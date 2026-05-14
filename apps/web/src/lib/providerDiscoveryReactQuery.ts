@@ -29,6 +29,16 @@ const EMPTY_MODELS_RESULT: ProviderListModelsResult = {
   cached: false,
 };
 
+// Returned when a single provider's model discovery fails (e.g. the Cursor CLI
+// is not installed or not authenticated). Resolving to this instead of
+// rejecting keeps the failure isolated to that provider so the shared model
+// picker — and every other provider's models — stays usable.
+const MODEL_DISCOVERY_ERROR_RESULT: ProviderListModelsResult = {
+  models: [],
+  source: "error",
+  cached: false,
+};
+
 const EMPTY_AGENTS_RESULT: ProviderListAgentsResult = {
   agents: [],
   source: "empty",
@@ -158,15 +168,28 @@ export function providerModelsQueryOptions(input: {
     ),
     queryFn: async () => {
       const api = ensureNativeApi();
-      return api.provider.listModels({
-        provider: input.provider,
-        ...(input.binaryPath ? { binaryPath: input.binaryPath } : {}),
-        ...(input.apiEndpoint ? { apiEndpoint: input.apiEndpoint } : {}),
-        ...(input.agentDir ? { agentDir: input.agentDir } : {}),
-      });
+      try {
+        return await api.provider.listModels({
+          provider: input.provider,
+          ...(input.binaryPath ? { binaryPath: input.binaryPath } : {}),
+          ...(input.apiEndpoint ? { apiEndpoint: input.apiEndpoint } : {}),
+          ...(input.agentDir ? { agentDir: input.agentDir } : {}),
+        });
+      } catch (error) {
+        // Fault isolation: model discovery runs per provider, so one failing
+        // CLI must degrade only that provider. Rejecting here would put the
+        // query in an error state and blank the shared model picker; instead
+        // we resolve to an empty "error" result and let the UI fall back to
+        // that provider's static models while every other provider is
+        // unaffected.
+        console.warn(`Model discovery failed for provider "${input.provider}".`, error);
+        return MODEL_DISCOVERY_ERROR_RESULT;
+      }
     },
     enabled: input.enabled ?? true,
-    retry: input.provider === "cursor" ? 1 : 3,
+    // Discovery failures are caught inside queryFn and surfaced as a resolved
+    // "error" result, so the query itself never rejects and never retries.
+    retry: false,
     staleTime: 60_000,
     placeholderData: (previous) => previous ?? EMPTY_MODELS_RESULT,
   });
