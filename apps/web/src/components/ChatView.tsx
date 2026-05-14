@@ -1477,10 +1477,14 @@ export default function ChatView({
   const hasResolvedCursorModelDiscovery =
     cursorDynamicModelsQuery.data?.source === "cursor.cli" &&
     (cursorDynamicModelsQuery.data.models.length ?? 0) > 0;
+  // Only the very first discovery attempt (no settled result yet) should gate
+  // the picker. Once discovery resolves — including a fault-isolated "error"
+  // result when the Cursor CLI is unavailable — background refetches must not
+  // re-blank the shared model picker.
   const cursorModelDiscoveryPending =
     cursorModelDiscoveryEnabled &&
     !hasResolvedCursorModelDiscovery &&
-    (cursorDynamicModelsQuery.isLoading || cursorDynamicModelsQuery.isFetching);
+    cursorDynamicModelsQuery.isLoading;
   const kiloModelDiscoveryEnabled =
     selectedProvider === "kilo" || lockedProvider === "kilo" || isModelPickerOpen;
   const hasResolvedKiloModelDiscovery =
@@ -1488,9 +1492,7 @@ export default function ChatView({
       kiloDynamicModelsQuery.data?.source === "kilo") &&
     (kiloDynamicModelsQuery.data.models.length ?? 0) > 0;
   const kiloModelDiscoveryPending =
-    kiloModelDiscoveryEnabled &&
-    !hasResolvedKiloModelDiscovery &&
-    (kiloDynamicModelsQuery.isLoading || kiloDynamicModelsQuery.isFetching);
+    kiloModelDiscoveryEnabled && !hasResolvedKiloModelDiscovery && kiloDynamicModelsQuery.isLoading;
   const modelOptionsByProvider = useMemo(() => {
     const staticOptions: Record<ProviderKind, ReturnType<typeof getAppModelOptions>> = {
       codex: getAppModelOptions(
