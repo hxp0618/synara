@@ -210,27 +210,25 @@ interface StagePackageJson {
   readonly overrides: Record<string, unknown>;
 }
 
-const DOTHETHING_PACKAGE_NAME = "@t3tools/dothething";
-const DOTHETHING_STAGE_RELATIVE_DIR = "packages/dothething";
-const DOTHETHING_RUNTIME_PACKAGE_ENTRIES = ["package.json", "bin", "dist", "LICENSE"] as const;
-const DOTHETHING_MACOS_RUNTIME_RELATIVE_PATH = [
+const WANDY_PACKAGE_NAME = "@t3tools/wandy";
+const WANDY_STAGE_RELATIVE_DIR = "packages/wandy";
+const WANDY_RUNTIME_PACKAGE_ENTRIES = ["package.json", "bin", "dist", "LICENSE"] as const;
+const WANDY_MACOS_RUNTIME_RELATIVE_PATH = [
   "dist",
-  "Do The Thing.app",
+  "Wandy.app",
   "Contents",
   "MacOS",
-  "DoTheThing",
+  "Wandy",
 ] as const;
 
-function withStagedDoTheThingDependency(
-  dependencies: Record<string, unknown>,
-): Record<string, unknown> {
-  if (!(DOTHETHING_PACKAGE_NAME in dependencies)) {
+function withStagedWandyDependency(dependencies: Record<string, unknown>): Record<string, unknown> {
+  if (!(WANDY_PACKAGE_NAME in dependencies)) {
     return dependencies;
   }
 
   return {
     ...dependencies,
-    [DOTHETHING_PACKAGE_NAME]: `file:./${DOTHETHING_STAGE_RELATIVE_DIR}`,
+    [WANDY_PACKAGE_NAME]: `file:./${WANDY_STAGE_RELATIVE_DIR}`,
   };
 }
 
@@ -564,31 +562,31 @@ const verifyStagedNodePty = Effect.fn("verifyStagedNodePty")(function* (
   );
 });
 
-const stageDoTheThingPackage = Effect.fn("stageDoTheThingPackage")(function* (
+const stageWandyPackage = Effect.fn("stageWandyPackage")(function* (
   repoRoot: string,
   stageAppDir: string,
   requireStableCodeSignature: boolean,
 ) {
   const path = yield* Path.Path;
   const fs = yield* FileSystem.FileSystem;
-  const sourceDir = path.join(repoRoot, "packages/dothething");
-  const runtimeBinary = path.join(sourceDir, ...DOTHETHING_MACOS_RUNTIME_RELATIVE_PATH);
+  const sourceDir = path.join(repoRoot, "packages/wandy");
+  const runtimeBinary = path.join(sourceDir, ...WANDY_MACOS_RUNTIME_RELATIVE_PATH);
 
   if (!(yield* fs.exists(runtimeBinary))) {
     return yield* new BuildScriptError({
-      message: `Missing Do The Thing runtime at ${runtimeBinary}. Run 'cd packages/dothething && bun run build:macos' first.`,
+      message: `Missing Wandy runtime at ${runtimeBinary}. Run 'cd packages/wandy && bun run build:macos' first.`,
     });
   }
 
   if (requireStableCodeSignature) {
-    const appBundlePath = path.join(sourceDir, "dist", "Do The Thing.app");
+    const appBundlePath = path.join(sourceDir, "dist", "Wandy.app");
     const signature = inspectMacCodeSignature(appBundlePath);
     if (!signature.isStable) {
       return yield* new BuildScriptError({
         message: [
-          "Signed macOS artifacts require Do The Thing.app to be signed with a stable Apple code-signing identity.",
-          "The current Do The Thing runtime is ad-hoc signed, which causes macOS Accessibility/Screen Recording permissions to reset across updates.",
-          "Build it with DOTHETHING_CODESIGN_MODE=identity and DOTHETHING_CODESIGN_IDENTITY before running the signed desktop artifact build.",
+          "Signed macOS artifacts require Wandy.app to be signed with a stable Apple code-signing identity.",
+          "The current Wandy runtime is ad-hoc signed, which causes macOS Accessibility/Screen Recording permissions to reset across updates.",
+          "Build it with WANDY_CODESIGN_MODE=identity and WANDY_CODESIGN_IDENTITY before running the signed desktop artifact build.",
           signature.details,
         ]
           .filter(Boolean)
@@ -597,10 +595,10 @@ const stageDoTheThingPackage = Effect.fn("stageDoTheThingPackage")(function* (
     }
   }
 
-  const targetDir = path.join(stageAppDir, DOTHETHING_STAGE_RELATIVE_DIR);
+  const targetDir = path.join(stageAppDir, WANDY_STAGE_RELATIVE_DIR);
   yield* fs.makeDirectory(targetDir, { recursive: true });
 
-  for (const entry of DOTHETHING_RUNTIME_PACKAGE_ENTRIES) {
+  for (const entry of WANDY_RUNTIME_PACKAGE_ENTRIES) {
     const from = path.join(sourceDir, entry);
     if (!(yield* fs.exists(from))) {
       continue;
@@ -810,20 +808,16 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
 
   yield* Effect.log("[desktop-artifact] Staging release app...");
   yield* fs.copy(distDirs.desktopDist, path.join(stageAppDir, "apps/desktop/dist-electron"));
-  const doTheThingLauncherSource = path.join(repoRoot, "apps/desktop/scripts/dothethingMcp.mjs");
-  if (yield* fs.exists(doTheThingLauncherSource)) {
+  const wandyLauncherSource = path.join(repoRoot, "apps/desktop/scripts/wandyMcp.mjs");
+  if (yield* fs.exists(wandyLauncherSource)) {
     yield* fs.copyFile(
-      doTheThingLauncherSource,
-      path.join(stageAppDir, "apps/desktop/dist-electron/dothethingMcp.mjs"),
+      wandyLauncherSource,
+      path.join(stageAppDir, "apps/desktop/dist-electron/wandyMcp.mjs"),
     );
   }
   yield* fs.copy(distDirs.desktopResources, stageResourcesDir);
   yield* fs.copy(distDirs.serverDist, path.join(stageAppDir, "apps/server/dist"));
-  yield* stageDoTheThingPackage(
-    repoRoot,
-    stageAppDir,
-    options.platform === "mac" && options.signed,
-  );
+  yield* stageWandyPackage(repoRoot, stageAppDir, options.platform === "mac" && options.signed);
 
   const stagedPlatformResources = yield* assertPlatformBuildResources(
     options.platform,
@@ -865,7 +859,7 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
       options.mockUpdateServerPort,
       stagedPlatformResources.hasComposerIcon,
     ),
-    dependencies: withStagedDoTheThingDependency({
+    dependencies: withStagedWandyDependency({
       ...resolvedServerDependencies,
       ...resolvedDesktopRuntimeDependencies,
     }),

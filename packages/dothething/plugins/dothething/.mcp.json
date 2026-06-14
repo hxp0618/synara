@@ -1,8 +1,0 @@
-{
-  "mcpServers": {
-    "dothething": {
-      "command": "./scripts/launch-dothething.sh",
-      "cwd": "."
-    }
-  }
-}

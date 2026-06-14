@@ -85,9 +85,9 @@ import {
   type GrokAcpRuntimeSettings,
 } from "../acp/GrokAcpSupport.ts";
 import {
-  shouldSkipAcpSessionResumeForDoTheThing,
-  withSynaraDoTheThingPromptContext,
-} from "@t3tools/shared/dothething";
+  shouldSkipAcpSessionResumeForWandy,
+  withSynaraWandyPromptContext,
+} from "@t3tools/shared/wandy";
 import { GrokAdapter, type GrokAdapterShape } from "../Services/GrokAdapter.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
 
@@ -917,7 +917,7 @@ export function makeGrokAdapter(
           let ctx!: GrokSessionContext;
 
           const parsedResumeSessionId = parseGrokResume(input.resumeCursor)?.sessionId;
-          const resumeSessionId = shouldSkipAcpSessionResumeForDoTheThing()
+          const resumeSessionId = shouldSkipAcpSessionResumeForWandy()
             ? undefined
             : parsedResumeSessionId;
           const acpNativeLoggers = makeAcpNativeLoggers({
@@ -947,7 +947,7 @@ export function makeGrokAdapter(
             threadId: input.threadId,
             cwd,
             resume: resumeSessionId !== undefined,
-            resumeSkippedForDoTheThingMcp:
+            resumeSkippedForWandyMcp:
               parsedResumeSessionId !== undefined && resumeSessionId === undefined,
             model: effectiveGrokSettings.model,
             reasoningEffort: effectiveGrokSettings.reasoningEffort,
@@ -1365,7 +1365,7 @@ export function makeGrokAdapter(
         if (input.input?.trim()) {
           promptParts.push({
             type: "text",
-            text: withSynaraDoTheThingPromptContext(
+            text: withSynaraWandyPromptContext(
               withGrokPlanModePrompt({
                 text: input.input.trim(),
                 ...(input.interactionMode !== undefined

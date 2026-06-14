@@ -19,11 +19,11 @@ import path from "node:path";
 
 import { readActiveCodexProviderEnvKey } from "@t3tools/shared/codexConfig";
 import {
-  applyDoTheThingCodexConfig,
-  isDoTheThingEnabledInEnv,
-  resolveDoTheThingLauncherPath,
-  resolveDoTheThingPackageRoots,
-} from "@t3tools/shared/dothething";
+  applyWandyCodexConfig,
+  isWandyEnabledInEnv,
+  resolveWandyLauncherPath,
+  resolveWandyPackageRoots,
+} from "@t3tools/shared/wandy";
 import {
   readEnvironmentFromLoginShell,
   resolveLoginShell,
@@ -178,13 +178,13 @@ function prepareDpCodeCodexHomeOverlay(input: {
     ? disableDpCodeBrowserPluginInCodexConfig(sourceConfig)
     : sourceConfig;
   const launcherPath =
-    resolveDoTheThingLauncherPath({
+    resolveWandyLauncherPath({
       env: input.env,
-      fallbackPackageRoots: resolveDoTheThingPackageRoots({ searchRoots: [process.cwd()] }),
+      fallbackPackageRoots: resolveWandyPackageRoots({ searchRoots: [process.cwd()] }),
     }) ?? "";
-  const overlayConfig = applyDoTheThingCodexConfig({
+  const overlayConfig = applyWandyCodexConfig({
     config: baseConfig,
-    enabled: isDoTheThingEnabledInEnv(input.env) && launcherPath.length > 0,
+    enabled: isWandyEnabledInEnv(input.env) && launcherPath.length > 0,
     launcherPath,
   });
   writeFileSync(path.join(overlayHomePath, "config.toml"), overlayConfig, "utf8");
@@ -202,9 +202,9 @@ export function buildCodexProcessEnv(
 ): NodeJS.ProcessEnv {
   const baseEnv = { ...(input.env ?? process.env) };
   const disableBrowserPlugin = shouldDisableDpCodeBrowserPlugin(baseEnv);
-  const needsDoTheThingOverlay = isDoTheThingEnabledInEnv(baseEnv);
+  const needsWandyOverlay = isWandyEnabledInEnv(baseEnv);
   const overlayHomePath =
-    disableBrowserPlugin || needsDoTheThingOverlay
+    disableBrowserPlugin || needsWandyOverlay
       ? prepareDpCodeCodexHomeOverlay({
           env: baseEnv,
           ...(input.homePath ? { homePath: input.homePath } : {}),

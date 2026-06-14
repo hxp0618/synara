@@ -39,10 +39,10 @@ import { autoUpdater, CancellationToken } from "electron-updater";
 
 import type { ContextMenuItem } from "@t3tools/contracts";
 import {
-  SYNARA_DOTHETHING_STABLE_APP_DIR_ENV,
-  resolveDoTheThingLauncherPath as resolveSharedDoTheThingLauncherPath,
-  resolveStableDoTheThingAppDir as resolveSharedStableDoTheThingAppDir,
-} from "@t3tools/shared/dothething";
+  SYNARA_WANDY_STABLE_APP_DIR_ENV,
+  resolveWandyLauncherPath as resolveSharedWandyLauncherPath,
+  resolveStableWandyAppDir as resolveSharedStableWandyAppDir,
+} from "@t3tools/shared/wandy";
 import { getMacTrafficLightPosition } from "@t3tools/shared/desktopChrome";
 import { NetService } from "@t3tools/shared/Net";
 import { RotatingFileSink } from "@t3tools/shared/logging";
@@ -119,10 +119,10 @@ import {
   seedDesktopUserDataProfileFromLegacy,
 } from "./desktopUserDataProfile";
 import {
-  ensureStableDoTheThingHelper,
-  terminateRunningDoTheThingProcesses,
-  terminateRunningStableDoTheThingHelper,
-} from "./dothethingStableHelper";
+  ensureStableWandyHelper,
+  terminateRunningWandyProcesses,
+  terminateRunningStableWandyHelper,
+} from "./wandyStableHelper";
 
 syncShellEnvironment();
 
@@ -225,9 +225,9 @@ let backendLogSink: RotatingFileSink | null = null;
 let restoreStdIoCapture: (() => void) | null = null;
 let unreadBackgroundNotificationCount = 0;
 let browserPerfInterval: ReturnType<typeof setInterval> | null = null;
-let doTheThingLauncherPathCache: string | null | undefined;
-let doTheThingProcessCleanupDone = false;
-let doTheThingWarmupStarted = false;
+let wandyLauncherPathCache: string | null | undefined;
+let wandyProcessCleanupDone = false;
+let wandyWarmupStarted = false;
 const browserManager = new DesktopBrowserManager();
 let browserUsePipeServer: BrowserUsePipeServer | null = null;
 let configuredGitHubUpdateSource: ReturnType<typeof resolveGitHubUpdateSource> = null;
@@ -781,56 +781,56 @@ function resolveBackendCwd(): string {
   return OS.homedir();
 }
 
-function resolveDoTheThingPackageRoots(): string[] {
+function resolveWandyPackageRoots(): string[] {
   const appRoot = resolveAppRoot();
 
   if (app.isPackaged && appRoot.endsWith(".asar")) {
     const unpackedRoot = Path.join(
       appRoot.replace(/\.asar$/, ".asar.unpacked"),
-      "node_modules/@t3tools/dothething",
+      "node_modules/@t3tools/wandy",
     );
     return FS.existsSync(Path.join(unpackedRoot, "package.json")) ? [unpackedRoot] : [];
   }
 
   const roots = [
-    Path.join(ROOT_DIR, "packages/dothething"),
-    Path.join(appRoot, "node_modules/@t3tools/dothething"),
+    Path.join(ROOT_DIR, "packages/wandy"),
+    Path.join(appRoot, "node_modules/@t3tools/wandy"),
   ];
 
   if (appRoot.endsWith(".asar")) {
     roots.push(
-      Path.join(appRoot.replace(/\.asar$/, ".asar.unpacked"), "node_modules/@t3tools/dothething"),
+      Path.join(appRoot.replace(/\.asar$/, ".asar.unpacked"), "node_modules/@t3tools/wandy"),
     );
   }
 
   return roots.filter((root) => FS.existsSync(Path.join(root, "package.json")));
 }
 
-function resolveDesktopDoTheThingStableAppDir(): string {
-  if (process.env[SYNARA_DOTHETHING_STABLE_APP_DIR_ENV]?.trim()) {
-    return resolveSharedStableDoTheThingAppDir(process.env);
+function resolveDesktopWandyStableAppDir(): string {
+  if (process.env[SYNARA_WANDY_STABLE_APP_DIR_ENV]?.trim()) {
+    return resolveSharedStableWandyAppDir(process.env);
   }
 
-  return Path.join(BASE_DIR, "dothething-app");
+  return Path.join(BASE_DIR, "wandy-app");
 }
 
-function resolveDoTheThingLauncherPath(): string | null {
-  if (doTheThingLauncherPathCache !== undefined) {
-    return doTheThingLauncherPathCache;
+function resolveWandyLauncherPath(): string | null {
+  if (wandyLauncherPathCache !== undefined) {
+    return wandyLauncherPathCache;
   }
 
-  const fallbackPackageRoots = resolveDoTheThingPackageRoots();
-  const bundledLauncherPath = resolveSharedDoTheThingLauncherPath({
+  const fallbackPackageRoots = resolveWandyPackageRoots();
+  const bundledLauncherPath = resolveSharedWandyLauncherPath({
     env: {},
     fallbackPackageRoots,
     preferBundled: true,
   });
 
   if (app.isPackaged) {
-    const stableResult = ensureStableDoTheThingHelper({
+    const stableResult = ensureStableWandyHelper({
       bundledLauncherPath,
-      stableAppDir: resolveDesktopDoTheThingStableAppDir(),
-      terminateRunningHelper: terminateRunningStableDoTheThingHelper,
+      stableAppDir: resolveDesktopWandyStableAppDir(),
+      terminateRunningHelper: terminateRunningStableWandyHelper,
     });
 
     if (stableResult.status === "ready") {
@@ -839,47 +839,45 @@ function resolveDoTheThingLauncherPath(): string | null {
           ? "updated"
           : "installed"
         : "reused";
-      console.info(
-        `[desktop] Do The Thing stable helper ${action}: ${stableResult.launcherPath ?? ""}`,
-      );
-      if (!doTheThingProcessCleanupDone) {
-        terminateRunningDoTheThingProcesses();
-        doTheThingProcessCleanupDone = true;
+      console.info(`[desktop] Wandy stable helper ${action}: ${stableResult.launcherPath ?? ""}`);
+      if (!wandyProcessCleanupDone) {
+        terminateRunningWandyProcesses();
+        wandyProcessCleanupDone = true;
       }
-      doTheThingLauncherPathCache = stableResult.launcherPath;
-      return doTheThingLauncherPathCache;
+      wandyLauncherPathCache = stableResult.launcherPath;
+      return wandyLauncherPathCache;
     }
 
     console.warn(
-      `[desktop] Do The Thing stable helper unavailable; Do The Thing MCP will not be registered. ${stableResult.reason ?? ""}`,
+      `[desktop] Wandy stable helper unavailable; Wandy MCP will not be registered. ${stableResult.reason ?? ""}`,
     );
-    doTheThingLauncherPathCache = null;
-    return doTheThingLauncherPathCache;
+    wandyLauncherPathCache = null;
+    return wandyLauncherPathCache;
   }
 
-  doTheThingLauncherPathCache = resolveSharedDoTheThingLauncherPath({
+  wandyLauncherPathCache = resolveSharedWandyLauncherPath({
     fallbackPackageRoots,
   });
-  return doTheThingLauncherPathCache;
+  return wandyLauncherPathCache;
 }
 
-function warmDoTheThingHelper(): void {
-  if (doTheThingWarmupStarted || process.env.SYNARA_ENABLE_DOTHETHING === "0") {
+function warmWandyHelper(): void {
+  if (wandyWarmupStarted || process.env.SYNARA_ENABLE_WANDY === "0") {
     return;
   }
 
-  const launcherPath = resolveDoTheThingLauncherPath();
+  const launcherPath = resolveWandyLauncherPath();
   if (!launcherPath) {
     return;
   }
 
-  doTheThingWarmupStarted = true;
+  wandyWarmupStarted = true;
   const child = ChildProcess.spawn(launcherPath, ["doctor", "--json"], {
     cwd: OS.homedir(),
     env: {
       ...process.env,
-      DOTHETHING_SUPPRESS_ONBOARDING: "1",
-      [SYNARA_DOTHETHING_STABLE_APP_DIR_ENV]: resolveDesktopDoTheThingStableAppDir(),
+      WANDY_SUPPRESS_ONBOARDING: "1",
+      [SYNARA_WANDY_STABLE_APP_DIR_ENV]: resolveDesktopWandyStableAppDir(),
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -910,7 +908,7 @@ function warmDoTheThingHelper(): void {
             needsRuntimePermissionRefresh?: boolean;
           })
         : null;
-      console.info("[desktop] Do The Thing warmup completed", {
+      console.info("[desktop] Wandy warmup completed", {
         code,
         signal,
         allGranted: parsed?.allGranted,
@@ -918,7 +916,7 @@ function warmDoTheThingHelper(): void {
         summary: parsed?.summary,
       });
     } catch {
-      console.warn("[desktop] Do The Thing warmup returned non-JSON output", {
+      console.warn("[desktop] Wandy warmup returned non-JSON output", {
         code,
         signal,
         stdout: trimmed.slice(0, 500),
@@ -928,7 +926,7 @@ function warmDoTheThingHelper(): void {
   });
   child.on("error", (error) => {
     clearTimeout(timeout);
-    console.warn("[desktop] Do The Thing warmup failed", error);
+    console.warn("[desktop] Wandy warmup failed", error);
   });
 }
 
@@ -2017,8 +2015,8 @@ function backendNodeArgs(): string[] {
 }
 
 function backendEnv(): NodeJS.ProcessEnv {
-  const doTheThingLauncherPath = resolveDoTheThingLauncherPath();
-  const doTheThingStableAppDir = resolveDesktopDoTheThingStableAppDir();
+  const wandyLauncherPath = resolveWandyLauncherPath();
+  const wandyStableAppDir = resolveDesktopWandyStableAppDir();
   return {
     ...process.env,
     DPCODE_MODE: "desktop",
@@ -2035,9 +2033,9 @@ function backendEnv(): NodeJS.ProcessEnv {
     T3CODE_AUTH_TOKEN: backendAuthToken,
     SYNARA_HOME: BASE_DIR,
     [T3CODE_BROWSER_USE_PIPE_ENV]: SYNARA_BROWSER_USE_PIPE_PATH,
-    SYNARA_ENABLE_DOTHETHING: process.env.SYNARA_ENABLE_DOTHETHING ?? "1",
-    [SYNARA_DOTHETHING_STABLE_APP_DIR_ENV]: doTheThingStableAppDir,
-    ...(doTheThingLauncherPath ? { SYNARA_DOTHETHING_LAUNCHER_PATH: doTheThingLauncherPath } : {}),
+    SYNARA_ENABLE_WANDY: process.env.SYNARA_ENABLE_WANDY ?? "1",
+    [SYNARA_WANDY_STABLE_APP_DIR_ENV]: wandyStableAppDir,
+    ...(wandyLauncherPath ? { SYNARA_WANDY_LAUNCHER_PATH: wandyLauncherPath } : {}),
   };
 }
 
@@ -2777,7 +2775,7 @@ async function bootstrap(): Promise<void> {
   writeDesktopLogHeader("bootstrap start");
   backendAuthToken = Crypto.randomBytes(24).toString("hex");
   await reserveBackendEndpoint("bootstrap");
-  warmDoTheThingHelper();
+  warmWandyHelper();
 
   registerIpcHandlers();
   writeDesktopLogHeader("bootstrap ipc handlers registered");

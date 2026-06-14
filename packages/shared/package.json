@@ -132,9 +132,9 @@
       "types": "./src/providerUsage.ts",
       "import": "./src/providerUsage.ts"
     },
-    "./dothething": {
-      "types": "./src/dothething.ts",
-      "import": "./src/dothething.ts"
+    "./wandy": {
+      "types": "./src/wandy.ts",
+      "import": "./src/wandy.ts"
     }
   },
   "scripts": {

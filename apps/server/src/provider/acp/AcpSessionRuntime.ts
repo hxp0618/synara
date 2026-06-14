@@ -16,10 +16,7 @@ import * as EffectAcpErrors from "effect-acp/errors";
 import type * as EffectAcpSchema from "effect-acp/schema";
 import type * as EffectAcpProtocol from "effect-acp/protocol";
 
-import {
-  buildDoTheThingAcpMcpServers,
-  shouldSkipAcpSessionResumeForDoTheThing,
-} from "@t3tools/shared/dothething";
+import { buildWandyAcpMcpServers, shouldSkipAcpSessionResumeForWandy } from "@t3tools/shared/wandy";
 
 import {
   collectSessionConfigOptionValues,
@@ -413,8 +410,8 @@ const makeAcpSessionRuntime = (
         acp.agent.authenticate(authenticatePayload),
       );
 
-      const mcpServers = buildDoTheThingAcpMcpServers();
-      const resumeSessionId = shouldSkipAcpSessionResumeForDoTheThing()
+      const mcpServers = buildWandyAcpMcpServers();
+      const resumeSessionId = shouldSkipAcpSessionResumeForWandy()
         ? undefined
         : options.resumeSessionId;
 

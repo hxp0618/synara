@@ -40,10 +40,10 @@ import {
   resolveGeminiApiModelId,
 } from "@t3tools/shared/model";
 import {
-  buildDoTheThingAcpMcpServers,
-  shouldSkipAcpSessionResumeForDoTheThing,
-  withSynaraDoTheThingPromptContext,
-} from "@t3tools/shared/dothething";
+  buildWandyAcpMcpServers,
+  shouldSkipAcpSessionResumeForWandy,
+  withSynaraWandyPromptContext,
+} from "@t3tools/shared/wandy";
 import { Effect, FileSystem, Layer, Queue, Stream } from "effect";
 
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
@@ -1893,8 +1893,8 @@ const makeGeminiAdapter = Effect.fn("makeGeminiAdapter")(function* (
         },
       });
 
-      const mcpServers = buildDoTheThingAcpMcpServers();
-      const resumeSessionId = shouldSkipAcpSessionResumeForDoTheThing()
+      const mcpServers = buildWandyAcpMcpServers();
+      const resumeSessionId = shouldSkipAcpSessionResumeForWandy()
         ? undefined
         : input.resumeSessionId;
       const startResponse = yield* resumeSessionId
@@ -2002,7 +2002,7 @@ const makeGeminiAdapter = Effect.fn("makeGeminiAdapter")(function* (
     const blocks: Array<Record<string, unknown>> = [];
 
     const promptText = trimToUndefined(
-      withSynaraDoTheThingPromptContext(
+      withSynaraWandyPromptContext(
         withProviderPlanModePrompt({
           text: input.input?.trim() ?? "",
           interactionMode: input.interactionMode,

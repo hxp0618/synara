@@ -953,7 +953,7 @@ function SettingsRouteView() {
     defaults.enableSystemTaskCompletionNotifications
       ? ["Desktop notifications"]
       : []),
-    ...(settings.enableDoTheThing !== defaults.enableDoTheThing ? ["Do The Thing"] : []),
+    ...(settings.enableWandy !== defaults.enableWandy ? ["Wandy"] : []),
     ...(settings.enableAssistantStreaming !== defaults.enableAssistantStreaming
       ? ["Assistant output"]
       : []),
@@ -2069,12 +2069,12 @@ function SettingsRouteView() {
       <SettingsSection title="Runtime behavior">
         {isElectron
           ? renderBooleanSettingRow({
-              settingKey: "enableDoTheThing",
-              title: "Do The Thing",
+              settingKey: "enableWandy",
+              title: "Wandy",
               description:
                 "Let Codex control desktop apps outside the in-app browser. macOS may ask for Accessibility and Screen Recording on first use.",
-              resetLabel: "Do The Thing",
-              ariaLabel: "Enable Do The Thing desktop automation",
+              resetLabel: "Wandy",
+              ariaLabel: "Enable Wandy desktop automation",
             })
           : null}
 

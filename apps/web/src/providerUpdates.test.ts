@@ -45,7 +45,7 @@ function serverSettings(overrides: Partial<ServerSettings["providers"]> = {}): S
   };
 
   return {
-    enableDoTheThing: true,
+    enableWandy: true,
     enableAssistantStreaming: false,
     defaultThreadEnvMode: "local",
     addProjectBaseDirectory: "",

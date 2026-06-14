@@ -16,7 +16,7 @@
       "name": "@t3tools/desktop",
       "version": "0.2.1",
       "dependencies": {
-        "@t3tools/dothething": "workspace:*",
+        "@t3tools/wandy": "workspace:*",
         "effect": "catalog:",
         "electron": "40.6.0",
         "electron-updater": "^6.6.2",
@@ -164,14 +164,6 @@
         "vitest": "catalog:",
       },
     },
-    "packages/dothething": {
-      "name": "@t3tools/dothething",
-      "version": "0.1.52-synara.4",
-      "bin": {
-        "dothething": "bin/dothething",
-        "dothething-mcp": "bin/dothething-mcp",
-      },
-    },
     "packages/effect-acp": {
       "name": "effect-acp",
       "dependencies": {
@@ -200,6 +192,14 @@
         "@types/node": "catalog:",
         "typescript": "catalog:",
         "vitest": "catalog:",
+      },
+    },
+    "packages/wandy": {
+      "name": "@t3tools/wandy",
+      "version": "0.1.52-synara.4",
+      "bin": {
+        "wandy": "bin/wandy",
+        "wandy-mcp": "bin/wandy-mcp",
       },
     },
     "scripts": {
@@ -1059,13 +1059,13 @@
 
     "@t3tools/desktop": ["@t3tools/desktop@workspace:apps/desktop"],
 
-    "@t3tools/dothething": ["@t3tools/dothething@workspace:packages/dothething"],
-
     "@t3tools/marketing": ["@t3tools/marketing@workspace:apps/marketing"],
 
     "@t3tools/scripts": ["@t3tools/scripts@workspace:scripts"],
 
     "@t3tools/shared": ["@t3tools/shared@workspace:packages/shared"],
+
+    "@t3tools/wandy": ["@t3tools/wandy@workspace:packages/wandy"],
 
     "@t3tools/web": ["@t3tools/web@workspace:apps/web"],
 

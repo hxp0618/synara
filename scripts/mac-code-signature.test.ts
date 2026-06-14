@@ -7,8 +7,8 @@ describe("inspectMacCodeSignatureOutput", () => {
     const inspection = inspectMacCodeSignatureOutput(
       0,
       [
-        "Executable=/Applications/Synara.app/Contents/Resources/Do The Thing.app/Contents/MacOS/DoTheThing",
-        "Identifier=com.synara.dothething",
+        "Executable=/Applications/Synara.app/Contents/Resources/Wandy.app/Contents/MacOS/Wandy",
+        "Identifier=com.synara.wandy",
         "Signature=adhoc",
         "TeamIdentifier=not set",
       ].join("\n"),
@@ -22,8 +22,8 @@ describe("inspectMacCodeSignatureOutput", () => {
     const inspection = inspectMacCodeSignatureOutput(
       0,
       [
-        "Executable=/Applications/Synara.app/Contents/Resources/Do The Thing.app/Contents/MacOS/DoTheThing",
-        "Identifier=com.synara.dothething",
+        "Executable=/Applications/Synara.app/Contents/Resources/Wandy.app/Contents/MacOS/Wandy",
+        "Identifier=com.synara.wandy",
         "Authority=Developer ID Application: Synara Labs, Inc. (TEAMID1234)",
         "TeamIdentifier=TEAMID1234",
       ].join("\n"),

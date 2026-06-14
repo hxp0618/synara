@@ -61,7 +61,7 @@ import {
   toOpenCodeQuestionAnswers,
   type OpenCodeServerConnection,
 } from "../opencodeRuntime.ts";
-import { buildDoTheThingOpenCodeMcpConfig } from "@t3tools/shared/dothething";
+import { buildWandyOpenCodeMcpConfig } from "@t3tools/shared/wandy";
 import { extractProposedPlanMarkdown, withProviderPlanModePrompt } from "../planMode.ts";
 
 type OpenCodeCompatibleProvider = Extract<ProviderKind, "opencode" | "kilo">;
@@ -3620,15 +3620,12 @@ export function makeOpenCodeAdapterLive(options?: OpenCodeAdapterLiveOptions) {
                   cliSpec: adapterConfig.cliSpec,
                   ...(server.external && serverPassword ? { serverPassword } : {}),
                 });
-                const doTheThingMcp = buildDoTheThingOpenCodeMcpConfig();
-                if (doTheThingMcp) {
-                  const emitDoTheThingMcpWarning = (
-                    operation: string,
-                    cause: Cause.Cause<unknown>,
-                  ) =>
+                const wandyMcp = buildWandyOpenCodeMcpConfig();
+                if (wandyMcp) {
+                  const emitWandyMcpWarning = (operation: string, cause: Cause.Cause<unknown>) =>
                     Effect.gen(function* () {
                       const detail = Cause.pretty(cause);
-                      yield* Effect.logWarning("opencode.dothething_mcp.connection_failed", {
+                      yield* Effect.logWarning("opencode.wandy_mcp.connection_failed", {
                         operation,
                         detail,
                       });
@@ -3636,7 +3633,7 @@ export function makeOpenCodeAdapterLive(options?: OpenCodeAdapterLiveOptions) {
                         ...buildEventBase({ threadId: input.threadId }),
                         type: "runtime.warning",
                         payload: {
-                          message: "Do The Thing MCP did not connect.",
+                          message: "Wandy MCP did not connect.",
                           detail: {
                             operation,
                             error: detail,
@@ -3647,21 +3644,21 @@ export function makeOpenCodeAdapterLive(options?: OpenCodeAdapterLiveOptions) {
                   const addExit = yield* runOpenCodeSdk("mcp.add", () =>
                     client.mcp.add({
                       directory,
-                      name: doTheThingMcp.name,
-                      config: doTheThingMcp.config,
+                      name: wandyMcp.name,
+                      config: wandyMcp.config,
                     }),
                   ).pipe(Effect.exit);
                   if (Exit.isFailure(addExit)) {
-                    yield* emitDoTheThingMcpWarning("mcp.add", addExit.cause);
+                    yield* emitWandyMcpWarning("mcp.add", addExit.cause);
                   } else {
                     const connectExit = yield* runOpenCodeSdk("mcp.connect", () =>
                       client.mcp.connect({
                         directory,
-                        name: doTheThingMcp.name,
+                        name: wandyMcp.name,
                       }),
                     ).pipe(Effect.exit);
                     if (Exit.isFailure(connectExit)) {
-                      yield* emitDoTheThingMcpWarning("mcp.connect", connectExit.cause);
+                      yield* emitWandyMcpWarning("mcp.connect", connectExit.cause);
                     }
                   }
                 }
