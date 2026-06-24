@@ -98,6 +98,16 @@ function isGeminiUnauthenticatedFailure(message: string, code?: number): boolean
   );
 }
 
+function isGeminiLogUnauthenticatedFailure(message: string): boolean {
+  const lowerMessage = message.toLowerCase();
+  return (
+    isGeminiCodeAssistMigrationAuthFailure(message) ||
+    lowerMessage.includes("authentication required") ||
+    lowerMessage.includes("api key is missing") ||
+    lowerMessage.includes("auth method")
+  );
+}
+
 function buildGeminiUnauthenticatedResult(
   message: string,
 ): Omit<GeminiCapabilityProbeResult, "models"> {
@@ -138,7 +148,7 @@ export function parseGeminiAcpProbeError(
 export function parseGeminiAcpProbeLogFailure(
   detail: string,
 ): Omit<GeminiCapabilityProbeResult, "models"> | undefined {
-  return isGeminiUnauthenticatedFailure(detail)
+  return isGeminiLogUnauthenticatedFailure(detail)
     ? buildGeminiUnauthenticatedResult(detail)
     : undefined;
 }

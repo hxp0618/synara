@@ -122,6 +122,10 @@ describe("parseGeminiAcpProbeLogFailure", () => {
   it("ignores captured non-auth process output", () => {
     expect(parseGeminiAcpProbeLogFailure("Gemini ACP exited with code 1")).toBeUndefined();
   });
+
+  it("ignores generic configured wording in captured process output", () => {
+    expect(parseGeminiAcpProbeLogFailure("forkpty: Device not configured")).toBeUndefined();
+  });
 });
 
 describe("normalizeGeminiCapabilityProbeResult", () => {
