@@ -1538,6 +1538,68 @@ idleCleanup.layer("ProviderServiceLive idle cleanup", (it) => {
     }),
   );
 
+  it.effect("clears a pending idle stop when a runtime turn starts", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const runtimeRepository = yield* ProviderSessionRuntimeRepository;
+      const threadId = asThreadId("thread-idle-runtime-turn-start");
+
+      idleCleanup.codex.stopSession.mockClear();
+      const session = yield* provider.startSession(threadId, {
+        provider: "codex",
+        threadId,
+        runtimeMode: "full-access",
+      });
+      idleCleanup.codex.updateSession(threadId, (existing) => {
+        const { resumeCursor: _omittedResumeCursor, ...withoutResumeCursor } = existing;
+        return withoutResumeCursor;
+      });
+      yield* idleCleanup.codex.waitForRuntimeSubscribers();
+      idleCleanup.codex.emit({
+        type: "turn.completed",
+        eventId: asEventId("runtime-idle-before-runtime-turn-start"),
+        provider: "codex",
+        createdAt: "2026-02-27T00:04:00.000Z",
+        threadId,
+        payload: { state: "completed" },
+      });
+
+      yield* waitUntilEffect(
+        () =>
+          runtimeRepository.getByThreadId({ threadId }).pipe(
+            Effect.map((runtime) => {
+              if (Option.isNone(runtime)) {
+                return false;
+              }
+              const payload = runtime.value.runtimePayload;
+              return (
+                payload !== null &&
+                typeof payload === "object" &&
+                !Array.isArray(payload) &&
+                (payload as Record<string, unknown>).lastRuntimeEvent === "turn.completed"
+              );
+            }),
+          ),
+        500,
+        20,
+        "runtime completion persistence",
+      );
+
+      idleCleanup.codex.emit({
+        type: "turn.started",
+        eventId: asEventId("runtime-turn-start-clears-idle"),
+        provider: "codex",
+        createdAt: "2026-02-27T00:04:01.000Z",
+        threadId: session.threadId,
+        turnId: asTurnId("turn-runtime-clears-idle"),
+        payload: { state: "running" },
+      });
+      yield* sleep(150);
+
+      assert.equal(idleCleanup.codex.stopSession.mock.calls.length, 0);
+    }),
+  );
+
   it.effect("serializes a fired idle stop before starting new turn work", () =>
     Effect.gen(function* () {
       const provider = yield* ProviderService;
@@ -1952,6 +2014,15 @@ idleCleanup.layer("ProviderServiceLive idle cleanup", (it) => {
       );
 
       idleCleanup.codex.stopSession.mockClear();
+      idleCleanup.codex.compactThread.mockImplementationOnce((inputThreadId) =>
+        Effect.sync(() => {
+          idleCleanup.codex.updateSession(inputThreadId, (existing) => ({
+            ...existing,
+            status: "running",
+            activeTurnId: undefined,
+          }));
+        }),
+      );
       yield* provider.compactThread({ threadId });
 
       yield* waitUntil(
@@ -1959,6 +2030,37 @@ idleCleanup.layer("ProviderServiceLive idle cleanup", (it) => {
         500,
         20,
         "idle runtime stop after successful compact",
+      );
+      assert.deepEqual(idleCleanup.codex.stopSession.mock.calls[0]?.[0], threadId);
+    }),
+  );
+
+  it.effect("schedules idle cleanup for closed thread state changes", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const threadId = asThreadId("thread-idle-closed-state");
+
+      yield* provider.startSession(threadId, {
+        provider: "codex",
+        threadId,
+        runtimeMode: "full-access",
+      });
+      idleCleanup.codex.stopSession.mockClear();
+      yield* idleCleanup.codex.waitForRuntimeSubscribers();
+      idleCleanup.codex.emit({
+        type: "thread.state.changed",
+        eventId: asEventId("runtime-idle-closed-state"),
+        provider: "codex",
+        createdAt: "2026-02-27T00:04:00.000Z",
+        threadId,
+        payload: { state: "closed" },
+      });
+
+      yield* waitUntil(
+        () => idleCleanup.codex.stopSession.mock.calls.length > 0,
+        500,
+        20,
+        "idle runtime stop after closed thread state",
       );
       assert.deepEqual(idleCleanup.codex.stopSession.mock.calls[0]?.[0], threadId);
     }),
@@ -1975,20 +2077,12 @@ idleCleanup.layer("ProviderServiceLive idle cleanup", (it) => {
         runtimeMode: "full-access",
       });
       idleCleanup.codex.stopSession.mockClear();
-      idleCleanup.codex.compactThread.mockImplementationOnce((inputThreadId) =>
-        Effect.sync(() => {
-          idleCleanup.codex.updateSession(inputThreadId, (existing) => ({
-            ...existing,
-            status: "running",
-            activeTurnId: undefined,
-          }));
-        }),
-      );
+      idleCleanup.codex.updateSession(threadId, (existing) => ({
+        ...existing,
+        status: "running",
+        activeTurnId: undefined,
+      }));
       yield* idleCleanup.codex.waitForRuntimeSubscribers();
-      yield* provider.compactThread({ threadId });
-      yield* sleep(150);
-      assert.equal(idleCleanup.codex.stopSession.mock.calls.length, 0);
-
       idleCleanup.codex.emit({
         type: "thread.state.changed",
         eventId: asEventId("runtime-idle-compact-completed"),

@@ -345,7 +345,11 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
           scheduleRuntimeIdleStop(event.threadId);
           return;
         case "thread.state.changed":
-          if (event.payload.state === "compacted") {
+          if (
+            event.payload.state === "compacted" ||
+            event.payload.state === "archived" ||
+            event.payload.state === "closed"
+          ) {
             scheduleRuntimeIdleStop(event.threadId);
           }
           return;
@@ -527,8 +531,19 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
       registry.getByProvider(provider),
     );
     const processRuntimeEvent = (event: ProviderRuntimeEvent): Effect.Effect<void> =>
-      updateSessionBindingFromRuntimeEvent(event).pipe(
-        Effect.andThen(Effect.sync(() => reconcileRuntimeIdleTimer(event))),
+      Effect.sync(() => {
+        if (event.type === "turn.started") {
+          reconcileRuntimeIdleTimer(event);
+        }
+      }).pipe(
+        Effect.andThen(updateSessionBindingFromRuntimeEvent(event)),
+        Effect.andThen(
+          Effect.sync(() => {
+            if (event.type !== "turn.started") {
+              reconcileRuntimeIdleTimer(event);
+            }
+          }),
+        ),
         Effect.andThen(publishRuntimeEvent(event)),
       );
 
@@ -1129,7 +1144,8 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
           (session?.status === "running" &&
             session.activeTurnId === undefined &&
             binding.status === "stopped" &&
-            bindingRuntimePayload.lastRuntimeEvent === "thread.state.changed");
+            (bindingRuntimePayload.lastRuntimeEvent === "thread.state.changed" ||
+              bindingRuntimePayload.lastRuntimeEvent === "provider.compactThread"));
         if (!session || !isIdleReadySession || session.activeTurnId !== undefined) {
           retireRuntimeIdleGeneration(threadId, generation);
           return;
@@ -1298,6 +1314,23 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
               );
             }
             yield* routed.adapter.compactThread(routed.threadId);
+            const binding = Option.getOrUndefined(yield* directory.getBinding(routed.threadId));
+            if (binding) {
+              yield* directory.upsert({
+                threadId: routed.threadId,
+                provider: binding.provider,
+                ...(binding.adapterKey !== undefined ? { adapterKey: binding.adapterKey } : {}),
+                ...(binding.runtimeMode !== undefined ? { runtimeMode: binding.runtimeMode } : {}),
+                status: "stopped",
+                resumeCursor: binding.resumeCursor,
+                runtimePayload: {
+                  ...runtimePayloadRecord(binding.runtimePayload),
+                  activeTurnId: null,
+                  lastRuntimeEvent: "provider.compactThread",
+                  lastRuntimeEventAt: new Date().toISOString(),
+                },
+              });
+            }
             yield* analytics.record("provider.thread.compacted", {
               provider: routed.adapter.provider,
             });
