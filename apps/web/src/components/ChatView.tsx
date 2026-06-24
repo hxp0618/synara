@@ -5947,18 +5947,20 @@ export default function ChatView({
     // Abandon setup and put everything back into the composer: the accumulated request
     // plus any reply the user had started typing but not yet sent, so cancelling never
     // costs them their words.
-    if (pendingAutomationConversation && activeThread) {
+    if (pendingAutomationConversation) {
       const draft = promptRef.current.trim();
       const restored = draft
         ? `${pendingAutomationConversation.accumulatedMessage}\n${draft}`
         : pendingAutomationConversation.accumulatedMessage;
       // Restore only the prompt text; any attachments/skills/mentions the user added
       // during setup stay in the draft so Cancel never discards them.
-      promptRef.current = restored;
-      setComposerDraftPrompt(activeThread.id, restored);
+      if (pendingAutomationConversation.threadId === threadId) {
+        promptRef.current = restored;
+      }
+      setComposerDraftPrompt(pendingAutomationConversation.threadId, restored);
     }
     setPendingAutomationConversation(null);
-  }, [activeThread, pendingAutomationConversation, setComposerDraftPrompt]);
+  }, [pendingAutomationConversation, setComposerDraftPrompt, threadId]);
 
   const toggleAutomationWarning = useCallback((id: AutomationDraftWarningId, checked: boolean) => {
     setAcknowledgedAutomationWarnings((current) => {
@@ -9407,7 +9409,8 @@ export default function ChatView({
                       : null
                   }
                   automationSetup={
-                    pendingAutomationConversation
+                    pendingAutomationConversation &&
+                    pendingAutomationConversation.threadId === threadId
                       ? { onCancel: cancelAutomationConversation }
                       : null
                   }

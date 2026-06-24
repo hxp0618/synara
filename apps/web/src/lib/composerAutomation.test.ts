@@ -586,6 +586,45 @@ describe("composerAutomation", () => {
       throw new Error("Expected automation decision");
     }
     expect(scheduledTaskCombined.resolution.intent.prompt).toBe("check the build");
+
+    const usSubject = await resolveComposerAutomationRequest({
+      message: "create an automation for US outages every hour",
+      cwd: "/tmp/project",
+      nowIso: NOW_ISO,
+      generateIntent: offline,
+    });
+    expect(usSubject.type).toBe("automation");
+    if (usSubject.type !== "automation") {
+      throw new Error("Expected automation decision");
+    }
+    expect(usSubject.resolution.intent.prompt).toBe("US outages");
+    expect(usSubject.resolution.intent.schedule).toMatchObject({
+      type: "interval",
+      everySeconds: 3600,
+    });
+
+    const punctuatedFiller = await resolveComposerAutomationRequest({
+      message: "create an automation for me!",
+      cwd: "/tmp/project",
+      nowIso: NOW_ISO,
+      generateIntent,
+    });
+    expect(punctuatedFiller).toMatchObject({
+      type: "needs-clarification",
+      automationMessage: "create an automation",
+    });
+
+    const punctuatedCombined = await resolveComposerAutomationRequest({
+      message: "create an automation\ncheck the build every 6 hours",
+      cwd: "/tmp/project",
+      nowIso: NOW_ISO,
+      generateIntent: offline,
+    });
+    expect(punctuatedCombined.type).toBe("automation");
+    if (punctuatedCombined.type !== "automation") {
+      throw new Error("Expected automation decision");
+    }
+    expect(punctuatedCombined.resolution.intent.prompt).toBe("check the build");
   });
 
   it("strips Italian possessive creation filler before the task across turns", async () => {

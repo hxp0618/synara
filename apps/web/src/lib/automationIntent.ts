@@ -119,8 +119,11 @@ const WEEKDAY_STRIP_PATTERN = [
 ].join("|");
 
 const TIME_PATTERN = "((?:[01]?\\d|2[0-3])(?::[0-5]\\d)?\\s*(?:am|pm)?)";
-const INTERVAL_PATTERN =
-  "(\\d{1,4})\\s*(seconds|second|secs|sec|secondi|secondo|minutes|minute|mins|minuti|minuto|min|hours|hour|hrs|hr|ore|ora|days|day|giorni|giorno|s|m|h|d|g)";
+const INTERVAL_UNIT_PATTERN =
+  "(?:seconds|second|secs|sec|secondi|secondo|minutes|minute|mins|minuti|minuto|min|hours|hour|hrs|hr|ore|ora|days|day|giorni|giorno|s|m|h|d|g)";
+const BARE_INTERVAL_UNIT_PATTERN =
+  "(?:seconds|second|secs|sec|secondi|secondo|minutes|minute|mins|minuti|minuto|min|hours|hour|hrs|hr|ore|ora|s|m|h)";
+const INTERVAL_PATTERN = `(\\d{1,4})\\s*(${INTERVAL_UNIT_PATTERN})`;
 
 function normalizeInlineText(value: string): string {
   return value.replace(/\s+/g, " ").trim();
@@ -447,12 +450,17 @@ function parseIntervalSchedule(searchText: string): ParsedSchedule | null {
   const match =
     searchText.match(new RegExp(`\\b(?:every|each)\\s+${INTERVAL_PATTERN}\\b`)) ??
     searchText.match(new RegExp(`\\bogni\\s+${INTERVAL_PATTERN}\\b`));
-  if (!match) {
+  const bareMatch =
+    match == null
+      ? (searchText.match(new RegExp(`\\b(?:every|each)\\s+(${BARE_INTERVAL_UNIT_PATTERN})\\b`)) ??
+        searchText.match(new RegExp(`\\bogni\\s+(${BARE_INTERVAL_UNIT_PATTERN})\\b`)))
+      : null;
+  if (!match && !bareMatch) {
     return null;
   }
 
-  const amount = Number.parseInt(match[1] ?? "", 10);
-  const unit = match[2] ?? "m";
+  const amount = match ? Number.parseInt(match[1] ?? "", 10) : 1;
+  const unit = match?.[2] ?? bareMatch?.[1] ?? "m";
   if (!Number.isFinite(amount) || amount <= 0) {
     return null;
   }
@@ -654,7 +662,7 @@ function stripAutomationScaffold(value: string): string {
   let cleaned = normalizeInlineText(value);
   cleaned = cleaned
     .replace(
-      /^(?:please\s+)?(?:make|create|set up|setup|add|start|build)\s+(?:an?\s+)?automation\s*(?:for\s+(?:me|us|myself)\s*)?(?:where|that|to|which)?\s*/i,
+      /^(?:please\s+)?(?:make|create|set up|setup|add|start|build)\s+(?:an?\s+)?automation\s*(?:for\s+(?:me|myself)\s*)?(?:where|that|to|which)?\s*/i,
       "",
     )
     .replace(
@@ -662,11 +670,11 @@ function stripAutomationScaffold(value: string): string {
       "",
     )
     .replace(
-      /^(?:please\s+)?schedule\s+(?:an?\s+)?(?:automation|task|job|check|monitor|reminder)\s*(?:for\s+(?:me|us|myself)\s*)?(?:to|that)?\s*/i,
+      /^(?:please\s+)?schedule\s+(?:an?\s+)?(?:automation|task|job|check|monitor|reminder)\s*(?:for\s+(?:me|myself)\s*)?(?:to|that)?\s*/i,
       "",
     )
     .replace(/^(?:please\s+)?automate\s+(?:this|that|it)?\s*/i, "")
-    .replace(/^(?:where|that|to|che|per|dove)\s+/i, "");
+    .replace(/^(?:where|that|to|for|che|per|dove)\s+/i, "");
 
   cleaned = cleaned
     .replace(
@@ -684,7 +692,15 @@ function stripAutomationScaffold(value: string): string {
       "",
     )
     .replace(new RegExp(`\\bevery\\s+${INTERVAL_PATTERN}\\b\\s*(?:and|to|then|,)?\\s*`, "i"), "")
+    .replace(
+      new RegExp(`\\bevery\\s+${BARE_INTERVAL_UNIT_PATTERN}\\b\\s*(?:and|to|then|,)?\\s*`, "i"),
+      "",
+    )
     .replace(new RegExp(`\\bogni\\s+${INTERVAL_PATTERN}\\b\\s*(?:e|poi|per|,)?\\s*`, "i"), "")
+    .replace(
+      new RegExp(`\\bogni\\s+${BARE_INTERVAL_UNIT_PATTERN}\\b\\s*(?:e|poi|per|,)?\\s*`, "i"),
+      "",
+    )
     .replace(new RegExp(`\\bin\\s+${INTERVAL_PATTERN}\\b\\s*(?:and|to|then|,)?\\s*`, "i"), "")
     .replace(
       new RegExp(`\\b(?:tra|fra)\\s+${INTERVAL_PATTERN}\\b\\s*(?:e|poi|per|,)?\\s*`, "i"),
