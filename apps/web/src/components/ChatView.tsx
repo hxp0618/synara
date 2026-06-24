@@ -1446,12 +1446,13 @@ export default function ChatView({
     accumulatedMessage: string;
     bubbles: ChatMessage[];
   } | null>(null);
-  // Tracks the live thread + the live setup so an async automation resolve that finishes
-  // after a thread switch or a cancel never commits a stale result.
+  // Tracks the live thread + setup/send state so an async automation resolve that
+  // finishes after navigation, cancel, or a later send never commits a stale result.
   const activeThreadIdRef = useRef(threadId);
   activeThreadIdRef.current = threadId;
   const pendingAutomationConversationRef = useRef(pendingAutomationConversation);
   pendingAutomationConversationRef.current = pendingAutomationConversation;
+  const hasLiveTurnRef = useRef(false);
   // Ephemeral setup bubbles are rendered as ordinary transcript messages, so persistent
   // actions (pin, markers) must skip them — their ids vanish when setup ends and would
   // otherwise leave orphaned side-panel entries.
@@ -1461,11 +1462,19 @@ export default function ChatView({
       false,
     [],
   );
-  // A composer-local automation setup belongs to the thread it began in; drop it when
-  // the active thread changes so the prompt never leaks onto another conversation.
+  // A composer-local automation setup belongs to the thread it began in; restore its
+  // carried request before dropping ephemeral bubbles on navigation.
   useEffect(() => {
+    const conversation = pendingAutomationConversationRef.current;
+    if (conversation && conversation.threadId !== threadId) {
+      const draft = promptRef.current.trim();
+      const restored = draft
+        ? `${conversation.accumulatedMessage}\n${draft}`
+        : conversation.accumulatedMessage;
+      setComposerDraftPrompt(conversation.threadId, restored);
+    }
     setPendingAutomationConversation(null);
-  }, [threadId]);
+  }, [setComposerDraftPrompt, threadId]);
   const projectInstructions = useProjectInstructionsStore((state) =>
     activeProjectId ? (state.instructionsByProjectId[activeProjectId] ?? "") : "",
   );
@@ -2353,6 +2362,7 @@ export default function ChatView({
   const isSendBusy = localDispatch !== null && !serverAcknowledgedLocalDispatch;
   const isPreparingWorktree = localDispatch?.preparingWorktree ?? false;
   const hasLiveTurn = phase === "running";
+  hasLiveTurnRef.current = hasLiveTurn;
   const isWorking = hasLiveTurn || isSendBusy || isConnecting || isRevertingCheckpoint;
   const hasStreamingAssistantText =
     activeThread?.messages.some((message) => message.role === "assistant" && message.streaming) ??
@@ -6639,7 +6649,8 @@ export default function ChatView({
       // setup, while generateAutomationIntent was awaiting.
       if (
         activeThreadIdRef.current !== threadId ||
-        pendingAutomationConversationRef.current !== conversation
+        pendingAutomationConversationRef.current !== conversation ||
+        (!hasLiveTurn && hasLiveTurnRef.current)
       ) {
         return true;
       }

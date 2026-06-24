@@ -563,6 +563,29 @@ describe("composerAutomation", () => {
       throw new Error("Expected automation decision");
     }
     expect(withoutConnector.resolution.intent.prompt).toBe("check the build");
+
+    const scheduledTask = await resolveComposerAutomationRequest({
+      message: "schedule a task for me to check the build",
+      cwd: "/tmp/project",
+      nowIso: NOW_ISO,
+      generateIntent,
+    });
+    expect(scheduledTask).toMatchObject({
+      type: "needs-clarification",
+      automationMessage: "schedule a task to check the build",
+    });
+
+    const scheduledTaskCombined = await resolveComposerAutomationRequest({
+      message: "schedule a task to check the build\nevery 6 hours",
+      cwd: "/tmp/project",
+      nowIso: NOW_ISO,
+      generateIntent: offline,
+    });
+    expect(scheduledTaskCombined.type).toBe("automation");
+    if (scheduledTaskCombined.type !== "automation") {
+      throw new Error("Expected automation decision");
+    }
+    expect(scheduledTaskCombined.resolution.intent.prompt).toBe("check the build");
   });
 
   it("strips Italian possessive creation filler before the task across turns", async () => {

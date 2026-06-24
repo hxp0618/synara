@@ -88,7 +88,7 @@ export interface ComposerAutomationDraftDecision {
 function stripTrailingAutomationFiller(message: string): string {
   return message
     .replace(/[?？]+\s*$/u, "")
-    .replace(/\b(automation)\s+for\s+(?:me|us|myself)\s+/iu, "$1 ")
+    .replace(/\b(automation|task|job|check|monitor|reminder)\s+for\s+(?:me|us|myself)\s+/iu, "$1 ")
     .replace(/\b(automazione|task|controllo|monitoraggio)\s+per\s+(?:me|noi)\s+/iu, "$1 ")
     .replace(/\s+(?:for\s+(?:me|us|myself)|per\s+(?:me|noi))\s*$/iu, "")
     .trim();

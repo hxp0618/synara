@@ -662,7 +662,7 @@ function stripAutomationScaffold(value: string): string {
       "",
     )
     .replace(
-      /^(?:please\s+)?schedule\s+(?:an?\s+)?(?:automation|task|job|check|monitor|reminder)\s*(?:to|that)?\s*/i,
+      /^(?:please\s+)?schedule\s+(?:an?\s+)?(?:automation|task|job|check|monitor|reminder)\s*(?:for\s+(?:me|us|myself)\s*)?(?:to|that)?\s*/i,
       "",
     )
     .replace(/^(?:please\s+)?automate\s+(?:this|that|it)?\s*/i, "")
