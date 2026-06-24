@@ -619,6 +619,22 @@ describe("composerAutomation", () => {
       everySeconds: 3600,
     });
 
+    const leadingBareCadence = await resolveComposerAutomationRequest({
+      message: "every hour check metrics",
+      cwd: "/tmp/project",
+      nowIso: NOW_ISO,
+      generateIntent: offline,
+    });
+    expect(leadingBareCadence.type).toBe("automation");
+    if (leadingBareCadence.type !== "automation") {
+      throw new Error("Expected automation decision");
+    }
+    expect(leadingBareCadence.resolution.intent.prompt).toBe("check metrics");
+    expect(leadingBareCadence.resolution.intent.schedule).toMatchObject({
+      type: "interval",
+      everySeconds: 3600,
+    });
+
     const punctuatedFiller = await resolveComposerAutomationRequest({
       message: "create an automation for me!",
       cwd: "/tmp/project",
@@ -685,6 +701,22 @@ describe("composerAutomation", () => {
     expect(combined.resolution.intent.schedule).toMatchObject({
       type: "interval",
       everySeconds: 21_600,
+    });
+
+    const mercatoSubject = await resolveComposerAutomationRequest({
+      message: "crea un'automazione per mercato ogni ora",
+      cwd: "/tmp/project",
+      nowIso: NOW_ISO,
+      generateIntent: offline,
+    });
+    expect(mercatoSubject.type).toBe("automation");
+    if (mercatoSubject.type !== "automation") {
+      throw new Error("Expected automation decision");
+    }
+    expect(mercatoSubject.resolution.intent.prompt).toBe("mercato");
+    expect(mercatoSubject.resolution.intent.schedule).toMatchObject({
+      type: "interval",
+      everySeconds: 3600,
     });
   });
 
@@ -819,6 +851,22 @@ describe("composerAutomation", () => {
       resolution: {
         intent: {
           prompt: "check every second item in the queue",
+          schedule: { type: "daily", timeOfDay: "09:00" },
+        },
+      },
+    });
+
+    const leadingOrdinalWithDailyCadence = await resolveComposerAutomationRequest({
+      message: "/automation every second item in the queue daily",
+      cwd: "/tmp/project",
+      nowIso: NOW_ISO,
+      generateIntent: offline,
+    });
+    expect(leadingOrdinalWithDailyCadence).toMatchObject({
+      type: "automation",
+      resolution: {
+        intent: {
+          prompt: "every second item in the queue",
           schedule: { type: "daily", timeOfDay: "09:00" },
         },
       },

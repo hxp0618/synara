@@ -124,6 +124,12 @@ const INTERVAL_UNIT_PATTERN =
 const BARE_INTERVAL_UNIT_PATTERN =
   "(?:seconds|second|secs|sec|secondi|secondo|minutes|minute|mins|minuti|minuto|min|hours|hour|hrs|hr|ore|ora|s|m|h)";
 const INTERVAL_PATTERN = `(\\d{1,4})\\s*(${INTERVAL_UNIT_PATTERN})`;
+const BARE_INTERVAL_LEADING_REMAINDER_PATTERN =
+  "(?=$|\\s*(?:,|and\\b|to\\b|then\\b)|\\s+(?:check|verify|monitor|watch|remind|notify|alert|tell|controlla|verifica|monitora|avvisami|ricordami)\\b)";
+const BARE_INTERVAL_LEADING_ACTION_PATTERN = new RegExp(
+  `^(?:every|each|ogni)\\s+${BARE_INTERVAL_UNIT_PATTERN}\\b\\s+(?:check|verify|monitor|watch|remind|notify|alert|tell|controlla|verifica|monitora|avvisami|ricordami)\\b`,
+  "i",
+);
 
 function normalizeInlineText(value: string): string {
   return value.replace(/\s+/g, " ").trim();
@@ -180,7 +186,9 @@ function isLikelyPlainAutomationAction(value: string, politeRequest: boolean): b
     : PLAIN_INVOCATION_ACTION_PREFIX_PATTERN;
   const normalized = normalizeInlineText(value);
   return (
-    pattern.test(normalized) || PLAIN_INVOCATION_AUTOMATION_CREATION_PREFIX_PATTERN.test(normalized)
+    pattern.test(normalized) ||
+    PLAIN_INVOCATION_AUTOMATION_CREATION_PREFIX_PATTERN.test(normalized) ||
+    BARE_INTERVAL_LEADING_ACTION_PATTERN.test(normalized)
   );
 }
 
@@ -452,9 +460,17 @@ function parseIntervalSchedule(searchText: string): ParsedSchedule | null {
     searchText.match(new RegExp(`\\bogni\\s+${INTERVAL_PATTERN}\\b`));
   const bareMatch =
     match == null
-      ? (searchText.match(new RegExp(`^(?:every|each)\\s+(${BARE_INTERVAL_UNIT_PATTERN})\\b`)) ??
+      ? (searchText.match(
+          new RegExp(
+            `^(?:every|each)\\s+(${BARE_INTERVAL_UNIT_PATTERN})\\b${BARE_INTERVAL_LEADING_REMAINDER_PATTERN}`,
+          ),
+        ) ??
         searchText.match(new RegExp(`\\b(?:every|each)\\s+(${BARE_INTERVAL_UNIT_PATTERN})$`)) ??
-        searchText.match(new RegExp(`^ogni\\s+(${BARE_INTERVAL_UNIT_PATTERN})\\b`)) ??
+        searchText.match(
+          new RegExp(
+            `^ogni\\s+(${BARE_INTERVAL_UNIT_PATTERN})\\b${BARE_INTERVAL_LEADING_REMAINDER_PATTERN}`,
+          ),
+        ) ??
         searchText.match(new RegExp(`\\bogni\\s+(${BARE_INTERVAL_UNIT_PATTERN})$`)))
       : null;
   if (!match && !bareMatch) {
@@ -668,7 +684,7 @@ function stripAutomationScaffold(value: string): string {
       "",
     )
     .replace(
-      /^(?:please\s+)?(?:crea|creare|aggiungi|imposta|fai)\s+(?:un[' ]?)?(?:automazione|task|controllo|monitoraggio)\s*(?:per\s+(?:me|noi)\s*)?(?:che|per|dove)?\s*/i,
+      /^(?:please\s+)?(?:crea|creare|aggiungi|imposta|fai)\s+(?:un[' ]?)?(?:automazione|task|controllo|monitoraggio)\s*(?:per\s+(?:me|noi)\b\s*)?(?:che|per|dove)?\s*/i,
       "",
     )
     .replace(
@@ -695,13 +711,19 @@ function stripAutomationScaffold(value: string): string {
     )
     .replace(new RegExp(`\\bevery\\s+${INTERVAL_PATTERN}\\b\\s*(?:and|to|then|,)?\\s*`, "i"), "")
     .replace(
-      new RegExp(`^every\\s+${BARE_INTERVAL_UNIT_PATTERN}\\b\\s*(?:and|to|then|,)?\\s*`, "i"),
+      new RegExp(
+        `^every\\s+${BARE_INTERVAL_UNIT_PATTERN}\\b\\s*(?:and|to|then|,)?\\s*${BARE_INTERVAL_LEADING_REMAINDER_PATTERN}`,
+        "i",
+      ),
       "",
     )
     .replace(new RegExp(`\\bevery\\s+${BARE_INTERVAL_UNIT_PATTERN}$`, "i"), "")
     .replace(new RegExp(`\\bogni\\s+${INTERVAL_PATTERN}\\b\\s*(?:e|poi|per|,)?\\s*`, "i"), "")
     .replace(
-      new RegExp(`^ogni\\s+${BARE_INTERVAL_UNIT_PATTERN}\\b\\s*(?:e|poi|per|,)?\\s*`, "i"),
+      new RegExp(
+        `^ogni\\s+${BARE_INTERVAL_UNIT_PATTERN}\\b\\s*(?:e|poi|per|,)?\\s*${BARE_INTERVAL_LEADING_REMAINDER_PATTERN}`,
+        "i",
+      ),
       "",
     )
     .replace(new RegExp(`\\bogni\\s+${BARE_INTERVAL_UNIT_PATTERN}$`, "i"), "")

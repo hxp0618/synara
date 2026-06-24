@@ -4711,6 +4711,8 @@ export default function ChatView({
     composerFilesRef,
     composerAssistantSelectionsRef,
     addComposerAssistantSelectionToDraft,
+    canReferenceAssistantSelection: (selection) =>
+      !isPendingSetupBubbleId(MessageId.makeUnsafe(selection.assistantMessageId)),
     scheduleComposerFocus,
     onMessagesClickCaptureBase,
     onMessagesPointerCancelBase,
