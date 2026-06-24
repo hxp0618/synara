@@ -1129,7 +1129,6 @@ routing.layer("ProviderServiceLive routing", (it) => {
         provider: "codex",
         createdAt: "2026-02-27T00:05:00.000Z",
         threadId: session.threadId,
-        turnId: turn.turnId,
         payload: { state: "compacted" },
       });
       yield* sleep(50);
@@ -1828,6 +1827,140 @@ idleCleanup.layer("ProviderServiceLive idle cleanup", (it) => {
 
       const binding = yield* directory.getBinding(threadId);
       assert.equal(Option.isNone(binding), true);
+    }),
+  );
+
+  it.effect("waits for fired idle cleanup before explicit runtime stop", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const runtimeRepository = yield* ProviderSessionRuntimeRepository;
+      const threadId = asThreadId("thread-idle-runtime-stop-race");
+      let listSessionsStarted = false;
+      let releaseListSessions:
+        | ((sessions: ReadonlyArray<ProviderSession>) => void)
+        | undefined;
+
+      const session = yield* provider.startSession(threadId, {
+        provider: "codex",
+        threadId,
+        runtimeMode: "full-access",
+      });
+      const { resumeCursor: _omittedResumeCursor, ...staleReadySession } = session;
+      idleCleanup.codex.stopSession.mockClear();
+      idleCleanup.codex.listSessions
+        .mockImplementationOnce(() => Effect.succeed([session]))
+        .mockImplementationOnce(() =>
+          Effect.promise(
+            () =>
+              new Promise<ReadonlyArray<ProviderSession>>((resolve) => {
+                listSessionsStarted = true;
+                releaseListSessions = resolve;
+              }),
+          ),
+        );
+
+      yield* idleCleanup.codex.waitForRuntimeSubscribers();
+      idleCleanup.codex.emit({
+        type: "turn.completed",
+        eventId: asEventId("runtime-idle-before-runtime-stop"),
+        provider: "codex",
+        createdAt: "2026-02-27T00:04:00.000Z",
+        threadId,
+        payload: { state: "completed" },
+      });
+      yield* waitUntilEffect(
+        () =>
+          runtimeRepository.getByThreadId({ threadId }).pipe(
+            Effect.map((runtime) => {
+              if (Option.isNone(runtime)) {
+                return false;
+              }
+              const payload = runtime.value.runtimePayload;
+              return (
+                payload !== null &&
+                typeof payload === "object" &&
+                !Array.isArray(payload) &&
+                (payload as Record<string, unknown>).lastRuntimeEvent === "turn.completed"
+              );
+            }),
+          ),
+        500,
+        20,
+        "runtime completion persistence",
+      );
+      yield* waitUntil(() => listSessionsStarted, 500, 20, "idle listSessions start");
+
+      assert.equal(typeof provider.stopRuntimeSession, "function");
+      if (!provider.stopRuntimeSession) {
+        assert.fail("stopRuntimeSession unavailable");
+      }
+      const stopFiber = yield* provider.stopRuntimeSession({ threadId }).pipe(Effect.forkChild);
+      const release = releaseListSessions;
+      assert.equal(typeof release, "function");
+      release([staleReadySession]);
+      yield* Fiber.join(stopFiber);
+
+      assert.equal(idleCleanup.codex.stopSession.mock.calls.length, 1);
+      assert.deepEqual(idleCleanup.codex.stopSession.mock.calls[0]?.[0], threadId);
+    }),
+  );
+
+  it.effect("reschedules idle cleanup after successful compact work", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const runtimeRepository = yield* ProviderSessionRuntimeRepository;
+      const threadId = asThreadId("thread-idle-compact-success");
+
+      yield* provider.startSession(threadId, {
+        provider: "codex",
+        threadId,
+        runtimeMode: "full-access",
+      });
+      idleCleanup.codex.updateSession(threadId, (existing) => {
+        const { resumeCursor: _omittedResumeCursor, ...withoutResumeCursor } = existing;
+        return withoutResumeCursor;
+      });
+      yield* idleCleanup.codex.waitForRuntimeSubscribers();
+      idleCleanup.codex.emit({
+        type: "turn.completed",
+        eventId: asEventId("runtime-idle-before-compact-success"),
+        provider: "codex",
+        createdAt: "2026-02-27T00:04:00.000Z",
+        threadId,
+        payload: { state: "completed" },
+      });
+
+      yield* waitUntilEffect(
+        () =>
+          runtimeRepository.getByThreadId({ threadId }).pipe(
+            Effect.map((runtime) => {
+              if (Option.isNone(runtime)) {
+                return false;
+              }
+              const payload = runtime.value.runtimePayload;
+              return (
+                payload !== null &&
+                typeof payload === "object" &&
+                !Array.isArray(payload) &&
+                (payload as Record<string, unknown>).lastRuntimeEvent === "turn.completed"
+              );
+            }),
+          ),
+        500,
+        20,
+        "runtime completion persistence",
+      );
+
+      idleCleanup.codex.stopSession.mockClear();
+      yield* provider.compactThread({ threadId });
+
+      yield* waitUntil(
+        () => idleCleanup.codex.stopSession.mock.calls.length > 0,
+        500,
+        20,
+        "idle runtime stop after successful compact",
+      );
+      assert.deepEqual(idleCleanup.codex.stopSession.mock.calls[0]?.[0], threadId);
     }),
   );
 

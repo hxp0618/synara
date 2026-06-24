@@ -167,7 +167,10 @@ function hasResumeCursor(value: unknown): boolean {
   return value !== null && value !== undefined;
 }
 
-function runtimeStatusForEvent(event: ProviderRuntimeEvent): "running" | "stopped" | "error" {
+function runtimeStatusForEvent(
+  event: ProviderRuntimeEvent,
+  activeTurnId?: unknown,
+): "running" | "stopped" | "error" {
   switch (event.type) {
     case "session.state.changed":
       switch (event.payload.state) {
@@ -186,7 +189,7 @@ function runtimeStatusForEvent(event: ProviderRuntimeEvent): "running" | "stoppe
         case "closed":
           return "stopped";
         case "compacted":
-          return event.turnId === undefined ? "stopped" : "running";
+          return event.turnId === undefined && activeTurnId == null ? "stopped" : "running";
         default:
           return "running";
       }
@@ -470,11 +473,13 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
           return;
         }
 
+        const currentActiveTurnId =
+          runtimePayloadRecord(binding.runtimePayload).activeTurnId ?? null;
         const activeTurnId =
           event.type === "turn.started"
             ? (event.turnId ?? null)
-            : event.type === "thread.state.changed" && event.payload.state === "compacted"
-              ? (event.turnId ?? null)
+          : event.type === "thread.state.changed" && event.payload.state === "compacted"
+              ? (event.turnId ?? currentActiveTurnId)
             : event.type === "turn.completed" ||
                 event.type === "turn.aborted" ||
                 (event.type === "thread.state.changed" &&
@@ -488,7 +493,7 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
                     event.payload.state === "stopped" ||
                     event.payload.state === "error"))
               ? null
-              : (runtimePayloadRecord(binding.runtimePayload).activeTurnId ?? null);
+              : currentActiveTurnId;
         const lastError = runtimeLastErrorForEvent(event);
         const resumeCursor = yield* refreshResumeCursorFromActiveSession(event, binding);
 
@@ -497,7 +502,7 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
           provider: binding.provider,
           ...(binding.adapterKey !== undefined ? { adapterKey: binding.adapterKey } : {}),
           ...(binding.runtimeMode !== undefined ? { runtimeMode: binding.runtimeMode } : {}),
-          status: runtimeStatusForEvent(event),
+          status: runtimeStatusForEvent(event, activeTurnId),
           ...(resumeCursor !== undefined ? { resumeCursor } : {}),
           runtimePayload: {
             activeTurnId,
@@ -1057,6 +1062,7 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
           expectedIdleGeneration === undefined ||
           isRuntimeIdleGenerationCurrent(input.threadId, expectedIdleGeneration);
         if (expectedIdleGeneration === undefined) {
+          yield* waitForRuntimeIdleStop(input.threadId);
           clearRuntimeIdleTimer(input.threadId);
         } else if (!isExpectedIdleStopCurrent()) {
           return;
@@ -1296,6 +1302,7 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
               provider: routed.adapter.provider,
             });
           }),
+          { scheduleIdleStopOnSuccess: true },
         );
       });
 
