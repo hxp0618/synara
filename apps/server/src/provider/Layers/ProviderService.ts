@@ -230,13 +230,26 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
     const directory = yield* ProviderSessionDirectory;
     const runtimeEventPubSub = yield* PubSub.unbounded<ProviderRuntimeEvent>();
     const runtimeIdleTimers = new Map<ThreadId, ReturnType<typeof setTimeout>>();
+    // Fired idle callbacks outlive their timer map entry, so use generations to
+    // invalidate async stop work when new user work starts in that gap.
+    const runtimeIdleGenerations = new Map<ThreadId, number>();
     const runtimeIdleStopMs = Math.max(
       0,
       options?.runtimeIdleStopMs ?? PROVIDER_RUNTIME_IDLE_STOP_MS,
     );
-    let stopIdleRuntimeSession: ((threadId: ThreadId) => void) | null = null;
+    let stopIdleRuntimeSession: ((threadId: ThreadId, generation: number) => void) | null = null;
+
+    const bumpRuntimeIdleGeneration = (threadId: ThreadId): number => {
+      const generation = (runtimeIdleGenerations.get(threadId) ?? 0) + 1;
+      runtimeIdleGenerations.set(threadId, generation);
+      return generation;
+    };
+
+    const isRuntimeIdleGenerationCurrent = (threadId: ThreadId, generation: number): boolean =>
+      runtimeIdleGenerations.get(threadId) === generation;
 
     const clearRuntimeIdleTimer = (threadId: ThreadId) => {
+      bumpRuntimeIdleGeneration(threadId);
       const timer = runtimeIdleTimers.get(threadId);
       if (!timer) {
         return;
@@ -251,9 +264,10 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
         return;
       }
 
+      const generation = bumpRuntimeIdleGeneration(threadId);
       const timer = setTimeout(() => {
         runtimeIdleTimers.delete(threadId);
-        stopIdleRuntimeSession?.(threadId);
+        stopIdleRuntimeSession?.(threadId, generation);
       }, runtimeIdleStopMs);
       timer.unref();
       runtimeIdleTimers.set(threadId, timer);
@@ -965,23 +979,34 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
         });
       });
 
-    const stopRuntimeSession: NonNullable<ProviderServiceShape["stopRuntimeSession"]> = (
+    const stopRuntimeSessionInternal = (
       rawInput,
-    ) =>
+      expectedIdleGeneration?: number,
+    ): ReturnType<NonNullable<ProviderServiceShape["stopRuntimeSession"]>> =>
       Effect.gen(function* () {
         const input = yield* decodeInputOrValidationError({
           operation: "ProviderService.stopRuntimeSession",
           schema: ProviderStopSessionInput,
           payload: rawInput,
         });
-        clearRuntimeIdleTimer(input.threadId);
+        const isExpectedIdleStopCurrent = () =>
+          expectedIdleGeneration === undefined ||
+          isRuntimeIdleGenerationCurrent(input.threadId, expectedIdleGeneration);
+        if (expectedIdleGeneration === undefined) {
+          clearRuntimeIdleTimer(input.threadId);
+        } else if (!isExpectedIdleStopCurrent()) {
+          return;
+        }
         const bindingOption = yield* directory.getBinding(input.threadId);
         const binding = Option.getOrUndefined(bindingOption);
-        if (!binding) {
+        if (!binding || !isExpectedIdleStopCurrent()) {
           return;
         }
         const adapter = yield* registry.getByProvider(binding.provider);
         const hasActiveSession = yield* adapter.hasSession(input.threadId);
+        if (!isExpectedIdleStopCurrent()) {
+          return;
+        }
         if (hasActiveSession) {
           yield* adapter.stopSession(input.threadId);
         }
@@ -1008,7 +1033,12 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
         });
       });
 
-    stopIdleRuntimeSession = (threadId) => {
+    const stopRuntimeSession: NonNullable<ProviderServiceShape["stopRuntimeSession"]> = (
+      rawInput,
+    ) =>
+      stopRuntimeSessionInternal(rawInput);
+
+    stopIdleRuntimeSession = (threadId, generation) => {
       void Effect.runPromise(
         Effect.gen(function* () {
           const binding = Option.getOrUndefined(yield* directory.getBinding(threadId));
@@ -1027,8 +1057,11 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
           if (!hasResumeCursor(session.resumeCursor) && !hasResumeCursor(binding.resumeCursor)) {
             return;
           }
+          if (!isRuntimeIdleGenerationCurrent(threadId, generation)) {
+            return;
+          }
 
-          yield* stopRuntimeSession({ threadId });
+          yield* stopRuntimeSessionInternal({ threadId }, generation);
         }).pipe(
           Effect.catchCause((cause) =>
             Effect.logWarning("provider.session.idle_stop_failed", {
