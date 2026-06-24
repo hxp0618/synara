@@ -24,6 +24,13 @@ const GEMINI_ACP_AUTH_REQUIRED_CODE = -32_000;
 const MAX_CAPTURED_LOG_LINES = 5;
 const MAX_CAPTURED_LOG_LENGTH = 240;
 const GEMINI_BROWSER_BLOCKLIST_VALUE = "www-browser";
+const GEMINI_API_KEY_ENV_HINT = "`GEMINI_API_KEY`";
+const GEMINI_VERTEX_ENV_HINT =
+  "`GOOGLE_GENAI_USE_VERTEXAI=true`, `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`, plus ADC or `GOOGLE_API_KEY`";
+const GEMINI_HEADLESS_AUTH_GUIDANCE =
+  `Use Gemini API key or Vertex AI auth for Synara: set ${GEMINI_API_KEY_ENV_HINT} in \`~/.gemini/.env\`, or set Vertex AI env (${GEMINI_VERTEX_ENV_HINT}), then refresh provider status.`;
+const GEMINI_CODE_ASSIST_MIGRATION_AUTH_MESSAGE =
+  `Gemini is not authenticated because Google Code Assist OAuth for individual accounts appears to require Antigravity. For Synara, use ${GEMINI_API_KEY_ENV_HINT} or Vertex AI auth (${GEMINI_VERTEX_ENV_HINT}); use Antigravity for individual Code Assist OAuth until Gemini CLI exposes a compatible path.`;
 
 const GEMINI_OAUTH_BROWSER_PROMPT_PATTERNS = [
   /opening your browser for oauth sign-in/i,
@@ -68,7 +75,11 @@ function formatGeminiDiscoveryWarning(detail: string): string {
 }
 
 function formatGeminiAuthMessage(detail: string): string {
-  return `Gemini is not authenticated. ${detail}`;
+  return `Gemini is not authenticated. ${detail} ${GEMINI_HEADLESS_AUTH_GUIDANCE}`;
+}
+
+function formatGeminiCodeAssistMigrationAuthMessage(): string {
+  return GEMINI_CODE_ASSIST_MIGRATION_AUTH_MESSAGE;
 }
 
 function formatGeminiModelDiscoveryFallbackMessage(): string {
@@ -89,8 +100,10 @@ export function parseGeminiAcpProbeError(
   const code = asNumber(record?.code);
   const message = trimToUndefined(record?.message) ?? "Gemini ACP request failed.";
   const lowerMessage = message.toLowerCase();
+  const codeAssistMigrationAuthFailure = isGeminiCodeAssistMigrationAuthFailure(message);
   const unauthenticated =
     code === GEMINI_ACP_AUTH_REQUIRED_CODE ||
+    codeAssistMigrationAuthFailure ||
     lowerMessage.includes("authentication required") ||
     lowerMessage.includes("api key is missing") ||
     lowerMessage.includes("auth method") ||
@@ -100,7 +113,9 @@ export function parseGeminiAcpProbeError(
     return {
       status: "error",
       auth: { status: "unauthenticated" },
-      message: formatGeminiAuthMessage(message),
+      message: codeAssistMigrationAuthFailure
+        ? formatGeminiCodeAssistMigrationAuthMessage()
+        : formatGeminiAuthMessage(message),
     };
   }
 
@@ -124,6 +139,23 @@ export function buildGeminiProbeEnv(env: NodeJS.ProcessEnv = process.env): NodeJ
 
 export function isGeminiOAuthBrowserPrompt(line: string): boolean {
   return GEMINI_OAUTH_BROWSER_PROMPT_PATTERNS.some((pattern) => pattern.test(line));
+}
+
+// Code Assist OAuth failures can surface either as the explicit Antigravity
+// migration message or as a closed loadCodeAssist transport in ACP mode.
+export function isGeminiCodeAssistMigrationAuthFailure(message: string): boolean {
+  const lowerMessage = message.toLowerCase();
+  const explicitMigration =
+    lowerMessage.includes("gemini code assist") &&
+    (lowerMessage.includes("antigravity") ||
+      lowerMessage.includes("client is no longer supported") ||
+      lowerMessage.includes("migrate"));
+  const loadCodeAssistClosed =
+    (lowerMessage.includes("cloudcode-pa.googleapis.com") ||
+      lowerMessage.includes("loadcodeassist")) &&
+    lowerMessage.includes("premature close");
+
+  return explicitMigration || loadCodeAssistClosed;
 }
 
 export function normalizeGeminiCapabilityProbeResult(

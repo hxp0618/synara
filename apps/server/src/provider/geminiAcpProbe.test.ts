@@ -2,8 +2,10 @@ import { describe, expect, it } from "vitest";
 
 import {
   buildGeminiProbeEnv,
+  isGeminiCodeAssistMigrationAuthFailure,
   isGeminiOAuthBrowserPrompt,
   normalizeGeminiCapabilityProbeResult,
+  parseGeminiAcpProbeError,
 } from "./geminiAcpProbe";
 
 describe("buildGeminiProbeEnv", () => {
@@ -30,6 +32,69 @@ describe("isGeminiOAuthBrowserPrompt", () => {
 
   it("ignores ordinary ACP output", () => {
     expect(isGeminiOAuthBrowserPrompt('{"jsonrpc":"2.0","id":1,"result":{}}')).toBe(false);
+  });
+});
+
+describe("isGeminiCodeAssistMigrationAuthFailure", () => {
+  it("detects the Gemini Code Assist to Antigravity migration message", () => {
+    expect(
+      isGeminiCodeAssistMigrationAuthFailure(
+        "Failed to sign in. Message: This client is no longer supported for Gemini Code Assist for individuals. To continue using Gemini, please migrate to the Antigravity suite of products.",
+      ),
+    ).toBe(true);
+  });
+
+  it("detects ACP loadCodeAssist premature-close auth failures", () => {
+    expect(
+      isGeminiCodeAssistMigrationAuthFailure(
+        "Invalid response body while trying to fetch https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist: Premature close",
+      ),
+    ).toBe(true);
+  });
+
+  it("ignores unrelated transport errors", () => {
+    expect(isGeminiCodeAssistMigrationAuthFailure("Network request failed: Premature close")).toBe(
+      false,
+    );
+  });
+});
+
+describe("parseGeminiAcpProbeError", () => {
+  it("returns actionable auth guidance for the Antigravity migration failure", () => {
+    const parsed = parseGeminiAcpProbeError({
+      message:
+        "Failed to sign in. Message: This client is no longer supported for Gemini Code Assist for individuals. To continue using Gemini, please migrate to the Antigravity suite of products.",
+    });
+
+    expect(parsed.status).toBe("error");
+    expect(parsed.auth.status).toBe("unauthenticated");
+    expect(parsed.message).toContain("Antigravity");
+    expect(parsed.message).toContain("GEMINI_API_KEY");
+    expect(parsed.message).toContain("GOOGLE_GENAI_USE_VERTEXAI");
+  });
+
+  it("maps the issue #224 loadCodeAssist premature close to auth guidance", () => {
+    const parsed = parseGeminiAcpProbeError({
+      code: -32_000,
+      message:
+        "Invalid response body while trying to fetch https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist: Premature close",
+    });
+
+    expect(parsed.status).toBe("error");
+    expect(parsed.auth.status).toBe("unauthenticated");
+    expect(parsed.message).toContain("Antigravity");
+    expect(parsed.message).toContain("Vertex AI");
+  });
+
+  it("adds setup guidance to generic Gemini auth failures", () => {
+    const parsed = parseGeminiAcpProbeError({
+      message: "API key is missing",
+    });
+
+    expect(parsed.status).toBe("error");
+    expect(parsed.auth.status).toBe("unauthenticated");
+    expect(parsed.message).toContain("API key is missing");
+    expect(parsed.message).toContain("~/.gemini/.env");
   });
 });
 
