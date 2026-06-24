@@ -646,7 +646,7 @@ export function maxIterationOptions(
 }
 
 // Shown at the top of an automation's detail panel when it still needs a one-time risk
-// approval before it can run. Approving persists on the automation, so it never asks again.
+// approval before Synara can run or update every configured path without asking again.
 export function AutomationApprovalBanner({
   warnings,
   busy,
@@ -663,10 +663,11 @@ export function AutomationApprovalBanner({
   }
   return (
     <Alert variant="warning">
-      <AlertTitle>Approval needed to run</AlertTitle>
+      <AlertTitle>Approval needed</AlertTitle>
       <AlertDescription>
         <span>
-          This automation needs your approval once before it can run. It won&apos;t ask again.
+          This automation needs your approval once before Synara can run or update it. It
+          won&apos;t ask again.
         </span>
         <ul className="flex flex-col gap-1.5">
           {warnings.map((warning) => (

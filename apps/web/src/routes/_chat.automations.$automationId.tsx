@@ -466,10 +466,12 @@ function AutomationDetailView() {
                     // acknowledgedRisks optimistically, so warnings clears before the server
                     // persists and a run dispatched in that window hits the old definition.
                     updateMutation.isPending ||
-                    approvalGaps.warnings.length > 0
+                    approvalGaps.runBlockingWarnings.length > 0
                   }
                   title={
-                    approvalGaps.warnings.length > 0 ? "Approve the automation first" : undefined
+                    approvalGaps.runBlockingWarnings.length > 0
+                      ? "Approve the automation first"
+                      : undefined
                   }
                   onClick={() => runNowMutation.mutate(definition)}
                 >
