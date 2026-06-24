@@ -275,6 +275,10 @@ function toolOutputBufferKey(event: ProviderRuntimeEvent): string | null {
   return [event.threadId, event.turnId ?? "no-turn", event.itemId].join(":");
 }
 
+function hasNonEmptyString(value: unknown): boolean {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
 function mergeBufferedToolOutputData(
   data: unknown,
   bufferedOutput: BufferedToolOutput,
@@ -286,9 +290,9 @@ function mergeBufferedToolOutputData(
       ? { output: baseData.rawOutput }
       : {};
   const hasStructuredOutput =
-    typeof existingRawOutput.output === "string" ||
-    typeof existingRawOutput.stdout === "string" ||
-    typeof existingRawOutput.stderr === "string";
+    hasNonEmptyString(existingRawOutput.output) ||
+    hasNonEmptyString(existingRawOutput.stdout) ||
+    hasNonEmptyString(existingRawOutput.stderr);
   return {
     ...baseData,
     rawOutput: {

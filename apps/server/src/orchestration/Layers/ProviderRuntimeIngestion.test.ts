@@ -2961,6 +2961,72 @@ describe("ProviderRuntimeIngestion", () => {
     expect(rawOutput.output).toBe("first line\nsecond line\n");
   });
 
+  it("keeps buffered command output when completed raw streams are empty", async () => {
+    const harness = await createHarness();
+    const now = new Date().toISOString();
+
+    harness.emit({
+      type: "content.delta",
+      eventId: asEventId("evt-empty-stream-buffered-output"),
+      provider: "codex",
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-empty-stream-output"),
+      itemId: asItemId("item-empty-stream-output"),
+      payload: {
+        streamKind: "command_output",
+        delta: "captured through delta\n",
+      },
+    });
+    harness.emit({
+      type: "item.completed",
+      eventId: asEventId("evt-empty-stream-completed"),
+      provider: "codex",
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-empty-stream-output"),
+      itemId: asItemId("item-empty-stream-output"),
+      payload: {
+        itemType: "command_execution",
+        status: "completed",
+        title: "Ran command",
+        detail: "printf buffered",
+        data: {
+          rawInput: { command: "printf buffered" },
+          rawOutput: {
+            stdout: "",
+            stderr: "",
+          },
+        },
+      },
+    });
+
+    const thread = await waitForThread(harness.engine, (entry) =>
+      entry.activities.some((activity) => activity.id === "evt-empty-stream-completed"),
+    );
+    const activity = thread.activities.find(
+      (entry) => entry.id === "evt-empty-stream-completed",
+    );
+    const payload =
+      activity?.payload && typeof activity.payload === "object"
+        ? (activity.payload as Record<string, unknown>)
+        : {};
+    const data =
+      payload.data && typeof payload.data === "object"
+        ? (payload.data as Record<string, unknown>)
+        : {};
+    const rawOutput =
+      data.rawOutput && typeof data.rawOutput === "object"
+        ? (data.rawOutput as Record<string, unknown>)
+        : {};
+
+    expect(rawOutput).toMatchObject({
+      stdout: "",
+      stderr: "",
+      output: "captured through delta\n",
+    });
+  });
+
   it("hard-caps pathological tool activity data", async () => {
     const harness = await createHarness();
     const now = new Date().toISOString();
