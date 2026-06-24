@@ -470,23 +470,10 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     ],
   );
   const rows = useStableRows(rawRows);
-  const selectedToolDetailsEntry = useMemo(() => {
-    if (!selectedToolDetailsEntryId) {
-      return null;
-    }
-    for (const row of rows) {
-      if (row.kind !== "work") {
-        continue;
-      }
-      const matchingEntry = row.groupedEntries.find(
-        (entry) => entry.id === selectedToolDetailsEntryId,
-      );
-      if (matchingEntry) {
-        return matchingEntry;
-      }
-    }
-    return null;
-  }, [rows, selectedToolDetailsEntryId]);
+  const selectedToolDetailsEntry = useMemo(
+    () => findToolDetailsEntryById(rows, selectedToolDetailsEntryId),
+    [rows, selectedToolDetailsEntryId],
+  );
   // Latest rows kept in a ref so the imperative scroll controller can look up a message's
   // index lazily without re-installing the controller on every transcript change.
   const rowsRef = useRef(rows);
@@ -1576,6 +1563,38 @@ export const MessagesTimeline = memo(function MessagesTimeline({
 
 type TimelineMessage = Extract<MessagesTimelineRow, { kind: "message" }>["message"];
 type TimelineWorkEntry = Extract<MessagesTimelineRow, { kind: "work" }>["groupedEntries"][number];
+
+export function findToolDetailsEntryById(
+  rows: ReadonlyArray<MessagesTimelineRow>,
+  entryId: string | null,
+): TimelineWorkEntry | null {
+  if (!entryId) {
+    return null;
+  }
+  for (const row of rows) {
+    if (row.kind === "work") {
+      const matchingEntry = row.groupedEntries.find((entry) => entry.id === entryId);
+      if (matchingEntry) {
+        return matchingEntry;
+      }
+      continue;
+    }
+    if (row.kind !== "message") {
+      continue;
+    }
+    const matchingInlineEntry = row.inlineWorkEntries?.find((entry) => entry.id === entryId);
+    if (matchingInlineEntry) {
+      return matchingInlineEntry;
+    }
+    const matchingCollapsedEntry = row.collapsedTurnItems?.find(
+      (item) => item.kind === "work" && item.entry.id === entryId,
+    );
+    if (matchingCollapsedEntry?.kind === "work") {
+      return matchingCollapsedEntry.entry;
+    }
+  }
+  return null;
+}
 
 // Reuse stable row references so streaming updates only force React work for
 // rows whose visible content actually changed.
