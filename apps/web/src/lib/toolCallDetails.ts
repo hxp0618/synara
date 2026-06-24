@@ -84,6 +84,15 @@ function firstOutputText(...values: unknown[]): string | undefined {
   return undefined;
 }
 
+function asRawOutputRecord(value: unknown): Record<string, unknown> | null {
+  const record = asRecord(value);
+  if (record) {
+    return record;
+  }
+  const output = firstOutputText(value);
+  return output !== undefined ? { output } : null;
+}
+
 function firstNumber(...values: unknown[]): number | undefined {
   for (const value of values) {
     const normalized = asFiniteNumber(value);
@@ -139,7 +148,7 @@ function extractToolOutputDetails(input: {
   command?: string | undefined;
 }): WorkLogToolOutputDetails | undefined {
   const data = asRecord(input.payload?.data);
-  const rawOutput = asRecord(data?.rawOutput);
+  const rawOutput = asRawOutputRecord(data?.rawOutput);
   const rawOutputDetails = asRecord(rawOutput?.details);
   const item = asRecord(data?.item);
   const itemResult = asRecord(item?.result);

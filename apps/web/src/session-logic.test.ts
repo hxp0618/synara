@@ -1129,6 +1129,36 @@ describe("deriveWorkLogEntries", () => {
     });
   });
 
+  it("keeps command output details when rawOutput is stored as a string", () => {
+    const activities: OrchestrationThreadActivity[] = [
+      makeActivity({
+        id: "command-tool-string-output",
+        kind: "tool.completed",
+        summary: "Ran command",
+        payload: {
+          itemType: "command_execution",
+          title: "Ran command",
+          data: {
+            item: {
+              command: "gemini --version",
+            },
+            rawOutput: "gemini 1.2.3\n",
+          },
+        },
+      }),
+    ];
+
+    const [entry] = deriveWorkLogEntries(activities, undefined);
+    expect(entry?.toolDetails).toEqual({
+      kind: "command",
+      title: "Ran",
+      command: "gemini --version",
+      output: {
+        output: "gemini 1.2.3\n",
+      },
+    });
+  });
+
   it("merges command detail payloads across started and completed lifecycle rows", () => {
     const activities: OrchestrationThreadActivity[] = [
       makeActivity({
