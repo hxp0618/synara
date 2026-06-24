@@ -52,9 +52,13 @@ export type ComposerAutomationRequestDecision =
   | {
       // The message reads as an automation request but is missing required fields
       // (a task and/or a schedule). ChatView turns this into a conversational
-      // follow-up instead of dropping the message: it keeps the raw text, asks for
-      // what's missing, and folds the user's next reply back in before re-resolving.
+      // follow-up instead of dropping the message: it asks for what's missing and
+      // folds the user's next reply back in before re-resolving. `automationMessage`
+      // is the cleaned invocation (politeness/creation scaffold stripped) so the
+      // accumulated request never re-parses "could you create an automation for me?"
+      // scaffolding as task content.
       readonly type: "needs-clarification";
+      readonly automationMessage: string;
       readonly missingFields: readonly ServerAutomationIntentMissingField[];
       readonly reason: string | null;
     }
@@ -74,6 +78,17 @@ export interface ComposerAutomationDraftDecision {
   };
   readonly acknowledgedWarningIds: ReadonlySet<AutomationDraftWarningId>;
   readonly needsDraftReview: boolean;
+}
+
+// Trailing filler like "for me" / "per favore" carries no task content, but once a
+// follow-up answer is folded onto the accumulated request it would survive into the
+// parsed prompt (e.g. "for me check the build"). Strip it so multi-turn setup keeps a
+// clean task. Conservative on purpose: only first/second-person filler, never nouns.
+function stripTrailingAutomationFiller(message: string): string {
+  return message
+    .replace(/[?？]+\s*$/u, "")
+    .replace(/\s+(?:for\s+(?:me|us|myself)|per\s+(?:me|noi)|please|per favore)\s*$/iu, "")
+    .trim();
 }
 
 // Builds the follow-up question shown when an automation request is missing required
@@ -194,6 +209,7 @@ export async function resolveComposerAutomationRequest(input: {
   if (!automationResolution) {
     return {
       type: "needs-clarification",
+      automationMessage: stripTrailingAutomationFiller(automationMessage),
       missingFields: generatedAutomationIntent?.missingFields ?? [],
       reason: generatedAutomationIntent?.reason ?? null,
     };

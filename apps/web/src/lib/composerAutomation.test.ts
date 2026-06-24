@@ -431,6 +431,9 @@ describe("composerAutomation", () => {
     expect(generateIntent).toHaveBeenCalledTimes(1);
     expect(decision).toMatchObject({
       type: "needs-clarification",
+      // The accumulated request is the cleaned invocation (politeness, "?", and "for me"
+      // filler stripped), so folding the next reply never re-parses scaffolding as the task.
+      automationMessage: "create an automation",
       missingFields: ["taskPrompt", "schedule"],
       reason: "Tell me what to automate.",
     });
@@ -479,6 +482,29 @@ describe("composerAutomation", () => {
           schedule: { type: "interval", everySeconds: 21_600 },
         },
       },
+    });
+  });
+
+  it("does not leak creation scaffolding into the task prompt across turns", async () => {
+    const offline = vi.fn(async () => {
+      throw new Error("deterministic parse should cover the combined request");
+    });
+    // Mirrors ChatView folding the cleaned, filler-stripped automationMessage
+    // ("create an automation") with the user's follow-up answer.
+    const decision = await resolveComposerAutomationRequest({
+      message: "create an automation\ncheck the build every 6 hours",
+      cwd: "/tmp/project",
+      nowIso: NOW_ISO,
+      generateIntent: offline,
+    });
+    expect(decision.type).toBe("automation");
+    if (decision.type !== "automation") {
+      throw new Error("Expected automation decision");
+    }
+    expect(decision.resolution.intent.prompt).toBe("check the build");
+    expect(decision.resolution.intent.schedule).toMatchObject({
+      type: "interval",
+      everySeconds: 21_600,
     });
   });
 

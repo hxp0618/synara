@@ -849,6 +849,20 @@ function composerPromptStillMatchesRestoredQueuedDraft(
   return probe.length >= 16 && next.includes(probe);
 }
 
+// Builds an ephemeral transcript bubble for the conversational automation-setup
+// exchange. These never reach a provider and are not persisted; they render the
+// back-and-forth (user request, Synara's clarifying questions) inline like Codex.
+function makeAutomationSetupBubble(role: "user" | "assistant", text: string): ChatMessage {
+  return {
+    id: newMessageId(),
+    role,
+    text,
+    createdAt: new Date().toISOString(),
+    streaming: false,
+    source: "native",
+  };
+}
+
 export default function ChatView({
   threadId,
   paneScopeId = "single",
@@ -1424,10 +1438,12 @@ export default function ChatView({
   const automationDraftSubmittingRef = useRef(false);
   // While set, Synara is mid-conversation gathering an automation's missing details.
   // `accumulatedMessage` carries everything said so far so the next reply re-resolves
-  // against the full request rather than the answer alone.
+  // against the full request (not the bare answer); `bubbles` is the ephemeral
+  // in-thread exchange rendered in the transcript until the automation resolves or
+  // the user cancels.
   const [pendingAutomationConversation, setPendingAutomationConversation] = useState<{
     accumulatedMessage: string;
-    question: string;
+    bubbles: ChatMessage[];
   } | null>(null);
   // A composer-local automation setup belongs to the thread it began in; drop it when
   // the active thread changes so the prompt never leaks onto another conversation.
@@ -2538,20 +2554,21 @@ export default function ChatView({
             return changed ? { ...message, attachments } : message;
           });
 
-    if (optimisticUserMessages.length === 0) {
-      return serverMessagesWithPreviewHandoff;
-    }
+    // Ephemeral automation-setup bubbles render after everything else, at the tail.
+    const setupBubbles = pendingAutomationConversation?.bubbles ?? [];
     const serverIds = new Set(serverMessagesWithPreviewHandoff.map((message) => message.id));
     const pendingMessages = optimisticUserMessages.filter((message) => !serverIds.has(message.id));
-    if (pendingMessages.length === 0) {
-      return serverMessagesWithPreviewHandoff;
-    }
-    return [...serverMessagesWithPreviewHandoff, ...pendingMessages];
+    const withPending =
+      pendingMessages.length === 0
+        ? serverMessagesWithPreviewHandoff
+        : [...serverMessagesWithPreviewHandoff, ...pendingMessages];
+    return setupBubbles.length === 0 ? withPending : [...withPending, ...setupBubbles];
   }, [
     activeThread?.sidechatSourceThreadId,
     serverMessages,
     attachmentPreviewHandoffByMessageId,
     optimisticUserMessages,
+    pendingAutomationConversation?.bubbles,
   ]);
   const timelineEntries = useMemo(
     () =>
@@ -5877,12 +5894,17 @@ export default function ChatView({
   );
 
   const cancelAutomationConversation = useCallback(() => {
-    // Abandon the in-progress setup and put everything the user typed back into the
-    // composer, so a false-positive detection never costs them their message.
+    // Abandon setup and put everything back into the composer: the accumulated request
+    // plus any reply the user had started typing but not yet sent, so cancelling never
+    // costs them their words.
     if (pendingAutomationConversation && activeThread) {
-      promptRef.current = pendingAutomationConversation.accumulatedMessage;
+      const draft = promptRef.current.trim();
+      const restored = draft
+        ? `${pendingAutomationConversation.accumulatedMessage}\n${draft}`
+        : pendingAutomationConversation.accumulatedMessage;
+      promptRef.current = restored;
       clearComposerDraftContent(activeThread.id);
-      setComposerDraftPrompt(activeThread.id, pendingAutomationConversation.accumulatedMessage);
+      setComposerDraftPrompt(activeThread.id, restored);
     }
     setPendingAutomationConversation(null);
   }, [
@@ -6562,10 +6584,12 @@ export default function ChatView({
     }
     if (!activeProject) return false;
     if (queuedChatTurn === null && !isLivePlanFollowUpSubmission) {
-      // While gathering missing details, fold the reply into everything said so far so
-      // the request re-resolves as a whole instead of parsing the bare answer.
-      const messageForAutomation = pendingAutomationConversation
-        ? `${pendingAutomationConversation.accumulatedMessage}\n${trimmedPromptForSend}`
+      const conversation = pendingAutomationConversation;
+      // While gathering missing details, fold the reply into the cleaned request so it
+      // re-resolves as a whole rather than parsing the bare answer (and never re-parses
+      // "could you create an automation" scaffolding as the task).
+      const messageForAutomation = conversation
+        ? `${conversation.accumulatedMessage}\n${trimmedPromptForSend}`
         : trimmedPromptForSend;
       const automationRequest = await resolveComposerAutomationRequest({
         message: messageForAutomation,
@@ -6574,13 +6598,31 @@ export default function ChatView({
       });
       if (automationRequest.type !== "normal-chat") {
         if (automationRequest.type === "needs-clarification") {
-          // Keep the message out of the thread and ask for what's missing. The user
-          // answers in the now-empty composer; the banner holds the question and the
-          // raw text so Cancel can restore everything they typed.
+          // Conversational setup only runs for prompt-only sends: clearing the composer
+          // would otherwise drop attachments/mentions that Cancel cannot restore.
+          if (!hasPromptOnlySendableContent) {
+            toastManager.add({
+              type: "warning",
+              title: "Automation needs a bit more detail",
+              description:
+                automationRequest.reason ??
+                'Add what it should do and how often, e.g. "every weekday at 9am, summarize my PRs".',
+            });
+            return true;
+          }
+          // Render the exchange in-thread: echo the user's words as a bubble and ask for
+          // what's missing as an assistant bubble. Nothing reaches a provider; the cleaned
+          // automationMessage accumulates for the next re-resolve and for Cancel's restore.
+          const question = automationClarificationPrompt(automationRequest.missingFields);
+          const priorBubbles = conversation?.bubbles ?? [];
           clearComposerInput(activeThread.id);
           setPendingAutomationConversation({
-            accumulatedMessage: messageForAutomation,
-            question: automationClarificationPrompt(automationRequest.missingFields),
+            accumulatedMessage: automationRequest.automationMessage,
+            bubbles: [
+              ...priorBubbles,
+              makeAutomationSetupBubble("user", trimmedPromptForSend),
+              makeAutomationSetupBubble("assistant", question),
+            ],
           });
           return true;
         }
@@ -6600,7 +6642,13 @@ export default function ChatView({
           targetThreadId: automationTargetThreadId,
           hasEphemeralContext: !hasPromptOnlySendableContent,
         });
-        if (automationDraft.needsDraftReview) {
+        // A multi-turn setup always confirms before creating, so the user reviews the
+        // parsed task/schedule (and any scaffolding the parser kept) rather than it
+        // silently auto-creating a recurring job.
+        if (automationDraft.needsDraftReview || conversation !== null) {
+          if (conversation !== null) {
+            clearComposerInput(activeThread.id);
+          }
           setAutomationEditingDefinition(null);
           setAutomationDraftWarningContext(automationDraft.warningContext);
           setAutomationDraftForm(automationDraft.form);
@@ -6624,7 +6672,7 @@ export default function ChatView({
         });
         return true;
       }
-      if (pendingAutomationConversation) {
+      if (conversation) {
         // The combined text no longer reads as an automation; abandon setup and let
         // this message send as a normal chat turn instead of looping on the question.
         setPendingAutomationConversation(null);
@@ -9285,11 +9333,7 @@ export default function ChatView({
                   }
                   automationSetup={
                     pendingAutomationConversation
-                      ? {
-                          question: pendingAutomationConversation.question,
-                          request: pendingAutomationConversation.accumulatedMessage,
-                          onCancel: cancelAutomationConversation,
-                        }
+                      ? { onCancel: cancelAutomationConversation }
                       : null
                   }
                 />

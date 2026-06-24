@@ -32,8 +32,9 @@ interface ComposerInputBannersProps {
   onCancelUserInput: PendingUserInputPanelProps["onCancel"];
   // `id` keys the banner so it remounts when the proposed plan changes.
   planFollowUp: { id: string; title: string | null } | null;
-  // Conversational follow-up while gathering an automation's task/schedule.
-  automationSetup: { question: string; request: string | null; onCancel: () => void } | null;
+  // Setup-mode control while gathering an automation's task/schedule (the exchange
+  // itself renders as bubbles in the transcript).
+  automationSetup: { onCancel: () => void } | null;
 }
 
 export const ComposerInputBanners = memo(function ComposerInputBanners({
@@ -70,13 +71,7 @@ export const ComposerInputBanners = memo(function ComposerInputBanners({
   } else if (planFollowUp) {
     content = <ComposerPlanFollowUpBanner key={planFollowUp.id} planTitle={planFollowUp.title} />;
   } else if (automationSetup) {
-    content = (
-      <ComposerAutomationSetupBanner
-        question={automationSetup.question}
-        request={automationSetup.request}
-        onCancel={automationSetup.onCancel}
-      />
-    );
+    content = <ComposerAutomationSetupBanner onCancel={automationSetup.onCancel} />;
   }
 
   if (!content) {
