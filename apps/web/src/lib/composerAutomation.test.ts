@@ -603,6 +603,22 @@ describe("composerAutomation", () => {
       everySeconds: 3600,
     });
 
+    const metricsSubject = await resolveComposerAutomationRequest({
+      message: "create an automation for metrics every hour",
+      cwd: "/tmp/project",
+      nowIso: NOW_ISO,
+      generateIntent: offline,
+    });
+    expect(metricsSubject.type).toBe("automation");
+    if (metricsSubject.type !== "automation") {
+      throw new Error("Expected automation decision");
+    }
+    expect(metricsSubject.resolution.intent.prompt).toBe("metrics");
+    expect(metricsSubject.resolution.intent.schedule).toMatchObject({
+      type: "interval",
+      everySeconds: 3600,
+    });
+
     const punctuatedFiller = await resolveComposerAutomationRequest({
       message: "create an automation for me!",
       cwd: "/tmp/project",
@@ -788,6 +804,22 @@ describe("composerAutomation", () => {
         intent: {
           prompt: "check the build",
           schedule: { type: "interval", everySeconds: 21_600 },
+        },
+      },
+    });
+
+    const dailyWithTaskOrdinal = await resolveComposerAutomationRequest({
+      message: "/automation every day check every second item in the queue",
+      cwd: "/tmp/project",
+      nowIso: NOW_ISO,
+      generateIntent: offline,
+    });
+    expect(dailyWithTaskOrdinal).toMatchObject({
+      type: "automation",
+      resolution: {
+        intent: {
+          prompt: "check every second item in the queue",
+          schedule: { type: "daily", timeOfDay: "09:00" },
         },
       },
     });

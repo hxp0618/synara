@@ -452,8 +452,10 @@ function parseIntervalSchedule(searchText: string): ParsedSchedule | null {
     searchText.match(new RegExp(`\\bogni\\s+${INTERVAL_PATTERN}\\b`));
   const bareMatch =
     match == null
-      ? (searchText.match(new RegExp(`\\b(?:every|each)\\s+(${BARE_INTERVAL_UNIT_PATTERN})\\b`)) ??
-        searchText.match(new RegExp(`\\bogni\\s+(${BARE_INTERVAL_UNIT_PATTERN})\\b`)))
+      ? (searchText.match(new RegExp(`^(?:every|each)\\s+(${BARE_INTERVAL_UNIT_PATTERN})\\b`)) ??
+        searchText.match(new RegExp(`\\b(?:every|each)\\s+(${BARE_INTERVAL_UNIT_PATTERN})$`)) ??
+        searchText.match(new RegExp(`^ogni\\s+(${BARE_INTERVAL_UNIT_PATTERN})\\b`)) ??
+        searchText.match(new RegExp(`\\bogni\\s+(${BARE_INTERVAL_UNIT_PATTERN})$`)))
       : null;
   if (!match && !bareMatch) {
     return null;
@@ -662,7 +664,7 @@ function stripAutomationScaffold(value: string): string {
   let cleaned = normalizeInlineText(value);
   cleaned = cleaned
     .replace(
-      /^(?:please\s+)?(?:make|create|set up|setup|add|start|build)\s+(?:an?\s+)?automation\s*(?:for\s+(?:me|myself)\s*)?(?:where|that|to|which)?\s*/i,
+      /^(?:please\s+)?(?:make|create|set up|setup|add|start|build)\s+(?:an?\s+)?automation\s*(?:for\s+(?:me|myself)\b\s*)?(?:where|that|to|which)?\s*/i,
       "",
     )
     .replace(
@@ -670,7 +672,7 @@ function stripAutomationScaffold(value: string): string {
       "",
     )
     .replace(
-      /^(?:please\s+)?schedule\s+(?:an?\s+)?(?:automation|task|job|check|monitor|reminder)\s*(?:for\s+(?:me|myself)\s*)?(?:to|that)?\s*/i,
+      /^(?:please\s+)?schedule\s+(?:an?\s+)?(?:automation|task|job|check|monitor|reminder)\s*(?:for\s+(?:me|myself)\b\s*)?(?:to|that)?\s*/i,
       "",
     )
     .replace(/^(?:please\s+)?automate\s+(?:this|that|it)?\s*/i, "")
@@ -693,14 +695,16 @@ function stripAutomationScaffold(value: string): string {
     )
     .replace(new RegExp(`\\bevery\\s+${INTERVAL_PATTERN}\\b\\s*(?:and|to|then|,)?\\s*`, "i"), "")
     .replace(
-      new RegExp(`\\bevery\\s+${BARE_INTERVAL_UNIT_PATTERN}\\b\\s*(?:and|to|then|,)?\\s*`, "i"),
+      new RegExp(`^every\\s+${BARE_INTERVAL_UNIT_PATTERN}\\b\\s*(?:and|to|then|,)?\\s*`, "i"),
       "",
     )
+    .replace(new RegExp(`\\bevery\\s+${BARE_INTERVAL_UNIT_PATTERN}$`, "i"), "")
     .replace(new RegExp(`\\bogni\\s+${INTERVAL_PATTERN}\\b\\s*(?:e|poi|per|,)?\\s*`, "i"), "")
     .replace(
-      new RegExp(`\\bogni\\s+${BARE_INTERVAL_UNIT_PATTERN}\\b\\s*(?:e|poi|per|,)?\\s*`, "i"),
+      new RegExp(`^ogni\\s+${BARE_INTERVAL_UNIT_PATTERN}\\b\\s*(?:e|poi|per|,)?\\s*`, "i"),
       "",
     )
+    .replace(new RegExp(`\\bogni\\s+${BARE_INTERVAL_UNIT_PATTERN}$`, "i"), "")
     .replace(new RegExp(`\\bin\\s+${INTERVAL_PATTERN}\\b\\s*(?:and|to|then|,)?\\s*`, "i"), "")
     .replace(
       new RegExp(`\\b(?:tra|fra)\\s+${INTERVAL_PATTERN}\\b\\s*(?:e|poi|per|,)?\\s*`, "i"),
