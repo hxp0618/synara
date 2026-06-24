@@ -259,6 +259,12 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
       runtimeIdleTimers.set(threadId, timer);
     };
 
+    const restoreRuntimeIdleTimerOnError = <A, E, R>(
+      threadId: ThreadId,
+      effect: Effect.Effect<A, E, R>,
+    ): Effect.Effect<A, E, R> =>
+      effect.pipe(Effect.tapError(() => Effect.sync(() => scheduleRuntimeIdleStop(threadId))));
+
     const reconcileRuntimeIdleTimer = (event: ProviderRuntimeEvent) => {
       switch (event.type) {
         case "turn.started":
@@ -741,12 +747,18 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
           );
         }
         clearRuntimeIdleTimer(input.threadId);
-        const routed = yield* resolveRoutableSession({
-          threadId: input.threadId,
-          operation: "ProviderService.sendTurn",
-          allowRecovery: true,
-        });
-        const turn = yield* routed.adapter.sendTurn(input);
+        const routed = yield* restoreRuntimeIdleTimerOnError(
+          input.threadId,
+          resolveRoutableSession({
+            threadId: input.threadId,
+            operation: "ProviderService.sendTurn",
+            allowRecovery: true,
+          }),
+        );
+        const turn = yield* restoreRuntimeIdleTimerOnError(
+          input.threadId,
+          routed.adapter.sendTurn(input),
+        );
         yield* directory.upsert({
           threadId: input.threadId,
           provider: routed.adapter.provider,
@@ -788,21 +800,28 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
           );
         }
         clearRuntimeIdleTimer(input.threadId);
-        const routed = yield* resolveRoutableSession({
-          threadId: input.threadId,
-          operation: "ProviderService.steerTurn",
-          allowRecovery: true,
-        });
+        const routed = yield* restoreRuntimeIdleTimerOnError(
+          input.threadId,
+          resolveRoutableSession({
+            threadId: input.threadId,
+            operation: "ProviderService.steerTurn",
+            allowRecovery: true,
+          }),
+        );
         if (
           !routed.adapter.steerTurn ||
           routed.adapter.capabilities.supportsTurnSteering !== true
         ) {
+          scheduleRuntimeIdleStop(input.threadId);
           return yield* toValidationError(
             "ProviderService.steerTurn",
             `Provider '${routed.adapter.provider}' does not support steering an active turn.`,
           );
         }
-        const turn = yield* routed.adapter.steerTurn(input);
+        const turn = yield* restoreRuntimeIdleTimerOnError(
+          input.threadId,
+          routed.adapter.steerTurn(input),
+        );
         yield* directory.upsert({
           threadId: input.threadId,
           provider: routed.adapter.provider,
@@ -834,19 +853,26 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
         });
 
         clearRuntimeIdleTimer(input.threadId);
-        const routed = yield* resolveRoutableSession({
-          threadId: input.threadId,
-          operation: "ProviderService.startReview",
-          allowRecovery: true,
-        });
+        const routed = yield* restoreRuntimeIdleTimerOnError(
+          input.threadId,
+          resolveRoutableSession({
+            threadId: input.threadId,
+            operation: "ProviderService.startReview",
+            allowRecovery: true,
+          }),
+        );
         if (!routed.adapter.startReview) {
+          scheduleRuntimeIdleStop(input.threadId);
           return yield* toValidationError(
             "ProviderService.startReview",
             `Provider '${routed.adapter.provider}' does not support native review.`,
           );
         }
 
-        const turn = yield* routed.adapter.startReview(input);
+        const turn = yield* restoreRuntimeIdleTimerOnError(
+          input.threadId,
+          routed.adapter.startReview(input),
+        );
         yield* directory.upsert({
           threadId: input.threadId,
           provider: routed.adapter.provider,
