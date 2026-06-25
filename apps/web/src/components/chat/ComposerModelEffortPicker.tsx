@@ -19,6 +19,7 @@ import { IoFlash } from "react-icons/io5";
 import { ChevronDownIcon } from "~/lib/icons";
 import { cn } from "~/lib/utils";
 import { useComposerDraftStore } from "../../composerDraftStore";
+import type { ResolvedCodexAccount } from "../../appSettings";
 import { buildNextProviderOptions, type ProviderModelOption } from "../../providerModelOptions";
 import { Button } from "../ui/button";
 import {
@@ -61,12 +62,15 @@ type ComposerModelEffortPickerProps = {
   loadingModelProviders?: Partial<Record<ProviderKind, boolean>>;
   hiddenProviders?: ReadonlyArray<ProviderKind>;
   providerOrder?: ReadonlyArray<ProviderKind>;
+  codexAccounts?: ReadonlyArray<ResolvedCodexAccount>;
+  selectedCodexAccountId?: string;
   compact?: boolean;
   // Narrow-composer degradation: drop the model name (provider icon stays)
   // and/or the effort/status label; both remain available to assistive tech.
   hideModelLabel?: boolean;
   hideStatusLabel?: boolean;
   disabled?: boolean;
+  onCodexAccountChange?: (accountId: string) => void;
   onProviderModelChange: (provider: ProviderKind, model: ModelSlug) => void;
   onSelectionCommitted?: () => void;
 
@@ -311,7 +315,14 @@ export const ComposerModelEffortPicker = memo(function ComposerModelEffortPicker
                 : {})}
               {...(props.hiddenProviders ? { hiddenProviders: props.hiddenProviders } : {})}
               {...(props.providerOrder ? { providerOrder: props.providerOrder } : {})}
+              {...(props.codexAccounts ? { codexAccounts: props.codexAccounts } : {})}
+              {...(props.selectedCodexAccountId
+                ? { selectedCodexAccountId: props.selectedCodexAccountId }
+                : {})}
               {...(props.disabled !== undefined ? { disabled: props.disabled } : {})}
+              {...(props.onCodexAccountChange
+                ? { onCodexAccountChange: props.onCodexAccountChange }
+                : {})}
               onProviderModelChange={props.onProviderModelChange}
               onAfterSelection={handleAfterModelSelection}
             />

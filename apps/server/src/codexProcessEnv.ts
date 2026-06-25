@@ -26,6 +26,7 @@ import {
 
 import {
   resolveBaseCodexHomePath,
+  resolveCodexHomeOverlayAccountSegment,
   resolveDpCodeCodexHomeOverlayPath,
   shouldDisableDpCodeBrowserPlugin,
 } from "./codexHomePaths.ts";
@@ -34,6 +35,7 @@ const CODEX_PROCESS_SHELL_ENV_NAMES = ["PATH", "SSH_AUTH_SOCK"] as const;
 const NODE_REPL_SANDBOX_ALLOWED_UNIX_SOCKETS = "NODE_REPL_SANDBOX_ALLOWED_UNIX_SOCKETS";
 const DPCODE_BROWSER_PLUGIN_CONFIG_HEADER = '[plugins."dpcode-browser@local"]';
 const CODEX_OVERLAY_SHARED_STATE_FILES = new Set(["auth.json"]);
+const CODEX_ACCOUNT_PRIVATE_STATE_FILES = new Set(["auth.json", "models_cache.json"]);
 
 export function resolveCodexBrowserUsePipePath(
   input: {
@@ -104,6 +106,7 @@ function ensureCodexOverlaySymlink(input: {
   readonly sourcePath: string;
   readonly targetPath: string;
   readonly type: "dir" | "file";
+  readonly force?: boolean;
 }): void {
   let targetStat: ReturnType<typeof lstatSync> | undefined;
   try {
@@ -118,6 +121,7 @@ function ensureCodexOverlaySymlink(input: {
     }
 
     if (
+      input.force ||
       targetStat.isSymbolicLink() ||
       /^.+\.sqlite(?:-(?:wal|shm|journal))?$/.test(input.entryName) ||
       CODEX_OVERLAY_SHARED_STATE_FILES.has(input.entryName)
@@ -136,9 +140,25 @@ function ensureCodexOverlaySymlink(input: {
 function prepareDpCodeCodexHomeOverlay(input: {
   readonly env: NodeJS.ProcessEnv;
   readonly homePath?: string;
+  readonly shadowHomePath?: string;
+  readonly accountId?: string;
 }): string | undefined {
   const sourceHomePath = resolveBaseCodexHomePath(input.env, input.homePath);
-  const overlayHomePath = resolveDpCodeCodexHomeOverlayPath(input.env, sourceHomePath);
+  const shadowHomePath = input.shadowHomePath
+    ? resolveBaseCodexHomePath(input.env, input.shadowHomePath)
+    : undefined;
+  if (shadowHomePath && path.resolve(sourceHomePath) === path.resolve(shadowHomePath)) {
+    throw new Error("Codex account shadow home must be different from CODEX_HOME.");
+  }
+  const overlayHomePath = resolveDpCodeCodexHomeOverlayPath(
+    input.env,
+    sourceHomePath,
+    resolveCodexHomeOverlayAccountSegment({
+      homePath: sourceHomePath,
+      ...(input.accountId ? { accountId: input.accountId } : {}),
+      ...(shadowHomePath ? { shadowHomePath } : {}),
+    }),
+  );
   if (path.resolve(sourceHomePath) === path.resolve(overlayHomePath)) {
     return undefined;
   }
@@ -148,6 +168,9 @@ function prepareDpCodeCodexHomeOverlay(input: {
   try {
     for (const entry of readdirSync(sourceHomePath)) {
       if (entry === "config.toml") {
+        continue;
+      }
+      if (shadowHomePath && CODEX_ACCOUNT_PRIVATE_STATE_FILES.has(entry)) {
         continue;
       }
       const sourcePath = path.join(sourceHomePath, entry);
@@ -165,6 +188,29 @@ function prepareDpCodeCodexHomeOverlay(input: {
     // overlay config and create any required state lazily.
   }
 
+  if (shadowHomePath) {
+    try {
+      for (const entry of CODEX_ACCOUNT_PRIVATE_STATE_FILES) {
+        const sourcePath = path.join(shadowHomePath, entry);
+        if (!existsSync(sourcePath)) {
+          continue;
+        }
+        const targetPath = path.join(overlayHomePath, entry);
+        const stat = lstatSync(sourcePath);
+        ensureCodexOverlaySymlink({
+          entryName: entry,
+          sourcePath,
+          targetPath,
+          type: stat.isDirectory() ? "dir" : "file",
+          force: true,
+        });
+      }
+    } catch {
+      // Missing shadow homes should not prevent Codex from creating account
+      // state lazily, but existing private files must never be read or logged.
+    }
+  }
+
   const sourceConfigPath = path.join(sourceHomePath, "config.toml");
   const sourceConfig = existsSync(sourceConfigPath) ? readFileSync(sourceConfigPath, "utf8") : "";
   writeFileSync(
@@ -180,6 +226,8 @@ export function buildCodexProcessEnv(
   input: {
     readonly env?: NodeJS.ProcessEnv;
     readonly homePath?: string;
+    readonly shadowHomePath?: string;
+    readonly accountId?: string;
     readonly platform?: NodeJS.Platform;
     readonly readEnvironment?: ShellEnvironmentReader;
   } = {},
@@ -189,11 +237,18 @@ export function buildCodexProcessEnv(
     ? prepareDpCodeCodexHomeOverlay({
         env: baseEnv,
         ...(input.homePath ? { homePath: input.homePath } : {}),
+        ...(input.shadowHomePath ? { shadowHomePath: input.shadowHomePath } : {}),
+        ...(input.accountId ? { accountId: input.accountId } : {}),
       })
     : undefined;
+  const directAccountHomePath = input.shadowHomePath
+    ? resolveBaseCodexHomePath(baseEnv, input.shadowHomePath)
+    : input.homePath
+      ? resolveBaseCodexHomePath(baseEnv, input.homePath)
+      : undefined;
   const effectiveEnv =
-    overlayHomePath || input.homePath
-      ? { ...baseEnv, CODEX_HOME: overlayHomePath ?? input.homePath }
+    overlayHomePath || directAccountHomePath
+      ? { ...baseEnv, CODEX_HOME: overlayHomePath ?? directAccountHomePath }
       : baseEnv;
   const platform = input.platform ?? process.platform;
 

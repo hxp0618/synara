@@ -2501,6 +2501,95 @@ describe("ProviderCommandReactor", () => {
     expect(thread?.session?.runtimeMode).toBe("full-access");
   });
 
+  it("restarts Codex sessions when the selected account options change", async () => {
+    const harness = await createHarness();
+    const now = new Date().toISOString();
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.makeUnsafe("cmd-turn-start-codex-account-1"),
+        threadId: ThreadId.makeUnsafe("thread-1"),
+        message: {
+          messageId: asMessageId("user-message-codex-account-1"),
+          role: "user",
+          text: "first account",
+          attachments: [],
+        },
+        providerOptions: {
+          codex: {
+            accountId: "personal",
+            homePath: "/tmp/shared-codex-home",
+            shadowHomePath: "/tmp/personal-codex-home",
+          },
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      }),
+    );
+
+    await waitFor(() => harness.startSession.mock.calls.length === 1);
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.makeUnsafe("cmd-turn-start-codex-account-2"),
+        threadId: ThreadId.makeUnsafe("thread-1"),
+        message: {
+          messageId: asMessageId("user-message-codex-account-2"),
+          role: "user",
+          text: "second account",
+          attachments: [],
+        },
+        providerOptions: {
+          codex: {
+            accountId: "work",
+            homePath: "/tmp/shared-codex-home",
+            shadowHomePath: "/tmp/work-codex-home",
+          },
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      }),
+    );
+
+    await waitFor(() => harness.startSession.mock.calls.length === 2);
+    expect(harness.startSession.mock.calls[1]?.[1]).toMatchObject({
+      resumeCursor: { opaque: "resume-1" },
+      providerOptions: {
+        codex: {
+          accountId: "work",
+          homePath: "/tmp/shared-codex-home",
+          shadowHomePath: "/tmp/work-codex-home",
+        },
+      },
+    });
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.makeUnsafe("cmd-turn-start-codex-account-default"),
+        threadId: ThreadId.makeUnsafe("thread-1"),
+        message: {
+          messageId: asMessageId("user-message-codex-account-default"),
+          role: "user",
+          text: "default account",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      }),
+    );
+
+    await waitFor(() => harness.startSession.mock.calls.length === 3);
+    expect(harness.startSession.mock.calls[2]?.[1]).not.toHaveProperty("resumeCursor");
+    expect(harness.startSession.mock.calls[2]?.[1]).not.toHaveProperty("providerOptions");
+  });
+
   it("does not inject derived model options when restarting claude on runtime mode changes", async () => {
     const harness = await createHarness({
       threadModelSelection: { provider: "claudeAgent", model: "claude-opus-4-6" },

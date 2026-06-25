@@ -12,7 +12,12 @@ import type {
 import { useQuery } from "@tanstack/react-query";
 import { useMemo } from "react";
 
-import { getAppModelOptions, getCustomModelsByProvider, useAppSettings } from "../appSettings";
+import {
+  getAppModelOptions,
+  getCodexProviderDiscoveryOptions,
+  getCustomModelsByProvider,
+  useAppSettings,
+} from "../appSettings";
 import { resolveRuntimeModelDescriptor } from "../components/chat/runtimeModelCapabilities";
 import { mergeCursorModelVariantsWithBaseControls } from "../cursorModelVariants";
 import { useFeatureFlags } from "../featureFlags";
@@ -63,11 +68,20 @@ export function useProviderModelCatalog(input: {
   const featureFlags = useFeatureFlags();
   const showExpandedCursorModelVariants = featureFlags["show-expanded-cursor-model-variants"];
   const customModelsByProvider = useMemo(() => getCustomModelsByProvider(settings), [settings]);
+  const codexDiscoveryOptions = useMemo(
+    () => getCodexProviderDiscoveryOptions(settings),
+    [settings],
+  );
 
   const claudeDynamicModelsQuery = useQuery(
     providerModelsQueryOptions({ provider: "claudeAgent" }),
   );
-  const codexDynamicModelsQuery = useQuery(providerModelsQueryOptions({ provider: "codex" }));
+  const codexDynamicModelsQuery = useQuery(
+    providerModelsQueryOptions({
+      provider: "codex",
+      ...codexDiscoveryOptions,
+    }),
+  );
   const cursorDynamicModelsQuery = useQuery(
     providerModelsQueryOptions({
       provider: "cursor",

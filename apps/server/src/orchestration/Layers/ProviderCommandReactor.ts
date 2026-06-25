@@ -94,6 +94,56 @@ function toNonEmptyProviderInput(value: string | undefined): string | undefined 
   return normalized && normalized.length > 0 ? normalized : undefined;
 }
 
+function normalizeCodexProviderOptionsForComparison(
+  providerOptions: ProviderStartOptions | undefined,
+): NonNullable<ProviderStartOptions["codex"]> | undefined {
+  const codex = providerOptions?.codex;
+  if (!codex) {
+    return undefined;
+  }
+  const binaryPath = toNonEmptyProviderInput(codex.binaryPath);
+  const homePath = toNonEmptyProviderInput(codex.homePath);
+  const shadowHomePath = toNonEmptyProviderInput(codex.shadowHomePath);
+  const accountId = toNonEmptyProviderInput(codex.accountId);
+  const normalized = {
+    ...(binaryPath ? { binaryPath } : {}),
+    ...(homePath ? { homePath } : {}),
+    ...(shadowHomePath ? { shadowHomePath } : {}),
+    ...(accountId ? { accountId } : {}),
+  } satisfies NonNullable<ProviderStartOptions["codex"]>;
+  return Object.keys(normalized).length > 0 ? normalized : undefined;
+}
+
+function shouldRestartCodexForProviderOptionsChange(input: {
+  readonly requestedProvider: ProviderKind;
+  readonly previousProviderOptions: ProviderStartOptions | undefined;
+  readonly requestedProviderOptions: ProviderStartOptions | undefined;
+}): boolean {
+  if (input.requestedProvider !== "codex") {
+    return false;
+  }
+  if (input.requestedProviderOptions === undefined) {
+    return normalizeCodexProviderOptionsForComparison(input.previousProviderOptions) !== undefined;
+  }
+  return !Equal.equals(
+    normalizeCodexProviderOptionsForComparison(input.previousProviderOptions),
+    normalizeCodexProviderOptionsForComparison(input.requestedProviderOptions),
+  );
+}
+
+function shouldDropCodexResumeCursorForProviderOptionsChange(input: {
+  readonly providerOptionsChanged: boolean;
+  readonly previousProviderOptions: ProviderStartOptions | undefined;
+  readonly requestedProviderOptions: ProviderStartOptions | undefined;
+}): boolean {
+  if (!input.providerOptionsChanged) {
+    return false;
+  }
+  const previous = normalizeCodexProviderOptionsForComparison(input.previousProviderOptions);
+  const requested = normalizeCodexProviderOptionsForComparison(input.requestedProviderOptions);
+  return (previous?.homePath ?? "") !== (requested?.homePath ?? "");
+}
+
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
@@ -738,18 +788,32 @@ const make = Effect.gen(function* () {
         (currentProvider === "claudeAgent" || currentProvider === "grok") &&
         requestedModelSelection !== undefined &&
         !Equal.equals(previousModelSelection, requestedModelSelection);
+      const previousProviderOptions = threadProviderOptions.get(threadId);
+      const providerOptionsChanged = shouldRestartCodexForProviderOptionsChange({
+        requestedProvider: desiredModelSelection.provider,
+        previousProviderOptions,
+        requestedProviderOptions: options?.providerOptions,
+      });
 
       if (
         !runtimeModeChanged &&
         !providerChanged &&
         !shouldRestartForModelChange &&
-        !shouldRestartForModelSelectionChange
+        !shouldRestartForModelSelectionChange &&
+        !providerOptionsChanged
       ) {
         return existingSessionThreadId;
       }
 
       const resumeCursor =
-        providerChanged || shouldRestartForModelChange || runtimeModeChanged
+        providerChanged ||
+        shouldRestartForModelChange ||
+        runtimeModeChanged ||
+        shouldDropCodexResumeCursorForProviderOptionsChange({
+          providerOptionsChanged,
+          previousProviderOptions,
+          requestedProviderOptions: options?.providerOptions,
+        })
           ? undefined
           : (activeSession?.resumeCursor ?? undefined);
       yield* Effect.logInfo("provider command reactor restarting provider session", {
@@ -764,6 +828,7 @@ const make = Effect.gen(function* () {
         modelChanged,
         shouldRestartForModelChange,
         shouldRestartForModelSelectionChange,
+        providerOptionsChanged,
         hasResumeCursor: resumeCursor !== undefined,
       });
       const restartedSession = yield* startProviderSession(

@@ -285,9 +285,12 @@ import {
 import { promoteThreadCreate } from "~/lib/threadCreatePromotion";
 import {
   getAppModelOptions,
+  getCodexAccountOptions,
+  getCodexProviderDiscoveryOptions,
   getCustomBinaryPathForProvider,
   getCustomModelsByProvider,
   getProviderStartOptions,
+  resolveSelectedCodexAccount,
   resolveAppModelSelection,
   resolveAssistantDeliveryMode,
   useAppSettings,
@@ -884,7 +887,7 @@ export default function ChatView({
   const syncServerShellSnapshot = useStore((store) => store.syncServerShellSnapshot);
   const setStoreThreadError = useStore((store) => store.setError);
   const setStoreThreadWorkspace = useStore((store) => store.setThreadWorkspace);
-  const { settings } = useAppSettings();
+  const { settings, updateSettings } = useAppSettings();
   const assistantDeliveryMode = resolveAssistantDeliveryMode(settings);
   const desktopTopBarTrafficLightGutterClassName = useDesktopTopBarTrafficLightGutterClassName();
   const desktopTopBarWindowControlsGutterClassName =
@@ -1734,10 +1737,21 @@ export default function ChatView({
     activeProjectCwd: activeProject?.cwd ?? null,
     serverCwd: serverConfigQuery.data?.cwd ?? null,
   });
+  const codexAccounts = useMemo(() => getCodexAccountOptions(settings), [settings]);
+  const selectedCodexAccount = useMemo(() => resolveSelectedCodexAccount(settings), [settings]);
+  const codexDiscoveryOptions = useMemo(
+    () => getCodexProviderDiscoveryOptions(settings),
+    [settings],
+  );
   const claudeDynamicModelsQuery = useQuery(
     providerModelsQueryOptions({ provider: "claudeAgent" }),
   );
-  const codexDynamicModelsQuery = useQuery(providerModelsQueryOptions({ provider: "codex" }));
+  const codexDynamicModelsQuery = useQuery(
+    providerModelsQueryOptions({
+      provider: "codex",
+      ...codexDiscoveryOptions,
+    }),
+  );
   const openCodeModelDiscoveryEnabled =
     selectedProvider === "opencode" || lockedProvider === "opencode" || isModelPickerOpen;
   const kiloModelDiscoveryEnabled =
@@ -3954,7 +3968,6 @@ export default function ChatView({
       removeThreadFromSplitViews,
       storeClearTerminalState,
       storeCloseTerminal,
-      syncServerShellSnapshot,
       settings.confirmTerminalTabClose,
       terminalState.entryPoint,
       terminalState.runningTerminalIds,
@@ -8098,6 +8111,13 @@ export default function ChatView({
       modelOptionsByProvider,
     ],
   );
+  const onCodexAccountSelect = useCallback(
+    (accountId: string) => {
+      updateSettings({ selectedCodexAccountId: accountId });
+      scheduleComposerFocus();
+    },
+    [scheduleComposerFocus, updateSettings],
+  );
   const setPromptFromTraits = useCallback(
     (nextPrompt: string) => {
       const currentPrompt = promptRef.current;
@@ -8226,6 +8246,9 @@ export default function ChatView({
         }}
         hiddenProviders={settings.hiddenProviders}
         providerOrder={settings.providerOrder}
+        codexAccounts={codexAccounts}
+        selectedCodexAccountId={selectedCodexAccount.id}
+        onCodexAccountChange={onCodexAccountSelect}
         onProviderModelChange={onProviderModelSelect}
         onSelectionCommitted={scheduleComposerFocus}
         open={isModelPickerOpen}
@@ -8267,6 +8290,9 @@ export default function ChatView({
       }}
       hiddenProviders={settings.hiddenProviders}
       providerOrder={settings.providerOrder}
+      codexAccounts={codexAccounts}
+      selectedCodexAccountId={selectedCodexAccount.id}
+      onCodexAccountChange={onCodexAccountSelect}
       threadId={threadId}
       runtimeModel={selectedRuntimeModel}
       runtimeModels={runtimeModelsByProvider[selectedProvider]}

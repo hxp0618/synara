@@ -4,6 +4,7 @@
 // Exports: Settings route component for `/settings`
 
 import {
+  DEFAULT_CODEX_ACCOUNT_ID,
   PROVIDER_DISPLAY_NAMES,
   type ProviderKind,
   type ServerProviderStatus,
@@ -41,8 +42,10 @@ import { restrictToVerticalAxis } from "@dnd-kit/modifiers";
 import { CSS } from "@dnd-kit/utilities";
 import {
   type AppSettings,
+  type CodexAccountSettings,
   DEFAULT_UI_DENSITY,
   type UiDensity,
+  getCodexAccountOptions,
   MAX_CHAT_FONT_SIZE_PX,
   MAX_TERMINAL_FONT_SIZE_PX,
   getCustomModelsForProvider,
@@ -51,6 +54,7 @@ import {
   MIN_CHAT_FONT_SIZE_PX,
   MIN_TERMINAL_FONT_SIZE_PX,
   MODEL_PROVIDER_SETTINGS,
+  normalizeCodexAccounts,
   normalizeChatFontSizePx,
   normalizeTerminalFontFamily,
   normalizeTerminalFontSizePx,
@@ -342,7 +346,7 @@ function SortableProviderVisibilityRow(props: {
       </div>
       <Switch
         checked={!props.isHidden}
-        onCheckedChange={(checked) => props.onHiddenChange(!Boolean(checked))}
+        onCheckedChange={(checked) => props.onHiddenChange(checked !== true)}
         aria-label={`Show ${props.option.title} in the provider picker`}
       />
     </div>
@@ -635,7 +639,6 @@ function SettingsRouteView() {
   const removeDeletedThreadFromClientState = useStore(
     (store) => store.removeDeletedThreadFromClientState,
   );
-  const syncServerShellSnapshot = useStore((store) => store.syncServerShellSnapshot);
   const syncServerReadModel = useStore((store) => store.syncServerReadModel);
   // Shell-level subscription on purpose: the full-thread selector invalidates on every
   // streaming message/activity tick, which would re-render this whole route while a
@@ -740,6 +743,8 @@ function SettingsRouteView() {
   const isProviderOrderDirty = !sameProviderOrder(settings.providerOrder, defaults.providerOrder);
   const codexBinaryPath = settings.codexBinaryPath;
   const codexHomePath = settings.codexHomePath;
+  const codexAccounts = settings.codexAccounts;
+  const codexAccountOptions = useMemo(() => getCodexAccountOptions(settings), [settings]);
   const claudeBinaryPath = settings.claudeBinaryPath;
   const cursorBinaryPath = settings.cursorBinaryPath;
   const cursorApiEndpoint = settings.cursorApiEndpoint;
@@ -917,6 +922,8 @@ function SettingsRouteView() {
     settings.kiloServerPassword !== defaults.kiloServerPassword ||
     settings.codexBinaryPath !== defaults.codexBinaryPath ||
     settings.codexHomePath !== defaults.codexHomePath ||
+    settings.selectedCodexAccountId !== defaults.selectedCodexAccountId ||
+    JSON.stringify(settings.codexAccounts) !== JSON.stringify(defaults.codexAccounts) ||
     settings.openCodeBinaryPath !== defaults.openCodeBinaryPath ||
     settings.openCodeExperimentalWebSockets !== defaults.openCodeExperimentalWebSockets ||
     settings.openCodeServerUrl !== defaults.openCodeServerUrl ||
@@ -1075,6 +1082,52 @@ function SettingsRouteView() {
       }));
     },
     [settings, updateSettings],
+  );
+
+  const addCodexAccount = useCallback(() => {
+    const existingIds = new Set(codexAccounts.map((account) => account.id));
+    let index = codexAccounts.length + 1;
+    let id = `account${index}`;
+    while (existingIds.has(id)) {
+      index += 1;
+      id = `account${index}`;
+    }
+    const nextAccount: CodexAccountSettings = {
+      id,
+      label: `Account ${index}`,
+      homePath: codexHomePath,
+      shadowHomePath: "",
+    };
+    updateSettings({
+      codexAccounts: [...codexAccounts, nextAccount],
+      selectedCodexAccountId: id,
+    });
+  }, [codexAccounts, codexHomePath, updateSettings]);
+
+  const updateCodexAccount = useCallback(
+    (accountId: string, patch: Partial<Omit<CodexAccountSettings, "id">>) => {
+      updateSettings({
+        codexAccounts: normalizeCodexAccounts(
+          codexAccounts.map((account) =>
+            account.id === accountId ? { ...account, ...patch } : account,
+          ),
+        ),
+      });
+    },
+    [codexAccounts, updateSettings],
+  );
+
+  const removeCodexAccount = useCallback(
+    (accountId: string) => {
+      const nextAccounts = codexAccounts.filter((account) => account.id !== accountId);
+      updateSettings({
+        codexAccounts: nextAccounts,
+        ...(settings.selectedCodexAccountId === accountId
+          ? { selectedCodexAccountId: DEFAULT_CODEX_ACCOUNT_ID }
+          : {}),
+      });
+    },
+    [codexAccounts, settings.selectedCodexAccountId, updateSettings],
   );
 
   const handleProviderOrderDragEnd = useCallback(
@@ -2691,6 +2744,8 @@ function SettingsRouteView() {
                     claudeBinaryPath: defaults.claudeBinaryPath,
                     codexBinaryPath: defaults.codexBinaryPath,
                     codexHomePath: defaults.codexHomePath,
+                    codexAccounts: defaults.codexAccounts,
+                    selectedCodexAccountId: defaults.selectedCodexAccountId,
                     cursorBinaryPath: defaults.cursorBinaryPath,
                     cursorApiEndpoint: defaults.cursorApiEndpoint,
                     geminiBinaryPath: defaults.geminiBinaryPath,
@@ -2963,6 +3018,142 @@ function SettingsRouteView() {
                                   </span>
                                 ) : null}
                               </label>
+                            ) : null}
+
+                            {providerSettings.provider === "codex" ? (
+                              <div className="space-y-3">
+                                <div className="flex flex-wrap items-center justify-between gap-2">
+                                  <div className="min-w-0">
+                                    <span className="block text-xs font-medium text-foreground">
+                                      Codex account
+                                    </span>
+                                    <span className="mt-1 block text-xs text-muted-foreground">
+                                      Select the account used for new Codex turns.
+                                    </span>
+                                  </div>
+                                  <Button
+                                    type="button"
+                                    size="xs"
+                                    variant="outline"
+                                    onClick={addCodexAccount}
+                                  >
+                                    <PlusIcon className="size-3.5" />
+                                    Add
+                                  </Button>
+                                </div>
+
+                                <SettingsSelectControl
+                                  value={settings.selectedCodexAccountId}
+                                  onValueChange={(value) => {
+                                    updateSettings({ selectedCodexAccountId: value });
+                                  }}
+                                  ariaLabel="Codex account"
+                                  triggerClassName="w-full"
+                                  valueContent={
+                                    <span className="truncate">
+                                      {codexAccountOptions.find(
+                                        (account) => account.id === settings.selectedCodexAccountId,
+                                      )?.label ?? "Default"}
+                                    </span>
+                                  }
+                                >
+                                  {codexAccountOptions.map((account) => (
+                                    <SelectItem hideIndicator key={account.id} value={account.id}>
+                                      <span className="truncate">{account.label}</span>
+                                    </SelectItem>
+                                  ))}
+                                </SettingsSelectControl>
+
+                                {codexAccounts.length > 0 ? (
+                                  <div className="space-y-2">
+                                    {codexAccounts.map((account) => (
+                                      <div
+                                        key={account.id}
+                                        className={`${SETTINGS_RADIUS_CLASS_NAME} border border-[color:var(--color-border)] px-3 py-3`}
+                                      >
+                                        <div className="mb-2 flex items-center justify-between gap-2">
+                                          <div className="min-w-0">
+                                            <div className="truncate text-xs font-medium text-foreground">
+                                              {account.label || account.id}
+                                            </div>
+                                            <div className="truncate text-[11px] text-muted-foreground">
+                                              {account.id}
+                                            </div>
+                                          </div>
+                                          <Button
+                                            type="button"
+                                            size="xs"
+                                            variant="ghost"
+                                            onClick={() => removeCodexAccount(account.id)}
+                                          >
+                                            <XIcon className="size-3.5" />
+                                            Remove
+                                          </Button>
+                                        </div>
+                                        <div className="grid gap-2 sm:grid-cols-2">
+                                          <label className="block">
+                                            <span className="block text-xs font-medium text-foreground">
+                                              Label
+                                            </span>
+                                            <DebouncedSettingTextInput
+                                              id={`codex-account-${account.id}-label`}
+                                              size="sm"
+                                              variant="soft"
+                                              className="mt-1"
+                                              value={account.label}
+                                              onCommit={(nextValue) =>
+                                                updateCodexAccount(account.id, {
+                                                  label: nextValue,
+                                                })
+                                              }
+                                              placeholder="Work"
+                                              spellCheck={false}
+                                            />
+                                          </label>
+                                          <label className="block">
+                                            <span className="block text-xs font-medium text-foreground">
+                                              Shared CODEX_HOME
+                                            </span>
+                                            <DebouncedSettingTextInput
+                                              id={`codex-account-${account.id}-home`}
+                                              size="sm"
+                                              variant="soft"
+                                              className="mt-1"
+                                              value={account.homePath}
+                                              onCommit={(nextValue) =>
+                                                updateCodexAccount(account.id, {
+                                                  homePath: nextValue,
+                                                })
+                                              }
+                                              placeholder={codexHomePath || "~/.codex"}
+                                              spellCheck={false}
+                                            />
+                                          </label>
+                                          <label className="block sm:col-span-2">
+                                            <span className="block text-xs font-medium text-foreground">
+                                              Shadow auth home
+                                            </span>
+                                            <DebouncedSettingTextInput
+                                              id={`codex-account-${account.id}-shadow-home`}
+                                              size="sm"
+                                              variant="soft"
+                                              className="mt-1"
+                                              value={account.shadowHomePath}
+                                              onCommit={(nextValue) =>
+                                                updateCodexAccount(account.id, {
+                                                  shadowHomePath: nextValue,
+                                                })
+                                              }
+                                              placeholder="~/.codex_work"
+                                              spellCheck={false}
+                                            />
+                                          </label>
+                                        </div>
+                                      </div>
+                                    ))}
+                                  </div>
+                                ) : null}
+                              </div>
                             ) : null}
 
                             {providerSettings.agentDirKey ? (

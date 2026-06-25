@@ -10,10 +10,12 @@ import { memo, useCallback, useDeferredValue, useEffect, useMemo, useRef, useSta
 import { type ProviderPickerKind, PROVIDER_OPTIONS } from "../../session-logic";
 import { formatProviderModelOptionName } from "../../providerModelOptions";
 import { compareProvidersByOrder } from "../../providerOrdering";
+import type { ResolvedCodexAccount } from "../../appSettings";
 import {
   Menu,
   MenuItem,
   MenuRadioGroup,
+  MenuRadioItem,
   MenuSeparator,
   MenuSub,
   MenuSubTrigger,
@@ -182,7 +184,10 @@ type ProviderModelMenuItemsProps = {
   loadingModelProviders?: Partial<Record<ProviderKind, boolean>>;
   hiddenProviders?: ReadonlyArray<ProviderKind>;
   providerOrder?: ReadonlyArray<ProviderKind>;
+  codexAccounts?: ReadonlyArray<ResolvedCodexAccount>;
+  selectedCodexAccountId?: string;
   disabled?: boolean;
+  onCodexAccountChange?: (accountId: string) => void;
   onProviderModelChange: (provider: ProviderKind, model: ModelSlug) => void;
   // Invoked after a model selection commits so callers can close ancestor
   // menus and refocus the composer.
@@ -235,7 +240,7 @@ export const ProviderModelMenuItems = memo(function ProviderModelMenuItems(
   const visibleAvailableProviderOptions = useMemo(
     () =>
       filterProviderOptionsByVisibility(
-        [...AVAILABLE_PROVIDER_OPTIONS].sort((left, right) =>
+        AVAILABLE_PROVIDER_OPTIONS.toSorted((left, right) =>
           compareProvidersByOrder(providerOrder ?? [], left.value, right.value),
         ),
         hiddenProviderSet,
@@ -246,7 +251,7 @@ export const ProviderModelMenuItems = memo(function ProviderModelMenuItems(
   const visibleUnavailableProviderOptions = useMemo(
     () =>
       filterProviderOptionsByVisibility(
-        [...UNAVAILABLE_PROVIDER_OPTIONS].sort((left, right) =>
+        UNAVAILABLE_PROVIDER_OPTIONS.toSorted((left, right) =>
           compareProvidersByOrder(providerOrder ?? [], left.value, right.value),
         ),
         hiddenProviderSet,
@@ -295,6 +300,36 @@ export const ProviderModelMenuItems = memo(function ProviderModelMenuItems(
     if (!resolvedModel) return;
     props.onProviderModelChange(provider, resolvedModel);
     onAfterSelection?.();
+  };
+  const renderCodexAccountRadioGroup = () => {
+    const accounts = props.codexAccounts ?? [];
+    if (accounts.length <= 1 || !props.onCodexAccountChange) {
+      return null;
+    }
+    return (
+      <>
+        <div className="px-2.5 pb-1 pt-1.5 text-[11px] font-medium text-muted-foreground uppercase tracking-[0.08em]">
+          Account
+        </div>
+        <MenuRadioGroup
+          value={props.selectedCodexAccountId ?? accounts[0]?.id ?? ""}
+          onValueChange={(value) => {
+            if (props.disabled || !value) {
+              return;
+            }
+            props.onCodexAccountChange?.(value);
+            onAfterSelection?.();
+          }}
+        >
+          {accounts.map((account) => (
+            <MenuRadioItem key={account.id} value={account.id}>
+              <span className="truncate">{account.label}</span>
+            </MenuRadioItem>
+          ))}
+        </MenuRadioGroup>
+        <MenuSeparator />
+      </>
+    );
   };
   const toggleFavoriteModel = useCallback(
     (provider: FavoriteModelProvider, slug: string) => {
@@ -417,7 +452,12 @@ export const ProviderModelMenuItems = memo(function ProviderModelMenuItems(
   };
 
   if (props.lockedProvider !== null) {
-    return <>{renderModelRadioGroup(props.lockedProvider)}</>;
+    return (
+      <>
+        {props.lockedProvider === "codex" ? renderCodexAccountRadioGroup() : null}
+        {renderModelRadioGroup(props.lockedProvider)}
+      </>
+    );
   }
 
   return (
@@ -459,6 +499,7 @@ export const ProviderModelMenuItems = memo(function ProviderModelMenuItems(
               fixedWidth
               className={COMPOSER_PICKER_MODEL_SUBMENU_HEIGHT_CLASS_NAME}
             >
+              {option.value === "codex" ? renderCodexAccountRadioGroup() : null}
               {renderModelRadioGroup(option.value)}
             </ComposerPickerMenuSubPopup>
           </MenuSub>
@@ -515,6 +556,8 @@ type ProviderModelPickerProps = {
   loadingModelProviders?: Partial<Record<ProviderKind, boolean>>;
   hiddenProviders?: ReadonlyArray<ProviderKind>;
   providerOrder?: ReadonlyArray<ProviderKind>;
+  codexAccounts?: ReadonlyArray<ResolvedCodexAccount>;
+  selectedCodexAccountId?: string;
   activeProviderIconClassName?: string;
   compact?: boolean;
   // Icon-only trigger for narrow composers; the model name moves to title/sr-only.
@@ -524,6 +567,7 @@ type ProviderModelPickerProps = {
   onOpenChange?: (open: boolean) => void;
   onSelectionCommitted?: () => void;
   shortcutLabel?: string | null;
+  onCodexAccountChange?: (accountId: string) => void;
   onProviderModelChange: (provider: ProviderKind, model: ModelSlug) => void;
 };
 
@@ -640,7 +684,14 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(
             : {})}
           {...(props.hiddenProviders ? { hiddenProviders: props.hiddenProviders } : {})}
           {...(props.providerOrder ? { providerOrder: props.providerOrder } : {})}
+          {...(props.codexAccounts ? { codexAccounts: props.codexAccounts } : {})}
+          {...(props.selectedCodexAccountId
+            ? { selectedCodexAccountId: props.selectedCodexAccountId }
+            : {})}
           {...(props.disabled !== undefined ? { disabled: props.disabled } : {})}
+          {...(props.onCodexAccountChange
+            ? { onCodexAccountChange: props.onCodexAccountChange }
+            : {})}
           onProviderModelChange={props.onProviderModelChange}
           onAfterSelection={handleAfterSelection}
         />

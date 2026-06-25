@@ -8,7 +8,9 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Option, Schema } from "effect";
 import {
   type AssistantDeliveryMode,
+  CodexAccountConfig,
   DEFAULT_GIT_TEXT_GENERATION_MODEL,
+  DEFAULT_CODEX_ACCOUNT_ID,
   DEFAULT_SERVER_SETTINGS,
   TrimmedNonEmptyString,
   ProviderKind,
@@ -142,6 +144,10 @@ export const AppSettingsSchema = Schema.Struct({
   ),
   codexBinaryPath: Schema.String.check(Schema.isMaxLength(4096)).pipe(withDefaults(() => "")),
   codexHomePath: Schema.String.check(Schema.isMaxLength(4096)).pipe(withDefaults(() => "")),
+  codexAccounts: Schema.Array(CodexAccountConfig).pipe(withDefaults(() => [])),
+  selectedCodexAccountId: Schema.String.check(Schema.isMaxLength(64)).pipe(
+    withDefaults(() => DEFAULT_CODEX_ACCOUNT_ID),
+  ),
   cursorBinaryPath: Schema.String.check(Schema.isMaxLength(4096)).pipe(withDefaults(() => "")),
   cursorApiEndpoint: Schema.String.check(Schema.isMaxLength(4096)).pipe(withDefaults(() => "")),
   geminiBinaryPath: Schema.String.check(Schema.isMaxLength(4096)).pipe(withDefaults(() => "")),
@@ -406,11 +412,126 @@ function normalizeProviderBinaryPathOverride(
   return trimmed;
 }
 
+export type CodexAccountSettings = CodexAccountConfig;
+
+export interface ResolvedCodexAccount {
+  readonly id: string;
+  readonly label: string;
+  readonly homePath: string;
+  readonly shadowHomePath: string;
+  readonly isDefault: boolean;
+}
+
+function isValidCodexAccountId(value: string): boolean {
+  return /^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(value);
+}
+
+export function normalizeCodexAccounts(
+  accounts: ReadonlyArray<CodexAccountSettings>,
+): CodexAccountSettings[] {
+  const seen = new Set<string>([DEFAULT_CODEX_ACCOUNT_ID]);
+  const normalized: CodexAccountSettings[] = [];
+
+  for (const account of accounts) {
+    const id = account.id.trim();
+    if (!isValidCodexAccountId(id) || seen.has(id)) {
+      continue;
+    }
+    seen.add(id);
+    normalized.push({
+      id,
+      label: account.label.trim(),
+      homePath: account.homePath.trim(),
+      shadowHomePath: account.shadowHomePath.trim(),
+    });
+  }
+
+  return normalized;
+}
+
+export function getCodexAccountOptions(
+  settings: Pick<AppSettings, "codexHomePath" | "codexAccounts">,
+): ResolvedCodexAccount[] {
+  return [
+    {
+      id: DEFAULT_CODEX_ACCOUNT_ID,
+      label: "Default",
+      homePath: settings.codexHomePath.trim(),
+      shadowHomePath: "",
+      isDefault: true,
+    },
+    ...normalizeCodexAccounts(settings.codexAccounts).map((account) => ({
+      id: account.id,
+      label: account.label || account.id,
+      homePath: account.homePath.trim(),
+      shadowHomePath: account.shadowHomePath.trim(),
+      isDefault: false,
+    })),
+  ];
+}
+
+export function resolveSelectedCodexAccount(
+  settings: Pick<AppSettings, "codexHomePath" | "codexAccounts" | "selectedCodexAccountId">,
+): ResolvedCodexAccount {
+  const accounts = getCodexAccountOptions(settings);
+  return (
+    accounts.find((account) => account.id === settings.selectedCodexAccountId.trim()) ??
+    accounts[0]!
+  );
+}
+
+type CodexAccountLaunchSettingsInput = Pick<
+  AppSettings,
+  "codexAccounts" | "codexBinaryPath" | "codexHomePath" | "selectedCodexAccountId"
+>;
+
+function resolveCodexAccountLaunchSettings(settings: CodexAccountLaunchSettingsInput): {
+  readonly binaryPath: string;
+  readonly homePath: string;
+  readonly shadowHomePath: string;
+  readonly accountId: string;
+  readonly hasAdditionalAccounts: boolean;
+} {
+  const selectedAccount = resolveSelectedCodexAccount(settings);
+  return {
+    binaryPath: normalizeProviderBinaryPathOverride("codex", settings.codexBinaryPath),
+    homePath: selectedAccount.homePath || settings.codexHomePath,
+    shadowHomePath: selectedAccount.shadowHomePath,
+    accountId: selectedAccount.id !== DEFAULT_CODEX_ACCOUNT_ID ? selectedAccount.id : "",
+    hasAdditionalAccounts: normalizeCodexAccounts(settings.codexAccounts).length > 0,
+  };
+}
+
+export function getCodexProviderDiscoveryOptions(settings: CodexAccountLaunchSettingsInput): {
+  readonly binaryPath: string | null;
+  readonly homePath: string | null;
+  readonly shadowHomePath: string | null;
+  readonly accountId: string | null;
+} {
+  const launch = resolveCodexAccountLaunchSettings(settings);
+  return {
+    binaryPath: launch.binaryPath || null,
+    homePath: launch.homePath || null,
+    shadowHomePath: launch.shadowHomePath || null,
+    accountId: launch.accountId || (launch.hasAdditionalAccounts ? DEFAULT_CODEX_ACCOUNT_ID : null),
+  };
+}
+
 function normalizeAppSettings(settings: AppSettings): AppSettings {
+  const codexAccounts = normalizeCodexAccounts(settings.codexAccounts);
+  const selectedCodexAccountId = new Set([
+    DEFAULT_CODEX_ACCOUNT_ID,
+    ...codexAccounts.map((account) => account.id),
+  ]).has(settings.selectedCodexAccountId.trim())
+    ? settings.selectedCodexAccountId.trim()
+    : DEFAULT_CODEX_ACCOUNT_ID;
+
   return {
     ...settings,
     claudeBinaryPath: normalizeProviderBinaryPathOverride("claudeAgent", settings.claudeBinaryPath),
     codexBinaryPath: normalizeProviderBinaryPathOverride("codex", settings.codexBinaryPath),
+    codexAccounts,
+    selectedCodexAccountId,
     cursorBinaryPath: normalizeProviderBinaryPathOverride("cursor", settings.cursorBinaryPath),
     geminiBinaryPath: normalizeProviderBinaryPathOverride("gemini", settings.geminiBinaryPath),
     grokBinaryPath: normalizeProviderBinaryPathOverride("grok", settings.grokBinaryPath),
@@ -443,6 +564,8 @@ function serverSettingsToAppSettings(settings: ServerSettings): Partial<AppSetti
     claudeBinaryPath: settings.providers.claudeAgent.binaryPath,
     codexBinaryPath: settings.providers.codex.binaryPath,
     codexHomePath: settings.providers.codex.homePath,
+    codexAccounts: settings.providers.codex.accounts,
+    selectedCodexAccountId: settings.providers.codex.selectedAccountId,
     cursorApiEndpoint: settings.providers.cursor.apiEndpoint,
     cursorBinaryPath: settings.providers.cursor.binaryPath,
     defaultThreadEnvMode: settings.defaultThreadEnvMode,
@@ -488,6 +611,10 @@ function hasOwn<Key extends keyof AppSettings>(patch: Partial<AppSettings>, key:
 
 function touchesProviderDiscoverySettings(patch: Partial<AppSettings>): boolean {
   return (
+    hasOwn(patch, "codexBinaryPath") ||
+    hasOwn(patch, "codexHomePath") ||
+    hasOwn(patch, "codexAccounts") ||
+    hasOwn(patch, "selectedCodexAccountId") ||
     hasOwn(patch, "kiloBinaryPath") ||
     hasOwn(patch, "kiloServerPassword") ||
     hasOwn(patch, "kiloServerUrl") ||
@@ -525,11 +652,21 @@ function appSettingsPatchToServerSettingsPatch(patch: Partial<AppSettings>): Ser
   if (
     hasOwn(patch, "codexBinaryPath") ||
     hasOwn(patch, "codexHomePath") ||
+    hasOwn(patch, "codexAccounts") ||
+    hasOwn(patch, "selectedCodexAccountId") ||
     hasOwn(patch, "customCodexModels")
   ) {
+    const codexAccounts = patch.codexAccounts
+      ? normalizeCodexAccounts(patch.codexAccounts)
+      : undefined;
+    const selectedCodexAccountId = patch.selectedCodexAccountId?.trim();
     providers.codex = {
       ...(hasOwn(patch, "codexBinaryPath") ? { binaryPath: patch.codexBinaryPath ?? "" } : {}),
       ...(hasOwn(patch, "codexHomePath") ? { homePath: patch.codexHomePath ?? "" } : {}),
+      ...(codexAccounts !== undefined ? { accounts: codexAccounts } : {}),
+      ...(selectedCodexAccountId && isValidCodexAccountId(selectedCodexAccountId)
+        ? { selectedAccountId: selectedCodexAccountId }
+        : {}),
       ...(hasOwn(patch, "customCodexModels")
         ? { customModels: patch.customCodexModels ?? [] }
         : {}),
@@ -639,6 +776,7 @@ function buildInitialServerSettingsMigrationPatch(settings: AppSettings): Server
     "claudeBinaryPath",
     "codexBinaryPath",
     "codexHomePath",
+    "selectedCodexAccountId",
     "cursorApiEndpoint",
     "cursorBinaryPath",
     "defaultThreadEnvMode",
@@ -663,6 +801,7 @@ function buildInitialServerSettingsMigrationPatch(settings: AppSettings): Server
   }
 
   for (const key of [
+    "codexAccounts",
     "customCodexModels",
     "customClaudeModels",
     "customCursorModels",
@@ -845,8 +984,10 @@ export function getProviderStartOptions(
   settings: Pick<
     AppSettings,
     | "claudeBinaryPath"
+    | "codexAccounts"
     | "codexBinaryPath"
     | "codexHomePath"
+    | "selectedCodexAccountId"
     | "cursorApiEndpoint"
     | "cursorBinaryPath"
     | "geminiBinaryPath"
@@ -866,7 +1007,6 @@ export function getProviderStartOptions(
     "claudeAgent",
     settings.claudeBinaryPath,
   );
-  const codexBinaryPath = normalizeProviderBinaryPathOverride("codex", settings.codexBinaryPath);
   const cursorBinaryPath = normalizeProviderBinaryPathOverride("cursor", settings.cursorBinaryPath);
   const geminiBinaryPath = normalizeProviderBinaryPathOverride("gemini", settings.geminiBinaryPath);
   const grokBinaryPath = normalizeProviderBinaryPathOverride("grok", settings.grokBinaryPath);
@@ -876,6 +1016,7 @@ export function getProviderStartOptions(
     settings.openCodeBinaryPath,
   );
   const piBinaryPath = normalizeProviderBinaryPathOverride("pi", settings.piBinaryPath);
+  const codexLaunch = resolveCodexAccountLaunchSettings(settings);
   const hasOpenCodeStartOptions = Boolean(
     openCodeBinaryPath ||
     settings.openCodeExperimentalWebSockets ||
@@ -883,11 +1024,17 @@ export function getProviderStartOptions(
     settings.openCodeServerPassword,
   );
   const providerOptions: ProviderStartOptions = {
-    ...(codexBinaryPath || settings.codexHomePath
+    ...(codexLaunch.binaryPath ||
+    codexLaunch.homePath ||
+    codexLaunch.shadowHomePath ||
+    codexLaunch.accountId ||
+    codexLaunch.hasAdditionalAccounts
       ? {
           codex: {
-            ...(codexBinaryPath ? { binaryPath: codexBinaryPath } : {}),
-            ...(settings.codexHomePath ? { homePath: settings.codexHomePath } : {}),
+            ...(codexLaunch.binaryPath ? { binaryPath: codexLaunch.binaryPath } : {}),
+            ...(codexLaunch.homePath ? { homePath: codexLaunch.homePath } : {}),
+            ...(codexLaunch.shadowHomePath ? { shadowHomePath: codexLaunch.shadowHomePath } : {}),
+            ...(codexLaunch.accountId ? { accountId: codexLaunch.accountId } : {}),
           },
         }
       : {}),

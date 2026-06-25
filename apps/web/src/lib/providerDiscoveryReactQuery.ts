@@ -67,10 +67,25 @@ export const providerDiscoveryQueryKeys = {
   models: (
     provider: ProviderKind,
     binaryPath: string | null,
+    homePath: string | null,
+    shadowHomePath: string | null,
+    accountId: string | null,
     apiEndpoint: string | null,
     agentDir: string | null,
     cwd: string | null,
-  ) => ["provider-discovery", "models", provider, binaryPath, apiEndpoint, agentDir, cwd] as const,
+  ) =>
+    [
+      "provider-discovery",
+      "models",
+      provider,
+      binaryPath,
+      homePath,
+      shadowHomePath,
+      accountId,
+      apiEndpoint,
+      agentDir,
+      cwd,
+    ] as const,
   agentsForProvider: (provider: ProviderKind) =>
     ["provider-discovery", "agents", provider] as const,
   agents: (provider: ProviderKind, binaryPath: string | null, cwd: string | null) =>
@@ -184,6 +199,9 @@ export function providerCommandsQueryOptions(input: {
 export function providerModelsQueryOptions(input: {
   provider: ProviderKind;
   binaryPath?: string | null;
+  homePath?: string | null;
+  shadowHomePath?: string | null;
+  accountId?: string | null;
   apiEndpoint?: string | null;
   agentDir?: string | null;
   cwd?: string | null;
@@ -193,6 +211,9 @@ export function providerModelsQueryOptions(input: {
     queryKey: providerDiscoveryQueryKeys.models(
       input.provider,
       input.binaryPath ?? null,
+      input.homePath ?? null,
+      input.shadowHomePath ?? null,
+      input.accountId ?? null,
       input.apiEndpoint ?? null,
       input.agentDir ?? null,
       input.cwd ?? null,
@@ -202,6 +223,9 @@ export function providerModelsQueryOptions(input: {
       return api.provider.listModels({
         provider: input.provider,
         ...(input.binaryPath ? { binaryPath: input.binaryPath } : {}),
+        ...(input.homePath ? { homePath: input.homePath } : {}),
+        ...(input.shadowHomePath ? { shadowHomePath: input.shadowHomePath } : {}),
+        ...(input.accountId ? { accountId: input.accountId } : {}),
         ...(input.apiEndpoint ? { apiEndpoint: input.apiEndpoint } : {}),
         ...(input.agentDir ? { agentDir: input.agentDir } : {}),
         ...(input.cwd ? { cwd: input.cwd } : {}),

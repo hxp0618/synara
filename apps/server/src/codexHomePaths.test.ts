@@ -3,6 +3,7 @@ import path from "node:path";
 import { describe, it } from "vitest";
 
 import {
+  resolveCodexHomeOverlayAccountSegment,
   resolveActiveCodexHomeWritePath,
   resolveBaseCodexHomePath,
   resolveCodexHomeAllowlistCandidates,
@@ -25,6 +26,13 @@ describe("resolveBaseCodexHomePath", () => {
   it("falls back to ~/.codex when nothing is provided", () => {
     const result = resolveBaseCodexHomePath({});
     assert.ok(result.endsWith(`${path.sep}.codex`));
+  });
+
+  it("expands a leading tilde in explicit homes", () => {
+    const result = resolveBaseCodexHomePath({}, "~/.codex_work");
+
+    assert.ok(result.endsWith(`${path.sep}.codex_work`));
+    assert.ok(!result.startsWith("~"));
   });
 });
 
@@ -54,6 +62,34 @@ describe("resolveDpCodeCodexHomeOverlayPath", () => {
     assert.equal(
       resolveDpCodeCodexHomeOverlayPath({}, "/users/me/.codex"),
       path.join("/users/me", ".synara", "runtime", "codex-home-overlay"),
+    );
+  });
+
+  it("derives nested account overlays when given an account segment", () => {
+    const segment = resolveCodexHomeOverlayAccountSegment({
+      accountId: "work",
+      homePath: "/users/me/.codex",
+      shadowHomePath: "/users/me/.codex_work",
+    });
+
+    assert.ok(segment?.startsWith("work-"));
+    assert.equal(
+      resolveDpCodeCodexHomeOverlayPath(
+        { SYNARA_HOME: "/synara/runtime" },
+        "/users/me/.codex",
+        segment,
+      ),
+      path.join("/synara/runtime", "codex-home-overlay", "accounts", segment ?? ""),
+    );
+  });
+
+  it("does not create a nested account overlay for the explicit default account", () => {
+    assert.equal(
+      resolveCodexHomeOverlayAccountSegment({
+        accountId: "default",
+        homePath: "/users/me/.codex",
+      }),
+      undefined,
     );
   });
 });
@@ -114,5 +150,18 @@ describe("resolveCodexHomeAllowlistCandidates", () => {
       homePath: path.join("/users/me", "codex-home-overlay"),
     });
     assert.deepEqual(candidates, [path.join("/users/me", "codex-home-overlay")]);
+  });
+
+  it("includes the shadow home for direct account writes", () => {
+    const candidates = resolveCodexHomeAllowlistCandidates({
+      env: { SYNARA_HOME: "/synara/runtime" },
+      homePath: "/users/me/.codex",
+      shadowHomePath: "/users/me/.codex_work",
+    });
+    assert.deepEqual(candidates, [
+      "/users/me/.codex",
+      path.join("/synara/runtime", "codex-home-overlay"),
+      "/users/me/.codex_work",
+    ]);
   });
 });
