@@ -226,6 +226,24 @@ export function automationApprovalGaps(input: {
   return { warnings, runBlockingWarnings, acknowledgedRisks: Array.from(required) };
 }
 
+// Approval of an enabled legacy fast loop must also satisfy the server's hard iteration cap.
+export function maxIterationsForFastIntervalApproval(input: {
+  readonly schedule: AutomationSchedule;
+  readonly enabled: boolean;
+  readonly maxIterations: number | null;
+}): number | undefined {
+  if (
+    input.enabled &&
+    input.schedule.type === "interval" &&
+    input.schedule.everySeconds < 60 &&
+    (input.maxIterations === null ||
+      input.maxIterations > DEFAULT_AUTOMATION_FAST_INTERVAL_MAX_ITERATIONS)
+  ) {
+    return DEFAULT_AUTOMATION_FAST_INTERVAL_MAX_ITERATIONS;
+  }
+  return undefined;
+}
+
 export function acknowledgedRiskIdsForDraft(
   warnings: readonly AutomationDraftWarning[],
   acknowledgedWarningIds: ReadonlySet<AutomationDraftWarningId>,

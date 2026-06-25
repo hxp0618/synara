@@ -11,6 +11,7 @@ import {
   automationApprovalGaps,
   buildAutomationDraftWarnings,
   hasBlockingAutomationDraftWarnings,
+  maxIterationsForFastIntervalApproval,
   warningIdsForAcknowledgedRisks,
 } from "./automationDraft";
 
@@ -343,5 +344,47 @@ describe("automationApprovalGaps", () => {
     expect(gaps.warnings.map((warning) => warning.id)).toEqual(["fast-recurring-interval"]);
     expect(gaps.runBlockingWarnings).toEqual([]);
     expect(gaps.acknowledgedRisks).toEqual(["fast-interval"]);
+  });
+});
+
+describe("maxIterationsForFastIntervalApproval", () => {
+  it("caps enabled imported fast loops without a max iteration limit", () => {
+    expect(
+      maxIterationsForFastIntervalApproval({
+        schedule: { type: "interval", everySeconds: 15 },
+        enabled: true,
+        maxIterations: null,
+      }),
+    ).toBe(10);
+  });
+
+  it("caps enabled imported fast loops above the server cap", () => {
+    expect(
+      maxIterationsForFastIntervalApproval({
+        schedule: { type: "interval", everySeconds: 15 },
+        enabled: true,
+        maxIterations: 25,
+      }),
+    ).toBe(10);
+  });
+
+  it("leaves already-bounded fast loops unchanged", () => {
+    expect(
+      maxIterationsForFastIntervalApproval({
+        schedule: { type: "interval", everySeconds: 15 },
+        enabled: true,
+        maxIterations: 3,
+      }),
+    ).toBeUndefined();
+  });
+
+  it("does not cap disabled legacy fast loops during approval", () => {
+    expect(
+      maxIterationsForFastIntervalApproval({
+        schedule: { type: "interval", everySeconds: 15 },
+        enabled: false,
+        maxIterations: null,
+      }),
+    ).toBeUndefined();
   });
 });

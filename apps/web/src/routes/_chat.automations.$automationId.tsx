@@ -31,6 +31,7 @@ import { SidebarInset } from "~/components/ui/sidebar";
 import {
   automationApprovalGaps,
   hasBlockingAutomationDraftWarnings,
+  maxIterationsForFastIntervalApproval,
   warningIdsForAcknowledgedRisks,
   type AutomationDraftWarning,
   type AutomationDraftWarningId,
@@ -268,13 +269,20 @@ function AutomationDetailView() {
     prompt: definition.prompt,
     acknowledgedRisks: definition.acknowledgedRisks,
   });
+  const fastIntervalMaxIterationsOnApproval = maxIterationsForFastIntervalApproval({
+    schedule: definition.schedule,
+    enabled: definition.enabled,
+    maxIterations: definition.maxIterations,
+  });
   const approveAutomationRisks = () =>
-    // Records consent only, persisting the full required risk set so the update validates.
-    // Pause/resume stays a separate, explicit action so approving never silently re-enables
-    // an automation the user deliberately paused.
+    // Records consent and any server-required fast-loop cap. Pause/resume stays separate so
+    // approving never silently re-enables an automation the user deliberately paused.
     updateMutation.mutateAsync({
       id: definition.id,
       acknowledgedRisks: approvalGaps.acknowledgedRisks,
+      ...(fastIntervalMaxIterationsOnApproval !== undefined
+        ? { maxIterations: fastIntervalMaxIterationsOnApproval }
+        : {}),
     });
   const handleApproveAndRunNow = async () => {
     try {
