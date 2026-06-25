@@ -119,6 +119,12 @@ const makeProviderSessionDirectory = Effect.gen(function* () {
     const providerInstanceId =
       binding.providerInstanceId ??
       readProviderInstanceId(binding.provider, existingRuntime?.runtimePayload);
+    const previousProviderInstanceId =
+      existingRuntime !== undefined
+        ? readProviderInstanceId(binding.provider, existingRuntime.runtimePayload)
+        : providerInstanceId;
+    const providerInstanceChanged =
+      existingRuntime !== undefined && previousProviderInstanceId !== providerInstanceId;
     yield* repository
       .upsert({
         threadId: resolvedThreadId,
@@ -132,7 +138,9 @@ const makeProviderSessionDirectory = Effect.gen(function* () {
         resumeCursor:
           binding.resumeCursor !== undefined
             ? binding.resumeCursor
-            : (existingRuntime?.resumeCursor ?? null),
+            : providerChanged || providerInstanceChanged
+              ? null
+              : (existingRuntime?.resumeCursor ?? null),
         runtimePayload: mergeRuntimePayload(
           existingRuntime?.runtimePayload ?? null,
           mergeRuntimePayload(binding.runtimePayload ?? null, { providerInstanceId }),

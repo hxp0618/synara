@@ -198,7 +198,8 @@ interface ClaudeSessionContext {
   session: ProviderSession;
   readonly promptQueue: Queue.Queue<PromptQueueItem>;
   readonly query: ClaudeQueryRuntime;
-  readonly discoveryKey: string;
+  readonly commandDiscoveryKey: string;
+  readonly accountDiscoveryKey: string;
   streamFiber: Fiber.Fiber<void, Error> | undefined;
   readonly startedAt: string;
   readonly basePermissionMode: PermissionMode | undefined;
@@ -270,11 +271,12 @@ function claudeDiscoveryKey(input: {
   readonly binaryPath?: string | null | undefined;
   readonly homePath?: string | null | undefined;
   readonly cwd?: string | null | undefined;
+  readonly includeCwd?: boolean;
 }): string {
   return JSON.stringify({
     binaryPath: input.binaryPath?.trim() || "claude",
     homePath: input.homePath?.trim() || null,
-    cwd: input.cwd?.trim() || null,
+    cwd: input.includeCwd === false ? null : input.cwd?.trim() || null,
   });
 }
 
@@ -3293,10 +3295,15 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
 
         const providerOptions = input.providerOptions?.claudeAgent;
         const queryEnv = claudeEnvironment(providerOptions?.homePath);
-        const discoveryKey = claudeDiscoveryKey({
+        const commandDiscoveryKey = claudeDiscoveryKey({
           binaryPath: providerOptions?.binaryPath,
           homePath: providerOptions?.homePath,
           cwd: input.cwd,
+        });
+        const accountDiscoveryKey = claudeDiscoveryKey({
+          binaryPath: providerOptions?.binaryPath,
+          homePath: providerOptions?.homePath,
+          includeCwd: false,
         });
         const modelSelection =
           input.modelSelection?.provider === "claudeAgent" ? input.modelSelection : undefined;
@@ -3372,11 +3379,11 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
         });
 
         // Populate model cache in background from first session
-        if (!cachedModelsByKey.has(discoveryKey)) {
+        if (!cachedModelsByKey.has(accountDiscoveryKey)) {
           queryRuntime
             .supportedModels()
             .then((models) => {
-              cachedModelsByKey.set(discoveryKey, {
+              cachedModelsByKey.set(accountDiscoveryKey, {
                 models: models.map((m) => ({ slug: m.value, name: m.displayName })),
                 source: "sdk",
                 cached: false,
@@ -3388,11 +3395,11 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
         }
 
         // Populate agent cache in background from first session
-        if (!cachedAgentsByKey.has(discoveryKey)) {
+        if (!cachedAgentsByKey.has(accountDiscoveryKey)) {
           queryRuntime
             .supportedAgents()
             .then((agents) => {
-              cachedAgentsByKey.set(discoveryKey, {
+              cachedAgentsByKey.set(accountDiscoveryKey, {
                 agents: agents.map((a) => ({
                   name: a.name,
                   displayName: a.name,
@@ -3433,7 +3440,8 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
           session,
           promptQueue,
           query: queryRuntime,
-          discoveryKey,
+          commandDiscoveryKey,
+          accountDiscoveryKey,
           streamFiber: undefined,
           startedAt,
           basePermissionMode: permissionMode,
@@ -3753,9 +3761,11 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
         // 1. Try an active session first (cheapest path).
         const context = input.threadId
           ? sessions.get(ThreadId.makeUnsafe(input.threadId))
-          : [...sessions.values()].find((s) => !s.stopped && s.discoveryKey === discoveryKey);
+          : [...sessions.values()].find(
+              (s) => !s.stopped && s.commandDiscoveryKey === discoveryKey,
+            );
 
-        if (context && !context.stopped && context.discoveryKey === discoveryKey) {
+        if (context && !context.stopped && context.commandDiscoveryKey === discoveryKey) {
           const commands = yield* Effect.tryPromise({
             try: () => context.query.supportedCommands(),
             catch: (cause) => toRequestError(context.session.threadId, "listCommands", cause),
@@ -3850,14 +3860,14 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
 
     const listModels: NonNullable<ClaudeAdapterShape["listModels"]> = (input) =>
       Effect.sync(() => {
-        const discoveryKey = claudeDiscoveryKey(input);
+        const discoveryKey = claudeDiscoveryKey({ ...input, includeCwd: false });
         const cachedModels = cachedModelsByKey.get(discoveryKey);
         if (cachedModels) {
           return { ...cachedModels, cached: true };
         }
         // Fallback: try to get models from any active session
         for (const [, context] of sessions) {
-          if (!context.stopped && context.query && context.discoveryKey === discoveryKey) {
+          if (!context.stopped && context.query && context.accountDiscoveryKey === discoveryKey) {
             // Trigger async cache population
             context.query
               .supportedModels()
@@ -3878,13 +3888,13 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
 
     const listAgents: NonNullable<ClaudeAdapterShape["listAgents"]> = (input) =>
       Effect.sync(() => {
-        const discoveryKey = claudeDiscoveryKey(input);
+        const discoveryKey = claudeDiscoveryKey({ ...input, includeCwd: false });
         const cachedAgents = cachedAgentsByKey.get(discoveryKey);
         if (cachedAgents) {
           return { ...cachedAgents, cached: true };
         }
         for (const [, context] of sessions) {
-          if (!context.stopped && context.query && context.discoveryKey === discoveryKey) {
+          if (!context.stopped && context.query && context.accountDiscoveryKey === discoveryKey) {
             context.query
               .supportedAgents()
               .then((agents) => {

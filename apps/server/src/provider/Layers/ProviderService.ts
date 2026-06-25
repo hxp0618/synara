@@ -350,6 +350,18 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
           instanceId: requestedInstanceId,
           provider,
         });
+        if (!instance) {
+          return yield* toValidationError(
+            input.operation,
+            `Unknown provider instance '${requestedInstanceId}'.`,
+          );
+        }
+        if (provider !== instance.driver) {
+          return yield* toValidationError(
+            input.operation,
+            `Requested provider '${provider}' does not match provider instance '${instance.instanceId}' driver '${instance.driver}'.`,
+          );
+        }
         if (input.modelSelection && input.modelSelection.provider !== instance.driver) {
           return yield* toValidationError(
             input.operation,
@@ -718,18 +730,21 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
         return { adapter, session: resumedWithInstance } as const;
       });
 
-    const findLiveSessionAdapter = (threadId: ThreadId) =>
+    const findLiveSession = (threadId: ThreadId) =>
       Effect.gen(function* () {
         const matches = yield* Effect.forEach(
           adapters,
           (adapter) =>
-            adapter.hasSession(threadId).pipe(
-              Effect.map((hasSession) => (hasSession ? adapter : null)),
+            adapter.listSessions().pipe(
+              Effect.map((sessions) => {
+                const session = sessions.find((candidate) => candidate.threadId === threadId);
+                return session ? { adapter, session } : null;
+              }),
               Effect.orElseSucceed(() => null),
             ),
           { concurrency: "unbounded" },
         );
-        return matches.find((adapter) => adapter !== null) ?? null;
+        return matches.find((match) => match !== null) ?? null;
       });
 
     const resolveRoutableSession = (input: {
@@ -743,12 +758,12 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
         if (!binding) {
           // Startup extension prompts can fire before startSession has persisted
           // the provider binding, but the adapter already owns a live session.
-          const liveAdapter = yield* findLiveSessionAdapter(input.threadId);
-          if (liveAdapter) {
+          const live = yield* findLiveSession(input.threadId);
+          if (live) {
             return {
-              adapter: liveAdapter,
+              adapter: live.adapter,
               threadId: input.threadId,
-              providerInstanceId: liveAdapter.provider,
+              providerInstanceId: live.session.providerInstanceId ?? live.session.provider,
               isActive: true,
             } as const;
           }

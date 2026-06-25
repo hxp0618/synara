@@ -10,6 +10,7 @@
  */
 import * as OS from "node:os";
 import type {
+  ProviderInstanceId,
   ProviderKind,
   ServerSettings,
   ServerProviderAuthStatus,
@@ -74,7 +75,6 @@ import {
   parseGenericCliVersion,
   resolveProviderMaintenanceCapabilitiesEffect,
   type PackageManagedProviderMaintenanceDefinition,
-  type ProviderMaintenanceCapabilities,
 } from "../providerMaintenance";
 import { collectUint8StreamText } from "../../stream/collectUint8StreamText";
 import { buildCodexProcessEnv } from "../../codexProcessEnv.ts";
@@ -1745,6 +1745,39 @@ function isDisabledProviderStatusOverlay(status: ServerProviderStatus): boolean 
   return status.message === DISABLED_PROVIDER_STATUS_MESSAGE && status.available === false;
 }
 
+interface ProviderStatusProjectionInstance {
+  readonly instanceId: ProviderInstanceId;
+  readonly driver: ProviderKind;
+  readonly displayName: string;
+  readonly enabled: boolean;
+  readonly isDefault?: boolean;
+}
+
+function projectStatusForProviderInstance(
+  status: ServerProviderStatus,
+  instance: ProviderStatusProjectionInstance,
+): ServerProviderStatus {
+  const projected = {
+    ...status,
+    instanceId: instance.instanceId,
+    driver: instance.driver,
+    displayName: instance.displayName,
+    enabled: instance.enabled,
+  } satisfies ServerProviderStatus;
+  if (instance.isDefault || status.authStatus === "unknown") {
+    return projected;
+  }
+  const { authType, authLabel, ...withoutAuthMetadata } = projected;
+  void authType;
+  void authLabel;
+  return {
+    ...withoutAuthMetadata,
+    status: projected.status === "ready" ? "warning" : projected.status,
+    authStatus: "unknown",
+    message: projected.message ?? "Authentication has not been checked for this provider instance.",
+  } satisfies ServerProviderStatus;
+}
+
 function mergeProviderStatusUpdates(
   previousStatuses: ReadonlyArray<ServerProviderStatus>,
   updatedStatuses: ReadonlyArray<ServerProviderStatus>,
@@ -1789,13 +1822,7 @@ export function projectProviderStatusesForSettings(
           ];
     const projectStatusForInstances = (baseStatus: ServerProviderStatus) => {
       for (const instance of instances) {
-        projected.push({
-          ...baseStatus,
-          instanceId: instance.instanceId,
-          driver: instance.driver,
-          displayName: instance.displayName,
-          enabled: instance.enabled,
-        });
+        projected.push(projectStatusForProviderInstance(baseStatus, instance));
       }
     };
 
@@ -1824,13 +1851,7 @@ export function projectProviderStatusesForSettings(
     if (status && !isDisabledProviderStatusOverlay(status)) {
       for (const instance of instances) {
         if (instance.enabled) {
-          projected.push({
-            ...status,
-            instanceId: instance.instanceId,
-            driver: instance.driver,
-            displayName: instance.displayName,
-            enabled: true,
-          });
+          projected.push(projectStatusForProviderInstance(status, instance));
           continue;
         }
         projected.push({

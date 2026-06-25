@@ -26,6 +26,7 @@ import {
   normalizeModelSlug,
   resolveSelectableModel,
 } from "@t3tools/shared/model";
+import { codexAccountInstanceId } from "@t3tools/shared/providerInstances";
 import { useLocalStorage } from "./hooks/useLocalStorage";
 import { EnvMode } from "./components/BranchToolbar.logic";
 import { formatProviderModelOptionName, type ProviderModelOption } from "./providerModelOptions";
@@ -505,7 +506,7 @@ const PROVIDER_INSTANCE_PROVIDER_ORDER = [
 ] as const satisfies ReadonlyArray<ProviderKind>;
 
 function providerInstanceIdForCodexAccount(accountId: string): ProviderInstanceId {
-  return accountId === DEFAULT_CODEX_ACCOUNT_ID ? "codex" : `codex_${accountId}`;
+  return accountId === DEFAULT_CODEX_ACCOUNT_ID ? "codex" : codexAccountInstanceId(accountId);
 }
 
 function defaultProviderInstanceLabel(provider: ProviderKind): string {

@@ -124,10 +124,24 @@ export function resolveCodexHomeAllowlistCandidates(
   const shadow = input.shadowHomePath
     ? resolveBaseCodexHomePath(env, input.shadowHomePath)
     : undefined;
+  const accountSegment = resolveCodexHomeOverlayAccountSegment({
+    homePath: source,
+    ...(input.accountId ? { accountId: input.accountId } : {}),
+    ...(shadow ? { shadowHomePath: shadow } : {}),
+  });
   const overlay = resolveDpCodeCodexHomeOverlayPath(env, source);
+  const accountOverlay = accountSegment
+    ? resolveDpCodeCodexHomeOverlayPath(env, source, accountSegment)
+    : undefined;
   const sourceResolved = path.resolve(source);
   const overlayResolved = path.resolve(overlay);
   const candidates = sourceResolved === overlayResolved ? [source] : [source, overlay];
+  if (
+    accountOverlay &&
+    !candidates.some((candidate) => path.resolve(candidate) === path.resolve(accountOverlay))
+  ) {
+    candidates.push(accountOverlay);
+  }
   if (shadow && !candidates.some((candidate) => path.resolve(candidate) === path.resolve(shadow))) {
     candidates.push(shadow);
   }

@@ -5,6 +5,7 @@
 
 import { Schema } from "effect";
 import { describe, expect, it } from "vitest";
+import { ProviderInstanceId } from "@t3tools/contracts";
 
 import {
   AppSettingsSchema,
@@ -22,6 +23,7 @@ import {
   getCustomModelsForProvider,
   getDefaultCustomModelsForProvider,
   getGitTextGenerationModelOptions,
+  getProviderInstanceOptions,
   getProviderStartOptions,
   MODEL_PROVIDER_SETTINGS,
   normalizeChatFontSizePx,
@@ -695,6 +697,29 @@ describe("getProviderStartOptions", () => {
         piBinaryPath: "pi",
       }),
     ).toBeUndefined();
+  });
+});
+
+describe("getProviderInstanceOptions", () => {
+  it("keeps derived Codex account instance ids schema-valid for long account ids", () => {
+    const accountId = `a${"b".repeat(63)}`;
+    const options = getProviderInstanceOptions({
+      codexAccounts: [
+        {
+          id: accountId,
+          label: "Long Codex Account",
+          homePath: "",
+          shadowHomePath: "",
+        },
+      ],
+      codexHomePath: "",
+      providerInstances: {},
+      selectedCodexAccountId: "default",
+    });
+
+    const accountOption = options.find((option) => option.label === "Long Codex Account");
+    expect(accountOption?.instanceId.length).toBeLessThanOrEqual(64);
+    expect(Schema.is(ProviderInstanceId)(accountOption?.instanceId)).toBe(true);
   });
 });
 

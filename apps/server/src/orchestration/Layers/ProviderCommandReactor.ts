@@ -94,44 +94,43 @@ function toNonEmptyProviderInput(value: string | undefined): string | undefined 
   return normalized && normalized.length > 0 ? normalized : undefined;
 }
 
-function normalizeCodexProviderOptionsForComparison(
+function normalizeProviderOptionsForComparison(
+  provider: ProviderKind,
   providerOptions: ProviderStartOptions | undefined,
-): NonNullable<ProviderStartOptions["codex"]> | undefined {
-  const codex = providerOptions?.codex;
-  if (!codex) {
+): Record<string, unknown> | undefined {
+  const rawOptions = providerOptions?.[provider];
+  if (!rawOptions || typeof rawOptions !== "object") {
     return undefined;
   }
-  const binaryPath = toNonEmptyProviderInput(codex.binaryPath);
-  const homePath = toNonEmptyProviderInput(codex.homePath);
-  const shadowHomePath = toNonEmptyProviderInput(codex.shadowHomePath);
-  const accountId = toNonEmptyProviderInput(codex.accountId);
-  const normalized = {
-    ...(binaryPath ? { binaryPath } : {}),
-    ...(homePath ? { homePath } : {}),
-    ...(shadowHomePath ? { shadowHomePath } : {}),
-    ...(accountId ? { accountId } : {}),
-  } satisfies NonNullable<ProviderStartOptions["codex"]>;
+  const normalized = Object.fromEntries(
+    Object.entries(rawOptions)
+      .map(([key, value]) => [
+        key,
+        typeof value === "string" ? toNonEmptyProviderInput(value) : value,
+      ])
+      .filter(([, value]) => value !== undefined && value !== ""),
+  );
   return Object.keys(normalized).length > 0 ? normalized : undefined;
 }
 
-function shouldRestartCodexForProviderOptionsChange(input: {
+function shouldRestartForProviderOptionsChange(input: {
   readonly requestedProvider: ProviderKind;
   readonly previousProviderOptions: ProviderStartOptions | undefined;
   readonly requestedProviderOptions: ProviderStartOptions | undefined;
 }): boolean {
-  if (input.requestedProvider !== "codex") {
-    return false;
-  }
-  if (input.requestedProviderOptions === undefined) {
-    return normalizeCodexProviderOptionsForComparison(input.previousProviderOptions) !== undefined;
-  }
   return !Equal.equals(
-    normalizeCodexProviderOptionsForComparison(input.previousProviderOptions),
-    normalizeCodexProviderOptionsForComparison(input.requestedProviderOptions),
+    normalizeProviderOptionsForComparison(input.requestedProvider, input.previousProviderOptions),
+    normalizeProviderOptionsForComparison(input.requestedProvider, input.requestedProviderOptions),
   );
 }
 
-function shouldDropCodexResumeCursorForProviderOptionsChange(input: {
+function readNormalizedOption(options: Record<string, unknown> | undefined, key: string): string {
+  const value = options?.[key];
+  return typeof value === "string" ? value : "";
+}
+
+function shouldDropResumeCursorForProviderOptionsChange(input: {
+  readonly requestedProvider: ProviderKind;
   readonly providerOptionsChanged: boolean;
   readonly previousProviderOptions: ProviderStartOptions | undefined;
   readonly requestedProviderOptions: ProviderStartOptions | undefined;
@@ -139,9 +138,30 @@ function shouldDropCodexResumeCursorForProviderOptionsChange(input: {
   if (!input.providerOptionsChanged) {
     return false;
   }
-  const previous = normalizeCodexProviderOptionsForComparison(input.previousProviderOptions);
-  const requested = normalizeCodexProviderOptionsForComparison(input.requestedProviderOptions);
-  return (previous?.homePath ?? "") !== (requested?.homePath ?? "");
+  const previous = normalizeProviderOptionsForComparison(
+    input.requestedProvider,
+    input.previousProviderOptions,
+  );
+  const requested = normalizeProviderOptionsForComparison(
+    input.requestedProvider,
+    input.requestedProviderOptions,
+  );
+  switch (input.requestedProvider) {
+    case "codex":
+      return (
+        readNormalizedOption(previous, "homePath") !==
+          readNormalizedOption(requested, "homePath") ||
+        readNormalizedOption(previous, "shadowHomePath") !==
+          readNormalizedOption(requested, "shadowHomePath") ||
+        readNormalizedOption(previous, "accountId") !== readNormalizedOption(requested, "accountId")
+      );
+    case "claudeAgent":
+      return (
+        readNormalizedOption(previous, "homePath") !== readNormalizedOption(requested, "homePath")
+      );
+    default:
+      return false;
+  }
 }
 
 function escapeRegExp(value: string): string {
@@ -805,7 +825,7 @@ const make = Effect.gen(function* () {
         requestedModelSelection !== undefined &&
         !Equal.equals(previousModelSelection, requestedModelSelection);
       const previousProviderOptions = threadProviderOptions.get(threadId);
-      const providerOptionsChanged = shouldRestartCodexForProviderOptionsChange({
+      const providerOptionsChanged = shouldRestartForProviderOptionsChange({
         requestedProvider: desiredModelSelection.provider,
         previousProviderOptions,
         requestedProviderOptions: options?.providerOptions,
@@ -827,7 +847,8 @@ const make = Effect.gen(function* () {
         providerInstanceChanged ||
         shouldRestartForModelChange ||
         runtimeModeChanged ||
-        shouldDropCodexResumeCursorForProviderOptionsChange({
+        shouldDropResumeCursorForProviderOptionsChange({
+          requestedProvider: desiredModelSelection.provider,
           providerOptionsChanged,
           previousProviderOptions,
           requestedProviderOptions: options?.providerOptions,
@@ -931,8 +952,16 @@ const make = Effect.gen(function* () {
       ...(input.providerOptions !== undefined ? { providerOptions: input.providerOptions } : {}),
       ...(input.runtimeMode !== undefined ? { runtimeMode: input.runtimeMode } : {}),
     });
-    if (input.providerOptions !== undefined) {
+    const providerForOptionsCache =
+      input.modelSelection?.provider ?? thread.modelSelection.provider;
+    if (
+      input.providerOptions !== undefined &&
+      normalizeProviderOptionsForComparison(providerForOptionsCache, input.providerOptions) !==
+        undefined
+    ) {
       threadProviderOptions.set(input.threadId, input.providerOptions);
+    } else {
+      threadProviderOptions.delete(input.threadId);
     }
     if (input.modelSelection !== undefined) {
       threadModelSelections.set(input.threadId, input.modelSelection);

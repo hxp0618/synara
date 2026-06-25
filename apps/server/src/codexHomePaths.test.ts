@@ -153,6 +153,10 @@ describe("resolveCodexHomeAllowlistCandidates", () => {
   });
 
   it("includes the shadow home for direct account writes", () => {
+    const segment = resolveCodexHomeOverlayAccountSegment({
+      homePath: "/users/me/.codex",
+      shadowHomePath: "/users/me/.codex_work",
+    });
     const candidates = resolveCodexHomeAllowlistCandidates({
       env: { SYNARA_HOME: "/synara/runtime" },
       homePath: "/users/me/.codex",
@@ -161,7 +165,25 @@ describe("resolveCodexHomeAllowlistCandidates", () => {
     assert.deepEqual(candidates, [
       "/users/me/.codex",
       path.join("/synara/runtime", "codex-home-overlay"),
+      path.join("/synara/runtime", "codex-home-overlay", "accounts", segment ?? ""),
       "/users/me/.codex_work",
+    ]);
+  });
+
+  it("includes account-scoped overlays for account-id-only Codex homes", () => {
+    const segment = resolveCodexHomeOverlayAccountSegment({
+      accountId: "work",
+      homePath: "/users/me/.codex",
+    });
+    const candidates = resolveCodexHomeAllowlistCandidates({
+      env: { SYNARA_HOME: "/synara/runtime" },
+      homePath: "/users/me/.codex",
+      accountId: "work",
+    });
+    assert.deepEqual(candidates, [
+      "/users/me/.codex",
+      path.join("/synara/runtime", "codex-home-overlay"),
+      path.join("/synara/runtime", "codex-home-overlay", "accounts", segment ?? ""),
     ]);
   });
 });
