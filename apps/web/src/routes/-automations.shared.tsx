@@ -645,8 +645,8 @@ export function maxIterationOptions(
   return [{ value, label: maxIterationLabel(value) }, ...MAX_ITERATION_PRESETS];
 }
 
-// Shown at the top of an automation's detail panel when it still needs a one-time risk
-// approval before Synara can run or update every configured path without asking again.
+// Shown at the top of an automation's detail panel when saving or manual run actions need
+// one-time risk approval.
 export function AutomationApprovalBanner({
   warnings,
   busy,
@@ -666,8 +666,8 @@ export function AutomationApprovalBanner({
       <AlertTitle>Approval needed</AlertTitle>
       <AlertDescription>
         <span>
-          This automation needs your approval once before Synara can run or update it. It
-          won&apos;t ask again.
+          This automation needs your approval once before Synara can save changes. When a
+          warning blocks manual runs, Run now stays disabled until you approve it.
         </span>
         <ul className="flex flex-col gap-1.5">
           {warnings.map((warning) => (

@@ -197,6 +197,8 @@ describe("automation draft warnings", () => {
 describe("automationApprovalGaps", () => {
   const base = {
     schedule: { type: "daily" as const, timeOfDay: "09:00" },
+    enabled: true,
+    maxIterations: null,
     mode: "standalone" as const,
     runtimeMode: "approval-required" as const,
     worktreeMode: "worktree" as const,
@@ -333,6 +335,7 @@ describe("automationApprovalGaps", () => {
     );
     expect(gaps.runBlockingWarnings.map((warning) => warning.id)).toEqual(["full-access"]);
     expect(new Set(gaps.acknowledgedRisks)).toEqual(new Set(["full-access", "fast-interval"]));
+    expect(gaps.maxIterations).toBe(10);
   });
 
   it("surfaces fast-loop approval for imported definitions without blocking run now", () => {
@@ -344,6 +347,33 @@ describe("automationApprovalGaps", () => {
     expect(gaps.warnings.map((warning) => warning.id)).toEqual(["fast-recurring-interval"]);
     expect(gaps.runBlockingWarnings).toEqual([]);
     expect(gaps.acknowledgedRisks).toEqual(["fast-interval"]);
+    expect(gaps.maxIterations).toBe(10);
+  });
+
+  it("surfaces a cap-only fast-loop repair for legacy acknowledged definitions", () => {
+    const gaps = automationApprovalGaps({
+      ...base,
+      schedule: { type: "interval", everySeconds: 15 },
+      maxIterations: 25,
+      acknowledgedRisks: ["fast-interval"],
+    });
+    expect(gaps.warnings.map((warning) => warning.id)).toEqual(["fast-recurring-interval"]);
+    expect(gaps.runBlockingWarnings).toEqual([]);
+    expect(gaps.acknowledgedRisks).toEqual(["fast-interval"]);
+    expect(gaps.maxIterations).toBe(10);
+  });
+
+  it("does not show a cap-only repair for paused legacy fast loops", () => {
+    const gaps = automationApprovalGaps({
+      ...base,
+      schedule: { type: "interval", everySeconds: 15 },
+      enabled: false,
+      acknowledgedRisks: ["fast-interval"],
+    });
+    expect(gaps.warnings).toEqual([]);
+    expect(gaps.runBlockingWarnings).toEqual([]);
+    expect(gaps.acknowledgedRisks).toEqual(["fast-interval"]);
+    expect(gaps.maxIterations).toBeUndefined();
   });
 });
 

@@ -158,6 +158,8 @@ export function buildAutomationDraftWarnings(input: {
 // disable Run now. `acknowledgedRisks` is the full set to persist on approval.
 export function automationApprovalGaps(input: {
   readonly schedule: AutomationSchedule;
+  readonly enabled: boolean;
+  readonly maxIterations: number | null;
   readonly mode: AutomationMode;
   readonly runtimeMode: RuntimeMode;
   readonly worktreeMode: AutomationWorktreeMode;
@@ -167,9 +169,11 @@ export function automationApprovalGaps(input: {
   readonly warnings: readonly AutomationDraftWarning[];
   readonly runBlockingWarnings: readonly AutomationDraftWarning[];
   readonly acknowledgedRisks: readonly AutomationAcknowledgedRiskId[];
+  readonly maxIterations: number | undefined;
 } {
   const acknowledged = new Set(input.acknowledgedRisks);
   const approvalIds = new Set<AutomationDraftWarningId>();
+  const maxIterations = maxIterationsForFastIntervalApproval(input);
   // Definite run blockers: full-access and a standalone local checkout. Heartbeats reuse
   // their target thread, so local-checkout consent is needed for updates but not dispatch.
   const runBlockingIds = new Set<AutomationDraftWarningId>();
@@ -190,6 +194,9 @@ export function automationApprovalGaps(input: {
   ) {
     approvalIds.add("fast-recurring-interval");
   }
+  if (maxIterations !== undefined) {
+    approvalIds.add("fast-recurring-interval");
+  }
   if (
     approvalIds.size > 0 &&
     input.mode === "standalone" &&
@@ -205,6 +212,7 @@ export function automationApprovalGaps(input: {
       warnings: [],
       runBlockingWarnings: [],
       acknowledgedRisks: input.acknowledgedRisks,
+      maxIterations: undefined,
     };
   }
   const warnings = buildAutomationDraftWarnings({
@@ -223,7 +231,12 @@ export function automationApprovalGaps(input: {
   for (const risk of acknowledgedRiskIdsForDraft(warnings, acknowledgedWarningIds)) {
     required.add(risk);
   }
-  return { warnings, runBlockingWarnings, acknowledgedRisks: Array.from(required) };
+  return {
+    warnings,
+    runBlockingWarnings,
+    acknowledgedRisks: Array.from(required),
+    maxIterations,
+  };
 }
 
 // Approval of an enabled legacy fast loop must also satisfy the server's hard iteration cap.
