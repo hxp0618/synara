@@ -8,7 +8,11 @@ export interface TextGenerationProviderInput {
 
 export function hasDedicatedTextGenerationProvider(provider: ProviderKind | undefined): boolean {
   return (
-    provider === "codex" || provider === "cursor" || provider === "kilo" || provider === "opencode"
+    provider === "claudeAgent" ||
+    provider === "codex" ||
+    provider === "cursor" ||
+    provider === "kilo" ||
+    provider === "opencode"
   );
 }
 

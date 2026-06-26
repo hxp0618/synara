@@ -2196,8 +2196,8 @@ layer("AutomationService", (it) => {
         mode: "heartbeat",
         targetThreadId,
         modelSelection: {
-          provider: "claudeAgent",
-          model: "claude-opus-4-8",
+          provider: "gemini",
+          model: "gemini-2.5-pro",
         },
         completionPolicy: heartbeatCompletionPolicy("the PR is ready"),
       });
@@ -2219,6 +2219,7 @@ layer("AutomationService", (it) => {
 
       assert.deepStrictEqual(completionEvaluationInputs.at(-1)?.modelSelection, {
         provider: "cursor",
+        instanceId: "cursor",
         model: "composer-2",
       });
     }),

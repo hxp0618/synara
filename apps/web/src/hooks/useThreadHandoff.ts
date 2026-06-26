@@ -5,14 +5,13 @@
 
 import { useNavigate } from "@tanstack/react-router";
 import { useCallback } from "react";
-import { type ProviderKind } from "@t3tools/contracts";
+import { type ProviderInstanceId, type ProviderKind } from "@t3tools/contracts";
 import { useComposerDraftStore } from "../composerDraftStore";
 import { useProviderStatusesForLocalConfig } from "./useProviderStatusesForLocalConfig";
 import {
   buildThreadHandoffImportedActivities,
   buildThreadHandoffImportedMessages,
   canCreateThreadHandoff,
-  resolveAvailableHandoffTargetProviders,
   resolveThreadHandoffModelSelection,
   resolveThreadHandoffTitle,
 } from "../lib/threadHandoff";
@@ -29,7 +28,11 @@ export function useThreadHandoff() {
   const providerStatuses = useProviderStatusesForLocalConfig();
 
   const createThreadHandoff = useCallback(
-    async (thread: Thread, targetProvider: ProviderKind): Promise<Thread["id"]> => {
+    async (
+      thread: Thread,
+      targetProvider: ProviderKind,
+      targetProviderInstanceId?: ProviderInstanceId,
+    ): Promise<Thread["id"]> => {
       const api = readNativeApi();
       if (!api) {
         throw new Error("Native API not found");
@@ -43,15 +46,20 @@ export function useThreadHandoff() {
       if (!canCreateThreadHandoff({ thread })) {
         throw new Error("This thread cannot be handed off yet.");
       }
+      const sourceProviderInstanceId =
+        thread.session?.providerInstanceId ??
+        thread.modelSelection.instanceId ??
+        thread.modelSelection.provider;
+      const targetInstanceId = targetProviderInstanceId ?? targetProvider;
       if (
-        !resolveAvailableHandoffTargetProviders(thread.modelSelection.provider).includes(
-          targetProvider,
-        )
+        targetProvider === thread.modelSelection.provider &&
+        targetInstanceId === sourceProviderInstanceId
       ) {
         throw new Error("This handoff target is not available for the current thread.");
       }
       const targetAvailability = resolveProviderSendAvailability({
         provider: targetProvider,
+        ...(targetProviderInstanceId ? { instanceId: targetProviderInstanceId } : {}),
         statuses: providerStatuses,
       });
       if (!targetAvailability.usable) {
@@ -75,6 +83,7 @@ export function useThreadHandoff() {
         modelSelection: resolveThreadHandoffModelSelection({
           sourceThread: thread,
           targetProvider,
+          targetProviderInstanceId,
           projectDefaultModelSelection: project.defaultModelSelection,
           stickyModelSelectionByProvider,
         }),

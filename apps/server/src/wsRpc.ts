@@ -22,6 +22,11 @@ import { clamp } from "effect/Number";
 import { Effect, FileSystem, Layer, Option, Path, Queue, Schema, Stream } from "effect";
 import { HttpRouter, HttpServerRequest } from "effect/unstable/http";
 import { RpcSerialization, RpcServer } from "effect/unstable/rpc";
+import {
+  providerStartOptionsFromInstance,
+  resolveModelSelectionInstanceId,
+  resolveProviderInstance,
+} from "@t3tools/shared/providerInstances";
 
 import { AutomationService } from "./automation/Services/AutomationService";
 import { authErrorResponse, makeEffectAuthRequest } from "./auth/http";
@@ -52,7 +57,7 @@ import { ProfileStatsQuery } from "./profileStats";
 import { ServerEnvironment } from "./environment/Services/ServerEnvironment";
 import { ServerLifecycleEvents } from "./serverLifecycleEvents";
 import { ServerRuntimeStartup } from "./serverRuntimeStartup";
-import { ServerSettingsService } from "./serverSettings";
+import { redactServerSettingsForClient, ServerSettingsService } from "./serverSettings";
 import { TerminalManager } from "./terminal/Services/Manager";
 import { TerminalThreadTitleTracker } from "./terminal/terminalThreadTitleTracker";
 import { WorkspaceEntries } from "./workspace/Services/WorkspaceEntries";
@@ -434,6 +439,7 @@ export const makeWsRpcLayer = () =>
         projectionSnapshotQuery: projectionReadModelQuery,
         providerAdapterRegistry,
         providerService,
+        serverSettings,
       });
 
       // Terminal-first threads are created with the generic "New terminal" placeholder.
@@ -732,7 +738,25 @@ export const makeWsRpcLayer = () =>
         [WS_METHODS.gitReadWorkingTreeDiff]: (input) =>
           rpcEffect(gitManager.readWorkingTreeDiff(input), "Failed to read working tree diff"),
         [WS_METHODS.gitSummarizeDiff]: (input) =>
-          rpcEffect(gitManager.summarizeDiff(input), "Failed to summarize diff"),
+          rpcEffect(
+            Effect.gen(function* () {
+              if (input.providerOptions || !input.textGenerationModelSelection) {
+                return yield* gitManager.summarizeDiff(input);
+              }
+              const settings = yield* serverSettings.getSettings;
+              const instance = resolveProviderInstance(settings, {
+                provider: input.textGenerationModelSelection.provider,
+                instanceId: resolveModelSelectionInstanceId(input.textGenerationModelSelection),
+              });
+              return yield* gitManager.summarizeDiff({
+                ...input,
+                ...(instance
+                  ? { providerOptions: providerStartOptionsFromInstance(instance) }
+                  : {}),
+              });
+            }),
+            "Failed to summarize diff",
+          ),
         [WS_METHODS.gitPull]: (input) =>
           rpcEffect(
             git.pullCurrentBranch(input.cwd).pipe(Effect.tap(() => refreshGitStatus(input.cwd))),
@@ -741,21 +765,36 @@ export const makeWsRpcLayer = () =>
         [WS_METHODS.gitRunStackedAction]: (input) =>
           bufferLiveUiStream(
             Stream.callback<GitActionProgressEvent, WsRpcError>((queue) =>
-              gitManager
-                .runStackedAction(input, {
-                  actionId: input.actionId,
-                  progressReporter: {
-                    publish: (event) => Queue.offer(queue, event).pipe(Effect.asVoid),
-                  },
-                })
-                .pipe(
-                  Effect.tap(() => refreshGitStatus(input.cwd)),
-                  Effect.matchCauseEffect({
-                    onFailure: (cause) =>
-                      Queue.fail(queue, toWsRpcError(cause, "Git action failed")),
-                    onSuccess: () => Queue.end(queue).pipe(Effect.asVoid),
+              Effect.gen(function* () {
+                if (input.providerOptions || !input.textGenerationModelSelection) {
+                  return input;
+                }
+                const settings = yield* serverSettings.getSettings;
+                const instance = resolveProviderInstance(settings, {
+                  provider: input.textGenerationModelSelection.provider,
+                  instanceId: resolveModelSelectionInstanceId(input.textGenerationModelSelection),
+                });
+                return {
+                  ...input,
+                  ...(instance
+                    ? { providerOptions: providerStartOptionsFromInstance(instance) }
+                    : {}),
+                };
+              }).pipe(
+                Effect.flatMap((runInput) =>
+                  gitManager.runStackedAction(runInput, {
+                    actionId: input.actionId,
+                    progressReporter: {
+                      publish: (event) => Queue.offer(queue, event).pipe(Effect.asVoid),
+                    },
                   }),
                 ),
+                Effect.tap(() => refreshGitStatus(input.cwd)),
+                Effect.matchCauseEffect({
+                  onFailure: (cause) => Queue.fail(queue, toWsRpcError(cause, "Git action failed")),
+                  onSuccess: () => Queue.end(queue).pipe(Effect.asVoid),
+                }),
+              ),
             ),
             { label: "git.stacked-action" },
           ),
@@ -897,7 +936,10 @@ export const makeWsRpcLayer = () =>
         [WS_METHODS.serverGetEnvironment]: () =>
           rpcEffect(serverEnvironment.getDescriptor, "Failed to load server environment"),
         [WS_METHODS.serverGetSettings]: () =>
-          rpcEffect(serverSettings.getSettings, "Failed to load server settings"),
+          rpcEffect(
+            serverSettings.getSettings.pipe(Effect.map(redactServerSettingsForClient)),
+            "Failed to load server settings",
+          ),
         [WS_METHODS.serverUpdateSettings]: (input) =>
           rpcEffect(serverSettings.updateSettings(input), "Failed to update server settings"),
         [WS_METHODS.serverRefreshProviders]: () =>
@@ -982,6 +1024,13 @@ export const makeWsRpcLayer = () =>
               const settings = yield* serverSettings.getSettings;
               const modelSelection =
                 input.textGenerationModelSelection ?? settings.textGenerationModelSelection;
+              const fallbackInstance = resolveProviderInstance(settings, {
+                provider: modelSelection.provider,
+                instanceId: resolveModelSelectionInstanceId(modelSelection),
+              });
+              const providerOptions =
+                input.providerOptions ??
+                (fallbackInstance ? providerStartOptionsFromInstance(fallbackInstance) : undefined);
               return yield* textGeneration.generateThreadRecap({
                 cwd: input.cwd,
                 newMaterial: input.newMaterial,
@@ -990,7 +1039,7 @@ export const makeWsRpcLayer = () =>
                 ...(input.codexHomePath ? { codexHomePath: input.codexHomePath } : {}),
                 model: input.textGenerationModel ?? modelSelection.model,
                 modelSelection,
-                ...(input.providerOptions ? { providerOptions: input.providerOptions } : {}),
+                ...(providerOptions ? { providerOptions } : {}),
               });
             }),
             "Failed to generate thread recap",
@@ -1001,6 +1050,13 @@ export const makeWsRpcLayer = () =>
               const settings = yield* serverSettings.getSettings;
               const modelSelection =
                 input.textGenerationModelSelection ?? settings.textGenerationModelSelection;
+              const fallbackInstance = resolveProviderInstance(settings, {
+                provider: modelSelection.provider,
+                instanceId: resolveModelSelectionInstanceId(modelSelection),
+              });
+              const providerOptions =
+                input.providerOptions ??
+                (fallbackInstance ? providerStartOptionsFromInstance(fallbackInstance) : undefined);
               return yield* textGeneration.generateAutomationIntent({
                 cwd: input.cwd,
                 message: input.message,
@@ -1009,7 +1065,7 @@ export const makeWsRpcLayer = () =>
                 ...(input.codexHomePath ? { codexHomePath: input.codexHomePath } : {}),
                 model: input.textGenerationModel ?? modelSelection.model,
                 modelSelection,
-                ...(input.providerOptions ? { providerOptions: input.providerOptions } : {}),
+                ...(providerOptions ? { providerOptions } : {}),
               });
             }),
             "Failed to generate automation intent",
@@ -1083,7 +1139,7 @@ export const makeWsRpcLayer = () =>
                 }).pipe(
                   Stream.map((settings) => ({
                     type: "settingsUpdated" as const,
-                    payload: { settings },
+                    payload: { settings: redactServerSettingsForClient(settings) },
                   })),
                 ),
               ),
@@ -1102,12 +1158,16 @@ export const makeWsRpcLayer = () =>
         [WS_METHODS.subscribeServerSettings]: () =>
           Stream.concat(
             Stream.fromEffect(
-              serverSettings.getSettings.pipe(Effect.map((settings) => ({ settings }))),
+              serverSettings.getSettings.pipe(
+                Effect.map((settings) => ({ settings: redactServerSettingsForClient(settings) })),
+              ),
             ),
             bufferLiveUiStream(serverSettings.streamChanges, {
               label: "server.settings",
               onDroppedEvents: failLiveUiStreamForSnapshotResync,
-            }).pipe(Stream.map((settings) => ({ settings }))),
+            }).pipe(
+              Stream.map((settings) => ({ settings: redactServerSettingsForClient(settings) })),
+            ),
           ).pipe(Stream.mapError((cause) => toWsRpcError(cause, "Server settings stream failed"))),
 
         [WS_METHODS.providerGetComposerCapabilities]: (input) =>

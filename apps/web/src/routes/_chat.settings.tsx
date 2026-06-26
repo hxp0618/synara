@@ -7,6 +7,7 @@ import {
   PROVIDER_DISPLAY_NAMES,
   type ProviderInstanceConfig,
   type ProviderInstanceConfigMap,
+  type ProviderInstanceId,
   type ProviderKind,
   type ServerProviderStatus,
   type ThreadId,
@@ -50,6 +51,7 @@ import {
   getCustomModelsForProvider,
   getGitTextGenerationModelOptions,
   getProviderInstanceOptions,
+  getUnsupportedProviderInstanceOptions,
   MAX_CUSTOM_MODEL_LENGTH,
   MIN_CHAT_FONT_SIZE_PX,
   MIN_TERMINAL_FONT_SIZE_PX,
@@ -57,7 +59,7 @@ import {
   normalizeChatFontSizePx,
   normalizeTerminalFontFamily,
   normalizeTerminalFontSizePx,
-  patchCustomModels,
+  patchCustomModelsForProviderInstance,
   TERMINAL_FONT_FAMILY_SUGGESTIONS,
   useAppSettings,
 } from "../appSettings";
@@ -276,6 +278,13 @@ type InstallProviderSettings = {
   agentDirKey?: "piAgentDir";
   agentDirPlaceholder?: string;
   agentDirDescription?: ReactNode;
+};
+
+type CustomModelTargetOption = {
+  readonly instanceId: ProviderInstanceId;
+  readonly provider: ProviderKind;
+  readonly label: string;
+  readonly isDefault: boolean;
 };
 
 const PROVIDER_VISIBILITY_OPTIONS: ReadonlyArray<{ provider: ProviderKind; title: string }> = [
@@ -523,6 +532,57 @@ function isProviderSelectOption(value: string): value is ProviderKind {
   return PROVIDER_SELECT_OPTIONS.includes(value as ProviderKind);
 }
 
+function readProviderInstanceConfigString(config: unknown, key: string): string {
+  if (!config || typeof config !== "object" || Array.isArray(config)) return "";
+  const value = (config as Record<string, unknown>)[key];
+  return typeof value === "string" ? value : "";
+}
+
+function readProviderInstanceConfigBoolean(config: unknown, key: string): boolean {
+  if (!config || typeof config !== "object" || Array.isArray(config)) return false;
+  return (config as Record<string, unknown>)[key] === true;
+}
+
+function readStoredCustomModelsForTarget(
+  settings: Pick<AppSettings, "providerInstances"> &
+    Parameters<typeof getCustomModelsForProvider>[0],
+  target: CustomModelTargetOption,
+): readonly string[] {
+  if (target.isDefault || target.instanceId === target.provider) {
+    return getCustomModelsForProvider(settings, target.provider);
+  }
+
+  const raw = settings.providerInstances[target.instanceId];
+  const config = raw?.config;
+  const customModels =
+    config && typeof config === "object" && !Array.isArray(config)
+      ? (config as Record<string, unknown>).customModels
+      : null;
+  return Array.isArray(customModels)
+    ? customModels.filter((entry): entry is string => typeof entry === "string")
+    : [];
+}
+
+function removeProviderInstanceCustomModels(
+  providerInstances: ProviderInstanceConfigMap,
+): ProviderInstanceConfigMap {
+  const nextInstances: Record<string, ProviderInstanceConfig> = {};
+  for (const [instanceId, instance] of Object.entries(providerInstances)) {
+    const config = instance.config;
+    if (!config || typeof config !== "object" || Array.isArray(config)) {
+      nextInstances[instanceId] = instance;
+      continue;
+    }
+    const remainingConfig = { ...(config as Record<string, unknown>) };
+    delete remainingConfig.customModels;
+    nextInstances[instanceId] = {
+      ...instance,
+      config: remainingConfig,
+    };
+  }
+  return nextInstances as ProviderInstanceConfigMap;
+}
+
 function ProviderDocsLinks({ docs }: { docs: InstallProviderSettings["docs"] }) {
   return (
     <div className={cn(SETTINGS_INSET_LIST_CLASS_NAME, "px-3 py-2.5")}>
@@ -590,11 +650,22 @@ function providerUpdateStatusLabel(provider: ServerProviderStatus): string | nul
   return currentVersion ? `Current ${currentVersion}` : null;
 }
 
+function providerStatusTargetKey(
+  provider: Pick<ServerProviderStatus, "provider" | "instanceId">,
+): ProviderInstanceId | ProviderKind {
+  return provider.instanceId ?? provider.provider;
+}
+
+function providerStatusDisplayName(provider: ServerProviderStatus): string {
+  return provider.displayName ?? PROVIDER_DISPLAY_NAMES[provider.provider];
+}
+
 function providerUpdateFailureMessage(provider: ServerProviderStatus | undefined): string | null {
   const state = provider?.updateState;
   if (!state || (state.status !== "failed" && state.status !== "unchanged")) {
     return null;
   }
+
   return state.output?.trim() || state.message || "The provider update did not complete.";
 }
 
@@ -683,14 +754,10 @@ function SettingsRouteView() {
     ),
     pi: Boolean(settings.piBinaryPath || settings.piAgentDir),
   });
-  const [updatingProviders, setUpdatingProviders] = useState<ReadonlySet<ProviderKind>>(
-    () => new Set(),
-  );
-  const [selectedCustomModelProvider, setSelectedCustomModelProvider] =
-    useState<ProviderKind>("codex");
-  const [customModelInputByProvider, setCustomModelInputByProvider] = useState<
-    Record<ProviderKind, string>
-  >({
+  const [updatingProviders, setUpdatingProviders] = useState<ReadonlySet<string>>(() => new Set());
+  const [selectedCustomModelTargetId, setSelectedCustomModelTargetId] =
+    useState<ProviderInstanceId>("codex");
+  const [customModelInputByTarget, setCustomModelInputByTarget] = useState<Record<string, string>>({
     codex: "",
     claudeAgent: "",
     cursor: "",
@@ -700,8 +767,8 @@ function SettingsRouteView() {
     opencode: "",
     pi: "",
   });
-  const [customModelErrorByProvider, setCustomModelErrorByProvider] = useState<
-    Partial<Record<ProviderKind, string | null>>
+  const [customModelErrorByTarget, setCustomModelErrorByTarget] = useState<
+    Partial<Record<string, string | null>>
   >({});
   const [showAllCustomModels, setShowAllCustomModels] = useState(false);
   const [browserNotificationPermission, setBrowserNotificationPermission] = useState(
@@ -764,7 +831,11 @@ function SettingsRouteView() {
   const availableEditors = serverConfigQuery.data?.availableEditors;
   const providerStatusByProvider = useMemo(
     () =>
-      new Map((serverConfigQuery.data?.providers ?? []).map((status) => [status.provider, status])),
+      new Map(
+        (serverConfigQuery.data?.providers ?? [])
+          .filter((status) => (status.instanceId ?? status.provider) === status.provider)
+          .map((status) => [status.provider, status]),
+      ),
     [serverConfigQuery.data?.providers],
   );
   const outdatedProviderStatuses = useMemo(
@@ -851,6 +922,10 @@ function SettingsRouteView() {
     textGenerationProvider,
   } = settings;
   const providerInstanceOptions = useMemo(() => getProviderInstanceOptions(settings), [settings]);
+  const unsupportedProviderInstanceOptions = useMemo(
+    () => getUnsupportedProviderInstanceOptions(settings),
+    [settings],
+  );
   const gitTextGenerationModelOptions = useMemo(
     () =>
       getGitTextGenerationModelOptions({
@@ -922,32 +997,61 @@ function SettingsRouteView() {
       PROVIDER_DISPLAY_NAMES[currentGitTextGenerationProvider]
       ? `${selectedGitTextGenerationInstanceLabel} · ${selectedGitTextGenerationModelName}`
       : selectedGitTextGenerationModelName;
+  const customModelTargetOptions = useMemo<readonly CustomModelTargetOption[]>(() => {
+    const defaultTargets = MODEL_PROVIDER_SETTINGS.map((providerSettings) => ({
+      instanceId: providerSettings.provider as ProviderInstanceId,
+      provider: providerSettings.provider,
+      label: providerSettings.title,
+      isDefault: true,
+    }));
+    const explicitTargets = providerInstanceOptions
+      .filter(
+        (instance) =>
+          !instance.isDefault && settings.providerInstances[instance.instanceId] !== undefined,
+      )
+      .map((instance) => ({
+        instanceId: instance.instanceId,
+        provider: instance.provider,
+        label: instance.label,
+        isDefault: false,
+      }));
+    return [...defaultTargets, ...explicitTargets];
+  }, [providerInstanceOptions, settings.providerInstances]);
+  const selectedCustomModelTarget =
+    customModelTargetOptions.find((target) => target.instanceId === selectedCustomModelTargetId) ??
+    customModelTargetOptions[0]!;
+  useEffect(() => {
+    if (
+      selectedCustomModelTarget &&
+      selectedCustomModelTarget.instanceId !== selectedCustomModelTargetId
+    ) {
+      setSelectedCustomModelTargetId(selectedCustomModelTarget.instanceId);
+    }
+  }, [selectedCustomModelTarget, selectedCustomModelTargetId]);
+  const selectedCustomModelProvider = selectedCustomModelTarget.provider;
   const selectedCustomModelProviderSettings = MODEL_PROVIDER_SETTINGS.find(
     (providerSettings) => providerSettings.provider === selectedCustomModelProvider,
   )!;
-  const selectedCustomModelInput = customModelInputByProvider[selectedCustomModelProvider];
-  const selectedCustomModelError = customModelErrorByProvider[selectedCustomModelProvider] ?? null;
-  const totalCustomModels =
-    settings.customCodexModels.length +
-    settings.customClaudeModels.length +
-    settings.customCursorModels.length +
-    settings.customGeminiModels.length +
-    settings.customGrokModels.length +
-    settings.customKiloModels.length +
-    settings.customOpenCodeModels.length +
-    settings.customPiModels.length;
+  const selectedCustomModelInput =
+    customModelInputByTarget[selectedCustomModelTarget.instanceId] ?? "";
+  const selectedCustomModelError =
+    customModelErrorByTarget[selectedCustomModelTarget.instanceId] ?? null;
   const savedCustomModelRows = useMemo(
     () =>
-      MODEL_PROVIDER_SETTINGS.flatMap((providerSettings) =>
-        getCustomModelsForProvider(settings, providerSettings.provider).map((slug) => ({
-          key: `${providerSettings.provider}:${slug}`,
-          provider: providerSettings.provider,
-          providerTitle: providerSettings.title,
+      customModelTargetOptions.flatMap((target) =>
+        readStoredCustomModelsForTarget(settings, target).map((slug) => ({
+          key: `${target.instanceId}:${slug}`,
+          providerTitle:
+            target.isDefault || target.label === PROVIDER_DISPLAY_NAMES[target.provider]
+              ? PROVIDER_DISPLAY_NAMES[target.provider]
+              : `${target.label} · ${PROVIDER_DISPLAY_NAMES[target.provider]}`,
+          target,
           slug,
         })),
       ),
-    [settings],
+    [customModelTargetOptions, settings],
   );
+  const totalCustomModels = savedCustomModelRows.length;
   const visibleCustomModelRows = showAllCustomModels
     ? savedCustomModelRows
     : savedCustomModelRows.slice(0, 5);
@@ -1063,75 +1167,81 @@ function SettingsRouteView() {
   }, []);
 
   const addCustomModel = useCallback(
-    (provider: ProviderKind) => {
-      const customModelInput = customModelInputByProvider[provider];
-      const customModels = getCustomModelsForProvider(settings, provider);
+    (target: CustomModelTargetOption) => {
+      const provider = target.provider;
+      const targetId = target.instanceId;
+      const customModelInput = customModelInputByTarget[targetId] ?? "";
+      const customModels = readStoredCustomModelsForTarget(settings, target);
       const normalized = normalizeModelSlug(customModelInput, provider);
       if (!normalized) {
-        setCustomModelErrorByProvider((existing) => ({
+        setCustomModelErrorByTarget((existing) => ({
           ...existing,
-          [provider]: "Enter a model slug.",
+          [targetId]: "Enter a model slug.",
         }));
         return;
       }
       if (getModelOptions(provider).some((option) => option.slug === normalized)) {
-        setCustomModelErrorByProvider((existing) => ({
+        setCustomModelErrorByTarget((existing) => ({
           ...existing,
-          [provider]: "That model is already built in.",
+          [targetId]: "That model is already built in.",
         }));
         return;
       }
       if (normalized.length > MAX_CUSTOM_MODEL_LENGTH) {
-        setCustomModelErrorByProvider((existing) => ({
+        setCustomModelErrorByTarget((existing) => ({
           ...existing,
-          [provider]: `Model slugs must be ${MAX_CUSTOM_MODEL_LENGTH} characters or less.`,
+          [targetId]: `Model slugs must be ${MAX_CUSTOM_MODEL_LENGTH} characters or less.`,
         }));
         return;
       }
       if (customModels.includes(normalized)) {
-        setCustomModelErrorByProvider((existing) => ({
+        setCustomModelErrorByTarget((existing) => ({
           ...existing,
-          [provider]: "That custom model is already saved.",
+          [targetId]: "That custom model is already saved.",
         }));
         return;
       }
 
-      updateSettings(patchCustomModels(provider, [...customModels, normalized]));
-      setCustomModelInputByProvider((existing) => ({
+      updateSettings(
+        patchCustomModelsForProviderInstance(settings, target, [...customModels, normalized]),
+      );
+      setCustomModelInputByTarget((existing) => ({
         ...existing,
-        [provider]: "",
+        [targetId]: "",
       }));
-      setCustomModelErrorByProvider((existing) => ({
+      setCustomModelErrorByTarget((existing) => ({
         ...existing,
-        [provider]: null,
+        [targetId]: null,
       }));
     },
-    [customModelInputByProvider, settings, updateSettings],
+    [customModelInputByTarget, settings, updateSettings],
   );
 
   const removeCustomModel = useCallback(
-    (provider: ProviderKind, slug: string) => {
-      const customModels = getCustomModelsForProvider(settings, provider);
+    (target: CustomModelTargetOption, slug: string) => {
+      const customModels = readStoredCustomModelsForTarget(settings, target);
       updateSettings(
-        patchCustomModels(
-          provider,
+        patchCustomModelsForProviderInstance(
+          settings,
+          target,
           customModels.filter((model) => model !== slug),
         ),
       );
-      setCustomModelErrorByProvider((existing) => ({
+      setCustomModelErrorByTarget((existing) => ({
         ...existing,
-        [provider]: null,
+        [target.instanceId]: null,
       }));
     },
     [settings, updateSettings],
   );
 
   const addProviderInstance = useCallback(
-    (provider: Extract<ProviderKind, "codex" | "claudeAgent">) => {
+    (provider: ProviderKind) => {
       const nextInstances: Record<string, ProviderInstanceConfig> = {
         ...settings.providerInstances,
       };
-      const prefix = provider === "claudeAgent" ? "claude" : provider;
+      const prefix =
+        provider === "claudeAgent" ? "claude" : provider === "opencode" ? "opencode" : provider;
       const existingIds = new Set(Object.keys(nextInstances));
       let index = 2;
       let instanceId = `${prefix}_${index}`;
@@ -1139,14 +1249,39 @@ function SettingsRouteView() {
         index += 1;
         instanceId = `${prefix}_${index}`;
       }
+      const config =
+        provider === "codex"
+          ? { binaryPath: codexBinaryPath, homePath: codexHomePath, shadowHomePath: "" }
+          : provider === "claudeAgent"
+            ? { binaryPath: claudeBinaryPath, homePath: claudeHomePath }
+            : provider === "cursor"
+              ? { binaryPath: settings.cursorBinaryPath, apiEndpoint: settings.cursorApiEndpoint }
+              : provider === "gemini"
+                ? { binaryPath: settings.geminiBinaryPath }
+                : provider === "grok"
+                  ? { binaryPath: settings.grokBinaryPath }
+                  : provider === "kilo"
+                    ? {
+                        binaryPath: settings.kiloBinaryPath,
+                        serverUrl: settings.kiloServerUrl,
+                        serverPassword: settings.kiloServerPassword,
+                      }
+                    : provider === "opencode"
+                      ? {
+                          binaryPath: settings.openCodeBinaryPath,
+                          serverUrl: settings.openCodeServerUrl,
+                          serverPassword: settings.openCodeServerPassword,
+                          experimentalWebSockets: settings.openCodeExperimentalWebSockets,
+                        }
+                      : {
+                          binaryPath: settings.piBinaryPath,
+                          agentDir: settings.piAgentDir,
+                        };
       nextInstances[instanceId] = {
         driver: provider,
         displayName: `${PROVIDER_DISPLAY_NAMES[provider]} ${index}`,
         enabled: true,
-        config:
-          provider === "codex"
-            ? { binaryPath: codexBinaryPath, homePath: codexHomePath, shadowHomePath: "" }
-            : { binaryPath: claudeBinaryPath, homePath: claudeHomePath },
+        config,
       };
       updateSettings({ providerInstances: nextInstances as ProviderInstanceConfigMap });
     },
@@ -1155,6 +1290,19 @@ function SettingsRouteView() {
       claudeHomePath,
       codexBinaryPath,
       codexHomePath,
+      settings.cursorApiEndpoint,
+      settings.cursorBinaryPath,
+      settings.geminiBinaryPath,
+      settings.grokBinaryPath,
+      settings.kiloBinaryPath,
+      settings.kiloServerPassword,
+      settings.kiloServerUrl,
+      settings.openCodeBinaryPath,
+      settings.openCodeExperimentalWebSockets,
+      settings.openCodeServerPassword,
+      settings.openCodeServerUrl,
+      settings.piAgentDir,
+      settings.piBinaryPath,
       settings.providerInstances,
       updateSettings,
     ],
@@ -1227,20 +1375,29 @@ function SettingsRouteView() {
   );
 
   const runProviderUpdate = useCallback(
-    async (provider: ProviderKind) => {
-      if (updatingProviders.has(provider)) {
+    async (providerStatus: ServerProviderStatus) => {
+      const provider = providerStatus.provider;
+      const instanceId = providerStatus.instanceId;
+      const targetKey = providerStatusTargetKey(providerStatus);
+      const displayName = providerStatusDisplayName(providerStatus);
+      if (updatingProviders.has(targetKey)) {
         return;
       }
-      setUpdatingProviders((current) => new Set(current).add(provider));
+      setUpdatingProviders((current) => new Set(current).add(targetKey));
       try {
-        const result = await ensureNativeApi().server.updateProvider({ provider });
-        const refreshedProvider = result.providers.find((status) => status.provider === provider);
+        const result = await ensureNativeApi().server.updateProvider({
+          provider,
+          ...(instanceId ? { instanceId } : {}),
+        });
+        const refreshedProvider = result.providers.find(
+          (status) => status.provider === provider && providerStatusTargetKey(status) === targetKey,
+        );
         const failureMessage = providerUpdateFailureMessage(refreshedProvider);
         if (failureMessage) {
           const manualCommand = refreshedProvider?.versionAdvisory?.updateCommand?.trim();
           toastManager.add({
             type: "error",
-            title: `Could not update ${PROVIDER_DISPLAY_NAMES[provider]}`,
+            title: `Could not update ${displayName}`,
             description: manualCommand
               ? `${failureMessage}\n\nCopy the command below to update manually in a terminal.`
               : failureMessage,
@@ -1250,13 +1407,13 @@ function SettingsRouteView() {
         }
         toastManager.add({
           type: "success",
-          title: `${PROVIDER_DISPLAY_NAMES[provider]} update finished`,
+          title: `${displayName} update finished`,
           description: "New sessions will use the refreshed provider.",
         });
       } catch (error) {
         toastManager.add({
           type: "error",
-          title: `Could not update ${PROVIDER_DISPLAY_NAMES[provider]}`,
+          title: `Could not update ${displayName}`,
           description: error instanceof Error ? error.message : "The provider update failed.",
         });
       } finally {
@@ -1265,7 +1422,7 @@ function SettingsRouteView() {
           .catch(() => undefined);
         setUpdatingProviders((current) => {
           const next = new Set(current);
-          next.delete(provider);
+          next.delete(targetKey);
           return next;
         });
       }
@@ -1297,8 +1454,8 @@ function SettingsRouteView() {
       opencode: false,
       pi: false,
     });
-    setSelectedCustomModelProvider("codex");
-    setCustomModelInputByProvider({
+    setSelectedCustomModelTargetId("codex");
+    setCustomModelInputByTarget({
       codex: "",
       claudeAgent: "",
       cursor: "",
@@ -1308,7 +1465,7 @@ function SettingsRouteView() {
       opencode: "",
       pi: "",
     });
-    setCustomModelErrorByProvider({});
+    setCustomModelErrorByTarget({});
     setShowAllCustomModels(false);
     setShowRecoveryTools(false);
     setOpenKeybindingsError(null);
@@ -2532,8 +2689,11 @@ function SettingsRouteView() {
                     customKiloModels: defaults.customKiloModels,
                     customOpenCodeModels: defaults.customOpenCodeModels,
                     customPiModels: defaults.customPiModels,
+                    providerInstances: removeProviderInstanceCustomModels(
+                      settings.providerInstances,
+                    ),
                   });
-                  setCustomModelErrorByProvider({});
+                  setCustomModelErrorByTarget({});
                   setShowAllCustomModels(false);
                 }}
               />
@@ -2543,38 +2703,30 @@ function SettingsRouteView() {
           <div className={cn("mt-4 pt-4", SETTINGS_CARD_ROW_DIVIDER_CLASS_NAME)}>
             <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
               <Select
-                value={selectedCustomModelProvider}
+                value={selectedCustomModelTarget.instanceId}
                 onValueChange={(value) => {
-                  if (
-                    value !== "codex" &&
-                    value !== "claudeAgent" &&
-                    value !== "cursor" &&
-                    value !== "gemini" &&
-                    value !== "grok" &&
-                    value !== "kilo" &&
-                    value !== "opencode" &&
-                    value !== "pi"
-                  ) {
+                  if (!customModelTargetOptions.some((target) => target.instanceId === value))
                     return;
-                  }
-                  setSelectedCustomModelProvider(value);
+                  setSelectedCustomModelTargetId(value as ProviderInstanceId);
                 }}
               >
                 <SelectTrigger
                   size="sm"
-                  className="w-full sm:w-40"
-                  aria-label="Custom model provider"
+                  className="w-full sm:w-56"
+                  aria-label="Custom model target"
                 >
-                  <SelectValue>{selectedCustomModelProviderSettings.title}</SelectValue>
+                  <SelectValue>
+                    {selectedCustomModelTarget.isDefault
+                      ? selectedCustomModelProviderSettings.title
+                      : `${selectedCustomModelTarget.label} · ${selectedCustomModelProviderSettings.title}`}
+                  </SelectValue>
                 </SelectTrigger>
                 <SettingsSelectPopup align="start">
-                  {MODEL_PROVIDER_SETTINGS.map((providerSettings) => (
-                    <SelectItem
-                      hideIndicator
-                      key={providerSettings.provider}
-                      value={providerSettings.provider}
-                    >
-                      {providerSettings.title}
+                  {customModelTargetOptions.map((target) => (
+                    <SelectItem hideIndicator key={target.instanceId} value={target.instanceId}>
+                      {target.isDefault
+                        ? PROVIDER_DISPLAY_NAMES[target.provider]
+                        : `${target.label} · ${PROVIDER_DISPLAY_NAMES[target.provider]}`}
                     </SelectItem>
                   ))}
                 </SettingsSelectPopup>
@@ -2586,21 +2738,21 @@ function SettingsRouteView() {
                 value={selectedCustomModelInput}
                 onChange={(event) => {
                   const value = event.target.value;
-                  setCustomModelInputByProvider((existing) => ({
+                  setCustomModelInputByTarget((existing) => ({
                     ...existing,
-                    [selectedCustomModelProvider]: value,
+                    [selectedCustomModelTarget.instanceId]: value,
                   }));
                   if (selectedCustomModelError) {
-                    setCustomModelErrorByProvider((existing) => ({
+                    setCustomModelErrorByTarget((existing) => ({
                       ...existing,
-                      [selectedCustomModelProvider]: null,
+                      [selectedCustomModelTarget.instanceId]: null,
                     }));
                   }
                 }}
                 onKeyDown={(event) => {
                   if (event.key !== "Enter") return;
                   event.preventDefault();
-                  addCustomModel(selectedCustomModelProvider);
+                  addCustomModel(selectedCustomModelTarget);
                 }}
                 placeholder={selectedCustomModelProviderSettings.example}
                 spellCheck={false}
@@ -2608,7 +2760,7 @@ function SettingsRouteView() {
               <Button
                 className="shrink-0"
                 variant="outline"
-                onClick={() => addCustomModel(selectedCustomModelProvider)}
+                onClick={() => addCustomModel(selectedCustomModelTarget)}
               >
                 <PlusIcon className="size-3.5" />
                 Add
@@ -2634,7 +2786,7 @@ function SettingsRouteView() {
                       type="button"
                       className="shrink-0 opacity-0 transition-opacity group-hover:opacity-100 hover:opacity-100"
                       aria-label={`Remove ${row.slug}`}
-                      onClick={() => removeCustomModel(row.provider, row.slug)}
+                      onClick={() => removeCustomModel(row.target, row.slug)}
                     >
                       <XIcon className="size-3.5 text-muted-foreground hover:text-foreground" />
                     </button>
@@ -2739,24 +2891,25 @@ function SettingsRouteView() {
           {outdatedProviderStatuses.length > 0 ? (
             <div className={cn("mt-4", SETTINGS_INSET_LIST_CLASS_NAME)}>
               {outdatedProviderStatuses.map((providerStatus) => {
+                const targetKey = providerStatusTargetKey(providerStatus);
                 const updateAdvisory = providerStatus.versionAdvisory;
                 const updateState = providerStatus.updateState?.status;
                 const isProviderUpdateActive =
                   updateState === "queued" ||
                   updateState === "running" ||
-                  updatingProviders.has(providerStatus.provider);
+                  updatingProviders.has(targetKey);
                 const canUpdateProvider =
                   updateAdvisory?.canUpdate === true && !isProviderUpdateActive;
                 const updateLabel = providerUpdateStatusLabel(providerStatus);
 
                 return (
                   <div
-                    key={providerStatus.provider}
+                    key={targetKey}
                     className="flex min-h-11 items-center gap-3 border-t border-[color:var(--color-border)] px-3 py-2 first:border-t-0"
                   >
                     <div className="min-w-0 flex-1">
                       <div className="truncate text-sm font-medium text-foreground">
-                        {PROVIDER_DISPLAY_NAMES[providerStatus.provider]}
+                        {providerStatusDisplayName(providerStatus)}
                       </div>
                       {updateLabel ? (
                         <div className="mt-0.5 truncate text-[11px] text-muted-foreground">
@@ -2775,7 +2928,7 @@ function SettingsRouteView() {
                             ? `Run ${updateAdvisory.updateCommand}`
                             : undefined
                         }
-                        onClick={() => void runProviderUpdate(providerStatus.provider)}
+                        onClick={() => void runProviderUpdate(providerStatus)}
                       >
                         {isProviderUpdateActive ? (
                           <Loader2Icon className="size-3.5 animate-spin" />
@@ -2799,31 +2952,36 @@ function SettingsRouteView() {
     </div>
   );
 
-  const renderProviderInstancesEditor = (
-    provider: Extract<ProviderKind, "codex" | "claudeAgent">,
-  ) => {
+  const renderProviderInstancesEditor = (providerSettings: InstallProviderSettings) => {
+    const provider = providerSettings.provider;
     const instanceRows = Object.entries(settings.providerInstances).filter(
       ([instanceId, config]) => config.driver === provider && instanceId !== provider,
     );
-    const homeLabel = provider === "codex" ? "CODEX_HOME" : "HOME";
-    const homePlaceholder = provider === "codex" ? codexHomePath || "~/.codex" : "~";
-
-    const readConfigString = (config: unknown, key: string): string => {
-      if (!config || typeof config !== "object" || Array.isArray(config)) return "";
-      const value = (config as Record<string, unknown>)[key];
-      return typeof value === "string" ? value : "";
-    };
+    const homeLabel =
+      provider === "codex" ? "CODEX_HOME" : provider === "claudeAgent" ? "HOME" : "Home path";
+    const homePlaceholder =
+      provider === "codex"
+        ? codexHomePath || "~/.codex"
+        : provider === "claudeAgent"
+          ? claudeHomePath || "~"
+          : "";
+    const description =
+      provider === "codex"
+        ? "Add separate Codex accounts with their own home or shadow auth home."
+        : provider === "claudeAgent"
+          ? "Add separate Claude accounts with their own HOME directory."
+          : provider === "kilo" || provider === "opencode"
+            ? "Add launch profiles for separate external servers or local runtime settings."
+            : provider === "pi"
+              ? "Add Pi launch profiles. Use separate agent directories for separate Pi state."
+              : "Add launch profiles for this provider. Account isolation depends on the provider CLI and configured paths.";
 
     return (
       <div className="space-y-3">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="min-w-0">
             <span className="block text-xs font-medium text-foreground">Provider instances</span>
-            <span className="mt-1 block text-xs text-muted-foreground">
-              {provider === "codex"
-                ? "Add separate Codex accounts with their own home or shadow auth home."
-                : "Add separate Claude accounts with their own HOME directory."}
-            </span>
+            <span className="mt-1 block text-xs text-muted-foreground">{description}</span>
           </div>
           <Button
             type="button"
@@ -2888,22 +3046,127 @@ function SettingsRouteView() {
                       />
                     </label>
                     <label className="block">
-                      <span className="block text-xs font-medium text-foreground">{homeLabel}</span>
+                      <span className="block text-xs font-medium text-foreground">Binary path</span>
                       <DebouncedSettingTextInput
-                        id={`provider-instance-${instanceId}-home`}
+                        id={`provider-instance-${instanceId}-binary`}
                         size="sm"
                         variant="soft"
                         className="mt-1"
-                        value={readConfigString(config, "homePath")}
+                        value={readProviderInstanceConfigString(config, "binaryPath")}
                         onCommit={(nextValue) =>
                           updateProviderInstance(instanceId, {
-                            config: { homePath: nextValue },
+                            config: { binaryPath: nextValue },
                           })
                         }
-                        placeholder={homePlaceholder}
+                        placeholder={providerSettings.binaryPlaceholder}
                         spellCheck={false}
                       />
                     </label>
+                    {providerSettings.homePathKey ? (
+                      <label className="block">
+                        <span className="block text-xs font-medium text-foreground">
+                          {homeLabel}
+                        </span>
+                        <DebouncedSettingTextInput
+                          id={`provider-instance-${instanceId}-home`}
+                          size="sm"
+                          variant="soft"
+                          className="mt-1"
+                          value={readProviderInstanceConfigString(config, "homePath")}
+                          onCommit={(nextValue) =>
+                            updateProviderInstance(instanceId, {
+                              config: { homePath: nextValue },
+                            })
+                          }
+                          placeholder={homePlaceholder}
+                          spellCheck={false}
+                        />
+                      </label>
+                    ) : null}
+                    {providerSettings.apiEndpointKey ? (
+                      <label className="block">
+                        <span className="block text-xs font-medium text-foreground">
+                          API endpoint
+                        </span>
+                        <DebouncedSettingTextInput
+                          id={`provider-instance-${instanceId}-api-endpoint`}
+                          size="sm"
+                          variant="soft"
+                          className="mt-1"
+                          value={readProviderInstanceConfigString(config, "apiEndpoint")}
+                          onCommit={(nextValue) =>
+                            updateProviderInstance(instanceId, {
+                              config: { apiEndpoint: nextValue },
+                            })
+                          }
+                          placeholder={providerSettings.apiEndpointPlaceholder}
+                          spellCheck={false}
+                        />
+                      </label>
+                    ) : null}
+                    {providerSettings.serverUrlKey ? (
+                      <label className="block">
+                        <span className="block text-xs font-medium text-foreground">
+                          Server URL
+                        </span>
+                        <DebouncedSettingTextInput
+                          id={`provider-instance-${instanceId}-server-url`}
+                          size="sm"
+                          variant="soft"
+                          className="mt-1"
+                          value={readProviderInstanceConfigString(config, "serverUrl")}
+                          onCommit={(nextValue) =>
+                            updateProviderInstance(instanceId, {
+                              config: { serverUrl: nextValue },
+                            })
+                          }
+                          placeholder={providerSettings.serverUrlPlaceholder}
+                          spellCheck={false}
+                        />
+                      </label>
+                    ) : null}
+                    {providerSettings.serverPasswordKey ? (
+                      <label className="block">
+                        <span className="block text-xs font-medium text-foreground">
+                          Server password
+                        </span>
+                        <DebouncedSettingTextInput
+                          id={`provider-instance-${instanceId}-server-password`}
+                          size="sm"
+                          variant="soft"
+                          className="mt-1"
+                          value={readProviderInstanceConfigString(config, "serverPassword")}
+                          onCommit={(nextValue) =>
+                            updateProviderInstance(instanceId, {
+                              config: { serverPassword: nextValue },
+                            })
+                          }
+                          placeholder={providerSettings.serverPasswordPlaceholder}
+                          spellCheck={false}
+                        />
+                      </label>
+                    ) : null}
+                    {providerSettings.agentDirKey ? (
+                      <label className="block">
+                        <span className="block text-xs font-medium text-foreground">
+                          Agent directory
+                        </span>
+                        <DebouncedSettingTextInput
+                          id={`provider-instance-${instanceId}-agent-dir`}
+                          size="sm"
+                          variant="soft"
+                          className="mt-1"
+                          value={readProviderInstanceConfigString(config, "agentDir")}
+                          onCommit={(nextValue) =>
+                            updateProviderInstance(instanceId, {
+                              config: { agentDir: nextValue },
+                            })
+                          }
+                          placeholder={providerSettings.agentDirPlaceholder}
+                          spellCheck={false}
+                        />
+                      </label>
+                    ) : null}
                     {provider === "codex" ? (
                       <label className="block sm:col-span-2">
                         <span className="block text-xs font-medium text-foreground">
@@ -2914,7 +3177,7 @@ function SettingsRouteView() {
                           size="sm"
                           variant="soft"
                           className="mt-1"
-                          value={readConfigString(config, "shadowHomePath")}
+                          value={readProviderInstanceConfigString(config, "shadowHomePath")}
                           onCommit={(nextValue) =>
                             updateProviderInstance(instanceId, {
                               config: { shadowHomePath: nextValue },
@@ -2922,6 +3185,27 @@ function SettingsRouteView() {
                           }
                           placeholder="~/.codex_work"
                           spellCheck={false}
+                        />
+                      </label>
+                    ) : null}
+                    {providerSettings.experimentalWebSocketsKey ? (
+                      <label className="flex items-center justify-between gap-3 sm:col-span-2">
+                        <span className="text-xs font-medium text-foreground">
+                          Experimental WebSockets
+                        </span>
+                        <Switch
+                          checked={readProviderInstanceConfigBoolean(
+                            config,
+                            "experimentalWebSockets",
+                          )}
+                          onCheckedChange={(checked) =>
+                            updateProviderInstance(instanceId, {
+                              config: { experimentalWebSockets: checked },
+                            })
+                          }
+                          aria-label={`Enable experimental WebSockets for ${
+                            instance.displayName || instanceId
+                          }`}
                         />
                       </label>
                     ) : null}
@@ -3053,10 +3337,13 @@ function SettingsRouteView() {
                   : null;
                 const updateAdvisory = providerStatus?.versionAdvisory;
                 const providerUpdateState = providerStatus?.updateState?.status;
+                const providerUpdateTargetKey = providerStatus
+                  ? providerStatusTargetKey(providerStatus)
+                  : providerSettings.provider;
                 const isProviderUpdateActive =
                   providerUpdateState === "queued" ||
                   providerUpdateState === "running" ||
-                  updatingProviders.has(providerSettings.provider);
+                  updatingProviders.has(providerUpdateTargetKey);
                 const canUpdateProvider =
                   showProviderUpdateStatus &&
                   updateAdvisory?.status === "behind_latest" &&
@@ -3130,7 +3417,9 @@ function SettingsRouteView() {
                             }
                             onClick={(event) => {
                               event.stopPropagation();
-                              void runProviderUpdate(providerSettings.provider);
+                              if (providerStatus) {
+                                void runProviderUpdate(providerStatus);
+                              }
                             }}
                           >
                             {isProviderUpdateActive ? (
@@ -3242,10 +3531,7 @@ function SettingsRouteView() {
                               </label>
                             ) : null}
 
-                            {providerSettings.provider === "codex" ||
-                            providerSettings.provider === "claudeAgent"
-                              ? renderProviderInstancesEditor(providerSettings.provider)
-                              : null}
+                            {renderProviderInstancesEditor(providerSettings)}
 
                             {providerSettings.agentDirKey ? (
                               <label
@@ -3413,6 +3699,30 @@ function SettingsRouteView() {
                 );
               })}
             </div>
+            {unsupportedProviderInstanceOptions.length > 0 ? (
+              <div className="mt-3 space-y-2">
+                {unsupportedProviderInstanceOptions.map((instance) => (
+                  <div
+                    key={instance.instanceId}
+                    className={`${SETTINGS_RADIUS_CLASS_NAME} border border-dashed border-[color:var(--color-border)] px-3 py-2`}
+                  >
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="truncate text-xs font-medium text-foreground">
+                          {instance.label}
+                        </div>
+                        <div className="truncate text-[11px] text-muted-foreground">
+                          {instance.instanceId} / {instance.driver}
+                        </div>
+                      </div>
+                      <span className="shrink-0 text-[11px] text-muted-foreground">
+                        Unsupported driver
+                      </span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : null}
           </div>
         </SettingsRow>
       </SettingsSection>

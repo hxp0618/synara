@@ -1989,7 +1989,7 @@ const make = Effect.gen(function* () {
           const resolvedModelSelection =
             identity?.model && identity.modelIsRequestedHint !== true
               ? {
-                  provider: parentThread.modelSelection.provider,
+                  ...parentThread.modelSelection,
                   model: identity.model,
                 }
               : undefined;
@@ -2605,7 +2605,10 @@ const make = Effect.gen(function* () {
       const thread = Option.getOrUndefined(
         yield* projectionSnapshotQuery.getThreadShellById(event.payload.threadId),
       );
-      const activeTurnId = thread?.session?.activeTurnId ?? undefined;
+      if (!thread) {
+        return;
+      }
+      const activeTurnId = thread.session?.activeTurnId ?? undefined;
       if (!activeTurnId) {
         return;
       }
@@ -2613,7 +2616,10 @@ const make = Effect.gen(function* () {
       const flushEvent: ProviderRuntimeEvent = {
         type: "turn.started",
         eventId: event.eventId,
-        provider: thread?.session?.providerName === "claudeAgent" ? "claudeAgent" : "codex",
+        provider: thread.modelSelection.provider,
+        providerInstanceId:
+          thread.session?.providerInstanceId ??
+          readModelSelectionProviderInstanceId(thread.modelSelection),
         createdAt: event.payload.createdAt,
         threadId: event.payload.threadId,
         turnId: activeTurnId,

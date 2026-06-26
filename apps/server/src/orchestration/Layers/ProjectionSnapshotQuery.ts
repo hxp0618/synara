@@ -32,6 +32,7 @@ import {
   type OrchestrationThreadActivity,
   ThreadHandoff,
   ModelSelection,
+  type ServerSettings,
 } from "@t3tools/contracts";
 import { Effect, Layer, Option, Schema, Struct } from "effect";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
@@ -54,6 +55,7 @@ import { ProjectionThreadProposedPlan } from "../../persistence/Services/Project
 import { ProjectionThreadSession } from "../../persistence/Services/ProjectionThreadSessions.ts";
 import { ProjectionThread } from "../../persistence/Services/ProjectionThreads.ts";
 import { ORCHESTRATION_PROJECTOR_NAMES } from "./ProjectionPipeline.ts";
+import { ServerSettingsService } from "../../serverSettings.ts";
 import {
   ProjectionSnapshotQuery,
   type ProjectionFullThreadDiffContext,
@@ -203,27 +205,30 @@ type ProjectionStateDbRow = Schema.Schema.Type<typeof ProjectionStateDbRowSchema
 
 function decodeProjectionProjectRow(
   row: ProjectionProjectDbRowRaw,
+  settings?: ServerSettings,
 ): Effect.Effect<ProjectionProjectDbRow, Schema.SchemaError> {
   if (row.defaultModelSelection === null) {
     return Effect.succeed({ ...row, defaultModelSelection: null });
   }
-  return decodeModelSelection(normalizePersistedModelSelection(row.defaultModelSelection)).pipe(
-    Effect.map((defaultModelSelection) => ({ ...row, defaultModelSelection })),
-  );
+  return decodeModelSelection(
+    normalizePersistedModelSelection(row.defaultModelSelection, settings),
+  ).pipe(Effect.map((defaultModelSelection) => ({ ...row, defaultModelSelection })));
 }
 
 function decodeProjectionThreadRow(
   row: ProjectionThreadDbRowRaw,
+  settings?: ServerSettings,
 ): Effect.Effect<ProjectionThreadDbRow, Schema.SchemaError> {
-  return decodeModelSelection(normalizePersistedModelSelection(row.modelSelection)).pipe(
+  return decodeModelSelection(normalizePersistedModelSelection(row.modelSelection, settings)).pipe(
     Effect.map((modelSelection) => ({ ...row, modelSelection })),
   );
 }
 
 function decodeProjectionThreadShellRow(
   row: ProjectionThreadShellDbRowRaw,
+  settings?: ServerSettings,
 ): Effect.Effect<ProjectionThreadShellDbRow, Schema.SchemaError> {
-  return decodeModelSelection(normalizePersistedModelSelection(row.modelSelection)).pipe(
+  return decodeModelSelection(normalizePersistedModelSelection(row.modelSelection, settings)).pipe(
     Effect.map((modelSelection) => ({ ...row, modelSelection })),
   );
 }
@@ -231,8 +236,9 @@ function decodeProjectionThreadShellRow(
 function decodeProjectionProjectRows(
   rows: ReadonlyArray<ProjectionProjectDbRowRaw>,
   operation: string,
+  settings?: ServerSettings,
 ): Effect.Effect<ReadonlyArray<ProjectionProjectDbRow>, ProjectionRepositoryError> {
-  return Effect.forEach(rows, decodeProjectionProjectRow).pipe(
+  return Effect.forEach(rows, (row) => decodeProjectionProjectRow(row, settings)).pipe(
     Effect.mapError(toPersistenceDecodeError(operation)),
   );
 }
@@ -240,8 +246,9 @@ function decodeProjectionProjectRows(
 function decodeProjectionThreadRows(
   rows: ReadonlyArray<ProjectionThreadDbRowRaw>,
   operation: string,
+  settings?: ServerSettings,
 ): Effect.Effect<ReadonlyArray<ProjectionThreadDbRow>, ProjectionRepositoryError> {
-  return Effect.forEach(rows, decodeProjectionThreadRow).pipe(
+  return Effect.forEach(rows, (row) => decodeProjectionThreadRow(row, settings)).pipe(
     Effect.mapError(toPersistenceDecodeError(operation)),
   );
 }
@@ -249,8 +256,9 @@ function decodeProjectionThreadRows(
 function decodeProjectionThreadShellRows(
   rows: ReadonlyArray<ProjectionThreadShellDbRowRaw>,
   operation: string,
+  settings?: ServerSettings,
 ): Effect.Effect<ReadonlyArray<ProjectionThreadShellDbRow>, ProjectionRepositoryError> {
-  return Effect.forEach(rows, decodeProjectionThreadShellRow).pipe(
+  return Effect.forEach(rows, (row) => decodeProjectionThreadShellRow(row, settings)).pipe(
     Effect.mapError(toPersistenceDecodeError(operation)),
   );
 }
@@ -258,11 +266,12 @@ function decodeProjectionThreadShellRows(
 function decodeProjectionProjectOption(
   option: Option.Option<ProjectionProjectDbRowRaw>,
   operation: string,
+  settings?: ServerSettings,
 ): Effect.Effect<Option.Option<ProjectionProjectDbRow>, ProjectionRepositoryError> {
   if (Option.isNone(option)) {
     return Effect.succeed(Option.none());
   }
-  return decodeProjectionProjectRow(option.value).pipe(
+  return decodeProjectionProjectRow(option.value, settings).pipe(
     Effect.map(Option.some),
     Effect.mapError(toPersistenceDecodeError(operation)),
   );
@@ -271,11 +280,12 @@ function decodeProjectionProjectOption(
 function decodeProjectionThreadOption(
   option: Option.Option<ProjectionThreadDbRowRaw>,
   operation: string,
+  settings?: ServerSettings,
 ): Effect.Effect<Option.Option<ProjectionThreadDbRow>, ProjectionRepositoryError> {
   if (Option.isNone(option)) {
     return Effect.succeed(Option.none());
   }
-  return decodeProjectionThreadRow(option.value).pipe(
+  return decodeProjectionThreadRow(option.value, settings).pipe(
     Effect.map(Option.some),
     Effect.mapError(toPersistenceDecodeError(operation)),
   );
@@ -714,6 +724,52 @@ function toPersistenceSqlOrDecodeError(sqlOperation: string, decodeOperation: st
 
 const makeProjectionSnapshotQuery = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
+  const serverSettings = yield* ServerSettingsService;
+
+  const readSettingsForModelSelectionDecode = (operation: string) =>
+    serverSettings.getSettings.pipe(
+      Effect.mapError(toPersistenceSqlError(`${operation}:getSettings`)),
+    );
+
+  const decodeProjectionProjectRowsForCurrentSettings = (
+    rows: ReadonlyArray<ProjectionProjectDbRowRaw>,
+    operation: string,
+  ) =>
+    readSettingsForModelSelectionDecode(operation).pipe(
+      Effect.flatMap((settings) => decodeProjectionProjectRows(rows, operation, settings)),
+    );
+
+  const decodeProjectionThreadRowsForCurrentSettings = (
+    rows: ReadonlyArray<ProjectionThreadDbRowRaw>,
+    operation: string,
+  ) =>
+    readSettingsForModelSelectionDecode(operation).pipe(
+      Effect.flatMap((settings) => decodeProjectionThreadRows(rows, operation, settings)),
+    );
+
+  const decodeProjectionThreadShellRowsForCurrentSettings = (
+    rows: ReadonlyArray<ProjectionThreadShellDbRowRaw>,
+    operation: string,
+  ) =>
+    readSettingsForModelSelectionDecode(operation).pipe(
+      Effect.flatMap((settings) => decodeProjectionThreadShellRows(rows, operation, settings)),
+    );
+
+  const decodeProjectionProjectOptionForCurrentSettings = (
+    option: Option.Option<ProjectionProjectDbRowRaw>,
+    operation: string,
+  ) =>
+    readSettingsForModelSelectionDecode(operation).pipe(
+      Effect.flatMap((settings) => decodeProjectionProjectOption(option, operation, settings)),
+    );
+
+  const decodeProjectionThreadOptionForCurrentSettings = (
+    option: Option.Option<ProjectionThreadDbRowRaw>,
+    operation: string,
+  ) =>
+    readSettingsForModelSelectionDecode(operation).pipe(
+      Effect.flatMap((settings) => decodeProjectionThreadOption(option, operation, settings)),
+    );
 
   const listProjectRows = SqlSchema.findAll({
     Request: Schema.Void,
@@ -1521,7 +1577,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                 ),
               ),
               Effect.flatMap((rows) =>
-                decodeProjectionProjectRows(
+                decodeProjectionProjectRowsForCurrentSettings(
                   rows,
                   "ProjectionSnapshotQuery.getSnapshot:listProjects:decodeModelSelections",
                 ),
@@ -1535,7 +1591,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                 ),
               ),
               Effect.flatMap((rows) =>
-                decodeProjectionThreadRows(
+                decodeProjectionThreadRowsForCurrentSettings(
                   rows,
                   "ProjectionSnapshotQuery.getSnapshot:listThreads:decodeModelSelections",
                 ),
@@ -1671,7 +1727,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                 ),
               ),
               Effect.flatMap((rows) =>
-                decodeProjectionProjectRows(
+                decodeProjectionProjectRowsForCurrentSettings(
                   rows,
                   "ProjectionSnapshotQuery.getCommandReadModel:listProjects:decodeModelSelections",
                 ),
@@ -1685,7 +1741,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                 ),
               ),
               Effect.flatMap((rows) =>
-                decodeProjectionThreadRows(
+                decodeProjectionThreadRowsForCurrentSettings(
                   rows,
                   "ProjectionSnapshotQuery.getCommandReadModel:listThreads:decodeModelSelections",
                 ),
@@ -1785,7 +1841,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                   ),
                 ),
                 Effect.flatMap((rows) =>
-                  decodeProjectionProjectRows(
+                  decodeProjectionProjectRowsForCurrentSettings(
                     rows,
                     "ProjectionSnapshotQuery.getShellSnapshot:listProjects:decodeModelSelections",
                   ),
@@ -1799,7 +1855,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                   ),
                 ),
                 Effect.flatMap((rows) =>
-                  decodeProjectionThreadShellRows(
+                  decodeProjectionThreadShellRowsForCurrentSettings(
                     rows,
                     "ProjectionSnapshotQuery.getShellSnapshot:listThreads:decodeModelSelections",
                   ),
@@ -1914,7 +1970,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           ),
         ),
         Effect.flatMap((option) =>
-          decodeProjectionProjectOption(
+          decodeProjectionProjectOptionForCurrentSettings(
             option,
             "ProjectionSnapshotQuery.getActiveProjectByWorkspaceRoot:decodeModelSelection",
           ),
@@ -1947,7 +2003,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         ),
       ),
       Effect.flatMap((option) =>
-        decodeProjectionProjectOption(
+        decodeProjectionProjectOptionForCurrentSettings(
           option,
           "ProjectionSnapshotQuery.getProjectShellById:decodeModelSelection",
         ),
@@ -2055,7 +2111,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
               ),
             ),
             Effect.flatMap((option) =>
-              decodeProjectionThreadOption(
+              decodeProjectionThreadOptionForCurrentSettings(
                 option,
                 "ProjectionSnapshotQuery.getThreadShellById:getThread:decodeModelSelection",
               ),
@@ -2121,7 +2177,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                 ),
               ),
               Effect.flatMap((option) =>
-                decodeProjectionThreadOption(
+                decodeProjectionThreadOptionForCurrentSettings(
                   option,
                   "ProjectionSnapshotQuery.findSyntheticSubagentParentThread:getThread:decodeModelSelection",
                 ),
@@ -2155,7 +2211,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           ),
         ),
         Effect.flatMap((option) =>
-          decodeProjectionThreadOption(
+          decodeProjectionThreadOptionForCurrentSettings(
             option,
             "ProjectionSnapshotQuery.getThreadDetailById:getThread:decodeModelSelection",
           ),

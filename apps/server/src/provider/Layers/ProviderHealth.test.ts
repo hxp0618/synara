@@ -27,6 +27,7 @@ import {
   makeCheckClaudeProviderStatus,
   makeCheckCodexProviderStatus,
   makeCheckCursorProviderStatus,
+  makeCheckGeminiProviderStatus,
   makeCheckGrokProviderStatus,
   makeCheckKiloProviderStatus,
   makeCheckOpenCodeProviderStatus,
@@ -96,6 +97,14 @@ function failingSpawnerLayer(description: string) {
       ),
     ),
   );
+}
+
+function assertProviderInstanceEnv(
+  env: NodeJS.ProcessEnv | undefined,
+  key: string,
+  expected: string,
+) {
+  assert.strictEqual(env?.[key], expected);
 }
 
 const allProvidersDisabledSettings = {
@@ -398,7 +407,7 @@ it.layer(NodeServices.layer)("ProviderHealth", (it) => {
 
         assert.ok(error instanceof ServerProviderUpdateError);
         assert.strictEqual(error.provider, "kilo");
-        assert.strictEqual(error.reason, "Provider is disabled in Synara settings.");
+        assert.strictEqual(error.reason, "Provider instance is disabled in Synara settings.");
       }).pipe(Effect.provide(disabledProviderHealthLayer)),
     );
   });
@@ -1062,6 +1071,35 @@ it.layer(NodeServices.layer)("ProviderHealth", (it) => {
       ),
     );
 
+    it.effect("passes configured instance HOME and environment to Claude probes", () =>
+      Effect.gen(function* () {
+        const status = yield* makeCheckClaudeProviderStatus(
+          undefined,
+          "/custom/bin/claude",
+          "/tmp/claude-work-home",
+          { SYNARA_TEST_INSTANCE: "claude-work" },
+        );
+        assert.strictEqual(status.status, "ready");
+      }).pipe(
+        Effect.provide(
+          mockSpawnerLayer((args, command, env) => {
+            assert.strictEqual(command, "/custom/bin/claude");
+            assert.strictEqual(env?.HOME, "/tmp/claude-work-home");
+            assertProviderInstanceEnv(env, "SYNARA_TEST_INSTANCE", "claude-work");
+            const joined = args.join(" ");
+            if (joined === "--version") return { stdout: "1.0.0\n", stderr: "", code: 0 };
+            if (joined === "auth status")
+              return {
+                stdout: '{"loggedIn":true,"authMethod":"claude.ai"}\n',
+                stderr: "",
+                code: 0,
+              };
+            throw new Error(`Unexpected args: ${joined}`);
+          }),
+        ),
+      ),
+    );
+
     it.effect("returns unavailable when claude is missing", () =>
       Effect.gen(function* () {
         const status = yield* checkClaudeProviderStatus;
@@ -1166,6 +1204,29 @@ it.layer(NodeServices.layer)("ProviderHealth", (it) => {
     );
   });
 
+  describe("checkGeminiProviderStatus", () => {
+    it.effect("passes configured instance environment to the Gemini version probe", () =>
+      Effect.gen(function* () {
+        const status = yield* makeCheckGeminiProviderStatus("/custom/bin/gemini", {
+          SYNARA_TEST_INSTANCE: "gemini-work",
+        });
+        assert.strictEqual(status.provider, "gemini");
+        assert.strictEqual(status.status, "error");
+      }).pipe(
+        Effect.provide(
+          mockSpawnerLayer((args, command, env) => {
+            assert.strictEqual(command, "/custom/bin/gemini");
+            assertProviderInstanceEnv(env, "SYNARA_TEST_INSTANCE", "gemini-work");
+            assert.strictEqual(env?.NO_BROWSER, "true");
+            const joined = args.join(" ");
+            if (joined === "--version") return { stdout: "", stderr: "version failed", code: 1 };
+            throw new Error(`Unexpected args: ${joined}`);
+          }),
+        ),
+      ),
+    );
+  });
+
   describe("checkOpenCodeProviderStatus", () => {
     it.effect("returns ready when opencode is installed", () =>
       Effect.gen(function* () {
@@ -1201,6 +1262,25 @@ it.layer(NodeServices.layer)("ProviderHealth", (it) => {
       ),
     );
 
+    it.effect("passes configured instance environment to the OpenCode version probe", () =>
+      Effect.gen(function* () {
+        const status = yield* makeCheckOpenCodeProviderStatus("/custom/bin/opencode", {
+          SYNARA_TEST_INSTANCE: "opencode-work",
+        });
+        assert.strictEqual(status.status, "ready");
+      }).pipe(
+        Effect.provide(
+          mockSpawnerLayer((args, command, env) => {
+            assert.strictEqual(command, "/custom/bin/opencode");
+            assertProviderInstanceEnv(env, "SYNARA_TEST_INSTANCE", "opencode-work");
+            const joined = args.join(" ");
+            if (joined === "--version") return { stdout: "opencode 1.3.17\n", stderr: "", code: 0 };
+            throw new Error(`Unexpected args: ${joined}`);
+          }),
+        ),
+      ),
+    );
+
     it.effect("returns unavailable when opencode is missing", () =>
       Effect.gen(function* () {
         const status = yield* checkOpenCodeProviderStatus;
@@ -1225,6 +1305,25 @@ it.layer(NodeServices.layer)("ProviderHealth", (it) => {
         Effect.provide(
           mockSpawnerLayer((args, command) => {
             assert.strictEqual(command, "/custom/bin/kilo");
+            const joined = args.join(" ");
+            if (joined === "--version") return { stdout: "kilo 7.2.52\n", stderr: "", code: 0 };
+            throw new Error(`Unexpected args: ${joined}`);
+          }),
+        ),
+      ),
+    );
+
+    it.effect("passes configured instance environment to the Kilo version probe", () =>
+      Effect.gen(function* () {
+        const status = yield* makeCheckKiloProviderStatus("/custom/bin/kilo", {
+          SYNARA_TEST_INSTANCE: "kilo-work",
+        });
+        assert.strictEqual(status.status, "ready");
+      }).pipe(
+        Effect.provide(
+          mockSpawnerLayer((args, command, env) => {
+            assert.strictEqual(command, "/custom/bin/kilo");
+            assertProviderInstanceEnv(env, "SYNARA_TEST_INSTANCE", "kilo-work");
             const joined = args.join(" ");
             if (joined === "--version") return { stdout: "kilo 7.2.52\n", stderr: "", code: 0 };
             throw new Error(`Unexpected args: ${joined}`);
@@ -1270,6 +1369,25 @@ it.layer(NodeServices.layer)("ProviderHealth", (it) => {
         Effect.provide(
           mockSpawnerLayer((args, command) => {
             assert.strictEqual(command, "/custom/bin/pi");
+            const joined = args.join(" ");
+            if (joined === "--version") return { stdout: "pi 0.74.0\n", stderr: "", code: 0 };
+            throw new Error(`Unexpected args: ${joined}`);
+          }),
+        ),
+      ),
+    );
+
+    it.effect("passes configured instance environment to the Pi version probe", () =>
+      Effect.gen(function* () {
+        const status = yield* checkPiProviderStatus("/tmp/pi-agent", "/custom/bin/pi", {
+          SYNARA_TEST_INSTANCE: "pi-work",
+        });
+        assert.strictEqual(status.status, "ready");
+      }).pipe(
+        Effect.provide(
+          mockSpawnerLayer((args, command, env) => {
+            assert.strictEqual(command, "/custom/bin/pi");
+            assertProviderInstanceEnv(env, "SYNARA_TEST_INSTANCE", "pi-work");
             const joined = args.join(" ");
             if (joined === "--version") return { stdout: "pi 0.74.0\n", stderr: "", code: 0 };
             throw new Error(`Unexpected args: ${joined}`);
@@ -1382,6 +1500,46 @@ it.layer(NodeServices.layer)("ProviderHealth", (it) => {
       ),
     );
 
+    it.effect("marks Grok authenticated from configured instance environment", () => {
+      const previousXaiApiKey = process.env.XAI_API_KEY;
+      const previousApiKey = process.env.GROK_CODE_XAI_API_KEY;
+      delete process.env.XAI_API_KEY;
+      delete process.env.GROK_CODE_XAI_API_KEY;
+      return Effect.gen(function* () {
+        const status = yield* makeCheckGrokProviderStatus("/custom/bin/grok", {
+          XAI_API_KEY: "xai-instance-key",
+          SYNARA_TEST_INSTANCE: "grok-work",
+        });
+        assert.strictEqual(status.authStatus, "authenticated");
+        assert.strictEqual(status.authType, "apiKey");
+      }).pipe(
+        Effect.provide(
+          mockSpawnerLayer((args, command, env) => {
+            assert.strictEqual(command, "/custom/bin/grok");
+            assertProviderInstanceEnv(env, "SYNARA_TEST_INSTANCE", "grok-work");
+            assertProviderInstanceEnv(env, "XAI_API_KEY", "xai-instance-key");
+            const joined = args.join(" ");
+            if (joined === "--version") return { stdout: "grok 0.1.0\n", stderr: "", code: 0 };
+            throw new Error(`Unexpected args: ${joined}`);
+          }),
+        ),
+        Effect.ensuring(
+          Effect.sync(() => {
+            if (previousXaiApiKey === undefined) {
+              delete process.env.XAI_API_KEY;
+            } else {
+              process.env.XAI_API_KEY = previousXaiApiKey;
+            }
+            if (previousApiKey === undefined) {
+              delete process.env.GROK_CODE_XAI_API_KEY;
+            } else {
+              process.env.GROK_CODE_XAI_API_KEY = previousApiKey;
+            }
+          }),
+        ),
+      );
+    });
+
     it.effect("returns unavailable when Grok CLI is missing", () =>
       Effect.gen(function* () {
         const status = yield* checkGrokProviderStatus;
@@ -1442,6 +1600,27 @@ it.layer(NodeServices.layer)("ProviderHealth", (it) => {
         Effect.provide(
           mockSpawnerLayer((args, command) => {
             assert.strictEqual(command, "/custom/bin/agent");
+            const joined = args.join(" ");
+            if (joined === "--version") {
+              return { stdout: "agent 2026.04.27\n", stderr: "", code: 0 };
+            }
+            throw new Error(`Unexpected args: ${joined}`);
+          }),
+        ),
+      ),
+    );
+
+    it.effect("passes configured instance environment to the Cursor version probe", () =>
+      Effect.gen(function* () {
+        const status = yield* makeCheckCursorProviderStatus("/custom/bin/agent", {
+          SYNARA_TEST_INSTANCE: "cursor-work",
+        });
+        assert.strictEqual(status.status, "ready");
+      }).pipe(
+        Effect.provide(
+          mockSpawnerLayer((args, command, env) => {
+            assert.strictEqual(command, "/custom/bin/agent");
+            assertProviderInstanceEnv(env, "SYNARA_TEST_INSTANCE", "cursor-work");
             const joined = args.join(" ");
             if (joined === "--version") {
               return { stdout: "agent 2026.04.27\n", stderr: "", code: 0 };

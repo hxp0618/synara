@@ -8,15 +8,19 @@ import type {
   ProviderAgentDescriptor,
   ProviderInstanceId,
   ProviderKind,
+  ProviderListModelsResult,
   ProviderModelDescriptor,
 } from "@t3tools/contracts";
-import { useQuery } from "@tanstack/react-query";
+import { useQueries, useQuery } from "@tanstack/react-query";
 import { useMemo } from "react";
 
 import {
   getAppModelOptions,
   getCodexProviderDiscoveryOptions,
+  getCustomModelsForProviderInstance,
   getCustomModelsByProvider,
+  getProviderInstanceOptions,
+  getProviderStartOptions,
   useAppSettings,
 } from "../appSettings";
 import { resolveRuntimeModelDescriptor } from "../components/chat/runtimeModelCapabilities";
@@ -27,12 +31,14 @@ import {
   providerModelsQueryOptions,
 } from "../lib/providerDiscoveryReactQuery";
 import { mergeDynamicModelOptions, type ProviderModelOption } from "../providerModelOptions";
+import type { ProviderModelOptionsByProviderInstance } from "../components/chat/ProviderModelPicker";
 
 export interface ProviderModelCatalog {
   modelOptionsByProvider: Record<
     ProviderKind,
     ReadonlyArray<ProviderModelOption & { isCustom?: boolean }>
   >;
+  modelOptionsByProviderInstance: ProviderModelOptionsByProviderInstance;
   /** Providers whose runtime model discovery is still pending (no usable list yet). */
   loadingModelProviders: Partial<Record<ProviderKind, boolean>>;
   /**
@@ -49,6 +55,38 @@ export interface ProviderModelCatalog {
 }
 
 const EMPTY_PROVIDER_AGENTS: ReadonlyArray<ProviderAgentDescriptor> = [];
+
+function readOptionString(options: unknown, key: string): string | null {
+  if (!options || typeof options !== "object" || Array.isArray(options)) {
+    return null;
+  }
+  const value = (options as Record<string, unknown>)[key];
+  return typeof value === "string" && value.trim().length > 0 ? value : null;
+}
+
+function modelQueryOptionsForProviderInstance(input: {
+  readonly settings: Parameters<typeof getProviderStartOptions>[0];
+  readonly provider: ProviderKind;
+  readonly instanceId: ProviderInstanceId;
+  readonly cwd: string | null;
+  readonly enabled: boolean;
+}) {
+  const providerOptions = getProviderStartOptions(input.settings, input.instanceId)?.[
+    input.provider
+  ];
+  return providerModelsQueryOptions({
+    provider: input.provider,
+    instanceId: input.instanceId,
+    binaryPath: readOptionString(providerOptions, "binaryPath"),
+    homePath: readOptionString(providerOptions, "homePath"),
+    shadowHomePath: readOptionString(providerOptions, "shadowHomePath"),
+    accountId: readOptionString(providerOptions, "accountId"),
+    apiEndpoint: readOptionString(providerOptions, "apiEndpoint"),
+    agentDir: readOptionString(providerOptions, "agentDir"),
+    cwd: input.cwd,
+    enabled: input.enabled,
+  });
+}
 
 export function useProviderModelCatalog(input: {
   selectedProvider: ProviderKind;
@@ -71,6 +109,37 @@ export function useProviderModelCatalog(input: {
   const featureFlags = useFeatureFlags();
   const showExpandedCursorModelVariants = featureFlags["show-expanded-cursor-model-variants"];
   const customModelsByProvider = useMemo(() => getCustomModelsByProvider(settings), [settings]);
+  const providerInstances = useMemo(() => getProviderInstanceOptions(settings), [settings]);
+  const instanceModelQueries = useQueries({
+    queries: providerInstances.map((instance) =>
+      modelQueryOptionsForProviderInstance({
+        settings,
+        provider: instance.provider,
+        instanceId: instance.instanceId,
+        cwd: discoveryCwd,
+        enabled:
+          discoveryEnabled ||
+          selectedProvider === instance.provider ||
+          selectedProviderInstanceId === instance.instanceId,
+      }),
+    ),
+  });
+  const dynamicModelsByProviderInstance = useMemo(() => {
+    const byInstance: Partial<Record<ProviderInstanceId, ProviderListModelsResult>> = {};
+    providerInstances.forEach((instance, index) => {
+      const data = instanceModelQueries[index]?.data;
+      if (data) {
+        byInstance[instance.instanceId] =
+          instance.provider === "cursor" && !showExpandedCursorModelVariants
+            ? {
+                ...data,
+                models: mergeCursorModelVariantsWithBaseControls(data.models),
+              }
+            : data;
+      }
+    });
+    return byInstance;
+  }, [instanceModelQueries, providerInstances, showExpandedCursorModelVariants]);
   const codexDiscoveryOptions = useMemo(
     () => getCodexProviderDiscoveryOptions(settings),
     [settings],
@@ -309,6 +378,46 @@ export function useProviderModelCatalog(input: {
     piDynamicModelsQuery.data,
   ]);
 
+  const modelOptionsByProviderInstance = useMemo<ProviderModelOptionsByProviderInstance>(() => {
+    const selectedInstanceId = (selectedProviderInstanceId?.trim() ||
+      selectedProvider) as ProviderInstanceId;
+    const byInstance: ProviderModelOptionsByProviderInstance = {};
+    for (const instance of providerInstances) {
+      const customModels = getCustomModelsForProviderInstance(settings, instance);
+      const selectedModelHint =
+        instance.provider === selectedProvider && instance.instanceId === selectedInstanceId
+          ? modelHintByProvider?.[instance.provider]
+          : null;
+      const staticOptions = getAppModelOptions(instance.provider, customModels, selectedModelHint);
+      const dynamicModels = dynamicModelsByProviderInstance[instance.instanceId]?.models;
+      byInstance[instance.instanceId] =
+        dynamicModels && dynamicModels.length > 0
+          ? mergeDynamicModelOptions({
+              provider: instance.provider,
+              staticOptions,
+              dynamicModels,
+            })
+          : staticOptions;
+    }
+    return byInstance;
+  }, [
+    claudeDynamicModelsQuery.data,
+    codexDynamicModelsQuery.data,
+    cursorDynamicModelsQuery.data,
+    cursorRuntimeModels,
+    dynamicModelsByProviderInstance,
+    geminiModelsQuery.data,
+    grokDynamicModelsQuery.data,
+    kiloDynamicModelsQuery.data,
+    modelHintByProvider,
+    openCodeDynamicModelsQuery.data,
+    piDynamicModelsQuery.data,
+    providerInstances,
+    selectedProvider,
+    selectedProviderInstanceId,
+    settings,
+  ]);
+
   const loadingModelProviders = useMemo<Partial<Record<ProviderKind, boolean>>>(
     () => ({
       cursor: cursorModelDiscoveryPending,
@@ -379,6 +488,7 @@ export function useProviderModelCatalog(input: {
 
   return {
     modelOptionsByProvider,
+    modelOptionsByProviderInstance,
     loadingModelProviders,
     runtimeModelsByProvider,
     selectedRuntimeModel,

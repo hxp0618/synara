@@ -190,6 +190,7 @@ export interface OpenCodeRuntimeShape {
     readonly hostname?: string;
     readonly timeoutMs?: number;
     readonly experimentalWebSockets?: boolean;
+    readonly environment?: Readonly<Record<string, string>>;
   }) => Effect.Effect<OpenCodeServerProcess, OpenCodeRuntimeError, Scope.Scope>;
   readonly connectToOpenCodeServer: (input: {
     readonly binaryPath: string;
@@ -200,12 +201,14 @@ export interface OpenCodeRuntimeShape {
     readonly hostname?: string;
     readonly timeoutMs?: number;
     readonly experimentalWebSockets?: boolean;
+    readonly environment?: Readonly<Record<string, string>>;
   }) => Effect.Effect<OpenCodeServerConnection, OpenCodeRuntimeError, Scope.Scope>;
   readonly runOpenCodeCommand: (input: {
     readonly binaryPath: string;
     readonly cliSpec?: OpenCodeCompatibleCliSpec;
     readonly args: ReadonlyArray<string>;
     readonly cwd?: string;
+    readonly environment?: Readonly<Record<string, string>>;
   }) => Effect.Effect<OpenCodeCommandResult, OpenCodeRuntimeError>;
   readonly createOpenCodeSdkClient: (input: {
     readonly baseUrl: string;
@@ -220,6 +223,7 @@ export interface OpenCodeRuntimeShape {
     readonly binaryPath: string;
     readonly cliSpec?: OpenCodeCompatibleCliSpec;
     readonly cwd?: string;
+    readonly environment?: Readonly<Record<string, string>>;
   }) => Effect.Effect<ReadonlyArray<OpenCodeCliModelDescriptor>, OpenCodeRuntimeError>;
   readonly loadOpenCodeCredentialProviderIDs: (
     client: OpencodeClient,
@@ -298,6 +302,7 @@ function pooledOpenCodeServerKey(input: {
   readonly port?: number;
   readonly hostname?: string;
   readonly experimentalWebSockets?: boolean;
+  readonly environment?: Readonly<Record<string, string>>;
 }): string {
   const cliSpec = input.cliSpec ?? OPENCODE_CLI_SPEC;
   return JSON.stringify({
@@ -306,6 +311,7 @@ function pooledOpenCodeServerKey(input: {
     hostname: input.hostname ?? DEFAULT_HOSTNAME,
     port: input.port ?? null,
     experimentalWebSockets: input.experimentalWebSockets === true,
+    environment: environmentFingerprint(input.environment),
     cliSpec: {
       defaultBinaryPath: cliSpec.defaultBinaryPath,
       displayName: cliSpec.displayName,
@@ -315,6 +321,28 @@ function pooledOpenCodeServerKey(input: {
       serverAuthUsername: cliSpec.serverAuthUsername,
     },
   });
+}
+
+function environmentFingerprint(
+  environment: Readonly<Record<string, string>> | undefined,
+): Record<string, string> | null {
+  if (!environment || Object.keys(environment).length === 0) {
+    return null;
+  }
+  return Object.fromEntries(
+    Object.entries(environment)
+      .toSorted(([left], [right]) => left.localeCompare(right))
+      .map(([name, value]) => [name, hashCacheComponent(value)]),
+  );
+}
+
+function hashCacheComponent(value: string): string {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(36);
 }
 
 export function parseOpenCodeModelSlug(
@@ -832,15 +860,16 @@ const makeOpenCodeRuntime = Effect.gen(function* () {
 
   const runOpenCodeCommand: OpenCodeRuntimeShape["runOpenCodeCommand"] = (input) =>
     Effect.gen(function* () {
+      const childEnv = input.environment ? { ...process.env, ...input.environment } : process.env;
       const prepared = prepareWindowsSafeProcess(input.binaryPath, input.args, {
         cwd: input.cwd,
-        env: process.env,
+        env: childEnv,
       });
       const child = yield* spawner.spawn(
         ChildProcess.make(prepared.command, prepared.args, {
           shell: prepared.shell,
           ...(input.cwd ? { cwd: input.cwd } : {}),
-          env: process.env,
+          env: childEnv,
         }),
       );
       const [stdout, stderr, code] = yield* Effect.all(
@@ -896,6 +925,7 @@ const makeOpenCodeRuntime = Effect.gen(function* () {
           ChildProcess.make(input.binaryPath, args, {
             env: buildOpenCodeServerProcessEnv({
               cliSpec,
+              ...(input.environment ? { baseEnv: { ...process.env, ...input.environment } } : {}),
               ...(input.experimentalWebSockets !== undefined
                 ? { experimentalWebSockets: input.experimentalWebSockets }
                 : {}),
@@ -1127,6 +1157,7 @@ const makeOpenCodeRuntime = Effect.gen(function* () {
     readonly hostname?: string;
     readonly timeoutMs?: number;
     readonly experimentalWebSockets?: boolean;
+    readonly environment?: Readonly<Record<string, string>>;
   }) =>
     pooledServerMutex.withPermit(
       Effect.gen(function* () {
@@ -1216,6 +1247,7 @@ const makeOpenCodeRuntime = Effect.gen(function* () {
         ...(input.experimentalWebSockets !== undefined
           ? { experimentalWebSockets: input.experimentalWebSockets }
           : {}),
+        ...(input.environment !== undefined ? { environment: input.environment } : {}),
       });
       yield* Scope.addFinalizer(callerScope, releasePooledServer(pooledServer));
       return {
@@ -1311,11 +1343,13 @@ const makeOpenCodeRuntime = Effect.gen(function* () {
     readonly cliSpec?: OpenCodeCompatibleCliSpec;
     readonly cwd?: string;
     readonly args: ReadonlyArray<string>;
+    readonly environment?: Readonly<Record<string, string>>;
   }) =>
     runOpenCodeCommand({
       binaryPath: input.binaryPath,
       ...(input.cliSpec !== undefined ? { cliSpec: input.cliSpec } : {}),
       ...(input.cwd !== undefined ? { cwd: input.cwd } : {}),
+      ...(input.environment !== undefined ? { environment: input.environment } : {}),
       args: input.args,
     }).pipe(
       Effect.flatMap((result) =>
@@ -1338,6 +1372,7 @@ const makeOpenCodeRuntime = Effect.gen(function* () {
       binaryPath: input.binaryPath,
       ...(input.cliSpec !== undefined ? { cliSpec: input.cliSpec } : {}),
       ...(input.cwd !== undefined ? { cwd: input.cwd } : {}),
+      ...(input.environment !== undefined ? { environment: input.environment } : {}),
       args: ["models", "--verbose"],
     }).pipe(
       Effect.catch((error) => {
@@ -1362,6 +1397,7 @@ const makeOpenCodeRuntime = Effect.gen(function* () {
           binaryPath: input.binaryPath,
           ...(input.cliSpec !== undefined ? { cliSpec: input.cliSpec } : {}),
           ...(input.cwd !== undefined ? { cwd: input.cwd } : {}),
+          ...(input.environment !== undefined ? { environment: input.environment } : {}),
           args: ["models"],
         });
       }),

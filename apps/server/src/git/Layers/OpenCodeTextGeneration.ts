@@ -99,6 +99,8 @@ interface SharedOpenCodeTextGenerationServerState {
   serverScope: Scope.Closeable | null;
   binaryPath: string | null;
   cwd: string | null;
+  experimentalWebSockets: boolean;
+  environmentKey: string | null;
   activeRequests: number;
   idleCloseFiber: Fiber.Fiber<void, never> | null;
 }
@@ -111,6 +113,27 @@ interface AcquiredOpenCodeTextGenerationServer {
 
 type OpenCodeCompatibleTextGenerationProvider = "opencode" | "kilo";
 type OpenCodeCompatibleModelSelection = OpenCodeModelSelection | KiloModelSelection;
+
+function environmentFingerprint(
+  environment: Readonly<Record<string, string>> | undefined,
+): string | null {
+  if (!environment || Object.keys(environment).length === 0) {
+    return null;
+  }
+  const entries = Object.entries(environment)
+    .toSorted(([left], [right]) => left.localeCompare(right))
+    .map(([name, value]) => [name, hashCacheComponent(value)]);
+  return JSON.stringify(entries);
+}
+
+function hashCacheComponent(value: string): string {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(36);
+}
 
 interface OpenCodeCompatibleTextGenerationConfig {
   readonly provider: OpenCodeCompatibleTextGenerationProvider;
@@ -154,6 +177,8 @@ const makeOpenCodeCompatibleTextGeneration = (config: OpenCodeCompatibleTextGene
       serverScope: null,
       binaryPath: null,
       cwd: null,
+      experimentalWebSockets: false,
+      environmentKey: null,
       activeRequests: 0,
       idleCloseFiber: null,
     };
@@ -164,6 +189,8 @@ const makeOpenCodeCompatibleTextGeneration = (config: OpenCodeCompatibleTextGene
       sharedServerState.serverScope = null;
       sharedServerState.binaryPath = null;
       sharedServerState.cwd = null;
+      sharedServerState.experimentalWebSockets = false;
+      sharedServerState.environmentKey = null;
       if (scope !== null) {
         yield* Scope.close(scope, Exit.void).pipe(Effect.ignore);
       }
@@ -201,6 +228,9 @@ const makeOpenCodeCompatibleTextGeneration = (config: OpenCodeCompatibleTextGene
     const acquireSharedServer = (input: {
       readonly binaryPath: string;
       readonly cwd: string;
+      readonly experimentalWebSockets: boolean;
+      readonly environment?: Readonly<Record<string, string>>;
+      readonly environmentKey: string | null;
       readonly operation: TextGenerationOperation;
     }) =>
       sharedServerMutex.withPermit(
@@ -215,6 +245,10 @@ const makeOpenCodeCompatibleTextGeneration = (config: OpenCodeCompatibleTextGene
                   binaryPath: input.binaryPath,
                   cliSpec: config.cliSpec,
                   cwd: input.cwd,
+                  ...(input.environment ? { environment: input.environment } : {}),
+                  ...(input.experimentalWebSockets
+                    ? { experimentalWebSockets: input.experimentalWebSockets }
+                    : {}),
                 })
                 .pipe(
                   Effect.provideService(Scope.Scope, serverScope),
@@ -244,7 +278,9 @@ const makeOpenCodeCompatibleTextGeneration = (config: OpenCodeCompatibleTextGene
           if (existingServer !== null) {
             const sameConfigScope =
               sharedServerState.binaryPath === input.binaryPath &&
-              sharedServerState.cwd === input.cwd;
+              sharedServerState.cwd === input.cwd &&
+              sharedServerState.experimentalWebSockets === input.experimentalWebSockets &&
+              sharedServerState.environmentKey === input.environmentKey;
             if (!sameConfigScope && sharedServerState.activeRequests === 0) {
               yield* closeSharedServer();
             } else {
@@ -254,10 +290,14 @@ const makeOpenCodeCompatibleTextGeneration = (config: OpenCodeCompatibleTextGene
                     input.binaryPath +
                     " at " +
                     input.cwd +
+                    (input.experimentalWebSockets ? " with websockets" : "") +
+                    (input.environmentKey ? " with custom environment" : "") +
                     " but active server uses " +
                     sharedServerState.binaryPath +
                     " at " +
                     sharedServerState.cwd +
+                    (sharedServerState.experimentalWebSockets ? " with websockets" : "") +
+                    (sharedServerState.environmentKey ? " with custom environment" : "") +
                     "; starting a dedicated server for this request",
                 );
                 const dedicated = yield* startServer();
@@ -283,6 +323,8 @@ const makeOpenCodeCompatibleTextGeneration = (config: OpenCodeCompatibleTextGene
               sharedServerState.serverScope = serverScope;
               sharedServerState.binaryPath = input.binaryPath;
               sharedServerState.cwd = input.cwd;
+              sharedServerState.experimentalWebSockets = input.experimentalWebSockets;
+              sharedServerState.environmentKey = input.environmentKey;
               sharedServerState.activeRequests = 1;
               return {
                 server,
@@ -345,6 +387,13 @@ const makeOpenCodeCompatibleTextGeneration = (config: OpenCodeCompatibleTextGene
       const binaryPath = providerOptions?.binaryPath?.trim() || config.cliSpec.defaultBinaryPath;
       const serverUrl = providerOptions?.serverUrl?.trim() || "";
       const serverPassword = providerOptions?.serverPassword?.trim() || "";
+      const experimentalWebSockets =
+        config.provider === "opencode" &&
+        providerOptions !== undefined &&
+        "experimentalWebSockets" in providerOptions &&
+        providerOptions.experimentalWebSockets === true;
+      const environment = providerOptions?.environment;
+      const environmentKey = environmentFingerprint(environment);
       const providerId = parsedModel.providerID;
       const modelId = parsedModel.modelID;
       const modelOptions = input.modelSelection.options as OpenCodeModelOptions | undefined;
@@ -428,6 +477,7 @@ const makeOpenCodeCompatibleTextGeneration = (config: OpenCodeCompatibleTextGene
         filePartCount: fileParts.length,
         binaryPath,
         usingExternalServer: serverUrl.length > 0,
+        experimentalWebSockets,
       });
 
       const rawOutput =
@@ -437,6 +487,9 @@ const makeOpenCodeCompatibleTextGeneration = (config: OpenCodeCompatibleTextGene
               acquireSharedServer({
                 binaryPath,
                 cwd: input.cwd,
+                experimentalWebSockets,
+                ...(environment ? { environment } : {}),
+                environmentKey,
                 operation: input.operation,
               }),
               (acquired) => runAgainstServer(acquired.server),

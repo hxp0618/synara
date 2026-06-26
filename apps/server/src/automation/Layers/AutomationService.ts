@@ -22,6 +22,11 @@ import {
   type ThreadEnvironmentMode,
 } from "@t3tools/contracts";
 import { Cause, Effect, Layer, Option, PubSub, Queue, Stream } from "effect";
+import {
+  providerStartOptionsFromInstance,
+  resolveModelSelectionInstanceId,
+  resolveProviderInstance,
+} from "@t3tools/shared/providerInstances";
 
 import { GitCore } from "../../git/Services/GitCore.ts";
 import { TextGeneration } from "../../git/Services/TextGeneration.ts";
@@ -1267,10 +1272,17 @@ export const AutomationServiceLive = Layer.effect(
         const settings = yield* serverSettings.getSettings.pipe(
           Effect.mapError(toServiceError("Failed to load text-generation settings.")),
         );
+        const fallbackInstance = resolveProviderInstance(settings, {
+          provider: settings.textGenerationModelSelection.provider,
+          instanceId: resolveModelSelectionInstanceId(settings.textGenerationModelSelection),
+        });
+        const fallbackProviderOptions = fallbackInstance
+          ? providerStartOptionsFromInstance(fallbackInstance)
+          : definition.providerOptions;
         return (
           resolveTextGenerationInputForSelection(
             settings.textGenerationModelSelection,
-            definition.providerOptions,
+            fallbackProviderOptions,
           ) ?? {}
         );
       });

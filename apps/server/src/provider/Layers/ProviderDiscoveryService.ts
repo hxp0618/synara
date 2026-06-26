@@ -64,14 +64,14 @@ const disabledCapabilitiesForProvider = (
 });
 
 const PROVIDER_DISCOVERY_OPTION_KEYS = {
-  codex: ["binaryPath", "homePath", "shadowHomePath", "accountId"],
-  claudeAgent: ["binaryPath", "homePath"],
-  cursor: ["binaryPath", "apiEndpoint"],
-  gemini: ["binaryPath"],
-  grok: ["binaryPath"],
-  kilo: ["binaryPath", "serverUrl", "serverPassword"],
-  opencode: ["binaryPath", "serverUrl", "serverPassword", "experimentalWebSockets"],
-  pi: ["binaryPath", "agentDir"],
+  codex: ["binaryPath", "homePath", "shadowHomePath", "accountId", "environment"],
+  claudeAgent: ["binaryPath", "homePath", "environment"],
+  cursor: ["binaryPath", "apiEndpoint", "environment"],
+  gemini: ["binaryPath", "environment"],
+  grok: ["binaryPath", "environment"],
+  kilo: ["binaryPath", "serverUrl", "serverPassword", "environment"],
+  opencode: ["binaryPath", "serverUrl", "serverPassword", "experimentalWebSockets", "environment"],
+  pi: ["binaryPath", "agentDir", "environment"],
 } as const satisfies Record<ProviderKind, readonly string[]>;
 
 const make = Effect.gen(function* () {
@@ -127,6 +127,12 @@ const make = Effect.gen(function* () {
         return yield* new ProviderValidationError({
           operation: "ProviderDiscoveryService.resolveDiscoveryInput",
           issue: `Requested provider '${parsed.provider}' does not match provider instance '${instance.instanceId}' driver '${instance.driver}'.`,
+        });
+      }
+      if (!instance.enabled) {
+        return yield* new ProviderValidationError({
+          operation: "ProviderDiscoveryService.resolveDiscoveryInput",
+          issue: `Provider instance '${instance.instanceId}' is disabled.`,
         });
       }
       const resolved = {

@@ -137,9 +137,11 @@ function modelSelection(
   provider: ModelSelection["provider"],
   model: string,
   options?: ModelSelection["options"],
+  instanceId?: string,
 ): ModelSelection {
   return {
     provider,
+    ...(instanceId ? { instanceId } : {}),
     model,
     ...(options ? { options } : {}),
   } as ModelSelection;
@@ -1168,6 +1170,59 @@ describe("composerDraftStore modelSelection", () => {
     ).toEqual(modelSelection("codex", "gpt-5.4"));
   });
 
+  it("preserves provider instance ids when reusing existing model options", () => {
+    const store = useComposerDraftStore.getState();
+    store.setModelSelection(
+      threadId,
+      modelSelection(
+        "codex",
+        "gpt-5.3-codex",
+        {
+          reasoningEffort: "xhigh",
+        },
+        "codex_work",
+      ),
+    );
+
+    store.setModelSelection(threadId, modelSelection("codex", "gpt-5.4", undefined, "codex_work"));
+
+    expect(
+      useComposerDraftStore.getState().draftsByThreadId[threadId]?.modelSelectionByProvider
+        .codex_work,
+    ).toEqual(
+      modelSelection(
+        "codex",
+        "gpt-5.4",
+        {
+          reasoningEffort: "xhigh",
+        },
+        "codex_work",
+      ),
+    );
+  });
+
+  it("keeps same-provider instance selections in separate draft slots", () => {
+    const store = useComposerDraftStore.getState();
+
+    store.setModelSelection(
+      threadId,
+      modelSelection("claudeAgent", "claude-sonnet-personal", undefined, "claude_personal"),
+    );
+    store.setModelSelection(
+      threadId,
+      modelSelection("claudeAgent", "claude-sonnet-work", { effort: "max" }, "claude_work"),
+    );
+
+    const selections =
+      useComposerDraftStore.getState().draftsByThreadId[threadId]?.modelSelectionByProvider;
+    expect(selections?.claude_personal).toEqual(
+      modelSelection("claudeAgent", "claude-sonnet-personal", undefined, "claude_personal"),
+    );
+    expect(selections?.claude_work).toEqual(
+      modelSelection("claudeAgent", "claude-sonnet-work", { effort: "max" }, "claude_work"),
+    );
+  });
+
   it("stores Grok selections instead of dropping them during normalization", () => {
     const store = useComposerDraftStore.getState();
 
@@ -1448,6 +1503,45 @@ describe("composerDraftStore modelSelection", () => {
     });
 
     expect(state.selectedModel).toBe("opencode/gpt-5-nano");
+  });
+
+  it("ignores same-provider draft models and options from a different provider instance", () => {
+    const state = deriveEffectiveComposerModelState({
+      draft: {
+        modelSelectionByProvider: {
+          codex_personal: modelSelection(
+            "codex",
+            "gpt-5-personal",
+            { effort: "high" },
+            "codex_personal",
+          ),
+        },
+        activeProvider: "codex",
+      },
+      selectedProvider: "codex",
+      selectedProviderInstanceId: "codex_work",
+      threadModelSelection: null,
+      projectModelSelection: null,
+      customModelsByProvider: {
+        codex: [],
+        claudeAgent: [],
+        cursor: [],
+        gemini: [],
+        grok: [],
+        kilo: [],
+        opencode: [],
+        pi: [],
+      },
+      availableModelOptionsByProvider: {
+        codex: [
+          { slug: "gpt-5-work", name: "GPT-5 Work" },
+          { slug: "gpt-5-personal", name: "GPT-5 Personal" },
+        ],
+      },
+    });
+
+    expect(state.selectedModel).toBe("gpt-5-work");
+    expect(state.modelOptions?.codex).toBeUndefined();
   });
 
   it("preserves a selected Pi custom model when discovery omits it", () => {

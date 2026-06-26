@@ -171,7 +171,7 @@ function prepareDpCodeCodexHomeOverlay(input: {
       if (entry === "config.toml") {
         continue;
       }
-      if (accountSegment && CODEX_ACCOUNT_PRIVATE_STATE_FILES.has(entry)) {
+      if (accountSegment && shadowHomePath && CODEX_ACCOUNT_PRIVATE_STATE_FILES.has(entry)) {
         continue;
       }
       const sourcePath = path.join(sourceHomePath, entry);

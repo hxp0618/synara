@@ -9,6 +9,7 @@ import { render } from "vitest-browser-react";
 import { CompactComposerControlsMenu } from "./CompactComposerControlsMenu";
 import { TraitsMenuContent } from "./TraitsPicker";
 import { useComposerDraftStore } from "../../composerDraftStore";
+import { buildModelSelection } from "../../providerModelOptions";
 
 async function mountMenu(props?: {
   activePlan?: boolean;
@@ -23,6 +24,9 @@ async function mountMenu(props?: {
   >["draftsByThreadId"];
   const model =
     props?.modelSelection?.model ?? getDefaultModel(provider) ?? getDefaultModel("codex");
+  const modelSelection =
+    props?.modelSelection ?? buildModelSelection(provider, model, null, { instanceId: provider });
+  const modelSelectionKey = modelSelection.instanceId ?? modelSelection.provider;
 
   draftsByThreadId[threadId] = {
     prompt: props?.prompt ?? "",
@@ -38,11 +42,7 @@ async function mountMenu(props?: {
     mentions: [],
     queuedTurns: [],
     modelSelectionByProvider: {
-      [provider]: {
-        provider,
-        model,
-        ...(props?.modelSelection?.options ? { options: props.modelSelection.options } : {}),
-      },
+      [modelSelectionKey]: modelSelection,
     },
     activeProvider: provider,
     runtimeMode: null,

@@ -1827,7 +1827,12 @@ const makeCodexAdapter = (options?: CodexAdapterLiveOptions) =>
 
     const readExternalThread: NonNullable<CodexAdapterShape["readExternalThread"]> = (input) =>
       Effect.tryPromise({
-        try: () => manager.readExternalThread(input),
+        try: () =>
+          manager.readExternalThread({
+            externalThreadId: input.externalThreadId,
+            ...(input.cwd ? { cwd: input.cwd } : {}),
+            ...(input.providerOptions?.codex ? { codexOptions: input.providerOptions.codex } : {}),
+          }),
         catch: (cause) =>
           new ProviderAdapterRequestError({
             provider: PROVIDER,

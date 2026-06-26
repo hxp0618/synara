@@ -270,19 +270,50 @@ function neverResolvingUserMessageStream(): AsyncIterable<SDKUserMessage> {
 function claudeDiscoveryKey(input: {
   readonly binaryPath?: string | null | undefined;
   readonly homePath?: string | null | undefined;
+  readonly environment?: Readonly<Record<string, string>> | undefined;
   readonly cwd?: string | null | undefined;
   readonly includeCwd?: boolean;
 }): string {
   return JSON.stringify({
     binaryPath: input.binaryPath?.trim() || "claude",
     homePath: input.homePath?.trim() || null,
+    environment: environmentFingerprint(input.environment),
     cwd: input.includeCwd === false ? null : input.cwd?.trim() || null,
   });
 }
 
-function claudeEnvironment(homePath: string | null | undefined): NodeJS.ProcessEnv {
+function environmentFingerprint(
+  environment: Readonly<Record<string, string>> | undefined,
+): Record<string, string> | null {
+  if (!environment || Object.keys(environment).length === 0) {
+    return null;
+  }
+  return Object.fromEntries(
+    Object.entries(environment)
+      .toSorted(([left], [right]) => left.localeCompare(right))
+      .map(([name, value]) => [name, hashCacheComponent(value)]),
+  );
+}
+
+function hashCacheComponent(value: string): string {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(36);
+}
+
+function claudeEnvironment(
+  homePath: string | null | undefined,
+  environment?: Readonly<Record<string, string>> | undefined,
+): NodeJS.ProcessEnv {
   const trimmedHomePath = homePath?.trim();
-  return trimmedHomePath ? { ...process.env, HOME: trimmedHomePath } : process.env;
+  return {
+    ...process.env,
+    ...(environment ?? {}),
+    ...(trimmedHomePath ? { HOME: trimmedHomePath } : {}),
+  };
 }
 
 function isUuid(value: string): boolean {
@@ -1318,8 +1349,14 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
     const nextEventId = Effect.map(Random.nextUUIDv4, (id) => EventId.makeUnsafe(id));
     const makeEventStamp = () => Effect.all({ eventId: nextEventId, createdAt: nowIso });
 
-    const offerRuntimeEvent = (event: ProviderRuntimeEvent): Effect.Effect<void> =>
-      Queue.offer(runtimeEventQueue, event).pipe(Effect.asVoid);
+    const offerRuntimeEvent = (event: ProviderRuntimeEvent): Effect.Effect<void> => {
+      const session = sessions.get(event.threadId)?.session;
+      const eventWithInstance =
+        event.providerInstanceId === undefined && session?.providerInstanceId !== undefined
+          ? { ...event, providerInstanceId: session.providerInstanceId }
+          : event;
+      return Queue.offer(runtimeEventQueue, eventWithInstance).pipe(Effect.asVoid);
+    };
 
     const logNativeSdkMessage = (
       context: ClaudeSessionContext,
@@ -2986,6 +3023,12 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
         const startedAt = yield* nowIso;
         const resumeState = readClaudeResumeState(input.resumeCursor);
         const threadId = input.threadId;
+        const existingContext = sessions.get(threadId);
+        if (existingContext) {
+          yield* stopSessionInternal(existingContext, {
+            emitExitEvent: true,
+          });
+        }
         const existingResumeSessionId = resumeState?.resume;
         const newSessionId =
           existingResumeSessionId === undefined ? yield* Random.nextUUIDv4 : undefined;
@@ -3294,15 +3337,17 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
           );
 
         const providerOptions = input.providerOptions?.claudeAgent;
-        const queryEnv = claudeEnvironment(providerOptions?.homePath);
+        const queryEnv = claudeEnvironment(providerOptions?.homePath, providerOptions?.environment);
         const commandDiscoveryKey = claudeDiscoveryKey({
           binaryPath: providerOptions?.binaryPath,
           homePath: providerOptions?.homePath,
+          environment: providerOptions?.environment,
           cwd: input.cwd,
         });
         const accountDiscoveryKey = claudeDiscoveryKey({
           binaryPath: providerOptions?.binaryPath,
           homePath: providerOptions?.homePath,
+          environment: providerOptions?.environment,
           includeCwd: false,
         });
         const modelSelection =
@@ -3732,7 +3777,7 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
           settingSources: [...CLAUDE_SETTING_SOURCES],
           permissionMode: "plan" as PermissionMode,
           persistSession: false,
-          env: claudeEnvironment(input.homePath),
+          env: claudeEnvironment(input.homePath, input.environment),
         },
       });
 

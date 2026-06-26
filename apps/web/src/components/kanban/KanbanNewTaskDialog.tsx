@@ -146,7 +146,7 @@ export function KanbanNewTaskDialog({
     clearComposerAssistantSelections,
     clearComposerFileComments,
     removeComposerTerminalContext,
-  } = useKanbanTaskScratchDraft({ defaultProvider: settings.defaultProvider });
+  } = useKanbanTaskScratchDraft({ defaultProvider: settings.defaultProvider, settings });
   const promptRef = useRef(prompt);
   const providerInstances = useMemo(() => getProviderInstanceOptions(settings), [settings]);
   const providerOptionsForDispatch = useMemo(
@@ -190,6 +190,7 @@ export function KanbanNewTaskDialog({
   );
   const {
     modelOptionsByProvider,
+    modelOptionsByProviderInstance,
     loadingModelProviders,
     runtimeModelsByProvider,
     selectedRuntimeModel,
@@ -284,7 +285,8 @@ export function KanbanNewTaskDialog({
     if (selectedModel !== null) {
       return;
     }
-    const firstOption = modelOptionsByProvider[selectedProvider][0];
+    const firstOption = (modelOptionsByProviderInstance[selectedProviderInstanceId] ??
+      modelOptionsByProvider[selectedProvider])[0];
     if (firstOption) {
       useComposerDraftStore.getState().setModelSelection(
         scratchThreadId,
@@ -295,6 +297,7 @@ export function KanbanNewTaskDialog({
     }
   }, [
     modelOptionsByProvider,
+    modelOptionsByProviderInstance,
     scratchThreadId,
     selectedModel,
     selectedProvider,
@@ -529,6 +532,7 @@ export function KanbanNewTaskDialog({
                     lockedProvider={null}
                     providers={providerStatuses}
                     modelOptionsByProvider={modelOptionsByProvider}
+                    modelOptionsByProviderInstance={modelOptionsByProviderInstance}
                     loadingModelProviders={loadingModelProviders}
                     hiddenProviders={settings.hiddenProviders}
                     providerOrder={settings.providerOrder}
@@ -550,6 +554,7 @@ export function KanbanNewTaskDialog({
                     onPromptChange={setPrompt}
                     open={isTraitsPickerOpen}
                     onOpenChange={setIsTraitsPickerOpen}
+                    selectedProviderInstanceId={selectedProviderInstanceId}
                   />
                 </div>
               </div>

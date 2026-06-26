@@ -5,6 +5,7 @@
 
 import type {
   ModelSelection,
+  ProviderDriverKind,
   ProviderInstanceConfig,
   ProviderInstanceConfigMap,
   ProviderInstanceId,
@@ -33,6 +34,17 @@ export interface ResolvedProviderInstance {
   readonly enabled: boolean;
   readonly isDefault: boolean;
   readonly config: Record<string, unknown>;
+  readonly environment: Readonly<Record<string, string>>;
+  readonly raw: ProviderInstanceConfig;
+}
+
+export interface UnsupportedProviderInstance {
+  readonly instanceId: ProviderInstanceId;
+  readonly driver: ProviderDriverKind;
+  readonly displayName: string;
+  readonly enabled: boolean;
+  readonly config: Record<string, unknown>;
+  readonly environment: Readonly<Record<string, string>>;
   readonly raw: ProviderInstanceConfig;
 }
 
@@ -43,6 +55,32 @@ const CODEX_ACCOUNT_INSTANCE_PREFIX = "codex_";
 
 function trimString(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
+}
+
+function materializeProviderInstanceEnvironment(
+  raw: ProviderInstanceConfig,
+): Readonly<Record<string, string>> {
+  const environment: Record<string, string> = {};
+  for (const variable of raw.environment ?? []) {
+    if (variable.valueRedacted === true) {
+      continue;
+    }
+    const name = variable.name.trim();
+    if (!name) {
+      continue;
+    }
+    if (typeof variable.value !== "string") {
+      continue;
+    }
+    environment[name] = variable.value;
+  }
+  return environment;
+}
+
+function providerEnvironmentOption(environment: Readonly<Record<string, string>>): {
+  readonly environment?: Readonly<Record<string, string>>;
+} {
+  return Object.keys(environment).length > 0 ? { environment } : {};
 }
 
 function normalizeBinaryPathOverride(provider: ProviderKind, value: unknown): string {
@@ -170,7 +208,7 @@ export function deriveProviderInstanceConfigMap(
 
 function displayNameForInstance(
   instanceId: ProviderInstanceId,
-  driver: ProviderKind,
+  driver: ProviderDriverKind,
   raw: ProviderInstanceConfig,
 ): string {
   const explicit = raw.displayName?.trim();
@@ -213,10 +251,37 @@ export function deriveProviderInstances(
       enabled: raw.enabled !== false && config.enabled !== false,
       isDefault: instanceId === raw.driver,
       config,
+      environment: materializeProviderInstanceEnvironment(raw),
       raw,
     });
   }
   return resolved;
+}
+
+export function deriveUnsupportedProviderInstances(
+  settings: ServerSettings,
+): ReadonlyArray<UnsupportedProviderInstance> {
+  const map = deriveProviderInstanceConfigMap(settings);
+  const unsupported: UnsupportedProviderInstance[] = [];
+  for (const [instanceId, raw] of Object.entries(map)) {
+    if (isProviderKind(raw.driver)) {
+      continue;
+    }
+    const config =
+      raw.config && typeof raw.config === "object" && !Array.isArray(raw.config)
+        ? (raw.config as Record<string, unknown>)
+        : {};
+    unsupported.push({
+      instanceId,
+      driver: raw.driver,
+      displayName: displayNameForInstance(instanceId, raw.driver, raw),
+      enabled: raw.enabled !== false && config.enabled !== false,
+      config,
+      environment: materializeProviderInstanceEnvironment(raw),
+      raw,
+    });
+  }
+  return unsupported;
 }
 
 export function resolveProviderInstance(
@@ -246,14 +311,16 @@ export function providerStartOptionsFromInstance(
 ): ProviderStartOptions | undefined {
   const config = instance.config;
   const binaryPath = normalizeBinaryPathOverride(instance.driver, config.binaryPath);
+  const environment = providerEnvironmentOption(instance.environment);
   switch (instance.driver) {
     case "codex": {
       const homePath = trimString(config.homePath);
       const shadowHomePath = trimString(config.shadowHomePath);
       const accountId = trimString(config.accountId);
-      return binaryPath || homePath || shadowHomePath || accountId
+      return binaryPath || homePath || shadowHomePath || accountId || environment.environment
         ? {
             codex: {
+              ...environment,
               ...(binaryPath ? { binaryPath } : {}),
               ...(homePath ? { homePath } : {}),
               ...(shadowHomePath ? { shadowHomePath } : {}),
@@ -264,9 +331,10 @@ export function providerStartOptionsFromInstance(
     }
     case "claudeAgent": {
       const homePath = trimString(config.homePath);
-      return binaryPath || homePath
+      return binaryPath || homePath || environment.environment
         ? {
             claudeAgent: {
+              ...environment,
               ...(binaryPath ? { binaryPath } : {}),
               ...(homePath ? { homePath } : {}),
             },
@@ -275,9 +343,10 @@ export function providerStartOptionsFromInstance(
     }
     case "cursor": {
       const apiEndpoint = trimString(config.apiEndpoint);
-      return binaryPath || apiEndpoint
+      return binaryPath || apiEndpoint || environment.environment
         ? {
             cursor: {
+              ...environment,
               ...(binaryPath ? { binaryPath } : {}),
               ...(apiEndpoint ? { apiEndpoint } : {}),
             },
@@ -285,15 +354,20 @@ export function providerStartOptionsFromInstance(
         : undefined;
     }
     case "gemini":
-      return binaryPath ? { gemini: { binaryPath } } : undefined;
+      return binaryPath || environment.environment
+        ? { gemini: { ...environment, ...(binaryPath ? { binaryPath } : {}) } }
+        : undefined;
     case "grok":
-      return binaryPath ? { grok: { binaryPath } } : undefined;
+      return binaryPath || environment.environment
+        ? { grok: { ...environment, ...(binaryPath ? { binaryPath } : {}) } }
+        : undefined;
     case "kilo": {
       const serverUrl = trimString(config.serverUrl);
       const serverPassword = trimString(config.serverPassword);
-      return binaryPath || serverUrl || serverPassword
+      return binaryPath || serverUrl || serverPassword || environment.environment
         ? {
             kilo: {
+              ...environment,
               ...(binaryPath ? { binaryPath } : {}),
               ...(serverUrl ? { serverUrl } : {}),
               ...(serverPassword ? { serverPassword } : {}),
@@ -305,9 +379,14 @@ export function providerStartOptionsFromInstance(
       const serverUrl = trimString(config.serverUrl);
       const serverPassword = trimString(config.serverPassword);
       const experimentalWebSockets = config.experimentalWebSockets === true;
-      return binaryPath || serverUrl || serverPassword || experimentalWebSockets
+      return binaryPath ||
+        serverUrl ||
+        serverPassword ||
+        experimentalWebSockets ||
+        environment.environment
         ? {
             opencode: {
+              ...environment,
               ...(binaryPath ? { binaryPath } : {}),
               ...(serverUrl ? { serverUrl } : {}),
               ...(serverPassword ? { serverPassword } : {}),
@@ -318,8 +397,14 @@ export function providerStartOptionsFromInstance(
     }
     case "pi": {
       const agentDir = trimString(config.agentDir);
-      return binaryPath || agentDir
-        ? { pi: { ...(binaryPath ? { binaryPath } : {}), ...(agentDir ? { agentDir } : {}) } }
+      return binaryPath || agentDir || environment.environment
+        ? {
+            pi: {
+              ...environment,
+              ...(binaryPath ? { binaryPath } : {}),
+              ...(agentDir ? { agentDir } : {}),
+            },
+          }
         : undefined;
     }
   }

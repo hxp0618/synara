@@ -934,6 +934,9 @@ export function makeGrokAdapter(
               ? { reasoningEffort: grokModelSelection.options.reasoningEffort }
               : {}),
             ...(input.runtimeMode === "full-access" ? { alwaysApprove: true } : {}),
+            ...(providerGrokOptions?.environment !== undefined
+              ? { environment: providerGrokOptions.environment }
+              : {}),
           };
 
           yield* Effect.logInfo("grok.acp.start", {
@@ -1674,15 +1677,16 @@ export function makeGrokAdapter(
 
     const listModels: NonNullable<GrokAdapterShape["listModels"]> = (input) => {
       const binaryPath = input.binaryPath?.trim() || grokSettings.binaryPath || "grok";
+      const childEnv = input.environment ? { ...process.env, ...input.environment } : process.env;
       return Effect.gen(function* () {
         let cliError: unknown;
         let apiError: ProviderAdapterRequestError | undefined;
         const cliModels = yield* Effect.gen(function* () {
-          const prepared = prepareWindowsSafeProcess(binaryPath, ["models"], { env: process.env });
+          const prepared = prepareWindowsSafeProcess(binaryPath, ["models"], { env: childEnv });
           const child = yield* childProcessSpawner.spawn(
             ChildProcess.make(prepared.command, prepared.args, {
               shell: prepared.shell,
-              env: process.env,
+              env: childEnv,
             }),
           );
           const [stdout, stderr, exitCode] = yield* Effect.all(

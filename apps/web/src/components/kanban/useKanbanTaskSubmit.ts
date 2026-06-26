@@ -20,7 +20,7 @@ import { useCallback, useRef, useState } from "react";
 
 import { toastManager } from "~/components/ui/toast";
 import type { DraftThreadEnvMode } from "~/composerDraftStore";
-import { useComposerDraftStore } from "~/composerDraftStore";
+import { providerInstanceModelSelectionKey, useComposerDraftStore } from "~/composerDraftStore";
 import { createAndSendKanbanTask, createKanbanDraftTask } from "~/lib/kanbanTaskCreate";
 import { resolveProviderSendAvailability } from "~/lib/providerAvailability";
 import { buildModelSelection } from "~/providerModelOptions";
@@ -91,11 +91,18 @@ export function useKanbanTaskSubmit(input: UseKanbanTaskSubmitInput) {
     // The scratch draft carries the full selection (model + reasoning effort +
     // speed) set through the picker; fall back to a bare selection otherwise.
     const scratchState = useComposerDraftStore.getState().draftsByThreadId[scratchThreadId];
-    const modelSelection =
-      scratchState?.modelSelectionByProvider[selectedProvider] ??
-      buildModelSelection(selectedProvider, selectedModel, null, {
+    const draftModelSelection =
+      scratchState?.modelSelectionByProvider[
+        providerInstanceModelSelectionKey(selectedProvider, selectedProviderInstanceId)
+      ];
+    const modelSelection = buildModelSelection(
+      selectedProvider,
+      draftModelSelection?.model ?? selectedModel,
+      draftModelSelection?.options ?? null,
+      {
         instanceId: selectedProviderInstanceId,
-      });
+      },
+    );
     const taskInput = {
       projectId: selectedProjectId,
       prompt: trimmedPrompt,

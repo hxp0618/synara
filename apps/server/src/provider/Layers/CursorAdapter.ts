@@ -704,6 +704,9 @@ export function makeCursorAdapter(
             ...(providerCursorOptions?.apiEndpoint !== undefined
               ? { apiEndpoint: providerCursorOptions.apiEndpoint }
               : {}),
+            ...(providerCursorOptions?.environment !== undefined
+              ? { environment: providerCursorOptions.environment }
+              : {}),
           };
 
           const acp = yield* makeCursorAcpRuntime({
@@ -1472,6 +1475,7 @@ export function makeCursorAdapter(
     const listModels: NonNullable<CursorAdapterShape["listModels"]> = (input) => {
       const binaryPath = input.binaryPath?.trim();
       const apiEndpoint = input.apiEndpoint?.trim();
+      const childEnv = input.environment ? { ...process.env, ...input.environment } : process.env;
       const effectiveBinaryPath = resolveCursorAgentBinaryPath(
         binaryPath || cursorSettings.binaryPath,
       );
@@ -1482,12 +1486,12 @@ export function makeCursorAdapter(
           "models",
         ];
         const prepared = prepareWindowsSafeProcess(effectiveBinaryPath, args, {
-          env: process.env,
+          env: childEnv,
         });
         const child = yield* childProcessSpawner.spawn(
           ChildProcess.make(prepared.command, prepared.args, {
             shell: prepared.shell,
-            env: process.env,
+            env: childEnv,
           }),
         );
         const [stdout, stderr, exitCode] = yield* Effect.all(

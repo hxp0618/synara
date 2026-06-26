@@ -24,6 +24,7 @@ import { resolveCursorAgentBinaryPath } from "./CursorAcpCommand.ts";
 export interface CursorAcpRuntimeCursorSettings {
   readonly apiEndpoint?: string;
   readonly binaryPath?: string;
+  readonly environment?: Readonly<Record<string, string>>;
 }
 
 export const CURSOR_PARAMETERIZED_MODEL_PICKER_CAPABILITIES = {
@@ -71,6 +72,7 @@ export function buildCursorAcpSpawnInput(
       "acp",
     ],
     cwd,
+    ...(cursorSettings?.environment ? { env: cursorSettings.environment } : {}),
   };
 }
 

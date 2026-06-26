@@ -3,6 +3,9 @@
 // Layer: Persistence compatibility helper
 // Exports: normalizeLegacyModelSelection, normalizePersistedModelSelection
 
+import type { ServerSettings } from "@t3tools/contracts";
+import { isProviderKind } from "@t3tools/shared/providerInstances";
+
 type ModelProviderKind =
   | "codex"
   | "claudeAgent"
@@ -75,8 +78,17 @@ function inferLegacyModelProvider(provider: unknown, model: string): ModelProvid
       return providerFromLabel;
     }
   }
+  return inferSpecificModelProvider(model) ?? "codex";
+}
+
+function inferSpecificModelProvider(model: string): ModelProviderKind | undefined {
   const lowerModel = model.toLowerCase();
-  if (lowerModel.includes("claude")) {
+  if (
+    lowerModel.includes("claude") ||
+    lowerModel.includes("sonnet") ||
+    lowerModel.includes("opus") ||
+    lowerModel.includes("haiku")
+  ) {
     return "claudeAgent";
   }
   if (lowerModel.includes("gemini")) {
@@ -85,7 +97,19 @@ function inferLegacyModelProvider(provider: unknown, model: string): ModelProvid
   if (lowerModel.includes("grok")) {
     return "grok";
   }
-  return "codex";
+  if (lowerModel.includes("opencode") || lowerModel.includes("open_code")) {
+    return "opencode";
+  }
+  if (lowerModel.includes("kilo")) {
+    return "kilo";
+  }
+  if (lowerModel.includes("cursor")) {
+    return "cursor";
+  }
+  if (lowerModel.startsWith("pi/") || lowerModel.includes("/pi/")) {
+    return "pi";
+  }
+  return undefined;
 }
 
 function readLegacyProviderOptions(options: unknown, provider: ModelProviderKind): unknown {
@@ -117,19 +141,39 @@ function normalizeModelOptions(input: unknown): unknown {
 
 export function normalizeLegacyModelSelection(input: {
   readonly provider: unknown;
+  readonly instanceId?: unknown;
   readonly model: string;
   readonly options: unknown;
 }): Record<string, unknown> {
   const provider = inferLegacyModelProvider(input.provider, input.model);
   const options = normalizeModelOptions(readLegacyProviderOptions(input.options, provider));
+  const instanceId =
+    typeof input.instanceId === "string" && input.instanceId.trim().length > 0
+      ? input.instanceId.trim()
+      : provider;
   return {
     provider,
+    instanceId,
     model: input.model,
     ...(options === undefined ? {} : { options }),
   };
 }
 
-export function normalizePersistedModelSelection(input: unknown): unknown {
+function resolveProviderFromSettings(
+  settings: ServerSettings | undefined,
+  instanceId: string | undefined,
+): ModelProviderKind | undefined {
+  if (!settings || instanceId === undefined) {
+    return undefined;
+  }
+  const raw = settings.providerInstances[instanceId];
+  return raw && isProviderKind(raw.driver) ? raw.driver : undefined;
+}
+
+export function normalizePersistedModelSelection(
+  input: unknown,
+  settings?: ServerSettings,
+): unknown {
   if (!isRecord(input)) {
     return input;
   }
@@ -141,8 +185,20 @@ export function normalizePersistedModelSelection(input: unknown): unknown {
 
   // Newer T3 Code writes provider-less selections as { instanceId, model } and
   // option rows as [{ id, value }]; Synara stores canonical provider/options objects.
+  const instanceId = readTrimmedString(input, "instanceId");
+  const providerFromSettings = resolveProviderFromSettings(settings, instanceId);
+  if (
+    input.provider === undefined &&
+    providerFromSettings === undefined &&
+    instanceId !== undefined &&
+    inferProviderFromLabel(instanceId) === undefined &&
+    inferSpecificModelProvider(model) === undefined
+  ) {
+    return input;
+  }
   return normalizeLegacyModelSelection({
-    provider: input.provider ?? input.instanceId,
+    provider: input.provider ?? providerFromSettings ?? instanceId,
+    instanceId,
     model,
     options: input.options,
   });

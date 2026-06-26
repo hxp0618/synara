@@ -48,6 +48,7 @@ import { getComposerTraitSelection, hasVisibleComposerTraitControls } from "./co
 import {
   getProviderIconClassName,
   ProviderModelMenuItems,
+  type ProviderModelOptionsByProviderInstance,
   type ProviderModelPickerInstance,
   resolveProviderInstanceLabel,
   resolveProviderModelLabel,
@@ -61,6 +62,7 @@ type ComposerModelEffortPickerProps = {
   lockedProvider: ProviderKind | null;
   providers?: ReadonlyArray<ServerProviderStatus>;
   modelOptionsByProvider: Record<ProviderKind, ReadonlyArray<ProviderModelOption>>;
+  modelOptionsByProviderInstance?: ProviderModelOptionsByProviderInstance;
   loadingModelProviders?: Partial<Record<ProviderKind, boolean>>;
   hiddenProviders?: ReadonlyArray<ProviderKind>;
   providerOrder?: ReadonlyArray<ProviderKind>;
@@ -124,6 +126,8 @@ export const ComposerModelEffortPicker = memo(function ComposerModelEffortPicker
     lockedProvider: props.lockedProvider,
     model: props.model,
     modelOptionsByProvider: props.modelOptionsByProvider,
+    modelOptionsByProviderInstance: props.modelOptionsByProviderInstance,
+    selectedProviderInstanceId: props.selectedProviderInstanceId,
   });
   const instanceLabel = resolveProviderInstanceLabel({
     provider: activeProvider,
@@ -179,6 +183,9 @@ export const ComposerModelEffortPicker = memo(function ComposerModelEffortPicker
           fastMode: nextFastMode,
         }),
         {
+          ...(props.selectedProviderInstanceId
+            ? { instanceId: props.selectedProviderInstanceId }
+            : {}),
           ...(props.model !== undefined ? { model: props.model } : {}),
           persistSticky: true,
         },
@@ -299,6 +306,7 @@ export const ComposerModelEffortPicker = memo(function ComposerModelEffortPicker
             prompt={props.prompt}
             onPromptChange={props.onPromptChange}
             includeFastMode={false}
+            selectedProviderInstanceId={props.selectedProviderInstanceId}
             onSelectionComplete={handleAfterTraitsSelection}
           />
         ) : null}
@@ -323,6 +331,9 @@ export const ComposerModelEffortPicker = memo(function ComposerModelEffortPicker
               lockedProvider={props.lockedProvider}
               {...(props.providers ? { providers: props.providers } : {})}
               modelOptionsByProvider={props.modelOptionsByProvider}
+              {...(props.modelOptionsByProviderInstance
+                ? { modelOptionsByProviderInstance: props.modelOptionsByProviderInstance }
+                : {})}
               {...(props.loadingModelProviders
                 ? { loadingModelProviders: props.loadingModelProviders }
                 : {})}
