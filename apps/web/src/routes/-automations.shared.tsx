@@ -10,14 +10,18 @@ import {
   type AutomationUpdateInput,
   type AutomationWorktreeMode,
   type ModelSelection,
+  type ProviderInstanceId,
   type ProviderKind,
   type RuntimeMode,
   type ThreadId,
 } from "@t3tools/contracts";
 import { getDefaultModel } from "@t3tools/shared/model";
-import { inferLegacyProviderKindFromModelSelection } from "@t3tools/shared/providerInstances";
+import {
+  inferLegacyProviderKindFromInstanceId,
+  inferLegacyProviderKindFromModelSelection,
+} from "@t3tools/shared/providerInstances";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import {
   getProviderInstanceOptions,
@@ -28,7 +32,10 @@ import {
   ComposerPickerMenuPopup,
   ComposerPickerMenuSubPopup,
 } from "~/components/chat/ComposerPickerMenuPopup";
-import { ProviderModelPicker } from "~/components/chat/ProviderModelPicker";
+import {
+  ProviderModelPicker,
+  type ProviderModelFavorite,
+} from "~/components/chat/ProviderModelPicker";
 import { Alert, AlertDescription, AlertTitle } from "~/components/ui/alert";
 import { Button } from "~/components/ui/button";
 import { Dialog, DialogPopup, DialogTitle } from "~/components/ui/dialog";
@@ -705,12 +712,28 @@ export function AutomationModelPicker({
   readonly projectCwd: string | null;
   readonly onChange: (value: ModelSelection) => void;
 }) {
-  const { settings } = useAppSettings();
+  const { settings, updateSettings } = useAppSettings();
   const serverConfigQuery = useQuery(serverConfigQueryOptions());
   const providerStatuses = useProviderStatusesForLocalConfig();
   const [open, setOpen] = useState(false);
+  const handleFavoriteModelsChange = useCallback(
+    (favorites: ProviderModelFavorite[]) => {
+      updateSettings({ favorites });
+    },
+    [updateSettings],
+  );
   const providerInstances = useMemo(() => getProviderInstanceOptions(settings), [settings]);
-  const selectedProvider = inferLegacyProviderKindFromModelSelection(value);
+  const providerByInstanceId = useMemo(() => {
+    const result = new Map<ProviderInstanceId, ProviderKind>();
+    for (const instance of providerInstances) {
+      result.set(instance.instanceId, instance.provider);
+    }
+    return result;
+  }, [providerInstances]);
+  const selectedProvider =
+    providerByInstanceId.get(value.instanceId) ??
+    inferLegacyProviderKindFromInstanceId(value.instanceId) ??
+    inferLegacyProviderKindFromModelSelection(value);
   const selectedProviderInstanceId = useMemo(
     () => resolveSelectableProviderInstanceId(settings, selectedProvider, value.instanceId),
     [settings, selectedProvider, value.instanceId],
@@ -774,6 +797,8 @@ export function AutomationModelPicker({
       providerOrder={settings.providerOrder}
       providerInstances={providerInstances}
       selectedProviderInstanceId={selectedProviderInstanceId}
+      favoriteModels={settings.favorites}
+      onFavoriteModelsChange={handleFavoriteModelsChange}
       open={open}
       onOpenChange={setOpen}
       onProviderModelChange={(provider, model, instanceId) =>

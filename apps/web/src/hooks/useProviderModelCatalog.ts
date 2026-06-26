@@ -102,6 +102,31 @@ function modelQueryOptionsForProviderInstance(input: {
   });
 }
 
+function agentQueryOptionsForProviderInstance(input: {
+  readonly settings: Parameters<typeof getProviderStartOptions>[0];
+  readonly provider: ProviderKind;
+  readonly instanceId: ProviderInstanceId;
+  readonly cwd: string | null;
+  readonly enabled: boolean;
+}) {
+  const providerOptions = getProviderStartOptions(input.settings, input.instanceId)?.[
+    input.provider
+  ];
+  return providerAgentsQueryOptions({
+    provider: input.provider,
+    instanceId: input.instanceId,
+    binaryPath: readOptionString(providerOptions, "binaryPath"),
+    serverUrl: readOptionString(providerOptions, "serverUrl"),
+    serverPassword: readOptionString(providerOptions, "serverPassword"),
+    experimentalWebSockets:
+      input.provider === "opencode"
+        ? readOptionBoolean(providerOptions, "experimentalWebSockets")
+        : undefined,
+    cwd: input.cwd,
+    enabled: input.enabled,
+  });
+}
+
 export function useProviderModelCatalog(input: {
   selectedProvider: ProviderKind;
   selectedProviderInstanceId?: ProviderInstanceId | null;
@@ -165,6 +190,10 @@ export function useProviderModelCatalog(input: {
       selectedProvider === provider ? selectedProviderInstanceId?.trim() : undefined;
     return instanceId ? { instanceId } : {};
   };
+  const selectedOrDefaultInstanceId = (provider: ProviderKind): ProviderInstanceId =>
+    (selectedProvider === provider && selectedProviderInstanceId?.trim()
+      ? selectedProviderInstanceId
+      : provider) as ProviderInstanceId;
 
   const claudeDynamicModelsQuery = useQuery(
     providerModelsQueryOptions({
@@ -254,24 +283,19 @@ export function useProviderModelCatalog(input: {
     }),
   );
   const openCodeDynamicAgentsQuery = useQuery(
-    providerAgentsQueryOptions({
+    agentQueryOptionsForProviderInstance({
+      settings,
       provider: "opencode",
-      ...selectedInstanceQueryOption("opencode"),
-      binaryPath: settings.openCodeBinaryPath || null,
-      serverUrl: settings.openCodeServerUrl || null,
-      serverPassword: settings.openCodeServerPassword || null,
-      experimentalWebSockets: settings.openCodeExperimentalWebSockets,
+      instanceId: selectedOrDefaultInstanceId("opencode"),
       cwd: discoveryCwd,
       enabled: selectedProvider === "opencode" || discoveryEnabled,
     }),
   );
   const kiloDynamicAgentsQuery = useQuery(
-    providerAgentsQueryOptions({
+    agentQueryOptionsForProviderInstance({
+      settings,
       provider: "kilo",
-      ...selectedInstanceQueryOption("kilo"),
-      binaryPath: settings.kiloBinaryPath || null,
-      serverUrl: settings.kiloServerUrl || null,
-      serverPassword: settings.kiloServerPassword || null,
+      instanceId: selectedOrDefaultInstanceId("kilo"),
       cwd: discoveryCwd,
       enabled: selectedProvider === "kilo" || discoveryEnabled,
     }),

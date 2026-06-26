@@ -4,6 +4,10 @@ import {
   type ProviderKind,
   type ServerProviderStatus,
 } from "@t3tools/contracts";
+import { isProviderKind } from "../providerOrdering";
+
+const CUSTOM_BINARY_CONFIRMATION_SUFFIX =
+  "Availability will be confirmed when you start a session.";
 
 export interface ProviderSendAvailability {
   readonly provider: ProviderKind;
@@ -42,17 +46,11 @@ export function normalizeProviderStatusForLocalConfig(input: {
 
   if (normalizeCustomBinaryPath(input.confirmedCustomBinaryPath) === customBinaryPath) {
     // Only the exact path used by a successful session can suppress the warning.
+    const { message: _message, ...confirmedStatus } = status;
     return {
-      provider: status.provider,
+      ...confirmedStatus,
       available: true,
       status: "ready",
-      authStatus: status.authStatus,
-      checkedAt: status.checkedAt,
-      ...(status.authType ? { authType: status.authType } : {}),
-      ...(status.authLabel ? { authLabel: status.authLabel } : {}),
-      ...(status.voiceTranscriptionAvailable !== undefined
-        ? { voiceTranscriptionAvailable: status.voiceTranscriptionAvailable }
-        : {}),
     };
   }
 
@@ -60,8 +58,14 @@ export function normalizeProviderStatusForLocalConfig(input: {
     ...status,
     available: true,
     status: "warning",
-    message: `${PROVIDER_DISPLAY_NAMES[input.provider]} uses a custom local binary path in this app. Availability will be confirmed when you start a session.`,
+    message: `${PROVIDER_DISPLAY_NAMES[input.provider]} uses a custom local binary path in this app. ${CUSTOM_BINARY_CONFIRMATION_SUFFIX}`,
   };
+}
+
+export function providerStatusInstanceKey(
+  status: Pick<ServerProviderStatus, "provider" | "instanceId">,
+): ProviderInstanceId {
+  return (status.instanceId ?? status.provider) as ProviderInstanceId;
 }
 
 export function isProviderUsable(status: ServerProviderStatus | null | undefined): boolean {
@@ -69,15 +73,27 @@ export function isProviderUsable(status: ServerProviderStatus | null | undefined
     // Missing status means the health check has not confirmed an installed provider yet.
     return false;
   }
-  return status.available && status.status === "ready" && status.authStatus !== "unauthenticated";
+  if (!status.available || status.authStatus === "unauthenticated") {
+    return false;
+  }
+  if (status.status === "ready") {
+    return true;
+  }
+  return (
+    status.status === "warning" &&
+    typeof status.message === "string" &&
+    status.message.endsWith(CUSTOM_BINARY_CONFIRMATION_SUFFIX)
+  );
 }
 
 export function providerUnavailableReason(status: ServerProviderStatus | null | undefined): string {
   if (!status) {
     return "Provider status is still loading.";
   }
-  const providerLabel =
-    status.displayName?.trim() || PROVIDER_DISPLAY_NAMES[status.provider] || status.provider;
+  const providerLabelFallback = isProviderKind(status.provider)
+    ? PROVIDER_DISPLAY_NAMES[status.provider]
+    : status.provider;
+  const providerLabel = status.displayName?.trim() || providerLabelFallback || status.provider;
   if (status.authStatus === "unauthenticated") {
     return `${providerLabel} is not authenticated yet.`;
   }
@@ -96,11 +112,12 @@ export function findProviderStatus(
     return (
       statuses.find(
         (status) =>
-          status.provider === provider && (status.instanceId ?? status.provider) === instanceId,
+          (status.driver ?? status.provider) === provider &&
+          (status.instanceId ?? status.provider) === instanceId,
       ) ?? null
     );
   }
-  return statuses.find((status) => status.provider === provider) ?? null;
+  return statuses.find((status) => (status.driver ?? status.provider) === provider) ?? null;
 }
 
 // Shared send gate used by chat, Kanban, shortcuts, and handoff flows.

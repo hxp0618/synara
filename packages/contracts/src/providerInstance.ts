@@ -18,18 +18,14 @@ const ProviderSlug = TrimmedNonEmptyString.check(
 
 // Driver kind names the implementation (codex, claudeAgent, cursor, ...).
 export const ProviderDriverKind = ProviderSlug;
-export type ProviderDriverKind = string & {
-  readonly __providerInstanceContractBrand?: "ProviderDriverKind";
-};
+export type ProviderDriverKind = typeof ProviderDriverKind.Type;
 const isProviderDriverKindValue = Schema.is(ProviderDriverKind);
 export const isProviderDriverKind = (value: unknown): value is ProviderDriverKind =>
   isProviderDriverKindValue(value);
 
 // Instance id is the routing key: multiple ids may share the same driver.
 export const ProviderInstanceId = ProviderSlug;
-export type ProviderInstanceId = string & {
-  readonly __providerInstanceContractBrand?: "ProviderInstanceId";
-};
+export type ProviderInstanceId = typeof ProviderInstanceId.Type;
 
 export const ProviderInstanceRef = Schema.Struct({
   instanceId: ProviderInstanceId,
@@ -71,5 +67,5 @@ export type ProviderInstanceConfigMap = typeof ProviderInstanceConfigMap.Type;
 
 // Legacy single-provider ids remain the default instance ids for migrations.
 export function defaultInstanceIdForDriver(driver: ProviderDriverKind): ProviderInstanceId {
-  return driver as string as ProviderInstanceId;
+  return driver;
 }

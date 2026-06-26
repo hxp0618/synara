@@ -6,7 +6,7 @@ import {
   type ServerSettingsPatch,
 } from "@t3tools/contracts";
 import { deepMerge, type DeepPartial } from "./Struct";
-import { deriveProviderInstances } from "./providerInstances";
+import { defaultInstanceIdForProvider, deriveProviderInstances } from "./providerInstances";
 
 function defaultModelForProvider(provider: ProviderKind): string {
   return provider === "pi" ? "openai/gpt-5.5" : DEFAULT_MODEL_BY_PROVIDER[provider];
@@ -41,8 +41,8 @@ export function applyServerSettingsPatch(
   );
   const patchedInstanceId =
     selectionPatch.instanceId ??
-    (selectionPatch.provider && selectionPatch.provider !== currentInstance?.driver
-      ? selectionPatch.provider
+    (selectionPatch.provider
+      ? defaultInstanceIdForProvider(selectionPatch.provider)
       : current.textGenerationModelSelection.instanceId);
   const patchedInstance =
     patchedInstanceId !== undefined

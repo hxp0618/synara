@@ -9,6 +9,7 @@ import {
   type OrchestrationThreadPullRequest,
   type ProjectId,
   type ProviderInteractionMode,
+  type ProviderInstanceId,
   type ProviderKind,
   type RuntimeMode,
   type ThreadEnvironmentMode,
@@ -68,6 +69,9 @@ interface ResolveTerminalThreadCreationStateInput {
   options: NewThreadOptions | undefined;
   projectDefaultModelSelection: ModelSelection | null;
   projectId: ProjectId;
+  resolveProviderForInstanceId?: (
+    instanceId: ProviderInstanceId,
+  ) => ProviderKind | null | undefined;
 }
 
 export interface TerminalThreadCreationState {
@@ -260,6 +264,9 @@ export function resolveTerminalThreadCreationState(
           : null,
       projectModelSelection: input.projectDefaultModelSelection,
       defaultProvider: input.defaultProvider,
+      ...(input.resolveProviderForInstanceId
+        ? { resolveProviderForInstanceId: input.resolveProviderForInstanceId }
+        : {}),
     }),
     runtimeMode:
       input.draftThread?.runtimeMode ??

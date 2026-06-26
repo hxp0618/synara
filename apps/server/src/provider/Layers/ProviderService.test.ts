@@ -14,6 +14,7 @@ import {
   EventId,
   type ServerSettings,
   type ProviderKind,
+  type ProviderInstanceId,
   ProviderSessionStartInput,
   ThreadId,
   TurnId,
@@ -48,6 +49,7 @@ import { ServerSettingsService } from "../../serverSettings.ts";
 
 const asRequestId = (value: string): ApprovalRequestId => ApprovalRequestId.makeUnsafe(value);
 const asEventId = (value: string): EventId => EventId.makeUnsafe(value);
+const asProviderInstanceId = (value: string): ProviderInstanceId => value as ProviderInstanceId;
 const asThreadId = (value: string): ThreadId => ThreadId.makeUnsafe(value);
 const asTurnId = (value: string): TurnId => TurnId.makeUnsafe(value);
 
@@ -429,6 +431,7 @@ it.effect(
 
       const codex = makeFakeCodexAdapter();
       const threadId = asThreadId("thread-stopall");
+      const providerInstanceId = asProviderInstanceId("codex_work");
       const resumeCursor = {
         threadId,
         resume: "resume-session-stopall",
@@ -456,23 +459,38 @@ it.effect(
         Layer.provide(Layer.succeed(ProviderAdapterRegistry, registry)),
         Layer.provide(ProviderSessionDirectoryLive.pipe(Layer.provide(runtimeRepositoryLayer))),
         Layer.provide(AnalyticsService.layerTest),
-        Layer.provide(ServerSettingsService.layerTest()),
+        Layer.provide(
+          ServerSettingsService.layerTest({
+            providerInstances: {
+              codex_work: {
+                driver: "codex",
+                config: {
+                  homePath: "/tmp/codex-work",
+                },
+              },
+            },
+          }),
+        ),
       );
 
       yield* Effect.gen(function* () {
         const provider = yield* ProviderService;
         yield* provider.startSession(threadId, {
           provider: "codex",
+          providerInstanceId,
           cwd: "/tmp/project",
           runtimeMode: "full-access",
           threadId,
         });
-        codex.updateSession(threadId, (existing) => ({
-          ...existing,
-          status: "running",
-          activeTurnId: asTurnId("turn-stopall"),
-          resumeCursor,
-        }));
+        codex.updateSession(threadId, (existing) => {
+          const { providerInstanceId: _providerInstanceId, ...sessionWithoutInstance } = existing;
+          return {
+            ...sessionWithoutInstance,
+            status: "running",
+            activeTurnId: asTurnId("turn-stopall"),
+            resumeCursor,
+          };
+        });
       }).pipe(Effect.provide(providerLayer));
 
       const persisted = yield* Effect.gen(function* () {
@@ -484,6 +502,7 @@ it.effect(
       if (Option.isSome(persisted)) {
         const runtimePayload = persisted.value.runtimePayload as Record<string, unknown>;
         assert.equal(persisted.value.status, "stopped");
+        assert.equal(persisted.value.providerInstanceId, providerInstanceId);
         assert.deepEqual(persisted.value.resumeCursor, resumeCursor);
         assert.equal(runtimePayload.activeTurnId, null);
         assert.equal(runtimePayload.lastRuntimeEvent, "provider.stopAll");
@@ -959,6 +978,48 @@ routing.layer("ProviderServiceLive routing", (it) => {
         assert.equal(resumedStartInput.providerInstanceId, "codex_work");
         assert.deepEqual(resumedStartInput.resumeCursor, initial.resumeCursor);
       }
+      assert.equal(routing.codex.sendTurn.mock.calls.length, 1);
+    }),
+  );
+
+  it.effect("keeps an unstamped live same-driver session when the binding owns the instance", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const serverSettings = yield* ServerSettingsService;
+      const threadId = asThreadId("thread-unstamped-live-instance");
+
+      yield* serverSettings.updateSettings({
+        providerInstances: {
+          codex_work: {
+            driver: "codex",
+            displayName: "Codex Work",
+          },
+        },
+      });
+
+      yield* provider.startSession(threadId, {
+        provider: "codex",
+        providerInstanceId: "codex_work",
+        threadId,
+        cwd: "/tmp/project-work",
+        runtimeMode: "full-access",
+      });
+      routing.codex.updateSession(threadId, (existing) => {
+        const { providerInstanceId: _providerInstanceId, ...sessionWithoutInstance } = existing;
+        return sessionWithoutInstance;
+      });
+      routing.codex.stopSession.mockClear();
+      routing.codex.startSession.mockClear();
+      routing.codex.sendTurn.mockClear();
+
+      yield* provider.sendTurn({
+        threadId,
+        input: "continue on the unstamped work account",
+        attachments: [],
+      });
+
+      assert.equal(routing.codex.stopSession.mock.calls.length, 0);
+      assert.equal(routing.codex.startSession.mock.calls.length, 0);
       assert.equal(routing.codex.sendTurn.mock.calls.length, 1);
     }),
   );
@@ -1594,6 +1655,243 @@ routing.layer("ProviderServiceLive routing", (it) => {
         };
         assert.equal(startPayload.providerOptions, undefined);
         assert.equal(startPayload.resumeCursor, undefined);
+      }
+
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("recovers provider-instance sessions from current settings after options clear", () =>
+    Effect.gen(function* () {
+      const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "t3-provider-service-instance-clear-"));
+      const dbPath = path.join(tempDir, "orchestration.sqlite");
+      const threadId = asThreadId("thread-instance-options-clear");
+      const persistenceLayer = makeSqlitePersistenceLive(dbPath);
+      const runtimeRepositoryLayer = ProviderSessionRuntimeRepositoryLive.pipe(
+        Layer.provide(persistenceLayer),
+      );
+      const firstSettings: Partial<ServerSettings> = {
+        providerInstances: {
+          codex_work: {
+            driver: "codex",
+            enabled: true,
+            config: {
+              homePath: "/tmp/codex-work",
+              shadowHomePath: "/tmp/codex-work-shadow",
+              accountId: "work",
+            },
+          },
+        },
+      };
+      const secondSettings: Partial<ServerSettings> = {
+        providerInstances: {
+          codex_work: {
+            driver: "codex",
+            enabled: true,
+            config: {
+              homePath: "/tmp/codex-work",
+            },
+          },
+        },
+      };
+
+      const firstCodex = makeFakeCodexAdapter("codex");
+      const firstRegistry: typeof ProviderAdapterRegistry.Service = {
+        getByProvider: (provider) =>
+          provider === "codex"
+            ? Effect.succeed(firstCodex.adapter)
+            : Effect.fail(new ProviderUnsupportedError({ provider })),
+        listProviders: () => Effect.succeed(["codex"]),
+      };
+      const firstDirectoryLayer = ProviderSessionDirectoryLive.pipe(
+        Layer.provide(runtimeRepositoryLayer),
+      );
+      const firstProviderLayer = makeProviderServiceLive().pipe(
+        Layer.provide(Layer.succeed(ProviderAdapterRegistry, firstRegistry)),
+        Layer.provide(firstDirectoryLayer),
+        Layer.provide(AnalyticsService.layerTest),
+        Layer.provide(ServerSettingsService.layerTest(firstSettings)),
+      );
+
+      const initial = yield* Effect.gen(function* () {
+        const provider = yield* ProviderService;
+        return yield* provider.startSession(threadId, {
+          provider: "codex",
+          providerInstanceId: "codex_work",
+          threadId,
+          cwd: "/tmp/project-instance-options-clear",
+          runtimeMode: "full-access",
+        });
+      }).pipe(Effect.provide(firstProviderLayer));
+
+      const secondCodex = makeFakeCodexAdapter("codex");
+      const secondRegistry: typeof ProviderAdapterRegistry.Service = {
+        getByProvider: (provider) =>
+          provider === "codex"
+            ? Effect.succeed(secondCodex.adapter)
+            : Effect.fail(new ProviderUnsupportedError({ provider })),
+        listProviders: () => Effect.succeed(["codex"]),
+      };
+      const secondDirectoryLayer = ProviderSessionDirectoryLive.pipe(
+        Layer.provide(runtimeRepositoryLayer),
+      );
+      const secondProviderLayer = makeProviderServiceLive().pipe(
+        Layer.provide(Layer.succeed(ProviderAdapterRegistry, secondRegistry)),
+        Layer.provide(secondDirectoryLayer),
+        Layer.provide(AnalyticsService.layerTest),
+        Layer.provide(ServerSettingsService.layerTest(secondSettings)),
+      );
+
+      yield* Effect.gen(function* () {
+        const provider = yield* ProviderService;
+        yield* provider.sendTurn({
+          threadId: initial.threadId,
+          input: "continue after account fields cleared",
+          attachments: [],
+        });
+      }).pipe(Effect.provide(secondProviderLayer));
+
+      assert.equal(secondCodex.startSession.mock.calls.length, 1);
+      const recoveredInput = secondCodex.startSession.mock.calls[0]?.[0];
+      assert.equal(typeof recoveredInput === "object" && recoveredInput !== null, true);
+      if (recoveredInput && typeof recoveredInput === "object") {
+        const startPayload = recoveredInput as {
+          providerOptions?: unknown;
+          resumeCursor?: unknown;
+          providerInstanceId?: string;
+        };
+        assert.equal(startPayload.providerInstanceId, "codex_work");
+        assert.deepEqual(startPayload.providerOptions, {
+          codex: { homePath: "/tmp/codex-work" },
+        });
+        assert.equal(startPayload.resumeCursor, undefined);
+      }
+
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("reuses resume cursor when hydrated instance options only add redacted fields", () =>
+    Effect.gen(function* () {
+      const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "t3-provider-service-redacted-"));
+      const dbPath = path.join(tempDir, "orchestration.sqlite");
+      const threadId = asThreadId("thread-redacted-instance-options");
+      const persistenceLayer = makeSqlitePersistenceLive(dbPath);
+      const runtimeRepositoryLayer = ProviderSessionRuntimeRepositoryLive.pipe(
+        Layer.provide(persistenceLayer),
+      );
+      const settings: Partial<ServerSettings> = {
+        providerInstances: {
+          opencode_work: {
+            driver: "opencode",
+            enabled: true,
+            environment: [
+              { name: "OPENCODE_API_KEY", value: "opencode-env-secret", sensitive: true },
+            ],
+            config: {
+              serverUrl: "http://127.0.0.1:4096",
+              serverPassword: "opencode-password",
+            },
+          },
+        },
+      };
+
+      const firstOpenCode = makeFakeCodexAdapter("opencode");
+      const firstRegistry: typeof ProviderAdapterRegistry.Service = {
+        getByProvider: (provider) =>
+          provider === "opencode"
+            ? Effect.succeed(firstOpenCode.adapter)
+            : Effect.fail(new ProviderUnsupportedError({ provider })),
+        listProviders: () => Effect.succeed(["opencode"]),
+      };
+      const firstDirectoryLayer = ProviderSessionDirectoryLive.pipe(
+        Layer.provide(runtimeRepositoryLayer),
+      );
+      const firstProviderLayer = makeProviderServiceLive().pipe(
+        Layer.provide(Layer.succeed(ProviderAdapterRegistry, firstRegistry)),
+        Layer.provide(firstDirectoryLayer),
+        Layer.provide(AnalyticsService.layerTest),
+        Layer.provide(ServerSettingsService.layerTest(settings)),
+      );
+
+      const initial = yield* Effect.gen(function* () {
+        const provider = yield* ProviderService;
+        return yield* provider.startSession(threadId, {
+          provider: "opencode",
+          providerInstanceId: "opencode_work",
+          threadId,
+          cwd: "/tmp/project-redacted-instance-options",
+          runtimeMode: "full-access",
+        });
+      }).pipe(Effect.provide(firstProviderLayer));
+
+      const persisted = yield* Effect.gen(function* () {
+        const runtimeRepository = yield* ProviderSessionRuntimeRepository;
+        return yield* runtimeRepository.getByThreadId({ threadId });
+      }).pipe(Effect.provide(runtimeRepositoryLayer));
+      assert.equal(Option.isSome(persisted), true);
+      if (Option.isSome(persisted)) {
+        const runtimePayload = persisted.value.runtimePayload as {
+          providerOptions?: {
+            opencode?: {
+              serverPassword?: string;
+              environment?: Record<string, string>;
+            };
+          };
+        };
+        assert.equal(runtimePayload.providerOptions?.opencode?.serverPassword, undefined);
+        assert.equal(runtimePayload.providerOptions?.opencode?.environment, undefined);
+      }
+
+      const secondOpenCode = makeFakeCodexAdapter("opencode");
+      const secondRegistry: typeof ProviderAdapterRegistry.Service = {
+        getByProvider: (provider) =>
+          provider === "opencode"
+            ? Effect.succeed(secondOpenCode.adapter)
+            : Effect.fail(new ProviderUnsupportedError({ provider })),
+        listProviders: () => Effect.succeed(["opencode"]),
+      };
+      const secondDirectoryLayer = ProviderSessionDirectoryLive.pipe(
+        Layer.provide(runtimeRepositoryLayer),
+      );
+      const secondProviderLayer = makeProviderServiceLive().pipe(
+        Layer.provide(Layer.succeed(ProviderAdapterRegistry, secondRegistry)),
+        Layer.provide(secondDirectoryLayer),
+        Layer.provide(AnalyticsService.layerTest),
+        Layer.provide(ServerSettingsService.layerTest(settings)),
+      );
+
+      yield* Effect.gen(function* () {
+        const provider = yield* ProviderService;
+        yield* provider.startSession(threadId, {
+          provider: "opencode",
+          providerInstanceId: "opencode_work",
+          threadId,
+          cwd: "/tmp/project-redacted-instance-options",
+          runtimeMode: "full-access",
+        });
+      }).pipe(Effect.provide(secondProviderLayer));
+
+      assert.equal(secondOpenCode.startSession.mock.calls.length, 1);
+      const resumedInput = secondOpenCode.startSession.mock.calls[0]?.[0];
+      assert.equal(typeof resumedInput === "object" && resumedInput !== null, true);
+      if (resumedInput && typeof resumedInput === "object") {
+        const startPayload = resumedInput as {
+          providerOptions?: {
+            opencode?: {
+              serverUrl?: string;
+              serverPassword?: string;
+              environment?: Record<string, string>;
+            };
+          };
+          resumeCursor?: unknown;
+        };
+        assert.deepEqual(startPayload.resumeCursor, initial.resumeCursor);
+        assert.deepEqual(startPayload.providerOptions?.opencode, {
+          serverUrl: "http://127.0.0.1:4096",
+          serverPassword: "opencode-password",
+          environment: { OPENCODE_API_KEY: "opencode-env-secret" },
+        });
       }
 
       fs.rmSync(tempDir, { recursive: true, force: true });

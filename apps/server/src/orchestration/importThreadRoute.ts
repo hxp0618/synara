@@ -51,10 +51,6 @@ async function withSerializedProcessEnv<T>(
   environment: Readonly<Record<string, string>> | undefined,
   run: () => Promise<T>,
 ): Promise<T> {
-  if (!environment || Object.keys(environment).length === 0) {
-    return run();
-  }
-
   const previousLock = claudeHistoricalSessionEnvLock;
   let releaseLock: (() => void) | undefined;
   claudeHistoricalSessionEnvLock = previousLock.then(
@@ -65,8 +61,9 @@ async function withSerializedProcessEnv<T>(
   );
   await previousLock;
 
+  const environmentEntries = Object.entries(environment ?? {});
   const previousValues = new Map<string, string | undefined>();
-  for (const [key, value] of Object.entries(environment)) {
+  for (const [key, value] of environmentEntries) {
     previousValues.set(key, process.env[key]);
     process.env[key] = value;
   }

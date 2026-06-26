@@ -5,7 +5,10 @@
 
 import type { ModelSlug, ProviderInstanceId, ProviderKind } from "@t3tools/contracts";
 import { getDefaultModel } from "@t3tools/shared/model";
-import { inferLegacyProviderKindFromModelSelection } from "@t3tools/shared/providerInstances";
+import {
+  inferLegacyProviderKindFromInstanceId,
+  inferLegacyProviderKindFromModelSelection,
+} from "@t3tools/shared/providerInstances";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
@@ -16,7 +19,11 @@ import {
 } from "~/lib/composerMentions";
 import { buildComposerImageAttachmentsFromFiles } from "~/lib/composerSend";
 import { newThreadId } from "~/lib/utils";
-import { resolveSelectableProviderInstanceId, type AppSettings } from "../../appSettings";
+import {
+  getProviderInstanceOptions,
+  resolveSelectableProviderInstanceId,
+  type AppSettings,
+} from "../../appSettings";
 import {
   providerInstanceModelSelectionKey,
   useComposerDraftStore,
@@ -66,16 +73,25 @@ export function useKanbanTaskScratchDraft(input: {
   const stickyModelSelectionByProvider = useComposerDraftStore(
     (state) => state.stickyModelSelectionByProvider,
   );
+  const activeProviderInstanceId = scratchDraft.activeProvider ?? stickyActiveProvider;
+  const providerInstances = useMemo(
+    () => getProviderInstanceOptions(input.settings),
+    [input.settings],
+  );
   const selectedProvider: ProviderKind =
-    scratchDraft.activeProvider ?? stickyActiveProvider ?? input.defaultProvider;
+    (activeProviderInstanceId
+      ? (providerInstances.find((instance) => instance.instanceId === activeProviderInstanceId)
+          ?.provider ?? inferLegacyProviderKindFromInstanceId(activeProviderInstanceId))
+      : null) ?? input.defaultProvider;
   const selectedProviderInstanceId: ProviderInstanceId = resolveSelectableProviderInstanceId(
     input.settings,
     selectedProvider,
-    Object.values(scratchDraft.modelSelectionByProvider).find(
-      (selection) =>
-        selection !== undefined &&
-        inferLegacyProviderKindFromModelSelection(selection) === selectedProvider,
-    )?.instanceId ??
+    activeProviderInstanceId ??
+      Object.values(scratchDraft.modelSelectionByProvider).find(
+        (selection) =>
+          selection !== undefined &&
+          inferLegacyProviderKindFromModelSelection(selection) === selectedProvider,
+      )?.instanceId ??
       Object.values(stickyModelSelectionByProvider).find(
         (selection) =>
           selection !== undefined &&

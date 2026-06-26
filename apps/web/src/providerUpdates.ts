@@ -4,6 +4,7 @@
 // Exports: update candidate helpers, notification keys, and auto-refresh timing.
 
 import type { ProviderKind, ServerProviderStatus, ServerSettings } from "@t3tools/contracts";
+import { isProviderKind } from "./providerOrdering";
 
 export const PROVIDER_UPDATE_INITIAL_REFRESH_DELAY_MS = 10_000;
 export const PROVIDER_UPDATE_REFRESH_INTERVAL_MS = 60 * 60 * 1_000;
@@ -50,7 +51,9 @@ function isProviderEnabled(
         : undefined;
     return instance.enabled !== false && configEnabled !== false;
   }
-  return serverSettings.providers[provider.provider]?.enabled !== false;
+  return isProviderKind(provider.provider)
+    ? serverSettings.providers[provider.provider]?.enabled !== false
+    : false;
 }
 
 // Central visibility gate used by both global toasts and Settings update rows.
@@ -61,6 +64,7 @@ export function shouldShowProviderUpdateStatus(input: ProviderUpdateVisibilityIn
     !advisory ||
     advisory.status !== "behind_latest" ||
     advisory.latestVersion === null ||
+    !isProviderKind(input.provider.provider) ||
     hiddenProviderSet.has(input.provider.provider) ||
     !isProviderEnabled(input.provider, input.serverSettings)
   ) {

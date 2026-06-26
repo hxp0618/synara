@@ -84,6 +84,7 @@ export function makeServerProviderLayer(): Layer.Layer<
       Layer.provide(openCodeAdapterLayer),
       Layer.provide(piAdapterLayer),
       Layer.provideMerge(providerSessionDirectoryLayer),
+      Layer.provide(ServerSettingsLive),
     );
     const providerServiceLayer = makeProviderServiceLive(
       canonicalEventLogger ? { canonicalEventLogger } : undefined,

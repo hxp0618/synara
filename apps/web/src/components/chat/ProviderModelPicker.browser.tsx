@@ -8,7 +8,11 @@ import { page } from "vitest/browser";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { render } from "vitest-browser-react";
 
-import { ProviderModelPicker, type ProviderModelPickerInstance } from "./ProviderModelPicker";
+import {
+  ProviderModelPicker,
+  type ProviderModelFavorite,
+  type ProviderModelPickerInstance,
+} from "./ProviderModelPicker";
 import type { ProviderModelOption } from "../../providerModelOptions";
 
 const MODEL_OPTIONS_BY_PROVIDER = {
@@ -133,6 +137,8 @@ async function mountPicker(props: {
   onSelectionCommitted?: () => void;
   providerInstances?: ReadonlyArray<ProviderModelPickerInstance>;
   selectedProviderInstanceId?: ProviderInstanceId;
+  favoriteModels?: ReadonlyArray<ProviderModelFavorite>;
+  onFavoriteModelsChange?: (favoriteModels: ProviderModelFavorite[]) => void;
   modelOptionsByProviderInstance?: Partial<
     Record<ProviderInstanceId, ReadonlyArray<ProviderModelOption & { slug: ModelSlug }>>
   >;
@@ -157,6 +163,10 @@ async function mountPicker(props: {
       {...(props.providerInstances ? { providerInstances: props.providerInstances } : {})}
       {...(props.selectedProviderInstanceId
         ? { selectedProviderInstanceId: props.selectedProviderInstanceId }
+        : {})}
+      {...(props.favoriteModels ? { favoriteModels: props.favoriteModels } : {})}
+      {...(props.onFavoriteModelsChange
+        ? { onFavoriteModelsChange: props.onFavoriteModelsChange }
         : {})}
       {...(props.modelOptionsByProviderInstance
         ? { modelOptionsByProviderInstance: props.modelOptionsByProviderInstance }
@@ -240,6 +250,56 @@ describe("ProviderModelPicker", () => {
         "claude-sonnet-4-6",
         "claudeAgent",
       );
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("stores settings-backed favourites by exact provider instance", async () => {
+    const onFavoriteModelsChange = vi.fn();
+    const mounted = await mountPicker({
+      provider: "claudeAgent",
+      model: "claude-opus-4-6",
+      lockedProvider: "claudeAgent",
+      selectedProviderInstanceId: "claude_work",
+      providerInstances: [
+        {
+          instanceId: "claudeAgent",
+          provider: "claudeAgent",
+          label: "Personal Claude",
+          enabled: true,
+          isDefault: true,
+        },
+        {
+          instanceId: "claude_work",
+          provider: "claudeAgent",
+          label: "Work Claude",
+          enabled: true,
+          isDefault: false,
+        },
+      ],
+      providers: [
+        {
+          provider: "claudeAgent",
+          instanceId: "claude_work",
+          driver: "claudeAgent",
+          status: "ready",
+          available: true,
+          authStatus: "authenticated",
+          checkedAt: "2026-04-10T10:00:00.000Z",
+        },
+      ],
+      favoriteModels: [],
+      onFavoriteModelsChange,
+    });
+
+    try {
+      await page.getByRole("button").click();
+      await page.getByRole("button", { name: "Add Claude Sonnet 4.6 to favourites" }).click();
+
+      expect(onFavoriteModelsChange).toHaveBeenCalledWith([
+        { provider: "claude_work", model: "claude-sonnet-4-6" },
+      ]);
     } finally {
       await mounted.cleanup();
     }
@@ -792,6 +852,47 @@ describe("ProviderModelPicker", () => {
         const text = document.body.textContent ?? "";
         expect(text).toContain("Claude");
         expect(text).toContain("Checking");
+      });
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("shows unsupported provider instances as missing-driver rows", async () => {
+    const mounted = await mountPicker({
+      provider: "codex",
+      model: "gpt-5-codex",
+      lockedProvider: null,
+      providers: [
+        {
+          provider: "codex",
+          status: "ready",
+          available: true,
+          authStatus: "authenticated",
+          checkedAt: "2026-04-10T10:00:00.000Z",
+        },
+        {
+          provider: "codex",
+          instanceId: "fork_work",
+          driver: "customFork",
+          displayName: "Fork Work",
+          status: "error",
+          available: false,
+          availability: "unavailable",
+          unavailableReason: "Provider driver 'customFork' is not supported by this Synara build.",
+          authStatus: "unknown",
+          checkedAt: "2026-04-10T10:00:00.000Z",
+        },
+      ],
+    });
+
+    try {
+      await page.getByRole("button").click();
+
+      await vi.waitFor(() => {
+        const text = document.body.textContent ?? "";
+        expect(text).toContain("Fork Work");
+        expect(text).toContain("Missing driver");
       });
     } finally {
       await mounted.cleanup();

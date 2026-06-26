@@ -3,16 +3,24 @@
 // Layer: Shared runtime utility tests
 
 import { describe, expect, it } from "vitest";
-import { DEFAULT_SERVER_SETTINGS, ProviderInstanceId } from "@t3tools/contracts";
+import {
+  DEFAULT_SERVER_SETTINGS,
+  ProviderInstanceId,
+  type ProviderInstanceId as ProviderInstanceIdType,
+} from "@t3tools/contracts";
 import { Schema } from "effect";
 
 import { codexAccountInstanceId, resolveProviderInstance } from "./providerInstances";
+
+function providerInstanceId(value: string): ProviderInstanceIdType {
+  return value as ProviderInstanceIdType;
+}
 
 describe("provider instance resolution", () => {
   it("rejects explicit unknown instance ids instead of falling back", () => {
     const resolved = resolveProviderInstance(DEFAULT_SERVER_SETTINGS, {
       provider: "codex",
-      instanceId: "codex_removed",
+      instanceId: providerInstanceId("codex_removed"),
     });
 
     expect(resolved).toBeNull();

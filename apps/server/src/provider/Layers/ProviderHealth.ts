@@ -11,18 +11,19 @@
 import * as OS from "node:os";
 import type {
   ProviderInstanceId,
-  ProviderKind,
   ServerSettings,
   ServerProviderAuthStatus,
   ServerProviderStatus,
   ServerProviderStatusState,
   ServerProviderUpdateState,
 } from "@t3tools/contracts";
-import { ServerProviderUpdateError } from "@t3tools/contracts";
+import { ProviderKind, ServerProviderUpdateError } from "@t3tools/contracts";
 import { parseCodexConfigModelProvider } from "@t3tools/shared/codexConfig";
 import {
   deriveProviderInstances,
+  deriveUnsupportedProviderInstances,
   type ResolvedProviderInstance,
+  type UnsupportedProviderInstance,
 } from "@t3tools/shared/providerInstances";
 import { decodeJsonResult } from "@t3tools/shared/schemaJson";
 import { prepareWindowsSafeProcess } from "@t3tools/shared/windowsProcess";
@@ -1993,6 +1994,27 @@ function makeUncheckedProviderInstanceStatus(
   } satisfies ServerProviderStatus;
 }
 
+function makeUnsupportedProviderInstanceStatus(
+  instance: UnsupportedProviderInstance,
+  checkedAt: string,
+): ServerProviderStatus {
+  const unavailableReason = `Provider driver '${instance.driver}' is not supported by this Synara build.`;
+  return {
+    provider: instance.driver,
+    instanceId: instance.instanceId,
+    driver: instance.driver,
+    displayName: instance.displayName,
+    enabled: false,
+    status: "error",
+    available: false,
+    availability: "unavailable",
+    unavailableReason,
+    authStatus: "unknown",
+    checkedAt,
+    message: unavailableReason,
+  } satisfies ServerProviderStatus;
+}
+
 function mergeProviderStatusUpdates(
   previousStatuses: ReadonlyArray<ServerProviderStatus>,
   updatedStatuses: ReadonlyArray<ServerProviderStatus>,
@@ -2102,6 +2124,10 @@ export function projectProviderStatusesForSettings(
     }
   }
 
+  for (const instance of deriveUnsupportedProviderInstances(settings)) {
+    projected.push(makeUnsupportedProviderInstanceStatus(instance, checkedAt));
+  }
+
   return orderProviderStatuses(projected);
 }
 
@@ -2123,13 +2149,15 @@ export const ProviderHealthLive = Layer.effect(
     yield* Effect.addFinalizer(() => Scope.close(refreshScope, Exit.void));
 
     const cachePathForProviderTarget = (input: {
-      readonly provider: ProviderKind;
+      readonly provider: ServerProviderStatus["provider"];
       readonly instanceId?: ProviderInstanceId | undefined;
     }) =>
       resolveProviderStatusCachePath({
         stateDir: serverConfig.stateDir,
         provider: input.provider,
-        ...(input.instanceId ? { instanceId: input.instanceId } : {}),
+        ...(input.instanceId && input.instanceId !== input.provider
+          ? { instanceId: input.instanceId }
+          : {}),
       });
 
     const initialSettings = yield* serverSettings.getSettings;
@@ -2224,11 +2252,11 @@ export const ProviderHealthLive = Layer.effect(
       const instances = deriveProviderInstances(settings).filter(
         (instance) => instance.driver === target.provider,
       );
-      return (
-        instances.find((instance) => instance.instanceId === targetInstanceId) ??
-        instances.find((instance) => instance.isDefault) ??
-        null
-      );
+      const exactInstance = instances.find((instance) => instance.instanceId === targetInstanceId);
+      if (exactInstance || target.instanceId !== undefined) {
+        return exactInstance ?? null;
+      }
+      return instances.find((instance) => instance.isDefault) ?? null;
     };
 
     const stampProviderStatusForInstance = (
@@ -2347,9 +2375,13 @@ export const ProviderHealthLive = Layer.effect(
     ) {
       const enriched = yield* Effect.forEach(
         statuses,
-        (status) =>
-          getProviderMaintenanceCapabilities({
-            provider: status.provider,
+        (status) => {
+          const provider = status.driver ?? status.provider;
+          if (!Schema.is(ProviderKind)(provider)) {
+            return Effect.succeed(status);
+          }
+          return getProviderMaintenanceCapabilities({
+            provider,
             instanceId: providerStatusInstanceKey(status),
           }).pipe(
             Effect.flatMap((capabilities) =>
@@ -2369,7 +2401,8 @@ export const ProviderHealthLive = Layer.effect(
                 },
               }),
             ),
-          ),
+          );
+        },
         { concurrency: "unbounded" },
       );
       return yield* Effect.forEach(enriched, applyVolatileProviderState, {
@@ -2565,7 +2598,7 @@ export const ProviderHealthLive = Layer.effect(
     yield* ensureRefreshFiber;
 
     yield* serverSettings.streamChanges.pipe(
-      Stream.runForEach(() => publishProjectedStatuses().pipe(Effect.asVoid)),
+      Stream.runForEach(() => ensureRefreshFiber.pipe(Effect.flatMap(Fiber.join), Effect.asVoid)),
       Effect.forkIn(refreshScope),
     );
 
@@ -2736,7 +2769,7 @@ export const ProviderHealthLive = Layer.effect(
         const providers = yield* refreshNow.pipe(Effect.mapError(toUpdateError));
         const refreshed = providers.find(
           (status) =>
-            status.provider === provider &&
+            (status.driver ?? status.provider) === provider &&
             providerStatusInstanceKey(status) === providerStatusKey(target),
         );
         const stillOutdated = refreshed?.versionAdvisory?.status === "behind_latest";

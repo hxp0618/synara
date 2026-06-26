@@ -4,6 +4,7 @@ import {
   ProjectId,
   ThreadId,
   type ModelSelection,
+  type ProviderInstanceId,
   type ProviderKind,
   type ProviderModelOptions,
 } from "@t3tools/contracts";
@@ -144,6 +145,10 @@ function modelSelection(
   return buildModelSelection(provider, model, options, { instanceId });
 }
 
+function providerInstanceId(value: string): ProviderInstanceId {
+  return value as ProviderInstanceId;
+}
+
 function providerModelOptions(options: ProviderModelOptions): ProviderModelOptions {
   return options;
 }
@@ -183,6 +188,59 @@ describe("resolvePreferredComposerModelSelection", () => {
         projectModelSelection: modelSelection("codex", "gpt-5.4"),
       }),
     ).toEqual(modelSelection("grok", "grok-build"));
+  });
+
+  it("prefers the exact active draft provider instance selection", () => {
+    expect(
+      resolvePreferredComposerModelSelection({
+        draft: {
+          modelSelectionByProvider: {
+            claude_work: modelSelection(
+              "claudeAgent",
+              "claude-sonnet-work",
+              { effort: "max" },
+              "claude_work",
+            ),
+          },
+          activeProvider: providerInstanceId("claude_work"),
+        },
+        threadModelSelection: modelSelection("claudeAgent", "claude-sonnet-default"),
+        projectModelSelection: modelSelection("codex", "gpt-5"),
+      }),
+    ).toEqual(
+      modelSelection("claudeAgent", "claude-sonnet-work", { effort: "max" }, "claude_work"),
+    );
+  });
+
+  it("falls back to the exact active draft provider instance when no draft model exists", () => {
+    const resolved = resolvePreferredComposerModelSelection({
+      draft: {
+        modelSelectionByProvider: {},
+        activeProvider: providerInstanceId("claude_work"),
+      },
+      threadModelSelection: null,
+      projectModelSelection: null,
+    });
+
+    expect(resolved.instanceId).toBe("claude_work");
+  });
+
+  it("uses configured provider instances for opaque active draft instance ids", () => {
+    const resolved = resolvePreferredComposerModelSelection({
+      draft: {
+        modelSelectionByProvider: {},
+        activeProvider: providerInstanceId("work"),
+      },
+      threadModelSelection: modelSelection("codex", "gpt-5"),
+      projectModelSelection: null,
+      resolveProviderForInstanceId: (instanceId) =>
+        instanceId === providerInstanceId("work") ? "claudeAgent" : null,
+    });
+
+    expect(resolved).toEqual({
+      instanceId: providerInstanceId("work"),
+      model: "claude-sonnet-4-6",
+    });
   });
 });
 
@@ -1214,6 +1272,23 @@ describe("composerDraftStore modelSelection", () => {
     expect(selections?.claude_work).toEqual(
       modelSelection("claudeAgent", "claude-sonnet-work", { effort: "max" }, "claude_work"),
     );
+    expect(useComposerDraftStore.getState().draftsByThreadId[threadId]?.activeProvider).toBe(
+      "claude_work",
+    );
+  });
+
+  it("keeps sticky selections scoped to the exact provider instance", () => {
+    const store = useComposerDraftStore.getState();
+
+    store.setStickyModelSelection(
+      modelSelection("claudeAgent", "claude-sonnet-work", { effort: "max" }, "claude_work"),
+    );
+
+    const state = useComposerDraftStore.getState();
+    expect(state.stickyModelSelectionByProvider.claude_work).toEqual(
+      modelSelection("claudeAgent", "claude-sonnet-work", { effort: "max" }, "claude_work"),
+    );
+    expect(state.stickyActiveProvider).toBe("claude_work");
   });
 
   it("stores Grok selections instead of dropping them during normalization", () => {
@@ -1270,6 +1345,36 @@ describe("composerDraftStore modelSelection", () => {
         thinking: false,
       }),
     );
+  });
+
+  it("persists provider option changes to the targeted provider instance", () => {
+    const store = useComposerDraftStore.getState();
+    store.setModelSelection(
+      threadId,
+      modelSelection("claudeAgent", "claude-sonnet-work", { effort: "max" }, "claude_work"),
+    );
+
+    store.setProviderModelOptions(
+      threadId,
+      "claudeAgent",
+      { fastMode: true },
+      {
+        instanceId: providerInstanceId("claude_work"),
+        model: "claude-sonnet-work",
+        persistSticky: true,
+      },
+    );
+
+    expect(
+      useComposerDraftStore.getState().draftsByThreadId[threadId]?.modelSelectionByProvider
+        .claude_work,
+    ).toEqual(
+      modelSelection("claudeAgent", "claude-sonnet-work", { fastMode: true }, "claude_work"),
+    );
+    expect(useComposerDraftStore.getState().stickyModelSelectionByProvider.claude_work).toEqual(
+      modelSelection("claudeAgent", "claude-sonnet-work", { fastMode: true }, "claude_work"),
+    );
+    expect(useComposerDraftStore.getState().stickyActiveProvider).toBe("claude_work");
   });
 
   it("keeps explicit default-state overrides on the selection", () => {

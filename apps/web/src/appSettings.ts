@@ -140,6 +140,12 @@ const withDefaults =
       Schema.withDecodingDefault(() => fallback()),
     );
 
+export const FavoriteModelSetting = Schema.Struct({
+  provider: ProviderInstanceId,
+  model: TrimmedNonEmptyString,
+});
+export type FavoriteModelSetting = typeof FavoriteModelSetting.Type;
+
 export const AppSettingsSchema = Schema.Struct({
   claudeBinaryPath: Schema.String.check(Schema.isMaxLength(4096)).pipe(withDefaults(() => "")),
   claudeHomePath: Schema.String.check(Schema.isMaxLength(4096)).pipe(withDefaults(() => "")),
@@ -218,6 +224,7 @@ export const AppSettingsSchema = Schema.Struct({
   customKiloModels: Schema.Array(Schema.String).pipe(withDefaults(() => [])),
   customOpenCodeModels: Schema.Array(Schema.String).pipe(withDefaults(() => [])),
   customPiModels: Schema.Array(Schema.String).pipe(withDefaults(() => [])),
+  favorites: Schema.Array(FavoriteModelSetting).pipe(withDefaults(() => [])),
   textGenerationProvider: ProviderKind.pipe(withDefaults(() => "codex" as const)),
   textGenerationProviderInstanceId: Schema.optional(ProviderInstanceId),
   textGenerationModel: Schema.optional(TrimmedNonEmptyString),
@@ -258,7 +265,12 @@ export interface GitTextGenerationModelPickerOption {
 
 const DEFAULT_APP_SETTINGS = AppSettingsSchema.makeUnsafe({});
 let serverSettingsMigrationInFlight = false;
-const GIT_TEXT_GENERATION_PROVIDERS = new Set<ProviderKind>(["codex", "kilo", "opencode"]);
+const GIT_TEXT_GENERATION_PROVIDERS = new Set<ProviderKind>([
+  "codex",
+  "claudeAgent",
+  "kilo",
+  "opencode",
+]);
 
 const PROVIDER_CUSTOM_MODEL_CONFIG: Record<ProviderKind, ProviderCustomModelConfig> = {
   codex: {
@@ -528,8 +540,18 @@ const PROVIDER_INSTANCE_PROVIDER_ORDER = [
   "pi",
 ] as const satisfies ReadonlyArray<ProviderKind>;
 
+function providerInstanceId(value: string): ProviderInstanceId {
+  return value as ProviderInstanceId;
+}
+
+function providerDriverKind(value: string): ProviderDriverKind {
+  return value as ProviderDriverKind;
+}
+
 function providerInstanceIdForCodexAccount(accountId: string): ProviderInstanceId {
-  return accountId === DEFAULT_CODEX_ACCOUNT_ID ? "codex" : codexAccountInstanceId(accountId);
+  return accountId === DEFAULT_CODEX_ACCOUNT_ID
+    ? providerInstanceId("codex")
+    : codexAccountInstanceId(accountId);
 }
 
 function defaultProviderInstanceLabel(provider: ProviderKind): string {
@@ -554,6 +576,20 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
+export function mergeProviderInstanceConfigPatch(
+  existingConfig: unknown,
+  patchConfig: Record<string, unknown>,
+): Record<string, unknown> {
+  const merged = {
+    ...(isRecord(existingConfig) ? existingConfig : {}),
+    ...patchConfig,
+  };
+  for (const key of Object.keys(patchConfig)) {
+    delete merged[`${key}Redacted`];
+  }
+  return merged;
+}
+
 export function getProviderInstanceOptions(
   settings: Pick<
     AppSettings,
@@ -563,8 +599,9 @@ export function getProviderInstanceOptions(
   const optionsById = new Map<ProviderInstanceId, ProviderInstanceOption>();
 
   for (const provider of PROVIDER_INSTANCE_PROVIDER_ORDER) {
-    optionsById.set(provider, {
-      instanceId: provider,
+    const instanceId = providerInstanceId(provider);
+    optionsById.set(instanceId, {
+      instanceId,
       provider,
       driver: provider,
       label: defaultProviderInstanceLabel(provider),
@@ -591,15 +628,16 @@ export function getProviderInstanceOptions(
     if (!Schema.is(ProviderKind)(raw.driver)) {
       continue;
     }
+    const typedInstanceId = providerInstanceId(instanceId);
     const config = isRecord(raw.config) ? raw.config : {};
-    const label = raw.displayName?.trim() || fallbackProviderInstanceLabel(instanceId);
-    optionsById.set(instanceId, {
-      instanceId,
+    const label = raw.displayName?.trim() || fallbackProviderInstanceLabel(typedInstanceId);
+    optionsById.set(typedInstanceId, {
+      instanceId: typedInstanceId,
       provider: raw.driver,
       driver: raw.driver,
       label,
       enabled: raw.enabled !== false && config.enabled !== false,
-      isDefault: instanceId === raw.driver,
+      isDefault: String(typedInstanceId) === String(raw.driver),
       supported: true,
     });
   }
@@ -624,11 +662,12 @@ export function getUnsupportedProviderInstanceOptions(
   return Object.entries(settings.providerInstances)
     .filter(([, raw]) => !Schema.is(ProviderKind)(raw.driver))
     .map(([instanceId, raw]) => {
+      const typedInstanceId = providerInstanceId(instanceId);
       const config = isRecord(raw.config) ? raw.config : {};
       return {
-        instanceId,
+        instanceId: typedInstanceId,
         driver: raw.driver,
-        label: raw.displayName?.trim() || fallbackProviderInstanceLabel(instanceId),
+        label: raw.displayName?.trim() || fallbackProviderInstanceLabel(typedInstanceId),
         enabled: raw.enabled !== false && config.enabled !== false,
         isDefault: false,
         supported: false,
@@ -642,7 +681,7 @@ export function resolveDefaultProviderInstanceId(
   provider: ProviderKind,
 ): ProviderInstanceId {
   if (provider !== "codex") {
-    return provider;
+    return providerInstanceId(provider);
   }
   return providerInstanceIdForCodexAccount(resolveSelectedCodexAccount(settings).id);
 }
@@ -676,7 +715,7 @@ export function resolveSelectableProviderInstanceId(
     return enabledInstance.instanceId;
   }
 
-  return defaultInstance?.instanceId ?? provider;
+  return defaultInstance?.instanceId ?? providerInstanceId(provider);
 }
 
 type CodexAccountLaunchSettingsInput = Pick<
@@ -748,6 +787,29 @@ export function getCodexProviderDiscoveryOptions(settings: CodexAccountLaunchSet
   };
 }
 
+function normalizeFavoriteModels(
+  favorites: ReadonlyArray<FavoriteModelSetting>,
+): FavoriteModelSetting[] {
+  const result: FavoriteModelSetting[] = [];
+  const seen = new Set<string>();
+  for (const favorite of favorites) {
+    const model = favorite.model.trim();
+    if (!model) {
+      continue;
+    }
+    const key = `${favorite.provider}\u0000${model}`;
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    result.push({
+      provider: favorite.provider,
+      model,
+    });
+  }
+  return result;
+}
+
 function normalizeAppSettings(settings: AppSettings): AppSettings {
   const codexAccounts = normalizeCodexAccounts(settings.codexAccounts);
   const selectedCodexAccountId = new Set([
@@ -785,6 +847,7 @@ function normalizeAppSettings(settings: AppSettings): AppSettings {
     customKiloModels: normalizeCustomModelSlugs(settings.customKiloModels, "kilo"),
     customOpenCodeModels: normalizeCustomModelSlugs(settings.customOpenCodeModels, "opencode"),
     customPiModels: normalizeCustomModelSlugs(settings.customPiModels, "pi"),
+    favorites: normalizeFavoriteModels(settings.favorites),
     hiddenProviders: normalizeHiddenProviders(settings.hiddenProviders),
     providerOrder: normalizeProviderOrder(settings.providerOrder),
     hiddenModels: [],
@@ -891,9 +954,10 @@ function appSettingsPatchToServerSettingsPatch(patch: Partial<AppSettings>): Ser
         : {}),
       model,
     });
-    const instanceId = patch.textGenerationProviderInstanceId?.trim() || provider;
+    const instanceId = providerInstanceId(
+      patch.textGenerationProviderInstanceId?.trim() || provider,
+    );
     serverPatch.textGenerationModelSelection = {
-      provider,
       instanceId,
       model,
     };
@@ -1111,18 +1175,40 @@ export function patchCustomModels(
 }
 
 export function patchCustomModelsForProviderInstance(
-  settings: Pick<AppSettings, "providerInstances">,
+  settings: Pick<
+    AppSettings,
+    "codexAccounts" | "codexHomePath" | "providerInstances" | "selectedCodexAccountId"
+  >,
   instance: Pick<ProviderInstanceOption, "instanceId" | "provider" | "isDefault">,
   models: string[],
 ): Partial<Pick<AppSettings, CustomModelSettingsKey | "providerInstances">> {
   const existing = settings.providerInstances[instance.instanceId];
+  const codexAccount =
+    instance.provider === "codex" && !instance.isDefault
+      ? getCodexAccountOptions(settings).find(
+          (account) => providerInstanceIdForCodexAccount(account.id) === instance.instanceId,
+        )
+      : undefined;
+  const codexAccountConfig =
+    codexAccount && !codexAccount.isDefault
+      ? {
+          ...(codexAccount.homePath ? { homePath: codexAccount.homePath } : {}),
+          ...(codexAccount.shadowHomePath ? { shadowHomePath: codexAccount.shadowHomePath } : {}),
+          ...(codexAccount.id ? { accountId: codexAccount.id } : {}),
+        }
+      : {};
 
   return {
     providerInstances: {
       ...settings.providerInstances,
       [instance.instanceId]: {
-        ...(existing ?? { driver: instance.provider, enabled: true }),
+        ...(existing ?? {
+          driver: providerDriverKind(instance.provider),
+          enabled: true,
+          ...(codexAccount?.label ? { displayName: codexAccount.label } : {}),
+        }),
         config: {
+          ...codexAccountConfig,
           ...(isRecord(existing?.config) ? existing.config : {}),
           customModels: models,
         },
@@ -1214,6 +1300,7 @@ export function getGitTextGenerationModelOptions(
   settings: Pick<
     AppSettings,
     | "customCodexModels"
+    | "customClaudeModels"
     | "customKiloModels"
     | "customOpenCodeModels"
     | "textGenerationModel"
@@ -1222,6 +1309,7 @@ export function getGitTextGenerationModelOptions(
 ): AppModelOption[] {
   const options = [
     ...getAppModelOptions("codex", settings.customCodexModels),
+    ...getAppModelOptions("claudeAgent", settings.customClaudeModels),
     ...getAppModelOptions("kilo", settings.customKiloModels),
     ...getAppModelOptions("opencode", settings.customOpenCodeModels),
   ];
@@ -1270,7 +1358,9 @@ export function getGitTextGenerationPickerOptions(
   const selectedProvider =
     settings.textGenerationProvider ??
     resolveTextGenerationProvider(selectedModel !== undefined ? { model: selectedModel } : {});
-  const selectedInstanceId = settings.textGenerationProviderInstanceId?.trim() || selectedProvider;
+  const selectedInstanceId = providerInstanceId(
+    settings.textGenerationProviderInstanceId?.trim() || selectedProvider,
+  );
   const entries: GitTextGenerationModelPickerOption[] = [];
   const seen = new Set<string>();
 
@@ -1657,6 +1747,39 @@ export function getCustomBinaryPathForProvider(
     case "pi":
       return normalizeProviderBinaryPathOverride(provider, settings.piBinaryPath);
   }
+}
+
+function getProviderOptionsBinaryPath(
+  providerOptions: ProviderStartOptions | undefined,
+  provider: ProviderKind,
+): string {
+  const options = providerOptions?.[provider];
+  if (!options || typeof options !== "object" || Array.isArray(options)) {
+    return "";
+  }
+  const binaryPath = (options as Record<string, unknown>).binaryPath;
+  return normalizeProviderBinaryPathOverride(
+    provider,
+    typeof binaryPath === "string" ? binaryPath : undefined,
+  );
+}
+
+export function getCustomBinaryPathForProviderInstance(
+  settings: Parameters<typeof getProviderStartOptions>[0] &
+    Parameters<typeof getCustomBinaryPathForProvider>[0],
+  provider: ProviderKind,
+  instanceId?: ProviderInstanceId | null | undefined,
+): string {
+  const instanceBinaryPath = getProviderOptionsBinaryPath(
+    getProviderStartOptions(settings, instanceId),
+    provider,
+  );
+  if (instanceBinaryPath) {
+    return instanceBinaryPath;
+  }
+  return instanceId && instanceId !== provider
+    ? ""
+    : getCustomBinaryPathForProvider(settings, provider);
 }
 
 export function useAppSettings() {

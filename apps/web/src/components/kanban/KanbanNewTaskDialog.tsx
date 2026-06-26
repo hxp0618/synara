@@ -29,7 +29,10 @@ import {
   type ComposerPromptEditorHandle,
 } from "~/components/ComposerPromptEditor";
 import { ComposerCommandMenu } from "~/components/chat/ComposerCommandMenu";
-import { ProviderModelPicker } from "~/components/chat/ProviderModelPicker";
+import {
+  ProviderModelPicker,
+  type ProviderModelFavorite,
+} from "~/components/chat/ProviderModelPicker";
 import { TraitsPicker } from "~/components/chat/TraitsPicker";
 import {
   ComposerLocalDirectoryMenu,
@@ -110,13 +113,19 @@ export function KanbanNewTaskDialog({
   initialProjectId,
   initialSendAsDraft = false,
 }: KanbanNewTaskDialogProps) {
-  const { settings } = useAppSettings();
+  const { settings, updateSettings } = useAppSettings();
   const { resolvedTheme } = useTheme();
   const assistantDeliveryMode = resolveAssistantDeliveryMode(settings);
   const projects = useStore((state) => state.projects);
   const serverConfigQuery = useQuery(serverConfigQueryOptions());
   const providerStatuses = useProviderStatusesForLocalConfig();
   const refreshProviderStatuses = useRefreshProviderStatusesNow();
+  const handleFavoriteModelsChange = useCallback(
+    (favorites: ProviderModelFavorite[]) => {
+      updateSettings({ favorites });
+    },
+    [updateSettings],
+  );
   const composerEditorRef = useRef<ComposerPromptEditorHandle>(null);
   const localDirectoryMenuRef = useRef<ComposerLocalDirectoryMenuHandle | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -237,6 +246,7 @@ export function KanbanNewTaskDialog({
     defaultProvider: settings.defaultProvider,
     assistantDeliveryMode,
     providerOptionsForDispatch,
+    providerInstances,
     providerStatuses,
     onOpenChange,
   });
@@ -271,6 +281,8 @@ export function KanbanNewTaskDialog({
     selectedProvider,
     selectedProviderInstanceId,
     modelOptionsByProvider,
+    modelOptionsByProviderInstance,
+    providerInstances,
     selectedRuntimeAgents,
     selectedProjectCwd: selectedProject?.cwd ?? null,
     serverCwd: serverConfigQuery.data?.cwd ?? null,
@@ -278,7 +290,7 @@ export function KanbanNewTaskDialog({
     providerOptionsForDispatch,
     hiddenProviders: settings.hiddenProviders,
     providerOrder: settings.providerOrder,
-    piAgentDir: settings.piAgentDir || null,
+    piAgentDir: providerOptionsForDispatch?.pi?.agentDir ?? null,
     handleProviderModelChange,
     setInteractionMode,
     onCreate: handleCreate,
@@ -544,6 +556,8 @@ export function KanbanNewTaskDialog({
                     providerOrder={settings.providerOrder}
                     providerInstances={providerInstances}
                     selectedProviderInstanceId={selectedProviderInstanceId}
+                    favoriteModels={settings.favorites}
+                    onFavoriteModelsChange={handleFavoriteModelsChange}
                     onProviderModelChange={handleProviderModelChange}
                     open={isModelPickerOpen}
                     onOpenChange={setIsModelPickerOpen}

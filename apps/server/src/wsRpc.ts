@@ -23,6 +23,7 @@ import { Effect, FileSystem, Layer, Option, Path, Queue, Schema, Stream } from "
 import { HttpRouter, HttpServerRequest } from "effect/unstable/http";
 import { RpcSerialization, RpcServer } from "effect/unstable/rpc";
 import {
+  mergeProviderStartOptions,
   providerStartOptionsFromInstance,
   resolveModelSelectionInstanceId,
   resolveProviderInstance,
@@ -746,14 +747,14 @@ export const makeWsRpcLayer = () =>
               const instance = resolveProviderInstance(settings, {
                 instanceId: resolveModelSelectionInstanceId(modelSelection),
               });
+              const providerOptions = mergeProviderStartOptions(
+                input.providerOptions,
+                instance ? providerStartOptionsFromInstance(instance) : undefined,
+              );
               return yield* gitManager.summarizeDiff({
                 ...input,
                 textGenerationModelSelection: modelSelection,
-                ...(input.providerOptions
-                  ? { providerOptions: input.providerOptions }
-                  : instance
-                    ? { providerOptions: providerStartOptionsFromInstance(instance) }
-                    : {}),
+                ...(providerOptions ? { providerOptions } : {}),
               });
             }),
             "Failed to summarize diff",
@@ -773,14 +774,14 @@ export const makeWsRpcLayer = () =>
                 const instance = resolveProviderInstance(settings, {
                   instanceId: resolveModelSelectionInstanceId(modelSelection),
                 });
+                const providerOptions = mergeProviderStartOptions(
+                  input.providerOptions,
+                  instance ? providerStartOptionsFromInstance(instance) : undefined,
+                );
                 return {
                   ...input,
                   textGenerationModelSelection: modelSelection,
-                  ...(input.providerOptions
-                    ? { providerOptions: input.providerOptions }
-                    : instance
-                      ? { providerOptions: providerStartOptionsFromInstance(instance) }
-                      : {}),
+                  ...(providerOptions ? { providerOptions } : {}),
                 };
               }).pipe(
                 Effect.flatMap((runInput) =>
@@ -1053,9 +1054,10 @@ export const makeWsRpcLayer = () =>
               const fallbackInstance = resolveProviderInstance(settings, {
                 instanceId: resolveModelSelectionInstanceId(modelSelection),
               });
-              const providerOptions =
-                input.providerOptions ??
-                (fallbackInstance ? providerStartOptionsFromInstance(fallbackInstance) : undefined);
+              const providerOptions = mergeProviderStartOptions(
+                input.providerOptions,
+                fallbackInstance ? providerStartOptionsFromInstance(fallbackInstance) : undefined,
+              );
               return yield* textGeneration.generateThreadRecap({
                 cwd: input.cwd,
                 newMaterial: input.newMaterial,
@@ -1078,9 +1080,10 @@ export const makeWsRpcLayer = () =>
               const fallbackInstance = resolveProviderInstance(settings, {
                 instanceId: resolveModelSelectionInstanceId(modelSelection),
               });
-              const providerOptions =
-                input.providerOptions ??
-                (fallbackInstance ? providerStartOptionsFromInstance(fallbackInstance) : undefined);
+              const providerOptions = mergeProviderStartOptions(
+                input.providerOptions,
+                fallbackInstance ? providerStartOptionsFromInstance(fallbackInstance) : undefined,
+              );
               return yield* textGeneration.generateAutomationIntent({
                 cwd: input.cwd,
                 message: input.message,

@@ -49,6 +49,7 @@ import {
   getProviderIconClassName,
   ProviderModelMenuItems,
   type ProviderModelOptionsByProviderInstance,
+  type ProviderModelFavorite,
   type ProviderModelPickerInstance,
   resolveProviderInstanceLabel,
   resolveProviderModelLabel,
@@ -68,6 +69,8 @@ type ComposerModelEffortPickerProps = {
   providerOrder?: ReadonlyArray<ProviderKind>;
   providerInstances?: ReadonlyArray<ProviderModelPickerInstance>;
   selectedProviderInstanceId?: ProviderInstanceId;
+  favoriteModels?: ReadonlyArray<ProviderModelFavorite>;
+  onFavoriteModelsChange?: (favoriteModels: ProviderModelFavorite[]) => void;
   compact?: boolean;
   // Narrow-composer degradation: drop the model name (provider icon stays)
   // and/or the effort/status label; both remain available to assistive tech.
@@ -342,6 +345,10 @@ export const ComposerModelEffortPicker = memo(function ComposerModelEffortPicker
               {...(props.providerInstances ? { providerInstances: props.providerInstances } : {})}
               {...(props.selectedProviderInstanceId
                 ? { selectedProviderInstanceId: props.selectedProviderInstanceId }
+                : {})}
+              {...(props.favoriteModels ? { favoriteModels: props.favoriteModels } : {})}
+              {...(props.onFavoriteModelsChange
+                ? { onFavoriteModelsChange: props.onFavoriteModelsChange }
                 : {})}
               {...(props.disabled !== undefined ? { disabled: props.disabled } : {})}
               onProviderModelChange={props.onProviderModelChange}

@@ -52,6 +52,7 @@ import {
   getGitTextGenerationPickerOptions,
   getProviderInstanceOptions,
   getUnsupportedProviderInstanceOptions,
+  mergeProviderInstanceConfigPatch,
   MAX_CUSTOM_MODEL_LENGTH,
   MIN_CHAT_FONT_SIZE_PX,
   MIN_TERMINAL_FONT_SIZE_PX,
@@ -163,7 +164,7 @@ import ReleaseHistoryDialog from "../components/ReleaseHistoryDialog";
 import { createAllThreadsMessagelessSelector, createThreadShellsSelector } from "../storeSelectors";
 import { formatRelativeTime } from "../lib/relativeTime";
 import { formatWorktreePathForDisplay } from "../worktreeCleanup";
-import { sameProviderOrder } from "../providerOrdering";
+import { isProviderKind, sameProviderOrder } from "../providerOrdering";
 import {
   getVisibleProviderUpdateStatuses,
   shouldShowProviderUpdateStatus,
@@ -657,7 +658,12 @@ function providerStatusTargetKey(
 }
 
 function providerStatusDisplayName(provider: ServerProviderStatus): string {
-  return provider.displayName ?? PROVIDER_DISPLAY_NAMES[provider.provider];
+  if (provider.displayName?.trim()) {
+    return provider.displayName;
+  }
+  return isProviderKind(provider.provider)
+    ? PROVIDER_DISPLAY_NAMES[provider.provider]
+    : provider.provider;
 }
 
 function providerUpdateFailureMessage(provider: ServerProviderStatus | undefined): string | null {
@@ -833,7 +839,11 @@ function SettingsRouteView() {
     () =>
       new Map(
         (serverConfigQuery.data?.providers ?? [])
-          .filter((status) => (status.instanceId ?? status.provider) === status.provider)
+          .filter(
+            (status) =>
+              isProviderKind(status.provider) &&
+              (status.instanceId ?? status.provider) === status.provider,
+          )
           .map((status) => [status.provider, status]),
       ),
     [serverConfigQuery.data?.providers],
@@ -974,10 +984,7 @@ function SettingsRouteView() {
       isDefault: true,
     }));
     const explicitTargets = providerInstanceOptions
-      .filter(
-        (instance) =>
-          !instance.isDefault && settings.providerInstances[instance.instanceId] !== undefined,
-      )
+      .filter((instance) => !instance.isDefault)
       .map((instance) => ({
         instanceId: instance.instanceId,
         provider: instance.provider,
@@ -1299,14 +1306,7 @@ function SettingsRouteView() {
             ...(patch.enabled !== undefined ? { enabled: patch.enabled } : {}),
             ...(patch.config
               ? {
-                  config: {
-                    ...(existing.config &&
-                    typeof existing.config === "object" &&
-                    !Array.isArray(existing.config)
-                      ? existing.config
-                      : {}),
-                    ...patch.config,
-                  },
+                  config: mergeProviderInstanceConfigPatch(existing.config, patch.config),
                 }
               : {}),
           },
@@ -1347,7 +1347,10 @@ function SettingsRouteView() {
 
   const runProviderUpdate = useCallback(
     async (providerStatus: ServerProviderStatus) => {
-      const provider = providerStatus.provider;
+      const provider = providerStatus.driver ?? providerStatus.provider;
+      if (!isProviderKind(provider)) {
+        return;
+      }
       const instanceId = providerStatus.instanceId;
       const targetKey = providerStatusTargetKey(providerStatus);
       const displayName = providerStatusDisplayName(providerStatus);
@@ -1361,7 +1364,9 @@ function SettingsRouteView() {
           ...(instanceId ? { instanceId } : {}),
         });
         const refreshedProvider = result.providers.find(
-          (status) => status.provider === provider && providerStatusTargetKey(status) === targetKey,
+          (status) =>
+            (status.driver ?? status.provider) === provider &&
+            providerStatusTargetKey(status) === targetKey,
         );
         const failureMessage = providerUpdateFailureMessage(refreshedProvider);
         if (failureMessage) {

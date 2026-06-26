@@ -19,6 +19,7 @@ import { inferLegacyProviderKindFromModelSelection } from "@t3tools/shared/provi
 import { useNavigate } from "@tanstack/react-router";
 import { useCallback, useRef, useState } from "react";
 
+import type { ProviderInstanceOption } from "~/appSettings";
 import { toastManager } from "~/components/ui/toast";
 import type { DraftThreadEnvMode } from "~/composerDraftStore";
 import { providerInstanceModelSelectionKey, useComposerDraftStore } from "~/composerDraftStore";
@@ -43,6 +44,9 @@ interface UseKanbanTaskSubmitInput {
   readonly defaultProvider: ProviderKind;
   readonly assistantDeliveryMode: AssistantDeliveryMode;
   readonly providerOptionsForDispatch: ProviderStartOptions | undefined;
+  readonly providerInstances: ReadonlyArray<
+    Pick<ProviderInstanceOption, "instanceId" | "provider">
+  >;
   readonly providerStatuses: readonly ServerProviderStatus[];
   readonly onOpenChange: (open: boolean) => void;
 }
@@ -64,6 +68,7 @@ export function useKanbanTaskSubmit(input: UseKanbanTaskSubmitInput) {
     defaultProvider,
     assistantDeliveryMode,
     providerOptionsForDispatch,
+    providerInstances,
     providerStatuses,
     onOpenChange,
   } = input;
@@ -145,6 +150,7 @@ export function useKanbanTaskSubmit(input: UseKanbanTaskSubmitInput) {
       defaultProvider,
       assistantDeliveryMode,
       providerOptions: providerOptionsForDispatch,
+      providerInstances,
     })
       .then(({ threadId, result }) => {
         if (result.kind === "dispatched") {
@@ -201,6 +207,7 @@ export function useKanbanTaskSubmit(input: UseKanbanTaskSubmitInput) {
     navigate,
     onOpenChange,
     providerOptionsForDispatch,
+    providerInstances,
     providerStatuses,
     runtimeMode,
     scratchThreadId,

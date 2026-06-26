@@ -16,6 +16,7 @@ import {
   type ProviderPluginDescriptor,
   type ProviderPluginDetail,
   type ProviderForkThreadInput,
+  type ProviderInstanceId,
   type ProviderReadPluginResult,
   type ProviderForkThreadResult,
   type ProviderListSkillsResult,
@@ -211,6 +212,7 @@ type CodexAppServerReviewTarget = ProviderStartReviewInput["target"];
 export interface CodexAppServerStartSessionInput {
   readonly threadId: ThreadId;
   readonly provider?: "codex";
+  readonly providerInstanceId?: ProviderInstanceId;
   readonly cwd?: string;
   readonly model?: string;
   readonly serviceTier?: string;
@@ -844,6 +846,7 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
 
       const session: ProviderSession = {
         provider: "codex",
+        ...(input.providerInstanceId ? { providerInstanceId: input.providerInstanceId } : {}),
         status: "connecting",
         runtimeMode: input.runtimeMode,
         model: normalizeCodexModelSlug(input.model),

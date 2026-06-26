@@ -6,10 +6,11 @@
 import {
   type ModelSlug,
   type ProviderInstanceId,
-  type ProviderKind,
+  ProviderKind,
   type ServerProviderStatus,
 } from "@t3tools/contracts";
 import { resolveSelectableModel } from "@t3tools/shared/model";
+import { inferLegacyProviderKindFromInstanceId } from "@t3tools/shared/providerInstances";
 import * as Schema from "effect/Schema";
 import { memo, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { type ProviderPickerKind, PROVIDER_OPTIONS } from "../../session-logic";
@@ -50,6 +51,7 @@ import {
 } from "../../providerModelOptions";
 import { useLocalStorage } from "../../hooks/useLocalStorage";
 import { Skeleton } from "../ui/skeleton";
+import { isProviderUsable } from "../../lib/providerAvailability";
 
 function isAvailableProviderOption(option: (typeof PROVIDER_OPTIONS)[number]): option is {
   value: ProviderKind;
@@ -84,7 +86,7 @@ function resolveLiveProviderAvailability(provider: ServerProviderStatus | undefi
     };
   }
 
-  if (provider.status !== "ready") {
+  if (!isProviderUsable(provider)) {
     return {
       disabled: true,
       label: provider.status === "warning" ? "Check" : "Unavailable",
@@ -95,6 +97,14 @@ function resolveLiveProviderAvailability(provider: ServerProviderStatus | undefi
     disabled: false,
     label: null,
   };
+}
+
+function isUnsupportedProviderInstanceStatus(status: ServerProviderStatus): boolean {
+  return (
+    status.availability === "unavailable" &&
+    status.driver !== undefined &&
+    !Schema.is(ProviderKind)(status.driver)
+  );
 }
 
 export const AVAILABLE_PROVIDER_OPTIONS = PROVIDER_OPTIONS.filter(isAvailableProviderOption);
@@ -135,12 +145,20 @@ const FAVORITE_MODEL_STORAGE_KEYS = {
   pi: "synara:pi-favourite-models:v1",
 } as const;
 const FavoriteModelKeys = Schema.Array(Schema.String);
-type FavoriteModelProvider = keyof typeof FAVORITE_MODEL_STORAGE_KEYS;
+type LegacyFavoriteModelProvider = keyof typeof FAVORITE_MODEL_STORAGE_KEYS;
+type FavoriteModelProvider = ProviderKind;
 
-function supportsModelFavorites(provider: ProviderKind): provider is FavoriteModelProvider {
+function supportsLegacyModelFavorites(
+  provider: ProviderKind,
+): provider is LegacyFavoriteModelProvider {
   return (
     provider === "cursor" || provider === "kilo" || provider === "opencode" || provider === "pi"
   );
+}
+
+export interface ProviderModelFavorite {
+  readonly provider: ProviderInstanceId;
+  readonly model: string;
 }
 
 export interface ProviderModelPickerInstance {
@@ -193,8 +211,49 @@ function favoriteModelKey(instanceId: ProviderInstanceId, slug: string): string 
   return `${instanceId}:${slug}`;
 }
 
+function normalizeFavoriteModels(
+  favorites: ReadonlyArray<ProviderModelFavorite>,
+): ProviderModelFavorite[] {
+  const result: ProviderModelFavorite[] = [];
+  const seen = new Set<string>();
+  for (const favorite of favorites) {
+    const model = favorite.model.trim();
+    if (!model) {
+      continue;
+    }
+    const key = favoriteModelKey(favorite.provider, model);
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    result.push({ provider: favorite.provider, model });
+  }
+  return result;
+}
+
+function favoriteModelKeySetsFromSettings(
+  favorites: ReadonlyArray<ProviderModelFavorite>,
+  providerInstances: ReadonlyArray<ProviderModelPickerInstance> | undefined,
+): Partial<Record<FavoriteModelProvider, ReadonlySet<string>>> {
+  const result: Partial<Record<FavoriteModelProvider, Set<string>>> = {};
+  const providerByInstanceId = new Map<ProviderInstanceId, ProviderKind>();
+  for (const instance of providerInstances ?? []) {
+    providerByInstanceId.set(instance.instanceId, instance.provider);
+  }
+  for (const favorite of normalizeFavoriteModels(favorites)) {
+    const provider =
+      providerByInstanceId.get(favorite.provider) ??
+      inferLegacyProviderKindFromInstanceId(favorite.provider);
+    if (!provider) {
+      continue;
+    }
+    (result[provider] ??= new Set()).add(favoriteModelKey(favorite.provider, favorite.model));
+  }
+  return result;
+}
+
 function normalizeFavoriteModelKeys(
-  provider: FavoriteModelProvider,
+  provider: LegacyFavoriteModelProvider,
   entries: ReadonlyArray<string>,
 ): string[] {
   return Array.from(
@@ -202,7 +261,9 @@ function normalizeFavoriteModelKeys(
       entries
         .map((entry) => entry.trim())
         .filter((entry) => entry.length > 0)
-        .map((entry) => (entry.includes(":") ? entry : favoriteModelKey(provider, entry))),
+        .map((entry) =>
+          entry.includes(":") ? entry : favoriteModelKey(provider as ProviderInstanceId, entry),
+        ),
     ),
   );
 }
@@ -210,7 +271,7 @@ function normalizeFavoriteModelKeys(
 // Keeps persisted favorite model keys compact and stable while preserving the user's order.
 function toggleFavoriteModelKey(
   current: ReadonlyArray<string>,
-  provider: FavoriteModelProvider,
+  provider: LegacyFavoriteModelProvider,
   instanceId: ProviderInstanceId,
   slug: string,
 ): string[] {
@@ -229,7 +290,9 @@ function favoriteModelSlugsForInstance(input: {
   const prefix = `${input.instanceId}:`;
   const slugs = new Set<string>();
   for (const key of input.keys) {
-    const normalizedKey = key.includes(":") ? key : favoriteModelKey(input.provider, key);
+    const normalizedKey = key.includes(":")
+      ? key
+      : favoriteModelKey(input.provider as ProviderInstanceId, key);
     if (normalizedKey.startsWith(prefix)) {
       slugs.add(normalizedKey.slice(prefix.length));
     }
@@ -284,6 +347,8 @@ type ProviderModelMenuItemsProps = {
   providerOrder?: ReadonlyArray<ProviderKind>;
   providerInstances?: ReadonlyArray<ProviderModelPickerInstance>;
   selectedProviderInstanceId?: ProviderInstanceId;
+  favoriteModels?: ReadonlyArray<ProviderModelFavorite>;
+  onFavoriteModelsChange?: (favoriteModels: ProviderModelFavorite[]) => void;
   disabled?: boolean;
   onProviderModelChange: (
     provider: ProviderKind,
@@ -361,6 +426,10 @@ export const ProviderModelMenuItems = memo(function ProviderModelMenuItems(
       ),
     [hiddenProviderSet, protectedProviderSet, providerOrder],
   );
+  const visibleUnsupportedProviderInstances = useMemo(
+    () => (props.providers ?? []).filter(isUnsupportedProviderInstanceStatus),
+    [props.providers],
+  );
   const kiloFavoriteModelSlugSet = useMemo(
     () => new Set(kiloFavoriteModelSlugs),
     [kiloFavoriteModelSlugs],
@@ -377,18 +446,27 @@ export const ProviderModelMenuItems = memo(function ProviderModelMenuItems(
     () => new Set(piFavoriteModelSlugs),
     [piFavoriteModelSlugs],
   );
+  const settingsFavoriteModelSlugSets = useMemo(
+    () =>
+      props.favoriteModels !== undefined
+        ? favoriteModelKeySetsFromSettings(props.favoriteModels, props.providerInstances)
+        : null,
+    [props.favoriteModels, props.providerInstances],
+  );
   const favoriteModelSlugSets = useMemo(
-    () => ({
-      cursor: cursorFavoriteModelSlugSet,
-      kilo: kiloFavoriteModelSlugSet,
-      opencode: openCodeFavoriteModelSlugSet,
-      pi: piFavoriteModelSlugSet,
-    }),
+    (): Partial<Record<FavoriteModelProvider, ReadonlySet<string>>> =>
+      settingsFavoriteModelSlugSets ?? {
+        cursor: cursorFavoriteModelSlugSet,
+        kilo: kiloFavoriteModelSlugSet,
+        opencode: openCodeFavoriteModelSlugSet,
+        pi: piFavoriteModelSlugSet,
+      },
     [
       cursorFavoriteModelSlugSet,
       kiloFavoriteModelSlugSet,
       openCodeFavoriteModelSlugSet,
       piFavoriteModelSlugSet,
+      settingsFavoriteModelSlugSets,
     ],
   );
 
@@ -549,8 +627,28 @@ export const ProviderModelMenuItems = memo(function ProviderModelMenuItems(
       </>
     );
   };
+  const favoriteModels = props.favoriteModels;
+  const onFavoriteModelsChange = props.onFavoriteModelsChange;
   const toggleFavoriteModel = useCallback(
     (provider: FavoriteModelProvider, instanceId: ProviderInstanceId, slug: string) => {
+      if (onFavoriteModelsChange) {
+        const normalizedFavorites = normalizeFavoriteModels(favoriteModels ?? []);
+        const key = favoriteModelKey(instanceId, slug);
+        const hasFavorite = normalizedFavorites.some(
+          (favorite) => favoriteModelKey(favorite.provider, favorite.model) === key,
+        );
+        onFavoriteModelsChange(
+          hasFavorite
+            ? normalizedFavorites.filter(
+                (favorite) => favoriteModelKey(favorite.provider, favorite.model) !== key,
+              )
+            : [...normalizedFavorites, { provider: instanceId, model: slug }],
+        );
+        return;
+      }
+      if (!supportsLegacyModelFavorites(provider)) {
+        return;
+      }
       const setFavoriteModelSlugs =
         provider === "cursor"
           ? setCursorFavoriteModelSlugs
@@ -564,6 +662,8 @@ export const ProviderModelMenuItems = memo(function ProviderModelMenuItems(
       );
     },
     [
+      favoriteModels,
+      onFavoriteModelsChange,
       setCursorFavoriteModelSlugs,
       setKiloFavoriteModelSlugs,
       setOpenCodeFavoriteModelSlugs,
@@ -602,7 +702,8 @@ export const ProviderModelMenuItems = memo(function ProviderModelMenuItems(
             buildModelSearchText(option).includes(normalizedModelSearchQuery),
           )
         : providerOptions;
-    const favoriteProvider = supportsModelFavorites(provider) ? provider : null;
+    const favoriteProvider =
+      props.onFavoriteModelsChange || supportsLegacyModelFavorites(provider) ? provider : null;
     const selectedInstanceId = getSelectedInstanceIdForProvider(provider);
     const favoriteModelKeySet =
       favoriteProvider !== null ? favoriteModelSlugSets[favoriteProvider] : undefined;
@@ -753,6 +854,23 @@ export const ProviderModelMenuItems = memo(function ProviderModelMenuItems(
           </MenuItem>
         );
       })}
+      {visibleUnsupportedProviderInstances.length > 0 && <MenuSeparator />}
+      {visibleUnsupportedProviderInstances.map((providerStatus) => (
+        <MenuItem
+          key={providerStatus.instanceId ?? providerStatus.driver ?? providerStatus.provider}
+          disabled
+        >
+          <span className="truncate">
+            {providerStatus.displayName ??
+              providerStatus.instanceId ??
+              providerStatus.driver ??
+              providerStatus.provider}
+          </span>
+          <span className="ms-auto text-[11px] text-muted-foreground/80 uppercase tracking-[0.08em]">
+            Missing driver
+          </span>
+        </MenuItem>
+      ))}
     </>
   );
 });
@@ -818,6 +936,8 @@ type ProviderModelPickerProps = {
   providerOrder?: ReadonlyArray<ProviderKind>;
   providerInstances?: ReadonlyArray<ProviderModelPickerInstance>;
   selectedProviderInstanceId?: ProviderInstanceId;
+  favoriteModels?: ReadonlyArray<ProviderModelFavorite>;
+  onFavoriteModelsChange?: (favoriteModels: ProviderModelFavorite[]) => void;
   activeProviderIconClassName?: string;
   compact?: boolean;
   // Icon-only trigger for narrow composers; the model name moves to title/sr-only.
@@ -963,6 +1083,10 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(
           {...(props.providerInstances ? { providerInstances: props.providerInstances } : {})}
           {...(props.selectedProviderInstanceId
             ? { selectedProviderInstanceId: props.selectedProviderInstanceId }
+            : {})}
+          {...(props.favoriteModels ? { favoriteModels: props.favoriteModels } : {})}
+          {...(props.onFavoriteModelsChange
+            ? { onFavoriteModelsChange: props.onFavoriteModelsChange }
             : {})}
           {...(props.disabled !== undefined ? { disabled: props.disabled } : {})}
           onProviderModelChange={props.onProviderModelChange}

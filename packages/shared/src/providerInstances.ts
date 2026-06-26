@@ -53,6 +53,14 @@ type MutableProviderStartOptions = Partial<Record<ProviderKind, unknown>>;
 const PROVIDER_INSTANCE_ID_MAX_CHARS = 64;
 const CODEX_ACCOUNT_INSTANCE_PREFIX = "codex_";
 
+function providerInstanceId(value: string): ProviderInstanceId {
+  return value as ProviderInstanceId;
+}
+
+function providerDriverKind(value: string): ProviderDriverKind {
+  return value as ProviderDriverKind;
+}
+
 function trimString(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
 }
@@ -113,7 +121,7 @@ export function isProviderKind(value: unknown): value is ProviderKind {
 }
 
 export function defaultInstanceIdForProvider(provider: ProviderKind): ProviderInstanceId {
-  return provider;
+  return providerInstanceId(provider);
 }
 
 export function inferLegacyProviderKindFromInstanceId(
@@ -196,7 +204,7 @@ export function inferLegacyProviderKindFromModelSelection(
 export function resolveModelSelectionInstanceId(
   selection: Pick<ModelSelection, "instanceId"> | null | undefined,
 ): ProviderInstanceId {
-  return selection?.instanceId ?? "codex";
+  return selection?.instanceId ?? providerInstanceId("codex");
 }
 
 export function resolveProviderStatusInstanceId(input: {
@@ -229,7 +237,7 @@ export function codexAccountInstanceId(accountId: string): ProviderInstanceId {
   const slug = slugCodexAccountId(normalizedAccountId);
   const raw = `${CODEX_ACCOUNT_INSTANCE_PREFIX}${slug}`;
   if (raw.length <= PROVIDER_INSTANCE_ID_MAX_CHARS && slug === normalizedAccountId) {
-    return raw;
+    return providerInstanceId(raw);
   }
   const hash = stableSlugHash(normalizedAccountId);
   const availableAccountChars =
@@ -237,7 +245,9 @@ export function codexAccountInstanceId(accountId: string): ProviderInstanceId {
     CODEX_ACCOUNT_INSTANCE_PREFIX.length -
     "_".length -
     hash.length;
-  return `${CODEX_ACCOUNT_INSTANCE_PREFIX}${slug.slice(0, availableAccountChars)}_${hash}`;
+  return providerInstanceId(
+    `${CODEX_ACCOUNT_INSTANCE_PREFIX}${slug.slice(0, availableAccountChars)}_${hash}`,
+  );
 }
 
 function legacyProviderConfig(
@@ -246,7 +256,7 @@ function legacyProviderConfig(
 ): ProviderInstanceConfig {
   const legacy = settings.providers[provider] as Record<string, unknown>;
   return {
-    driver: provider,
+    driver: providerDriverKind(provider),
     enabled: legacy.enabled !== false,
     config: { ...legacy },
   };
@@ -262,7 +272,7 @@ function deriveLegacyCodexAccountInstances(settings: ServerSettings): ProviderIn
     }
     const instanceId = codexAccountInstanceId(accountId);
     instances[instanceId] = {
-      driver: "codex",
+      driver: providerDriverKind("codex"),
       displayName: account.label.trim() || accountId,
       enabled: codex.enabled,
       config: {
@@ -324,16 +334,17 @@ export function deriveProviderInstances(
     if (!isProviderKind(raw.driver)) {
       continue;
     }
+    const typedInstanceId = providerInstanceId(instanceId);
     const config =
       raw.config && typeof raw.config === "object" && !Array.isArray(raw.config)
         ? (raw.config as Record<string, unknown>)
         : {};
     resolved.push({
-      instanceId,
+      instanceId: typedInstanceId,
       driver: raw.driver,
-      displayName: displayNameForInstance(instanceId, raw.driver, raw),
+      displayName: displayNameForInstance(typedInstanceId, raw.driver, raw),
       enabled: raw.enabled !== false && config.enabled !== false,
-      isDefault: instanceId === raw.driver,
+      isDefault: String(typedInstanceId) === String(raw.driver),
       config,
       environment: materializeProviderInstanceEnvironment(raw),
       raw,
@@ -351,14 +362,15 @@ export function deriveUnsupportedProviderInstances(
     if (isProviderKind(raw.driver)) {
       continue;
     }
+    const typedInstanceId = providerInstanceId(instanceId);
     const config =
       raw.config && typeof raw.config === "object" && !Array.isArray(raw.config)
         ? (raw.config as Record<string, unknown>)
         : {};
     unsupported.push({
-      instanceId,
+      instanceId: typedInstanceId,
       driver: raw.driver,
-      displayName: displayNameForInstance(instanceId, raw.driver, raw),
+      displayName: displayNameForInstance(typedInstanceId, raw.driver, raw),
       enabled: raw.enabled !== false && config.enabled !== false,
       config,
       environment: materializeProviderInstanceEnvironment(raw),

@@ -17,6 +17,7 @@ import {
   getAppModelOptions,
   getCodexProviderDiscoveryOptions,
   getCustomBinaryPathForProvider,
+  getCustomBinaryPathForProviderInstance,
   getDefaultNativeFontSmoothing,
   getCustomModelOptionsByProvider,
   getCustomModelsByProvider,
@@ -26,7 +27,9 @@ import {
   getGitTextGenerationModelOptions,
   getGitTextGenerationPickerOptions,
   getProviderInstanceOptions,
+  getUnsupportedProviderInstanceOptions,
   getProviderStartOptions,
+  mergeProviderInstanceConfigPatch,
   MODEL_PROVIDER_SETTINGS,
   normalizeChatFontSizePx,
   normalizeCustomModelSlugs,
@@ -110,9 +113,10 @@ describe("getAppModelOptions", () => {
 });
 
 describe("getGitTextGenerationModelOptions", () => {
-  it("merges codex and OpenCode model options for git writing settings", () => {
+  it("merges Codex, Claude, and OpenCode model options for git writing settings", () => {
     const options = getGitTextGenerationModelOptions({
       customCodexModels: ["custom/codex-model"],
+      customClaudeModels: ["claude/custom-opus"],
       customKiloModels: [],
       customOpenCodeModels: ["openrouter/gpt-oss-120b"],
       textGenerationModel: "openai/gpt-5",
@@ -120,6 +124,7 @@ describe("getGitTextGenerationModelOptions", () => {
     });
 
     expect(options.some((option) => option.slug === "gpt-5.4-mini")).toBe(true);
+    expect(options.some((option) => option.slug === "claude/custom-opus")).toBe(true);
     expect(options.some((option) => option.slug === "openai/gpt-5")).toBe(true);
     expect(options.some((option) => option.slug === "openrouter/gpt-oss-120b")).toBe(true);
   });
@@ -127,6 +132,7 @@ describe("getGitTextGenerationModelOptions", () => {
   it("preserves a currently selected transient git writing model", () => {
     const options = getGitTextGenerationModelOptions({
       customCodexModels: [],
+      customClaudeModels: [],
       customKiloModels: [],
       customOpenCodeModels: [],
       textGenerationModel: "openrouter/custom-model",
@@ -144,6 +150,7 @@ describe("getGitTextGenerationModelOptions", () => {
   it("humanizes transient OpenCode git-writing models instead of showing the raw slug", () => {
     const options = getGitTextGenerationModelOptions({
       customCodexModels: [],
+      customClaudeModels: [],
       customKiloModels: [],
       customOpenCodeModels: [],
       textGenerationModel: "opencode-go/kimi-k2.6",
@@ -198,6 +205,47 @@ describe("getGitTextGenerationPickerOptions", () => {
     expect(defaultModels).not.toContain("custom/work-codex");
     expect(workModels).toContain("custom/work-codex");
     expect(workModels).not.toContain("custom/default-codex");
+  });
+
+  it("includes Claude provider instances in git-writing model options", () => {
+    const options = getGitTextGenerationPickerOptions({
+      customCodexModels: [],
+      customClaudeModels: ["claude/default-opus"],
+      customCursorModels: [],
+      customGeminiModels: [],
+      customGrokModels: [],
+      customKiloModels: [],
+      customOpenCodeModels: [],
+      customPiModels: [],
+      codexAccounts: [],
+      codexHomePath: "",
+      selectedCodexAccountId: "default",
+      textGenerationModel: "claude/work-opus",
+      textGenerationProvider: "claudeAgent",
+      textGenerationProviderInstanceId: "claude_work",
+      providerInstances: {
+        claude_work: {
+          driver: "claudeAgent",
+          enabled: true,
+          displayName: "Claude Work",
+          config: {
+            customModels: ["claude/work-opus"],
+          },
+        },
+      },
+    });
+
+    const defaultClaudeModels = options
+      .filter((entry) => entry.instance.instanceId === "claudeAgent")
+      .map((entry) => entry.option.slug);
+    const workClaudeModels = options
+      .filter((entry) => entry.instance.instanceId === "claude_work")
+      .map((entry) => entry.option.slug);
+
+    expect(defaultClaudeModels).toContain("claude/default-opus");
+    expect(defaultClaudeModels).not.toContain("claude/work-opus");
+    expect(workClaudeModels).toContain("claude/work-opus");
+    expect(workClaudeModels).not.toContain("claude/default-opus");
   });
 });
 
@@ -421,6 +469,23 @@ describe("normalizeStoredAppSettings", () => {
       piBinaryPath: "",
     });
     expect(getCustomBinaryPathForProvider(normalized, "opencode")).toBe("");
+  });
+
+  it("normalizes settings-backed model favourites by provider instance", () => {
+    const decodedSettings = Schema.decodeSync(Schema.fromJsonString(AppSettingsSchema))(
+      JSON.stringify({
+        favorites: [
+          { provider: "claude_work", model: " claude-sonnet-4-6 " },
+          { provider: "claude_work", model: "claude-sonnet-4-6" },
+          { provider: "codex", model: "gpt-5" },
+        ],
+      }),
+    );
+
+    expect(normalizeStoredAppSettings(decodedSettings).favorites).toEqual([
+      { provider: "claude_work", model: "claude-sonnet-4-6" },
+      { provider: "codex", model: "gpt-5" },
+    ]);
   });
 });
 
@@ -795,6 +860,77 @@ describe("getProviderStartOptions", () => {
   });
 });
 
+describe("getCustomBinaryPathForProviderInstance", () => {
+  const baseSettings = {
+    claudeBinaryPath: "/legacy/bin/claude",
+    codexBinaryPath: "",
+    codexHomePath: "",
+    codexAccounts: [],
+    selectedCodexAccountId: "default",
+    cursorApiEndpoint: "",
+    cursorBinaryPath: "",
+    geminiBinaryPath: "",
+    grokBinaryPath: "",
+    kiloBinaryPath: "",
+    kiloServerPassword: "",
+    kiloServerUrl: "",
+    openCodeBinaryPath: "",
+    openCodeExperimentalWebSockets: false,
+    openCodeServerPassword: "",
+    openCodeServerUrl: "",
+    piAgentDir: "",
+    piBinaryPath: "",
+  } as const;
+
+  it("uses the legacy provider path for the default provider instance", () => {
+    expect(
+      getCustomBinaryPathForProviderInstance(
+        { ...baseSettings, providerInstances: {} },
+        "claudeAgent",
+        "claudeAgent",
+      ),
+    ).toBe("/legacy/bin/claude");
+  });
+
+  it("uses the exact provider instance overlay path", () => {
+    expect(
+      getCustomBinaryPathForProviderInstance(
+        {
+          ...baseSettings,
+          providerInstances: {
+            claude_work: {
+              driver: "claudeAgent",
+              enabled: true,
+              config: { binaryPath: "/work/bin/claude" },
+            },
+          },
+        },
+        "claudeAgent",
+        "claude_work",
+      ),
+    ).toBe("/work/bin/claude");
+  });
+
+  it("does not leak the provider-wide path into a custom provider instance", () => {
+    expect(
+      getCustomBinaryPathForProviderInstance(
+        {
+          ...baseSettings,
+          providerInstances: {
+            claude_personal: {
+              driver: "claudeAgent",
+              enabled: true,
+              config: {},
+            },
+          },
+        },
+        "claudeAgent",
+        "claude_personal",
+      ),
+    ).toBe("");
+  });
+});
+
 describe("getProviderInstanceOptions", () => {
   it("keeps derived Codex account instance ids schema-valid for long account ids", () => {
     const accountId = `a${"b".repeat(63)}`;
@@ -815,6 +951,30 @@ describe("getProviderInstanceOptions", () => {
     const accountOption = options.find((option) => option.label === "Long Codex Account");
     expect(accountOption?.instanceId.length).toBeLessThanOrEqual(64);
     expect(Schema.is(ProviderInstanceId)(accountOption?.instanceId)).toBe(true);
+  });
+
+  it("keeps unsupported provider instances visible for missing-driver affordances", () => {
+    expect(
+      getUnsupportedProviderInstanceOptions({
+        providerInstances: {
+          fork_work: {
+            driver: "customFork",
+            displayName: "Fork Work",
+            enabled: true,
+            config: {},
+          },
+        },
+      }),
+    ).toEqual([
+      {
+        instanceId: "fork_work",
+        driver: "customFork",
+        label: "Fork Work",
+        enabled: true,
+        isDefault: false,
+        supported: false,
+      },
+    ]);
   });
 });
 
@@ -972,6 +1132,9 @@ describe("provider-indexed custom model settings", () => {
   it("patches custom models for a selected provider instance", () => {
     const providerSettings = {
       ...settings,
+      codexAccounts: [],
+      codexHomePath: "",
+      selectedCodexAccountId: "default",
       providerInstances: {
         claude_work: {
           driver: "claudeAgent",
@@ -1008,7 +1171,10 @@ describe("provider-indexed custom model settings", () => {
     expect(
       patchCustomModelsForProviderInstance(
         {
+          codexAccounts: [],
+          codexHomePath: "",
           providerInstances: {},
+          selectedCodexAccountId: "default",
         },
         {
           instanceId: "claudeAgent",
@@ -1025,6 +1191,62 @@ describe("provider-indexed custom model settings", () => {
           config: { customModels: ["claude/default-instance"] },
         },
       },
+    });
+  });
+
+  it("materializes Codex account-derived instances when saving custom models", () => {
+    expect(
+      patchCustomModelsForProviderInstance(
+        {
+          codexAccounts: [
+            {
+              id: "work",
+              label: "Work",
+              homePath: "/tmp/codex-work",
+              shadowHomePath: "/tmp/codex-shadow",
+            },
+          ],
+          codexHomePath: "/tmp/codex-default",
+          providerInstances: {},
+          selectedCodexAccountId: "work",
+        },
+        {
+          instanceId: "codex_work",
+          provider: "codex",
+          isDefault: false,
+        },
+        ["custom/work-codex"],
+      ),
+    ).toEqual({
+      providerInstances: {
+        codex_work: {
+          driver: "codex",
+          enabled: true,
+          displayName: "Work",
+          config: {
+            homePath: "/tmp/codex-work",
+            shadowHomePath: "/tmp/codex-shadow",
+            accountId: "work",
+            customModels: ["custom/work-codex"],
+          },
+        },
+      },
+    });
+  });
+
+  it("drops stale redaction markers when replacing provider instance secrets", () => {
+    expect(
+      mergeProviderInstanceConfigPatch(
+        {
+          serverUrl: "http://127.0.0.1:4096",
+          serverPassword: "",
+          serverPasswordRedacted: true,
+        },
+        { serverPassword: "new-secret" },
+      ),
+    ).toEqual({
+      serverUrl: "http://127.0.0.1:4096",
+      serverPassword: "new-secret",
     });
   });
 

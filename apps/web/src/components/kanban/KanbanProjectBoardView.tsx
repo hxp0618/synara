@@ -19,6 +19,7 @@ import {
 import { useCallback, useMemo, useRef, useState } from "react";
 
 import {
+  getProviderInstanceOptions,
   getProviderStartOptions,
   resolveAssistantDeliveryMode,
   useAppSettings,
@@ -26,7 +27,10 @@ import {
 import { toastManager } from "~/components/ui/toast";
 import { useProviderStatusesForLocalConfig } from "~/hooks/useProviderStatusesForLocalConfig";
 import { resolveProviderSendAvailability } from "~/lib/providerAvailability";
-import { dispatchKanbanDraftCard } from "../../lib/kanbanDispatch";
+import {
+  dispatchKanbanDraftCard,
+  resolveKanbanDraftDispatchTarget,
+} from "../../lib/kanbanDispatch";
 import { KanbanCardView } from "./KanbanCardView";
 import { KanbanColumn, parseKanbanColumnDropId } from "./KanbanColumn";
 import {
@@ -61,7 +65,7 @@ export function KanbanProjectBoardView({
 }) {
   const { settings } = useAppSettings();
   const assistantDeliveryMode = resolveAssistantDeliveryMode(settings);
-  const providerOptionsForDispatch = useMemo(() => getProviderStartOptions(settings), [settings]);
+  const providerInstances = useMemo(() => getProviderInstanceOptions(settings), [settings]);
   const providerStatuses = useProviderStatusesForLocalConfig();
   const setDraftOrder = useKanbanUiStore((state) => state.setDraftOrder);
   const [activeCard, setActiveCard] = useState<KanbanCard | null>(null);
@@ -94,9 +98,16 @@ export function KanbanProjectBoardView({
 
   const handleDispatchDrop = useCallback(
     async (card: KanbanCard) => {
-      const targetProvider = card.provider ?? settings.defaultProvider;
+      const dispatchTarget = resolveKanbanDraftDispatchTarget({
+        threadId: card.threadId,
+        projectId: card.projectId,
+        thread: card.thread,
+        defaultProvider: settings.defaultProvider,
+        providerInstances,
+      });
       const sendAvailability = resolveProviderSendAvailability({
-        provider: targetProvider,
+        provider: dispatchTarget.provider,
+        instanceId: dispatchTarget.instanceId,
         statuses: providerStatuses,
       });
       if (!sendAvailability.usable) {
@@ -112,7 +123,8 @@ export function KanbanProjectBoardView({
         card,
         defaultProvider: settings.defaultProvider,
         assistantDeliveryMode,
-        providerOptions: providerOptionsForDispatch,
+        providerOptions: getProviderStartOptions(settings, dispatchTarget.instanceId),
+        providerInstances,
       });
       if (result.kind === "dispatched") {
         toastManager.add({
@@ -151,13 +163,7 @@ export function KanbanProjectBoardView({
         description: result.message,
       });
     },
-    [
-      assistantDeliveryMode,
-      onOpenCard,
-      providerOptionsForDispatch,
-      providerStatuses,
-      settings.defaultProvider,
-    ],
+    [assistantDeliveryMode, onOpenCard, providerInstances, providerStatuses, settings],
   );
 
   const handleDragStart = useCallback(

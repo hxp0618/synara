@@ -1,14 +1,5 @@
 import { Effect, Option, Schema, SchemaIssue, SchemaTransformation, Struct } from "effect";
-import {
-  ClaudeModelOptions,
-  CodexModelOptions,
-  CursorModelOptions,
-  GeminiModelOptions,
-  GrokModelOptions,
-  OpenCodeModelOptions,
-  PiModelOptions,
-  ProviderOptionSelections,
-} from "./model";
+import { ProviderOptionSelections } from "./model";
 import { ProviderInstanceId } from "./providerInstance";
 import { ProviderMentionReference, ProviderSkillReference } from "./providerDiscovery";
 import { ProjectKind } from "./project";

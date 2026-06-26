@@ -6,6 +6,7 @@ import {
   MODEL_OPTIONS_BY_PROVIDER,
   CODEX_REASONING_EFFORT_OPTIONS,
   GROK_REASONING_EFFORT_OPTIONS,
+  type ProviderInstanceId,
 } from "@t3tools/contracts";
 
 import {
@@ -34,6 +35,10 @@ import {
   buildProviderOptionSelectionsFromDescriptors,
   hasEffortLevel,
 } from "./model";
+
+function providerInstanceId(value: string): ProviderInstanceId {
+  return value as ProviderInstanceId;
+}
 
 describe("normalizeModelSlug", () => {
   it("maps known aliases to canonical slugs", () => {
@@ -494,7 +499,7 @@ describe("resolveApiModelId", () => {
   it("adds the 1m suffix for Claude models when selected", () => {
     expect(
       resolveApiModelId({
-        instanceId: "claudeAgent",
+        instanceId: providerInstanceId("claudeAgent"),
         model: "claude-opus-4-6",
         options: [{ id: "contextWindow", value: "1m" }],
       }),
@@ -504,7 +509,7 @@ describe("resolveApiModelId", () => {
   it("leaves Claude models unchanged for the default context window", () => {
     expect(
       resolveApiModelId({
-        instanceId: "claudeAgent",
+        instanceId: providerInstanceId("claudeAgent"),
         model: "claude-opus-4-6",
         options: [{ id: "contextWindow", value: "200k" }],
       }),

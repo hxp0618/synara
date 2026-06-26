@@ -105,6 +105,7 @@ describe("ProviderCommandReactor", () => {
     readonly baseDir?: string;
     readonly threadModelSelection?: ModelSelection;
     readonly sessionModelSwitch?: "unsupported" | "in-session" | "restart-session";
+    readonly serverSettings?: Parameters<typeof ServerSettingsService.layerTest>[0];
   }) {
     const now = new Date().toISOString();
     const baseDir = input?.baseDir ?? fs.mkdtempSync(path.join(os.tmpdir(), "t3code-reactor-"));
@@ -118,44 +119,54 @@ describe("ProviderCommandReactor", () => {
       instanceId: "codex",
       model: "gpt-5-codex",
     };
-    const startSession = vi.fn((_: unknown, input: unknown) => {
-      const sessionIndex = nextSessionIndex++;
-      const sessionModelSelection =
-        typeof input === "object" && input !== null && "modelSelection" in input
-          ? ((input as { modelSelection?: ModelSelection }).modelSelection ?? modelSelection)
-          : modelSelection;
-      const resumeCursor =
-        typeof input === "object" && input !== null && "resumeCursor" in input
-          ? input.resumeCursor
-          : undefined;
-      const threadId =
-        typeof input === "object" &&
-        input !== null &&
-        "threadId" in input &&
-        typeof input.threadId === "string"
-          ? ThreadId.makeUnsafe(input.threadId)
-          : ThreadId.makeUnsafe(`thread-${sessionIndex}`);
-      const session: ProviderSession = {
-        provider: inferLegacyProviderKindFromModelSelection(sessionModelSelection) ?? "codex",
-        status: "ready" as const,
-        runtimeMode:
+    const startSession = vi.fn<ProviderServiceShape["startSession"]>(
+      (_: unknown, input: unknown) => {
+        const sessionIndex = nextSessionIndex++;
+        const sessionModelSelection =
+          typeof input === "object" && input !== null && "modelSelection" in input
+            ? ((input as { modelSelection?: ModelSelection }).modelSelection ?? modelSelection)
+            : modelSelection;
+        const resumeCursor =
+          typeof input === "object" && input !== null && "resumeCursor" in input
+            ? input.resumeCursor
+            : undefined;
+        const threadId =
           typeof input === "object" &&
           input !== null &&
-          "runtimeMode" in input &&
-          (input.runtimeMode === "approval-required" || input.runtimeMode === "full-access")
-            ? input.runtimeMode
-            : "full-access",
-        ...(sessionModelSelection.model !== undefined
-          ? { model: sessionModelSelection.model }
-          : {}),
-        threadId,
-        resumeCursor: resumeCursor ?? { opaque: `resume-${sessionIndex}` },
-        createdAt: now,
-        updatedAt: now,
-      };
-      runtimeSessions.push(session);
-      return Effect.succeed(session);
-    });
+          "threadId" in input &&
+          typeof input.threadId === "string"
+            ? ThreadId.makeUnsafe(input.threadId)
+            : ThreadId.makeUnsafe(`thread-${sessionIndex}`);
+        const providerInstanceId =
+          typeof input === "object" &&
+          input !== null &&
+          "providerInstanceId" in input &&
+          typeof input.providerInstanceId === "string"
+            ? input.providerInstanceId
+            : undefined;
+        const session: ProviderSession = {
+          provider: inferLegacyProviderKindFromModelSelection(sessionModelSelection) ?? "codex",
+          status: "ready" as const,
+          runtimeMode:
+            typeof input === "object" &&
+            input !== null &&
+            "runtimeMode" in input &&
+            (input.runtimeMode === "approval-required" || input.runtimeMode === "full-access")
+              ? input.runtimeMode
+              : "full-access",
+          ...(sessionModelSelection.model !== undefined
+            ? { model: sessionModelSelection.model }
+            : {}),
+          threadId,
+          ...(providerInstanceId ? { providerInstanceId } : {}),
+          resumeCursor: resumeCursor ?? { opaque: `resume-${sessionIndex}` },
+          createdAt: now,
+          updatedAt: now,
+        };
+        runtimeSessions.push(session);
+        return Effect.succeed(session);
+      },
+    );
     const sendTurn = vi.fn<ProviderServiceShape["sendTurn"]>((_: unknown) =>
       Effect.succeed({
         threadId: ThreadId.makeUnsafe("thread-1"),
@@ -313,7 +324,7 @@ describe("ProviderCommandReactor", () => {
           generateThreadTitle,
         } as unknown as TextGenerationShape),
       ),
-      Layer.provideMerge(ServerSettingsService.layerTest()),
+      Layer.provideMerge(ServerSettingsService.layerTest(input?.serverSettings)),
       Layer.provideMerge(ServerConfig.layerTest(process.cwd(), baseDir)),
       Layer.provideMerge(NodeServices.layer),
       Layer.provideMerge(SqlitePersistenceMemory),
@@ -1073,7 +1084,7 @@ describe("ProviderCommandReactor", () => {
     if (!defaultStartSession) {
       throw new Error("Harness startSession mock has no implementation.");
     }
-    harness.startSession.mockImplementationOnce((threadId: unknown, input: unknown) =>
+    harness.startSession.mockImplementationOnce((threadId, input) =>
       Effect.promise(() => startSessionGate).pipe(
         Effect.flatMap(() => defaultStartSession(threadId, input)),
       ),
@@ -2734,6 +2745,250 @@ describe("ProviderCommandReactor", () => {
         instanceId: "claude_work",
         model: "claude-opus-4-6",
       },
+    });
+  });
+
+  it("allows stopped threads to start on a different provider instance", async () => {
+    const harness = await createHarness({
+      serverSettings: {
+        providerInstances: {
+          codex_work: {
+            driver: "codex",
+            enabled: true,
+            config: {
+              homePath: "/tmp/codex-work",
+            },
+          },
+        },
+      },
+    });
+    const now = new Date().toISOString();
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.makeUnsafe("cmd-session-set-stopped-instance-switch"),
+        threadId: ThreadId.makeUnsafe("thread-1"),
+        session: {
+          threadId: ThreadId.makeUnsafe("thread-1"),
+          status: "stopped",
+          providerName: "codex",
+          providerInstanceId: "codex",
+          runtimeMode: "approval-required",
+          activeTurnId: null,
+          lastError: null,
+          updatedAt: now,
+        },
+        createdAt: now,
+      }),
+    );
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.makeUnsafe("cmd-turn-start-stopped-instance-switch"),
+        threadId: ThreadId.makeUnsafe("thread-1"),
+        message: {
+          messageId: asMessageId("user-message-stopped-instance-switch"),
+          role: "user",
+          text: "restart on work account",
+          attachments: [],
+        },
+        modelSelection: {
+          instanceId: "codex_work",
+          model: "gpt-5.4",
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      }),
+    );
+
+    await waitFor(() => harness.startSession.mock.calls.length === 1);
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+
+    expect(harness.startSession.mock.calls[0]?.[1]).toMatchObject({
+      provider: "codex",
+      providerInstanceId: "codex_work",
+      modelSelection: {
+        instanceId: "codex_work",
+        model: "gpt-5.4",
+      },
+    });
+    expect(harness.sendTurn.mock.calls[0]?.[0]).toMatchObject({
+      threadId: ThreadId.makeUnsafe("thread-1"),
+      modelSelection: {
+        instanceId: "codex_work",
+        model: "gpt-5.4",
+      },
+    });
+  });
+
+  it("allows stopped edit-resend replays to start on a different provider instance", async () => {
+    const harness = await createHarness({
+      serverSettings: {
+        providerInstances: {
+          codex_work: {
+            driver: "codex",
+            enabled: true,
+            config: {
+              homePath: "/tmp/codex-work",
+            },
+          },
+        },
+      },
+    });
+    const now = new Date().toISOString();
+    const threadId = ThreadId.makeUnsafe("thread-1");
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.makeUnsafe("cmd-original-turn-start-stopped-edit"),
+        threadId,
+        message: {
+          messageId: asMessageId("user-message-stopped-edit"),
+          role: "user",
+          text: "old prompt",
+          attachments: [],
+        },
+        modelSelection: {
+          instanceId: "codex",
+          model: "gpt-5.4",
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      }),
+    );
+    await waitFor(() => harness.startSession.mock.calls.length === 1);
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.message.assistant.complete",
+        commandId: CommandId.makeUnsafe("cmd-assistant-complete-stopped-edit"),
+        threadId,
+        messageId: asMessageId("assistant-stopped-edit"),
+        turnId: asTurnId("turn-1"),
+        createdAt: now,
+      }),
+    );
+    await Effect.runPromise(harness.stopRuntimeSession({ threadId }));
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.makeUnsafe("cmd-session-set-stopped-edit-instance-switch"),
+        threadId,
+        session: {
+          threadId,
+          status: "stopped",
+          providerName: "codex",
+          providerInstanceId: "codex",
+          runtimeMode: "approval-required",
+          activeTurnId: null,
+          lastError: null,
+          updatedAt: now,
+        },
+        createdAt: now,
+      }),
+    );
+    harness.startSession.mockClear();
+    harness.sendTurn.mockClear();
+    harness.stopRuntimeSession.mockClear();
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.message.edit-and-resend",
+        commandId: CommandId.makeUnsafe("cmd-edit-stopped-instance-resend"),
+        threadId,
+        messageId: asMessageId("user-message-stopped-edit"),
+        text: "edited prompt for work account",
+        modelSelection: {
+          instanceId: "codex_work",
+          model: "gpt-5.4",
+        },
+        runtimeMode: "approval-required",
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        createdAt: now,
+      }),
+    );
+
+    await waitFor(() => harness.startSession.mock.calls.length === 1);
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+
+    expect(harness.stopRuntimeSession.mock.calls.length).toBe(0);
+    expect(harness.startSession.mock.calls[0]?.[1]).toMatchObject({
+      provider: "codex",
+      providerInstanceId: "codex_work",
+      modelSelection: {
+        instanceId: "codex_work",
+        model: "gpt-5.4",
+      },
+    });
+    expect(harness.sendTurn.mock.calls[0]?.[0]).toMatchObject({
+      threadId,
+      input: "edited prompt for work account",
+      modelSelection: {
+        instanceId: "codex_work",
+        model: "gpt-5.4",
+      },
+    });
+  });
+
+  it("preserves an unknown explicit provider instance on start failure", async () => {
+    const harness = await createHarness();
+    const now = new Date().toISOString();
+    harness.startSession.mockImplementationOnce(
+      () =>
+        Effect.fail(
+          new ProviderAdapterRequestError({
+            provider: "codex",
+            method: "thread/start",
+            detail: "Unknown provider instance 'codex_removed'.",
+          }),
+        ) as ReturnType<ProviderServiceShape["startSession"]>,
+    );
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.makeUnsafe("cmd-turn-start-missing-instance"),
+        threadId: ThreadId.makeUnsafe("thread-1"),
+        message: {
+          messageId: asMessageId("user-message-missing-instance"),
+          role: "user",
+          text: "start on the removed account",
+          attachments: [],
+        },
+        modelSelection: {
+          instanceId: "codex_removed",
+          model: "gpt-5.4",
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      }),
+    );
+
+    await waitFor(async () => {
+      const readModel = await Effect.runPromise(harness.engine.getReadModel());
+      const thread = readModel.threads.find(
+        (entry) => entry.id === ThreadId.makeUnsafe("thread-1"),
+      );
+      return thread?.session?.status === "error";
+    });
+
+    const readModel = await Effect.runPromise(harness.engine.getReadModel());
+    const thread = readModel.threads.find((entry) => entry.id === ThreadId.makeUnsafe("thread-1"));
+    expect(harness.startSession.mock.calls[0]?.[1]).toMatchObject({
+      provider: "codex",
+      providerInstanceId: "codex_removed",
+    });
+    expect(thread?.session).toMatchObject({
+      status: "error",
+      providerName: null,
+      providerInstanceId: "codex_removed",
+      lastError: expect.stringContaining("Unknown provider instance 'codex_removed'."),
     });
   });
 
