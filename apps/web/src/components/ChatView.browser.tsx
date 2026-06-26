@@ -3293,6 +3293,27 @@ describe("ChatView timeline estimator parity (full app)", () => {
       await expect.element(page.getByText("Don't work in a project")).toBeInTheDocument();
       await expect.element(page.getByText("Folders on this Mac")).not.toBeInTheDocument();
 
+      const currentProjectOption = await waitForElement(
+        () =>
+          Array.from(document.querySelectorAll<HTMLElement>('[data-slot="combobox-item"]')).find(
+            (item) => item.textContent?.trim() === "project",
+          ) ?? null,
+        "Unable to find current project option.",
+      );
+      currentProjectOption.click();
+      await vi.waitFor(
+        () => {
+          expect(useComposerDraftStore.getState().getDraftThread(newThreadId)).toMatchObject({
+            projectId: PROJECT_ID,
+            envMode: "worktree",
+            branch: "feature/keep-out",
+            worktreePath: "/repo/project/.worktrees/feature-keep-out",
+          });
+        },
+        { timeout: 8_000, interval: 16 },
+      );
+
+      await projectPickerTrigger.click();
       await page.getByText("other", { exact: true }).click();
 
       await vi.waitFor(

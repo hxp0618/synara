@@ -8,6 +8,10 @@ import type { Project } from "../types";
 import { readNativeApi } from "../nativeApi";
 import { useStore } from "../store";
 import { getThreadFromState } from "../threadDerivation";
+import {
+  extractDuplicateProjectCreateProjectId,
+  isDuplicateProjectCreateError,
+} from "./projectCreateRecovery";
 import { resolveServerChatWorkspaceRoot, type ServerWorkspacePaths } from "./serverWorkspacePaths";
 import { newCommandId, newProjectId } from "./utils";
 
@@ -187,16 +191,27 @@ export async function ensureHomeChatProject(
 
   const creationPromise = (async () => {
     const projectId = newProjectId();
-    await api.orchestration.dispatchCommand({
-      type: "project.create",
-      commandId: newCommandId(),
-      projectId,
-      kind: "chat",
-      title: "Home",
-      workspaceRoot: placeholderWorkspaceRoot,
-      createdAt: new Date().toISOString(),
-    });
-    return projectId;
+    try {
+      await api.orchestration.dispatchCommand({
+        type: "project.create",
+        commandId: newCommandId(),
+        projectId,
+        kind: "chat",
+        title: "Home",
+        workspaceRoot: placeholderWorkspaceRoot,
+        createdAt: new Date().toISOString(),
+      });
+      return projectId;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (isDuplicateProjectCreateError(message)) {
+        const duplicateProjectId = extractDuplicateProjectCreateProjectId(message);
+        if (duplicateProjectId) {
+          return duplicateProjectId as ProjectId;
+        }
+      }
+      throw error;
+    }
   })().finally(() => {
     pendingHomeChatCreationByWorkspaceRoot.delete(workspaceRoot);
   });

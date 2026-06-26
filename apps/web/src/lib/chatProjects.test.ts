@@ -1,9 +1,20 @@
 // FILE: chatProjects.test.ts
 // Purpose: Verifies home chat-container project recognition across new and legacy roots.
 
-import { describe, expect, it } from "vitest";
+import { ProjectId } from "@t3tools/contracts";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { isHomeChatContainerProject } from "./chatProjects";
+import { useStore } from "../store";
+import { ensureHomeChatProject, isHomeChatContainerProject } from "./chatProjects";
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+  useStore.setState({
+    projects: [],
+    threadIds: [],
+    threads: [],
+  });
+});
 
 describe("isHomeChatContainerProject", () => {
   it("matches the managed Documents/Synara general-chat root used by older drafts", () => {
@@ -89,5 +100,35 @@ describe("isHomeChatContainerProject", () => {
         },
       ),
     ).toBe(false);
+  });
+
+  it("recovers an existing Home project id when creation races a stale duplicate", async () => {
+    const existingProjectId = ProjectId.makeUnsafe("project-home-existing");
+    const dispatchCommand = vi.fn(async () => {
+      throw new Error(
+        `Orchestration command invariant failed (project.create): Project '${existingProjectId}' already uses workspace root '/Users/tester'.`,
+      );
+    });
+    vi.stubGlobal("window", {
+      nativeApi: {
+        orchestration: {
+          dispatchCommand,
+        },
+      },
+    });
+
+    const projectId = await ensureHomeChatProject({
+      homeDir: "/Users/tester",
+      chatWorkspaceRoot: "/Users/tester/Documents/Synara",
+    });
+
+    expect(projectId).toBe(existingProjectId);
+    expect(dispatchCommand).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "project.create",
+        kind: "chat",
+        workspaceRoot: "/Users/tester",
+      }),
+    );
   });
 });

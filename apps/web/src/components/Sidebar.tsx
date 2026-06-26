@@ -1947,7 +1947,7 @@ export default function Sidebar() {
   );
 
   const openOrCreateProjectThreadFromSnapshot = useCallback(
-    async (projectId: ProjectId, snapshot: OrchestrationShellSnapshot) => {
+    async (projectId: ProjectId, snapshot: OrchestrationShellSnapshot): Promise<boolean> => {
       const latestThread = sortThreadsForSidebar(
         snapshot.threads
           .filter(
@@ -1966,12 +1966,13 @@ export default function Sidebar() {
           to: "/$threadId",
           params: { threadId: latestThread.id },
         });
-        return;
+        return true;
       }
 
       void handleNewThread(projectId, {
         envMode: appSettings.defaultThreadEnvMode,
       }).catch(() => undefined);
+      return true;
     },
     [
       appSettings.defaultThreadEnvMode,

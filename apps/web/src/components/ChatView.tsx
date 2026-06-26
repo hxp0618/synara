@@ -8522,9 +8522,18 @@ export default function ChatView({
       if (!project) {
         throw new Error("Selected project is not available.");
       }
+      if (draftThread?.projectId === projectId) {
+        scheduleComposerFocus();
+        return;
+      }
       moveEmptyDraftToLocalProject(projectId);
     },
-    [isLocalDraftThread, moveEmptyDraftToLocalProject],
+    [
+      draftThread?.projectId,
+      isLocalDraftThread,
+      moveEmptyDraftToLocalProject,
+      scheduleComposerFocus,
+    ],
   );
 
   const handleCreateProjectFromPickerPath = useCallback(
