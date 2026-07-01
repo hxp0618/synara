@@ -1960,24 +1960,15 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
           return;
         }
 
-        // Incremental task patches stay off the timeline (they're covered by
-        // task_started/progress/notification), but terminal patches are the
-        // reliable cleanup signal for per-task bookkeeping — a killed or failed
-        // task may never emit a task_notification. hiddenTaskIds is deliberately
-        // NOT cleaned here: a terminal patch can precede the task_notification,
-        // and the notification does not always repeat skip_transcript, so the
-        // tombstone must survive until the notification consumes it (a leaked
-        // string per never-notifying hidden task is negligible).
+        // Incremental task patches stay off the timeline — they're covered by
+        // task_started/progress/notification. Per-task bookkeeping is
+        // deliberately NOT cleaned here either: a terminal patch can precede
+        // the task_notification, and the notification needs both the
+        // skip_transcript tombstone (it does not always repeat the flag) and
+        // the spawning-turn metadata (to attribute the completion). The
+        // notification is the sole consumer of both; the occasional entry
+        // leaked by a never-notifying task is a few strings per session.
         if (message.subtype === "task_updated") {
-          const patchStatus = (message.patch as { status?: string } | undefined)?.status;
-          if (patchStatus === "completed" || patchStatus === "failed" || patchStatus === "killed") {
-            for (const [toolUseId, taskInfo] of context.knownTasksByToolUseId) {
-              if (taskInfo.taskId === message.task_id) {
-                context.knownTasksByToolUseId.delete(toolUseId);
-                break;
-              }
-            }
-          }
           return;
         }
 
@@ -2141,13 +2132,13 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
             if (context.hiddenTaskIds.has(message.task_id)) {
               return;
             }
-            // Background task events can arrive between turns. The web work-log
-            // filter hides turn-less activities once turn-stamped messages
-            // exist, so fall back to the turn that spawned the task.
-            const progressTurnId =
-              !context.turnState && message.tool_use_id
-                ? context.knownTasksByToolUseId.get(message.tool_use_id)?.turnId
-                : undefined;
+            // Task progress belongs to the turn that spawned the task — not
+            // whatever turn happens to be open when it arrives, and not no turn
+            // at all (the web work-log filter hides turn-less activities once
+            // turn-stamped messages exist).
+            const progressTurnId = message.tool_use_id
+              ? context.knownTasksByToolUseId.get(message.tool_use_id)?.turnId
+              : undefined;
             if (message.usage) {
               const normalizedUsage = normalizeClaudeTokenUsage(
                 message.usage,
@@ -2220,16 +2211,18 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
             return;
           }
           case "task_notification": {
-            const notifiedTask = message.tool_use_id
+            let notifiedTask = message.tool_use_id
               ? context.knownTasksByToolUseId.get(message.tool_use_id)
               : undefined;
             if (message.tool_use_id) {
               context.knownTasksByToolUseId.delete(message.tool_use_id);
             } else {
-              // Notifications may omit the tool id; clean by task id so the
-              // entry cannot leak or keep routing late subagent output.
+              // Notifications may omit the tool id; match by task id instead so
+              // the entry cannot leak — keeping its spawning-turn metadata for
+              // the completion event below.
               for (const [toolUseId, taskInfo] of context.knownTasksByToolUseId) {
                 if (taskInfo.taskId === message.task_id) {
+                  notifiedTask = taskInfo;
                   context.knownTasksByToolUseId.delete(toolUseId);
                   break;
                 }
@@ -2238,7 +2231,9 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
             if (context.hiddenTaskIds.delete(message.task_id) || message.skip_transcript === true) {
               return;
             }
-            const notificationTurnId = !context.turnState ? notifiedTask?.turnId : undefined;
+            // The completion belongs to the turn that spawned the task, even if
+            // an unrelated turn is open when the notification arrives.
+            const notificationTurnId = notifiedTask?.turnId;
             if (message.usage) {
               const normalizedUsage = normalizeClaudeTokenUsage(
                 message.usage,

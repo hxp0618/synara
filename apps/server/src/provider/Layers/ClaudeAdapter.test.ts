@@ -5266,10 +5266,7 @@ describe("ClaudeAdapterLive", () => {
       const adapter = yield* ClaudeAdapter;
 
       const runtimeEventsFiber = yield* adapter.streamEvents.pipe(
-        Stream.takeUntil(
-          (event) =>
-            event.type === "task.progress" && event.payload.summary === "Background inner update",
-        ),
+        Stream.takeUntil((event) => event.type === "task.completed"),
         Stream.runCollect,
         Effect.forkChild,
       );
@@ -5372,6 +5369,42 @@ describe("ClaudeAdapterLive", () => {
         },
       } as unknown as SDKMessage);
 
+      // A terminal patch preceding the notification must not drop the task's
+      // spawning-turn metadata.
+      harness.query.emit({
+        type: "system",
+        subtype: "task_updated",
+        task_id: "task-bg-1",
+        patch: { status: "completed" },
+        session_id: "sdk-session-bg-subagent",
+        uuid: "bg-subagent-task-updated",
+      } as unknown as SDKMessage);
+
+      harness.query.emit({
+        type: "system",
+        subtype: "task_progress",
+        task_id: "task-bg-1",
+        tool_use_id: "task-tool-bg",
+        description: "Explore the repo",
+        summary: "Halfway done",
+        usage: { total_tokens: 20, tool_uses: 1, duration_ms: 10 },
+        session_id: "sdk-session-bg-subagent",
+        uuid: "bg-subagent-task-progress",
+      } as unknown as SDKMessage);
+
+      // The terminal notification may omit the tool id; the completion must
+      // still resolve the spawning turn via the task-id fallback.
+      harness.query.emit({
+        type: "system",
+        subtype: "task_notification",
+        task_id: "task-bg-1",
+        status: "completed",
+        output_file: "/tmp/bg.log",
+        summary: "Explored everything",
+        session_id: "sdk-session-bg-subagent",
+        uuid: "bg-subagent-task-notification",
+      } as unknown as SDKMessage);
+
       const runtimeEvents = Array.from(yield* Fiber.join(runtimeEventsFiber));
 
       const progressEvent = runtimeEvents.find(
@@ -5388,6 +5421,24 @@ describe("ClaudeAdapterLive", () => {
         // the web work-log filter, and not attributed to the unrelated turn
         // that happens to be open when it arrives.
         assert.equal(String(progressEvent.turnId), String(turn.turnId));
+      }
+
+      const sdkProgressEvent = runtimeEvents.find(
+        (event) => event.type === "task.progress" && event.payload.summary === "Halfway done",
+      );
+      assert.equal(sdkProgressEvent?.type, "task.progress");
+      if (sdkProgressEvent?.type === "task.progress") {
+        assert.equal(String(sdkProgressEvent.turnId), String(turn.turnId));
+      }
+
+      const completedEvent = runtimeEvents.find((event) => event.type === "task.completed");
+      assert.equal(completedEvent?.type, "task.completed");
+      if (completedEvent?.type === "task.completed") {
+        assert.equal(String(completedEvent.payload.taskId), "task-bg-1");
+        assert.equal(completedEvent.payload.status, "completed");
+        // Even without a tool id on the notification, the completion resolves
+        // the spawning turn instead of the unrelated open turn.
+        assert.equal(String(completedEvent.turnId), String(turn.turnId));
       }
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
