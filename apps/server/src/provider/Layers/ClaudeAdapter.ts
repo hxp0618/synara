@@ -811,6 +811,11 @@ const EMBEDDED_CLAUDE_SYSTEM_PROMPT_APPEND = [
   "Do not present the host app as Claude Code unless the user is explicitly asking about Claude Code.",
   "Treat the current working directory as the active workspace for the task.",
   "When the user asks about the current project, codebase, or repository, proactively inspect files in the current working directory before asking the user where to look.",
+].join("\n");
+// Wandy routing guidance only belongs in the prompt when the wandy MCP server
+// is actually registered for the session.
+const EMBEDDED_CLAUDE_SYSTEM_PROMPT_APPEND_WITH_WANDY = [
+  EMBEDDED_CLAUDE_SYSTEM_PROMPT_APPEND,
   WANDY_BROWSER_TOOL_ROUTING_INSTRUCTIONS,
 ].join("\n");
 
@@ -3337,7 +3342,10 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
           systemPrompt: {
             type: "preset",
             preset: "claude_code",
-            append: EMBEDDED_CLAUDE_SYSTEM_PROMPT_APPEND,
+            append:
+              Object.keys(wandyMcpServers).length > 0
+                ? EMBEDDED_CLAUDE_SYSTEM_PROMPT_APPEND_WITH_WANDY
+                : EMBEDDED_CLAUDE_SYSTEM_PROMPT_APPEND,
           },
           ...(Object.keys(claudeSubagents).length > 0 ? { agents: claudeSubagents } : {}),
           // Keep the runtime value explicit so Opus 4.7 can pass xhigh through to the SDK.

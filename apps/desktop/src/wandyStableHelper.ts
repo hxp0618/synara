@@ -94,24 +94,29 @@ export function ensureStableWandyHelper(
     };
   }
 
-  const sourceFingerprint = fingerprintDirectory(normalizedSourceAppPath);
-  const stableExists = FS.existsSync(normalizedStableAppPath);
-  const stableFingerprint = stableExists ? fingerprintDirectory(normalizedStableAppPath) : null;
-  const needsInstall = sourceFingerprint !== stableFingerprint;
-
-  if (!needsInstall) {
-    ensureExecutable(stableLauncherPath);
-    return {
-      status: "ready",
-      launcherPath: stableLauncherPath,
-      sourceAppPath: normalizedSourceAppPath,
-      stableAppPath: normalizedStableAppPath,
-      installed: false,
-      replaced: false,
-    };
-  }
-
+  // A stale-helper glitch must never escalate beyond "fall back to the bundled
+  // launcher": fingerprinting and installation both touch the filesystem and can
+  // fail transiently (Gatekeeper scans, dangling symlinks, permission hiccups).
+  let stableExists = false;
   try {
+    const sourceFingerprint = fingerprintDirectory(normalizedSourceAppPath);
+    stableExists = FS.existsSync(normalizedStableAppPath);
+    const stableFingerprint = stableExists
+      ? fingerprintDirectory(normalizedStableAppPath)
+      : null;
+
+    if (sourceFingerprint === stableFingerprint) {
+      ensureExecutable(stableLauncherPath);
+      return {
+        status: "ready",
+        launcherPath: stableLauncherPath,
+        sourceAppPath: normalizedSourceAppPath,
+        stableAppPath: normalizedStableAppPath,
+        installed: false,
+        replaced: false,
+      };
+    }
+
     if (stableExists) {
       input.terminateRunningHelper?.(normalizedStableAppPath);
     }
@@ -148,13 +153,25 @@ export function terminateRunningStableWandyHelper(appPath: string): void {
   ChildProcess.spawnSync("pkill", ["-f", executablePath], { stdio: "ignore" });
 }
 
-export function collectRunningWandyProcessIds(psOutput: string): number[] {
-  const processIds: number[] = [];
-  const executableSuffix = `${Path.sep}${WANDY_APP_BUNDLE_NAME}${Path.sep}${WANDY_EXECUTABLE_RELATIVE_PATH}`;
+export function collectRunningWandyProcessIds(
+  psOutput: string,
+  appPaths: readonly string[],
+): number[] {
+  const executablePaths = appPaths
+    .map((appPath) => Path.join(Path.resolve(appPath), WANDY_EXECUTABLE_RELATIVE_PATH))
+    .filter((executablePath, index, all) => all.indexOf(executablePath) === index);
+  if (executablePaths.length === 0) {
+    return [];
+  }
 
+  const processIds: number[] = [];
   for (const line of psOutput.split("\n")) {
     const match = line.match(/^\s*(\d+)\s+(.+)$/);
-    if (!match?.[1] || !match[2]?.includes(executableSuffix)) {
+    if (!match?.[1] || !match[2]) {
+      continue;
+    }
+    const command = match[2];
+    if (!executablePaths.some((executablePath) => command.includes(executablePath))) {
       continue;
     }
 
@@ -167,12 +184,14 @@ export function collectRunningWandyProcessIds(psOutput: string): number[] {
   return processIds;
 }
 
-export function terminateRunningWandyProcesses(): void {
+// Scoped to this install's own app bundles so concurrent Synara instances
+// (or a dev build next to a packaged build) never kill each other's helpers.
+export function terminateRunningWandyProcesses(appPaths: readonly string[]): void {
   const ps = ChildProcess.spawnSync("ps", ["-axo", "pid=,command="], {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "ignore"],
   });
-  const processIds = collectRunningWandyProcessIds(ps.stdout ?? "");
+  const processIds = collectRunningWandyProcessIds(ps.stdout ?? "", appPaths);
   if (processIds.length === 0) {
     return;
   }
@@ -195,6 +214,9 @@ function installStableAppBundle(input: {
       force: true,
       dereference: false,
       errorOnExist: false,
+      // Keep source mtimes so the metadata fingerprint of the installed copy
+      // matches the bundle and future launches take the cheap reuse path.
+      preserveTimestamps: true,
     });
     FS.rmSync(input.stableAppPath, { recursive: true, force: true });
     FS.renameSync(temporaryAppPath, input.stableAppPath);
@@ -213,14 +235,16 @@ function ensureExecutable(filePath: string): void {
   }
 }
 
+// Metadata fingerprint (path + size + mtime + symlink target). Content hashing
+// re-read every byte of both bundles on the Electron main thread at each
+// launch; installStableAppBundle preserves timestamps so metadata alone is a
+// faithful staleness signal, at the cost of a few lstat calls.
 function fingerprintDirectory(rootPath: string): string {
   const hash = Crypto.createHash("sha256");
   for (const filePath of listFiles(rootPath)) {
     const relativePath = Path.relative(rootPath, filePath);
     const stats = FS.lstatSync(filePath);
     hash.update(relativePath);
-    hash.update("\0");
-    hash.update(String(stats.mode));
     hash.update("\0");
 
     if (stats.isSymbolicLink()) {
@@ -230,7 +254,9 @@ function fingerprintDirectory(rootPath: string): string {
     } else {
       hash.update("file");
       hash.update("\0");
-      hash.update(FS.readFileSync(filePath));
+      hash.update(String(stats.size));
+      hash.update("\0");
+      hash.update(String(stats.mtimeMs));
     }
     hash.update("\0");
   }

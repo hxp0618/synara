@@ -16,7 +16,6 @@ import {
   ProviderRuntimeEvent,
   ThreadId,
 } from "@t3tools/contracts";
-import { WANDY_BROWSER_TOOL_ROUTING_INSTRUCTIONS } from "@t3tools/shared/wandy";
 import { assert, describe, it } from "@effect/vitest";
 import { Effect, Fiber, Layer, Random, Stream } from "effect";
 
@@ -25,6 +24,10 @@ import { ServerConfig } from "../../config.ts";
 import { ProviderAdapterValidationError } from "../Errors.ts";
 import { ClaudeAdapter } from "../Services/ClaudeAdapter.ts";
 import { makeClaudeAdapterLive, type ClaudeAdapterLiveOptions } from "./ClaudeAdapter.ts";
+
+// Wandy MCP availability depends on the host env (desktop mode + bundled
+// runtime); pin it off so system-prompt assertions are deterministic.
+process.env.SYNARA_ENABLE_WANDY = "0";
 
 class FakeClaudeQuery implements AsyncIterable<SDKMessage> {
   private readonly queue: Array<SDKMessage> = [];
@@ -313,12 +316,13 @@ describe("ClaudeAdapterLive", () => {
       assert.deepEqual(createInput?.options.systemPrompt, {
         type: "preset",
         preset: "claude_code",
+        // Wandy is not resolvable in this harness, so the append must not
+        // carry the Wandy routing instructions.
         append: [
           "You are running inside Synara, a coding app that embeds the Claude Agent SDK.",
           "Do not present the host app as Claude Code unless the user is explicitly asking about Claude Code.",
           "Treat the current working directory as the active workspace for the task.",
           "When the user asks about the current project, codebase, or repository, proactively inspect files in the current working directory before asking the user where to look.",
-          WANDY_BROWSER_TOOL_ROUTING_INSTRUCTIONS,
         ].join("\n"),
       });
     }).pipe(

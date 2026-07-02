@@ -41,6 +41,7 @@ import { autoUpdater, BaseUpdater, CancellationToken } from "electron-updater";
 import type { ContextMenuItem } from "@t3tools/contracts";
 import {
   SYNARA_WANDY_STABLE_APP_DIR_ENV,
+  isWandyExplicitlyDisabledInEnv,
   resolveWandyLauncherPath as resolveSharedWandyLauncherPath,
   resolveStableWandyAppDir as resolveSharedStableWandyAppDir,
 } from "@t3tools/shared/wandy";
@@ -831,6 +832,13 @@ function resolveWandyLauncherPath(): string | null {
     return wandyLauncherPathCache;
   }
 
+  // Skip stable-helper install/fingerprint work entirely when the operator
+  // disabled Wandy; backendEnv() calls this on every backend (re)start.
+  if (isWandyExplicitlyDisabledInEnv(process.env)) {
+    wandyLauncherPathCache = null;
+    return wandyLauncherPathCache;
+  }
+
   const fallbackPackageRoots = resolveWandyPackageRoots();
   const bundledLauncherPath = resolveSharedWandyLauncherPath({
     env: {},
@@ -853,7 +861,11 @@ function resolveWandyLauncherPath(): string | null {
         : "reused";
       console.info(`[desktop] Wandy stable helper ${action}: ${stableResult.launcherPath ?? ""}`);
       if (!wandyProcessCleanupDone) {
-        terminateRunningWandyProcesses();
+        terminateRunningWandyProcesses(
+          [stableResult.stableAppPath, stableResult.sourceAppPath].filter(
+            (appPath): appPath is string => appPath !== null,
+          ),
+        );
         wandyProcessCleanupDone = true;
       }
       wandyLauncherPathCache = stableResult.launcherPath;
@@ -874,7 +886,7 @@ function resolveWandyLauncherPath(): string | null {
 }
 
 function warmWandyHelper(): void {
-  if (wandyWarmupStarted || process.env.SYNARA_ENABLE_WANDY === "0") {
+  if (wandyWarmupStarted || isWandyExplicitlyDisabledInEnv(process.env)) {
     return;
   }
 

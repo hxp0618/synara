@@ -7,16 +7,13 @@ import {
 
 import type { ComposerImageAttachment } from "../composerDraftStore";
 
+// Substring matches on the normalized prompt; entries subsumed by a shorter
+// pattern (e.g. "@wandy" by "wandy") are intentionally omitted.
 const EXPLICIT_WANDY_PATTERNS = [
   "do the thing",
   "wandy",
-  "@wandy",
-  "@wandy",
-  "mcp__wandy__",
   "computer use",
   "computer-use",
-  "@computer-use",
-  "@computer use",
   "mcp__computer_use__",
 ];
 

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmodSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, it } from "vitest";
@@ -17,13 +17,24 @@ function makeTempRoot(name: string): string {
   return root;
 }
 
+const FAKE_APP_MTIME_BY_VERSION: Record<string, number> = {
+  v1: 1_700_000_000,
+  v2: 1_700_000_100,
+};
+
 function writeFakeWandyApp(root: string, version: string): string {
   const appPath = path.join(root, "Wandy.app");
   const executablePath = path.join(appPath, "Contents", "MacOS", "Wandy");
+  const plistPath = path.join(appPath, "Contents", "Info.plist");
   mkdirSync(path.dirname(executablePath), { recursive: true });
-  writeFileSync(path.join(appPath, "Contents", "Info.plist"), `<plist>${version}</plist>`);
+  writeFileSync(plistPath, `<plist>${version}</plist>`);
   writeFileSync(executablePath, `#!/bin/sh\necho ${version}\n`);
   chmodSync(executablePath, 0o755);
+  // Distinct builds carry distinct mtimes; pin them so the metadata
+  // fingerprint distinguishes versions deterministically.
+  const mtime = FAKE_APP_MTIME_BY_VERSION[version] ?? 1_700_000_000;
+  utimesSync(plistPath, mtime, mtime);
+  utimesSync(executablePath, mtime, mtime);
   return executablePath;
 }
 
@@ -111,17 +122,53 @@ describe("ensureStableWandyHelper", () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  it("falls back to the bundled launcher when the stable dir is unreadable", () => {
+    const root = makeTempRoot("wandy-fallback");
+    const bundledLauncherPath = writeFakeWandyApp(path.join(root, "bundled"), "v1");
+    const stableAppDir = path.join(root, "stable");
+    // A regular file where the stable Wandy.app directory is expected makes
+    // fingerprinting throw; that must degrade to fallback, never escalate.
+    mkdirSync(stableAppDir, { recursive: true });
+    writeFileSync(path.join(stableAppDir, "Wandy.app"), "not a directory");
+
+    try {
+      const result = ensureStableWandyHelper({
+        bundledLauncherPath,
+        stableAppDir,
+        platform: "darwin",
+      });
+
+      assert.equal(result.status, "fallback");
+      assert.equal(result.launcherPath, bundledLauncherPath);
+      assert.equal(result.installed, false);
+      assert.ok(result.reason);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("collectRunningWandyProcessIds", () => {
-  it("finds Wandy app bundle processes without matching unrelated commands", () => {
-    const psOutput = `
-      101 /Users/me/.synara/wandy-app/Wandy.app/Contents/MacOS/Wandy __wandy-app-agent /tmp/wandy-agent.sock
-      102 /Applications/Synara.app/Contents/Resources/app.asar.unpacked/node_modules/@t3tools/wandy/dist/Wandy.app/Contents/MacOS/Wandy
+  const stableAppPath = "/Users/me/.synara/wandy-app/Wandy.app";
+  const bundledAppPath =
+    "/Applications/Synara.app/Contents/Resources/app.asar.unpacked/node_modules/@t3tools/wandy/dist/Wandy.app";
+  const psOutput = `
+      101 ${stableAppPath}/Contents/MacOS/Wandy __wandy-app-agent /tmp/wandy-agent.sock
+      102 ${bundledAppPath}/Contents/MacOS/Wandy
       103 /Applications/Synara.app/Contents/MacOS/Synara
       104 rg Wandy
+      105 /Users/other/.synara-alt/wandy-app/Wandy.app/Contents/MacOS/Wandy
     `;
 
-    assert.deepEqual(collectRunningWandyProcessIds(psOutput), [101, 102]);
+  it("finds Wandy processes for this install's app bundles only", () => {
+    assert.deepEqual(collectRunningWandyProcessIds(psOutput, [stableAppPath, bundledAppPath]), [
+      101, 102,
+    ]);
+  });
+
+  it("does not match other installs' Wandy processes or unrelated commands", () => {
+    assert.deepEqual(collectRunningWandyProcessIds(psOutput, [stableAppPath]), [101]);
+    assert.deepEqual(collectRunningWandyProcessIds(psOutput, []), []);
   });
 });

@@ -13,6 +13,9 @@ import {
   formatWandyGrokToolName,
   shouldSkipAcpSessionResumeForWandy,
   isWandyEnabledInEnv,
+  isWandyExplicitlyDisabledInEnv,
+  resolveWandyEnabledFromSettings,
+  syncWandyEnabledEnv,
   resolveBundledWandyLauncherPath,
   resolveWandyLauncherPath,
   resolveStableWandyAppDir,
@@ -103,6 +106,25 @@ describe("applyWandyCodexConfig", () => {
 
     assert.doesNotMatch(next, /\[mcp_servers\."wandy"\]/);
     assert.doesNotMatch(next, /WANDY_DISABLE_APP_AGENT_PROXY/);
+  });
+
+  it("still removes stale sections when enabled without a resolvable launcher", () => {
+    const next = applyWandyCodexConfig({
+      config: [
+        'model = "gpt-5.5"',
+        `[mcp_servers."${WANDY_MCP_SERVER_NAME}"]`,
+        'command = "/tmp/stale/bin/wandy"',
+        'args = ["mcp"]',
+        '[mcp_servers."open-computer-use"]',
+        'command = "/tmp/legacy/bin/open-computer-use"',
+      ].join("\n"),
+      enabled: true,
+      launcherPath: "",
+    });
+
+    assert.match(next, /model = "gpt-5\.5"/);
+    assert.doesNotMatch(next, /\[mcp_servers\."wandy"\]/);
+    assert.doesNotMatch(next, /open-computer-use/);
   });
 });
 
@@ -378,6 +400,45 @@ describe("isWandyEnabledInEnv", () => {
       }),
       false,
     );
+  });
+});
+
+describe("isWandyExplicitlyDisabledInEnv", () => {
+  it("only reports explicit disable sentinels", () => {
+    assert.equal(isWandyExplicitlyDisabledInEnv({ SYNARA_ENABLE_WANDY: "0" }), true);
+    assert.equal(isWandyExplicitlyDisabledInEnv({ SYNARA_ENABLE_WANDY: "false" }), true);
+    assert.equal(isWandyExplicitlyDisabledInEnv({ SYNARA_ENABLE_WANDY: "no" }), true);
+    assert.equal(isWandyExplicitlyDisabledInEnv({ SYNARA_ENABLE_WANDY: "1" }), false);
+    assert.equal(isWandyExplicitlyDisabledInEnv({}), false);
+  });
+});
+
+describe("resolveWandyEnabledFromSettings", () => {
+  it("honors the setting when the environment allows Wandy", () => {
+    const env = { DPCODE_MODE: "desktop" };
+    assert.equal(resolveWandyEnabledFromSettings({ enableWandy: true, env }), true);
+    assert.equal(resolveWandyEnabledFromSettings({ enableWandy: false, env }), false);
+  });
+
+  it("cannot enable Wandy when the environment disables it", () => {
+    assert.equal(
+      resolveWandyEnabledFromSettings({
+        enableWandy: true,
+        env: { DPCODE_MODE: "desktop", SYNARA_ENABLE_WANDY: "0" },
+      }),
+      false,
+    );
+    assert.equal(resolveWandyEnabledFromSettings({ enableWandy: true, env: {} }), false);
+  });
+});
+
+describe("syncWandyEnabledEnv", () => {
+  it("writes the enable sentinel into the provided env", () => {
+    const env: NodeJS.ProcessEnv = {};
+    syncWandyEnabledEnv(true, env);
+    assert.equal(env.SYNARA_ENABLE_WANDY, "1");
+    syncWandyEnabledEnv(false, env);
+    assert.equal(env.SYNARA_ENABLE_WANDY, "0");
   });
 });
 

@@ -41,7 +41,6 @@ import {
 } from "@t3tools/shared/model";
 import {
   buildWandyAcpMcpServers,
-  shouldSkipAcpSessionResumeForWandy,
   withSynaraWandyPromptContext,
 } from "@t3tools/shared/wandy";
 import { prepareWindowsSafeProcess } from "@t3tools/shared/windowsProcess";
@@ -1903,9 +1902,15 @@ const makeGeminiAdapter = Effect.fn("makeGeminiAdapter")(function* (
       });
 
       const mcpServers = buildWandyAcpMcpServers();
-      const resumeSessionId = shouldSkipAcpSessionResumeForWandy()
-        ? undefined
-        : input.resumeSessionId;
+      // Wandy skips best-effort resume because the Gemini CLI does not honor
+      // MCP registration on session/load. Rollback (allowResumeFallback: false)
+      // must still load its cloned snapshot: dropping it would silently reset
+      // the model to an empty conversation while the UI shows truncated turns.
+      const skipResumeForWandy = input.allowResumeFallback !== false && mcpServers.length > 0;
+      if (skipResumeForWandy && input.resumeSessionId) {
+        yield* Effect.logInfo("gemini session resume skipped for Wandy MCP registration");
+      }
+      const resumeSessionId = skipResumeForWandy ? undefined : input.resumeSessionId;
       const startResponse = yield* resumeSessionId
         ? input.allowResumeFallback !== false
           ? sendRequest<Record<string, unknown>>(context, "session/load", {

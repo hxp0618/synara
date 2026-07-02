@@ -17,7 +17,7 @@ import * as EffectAcpErrors from "effect-acp/errors";
 import type * as EffectAcpSchema from "effect-acp/schema";
 import type * as EffectAcpProtocol from "effect-acp/protocol";
 
-import { buildWandyAcpMcpServers, shouldSkipAcpSessionResumeForWandy } from "@t3tools/shared/wandy";
+import { buildWandyAcpMcpServers } from "@t3tools/shared/wandy";
 
 import {
   collectSessionConfigOptionValues,
@@ -417,9 +417,13 @@ const makeAcpSessionRuntime = (
       );
 
       const mcpServers = buildWandyAcpMcpServers();
-      const resumeSessionId = shouldSkipAcpSessionResumeForWandy()
-        ? undefined
-        : options.resumeSessionId;
+      // ACP CLIs only honor MCP registration on session/new, so Wandy sessions
+      // trade resume continuity for tool availability.
+      const skipResumeForWandy = mcpServers.length > 0;
+      if (skipResumeForWandy && options.resumeSessionId) {
+        yield* Effect.logInfo("acp session resume skipped for Wandy MCP registration");
+      }
+      const resumeSessionId = skipResumeForWandy ? undefined : options.resumeSessionId;
 
       let sessionId: string;
       let sessionSetupResult:

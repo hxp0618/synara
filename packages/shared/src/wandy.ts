@@ -315,11 +315,40 @@ function withDefaultWandyPackageRoots(
   };
 }
 
+// Launcher resolution walks several existsSync/accessSync candidates and runs
+// on every turn (prompt context) and session start. The default process-env
+// resolution is memoized briefly; the enabled/disabled gate stays uncached so
+// settings toggles apply immediately.
+const DEFAULT_LAUNCHER_CACHE_TTL_MS = 5_000;
+let defaultLauncherCache: { readonly value: string | null; readonly expiresAtMs: number } | null =
+  null;
+
+function isDefaultWandyResolutionInput(input: WandyMcpResolutionInput): boolean {
+  return (
+    (input.env === undefined || input.env === process.env) &&
+    input.fallbackLauncherPath === undefined &&
+    input.fallbackPackageRoots === undefined &&
+    input.searchRoots === undefined &&
+    input.platform === undefined &&
+    input.arch === undefined
+  );
+}
+
 export function resolveWandyMcpLauncher(input: WandyMcpResolutionInput = {}): string | null {
   if (!isWandyEnabledInEnv(input.env)) {
     return null;
   }
-  return resolveWandyLauncherPath(withDefaultWandyPackageRoots(input));
+  if (!isDefaultWandyResolutionInput(input)) {
+    return resolveWandyLauncherPath(withDefaultWandyPackageRoots(input));
+  }
+
+  const now = Date.now();
+  if (defaultLauncherCache && defaultLauncherCache.expiresAtMs > now) {
+    return defaultLauncherCache.value;
+  }
+  const value = resolveWandyLauncherPath(withDefaultWandyPackageRoots(input));
+  defaultLauncherCache = { value, expiresAtMs: now + DEFAULT_LAUNCHER_CACHE_TTL_MS };
+  return value;
 }
 
 export function buildWandyAcpMcpServers(
@@ -385,10 +414,10 @@ export function applyWandyCodexConfig(input: {
 }): string {
   const launcherPath = input.launcherPath.trim();
   const sanitizedConfig = sanitizeCodexConfigForSynaraOverlay(input.config);
-  if (input.enabled && launcherPath.length === 0) {
-    return sanitizedConfig;
-  }
 
+  // Stale wandy/legacy sections are removed even when no launcher is
+  // resolvable: a leftover entry pointing at a missing binary would make Codex
+  // spawn a broken MCP server.
   const document = splitTomlSections(sanitizedConfig);
   const desiredBody = buildWandyMcpSectionBody(launcherPath);
   const desiredCanonical = canonicalSectionBody(desiredBody.split("\n"));
@@ -419,11 +448,16 @@ export function applyWandyCodexConfig(input: {
   });
 }
 
-export function isWandyEnabledInEnv(env: NodeJS.ProcessEnv = process.env): boolean {
+export function isWandyExplicitlyDisabledInEnv(env: NodeJS.ProcessEnv = process.env): boolean {
   const raw = env[SYNARA_WANDY_ENABLED_ENV]?.trim().toLowerCase();
-  if (raw === "0" || raw === "false" || raw === "no") {
+  return raw === "0" || raw === "false" || raw === "no";
+}
+
+export function isWandyEnabledInEnv(env: NodeJS.ProcessEnv = process.env): boolean {
+  if (isWandyExplicitlyDisabledInEnv(env)) {
     return false;
   }
+  const raw = env[SYNARA_WANDY_ENABLED_ENV]?.trim().toLowerCase();
   if (raw === "1" || raw === "true" || raw === "yes") {
     return true;
   }
@@ -434,15 +468,14 @@ export function syncWandyEnabledEnv(enabled: boolean, env: NodeJS.ProcessEnv = p
   env[SYNARA_WANDY_ENABLED_ENV] = enabled ? "1" : "0";
 }
 
+// The persisted setting can only narrow what the environment already allows:
+// pass the env as it looked before any syncWandyEnabledEnv mutation so turning
+// the setting back on restores the boot behavior.
 export function resolveWandyEnabledFromSettings(input: {
   readonly enableWandy: boolean;
   readonly env?: NodeJS.ProcessEnv;
 }): boolean {
-  const env = input.env ?? process.env;
-  if (env.DPCODE_MODE === "desktop" || env.T3CODE_MODE === "desktop") {
-    return input.enableWandy;
-  }
-  return false;
+  return isWandyEnabledInEnv(input.env ?? process.env) && input.enableWandy;
 }
 
 const PLATFORM_RUNTIME_RELATIVE_PATHS: Record<string, readonly string[]> = {
@@ -466,7 +499,7 @@ function resolveBundledWandyBinLauncherPath(input: {
       : [path.join(binDir, "wandy")];
 
   for (const candidate of candidates) {
-    if (existsSync(candidate)) {
+    if (isExecutableFile(candidate)) {
       return candidate;
     }
   }
@@ -494,9 +527,12 @@ function normalizeWandyMcpLauncherPath(
     readonly arch?: string;
   } = {},
 ): string {
-  const binLauncherPath = path.join("bin", "wandy");
+  // Compare with normalized separators so Windows paths configured with
+  // forward slashes still get upgraded to the native runtime.
+  const normalizedLauncherPath = launcherPath.replace(/\\/g, "/");
   const isBinLauncher =
-    launcherPath.endsWith(binLauncherPath) || launcherPath.endsWith(`${binLauncherPath}.exe`);
+    normalizedLauncherPath.endsWith("bin/wandy") ||
+    normalizedLauncherPath.endsWith("bin/wandy.exe");
   if (!isBinLauncher) {
     return launcherPath;
   }

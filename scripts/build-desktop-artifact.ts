@@ -207,14 +207,34 @@ interface StagePackageJson {
 
 const WANDY_PACKAGE_NAME = "@t3tools/wandy";
 const WANDY_STAGE_RELATIVE_DIR = "packages/wandy";
-const WANDY_RUNTIME_PACKAGE_ENTRIES = ["package.json", "bin", "dist", "LICENSE"] as const;
-const WANDY_MACOS_RUNTIME_RELATIVE_PATH = [
-  "dist",
-  "Wandy.app",
-  "Contents",
-  "MacOS",
-  "Wandy",
-] as const;
+const WANDY_RUNTIME_PACKAGE_ENTRIES = ["package.json", "bin", "LICENSE"] as const;
+
+// Each desktop artifact only ships the Wandy runtime for its own platform;
+// bundling the full dist tree would embed the macOS app bundle and both
+// Windows/Linux binary sets into every installer.
+function wandyDistEntriesForPlatform(
+  platform: typeof BuildPlatform.Type,
+  arch: typeof BuildArch.Type,
+): readonly string[] {
+  if (platform === "mac") {
+    return ["dist/Wandy.app"];
+  }
+  const distArchDirs =
+    arch === "universal" ? ["arm64", "amd64"] : [arch === "x64" ? "amd64" : arch];
+  const distPlatformDir = platform === "win" ? "windows" : "linux";
+  return distArchDirs.map((distArch) => `dist/${distPlatformDir}/${distArch}`);
+}
+
+function wandyRuntimeBinaryRelativePath(
+  platform: typeof BuildPlatform.Type,
+  arch: typeof BuildArch.Type,
+): string {
+  if (platform === "mac") {
+    return "dist/Wandy.app/Contents/MacOS/Wandy";
+  }
+  const distArch = arch === "x64" || arch === "universal" ? "amd64" : arch;
+  return platform === "win" ? `dist/windows/${distArch}/wandy.exe` : `dist/linux/${distArch}/wandy`;
+}
 
 function withStagedWandyDependency(dependencies: Record<string, unknown>): Record<string, unknown> {
   if (!(WANDY_PACKAGE_NAME in dependencies)) {
@@ -561,16 +581,23 @@ const verifyStagedNodePty = Effect.fn("verifyStagedNodePty")(function* (
 const stageWandyPackage = Effect.fn("stageWandyPackage")(function* (
   repoRoot: string,
   stageAppDir: string,
+  platform: typeof BuildPlatform.Type,
+  arch: typeof BuildArch.Type,
   requireStableCodeSignature: boolean,
 ) {
   const path = yield* Path.Path;
   const fs = yield* FileSystem.FileSystem;
   const sourceDir = path.join(repoRoot, "packages/wandy");
-  const runtimeBinary = path.join(sourceDir, ...WANDY_MACOS_RUNTIME_RELATIVE_PATH);
+  const runtimeBinary = path.join(
+    sourceDir,
+    ...wandyRuntimeBinaryRelativePath(platform, arch).split("/"),
+  );
 
   if (!(yield* fs.exists(runtimeBinary))) {
+    const hint =
+      platform === "mac" ? " Run 'cd packages/wandy && bun run build:macos' first." : "";
     return yield* new BuildScriptError({
-      message: `Missing Wandy runtime at ${runtimeBinary}. Run 'cd packages/wandy && bun run build:macos' first.`,
+      message: `Missing Wandy runtime at ${runtimeBinary}.${hint}`,
     });
   }
 
@@ -594,12 +621,14 @@ const stageWandyPackage = Effect.fn("stageWandyPackage")(function* (
   const targetDir = path.join(stageAppDir, WANDY_STAGE_RELATIVE_DIR);
   yield* fs.makeDirectory(targetDir, { recursive: true });
 
-  for (const entry of WANDY_RUNTIME_PACKAGE_ENTRIES) {
-    const from = path.join(sourceDir, entry);
+  const entries = [...WANDY_RUNTIME_PACKAGE_ENTRIES, ...wandyDistEntriesForPlatform(platform, arch)];
+  for (const entry of entries) {
+    const from = path.join(sourceDir, ...entry.split("/"));
     if (!(yield* fs.exists(from))) {
       continue;
     }
-    const to = path.join(targetDir, entry);
+    const to = path.join(targetDir, ...entry.split("/"));
+    yield* fs.makeDirectory(path.dirname(to), { recursive: true });
     const stat = yield* fs.stat(from);
     if (stat.type === "Directory") {
       yield* fs.copy(from, to);
@@ -804,7 +833,13 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
   }
   yield* fs.copy(distDirs.desktopResources, stageResourcesDir);
   yield* fs.copy(distDirs.serverDist, path.join(stageAppDir, "apps/server/dist"));
-  yield* stageWandyPackage(repoRoot, stageAppDir, options.platform === "mac" && options.signed);
+  yield* stageWandyPackage(
+    repoRoot,
+    stageAppDir,
+    options.platform,
+    options.arch,
+    options.platform === "mac" && options.signed,
+  );
 
   yield* assertPlatformBuildResources(options.platform, stageResourcesDir, options.verbose);
 
