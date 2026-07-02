@@ -124,6 +124,18 @@ describe("resolveCodexGeneratedImagesRoot(s)", () => {
     assert.ok(root.endsWith(path.join("generated_images")));
   });
 
+  it("honors a per-instance environment that enables the browser plugin", () => {
+    process.env.SYNARA_HOME = "/synara-test/runtime";
+    delete process.env.DPCODE_DISABLE_CODEX_DPCODE_BROWSER_PLUGIN;
+    // The server stays in overlay mode, but this instance's child env flips
+    // the sentinel, so it writes under its dedicated home directly.
+    const root = resolveCodexGeneratedImagesRoot({
+      homePath: "/codex-test/.codex-work",
+      environment: { DPCODE_DISABLE_CODEX_DPCODE_BROWSER_PLUGIN: "0" },
+    });
+    assert.equal(root, path.join("/codex-test/.codex-work", "generated_images"));
+  });
+
   it("returns both source and overlay generated_images roots for the allowlist", () => {
     process.env.SYNARA_HOME = "/synara-test/runtime";
     delete process.env.DPCODE_DISABLE_CODEX_DPCODE_BROWSER_PLUGIN;

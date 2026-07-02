@@ -82,6 +82,12 @@ export interface CodexGeneratedImageHomeContext {
   readonly homePath?: string | undefined;
   readonly shadowHomePath?: string | undefined;
   readonly accountId?: string | undefined;
+  /**
+   * Per-instance launch environment. It can flip the browser-plugin sentinel
+   * for the child process, which changes the home Codex writes under even
+   * though the server process itself keeps the default mode.
+   */
+  readonly environment?: Readonly<Record<string, string>> | undefined;
 }
 
 /**
@@ -92,11 +98,15 @@ export interface CodexGeneratedImageHomeContext {
  * that account's own overlay.
  */
 export function resolveCodexHomePath(codexHome?: string | CodexGeneratedImageHomeContext): string {
-  const context = typeof codexHome === "string" ? { homePath: codexHome } : (codexHome ?? {});
+  const context: CodexGeneratedImageHomeContext =
+    typeof codexHome === "string" ? { homePath: codexHome } : (codexHome ?? {});
   return resolveActiveCodexHomeWritePath({
     ...(context.homePath?.trim() ? { homePath: context.homePath } : {}),
     ...(context.shadowHomePath?.trim() ? { shadowHomePath: context.shadowHomePath } : {}),
     ...(context.accountId?.trim() ? { accountId: context.accountId } : {}),
+    // The child runs with the instance environment layered over the server's,
+    // so the write-home decision must see the same merged view.
+    ...(context.environment ? { env: { ...process.env, ...context.environment } } : {}),
   });
 }
 

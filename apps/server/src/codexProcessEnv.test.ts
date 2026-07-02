@@ -173,6 +173,73 @@ describe("buildCodexProcessEnv account overlays", () => {
     assert.strictEqual(defaultEnv.CODEX_HOME, fixture.homePath);
   });
 
+  it("rejects a symlinked shadow home when the browser plugin is enabled", () => {
+    const fixture = makeAccountFixture({ shadowAuth: "missing" });
+    const aliasedShadowHome = path.join(path.dirname(fixture.shadowHomePath), "codex-shadow-alias");
+    symlinkSync(fixture.homePath, aliasedShadowHome);
+
+    assert.throws(
+      () =>
+        buildCodexProcessEnv({
+          env: {
+            ...fixture.env,
+            CODEX_HOME: fixture.homePath,
+            DPCODE_DISABLE_CODEX_DPCODE_BROWSER_PLUGIN: "0",
+          },
+          shadowHomePath: aliasedShadowHome,
+          accountId: "work",
+          platform: "win32",
+        }),
+      /shadow home/i,
+    );
+  });
+
+  it("rejects symlinked shadow auth state when the browser plugin is enabled", () => {
+    const fixture = makeAccountFixture({ shadowAuth: "symlink" });
+
+    assert.throws(
+      () =>
+        buildCodexProcessEnv({
+          env: {
+            ...fixture.env,
+            CODEX_HOME: fixture.homePath,
+            DPCODE_DISABLE_CODEX_DPCODE_BROWSER_PLUGIN: "0",
+          },
+          shadowHomePath: fixture.shadowHomePath,
+          accountId: "work",
+          platform: "win32",
+        }),
+      /is a symlink/,
+    );
+  });
+
+  it("materializes the source config into direct shadow homes when the plugin is enabled", () => {
+    const fixture = makeAccountFixture({ shadowAuth: "real" });
+    writeFileSync(path.join(fixture.homePath, "config.toml"), 'model = "gpt-5.4"\n', "utf8");
+
+    const env = buildCodexProcessEnv({
+      env: {
+        ...fixture.env,
+        CODEX_HOME: fixture.homePath,
+        DPCODE_DISABLE_CODEX_DPCODE_BROWSER_PLUGIN: "0",
+      },
+      shadowHomePath: fixture.shadowHomePath,
+      accountId: "work",
+      platform: "win32",
+    });
+
+    assert.strictEqual(env.CODEX_HOME, fixture.shadowHomePath);
+    assert.strictEqual(
+      readFileSync(path.join(fixture.shadowHomePath, "config.toml"), "utf8"),
+      'model = "gpt-5.4"\n',
+    );
+    // The shadow home's own auth stays untouched.
+    assert.strictEqual(
+      readFileSync(path.join(fixture.shadowHomePath, "auth.json"), "utf8"),
+      '{"account":"work"}',
+    );
+  });
+
   it("drops stale shared-auth symlinks when reusing the account home with the plugin enabled", () => {
     const fixture = makeAccountFixture({ shadowAuth: "missing" });
     const pluginEnabledEnv = {

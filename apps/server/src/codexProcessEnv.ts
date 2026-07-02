@@ -138,6 +138,70 @@ function ensureCodexOverlaySymlink(input: {
   symlinkSync(input.sourcePath, input.targetPath, input.type);
 }
 
+// A symlinked shadow home (or one resolving to the source home) aliases
+// another account's credentials through the directory itself; both overlay
+// and direct plugin-enabled launches must reject that configuration.
+function validateCodexShadowHomePath(sourceHomePath: string, shadowHomePath: string): void {
+  if (path.resolve(sourceHomePath) === path.resolve(shadowHomePath)) {
+    throw new Error("Codex account shadow home must be different from CODEX_HOME.");
+  }
+  let shadowStat: ReturnType<typeof lstatSync> | undefined;
+  try {
+    shadowStat = lstatSync(shadowHomePath);
+  } catch {
+    shadowStat = undefined;
+  }
+  if (shadowStat?.isSymbolicLink()) {
+    throw new Error(
+      `Codex account shadow home at ${shadowHomePath} is a symlink; it must be a real directory so accounts cannot alias each other's auth.`,
+    );
+  }
+  const resolveRealPath = (candidate: string): string | undefined => {
+    try {
+      return realpathSync(candidate);
+    } catch {
+      return undefined;
+    }
+  };
+  const shadowRealPath = shadowStat ? resolveRealPath(shadowHomePath) : undefined;
+  if (shadowRealPath && shadowRealPath === resolveRealPath(sourceHomePath)) {
+    throw new Error("Codex account shadow home must be different from CODEX_HOME.");
+  }
+}
+
+// A symlinked auth.json can silently alias another account's credentials, so
+// account-private state must always be a real file in the shadow home.
+// Returns the entry's lstat, or undefined when it does not exist yet.
+function lstatShadowPrivateState(
+  shadowHomePath: string,
+  entry: string,
+): ReturnType<typeof lstatSync> | undefined {
+  const sourcePath = path.join(shadowHomePath, entry);
+  let sourceStat: ReturnType<typeof lstatSync>;
+  try {
+    sourceStat = lstatSync(sourcePath);
+  } catch {
+    // Missing shadow state should not prevent Codex from creating account
+    // state lazily, but existing private files must never be read or logged.
+    return undefined;
+  }
+  if (sourceStat.isSymbolicLink()) {
+    throw new Error(
+      `Codex account private state at ${sourcePath} is a symlink; it must be a real file so accounts cannot alias each other's auth.`,
+    );
+  }
+  return sourceStat;
+}
+
+// Materialize the source home's config.toml unmodified so direct
+// (plugin-enabled) launches keep the user's plugin/model-provider
+// configuration in the home Codex actually runs against.
+function materializeSourceCodexConfig(sourceHomePath: string, targetHomePath: string): void {
+  const sourceConfigPath = path.join(sourceHomePath, "config.toml");
+  const sourceConfig = existsSync(sourceConfigPath) ? readFileSync(sourceConfigPath, "utf8") : "";
+  writeFileSync(path.join(targetHomePath, "config.toml"), sourceConfig, "utf8");
+}
+
 function prepareDpCodeCodexHomeOverlay(input: {
   readonly env: NodeJS.ProcessEnv;
   readonly homePath?: string;
@@ -152,33 +216,7 @@ function prepareDpCodeCodexHomeOverlay(input: {
     ? resolveBaseCodexHomePath(input.env, input.shadowHomePath)
     : undefined;
   if (shadowHomePath) {
-    if (path.resolve(sourceHomePath) === path.resolve(shadowHomePath)) {
-      throw new Error("Codex account shadow home must be different from CODEX_HOME.");
-    }
-    // A symlinked shadow home aliases another account's credentials through the
-    // directory itself, bypassing the per-file symlink guard further down.
-    let shadowStat: ReturnType<typeof lstatSync> | undefined;
-    try {
-      shadowStat = lstatSync(shadowHomePath);
-    } catch {
-      shadowStat = undefined;
-    }
-    if (shadowStat?.isSymbolicLink()) {
-      throw new Error(
-        `Codex account shadow home at ${shadowHomePath} is a symlink; it must be a real directory so accounts cannot alias each other's auth.`,
-      );
-    }
-    const resolveRealPath = (candidate: string): string | undefined => {
-      try {
-        return realpathSync(candidate);
-      } catch {
-        return undefined;
-      }
-    };
-    const shadowRealPath = shadowStat ? resolveRealPath(shadowHomePath) : undefined;
-    if (shadowRealPath && shadowRealPath === resolveRealPath(sourceHomePath)) {
-      throw new Error("Codex account shadow home must be different from CODEX_HOME.");
-    }
+    validateCodexShadowHomePath(sourceHomePath, shadowHomePath);
   }
   const accountSegment = resolveCodexHomeOverlayAccountSegment({
     homePath: sourceHomePath,
@@ -234,27 +272,15 @@ function prepareDpCodeCodexHomeOverlay(input: {
 
   if (shadowHomePath) {
     for (const entry of CODEX_ACCOUNT_PRIVATE_STATE_FILES) {
-      const sourcePath = path.join(shadowHomePath, entry);
-      let sourceStat: ReturnType<typeof lstatSync>;
-      try {
-        sourceStat = lstatSync(sourcePath);
-      } catch {
-        // Missing shadow homes should not prevent Codex from creating account
-        // state lazily, but existing private files must never be read or logged.
+      const sourceStat = lstatShadowPrivateState(shadowHomePath, entry);
+      if (!sourceStat) {
         continue;
-      }
-      // A symlinked auth.json can silently alias another account's credentials,
-      // so account-private state must always be a real file in the shadow home.
-      if (sourceStat.isSymbolicLink()) {
-        throw new Error(
-          `Codex account private state at ${sourcePath} is a symlink; it must be a real file so accounts cannot alias each other's auth.`,
-        );
       }
       const targetPath = path.join(overlayHomePath, entry);
       try {
         ensureCodexOverlaySymlink({
           entryName: entry,
-          sourcePath,
+          sourcePath: path.join(shadowHomePath, entry),
           targetPath,
           type: sourceStat.isDirectory() ? "dir" : "file",
           force: true,
@@ -315,13 +341,27 @@ function prepareDirectCodexAccountHome(
   mkdirSync(accountHomePath, { recursive: true });
   dropStaleAccountPrivateStateSymlinks(accountHomePath);
   // Overlay mode may have left a config.toml with the dpcode-browser plugin
-  // forced off, and a fresh directory has no config at all: materialize the
-  // source home's config unmodified so plugin-enabled launches keep the
-  // user's plugin/model-provider configuration.
-  const sourceConfigPath = path.join(sourceHomePath, "config.toml");
-  const sourceConfig = existsSync(sourceConfigPath) ? readFileSync(sourceConfigPath, "utf8") : "";
-  writeFileSync(path.join(accountHomePath, "config.toml"), sourceConfig, "utf8");
+  // forced off, and a fresh directory has no config at all.
+  materializeSourceCodexConfig(sourceHomePath, accountHomePath);
   return accountHomePath;
+}
+
+// Direct (plugin-enabled) shadow homes become the child CODEX_HOME outright,
+// so they need the same aliasing guards overlay mode applies plus the source
+// home's config that the overlay would otherwise materialize.
+function prepareDirectCodexShadowHome(
+  env: NodeJS.ProcessEnv,
+  input: { readonly homePath?: string | undefined; readonly shadowHomePath: string },
+): string {
+  const sourceHomePath = resolveBaseCodexHomePath(env, input.homePath);
+  const shadowHomePath = resolveBaseCodexHomePath(env, input.shadowHomePath);
+  validateCodexShadowHomePath(sourceHomePath, shadowHomePath);
+  for (const entry of CODEX_ACCOUNT_PRIVATE_STATE_FILES) {
+    lstatShadowPrivateState(shadowHomePath, entry);
+  }
+  mkdirSync(shadowHomePath, { recursive: true });
+  materializeSourceCodexConfig(sourceHomePath, shadowHomePath);
+  return shadowHomePath;
 }
 
 export function buildCodexProcessEnv(
@@ -343,13 +383,20 @@ export function buildCodexProcessEnv(
         ...(input.accountId ? { accountId: input.accountId } : {}),
       })
     : undefined;
-  const directAccountHomePath = input.shadowHomePath
-    ? resolveBaseCodexHomePath(baseEnv, input.shadowHomePath)
-    : input.homePath
-      ? resolveBaseCodexHomePath(baseEnv, input.homePath)
-      : overlayHomePath === undefined
-        ? prepareDirectCodexAccountHome(baseEnv, input.accountId)
-        : undefined;
+  // Only prepared when the overlay is skipped: overlay mode already owns the
+  // effective home, so direct-mode side effects (validation, config writes)
+  // must not run for it.
+  const directAccountHomePath =
+    overlayHomePath !== undefined
+      ? undefined
+      : input.shadowHomePath
+        ? prepareDirectCodexShadowHome(baseEnv, {
+            ...(input.homePath ? { homePath: input.homePath } : {}),
+            shadowHomePath: input.shadowHomePath,
+          })
+        : input.homePath
+          ? resolveBaseCodexHomePath(baseEnv, input.homePath)
+          : prepareDirectCodexAccountHome(baseEnv, input.accountId);
   const effectiveEnv =
     overlayHomePath || directAccountHomePath
       ? { ...baseEnv, CODEX_HOME: overlayHomePath ?? directAccountHomePath }
