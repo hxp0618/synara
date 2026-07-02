@@ -130,6 +130,23 @@ describe("resolveActiveCodexHomeWritePath", () => {
       "/users/me/.codex",
     );
   });
+
+  it("keeps account-id-only homes isolated when the plugin is explicitly enabled", () => {
+    const env = {
+      CODEX_HOME: "/users/me/.codex",
+      SYNARA_HOME: "/synara/runtime",
+      DPCODE_DISABLE_CODEX_DPCODE_BROWSER_PLUGIN: "0",
+    };
+    const segment = resolveCodexHomeOverlayAccountSegment({
+      accountId: "codex_2",
+      homePath: "/users/me/.codex",
+    });
+
+    assert.equal(
+      resolveActiveCodexHomeWritePath({ env, accountId: "codex_2" }),
+      path.join("/synara/runtime", "codex-home-overlay", "accounts", segment ?? ""),
+    );
+  });
 });
 
 describe("resolveCodexHomeAllowlistCandidates", () => {

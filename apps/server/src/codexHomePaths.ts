@@ -91,7 +91,25 @@ export function resolveActiveCodexHomeWritePath(input: CodexHomePathsInput = {})
   const env = input.env ?? process.env;
   const source = resolveBaseCodexHomePath(env, input.homePath);
   if (!shouldDisableDpCodeBrowserPlugin(env)) {
-    return input.shadowHomePath ? resolveBaseCodexHomePath(env, input.shadowHomePath) : source;
+    if (input.shadowHomePath) {
+      return resolveBaseCodexHomePath(env, input.shadowHomePath);
+    }
+    if (input.homePath?.trim()) {
+      return source;
+    }
+    // Mirrors buildCodexProcessEnv: accountId-only instances run against
+    // their per-account home even when the managed overlay is skipped.
+    const directAccountSegment = resolveCodexHomeOverlayAccountSegment({
+      homePath: source,
+      ...(input.accountId ? { accountId: input.accountId } : {}),
+    });
+    if (directAccountSegment) {
+      const accountHome = resolveDpCodeCodexHomeOverlayPath(env, source, directAccountSegment);
+      if (path.resolve(source) !== path.resolve(accountHome)) {
+        return accountHome;
+      }
+    }
+    return source;
   }
   const overlay = resolveDpCodeCodexHomeOverlayPath(
     env,

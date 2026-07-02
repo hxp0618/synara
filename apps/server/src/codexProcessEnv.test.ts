@@ -142,6 +142,29 @@ describe("buildCodexProcessEnv account overlays", () => {
     assert.throws(() => lstatSync(path.join(overlayHomePath, "auth.json")));
   });
 
+  it("keeps account-id-only instances isolated when the browser plugin is enabled", () => {
+    const fixture = makeAccountFixture({ shadowAuth: "missing" });
+    const pluginEnabledEnv = {
+      ...fixture.env,
+      CODEX_HOME: fixture.homePath,
+      DPCODE_DISABLE_CODEX_DPCODE_BROWSER_PLUGIN: "0",
+    };
+
+    const env = buildCodexProcessEnv({
+      env: pluginEnabledEnv,
+      accountId: "work",
+      platform: "win32",
+    });
+
+    const accountHomePath = env.CODEX_HOME;
+    assert.ok(accountHomePath);
+    assert.notStrictEqual(path.resolve(accountHomePath), path.resolve(fixture.homePath));
+    assert.ok(lstatSync(accountHomePath).isDirectory());
+    // The default account keeps using the shared home in this mode.
+    const defaultEnv = buildCodexProcessEnv({ env: pluginEnabledEnv, platform: "win32" });
+    assert.strictEqual(defaultEnv.CODEX_HOME, fixture.homePath);
+  });
+
   it("mirrors private auth from an account's own dedicated home", () => {
     const fixture = makeAccountFixture({ shadowAuth: "missing" });
 

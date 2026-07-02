@@ -287,6 +287,30 @@ function prepareDpCodeCodexHomeOverlay(input: {
   return overlayHomePath;
 }
 
+// With the dpcode-browser plugin enabled Synara skips the managed overlay,
+// but an accountId-only instance still must not share the default Codex
+// home/auth. Point CODEX_HOME at the same per-account directory overlay mode
+// uses, so login state survives toggling the plugin sentinel.
+function prepareDirectCodexAccountHome(
+  env: NodeJS.ProcessEnv,
+  accountId: string | undefined,
+): string | undefined {
+  const sourceHomePath = resolveBaseCodexHomePath(env);
+  const accountSegment = resolveCodexHomeOverlayAccountSegment({
+    homePath: sourceHomePath,
+    ...(accountId ? { accountId } : {}),
+  });
+  if (!accountSegment) {
+    return undefined;
+  }
+  const accountHomePath = resolveDpCodeCodexHomeOverlayPath(env, sourceHomePath, accountSegment);
+  if (path.resolve(sourceHomePath) === path.resolve(accountHomePath)) {
+    return undefined;
+  }
+  mkdirSync(accountHomePath, { recursive: true });
+  return accountHomePath;
+}
+
 export function buildCodexProcessEnv(
   input: {
     readonly env?: NodeJS.ProcessEnv;
@@ -310,7 +334,9 @@ export function buildCodexProcessEnv(
     ? resolveBaseCodexHomePath(baseEnv, input.shadowHomePath)
     : input.homePath
       ? resolveBaseCodexHomePath(baseEnv, input.homePath)
-      : undefined;
+      : overlayHomePath === undefined
+        ? prepareDirectCodexAccountHome(baseEnv, input.accountId)
+        : undefined;
   const effectiveEnv =
     overlayHomePath || directAccountHomePath
       ? { ...baseEnv, CODEX_HOME: overlayHomePath ?? directAccountHomePath }

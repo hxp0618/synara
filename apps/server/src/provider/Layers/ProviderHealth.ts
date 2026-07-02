@@ -22,6 +22,7 @@ import { parseCodexConfigModelProvider } from "@t3tools/shared/codexConfig";
 import {
   deriveProviderInstances,
   deriveUnsupportedProviderInstances,
+  providerStartOptionsFromInstance,
   type ResolvedProviderInstance,
   type UnsupportedProviderInstance,
 } from "@t3tools/shared/providerInstances";
@@ -2657,17 +2658,22 @@ export const ProviderHealthLive = Layer.effect(
     > => {
       const binaryPath = readInstanceConfigString(instance, "binaryPath");
       switch (instance.driver) {
-        case "codex":
+        case "codex": {
+          // Launches derive their codex options (including the seeded account
+          // discriminator) from providerStartOptionsFromInstance; the status
+          // probe must check the same home/auth the instance runs against.
+          const codexOptions = providerStartOptionsFromInstance(instance)?.codex;
           return checkProviderInstanceWhenEnabled(
             instance,
             makeCheckCodexProviderStatus(
               binaryPath,
-              readInstanceConfigString(instance, "homePath"),
-              readInstanceConfigString(instance, "shadowHomePath"),
-              readInstanceConfigString(instance, "accountId"),
+              codexOptions?.homePath,
+              codexOptions?.shadowHomePath,
+              codexOptions?.accountId,
               instance.environment,
             ),
           );
+        }
         case "claudeAgent": {
           const claudeHomePath = readInstanceConfigString(instance, "homePath");
           return checkProviderInstanceWhenEnabled(
