@@ -2029,23 +2029,22 @@ export default function ChatView({
     () => getCodexProviderDiscoveryOptions(settings),
     [settings],
   );
+  // Like the per-instance queries above, these legacy provider-level queries
+  // must not probe the default Codex/Claude accounts just because a chat with
+  // another provider is open.
   const claudeDynamicModelsQuery = useQuery(
     providerModelsQueryOptions({
       provider: "claudeAgent",
-      instanceId:
-        selectedProvider === "claudeAgent" || lockedProvider === "claudeAgent"
-          ? selectedProviderInstanceId
-          : "claudeAgent",
+      instanceId: selectedProvider === "claudeAgent" ? selectedProviderInstanceId : "claudeAgent",
+      enabled: selectedProvider === "claudeAgent" || isModelPickerOpen,
     }),
   );
   const codexDynamicModelsQuery = useQuery(
     providerModelsQueryOptions({
       provider: "codex",
-      instanceId:
-        selectedProvider === "codex" || lockedProvider === "codex"
-          ? selectedProviderInstanceId
-          : "codex",
-      ...(selectedProvider === "codex" || lockedProvider === "codex" ? codexDiscoveryOptions : {}),
+      instanceId: selectedProvider === "codex" ? selectedProviderInstanceId : "codex",
+      ...(selectedProvider === "codex" ? codexDiscoveryOptions : {}),
+      enabled: selectedProvider === "codex" || isModelPickerOpen,
     }),
   );
   const openCodeModelDiscoveryEnabled =
@@ -2516,8 +2515,16 @@ export default function ChatView({
           compareProvidersByOrder(settings.providerOrder, left.provider, right.provider),
         )
         .filter((instance) => {
+          // Search must only offer instances the picker would let the user
+          // choose: disabled ones would silently reroute to a different
+          // account via resolveSelectableProviderInstanceId.
+          if (!instance.enabled) {
+            return false;
+          }
           if (lockedProvider !== null) {
-            return instance.provider === lockedProvider;
+            // A started thread is locked to its provider instance; models from
+            // sibling accounts would hit the locked-instance guard and no-op.
+            return instance.instanceId === selectedProviderInstanceId;
           }
           // Always keep the currently selected provider visible in search even if
           // it's hidden in the picker, so the user can still see and switch from
@@ -2554,6 +2561,7 @@ export default function ChatView({
       modelOptionsByProviderInstance,
       providerInstances,
       selectedProvider,
+      selectedProviderInstanceId,
       settings.providerOrder,
     ],
   );

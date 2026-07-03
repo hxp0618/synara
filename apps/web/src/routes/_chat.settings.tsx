@@ -1262,7 +1262,14 @@ function SettingsRouteView() {
       };
       const prefix =
         provider === "claudeAgent" ? "claude" : provider === "opencode" ? "opencode" : provider;
-      const existingIds = new Set(Object.keys(nextInstances));
+      // Derived instances (e.g. Codex accounts surfacing as codex_2) share the
+      // id namespace with explicit entries; writing an explicit entry under a
+      // derived id would merge into and effectively rename/disable that
+      // account instead of creating a new instance.
+      const existingIds = new Set([
+        ...Object.keys(nextInstances),
+        ...getProviderInstanceOptions(settings).map((option) => String(option.instanceId)),
+      ]);
       let index = 2;
       let instanceId = `${prefix}_${index}`;
       while (existingIds.has(instanceId)) {
@@ -1305,26 +1312,7 @@ function SettingsRouteView() {
       };
       updateSettings({ providerInstances: nextInstances as ProviderInstanceConfigMap });
     },
-    [
-      claudeBinaryPath,
-      claudeHomePath,
-      codexBinaryPath,
-      settings.cursorApiEndpoint,
-      settings.cursorBinaryPath,
-      settings.geminiBinaryPath,
-      settings.grokBinaryPath,
-      settings.kiloBinaryPath,
-      settings.kiloServerPassword,
-      settings.kiloServerUrl,
-      settings.openCodeBinaryPath,
-      settings.openCodeExperimentalWebSockets,
-      settings.openCodeServerPassword,
-      settings.openCodeServerUrl,
-      settings.piAgentDir,
-      settings.piBinaryPath,
-      settings.providerInstances,
-      updateSettings,
-    ],
+    [claudeBinaryPath, claudeHomePath, codexBinaryPath, settings, updateSettings],
   );
 
   const updateProviderInstance = useCallback(

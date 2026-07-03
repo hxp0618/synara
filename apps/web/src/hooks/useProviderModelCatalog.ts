@@ -149,6 +149,10 @@ export function useProviderModelCatalog(input: {
   const showExpandedCursorModelVariants = featureFlags["show-expanded-cursor-model-variants"];
   const customModelsByProvider = useMemo(() => getCustomModelsByProvider(settings), [settings]);
   const providerInstances = useMemo(() => getProviderInstanceOptions(settings), [settings]);
+  // Callers without an explicit instance selection route to the provider's
+  // default instance, so that is the only instance discovery must warm.
+  const effectiveSelectedInstanceId = (selectedProviderInstanceId?.trim() ||
+    selectedProvider) as ProviderInstanceId;
   const instanceModelQueries = useQueries({
     queries: providerInstances.map((instance) =>
       modelQueryOptionsForProviderInstance({
@@ -156,10 +160,11 @@ export function useProviderModelCatalog(input: {
         provider: instance.provider,
         instanceId: instance.instanceId,
         cwd: discoveryCwd,
-        enabled:
-          discoveryEnabled ||
-          selectedProvider === instance.provider ||
-          selectedProviderInstanceId === instance.instanceId,
+        // Closed-picker discovery is limited to the active instance; enabling
+        // every same-provider instance would probe all configured accounts
+        // (Codex spawns app-server discovery per account home). The full
+        // fan-out only happens while the picker is open (discoveryEnabled).
+        enabled: discoveryEnabled || effectiveSelectedInstanceId === instance.instanceId,
       }),
     ),
   });
@@ -195,10 +200,13 @@ export function useProviderModelCatalog(input: {
       ? selectedProviderInstanceId
       : provider) as ProviderInstanceId;
 
+  // Gated like the per-instance queries: an unselected Codex/Claude account
+  // must not be probed just because this surface mounted.
   const claudeDynamicModelsQuery = useQuery(
     providerModelsQueryOptions({
       provider: "claudeAgent",
       ...selectedInstanceQueryOption("claudeAgent"),
+      enabled: selectedProvider === "claudeAgent" || discoveryEnabled,
     }),
   );
   const codexDynamicModelsQuery = useQuery(
@@ -206,6 +214,7 @@ export function useProviderModelCatalog(input: {
       provider: "codex",
       ...selectedInstanceQueryOption("codex"),
       ...codexDiscoveryOptions,
+      enabled: selectedProvider === "codex" || discoveryEnabled,
     }),
   );
   const cursorDynamicModelsQuery = useQuery(
