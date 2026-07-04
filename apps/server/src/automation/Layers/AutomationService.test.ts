@@ -1,6 +1,7 @@
 import { assert, it } from "@effect/vitest";
 import {
   AutomationId,
+  DEFAULT_SERVER_SETTINGS,
   type AutomationListResult,
   AutomationRunId,
   CommandId,
@@ -39,7 +40,10 @@ import { AutomationRepository } from "../../persistence/Services/AutomationRepos
 import { ProjectionTurnRepository } from "../../persistence/Services/ProjectionTurns.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { AutomationService, type AutomationServiceShape } from "../Services/AutomationService.ts";
-import { AutomationServiceLive } from "./AutomationService.ts";
+import {
+  AutomationServiceLive,
+  resolveAutomationCompletionTextGenerationInputForSettings,
+} from "./AutomationService.ts";
 
 const now = "2026-06-16T10:00:00.000Z";
 const projectId = ProjectId.makeUnsafe("automation-project");
@@ -93,6 +97,34 @@ let failDispatchType: OrchestrationCommand["type"] | null = null;
 let dispatchHook:
   | ((command: OrchestrationCommand) => Effect.Effect<void, OrchestrationCommandInternalError>)
   | null = null;
+
+it("drops stale completion fallback provider options when the fallback instance cannot resolve", () => {
+  const input = resolveAutomationCompletionTextGenerationInputForSettings(
+    {
+      modelSelection: {
+        instanceId: "gemini",
+        model: "gemini-2.5-pro",
+      },
+      providerOptions: {
+        codex: {
+          homePath: "/tmp/stale-codex-home",
+          environment: {
+            STALE_CODEX_ENV: "must-not-leak",
+          },
+        },
+      },
+    },
+    {
+      ...DEFAULT_SERVER_SETTINGS,
+      textGenerationModelSelection: {
+        instanceId: "codex_fallback_removed" as ProviderInstanceId,
+        model: "gpt-5-codex",
+      },
+    },
+  );
+
+  assert.deepStrictEqual(input, {});
+});
 
 function resetHarness() {
   dispatchedCommands.length = 0;
@@ -2272,6 +2304,9 @@ layer("AutomationService", (it) => {
                 STALE_CODEX_ENV: "must-not-leak",
               },
             },
+            claudeAgent: {
+              homePath: "/tmp/stale-claude-home",
+            },
           },
           completionPolicy: heartbeatCompletionPolicy("the PR is ready"),
         });
@@ -2291,9 +2326,11 @@ layer("AutomationService", (it) => {
             undefined,
         });
 
-        assert.deepStrictEqual(completionEvaluationInputs.at(-1)?.providerOptions?.codex, {
-          homePath: "/tmp/codex-work-home",
-          accountId: "work",
+        assert.deepStrictEqual(completionEvaluationInputs.at(-1)?.providerOptions, {
+          codex: {
+            homePath: "/tmp/codex-work-home",
+            accountId: "work",
+          },
         });
       }),
   );
@@ -2304,9 +2341,16 @@ layer("AutomationService", (it) => {
       Effect.gen(function* () {
         resetHarness();
         const service = yield* AutomationService;
+        const serverSettings = yield* ServerSettingsService;
         const targetThreadId = ThreadId.makeUnsafe("heartbeat-stop-missing-provider-instance");
         const automationTurnId = TurnId.makeUnsafe("turn-stop-missing-provider-instance");
         threadShell = Option.some(makeThreadShell({ id: targetThreadId }));
+        yield* serverSettings.updateSettings({
+          textGenerationModelSelection: {
+            instanceId: "cursor",
+            model: "composer-2",
+          },
+        });
 
         const created = yield* service.create({
           ...createInput("local"),
@@ -2342,8 +2386,65 @@ layer("AutomationService", (it) => {
             undefined,
         });
 
+        assert.deepStrictEqual(completionEvaluationInputs.at(-1)?.modelSelection, {
+          instanceId: "cursor",
+          model: "composer-2",
+        });
         assert.isUndefined(completionEvaluationInputs.at(-1)?.providerOptions);
       }),
+  );
+
+  it.effect("drops stale heartbeat completion options from the fallback path", () =>
+    Effect.gen(function* () {
+      resetHarness();
+      const service = yield* AutomationService;
+      const serverSettings = yield* ServerSettingsService;
+      const targetThreadId = ThreadId.makeUnsafe("heartbeat-stop-missing-fallback-instance");
+      const automationTurnId = TurnId.makeUnsafe("turn-stop-missing-fallback-instance");
+      threadShell = Option.some(makeThreadShell({ id: targetThreadId }));
+      yield* serverSettings.updateSettings({
+        textGenerationModelSelection: {
+          instanceId: "codex_fallback_removed" as ProviderInstanceId,
+          model: "gpt-5-codex",
+        },
+      });
+
+      const created = yield* service.create({
+        ...createInput("local"),
+        mode: "heartbeat",
+        targetThreadId,
+        modelSelection: {
+          instanceId: "gemini",
+          model: "gemini-2.5-pro",
+        },
+        providerOptions: {
+          codex: {
+            homePath: "/tmp/stale-codex-home",
+            environment: {
+              STALE_CODEX_ENV: "must-not-leak",
+            },
+          },
+        },
+        completionPolicy: heartbeatCompletionPolicy("the PR is ready"),
+      });
+      const { run } = yield* service.runNow({ automationId: created.id });
+      yield* completeHeartbeatRun({
+        run,
+        threadId: targetThreadId,
+        turnId: automationTurnId,
+      });
+
+      yield* service.reconcileThread({ threadId: targetThreadId });
+      yield* waitForAutomationList({
+        service,
+        description: "missing fallback instance stop evaluation",
+        predicate: (listed) =>
+          listed.runs.find((entry) => entry.id === run.id)?.result?.completionEvaluation !==
+          undefined,
+      });
+
+      assert.isUndefined(completionEvaluationInputs.at(-1)?.providerOptions);
+    }),
   );
 
   it.effect("keeps a heartbeat automation active when the AI stop condition is unmatched", () =>
