@@ -485,6 +485,7 @@ export const makeWsRpcLayer = () =>
         projectionSnapshotQuery: projectionReadModelQuery,
         providerAdapterRegistry,
         providerService,
+        serverConfig: config,
         serverSettings,
       });
 

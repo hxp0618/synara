@@ -177,6 +177,28 @@ describe("resolveCodexGeneratedImagesRoot(s)", () => {
     ]);
   });
 
+  it("keeps historical account overlay roots when an instance enables direct-home mode", () => {
+    process.env.SYNARA_HOME = "/synara-test/runtime";
+    delete process.env.DPCODE_DISABLE_CODEX_DPCODE_BROWSER_PLUGIN;
+
+    const roots = resolveCodexGeneratedImagesRoots({
+      homePath: "/codex-test/.codex-work",
+      shadowHomePath: "/codex-test/.codex-work-auth",
+      accountId: "codex_work",
+      environment: { DPCODE_DISABLE_CODEX_DPCODE_BROWSER_PLUGIN: "0" },
+    });
+
+    assert.ok(
+      roots.some(
+        (root) =>
+          root.startsWith(
+            path.join("/synara-test/runtime", "codex-home-overlay", "accounts", "codex_work-"),
+          ) && root.endsWith(path.join("generated_images")),
+      ),
+      `expected account overlay generated_images root, got ${JSON.stringify(roots)}`,
+    );
+  });
+
   it("collapses to a single root when overlay equals source", () => {
     delete process.env.SYNARA_HOME;
     delete process.env.DPCODE_HOME;
@@ -194,11 +216,14 @@ describe("resolveCodexGeneratedImagesRoot(s)", () => {
 
 describe("codexConfiguredHomePathsFromSettings", () => {
   const previousDisableFlag = process.env.DPCODE_DISABLE_CODEX_DPCODE_BROWSER_PLUGIN;
+  const previousSynaraHome = process.env.SYNARA_HOME;
 
   afterEach(() => {
     if (previousDisableFlag === undefined)
       delete process.env.DPCODE_DISABLE_CODEX_DPCODE_BROWSER_PLUGIN;
     else process.env.DPCODE_DISABLE_CODEX_DPCODE_BROWSER_PLUGIN = previousDisableFlag;
+    if (previousSynaraHome === undefined) delete process.env.SYNARA_HOME;
+    else process.env.SYNARA_HOME = previousSynaraHome;
   });
 
   it("includes the env-scoped write home for instances relocating the overlay root", () => {
@@ -214,7 +239,9 @@ describe("codexConfiguredHomePathsFromSettings", () => {
       },
     };
 
-    const homes = codexConfiguredHomePathsFromSettings(settings);
+    const roots = codexConfiguredHomePathsFromSettings(settings).flatMap((home) =>
+      resolveCodexGeneratedImagesRoots(home),
+    );
 
     const expectedPrefix = path.join(
       "/instance-env/runtime",
@@ -223,8 +250,41 @@ describe("codexConfiguredHomePathsFromSettings", () => {
       "codex_env-",
     );
     assert.ok(
-      homes.some((home) => home.startsWith(expectedPrefix)),
-      `expected env-scoped account overlay home, got ${JSON.stringify(homes)}`,
+      roots.some((root) => root.startsWith(expectedPrefix)),
+      `expected env-scoped account overlay root, got ${JSON.stringify(roots)}`,
+    );
+  });
+
+  it("preserves configured account context so old overlay images survive plugin toggles", () => {
+    process.env.DPCODE_DISABLE_CODEX_DPCODE_BROWSER_PLUGIN = "0";
+    process.env.SYNARA_HOME = "/synara-test/runtime";
+    const settings = {
+      ...DEFAULT_SERVER_SETTINGS,
+      providerInstances: {
+        codex_work: {
+          driver: "codex" as const,
+          enabled: true,
+          config: {
+            homePath: "/codex-test/.codex-work",
+            shadowHomePath: "/codex-test/.codex-work-auth",
+            accountId: "codex_work",
+          },
+        },
+      },
+    };
+
+    const roots = codexConfiguredHomePathsFromSettings(settings).flatMap((home) =>
+      resolveCodexGeneratedImagesRoots(home),
+    );
+
+    assert.ok(
+      roots.some(
+        (root) =>
+          root.startsWith(
+            path.join("/synara-test/runtime", "codex-home-overlay", "accounts", "codex_work-"),
+          ) && root.endsWith(path.join("generated_images")),
+      ),
+      `expected configured account overlay generated_images root, got ${JSON.stringify(roots)}`,
     );
   });
 });

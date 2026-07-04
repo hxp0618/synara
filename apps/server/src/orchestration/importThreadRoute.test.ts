@@ -22,6 +22,21 @@ describe("claudeHistoricalSessionEnvironment", () => {
     expect(environment?.SYNARA_CLAUDE_IMPORT_TEST).toBe("1");
   });
 
+  it("expands instance Claude homes against the configured Synara home", () => {
+    const environment = claudeHistoricalSessionEnvironment(
+      {
+        claudeAgent: {
+          homePath: "~/claude-work",
+          environment: { SYNARA_CLAUDE_IMPORT_TEST: "1" },
+        },
+      } satisfies ProviderStartOptions,
+      { homeDir: "/synara/home" },
+    );
+
+    expect(environment?.HOME).toBe(path.join("/synara/home", "claude-work"));
+    expect(environment?.SYNARA_CLAUDE_IMPORT_TEST).toBe("1");
+  });
+
   it("passes the sanitized historical environment to child queries without remerging process env", () => {
     const original = process.env.ANTHROPIC_API_KEY;
     process.env.ANTHROPIC_API_KEY = "ambient-key";

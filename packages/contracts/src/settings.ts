@@ -76,6 +76,7 @@ export const OpenCodeServerProviderSettings = Schema.Struct({
   binaryPath: StringSetting.pipe(Schema.withDecodingDefault(() => "opencode")),
   serverUrl: StringSetting.pipe(Schema.withDecodingDefault(() => "")),
   serverPassword: StringSetting.pipe(Schema.withDecodingDefault(() => "")),
+  serverPasswordRedacted: Schema.optionalKey(Schema.Boolean),
   experimentalWebSockets: Schema.Boolean.pipe(Schema.withDecodingDefault(() => false)),
 });
 export type OpenCodeServerProviderSettings = typeof OpenCodeServerProviderSettings.Type;
@@ -85,6 +86,7 @@ export const KiloServerProviderSettings = Schema.Struct({
   binaryPath: StringSetting.pipe(Schema.withDecodingDefault(() => "kilo")),
   serverUrl: StringSetting.pipe(Schema.withDecodingDefault(() => "")),
   serverPassword: StringSetting.pipe(Schema.withDecodingDefault(() => "")),
+  serverPasswordRedacted: Schema.optionalKey(Schema.Boolean),
 });
 export type KiloServerProviderSettings = typeof KiloServerProviderSettings.Type;
 
@@ -183,6 +185,7 @@ export const ServerSettingsPatch = Schema.Struct({
           ...ProviderSettingsBasePatch,
           serverUrl: Schema.optionalKey(StringSetting),
           serverPassword: Schema.optionalKey(StringSetting),
+          serverPasswordRedacted: Schema.optionalKey(Schema.Boolean),
         }),
       ),
       opencode: Schema.optionalKey(
@@ -190,6 +193,7 @@ export const ServerSettingsPatch = Schema.Struct({
           ...ProviderSettingsBasePatch,
           serverUrl: Schema.optionalKey(StringSetting),
           serverPassword: Schema.optionalKey(StringSetting),
+          serverPasswordRedacted: Schema.optionalKey(Schema.Boolean),
           experimentalWebSockets: Schema.optionalKey(Schema.Boolean),
         }),
       ),

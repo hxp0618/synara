@@ -120,6 +120,20 @@ function providerConfigSecretName(input: {
   return `provider-config-${Buffer.from(input.instanceId, "utf8").toString("base64url")}-${Buffer.from(input.key, "utf8").toString("base64url")}`;
 }
 
+type LegacyServerPasswordProvider = "kilo" | "opencode";
+
+const LEGACY_SERVER_PASSWORD_PROVIDERS = [
+  "kilo",
+  "opencode",
+] as const satisfies readonly LegacyServerPasswordProvider[];
+
+function legacyProviderConfigSecretName(input: {
+  readonly provider: LegacyServerPasswordProvider;
+  readonly key: "serverPassword";
+}): string {
+  return `legacy-provider-config-${input.provider}-${input.key}`;
+}
+
 function defaultTextGenerationModel(provider: ProviderKind): string {
   return provider === "pi" ? "openai/gpt-5.5" : DEFAULT_MODEL_BY_PROVIDER[provider];
 }
@@ -284,6 +298,39 @@ function preserveRedactedProviderInstanceEnvironment(
   };
 }
 
+function preserveRedactedLegacyServerPasswords(
+  current: ServerSettings,
+  patch: ServerSettingsPatch,
+): ServerSettingsPatch {
+  if (patch.providers === undefined) {
+    return patch;
+  }
+
+  let providers: NonNullable<ServerSettingsPatch["providers"]> | undefined;
+  for (const provider of LEGACY_SERVER_PASSWORD_PROVIDERS) {
+    const nextProviderSettings = patch.providers[provider];
+    if (nextProviderSettings?.serverPasswordRedacted !== true) {
+      continue;
+    }
+    const currentPassword = current.providers[provider].serverPassword;
+    if (!currentPassword) {
+      continue;
+    }
+
+    const { serverPasswordRedacted: _serverPasswordRedacted, ...restoredProviderSettings } =
+      nextProviderSettings;
+    providers = {
+      ...(providers ?? patch.providers),
+      [provider]: {
+        ...restoredProviderSettings,
+        serverPassword: currentPassword,
+      },
+    };
+  }
+
+  return providers ? { ...patch, providers } : patch;
+}
+
 function redactProviderInstanceConfig(config: unknown): unknown {
   if (!isRecord(config)) {
     return config;
@@ -320,6 +367,19 @@ function redactProviderEnvironmentVariable(
   };
 }
 
+function redactLegacyServerPasswordProvider<
+  T extends { readonly serverPassword: string; readonly serverPasswordRedacted?: boolean },
+>(provider: T): T {
+  if (!provider.serverPassword) {
+    return provider;
+  }
+  return {
+    ...provider,
+    serverPassword: "",
+    serverPasswordRedacted: true,
+  };
+}
+
 export function redactServerSettingsForClient(settings: ServerSettings): ServerSettings {
   const providerInstances = Object.fromEntries(
     Object.entries(settings.providerInstances).map(([instanceId, instance]) => [
@@ -337,7 +397,15 @@ export function redactServerSettingsForClient(settings: ServerSettings): ServerS
       },
     ]),
   );
-  return { ...settings, providerInstances };
+  return {
+    ...settings,
+    providers: {
+      ...settings.providers,
+      kilo: redactLegacyServerPasswordProvider(settings.providers.kilo),
+      opencode: redactLegacyServerPasswordProvider(settings.providers.opencode),
+    },
+    providerInstances,
+  };
 }
 
 function normalizeSettings(
@@ -345,7 +413,10 @@ function normalizeSettings(
   current: ServerSettings,
   patch: ServerSettingsPatch,
 ): Effect.Effect<ServerSettings, ServerSettingsError> {
-  const preservedPatch = preserveRedactedProviderInstanceEnvironment(current, patch);
+  const preservedPatch = preserveRedactedProviderInstanceEnvironment(
+    current,
+    preserveRedactedLegacyServerPasswords(current, patch),
+  );
   return Schema.decodeUnknownEffect(ServerSettings)(
     applyServerSettingsPatch(current, preservedPatch),
   ).pipe(
@@ -486,10 +557,48 @@ const makeServerSettings = Effect.gen(function* () {
       };
     });
 
+  const materializeLegacyProviderConfigSecrets = (
+    settings: ServerSettings,
+  ): Effect.Effect<ServerSettings, ServerSettingsError> =>
+    Effect.gen(function* () {
+      let providers = settings.providers;
+
+      for (const provider of LEGACY_SERVER_PASSWORD_PROVIDERS) {
+        const providerSettings = providers[provider];
+        if (providerSettings.serverPasswordRedacted !== true) {
+          continue;
+        }
+        const secret = yield* secretStore
+          .get(legacyProviderConfigSecretName({ provider, key: "serverPassword" }))
+          .pipe(
+            Effect.mapError(
+              (cause) =>
+                new ServerSettingsError({
+                  settingsPath,
+                  detail: `failed to read secret for legacy provider '${provider}' config 'serverPassword'`,
+                  cause,
+                }),
+            ),
+          );
+        const { serverPasswordRedacted: _serverPasswordRedacted, ...materialized } =
+          providerSettings;
+        providers = {
+          ...providers,
+          [provider]: {
+            ...materialized,
+            serverPassword: secret ? textDecoder.decode(secret) : "",
+          },
+        };
+      }
+
+      return providers === settings.providers ? settings : { ...settings, providers };
+    });
+
   const materializeProviderSecrets = (
     settings: ServerSettings,
   ): Effect.Effect<ServerSettings, ServerSettingsError> =>
-    materializeProviderEnvironmentSecrets(settings).pipe(
+    materializeLegacyProviderConfigSecrets(settings).pipe(
+      Effect.flatMap(materializeProviderEnvironmentSecrets),
       Effect.flatMap(materializeProviderConfigSecrets),
     );
 
@@ -519,9 +628,40 @@ const makeServerSettings = Effect.gen(function* () {
       const providerInstances: Record<string, ProviderInstanceConfig> = {
         ...next.providerInstances,
       };
+      let providers = next.providers;
       const nextEnvironmentSecretKeys = new Set<string>();
       const nextConfigSecretKeys = new Set<string>();
+      const nextLegacyConfigSecretKeys = new Set<string>();
       const obsoleteSecretNames = new Set<string>();
+
+      for (const provider of LEGACY_SERVER_PASSWORD_PROVIDERS) {
+        const secretName = legacyProviderConfigSecretName({ provider, key: "serverPassword" });
+        const value = next.providers[provider].serverPassword;
+        if (value.length === 0) {
+          obsoleteSecretNames.add(secretName);
+          continue;
+        }
+
+        nextLegacyConfigSecretKeys.add(secretName);
+        yield* secretStore.set(secretName, textEncoder.encode(value)).pipe(
+          Effect.mapError(
+            (cause) =>
+              new ServerSettingsError({
+                settingsPath,
+                detail: `failed to write secret for legacy provider '${provider}' config 'serverPassword'`,
+                cause,
+              }),
+          ),
+        );
+        providers = {
+          ...providers,
+          [provider]: {
+            ...providers[provider],
+            serverPassword: "",
+            serverPasswordRedacted: true,
+          },
+        };
+      }
 
       for (const [instanceId, instance] of Object.entries(next.providerInstances)) {
         if (instance.environment) {
@@ -601,6 +741,13 @@ const makeServerSettings = Effect.gen(function* () {
         }
       }
 
+      for (const provider of LEGACY_SERVER_PASSWORD_PROVIDERS) {
+        const secretName = legacyProviderConfigSecretName({ provider, key: "serverPassword" });
+        if (!nextLegacyConfigSecretKeys.has(secretName)) {
+          obsoleteSecretNames.add(secretName);
+        }
+      }
+
       for (const [instanceId, instance] of Object.entries(current.providerInstances)) {
         for (const variable of instance.environment ?? []) {
           if (!variable.sensitive) {
@@ -630,10 +777,14 @@ const makeServerSettings = Effect.gen(function* () {
       for (const key of nextConfigSecretKeys) {
         pendingObsoleteSecretNames.delete(key);
       }
+      for (const key of nextLegacyConfigSecretKeys) {
+        pendingObsoleteSecretNames.delete(key);
+      }
 
       return {
         settings: {
           ...next,
+          providers,
           providerInstances: providerInstances as ServerSettings["providerInstances"],
         },
         obsoleteSecretNames,
@@ -671,6 +822,15 @@ const makeServerSettings = Effect.gen(function* () {
     });
 
   const hasPlaintextProviderInstanceSecrets = (settings: ServerSettings): boolean => {
+    for (const provider of LEGACY_SERVER_PASSWORD_PROVIDERS) {
+      const providerSettings = settings.providers[provider];
+      if (
+        providerSettings.serverPassword.length > 0 &&
+        providerSettings.serverPasswordRedacted !== true
+      ) {
+        return true;
+      }
+    }
     for (const instance of Object.values(settings.providerInstances)) {
       if (
         instance.environment?.some(

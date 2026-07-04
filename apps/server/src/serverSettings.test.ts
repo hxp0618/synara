@@ -272,6 +272,19 @@ describe("ServerSettingsService", () => {
   it("redacts sensitive provider-instance environment and config values for clients", () => {
     const settings = redactServerSettingsForClient({
       ...DEFAULT_SERVER_SETTINGS,
+      providers: {
+        ...DEFAULT_SERVER_SETTINGS.providers,
+        kilo: {
+          ...DEFAULT_SERVER_SETTINGS.providers.kilo,
+          serverUrl: "http://127.0.0.1:4097",
+          serverPassword: "kilo-secret",
+        },
+        opencode: {
+          ...DEFAULT_SERVER_SETTINGS.providers.opencode,
+          serverUrl: "http://127.0.0.1:4098",
+          serverPassword: "legacy-opencode-secret",
+        },
+      },
       providerInstances: {
         grok_work: {
           driver: "grok",
@@ -295,6 +308,51 @@ describe("ServerSettingsService", () => {
     ]);
     expect(settings.providerInstances.opencode_work?.config).toEqual({
       serverUrl: "http://127.0.0.1:4096",
+      serverPassword: "",
+      serverPasswordRedacted: true,
+    });
+    expect(settings.providers.kilo).toMatchObject({
+      serverUrl: "http://127.0.0.1:4097",
+      serverPassword: "",
+      serverPasswordRedacted: true,
+    });
+    expect(settings.providers.opencode).toMatchObject({
+      serverUrl: "http://127.0.0.1:4098",
+      serverPassword: "",
+      serverPasswordRedacted: true,
+    });
+  });
+
+  it("preserves redacted legacy server passwords on writeback", async () => {
+    const settings = await Effect.runPromise(
+      Effect.gen(function* () {
+        const service = yield* ServerSettingsService;
+        yield* service.updateSettings({
+          providers: {
+            opencode: {
+              serverUrl: "http://127.0.0.1:4096",
+              serverPassword: "opencode-secret",
+            },
+          },
+        });
+        return yield* service.updateSettings({
+          providers: {
+            opencode: {
+              serverUrl: "http://127.0.0.1:4097",
+              serverPassword: "",
+              serverPasswordRedacted: true,
+            },
+          },
+        });
+      }).pipe(Effect.provide(ServerSettingsService.layerTest())),
+    );
+
+    expect(settings.providers.opencode).toMatchObject({
+      serverUrl: "http://127.0.0.1:4097",
+      serverPassword: "opencode-secret",
+    });
+    expect(redactServerSettingsForClient(settings).providers.opencode).toMatchObject({
+      serverUrl: "http://127.0.0.1:4097",
       serverPassword: "",
       serverPasswordRedacted: true,
     });
@@ -374,6 +432,47 @@ describe("ServerSettingsService", () => {
     expect(result.parsed.providerInstances.grok_work.environment).toEqual([
       { name: "XAI_API_KEY", value: "", sensitive: true, valueRedacted: true },
     ]);
+  });
+
+  it("persists legacy server passwords in the secret store", async () => {
+    const result = await runWithSettings(
+      Effect.gen(function* () {
+        const service = yield* ServerSettingsService;
+        const { settingsPath } = yield* ServerConfig;
+        const fs = yield* FileSystem.FileSystem;
+        yield* service.start;
+
+        const updated = yield* service.updateSettings({
+          providers: {
+            kilo: {
+              serverUrl: "http://127.0.0.1:4097",
+              serverPassword: "kilo-secret",
+            },
+            opencode: {
+              serverUrl: "http://127.0.0.1:4098",
+              serverPassword: "opencode-secret",
+            },
+          },
+        });
+        const raw = yield* fs.readFileString(settingsPath);
+        return { updated, parsed: JSON.parse(raw) as any, raw };
+      }),
+    );
+
+    expect(result.raw).not.toContain("kilo-secret");
+    expect(result.raw).not.toContain("opencode-secret");
+    expect(result.updated.providers.kilo.serverPassword).toBe("kilo-secret");
+    expect(result.updated.providers.opencode.serverPassword).toBe("opencode-secret");
+    expect(result.parsed.providers.kilo).toMatchObject({
+      serverUrl: "http://127.0.0.1:4097",
+      serverPassword: "",
+      serverPasswordRedacted: true,
+    });
+    expect(result.parsed.providers.opencode).toMatchObject({
+      serverUrl: "http://127.0.0.1:4098",
+      serverPassword: "",
+      serverPasswordRedacted: true,
+    });
   });
 
   it("preserves redacted provider-instance config secrets on writeback", async () => {
@@ -472,6 +571,14 @@ describe("ServerSettingsService", () => {
           settingsPath,
           JSON.stringify({
             ...DEFAULT_SERVER_SETTINGS,
+            providers: {
+              ...DEFAULT_SERVER_SETTINGS.providers,
+              kilo: {
+                ...DEFAULT_SERVER_SETTINGS.providers.kilo,
+                serverUrl: "http://127.0.0.1:4097",
+                serverPassword: "kilo-secret",
+              },
+            },
             providerInstances: {
               grok_work: {
                 driver: "grok",
@@ -504,13 +611,23 @@ describe("ServerSettingsService", () => {
       serverUrl: "http://127.0.0.1:4096",
       serverPassword: "opencode-secret",
     });
+    expect(result.settings.providers.kilo).toMatchObject({
+      serverUrl: "http://127.0.0.1:4097",
+      serverPassword: "kilo-secret",
+    });
     expect(result.raw).not.toContain("secret-token");
     expect(result.raw).not.toContain("opencode-secret");
+    expect(result.raw).not.toContain("kilo-secret");
     expect(result.parsed.providerInstances.grok_work.environment).toEqual([
       { name: "XAI_API_KEY", value: "", sensitive: true, valueRedacted: true },
     ]);
     expect(result.parsed.providerInstances.opencode_work.config).toEqual({
       serverUrl: "http://127.0.0.1:4096",
+      serverPassword: "",
+      serverPasswordRedacted: true,
+    });
+    expect(result.parsed.providers.kilo).toMatchObject({
+      serverUrl: "http://127.0.0.1:4097",
       serverPassword: "",
       serverPasswordRedacted: true,
     });
