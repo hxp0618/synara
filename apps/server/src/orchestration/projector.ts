@@ -675,8 +675,8 @@ export function projectEvent(
           const modelSelectionPatch =
             payload.modelSelection !== undefined &&
             canProjectTurnModelSelection(thread, payload.modelSelection)
-            ? { modelSelection: payload.modelSelection }
-            : {};
+              ? { modelSelection: payload.modelSelection }
+              : {};
           return {
             ...nextBase,
             threads: updateThread(nextBase.threads, payload.threadId, {

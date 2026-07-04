@@ -2852,8 +2852,6 @@ export const ProviderHealthLive = Layer.effect(
       },
     );
 
-    yield* ensureRefreshFiber;
-
     yield* serverSettings.streamChanges.pipe(
       Stream.runForEach((settings) =>
         Effect.gen(function* () {

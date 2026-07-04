@@ -462,7 +462,7 @@ it.layer(NodeServices.layer)("ProviderHealth", (it) => {
       }),
     );
 
-    it.effect("publishes ready status when a disabled provider is re-enabled", () =>
+    it.effect("projects cached ready status when a disabled provider is re-enabled", () =>
       Effect.gen(function* () {
         const fileSystem = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
@@ -478,11 +478,13 @@ it.layer(NodeServices.layer)("ProviderHealth", (it) => {
           provider: cachedReadyCodexStatus,
         });
 
+        let spawnCount = 0;
         const layer = ProviderHealthLive.pipe(
           Layer.provideMerge(ServerSettingsService.layerTest(allProvidersDisabledSettings)),
           Layer.provideMerge(ServerConfig.layerTest(process.cwd(), baseDir)),
           Layer.provideMerge(
             mockSpawnerLayer((args) => {
+              spawnCount += 1;
               const joined = args.join(" ");
               if (joined === "--version") {
                 return { stdout: "codex 1.0.0\n", stderr: "", code: 0 };
@@ -517,6 +519,7 @@ it.layer(NodeServices.layer)("ProviderHealth", (it) => {
           assert.strictEqual(currentCodex?.available, true);
           assert.strictEqual(currentCodex?.authStatus, "authenticated");
           assert.notStrictEqual(currentCodex?.message, "Provider is disabled in Synara settings.");
+          assert.strictEqual(spawnCount, 0);
         }).pipe(Effect.provide(layer));
       }),
     );
@@ -572,6 +575,36 @@ it.layer(NodeServices.layer)("ProviderHealth", (it) => {
           ),
         ),
       ),
+    );
+  });
+
+  describe("startup refresh behavior", () => {
+    it.effect("serves cached statuses without spawning provider CLIs on layer startup", () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const baseDir = yield* fileSystem.makeTempDirectoryScoped({
+          prefix: "provider-health-no-boot-refresh-",
+        });
+        let spawnCount = 0;
+        const layer = ProviderHealthLive.pipe(
+          Layer.provideMerge(ServerSettingsService.layerTest(DEFAULT_SERVER_SETTINGS)),
+          Layer.provideMerge(ServerConfig.layerTest(process.cwd(), baseDir)),
+          Layer.provideMerge(
+            mockSpawnerLayer(() => {
+              spawnCount += 1;
+              return { stdout: "", stderr: "", code: 0 };
+            }),
+          ),
+        );
+
+        const statuses = yield* Effect.gen(function* () {
+          const providerHealth = yield* ProviderHealth;
+          return yield* providerHealth.getStatuses;
+        }).pipe(Effect.provide(layer));
+
+        assert.deepStrictEqual(statuses, []);
+        assert.strictEqual(spawnCount, 0);
+      }),
     );
   });
 
