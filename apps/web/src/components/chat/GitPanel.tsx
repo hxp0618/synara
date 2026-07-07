@@ -31,7 +31,7 @@ import {
 import { PlusIcon, RefreshCwIcon, RotateCcwIcon } from "~/lib/icons";
 import { cn } from "~/lib/utils";
 import { useStore } from "~/store";
-import { createProjectSelector, createThreadSelector } from "~/storeSelectors";
+import { createProjectSelector, createThreadWorkspaceMetadataSelector } from "~/storeSelectors";
 import { Alert } from "../ui/alert";
 import { Button } from "../ui/button";
 import { IconButton } from "../ui/icon-button";
@@ -210,13 +210,13 @@ export function GitPanel(props: {
   const queryClient = useQueryClient();
   const { resolvedTheme } = useTheme();
   const theme = resolvedTheme as "light" | "dark";
-  const thread = useStore(
-    useMemo(() => createThreadSelector(props.hostThreadId), [props.hostThreadId]),
+  const workspace = useStore(
+    useMemo(() => createThreadWorkspaceMetadataSelector(props.hostThreadId), [props.hostThreadId]),
   );
   const project = useStore(
     useMemo(() => createProjectSelector(props.projectId), [props.projectId]),
   );
-  const cwd = thread?.worktreePath ?? project?.cwd ?? null;
+  const cwd = workspace.worktreePath ?? project?.cwd ?? null;
 
   const [selected, setSelected] = useState<SelectedFile | null>(null);
 
