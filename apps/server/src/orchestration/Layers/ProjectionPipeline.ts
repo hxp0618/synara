@@ -74,6 +74,12 @@ import {
 } from "../projectMetadataProjection.ts";
 import { resolveStableMessageTurnId } from "../messageTurnId.ts";
 import {
+  addQueuedTurn,
+  clearAllQueuedTurns,
+  clearQueuedTurn,
+  clearQueuedTurnsForEditResend,
+} from "../queuedTurnsProjection.ts";
+import {
   attachmentRelativePath,
   parseAttachmentIdFromRelativePath,
   parseThreadSegmentFromAttachmentId,
@@ -896,13 +902,10 @@ const makeOrchestrationProjectionPipeline = Effect.gen(function* () {
           // Append the queued turn (keyed by messageId; a re-queue of the same
           // message replaces its entry rather than duplicating it) so a
           // restart can recover it via `planQueuedTurnRecovery`. Cleared below
-          // when the matching `thread.turn-start-requested` is projected.
-          const queuedTurns = [
-            ...(existingRow.value.queuedTurns ?? []).filter(
-              (queued) => queued.messageId !== event.payload.messageId,
-            ),
-            event.payload,
-          ];
+          // when the matching `thread.turn-start-requested` is projected (or
+          // when withdrawn without dispatching — see the revert/rollback/
+          // edit-resend cases further down).
+          const queuedTurns = addQueuedTurn(existingRow.value.queuedTurns, event.payload);
           yield* projectionThreadRepository.upsert({
             ...existingRow.value,
             queuedTurns,
@@ -940,8 +943,9 @@ const makeOrchestrationProjectionPipeline = Effect.gen(function* () {
           // only where the reactor drains its in-memory queue) so restart
           // recovery is idempotent even if the process dies between dispatch
           // and drain.
-          const queuedTurns = (existingRow.value.queuedTurns ?? []).filter(
-            (queued) => queued.messageId !== event.payload.messageId,
+          const queuedTurns = clearQueuedTurn(
+            existingRow.value.queuedTurns,
+            event.payload.messageId,
           );
           yield* projectionThreadRepository.upsert({
             ...existingRow.value,
@@ -998,6 +1002,63 @@ const makeOrchestrationProjectionPipeline = Effect.gen(function* () {
             ...existingRow.value,
             archivedAt: null,
             updatedAt: event.payload.updatedAt ?? event.payload.unarchivedAt ?? event.occurredAt,
+          });
+          return;
+        }
+
+        case "thread.reverted": {
+          const existingRow = yield* projectionThreadRepository.getById({
+            threadId: event.payload.threadId,
+          });
+          if (Option.isNone(existingRow)) {
+            return;
+          }
+          // A checkpoint revert invalidates any turn queued to run against
+          // the now-reverted conversation state — drop it so restart
+          // recovery can't resurrect it.
+          yield* projectionThreadRepository.upsert({
+            ...existingRow.value,
+            queuedTurns: clearAllQueuedTurns(),
+            updatedAt: event.occurredAt,
+          });
+          return;
+        }
+
+        case "thread.conversation-rolled-back": {
+          if (event.payload.numTurns === 0) {
+            return;
+          }
+          const existingRow = yield* projectionThreadRepository.getById({
+            threadId: event.payload.threadId,
+          });
+          if (Option.isNone(existingRow)) {
+            return;
+          }
+          // A conversation rollback invalidates any turn queued against the
+          // now-rolled-back conversation state — drop it so restart
+          // recovery can't resurrect it.
+          yield* projectionThreadRepository.upsert({
+            ...existingRow.value,
+            queuedTurns: clearAllQueuedTurns(),
+            updatedAt: event.occurredAt,
+          });
+          return;
+        }
+
+        case "thread.message-edit-resend-requested": {
+          const existingRow = yield* projectionThreadRepository.getById({
+            threadId: event.payload.threadId,
+          });
+          if (Option.isNone(existingRow)) {
+            return;
+          }
+          yield* projectionThreadRepository.upsert({
+            ...existingRow.value,
+            queuedTurns: clearQueuedTurnsForEditResend(
+              existingRow.value.queuedTurns,
+              event.payload.messageId,
+            ),
+            updatedAt: event.payload.createdAt,
           });
           return;
         }

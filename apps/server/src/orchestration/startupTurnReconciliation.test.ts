@@ -406,6 +406,46 @@ describe("planQueuedTurnRecovery", () => {
     expect(planQueuedTurnRecovery({ threads, now: NOW })).toEqual([]);
   });
 
+  it("is resurrection-safe: a queued turn removed by a checkpoint revert or conversation rollback yields no commands", () => {
+    // `thread.reverted` and `thread.conversation-rolled-back` both clear
+    // every queued turn for the thread in `ProjectionPipeline.ts`/
+    // `projector.ts` (via `clearAllQueuedTurns`), mirroring
+    // `queuedTurnStartsByThread.delete(threadId)` in the live reactor. From
+    // the planner's point of view this looks identical to "never queued" —
+    // exactly like this fixture — so a reverted/rolled-back turn can never
+    // be resurrected by restart recovery.
+    const threads = [
+      makeThread("thread-1", {
+        latestTurn: { state: "completed" },
+        queuedTurns: [],
+      }),
+    ];
+
+    expect(planQueuedTurnRecovery({ threads, now: NOW })).toEqual([]);
+  });
+
+  it("is resurrection-safe: a queued turn withdrawn by a message edit-resend yields no commands", () => {
+    // `thread.message-edit-resend-requested` removes just the edited
+    // message's own queued entry (if it was itself still queued) or every
+    // queued turn for the thread (if the edited message already dispatched)
+    // via `clearQueuedTurnsForEditResend` — either way the withdrawn turn is
+    // gone from `queuedTurns` before a restart could ever observe it, so
+    // recovery emits nothing for it.
+    const threadId = ThreadId.makeUnsafe("thread-1");
+    const threads = [
+      makeThread("thread-1", {
+        latestTurn: { state: "completed" },
+        // "queued-2" was withdrawn by the edit-resend; only the unrelated
+        // "queued-1" (queued under a different message) remains.
+        queuedTurns: [makeQueuedTurn("queued-1", { threadId })],
+      }),
+    ];
+
+    const commands = planQueuedTurnRecovery({ threads, now: NOW });
+    expect(commands).toHaveLength(1);
+    expect(commands[0]?.messageId).toBe("queued-1");
+  });
+
   it("recovers multiple queued turns on the same thread in original order", () => {
     const threadId = ThreadId.makeUnsafe("thread-multi");
     const threads = [

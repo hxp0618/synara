@@ -39,6 +39,7 @@ import {
   ThreadMarkerDoneSetPayload,
   ThreadMarkerLabelSetPayload,
   ThreadMarkerRemovedPayload,
+  ThreadMessageEditResendRequestedPayload,
   ThreadProposedPlanUpsertedPayload,
   ThreadConversationRolledBackPayload,
   ThreadRuntimeModeSetPayload,
@@ -50,6 +51,12 @@ import {
   ThreadTurnQueuedPayload,
 } from "./Schemas.ts";
 import { resolveStableMessageTurnId } from "./messageTurnId.ts";
+import {
+  addQueuedTurn,
+  clearAllQueuedTurns,
+  clearQueuedTurn,
+  clearQueuedTurnsForEditResend,
+} from "./queuedTurnsProjection.ts";
 
 type ThreadPatch = Partial<Omit<OrchestrationThread, "id" | "projectId">>;
 const MAX_THREAD_MESSAGES = 2_000;
@@ -654,16 +661,13 @@ export function projectEvent(
             return nextBase;
           }
           // Keyed by messageId: a re-queue of the same message replaces its
-          // entry rather than duplicating it. Cleared below when the matching
-          // `thread.turn-start-requested` is projected, so this field always
-          // reflects only turns that never actually dispatched — that is what
-          // makes `planQueuedTurnRecovery` idempotent across a restart.
-          const queuedTurns = [
-            ...(thread.queuedTurns ?? []).filter(
-              (queued) => queued.messageId !== payload.messageId,
-            ),
-            payload,
-          ];
+          // entry rather than duplicating it. Cleared when the matching
+          // `thread.turn-start-requested` is projected (or when the turn is
+          // withdrawn without dispatching — revert/rollback/edit-resend), so
+          // this field always reflects only turns that are still genuinely
+          // queued — that is what makes `planQueuedTurnRecovery` idempotent
+          // and resurrection-safe across a restart.
+          const queuedTurns = addQueuedTurn(thread.queuedTurns, payload);
           return {
             ...nextBase,
             threads: updateThread(nextBase.threads, payload.threadId, {
@@ -695,9 +699,7 @@ export function projectEvent(
               ? { modelSelection: payload.modelSelection }
               : {};
           // A dispatched turn is no longer queued.
-          const queuedTurns = (thread.queuedTurns ?? []).filter(
-            (queued) => queued.messageId !== payload.messageId,
-          );
+          const queuedTurns = clearQueuedTurn(thread.queuedTurns, payload.messageId);
           return {
             ...nextBase,
             threads: updateThread(nextBase.threads, payload.threadId, {
@@ -995,6 +997,10 @@ export function projectEvent(
               proposedPlans,
               activities,
               latestTurn,
+              // A checkpoint revert invalidates any turn queued to run
+              // against the now-reverted conversation state — drop it so
+              // restart recovery can't resurrect it.
+              queuedTurns: clearAllQueuedTurns(),
               updatedAt: event.occurredAt,
             }),
           };
@@ -1052,7 +1058,33 @@ export function projectEvent(
                       completedAt: latestCheckpoint.completedAt,
                       assistantMessageId: latestCheckpoint.assistantMessageId,
                     },
+              // A conversation rollback invalidates any turn queued against
+              // the now-rolled-back conversation state — drop it so restart
+              // recovery can't resurrect it.
+              queuedTurns: clearAllQueuedTurns(),
               updatedAt: event.occurredAt,
+            }),
+          };
+        }),
+      );
+
+    case "thread.message-edit-resend-requested":
+      return decodeForEvent(
+        ThreadMessageEditResendRequestedPayload,
+        event.payload,
+        event.type,
+        "payload",
+      ).pipe(
+        Effect.map((payload) => {
+          const thread = nextBase.threads.find((entry) => entry.id === payload.threadId);
+          if (!thread) {
+            return nextBase;
+          }
+          return {
+            ...nextBase,
+            threads: updateThread(nextBase.threads, payload.threadId, {
+              queuedTurns: clearQueuedTurnsForEditResend(thread.queuedTurns, payload.messageId),
+              updatedAt: payload.createdAt,
             }),
           };
         }),

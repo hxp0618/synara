@@ -2767,3 +2767,560 @@ it.layer(
     }),
   );
 });
+
+it.layer(Layer.fresh(makeProjectionPipelinePrefixedTestLayer("t3-projection-queued-turns-")))(
+  "OrchestrationProjectionPipeline queuedTurns",
+  (it) => {
+    const queuedTurnsColumn = (sql: SqlClient.SqlClient, threadId: string) =>
+      sql<{ readonly queuedTurnsJson: string | null }>`
+        SELECT queued_turns_json AS "queuedTurnsJson"
+        FROM projection_threads
+        WHERE thread_id = ${threadId}
+      `.pipe(
+        Effect.map((rows) => (rows[0]?.queuedTurnsJson ? JSON.parse(rows[0].queuedTurnsJson) : [])),
+      );
+
+    it.effect(
+      "appends a queued turn on thread.turn-queued and clears it on the matching thread.turn-start-requested",
+      () =>
+        Effect.gen(function* () {
+          const eventStore = yield* OrchestrationEventStore;
+          const projectionPipeline = yield* OrchestrationProjectionPipeline;
+          const sql = yield* SqlClient.SqlClient;
+          const threadId = ThreadId.makeUnsafe("thread-queued-lifecycle");
+          const createdAt = "2026-04-01T09:00:00.000Z";
+
+          yield* eventStore.append({
+            type: "project.created",
+            eventId: EventId.makeUnsafe("evt-ql-project"),
+            aggregateKind: "project",
+            aggregateId: ProjectId.makeUnsafe("project-queued-lifecycle"),
+            occurredAt: createdAt,
+            commandId: CommandId.makeUnsafe("cmd-ql-project"),
+            causationEventId: null,
+            correlationId: CommandId.makeUnsafe("cmd-ql-project"),
+            metadata: {},
+            payload: {
+              projectId: ProjectId.makeUnsafe("project-queued-lifecycle"),
+              title: "Project",
+              workspaceRoot: "/tmp/project-queued-lifecycle",
+              defaultModelSelection: null,
+              scripts: [],
+              createdAt,
+              updatedAt: createdAt,
+            },
+          });
+
+          yield* eventStore.append({
+            type: "thread.created",
+            eventId: EventId.makeUnsafe("evt-ql-thread"),
+            aggregateKind: "thread",
+            aggregateId: threadId,
+            occurredAt: createdAt,
+            commandId: CommandId.makeUnsafe("cmd-ql-thread"),
+            causationEventId: null,
+            correlationId: CommandId.makeUnsafe("cmd-ql-thread"),
+            metadata: {},
+            payload: {
+              threadId,
+              projectId: ProjectId.makeUnsafe("project-queued-lifecycle"),
+              title: "Thread",
+              modelSelection: { provider: "codex", model: "gpt-5-codex" },
+              runtimeMode: "full-access",
+              branch: null,
+              worktreePath: null,
+              createdAt,
+              updatedAt: createdAt,
+            },
+          });
+
+          yield* eventStore.append({
+            type: "thread.turn-queued",
+            eventId: EventId.makeUnsafe("evt-ql-queued"),
+            aggregateKind: "thread",
+            aggregateId: threadId,
+            occurredAt: "2026-04-01T09:00:01.000Z",
+            commandId: CommandId.makeUnsafe("cmd-ql-queued"),
+            causationEventId: null,
+            correlationId: CommandId.makeUnsafe("cmd-ql-queued"),
+            metadata: {},
+            payload: {
+              threadId,
+              messageId: MessageId.makeUnsafe("message-1"),
+              dispatchMode: "queue",
+              runtimeMode: "full-access",
+              interactionMode: "default",
+              createdAt: "2026-04-01T09:00:01.000Z",
+            },
+          });
+
+          yield* projectionPipeline.bootstrap;
+          assert.deepEqual(
+            (yield* queuedTurnsColumn(sql, threadId)).map(
+              (queued: { messageId: string }) => queued.messageId,
+            ),
+            ["message-1"],
+          );
+
+          yield* eventStore.append({
+            type: "thread.turn-start-requested",
+            eventId: EventId.makeUnsafe("evt-ql-started"),
+            aggregateKind: "thread",
+            aggregateId: threadId,
+            occurredAt: "2026-04-01T09:00:02.000Z",
+            commandId: CommandId.makeUnsafe("cmd-ql-started"),
+            causationEventId: null,
+            correlationId: CommandId.makeUnsafe("cmd-ql-started"),
+            metadata: {},
+            payload: {
+              threadId,
+              messageId: MessageId.makeUnsafe("message-1"),
+              runtimeMode: "full-access",
+              interactionMode: "default",
+              createdAt: "2026-04-01T09:00:02.000Z",
+            },
+          });
+
+          yield* projectionPipeline.bootstrap;
+          assert.deepEqual(yield* queuedTurnsColumn(sql, threadId), []);
+        }),
+    );
+
+    it.effect("clears all queued turns on thread.reverted (checkpoint revert)", () =>
+      Effect.gen(function* () {
+        const eventStore = yield* OrchestrationEventStore;
+        const projectionPipeline = yield* OrchestrationProjectionPipeline;
+        const sql = yield* SqlClient.SqlClient;
+        const threadId = ThreadId.makeUnsafe("thread-queued-revert");
+        const createdAt = "2026-04-01T09:00:00.000Z";
+
+        yield* eventStore.append({
+          type: "project.created",
+          eventId: EventId.makeUnsafe("evt-qr-project"),
+          aggregateKind: "project",
+          aggregateId: ProjectId.makeUnsafe("project-queued-revert"),
+          occurredAt: createdAt,
+          commandId: CommandId.makeUnsafe("cmd-qr-project"),
+          causationEventId: null,
+          correlationId: CommandId.makeUnsafe("cmd-qr-project"),
+          metadata: {},
+          payload: {
+            projectId: ProjectId.makeUnsafe("project-queued-revert"),
+            title: "Project",
+            workspaceRoot: "/tmp/project-queued-revert",
+            defaultModelSelection: null,
+            scripts: [],
+            createdAt,
+            updatedAt: createdAt,
+          },
+        });
+
+        yield* eventStore.append({
+          type: "thread.created",
+          eventId: EventId.makeUnsafe("evt-qr-thread"),
+          aggregateKind: "thread",
+          aggregateId: threadId,
+          occurredAt: createdAt,
+          commandId: CommandId.makeUnsafe("cmd-qr-thread"),
+          causationEventId: null,
+          correlationId: CommandId.makeUnsafe("cmd-qr-thread"),
+          metadata: {},
+          payload: {
+            threadId,
+            projectId: ProjectId.makeUnsafe("project-queued-revert"),
+            title: "Thread",
+            modelSelection: { provider: "codex", model: "gpt-5-codex" },
+            runtimeMode: "full-access",
+            branch: null,
+            worktreePath: null,
+            createdAt,
+            updatedAt: createdAt,
+          },
+        });
+
+        yield* eventStore.append({
+          type: "thread.turn-queued",
+          eventId: EventId.makeUnsafe("evt-qr-queued"),
+          aggregateKind: "thread",
+          aggregateId: threadId,
+          occurredAt: "2026-04-01T09:00:01.000Z",
+          commandId: CommandId.makeUnsafe("cmd-qr-queued"),
+          causationEventId: null,
+          correlationId: CommandId.makeUnsafe("cmd-qr-queued"),
+          metadata: {},
+          payload: {
+            threadId,
+            messageId: MessageId.makeUnsafe("message-1"),
+            dispatchMode: "queue",
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            createdAt: "2026-04-01T09:00:01.000Z",
+          },
+        });
+
+        yield* eventStore.append({
+          type: "thread.reverted",
+          eventId: EventId.makeUnsafe("evt-qr-reverted"),
+          aggregateKind: "thread",
+          aggregateId: threadId,
+          occurredAt: "2026-04-01T09:00:02.000Z",
+          commandId: CommandId.makeUnsafe("cmd-qr-reverted"),
+          causationEventId: null,
+          correlationId: CommandId.makeUnsafe("cmd-qr-reverted"),
+          metadata: {},
+          payload: {
+            threadId,
+            turnCount: 0,
+          },
+        });
+
+        yield* projectionPipeline.bootstrap;
+        assert.deepEqual(yield* queuedTurnsColumn(sql, threadId), []);
+      }),
+    );
+
+    it.effect("clears all queued turns on thread.conversation-rolled-back", () =>
+      Effect.gen(function* () {
+        const eventStore = yield* OrchestrationEventStore;
+        const projectionPipeline = yield* OrchestrationProjectionPipeline;
+        const sql = yield* SqlClient.SqlClient;
+        const threadId = ThreadId.makeUnsafe("thread-queued-rollback");
+        const createdAt = "2026-04-01T09:00:00.000Z";
+
+        yield* eventStore.append({
+          type: "project.created",
+          eventId: EventId.makeUnsafe("evt-qb-project"),
+          aggregateKind: "project",
+          aggregateId: ProjectId.makeUnsafe("project-queued-rollback"),
+          occurredAt: createdAt,
+          commandId: CommandId.makeUnsafe("cmd-qb-project"),
+          causationEventId: null,
+          correlationId: CommandId.makeUnsafe("cmd-qb-project"),
+          metadata: {},
+          payload: {
+            projectId: ProjectId.makeUnsafe("project-queued-rollback"),
+            title: "Project",
+            workspaceRoot: "/tmp/project-queued-rollback",
+            defaultModelSelection: null,
+            scripts: [],
+            createdAt,
+            updatedAt: createdAt,
+          },
+        });
+
+        yield* eventStore.append({
+          type: "thread.created",
+          eventId: EventId.makeUnsafe("evt-qb-thread"),
+          aggregateKind: "thread",
+          aggregateId: threadId,
+          occurredAt: createdAt,
+          commandId: CommandId.makeUnsafe("cmd-qb-thread"),
+          causationEventId: null,
+          correlationId: CommandId.makeUnsafe("cmd-qb-thread"),
+          metadata: {},
+          payload: {
+            threadId,
+            projectId: ProjectId.makeUnsafe("project-queued-rollback"),
+            title: "Thread",
+            modelSelection: { provider: "codex", model: "gpt-5-codex" },
+            runtimeMode: "full-access",
+            branch: null,
+            worktreePath: null,
+            createdAt,
+            updatedAt: createdAt,
+          },
+        });
+
+        yield* eventStore.append({
+          type: "thread.turn-queued",
+          eventId: EventId.makeUnsafe("evt-qb-queued"),
+          aggregateKind: "thread",
+          aggregateId: threadId,
+          occurredAt: "2026-04-01T09:00:01.000Z",
+          commandId: CommandId.makeUnsafe("cmd-qb-queued"),
+          causationEventId: null,
+          correlationId: CommandId.makeUnsafe("cmd-qb-queued"),
+          metadata: {},
+          payload: {
+            threadId,
+            messageId: MessageId.makeUnsafe("message-1"),
+            dispatchMode: "queue",
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            createdAt: "2026-04-01T09:00:01.000Z",
+          },
+        });
+
+        // The rollback pivot ("user-msg-1") must exist in thread history for
+        // the pipeline to treat this as a real (non-no-op) rollback.
+        yield* eventStore.append({
+          type: "thread.message-sent",
+          eventId: EventId.makeUnsafe("evt-qb-message"),
+          aggregateKind: "thread",
+          aggregateId: threadId,
+          occurredAt: "2026-04-01T09:00:01.500Z",
+          commandId: CommandId.makeUnsafe("cmd-qb-message"),
+          causationEventId: null,
+          correlationId: CommandId.makeUnsafe("cmd-qb-message"),
+          metadata: {},
+          payload: {
+            threadId,
+            messageId: MessageId.makeUnsafe("user-msg-1"),
+            role: "user",
+            text: "First message",
+            turnId: null,
+            streaming: false,
+            createdAt: "2026-04-01T09:00:01.500Z",
+            updatedAt: "2026-04-01T09:00:01.500Z",
+          },
+        });
+
+        yield* eventStore.append({
+          type: "thread.conversation-rolled-back",
+          eventId: EventId.makeUnsafe("evt-qb-rollback"),
+          aggregateKind: "thread",
+          aggregateId: threadId,
+          occurredAt: "2026-04-01T09:00:02.000Z",
+          commandId: CommandId.makeUnsafe("cmd-qb-rollback"),
+          causationEventId: null,
+          correlationId: CommandId.makeUnsafe("cmd-qb-rollback"),
+          metadata: {},
+          payload: {
+            threadId,
+            messageId: MessageId.makeUnsafe("user-msg-1"),
+            numTurns: 1,
+          },
+        });
+
+        yield* projectionPipeline.bootstrap;
+        assert.deepEqual(yield* queuedTurnsColumn(sql, threadId), []);
+      }),
+    );
+
+    it.effect(
+      "clears only the edited message's queued entry on thread.message-edit-resend-requested when it is itself queued",
+      () =>
+        Effect.gen(function* () {
+          const eventStore = yield* OrchestrationEventStore;
+          const projectionPipeline = yield* OrchestrationProjectionPipeline;
+          const sql = yield* SqlClient.SqlClient;
+          const threadId = ThreadId.makeUnsafe("thread-queued-edit-resend-self");
+          const createdAt = "2026-04-01T09:00:00.000Z";
+
+          yield* eventStore.append({
+            type: "project.created",
+            eventId: EventId.makeUnsafe("evt-qe1-project"),
+            aggregateKind: "project",
+            aggregateId: ProjectId.makeUnsafe("project-queued-edit-resend-self"),
+            occurredAt: createdAt,
+            commandId: CommandId.makeUnsafe("cmd-qe1-project"),
+            causationEventId: null,
+            correlationId: CommandId.makeUnsafe("cmd-qe1-project"),
+            metadata: {},
+            payload: {
+              projectId: ProjectId.makeUnsafe("project-queued-edit-resend-self"),
+              title: "Project",
+              workspaceRoot: "/tmp/project-queued-edit-resend-self",
+              defaultModelSelection: null,
+              scripts: [],
+              createdAt,
+              updatedAt: createdAt,
+            },
+          });
+
+          yield* eventStore.append({
+            type: "thread.created",
+            eventId: EventId.makeUnsafe("evt-qe1-thread"),
+            aggregateKind: "thread",
+            aggregateId: threadId,
+            occurredAt: createdAt,
+            commandId: CommandId.makeUnsafe("cmd-qe1-thread"),
+            causationEventId: null,
+            correlationId: CommandId.makeUnsafe("cmd-qe1-thread"),
+            metadata: {},
+            payload: {
+              threadId,
+              projectId: ProjectId.makeUnsafe("project-queued-edit-resend-self"),
+              title: "Thread",
+              modelSelection: { provider: "codex", model: "gpt-5-codex" },
+              runtimeMode: "full-access",
+              branch: null,
+              worktreePath: null,
+              createdAt,
+              updatedAt: createdAt,
+            },
+          });
+
+          yield* eventStore.append({
+            type: "thread.turn-queued",
+            eventId: EventId.makeUnsafe("evt-qe1-queued-1"),
+            aggregateKind: "thread",
+            aggregateId: threadId,
+            occurredAt: "2026-04-01T09:00:01.000Z",
+            commandId: CommandId.makeUnsafe("cmd-qe1-queued-1"),
+            causationEventId: null,
+            correlationId: CommandId.makeUnsafe("cmd-qe1-queued-1"),
+            metadata: {},
+            payload: {
+              threadId,
+              messageId: MessageId.makeUnsafe("message-1"),
+              dispatchMode: "queue",
+              runtimeMode: "full-access",
+              interactionMode: "default",
+              createdAt: "2026-04-01T09:00:01.000Z",
+            },
+          });
+
+          yield* eventStore.append({
+            type: "thread.turn-queued",
+            eventId: EventId.makeUnsafe("evt-qe1-queued-2"),
+            aggregateKind: "thread",
+            aggregateId: threadId,
+            occurredAt: "2026-04-01T09:00:02.000Z",
+            commandId: CommandId.makeUnsafe("cmd-qe1-queued-2"),
+            causationEventId: null,
+            correlationId: CommandId.makeUnsafe("cmd-qe1-queued-2"),
+            metadata: {},
+            payload: {
+              threadId,
+              messageId: MessageId.makeUnsafe("message-2"),
+              dispatchMode: "queue",
+              runtimeMode: "full-access",
+              interactionMode: "default",
+              createdAt: "2026-04-01T09:00:02.000Z",
+            },
+          });
+
+          yield* eventStore.append({
+            type: "thread.message-edit-resend-requested",
+            eventId: EventId.makeUnsafe("evt-qe1-edit"),
+            aggregateKind: "thread",
+            aggregateId: threadId,
+            occurredAt: "2026-04-01T09:00:03.000Z",
+            commandId: CommandId.makeUnsafe("cmd-qe1-edit"),
+            causationEventId: null,
+            correlationId: CommandId.makeUnsafe("cmd-qe1-edit"),
+            metadata: {},
+            payload: {
+              threadId,
+              messageId: MessageId.makeUnsafe("message-2"),
+              text: "edited",
+              runtimeMode: "full-access",
+              interactionMode: "default",
+              createdAt: "2026-04-01T09:00:03.000Z",
+            },
+          });
+
+          yield* projectionPipeline.bootstrap;
+          assert.deepEqual(
+            (yield* queuedTurnsColumn(sql, threadId)).map(
+              (queued: { messageId: string }) => queued.messageId,
+            ),
+            ["message-1"],
+          );
+        }),
+    );
+
+    it.effect(
+      "clears every queued turn on thread.message-edit-resend-requested when the edited message is not itself queued",
+      () =>
+        Effect.gen(function* () {
+          const eventStore = yield* OrchestrationEventStore;
+          const projectionPipeline = yield* OrchestrationProjectionPipeline;
+          const sql = yield* SqlClient.SqlClient;
+          const threadId = ThreadId.makeUnsafe("thread-queued-edit-resend-past");
+          const createdAt = "2026-04-01T09:00:00.000Z";
+
+          yield* eventStore.append({
+            type: "project.created",
+            eventId: EventId.makeUnsafe("evt-qe2-project"),
+            aggregateKind: "project",
+            aggregateId: ProjectId.makeUnsafe("project-queued-edit-resend-past"),
+            occurredAt: createdAt,
+            commandId: CommandId.makeUnsafe("cmd-qe2-project"),
+            causationEventId: null,
+            correlationId: CommandId.makeUnsafe("cmd-qe2-project"),
+            metadata: {},
+            payload: {
+              projectId: ProjectId.makeUnsafe("project-queued-edit-resend-past"),
+              title: "Project",
+              workspaceRoot: "/tmp/project-queued-edit-resend-past",
+              defaultModelSelection: null,
+              scripts: [],
+              createdAt,
+              updatedAt: createdAt,
+            },
+          });
+
+          yield* eventStore.append({
+            type: "thread.created",
+            eventId: EventId.makeUnsafe("evt-qe2-thread"),
+            aggregateKind: "thread",
+            aggregateId: threadId,
+            occurredAt: createdAt,
+            commandId: CommandId.makeUnsafe("cmd-qe2-thread"),
+            causationEventId: null,
+            correlationId: CommandId.makeUnsafe("cmd-qe2-thread"),
+            metadata: {},
+            payload: {
+              threadId,
+              projectId: ProjectId.makeUnsafe("project-queued-edit-resend-past"),
+              title: "Thread",
+              modelSelection: { provider: "codex", model: "gpt-5-codex" },
+              runtimeMode: "full-access",
+              branch: null,
+              worktreePath: null,
+              createdAt,
+              updatedAt: createdAt,
+            },
+          });
+
+          yield* eventStore.append({
+            type: "thread.turn-queued",
+            eventId: EventId.makeUnsafe("evt-qe2-queued"),
+            aggregateKind: "thread",
+            aggregateId: threadId,
+            occurredAt: "2026-04-01T09:00:01.000Z",
+            commandId: CommandId.makeUnsafe("cmd-qe2-queued"),
+            causationEventId: null,
+            correlationId: CommandId.makeUnsafe("cmd-qe2-queued"),
+            metadata: {},
+            payload: {
+              threadId,
+              messageId: MessageId.makeUnsafe("message-2"),
+              dispatchMode: "queue",
+              runtimeMode: "full-access",
+              interactionMode: "default",
+              createdAt: "2026-04-01T09:00:01.000Z",
+            },
+          });
+
+          yield* eventStore.append({
+            type: "thread.message-edit-resend-requested",
+            eventId: EventId.makeUnsafe("evt-qe2-edit"),
+            aggregateKind: "thread",
+            aggregateId: threadId,
+            occurredAt: "2026-04-01T09:00:02.000Z",
+            commandId: CommandId.makeUnsafe("cmd-qe2-edit"),
+            causationEventId: null,
+            correlationId: CommandId.makeUnsafe("cmd-qe2-edit"),
+            metadata: {},
+            payload: {
+              threadId,
+              // Editing a message that is NOT itself a queued turn (e.g. an
+              // already-dispatched/completed message earlier in history)
+              // invalidates anything queued to run after it.
+              messageId: MessageId.makeUnsafe("message-1"),
+              text: "edited earlier message",
+              runtimeMode: "full-access",
+              interactionMode: "default",
+              createdAt: "2026-04-01T09:00:02.000Z",
+            },
+          });
+
+          yield* projectionPipeline.bootstrap;
+          assert.deepEqual(yield* queuedTurnsColumn(sql, threadId), []);
+        }),
+    );
+  },
+);

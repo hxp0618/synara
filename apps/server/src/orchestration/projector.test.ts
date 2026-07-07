@@ -1175,4 +1175,298 @@ describe("orchestration projector", () => {
     expect(thread?.checkpoints[0]?.turnId).toBe("turn-100");
     expect(thread?.checkpoints.at(-1)?.turnId).toBe("turn-599");
   });
+
+  describe("durable queuedTurns projection", () => {
+    const createdAt = "2026-04-01T09:00:00.000Z";
+
+    function threadCreatedEvent() {
+      return makeEvent({
+        sequence: 1,
+        type: "thread.created",
+        aggregateKind: "thread",
+        aggregateId: "thread-1",
+        occurredAt: createdAt,
+        commandId: "cmd-create",
+        payload: {
+          threadId: "thread-1",
+          projectId: "project-1",
+          title: "demo",
+          modelSelection: { provider: "codex", model: "gpt-5-codex" },
+          runtimeMode: "full-access",
+          branch: null,
+          worktreePath: null,
+          createdAt,
+          updatedAt: createdAt,
+        },
+      });
+    }
+
+    function turnQueuedEvent(input: { sequence: number; messageId: string; occurredAt: string }) {
+      return makeEvent({
+        sequence: input.sequence,
+        type: "thread.turn-queued",
+        aggregateKind: "thread",
+        aggregateId: "thread-1",
+        occurredAt: input.occurredAt,
+        commandId: `cmd-queue-${input.messageId}`,
+        payload: {
+          threadId: "thread-1",
+          messageId: input.messageId,
+          dispatchMode: "queue",
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          createdAt: input.occurredAt,
+        },
+      });
+    }
+
+    async function reduceEvents(events: ReadonlyArray<OrchestrationEvent>) {
+      const model = createEmptyReadModel(createdAt);
+      return events.reduce<Promise<ReturnType<typeof createEmptyReadModel>>>(
+        (statePromise, event) =>
+          statePromise.then((state) => Effect.runPromise(projectEvent(state, event))),
+        Promise.resolve(model),
+      );
+    }
+
+    it("appends a queued turn on thread.turn-queued and clears it on the matching thread.turn-start-requested", async () => {
+      const afterQueued = await reduceEvents([
+        threadCreatedEvent(),
+        turnQueuedEvent({
+          sequence: 2,
+          messageId: "message-1",
+          occurredAt: "2026-04-01T09:00:01.000Z",
+        }),
+      ]);
+      expect(afterQueued.threads[0]?.queuedTurns?.map((queued) => queued.messageId)).toEqual([
+        "message-1",
+      ]);
+
+      const afterStart = await Effect.runPromise(
+        projectEvent(
+          afterQueued,
+          makeEvent({
+            sequence: 3,
+            type: "thread.turn-start-requested",
+            aggregateKind: "thread",
+            aggregateId: "thread-1",
+            occurredAt: "2026-04-01T09:00:02.000Z",
+            commandId: "cmd-start",
+            payload: {
+              threadId: "thread-1",
+              messageId: "message-1",
+              runtimeMode: "full-access",
+              interactionMode: "default",
+              createdAt: "2026-04-01T09:00:02.000Z",
+            },
+          }),
+        ),
+      );
+      expect(afterStart.threads[0]?.queuedTurns ?? []).toEqual([]);
+    });
+
+    it("clears all queued turns on thread.reverted (checkpoint revert)", async () => {
+      const afterQueued = await reduceEvents([
+        threadCreatedEvent(),
+        turnQueuedEvent({
+          sequence: 2,
+          messageId: "message-1",
+          occurredAt: "2026-04-01T09:00:01.000Z",
+        }),
+      ]);
+      expect(afterQueued.threads[0]?.queuedTurns).toHaveLength(1);
+
+      const afterRevert = await Effect.runPromise(
+        projectEvent(
+          afterQueued,
+          makeEvent({
+            sequence: 3,
+            type: "thread.reverted",
+            aggregateKind: "thread",
+            aggregateId: "thread-1",
+            occurredAt: "2026-04-01T09:00:02.000Z",
+            commandId: "cmd-revert",
+            payload: {
+              threadId: "thread-1",
+              turnCount: 0,
+            },
+          }),
+        ),
+      );
+      expect(afterRevert.threads[0]?.queuedTurns ?? []).toEqual([]);
+    });
+
+    it("clears all queued turns on thread.conversation-rolled-back", async () => {
+      // The rollback pivot ("user-msg-1") must actually exist in thread
+      // history for the projector to treat this as a real (non-no-op)
+      // rollback; the queued turn under test ("message-1") is a separate,
+      // still-undispatched message to prove the clear is thread-wide, not
+      // scoped to the rollback's own messageId.
+      const afterQueued = await reduceEvents([
+        threadCreatedEvent(),
+        makeEvent({
+          sequence: 2,
+          type: "thread.message-sent",
+          aggregateKind: "thread",
+          aggregateId: "thread-1",
+          occurredAt: "2026-04-01T09:00:00.500Z",
+          commandId: "cmd-user-1",
+          payload: {
+            threadId: "thread-1",
+            messageId: "user-msg-1",
+            role: "user",
+            text: "First message",
+            turnId: null,
+            streaming: false,
+            createdAt: "2026-04-01T09:00:00.500Z",
+            updatedAt: "2026-04-01T09:00:00.500Z",
+          },
+        }),
+        turnQueuedEvent({
+          sequence: 3,
+          messageId: "message-1",
+          occurredAt: "2026-04-01T09:00:01.000Z",
+        }),
+      ]);
+      expect(afterQueued.threads[0]?.queuedTurns).toHaveLength(1);
+
+      const afterRollback = await Effect.runPromise(
+        projectEvent(
+          afterQueued,
+          makeEvent({
+            sequence: 4,
+            type: "thread.conversation-rolled-back",
+            aggregateKind: "thread",
+            aggregateId: "thread-1",
+            occurredAt: "2026-04-01T09:00:02.000Z",
+            commandId: "cmd-rollback",
+            payload: {
+              threadId: "thread-1",
+              messageId: "user-msg-1",
+              numTurns: 1,
+            },
+          }),
+        ),
+      );
+      expect(afterRollback.threads[0]?.queuedTurns ?? []).toEqual([]);
+    });
+
+    it("does not clear queued turns on a no-op thread.conversation-rolled-back (numTurns 0)", async () => {
+      const afterQueued = await reduceEvents([
+        threadCreatedEvent(),
+        turnQueuedEvent({
+          sequence: 2,
+          messageId: "message-1",
+          occurredAt: "2026-04-01T09:00:01.000Z",
+        }),
+      ]);
+
+      const afterRollback = await Effect.runPromise(
+        projectEvent(
+          afterQueued,
+          makeEvent({
+            sequence: 3,
+            type: "thread.conversation-rolled-back",
+            aggregateKind: "thread",
+            aggregateId: "thread-1",
+            occurredAt: "2026-04-01T09:00:02.000Z",
+            commandId: "cmd-rollback-noop",
+            payload: {
+              threadId: "thread-1",
+              messageId: "message-1",
+              numTurns: 0,
+            },
+          }),
+        ),
+      );
+      expect(afterRollback.threads[0]?.queuedTurns?.map((queued) => queued.messageId)).toEqual([
+        "message-1",
+      ]);
+    });
+
+    it("clears only the edited message's queued entry on thread.message-edit-resend-requested when it is itself queued", async () => {
+      const afterQueued = await reduceEvents([
+        threadCreatedEvent(),
+        turnQueuedEvent({
+          sequence: 2,
+          messageId: "message-1",
+          occurredAt: "2026-04-01T09:00:01.000Z",
+        }),
+        turnQueuedEvent({
+          sequence: 3,
+          messageId: "message-2",
+          occurredAt: "2026-04-01T09:00:02.000Z",
+        }),
+      ]);
+      expect(afterQueued.threads[0]?.queuedTurns?.map((queued) => queued.messageId)).toEqual([
+        "message-1",
+        "message-2",
+      ]);
+
+      const afterEdit = await Effect.runPromise(
+        projectEvent(
+          afterQueued,
+          makeEvent({
+            sequence: 4,
+            type: "thread.message-edit-resend-requested",
+            aggregateKind: "thread",
+            aggregateId: "thread-1",
+            occurredAt: "2026-04-01T09:00:03.000Z",
+            commandId: "cmd-edit-resend",
+            payload: {
+              threadId: "thread-1",
+              messageId: "message-2",
+              text: "edited",
+              runtimeMode: "full-access",
+              interactionMode: "default",
+              createdAt: "2026-04-01T09:00:03.000Z",
+            },
+          }),
+        ),
+      );
+      // message-2 was itself still queued: only its entry is removed, message-1
+      // (an unrelated queued turn) survives untouched.
+      expect(afterEdit.threads[0]?.queuedTurns?.map((queued) => queued.messageId)).toEqual([
+        "message-1",
+      ]);
+    });
+
+    it("clears every queued turn on thread.message-edit-resend-requested when the edited message is not itself queued", async () => {
+      const afterQueued = await reduceEvents([
+        threadCreatedEvent(),
+        turnQueuedEvent({
+          sequence: 2,
+          messageId: "message-2",
+          occurredAt: "2026-04-01T09:00:01.000Z",
+        }),
+      ]);
+      expect(afterQueued.threads[0]?.queuedTurns).toHaveLength(1);
+
+      const afterEdit = await Effect.runPromise(
+        projectEvent(
+          afterQueued,
+          makeEvent({
+            sequence: 3,
+            type: "thread.message-edit-resend-requested",
+            aggregateKind: "thread",
+            aggregateId: "thread-1",
+            occurredAt: "2026-04-01T09:00:02.000Z",
+            commandId: "cmd-edit-resend-past",
+            payload: {
+              threadId: "thread-1",
+              // Editing a message that is NOT itself a queued turn (e.g. an
+              // already-dispatched/completed message earlier in history)
+              // invalidates anything queued to run after it.
+              messageId: "message-1",
+              text: "edited earlier message",
+              runtimeMode: "full-access",
+              interactionMode: "default",
+              createdAt: "2026-04-01T09:00:02.000Z",
+            },
+          }),
+        ),
+      );
+      expect(afterEdit.threads[0]?.queuedTurns ?? []).toEqual([]);
+    });
+  });
 });
