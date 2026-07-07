@@ -478,16 +478,18 @@ function toThreadTurnState(thread: Thread): ThreadTurnState {
   };
 }
 
+// Builds both normalized message containers in one pass without a tuple-array allocation.
 function buildMessageSlice(thread: Thread): {
   ids: MessageId[];
   byId: Record<MessageId, ChatMessage>;
 } {
-  return {
-    ids: thread.messages.map((message) => message.id),
-    byId: Object.fromEntries(
-      thread.messages.map((message) => [message.id, message] as const),
-    ) as Record<MessageId, ChatMessage>,
-  };
+  const ids: MessageId[] = [];
+  const byId: Record<MessageId, ChatMessage> = {};
+  for (const message of thread.messages) {
+    ids.push(message.id);
+    byId[message.id] = message;
+  }
+  return { ids, byId };
 }
 
 function buildActivitySlice(thread: Thread): {
