@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import {
   appendVoiceTranscriptToPrompt,
   buildComposerMenuSelectionKey,
+  createLocalDispatchSnapshot,
   createWorktreeSetupSnapshot,
   derivePromptHistoryFromMessages,
   failWorktreeSetupSnapshot,
@@ -643,48 +644,21 @@ describe("environment panel visibility", () => {
     expect(
       resolveEnvironmentPanelOpen({
         defaultOpen: true,
-        actionDismissed: false,
         userPreferenceOpen: null,
       }),
     ).toBe(true);
     expect(
       resolveEnvironmentPanelOpen({
         defaultOpen: true,
-        actionDismissed: false,
         userPreferenceOpen: false,
       }),
     ).toBe(false);
     expect(
       resolveEnvironmentPanelOpen({
         defaultOpen: false,
-        actionDismissed: false,
         userPreferenceOpen: true,
       }),
     ).toBe(true);
-  });
-
-  it("treats action dismissals as transient closes instead of stored preferences", () => {
-    expect(
-      resolveEnvironmentPanelOpen({
-        defaultOpen: true,
-        actionDismissed: true,
-        userPreferenceOpen: null,
-      }),
-    ).toBe(false);
-    expect(
-      resolveEnvironmentPanelOpen({
-        defaultOpen: true,
-        actionDismissed: false,
-        userPreferenceOpen: null,
-      }),
-    ).toBe(true);
-    expect(
-      resolveEnvironmentPanelOpen({
-        defaultOpen: false,
-        actionDismissed: true,
-        userPreferenceOpen: true,
-      }),
-    ).toBe(false);
   });
 
   it("renders the panel when the user toggles it open on empty landing", () => {
@@ -1269,6 +1243,45 @@ describe("worktree setup snapshots", () => {
       "done",
       "done",
       "active",
+    ]);
+  });
+
+  it("inserts the setup action step when a worktree setup script is present", () => {
+    expect(
+      createWorktreeSetupSnapshot("run-setup-action", { setupScriptName: "Setup" }).steps,
+    ).toEqual([
+      { id: "create-worktree", label: "Creating branch and worktree", status: "done" },
+      { id: "prepare-thread", label: "Linking thread workspace", status: "done" },
+      { id: "run-setup-action", label: "Running setup action: Setup", status: "active" },
+      { id: "start-session", label: "Starting session", status: "pending" },
+    ]);
+  });
+
+  it("keeps the setup action step done when the session starts afterward", () => {
+    expect(
+      createWorktreeSetupSnapshot("start-session", { setupScriptName: "Setup" }).steps.map(
+        (step) => step.status,
+      ),
+    ).toEqual(["done", "done", "done", "active"]);
+  });
+
+  it("preserves setup action metadata while advancing local worktree setup", () => {
+    const current = createLocalDispatchSnapshot(undefined, {
+      worktreeSetupStepId: "create-worktree",
+      setupScriptName: "Setup",
+    });
+
+    const next = resolveNextLocalDispatchSnapshot({
+      current,
+      activeThread: undefined,
+      options: { worktreeSetupStepId: "run-setup-action", setupScriptName: "Setup" },
+    });
+
+    expect(next.worktreeSetup?.steps).toEqual([
+      { id: "create-worktree", label: "Creating branch and worktree", status: "done" },
+      { id: "prepare-thread", label: "Linking thread workspace", status: "done" },
+      { id: "run-setup-action", label: "Running setup action: Setup", status: "active" },
+      { id: "start-session", label: "Starting session", status: "pending" },
     ]);
   });
 

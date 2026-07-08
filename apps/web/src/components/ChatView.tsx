@@ -116,6 +116,7 @@ import { isElectron } from "../env";
 import { stripDiffSearchParams } from "../diffRouteSearch";
 import { resolveSubagentPresentationForThread } from "../lib/subagentPresentation";
 import { ensureHomeChatProject, isHomeChatContainerProject } from "../lib/chatProjects";
+import { ensureStudioProject, isStudioContainerProject } from "../lib/studioProjects";
 import { resolveFirstSendTarget } from "../lib/chatFirstSend";
 import {
   createOrRecoverProjectFromPath,
@@ -243,7 +244,6 @@ import {
   MAX_TERMINALS_PER_GROUP,
   type ChatMessage,
   type Thread,
-  type WorktreeSetupStepId,
 } from "../types";
 import { useTheme } from "../hooks/useTheme";
 import { useThreadWorkspaceHandoff } from "../hooks/useThreadWorkspaceHandoff";
@@ -287,6 +287,8 @@ import {
   projectScriptRuntimeEnv,
   projectScriptIdFromCommand,
   setupProjectScript,
+  type ProjectScriptRunOptions,
+  type ProjectScriptRunResult,
 } from "~/projectScripts";
 import { runProjectCommandInTerminal } from "~/projectTerminalRunner";
 import { newCommandId, newMessageId, newProjectId, newThreadId } from "~/lib/utils";
@@ -506,6 +508,7 @@ import {
   LAST_INVOKED_SCRIPT_BY_PROJECT_KEY,
   LastInvokedScriptByProjectSchema,
   type LocalDispatchSnapshot,
+  type WorktreeSetupDispatchOptions,
   PullRequestDialogState,
   type QueuedSteerGate,
   resolveQueuedSteerGateTransition,
@@ -557,6 +560,87 @@ const LOCAL_PROJECT_DRAFT_CONTEXT = {
 } as const;
 const DRAFT_PROJECT_SYNC_MAX_ATTEMPTS = 6;
 const DRAFT_PROJECT_SYNC_DELAY_MS = 50;
+const SETUP_SCRIPT_TERMINAL_ACTIVITY_START_TIMEOUT_MS = 1_000;
+const SETUP_SCRIPT_TERMINAL_MAX_RUNTIME_MS = 10 * 60 * 1000;
+
+function terminalHasRunningSubprocess(threadId: ThreadId, terminalId: string): boolean {
+  const terminalState = selectThreadTerminalState(
+    useTerminalStateStore.getState().terminalStateByThreadId,
+    threadId,
+  );
+  return terminalState.runningTerminalIds.includes(terminalId);
+}
+
+function waitForSetupScriptTerminalActivity(input: {
+  threadId: ThreadId;
+  terminalId: string;
+  observeStartTimeoutMs?: number;
+  maxRuntimeMs?: number;
+}): Promise<void> {
+  if (typeof window === "undefined") {
+    return Promise.resolve();
+  }
+
+  const observeStartTimeoutMs =
+    input.observeStartTimeoutMs ?? SETUP_SCRIPT_TERMINAL_ACTIVITY_START_TIMEOUT_MS;
+  const maxRuntimeMs = input.maxRuntimeMs ?? SETUP_SCRIPT_TERMINAL_MAX_RUNTIME_MS;
+
+  return new Promise((resolve) => {
+    let resolved = false;
+    let observedRunning = terminalHasRunningSubprocess(input.threadId, input.terminalId);
+    let observeStartTimer: number | null = null;
+    let maxRuntimeTimer: number | null = null;
+
+    const unsubscribe = useTerminalStateStore.subscribe(() => {
+      checkRunningState();
+    });
+
+    const clearTimers = () => {
+      if (observeStartTimer !== null) {
+        window.clearTimeout(observeStartTimer);
+        observeStartTimer = null;
+      }
+      if (maxRuntimeTimer !== null) {
+        window.clearTimeout(maxRuntimeTimer);
+        maxRuntimeTimer = null;
+      }
+    };
+
+    const finish = () => {
+      if (resolved) return;
+      resolved = true;
+      clearTimers();
+      unsubscribe();
+      resolve();
+    };
+
+    const ensureMaxRuntimeTimer = () => {
+      if (maxRuntimeTimer !== null) return;
+      maxRuntimeTimer = window.setTimeout(finish, maxRuntimeMs);
+    };
+
+    function checkRunningState() {
+      const running = terminalHasRunningSubprocess(input.threadId, input.terminalId);
+      if (running) {
+        observedRunning = true;
+        if (observeStartTimer !== null) {
+          window.clearTimeout(observeStartTimer);
+          observeStartTimer = null;
+        }
+        ensureMaxRuntimeTimer();
+        return;
+      }
+      if (observedRunning) {
+        finish();
+      }
+    }
+
+    checkRunningState();
+    if (!observedRunning) {
+      observeStartTimer = window.setTimeout(finish, observeStartTimeoutMs);
+    }
+  });
+}
 
 function waitForDraftProjectSyncDelay(ms: number): Promise<void> {
   return new Promise((resolve) => {
@@ -1647,15 +1731,22 @@ export default function ChatView({
   const setProjectInstructions = useProjectInstructionsStore((state) => state.setInstructions);
   const homeDir = useWorkspaceStore((state) => state.homeDir);
   const chatWorkspaceRoot = useWorkspaceStore((state) => state.chatWorkspaceRoot);
+  const studioWorkspaceRoot = useWorkspaceStore((state) => state.studioWorkspaceRoot);
   const [renameDialogOpen, setRenameDialogOpen] = useState(false);
   const isHomeChatContainer = isHomeChatContainerProject(activeProject, {
     homeDir,
     chatWorkspaceRoot,
   });
+  const isStudioContainer = isStudioContainerProject(activeProject, {
+    homeDir,
+    chatWorkspaceRoot,
+    studioWorkspaceRoot,
+  });
+  const isContainerLandingProject = isHomeChatContainer || isStudioContainer;
   const activeProjectDisplayName = isHomeChatContainer
     ? activeProject?.folderName
     : activeProject?.name;
-  const isChatProject = isHomeChatContainer;
+  const isChatProject = isContainerLandingProject;
   const activeProjectScripts =
     activeProject?.kind === "project" ? activeProject.scripts : undefined;
   const threadLineageThreads = useStore(
@@ -2933,9 +3024,7 @@ export default function ChatView({
   const isCenteredEmptyLanding =
     timelineEntries.length === 0 && !activeThread?.parentThreadId && !isEditorRail;
   const isEmptyChatLanding =
-    isCenteredEmptyLanding &&
-    Boolean(homeDir) &&
-    isHomeChatContainerProject(activeProject, { homeDir, chatWorkspaceRoot });
+    isCenteredEmptyLanding && Boolean(homeDir) && isContainerLandingProject;
   const { turnDiffSummaries, inferredCheckpointTurnCountByTurnId } =
     useTurnDiffSummaries(activeThread);
   const turnDiffSummaryByAssistantMessageId = useMemo(() => {
@@ -2997,7 +3086,7 @@ export default function ChatView({
       })
     : null;
   const gitCwd = threadWorkspaceCwd;
-  const showGitActions = !isHomeChatContainer || Boolean(resolvedThreadWorktreePath);
+  const showGitActions = !isContainerLandingProject || Boolean(resolvedThreadWorktreePath);
   const gitBranchSourceCwd = activeProject
     ? resolveThreadBranchSourceCwd({
         projectCwd: activeProject.cwd,
@@ -4131,18 +4220,13 @@ export default function ChatView({
     isTerminalPrimarySurface,
     isConstrainedChatLayout: environmentUsesFloatingOverlay,
   });
+  // Every close (header toggle or panel action click) stores the cross-chat preference,
+  // so a dismissed panel stays closed when switching threads until it is toggled back on.
   const [environmentPanelPreferenceOpen, setEnvironmentPanelPreferenceOpen] = useState<
     boolean | null
   >(null);
-  const [environmentPanelActionDismissedThreadId, setEnvironmentPanelActionDismissedThreadId] =
-    useState<ThreadId | null>(null);
-  // Action clicks close the current panel, but only the header toggle owns cross-chat preference.
-  useEffect(() => {
-    setEnvironmentPanelActionDismissedThreadId(null);
-  }, [threadId]);
   const environmentPanelOpen = resolveEnvironmentPanelOpen({
     defaultOpen: environmentDefaultOpen,
-    actionDismissed: environmentPanelActionDismissedThreadId === threadId,
     userPreferenceOpen: environmentPanelPreferenceOpen,
   });
   const environmentPanelVisible = resolveEnvironmentPanelVisible({
@@ -4268,16 +4352,10 @@ export default function ChatView({
   const runProjectScript = useCallback(
     async (
       script: ProjectScript,
-      options?: {
-        cwd?: string;
-        env?: Record<string, string>;
-        worktreePath?: string | null;
-        preferNewTerminal?: boolean;
-        rememberAsLastInvoked?: boolean;
-      },
-    ) => {
+      options?: ProjectScriptRunOptions,
+    ): Promise<ProjectScriptRunResult | null> => {
       const api = readNativeApi();
-      if (!api || !activeThreadId || !activeProject || !activeThread) return;
+      if (!api || !activeThreadId || !activeProject || !activeThread) return null;
       if (options?.rememberAsLastInvoked !== false) {
         setLastInvokedScriptByProjectId((current) => {
           if (current[activeProject.id] === script.id) return current;
@@ -4325,11 +4403,18 @@ export default function ChatView({
             label: metadata.label,
           });
         }
+        return { terminalId: targetTerminalId };
       } catch (error) {
         setThreadError(
           activeThreadId,
           error instanceof Error ? error.message : `Failed to run script "${script.name}".`,
         );
+        if (options?.throwOnError) {
+          throw error instanceof Error
+            ? error
+            : new Error(`Failed to run script "${script.name}".`);
+        }
+        return null;
       }
     },
     [
@@ -5466,7 +5551,7 @@ export default function ChatView({
   });
 
   const beginLocalDispatch = useCallback(
-    (options?: { worktreeSetupStepId?: WorktreeSetupStepId }) => {
+    (options?: WorktreeSetupDispatchOptions) => {
       setLocalDispatch((current) => {
         const next = resolveNextLocalDispatchSnapshot(
           options ? { current, activeThread, options } : { current, activeThread },
@@ -7201,8 +7286,11 @@ export default function ChatView({
       createdAt: firstSendCreatedAt,
       isFirstMessage,
       isHomeChatContainer,
+      isStudioContainer,
       projects: useStore.getState().projects,
-      selectedWorkspaceRoot: isHomeChatContainer ? (resolvedThreadWorktreePath ?? null) : null,
+      selectedWorkspaceRoot: isContainerLandingProject
+        ? (resolvedThreadWorktreePath ?? null)
+        : null,
       title,
       titleSeed,
     });
@@ -7226,7 +7314,7 @@ export default function ChatView({
     let nextThreadBranch = activeThread.branch;
     let nextThreadWorktreePath = activeThread.worktreePath;
 
-    if (isFirstMessage && isHomeChatContainer && firstSendTarget.kind !== "current") {
+    if (isFirstMessage && isContainerLandingProject && firstSendTarget.kind !== "current") {
       if (firstSendTarget.kind === "create-project") {
         const projectId = newProjectId();
         const createdAt = firstSendCreatedAt.toISOString();
@@ -7309,9 +7397,16 @@ export default function ChatView({
       return false;
     }
 
+    const setupScriptForWorktree = baseBranchForWorktree
+      ? setupProjectScript(targetProjectScriptsForSend)
+      : null;
+    const worktreeSetupScriptName = setupScriptForWorktree?.name ?? null;
+
     sendInFlightRef.current = true;
     beginLocalDispatch(
-      baseBranchForWorktree ? { worktreeSetupStepId: "create-worktree" } : undefined,
+      baseBranchForWorktree
+        ? { worktreeSetupStepId: "create-worktree", setupScriptName: worktreeSetupScriptName }
+        : undefined,
     );
 
     const composerImagesSnapshot = [...composerImagesForSend];
@@ -7446,7 +7541,10 @@ export default function ChatView({
           branch: baseBranchForWorktree,
           newBranch: buildTemporaryWorktreeBranchName(),
         });
-        beginLocalDispatch({ worktreeSetupStepId: "prepare-thread" });
+        beginLocalDispatch({
+          worktreeSetupStepId: "prepare-thread",
+          setupScriptName: worktreeSetupScriptName,
+        });
         nextThreadBranch = result.worktree.branch;
         nextThreadWorktreePath = result.worktree.path;
         const nextAssociatedWorktree = deriveAssociatedWorktreeMetadata({
@@ -7533,10 +7631,7 @@ export default function ChatView({
         createdServerThreadForLocalDraft = true;
       }
 
-      let setupScript: ProjectScript | null = null;
-      if (baseBranchForWorktree) {
-        setupScript = setupProjectScript(targetProjectScriptsForSend);
-      }
+      const setupScript = setupScriptForWorktree;
       if (setupScript) {
         let shouldRunSetupScript = false;
         if (isServerThread) {
@@ -7547,14 +7642,25 @@ export default function ChatView({
           }
         }
         if (shouldRunSetupScript) {
+          beginLocalDispatch({
+            worktreeSetupStepId: "run-setup-action",
+            setupScriptName: setupScript.name,
+          });
           const setupScriptOptions: Parameters<typeof runProjectScript>[1] = {
             worktreePath: nextThreadWorktreePath,
             rememberAsLastInvoked: false,
+            throwOnError: true,
           };
           if (nextThreadWorktreePath) {
             setupScriptOptions.cwd = nextThreadWorktreePath;
           }
-          await runProjectScript(setupScript, setupScriptOptions);
+          const setupTerminal = await runProjectScript(setupScript, setupScriptOptions);
+          if (setupTerminal) {
+            await waitForSetupScriptTerminalActivity({
+              threadId: threadIdForSend,
+              terminalId: setupTerminal.terminalId,
+            });
+          }
         }
       }
 
@@ -7569,7 +7675,9 @@ export default function ChatView({
       }
 
       beginLocalDispatch(
-        baseBranchForWorktree ? { worktreeSetupStepId: "start-session" } : undefined,
+        baseBranchForWorktree
+          ? { worktreeSetupStepId: "start-session", setupScriptName: worktreeSetupScriptName }
+          : undefined,
       );
       const turnAttachments = await turnAttachmentsPromise;
       rememberCustomBinaryPathForDispatch({
@@ -8708,6 +8816,33 @@ export default function ChatView({
 
   const handleResetWorkspaceToHome = useCallback(() => {
     if (isLocalDraftThread) {
+      if (isStudioContainer) {
+        return (async () => {
+          const studioProjectId = await ensureStudioProject({
+            homeDir,
+            chatWorkspaceRoot,
+            studioWorkspaceRoot,
+          });
+          if (!studioProjectId) {
+            throw new Error("Unable to prepare Studio.");
+          }
+          const api = readNativeApi();
+          if (!api) {
+            throw new Error("App is still connecting. Try again in a moment.");
+          }
+          const hasStudioProjectInStore = useStore
+            .getState()
+            .projects.some((project) => project.id === studioProjectId);
+          if (!hasStudioProjectInStore) {
+            const { project, snapshot } = await waitForShellProjectById(api, studioProjectId);
+            if (!project || !snapshot) {
+              throw new Error(PROJECT_CREATE_SYNC_ERROR);
+            }
+            syncServerShellSnapshot(snapshot);
+          }
+          moveEmptyDraftToLocalProject(studioProjectId);
+        })();
+      }
       if (!isHomeChatContainer) {
         return (async () => {
           if (!homeDir) {
@@ -8768,10 +8903,12 @@ export default function ChatView({
     homeDir,
     isHomeChatContainer,
     isLocalDraftThread,
+    isStudioContainer,
     moveEmptyDraftToLocalProject,
     scheduleComposerFocus,
     setDraftThreadContext,
     setStoreThreadWorkspace,
+    studioWorkspaceRoot,
     syncServerShellSnapshot,
     threadId,
   ]);
@@ -9994,7 +10131,7 @@ export default function ChatView({
     onRenameThreadMarker: handleRenameThreadMarker,
     onNotesChange: handleNotesChange,
     onOpenEditorView: viewModeAction?.onClick ?? null,
-    onClose: () => setEnvironmentPanelActionDismissedThreadId(threadId),
+    onClose: () => setEnvironmentPanelPreferenceOpen(false),
   };
   // Full-width single chat: overlay plus transcript/composer inset. Floating overlay when the
   // column is already narrow — right dock open or a split pane (same as header compact mode).
@@ -10004,10 +10141,7 @@ export default function ChatView({
   const environmentHeaderState = environmentEnabled
     ? {
         open: environmentPanelVisible,
-        onOpenChange: (open: boolean) => {
-          setEnvironmentPanelActionDismissedThreadId(null);
-          setEnvironmentPanelPreferenceOpen(open);
-        },
+        onOpenChange: setEnvironmentPanelPreferenceOpen,
       }
     : null;
 
