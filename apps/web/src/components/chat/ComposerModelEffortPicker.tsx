@@ -46,7 +46,6 @@ import {
   type ProviderModelOptionsByProviderInstance,
   type ProviderModelFavorite,
   type ProviderModelPickerInstance,
-  resolveProviderInstanceLabel,
   resolveProviderModelLabel,
 } from "./ProviderModelPicker";
 import { TraitsMenuContent } from "./TraitsPicker";
@@ -127,12 +126,7 @@ export const ComposerModelEffortPicker = memo(function ComposerModelEffortPicker
     modelOptionsByProviderInstance: props.modelOptionsByProviderInstance,
     selectedProviderInstanceId: props.selectedProviderInstanceId,
   });
-  const instanceLabel = resolveProviderInstanceLabel({
-    provider: activeProvider,
-    selectedProviderInstanceId: props.selectedProviderInstanceId,
-    providerInstances: props.providerInstances,
-  });
-  const triggerModelLabel = instanceLabel ? `${instanceLabel} · ${modelLabel}` : modelLabel;
+  const triggerModelLabel = modelLabel;
 
   const traitSelection = getComposerTraitSelection(
     props.provider,

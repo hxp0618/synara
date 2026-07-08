@@ -373,7 +373,7 @@ describe("ProviderModelPicker", () => {
     }
   });
 
-  it("switches between same-provider instances and chooses the first model from the selected instance", async () => {
+  it("keeps account choices out of the model picker", async () => {
     const mounted = await mountPicker({
       provider: "codex",
       model: "gpt-5-codex",
@@ -422,13 +422,10 @@ describe("ProviderModelPicker", () => {
 
     try {
       await page.getByRole("button").click();
-      await page.getByRole("menuitemradio", { name: "Work" }).click();
-
-      expect(mounted.onProviderModelChange).toHaveBeenCalledWith(
-        "codex",
-        "gpt-5-work-codex",
-        "codex_work",
-      );
+      await vi.waitFor(() => {
+        expect(document.body.textContent ?? "").not.toContain("Work");
+        expect(document.body.textContent ?? "").toContain("GPT-5 Codex");
+      });
     } finally {
       await mounted.cleanup();
     }

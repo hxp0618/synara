@@ -724,6 +724,10 @@ function SettingsRouteView() {
   const routeSearch = useSearch({ strict: false }) as Record<string, unknown>;
   const activeSection = normalizeSettingsSection(routeSearch.section);
   const settingsTarget = typeof routeSearch.target === "string" ? routeSearch.target : null;
+  const settingsProviderTarget =
+    typeof routeSearch.provider === "string" && isProviderKind(routeSearch.provider)
+      ? routeSearch.provider
+      : null;
   const activeSectionItem = SETTINGS_NAV_ITEMS.find((item) => item.id === activeSection)!;
 
   const { isDefaultActiveTheme, resetAllThemes, resolvedTheme, theme, setTheme } = useTheme();
@@ -765,19 +769,29 @@ function SettingsRouteView() {
   const providerInstallsRef = useRef<HTMLDivElement | null>(null);
   const environmentPanelRef = useRef<HTMLDivElement | null>(null);
   const [openInstallProviders, setOpenInstallProviders] = useState<Record<ProviderKind, boolean>>({
-    codex: Boolean(settings.codexBinaryPath || settings.codexHomePath),
-    claudeAgent: Boolean(settings.claudeBinaryPath || settings.claudeHomePath),
-    cursor: Boolean(settings.cursorBinaryPath || settings.cursorApiEndpoint),
-    gemini: Boolean(settings.geminiBinaryPath),
-    grok: Boolean(settings.grokBinaryPath),
-    kilo: Boolean(settings.kiloBinaryPath || settings.kiloServerUrl || settings.kiloServerPassword),
-    opencode: Boolean(
-      settings.openCodeBinaryPath ||
-      settings.openCodeExperimentalWebSockets ||
-      settings.openCodeServerUrl ||
-      settings.openCodeServerPassword,
-    ),
-    pi: Boolean(settings.piBinaryPath || settings.piAgentDir),
+    codex:
+      settingsProviderTarget === "codex" ||
+      Boolean(settings.codexBinaryPath || settings.codexHomePath),
+    claudeAgent:
+      settingsProviderTarget === "claudeAgent" ||
+      Boolean(settings.claudeBinaryPath || settings.claudeHomePath),
+    cursor:
+      settingsProviderTarget === "cursor" ||
+      Boolean(settings.cursorBinaryPath || settings.cursorApiEndpoint),
+    gemini: settingsProviderTarget === "gemini" || Boolean(settings.geminiBinaryPath),
+    grok: settingsProviderTarget === "grok" || Boolean(settings.grokBinaryPath),
+    kilo:
+      settingsProviderTarget === "kilo" ||
+      Boolean(settings.kiloBinaryPath || settings.kiloServerUrl || settings.kiloServerPassword),
+    opencode:
+      settingsProviderTarget === "opencode" ||
+      Boolean(
+        settings.openCodeBinaryPath ||
+        settings.openCodeExperimentalWebSockets ||
+        settings.openCodeServerUrl ||
+        settings.openCodeServerPassword,
+      ),
+    pi: settingsProviderTarget === "pi" || Boolean(settings.piBinaryPath || settings.piAgentDir),
   });
   const [updatingProviders, setUpdatingProviders] = useState<ReadonlySet<string>>(() => new Set());
   const [selectedCustomModelTargetId, setSelectedCustomModelTargetId] =
@@ -900,6 +914,11 @@ function SettingsRouteView() {
   useSettingsTargetScroll(
     activeSection === "providers" && settingsTarget === SETTINGS_TARGETS.providerUpdates,
     providerUpdatesRef,
+    serverConfigQuery.data?.providers,
+  );
+  useSettingsTargetScroll(
+    activeSection === "providers" && settingsTarget === SETTINGS_TARGETS.providerInstalls,
+    providerInstallsRef,
     serverConfigQuery.data?.providers,
   );
 
@@ -3012,6 +3031,12 @@ function SettingsRouteView() {
         : provider === "claudeAgent"
           ? claudeHomePath || "~"
           : "";
+    const instanceSectionLabel =
+      provider === "codex"
+        ? "Codex accounts"
+        : provider === "claudeAgent"
+          ? "Claude accounts"
+          : "Provider profiles";
     const description =
       provider === "codex"
         ? "Add separate Codex accounts with their own home or shadow auth home."
@@ -3027,7 +3052,9 @@ function SettingsRouteView() {
       <div className="space-y-3">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="min-w-0">
-            <span className="block text-xs font-medium text-foreground">Provider instances</span>
+            <span className="block text-xs font-medium text-foreground">
+              {instanceSectionLabel}
+            </span>
             <span className="mt-1 block text-xs text-muted-foreground">{description}</span>
           </div>
           <Button
