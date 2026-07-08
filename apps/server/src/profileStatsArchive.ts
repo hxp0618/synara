@@ -176,10 +176,7 @@ function normalizeThreadEnvironmentMode(value: string | null): ThreadEnvironment
 }
 
 function threadWorkspaceCwdForCheckpointCleanup(
-  thread: Pick<
-    PurgeThreadRow,
-    "projectKind" | "workspaceRoot" | "worktreePath" | "envMode"
-  >,
+  thread: Pick<PurgeThreadRow, "projectKind" | "workspaceRoot" | "worktreePath" | "envMode">,
 ): string | null {
   const projectCwd = resolveProjectCwdForKind({
     kind: thread.projectKind,

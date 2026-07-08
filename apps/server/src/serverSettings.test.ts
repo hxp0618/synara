@@ -669,9 +669,7 @@ describe("ServerSettingsService", () => {
               grok_work: {
                 driver: "grok",
                 enabled: true,
-                environment: [
-                  { name: "XAI_API_KEY", value: "plaintext-trigger", sensitive: true },
-                ],
+                environment: [{ name: "XAI_API_KEY", value: "plaintext-trigger", sensitive: true }],
               },
               opencode_work: {
                 driver: "opencode",
@@ -788,9 +786,9 @@ describe("ServerSettingsService", () => {
     expect(result.failedExit._tag).toBe("Failure");
     expect(result.rawAfterFailedWrite).toBe(result.rawBefore);
     expect(result.settingsAfterFailedWrite.providers.opencode.serverPassword).toBe("legacy-old");
-    expect(result.settingsAfterFailedWrite.providerInstances.grok_work?.environment?.[0]?.value).toBe(
-      "environment-old",
-    );
+    expect(
+      result.settingsAfterFailedWrite.providerInstances.grok_work?.environment?.[0]?.value,
+    ).toBe("environment-old");
     expect(result.settingsAfterFailedWrite.providerInstances.opencode_work?.config).toMatchObject({
       serverPassword: "config-old",
     });

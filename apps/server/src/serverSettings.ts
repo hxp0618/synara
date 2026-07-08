@@ -546,18 +546,16 @@ const makeServerSettings = Effect.gen(function* () {
           const secretReference =
             variable.valueSecretRef ??
             providerEnvironmentSecretName({ instanceId, name: variable.name });
-          const secret = yield* secretStore
-            .get(secretReference)
-            .pipe(
-              Effect.mapError(
-                (cause) =>
-                  new ServerSettingsError({
-                    settingsPath,
-                    detail: `failed to read secret for provider instance '${instanceId}' environment variable '${variable.name}'`,
-                    cause,
-                  }),
-              ),
-            );
+          const secret = yield* secretStore.get(secretReference).pipe(
+            Effect.mapError(
+              (cause) =>
+                new ServerSettingsError({
+                  settingsPath,
+                  detail: `failed to read secret for provider instance '${instanceId}' environment variable '${variable.name}'`,
+                  cause,
+                }),
+            ),
+          );
           const {
             valueRedacted: _valueRedacted,
             valueSecretRef: _valueSecretRef,
@@ -648,18 +646,16 @@ const makeServerSettings = Effect.gen(function* () {
         const secretReference =
           providerSettings.serverPasswordSecretRef ??
           legacyProviderConfigSecretName({ provider, key: "serverPassword" });
-        const secret = yield* secretStore
-          .get(secretReference)
-          .pipe(
-            Effect.mapError(
-              (cause) =>
-                new ServerSettingsError({
-                  settingsPath,
-                  detail: `failed to read secret for legacy provider '${provider}' config 'serverPassword'`,
-                  cause,
-                }),
-            ),
-          );
+        const secret = yield* secretStore.get(secretReference).pipe(
+          Effect.mapError(
+            (cause) =>
+              new ServerSettingsError({
+                settingsPath,
+                detail: `failed to read secret for legacy provider '${provider}' config 'serverPassword'`,
+                cause,
+              }),
+          ),
+        );
         const {
           serverPasswordRedacted: _serverPasswordRedacted,
           serverPasswordSecretRef: _serverPasswordSecretRef,
@@ -865,9 +861,7 @@ const makeServerSettings = Effect.gen(function* () {
               ? currentInstance.config[key]
               : undefined;
             const secretReference =
-              currentReference &&
-              currentReference !== logicalName &&
-              currentConfigValue === value
+              currentReference && currentReference !== logicalName && currentConfigValue === value
                 ? currentReference
                 : newVersionedSecretReference();
             nextSecretReferences.set(logicalName, secretReference);

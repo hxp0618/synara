@@ -335,10 +335,9 @@ describe("ProviderCommandReactor", () => {
       >,
       ...(input?.sessionBindingMatchesLaunchOptions !== undefined
         ? {
-            sessionBindingMatchesLaunchOptions:
-              sessionBindingMatchesLaunchOptions as NonNullable<
-                ProviderServiceShape["sessionBindingMatchesLaunchOptions"]
-              >,
+            sessionBindingMatchesLaunchOptions: sessionBindingMatchesLaunchOptions as NonNullable<
+              ProviderServiceShape["sessionBindingMatchesLaunchOptions"]
+            >,
           }
         : {}),
       listSessions: () => Effect.succeed(runtimeSessions),
