@@ -2781,7 +2781,7 @@ it.layer(Layer.fresh(makeProjectionPipelinePrefixedTestLayer("t3-projection-queu
       );
 
     it.effect(
-      "appends a queued turn on thread.turn-queued and clears it on the matching thread.turn-start-requested",
+      "keeps a dispatched queued turn durable until provider runtime start",
       () =>
         Effect.gen(function* () {
           const eventStore = yield* OrchestrationEventStore;
@@ -2878,6 +2878,43 @@ it.layer(Layer.fresh(makeProjectionPipelinePrefixedTestLayer("t3-projection-queu
               runtimeMode: "full-access",
               interactionMode: "default",
               createdAt: "2026-04-01T09:00:02.000Z",
+            },
+          });
+
+          yield* projectionPipeline.bootstrap;
+          assert.deepEqual(yield* queuedTurnsColumn(sql, threadId), [
+            {
+              threadId,
+              messageId: "message-1",
+              dispatchMode: "queue",
+              runtimeMode: "full-access",
+              interactionMode: "default",
+              createdAt: "2026-04-01T09:00:01.000Z",
+              dispatchState: "dispatch-requested",
+            },
+          ]);
+
+          yield* eventStore.append({
+            type: "thread.session-set",
+            eventId: EventId.makeUnsafe("evt-ql-running"),
+            aggregateKind: "thread",
+            aggregateId: threadId,
+            occurredAt: "2026-04-01T09:00:03.000Z",
+            commandId: CommandId.makeUnsafe("cmd-ql-running"),
+            causationEventId: null,
+            correlationId: CommandId.makeUnsafe("cmd-ql-running"),
+            metadata: {},
+            payload: {
+              threadId,
+              session: {
+                threadId,
+                status: "running",
+                providerName: "codex",
+                runtimeMode: "full-access",
+                activeTurnId: TurnId.makeUnsafe("turn-1"),
+                lastError: null,
+                updatedAt: "2026-04-01T09:00:03.000Z",
+              },
             },
           });
 

@@ -54,8 +54,9 @@ import { resolveStableMessageTurnId } from "./messageTurnId.ts";
 import {
   addQueuedTurn,
   clearAllQueuedTurns,
-  clearQueuedTurn,
+  clearStartedQueuedTurn,
   clearQueuedTurnsForEditResend,
+  markQueuedTurnDispatchRequested,
 } from "./queuedTurnsProjection.ts";
 
 type ThreadPatch = Partial<Omit<OrchestrationThread, "id" | "projectId">>;
@@ -661,12 +662,10 @@ export function projectEvent(
             return nextBase;
           }
           // Keyed by messageId: a re-queue of the same message replaces its
-          // entry rather than duplicating it. Cleared when the matching
-          // `thread.turn-start-requested` is projected (or when the turn is
-          // withdrawn without dispatching — revert/rollback/edit-resend), so
-          // this field always reflects only turns that are still genuinely
-          // queued — that is what makes `planQueuedTurnRecovery` idempotent
-          // and resurrection-safe across a restart.
+          // entry rather than duplicating it. It stays durable through the
+          // dispatch request and is cleared only when provider runtime start
+          // is projected (or when explicitly withdrawn), so a crash in that
+          // gap remains recoverable.
           const queuedTurns = addQueuedTurn(thread.queuedTurns, payload);
           return {
             ...nextBase,
@@ -698,8 +697,11 @@ export function projectEvent(
               canAdoptFirstTurnProvider)
               ? { modelSelection: payload.modelSelection }
               : {};
-          // A dispatched turn is no longer queued.
-          const queuedTurns = clearQueuedTurn(thread.queuedTurns, payload.messageId);
+          // A request is recoverable until provider runtime start is projected.
+          const queuedTurns = markQueuedTurnDispatchRequested(
+            thread.queuedTurns,
+            payload.messageId,
+          );
           return {
             ...nextBase,
             threads: updateThread(nextBase.threads, payload.threadId, {
@@ -802,11 +804,16 @@ export function projectEvent(
           event.type,
           "session",
         );
+        const queuedTurns =
+          session.status === "running" && session.activeTurnId !== null
+            ? clearStartedQueuedTurn(thread.queuedTurns)
+            : thread.queuedTurns;
 
         return {
           ...nextBase,
           threads: updateThread(nextBase.threads, payload.threadId, {
             session,
+            queuedTurns,
             latestTurn:
               session.status === "running" && session.activeTurnId !== null
                 ? thread.latestTurn?.turnId === session.activeTurnId &&

@@ -1,23 +1,10 @@
+// FILE: queuedTurnsProjection.ts
+// Purpose: Keeps pure and SQL-backed queued-turn projections behaviorally identical.
+// Used by: projector.ts and Layers/ProjectionPipeline.ts.
+
 import type { OrchestrationQueuedTurn } from "@t3tools/contracts";
 
-/**
- * Pure helpers for maintaining a thread's durable `queuedTurns` list — the
- * projected record of turns queued (`thread.turn-queued`) but not yet
- * dispatched (`thread.turn-start-requested` for the same `messageId`).
- *
- * `projector.ts` (in-memory reducer) and `Layers/ProjectionPipeline.ts`
- * (SQL-materializing reducer, used live and during full-log-replay boot) are
- * two parallel reducers over the same event log. Both call these exact same
- * functions so the two projections can never drift apart.
- *
- * `startupTurnReconciliation.ts`'s `planQueuedTurnRecovery` reads this field
- * at boot to re-drive any turn that was durably queued but never dispatched
- * before the previous process exited. Its idempotency depends entirely on
- * this field accurately reflecting "still queued, never dispatched, never
- * withdrawn" — see `clearQueuedTurn`, `clearAllQueuedTurns`, and
- * `clearQueuedTurnsForEditResend` below for the ways an entry stops being
- * "still queued".
- */
+type QueuedTurnInput = Omit<OrchestrationQueuedTurn, "dispatchState">;
 
 /**
  * Appends (or replaces) a queued-turn entry, keyed by `messageId` — a
@@ -26,23 +13,44 @@ import type { OrchestrationQueuedTurn } from "@t3tools/contracts";
  */
 export function addQueuedTurn(
   existing: ReadonlyArray<OrchestrationQueuedTurn> | null | undefined,
-  payload: OrchestrationQueuedTurn,
+  payload: QueuedTurnInput,
 ): ReadonlyArray<OrchestrationQueuedTurn> {
-  return [...(existing ?? []).filter((queued) => queued.messageId !== payload.messageId), payload];
+  const remaining = (existing ?? []).filter((queued) => queued.messageId !== payload.messageId);
+  const queued = { ...payload, dispatchState: "queued" as const };
+  return payload.dispatchMode === "steer" ? [queued, ...remaining] : [...remaining, queued];
 }
 
-/**
- * Clears the queued-turn entry matching `messageId`. Called on
- * `thread.turn-start-requested`: a dispatched turn is no longer queued. This
- * is the mechanism that makes `planQueuedTurnRecovery` idempotent — once a
- * queued turn actually starts, it can never be recovered/re-dispatched again
- * after a restart.
- */
+// Marks the selected queue entry in-flight without making it unrecoverable yet.
+export function markQueuedTurnDispatchRequested(
+  existing: ReadonlyArray<OrchestrationQueuedTurn> | null | undefined,
+  messageId: string,
+): ReadonlyArray<OrchestrationQueuedTurn> {
+  return (existing ?? []).map((queued) =>
+    queued.messageId === messageId
+      ? { ...queued, dispatchState: "dispatch-requested" as const }
+      : queued,
+  );
+}
+
+// Clears an entry only after provider runtime start is durably projected.
 export function clearQueuedTurn(
   existing: ReadonlyArray<OrchestrationQueuedTurn> | null | undefined,
   messageId: string,
 ): ReadonlyArray<OrchestrationQueuedTurn> {
   return (existing ?? []).filter((queued) => queued.messageId !== messageId);
+}
+
+/**
+ * Clears the single queued turn whose provider start was requested. A running
+ * session does not carry the originating message id, so ambiguous projection
+ * state is left intact for restart recovery instead of guessing incorrectly.
+ */
+export function clearStartedQueuedTurn(
+  existing: ReadonlyArray<OrchestrationQueuedTurn> | null | undefined,
+): ReadonlyArray<OrchestrationQueuedTurn> {
+  const list = existing ?? [];
+  const requested = list.filter((queued) => queued.dispatchState === "dispatch-requested");
+  return requested.length === 1 ? clearQueuedTurn(list, requested[0]!.messageId) : list;
 }
 
 /**
@@ -74,6 +82,8 @@ export function clearQueuedTurnsForEditResend(
   messageId: string,
 ): ReadonlyArray<OrchestrationQueuedTurn> {
   const list = existing ?? [];
-  const isQueuedMessageEdit = list.some((queued) => queued.messageId === messageId);
+  const isQueuedMessageEdit = list.some(
+    (queued) => queued.messageId === messageId && queued.dispatchState !== "dispatch-requested",
+  );
   return isQueuedMessageEdit ? list.filter((queued) => queued.messageId !== messageId) : [];
 }

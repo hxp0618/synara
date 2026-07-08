@@ -78,6 +78,7 @@ import {
   clearAllQueuedTurns,
   clearQueuedTurn,
   clearQueuedTurnsForEditResend,
+  markQueuedTurnDispatchRequested,
 } from "../queuedTurnsProjection.ts";
 import {
   attachmentRelativePath,
@@ -899,12 +900,9 @@ const makeOrchestrationProjectionPipeline = Effect.gen(function* () {
           if (Option.isNone(existingRow)) {
             return;
           }
-          // Append the queued turn (keyed by messageId; a re-queue of the same
-          // message replaces its entry rather than duplicating it) so a
-          // restart can recover it via `planQueuedTurnRecovery`. Cleared below
-          // when the matching `thread.turn-start-requested` is projected (or
-          // when withdrawn without dispatching — see the revert/rollback/
-          // edit-resend cases further down).
+          // Keep the queued turn durable through dispatch request so a crash
+          // before provider runtime start can recover it. Explicit withdrawal
+          // paths clear it further down.
           const queuedTurns = addQueuedTurn(existingRow.value.queuedTurns, event.payload);
           yield* projectionThreadRepository.upsert({
             ...existingRow.value,
@@ -939,11 +937,8 @@ const makeOrchestrationProjectionPipeline = Effect.gen(function* () {
               canAdoptFirstTurnProvider)
               ? { modelSelection: event.payload.modelSelection }
               : {};
-          // A dispatched turn is no longer queued — clear it here (rather than
-          // only where the reactor drains its in-memory queue) so restart
-          // recovery is idempotent even if the process dies between dispatch
-          // and drain.
-          const queuedTurns = clearQueuedTurn(
+          // The request remains recoverable until provider runtime start is durable.
+          const queuedTurns = markQueuedTurnDispatchRequested(
             existingRow.value.queuedTurns,
             event.payload.messageId,
           );
@@ -1526,6 +1521,21 @@ const makeOrchestrationProjectionPipeline = Effect.gen(function* () {
           const pendingTurnStart = yield* projectionTurnRepository.getPendingTurnStartByThreadId({
             threadId: event.payload.threadId,
           });
+          if (Option.isSome(pendingTurnStart)) {
+            const threadRow = yield* projectionThreadRepository.getById({
+              threadId: event.payload.threadId,
+            });
+            if (Option.isSome(threadRow)) {
+              yield* projectionThreadRepository.upsert({
+                ...threadRow.value,
+                queuedTurns: clearQueuedTurn(
+                  threadRow.value.queuedTurns,
+                  pendingTurnStart.value.messageId,
+                ),
+                updatedAt: event.occurredAt,
+              });
+            }
+          }
           if (Option.isSome(existingTurn)) {
             const nextState =
               existingTurn.value.state === "completed" || existingTurn.value.state === "error"

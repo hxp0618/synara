@@ -21,6 +21,7 @@ export const makeOrchestrationReactor = Effect.gen(function* () {
 
   return {
     start,
+    rehydrateQueuedTurns: providerCommandReactor.rehydrateQueuedTurns,
   } satisfies OrchestrationReactorShape;
 });
 

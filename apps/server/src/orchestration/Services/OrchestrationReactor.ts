@@ -6,6 +6,7 @@
  *
  * @module OrchestrationReactor
  */
+import type { OrchestrationQueuedTurn } from "@t3tools/contracts";
 import { ServiceMap } from "effect";
 import type { Effect, Scope } from "effect";
 
@@ -20,6 +21,11 @@ export interface OrchestrationReactorShape {
    * finalized on shutdown.
    */
   readonly start: Effect.Effect<void, never, Scope.Scope>;
+
+  /** Restore durable queued turns after projection bootstrap. */
+  readonly rehydrateQueuedTurns: (
+    turns: ReadonlyArray<OrchestrationQueuedTurn>,
+  ) => Effect.Effect<void>;
 }
 
 /**

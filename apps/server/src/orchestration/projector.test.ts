@@ -1201,7 +1201,12 @@ describe("orchestration projector", () => {
       });
     }
 
-    function turnQueuedEvent(input: { sequence: number; messageId: string; occurredAt: string }) {
+    function turnQueuedEvent(input: {
+      sequence: number;
+      messageId: string;
+      occurredAt: string;
+      dispatchMode?: "queue" | "steer";
+    }) {
       return makeEvent({
         sequence: input.sequence,
         type: "thread.turn-queued",
@@ -1212,7 +1217,7 @@ describe("orchestration projector", () => {
         payload: {
           threadId: "thread-1",
           messageId: input.messageId,
-          dispatchMode: "queue",
+          dispatchMode: input.dispatchMode ?? "queue",
           runtimeMode: "full-access",
           interactionMode: "default",
           createdAt: input.occurredAt,
@@ -1229,7 +1234,35 @@ describe("orchestration projector", () => {
       );
     }
 
-    it("appends a queued turn on thread.turn-queued and clears it on the matching thread.turn-start-requested", async () => {
+    it("preserves FIFO queue order while placing steers at the front", async () => {
+      const state = await reduceEvents([
+        threadCreatedEvent(),
+        turnQueuedEvent({
+          sequence: 2,
+          messageId: "queued-1",
+          occurredAt: "2026-04-01T09:00:01.000Z",
+        }),
+        turnQueuedEvent({
+          sequence: 3,
+          messageId: "queued-2",
+          occurredAt: "2026-04-01T09:00:02.000Z",
+        }),
+        turnQueuedEvent({
+          sequence: 4,
+          messageId: "steer-1",
+          occurredAt: "2026-04-01T09:00:03.000Z",
+          dispatchMode: "steer",
+        }),
+      ]);
+
+      expect(state.threads[0]?.queuedTurns?.map((queued) => queued.messageId)).toEqual([
+        "steer-1",
+        "queued-1",
+        "queued-2",
+      ]);
+    });
+
+    it("keeps a dispatched queued turn durable until provider runtime start", async () => {
       const afterQueued = await reduceEvents([
         threadCreatedEvent(),
         turnQueuedEvent({
@@ -1262,7 +1295,36 @@ describe("orchestration projector", () => {
           }),
         ),
       );
-      expect(afterStart.threads[0]?.queuedTurns ?? []).toEqual([]);
+      expect(afterStart.threads[0]?.queuedTurns).toMatchObject([
+        { messageId: "message-1", dispatchState: "dispatch-requested" },
+      ]);
+
+      const afterRunning = await Effect.runPromise(
+        projectEvent(
+          afterStart,
+          makeEvent({
+            sequence: 4,
+            type: "thread.session-set",
+            aggregateKind: "thread",
+            aggregateId: "thread-1",
+            occurredAt: "2026-04-01T09:00:03.000Z",
+            commandId: "cmd-running",
+            payload: {
+              threadId: "thread-1",
+              session: {
+                threadId: "thread-1",
+                status: "running",
+                providerName: "codex",
+                runtimeMode: "full-access",
+                activeTurnId: "turn-1",
+                lastError: null,
+                updatedAt: "2026-04-01T09:00:03.000Z",
+              },
+            },
+          }),
+        ),
+      );
+      expect(afterRunning.threads[0]?.queuedTurns ?? []).toEqual([]);
     });
 
     it("clears all queued turns on thread.reverted (checkpoint revert)", async () => {
@@ -1466,6 +1528,66 @@ describe("orchestration projector", () => {
           }),
         ),
       );
+      expect(afterEdit.threads[0]?.queuedTurns ?? []).toEqual([]);
+    });
+
+    it("clears follow-ups when edit-resend targets a dispatch-requested queue entry", async () => {
+      const afterQueued = await reduceEvents([
+        threadCreatedEvent(),
+        turnQueuedEvent({
+          sequence: 2,
+          messageId: "message-1",
+          occurredAt: "2026-04-01T09:00:01.000Z",
+        }),
+        turnQueuedEvent({
+          sequence: 3,
+          messageId: "message-2",
+          occurredAt: "2026-04-01T09:00:02.000Z",
+        }),
+      ]);
+      const afterDispatchRequest = await Effect.runPromise(
+        projectEvent(
+          afterQueued,
+          makeEvent({
+            sequence: 4,
+            type: "thread.turn-start-requested",
+            aggregateKind: "thread",
+            aggregateId: "thread-1",
+            occurredAt: "2026-04-01T09:00:03.000Z",
+            commandId: "cmd-start",
+            payload: {
+              threadId: "thread-1",
+              messageId: "message-1",
+              runtimeMode: "full-access",
+              interactionMode: "default",
+              createdAt: "2026-04-01T09:00:03.000Z",
+            },
+          }),
+        ),
+      );
+
+      const afterEdit = await Effect.runPromise(
+        projectEvent(
+          afterDispatchRequest,
+          makeEvent({
+            sequence: 5,
+            type: "thread.message-edit-resend-requested",
+            aggregateKind: "thread",
+            aggregateId: "thread-1",
+            occurredAt: "2026-04-01T09:00:04.000Z",
+            commandId: "cmd-edit-dispatched",
+            payload: {
+              threadId: "thread-1",
+              messageId: "message-1",
+              text: "edited after dispatch request",
+              runtimeMode: "full-access",
+              interactionMode: "default",
+              createdAt: "2026-04-01T09:00:04.000Z",
+            },
+          }),
+        ),
+      );
+
       expect(afterEdit.threads[0]?.queuedTurns ?? []).toEqual([]);
     });
   });

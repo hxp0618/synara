@@ -19,6 +19,7 @@ describe("OrchestrationReactor", () => {
 
   it("starts provider ingestion, provider command, and checkpoint reactors", async () => {
     const started: string[] = [];
+    const rehydratedMessageIds: string[] = [];
 
     runtime = ManagedRuntime.make(
       Layer.effect(OrchestrationReactor, makeOrchestrationReactor).pipe(
@@ -36,6 +37,10 @@ describe("OrchestrationReactor", () => {
               started.push("provider-command-reactor");
             }),
             drain: Effect.void,
+            rehydrateQueuedTurns: (turns) =>
+              Effect.sync(() => {
+                rehydratedMessageIds.push(...turns.map((turn) => turn.messageId));
+              }),
           }),
         ),
         Layer.provideMerge(
@@ -58,6 +63,21 @@ describe("OrchestrationReactor", () => {
       "provider-command-reactor",
       "checkpoint-reactor",
     ]);
+
+    await Effect.runPromise(
+      reactor.rehydrateQueuedTurns([
+        {
+          threadId: "thread-1",
+          messageId: "message-1",
+          dispatchMode: "queue",
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          createdAt: "2026-04-01T09:00:00.000Z",
+          dispatchState: "queued",
+        },
+      ]),
+    );
+    expect(rehydratedMessageIds).toEqual(["message-1"]);
 
     await Effect.runPromise(Scope.close(scope, Exit.void));
   });

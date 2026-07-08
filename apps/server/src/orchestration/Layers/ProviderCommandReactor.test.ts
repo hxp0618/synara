@@ -2,7 +2,12 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import type { ModelSelection, ProviderRuntimeEvent, ProviderSession } from "@t3tools/contracts";
+import type {
+  ModelSelection,
+  OrchestrationQueuedTurn,
+  ProviderRuntimeEvent,
+  ProviderSession,
+} from "@t3tools/contracts";
 import {
   ApprovalRequestId,
   CommandId,
@@ -391,6 +396,7 @@ describe("ProviderCommandReactor", () => {
 
     return {
       engine,
+      reactor,
       startSession,
       sendTurn,
       steerTurn,
@@ -1847,6 +1853,67 @@ describe("ProviderCommandReactor", () => {
       threadId: ThreadId.makeUnsafe("thread-1"),
       input: "queue this next",
     });
+  });
+
+  it("rehydrates restart queues once and promotes one turn per terminal event", async () => {
+    const harness = await createHarness();
+    const now = new Date().toISOString();
+    const threadId = ThreadId.makeUnsafe("thread-1");
+    const messageIds = ["msg-recovered-1", "msg-recovered-2", "msg-recovered-3"];
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.messages.import",
+        commandId: CommandId.makeUnsafe("cmd-import-recovered-queue"),
+        threadId,
+        messages: messageIds.map((messageId, index) => ({
+          messageId: asMessageId(messageId),
+          role: "user" as const,
+          text: `recovered ${index + 1}`,
+          createdAt: now,
+          updatedAt: now,
+        })),
+        createdAt: now,
+      }),
+    );
+
+    const queuedTurns: ReadonlyArray<OrchestrationQueuedTurn> = messageIds.map((messageId) => ({
+      threadId,
+      messageId: asMessageId(messageId),
+      dispatchMode: "queue",
+      runtimeMode: "approval-required",
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      createdAt: now,
+      dispatchState: messageId === "msg-recovered-1" ? "dispatch-requested" : "queued",
+    }));
+
+    harness.sendTurn.mockClear();
+    await Effect.runPromise(harness.reactor.rehydrateQueuedTurns(queuedTurns));
+    await Effect.runPromise(harness.reactor.rehydrateQueuedTurns(queuedTurns));
+    await harness.drain();
+
+    expect(harness.sendTurn).toHaveBeenCalledTimes(1);
+    expect(harness.sendTurn.mock.calls[0]?.[0]).toMatchObject({ input: "recovered 1" });
+
+    for (const [index, turnId] of ["turn-recovered-1", "turn-recovered-2"].entries()) {
+      await harness.emitRuntimeEvent({
+        type: "turn.completed",
+        eventId: asEventId(`evt-${turnId}`),
+        provider: "codex",
+        threadId,
+        createdAt: new Date().toISOString(),
+        turnId: asTurnId(turnId),
+        payload: { state: "completed" },
+        providerRefs: {},
+      } as ProviderRuntimeEvent);
+      await waitFor(() => harness.sendTurn.mock.calls.length === index + 2);
+      await harness.drain();
+      expect(harness.sendTurn.mock.calls[index + 1]?.[0]).toMatchObject({
+        input: `recovered ${index + 2}`,
+      });
+    }
+
+    expect(harness.sendTurn).toHaveBeenCalledTimes(3);
   });
 
   it("promotes a queued turn immediately when the provider turn already settled", async () => {

@@ -190,6 +190,7 @@ it.layer(testLayer)("server CLI command", (it) => {
       yield* runCli(["--mode", "web"], {
         T3CODE_MODE: "desktop",
         T3CODE_NO_BROWSER: "true",
+        T3CODE_AUTH_TOKEN: "test-token",
       });
 
       assert.deepStrictEqual(findAvailablePort.mock.calls, [[3773]]);
@@ -204,6 +205,7 @@ it.layer(testLayer)("server CLI command", (it) => {
     Effect.gen(function* () {
       yield* runCli(["--no-browser"], {
         T3CODE_NO_BROWSER: "false",
+        T3CODE_AUTH_TOKEN: "test-token",
       });
 
       assert.equal(start.mock.calls.length, 1);
@@ -214,12 +216,22 @@ it.layer(testLayer)("server CLI command", (it) => {
   it.effect("uses dynamic port discovery in web mode when port is omitted", () =>
     Effect.gen(function* () {
       findAvailablePort.mockImplementation((_preferred: number) => Effect.succeed(5444));
-      yield* runCli([]);
+      yield* runCli([], { T3CODE_AUTH_TOKEN: "test-token" });
 
       assert.deepStrictEqual(findAvailablePort.mock.calls, [[3773]]);
       assert.equal(start.mock.calls.length, 1);
       assert.equal(resolvedConfig?.port, 5444);
       assert.equal(resolvedConfig?.mode, "web");
+    }),
+  );
+
+  it.effect("refuses the default all-interface web bind without an auth token", () =>
+    Effect.gen(function* () {
+      const error = yield* Effect.flip(runCli([]));
+
+      assert.equal((error as { readonly _tag?: string })._tag, "StartupError");
+      assert.equal(start.mock.calls.length, 0);
+      assert.equal(stop.mock.calls.length, 0);
     }),
   );
 

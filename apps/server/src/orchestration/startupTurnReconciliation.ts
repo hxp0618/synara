@@ -45,6 +45,7 @@ import {
 import { Effect, Option } from "effect";
 
 import { OrchestrationEngineService } from "./Services/OrchestrationEngine.ts";
+import { OrchestrationReactor } from "./Services/OrchestrationReactor.ts";
 import { ProjectionSnapshotQuery } from "./Services/ProjectionSnapshotQuery.ts";
 
 /** The `thread.session.set` variant of the internal orchestration command union. */
@@ -57,10 +58,6 @@ type ThreadActivityAppendCommand = Extract<
   { readonly type: "thread.activity.append" }
 >;
 type RestartReconciliationCommand = ThreadSessionSetCommand | ThreadActivityAppendCommand;
-type ThreadDispatchQueuedTurnCommand = Extract<
-  OrchestrationCommand,
-  { readonly type: "thread.turn.dispatch-queued" }
->;
 
 /** Minimal persisted thread shape the planner inspects (a superset is fine). */
 export interface ReconcilableThread {
@@ -72,6 +69,11 @@ export interface ReconcilableThread {
     Pick<OrchestrationThreadActivity, "createdAt" | "id" | "kind" | "payload" | "sequence">
   >;
   readonly queuedTurns?: ReadonlyArray<OrchestrationQueuedTurn> | undefined;
+}
+
+export interface QueuedTurnRecoveryBatch {
+  readonly threadId: ThreadId;
+  readonly turns: ReadonlyArray<OrchestrationQueuedTurn>;
 }
 
 /**
@@ -204,69 +206,24 @@ export function planRestartTurnReconciliation(input: {
 }
 
 /**
- * Builds the `thread.turn.dispatch-queued` command that re-drives a single
- * durably-queued turn, carrying over every field from the original
- * `thread.turn-queued` payload untouched (same messageId, model selection,
- * provider options, review target, delivery mode, dispatch mode, runtime/
- * interaction mode, source proposed plan). `createdAt` is the recovery run's
- * `now`, not the original queue time, since this is a new command.
- */
-function buildQueuedTurnRecoveryCommand(input: {
-  readonly threadId: ThreadId;
-  readonly queued: OrchestrationQueuedTurn;
-  readonly now: string;
-}): ThreadDispatchQueuedTurnCommand {
-  const { threadId, queued, now } = input;
-  const commandKey = ["restart-reconcile-queued-turn", threadId, queued.messageId, now].join(":");
-  return {
-    type: "thread.turn.dispatch-queued",
-    commandId: CommandId.makeUnsafe(commandKey),
-    threadId,
-    messageId: queued.messageId,
-    ...(queued.modelSelection !== undefined ? { modelSelection: queued.modelSelection } : {}),
-    ...(queued.providerOptions !== undefined ? { providerOptions: queued.providerOptions } : {}),
-    ...(queued.reviewTarget !== undefined ? { reviewTarget: queued.reviewTarget } : {}),
-    ...(queued.assistantDeliveryMode !== undefined
-      ? { assistantDeliveryMode: queued.assistantDeliveryMode }
-      : {}),
-    dispatchMode: queued.dispatchMode,
-    runtimeMode: queued.runtimeMode,
-    interactionMode: queued.interactionMode,
-    ...(queued.sourceProposedPlan !== undefined
-      ? { sourceProposedPlan: queued.sourceProposedPlan }
-      : {}),
-    createdAt: now,
-  };
-}
-
-/**
- * Pure planner: recovers turns that were durably queued (`thread.turn-queued`)
- * but never dispatched (`thread.turn-start-requested` for the same
- * `messageId`) before the process died — otherwise the underlying user
- * message is stuck behind a queue that no in-memory reactor will ever drain
- * again, since `ProviderCommandReactor`'s queue map is rebuilt empty on
- * restart.
+ * Pure planner: flattens durable queued turns in their canonical per-thread
+ * order so the provider reactor can rebuild its serialized in-memory queues.
  *
- * Idempotent by construction: the projection clears a thread's `queuedTurns`
- * entry the moment the matching `thread.turn-start-requested` is projected
- * (see `ProjectionPipeline.ts` / `projector.ts`), so a queued turn that
- * already dispatched is simply absent here and never re-dispatched. Order is
- * preserved per thread (oldest queued first), matching
- * `enqueueQueuedTurnStart`'s FIFO drain order.
+ * Entries survive the dispatch request and are removed only after a running
+ * provider session is projected, closing the crash window without promoting
+ * multiple turns concurrently.
  */
 export function planQueuedTurnRecovery(input: {
   readonly threads: ReadonlyArray<ReconcilableThread>;
-  readonly now: string;
-}): ReadonlyArray<ThreadDispatchQueuedTurnCommand> {
-  const commands: ThreadDispatchQueuedTurnCommand[] = [];
+}): ReadonlyArray<QueuedTurnRecoveryBatch> {
+  const batches: QueuedTurnRecoveryBatch[] = [];
   for (const thread of input.threads) {
-    for (const queued of thread.queuedTurns ?? []) {
-      commands.push(
-        buildQueuedTurnRecoveryCommand({ threadId: thread.id, queued, now: input.now }),
-      );
+    const turns = thread.queuedTurns ?? [];
+    if (turns.length > 0) {
+      batches.push({ threadId: thread.id, turns });
     }
   }
-  return commands;
+  return batches;
 }
 
 /**
@@ -352,24 +309,18 @@ export const reconcileRestartStuckTurns: Effect.Effect<
  * (`thread.turn-queued`) but never reached the front of that queue before the
  * process died would otherwise sit behind its user message forever — no
  * runtime is ever going to drain it. The projection's `queuedTurns` field
- * (cleared the instant a queued turn actually dispatches — see
- * `ProjectionPipeline.ts`) is exactly the durable record needed to recover it:
- * re-dispatching everything still present there is safe to run on every
- * restart, since anything that already dispatched is no longer present.
+ * (cleared only after provider runtime start — see `ProjectionPipeline.ts`) is
+ * the durable record needed to recover queued and in-flight dispatch requests.
  *
- * Reads the command read model (post-bootstrap projection state, already
- * carrying `queuedTurns` on every thread) and dispatches one
- * `thread.turn.dispatch-queued` command per still-queued turn, in original
- * per-thread order. Every failure mode is contained and logged: a failed
- * snapshot read or a failed individual dispatch must never block the server
- * from coming up.
+ * The provider reactor promotes at most one turn per thread; later turns stay
+ * serialized behind provider terminal events.
  */
 export const reconcileQueuedTurnsOnRestart: Effect.Effect<
   void,
   never,
-  OrchestrationEngineService | ProjectionSnapshotQuery
+  OrchestrationReactor | ProjectionSnapshotQuery
 > = Effect.gen(function* () {
-  const engine = yield* OrchestrationEngineService;
+  const orchestrationReactor = yield* OrchestrationReactor;
   const snapshotQuery = yield* ProjectionSnapshotQuery;
 
   const readModel = yield* snapshotQuery.getCommandReadModel().pipe(
@@ -383,28 +334,20 @@ export const reconcileQueuedTurnsOnRestart: Effect.Effect<
     return;
   }
 
-  const now = new Date().toISOString();
-  const commands = planQueuedTurnRecovery({ threads: readModel.threads, now });
-  if (commands.length === 0) {
+  const batches = planQueuedTurnRecovery({ threads: readModel.threads });
+  if (batches.length === 0) {
     return;
   }
+  const turns = batches.flatMap((batch) => batch.turns);
 
   yield* Effect.logInfo("recovering restart-orphaned queued turns", {
-    commandCount: commands.length,
+    turnCount: turns.length,
+    threadCount: batches.length,
   });
 
-  yield* Effect.forEach(
-    commands,
-    (command) =>
-      engine.dispatch(command).pipe(
-        Effect.catchCause((cause) =>
-          Effect.logWarning("failed to recover queued turn on restart", {
-            threadId: command.threadId,
-            messageId: command.messageId,
-            cause,
-          }),
-        ),
-      ),
-    { discard: true },
+  yield* orchestrationReactor.rehydrateQueuedTurns(turns).pipe(
+    Effect.catchCause((cause) =>
+      Effect.logWarning("failed to rehydrate queued turns on restart", { cause }),
+    ),
   );
 });

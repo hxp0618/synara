@@ -622,15 +622,13 @@ export const ThreadTurnStartRequestedPayload = Schema.Struct({
 
 export const ThreadTurnQueuedPayload = ThreadTurnStartRequestedPayload;
 
-/**
- * A still-queued turn projected from a persisted `thread.turn-queued` event.
- * Cleared from the owning thread's `queuedTurns` when the matching
- * `thread.turn-start-requested` event (same `messageId`) is projected, so the
- * field always reflects only turns that never actually dispatched. This is
- * what lets `planQueuedTurnRecovery` (startupTurnReconciliation.ts) recover
- * queued-but-unstarted turns across a restart without double-dispatching.
- */
-export const OrchestrationQueuedTurn = ThreadTurnQueuedPayload;
+/** A durable queue entry retained until provider runtime start is projected. */
+export const OrchestrationQueuedTurn = Schema.Struct({
+  ...ThreadTurnQueuedPayload.fields,
+  dispatchState: Schema.optional(Schema.Literals(["queued", "dispatch-requested"])).pipe(
+    Schema.withDecodingDefault(() => "queued" as const),
+  ),
+});
 export type OrchestrationQueuedTurn = typeof OrchestrationQueuedTurn.Type;
 
 export const OrchestrationThread = Schema.Struct({
@@ -697,10 +695,8 @@ export const OrchestrationThread = Schema.Struct({
   activities: Schema.Array(OrchestrationThreadActivity),
   checkpoints: Schema.Array(OrchestrationCheckpointSummary),
   session: Schema.NullOr(OrchestrationSession),
-  // Turns durably queued (`thread.turn-queued`) but not yet dispatched
-  // (`thread.turn-start-requested` for the same messageId). Optional (like
-  // `pinnedMessages`/`threadMarkers`/`notes` above): absent on old persisted
-  // rows/events with no queued-turn data; readers treat absence as `[]`.
+  // Turns durably queued but not yet confirmed running by the provider.
+  // Optional for compatibility with projections written before migration 052.
   queuedTurns: Schema.optional(Schema.Array(OrchestrationQueuedTurn)),
 });
 export type OrchestrationThread = typeof OrchestrationThread.Type;

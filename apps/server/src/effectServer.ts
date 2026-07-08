@@ -143,9 +143,9 @@ export const createEffectServer = Effect.fn(function* () {
   // died, so they can never complete on their own) before clients can observe
   // the stale "Working" state.
   yield* reconcileRestartStuckTurns;
-  // Recover turns that were durably queued but never dispatched before the
-  // previous process exited — the in-memory queue that would have drained
-  // them is rebuilt empty on every restart.
+  // Recover turns that were queued or only dispatch-requested before the
+  // previous process exited. The in-memory serialized queue is rebuilt empty
+  // on every restart, while the projection remains durable until runtime start.
   yield* reconcileQueuedTurnsOnRestart;
   yield* runtimeStartup.markCommandReady;
 

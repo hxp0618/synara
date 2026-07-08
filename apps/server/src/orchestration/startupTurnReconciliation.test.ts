@@ -357,7 +357,7 @@ const makeQueuedTurn = (
 
 describe("planQueuedTurnRecovery", () => {
   it("returns nothing for an empty thread set", () => {
-    expect(planQueuedTurnRecovery({ threads: [], now: NOW })).toEqual([]);
+    expect(planQueuedTurnRecovery({ threads: [] })).toEqual([]);
   });
 
   it("returns nothing when no thread has a queued turn (idle/active-only threads untouched)", () => {
@@ -366,36 +366,26 @@ describe("planQueuedTurnRecovery", () => {
       makeThread("active", { latestTurn: { state: "running" } }),
     ];
 
-    expect(planQueuedTurnRecovery({ threads, now: NOW })).toEqual([]);
+    expect(planQueuedTurnRecovery({ threads })).toEqual([]);
   });
 
-  it("emits a dispatch-queued command for one queued turn behind an active turn", () => {
+  it("returns the durable payload for one queued turn behind an active turn", () => {
+    const queued = makeQueuedTurn("queued-1", {
+      threadId: ThreadId.makeUnsafe("thread-1"),
+    });
     const threads = [
       makeThread("thread-1", {
         latestTurn: { state: "running" },
-        queuedTurns: [makeQueuedTurn("queued-1", { threadId: ThreadId.makeUnsafe("thread-1") })],
+        queuedTurns: [queued],
       }),
     ];
 
-    const commands = planQueuedTurnRecovery({ threads, now: NOW });
-    expect(commands).toHaveLength(1);
-    expect(commands[0]).toEqual({
-      type: "thread.turn.dispatch-queued",
-      commandId: `restart-reconcile-queued-turn:thread-1:queued-1:${NOW}`,
-      threadId: "thread-1",
-      messageId: "queued-1",
-      dispatchMode: "queue",
-      runtimeMode: "full-access",
-      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-      createdAt: NOW,
-    });
+    expect(planQueuedTurnRecovery({ threads })).toEqual([
+      { threadId: ThreadId.makeUnsafe("thread-1"), turns: [queued] },
+    ]);
   });
 
-  it("is idempotent: a queued turn already cleared by the projector (already dispatched) yields no commands", () => {
-    // Once `thread.turn-start-requested` is projected for a queued turn's
-    // messageId, `ProjectionPipeline.ts`/`projector.ts` remove it from
-    // `queuedTurns` — so from the planner's point of view a turn that already
-    // ran is simply absent, exactly like this fixture.
+  it("omits a queued turn already cleared after provider runtime start", () => {
     const threads = [
       makeThread("thread-1", {
         latestTurn: { state: "completed" },
@@ -403,7 +393,7 @@ describe("planQueuedTurnRecovery", () => {
       }),
     ];
 
-    expect(planQueuedTurnRecovery({ threads, now: NOW })).toEqual([]);
+    expect(planQueuedTurnRecovery({ threads })).toEqual([]);
   });
 
   it("is resurrection-safe: a queued turn removed by a checkpoint revert or conversation rollback yields no commands", () => {
@@ -421,7 +411,7 @@ describe("planQueuedTurnRecovery", () => {
       }),
     ];
 
-    expect(planQueuedTurnRecovery({ threads, now: NOW })).toEqual([]);
+    expect(planQueuedTurnRecovery({ threads })).toEqual([]);
   });
 
   it("is resurrection-safe: a queued turn withdrawn by a message edit-resend yields no commands", () => {
@@ -441,9 +431,9 @@ describe("planQueuedTurnRecovery", () => {
       }),
     ];
 
-    const commands = planQueuedTurnRecovery({ threads, now: NOW });
-    expect(commands).toHaveLength(1);
-    expect(commands[0]?.messageId).toBe("queued-1");
+    const batches = planQueuedTurnRecovery({ threads });
+    expect(batches).toHaveLength(1);
+    expect(batches[0]?.turns[0]?.messageId).toBe("queued-1");
   });
 
   it("recovers multiple queued turns on the same thread in original order", () => {
@@ -458,13 +448,13 @@ describe("planQueuedTurnRecovery", () => {
       }),
     ];
 
-    const commands = planQueuedTurnRecovery({ threads, now: NOW });
-    expect(commands.map((command) => command.messageId)).toEqual([
+    const batches = planQueuedTurnRecovery({ threads });
+    expect(batches).toHaveLength(1);
+    expect(batches[0]?.turns.map((turn) => turn.messageId)).toEqual([
       "queued-1",
       "queued-2",
       "queued-3",
     ]);
-    expect(commands.every((command) => command.type === "thread.turn.dispatch-queued")).toBe(true);
   });
 
   it("recovers queued turns across multiple threads, preserving per-thread order", () => {
@@ -483,13 +473,16 @@ describe("planQueuedTurnRecovery", () => {
       }),
     ];
 
-    const commands = planQueuedTurnRecovery({ threads, now: NOW });
-    expect(
-      commands.map((command) => ({ threadId: command.threadId, messageId: command.messageId })),
-    ).toEqual([
-      { threadId: "thread-a", messageId: "a-1" },
-      { threadId: "thread-b", messageId: "b-1" },
-      { threadId: "thread-b", messageId: "b-2" },
+    const batches = planQueuedTurnRecovery({ threads });
+    expect(batches.map((batch) => ({ threadId: batch.threadId, turns: batch.turns }))).toEqual([
+      { threadId: "thread-a", turns: [makeQueuedTurn("a-1", { threadId: threadAId })] },
+      {
+        threadId: "thread-b",
+        turns: [
+          makeQueuedTurn("b-1", { threadId: threadBId }),
+          makeQueuedTurn("b-2", { threadId: threadBId }),
+        ],
+      },
     ]);
   });
 
@@ -508,8 +501,8 @@ describe("planQueuedTurnRecovery", () => {
       }),
     ];
 
-    const commands = planQueuedTurnRecovery({ threads, now: NOW });
-    expect(commands[0]).toMatchObject({
+    const batches = planQueuedTurnRecovery({ threads });
+    expect(batches[0]?.turns[0]).toMatchObject({
       messageId: "queued-1",
       modelSelection: { provider: "codex", model: "gpt-5-codex" },
       dispatchMode: "steer",
@@ -517,16 +510,18 @@ describe("planQueuedTurnRecovery", () => {
     });
   });
 
-  it("produces deterministic command ids for identical inputs", () => {
+  it("recovers a dispatch-requested turn from the provider-start crash window", () => {
     const threadId = ThreadId.makeUnsafe("thread-1");
     const threads = [
       makeThread("thread-1", {
-        queuedTurns: [makeQueuedTurn("queued-1", { threadId })],
+        queuedTurns: [
+          makeQueuedTurn("queued-1", { threadId, dispatchState: "dispatch-requested" }),
+        ],
       }),
     ];
 
-    const first = planQueuedTurnRecovery({ threads, now: NOW });
-    const second = planQueuedTurnRecovery({ threads, now: NOW });
-    expect(first[0]?.commandId).toBe(second[0]?.commandId);
+    expect(planQueuedTurnRecovery({ threads })).toMatchObject([
+      { turns: [{ messageId: "queued-1", dispatchState: "dispatch-requested" }] },
+    ]);
   });
 });

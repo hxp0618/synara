@@ -6,6 +6,7 @@
  *
  * @module ProviderCommandReactor
  */
+import type { OrchestrationQueuedTurn } from "@t3tools/contracts";
 import { ServiceMap } from "effect";
 import type { Effect, Scope } from "effect";
 
@@ -29,6 +30,11 @@ export interface ProviderCommandReactorShape {
    * Intended for test use to replace timing-sensitive sleeps.
    */
   readonly drain: Effect.Effect<void>;
+
+  /** Restore durable queued turns into the reactor's serialized in-memory queues. */
+  readonly rehydrateQueuedTurns: (
+    turns: ReadonlyArray<OrchestrationQueuedTurn>,
+  ) => Effect.Effect<void>;
 }
 
 /**

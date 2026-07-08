@@ -5,6 +5,7 @@ import {
   type ModelSelection,
   MessageId,
   type OrchestrationEvent,
+  type OrchestrationQueuedTurn,
   PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
   type ProviderMentionReference,
   type ProviderRuntimeEvent,
@@ -300,7 +301,12 @@ const make = Effect.gen(function* () {
   // been dispatched into the engine but not yet processed by the worker. While
   // set, recovery drains and terminal-event drains must hold off so two queued
   // turns are never promoted at once.
-  const pendingQueuedDispatchThreads = new Set<string>();
+  const pendingQueuedDispatchThreads = new Map<string, string>();
+  // Rehydration may be invoked more than once during startup retries. Keep a
+  // process-local dedupe key so the same durable entry is never promoted twice.
+  const rehydratedQueuedTurnKeys = new Set<string>();
+  const queuedTurnRecoveryKey = (turn: Pick<OrchestrationQueuedTurn, "threadId" | "messageId">) =>
+    `${turn.threadId}:${turn.messageId}`;
   const sidechatContextBootstrapThreadIds = new Set<string>();
 
   const resolveThreadTextGenerationInput = Effect.fnUntraced(function* (input: {
@@ -1358,7 +1364,11 @@ const make = Effect.gen(function* () {
     // This turn start (queued promotion or direct decider dispatch) is now
     // being handled on the serialized worker, so the in-flight marker set by
     // the drain path has served its purpose.
-    pendingQueuedDispatchThreads.delete(event.payload.threadId);
+    if (
+      pendingQueuedDispatchThreads.get(event.payload.threadId) === event.payload.messageId
+    ) {
+      pendingQueuedDispatchThreads.delete(event.payload.threadId);
+    }
     const key = turnStartKeyForEvent(event);
     if (yield* hasHandledTurnStartRecently(key)) {
       return;
@@ -1532,7 +1542,7 @@ const make = Effect.gen(function* () {
       if (!nextQueuedTurn) {
         return;
       }
-      pendingQueuedDispatchThreads.add(threadId);
+      pendingQueuedDispatchThreads.set(threadId, nextQueuedTurn.messageId);
       yield* orchestrationEngine
         .dispatch({
           type: "thread.turn.dispatch-queued",
@@ -1562,12 +1572,79 @@ const make = Effect.gen(function* () {
         .pipe(
           // A failed promotion must not leave the in-flight marker behind, or
           // every future drain for this thread would be blocked forever.
-          Effect.onError(() => Effect.sync(() => pendingQueuedDispatchThreads.delete(threadId))),
+          Effect.onError(() =>
+            Effect.sync(() => {
+              pendingQueuedDispatchThreads.delete(threadId);
+              const existing = queuedTurnStartsByThread.get(threadId) ?? [];
+              if (!existing.some((queued) => queued.messageId === nextQueuedTurn.messageId)) {
+                existing.unshift(nextQueuedTurn);
+                queuedTurnStartsByThread.set(threadId, existing);
+              }
+            }),
+          ),
         );
     } finally {
       drainingQueuedTurns.delete(threadId);
     }
   });
+
+  const rehydrateQueuedTurns: ProviderCommandReactorShape["rehydrateQueuedTurns"] = (turns) =>
+    Effect.gen(function* () {
+      const threadIds = new Set<ThreadId>();
+
+      for (const turn of turns) {
+        const key = queuedTurnRecoveryKey(turn);
+        if (rehydratedQueuedTurnKeys.has(key)) {
+          continue;
+        }
+        rehydratedQueuedTurnKeys.add(key);
+        threadIds.add(turn.threadId);
+
+        const existing = queuedTurnStartsByThread.get(turn.threadId) ?? [];
+        const pendingMessageId = pendingQueuedDispatchThreads.get(turn.threadId);
+        if (
+          pendingMessageId === turn.messageId ||
+          existing.some((queued) => queued.messageId === turn.messageId)
+        ) {
+          continue;
+        }
+
+        const { dispatchState: _dispatchState, ...payload } = turn;
+        existing.push(payload);
+        queuedTurnStartsByThread.set(turn.threadId, existing);
+      }
+
+      yield* Effect.forEach(
+        threadIds,
+        (threadId) =>
+          Effect.gen(function* () {
+            if (yield* hasLiveProviderTurn(threadId)) {
+              return;
+            }
+            yield* drainQueuedTurnsForThread(threadId);
+          }).pipe(
+            Effect.catchCause((cause) =>
+              Effect.sync(() => {
+                // Keep the in-memory payloads, but allow a later startup retry
+                // to kick the drain again after a transient provider/engine error.
+                for (const turn of turns) {
+                  if (turn.threadId === threadId) {
+                    rehydratedQueuedTurnKeys.delete(queuedTurnRecoveryKey(turn));
+                  }
+                }
+              }).pipe(
+                Effect.andThen(
+                  Effect.logWarning("provider command reactor failed to rehydrate queued turn", {
+                    threadId,
+                    cause: Cause.pretty(cause),
+                  }),
+                ),
+              ),
+            ),
+          ),
+        { discard: true },
+      );
+    });
 
   const processQueueDrainEvent = Effect.fnUntraced(function* (event: ProviderQueueDrainEvent) {
     yield* drainQueuedTurnsForThread(event.threadId);
@@ -2154,6 +2231,7 @@ const make = Effect.gen(function* () {
   return {
     start,
     drain: worker.drain,
+    rehydrateQueuedTurns,
   } satisfies ProviderCommandReactorShape;
 });
 
