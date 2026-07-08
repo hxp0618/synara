@@ -418,8 +418,20 @@ describe("ProfileStatsQuery", () => {
         expect(tokenStats.providers).toEqual(["claudeAgent", "codex"]);
         // Token-based model mix mirrors the token ranking, not the turn counts.
         expect(tokenStats.models).toEqual([
-          { provider: "claudeAgent", model: "claude-sonnet-4-6", tokens: 5000, percent: 83.3 },
-          { provider: "codex", model: "gpt-5-codex", tokens: 1000, percent: 16.7 },
+          {
+            provider: "claudeAgent",
+            instanceId: "claudeAgent",
+            model: "claude-sonnet-4-6",
+            tokens: 5000,
+            percent: 83.3,
+          },
+          {
+            provider: "codex",
+            instanceId: "codex",
+            model: "gpt-5-codex",
+            tokens: 1000,
+            percent: 16.7,
+          },
         ]);
         // Turn-based provider/model mix is unchanged by the token ranking.
         expect(stats.providerModels[0]).toMatchObject({ provider: "codex", turnCount: 2 });
@@ -427,7 +439,7 @@ describe("ProfileStatsQuery", () => {
     );
   });
 
-  it("attributes provider-less custom instance selections to their session provider", async () => {
+  it("keeps same-model custom instances separate while attributing their provider", async () => {
     await runProfileStatsTest(
       Effect.gen(function* () {
         const sql = yield* SqlClient.SqlClient;
@@ -446,18 +458,31 @@ describe("ProfileStatsQuery", () => {
             updated_at,
             deleted_at
           )
-          VALUES (
-            'thread-claude-work',
-            'project-profile',
-            'Claude Work Thread',
-            '{"instanceId":"work","model":"claude-sonnet-4-6"}',
-            'full-access',
-            'default',
-            'local',
-            '2026-06-13T10:00:00.000Z',
-            '2026-06-13T10:00:00.000Z',
-            NULL
-          )
+          VALUES
+            (
+              'thread-claude-work',
+              'project-profile',
+              'Claude Work Thread',
+              '{"instanceId":"work","model":"claude-sonnet-4-6"}',
+              'full-access',
+              'default',
+              'local',
+              '2026-06-13T10:00:00.000Z',
+              '2026-06-13T10:00:00.000Z',
+              NULL
+            ),
+            (
+              'thread-claude-personal',
+              'project-profile',
+              'Claude Personal Thread',
+              '{"instanceId":"personal","model":"claude-sonnet-4-6"}',
+              'full-access',
+              'default',
+              'local',
+              '2026-06-13T11:00:00.000Z',
+              '2026-06-13T11:00:00.000Z',
+              NULL
+            )
         `;
 
         yield* sql`
@@ -468,13 +493,21 @@ describe("ProfileStatsQuery", () => {
             provider_instance_id,
             updated_at
           )
-          VALUES (
-            'thread-claude-work',
-            'ready',
-            'claudeAgent',
-            'work',
-            '2026-06-13T10:00:00.000Z'
-          )
+          VALUES
+            (
+              'thread-claude-work',
+              'ready',
+              'claudeAgent',
+              'work',
+              '2026-06-13T10:00:00.000Z'
+            ),
+            (
+              'thread-claude-personal',
+              'ready',
+              'claudeAgent',
+              'personal',
+              '2026-06-13T11:00:00.000Z'
+            )
         `;
 
         yield* sql`
@@ -489,17 +522,29 @@ describe("ProfileStatsQuery", () => {
             payload_json,
             metadata_json
           )
-          VALUES (
-            'event-claude-work',
-            'thread',
-            'thread-claude-work',
-            1,
-            'thread.turn-start-requested',
-            '2026-06-13T10:05:00.000Z',
-            'client',
-            '{"threadId":"thread-claude-work","modelSelection":{"instanceId":"work","model":"claude-sonnet-4-6"}}',
-            '{}'
-          )
+          VALUES
+            (
+              'event-claude-work',
+              'thread',
+              'thread-claude-work',
+              1,
+              'thread.turn-start-requested',
+              '2026-06-13T10:05:00.000Z',
+              'client',
+              '{"threadId":"thread-claude-work","modelSelection":{"instanceId":"work","model":"claude-sonnet-4-6"}}',
+              '{}'
+            ),
+            (
+              'event-claude-personal',
+              'thread',
+              'thread-claude-personal',
+              1,
+              'thread.turn-start-requested',
+              '2026-06-13T11:05:00.000Z',
+              'client',
+              '{"threadId":"thread-claude-personal","modelSelection":{"instanceId":"personal","model":"claude-sonnet-4-6"}}',
+              '{}'
+            )
         `;
 
         yield* sql`
@@ -514,31 +559,53 @@ describe("ProfileStatsQuery", () => {
             sequence,
             created_at
           )
-          VALUES (
-            'activity-claude-work',
-            'thread-claude-work',
-            'turn-claude-work',
-            'info',
-            'context-window.updated',
-            'tokens updated',
-            '{"totalProcessedTokens":2500}',
-            1,
-            '2026-06-13T10:06:00.000Z'
-          )
+          VALUES
+            (
+              'activity-claude-work',
+              'thread-claude-work',
+              'turn-claude-work',
+              'info',
+              'context-window.updated',
+              'tokens updated',
+              '{"totalProcessedTokens":2500}',
+              1,
+              '2026-06-13T10:06:00.000Z'
+            ),
+            (
+              'activity-claude-personal',
+              'thread-claude-personal',
+              'turn-claude-personal',
+              'info',
+              'context-window.updated',
+              'tokens updated',
+              '{"totalProcessedTokens":1500}',
+              1,
+              '2026-06-13T11:06:00.000Z'
+            )
         `;
 
         const stats = yield* statsQuery.getProfileStats({ utcOffsetMinutes: 0 });
         const tokenStats = yield* statsQuery.getProfileTokenStats({ utcOffsetMinutes: 0 });
 
         expect(stats.insights.topProvider).toBe("claudeAgent");
-        expect(stats.providerModels[0]).toMatchObject({
-          provider: "claudeAgent",
-          instanceId: "work",
-          model: "claude-sonnet-4-6",
-          turnCount: 1,
-        });
+        expect(
+          stats.providerModels.map(({ instanceId, turnCount }) => ({ instanceId, turnCount })),
+        ).toEqual([
+          { instanceId: "personal", turnCount: 1 },
+          { instanceId: "work", turnCount: 1 },
+        ]);
         expect(tokenStats.topProvider).toBe("claudeAgent");
         expect(tokenStats.providers).toEqual(["claudeAgent"]);
+        expect(
+          tokenStats.models.map(({ instanceId, tokens, percent }) => ({
+            instanceId,
+            tokens,
+            percent,
+          })),
+        ).toEqual([
+          { instanceId: "work", tokens: 2500, percent: 62.5 },
+          { instanceId: "personal", tokens: 1500, percent: 37.5 },
+        ]);
       }),
     );
   });
@@ -984,9 +1051,27 @@ describe("ProfileStatsQuery", () => {
         expect(tokenStats.lifetimeTotalTokens).toBe(11000);
         expect(tokenStats.topProvider).toBe("codex");
         expect(tokenStats.models).toEqual([
-          { provider: "codex", model: "gpt-5-codex", tokens: 6000, percent: 54.5 },
-          { provider: "claudeAgent", model: "claude-fable-5", tokens: 3000, percent: 27.3 },
-          { provider: "claudeAgent", model: "claude-opus-4-8", tokens: 2000, percent: 18.2 },
+          {
+            provider: "codex",
+            instanceId: "codex",
+            model: "gpt-5-codex",
+            tokens: 6000,
+            percent: 54.5,
+          },
+          {
+            provider: "claudeAgent",
+            instanceId: "claudeAgent",
+            model: "claude-fable-5",
+            tokens: 3000,
+            percent: 27.3,
+          },
+          {
+            provider: "claudeAgent",
+            instanceId: "claudeAgent",
+            model: "claude-opus-4-8",
+            tokens: 2000,
+            percent: 18.2,
+          },
         ]);
       }),
     );
@@ -1167,8 +1252,20 @@ describe("ProfileStatsQuery", () => {
 
         expect(tokenStats.lifetimeTotalTokens).toBe(4200);
         expect(tokenStats.models).toEqual([
-          { provider: "codex", model: "gpt-5-codex", tokens: 2500, percent: 59.5 },
-          { provider: "claudeAgent", model: "claude-haiku-4-5", tokens: 1700, percent: 40.5 },
+          {
+            provider: "codex",
+            instanceId: "codex",
+            model: "gpt-5-codex",
+            tokens: 2500,
+            percent: 59.5,
+          },
+          {
+            provider: "claudeAgent",
+            instanceId: "claudeAgent",
+            model: "claude-haiku-4-5",
+            tokens: 1700,
+            percent: 40.5,
+          },
         ]);
       }),
     );
@@ -1781,7 +1878,13 @@ describe("ProfileStatsQuery", () => {
         expect(tokenStats.lifetimeTotalTokens).toBe(1500);
         expect(tokenStats.providers).toEqual([]);
         expect(tokenStats.models).toEqual([
-          { provider: "unknown", model: "unknown", tokens: 1500, percent: 100 },
+          {
+            provider: "unknown",
+            instanceId: "unknown",
+            model: "unknown",
+            tokens: 1500,
+            percent: 100,
+          },
         ]);
       }),
     );

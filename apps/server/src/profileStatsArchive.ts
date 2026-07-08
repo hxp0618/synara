@@ -52,6 +52,7 @@ interface TokenActivityRow {
   // the activity has no attributable turn, in which case the thread's own
   // selection applies as the fallback.
   readonly provider: string | null;
+  readonly instanceId: string | null;
   readonly model: string | null;
   readonly createdAt: string | null;
 }
@@ -88,6 +89,7 @@ export interface ThreadTurnSnapshotRow {
 export interface ThreadTokenSnapshotRow {
   readonly createdAt: string;
   readonly provider: string | null;
+  readonly instanceId: string | null;
   readonly model: string | null;
   readonly tokens: number;
 }
@@ -295,15 +297,19 @@ function tokenCounterValue(value: number | bigint | null): number | null {
   return total !== null && Number.isFinite(total) ? total : null;
 }
 
-function tokenProviderModelKey(provider: string | null, model: string | null): string {
-  return `${provider ?? ""}\u0000${model ?? ""}`;
+function tokenProviderModelKey(
+  provider: string | null,
+  instanceId: string | null,
+  model: string | null,
+): string {
+  return `${provider ?? ""}\u0000${instanceId ?? ""}\u0000${model ?? ""}`;
 }
 
 function addTokenSnapshotRow(
   rows: Map<string, ThreadTokenSnapshotRow>,
   row: ThreadTokenSnapshotRow,
 ): void {
-  const key = `${row.createdAt}\u0000${tokenProviderModelKey(row.provider, row.model)}`;
+  const key = `${row.createdAt}\u0000${tokenProviderModelKey(row.provider, row.instanceId, row.model)}`;
   const existing = rows.get(key);
   if (existing) {
     rows.set(key, { ...existing, tokens: existing.tokens + row.tokens });
@@ -322,7 +328,11 @@ function addTokenSnapshotRow(
 // thread's own selection fills in rows without turn attribution).
 export function aggregateThreadTokenRows(
   rows: ReadonlyArray<TokenActivityRow>,
-  fallbackSelection?: { readonly provider: string | null; readonly model: string | null },
+  fallbackSelection?: {
+    readonly provider: string | null;
+    readonly instanceId: string | null;
+    readonly model: string | null;
+  },
 ): ThreadTokenSnapshotRow[] {
   const tokensByKey = new Map<string, ThreadTokenSnapshotRow>();
   const cumulativeProviderModels = new Set<string>();
@@ -331,8 +341,9 @@ export function aggregateThreadTokenRows(
       continue;
     }
     const provider = readString(row.provider) ?? fallbackSelection?.provider ?? null;
+    const instanceId = readString(row.instanceId) ?? fallbackSelection?.instanceId ?? provider;
     const model = readString(row.model) ?? fallbackSelection?.model ?? null;
-    cumulativeProviderModels.add(tokenProviderModelKey(provider, model));
+    cumulativeProviderModels.add(tokenProviderModelKey(provider, instanceId, model));
   }
 
   let previousCumulativeTotal: number | null = null;
@@ -350,10 +361,12 @@ export function aggregateThreadTokenRows(
       continue;
     }
     const provider = readString(row.provider) ?? fallbackSelection?.provider ?? null;
+    const instanceId = readString(row.instanceId) ?? fallbackSelection?.instanceId ?? provider;
     const model = readString(row.model) ?? fallbackSelection?.model ?? null;
     addTokenSnapshotRow(tokensByKey, {
       createdAt: row.createdAt,
       provider,
+      instanceId,
       model,
       tokens: delta,
     });
@@ -363,8 +376,9 @@ export function aggregateThreadTokenRows(
   let previousUsedProviderModelKey: string | null = null;
   for (const row of rows) {
     const provider = readString(row.provider) ?? fallbackSelection?.provider ?? null;
+    const instanceId = readString(row.instanceId) ?? fallbackSelection?.instanceId ?? provider;
     const model = readString(row.model) ?? fallbackSelection?.model ?? null;
-    const providerModelKey = tokenProviderModelKey(provider, model);
+    const providerModelKey = tokenProviderModelKey(provider, instanceId, model);
     if (cumulativeProviderModels.has(providerModelKey)) {
       continue;
     }
@@ -385,6 +399,7 @@ export function aggregateThreadTokenRows(
     addTokenSnapshotRow(tokensByKey, {
       createdAt: row.createdAt,
       provider,
+      instanceId,
       model,
       tokens: delta,
     });
@@ -592,9 +607,11 @@ const makeProfileStatsArchive = Effect.gen(function* () {
             AS totalProcessedTokens,
           CAST(json_extract(a.payload_json, '$.usedTokens') AS INTEGER) AS usedTokens,
           CASE
-            WHEN tm.provider = s.provider_instance_id THEN s.provider_name
-            ELSE tm.provider
+            WHEN tm.provider IS NOT NULL THEN tm.provider
+            WHEN tm.instance_id = s.provider_instance_id THEN s.provider_name
+            ELSE tm.instance_id
           END AS provider,
+          COALESCE(tm.instance_id, s.provider_instance_id, tm.provider) AS instanceId,
           tm.model AS model,
           a.created_at AS createdAt
         FROM projection_thread_activities a
@@ -640,6 +657,7 @@ const makeProfileStatsArchive = Effect.gen(function* () {
       const threadRoute = resolveArchivedSelectionRoute(threadSelection, sessionRoute);
       const tokenRows = aggregateThreadTokenRows(tokenActivityRows, {
         provider: threadRoute.provider,
+        instanceId: threadRoute.instanceId,
         model: threadSelection?.model ?? null,
       });
       const skillRows = aggregateProfileSkillUsageRows(skillMessageRows);
@@ -704,8 +722,22 @@ const makeProfileStatsArchive = Effect.gen(function* () {
         yield* Effect.forEach(
           tokenRows,
           (row) => sql`
-            INSERT INTO profile_stats_deleted_tokens (thread_id, created_at, provider, model, tokens)
-            VALUES (${threadId}, ${row.createdAt}, ${row.provider}, ${row.model}, ${row.tokens})
+            INSERT INTO profile_stats_deleted_tokens (
+              thread_id,
+              created_at,
+              provider,
+              provider_instance_id,
+              model,
+              tokens
+            )
+            VALUES (
+              ${threadId},
+              ${row.createdAt},
+              ${row.provider},
+              ${row.instanceId},
+              ${row.model},
+              ${row.tokens}
+            )
           `,
           { concurrency: 1, discard: true },
         );
