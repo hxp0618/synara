@@ -44,8 +44,6 @@ import {
   ThreadId,
   TurnId,
   type UserInputQuestion,
-  type ClaudeApiEffort,
-  type ClaudeCodeEffort,
   type ProviderComposerCapabilities,
   type ProviderListCommandsInput,
   type ProviderListCommandsResult,
@@ -57,6 +55,7 @@ import {
 } from "@t3tools/contracts";
 import {
   getDefaultContextWindow,
+  getEffectiveClaudeCodeEffort,
   hasEffortLevel,
   hasContextWindowOption,
   applyClaudePromptEffortPrefix,
@@ -219,6 +218,12 @@ interface ClaudeSessionContext {
   lastKnownTokenUsage: ThreadTokenUsageSnapshot | undefined;
   lastAssistantUuid: string | undefined;
   lastThreadStartedId: string | undefined;
+  // Original API model id the runtime rerouted away from (safeguard refusal
+  // fallback). While set, turns requesting that model stay on the fallback:
+  // every flip back re-ingests the entire context as uncached tokens.
+  rerouteOriginalApiModelId: string | undefined;
+  // Context-size warnings already emitted for this session (once per threshold).
+  readonly emittedContextUsageWarnings: Set<string>;
   stopped: boolean;
   // Unrecognized SDK message kinds already surfaced as a runtime warning. Newer
   // Claude SDKs stream high-frequency telemetry (e.g. `thinking_tokens`); de-duping
@@ -310,18 +315,6 @@ function normalizeClaudeStreamMessages(cause: Cause.Cause<Error>): ReadonlyArray
 
   const squashed = toMessage(Cause.squash(cause), "").trim();
   return squashed.length > 0 ? [squashed] : [];
-}
-
-function getEffectiveClaudeCodeEffort(
-  effort: ClaudeCodeEffort | null | undefined,
-): ClaudeApiEffort | null {
-  if (!effort) {
-    return null;
-  }
-  if (effort === "ultrathink") {
-    return null;
-  }
-  return effort === "ultracode" ? "xhigh" : effort;
 }
 
 function isClaudeInterruptedMessage(message: string): boolean {
@@ -418,6 +411,64 @@ function maxClaudeContextWindowFromModelUsage(
   }
 
   return maxContextWindow;
+}
+
+function finiteTokenCountOrZero(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+function claudePromptTokensFromRawUsage(usage: Record<string, unknown>): number {
+  return (
+    finiteTokenCountOrZero(usage.input_tokens) +
+    finiteTokenCountOrZero(usage.cache_creation_input_tokens) +
+    finiteTokenCountOrZero(usage.cache_read_input_tokens)
+  );
+}
+
+function stripClaudeContextWindowSuffix(apiModelId: string): string {
+  return apiModelId.replace(/\[[^\]]+\]$/u, "");
+}
+
+// Safeguard reroutes (e.g. Fable 5 refusal -> Opus fallback) stream as an
+// untyped system message; match it structurally so SDK type drift stays inert.
+interface ClaudeModelRefusalFallback {
+  readonly originalModel: string;
+  readonly fallbackModel: string;
+  readonly content?: string;
+}
+
+function readClaudeModelRefusalFallback(message: unknown): ClaudeModelRefusalFallback | undefined {
+  if (!message || typeof message !== "object") {
+    return undefined;
+  }
+  const record = message as {
+    type?: unknown;
+    subtype?: unknown;
+    originalModel?: unknown;
+    fallbackModel?: unknown;
+    content?: unknown;
+  };
+  if (record.type !== "system" || record.subtype !== "model_refusal_fallback") {
+    return undefined;
+  }
+  const originalModel =
+    typeof record.originalModel === "string" && record.originalModel.trim().length > 0
+      ? record.originalModel
+      : undefined;
+  const fallbackModel =
+    typeof record.fallbackModel === "string" && record.fallbackModel.trim().length > 0
+      ? record.fallbackModel
+      : undefined;
+  if (!originalModel || !fallbackModel) {
+    return undefined;
+  }
+  return {
+    originalModel,
+    fallbackModel,
+    ...(typeof record.content === "string" && record.content.trim().length > 0
+      ? { content: record.content }
+      : {}),
+  };
 }
 
 function normalizeClaudeTokenUsage(
@@ -802,6 +853,8 @@ const CLAUDE_SETTING_SOURCES = [
   "project",
   "local",
 ] as const satisfies ReadonlyArray<SettingSource>;
+const CLAUDE_DEFAULT_CONTEXT_WINDOW_TOKENS = 200_000;
+const CLAUDE_CONTEXT_WARNING_RATIO = 0.8;
 const EMBEDDED_CLAUDE_SYSTEM_PROMPT_APPEND = [
   "You are running inside Synara, a coding app that embeds the Claude Agent SDK.",
   "Do not present the host app as Claude Code unless the user is explicitly asking about Claude Code.",
@@ -1701,6 +1754,48 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
         });
       });
 
+    // Warns once per session per threshold when the per-request prompt size makes
+    // token burn dangerous: every request re-sends the whole context, and after a
+    // 5-minute prompt-cache expiry it is re-ingested as uncached tokens. Above 200k
+    // (1M window) requests additionally bill at the long-context premium.
+    const maybeEmitContextUsageWarning = (
+      context: ClaudeSessionContext,
+      rawUsage: Record<string, unknown>,
+    ): Effect.Effect<void> =>
+      Effect.gen(function* () {
+        const promptTokens = claudePromptTokensFromRawUsage(rawUsage);
+        if (promptTokens <= 0) {
+          return;
+        }
+        const approxThousands = Math.round(promptTokens / 1000);
+        const isLongContextSession = context.currentApiModelId?.endsWith("[1m]") === true;
+        if (isLongContextSession) {
+          if (
+            promptTokens > CLAUDE_DEFAULT_CONTEXT_WINDOW_TOKENS &&
+            !context.emittedContextUsageWarnings.has("long-context-premium")
+          ) {
+            context.emittedContextUsageWarnings.add("long-context-premium");
+            yield* emitRuntimeWarning(
+              context,
+              `Claude context passed 200k tokens in the 1M window (~${approxThousands}k tokens per request). Long-context requests bill at a premium and consume usage limits much faster - consider compacting or starting a fresh thread.`,
+            );
+          }
+          return;
+        }
+        const contextWindow =
+          context.lastKnownContextWindow ?? CLAUDE_DEFAULT_CONTEXT_WINDOW_TOKENS;
+        if (
+          promptTokens > contextWindow * CLAUDE_CONTEXT_WARNING_RATIO &&
+          !context.emittedContextUsageWarnings.has("near-window")
+        ) {
+          context.emittedContextUsageWarnings.add("near-window");
+          yield* emitRuntimeWarning(
+            context,
+            `Claude context is above 80% of the ${Math.round(contextWindow / 1000)}k window (~${approxThousands}k tokens per request). Every request re-sends the full history - consider compacting or starting a fresh thread.`,
+          );
+        }
+      });
+
     // Surfaces each distinct unrecognized SDK message kind at most once per session.
     // Without this, high-frequency telemetry the adapter doesn't model (notably the
     // `thinking_tokens` system subtype streamed on every reasoning tick) turns into a
@@ -2445,6 +2540,7 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
         // this reflects the actual prompt + output size for this single API call.
         const perCallUsage = (message.message as { usage?: unknown } | undefined)?.usage;
         if (perCallUsage) {
+          yield* maybeEmitContextUsageWarning(context, perCallUsage as Record<string, unknown>);
           const normalizedPerCallUsage = normalizeClaudeTokenUsage(
             perCallUsage as Record<string, unknown>,
             context.lastKnownContextWindow,
@@ -2532,6 +2628,26 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
             payload: message,
           },
         };
+
+        // Safeguard reroute (e.g. Fable 5 refusal -> Opus fallback). Pin the session
+        // to the fallback model: forcing the refused model back on the next turn
+        // costs two full-context cache misses per bounce.
+        const refusalFallback = readClaudeModelRefusalFallback(message);
+        if (refusalFallback) {
+          context.rerouteOriginalApiModelId =
+            context.currentApiModelId ?? refusalFallback.originalModel;
+          context.currentApiModelId = refusalFallback.fallbackModel;
+          yield* offerRuntimeEvent({
+            ...base,
+            type: "model.rerouted",
+            payload: {
+              fromModel: refusalFallback.originalModel,
+              toModel: refusalFallback.fallbackModel,
+              reason: refusalFallback.content ?? "Model safeguards rerouted this request.",
+            },
+          });
+          return;
+        }
 
         switch (message.subtype) {
           case "init":
@@ -3314,6 +3430,10 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
           toPermissionMode(providerOptions?.permissionMode) ??
           (input.runtimeMode === "full-access" ? "bypassPermissions" : undefined);
         const settings = {
+          // Auto-compaction bounds context growth. Without it a long session replays
+          // its entire history as uncached tokens after every prompt-cache expiry,
+          // which is the dominant driver of runaway usage on long threads.
+          autoCompactEnabled: true,
           ...(typeof thinking === "boolean" ? { alwaysThinkingEnabled: thinking } : {}),
           ...(fastMode ? { fastMode: true } : {}),
           ...(ultracode ? { ultracode: true } : {}),
@@ -3345,7 +3465,7 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
           ...(providerOptions?.maxThinkingTokens !== undefined
             ? { maxThinkingTokens: providerOptions.maxThinkingTokens }
             : {}),
-          ...(Object.keys(settings).length > 0 ? { settings } : {}),
+          settings,
           ...(existingResumeSessionId ? { resume: existingResumeSessionId } : {}),
           ...(newSessionId ? { sessionId: newSessionId } : {}),
           includePartialMessages: true,
@@ -3446,6 +3566,8 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
           lastKnownTokenUsage: undefined,
           lastAssistantUuid: resumeState?.resumeSessionAt,
           lastThreadStartedId: undefined,
+          rerouteOriginalApiModelId: undefined,
+          emittedContextUsageWarnings: new Set(),
           stopped: false,
           warnedUnhandledSdkKinds: new Set(),
         };
@@ -3536,13 +3658,28 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
 
         if (modelSelection?.model) {
           const apiModelId = resolveApiModelId(modelSelection);
-          yield* Effect.tryPromise({
-            try: () => context.query.setModel(apiModelId),
-            catch: (cause) => toRequestError(input.threadId, "turn/setModel", cause),
-          });
-          context.currentApiModelId = apiModelId;
-          if (requestedContextWindowMaxTokens !== undefined) {
-            context.lastKnownContextWindow = requestedContextWindowMaxTokens;
+          const reroutedFrom = context.rerouteOriginalApiModelId;
+          const requestsReroutedModel =
+            reroutedFrom !== undefined &&
+            stripClaudeContextWindowSuffix(apiModelId) ===
+              stripClaudeContextWindowSuffix(reroutedFrom);
+          if (requestsReroutedModel) {
+            // A safeguard reroute pinned this session to the fallback model. The
+            // thread selection still names the refused model; switching back would
+            // re-ingest the entire context uncached (and likely bounce again), so
+            // stay on the fallback until the user picks a different model.
+          } else {
+            if (apiModelId !== context.currentApiModelId) {
+              yield* Effect.tryPromise({
+                try: () => context.query.setModel(apiModelId),
+                catch: (cause) => toRequestError(input.threadId, "turn/setModel", cause),
+              });
+            }
+            context.currentApiModelId = apiModelId;
+            context.rerouteOriginalApiModelId = undefined;
+            if (requestedContextWindowMaxTokens !== undefined) {
+              context.lastKnownContextWindow = requestedContextWindowMaxTokens;
+            }
           }
         }
 

@@ -498,6 +498,7 @@ describe("ClaudeAdapterLive", () => {
       assert.equal(createInput?.options.model, "claude-sonnet-5");
       assert.equal(createInput?.options.effort, "xhigh");
       assert.deepEqual(createInput?.options.settings, {
+        autoCompactEnabled: true,
         ultracode: true,
       });
     }).pipe(
@@ -575,6 +576,7 @@ describe("ClaudeAdapterLive", () => {
 
       const createInput = harness.getLastCreateQueryInput();
       assert.deepEqual(createInput?.options.settings, {
+        autoCompactEnabled: true,
         alwaysThinkingEnabled: false,
       });
     }).pipe(
@@ -601,7 +603,7 @@ describe("ClaudeAdapterLive", () => {
       });
 
       const createInput = harness.getLastCreateQueryInput();
-      assert.equal(createInput?.options.settings, undefined);
+      assert.deepEqual(createInput?.options.settings, { autoCompactEnabled: true });
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),
@@ -627,6 +629,7 @@ describe("ClaudeAdapterLive", () => {
 
       const createInput = harness.getLastCreateQueryInput();
       assert.deepEqual(createInput?.options.settings, {
+        autoCompactEnabled: true,
         fastMode: true,
       });
     }).pipe(
@@ -653,7 +656,7 @@ describe("ClaudeAdapterLive", () => {
       });
 
       const createInput = harness.getLastCreateQueryInput();
-      assert.equal(createInput?.options.settings, undefined);
+      assert.deepEqual(createInput?.options.settings, { autoCompactEnabled: true });
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),
@@ -3542,6 +3545,259 @@ describe("ClaudeAdapterLive", () => {
       );
     },
   );
+
+  it.effect("skips redundant setModel when the turn model matches the session", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: "claudeAgent",
+        runtimeMode: "full-access",
+        modelSelection: {
+          provider: "claudeAgent",
+          model: "claude-opus-4-8",
+        },
+      });
+      yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "hello",
+        modelSelection: {
+          provider: "claudeAgent",
+          model: "claude-opus-4-8",
+        },
+        attachments: [],
+      });
+
+      assert.deepEqual(harness.query.setModelCalls, []);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("always enables auto-compaction in the query settings", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: "claudeAgent",
+        runtimeMode: "full-access",
+      });
+
+      const settings = harness.getLastCreateQueryInput()?.options.settings;
+      assert.ok(settings && typeof settings === "object");
+      assert.equal((settings as { autoCompactEnabled?: boolean }).autoCompactEnabled, true);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("pins the fallback model after a safeguard reroute", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+
+      const reroutedFiber = yield* Stream.filter(
+        adapter.streamEvents,
+        (event) => event.type === "model.rerouted",
+      ).pipe(Stream.runHead, Effect.forkChild);
+
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: "claudeAgent",
+        runtimeMode: "full-access",
+        modelSelection: {
+          provider: "claudeAgent",
+          model: "claude-fable-5",
+        },
+      });
+
+      harness.query.emit({
+        type: "system",
+        subtype: "model_refusal_fallback",
+        content: "Fable 5's safeguards flagged this message. Switched to Opus 4.8.",
+        originalModel: "claude-fable-5",
+        fallbackModel: "claude-opus-4-8",
+        session_id: "sdk-session-fallback",
+        uuid: "fallback-1",
+      } as unknown as SDKMessage);
+
+      const rerouted = yield* Fiber.join(reroutedFiber);
+      assert.equal(rerouted._tag, "Some");
+      if (rerouted._tag === "Some" && rerouted.value.type === "model.rerouted") {
+        assert.equal(rerouted.value.payload.fromModel, "claude-fable-5");
+        assert.equal(rerouted.value.payload.toModel, "claude-opus-4-8");
+      }
+
+      // A turn still requesting the refused model must not flip back: each bounce
+      // re-ingests the entire context as uncached tokens.
+      yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "continue",
+        modelSelection: {
+          provider: "claudeAgent",
+          model: "claude-fable-5",
+        },
+        attachments: [],
+      });
+      assert.deepEqual(harness.query.setModelCalls, []);
+
+      // Picking a genuinely different model clears the pin and applies it.
+      yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "switch",
+        modelSelection: {
+          provider: "claudeAgent",
+          model: "claude-opus-4-6",
+        },
+        attachments: [],
+      });
+      assert.deepEqual(harness.query.setModelCalls, ["claude-opus-4-6"]);
+
+      // And the original model can be re-applied after the explicit switch.
+      yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "back to fable",
+        modelSelection: {
+          provider: "claudeAgent",
+          model: "claude-fable-5",
+        },
+        attachments: [],
+      });
+      assert.deepEqual(harness.query.setModelCalls, ["claude-opus-4-6", "claude-fable-5"]);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("warns once when the per-request prompt nears the context window", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+
+      const warningsFiber = yield* Stream.filter(
+        adapter.streamEvents,
+        (event) => event.type === "runtime.warning",
+      ).pipe(Stream.take(1), Stream.runCollect, Effect.forkChild);
+
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: "claudeAgent",
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "hello",
+        attachments: [],
+      });
+
+      const bigUsageAssistant = (uuid: string) =>
+        ({
+          type: "assistant",
+          session_id: "sdk-session-context",
+          uuid,
+          parent_tool_use_id: null,
+          message: {
+            id: `assistant-${uuid}`,
+            content: [{ type: "text", text: "working" }],
+            usage: {
+              input_tokens: 2,
+              cache_read_input_tokens: 170_000,
+              output_tokens: 5,
+            },
+          },
+        }) as unknown as SDKMessage;
+
+      harness.query.emit(bigUsageAssistant("ctx-1"));
+      harness.query.emit(bigUsageAssistant("ctx-2"));
+      harness.query.emit({
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        errors: [],
+        session_id: "sdk-session-context",
+        uuid: "result-ctx",
+      } as unknown as SDKMessage);
+
+      const warnings = Array.from(yield* Fiber.join(warningsFiber));
+      assert.equal(warnings.length, 1);
+      const warning = warnings[0];
+      assert.equal(warning?.type, "runtime.warning");
+      if (warning?.type === "runtime.warning") {
+        assert.ok(warning.payload.message.includes("80%"));
+      }
+
+      // The second oversized request must not emit another warning; the turn
+      // completed without a second runtime.warning in the stream.
+      const thread = yield* adapter.readThread(session.threadId);
+      assert.ok(thread.turns.length >= 1);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("warns about the long-context premium past 200k on a 1M session", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+
+      const warningsFiber = yield* Stream.filter(
+        adapter.streamEvents,
+        (event) => event.type === "runtime.warning",
+      ).pipe(Stream.take(1), Stream.runCollect, Effect.forkChild);
+
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: "claudeAgent",
+        runtimeMode: "full-access",
+        modelSelection: {
+          provider: "claudeAgent",
+          model: "claude-opus-4-6",
+          options: { contextWindow: "1m" },
+        },
+      });
+      yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "hello",
+        attachments: [],
+      });
+
+      harness.query.emit({
+        type: "assistant",
+        session_id: "sdk-session-1m",
+        uuid: "assistant-1m",
+        parent_tool_use_id: null,
+        message: {
+          id: "assistant-message-1m",
+          content: [{ type: "text", text: "working" }],
+          usage: {
+            input_tokens: 2,
+            cache_read_input_tokens: 320_000,
+            output_tokens: 5,
+          },
+        },
+      } as unknown as SDKMessage);
+
+      const warnings = Array.from(yield* Fiber.join(warningsFiber));
+      assert.equal(warnings.length, 1);
+      const warning = warnings[0];
+      assert.equal(warning?.type, "runtime.warning");
+      if (warning?.type === "runtime.warning") {
+        assert.ok(warning.payload.message.includes("1M window"));
+        assert.ok(warning.payload.message.includes("premium"));
+      }
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
 
   it.effect("uses the requested Claude context window for in-flight usage snapshots", () => {
     const harness = makeHarness();
