@@ -31,6 +31,7 @@ import {
   resolveTailUserMessageEditTarget,
 } from "@t3tools/shared/conversationEdit";
 import { isTemporaryWorktreeBranch, WORKTREE_BRANCH_PREFIX } from "@t3tools/shared/git";
+import { claudeSelectionRequiresRestart } from "@t3tools/shared/model";
 import { buildStalePendingRequestFailureDetail } from "@t3tools/shared/threadSummary";
 import { resolveThreadWorkspaceState } from "@t3tools/shared/threadEnvironment";
 
@@ -753,10 +754,15 @@ const make = Effect.gen(function* () {
         requestedModelSelection.model !== activeSession?.model;
       const shouldRestartForModelChange = modelChanged && sessionModelSwitch === "restart-session";
       const previousModelSelection = threadModelSelections.get(threadId);
+      // Claude restarts resume via `--resume`, which replays the whole conversation
+      // as uncached input tokens. Only spawn-fixed options (effort/settings) may
+      // force that; model and context-window changes switch in-session via setModel.
       const shouldRestartForModelSelectionChange =
-        (currentProvider === "claudeAgent" || currentProvider === "grok") &&
         requestedModelSelection !== undefined &&
-        !Equal.equals(previousModelSelection, requestedModelSelection);
+        (currentProvider === "claudeAgent"
+          ? claudeSelectionRequiresRestart(previousModelSelection, requestedModelSelection)
+          : currentProvider === "grok" &&
+            !Equal.equals(previousModelSelection, requestedModelSelection));
 
       if (
         !runtimeModeChanged &&

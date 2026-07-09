@@ -2312,7 +2312,7 @@ describe("ProviderCommandReactor", () => {
     });
   });
 
-  it("restarts an idle Claude session immediately when thread model selection changes", async () => {
+  it("restarts an idle Claude session only for spawn-fixed model selection changes", async () => {
     const harness = await createHarness({
       threadModelSelection: { provider: "claudeAgent", model: "claude-opus-4-7" },
     });
@@ -2339,6 +2339,9 @@ describe("ProviderCommandReactor", () => {
     await waitFor(() => harness.sendTurn.mock.calls.length === 1);
     harness.startSession.mockClear();
 
+    // Context-window changes switch in-session via setModel on the next turn.
+    // Restarting would resume via --resume and replay the whole conversation
+    // as uncached input tokens.
     await Effect.runPromise(
       harness.engine.dispatch({
         type: "thread.meta.update",
@@ -2354,13 +2357,29 @@ describe("ProviderCommandReactor", () => {
       }),
     );
 
+    // Effort is fixed at subprocess spawn, so an effort change still restarts.
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.meta.update",
+        commandId: CommandId.makeUnsafe("cmd-thread-meta-update-claude-effort"),
+        threadId: ThreadId.makeUnsafe("thread-1"),
+        modelSelection: {
+          provider: "claudeAgent",
+          model: "claude-opus-4-7",
+          options: {
+            effort: "max",
+          },
+        },
+      }),
+    );
+
     await waitFor(() => harness.startSession.mock.calls.length === 1);
     expect(harness.startSession.mock.calls[0]?.[1]).toMatchObject({
       modelSelection: {
         provider: "claudeAgent",
         model: "claude-opus-4-7",
         options: {
-          contextWindow: "1m",
+          effort: "max",
         },
       },
     });
