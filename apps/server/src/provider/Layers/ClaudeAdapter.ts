@@ -692,9 +692,7 @@ function readClaudeResumeState(resumeCursor: unknown): ClaudeResumeState | undef
     ...(turnCountValue !== undefined && Number.isInteger(turnCountValue) && turnCountValue >= 0
       ? { turnCount: turnCountValue }
       : {}),
-    ...(hasCompleteReroute
-      ? { rerouteOriginalApiModelId, rerouteFallbackApiModelId }
-      : {}),
+    ...(hasCompleteReroute ? { rerouteOriginalApiModelId, rerouteFallbackApiModelId } : {}),
   };
 }
 
@@ -3718,9 +3716,7 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
               providerRefs: {},
             });
 
-            if (
-              context.lastKnownContextWindow === CLAUDE_CONTEXT_WINDOW_MAX_TOKENS["1m"]
-            ) {
+            if (context.lastKnownContextWindow === CLAUDE_CONTEXT_WINDOW_MAX_TOKENS["1m"]) {
               context.emittedContextUsageWarnings.add("one-million-window");
               yield* emitRuntimeWarning(
                 context,
@@ -3789,8 +3785,9 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
                 });
               }
               context.currentApiModelId = effectiveFallbackApiModelId;
-              context.lastKnownContextWindow =
-                resolveClaudeApiModelIdContextWindowMaxTokens(effectiveFallbackApiModelId);
+              context.lastKnownContextWindow = resolveClaudeApiModelIdContextWindowMaxTokens(
+                effectiveFallbackApiModelId,
+              );
               yield* updateResumeCursor(context);
             }
           } else {

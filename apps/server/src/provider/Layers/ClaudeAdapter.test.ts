@@ -3748,10 +3748,7 @@ describe("ClaudeAdapterLive", () => {
         },
         attachments: [],
       });
-      assert.deepEqual(harness.query.setModelCalls, [
-        "claude-opus-4-8[1m]",
-        "claude-opus-4-6",
-      ]);
+      assert.deepEqual(harness.query.setModelCalls, ["claude-opus-4-8[1m]", "claude-opus-4-6"]);
 
       // And the original model can be re-applied after the explicit switch.
       yield* adapter.sendTurn({
@@ -3957,8 +3954,7 @@ describe("ClaudeAdapterLive", () => {
 
       const warningsFiber = yield* Stream.filter(
         adapter.streamEvents,
-        (event) =>
-          event.type === "runtime.warning" && event.payload.message.includes("processing"),
+        (event) => event.type === "runtime.warning" && event.payload.message.includes("processing"),
       ).pipe(Stream.take(1), Stream.runCollect, Effect.forkChild);
 
       const session = yield* adapter.startSession({

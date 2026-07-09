@@ -998,8 +998,7 @@ const make = Effect.gen(function* () {
       activeSession === undefined
         ? "in-session"
         : (yield* providerService.getCapabilities(activeSession.provider)).sessionModelSwitch;
-    const requestedModelSelection =
-      input.modelSelection ?? thread.modelSelection;
+    const requestedModelSelection = input.modelSelection ?? thread.modelSelection;
     const modelForTurn =
       sessionModelSwitch === "unsupported"
         ? activeSession?.model !== undefined
