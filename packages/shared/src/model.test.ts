@@ -708,6 +708,15 @@ describe("claudeSelectionRequiresRestart", () => {
     ).toBe(true);
   });
 
+  it("treats an unknown effort as a no-op", () => {
+    expect(
+      claudeSelectionRequiresRestart(
+        selection("claude-opus-4-8"),
+        selection("claude-opus-4-8", { effort: "future-effort" }),
+      ),
+    ).toBe(false);
+  });
+
   it("treats ultrathink as prompt-injected, not a spawn change", () => {
     // ultrathink carries no API effort, so switching from no effort to ultrathink
     // must not respawn the subprocess.
