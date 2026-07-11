@@ -9,6 +9,7 @@ import {
   readFileSync,
   readlinkSync,
   rmSync,
+  symlinkSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -370,6 +371,7 @@ describe("classifyCodexStderrLine", () => {
 describe("buildCodexProcessEnv", () => {
   it("hydrates the active custom provider env_key from the effective CODEX_HOME", () => {
     const tempDir = mkdtempSync(path.join(os.tmpdir(), "synara-codex-env-"));
+    const runtimeHome = mkdtempSync(path.join(os.tmpdir(), "synara-runtime-home-"));
     try {
       writeFileSync(
         path.join(tempDir, "config.toml"),
@@ -392,6 +394,7 @@ describe("buildCodexProcessEnv", () => {
         env: {
           SHELL: "/bin/zsh",
           PATH: "/usr/bin",
+          SYNARA_HOME: runtimeHome,
         },
         homePath: tempDir,
         platform: "darwin",
@@ -408,6 +411,7 @@ describe("buildCodexProcessEnv", () => {
       expect(env.PATH).toBe("/opt/homebrew/bin:/usr/bin");
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
+      rmSync(runtimeHome, { recursive: true, force: true });
     }
   });
 
@@ -578,7 +582,7 @@ describe("buildCodexProcessEnv", () => {
     }
   });
 
-  it("repairs stale real files in Synara's Codex home overlay", () => {
+  it("routes SQLite state through the source home without repairing stale overlay DBs", () => {
     const tempDir = mkdtempSync(path.join(os.tmpdir(), "synara-codex-env-"));
     const runtimeHome = mkdtempSync(path.join(os.tmpdir(), "synara-runtime-home-"));
     try {
@@ -598,8 +602,10 @@ describe("buildCodexProcessEnv", () => {
       });
 
       expect(env.CODEX_HOME).toBe(overlayHome);
-      expect(lstatSync(overlayMemoryPath).isSymbolicLink()).toBe(true);
-      expect(readlinkSync(overlayMemoryPath)).toBe(sourceMemoryPath);
+      expect(env.CODEX_SQLITE_HOME).toBe(path.resolve(tempDir));
+      expect(lstatSync(overlayMemoryPath).isFile()).toBe(true);
+      expect(readFileSync(overlayMemoryPath, "utf8")).toBe("stale-overlay-db");
+      expect(readFileSync(sourceMemoryPath, "utf8")).toBe("fresh-source-db");
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
       rmSync(runtimeHome, { recursive: true, force: true });
@@ -1067,8 +1073,11 @@ describe("startSession", () => {
       env: { HOME: root, SYNARA_HOME: runtimeHome, CODEX_HOME: sourceHome },
       platform: "win32",
       overlayEntryLinker: {
-        symlink: () => {
-          throw new Error("symlinks unavailable");
+        symlink: (sourcePath, targetPath, type) => {
+          if (path.basename(String(targetPath)) === "auth.json") {
+            throw new Error("auth symlinks unavailable");
+          }
+          return symlinkSync(sourcePath, targetPath, type);
         },
         copyFile: copyFileSync,
       },
@@ -1136,8 +1145,11 @@ describe("startSession", () => {
       env: { HOME: root, SYNARA_HOME: runtimeHome, CODEX_HOME: sourceHome },
       platform: "win32",
       overlayEntryLinker: {
-        symlink: () => {
-          throw new Error("symlinks unavailable");
+        symlink: (sourcePath, targetPath, type) => {
+          if (path.basename(String(targetPath)) === "auth.json") {
+            throw new Error("auth symlinks unavailable");
+          }
+          return symlinkSync(sourcePath, targetPath, type);
         },
         copyFile: copyFileSync,
       },
@@ -1280,7 +1292,7 @@ describe("startSession", () => {
       )
       .mockImplementation(() => {
         throw new Error(
-          "Codex CLI v0.36.0 is too old for Synara. Upgrade to v0.37.0 or newer and restart Synara.",
+          "Codex CLI v0.104.0 is too old for Synara. Upgrade to v0.105.0 or newer and restart Synara.",
         );
       });
 
@@ -1292,7 +1304,7 @@ describe("startSession", () => {
           runtimeMode: "full-access",
         }),
       ).rejects.toThrow(
-        "Codex CLI v0.36.0 is too old for Synara. Upgrade to v0.37.0 or newer and restart Synara.",
+        "Codex CLI v0.104.0 is too old for Synara. Upgrade to v0.105.0 or newer and restart Synara.",
       );
       expect(versionCheck).toHaveBeenCalledTimes(1);
       expect(events).toEqual([
@@ -1300,7 +1312,7 @@ describe("startSession", () => {
           method: "session/startFailed",
           kind: "error",
           message:
-            "Codex CLI v0.36.0 is too old for Synara. Upgrade to v0.37.0 or newer and restart Synara.",
+            "Codex CLI v0.104.0 is too old for Synara. Upgrade to v0.105.0 or newer and restart Synara.",
         },
       ]);
     } finally {
@@ -1710,8 +1722,11 @@ describe("CodexAppServerManager discovery", () => {
       homePath,
       platform: "win32",
       overlayEntryLinker: {
-        symlink: () => {
-          throw new Error("symlinks unavailable");
+        symlink: (sourcePath, targetPath, type) => {
+          if (path.basename(String(targetPath)) === "auth.json") {
+            throw new Error("auth symlinks unavailable");
+          }
+          return symlinkSync(sourcePath, targetPath, type);
         },
         copyFile: copyFileSync,
       },
@@ -1782,8 +1797,11 @@ describe("CodexAppServerManager discovery", () => {
         homePath,
         platform: "win32",
         overlayEntryLinker: {
-          symlink: () => {
-            throw new Error("symlinks unavailable");
+          symlink: (sourcePath, targetPath, type) => {
+            if (path.basename(String(targetPath)) === "auth.json") {
+              throw new Error("auth symlinks unavailable");
+            }
+            return symlinkSync(sourcePath, targetPath, type);
           },
           copyFile: copyFileSync,
         },

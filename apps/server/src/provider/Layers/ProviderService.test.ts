@@ -1239,79 +1239,91 @@ routing.layer("ProviderServiceLive routing", (it) => {
     }),
   );
 
-  it.effect(
-    "rejects a stale shared marker when the selected Codex overlay is no longer linked",
-    () =>
-      Effect.gen(function* () {
-        const provider = yield* ProviderService;
-        const threadId = asThreadId("thread-codex-stale-shared-marker");
-        const fixture = makeSharedCodexContinuationFixture(["personal", "work"]);
-        const personalOptions = {
-          codex: {
-            homePath: fixture.homePath,
-            shadowHomePath: fixture.shadowHomePath("personal"),
-            accountId: "personal",
-            environment: fixture.environment,
-          },
-        };
-        const workOptions = {
-          codex: {
-            homePath: fixture.homePath,
-            shadowHomePath: fixture.shadowHomePath("work"),
-            accountId: "work",
-            environment: fixture.environment,
-          },
-        };
-        yield* provider.startSession(threadId, {
-          provider: "codex",
-          threadId,
-          providerOptions: personalOptions,
-          runtimeMode: "full-access",
-        });
+  it.effect("resumes account A after a broken account B overlay is rejected", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const threadId = asThreadId("thread-codex-stale-shared-marker");
+      const fixture = makeSharedCodexContinuationFixture(["personal", "work"]);
+      const personalOptions = {
+        codex: {
+          homePath: fixture.homePath,
+          shadowHomePath: fixture.shadowHomePath("personal"),
+          accountId: "personal",
+          environment: fixture.environment,
+        },
+      };
+      const workOptions = {
+        codex: {
+          homePath: fixture.homePath,
+          shadowHomePath: fixture.shadowHomePath("work"),
+          accountId: "work",
+          environment: fixture.environment,
+        },
+      };
+      const initial = yield* provider.startSession(threadId, {
+        provider: "codex",
+        threadId,
+        providerOptions: personalOptions,
+        runtimeMode: "full-access",
+      });
+      assert.equal(typeof provider.stopRuntimeSession, "function");
+      if (!provider.stopRuntimeSession) return;
+      yield* provider.stopRuntimeSession({ threadId });
 
-        const workOverlayHomePath = resolveActiveCodexHomeWritePath({
+      const workOverlayHomePath = resolveActiveCodexHomeWritePath({
+        env: { ...process.env, ...fixture.environment },
+        homePath: fixture.homePath,
+        shadowHomePath: fixture.shadowHomePath("work"),
+        accountId: "work",
+      });
+      fs.unlinkSync(path.join(workOverlayHomePath, "sessions"));
+      fs.mkdirSync(path.join(workOverlayHomePath, "sessions"));
+      fs.writeFileSync(
+        path.join(workOverlayHomePath, "sessions", "independent.jsonl"),
+        "independent",
+        "utf8",
+      );
+      assert.equal(
+        isCodexSharedContinuationStatePrepared({
           env: { ...process.env, ...fixture.environment },
           homePath: fixture.homePath,
           shadowHomePath: fixture.shadowHomePath("work"),
           accountId: "work",
-        });
-        fs.unlinkSync(path.join(workOverlayHomePath, "sessions"));
-        fs.mkdirSync(path.join(workOverlayHomePath, "sessions"));
-        fs.writeFileSync(
-          path.join(workOverlayHomePath, "sessions", "independent.jsonl"),
-          "independent",
-          "utf8",
-        );
-        assert.equal(
-          isCodexSharedContinuationStatePrepared({
-            env: { ...process.env, ...fixture.environment },
-            homePath: fixture.homePath,
-            shadowHomePath: fixture.shadowHomePath("work"),
-            accountId: "work",
-          }),
-          false,
-        );
-        routing.codex.startSession.mockClear();
+        }),
+        false,
+      );
+      routing.codex.startSession.mockClear();
 
-        const result = yield* Effect.result(
-          provider.startSession(threadId, {
-            provider: "codex",
-            threadId,
-            providerOptions: workOptions,
-            runtimeMode: "full-access",
-          }),
-        );
-        assert.equal(result._tag, "Failure");
-        if (result._tag === "Failure") {
-          assert.match(String(result.failure), /native session storage is incompatible/);
-        }
-        assert.equal(routing.codex.startSession.mock.calls.length, 0);
-        assert.strictEqual(
-          fs.readFileSync(path.join(workOverlayHomePath, "sessions", "independent.jsonl"), "utf8"),
-          "independent",
-        );
-        fs.rmSync(fixture.root, { recursive: true, force: true });
-      }),
+      const result = yield* Effect.result(
+        provider.startSession(threadId, {
+          provider: "codex",
+          threadId,
+          providerOptions: workOptions,
+          runtimeMode: "full-access",
+        }),
+      );
+      assert.equal(result._tag, "Failure");
+      if (result._tag === "Failure") {
+        assert.match(String(result.failure), /native session storage is incompatible/);
+      }
+      assert.equal(routing.codex.startSession.mock.calls.length, 0);
+      assert.strictEqual(
+        fs.readFileSync(path.join(workOverlayHomePath, "sessions", "independent.jsonl"), "utf8"),
+        "independent",
+      );
+      yield* provider.startSession(threadId, {
+        provider: "codex",
+        threadId,
+        providerOptions: personalOptions,
+        runtimeMode: "full-access",
+      });
+      assert.equal(routing.codex.startSession.mock.calls.length, 1);
+      assert.deepEqual(
+        routing.codex.startSession.mock.calls[0]?.[0].resumeCursor,
+        initial.resumeCursor,
+      );
+      fs.rmSync(fixture.root, { recursive: true, force: true });
+    }),
   );
 
   it.effect("does not let an exact Codex launch downgrade a persisted shared identity", () =>

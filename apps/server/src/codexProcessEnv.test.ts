@@ -4,15 +4,18 @@
 // Exports: Vitest coverage for apps/server/src/codexProcessEnv.ts.
 import {
   copyFileSync,
+  existsSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   readlinkSync,
   rmSync,
   symlinkSync,
   chmodSync,
   unlinkSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import OS from "node:os";
@@ -47,6 +50,12 @@ describe("readEffectiveCodexAuthCredentialsStoreMode", () => {
         '"profile" = "work"\n"cli_auth_credentials_store" = "file"\nprofiles."work"."cli_auth_credentials_store" = "keyring"\n',
       ),
       "keyring",
+    );
+    assert.strictEqual(
+      readEffectiveCodexAuthCredentialsStoreMode(
+        'profile = "work"\nprofiles = { work = { cli_auth_credentials_store = "auto" } }\n',
+      ),
+      "auto",
     );
   });
 
@@ -167,7 +176,8 @@ describe("buildCodexProcessEnv account overlays", () => {
       accountId: "personal",
       platform: "win32",
     });
-    assert.ok(personalEnv.CODEX_HOME);
+    const personalCodexHomePath = personalEnv.CODEX_HOME;
+    assert.ok(personalCodexHomePath);
     assert.ok(
       isCodexSharedContinuationStatePrepared({
         env: fixture.env,
@@ -176,16 +186,24 @@ describe("buildCodexProcessEnv account overlays", () => {
         accountId: "personal",
       }),
     );
-    const personalSessionsPath = path.join(personalEnv.CODEX_HOME, "sessions");
-    const personalStateDbPath = path.join(personalEnv.CODEX_HOME, "state_5.sqlite");
+    const personalSessionsPath = path.join(personalCodexHomePath, "sessions");
+    const personalSqliteHomePath = personalEnv.CODEX_SQLITE_HOME;
+    assert.ok(personalSqliteHomePath);
     assert.ok(lstatSync(personalSessionsPath).isSymbolicLink());
-    assert.ok(lstatSync(personalStateDbPath).isSymbolicLink());
+    assert.strictEqual(personalSqliteHomePath, path.resolve(fixture.homePath));
+    assert.throws(() => lstatSync(path.join(personalCodexHomePath, "state_6.sqlite")));
     writeFileSync(
       path.join(personalSessionsPath, "thread-personal.jsonl"),
       "personal-thread",
       "utf8",
     );
-    writeFileSync(personalStateDbPath, "shared-state", "utf8");
+    writeFileSync(path.join(personalSqliteHomePath, "state_6.sqlite"), "shared-state", "utf8");
+    writeFileSync(path.join(personalSqliteHomePath, "state_6.sqlite-wal"), "shared-wal", "utf8");
+    writeFileSync(
+      path.join(personalSqliteHomePath, "thread_history_1.sqlite"),
+      "shared-history",
+      "utf8",
+    );
 
     const workEnv = buildCodexProcessEnv({
       env: fixture.env,
@@ -194,24 +212,164 @@ describe("buildCodexProcessEnv account overlays", () => {
       accountId: "work",
       platform: "win32",
     });
-    assert.ok(workEnv.CODEX_HOME);
-    assert.notStrictEqual(workEnv.CODEX_HOME, personalEnv.CODEX_HOME);
+    const workCodexHomePath = workEnv.CODEX_HOME;
+    assert.ok(workCodexHomePath);
+    assert.notStrictEqual(workCodexHomePath, personalCodexHomePath);
+    assert.strictEqual(workEnv.CODEX_SQLITE_HOME, personalSqliteHomePath);
+    const workSqliteHomePath = workEnv.CODEX_SQLITE_HOME;
+    assert.ok(workSqliteHomePath);
     assert.strictEqual(
-      readFileSync(path.join(workEnv.CODEX_HOME, "sessions", "thread-personal.jsonl"), "utf8"),
+      readFileSync(path.join(workCodexHomePath, "sessions", "thread-personal.jsonl"), "utf8"),
       "personal-thread",
     );
     assert.strictEqual(
-      readFileSync(path.join(workEnv.CODEX_HOME, "state_5.sqlite"), "utf8"),
+      readFileSync(path.join(workSqliteHomePath, "state_6.sqlite"), "utf8"),
       "shared-state",
     );
     assert.strictEqual(
-      path.resolve(readlinkSync(path.join(personalEnv.CODEX_HOME, "models_cache.json"))),
+      readFileSync(path.join(workSqliteHomePath, "state_6.sqlite-wal"), "utf8"),
+      "shared-wal",
+    );
+    assert.strictEqual(
+      readFileSync(path.join(workSqliteHomePath, "thread_history_1.sqlite"), "utf8"),
+      "shared-history",
+    );
+    assert.throws(() => lstatSync(path.join(workCodexHomePath, "state_6.sqlite")));
+    assert.strictEqual(
+      path.resolve(readlinkSync(path.join(personalCodexHomePath, "models_cache.json"))),
       path.resolve(path.join(personalShadowHomePath, "models_cache.json")),
     );
     assert.strictEqual(
-      path.resolve(readlinkSync(path.join(workEnv.CODEX_HOME, "models_cache.json"))),
+      path.resolve(readlinkSync(path.join(workCodexHomePath, "models_cache.json"))),
       path.resolve(path.join(fixture.shadowHomePath, "models_cache.json")),
     );
+  });
+
+  it("overrides inherited SQLite routing and accepts an explicit same-source sqlite_home", () => {
+    const fixture = makeAccountFixture({ shadowAuth: "missing" });
+    const sourceAlias = aliasHomeThroughParent(fixture.homePath);
+    writeFileSync(
+      path.join(fixture.homePath, "config.toml"),
+      `sqlite_home = ${JSON.stringify(sourceAlias)}\nmodel = "gpt-5.4"\n`,
+      "utf8",
+    );
+
+    const env = buildCodexProcessEnv({
+      env: {
+        ...fixture.env,
+        CODEX_SQLITE_HOME: path.join(path.dirname(fixture.homePath), "wrong-sqlite-home"),
+      },
+      homePath: fixture.homePath,
+      platform: "win32",
+    });
+    assert.strictEqual(env.CODEX_SQLITE_HOME, path.resolve(fixture.homePath));
+    assert.ok(env.CODEX_HOME);
+    assert.match(readFileSync(path.join(env.CODEX_HOME, "config.toml"), "utf8"), /sqlite_home/);
+  });
+
+  it("structurally rejects every effective sqlite_home form that overrides source routing", () => {
+    const configCases = [
+      {
+        label: "plain root",
+        render: (foreignPath: string) => `sqlite_home = ${JSON.stringify(foreignPath)}\n`,
+      },
+      {
+        label: "quoted root key",
+        render: (foreignPath: string) => `"sqlite_home" = ${JSON.stringify(foreignPath)}\n`,
+      },
+      {
+        label: "multiline string",
+        render: (foreignPath: string) => `sqlite_home = """${foreignPath}"""\n`,
+      },
+      {
+        label: "profile table",
+        render: (foreignPath: string) =>
+          `profile = "work"\n[profiles.work]\nsqlite_home = ${JSON.stringify(foreignPath)}\n`,
+      },
+      {
+        label: "dotted quoted profile",
+        render: (foreignPath: string) =>
+          `profile = "work"\nprofiles."work"."sqlite_home" = ${JSON.stringify(foreignPath)}\n`,
+      },
+      {
+        label: "inline profile",
+        render: (foreignPath: string) =>
+          `profile = "work"\nprofiles = { work = { sqlite_home = ${JSON.stringify(foreignPath)} } }\n`,
+      },
+    ] as const;
+
+    for (const configCase of configCases) {
+      const fixture = makeAccountFixture({ shadowAuth: "missing" });
+      const foreignSqliteHomePath = path.join(
+        path.dirname(fixture.homePath),
+        `foreign-sqlite-home-${configCase.label.replaceAll(" ", "-")}`,
+      );
+      writeFileSync(
+        path.join(fixture.homePath, "config.toml"),
+        configCase.render(foreignSqliteHomePath),
+        "utf8",
+      );
+      const overlayHomePath = resolveActiveCodexHomeWritePath({
+        env: fixture.env,
+        homePath: fixture.homePath,
+      });
+
+      assert.throws(
+        () =>
+          buildCodexProcessEnv({
+            env: fixture.env,
+            homePath: fixture.homePath,
+            platform: "win32",
+          }),
+        /sqlite_home.*must resolve to the source CODEX_HOME/,
+        configCase.label,
+      );
+      assert.strictEqual(existsSync(overlayHomePath), false, configCase.label);
+    }
+  });
+
+  it("invalidates a prepared identity when sqlite_home later drifts away from the source", () => {
+    const fixture = makeAccountFixture({ shadowAuth: "missing" });
+    buildCodexProcessEnv({
+      env: fixture.env,
+      homePath: fixture.homePath,
+      platform: "win32",
+    });
+    assert.ok(
+      isCodexSharedContinuationStatePrepared({
+        env: fixture.env,
+        homePath: fixture.homePath,
+      }),
+    );
+
+    writeFileSync(
+      path.join(fixture.homePath, "config.toml"),
+      `sqlite_home = ${JSON.stringify(path.join(path.dirname(fixture.homePath), "drifted"))}\n`,
+      "utf8",
+    );
+    assert.strictEqual(
+      isCodexSharedContinuationStatePrepared({
+        env: fixture.env,
+        homePath: fixture.homePath,
+      }),
+      false,
+    );
+  });
+
+  it("does not treat an unselected backup config as active Codex configuration", () => {
+    const fixture = makeAccountFixture({ shadowAuth: "missing" });
+    writeFileSync(
+      path.join(fixture.homePath, "backup.config.toml"),
+      `sqlite_home = ${JSON.stringify(path.join(path.dirname(fixture.homePath), "backup-db"))}\n`,
+      "utf8",
+    );
+
+    const env = buildCodexProcessEnv({
+      env: fixture.env,
+      homePath: fixture.homePath,
+      platform: "win32",
+    });
+    assert.strictEqual(env.CODEX_SQLITE_HOME, path.resolve(fixture.homePath));
   });
 
   it("preserves non-empty legacy-only continuation state and requires an explicit migration", () => {
@@ -364,6 +522,65 @@ describe("buildCodexProcessEnv account overlays", () => {
     );
   });
 
+  it("keeps a healthy account marker valid when another overlay fails preparation", () => {
+    const fixture = makeAccountFixture({ shadowAuth: "real" });
+    const personalShadowHomePath = path.join(
+      path.dirname(fixture.shadowHomePath),
+      "codex-shadow-personal-marker",
+    );
+    mkdirSync(personalShadowHomePath, { recursive: true });
+    writeFileSync(path.join(personalShadowHomePath, "auth.json"), "{}", "utf8");
+    buildCodexProcessEnv({
+      env: fixture.env,
+      homePath: fixture.homePath,
+      shadowHomePath: personalShadowHomePath,
+      accountId: "personal",
+      platform: "win32",
+    });
+    const markerPath = path.join(fixture.homePath, "synara-shared-continuation-v1.json");
+    const markerBeforeFailure = readFileSync(markerPath, "utf8");
+    const workOverlayHomePath = resolveActiveCodexHomeWritePath({
+      env: fixture.env,
+      homePath: fixture.homePath,
+      shadowHomePath: fixture.shadowHomePath,
+      accountId: "work",
+    });
+    mkdirSync(path.join(workOverlayHomePath, "sessions"), { recursive: true });
+    writeFileSync(
+      path.join(workOverlayHomePath, "sessions", "independent.jsonl"),
+      "independent",
+      "utf8",
+    );
+
+    assert.throws(() =>
+      buildCodexProcessEnv({
+        env: fixture.env,
+        homePath: fixture.homePath,
+        shadowHomePath: fixture.shadowHomePath,
+        accountId: "work",
+        platform: "win32",
+      }),
+    );
+    assert.strictEqual(readFileSync(markerPath, "utf8"), markerBeforeFailure);
+    assert.ok(
+      isCodexSharedContinuationStatePrepared({
+        env: fixture.env,
+        homePath: fixture.homePath,
+        shadowHomePath: personalShadowHomePath,
+        accountId: "personal",
+      }),
+    );
+    assert.strictEqual(
+      isCodexSharedContinuationStatePrepared({
+        env: fixture.env,
+        homePath: fixture.homePath,
+        shadowHomePath: fixture.shadowHomePath,
+        accountId: "work",
+      }),
+      false,
+    );
+  });
+
   it("revalidates a stale migration plan and preserves a target that appears during execution", () => {
     const fixture = makeAccountFixture({ shadowAuth: "missing" });
     const overlayHomePath = resolveActiveCodexHomeWritePath({
@@ -371,8 +588,8 @@ describe("buildCodexProcessEnv account overlays", () => {
       homePath: fixture.homePath,
     });
     mkdirSync(overlayHomePath, { recursive: true });
-    const sourceStatePath = path.join(fixture.homePath, "state_5.sqlite");
-    const overlayStatePath = path.join(overlayHomePath, "state_5.sqlite");
+    const sourceStatePath = path.join(fixture.homePath, "history.jsonl");
+    const overlayStatePath = path.join(overlayHomePath, "history.jsonl");
     writeFileSync(sourceStatePath, "same-before-plan", "utf8");
     let mutated = false;
     const mutateAfterPlanningStarts = {
@@ -402,7 +619,7 @@ describe("buildCodexProcessEnv account overlays", () => {
     assert.ok(lstatSync(overlayStatePath).isFile());
   });
 
-  it("serializes first-time continuation preparation across processes", async () => {
+  it("does not let a stale owner release remove its reclaimer's successor lock", async () => {
     const fixture = makeAccountFixture({ shadowAuth: "real" });
     const personalShadowHomePath = path.join(
       path.dirname(fixture.shadowHomePath),
@@ -410,42 +627,116 @@ describe("buildCodexProcessEnv account overlays", () => {
     );
     mkdirSync(personalShadowHomePath, { recursive: true });
     writeFileSync(path.join(personalShadowHomePath, "auth.json"), "{}", "utf8");
+    const lockPath = path.join(fixture.homePath, ".synara-shared-continuation-v1.lock");
+    const ownerPath = path.join(lockPath, "owner.json");
     const moduleUrl = pathToFileURL(path.join(import.meta.dirname, "codexProcessEnv.ts")).href;
-    const runPreparation = (accountId: string, shadowHomePath: string) =>
-      new Promise<void>((resolve, reject) => {
-        const script = `
+    const spawnPreparation = (
+      accountId: string,
+      shadowHomePath: string,
+      readyPath: string,
+      releasePath: string,
+    ) => {
+      let child!: ReturnType<typeof spawn>;
+      const completed = new Promise<{ readonly code: number | null; readonly stderr: string }>(
+        (resolve, reject) => {
+          const script = `
+          import { copyFileSync, existsSync, symlinkSync, writeFileSync } from "node:fs";
+          import path from "node:path";
           import { buildCodexProcessEnv } from ${JSON.stringify(moduleUrl)};
-          buildCodexProcessEnv(${JSON.stringify({
-            env: fixture.env,
-            homePath: fixture.homePath,
-            accountId,
-            shadowHomePath,
-            platform: "win32",
-          })});
+          let paused = false;
+          buildCodexProcessEnv({
+            ...${JSON.stringify({
+              env: fixture.env,
+              homePath: fixture.homePath,
+              accountId,
+              shadowHomePath,
+              platform: "win32",
+            })},
+            overlayEntryLinker: {
+              symlink(sourcePath, targetPath, type) {
+                if (!paused && path.basename(String(targetPath)) === "sessions") {
+                  paused = true;
+                  writeFileSync(${JSON.stringify(readyPath)}, "ready", "utf8");
+                  while (!existsSync(${JSON.stringify(releasePath)})) {
+                    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
+                  }
+                }
+                return symlinkSync(sourcePath, targetPath, type);
+              },
+              copyFile: copyFileSync,
+            },
+          });
         `;
-        const child = spawn("bun", ["-e", script], {
-          cwd: import.meta.dirname,
-          stdio: ["ignore", "ignore", "pipe"],
-        });
-        let stderr = "";
-        child.stderr.setEncoding("utf8");
-        child.stderr.on("data", (chunk: string) => {
-          stderr += chunk;
-        });
-        child.once("error", reject);
-        child.once("exit", (code) => {
-          if (code === 0) {
-            resolve();
-          } else {
-            reject(new Error(`Codex preparation child exited ${String(code)}: ${stderr}`));
-          }
-        });
-      });
+          const spawned = spawn("bun", ["-e", script], {
+            cwd: import.meta.dirname,
+            stdio: ["ignore", "ignore", "pipe"],
+          });
+          child = spawned;
+          let stderr = "";
+          spawned.stderr.setEncoding("utf8");
+          spawned.stderr.on("data", (chunk: string) => {
+            stderr += chunk;
+          });
+          spawned.once("error", reject);
+          spawned.once("exit", (code) => {
+            resolve({ code, stderr });
+          });
+        },
+      );
+      return { child, completed };
+    };
 
-    await Promise.all([
-      runPreparation("personal", personalShadowHomePath),
-      runPreparation("work", fixture.shadowHomePath),
-    ]);
+    const ownerReadyPath = path.join(path.dirname(fixture.homePath), "owner-ready");
+    const ownerReleasePath = path.join(path.dirname(fixture.homePath), "owner-release");
+    const reclaimerReadyPath = path.join(path.dirname(fixture.homePath), "reclaimer-ready");
+    const reclaimerReleasePath = path.join(path.dirname(fixture.homePath), "reclaimer-release");
+    const owner = spawnPreparation(
+      "personal",
+      personalShadowHomePath,
+      ownerReadyPath,
+      ownerReleasePath,
+    );
+    let reclaimer: ReturnType<typeof spawnPreparation> | undefined;
+
+    try {
+      await vi.waitFor(() => expect(existsSync(ownerReadyPath)).toBe(true), { timeout: 5_000 });
+      const originalOwner = JSON.parse(readFileSync(ownerPath, "utf8")) as {
+        readonly token: string;
+      };
+      writeFileSync(
+        ownerPath,
+        `${JSON.stringify({ token: originalOwner.token, createdAtMs: 1 })}\n`,
+        "utf8",
+      );
+      utimesSync(ownerPath, new Date(0), new Date(0));
+
+      reclaimer = spawnPreparation(
+        "work",
+        fixture.shadowHomePath,
+        reclaimerReadyPath,
+        reclaimerReleasePath,
+      );
+      await vi.waitFor(() => expect(existsSync(reclaimerReadyPath)).toBe(true), {
+        timeout: 5_000,
+      });
+      const successorBeforeStaleRelease = readFileSync(ownerPath, "utf8");
+
+      writeFileSync(ownerReleasePath, "release", "utf8");
+      const ownerResult = await owner.completed;
+      assert.notStrictEqual(ownerResult.code, 0);
+      assert.match(ownerResult.stderr, /Lost ownership of Codex continuation lock/);
+      assert.strictEqual(readFileSync(ownerPath, "utf8"), successorBeforeStaleRelease);
+
+      writeFileSync(reclaimerReleasePath, "release", "utf8");
+      const reclaimerResult = await reclaimer.completed;
+      assert.strictEqual(reclaimerResult.code, 0, reclaimerResult.stderr);
+    } finally {
+      writeFileSync(ownerReleasePath, "release", "utf8");
+      writeFileSync(reclaimerReleasePath, "release", "utf8");
+      if (owner.child.exitCode === null) owner.child.kill("SIGKILL");
+      if (reclaimer?.child.exitCode === null) reclaimer.child.kill("SIGKILL");
+    }
+
     assert.ok(
       isCodexSharedContinuationStatePrepared({
         env: fixture.env,
@@ -462,6 +753,13 @@ describe("buildCodexProcessEnv account overlays", () => {
         accountId: "work",
       }),
     );
+    assert.strictEqual(existsSync(lockPath), false);
+    assert.deepEqual(
+      readdirSync(fixture.homePath).filter((entryName) =>
+        entryName.startsWith(".synara-shared-continuation-v1.lock.quarantine-"),
+      ),
+      [],
+    );
   });
 
   it.runIf(process.platform !== "win32")(
@@ -473,8 +771,8 @@ describe("buildCodexProcessEnv account overlays", () => {
         homePath: fixture.homePath,
       });
       mkdirSync(overlayHomePath, { recursive: true });
-      const sourceStatePath = path.join(fixture.homePath, "state_5.sqlite");
-      const overlayStatePath = path.join(overlayHomePath, "state_5.sqlite");
+      const sourceStatePath = path.join(fixture.homePath, "history.jsonl");
+      const overlayStatePath = path.join(overlayHomePath, "history.jsonl");
       writeFileSync(sourceStatePath, "source-secret", "utf8");
       writeFileSync(overlayStatePath, "overlay-secret", "utf8");
       chmodSync(sourceStatePath, 0o000);
