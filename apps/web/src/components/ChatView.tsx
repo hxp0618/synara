@@ -114,7 +114,10 @@ import {
   normalizeProviderStatusForLocalConfig,
   providerStatusInstanceKey,
   resolveProviderSendAvailabilityWithRefresh,
+  resolveVoiceTranscriptionTarget,
 } from "~/lib/providerAvailability";
+import { resolveProviderInstanceLabel } from "~/lib/providerInstancePresentation";
+import { resolveAuxiliaryTextGenerationSelection } from "~/lib/textGenerationCapabilities";
 import {
   loadConfirmedCustomBinaryPaths,
   saveConfirmedCustomBinaryPaths,
@@ -2078,6 +2081,7 @@ export default function ChatView({
   const voiceTranscriptionRequestIdRef = useRef(0);
   const voiceThreadIdRef = useRef(threadId);
   const voiceProviderRef = useRef<ProviderKind>(selectedProvider);
+  const voiceProviderInstanceRef = useRef<ProviderInstanceId>("codex" as ProviderInstanceId);
   const voiceRecordingStartedAtRef = useRef<number | null>(null);
   voiceThreadIdRef.current = threadId;
   voiceProviderRef.current = selectedProvider;
@@ -2181,11 +2185,10 @@ export default function ChatView({
     () => providerInstances.filter((instance) => instance.provider === selectedProvider),
     [providerInstances, selectedProvider],
   );
-  const selectedProviderInstanceLabel =
-    selectedProviderInstances.find((instance) => instance.instanceId === selectedProviderInstanceId)
-      ?.label ??
-    selectedProviderInstances[0]?.label ??
-    "Default";
+  const selectedProviderInstanceLabel = resolveProviderInstanceLabel(
+    selectedProviderInstances,
+    selectedProviderInstanceId,
+  );
   const showProviderInstancePicker =
     selectedProvider === "codex" ||
     selectedProvider === "claudeAgent" ||
@@ -3925,15 +3928,20 @@ export default function ChatView({
     dismissedProviderHealthBannerKeys.includes(activeProviderHealthBannerDismissalKey)
       ? null
       : activeProviderStatus;
-  const voiceProviderStatus = useMemo(
+  const voiceProviderTarget = useMemo(
     () =>
-      findProviderStatus(
-        providerStatuses,
-        "codex",
-        selectedProvider === "codex" ? selectedProviderInstanceId : "codex",
-      ),
-    [providerStatuses, selectedProvider, selectedProviderInstanceId],
+      resolveVoiceTranscriptionTarget({
+        statuses: providerStatuses,
+        providerInstances,
+        selectedProvider,
+        selectedProviderInstanceId,
+      }),
+    [providerInstances, providerStatuses, selectedProvider, selectedProviderInstanceId],
   );
+  const voiceProviderStatus = voiceProviderTarget?.status ?? null;
+  const voiceProviderInstanceId =
+    voiceProviderTarget?.instanceId ?? ("codex" as ProviderInstanceId);
+  voiceProviderInstanceRef.current = voiceProviderInstanceId;
   const refreshProviderStatuses = useRefreshProviderStatusesNow();
   const voiceRecordingDurationLabel = useMemo(
     () => formatVoiceRecordingDuration(voiceRecordingDurationMs),
@@ -4672,7 +4680,10 @@ export default function ChatView({
     latestTurnSettled,
     codexHomePath: settings.codexHomePath || null,
     providerOptions: providerOptionsForDispatch ?? null,
-    textGenerationModelSelection: selectedModelSelection,
+    textGenerationModelSelection: resolveAuxiliaryTextGenerationSelection({
+      provider: selectedProvider,
+      modelSelection: selectedModelSelection,
+    }),
   });
   const hasRightDockPanes = useRightDockStore(
     (store) => selectRightDockState(threadId)(store).panes.length > 0,
@@ -6444,10 +6455,12 @@ export default function ChatView({
     voiceTranscriptionRequestIdRef.current = requestId;
     const requestThreadId = threadId;
     const requestProvider = selectedProvider;
+    const requestVoiceProviderInstanceId = voiceProviderInstanceId;
     const isCurrentVoiceRequest = () =>
       voiceTranscriptionRequestIdRef.current === requestId &&
       voiceThreadIdRef.current === requestThreadId &&
-      voiceProviderRef.current === requestProvider;
+      voiceProviderRef.current === requestProvider &&
+      voiceProviderInstanceRef.current === requestVoiceProviderInstanceId;
 
     try {
       const payload = await stopVoiceRecording();
@@ -6463,7 +6476,7 @@ export default function ChatView({
       }
       const result = await api.server.transcribeVoice({
         provider: "codex",
-        providerInstanceId: selectedProvider === "codex" ? selectedProviderInstanceId : "codex",
+        providerInstanceId: requestVoiceProviderInstanceId,
         cwd: activeProject.cwd,
         ...(activeThread ? { threadId: activeThread.id } : {}),
         ...payload,
@@ -6515,9 +6528,9 @@ export default function ChatView({
     isVoiceRecording,
     refreshProviderStatuses,
     selectedProvider,
-    selectedProviderInstanceId,
     stopVoiceRecording,
     threadId,
+    voiceProviderInstanceId,
   ]);
 
   const cancelComposerVoiceRecording = useCallback(() => {
@@ -7455,7 +7468,10 @@ export default function ChatView({
         cwd: activeProject.cwd,
         codexHomePath: settings.codexHomePath || null,
         providerOptions: providerOptionsForDispatch ?? null,
-        textGenerationModelSelection: selectedModelSelectionForSend,
+        textGenerationModelSelection: resolveAuxiliaryTextGenerationSelection({
+          provider: selectedModelSelectionProviderForSend,
+          modelSelection: selectedModelSelectionForSend,
+        }),
         generateIntent: (request) => api.server.generateAutomationIntent(request),
       });
       // Drop a stale resolve: bail if the user switched threads, or cancelled/changed the

@@ -28,6 +28,7 @@ interface UseComposerVoiceControllerOptions {
   threadId: ThreadId;
   selectedProvider: ProviderKind;
   selectedProviderInstanceId: ProviderInstanceId;
+  voiceProviderInstanceId: ProviderInstanceId;
   activeProviderStatus: ServerProviderStatus | null;
   pendingUserInputCount: number;
   onTranscriptReady: (transcript: string) => void;
@@ -55,6 +56,7 @@ export function useComposerVoiceController(
     threadId,
     selectedProvider,
     selectedProviderInstanceId,
+    voiceProviderInstanceId,
     activeProviderStatus,
     pendingUserInputCount,
     onTranscriptReady,
@@ -72,10 +74,12 @@ export function useComposerVoiceController(
   const voiceTranscriptionRequestIdRef = useRef(0);
   const voiceThreadIdRef = useRef(threadId);
   const voiceProviderRef = useRef<ProviderKind>(selectedProvider);
-  const voiceProviderInstanceRef = useRef<ProviderInstanceId>(selectedProviderInstanceId);
+  const composerProviderInstanceRef = useRef<ProviderInstanceId>(selectedProviderInstanceId);
+  const voiceProviderInstanceRef = useRef<ProviderInstanceId>(voiceProviderInstanceId);
   voiceThreadIdRef.current = threadId;
   voiceProviderRef.current = selectedProvider;
-  voiceProviderInstanceRef.current = selectedProviderInstanceId;
+  composerProviderInstanceRef.current = selectedProviderInstanceId;
+  voiceProviderInstanceRef.current = voiceProviderInstanceId;
 
   const voiceRecordingDurationLabel = useMemo(
     () => formatVoiceRecordingDuration(voiceRecordingDurationMs),
@@ -176,11 +180,13 @@ export function useComposerVoiceController(
     const requestThreadId = threadId;
     const requestProvider = selectedProvider;
     const requestProviderInstanceId = selectedProviderInstanceId;
+    const requestVoiceProviderInstanceId = voiceProviderInstanceId;
     const isCurrentVoiceRequest = () =>
       voiceTranscriptionRequestIdRef.current === requestId &&
       voiceThreadIdRef.current === requestThreadId &&
       voiceProviderRef.current === requestProvider &&
-      voiceProviderInstanceRef.current === requestProviderInstanceId;
+      composerProviderInstanceRef.current === requestProviderInstanceId &&
+      voiceProviderInstanceRef.current === requestVoiceProviderInstanceId;
 
     try {
       const payload = await stopVoiceRecording();
@@ -194,11 +200,9 @@ export function useComposerVoiceController(
         });
         return;
       }
-      const transcriptionProviderInstanceId =
-        selectedProvider === "codex" ? selectedProviderInstanceId : ("codex" as ProviderInstanceId);
       const result = await api.server.transcribeVoice({
         provider: "codex",
-        providerInstanceId: transcriptionProviderInstanceId,
+        providerInstanceId: requestVoiceProviderInstanceId,
         cwd: activeProject.cwd,
         ...(activeThreadId ? { threadId: activeThreadId } : {}),
         ...payload,
@@ -251,6 +255,7 @@ export function useComposerVoiceController(
     selectedProviderInstanceId,
     stopVoiceRecording,
     threadId,
+    voiceProviderInstanceId,
   ]);
 
   const cancelComposerVoiceRecording = useCallback(() => {

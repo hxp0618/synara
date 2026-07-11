@@ -64,7 +64,7 @@ import { useComposerDropzone } from "~/hooks/useComposerDropzone";
 import { toastManager } from "~/components/ui/toast";
 import { useTheme } from "~/hooks/useTheme";
 import { ChevronRightIcon, PaperclipIcon } from "~/lib/icons";
-import { findProviderStatus } from "~/lib/providerAvailability";
+import { resolveVoiceTranscriptionTarget } from "~/lib/providerAvailability";
 import { resolveProviderDiscoveryCwd } from "~/lib/providerDiscovery";
 import { serverConfigQueryOptions } from "~/lib/serverReactQuery";
 import { cn } from "~/lib/utils";
@@ -188,15 +188,17 @@ export function KanbanNewTaskDialog({
 
   // Voice transcription always rides on the Codex ChatGPT session, regardless of
   // which provider the task targets — gate the mic on the Codex status.
-  const voiceProviderStatus = useMemo(
+  const voiceProviderTarget = useMemo(
     () =>
-      findProviderStatus(
-        providerStatuses,
-        "codex",
-        selectedProvider === "codex" ? selectedProviderInstanceId : "codex",
-      ),
-    [providerStatuses, selectedProvider, selectedProviderInstanceId],
+      resolveVoiceTranscriptionTarget({
+        statuses: providerStatuses,
+        providerInstances,
+        selectedProvider,
+        selectedProviderInstanceId,
+      }),
+    [providerInstances, providerStatuses, selectedProvider, selectedProviderInstanceId],
   );
+  const voiceProviderStatus = voiceProviderTarget?.status ?? null;
 
   const modelHintByProvider = useMemo<Partial<Record<ProviderKind, string | null>>>(
     () => ({ [selectedProvider]: selectedModel }),
@@ -337,6 +339,7 @@ export function KanbanNewTaskDialog({
     threadId: scratchThreadId,
     selectedProvider,
     selectedProviderInstanceId,
+    voiceProviderInstanceId: voiceProviderTarget?.instanceId ?? "codex",
     activeProviderStatus: voiceProviderStatus,
     pendingUserInputCount: 0,
     onTranscriptReady: handleTranscriptReady,

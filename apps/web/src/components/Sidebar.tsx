@@ -92,6 +92,7 @@ import {
   type SidebarProjectSortOrder,
   type SidebarThreadSortOrder,
   getProviderInstanceOptions,
+  type ProviderInstanceOption,
   useAppSettings,
 } from "../appSettings";
 import { isElectron } from "../env";
@@ -129,10 +130,12 @@ import {
   gitResolvePullRequestQueryOptions,
   gitStatusQueryOptions,
 } from "../lib/gitReactQuery";
+import { providerComposerCapabilitiesQueryOptions } from "../lib/providerDiscoveryReactQuery";
 import {
-  providerComposerCapabilitiesQueryOptions,
-  supportsThreadImport,
-} from "../lib/providerDiscoveryReactQuery";
+  buildThreadImportCandidates,
+  filterThreadImportTargetsByCapabilities,
+  type ThreadImportTarget,
+} from "../lib/threadImport";
 import { resolveCurrentProjectTargetId } from "../lib/projectShortcutTargets";
 import { projectDiscoverScriptsQueryOptions } from "../lib/projectReactQuery";
 import {
@@ -193,11 +196,7 @@ import { ThreadRunningSpinner } from "./ThreadRunningSpinner";
 import { RenameDialog } from "./RenameDialog";
 import { RenameThreadDialog } from "./RenameThreadDialog";
 import { terminalRuntimeRegistry } from "./terminal/terminalRuntimeRegistry";
-import {
-  SidebarSearchPalette,
-  type ImportProviderKind,
-  type SidebarSearchPaletteMode,
-} from "./SidebarSearchPalette";
+import { SidebarSearchPalette, type SidebarSearchPaletteMode } from "./SidebarSearchPalette";
 import { useHandleNewChat } from "../hooks/useHandleNewChat";
 import { useHandleNewStudioChat } from "../hooks/useHandleNewStudioChat";
 import { useHandleNewThread } from "../hooks/useHandleNewThread";
@@ -1441,6 +1440,10 @@ export default function Sidebar() {
     [automationListQuery.data],
   );
   const { settings: appSettings, updateSettings } = useAppSettings();
+  const sidebarProviderInstances = useMemo(
+    () => getProviderInstanceOptions(appSettings),
+    [appSettings],
+  );
   // Threads is always available; Studio, Workspace, and the standalone Chats footer
   // can be hidden independently from Settings.
   const chatsSectionVisible = appSettings.showChatsSection;
@@ -2775,7 +2778,7 @@ export default function Sidebar() {
   ]);
 
   const handleImportThread = useCallback(
-    async (provider: ImportProviderKind, externalId: string) => {
+    async (target: ThreadImportTarget, externalId: string) => {
       const api = readNativeApi();
       if (!api) {
         throw new Error("The app server is unavailable.");
@@ -2792,14 +2795,17 @@ export default function Sidebar() {
         throw new Error("The target project could not be resolved.");
       }
 
+      const { provider, instanceId } = target;
       const providerDefaultModel = getDefaultModel(provider);
       const modelSelection =
         activeProject.defaultModelSelection &&
-        inferLegacyProviderKindFromModelSelection(activeProject.defaultModelSelection) === provider
+        inferLegacyProviderKindFromModelSelection(activeProject.defaultModelSelection) ===
+          provider &&
+        activeProject.defaultModelSelection.instanceId === instanceId
           ? activeProject.defaultModelSelection
           : providerDefaultModel
             ? {
-                instanceId: provider,
+                instanceId,
                 model: providerDefaultModel,
               }
             : null;
@@ -3621,7 +3627,7 @@ export default function Sidebar() {
             sourceProvider: inferLegacyProviderKindFromModelSelection(thread.modelSelection),
             sourceProviderInstanceId:
               thread.session?.providerInstanceId ?? thread.modelSelection.instanceId,
-            providerInstances: getProviderInstanceOptions(appSettings),
+            providerInstances: sidebarProviderInstances,
           })
         : [];
       const handoffTargetById = new Map(
@@ -3796,7 +3802,7 @@ export default function Sidebar() {
       await confirmAndDeleteThread(threadId);
     },
     [
-      appSettings,
+      sidebarProviderInstances,
       confirmAndArchiveThread,
       confirmAndDeleteThread,
       copyPathToClipboard,
@@ -7632,6 +7638,7 @@ export default function Sidebar() {
             });
           }}
           onOpenProject={handleOpenProjectFromSearch}
+          providerInstances={sidebarProviderInstances}
           onImportThread={handleImportThread}
           onOpenThread={(threadId) => {
             activateThreadFromSidebarIntent(ThreadId.makeUnsafe(threadId));
@@ -7658,21 +7665,27 @@ function SidebarSearchPaletteController(props: {
   onOpenSettings: () => void;
   onOpenUsageSettings: () => void;
   onOpenProject: (projectId: string) => void;
-  onImportThread: (provider: ImportProviderKind, externalId: string) => Promise<void>;
+  providerInstances: readonly ProviderInstanceOption[];
+  onImportThread: (target: ThreadImportTarget, externalId: string) => Promise<void>;
   onOpenThread: (threadId: string) => void;
 }) {
   const selectAllThreads = useMemo(() => createAllThreadsSelector(), []);
   const selectSidebarDisplayThreads = useMemo(() => createSidebarDisplayThreadsSelector(), []);
+  const importCandidates = useMemo(
+    () => buildThreadImportCandidates(props.providerInstances),
+    [props.providerInstances],
+  );
   const importProviderCapabilityQueries = useQueries({
-    queries: (["codex", "claudeAgent", "cursor", "kilo", "opencode"] as const).map((provider) =>
-      providerComposerCapabilitiesQueryOptions(provider),
+    queries: importCandidates.map((target) =>
+      providerComposerCapabilitiesQueryOptions(target.provider, target.instanceId),
     ),
   });
   const threads = useStore(selectAllThreads);
   const sidebarDisplayThreads = useStore(selectSidebarDisplayThreads);
-  const importProviders: ReadonlyArray<ImportProviderKind> = (
-    ["codex", "claudeAgent", "cursor", "kilo", "opencode"] as const
-  ).filter((provider, index) => supportsThreadImport(importProviderCapabilityQueries[index]?.data));
+  const importTargets = filterThreadImportTargetsByCapabilities(
+    importCandidates,
+    importProviderCapabilityQueries.map((query) => query.data),
+  );
   const searchPaletteThreads = useMemo<SidebarSearchThread[]>(() => {
     const threadById = new Map(threads.map((thread) => [thread.id, thread] as const));
     return sidebarDisplayThreads.flatMap((threadSummary) => {
@@ -7717,7 +7730,7 @@ function SidebarSearchPaletteController(props: {
       onOpenSettings={props.onOpenSettings}
       onOpenUsageSettings={props.onOpenUsageSettings}
       onOpenProject={props.onOpenProject}
-      importProviders={importProviders}
+      importTargets={importTargets}
       onImportThread={props.onImportThread}
       onOpenThread={props.onOpenThread}
     />

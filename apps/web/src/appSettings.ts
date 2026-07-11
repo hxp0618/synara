@@ -48,6 +48,7 @@ import {
   UI_DENSITY_MODES,
   normalizeUiDensity as normalizeUiDensityValue,
 } from "./lib/appDensity";
+import { supportsTextGeneration } from "./lib/textGenerationCapabilities";
 
 const APP_SETTINGS_STORAGE_KEY = "synara:app-settings:v1";
 const SERVER_SETTINGS_MIGRATION_STORAGE_KEY = "synara:server-settings-migrated:v1";
@@ -268,12 +269,6 @@ export interface GitTextGenerationModelPickerOption {
 
 const DEFAULT_APP_SETTINGS = AppSettingsSchema.makeUnsafe({});
 let serverSettingsMigrationInFlight = false;
-const GIT_TEXT_GENERATION_PROVIDERS = new Set<ProviderKind>([
-  "codex",
-  "claudeAgent",
-  "kilo",
-  "opencode",
-]);
 
 const PROVIDER_CUSTOM_MODEL_CONFIG: Record<ProviderKind, ProviderCustomModelConfig> = {
   codex: {
@@ -680,6 +675,79 @@ export function getUnsupportedProviderInstanceOptions(
     .toSorted((left, right) => left.label.localeCompare(right.label));
 }
 
+export interface ManageableProviderInstance {
+  readonly instanceId: ProviderInstanceId;
+  readonly instance: ProviderInstanceConfig;
+  readonly legacyCodexAccountId: string | null;
+}
+
+// Legacy Codex accounts are derived into provider instances by the server. Surface
+// those derived rows alongside explicit instances so settings can edit or remove
+// them without first requiring a destructive identity migration.
+export function getManageableProviderInstances(
+  settings: Pick<
+    AppSettings,
+    | "codexAccounts"
+    | "codexBinaryPath"
+    | "codexHomePath"
+    | "providerInstances"
+    | "selectedCodexAccountId"
+  >,
+  provider: ProviderKind,
+): ManageableProviderInstance[] {
+  const legacyCodexAccountByInstanceId = new Map(
+    normalizeCodexAccounts(settings.codexAccounts).map((account) => [
+      providerInstanceIdForCodexAccount(account.id),
+      account,
+    ]),
+  );
+  const result: ManageableProviderInstance[] = [];
+
+  for (const option of getProviderInstanceOptions(settings)) {
+    if (option.provider !== provider || option.isDefault) {
+      continue;
+    }
+
+    const explicit = settings.providerInstances[option.instanceId];
+    const legacyCodexAccount =
+      provider === "codex" ? legacyCodexAccountByInstanceId.get(option.instanceId) : undefined;
+    if (!legacyCodexAccount) {
+      if (explicit) {
+        result.push({
+          instanceId: option.instanceId,
+          instance: explicit,
+          legacyCodexAccountId: null,
+        });
+      }
+      continue;
+    }
+
+    const legacyConfig = {
+      binaryPath: settings.codexBinaryPath.trim(),
+      homePath: legacyCodexAccount.homePath.trim(),
+      shadowHomePath: legacyCodexAccount.shadowHomePath.trim(),
+      accountId: legacyCodexAccount.id,
+    };
+    const explicitConfig = isRecord(explicit?.config) ? explicit.config : {};
+    result.push({
+      instanceId: option.instanceId,
+      instance: {
+        driver: "codex",
+        displayName: legacyCodexAccount.label.trim() || legacyCodexAccount.id,
+        enabled: true,
+        ...explicit,
+        config: {
+          ...legacyConfig,
+          ...explicitConfig,
+        },
+      },
+      legacyCodexAccountId: legacyCodexAccount.id,
+    });
+  }
+
+  return result;
+}
+
 // Removes every setting keyed by an explicit instance id so a later instance
 // that reuses the id cannot inherit the deleted account's model preferences.
 export function removeProviderInstancePreferences(
@@ -693,6 +761,38 @@ export function removeProviderInstancePreferences(
   return {
     providerInstances: providerInstances as ProviderInstanceConfigMap,
     favorites: settings.favorites.filter((favorite) => favorite.provider !== instanceId),
+  };
+}
+
+export function removeManageableProviderInstance(
+  settings: Pick<
+    AppSettings,
+    "codexAccounts" | "codexHomePath" | "favorites" | "providerInstances" | "selectedCodexAccountId"
+  >,
+  instanceId: string,
+): Pick<
+  AppSettings,
+  "codexAccounts" | "favorites" | "providerInstances" | "selectedCodexAccountId"
+> {
+  const preferences = removeProviderInstancePreferences(settings, instanceId);
+  const legacyAccount = normalizeCodexAccounts(settings.codexAccounts).find(
+    (account) => providerInstanceIdForCodexAccount(account.id) === instanceId,
+  );
+  if (!legacyAccount) {
+    return {
+      ...preferences,
+      codexAccounts: settings.codexAccounts,
+      selectedCodexAccountId: settings.selectedCodexAccountId,
+    };
+  }
+
+  return {
+    ...preferences,
+    codexAccounts: settings.codexAccounts.filter((account) => account.id !== legacyAccount.id),
+    selectedCodexAccountId:
+      settings.selectedCodexAccountId === legacyAccount.id
+        ? DEFAULT_CODEX_ACCOUNT_ID
+        : settings.selectedCodexAccountId,
   };
 }
 
@@ -1537,7 +1637,7 @@ export function getGitTextGenerationPickerOptions(
   const seen = new Set<string>();
 
   for (const instance of getProviderInstanceOptions(settings)) {
-    if (!instance.enabled || !GIT_TEXT_GENERATION_PROVIDERS.has(instance.provider)) {
+    if (!instance.enabled || !supportsTextGeneration(instance.provider)) {
       continue;
     }
     const selectedModelForInstance =

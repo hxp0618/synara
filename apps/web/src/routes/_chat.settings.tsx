@@ -52,6 +52,7 @@ import {
   getCustomModelsForProvider,
   getCustomModelsForProviderInstance,
   getGitTextGenerationPickerOptions,
+  getManageableProviderInstances,
   getProviderInstanceOptions,
   getUnsupportedProviderInstanceOptions,
   mergeProviderInstanceConfigPatch,
@@ -63,7 +64,7 @@ import {
   normalizeTerminalFontFamily,
   normalizeTerminalFontSizePx,
   patchCustomModelsForProviderInstance,
-  removeProviderInstancePreferences,
+  removeManageableProviderInstance,
   TERMINAL_FONT_FAMILY_SUGGESTIONS,
   useAppSettings,
 } from "../appSettings";
@@ -1359,7 +1360,14 @@ function SettingsRouteView() {
         readonly config?: Record<string, unknown>;
       },
     ) => {
-      const existing = settings.providerInstances[instanceId];
+      const existing: ProviderInstanceConfig | null =
+        settings.providerInstances[instanceId] ??
+        (() => {
+          const derived = getProviderInstanceOptions(settings).find(
+            (instance) => instance.instanceId === instanceId,
+          );
+          return derived ? ({ driver: derived.driver } as ProviderInstanceConfig) : null;
+        })();
       if (!existing) return;
       const {
         displayName: existingDisplayName,
@@ -1390,12 +1398,12 @@ function SettingsRouteView() {
         },
       });
     },
-    [settings.providerInstances, updateSettings],
+    [settings, updateSettings],
   );
 
   const removeProviderInstance = useCallback(
     (instanceId: string) => {
-      updateSettings(removeProviderInstancePreferences(settings, instanceId));
+      updateSettings(removeManageableProviderInstance(settings, instanceId));
     },
     [settings, updateSettings],
   );
@@ -3020,9 +3028,7 @@ function SettingsRouteView() {
 
   const renderProviderInstancesEditor = (providerSettings: InstallProviderSettings) => {
     const provider = providerSettings.provider;
-    const instanceRows = Object.entries(settings.providerInstances).filter(
-      ([instanceId, config]) => config.driver === provider && instanceId !== provider,
-    );
+    const instanceRows = getManageableProviderInstances(settings, provider);
     const homeLabel =
       provider === "codex" ? "CODEX_HOME" : provider === "claudeAgent" ? "HOME" : "Home path";
     const homePlaceholder =
@@ -3070,7 +3076,7 @@ function SettingsRouteView() {
 
         {instanceRows.length > 0 ? (
           <div className="space-y-2">
-            {instanceRows.map(([instanceId, instance]) => {
+            {instanceRows.map(({ instanceId, instance }) => {
               const config = instance.config;
               const serverPasswordRedacted = readProviderInstanceConfigBoolean(
                 config,
