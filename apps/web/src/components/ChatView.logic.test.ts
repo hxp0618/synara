@@ -39,6 +39,7 @@ import {
   shouldHandlePromptHistoryNavigationKey,
   shouldRenderProviderHealthBanner,
   shouldShowComposerModelBootstrapSkeleton,
+  shouldShowComposerProviderInstancePicker,
   shouldStartActiveTurnLayoutGrace,
   shouldRenderTerminalWorkspace,
   worktreeSetupHasError,
@@ -78,6 +79,40 @@ describe("draft provider instance selection", () => {
         resolveProviderForModelSelection: resolveProvider,
       }),
     ).toBe("claude_work");
+  });
+
+  it("keeps the account picker visible for a missing profile on every provider", () => {
+    expect(
+      shouldShowComposerProviderInstancePicker({
+        provider: "cursor",
+        selectedProviderInstanceId: "cursor_removed",
+        providerInstances: [{ instanceId: "cursor" }],
+      }),
+    ).toBe(true);
+    expect(
+      shouldShowComposerProviderInstancePicker({
+        provider: "opencode",
+        selectedProviderInstanceId: "opencode_removed",
+        providerInstances: [{ instanceId: "opencode" }],
+      }),
+    ).toBe(true);
+  });
+
+  it("still hides a redundant single-profile picker when the selection exists", () => {
+    expect(
+      shouldShowComposerProviderInstancePicker({
+        provider: "cursor",
+        selectedProviderInstanceId: "cursor",
+        providerInstances: [{ instanceId: "cursor" }],
+      }),
+    ).toBe(false);
+    expect(
+      shouldShowComposerProviderInstancePicker({
+        provider: "codex",
+        selectedProviderInstanceId: "codex",
+        providerInstances: [{ instanceId: "codex" }],
+      }),
+    ).toBe(true);
   });
 });
 

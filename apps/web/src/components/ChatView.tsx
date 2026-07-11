@@ -533,6 +533,7 @@ import {
   type QueuedSteerGate,
   resolveQueuedSteerGateTransition,
   shouldRenderProviderHealthBanner,
+  shouldShowComposerProviderInstancePicker,
   resolveRuntimeModeAfterApprovalDecision,
   revokeBlobPreviewUrl,
   revokeUserMessagePreviewUrls,
@@ -2190,10 +2191,11 @@ export default function ChatView({
     selectedProviderInstances,
     selectedProviderInstanceId,
   );
-  const showProviderInstancePicker =
-    selectedProvider === "codex" ||
-    selectedProvider === "claudeAgent" ||
-    selectedProviderInstances.length > 1;
+  const showProviderInstancePicker = shouldShowComposerProviderInstancePicker({
+    provider: selectedProvider,
+    selectedProviderInstanceId,
+    providerInstances: selectedProviderInstances,
+  });
   const instanceModelQueries = useQueries({
     queries: providerInstances.map((instance) =>
       modelQueryOptionsForProviderInstance({
