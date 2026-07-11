@@ -385,11 +385,10 @@ function persistedContinuationMatchesLaunch(input: {
     if (persistedIdentity === currentIdentity) {
       return true;
     }
-    // Identity formats and preparation markers can change independently of an
-    // account's launch settings. An exact Codex launch is safe to upgrade in
-    // place; a different account or instance must first establish a genuinely
-    // shared identity.
-    if (input.provider === "codex") {
+    // Identity formats can be upgraded after the selected overlay has been
+    // verified as shared. Never use exact launch equivalence to downgrade from
+    // a persisted shared identity to an unprepared/broken overlay identity.
+    if (input.provider === "codex" && currentIdentity?.startsWith("codex:shared-v1:")) {
       return persistedLaunchMatchesExactly(input);
     }
     return false;
@@ -1670,8 +1669,8 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
         if (
           persistedBinding !== undefined &&
           !continuationResetRequested &&
-          !exactPersistedLaunchMatch &&
-          (!hasAvailableResumeCursor || !continuationCompatible) &&
+          ((!hasAvailableResumeCursor && !exactPersistedLaunchMatch) ||
+            (hasAvailableResumeCursor && !continuationCompatible)) &&
           (providerUsesProtectedNativeContinuation(persistedBinding.provider) ||
             providerUsesProtectedNativeContinuation(resolved.instance.driver))
         ) {

@@ -49,7 +49,11 @@ import {
 } from "../../persistence/Layers/Sqlite.ts";
 import { AnalyticsService } from "../../telemetry/Services/AnalyticsService.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
-import { buildCodexProcessEnv } from "../../codexProcessEnv.ts";
+import {
+  buildCodexProcessEnv,
+  isCodexSharedContinuationStatePrepared,
+} from "../../codexProcessEnv.ts";
+import { resolveActiveCodexHomeWritePath } from "../../codexHomePaths.ts";
 
 const asRequestId = (value: string): ApprovalRequestId => ApprovalRequestId.makeUnsafe(value);
 const asEventId = (value: string): EventId => EventId.makeUnsafe(value);
@@ -81,6 +85,11 @@ function makeSharedCodexContinuationFixture(accountIds: readonly string[]) {
     root,
     homePath,
     environment,
+    instanceEnvironment: Object.entries(environment).map(([name, value]) => ({
+      name,
+      value,
+      sensitive: false,
+    })),
     shadowHomePath: (accountId: string) => shadowHomePaths.get(accountId)!,
   };
 }
@@ -431,20 +440,20 @@ routing.layer("ProviderServiceLive native forks", (it) => {
         providerInstances: {
           codex_personal: {
             driver: "codex",
+            environment: fixture.instanceEnvironment,
             config: {
               homePath: sharedHomePath,
               shadowHomePath: fixture.shadowHomePath("personal"),
               accountId: "personal",
-              environment: fixture.environment,
             },
           },
           codex_work: {
             driver: "codex",
+            environment: fixture.instanceEnvironment,
             config: {
               homePath: sharedHomePath,
               shadowHomePath: fixture.shadowHomePath("work"),
               accountId: "work",
-              environment: fixture.environment,
             },
           },
         },
@@ -483,6 +492,7 @@ routing.layer("ProviderServiceLive native forks", (it) => {
           homePath: sharedHomePath,
           shadowHomePath: fixture.shadowHomePath("work"),
           accountId: "work",
+          environment: fixture.environment,
         },
       });
       const targetBinding = Option.getOrUndefined(yield* directory.getBinding(targetThreadId));
@@ -1229,6 +1239,140 @@ routing.layer("ProviderServiceLive routing", (it) => {
     }),
   );
 
+  it.effect(
+    "rejects a stale shared marker when the selected Codex overlay is no longer linked",
+    () =>
+      Effect.gen(function* () {
+        const provider = yield* ProviderService;
+        const threadId = asThreadId("thread-codex-stale-shared-marker");
+        const fixture = makeSharedCodexContinuationFixture(["personal", "work"]);
+        const personalOptions = {
+          codex: {
+            homePath: fixture.homePath,
+            shadowHomePath: fixture.shadowHomePath("personal"),
+            accountId: "personal",
+            environment: fixture.environment,
+          },
+        };
+        const workOptions = {
+          codex: {
+            homePath: fixture.homePath,
+            shadowHomePath: fixture.shadowHomePath("work"),
+            accountId: "work",
+            environment: fixture.environment,
+          },
+        };
+        yield* provider.startSession(threadId, {
+          provider: "codex",
+          threadId,
+          providerOptions: personalOptions,
+          runtimeMode: "full-access",
+        });
+
+        const workOverlayHomePath = resolveActiveCodexHomeWritePath({
+          env: { ...process.env, ...fixture.environment },
+          homePath: fixture.homePath,
+          shadowHomePath: fixture.shadowHomePath("work"),
+          accountId: "work",
+        });
+        fs.unlinkSync(path.join(workOverlayHomePath, "sessions"));
+        fs.mkdirSync(path.join(workOverlayHomePath, "sessions"));
+        fs.writeFileSync(
+          path.join(workOverlayHomePath, "sessions", "independent.jsonl"),
+          "independent",
+          "utf8",
+        );
+        assert.equal(
+          isCodexSharedContinuationStatePrepared({
+            env: { ...process.env, ...fixture.environment },
+            homePath: fixture.homePath,
+            shadowHomePath: fixture.shadowHomePath("work"),
+            accountId: "work",
+          }),
+          false,
+        );
+        routing.codex.startSession.mockClear();
+
+        const result = yield* Effect.result(
+          provider.startSession(threadId, {
+            provider: "codex",
+            threadId,
+            providerOptions: workOptions,
+            runtimeMode: "full-access",
+          }),
+        );
+        assert.equal(result._tag, "Failure");
+        if (result._tag === "Failure") {
+          assert.match(String(result.failure), /native session storage is incompatible/);
+        }
+        assert.equal(routing.codex.startSession.mock.calls.length, 0);
+        assert.strictEqual(
+          fs.readFileSync(path.join(workOverlayHomePath, "sessions", "independent.jsonl"), "utf8"),
+          "independent",
+        );
+        fs.rmSync(fixture.root, { recursive: true, force: true });
+      }),
+  );
+
+  it.effect("does not let an exact Codex launch downgrade a persisted shared identity", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const threadId = asThreadId("thread-codex-stale-shared-marker-exact-launch");
+      const fixture = makeSharedCodexContinuationFixture(["personal"]);
+      const personalOptions = {
+        codex: {
+          homePath: fixture.homePath,
+          shadowHomePath: fixture.shadowHomePath("personal"),
+          accountId: "personal",
+          environment: fixture.environment,
+        },
+      };
+      yield* provider.startSession(threadId, {
+        provider: "codex",
+        threadId,
+        providerOptions: personalOptions,
+        runtimeMode: "full-access",
+      });
+
+      const personalOverlayHomePath = resolveActiveCodexHomeWritePath({
+        env: { ...process.env, ...fixture.environment },
+        homePath: fixture.homePath,
+        shadowHomePath: fixture.shadowHomePath("personal"),
+        accountId: "personal",
+      });
+      fs.unlinkSync(path.join(personalOverlayHomePath, "sessions"));
+      fs.mkdirSync(path.join(personalOverlayHomePath, "sessions"));
+      fs.writeFileSync(
+        path.join(personalOverlayHomePath, "sessions", "independent.jsonl"),
+        "independent",
+        "utf8",
+      );
+      routing.codex.startSession.mockClear();
+
+      const result = yield* Effect.result(
+        provider.startSession(threadId, {
+          provider: "codex",
+          threadId,
+          providerOptions: personalOptions,
+          runtimeMode: "full-access",
+        }),
+      );
+      assert.equal(result._tag, "Failure");
+      if (result._tag === "Failure") {
+        assert.match(String(result.failure), /native session storage is incompatible/);
+      }
+      assert.equal(routing.codex.startSession.mock.calls.length, 0);
+      assert.strictEqual(
+        fs.readFileSync(
+          path.join(personalOverlayHomePath, "sessions", "independent.jsonl"),
+          "utf8",
+        ),
+        "independent",
+      );
+      fs.rmSync(fixture.root, { recursive: true, force: true });
+    }),
+  );
+
   it.effect("reuses stopped Codex continuation when switching instances on a shared home", () =>
     Effect.gen(function* () {
       const provider = yield* ProviderService;
@@ -1239,20 +1383,20 @@ routing.layer("ProviderServiceLive routing", (it) => {
         providerInstances: {
           codex_personal: {
             driver: "codex",
+            environment: fixture.instanceEnvironment,
             config: {
               homePath: fixture.homePath,
               shadowHomePath: fixture.shadowHomePath("personal"),
               accountId: "personal",
-              environment: fixture.environment,
             },
           },
           codex_work: {
             driver: "codex",
+            environment: fixture.instanceEnvironment,
             config: {
               homePath: fixture.homePath,
               shadowHomePath: fixture.shadowHomePath("work"),
               accountId: "work",
-              environment: fixture.environment,
             },
           },
         },
@@ -2333,6 +2477,9 @@ routing.layer("ProviderServiceLive routing", (it) => {
       const codexHomePath = path.join(tempDir, "codex-work");
       const codexShadowHomePath = path.join(tempDir, "codex-work-shadow");
       const codexEnvironment = { SYNARA_HOME: path.join(tempDir, "synara-runtime") };
+      const codexInstanceEnvironment = [
+        { name: "SYNARA_HOME", value: codexEnvironment.SYNARA_HOME, sensitive: false },
+      ];
       fs.mkdirSync(codexHomePath, { recursive: true });
       fs.mkdirSync(codexShadowHomePath, { recursive: true });
       fs.writeFileSync(path.join(codexHomePath, "config.toml"), "", "utf8");
@@ -2343,6 +2490,11 @@ routing.layer("ProviderServiceLive routing", (it) => {
         shadowHomePath: codexShadowHomePath,
         accountId: "work",
       });
+      buildCodexProcessEnv({
+        env: { ...process.env, ...codexEnvironment },
+        homePath: codexHomePath,
+        accountId: "codex_work",
+      });
       const persistenceLayer = makeSqlitePersistenceLive(dbPath);
       const runtimeRepositoryLayer = ProviderSessionRuntimeRepositoryLive.pipe(
         Layer.provide(persistenceLayer),
@@ -2352,11 +2504,11 @@ routing.layer("ProviderServiceLive routing", (it) => {
           codex_work: {
             driver: "codex",
             enabled: true,
+            environment: codexInstanceEnvironment,
             config: {
               homePath: codexHomePath,
               shadowHomePath: codexShadowHomePath,
               accountId: "work",
-              environment: codexEnvironment,
             },
           },
         },
@@ -2366,9 +2518,9 @@ routing.layer("ProviderServiceLive routing", (it) => {
           codex_work: {
             driver: "codex",
             enabled: true,
+            environment: codexInstanceEnvironment,
             config: {
               homePath: codexHomePath,
-              environment: codexEnvironment,
             },
           },
         },
@@ -2446,6 +2598,7 @@ routing.layer("ProviderServiceLive routing", (it) => {
           codex: {
             homePath: codexHomePath,
             accountId: "codex_work",
+            environment: codexEnvironment,
           },
         });
         assert.deepEqual(startPayload.resumeCursor, initial.resumeCursor);
