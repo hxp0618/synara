@@ -637,7 +637,7 @@ export function SidebarSearchPalette(props: SidebarSearchPaletteProps) {
                       key={target.instanceId}
                       aria-label={`${target.label}, ${PROVIDER_DISPLAY_NAMES[target.provider]}`}
                       value={target.instanceId}
-                      className="h-auto min-h-11 w-full min-w-0 justify-start gap-2 rounded-lg border-[color:var(--color-border)] bg-transparent px-3 py-2 text-left text-foreground hover:bg-muted/60 data-checked:bg-muted data-checked:hover:bg-muted/80 [&_[data-slot=radio-indicator]]:hidden"
+                      className="h-auto min-h-11 w-full min-w-0 justify-start gap-2 rounded-lg border-[color:var(--color-border)] bg-transparent px-3 py-2 text-left text-foreground hover:bg-muted/60 data-checked:bg-muted data-checked:hover:bg-muted/80 sm:h-auto sm:w-full [&_[data-slot=radio-indicator]]:hidden"
                     >
                       <ProviderIcon provider={target.provider} />
                       <span className="min-w-0 flex-1">
