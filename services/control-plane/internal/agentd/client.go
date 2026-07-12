@@ -112,6 +112,76 @@ func (c *Client) AppendEvent(ctx context.Context, executionID uuid.UUID, lease e
 	}, nil)
 }
 
+func (c *Client) PullInteractionResolutions(
+	ctx context.Context,
+	executionID uuid.UUID,
+	lease executions.Lease,
+) ([]executions.InteractionResolutionDelivery, error) {
+	var output struct {
+		Items []executions.InteractionResolutionDelivery `json:"items"`
+	}
+	err := c.doJSON(
+		ctx, http.MethodPost, executionPath(executionID, "interaction-resolutions/pull"),
+		c.workerToken, uuid.NewString(), executions.PullInteractionResolutionsInput{
+			LeaseInput: executions.LeaseInput{
+				TenantID: lease.TenantID, Generation: lease.Generation, LeaseToken: lease.LeaseToken,
+			},
+			Limit: 1,
+		}, &output,
+	)
+	return output.Items, err
+}
+
+func (c *Client) MarkInteractionResolutionDelivered(
+	ctx context.Context,
+	executionID uuid.UUID,
+	lease executions.Lease,
+	delivery executions.InteractionResolutionDelivery,
+) error {
+	return c.updateInteractionResolutionDelivery(ctx, executionID, lease, delivery, "delivered")
+}
+
+func (c *Client) AcknowledgeInteractionResolution(
+	ctx context.Context,
+	executionID uuid.UUID,
+	lease executions.Lease,
+	delivery executions.InteractionResolutionDelivery,
+) error {
+	return c.updateInteractionResolutionDelivery(ctx, executionID, lease, delivery, "acknowledged")
+}
+
+func (c *Client) updateInteractionResolutionDelivery(
+	ctx context.Context,
+	executionID uuid.UUID,
+	lease executions.Lease,
+	delivery executions.InteractionResolutionDelivery,
+	status string,
+) error {
+	return c.doJSON(
+		ctx, http.MethodPost,
+		executionPath(executionID, "interaction-resolutions/"+delivery.InteractionID.String()+"/"+status),
+		c.workerToken, interactionDeliveryRequestID(executionID, lease, delivery, status), executions.InteractionResolutionDeliveryInput{
+			LeaseInput: executions.LeaseInput{
+				TenantID: lease.TenantID, Generation: lease.Generation, LeaseToken: lease.LeaseToken,
+			},
+			ResolutionCommandID: delivery.CommandID,
+		}, nil,
+	)
+}
+
+func interactionDeliveryRequestID(
+	executionID uuid.UUID,
+	lease executions.Lease,
+	delivery executions.InteractionResolutionDelivery,
+	status string,
+) string {
+	digest := sha256.Sum256([]byte(strings.Join([]string{
+		executionID.String(), delivery.InteractionID.String(), delivery.CommandID,
+		fmt.Sprintf("%d", lease.Generation), status,
+	}, "\x00")))
+	return "interaction-" + status + "-" + hex.EncodeToString(digest[:16])
+}
+
 func (c *Client) Complete(ctx context.Context, executionID uuid.UUID, lease executions.Lease, result RunnerResult) error {
 	return c.executionRequest(ctx, executionID, "complete", executions.CompleteExecutionInput{
 		LeaseInput:           executions.LeaseInput{TenantID: lease.TenantID, Generation: lease.Generation, LeaseToken: lease.LeaseToken},

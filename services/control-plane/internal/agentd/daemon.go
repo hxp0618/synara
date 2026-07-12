@@ -119,9 +119,15 @@ func (d *Daemon) runExecution(
 	runnerContext, cancelRunner := context.WithCancel(ctx)
 	renewErrors := make(chan error, 1)
 	go d.renewLeaseLoop(runnerContext, execution.ID, lease, cancelRunner, renewErrors)
-	result, runErr := d.runner.Run(runnerContext, RunnerInput{
+	var controls <-chan RunnerControl
+	if d.runner.protocol == RunnerProtocolV2 {
+		controlChannel := make(chan RunnerControl)
+		controls = controlChannel
+		go d.interactionResolutionLoop(runnerContext, execution.ID, lease, controlChannel)
+	}
+	result, runErr := d.runner.RunControlled(runnerContext, RunnerInput{
 		Execution: execution, Workload: workload, ProviderResumeCursor: resumeCursor, WorkspaceDirectory: workspaceDirectory,
-	}, credential, func(messageContext context.Context, message RunnerMessage) error {
+	}, credential, controls, func(messageContext context.Context, message RunnerMessage) error {
 		switch message.Type {
 		case "event":
 			return d.client.AppendEvent(messageContext, execution.ID, lease, message)
@@ -136,7 +142,14 @@ func (d *Daemon) runExecution(
 			return d.client.UploadArtifact(messageContext, execution.ID, lease, *message.Artifact, artifactPath)
 		case "progress":
 			return nil
-		case "interaction", "checkpoint":
+		case "interaction":
+			eventType, err := interactionRuntimeEventType(message.Payload)
+			if err != nil {
+				return err
+			}
+			message.EventType = eventType
+			return d.client.AppendEvent(messageContext, execution.ID, lease, message)
+		case "checkpoint":
 			return &runnerFailure{
 				code:                 "capability_unsupported",
 				message:              "Provider Host emitted a lifecycle message that this Worker version cannot persist",
@@ -166,6 +179,100 @@ func (d *Daemon) runExecution(
 	}
 	d.logger.Info("execution completed", "executionId", execution.ID, "generation", lease.Generation)
 	return nil
+}
+
+func (d *Daemon) interactionResolutionLoop(
+	ctx context.Context,
+	executionID uuid.UUID,
+	lease executions.Lease,
+	output chan<- RunnerControl,
+) {
+	defer close(output)
+	interval := d.config.PollInterval
+	if interval <= 0 || interval > 500*time.Millisecond {
+		interval = 500 * time.Millisecond
+	}
+	for {
+		requestContext, cancel := context.WithTimeout(ctx, d.config.RequestTimeout)
+		items, err := d.client.PullInteractionResolutions(requestContext, executionID, lease)
+		cancel()
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			d.logger.Warn("interaction resolution pull failed", "executionId", executionID, "generation", lease.Generation, "error", err)
+			if !waitContext(ctx, interval) {
+				return
+			}
+			continue
+		}
+		if len(items) == 0 {
+			if !waitContext(ctx, interval) {
+				return
+			}
+			continue
+		}
+		delivery := items[0]
+		done := make(chan error, 1)
+		control := RunnerControl{
+			Delivery: delivery,
+			MarkDelivered: func(controlContext context.Context) error {
+				return d.retryInteractionDeliveryUpdate(controlContext, func(requestContext context.Context) error {
+					return d.client.MarkInteractionResolutionDelivered(requestContext, executionID, lease, delivery)
+				})
+			},
+			Acknowledge: func(controlContext context.Context) error {
+				return d.retryInteractionDeliveryUpdate(controlContext, func(requestContext context.Context) error {
+					return d.client.AcknowledgeInteractionResolution(requestContext, executionID, lease, delivery)
+				})
+			},
+			Done: done,
+		}
+		select {
+		case output <- control:
+		case <-ctx.Done():
+			return
+		}
+		select {
+		case err := <-done:
+			if err != nil {
+				return
+			}
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+func (d *Daemon) retryInteractionDeliveryUpdate(
+	ctx context.Context,
+	update func(context.Context) error,
+) error {
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		requestContext, cancel := context.WithTimeout(ctx, d.config.RequestTimeout)
+		lastErr = update(requestContext)
+		cancel()
+		if lastErr == nil {
+			return nil
+		}
+		if attempt < 2 && !waitContext(ctx, time.Duration(attempt+1)*100*time.Millisecond) {
+			return ctx.Err()
+		}
+	}
+	return lastErr
+}
+
+func interactionRuntimeEventType(payload map[string]any) (string, error) {
+	interactionType, _ := payload["interactionType"].(string)
+	switch strings.ToLower(strings.TrimSpace(interactionType)) {
+	case "approval":
+		return "approval.requested", nil
+	case "user-input":
+		return "user-input.requested", nil
+	default:
+		return "", protocolFailure("Provider Host InteractionRequest omitted a supported interactionType")
+	}
 }
 
 func (d *Daemon) renewLeaseLoop(ctx context.Context, executionID uuid.UUID, lease executions.Lease, cancel context.CancelFunc, result chan<- error) {

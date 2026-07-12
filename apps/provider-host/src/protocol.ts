@@ -22,8 +22,9 @@ import type { ProviderKind } from "@synara/contracts";
 import { Schema } from "effect";
 
 import {
-  runProviderHost,
+  startProviderHostRun,
   validateRunnerInput,
+  type ProviderRunController,
   type RunnerCredential,
   type RunnerInput,
   type RunnerMessage,
@@ -34,6 +35,8 @@ const HOST_BUILD_VERSION = process.env.SYNARA_PROVIDER_HOST_BUILD_VERSION?.trim(
 
 type ProtocolState = {
   sessionInput: RunnerInput | null;
+  activeTurn: { commandId: string; run: ProviderRunController } | null;
+  inFlightByCommandId: Map<string, Promise<ProviderHostMessageEnvelope>>;
   terminalByCommandId: Map<string, ProviderHostMessageEnvelope>;
 };
 
@@ -74,6 +77,7 @@ export function capabilityMapForProvider(provider: ProviderKind): ProviderCapabi
       "start-session": "native",
       "resume-session": "native",
       "send-turn": "native",
+      "interrupt-turn": "emulated",
       "read-history": "emulated",
       "model-switch": "native",
       "tool-events": "emulated",
@@ -90,17 +94,27 @@ export function capabilityMapForProvider(provider: ProviderKind): ProviderCapabi
 export function createProviderHostProtocolHandler(input: {
   credential: RunnerCredential | null;
   emit: (message: ProviderHostMessageEnvelope) => void;
+  startRun?: typeof startProviderHostRun;
 }): ProtocolHandler {
   const state: ProtocolState = {
     sessionInput: null,
+    activeTurn: null,
+    inFlightByCommandId: new Map(),
     terminalByCommandId: new Map(),
   };
+  const startRun = input.startRun ?? startProviderHostRun;
 
   return async (command) => {
     const cached = state.terminalByCommandId.get(command.commandId);
     if (cached) {
       input.emit(cached);
       return [cached];
+    }
+    const inFlight = state.inFlightByCommandId.get(command.commandId);
+    if (inFlight) {
+      const terminal = await inFlight;
+      input.emit(terminal);
+      return [terminal];
     }
 
     const emitted: ProviderHostMessageEnvelope[] = [];
@@ -109,9 +123,12 @@ export function createProviderHostProtocolHandler(input: {
       input.emit(message);
     };
 
-    const terminal = await executeCommand(command, state, input.credential, emit).catch((error) =>
-      errorMessage(command, classifyProviderHostError(error)),
+    const terminalPromise = executeCommand(command, state, input.credential, emit, startRun).catch(
+      (error) => errorMessage(command, classifyProviderHostError(error)),
     );
+    state.inFlightByCommandId.set(command.commandId, terminalPromise);
+    const terminal = await terminalPromise;
+    state.inFlightByCommandId.delete(command.commandId);
     state.terminalByCommandId.set(command.commandId, terminal);
     emitted.push(terminal);
     input.emit(terminal);
@@ -123,9 +140,15 @@ export async function runProviderHostProtocolV2(input: {
   source: Readable;
   credential: RunnerCredential | null;
   emit: (message: ProviderHostMessageEnvelope) => void;
+  startRun?: typeof startProviderHostRun;
 }): Promise<void> {
-  const handle = createProviderHostProtocolHandler({ credential: input.credential, emit: input.emit });
+  const handle = createProviderHostProtocolHandler({
+    credential: input.credential,
+    emit: input.emit,
+    ...(input.startRun ? { startRun: input.startRun } : {}),
+  });
   const lines = createInterface({ input: input.source, crlfDelay: Infinity });
+  const inFlight = new Set<Promise<ReadonlyArray<ProviderHostMessageEnvelope>>>();
 
   for await (const line of lines) {
     if (!line.trim()) continue;
@@ -179,8 +202,14 @@ export async function runProviderHostProtocolV2(input: {
       );
       continue;
     }
-    await handle(command);
+    const task = handle(command);
+    inFlight.add(task);
+    task.then(
+      () => inFlight.delete(task),
+      () => inFlight.delete(task),
+    );
   }
+  await Promise.all(inFlight);
 }
 
 async function executeCommand(
@@ -188,6 +217,7 @@ async function executeCommand(
   state: ProtocolState,
   credential: RunnerCredential | null,
   emit: (message: ProviderHostMessageEnvelope) => void,
+  startRun: typeof startProviderHostRun,
 ): Promise<ProviderHostMessageEnvelope> {
   assertCompatibleProtocol(command);
 
@@ -253,8 +283,18 @@ async function executeCommand(
         ...state.sessionInput,
         workload: { ...state.sessionInput.workload, inputText },
       };
-      let terminalResult: Extract<RunnerMessage, { type: "result" }> | undefined;
-      await runProviderHost(runInput, credential, (message) => {
+      if (state.activeTurn) {
+        throw new ProtocolFailure({
+          code: "protocol_violation",
+          message: "Only one SendTurn command may be active in a Provider Session.",
+          retryable: false,
+          requiresNewExecution: true,
+          requiresUserAction: false,
+          canReconstructFromHistory: true,
+          canMoveWorker: true,
+        });
+      }
+      const run = startRun(runInput, credential, (message) => {
         if (message.type === "event") {
           emit(
             payloadMessage(command, "Event", {
@@ -262,12 +302,21 @@ async function executeCommand(
               payload: message.payload,
             }),
           );
-        } else {
-          terminalResult = message;
+        } else if (message.type === "interaction") {
+          emit(
+            payloadMessage(command, "InteractionRequest", {
+              ...message.payload,
+              interactionType: message.interactionType,
+            }),
+          );
         }
       });
-      if (!terminalResult) {
-        throw new Error("Provider Host completed without a result message");
+      state.activeTurn = { commandId: command.commandId, run };
+      let terminalResult: Extract<RunnerMessage, { type: "result" }>;
+      try {
+        terminalResult = await run.result;
+      } finally {
+        if (state.activeTurn?.commandId === command.commandId) state.activeTurn = null;
       }
       const outputText = terminalResult.output.text;
       const history = [...(state.sessionInput.workload.conversationHistory ?? [])];
@@ -293,7 +342,52 @@ async function executeCommand(
           : {}),
       });
     }
+    case "InterruptTurn": {
+      const activeTurn = requireActiveTurn(state, command.commandType);
+      const targetCommandId = command.payload.targetCommandId;
+      if (
+        targetCommandId !== undefined &&
+        (typeof targetCommandId !== "string" || targetCommandId.trim() !== activeTurn.commandId)
+      ) {
+        throw new ProtocolFailure({
+          code: "protocol_violation",
+          message: "InterruptTurn targetCommandId does not match the active SendTurn command.",
+          retryable: false,
+          requiresNewExecution: false,
+          requiresUserAction: false,
+          canReconstructFromHistory: true,
+          canMoveWorker: false,
+        });
+      }
+      activeTurn.run.interrupt();
+      return resultMessage(command, { interrupted: true, targetCommandId: activeTurn.commandId });
+    }
+    case "ResolveApproval": {
+      const activeTurn = requireActiveTurn(state, command.commandType);
+      if (!activeTurn.run.resolveApproval) {
+        throw unsupportedInteractiveCommand(command.commandType);
+      }
+      validateResolutionCommandPayload(command.payload, command.commandType);
+      await activeTurn.run.resolveApproval(command.payload);
+      return resultMessage(command, {
+        acknowledged: true,
+        requestId: command.payload.requestId,
+      });
+    }
+    case "ResolveUserInput": {
+      const activeTurn = requireActiveTurn(state, command.commandType);
+      if (!activeTurn.run.resolveUserInput) {
+        throw unsupportedInteractiveCommand(command.commandType);
+      }
+      validateResolutionCommandPayload(command.payload, command.commandType);
+      await activeTurn.run.resolveUserInput(command.payload);
+      return resultMessage(command, {
+        acknowledged: true,
+        requestId: command.payload.requestId,
+      });
+    }
     case "StopSession":
+      state.activeTurn?.run.interrupt();
       state.sessionInput = null;
       return resultMessage(command, { stopped: true });
     default:
@@ -307,6 +401,54 @@ async function executeCommand(
         canMoveWorker: true,
       });
   }
+}
+
+function requireActiveTurn(
+  state: ProtocolState,
+  commandType: ProviderHostCommand["commandType"],
+): NonNullable<ProtocolState["activeTurn"]> {
+  if (state.activeTurn) return state.activeTurn;
+  throw new ProtocolFailure({
+    code: "session_resume_invalid",
+    message: `${commandType} requires an active SendTurn command.`,
+    retryable: false,
+    requiresNewExecution: false,
+    requiresUserAction: false,
+    canReconstructFromHistory: true,
+    canMoveWorker: true,
+  });
+}
+
+function validateResolutionCommandPayload(
+  payload: Record<string, unknown>,
+  commandType: "ResolveApproval" | "ResolveUserInput",
+): void {
+  requiredString(payload.requestId, `${commandType} requestId`);
+  if (!isRecord(payload.resolution)) {
+    throw new ProtocolFailure({
+      code: "protocol_violation",
+      message: `${commandType} resolution must be an object.`,
+      retryable: false,
+      requiresNewExecution: false,
+      requiresUserAction: false,
+      canReconstructFromHistory: true,
+      canMoveWorker: false,
+    });
+  }
+}
+
+function unsupportedInteractiveCommand(
+  commandType: "ResolveApproval" | "ResolveUserInput",
+): ProtocolFailure {
+  return new ProtocolFailure({
+    code: "capability_unsupported",
+    message: `${commandType} is not supported by the active Provider runtime.`,
+    retryable: false,
+    requiresNewExecution: true,
+    requiresUserAction: true,
+    canReconstructFromHistory: true,
+    canMoveWorker: true,
+  });
 }
 
 function assertCompatibleProtocol(command: ProviderHostCommand): void {
@@ -438,6 +580,9 @@ function classifyProviderHostError(error: unknown): ProviderHostError {
   if (error instanceof ProtocolFailure) return error.detail;
   const message = error instanceof Error ? error.message : String(error);
   const normalized = message.toLowerCase();
+  if (normalized.includes("interrupted")) {
+    return errorDetail("interrupted", message, false, false, false, true, true);
+  }
   if (normalized.includes("invalid jsonl") || normalized.includes("result message")) {
     return errorDetail("protocol_violation", message, false, true, false, true, true);
   }

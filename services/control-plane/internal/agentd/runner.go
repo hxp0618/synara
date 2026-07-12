@@ -32,8 +32,18 @@ func (r *Runner) Run(
 	credential *RunnerCredential,
 	handle func(context.Context, RunnerMessage) error,
 ) (RunnerResult, error) {
+	return r.RunControlled(ctx, input, credential, nil, handle)
+}
+
+func (r *Runner) RunControlled(
+	ctx context.Context,
+	input RunnerInput,
+	credential *RunnerCredential,
+	controls <-chan RunnerControl,
+	handle func(context.Context, RunnerMessage) error,
+) (RunnerResult, error) {
 	if r.protocol == RunnerProtocolV2 {
-		return r.runProviderHostV2(ctx, input, credential, handle)
+		return r.runProviderHostV2(ctx, input, credential, controls, handle)
 	}
 	return r.runLegacy(ctx, input, credential, handle)
 }

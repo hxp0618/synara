@@ -1,3 +1,6 @@
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -6,6 +9,7 @@ import {
   normalizeCodexEvent,
   providerEnvironment,
   reconstructedPrompt,
+  startProviderHostRun,
 } from "./providerHost";
 
 describe("provider credential isolation", () => {
@@ -109,5 +113,37 @@ describe("durable conversation reconstruction", () => {
     expect(prompt).toContain("<user>\nprior question\n</user>");
     expect(prompt).toContain("<assistant>\nprior answer\n</assistant>");
     expect(prompt).toContain("<current_user>\ncurrent question\n</current_user>");
+  });
+});
+
+describe("provider process lifecycle", () => {
+  it("terminates the active provider subprocess on interrupt", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "synara-provider-host-"));
+    const executable = join(directory, "codex");
+    writeFileSync(
+      executable,
+      "#!/bin/sh\n/bin/cat >/dev/null\nwhile :; do /bin/sleep 1; done\n",
+      "utf8",
+    );
+    chmodSync(executable, 0o700);
+    const previousPath = process.env.PATH;
+    process.env.PATH = `${directory}:${previousPath ?? ""}`;
+    try {
+      const run = startProviderHostRun(
+        {
+          execution: { id: "execution-interrupt" },
+          workload: { provider: "codex", inputText: "wait" },
+          workspaceDirectory: directory,
+        },
+        null,
+        () => {},
+      );
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      run.interrupt();
+      await expect(run.result).rejects.toThrow("interrupted");
+    } finally {
+      process.env.PATH = previousPath;
+      rmSync(directory, { recursive: true, force: true });
+    }
   });
 });

@@ -42,6 +42,30 @@ terminal, malformed JSONL or an oversized line is a `protocol_violation`.
 Provider diagnostics use stderr, are bounded and redacted, and are never parsed by Control Plane. Large logs,
 files, Diffs and snapshots use Artifact references.
 
+## Bidirectional command execution
+
+The Host keeps reading stdin while `SendTurn` is active. Agentd multiplexes stdout by `commandId`, so a live
+Turn can emit Runtime Events or an `InteractionRequest` while the same Host process accepts
+`ResolveApproval`, `ResolveUserInput`, or `InterruptTurn`. A terminal message is correlated to the command that
+created it; it does not terminate unrelated commands.
+
+Interaction delivery is durable across the Control Plane boundary:
+
+1. The Host emits an `InteractionRequest` correlated to the active `SendTurn`.
+2. Agentd persists the normalized requested Event through Worker Protocol.
+3. The authorized user resolution receives a stable resolution `commandId` and Worker/Generation target.
+4. Agentd pulls the resolution, writes the command to the active Host, then marks it `delivered`.
+5. After a correlated Host terminal message, agentd marks the resolution `acknowledged`.
+
+Delivered-but-unacknowledged commands remain pullable and use the stable command ID for replay. A stale
+Worker/Generation cannot pull, deliver, or acknowledge them. Lease recovery expires unresolved requests and
+supersedes unacknowledged deliveries from the obsolete Generation.
+
+Codex and Claude currently expose process termination as an `emulated` `interrupt-turn`. Approval and
+Structured User Input remain `unsupported` in the production CLI runner while it uses non-interactive bypass
+modes. The protocol and Worker lifecycle are implemented and tested with an interactive fixture, but the
+capability must not be promoted until a real Provider runtime supplies the corresponding resolver methods.
+
 ## Describe
 
 `Describe` returns the Host build, Adapter/CLI version, complete Capability Descriptor, command/message limits,
@@ -52,8 +76,9 @@ verified by the shared Provider Acceptance Suite.
 
 Managed Local, SSH, Docker and Kubernetes Workers use v2. Agentd appends `--protocol-v2`, performs
 side-effect-free `Describe` probes before Worker registration, and publishes the returned Codex and Claude
-plus explicit Local-only Provider descriptors under the registered `providerHost` capability. It performs another Describe in the actual Host
-process before Start/Resume and rejects incompatible Major versions, unavailable Provider CLIs, Local-only or
+plus explicit Local-only Provider descriptors under the registered `providerHost` capability. It performs
+another Describe in the actual Host process before Start/Resume and rejects incompatible Major versions,
+unavailable Provider CLIs, Local-only or
 missing `send-turn` capability, incompatible Runtime Event ranges, unsupported Credential delivery and invalid
 Resume strategies before sending the Provider Turn.
 

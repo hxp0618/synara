@@ -223,6 +223,29 @@ type ResolveUserInputInput struct {
 	Answers map[string]any `json:"answers"`
 }
 
+type PullInteractionResolutionsInput struct {
+	LeaseInput
+	Limit int `json:"limit,omitempty"`
+}
+
+type InteractionResolutionDelivery struct {
+	InteractionID       uuid.UUID      `json:"interactionId"`
+	RequestID           string         `json:"requestId"`
+	Provider            string         `json:"provider"`
+	CommandType         string         `json:"commandType"`
+	CommandID           string         `json:"commandId"`
+	ResolutionKind      string         `json:"resolutionKind"`
+	Resolution          map[string]any `json:"resolution"`
+	DeliveryStatus      string         `json:"deliveryStatus"`
+	DeliveryAttempts    int            `json:"deliveryAttempts"`
+	DeliveryAvailableAt time.Time      `json:"deliveryAvailableAt"`
+}
+
+type InteractionResolutionDeliveryInput struct {
+	LeaseInput
+	ResolutionCommandID string `json:"resolutionCommandId"`
+}
+
 func toWorker(model persistence.WorkerInstance) Worker {
 	capabilities := model.Capabilities
 	if capabilities == nil {

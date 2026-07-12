@@ -3,6 +3,7 @@ package executions
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 
 	"github.com/google/uuid"
@@ -15,6 +16,11 @@ import (
 	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
 	"github.com/synara-ai/synara/services/control-plane/internal/problem"
 	"github.com/synara-ai/synara/services/control-plane/internal/sessions"
+)
+
+const (
+	defaultInteractionResolutionPullLimit = 10
+	maximumInteractionResolutionPullLimit = 100
 )
 
 func (s *Service) ListInteractions(
@@ -72,6 +78,210 @@ func (s *Service) ResolveUserInput(
 		ctx, principal, executionID, requestID, "user-input", map[string]any{"answers": input.Answers},
 		idempotencyKey, auditRequestID, ipAddress,
 	)
+}
+
+func (s *Service) PullInteractionResolutions(
+	ctx context.Context,
+	worker persistence.WorkerInstance,
+	executionID uuid.UUID,
+	input PullInteractionResolutionsInput,
+) ([]InteractionResolutionDelivery, error) {
+	limit := input.Limit
+	if limit == 0 {
+		limit = defaultInteractionResolutionPullLimit
+	}
+	if limit < 1 || limit > maximumInteractionResolutionPullLimit {
+		return nil, problem.New(400, "invalid_interaction_resolution_limit", "limit must be between 1 and 100.")
+	}
+
+	items := make([]InteractionResolutionDelivery, 0)
+	err := persistence.InTransaction(ctx, s.db, func(tx *gorm.DB) error {
+		_, execution, err := s.lockLease(ctx, tx, worker.ID, executionID, input.LeaseInput, true)
+		if err != nil {
+			return err
+		}
+		models := make([]persistence.ExecutionInteraction, 0)
+		if err := tx.WithContext(ctx).
+			Where(
+				"tenant_id = ? AND execution_id = ? AND status = ? AND delivery_worker_id = ? AND delivery_generation = ? AND delivery_status IN ? AND delivery_available_at <= ?",
+				execution.TenantID, execution.ID, "resolved", worker.ID, input.Generation,
+				[]string{"pending", "delivered", "failed"}, s.now(),
+			).
+			Order("delivery_available_at, id").Limit(limit).Find(&models).Error; err != nil {
+			return problem.Wrap(500, "interaction_resolutions_load_failed", "Interaction resolutions could not be loaded.", err)
+		}
+		for _, model := range models {
+			item, err := toInteractionResolutionDelivery(model)
+			if err != nil {
+				return err
+			}
+			items = append(items, item)
+		}
+		return nil
+	})
+	return items, err
+}
+
+func (s *Service) MarkInteractionResolutionDelivered(
+	ctx context.Context,
+	worker persistence.WorkerInstance,
+	executionID, interactionID uuid.UUID,
+	input InteractionResolutionDeliveryInput,
+	requestID string,
+) (OperationResult[Interaction], error) {
+	return s.updateInteractionResolutionDelivery(
+		ctx, worker, executionID, interactionID, input, requestID, "delivered",
+	)
+}
+
+func (s *Service) AcknowledgeInteractionResolution(
+	ctx context.Context,
+	worker persistence.WorkerInstance,
+	executionID, interactionID uuid.UUID,
+	input InteractionResolutionDeliveryInput,
+	requestID string,
+) (OperationResult[Interaction], error) {
+	return s.updateInteractionResolutionDelivery(
+		ctx, worker, executionID, interactionID, input, requestID, "acknowledged",
+	)
+}
+
+func (s *Service) updateInteractionResolutionDelivery(
+	ctx context.Context,
+	worker persistence.WorkerInstance,
+	executionID, interactionID uuid.UUID,
+	input InteractionResolutionDeliveryInput,
+	requestID, targetStatus string,
+) (OperationResult[Interaction], error) {
+	input.ResolutionCommandID = strings.TrimSpace(input.ResolutionCommandID)
+	if input.ResolutionCommandID == "" || len(input.ResolutionCommandID) > 240 ||
+		strings.ContainsAny(input.ResolutionCommandID, "\r\n\t") {
+		return OperationResult[Interaction]{}, problem.New(
+			400, "invalid_interaction_resolution_command_id", "resolutionCommandId is invalid.",
+		)
+	}
+	return runIdempotent(ctx, s, worker.ID, requestID, "interaction.resolution."+targetStatus, struct {
+		ExecutionID   uuid.UUID                          `json:"executionId"`
+		InteractionID uuid.UUID                          `json:"interactionId"`
+		Input         InteractionResolutionDeliveryInput `json:"input"`
+	}{executionID, interactionID, input}, 200, func(tx *gorm.DB) (Interaction, error) {
+		_, execution, err := s.lockLease(ctx, tx, worker.ID, executionID, input.LeaseInput, true)
+		if err != nil {
+			return Interaction{}, err
+		}
+		var interaction persistence.ExecutionInteraction
+		err = persistence.WithLocking(tx.WithContext(ctx), "UPDATE", "").
+			Where("tenant_id = ? AND execution_id = ? AND id = ?", execution.TenantID, execution.ID, interactionID).
+			Take(&interaction).Error
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return Interaction{}, problem.New(404, "interaction_not_found", "Execution interaction not found.")
+		}
+		if err != nil {
+			return Interaction{}, problem.Wrap(500, "interaction_lock_failed", "The execution interaction could not be locked.", err)
+		}
+		if interaction.Status != "resolved" || interaction.ResolutionCommandID == nil {
+			return Interaction{}, problem.New(409, "interaction_resolution_not_ready", "The interaction does not have a deliverable resolution.")
+		}
+		if interaction.DeliveryWorkerID == nil || *interaction.DeliveryWorkerID != worker.ID ||
+			interaction.DeliveryGeneration == nil || *interaction.DeliveryGeneration != input.Generation {
+			return Interaction{}, problem.New(409, "interaction_generation_fenced", "The interaction resolution belongs to an obsolete Worker generation.")
+		}
+		if *interaction.ResolutionCommandID != input.ResolutionCommandID {
+			return Interaction{}, problem.New(409, "interaction_resolution_command_mismatch", "The resolution command does not match the persisted interaction.")
+		}
+
+		now := s.now()
+		switch targetStatus {
+		case "delivered":
+			if interaction.DeliveryStatus == "acknowledged" || interaction.DeliveryStatus == "delivered" {
+				return toInteraction(interaction), nil
+			}
+			if interaction.DeliveryStatus != "pending" && interaction.DeliveryStatus != "failed" {
+				return Interaction{}, problem.New(409, "interaction_resolution_not_deliverable", "The interaction resolution cannot be delivered from its current state.")
+			}
+			updated := tx.WithContext(ctx).Model(&persistence.ExecutionInteraction{}).
+				Where("tenant_id = ? AND execution_id = ? AND id = ? AND delivery_worker_id = ? AND delivery_generation = ? AND delivery_status IN ?",
+					execution.TenantID, execution.ID, interaction.ID, worker.ID, input.Generation, []string{"pending", "failed"}).
+				Updates(map[string]any{
+					"delivery_status": "delivered", "delivery_attempts": gorm.Expr("delivery_attempts + 1"),
+					"delivered_at": now, "delivery_error": nil,
+				})
+			if err := expectOne(updated, 409, "interaction_delivery_conflict", "The interaction resolution delivery changed concurrently."); err != nil {
+				return Interaction{}, err
+			}
+			interaction.DeliveryStatus = "delivered"
+			interaction.DeliveryAttempts++
+			interaction.DeliveredAt = &now
+			interaction.DeliveryError = nil
+		case "acknowledged":
+			if interaction.DeliveryStatus == "acknowledged" {
+				return toInteraction(interaction), nil
+			}
+			if interaction.DeliveryStatus != "delivered" || interaction.DeliveredAt == nil {
+				return Interaction{}, problem.New(409, "interaction_resolution_not_delivered", "The interaction resolution must be delivered before it can be acknowledged.")
+			}
+			updated := tx.WithContext(ctx).Model(&persistence.ExecutionInteraction{}).
+				Where("tenant_id = ? AND execution_id = ? AND id = ? AND delivery_worker_id = ? AND delivery_generation = ? AND delivery_status = ?",
+					execution.TenantID, execution.ID, interaction.ID, worker.ID, input.Generation, "delivered").
+				Updates(map[string]any{"delivery_status": "acknowledged", "acknowledged_at": now, "delivery_error": nil})
+			if err := expectOne(updated, 409, "interaction_acknowledgement_conflict", "The interaction resolution acknowledgement changed concurrently."); err != nil {
+				return Interaction{}, err
+			}
+			interaction.DeliveryStatus = "acknowledged"
+			interaction.AcknowledgedAt = &now
+			interaction.DeliveryError = nil
+		default:
+			return Interaction{}, problem.New(500, "invalid_interaction_delivery_transition", "The interaction resolution delivery transition is invalid.")
+		}
+		return toInteraction(interaction), nil
+	})
+}
+
+func toInteractionResolutionDelivery(model persistence.ExecutionInteraction) (InteractionResolutionDelivery, error) {
+	if model.ResolutionCommandID == nil || model.ResolutionKind == nil || model.DeliveryAvailableAt == nil || model.Resolution == nil {
+		return InteractionResolutionDelivery{}, problem.New(500, "interaction_resolution_corrupt", "The persisted interaction resolution is incomplete.")
+	}
+	commandType := ""
+	switch model.Kind {
+	case "approval":
+		commandType = "ResolveApproval"
+	case "user-input":
+		commandType = "ResolveUserInput"
+	default:
+		return InteractionResolutionDelivery{}, problem.New(500, "interaction_resolution_corrupt", fmt.Sprintf("Unsupported persisted interaction kind %q.", model.Kind))
+	}
+	return InteractionResolutionDelivery{
+		InteractionID: model.ID, RequestID: model.RequestID, Provider: model.Provider,
+		CommandType: commandType, CommandID: *model.ResolutionCommandID,
+		ResolutionKind: *model.ResolutionKind, Resolution: model.Resolution,
+		DeliveryStatus: model.DeliveryStatus, DeliveryAttempts: model.DeliveryAttempts,
+		DeliveryAvailableAt: *model.DeliveryAvailableAt,
+	}, nil
+}
+
+func (s *Service) supersedeInteractionGeneration(
+	ctx context.Context,
+	tx *gorm.DB,
+	execution persistence.AgentExecution,
+	lease persistence.WorkerLease,
+) error {
+	const reason = "The Worker lease expired before the interaction lifecycle completed."
+	if err := tx.WithContext(ctx).Model(&persistence.ExecutionInteraction{}).
+		Where("tenant_id = ? AND execution_id = ? AND worker_id = ? AND generation = ? AND status = ?",
+			execution.TenantID, execution.ID, lease.WorkerID, lease.Generation, "pending").
+		Updates(map[string]any{
+			"status": "expired", "delivery_status": "superseded", "delivery_error": reason,
+		}).Error; err != nil {
+		return problem.Wrap(500, "interaction_expiry_failed", "Pending interactions could not be expired during Worker recovery.", err)
+	}
+	if err := tx.WithContext(ctx).Model(&persistence.ExecutionInteraction{}).
+		Where("tenant_id = ? AND execution_id = ? AND delivery_worker_id = ? AND delivery_generation = ? AND status = ? AND delivery_status IN ?",
+			execution.TenantID, execution.ID, lease.WorkerID, lease.Generation, "resolved",
+			[]string{"pending", "delivered", "failed"}).
+		Updates(map[string]any{"delivery_status": "superseded", "delivery_error": reason}).Error; err != nil {
+		return problem.Wrap(500, "interaction_delivery_supersede_failed", "Interaction resolution delivery could not be superseded during Worker recovery.", err)
+	}
+	return nil
 }
 
 func (s *Service) resolveInteraction(

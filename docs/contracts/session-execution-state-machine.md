@@ -60,8 +60,19 @@ POST /v1/executions/{executionID}/user-input/{requestID}/resolve
 ```
 
 Resolution is rejected after Lease expiry or Generation fencing. The response is idempotent, audited,
-and appended to Session Event replay. Delivering the resolved command into a live Provider Runner is a
-Stage 3 Provider Runtime responsibility; Stage 2 makes the database and API state authoritative.
+and appended to Session Event replay. Stage 3 delivers the persisted command through Worker-scoped endpoints:
+
+```text
+POST /v1/workers/executions/{executionID}/interaction-resolutions/pull
+POST /v1/workers/executions/{executionID}/interaction-resolutions/{interactionID}/delivered
+POST /v1/workers/executions/{executionID}/interaction-resolutions/{interactionID}/acknowledged
+```
+
+Pull validates the live Lease and returns only commands targeted to the authenticated Worker/Generation.
+`delivered` is recorded after the command is written to the Provider Host; `acknowledged` is recorded after a
+correlated terminal Host message. Both transitions are idempotent. Lease recovery expires unresolved requests
+and supersedes unacknowledged resolution delivery for the obsolete Generation before a replacement Worker can
+claim the Execution.
 
 ## Browser/API idempotency
 

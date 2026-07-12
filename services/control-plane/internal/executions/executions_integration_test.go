@@ -494,6 +494,64 @@ func TestApprovalAndUserInputPersistResolveReplayAndResumeExecution(t *testing.T
 		t.Fatalf("unexpected approval replay: first=%#v second=%#v", resolved, replayed)
 	}
 	assertExecutionStatus(t, db, fixture, "running")
+	approvalDeliveries, err := service.PullInteractionResolutions(context.Background(), worker, fixture.ExecutionID,
+		PullInteractionResolutionsInput{LeaseInput: leaseInput})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(approvalDeliveries) != 1 || approvalDeliveries[0].CommandType != "ResolveApproval" ||
+		approvalDeliveries[0].CommandID != approvalRequestID+":resolution" ||
+		approvalDeliveries[0].ResolutionKind != "approved" || approvalDeliveries[0].DeliveryStatus != "pending" {
+		t.Fatalf("unexpected approval delivery: %#v", approvalDeliveries)
+	}
+	approvalDelivery := approvalDeliveries[0]
+	deliveryInput := InteractionResolutionDeliveryInput{
+		LeaseInput: leaseInput, ResolutionCommandID: approvalDelivery.CommandID,
+	}
+	delivered, err := service.MarkInteractionResolutionDelivered(
+		context.Background(), worker, fixture.ExecutionID, approvalDelivery.InteractionID,
+		deliveryInput, "approval-delivered",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deliveryReplay, err := service.MarkInteractionResolutionDelivered(
+		context.Background(), worker, fixture.ExecutionID, approvalDelivery.InteractionID,
+		deliveryInput, "approval-delivered",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deliveryAgain, err := service.MarkInteractionResolutionDelivered(
+		context.Background(), worker, fixture.ExecutionID, approvalDelivery.InteractionID,
+		deliveryInput, "approval-delivered-again",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if delivered.Value.DeliveryStatus != "delivered" || delivered.Value.DeliveryAttempts != 1 ||
+		delivered.Value.DeliveredAt == nil || !deliveryReplay.Replayed ||
+		deliveryAgain.Value.DeliveryAttempts != 1 {
+		t.Fatalf("approval delivery was not idempotent: first=%#v replay=%#v again=%#v", delivered, deliveryReplay, deliveryAgain)
+	}
+	acknowledged, err := service.AcknowledgeInteractionResolution(
+		context.Background(), worker, fixture.ExecutionID, approvalDelivery.InteractionID,
+		deliveryInput, "approval-acknowledged",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	acknowledgedAgain, err := service.AcknowledgeInteractionResolution(
+		context.Background(), worker, fixture.ExecutionID, approvalDelivery.InteractionID,
+		deliveryInput, "approval-acknowledged-again",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if acknowledged.Value.DeliveryStatus != "acknowledged" || acknowledged.Value.AcknowledgedAt == nil ||
+		acknowledgedAgain.Value.DeliveryAttempts != 1 {
+		t.Fatalf("approval acknowledgement was not idempotent: first=%#v again=%#v", acknowledged, acknowledgedAgain)
+	}
 
 	userInputRequestID := "user-input-" + uuid.NewString()
 	if _, err := service.AppendRuntimeEvent(context.Background(), worker, fixture.ExecutionID, RuntimeEventInput{
@@ -518,6 +576,39 @@ func TestApprovalAndUserInputPersistResolveReplayAndResumeExecution(t *testing.T
 		t.Fatalf("user input was not resolved: %#v", userInput)
 	}
 	assertExecutionStatus(t, db, fixture, "running")
+	userInputDeliveries, err := service.PullInteractionResolutions(context.Background(), worker, fixture.ExecutionID,
+		PullInteractionResolutionsInput{LeaseInput: leaseInput})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(userInputDeliveries) != 1 || userInputDeliveries[0].CommandType != "ResolveUserInput" ||
+		userInputDeliveries[0].ResolutionKind != "answered" {
+		t.Fatalf("unexpected user-input delivery: %#v", userInputDeliveries)
+	}
+	userInputDelivery := userInputDeliveries[0]
+	userInputDeliveryInput := InteractionResolutionDeliveryInput{
+		LeaseInput: leaseInput, ResolutionCommandID: userInputDelivery.CommandID,
+	}
+	if _, err := service.MarkInteractionResolutionDelivered(
+		context.Background(), worker, fixture.ExecutionID, userInputDelivery.InteractionID,
+		userInputDeliveryInput, "user-input-delivered",
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.AcknowledgeInteractionResolution(
+		context.Background(), worker, fixture.ExecutionID, userInputDelivery.InteractionID,
+		userInputDeliveryInput, "user-input-acknowledged",
+	); err != nil {
+		t.Fatal(err)
+	}
+	remainingDeliveries, err := service.PullInteractionResolutions(context.Background(), worker, fixture.ExecutionID,
+		PullInteractionResolutionsInput{LeaseInput: leaseInput})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(remainingDeliveries) != 0 {
+		t.Fatalf("acknowledged resolutions remained pullable: %#v", remainingDeliveries)
+	}
 
 	interactions, err := service.ListInteractions(context.Background(), principal, fixture.ExecutionID)
 	if err != nil {
@@ -577,6 +668,80 @@ func TestInteractionResolutionRejectsExpiredLease(t *testing.T) {
 	var apiError *problem.Error
 	if !errors.As(err, &apiError) || apiError.Code != "interaction_lease_expired" {
 		t.Fatalf("expected interaction_lease_expired, got %v", err)
+	}
+}
+
+func TestInteractionResolutionDeliveryFencesReplacedGeneration(t *testing.T) {
+	db := integrationDB(t)
+	fixture := seedExecutionFixture(t, db)
+	service := integrationService(t, db)
+	current := time.Now().UTC().Truncate(time.Microsecond)
+	service.now = func() time.Time { return current }
+	first := registerTestWorker(t, service, fixture.TargetID, fixture.TargetKind, "worker-interaction-old")
+	second := registerTestWorker(t, service, fixture.TargetID, fixture.TargetKind, "worker-interaction-new")
+	cleanupWorkers(t, db, first.ID, second.ID)
+	claimInput := ClaimExecutionInput{
+		ExecutionTargetID: fixture.TargetID, TargetKind: fixture.TargetKind, ExecutionID: &fixture.ExecutionID,
+	}
+	firstClaim, err := service.Claim(context.Background(), first, claimInput, "interaction-fence-first-claim")
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstLease := *firstClaim.Value.Lease
+	firstLeaseInput := LeaseInput{
+		TenantID: fixture.TenantID, Generation: firstLease.Generation, LeaseToken: firstLease.LeaseToken,
+	}
+	if _, err := service.Start(context.Background(), first, fixture.ExecutionID, firstLeaseInput, "interaction-fence-start"); err != nil {
+		t.Fatal(err)
+	}
+	requestID := "approval-fence-" + uuid.NewString()
+	if _, err := service.AppendRuntimeEvent(context.Background(), first, fixture.ExecutionID, RuntimeEventInput{
+		LeaseInput: firstLeaseInput, EventID: uuid.New(), EventVersion: 1, EventType: "approval.requested",
+		Payload: map[string]any{"requestId": requestID}, OccurredAt: current,
+	}, "interaction-fence-requested"); err != nil {
+		t.Fatal(err)
+	}
+	principal := identity.Principal{UserID: fixture.UserID, ActiveTenantID: &fixture.TenantID}
+	resolved, err := service.ResolveApproval(
+		context.Background(), principal, fixture.ExecutionID, requestID,
+		ResolveApprovalInput{Decision: "accept"}, "interaction-fence-resolve", "interaction-fence-resolve", "127.0.0.1",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	current = current.Add(service.leaseTTL + time.Second)
+	secondClaim, err := service.Claim(context.Background(), second, claimInput, "interaction-fence-second-claim")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if secondClaim.Value.Lease == nil || secondClaim.Value.Lease.Generation != firstLease.Generation+1 {
+		t.Fatalf("replacement Worker did not receive a new generation: %#v", secondClaim.Value.Lease)
+	}
+	_, err = service.PullInteractionResolutions(context.Background(), first, fixture.ExecutionID,
+		PullInteractionResolutionsInput{LeaseInput: firstLeaseInput})
+	var apiError *problem.Error
+	if !errors.As(err, &apiError) || apiError.Code != "generation_fenced" {
+		t.Fatalf("obsolete Worker generation was not fenced: %v", err)
+	}
+	var interaction persistence.ExecutionInteraction
+	if err := db.Where("tenant_id = ? AND id = ?", fixture.TenantID, resolved.Value.ID).Take(&interaction).Error; err != nil {
+		t.Fatal(err)
+	}
+	if interaction.DeliveryStatus != "superseded" || interaction.DeliveryError == nil {
+		t.Fatalf("obsolete interaction delivery was not superseded: %#v", interaction)
+	}
+	secondLeaseInput := LeaseInput{
+		TenantID: fixture.TenantID, Generation: secondClaim.Value.Lease.Generation,
+		LeaseToken: secondClaim.Value.Lease.LeaseToken,
+	}
+	newGenerationDeliveries, err := service.PullInteractionResolutions(context.Background(), second, fixture.ExecutionID,
+		PullInteractionResolutionsInput{LeaseInput: secondLeaseInput})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(newGenerationDeliveries) != 0 {
+		t.Fatalf("replacement Worker received an obsolete resolution: %#v", newGenerationDeliveries)
 	}
 }
 

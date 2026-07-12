@@ -2,9 +2,12 @@ package agentd
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -86,5 +89,46 @@ func TestResolveWorkspaceArtifactRejectsSymlinkEscape(t *testing.T) {
 	}
 	if _, err := resolveWorkspaceArtifact(workspace, "escape.txt"); err == nil {
 		t.Fatal("agentd accepted an artifact symlink outside the execution workspace")
+	}
+}
+
+func TestRetryInteractionDeliveryUpdateRecoversTransientResponseLoss(t *testing.T) {
+	daemon := &Daemon{config: Config{RequestTimeout: time.Second}}
+	attempts := 0
+	err := daemon.retryInteractionDeliveryUpdate(context.Background(), func(context.Context) error {
+		attempts++
+		if attempts < 3 {
+			return errors.New("temporary response loss")
+		}
+		return nil
+	})
+	if err != nil || attempts != 3 {
+		t.Fatalf("delivery update retry = %d attempts, %v", attempts, err)
+	}
+}
+
+func TestBuildGitSHAValidationMatchesPersistedManifestConstraint(t *testing.T) {
+	for value, want := range map[string]bool{
+		"abcdef0": true, strings.Repeat("a", 64): true,
+		"ABCDEF0": false, "not-a-sha": false, "abcdef": false,
+	} {
+		if actual := validBuildGitSHA(value); actual != want {
+			t.Fatalf("validBuildGitSHA(%q) = %t, want %t", value, actual, want)
+		}
+	}
+}
+
+func TestWithProviderHostCapabilitiesIncludesWorkerRuntimeManifest(t *testing.T) {
+	providerHost := map[string]any{"protocolVersion": map[string]any{"major": 2, "minor": 0}}
+	result := withProviderHostCapabilities(map[string]any{"gpu": false}, providerHost, Config{
+		Version: "agentd-test", BuildGitSHA: "abcdef0", ImageDigest: "sha256:test",
+	})
+	runtimeManifest, ok := result["workerRuntime"].(map[string]any)
+	if !ok || runtimeManifest["workerBuildVersion"] != "agentd-test" ||
+		runtimeManifest["workerBuildGitSha"] != "abcdef0" || runtimeManifest["imageDigest"] != "sha256:test" {
+		t.Fatalf("worker runtime manifest was not advertised: %#v", result)
+	}
+	if result["providerHost"] == nil || result["gpu"] != false {
+		t.Fatalf("worker capabilities were not merged: %#v", result)
 	}
 }

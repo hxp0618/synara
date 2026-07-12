@@ -21,10 +21,22 @@ export type RunnerCredential = {
 export type RunnerMessage =
   | { type: "event"; eventType: string; payload: Record<string, unknown> }
   | {
+      type: "interaction";
+      interactionType: "approval" | "user-input";
+      payload: Record<string, unknown>;
+    }
+  | {
       type: "result";
       output: Record<string, unknown>;
       providerResumeCursor?: string;
     };
+
+export type ProviderRunController = {
+  result: Promise<Extract<RunnerMessage, { type: "result" }>>;
+  interrupt: () => void;
+  resolveApproval?: (payload: Record<string, unknown>) => void | Promise<void>;
+  resolveUserInput?: (payload: Record<string, unknown>) => void | Promise<void>;
+};
 
 type ProviderState = {
   cursor?: string;
@@ -223,71 +235,116 @@ export async function runProviderHost(
   credential: RunnerCredential | null,
   emit: (message: RunnerMessage) => void,
 ): Promise<void> {
+  const run = startProviderHostRun(input, credential, emit);
+  emit(await run.result);
+}
+
+export function startProviderHostRun(
+  input: RunnerInput,
+  credential: RunnerCredential | null,
+  emit: (message: RunnerMessage) => void,
+): ProviderRunController {
   validateRunnerInput(input);
   const normalizedProvider = input.workload.provider.trim().toLowerCase();
   const { environment, redact } = providerEnvironment(process.env, normalizedProvider, credential);
   const state: ProviderState = { text: [], model: input.workload.model ?? undefined };
-	const hasDurableHistory = (input.workload.conversationHistory?.length ?? 0) > 0;
-	const prompt = hasDurableHistory ? reconstructedPrompt(input) : input.workload.inputText;
-	const command = providerCommand(input, normalizedProvider, !hasDurableHistory);
+  const hasDurableHistory = (input.workload.conversationHistory?.length ?? 0) > 0;
+  const prompt = hasDurableHistory ? reconstructedPrompt(input) : input.workload.inputText;
+  const command = providerCommand(input, normalizedProvider, !hasDurableHistory);
   const options = {
     cwd: input.workspaceDirectory,
     env: environment,
     stdio: ["pipe", "pipe", "pipe"] as const,
   };
   const child = spawn(command.executable, command.arguments, options);
-	let spawnError: Error | null = null;
-	child.once("error", (error) => {
-		spawnError = error;
-	});
-	child.stdin.on("error", () => {
-		// A provider that exits before consuming stdin is reported through its
-		// process exit/error path below; never let EPIPE crash the host process.
-	});
-	const exitPromise = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
-		(resolve) => {
-			child.once("close", (code, signal) => resolve({ code, signal }));
-		},
-	);
+  let spawnError: Error | null = null;
+  let interrupted = false;
+  let exited = false;
+  let forceKillTimer: NodeJS.Timeout | undefined;
+  child.once("error", (error) => {
+    spawnError = error;
+  });
+  child.stdin.on("error", () => {
+    // A provider that exits before consuming stdin is reported through its
+    // process exit/error path below; never let EPIPE crash the host process.
+  });
+  const exitPromise = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
+    (resolve) => {
+      child.once("close", (code, signal) => resolve({ code, signal }));
+    },
+  );
   let stderr = "";
   child.stderr.setEncoding("utf8");
   child.stderr.on("data", (chunk: string) => {
     stderr = (stderr + redact(chunk)).slice(-(64 * 1024));
   });
-	child.stdin.end(prompt);
-	const lines = createInterface({ input: child.stdout, crlfDelay: Infinity });
-	try {
-		for await (const line of lines) {
-			if (!line.trim()) continue;
-			let parsed: unknown;
-			try {
-				parsed = JSON.parse(line);
-			} catch {
-				throw new Error(`${command.label} emitted invalid JSONL`);
-			}
-			const messages =
-				normalizedProvider === "codex"
-					? normalizeCodexEvent(parsed, state, redact)
-					: normalizeClaudeEvent(parsed, state, redact);
-			for (const message of messages) emit(message);
-		}
-	} catch (error) {
-		child.kill("SIGKILL");
-		await exitPromise;
-		throw error;
-	}
-	const exit = await exitPromise;
-	if (spawnError) throw spawnError;
-  if (exit.code !== 0) {
-    const detail = stderr.trim() || `${command.label} exited with code ${exit.code ?? "unknown"}`;
-    throw new Error(detail);
-  }
-  const output: Record<string, unknown> = {
-    provider: normalizedProvider === "claudeagent" ? "claudeAgent" : normalizedProvider,
-    model: state.model ?? null,
-    text: state.text.join(""),
+  child.stdin.end(prompt);
+
+  const result = (async (): Promise<Extract<RunnerMessage, { type: "result" }>> => {
+    try {
+      const lines = createInterface({ input: child.stdout, crlfDelay: Infinity });
+      try {
+        for await (const line of lines) {
+          if (!line.trim()) continue;
+          let parsed: unknown;
+          try {
+            parsed = JSON.parse(line);
+          } catch {
+            throw new Error(`${command.label} emitted invalid JSONL`);
+          }
+          const messages =
+            normalizedProvider === "codex"
+              ? normalizeCodexEvent(parsed, state, redact)
+              : normalizeClaudeEvent(parsed, state, redact);
+          for (const message of messages) emit(message);
+        }
+      } catch (error) {
+        child.kill("SIGKILL");
+        await exitPromise;
+        throw error;
+      }
+      const exit = await exitPromise;
+      if (spawnError) throw spawnError;
+      if (interrupted) throw new ProviderInterruptedError();
+      if (exit.code !== 0) {
+        const detail = stderr.trim() || `${command.label} exited with code ${exit.code ?? "unknown"}`;
+        throw new Error(detail);
+      }
+      const output: Record<string, unknown> = {
+        provider: normalizedProvider === "claudeagent" ? "claudeAgent" : normalizedProvider,
+        model: state.model ?? null,
+        text: state.text.join(""),
+      };
+      return {
+        type: "result",
+        output,
+        ...(state.cursor ? { providerResumeCursor: state.cursor } : {}),
+      };
+    } finally {
+      exited = true;
+      if (forceKillTimer) clearTimeout(forceKillTimer);
+    }
+  })();
+
+  return {
+    result,
+    interrupt: () => {
+      if (exited || interrupted) return;
+      interrupted = true;
+      child.kill("SIGTERM");
+      forceKillTimer = setTimeout(() => {
+        if (!exited) child.kill("SIGKILL");
+      }, 2_000);
+      forceKillTimer.unref();
+    },
   };
-  emit({ type: "result", output, ...(state.cursor ? { providerResumeCursor: state.cursor } : {}) });
+}
+
+class ProviderInterruptedError extends Error {
+  constructor() {
+    super("Provider turn was interrupted.");
+    this.name = "ProviderInterruptedError";
+  }
 }
 
 function providerCommand(input: RunnerInput, provider: string, allowNativeResume: boolean) {

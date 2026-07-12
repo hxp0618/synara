@@ -61,8 +61,15 @@ the Runtime Event.
 `approval.requested` and `user-input.requested` Runtime Events include a stable `requestId`. The Control
 Plane persists the pending request, current Worker, and Generation. User resolution is rejected when the
 Lease has expired or the Generation is fenced and is replayed as `approval.resolved` or
-`user-input.resolved` Session Events. Stage 3 owns delivery of the resolved command into the bidirectional
-Provider Runner channel.
+`user-input.resolved` Session Events.
+
+The current Worker/Generation pulls resolved commands from the execution-scoped resolution endpoint. A
+delivery carries the persisted `interactionId`, stable `commandId`, `ResolveApproval` or `ResolveUserInput`
+command type, and the validated resolution payload. The Worker marks the command `delivered` only after it is
+written to the Provider Host channel and marks it `acknowledged` only after the Host returns a correlated
+terminal message. Both transitions are idempotent. `delivered` commands remain pullable until acknowledged so
+an agentd restart can replay the stable command ID without duplicating the Provider action. A stale Worker or
+Generation is permanently fenced from pull, delivery, and acknowledgement.
 
 ## Boundary
 

@@ -1,6 +1,7 @@
 package agentd
 
 import (
+	"context"
 	"time"
 
 	"github.com/google/uuid"
@@ -40,4 +41,12 @@ type RunnerArtifact struct {
 type RunnerResult struct {
 	Output               map[string]any
 	ProviderResumeCursor *string
+}
+
+type RunnerControl struct {
+	Delivery      executions.InteractionResolutionDelivery
+	MarkDelivered func(context.Context) error
+	Acknowledge   func(context.Context) error
+	Done          chan<- error
+	Err           error
 }

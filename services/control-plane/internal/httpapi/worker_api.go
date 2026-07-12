@@ -171,6 +171,66 @@ func (s *Server) appendRuntimeEvent(w http.ResponseWriter, r *http.Request) {
 	writeOperation(w, result.Replayed, result.StatusCode, result.Value)
 }
 
+func (s *Server) pullInteractionResolutions(w http.ResponseWriter, r *http.Request) {
+	executionID, ok := s.pathUUID(w, r, "executionID")
+	if !ok {
+		return
+	}
+	var input executions.PullInteractionResolutionsInput
+	if err := decodeJSON(r, &input); err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	items, err := s.executions.PullInteractionResolutions(r.Context(), mustWorker(r), executionID, input)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+func (s *Server) markInteractionResolutionDelivered(w http.ResponseWriter, r *http.Request) {
+	s.handleInteractionResolutionDelivery(w, r, false)
+}
+
+func (s *Server) acknowledgeInteractionResolution(w http.ResponseWriter, r *http.Request) {
+	s.handleInteractionResolutionDelivery(w, r, true)
+}
+
+func (s *Server) handleInteractionResolutionDelivery(w http.ResponseWriter, r *http.Request, acknowledge bool) {
+	executionID, ok := s.pathUUID(w, r, "executionID")
+	if !ok {
+		return
+	}
+	interactionID, ok := s.pathUUID(w, r, "interactionID")
+	if !ok {
+		return
+	}
+	var input executions.InteractionResolutionDeliveryInput
+	if err := decodeJSON(r, &input); err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	var (
+		result executions.OperationResult[executions.Interaction]
+		err    error
+	)
+	if acknowledge {
+		result, err = s.executions.AcknowledgeInteractionResolution(
+			r.Context(), mustWorker(r), executionID, interactionID, input, requestID(r),
+		)
+	} else {
+		result, err = s.executions.MarkInteractionResolutionDelivered(
+			r.Context(), mustWorker(r), executionID, interactionID, input, requestID(r),
+		)
+	}
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	writeOperation(w, result.Replayed, result.StatusCode, result.Value)
+}
+
 func (s *Server) requireWorker(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		worker, err := s.executions.Authenticate(r.Context(), bearerToken(r))

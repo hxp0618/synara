@@ -557,8 +557,11 @@ func (s *Service) RecoverExpired(ctx context.Context, limit int) error {
 				return problem.Wrap(500, "expired_lease_release_failed", "Failed to release an expired execution lease.", err)
 			}
 			if execution.WorkerID == nil || *execution.WorkerID != lease.WorkerID || execution.Generation != lease.Generation ||
-				(execution.Status != "leased" && execution.Status != "running") {
+				(execution.Status != "leased" && execution.Status != "running" && execution.Status != "waiting-for-approval") {
 				continue
+			}
+			if err := s.supersedeInteractionGeneration(ctx, tx, execution, lease); err != nil {
+				return err
 			}
 			execution.Status = "recovering"
 			execution.WorkerID = nil

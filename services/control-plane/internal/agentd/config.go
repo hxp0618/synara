@@ -117,10 +117,22 @@ func LoadConfig() (Config, error) {
 	if cfg.PollInterval <= 0 || cfg.HeartbeatInterval <= 0 || cfg.LeaseRenewInterval <= 0 || cfg.RequestTimeout <= 0 || cfg.ArtifactTimeout <= 0 || cfg.RunnerMessageBytes < 1024 {
 		return Config{}, errors.New("agentd intervals, request timeout, and runner message limit must be positive")
 	}
-	if (cfg.BuildGitSHA != "" && (len(cfg.BuildGitSHA) < 7 || len(cfg.BuildGitSHA) > 64)) || len(cfg.ImageDigest) > 512 {
+	if (cfg.BuildGitSHA != "" && !validBuildGitSHA(cfg.BuildGitSHA)) || len(cfg.ImageDigest) > 512 {
 		return Config{}, errors.New("agentd build Git SHA or image digest is invalid")
 	}
 	return cfg, nil
+}
+
+func validBuildGitSHA(value string) bool {
+	if len(value) < 7 || len(value) > 64 {
+		return false
+	}
+	for _, character := range value {
+		if (character < '0' || character > '9') && (character < 'a' || character > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 func parseRunnerProtocol(value string) (RunnerProtocol, error) {
