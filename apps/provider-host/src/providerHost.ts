@@ -343,7 +343,7 @@ export function reconstructedPrompt(input: RunnerInput): string {
 	return lines.join("\n");
 }
 
-function validateRunnerInput(input: RunnerInput): void {
+export function validateRunnerInput(input: RunnerInput): void {
   if (!isRecord(input) || !isRecord(input.execution) || !isRecord(input.workload)) {
     throw new Error("Runner input is invalid");
   }

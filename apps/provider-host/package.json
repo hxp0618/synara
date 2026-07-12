@@ -1,6 +1,6 @@
 {
   "name": "@synara/provider-host",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "bin": {
@@ -10,6 +10,10 @@
     "build": "bun build src/index.ts --target=node --outfile=dist/index.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
+  },
+  "dependencies": {
+    "@synara/contracts": "workspace:*",
+    "effect": "catalog:"
   },
   "devDependencies": {
     "@types/node": "catalog:",

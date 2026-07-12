@@ -145,8 +145,21 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 FROM oven/bun:1.3.14 AS provider-host-build
 
 WORKDIR /src
-COPY apps/provider-host/src ./src
-RUN bun build src/index.ts --target=node --outfile=/out/provider-host.mjs
+COPY package.json bun.lock bunfig.toml ./
+COPY apps/desktop/package.json ./apps/desktop/package.json
+COPY apps/marketing/package.json ./apps/marketing/package.json
+COPY apps/provider-host/package.json ./apps/provider-host/package.json
+COPY apps/server/package.json ./apps/server/package.json
+COPY apps/web/package.json ./apps/web/package.json
+COPY packages/contracts/package.json ./packages/contracts/package.json
+COPY packages/effect-acp/package.json ./packages/effect-acp/package.json
+COPY packages/shared/package.json ./packages/shared/package.json
+COPY scripts/package.json ./scripts/package.json
+RUN --mount=type=cache,target=/root/.bun/install/cache \
+  bun install --frozen-lockfile --filter @synara/provider-host
+COPY apps/provider-host/src ./apps/provider-host/src
+COPY packages/contracts/src ./packages/contracts/src
+RUN bun build apps/provider-host/src/index.ts --target=node --outfile=/out/provider-host.mjs
 
 FROM node:24-alpine AS worker-runtime-base
 

@@ -43,9 +43,13 @@
     },
     "apps/provider-host": {
       "name": "@synara/provider-host",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "bin": {
         "provider-host": "./dist/index.mjs",
+      },
+      "dependencies": {
+        "@synara/contracts": "workspace:*",
+        "effect": "catalog:",
       },
       "devDependencies": {
         "@types/node": "catalog:",
