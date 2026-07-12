@@ -143,11 +143,21 @@ func (s *Service) resolveInteraction(
 		}
 
 		now := s.now()
+		resolutionKind := interactionResolutionKind(kind, resolution)
+		resolutionCommandID := requestID + ":resolution"
+		deliveryWorkerID := lease.WorkerID
+		deliveryGeneration := lease.Generation
 		updated := tx.WithContext(ctx).Model(&persistence.ExecutionInteraction{}).
 			Where("id = ? AND status = ?", interaction.ID, "pending").
-			Select("status", "resolution", "resolved_at", "resolved_by").
+			Select(
+				"status", "resolution", "resolved_at", "resolved_by", "resolution_kind", "resolution_command_id",
+				"delivery_status", "delivery_worker_id", "delivery_generation", "delivery_available_at",
+			).
 			Updates(&persistence.ExecutionInteraction{
 				Status: "resolved", Resolution: resolution, ResolvedAt: &now, ResolvedBy: &principal.UserID,
+				ResolutionKind: &resolutionKind, ResolutionCommandID: &resolutionCommandID,
+				DeliveryStatus: "pending", DeliveryWorkerID: &deliveryWorkerID,
+				DeliveryGeneration: &deliveryGeneration, DeliveryAvailableAt: &now,
 			})
 		if err := expectOne(updated, 409, "interaction_resolve_conflict", "The execution interaction was resolved concurrently."); err != nil {
 			return Interaction{}, err
@@ -156,6 +166,12 @@ func (s *Service) resolveInteraction(
 		interaction.Resolution = resolution
 		interaction.ResolvedAt = &now
 		interaction.ResolvedBy = &principal.UserID
+		interaction.ResolutionKind = &resolutionKind
+		interaction.ResolutionCommandID = &resolutionCommandID
+		interaction.DeliveryStatus = "pending"
+		interaction.DeliveryWorkerID = &deliveryWorkerID
+		interaction.DeliveryGeneration = &deliveryGeneration
+		interaction.DeliveryAvailableAt = &now
 
 		var pending int64
 		if err := tx.WithContext(ctx).Model(&persistence.ExecutionInteraction{}).
@@ -195,6 +211,17 @@ func (s *Service) resolveInteraction(
 	return OperationResult[Interaction]{
 		Value: result.Value, Replayed: result.Replayed, StatusCode: result.StatusCode,
 	}, err
+}
+
+func interactionResolutionKind(kind string, resolution map[string]any) string {
+	if kind == "user-input" {
+		return "answered"
+	}
+	decision, _ := resolution["decision"].(string)
+	if strings.EqualFold(strings.TrimSpace(decision), "accept") {
+		return "approved"
+	}
+	return "denied"
 }
 
 func (s *Service) authorizeInteraction(

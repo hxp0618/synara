@@ -72,4 +72,5 @@ revocable secrets and must never appear in event payloads or logs.
 
 The generic `synara-agentd` implementation keeps Worker and Lease credentials outside provider
 runners, renews the Lease while a runner is active, validates runner Artifact paths against the
-Execution workspace, and implements the runner boundary in `agentd-runner-v1.md`.
+Execution workspace, and negotiates Provider Host Protocol v2 independently from Worker Protocol v1.
+`agentd-runner-v1.md` documents only the explicit legacy compatibility boundary.

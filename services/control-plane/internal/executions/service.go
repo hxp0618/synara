@@ -85,12 +85,13 @@ func (s *Service) Register(ctx context.Context, input RegisterWorkerInput) (Regi
 				ProtocolVersion: normalized.ProtocolVersion,
 				Capabilities:    normalized.Capabilities, LeaseSupported: normalized.LeaseSupported,
 				FencingSupported: normalized.FencingSupported, AuthTokenHash: tokenHash, Status: "online",
-				RegisteredAt: now, LastHeartbeatAt: now,
+				CompatibilityStatus: "unknown",
+				RegisteredAt:        now, LastHeartbeatAt: now,
 			}
 			if err := tx.WithContext(ctx).Create(&model).Error; err != nil {
 				return problem.Wrap(409, "worker_registration_conflict", "Worker registration conflicts with an active instance.", err)
 			}
-			return nil
+			return persistWorkerManifest(ctx, tx, &model, normalized.Version, normalized.Capabilities, now)
 		}
 		if err != nil {
 			return problem.Wrap(500, "worker_registration_lookup_failed", "Failed to resolve the worker registration.", err)
@@ -122,7 +123,7 @@ func (s *Service) Register(ctx context.Context, input RegisterWorkerInput) (Regi
 		model.LastHeartbeatAt = now
 		model.DrainingAt = nil
 		model.TerminatedAt = nil
-		return nil
+		return persistWorkerManifest(ctx, tx, &model, normalized.Version, normalized.Capabilities, now)
 	})
 	if err != nil {
 		return RegisteredWorker{}, err

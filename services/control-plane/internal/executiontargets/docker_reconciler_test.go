@@ -48,7 +48,8 @@ func TestDockerPoolReconcilerCreatesStableWorkersAndDefersBusyRemoval(t *testing
 		}
 		environment := strings.Join(spec.Environment, "\n")
 		if !strings.Contains(environment, "SYNARA_WORKER_REGISTRATION_TOKEN=docker-registration-secret") ||
-			!strings.Contains(environment, "SYNARA_EXECUTION_TARGET_KIND=docker") {
+			!strings.Contains(environment, "SYNARA_EXECUTION_TARGET_KIND=docker") ||
+			!strings.Contains(environment, "SYNARA_AGENTD_PROVIDER_HOST_PROTOCOL=v2") {
 			t.Fatalf("Docker Worker environment is incomplete: %s", environment)
 		}
 		encodedLabels, _ := json.Marshal(spec.Labels)

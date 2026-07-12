@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -27,6 +28,13 @@ func NewDaemon(cfg Config, logger *slog.Logger) *Daemon {
 }
 
 func (d *Daemon) Run(ctx context.Context) error {
+	probeContext, cancelProbe := context.WithTimeout(ctx, d.config.RequestTimeout)
+	providerHostCapabilities, err := d.runner.CapabilitySummary(probeContext)
+	cancelProbe()
+	if err != nil {
+		return fmt.Errorf("probe Provider Host compatibility: %w", err)
+	}
+	d.config.Capabilities = withProviderHostCapabilities(d.config.Capabilities, providerHostCapabilities, d.config)
 	registered, err := d.client.Register(ctx, d.config)
 	if err != nil {
 		return fmt.Errorf("register worker: %w", err)
@@ -126,8 +134,17 @@ func (d *Daemon) runExecution(
 				message.Artifact.OriginalName = filepath.Base(artifactPath)
 			}
 			return d.client.UploadArtifact(messageContext, execution.ID, lease, *message.Artifact, artifactPath)
-		default:
+		case "progress":
 			return nil
+		case "interaction", "checkpoint":
+			return &runnerFailure{
+				code:                 "capability_unsupported",
+				message:              "Provider Host emitted a lifecycle message that this Worker version cannot persist",
+				requiresNewExecution: true, requiresUserAction: true,
+				canReconstructFromHistory: true, canMoveWorker: true,
+			}
+		default:
+			return protocolFailure("Provider Host emitted an unsupported Worker message")
 		}
 	})
 	cancelRunner()
@@ -180,10 +197,35 @@ func (d *Daemon) failExecution(ctx context.Context, executionID uuid.UUID, lease
 	if len(message) > 10_000 {
 		message = message[:10_000]
 	}
-	if err := d.client.Fail(ctx, executionID, lease, "runner_failed", message); err != nil {
+	if err := d.client.Fail(ctx, executionID, lease, runnerFailureCode(cause), message); err != nil {
 		return fmt.Errorf("runner failed (%v) and execution failure could not be reported: %w", cause, err)
 	}
 	return cause
+}
+
+func withProviderHostCapabilities(base map[string]any, providerHost map[string]any, config Config) map[string]any {
+	result := make(map[string]any, len(base)+2)
+	for key, value := range base {
+		result[key] = value
+	}
+	result["providerHost"] = providerHost
+	workerRuntime := map[string]any{
+		"workerBuildVersion":    config.Version,
+		"workerProtocolMinimum": executions.WorkerProtocolVersion,
+		"workerProtocolMaximum": executions.WorkerProtocolVersion,
+		"runtimeEventMinimum":   1,
+		"runtimeEventMaximum":   1,
+		"operatingSystem":       runtime.GOOS,
+		"architecture":          runtime.GOARCH,
+	}
+	if config.BuildGitSHA != "" {
+		workerRuntime["workerBuildGitSha"] = config.BuildGitSHA
+	}
+	if config.ImageDigest != "" {
+		workerRuntime["imageDigest"] = config.ImageDigest
+	}
+	result["workerRuntime"] = workerRuntime
+	return result
 }
 
 func resolveWorkspaceArtifact(workspaceDirectory, candidate string) (string, error) {

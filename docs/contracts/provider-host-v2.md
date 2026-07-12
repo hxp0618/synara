@@ -48,6 +48,20 @@ files, Diffs and snapshots use Artifact references.
 Runtime Event version range, credential delivery modes and Resume strategies. Static capability claims must be
 verified by the shared Provider Acceptance Suite.
 
+## agentd negotiation and v1 boundary
+
+Managed Local, SSH, Docker and Kubernetes Workers use v2. Agentd appends `--protocol-v2`, performs
+side-effect-free `Describe` probes before Worker registration, and publishes the returned Codex and Claude
+plus explicit Local-only Provider descriptors under the registered `providerHost` capability. It performs another Describe in the actual Host
+process before Start/Resume and rejects incompatible Major versions, unavailable Provider CLIs, Local-only or
+missing `send-turn` capability, incompatible Runtime Event ranges, unsupported Credential delivery and invalid
+Resume strategies before sending the Provider Turn.
+
+`SYNARA_AGENTD_PROVIDER_HOST_PROTOCOL=v1` is the explicit, bounded compatibility switch for an older one-shot
+runner. The default is `v2`; there is intentionally no `auto` mode and no fallback after a v2 command. Replaying
+the same Workload through v1 after a partial v2 execution could duplicate a Provider Turn, tool call or external
+side effect.
+
 ## Stable errors
 
 Errors use the codes in `PROVIDER_HOST_ERROR_CODES` and include:
@@ -65,6 +79,5 @@ Provider stderr or Presigned URLs.
 
 ## v1 boundary
 
-The existing unversioned one-shot runner is retained only as an explicit compatibility path during managed
-Worker upgrades. It cannot advertise v2-only capabilities. Managed Stage 3 Worker images must negotiate v2
-before Claiming Provider work.
+The existing unversioned one-shot runner is retained only through the explicit switch above during managed
+Worker upgrades. It advertises a legacy Protocol summary and cannot advertise v2-only capabilities.

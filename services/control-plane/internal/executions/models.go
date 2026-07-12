@@ -11,22 +11,26 @@ import (
 const WorkerProtocolVersion = 1
 
 type Worker struct {
-	ID                uuid.UUID      `json:"id"`
-	ExecutionTargetID uuid.UUID      `json:"executionTargetId"`
-	TargetKind        string         `json:"targetKind"`
-	ClusterID         string         `json:"clusterId"`
-	Namespace         string         `json:"namespace"`
-	PodName           string         `json:"podName"`
-	Version           string         `json:"version"`
-	ProtocolVersion   int            `json:"protocolVersion"`
-	Capabilities      map[string]any `json:"capabilities"`
-	LeaseSupported    bool           `json:"leaseSupported"`
-	FencingSupported  bool           `json:"fencingSupported"`
-	Status            string         `json:"status"`
-	RegisteredAt      time.Time      `json:"registeredAt"`
-	LastHeartbeatAt   time.Time      `json:"lastHeartbeatAt"`
-	DrainingAt        *time.Time     `json:"drainingAt"`
-	TerminatedAt      *time.Time     `json:"terminatedAt"`
+	ID                     uuid.UUID      `json:"id"`
+	ExecutionTargetID      uuid.UUID      `json:"executionTargetId"`
+	TargetKind             string         `json:"targetKind"`
+	ClusterID              string         `json:"clusterId"`
+	Namespace              string         `json:"namespace"`
+	PodName                string         `json:"podName"`
+	Version                string         `json:"version"`
+	ProtocolVersion        int            `json:"protocolVersion"`
+	Capabilities           map[string]any `json:"capabilities"`
+	CurrentManifestID      *uuid.UUID     `json:"currentManifestId,omitempty"`
+	CompatibilityStatus    string         `json:"compatibilityStatus"`
+	CompatibilityReason    *string        `json:"compatibilityReason,omitempty"`
+	CompatibilityCheckedAt *time.Time     `json:"compatibilityCheckedAt,omitempty"`
+	LeaseSupported         bool           `json:"leaseSupported"`
+	FencingSupported       bool           `json:"fencingSupported"`
+	Status                 string         `json:"status"`
+	RegisteredAt           time.Time      `json:"registeredAt"`
+	LastHeartbeatAt        time.Time      `json:"lastHeartbeatAt"`
+	DrainingAt             *time.Time     `json:"drainingAt"`
+	TerminatedAt           *time.Time     `json:"terminatedAt"`
 }
 
 type RegisteredWorker struct {
@@ -35,22 +39,27 @@ type RegisteredWorker struct {
 }
 
 type Execution struct {
-	ID                uuid.UUID  `json:"id"`
-	TenantID          uuid.UUID  `json:"tenantId"`
-	SessionID         uuid.UUID  `json:"sessionId"`
-	TurnID            uuid.UUID  `json:"turnId"`
-	Attempt           int        `json:"attempt"`
-	Status            string     `json:"status"`
-	ExecutionTargetID uuid.UUID  `json:"executionTargetId"`
-	TargetKind        string     `json:"targetKind"`
-	WorkerID          *uuid.UUID `json:"workerId"`
-	Generation        int64      `json:"generation"`
-	RequestedBy       uuid.UUID  `json:"requestedBy"`
-	QueuedAt          time.Time  `json:"queuedAt"`
-	StartedAt         *time.Time `json:"startedAt"`
-	FinishedAt        *time.Time `json:"finishedAt"`
-	FailureCode       *string    `json:"failureCode"`
-	FailureMessage    *string    `json:"failureMessage"`
+	ID                       uuid.UUID  `json:"id"`
+	TenantID                 uuid.UUID  `json:"tenantId"`
+	SessionID                uuid.UUID  `json:"sessionId"`
+	TurnID                   uuid.UUID  `json:"turnId"`
+	Attempt                  int        `json:"attempt"`
+	Status                   string     `json:"status"`
+	ExecutionTargetID        uuid.UUID  `json:"executionTargetId"`
+	TargetKind               string     `json:"targetKind"`
+	Provider                 *string    `json:"provider,omitempty"`
+	WorkerID                 *uuid.UUID `json:"workerId"`
+	WorkerManifestID         *uuid.UUID `json:"workerManifestId,omitempty"`
+	ProviderRuntimeBindingID *uuid.UUID `json:"providerRuntimeBindingId,omitempty"`
+	RemoteWorkspaceID        *uuid.UUID `json:"remoteWorkspaceId,omitempty"`
+	RestoreCheckpointID      *uuid.UUID `json:"restoreCheckpointId,omitempty"`
+	Generation               int64      `json:"generation"`
+	RequestedBy              uuid.UUID  `json:"requestedBy"`
+	QueuedAt                 time.Time  `json:"queuedAt"`
+	StartedAt                *time.Time `json:"startedAt"`
+	FinishedAt               *time.Time `json:"finishedAt"`
+	FailureCode              *string    `json:"failureCode"`
+	FailureMessage           *string    `json:"failureMessage"`
 }
 
 type Lease struct {
@@ -72,19 +81,22 @@ type ClaimResult struct {
 }
 
 type Workload struct {
-	TenantID             uuid.UUID             `json:"tenantId"`
-	OrganizationID       uuid.UUID             `json:"organizationId"`
-	ProjectID            uuid.UUID             `json:"projectId"`
-	SessionID            uuid.UUID             `json:"sessionId"`
-	TurnID               uuid.UUID             `json:"turnId"`
-	SessionTitle         string                `json:"sessionTitle"`
-	Provider             string                `json:"provider"`
-	Model                *string               `json:"model"`
-	ProviderCredentialID *uuid.UUID            `json:"providerCredentialId"`
-	InputText            string                `json:"inputText"`
-	RepositoryURL        *string               `json:"repositoryUrl"`
-	DefaultBranch        string                `json:"defaultBranch"`
-	ConversationHistory  []ConversationMessage `json:"conversationHistory,omitempty"`
+	TenantID                 uuid.UUID             `json:"tenantId"`
+	OrganizationID           uuid.UUID             `json:"organizationId"`
+	ProjectID                uuid.UUID             `json:"projectId"`
+	SessionID                uuid.UUID             `json:"sessionId"`
+	TurnID                   uuid.UUID             `json:"turnId"`
+	SessionTitle             string                `json:"sessionTitle"`
+	Provider                 string                `json:"provider"`
+	ProviderRuntimeBindingID *uuid.UUID            `json:"providerRuntimeBindingId,omitempty"`
+	RemoteWorkspaceID        *uuid.UUID            `json:"remoteWorkspaceId,omitempty"`
+	WorkerManifestID         *uuid.UUID            `json:"workerManifestId,omitempty"`
+	Model                    *string               `json:"model"`
+	ProviderCredentialID     *uuid.UUID            `json:"providerCredentialId"`
+	InputText                string                `json:"inputText"`
+	RepositoryURL            *string               `json:"repositoryUrl"`
+	DefaultBranch            string                `json:"defaultBranch"`
+	ConversationHistory      []ConversationMessage `json:"conversationHistory,omitempty"`
 }
 
 type ConversationMessage struct {
@@ -175,19 +187,32 @@ type RuntimeEventResult struct {
 }
 
 type Interaction struct {
-	ID          uuid.UUID      `json:"id"`
-	ExecutionID uuid.UUID      `json:"executionId"`
-	SessionID   uuid.UUID      `json:"sessionId"`
-	WorkerID    uuid.UUID      `json:"workerId"`
-	Generation  int64          `json:"generation"`
-	RequestID   string         `json:"requestId"`
-	Kind        string         `json:"kind"`
-	Status      string         `json:"status"`
-	Payload     map[string]any `json:"payload"`
-	Resolution  map[string]any `json:"resolution,omitempty"`
-	RequestedAt time.Time      `json:"requestedAt"`
-	ResolvedAt  *time.Time     `json:"resolvedAt"`
-	ResolvedBy  *uuid.UUID     `json:"resolvedBy"`
+	ID                  uuid.UUID      `json:"id"`
+	ExecutionID         uuid.UUID      `json:"executionId"`
+	SessionID           uuid.UUID      `json:"sessionId"`
+	TurnID              uuid.UUID      `json:"turnId"`
+	WorkerID            uuid.UUID      `json:"workerId"`
+	Generation          int64          `json:"generation"`
+	Provider            string         `json:"provider"`
+	RequestID           string         `json:"requestId"`
+	Kind                string         `json:"kind"`
+	Status              string         `json:"status"`
+	Payload             map[string]any `json:"payload"`
+	Resolution          map[string]any `json:"resolution,omitempty"`
+	RequestedAt         time.Time      `json:"requestedAt"`
+	ExpiresAt           time.Time      `json:"expiresAt"`
+	ResolvedAt          *time.Time     `json:"resolvedAt"`
+	ResolvedBy          *uuid.UUID     `json:"resolvedBy"`
+	ResolutionKind      *string        `json:"resolutionKind,omitempty"`
+	ResolutionCommandID *string        `json:"resolutionCommandId,omitempty"`
+	DeliveryStatus      string         `json:"deliveryStatus"`
+	DeliveryWorkerID    *uuid.UUID     `json:"deliveryWorkerId,omitempty"`
+	DeliveryGeneration  *int64         `json:"deliveryGeneration,omitempty"`
+	DeliveryAttempts    int            `json:"deliveryAttempts"`
+	DeliveryAvailableAt *time.Time     `json:"deliveryAvailableAt,omitempty"`
+	DeliveredAt         *time.Time     `json:"deliveredAt,omitempty"`
+	AcknowledgedAt      *time.Time     `json:"acknowledgedAt,omitempty"`
+	DeliveryError       *string        `json:"deliveryError,omitempty"`
 }
 
 type ResolveApprovalInput struct {
@@ -208,6 +233,8 @@ func toWorker(model persistence.WorkerInstance) Worker {
 		ClusterID: model.ClusterID,
 		Namespace: model.Namespace, PodName: model.PodName, Version: model.Version,
 		ProtocolVersion: model.ProtocolVersion, Capabilities: capabilities, LeaseSupported: model.LeaseSupported,
+		CurrentManifestID: model.CurrentManifestID, CompatibilityStatus: model.CompatibilityStatus,
+		CompatibilityReason: model.CompatibilityReason, CompatibilityCheckedAt: model.CompatibilityCheckedAt,
 		FencingSupported: model.FencingSupported, Status: model.Status, RegisteredAt: model.RegisteredAt,
 		LastHeartbeatAt: model.LastHeartbeatAt, DrainingAt: model.DrainingAt,
 		TerminatedAt: model.TerminatedAt,
@@ -220,10 +247,15 @@ func toInteraction(model persistence.ExecutionInteraction) Interaction {
 		payload = map[string]any{}
 	}
 	return Interaction{
-		ID: model.ID, ExecutionID: model.ExecutionID, SessionID: model.SessionID,
-		WorkerID: model.WorkerID, Generation: model.Generation, RequestID: model.RequestID,
+		ID: model.ID, ExecutionID: model.ExecutionID, SessionID: model.SessionID, TurnID: model.TurnID,
+		WorkerID: model.WorkerID, Generation: model.Generation, Provider: model.Provider, RequestID: model.RequestID,
 		Kind: model.Kind, Status: model.Status, Payload: payload, Resolution: model.Resolution,
-		RequestedAt: model.RequestedAt, ResolvedAt: model.ResolvedAt, ResolvedBy: model.ResolvedBy,
+		RequestedAt: model.RequestedAt, ExpiresAt: model.ExpiresAt, ResolvedAt: model.ResolvedAt, ResolvedBy: model.ResolvedBy,
+		ResolutionKind: model.ResolutionKind, ResolutionCommandID: model.ResolutionCommandID,
+		DeliveryStatus: model.DeliveryStatus, DeliveryWorkerID: model.DeliveryWorkerID,
+		DeliveryGeneration: model.DeliveryGeneration, DeliveryAttempts: model.DeliveryAttempts,
+		DeliveryAvailableAt: model.DeliveryAvailableAt, DeliveredAt: model.DeliveredAt,
+		AcknowledgedAt: model.AcknowledgedAt, DeliveryError: model.DeliveryError,
 	}
 }
 
@@ -231,8 +263,11 @@ func toExecution(model persistence.AgentExecution) Execution {
 	return Execution{
 		ID: model.ID, TenantID: model.TenantID, SessionID: model.SessionID, TurnID: model.TurnID,
 		Attempt: model.Attempt, Status: model.Status, ExecutionTargetID: model.ExecutionTargetID,
-		TargetKind: model.TargetKind,
-		WorkerID:   model.WorkerID, Generation: model.Generation, RequestedBy: model.RequestedBy,
+		TargetKind: model.TargetKind, Provider: model.Provider,
+		WorkerID: model.WorkerID, WorkerManifestID: model.WorkerManifestID,
+		ProviderRuntimeBindingID: model.ProviderRuntimeBindingID, RemoteWorkspaceID: model.RemoteWorkspaceID,
+		RestoreCheckpointID: model.RestoreCheckpointID,
+		Generation:          model.Generation, RequestedBy: model.RequestedBy,
 		QueuedAt: model.QueuedAt, StartedAt: model.StartedAt, FinishedAt: model.FinishedAt,
 		FailureCode: model.FailureCode, FailureMessage: model.FailureMessage,
 	}

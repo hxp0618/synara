@@ -71,7 +71,8 @@ func TestKubernetesReconcilerAppliesSecurityFoundationAndExecutionPods(t *testin
 	}
 	if bytes.Contains(environment, []byte("kubernetes-registration-secret")) ||
 		!bytes.Contains(environment, []byte("secretKeyRef")) ||
-		!bytes.Contains(environment, []byte("SYNARA_AGENTD_ASSIGNED_EXECUTION_ID")) {
+		!bytes.Contains(environment, []byte("SYNARA_AGENTD_ASSIGNED_EXECUTION_ID")) ||
+		!bytes.Contains(environment, []byte("SYNARA_AGENTD_PROVIDER_HOST_PROTOCOL")) {
 		t.Fatalf("Kubernetes Pod secret/assignment environment is invalid: %s", environment)
 	}
 	secret := client.lastKind("Secret")

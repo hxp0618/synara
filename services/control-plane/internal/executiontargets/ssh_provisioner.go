@@ -402,6 +402,7 @@ func (p *SSHProvisioner) environmentFile(
 		{"SYNARA_AGENTD_VERSION", "managed"},
 		{"SYNARA_AGENTD_CAPABILITIES_JSON", string(capabilities)},
 		{"SYNARA_AGENTD_RUNNER_COMMAND_JSON", string(runnerCommand)},
+		{"SYNARA_AGENTD_PROVIDER_HOST_PROTOCOL", "v2"},
 		{"SYNARA_AGENTD_WORKSPACE_ROOT", paths.workspaceRoot},
 	}
 	var output strings.Builder

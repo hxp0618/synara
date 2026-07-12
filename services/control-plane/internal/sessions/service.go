@@ -183,6 +183,9 @@ func (s *Service) CreateWithIdempotency(
 		if err := tx.Create(&model).Error; err != nil {
 			return Session{}, problem.Wrap(409, "session_create_rejected", "Session creation was rejected by a tenant isolation constraint.", err)
 		}
+		if _, err := s.ensureRuntimeResources(ctx, tx, &model); err != nil {
+			return Session{}, err
+		}
 		createdEvent, err = appendEvent(ctx, tx, &model, eventInput{
 			EventType: "session.created", ActorType: "user", ActorID: &principal.UserID,
 			Payload: map[string]any{
@@ -377,9 +380,15 @@ func (s *Service) CreateTurnWithIdempotency(
 			Where("id = ? AND status = ?", locked.ExecutionTargetID, "active").Take(&target).Error; err != nil {
 			return Turn{}, problem.Wrap(409, "execution_target_unavailable", "The session execution target is unavailable.", err)
 		}
+		resources, err := s.ensureRuntimeResources(ctx, tx, &locked)
+		if err != nil {
+			return Turn{}, err
+		}
+		provider := locked.Provider
 		execution = persistence.AgentExecution{
 			ID: uuid.New(), TenantID: tenantID, SessionID: sessionID, TurnID: turn.ID,
 			Attempt: 1, Status: "queued", ExecutionTargetID: target.ID, TargetKind: target.Kind,
+			Provider: &provider, ProviderRuntimeBindingID: &resources.BindingID, RemoteWorkspaceID: &resources.WorkspaceID,
 			Generation: 0, RequestedBy: principal.UserID, QueuedAt: queuedAt,
 		}
 		if err := tx.Create(&turn).Error; err != nil {
@@ -394,6 +403,8 @@ func (s *Service) CreateTurnWithIdempotency(
 				"executionId": execution.ID, "tenantId": tenantID, "sessionId": sessionID,
 				"turnId": turn.ID, "executionTargetId": execution.ExecutionTargetID,
 				"targetKind": execution.TargetKind, "attempt": execution.Attempt,
+				"provider": provider, "providerRuntimeBindingId": resources.BindingID,
+				"remoteWorkspaceId": resources.WorkspaceID,
 			},
 			Headers: map[string]any{"eventVersion": 1}, AvailableAt: queuedAt, CreatedAt: queuedAt,
 		}); err != nil {

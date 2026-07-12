@@ -16,13 +16,29 @@ import (
 type Runner struct {
 	command         []string
 	maxMessageBytes int
+	protocol        RunnerProtocol
 }
 
 func NewRunner(cfg Config) *Runner {
-	return &Runner{command: append([]string(nil), cfg.RunnerCommand...), maxMessageBytes: cfg.RunnerMessageBytes}
+	return &Runner{
+		command: append([]string(nil), cfg.RunnerCommand...), maxMessageBytes: cfg.RunnerMessageBytes,
+		protocol: cfg.RunnerProtocol,
+	}
 }
 
 func (r *Runner) Run(
+	ctx context.Context,
+	input RunnerInput,
+	credential *RunnerCredential,
+	handle func(context.Context, RunnerMessage) error,
+) (RunnerResult, error) {
+	if r.protocol == RunnerProtocolV2 {
+		return r.runProviderHostV2(ctx, input, credential, handle)
+	}
+	return r.runLegacy(ctx, input, credential, handle)
+}
+
+func (r *Runner) runLegacy(
 	ctx context.Context,
 	input RunnerInput,
 	credential *RunnerCredential,

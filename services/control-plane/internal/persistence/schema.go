@@ -13,6 +13,7 @@ func AllModels() []any {
 		&AgentSession{}, &AgentTurn{}, &SessionEvent{}, &Automation{}, &WorkerInstance{},
 		&AgentExecution{}, &WorkerLease{}, &WorkerRequestReceipt{}, &APIIdempotencyKey{}, &ExecutionInteraction{}, &Artifact{},
 		&ArtifactPayloadMigration{}, &ArtifactAccessToken{}, &ProviderCredential{},
+		&WorkerManifest{}, &WorkerProviderManifest{}, &ProviderRuntimeBinding{}, &RemoteWorkspace{}, &WorkspaceCheckpoint{},
 		&SSEConnectionLease{},
 		&TenantRetentionPolicy{}, &IdentityConnection{}, &IdentityLoginAttempt{},
 		&ServiceAccount{}, &ServiceAccountToken{}, &IdentityGroup{}, &IdentityGroupMember{},

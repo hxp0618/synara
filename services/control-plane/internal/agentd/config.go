@@ -27,8 +27,11 @@ type Config struct {
 	Namespace           string
 	PodName             string
 	Version             string
+	BuildGitSHA         string
+	ImageDigest         string
 	Capabilities        map[string]any
 	RunnerCommand       []string
+	RunnerProtocol      RunnerProtocol
 	WorkspaceRoot       string
 	PollInterval        time.Duration
 	HeartbeatInterval   time.Duration
@@ -56,6 +59,10 @@ func LoadConfig() (Config, error) {
 	if err != nil {
 		return Config{}, fmt.Errorf("SYNARA_AGENTD_RUNNER_COMMAND_JSON: %w", err)
 	}
+	runnerProtocol, err := parseRunnerProtocol(os.Getenv("SYNARA_AGENTD_PROVIDER_HOST_PROTOCOL"))
+	if err != nil {
+		return Config{}, err
+	}
 	capabilities := map[string]any{}
 	if raw := strings.TrimSpace(os.Getenv("SYNARA_AGENTD_CAPABILITIES_JSON")); raw != "" {
 		if err := json.Unmarshal([]byte(raw), &capabilities); err != nil {
@@ -75,7 +82,9 @@ func LoadConfig() (Config, error) {
 		ExecutionTargetID: targetID, TargetKind: targetKind,
 		ClusterID: envDefault("SYNARA_AGENTD_CLUSTER_ID", "local"), Namespace: envDefault("SYNARA_AGENTD_NAMESPACE", "default"),
 		PodName: envDefault("SYNARA_AGENTD_INSTANCE_ID", hostname()), Version: envDefault("SYNARA_AGENTD_VERSION", "dev"),
-		Capabilities: capabilities, RunnerCommand: runnerCommand, WorkspaceRoot: workspaceRoot,
+		BuildGitSHA:  strings.TrimSpace(os.Getenv("SYNARA_AGENTD_BUILD_GIT_SHA")),
+		ImageDigest:  strings.TrimSpace(os.Getenv("SYNARA_AGENTD_IMAGE_DIGEST")),
+		Capabilities: capabilities, RunnerCommand: runnerCommand, RunnerProtocol: runnerProtocol, WorkspaceRoot: workspaceRoot,
 	}
 	if raw := strings.TrimSpace(os.Getenv("SYNARA_AGENTD_ASSIGNED_EXECUTION_ID")); raw != "" {
 		assignedExecutionID, parseErr := uuid.Parse(raw)
@@ -108,7 +117,21 @@ func LoadConfig() (Config, error) {
 	if cfg.PollInterval <= 0 || cfg.HeartbeatInterval <= 0 || cfg.LeaseRenewInterval <= 0 || cfg.RequestTimeout <= 0 || cfg.ArtifactTimeout <= 0 || cfg.RunnerMessageBytes < 1024 {
 		return Config{}, errors.New("agentd intervals, request timeout, and runner message limit must be positive")
 	}
+	if (cfg.BuildGitSHA != "" && (len(cfg.BuildGitSHA) < 7 || len(cfg.BuildGitSHA) > 64)) || len(cfg.ImageDigest) > 512 {
+		return Config{}, errors.New("agentd build Git SHA or image digest is invalid")
+	}
 	return cfg, nil
+}
+
+func parseRunnerProtocol(value string) (RunnerProtocol, error) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", string(RunnerProtocolV2):
+		return RunnerProtocolV2, nil
+	case string(RunnerProtocolV1):
+		return RunnerProtocolV1, nil
+	default:
+		return "", errors.New("SYNARA_AGENTD_PROVIDER_HOST_PROTOCOL must be v2 or v1")
+	}
 }
 
 func envDefault(name, fallback string) string {

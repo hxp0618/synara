@@ -145,10 +145,22 @@ func (s *Service) persistPendingInteraction(
 	if !ok || requestID == "" || len(requestID) > 200 || strings.ContainsAny(requestID, "\r\n\t") {
 		return problem.New(400, "invalid_interaction_request_id", "Approval and user-input events require a valid requestId.")
 	}
+	provider := ""
+	if execution.Provider != nil {
+		provider = strings.TrimSpace(*execution.Provider)
+	}
+	if provider == "" {
+		if err := tx.WithContext(ctx).Model(&persistence.AgentSession{}).
+			Select("provider").Where("tenant_id = ? AND id = ?", execution.TenantID, execution.SessionID).
+			Scan(&provider).Error; err != nil {
+			return problem.Wrap(500, "interaction_provider_load_failed", "The interaction Provider could not be loaded.", err)
+		}
+	}
 	interaction := persistence.ExecutionInteraction{
 		ID: uuid.New(), TenantID: execution.TenantID, ExecutionID: execution.ID, SessionID: execution.SessionID,
-		WorkerID: worker.ID, Generation: execution.Generation, RequestID: requestID,
-		Kind: kind, Status: "pending", Payload: payload, RequestedAt: requestedAt,
+		TurnID: execution.TurnID, WorkerID: worker.ID, Generation: execution.Generation, Provider: provider,
+		RequestID: requestID, Kind: kind, Status: "pending", Payload: payload,
+		RequestedAt: requestedAt, ExpiresAt: requestedAt.Add(24 * time.Hour), DeliveryStatus: "not-ready",
 	}
 	if err := tx.WithContext(ctx).Create(&interaction).Error; err != nil {
 		if errors.Is(err, gorm.ErrDuplicatedKey) {

@@ -109,7 +109,8 @@ func (s *Service) Claim(
 				return problem.Wrap(500, "receipt_lookup_failed", "Failed to inspect the claim receipt.", lookupErr)
 			}
 
-			if err := s.requireClaimableWorker(ctx, tx, worker.ID); err != nil {
+			claimWorker, err := s.requireClaimableWorker(ctx, tx, worker.ID)
+			if err != nil {
 				return err
 			}
 			var execution persistence.AgentExecution
@@ -119,8 +120,33 @@ func (s *Service) Claim(
 			if normalizedTarget.ExecutionID != nil {
 				claimQuery = claimQuery.Where("agent_executions.id = ?", *normalizedTarget.ExecutionID)
 			}
+			if claimWorker.CurrentManifestID != nil {
+				claimQuery = claimQuery.Where(`agent_executions.provider IS NULL OR EXISTS (
+					SELECT 1 FROM worker_provider_manifests provider_manifest
+					WHERE provider_manifest.worker_manifest_id = ?
+					  AND provider_manifest.provider = agent_executions.provider
+					  AND provider_manifest.compatibility_status = 'compatible'
+				)`, *claimWorker.CurrentManifestID)
+			}
 			claimErr := claimQuery.Order("agent_executions.queued_at, agent_executions.id").Take(&execution).Error
 			if errors.Is(claimErr, gorm.ErrRecordNotFound) {
+				if normalizedTarget.ExecutionID != nil && claimWorker.CurrentManifestID != nil {
+					var assigned persistence.AgentExecution
+					assignedErr := tx.WithContext(ctx).
+						Where("id = ? AND status IN ? AND execution_target_id = ? AND target_kind = ?",
+							*normalizedTarget.ExecutionID, []string{"queued", "recovering"},
+							normalizedTarget.ExecutionTargetID, normalizedTarget.TargetKind).
+						Take(&assigned).Error
+					if assignedErr == nil {
+						supported, supportErr := workerSupportsProvider(tx, claimWorker, assigned.Provider)
+						if supportErr != nil {
+							return problem.Wrap(500, "worker_manifest_lookup_failed", "Failed to inspect Worker Provider compatibility.", supportErr)
+						}
+						if !supported {
+							return problem.New(409, "worker_provider_incompatible", "The Worker manifest does not support the assigned Execution Provider.")
+						}
+					}
+				}
 				result = ClaimResult{}
 			} else if claimErr != nil {
 				return problem.Wrap(500, "execution_claim_lookup_failed", "Failed to find a claimable execution.", claimErr)
@@ -134,6 +160,7 @@ func (s *Service) Claim(
 				now := s.now()
 				execution.Status = "leased"
 				execution.WorkerID = &worker.ID
+				execution.WorkerManifestID = claimWorker.CurrentManifestID
 				execution.Generation++
 				execution.FinishedAt = nil
 				execution.FailureCode = nil
@@ -142,7 +169,8 @@ func (s *Service) Claim(
 					Where("id = ? AND status = ? AND generation = ?", execution.ID, previousStatus, previousGeneration).
 					Updates(map[string]any{
 						"status": execution.Status, "worker_id": worker.ID, "generation": execution.Generation,
-						"finished_at": nil, "failure_code": nil, "failure_message": nil,
+						"worker_manifest_id": execution.WorkerManifestID,
+						"finished_at":        nil, "failure_code": nil, "failure_message": nil,
 					})
 				if err := expectOne(claimUpdate, 409, "execution_claim_conflict", "The execution was claimed concurrently."); err != nil {
 					return err
@@ -155,12 +183,16 @@ func (s *Service) Claim(
 				if err := tx.WithContext(ctx).Create(&lease).Error; err != nil {
 					return problem.Wrap(409, "execution_lease_conflict", "The execution already has an active lease.", err)
 				}
+				if err := bindExecutionRuntimeResources(ctx, tx, claimWorker, execution, now); err != nil {
+					return err
+				}
 				appended, err = s.sessions.AppendInternalEvent(ctx, tx, execution.TenantID, execution.SessionID, sessions.InternalEventInput{
 					EventType: "execution.leased", ActorType: "worker", ActorID: &worker.ID,
 					ExecutionID: &execution.ID, WorkerID: &worker.ID, Generation: &execution.Generation,
 					Payload: map[string]any{
 						"turnId": execution.TurnID, "expiresAt": lease.ExpiresAt,
 						"executionTargetId": execution.ExecutionTargetID, "targetKind": execution.TargetKind,
+						"workerManifestId": execution.WorkerManifestID,
 					},
 				})
 				if err != nil {
@@ -610,35 +642,38 @@ func (s *Service) lockLease(
 	return lease, execution, nil
 }
 
-func (s *Service) requireClaimableWorker(ctx context.Context, tx *gorm.DB, workerID uuid.UUID) error {
+func (s *Service) requireClaimableWorker(ctx context.Context, tx *gorm.DB, workerID uuid.UUID) (persistence.WorkerInstance, error) {
 	var worker persistence.WorkerInstance
 	err := persistence.WithLocking(tx.WithContext(ctx), "UPDATE", "").Where("id = ?", workerID).Take(&worker).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return problem.New(401, "worker_not_found", "Worker not found.")
+		return persistence.WorkerInstance{}, problem.New(401, "worker_not_found", "Worker not found.")
 	}
 	if err != nil {
-		return problem.Wrap(500, "worker_lock_failed", "Failed to lock the worker.", err)
+		return persistence.WorkerInstance{}, problem.Wrap(500, "worker_lock_failed", "Failed to lock the worker.", err)
 	}
 	if worker.Status != "online" {
-		return problem.New(409, "worker_not_claimable", "Only online workers can claim executions.")
+		return persistence.WorkerInstance{}, problem.New(409, "worker_not_claimable", "Only online workers can claim executions.")
+	}
+	if worker.CompatibilityStatus == "incompatible" || worker.CompatibilityStatus == "revoked" {
+		return persistence.WorkerInstance{}, problem.New(409, "worker_manifest_incompatible", "The Worker manifest is not compatible with this Control Plane.")
 	}
 	kind, err := platform.ParseExecutionTargetKind(worker.TargetKind)
 	if err != nil {
-		return problem.Wrap(500, "invalid_persisted_execution_target", "The worker target kind is invalid.", err)
+		return persistence.WorkerInstance{}, problem.Wrap(500, "invalid_persisted_execution_target", "The worker target kind is invalid.", err)
 	}
 	if platform.IsRemoteTarget(kind) && (!worker.LeaseSupported || !worker.FencingSupported) {
-		return problem.New(409, "remote_worker_protocol_required", "Remote workers must support execution leases and generation fencing.")
+		return persistence.WorkerInstance{}, problem.New(409, "remote_worker_protocol_required", "Remote workers must support execution leases and generation fencing.")
 	}
 	if worker.LastHeartbeatAt.Before(s.now().Add(-s.heartbeatTimeout)) {
 		if err := tx.WithContext(ctx).Model(&persistence.WorkerInstance{}).Where("id = ?", worker.ID).Update("status", "offline").Error; err != nil {
-			return problem.Wrap(500, "worker_offline_update_failed", "Failed to mark the stale worker offline.", err)
+			return persistence.WorkerInstance{}, problem.Wrap(500, "worker_offline_update_failed", "Failed to mark the stale worker offline.", err)
 		}
 		if err := enqueueWorkerOffline(ctx, tx, worker); err != nil {
-			return problem.Wrap(500, "worker_offline_outbox_failed", "Failed to queue the offline Worker event.", err)
+			return persistence.WorkerInstance{}, problem.Wrap(500, "worker_offline_outbox_failed", "Failed to queue the offline Worker event.", err)
 		}
-		return problem.New(409, "worker_heartbeat_stale", "Worker heartbeat is stale; send a heartbeat before claiming work.")
+		return persistence.WorkerInstance{}, problem.New(409, "worker_heartbeat_stale", "Worker heartbeat is stale; send a heartbeat before claiming work.")
 	}
-	return nil
+	return worker, nil
 }
 
 func (s *Service) enqueueRecovery(ctx context.Context, tx *gorm.DB, execution persistence.AgentExecution) error {
@@ -684,6 +719,29 @@ func (s *Service) storeProviderCursor(
 		Update("provider_resume_cursor_encrypted", encrypted).Error; err != nil {
 		return problem.Wrap(500, "provider_cursor_store_failed", "Failed to store the encrypted provider resume cursor.", err)
 	}
+	if execution.ProviderRuntimeBindingID != nil {
+		now := s.now()
+		updates := map[string]any{
+			"cursor_updated_at": now, "resume_strategy": "native-cursor",
+			"last_execution_id": execution.ID, "last_generation": execution.Generation,
+			"updated_at": now,
+		}
+		var binding persistence.ProviderRuntimeBinding
+		if err := tx.WithContext(ctx).
+			Select("capability_descriptor_hash").
+			Where("tenant_id = ? AND id = ?", execution.TenantID, *execution.ProviderRuntimeBindingID).
+			Take(&binding).Error; err != nil {
+			return problem.Wrap(500, "runtime_binding_cursor_load_failed", "Failed to load the Provider runtime binding for Cursor persistence.", err)
+		}
+		if binding.CapabilityDescriptorHash != nil {
+			updates["cursor_compatibility_key"] = *binding.CapabilityDescriptorHash
+		}
+		if err := tx.WithContext(ctx).Model(&persistence.ProviderRuntimeBinding{}).
+			Where("tenant_id = ? AND id = ?", execution.TenantID, *execution.ProviderRuntimeBindingID).
+			Updates(updates).Error; err != nil {
+			return problem.Wrap(500, "runtime_binding_cursor_store_failed", "Failed to update Provider Cursor compatibility metadata.", err)
+		}
+	}
 	return nil
 }
 
@@ -692,6 +750,22 @@ func (s *Service) loadProviderCursor(
 	tx *gorm.DB,
 	execution persistence.AgentExecution,
 ) (*string, error) {
+	if execution.ProviderRuntimeBindingID != nil {
+		var binding persistence.ProviderRuntimeBinding
+		if err := tx.WithContext(ctx).
+			Select("status", "resume_strategy", "cursor_compatibility_key", "capability_descriptor_hash").
+			Where("tenant_id = ? AND id = ?", execution.TenantID, *execution.ProviderRuntimeBindingID).
+			Take(&binding).Error; err != nil {
+			return nil, problem.Wrap(500, "runtime_binding_cursor_load_failed", "Failed to load Provider Cursor compatibility metadata.", err)
+		}
+		if binding.Status == "incompatible" || binding.Status == "released" || binding.ResumeStrategy == "none" {
+			return nil, nil
+		}
+		if binding.CapabilityDescriptorHash != nil &&
+			(binding.CursorCompatibilityKey == nil || *binding.CursorCompatibilityKey != *binding.CapabilityDescriptorHash) {
+			return nil, nil
+		}
+	}
 	var session persistence.AgentSession
 	if err := tx.WithContext(ctx).
 		Select("provider_resume_cursor_encrypted").

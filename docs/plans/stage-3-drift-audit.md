@@ -27,16 +27,16 @@ Acceptance Fixture used by Codex and Claude.
 
 | Workflow | Status | Current evidence and required delta |
 | --- | --- | --- |
-| A. Capability matrix and support levels | partial | Eight local adapters exist, but current booleans cover only composer features. Add one schema-backed Capability ID set, behavior state (`native`, `emulated`, `unsupported`) and release tier shared by Host, Worker, Control Plane and Web. |
-| B. Provider Host Protocol v2 | missing | `provider-host` reads one unversioned JSON document and emits only `event`/`result`. Add v2 Describe/Handshake, Command/Message envelopes, size limits, terminal guarantees, stable errors and a controlled v1 boundary. |
-| C. Unified Session/Turn semantics | partial | Local adapters expose most operations. Remote Host only runs one Start/Resume-like Turn and has no Command ID or duplicate-side-effect protection. Freeze cross-provider command semantics and implement Tier 1 paths. |
-| D. Approval and Structured User Input | partial | Migration `000014` and Control Plane Resolve APIs persist interactions and fence old Generations. agentd cannot deliver a persisted Resolution back to a running/recovered Host; states are only `pending/resolved/expired`. |
+| A. Capability matrix and support levels | partial | The shared Contract freezes Capability IDs and Host descriptors for all eight Providers. Agentd probes all eight; Control Plane stores immutable Provider manifests and rejects incompatible assigned Claims. Web capability projection and per-capability Acceptance evidence remain. |
+| B. Provider Host Protocol v2 | partial | Shared/Host v2 contracts, Describe, Command/Message envelopes, stable errors and terminal replay exist. Agentd defaults to v2, publishes startup descriptors, persists/gates the actual Host/Provider manifest, classifies bounded failures and retains only an explicit v1 mode. Bidirectional Interrupt/Interaction commands remain. |
+| C. Unified Session/Turn semantics | partial | Start/Resume/Send now use correlated v2 Command IDs with in-process terminal replay and persisted Runtime Binding identity. Steer, Interrupt, Compact, Rollback, Fork and Review still need Tier 1 remote implementations and cross-Worker tests. |
+| D. Approval and Structured User Input | partial | Migration `000019` adds expiry, semantic resolution kind, stable resolution Command ID, delivery target/Generation, attempts and acknowledgement fields. Resolve APIs populate pending delivery, but agentd cannot yet claim/deliver/acknowledge the Resolution to a running or recovered Host. |
 | E. Runtime Event compatibility | partial | `packages/contracts` has a rich canonical `ProviderRuntimeEventV2`; remote Host emits a separate small `runtime.*` vocabulary and Control Plane accepts only Event Version 1. Add an audited compatibility bridge and unknown-event policy instead of creating a third vocabulary. |
-| F. Authoritative history and Worker migration | partial | PostgreSQL history reconstruction and encrypted native Cursor recovery work for text Turns. Snapshot policy lacks Tool/Artifact/Plan/Interaction/Checkpoint context, Cursor compatibility binding and explicit fallback results. |
+| F. Authoritative history and Worker migration | partial | Migration `000018` and Session/Execution code create versioned Runtime Bindings. Native Cursor reuse is gated by the persisted Capability Descriptor Hash and otherwise falls back to authoritative history. Tool/Artifact/Plan/Interaction/Checkpoint reconstruction and explicit fallback outcome Events remain. |
 | G. Credential isolation | partial | Codex/Claude credentials use FD 3, strict allowlists and redaction; Worker/Lease variables are removed. Remaining Providers and Git/registry/package credentials have no remote delivery contract or leakage suite. |
-| H. Remote Workspace/Git lifecycle | missing | agentd creates an Execution directory and validates uploaded regular files. There is no persisted Workspace identity/state, secure Clone/Fetch/Worktree policy, Repository URL SSRF guard, Checkpoint or cleanup/retention lifecycle. |
-| I. Terminal/log/generated file/checkpoint | partial | Artifact upload and regular-file/symlink containment exist. There is no Terminal lifecycle, rolling long-log Artifact, Checkpoint model, last-known-good recovery point or reference-aware retention. |
-| J. Worker drain/upgrade/version isolation | partial | Control Plane supports `draining`, protocol v1 and Generation fencing. agentd does not initiate Drain on shutdown, expose a complete Manifest, checkpoint before deadline, or distinguish incompatible/revoked lifecycle states. Worker image pins Codex/Claude CLI versions but not base digests and produces no Manifest/SBOM. |
+| H. Remote Workspace/Git lifecycle | partial | Migration `000020` creates one logical Workspace per Session, binds it to Target/Execution and freezes recovery/retention states without persisting Worker paths or Credentials. Secure Clone/Fetch/Worktree, SSRF policy, materialization and cleanup execution remain. |
+| I. Terminal/log/generated file/checkpoint | partial | Artifact upload and path containment exist. Migration `000020` adds idempotent Git/Patch/Snapshot Checkpoints, ready-Artifact enforcement and last-known-good references. Terminal lifecycle, rolling logs, Checkpoint creation and retention services remain. |
+| J. Worker drain/upgrade/version isolation | partial | Migration `000017` stores immutable Worker/Image/Provider manifests; registration deduplicates by Hash, records all eight Provider conclusions, and Claim binds/rejects by compatibility. Agentd Drain, complete image digest/SBOM inputs, canary/rollback and incompatible/revoked operations remain. |
 | K. Web authority switch | implemented Stage 2 baseline | SaaS Project/Session/Turn/Event is Control Plane authoritative and local mode remains isolated. Stage 3 must add Capability/Interaction/Artifact/Recovering projection without restoring dual authority. |
 | L. Unified acceptance suite | missing | Stage 2 has target-specific smoke/failure scripts, but no `Provider × Capability × Target` fixture, machine-readable report or long-session/failure matrix. |
 
@@ -73,18 +73,18 @@ interrupted
 internal_error
 ```
 
-## Database and DDL gaps
+## Database and DDL status
 
-Existing migrations stop at `000016_sse_connection_leases.sql`. Stage 3 needs checked-in, forward-only DDL for:
+The checked-in forward-only migrations now continue through:
 
-1. Worker/Provider Host/Image Manifest and compatibility status.
-2. Expanded Interaction lifecycle, expiry and delivery/acknowledgement state.
-3. Provider Runtime Binding/Cursor compatibility metadata.
-4. Remote Workspace identity/state/manifest and retention fields.
-5. Checkpoint metadata and last-known-good references.
+1. `000017_worker_provider_manifests.sql`: immutable Worker/Image/Provider manifests and compatibility binding.
+2. `000018_provider_runtime_bindings.sql`: Session Runtime Binding and Cursor compatibility metadata.
+3. `000019_interaction_delivery.sql`: Interaction expiry, resolution command, delivery and acknowledgement state.
+4. `000020_remote_workspaces_checkpoints.sql`: logical Workspace lifecycle and Artifact-backed Checkpoints.
 
-The exact split is determined while implementing the owning workflow. No runtime `AutoMigrate` or hand-applied
-database mutation substitutes for these migrations.
+An integration test applies `000001`–`000016`, seeds legacy Cursor/Execution/Interaction/Repository state, then
+upgrades through `000020` and verifies every backfill. Runtime `AutoMigrate` and hand-applied database mutation
+remain non-authoritative.
 
 ## Reuse decisions
 
@@ -97,8 +97,8 @@ database mutation substitutes for these migrations.
 
 ## Implementation order
 
-1. Add shared Capability and Provider Host v2 contracts plus contract fixtures.
-2. Implement Host Describe/Handshake and agentd compatibility gating while retaining the bounded v1 path.
+1. Completed: add shared Capability and Provider Host v2 contracts plus contract fixtures.
+2. Completed: implement Host Describe/Handshake, persisted compatibility gating and the bounded v1 path.
 3. Close Codex/Claude Tier 1 command, interaction and recovery semantics.
 4. Add Workspace/Git/Checkpoint DDL and runtime lifecycle.
 5. Add Worker Manifest, graceful Drain, reproducible image evidence and upgrade isolation.

@@ -41,8 +41,19 @@ func TestTurnCreateIdempotencyDoesNotDuplicateExecutionEventOrOutbox(t *testing.
 
 	assertCount(t, fixture, &persistence.AgentTurn{}, "session_id = ?", 1, fixture.sessionID)
 	assertCount(t, fixture, &persistence.AgentExecution{}, "session_id = ?", 1, fixture.sessionID)
+	assertCount(t, fixture, &persistence.ProviderRuntimeBinding{}, "session_id = ?", 1, fixture.sessionID)
+	assertCount(t, fixture, &persistence.RemoteWorkspace{}, "session_id = ?", 1, fixture.sessionID)
 	assertCount(t, fixture, &persistence.SessionEvent{}, "session_id = ? AND event_type = ?", 1, fixture.sessionID, "turn.created")
 	assertCount(t, fixture, &persistence.OutboxMessage{}, "tenant_id = ? AND topic = ?", 1, fixture.tenantID, "execution.queued")
+	var execution persistence.AgentExecution
+	if err := fixture.db.Where("tenant_id = ? AND session_id = ?", fixture.tenantID, fixture.sessionID).
+		Take(&execution).Error; err != nil {
+		t.Fatal(err)
+	}
+	if execution.Provider == nil || *execution.Provider != "codex" ||
+		execution.ProviderRuntimeBindingID == nil || execution.RemoteWorkspaceID == nil {
+		t.Fatalf("Turn Execution omitted Stage 3 runtime resources: %#v", execution)
+	}
 }
 
 func TestSessionCreateAndArchiveIdempotency(t *testing.T) {
@@ -89,6 +100,8 @@ func TestSessionCreateAndArchiveIdempotency(t *testing.T) {
 	}
 
 	assertCount(t, fixture, &persistence.AgentSession{}, "id = ?", 1, first.ID)
+	assertCount(t, fixture, &persistence.ProviderRuntimeBinding{}, "session_id = ?", 1, first.ID)
+	assertCount(t, fixture, &persistence.RemoteWorkspace{}, "session_id = ?", 1, first.ID)
 	assertCount(t, fixture, &persistence.SessionEvent{}, "session_id = ? AND event_type = ?", 1, first.ID, "session.created")
 	assertCount(t, fixture, &persistence.SessionEvent{}, "session_id = ? AND event_type = ?", 1, first.ID, "session.archived")
 	assertCount(t, fixture, &persistence.OutboxMessage{}, "tenant_id = ? AND topic = ?", 1, fixture.tenantID, "session.archived")

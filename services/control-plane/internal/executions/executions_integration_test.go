@@ -487,7 +487,10 @@ func TestApprovalAndUserInputPersistResolveReplayAndResumeExecution(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resolved.Replayed || !replayed.Replayed || replayed.Value.ID != resolved.Value.ID || resolved.Value.Status != "resolved" {
+	if resolved.Replayed || !replayed.Replayed || replayed.Value.ID != resolved.Value.ID || resolved.Value.Status != "resolved" ||
+		resolved.Value.ResolutionKind == nil || *resolved.Value.ResolutionKind != "approved" ||
+		resolved.Value.DeliveryStatus != "pending" || resolved.Value.DeliveryWorkerID == nil ||
+		resolved.Value.DeliveryGeneration == nil || resolved.Value.DeliveryAvailableAt == nil {
 		t.Fatalf("unexpected approval replay: first=%#v second=%#v", resolved, replayed)
 	}
 	assertExecutionStatus(t, db, fixture, "running")
@@ -510,7 +513,8 @@ func TestApprovalAndUserInputPersistResolveReplayAndResumeExecution(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if userInput.Value.Status != "resolved" {
+	if userInput.Value.Status != "resolved" || userInput.Value.ResolutionKind == nil ||
+		*userInput.Value.ResolutionKind != "answered" || userInput.Value.DeliveryStatus != "pending" {
 		t.Fatalf("user input was not resolved: %#v", userInput)
 	}
 	assertExecutionStatus(t, db, fixture, "running")

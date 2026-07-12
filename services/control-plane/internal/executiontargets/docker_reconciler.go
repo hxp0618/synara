@@ -383,6 +383,7 @@ func (r *DockerPoolReconciler) desiredSpecs(
 		"SYNARA_AGENTD_VERSION=managed",
 		"SYNARA_AGENTD_CAPABILITIES_JSON=" + string(capabilities),
 		"SYNARA_AGENTD_RUNNER_COMMAND_JSON=" + string(runner),
+		"SYNARA_AGENTD_PROVIDER_HOST_PROTOCOL=v2",
 		"SYNARA_AGENTD_WORKSPACE_ROOT=" + configuration.WorkspaceRoot,
 	}
 	hashPayload, err := json.Marshal(struct {

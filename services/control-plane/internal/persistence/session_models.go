@@ -36,6 +36,7 @@ type AgentSession struct {
 	ProviderCredentialID          *uuid.UUID `gorm:"column:provider_credential_id;type:uuid"`
 	ExecutionTargetID             uuid.UUID  `gorm:"column:execution_target_id;type:uuid"`
 	ProviderResumeCursorEncrypted []byte     `gorm:"column:provider_resume_cursor_encrypted"`
+	CurrentRuntimeBindingID       *uuid.UUID `gorm:"column:current_runtime_binding_id;type:uuid"`
 	LastEventSequence             int64      `gorm:"column:last_event_sequence"`
 	CreatedAt                     time.Time  `gorm:"column:created_at"`
 	UpdatedAt                     time.Time  `gorm:"column:updated_at"`

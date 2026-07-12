@@ -1,5 +1,10 @@
 # agentd runner v1 contract
 
+> Legacy compatibility boundary: managed Workers use Provider Host Protocol v2 by default. This v1
+> one-shot contract is available only when `SYNARA_AGENTD_PROVIDER_HOST_PROTOCOL=v1` is configured
+> explicitly. Agentd never retries a failed v2 Turn through v1 because that could repeat Provider or
+> tool side effects.
+
 `synara-agentd` is the outbound Worker Protocol client shared by Local, SSH, Docker, and Kubernetes
 Execution Targets. It registers one target-bound Worker, sends heartbeats, claims one Execution at a
 time, renews its Lease while the runner is active, forwards Runtime Events and Artifacts, and reports

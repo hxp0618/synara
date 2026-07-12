@@ -14,22 +14,27 @@ import (
 
 func (s *Service) loadWorkload(ctx context.Context, tx *gorm.DB, execution persistence.AgentExecution) (Workload, error) {
 	var row struct {
-		TenantID             uuid.UUID  `gorm:"column:tenant_id"`
-		OrganizationID       uuid.UUID  `gorm:"column:organization_id"`
-		ProjectID            uuid.UUID  `gorm:"column:project_id"`
-		SessionID            uuid.UUID  `gorm:"column:session_id"`
-		TurnID               uuid.UUID  `gorm:"column:turn_id"`
-		SessionTitle         string     `gorm:"column:session_title"`
-		Provider             string     `gorm:"column:provider"`
-		Model                *string    `gorm:"column:model"`
-		ProviderCredentialID *uuid.UUID `gorm:"column:provider_credential_id"`
-		InputText            string     `gorm:"column:input_text"`
-		RepositoryURL        *string    `gorm:"column:repository_url"`
-		DefaultBranch        string     `gorm:"column:default_branch"`
+		TenantID                 uuid.UUID  `gorm:"column:tenant_id"`
+		OrganizationID           uuid.UUID  `gorm:"column:organization_id"`
+		ProjectID                uuid.UUID  `gorm:"column:project_id"`
+		SessionID                uuid.UUID  `gorm:"column:session_id"`
+		TurnID                   uuid.UUID  `gorm:"column:turn_id"`
+		SessionTitle             string     `gorm:"column:session_title"`
+		Provider                 string     `gorm:"column:provider"`
+		ProviderRuntimeBindingID *uuid.UUID `gorm:"column:provider_runtime_binding_id"`
+		RemoteWorkspaceID        *uuid.UUID `gorm:"column:remote_workspace_id"`
+		WorkerManifestID         *uuid.UUID `gorm:"column:worker_manifest_id"`
+		Model                    *string    `gorm:"column:model"`
+		ProviderCredentialID     *uuid.UUID `gorm:"column:provider_credential_id"`
+		InputText                string     `gorm:"column:input_text"`
+		RepositoryURL            *string    `gorm:"column:repository_url"`
+		DefaultBranch            string     `gorm:"column:default_branch"`
 	}
 	err := tx.WithContext(ctx).Table("agent_executions AS e").
 		Select(`e.tenant_id, s.organization_id, s.project_id, e.session_id, e.turn_id,
-			s.title AS session_title, s.provider, s.model, s.provider_credential_id, t.input_text,
+			s.title AS session_title, COALESCE(e.provider, s.provider) AS provider,
+			e.provider_runtime_binding_id, e.remote_workspace_id, e.worker_manifest_id,
+			s.model, s.provider_credential_id, t.input_text,
 			p.repository_url, p.default_branch`).
 		Joins("JOIN agent_sessions AS s ON s.tenant_id = e.tenant_id AND s.id = e.session_id").
 		Joins("JOIN agent_turns AS t ON t.tenant_id = e.tenant_id AND t.session_id = e.session_id AND t.id = e.turn_id").
@@ -46,7 +51,9 @@ func (s *Service) loadWorkload(ctx context.Context, tx *gorm.DB, execution persi
 	return Workload{
 		TenantID: row.TenantID, OrganizationID: row.OrganizationID, ProjectID: row.ProjectID,
 		SessionID: row.SessionID, TurnID: row.TurnID, SessionTitle: row.SessionTitle,
-		Provider: row.Provider, Model: row.Model, ProviderCredentialID: row.ProviderCredentialID, InputText: row.InputText,
+		Provider: row.Provider, ProviderRuntimeBindingID: row.ProviderRuntimeBindingID,
+		RemoteWorkspaceID: row.RemoteWorkspaceID, WorkerManifestID: row.WorkerManifestID,
+		Model: row.Model, ProviderCredentialID: row.ProviderCredentialID, InputText: row.InputText,
 		RepositoryURL: row.RepositoryURL, DefaultBranch: row.DefaultBranch,
 		ConversationHistory: history,
 	}, nil

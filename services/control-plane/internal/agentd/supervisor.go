@@ -77,7 +77,7 @@ func NewLocalSupervisor(input LocalSupervisorInput, logger *slog.Logger) (*Local
 		ClusterID: "control-plane", Namespace: "local",
 		PodName: "local-agentd-" + input.ExecutionTargetID.String(), Version: "embedded",
 		Capabilities:  map[string]any{"workspaceModes": []string{"local", "worktree"}},
-		RunnerCommand: append([]string(nil), input.RunnerCommand...), WorkspaceRoot: workspaceRoot,
+		RunnerCommand: append([]string(nil), input.RunnerCommand...), RunnerProtocol: RunnerProtocolV2, WorkspaceRoot: workspaceRoot,
 		PollInterval: time.Second, HeartbeatInterval: heartbeatInterval,
 		LeaseRenewInterval: leaseRenewInterval, RequestTimeout: 30 * time.Second,
 		ArtifactTimeout: 30 * time.Minute, RunnerMessageBytes: 1 << 20,
