@@ -72,6 +72,45 @@ func (c *Client) Start(ctx context.Context, executionID uuid.UUID, lease executi
 	}, nil)
 }
 
+func (c *Client) MarkWorkspaceReady(
+	ctx context.Context,
+	executionID uuid.UUID,
+	lease executions.Lease,
+	result WorkspaceMaterialization,
+) error {
+	return c.doJSON(
+		ctx, http.MethodPost, executionPath(executionID, "workspace/ready"), c.workerToken,
+		workspaceRequestID(executionID, lease, "ready"), executions.WorkspaceReadyInput{
+			LeaseInput: executions.LeaseInput{
+				TenantID: lease.TenantID, Generation: lease.Generation, LeaseToken: lease.LeaseToken,
+			},
+			RepositoryFingerprint: result.RepositoryFingerprint, CurrentBranch: result.CurrentBranch,
+			BaseCommit: result.BaseCommit, HeadCommit: result.HeadCommit,
+		}, nil,
+	)
+}
+
+func (c *Client) MarkWorkspaceFailed(
+	ctx context.Context,
+	executionID uuid.UUID,
+	lease executions.Lease,
+	failureCode, failureMessage string,
+) error {
+	return c.doJSON(
+		ctx, http.MethodPost, executionPath(executionID, "workspace/failed"), c.workerToken,
+		workspaceRequestID(executionID, lease, "failed"), executions.WorkspaceFailedInput{
+			LeaseInput: executions.LeaseInput{
+				TenantID: lease.TenantID, Generation: lease.Generation, LeaseToken: lease.LeaseToken,
+			},
+			FailureCode: failureCode, FailureMessage: failureMessage,
+		}, nil,
+	)
+}
+
+func workspaceRequestID(executionID uuid.UUID, lease executions.Lease, state string) string {
+	return fmt.Sprintf("%s:%d:workspace:%s", executionID, lease.Generation, state)
+}
+
 func (c *Client) ResolveCredential(
 	ctx context.Context,
 	executionID, credentialID uuid.UUID,

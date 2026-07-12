@@ -5,13 +5,13 @@ import (
 	"errors"
 	"strings"
 	"time"
-	"unicode"
 
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 
 	"github.com/synara-ai/synara/services/control-plane/internal/audit"
 	"github.com/synara-ai/synara/services/control-plane/internal/authorization"
+	"github.com/synara-ai/synara/services/control-plane/internal/gitpolicy"
 	apiidempotency "github.com/synara-ai/synara/services/control-plane/internal/idempotency"
 	"github.com/synara-ai/synara/services/control-plane/internal/identity"
 	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
@@ -53,19 +53,11 @@ func normalizeVisibility(value, fallback string) (string, error) {
 }
 
 func normalizeBranch(value string) (string, error) {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		value = "main"
-	}
-	if len(value) > 255 || strings.ContainsAny(value, " ~^:?*[\\") || strings.Contains(value, "..") || strings.HasPrefix(value, ".") || strings.HasSuffix(value, ".lock") {
+	branch, err := gitpolicy.NormalizeBranch(value, "main")
+	if err != nil {
 		return "", problem.New(400, "invalid_default_branch", "Default branch is not a valid Git branch name.")
 	}
-	for _, character := range value {
-		if unicode.IsControl(character) || unicode.IsSpace(character) {
-			return "", problem.New(400, "invalid_default_branch", "Default branch is not a valid Git branch name.")
-		}
-	}
-	return value, nil
+	return branch, nil
 }
 
 func normalizeRepositoryURL(value *string) (*string, error) {

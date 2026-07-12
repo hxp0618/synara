@@ -81,24 +81,25 @@ type ClaimResult struct {
 }
 
 type Workload struct {
-	TenantID                 uuid.UUID             `json:"tenantId"`
-	OrganizationID           uuid.UUID             `json:"organizationId"`
-	ProjectID                uuid.UUID             `json:"projectId"`
-	SessionID                uuid.UUID             `json:"sessionId"`
-	TurnID                   uuid.UUID             `json:"turnId"`
-	SessionTitle             string                `json:"sessionTitle"`
-	Provider                 string                `json:"provider"`
-	ProviderRuntimeBindingID *uuid.UUID            `json:"providerRuntimeBindingId,omitempty"`
-	RemoteWorkspaceID        *uuid.UUID            `json:"remoteWorkspaceId,omitempty"`
-	WorkerManifestID         *uuid.UUID            `json:"workerManifestId,omitempty"`
-	Model                    *string               `json:"model"`
-	ProviderCredentialID     *uuid.UUID            `json:"providerCredentialId"`
-	InputText                string                `json:"inputText"`
-	RuntimeMode              string                `json:"runtimeMode"`
-	InteractionMode          string                `json:"interactionMode"`
-	RepositoryURL            *string               `json:"repositoryUrl"`
-	DefaultBranch            string                `json:"defaultBranch"`
-	ConversationHistory      []ConversationMessage `json:"conversationHistory,omitempty"`
+	TenantID                       uuid.UUID             `json:"tenantId"`
+	OrganizationID                 uuid.UUID             `json:"organizationId"`
+	ProjectID                      uuid.UUID             `json:"projectId"`
+	SessionID                      uuid.UUID             `json:"sessionId"`
+	TurnID                         uuid.UUID             `json:"turnId"`
+	SessionTitle                   string                `json:"sessionTitle"`
+	Provider                       string                `json:"provider"`
+	ProviderRuntimeBindingID       *uuid.UUID            `json:"providerRuntimeBindingId,omitempty"`
+	RemoteWorkspaceID              *uuid.UUID            `json:"remoteWorkspaceId,omitempty"`
+	WorkspaceRepositoryFingerprint *string               `json:"workspaceRepositoryFingerprint,omitempty"`
+	WorkerManifestID               *uuid.UUID            `json:"workerManifestId,omitempty"`
+	Model                          *string               `json:"model"`
+	ProviderCredentialID           *uuid.UUID            `json:"providerCredentialId"`
+	InputText                      string                `json:"inputText"`
+	RuntimeMode                    string                `json:"runtimeMode"`
+	InteractionMode                string                `json:"interactionMode"`
+	RepositoryURL                  *string               `json:"repositoryUrl"`
+	DefaultBranch                  string                `json:"defaultBranch"`
+	ConversationHistory            []ConversationMessage `json:"conversationHistory,omitempty"`
 }
 
 type ConversationMessage struct {
@@ -142,6 +143,33 @@ type LeaseInput struct {
 	TenantID   uuid.UUID `json:"tenantId"`
 	Generation int64     `json:"generation"`
 	LeaseToken string    `json:"leaseToken"`
+}
+
+type WorkspaceReadyInput struct {
+	LeaseInput
+	RepositoryFingerprint *string `json:"repositoryFingerprint,omitempty"`
+	CurrentBranch         *string `json:"currentBranch,omitempty"`
+	BaseCommit            *string `json:"baseCommit,omitempty"`
+	HeadCommit            *string `json:"headCommit,omitempty"`
+}
+
+type WorkspaceFailedInput struct {
+	LeaseInput
+	FailureCode    string `json:"failureCode"`
+	FailureMessage string `json:"failureMessage"`
+}
+
+type WorkspaceState struct {
+	ID                    uuid.UUID  `json:"id"`
+	State                 string     `json:"state"`
+	RepositoryFingerprint *string    `json:"repositoryFingerprint,omitempty"`
+	CurrentBranch         *string    `json:"currentBranch,omitempty"`
+	BaseCommit            *string    `json:"baseCommit,omitempty"`
+	HeadCommit            *string    `json:"headCommit,omitempty"`
+	LastWorkerID          *uuid.UUID `json:"lastWorkerId,omitempty"`
+	LastExecutionID       *uuid.UUID `json:"lastExecutionId,omitempty"`
+	LastGeneration        *int64     `json:"lastGeneration,omitempty"`
+	UpdatedAt             time.Time  `json:"updatedAt"`
 }
 
 type RenewLeaseInput struct {

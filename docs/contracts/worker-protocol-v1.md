@@ -7,7 +7,7 @@ message names and fencing behavior remain stable if the transport later moves to
 
 `RegisterWorker`, `Heartbeat`, `ClaimExecution`, `StartSession`, `ResumeSession`, `SendTurn`,
 `InterruptTurn`, `ResolveApproval`, `ResolveUserInput`, `RuntimeEvent`, `UploadArtifact`,
-`CompleteExecution`, `FailExecution`, and `ReleaseLease`.
+`ReportWorkspaceReady`, `ReportWorkspaceFailed`, `CompleteExecution`, `FailExecution`, and `ReleaseLease`.
 
 ## Common envelope
 
@@ -30,6 +30,11 @@ A successful Claim includes a read-only `workload` snapshot with Tenant/Organiza
 Turn IDs, Session title, Provider and Model, Turn input, repository URL, and default branch. The
 snapshot is loaded in the claim transaction and is preserved across idempotent Claim replay. Workers
 never query control-plane tables directly.
+
+The Workload includes the logical `remoteWorkspaceId`. Before `StartExecution`, agentd renews the Lease,
+materializes the stable Session checkout and reports either `workspace.ready` with Repository fingerprint,
+branch, base commit and HEAD, or `workspace.failed` with a safe stable error. Both reports require the current
+Worker ID, Lease Token and Generation. Provider execution cannot begin from an unreported managed Workspace.
 
 The Workload also carries the immutable `runtimeMode` (`approval-required | full-access`) and
 `interactionMode` (`default | plan`) captured when the Control Plane created the Turn. A Worker must not infer

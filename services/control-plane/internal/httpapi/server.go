@@ -138,6 +138,8 @@ func New(
 	mux.Handle("POST /v1/workers/executions/claim", server.requireWorker(http.HandlerFunc(server.claimExecution)))
 	mux.Handle("POST /v1/workers/executions/{executionID}/renew", server.requireWorker(http.HandlerFunc(server.renewExecutionLease)))
 	mux.Handle("POST /v1/workers/executions/{executionID}/start", server.requireWorker(http.HandlerFunc(server.startExecution)))
+	mux.Handle("POST /v1/workers/executions/{executionID}/workspace/ready", server.requireWorker(http.HandlerFunc(server.markWorkspaceReady)))
+	mux.Handle("POST /v1/workers/executions/{executionID}/workspace/failed", server.requireWorker(http.HandlerFunc(server.markWorkspaceFailed)))
 	mux.Handle("POST /v1/workers/executions/{executionID}/complete", server.requireWorker(http.HandlerFunc(server.completeExecution)))
 	mux.Handle("POST /v1/workers/executions/{executionID}/fail", server.requireWorker(http.HandlerFunc(server.failExecution)))
 	mux.Handle("POST /v1/workers/executions/{executionID}/release", server.requireWorker(http.HandlerFunc(server.releaseExecution)))

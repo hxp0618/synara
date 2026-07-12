@@ -608,6 +608,119 @@ func TestInterruptedTurnContinuesOnReplacementWorkerWithCursorHistoryAndSequence
 	}
 }
 
+func TestWorkspacePreparationIsGenerationFencedAcrossWorkerRecovery(t *testing.T) {
+	ctx := context.Background()
+	db := integrationDB(t)
+	fixture := seedExecutionFixture(t, db)
+	service := integrationService(t, db)
+	var session persistence.AgentSession
+	if err := db.Where("tenant_id = ? AND id = ?", fixture.TenantID, fixture.SessionID).Take(&session).Error; err != nil {
+		t.Fatal(err)
+	}
+	repositoryURL := "https://git.example.com/team/repository.git"
+	if err := db.Model(&persistence.Project{}).Where("tenant_id = ? AND id = ?", fixture.TenantID, session.ProjectID).
+		Update("repository_url", repositoryURL).Error; err != nil {
+		t.Fatal(err)
+	}
+	workspaceID := uuid.New()
+	workspace := persistence.RemoteWorkspace{
+		ID: workspaceID, TenantID: fixture.TenantID, OrganizationID: session.OrganizationID,
+		ProjectID: session.ProjectID, SessionID: fixture.SessionID, ExecutionTargetID: fixture.TargetID,
+		WorkspaceMode: "clone", State: "pending", DefaultBranch: "main",
+	}
+	if err := db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(&workspace).Error; err != nil {
+			return err
+		}
+		return tx.Model(&persistence.AgentExecution{}).
+			Where("tenant_id = ? AND id = ?", fixture.TenantID, fixture.ExecutionID).
+			Update("remote_workspace_id", workspaceID).Error
+	}); err != nil {
+		t.Fatal(err)
+	}
+	first := registerManifestTestWorker(t, service, fixture.TargetID, fixture.TargetKind, "worker-workspace-first")
+	second := registerManifestTestWorker(t, service, fixture.TargetID, fixture.TargetKind, "worker-workspace-second")
+	cleanupWorkers(t, db, first.ID, second.ID)
+	firstClaim, err := service.Claim(ctx, first, ClaimExecutionInput{
+		ExecutionTargetID: fixture.TargetID, TargetKind: fixture.TargetKind, ExecutionID: &fixture.ExecutionID,
+	}, "workspace-first-claim")
+	if err != nil || firstClaim.Value.Lease == nil || firstClaim.Value.Workload == nil ||
+		firstClaim.Value.Workload.RemoteWorkspaceID == nil || *firstClaim.Value.Workload.RemoteWorkspaceID != workspaceID {
+		t.Fatalf("first Workspace claim failed: result=%#v err=%v", firstClaim, err)
+	}
+	firstLease := *firstClaim.Value.Lease
+	firstLeaseInput := LeaseInput{
+		TenantID: fixture.TenantID, Generation: firstLease.Generation, LeaseToken: firstLease.LeaseToken,
+	}
+	fingerprint := strings.Repeat("a", 64)
+	branch := "synara/session-test"
+	baseCommit, headCommit := strings.Repeat("b", 40), strings.Repeat("c", 40)
+	ready, err := service.MarkWorkspaceReady(ctx, first, fixture.ExecutionID, WorkspaceReadyInput{
+		LeaseInput: firstLeaseInput, RepositoryFingerprint: &fingerprint,
+		CurrentBranch: &branch, BaseCommit: &baseCommit, HeadCommit: &headCommit,
+	}, "workspace-ready")
+	if err != nil || ready.Value.State != "ready" {
+		t.Fatalf("Workspace ready transition failed: result=%#v err=%v", ready, err)
+	}
+	replayed, err := service.MarkWorkspaceReady(ctx, first, fixture.ExecutionID, WorkspaceReadyInput{
+		LeaseInput: firstLeaseInput, RepositoryFingerprint: &fingerprint,
+		CurrentBranch: &branch, BaseCommit: &baseCommit, HeadCommit: &headCommit,
+	}, "workspace-ready")
+	if err != nil || !replayed.Replayed {
+		t.Fatalf("Workspace ready transition was not idempotent: result=%#v err=%v", replayed, err)
+	}
+	if _, err := service.Release(ctx, first, fixture.ExecutionID, ReleaseLeaseInput{
+		LeaseInput: firstLeaseInput, Reason: "replace Worker after Workspace preparation",
+	}, "workspace-release"); err != nil {
+		t.Fatal(err)
+	}
+	secondClaim, err := service.Claim(ctx, second, ClaimExecutionInput{
+		ExecutionTargetID: fixture.TargetID, TargetKind: fixture.TargetKind, ExecutionID: &fixture.ExecutionID,
+	}, "workspace-second-claim")
+	if err != nil || secondClaim.Value.Lease == nil || secondClaim.Value.Workload == nil ||
+		secondClaim.Value.Workload.WorkspaceRepositoryFingerprint == nil ||
+		*secondClaim.Value.Workload.WorkspaceRepositoryFingerprint != fingerprint {
+		t.Fatalf("replacement Workspace claim failed: result=%#v err=%v", secondClaim, err)
+	}
+	if _, err := service.MarkWorkspaceReady(ctx, first, fixture.ExecutionID, WorkspaceReadyInput{
+		LeaseInput: firstLeaseInput,
+	}, "workspace-stale-ready"); err == nil {
+		t.Fatal("obsolete Worker Generation updated Workspace state")
+	}
+	secondLease := *secondClaim.Value.Lease
+	failed, err := service.MarkWorkspaceFailed(ctx, second, fixture.ExecutionID, WorkspaceFailedInput{
+		LeaseInput: LeaseInput{
+			TenantID: fixture.TenantID, Generation: secondLease.Generation, LeaseToken: secondLease.LeaseToken,
+		},
+		FailureCode: "workspace_invalid", FailureMessage: "Repository policy rejected the remote",
+	}, "workspace-failed")
+	if err != nil || failed.Value.State != "failed" {
+		t.Fatalf("replacement Workspace failure transition failed: result=%#v err=%v", failed, err)
+	}
+	var persisted persistence.RemoteWorkspace
+	if err := db.Where("tenant_id = ? AND id = ?", fixture.TenantID, workspaceID).Take(&persisted).Error; err != nil {
+		t.Fatal(err)
+	}
+	if persisted.State != "failed" || persisted.LastWorkerID == nil || *persisted.LastWorkerID != second.ID ||
+		persisted.LastGeneration == nil || *persisted.LastGeneration != secondLease.Generation {
+		t.Fatalf("Workspace generation binding is incorrect: %#v", persisted)
+	}
+	var readyEvents, failedEvents int64
+	if err := db.Model(&persistence.SessionEvent{}).
+		Where("tenant_id = ? AND session_id = ? AND event_type = ?", fixture.TenantID, fixture.SessionID, "workspace.ready").
+		Count(&readyEvents).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Model(&persistence.SessionEvent{}).
+		Where("tenant_id = ? AND session_id = ? AND event_type = ?", fixture.TenantID, fixture.SessionID, "workspace.failed").
+		Count(&failedEvents).Error; err != nil {
+		t.Fatal(err)
+	}
+	if readyEvents != 1 || failedEvents != 1 {
+		t.Fatalf("Workspace lifecycle events are not idempotent: ready=%d failed=%d", readyEvents, failedEvents)
+	}
+}
+
 func TestDurableInterruptCommandRebindsAfterWorkerRelease(t *testing.T) {
 	db := integrationDB(t)
 	fixture := seedExecutionFixture(t, db)

@@ -18,15 +18,19 @@ import (
 )
 
 type Daemon struct {
-	config   Config
-	client   *Client
-	runner   *Runner
-	logger   *slog.Logger
-	draining atomic.Bool
+	config    Config
+	client    *Client
+	runner    *Runner
+	workspace workspaceMaterializer
+	logger    *slog.Logger
+	draining  atomic.Bool
 }
 
 func NewDaemon(cfg Config, logger *slog.Logger) *Daemon {
-	return &Daemon{config: cfg, client: NewClient(cfg), runner: NewRunner(cfg), logger: logger}
+	return &Daemon{
+		config: cfg, client: NewClient(cfg), runner: NewRunner(cfg),
+		workspace: NewWorkspaceMaterializer(cfg.WorkspaceRoot), logger: logger,
+	}
 }
 
 func (d *Daemon) Run(ctx context.Context) error {
@@ -164,41 +168,99 @@ func (d *Daemon) runExecution(
 	workload executions.Workload,
 	resumeCursor *string,
 ) error {
-	if err := d.client.Start(ctx, execution.ID, lease); err != nil {
-		return fmt.Errorf("start execution: %w", err)
+	executionContext, cancelExecution := context.WithCancel(ctx)
+	renewErrors := make(chan error, 1)
+	go d.renewLeaseLoop(executionContext, execution.ID, lease, cancelExecution, renewErrors)
+	renewStopped := false
+	stopRenewal := func() error {
+		if renewStopped {
+			return nil
+		}
+		renewStopped = true
+		cancelExecution()
+		return drainRenewError(renewErrors)
 	}
-	workspaceDirectory := filepath.Join(
-		d.config.WorkspaceRoot, workload.TenantID.String(), workload.ProjectID.String(), workload.SessionID.String(), execution.ID.String(),
-	)
-	if err := os.MkdirAll(workspaceDirectory, 0o700); err != nil {
-		return d.failExecution(ctx, execution.ID, lease, fmt.Errorf("create execution workspace: %w", err))
+	defer func() { _ = stopRenewal() }()
+	materializer := d.workspace
+	if materializer == nil {
+		materializer = NewWorkspaceMaterializer(d.config.WorkspaceRoot)
+	}
+	materialized, err := materializer.Materialize(executionContext, execution, workload)
+	if err != nil {
+		if ctx.Err() != nil {
+			renewErr := stopRenewal()
+			d.releaseDuringShutdown(execution.ID, lease, "agentd Drain deadline reached during Workspace preparation")
+			return errors.Join(ctx.Err(), renewErr)
+		}
+		if executionContext.Err() != nil {
+			if renewErr := stopRenewal(); renewErr != nil {
+				return renewErr
+			}
+		}
+		failureMessage := err.Error()
+		if len(failureMessage) > 10_000 {
+			failureMessage = failureMessage[:10_000]
+		}
+		var reportErr error
+		if materialized.Managed || workload.RemoteWorkspaceID != nil {
+			reportErr = d.client.MarkWorkspaceFailed(
+				executionContext, execution.ID, lease, runnerFailureCode(err), failureMessage,
+			)
+		}
+		failErr := d.failExecution(executionContext, execution.ID, lease, err)
+		renewErr := stopRenewal()
+		return errors.Join(failErr, reportErr, renewErr)
+	}
+	if materialized.Managed {
+		if err := d.client.MarkWorkspaceReady(executionContext, execution.ID, lease, materialized); err != nil {
+			if ctx.Err() != nil {
+				renewErr := stopRenewal()
+				d.releaseDuringShutdown(execution.ID, lease, "agentd Drain deadline reached while reporting Workspace readiness")
+				return errors.Join(ctx.Err(), renewErr)
+			}
+			failErr := d.failExecution(executionContext, execution.ID, lease, fmt.Errorf("persist prepared Workspace: %w", err))
+			return errors.Join(failErr, stopRenewal())
+		}
 	}
 	var credential *RunnerCredential
 	if workload.ProviderCredentialID != nil {
-		resolved, err := d.client.ResolveCredential(ctx, execution.ID, *workload.ProviderCredentialID, lease)
+		resolved, err := d.client.ResolveCredential(executionContext, execution.ID, *workload.ProviderCredentialID, lease)
 		if err != nil {
-			return d.failExecution(ctx, execution.ID, lease, fmt.Errorf("resolve provider credential: %w", err))
+			if ctx.Err() != nil {
+				renewErr := stopRenewal()
+				d.releaseDuringShutdown(execution.ID, lease, "agentd Drain deadline reached while resolving Provider Credential")
+				return errors.Join(ctx.Err(), renewErr)
+			}
+			failErr := d.failExecution(executionContext, execution.ID, lease, fmt.Errorf("resolve provider credential: %w", err))
+			return errors.Join(failErr, stopRenewal())
 		}
 		credential = &resolved
 	}
-
-	runnerContext, cancelRunner := context.WithCancel(ctx)
-	renewErrors := make(chan error, 1)
-	go d.renewLeaseLoop(runnerContext, execution.ID, lease, cancelRunner, renewErrors)
+	if err := d.client.Start(executionContext, execution.ID, lease); err != nil {
+		if ctx.Err() != nil {
+			renewErr := stopRenewal()
+			d.releaseDuringShutdown(execution.ID, lease, "agentd Drain deadline reached before Provider start")
+			return errors.Join(ctx.Err(), renewErr)
+		}
+		if renewErr := stopRenewal(); renewErr != nil {
+			return renewErr
+		}
+		return fmt.Errorf("start execution: %w", err)
+	}
 	var controls <-chan RunnerControl
 	if d.runner.protocol == RunnerProtocolV2 {
 		controlChannel := make(chan RunnerControl)
 		controls = controlChannel
-		go d.runnerControlLoop(runnerContext, execution.ID, lease, controlChannel)
+		go d.runnerControlLoop(executionContext, execution.ID, lease, controlChannel)
 	}
-	result, runErr := d.runner.RunControlled(runnerContext, RunnerInput{
-		Execution: execution, Workload: workload, ProviderResumeCursor: resumeCursor, WorkspaceDirectory: workspaceDirectory,
+	result, runErr := d.runner.RunControlled(executionContext, RunnerInput{
+		Execution: execution, Workload: workload, ProviderResumeCursor: resumeCursor, WorkspaceDirectory: materialized.Directory,
 	}, credential, controls, func(messageContext context.Context, message RunnerMessage) error {
 		switch message.Type {
 		case "event":
 			return d.client.AppendEvent(messageContext, execution.ID, lease, message)
 		case "artifact":
-			artifactPath, err := resolveWorkspaceArtifact(workspaceDirectory, message.Artifact.Path)
+			artifactPath, err := resolveWorkspaceArtifact(materialized.Directory, message.Artifact.Path)
 			if err != nil {
 				return err
 			}
@@ -226,8 +288,7 @@ func (d *Daemon) runExecution(
 			return protocolFailure("Provider Host emitted an unsupported Worker message")
 		}
 	})
-	cancelRunner()
-	renewErr := drainRenewError(renewErrors)
+	renewErr := stopRenewal()
 	if runErr != nil && runnerFailurePersisted(runErr) {
 		d.logger.Info("execution interrupted", "executionId", execution.ID, "generation", lease.Generation)
 		return nil
