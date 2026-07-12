@@ -8,6 +8,8 @@ import (
 	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
 )
 
+const WorkerProtocolVersion = 1
+
 type Worker struct {
 	ID                uuid.UUID      `json:"id"`
 	ExecutionTargetID uuid.UUID      `json:"executionTargetId"`
@@ -16,6 +18,7 @@ type Worker struct {
 	Namespace         string         `json:"namespace"`
 	PodName           string         `json:"podName"`
 	Version           string         `json:"version"`
+	ProtocolVersion   int            `json:"protocolVersion"`
 	Capabilities      map[string]any `json:"capabilities"`
 	LeaseSupported    bool           `json:"leaseSupported"`
 	FencingSupported  bool           `json:"fencingSupported"`
@@ -102,14 +105,17 @@ type RegisterWorkerInput struct {
 	Namespace         string         `json:"namespace"`
 	PodName           string         `json:"podName"`
 	Version           string         `json:"version"`
+	ProtocolVersion   int            `json:"protocolVersion"`
 	Capabilities      map[string]any `json:"capabilities"`
 	LeaseSupported    bool           `json:"leaseSupported"`
 	FencingSupported  bool           `json:"fencingSupported"`
 }
 
 type HeartbeatInput struct {
-	Version      string         `json:"version"`
-	Capabilities map[string]any `json:"capabilities"`
+	Version         string         `json:"version"`
+	ProtocolVersion int            `json:"protocolVersion"`
+	Capabilities    map[string]any `json:"capabilities"`
+	Draining        *bool          `json:"draining"`
 }
 
 type ClaimExecutionInput struct {
@@ -163,6 +169,30 @@ type RuntimeEventResult struct {
 	EventVersion int       `json:"eventVersion"`
 }
 
+type Interaction struct {
+	ID          uuid.UUID      `json:"id"`
+	ExecutionID uuid.UUID      `json:"executionId"`
+	SessionID   uuid.UUID      `json:"sessionId"`
+	WorkerID    uuid.UUID      `json:"workerId"`
+	Generation  int64          `json:"generation"`
+	RequestID   string         `json:"requestId"`
+	Kind        string         `json:"kind"`
+	Status      string         `json:"status"`
+	Payload     map[string]any `json:"payload"`
+	Resolution  map[string]any `json:"resolution,omitempty"`
+	RequestedAt time.Time      `json:"requestedAt"`
+	ResolvedAt  *time.Time     `json:"resolvedAt"`
+	ResolvedBy  *uuid.UUID     `json:"resolvedBy"`
+}
+
+type ResolveApprovalInput struct {
+	Decision string `json:"decision"`
+}
+
+type ResolveUserInputInput struct {
+	Answers map[string]any `json:"answers"`
+}
+
 func toWorker(model persistence.WorkerInstance) Worker {
 	capabilities := model.Capabilities
 	if capabilities == nil {
@@ -172,10 +202,23 @@ func toWorker(model persistence.WorkerInstance) Worker {
 		ID: model.ID, ExecutionTargetID: model.ExecutionTargetID, TargetKind: model.TargetKind,
 		ClusterID: model.ClusterID,
 		Namespace: model.Namespace, PodName: model.PodName, Version: model.Version,
-		Capabilities: capabilities, LeaseSupported: model.LeaseSupported,
+		ProtocolVersion: model.ProtocolVersion, Capabilities: capabilities, LeaseSupported: model.LeaseSupported,
 		FencingSupported: model.FencingSupported, Status: model.Status, RegisteredAt: model.RegisteredAt,
 		LastHeartbeatAt: model.LastHeartbeatAt, DrainingAt: model.DrainingAt,
 		TerminatedAt: model.TerminatedAt,
+	}
+}
+
+func toInteraction(model persistence.ExecutionInteraction) Interaction {
+	payload := model.Payload
+	if payload == nil {
+		payload = map[string]any{}
+	}
+	return Interaction{
+		ID: model.ID, ExecutionID: model.ExecutionID, SessionID: model.SessionID,
+		WorkerID: model.WorkerID, Generation: model.Generation, RequestID: model.RequestID,
+		Kind: model.Kind, Status: model.Status, Payload: payload, Resolution: model.Resolution,
+		RequestedAt: model.RequestedAt, ResolvedAt: model.ResolvedAt, ResolvedBy: model.ResolvedBy,
 	}
 }
 

@@ -276,7 +276,7 @@ func (r *KubernetesReconciler) loadKubernetesExecutions(ctx context.Context, tar
 	err := r.targets.db.WithContext(ctx).Table("agent_executions AS e").
 		Select("e.id, e.tenant_id, s.organization_id, s.project_id, e.session_id, e.status, e.generation").
 		Joins("JOIN agent_sessions AS s ON s.tenant_id = e.tenant_id AND s.id = e.session_id").
-		Where("e.execution_target_id = ? AND e.target_kind = ? AND e.status IN ?", targetID, "kubernetes", []string{"queued", "recovering", "leased", "running"}).
+		Where("e.execution_target_id = ? AND e.target_kind = ? AND e.status IN ?", targetID, "kubernetes", []string{"queued", "recovering", "leased", "running", "waiting-for-approval"}).
 		Order("e.queued_at, e.id").Scan(&items).Error
 	if err != nil {
 		return nil, problem.Wrap(500, "kubernetes_executions_load_failed", "Kubernetes executions could not be loaded.", err)

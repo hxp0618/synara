@@ -40,8 +40,16 @@ for programmatic branching.
 
 ## Idempotency
 
-Creation and command endpoints that may be retried will accept `Idempotency-Key`. The key,
-request hash, status, and response are stored transactionally before worker scheduling is added.
+Creation and command endpoints that may be retried accept `Idempotency-Key`. Keys are scoped to the
+active Tenant and authenticated actor. The operation, normalized request hash, successful status, and
+response are stored in the same transaction as business, Event, Outbox, and Audit writes.
+
+- Same key and request return the stored response with `Idempotency-Replayed: true`.
+- Same key with a different operation or normalized request returns `409 idempotency_conflict`.
+- A missing key preserves the non-replayable legacy behavior; first-party Web clients should always send
+  a unique key for supported commands.
+- `X-Request-ID` remains request correlation and Worker receipt identity. It is not a replacement for the
+  user/API `Idempotency-Key` contract.
 
 ## Phase 2 resource routes
 
@@ -56,7 +64,13 @@ POST   /v1/projects/{projectId}/sessions
 GET    /v1/sessions/{sessionId}
 GET    /v1/sessions/{sessionId}/events?afterSequence={sequence}&limit={limit}
 POST   /v1/sessions/{sessionId}/turns
+POST   /v1/sessions/{sessionId}/suspend
+POST   /v1/sessions/{sessionId}/resume
 POST   /v1/sessions/{sessionId}/archive
+POST   /v1/executions/{executionId}/cancel
+GET    /v1/executions/{executionId}/interactions
+POST   /v1/executions/{executionId}/approvals/{requestId}/resolve
+POST   /v1/executions/{executionId}/user-input/{requestId}/resolve
 ```
 
 Event pages return `lastSequence` even when no newer events exist, allowing clients to reconnect

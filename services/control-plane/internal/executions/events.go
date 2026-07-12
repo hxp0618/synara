@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"gorm.io/gorm"
@@ -67,6 +68,11 @@ func (s *Service) AppendRuntimeEvent(
 		if err != nil {
 			return RuntimeEventResult{}, err
 		}
+		if kind, pending := pendingInteractionKind(input.EventType); pending {
+			if err := s.persistPendingInteraction(ctx, tx, worker, &execution, kind, input.Payload, input.OccurredAt); err != nil {
+				return RuntimeEventResult{}, err
+			}
+		}
 		appended, err = s.sessions.AppendInternalEvent(ctx, tx, execution.TenantID, execution.SessionID, sessions.InternalEventInput{
 			EventID: &input.EventID, EventVersion: input.EventVersion,
 			EventType: input.EventType, ActorType: "worker", ActorID: &worker.ID,
@@ -85,6 +91,54 @@ func (s *Service) AppendRuntimeEvent(
 		s.sessions.PublishInternalEvent(appended)
 	}
 	return result, err
+}
+
+func pendingInteractionKind(eventType string) (string, bool) {
+	switch eventType {
+	case "approval.requested":
+		return "approval", true
+	case "user-input.requested":
+		return "user-input", true
+	default:
+		return "", false
+	}
+}
+
+func (s *Service) persistPendingInteraction(
+	ctx context.Context,
+	tx *gorm.DB,
+	worker persistence.WorkerInstance,
+	execution *persistence.AgentExecution,
+	kind string,
+	payload map[string]any,
+	requestedAt time.Time,
+) error {
+	requestID, ok := payload["requestId"].(string)
+	requestID = strings.TrimSpace(requestID)
+	if !ok || requestID == "" || len(requestID) > 200 || strings.ContainsAny(requestID, "\r\n\t") {
+		return problem.New(400, "invalid_interaction_request_id", "Approval and user-input events require a valid requestId.")
+	}
+	interaction := persistence.ExecutionInteraction{
+		ID: uuid.New(), TenantID: execution.TenantID, ExecutionID: execution.ID, SessionID: execution.SessionID,
+		WorkerID: worker.ID, Generation: execution.Generation, RequestID: requestID,
+		Kind: kind, Status: "pending", Payload: payload, RequestedAt: requestedAt,
+	}
+	if err := tx.WithContext(ctx).Create(&interaction).Error; err != nil {
+		if errors.Is(err, gorm.ErrDuplicatedKey) {
+			return problem.New(409, "interaction_request_reused", "requestId was already used for this execution.")
+		}
+		return problem.Wrap(500, "interaction_persist_failed", "The pending interaction could not be persisted.", err)
+	}
+	updated := tx.WithContext(ctx).Model(&persistence.AgentExecution{}).
+		Where("tenant_id = ? AND id = ? AND worker_id = ? AND generation = ? AND status IN ?",
+			execution.TenantID, execution.ID, worker.ID, execution.Generation,
+			[]string{"leased", "running", "waiting-for-approval"}).
+		Update("status", "waiting-for-approval")
+	if err := expectOne(updated, 409, "execution_interaction_state_conflict", "The execution could not enter the approval wait state."); err != nil {
+		return err
+	}
+	execution.Status = "waiting-for-approval"
+	return nil
 }
 
 func sameJSON(left, right any) bool {

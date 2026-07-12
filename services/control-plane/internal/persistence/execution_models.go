@@ -14,6 +14,7 @@ type WorkerInstance struct {
 	Namespace         string         `gorm:"column:namespace"`
 	PodName           string         `gorm:"column:pod_name"`
 	Version           string         `gorm:"column:version"`
+	ProtocolVersion   int            `gorm:"column:protocol_version"`
 	Capabilities      map[string]any `gorm:"column:capabilities;serializer:json"`
 	LeaseSupported    bool           `gorm:"column:lease_supported"`
 	FencingSupported  bool           `gorm:"column:fencing_supported"`

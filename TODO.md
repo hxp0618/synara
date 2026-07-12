@@ -15,7 +15,7 @@
 ## SaaS product roadmap
 
 > 这里的 Stage 是产品路线阶段，不等同于
-> `docs/saas-tenancy-organization-user-plan.md` 中的技术 Phase 0-6。
+> `docs/plans/saas-tenancy-organization-user-plan.md` 中的技术 Phase 0-6。
 >
 > 当前工作区已经包含大量 Control Plane、Provider Host、agentd、Docker、Kubernetes、
 > Artifact、Credential 和企业身份基础实现。下面的 TODO 表示生产化与产品收口目标；执行每个
@@ -31,6 +31,9 @@
 
 Stage 2 的独立执行计划：
 [`docs/plans/stage-2-go-control-plane-productionization.md`](docs/plans/stage-2-go-control-plane-productionization.md)
+
+Stage 3 的独立执行计划：
+[`docs/plans/stage-3-provider-runtime-remote-worker-productization.md`](docs/plans/stage-3-provider-runtime-remote-worker-productization.md)
 
 ### Stage 3：Provider Runtime 与远程 Worker 产品化
 

@@ -6,9 +6,9 @@ This audit classifies the productionization plan against executable code rather 
 
 | Workflow | Status | Evidence and remaining work |
 | --- | --- | --- |
-| A. Production authentication | partial | OIDC, SAML, persisted login sessions and secure-cookie support exist. Enterprise dev-bootstrap rejection, trusted-proxy policy, idle expiry and rotation/revocation concurrency still need completion. |
-| B. Session API | partial | Tenant-scoped Project/Session/Turn/Event APIs and ordered replay exist. Uniform idempotency keys, the full state machine and payload validation limits remain. |
-| C. Execution and Worker lifecycle | partial | Registration, heartbeat, Claim, Lease, Generation fencing and recovery exist. Protocol version negotiation, Drain, token rotation, Cancel races and persisted Approval/Input remain. |
+| A. Production authentication | partial | Backend production authentication is implemented: Enterprise Dev Bootstrap fail-fast, trusted Public URL/proxy policy, explicit cookie attributes, absolute/idle expiry, token rotation, audited administrator revocation, and PostgreSQL cross-replica concurrency tests. Application-level Tenant/Organization context remains in Workflow H. |
+| B. Session API | partial | Project/Session/Turn and Session command idempotency, active/suspended/archived transitions, ordered replay, and PostgreSQL same-key concurrency are implemented. Runtime Event v1 payload validation and oversized-payload Artifact enforcement remain. |
+| C. Execution and Worker lifecycle | partial | Registration, protocol/build versions, capability updates, Drain, registration-token rotation behavior, Claim/Lease/Fencing/Recovery, user Cancel, terminal races, and persisted Approval/User Input resolution are implemented. Bidirectional resolution delivery into Provider Runners remains for Stage 3. |
 | D. Stateless replicas | implemented | PostgreSQL is authoritative; periodic jobs use Advisory Lock or `SKIP LOCKED`; pool settings and Migration Lock timeout are configurable; readiness checks write access and migration version/checksum; the repeatable two-replica suite covers concurrent Turn/Claim, cross-replica revocation/SSE and replica loss. |
 | E. Artifact completion | partial | Local/MinIO/S3 stores, presigned grants and server-side Stat/Hash validation exist. Temporary-key promotion, distributed cleanup and real S3 compatibility evidence remain. |
 | F. SSE | partial | Sequence replay, `Last-Event-ID`, heartbeat and PostgreSQL cross-replica catch-up are covered by automated tests and real two-replica acceptance. Connection limits, catch-up metrics and the explicit slow-client policy remain. |
@@ -29,5 +29,5 @@ This audit classifies the productionization plan against executable code rather 
 | Provider resume cursor | `authoritative-postgres`, encrypted. |
 | Artifact metadata | `authoritative-postgres`; payload is `authoritative-object-store`. |
 
-The implementation order remains the one in the Stage 2 plan. Steps 0-2 are complete; production
-authentication is the next implementation step. The full Stage 2 remains in progress.
+The implementation order remains the one in the Stage 2 plan. Steps 0-4 are complete; Artifact and SSE
+operational completion is the next implementation step. The full Stage 2 remains in progress.

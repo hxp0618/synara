@@ -41,7 +41,11 @@ func TestPostgresConcurrentClaimAndExpiredRecovery(t *testing.T) {
 	first := integrationService(t, db, "first", now)
 	second := integrationService(t, db, "second", now)
 	start := make(chan struct{})
-	results := make(chan []Message, 2)
+	type claimResult struct {
+		service  *Service
+		messages []Message
+	}
+	results := make(chan claimResult, 2)
 	errors := make(chan error, 2)
 	var wait sync.WaitGroup
 	for _, service := range []*Service{first, second} {
@@ -50,7 +54,7 @@ func TestPostgresConcurrentClaimAndExpiredRecovery(t *testing.T) {
 			defer wait.Done()
 			<-start
 			messages, err := service.Claim(context.Background())
-			results <- messages
+			results <- claimResult{service: service, messages: messages}
 			errors <- err
 		}(service)
 	}
@@ -58,17 +62,28 @@ func TestPostgresConcurrentClaimAndExpiredRecovery(t *testing.T) {
 	wait.Wait()
 	close(results)
 	close(errors)
-	claimed := 0
+	targetClaims := 0
 	for err := range errors {
 		if err != nil {
 			t.Fatal(err)
 		}
 	}
-	for messages := range results {
-		claimed += len(messages)
+	for result := range results {
+		for _, claimed := range result.messages {
+			if claimed.ID == message.ID {
+				targetClaims++
+				continue
+			}
+			// Other PostgreSQL-backed packages can enqueue messages while `go test ./...`
+			// runs packages concurrently. They are not part of this assertion and must not
+			// remain leased by this test's dispatcher instance.
+			if err := result.service.Release(context.Background(), claimed.ID); err != nil {
+				t.Fatal(err)
+			}
+		}
 	}
-	if claimed != 1 {
-		t.Fatalf("concurrent dispatchers claimed the message %d times", claimed)
+	if targetClaims != 1 {
+		t.Fatalf("concurrent dispatchers claimed the target message %d times", targetClaims)
 	}
 
 	recovery := integrationService(t, db, "recovery", now.Add(31*time.Second))

@@ -352,7 +352,7 @@ func seedCredentialExecution(
 	leaseToken := "credential-worker-lease-token"
 	worker := persistence.WorkerInstance{
 		ID: workerID, ExecutionTargetID: fixture.targetID, TargetKind: "local",
-		ClusterID: "credential-test", Namespace: "credential-test", PodName: "credential-test", Version: "test",
+		ClusterID: "credential-test", Namespace: "credential-test", PodName: "credential-test", Version: "test", ProtocolVersion: 1,
 		Capabilities: map[string]any{}, LeaseSupported: true, FencingSupported: true,
 		AuthTokenHash: secret.HashToken("credential-worker-token"), Status: "online",
 		RegisteredAt: now, LastHeartbeatAt: now,

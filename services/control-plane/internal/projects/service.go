@@ -12,6 +12,7 @@ import (
 
 	"github.com/synara-ai/synara/services/control-plane/internal/audit"
 	"github.com/synara-ai/synara/services/control-plane/internal/authorization"
+	apiidempotency "github.com/synara-ai/synara/services/control-plane/internal/idempotency"
 	"github.com/synara-ai/synara/services/control-plane/internal/identity"
 	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
 	"github.com/synara-ai/synara/services/control-plane/internal/problem"
@@ -88,46 +89,69 @@ func (s *Service) Create(
 	input CreateProjectInput,
 	requestID, ipAddress string,
 ) (Project, error) {
+	item, _, err := s.CreateWithIdempotency(
+		ctx, principal, tenantID, organizationID, input, "", requestID, ipAddress,
+	)
+	return item, err
+}
+
+func (s *Service) CreateWithIdempotency(
+	ctx context.Context,
+	principal identity.Principal,
+	tenantID, organizationID uuid.UUID,
+	input CreateProjectInput,
+	idempotencyKey, requestID, ipAddress string,
+) (Project, bool, error) {
 	if _, err := s.authorizer.RequireOrganization(ctx, principal.UserID, tenantID, organizationID, authorization.ProjectCreate); err != nil {
-		return Project{}, err
+		return Project{}, false, err
 	}
 	name, err := validation.Name(input.Name, "invalid_project_name", "Project name", 200)
 	if err != nil {
-		return Project{}, err
+		return Project{}, false, err
 	}
 	repositoryURL, err := normalizeRepositoryURL(input.RepositoryURL)
 	if err != nil {
-		return Project{}, err
+		return Project{}, false, err
 	}
 	defaultBranch, err := normalizeBranch(input.DefaultBranch)
 	if err != nil {
-		return Project{}, err
+		return Project{}, false, err
 	}
 	visibility, err := normalizeVisibility(input.Visibility, "organization")
 	if err != nil {
-		return Project{}, err
+		return Project{}, false, err
 	}
 
-	model := persistence.Project{
-		ID: uuid.New(), TenantID: tenantID, OrganizationID: organizationID,
-		Name: name, RepositoryURL: repositoryURL, DefaultBranch: defaultBranch,
-		Visibility: visibility, CreatedBy: principal.UserID,
-	}
-	err = persistence.InTransaction(ctx, s.db, func(tx *gorm.DB) error {
-		if err := tx.Create(&model).Error; err != nil {
-			return problem.Wrap(409, "project_create_rejected", "Project creation was rejected by a tenant isolation constraint.", err)
+	result, err := apiidempotency.Execute(ctx, s.db, apiidempotency.Scope{
+		TenantID: tenantID, ActorID: principal.UserID, Key: idempotencyKey,
+		Operation: "project.create", SuccessStatus: 201,
+		Request: map[string]any{
+			"tenantId": tenantID, "organizationId": organizationID, "name": name,
+			"repositoryUrl": repositoryURL, "defaultBranch": defaultBranch, "visibility": visibility,
+		},
+	}, func(tx *gorm.DB) (Project, error) {
+		model := persistence.Project{
+			ID: uuid.New(), TenantID: tenantID, OrganizationID: organizationID,
+			Name: name, RepositoryURL: repositoryURL, DefaultBranch: defaultBranch,
+			Visibility: visibility, CreatedBy: principal.UserID,
 		}
-		return audit.Record(ctx, tx, audit.Entry{
+		if err := tx.Create(&model).Error; err != nil {
+			return Project{}, problem.Wrap(409, "project_create_rejected", "Project creation was rejected by a tenant isolation constraint.", err)
+		}
+		if err := audit.Record(ctx, tx, audit.Entry{
 			TenantID: tenantID, ActorType: "user", ActorID: &principal.UserID,
 			Action: "project.created", ResourceType: "project", ResourceID: &model.ID,
 			OrganizationID: &organizationID, RequestID: requestID, IPAddress: ipAddress,
 			Metadata: map[string]any{"visibility": visibility},
-		})
+		}); err != nil {
+			return Project{}, err
+		}
+		return toProject(model), nil
 	})
 	if err != nil {
-		return Project{}, err
+		return Project{}, false, err
 	}
-	return s.Get(ctx, principal, tenantID, model.ID)
+	return result.Value, result.Replayed, nil
 }
 
 func (s *Service) List(

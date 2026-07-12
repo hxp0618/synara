@@ -34,7 +34,7 @@ func TestGatherUsesBoundedRoutePatternsAndAuthoritativeState(t *testing.T) {
 	}
 	if err := db.Create(&persistence.WorkerInstance{
 		ID: workerID, ExecutionTargetID: targetID, TargetKind: "docker", ClusterID: "test",
-		Namespace: "test", PodName: "worker", Version: "test", Capabilities: map[string]any{},
+		Namespace: "test", PodName: "worker", Version: "test", ProtocolVersion: 1, Capabilities: map[string]any{},
 		LeaseSupported: true, FencingSupported: true, AuthTokenHash: []byte("hash"), Status: "ready",
 		RegisteredAt: now, LastHeartbeatAt: now,
 	}).Error; err != nil {

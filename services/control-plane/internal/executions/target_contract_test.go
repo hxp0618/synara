@@ -2,6 +2,7 @@ package executions
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -13,6 +14,7 @@ import (
 	"github.com/synara-ai/synara/services/control-plane/internal/executiontargets"
 	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
 	"github.com/synara-ai/synara/services/control-plane/internal/platform"
+	"github.com/synara-ai/synara/services/control-plane/internal/problem"
 	"github.com/synara-ai/synara/services/control-plane/migrations"
 )
 
@@ -43,7 +45,7 @@ func TestRemoteWorkerRequiresLeaseAndFencingAndCannotSwitchTargets(t *testing.T)
 	service := NewService(store.DB(), nil, 30*time.Second, 90*time.Second, time.Hour, nil, targetService)
 	input := RegisterWorkerInput{
 		ExecutionTargetID: sshTarget.ID, TargetKind: "ssh", ClusterID: "local",
-		Namespace: "default", PodName: "agentd-test", Version: "test",
+		Namespace: "default", PodName: "agentd-test", Version: "test", ProtocolVersion: WorkerProtocolVersion,
 	}
 	if _, err := service.Register(ctx, input); err == nil {
 		t.Fatal("remote worker without lease/fencing support was accepted")
@@ -51,6 +53,17 @@ func TestRemoteWorkerRequiresLeaseAndFencingAndCannotSwitchTargets(t *testing.T)
 	input.LeaseSupported = true
 	input.FencingSupported = true
 	input.Capabilities = map[string]any{"workspaceModes": []string{"local"}}
+	input.ProtocolVersion = WorkerProtocolVersion + 1
+	if _, err := service.Register(ctx, input); err == nil {
+		t.Fatal("unsupported Worker Protocol version was accepted")
+	} else {
+		var apiError *problem.Error
+		if !errors.As(err, &apiError) || apiError.Code != "worker_protocol_version_unsupported" ||
+			apiError.Details["minimumSupported"] != WorkerProtocolVersion {
+			t.Fatalf("unexpected Worker Protocol rejection: %#v", apiError)
+		}
+	}
+	input.ProtocolVersion = WorkerProtocolVersion
 	registered, err := service.Register(ctx, input)
 	if err != nil {
 		t.Fatal(err)
@@ -65,12 +78,17 @@ func TestRemoteWorkerRequiresLeaseAndFencingAndCannotSwitchTargets(t *testing.T)
 	if err != nil {
 		t.Fatalf("re-register SQLite worker with JSON capabilities: %v", err)
 	}
+	if _, err := service.Authenticate(ctx, registered.Token); err == nil {
+		t.Fatal("re-registration did not revoke the previous Worker token")
+	}
 	worker, err = service.Authenticate(ctx, reregistered.Token)
 	if err != nil {
 		t.Fatal(err)
 	}
+	draining := true
 	heartbeat, err := service.Heartbeat(ctx, worker, HeartbeatInput{
-		Version: "test-v3", Capabilities: map[string]any{"workspaceModes": []string{"worktree"}},
+		Version: "test-v3", ProtocolVersion: WorkerProtocolVersion,
+		Capabilities: map[string]any{"workspaceModes": []string{"worktree"}}, Draining: &draining,
 	})
 	if err != nil {
 		t.Fatalf("heartbeat SQLite worker with JSON capabilities: %v", err)
@@ -78,6 +96,28 @@ func TestRemoteWorkerRequiresLeaseAndFencingAndCannotSwitchTargets(t *testing.T)
 	workspaceModes, ok := heartbeat.Capabilities["workspaceModes"].([]any)
 	if !ok || len(workspaceModes) != 1 || workspaceModes[0] != "worktree" {
 		t.Fatalf("worker heartbeat did not persist JSON capabilities: %#v", heartbeat.Capabilities)
+	}
+	if heartbeat.Status != "draining" || heartbeat.DrainingAt == nil || heartbeat.ProtocolVersion != WorkerProtocolVersion {
+		t.Fatalf("worker heartbeat did not persist drain/protocol state: %#v", heartbeat)
+	}
+	worker, err = service.Authenticate(ctx, reregistered.Token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Claim(ctx, worker, ClaimExecutionInput{
+		ExecutionTargetID: sshTarget.ID, TargetKind: "ssh",
+	}, "claim-draining"); err == nil {
+		t.Fatal("draining Worker was allowed to claim")
+	}
+	draining = false
+	if _, err := service.Heartbeat(ctx, worker, HeartbeatInput{
+		ProtocolVersion: WorkerProtocolVersion, Draining: &draining,
+	}); err != nil {
+		t.Fatalf("worker could not leave drain mode: %v", err)
+	}
+	worker, err = service.Authenticate(ctx, reregistered.Token)
+	if err != nil {
+		t.Fatal(err)
 	}
 	if _, err := service.Claim(ctx, worker, ClaimExecutionInput{
 		ExecutionTargetID: domain.ExecutionTargetID, TargetKind: "local",

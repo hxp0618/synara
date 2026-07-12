@@ -41,7 +41,8 @@ func (c *Client) Register(ctx context.Context, cfg Config) (executions.Registere
 	err := c.doJSON(ctx, http.MethodPost, "/v1/workers/register", c.registrationToken, "", executions.RegisterWorkerInput{
 		ExecutionTargetID: cfg.ExecutionTargetID, TargetKind: string(cfg.TargetKind),
 		ClusterID: cfg.ClusterID, Namespace: cfg.Namespace, PodName: cfg.PodName,
-		Version: cfg.Version, Capabilities: cfg.Capabilities, LeaseSupported: true, FencingSupported: true,
+		Version: cfg.Version, ProtocolVersion: executions.WorkerProtocolVersion,
+		Capabilities: cfg.Capabilities, LeaseSupported: true, FencingSupported: true,
 	}, &output)
 	if err != nil {
 		return executions.RegisteredWorker{}, err
@@ -52,7 +53,7 @@ func (c *Client) Register(ctx context.Context, cfg Config) (executions.Registere
 
 func (c *Client) Heartbeat(ctx context.Context, cfg Config) error {
 	return c.doJSON(ctx, http.MethodPost, "/v1/workers/heartbeat", c.workerToken, "", executions.HeartbeatInput{
-		Version: cfg.Version, Capabilities: cfg.Capabilities,
+		Version: cfg.Version, ProtocolVersion: executions.WorkerProtocolVersion, Capabilities: cfg.Capabilities,
 	}, nil)
 }
 

@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 
+	"github.com/synara-ai/synara/services/control-plane/internal/authorization"
 	"github.com/synara-ai/synara/services/control-plane/internal/executiontargets"
 	"github.com/synara-ai/synara/services/control-plane/internal/outbox"
 	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
@@ -30,6 +31,7 @@ func expectOne(result *gorm.DB, status int, code, message string) error {
 
 type Service struct {
 	db               *gorm.DB
+	authorizer       *authorization.Authorizer
 	sessions         *sessions.Service
 	leaseTTL         time.Duration
 	heartbeatTimeout time.Duration
@@ -47,7 +49,7 @@ func NewService(
 	targetService *executiontargets.Service,
 ) *Service {
 	return &Service{
-		db: db, sessions: sessionService, leaseTTL: leaseTTL,
+		db: db, authorizer: authorization.NewAuthorizer(db), sessions: sessionService, leaseTTL: leaseTTL,
 		heartbeatTimeout: heartbeatTimeout, receiptTTL: receiptTTL,
 		cursorCipher: cursorCipher, targets: targetService, now: func() time.Time { return time.Now().UTC() },
 	}
@@ -80,7 +82,8 @@ func (s *Service) Register(ctx context.Context, input RegisterWorkerInput) (Regi
 				ID: uuid.New(), ExecutionTargetID: normalized.ExecutionTargetID, TargetKind: normalized.TargetKind,
 				ClusterID: normalized.ClusterID,
 				Namespace: normalized.Namespace, PodName: normalized.PodName, Version: normalized.Version,
-				Capabilities: normalized.Capabilities, LeaseSupported: normalized.LeaseSupported,
+				ProtocolVersion: normalized.ProtocolVersion,
+				Capabilities:    normalized.Capabilities, LeaseSupported: normalized.LeaseSupported,
 				FencingSupported: normalized.FencingSupported, AuthTokenHash: tokenHash, Status: "online",
 				RegisteredAt: now, LastHeartbeatAt: now,
 			}
@@ -93,7 +96,7 @@ func (s *Service) Register(ctx context.Context, input RegisterWorkerInput) (Regi
 			return problem.Wrap(500, "worker_registration_lookup_failed", "Failed to resolve the worker registration.", err)
 		}
 		updates := persistence.WorkerInstance{
-			TargetKind: normalized.TargetKind, Version: normalized.Version,
+			TargetKind: normalized.TargetKind, Version: normalized.Version, ProtocolVersion: normalized.ProtocolVersion,
 			Capabilities: normalized.Capabilities, AuthTokenHash: tokenHash,
 			LeaseSupported: normalized.LeaseSupported, FencingSupported: normalized.FencingSupported,
 			Status: "online", LastHeartbeatAt: now,
@@ -101,7 +104,7 @@ func (s *Service) Register(ctx context.Context, input RegisterWorkerInput) (Regi
 		result := tx.WithContext(ctx).Model(&persistence.WorkerInstance{}).
 			Where("id = ?", model.ID).
 			Select(
-				"target_kind", "version", "capabilities", "auth_token_hash", "lease_supported",
+				"target_kind", "version", "protocol_version", "capabilities", "auth_token_hash", "lease_supported",
 				"fencing_supported", "status", "last_heartbeat_at", "draining_at", "terminated_at",
 			).Updates(&updates)
 		if err := expectOne(result, 500, "worker_registration_update_failed", "Failed to refresh the worker registration."); err != nil {
@@ -110,6 +113,7 @@ func (s *Service) Register(ctx context.Context, input RegisterWorkerInput) (Regi
 		model.ExecutionTargetID = normalized.ExecutionTargetID
 		model.TargetKind = normalized.TargetKind
 		model.Version = normalized.Version
+		model.ProtocolVersion = normalized.ProtocolVersion
 		model.Capabilities = normalized.Capabilities
 		model.LeaseSupported = normalized.LeaseSupported
 		model.FencingSupported = normalized.FencingSupported
@@ -149,10 +153,25 @@ func (s *Service) Heartbeat(
 	worker persistence.WorkerInstance,
 	input HeartbeatInput,
 ) (Worker, error) {
+	protocolVersion := input.ProtocolVersion
+	if protocolVersion == 0 {
+		protocolVersion = WorkerProtocolVersion
+	}
+	if protocolVersion != WorkerProtocolVersion || worker.ProtocolVersion != WorkerProtocolVersion {
+		return Worker{}, unsupportedWorkerProtocol(protocolVersion)
+	}
 	now := s.now()
 	updates := persistence.WorkerInstance{LastHeartbeatAt: now}
 	fields := []string{"last_heartbeat_at"}
-	if worker.Status == "offline" {
+	if input.Draining != nil && *input.Draining {
+		updates.Status = "draining"
+		updates.DrainingAt = &now
+		fields = append(fields, "status", "draining_at")
+	} else if input.Draining != nil && !*input.Draining {
+		updates.Status = "online"
+		updates.DrainingAt = nil
+		fields = append(fields, "status", "draining_at")
+	} else if worker.Status == "offline" {
 		updates.Status = "online"
 		fields = append(fields, "status")
 	}
@@ -247,6 +266,13 @@ func normalizeRegistration(input RegisterWorkerInput) (RegisterWorkerInput, erro
 	if input.ExecutionTargetID == uuid.Nil {
 		return RegisterWorkerInput{}, problem.New(400, "invalid_worker_registration", "executionTargetId is required.")
 	}
+	protocolVersion := input.ProtocolVersion
+	if protocolVersion == 0 {
+		protocolVersion = WorkerProtocolVersion
+	}
+	if protocolVersion != WorkerProtocolVersion {
+		return RegisterWorkerInput{}, unsupportedWorkerProtocol(protocolVersion)
+	}
 	kind, err := platform.ParseExecutionTargetKind(input.TargetKind)
 	if err != nil {
 		return RegisterWorkerInput{}, problem.New(400, "invalid_worker_registration", "targetKind is invalid.")
@@ -258,7 +284,16 @@ func normalizeRegistration(input RegisterWorkerInput) (RegisterWorkerInput, erro
 	return RegisterWorkerInput{
 		ExecutionTargetID: input.ExecutionTargetID, TargetKind: string(kind),
 		ClusterID: values[0], Namespace: values[1], PodName: values[2], Version: values[3],
-		Capabilities: capabilities, LeaseSupported: input.LeaseSupported,
+		ProtocolVersion: protocolVersion,
+		Capabilities:    capabilities, LeaseSupported: input.LeaseSupported,
 		FencingSupported: input.FencingSupported,
 	}, nil
+}
+
+func unsupportedWorkerProtocol(received int) *problem.Error {
+	err := problem.New(426, "worker_protocol_version_unsupported", "The Worker Protocol version is not supported; upgrade synara-agentd.")
+	err.Details = map[string]any{
+		"received": received, "minimumSupported": WorkerProtocolVersion, "maximumSupported": WorkerProtocolVersion,
+	}
+	return err
 }

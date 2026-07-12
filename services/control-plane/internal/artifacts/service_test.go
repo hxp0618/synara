@@ -115,7 +115,7 @@ func TestWorkerArtifactConfirmationRequiresCurrentLease(t *testing.T) {
 	now := time.Now().UTC()
 	worker := persistence.WorkerInstance{
 		ID: workerID, ExecutionTargetID: fixture.targetID, TargetKind: "local", ClusterID: "local",
-		Namespace: "default", PodName: "worker-1", Version: "test", Capabilities: map[string]any{},
+		Namespace: "default", PodName: "worker-1", Version: "test", ProtocolVersion: 1, Capabilities: map[string]any{},
 		LeaseSupported: true, FencingSupported: true, AuthTokenHash: secret.HashToken("worker-token"),
 		Status: "online", RegisteredAt: now, LastHeartbeatAt: now,
 	}

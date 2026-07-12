@@ -321,6 +321,9 @@ func (s *Service) Complete(
 		if err != nil {
 			return Execution{}, err
 		}
+		if execution.Status == "waiting-for-approval" {
+			return Execution{}, problem.New(409, "execution_interaction_pending", "The execution is waiting for approval or user input.")
+		}
 		if err := s.storeProviderCursor(ctx, tx, execution, input.ProviderResumeCursor); err != nil {
 			return Execution{}, err
 		}
@@ -385,6 +388,9 @@ func (s *Service) Fail(
 		lease, execution, err := s.lockLease(ctx, tx, worker.ID, executionID, input.LeaseInput, true)
 		if err != nil {
 			return Execution{}, err
+		}
+		if execution.Status == "waiting-for-approval" {
+			return Execution{}, problem.New(409, "execution_interaction_pending", "The execution is waiting for approval or user input.")
 		}
 		if err := s.storeProviderCursor(ctx, tx, execution, input.ProviderResumeCursor); err != nil {
 			return Execution{}, err
@@ -457,7 +463,7 @@ func (s *Service) Release(
 		execution.Status = "recovering"
 		execution.WorkerID = nil
 		releaseUpdate := tx.WithContext(ctx).Model(&persistence.AgentExecution{}).
-			Where("id = ? AND tenant_id = ? AND worker_id = ? AND generation = ? AND status IN ?", execution.ID, execution.TenantID, worker.ID, input.Generation, []string{"leased", "running"}).
+			Where("id = ? AND tenant_id = ? AND worker_id = ? AND generation = ? AND status IN ?", execution.ID, execution.TenantID, worker.ID, input.Generation, []string{"leased", "running", "waiting-for-approval"}).
 			Updates(map[string]any{"status": "recovering", "worker_id": nil})
 		if err := expectOne(releaseUpdate, 409, "execution_release_conflict", "The execution lease could not be released from its current state."); err != nil {
 			return Execution{}, err
@@ -525,7 +531,7 @@ func (s *Service) RecoverExpired(ctx context.Context, limit int) error {
 			execution.Status = "recovering"
 			execution.WorkerID = nil
 			recoveryUpdate := tx.WithContext(ctx).Model(&persistence.AgentExecution{}).
-				Where("id = ? AND worker_id = ? AND generation = ? AND status IN ?", execution.ID, lease.WorkerID, lease.Generation, []string{"leased", "running"}).
+				Where("id = ? AND worker_id = ? AND generation = ? AND status IN ?", execution.ID, lease.WorkerID, lease.Generation, []string{"leased", "running", "waiting-for-approval"}).
 				Updates(map[string]any{"status": "recovering", "worker_id": nil})
 			if err := expectOne(recoveryUpdate, 409, "execution_recovery_failed", "Failed to move an expired execution into recovery."); err != nil {
 				return err
@@ -598,7 +604,7 @@ func (s *Service) lockLease(
 		return persistence.WorkerLease{}, persistence.AgentExecution{}, problem.Wrap(500, "execution_lock_failed", "Failed to lock the execution.", err)
 	}
 	if execution.WorkerID == nil || *execution.WorkerID != workerID || execution.Generation != input.Generation ||
-		(execution.Status != "leased" && execution.Status != "running") {
+		(execution.Status != "leased" && execution.Status != "running" && execution.Status != "waiting-for-approval") {
 		return persistence.WorkerLease{}, persistence.AgentExecution{}, problem.New(409, "generation_fenced", "The worker generation is no longer current.")
 	}
 	return lease, execution, nil

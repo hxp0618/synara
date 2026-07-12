@@ -214,7 +214,13 @@ func New(
 	mux.Handle("GET /v1/sessions/{sessionID}/events", server.requireAuth(http.HandlerFunc(server.listSessionEvents)))
 	mux.Handle("GET /v1/sessions/{sessionID}/events/stream", server.requireAuth(http.HandlerFunc(server.streamSessionEvents)))
 	mux.Handle("POST /v1/sessions/{sessionID}/turns", server.requireAuth(http.HandlerFunc(server.createTurn)))
+	mux.Handle("POST /v1/sessions/{sessionID}/suspend", server.requireAuth(http.HandlerFunc(server.suspendSession)))
+	mux.Handle("POST /v1/sessions/{sessionID}/resume", server.requireAuth(http.HandlerFunc(server.resumeSession)))
 	mux.Handle("POST /v1/sessions/{sessionID}/archive", server.requireAuth(http.HandlerFunc(server.archiveSession)))
+	mux.Handle("POST /v1/executions/{executionID}/cancel", server.requireAuth(http.HandlerFunc(server.cancelExecution)))
+	mux.Handle("GET /v1/executions/{executionID}/interactions", server.requireAuth(http.HandlerFunc(server.listExecutionInteractions)))
+	mux.Handle("POST /v1/executions/{executionID}/approvals/{requestID}/resolve", server.requireAuth(http.HandlerFunc(server.resolveExecutionApproval)))
+	mux.Handle("POST /v1/executions/{executionID}/user-input/{requestID}/resolve", server.requireAuth(http.HandlerFunc(server.resolveExecutionUserInput)))
 	mux.Handle("GET /v1/sessions/{sessionID}/artifacts", server.requireAuth(http.HandlerFunc(server.listArtifacts)))
 	mux.Handle("POST /v1/sessions/{sessionID}/artifacts", server.requireAuth(http.HandlerFunc(server.createArtifact)))
 	mux.Handle("GET /v1/artifacts/{artifactID}", server.requireAuth(http.HandlerFunc(server.getArtifact)))
@@ -695,11 +701,15 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, err)
 		return
 	}
-	item, err := s.projects.Create(r.Context(), mustPrincipal(r), tenantID, organizationID, input, requestID(r), clientIP(r))
+	item, replayed, err := s.projects.CreateWithIdempotency(
+		r.Context(), mustPrincipal(r), tenantID, organizationID, input,
+		r.Header.Get("Idempotency-Key"), requestID(r), clientIP(r),
+	)
 	if err != nil {
 		s.writeError(w, r, err)
 		return
 	}
+	setIdempotencyReplayHeader(w, replayed)
 	writeJSON(w, http.StatusCreated, item)
 }
 
@@ -784,11 +794,15 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, err)
 		return
 	}
-	item, err := s.sessions.Create(r.Context(), mustPrincipal(r), projectID, input, requestID(r), clientIP(r))
+	item, replayed, err := s.sessions.CreateWithIdempotency(
+		r.Context(), mustPrincipal(r), projectID, input,
+		r.Header.Get("Idempotency-Key"), requestID(r), clientIP(r),
+	)
 	if err != nil {
 		s.writeError(w, r, err)
 		return
 	}
+	setIdempotencyReplayHeader(w, replayed)
 	writeJSON(w, http.StatusCreated, item)
 }
 
@@ -820,11 +834,15 @@ func (s *Server) createTurn(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, err)
 		return
 	}
-	item, err := s.sessions.CreateTurn(r.Context(), mustPrincipal(r), sessionID, input, requestID(r), clientIP(r))
+	item, replayed, err := s.sessions.CreateTurnWithIdempotency(
+		r.Context(), mustPrincipal(r), sessionID, input,
+		r.Header.Get("Idempotency-Key"), requestID(r), clientIP(r),
+	)
 	if err != nil {
 		s.writeError(w, r, err)
 		return
 	}
+	setIdempotencyReplayHeader(w, replayed)
 	writeJSON(w, http.StatusCreated, item)
 }
 
@@ -856,12 +874,126 @@ func (s *Server) archiveSession(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	item, err := s.sessions.Archive(r.Context(), mustPrincipal(r), sessionID, requestID(r), clientIP(r))
+	item, replayed, err := s.sessions.ArchiveWithIdempotency(
+		r.Context(), mustPrincipal(r), sessionID, r.Header.Get("Idempotency-Key"), requestID(r), clientIP(r),
+	)
 	if err != nil {
 		s.writeError(w, r, err)
 		return
 	}
+	setIdempotencyReplayHeader(w, replayed)
 	writeJSON(w, http.StatusOK, item)
+}
+
+func (s *Server) suspendSession(w http.ResponseWriter, r *http.Request) {
+	sessionID, ok := s.pathUUID(w, r, "sessionID")
+	if !ok {
+		return
+	}
+	item, replayed, err := s.sessions.Suspend(
+		r.Context(), mustPrincipal(r), sessionID, r.Header.Get("Idempotency-Key"), requestID(r), clientIP(r),
+	)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	setIdempotencyReplayHeader(w, replayed)
+	writeJSON(w, http.StatusOK, item)
+}
+
+func (s *Server) resumeSession(w http.ResponseWriter, r *http.Request) {
+	sessionID, ok := s.pathUUID(w, r, "sessionID")
+	if !ok {
+		return
+	}
+	item, replayed, err := s.sessions.Resume(
+		r.Context(), mustPrincipal(r), sessionID, r.Header.Get("Idempotency-Key"), requestID(r), clientIP(r),
+	)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	setIdempotencyReplayHeader(w, replayed)
+	writeJSON(w, http.StatusOK, item)
+}
+
+func (s *Server) cancelExecution(w http.ResponseWriter, r *http.Request) {
+	executionID, ok := s.pathUUID(w, r, "executionID")
+	if !ok {
+		return
+	}
+	result, err := s.executions.Cancel(
+		r.Context(), mustPrincipal(r), executionID, r.Header.Get("Idempotency-Key"), requestID(r), clientIP(r),
+	)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	setIdempotencyReplayHeader(w, result.Replayed)
+	writeJSON(w, result.StatusCode, result.Value)
+}
+
+func (s *Server) listExecutionInteractions(w http.ResponseWriter, r *http.Request) {
+	executionID, ok := s.pathUUID(w, r, "executionID")
+	if !ok {
+		return
+	}
+	items, err := s.executions.ListInteractions(r.Context(), mustPrincipal(r), executionID)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+func (s *Server) resolveExecutionApproval(w http.ResponseWriter, r *http.Request) {
+	executionID, ok := s.pathUUID(w, r, "executionID")
+	if !ok {
+		return
+	}
+	var input executions.ResolveApprovalInput
+	if err := decodeJSON(r, &input); err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	result, err := s.executions.ResolveApproval(
+		r.Context(), mustPrincipal(r), executionID, r.PathValue("requestID"), input,
+		r.Header.Get("Idempotency-Key"), requestID(r), clientIP(r),
+	)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	setIdempotencyReplayHeader(w, result.Replayed)
+	writeJSON(w, result.StatusCode, result.Value)
+}
+
+func (s *Server) resolveExecutionUserInput(w http.ResponseWriter, r *http.Request) {
+	executionID, ok := s.pathUUID(w, r, "executionID")
+	if !ok {
+		return
+	}
+	var input executions.ResolveUserInputInput
+	if err := decodeJSON(r, &input); err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	result, err := s.executions.ResolveUserInput(
+		r.Context(), mustPrincipal(r), executionID, r.PathValue("requestID"), input,
+		r.Header.Get("Idempotency-Key"), requestID(r), clientIP(r),
+	)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	setIdempotencyReplayHeader(w, result.Replayed)
+	writeJSON(w, result.StatusCode, result.Value)
+}
+
+func setIdempotencyReplayHeader(w http.ResponseWriter, replayed bool) {
+	if replayed {
+		w.Header().Set("Idempotency-Replayed", "true")
+	}
 }
 
 func (s *Server) requireAuth(next http.Handler) http.Handler {

@@ -44,6 +44,7 @@ type WorkerArchive struct {
 	Namespace         string         `json:"namespace"`
 	PodName           string         `json:"podName"`
 	Version           string         `json:"version"`
+	ProtocolVersion   int            `json:"protocolVersion"`
 	Capabilities      map[string]any `json:"capabilities" gorm:"column:capabilities;serializer:json"`
 	RegisteredAt      time.Time      `json:"registeredAt"`
 	LastHeartbeatAt   time.Time      `json:"lastHeartbeatAt"`
@@ -100,7 +101,7 @@ func Export(ctx context.Context, db *gorm.DB, profile platform.DeploymentProfile
 	}
 	var activeExecutions int64
 	if err := db.WithContext(ctx).Model(&persistence.AgentExecution{}).
-		Where("status IN ?", []string{"leased", "running", "recovering"}).Count(&activeExecutions).Error; err != nil {
+		Where("status IN ?", []string{"leased", "running", "waiting-for-approval", "recovering"}).Count(&activeExecutions).Error; err != nil {
 		return Manifest{}, fmt.Errorf("check active executions: %w", err)
 	}
 	var leases int64
@@ -408,11 +409,16 @@ func insertArtifacts(tx *gorm.DB, values []persistence.Artifact) error {
 
 func insertWorkers(tx *gorm.DB, values []WorkerArchive) error {
 	for _, archived := range values {
+		protocolVersion := archived.ProtocolVersion
+		if protocolVersion <= 0 {
+			protocolVersion = 1
+		}
 		hash := sha256.Sum256([]byte("migrated-worker:" + archived.ID.String()))
 		worker := persistence.WorkerInstance{
 			ID: archived.ID, ExecutionTargetID: archived.ExecutionTargetID, TargetKind: archived.TargetKind,
 			ClusterID: archived.ClusterID, Namespace: archived.Namespace, PodName: archived.PodName,
-			Version: archived.Version, Capabilities: archived.Capabilities, LeaseSupported: true,
+			Version: archived.Version, ProtocolVersion: protocolVersion,
+			Capabilities: archived.Capabilities, LeaseSupported: true,
 			FencingSupported: true, AuthTokenHash: hash[:], Status: "terminated",
 			RegisteredAt: archived.RegisteredAt, LastHeartbeatAt: archived.LastHeartbeatAt,
 			TerminatedAt: pointerTime(time.Now().UTC()),

@@ -24,6 +24,10 @@ foundations. The existing TypeScript server remains the Provider Runtime during 
   - `000010_enterprise_identity.sql`: OIDC/SAML connection boundary, Service Accounts,
     SCIM Groups and mappings, and protected login attempts
   - `000011_outbox_delivery.sql`: multi-replica Claim ownership, claim expiry, retry and dead-letter state
+  - `000012_api_idempotency.sql`: Tenant/actor-scoped transactional API idempotency records
+  - `000013_worker_protocol.sql`: persisted Worker Protocol version negotiation
+  - `000014_execution_interactions.sql`: Approval/User Input persistence and approval-wait Execution state
+  - `000015_session_suspension.sql`: explicit active/suspended/archived Session state machine
 - ORM: GORM with PostgreSQL and CGO-free SQLite drivers
 - Shared model/repository/transaction utilities: `internal/persistence`
 - Tenant-scoped queries always include `tenant_id`
@@ -52,6 +56,20 @@ Provider Credential envelope encryption and Worker retrieval are defined in
 `docs/contracts/provider-credential-v1.md`.
 Enterprise identity, retention, Provider Host, observability, and Worker image boundaries
 are documented under `docs/contracts` and `docs/worker-image.md`.
+Session/Execution transitions, API idempotency, Cancel races, and persisted Approval/User Input are
+defined in `docs/contracts/session-execution-state-machine.md`.
+
+## Production authentication
+
+The profile-specific login, callback, cookie, trusted-proxy, expiry, and administrator-revocation rules
+are defined in `docs/contracts/production-authentication-policy.md`. In particular:
+
+- `enterprise` rejects Dev Bootstrap and requires an explicit public Control Plane URL.
+- Non-loopback public URLs require HTTPS and Secure cookies.
+- Forwarded client IPs are accepted only from `SYNARA_TRUSTED_PROXY_CIDRS`.
+- Login Sessions enforce both absolute and idle expiry from authoritative database rows.
+- Tenant administrators can revoke a member's active-Tenant sessions through the audited
+  `POST /v1/tenants/{tenantID}/members/{userID}/revoke-sessions` endpoint.
 
 ## Local run
 
@@ -178,8 +196,8 @@ docker build -t synara-control-plane:test .
 ```
 
 Development bootstrap is deliberately disabled by default outside the Personal example. Production
-deployments should keep it disabled and connect an enterprise identity provider in the later security
-phase.
+deployments should keep it disabled and configure an OIDC or SAML identity connection. Enterprise
+deployments reject Dev Bootstrap during startup.
 
 Worker registration uses a separate bearer secret. A worker registers one `executionTargetId` and
 `targetKind`, advertises lease/fencing support, receives a one-time worker token, and can claim only

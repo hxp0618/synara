@@ -300,6 +300,293 @@ func TestCreateTurnQueuesExecutionAndOutboxAtomically(t *testing.T) {
 	}
 }
 
+func TestExecutionCancelIsIdempotentAndRemovesLease(t *testing.T) {
+	db := integrationDB(t)
+	fixture := seedExecutionFixture(t, db)
+	service := integrationService(t, db)
+	worker := registerTestWorker(t, service, fixture.TargetID, fixture.TargetKind, "worker-cancel")
+	cleanupWorkers(t, db, worker.ID)
+	claim, err := service.Claim(context.Background(), worker, ClaimExecutionInput{
+		ExecutionTargetID: fixture.TargetID, TargetKind: fixture.TargetKind, ExecutionID: &fixture.ExecutionID,
+	}, "cancel-claim")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claim.Value.Lease == nil {
+		t.Fatal("cancel test execution was not leased")
+	}
+	principal := identity.Principal{UserID: fixture.UserID, ActiveTenantID: &fixture.TenantID}
+
+	first, err := service.Cancel(
+		context.Background(), principal, fixture.ExecutionID, "cancel-key", "cancel-first", "127.0.0.1",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := service.Cancel(
+		context.Background(), principal, fixture.ExecutionID, "cancel-key", "cancel-second", "127.0.0.1",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Replayed || !second.Replayed || first.Value.ID != second.Value.ID || second.Value.Status != "cancelled" {
+		t.Fatalf("unexpected cancel replay: first=%#v second=%#v", first, second)
+	}
+	var leases int64
+	if err := db.Model(&persistence.WorkerLease{}).Where("execution_id = ?", fixture.ExecutionID).Count(&leases).Error; err != nil {
+		t.Fatal(err)
+	}
+	if leases != 0 {
+		t.Fatalf("cancelled execution retained %d leases", leases)
+	}
+	var events, messages int64
+	if err := db.Model(&persistence.SessionEvent{}).
+		Where("tenant_id = ? AND execution_id = ? AND event_type = ?", fixture.TenantID, fixture.ExecutionID, "execution.cancelled").
+		Count(&events).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Model(&persistence.OutboxMessage{}).
+		Where("tenant_id = ? AND topic = ? AND message_key = ?", fixture.TenantID, "execution.cancelled", fixture.ExecutionID.String()).
+		Count(&messages).Error; err != nil {
+		t.Fatal(err)
+	}
+	if events != 1 || messages != 1 {
+		t.Fatalf("cancel lifecycle duplicated event/outbox: events=%d messages=%d", events, messages)
+	}
+}
+
+func TestConcurrentCancelAndCompleteHasOneTerminalWinner(t *testing.T) {
+	for iteration := range 5 {
+		t.Run("race-"+string(rune('a'+iteration)), func(t *testing.T) {
+			db := integrationDB(t)
+			fixture := seedExecutionFixture(t, db)
+			service := integrationService(t, db)
+			worker := registerTestWorker(t, service, fixture.TargetID, fixture.TargetKind, "worker-terminal-race")
+			cleanupWorkers(t, db, worker.ID)
+			claim, err := service.Claim(context.Background(), worker, ClaimExecutionInput{
+				ExecutionTargetID: fixture.TargetID, TargetKind: fixture.TargetKind, ExecutionID: &fixture.ExecutionID,
+			}, "terminal-race-claim")
+			if err != nil {
+				t.Fatal(err)
+			}
+			lease := claim.Value.Lease
+			if lease == nil {
+				t.Fatal("terminal race execution was not leased")
+			}
+			principal := identity.Principal{UserID: fixture.UserID, ActiveTenantID: &fixture.TenantID}
+			start := make(chan struct{})
+			outcomes := make(chan error, 2)
+			var wait sync.WaitGroup
+			wait.Add(2)
+			go func() {
+				defer wait.Done()
+				<-start
+				_, err := service.Cancel(
+					context.Background(), principal, fixture.ExecutionID,
+					"terminal-race-cancel", "terminal-race-cancel", "127.0.0.1",
+				)
+				outcomes <- err
+			}()
+			go func() {
+				defer wait.Done()
+				<-start
+				_, err := service.Complete(context.Background(), worker, fixture.ExecutionID, CompleteExecutionInput{
+					LeaseInput: LeaseInput{
+						TenantID: fixture.TenantID, Generation: lease.Generation, LeaseToken: lease.LeaseToken,
+					},
+				}, "terminal-race-complete")
+				outcomes <- err
+			}()
+			close(start)
+			wait.Wait()
+			close(outcomes)
+
+			succeeded := 0
+			for err := range outcomes {
+				if err == nil {
+					succeeded++
+					continue
+				}
+				var apiError *problem.Error
+				if !errors.As(err, &apiError) || (apiError.Code != "execution_terminal" && apiError.Code != "lease_not_current") {
+					t.Fatalf("unexpected terminal race error: %v", err)
+				}
+			}
+			if succeeded != 1 {
+				t.Fatalf("terminal race successes = %d, want 1", succeeded)
+			}
+			var execution persistence.AgentExecution
+			if err := db.Where("tenant_id = ? AND id = ?", fixture.TenantID, fixture.ExecutionID).Take(&execution).Error; err != nil {
+				t.Fatal(err)
+			}
+			if execution.Status != "completed" && execution.Status != "cancelled" {
+				t.Fatalf("terminal race left status %q", execution.Status)
+			}
+			var leases int64
+			if err := db.Model(&persistence.WorkerLease{}).Where("execution_id = ?", fixture.ExecutionID).Count(&leases).Error; err != nil {
+				t.Fatal(err)
+			}
+			if leases != 0 {
+				t.Fatalf("terminal race retained %d leases", leases)
+			}
+		})
+	}
+}
+
+func TestApprovalAndUserInputPersistResolveReplayAndResumeExecution(t *testing.T) {
+	db := integrationDB(t)
+	fixture := seedExecutionFixture(t, db)
+	service := integrationService(t, db)
+	worker := registerTestWorker(t, service, fixture.TargetID, fixture.TargetKind, "worker-interaction")
+	cleanupWorkers(t, db, worker.ID)
+	claim, err := service.Claim(context.Background(), worker, ClaimExecutionInput{
+		ExecutionTargetID: fixture.TargetID, TargetKind: fixture.TargetKind, ExecutionID: &fixture.ExecutionID,
+	}, "interaction-claim")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease := claim.Value.Lease
+	if lease == nil {
+		t.Fatal("interaction test execution was not leased")
+	}
+	leaseInput := LeaseInput{
+		TenantID: fixture.TenantID, Generation: lease.Generation, LeaseToken: lease.LeaseToken,
+	}
+	if _, err := service.Start(context.Background(), worker, fixture.ExecutionID, leaseInput, "interaction-start"); err != nil {
+		t.Fatal(err)
+	}
+	principal := identity.Principal{UserID: fixture.UserID, ActiveTenantID: &fixture.TenantID}
+
+	approvalRequestID := "approval-" + uuid.NewString()
+	if _, err := service.AppendRuntimeEvent(context.Background(), worker, fixture.ExecutionID, RuntimeEventInput{
+		LeaseInput: leaseInput, EventID: uuid.New(), EventVersion: 1, EventType: "approval.requested",
+		Payload: map[string]any{
+			"requestId": approvalRequestID, "requestType": "exec_command_approval", "summary": "Run command",
+		}, OccurredAt: time.Now().UTC(),
+	}, "approval-requested"); err != nil {
+		t.Fatal(err)
+	}
+	assertExecutionStatus(t, db, fixture, "waiting-for-approval")
+	if _, err := service.Complete(context.Background(), worker, fixture.ExecutionID, CompleteExecutionInput{
+		LeaseInput: leaseInput,
+	}, "complete-while-approval-pending"); err == nil {
+		t.Fatal("execution completed while approval was pending")
+	}
+
+	resolved, err := service.ResolveApproval(
+		context.Background(), principal, fixture.ExecutionID, approvalRequestID,
+		ResolveApprovalInput{Decision: "accept"}, "approval-resolve-key", "approval-resolve", "127.0.0.1",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replayed, err := service.ResolveApproval(
+		context.Background(), principal, fixture.ExecutionID, approvalRequestID,
+		ResolveApprovalInput{Decision: "accept"}, "approval-resolve-key", "approval-resolve-replay", "127.0.0.1",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.Replayed || !replayed.Replayed || replayed.Value.ID != resolved.Value.ID || resolved.Value.Status != "resolved" {
+		t.Fatalf("unexpected approval replay: first=%#v second=%#v", resolved, replayed)
+	}
+	assertExecutionStatus(t, db, fixture, "running")
+
+	userInputRequestID := "user-input-" + uuid.NewString()
+	if _, err := service.AppendRuntimeEvent(context.Background(), worker, fixture.ExecutionID, RuntimeEventInput{
+		LeaseInput: leaseInput, EventID: uuid.New(), EventVersion: 1, EventType: "user-input.requested",
+		Payload: map[string]any{
+			"requestId": userInputRequestID,
+			"questions": []any{map[string]any{"id": "environment", "question": "Which environment?"}},
+		}, OccurredAt: time.Now().UTC(),
+	}, "user-input-requested"); err != nil {
+		t.Fatal(err)
+	}
+	userInput, err := service.ResolveUserInput(
+		context.Background(), principal, fixture.ExecutionID, userInputRequestID,
+		ResolveUserInputInput{Answers: map[string]any{"environment": "staging"}},
+		"user-input-resolve-key", "user-input-resolve", "127.0.0.1",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if userInput.Value.Status != "resolved" {
+		t.Fatalf("user input was not resolved: %#v", userInput)
+	}
+	assertExecutionStatus(t, db, fixture, "running")
+
+	interactions, err := service.ListInteractions(context.Background(), principal, fixture.ExecutionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(interactions) != 2 || interactions[0].Status != "resolved" || interactions[1].Status != "resolved" {
+		t.Fatalf("unexpected persisted interactions: %#v", interactions)
+	}
+	var requestedEvents, resolvedEvents int64
+	if err := db.Model(&persistence.SessionEvent{}).
+		Where("tenant_id = ? AND execution_id = ? AND event_type IN ?", fixture.TenantID, fixture.ExecutionID,
+			[]string{"approval.requested", "user-input.requested"}).Count(&requestedEvents).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Model(&persistence.SessionEvent{}).
+		Where("tenant_id = ? AND execution_id = ? AND event_type IN ?", fixture.TenantID, fixture.ExecutionID,
+			[]string{"approval.resolved", "user-input.resolved"}).Count(&resolvedEvents).Error; err != nil {
+		t.Fatal(err)
+	}
+	if requestedEvents != 2 || resolvedEvents != 2 {
+		t.Fatalf("interaction replay duplicated events: requested=%d resolved=%d", requestedEvents, resolvedEvents)
+	}
+}
+
+func TestInteractionResolutionRejectsExpiredLease(t *testing.T) {
+	db := integrationDB(t)
+	fixture := seedExecutionFixture(t, db)
+	service := integrationService(t, db)
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	service.now = func() time.Time { return now }
+	worker := registerTestWorker(t, service, fixture.TargetID, fixture.TargetKind, "worker-expired-interaction")
+	cleanupWorkers(t, db, worker.ID)
+	claim, err := service.Claim(context.Background(), worker, ClaimExecutionInput{
+		ExecutionTargetID: fixture.TargetID, TargetKind: fixture.TargetKind, ExecutionID: &fixture.ExecutionID,
+	}, "expired-interaction-claim")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease := claim.Value.Lease
+	if lease == nil {
+		t.Fatal("expired interaction execution was not leased")
+	}
+	leaseInput := LeaseInput{TenantID: fixture.TenantID, Generation: lease.Generation, LeaseToken: lease.LeaseToken}
+	requestID := "approval-expired-" + uuid.NewString()
+	if _, err := service.AppendRuntimeEvent(context.Background(), worker, fixture.ExecutionID, RuntimeEventInput{
+		LeaseInput: leaseInput, EventID: uuid.New(), EventVersion: 1, EventType: "approval.requested",
+		Payload: map[string]any{"requestId": requestID}, OccurredAt: now,
+	}, "expired-approval-requested"); err != nil {
+		t.Fatal(err)
+	}
+	service.now = func() time.Time { return now.Add(service.leaseTTL + time.Second) }
+	principal := identity.Principal{UserID: fixture.UserID, ActiveTenantID: &fixture.TenantID}
+	_, err = service.ResolveApproval(
+		context.Background(), principal, fixture.ExecutionID, requestID,
+		ResolveApprovalInput{Decision: "accept"}, "expired-approval-key", "expired-approval", "127.0.0.1",
+	)
+	var apiError *problem.Error
+	if !errors.As(err, &apiError) || apiError.Code != "interaction_lease_expired" {
+		t.Fatalf("expected interaction_lease_expired, got %v", err)
+	}
+}
+
+func assertExecutionStatus(t *testing.T, db *gorm.DB, fixture executionFixture, want string) {
+	t.Helper()
+	var execution persistence.AgentExecution
+	if err := db.Where("tenant_id = ? AND id = ?", fixture.TenantID, fixture.ExecutionID).Take(&execution).Error; err != nil {
+		t.Fatal(err)
+	}
+	if execution.Status != want {
+		t.Fatalf("execution status = %q, want %q", execution.Status, want)
+	}
+}
+
 func TestConcurrentTurnCreationCannotOversubscribeTenantQuota(t *testing.T) {
 	db := integrationDB(t)
 	fixture := seedExecutionFixture(t, db)
@@ -353,7 +640,7 @@ func TestConcurrentTurnCreationCannotOversubscribeTenantQuota(t *testing.T) {
 	}
 	var activeExecutions int64
 	if err := db.Model(&persistence.AgentExecution{}).
-		Where("tenant_id = ? AND status IN ?", fixture.TenantID, []string{"queued", "leased", "running", "recovering"}).
+		Where("tenant_id = ? AND status IN ?", fixture.TenantID, []string{"queued", "leased", "running", "waiting-for-approval", "recovering"}).
 		Count(&activeExecutions).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -482,6 +769,7 @@ func cleanupFixture(db *gorm.DB, tenantID uuid.UUID) {
 	_ = db.Transaction(func(tx *gorm.DB) error {
 		models := []any{
 			&persistence.WorkerLease{}, &persistence.SessionEvent{}, &persistence.OutboxMessage{},
+			&persistence.APIIdempotencyKey{}, &persistence.ExecutionInteraction{},
 			&persistence.TenantQuota{}, &persistence.AgentExecution{}, &persistence.AgentTurn{},
 			&persistence.AgentSession{}, &persistence.Project{}, &persistence.ExecutionTarget{},
 		}

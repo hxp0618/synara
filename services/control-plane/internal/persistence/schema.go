@@ -11,7 +11,7 @@ func AllModels() []any {
 		&TenantMembership{}, &Organization{}, &OrganizationMembership{}, &LoginSession{},
 		&TenantInvitation{}, &AuditLog{}, &OutboxMessage{}, &TenantQuota{}, &Project{}, &ExecutionTarget{},
 		&AgentSession{}, &AgentTurn{}, &SessionEvent{}, &Automation{}, &WorkerInstance{},
-		&AgentExecution{}, &WorkerLease{}, &WorkerRequestReceipt{}, &Artifact{},
+		&AgentExecution{}, &WorkerLease{}, &WorkerRequestReceipt{}, &APIIdempotencyKey{}, &ExecutionInteraction{}, &Artifact{},
 		&ArtifactPayloadMigration{}, &ArtifactAccessToken{}, &ProviderCredential{},
 		&TenantRetentionPolicy{}, &IdentityConnection{}, &IdentityLoginAttempt{},
 		&ServiceAccount{}, &ServiceAccountToken{}, &IdentityGroup{}, &IdentityGroupMember{},

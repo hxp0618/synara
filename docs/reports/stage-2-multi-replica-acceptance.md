@@ -2,7 +2,7 @@
 
 - Date: 2026-07-12
 - Branch: `codex/saas-tenancy-user`
-- Scope: Stage 2 Step 2 PostgreSQL and stateless multi-replica correctness
+- Scope: Stage 2 Steps 2-3 PostgreSQL, stateless multi-replica correctness, and authentication regression
 - Result: PASS
 
 ## Runtime topology
@@ -12,9 +12,10 @@ The isolated acceptance suite started:
 - PostgreSQL 17 as authoritative metadata and event storage.
 - MinIO as the shared object store.
 - Two Control Plane containers built from the current worktree.
-- One Synara runtime container used as an in-network HTTP/SSE test runner.
+- One disposable Alpine container used as an in-network HTTP/SSE test runner. The acceptance suite does not
+  rebuild the unrelated TypeScript Provider Runtime.
 
-The final successful run used Compose project `synara-stage2-multi-41278`. The script removed all
+The latest successful run used Compose project `synara-stage2-step4-acceptance-12757`. The script removed all
 containers, networks and volumes after completion.
 
 ## Verified behavior
@@ -30,6 +31,11 @@ containers, networks and volumes after completion.
 7. Replica A was stopped. Replica B remained Ready and recovered missed Events from `Last-Event-ID` without
    replaying the acknowledged Event.
 8. Startup migrations completed under two concurrent replicas with one Advisory Lock boundary.
+9. The production-authentication changes retained immediate cross-replica logout rejection while using
+   the configured cookie and Session lifetime policy.
+10. Project and Session replay returned the original resources through the other replica.
+11. Two replicas concurrently submitted the same Turn `Idempotency-Key`; one request executed and the
+    other returned the stored response without duplicating the Event sequence.
 
 ## Automated evidence
 
@@ -42,6 +48,8 @@ The following focused coverage was added:
 - Database write readiness rejection for SQLite query-only and PostgreSQL read-only transactions.
 - Configured PostgreSQL pool limit verification.
 - Bounded startup Migration Lock wait.
+- PostgreSQL Login Session idle expiry with independent replica connection pools.
+- Cross-replica administrator revocation and concurrent Authenticate/Revoke without Session resurrection.
 
 Full Go tests passed against a fresh PostgreSQL 17 container:
 
@@ -57,5 +65,6 @@ deploy/saas/multi-replica-acceptance.sh
 
 ## Remaining scope
 
-This report closes Stage 2 Step 2. It does not claim the final Enterprise K8s acceptance from Step 7, nor
-production authentication, API idempotency, Artifact/SSE operational limits or the Web main-flow cutover.
+This report closes the runtime regression evidence for Stage 2 Steps 2-3. It does not claim the final
+Enterprise K8s acceptance from Step 7, API idempotency, Artifact/SSE operational limits, Tenant Context,
+or the Web main-flow cutover.

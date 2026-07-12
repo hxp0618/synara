@@ -12,7 +12,7 @@ func TestModelsHaveValidGormSchemas(t *testing.T) {
 		&User{}, &LoginSession{}, &Tenant{}, &TenantMembership{}, &Organization{},
 		&OrganizationMembership{}, &TenantInvitation{}, &AuditLog{}, &Project{},
 		&AgentSession{}, &AgentTurn{}, &SessionEvent{}, &Automation{}, &WorkerInstance{},
-		&AgentExecution{}, &WorkerLease{}, &WorkerRequestReceipt{}, &OutboxMessage{},
+		&AgentExecution{}, &WorkerLease{}, &WorkerRequestReceipt{}, &APIIdempotencyKey{}, &ExecutionInteraction{}, &OutboxMessage{},
 	}
 	for _, model := range models {
 		if _, err := schema.Parse(model, &sync.Map{}, schema.NamingStrategy{}); err != nil {

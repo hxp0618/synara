@@ -1,7 +1,7 @@
 # SaaS 路线第二阶段：Go Control Plane 收口与生产化计划
 
 > **阶段命名说明**：这里的“第二阶段”对应产品路线中的“新建 Go Control Plane”。它不等同于
-> `docs/saas-tenancy-organization-user-plan.md` 内部编号为 Phase 2 的“Project 与 Agent Session
+> `docs/plans/saas-tenancy-organization-user-plan.md` 内部编号为 Phase 2 的“Project 与 Agent Session
 > 归属”。
 >
 > **执行要求**：先核对当前工作区，不得把已经实现的功能重写一遍。当前分支存在大规模未提交
@@ -775,7 +775,22 @@ errorCode
   Login Session 撤销和单副本退出恢复。
 - [x] 可重复的双副本 Compose Acceptance 已通过，报告见
   `docs/reports/stage-2-multi-replica-acceptance.md`。
-- [ ] 当前进入 Step 3：生产认证收口。整个 Stage 2 尚未完成。
+- [x] Step 3 生产认证收口：已完成 Profile 启动策略、Cookie/Public URL/可信代理规则、绝对与空闲
+  Session 过期、登录 Token Rotation、管理员审计撤销，以及独立 PostgreSQL 连接池下的跨副本撤销和
+  Authenticate/Revoke 并发测试。
+- [x] 生产认证改动后的双副本 Compose Acceptance 已重新通过；验收客户端改为 Python 标准库，
+  不再重复构建 TypeScript Provider Runtime，也不依赖测试容器在线安装工具。
+- [x] Step 4 Session/Execution API 幂等：已完成 Project/Session/Turn、Suspend/Resume/Archive、
+  Execution Cancel 和 Approval/User Input Resolve 的事务型 `Idempotency-Key`，同 Key 冲突返回稳定
+  `409`，跨 PostgreSQL 连接池并发只执行一次副作用。
+- [x] Session 状态机已补齐 active/suspended/archived；Execution 已补齐用户 Cancel、
+  waiting-for-approval、Cancel/Complete 终态竞争、Worker Protocol Version、Drain 和重新注册 Token
+  Rotation 语义。
+- [x] Approval/User Input 请求与 Runtime Event 原子持久化；Resolve 校验 Lease/Generation、拒绝过期
+  Lease 并生成可回放 resolved Event。Provider Runner 双向投递明确进入 Stage 3。
+- [x] Step 4 后双副本 Compose Acceptance 已通过，包含跨副本 Project/Session Replay 和同 Key Turn
+  并发。
+- [ ] 当前进入 Step 5：Artifact 和 SSE 收口。整个 Stage 2 尚未完成。
 
 ### Step 2：多副本正确性
 
@@ -954,12 +969,12 @@ bun run test
 
 ## 18. 完成标准
 
-- [ ] Enterprise Profile 无法启用 Dev Login。
-- [ ] 登录 Cookie、Public URL 和 Proxy Trust 配置安全。
+- [x] Enterprise Profile 无法启用 Dev Login。
+- [x] 登录 Cookie、Public URL 和 Proxy Trust 配置安全。
 - [ ] Tenant Context 在 Web 应用级统一管理。
-- [ ] Project、Session、Turn 创建具备幂等语义。
-- [ ] Execution 状态机和并发终态已冻结并测试。
-- [ ] Worker Protocol Version、Drain 和 Token Rotation 有明确实现。
+- [x] Project、Session、Turn 创建具备幂等语义。
+- [x] Execution 状态机和并发终态已冻结并测试。
+- [x] Worker Protocol Version、Drain 和 Token Rotation 有明确实现。
 - [x] 多 Control Plane 副本不依赖进程内权威状态。
 - [x] SSE 能跨副本、跨重启从 PostgreSQL Sequence 恢复。
 - [ ] Artifact Complete 由 Control Plane 独立验证 Object 内容。

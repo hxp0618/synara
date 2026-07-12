@@ -12,6 +12,7 @@ import (
 	"github.com/synara-ai/synara/services/control-plane/internal/audit"
 	"github.com/synara-ai/synara/services/control-plane/internal/authorization"
 	"github.com/synara-ai/synara/services/control-plane/internal/executiontargets"
+	apiidempotency "github.com/synara-ai/synara/services/control-plane/internal/idempotency"
 	"github.com/synara-ai/synara/services/control-plane/internal/identity"
 	"github.com/synara-ai/synara/services/control-plane/internal/outbox"
 	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
@@ -114,55 +115,73 @@ func (s *Service) Create(
 	input CreateSessionInput,
 	requestID, ipAddress string,
 ) (Session, error) {
+	item, _, err := s.CreateWithIdempotency(ctx, principal, projectID, input, "", requestID, ipAddress)
+	return item, err
+}
+
+func (s *Service) CreateWithIdempotency(
+	ctx context.Context,
+	principal identity.Principal,
+	projectID uuid.UUID,
+	input CreateSessionInput,
+	idempotencyKey, requestID, ipAddress string,
+) (Session, bool, error) {
 	tenantID, err := ActiveTenant(principal)
 	if err != nil {
-		return Session{}, err
+		return Session{}, false, err
 	}
 	project, err := s.projects.Get(ctx, principal, tenantID, projectID)
 	if err != nil {
-		return Session{}, err
+		return Session{}, false, err
 	}
 	if _, err := s.authorizer.RequireOrganization(ctx, principal.UserID, tenantID, project.OrganizationID, authorization.SessionCreate); err != nil {
-		return Session{}, err
+		return Session{}, false, err
 	}
 	title, err := validation.Name(input.Title, "invalid_session_title", "Session title", 300)
 	if err != nil {
-		return Session{}, err
+		return Session{}, false, err
 	}
 	visibility, err := normalizeSessionVisibility(input.Visibility)
 	if err != nil {
-		return Session{}, err
+		return Session{}, false, err
 	}
 	provider, err := normalizeProvider(input.Provider)
 	if err != nil {
-		return Session{}, err
+		return Session{}, false, err
 	}
 	modelName, err := normalizeModel(input.Model)
 	if err != nil {
-		return Session{}, err
+		return Session{}, false, err
 	}
 	credentialID, err := s.resolveProviderCredential(
 		ctx, principal, tenantID, project.OrganizationID, provider, input.ProviderCredentialID,
 	)
 	if err != nil {
-		return Session{}, err
+		return Session{}, false, err
 	}
 
 	target, err := s.targets.ResolveForSession(ctx, tenantID, project.OrganizationID, input.ExecutionTargetID)
 	if err != nil {
-		return Session{}, err
+		return Session{}, false, err
 	}
 
-	model := persistence.AgentSession{
-		ID: uuid.New(), TenantID: tenantID, OrganizationID: project.OrganizationID,
-		ProjectID: project.ID, CreatedBy: principal.UserID, Title: title, Status: "active",
-		Visibility: visibility, Provider: provider, Model: modelName,
-		ProviderCredentialID: credentialID, ExecutionTargetID: target.ID,
-	}
 	var createdEvent persistence.SessionEvent
-	err = persistence.InTransaction(ctx, s.db, func(tx *gorm.DB) error {
+	result, err := apiidempotency.Execute(ctx, s.db, apiidempotency.Scope{
+		TenantID: tenantID, ActorID: principal.UserID, Key: idempotencyKey,
+		Operation: "session.create", SuccessStatus: 201,
+		Request: map[string]any{
+			"projectId": projectID, "title": title, "visibility": visibility, "provider": provider,
+			"model": modelName, "providerCredentialId": credentialID, "executionTargetId": target.ID,
+		},
+	}, func(tx *gorm.DB) (Session, error) {
+		model := persistence.AgentSession{
+			ID: uuid.New(), TenantID: tenantID, OrganizationID: project.OrganizationID,
+			ProjectID: project.ID, CreatedBy: principal.UserID, Title: title, Status: "active",
+			Visibility: visibility, Provider: provider, Model: modelName,
+			ProviderCredentialID: credentialID, ExecutionTargetID: target.ID,
+		}
 		if err := tx.Create(&model).Error; err != nil {
-			return problem.Wrap(409, "session_create_rejected", "Session creation was rejected by a tenant isolation constraint.", err)
+			return Session{}, problem.Wrap(409, "session_create_rejected", "Session creation was rejected by a tenant isolation constraint.", err)
 		}
 		createdEvent, err = appendEvent(ctx, tx, &model, eventInput{
 			EventType: "session.created", ActorType: "user", ActorID: &principal.UserID,
@@ -173,20 +192,25 @@ func (s *Service) Create(
 			},
 		})
 		if err != nil {
-			return err
+			return Session{}, err
 		}
-		return audit.Record(ctx, tx, audit.Entry{
+		if err := audit.Record(ctx, tx, audit.Entry{
 			TenantID: tenantID, ActorType: "user", ActorID: &principal.UserID,
 			Action: "session.created", ResourceType: "agent_session", ResourceID: &model.ID,
 			OrganizationID: &project.OrganizationID, RequestID: requestID, IPAddress: ipAddress,
 			Metadata: map[string]any{"projectId": project.ID, "visibility": visibility, "providerCredentialId": credentialID},
-		})
+		}); err != nil {
+			return Session{}, err
+		}
+		return toSession(model), nil
 	})
 	if err != nil {
-		return Session{}, err
+		return Session{}, false, err
 	}
-	s.events.publish(toEvent(createdEvent))
-	return s.Get(ctx, principal, tenantID, model.ID)
+	if !result.Replayed {
+		s.events.publish(toEvent(createdEvent))
+	}
+	return result.Value, result.Replayed, nil
 }
 
 func (s *Service) resolveProviderCredential(
@@ -283,60 +307,75 @@ func (s *Service) CreateTurn(
 	input CreateTurnInput,
 	requestID, ipAddress string,
 ) (Turn, error) {
+	item, _, err := s.CreateTurnWithIdempotency(ctx, principal, sessionID, input, "", requestID, ipAddress)
+	return item, err
+}
+
+func (s *Service) CreateTurnWithIdempotency(
+	ctx context.Context,
+	principal identity.Principal,
+	sessionID uuid.UUID,
+	input CreateTurnInput,
+	idempotencyKey, requestID, ipAddress string,
+) (Turn, bool, error) {
 	tenantID, err := ActiveTenant(principal)
 	if err != nil {
-		return Turn{}, err
+		return Turn{}, false, err
 	}
 	current, _, err := s.authorizedModel(ctx, principal, tenantID, sessionID, authorization.ExecutionCreate)
 	if err != nil {
-		return Turn{}, err
+		return Turn{}, false, err
 	}
 	if current.Visibility == "private" && current.CreatedBy != principal.UserID {
-		return Turn{}, problem.New(404, "session_not_found", "Session not found.")
+		return Turn{}, false, problem.New(404, "session_not_found", "Session not found.")
 	}
 	inputText := strings.TrimSpace(input.InputText)
 	if inputText == "" || len(inputText) > 1_000_000 {
-		return Turn{}, problem.New(400, "invalid_turn_input", "Turn input must be between 1 and 1000000 characters.")
-	}
-	queuedAt := time.Now().UTC()
-	turn := persistence.AgentTurn{
-		ID: uuid.New(), TenantID: tenantID, SessionID: sessionID,
-		CreatedBy: principal.UserID, Status: "queued", InputText: inputText,
+		return Turn{}, false, problem.New(400, "invalid_turn_input", "Turn input must be between 1 and 1000000 characters.")
 	}
 	var execution persistence.AgentExecution
 	var createdEvent persistence.SessionEvent
-	err = persistence.InTransaction(ctx, s.db, func(tx *gorm.DB) error {
+	result, err := apiidempotency.Execute(ctx, s.db, apiidempotency.Scope{
+		TenantID: tenantID, ActorID: principal.UserID, Key: idempotencyKey,
+		Operation: "turn.create", SuccessStatus: 201,
+		Request: map[string]any{"sessionId": sessionID, "inputText": inputText},
+	}, func(tx *gorm.DB) (Turn, error) {
+		queuedAt := time.Now().UTC()
+		turn := persistence.AgentTurn{
+			ID: uuid.New(), TenantID: tenantID, SessionID: sessionID,
+			CreatedBy: principal.UserID, Status: "queued", InputText: inputText,
+		}
 		var tenant persistence.Tenant
 		if err := persistence.WithLocking(tx.WithContext(ctx), "UPDATE", "").
 			Select("id", "status").Where("id = ? AND deleted_at IS NULL", tenantID).Take(&tenant).Error; err != nil {
-			return problem.Wrap(404, "tenant_not_found", "Tenant not found.", err)
+			return Turn{}, problem.Wrap(404, "tenant_not_found", "Tenant not found.", err)
 		}
 		if tenant.Status != "active" {
-			return problem.New(409, "tenant_suspended", "The tenant is suspended and cannot create new executions.")
+			return Turn{}, problem.New(409, "tenant_suspended", "The tenant is suspended and cannot create new executions.")
 		}
 		var quota persistence.TenantQuota
 		quotaErr := tx.WithContext(ctx).Where("tenant_id = ?", tenantID).Take(&quota).Error
 		if quotaErr == nil && quota.MaxConcurrentExecutions != nil {
 			var activeExecutions int64
 			if err := tx.WithContext(ctx).Model(&persistence.AgentExecution{}).
-				Where("tenant_id = ? AND status IN ?", tenantID, []string{"queued", "leased", "running", "recovering"}).
+				Where("tenant_id = ? AND status IN ?", tenantID, []string{"queued", "leased", "running", "waiting-for-approval", "recovering"}).
 				Count(&activeExecutions).Error; err != nil {
-				return problem.Wrap(500, "execution_quota_check_failed", "Failed to check tenant execution quota.", err)
+				return Turn{}, problem.Wrap(500, "execution_quota_check_failed", "Failed to check tenant execution quota.", err)
 			}
 			if activeExecutions >= int64(*quota.MaxConcurrentExecutions) {
-				return problem.New(409, "execution_quota_exceeded", "The tenant concurrent execution quota has been reached.")
+				return Turn{}, problem.New(409, "execution_quota_exceeded", "The tenant concurrent execution quota has been reached.")
 			}
 		} else if quotaErr != nil && !errors.Is(quotaErr, gorm.ErrRecordNotFound) {
-			return problem.Wrap(500, "execution_quota_check_failed", "Failed to load tenant execution quota.", quotaErr)
+			return Turn{}, problem.Wrap(500, "execution_quota_check_failed", "Failed to load tenant execution quota.", quotaErr)
 		}
 		locked, err := lockActiveSession(ctx, tx, tenantID, sessionID)
 		if err != nil {
-			return err
+			return Turn{}, err
 		}
 		var target persistence.ExecutionTarget
 		if err := tx.WithContext(ctx).
 			Where("id = ? AND status = ?", locked.ExecutionTargetID, "active").Take(&target).Error; err != nil {
-			return problem.Wrap(409, "execution_target_unavailable", "The session execution target is unavailable.", err)
+			return Turn{}, problem.Wrap(409, "execution_target_unavailable", "The session execution target is unavailable.", err)
 		}
 		execution = persistence.AgentExecution{
 			ID: uuid.New(), TenantID: tenantID, SessionID: sessionID, TurnID: turn.ID,
@@ -344,10 +383,10 @@ func (s *Service) CreateTurn(
 			Generation: 0, RequestedBy: principal.UserID, QueuedAt: queuedAt,
 		}
 		if err := tx.Create(&turn).Error; err != nil {
-			return problem.Wrap(409, "turn_create_rejected", "Turn creation was rejected by a tenant isolation constraint.", err)
+			return Turn{}, problem.Wrap(409, "turn_create_rejected", "Turn creation was rejected by a tenant isolation constraint.", err)
 		}
 		if err := tx.Create(&execution).Error; err != nil {
-			return problem.Wrap(409, "execution_create_rejected", "Execution creation was rejected by a tenant isolation constraint.", err)
+			return Turn{}, problem.Wrap(409, "execution_create_rejected", "Execution creation was rejected by a tenant isolation constraint.", err)
 		}
 		if err := outbox.Enqueue(ctx, tx, outbox.EnqueueInput{
 			TenantID: &tenantID, Topic: "execution.queued", MessageKey: execution.ID.String(),
@@ -358,7 +397,7 @@ func (s *Service) CreateTurn(
 			},
 			Headers: map[string]any{"eventVersion": 1}, AvailableAt: queuedAt, CreatedAt: queuedAt,
 		}); err != nil {
-			return problem.Wrap(409, "execution_outbox_create_rejected", "Execution dispatch could not be queued atomically.", err)
+			return Turn{}, problem.Wrap(409, "execution_outbox_create_rejected", "Execution dispatch could not be queued atomically.", err)
 		}
 		createdEvent, err = appendEvent(ctx, tx, &locked, eventInput{
 			EventType: "turn.created", ActorType: "user", ActorID: &principal.UserID,
@@ -370,20 +409,25 @@ func (s *Service) CreateTurn(
 			},
 		})
 		if err != nil {
-			return err
+			return Turn{}, err
 		}
-		return audit.Record(ctx, tx, audit.Entry{
+		if err := audit.Record(ctx, tx, audit.Entry{
 			TenantID: tenantID, ActorType: "user", ActorID: &principal.UserID,
 			Action: "turn.created", ResourceType: "agent_turn", ResourceID: &turn.ID,
 			OrganizationID: &locked.OrganizationID, RequestID: requestID, IPAddress: ipAddress,
 			Metadata: map[string]any{"sessionId": sessionID, "projectId": locked.ProjectID},
-		})
+		}); err != nil {
+			return Turn{}, err
+		}
+		return toTurn(turn), nil
 	})
 	if err != nil {
-		return Turn{}, err
+		return Turn{}, false, err
 	}
-	s.events.publish(toEvent(createdEvent))
-	return toTurn(turn), nil
+	if !result.Replayed {
+		s.events.publish(toEvent(createdEvent))
+	}
+	return result.Value, result.Replayed, nil
 }
 
 func (s *Service) ListEvents(
@@ -425,31 +469,53 @@ func (s *Service) Archive(
 	sessionID uuid.UUID,
 	requestID, ipAddress string,
 ) (Session, error) {
+	item, _, err := s.ArchiveWithIdempotency(ctx, principal, sessionID, "", requestID, ipAddress)
+	return item, err
+}
+
+func (s *Service) ArchiveWithIdempotency(
+	ctx context.Context,
+	principal identity.Principal,
+	sessionID uuid.UUID,
+	idempotencyKey, requestID, ipAddress string,
+) (Session, bool, error) {
 	tenantID, err := ActiveTenant(principal)
 	if err != nil {
-		return Session{}, err
+		return Session{}, false, err
 	}
 	current, _, err := s.authorizedModel(ctx, principal, tenantID, sessionID, authorization.SessionArchive)
 	if err != nil {
-		return Session{}, err
+		return Session{}, false, err
 	}
 	if current.Visibility == "private" && current.CreatedBy != principal.UserID {
-		return Session{}, problem.New(404, "session_not_found", "Session not found.")
-	}
-	if current.ArchivedAt != nil {
-		return toSession(current), nil
+		return Session{}, false, problem.New(404, "session_not_found", "Session not found.")
 	}
 	var archivedEvent persistence.SessionEvent
-	err = persistence.InTransaction(ctx, s.db, func(tx *gorm.DB) error {
-		locked, err := lockActiveSession(ctx, tx, tenantID, sessionID)
-		if err != nil {
-			return err
+	result, err := apiidempotency.Execute(ctx, s.db, apiidempotency.Scope{
+		TenantID: tenantID, ActorID: principal.UserID, Key: idempotencyKey,
+		Operation: "session.archive", SuccessStatus: 200,
+		Request: map[string]any{"sessionId": sessionID},
+	}, func(tx *gorm.DB) (Session, error) {
+		var locked persistence.AgentSession
+		lookupErr := persistence.WithLocking(tx.WithContext(ctx), "UPDATE", "").
+			Where("tenant_id = ? AND id = ?", tenantID, sessionID).Take(&locked).Error
+		if errors.Is(lookupErr, gorm.ErrRecordNotFound) {
+			return Session{}, problem.New(404, "session_not_found", "Session not found.")
+		}
+		if lookupErr != nil {
+			return Session{}, problem.Wrap(500, "session_lock_failed", "Failed to lock the session.", lookupErr)
+		}
+		if locked.ArchivedAt != nil {
+			return toSession(locked), nil
+		}
+		if locked.Status != "active" {
+			return Session{}, problem.New(409, "session_not_active", "Session is not active.")
 		}
 		now := time.Now().UTC()
 		if err := tx.Model(&persistence.AgentSession{}).
 			Where("tenant_id = ? AND id = ?", tenantID, sessionID).
 			Updates(map[string]any{"status": "archived", "archived_at": now}).Error; err != nil {
-			return problem.Wrap(500, "session_archive_failed", "Failed to archive the session.", err)
+			return Session{}, problem.Wrap(500, "session_archive_failed", "Failed to archive the session.", err)
 		}
 		locked.Status = "archived"
 		locked.ArchivedAt = &now
@@ -458,7 +524,7 @@ func (s *Service) Archive(
 			Payload: map[string]any{"archivedAt": now},
 		})
 		if err != nil {
-			return err
+			return Session{}, err
 		}
 		if err := outbox.Enqueue(ctx, tx, outbox.EnqueueInput{
 			TenantID: &tenantID, Topic: "session.archived", MessageKey: sessionID.String(),
@@ -467,19 +533,24 @@ func (s *Service) Archive(
 				"projectId": locked.ProjectID, "sessionId": sessionID, "archivedAt": now,
 			},
 		}); err != nil {
-			return problem.Wrap(500, "session_archive_outbox_failed", "The archived Session event could not be queued.", err)
+			return Session{}, problem.Wrap(500, "session_archive_outbox_failed", "The archived Session event could not be queued.", err)
 		}
-		return audit.Record(ctx, tx, audit.Entry{
+		if err := audit.Record(ctx, tx, audit.Entry{
 			TenantID: tenantID, ActorType: "user", ActorID: &principal.UserID,
 			Action: "session.archived", ResourceType: "agent_session", ResourceID: &sessionID,
 			OrganizationID: &locked.OrganizationID, RequestID: requestID, IPAddress: ipAddress,
-		})
+		}); err != nil {
+			return Session{}, err
+		}
+		return toSession(locked), nil
 	})
 	if err != nil {
-		return Session{}, err
+		return Session{}, false, err
 	}
-	s.events.publish(toEvent(archivedEvent))
-	return s.Get(ctx, principal, tenantID, sessionID)
+	if !result.Replayed && archivedEvent.EventID != uuid.Nil {
+		s.events.publish(toEvent(archivedEvent))
+	}
+	return result.Value, result.Replayed, nil
 }
 
 func (s *Service) SubscribeEvents(
