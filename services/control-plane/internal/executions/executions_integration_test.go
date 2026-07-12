@@ -67,7 +67,9 @@ func TestConcurrentClaimHasSingleWinner(t *testing.T) {
 				t.Fatalf("claimed unexpected execution: %#v", item.result.Value.Execution)
 			}
 			if item.result.Value.Workload == nil || item.result.Value.Workload.InputText != "Run integration test" ||
-				item.result.Value.Workload.Provider != "codex" || item.result.Value.Workload.DefaultBranch != "main" {
+				item.result.Value.Workload.Provider != "codex" || item.result.Value.Workload.DefaultBranch != "main" ||
+				item.result.Value.Workload.RuntimeMode != "approval-required" ||
+				item.result.Value.Workload.InteractionMode != "plan" {
 				t.Fatalf("claim omitted execution workload: %#v", item.result.Value.Workload)
 			}
 		}
@@ -877,7 +879,11 @@ func seedExecutionFixture(t *testing.T, db *gorm.DB) executionFixture {
 		&persistence.Project{ID: projectID, TenantID: tenantID, OrganizationID: organizationID, Name: "Execution project", DefaultBranch: "main", Visibility: "organization", CreatedBy: userID},
 		&persistence.ExecutionTarget{ID: targetID, TenantID: &tenantID, OrganizationID: &organizationID, Kind: "kubernetes", Name: "test-target", Status: "active", ConfigurationEncrypted: []byte{}, Capabilities: map[string]any{}},
 		&persistence.AgentSession{ID: sessionID, TenantID: tenantID, OrganizationID: organizationID, ProjectID: projectID, CreatedBy: userID, Title: "Execution session", Status: "active", Visibility: "private", Provider: "codex", ExecutionTargetID: targetID},
-		&persistence.AgentTurn{ID: turnID, TenantID: tenantID, SessionID: sessionID, CreatedBy: userID, Status: "queued", InputText: "Run integration test"},
+		&persistence.AgentTurn{
+			ID: turnID, TenantID: tenantID, SessionID: sessionID, CreatedBy: userID,
+			Status: "queued", InputText: "Run integration test",
+			RuntimeMode: "approval-required", InteractionMode: "plan",
+		},
 		&persistence.AgentExecution{ID: executionID, TenantID: tenantID, SessionID: sessionID, TurnID: turnID, Attempt: 1, Status: "queued", ExecutionTargetID: targetID, TargetKind: "kubernetes", Generation: 0, RequestedBy: userID, QueuedAt: now},
 		&persistence.OutboxMessage{ID: uuid.New(), TenantID: &tenantID, Topic: "execution.queued", MessageKey: executionID.String(), Payload: map[string]any{"executionId": executionID}, Headers: map[string]any{"eventVersion": 1}, CreatedAt: now, AvailableAt: now},
 	}

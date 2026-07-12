@@ -41,7 +41,13 @@ describe("Provider Host Protocol v2", () => {
       PROVIDER_CAPABILITY_IDS.length,
     );
     expect(codex.capabilityDescriptor.capabilities["send-turn"]).toBe("native");
-    expect(codex.capabilityDescriptor.capabilities["interrupt-turn"]).toBe("emulated");
+    expect(codex.capabilityDescriptor.capabilities["interrupt-turn"]).toBe("native");
+    expect(codex.capabilityDescriptor.capabilities.approval).toBe("native");
+    expect(codex.capabilityDescriptor.capabilities["structured-user-input"]).toBe("native");
+    expect(codex.capabilityDescriptor.capabilities["plan-mode"]).toBe("native");
+    expect(providerHostDescriptor("claudeAgent").capabilityDescriptor.capabilities.approval).toBe(
+      "unsupported",
+    );
     expect(cursor.capabilityDescriptor.supportTier).toBe("local-only");
     expect(Object.values(capabilityMapForProvider("cursor"))).toEqual(
       Array(PROVIDER_CAPABILITY_IDS.length).fill("unsupported"),

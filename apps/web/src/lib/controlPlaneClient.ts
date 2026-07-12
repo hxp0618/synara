@@ -1,3 +1,5 @@
+import type { ProviderInteractionMode, RuntimeMode } from "@synara/contracts";
+
 import { resolveWsHttpUrl } from "./wsHttpUrl";
 
 export function resolveControlPlaneHttpUrl(path: string): string {
@@ -304,6 +306,8 @@ export type ControlPlaneAgentTurn = {
   createdBy: string;
   status: "queued" | "running" | "completed" | "failed" | "cancelled";
   inputText: string;
+  runtimeMode: RuntimeMode;
+  interactionMode: ProviderInteractionMode;
   startedAt: string | null;
   completedAt: string | null;
   createdAt: string;
@@ -741,13 +745,14 @@ export const controlPlaneClient = {
     sessionId: string,
     inputText: string,
     options?: ControlPlaneIdempotencyOptions,
+    modes?: { runtimeMode: RuntimeMode; interactionMode: ProviderInteractionMode },
   ) =>
     controlPlaneRequest<ControlPlaneAgentTurn>(
       `/v1/sessions/${encodeURIComponent(sessionId)}/turns`,
       {
         method: "POST",
         ...idempotencyRequestHeaders(options),
-        body: { inputText },
+        body: { inputText, ...modes },
       },
     ),
   listSessionEvents: (sessionId: string, afterSequence = 0, limit = 500) => {

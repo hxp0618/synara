@@ -26,15 +26,17 @@ type Session struct {
 }
 
 type Turn struct {
-	ID          uuid.UUID  `json:"id"`
-	TenantID    uuid.UUID  `json:"tenantId"`
-	SessionID   uuid.UUID  `json:"sessionId"`
-	CreatedBy   uuid.UUID  `json:"createdBy"`
-	Status      string     `json:"status"`
-	InputText   string     `json:"inputText"`
-	StartedAt   *time.Time `json:"startedAt"`
-	CompletedAt *time.Time `json:"completedAt"`
-	CreatedAt   time.Time  `json:"createdAt"`
+	ID              uuid.UUID  `json:"id"`
+	TenantID        uuid.UUID  `json:"tenantId"`
+	SessionID       uuid.UUID  `json:"sessionId"`
+	CreatedBy       uuid.UUID  `json:"createdBy"`
+	Status          string     `json:"status"`
+	InputText       string     `json:"inputText"`
+	RuntimeMode     string     `json:"runtimeMode"`
+	InteractionMode string     `json:"interactionMode"`
+	StartedAt       *time.Time `json:"startedAt"`
+	CompletedAt     *time.Time `json:"completedAt"`
+	CreatedAt       time.Time  `json:"createdAt"`
 }
 
 type Event struct {
@@ -65,7 +67,9 @@ type CreateSessionInput struct {
 }
 
 type CreateTurnInput struct {
-	InputText string `json:"inputText"`
+	InputText       string `json:"inputText"`
+	RuntimeMode     string `json:"runtimeMode"`
+	InteractionMode string `json:"interactionMode"`
 }
 
 type EventPage struct {

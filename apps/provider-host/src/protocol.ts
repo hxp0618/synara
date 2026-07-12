@@ -52,7 +52,12 @@ export function providerHostDescriptor(provider: ProviderKind): ProviderHostDesc
     capabilityDescriptor: {
       provider,
       supportTier: remote ? "experimental" : "local-only",
-      adapterVersion: remote ? `${provider}-remote-v2` : `${provider}-local-only`,
+      adapterVersion:
+        provider === "codex"
+          ? "codex-app-server-v2"
+          : provider === "claudeAgent"
+            ? "claude-cli-v2"
+            : `${provider}-local-only`,
       ...(remote ? { providerCliVersion: readProviderCliVersion(provider) } : {}),
       capabilities: capabilityMapForProvider(provider),
     },
@@ -71,7 +76,27 @@ export function capabilityMapForProvider(provider: ProviderKind): ProviderCapabi
     PROVIDER_CAPABILITY_IDS.map((capability) => [capability, "unsupported"]),
   ) as Record<(typeof PROVIDER_CAPABILITY_IDS)[number], ProviderCapabilitySupport>;
 
-  if (provider === "codex" || provider === "claudeAgent") {
+  if (provider === "codex") {
+    Object.assign(capabilities, {
+      discovery: "native",
+      "start-session": "native",
+      "resume-session": "native",
+      "send-turn": "native",
+      "interrupt-turn": "native",
+      approval: "native",
+      "structured-user-input": "native",
+      "plan-mode": "native",
+      "read-history": "emulated",
+      "model-switch": "native",
+      "tool-events": "native",
+      "usage-events": "native",
+      "credential-injection": "native",
+      "authoritative-history-reconstruction": "emulated",
+      "worker-migration": "emulated",
+    } satisfies Partial<Record<(typeof PROVIDER_CAPABILITY_IDS)[number], ProviderCapabilitySupport>>);
+  }
+
+  if (provider === "claudeAgent") {
     Object.assign(capabilities, {
       discovery: "native",
       "start-session": "native",

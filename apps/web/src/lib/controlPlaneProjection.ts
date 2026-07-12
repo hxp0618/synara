@@ -7,7 +7,9 @@ import {
   type OrchestrationLatestTurn,
   type OrchestrationSessionStatus,
   type OrchestrationThreadActivity,
+  type ProviderInteractionMode,
   type ProviderKind,
+  type RuntimeMode,
 } from "@synara/contracts";
 import { getDefaultModel } from "@synara/shared/model";
 
@@ -34,6 +36,8 @@ export type ControlPlaneSessionProjection = {
   messages: Thread["messages"];
   activities: Thread["activities"];
   latestTurn: OrchestrationLatestTurn | null;
+  runtimeMode: RuntimeMode;
+  interactionMode: ProviderInteractionMode;
   orchestrationStatus: OrchestrationSessionStatus;
   error: string | null;
 };
@@ -67,6 +71,16 @@ function payloadString(event: ControlPlaneSessionEvent, key: string): string | n
 function eventTurnId(event: ControlPlaneSessionEvent): TurnId | null {
   const value = payloadString(event, "turnId");
   return value ? TurnId.makeUnsafe(value) : null;
+}
+
+function eventRuntimeMode(event: ControlPlaneSessionEvent): RuntimeMode | null {
+  const value = payloadString(event, "runtimeMode");
+  return value === "approval-required" || value === "full-access" ? value : null;
+}
+
+function eventInteractionMode(event: ControlPlaneSessionEvent): ProviderInteractionMode | null {
+  const value = payloadString(event, "interactionMode");
+  return value === "default" || value === "plan" ? value : null;
 }
 
 function assistantMessageId(executionId: string): MessageId {
@@ -199,6 +213,8 @@ export function createControlPlaneSessionProjection(
     messages: [],
     activities: [],
     latestTurn: null,
+    runtimeMode: "full-access",
+    interactionMode: "default",
     orchestrationStatus: session.status === "active" ? "ready" : "stopped",
     error: null,
   };
@@ -235,6 +251,8 @@ export function applyControlPlaneSessionEvent(
   let session = projection.session;
   let messages = projection.messages;
   let latestTurn = projection.latestTurn;
+  let runtimeMode = projection.runtimeMode;
+  let interactionMode = projection.interactionMode;
   let orchestrationStatus = projection.orchestrationStatus;
   let error = projection.error;
   const turnId = eventTurnId(event);
@@ -265,6 +283,8 @@ export function applyControlPlaneSessionEvent(
           assistantMessageId: null,
         };
       }
+      runtimeMode = eventRuntimeMode(event) ?? runtimeMode;
+      interactionMode = eventInteractionMode(event) ?? interactionMode;
       orchestrationStatus = "starting";
       error = null;
       break;
@@ -361,6 +381,8 @@ export function applyControlPlaneSessionEvent(
       messages,
       activities: appendActivity(projection.activities, event),
       latestTurn,
+      runtimeMode,
+      interactionMode,
       orchestrationStatus,
       error,
     },
@@ -432,8 +454,8 @@ export function projectControlPlaneThreads(
       projectId: ProjectId.makeUnsafe(session.projectId),
       title: session.title,
       modelSelection: { provider, model },
-      runtimeMode: "full-access",
-      interactionMode: "default",
+      runtimeMode: projection.runtimeMode,
+      interactionMode: projection.interactionMode,
       session: threadSession(projection),
       messages: projection.messages,
       proposedPlans: [],

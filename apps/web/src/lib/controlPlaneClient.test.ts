@@ -196,6 +196,9 @@ describe("controlPlaneClient", () => {
     const page = await controlPlaneClient.listSessionEvents("session/one", -5, 5_000);
     await controlPlaneClient.createTurn("session/one", "Continue", {
       idempotencyKey: "web-turn-request-1",
+    }, {
+      runtimeMode: "approval-required",
+      interactionMode: "plan",
     });
 
     expect(page.lastSequence).toBe(23);
@@ -208,6 +211,11 @@ describe("controlPlaneClient", () => {
     expect(new Headers(turnRequest.headers).get("Idempotency-Key")).toBe(
       "web-turn-request-1",
     );
+    expect(JSON.parse(String(turnRequest.body))).toEqual({
+      inputText: "Continue",
+      runtimeMode: "approval-required",
+      interactionMode: "plan",
+    });
   });
 
   it("creates execution targets without expecting secret configuration in the response", async () => {

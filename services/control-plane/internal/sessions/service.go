@@ -61,6 +61,7 @@ func toTurn(model persistence.AgentTurn) Turn {
 	return Turn{
 		ID: model.ID, TenantID: model.TenantID, SessionID: model.SessionID,
 		CreatedBy: model.CreatedBy, Status: model.Status, InputText: model.InputText,
+		RuntimeMode: model.RuntimeMode, InteractionMode: model.InteractionMode,
 		StartedAt: model.StartedAt, CompletedAt: model.CompletedAt, CreatedAt: model.CreatedAt,
 	}
 }
@@ -92,6 +93,28 @@ func normalizeSessionVisibility(value string) (string, error) {
 
 func normalizeProvider(value string) (string, error) {
 	return validation.Code(value, "codex", "invalid_provider", "Provider")
+}
+
+func normalizeRuntimeMode(value string) (string, error) {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		value = "full-access"
+	}
+	if value != "approval-required" && value != "full-access" {
+		return "", problem.New(400, "invalid_runtime_mode", "runtimeMode must be approval-required or full-access.")
+	}
+	return value, nil
+}
+
+func normalizeInteractionMode(value string) (string, error) {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		value = "default"
+	}
+	if value != "default" && value != "plan" {
+		return "", problem.New(400, "invalid_interaction_mode", "interactionMode must be default or plan.")
+	}
+	return value, nil
 }
 
 func normalizeModel(value *string) (*string, error) {
@@ -336,17 +359,29 @@ func (s *Service) CreateTurnWithIdempotency(
 	if inputText == "" || len(inputText) > 1_000_000 {
 		return Turn{}, false, problem.New(400, "invalid_turn_input", "Turn input must be between 1 and 1000000 characters.")
 	}
+	runtimeMode, err := normalizeRuntimeMode(input.RuntimeMode)
+	if err != nil {
+		return Turn{}, false, err
+	}
+	interactionMode, err := normalizeInteractionMode(input.InteractionMode)
+	if err != nil {
+		return Turn{}, false, err
+	}
 	var execution persistence.AgentExecution
 	var createdEvent persistence.SessionEvent
 	result, err := apiidempotency.Execute(ctx, s.db, apiidempotency.Scope{
 		TenantID: tenantID, ActorID: principal.UserID, Key: idempotencyKey,
 		Operation: "turn.create", SuccessStatus: 201,
-		Request: map[string]any{"sessionId": sessionID, "inputText": inputText},
+		Request: map[string]any{
+			"sessionId": sessionID, "inputText": inputText,
+			"runtimeMode": runtimeMode, "interactionMode": interactionMode,
+		},
 	}, func(tx *gorm.DB) (Turn, error) {
 		queuedAt := time.Now().UTC()
 		turn := persistence.AgentTurn{
 			ID: uuid.New(), TenantID: tenantID, SessionID: sessionID,
 			CreatedBy: principal.UserID, Status: "queued", InputText: inputText,
+			RuntimeMode: runtimeMode, InteractionMode: interactionMode,
 		}
 		var tenant persistence.Tenant
 		if err := persistence.WithLocking(tx.WithContext(ctx), "UPDATE", "").
@@ -416,7 +451,8 @@ func (s *Service) CreateTurnWithIdempotency(
 			Payload: map[string]any{
 				"turnId": turn.ID, "executionId": execution.ID, "inputText": inputText,
 				"status": "queued", "executionTargetId": execution.ExecutionTargetID,
-				"targetKind": execution.TargetKind,
+				"targetKind":  execution.TargetKind,
+				"runtimeMode": runtimeMode, "interactionMode": interactionMode,
 			},
 		})
 		if err != nil {
@@ -426,7 +462,10 @@ func (s *Service) CreateTurnWithIdempotency(
 			TenantID: tenantID, ActorType: "user", ActorID: &principal.UserID,
 			Action: "turn.created", ResourceType: "agent_turn", ResourceID: &turn.ID,
 			OrganizationID: &locked.OrganizationID, RequestID: requestID, IPAddress: ipAddress,
-			Metadata: map[string]any{"sessionId": sessionID, "projectId": locked.ProjectID},
+			Metadata: map[string]any{
+				"sessionId": sessionID, "projectId": locked.ProjectID,
+				"runtimeMode": runtimeMode, "interactionMode": interactionMode,
+			},
 		}); err != nil {
 			return Turn{}, err
 		}

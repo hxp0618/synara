@@ -16,6 +16,18 @@ active --archive--> archived
   them.
 - Suspend, Resume, and Archive accept `Idempotency-Key` and append exactly one durable Session Event.
 
+## Agent Turn modes
+
+Turn creation captures immutable `runtimeMode` (`approval-required | full-access`) and `interactionMode`
+(`default | plan`) values in PostgreSQL. They are part of the idempotency request identity, the
+`turn.created` Session Event, and the Worker Workload snapshot. Browser refresh, SSE reconnect, Server restart,
+Worker replacement, and Provider native resume must reuse the persisted Turn values rather than current
+composer state.
+
+Codex maps approval-required to its native approval/sandbox controls and Plan Mode to its native collaboration
+mode. A Provider that cannot implement a persisted mode returns a stable unsupported error; it must not silently
+run the Turn under a different mode.
+
 ## Execution
 
 ```text

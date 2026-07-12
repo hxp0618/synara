@@ -31,6 +31,11 @@ Turn IDs, Session title, Provider and Model, Turn input, repository URL, and def
 snapshot is loaded in the claim transaction and is preserved across idempotent Claim replay. Workers
 never query control-plane tables directly.
 
+The Workload also carries the immutable `runtimeMode` (`approval-required | full-access`) and
+`interactionMode` (`default | plan`) captured when the Control Plane created the Turn. A Worker must not infer
+these values from browser state or reuse a later Session setting. Provider Host maps them to native Provider
+permission and collaboration-mode controls for that Turn.
+
 Runtime events additionally conform to `runtime-event-v1.schema.json`. `eventVersion` is required and
 must be `1`; an unsupported version is rejected with `runtime_event_version_unsupported` and the
 supported range. The serialized `payload` object is limited to 65,536 bytes. Larger output, binary data,

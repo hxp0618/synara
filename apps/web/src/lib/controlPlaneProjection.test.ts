@@ -81,7 +81,12 @@ describe("Control Plane Session projection", () => {
     let projection = createControlPlaneSessionProjection(session);
     projection = applyControlPlaneSessionEvent(
       projection,
-      event(1, "turn.created", { turnId: "turn-1", inputText: "Build it" }),
+      event(1, "turn.created", {
+        turnId: "turn-1",
+        inputText: "Build it",
+        runtimeMode: "approval-required",
+        interactionMode: "plan",
+      }),
     ).projection;
     projection = applyControlPlaneSessionEvent(
       projection,
@@ -106,6 +111,8 @@ describe("Control Plane Session projection", () => {
 
     const thread = projectControlPlaneThreads([session], new Map([[session.id, projection]]))[0]!;
     expect(thread.session?.orchestrationStatus).toBe("running");
+    expect(thread.runtimeMode).toBe("approval-required");
+    expect(thread.interactionMode).toBe("plan");
   });
 
   it("finishes assistant output only from the durable completion Event", () => {

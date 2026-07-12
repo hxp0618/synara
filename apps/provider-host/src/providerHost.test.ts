@@ -6,7 +6,6 @@ import { describe, expect, it } from "vitest";
 import {
   createRedactor,
   normalizeClaudeEvent,
-  normalizeCodexEvent,
   providerEnvironment,
   reconstructedPrompt,
   startProviderHostRun,
@@ -43,35 +42,6 @@ describe("provider credential isolation", () => {
 });
 
 describe("provider event normalization", () => {
-  it("normalizes Codex output without forwarding raw command data", () => {
-    const state = { text: [] as string[] };
-    const redact = createRedactor(["secret-value"]);
-    expect(
-      normalizeCodexEvent(
-        { type: "thread.started", thread_id: "thread-1" },
-        state,
-        redact,
-      ),
-    ).toEqual([]);
-    expect(
-      normalizeCodexEvent(
-        {
-          type: "item.completed",
-          item: { type: "agent_message", text: "done secret-value" },
-        },
-        state,
-        redact,
-      ),
-    ).toEqual([
-      {
-        type: "event",
-        eventType: "runtime.output.delta",
-        payload: { text: "done [REDACTED]" },
-      },
-    ]);
-    expect(state).toMatchObject({ cursor: "thread-1", text: ["done [REDACTED]"] });
-  });
-
   it("normalizes Claude text and usage", () => {
     const state = { text: [] as string[] };
     const redact = createRedactor([]);

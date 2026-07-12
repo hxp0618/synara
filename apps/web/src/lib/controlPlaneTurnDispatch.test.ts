@@ -19,6 +19,8 @@ describe("ControlPlaneTurnDispatcher", () => {
       provider: "codex",
       model: "gpt-5.6-sol",
       inputText: "Build it",
+      runtimeMode: "approval-required" as const,
+      interactionMode: "plan" as const,
       createSession,
       createTurn,
     };
@@ -48,13 +50,20 @@ describe("ControlPlaneTurnDispatcher", () => {
       title: "Existing",
       provider: "codex",
       inputText: "Continue",
+      runtimeMode: "full-access",
+      interactionMode: "default",
       createSession,
       createTurn,
     });
 
     expect(createSession).not.toHaveBeenCalled();
     expect(createTurn).toHaveBeenCalledWith(
-      expect.objectContaining({ sessionId: "session-1", idempotencyKey: "web-turn-uuid-1" }),
+      expect.objectContaining({
+        sessionId: "session-1",
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        idempotencyKey: "web-turn-uuid-1",
+      }),
     );
   });
 });

@@ -1,3 +1,5 @@
+import type { ProviderInteractionMode, RuntimeMode } from "@synara/contracts";
+
 export type ControlPlaneTurnDispatchInput = {
   draftThreadId: string;
   persistedSessionId: string | null;
@@ -6,6 +8,8 @@ export type ControlPlaneTurnDispatchInput = {
   provider: string;
   model?: string;
   inputText: string;
+  runtimeMode: RuntimeMode;
+  interactionMode: ProviderInteractionMode;
   createSession: (input: {
     projectId: string;
     title: string;
@@ -16,6 +20,8 @@ export type ControlPlaneTurnDispatchInput = {
   createTurn: (input: {
     sessionId: string;
     inputText: string;
+    runtimeMode: RuntimeMode;
+    interactionMode: ProviderInteractionMode;
     idempotencyKey: string;
   }) => Promise<unknown>;
 };
@@ -56,13 +62,15 @@ export class ControlPlaneTurnDispatcher {
       this.#draftSessionIds.set(input.draftThreadId, sessionId);
     }
 
-    const turnRequestKey = `${sessionId}\u0000${input.inputText}`;
+    const turnRequestKey = `${sessionId}\u0000${input.runtimeMode}\u0000${input.interactionMode}\u0000${input.inputText}`;
     const turnIdempotencyKey =
       this.#turnKeys.get(turnRequestKey) ?? `web-turn-${this.#randomUUID()}`;
     this.#turnKeys.set(turnRequestKey, turnIdempotencyKey);
     await input.createTurn({
       sessionId,
       inputText: input.inputText,
+      runtimeMode: input.runtimeMode,
+      interactionMode: input.interactionMode,
       idempotencyKey: turnIdempotencyKey,
     });
 

@@ -46,15 +46,17 @@ type AgentSession struct {
 func (AgentSession) TableName() string { return "agent_sessions" }
 
 type AgentTurn struct {
-	ID          uuid.UUID  `gorm:"column:id;type:uuid;primaryKey"`
-	TenantID    uuid.UUID  `gorm:"column:tenant_id;type:uuid"`
-	SessionID   uuid.UUID  `gorm:"column:session_id;type:uuid"`
-	CreatedBy   uuid.UUID  `gorm:"column:created_by;type:uuid"`
-	Status      string     `gorm:"column:status"`
-	InputText   string     `gorm:"column:input_text"`
-	StartedAt   *time.Time `gorm:"column:started_at"`
-	CompletedAt *time.Time `gorm:"column:completed_at"`
-	CreatedAt   time.Time  `gorm:"column:created_at"`
+	ID              uuid.UUID  `gorm:"column:id;type:uuid;primaryKey"`
+	TenantID        uuid.UUID  `gorm:"column:tenant_id;type:uuid"`
+	SessionID       uuid.UUID  `gorm:"column:session_id;type:uuid"`
+	CreatedBy       uuid.UUID  `gorm:"column:created_by;type:uuid"`
+	Status          string     `gorm:"column:status"`
+	InputText       string     `gorm:"column:input_text"`
+	RuntimeMode     string     `gorm:"column:runtime_mode;default:full-access"`
+	InteractionMode string     `gorm:"column:interaction_mode;default:default"`
+	StartedAt       *time.Time `gorm:"column:started_at"`
+	CompletedAt     *time.Time `gorm:"column:completed_at"`
+	CreatedAt       time.Time  `gorm:"column:created_at"`
 }
 
 func (AgentTurn) TableName() string { return "agent_turns" }

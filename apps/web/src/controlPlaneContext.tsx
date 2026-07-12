@@ -1,4 +1,5 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import type { ProviderInteractionMode, RuntimeMode } from "@synara/contracts";
 import {
   createContext,
   createElement,
@@ -111,6 +112,7 @@ export type ControlPlaneContextValue = {
     sessionId: string,
     inputText: string,
     idempotencyKey?: string,
+    modes?: { runtimeMode: RuntimeMode; interactionMode: ProviderInteractionMode },
   ) => Promise<ControlPlaneAgentTurn>;
   watchSession: (sessionId: string) => () => void;
 };
@@ -454,7 +456,12 @@ export function ControlPlaneProvider({ children }: { children: ReactNode }) {
     ],
   );
   const createTurn = useCallback(
-    async (sessionId: string, inputText: string, idempotencyKey?: string) => {
+    async (
+      sessionId: string,
+      inputText: string,
+      idempotencyKey?: string,
+      modes?: { runtimeMode: RuntimeMode; interactionMode: ProviderInteractionMode },
+    ) => {
       if (!capabilities.canCreateTurn) {
         throw new Error("The active Tenant or Organization is read-only for new Turns.");
       }
@@ -462,6 +469,7 @@ export function ControlPlaneProvider({ children }: { children: ReactNode }) {
         sessionId,
         inputText,
         idempotencyOptions("turn", idempotencyKey),
+        modes,
       );
       void projectionRuntime.catchUp(sessionId).catch(() => undefined);
       return turn;

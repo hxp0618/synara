@@ -94,6 +94,8 @@ type Workload struct {
 	Model                    *string               `json:"model"`
 	ProviderCredentialID     *uuid.UUID            `json:"providerCredentialId"`
 	InputText                string                `json:"inputText"`
+	RuntimeMode              string                `json:"runtimeMode"`
+	InteractionMode          string                `json:"interactionMode"`
 	RepositoryURL            *string               `json:"repositoryUrl"`
 	DefaultBranch            string                `json:"defaultBranch"`
 	ConversationHistory      []ConversationMessage `json:"conversationHistory,omitempty"`

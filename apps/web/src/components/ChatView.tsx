@@ -7031,10 +7031,21 @@ export default function ChatView({
           provider: selectedProviderForSend,
           ...(selectedModelForSend ? { model: selectedModelForSend } : {}),
           inputText: outgoingMessageText,
+          runtimeMode: runtimeModeForSend,
+          interactionMode: interactionModeForSend,
           createSession: ({ projectId, idempotencyKey, ...input }) =>
             controlPlane.createSession(projectId, { ...input, idempotencyKey }),
-          createTurn: ({ sessionId, inputText, idempotencyKey }) =>
-            controlPlane.createTurn(sessionId, inputText, idempotencyKey),
+          createTurn: ({
+            sessionId,
+            inputText,
+            runtimeMode,
+            interactionMode,
+            idempotencyKey,
+          }) =>
+            controlPlane.createTurn(sessionId, inputText, idempotencyKey, {
+              runtimeMode,
+              interactionMode,
+            }),
         });
         clearComposerInput(activeThread.id);
         scheduleComposerFocus();

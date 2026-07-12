@@ -12,7 +12,9 @@ import (
 func TestTurnCreateIdempotencyDoesNotDuplicateExecutionEventOrOutbox(t *testing.T) {
 	fixture := newTenantExecutionPolicyFixture(t)
 	ctx := context.Background()
-	input := CreateTurnInput{InputText: "one durable Turn"}
+	input := CreateTurnInput{
+		InputText: "one durable Turn", RuntimeMode: "approval-required", InteractionMode: "plan",
+	}
 
 	first, replayed, err := fixture.service.CreateTurnWithIdempotency(
 		ctx, fixture.principal, fixture.sessionID, input, "turn-key", "turn-first", "127.0.0.1",
@@ -22,6 +24,9 @@ func TestTurnCreateIdempotencyDoesNotDuplicateExecutionEventOrOutbox(t *testing.
 	}
 	if replayed {
 		t.Fatal("first Turn creation was marked as replayed")
+	}
+	if first.RuntimeMode != "approval-required" || first.InteractionMode != "plan" {
+		t.Fatalf("Turn modes were not persisted in the API result: %#v", first)
 	}
 	second, replayed, err := fixture.service.CreateTurnWithIdempotency(
 		ctx, fixture.principal, fixture.sessionID, input, "turn-key", "turn-second", "127.0.0.1",
@@ -34,7 +39,8 @@ func TestTurnCreateIdempotencyDoesNotDuplicateExecutionEventOrOutbox(t *testing.
 	}
 
 	_, _, err = fixture.service.CreateTurnWithIdempotency(
-		ctx, fixture.principal, fixture.sessionID, CreateTurnInput{InputText: "different"},
+		ctx, fixture.principal, fixture.sessionID,
+		CreateTurnInput{InputText: "one durable Turn", RuntimeMode: "full-access", InteractionMode: "default"},
 		"turn-key", "turn-conflict", "127.0.0.1",
 	)
 	assertIdempotencyConflict(t, err)
@@ -53,6 +59,21 @@ func TestTurnCreateIdempotencyDoesNotDuplicateExecutionEventOrOutbox(t *testing.
 	if execution.Provider == nil || *execution.Provider != "codex" ||
 		execution.ProviderRuntimeBindingID == nil || execution.RemoteWorkspaceID == nil {
 		t.Fatalf("Turn Execution omitted Stage 3 runtime resources: %#v", execution)
+	}
+	var turn persistence.AgentTurn
+	if err := fixture.db.Where("tenant_id = ? AND id = ?", fixture.tenantID, first.ID).Take(&turn).Error; err != nil {
+		t.Fatal(err)
+	}
+	if turn.RuntimeMode != "approval-required" || turn.InteractionMode != "plan" {
+		t.Fatalf("Turn modes were not persisted in PostgreSQL: %#v", turn)
+	}
+	var event persistence.SessionEvent
+	if err := fixture.db.Where("tenant_id = ? AND session_id = ? AND event_type = ?",
+		fixture.tenantID, fixture.sessionID, "turn.created").Take(&event).Error; err != nil {
+		t.Fatal(err)
+	}
+	if event.Payload["runtimeMode"] != "approval-required" || event.Payload["interactionMode"] != "plan" {
+		t.Fatalf("Turn modes were not captured in the authoritative Event: %#v", event.Payload)
 	}
 }
 

@@ -61,10 +61,16 @@ Delivered-but-unacknowledged commands remain pullable and use the stable command
 Worker/Generation cannot pull, deliver, or acknowledge them. Lease recovery expires unresolved requests and
 supersedes unacknowledged deliveries from the obsolete Generation.
 
-Codex and Claude currently expose process termination as an `emulated` `interrupt-turn`. Approval and
-Structured User Input remain `unsupported` in the production CLI runner while it uses non-interactive bypass
-modes. The protocol and Worker lifecycle are implemented and tested with an interactive fixture, but the
-capability must not be promoted until a real Provider runtime supplies the corresponding resolver methods.
+Codex uses `codex app-server` as its production v2 runtime. It initializes a bidirectional JSON-RPC connection,
+starts or resumes the native Thread, streams Turn/Item/usage events, and routes native `turn/interrupt`, command
+or file Approval, and Plan Mode Structured User Input through durable Worker Interaction delivery. The immutable
+Turn `runtimeMode` selects approval-required versus full-access permissions, while `interactionMode=plan`
+activates Codex Plan Mode. Native Cursor resume is attempted first; when it is unavailable, a new Thread is
+rebuilt from bounded authoritative history instead of depending on the old Worker state.
+
+Claude still uses the non-interactive CLI runner. Its process termination remains an `emulated`
+`interrupt-turn`, and Approval, Structured User Input and Plan Mode remain `unsupported` until the Agent SDK
+runtime supplies and passes the same real bidirectional acceptance paths.
 
 ## Describe
 
