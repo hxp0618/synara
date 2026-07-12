@@ -1,0 +1,4 @@
+services:
+  control-plane:
+    ports:
+      - "${SYNARA_CONTROL_PLANE_BIND_ADDRESS:-127.0.0.1}:${SYNARA_CONTROL_PLANE_HOST_PORT:-59780}:3780"

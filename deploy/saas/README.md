@@ -34,6 +34,22 @@ socket-owning group on Linux, and never expose the Docker API over an unauthenti
 For browser uploads, set `SYNARA_ARTIFACT_CORS_ALLOW_ORIGIN` to the exact Synara web origin in
 production. The example defaults can be used for local acceptance only.
 
+## Acceptance and failure drills
+
+The normal single-node flow is covered by `acceptance.sh`. Multi-replica PostgreSQL/SSE/Claim behavior is
+covered by `multi-replica-acceptance.sh`.
+
+Run the isolated dependency and Worker failure drill with:
+
+```bash
+deploy/saas/failure-acceptance.sh
+```
+
+It exposes only the temporary Control Plane test port through
+`control-plane-acceptance.override.yml`, uses random credentials, verifies Worker offline recovery and
+Generation Fencing, stops and restores MinIO and PostgreSQL, and scans Control Plane logs for Credential,
+Token, Lease, Prompt and Presigned URL leakage. Containers, networks and volumes are removed on exit.
+
 Personal migration:
 
 ```bash

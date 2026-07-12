@@ -181,6 +181,17 @@ The suite starts two Control Plane containers against one PostgreSQL/MinIO stack
 revocation, concurrent Turn creation, SSE catch-up and Claim uniqueness, stops one replica, and verifies
 `Last-Event-ID` recovery through the remaining replica. It cleans up its containers and volumes on exit.
 
+Production failure and Kubernetes acceptance are repeatable through:
+
+```bash
+../../deploy/saas/failure-acceptance.sh
+KIND_BIN=/path/to/kind ../../deploy/kubernetes/kind-acceptance.sh
+```
+
+The operations Runbook and release gate are maintained in
+`docs/runbooks/control-plane-operations.md` and
+`docs/release-checklists/stage-2-control-plane.md`.
+
 ## Personal metadata export/import
 
 Stop or quiesce workers first; export rejects active leases/executions.

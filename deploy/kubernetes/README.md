@@ -35,3 +35,21 @@ into Worker Pods or execution events.
 users can apply the optional `deploy/kubernetes/monitoring` ServiceMonitor and alert
 rules after installing the required CRDs; they are not included in the base so a
 plain Kubernetes cluster can still apply the Kustomization.
+
+## Disposable Kind acceptance
+
+Run the Stage 2 two-replica and failure acceptance in a disposable Kind cluster:
+
+```bash
+KIND_BIN=/path/to/kind deploy/kubernetes/kind-acceptance.sh
+```
+
+The wrapper builds and loads the current Control Plane plus pinned PostgreSQL/MinIO images, creates PVC-backed
+test dependencies, applies this Kustomize base, verifies two Ready replicas and migration uniqueness, deletes one
+Control Plane Pod, interrupts PostgreSQL and MinIO, verifies Worker-token continuity, checks RBAC and scans Pod
+logs for random secret Sentinels. The cluster and test resources are deleted on exit.
+
+`deploy/kubernetes/acceptance.sh` defaults to Kind contexts and refuses other clusters. Running it against an
+explicitly disposable non-Kind cluster requires `SYNARA_K8S_ACCEPTANCE_ALLOW_NONDISPOSABLE=1`; the script deletes
+the `synara-system` Namespace and supplied ClusterRole resources during cleanup, so never use that override on a
+shared or production cluster.

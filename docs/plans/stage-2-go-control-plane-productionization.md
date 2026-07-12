@@ -797,7 +797,18 @@ errorCode
   Compose Acceptance 已通过；独立 PostgreSQL 连接池并发 SSE 配额只有一个合法赢家。
 - [ ] 真实 AWS S3 Live Store 验收需要操作人提供明确授权的可写测试 Bucket；共享
   `SYNARA_TEST_S3_*` 测试入口已完成。在此之前不宣称真实 AWS S3 已验收。
-- [ ] 当前进入 Step 6：Web 主流程切换。整个 Stage 2 尚未完成。
+- [x] Step 6 Web 主流程切换：应用级 Authentication/Tenant/Organization Context、Control Plane
+  Project/Session/Turn 主路径、SSE 到 Thread UI 的单向投影和 Control Plane Projection Authority 已完成。
+- [x] SaaS 浏览器闭环通过：登录、Context、Project、Session、Turn、Worker Event/Complete、SSE 输出和
+  PostgreSQL 刷新恢复均正常；延迟本地 Snapshot 不会覆盖 SaaS Projection。
+- [x] 未配置 Control Plane 的隔离本地实例通过：无登录门、可从真实路径创建 Project、刷新后从 SQLite
+  Snapshot 恢复，Console 无相关错误。
+- [x] Step 7 部署与生产验收：Single-node、双副本 Compose、PVC-backed Kind 双副本、Pod 删除、数据库
+  和 MinIO 暂时不可用、Worker 失联/Generation 接管均已通过。
+- [x] Control Plane Operations Runbook、Stage 2 Release Checklist、生产验收报告和随机 Sentinel
+  Credential/Token/Prompt 日志泄漏审计已完成。
+- [x] Stage 2 仓库内实现与可控环境验收完成。真实 AWS S3 是目标部署使用 AWS 时的外部发布证据，
+  仍保持未执行状态，不能以 MinIO 结果替代。
 
 ### Step 2：多副本正确性
 
@@ -978,7 +989,7 @@ bun run test
 
 - [x] Enterprise Profile 无法启用 Dev Login。
 - [x] 登录 Cookie、Public URL 和 Proxy Trust 配置安全。
-- [ ] Tenant Context 在 Web 应用级统一管理。
+- [x] Tenant Context 在 Web 应用级统一管理。
 - [x] Project、Session、Turn 创建具备幂等语义。
 - [x] Execution 状态机和并发终态已冻结并测试。
 - [x] Worker Protocol Version、Drain 和 Token Rotation 有明确实现。
@@ -986,12 +997,12 @@ bun run test
 - [x] SSE 能跨副本、跨重启从 PostgreSQL Sequence 恢复。
 - [x] Artifact Complete 由 Control Plane 独立验证 Object 内容。
 - [x] Outbox 具备 Claim、Retry、Dead Letter、Replay 和 Metrics。
-- [ ] Web 主流程可以创建 Control Plane Session/Execution 并消费 Event。
-- [ ] 未配置 Control Plane 时本地模式保持可用。
+- [x] Web 主流程可以创建 Control Plane Session/Execution 并消费 Event。
+- [x] 未配置 Control Plane 时本地模式保持可用。
 - [x] Single-node Compose Acceptance 通过。
-- [ ] Enterprise 双副本 Acceptance 通过。
-- [ ] 生产 Runbook 和告警规则完成。
-- [ ] 未引入 Credential、Token、Prompt 的日志泄漏。
+- [x] Enterprise 双副本 Acceptance 通过。
+- [x] 生产 Runbook 和告警规则完成。
+- [x] 未引入 Credential、Token、Prompt 的日志泄漏。
 
 ## 19. STOP 条件
 
