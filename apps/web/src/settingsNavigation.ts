@@ -16,6 +16,7 @@ export const SETTINGS_SECTION_IDS = [
   "providers",
   "skills",
   "usage",
+  "tenancy",
   "advanced",
 ] as const;
 
@@ -150,6 +151,14 @@ export const SETTINGS_NAV_ITEMS: readonly SettingsNavItem[] = [
     description: "Remaining quota and credits for each signed-in provider.",
     icon: "gauge",
     eyebrow: "Limits & credits",
+  },
+  {
+    id: "tenancy",
+    group: "synara",
+    label: "Organization",
+    description: "Tenants, organizations, memberships, roles, and invitations.",
+    icon: "buildings",
+    eyebrow: "SaaS control plane",
   },
   {
     id: "advanced",

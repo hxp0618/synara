@@ -1,0 +1,30 @@
+# syntax=docker/dockerfile:1.7
+
+# Build the `runtime-base` target from the root Dockerfile first. This path is
+# intended for low-memory remote hosts: web/server compilation happens on the
+# operator machine, while the target host only installs server production
+# dependencies so native modules match its Linux architecture.
+FROM synara-runtime-base:phase1
+
+WORKDIR /app
+ENV ELECTRON_SKIP_BINARY_DOWNLOAD=1 \
+  PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
+
+COPY deploy/remote/prebuilt/runtime/package.json ./package.json
+COPY deploy/remote/prebuilt/runtime/apps/server/package.json ./apps/server/package.json
+RUN --mount=type=cache,target=/root/.bun/install/cache \
+  bun install --production
+
+COPY deploy/remote/prebuilt/server-dist ./apps/server/dist
+
+ENV HOME=/home/synara \
+  PATH=/home/synara/.local/bin:${PATH} \
+  NPM_CONFIG_UPDATE_NOTIFIER=false
+
+WORKDIR /workspace
+USER synara
+
+EXPOSE 3773
+
+ENTRYPOINT ["/usr/local/bin/tini", "--"]
+CMD ["node", "/app/apps/server/dist/index.mjs"]

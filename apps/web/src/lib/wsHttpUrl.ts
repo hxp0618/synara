@@ -4,6 +4,8 @@
 // Layer: Web utility
 // Exports: resolveWsHttpUrl, toAttachmentPreviewUrl
 
+import { withRemoteAccessToken } from "../remoteAccessToken";
+
 // Build a fully-qualified HTTP URL for `rawPath` against the same server the WS connection uses.
 // On desktop the page is served from a custom protocol scheme, so <img>/<a download> with a
 // relative path never reaches the server. We mirror the WS host and forward the legacy token
@@ -19,7 +21,9 @@ export function resolveWsHttpUrl(rawPath: string): string {
       : typeof envWsUrl === "string" && envWsUrl.length > 0
         ? envWsUrl
         : null;
-  if (!wsCandidate) return new URL(rawPath, window.location.origin).toString();
+  if (!wsCandidate) {
+    return withRemoteAccessToken(new URL(rawPath, window.location.origin).toString());
+  }
   try {
     const wsUrl = new URL(wsCandidate);
     const protocol =
@@ -29,9 +33,9 @@ export function resolveWsHttpUrl(rawPath: string): string {
     if (legacyToken && !httpUrl.searchParams.has("token")) {
       httpUrl.searchParams.set("token", legacyToken);
     }
-    return httpUrl.toString();
+    return withRemoteAccessToken(httpUrl.toString());
   } catch {
-    return new URL(rawPath, window.location.origin).toString();
+    return withRemoteAccessToken(new URL(rawPath, window.location.origin).toString());
   }
 }
 

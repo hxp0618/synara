@@ -1,0 +1,744 @@
+import { resolveWsHttpUrl } from "./wsHttpUrl";
+
+export function resolveControlPlaneHttpUrl(path: string): string {
+  if (
+    typeof window !== "undefined" &&
+    (window.location.protocol === "http:" || window.location.protocol === "https:")
+  ) {
+    return new URL(path, window.location.origin).toString();
+  }
+  return resolveWsHttpUrl(path);
+}
+
+export class ControlPlaneError extends Error {
+  constructor(
+    readonly status: number,
+    readonly code: string,
+    message: string,
+    readonly requestId?: string,
+  ) {
+    super(message);
+    this.name = "ControlPlaneError";
+  }
+}
+
+export type ControlPlaneTenantAccess = {
+  id: string;
+  slug: string;
+  name: string;
+  status: string;
+  planCode: string;
+  region: string;
+  role: string;
+};
+
+export type ControlPlaneSessionState = {
+  authenticated: true;
+  user: {
+    userId: string;
+    sessionId: string;
+    activeTenantId: string | null;
+    email: string;
+    displayName: string;
+  };
+  tenants: ReadonlyArray<ControlPlaneTenantAccess>;
+};
+
+export type ControlPlaneOrganization = {
+  id: string;
+  tenantId: string;
+  parentOrganizationId: string | null;
+  slug: string;
+  name: string;
+  kind: "root" | "team" | "department" | "personal";
+  status: "active" | "suspended";
+  settings: Record<string, unknown>;
+  createdAt: string;
+  updatedAt: string;
+  archivedAt: string | null;
+};
+
+export type ControlPlaneTenantMember = {
+  tenantId: string;
+  userId: string;
+  email: string;
+  displayName: string;
+  role: string;
+  status: string;
+  joinedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type ControlPlaneTenantQuota = {
+  tenantId: string;
+  maxConcurrentExecutions: number | null;
+  maxArtifactBytes: number | null;
+};
+
+export type ControlPlaneRetentionPolicy = {
+  tenantId: string;
+  sessionArchiveAfterDays: number | null;
+  artifactDeleteAfterDays: number | null;
+  updatedBy: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type ControlPlaneIdentityConnection = {
+  id: string;
+  tenantId: string;
+  kind: "oidc" | "saml";
+  name: string;
+  status: "active" | "disabled";
+  issuer: string;
+  clientId: string | null;
+  configuration: {
+    scopes?: ReadonlyArray<string>;
+    allowedDomains?: ReadonlyArray<string>;
+    groupsClaim?: string;
+    defaultTenantRole?: string;
+    metadataUrl?: string;
+    entityId?: string;
+    emailAttribute?: string;
+    displayNameAttribute?: string;
+    groupsAttribute?: string;
+  };
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type ControlPlanePublicIdentityConnection = Pick<
+  ControlPlaneIdentityConnection,
+  "id" | "tenantId" | "kind" | "name"
+>;
+
+export type ControlPlaneIdentityGroupMapping = {
+  id: string;
+  externalGroup: string;
+  tenantRole: string | null;
+  organizationId: string | null;
+  organizationRole: string | null;
+};
+
+export type ControlPlaneServiceAccount = {
+  id: string;
+  tenantId: string;
+  organizationId: string | null;
+  name: string;
+  description: string;
+  status: "active" | "revoked";
+  scopes: ReadonlyArray<string>;
+  createdAt: string;
+  updatedAt: string;
+  revokedAt: string | null;
+};
+
+export type ControlPlaneIssuedServiceAccount = {
+  account: ControlPlaneServiceAccount;
+  token: string;
+};
+
+export type ControlPlaneProviderCredential = {
+  id: string;
+  tenantId: string;
+  organizationId: string | null;
+  name: string;
+  provider: string;
+  credentialType: string;
+  kmsProvider: string;
+  kmsKeyId: string;
+  version: number;
+  createdBy: string;
+  updatedBy: string;
+  createdAt: string;
+  updatedAt: string;
+  expiresAt: string | null;
+  revokedAt: string | null;
+};
+
+export type ControlPlaneAuditLogEntry = {
+  eventId: string;
+  tenantId: string;
+  actorType: "user" | "service_account" | "worker" | "system";
+  actorId: string | null;
+  action: string;
+  resourceType: string;
+  resourceId: string | null;
+  organizationId: string | null;
+  requestId: string;
+  metadata: Record<string, unknown>;
+  occurredAt: string;
+};
+
+export type ControlPlaneAuditLogFilters = {
+  action?: string;
+  actorType?: ControlPlaneAuditLogEntry["actorType"] | "";
+  resourceType?: string;
+  organizationId?: string;
+  occurredAfter?: string;
+  occurredBefore?: string;
+};
+
+export type ControlPlaneAuditLogPage = {
+  items: ReadonlyArray<ControlPlaneAuditLogEntry>;
+  nextCursor: string | null;
+};
+
+export type ControlPlaneProject = {
+  id: string;
+  tenantId: string;
+  organizationId: string;
+  name: string;
+  repositoryUrl: string | null;
+  defaultBranch: string;
+  visibility: "private" | "organization" | "tenant";
+  createdBy: string;
+  createdAt: string;
+  updatedAt: string;
+  archivedAt: string | null;
+};
+
+export type ControlPlaneAgentSession = {
+  id: string;
+  tenantId: string;
+  organizationId: string;
+  projectId: string;
+  createdBy: string;
+  title: string;
+  status: "active" | "archived";
+  visibility: "private" | "project" | "organization";
+  provider: string;
+  model: string | null;
+  providerCredentialId: string | null;
+  executionTargetId: string;
+  lastEventSequence: number;
+  createdAt: string;
+  updatedAt: string;
+  archivedAt: string | null;
+};
+
+export type ControlPlaneExecutionTargetKind = "local" | "ssh" | "docker" | "kubernetes";
+
+export type ControlPlaneExecutionTarget = {
+  id: string;
+  tenantId: string | null;
+  organizationId: string | null;
+  kind: ControlPlaneExecutionTargetKind;
+  name: string;
+  status: "active" | "disabled" | "offline";
+  capabilities: Record<string, unknown>;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type ControlPlaneSSHProvisionResult = {
+  targetId: string;
+  operation: "install" | "upgrade" | "revoke";
+  status: "active" | "offline" | "disabled";
+  serviceName: string;
+  binarySha256?: string;
+};
+
+export type ControlPlaneArtifactKind =
+  | "attachment"
+  | "generated_file"
+  | "terminal_log"
+  | "workspace_snapshot"
+  | "checkpoint";
+
+export type ControlPlaneArtifact = {
+  id: string;
+  tenantId: string;
+  organizationId: string;
+  projectId: string;
+  sessionId: string;
+  executionId: string | null;
+  kind: ControlPlaneArtifactKind;
+  status: "pending" | "ready" | "deleting" | "deleted" | "failed";
+  originalName: string | null;
+  contentType: string | null;
+  sizeBytes: number | null;
+  sha256: string | null;
+  createdByType: "user" | "service_account" | "worker" | "system";
+  createdById: string;
+  readyAt: string | null;
+  createdAt: string;
+  expiresAt: string | null;
+  deletedAt: string | null;
+};
+
+export type ControlPlaneArtifactUploadGrant = {
+  artifact: ControlPlaneArtifact;
+  method: "PUT";
+  url: string;
+  headers: Readonly<Record<string, string>>;
+  expiresAt: string;
+};
+
+export type ControlPlaneArtifactDownloadGrant = {
+  artifact: ControlPlaneArtifact;
+  url: string;
+  expiresAt: string;
+};
+
+export type ControlPlaneAgentTurn = {
+  id: string;
+  tenantId: string;
+  sessionId: string;
+  createdBy: string;
+  status: "queued" | "running" | "completed" | "failed" | "cancelled";
+  inputText: string;
+  startedAt: string | null;
+  completedAt: string | null;
+  createdAt: string;
+};
+
+export type ControlPlaneSessionEvent = {
+  eventId: string;
+  eventVersion: number;
+  tenantId: string;
+  organizationId: string;
+  projectId: string;
+  sessionId: string;
+  executionId: string | null;
+  workerId: string | null;
+  generation: number | null;
+  sequence: number;
+  eventType: string;
+  actorType: "user" | "service_account" | "worker" | "system";
+  actorId: string | null;
+  payload: Record<string, unknown>;
+  occurredAt: string;
+};
+
+export type TenantInvitation = {
+  id: string;
+  tenantId: string;
+  email: string;
+  role: string;
+  token?: string;
+  expiresAt: string;
+  createdAt: string;
+};
+
+type ErrorEnvelope = {
+  error?: { code?: string; message?: string; requestId?: string };
+};
+
+export function resolveSessionEventStreamUrl(sessionId: string, afterSequence: number): string {
+  const query = new URLSearchParams({ afterSequence: String(Math.max(0, afterSequence)) });
+  return resolveControlPlaneHttpUrl(
+    `/v1/sessions/${encodeURIComponent(sessionId)}/events/stream?${query.toString()}`,
+  );
+}
+
+function subscribeSessionEvents(
+  sessionId: string,
+  afterSequence: number,
+  handlers: {
+    onEvent: (event: ControlPlaneSessionEvent) => void;
+    onOpen?: () => void;
+    onError?: () => void;
+  },
+): () => void {
+  const source = new EventSource(resolveSessionEventStreamUrl(sessionId, afterSequence), {
+    withCredentials: true,
+  });
+  source.onopen = () => handlers.onOpen?.();
+  source.onerror = () => handlers.onError?.();
+  source.addEventListener("session-event", (message) => {
+    try {
+      handlers.onEvent(JSON.parse(message.data) as ControlPlaneSessionEvent);
+    } catch {
+      handlers.onError?.();
+    }
+  });
+  return () => source.close();
+}
+
+function resolveArtifactGrantUrl(url: string): string {
+  return /^https?:\/\//i.test(url) ? url : resolveControlPlaneHttpUrl(url);
+}
+
+function auditLogSearchParams(
+  filters: ControlPlaneAuditLogFilters,
+  page?: { limit?: number; cursor?: string },
+): URLSearchParams {
+  const query = new URLSearchParams();
+  for (const [name, value] of Object.entries(filters)) {
+    if (typeof value === "string" && value.trim() !== "") query.set(name, value.trim());
+  }
+  if (page?.limit !== undefined) query.set("limit", String(page.limit));
+  if (page?.cursor) query.set("cursor", page.cursor);
+  return query;
+}
+
+export function resolveAuditLogExportUrl(
+  tenantId: string,
+  format: "jsonl" | "csv",
+  filters: ControlPlaneAuditLogFilters = {},
+): string {
+  const query = auditLogSearchParams(filters);
+  query.set("format", format);
+  return resolveControlPlaneHttpUrl(
+    `/v1/tenants/${encodeURIComponent(tenantId)}/audit-logs/export?${query.toString()}`,
+  );
+}
+
+async function uploadArtifactPayload(
+  grant: ControlPlaneArtifactUploadGrant,
+  payload: Blob | ArrayBuffer | ArrayBufferView,
+  contentType: string,
+): Promise<void> {
+  const headers = new Headers(grant.headers);
+  headers.set("Content-Type", contentType);
+  const response = await fetch(resolveArtifactGrantUrl(grant.url), {
+    method: grant.method,
+    headers,
+    body: payload as BodyInit,
+  });
+  if (!response.ok) {
+    throw new ControlPlaneError(
+      response.status,
+      "artifact_upload_failed",
+      `Artifact upload failed (${response.status}).`,
+    );
+  }
+}
+
+async function controlPlaneRequest<T>(
+  path: string,
+  init: Omit<RequestInit, "body"> & { body?: unknown } = {},
+): Promise<T> {
+  const headers = new Headers(init.headers);
+  let body: BodyInit | undefined;
+  if (init.body !== undefined) {
+    headers.set("Content-Type", "application/json");
+    body = JSON.stringify(init.body);
+  }
+  const response = await fetch(resolveControlPlaneHttpUrl(path), {
+    ...init,
+    headers,
+    body,
+    credentials: "include",
+  });
+  if (!response.ok) {
+    const payload = (await response.json().catch(() => null)) as ErrorEnvelope | null;
+    throw new ControlPlaneError(
+      response.status,
+      payload?.error?.code ?? "control_plane_request_failed",
+      payload?.error?.message ?? `Control-plane request failed (${response.status}).`,
+      payload?.error?.requestId,
+    );
+  }
+  if (response.status === 204) return undefined as T;
+  return (await response.json()) as T;
+}
+
+export const controlPlaneClient = {
+  getSession: () => controlPlaneRequest<ControlPlaneSessionState>("/v1/auth/session"),
+  devLogin: (input: { email: string; displayName: string }) =>
+    controlPlaneRequest<ControlPlaneSessionState>("/v1/auth/dev-login", {
+      method: "POST",
+      body: input,
+    }),
+  listPublicIdentityConnections: (tenantSlug: string) => {
+    const query = new URLSearchParams({ tenantSlug });
+    return controlPlaneRequest<{ items: ReadonlyArray<ControlPlanePublicIdentityConnection> }>(
+      `/v1/auth/sso/connections?${query.toString()}`,
+    );
+  },
+  startSSO: (connectionId: string, returnTo = "/settings?section=tenancy") => {
+    const query = new URLSearchParams({ returnTo });
+    return controlPlaneRequest<{ authorizationUrl: string }>(
+      `/v1/auth/sso/${encodeURIComponent(connectionId)}/start?${query.toString()}`,
+    );
+  },
+  logout: () => controlPlaneRequest<void>("/v1/auth/logout", { method: "POST" }),
+  setActiveTenant: (tenantId: string) =>
+    controlPlaneRequest<ControlPlaneSessionState>("/v1/auth/active-tenant", {
+      method: "PUT",
+      body: { tenantId },
+    }),
+  getTenantQuota: (tenantId: string) =>
+    controlPlaneRequest<ControlPlaneTenantQuota>(
+      `/v1/tenants/${encodeURIComponent(tenantId)}/quota`,
+    ),
+  updateTenantQuota: (
+    tenantId: string,
+    input: Pick<ControlPlaneTenantQuota, "maxConcurrentExecutions" | "maxArtifactBytes">,
+  ) =>
+    controlPlaneRequest<ControlPlaneTenantQuota>(
+      `/v1/tenants/${encodeURIComponent(tenantId)}/quota`,
+      { method: "PUT", body: input },
+    ),
+  getRetentionPolicy: (tenantId: string) =>
+    controlPlaneRequest<ControlPlaneRetentionPolicy>(
+      `/v1/tenants/${encodeURIComponent(tenantId)}/retention-policy`,
+    ),
+  updateRetentionPolicy: (
+    tenantId: string,
+    input: Pick<
+      ControlPlaneRetentionPolicy,
+      "sessionArchiveAfterDays" | "artifactDeleteAfterDays"
+    >,
+  ) =>
+    controlPlaneRequest<ControlPlaneRetentionPolicy>(
+      `/v1/tenants/${encodeURIComponent(tenantId)}/retention-policy`,
+      { method: "PUT", body: input },
+    ),
+  listIdentityConnections: (tenantId: string) =>
+    controlPlaneRequest<{ items: ReadonlyArray<ControlPlaneIdentityConnection> }>(
+      `/v1/tenants/${encodeURIComponent(tenantId)}/identity-connections`,
+    ),
+  createIdentityConnection: (
+    tenantId: string,
+    input: {
+      kind: "oidc" | "saml";
+      name: string;
+      issuer: string;
+      clientId?: string;
+      clientSecret?: string;
+      oidc?: {
+        scopes?: ReadonlyArray<string>;
+        allowedDomains?: ReadonlyArray<string>;
+        groupsClaim?: string;
+        defaultTenantRole?: string;
+      };
+      saml?: {
+        metadataUrl?: string;
+        entityId?: string;
+        emailAttribute?: string;
+        displayNameAttribute?: string;
+        groupsAttribute?: string;
+        allowedDomains?: ReadonlyArray<string>;
+        defaultTenantRole?: string;
+      };
+    },
+  ) =>
+    controlPlaneRequest<ControlPlaneIdentityConnection>(
+      `/v1/tenants/${encodeURIComponent(tenantId)}/identity-connections`,
+      { method: "POST", body: input },
+    ),
+  disableIdentityConnection: (tenantId: string, connectionId: string) =>
+    controlPlaneRequest<void>(
+      `/v1/tenants/${encodeURIComponent(tenantId)}/identity-connections/${encodeURIComponent(connectionId)}/disable`,
+      { method: "POST" },
+    ),
+  listIdentityGroupMappings: (tenantId: string, connectionId: string) =>
+    controlPlaneRequest<{ items: ReadonlyArray<ControlPlaneIdentityGroupMapping> }>(
+      `/v1/tenants/${encodeURIComponent(tenantId)}/identity-connections/${encodeURIComponent(connectionId)}/group-mappings`,
+    ),
+  replaceIdentityGroupMappings: (
+    tenantId: string,
+    connectionId: string,
+    items: ReadonlyArray<Omit<ControlPlaneIdentityGroupMapping, "id">>,
+  ) =>
+    controlPlaneRequest<{ items: ReadonlyArray<ControlPlaneIdentityGroupMapping> }>(
+      `/v1/tenants/${encodeURIComponent(tenantId)}/identity-connections/${encodeURIComponent(connectionId)}/group-mappings`,
+      { method: "PUT", body: { items } },
+    ),
+  listServiceAccounts: (tenantId: string) =>
+    controlPlaneRequest<{ items: ReadonlyArray<ControlPlaneServiceAccount> }>(
+      `/v1/tenants/${encodeURIComponent(tenantId)}/service-accounts`,
+    ),
+  createServiceAccount: (
+    tenantId: string,
+    input: {
+      organizationId?: string;
+      name: string;
+      description: string;
+      scopes: ReadonlyArray<string>;
+      expiresAt?: string;
+    },
+  ) =>
+    controlPlaneRequest<ControlPlaneIssuedServiceAccount>(
+      `/v1/tenants/${encodeURIComponent(tenantId)}/service-accounts`,
+      { method: "POST", body: input },
+    ),
+  rotateServiceAccountToken: (tenantId: string, serviceAccountId: string) =>
+    controlPlaneRequest<{ token: string; expiresAt: string | null }>(
+      `/v1/tenants/${encodeURIComponent(tenantId)}/service-accounts/${encodeURIComponent(serviceAccountId)}/rotate-token`,
+      { method: "POST", body: { expiresAt: null } },
+    ),
+  revokeServiceAccount: (tenantId: string, serviceAccountId: string) =>
+    controlPlaneRequest<void>(
+      `/v1/tenants/${encodeURIComponent(tenantId)}/service-accounts/${encodeURIComponent(serviceAccountId)}/revoke`,
+      { method: "POST" },
+    ),
+  listCredentials: (tenantId: string) =>
+    controlPlaneRequest<{ items: ReadonlyArray<ControlPlaneProviderCredential> }>(
+      `/v1/tenants/${encodeURIComponent(tenantId)}/credentials`,
+    ),
+  createCredential: (
+    tenantId: string,
+    input: {
+      organizationId?: string;
+      name: string;
+      provider: string;
+      credentialType: string;
+      payload: Record<string, unknown>;
+      expiresAt?: string;
+    },
+  ) =>
+    controlPlaneRequest<ControlPlaneProviderCredential>(
+      `/v1/tenants/${encodeURIComponent(tenantId)}/credentials`,
+      { method: "POST", body: input },
+    ),
+  rotateCredential: (
+    tenantId: string,
+    credentialId: string,
+    input: {
+      expectedVersion: number;
+      payload: Record<string, unknown>;
+      expiresAt: string | null;
+    },
+  ) =>
+    controlPlaneRequest<ControlPlaneProviderCredential>(
+      `/v1/tenants/${encodeURIComponent(tenantId)}/credentials/${encodeURIComponent(credentialId)}/rotate`,
+      { method: "POST", body: input },
+    ),
+  revokeCredential: (tenantId: string, credentialId: string) =>
+    controlPlaneRequest<void>(
+      `/v1/tenants/${encodeURIComponent(tenantId)}/credentials/${encodeURIComponent(credentialId)}/revoke`,
+      { method: "POST" },
+    ),
+  listAuditLogs: (
+    tenantId: string,
+    filters: ControlPlaneAuditLogFilters = {},
+    page: { limit?: number; cursor?: string } = {},
+  ) => {
+    const query = auditLogSearchParams(filters, page);
+    const suffix = query.size > 0 ? `?${query.toString()}` : "";
+    return controlPlaneRequest<ControlPlaneAuditLogPage>(
+      `/v1/tenants/${encodeURIComponent(tenantId)}/audit-logs${suffix}`,
+    );
+  },
+  listOrganizations: (tenantId: string) =>
+    controlPlaneRequest<{ items: ReadonlyArray<ControlPlaneOrganization> }>(
+      `/v1/tenants/${encodeURIComponent(tenantId)}/organizations`,
+    ),
+  createOrganization: (
+    tenantId: string,
+    input: { slug: string; name: string; kind: "team" | "department" | "personal" },
+  ) =>
+    controlPlaneRequest<ControlPlaneOrganization>(
+      `/v1/tenants/${encodeURIComponent(tenantId)}/organizations`,
+      { method: "POST", body: { ...input, settings: {} } },
+    ),
+  listProjects: (tenantId: string, organizationId: string) =>
+    controlPlaneRequest<{ items: ReadonlyArray<ControlPlaneProject> }>(
+      `/v1/tenants/${encodeURIComponent(tenantId)}/organizations/${encodeURIComponent(organizationId)}/projects`,
+    ),
+  createProject: (
+    tenantId: string,
+    organizationId: string,
+    input: {
+      name: string;
+      repositoryUrl?: string;
+      defaultBranch: string;
+      visibility: ControlPlaneProject["visibility"];
+    },
+  ) =>
+    controlPlaneRequest<ControlPlaneProject>(
+      `/v1/tenants/${encodeURIComponent(tenantId)}/organizations/${encodeURIComponent(organizationId)}/projects`,
+      { method: "POST", body: input },
+    ),
+  listProjectSessions: (projectId: string) =>
+    controlPlaneRequest<{ items: ReadonlyArray<ControlPlaneAgentSession> }>(
+      `/v1/projects/${encodeURIComponent(projectId)}/sessions`,
+    ),
+  createSession: (
+    projectId: string,
+    input: {
+      title: string;
+      visibility: ControlPlaneAgentSession["visibility"];
+      provider: string;
+      model?: string;
+      providerCredentialId?: string;
+      executionTargetId?: string;
+    },
+  ) =>
+    controlPlaneRequest<ControlPlaneAgentSession>(
+      `/v1/projects/${encodeURIComponent(projectId)}/sessions`,
+      { method: "POST", body: input },
+    ),
+  listExecutionTargets: (tenantId: string) =>
+    controlPlaneRequest<{ items: ReadonlyArray<ControlPlaneExecutionTarget> }>(
+      `/v1/tenants/${encodeURIComponent(tenantId)}/execution-targets`,
+    ),
+  createExecutionTarget: (
+    tenantId: string,
+    input: {
+      organizationId?: string;
+      kind: ControlPlaneExecutionTargetKind;
+      name: string;
+      configuration: Record<string, unknown>;
+      capabilities: Record<string, unknown>;
+    },
+  ) =>
+    controlPlaneRequest<ControlPlaneExecutionTarget>(
+      `/v1/tenants/${encodeURIComponent(tenantId)}/execution-targets`,
+      { method: "POST", body: input },
+    ),
+  provisionSSHExecutionTarget: (
+    tenantId: string,
+    targetId: string,
+    operation: ControlPlaneSSHProvisionResult["operation"],
+  ) =>
+    controlPlaneRequest<ControlPlaneSSHProvisionResult>(
+      `/v1/tenants/${encodeURIComponent(tenantId)}/execution-targets/${encodeURIComponent(targetId)}/ssh/${operation}`,
+      { method: "POST" },
+    ),
+  createTurn: (sessionId: string, inputText: string) =>
+    controlPlaneRequest<ControlPlaneAgentTurn>(
+      `/v1/sessions/${encodeURIComponent(sessionId)}/turns`,
+      { method: "POST", body: { inputText } },
+    ),
+  listArtifacts: (sessionId: string) =>
+    controlPlaneRequest<{ items: ReadonlyArray<ControlPlaneArtifact> }>(
+      `/v1/sessions/${encodeURIComponent(sessionId)}/artifacts`,
+    ),
+  createArtifact: (
+    sessionId: string,
+    input: {
+      kind: ControlPlaneArtifactKind;
+      originalName?: string;
+      executionId?: string;
+      expiresAt?: string;
+    },
+  ) =>
+    controlPlaneRequest<ControlPlaneArtifactUploadGrant>(
+      `/v1/sessions/${encodeURIComponent(sessionId)}/artifacts`,
+      { method: "POST", body: input },
+    ),
+  uploadArtifactPayload,
+  completeArtifact: (
+    artifactId: string,
+    input: { sizeBytes: number; sha256: string; contentType: string },
+  ) =>
+    controlPlaneRequest<ControlPlaneArtifact>(
+      `/v1/artifacts/${encodeURIComponent(artifactId)}/complete`,
+      { method: "POST", body: input },
+    ),
+  issueArtifactDownload: (artifactId: string) =>
+    controlPlaneRequest<ControlPlaneArtifactDownloadGrant>(
+      `/v1/artifacts/${encodeURIComponent(artifactId)}/download`,
+      { method: "POST" },
+    ),
+  deleteArtifact: (artifactId: string) =>
+    controlPlaneRequest<void>(`/v1/artifacts/${encodeURIComponent(artifactId)}`, {
+      method: "DELETE",
+    }),
+  subscribeSessionEvents,
+  listTenantMembers: (tenantId: string) =>
+    controlPlaneRequest<{ items: ReadonlyArray<ControlPlaneTenantMember> }>(
+      `/v1/tenants/${encodeURIComponent(tenantId)}/members`,
+    ),
+  inviteTenantMember: (tenantId: string, input: { email: string; role: string }) =>
+    controlPlaneRequest<TenantInvitation>(
+      `/v1/tenants/${encodeURIComponent(tenantId)}/invitations`,
+      { method: "POST", body: input },
+    ),
+};

@@ -15,6 +15,27 @@ import pkg from "./package.json" with { type: "json" };
 const port = Number(process.env.PORT ?? 5733);
 const sourcemapEnv = process.env.SYNARA_WEB_SOURCEMAP?.trim().toLowerCase();
 
+function httpTargetFromWebSocketUrl(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  try {
+    const url = new URL(value);
+    if (url.protocol === "ws:") url.protocol = "http:";
+    else if (url.protocol === "wss:") url.protocol = "https:";
+    else return undefined;
+    if (url.hostname === "[::1]" || url.hostname === "::1") {
+      url.hostname = "localhost";
+    }
+    url.pathname = "/";
+    url.search = "";
+    url.hash = "";
+    return url.toString();
+  } catch {
+    return undefined;
+  }
+}
+
+const serverHttpTarget = httpTargetFromWebSocketUrl(process.env.VITE_WS_URL);
+
 const buildSourcemap =
   sourcemapEnv === "1" || sourcemapEnv === "true"
     ? true
@@ -137,6 +158,16 @@ export default defineConfig({
   server: {
     port,
     strictPort: true,
+    ...(serverHttpTarget
+      ? {
+          proxy: {
+            "/v1": {
+              target: serverHttpTarget,
+              changeOrigin: false,
+            },
+          },
+        }
+      : {}),
     hmr: {
       // Explicit config so Vite's HMR WebSocket connects reliably
       // inside Electron's BrowserWindow. Vite 8 uses console.debug for

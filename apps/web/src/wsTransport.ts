@@ -29,6 +29,7 @@ import { Cause, Data, Effect, Exit, Layer, ManagedRuntime, Scope, Stream } from 
 import { RpcClient, RpcSerialization } from "effect/unstable/rpc";
 import * as Socket from "effect/unstable/socket/Socket";
 
+import { withRemoteAccessToken } from "./remoteAccessToken";
 import type { WsTransportState } from "./wsTransportEvents";
 
 type PushListener<C extends WsPushChannel> = (message: WsPushMessage<C>) => void;
@@ -51,7 +52,7 @@ function resolveRpcUrl(rawUrl: string): string {
 }
 
 function makeSocketUrl(explicitUrl: string | null): string {
-  if (explicitUrl) return resolveRpcUrl(explicitUrl);
+  if (explicitUrl) return withRemoteAccessToken(resolveRpcUrl(explicitUrl));
   const bridgeUrl = window.desktopBridge?.getWsUrl();
   const envUrl = import.meta.env.VITE_WS_URL as string | undefined;
   const rawUrl =
@@ -60,7 +61,7 @@ function makeSocketUrl(explicitUrl: string | null): string {
       : envUrl && envUrl.length > 0
         ? envUrl
         : `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.hostname}:${window.location.port}`;
-  return resolveRpcUrl(rawUrl);
+  return withRemoteAccessToken(resolveRpcUrl(rawUrl));
 }
 
 function makeProtocolLayer(url: string) {

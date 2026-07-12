@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: synara-system
+  labels:
+    app.kubernetes.io/name: synara
+    app.kubernetes.io/part-of: synara-control-plane

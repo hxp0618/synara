@@ -1,0 +1,6 @@
+services:
+  control-plane:
+    volumes:
+      - ${SYNARA_DOCKER_SOCKET_PATH:-/var/run/docker.sock}:/var/run/docker.sock
+    group_add:
+      - ${SYNARA_DOCKER_GID:-0}

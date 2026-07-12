@@ -27,13 +27,14 @@ import type { SessionCredentialServiceShape } from "./auth/Services/SessionCrede
 import { SessionCredentialService } from "./auth/Services/SessionCredentialService";
 import { deriveAuthClientMetadata } from "./auth/utils";
 import { ServerConfig, type ServerConfigShape } from "./config";
+import { controlPlaneProxyEffectRouteLayer } from "./controlPlaneProxy";
 import { resolveCachedEditorIcon } from "./editorAppIcons";
 import { LOCAL_IMAGE_ROUTE_PATH, resolveAllowedLocalPreviewFile } from "./localImageFiles.ts";
 import type { ProjectFaviconResolverShape } from "./project/Services/ProjectFaviconResolver";
 import { ProjectFaviconResolver } from "./project/Services/ProjectFaviconResolver";
 import { ProjectionSnapshotQuery } from "./orchestration/Services/ProjectionSnapshotQuery";
 import { threadArchiveChunks, threadArchiveFileName } from "./orchestration/exportThreadArchive";
-import type { ServerReadiness } from "./server/readiness";
+import type { ServerReadiness, ServerReadinessSnapshot } from "./server/readiness";
 import { resolveFavicon, tryParseHost } from "./siteFaviconCache";
 import { isTrustedAppOrigin, normalizeCorsOrigin } from "./trustedOrigins";
 
@@ -149,26 +150,9 @@ function localPreviewCorsHeaders(input: {
 
 export function makeEffectHttpRouteLayer(readiness: ServerReadiness) {
   return Layer.mergeAll(
-    HttpRouter.add(
-      "GET",
-      "/health",
-      readiness.getSnapshot.pipe(
-        Effect.map((snapshot) =>
-          HttpServerResponse.jsonUnsafe(
-            {
-              status: "ok",
-              startupReady: snapshot.startupReady,
-              pushBusReady: snapshot.pushBusReady,
-              keybindingsReady: snapshot.keybindingsReady,
-              terminalSubscriptionsReady: snapshot.terminalSubscriptionsReady,
-              orchestrationSubscriptionsReady: snapshot.orchestrationSubscriptionsReady,
-            },
-            { status: 200 },
-          ),
-        ),
-      ),
-    ),
+    readinessEffectRouteLayer(readiness),
     authEffectRouteLayer,
+    controlPlaneProxyEffectRouteLayer,
     projectFaviconEffectRouteLayer,
     threadExportEffectRouteLayer,
     siteFaviconEffectRouteLayer,
@@ -176,6 +160,49 @@ export function makeEffectHttpRouteLayer(readiness: ServerReadiness) {
     localImageEffectRouteLayer,
     attachmentsEffectRouteLayer,
     staticAndDevEffectRouteLayer,
+  );
+}
+
+function healthResponse(snapshot: ServerReadinessSnapshot) {
+  return {
+    status: "ok" as const,
+    startupReady: snapshot.startupReady,
+    pushBusReady: snapshot.pushBusReady,
+    keybindingsReady: snapshot.keybindingsReady,
+    terminalSubscriptionsReady: snapshot.terminalSubscriptionsReady,
+    orchestrationSubscriptionsReady: snapshot.orchestrationSubscriptionsReady,
+  };
+}
+
+function readyResponse(snapshot: ServerReadinessSnapshot) {
+  return {
+    status: snapshot.startupReady ? ("ready" as const) : ("not_ready" as const),
+    ...snapshot,
+  };
+}
+
+export function readinessEffectRouteLayer(readiness: ServerReadiness) {
+  return Layer.mergeAll(
+    HttpRouter.add(
+      "GET",
+      "/health",
+      readiness.getSnapshot.pipe(
+        Effect.map((snapshot) =>
+          HttpServerResponse.jsonUnsafe(healthResponse(snapshot), { status: 200 }),
+        ),
+      ),
+    ),
+    HttpRouter.add(
+      "GET",
+      "/ready",
+      readiness.getSnapshot.pipe(
+        Effect.map((snapshot) =>
+          HttpServerResponse.jsonUnsafe(readyResponse(snapshot), {
+            status: snapshot.startupReady ? 200 : 503,
+          }),
+        ),
+      ),
+    ),
   );
 }
 
@@ -786,14 +813,17 @@ export function createHttpRequestHandler({
           respond(
             200,
             { "Content-Type": "application/json; charset=utf-8" },
-            JSON.stringify({
-              status: "ok",
-              startupReady: readinessSnapshot.startupReady,
-              pushBusReady: readinessSnapshot.pushBusReady,
-              keybindingsReady: readinessSnapshot.keybindingsReady,
-              terminalSubscriptionsReady: readinessSnapshot.terminalSubscriptionsReady,
-              orchestrationSubscriptionsReady: readinessSnapshot.orchestrationSubscriptionsReady,
-            }),
+            JSON.stringify(healthResponse(readinessSnapshot)),
+          );
+          return;
+        }
+
+        if (url.pathname === "/ready") {
+          const readinessSnapshot = yield* readiness.getSnapshot;
+          respond(
+            readinessSnapshot.startupReady ? 200 : 503,
+            { "Content-Type": "application/json; charset=utf-8" },
+            JSON.stringify(readyResponse(readinessSnapshot)),
           );
           return;
         }

@@ -1,0 +1,69 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: synara-control-plane
+  namespace: synara-system
+  labels:
+    app.kubernetes.io/name: synara-control-plane
+    app.kubernetes.io/part-of: synara
+spec:
+  groups:
+    - name: synara-control-plane.availability
+      rules:
+        - alert: SynaraControlPlaneUnavailable
+          expr: sum(up{service="synara-control-plane"}) == 0
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: Synara control plane is unavailable
+            description: Prometheus has not scraped a healthy Synara control-plane replica for two minutes.
+        - alert: SynaraControlPlaneHighErrorRate
+          expr: |
+            sum(rate(synara_http_requests_total{status=~"5.."}[5m]))
+              /
+            clamp_min(sum(rate(synara_http_requests_total[5m])), 0.001) > 0.05
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: Synara control-plane error rate is above 5 percent
+            description: Server-side HTTP failures have exceeded 5 percent for ten minutes.
+        - alert: SynaraControlPlaneHighLatency
+          expr: |
+            histogram_quantile(
+              0.95,
+              sum by (le) (rate(synara_http_request_duration_seconds_bucket[5m]))
+            ) > 2
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: Synara control-plane p95 latency is above two seconds
+            description: Control-plane request latency has remained elevated for ten minutes.
+    - name: synara-control-plane.runtime
+      rules:
+        - alert: SynaraBackgroundFailures
+          expr: increase(synara_background_failures_total[10m]) > 0
+          for: 1m
+          labels:
+            severity: warning
+          annotations:
+            summary: Synara background reconciliation is failing
+            description: A Docker, Kubernetes, or retention background run failed in the last ten minutes.
+        - alert: SynaraExpiredWorkerLeases
+          expr: synara_worker_leases{state="expired"} > 0
+          for: 2m
+          labels:
+            severity: warning
+          annotations:
+            summary: Synara has expired Worker leases awaiting recovery
+            description: One or more expired Worker leases remain in authoritative metadata.
+        - alert: SynaraOutboxBacklog
+          expr: synara_outbox_pending > 1000
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: Synara outbox backlog is growing
+            description: More than 1000 unpublished outbox messages have remained pending for ten minutes.

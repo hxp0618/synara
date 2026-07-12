@@ -94,6 +94,7 @@ import { ProviderUsageSettingsPanel } from "../components/settings/ProviderUsage
 import { ProfileSettingsPanel } from "../components/settings/ProfileSettingsPanel";
 import { KeyboardShortcutsSettingsPanel } from "../components/settings/KeyboardShortcutsSettingsPanel";
 import { SkillsSettingsPanel } from "../components/settings/SkillsSettingsPanel";
+import { TenantOrganizationSettingsPanel } from "../components/settings/TenantOrganizationSettingsPanel";
 import {
   CHAT_CONTENT_CARD_CLASS_NAME,
   CHAT_MAIN_VIEWPORT_SHELL_CLASS_NAME,
@@ -3328,6 +3329,8 @@ function SettingsRouteView() {
         return <SkillsSettingsPanel />;
       case "usage":
         return <ProviderUsageSettingsPanel />;
+      case "tenancy":
+        return <TenantOrganizationSettingsPanel />;
       case "advanced":
         return renderAdvancedPanel();
       default:
@@ -3384,16 +3387,18 @@ function SettingsRouteView() {
                       {activeSectionItem.description}
                     </p>
                   </div>
-                  <Button
-                    size="xs"
-                    variant="outline"
-                    className="shrink-0"
-                    disabled={changedSettingLabels.length === 0}
-                    onClick={() => void restoreDefaults()}
-                  >
-                    <RotateCcwIcon className="size-3.5" />
-                    Restore defaults
-                  </Button>
+                  {activeSection !== "tenancy" ? (
+                    <Button
+                      size="xs"
+                      variant="outline"
+                      className="shrink-0"
+                      disabled={changedSettingLabels.length === 0}
+                      onClick={() => void restoreDefaults()}
+                    >
+                      <RotateCcwIcon className="size-3.5" />
+                      Restore defaults
+                    </Button>
+                  ) : null}
                 </div>
 
                 {renderActivePanel()}

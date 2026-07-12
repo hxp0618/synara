@@ -1,0 +1,135 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-synara}
+      POSTGRES_USER: ${POSTGRES_USER:-synara}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in deploy/saas/.env}
+    volumes:
+      - synara-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  minio:
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    restart: unless-stopped
+    command: server /data --console-address :9001
+    ports:
+      - "${MINIO_BIND_ADDRESS:-127.0.0.1}:${MINIO_HOST_PORT:-59000}:9000"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?Set MINIO_ROOT_USER in deploy/saas/.env}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?Set MINIO_ROOT_PASSWORD in deploy/saas/.env}
+      MINIO_API_CORS_ALLOW_ORIGIN: ${SYNARA_ARTIFACT_CORS_ALLOW_ORIGIN:-*}
+    volumes:
+      - synara-minio:/data
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:9000/minio/health/live"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  control-plane:
+    build:
+      context: ../../services/control-plane
+      dockerfile: Dockerfile
+      args:
+        GOPROXY: ${GOPROXY:-https://proxy.golang.org,direct}
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    environment:
+      SYNARA_DEPLOYMENT_PROFILE: single-node
+      SYNARA_METADATA_STORE: postgresql
+      SYNARA_ARTIFACT_STORE: minio
+      SYNARA_QUEUE_DRIVER: postgres-outbox
+      SYNARA_CONTROL_PLANE_REPLICAS: "1"
+      SYNARA_DATABASE_URL: postgres://${POSTGRES_USER:-synara}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-synara}?sslmode=disable
+      SYNARA_CONTROL_PLANE_LISTEN: 0.0.0.0:3780
+      SYNARA_CONTROL_PLANE_DEV_BOOTSTRAP: ${SYNARA_CONTROL_PLANE_DEV_BOOTSTRAP:-false}
+      SYNARA_LOGIN_COOKIE_SECURE: ${SYNARA_LOGIN_COOKIE_SECURE:-true}
+      SYNARA_WORKER_REGISTRATION_TOKEN: ${SYNARA_WORKER_REGISTRATION_TOKEN:?Set SYNARA_WORKER_REGISTRATION_TOKEN in deploy/saas/.env}
+      SYNARA_WORKER_LEASE_TTL: ${SYNARA_WORKER_LEASE_TTL:-30s}
+      SYNARA_WORKER_HEARTBEAT_TIMEOUT: ${SYNARA_WORKER_HEARTBEAT_TIMEOUT:-90s}
+      SYNARA_WORKER_RECEIPT_TTL: ${SYNARA_WORKER_RECEIPT_TTL:-24h}
+      SYNARA_WORKER_LEASES_ENABLED: "true"
+      SYNARA_WORKER_FENCING_ENABLED: "true"
+      SYNARA_PROVIDER_CURSOR_KEY: ${SYNARA_PROVIDER_CURSOR_KEY:?Set SYNARA_PROVIDER_CURSOR_KEY in deploy/saas/.env}
+      SYNARA_CREDENTIAL_KMS_PROVIDER: ${SYNARA_CREDENTIAL_KMS_PROVIDER:-local}
+      SYNARA_CREDENTIAL_KMS_KEY_ID: ${SYNARA_CREDENTIAL_KMS_KEY_ID:-single-node-local-v1}
+      SYNARA_CREDENTIAL_MASTER_KEY: ${SYNARA_CREDENTIAL_MASTER_KEY:-}
+      SYNARA_CREDENTIAL_KMS_AWS_REGION: ${SYNARA_CREDENTIAL_KMS_AWS_REGION:-}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
+      SYNARA_PUBLIC_CONTROL_PLANE_URL: ${SYNARA_PUBLIC_CONTROL_PLANE_URL:-}
+      SYNARA_SSH_PROVISION_TIMEOUT: ${SYNARA_SSH_PROVISION_TIMEOUT:-2m}
+      SYNARA_DOCKER_RECONCILE_INTERVAL: ${SYNARA_DOCKER_RECONCILE_INTERVAL:-10s}
+      SYNARA_KUBERNETES_RECONCILE_INTERVAL: ${SYNARA_KUBERNETES_RECONCILE_INTERVAL:-5s}
+      SYNARA_RETENTION_SWEEP_INTERVAL: ${SYNARA_RETENTION_SWEEP_INTERVAL:-1h}
+      SYNARA_ARTIFACT_ENDPOINT: http://minio:9000
+      SYNARA_ARTIFACT_PUBLIC_ENDPOINT: http://${MINIO_PUBLIC_HOST:-127.0.0.1}:${MINIO_HOST_PORT:-59000}
+      SYNARA_ARTIFACT_BUCKET: ${SYNARA_ARTIFACT_BUCKET:-synara-artifacts}
+      SYNARA_ARTIFACT_REGION: ${SYNARA_ARTIFACT_REGION:-us-east-1}
+      SYNARA_ARTIFACT_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
+      SYNARA_ARTIFACT_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
+      SYNARA_ARTIFACT_USE_PATH_STYLE: "true"
+      SYNARA_ARTIFACT_PRESIGN_TTL: ${SYNARA_ARTIFACT_PRESIGN_TTL:-15m}
+      SYNARA_ARTIFACT_MAX_UPLOAD_BYTES: ${SYNARA_ARTIFACT_MAX_UPLOAD_BYTES:-2147483648}
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/control-plane", "healthcheck"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+
+  synara:
+    image: ${SYNARA_IMAGE:-synara-saas:local}
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+      args:
+        GITHUB_DOWNLOAD_PREFIX: ${GITHUB_DOWNLOAD_PREFIX:-}
+        SYNARA_UID: ${SYNARA_UID:-1000}
+        SYNARA_GID: ${SYNARA_GID:-1000}
+    restart: unless-stopped
+    depends_on:
+      control-plane:
+        condition: service_healthy
+    working_dir: /workspace
+    ports:
+      - "${SYNARA_BIND_ADDRESS:-127.0.0.1}:${SYNARA_HOST_PORT:-3773}:3773"
+    environment:
+      HOME: /home/synara
+      SYNARA_HOME: /home/synara/.synara
+      SYNARA_MODE: web
+      SYNARA_HOST: 0.0.0.0
+      SYNARA_PORT: "3773"
+      SYNARA_NO_BROWSER: "1"
+      SYNARA_AUTO_BOOTSTRAP_PROJECT_FROM_CWD: "0"
+      SYNARA_AUTH_TOKEN: ${SYNARA_AUTH_TOKEN:?Set SYNARA_AUTH_TOKEN in deploy/saas/.env}
+      SYNARA_CONTROL_PLANE_URL: http://control-plane:3780
+    volumes:
+      - synara-home:/home/synara
+      - type: bind
+        source: ${SYNARA_WORKSPACE_PATH:-./workspace}
+        target: /workspace
+        bind:
+          create_host_path: false
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "--show-error", "http://127.0.0.1:3773/ready"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+volumes:
+  synara-home:
+  synara-postgres:
+  synara-minio:

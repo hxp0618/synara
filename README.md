@@ -29,6 +29,27 @@ bun install
 bun run dev
 ```
 
+For the Phase 1 single-server Docker Compose deployment, provider login,
+reverse proxy, backup, and automated/manual acceptance checks, see
+[REMOTE.md](./REMOTE.md).
+
+## SaaS control-plane foundations
+
+The in-progress Go control plane now supports three explicit deployment profiles (`personal`,
+`single-node`, and `enterprise`) and four independent execution target kinds (`local`, `ssh`, `docker`,
+and `kubernetes`). Personal uses a CGO-free SQLite metadata store and deterministic local-owner
+bootstrap; the server profiles retain PostgreSQL migrations, execution leases, generation fencing, and
+ordered SSE event recovery.
+
+- Personal Compose example: [`deploy/personal`](./deploy/personal)
+- Single-node SaaS Compose example: [`deploy/saas`](./deploy/saas)
+- Revised tenancy plan: [`docs/saas-tenancy-organization-user-plan.md`](./docs/saas-tenancy-organization-user-plan.md)
+- Profile/target ADR: [`docs/adr/0002-deployment-profile-execution-target-v1.md`](./docs/adr/0002-deployment-profile-execution-target-v1.md)
+
+Artifact metadata, Local/MinIO/S3 payload lifecycle, verified upload/download, and reentrant Personal
+Local-to-object-storage migration are available. Kubernetes reconciliation and enterprise
+OIDC/SAML/SCIM remain later phases.
+
 ## Privacy
 
 Synara runs as the workspace layer on your machine. There is no Synara cloud holding your repositories, chats, or project history.

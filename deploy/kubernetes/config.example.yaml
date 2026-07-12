@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: synara-control-plane-config
+  namespace: synara-system
+data:
+  public-control-plane-url: https://synara.example.com
+  artifact-bucket: synara-artifacts
+  aws-region: us-east-1
+  credential-kms-key-id: alias/synara-provider-credentials

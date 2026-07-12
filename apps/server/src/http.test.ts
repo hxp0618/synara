@@ -83,6 +83,7 @@ async function makeHandler(
     readonly serverAuth: ServerAuthShape;
     readonly cookieName: string;
   },
+  serverReadiness: ServerReadiness = readiness,
 ): Promise<http.RequestListener> {
   const services = await Effect.runPromise(
     Effect.gen(function* () {
@@ -94,7 +95,7 @@ async function makeHandler(
   );
   return createHttpRequestHandler({
     serverConfig: config,
-    readiness,
+    readiness: serverReadiness,
     fileSystem: services.fileSystem,
     projectFaviconResolver,
     path: services.path,
@@ -300,6 +301,53 @@ describe("createHttpRequestHandler", () => {
         status: "ok",
         startupReady: false,
         pushBusReady: true,
+      });
+    });
+  });
+
+  it("reports not ready with HTTP 503 until startup is complete", async () => {
+    const config = await makeConfig();
+    const handler = await makeHandler(config);
+
+    await withServer(handler, async (origin) => {
+      const response = await fetch(`${origin}/ready`);
+
+      expect(response.status).toBe(503);
+      expect(response.headers.get("content-type")).toContain("application/json");
+      await expect(response.json()).resolves.toEqual({
+        status: "not_ready",
+        httpListening: true,
+        pushBusReady: true,
+        keybindingsReady: true,
+        terminalSubscriptionsReady: false,
+        orchestrationSubscriptionsReady: false,
+        startupReady: false,
+      });
+    });
+  });
+
+  it("reports ready with HTTP 200 after startup is complete", async () => {
+    const config = await makeConfig();
+    const ready: ServerReadiness = {
+      ...readiness,
+      getSnapshot: Effect.succeed({
+        httpListening: true,
+        pushBusReady: true,
+        keybindingsReady: true,
+        terminalSubscriptionsReady: true,
+        orchestrationSubscriptionsReady: true,
+        startupReady: true,
+      }),
+    };
+    const handler = await makeHandler(config, undefined, ready);
+
+    await withServer(handler, async (origin) => {
+      const response = await fetch(`${origin}/ready`);
+
+      expect(response.status).toBe(200);
+      await expect(response.json()).resolves.toMatchObject({
+        status: "ready",
+        startupReady: true,
       });
     });
   });

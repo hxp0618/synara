@@ -64,7 +64,13 @@ beforeEach(() => {
   Object.defineProperty(globalThis, "window", {
     configurable: true,
     value: {
-      location: { protocol: "http:", hostname: "localhost", port: "3020" },
+      location: {
+        protocol: "http:",
+        hostname: "localhost",
+        port: "3020",
+        hash: "",
+        search: "",
+      },
       desktopBridge: undefined,
     },
   });
@@ -123,6 +129,28 @@ describe("WsTransport", () => {
     const transport = new WsTransport();
 
     expect(sockets[0]?.url).toBe("ws://localhost:3020/ws");
+
+    transport.dispose();
+  });
+
+  it("forwards a browser fragment token to the WebSocket endpoint", () => {
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: {
+        location: {
+          protocol: "https:",
+          hostname: "synara.example.com",
+          port: "",
+          hash: "#token=remote-secret",
+          search: "",
+        },
+        desktopBridge: undefined,
+      },
+    });
+
+    const transport = new WsTransport();
+
+    expect(sockets[0]?.url).toBe("wss://synara.example.com/ws?token=remote-secret");
 
     transport.dispose();
   });

@@ -1,0 +1,41 @@
+services:
+  synara:
+    image: ${SYNARA_IMAGE:-synara-remote:local}
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+      args:
+        GITHUB_DOWNLOAD_PREFIX: ${GITHUB_DOWNLOAD_PREFIX:-}
+        SYNARA_UID: ${SYNARA_UID:-1000}
+        SYNARA_GID: ${SYNARA_GID:-1000}
+    restart: unless-stopped
+    stop_grace_period: ${SYNARA_STOP_GRACE_PERIOD:-30s}
+    working_dir: /workspace
+    ports:
+      - "${SYNARA_BIND_ADDRESS:-127.0.0.1}:${SYNARA_HOST_PORT:-3773}:3773"
+    environment:
+      HOME: /home/synara
+      SYNARA_HOME: /home/synara/.synara
+      SYNARA_MODE: web
+      SYNARA_HOST: 0.0.0.0
+      SYNARA_PORT: "3773"
+      SYNARA_NO_BROWSER: "1"
+      SYNARA_AUTO_BOOTSTRAP_PROJECT_FROM_CWD: "0"
+      SYNARA_AUTH_TOKEN: ${SYNARA_AUTH_TOKEN:?Set SYNARA_AUTH_TOKEN in deploy/remote/.env}
+    volumes:
+      - synara-home:/home/synara
+      - type: bind
+        source: ${SYNARA_WORKSPACE_PATH:-./workspace}
+        target: /workspace
+        bind:
+          create_host_path: false
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "--show-error", "http://127.0.0.1:3773/ready"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+volumes:
+  synara-home:
+    name: ${SYNARA_HOME_VOLUME:-synara-remote-home}

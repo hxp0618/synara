@@ -1,0 +1,19 @@
+{
+  "name": "@synara/provider-host",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "provider-host": "./dist/index.mjs"
+  },
+  "scripts": {
+    "build": "bun build src/index.ts --target=node --outfile=dist/index.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  }
+}
