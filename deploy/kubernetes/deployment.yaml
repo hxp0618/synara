@@ -126,6 +126,18 @@ spec:
               value: 1s
             - name: SYNARA_OUTBOX_MAX_BACKOFF
               value: 5m
+            - name: SYNARA_SSE_POLL_INTERVAL
+              value: 2s
+            - name: SYNARA_SSE_HEARTBEAT_INTERVAL
+              value: 15s
+            - name: SYNARA_SSE_WRITE_TIMEOUT
+              value: 10s
+            - name: SYNARA_SSE_LEASE_TTL
+              value: 45s
+            - name: SYNARA_SSE_MAX_CONNECTIONS_PER_USER
+              value: "4"
+            - name: SYNARA_SSE_MAX_CONNECTIONS_PER_TENANT
+              value: "200"
           readinessProbe:
             httpGet:
               path: /ready

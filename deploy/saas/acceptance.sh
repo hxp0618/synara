@@ -112,7 +112,7 @@ jq -e '.items | all(.tenantId != null and .organizationId != null and .projectId
 
 worker_registration_token="${SYNARA_ACCEPTANCE_WORKER_REGISTRATION_TOKEN:-acceptance-worker-registration-token}"
 worker_registration="$(worker_json "$worker_registration_token" "register-$run_id" POST /v1/workers/register \
-  "{\"executionTargetId\":\"$execution_target_id\",\"targetKind\":\"$target_kind\",\"clusterId\":\"acceptance\",\"namespace\":\"default\",\"podName\":\"worker-$run_id\",\"version\":\"acceptance\",\"capabilities\":{\"codex\":true},\"leaseSupported\":true,\"fencingSupported\":true}")"
+  "{\"executionTargetId\":\"$execution_target_id\",\"targetKind\":\"$target_kind\",\"clusterId\":\"acceptance\",\"namespace\":\"default\",\"podName\":\"worker-$run_id\",\"version\":\"acceptance\",\"protocolVersion\":1,\"capabilities\":{\"codex\":true},\"leaseSupported\":true,\"fencingSupported\":true}")"
 worker_token="$(jq -er '.token' <<<"$worker_registration")"
 worker_id="$(jq -er '.worker.id' <<<"$worker_registration")"
 
@@ -178,9 +178,22 @@ artifact_id="$(jq -er '.artifact.id' <<<"$artifact_grant")"
 artifact_upload_url="$(jq -er '.url' <<<"$artifact_grant")"
 curl -sS --fail -X PUT -H 'Content-Type: text/plain' --data-binary @"$artifact_payload" \
   "$artifact_upload_url" >/dev/null
+forged_hash_status="$(curl -sS -o "$work_dir/forged-artifact-hash.json" -w '%{http_code}' \
+  -b "$owner_cookie" -H 'Content-Type: application/json' \
+  -d "{\"sizeBytes\":$artifact_size,\"sha256\":\"$(printf '0%.0s' {1..64})\",\"contentType\":\"text/plain\"}" \
+  "$base_url/v1/artifacts/$artifact_id/complete")"
+[[ "$forged_hash_status" == "409" ]]
+jq -e '.error.code == "artifact_hash_mismatch"' "$work_dir/forged-artifact-hash.json" >/dev/null
 artifact="$(request_json "$owner_cookie" POST "/v1/artifacts/$artifact_id/complete" \
   "{\"sizeBytes\":$artifact_size,\"sha256\":\"$artifact_sha256\",\"contentType\":\"text/plain\"}")"
 jq -e --arg sha256 "$artifact_sha256" '.status == "ready" and .sha256 == $sha256' <<<"$artifact" >/dev/null
+# A still-valid old presigned PUT can only recreate the isolated temporary key. Replaying Complete
+# removes it again and must never change the verified final object.
+printf 'tampered temporary payload\n' | curl -sS --fail -X PUT -H 'Content-Type: text/plain' --data-binary @- \
+  "$artifact_upload_url" >/dev/null
+artifact_replay="$(request_json "$owner_cookie" POST "/v1/artifacts/$artifact_id/complete" \
+  "{\"sizeBytes\":$artifact_size,\"sha256\":\"$artifact_sha256\",\"contentType\":\"text/plain\"}")"
+jq -e --arg sha256 "$artifact_sha256" '.status == "ready" and .sha256 == $sha256' <<<"$artifact_replay" >/dev/null
 artifact_list="$(request_json "$owner_cookie" GET "/v1/sessions/$session_id/artifacts")"
 jq -e --arg artifact_id "$artifact_id" '.items | any(.id == $artifact_id and .status == "ready")' \
   <<<"$artifact_list" >/dev/null

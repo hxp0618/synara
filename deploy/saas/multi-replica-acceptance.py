@@ -221,7 +221,7 @@ def assert_ready(client: CookieClient, replica: str) -> None:
     schema = ready.get("checks", {}).get("schema", {})
     require(ready.get("status") == "ready", f"{replica} did not report ready")
     require(schema.get("status") == "ready", f"{replica} schema was not ready")
-    require(schema.get("expectedVersion", 0) >= 11, f"{replica} expected schema version was too old")
+    require(schema.get("expectedVersion", 0) >= 16, f"{replica} expected schema version was too old")
     require(
         schema.get("appliedVersion", 0) >= schema.get("expectedVersion", 0),
         f"{replica} had unapplied migrations",
@@ -312,6 +312,15 @@ def phase_one(replica_a: str, replica_b: str, registration_token: str, state_dir
     )
     cross_replica.start()
     cross_replica.wait_for_retry()
+    limited_status, limited_body, limited_headers = owner.request(
+        replica_b,
+        "GET",
+        f"/v1/sessions/{session_id}/events/stream?afterSequence=1",
+        headers={"Accept": "text/event-stream"},
+    )
+    require(limited_status == 429, f"cross-replica SSE user limit returned {limited_status}")
+    require(b"sse_user_connection_limit" in limited_body, "SSE user limit returned the wrong error")
+    require(limited_headers.get("Retry-After") == "2", "SSE user limit omitted Retry-After")
     owner.json(
         replica_b,
         "POST",
@@ -320,6 +329,17 @@ def phase_one(replica_a: str, replica_b: str, registration_token: str, state_dir
     )
     cross_replica.wait_for({2})
     cross_replica.finish()
+
+    metrics_status, metrics_body, _ = anonymous.request(replica_b, "GET", "/metrics")
+    require(metrics_status == 200, f"metrics endpoint returned {metrics_status}")
+    for metric_name in (
+        b"synara_sse_connections",
+        b"synara_sse_catchup_duration_seconds",
+        b"synara_sse_connection_rejections_total",
+        b"synara_artifact_ready_bytes",
+        b"synara_database_connections",
+    ):
+        require(metric_name in metrics_body, f"metrics endpoint omitted {metric_name.decode()}")
 
     events = owner.json(replica_a, "GET", f"/v1/sessions/{session_id}/events?afterSequence=1&limit=10")
     sequence_two = next(item for item in events["items"] if item["sequence"] == 2)

@@ -41,6 +41,17 @@ spec:
           annotations:
             summary: Synara control-plane p95 latency is above two seconds
             description: Control-plane request latency has remained elevated for ten minutes.
+        - alert: SynaraDatabaseConnectionSaturation
+          expr: |
+            sum(synara_database_connections{state="in_use"})
+              /
+            clamp_min(sum(synara_database_connections{state="max_open"}), 1) > 0.9
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: Synara database connection pools are saturated
+            description: More than 90 percent of configured database connections have been in use for five minutes.
     - name: synara-control-plane.runtime
       rules:
         - alert: SynaraBackgroundFailures
@@ -83,3 +94,34 @@ spec:
           annotations:
             summary: Synara outbox has dead-letter messages
             description: One or more lifecycle messages exhausted all publish attempts and require operator review.
+        - alert: SynaraArtifactFailureRate
+          expr: |
+            sum(rate(synara_artifact_operations_total{result="failure"}[5m]))
+              /
+            clamp_min(sum(rate(synara_artifact_operations_total[5m])), 0.001) > 0.05
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: Synara Artifact operations are failing
+            description: More than five percent of Artifact lifecycle operations have failed for ten minutes.
+        - alert: SynaraSSECatchupDelay
+          expr: |
+            histogram_quantile(
+              0.95,
+              sum by (le) (rate(synara_sse_catchup_duration_seconds_bucket[5m]))
+            ) > 5
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: Synara SSE catch-up is delayed
+            description: PostgreSQL-backed SSE catch-up p95 latency has exceeded five seconds for five minutes.
+        - alert: SynaraExpiredSSELeases
+          expr: synara_sse_connections{state="expired"} > 0
+          for: 2m
+          labels:
+            severity: warning
+          annotations:
+            summary: Synara has expired SSE connection leases
+            description: Expired SSE leases remain and should be removed by reconnect or retention cleanup.

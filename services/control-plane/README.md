@@ -28,6 +28,7 @@ foundations. The existing TypeScript server remains the Provider Runtime during 
   - `000013_worker_protocol.sql`: persisted Worker Protocol version negotiation
   - `000014_execution_interactions.sql`: Approval/User Input persistence and approval-wait Execution state
   - `000015_session_suspension.sql`: explicit active/suspended/archived Session state machine
+  - `000016_sse_connection_leases.sql`: cross-replica SSE connection leases and bounded Tenant/User limits
 - ORM: GORM with PostgreSQL and CGO-free SQLite drivers
 - Shared model/repository/transaction utilities: `internal/persistence`
 - Tenant-scoped queries always include `tenant_id`
@@ -130,6 +131,23 @@ SYNARA_OUTBOX_MAX_BACKOFF
 ```
 
 The `/metrics` endpoint exposes pending count, retry count, dead-letter count and oldest pending age.
+
+SSE uses PostgreSQL-backed expiring leases so connection limits remain exact across Control Plane replicas.
+Slow clients are disconnected by a per-write deadline; PostgreSQL Session Events remain authoritative and the
+client reconnects from its last durable Sequence. Configure the stream with:
+
+```text
+SYNARA_SSE_POLL_INTERVAL
+SYNARA_SSE_HEARTBEAT_INTERVAL
+SYNARA_SSE_WRITE_TIMEOUT
+SYNARA_SSE_LEASE_TTL
+SYNARA_SSE_MAX_CONNECTIONS_PER_USER
+SYNARA_SSE_MAX_CONNECTIONS_PER_TENANT
+```
+
+The retention sweeper also removes expired pending Artifact temporary objects even when the Tenant has no
+long-term Artifact retention policy. It deletes both the temporary key and any final key orphaned by a crash
+between object promotion and metadata commit, then seals the metadata as `failed`.
 Payloads are not returned by the operational list API and are never included in publisher error logs.
 
 ## Multi-replica readiness and acceptance

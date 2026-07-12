@@ -1,11 +1,15 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/google/uuid"
 
 	"github.com/synara-ai/synara/services/control-plane/internal/problem"
 	"github.com/synara-ai/synara/services/control-plane/internal/sessions"
@@ -26,41 +30,88 @@ func (s *Server) streamSessionEvents(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, err)
 		return
 	}
-	_, notifications, unsubscribe, err := s.sessions.SubscribeEvents(r.Context(), mustPrincipal(r), sessionID)
+	if _, ok := w.(http.Flusher); !ok {
+		s.writeError(w, r, problem.New(500, "streaming_unsupported", "The server does not support event streaming."))
+		return
+	}
+	principal := mustPrincipal(r)
+	tenantID, notifications, unsubscribe, err := s.sessions.SubscribeEvents(r.Context(), principal, sessionID)
 	if err != nil {
 		s.writeError(w, r, err)
 		return
 	}
 	defer unsubscribe()
 
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		s.writeError(w, r, problem.New(500, "streaming_unsupported", "The server does not support event streaming."))
-		return
+	var leaseID uuid.UUID
+	if s.eventStreams != nil {
+		lease, err := s.eventStreams.Acquire(r.Context(), tenantID, principal.UserID, sessionID)
+		if err != nil {
+			var apiError *problem.Error
+			if errors.As(err, &apiError) && apiError.Status == http.StatusTooManyRequests {
+				w.Header().Set("Retry-After", "2")
+				if s.metrics != nil {
+					scope := "other"
+					if apiError.Code == "sse_user_connection_limit" {
+						scope = "user"
+					} else if apiError.Code == "sse_tenant_connection_limit" {
+						scope = "tenant"
+					}
+					s.metrics.ObserveSSELimit(scope)
+				}
+			}
+			s.writeError(w, r, err)
+			return
+		}
+		leaseID = lease.ID
+		defer func() {
+			releaseCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			if err := s.eventStreams.Release(releaseCtx, lease.ID); err != nil {
+				s.logger.Warn("session event stream lease release failed", "requestId", requestID(r), "sessionId", sessionID, "error", err)
+			}
+		}()
 	}
-	_ = http.NewResponseController(w).SetWriteDeadline(time.Time{})
+
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache, no-store")
 	w.Header().Set("X-Accel-Buffering", "no")
 	w.WriteHeader(http.StatusOK)
-	_, _ = fmt.Fprint(w, "retry: 2000\n\n")
-	flusher.Flush()
+	if err := s.writeSSE(w, func() error {
+		_, err := fmt.Fprint(w, "retry: 2000\n\n")
+		return err
+	}); err != nil {
+		return
+	}
 
 	cursor := afterSequence
-	flushBacklog := func() error {
+	flushBacklog := func() (catchupErr error) {
+		started := time.Now()
+		delivered := 0
+		defer func() {
+			if s.metrics != nil {
+				s.metrics.ObserveSSECatchup(time.Since(started), delivered, catchupErr)
+			}
+		}()
 		for {
-			page, err := s.sessions.ListEvents(r.Context(), mustPrincipal(r), sessionID, cursor, 500)
+			page, err := s.sessions.ListEvents(r.Context(), principal, sessionID, cursor, 500)
 			if err != nil {
 				return err
 			}
-			for _, event := range page.Items {
-				if err := writeSessionEvent(w, event); err != nil {
+			if len(page.Items) > 0 {
+				if err := s.writeSSE(w, func() error {
+					for _, event := range page.Items {
+						if err := writeSessionEvent(w, event); err != nil {
+							return err
+						}
+						cursor = event.Sequence
+						delivered++
+					}
+					return nil
+				}); err != nil {
 					return err
 				}
-				cursor = event.Sequence
 			}
 			if len(page.Items) < 500 {
-				flusher.Flush()
 				return nil
 			}
 		}
@@ -100,22 +151,45 @@ func (s *Server) streamSessionEvents(w http.ResponseWriter, r *http.Request) {
 				}
 				continue
 			}
-			if err := writeSessionEvent(w, event); err != nil {
+			if err := s.writeSSE(w, func() error { return writeSessionEvent(w, event) }); err != nil {
 				return
 			}
 			cursor = event.Sequence
-			flusher.Flush()
 		case <-poll.C:
 			if err := flushBacklog(); err != nil {
 				return
 			}
 		case <-heartbeat.C:
-			if _, err := fmt.Fprint(w, ": keep-alive\n\n"); err != nil {
+			if s.eventStreams != nil && leaseID != uuid.Nil {
+				if _, err := s.eventStreams.Renew(r.Context(), leaseID); err != nil {
+					s.logger.Warn("session event stream lease renewal failed", "requestId", requestID(r), "sessionId", sessionID, "error", err)
+					return
+				}
+			}
+			if err := s.writeSSE(w, func() error {
+				_, err := fmt.Fprint(w, ": keep-alive\n\n")
+				return err
+			}); err != nil {
 				return
 			}
-			flusher.Flush()
 		}
 	}
+}
+
+func (s *Server) writeSSE(w http.ResponseWriter, write func() error) error {
+	controller := http.NewResponseController(w)
+	timeout := s.sessionEventWrite
+	if timeout <= 0 {
+		timeout = 10 * time.Second
+	}
+	if err := controller.SetWriteDeadline(time.Now().Add(timeout)); err != nil && !errors.Is(err, http.ErrNotSupported) {
+		return err
+	}
+	defer func() { _ = controller.SetWriteDeadline(time.Time{}) }()
+	if err := write(); err != nil {
+		return err
+	}
+	return controller.Flush()
 }
 
 func sessionEventCursor(r *http.Request) (int64, error) {

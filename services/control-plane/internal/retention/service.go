@@ -181,6 +181,9 @@ func (s *Service) RunOnce(ctx context.Context, limit int) error {
 	}
 	now := s.now()
 	var failures []error
+	if _, err := s.artifacts.CleanupExpiredUploads(ctx, now, limit); err != nil {
+		failures = append(failures, err)
+	}
 	for _, policy := range policies {
 		if err := s.applyPolicy(ctx, policy, now, limit); err != nil {
 			failures = append(failures, fmt.Errorf("tenant %s: %w", policy.TenantID, err))
@@ -205,6 +208,7 @@ func (s *Service) cleanupEphemeralRecords(ctx context.Context, now time.Time, li
 	}{
 		{name: "login sessions", model: &persistence.LoginSession{}, condition: "expires_at <= ? OR (revoked_at IS NOT NULL AND revoked_at <= ?)", args: []any{longLivedCutoff, longLivedCutoff}},
 		{name: "Artifact access tokens", model: &persistence.ArtifactAccessToken{}, condition: "expires_at <= ?", args: []any{now}},
+		{name: "SSE connection leases", model: &persistence.SSEConnectionLease{}, condition: "expires_at <= ?", args: []any{now}},
 		{name: "identity login attempts", model: &persistence.IdentityLoginAttempt{}, condition: "expires_at <= ? OR (consumed_at IS NOT NULL AND consumed_at <= ?)", args: []any{now, now.Add(-time.Hour)}},
 		{name: "Service Account tokens", model: &persistence.ServiceAccountToken{}, condition: "(expires_at IS NOT NULL AND expires_at <= ?) OR (revoked_at IS NOT NULL AND revoked_at <= ?)", args: []any{longLivedCutoff, longLivedCutoff}},
 		{name: "Tenant invitations", model: &persistence.TenantInvitation{}, condition: "expires_at <= ?", args: []any{longLivedCutoff}},

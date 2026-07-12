@@ -44,14 +44,23 @@ type Service struct {
 	presignTTL     time.Duration
 	maxUploadBytes int64
 	now            func() time.Time
+	observer       artifactObserver
 }
 
-func NewService(db *gorm.DB, store Store, cfg config.Config, executionService *executions.Service, sessionService *sessions.Service) *Service {
-	return &Service{
+type artifactObserver interface {
+	ObserveArtifact(operation string, bytes int64, err error)
+}
+
+func NewService(db *gorm.DB, store Store, cfg config.Config, executionService *executions.Service, sessionService *sessions.Service, observers ...artifactObserver) *Service {
+	service := &Service{
 		db: db, store: store, authorizer: authorization.NewAuthorizer(db), executions: executionService,
 		sessions: sessionService, presignTTL: cfg.ArtifactPresignTTL,
 		maxUploadBytes: cfg.ArtifactMaxUploadBytes, now: func() time.Time { return time.Now().UTC() },
 	}
+	if len(observers) > 0 {
+		service.observer = observers[0]
+	}
+	return service
 }
 
 func (s *Service) CheckStore(ctx context.Context) error {
@@ -96,7 +105,9 @@ func (s *Service) Create(
 	if err != nil {
 		return UploadGrant{}, err
 	}
-	return s.uploadGrant(ctx, model, plainToken)
+	grant, err := s.uploadGrant(ctx, model, plainToken)
+	s.observe("create", 0, err)
+	return grant, err
 }
 
 func (s *Service) CreateForWorker(
@@ -136,7 +147,9 @@ func (s *Service) CreateForWorker(
 	if err != nil {
 		return UploadGrant{}, err
 	}
-	return s.uploadGrant(ctx, model, plainToken)
+	grant, err := s.uploadGrant(ctx, model, plainToken)
+	s.observe("create", 0, err)
+	return grant, err
 }
 
 func (s *Service) uploadGrant(ctx context.Context, model persistence.Artifact, plainToken string) (UploadGrant, error) {
@@ -243,7 +256,9 @@ func (s *Service) Complete(
 	if model.CreatedByType == "worker" {
 		return Artifact{}, problem.New(403, "worker_artifact_confirmation_required", "Worker-created artifacts must be confirmed through the current execution lease.")
 	}
-	return s.complete(ctx, model, input, nil, &principal.UserID, requestID, ipAddress)
+	artifact, err := s.complete(ctx, model, input, nil, &principal.UserID, requestID, ipAddress)
+	s.observe("complete", input.SizeBytes, err)
+	return artifact, err
 }
 
 func (s *Service) CompleteForWorker(
@@ -265,7 +280,9 @@ func (s *Service) CompleteForWorker(
 	lease := &workerLeaseConfirmation{worker: worker, executionID: executionID, input: executions.LeaseInput{
 		TenantID: input.TenantID, Generation: input.Generation, LeaseToken: input.LeaseToken,
 	}}
-	return s.complete(ctx, model, input.CompleteInput, lease, nil, "", "")
+	artifact, err := s.complete(ctx, model, input.CompleteInput, lease, nil, "", "")
+	s.observe("complete", input.SizeBytes, err)
+	return artifact, err
 }
 
 type workerLeaseConfirmation struct {
@@ -532,6 +549,11 @@ func (s *Service) Delete(
 	_, err = s.deleteModel(ctx, model, artifactDeleteActor{
 		ActorType: "user", ActorID: &actorID, RequestID: requestID, IPAddress: ipAddress,
 	})
+	var size int64
+	if model.SizeBytes != nil {
+		size = *model.SizeBytes
+	}
+	s.observe("delete", size, err)
 	return err
 }
 
@@ -752,6 +774,12 @@ func (s *Service) cleanupPromotedUpload(ctx context.Context, model persistence.A
 	}
 	if err := s.store.Delete(ctx, *model.UploadObjectKey); err != nil {
 		return
+	}
+}
+
+func (s *Service) observe(operation string, bytes int64, err error) {
+	if s.observer != nil {
+		s.observer.ObserveArtifact(operation, bytes, err)
 	}
 }
 

@@ -10,11 +10,11 @@ This audit classifies the productionization plan against executable code rather 
 | B. Session API | partial | Project/Session/Turn and Session command idempotency, active/suspended/archived transitions, ordered replay, and PostgreSQL same-key concurrency are implemented. Runtime Event v1 payload validation and oversized-payload Artifact enforcement remain. |
 | C. Execution and Worker lifecycle | partial | Registration, protocol/build versions, capability updates, Drain, registration-token rotation behavior, Claim/Lease/Fencing/Recovery, user Cancel, terminal races, and persisted Approval/User Input resolution are implemented. Bidirectional resolution delivery into Provider Runners remains for Stage 3. |
 | D. Stateless replicas | implemented | PostgreSQL is authoritative; periodic jobs use Advisory Lock or `SKIP LOCKED`; pool settings and Migration Lock timeout are configurable; readiness checks write access and migration version/checksum; the repeatable two-replica suite covers concurrent Turn/Claim, cross-replica revocation/SSE and replica loss. |
-| E. Artifact completion | partial | Local/MinIO/S3 stores, presigned grants and server-side Stat/Hash validation exist. Temporary-key promotion, distributed cleanup and real S3 compatibility evidence remain. |
-| F. SSE | partial | Sequence replay, `Last-Event-ID`, heartbeat and PostgreSQL cross-replica catch-up are covered by automated tests and real two-replica acceptance. Connection limits, catch-up metrics and the explicit slow-client policy remain. |
+| E. Artifact completion | partial | Temporary-key isolation/promotion, server-side Stat/read/SHA-256 verification, distributed expiry cleanup, forged-hash rejection and live MinIO compatibility are implemented. The shared live-store suite is ready, but a writable real AWS S3 test bucket is still required for final external evidence. |
+| F. SSE | implemented | Sequence replay, `Last-Event-ID`, heartbeat, PostgreSQL cross-replica catch-up, globally exact Tenant/User connection leases, write-deadline slow-client handling and SSE metrics are covered by unit, PostgreSQL and two-replica acceptance tests. Web projection/reconnect ownership remains in Workflow H rather than this transport workflow. |
 | G. Reliable Outbox | implemented | Durable Claim/Dispatcher, claim recovery, bounded retry, Dead Letter, audited Replay, lifecycle transaction integration, metrics and alerts are implemented and covered by SQLite/PostgreSQL tests. |
 | H. Web main flow | partial | Settings can operate Control Plane resources. The primary chat still uses the TypeScript orchestration authority and lacks an application-level Control Plane context/projection. |
-| I. Operations | partial | HTTP, Worker, Execution and dependency metrics exist. Outbox/SSE/DB-pool coverage, alerts and production runbooks remain incomplete. |
+| I. Operations | partial | HTTP, DB pool, Login Session, Worker, Execution, Artifact, SSE, Outbox and background metrics plus production alert rules exist. Production runbooks and final release checklist remain incomplete. |
 
 ## Process-local state classification
 
@@ -29,5 +29,7 @@ This audit classifies the productionization plan against executable code rather 
 | Provider resume cursor | `authoritative-postgres`, encrypted. |
 | Artifact metadata | `authoritative-postgres`; payload is `authoritative-object-store`. |
 
-The implementation order remains the one in the Stage 2 plan. Steps 0-4 are complete; Artifact and SSE
-operational completion is the next implementation step. The full Stage 2 remains in progress.
+The implementation order remains the one in the Stage 2 plan. Steps 0-4 are complete; Step 5 implementation
+and local/PostgreSQL/MinIO/multi-replica evidence are complete, with real AWS S3 evidence deferred until a
+writable test bucket is explicitly supplied. The full Stage 2 remains in progress while Web and deployment
+acceptance continue.

@@ -72,6 +72,12 @@ type Config struct {
 	OutboxMaxAttempts             int
 	OutboxBaseBackoff             time.Duration
 	OutboxMaxBackoff              time.Duration
+	SSEPollInterval               time.Duration
+	SSEHeartbeatInterval          time.Duration
+	SSEWriteTimeout               time.Duration
+	SSELeaseTTL                   time.Duration
+	SSEMaxConnectionsPerUser      int
+	SSEMaxConnectionsPerTenant    int
 }
 
 func Load() (Config, error) {
@@ -238,6 +244,24 @@ func Load() (Config, error) {
 	if cfg.OutboxMaxBackoff, err = envDurationStrict("SYNARA_OUTBOX_MAX_BACKOFF", 5*time.Minute); err != nil {
 		return Config{}, err
 	}
+	if cfg.SSEPollInterval, err = envDurationStrict("SYNARA_SSE_POLL_INTERVAL", 2*time.Second); err != nil {
+		return Config{}, err
+	}
+	if cfg.SSEHeartbeatInterval, err = envDurationStrict("SYNARA_SSE_HEARTBEAT_INTERVAL", 15*time.Second); err != nil {
+		return Config{}, err
+	}
+	if cfg.SSEWriteTimeout, err = envDurationStrict("SYNARA_SSE_WRITE_TIMEOUT", 10*time.Second); err != nil {
+		return Config{}, err
+	}
+	if cfg.SSELeaseTTL, err = envDurationStrict("SYNARA_SSE_LEASE_TTL", 45*time.Second); err != nil {
+		return Config{}, err
+	}
+	if cfg.SSEMaxConnectionsPerUser, err = envInt("SYNARA_SSE_MAX_CONNECTIONS_PER_USER", 4); err != nil {
+		return Config{}, err
+	}
+	if cfg.SSEMaxConnectionsPerTenant, err = envInt("SYNARA_SSE_MAX_CONNECTIONS_PER_TENANT", 200); err != nil {
+		return Config{}, err
+	}
 	if encodedKey := strings.TrimSpace(os.Getenv("SYNARA_CREDENTIAL_MASTER_KEY")); encodedKey != "" {
 		cfg.CredentialKMSLocalKey, err = decodeKey(encodedKey, "SYNARA_CREDENTIAL_MASTER_KEY")
 		if err != nil {
@@ -372,6 +396,22 @@ func Load() (Config, error) {
 	}
 	if cfg.OutboxBaseBackoff <= 0 || cfg.OutboxMaxBackoff < cfg.OutboxBaseBackoff {
 		return Config{}, errors.New("SYNARA_OUTBOX_MAX_BACKOFF must be greater than or equal to SYNARA_OUTBOX_BASE_BACKOFF")
+	}
+	if cfg.SSEPollInterval <= 0 {
+		return Config{}, errors.New("SYNARA_SSE_POLL_INTERVAL must be positive")
+	}
+	if cfg.SSEHeartbeatInterval <= 0 {
+		return Config{}, errors.New("SYNARA_SSE_HEARTBEAT_INTERVAL must be positive")
+	}
+	if cfg.SSEWriteTimeout <= 0 || cfg.SSEWriteTimeout >= cfg.SSEHeartbeatInterval {
+		return Config{}, errors.New("SYNARA_SSE_WRITE_TIMEOUT must be positive and less than SYNARA_SSE_HEARTBEAT_INTERVAL")
+	}
+	if cfg.SSELeaseTTL <= 2*cfg.SSEHeartbeatInterval {
+		return Config{}, errors.New("SYNARA_SSE_LEASE_TTL must be greater than twice SYNARA_SSE_HEARTBEAT_INTERVAL")
+	}
+	if cfg.SSEMaxConnectionsPerUser <= 0 || cfg.SSEMaxConnectionsPerTenant <= 0 ||
+		cfg.SSEMaxConnectionsPerUser > cfg.SSEMaxConnectionsPerTenant {
+		return Config{}, errors.New("SYNARA_SSE connection limits must be positive and the per-user limit must not exceed the per-tenant limit")
 	}
 	switch cfg.CredentialKMSProvider {
 	case "":

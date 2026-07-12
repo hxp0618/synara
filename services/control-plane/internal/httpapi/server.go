@@ -23,6 +23,7 @@ import (
 	"github.com/synara-ai/synara/services/control-plane/internal/credentials"
 	"github.com/synara-ai/synara/services/control-plane/internal/database"
 	"github.com/synara-ai/synara/services/control-plane/internal/enterpriseidentity"
+	"github.com/synara-ai/synara/services/control-plane/internal/eventstream"
 	"github.com/synara-ai/synara/services/control-plane/internal/executions"
 	"github.com/synara-ai/synara/services/control-plane/internal/executiontargets"
 	"github.com/synara-ai/synara/services/control-plane/internal/identity"
@@ -68,8 +69,10 @@ type Server struct {
 	scim               *scim.Service
 	logger             *slog.Logger
 	schema             schemaReadiness
+	eventStreams       *eventstream.Service
 	sessionEventPoll   time.Duration
 	sessionEventBeat   time.Duration
+	sessionEventWrite  time.Duration
 	handler            http.Handler
 }
 
@@ -99,7 +102,15 @@ func New(
 	scimService *scim.Service,
 	schemaChecker schemaReadiness,
 	logger *slog.Logger,
-) *Server {
+) (*Server, error) {
+	eventStreams, err := eventstream.New(db, eventstream.Config{
+		InstanceID: uuid.NewString(), LeaseTTL: cfg.SSELeaseTTL,
+		MaxConnectionsPerUser:   cfg.SSEMaxConnectionsPerUser,
+		MaxConnectionsPerTenant: cfg.SSEMaxConnectionsPerTenant,
+	})
+	if err != nil {
+		return nil, err
+	}
 	server := &Server{
 		config: cfg, db: db, identity: identityService, tenancy: tenancyService,
 		projects: projectService, sessions: sessionService, executions: executionService,
@@ -107,8 +118,9 @@ func New(
 		artifacts: artifactService, quotas: quotaService,
 		credentials: credentialService, retention: retentionService, metrics: metrics, outbox: outboxService,
 		enterpriseIdentity: enterpriseIdentityService, serviceAccounts: serviceAccountService,
-		scim: scimService, schema: schemaChecker, logger: logger,
-		sessionEventPoll: sessionEventPollInterval, sessionEventBeat: sessionEventHeartbeat,
+		scim: scimService, schema: schemaChecker, logger: logger, eventStreams: eventStreams,
+		sessionEventPoll: cfg.SSEPollInterval, sessionEventBeat: cfg.SSEHeartbeatInterval,
+		sessionEventWrite: cfg.SSEWriteTimeout,
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", server.health)
@@ -231,7 +243,7 @@ func New(
 	mux.HandleFunc("GET /v1/artifact-content/{artifactID}", server.downloadArtifactContent)
 
 	server.handler = server.withRequestContext(server.observeRequests(server.recoverPanics(server.securityHeaders(mux))))
-	return server
+	return server, nil
 }
 
 func (s *Server) Handler() http.Handler { return s.handler }

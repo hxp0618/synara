@@ -234,6 +234,39 @@ func TestLoadValidatesOutboxConfiguration(t *testing.T) {
 	}
 }
 
+func TestLoadValidatesSSEConfiguration(t *testing.T) {
+	clearConfigEnvironment(t)
+	t.Setenv("SYNARA_SSE_POLL_INTERVAL", "3s")
+	t.Setenv("SYNARA_SSE_HEARTBEAT_INTERVAL", "20s")
+	t.Setenv("SYNARA_SSE_WRITE_TIMEOUT", "8s")
+	t.Setenv("SYNARA_SSE_LEASE_TTL", "1m")
+	t.Setenv("SYNARA_SSE_MAX_CONNECTIONS_PER_USER", "6")
+	t.Setenv("SYNARA_SSE_MAX_CONNECTIONS_PER_TENANT", "300")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.SSEPollInterval != 3*time.Second || cfg.SSEHeartbeatInterval != 20*time.Second ||
+		cfg.SSEWriteTimeout != 8*time.Second || cfg.SSELeaseTTL != time.Minute ||
+		cfg.SSEMaxConnectionsPerUser != 6 || cfg.SSEMaxConnectionsPerTenant != 300 {
+		t.Fatalf("unexpected SSE config: %#v", cfg)
+	}
+
+	clearConfigEnvironment(t)
+	t.Setenv("SYNARA_SSE_HEARTBEAT_INTERVAL", "20s")
+	t.Setenv("SYNARA_SSE_LEASE_TTL", "40s")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "SYNARA_SSE_LEASE_TTL") {
+		t.Fatalf("expected invalid SSE lease TTL error, got %v", err)
+	}
+
+	clearConfigEnvironment(t)
+	t.Setenv("SYNARA_SSE_MAX_CONNECTIONS_PER_USER", "20")
+	t.Setenv("SYNARA_SSE_MAX_CONNECTIONS_PER_TENANT", "10")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "SYNARA_SSE connection limits") {
+		t.Fatalf("expected invalid SSE connection limits, got %v", err)
+	}
+}
+
 func clearConfigEnvironment(t *testing.T) {
 	t.Helper()
 	for _, name := range []string{
@@ -260,6 +293,9 @@ func clearConfigEnvironment(t *testing.T) {
 		"SYNARA_OUTBOX_POLL_INTERVAL", "SYNARA_OUTBOX_CLAIM_TTL",
 		"SYNARA_OUTBOX_BATCH_SIZE", "SYNARA_OUTBOX_MAX_ATTEMPTS",
 		"SYNARA_OUTBOX_BASE_BACKOFF", "SYNARA_OUTBOX_MAX_BACKOFF",
+		"SYNARA_SSE_POLL_INTERVAL", "SYNARA_SSE_HEARTBEAT_INTERVAL",
+		"SYNARA_SSE_WRITE_TIMEOUT", "SYNARA_SSE_LEASE_TTL",
+		"SYNARA_SSE_MAX_CONNECTIONS_PER_USER", "SYNARA_SSE_MAX_CONNECTIONS_PER_TENANT",
 	} {
 		t.Setenv(name, "")
 	}

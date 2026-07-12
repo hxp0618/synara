@@ -16,8 +16,10 @@ import (
 
 	"github.com/synara-ai/synara/services/control-plane/internal/bootstrap"
 	"github.com/synara-ai/synara/services/control-plane/internal/database"
+	"github.com/synara-ai/synara/services/control-plane/internal/eventstream"
 	"github.com/synara-ai/synara/services/control-plane/internal/executiontargets"
 	"github.com/synara-ai/synara/services/control-plane/internal/identity"
+	"github.com/synara-ai/synara/services/control-plane/internal/observability"
 	"github.com/synara-ai/synara/services/control-plane/internal/platform"
 	"github.com/synara-ai/synara/services/control-plane/internal/projects"
 	"github.com/synara-ai/synara/services/control-plane/internal/sessions"
@@ -102,6 +104,14 @@ func TestSessionEventStreamCatchesUpAcrossServiceInstances(t *testing.T) {
 	server := &Server{
 		sessions: firstReplica, logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		sessionEventPoll: 20 * time.Millisecond, sessionEventBeat: time.Second,
+		metrics: observability.New(store.DB()),
+	}
+	server.eventStreams, err = eventstream.New(store.DB(), eventstream.Config{
+		InstanceID: "sse-http-test", LeaseTTL: 5 * time.Second,
+		MaxConnectionsPerUser: 1, MaxConnectionsPerTenant: 2,
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/sessions/{sessionID}/events/stream", func(w http.ResponseWriter, r *http.Request) {
@@ -128,6 +138,15 @@ func TestSessionEventStreamCatchesUpAcrossServiceInstances(t *testing.T) {
 		scanDone <- scanner.Err()
 	}()
 	waitForSSELine(t, lines, scanDone, "retry: 2000")
+	limitedResponse, err := http.Get(httpServer.URL + "/v1/sessions/" + session.ID.String() + "/events/stream?afterSequence=1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	limitedBody, _ := io.ReadAll(limitedResponse.Body)
+	_ = limitedResponse.Body.Close()
+	if limitedResponse.StatusCode != http.StatusTooManyRequests || !strings.Contains(string(limitedBody), "sse_user_connection_limit") {
+		t.Fatalf("connection limit response = %d %s", limitedResponse.StatusCode, limitedBody)
+	}
 
 	if _, err := secondReplica.CreateTurn(ctx, principal, session.ID, sessions.CreateTurnInput{
 		InputText: "created through another replica",
@@ -136,6 +155,32 @@ func TestSessionEventStreamCatchesUpAcrossServiceInstances(t *testing.T) {
 	}
 	waitForSSELine(t, lines, scanDone, "id: 2")
 }
+
+func TestSSEWriteAppliesAndClearsDeadline(t *testing.T) {
+	writer := &deadlineResponseWriter{ResponseRecorder: httptest.NewRecorder()}
+	server := &Server{sessionEventWrite: 250 * time.Millisecond}
+	if err := server.writeSSE(writer, func() error {
+		_, err := io.WriteString(writer, ": test\n\n")
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(writer.deadlines) < 2 || writer.deadlines[0].IsZero() || !writer.deadlines[len(writer.deadlines)-1].IsZero() {
+		t.Fatalf("write deadlines were not applied and cleared: %#v", writer.deadlines)
+	}
+}
+
+type deadlineResponseWriter struct {
+	*httptest.ResponseRecorder
+	deadlines []time.Time
+}
+
+func (w *deadlineResponseWriter) SetWriteDeadline(deadline time.Time) error {
+	w.deadlines = append(w.deadlines, deadline)
+	return nil
+}
+
+func (w *deadlineResponseWriter) Flush() {}
 
 func waitForSSELine(t *testing.T, lines <-chan string, scanDone <-chan error, expected string) {
 	t.Helper()

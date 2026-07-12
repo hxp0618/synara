@@ -83,7 +83,7 @@ func main() {
 		logger.Error("failed to configure schema readiness", "kind", metadataStore.Kind(), "error", err)
 		os.Exit(1)
 	}
-	metrics := observability.New(db)
+	metrics := observability.New(db, cfg.SessionIdleTTL)
 	if cfg.Platform.QueueDriver == platform.QueueExternal {
 		logger.Error("external queue driver requires a publisher adapter that is not configured in this build")
 		os.Exit(1)
@@ -146,7 +146,7 @@ func main() {
 		logger.Error("failed to configure artifact store", "kind", cfg.Platform.ArtifactStore, "error", err)
 		os.Exit(1)
 	}
-	artifactService := artifacts.NewService(db, artifactStore, cfg, executionService, sessionService)
+	artifactService := artifacts.NewService(db, artifactStore, cfg, executionService, sessionService, metrics)
 	quotaService := quotas.NewService(db)
 	credentialCipher, err := credentialkms.New(ctx, credentialkms.Config{
 		Provider: cfg.CredentialKMSProvider, KeyID: cfg.CredentialKMSKeyID,
@@ -163,12 +163,16 @@ func main() {
 	retentionService := retention.NewService(
 		db, sessionService, artifactService, cfg.RetentionSweepInterval, logger, metrics,
 	)
-	api := httpapi.New(
+	api, err := httpapi.New(
 		cfg, db, identityService, tenancyService, projectService, sessionService,
 		executionService, executionTargetService, sshProvisioner, artifactService, quotaService,
 		credentialService, retentionService, metrics, outboxService, enterpriseIdentityService,
 		serviceAccountService, scimService, schemaChecker, logger,
 	)
+	if err != nil {
+		logger.Error("failed to configure HTTP API", "error", err)
+		os.Exit(1)
+	}
 	server := &http.Server{
 		Addr: cfg.ListenAddress, Handler: api.Handler(),
 		ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 90 * time.Second,

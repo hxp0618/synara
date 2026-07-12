@@ -221,6 +221,72 @@ func TestObjectStoreUploadGrantCannotOverwriteReadyArtifact(t *testing.T) {
 	if !bytes.Equal(readyPayload, payload) {
 		t.Fatalf("replayed upload grant overwrote ready payload: %q", readyPayload)
 	}
+	cleaned, err := fixture.service.CleanupExpiredUploads(context.Background(), pending.UploadExpiresAt.Add(time.Second), 10)
+	if err != nil || cleaned != 1 {
+		t.Fatalf("ready temporary-key cleanup = %d, %v", cleaned, err)
+	}
+	if _, ok := store.objects[*pending.UploadObjectKey]; ok {
+		t.Fatal("replayed ready Artifact temporary object remains after URL expiry")
+	}
+	if !bytes.Equal(store.objects[pending.ObjectKey], payload) {
+		t.Fatal("ready temporary-key cleanup removed or changed the verified final object")
+	}
+	var ready persistence.Artifact
+	if err := fixture.db.Where("id = ?", pending.ID).Take(&ready).Error; err != nil {
+		t.Fatal(err)
+	}
+	if ready.Status != "ready" || ready.UploadObjectKey != nil || ready.UploadExpiresAt != nil {
+		t.Fatalf("ready Artifact upload metadata was not sealed: %#v", ready)
+	}
+}
+
+func TestCleanupExpiredUploadRemovesTemporaryAndPromotedObjects(t *testing.T) {
+	fixture := newArtifactFixture(t)
+	store := &testObjectStore{bucket: "artifact-bucket", objects: map[string][]byte{}, contentTypes: map[string]string{}}
+	fixture.service.store = store
+	grant, err := fixture.service.Create(context.Background(), fixture.principal, fixture.sessionID, CreateInput{
+		Kind: "generated_file", OriginalName: pointerString("expired.txt"),
+	}, "expired-object-create", "127.0.0.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var pending persistence.Artifact
+	if err := fixture.db.Where("id = ?", grant.Artifact.ID).Take(&pending).Error; err != nil {
+		t.Fatal(err)
+	}
+	if pending.UploadObjectKey == nil {
+		t.Fatal("object-store upload did not use a temporary key")
+	}
+	for _, key := range []string{*pending.UploadObjectKey, pending.ObjectKey} {
+		if _, err := store.Put(context.Background(), key, strings.NewReader("orphan"), 6, "text/plain"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	expiredAt := pending.UploadExpiresAt.Add(time.Second)
+	cleaned, err := fixture.service.CleanupExpiredUploads(context.Background(), expiredAt, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cleaned != 1 {
+		t.Fatalf("cleaned uploads = %d, want 1", cleaned)
+	}
+	if _, ok := store.objects[*pending.UploadObjectKey]; ok {
+		t.Fatal("expired temporary object remains")
+	}
+	if _, ok := store.objects[pending.ObjectKey]; ok {
+		t.Fatal("orphaned promoted object remains")
+	}
+	var failed persistence.Artifact
+	if err := fixture.db.Where("id = ?", pending.ID).Take(&failed).Error; err != nil {
+		t.Fatal(err)
+	}
+	if failed.Status != "failed" || failed.UploadExpiresAt != nil || failed.UploadObjectKey != nil || len(failed.UploadTokenHash) != 0 {
+		t.Fatalf("expired Artifact metadata was not sealed: %#v", failed)
+	}
+	cleaned, err = fixture.service.CleanupExpiredUploads(context.Background(), expiredAt, 10)
+	if err != nil || cleaned != 0 {
+		t.Fatalf("idempotent cleanup = %d, %v", cleaned, err)
+	}
 }
 
 func TestArtifactQuotaRejectsCompletionAndAllowsRetryAfterIncrease(t *testing.T) {

@@ -2,7 +2,7 @@
 
 - Date: 2026-07-12
 - Branch: `codex/saas-tenancy-user`
-- Scope: Stage 2 Steps 2-3 PostgreSQL, stateless multi-replica correctness, and authentication regression
+- Scope: Stage 2 Steps 2-5 PostgreSQL, stateless multi-replica correctness, authentication, idempotency and SSE operations
 - Result: PASS
 
 ## Runtime topology
@@ -15,7 +15,7 @@ The isolated acceptance suite started:
 - One disposable Alpine container used as an in-network HTTP/SSE test runner. The acceptance suite does not
   rebuild the unrelated TypeScript Provider Runtime.
 
-The latest successful run used Compose project `synara-stage2-step4-acceptance-12757`. The script removed all
+The latest successful run used Compose project `synara-stage2-multi-54592`. The script removed all
 containers, networks and volumes after completion.
 
 ## Verified behavior
@@ -36,6 +36,10 @@ containers, networks and volumes after completion.
 10. Project and Session replay returned the original resources through the other replica.
 11. Two replicas concurrently submitted the same Turn `Idempotency-Key`; one request executed and the
     other returned the stored response without duplicating the Event sequence.
+12. A live SSE connection on replica A consumed the only configured per-user connection slot; replica B
+    rejected a concurrent stream with HTTP 429, stable code and `Retry-After`.
+13. `/metrics` exposed authoritative SSE leases, catch-up latency, rejection counters, Artifact ready bytes
+    and database pool state.
 
 ## Automated evidence
 
@@ -50,6 +54,8 @@ The following focused coverage was added:
 - Bounded startup Migration Lock wait.
 - PostgreSQL Login Session idle expiry with independent replica connection pools.
 - Cross-replica administrator revocation and concurrent Authenticate/Revoke without Session resurrection.
+- PostgreSQL concurrent SSE acquisition through independent connection pools with exactly one legal winner.
+- Per-write SSE deadline application/cleanup and connection-limit HTTP behavior.
 
 Full Go tests passed against a fresh PostgreSQL 17 container:
 
@@ -65,6 +71,6 @@ deploy/saas/multi-replica-acceptance.sh
 
 ## Remaining scope
 
-This report closes the runtime regression evidence for Stage 2 Steps 2-3. It does not claim the final
-Enterprise K8s acceptance from Step 7, API idempotency, Artifact/SSE operational limits, Tenant Context,
-or the Web main-flow cutover.
+This report closes the multi-replica runtime evidence through Stage 2 Step 5. It does not claim the final
+Enterprise K8s acceptance from Step 7, writable AWS S3 compatibility evidence, Tenant Context, or the Web
+main-flow cutover.

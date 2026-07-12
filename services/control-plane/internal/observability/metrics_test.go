@@ -20,7 +20,8 @@ func TestGatherUsesBoundedRoutePatternsAndAuthoritativeState(t *testing.T) {
 	}
 	models := []any{
 		&persistence.AgentExecution{}, &persistence.WorkerInstance{}, &persistence.WorkerLease{},
-		&persistence.ExecutionTarget{}, &persistence.OutboxMessage{},
+		&persistence.ExecutionTarget{}, &persistence.OutboxMessage{}, &persistence.SSEConnectionLease{},
+		&persistence.LoginSession{}, &persistence.Artifact{},
 	}
 	if err := db.AutoMigrate(models...); err != nil {
 		t.Fatal(err)
@@ -73,6 +74,9 @@ func TestGatherUsesBoundedRoutePatternsAndAuthoritativeState(t *testing.T) {
 	registry.ObserveHTTP("GET", "GET /v1/sessions/{sessionID}", 200, 25*time.Millisecond)
 	registry.ObserveHTTP("GET", "/v1/sessions/"+executionID.String(), 404, 10*time.Millisecond)
 	registry.ObserveBackground("docker", now, nil)
+	registry.ObserveArtifact("complete", 128, nil)
+	registry.ObserveSSECatchup(20*time.Millisecond, 3, nil)
+	registry.ObserveSSELimit("user")
 	payload, err := registry.Gather(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -85,6 +89,9 @@ func TestGatherUsesBoundedRoutePatternsAndAuthoritativeState(t *testing.T) {
 		`synara_worker_leases{state="active"} 1`, `synara_metrics_collection_success 1`,
 		`synara_outbox_pending 1`, `synara_outbox_retrying 1`,
 		`synara_outbox_dead_letter 1`, `synara_outbox_oldest_pending_seconds`,
+		`synara_sse_connections{state="active"} 0`, `synara_artifact_ready_bytes 0`,
+		`synara_database_connections{state="open"}`, `synara_artifact_operations_total{operation="complete",result="success"} 1`,
+		`synara_sse_catchup_events_total 3`, `synara_sse_connection_rejections_total{scope="user"} 1`,
 	} {
 		if !strings.Contains(metrics, expected) {
 			t.Fatalf("metrics omitted %q:\n%s", expected, metrics)

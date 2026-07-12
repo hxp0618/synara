@@ -38,21 +38,48 @@ type backgroundMetric struct {
 	lastSuccess     time.Time
 }
 
+type artifactMetricKey struct {
+	operation string
+	result    string
+}
+
+type artifactMetric struct {
+	count uint64
+	bytes uint64
+}
+
+type sseCatchupMetric struct {
+	count    uint64
+	failures uint64
+	events   uint64
+	sum      float64
+	buckets  [len(requestDurationBuckets)]uint64
+}
+
 // Registry contains only process-local monotonic telemetry. Authoritative domain
 // state is read from PostgreSQL/SQLite when Prometheus scrapes the endpoint, so
 // Worker and Execution counts cannot drift from the database.
 type Registry struct {
-	db *gorm.DB
+	db             *gorm.DB
+	sessionIdleTTL time.Duration
 
 	mu         sync.RWMutex
 	requests   map[requestKey]requestMetric
 	background map[string]backgroundMetric
+	artifacts  map[artifactMetricKey]artifactMetric
+	sseCatchup sseCatchupMetric
+	sseLimits  map[string]uint64
 }
 
-func New(db *gorm.DB) *Registry {
+func New(db *gorm.DB, sessionIdleTTLs ...time.Duration) *Registry {
+	sessionIdleTTL := 7 * 24 * time.Hour
+	if len(sessionIdleTTLs) > 0 && sessionIdleTTLs[0] > 0 {
+		sessionIdleTTL = sessionIdleTTLs[0]
+	}
 	return &Registry{
-		db: db, requests: make(map[requestKey]requestMetric),
-		background: make(map[string]backgroundMetric),
+		db: db, sessionIdleTTL: sessionIdleTTL, requests: make(map[requestKey]requestMetric),
+		background: make(map[string]backgroundMetric), artifacts: make(map[artifactMetricKey]artifactMetric),
+		sseLimits: make(map[string]uint64),
 	}
 }
 
@@ -80,7 +107,7 @@ func (r *Registry) ObserveHTTP(method, route string, status int, duration time.D
 func (r *Registry) ObserveBackground(kind string, started time.Time, err error) {
 	kind = strings.ToLower(strings.TrimSpace(kind))
 	switch kind {
-	case "docker", "kubernetes", "retention":
+	case "docker", "kubernetes", "retention", "outbox":
 	default:
 		kind = "other"
 	}
@@ -94,6 +121,57 @@ func (r *Registry) ObserveBackground(kind string, started time.Time, err error) 
 		metric.lastSuccess = time.Now().UTC()
 	}
 	r.background[kind] = metric
+	r.mu.Unlock()
+}
+
+func (r *Registry) ObserveArtifact(operation string, bytes int64, err error) {
+	operation = strings.ToLower(strings.TrimSpace(operation))
+	switch operation {
+	case "create", "complete", "delete", "cleanup":
+	default:
+		operation = "other"
+	}
+	result := "success"
+	if err != nil {
+		result = "failure"
+	}
+	key := artifactMetricKey{operation: operation, result: result}
+	r.mu.Lock()
+	metric := r.artifacts[key]
+	metric.count++
+	if bytes > 0 {
+		metric.bytes += uint64(bytes)
+	}
+	r.artifacts[key] = metric
+	r.mu.Unlock()
+}
+
+func (r *Registry) ObserveSSECatchup(duration time.Duration, events int, err error) {
+	seconds := duration.Seconds()
+	r.mu.Lock()
+	r.sseCatchup.count++
+	r.sseCatchup.sum += seconds
+	if events > 0 {
+		r.sseCatchup.events += uint64(events)
+	}
+	if err != nil {
+		r.sseCatchup.failures++
+	}
+	for index, upperBound := range requestDurationBuckets {
+		if seconds <= upperBound {
+			r.sseCatchup.buckets[index]++
+		}
+	}
+	r.mu.Unlock()
+}
+
+func (r *Registry) ObserveSSELimit(scope string) {
+	scope = strings.ToLower(strings.TrimSpace(scope))
+	if scope != "user" && scope != "tenant" {
+		scope = "other"
+	}
+	r.mu.Lock()
+	r.sseLimits[scope]++
 	r.mu.Unlock()
 }
 
@@ -115,6 +193,15 @@ func (r *Registry) writeProcessMetrics(output *bytes.Buffer) {
 	background := make(map[string]backgroundMetric, len(r.background))
 	for key, value := range r.background {
 		background[key] = value
+	}
+	artifacts := make(map[artifactMetricKey]artifactMetric, len(r.artifacts))
+	for key, value := range r.artifacts {
+		artifacts[key] = value
+	}
+	sseCatchup := r.sseCatchup
+	sseLimits := make(map[string]uint64, len(r.sseLimits))
+	for key, value := range r.sseLimits {
+		sseLimits[key] = value
 	}
 	r.mu.RUnlock()
 
@@ -166,6 +253,46 @@ func (r *Registry) writeProcessMetrics(output *bytes.Buffer) {
 		}
 		fmt.Fprintf(output, "synara_background_last_success_unixtime%s %d\n", labels, lastSuccess)
 	}
+
+	artifactKeys := make([]artifactMetricKey, 0, len(artifacts))
+	for key := range artifacts {
+		artifactKeys = append(artifactKeys, key)
+	}
+	sort.Slice(artifactKeys, func(i, j int) bool {
+		if artifactKeys[i].operation != artifactKeys[j].operation {
+			return artifactKeys[i].operation < artifactKeys[j].operation
+		}
+		return artifactKeys[i].result < artifactKeys[j].result
+	})
+	writeHelp(output, "synara_artifact_operations_total", "Artifact lifecycle operations by bounded operation and result.", "counter")
+	writeHelp(output, "synara_artifact_bytes_total", "Artifact bytes processed by bounded operation and result.", "counter")
+	for _, key := range artifactKeys {
+		metric := artifacts[key]
+		metricLabels := labels(map[string]string{"operation": key.operation, "result": key.result})
+		fmt.Fprintf(output, "synara_artifact_operations_total%s %d\n", metricLabels, metric.count)
+		fmt.Fprintf(output, "synara_artifact_bytes_total%s %d\n", metricLabels, metric.bytes)
+	}
+
+	writeHelp(output, "synara_sse_catchup_duration_seconds", "Database-backed SSE backlog catch-up duration.", "histogram")
+	for index, upperBound := range requestDurationBuckets {
+		fmt.Fprintf(output, "synara_sse_catchup_duration_seconds_bucket%s %d\n", labels(map[string]string{"le": strconv.FormatFloat(upperBound, 'g', -1, 64)}), sseCatchup.buckets[index])
+	}
+	fmt.Fprintf(output, "synara_sse_catchup_duration_seconds_bucket%s %d\n", labels(map[string]string{"le": "+Inf"}), sseCatchup.count)
+	fmt.Fprintf(output, "synara_sse_catchup_duration_seconds_sum %s\n", formatFloat(sseCatchup.sum))
+	fmt.Fprintf(output, "synara_sse_catchup_duration_seconds_count %d\n", sseCatchup.count)
+	writeHelp(output, "synara_sse_catchup_failures_total", "Failed database-backed SSE catch-up attempts.", "counter")
+	fmt.Fprintf(output, "synara_sse_catchup_failures_total %d\n", sseCatchup.failures)
+	writeHelp(output, "synara_sse_catchup_events_total", "Session Events delivered through database-backed SSE catch-up.", "counter")
+	fmt.Fprintf(output, "synara_sse_catchup_events_total %d\n", sseCatchup.events)
+	writeHelp(output, "synara_sse_connection_rejections_total", "Rejected SSE connections by bounded limit scope.", "counter")
+	limitScopes := make([]string, 0, len(sseLimits))
+	for scope := range sseLimits {
+		limitScopes = append(limitScopes, scope)
+	}
+	sort.Strings(limitScopes)
+	for _, scope := range limitScopes {
+		fmt.Fprintf(output, "synara_sse_connection_rejections_total%s %d\n", labels(map[string]string{"scope": scope}), sseLimits[scope])
+	}
 }
 
 type groupedCount struct {
@@ -189,11 +316,26 @@ func (r *Registry) writeDatabaseMetrics(ctx context.Context, output *bytes.Buffe
 	}
 	now := time.Now().UTC()
 	var activeLeases, expiredLeases, outboxPending, outboxRetrying, outboxDeadLetter int64
+	var activeSSEConnections, expiredSSEConnections, activeLoginSessions, readyArtifactBytes int64
 	if err := r.db.WithContext(ctx).Table("worker_leases").Where("expires_at > ?", now).Count(&activeLeases).Error; err != nil {
 		return fmt.Errorf("collect active lease metrics: %w", err)
 	}
 	if err := r.db.WithContext(ctx).Table("worker_leases").Where("expires_at <= ?", now).Count(&expiredLeases).Error; err != nil {
 		return fmt.Errorf("collect expired lease metrics: %w", err)
+	}
+	if err := r.db.WithContext(ctx).Table("sse_connection_leases").Where("expires_at > ?", now).Count(&activeSSEConnections).Error; err != nil {
+		return fmt.Errorf("collect active SSE connection metrics: %w", err)
+	}
+	if err := r.db.WithContext(ctx).Table("sse_connection_leases").Where("expires_at <= ?", now).Count(&expiredSSEConnections).Error; err != nil {
+		return fmt.Errorf("collect expired SSE connection metrics: %w", err)
+	}
+	if err := r.db.WithContext(ctx).Table("login_sessions").
+		Where("revoked_at IS NULL AND expires_at > ? AND last_seen_at > ?", now, now.Add(-r.sessionIdleTTL)).Count(&activeLoginSessions).Error; err != nil {
+		return fmt.Errorf("collect active login session metrics: %w", err)
+	}
+	if err := r.db.WithContext(ctx).Table("artifacts").Select("COALESCE(SUM(size_bytes), 0)").
+		Where("status = ? AND deleted_at IS NULL", "ready").Scan(&readyArtifactBytes).Error; err != nil {
+		return fmt.Errorf("collect ready Artifact byte metrics: %w", err)
 	}
 	outboxPendingQuery := r.db.WithContext(ctx).Table("outbox_messages").Where("published_at IS NULL AND dead_lettered_at IS NULL")
 	if err := outboxPendingQuery.Count(&outboxPending).Error; err != nil {
@@ -223,6 +365,25 @@ func (r *Registry) writeDatabaseMetrics(ctx context.Context, output *bytes.Buffe
 	writeHelp(output, "synara_worker_leases", "Authoritative Worker Lease count by expiration state.", "gauge")
 	fmt.Fprintf(output, "synara_worker_leases%s %d\n", labels(map[string]string{"state": "active"}), activeLeases)
 	fmt.Fprintf(output, "synara_worker_leases%s %d\n", labels(map[string]string{"state": "expired"}), expiredLeases)
+	writeHelp(output, "synara_sse_connections", "Authoritative SSE connection lease count by expiration state.", "gauge")
+	fmt.Fprintf(output, "synara_sse_connections%s %d\n", labels(map[string]string{"state": "active"}), activeSSEConnections)
+	fmt.Fprintf(output, "synara_sse_connections%s %d\n", labels(map[string]string{"state": "expired"}), expiredSSEConnections)
+	writeHelp(output, "synara_active_login_sessions", "Authoritative active login session count.", "gauge")
+	fmt.Fprintf(output, "synara_active_login_sessions %d\n", activeLoginSessions)
+	writeHelp(output, "synara_artifact_ready_bytes", "Authoritative total bytes of ready non-deleted Artifacts.", "gauge")
+	fmt.Fprintf(output, "synara_artifact_ready_bytes %d\n", readyArtifactBytes)
+	if sqlDB, err := r.db.DB(); err == nil {
+		stats := sqlDB.Stats()
+		writeHelp(output, "synara_database_connections", "Database connection pool state.", "gauge")
+		fmt.Fprintf(output, "synara_database_connections%s %d\n", labels(map[string]string{"state": "max_open"}), stats.MaxOpenConnections)
+		fmt.Fprintf(output, "synara_database_connections%s %d\n", labels(map[string]string{"state": "open"}), stats.OpenConnections)
+		fmt.Fprintf(output, "synara_database_connections%s %d\n", labels(map[string]string{"state": "in_use"}), stats.InUse)
+		fmt.Fprintf(output, "synara_database_connections%s %d\n", labels(map[string]string{"state": "idle"}), stats.Idle)
+		writeHelp(output, "synara_database_connection_wait_total", "Database connection pool waits.", "counter")
+		fmt.Fprintf(output, "synara_database_connection_wait_total %d\n", stats.WaitCount)
+		writeHelp(output, "synara_database_connection_wait_seconds_total", "Cumulative database connection pool wait duration.", "counter")
+		fmt.Fprintf(output, "synara_database_connection_wait_seconds_total %s\n", formatFloat(stats.WaitDuration.Seconds()))
+	}
 	writeHelp(output, "synara_outbox_pending", "Unpublished authoritative outbox message count.", "gauge")
 	fmt.Fprintf(output, "synara_outbox_pending %d\n", outboxPending)
 	writeHelp(output, "synara_outbox_retrying", "Outbox messages waiting for another publish attempt.", "gauge")

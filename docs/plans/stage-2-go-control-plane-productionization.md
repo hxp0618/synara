@@ -790,7 +790,14 @@ errorCode
   Lease 并生成可回放 resolved Event。Provider Runner 双向投递明确进入 Stage 3。
 - [x] Step 4 后双副本 Compose Acceptance 已通过，包含跨副本 Project/Session Replay 和同 Key Turn
   并发。
-- [ ] 当前进入 Step 5：Artifact 和 SSE 收口。整个 Stage 2 尚未完成。
+- [x] Step 5 Artifact/SSE 实现收口：Artifact 临时 Key 提升、Pending/Ready 过期临时对象分布式清理、
+  伪造 Hash 拒绝、真实 MinIO Presigned 生命周期、SSE PostgreSQL 全局 Tenant/User 连接租约、慢客户端
+  写超时、Catch-up/连接/Artifact/DB Pool Metrics 和告警已完成。
+- [x] Step 5 默认 SQLite、完整 PostgreSQL 17 + MinIO、单节点 Control Plane Acceptance 和双副本
+  Compose Acceptance 已通过；独立 PostgreSQL 连接池并发 SSE 配额只有一个合法赢家。
+- [ ] 真实 AWS S3 Live Store 验收需要操作人提供明确授权的可写测试 Bucket；共享
+  `SYNARA_TEST_S3_*` 测试入口已完成。在此之前不宣称真实 AWS S3 已验收。
+- [ ] 当前进入 Step 6：Web 主流程切换。整个 Stage 2 尚未完成。
 
 ### Step 2：多副本正确性
 
@@ -977,7 +984,7 @@ bun run test
 - [x] Worker Protocol Version、Drain 和 Token Rotation 有明确实现。
 - [x] 多 Control Plane 副本不依赖进程内权威状态。
 - [x] SSE 能跨副本、跨重启从 PostgreSQL Sequence 恢复。
-- [ ] Artifact Complete 由 Control Plane 独立验证 Object 内容。
+- [x] Artifact Complete 由 Control Plane 独立验证 Object 内容。
 - [x] Outbox 具备 Claim、Retry、Dead Letter、Replay 和 Metrics。
 - [ ] Web 主流程可以创建 Control Plane Session/Execution 并消费 Event。
 - [ ] 未配置 Control Plane 时本地模式保持可用。

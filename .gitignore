@@ -19,6 +19,7 @@ release/
 /deploy/remote/prebuilt/
 /deploy/*/workspace/
 /services/control-plane/data/
+/apps/server/userdata/
 .synara
 /.synara/electron-dev
 /.synara/backups
