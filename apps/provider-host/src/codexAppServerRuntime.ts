@@ -98,6 +98,7 @@ class CodexAppServerRuntime {
       result: this.run(),
       interrupt: () => this.interrupt(),
       getResumeCursor: () => this.threadId,
+      steer: (payload) => this.steer(payload),
       resolveApproval: (payload) => this.resolveApproval(payload),
       resolveUserInput: (payload) => this.resolveUserInput(payload),
     };
@@ -482,6 +483,18 @@ class CodexAppServerRuntime {
     if (!answers) throw new Error("Codex user-input resolution must include an answers object.");
     this.pendingUserInputs.delete(requestId);
     this.writeMessage({ id: pending.jsonRpcId, result: { answers: codexUserInputAnswers(answers) } });
+  }
+
+  private async steer(payload: Record<string, unknown>): Promise<void> {
+    const inputText = requiredString(payload.inputText, "SteerTurn inputText");
+    if (!this.threadId || !this.turnId || this.turnSettled || this.processExited) {
+      throw new Error("Codex app-server does not have an active steerable Turn.");
+    }
+    await this.sendRequest("turn/steer", {
+      threadId: this.threadId,
+      expectedTurnId: this.turnId,
+      input: [{ type: "text", text: inputText, text_elements: [] }],
+    });
   }
 
   private interrupt(): void {

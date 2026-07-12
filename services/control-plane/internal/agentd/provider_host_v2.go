@@ -331,7 +331,7 @@ func (p *providerHostV2Process) executeControl(
 		return false, protocolFailure("Control command Provider does not match the active Provider Session")
 	}
 	if delivery.CommandType != "ResolveApproval" && delivery.CommandType != "ResolveUserInput" &&
-		delivery.CommandType != "InterruptTurn" {
+		delivery.CommandType != "SteerTurn" && delivery.CommandType != "InterruptTurn" {
 		return false, protocolFailure("Worker delivery uses an unsupported Provider Host command")
 	}
 	if strings.TrimSpace(delivery.CommandID) == "" || delivery.Payload == nil {
@@ -341,7 +341,7 @@ func (p *providerHostV2Process) executeControl(
 	for key, value := range delivery.Payload {
 		payload[key] = value
 	}
-	if delivery.CommandType == "InterruptTurn" {
+	if delivery.CommandType == "SteerTurn" || delivery.CommandType == "InterruptTurn" {
 		payload["targetCommandId"] = targetCommandID
 	}
 	command := newProviderHostCommand(

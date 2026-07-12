@@ -531,6 +531,136 @@ func TestDurableInterruptCommandRebindsAfterWorkerRelease(t *testing.T) {
 	}
 }
 
+func TestDurableSteerCommandKeepsExecutionRunning(t *testing.T) {
+	db := integrationDB(t)
+	fixture := seedExecutionFixture(t, db)
+	service := integrationService(t, db)
+	principal := identity.Principal{UserID: fixture.UserID, ActiveTenantID: &fixture.TenantID}
+	worker := registerManifestTestWorker(t, service, fixture.TargetID, fixture.TargetKind, "worker-steer")
+	cleanupWorkers(t, db, worker.ID)
+	claim, err := service.Claim(context.Background(), worker, ClaimExecutionInput{
+		ExecutionTargetID: fixture.TargetID, TargetKind: fixture.TargetKind, ExecutionID: &fixture.ExecutionID,
+	}, "steer-claim")
+	if err != nil || claim.Value.Lease == nil {
+		t.Fatalf("steer claim failed: result=%#v err=%v", claim, err)
+	}
+	lease := *claim.Value.Lease
+	leaseInput := LeaseInput{TenantID: fixture.TenantID, Generation: lease.Generation, LeaseToken: lease.LeaseToken}
+	if _, err := service.Start(context.Background(), worker, fixture.ExecutionID, leaseInput, "steer-start"); err != nil {
+		t.Fatal(err)
+	}
+
+	requested, err := service.RequestSteer(
+		context.Background(), principal, fixture.SessionID,
+		SteerActiveTurnInput{InputText: "focus on the failing test"},
+		"steer-key", "steer-request", "127.0.0.1",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replayed, err := service.RequestSteer(
+		context.Background(), principal, fixture.SessionID,
+		SteerActiveTurnInput{InputText: "focus on the failing test"},
+		"steer-key", "steer-replay", "127.0.0.1",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requested.Replayed || !replayed.Replayed || requested.Value.ID != replayed.Value.ID ||
+		requested.Value.DeliveryWorkerID == nil || *requested.Value.DeliveryWorkerID != worker.ID ||
+		requested.Value.DeliveryGeneration == nil || *requested.Value.DeliveryGeneration != lease.Generation {
+		t.Fatalf("unexpected Steer request/replay: requested=%#v replayed=%#v", requested, replayed)
+	}
+
+	deliveries, err := service.PullControlCommands(context.Background(), worker, fixture.ExecutionID, PullControlCommandsInput{
+		LeaseInput: leaseInput, Limit: 1,
+	})
+	if err != nil || len(deliveries) != 1 || deliveries[0].CommandType != "SteerTurn" ||
+		deliveries[0].Payload["inputText"] != "focus on the failing test" {
+		t.Fatalf("unexpected Steer delivery: deliveries=%#v err=%v", deliveries, err)
+	}
+	deliveryInput := ControlCommandDeliveryInput{LeaseInput: leaseInput, CommandID: requested.Value.CommandID}
+	if _, err := service.MarkControlCommandDelivered(
+		context.Background(), worker, fixture.ExecutionID, requested.Value.ID, deliveryInput, "steer-delivered",
+	); err != nil {
+		t.Fatal(err)
+	}
+	acknowledged, err := service.AcknowledgeControlCommand(
+		context.Background(), worker, fixture.ExecutionID, requested.Value.ID, deliveryInput, "steer-acknowledged",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if acknowledged.Value.Status != "acknowledged" || acknowledged.Value.AcknowledgedAt == nil {
+		t.Fatalf("Steer command was not acknowledged: %#v", acknowledged.Value)
+	}
+
+	var execution persistence.AgentExecution
+	if err := db.Where("tenant_id = ? AND id = ?", fixture.TenantID, fixture.ExecutionID).Take(&execution).Error; err != nil {
+		t.Fatal(err)
+	}
+	if execution.Status != "running" || execution.FinishedAt != nil {
+		t.Fatalf("Steer changed the Execution terminal state: %#v", execution)
+	}
+	var leases int64
+	if err := db.Model(&persistence.WorkerLease{}).Where("execution_id = ?", fixture.ExecutionID).Count(&leases).Error; err != nil {
+		t.Fatal(err)
+	}
+	if leases != 1 {
+		t.Fatalf("Steer unexpectedly released the active Lease: %d", leases)
+	}
+	var requestedEvents, acknowledgedEvents int64
+	if err := db.Model(&persistence.SessionEvent{}).
+		Where("tenant_id = ? AND execution_id = ? AND event_type = ?", fixture.TenantID, fixture.ExecutionID, "turn.steer-requested").
+		Count(&requestedEvents).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Model(&persistence.SessionEvent{}).
+		Where("tenant_id = ? AND execution_id = ? AND event_type = ?", fixture.TenantID, fixture.ExecutionID, "turn.steered").
+		Count(&acknowledgedEvents).Error; err != nil {
+		t.Fatal(err)
+	}
+	if requestedEvents != 1 || acknowledgedEvents != 1 {
+		t.Fatalf("unexpected Steer event counts: requested=%d acknowledged=%d", requestedEvents, acknowledgedEvents)
+	}
+}
+
+func TestDurableSteerRejectsWorkerWithoutCapability(t *testing.T) {
+	db := integrationDB(t)
+	fixture := seedExecutionFixture(t, db)
+	service := integrationService(t, db)
+	capabilities := workerManifestTestCapabilities()
+	providerHost := capabilities["providerHost"].(map[string]any)
+	providers := providerHost["providers"].(map[string]any)
+	codex := providers["codex"].(map[string]any)
+	descriptor := codex["capabilityDescriptor"].(map[string]any)
+	providerCapabilities := descriptor["capabilities"].(map[string]any)
+	providerCapabilities["steer-turn"] = "unsupported"
+	worker := registerTestWorkerWithCapabilities(t, service, fixture.TargetID, fixture.TargetKind, "worker-no-steer", capabilities)
+	cleanupWorkers(t, db, worker.ID)
+	claim, err := service.Claim(context.Background(), worker, ClaimExecutionInput{
+		ExecutionTargetID: fixture.TargetID, TargetKind: fixture.TargetKind, ExecutionID: &fixture.ExecutionID,
+	}, "no-steer-claim")
+	if err != nil || claim.Value.Lease == nil {
+		t.Fatalf("claim without Steer capability failed unexpectedly: result=%#v err=%v", claim, err)
+	}
+	lease := *claim.Value.Lease
+	if _, err := service.Start(context.Background(), worker, fixture.ExecutionID, LeaseInput{
+		TenantID: fixture.TenantID, Generation: lease.Generation, LeaseToken: lease.LeaseToken,
+	}, "no-steer-start"); err != nil {
+		t.Fatal(err)
+	}
+	principal := identity.Principal{UserID: fixture.UserID, ActiveTenantID: &fixture.TenantID}
+	_, err = service.RequestSteer(
+		context.Background(), principal, fixture.SessionID, SteerActiveTurnInput{InputText: "redirect"},
+		"no-steer", "no-steer", "127.0.0.1",
+	)
+	var apiError *problem.Error
+	if !errors.As(err, &apiError) || apiError.Code != "capability_unsupported" {
+		t.Fatalf("expected capability_unsupported, got %v", err)
+	}
+}
+
 func TestConcurrentCancelAndCompleteHasOneTerminalWinner(t *testing.T) {
 	for iteration := range 5 {
 		t.Run("race-"+string(rune('a'+iteration)), func(t *testing.T) {
@@ -1089,6 +1219,44 @@ func registerTestWorker(
 		ExecutionTargetID: targetID, TargetKind: targetKind,
 		ClusterID: "test-cluster", Namespace: "default", PodName: podName + "-" + uuid.NewString(),
 		Version: "test", Capabilities: map[string]any{"codex": true}, LeaseSupported: true, FencingSupported: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker, err := service.Authenticate(context.Background(), registered.Token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return worker
+}
+
+func registerManifestTestWorker(
+	t *testing.T,
+	service *Service,
+	targetID uuid.UUID,
+	targetKind string,
+	podName string,
+) persistence.WorkerInstance {
+	t.Helper()
+	return registerTestWorkerWithCapabilities(
+		t, service, targetID, targetKind, podName, workerManifestTestCapabilities(),
+	)
+}
+
+func registerTestWorkerWithCapabilities(
+	t *testing.T,
+	service *Service,
+	targetID uuid.UUID,
+	targetKind string,
+	podName string,
+	capabilities map[string]any,
+) persistence.WorkerInstance {
+	t.Helper()
+	registered, err := service.Register(context.Background(), RegisterWorkerInput{
+		ExecutionTargetID: targetID, TargetKind: targetKind,
+		ClusterID: "test-cluster", Namespace: "default", PodName: podName + "-" + uuid.NewString(),
+		Version: "test", ProtocolVersion: WorkerProtocolVersion, Capabilities: capabilities,
+		LeaseSupported: true, FencingSupported: true,
 	})
 	if err != nil {
 		t.Fatal(err)

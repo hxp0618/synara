@@ -41,12 +41,14 @@ describe("Provider Host Protocol v2", () => {
       PROVIDER_CAPABILITY_IDS.length,
     );
     expect(codex.capabilityDescriptor.capabilities["send-turn"]).toBe("native");
+    expect(codex.capabilityDescriptor.capabilities["steer-turn"]).toBe("native");
     expect(codex.capabilityDescriptor.capabilities["interrupt-turn"]).toBe("native");
     expect(codex.capabilityDescriptor.capabilities.approval).toBe("native");
     expect(codex.capabilityDescriptor.capabilities["structured-user-input"]).toBe("native");
     expect(codex.capabilityDescriptor.capabilities["plan-mode"]).toBe("native");
     const claude = providerHostDescriptor("claudeAgent");
     expect(claude.capabilityDescriptor.adapterVersion).toBe("claude-agent-sdk-v2");
+    expect(claude.capabilityDescriptor.capabilities["steer-turn"]).toBe("native");
     expect(claude.capabilityDescriptor.capabilities["interrupt-turn"]).toBe("native");
     expect(claude.capabilityDescriptor.capabilities.approval).toBe("native");
     expect(claude.capabilityDescriptor.capabilities["structured-user-input"]).toBe("native");
@@ -130,6 +132,47 @@ describe("Provider Host Protocol v2", () => {
     expect(sendMessages.at(-1)).toMatchObject({
       messageType: "Error",
       error: { code: "interrupted" },
+    });
+  });
+
+  it("processes SteerTurn while SendTurn remains active", async () => {
+    let completeRun: ((message: Extract<RunnerMessage, { type: "result" }>) => void) | undefined;
+    let steeredPayload: Record<string, unknown> | undefined;
+    const handle = createProviderHostProtocolHandler({
+      credential: null,
+      emit: () => {},
+      startRun: () =>
+        ({
+          result: new Promise((resolve) => {
+            completeRun = resolve;
+          }),
+          interrupt: () => {},
+          steer: (payload) => {
+            steeredPayload = payload;
+          },
+        }) satisfies ProviderRunController,
+    });
+    await handle(command("StartSession", { runnerInput: remoteRunnerInput() }, "session-steer"));
+
+    const send = handle(command("SendTurn", { inputText: "long task" }, "send-steer"));
+    const steer = await handle(
+      command(
+        "SteerTurn",
+        { targetCommandId: "send-steer", inputText: "focus on tests" },
+        "steer-active",
+      ),
+    );
+    completeRun?.({ type: "result", output: { text: "done" } });
+    const sendMessages = await send;
+
+    expect(steeredPayload).toEqual({ inputText: "focus on tests" });
+    expect(steer.at(-1)).toMatchObject({
+      messageType: "Result",
+      payload: { steered: true, targetCommandId: "send-steer" },
+    });
+    expect(sendMessages.at(-1)).toMatchObject({
+      messageType: "Result",
+      payload: { output: { text: "done" } },
     });
   });
 

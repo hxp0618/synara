@@ -41,6 +41,7 @@ export type ProviderRunController = {
   result: Promise<Extract<RunnerMessage, { type: "result" }>>;
   interrupt: () => void;
   getResumeCursor?: () => string | undefined;
+  steer?: (payload: Record<string, unknown>) => void | Promise<void>;
   resolveApproval?: (payload: Record<string, unknown>) => void | Promise<void>;
   resolveUserInput?: (payload: Record<string, unknown>) => void | Promise<void>;
 };

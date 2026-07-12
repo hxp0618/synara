@@ -88,7 +88,7 @@ func loadConversationHistory(
 	if err := tx.WithContext(ctx).
 		Where("tenant_id = ? AND session_id = ? AND sequence < ? AND event_type IN ?",
 			execution.TenantID, execution.SessionID, current.Sequence,
-			[]string{"turn.created", "runtime.output.delta"}).
+			[]string{"turn.created", "turn.steer-requested", "runtime.output.delta"}).
 		Order("sequence DESC").Limit(conversationHistoryEventLimit).Find(&events).Error; err != nil {
 		return nil, problem.Wrap(500, "execution_history_load_failed", "Failed to load Session conversation history.", err)
 	}
@@ -98,6 +98,8 @@ func loadConversationHistory(
 		role, key := "", ""
 		switch event.EventType {
 		case "turn.created":
+			role, key = "user", "inputText"
+		case "turn.steer-requested":
 			role, key = "user", "inputText"
 		case "runtime.output.delta":
 			role, key = "assistant", "text"

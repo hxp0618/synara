@@ -67,6 +67,7 @@ type PendingUserInput = {
 
 type PromptStream = {
   stream: AsyncIterable<SDKUserMessage>;
+  push: (text: string) => void;
   close: () => void;
 };
 
@@ -90,6 +91,7 @@ class ClaudeAgentSdkRuntime {
   private readonly pendingApprovals = new Map<string, PendingApproval>();
   private readonly pendingUserInputs = new Map<string, PendingUserInput>();
   private activeQuery: ClaudeQueryRuntime | undefined;
+  private activePromptStream: PromptStream | undefined;
   private resumeCursor: string | undefined;
   private forceCloseTimer: NodeJS.Timeout | undefined;
   private requestSequence = 0;
@@ -110,6 +112,7 @@ class ClaudeAgentSdkRuntime {
       result,
       interrupt: () => this.interrupt(),
       getResumeCursor: () => this.resumeCursor,
+      steer: (payload) => this.steer(payload),
       resolveApproval: (payload) => this.resolveApproval(payload),
       resolveUserInput: (payload) => this.resolveUserInput(payload),
     };
@@ -163,6 +166,7 @@ class ClaudeAgentSdkRuntime {
         options: this.queryOptions(state, resume),
       });
       this.activeQuery = runtime;
+      this.activePromptStream = promptStream;
       if (this.interruptRequested) this.requestNativeInterrupt(runtime);
 
       for await (const message of runtime) {
@@ -179,6 +183,7 @@ class ClaudeAgentSdkRuntime {
     } finally {
       promptStream.close();
       if (this.activeQuery === runtime) this.activeQuery = undefined;
+      if (this.activePromptStream === promptStream) this.activePromptStream = undefined;
       if (this.forceCloseTimer) {
         clearTimeout(this.forceCloseTimer);
         this.forceCloseTimer = undefined;
@@ -399,6 +404,14 @@ class ClaudeAgentSdkRuntime {
         answers: remapAnswers(pending.questions, answers),
       },
     });
+  }
+
+  private steer(payload: Record<string, unknown>): void {
+    const inputText = requiredString(payload.inputText, "SteerTurn inputText");
+    if (this.settled || this.interruptRequested || !this.activePromptStream) {
+      throw new Error("Claude Agent SDK does not have an active steerable Query.");
+    }
+    this.activePromptStream.push(inputText);
   }
 
   private interrupt(): void {
@@ -686,25 +699,52 @@ class ClaudeAttemptError extends Error {
 }
 
 function createPromptStream(prompt: string): PromptStream {
-  let release!: () => void;
-  const closed = new Promise<void>((resolve) => {
-    release = resolve;
-  });
+  const queue: SDKUserMessage[] = [claudeUserMessage(prompt)];
+  let closed = false;
+  let wake: (() => void) | undefined;
+  const signal = () => {
+    const current = wake;
+    wake = undefined;
+    current?.();
+  };
   return {
     stream: (async function* () {
-      yield {
-        type: "user",
-        session_id: "",
-        parent_tool_use_id: null,
-        message: {
-          role: "user",
-          content: [{ type: "text", text: prompt }],
-        },
-      } as unknown as SDKUserMessage;
-      await closed;
+      for (;;) {
+        const next = queue.shift();
+        if (next) {
+          yield next;
+          continue;
+        }
+        if (closed) return;
+        await new Promise<void>((resolve) => {
+          wake = resolve;
+        });
+      }
     })(),
-    close: release,
+    push: (text) => {
+      if (closed) throw new Error("Claude Agent SDK prompt stream is closed.");
+      queue.push(claudeUserMessage(text, "now"));
+      signal();
+    },
+    close: () => {
+      if (closed) return;
+      closed = true;
+      signal();
+    },
   };
+}
+
+function claudeUserMessage(text: string, priority?: "now"): SDKUserMessage {
+  return {
+    type: "user",
+    session_id: "",
+    parent_tool_use_id: null,
+    message: {
+      role: "user",
+      content: [{ type: "text", text }],
+    },
+    ...(priority ? { priority } : {}),
+  } as unknown as SDKUserMessage;
 }
 
 function registerAbort(signal: AbortSignal, onAbort: () => void): () => void {

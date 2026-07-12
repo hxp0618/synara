@@ -361,6 +361,41 @@ describe("Claude Agent SDK runtime", () => {
     expect(nativeInterrupts).toBe(1);
   });
 
+  it("steers the active Query through the native streaming input", async () => {
+    let initialRead!: () => void;
+    const initialReadPromise = new Promise<void>((resolve) => {
+      initialRead = resolve;
+    });
+    const queryFactory: ClaudeQueryFactory = ({ prompt }) =>
+      fakeQuery(
+        (async function* () {
+          if (typeof prompt === "string") throw new Error("Expected streaming Claude input.");
+          const iterator = prompt[Symbol.asyncIterator]();
+          const initial = await iterator.next();
+          expect(messageText(initial.value)).toBe("long task");
+          initialRead();
+          const steered = await iterator.next();
+          expect(messageText(steered.value)).toBe("focus on the failing test");
+          expect(steered.value?.priority).toBe("now");
+          yield sdkMessage(systemInit("session-steer", "claude-test"));
+          yield sdkMessage(successResult("session-steer", "steered", {}));
+        })(),
+      );
+    const run = startProviderHostRun(
+      claudeInput({ inputText: "long task" }),
+      null,
+      () => {},
+      { claudeQueryFactory: queryFactory },
+    );
+
+    await initialReadPromise;
+    await run.steer?.({ inputText: "focus on the failing test" });
+    await expect(run.result).resolves.toMatchObject({
+      output: { text: "steered" },
+      providerResumeCursor: "session-steer",
+    });
+  });
+
   it("cancels a pending durable approval when the Turn is interrupted", async () => {
     const messages: RunnerMessage[] = [];
     const interaction = nextInteraction(messages, "approval");
@@ -488,6 +523,18 @@ async function promptText(
   const message = await prompt[Symbol.asyncIterator]().next();
   if (message.done) return "";
   const content = (message.value.message as { content?: unknown }).content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .flatMap((block) => {
+      if (!block || typeof block !== "object") return [];
+      const record = block as Record<string, unknown>;
+      return record.type === "text" && typeof record.text === "string" ? [record.text] : [];
+    })
+    .join("");
+}
+
+function messageText(message: SDKUserMessage | undefined): string {
+  const content = (message?.message as { content?: unknown } | undefined)?.content;
   if (!Array.isArray(content)) return "";
   return content
     .flatMap((block) => {

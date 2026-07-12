@@ -82,6 +82,7 @@ export function capabilityMapForProvider(provider: ProviderKind): ProviderCapabi
       "start-session": "native",
       "resume-session": "native",
       "send-turn": "native",
+      "steer-turn": "native",
       "interrupt-turn": "native",
       approval: "native",
       "structured-user-input": "native",
@@ -102,6 +103,7 @@ export function capabilityMapForProvider(provider: ProviderKind): ProviderCapabi
       "start-session": "native",
       "resume-session": "native",
       "send-turn": "native",
+      "steer-turn": "native",
       "interrupt-turn": "native",
       approval: "native",
       "structured-user-input": "native",
@@ -370,23 +372,22 @@ async function executeCommand(
           : {}),
       });
     }
+    case "SteerTurn": {
+      const activeTurn = requireActiveTurn(state, command.commandType);
+      validateTargetCommandId(command.payload.targetCommandId, activeTurn.commandId);
+      if (!activeTurn.run.steer) {
+        throw unsupportedActiveTurnCommand(command.commandType);
+      }
+      const inputText = requiredString(command.payload.inputText, "SteerTurn inputText");
+      await activeTurn.run.steer({ inputText });
+      return resultMessage(command, {
+        steered: true,
+        targetCommandId: activeTurn.commandId,
+      });
+    }
     case "InterruptTurn": {
       const activeTurn = requireActiveTurn(state, command.commandType);
-      const targetCommandId = command.payload.targetCommandId;
-      if (
-        targetCommandId !== undefined &&
-        (typeof targetCommandId !== "string" || targetCommandId.trim() !== activeTurn.commandId)
-      ) {
-        throw new ProtocolFailure({
-          code: "protocol_violation",
-          message: "InterruptTurn targetCommandId does not match the active SendTurn command.",
-          retryable: false,
-          requiresNewExecution: false,
-          requiresUserAction: false,
-          canReconstructFromHistory: true,
-          canMoveWorker: false,
-        });
-      }
+      validateTargetCommandId(command.payload.targetCommandId, activeTurn.commandId);
       activeTurn.run.interrupt();
       const providerResumeCursor = activeTurn.run.getResumeCursor?.();
       return resultMessage(command, {
@@ -447,6 +448,34 @@ function requireActiveTurn(
     retryable: false,
     requiresNewExecution: false,
     requiresUserAction: false,
+    canReconstructFromHistory: true,
+    canMoveWorker: true,
+  });
+}
+
+function validateTargetCommandId(value: unknown, activeCommandId: string): void {
+  if (value === undefined) return;
+  if (typeof value === "string" && value.trim() === activeCommandId) return;
+  throw new ProtocolFailure({
+    code: "protocol_violation",
+    message: "Control command targetCommandId does not match the active SendTurn command.",
+    retryable: false,
+    requiresNewExecution: false,
+    requiresUserAction: false,
+    canReconstructFromHistory: true,
+    canMoveWorker: false,
+  });
+}
+
+function unsupportedActiveTurnCommand(
+  commandType: "SteerTurn",
+): ProtocolFailure {
+  return new ProtocolFailure({
+    code: "capability_unsupported",
+    message: `${commandType} is not supported by the active Provider runtime.`,
+    retryable: false,
+    requiresNewExecution: false,
+    requiresUserAction: true,
     canReconstructFromHistory: true,
     canMoveWorker: true,
   });

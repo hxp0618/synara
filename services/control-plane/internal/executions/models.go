@@ -274,6 +274,10 @@ type PullControlCommandsInput struct {
 	Limit int `json:"limit,omitempty"`
 }
 
+type SteerActiveTurnInput struct {
+	InputText string `json:"inputText"`
+}
+
 type ControlCommandDelivery struct {
 	ControlCommandID    uuid.UUID      `json:"controlCommandId"`
 	Provider            string         `json:"provider"`

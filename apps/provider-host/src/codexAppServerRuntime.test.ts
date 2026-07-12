@@ -122,6 +122,26 @@ describe("Codex app-server runtime", () => {
       expect(readFileSync(tracePath, "utf8")).toContain("turn/interrupt");
     });
   });
+
+  it("steers the active native Turn without creating a second Turn", async () => {
+    await withFakeCodex("steer", async (directory, tracePath) => {
+      let started!: () => void;
+      const startedPromise = new Promise<void>((resolve) => {
+        started = resolve;
+      });
+      const run = startProviderHostRun(codexInput(directory), null, (message) => {
+        if (message.type === "event" && message.eventType === "runtime.output.delta") started();
+      });
+
+      await startedPromise;
+      await run.steer?.({ inputText: "focus on the failing test" });
+      await expect(run.result).resolves.toMatchObject({
+        output: { text: "workingsteered" },
+        providerResumeCursor: "thread-new",
+      });
+      expect(readFileSync(tracePath, "utf8")).toContain("turn/steer");
+    });
+  });
 });
 
 function codexInput(
@@ -159,7 +179,7 @@ function waitForInteraction(
 }
 
 async function withFakeCodex(
-  scenario: "approval" | "user-input" | "resume" | "interrupt",
+  scenario: "approval" | "user-input" | "resume" | "interrupt" | "steer",
   run: (directory: string, tracePath: string) => Promise<void>,
 ): Promise<void> {
   const directory = mkdtempSync(join(tmpdir(), "synara-codex-app-server-"));
@@ -218,7 +238,13 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
       complete("resumed");
     } else if (scenario === "interrupt") {
       send({ method: "item/agentMessage/delta", params: { threadId: "thread-new", turnId: "turn-1", itemId: "agent-1", delta: "waiting" } });
+    } else if (scenario === "steer") {
+      send({ method: "item/agentMessage/delta", params: { threadId: "thread-new", turnId: "turn-1", itemId: "agent-1", delta: "working" } });
     }
+  } else if (message.method === "turn/steer") {
+    if (message.params?.expectedTurnId !== "turn-1" || message.params?.input?.[0]?.text !== "focus on the failing test") process.exit(2);
+    send({ id: message.id, result: {} });
+    complete("steered");
   } else if (message.method === "turn/interrupt") {
     send({ id: message.id, result: {} });
     send({ method: "turn/completed", params: { threadId: "thread-new", turn: { id: "turn-1", items: [], status: "interrupted", error: null } } });

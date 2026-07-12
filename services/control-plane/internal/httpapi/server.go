@@ -232,6 +232,7 @@ func New(
 	mux.Handle("GET /v1/sessions/{sessionID}/events", server.requireAuth(http.HandlerFunc(server.listSessionEvents)))
 	mux.Handle("GET /v1/sessions/{sessionID}/events/stream", server.requireAuth(http.HandlerFunc(server.streamSessionEvents)))
 	mux.Handle("POST /v1/sessions/{sessionID}/turns", server.requireAuth(http.HandlerFunc(server.createTurn)))
+	mux.Handle("POST /v1/sessions/{sessionID}/turns/active/steer", server.requireAuth(http.HandlerFunc(server.steerActiveTurn)))
 	mux.Handle("POST /v1/sessions/{sessionID}/turns/active/interrupt", server.requireAuth(http.HandlerFunc(server.interruptActiveTurn)))
 	mux.Handle("POST /v1/sessions/{sessionID}/suspend", server.requireAuth(http.HandlerFunc(server.suspendSession)))
 	mux.Handle("POST /v1/sessions/{sessionID}/resume", server.requireAuth(http.HandlerFunc(server.resumeSession)))
@@ -959,6 +960,28 @@ func (s *Server) interruptActiveTurn(w http.ResponseWriter, r *http.Request) {
 	}
 	result, err := s.executions.RequestInterrupt(
 		r.Context(), mustPrincipal(r), sessionID, r.Header.Get("Idempotency-Key"), requestID(r), clientIP(r),
+	)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	setIdempotencyReplayHeader(w, result.Replayed)
+	writeJSON(w, result.StatusCode, result.Value)
+}
+
+func (s *Server) steerActiveTurn(w http.ResponseWriter, r *http.Request) {
+	sessionID, ok := s.pathUUID(w, r, "sessionID")
+	if !ok {
+		return
+	}
+	var input executions.SteerActiveTurnInput
+	if err := decodeJSON(r, &input); err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	result, err := s.executions.RequestSteer(
+		r.Context(), mustPrincipal(r), sessionID, input,
+		r.Header.Get("Idempotency-Key"), requestID(r), clientIP(r),
 	)
 	if err != nil {
 		s.writeError(w, r, err)

@@ -80,7 +80,9 @@ func providerManifestTestDescriptor(provider, cliVersion, supportTier string) ma
 		"capabilityDescriptor": map[string]any{
 			"provider": provider, "supportTier": supportTier, "adapterVersion": provider + "-test",
 			"providerCliVersion": cliVersion,
-			"capabilities":       map[string]any{"send-turn": "native", "resume-session": "native"},
+			"capabilities": map[string]any{
+				"send-turn": "native", "resume-session": "native", "steer-turn": "native",
+			},
 		},
 	}
 }

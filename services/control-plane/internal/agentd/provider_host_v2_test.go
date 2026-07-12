@@ -172,6 +172,63 @@ func TestRunnerProviderHostV2DeliversDurableInterruptDuringSend(t *testing.T) {
 	}
 }
 
+func TestRunnerProviderHostV2DeliversDurableSteerDuringSend(t *testing.T) {
+	t.Setenv("GO_WANT_PROVIDER_HOST_HELPER", "1")
+	t.Setenv("PROVIDER_HOST_TEST_MODE", "steer")
+	commandLog := filepath.Join(t.TempDir(), "commands.log")
+	t.Setenv("PROVIDER_HOST_TEST_COMMAND_LOG", commandLog)
+
+	input := providerHostV2TestInput(t)
+	controls := make(chan RunnerControl, 1)
+	done := make(chan error, 1)
+	markedDelivered := false
+	acknowledged := false
+	result, err := providerHostV2TestRunner().RunControlled(
+		context.Background(), input, nil, controls,
+		func(_ context.Context, message RunnerMessage) error {
+			if message.Type == "progress" {
+				controls <- RunnerControl{
+					Command: RunnerControlCommand{
+						Provider: "codex", CommandType: "SteerTurn", CommandID: "steer:durable",
+						Payload: map[string]any{
+							"turnId": input.Workload.TurnID.String(), "inputText": "focus on tests",
+						},
+					},
+					MarkDelivered: func(context.Context) error {
+						markedDelivered = true
+						return nil
+					},
+					Acknowledge: func(context.Context, map[string]any) error {
+						acknowledged = true
+						return nil
+					},
+					Done: done,
+				}
+			}
+			return nil
+		},
+	)
+	if err != nil || result.Output["text"] != "steered" || !markedDelivered || !acknowledged {
+		t.Fatalf("durable Steer failed: result=%#v err=%v delivered=%t acknowledged=%t",
+			result, err, markedDelivered, acknowledged)
+	}
+	select {
+	case controlErr := <-done:
+		if controlErr != nil {
+			t.Fatalf("Steer control failed: %v", controlErr)
+		}
+	default:
+		t.Fatal("Steer control completion was not reported")
+	}
+	commands, err := os.ReadFile(commandLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(commands) != "Describe\nStartSession\nSendTurn\nSteerTurn\n" {
+		t.Fatalf("unexpected Steer command sequence %q", commands)
+	}
+}
+
 func TestRunnerProviderHostV2InterruptsProviderBeforeHostShutdown(t *testing.T) {
 	t.Setenv("GO_WANT_PROVIDER_HOST_HELPER", "1")
 	t.Setenv("PROVIDER_HOST_TEST_MODE", "interrupt")
@@ -451,7 +508,7 @@ func TestProviderHostV2HelperProcess(t *testing.T) {
 		switch command.CommandType {
 		case "Describe":
 			provider, _ := command.Payload["provider"].(string)
-			capabilities := map[string]any{"send-turn": "native"}
+			capabilities := map[string]any{"send-turn": "native", "steer-turn": "native"}
 			if mode == "missing-capability" {
 				capabilities = map[string]any{"send-turn": "unsupported"}
 			}
@@ -493,7 +550,7 @@ func TestProviderHostV2HelperProcess(t *testing.T) {
 				}, nil)
 				continue
 			}
-			if mode == "interrupt" {
+			if mode == "interrupt" || mode == "steer" {
 				copy := command
 				pendingSend = &copy
 				emitProviderHostTestMessage(encoder, command, "Progress", map[string]any{"ready": true}, nil)
@@ -516,6 +573,17 @@ func TestProviderHostV2HelperProcess(t *testing.T) {
 			emitProviderHostTestMessage(encoder, command, "Result", map[string]any{"acknowledged": true}, nil)
 			emitProviderHostTestMessage(encoder, *pendingSend, "Result", map[string]any{
 				"output": map[string]any{"text": "approved"}, "providerResumeCursor": "cursor-approved",
+			}, nil)
+			pendingSend = nil
+		case "SteerTurn":
+			if mode != "steer" || pendingSend == nil || command.Payload["targetCommandId"] != pendingSend.CommandID ||
+				command.Payload["inputText"] != "focus on tests" {
+				fmt.Fprintln(os.Stderr, "unexpected turn steer")
+				os.Exit(2)
+			}
+			emitProviderHostTestMessage(encoder, command, "Result", map[string]any{"steered": true}, nil)
+			emitProviderHostTestMessage(encoder, *pendingSend, "Result", map[string]any{
+				"output": map[string]any{"text": "steered"}, "providerResumeCursor": "cursor-steered",
 			}, nil)
 			pendingSend = nil
 		case "InterruptTurn":
