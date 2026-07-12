@@ -770,8 +770,12 @@ errorCode
 - [x] Go 单元测试和真实 PostgreSQL 17 集成测试通过，包括双 Dispatcher Claim 唯一性与过期恢复。
 - [x] Single-node SaaS Compose Acceptance 通过，覆盖 Outbox 发布结果，并修复 Synara Web 镜像错误
   落到 `worker` Stage 的 Docker 构建缺陷。
-- [ ] 当前进入 Step 2：多副本正确性审计、SSE 跨副本 Catch-up、Schema-aware Readiness 和双副本
-  Integration/Acceptance。整个 Stage 2 尚未完成。
+- [x] Step 2 多副本正确性：已完成进程内状态分类、Background Job Advisory Lock 审计、数据库连接池
+  配置、Migration Lock 超时、Schema/写能力 Readiness、跨副本 SSE Catch-up、并发 Turn/Claim、跨副本
+  Login Session 撤销和单副本退出恢复。
+- [x] 可重复的双副本 Compose Acceptance 已通过，报告见
+  `docs/reports/stage-2-multi-replica-acceptance.md`。
+- [ ] 当前进入 Step 3：生产认证收口。整个 Stage 2 尚未完成。
 
 ### Step 2：多副本正确性
 
@@ -956,8 +960,8 @@ bun run test
 - [ ] Project、Session、Turn 创建具备幂等语义。
 - [ ] Execution 状态机和并发终态已冻结并测试。
 - [ ] Worker Protocol Version、Drain 和 Token Rotation 有明确实现。
-- [ ] 多 Control Plane 副本不依赖进程内权威状态。
-- [ ] SSE 能跨副本、跨重启从 PostgreSQL Sequence 恢复。
+- [x] 多 Control Plane 副本不依赖进程内权威状态。
+- [x] SSE 能跨副本、跨重启从 PostgreSQL Sequence 恢复。
 - [ ] Artifact Complete 由 Control Plane 独立验证 Object 内容。
 - [x] Outbox 具备 Claim、Retry、Dead Letter、Replay 和 Metrics。
 - [ ] Web 主流程可以创建 Control Plane Session/Execution 并消费 Event。

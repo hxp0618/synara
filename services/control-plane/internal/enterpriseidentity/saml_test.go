@@ -249,7 +249,7 @@ func TestSAMLMetadataRejectsUnsafeRedirect(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	service := NewService(db, identity.NewService(db, time.Hour), credentialkms.NewEnvelopeCipher(wrapper))
+	service := NewService(db, identity.NewService(db, time.Hour, 30*time.Minute), credentialkms.NewEnvelopeCipher(wrapper))
 	service.httpClient = redirectServer.Client()
 	_, err = service.Create(context.Background(), principal, tenantID, CreateConnectionInput{
 		Kind: "saml", Name: "Unsafe redirect",
@@ -324,7 +324,7 @@ func newSAMLTestFixtureWithoutConnection(t *testing.T) *samlTestFixture {
 	}
 	fixture := &samlTestFixture{
 		testingT: t, principal: principal, tenantID: tenantID,
-		service:    NewService(db, identity.NewService(db, time.Hour), credentialkms.NewEnvelopeCipher(wrapper)),
+		service:    NewService(db, identity.NewService(db, time.Hour, 30*time.Minute), credentialkms.NewEnvelopeCipher(wrapper)),
 		spProvider: &samlTestServiceProviderProvider{},
 		session: &saml.Session{
 			ID: uuid.NewString(), CreateTime: time.Now().UTC(), ExpireTime: time.Now().UTC().Add(time.Hour),

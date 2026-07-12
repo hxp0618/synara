@@ -34,6 +34,111 @@ func TestLoadRequiresExplicitPostgresConnection(t *testing.T) {
 	}
 }
 
+func TestLoadRejectsEnterpriseDevBootstrapAndMissingPublicURL(t *testing.T) {
+	clearConfigEnvironment(t)
+	t.Setenv("SYNARA_DEPLOYMENT_PROFILE", "enterprise")
+	t.Setenv("SYNARA_DATABASE_URL", "postgres://synara:test@db/synara")
+	t.Setenv("SYNARA_CONTROL_PLANE_DEV_BOOTSTRAP", "true")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "DEV_BOOTSTRAP must be false") {
+		t.Fatalf("expected enterprise dev bootstrap rejection, got %v", err)
+	}
+
+	clearConfigEnvironment(t)
+	t.Setenv("SYNARA_DEPLOYMENT_PROFILE", "enterprise")
+	t.Setenv("SYNARA_DATABASE_URL", "postgres://synara:test@db/synara")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "PUBLIC_CONTROL_PLANE_URL is required") {
+		t.Fatalf("expected enterprise public URL requirement, got %v", err)
+	}
+}
+
+func TestLoadValidatesCookieProxyAndIdleSessionConfiguration(t *testing.T) {
+	clearConfigEnvironment(t)
+	t.Setenv("SYNARA_LOGIN_COOKIE_SECURE", "true")
+	t.Setenv("SYNARA_LOGIN_COOKIE_DOMAIN", ".example.com")
+	t.Setenv("SYNARA_LOGIN_COOKIE_PATH", "/control-plane")
+	t.Setenv("SYNARA_LOGIN_COOKIE_SAME_SITE", "strict")
+	t.Setenv("SYNARA_LOGIN_SESSION_IDLE_TTL", "12h")
+	t.Setenv("SYNARA_TRUSTED_PROXY_CIDRS", "10.0.0.0/8,2001:db8::/32")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.CookieDomain != ".example.com" || cfg.CookiePath != "/control-plane" || cfg.CookieSameSite != "strict" ||
+		cfg.SessionIdleTTL != 12*time.Hour || len(cfg.TrustedProxyCIDRs) != 2 {
+		t.Fatalf("unexpected cookie/proxy/session config: %#v", cfg)
+	}
+
+	clearConfigEnvironment(t)
+	t.Setenv("SYNARA_LOGIN_COOKIE_SAME_SITE", "none")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "COOKIE_SECURE") {
+		t.Fatalf("expected SameSite=None secure cookie rejection, got %v", err)
+	}
+
+	clearConfigEnvironment(t)
+	t.Setenv("SYNARA_LOGIN_SESSION_TTL", "1h")
+	t.Setenv("SYNARA_LOGIN_SESSION_IDLE_TTL", "2h")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "SESSION_IDLE_TTL") {
+		t.Fatalf("expected idle TTL rejection, got %v", err)
+	}
+
+	clearConfigEnvironment(t)
+	t.Setenv("SYNARA_TRUSTED_PROXY_CIDRS", "not-a-cidr")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "TRUSTED_PROXY_CIDRS") {
+		t.Fatalf("expected trusted proxy CIDR rejection, got %v", err)
+	}
+}
+
+func TestLoadRequiresHTTPSAndSecureCookiesOutsideLoopback(t *testing.T) {
+	clearConfigEnvironment(t)
+	t.Setenv("SYNARA_PUBLIC_CONTROL_PLANE_URL", "http://synara.example.com")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "must use HTTPS") {
+		t.Fatalf("expected non-loopback HTTPS requirement, got %v", err)
+	}
+
+	clearConfigEnvironment(t)
+	t.Setenv("SYNARA_PUBLIC_CONTROL_PLANE_URL", "https://synara.example.com")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "COOKIE_SECURE") {
+		t.Fatalf("expected secure cookie requirement, got %v", err)
+	}
+
+	clearConfigEnvironment(t)
+	t.Setenv("SYNARA_PUBLIC_CONTROL_PLANE_URL", "http://127.0.0.1:3780")
+	if _, err := Load(); err != nil {
+		t.Fatalf("loopback HTTP should be allowed: %v", err)
+	}
+}
+
+func TestLoadValidatesDatabasePoolAndMigrationConfiguration(t *testing.T) {
+	clearConfigEnvironment(t)
+	t.Setenv("SYNARA_DATABASE_MAX_OPEN_CONNECTIONS", "40")
+	t.Setenv("SYNARA_DATABASE_MAX_IDLE_CONNECTIONS", "10")
+	t.Setenv("SYNARA_DATABASE_CONNECTION_MAX_LIFETIME", "45m")
+	t.Setenv("SYNARA_DATABASE_CONNECTION_MAX_IDLE_TIME", "5m")
+	t.Setenv("SYNARA_DATABASE_MIGRATION_LOCK_TIMEOUT", "20s")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.DatabaseMaxOpenConnections != 40 || cfg.DatabaseMaxIdleConnections != 10 ||
+		cfg.DatabaseConnectionMaxLifetime != 45*time.Minute || cfg.DatabaseConnectionMaxIdleTime != 5*time.Minute ||
+		cfg.DatabaseMigrationLockTimeout != 20*time.Second {
+		t.Fatalf("unexpected database configuration: %#v", cfg)
+	}
+
+	clearConfigEnvironment(t)
+	t.Setenv("SYNARA_DATABASE_MAX_OPEN_CONNECTIONS", "4")
+	t.Setenv("SYNARA_DATABASE_MAX_IDLE_CONNECTIONS", "5")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "SYNARA_DATABASE_MAX_IDLE_CONNECTIONS") {
+		t.Fatalf("expected invalid idle connection limit, got %v", err)
+	}
+
+	clearConfigEnvironment(t)
+	t.Setenv("SYNARA_DATABASE_MIGRATION_LOCK_TIMEOUT", "0s")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "SYNARA_DATABASE_MIGRATION_LOCK_TIMEOUT") {
+		t.Fatalf("expected invalid migration lock timeout, got %v", err)
+	}
+}
+
 func TestLoadParsesOptionalLocalAgentdConfiguration(t *testing.T) {
 	clearConfigEnvironment(t)
 	t.Setenv("SYNARA_LOCAL_AGENTD_RUNNER_COMMAND_JSON", `["runner","--jsonl"]`)
@@ -77,6 +182,7 @@ func TestLoadValidatesCredentialKMSConfiguration(t *testing.T) {
 
 func TestLoadValidatesSSHProvisioningConfiguration(t *testing.T) {
 	clearConfigEnvironment(t)
+	t.Setenv("SYNARA_LOGIN_COOKIE_SECURE", "true")
 	t.Setenv("SYNARA_PUBLIC_CONTROL_PLANE_URL", "https://synara.example.com/control-plane")
 	t.Setenv("SYNARA_AGENTD_BINARY_PATH", "/tmp/synara-agentd")
 	t.Setenv("SYNARA_SSH_PROVISION_TIMEOUT", "45s")
@@ -135,7 +241,12 @@ func clearConfigEnvironment(t *testing.T) {
 		"SYNARA_QUEUE_DRIVER", "SYNARA_CONTROL_PLANE_REPLICAS", "SYNARA_WORKER_LEASES_ENABLED",
 		"SYNARA_WORKER_FENCING_ENABLED", "SYNARA_DATABASE_URL", "SYNARA_LOGIN_COOKIE_SECURE",
 		"SYNARA_CONTROL_PLANE_DEV_BOOTSTRAP", "SYNARA_LOGIN_SESSION_TTL",
+		"SYNARA_LOGIN_SESSION_IDLE_TTL", "SYNARA_LOGIN_COOKIE_NAME", "SYNARA_LOGIN_COOKIE_DOMAIN",
+		"SYNARA_LOGIN_COOKIE_PATH", "SYNARA_LOGIN_COOKIE_SAME_SITE", "SYNARA_TRUSTED_PROXY_CIDRS",
 		"SYNARA_CONTROL_PLANE_SHUTDOWN_TIMEOUT", "SYNARA_WORKER_LEASE_TTL",
+		"SYNARA_DATABASE_MAX_OPEN_CONNECTIONS", "SYNARA_DATABASE_MAX_IDLE_CONNECTIONS",
+		"SYNARA_DATABASE_CONNECTION_MAX_LIFETIME", "SYNARA_DATABASE_CONNECTION_MAX_IDLE_TIME",
+		"SYNARA_DATABASE_MIGRATION_LOCK_TIMEOUT",
 		"SYNARA_WORKER_HEARTBEAT_TIMEOUT", "SYNARA_WORKER_RECEIPT_TTL",
 		"SYNARA_LOCAL_AGENTD_RUNNER_COMMAND_JSON", "SYNARA_LOCAL_AGENTD_WORKSPACE_ROOT",
 		"SYNARA_LOCAL_AGENTD_RESTART_BACKOFF",

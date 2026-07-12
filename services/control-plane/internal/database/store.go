@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
@@ -22,18 +23,20 @@ type MetadataStore interface {
 }
 
 type store struct {
-	db   *gorm.DB
-	kind platform.MetadataStore
+	db                   *gorm.DB
+	kind                 platform.MetadataStore
+	migrationLockTimeout time.Duration
 }
 
-func OpenMetadataStore(ctx context.Context, config platform.Config, databaseURL, sqlitePath string) (MetadataStore, error) {
+func OpenMetadataStore(ctx context.Context, config platform.Config, databaseURL, sqlitePath string, values ...Options) (MetadataStore, error) {
+	options := resolveOptions(values)
 	switch config.MetadataStore {
 	case platform.MetadataPostgres:
-		db, err := Open(ctx, databaseURL)
+		db, err := Open(ctx, databaseURL, options)
 		if err != nil {
 			return nil, err
 		}
-		return &store{db: db, kind: platform.MetadataPostgres}, nil
+		return &store{db: db, kind: platform.MetadataPostgres, migrationLockTimeout: options.MigrationLockTimeout}, nil
 	case platform.MetadataSQLite:
 		if err := os.MkdirAll(filepath.Dir(sqlitePath), 0o700); err != nil {
 			return nil, fmt.Errorf("create sqlite metadata directory: %w", err)
@@ -68,7 +71,7 @@ func OpenMetadataStore(ctx context.Context, config platform.Config, databaseURL,
 			_ = sqlDB.Close()
 			return nil, fmt.Errorf("configure sqlite synchronous mode: %w", err)
 		}
-		return &store{db: db, kind: platform.MetadataSQLite}, nil
+		return &store{db: db, kind: platform.MetadataSQLite, migrationLockTimeout: options.MigrationLockTimeout}, nil
 	default:
 		return nil, fmt.Errorf("unsupported metadata store %q", config.MetadataStore)
 	}
@@ -80,7 +83,7 @@ func (s *store) Kind() platform.MetadataStore { return s.kind }
 
 func (s *store) Migrate(ctx context.Context, files fs.FS) error {
 	if s.kind == platform.MetadataPostgres {
-		return Migrate(ctx, s.db, files)
+		return Migrate(ctx, s.db, files, s.migrationLockTimeout)
 	}
 	if err := s.db.WithContext(ctx).AutoMigrate(persistence.AllModels()...); err != nil {
 		return fmt.Errorf("auto-migrate sqlite metadata schema: %w", err)

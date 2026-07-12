@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -16,51 +17,61 @@ import (
 )
 
 type Config struct {
-	Platform                    platform.Config
-	ListenAddress               string
-	DatabaseURL                 string
-	SQLitePath                  string
-	ArtifactLocalPath           string
-	ArtifactBucket              string
-	ArtifactRegion              string
-	ArtifactEndpoint            string
-	ArtifactPublicEndpoint      string
-	ArtifactAccessKeyID         string
-	ArtifactSecretAccessKey     string
-	ArtifactSessionToken        string
-	ArtifactUsePathStyle        bool
-	ArtifactPresignTTL          time.Duration
-	ArtifactMaxUploadBytes      int64
-	InstallationID              string
-	CookieName                  string
-	CookieSecure                bool
-	DevBootstrapEnabled         bool
-	SessionTTL                  time.Duration
-	ShutdownTimeout             time.Duration
-	WorkerRegistrationToken     string
-	WorkerLeaseTTL              time.Duration
-	WorkerHeartbeatTimeout      time.Duration
-	WorkerReceiptTTL            time.Duration
-	ProviderCursorKey           []byte
-	LocalAgentdRunnerCommand    []string
-	LocalAgentdWorkspaceRoot    string
-	LocalAgentdRestartBackoff   time.Duration
-	CredentialKMSProvider       string
-	CredentialKMSKeyID          string
-	CredentialKMSLocalKey       []byte
-	CredentialKMSAWSRegion      string
-	PublicControlPlaneURL       string
-	AgentdBinaryPath            string
-	SSHProvisionTimeout         time.Duration
-	DockerReconcileInterval     time.Duration
-	KubernetesReconcileInterval time.Duration
-	RetentionSweepInterval      time.Duration
-	OutboxPollInterval          time.Duration
-	OutboxClaimTTL              time.Duration
-	OutboxBatchSize             int
-	OutboxMaxAttempts           int
-	OutboxBaseBackoff           time.Duration
-	OutboxMaxBackoff            time.Duration
+	Platform                      platform.Config
+	ListenAddress                 string
+	DatabaseURL                   string
+	DatabaseMaxOpenConnections    int
+	DatabaseMaxIdleConnections    int
+	DatabaseConnectionMaxLifetime time.Duration
+	DatabaseConnectionMaxIdleTime time.Duration
+	DatabaseMigrationLockTimeout  time.Duration
+	SQLitePath                    string
+	ArtifactLocalPath             string
+	ArtifactBucket                string
+	ArtifactRegion                string
+	ArtifactEndpoint              string
+	ArtifactPublicEndpoint        string
+	ArtifactAccessKeyID           string
+	ArtifactSecretAccessKey       string
+	ArtifactSessionToken          string
+	ArtifactUsePathStyle          bool
+	ArtifactPresignTTL            time.Duration
+	ArtifactMaxUploadBytes        int64
+	InstallationID                string
+	CookieName                    string
+	CookieDomain                  string
+	CookiePath                    string
+	CookieSameSite                string
+	CookieSecure                  bool
+	DevBootstrapEnabled           bool
+	SessionTTL                    time.Duration
+	SessionIdleTTL                time.Duration
+	TrustedProxyCIDRs             []netip.Prefix
+	ShutdownTimeout               time.Duration
+	WorkerRegistrationToken       string
+	WorkerLeaseTTL                time.Duration
+	WorkerHeartbeatTimeout        time.Duration
+	WorkerReceiptTTL              time.Duration
+	ProviderCursorKey             []byte
+	LocalAgentdRunnerCommand      []string
+	LocalAgentdWorkspaceRoot      string
+	LocalAgentdRestartBackoff     time.Duration
+	CredentialKMSProvider         string
+	CredentialKMSKeyID            string
+	CredentialKMSLocalKey         []byte
+	CredentialKMSAWSRegion        string
+	PublicControlPlaneURL         string
+	AgentdBinaryPath              string
+	SSHProvisionTimeout           time.Duration
+	DockerReconcileInterval       time.Duration
+	KubernetesReconcileInterval   time.Duration
+	RetentionSweepInterval        time.Duration
+	OutboxPollInterval            time.Duration
+	OutboxClaimTTL                time.Duration
+	OutboxBatchSize               int
+	OutboxMaxAttempts             int
+	OutboxBaseBackoff             time.Duration
+	OutboxMaxBackoff              time.Duration
 }
 
 func Load() (Config, error) {
@@ -119,6 +130,9 @@ func Load() (Config, error) {
 		ArtifactSessionToken:    strings.TrimSpace(os.Getenv("SYNARA_ARTIFACT_SESSION_TOKEN")),
 		InstallationID:          strings.TrimSpace(os.Getenv("SYNARA_INSTALLATION_ID")),
 		CookieName:              envOrDefault("SYNARA_LOGIN_COOKIE_NAME", "synara_login_session"),
+		CookieDomain:            strings.TrimSpace(os.Getenv("SYNARA_LOGIN_COOKIE_DOMAIN")),
+		CookiePath:              envOrDefault("SYNARA_LOGIN_COOKIE_PATH", "/"),
+		CookieSameSite:          strings.ToLower(envOrDefault("SYNARA_LOGIN_COOKIE_SAME_SITE", "lax")),
 		WorkerRegistrationToken: strings.TrimSpace(os.Getenv("SYNARA_WORKER_REGISTRATION_TOKEN")),
 	}
 	if cfg.CookieSecure, err = envBoolStrict("SYNARA_LOGIN_COOKIE_SECURE", false); err != nil {
@@ -130,7 +144,28 @@ func Load() (Config, error) {
 	if cfg.SessionTTL, err = envDurationStrict("SYNARA_LOGIN_SESSION_TTL", 30*24*time.Hour); err != nil {
 		return Config{}, err
 	}
+	if cfg.SessionIdleTTL, err = envDurationStrict("SYNARA_LOGIN_SESSION_IDLE_TTL", 7*24*time.Hour); err != nil {
+		return Config{}, err
+	}
+	if cfg.TrustedProxyCIDRs, err = parseCIDRs(os.Getenv("SYNARA_TRUSTED_PROXY_CIDRS")); err != nil {
+		return Config{}, err
+	}
 	if cfg.ShutdownTimeout, err = envDurationStrict("SYNARA_CONTROL_PLANE_SHUTDOWN_TIMEOUT", 15*time.Second); err != nil {
+		return Config{}, err
+	}
+	if cfg.DatabaseMaxOpenConnections, err = envInt("SYNARA_DATABASE_MAX_OPEN_CONNECTIONS", 20); err != nil {
+		return Config{}, err
+	}
+	if cfg.DatabaseMaxIdleConnections, err = envInt("SYNARA_DATABASE_MAX_IDLE_CONNECTIONS", 5); err != nil {
+		return Config{}, err
+	}
+	if cfg.DatabaseConnectionMaxLifetime, err = envDurationStrict("SYNARA_DATABASE_CONNECTION_MAX_LIFETIME", time.Hour); err != nil {
+		return Config{}, err
+	}
+	if cfg.DatabaseConnectionMaxIdleTime, err = envDurationStrict("SYNARA_DATABASE_CONNECTION_MAX_IDLE_TIME", 15*time.Minute); err != nil {
+		return Config{}, err
+	}
+	if cfg.DatabaseMigrationLockTimeout, err = envDurationStrict("SYNARA_DATABASE_MIGRATION_LOCK_TIMEOUT", 30*time.Second); err != nil {
 		return Config{}, err
 	}
 	if cfg.WorkerLeaseTTL, err = envDurationStrict("SYNARA_WORKER_LEASE_TTL", 30*time.Second); err != nil {
@@ -231,8 +266,43 @@ func Load() (Config, error) {
 	if strings.TrimSpace(cfg.CookieName) == "" {
 		return Config{}, errors.New("SYNARA_LOGIN_COOKIE_NAME must not be empty")
 	}
+	if !strings.HasPrefix(cfg.CookiePath, "/") || strings.ContainsAny(cfg.CookiePath, "\r\n\t") {
+		return Config{}, errors.New("SYNARA_LOGIN_COOKIE_PATH must be an absolute cookie path")
+	}
+	if strings.ContainsAny(cfg.CookieDomain, "\r\n\t/:@") {
+		return Config{}, errors.New("SYNARA_LOGIN_COOKIE_DOMAIN is invalid")
+	}
+	switch cfg.CookieSameSite {
+	case "lax", "strict", "none":
+	default:
+		return Config{}, errors.New("SYNARA_LOGIN_COOKIE_SAME_SITE must be lax, strict, or none")
+	}
+	if cfg.CookieSameSite == "none" && !cfg.CookieSecure {
+		return Config{}, errors.New("SYNARA_LOGIN_COOKIE_SECURE must be true when SYNARA_LOGIN_COOKIE_SAME_SITE=none")
+	}
 	if cfg.SessionTTL <= 0 {
 		return Config{}, errors.New("SYNARA_LOGIN_SESSION_TTL must be positive")
+	}
+	if cfg.SessionIdleTTL <= 0 || cfg.SessionIdleTTL > cfg.SessionTTL {
+		return Config{}, errors.New("SYNARA_LOGIN_SESSION_IDLE_TTL must be positive and no greater than SYNARA_LOGIN_SESSION_TTL")
+	}
+	if cfg.Platform.Profile == platform.ProfileEnterprise && cfg.DevBootstrapEnabled {
+		return Config{}, errors.New("SYNARA_CONTROL_PLANE_DEV_BOOTSTRAP must be false for enterprise deployments")
+	}
+	if cfg.DatabaseMaxOpenConnections <= 0 || cfg.DatabaseMaxOpenConnections > 1000 {
+		return Config{}, errors.New("SYNARA_DATABASE_MAX_OPEN_CONNECTIONS must be between 1 and 1000")
+	}
+	if cfg.DatabaseMaxIdleConnections < 0 || cfg.DatabaseMaxIdleConnections > cfg.DatabaseMaxOpenConnections {
+		return Config{}, errors.New("SYNARA_DATABASE_MAX_IDLE_CONNECTIONS must be between 0 and SYNARA_DATABASE_MAX_OPEN_CONNECTIONS")
+	}
+	if cfg.DatabaseConnectionMaxLifetime < 0 {
+		return Config{}, errors.New("SYNARA_DATABASE_CONNECTION_MAX_LIFETIME must not be negative")
+	}
+	if cfg.DatabaseConnectionMaxIdleTime < 0 {
+		return Config{}, errors.New("SYNARA_DATABASE_CONNECTION_MAX_IDLE_TIME must not be negative")
+	}
+	if cfg.DatabaseMigrationLockTimeout <= 0 {
+		return Config{}, errors.New("SYNARA_DATABASE_MIGRATION_LOCK_TIMEOUT must be positive")
 	}
 	if cfg.WorkerLeaseTTL <= 0 {
 		return Config{}, errors.New("SYNARA_WORKER_LEASE_TTL must be positive")
@@ -255,10 +325,22 @@ func Load() (Config, error) {
 	if len(cfg.LocalAgentdRunnerCommand) > 0 && strings.TrimSpace(cfg.LocalAgentdWorkspaceRoot) == "" {
 		return Config{}, errors.New("SYNARA_LOCAL_AGENTD_WORKSPACE_ROOT must not be empty")
 	}
+	if cfg.Platform.Profile == platform.ProfileEnterprise && cfg.PublicControlPlaneURL == "" {
+		return Config{}, errors.New("SYNARA_PUBLIC_CONTROL_PLANE_URL is required for enterprise deployments")
+	}
 	if cfg.PublicControlPlaneURL != "" {
 		parsed, parseErr := url.Parse(cfg.PublicControlPlaneURL)
-		if parseErr != nil || parsed.Scheme == "" || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		if parseErr != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" ||
+			(parsed.Scheme != "http" && parsed.Scheme != "https") {
 			return Config{}, errors.New("SYNARA_PUBLIC_CONTROL_PLANE_URL must be an HTTP(S) origin")
+		}
+		if !isLoopbackHostname(parsed.Hostname()) {
+			if parsed.Scheme != "https" {
+				return Config{}, errors.New("SYNARA_PUBLIC_CONTROL_PLANE_URL must use HTTPS outside loopback")
+			}
+			if !cfg.CookieSecure {
+				return Config{}, errors.New("SYNARA_LOGIN_COOKIE_SECURE must be true outside loopback")
+			}
 		}
 	}
 	if strings.TrimSpace(cfg.AgentdBinaryPath) == "" {
@@ -325,6 +407,32 @@ func Load() (Config, error) {
 		}
 	}
 	return cfg, nil
+}
+
+func parseCIDRs(value string) ([]netip.Prefix, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil, nil
+	}
+	parts := strings.Split(value, ",")
+	result := make([]netip.Prefix, 0, len(parts))
+	for _, part := range parts {
+		prefix, err := netip.ParsePrefix(strings.TrimSpace(part))
+		if err != nil {
+			return nil, fmt.Errorf("SYNARA_TRUSTED_PROXY_CIDRS must contain valid CIDR prefixes")
+		}
+		result = append(result, prefix.Masked())
+	}
+	return result, nil
+}
+
+func isLoopbackHostname(host string) bool {
+	host = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(host)), ".")
+	if host == "localhost" {
+		return true
+	}
+	address, err := netip.ParseAddr(host)
+	return err == nil && address.IsLoopback()
 }
 
 func decodeKey(value, name string) ([]byte, error) {

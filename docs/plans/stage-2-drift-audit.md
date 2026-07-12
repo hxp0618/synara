@@ -1,6 +1,6 @@
 # Stage 2 Drift Audit
 
-Baseline: `codex/saas-tenancy-user` at `05c3c5da` plus the current uncommitted roadmap documents.
+Baseline: `codex/saas-tenancy-user` at `05c3c5da`; status updated after Stage 2 Steps 1-2 implementation.
 
 This audit classifies the productionization plan against executable code rather than plan status text.
 
@@ -9,10 +9,10 @@ This audit classifies the productionization plan against executable code rather 
 | A. Production authentication | partial | OIDC, SAML, persisted login sessions and secure-cookie support exist. Enterprise dev-bootstrap rejection, trusted-proxy policy, idle expiry and rotation/revocation concurrency still need completion. |
 | B. Session API | partial | Tenant-scoped Project/Session/Turn/Event APIs and ordered replay exist. Uniform idempotency keys, the full state machine and payload validation limits remain. |
 | C. Execution and Worker lifecycle | partial | Registration, heartbeat, Claim, Lease, Generation fencing and recovery exist. Protocol version negotiation, Drain, token rotation, Cancel races and persisted Approval/Input remain. |
-| D. Stateless replicas | partial | PostgreSQL is authoritative and reconcilers use database coordination in several paths. Pool configuration, schema-aware readiness and a repeatable two-replica suite remain. |
+| D. Stateless replicas | implemented | PostgreSQL is authoritative; periodic jobs use Advisory Lock or `SKIP LOCKED`; pool settings and Migration Lock timeout are configurable; readiness checks write access and migration version/checksum; the repeatable two-replica suite covers concurrent Turn/Claim, cross-replica revocation/SSE and replica loss. |
 | E. Artifact completion | partial | Local/MinIO/S3 stores, presigned grants and server-side Stat/Hash validation exist. Temporary-key promotion, distributed cleanup and real S3 compatibility evidence remain. |
-| F. SSE | partial | Sequence replay, `Last-Event-ID`, heartbeat and PostgreSQL catch-up exist. Connection limits, catch-up metrics, slow-client policy and cross-replica acceptance remain. |
-| G. Reliable Outbox | missing | Rows are inserted transactionally, but there is no durable Claim/Dispatcher, retry, claim recovery, dead letter, replay or complete metric set. |
+| F. SSE | partial | Sequence replay, `Last-Event-ID`, heartbeat and PostgreSQL cross-replica catch-up are covered by automated tests and real two-replica acceptance. Connection limits, catch-up metrics and the explicit slow-client policy remain. |
+| G. Reliable Outbox | implemented | Durable Claim/Dispatcher, claim recovery, bounded retry, Dead Letter, audited Replay, lifecycle transaction integration, metrics and alerts are implemented and covered by SQLite/PostgreSQL tests. |
 | H. Web main flow | partial | Settings can operate Control Plane resources. The primary chat still uses the TypeScript orchestration authority and lacks an application-level Control Plane context/projection. |
 | I. Operations | partial | HTTP, Worker, Execution and dependency metrics exist. Outbox/SSE/DB-pool coverage, alerts and production runbooks remain incomplete. |
 
@@ -29,5 +29,5 @@ This audit classifies the productionization plan against executable code rather 
 | Provider resume cursor | `authoritative-postgres`, encrypted. |
 | Artifact metadata | `authoritative-postgres`; payload is `authoritative-object-store`. |
 
-The implementation order remains the one in the Stage 2 plan. Reliable Outbox is the first missing
-production primitive and must be completed before broader multi-replica acceptance.
+The implementation order remains the one in the Stage 2 plan. Steps 0-2 are complete; production
+authentication is the next implementation step. The full Stage 2 remains in progress.

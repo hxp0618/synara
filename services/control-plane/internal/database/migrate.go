@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io/fs"
 	"path/filepath"
@@ -34,7 +35,11 @@ type migrationRecord struct {
 
 func (migrationRecord) TableName() string { return "control_plane_schema_migrations" }
 
-func Migrate(ctx context.Context, db *gorm.DB, files fs.FS) error {
+func Migrate(ctx context.Context, db *gorm.DB, files fs.FS, lockTimeoutValues ...time.Duration) error {
+	lockTimeout := 30 * time.Second
+	if len(lockTimeoutValues) > 0 {
+		lockTimeout = lockTimeoutValues[0]
+	}
 	sqlDB, err := db.DB()
 	if err != nil {
 		return fmt.Errorf("resolve migration pool: %w", err)
@@ -48,7 +53,12 @@ func Migrate(ctx context.Context, db *gorm.DB, files fs.FS) error {
 	connection := db.Session(&gorm.Session{NewDB: true, Context: ctx})
 	connection.ConnPool = rawConnection
 	connection.Statement.ConnPool = rawConnection
-	if err := connection.Exec(`SELECT pg_advisory_lock(hashtext('synara_control_plane_migrations'))`).Error; err != nil {
+	lockContext, cancelLock := context.WithTimeout(ctx, lockTimeout)
+	defer cancelLock()
+	if err := connection.WithContext(lockContext).Exec(`SELECT pg_advisory_lock(hashtext('synara_control_plane_migrations'))`).Error; err != nil {
+		if errors.Is(lockContext.Err(), context.DeadlineExceeded) {
+			return fmt.Errorf("acquire migration lock within %s: %w", lockTimeout, lockContext.Err())
+		}
 		return fmt.Errorf("acquire migration lock: %w", err)
 	}
 	defer func() {

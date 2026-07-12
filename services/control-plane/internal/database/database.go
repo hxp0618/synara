@@ -9,7 +9,33 @@ import (
 	"gorm.io/gorm"
 )
 
-func Open(ctx context.Context, databaseURL string) (*gorm.DB, error) {
+type Options struct {
+	MaxOpenConnections    int
+	MaxIdleConnections    int
+	ConnectionMaxLifetime time.Duration
+	ConnectionMaxIdleTime time.Duration
+	MigrationLockTimeout  time.Duration
+}
+
+func DefaultOptions() Options {
+	return Options{
+		MaxOpenConnections:    20,
+		MaxIdleConnections:    5,
+		ConnectionMaxLifetime: time.Hour,
+		ConnectionMaxIdleTime: 15 * time.Minute,
+		MigrationLockTimeout:  30 * time.Second,
+	}
+}
+
+func resolveOptions(values []Options) Options {
+	if len(values) == 0 {
+		return DefaultOptions()
+	}
+	return values[0]
+}
+
+func Open(ctx context.Context, databaseURL string, values ...Options) (*gorm.DB, error) {
+	options := resolveOptions(values)
 	db, err := gorm.Open(postgres.Open(databaseURL), &gorm.Config{
 		TranslateError:         true,
 		SkipDefaultTransaction: true,
@@ -23,10 +49,10 @@ func Open(ctx context.Context, databaseURL string) (*gorm.DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("resolve database pool: %w", err)
 	}
-	sqlDB.SetMaxOpenConns(20)
-	sqlDB.SetMaxIdleConns(5)
-	sqlDB.SetConnMaxLifetime(time.Hour)
-	sqlDB.SetConnMaxIdleTime(15 * time.Minute)
+	sqlDB.SetMaxOpenConns(options.MaxOpenConnections)
+	sqlDB.SetMaxIdleConns(options.MaxIdleConnections)
+	sqlDB.SetConnMaxLifetime(options.ConnectionMaxLifetime)
+	sqlDB.SetConnMaxIdleTime(options.ConnectionMaxIdleTime)
 	if err := sqlDB.PingContext(ctx); err != nil {
 		_ = sqlDB.Close()
 		return nil, fmt.Errorf("ping database: %w", err)

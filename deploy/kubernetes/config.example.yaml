@@ -5,6 +5,8 @@ metadata:
   namespace: synara-system
 data:
   public-control-plane-url: https://synara.example.com
+  # Set to the ingress/load-balancer CIDRs that append X-Forwarded-For.
+  trusted-proxy-cidrs: ""
   artifact-bucket: synara-artifacts
   aws-region: us-east-1
   credential-kms-key-id: alias/synara-provider-credentials

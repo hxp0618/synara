@@ -70,9 +70,17 @@ func (s *Server) streamSessionEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	poll := time.NewTicker(sessionEventPollInterval)
+	pollInterval := s.sessionEventPoll
+	if pollInterval <= 0 {
+		pollInterval = sessionEventPollInterval
+	}
+	heartbeatInterval := s.sessionEventBeat
+	if heartbeatInterval <= 0 {
+		heartbeatInterval = sessionEventHeartbeat
+	}
+	poll := time.NewTicker(pollInterval)
 	defer poll.Stop()
-	heartbeat := time.NewTicker(sessionEventHeartbeat)
+	heartbeat := time.NewTicker(heartbeatInterval)
 	defer heartbeat.Stop()
 
 	for {

@@ -9,8 +9,8 @@ import (
 	"io"
 	"log/slog"
 	"mime"
-	"net"
 	"net/http"
+	"net/netip"
 	"strconv"
 	"strings"
 	"time"
@@ -21,6 +21,7 @@ import (
 	"github.com/synara-ai/synara/services/control-plane/internal/artifacts"
 	"github.com/synara-ai/synara/services/control-plane/internal/config"
 	"github.com/synara-ai/synara/services/control-plane/internal/credentials"
+	"github.com/synara-ai/synara/services/control-plane/internal/database"
 	"github.com/synara-ai/synara/services/control-plane/internal/enterpriseidentity"
 	"github.com/synara-ai/synara/services/control-plane/internal/executions"
 	"github.com/synara-ai/synara/services/control-plane/internal/executiontargets"
@@ -42,6 +43,7 @@ const maxJSONBodyBytes = 1 << 20
 type principalContextKey struct{}
 type requestIDContextKey struct{}
 type traceIDContextKey struct{}
+type clientIPContextKey struct{}
 type workerContextKey struct{}
 type serviceAccountContextKey struct{}
 
@@ -65,7 +67,15 @@ type Server struct {
 	serviceAccounts    *serviceaccounts.Service
 	scim               *scim.Service
 	logger             *slog.Logger
+	schema             schemaReadiness
+	sessionEventPoll   time.Duration
+	sessionEventBeat   time.Duration
 	handler            http.Handler
+}
+
+type schemaReadiness interface {
+	Check(context.Context) (database.SchemaStatus, error)
+	CheckWrite(context.Context) error
 }
 
 func New(
@@ -87,6 +97,7 @@ func New(
 	enterpriseIdentityService *enterpriseidentity.Service,
 	serviceAccountService *serviceaccounts.Service,
 	scimService *scim.Service,
+	schemaChecker schemaReadiness,
 	logger *slog.Logger,
 ) *Server {
 	server := &Server{
@@ -96,7 +107,8 @@ func New(
 		artifacts: artifactService, quotas: quotaService,
 		credentials: credentialService, retention: retentionService, metrics: metrics, outbox: outboxService,
 		enterpriseIdentity: enterpriseIdentityService, serviceAccounts: serviceAccountService,
-		scim: scimService, logger: logger,
+		scim: scimService, schema: schemaChecker, logger: logger,
+		sessionEventPoll: sessionEventPollInterval, sessionEventBeat: sessionEventHeartbeat,
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", server.health)
@@ -135,6 +147,7 @@ func New(
 	mux.Handle("POST /v1/tenants/{tenantID}/invitations", server.requireAuth(http.HandlerFunc(server.inviteTenantMember)))
 	mux.Handle("PATCH /v1/tenants/{tenantID}/members/{userID}", server.requireAuth(http.HandlerFunc(server.updateTenantMember)))
 	mux.Handle("DELETE /v1/tenants/{tenantID}/members/{userID}", server.requireAuth(http.HandlerFunc(server.removeTenantMember)))
+	mux.Handle("POST /v1/tenants/{tenantID}/members/{userID}/revoke-sessions", server.requireAuth(http.HandlerFunc(server.revokeTenantUserSessions)))
 	mux.Handle("GET /v1/tenants/{tenantID}/audit-logs", server.requireAuth(http.HandlerFunc(server.listAuditLogs)))
 	mux.Handle("GET /v1/tenants/{tenantID}/audit-logs/export", server.requireAuth(http.HandlerFunc(server.exportAuditLogs)))
 	mux.Handle("GET /v1/tenants/{tenantID}/outbox-messages", server.requireAuth(http.HandlerFunc(server.listOutboxMessages)))
@@ -227,9 +240,11 @@ func (s *Server) ready(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 	defer cancel()
 	type dependency struct {
-		Status    string `json:"status"`
-		Kind      string `json:"kind,omitempty"`
-		LatencyMS int64  `json:"latencyMs"`
+		Status          string `json:"status"`
+		Kind            string `json:"kind,omitempty"`
+		LatencyMS       int64  `json:"latencyMs"`
+		ExpectedVersion int64  `json:"expectedVersion,omitempty"`
+		AppliedVersion  int64  `json:"appliedVersion,omitempty"`
 	}
 	checks := map[string]dependency{}
 	databaseStarted := time.Now()
@@ -245,6 +260,27 @@ func (s *Server) ready(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	checks["database"] = dependency{Status: "ready", Kind: string(s.config.Platform.MetadataStore), LatencyMS: time.Since(databaseStarted).Milliseconds()}
+	writeStarted := time.Now()
+	if err := s.schema.CheckWrite(ctx); err != nil {
+		checks["databaseWrite"] = dependency{Status: "unavailable", Kind: string(s.config.Platform.MetadataStore), LatencyMS: time.Since(writeStarted).Milliseconds()}
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"status": "not_ready", "checks": checks, "requestId": requestID(r)})
+		return
+	}
+	checks["databaseWrite"] = dependency{Status: "ready", Kind: string(s.config.Platform.MetadataStore), LatencyMS: time.Since(writeStarted).Milliseconds()}
+	schemaStarted := time.Now()
+	schemaStatus, err := s.schema.Check(ctx)
+	if err != nil {
+		checks["schema"] = dependency{
+			Status: "unavailable", Kind: string(schemaStatus.Kind), LatencyMS: time.Since(schemaStarted).Milliseconds(),
+			ExpectedVersion: schemaStatus.ExpectedVersion, AppliedVersion: schemaStatus.AppliedVersion,
+		}
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"status": "not_ready", "checks": checks, "requestId": requestID(r)})
+		return
+	}
+	checks["schema"] = dependency{
+		Status: "ready", Kind: string(schemaStatus.Kind), LatencyMS: time.Since(schemaStarted).Milliseconds(),
+		ExpectedVersion: schemaStatus.ExpectedVersion, AppliedVersion: schemaStatus.AppliedVersion,
+	}
 	artifactStarted := time.Now()
 	if err := s.artifacts.CheckStore(ctx); err != nil {
 		checks["artifactStore"] = dependency{Status: "unavailable", Kind: string(s.config.Platform.ArtifactStore), LatencyMS: time.Since(artifactStarted).Milliseconds()}
@@ -287,11 +323,7 @@ func (s *Server) devLogin(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, err)
 		return
 	}
-	http.SetCookie(w, &http.Cookie{
-		Name: s.config.CookieName, Value: issued.Token, Path: "/", HttpOnly: true,
-		Secure: s.config.CookieSecure, SameSite: http.SameSiteLaxMode,
-		MaxAge: int(s.config.SessionTTL.Seconds()),
-	})
+	s.setSessionCookie(w, issued.Token)
 	writeJSON(w, http.StatusOK, issued.State)
 }
 
@@ -309,10 +341,7 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, err)
 		return
 	}
-	http.SetCookie(w, &http.Cookie{
-		Name: s.config.CookieName, Value: "", Path: "/", HttpOnly: true,
-		Secure: s.config.CookieSecure, SameSite: http.SameSiteLaxMode, MaxAge: -1,
-	})
+	s.clearSessionCookie(w)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -479,6 +508,25 @@ func (s *Server) removeTenantMember(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) revokeTenantUserSessions(w http.ResponseWriter, r *http.Request) {
+	tenantID, ok := s.pathUUID(w, r, "tenantID")
+	if !ok {
+		return
+	}
+	userID, ok := s.pathUUID(w, r, "userID")
+	if !ok {
+		return
+	}
+	revoked, err := s.identity.RevokeTenantUserSessions(
+		r.Context(), mustPrincipal(r), tenantID, userID, requestID(r), clientIP(r),
+	)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"revokedCount": revoked})
 }
 
 func (s *Server) listOrganizations(w http.ResponseWriter, r *http.Request) {
@@ -866,6 +914,7 @@ func (s *Server) withRequestContext(next http.Handler) http.Handler {
 		w.Header().Set("Traceparent", "00-"+trace+"-"+span+"-01")
 		ctx := context.WithValue(r.Context(), requestIDContextKey{}, id)
 		ctx = context.WithValue(ctx, traceIDContextKey{}, trace)
+		ctx = context.WithValue(ctx, clientIPContextKey{}, s.resolveClientIP(r))
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
@@ -1082,12 +1131,78 @@ func normalizedLogRoute(r *http.Request) string {
 }
 
 func clientIP(r *http.Request) string {
-	if forwarded := strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-For"), ",")[0]); forwarded != "" {
-		return forwarded
+	if value, ok := r.Context().Value(clientIPContextKey{}).(string); ok && value != "" {
+		return value
 	}
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err == nil {
-		return host
+	address, ok := directRemoteIP(r.RemoteAddr)
+	if ok {
+		return address.String()
 	}
 	return strings.TrimSpace(r.RemoteAddr)
+}
+
+func (s *Server) resolveClientIP(r *http.Request) string {
+	remote, ok := directRemoteIP(r.RemoteAddr)
+	if !ok {
+		return strings.TrimSpace(r.RemoteAddr)
+	}
+	candidate := remote
+	forwarded := strings.Split(r.Header.Get("X-Forwarded-For"), ",")
+	for index := len(forwarded) - 1; index >= 0 && s.isTrustedProxy(candidate); index-- {
+		address, err := netip.ParseAddr(strings.TrimSpace(forwarded[index]))
+		if err != nil {
+			return remote.String()
+		}
+		candidate = address.Unmap()
+	}
+	return candidate.String()
+}
+
+func (s *Server) isTrustedProxy(address netip.Addr) bool {
+	for _, prefix := range s.config.TrustedProxyCIDRs {
+		if prefix.Contains(address) {
+			return true
+		}
+	}
+	return false
+}
+
+func directRemoteIP(value string) (netip.Addr, bool) {
+	if addressPort, err := netip.ParseAddrPort(strings.TrimSpace(value)); err == nil {
+		return addressPort.Addr().Unmap(), true
+	}
+	address, err := netip.ParseAddr(strings.Trim(strings.TrimSpace(value), "[]"))
+	if err != nil {
+		return netip.Addr{}, false
+	}
+	return address.Unmap(), true
+}
+
+func (s *Server) setSessionCookie(w http.ResponseWriter, token string) {
+	http.SetCookie(w, &http.Cookie{
+		Name: s.config.CookieName, Value: token, Domain: s.config.CookieDomain,
+		Path: s.config.CookiePath, HttpOnly: true, Secure: s.config.CookieSecure,
+		SameSite: sessionCookieSameSite(s.config.CookieSameSite),
+		MaxAge:   int(s.config.SessionTTL.Seconds()), Expires: time.Now().UTC().Add(s.config.SessionTTL),
+	})
+}
+
+func (s *Server) clearSessionCookie(w http.ResponseWriter) {
+	http.SetCookie(w, &http.Cookie{
+		Name: s.config.CookieName, Value: "", Domain: s.config.CookieDomain,
+		Path: s.config.CookiePath, HttpOnly: true, Secure: s.config.CookieSecure,
+		SameSite: sessionCookieSameSite(s.config.CookieSameSite),
+		MaxAge:   -1, Expires: time.Unix(1, 0).UTC(),
+	})
+}
+
+func sessionCookieSameSite(value string) http.SameSite {
+	switch value {
+	case "strict":
+		return http.SameSiteStrictMode
+	case "none":
+		return http.SameSiteNoneMode
+	default:
+		return http.SameSiteLaxMode
+	}
 }

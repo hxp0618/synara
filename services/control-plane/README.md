@@ -114,6 +114,37 @@ SYNARA_OUTBOX_MAX_BACKOFF
 The `/metrics` endpoint exposes pending count, retry count, dead-letter count and oldest pending age.
 Payloads are not returned by the operational list API and are never included in publisher error logs.
 
+## Multi-replica readiness and acceptance
+
+Schema readiness is checked separately from database connectivity. `/ready` reports the migration version
+required by the running build and the highest applied PostgreSQL migration; a replica does not become ready
+when its required migration is absent or has a different checksum. SQLite readiness verifies every metadata
+table used by the Personal profile. Readiness also executes a no-op write statement so a read-only database
+or insufficient DML privileges cannot pass as ready.
+
+PostgreSQL connection and startup coordination are configurable with:
+
+```text
+SYNARA_DATABASE_MAX_OPEN_CONNECTIONS
+SYNARA_DATABASE_MAX_IDLE_CONNECTIONS
+SYNARA_DATABASE_CONNECTION_MAX_LIFETIME
+SYNARA_DATABASE_CONNECTION_MAX_IDLE_TIME
+SYNARA_DATABASE_MIGRATION_LOCK_TIMEOUT
+```
+
+The migration timeout bounds how long a replica waits for the dedicated PostgreSQL Advisory Lock during
+concurrent startup. Migration scripts remain transactional and checksum-verified after the lock is acquired.
+
+Run the isolated two-replica acceptance suite with:
+
+```bash
+deploy/saas/multi-replica-acceptance.sh
+```
+
+The suite starts two Control Plane containers against one PostgreSQL/MinIO stack, verifies cross-replica login
+revocation, concurrent Turn creation, SSE catch-up and Claim uniqueness, stops one replica, and verifies
+`Last-Event-ID` recovery through the remaining replica. It cleans up its containers and volumes on exit.
+
 ## Personal metadata export/import
 
 Stop or quiesce workers first; export rejects active leases/executions.

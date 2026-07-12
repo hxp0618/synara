@@ -3,49 +3,50 @@ package authorization
 type Permission string
 
 const (
-	TenantRead            Permission = "tenant.read"
-	TenantUpdate          Permission = "tenant.update"
-	TenantDelete          Permission = "tenant.delete"
-	TenantMembersRead     Permission = "tenant.members.read"
-	TenantMembersInvite   Permission = "tenant.members.invite"
-	TenantMembersUpdate   Permission = "tenant.members.update"
-	TenantMembersRemove   Permission = "tenant.members.remove"
-	OrganizationRead      Permission = "organization.read"
-	OrganizationUpdate    Permission = "organization.update"
-	OrganizationMembers   Permission = "organization.members.manage"
-	ProjectCreate         Permission = "project.create"
-	ProjectRead           Permission = "project.read"
-	ProjectUpdate         Permission = "project.update"
-	ProjectDelete         Permission = "project.delete"
-	SessionCreate         Permission = "session.create"
-	SessionRead           Permission = "session.read"
-	SessionShare          Permission = "session.share"
-	SessionArchive        Permission = "session.archive"
-	SessionDelete         Permission = "session.delete"
-	ExecutionCreate       Permission = "execution.create"
-	ExecutionCancel       Permission = "execution.cancel"
-	ExecutionApprove      Permission = "execution.approve"
-	ExecutionReadLogs     Permission = "execution.read_logs"
-	ArtifactRead          Permission = "artifact.read"
-	ArtifactWrite         Permission = "artifact.write"
-	ArtifactDelete        Permission = "artifact.delete"
-	CredentialsRead       Permission = "credentials.read"
-	CredentialsUse        Permission = "credentials.use"
-	CredentialsManage     Permission = "credentials.manage"
-	WorkerRead            Permission = "worker.read"
-	WorkerManage          Permission = "worker.manage"
-	AuditRead             Permission = "audit.read"
-	BillingManage         Permission = "billing.manage"
-	QuotaRead             Permission = "quota.read"
-	QuotaManage           Permission = "quota.manage"
-	RetentionRead         Permission = "retention.read"
-	RetentionManage       Permission = "retention.manage"
-	IdentityRead          Permission = "identity.read"
-	IdentityManage        Permission = "identity.manage"
-	ServiceAccountsRead   Permission = "service_accounts.read"
-	ServiceAccountsManage Permission = "service_accounts.manage"
-	OutboxRead            Permission = "outbox.read"
-	OutboxManage          Permission = "outbox.manage"
+	TenantRead             Permission = "tenant.read"
+	TenantUpdate           Permission = "tenant.update"
+	TenantDelete           Permission = "tenant.delete"
+	TenantMembersRead      Permission = "tenant.members.read"
+	TenantMembersInvite    Permission = "tenant.members.invite"
+	TenantMembersUpdate    Permission = "tenant.members.update"
+	TenantMembersRemove    Permission = "tenant.members.remove"
+	OrganizationRead       Permission = "organization.read"
+	OrganizationUpdate     Permission = "organization.update"
+	OrganizationMembers    Permission = "organization.members.manage"
+	ProjectCreate          Permission = "project.create"
+	ProjectRead            Permission = "project.read"
+	ProjectUpdate          Permission = "project.update"
+	ProjectDelete          Permission = "project.delete"
+	SessionCreate          Permission = "session.create"
+	SessionRead            Permission = "session.read"
+	SessionShare           Permission = "session.share"
+	SessionArchive         Permission = "session.archive"
+	SessionDelete          Permission = "session.delete"
+	ExecutionCreate        Permission = "execution.create"
+	ExecutionCancel        Permission = "execution.cancel"
+	ExecutionApprove       Permission = "execution.approve"
+	ExecutionReadLogs      Permission = "execution.read_logs"
+	ArtifactRead           Permission = "artifact.read"
+	ArtifactWrite          Permission = "artifact.write"
+	ArtifactDelete         Permission = "artifact.delete"
+	CredentialsRead        Permission = "credentials.read"
+	CredentialsUse         Permission = "credentials.use"
+	CredentialsManage      Permission = "credentials.manage"
+	WorkerRead             Permission = "worker.read"
+	WorkerManage           Permission = "worker.manage"
+	AuditRead              Permission = "audit.read"
+	BillingManage          Permission = "billing.manage"
+	QuotaRead              Permission = "quota.read"
+	QuotaManage            Permission = "quota.manage"
+	RetentionRead          Permission = "retention.read"
+	RetentionManage        Permission = "retention.manage"
+	IdentityRead           Permission = "identity.read"
+	IdentityManage         Permission = "identity.manage"
+	IdentitySessionsRevoke Permission = "identity.sessions.revoke"
+	ServiceAccountsRead    Permission = "service_accounts.read"
+	ServiceAccountsManage  Permission = "service_accounts.manage"
+	OutboxRead             Permission = "outbox.read"
+	OutboxManage           Permission = "outbox.manage"
 )
 
 var tenantRolePermissions = map[string]map[Permission]struct{}{
@@ -58,7 +59,7 @@ var tenantRolePermissions = map[string]map[Permission]struct{}{
 		ArtifactRead, ArtifactWrite, ArtifactDelete,
 		CredentialsRead, CredentialsUse, CredentialsManage, WorkerRead, WorkerManage, AuditRead, BillingManage,
 		QuotaRead, QuotaManage, RetentionRead, RetentionManage,
-		IdentityRead, IdentityManage, ServiceAccountsRead, ServiceAccountsManage,
+		IdentityRead, IdentityManage, IdentitySessionsRevoke, ServiceAccountsRead, ServiceAccountsManage,
 		OutboxRead, OutboxManage,
 	),
 	"admin": permissionSet(
@@ -69,14 +70,14 @@ var tenantRolePermissions = map[string]map[Permission]struct{}{
 		ExecutionApprove, ExecutionReadLogs, WorkerRead, WorkerManage, AuditRead,
 		ArtifactRead, ArtifactWrite, ArtifactDelete, CredentialsUse, QuotaRead, QuotaManage,
 		RetentionRead, RetentionManage,
-		IdentityRead, ServiceAccountsRead, ServiceAccountsManage,
+		IdentityRead, IdentitySessionsRevoke, ServiceAccountsRead, ServiceAccountsManage,
 		OutboxRead, OutboxManage,
 	),
 	"security_admin": permissionSet(
 		TenantRead, TenantMembersRead, OrganizationRead, ProjectRead, SessionRead,
 		ExecutionReadLogs, ArtifactRead, CredentialsRead, CredentialsUse, CredentialsManage, WorkerRead, AuditRead,
 		RetentionRead, RetentionManage,
-		IdentityRead, IdentityManage, ServiceAccountsRead, ServiceAccountsManage,
+		IdentityRead, IdentityManage, IdentitySessionsRevoke, ServiceAccountsRead, ServiceAccountsManage,
 		OutboxRead,
 	),
 	"billing_admin": permissionSet(TenantRead, TenantMembersRead, BillingManage, QuotaRead, QuotaManage),

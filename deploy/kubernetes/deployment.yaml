@@ -50,11 +50,36 @@ spec:
                 configMapKeyRef:
                   name: synara-control-plane-config
                   key: public-control-plane-url
+            - name: SYNARA_LOGIN_COOKIE_SECURE
+              value: "true"
+            - name: SYNARA_LOGIN_COOKIE_PATH
+              value: /
+            - name: SYNARA_LOGIN_COOKIE_SAME_SITE
+              value: lax
+            - name: SYNARA_LOGIN_SESSION_TTL
+              value: 720h
+            - name: SYNARA_LOGIN_SESSION_IDLE_TTL
+              value: 168h
+            - name: SYNARA_TRUSTED_PROXY_CIDRS
+              valueFrom:
+                configMapKeyRef:
+                  name: synara-control-plane-config
+                  key: trusted-proxy-cidrs
             - name: SYNARA_DATABASE_URL
               valueFrom:
                 secretKeyRef:
                   name: synara-control-plane-secrets
                   key: database-url
+            - name: SYNARA_DATABASE_MAX_OPEN_CONNECTIONS
+              value: "20"
+            - name: SYNARA_DATABASE_MAX_IDLE_CONNECTIONS
+              value: "5"
+            - name: SYNARA_DATABASE_CONNECTION_MAX_LIFETIME
+              value: 1h
+            - name: SYNARA_DATABASE_CONNECTION_MAX_IDLE_TIME
+              value: 15m
+            - name: SYNARA_DATABASE_MIGRATION_LOCK_TIMEOUT
+              value: 30s
             - name: SYNARA_WORKER_REGISTRATION_TOKEN
               valueFrom:
                 secretKeyRef:

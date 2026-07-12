@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"net/http"
+	"net/netip"
 	"net/url"
 	"strings"
 
@@ -62,7 +63,7 @@ func (s *Server) completeSSO(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, err)
 		return
 	}
-	http.SetCookie(w, &http.Cookie{Name: s.config.CookieName, Value: result.Session.Token, Path: "/", HttpOnly: true, Secure: s.config.CookieSecure, SameSite: http.SameSiteLaxMode, MaxAge: int(s.config.SessionTTL.Seconds())})
+	s.setSessionCookie(w, result.Session.Token)
 	http.Redirect(w, r, result.ReturnTo, http.StatusSeeOther)
 }
 
@@ -182,8 +183,16 @@ func (s *Server) identityConnectionPath(w http.ResponseWriter, r *http.Request) 
 func (s *Server) ssoCallbackURL(r *http.Request, connectionID string) (string, error) {
 	base := strings.TrimRight(strings.TrimSpace(s.config.PublicControlPlaneURL), "/")
 	if base == "" {
+		remote, ok := directRemoteIP(r.RemoteAddr)
+		if !ok || !remote.IsLoopback() {
+			return "", problem.New(503, "public_control_plane_url_required", "Public control-plane URL is required outside loopback.")
+		}
+		hostURL, parseErr := url.Parse("//" + r.Host)
+		if parseErr != nil || !isLoopbackRequestHost(hostURL.Hostname()) {
+			return "", problem.New(503, "public_control_plane_url_required", "Public control-plane URL is required outside loopback.")
+		}
 		scheme := "http"
-		if r.TLS != nil || strings.EqualFold(strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")), "https") {
+		if r.TLS != nil {
 			scheme = "https"
 		}
 		base = scheme + "://" + r.Host
@@ -193,4 +202,13 @@ func (s *Server) ssoCallbackURL(r *http.Request, connectionID string) (string, e
 		return "", problem.New(503, "public_control_plane_url_invalid", "Public control-plane URL is invalid.")
 	}
 	return strings.TrimRight(base, "/") + "/v1/auth/sso/" + connectionID + "/callback", nil
+}
+
+func isLoopbackRequestHost(host string) bool {
+	host = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(host)), ".")
+	if host == "localhost" {
+		return true
+	}
+	address, err := netip.ParseAddr(host)
+	return err == nil && address.IsLoopback()
 }

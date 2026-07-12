@@ -43,7 +43,7 @@ ordered SSE event recovery.
 
 - Personal Compose example: [`deploy/personal`](./deploy/personal)
 - Single-node SaaS Compose example: [`deploy/saas`](./deploy/saas)
-- Revised tenancy plan: [`docs/saas-tenancy-organization-user-plan.md`](./docs/saas-tenancy-organization-user-plan.md)
+- Revised tenancy plan: [`docs/saas-tenancy-organization-user-plan.md`](docs/plans/saas-tenancy-organization-user-plan.md)
 - Profile/target ADR: [`docs/adr/0002-deployment-profile-execution-target-v1.md`](./docs/adr/0002-deployment-profile-execution-target-v1.md)
 
 Artifact metadata, Local/MinIO/S3 payload lifecycle, verified upload/download, and reentrant Personal

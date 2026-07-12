@@ -23,7 +23,11 @@ func main() {
 	if err != nil {
 		fatal(err.Error())
 	}
-	store, err := database.OpenMetadataStore(ctx, cfg.Platform, cfg.DatabaseURL, cfg.SQLitePath)
+	store, err := database.OpenMetadataStore(ctx, cfg.Platform, cfg.DatabaseURL, cfg.SQLitePath, database.Options{
+		MaxOpenConnections: cfg.DatabaseMaxOpenConnections, MaxIdleConnections: cfg.DatabaseMaxIdleConnections,
+		ConnectionMaxLifetime: cfg.DatabaseConnectionMaxLifetime, ConnectionMaxIdleTime: cfg.DatabaseConnectionMaxIdleTime,
+		MigrationLockTimeout: cfg.DatabaseMigrationLockTimeout,
+	})
 	if err != nil {
 		fatal(err.Error())
 	}

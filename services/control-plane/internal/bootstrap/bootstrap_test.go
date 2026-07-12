@@ -38,7 +38,7 @@ func TestPersonalBootstrapIsDeterministicAndDevLoginReusesOwner(t *testing.T) {
 		t.Fatalf("bootstrap ids changed: first=%#v second=%#v", first, second)
 	}
 
-	identityService := identity.NewService(store.DB(), time.Hour, identity.PersonalDomain{
+	identityService := identity.NewService(store.DB(), time.Hour, 30*time.Minute, identity.PersonalDomain{
 		UserID: first.UserID, TenantID: first.TenantID,
 	})
 	firstLogin, err := identityService.DevLogin(ctx, identity.DevLoginInput{

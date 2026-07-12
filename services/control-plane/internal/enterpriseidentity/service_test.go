@@ -45,7 +45,7 @@ func TestOIDCConnectionEncryptsSecretAndCreatesPKCEAttempt(t *testing.T) {
 		t.Fatal(err)
 	}
 	cipher := credentialkms.NewEnvelopeCipher(wrapper)
-	service := NewService(db, identity.NewService(db, time.Hour), cipher)
+	service := NewService(db, identity.NewService(db, time.Hour, 30*time.Minute), cipher)
 	connection, err := service.Create(context.Background(), principal, tenantID, CreateConnectionInput{
 		Kind: "oidc", Name: "Company SSO", Issuer: issuer, ClientID: "synara-client",
 		ClientSecret: "oidc-client-secret", OIDC: OIDCConfiguration{AllowedDomains: []string{"example.com"}},

@@ -13,6 +13,7 @@ import (
 	"gorm.io/gorm/clause"
 
 	"github.com/synara-ai/synara/services/control-plane/internal/audit"
+	"github.com/synara-ai/synara/services/control-plane/internal/authorization"
 	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
 	"github.com/synara-ai/synara/services/control-plane/internal/problem"
 	"github.com/synara-ai/synara/services/control-plane/internal/secret"
@@ -20,9 +21,12 @@ import (
 )
 
 type Service struct {
-	db         *gorm.DB
-	sessionTTL time.Duration
-	personal   *PersonalDomain
+	db             *gorm.DB
+	authorizer     *authorization.Authorizer
+	sessionTTL     time.Duration
+	sessionIdleTTL time.Duration
+	personal       *PersonalDomain
+	now            func() time.Time
 }
 
 type PersonalDomain struct {
@@ -82,8 +86,14 @@ type ExternalLoginInput struct {
 	OrganizationGrants []OrganizationGrant
 }
 
-func NewService(db *gorm.DB, sessionTTL time.Duration, personal ...PersonalDomain) *Service {
-	service := &Service{db: db, sessionTTL: sessionTTL}
+func NewService(db *gorm.DB, sessionTTL, sessionIdleTTL time.Duration, personal ...PersonalDomain) *Service {
+	if sessionIdleTTL <= 0 || sessionIdleTTL > sessionTTL {
+		sessionIdleTTL = sessionTTL
+	}
+	service := &Service{
+		db: db, authorizer: authorization.NewAuthorizer(db), sessionTTL: sessionTTL, sessionIdleTTL: sessionIdleTTL,
+		now: func() time.Time { return time.Now().UTC() },
+	}
 	if len(personal) > 0 {
 		service.personal = &personal[0]
 	}
@@ -95,13 +105,14 @@ func (s *Service) Authenticate(ctx context.Context, token string) (Principal, er
 		return Principal{}, problem.New(401, "authentication_required", "Authentication is required.")
 	}
 	hash := sha256.Sum256([]byte(token))
+	now := s.now()
 	var principal Principal
 	err := s.db.WithContext(ctx).
 		Table("login_sessions AS ls").
 		Select("ls.user_id, ls.id AS session_id, ls.active_tenant_id, u.email, u.display_name").
 		Joins("JOIN users AS u ON u.id = ls.user_id").
 		Where("ls.refresh_token_hash = ?", hash[:]).
-		Where("ls.revoked_at IS NULL AND ls.expires_at > ?", time.Now().UTC()).
+		Where("ls.revoked_at IS NULL AND ls.expires_at > ? AND ls.last_seen_at > ?", now, now.Add(-s.sessionIdleTTL)).
 		Where("u.status = ? AND u.deleted_at IS NULL", "active").
 		Take(&principal).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -111,9 +122,13 @@ func (s *Service) Authenticate(ctx context.Context, token string) (Principal, er
 		return Principal{}, problem.Wrap(500, "session_lookup_failed", "Failed to load the login session.", err)
 	}
 
+	refreshInterval := 5 * time.Minute
+	if halfIdleTTL := s.sessionIdleTTL / 2; halfIdleTTL < refreshInterval {
+		refreshInterval = halfIdleTTL
+	}
 	_ = s.db.WithContext(ctx).Model(&persistence.LoginSession{}).
-		Where("id = ? AND last_seen_at < ?", principal.SessionID, time.Now().UTC().Add(-5*time.Minute)).
-		Update("last_seen_at", time.Now().UTC()).Error
+		Where("id = ? AND revoked_at IS NULL AND expires_at > ? AND last_seen_at < ?", principal.SessionID, now, now.Add(-refreshInterval)).
+		Update("last_seen_at", now).Error
 	return principal, nil
 }
 
@@ -148,7 +163,7 @@ func (s *Service) DevLogin(
 		if s.personal != nil {
 			userID = s.personal.UserID
 			activeTenantID = s.personal.TenantID
-			now := time.Now().UTC()
+			now := s.now()
 			result := tx.WithContext(ctx).Model(&persistence.User{}).
 				Where("id = ? AND deleted_at IS NULL", userID).
 				Updates(map[string]any{
@@ -176,7 +191,7 @@ func (s *Service) DevLogin(
 			return problem.Wrap(500, "login_failed", "Failed to generate a login session.", err)
 		}
 		sessionID = uuid.New()
-		now := time.Now().UTC()
+		now := s.now()
 		return tx.Create(&persistence.LoginSession{
 			ID: sessionID, UserID: userID, ActiveTenantID: &activeTenantID,
 			RefreshTokenHash: tokenHash, IPAddress: optionalString(ipAddress),
@@ -243,7 +258,7 @@ func (s *Service) CompleteExternalLogin(
 		} else if errors.Is(lookupErr, gorm.ErrRecordNotFound) {
 			var user persistence.User
 			userErr := persistence.WithLocking(tx.WithContext(ctx), "UPDATE", "").Where("LOWER(email) = ? AND deleted_at IS NULL", email).Take(&user).Error
-			now := time.Now().UTC()
+			now := s.now()
 			if errors.Is(userErr, gorm.ErrRecordNotFound) {
 				user = persistence.User{ID: uuid.New(), Email: email, DisplayName: displayName, Status: "active", EmailVerifiedAt: &now}
 				if err := tx.Create(&user).Error; err != nil {
@@ -264,7 +279,7 @@ func (s *Service) CompleteExternalLogin(
 		} else {
 			return lookupErr
 		}
-		now := time.Now().UTC()
+		now := s.now()
 		if err := tx.Model(&persistence.User{}).Where("id = ? AND deleted_at IS NULL", userID).Updates(map[string]any{
 			"email": email, "display_name": displayName, "status": "active", "email_verified_at": now,
 		}).Error; err != nil {
@@ -338,11 +353,58 @@ func (s *Service) CompleteExternalLogin(
 func (s *Service) Revoke(ctx context.Context, principal Principal) error {
 	result := s.db.WithContext(ctx).Model(&persistence.LoginSession{}).
 		Where("id = ? AND user_id = ? AND revoked_at IS NULL", principal.SessionID, principal.UserID).
-		Update("revoked_at", time.Now().UTC())
+		Update("revoked_at", s.now())
 	if result.Error != nil {
 		return problem.Wrap(500, "logout_failed", "Failed to revoke the login session.", result.Error)
 	}
 	return nil
+}
+
+func (s *Service) RevokeTenantUserSessions(
+	ctx context.Context,
+	principal Principal,
+	tenantID, userID uuid.UUID,
+	requestID, ipAddress string,
+) (int64, error) {
+	if principal.ActiveTenantID == nil || *principal.ActiveTenantID != tenantID {
+		return 0, problem.New(409, "active_tenant_mismatch", "The requested tenant must be the active tenant.")
+	}
+	if _, err := s.authorizer.RequireTenant(ctx, principal.UserID, tenantID, authorization.IdentitySessionsRevoke); err != nil {
+		return 0, err
+	}
+	var membership persistence.TenantMembership
+	err := s.db.WithContext(ctx).
+		Select("tenant_id", "user_id").
+		Where("tenant_id = ? AND user_id = ?", tenantID, userID).
+		Take(&membership).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return 0, problem.New(404, "tenant_member_not_found", "Tenant member not found.")
+	}
+	if err != nil {
+		return 0, problem.Wrap(500, "tenant_member_load_failed", "Tenant member could not be loaded.", err)
+	}
+
+	var revoked int64
+	err = persistence.InTransaction(ctx, s.db, func(tx *gorm.DB) error {
+		now := s.now()
+		result := tx.WithContext(ctx).Model(&persistence.LoginSession{}).
+			Where("user_id = ? AND active_tenant_id = ? AND revoked_at IS NULL", userID, tenantID).
+			Update("revoked_at", now)
+		if result.Error != nil {
+			return problem.Wrap(500, "session_revoke_failed", "Login Sessions could not be revoked.", result.Error)
+		}
+		revoked = result.RowsAffected
+		return audit.Record(ctx, tx, audit.Entry{
+			TenantID: tenantID, ActorType: "user", ActorID: &principal.UserID,
+			Action: "identity.sessions_revoked", ResourceType: "user", ResourceID: &userID,
+			RequestID: requestID, IPAddress: ipAddress,
+			Metadata: map[string]any{"revokedCount": revoked},
+		})
+	})
+	if err != nil {
+		return 0, err
+	}
+	return revoked, nil
 }
 
 func (s *Service) SetActiveTenant(ctx context.Context, principal Principal, tenantID uuid.UUID) (Principal, error) {
@@ -364,7 +426,7 @@ func (s *Service) SetActiveTenant(ctx context.Context, principal Principal, tena
 	}
 	result := s.db.WithContext(ctx).Model(&persistence.LoginSession{}).
 		Where("id = ? AND user_id = ? AND revoked_at IS NULL", principal.SessionID, principal.UserID).
-		Updates(map[string]any{"active_tenant_id": tenantID, "last_seen_at": time.Now().UTC()})
+		Updates(map[string]any{"active_tenant_id": tenantID, "last_seen_at": s.now()})
 	if result.Error != nil {
 		return Principal{}, problem.Wrap(500, "active_tenant_update_failed", "Failed to update the active tenant.", result.Error)
 	}

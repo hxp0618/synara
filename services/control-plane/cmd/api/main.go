@@ -62,7 +62,12 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	metadataStore, err := database.OpenMetadataStore(ctx, cfg.Platform, cfg.DatabaseURL, cfg.SQLitePath)
+	databaseOptions := database.Options{
+		MaxOpenConnections: cfg.DatabaseMaxOpenConnections, MaxIdleConnections: cfg.DatabaseMaxIdleConnections,
+		ConnectionMaxLifetime: cfg.DatabaseConnectionMaxLifetime, ConnectionMaxIdleTime: cfg.DatabaseConnectionMaxIdleTime,
+		MigrationLockTimeout: cfg.DatabaseMigrationLockTimeout,
+	}
+	metadataStore, err := database.OpenMetadataStore(ctx, cfg.Platform, cfg.DatabaseURL, cfg.SQLitePath, databaseOptions)
 	if err != nil {
 		logger.Error("failed to open metadata store", "kind", cfg.Platform.MetadataStore, "error", err)
 		os.Exit(1)
@@ -73,6 +78,11 @@ func main() {
 		os.Exit(1)
 	}
 	db := metadataStore.DB()
+	schemaChecker, err := database.NewSchemaChecker(db, metadataStore.Kind(), migrations.Files)
+	if err != nil {
+		logger.Error("failed to configure schema readiness", "kind", metadataStore.Kind(), "error", err)
+		os.Exit(1)
+	}
 	metrics := observability.New(db)
 	if cfg.Platform.QueueDriver == platform.QueueExternal {
 		logger.Error("external queue driver requires a publisher adapter that is not configured in this build")
@@ -104,7 +114,7 @@ func main() {
 	if bootstrapped.Personal {
 		identityOptions = append(identityOptions, identity.PersonalDomain{UserID: bootstrapped.UserID, TenantID: bootstrapped.TenantID})
 	}
-	identityService := identity.NewService(db, cfg.SessionTTL, identityOptions...)
+	identityService := identity.NewService(db, cfg.SessionTTL, cfg.SessionIdleTTL, identityOptions...)
 	tenancyService := tenancy.NewService(db)
 	projectService := projects.NewService(db)
 	cursorCipher, err := secret.NewCursorCipher(cfg.ProviderCursorKey)
@@ -157,7 +167,7 @@ func main() {
 		cfg, db, identityService, tenancyService, projectService, sessionService,
 		executionService, executionTargetService, sshProvisioner, artifactService, quotaService,
 		credentialService, retentionService, metrics, outboxService, enterpriseIdentityService,
-		serviceAccountService, scimService, logger,
+		serviceAccountService, scimService, schemaChecker, logger,
 	)
 	server := &http.Server{
 		Addr: cfg.ListenAddress, Handler: api.Handler(),

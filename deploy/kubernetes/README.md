@@ -3,6 +3,8 @@
 This Kustomize base runs two stateless control-plane replicas and grants only the
 cluster permissions required by the managed Kubernetes Execution Target reconciler.
 PostgreSQL, S3, ingress/TLS, and AWS workload identity remain operator-managed.
+Set `trusted-proxy-cidrs` to only the ingress or load-balancer network ranges that append
+`X-Forwarded-For`; leaving it empty records the direct peer address and ignores forwarded client IPs.
 
 Create the runtime configuration and Secret without committing either generated file:
 
