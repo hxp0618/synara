@@ -27,6 +27,36 @@ describe("controlPlaneClient", () => {
     );
   });
 
+  it("probes the public platform profile before requiring authentication", async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(
+        JSON.stringify({
+          profile: "single-node",
+          metadataStore: "postgresql",
+          artifactStore: "minio",
+          queueDriver: "postgres-outbox",
+          controlPlaneReplicas: 1,
+          highAvailability: false,
+          leaseEnabled: true,
+          fencingEnabled: true,
+          executionTargetKinds: ["docker", "kubernetes", "local", "ssh"],
+          artifactPayloadMigration: true,
+          metadataExportImport: true,
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const profile = await controlPlaneClient.getPlatformProfile();
+
+    expect(profile.profile).toBe("single-node");
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/v1/platform/profile",
+      expect.objectContaining({ credentials: "include" }),
+    );
+  });
+
   it("sends JSON with same-origin credentials", async () => {
     const fetchMock = vi.fn(async () =>
       new Response(
@@ -109,13 +139,17 @@ describe("controlPlaneClient", () => {
     );
     vi.stubGlobal("fetch", fetchMock);
 
-    await controlPlaneClient.createSession("project-1", {
-      title: "Session",
-      visibility: "private",
-      provider: "codex",
-      model: "gpt-5.6-sol",
-      executionTargetId: "target-1",
-    });
+    await controlPlaneClient.createSession(
+      "project-1",
+      {
+        title: "Session",
+        visibility: "private",
+        provider: "codex",
+        model: "gpt-5.6-sol",
+        executionTargetId: "target-1",
+      },
+      { idempotencyKey: "web-session-request-1" },
+    );
 
     expect(fetchMock).toHaveBeenCalledWith(
       "/v1/projects/project-1/sessions",
@@ -130,6 +164,49 @@ describe("controlPlaneClient", () => {
           executionTargetId: "target-1",
         }),
       }),
+    );
+    const request = fetchMock.mock.calls[0]?.[1] as RequestInit;
+    expect(new Headers(request.headers).get("Idempotency-Key")).toBe("web-session-request-1");
+  });
+
+  it("loads bounded durable event backlog and sends idempotent Turns", async () => {
+    const responses = [
+      new Response(JSON.stringify({ items: [], lastSequence: 23 }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+      new Response(
+        JSON.stringify({
+          id: "turn-1",
+          tenantId: "tenant-1",
+          sessionId: "session-1",
+          createdBy: "user-1",
+          status: "queued",
+          inputText: "Continue",
+          startedAt: null,
+          completedAt: null,
+          createdAt: "2026-07-12T00:00:00Z",
+        }),
+        { status: 201, headers: { "Content-Type": "application/json" } },
+      ),
+    ];
+    const fetchMock = vi.fn(async () => responses.shift()!);
+    vi.stubGlobal("fetch", fetchMock);
+
+    const page = await controlPlaneClient.listSessionEvents("session/one", -5, 5_000);
+    await controlPlaneClient.createTurn("session/one", "Continue", {
+      idempotencyKey: "web-turn-request-1",
+    });
+
+    expect(page.lastSequence).toBe(23);
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
+      "/v1/sessions/session%2Fone/events?afterSequence=0&limit=500",
+      expect.objectContaining({ credentials: "include" }),
+    );
+    const turnRequest = fetchMock.mock.calls[1]?.[1] as RequestInit;
+    expect(new Headers(turnRequest.headers).get("Idempotency-Key")).toBe(
+      "web-turn-request-1",
     );
   });
 

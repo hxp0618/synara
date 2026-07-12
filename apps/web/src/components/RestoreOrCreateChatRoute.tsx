@@ -26,6 +26,7 @@ import type { StartContainerChatResult } from "../lib/startContainerChat";
 import { readNativeApi } from "../nativeApi";
 import { useSplitViewStore } from "../splitViewStore";
 import { EMPTY_THREAD_IDS, useStore } from "../store";
+import { useControlPlane } from "../controlPlaneContext";
 
 export type RestoreRouteResolverInput = {
   // Split views currently known to the client. Callers that support split-view restore should
@@ -48,6 +49,7 @@ export function RestoreOrCreateChatRoute({
   readonly createFreshChat: () => Promise<StartContainerChatResult>;
 }) {
   const navigate = useNavigate();
+  const controlPlane = useControlPlane();
   const threadsHydrated = useStore((store) => store.threadsHydrated);
   const threadIds = useStore((state) => state.threadIds ?? EMPTY_THREAD_IDS);
   const splitViewsHydrated = useSplitViewStore((state) => state.hasHydrated);
@@ -99,7 +101,9 @@ export function RestoreOrCreateChatRoute({
         const recoveryRun = (emptyRestoreRecoveryRunRef.current += 1);
         setEmptyRestoreRecoveryState("pending");
         await Promise.all([
-          refreshEmptyRouteRestoreSnapshot(readNativeApi()).catch(() => false),
+          controlPlane.isAuthoritative
+            ? Promise.resolve(false)
+            : refreshEmptyRouteRestoreSnapshot(readNativeApi()).catch(() => false),
           waitForEmptyRouteRestoreFallbackDelay(),
         ]);
         if (mountedRef.current && emptyRestoreRecoveryRunRef.current === recoveryRun) {
@@ -158,6 +162,7 @@ export function RestoreOrCreateChatRoute({
   }, [
     attempt,
     createFreshChat,
+    controlPlane.isAuthoritative,
     emptyRestoreRecoveryState,
     navigate,
     resolveRestoreRoute,

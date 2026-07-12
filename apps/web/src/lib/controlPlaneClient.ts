@@ -26,10 +26,24 @@ export type ControlPlaneTenantAccess = {
   id: string;
   slug: string;
   name: string;
-  status: string;
+  status: "active" | "suspended";
   planCode: string;
   region: string;
-  role: string;
+  role: "owner" | "admin" | "security_admin" | "billing_admin" | "auditor" | "member";
+};
+
+export type ControlPlanePlatformProfile = {
+  profile: "personal" | "single-node" | "enterprise";
+  metadataStore: "sqlite" | "postgresql";
+  artifactStore: "local" | "minio" | "s3";
+  queueDriver: "in-process" | "postgres-outbox" | "external";
+  controlPlaneReplicas: number;
+  highAvailability: boolean;
+  leaseEnabled: boolean;
+  fencingEnabled: boolean;
+  executionTargetKinds: ReadonlyArray<ControlPlaneExecutionTargetKind>;
+  artifactPayloadMigration: boolean;
+  metadataExportImport: boolean;
 };
 
 export type ControlPlaneSessionState = {
@@ -52,6 +66,7 @@ export type ControlPlaneOrganization = {
   name: string;
   kind: "root" | "team" | "department" | "personal";
   status: "active" | "suspended";
+  currentUserRole: "owner" | "admin" | "agent_operator" | "member" | "viewer" | null;
   settings: Record<string, unknown>;
   createdAt: string;
   updatedAt: string;
@@ -206,7 +221,7 @@ export type ControlPlaneAgentSession = {
   projectId: string;
   createdBy: string;
   title: string;
-  status: "active" | "archived";
+  status: "active" | "suspended" | "archived";
   visibility: "private" | "project" | "organization";
   provider: string;
   model: string | null;
@@ -310,6 +325,15 @@ export type ControlPlaneSessionEvent = {
   actorId: string | null;
   payload: Record<string, unknown>;
   occurredAt: string;
+};
+
+export type ControlPlaneSessionEventPage = {
+  items: ReadonlyArray<ControlPlaneSessionEvent>;
+  lastSequence: number;
+};
+
+export type ControlPlaneIdempotencyOptions = {
+  idempotencyKey: string;
 };
 
 export type TenantInvitation = {
@@ -436,7 +460,15 @@ async function controlPlaneRequest<T>(
   return (await response.json()) as T;
 }
 
+function idempotencyRequestHeaders(
+  options?: ControlPlaneIdempotencyOptions,
+): { headers: HeadersInit } | Record<never, never> {
+  return options ? { headers: { "Idempotency-Key": options.idempotencyKey } } : {};
+}
+
 export const controlPlaneClient = {
+  getPlatformProfile: () =>
+    controlPlaneRequest<ControlPlanePlatformProfile>("/v1/platform/profile"),
   getSession: () => controlPlaneRequest<ControlPlaneSessionState>("/v1/auth/session"),
   devLogin: (input: { email: string; displayName: string }) =>
     controlPlaneRequest<ControlPlaneSessionState>("/v1/auth/dev-login", {
@@ -640,10 +672,15 @@ export const controlPlaneClient = {
       defaultBranch: string;
       visibility: ControlPlaneProject["visibility"];
     },
+    options?: ControlPlaneIdempotencyOptions,
   ) =>
     controlPlaneRequest<ControlPlaneProject>(
       `/v1/tenants/${encodeURIComponent(tenantId)}/organizations/${encodeURIComponent(organizationId)}/projects`,
-      { method: "POST", body: input },
+      {
+        method: "POST",
+        ...idempotencyRequestHeaders(options),
+        body: input,
+      },
     ),
   listProjectSessions: (projectId: string) =>
     controlPlaneRequest<{ items: ReadonlyArray<ControlPlaneAgentSession> }>(
@@ -659,10 +696,19 @@ export const controlPlaneClient = {
       providerCredentialId?: string;
       executionTargetId?: string;
     },
+    options?: ControlPlaneIdempotencyOptions,
   ) =>
     controlPlaneRequest<ControlPlaneAgentSession>(
       `/v1/projects/${encodeURIComponent(projectId)}/sessions`,
-      { method: "POST", body: input },
+      {
+        method: "POST",
+        ...idempotencyRequestHeaders(options),
+        body: input,
+      },
+    ),
+  getAgentSession: (sessionId: string) =>
+    controlPlaneRequest<ControlPlaneAgentSession>(
+      `/v1/sessions/${encodeURIComponent(sessionId)}`,
     ),
   listExecutionTargets: (tenantId: string) =>
     controlPlaneRequest<{ items: ReadonlyArray<ControlPlaneExecutionTarget> }>(
@@ -691,11 +737,28 @@ export const controlPlaneClient = {
       `/v1/tenants/${encodeURIComponent(tenantId)}/execution-targets/${encodeURIComponent(targetId)}/ssh/${operation}`,
       { method: "POST" },
     ),
-  createTurn: (sessionId: string, inputText: string) =>
+  createTurn: (
+    sessionId: string,
+    inputText: string,
+    options?: ControlPlaneIdempotencyOptions,
+  ) =>
     controlPlaneRequest<ControlPlaneAgentTurn>(
       `/v1/sessions/${encodeURIComponent(sessionId)}/turns`,
-      { method: "POST", body: { inputText } },
+      {
+        method: "POST",
+        ...idempotencyRequestHeaders(options),
+        body: { inputText },
+      },
     ),
+  listSessionEvents: (sessionId: string, afterSequence = 0, limit = 500) => {
+    const query = new URLSearchParams({
+      afterSequence: String(Math.max(0, afterSequence)),
+      limit: String(Math.max(1, Math.min(500, limit))),
+    });
+    return controlPlaneRequest<ControlPlaneSessionEventPage>(
+      `/v1/sessions/${encodeURIComponent(sessionId)}/events?${query.toString()}`,
+    );
+  },
   listArtifacts: (sessionId: string) =>
     controlPlaneRequest<{ items: ReadonlyArray<ControlPlaneArtifact> }>(
       `/v1/sessions/${encodeURIComponent(sessionId)}/artifacts`,

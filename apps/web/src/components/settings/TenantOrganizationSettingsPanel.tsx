@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useMemo, useState, type FormEvent } from "react";
+import { useState, type FormEvent } from "react";
 
 import {
   CONTROL_PLANE_FORM_GRID_CLASS_NAME as formGridClassName,
@@ -28,18 +28,14 @@ import {
 } from "~/components/settings/SettingsPanelPrimitives";
 import {
   controlPlaneClient,
-  ControlPlaneError,
   type ControlPlaneExecutionTarget,
   type ControlPlaneProviderCredential,
-  type ControlPlaneSessionState,
   type TenantInvitation,
 } from "~/lib/controlPlaneClient";
 import { cn } from "~/lib/utils";
+import { controlPlaneQueryKeys, useControlPlane } from "~/controlPlaneContext";
 
-const controlPlaneQueryKeys = {
-  session: ["control-plane", "session"] as const,
-  organizations: (tenantId: string | null) =>
-    ["control-plane", "tenants", tenantId, "organizations"] as const,
+const settingsQueryKeys = {
   members: (tenantId: string | null) =>
     ["control-plane", "tenants", tenantId, "members"] as const,
   executionTargets: (tenantId: string | null) =>
@@ -47,15 +43,12 @@ const controlPlaneQueryKeys = {
 };
 
 function LoginPanel() {
-  const queryClient = useQueryClient();
+  const controlPlane = useControlPlane();
   const [email, setEmail] = useState("");
   const [displayName, setDisplayName] = useState("");
   const [tenantSlug, setTenantSlug] = useState("");
   const login = useMutation({
-    mutationFn: controlPlaneClient.devLogin,
-    onSuccess: (session) => {
-      queryClient.setQueryData(controlPlaneQueryKeys.session, session);
-    },
+    mutationFn: controlPlane.devLogin,
   });
   const discoverSSO = useMutation({
     mutationFn: () => controlPlaneClient.listPublicIdentityConnections(tenantSlug.trim()),
@@ -159,15 +152,12 @@ function LoginPanel() {
 }
 
 export function TenantOrganizationSettingsPanel() {
-  const queryClient = useQueryClient();
-  const sessionQuery = useQuery({
-    queryKey: controlPlaneQueryKeys.session,
-    queryFn: controlPlaneClient.getSession,
-    retry: false,
-    staleTime: 30_000,
-  });
+  const controlPlane = useControlPlane();
 
-  if (sessionQuery.isPending) {
+  if (
+    controlPlane.availability === "detecting" ||
+    (controlPlane.availability === "available" && controlPlane.authentication === "unknown")
+  ) {
     return (
       <SettingsSection title="SaaS control plane">
         <SettingsListRow title="Connecting…" description="Loading tenant and organization context." />
@@ -175,20 +165,27 @@ export function TenantOrganizationSettingsPanel() {
     );
   }
 
-  if (sessionQuery.error) {
-    if (sessionQuery.error instanceof ControlPlaneError && sessionQuery.error.status === 401) {
-      return <LoginPanel />;
-    }
-    const unavailable =
-      sessionQuery.error instanceof ControlPlaneError &&
-      (sessionQuery.error.status === 502 || sessionQuery.error.status === 503);
+  if (controlPlane.authentication === "unauthenticated") return <LoginPanel />;
+
+  if (controlPlane.availability === "local") {
     return (
       <SettingsSection title="SaaS control plane">
         <SettingsListRow
-          title={unavailable ? "Control plane unavailable" : "Could not load tenant context"}
-          description={sessionQuery.error.message}
+          title="Local mode"
+          description="This Synara instance has no SaaS Control Plane configured. Local Projects and chats remain authoritative."
+        />
+      </SettingsSection>
+    );
+  }
+
+  if (controlPlane.error || controlPlane.availability === "unavailable") {
+    return (
+      <SettingsSection title="SaaS control plane">
+        <SettingsListRow
+          title="Control plane unavailable"
+          description={controlPlane.error?.message ?? "The Control Plane could not be reached."}
           actions={
-            <Button size="sm" variant="outline" onClick={() => void sessionQuery.refetch()}>
+            <Button size="sm" variant="outline" onClick={() => void controlPlane.retry()}>
               Retry
             </Button>
           }
@@ -197,28 +194,13 @@ export function TenantOrganizationSettingsPanel() {
     );
   }
 
-  return (
-    <AuthenticatedTenantPanel
-      session={sessionQuery.data}
-      onSessionChange={(session) =>
-        queryClient.setQueryData(controlPlaneQueryKeys.session, session)
-      }
-    />
-  );
+  return controlPlane.session ? <AuthenticatedTenantPanel /> : null;
 }
 
-function AuthenticatedTenantPanel(props: {
-  session: ControlPlaneSessionState;
-  onSessionChange: (session: ControlPlaneSessionState) => void;
-}) {
+function AuthenticatedTenantPanel() {
+  const controlPlane = useControlPlane();
   const queryClient = useQueryClient();
-  const activeTenant = useMemo(
-    () =>
-      props.session.tenants.find((tenant) => tenant.id === props.session.user.activeTenantId) ??
-      props.session.tenants[0] ??
-      null,
-    [props.session.tenants, props.session.user.activeTenantId],
-  );
+  const activeTenant = controlPlane.activeTenant;
   const activeTenantId = activeTenant?.id ?? null;
   const [organizationName, setOrganizationName] = useState("");
   const [organizationSlug, setOrganizationSlug] = useState("");
@@ -228,38 +210,22 @@ function AuthenticatedTenantPanel(props: {
   const [inviteRole, setInviteRole] = useState("member");
   const [createdInvitation, setCreatedInvitation] = useState<TenantInvitation | null>(null);
 
-  const organizationsQuery = useQuery({
-    queryKey: controlPlaneQueryKeys.organizations(activeTenantId),
-    queryFn: () => controlPlaneClient.listOrganizations(activeTenantId!),
-    enabled: activeTenantId !== null,
-    retry: false,
-  });
-  const canReadMembers = activeTenant?.role !== "member";
-  const canManageMembers = activeTenant?.role === "owner" || activeTenant?.role === "admin";
-  const canReadExecutionTargets = ["owner", "admin", "security_admin", "auditor"].includes(
-    activeTenant?.role ?? "",
-  );
-  const canManageExecutionTargets = activeTenant?.role === "owner" || activeTenant?.role === "admin";
-  const canReadQuota = ["owner", "admin", "billing_admin", "auditor"].includes(
-    activeTenant?.role ?? "",
-  );
-  const canManageQuota = ["owner", "admin", "billing_admin"].includes(activeTenant?.role ?? "");
-	const canReadRetention = ["owner", "admin", "security_admin", "auditor"].includes(
-		activeTenant?.role ?? "",
-	);
-	const canManageRetention = ["owner", "admin", "security_admin"].includes(
-		activeTenant?.role ?? "",
-	);
-  const canReadAudit = ["owner", "admin", "security_admin", "auditor"].includes(
-    activeTenant?.role ?? "",
-  );
-  const canManageCredentials = ["owner", "security_admin"].includes(activeTenant?.role ?? "");
-	const canReadIdentity = ["owner", "admin", "security_admin"].includes(activeTenant?.role ?? "");
-	const canManageIdentity = ["owner", "security_admin"].includes(activeTenant?.role ?? "");
-	const canReadServiceAccounts = ["owner", "admin", "security_admin"].includes(
-		activeTenant?.role ?? "",
-	);
-	const canManageServiceAccounts = canReadServiceAccounts;
+  const {
+    canReadMembers,
+    canManageMembers,
+    canReadExecutionTargets,
+    canManageExecutionTargets,
+    canReadQuota,
+    canManageQuota,
+    canReadRetention,
+    canManageRetention,
+    canReadAudit,
+    canManageCredentials,
+    canReadIdentity,
+    canManageIdentity,
+    canReadServiceAccounts,
+    canManageServiceAccounts,
+  } = controlPlane.capabilities;
 	const credentialsQuery = useQuery({
 		queryKey: credentialsQueryKey(activeTenantId ?? ""),
 		queryFn: () => controlPlaneClient.listCredentials(activeTenantId!),
@@ -267,23 +233,19 @@ function AuthenticatedTenantPanel(props: {
 		retry: false,
 	});
   const membersQuery = useQuery({
-    queryKey: controlPlaneQueryKeys.members(activeTenantId),
+    queryKey: settingsQueryKeys.members(activeTenantId),
     queryFn: () => controlPlaneClient.listTenantMembers(activeTenantId!),
     enabled: activeTenantId !== null && canReadMembers,
     retry: false,
   });
   const executionTargetsQuery = useQuery({
-    queryKey: controlPlaneQueryKeys.executionTargets(activeTenantId),
+    queryKey: settingsQueryKeys.executionTargets(activeTenantId),
     queryFn: () => controlPlaneClient.listExecutionTargets(activeTenantId!),
     enabled: activeTenantId !== null && canReadExecutionTargets,
     retry: false,
   });
   const setActiveTenant = useMutation({
-    mutationFn: controlPlaneClient.setActiveTenant,
-    onSuccess: (session) => {
-      props.onSessionChange(session);
-      void queryClient.invalidateQueries({ queryKey: ["control-plane", "tenants"] });
-    },
+    mutationFn: controlPlane.setActiveTenant,
   });
   const createOrganization = useMutation({
     mutationFn: () =>
@@ -312,11 +274,7 @@ function AuthenticatedTenantPanel(props: {
     },
   });
   const logout = useMutation({
-    mutationFn: controlPlaneClient.logout,
-    onSuccess: () => {
-      queryClient.removeQueries({ queryKey: ["control-plane"] });
-      void queryClient.invalidateQueries({ queryKey: controlPlaneQueryKeys.session });
-    },
+    mutationFn: controlPlane.logout,
   });
 
   if (!activeTenant) {
@@ -343,7 +301,7 @@ function AuthenticatedTenantPanel(props: {
             </span>
           }
           control={
-            props.session.tenants.length > 1 ? (
+            (controlPlane.session?.tenants.length ?? 0) > 1 ? (
               <select
                 aria-label="Active tenant"
                 className={cn(nativeSelectClassName, "min-w-44")}
@@ -351,7 +309,7 @@ function AuthenticatedTenantPanel(props: {
                 onChange={(event) => setActiveTenant.mutate(event.target.value)}
                 value={activeTenant.id}
               >
-                {props.session.tenants.map((tenant) => (
+                {controlPlane.session?.tenants.map((tenant) => (
                   <option key={tenant.id} value={tenant.id}>
                     {tenant.name}
                   </option>
@@ -361,8 +319,8 @@ function AuthenticatedTenantPanel(props: {
           }
         />
         <SettingsRow
-          title={props.session.user.displayName}
-          description={props.session.user.email}
+          title={controlPlane.session?.user.displayName ?? "Signed-in user"}
+          description={controlPlane.session?.user.email ?? ""}
           control={
             <Button disabled={logout.isPending} size="sm" variant="outline" onClick={() => logout.mutate()}>
               Sign out
@@ -394,21 +352,21 @@ function AuthenticatedTenantPanel(props: {
         />
       ) : null}
 
-      {canManageCredentials && organizationsQuery.data ? (
+      {canManageCredentials ? (
         <TenantCredentialSettingsSection
           key={`credentials-${activeTenant.id}`}
-          organizations={organizationsQuery.data.items.filter(
+          organizations={controlPlane.organizations.filter(
             (organization) => organization.status === "active",
           )}
           tenantId={activeTenant.id}
         />
       ) : null}
 
-		{canReadIdentity && organizationsQuery.data ? (
+		{canReadIdentity ? (
 			<TenantIdentitySettingsSection
 				key={`identity-${activeTenant.id}`}
 				canManage={canManageIdentity}
-				organizations={organizationsQuery.data.items.filter(
+				organizations={controlPlane.organizations.filter(
 					(organization) => organization.status === "active",
 				)}
 				tenantId={activeTenant.id}
@@ -424,7 +382,7 @@ function AuthenticatedTenantPanel(props: {
 		) : null}
 
       <SettingsSection title="Organizations">
-        {organizationsQuery.data?.items.map((organization) => (
+        {controlPlane.organizations.map((organization) => (
           <SettingsListRow
             key={organization.id}
             title={organization.name}
@@ -432,15 +390,13 @@ function AuthenticatedTenantPanel(props: {
             actions={<StatusPill value={organization.status} />}
           />
         ))}
-        {organizationsQuery.isPending ? (
-          <SettingsListRow title="Loading organizations…" />
-        ) : organizationsQuery.data?.items.length === 0 ? (
+        {controlPlane.organizations.length === 0 ? (
           <SettingsListRow
             title="No organization access"
             description="You are a tenant member but have not been assigned to an organization."
           />
         ) : null}
-        {authorizationCanCreateOrganization(activeTenant.role) ? (
+        {controlPlane.capabilities.canManageOrganizations ? (
           <SettingsRow
             title="Create organization"
             description="Organizations own projects and define the collaboration boundary inside a tenant."
@@ -483,14 +439,14 @@ function AuthenticatedTenantPanel(props: {
                 </Button>
               </div>
               <div className="sm:col-span-2">
-                <InlineError error={createOrganization.error ?? organizationsQuery.error} />
+                <InlineError error={createOrganization.error ?? controlPlane.error} />
               </div>
             </form>
           </SettingsRow>
         ) : null}
       </SettingsSection>
 
-      {organizationsQuery.data ? (
+      {controlPlane.organizations.length > 0 ? (
         <>
           {canReadExecutionTargets ? (
             <ExecutionTargetSettingsSection
@@ -499,13 +455,13 @@ function AuthenticatedTenantPanel(props: {
               isLoading={executionTargetsQuery.isPending}
               onCreated={(target) => {
                 queryClient.setQueryData<{ items: ReadonlyArray<ControlPlaneExecutionTarget> }>(
-                  controlPlaneQueryKeys.executionTargets(activeTenantId),
+                  settingsQueryKeys.executionTargets(activeTenantId),
                   (current) => ({ items: [...(current?.items ?? []), target] }),
                 );
               }}
               onUpdated={(targetId, status) => {
                 queryClient.setQueryData<{ items: ReadonlyArray<ControlPlaneExecutionTarget> }>(
-                  controlPlaneQueryKeys.executionTargets(activeTenantId),
+                  settingsQueryKeys.executionTargets(activeTenantId),
                   (current) => ({
                     items: (current?.items ?? []).map((target) =>
                       target.id === targetId ? { ...target, status } : target,
@@ -513,7 +469,7 @@ function AuthenticatedTenantPanel(props: {
                   }),
                 );
               }}
-              organizations={organizationsQuery.data.items.filter(
+              organizations={controlPlane.organizations.filter(
                 (organization) => organization.status === "active",
               )}
               requireOrganizationScope={activeTenant.planCode === "personal"}
@@ -525,7 +481,7 @@ function AuthenticatedTenantPanel(props: {
 			credentials={(credentialsQuery.data?.items ?? []) as ReadonlyArray<ControlPlaneProviderCredential>}
             executionTargets={executionTargetsQuery.data?.items ?? []}
             tenantId={activeTenant.id}
-            organizations={organizationsQuery.data.items.filter(
+            organizations={controlPlane.organizations.filter(
               (organization) => organization.status === "active",
             )}
           />
@@ -604,8 +560,4 @@ function AuthenticatedTenantPanel(props: {
       ) : null}
     </div>
   );
-}
-
-function authorizationCanCreateOrganization(role: string) {
-  return role === "owner" || role === "admin";
 }

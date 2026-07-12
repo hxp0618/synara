@@ -3,6 +3,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { createRouter } from "@tanstack/react-router";
 
 import { routeTree } from "./routeTree.gen";
+import { ControlPlaneProvider } from "./controlPlaneContext";
 import { StoreProvider } from "./store";
 
 type RouterHistory = NonNullable<Parameters<typeof createRouter>[0]["history"]>;
@@ -24,7 +25,11 @@ export function getRouter(history: RouterHistory) {
       createElement(
         QueryClientProvider,
         { client: queryClient },
-        createElement(StoreProvider, null, children),
+        createElement(
+          ControlPlaneProvider,
+          null,
+          createElement(StoreProvider, null, children),
+        ),
       ),
   });
 }

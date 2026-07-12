@@ -42,24 +42,28 @@ export function shouldStreamControlPlaneResponse(response: Response): boolean {
   return response.headers.get("content-disposition")?.toLowerCase().startsWith("attachment;") === true;
 }
 
-function proxyRequestHeaders(request: HttpServerRequest.HttpServerRequest, requestUrl: URL) {
+export function buildControlPlaneProxyRequestHeaders(input: {
+  headers: Readonly<Record<string, string | undefined>>;
+  requestUrl: URL;
+  remoteAddress?: string | undefined;
+}) {
   const headers = new Headers();
-  for (const [name, value] of Object.entries(request.headers)) {
-    if (!HOP_BY_HOP_HEADERS.has(name.toLowerCase())) {
+  for (const [name, value] of Object.entries(input.headers)) {
+    if (value !== undefined && !HOP_BY_HOP_HEADERS.has(name.toLowerCase())) {
       headers.set(name, value);
     }
   }
-  headers.set("x-forwarded-host", requestUrl.host);
-  headers.set("x-forwarded-proto", requestUrl.protocol.slice(0, -1));
-  if (request.remoteAddress) {
-    headers.set("x-forwarded-for", request.remoteAddress);
+  headers.set("x-forwarded-host", input.requestUrl.host);
+  headers.set("x-forwarded-proto", input.requestUrl.protocol.slice(0, -1));
+  if (input.remoteAddress) {
+    headers.set("x-forwarded-for", input.remoteAddress);
   } else {
     headers.delete("x-forwarded-for");
   }
   return headers;
 }
 
-function proxyResponseHeaders(response: Response) {
+export function buildControlPlaneProxyResponseHeaders(response: Response) {
   const headers: Record<string, string | ReadonlyArray<string>> = {};
   response.headers.forEach((value, name) => {
     if (!RESPONSE_HEADERS_TO_DROP.has(name.toLowerCase()) && name.toLowerCase() !== "set-cookie") {
@@ -99,7 +103,11 @@ const proxyControlPlaneRequest = Effect.gen(function* () {
       try: (signal) =>
         fetch(resolveControlPlaneTarget(config.controlPlaneUrl!, requestUrl), {
           method: request.method,
-          headers: proxyRequestHeaders(request, requestUrl),
+          headers: buildControlPlaneProxyRequestHeaders({
+            headers: request.headers,
+            requestUrl,
+            ...(request.remoteAddress ? { remoteAddress: request.remoteAddress } : {}),
+          }),
           body,
           ...(body === undefined ? {} : { duplex: "half" as const }),
           redirect: "manual",
@@ -122,7 +130,7 @@ const proxyControlPlaneRequest = Effect.gen(function* () {
         {
           status: upstream.status,
           statusText: upstream.statusText,
-          headers: proxyResponseHeaders(upstream),
+          headers: buildControlPlaneProxyResponseHeaders(upstream),
         },
       );
     }
@@ -130,7 +138,7 @@ const proxyControlPlaneRequest = Effect.gen(function* () {
     return HttpServerResponse.uint8Array(bytes, {
       status: upstream.status,
       statusText: upstream.statusText,
-      headers: proxyResponseHeaders(upstream),
+      headers: buildControlPlaneProxyResponseHeaders(upstream),
     });
 });
 

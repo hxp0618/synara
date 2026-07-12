@@ -327,6 +327,8 @@ import {
   useEffectiveComposerModelState,
 } from "../composerDraftStore";
 import { useTemporaryThreadStore } from "../temporaryThreadStore";
+import { useControlPlane } from "../controlPlaneContext";
+import { ControlPlaneTurnDispatcher } from "../lib/controlPlaneTurnDispatch";
 import { useComposerFocusRequestStore } from "../composerFocusRequestStore";
 import { appendComposerPromptText } from "../lib/chatReferences";
 import {
@@ -1021,6 +1023,10 @@ export default function ChatView({
   const syncServerShellSnapshot = useStore((store) => store.syncServerShellSnapshot);
   const setStoreThreadError = useStore((store) => store.setError);
   const setStoreThreadWorkspace = useStore((store) => store.setThreadWorkspace);
+  const controlPlane = useControlPlane();
+  const [controlPlaneTurnDispatcher] = useState(
+    () => new ControlPlaneTurnDispatcher(randomUUID),
+  );
   const { settings } = useAppSettings();
   const assistantDeliveryMode = resolveAssistantDeliveryMode(settings);
   const desktopTopBarTrafficLightGutterClassName = useDesktopTopBarTrafficLightGutterClassName();
@@ -6974,6 +6980,79 @@ export default function ChatView({
       // Provider mentions are structured turn metadata, and automation definitions persist text only.
       selectedComposerMentionsForSend.length === 0;
     const hasPromptOnlySendableContent = hasNoStructuredComposerContext;
+    if (controlPlane.isAuthoritative) {
+      if (!hasSendableContent) return false;
+      if (!activeProject || !controlPlane.capabilities.canCreateTurn) {
+        toastManager.add({
+          type: "error",
+          title: "This SaaS context is read-only",
+          description:
+            "Select an active Tenant and Organization with Session execution permission.",
+        });
+        return false;
+      }
+      if (!hasNoStructuredComposerContext || selectedComposerMentionsForSend.length > 0) {
+        toastManager.add({
+          type: "warning",
+          title: "Remote attachments are not ready yet",
+          description:
+            "This Control Plane Turn was not created. Remove file, image, terminal, selection, or provider-mention attachments and try again.",
+        });
+        return false;
+      }
+      if (hasLiveTurn) {
+        toastManager.add({
+          type: "warning",
+          title: "Wait for the active remote Turn",
+          description: "Queued and steering delivery will be enabled with the Stage 3 Provider Runner.",
+        });
+        return false;
+      }
+
+      const outgoingMessageText = formatOutgoingComposerPrompt({
+        provider: selectedProviderForSend,
+        model: selectedModelForSend,
+        effort: selectedPromptEffortForSend,
+        text: trimmedPromptForSend,
+      });
+      const draftKey = activeThread.id;
+      sendInFlightRef.current = true;
+      setThreadError(activeThread.id, null);
+      try {
+        const dispatch = await controlPlaneTurnDispatcher.dispatch({
+          draftThreadId: draftKey,
+          persistedSessionId: isServerThread ? activeThread.id : null,
+          projectId: activeProject.id,
+          title: buildPromptThreadTitleFallback(trimmedPromptForSend),
+          provider: selectedProviderForSend,
+          ...(selectedModelForSend ? { model: selectedModelForSend } : {}),
+          inputText: outgoingMessageText,
+          createSession: ({ projectId, idempotencyKey, ...input }) =>
+            controlPlane.createSession(projectId, { ...input, idempotencyKey }),
+          createTurn: ({ sessionId, inputText, idempotencyKey }) =>
+            controlPlane.createTurn(sessionId, inputText, idempotencyKey),
+        });
+        clearComposerInput(activeThread.id);
+        scheduleComposerFocus();
+
+        if (!isServerThread) {
+          const targetThreadId = ThreadId.makeUnsafe(dispatch.sessionId);
+          await navigate({ to: "/$threadId", params: { threadId: targetThreadId } });
+          const draftStore = useComposerDraftStore.getState();
+          draftStore.clearProjectDraftThreadId(activeProject.id);
+          draftStore.clearDraftThread(activeThread.id);
+        }
+        sendInFlightRef.current = false;
+        return true;
+      } catch (error) {
+        setThreadError(
+          activeThread.id,
+          error instanceof Error ? error.message : "Failed to create the remote Turn.",
+        );
+        sendInFlightRef.current = false;
+        return false;
+      }
+    }
     if (hasPromptOnlySendableContent) {
       const handledSlashCommand = await handleStandaloneSlashCommand(trimmedPromptForSend);
       if (handledSlashCommand) {

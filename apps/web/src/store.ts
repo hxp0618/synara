@@ -4275,6 +4275,59 @@ export function syncServerReadModel(state: AppState, readModel: OrchestrationRea
   };
 }
 
+export function syncAuthoritativeProjection(
+  state: AppState,
+  projects: ReadonlyArray<Project>,
+  nextThreads: ReadonlyArray<Thread>,
+): AppState {
+  rememberProjectUiState(state.projects);
+  rememberProjectLocalNames(state.projects);
+  const nextThreadIds = new Set(nextThreads.map((thread) => thread.id));
+  let normalizedState: AppState = {
+    ...state,
+    threadIds: [],
+    threadShellById: retainThreadScopedRecord(state.threadShellById, nextThreadIds),
+    threadSessionById: retainThreadScopedRecord(state.threadSessionById, nextThreadIds),
+    threadTurnStateById: retainThreadScopedRecord(state.threadTurnStateById, nextThreadIds),
+    messageIdsByThreadId: retainThreadScopedRecord(state.messageIdsByThreadId, nextThreadIds),
+    messageByThreadId: retainThreadScopedRecord(state.messageByThreadId, nextThreadIds),
+    activityIdsByThreadId: retainThreadScopedRecord(state.activityIdsByThreadId, nextThreadIds),
+    activityByThreadId: retainThreadScopedRecord(state.activityByThreadId, nextThreadIds),
+    proposedPlanIdsByThreadId: retainThreadScopedRecord(
+      state.proposedPlanIdsByThreadId,
+      nextThreadIds,
+    ),
+    proposedPlanByThreadId: retainThreadScopedRecord(
+      state.proposedPlanByThreadId,
+      nextThreadIds,
+    ),
+    turnDiffIdsByThreadId: retainThreadScopedRecord(state.turnDiffIdsByThreadId, nextThreadIds),
+    turnDiffSummaryByThreadId: retainThreadScopedRecord(
+      state.turnDiffSummaryByThreadId,
+      nextThreadIds,
+    ),
+    deletedProjectIdsById: {},
+    deletedThreadIdsById: {},
+  };
+  for (const thread of nextThreads) {
+    normalizedState = writeThreadState(normalizedState, thread);
+  }
+  const threads = getThreadsFromState(normalizedState);
+  const sidebarThreadSummaryById = Object.fromEntries(
+    threads.map((thread) => [
+      thread.id,
+      buildSidebarThreadSummary(thread, state.sidebarThreadSummaryById[thread.id]),
+    ]),
+  ) as Record<string, SidebarThreadSummary>;
+  return {
+    ...normalizedState,
+    projects: [...projects],
+    threads,
+    sidebarThreadSummaryById,
+    threadsHydrated: true,
+  };
+}
+
 export function markThreadVisited(
   state: AppState,
   threadId: ThreadId,
@@ -4472,6 +4525,10 @@ interface AppStore extends AppState {
   syncServerThreadDetail: (thread: ReadModelThread) => void;
   syncServerThreadDetailHotPath: (thread: ReadModelThread) => void;
   syncServerReadModel: (readModel: OrchestrationReadModel) => void;
+  syncAuthoritativeProjection: (
+    projects: ReadonlyArray<Project>,
+    threads: ReadonlyArray<Thread>,
+  ) => void;
   applyShellEvent: (event: OrchestrationShellStreamEvent) => void;
   applyOrchestrationEvents: (events: ReadonlyArray<OrchestrationEvent>) => void;
   applyOrchestrationEventsHotPath: (events: ReadonlyArray<OrchestrationEvent>) => void;
@@ -4496,6 +4553,8 @@ export const useStore = create<AppStore>((set) => ({
   syncServerThreadDetailHotPath: (thread) =>
     set((state) => syncServerThreadDetailHotPath(state, thread)),
   syncServerReadModel: (readModel) => set((state) => syncServerReadModel(state, readModel)),
+  syncAuthoritativeProjection: (projects, threads) =>
+    set((state) => syncAuthoritativeProjection(state, projects, threads)),
   applyShellEvent: (event) => set((state) => applyShellEvent(state, event)),
   applyOrchestrationEvents: (events) => set((state) => applyOrchestrationEvents(state, events)),
   applyOrchestrationEventsHotPath: (events) =>

@@ -23,6 +23,8 @@ import { Throttler } from "@tanstack/react-pacer";
 
 import { APP_DISPLAY_NAME } from "../branding";
 import { DesktopWindowControls } from "../components/DesktopWindowControls";
+import { ControlPlaneGate } from "../components/ControlPlaneGate";
+import { useControlPlane } from "../controlPlaneContext";
 import { SETTINGS_TARGETS } from "../settingsNavigation";
 import ShortcutsDialog from "../components/ShortcutsDialog";
 import WhatsNewDialog from "../components/WhatsNewDialog";
@@ -146,6 +148,7 @@ export const Route = createRootRouteWithContext<{
 });
 
 function RootRouteView() {
+  const controlPlane = useControlPlane();
   useAppTypography();
   useAppDensity();
   usePreloadSettingsRoute();
@@ -170,39 +173,51 @@ function RootRouteView() {
   // so it also stays clickable while a modal is open.)
   const desktopWindowControls = <DesktopWindowControls className="fixed top-0 right-0 z-[250]" />;
 
-  if (!readNativeApi()) {
-    return (
-      <>
-        <div className="flex h-screen flex-col bg-background text-foreground">
-          <div className="flex flex-1 items-center justify-center">
-            <p className="text-sm text-muted-foreground">
-              Connecting to {APP_DISPLAY_NAME} server...
-            </p>
-          </div>
-        </div>
-        {desktopWindowControls}
-      </>
-    );
-  }
-
-  return (
-    <>
+  const content = !readNativeApi() ? (
+    <div className="flex h-screen flex-col bg-background text-foreground">
+      <div className="flex flex-1 items-center justify-center">
+        <p className="text-sm text-muted-foreground">
+          Connecting to {APP_DISPLAY_NAME} server...
+        </p>
+      </div>
+    </div>
+  ) : (
       <ToastProvider position="top-center">
         <AnchoredToastProvider>
           <GitProgressToastPreviewDev />
-          <EventRouter />
+          {controlPlane.isAuthoritative ? <ControlPlaneSessionRouteCoordinator /> : <EventRouter />}
           <ProviderStatusRefreshCoordinator />
           <GlobalShortcutsDialog />
           <GlobalWhatsNewSurface />
           <TaskCompletionNotifications />
           <ProviderUpdateNotifications />
-          <DesktopProjectBootstrap />
+          {controlPlane.isAuthoritative ? null : <DesktopProjectBootstrap />}
           <Outlet />
         </AnchoredToastProvider>
       </ToastProvider>
+  );
+
+  return (
+    <>
+      <ControlPlaneGate>{content}</ControlPlaneGate>
       {desktopWindowControls}
     </>
   );
+}
+
+function ControlPlaneSessionRouteCoordinator() {
+  const controlPlane = useControlPlane();
+  const params = useParams({ strict: false }) as { threadId?: string };
+  const sessionId = params.threadId ?? null;
+  const sessionAvailable =
+    sessionId !== null && controlPlane.sessions.some((session) => session.id === sessionId);
+
+  useEffect(() => {
+    if (!sessionId || !sessionAvailable) return;
+    return controlPlane.watchSession(sessionId);
+  }, [controlPlane.watchSession, sessionAvailable, sessionId]);
+
+  return null;
 }
 
 function GitProgressToastPreviewDev() {

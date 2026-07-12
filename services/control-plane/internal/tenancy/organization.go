@@ -17,7 +17,7 @@ import (
 	"github.com/synara-ai/synara/services/control-plane/internal/validation"
 )
 
-func toOrganization(model persistence.Organization) Organization {
+func toOrganization(model persistence.Organization, currentUserRole *string) Organization {
 	settings := model.Settings
 	if settings == nil {
 		settings = map[string]any{}
@@ -25,9 +25,26 @@ func toOrganization(model persistence.Organization) Organization {
 	return Organization{
 		ID: model.ID, TenantID: model.TenantID, ParentOrganizationID: model.ParentOrganizationID,
 		Slug: model.Slug, Name: model.Name, Kind: model.Kind, Status: model.Status,
-		Settings: settings, CreatedAt: model.CreatedAt, UpdatedAt: model.UpdatedAt,
+		CurrentUserRole: currentUserRole, Settings: settings, CreatedAt: model.CreatedAt, UpdatedAt: model.UpdatedAt,
 		ArchivedAt: model.ArchivedAt,
 	}
+}
+
+func (s *Service) activeOrganizationRoles(
+	ctx context.Context,
+	tenantID, userID uuid.UUID,
+) (map[uuid.UUID]string, error) {
+	models := make([]persistence.OrganizationMembership, 0)
+	if err := s.db.WithContext(ctx).
+		Where("tenant_id = ? AND user_id = ? AND status = ?", tenantID, userID, "active").
+		Find(&models).Error; err != nil {
+		return nil, problem.Wrap(500, "organization_roles_load_failed", "Failed to load Organization roles.", err)
+	}
+	roles := make(map[uuid.UUID]string, len(models))
+	for _, model := range models {
+		roles[model.OrganizationID] = model.Role
+	}
+	return roles, nil
 }
 
 func (s *Service) requireOrganizationPermission(
@@ -55,9 +72,18 @@ func (s *Service) ListOrganizations(ctx context.Context, principal identity.Prin
 	if err := query.Order("CASE organizations.kind WHEN 'root' THEN 0 ELSE 1 END, LOWER(organizations.name), organizations.id").Find(&models).Error; err != nil {
 		return nil, problem.Wrap(500, "organizations_load_failed", "Failed to load organizations.", err)
 	}
+	roles, err := s.activeOrganizationRoles(ctx, tenantID, principal.UserID)
+	if err != nil {
+		return nil, err
+	}
 	result := make([]Organization, 0, len(models))
 	for _, model := range models {
-		result = append(result, toOrganization(model))
+		role, found := roles[model.ID]
+		if found {
+			result = append(result, toOrganization(model, &role))
+		} else {
+			result = append(result, toOrganization(model, nil))
+		}
 	}
 	return result, nil
 }
@@ -76,7 +102,15 @@ func (s *Service) GetOrganization(ctx context.Context, principal identity.Princi
 	if err != nil {
 		return Organization{}, problem.Wrap(500, "organization_load_failed", "Failed to load the organization.", err)
 	}
-	return toOrganization(model), nil
+	roles, err := s.activeOrganizationRoles(ctx, tenantID, principal.UserID)
+	if err != nil {
+		return Organization{}, err
+	}
+	role, found := roles[model.ID]
+	if !found {
+		return toOrganization(model, nil), nil
+	}
+	return toOrganization(model, &role), nil
 }
 
 func (s *Service) CreateOrganization(

@@ -29,6 +29,8 @@ import { useFocusedChatContext } from "../focusedChatContext";
 import { useStore } from "../store";
 import { useTemporaryThreadStore } from "../temporaryThreadStore";
 import { useTerminalStateStore } from "../terminalStateStore";
+import { useControlPlane } from "../controlPlaneContext";
+import { toastManager } from "../components/ui/toast";
 
 export interface NewThreadNavigationOptions {
   /**
@@ -41,6 +43,7 @@ export interface NewThreadNavigationOptions {
 
 export function useHandleNewThread() {
   const projects = useStore((store) => store.projects);
+  const controlPlane = useControlPlane();
   const { settings } = useAppSettings();
   const navigate = useNavigate();
   const router = useRouter();
@@ -165,6 +168,14 @@ export function useHandleNewThread() {
         threadId: ThreadId,
         creationState: ReturnType<typeof resolveCreationState>,
       ): Promise<void> => {
+        if (controlPlane.isAuthoritative) {
+          toastManager.add({
+            type: "warning",
+            title: "Remote terminal startup is not available yet",
+            description: "Stage 3 will attach terminal sessions through the selected Worker.",
+          });
+          return;
+        }
         const api = readNativeApi();
         if (!api) {
           return;
@@ -319,6 +330,7 @@ export function useHandleNewThread() {
     [
       activeDraftThread,
       activeThread,
+      controlPlane.isAuthoritative,
       clearTemporaryThread,
       clearTerminalState,
       navigate,

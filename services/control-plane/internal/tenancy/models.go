@@ -39,6 +39,7 @@ type Organization struct {
 	Name                 string         `json:"name"`
 	Kind                 string         `json:"kind"`
 	Status               string         `json:"status"`
+	CurrentUserRole      *string        `json:"currentUserRole"`
 	Settings             map[string]any `json:"settings"`
 	CreatedAt            time.Time      `json:"createdAt"`
 	UpdatedAt            time.Time      `json:"updatedAt"`

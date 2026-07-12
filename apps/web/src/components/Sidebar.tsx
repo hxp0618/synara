@@ -165,6 +165,8 @@ import {
 } from "../routes/-automations.shared";
 import { shouldRenderTerminalWorkspace } from "./ChatView.logic";
 import { CHAT_SURFACE_HEADER_HEIGHT_CLASS } from "./chat/chatHeaderControls";
+import { ControlPlaneContextSwitcher } from "./ControlPlaneContextSwitcher";
+import { useControlPlane } from "../controlPlaneContext";
 import { ProviderIcon } from "./ProviderIcon";
 import { SidebarLeadingControls } from "./SidebarHeaderNavigationControls";
 import { ProjectSidebarIcon } from "./ProjectSidebarIcon";
@@ -1357,6 +1359,7 @@ export default function Sidebar() {
     readDebugFeatureFlagsMenuVisibility,
   );
   const projects = useStore((store) => store.projects);
+  const controlPlane = useControlPlane();
   const threadsHydrated = useStore((store) => store.threadsHydrated);
   const sidebarThreadSummaryById = useStore((store) => store.sidebarThreadSummaryById);
   const sidebarThreadSummaryByIdRef = useRef(sidebarThreadSummaryById);
@@ -2596,9 +2599,6 @@ export default function Sidebar() {
     async (rawCwd: string, options: { createIfMissing?: boolean } = {}) => {
       const cwd = rawCwd.trim();
       if (!cwd || isAddingProject) return;
-      const api = readNativeApi();
-      if (!api) return;
-
       setIsAddingProject(true);
       const finishAddingProject = () => {
         setIsAddingProject(false);
@@ -2606,6 +2606,40 @@ export default function Sidebar() {
         setAddProjectError(null);
         setAddingProject(false);
       };
+
+      if (controlPlane.isAuthoritative) {
+        try {
+          if (!controlPlane.capabilities.canCreateProject) {
+            throw new Error("The active Tenant or Organization is read-only for Project creation.");
+          }
+          const repositoryUrl = /^(?:https?|ssh|git):\/\//i.test(cwd) ? cwd : undefined;
+          const nameSource = repositoryUrl ? new URL(repositoryUrl).pathname : cwd;
+          const name =
+            nameSource
+              .split(/[/\\]/)
+              .filter(Boolean)
+              .at(-1)
+              ?.replace(/\.git$/i, "") ?? cwd;
+          const project = await controlPlane.createProject({
+            name,
+            ...(repositoryUrl ? { repositoryUrl } : {}),
+          });
+          finishAddingProject();
+          await handleNewThread(project.id as ProjectId, {
+            envMode: appSettings.defaultThreadEnvMode,
+          });
+          return;
+        } catch (error) {
+          setIsAddingProject(false);
+          throw error;
+        }
+      }
+
+      const api = readNativeApi();
+      if (!api) {
+        setIsAddingProject(false);
+        return;
+      }
 
       try {
         const existing = findWorkspaceRootMatch(projects, cwd, (project) => project.cwd);
@@ -2682,6 +2716,9 @@ export default function Sidebar() {
     },
     [
       appSettings.defaultThreadEnvMode,
+      controlPlane.capabilities.canCreateProject,
+      controlPlane.createProject,
+      controlPlane.isAuthoritative,
       handleNewThread,
       isAddingProject,
       projects,
@@ -6674,6 +6711,7 @@ export default function Sidebar() {
       )}
 
       <SidebarContent className="gap-0 font-system-ui">
+        <ControlPlaneContextSwitcher />
         {showArm64IntelBuildWarning && arm64IntelBuildWarningDescription ? (
           <SidebarGroup className="px-2 pt-2 pb-0">
             <Alert variant="warning" className="rounded-2xl border-warning/40 bg-warning/8">
@@ -7000,7 +7038,7 @@ export default function Sidebar() {
                     <div className="mb-2.5 px-1">
                       {!showManualPathInput ? (
                         <div className="flex gap-1.5">
-                          {isElectron && (
+                          {isElectron && !controlPlane.isAuthoritative && (
                             <button
                               type="button"
                               className="flex h-8 flex-1 items-center justify-center gap-2 rounded-lg bg-[var(--color-background-elevated-secondary)] px-2 text-[length:var(--app-font-size-ui,12px)] font-normal text-[var(--color-text-foreground-secondary)] transition-colors hover:bg-[var(--color-background-button-secondary-hover)] hover:text-[var(--color-text-foreground)] disabled:opacity-50"
@@ -7021,7 +7059,7 @@ export default function Sidebar() {
                             onClick={() => setShowManualPathInput(true)}
                           >
                             <SidebarGlyph icon={TbCursorText} variant="chrome" />
-                            Type path
+                            {controlPlane.isAuthoritative ? "Enter project" : "Type path"}
                           </button>
                         </div>
                       ) : (
@@ -7035,7 +7073,11 @@ export default function Sidebar() {
                           <input
                             ref={addProjectInputRef}
                             className="min-w-0 flex-1 bg-transparent pl-2.5 py-1.5 text-sm text-foreground placeholder:text-muted-foreground/40 focus:outline-none"
-                            placeholder="/path/to/project"
+                            placeholder={
+                              controlPlane.isAuthoritative
+                                ? "Project name or repository URL"
+                                : "/path/to/project"
+                            }
                             value={newCwd}
                             onChange={(event) => {
                               setNewCwd(event.target.value);

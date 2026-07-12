@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useState, type FormEvent, type ReactNode } from "react";
+import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 
 import {
   CONTROL_PLANE_FORM_GRID_CLASS_NAME as formGridClassName,
@@ -24,7 +24,7 @@ import {
   type ControlPlaneProviderCredential,
   type ControlPlaneSessionEvent,
 } from "~/lib/controlPlaneClient";
-import { cn } from "~/lib/utils";
+import { cn, randomUUID } from "~/lib/utils";
 
 const projectSessionQueryKeys = {
   projects: (tenantId: string, organizationId: string | null) =>
@@ -99,6 +99,9 @@ export function ProjectSessionSettingsSection(props: {
   const [streamStatus, setStreamStatus] =
     useState<"idle" | "connecting" | "live" | "reconnecting">("idle");
   const [lastLiveEvent, setLastLiveEvent] = useState<ControlPlaneSessionEvent | null>(null);
+  const projectIdempotencyKeyRef = useRef<string | null>(null);
+  const sessionIdempotencyKeyRef = useRef<string | null>(null);
+  const turnIdempotencyKeyRef = useRef<string | null>(null);
 
   const selectedOrganizationId = props.organizations.some(
     (organization) => organization.id === organizationSelection,
@@ -183,13 +186,23 @@ export function ProjectSessionSettingsSection(props: {
 
   const createProject = useMutation({
     mutationFn: () =>
-      controlPlaneClient.createProject(props.tenantId, selectedOrganizationId!, {
-        name: projectName,
-        repositoryUrl: repositoryUrl || undefined,
-        defaultBranch,
-        visibility: projectVisibility,
-      }),
+      controlPlaneClient.createProject(
+        props.tenantId,
+        selectedOrganizationId!,
+        {
+          name: projectName,
+          ...(repositoryUrl ? { repositoryUrl } : {}),
+          defaultBranch,
+          visibility: projectVisibility,
+        },
+        {
+          idempotencyKey:
+            projectIdempotencyKeyRef.current ??
+            (projectIdempotencyKeyRef.current = `web-settings-project-${randomUUID()}`),
+        },
+      ),
     onSuccess: (project) => {
+      projectIdempotencyKeyRef.current = null;
       setProjectName("");
       setRepositoryUrl("");
       setDefaultBranch("main");
@@ -201,15 +214,28 @@ export function ProjectSessionSettingsSection(props: {
   });
   const createSession = useMutation({
     mutationFn: () =>
-      controlPlaneClient.createSession(selectedProjectId!, {
-        title: sessionTitle,
-        visibility: sessionVisibility,
-        provider,
-        model: model || undefined,
-		providerCredentialId: selectedProviderCredentialId || undefined,
-        executionTargetId: selectedExecutionTargetId || undefined,
-      }),
+      controlPlaneClient.createSession(
+        selectedProjectId!,
+        {
+          title: sessionTitle,
+          visibility: sessionVisibility,
+          provider,
+          ...(model ? { model } : {}),
+		...(selectedProviderCredentialId
+			? { providerCredentialId: selectedProviderCredentialId }
+			: {}),
+          ...(selectedExecutionTargetId
+            ? { executionTargetId: selectedExecutionTargetId }
+            : {}),
+        },
+        {
+          idempotencyKey:
+            sessionIdempotencyKeyRef.current ??
+            (sessionIdempotencyKeyRef.current = `web-settings-session-${randomUUID()}`),
+        },
+      ),
     onSuccess: (session) => {
+      sessionIdempotencyKeyRef.current = null;
       setSessionTitle("");
       setModel("");
       setWatchedSessionId(session.id);
@@ -220,8 +246,14 @@ export function ProjectSessionSettingsSection(props: {
     },
   });
   const createTurn = useMutation({
-    mutationFn: () => controlPlaneClient.createTurn(watchedSessionId!, turnInput),
+    mutationFn: () =>
+      controlPlaneClient.createTurn(watchedSessionId!, turnInput, {
+        idempotencyKey:
+          turnIdempotencyKeyRef.current ??
+          (turnIdempotencyKeyRef.current = `web-settings-turn-${randomUUID()}`),
+      }),
     onSuccess: () => {
+      turnIdempotencyKeyRef.current = null;
       setTurnInput("");
       void queryClient.invalidateQueries({
         queryKey: projectSessionQueryKeys.sessions(selectedProjectId),
