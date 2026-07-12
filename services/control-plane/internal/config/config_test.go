@@ -3,6 +3,7 @@ package config
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestLoadRejectsInvalidEnumAndScalarValues(t *testing.T) {
@@ -101,6 +102,32 @@ func TestLoadValidatesSSHProvisioningConfiguration(t *testing.T) {
 	}
 }
 
+func TestLoadValidatesOutboxConfiguration(t *testing.T) {
+	clearConfigEnvironment(t)
+	t.Setenv("SYNARA_OUTBOX_POLL_INTERVAL", "2s")
+	t.Setenv("SYNARA_OUTBOX_CLAIM_TTL", "10s")
+	t.Setenv("SYNARA_OUTBOX_BATCH_SIZE", "25")
+	t.Setenv("SYNARA_OUTBOX_MAX_ATTEMPTS", "7")
+	t.Setenv("SYNARA_OUTBOX_BASE_BACKOFF", "3s")
+	t.Setenv("SYNARA_OUTBOX_MAX_BACKOFF", "2m")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.OutboxPollInterval != 2*time.Second || cfg.OutboxClaimTTL != 10*time.Second ||
+		cfg.OutboxBatchSize != 25 || cfg.OutboxMaxAttempts != 7 ||
+		cfg.OutboxBaseBackoff != 3*time.Second || cfg.OutboxMaxBackoff != 2*time.Minute {
+		t.Fatalf("unexpected outbox config: %#v", cfg)
+	}
+
+	clearConfigEnvironment(t)
+	t.Setenv("SYNARA_OUTBOX_POLL_INTERVAL", "10s")
+	t.Setenv("SYNARA_OUTBOX_CLAIM_TTL", "5s")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "SYNARA_OUTBOX_CLAIM_TTL") {
+		t.Fatalf("expected invalid outbox claim TTL error, got %v", err)
+	}
+}
+
 func clearConfigEnvironment(t *testing.T) {
 	t.Helper()
 	for _, name := range []string{
@@ -118,6 +145,10 @@ func clearConfigEnvironment(t *testing.T) {
 		"SYNARA_SSH_PROVISION_TIMEOUT",
 		"SYNARA_DOCKER_RECONCILE_INTERVAL",
 		"SYNARA_KUBERNETES_RECONCILE_INTERVAL",
+		"SYNARA_RETENTION_SWEEP_INTERVAL",
+		"SYNARA_OUTBOX_POLL_INTERVAL", "SYNARA_OUTBOX_CLAIM_TTL",
+		"SYNARA_OUTBOX_BATCH_SIZE", "SYNARA_OUTBOX_MAX_ATTEMPTS",
+		"SYNARA_OUTBOX_BASE_BACKOFF", "SYNARA_OUTBOX_MAX_BACKOFF",
 	} {
 		t.Setenv(name, "")
 	}

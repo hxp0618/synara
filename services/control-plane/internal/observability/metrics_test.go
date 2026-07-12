@@ -53,6 +53,21 @@ func TestGatherUsesBoundedRoutePatternsAndAuthoritativeState(t *testing.T) {
 	}).Error; err != nil {
 		t.Fatal(err)
 	}
+	deadAt := now
+	if err := db.Create(&persistence.OutboxMessage{
+		ID: uuid.New(), Topic: "execution.queued", MessageKey: uuid.NewString(),
+		Payload: map[string]any{}, Headers: map[string]any{}, Attempts: 2,
+		AvailableAt: now, CreatedAt: now.Add(-time.Minute), DeadLetteredAt: &deadAt,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&persistence.OutboxMessage{
+		ID: uuid.New(), Topic: "execution.queued", MessageKey: uuid.NewString(),
+		Payload: map[string]any{}, Headers: map[string]any{}, Attempts: 1,
+		AvailableAt: now, CreatedAt: now.Add(-30 * time.Second),
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
 
 	registry := New(db)
 	registry.ObserveHTTP("GET", "GET /v1/sessions/{sessionID}", 200, 25*time.Millisecond)
@@ -68,6 +83,8 @@ func TestGatherUsesBoundedRoutePatternsAndAuthoritativeState(t *testing.T) {
 		`synara_workers{status="ready",target_kind="docker"} 1`,
 		`synara_executions{status="running",target_kind="docker"} 1`,
 		`synara_worker_leases{state="active"} 1`, `synara_metrics_collection_success 1`,
+		`synara_outbox_pending 1`, `synara_outbox_retrying 1`,
+		`synara_outbox_dead_letter 1`, `synara_outbox_oldest_pending_seconds`,
 	} {
 		if !strings.Contains(metrics, expected) {
 			t.Fatalf("metrics omitted %q:\n%s", expected, metrics)

@@ -23,6 +23,8 @@ import (
 	"github.com/synara-ai/synara/services/control-plane/internal/identity"
 	credentialkms "github.com/synara-ai/synara/services/control-plane/internal/kms"
 	"github.com/synara-ai/synara/services/control-plane/internal/observability"
+	"github.com/synara-ai/synara/services/control-plane/internal/outbox"
+	"github.com/synara-ai/synara/services/control-plane/internal/platform"
 	"github.com/synara-ai/synara/services/control-plane/internal/projects"
 	"github.com/synara-ai/synara/services/control-plane/internal/quotas"
 	"github.com/synara-ai/synara/services/control-plane/internal/retention"
@@ -72,6 +74,26 @@ func main() {
 	}
 	db := metadataStore.DB()
 	metrics := observability.New(db)
+	if cfg.Platform.QueueDriver == platform.QueueExternal {
+		logger.Error("external queue driver requires a publisher adapter that is not configured in this build")
+		os.Exit(1)
+	}
+	outboxService, err := outbox.NewService(db, outbox.Config{
+		BatchSize: cfg.OutboxBatchSize, ClaimTTL: cfg.OutboxClaimTTL,
+		MaxAttempts: cfg.OutboxMaxAttempts, BaseBackoff: cfg.OutboxBaseBackoff,
+		MaxBackoff: cfg.OutboxMaxBackoff,
+	})
+	if err != nil {
+		logger.Error("failed to configure outbox service", "error", err)
+		os.Exit(1)
+	}
+	outboxDispatcher, err := outbox.NewDispatcher(
+		outboxService, outbox.DatabasePublisher{}, cfg.OutboxPollInterval, metrics, logger,
+	)
+	if err != nil {
+		logger.Error("failed to configure outbox dispatcher", "error", err)
+		os.Exit(1)
+	}
 	bootstrapped, err := bootstrap.Ensure(ctx, db, cfg.Platform.Profile, cfg.InstallationID)
 	if err != nil {
 		logger.Error("failed to bootstrap control-plane installation", "error", err)
@@ -134,7 +156,7 @@ func main() {
 	api := httpapi.New(
 		cfg, db, identityService, tenancyService, projectService, sessionService,
 		executionService, executionTargetService, sshProvisioner, artifactService, quotaService,
-		credentialService, retentionService, metrics, enterpriseIdentityService,
+		credentialService, retentionService, metrics, outboxService, enterpriseIdentityService,
 		serviceAccountService, scimService, logger,
 	)
 	server := &http.Server{
@@ -163,6 +185,7 @@ func main() {
 	go dockerReconciler.Run(ctx)
 	go kubernetesReconciler.Run(ctx)
 	go retentionService.Run(ctx)
+	go outboxDispatcher.Run(ctx)
 	if localAgentd != nil {
 		logger.Info("local agentd supervisor enabled", "executionTargetId", bootstrapped.ExecutionTargetID, "workspaceRoot", cfg.LocalAgentdWorkspaceRoot)
 		go localAgentd.Run(ctx)

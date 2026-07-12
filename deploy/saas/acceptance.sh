@@ -243,5 +243,21 @@ jq -e '.status == "archived" and .lastEventSequence == 13 and .archivedAt != nul
   <<<"$archived_session" >/dev/null
 request_json "$owner_cookie" DELETE "/v1/projects/$project_id" >/dev/null
 
+outbox_ready=0
+for _ in {1..50}; do
+  published_outbox="$(request_json "$owner_cookie" GET "/v1/tenants/$tenant_id/outbox-messages?status=published&limit=50")"
+  if jq -e '
+    (.items | all(has("payload") | not)) and
+    (.items | any(.topic == "execution.queued")) and
+    (.items | any(.topic == "artifact.ready")) and
+    (.items | any(.topic == "session.archived"))
+  ' <<<"$published_outbox" >/dev/null; then
+    outbox_ready=1
+    break
+  fi
+  sleep 0.1
+done
+[[ "$outbox_ready" == "1" ]]
+
 printf 'SaaS acceptance passed: tenant=%s organization=%s project=%s session=%s member=%s worker=%s\n' \
   "$tenant_id" "$organization_id" "$project_id" "$session_id" "$member_id" "$worker_id"

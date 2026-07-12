@@ -55,6 +55,12 @@ type Config struct {
 	DockerReconcileInterval     time.Duration
 	KubernetesReconcileInterval time.Duration
 	RetentionSweepInterval      time.Duration
+	OutboxPollInterval          time.Duration
+	OutboxClaimTTL              time.Duration
+	OutboxBatchSize             int
+	OutboxMaxAttempts           int
+	OutboxBaseBackoff           time.Duration
+	OutboxMaxBackoff            time.Duration
 }
 
 func Load() (Config, error) {
@@ -179,6 +185,24 @@ func Load() (Config, error) {
 	if cfg.RetentionSweepInterval, err = envDurationStrict("SYNARA_RETENTION_SWEEP_INTERVAL", time.Hour); err != nil {
 		return Config{}, err
 	}
+	if cfg.OutboxPollInterval, err = envDurationStrict("SYNARA_OUTBOX_POLL_INTERVAL", 500*time.Millisecond); err != nil {
+		return Config{}, err
+	}
+	if cfg.OutboxClaimTTL, err = envDurationStrict("SYNARA_OUTBOX_CLAIM_TTL", 30*time.Second); err != nil {
+		return Config{}, err
+	}
+	if cfg.OutboxBatchSize, err = envInt("SYNARA_OUTBOX_BATCH_SIZE", 50); err != nil {
+		return Config{}, err
+	}
+	if cfg.OutboxMaxAttempts, err = envInt("SYNARA_OUTBOX_MAX_ATTEMPTS", 12); err != nil {
+		return Config{}, err
+	}
+	if cfg.OutboxBaseBackoff, err = envDurationStrict("SYNARA_OUTBOX_BASE_BACKOFF", time.Second); err != nil {
+		return Config{}, err
+	}
+	if cfg.OutboxMaxBackoff, err = envDurationStrict("SYNARA_OUTBOX_MAX_BACKOFF", 5*time.Minute); err != nil {
+		return Config{}, err
+	}
 	if encodedKey := strings.TrimSpace(os.Getenv("SYNARA_CREDENTIAL_MASTER_KEY")); encodedKey != "" {
 		cfg.CredentialKMSLocalKey, err = decodeKey(encodedKey, "SYNARA_CREDENTIAL_MASTER_KEY")
 		if err != nil {
@@ -251,6 +275,21 @@ func Load() (Config, error) {
 	}
 	if cfg.RetentionSweepInterval <= 0 {
 		return Config{}, errors.New("SYNARA_RETENTION_SWEEP_INTERVAL must be positive")
+	}
+	if cfg.OutboxPollInterval <= 0 {
+		return Config{}, errors.New("SYNARA_OUTBOX_POLL_INTERVAL must be positive")
+	}
+	if cfg.OutboxClaimTTL <= cfg.OutboxPollInterval {
+		return Config{}, errors.New("SYNARA_OUTBOX_CLAIM_TTL must be greater than SYNARA_OUTBOX_POLL_INTERVAL")
+	}
+	if cfg.OutboxBatchSize <= 0 || cfg.OutboxBatchSize > 1000 {
+		return Config{}, errors.New("SYNARA_OUTBOX_BATCH_SIZE must be between 1 and 1000")
+	}
+	if cfg.OutboxMaxAttempts <= 0 {
+		return Config{}, errors.New("SYNARA_OUTBOX_MAX_ATTEMPTS must be positive")
+	}
+	if cfg.OutboxBaseBackoff <= 0 || cfg.OutboxMaxBackoff < cfg.OutboxBaseBackoff {
+		return Config{}, errors.New("SYNARA_OUTBOX_MAX_BACKOFF must be greater than or equal to SYNARA_OUTBOX_BASE_BACKOFF")
 	}
 	switch cfg.CredentialKMSProvider {
 	case "":

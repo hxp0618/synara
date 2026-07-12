@@ -17,6 +17,7 @@ as authorization decisions outside that mapping.
 | Credentials | manage | no | manage | no | no | no |
 | Workers | manage | manage | read | no | no | no |
 | Audit | read | read | read | no | read | no |
+| Outbox operations | manage | manage | read | no | read | no |
 | Billing | manage | no | no | manage | no | no |
 
 ## Organization roles

@@ -26,6 +26,7 @@ import (
 	"github.com/synara-ai/synara/services/control-plane/internal/executiontargets"
 	"github.com/synara-ai/synara/services/control-plane/internal/identity"
 	"github.com/synara-ai/synara/services/control-plane/internal/observability"
+	"github.com/synara-ai/synara/services/control-plane/internal/outbox"
 	"github.com/synara-ai/synara/services/control-plane/internal/problem"
 	"github.com/synara-ai/synara/services/control-plane/internal/projects"
 	"github.com/synara-ai/synara/services/control-plane/internal/quotas"
@@ -59,6 +60,7 @@ type Server struct {
 	credentials        *credentials.Service
 	retention          *retention.Service
 	metrics            *observability.Registry
+	outbox             *outbox.Service
 	enterpriseIdentity *enterpriseidentity.Service
 	serviceAccounts    *serviceaccounts.Service
 	scim               *scim.Service
@@ -81,6 +83,7 @@ func New(
 	credentialService *credentials.Service,
 	retentionService *retention.Service,
 	metrics *observability.Registry,
+	outboxService *outbox.Service,
 	enterpriseIdentityService *enterpriseidentity.Service,
 	serviceAccountService *serviceaccounts.Service,
 	scimService *scim.Service,
@@ -91,7 +94,7 @@ func New(
 		projects: projectService, sessions: sessionService, executions: executionService,
 		targets: executionTargetService, sshTargets: sshProvisioner,
 		artifacts: artifactService, quotas: quotaService,
-		credentials: credentialService, retention: retentionService, metrics: metrics,
+		credentials: credentialService, retention: retentionService, metrics: metrics, outbox: outboxService,
 		enterpriseIdentity: enterpriseIdentityService, serviceAccounts: serviceAccountService,
 		scim: scimService, logger: logger,
 	}
@@ -134,6 +137,8 @@ func New(
 	mux.Handle("DELETE /v1/tenants/{tenantID}/members/{userID}", server.requireAuth(http.HandlerFunc(server.removeTenantMember)))
 	mux.Handle("GET /v1/tenants/{tenantID}/audit-logs", server.requireAuth(http.HandlerFunc(server.listAuditLogs)))
 	mux.Handle("GET /v1/tenants/{tenantID}/audit-logs/export", server.requireAuth(http.HandlerFunc(server.exportAuditLogs)))
+	mux.Handle("GET /v1/tenants/{tenantID}/outbox-messages", server.requireAuth(http.HandlerFunc(server.listOutboxMessages)))
+	mux.Handle("POST /v1/tenants/{tenantID}/outbox-messages/{messageID}/replay", server.requireAuth(http.HandlerFunc(server.replayOutboxMessage)))
 	mux.Handle("GET /v1/tenants/{tenantID}/execution-targets", server.requireAuth(http.HandlerFunc(server.listExecutionTargets)))
 	mux.Handle("POST /v1/tenants/{tenantID}/execution-targets", server.requireAuth(http.HandlerFunc(server.createExecutionTarget)))
 	mux.Handle("GET /v1/tenants/{tenantID}/execution-targets/{executionTargetID}", server.requireAuth(http.HandlerFunc(server.getExecutionTarget)))

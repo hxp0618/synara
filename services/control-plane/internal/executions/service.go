@@ -10,6 +10,7 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/synara-ai/synara/services/control-plane/internal/executiontargets"
+	"github.com/synara-ai/synara/services/control-plane/internal/outbox"
 	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
 	"github.com/synara-ai/synara/services/control-plane/internal/platform"
 	"github.com/synara-ai/synara/services/control-plane/internal/problem"
@@ -182,13 +183,49 @@ func (s *Service) Heartbeat(
 
 func (s *Service) markStaleWorkers(ctx context.Context) error {
 	cutoff := s.now().Add(-s.heartbeatTimeout)
-	err := s.db.WithContext(ctx).Model(&persistence.WorkerInstance{}).
-		Where("status = ? AND last_heartbeat_at < ?", "online", cutoff).
-		Update("status", "offline").Error
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		workers := make([]persistence.WorkerInstance, 0, 100)
+		if err := persistence.WithLocking(tx.WithContext(ctx), "UPDATE", "SKIP LOCKED").
+			Where("status = ? AND last_heartbeat_at < ?", "online", cutoff).
+			Order("last_heartbeat_at, id").Limit(100).Find(&workers).Error; err != nil {
+			return err
+		}
+		for _, worker := range workers {
+			result := tx.WithContext(ctx).Model(&persistence.WorkerInstance{}).
+				Where("id = ? AND status = ? AND last_heartbeat_at = ?", worker.ID, "online", worker.LastHeartbeatAt).
+				Update("status", "offline")
+			if result.Error != nil {
+				return result.Error
+			}
+			if result.RowsAffected != 1 {
+				continue
+			}
+			if err := enqueueWorkerOffline(ctx, tx, worker); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 	if err != nil {
 		return problem.Wrap(500, "worker_sweep_failed", "Failed to update stale workers.", err)
 	}
 	return nil
+}
+
+func enqueueWorkerOffline(ctx context.Context, tx *gorm.DB, worker persistence.WorkerInstance) error {
+	var target persistence.ExecutionTarget
+	if err := tx.WithContext(ctx).Select("id", "tenant_id", "organization_id").Where("id = ?", worker.ExecutionTargetID).Take(&target).Error; err != nil {
+		return err
+	}
+	return outbox.Enqueue(ctx, tx, outbox.EnqueueInput{
+		TenantID: target.TenantID, Topic: "worker.offline",
+		MessageKey: worker.ID.String() + ":" + worker.LastHeartbeatAt.UTC().Format(time.RFC3339Nano),
+		Payload: map[string]any{
+			"tenantId": target.TenantID, "organizationId": target.OrganizationID,
+			"workerId": worker.ID, "executionTargetId": worker.ExecutionTargetID,
+			"targetKind": worker.TargetKind, "lastHeartbeatAt": worker.LastHeartbeatAt,
+		},
+	})
 }
 
 func normalizeRegistration(input RegisterWorkerInput) (RegisterWorkerInput, error) {

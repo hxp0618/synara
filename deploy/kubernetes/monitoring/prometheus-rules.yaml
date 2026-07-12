@@ -67,3 +67,19 @@ spec:
           annotations:
             summary: Synara outbox backlog is growing
             description: More than 1000 unpublished outbox messages have remained pending for ten minutes.
+        - alert: SynaraOutboxOldestAge
+          expr: synara_outbox_oldest_pending_seconds > 300
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: Synara outbox delivery is delayed
+            description: The oldest pending outbox message has been waiting for more than five minutes.
+        - alert: SynaraOutboxDeadLetters
+          expr: synara_outbox_dead_letter > 0
+          for: 1m
+          labels:
+            severity: critical
+          annotations:
+            summary: Synara outbox has dead-letter messages
+            description: One or more lifecycle messages exhausted all publish attempts and require operator review.

@@ -175,3 +175,7 @@ ENV HOME=/home/synara \
 WORKDIR /data
 USER 10001:10001
 ENTRYPOINT ["/usr/local/bin/synara-agentd"]
+
+# Preserve the Synara web/server runtime as the default image. Worker images are
+# selected explicitly with `--target worker`.
+FROM runtime AS default

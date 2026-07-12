@@ -18,6 +18,9 @@
 > 导出/导入与 Local Artifact → MinIO/S3 Payload 迁移已经落地。企业身份中的 SAML 使用
 > 每连接独立且 KMS 加密的 SP 签名密钥、RSA-SHA256 AuthnRequest、一次性
 > RelayState、InResponseTo/Destination/Audience/Issuer/时效校验和 Group Role Mapping。
+>
+> SaaS 产品路线“第二阶段：Go Control Plane 收口与生产化”的独立执行计划见
+> `docs/plans/stage-2-go-control-plane-productionization.md`。
 
 ## 0. 本次主要变更点
 

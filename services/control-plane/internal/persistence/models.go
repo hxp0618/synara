@@ -157,17 +157,21 @@ type AuditLog struct {
 }
 
 type OutboxMessage struct {
-	ID          uuid.UUID      `gorm:"column:id;type:uuid;primaryKey"`
-	TenantID    *uuid.UUID     `gorm:"column:tenant_id;type:uuid"`
-	Topic       string         `gorm:"column:topic"`
-	MessageKey  string         `gorm:"column:message_key"`
-	Payload     map[string]any `gorm:"column:payload;serializer:json"`
-	Headers     map[string]any `gorm:"column:headers;serializer:json"`
-	Attempts    int            `gorm:"column:attempts"`
-	AvailableAt time.Time      `gorm:"column:available_at"`
-	CreatedAt   time.Time      `gorm:"column:created_at"`
-	PublishedAt *time.Time     `gorm:"column:published_at"`
-	LastError   *string        `gorm:"column:last_error"`
+	ID             uuid.UUID      `gorm:"column:id;type:uuid;primaryKey"`
+	TenantID       *uuid.UUID     `gorm:"column:tenant_id;type:uuid"`
+	Topic          string         `gorm:"column:topic"`
+	MessageKey     string         `gorm:"column:message_key"`
+	Payload        map[string]any `gorm:"column:payload;serializer:json"`
+	Headers        map[string]any `gorm:"column:headers;serializer:json"`
+	Attempts       int            `gorm:"column:attempts"`
+	AvailableAt    time.Time      `gorm:"column:available_at"`
+	CreatedAt      time.Time      `gorm:"column:created_at"`
+	ClaimedBy      *string        `gorm:"column:claimed_by"`
+	ClaimedAt      *time.Time     `gorm:"column:claimed_at"`
+	ClaimExpiresAt *time.Time     `gorm:"column:claim_expires_at"`
+	PublishedAt    *time.Time     `gorm:"column:published_at"`
+	DeadLetteredAt *time.Time     `gorm:"column:dead_lettered_at"`
+	LastError      *string        `gorm:"column:last_error"`
 }
 
 func (OutboxMessage) TableName() string { return "outbox_messages" }

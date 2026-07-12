@@ -24,7 +24,6 @@ release/
 /.synara/backups
 /.synara-*/
 /.synara/
-/.synara-*/
 .idea/
 apps/web/.playwright
 apps/web/playwright-report

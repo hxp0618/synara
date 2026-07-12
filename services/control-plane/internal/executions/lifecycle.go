@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 
+	"github.com/synara-ai/synara/services/control-plane/internal/outbox"
 	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
 	"github.com/synara-ai/synara/services/control-plane/internal/platform"
 	"github.com/synara-ai/synara/services/control-plane/internal/problem"
@@ -164,17 +165,6 @@ func (s *Service) Claim(
 				})
 				if err != nil {
 					return err
-				}
-				topic, messageKey := "execution.queued", execution.ID.String()
-				if previousStatus == "recovering" {
-					topic = "execution.recovering"
-					messageKey = execution.ID.String() + ":" + formatGeneration(previousGeneration)
-				}
-				publishedAt := now
-				if err := tx.WithContext(ctx).Model(&persistence.OutboxMessage{}).
-					Where("topic = ? AND message_key = ? AND published_at IS NULL", topic, messageKey).
-					Update("published_at", publishedAt).Error; err != nil {
-					return problem.Wrap(500, "execution_outbox_ack_failed", "Failed to acknowledge the execution dispatch message.", err)
 				}
 				convertedExecution := toExecution(execution)
 				convertedLease := toLease(lease, plainToken)
@@ -637,6 +627,9 @@ func (s *Service) requireClaimableWorker(ctx context.Context, tx *gorm.DB, worke
 		if err := tx.WithContext(ctx).Model(&persistence.WorkerInstance{}).Where("id = ?", worker.ID).Update("status", "offline").Error; err != nil {
 			return problem.Wrap(500, "worker_offline_update_failed", "Failed to mark the stale worker offline.", err)
 		}
+		if err := enqueueWorkerOffline(ctx, tx, worker); err != nil {
+			return problem.Wrap(500, "worker_offline_outbox_failed", "Failed to queue the offline Worker event.", err)
+		}
 		return problem.New(409, "worker_heartbeat_stale", "Worker heartbeat is stale; send a heartbeat before claiming work.")
 	}
 	return nil
@@ -645,8 +638,8 @@ func (s *Service) requireClaimableWorker(ctx context.Context, tx *gorm.DB, worke
 func (s *Service) enqueueRecovery(ctx context.Context, tx *gorm.DB, execution persistence.AgentExecution) error {
 	tenantID := execution.TenantID
 	messageKey := execution.ID.String() + ":" + formatGeneration(execution.Generation)
-	err := tx.WithContext(ctx).Create(&persistence.OutboxMessage{
-		ID: uuid.New(), TenantID: &tenantID, Topic: "execution.recovering", MessageKey: messageKey,
+	err := outbox.Enqueue(ctx, tx, outbox.EnqueueInput{
+		TenantID: &tenantID, Topic: "execution.recovering", MessageKey: messageKey,
 		Payload: map[string]any{
 			"executionId": execution.ID, "tenantId": execution.TenantID,
 			"sessionId": execution.SessionID, "turnId": execution.TurnID,
@@ -654,7 +647,7 @@ func (s *Service) enqueueRecovery(ctx context.Context, tx *gorm.DB, execution pe
 			"targetKind": execution.TargetKind,
 		},
 		Headers: map[string]any{"eventVersion": 1},
-	}).Error
+	})
 	if errors.Is(err, gorm.ErrDuplicatedKey) {
 		return nil
 	}

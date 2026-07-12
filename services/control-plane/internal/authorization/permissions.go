@@ -44,6 +44,8 @@ const (
 	IdentityManage        Permission = "identity.manage"
 	ServiceAccountsRead   Permission = "service_accounts.read"
 	ServiceAccountsManage Permission = "service_accounts.manage"
+	OutboxRead            Permission = "outbox.read"
+	OutboxManage          Permission = "outbox.manage"
 )
 
 var tenantRolePermissions = map[string]map[Permission]struct{}{
@@ -57,6 +59,7 @@ var tenantRolePermissions = map[string]map[Permission]struct{}{
 		CredentialsRead, CredentialsUse, CredentialsManage, WorkerRead, WorkerManage, AuditRead, BillingManage,
 		QuotaRead, QuotaManage, RetentionRead, RetentionManage,
 		IdentityRead, IdentityManage, ServiceAccountsRead, ServiceAccountsManage,
+		OutboxRead, OutboxManage,
 	),
 	"admin": permissionSet(
 		TenantRead, TenantUpdate, TenantMembersRead, TenantMembersInvite, TenantMembersUpdate,
@@ -67,15 +70,17 @@ var tenantRolePermissions = map[string]map[Permission]struct{}{
 		ArtifactRead, ArtifactWrite, ArtifactDelete, CredentialsUse, QuotaRead, QuotaManage,
 		RetentionRead, RetentionManage,
 		IdentityRead, ServiceAccountsRead, ServiceAccountsManage,
+		OutboxRead, OutboxManage,
 	),
 	"security_admin": permissionSet(
 		TenantRead, TenantMembersRead, OrganizationRead, ProjectRead, SessionRead,
 		ExecutionReadLogs, ArtifactRead, CredentialsRead, CredentialsUse, CredentialsManage, WorkerRead, AuditRead,
 		RetentionRead, RetentionManage,
 		IdentityRead, IdentityManage, ServiceAccountsRead, ServiceAccountsManage,
+		OutboxRead,
 	),
 	"billing_admin": permissionSet(TenantRead, TenantMembersRead, BillingManage, QuotaRead, QuotaManage),
-	"auditor":       permissionSet(TenantRead, TenantMembersRead, OrganizationRead, ProjectRead, SessionRead, ExecutionReadLogs, ArtifactRead, AuditRead, QuotaRead, RetentionRead),
+	"auditor":       permissionSet(TenantRead, TenantMembersRead, OrganizationRead, ProjectRead, SessionRead, ExecutionReadLogs, ArtifactRead, AuditRead, QuotaRead, RetentionRead, OutboxRead),
 	"member":        permissionSet(TenantRead),
 }
 

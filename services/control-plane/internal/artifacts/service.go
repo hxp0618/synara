@@ -23,6 +23,7 @@ import (
 	"github.com/synara-ai/synara/services/control-plane/internal/config"
 	"github.com/synara-ai/synara/services/control-plane/internal/executions"
 	"github.com/synara-ai/synara/services/control-plane/internal/identity"
+	"github.com/synara-ai/synara/services/control-plane/internal/outbox"
 	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
 	"github.com/synara-ai/synara/services/control-plane/internal/problem"
 	"github.com/synara-ai/synara/services/control-plane/internal/secret"
@@ -396,6 +397,18 @@ func (s *Service) complete(
 		appended, err = s.sessions.AppendInternalEvent(ctx, tx, current.TenantID, current.SessionID, eventInput)
 		if err != nil {
 			return err
+		}
+		tenantID := current.TenantID
+		if err := outbox.Enqueue(ctx, tx, outbox.EnqueueInput{
+			TenantID: &tenantID, Topic: "artifact.ready", MessageKey: current.ID.String(),
+			Payload: map[string]any{
+				"tenantId": current.TenantID, "organizationId": current.OrganizationID,
+				"projectId": current.ProjectID, "sessionId": current.SessionID,
+				"executionId": current.ExecutionID, "artifactId": current.ID,
+				"kind": current.Kind, "sizeBytes": input.SizeBytes, "contentType": input.ContentType,
+			},
+		}); err != nil {
+			return problem.Wrap(500, "artifact_ready_outbox_failed", "The ready Artifact event could not be queued.", err)
 		}
 		if requestID != "" && userActorID != nil {
 			return audit.Record(ctx, tx, audit.Entry{

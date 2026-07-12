@@ -89,6 +89,18 @@ spec:
                   key: aws-region
             - name: SYNARA_KUBERNETES_RECONCILE_INTERVAL
               value: 5s
+            - name: SYNARA_OUTBOX_POLL_INTERVAL
+              value: 500ms
+            - name: SYNARA_OUTBOX_CLAIM_TTL
+              value: 30s
+            - name: SYNARA_OUTBOX_BATCH_SIZE
+              value: "50"
+            - name: SYNARA_OUTBOX_MAX_ATTEMPTS
+              value: "12"
+            - name: SYNARA_OUTBOX_BASE_BACKOFF
+              value: 1s
+            - name: SYNARA_OUTBOX_MAX_BACKOFF
+              value: 5m
           readinessProbe:
             httpGet:
               path: /ready

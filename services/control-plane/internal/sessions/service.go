@@ -13,6 +13,7 @@ import (
 	"github.com/synara-ai/synara/services/control-plane/internal/authorization"
 	"github.com/synara-ai/synara/services/control-plane/internal/executiontargets"
 	"github.com/synara-ai/synara/services/control-plane/internal/identity"
+	"github.com/synara-ai/synara/services/control-plane/internal/outbox"
 	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
 	"github.com/synara-ai/synara/services/control-plane/internal/problem"
 	"github.com/synara-ai/synara/services/control-plane/internal/projects"
@@ -348,15 +349,15 @@ func (s *Service) CreateTurn(
 		if err := tx.Create(&execution).Error; err != nil {
 			return problem.Wrap(409, "execution_create_rejected", "Execution creation was rejected by a tenant isolation constraint.", err)
 		}
-		if err := tx.Create(&persistence.OutboxMessage{
-			ID: uuid.New(), TenantID: &tenantID, Topic: "execution.queued", MessageKey: execution.ID.String(),
+		if err := outbox.Enqueue(ctx, tx, outbox.EnqueueInput{
+			TenantID: &tenantID, Topic: "execution.queued", MessageKey: execution.ID.String(),
 			Payload: map[string]any{
 				"executionId": execution.ID, "tenantId": tenantID, "sessionId": sessionID,
 				"turnId": turn.ID, "executionTargetId": execution.ExecutionTargetID,
 				"targetKind": execution.TargetKind, "attempt": execution.Attempt,
 			},
 			Headers: map[string]any{"eventVersion": 1}, AvailableAt: queuedAt, CreatedAt: queuedAt,
-		}).Error; err != nil {
+		}); err != nil {
 			return problem.Wrap(409, "execution_outbox_create_rejected", "Execution dispatch could not be queued atomically.", err)
 		}
 		createdEvent, err = appendEvent(ctx, tx, &locked, eventInput{
@@ -458,6 +459,15 @@ func (s *Service) Archive(
 		})
 		if err != nil {
 			return err
+		}
+		if err := outbox.Enqueue(ctx, tx, outbox.EnqueueInput{
+			TenantID: &tenantID, Topic: "session.archived", MessageKey: sessionID.String(),
+			Payload: map[string]any{
+				"tenantId": tenantID, "organizationId": locked.OrganizationID,
+				"projectId": locked.ProjectID, "sessionId": sessionID, "archivedAt": now,
+			},
+		}); err != nil {
+			return problem.Wrap(500, "session_archive_outbox_failed", "The archived Session event could not be queued.", err)
 		}
 		return audit.Record(ctx, tx, audit.Entry{
 			TenantID: tenantID, ActorType: "user", ActorID: &principal.UserID,

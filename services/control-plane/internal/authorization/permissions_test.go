@@ -12,6 +12,9 @@ func TestTenantPermissionsAreRoleBased(t *testing.T) {
 	if TenantAllows("member", TenantMembersRead) || TenantAllows("admin", TenantDelete) {
 		t.Fatal("member and admin permissions exceeded their fixed role contract")
 	}
+	if !TenantAllows("admin", OutboxManage) || !TenantAllows("auditor", OutboxRead) || TenantAllows("auditor", OutboxManage) {
+		t.Fatal("outbox operations must separate read-only audit from replay authority")
+	}
 }
 
 func TestOrganizationPermissionsSeparateOperatorsAndViewers(t *testing.T) {

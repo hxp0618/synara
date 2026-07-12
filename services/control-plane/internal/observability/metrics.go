@@ -3,6 +3,7 @@ package observability
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strconv"
@@ -12,6 +13,8 @@ import (
 
 	"github.com/google/uuid"
 	"gorm.io/gorm"
+
+	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
 )
 
 var requestDurationBuckets = [...]float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10}
@@ -185,15 +188,33 @@ func (r *Registry) writeDatabaseMetrics(ctx context.Context, output *bytes.Buffe
 		return fmt.Errorf("collect execution target metrics: %w", err)
 	}
 	now := time.Now().UTC()
-	var activeLeases, expiredLeases, outboxPending int64
+	var activeLeases, expiredLeases, outboxPending, outboxRetrying, outboxDeadLetter int64
 	if err := r.db.WithContext(ctx).Table("worker_leases").Where("expires_at > ?", now).Count(&activeLeases).Error; err != nil {
 		return fmt.Errorf("collect active lease metrics: %w", err)
 	}
 	if err := r.db.WithContext(ctx).Table("worker_leases").Where("expires_at <= ?", now).Count(&expiredLeases).Error; err != nil {
 		return fmt.Errorf("collect expired lease metrics: %w", err)
 	}
-	if err := r.db.WithContext(ctx).Table("outbox_messages").Where("published_at IS NULL").Count(&outboxPending).Error; err != nil {
+	outboxPendingQuery := r.db.WithContext(ctx).Table("outbox_messages").Where("published_at IS NULL AND dead_lettered_at IS NULL")
+	if err := outboxPendingQuery.Count(&outboxPending).Error; err != nil {
 		return fmt.Errorf("collect outbox metrics: %w", err)
+	}
+	if err := r.db.WithContext(ctx).Table("outbox_messages").
+		Where("published_at IS NULL AND dead_lettered_at IS NULL AND attempts > 0").Count(&outboxRetrying).Error; err != nil {
+		return fmt.Errorf("collect retrying outbox metrics: %w", err)
+	}
+	if err := r.db.WithContext(ctx).Table("outbox_messages").Where("dead_lettered_at IS NOT NULL").Count(&outboxDeadLetter).Error; err != nil {
+		return fmt.Errorf("collect dead-letter outbox metrics: %w", err)
+	}
+	var oldestOutbox persistence.OutboxMessage
+	oldestOutboxErr := r.db.WithContext(ctx).Select("created_at").
+		Where("published_at IS NULL AND dead_lettered_at IS NULL").Order("created_at, id").Take(&oldestOutbox).Error
+	if oldestOutboxErr != nil && !errors.Is(oldestOutboxErr, gorm.ErrRecordNotFound) {
+		return fmt.Errorf("collect oldest outbox metrics: %w", oldestOutboxErr)
+	}
+	oldestOutboxSeconds := 0.0
+	if oldestOutboxErr == nil && oldestOutbox.CreatedAt.Before(now) {
+		oldestOutboxSeconds = now.Sub(oldestOutbox.CreatedAt).Seconds()
 	}
 
 	writeGroupedGauge(output, "synara_executions", "Authoritative Execution count by status and target kind.", executions)
@@ -204,6 +225,12 @@ func (r *Registry) writeDatabaseMetrics(ctx context.Context, output *bytes.Buffe
 	fmt.Fprintf(output, "synara_worker_leases%s %d\n", labels(map[string]string{"state": "expired"}), expiredLeases)
 	writeHelp(output, "synara_outbox_pending", "Unpublished authoritative outbox message count.", "gauge")
 	fmt.Fprintf(output, "synara_outbox_pending %d\n", outboxPending)
+	writeHelp(output, "synara_outbox_retrying", "Outbox messages waiting for another publish attempt.", "gauge")
+	fmt.Fprintf(output, "synara_outbox_retrying %d\n", outboxRetrying)
+	writeHelp(output, "synara_outbox_dead_letter", "Outbox messages that exhausted publish attempts.", "gauge")
+	fmt.Fprintf(output, "synara_outbox_dead_letter %d\n", outboxDeadLetter)
+	writeHelp(output, "synara_outbox_oldest_pending_seconds", "Age of the oldest pending outbox message.", "gauge")
+	fmt.Fprintf(output, "synara_outbox_oldest_pending_seconds %s\n", formatFloat(oldestOutboxSeconds))
 	writeHelp(output, "synara_metrics_collection_success", "Whether authoritative database metrics were collected successfully.", "gauge")
 	output.WriteString("synara_metrics_collection_success 1\n")
 	return nil

@@ -23,6 +23,7 @@ foundations. The existing TypeScript server remains the Provider Runtime during 
   - `000009_tenant_retention_policies.sql`: Tenant Session/Artifact retention policy
   - `000010_enterprise_identity.sql`: OIDC/SAML connection boundary, Service Accounts,
     SCIM Groups and mappings, and protected login attempts
+  - `000011_outbox_delivery.sql`: multi-replica Claim ownership, claim expiry, retry and dead-letter state
 - ORM: GORM with PostgreSQL and CGO-free SQLite drivers
 - Shared model/repository/transaction utilities: `internal/persistence`
 - Tenant-scoped queries always include `tenant_id`
@@ -45,6 +46,8 @@ enterprise  = PostgreSQL + S3 + outbox/external queue + multiple replicas
 Execution targets (`local`, `ssh`, `docker`, `kubernetes`) are independent from profile. See
 `docs/contracts/deployment-profile-v1.md` and `docs/contracts/execution-target-v1.md`.
 Tenant audit search and streaming JSONL/CSV export are defined in `docs/contracts/audit-log-v1.md`.
+Reliable at-least-once delivery and audited dead-letter replay are defined in
+`docs/contracts/outbox-delivery-v1.md`.
 Provider Credential envelope encryption and Worker retrieval are defined in
 `docs/contracts/provider-credential-v1.md`.
 Enterprise identity, retention, Provider Host, observability, and Worker image boundaries
@@ -91,6 +94,25 @@ root/personal Organization, local owner User, both owner memberships, and the te
 embedded Local agentd loop, generates an internal registration credential when necessary, and
 restarts the Worker after unexpected exits. Its workspace defaults to `./data/workspaces` and can be
 changed with `SYNARA_LOCAL_AGENTD_WORKSPACE_ROOT`.
+
+## Reliable Outbox
+
+The control plane runs one Dispatcher per replica. PostgreSQL uses `FOR UPDATE SKIP LOCKED`, and every
+acknowledgement is conditional on the current process claim. Failed publishes use bounded exponential
+backoff with deterministic jitter; exhausted messages enter a dead letter state and can be replayed by
+authorized Tenant operators. Configure the loop with:
+
+```text
+SYNARA_OUTBOX_POLL_INTERVAL
+SYNARA_OUTBOX_CLAIM_TTL
+SYNARA_OUTBOX_BATCH_SIZE
+SYNARA_OUTBOX_MAX_ATTEMPTS
+SYNARA_OUTBOX_BASE_BACKOFF
+SYNARA_OUTBOX_MAX_BACKOFF
+```
+
+The `/metrics` endpoint exposes pending count, retry count, dead-letter count and oldest pending age.
+Payloads are not returned by the operational list API and are never included in publisher error logs.
 
 ## Personal metadata export/import
 
