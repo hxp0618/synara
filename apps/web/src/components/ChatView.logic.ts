@@ -328,6 +328,13 @@ export function resolveEnvironmentPanelVisible(input: {
   return input.environmentEnabled && input.environmentPanelOpen;
 }
 
+export function shouldEnableThreadRecap(input: {
+  environmentPanelVisible: boolean;
+  controlPlaneAuthoritative: boolean;
+}): boolean {
+  return input.environmentPanelVisible && !input.controlPlaneAuthoritative;
+}
+
 // The composer live strip prefers the turn's computed diff (the
 // `thread.turn-diff-completed` event) so it can show real per-file +/- stats.
 // Before that lands, it falls back to mid-turn file-edit work-log activity so

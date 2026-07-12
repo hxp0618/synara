@@ -1,7 +1,13 @@
 import { describe, expect, it } from "vitest";
 
+import type { OrchestrationReadModel, OrchestrationShellSnapshot } from "@synara/contracts";
+
 import type { AppState } from "./store";
-import { syncAuthoritativeProjection } from "./store";
+import {
+  syncAuthoritativeProjection,
+  syncServerReadModel,
+  syncServerShellSnapshot,
+} from "./store";
 import type { Project, Thread } from "./types";
 
 const project: Project = {
@@ -52,5 +58,34 @@ describe("syncAuthoritativeProjection", () => {
     expect(next.threads.map((item) => item.id)).toEqual([thread.id]);
     expect(next.threadIds).toEqual([thread.id]);
     expect(next.sidebarThreadSummaryById[thread.id]?.title).toBe("Remote session");
+    expect(next.projectionAuthority).toBe("control-plane");
+  });
+
+  it("rejects delayed local snapshots after Control Plane authority is active", () => {
+    const authoritative = syncAuthoritativeProjection(
+      {
+        projects: [],
+        threads: [],
+        sidebarThreadSummaryById: {},
+        threadsHydrated: false,
+      },
+      [project],
+      [thread],
+    );
+    const shellSnapshot = {
+      snapshotSequence: 1,
+      updatedAt: "2026-07-12T00:01:00Z",
+      projects: [],
+      threads: [],
+    } satisfies OrchestrationShellSnapshot;
+    const readModel = {
+      snapshotSequence: 1,
+      updatedAt: "2026-07-12T00:01:00Z",
+      projects: [],
+      threads: [],
+    } satisfies OrchestrationReadModel;
+
+    expect(syncServerShellSnapshot(authoritative, shellSnapshot)).toBe(authoritative);
+    expect(syncServerReadModel(authoritative, readModel)).toBe(authoritative);
   });
 });

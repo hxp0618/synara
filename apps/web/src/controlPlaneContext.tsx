@@ -285,6 +285,9 @@ export function ControlPlaneProvider({ children }: { children: ReactNode }) {
       resourcesRef.current = { projects: [], sessions: [] };
       projectionRuntime.setScope("", []);
       setProjectionError(null);
+      if (availability === "local") {
+        useStore.getState().setProjectionAuthority("local");
+      }
       if (hadAuthoritativeProjectionRef.current || availability === "available") {
         useStore.getState().syncAuthoritativeProjection([], []);
       }

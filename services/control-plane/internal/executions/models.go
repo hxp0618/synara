@@ -153,6 +153,11 @@ type ReleaseLeaseInput struct {
 	Reason string `json:"reason"`
 }
 
+const (
+	RuntimeEventVersionV1       = 1
+	RuntimeEventMaxPayloadBytes = 64 << 10
+)
+
 type RuntimeEventInput struct {
 	LeaseInput
 	EventID      uuid.UUID      `json:"eventId"`

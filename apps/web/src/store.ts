@@ -56,6 +56,7 @@ export interface AppState {
   threads: Thread[];
   sidebarThreadSummaryById: Record<string, SidebarThreadSummary>;
   threadsHydrated: boolean;
+  projectionAuthority?: "local" | "control-plane";
   threadIds?: ThreadId[];
   threadShellById?: Record<ThreadId, ThreadShell>;
   threadSessionById?: Record<ThreadId, ThreadSession | null>;
@@ -136,6 +137,7 @@ const initialState: AppState = {
   threads: [],
   sidebarThreadSummaryById: {},
   threadsHydrated: false,
+  projectionAuthority: "local",
   threadIds: [],
   threadShellById: {},
   threadSessionById: {},
@@ -4006,6 +4008,7 @@ export function applyOrchestrationEventsHotPath(
   events: ReadonlyArray<OrchestrationEvent>,
   options?: ApplyOrchestrationEventOptions,
 ): AppState {
+  if (state.projectionAuthority === "control-plane") return state;
   const normalizedOptions = {
     updateThreadArray: options?.updateThreadArray ?? true,
     updateSidebarSummary: options?.updateSidebarSummary ?? false,
@@ -4040,6 +4043,7 @@ export function syncServerShellSnapshot(
   state: AppState,
   snapshot: OrchestrationShellSnapshot,
 ): AppState {
+  if (state.projectionAuthority === "control-plane") return state;
   rememberProjectUiState(state.projects);
   rememberProjectLocalNames(state.projects);
   const deletedProjectIdsById = state.deletedProjectIdsById ?? {};
@@ -4138,6 +4142,7 @@ function syncServerThreadDetailWithOptions(
 }
 
 export function syncServerThreadDetail(state: AppState, thread: ReadModelThread): AppState {
+  if (state.projectionAuthority === "control-plane") return state;
   if (
     state.deletedProjectIdsById?.[thread.projectId] === true ||
     state.deletedThreadIdsById?.[thread.id] === true
@@ -4148,6 +4153,7 @@ export function syncServerThreadDetail(state: AppState, thread: ReadModelThread)
 }
 
 export function syncServerThreadDetailHotPath(state: AppState, thread: ReadModelThread): AppState {
+  if (state.projectionAuthority === "control-plane") return state;
   if (
     state.deletedProjectIdsById?.[thread.projectId] === true ||
     state.deletedThreadIdsById?.[thread.id] === true
@@ -4158,6 +4164,7 @@ export function syncServerThreadDetailHotPath(state: AppState, thread: ReadModel
 }
 
 export function applyShellEvent(state: AppState, event: OrchestrationShellStreamEvent): AppState {
+  if (state.projectionAuthority === "control-plane") return state;
   switch (event.kind) {
     case "project-upserted":
       return upsertProjectFromShell(state, event.project);
@@ -4183,6 +4190,7 @@ export function applyShellEvent(state: AppState, event: OrchestrationShellStream
 }
 
 export function syncServerReadModel(state: AppState, readModel: OrchestrationReadModel): AppState {
+  if (state.projectionAuthority === "control-plane") return state;
   rememberProjectUiState(state.projects);
   rememberProjectLocalNames(state.projects);
   const deletedProjectIdsById = state.deletedProjectIdsById ?? {};
@@ -4321,6 +4329,7 @@ export function syncAuthoritativeProjection(
   ) as Record<string, SidebarThreadSummary>;
   return {
     ...normalizedState,
+    projectionAuthority: "control-plane",
     projects: [...projects],
     threads,
     sidebarThreadSummaryById,
@@ -4521,6 +4530,7 @@ export function setThreadWorkspace(
 // ── Zustand store ────────────────────────────────────────────────────
 
 interface AppStore extends AppState {
+  setProjectionAuthority: (authority: "local" | "control-plane") => void;
   syncServerShellSnapshot: (snapshot: OrchestrationShellSnapshot) => void;
   syncServerThreadDetail: (thread: ReadModelThread) => void;
   syncServerThreadDetailHotPath: (thread: ReadModelThread) => void;
@@ -4548,6 +4558,10 @@ interface AppStore extends AppState {
 
 export const useStore = create<AppStore>((set) => ({
   ...readPersistedState(),
+  setProjectionAuthority: (authority) =>
+    set((state) =>
+      state.projectionAuthority === authority ? state : { ...state, projectionAuthority: authority },
+    ),
   syncServerShellSnapshot: (snapshot) => set((state) => syncServerShellSnapshot(state, snapshot)),
   syncServerThreadDetail: (thread) => set((state) => syncServerThreadDetail(state, thread)),
   syncServerThreadDetailHotPath: (thread) =>

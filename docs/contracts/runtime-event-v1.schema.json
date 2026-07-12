@@ -32,6 +32,9 @@
     "sequence": { "type": "integer", "minimum": 1 },
     "eventType": { "type": "string", "minLength": 1, "maxLength": 160 },
     "occurredAt": { "type": "string", "format": "date-time" },
-    "payload": { "type": "object" }
+    "payload": {
+      "type": "object",
+      "description": "Serialized JSON is limited to 65536 bytes. Larger content must be uploaded as an Artifact and referenced by artifactId."
+    }
   }
 }

@@ -35,6 +35,7 @@ import {
   shouldAutoDeleteTerminalThreadOnLastClose,
   shouldConsumePendingCustomBinaryConfirmation,
   shouldEnableComposerPastedTextCollapse,
+  shouldEnableThreadRecap,
   shouldHandlePromptHistoryNavigationKey,
   shouldRenderProviderHealthBanner,
   shouldShowComposerModelBootstrapSkeleton,
@@ -683,6 +684,21 @@ describe("environment panel visibility", () => {
         environmentPanelOpen: false,
       }),
     ).toBe(false);
+  });
+
+  it("keeps local recap generation out of authoritative Control Plane sessions", () => {
+    expect(
+      shouldEnableThreadRecap({
+        environmentPanelVisible: true,
+        controlPlaneAuthoritative: true,
+      }),
+    ).toBe(false);
+    expect(
+      shouldEnableThreadRecap({
+        environmentPanelVisible: true,
+        controlPlaneAuthoritative: false,
+      }),
+    ).toBe(true);
   });
 });
 

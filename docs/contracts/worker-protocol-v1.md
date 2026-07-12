@@ -31,7 +31,11 @@ Turn IDs, Session title, Provider and Model, Turn input, repository URL, and def
 snapshot is loaded in the claim transaction and is preserved across idempotent Claim replay. Workers
 never query control-plane tables directly.
 
-Runtime events additionally conform to `runtime-event-v1.schema.json`.
+Runtime events additionally conform to `runtime-event-v1.schema.json`. `eventVersion` is required and
+must be `1`; an unsupported version is rejected with `runtime_event_version_unsupported` and the
+supported range. The serialized `payload` object is limited to 65,536 bytes. Larger output, binary data,
+or bulky structured results must use the Artifact lifecycle and place only an `artifactId` reference in
+the Runtime Event.
 
 ## Lease and fencing rules
 

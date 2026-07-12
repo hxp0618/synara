@@ -171,6 +171,7 @@ import {
   resolvePromptHistoryNavigation,
   shouldHandlePromptHistoryNavigationKey,
   shouldEnableComposerPastedTextCollapse,
+  shouldEnableThreadRecap,
   shouldConsumePendingCustomBinaryConfirmation,
   shouldShowComposerModelBootstrapSkeleton,
 } from "./ChatView.logic";
@@ -4245,7 +4246,10 @@ export default function ChatView({
   const threadRecap = useThreadRecap({
     thread: activeThread,
     cwd: threadWorkspaceCwd,
-    enabled: environmentPanelVisible,
+    enabled: shouldEnableThreadRecap({
+      environmentPanelVisible,
+      controlPlaneAuthoritative: controlPlane.isAuthoritative,
+    }),
     latestTurnSettled,
     codexHomePath: settings.codexHomePath || null,
     providerOptions: providerOptionsForDispatch ?? null,

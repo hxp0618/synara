@@ -27,14 +27,8 @@ func (s *Service) AppendRuntimeEvent(
 	if input.EventID == uuid.Nil {
 		return OperationResult[RuntimeEventResult]{}, problem.New(400, "invalid_event_id", "eventId is required.")
 	}
-	if len(input.EventType) < 3 || len(input.EventType) > 160 || strings.ContainsAny(input.EventType, "\r\n\t") {
-		return OperationResult[RuntimeEventResult]{}, problem.New(400, "invalid_event_type", "eventType must contain between 3 and 160 characters.")
-	}
-	if input.EventVersion <= 0 {
-		input.EventVersion = 1
-	}
-	if input.Payload == nil {
-		input.Payload = map[string]any{}
+	if err := validateRuntimeEventContract(input); err != nil {
+		return OperationResult[RuntimeEventResult]{}, err
 	}
 	if input.OccurredAt.IsZero() {
 		input.OccurredAt = s.now()
@@ -91,6 +85,39 @@ func (s *Service) AppendRuntimeEvent(
 		s.sessions.PublishInternalEvent(appended)
 	}
 	return result, err
+}
+
+func validateRuntimeEventContract(input RuntimeEventInput) error {
+	if input.EventVersion != RuntimeEventVersionV1 {
+		return &problem.Error{
+			Status:  422,
+			Code:    "runtime_event_version_unsupported",
+			Message: "eventVersion is not supported by this Control Plane.",
+			Details: map[string]any{
+				"minimumSupported": RuntimeEventVersionV1,
+				"maximumSupported": RuntimeEventVersionV1,
+			},
+		}
+	}
+	if input.EventType == "" || len(input.EventType) > 160 || strings.ContainsAny(input.EventType, "\r\n\t") {
+		return problem.New(400, "invalid_event_type", "eventType must contain between 1 and 160 characters.")
+	}
+	if input.Payload == nil {
+		return problem.New(400, "invalid_runtime_event_payload", "payload must be a JSON object.")
+	}
+	encoded, err := json.Marshal(input.Payload)
+	if err != nil {
+		return problem.New(400, "invalid_runtime_event_payload", "payload must be a valid JSON object.")
+	}
+	if len(encoded) > RuntimeEventMaxPayloadBytes {
+		return &problem.Error{
+			Status:  413,
+			Code:    "runtime_event_payload_too_large",
+			Message: "Runtime Event payload is too large; upload larger content as an Artifact and reference artifactId.",
+			Details: map[string]any{"maximumBytes": RuntimeEventMaxPayloadBytes},
+		}
+	}
+	return nil
 }
 
 func pendingInteractionKind(eventType string) (string, bool) {
