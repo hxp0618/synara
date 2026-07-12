@@ -776,6 +776,19 @@ export const controlPlaneClient = {
         body: { inputText, ...modes },
       },
     ),
+  steerActiveTurn: (
+    sessionId: string,
+    inputText: string,
+    options?: ControlPlaneIdempotencyOptions,
+  ) =>
+    controlPlaneRequest<ControlPlaneControlCommand>(
+      `/v1/sessions/${encodeURIComponent(sessionId)}/turns/active/steer`,
+      {
+        method: "POST",
+        ...idempotencyRequestHeaders(options),
+        body: { inputText },
+      },
+    ),
   interruptActiveTurn: (sessionId: string, options?: ControlPlaneIdempotencyOptions) =>
     controlPlaneRequest<ControlPlaneControlCommand>(
       `/v1/sessions/${encodeURIComponent(sessionId)}/turns/active/interrupt`,

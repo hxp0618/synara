@@ -169,6 +169,7 @@ import {
   resolveEnvironmentPanelVisible,
   resolveProjectScriptTerminalTarget,
   resolvePromptHistoryNavigation,
+  resolveAuthoritativeTurnDispatch,
   shouldHandlePromptHistoryNavigationKey,
   shouldEnableComposerPastedTextCollapse,
   shouldEnableThreadRecap,
@@ -6951,32 +6952,38 @@ export default function ChatView({
         interactionModeForSend = followUp.interactionMode;
         trimmedPromptForSend = followUp.text.trim();
       } else {
-        if (hasLiveTurn && dispatchMode === "queue") {
+        if (controlPlane.isAuthoritative) {
+          promptForSend = followUp.text;
+          interactionModeForSend = followUp.interactionMode;
+          trimmedPromptForSend = followUp.text.trim();
+        } else {
+          if (hasLiveTurn && dispatchMode === "queue") {
+            clearComposerInput(activeThread.id);
+            scheduleComposerFocus();
+            enqueueQueuedComposerTurn(activeThread.id, {
+              id: randomUUID(),
+              kind: "plan-follow-up",
+              createdAt: new Date().toISOString(),
+              previewText: followUp.text.trim(),
+              text: followUp.text,
+              interactionMode: followUp.interactionMode,
+              selectedProvider,
+              selectedModel,
+              selectedPromptEffort,
+              modelSelection: selectedModelSelection,
+              ...(providerOptionsForDispatch ? { providerOptionsForDispatch } : {}),
+              runtimeMode,
+            });
+            return true;
+          }
           clearComposerInput(activeThread.id);
           scheduleComposerFocus();
-          enqueueQueuedComposerTurn(activeThread.id, {
-            id: randomUUID(),
-            kind: "plan-follow-up",
-            createdAt: new Date().toISOString(),
-            previewText: followUp.text.trim(),
+          return onSubmitPlanFollowUp({
             text: followUp.text,
             interactionMode: followUp.interactionMode,
-            selectedProvider,
-            selectedModel,
-            selectedPromptEffort,
-            modelSelection: selectedModelSelection,
-            ...(providerOptionsForDispatch ? { providerOptionsForDispatch } : {}),
-            runtimeMode,
+            dispatchMode,
           });
-          return true;
         }
-        clearComposerInput(activeThread.id);
-        scheduleComposerFocus();
-        return onSubmitPlanFollowUp({
-          text: followUp.text,
-          interactionMode: followUp.interactionMode,
-          dispatchMode,
-        });
       }
     }
     const hasNoStructuredComposerContext =
@@ -6991,15 +6998,6 @@ export default function ChatView({
     const hasPromptOnlySendableContent = hasNoStructuredComposerContext;
     if (controlPlane.isAuthoritative) {
       if (!hasSendableContent) return false;
-      if (!activeProject || !controlPlane.capabilities.canCreateTurn) {
-        toastManager.add({
-          type: "error",
-          title: "This SaaS context is read-only",
-          description:
-            "Select an active Tenant and Organization with Session execution permission.",
-        });
-        return false;
-      }
       if (!hasNoStructuredComposerContext || selectedComposerMentionsForSend.length > 0) {
         toastManager.add({
           type: "warning",
@@ -7009,21 +7007,62 @@ export default function ChatView({
         });
         return false;
       }
-      if (hasLiveTurn) {
-        toastManager.add({
-          type: "warning",
-          title: "Wait for the active remote Turn",
-          description: "Queued and steering delivery will be enabled with the Stage 3 Provider Runner.",
-        });
-        return false;
-      }
-
       const outgoingMessageText = formatOutgoingComposerPrompt({
         provider: selectedProviderForSend,
         model: selectedModelForSend,
         effort: selectedPromptEffortForSend,
         text: trimmedPromptForSend,
       });
+      const authoritativeDispatch = resolveAuthoritativeTurnDispatch({
+        hasLiveTurn,
+        dispatchMode,
+      });
+      if (authoritativeDispatch === "steer") {
+        if (!controlPlane.capabilities.canSteerExecution) {
+          toastManager.add({
+            type: "error",
+            title: "This SaaS context cannot steer Executions",
+            description:
+              "Select an active Tenant and Organization with Session execution permission.",
+          });
+          return false;
+        }
+        sendInFlightRef.current = true;
+        setThreadError(activeThread.id, null);
+        try {
+          await controlPlane.steerActiveTurn(activeThread.id, outgoingMessageText);
+          if (queuedChatTurn === null) {
+            clearComposerInput(activeThread.id);
+            scheduleComposerFocus();
+          }
+          return true;
+        } catch (error) {
+          setThreadError(
+            activeThread.id,
+            error instanceof Error ? error.message : "Failed to steer the active remote Turn.",
+          );
+          return false;
+        } finally {
+          sendInFlightRef.current = false;
+        }
+      }
+      if (authoritativeDispatch === "queue-unsupported") {
+        toastManager.add({
+          type: "warning",
+          title: "Remote queued delivery is not supported yet",
+          description: "Steer the active remote Turn, or wait for it to finish before sending.",
+        });
+        return false;
+      }
+      if (!activeProject || !controlPlane.capabilities.canCreateTurn) {
+        toastManager.add({
+          type: "error",
+          title: "This SaaS context is read-only",
+          description:
+            "Select an active Tenant and Organization with Session execution permission.",
+        });
+        return false;
+      }
       const draftKey = activeThread.id;
       sendInFlightRef.current = true;
       setThreadError(activeThread.id, null);
@@ -8167,6 +8206,40 @@ export default function ChatView({
       effort: queuedTurn?.selectedPromptEffort ?? selectedPromptEffort,
       text: trimmed,
     });
+
+    if (controlPlane.isAuthoritative) {
+      if (!hasLiveTurn || dispatchMode !== "steer") {
+        toastManager.add({
+          type: "warning",
+          title: "Remote queued delivery is not supported yet",
+          description: "Steer the active remote Turn, or wait for it to finish before sending.",
+        });
+        return false;
+      }
+      if (!controlPlane.capabilities.canSteerExecution) {
+        toastManager.add({
+          type: "error",
+          title: "This SaaS context cannot steer Executions",
+          description:
+            "Select an active Tenant and Organization with Session execution permission.",
+        });
+        return false;
+      }
+      sendInFlightRef.current = true;
+      setThreadError(threadIdForSend, null);
+      try {
+        await controlPlane.steerActiveTurn(threadIdForSend, outgoingMessageText);
+        return true;
+      } catch (err) {
+        setThreadError(
+          threadIdForSend,
+          err instanceof Error ? err.message : "Failed to steer the active remote Turn.",
+        );
+        return false;
+      } finally {
+        sendInFlightRef.current = false;
+      }
+    }
 
     sendInFlightRef.current = true;
     beginLocalDispatch();

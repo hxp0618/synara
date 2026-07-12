@@ -44,6 +44,7 @@ describe("resolveControlPlaneCapabilities", () => {
     expect(capabilities.canCreateProject).toBe(true);
     expect(capabilities.canCreateSession).toBe(true);
     expect(capabilities.canCreateTurn).toBe(true);
+    expect(capabilities.canSteerExecution).toBe(true);
     expect(capabilities.canInterruptExecution).toBe(true);
   });
 
@@ -62,6 +63,7 @@ describe("resolveControlPlaneCapabilities", () => {
     expect(viewer.canReadProjects).toBe(true);
     expect(viewer.canCreateSession).toBe(false);
     expect(viewer.canCreateTurn).toBe(false);
+    expect(viewer.canSteerExecution).toBe(false);
     expect(viewer.canInterruptExecution).toBe(false);
   });
 
@@ -72,6 +74,7 @@ describe("resolveControlPlaneCapabilities", () => {
     });
     expect(suspendedTenant.canReadProjects).toBe(true);
     expect(suspendedTenant.canCreateTurn).toBe(false);
+    expect(suspendedTenant.canSteerExecution).toBe(false);
     expect(suspendedTenant.canInterruptExecution).toBe(false);
     expect(
       resolveControlPlaneCapabilities({

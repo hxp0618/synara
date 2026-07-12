@@ -253,6 +253,42 @@ describe("controlPlaneClient", () => {
     expect(new Headers(request.headers).get("Idempotency-Key")).toBe("web-interrupt-1");
   });
 
+  it("requests an idempotent durable Steer payload for the active Turn", async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(
+        JSON.stringify({
+          id: "control-steer-1",
+          executionId: "execution-1",
+          sessionId: "session/one",
+          turnId: "turn-1",
+          provider: "codex",
+          commandType: "SteerTurn",
+          commandId: "steer:control-steer-1",
+          payload: { turnId: "turn-1", inputText: "Focus on tests" },
+          status: "pending",
+          requestedBy: "user-1",
+          requestedAt: "2026-07-13T00:00:00Z",
+          deliveryAttempts: 0,
+          deliveryAvailableAt: "2026-07-13T00:00:00Z",
+        }),
+        { status: 202, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await controlPlaneClient.steerActiveTurn("session/one", "Focus on tests", {
+      idempotencyKey: "web-steer-1",
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/v1/sessions/session%2Fone/turns/active/steer",
+      expect.objectContaining({ method: "POST", credentials: "include" }),
+    );
+    const request = fetchMock.mock.calls[0]?.[1] as RequestInit;
+    expect(new Headers(request.headers).get("Idempotency-Key")).toBe("web-steer-1");
+    expect(JSON.parse(String(request.body))).toEqual({ inputText: "Focus on tests" });
+  });
+
   it("creates execution targets without expecting secret configuration in the response", async () => {
     const fetchMock = vi.fn(async () =>
       new Response(

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -384,7 +385,7 @@ func TestDurableInterruptCommandTerminatesTurn(t *testing.T) {
 		t.Fatalf("queued interrupt was bound before claim: %#v", first.Value)
 	}
 
-	worker := registerTestWorker(t, service, fixture.TargetID, fixture.TargetKind, "worker-interrupt")
+	worker := registerManifestTestWorker(t, service, fixture.TargetID, fixture.TargetKind, "worker-interrupt")
 	cleanupWorkers(t, db, worker.ID)
 	claim, err := service.Claim(context.Background(), worker, ClaimExecutionInput{
 		ExecutionTargetID: fixture.TargetID, TargetKind: fixture.TargetKind, ExecutionID: &fixture.ExecutionID,
@@ -461,6 +462,152 @@ func TestDurableInterruptCommandTerminatesTurn(t *testing.T) {
 	}
 }
 
+func TestInterruptedTurnContinuesOnReplacementWorkerWithCursorHistoryAndSequence(t *testing.T) {
+	ctx := context.Background()
+	db := integrationDB(t)
+	fixture := seedExecutionFixture(t, db)
+	service := integrationService(t, db)
+	principal := identity.Principal{UserID: fixture.UserID, ActiveTenantID: &fixture.TenantID}
+	if err := db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("tenant_id = ? AND message_key = ?", fixture.TenantID, fixture.ExecutionID.String()).
+			Delete(&persistence.OutboxMessage{}).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("tenant_id = ? AND id = ?", fixture.TenantID, fixture.ExecutionID).
+			Delete(&persistence.AgentExecution{}).Error; err != nil {
+			return err
+		}
+		return tx.Where("tenant_id = ? AND session_id = ? AND id = ?", fixture.TenantID, fixture.SessionID, fixture.TurnID).
+			Delete(&persistence.AgentTurn{}).Error
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	firstTurn, err := service.sessions.CreateTurn(
+		ctx, principal, fixture.SessionID,
+		sessions.CreateTurnInput{InputText: "Investigate the failing integration test"},
+		"continuity-first-turn", "127.0.0.1",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var firstExecution persistence.AgentExecution
+	if err := db.Where("tenant_id = ? AND turn_id = ?", fixture.TenantID, firstTurn.ID).
+		Take(&firstExecution).Error; err != nil {
+		t.Fatal(err)
+	}
+	firstWorker := registerManifestTestWorker(t, service, fixture.TargetID, fixture.TargetKind, "worker-continuity-first")
+	secondWorker := registerManifestTestWorker(t, service, fixture.TargetID, fixture.TargetKind, "worker-continuity-second")
+	cleanupWorkers(t, db, firstWorker.ID, secondWorker.ID)
+	firstClaim, err := service.Claim(ctx, firstWorker, ClaimExecutionInput{
+		ExecutionTargetID: fixture.TargetID, TargetKind: fixture.TargetKind, ExecutionID: &firstExecution.ID,
+	}, "continuity-first-claim")
+	if err != nil || firstClaim.Value.Lease == nil {
+		t.Fatalf("first claim failed: result=%#v err=%v", firstClaim, err)
+	}
+	firstLease := *firstClaim.Value.Lease
+	firstLeaseInput := LeaseInput{
+		TenantID: fixture.TenantID, Generation: firstLease.Generation, LeaseToken: firstLease.LeaseToken,
+	}
+	if _, err := service.Start(ctx, firstWorker, firstExecution.ID, firstLeaseInput, "continuity-first-start"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.AppendRuntimeEvent(ctx, firstWorker, firstExecution.ID, RuntimeEventInput{
+		LeaseInput: firstLeaseInput, EventID: uuid.New(), EventVersion: RuntimeEventVersionV1,
+		EventType: "runtime.output.delta", Payload: map[string]any{
+			"turnId": firstTurn.ID.String(), "text": "The first attempt found a race.",
+		},
+	}, "continuity-first-output"); err != nil {
+		t.Fatal(err)
+	}
+	interrupt, err := service.RequestInterrupt(
+		ctx, principal, fixture.SessionID,
+		"continuity-interrupt", "continuity-interrupt", "127.0.0.1",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deliveries, err := service.PullControlCommands(ctx, firstWorker, firstExecution.ID, PullControlCommandsInput{
+		LeaseInput: firstLeaseInput, Limit: 1,
+	})
+	if err != nil || len(deliveries) != 1 || deliveries[0].ControlCommandID != interrupt.Value.ID {
+		t.Fatalf("interrupt delivery failed: deliveries=%#v err=%v", deliveries, err)
+	}
+	deliveryInput := ControlCommandDeliveryInput{
+		LeaseInput: firstLeaseInput, CommandID: interrupt.Value.CommandID,
+	}
+	if _, err := service.MarkControlCommandDelivered(
+		ctx, firstWorker, firstExecution.ID, interrupt.Value.ID, deliveryInput, "continuity-interrupt-delivered",
+	); err != nil {
+		t.Fatal(err)
+	}
+	cursor := "cursor-after-interrupted-first-turn"
+	deliveryInput.ProviderResumeCursor = &cursor
+	if _, err := service.AcknowledgeControlCommand(
+		ctx, firstWorker, firstExecution.ID, interrupt.Value.ID, deliveryInput, "continuity-interrupt-acknowledged",
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	secondTurn, err := service.sessions.CreateTurn(
+		ctx, principal, fixture.SessionID,
+		sessions.CreateTurnInput{InputText: "Continue from the race diagnosis"},
+		"continuity-second-turn", "127.0.0.1",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var secondExecution persistence.AgentExecution
+	if err := db.Where("tenant_id = ? AND turn_id = ?", fixture.TenantID, secondTurn.ID).
+		Take(&secondExecution).Error; err != nil {
+		t.Fatal(err)
+	}
+	if secondExecution.ID == firstExecution.ID || secondTurn.ID == firstTurn.ID {
+		t.Fatal("later Turn did not create a distinct Execution boundary")
+	}
+	secondClaim, err := service.Claim(ctx, secondWorker, ClaimExecutionInput{
+		ExecutionTargetID: fixture.TargetID, TargetKind: fixture.TargetKind, ExecutionID: &secondExecution.ID,
+	}, "continuity-second-claim")
+	if err != nil || secondClaim.Value.Lease == nil || secondClaim.Value.Workload == nil {
+		t.Fatalf("replacement claim failed: result=%#v err=%v", secondClaim, err)
+	}
+	if secondClaim.Value.ProviderResumeCursor == nil || *secondClaim.Value.ProviderResumeCursor != cursor {
+		t.Fatalf("replacement claim omitted the persisted Cursor: %#v", secondClaim.Value.ProviderResumeCursor)
+	}
+	expectedHistory := []ConversationMessage{
+		{Role: "user", Text: "Investigate the failing integration test"},
+		{Role: "assistant", Text: "The first attempt found a race."},
+	}
+	if !reflect.DeepEqual(secondClaim.Value.Workload.ConversationHistory, expectedHistory) {
+		t.Fatalf("replacement claim received unexpected authoritative history: %#v", secondClaim.Value.Workload.ConversationHistory)
+	}
+
+	var events []persistence.SessionEvent
+	if err := db.Where("tenant_id = ? AND session_id = ?", fixture.TenantID, fixture.SessionID).
+		Order("sequence").Find(&events).Error; err != nil {
+		t.Fatal(err)
+	}
+	expectedTypes := []string{
+		"turn.created", "execution.leased", "execution.started", "runtime.output.delta",
+		"turn.interrupt-requested", "execution.interrupted", "turn.created", "execution.leased",
+	}
+	if len(events) != len(expectedTypes) {
+		t.Fatalf("unexpected continuity Event count: got=%d events=%#v", len(events), events)
+	}
+	for index, event := range events {
+		if event.Sequence != int64(index+1) || event.EventType != expectedTypes[index] {
+			t.Fatalf("Session Event continuity broke at index %d: %#v", index, event)
+		}
+	}
+	var session persistence.AgentSession
+	if err := db.Where("tenant_id = ? AND id = ?", fixture.TenantID, fixture.SessionID).Take(&session).Error; err != nil {
+		t.Fatal(err)
+	}
+	if session.LastEventSequence != int64(len(events)) {
+		t.Fatalf("Session sequence cursor is not continuous: got=%d want=%d", session.LastEventSequence, len(events))
+	}
+}
+
 func TestDurableInterruptCommandRebindsAfterWorkerRelease(t *testing.T) {
 	db := integrationDB(t)
 	fixture := seedExecutionFixture(t, db)
@@ -474,9 +621,15 @@ func TestDurableInterruptCommandRebindsAfterWorkerRelease(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	firstWorker := registerTestWorker(t, service, fixture.TargetID, fixture.TargetKind, "worker-interrupt-first")
-	secondWorker := registerTestWorker(t, service, fixture.TargetID, fixture.TargetKind, "worker-interrupt-second")
-	cleanupWorkers(t, db, firstWorker.ID, secondWorker.ID)
+	firstWorker := registerManifestTestWorker(t, service, fixture.TargetID, fixture.TargetKind, "worker-interrupt-first")
+	legacyWorker := registerTestWorker(t, service, fixture.TargetID, fixture.TargetKind, "worker-interrupt-legacy")
+	unsupportedCapabilities := workerManifestTestCapabilities()
+	setTestProviderCapability(unsupportedCapabilities, "codex", "interrupt-turn", "unsupported")
+	unsupportedWorker := registerTestWorkerWithCapabilities(
+		t, service, fixture.TargetID, fixture.TargetKind, "worker-interrupt-unsupported", unsupportedCapabilities,
+	)
+	secondWorker := registerManifestTestWorker(t, service, fixture.TargetID, fixture.TargetKind, "worker-interrupt-second")
+	cleanupWorkers(t, db, firstWorker.ID, legacyWorker.ID, unsupportedWorker.ID, secondWorker.ID)
 	firstClaim, err := service.Claim(context.Background(), firstWorker, ClaimExecutionInput{
 		ExecutionTargetID: fixture.TargetID, TargetKind: fixture.TargetKind, ExecutionID: &fixture.ExecutionID,
 	}, "interrupt-first-claim")
@@ -506,6 +659,49 @@ func TestDurableInterruptCommandRebindsAfterWorkerRelease(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	for _, attempt := range []struct {
+		name      string
+		worker    persistence.WorkerInstance
+		requestID string
+	}{
+		{name: "legacy", worker: legacyWorker, requestID: "interrupt-legacy-claim"},
+		{name: "unsupported", worker: unsupportedWorker, requestID: "interrupt-unsupported-claim"},
+	} {
+		t.Run(attempt.name+" replacement is fenced", func(t *testing.T) {
+			broadClaim, broadErr := service.Claim(context.Background(), attempt.worker, ClaimExecutionInput{
+				ExecutionTargetID: fixture.TargetID, TargetKind: fixture.TargetKind,
+			}, attempt.requestID+"-broad")
+			if broadErr != nil {
+				t.Fatal(broadErr)
+			}
+			if broadClaim.Value.Execution != nil || broadClaim.Value.Lease != nil {
+				t.Fatalf("incompatible replacement claimed filtered work: %#v", broadClaim.Value)
+			}
+			_, claimErr := service.Claim(context.Background(), attempt.worker, ClaimExecutionInput{
+				ExecutionTargetID: fixture.TargetID, TargetKind: fixture.TargetKind, ExecutionID: &fixture.ExecutionID,
+			}, attempt.requestID)
+			var apiError *problem.Error
+			if !errors.As(claimErr, &apiError) || apiError.Code != "capability_unsupported" {
+				t.Fatalf("expected capability_unsupported, got %v", claimErr)
+			}
+		})
+	}
+	var fencedExecution persistence.AgentExecution
+	if err := db.Where("tenant_id = ? AND id = ?", fixture.TenantID, fixture.ExecutionID).Take(&fencedExecution).Error; err != nil {
+		t.Fatal(err)
+	}
+	if fencedExecution.Status != "recovering" || fencedExecution.WorkerID != nil || fencedExecution.Generation != firstLease.Generation {
+		t.Fatalf("incompatible replacement mutated the Execution: %#v", fencedExecution)
+	}
+	var fencedCommand persistence.ExecutionControlCommand
+	if err := db.Where("tenant_id = ? AND id = ?", fixture.TenantID, requested.Value.ID).Take(&fencedCommand).Error; err != nil {
+		t.Fatal(err)
+	}
+	if fencedCommand.Status != "pending" || fencedCommand.DeliveryWorkerID != nil ||
+		fencedCommand.DeliveryGeneration != nil || fencedCommand.CommandID != requested.Value.CommandID {
+		t.Fatalf("incompatible replacement mutated the pending command: %#v", fencedCommand)
+	}
+
 	secondClaim, err := service.Claim(context.Background(), secondWorker, ClaimExecutionInput{
 		ExecutionTargetID: fixture.TargetID, TargetKind: fixture.TargetKind, ExecutionID: &fixture.ExecutionID,
 	}, "interrupt-second-claim")
@@ -528,6 +724,35 @@ func TestDurableInterruptCommandRebindsAfterWorkerRelease(t *testing.T) {
 	if len(secondDeliveries) != 1 || secondDeliveries[0].ControlCommandID != requested.Value.ID ||
 		secondDeliveries[0].CommandID != requested.Value.CommandID || secondDeliveries[0].DeliveryStatus != "pending" {
 		t.Fatalf("interrupt command was not rebound to replacement generation: %#v", secondDeliveries)
+	}
+}
+
+func TestDurableInterruptRejectsActiveWorkerWithoutManifestCapability(t *testing.T) {
+	db := integrationDB(t)
+	fixture := seedExecutionFixture(t, db)
+	service := integrationService(t, db)
+	worker := registerTestWorker(t, service, fixture.TargetID, fixture.TargetKind, "worker-interrupt-legacy-active")
+	cleanupWorkers(t, db, worker.ID)
+	claim, err := service.Claim(context.Background(), worker, ClaimExecutionInput{
+		ExecutionTargetID: fixture.TargetID, TargetKind: fixture.TargetKind, ExecutionID: &fixture.ExecutionID,
+	}, "interrupt-legacy-active-claim")
+	if err != nil || claim.Value.Lease == nil {
+		t.Fatalf("legacy claim failed before a durable command existed: result=%#v err=%v", claim, err)
+	}
+	lease := *claim.Value.Lease
+	if _, err := service.Start(context.Background(), worker, fixture.ExecutionID, LeaseInput{
+		TenantID: fixture.TenantID, Generation: lease.Generation, LeaseToken: lease.LeaseToken,
+	}, "interrupt-legacy-active-start"); err != nil {
+		t.Fatal(err)
+	}
+	principal := identity.Principal{UserID: fixture.UserID, ActiveTenantID: &fixture.TenantID}
+	_, err = service.RequestInterrupt(
+		context.Background(), principal, fixture.SessionID,
+		"interrupt-legacy-active", "interrupt-legacy-active", "127.0.0.1",
+	)
+	var apiError *problem.Error
+	if !errors.As(err, &apiError) || apiError.Code != "capability_unsupported" {
+		t.Fatalf("expected capability_unsupported, got %v", err)
 	}
 }
 
@@ -630,12 +855,7 @@ func TestDurableSteerRejectsWorkerWithoutCapability(t *testing.T) {
 	fixture := seedExecutionFixture(t, db)
 	service := integrationService(t, db)
 	capabilities := workerManifestTestCapabilities()
-	providerHost := capabilities["providerHost"].(map[string]any)
-	providers := providerHost["providers"].(map[string]any)
-	codex := providers["codex"].(map[string]any)
-	descriptor := codex["capabilityDescriptor"].(map[string]any)
-	providerCapabilities := descriptor["capabilities"].(map[string]any)
-	providerCapabilities["steer-turn"] = "unsupported"
+	setTestProviderCapability(capabilities, "codex", "steer-turn", "unsupported")
 	worker := registerTestWorkerWithCapabilities(t, service, fixture.TargetID, fixture.TargetKind, "worker-no-steer", capabilities)
 	cleanupWorkers(t, db, worker.ID)
 	claim, err := service.Claim(context.Background(), worker, ClaimExecutionInput{
@@ -1128,6 +1348,7 @@ type executionFixture struct {
 	UserID      uuid.UUID
 	TenantID    uuid.UUID
 	SessionID   uuid.UUID
+	TurnID      uuid.UUID
 	ExecutionID uuid.UUID
 	TargetID    uuid.UUID
 	TargetKind  string
@@ -1204,7 +1425,10 @@ func seedExecutionFixture(t *testing.T, db *gorm.DB) executionFixture {
 	t.Cleanup(func() {
 		cleanupFixture(db, tenantID)
 	})
-	return executionFixture{UserID: userID, TenantID: tenantID, SessionID: sessionID, ExecutionID: executionID, TargetID: targetID, TargetKind: "kubernetes"}
+	return executionFixture{
+		UserID: userID, TenantID: tenantID, SessionID: sessionID, TurnID: turnID,
+		ExecutionID: executionID, TargetID: targetID, TargetKind: "kubernetes",
+	}
 }
 
 func registerTestWorker(
@@ -1266,6 +1490,16 @@ func registerTestWorkerWithCapabilities(
 		t.Fatal(err)
 	}
 	return worker
+}
+
+func setTestProviderCapability(
+	capabilities map[string]any,
+	provider, capabilityID, support string,
+) {
+	providerHost := capabilities["providerHost"].(map[string]any)
+	providers := providerHost["providers"].(map[string]any)
+	descriptor := providers[provider].(map[string]any)["capabilityDescriptor"].(map[string]any)
+	descriptor["capabilities"].(map[string]any)[capabilityID] = support
 }
 
 func cleanupWorkers(t *testing.T, db *gorm.DB, workerIDs ...uuid.UUID) {

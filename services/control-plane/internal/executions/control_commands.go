@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -25,10 +26,20 @@ const (
 	maximumControlCommandPullLimit = 100
 )
 
+var controlCommandCapabilityIDs = map[string]string{
+	"SteerTurn":       "steer-turn",
+	"InterruptTurn":   "interrupt-turn",
+	"CompactSession":  "compact",
+	"RollbackSession": "rollback",
+	"ForkSession":     "fork",
+	"StartReview":     "review",
+}
+
+var outstandingControlCommandStatuses = []string{"pending", "delivered"}
+
 type controlCommandRequest struct {
 	CommandType     string
 	CommandPrefix   string
-	CapabilityID    string
 	Operation       string
 	Permission      authorization.Permission
 	ActiveStatuses  []string
@@ -67,7 +78,7 @@ func (s *Service) RequestSteer(
 		return OperationResult[ControlCommand]{}, problem.New(400, "invalid_steer_input", "Steer input must be between 1 and 1000000 characters.")
 	}
 	return s.requestControlCommand(ctx, principal, sessionID, idempotencyKey, requestID, ipAddress, controlCommandRequest{
-		CommandType: "SteerTurn", CommandPrefix: "steer", CapabilityID: "steer-turn",
+		CommandType: "SteerTurn", CommandPrefix: "steer",
 		Operation: "session.turn.steer", Permission: authorization.ExecutionCreate,
 		ActiveStatuses:  []string{"leased", "running", "waiting-for-approval"},
 		NotFoundMessage: "The Session does not have an active Execution that can be steered.",
@@ -136,10 +147,12 @@ func (s *Service) requestControlCommand(
 		if provider == "" {
 			return ControlCommand{}, problem.New(409, "execution_provider_missing", "The active Execution does not have a Provider binding.")
 		}
-		if request.CapabilityID != "" {
-			if err := requireExecutionCapability(ctx, tx, execution, provider, request.CapabilityID); err != nil {
-				return ControlCommand{}, err
-			}
+		capabilityID, supportedCommand := controlCommandCapabilityID(request.CommandType)
+		if !supportedCommand {
+			return ControlCommand{}, problem.New(500, "control_command_capability_missing", fmt.Sprintf("Control command %q does not declare a Provider capability requirement.", request.CommandType))
+		}
+		if err := requireExecutionCapability(ctx, tx, execution, provider, capabilityID); err != nil {
+			return ControlCommand{}, err
 		}
 		now := s.now()
 		commandID := uuid.New()
@@ -231,6 +244,9 @@ func requireExecutionCapability(
 	execution persistence.AgentExecution,
 	provider, capabilityID string,
 ) error {
+	if execution.WorkerID == nil || execution.Generation <= 0 {
+		return nil
+	}
 	if execution.WorkerManifestID == nil {
 		return problem.New(409, "capability_unsupported", "The active Worker does not advertise Provider capabilities required for this command.")
 	}
@@ -240,11 +256,95 @@ func requireExecutionCapability(
 		Take(&manifest).Error; err != nil {
 		return problem.Wrap(409, "capability_unsupported", "The active Worker does not advertise the requested Provider capability.", err)
 	}
-	support, _ := manifest.Capabilities[capabilityID].(string)
-	if support != "native" && support != "emulated" {
+	if !isSupportedProviderCapability(manifest.Capabilities[capabilityID]) {
 		return problem.New(409, "capability_unsupported", fmt.Sprintf("Provider capability %q is unsupported on the active Worker.", capabilityID))
 	}
 	return nil
+}
+
+func controlCommandCapabilityID(commandType string) (string, bool) {
+	capabilityID, ok := controlCommandCapabilityIDs[commandType]
+	return capabilityID, ok
+}
+
+type workerControlCommandSupport map[string]map[string]struct{}
+
+func loadWorkerControlCommandSupport(
+	ctx context.Context,
+	tx *gorm.DB,
+	worker persistence.WorkerInstance,
+) (workerControlCommandSupport, error) {
+	support := workerControlCommandSupport{}
+	if worker.CurrentManifestID == nil {
+		return support, nil
+	}
+	manifests := make([]persistence.WorkerProviderManifest, 0)
+	if err := tx.WithContext(ctx).
+		Where("worker_manifest_id = ? AND compatibility_status = ?", *worker.CurrentManifestID, "compatible").
+		Find(&manifests).Error; err != nil {
+		return nil, problem.Wrap(500, "worker_manifest_lookup_failed", "Failed to inspect Worker control command capabilities.", err)
+	}
+	for _, manifest := range manifests {
+		providerSupport := map[string]struct{}{}
+		for commandType, capabilityID := range controlCommandCapabilityIDs {
+			if isSupportedProviderCapability(manifest.Capabilities[capabilityID]) {
+				providerSupport[commandType] = struct{}{}
+			}
+		}
+		if len(providerSupport) > 0 {
+			support[manifest.Provider] = providerSupport
+		}
+	}
+	return support, nil
+}
+
+func (support workerControlCommandSupport) filterClaimQuery(query *gorm.DB) *gorm.DB {
+	providerNames := make([]string, 0, len(support))
+	for provider := range support {
+		providerNames = append(providerNames, provider)
+	}
+	sort.Strings(providerNames)
+	conditions := make([]string, 0, len(providerNames))
+	args := []any{outstandingControlCommandStatuses}
+	for _, provider := range providerNames {
+		commandTypes := make([]string, 0, len(support[provider]))
+		for commandType := range support[provider] {
+			commandTypes = append(commandTypes, commandType)
+		}
+		sort.Strings(commandTypes)
+		conditions = append(conditions, "(control_command.provider = ? AND control_command.command_type IN ?)")
+		args = append(args, provider, commandTypes)
+	}
+	const prefix = `NOT EXISTS (
+		SELECT 1 FROM execution_control_commands AS control_command
+		WHERE control_command.tenant_id = agent_executions.tenant_id
+		  AND control_command.execution_id = agent_executions.id
+		  AND control_command.status IN ?`
+	if len(conditions) == 0 {
+		return query.Where(prefix+")", args...)
+	}
+	return query.Where(prefix+" AND NOT ("+strings.Join(conditions, " OR ")+"))", args...)
+}
+
+func (support workerControlCommandSupport) supportsExecution(
+	ctx context.Context,
+	tx *gorm.DB,
+	execution persistence.AgentExecution,
+) (bool, error) {
+	commands := make([]persistence.ExecutionControlCommand, 0)
+	if err := tx.WithContext(ctx).
+		Select("provider", "command_type").
+		Where("tenant_id = ? AND execution_id = ? AND status IN ?", execution.TenantID, execution.ID, outstandingControlCommandStatuses).
+		Find(&commands).Error; err != nil {
+		return false, err
+	}
+	for _, command := range commands {
+		providerSupport := support[command.Provider]
+		if _, ok := providerSupport[command.CommandType]; !ok {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 func (s *Service) PullControlCommands(

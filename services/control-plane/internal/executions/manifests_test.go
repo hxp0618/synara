@@ -82,6 +82,7 @@ func providerManifestTestDescriptor(provider, cliVersion, supportTier string) ma
 			"providerCliVersion": cliVersion,
 			"capabilities": map[string]any{
 				"send-turn": "native", "resume-session": "native", "steer-turn": "native",
+				"interrupt-turn": "native",
 			},
 		},
 	}

@@ -335,6 +335,16 @@ export function shouldEnableThreadRecap(input: {
   return input.environmentPanelVisible && !input.controlPlaneAuthoritative;
 }
 
+export type AuthoritativeTurnDispatch = "create-turn" | "steer" | "queue-unsupported";
+
+export function resolveAuthoritativeTurnDispatch(input: {
+  hasLiveTurn: boolean;
+  dispatchMode: "queue" | "steer";
+}): AuthoritativeTurnDispatch {
+  if (!input.hasLiveTurn) return "create-turn";
+  return input.dispatchMode === "steer" ? "steer" : "queue-unsupported";
+}
+
 // The composer live strip prefers the turn's computed diff (the
 // `thread.turn-diff-completed` event) so it can show real per-file +/- stats.
 // Before that lands, it falls back to mid-turn file-edit work-log activity so

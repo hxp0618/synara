@@ -186,7 +186,7 @@ func normalizeProviderManifest(
 	case capability.ProviderCLIVersion == nil || strings.EqualFold(strings.TrimSpace(*capability.ProviderCLIVersion), "unavailable"):
 		status = "unavailable"
 		code, message = stringReference("provider_not_installed"), stringReference("Provider CLI is unavailable on this Worker.")
-	case capability.Capabilities["send-turn"] != "native" && capability.Capabilities["send-turn"] != "emulated":
+	case !isSupportedProviderCapability(capability.Capabilities["send-turn"]):
 		status = "incompatible"
 		code, message = stringReference("capability_unsupported"), stringReference("Provider does not declare a supported send-turn capability.")
 	case descriptor.MaximumCommandBytes <= 0 || descriptor.MaximumMessageBytes <= 0 ||
@@ -367,6 +367,11 @@ func containsCapabilityString(values []string, expected string) bool {
 		}
 	}
 	return false
+}
+
+func isSupportedProviderCapability(value any) bool {
+	support, _ := value.(string)
+	return support == "native" || support == "emulated"
 }
 
 func stringReference(value string) *string { return &value }

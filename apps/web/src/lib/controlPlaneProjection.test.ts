@@ -165,4 +165,37 @@ describe("Control Plane Session projection", () => {
     const thread = projectControlPlaneThreads([session], new Map([[session.id, projection]]))[0]!;
     expect(thread.session?.status).toBe("ready");
   });
+
+  it("projects durable Steer intent as a marked user message and acknowledgement activity", () => {
+    let projection = createControlPlaneSessionProjection(session);
+    for (const item of [
+      event(1, "turn.created", { turnId: "turn-1", inputText: "Long task" }),
+      event(2, "execution.started", { turnId: "turn-1" }),
+      event(3, "turn.steer-requested", {
+        turnId: "turn-1",
+        controlCommandId: "control-steer-1",
+        inputText: "Focus on the failing test",
+      }),
+      event(4, "turn.steered", {
+        turnId: "turn-1",
+        controlCommandId: "control-steer-1",
+      }),
+    ]) {
+      projection = applyControlPlaneSessionEvent(projection, item).projection;
+    }
+
+    expect(projection.messages).toHaveLength(2);
+    expect(projection.messages[1]).toEqual(
+      expect.objectContaining({
+        text: "Focus on the failing test",
+        dispatchMode: "steer",
+        turnId: "turn-1",
+      }),
+    );
+    expect(projection.latestTurn?.turnId).toBe("turn-1");
+    expect(projection.orchestrationStatus).toBe("running");
+    expect(projection.activities.map((activity) => activity.kind)).toEqual(
+      expect.arrayContaining(["turn.steer-requested", "turn.steered"]),
+    );
+  });
 });

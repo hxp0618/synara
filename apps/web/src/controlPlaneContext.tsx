@@ -115,6 +115,11 @@ export type ControlPlaneContextValue = {
     idempotencyKey?: string,
     modes?: { runtimeMode: RuntimeMode; interactionMode: ProviderInteractionMode },
   ) => Promise<ControlPlaneAgentTurn>;
+  steerActiveTurn: (
+    sessionId: string,
+    inputText: string,
+    idempotencyKey?: string,
+  ) => Promise<ControlPlaneControlCommand>;
   interruptActiveTurn: (
     sessionId: string,
     idempotencyKey?: string,
@@ -495,6 +500,21 @@ export function ControlPlaneProvider({ children }: { children: ReactNode }) {
     },
     [capabilities.canInterruptExecution, projectionRuntime],
   );
+  const steerActiveTurn = useCallback(
+    async (sessionId: string, inputText: string, idempotencyKey?: string) => {
+      if (!capabilities.canSteerExecution) {
+        throw new Error("The active Tenant or Organization cannot steer Executions.");
+      }
+      const command = await controlPlaneClient.steerActiveTurn(
+        sessionId,
+        inputText,
+        idempotencyOptions("steer", idempotencyKey),
+      );
+      void projectionRuntime.catchUp(sessionId).catch(() => undefined);
+      return command;
+    },
+    [capabilities.canSteerExecution, projectionRuntime],
+  );
   const watchSession = useCallback(
     (sessionId: string) => projectionRuntime.watch(sessionId),
     [projectionRuntime],
@@ -531,6 +551,7 @@ export function ControlPlaneProvider({ children }: { children: ReactNode }) {
       createProject,
       createSession,
       createTurn,
+      steerActiveTurn,
       interruptActiveTurn,
       watchSession,
     }),
@@ -543,6 +564,7 @@ export function ControlPlaneProvider({ children }: { children: ReactNode }) {
       createProject,
       createSession,
       createTurn,
+      steerActiveTurn,
       interruptActiveTurn,
       devLogin,
       error,

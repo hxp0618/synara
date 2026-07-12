@@ -113,6 +113,10 @@ func (s *Service) Claim(
 			if err != nil {
 				return err
 			}
+			controlCommandSupport, err := loadWorkerControlCommandSupport(ctx, tx, claimWorker)
+			if err != nil {
+				return err
+			}
 			var execution persistence.AgentExecution
 			claimQuery := persistence.WithLocking(tx.WithContext(ctx), "UPDATE", "SKIP LOCKED").
 				Joins("JOIN tenants AS claim_tenant ON claim_tenant.id = agent_executions.tenant_id AND claim_tenant.status = ? AND claim_tenant.deleted_at IS NULL", "active").
@@ -126,11 +130,12 @@ func (s *Service) Claim(
 					WHERE provider_manifest.worker_manifest_id = ?
 					  AND provider_manifest.provider = agent_executions.provider
 					  AND provider_manifest.compatibility_status = 'compatible'
-				)`, *claimWorker.CurrentManifestID)
+					)`, *claimWorker.CurrentManifestID)
 			}
+			claimQuery = controlCommandSupport.filterClaimQuery(claimQuery)
 			claimErr := claimQuery.Order("agent_executions.queued_at, agent_executions.id").Take(&execution).Error
 			if errors.Is(claimErr, gorm.ErrRecordNotFound) {
-				if normalizedTarget.ExecutionID != nil && claimWorker.CurrentManifestID != nil {
+				if normalizedTarget.ExecutionID != nil {
 					var assigned persistence.AgentExecution
 					assignedErr := tx.WithContext(ctx).
 						Where("id = ? AND status IN ? AND execution_target_id = ? AND target_kind = ?",
@@ -138,12 +143,21 @@ func (s *Service) Claim(
 							normalizedTarget.ExecutionTargetID, normalizedTarget.TargetKind).
 						Take(&assigned).Error
 					if assignedErr == nil {
-						supported, supportErr := workerSupportsProvider(tx, claimWorker, assigned.Provider)
-						if supportErr != nil {
-							return problem.Wrap(500, "worker_manifest_lookup_failed", "Failed to inspect Worker Provider compatibility.", supportErr)
+						if claimWorker.CurrentManifestID != nil {
+							supported, supportErr := workerSupportsProvider(tx, claimWorker, assigned.Provider)
+							if supportErr != nil {
+								return problem.Wrap(500, "worker_manifest_lookup_failed", "Failed to inspect Worker Provider compatibility.", supportErr)
+							}
+							if !supported {
+								return problem.New(409, "worker_provider_incompatible", "The Worker manifest does not support the assigned Execution Provider.")
+							}
 						}
-						if !supported {
-							return problem.New(409, "worker_provider_incompatible", "The Worker manifest does not support the assigned Execution Provider.")
+						commandsSupported, supportErr := controlCommandSupport.supportsExecution(ctx, tx, assigned)
+						if supportErr != nil {
+							return problem.Wrap(500, "control_command_capability_lookup_failed", "Failed to inspect pending Control command capabilities.", supportErr)
+						}
+						if !commandsSupported {
+							return problem.New(409, "capability_unsupported", "The Worker manifest does not support every pending Provider control command.")
 						}
 					}
 				}

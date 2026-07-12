@@ -91,6 +91,12 @@ function userMessageId(turnId: string): MessageId {
   return MessageId.makeUnsafe(`control-plane-user-${turnId}`);
 }
 
+function steerMessageId(event: ControlPlaneSessionEvent): MessageId {
+  return MessageId.makeUnsafe(
+    `control-plane-steer-${payloadString(event, "controlCommandId") ?? event.eventId}`,
+  );
+}
+
 function updateAssistantStreaming(
   messages: Thread["messages"],
   executionId: string | null,
@@ -153,6 +159,10 @@ function activitySummary(event: ControlPlaneSessionEvent): string | null {
       return "Execution cancelled";
     case "turn.interrupt-requested":
       return "Interrupt requested";
+    case "turn.steer-requested":
+      return "Steer requested";
+    case "turn.steered":
+      return "Steer applied";
     case "execution.interrupted":
       return "Execution interrupted";
     case "approval.requested":
@@ -290,6 +300,27 @@ export function applyControlPlaneSessionEvent(
       runtimeMode = eventRuntimeMode(event) ?? runtimeMode;
       interactionMode = eventInteractionMode(event) ?? interactionMode;
       orchestrationStatus = "starting";
+      error = null;
+      break;
+    }
+    case "turn.steer-requested": {
+      const inputText = payloadString(event, "inputText");
+      if (inputText) {
+        messages = [
+          ...messages,
+          {
+            id: steerMessageId(event),
+            role: "user",
+            text: inputText,
+            turnId,
+            dispatchMode: "steer",
+            createdAt: event.occurredAt,
+            streaming: false,
+            source: "native",
+          },
+        ];
+      }
+      orchestrationStatus = "running";
       error = null;
       break;
     }

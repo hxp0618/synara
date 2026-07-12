@@ -28,4 +28,7 @@ func TestSQLiteMetadataStoreAutoMigratesAllModels(t *testing.T) {
 			t.Fatalf("sqlite migration omitted model %T", model)
 		}
 	}
+	if !store.DB().Migrator().HasTable(&persistence.ExecutionControlCommand{}) {
+		t.Fatal("sqlite migration omitted execution_control_commands")
+	}
 }
