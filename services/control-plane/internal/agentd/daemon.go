@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -17,10 +18,11 @@ import (
 )
 
 type Daemon struct {
-	config Config
-	client *Client
-	runner *Runner
-	logger *slog.Logger
+	config   Config
+	client   *Client
+	runner   *Runner
+	logger   *slog.Logger
+	draining atomic.Bool
 }
 
 func NewDaemon(cfg Config, logger *slog.Logger) *Daemon {
@@ -40,36 +42,100 @@ func (d *Daemon) Run(ctx context.Context) error {
 		return fmt.Errorf("register worker: %w", err)
 	}
 	d.logger.Info("agentd registered", "workerId", registered.Worker.ID, "executionTargetId", registered.Worker.ExecutionTargetID, "targetKind", registered.Worker.TargetKind)
-	heartbeatContext, stopHeartbeat := context.WithCancel(ctx)
+	runContext, cancelRun := context.WithCancel(context.Background())
+	defer cancelRun()
+	runDone := make(chan struct{})
+	defer close(runDone)
+	drainMarked := make(chan struct{})
+	go d.waitForDrain(ctx, cancelRun, runDone, drainMarked)
+	heartbeatContext, stopHeartbeat := context.WithCancel(runContext)
 	defer stopHeartbeat()
 	go d.heartbeatLoop(heartbeatContext)
 
 	for {
-		if err := ctx.Err(); err != nil {
+		if d.draining.Load() || runContext.Err() != nil {
+			if d.draining.Load() {
+				<-drainMarked
+			}
 			return nil
 		}
-		claim, err := d.client.Claim(ctx, d.config)
+		claim, err := d.client.Claim(runContext, d.config)
 		if err != nil {
+			if d.draining.Load() || runContext.Err() != nil {
+				if d.draining.Load() {
+					<-drainMarked
+				}
+				return nil
+			}
 			d.logger.Warn("execution claim failed", "error", err)
-			if !waitContext(ctx, d.config.PollInterval) {
+			if !waitContext(runContext, d.config.PollInterval) {
 				return nil
 			}
 			continue
 		}
 		if claim.Execution == nil || claim.Lease == nil {
-			if !waitContext(ctx, d.config.PollInterval) {
+			if !waitContext(runContext, d.config.PollInterval) {
 				return nil
 			}
 			continue
 		}
+		if d.draining.Load() {
+			d.releaseDuringShutdown(claim.Execution.ID, *claim.Lease, "Worker entered Drain after claiming the Execution")
+			<-drainMarked
+			return nil
+		}
 		if claim.Workload == nil {
-			_ = d.client.Release(ctx, claim.Execution.ID, *claim.Lease, "claim omitted workload")
+			_ = d.client.Release(runContext, claim.Execution.ID, *claim.Lease, "claim omitted workload")
 			d.logger.Error("claimed execution omitted workload", "executionId", claim.Execution.ID)
 			continue
 		}
-		if err := d.runExecution(ctx, *claim.Execution, *claim.Lease, *claim.Workload, claim.ProviderResumeCursor); err != nil {
+		if err := d.runExecution(runContext, *claim.Execution, *claim.Lease, *claim.Workload, claim.ProviderResumeCursor); err != nil {
 			d.logger.Error("execution runner failed", "executionId", claim.Execution.ID, "generation", claim.Lease.Generation, "error", err)
 		}
+		if d.draining.Load() {
+			<-drainMarked
+			return nil
+		}
+	}
+}
+
+func (d *Daemon) waitForDrain(
+	parent context.Context,
+	cancelRun context.CancelFunc,
+	runDone <-chan struct{},
+	drainMarked chan<- struct{},
+) {
+	defer close(drainMarked)
+	select {
+	case <-parent.Done():
+	case <-runDone:
+		return
+	}
+	if !d.draining.CompareAndSwap(false, true) {
+		return
+	}
+	d.logger.Info("agentd draining", "deadline", d.config.DrainTimeout)
+	deadline := time.Now().Add(d.config.DrainTimeout)
+	heartbeatTimeout := min(d.shutdownRequestTimeout(), time.Until(deadline))
+	if heartbeatTimeout > 0 {
+		heartbeatContext, cancelHeartbeat := context.WithTimeout(context.Background(), heartbeatTimeout)
+		if err := d.client.Heartbeat(heartbeatContext, d.config, true); err != nil {
+			d.logger.Warn("worker Drain heartbeat failed", "error", err)
+		}
+		cancelHeartbeat()
+	}
+	remaining := time.Until(deadline)
+	if remaining <= 0 {
+		cancelRun()
+		return
+	}
+	timer := time.NewTimer(remaining)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		d.logger.Warn("agentd Drain deadline reached; cancelling the active Runner")
+		cancelRun()
+	case <-runDone:
 	}
 }
 
@@ -82,7 +148,7 @@ func (d *Daemon) heartbeatLoop(ctx context.Context) {
 			return
 		case <-ticker.C:
 			requestContext, cancel := context.WithTimeout(ctx, d.config.RequestTimeout)
-			err := d.client.Heartbeat(requestContext, d.config)
+			err := d.client.Heartbeat(requestContext, d.config, d.draining.Load())
 			cancel()
 			if err != nil && ctx.Err() == nil {
 				d.logger.Warn("worker heartbeat failed", "error", err)
@@ -171,18 +237,36 @@ func (d *Daemon) runExecution(
 	}
 	if runErr != nil {
 		if ctx.Err() != nil {
-			releaseContext, cancel := context.WithTimeout(context.Background(), d.config.RequestTimeout)
-			defer cancel()
-			_ = d.client.Release(releaseContext, execution.ID, lease, "agentd shutting down")
+			d.releaseDuringShutdown(execution.ID, lease, "agentd Drain deadline reached")
 			return ctx.Err()
 		}
 		return d.failExecution(ctx, execution.ID, lease, runErr)
 	}
 	if err := d.client.Complete(ctx, execution.ID, lease, result); err != nil {
+		if ctx.Err() != nil {
+			d.releaseDuringShutdown(execution.ID, lease, "agentd Drain deadline reached before completion was acknowledged")
+			return ctx.Err()
+		}
 		return fmt.Errorf("complete execution: %w", err)
 	}
 	d.logger.Info("execution completed", "executionId", execution.ID, "generation", lease.Generation)
 	return nil
+}
+
+func (d *Daemon) releaseDuringShutdown(executionID uuid.UUID, lease executions.Lease, reason string) {
+	releaseContext, cancel := context.WithTimeout(context.Background(), d.shutdownRequestTimeout())
+	defer cancel()
+	if err := d.client.Release(releaseContext, executionID, lease, reason); err != nil {
+		d.logger.Warn("execution release during Drain failed", "executionId", executionID, "generation", lease.Generation, "error", err)
+	}
+}
+
+func (d *Daemon) shutdownRequestTimeout() time.Duration {
+	timeout := d.config.RequestTimeout
+	if timeout <= 0 || timeout > 5*time.Second {
+		return 5 * time.Second
+	}
+	return timeout
 }
 
 func (d *Daemon) runnerControlLoop(

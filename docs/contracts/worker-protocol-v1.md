@@ -78,17 +78,39 @@ Generation is permanently fenced from pull, delivery, and acknowledgement.
 
 ## Durable Provider control commands
 
-User control intent is persisted separately from interaction resolution. `InterruptTurn` is the first command
-on the reusable Control Command channel; the same Generation-fenced delivery model is reserved for Steer,
-Compact, Rollback, Fork, Review and Stop Session. A command requested before Claim remains unbound until the
-Execution receives a Worker and Generation. Lease recovery returns delivered-but-unacknowledged commands to
-`pending` and binds them to the replacement Generation instead of losing user intent.
+User control intent is persisted separately from interaction resolution. `InterruptTurn` and `SteerTurn` use
+the reusable Control Command channel; the same Generation-fenced delivery model is reserved for Compact,
+Rollback, Fork, Review and Stop Session. A command requested before Claim remains unbound until the Execution
+receives a Worker and Generation. Lease recovery returns delivered-but-unacknowledged commands to `pending`
+and binds them to the replacement Generation instead of losing user intent.
+
+Each durable command has one frozen Provider Capability ID. Claim filters Workers against their immutable
+Provider Manifest before changing the Execution Generation or Lease. Legacy Workers without a Manifest and
+Workers that explicitly advertise the capability as unsupported cannot Claim that Execution. Explicit Claims
+return `capability_unsupported`; ordinary queue Claims skip incompatible work so compatible Workers can
+continue serving the queue.
 
 Agentd marks a Control Command delivered before writing it to Provider Host and acknowledges it only after the
 correlated terminal Result. Interrupt acknowledgement carries the Provider Resume Cursor. Control Plane stores
 that Cursor, releases the Lease, marks the Execution and Turn `interrupted`, and appends
 `execution.interrupted` in one transaction. A stale Generation cannot acknowledge the command, and agentd does
 not subsequently misreport the acknowledged user interrupt as `execution.failed`.
+
+Steer acknowledgement keeps the Execution running and appends `turn.steered`; the original persisted
+`turn.steer-requested` event remains the user-visible intent. Retrying the stable command ID cannot create a
+second Provider Steer action.
+
+## Worker Drain
+
+On SIGINT/SIGTERM, agentd sends an immediate Heartbeat with `draining=true`, stops Claiming new Executions and
+continues Heartbeat plus Lease renewal for the active Execution. If the Runner reaches a normal terminal result
+before `SYNARA_AGENTD_DRAIN_TIMEOUT`, agentd reports Complete/Fail normally. At the deadline it cancels the
+Provider Runner and explicitly releases the Lease; it never reports a forced shutdown as successful completion.
+
+Managed SSH, Docker and Kubernetes Workers use a 20-second Drain deadline inside a 30-second process/container
+termination window. The embedded Local Worker drains before the Control Plane HTTP server shuts down, so its
+final Heartbeat and Execution terminal request still have a live endpoint. A Draining Worker that stops
+heartbeating is eventually marked Offline by the same stale-Worker sweep used for Online Workers.
 
 ## Boundary
 

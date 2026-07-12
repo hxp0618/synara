@@ -551,6 +551,7 @@ func (r *KubernetesReconciler) executionPod(
 		map[string]any{"name": "SYNARA_AGENTD_CAPABILITIES_JSON", "value": string(capabilities)},
 		map[string]any{"name": "SYNARA_AGENTD_RUNNER_COMMAND_JSON", "value": string(runner)},
 		map[string]any{"name": "SYNARA_AGENTD_PROVIDER_HOST_PROTOCOL", "value": "v2"},
+		map[string]any{"name": "SYNARA_AGENTD_DRAIN_TIMEOUT", "value": "20s"},
 		map[string]any{"name": "SYNARA_AGENTD_WORKSPACE_ROOT", "value": "/data/workspaces"},
 	}
 	volumes := []any{

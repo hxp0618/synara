@@ -36,6 +36,7 @@ type Config struct {
 	PollInterval        time.Duration
 	HeartbeatInterval   time.Duration
 	LeaseRenewInterval  time.Duration
+	DrainTimeout        time.Duration
 	RequestTimeout      time.Duration
 	ArtifactTimeout     time.Duration
 	RunnerMessageBytes  int
@@ -105,6 +106,9 @@ func LoadConfig() (Config, error) {
 	if cfg.LeaseRenewInterval, err = durationEnv("SYNARA_AGENTD_LEASE_RENEW_INTERVAL", 10*time.Second); err != nil {
 		return Config{}, err
 	}
+	if cfg.DrainTimeout, err = durationEnv("SYNARA_AGENTD_DRAIN_TIMEOUT", 20*time.Second); err != nil {
+		return Config{}, err
+	}
 	if cfg.RequestTimeout, err = durationEnv("SYNARA_AGENTD_REQUEST_TIMEOUT", 30*time.Second); err != nil {
 		return Config{}, err
 	}
@@ -114,7 +118,7 @@ func LoadConfig() (Config, error) {
 	if cfg.RunnerMessageBytes, err = intEnv("SYNARA_AGENTD_RUNNER_MESSAGE_BYTES", 1<<20); err != nil {
 		return Config{}, err
 	}
-	if cfg.PollInterval <= 0 || cfg.HeartbeatInterval <= 0 || cfg.LeaseRenewInterval <= 0 || cfg.RequestTimeout <= 0 || cfg.ArtifactTimeout <= 0 || cfg.RunnerMessageBytes < 1024 {
+	if cfg.PollInterval <= 0 || cfg.HeartbeatInterval <= 0 || cfg.LeaseRenewInterval <= 0 || cfg.DrainTimeout <= 0 || cfg.RequestTimeout <= 0 || cfg.ArtifactTimeout <= 0 || cfg.RunnerMessageBytes < 1024 {
 		return Config{}, errors.New("agentd intervals, request timeout, and runner message limit must be positive")
 	}
 	if (cfg.BuildGitSHA != "" && !validBuildGitSHA(cfg.BuildGitSHA)) || len(cfg.ImageDigest) > 512 {

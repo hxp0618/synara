@@ -55,7 +55,8 @@ func TestSSHProvisionerInstallsUpgradesAndRevokesWithoutLeakingSecrets(t *testin
 	}
 	if !bytes.Contains(environment, []byte("worker-registration-secret")) ||
 		!bytes.Contains(environment, []byte(`SYNARA_AGENTD_RUNNER_COMMAND_JSON="[\"provider-host\",\"run\",\"--jsonl\"]"`)) ||
-		!bytes.Contains(environment, []byte(`SYNARA_AGENTD_PROVIDER_HOST_PROTOCOL="v2"`)) {
+		!bytes.Contains(environment, []byte(`SYNARA_AGENTD_PROVIDER_HOST_PROTOCOL="v2"`)) ||
+		!bytes.Contains(environment, []byte(`SYNARA_AGENTD_DRAIN_TIMEOUT="20s"`)) {
 		t.Fatalf("uploaded agentd environment is incomplete: %s", environment)
 	}
 	for _, command := range remote.commands {

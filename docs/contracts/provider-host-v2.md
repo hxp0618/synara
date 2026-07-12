@@ -66,6 +66,18 @@ supersedes unacknowledged deliveries from the obsolete Generation.
 acknowledgement so Control Plane can atomically persist the Cursor and terminal `execution.interrupted` state.
 The Provider Host Send Turn Error that follows is confirmation of the same interrupt, not a second failure.
 
+`SteerTurn` uses the same durable channel without terminating the active Execution. Control Plane persists the
+user intent before delivery, agentd correlates it to the active `SendTurn`, and the Host returns a terminal
+acknowledgement for the Steer command while the original Turn remains active. The Web SaaS projection renders
+the persisted Steer intent as a marked user message and clears the composer only after Control Plane accepts it.
+Queue delivery during an active remote Turn remains explicitly unsupported rather than being converted into
+Steer or a new Turn.
+
+Every durable Control Command is mapped to a Provider Capability before Claim. A Worker without a compatible
+immutable Provider Manifest is skipped for ordinary queue Claims and receives `capability_unsupported` for an
+explicit Execution Claim. This check happens before Generation or Lease mutation, so an incompatible Worker
+cannot consume or rebind pending control intent.
+
 Codex uses `codex app-server` as its production v2 runtime. It initializes a bidirectional JSON-RPC connection,
 starts or resumes the native Thread, streams Turn/Item/usage events, and routes native `turn/interrupt`, command
 or file Approval, and Plan Mode Structured User Input through durable Worker Interaction delivery. The immutable

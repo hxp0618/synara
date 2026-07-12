@@ -109,6 +109,21 @@ func TestRemoteWorkerRequiresLeaseAndFencingAndCannotSwitchTargets(t *testing.T)
 	}, "claim-draining"); err == nil {
 		t.Fatal("draining Worker was allowed to claim")
 	}
+	staleHeartbeat := time.Now().UTC().Add(-2 * time.Minute)
+	if err := store.DB().Model(&persistence.WorkerInstance{}).Where("id = ?", worker.ID).
+		Update("last_heartbeat_at", staleHeartbeat).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := service.markStaleWorkers(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var staleWorker persistence.WorkerInstance
+	if err := store.DB().Where("id = ?", worker.ID).Take(&staleWorker).Error; err != nil {
+		t.Fatal(err)
+	}
+	if staleWorker.Status != "offline" {
+		t.Fatalf("stale Draining Worker was not marked offline: %#v", staleWorker)
+	}
 	draining = false
 	if _, err := service.Heartbeat(ctx, worker, HeartbeatInput{
 		ProtocolVersion: WorkerProtocolVersion, Draining: &draining,

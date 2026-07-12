@@ -51,9 +51,10 @@ func (c *Client) Register(ctx context.Context, cfg Config) (executions.Registere
 	return output, nil
 }
 
-func (c *Client) Heartbeat(ctx context.Context, cfg Config) error {
+func (c *Client) Heartbeat(ctx context.Context, cfg Config, draining bool) error {
 	return c.doJSON(ctx, http.MethodPost, "/v1/workers/heartbeat", c.workerToken, "", executions.HeartbeatInput{
 		Version: cfg.Version, ProtocolVersion: executions.WorkerProtocolVersion, Capabilities: cfg.Capabilities,
+		Draining: &draining,
 	}, nil)
 }
 

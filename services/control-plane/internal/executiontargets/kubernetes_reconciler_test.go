@@ -57,7 +57,8 @@ func TestKubernetesReconcilerAppliesSecurityFoundationAndExecutionPods(t *testin
 		t.Fatalf("Kubernetes Pod ownership/fencing labels are incomplete: %#v", labels)
 	}
 	spec := pod["spec"].(map[string]any)
-	if spec["restartPolicy"] != "Never" || spec["automountServiceAccountToken"] != false {
+	if spec["restartPolicy"] != "Never" || spec["automountServiceAccountToken"] != false ||
+		spec["terminationGracePeriodSeconds"] != 30 {
 		t.Fatalf("Kubernetes Pod runtime policy is unsafe: %#v", spec)
 	}
 	container := spec["containers"].([]any)[0].(map[string]any)
@@ -72,7 +73,8 @@ func TestKubernetesReconcilerAppliesSecurityFoundationAndExecutionPods(t *testin
 	if bytes.Contains(environment, []byte("kubernetes-registration-secret")) ||
 		!bytes.Contains(environment, []byte("secretKeyRef")) ||
 		!bytes.Contains(environment, []byte("SYNARA_AGENTD_ASSIGNED_EXECUTION_ID")) ||
-		!bytes.Contains(environment, []byte("SYNARA_AGENTD_PROVIDER_HOST_PROTOCOL")) {
+		!bytes.Contains(environment, []byte("SYNARA_AGENTD_PROVIDER_HOST_PROTOCOL")) ||
+		!bytes.Contains(environment, []byte("SYNARA_AGENTD_DRAIN_TIMEOUT")) {
 		t.Fatalf("Kubernetes Pod secret/assignment environment is invalid: %s", environment)
 	}
 	secret := client.lastKind("Secret")

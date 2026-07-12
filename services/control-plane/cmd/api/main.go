@@ -178,12 +178,14 @@ func main() {
 		ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 90 * time.Second,
 	}
 	var localAgentd *agentd.LocalSupervisor
+	var localAgentdDone <-chan struct{}
 	if len(cfg.LocalAgentdRunnerCommand) > 0 {
 		localAgentd, err = agentd.NewLocalSupervisor(agentd.LocalSupervisorInput{
 			ListenAddress: cfg.ListenAddress, RegistrationToken: cfg.WorkerRegistrationToken,
 			ExecutionTargetID: bootstrapped.ExecutionTargetID, RunnerCommand: cfg.LocalAgentdRunnerCommand,
 			WorkspaceRoot: cfg.LocalAgentdWorkspaceRoot, WorkerLeaseTTL: cfg.WorkerLeaseTTL,
-			HeartbeatTimeout: cfg.WorkerHeartbeatTimeout, RestartBackoff: cfg.LocalAgentdRestartBackoff,
+			HeartbeatTimeout: cfg.WorkerHeartbeatTimeout, DrainTimeout: cfg.ShutdownTimeout / 2,
+			RestartBackoff: cfg.LocalAgentdRestartBackoff,
 		}, logger)
 		if err != nil {
 			logger.Error("failed to configure local agentd supervisor", "error", err)
@@ -202,7 +204,12 @@ func main() {
 	go outboxDispatcher.Run(ctx)
 	if localAgentd != nil {
 		logger.Info("local agentd supervisor enabled", "executionTargetId", bootstrapped.ExecutionTargetID, "workspaceRoot", cfg.LocalAgentdWorkspaceRoot)
-		go localAgentd.Run(ctx)
+		done := make(chan struct{})
+		localAgentdDone = done
+		go func() {
+			defer close(done)
+			localAgentd.Run(ctx)
+		}()
 	}
 
 	select {
@@ -214,8 +221,16 @@ func main() {
 		}
 	}
 
+	stop()
 	shutdownContext, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
 	defer cancel()
+	if localAgentdDone != nil {
+		select {
+		case <-localAgentdDone:
+		case <-shutdownContext.Done():
+			logger.Warn("local agentd Drain did not finish before the control-plane shutdown deadline")
+		}
+	}
 	if err := server.Shutdown(shutdownContext); err != nil {
 		logger.Error("control plane shutdown failed", "error", err)
 		os.Exit(1)

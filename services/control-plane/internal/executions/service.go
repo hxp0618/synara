@@ -206,13 +206,13 @@ func (s *Service) markStaleWorkers(ctx context.Context) error {
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		workers := make([]persistence.WorkerInstance, 0, 100)
 		if err := persistence.WithLocking(tx.WithContext(ctx), "UPDATE", "SKIP LOCKED").
-			Where("status = ? AND last_heartbeat_at < ?", "online", cutoff).
+			Where("status IN ? AND last_heartbeat_at < ?", []string{"online", "draining"}, cutoff).
 			Order("last_heartbeat_at, id").Limit(100).Find(&workers).Error; err != nil {
 			return err
 		}
 		for _, worker := range workers {
 			result := tx.WithContext(ctx).Model(&persistence.WorkerInstance{}).
-				Where("id = ? AND status = ? AND last_heartbeat_at = ?", worker.ID, "online", worker.LastHeartbeatAt).
+				Where("id = ? AND status = ? AND last_heartbeat_at = ?", worker.ID, worker.Status, worker.LastHeartbeatAt).
 				Update("status", "offline")
 			if result.Error != nil {
 				return result.Error

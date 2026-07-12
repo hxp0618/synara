@@ -24,6 +24,7 @@ type LocalSupervisorInput struct {
 	WorkspaceRoot     string
 	WorkerLeaseTTL    time.Duration
 	HeartbeatTimeout  time.Duration
+	DrainTimeout      time.Duration
 	RestartBackoff    time.Duration
 }
 
@@ -79,8 +80,11 @@ func NewLocalSupervisor(input LocalSupervisorInput, logger *slog.Logger) (*Local
 		Capabilities:  map[string]any{"workspaceModes": []string{"local", "worktree"}},
 		RunnerCommand: append([]string(nil), input.RunnerCommand...), RunnerProtocol: RunnerProtocolV2, WorkspaceRoot: workspaceRoot,
 		PollInterval: time.Second, HeartbeatInterval: heartbeatInterval,
-		LeaseRenewInterval: leaseRenewInterval, RequestTimeout: 30 * time.Second,
+		LeaseRenewInterval: leaseRenewInterval, DrainTimeout: input.DrainTimeout, RequestTimeout: 30 * time.Second,
 		ArtifactTimeout: 30 * time.Minute, RunnerMessageBytes: 1 << 20,
+	}
+	if config.DrainTimeout <= 0 {
+		config.DrainTimeout = 10 * time.Second
 	}
 	return &LocalSupervisor{
 		config: config, restartBackoff: restartBackoff, logger: logger,
