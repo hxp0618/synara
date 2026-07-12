@@ -123,7 +123,7 @@ func (d *Daemon) runExecution(
 	if d.runner.protocol == RunnerProtocolV2 {
 		controlChannel := make(chan RunnerControl)
 		controls = controlChannel
-		go d.interactionResolutionLoop(runnerContext, execution.ID, lease, controlChannel)
+		go d.runnerControlLoop(runnerContext, execution.ID, lease, controlChannel)
 	}
 	result, runErr := d.runner.RunControlled(runnerContext, RunnerInput{
 		Execution: execution, Workload: workload, ProviderResumeCursor: resumeCursor, WorkspaceDirectory: workspaceDirectory,
@@ -162,6 +162,10 @@ func (d *Daemon) runExecution(
 	})
 	cancelRunner()
 	renewErr := drainRenewError(renewErrors)
+	if runErr != nil && runnerFailurePersisted(runErr) {
+		d.logger.Info("execution interrupted", "executionId", execution.ID, "generation", lease.Generation)
+		return nil
+	}
 	if renewErr != nil {
 		return renewErr
 	}
@@ -181,7 +185,7 @@ func (d *Daemon) runExecution(
 	return nil
 }
 
-func (d *Daemon) interactionResolutionLoop(
+func (d *Daemon) runnerControlLoop(
 	ctx context.Context,
 	executionID uuid.UUID,
 	lease executions.Lease,
@@ -194,40 +198,82 @@ func (d *Daemon) interactionResolutionLoop(
 	}
 	for {
 		requestContext, cancel := context.WithTimeout(ctx, d.config.RequestTimeout)
-		items, err := d.client.PullInteractionResolutions(requestContext, executionID, lease)
+		commands, err := d.client.PullControlCommands(requestContext, executionID, lease)
 		cancel()
 		if err != nil {
 			if ctx.Err() != nil {
 				return
 			}
-			d.logger.Warn("interaction resolution pull failed", "executionId", executionID, "generation", lease.Generation, "error", err)
+			d.logger.Warn("control command pull failed", "executionId", executionID, "generation", lease.Generation, "error", err)
 			if !waitContext(ctx, interval) {
 				return
 			}
 			continue
 		}
-		if len(items) == 0 {
+		var control RunnerControl
+		if len(commands) > 0 {
+			delivery := commands[0]
+			control = RunnerControl{
+				Command: RunnerControlCommand{
+					Provider: delivery.Provider, CommandType: delivery.CommandType,
+					CommandID: delivery.CommandID, Payload: delivery.Payload,
+				},
+				MarkDelivered: func(controlContext context.Context) error {
+					return d.retryInteractionDeliveryUpdate(controlContext, func(requestContext context.Context) error {
+						return d.client.MarkControlCommandDelivered(requestContext, executionID, lease, delivery)
+					})
+				},
+				Acknowledge: func(controlContext context.Context, result map[string]any) error {
+					return d.retryInteractionDeliveryUpdate(controlContext, func(requestContext context.Context) error {
+						return d.client.AcknowledgeControlCommand(requestContext, executionID, lease, delivery, result)
+					})
+				},
+			}
+		} else {
+			requestContext, cancel = context.WithTimeout(ctx, d.config.RequestTimeout)
+			items, interactionErr := d.client.PullInteractionResolutions(requestContext, executionID, lease)
+			cancel()
+			if interactionErr != nil {
+				if ctx.Err() != nil {
+					return
+				}
+				d.logger.Warn("interaction resolution pull failed", "executionId", executionID, "generation", lease.Generation, "error", interactionErr)
+				if !waitContext(ctx, interval) {
+					return
+				}
+				continue
+			}
+			if len(items) > 0 {
+				delivery := items[0]
+				control = RunnerControl{
+					Command: RunnerControlCommand{
+						Provider: delivery.Provider, CommandType: delivery.CommandType, CommandID: delivery.CommandID,
+						Payload: map[string]any{
+							"interactionId": delivery.InteractionID.String(), "requestId": delivery.RequestID,
+							"resolutionKind": delivery.ResolutionKind, "resolution": delivery.Resolution,
+						},
+					},
+					MarkDelivered: func(controlContext context.Context) error {
+						return d.retryInteractionDeliveryUpdate(controlContext, func(requestContext context.Context) error {
+							return d.client.MarkInteractionResolutionDelivered(requestContext, executionID, lease, delivery)
+						})
+					},
+					Acknowledge: func(controlContext context.Context, _ map[string]any) error {
+						return d.retryInteractionDeliveryUpdate(controlContext, func(requestContext context.Context) error {
+							return d.client.AcknowledgeInteractionResolution(requestContext, executionID, lease, delivery)
+						})
+					},
+				}
+			}
+		}
+		if control.Command.CommandType == "" {
 			if !waitContext(ctx, interval) {
 				return
 			}
 			continue
 		}
-		delivery := items[0]
 		done := make(chan error, 1)
-		control := RunnerControl{
-			Delivery: delivery,
-			MarkDelivered: func(controlContext context.Context) error {
-				return d.retryInteractionDeliveryUpdate(controlContext, func(requestContext context.Context) error {
-					return d.client.MarkInteractionResolutionDelivered(requestContext, executionID, lease, delivery)
-				})
-			},
-			Acknowledge: func(controlContext context.Context) error {
-				return d.retryInteractionDeliveryUpdate(controlContext, func(requestContext context.Context) error {
-					return d.client.AcknowledgeInteractionResolution(requestContext, executionID, lease, delivery)
-				})
-			},
-			Done: done,
-		}
+		control.Done = done
 		select {
 		case output <- control:
 		case <-ctx.Done():

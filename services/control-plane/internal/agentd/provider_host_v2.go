@@ -102,6 +102,12 @@ type runnerFailure struct {
 	requiresUserAction        bool
 	canReconstructFromHistory bool
 	canMoveWorker             bool
+	persistedTerminal         bool
+}
+
+func runnerFailurePersisted(err error) bool {
+	var failure *runnerFailure
+	return errors.As(err, &failure) && failure.persistedTerminal
 }
 
 func (e *runnerFailure) Error() string { return e.message }
@@ -255,12 +261,17 @@ func (r *Runner) runProviderHostV2(
 				controls = nil
 				continue
 			}
-			controlErr := process.executeInteractionResolution(ctx, input, control)
+			terminalized, controlErr := process.executeControl(ctx, input, send.CommandID, control)
 			if control.Done != nil {
 				control.Done <- controlErr
 			}
 			if controlErr != nil {
 				return RunnerResult{}, controlErr
+			}
+			if terminalized {
+				return RunnerResult{}, &runnerFailure{
+					code: "interrupted", message: "Provider turn was interrupted.", persistedTerminal: true,
+				}
 			}
 		case <-ctx.Done():
 			if err := process.interruptActiveTurn(input, send.CommandID); err == nil {
@@ -306,47 +317,55 @@ func (p *providerHostV2Process) interruptActiveTurn(input RunnerInput, targetCom
 	}
 }
 
-func (p *providerHostV2Process) executeInteractionResolution(
+func (p *providerHostV2Process) executeControl(
 	ctx context.Context,
 	input RunnerInput,
+	targetCommandID string,
 	control RunnerControl,
-) error {
+) (bool, error) {
 	if control.Err != nil {
-		return control.Err
+		return false, control.Err
 	}
-	delivery := control.Delivery
+	delivery := control.Command
 	if normalizeProvider(delivery.Provider) != normalizeProvider(input.Workload.Provider) {
-		return protocolFailure("Interaction resolution Provider does not match the active Provider Session")
+		return false, protocolFailure("Control command Provider does not match the active Provider Session")
 	}
-	if delivery.CommandType != "ResolveApproval" && delivery.CommandType != "ResolveUserInput" {
-		return protocolFailure("Interaction resolution uses an unsupported Provider Host command")
+	if delivery.CommandType != "ResolveApproval" && delivery.CommandType != "ResolveUserInput" &&
+		delivery.CommandType != "InterruptTurn" {
+		return false, protocolFailure("Worker delivery uses an unsupported Provider Host command")
 	}
-	if strings.TrimSpace(delivery.CommandID) == "" || strings.TrimSpace(delivery.RequestID) == "" ||
-		delivery.Resolution == nil {
-		return protocolFailure("Interaction resolution omitted required command fields")
+	if strings.TrimSpace(delivery.CommandID) == "" || delivery.Payload == nil {
+		return false, protocolFailure("Worker delivery omitted required command fields")
+	}
+	payload := make(map[string]any, len(delivery.Payload)+1)
+	for key, value := range delivery.Payload {
+		payload[key] = value
+	}
+	if delivery.CommandType == "InterruptTurn" {
+		payload["targetCommandId"] = targetCommandID
 	}
 	command := newProviderHostCommand(
 		input.Execution.ID.String(), input.Execution.Generation, delivery.CommandType, delivery.CommandID,
-		map[string]any{
-			"interactionId": delivery.InteractionID.String(), "requestId": delivery.RequestID,
-			"resolutionKind": delivery.ResolutionKind, "resolution": delivery.Resolution,
-		},
+		payload,
 	)
 	execution, err := p.startCommand(command, nil)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if control.MarkDelivered == nil || control.Acknowledge == nil {
-		return protocolFailure("Interaction resolution omitted Worker delivery callbacks")
+		return false, protocolFailure("Worker delivery omitted persistence callbacks")
 	}
 	if err := control.MarkDelivered(ctx); err != nil {
-		return fmt.Errorf("mark interaction resolution delivered: %w", err)
+		return false, fmt.Errorf("mark Provider Host command delivered: %w", err)
 	}
-	_, terminalErr := execution.wait()
-	if err := control.Acknowledge(ctx); err != nil {
-		return fmt.Errorf("acknowledge interaction resolution: %w", err)
+	terminal, terminalErr := execution.wait()
+	if terminalErr != nil {
+		return false, terminalErr
 	}
-	return terminalErr
+	if err := control.Acknowledge(ctx, terminal.Payload); err != nil {
+		return false, fmt.Errorf("acknowledge Provider Host command: %w", err)
+	}
+	return delivery.CommandType == "InterruptTurn", nil
 }
 
 func newProviderHostCommand(

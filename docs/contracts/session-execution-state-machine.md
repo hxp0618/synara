@@ -25,8 +25,15 @@ Worker replacement, and Provider native resume must reuse the persisted Turn val
 composer state.
 
 Codex maps approval-required to its native approval/sandbox controls and Plan Mode to its native collaboration
-mode. A Provider that cannot implement a persisted mode returns a stable unsupported error; it must not silently
-run the Turn under a different mode.
+mode. Claude Agent SDK uses a host-owned PreToolUse policy gate plus native Plan permission mode so local Claude
+allow rules cannot bypass the persisted Turn mode. A Provider that cannot implement a persisted mode returns a
+stable unsupported error; it must not silently run the Turn under a different mode.
+
+An Interrupt request is durable intent, not terminal confirmation. Control Plane creates a Generation-fenced
+Control Command and appends `turn.interrupt-requested`; the Session remains running until Worker acknowledgement.
+The acknowledgement transaction stores the Provider Resume Cursor, releases the Lease, marks the current Turn
+and Execution `interrupted`, and appends `execution.interrupted`. The Agent Session remains active and accepts a
+later Turn.
 
 ## Execution
 
@@ -34,14 +41,16 @@ run the Turn under a different mode.
 queued -> leased -> running -> completed
    |         |         |  \
    |         |         |   -> waiting-for-approval -> running
+   |         |         |   -> interrupted
    |         |         -> failed
    |         -> recovering -> leased
    -> cancelled
 ```
 
 The stable persisted terminal name is `completed`; it is the v1 equivalent of the product-level
-"succeeded" state. An interrupted Worker attempt releases or expires its Lease and moves the Execution
-to `recovering`; interruption is not a second terminal state.
+"succeeded" state. Worker loss or an expired Lease moves the Execution to `recovering`. A user-requested,
+Provider-acknowledged Turn interrupt is distinct: it releases the Lease and moves the current Turn and
+Execution to the terminal `interrupted` state while leaving the Session active for a later Turn.
 
 | Transition | Actor | Coordination | Durable side effects |
 | --- | --- | --- | --- |
@@ -51,6 +60,7 @@ to `recovering`; interruption is not a second terminal state.
 | `waiting-for-approval -> running` | Authorized user | Current unexpired Lease/Generation | Resolution and resolved Event |
 | `leased/running -> completed` | Worker | Lease then Execution row lock | Lease deletion, Turn completion, Event |
 | `leased/running -> failed` | Worker | Lease then Execution row lock | Lease deletion, Turn failure, Event |
+| `leased/running/waiting-for-approval -> interrupted` | Worker acknowledgement of durable user intent | Current Lease/Worker/Generation and Control Command row lock | Provider Cursor persistence, interaction expiry, Lease deletion, Turn interruption, Event, Outbox |
 | active state -> `cancelled` | Authorized user | Lease then Execution row lock | Lease deletion, Turn cancellation, Event, Outbox, Audit |
 | `leased/running/waiting-for-approval -> recovering` | Worker or expiry sweeper | Lease then Execution row lock | Recovery Outbox and Event |
 

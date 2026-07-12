@@ -29,7 +29,7 @@ as authorization decisions outside that mapping.
 | Organization/member management | yes | yes | no | no | no |
 | Project management | yes | yes | read-only | read-only | read-only |
 | Session create/use | yes | yes | yes | yes | read-only |
-| Execution create/cancel | yes | yes | yes | yes | no |
+| Execution create/cancel/interrupt | yes | yes | yes | yes | no |
 | Execution approval | yes | yes | yes | no | no |
 
 Tenant permissions may grant access across all organizations (for example Tenant Owner/Admin).

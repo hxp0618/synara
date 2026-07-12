@@ -248,6 +248,50 @@ type InteractionResolutionDeliveryInput struct {
 	ResolutionCommandID string `json:"resolutionCommandId"`
 }
 
+type ControlCommand struct {
+	ID                  uuid.UUID      `json:"id"`
+	ExecutionID         uuid.UUID      `json:"executionId"`
+	SessionID           uuid.UUID      `json:"sessionId"`
+	TurnID              uuid.UUID      `json:"turnId"`
+	Provider            string         `json:"provider"`
+	CommandType         string         `json:"commandType"`
+	CommandID           string         `json:"commandId"`
+	Payload             map[string]any `json:"payload"`
+	Status              string         `json:"status"`
+	RequestedBy         uuid.UUID      `json:"requestedBy"`
+	RequestedAt         time.Time      `json:"requestedAt"`
+	DeliveryWorkerID    *uuid.UUID     `json:"deliveryWorkerId,omitempty"`
+	DeliveryGeneration  *int64         `json:"deliveryGeneration,omitempty"`
+	DeliveryAttempts    int            `json:"deliveryAttempts"`
+	DeliveryAvailableAt time.Time      `json:"deliveryAvailableAt"`
+	DeliveredAt         *time.Time     `json:"deliveredAt,omitempty"`
+	AcknowledgedAt      *time.Time     `json:"acknowledgedAt,omitempty"`
+	DeliveryError       *string        `json:"deliveryError,omitempty"`
+}
+
+type PullControlCommandsInput struct {
+	LeaseInput
+	Limit int `json:"limit,omitempty"`
+}
+
+type ControlCommandDelivery struct {
+	ControlCommandID    uuid.UUID      `json:"controlCommandId"`
+	Provider            string         `json:"provider"`
+	CommandType         string         `json:"commandType"`
+	CommandID           string         `json:"commandId"`
+	Payload             map[string]any `json:"payload"`
+	DeliveryStatus      string         `json:"deliveryStatus"`
+	DeliveryAttempts    int            `json:"deliveryAttempts"`
+	DeliveryAvailableAt time.Time      `json:"deliveryAvailableAt"`
+}
+
+type ControlCommandDeliveryInput struct {
+	LeaseInput
+	CommandID            string         `json:"commandId"`
+	ProviderResumeCursor *string        `json:"providerResumeCursor,omitempty"`
+	Result               map[string]any `json:"result,omitempty"`
+}
+
 func toWorker(model persistence.WorkerInstance) Worker {
 	capabilities := model.Capabilities
 	if capabilities == nil {
@@ -281,6 +325,21 @@ func toInteraction(model persistence.ExecutionInteraction) Interaction {
 		DeliveryGeneration: model.DeliveryGeneration, DeliveryAttempts: model.DeliveryAttempts,
 		DeliveryAvailableAt: model.DeliveryAvailableAt, DeliveredAt: model.DeliveredAt,
 		AcknowledgedAt: model.AcknowledgedAt, DeliveryError: model.DeliveryError,
+	}
+}
+
+func toControlCommand(model persistence.ExecutionControlCommand) ControlCommand {
+	payload := model.Payload
+	if payload == nil {
+		payload = map[string]any{}
+	}
+	return ControlCommand{
+		ID: model.ID, ExecutionID: model.ExecutionID, SessionID: model.SessionID, TurnID: model.TurnID,
+		Provider: model.Provider, CommandType: model.CommandType, CommandID: model.CommandID,
+		Payload: payload, Status: model.Status, RequestedBy: model.RequestedBy, RequestedAt: model.RequestedAt,
+		DeliveryWorkerID: model.DeliveryWorkerID, DeliveryGeneration: model.DeliveryGeneration,
+		DeliveryAttempts: model.DeliveryAttempts, DeliveryAvailableAt: model.DeliveryAvailableAt,
+		DeliveredAt: model.DeliveredAt, AcknowledgedAt: model.AcknowledgedAt, DeliveryError: model.DeliveryError,
 	}
 }
 

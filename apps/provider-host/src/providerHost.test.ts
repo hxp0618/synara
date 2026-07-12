@@ -5,7 +5,6 @@ import { describe, expect, it } from "vitest";
 
 import {
   createRedactor,
-  normalizeClaudeEvent,
   providerEnvironment,
   reconstructedPrompt,
   startProviderHostRun,
@@ -38,31 +37,6 @@ describe("provider credential isolation", () => {
         payload: { apiKey: "secret", environment: { MALICIOUS: "value" } },
       }),
     ).toThrow("unsupported fields");
-  });
-});
-
-describe("provider event normalization", () => {
-  it("normalizes Claude text and usage", () => {
-    const state = { text: [] as string[] };
-    const redact = createRedactor([]);
-    normalizeClaudeEvent(
-      { type: "system", subtype: "init", session_id: "session-1", model: "sonnet" },
-      state,
-      redact,
-    );
-    expect(
-      normalizeClaudeEvent(
-        {
-          type: "assistant",
-          message: { content: [{ type: "text", text: "hello" }] },
-        },
-        state,
-        redact,
-      ),
-    ).toEqual([
-      { type: "event", eventType: "runtime.output.delta", payload: { text: "hello" } },
-    ]);
-    expect(state).toMatchObject({ cursor: "session-1", model: "sonnet", text: ["hello"] });
   });
 });
 

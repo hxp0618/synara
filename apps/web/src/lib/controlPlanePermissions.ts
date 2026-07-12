@@ -10,6 +10,7 @@ export type ControlPlaneCapabilities = {
   canCreateProject: boolean;
   canCreateSession: boolean;
   canCreateTurn: boolean;
+  canInterruptExecution: boolean;
   canApproveExecution: boolean;
   canReadMembers: boolean;
   canManageMembers: boolean;
@@ -34,6 +35,7 @@ const NO_CAPABILITIES: ControlPlaneCapabilities = {
   canCreateProject: false,
   canCreateSession: false,
   canCreateTurn: false,
+  canInterruptExecution: false,
   canApproveExecution: false,
   canReadMembers: false,
   canManageMembers: false,
@@ -84,6 +86,7 @@ export function resolveControlPlaneCapabilities(input: {
     canCreateProject,
     canCreateSession,
     canCreateTurn,
+    canInterruptExecution: canCreateTurn,
     canApproveExecution: mutationScopeActive && (tenantProjectOperator || organizationOperator),
     canReadMembers: tenantRole !== "member",
     canManageMembers: tenant.status === "active" && tenantAdmin,

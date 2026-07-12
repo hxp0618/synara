@@ -44,9 +44,16 @@ type RunnerResult struct {
 }
 
 type RunnerControl struct {
-	Delivery      executions.InteractionResolutionDelivery
+	Command       RunnerControlCommand
 	MarkDelivered func(context.Context) error
-	Acknowledge   func(context.Context) error
+	Acknowledge   func(context.Context, map[string]any) error
 	Done          chan<- error
 	Err           error
+}
+
+type RunnerControlCommand struct {
+	Provider    string
+	CommandType string
+	CommandID   string
+	Payload     map[string]any
 }

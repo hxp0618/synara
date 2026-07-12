@@ -44,6 +44,7 @@ describe("resolveControlPlaneCapabilities", () => {
     expect(capabilities.canCreateProject).toBe(true);
     expect(capabilities.canCreateSession).toBe(true);
     expect(capabilities.canCreateTurn).toBe(true);
+    expect(capabilities.canInterruptExecution).toBe(true);
   });
 
   it("uses Organization membership for ordinary Tenant members", () => {
@@ -61,6 +62,7 @@ describe("resolveControlPlaneCapabilities", () => {
     expect(viewer.canReadProjects).toBe(true);
     expect(viewer.canCreateSession).toBe(false);
     expect(viewer.canCreateTurn).toBe(false);
+    expect(viewer.canInterruptExecution).toBe(false);
   });
 
   it("removes mutation capabilities for suspended Tenant or Organization state", () => {
@@ -70,6 +72,7 @@ describe("resolveControlPlaneCapabilities", () => {
     });
     expect(suspendedTenant.canReadProjects).toBe(true);
     expect(suspendedTenant.canCreateTurn).toBe(false);
+    expect(suspendedTenant.canInterruptExecution).toBe(false);
     expect(
       resolveControlPlaneCapabilities({
         tenant: tenant("owner"),

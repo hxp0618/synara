@@ -72,16 +72,18 @@ func TestRunnerProviderHostV2DeliversInteractionResolutionDuringSend(t *testing.
 				return fmt.Errorf("unexpected Runner message %#v", message)
 			}
 			controls <- RunnerControl{
-				Delivery: executions.InteractionResolutionDelivery{
-					InteractionID: uuid.New(), RequestID: "approval-1", Provider: "codex",
-					CommandType: "ResolveApproval", CommandID: "approval-1:resolution",
-					ResolutionKind: "approved", Resolution: map[string]any{"decision": "accept"},
+				Command: RunnerControlCommand{
+					Provider: "codex", CommandType: "ResolveApproval", CommandID: "approval-1:resolution",
+					Payload: map[string]any{
+						"interactionId": uuid.NewString(), "requestId": "approval-1",
+						"resolutionKind": "approved", "resolution": map[string]any{"decision": "accept"},
+					},
 				},
 				MarkDelivered: func(context.Context) error {
 					markedDelivered = true
 					return nil
 				},
-				Acknowledge: func(context.Context) error {
+				Acknowledge: func(context.Context, map[string]any) error {
 					acknowledged = true
 					return nil
 				},
@@ -110,6 +112,63 @@ func TestRunnerProviderHostV2DeliversInteractionResolutionDuringSend(t *testing.
 	}
 	if string(commands) != "Describe\nStartSession\nSendTurn\nResolveApproval\n" {
 		t.Fatalf("unexpected concurrent Provider Host command sequence %q", commands)
+	}
+}
+
+func TestRunnerProviderHostV2DeliversDurableInterruptDuringSend(t *testing.T) {
+	t.Setenv("GO_WANT_PROVIDER_HOST_HELPER", "1")
+	t.Setenv("PROVIDER_HOST_TEST_MODE", "interrupt")
+	commandLog := filepath.Join(t.TempDir(), "commands.log")
+	t.Setenv("PROVIDER_HOST_TEST_COMMAND_LOG", commandLog)
+
+	input := providerHostV2TestInput(t)
+	controls := make(chan RunnerControl, 1)
+	done := make(chan error, 1)
+	markedDelivered := false
+	acknowledgedCursor := ""
+	result, err := providerHostV2TestRunner().RunControlled(
+		context.Background(), input, nil, controls,
+		func(_ context.Context, message RunnerMessage) error {
+			if message.Type == "progress" {
+				controls <- RunnerControl{
+					Command: RunnerControlCommand{
+						Provider: "codex", CommandType: "InterruptTurn", CommandID: "interrupt:durable",
+						Payload: map[string]any{"turnId": input.Workload.TurnID.String()},
+					},
+					MarkDelivered: func(context.Context) error {
+						markedDelivered = true
+						return nil
+					},
+					Acknowledge: func(_ context.Context, payload map[string]any) error {
+						acknowledgedCursor, _ = payload["providerResumeCursor"].(string)
+						return nil
+					},
+					Done: done,
+				}
+			}
+			return nil
+		},
+	)
+	if result.Output != nil || runnerFailureCode(err) != "interrupted" || !runnerFailurePersisted(err) {
+		t.Fatalf("unexpected durable interrupt result=%#v err=%v", result, err)
+	}
+	if !markedDelivered || acknowledgedCursor != "cursor-interrupted" {
+		t.Fatalf("durable interrupt delivery was incomplete: delivered=%t cursor=%q", markedDelivered, acknowledgedCursor)
+	}
+	select {
+	case controlErr := <-done:
+		if controlErr != nil {
+			t.Fatalf("interrupt control failed: %v", controlErr)
+		}
+	default:
+		t.Fatal("interrupt control completion was not reported")
+	}
+	commands, err := os.ReadFile(commandLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(commands) != "Describe\nStartSession\nSendTurn\nInterruptTurn\n" {
+		t.Fatalf("unexpected interrupt command sequence %q", commands)
 	}
 }
 
@@ -464,7 +523,9 @@ func TestProviderHostV2HelperProcess(t *testing.T) {
 				fmt.Fprintln(os.Stderr, "unexpected turn interrupt")
 				os.Exit(2)
 			}
-			emitProviderHostTestMessage(encoder, command, "Result", map[string]any{"interrupted": true}, nil)
+			emitProviderHostTestMessage(encoder, command, "Result", map[string]any{
+				"interrupted": true, "providerResumeCursor": "cursor-interrupted",
+			}, nil)
 			no := false
 			yes := true
 			emitProviderHostTestMessage(encoder, *pendingSend, "Error", nil, &providerHostWireError{

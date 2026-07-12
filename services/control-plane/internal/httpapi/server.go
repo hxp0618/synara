@@ -145,6 +145,9 @@ func New(
 	mux.Handle("POST /v1/workers/executions/{executionID}/interaction-resolutions/pull", server.requireWorker(http.HandlerFunc(server.pullInteractionResolutions)))
 	mux.Handle("POST /v1/workers/executions/{executionID}/interaction-resolutions/{interactionID}/delivered", server.requireWorker(http.HandlerFunc(server.markInteractionResolutionDelivered)))
 	mux.Handle("POST /v1/workers/executions/{executionID}/interaction-resolutions/{interactionID}/acknowledged", server.requireWorker(http.HandlerFunc(server.acknowledgeInteractionResolution)))
+	mux.Handle("POST /v1/workers/executions/{executionID}/control-commands/pull", server.requireWorker(http.HandlerFunc(server.pullControlCommands)))
+	mux.Handle("POST /v1/workers/executions/{executionID}/control-commands/{controlCommandID}/delivered", server.requireWorker(http.HandlerFunc(server.markControlCommandDelivered)))
+	mux.Handle("POST /v1/workers/executions/{executionID}/control-commands/{controlCommandID}/acknowledged", server.requireWorker(http.HandlerFunc(server.acknowledgeControlCommand)))
 	mux.Handle("POST /v1/workers/executions/{executionID}/artifacts", server.requireWorker(http.HandlerFunc(server.createWorkerArtifact)))
 	mux.Handle("POST /v1/workers/executions/{executionID}/artifacts/{artifactID}/complete", server.requireWorker(http.HandlerFunc(server.completeWorkerArtifact)))
 	mux.Handle("POST /v1/workers/executions/{executionID}/credentials/{credentialID}/resolve", server.requireWorker(http.HandlerFunc(server.resolveExecutionCredential)))
@@ -229,6 +232,7 @@ func New(
 	mux.Handle("GET /v1/sessions/{sessionID}/events", server.requireAuth(http.HandlerFunc(server.listSessionEvents)))
 	mux.Handle("GET /v1/sessions/{sessionID}/events/stream", server.requireAuth(http.HandlerFunc(server.streamSessionEvents)))
 	mux.Handle("POST /v1/sessions/{sessionID}/turns", server.requireAuth(http.HandlerFunc(server.createTurn)))
+	mux.Handle("POST /v1/sessions/{sessionID}/turns/active/interrupt", server.requireAuth(http.HandlerFunc(server.interruptActiveTurn)))
 	mux.Handle("POST /v1/sessions/{sessionID}/suspend", server.requireAuth(http.HandlerFunc(server.suspendSession)))
 	mux.Handle("POST /v1/sessions/{sessionID}/resume", server.requireAuth(http.HandlerFunc(server.resumeSession)))
 	mux.Handle("POST /v1/sessions/{sessionID}/archive", server.requireAuth(http.HandlerFunc(server.archiveSession)))
@@ -939,6 +943,22 @@ func (s *Server) cancelExecution(w http.ResponseWriter, r *http.Request) {
 	}
 	result, err := s.executions.Cancel(
 		r.Context(), mustPrincipal(r), executionID, r.Header.Get("Idempotency-Key"), requestID(r), clientIP(r),
+	)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	setIdempotencyReplayHeader(w, result.Replayed)
+	writeJSON(w, result.StatusCode, result.Value)
+}
+
+func (s *Server) interruptActiveTurn(w http.ResponseWriter, r *http.Request) {
+	sessionID, ok := s.pathUUID(w, r, "sessionID")
+	if !ok {
+		return
+	}
+	result, err := s.executions.RequestInterrupt(
+		r.Context(), mustPrincipal(r), sessionID, r.Header.Get("Idempotency-Key"), requestID(r), clientIP(r),
 	)
 	if err != nil {
 		s.writeError(w, r, err)

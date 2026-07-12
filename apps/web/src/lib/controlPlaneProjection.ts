@@ -151,6 +151,10 @@ function activitySummary(event: ControlPlaneSessionEvent): string | null {
       return payloadString(event, "failureMessage") ?? "Execution failed";
     case "execution.cancelled":
       return "Execution cancelled";
+    case "turn.interrupt-requested":
+      return "Interrupt requested";
+    case "execution.interrupted":
+      return "Execution interrupted";
     case "approval.requested":
       return "Approval required";
     case "approval.resolved":
@@ -347,6 +351,16 @@ export function applyControlPlaneSessionEvent(
         latestTurn = { ...latestTurn, state: "interrupted", completedAt };
       }
       orchestrationStatus = "interrupted";
+      break;
+    }
+    case "execution.interrupted": {
+      const completedAt = payloadString(event, "finishedAt") ?? event.occurredAt;
+      messages = updateAssistantStreaming(messages, event.executionId, completedAt);
+      if (latestTurn && (!turnId || latestTurn.turnId === turnId)) {
+        latestTurn = { ...latestTurn, state: "interrupted", completedAt };
+      }
+      orchestrationStatus = "interrupted";
+      error = null;
       break;
     }
     case "session.suspended":

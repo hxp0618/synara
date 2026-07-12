@@ -76,6 +76,20 @@ terminal message. Both transitions are idempotent. `delivered` commands remain p
 an agentd restart can replay the stable command ID without duplicating the Provider action. A stale Worker or
 Generation is permanently fenced from pull, delivery, and acknowledgement.
 
+## Durable Provider control commands
+
+User control intent is persisted separately from interaction resolution. `InterruptTurn` is the first command
+on the reusable Control Command channel; the same Generation-fenced delivery model is reserved for Steer,
+Compact, Rollback, Fork, Review and Stop Session. A command requested before Claim remains unbound until the
+Execution receives a Worker and Generation. Lease recovery returns delivered-but-unacknowledged commands to
+`pending` and binds them to the replacement Generation instead of losing user intent.
+
+Agentd marks a Control Command delivered before writing it to Provider Host and acknowledges it only after the
+correlated terminal Result. Interrupt acknowledgement carries the Provider Resume Cursor. Control Plane stores
+that Cursor, releases the Lease, marks the Execution and Turn `interrupted`, and appends
+`execution.interrupted` in one transaction. A stale Generation cannot acknowledge the command, and agentd does
+not subsequently misreport the acknowledged user interrupt as `execution.failed`.
+
 ## Boundary
 
 Workers receive domain commands and return versioned events. They do not receive SQL, table names,

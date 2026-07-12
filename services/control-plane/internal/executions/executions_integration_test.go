@@ -357,6 +357,180 @@ func TestExecutionCancelIsIdempotentAndRemovesLease(t *testing.T) {
 	}
 }
 
+func TestDurableInterruptCommandTerminatesTurn(t *testing.T) {
+	db := integrationDB(t)
+	fixture := seedExecutionFixture(t, db)
+	service := integrationService(t, db)
+	principal := identity.Principal{UserID: fixture.UserID, ActiveTenantID: &fixture.TenantID}
+
+	first, err := service.RequestInterrupt(
+		context.Background(), principal, fixture.SessionID,
+		"interrupt-key", "interrupt-request", "127.0.0.1",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replayed, err := service.RequestInterrupt(
+		context.Background(), principal, fixture.SessionID,
+		"interrupt-key", "interrupt-replay", "127.0.0.1",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Replayed || !replayed.Replayed || first.Value.ID != replayed.Value.ID || first.StatusCode != 202 {
+		t.Fatalf("unexpected interrupt idempotency result: first=%#v replayed=%#v", first, replayed)
+	}
+	if first.Value.DeliveryWorkerID != nil || first.Value.DeliveryGeneration != nil {
+		t.Fatalf("queued interrupt was bound before claim: %#v", first.Value)
+	}
+
+	worker := registerTestWorker(t, service, fixture.TargetID, fixture.TargetKind, "worker-interrupt")
+	cleanupWorkers(t, db, worker.ID)
+	claim, err := service.Claim(context.Background(), worker, ClaimExecutionInput{
+		ExecutionTargetID: fixture.TargetID, TargetKind: fixture.TargetKind, ExecutionID: &fixture.ExecutionID,
+	}, "interrupt-claim")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claim.Value.Lease == nil {
+		t.Fatal("interrupt test execution was not leased")
+	}
+	lease := *claim.Value.Lease
+	leaseInput := LeaseInput{TenantID: fixture.TenantID, Generation: lease.Generation, LeaseToken: lease.LeaseToken}
+	deliveries, err := service.PullControlCommands(context.Background(), worker, fixture.ExecutionID, PullControlCommandsInput{
+		LeaseInput: leaseInput, Limit: 10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(deliveries) != 1 || deliveries[0].CommandType != "InterruptTurn" || deliveries[0].CommandID != first.Value.CommandID {
+		t.Fatalf("unexpected interrupt delivery: %#v", deliveries)
+	}
+	deliveryInput := ControlCommandDeliveryInput{LeaseInput: leaseInput, CommandID: deliveries[0].CommandID}
+	if _, err := service.MarkControlCommandDelivered(
+		context.Background(), worker, fixture.ExecutionID, first.Value.ID, deliveryInput, "interrupt-delivered",
+	); err != nil {
+		t.Fatal(err)
+	}
+	cursor := "provider-cursor-after-interrupt"
+	deliveryInput.ProviderResumeCursor = &cursor
+	acknowledged, err := service.AcknowledgeControlCommand(
+		context.Background(), worker, fixture.ExecutionID, first.Value.ID, deliveryInput, "interrupt-acknowledged",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if acknowledged.Value.Status != "acknowledged" || acknowledged.Value.AcknowledgedAt == nil {
+		t.Fatalf("interrupt command was not acknowledged: %#v", acknowledged.Value)
+	}
+
+	var execution persistence.AgentExecution
+	if err := db.Where("tenant_id = ? AND id = ?", fixture.TenantID, fixture.ExecutionID).Take(&execution).Error; err != nil {
+		t.Fatal(err)
+	}
+	if execution.Status != "interrupted" || execution.FinishedAt == nil {
+		t.Fatalf("execution was not interrupted: %#v", execution)
+	}
+	var turn persistence.AgentTurn
+	if err := db.Where("tenant_id = ? AND session_id = ? AND id = ?", fixture.TenantID, fixture.SessionID, execution.TurnID).Take(&turn).Error; err != nil {
+		t.Fatal(err)
+	}
+	if turn.Status != "interrupted" || turn.CompletedAt == nil {
+		t.Fatalf("turn was not interrupted: %#v", turn)
+	}
+	var leases int64
+	if err := db.Model(&persistence.WorkerLease{}).Where("execution_id = ?", fixture.ExecutionID).Count(&leases).Error; err != nil {
+		t.Fatal(err)
+	}
+	if leases != 0 {
+		t.Fatalf("interrupted execution retained %d leases", leases)
+	}
+	var requestedEvents, interruptedEvents int64
+	if err := db.Model(&persistence.SessionEvent{}).
+		Where("tenant_id = ? AND execution_id = ? AND event_type = ?", fixture.TenantID, fixture.ExecutionID, "turn.interrupt-requested").
+		Count(&requestedEvents).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Model(&persistence.SessionEvent{}).
+		Where("tenant_id = ? AND execution_id = ? AND event_type = ?", fixture.TenantID, fixture.ExecutionID, "execution.interrupted").
+		Count(&interruptedEvents).Error; err != nil {
+		t.Fatal(err)
+	}
+	if requestedEvents != 1 || interruptedEvents != 1 {
+		t.Fatalf("unexpected interrupt event counts: requested=%d interrupted=%d", requestedEvents, interruptedEvents)
+	}
+}
+
+func TestDurableInterruptCommandRebindsAfterWorkerRelease(t *testing.T) {
+	db := integrationDB(t)
+	fixture := seedExecutionFixture(t, db)
+	service := integrationService(t, db)
+	principal := identity.Principal{UserID: fixture.UserID, ActiveTenantID: &fixture.TenantID}
+	requested, err := service.RequestInterrupt(
+		context.Background(), principal, fixture.SessionID,
+		"interrupt-rebind", "interrupt-rebind", "127.0.0.1",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	firstWorker := registerTestWorker(t, service, fixture.TargetID, fixture.TargetKind, "worker-interrupt-first")
+	secondWorker := registerTestWorker(t, service, fixture.TargetID, fixture.TargetKind, "worker-interrupt-second")
+	cleanupWorkers(t, db, firstWorker.ID, secondWorker.ID)
+	firstClaim, err := service.Claim(context.Background(), firstWorker, ClaimExecutionInput{
+		ExecutionTargetID: fixture.TargetID, TargetKind: fixture.TargetKind, ExecutionID: &fixture.ExecutionID,
+	}, "interrupt-first-claim")
+	if err != nil || firstClaim.Value.Lease == nil {
+		t.Fatalf("first claim failed: result=%#v err=%v", firstClaim, err)
+	}
+	firstLease := *firstClaim.Value.Lease
+	firstLeaseInput := LeaseInput{TenantID: fixture.TenantID, Generation: firstLease.Generation, LeaseToken: firstLease.LeaseToken}
+	firstDeliveries, err := service.PullControlCommands(context.Background(), firstWorker, fixture.ExecutionID, PullControlCommandsInput{
+		LeaseInput: firstLeaseInput, Limit: 1,
+	})
+	if err != nil || len(firstDeliveries) != 1 {
+		t.Fatalf("first interrupt pull failed: deliveries=%#v err=%v", firstDeliveries, err)
+	}
+	if _, err := service.MarkControlCommandDelivered(
+		context.Background(), firstWorker, fixture.ExecutionID, requested.Value.ID,
+		ControlCommandDeliveryInput{LeaseInput: firstLeaseInput, CommandID: requested.Value.CommandID},
+		"interrupt-first-delivered",
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Release(
+		context.Background(), firstWorker, fixture.ExecutionID,
+		ReleaseLeaseInput{LeaseInput: firstLeaseInput, Reason: "worker draining"},
+		"interrupt-first-release",
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	secondClaim, err := service.Claim(context.Background(), secondWorker, ClaimExecutionInput{
+		ExecutionTargetID: fixture.TargetID, TargetKind: fixture.TargetKind, ExecutionID: &fixture.ExecutionID,
+	}, "interrupt-second-claim")
+	if err != nil || secondClaim.Value.Lease == nil {
+		t.Fatalf("second claim failed: result=%#v err=%v", secondClaim, err)
+	}
+	secondLease := *secondClaim.Value.Lease
+	if secondLease.Generation != firstLease.Generation+1 {
+		t.Fatalf("interrupt command did not advance generation: first=%d second=%d", firstLease.Generation, secondLease.Generation)
+	}
+	secondDeliveries, err := service.PullControlCommands(context.Background(), secondWorker, fixture.ExecutionID, PullControlCommandsInput{
+		LeaseInput: LeaseInput{
+			TenantID: fixture.TenantID, Generation: secondLease.Generation, LeaseToken: secondLease.LeaseToken,
+		},
+		Limit: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(secondDeliveries) != 1 || secondDeliveries[0].ControlCommandID != requested.Value.ID ||
+		secondDeliveries[0].CommandID != requested.Value.CommandID || secondDeliveries[0].DeliveryStatus != "pending" {
+		t.Fatalf("interrupt command was not rebound to replacement generation: %#v", secondDeliveries)
+	}
+}
+
 func TestConcurrentCancelAndCompleteHasOneTerminalWinner(t *testing.T) {
 	for iteration := range 5 {
 		t.Run("race-"+string(rune('a'+iteration)), func(t *testing.T) {
@@ -934,6 +1108,10 @@ func cleanupWorkers(t *testing.T, db *gorm.DB, workerIDs ...uuid.UUID) {
 		}
 		_ = db.Where("worker_id IN ?", workerIDs).Delete(&persistence.WorkerRequestReceipt{}).Error
 		_ = db.Where("worker_id IN ?", workerIDs).Delete(&persistence.WorkerLease{}).Error
+		_ = db.Where("delivery_worker_id IN ? OR worker_id IN ?", workerIDs, workerIDs).
+			Delete(&persistence.ExecutionInteraction{}).Error
+		_ = db.Where("delivery_worker_id IN ?", workerIDs).
+			Delete(&persistence.ExecutionControlCommand{}).Error
 		_ = db.Model(&persistence.AgentExecution{}).Where("worker_id IN ?", workerIDs).
 			Updates(map[string]any{"status": "recovering", "worker_id": nil}).Error
 		_ = db.Where("id IN ?", workerIDs).Delete(&persistence.WorkerInstance{}).Error
@@ -944,7 +1122,7 @@ func cleanupFixture(db *gorm.DB, tenantID uuid.UUID) {
 	_ = db.Transaction(func(tx *gorm.DB) error {
 		models := []any{
 			&persistence.WorkerLease{}, &persistence.SessionEvent{}, &persistence.OutboxMessage{},
-			&persistence.APIIdempotencyKey{}, &persistence.ExecutionInteraction{},
+			&persistence.APIIdempotencyKey{}, &persistence.ExecutionInteraction{}, &persistence.ExecutionControlCommand{},
 			&persistence.TenantQuota{}, &persistence.AgentExecution{}, &persistence.AgentTurn{},
 			&persistence.AgentSession{}, &persistence.Project{}, &persistence.ExecutionTarget{},
 		}

@@ -56,7 +56,7 @@ export function providerHostDescriptor(provider: ProviderKind): ProviderHostDesc
         provider === "codex"
           ? "codex-app-server-v2"
           : provider === "claudeAgent"
-            ? "claude-cli-v2"
+            ? "claude-agent-sdk-v2"
             : `${provider}-local-only`,
       ...(remote ? { providerCliVersion: readProviderCliVersion(provider) } : {}),
       capabilities: capabilityMapForProvider(provider),
@@ -102,10 +102,13 @@ export function capabilityMapForProvider(provider: ProviderKind): ProviderCapabi
       "start-session": "native",
       "resume-session": "native",
       "send-turn": "native",
-      "interrupt-turn": "emulated",
+      "interrupt-turn": "native",
+      approval: "native",
+      "structured-user-input": "native",
+      "plan-mode": "native",
       "read-history": "emulated",
       "model-switch": "native",
-      "tool-events": "emulated",
+      "tool-events": "native",
       "usage-events": "native",
       "credential-injection": "native",
       "authoritative-history-reconstruction": "emulated",
@@ -385,7 +388,12 @@ async function executeCommand(
         });
       }
       activeTurn.run.interrupt();
-      return resultMessage(command, { interrupted: true, targetCommandId: activeTurn.commandId });
+      const providerResumeCursor = activeTurn.run.getResumeCursor?.();
+      return resultMessage(command, {
+        interrupted: true,
+        targetCommandId: activeTurn.commandId,
+        ...(providerResumeCursor ? { providerResumeCursor } : {}),
+      });
     }
     case "ResolveApproval": {
       const activeTurn = requireActiveTurn(state, command.commandType);

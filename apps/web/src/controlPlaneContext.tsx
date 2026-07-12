@@ -17,6 +17,7 @@ import {
   ControlPlaneError,
   type ControlPlaneAgentSession,
   type ControlPlaneAgentTurn,
+  type ControlPlaneControlCommand,
   type ControlPlaneIdempotencyOptions,
   type ControlPlaneOrganization,
   type ControlPlanePlatformProfile,
@@ -114,6 +115,10 @@ export type ControlPlaneContextValue = {
     idempotencyKey?: string,
     modes?: { runtimeMode: RuntimeMode; interactionMode: ProviderInteractionMode },
   ) => Promise<ControlPlaneAgentTurn>;
+  interruptActiveTurn: (
+    sessionId: string,
+    idempotencyKey?: string,
+  ) => Promise<ControlPlaneControlCommand>;
   watchSession: (sessionId: string) => () => void;
 };
 
@@ -476,6 +481,20 @@ export function ControlPlaneProvider({ children }: { children: ReactNode }) {
     },
     [capabilities.canCreateTurn, projectionRuntime],
   );
+  const interruptActiveTurn = useCallback(
+    async (sessionId: string, idempotencyKey?: string) => {
+      if (!capabilities.canInterruptExecution) {
+        throw new Error("The active Tenant or Organization cannot interrupt Executions.");
+      }
+      const command = await controlPlaneClient.interruptActiveTurn(
+        sessionId,
+        idempotencyOptions("interrupt", idempotencyKey),
+      );
+      void projectionRuntime.catchUp(sessionId).catch(() => undefined);
+      return command;
+    },
+    [capabilities.canInterruptExecution, projectionRuntime],
+  );
   const watchSession = useCallback(
     (sessionId: string) => projectionRuntime.watch(sessionId),
     [projectionRuntime],
@@ -512,6 +531,7 @@ export function ControlPlaneProvider({ children }: { children: ReactNode }) {
       createProject,
       createSession,
       createTurn,
+      interruptActiveTurn,
       watchSession,
     }),
     [
@@ -523,6 +543,7 @@ export function ControlPlaneProvider({ children }: { children: ReactNode }) {
       createProject,
       createSession,
       createTurn,
+      interruptActiveTurn,
       devLogin,
       error,
       isAuthoritative,

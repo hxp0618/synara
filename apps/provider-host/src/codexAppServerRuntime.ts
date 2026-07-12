@@ -6,6 +6,7 @@ import type {
   RunnerInput,
   RunnerMessage,
 } from "./providerHost";
+import { ProviderInterruptedError } from "./providerRunErrors";
 
 type JsonRpcId = string | number;
 
@@ -96,6 +97,7 @@ class CodexAppServerRuntime {
     return {
       result: this.run(),
       interrupt: () => this.interrupt(),
+      getResumeCursor: () => this.threadId,
       resolveApproval: (payload) => this.resolveApproval(payload),
       resolveUserInput: (payload) => this.resolveUserInput(payload),
     };
@@ -555,13 +557,6 @@ class CodexAppServerRuntime {
       if (!this.processExited) this.child.kill("SIGKILL");
     }, INTERRUPT_GRACE_MS);
     this.forceKillTimer.unref();
-  }
-}
-
-class ProviderInterruptedError extends Error {
-  constructor() {
-    super("Provider turn was interrupted.");
-    this.name = "ProviderInterruptedError";
   }
 }
 

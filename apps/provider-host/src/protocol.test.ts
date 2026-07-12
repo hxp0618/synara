@@ -45,9 +45,13 @@ describe("Provider Host Protocol v2", () => {
     expect(codex.capabilityDescriptor.capabilities.approval).toBe("native");
     expect(codex.capabilityDescriptor.capabilities["structured-user-input"]).toBe("native");
     expect(codex.capabilityDescriptor.capabilities["plan-mode"]).toBe("native");
-    expect(providerHostDescriptor("claudeAgent").capabilityDescriptor.capabilities.approval).toBe(
-      "unsupported",
-    );
+    const claude = providerHostDescriptor("claudeAgent");
+    expect(claude.capabilityDescriptor.adapterVersion).toBe("claude-agent-sdk-v2");
+    expect(claude.capabilityDescriptor.capabilities["interrupt-turn"]).toBe("native");
+    expect(claude.capabilityDescriptor.capabilities.approval).toBe("native");
+    expect(claude.capabilityDescriptor.capabilities["structured-user-input"]).toBe("native");
+    expect(claude.capabilityDescriptor.capabilities["plan-mode"]).toBe("native");
+    expect(claude.capabilityDescriptor.capabilities["tool-events"]).toBe("native");
     expect(cursor.capabilityDescriptor.supportTier).toBe("local-only");
     expect(Object.values(capabilityMapForProvider("cursor"))).toEqual(
       Array(PROVIDER_CAPABILITY_IDS.length).fill("unsupported"),
@@ -104,6 +108,7 @@ describe("Provider Host Protocol v2", () => {
             rejectRun = reject;
           }),
           interrupt: () => rejectRun?.(new Error("Provider turn was interrupted.")),
+          getResumeCursor: () => "provider-cursor-after-interrupt",
         }) satisfies ProviderRunController,
     });
     await handle(command("StartSession", { runnerInput: remoteRunnerInput() }, "session-interrupt"));
@@ -116,7 +121,11 @@ describe("Provider Host Protocol v2", () => {
 
     expect(interrupt.at(-1)).toMatchObject({
       messageType: "Result",
-      payload: { interrupted: true, targetCommandId: "send-interrupt" },
+      payload: {
+        interrupted: true,
+        targetCommandId: "send-interrupt",
+        providerResumeCursor: "provider-cursor-after-interrupt",
+      },
     });
     expect(sendMessages.at(-1)).toMatchObject({
       messageType: "Error",

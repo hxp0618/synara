@@ -135,4 +135,34 @@ describe("Control Plane Session projection", () => {
     expect(projection.latestTurn?.state).toBe("completed");
     expect(projection.orchestrationStatus).toBe("ready");
   });
+
+  it("projects durable interrupt intent and confirmation without closing the Session", () => {
+    let projection = createControlPlaneSessionProjection(session);
+    for (const item of [
+      event(1, "turn.created", { turnId: "turn-1", inputText: "Long task" }),
+      event(2, "execution.started", { turnId: "turn-1" }),
+      event(3, "runtime.output.delta", { turnId: "turn-1", text: "Partial" }),
+      event(4, "turn.interrupt-requested", {
+        turnId: "turn-1",
+        controlCommandId: "control-1",
+      }),
+      event(5, "execution.interrupted", {
+        turnId: "turn-1",
+        finishedAt: "2026-07-12T00:00:05Z",
+      }),
+    ]) {
+      projection = applyControlPlaneSessionEvent(projection, item).projection;
+    }
+
+    expect(projection.messages[1]).toEqual(
+      expect.objectContaining({ text: "Partial", streaming: false }),
+    );
+    expect(projection.latestTurn?.state).toBe("interrupted");
+    expect(projection.orchestrationStatus).toBe("interrupted");
+    expect(projection.activities.map((activity) => activity.kind)).toEqual(
+      expect.arrayContaining(["turn.interrupt-requested", "execution.interrupted"]),
+    );
+    const thread = projectControlPlaneThreads([session], new Map([[session.id, projection]]))[0]!;
+    expect(thread.session?.status).toBe("ready");
+  });
 });

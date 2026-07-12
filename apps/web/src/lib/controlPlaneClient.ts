@@ -304,13 +304,34 @@ export type ControlPlaneAgentTurn = {
   tenantId: string;
   sessionId: string;
   createdBy: string;
-  status: "queued" | "running" | "completed" | "failed" | "cancelled";
+  status: "queued" | "running" | "completed" | "failed" | "cancelled" | "interrupted";
   inputText: string;
   runtimeMode: RuntimeMode;
   interactionMode: ProviderInteractionMode;
   startedAt: string | null;
   completedAt: string | null;
   createdAt: string;
+};
+
+export type ControlPlaneControlCommand = {
+  id: string;
+  executionId: string;
+  sessionId: string;
+  turnId: string;
+  provider: string;
+  commandType: string;
+  commandId: string;
+  payload: Record<string, unknown>;
+  status: "pending" | "delivered" | "acknowledged" | "superseded";
+  requestedBy: string;
+  requestedAt: string;
+  deliveryWorkerId?: string;
+  deliveryGeneration?: number;
+  deliveryAttempts: number;
+  deliveryAvailableAt: string;
+  deliveredAt?: string;
+  acknowledgedAt?: string;
+  deliveryError?: string;
 };
 
 export type ControlPlaneSessionEvent = {
@@ -753,6 +774,14 @@ export const controlPlaneClient = {
         method: "POST",
         ...idempotencyRequestHeaders(options),
         body: { inputText, ...modes },
+      },
+    ),
+  interruptActiveTurn: (sessionId: string, options?: ControlPlaneIdempotencyOptions) =>
+    controlPlaneRequest<ControlPlaneControlCommand>(
+      `/v1/sessions/${encodeURIComponent(sessionId)}/turns/active/interrupt`,
+      {
+        method: "POST",
+        ...idempotencyRequestHeaders(options),
       },
     ),
   listSessionEvents: (sessionId: string, afterSequence = 0, limit = 500) => {

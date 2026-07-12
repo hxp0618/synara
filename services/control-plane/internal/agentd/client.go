@@ -182,6 +182,83 @@ func interactionDeliveryRequestID(
 	return "interaction-" + status + "-" + hex.EncodeToString(digest[:16])
 }
 
+func (c *Client) PullControlCommands(
+	ctx context.Context,
+	executionID uuid.UUID,
+	lease executions.Lease,
+) ([]executions.ControlCommandDelivery, error) {
+	var output struct {
+		Items []executions.ControlCommandDelivery `json:"items"`
+	}
+	err := c.doJSON(
+		ctx, http.MethodPost, executionPath(executionID, "control-commands/pull"),
+		c.workerToken, uuid.NewString(), executions.PullControlCommandsInput{
+			LeaseInput: executions.LeaseInput{
+				TenantID: lease.TenantID, Generation: lease.Generation, LeaseToken: lease.LeaseToken,
+			},
+			Limit: 1,
+		}, &output,
+	)
+	return output.Items, err
+}
+
+func (c *Client) MarkControlCommandDelivered(
+	ctx context.Context,
+	executionID uuid.UUID,
+	lease executions.Lease,
+	delivery executions.ControlCommandDelivery,
+) error {
+	return c.updateControlCommandDelivery(ctx, executionID, lease, delivery, "delivered", nil)
+}
+
+func (c *Client) AcknowledgeControlCommand(
+	ctx context.Context,
+	executionID uuid.UUID,
+	lease executions.Lease,
+	delivery executions.ControlCommandDelivery,
+	result map[string]any,
+) error {
+	return c.updateControlCommandDelivery(ctx, executionID, lease, delivery, "acknowledged", result)
+}
+
+func (c *Client) updateControlCommandDelivery(
+	ctx context.Context,
+	executionID uuid.UUID,
+	lease executions.Lease,
+	delivery executions.ControlCommandDelivery,
+	status string,
+	result map[string]any,
+) error {
+	var providerResumeCursor *string
+	if value, ok := result["providerResumeCursor"].(string); ok && strings.TrimSpace(value) != "" {
+		trimmed := strings.TrimSpace(value)
+		providerResumeCursor = &trimmed
+	}
+	return c.doJSON(
+		ctx, http.MethodPost,
+		executionPath(executionID, "control-commands/"+delivery.ControlCommandID.String()+"/"+status),
+		c.workerToken, controlCommandDeliveryRequestID(executionID, lease, delivery, status), executions.ControlCommandDeliveryInput{
+			LeaseInput: executions.LeaseInput{
+				TenantID: lease.TenantID, Generation: lease.Generation, LeaseToken: lease.LeaseToken,
+			},
+			CommandID: delivery.CommandID, ProviderResumeCursor: providerResumeCursor, Result: result,
+		}, nil,
+	)
+}
+
+func controlCommandDeliveryRequestID(
+	executionID uuid.UUID,
+	lease executions.Lease,
+	delivery executions.ControlCommandDelivery,
+	status string,
+) string {
+	digest := sha256.Sum256([]byte(strings.Join([]string{
+		executionID.String(), delivery.ControlCommandID.String(), delivery.CommandID,
+		fmt.Sprintf("%d", lease.Generation), status,
+	}, "\x00")))
+	return "control-command-" + status + "-" + hex.EncodeToString(digest[:16])
+}
+
 func (c *Client) Complete(ctx context.Context, executionID uuid.UUID, lease executions.Lease, result RunnerResult) error {
 	return c.executionRequest(ctx, executionID, "complete", executions.CompleteExecutionInput{
 		LeaseInput:           executions.LeaseInput{TenantID: lease.TenantID, Generation: lease.Generation, LeaseToken: lease.LeaseToken},

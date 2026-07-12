@@ -186,6 +186,9 @@ func (s *Service) Claim(
 				if err := bindExecutionRuntimeResources(ctx, tx, claimWorker, execution, now); err != nil {
 					return err
 				}
+				if err := bindExecutionControlCommands(ctx, tx, execution, worker.ID, now); err != nil {
+					return err
+				}
 				appended, err = s.sessions.AppendInternalEvent(ctx, tx, execution.TenantID, execution.SessionID, sessions.InternalEventInput{
 					EventType: "execution.leased", ActorType: "worker", ActorID: &worker.ID,
 					ExecutionID: &execution.ID, WorkerID: &worker.ID, Generation: &execution.Generation,
@@ -377,6 +380,9 @@ func (s *Service) Complete(
 		if err := expectOne(turnUpdate, 500, "turn_complete_failed", "Failed to complete the turn."); err != nil {
 			return Execution{}, err
 		}
+		if err := supersedeControlCommands(ctx, tx, execution, uuid.Nil, "The Execution completed before the Control command was acknowledged."); err != nil {
+			return Execution{}, err
+		}
 		payload := map[string]any{"turnId": execution.TurnID, "finishedAt": now}
 		if input.Output != nil {
 			payload["output"] = input.Output
@@ -450,6 +456,9 @@ func (s *Service) Fail(
 		if err := expectOne(turnUpdate, 500, "turn_fail_failed", "Failed to fail the turn."); err != nil {
 			return Execution{}, err
 		}
+		if err := supersedeControlCommands(ctx, tx, execution, uuid.Nil, "The Execution failed before the Control command was acknowledged."); err != nil {
+			return Execution{}, err
+		}
 		appended, err = s.sessions.AppendInternalEvent(ctx, tx, execution.TenantID, execution.SessionID, sessions.InternalEventInput{
 			EventType: "execution.failed", ActorType: "worker", ActorID: &worker.ID,
 			ExecutionID: &execution.ID, WorkerID: &worker.ID, Generation: &execution.Generation,
@@ -491,6 +500,9 @@ func (s *Service) Release(
 		}
 		if err := tx.WithContext(ctx).Delete(&lease).Error; err != nil {
 			return Execution{}, problem.Wrap(500, "lease_release_failed", "Failed to release the execution lease.", err)
+		}
+		if err := requeueExecutionControlCommands(ctx, tx, execution, lease, "The Worker released the Execution before the Control command was acknowledged."); err != nil {
+			return Execution{}, err
 		}
 		execution.Status = "recovering"
 		execution.WorkerID = nil
@@ -561,6 +573,9 @@ func (s *Service) RecoverExpired(ctx context.Context, limit int) error {
 				continue
 			}
 			if err := s.supersedeInteractionGeneration(ctx, tx, execution, lease); err != nil {
+				return err
+			}
+			if err := requeueExecutionControlCommands(ctx, tx, execution, lease, "The Worker lease expired before the Control command was acknowledged."); err != nil {
 				return err
 			}
 			execution.Status = "recovering"

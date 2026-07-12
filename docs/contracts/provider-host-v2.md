@@ -61,6 +61,11 @@ Delivered-but-unacknowledged commands remain pullable and use the stable command
 Worker/Generation cannot pull, deliver, or acknowledge them. Lease recovery expires unresolved requests and
 supersedes unacknowledged deliveries from the obsolete Generation.
 
+`InterruptTurn` is also delivered as a durable Control Command. Its Result includes the current
+`providerResumeCursor` when the Provider runtime has established one. Agentd forwards that Result during
+acknowledgement so Control Plane can atomically persist the Cursor and terminal `execution.interrupted` state.
+The Provider Host Send Turn Error that follows is confirmation of the same interrupt, not a second failure.
+
 Codex uses `codex app-server` as its production v2 runtime. It initializes a bidirectional JSON-RPC connection,
 starts or resumes the native Thread, streams Turn/Item/usage events, and routes native `turn/interrupt`, command
 or file Approval, and Plan Mode Structured User Input through durable Worker Interaction delivery. The immutable
@@ -68,9 +73,13 @@ Turn `runtimeMode` selects approval-required versus full-access permissions, whi
 activates Codex Plan Mode. Native Cursor resume is attempted first; when it is unavailable, a new Thread is
 rebuilt from bounded authoritative history instead of depending on the old Worker state.
 
-Claude still uses the non-interactive CLI runner. Its process termination remains an `emulated`
-`interrupt-turn`, and Approval, Structured User Input and Plan Mode remain `unsupported` until the Agent SDK
-runtime supplies and passes the same real bidirectional acceptance paths.
+Claude uses `@anthropic-ai/claude-agent-sdk` as its production v2 runtime. Each Send Turn owns one streaming
+SDK Query, tries the native Session Cursor before authoritative-history reconstruction, and uses native
+`query.interrupt()`. A host-owned `PreToolUse` hook prevents permissive local Claude settings from bypassing
+Synara policy: approval-required Turns force mutating/network/command tools through the durable Interaction
+channel, while full-access Turns auto-allow them. `AskUserQuestion` is projected as Structured User Input and
+Plan Mode uses the native SDK permission mode. Provider output, tool lifecycle and usage are normalized without
+forwarding raw SDK payloads.
 
 ## Describe
 

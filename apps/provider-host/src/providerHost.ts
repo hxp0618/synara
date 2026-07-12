@@ -1,7 +1,9 @@
-import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { createInterface } from "node:readline";
 
+import {
+  startClaudeAgentSdkRun,
+  type ClaudeQueryFactory,
+} from "./claudeAgentSdkRuntime";
 import { startCodexAppServerRun } from "./codexAppServerRuntime";
 
 export type RunnerInput = {
@@ -38,18 +40,14 @@ export type RunnerMessage =
 export type ProviderRunController = {
   result: Promise<Extract<RunnerMessage, { type: "result" }>>;
   interrupt: () => void;
+  getResumeCursor?: () => string | undefined;
   resolveApproval?: (payload: Record<string, unknown>) => void | Promise<void>;
   resolveUserInput?: (payload: Record<string, unknown>) => void | Promise<void>;
 };
 
 export type ProviderRunOptions = {
   interactive?: boolean;
-};
-
-type ProviderState = {
-  cursor?: string;
-  text: string[];
-  model?: string;
+  claudeQueryFactory?: ClaudeQueryFactory;
 };
 
 export function readRunnerCredential(environment: NodeJS.ProcessEnv): RunnerCredential | null {
@@ -141,57 +139,6 @@ export function createRedactor(secrets: ReadonlyArray<string>): (value: string) 
   };
 }
 
-export function normalizeClaudeEvent(
-  value: unknown,
-  state: ProviderState,
-  redact: (value: string) => string,
-): RunnerMessage[] {
-  if (!isRecord(value) || typeof value.type !== "string") return [];
-  if (value.type === "system" && value.subtype === "init") {
-    if (typeof value.session_id === "string") state.cursor = value.session_id;
-    if (typeof value.model === "string") state.model = value.model;
-    return [];
-  }
-  if (value.type === "assistant" && isRecord(value.message) && Array.isArray(value.message.content)) {
-    const messages: RunnerMessage[] = [];
-    for (const block of value.message.content) {
-      if (!isRecord(block) || typeof block.type !== "string") continue;
-      if (block.type === "text" && typeof block.text === "string") {
-        const text = redact(block.text);
-        state.text.push(text);
-        messages.push({ type: "event", eventType: "runtime.output.delta", payload: { text } });
-      } else if (block.type === "tool_use") {
-        messages.push({
-          type: "event",
-          eventType: "runtime.provider.activity",
-          payload: {
-            provider: "claude",
-            itemType: typeof block.name === "string" ? block.name : "tool",
-            status: "started",
-          },
-        });
-      }
-    }
-    return messages;
-  }
-  if (value.type === "result") {
-    if (typeof value.session_id === "string") state.cursor = value.session_id;
-    if (state.text.length === 0 && typeof value.result === "string") {
-      state.text.push(redact(value.result));
-    }
-    if (isRecord(value.usage)) {
-      return [
-        {
-          type: "event",
-          eventType: "runtime.usage",
-          payload: { provider: "claude", ...numericFields(value.usage) },
-        },
-      ];
-    }
-  }
-  return [];
-}
-
 export async function runProviderHost(
   input: RunnerInput,
   credential: RunnerCredential | null,
@@ -210,9 +157,9 @@ export function startProviderHostRun(
   validateRunnerInput(input);
   const normalizedProvider = input.workload.provider.trim().toLowerCase();
   const { environment, redact } = providerEnvironment(process.env, normalizedProvider, credential);
-  const state: ProviderState = { text: [], model: input.workload.model ?? undefined };
   const hasDurableHistory = (input.workload.conversationHistory?.length ?? 0) > 0;
   const prompt = hasDurableHistory ? reconstructedPrompt(input) : input.workload.inputText;
+  const interactive = options.interactive ?? true;
   if (normalizedProvider === "codex") {
     return startCodexAppServerRun({
       input,
@@ -220,119 +167,19 @@ export function startProviderHostRun(
       redact,
       emit,
       authoritativePrompt: prompt,
-      interactive: options.interactive ?? true,
+      interactive,
     });
   }
-  const command = providerCommand(input, normalizedProvider);
-  const spawnOptions = {
-    cwd: input.workspaceDirectory,
-    env: environment,
-    stdio: ["pipe", "pipe", "pipe"] as const,
-  };
-  const child = spawn(command.executable, command.arguments, spawnOptions);
-  let spawnError: Error | null = null;
-  let interrupted = false;
-  let exited = false;
-  let forceKillTimer: NodeJS.Timeout | undefined;
-  child.once("error", (error) => {
-    spawnError = error;
-  });
-  child.stdin.on("error", () => {
-    // A provider that exits before consuming stdin is reported through its
-    // process exit/error path below; never let EPIPE crash the host process.
-  });
-  const exitPromise = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
-    (resolve) => {
-      child.once("close", (code, signal) => resolve({ code, signal }));
-    },
-  );
-  let stderr = "";
-  child.stderr.setEncoding("utf8");
-  child.stderr.on("data", (chunk: string) => {
-    stderr = (stderr + redact(chunk)).slice(-(64 * 1024));
-  });
-  child.stdin.end(prompt);
-
-  const result = (async (): Promise<Extract<RunnerMessage, { type: "result" }>> => {
-    try {
-      const lines = createInterface({ input: child.stdout, crlfDelay: Infinity });
-      try {
-        for await (const line of lines) {
-          if (!line.trim()) continue;
-          let parsed: unknown;
-          try {
-            parsed = JSON.parse(line);
-          } catch {
-            throw new Error(`${command.label} emitted invalid JSONL`);
-          }
-          const messages = normalizeClaudeEvent(parsed, state, redact);
-          for (const message of messages) emit(message);
-        }
-      } catch (error) {
-        child.kill("SIGKILL");
-        await exitPromise;
-        throw error;
-      }
-      const exit = await exitPromise;
-      if (spawnError) throw spawnError;
-      if (interrupted) throw new ProviderInterruptedError();
-      if (exit.code !== 0) {
-        const detail = stderr.trim() || `${command.label} exited with code ${exit.code ?? "unknown"}`;
-        throw new Error(detail);
-      }
-      const output: Record<string, unknown> = {
-        provider: normalizedProvider === "claudeagent" ? "claudeAgent" : normalizedProvider,
-        model: state.model ?? null,
-        text: state.text.join(""),
-      };
-      return {
-        type: "result",
-        output,
-        ...(state.cursor ? { providerResumeCursor: state.cursor } : {}),
-      };
-    } finally {
-      exited = true;
-      if (forceKillTimer) clearTimeout(forceKillTimer);
-    }
-  })();
-
-  return {
-    result,
-    interrupt: () => {
-      if (exited || interrupted) return;
-      interrupted = true;
-      child.kill("SIGTERM");
-      forceKillTimer = setTimeout(() => {
-        if (!exited) child.kill("SIGKILL");
-      }, 2_000);
-      forceKillTimer.unref();
-    },
-  };
-}
-
-class ProviderInterruptedError extends Error {
-  constructor() {
-    super("Provider turn was interrupted.");
-    this.name = "ProviderInterruptedError";
-  }
-}
-
-function providerCommand(input: RunnerInput, provider: string) {
-  const model = input.workload.model?.trim();
-  const cursor = input.providerResumeCursor?.trim();
-  if (provider === "claude" || provider === "claudeagent") {
-    const args = [
-      "--print",
-      "--output-format",
-      "stream-json",
-      "--verbose",
-      "--no-chrome",
-      "--permission-mode",
-      "bypassPermissions",
-    ];
-    if (model) args.push("--model", model);
-    if (cursor && (input.workload.conversationHistory?.length ?? 0) === 0) args.push("--resume", cursor);
-    return { executable: "claude", arguments: args, label: "Claude" };
+  if (normalizedProvider === "claude" || normalizedProvider === "claudeagent") {
+    return startClaudeAgentSdkRun({
+      input,
+      environment,
+      redact,
+      emit,
+      authoritativePrompt: prompt,
+      interactive,
+      ...(options.claudeQueryFactory ? { queryFactory: options.claudeQueryFactory } : {}),
+    });
   }
   throw new Error(`Unsupported provider ${input.workload.provider}`);
 }
@@ -408,12 +255,6 @@ function collectSecretStrings(value: unknown): string[] {
   if (Array.isArray(value)) return value.flatMap(collectSecretStrings);
   if (isRecord(value)) return Object.values(value).flatMap(collectSecretStrings);
   return [];
-}
-
-function numericFields(value: Record<string, unknown>): Record<string, number> {
-  return Object.fromEntries(
-    Object.entries(value).filter((entry): entry is [string, number] => typeof entry[1] === "number"),
-  );
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

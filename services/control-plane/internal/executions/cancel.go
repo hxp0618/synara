@@ -71,7 +71,7 @@ func (s *Service) Cancel(
 		switch execution.Status {
 		case "cancelled":
 			return toExecution(execution), nil
-		case "completed", "failed":
+		case "completed", "failed", "interrupted":
 			return Execution{}, problem.New(409, "execution_terminal", "The execution already reached a terminal state.")
 		case "queued", "recovering", "leased", "running", "waiting-for-approval":
 		default:
@@ -98,6 +98,9 @@ func (s *Service) Cancel(
 			Where("tenant_id = ? AND session_id = ? AND id = ?", tenantID, execution.SessionID, execution.TurnID).
 			Updates(map[string]any{"status": "cancelled", "completed_at": now})
 		if err := expectOne(turnUpdate, 500, "turn_cancel_failed", "Failed to cancel the Turn."); err != nil {
+			return Execution{}, err
+		}
+		if err := supersedeControlCommands(ctx, tx, execution, uuid.Nil, "The Execution was cancelled before the Control command was acknowledged."); err != nil {
 			return Execution{}, err
 		}
 		appended, err = s.sessions.AppendInternalEvent(ctx, tx, tenantID, execution.SessionID, sessions.InternalEventInput{

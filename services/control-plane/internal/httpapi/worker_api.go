@@ -231,6 +231,66 @@ func (s *Server) handleInteractionResolutionDelivery(w http.ResponseWriter, r *h
 	writeOperation(w, result.Replayed, result.StatusCode, result.Value)
 }
 
+func (s *Server) pullControlCommands(w http.ResponseWriter, r *http.Request) {
+	executionID, ok := s.pathUUID(w, r, "executionID")
+	if !ok {
+		return
+	}
+	var input executions.PullControlCommandsInput
+	if err := decodeJSON(r, &input); err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	items, err := s.executions.PullControlCommands(r.Context(), mustWorker(r), executionID, input)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+func (s *Server) markControlCommandDelivered(w http.ResponseWriter, r *http.Request) {
+	s.handleControlCommandDelivery(w, r, false)
+}
+
+func (s *Server) acknowledgeControlCommand(w http.ResponseWriter, r *http.Request) {
+	s.handleControlCommandDelivery(w, r, true)
+}
+
+func (s *Server) handleControlCommandDelivery(w http.ResponseWriter, r *http.Request, acknowledge bool) {
+	executionID, ok := s.pathUUID(w, r, "executionID")
+	if !ok {
+		return
+	}
+	controlCommandID, ok := s.pathUUID(w, r, "controlCommandID")
+	if !ok {
+		return
+	}
+	var input executions.ControlCommandDeliveryInput
+	if err := decodeJSON(r, &input); err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	var (
+		result executions.OperationResult[executions.ControlCommand]
+		err    error
+	)
+	if acknowledge {
+		result, err = s.executions.AcknowledgeControlCommand(
+			r.Context(), mustWorker(r), executionID, controlCommandID, input, requestID(r),
+		)
+	} else {
+		result, err = s.executions.MarkControlCommandDelivered(
+			r.Context(), mustWorker(r), executionID, controlCommandID, input, requestID(r),
+		)
+	}
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	writeOperation(w, result.Replayed, result.StatusCode, result.Value)
+}
+
 func (s *Server) requireWorker(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		worker, err := s.executions.Authenticate(r.Context(), bearerToken(r))

@@ -5703,6 +5703,11 @@ export default function ChatView({
   }, [focusComposer, terminalState.workspaceActiveTab, terminalWorkspaceOpen]);
 
   const onInterrupt = useCallback(async () => {
+    if (controlPlane.isAuthoritative) {
+      if (!activeThread || !controlPlane.capabilities.canInterruptExecution) return;
+      await controlPlane.interruptActiveTurn(activeThread.id);
+      return;
+    }
     const api = readNativeApi();
     if (!api || !activeThread) return;
     await api.orchestration.dispatchCommand({
@@ -5711,7 +5716,7 @@ export default function ChatView({
       threadId: activeThread.id,
       createdAt: new Date().toISOString(),
     });
-  }, [activeThread]);
+  }, [activeThread, controlPlane]);
 
   useEffect(() => {
     if (surfaceMode === "split" && !isFocusedPane) {
