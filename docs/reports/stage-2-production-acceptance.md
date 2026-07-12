@@ -2,7 +2,8 @@
 
 - Date: 2026-07-13
 - Branch: `codex/saas-tenancy-user`
-- Baseline commit: `425554e6`
+- Implementation baseline commit: `425554e6`
+- Final verification base: `702cb0d0` plus the Settings route chunk-warming fix described below
 - Scope: Web authority cutover, local fallback, single-node/multi-replica operations, dependency failures,
   Kubernetes rollout and sensitive-log boundaries
 - Result: PASS for repository-controlled and MinIO/S3-compatible evidence
@@ -18,7 +19,9 @@ SaaS browser flow verified:
 4. Worker Claim/Start/Runtime Event/Complete produced visible SSE output.
 5. Reload restored Project, Session and transcript from PostgreSQL.
 6. A delayed local Snapshot could not overwrite the Control Plane Projection.
-7. The browser remained stable beyond the local recap delay and emitted no relevant console warning/error.
+7. Settings idle warming now loads only the generated route chunk instead of creating a speculative Route Match.
+   The persisted thread was reloaded and Settings was opened in three fresh tabs after idle warming; all runs had
+   no relevant console warning/error.
 
 Local-mode browser flow verified at `http://localhost:9893/` with an isolated Home and ports:
 
@@ -85,6 +88,12 @@ Verified:
   migration locking, replica loss and global SSE connection leases.
 - Focused Web tests cover Control Plane Context, authoritative Projection and local recap isolation.
 - Go tests cover Runtime Event v1 version/object/65,536-byte boundaries and Artifact fallback.
+
+Final verification after the browser route fix:
+
+- Go: `go test ./...` and `go test -race ./...` passed.
+- Server: 153 test files passed, 1 skipped; 1,707 tests passed, 6 skipped; build passed.
+- Web: 208 test files and 2,460 tests passed; build passed.
 
 ## External AWS S3 boundary
 

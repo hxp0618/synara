@@ -1,7 +1,7 @@
 # Stage 2 Drift Audit
 
-Baseline: `codex/saas-tenancy-user` at `425554e6`; status updated after Stage 2 Steps 0-7 implementation
-and repository-controlled acceptance on 2026-07-13.
+Baseline: `codex/saas-tenancy-user` at `425554e6`; status updated after Stage 2 Steps 0-7 implementation,
+repository-controlled acceptance, and the post-`702cb0d0` browser route verification on 2026-07-13.
 
 This audit classifies the productionization plan against executable code rather than plan status text.
 

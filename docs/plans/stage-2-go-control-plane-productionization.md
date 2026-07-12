@@ -801,6 +801,8 @@ errorCode
   Project/Session/Turn 主路径、SSE 到 Thread UI 的单向投影和 Control Plane Projection Authority 已完成。
 - [x] SaaS 浏览器闭环通过：登录、Context、Project、Session、Turn、Worker Event/Complete、SSE 输出和
   PostgreSQL 刷新恢复均正常；延迟本地 Snapshot 不会覆盖 SaaS Projection。
+- [x] Settings 空闲预热不再调用会创建临时 Match 的 `preloadRoute`，改为只加载生成的 Route Chunk；
+  三个全新浏览器标签在预热、导航和刷新后均无相关 TanStack Router Warning/Error。
 - [x] 未配置 Control Plane 的隔离本地实例通过：无登录门、可从真实路径创建 Project、刷新后从 SQLite
   Snapshot 恢复，Console 无相关错误。
 - [x] Step 7 部署与生产验收：Single-node、双副本 Compose、PVC-backed Kind 双副本、Pod 删除、数据库

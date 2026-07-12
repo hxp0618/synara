@@ -1,6 +1,14 @@
 import { useEffect } from "react";
 import { useRouter } from "@tanstack/react-router";
 
+import type { AppRouter } from "../router";
+
+type SettingsRouteChunkLoader = Pick<AppRouter, "loadRouteChunk" | "routesById">;
+
+export function preloadSettingsRouteChunk(router: SettingsRouteChunkLoader) {
+  return router.loadRouteChunk(router.routesById["/_chat/settings"]);
+}
+
 /** Warms the code-split settings route chunk once the browser is idle.
  *
  *  Settings is reached through programmatic `navigate()` calls (sidebar gear,
@@ -12,8 +20,8 @@ export function usePreloadSettingsRoute() {
 
   useEffect(() => {
     const preload = () => {
-      router.preloadRoute({ to: "/settings" }).catch(() => {
-        // Preloading is best-effort; navigation falls back to loading on demand.
+      preloadSettingsRouteChunk(router)?.catch(() => {
+        // Chunk warming is best-effort; navigation loads it on demand.
       });
     };
 
