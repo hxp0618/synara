@@ -6,22 +6,26 @@ import { createInterface } from "node:readline";
 import type { Readable } from "node:stream";
 
 import {
+  PROVIDER_CAPABILITY_CATALOG,
   PROVIDER_CAPABILITY_IDS,
   PROVIDER_HOST_MAX_COMMAND_BYTES,
   PROVIDER_HOST_MAX_MESSAGE_BYTES,
   PROVIDER_HOST_PROTOCOL_VERSION,
   ProviderHostCommandEnvelope,
+  type ProviderCapabilityCatalogEntry,
   type ProviderCapabilityMap,
-  type ProviderCapabilitySupport,
   type ProviderHostCommandEnvelope as ProviderHostCommand,
   type ProviderHostDescriptor,
   type ProviderHostError,
   type ProviderHostMessageEnvelope,
+  type ProviderHostProviderKind,
+  type ProviderRuntimeCompatibleRange,
+  type ProviderRuntimeDescriptor,
 } from "@synara/contracts/provider-host";
-import type { ProviderKind } from "@synara/contracts";
 import { PROVIDER_RUNTIME_EVENT_VERSION } from "@synara/contracts";
 import { Schema } from "effect";
 
+import providerHostPackage from "../package.json";
 import {
   startProviderHostRun,
   validateRunnerInput,
@@ -34,6 +38,24 @@ import { normalizeRuntimeEventV2 } from "./runtimeEventV2";
 
 const decodeCommand = Schema.decodeUnknownSync(ProviderHostCommandEnvelope);
 const HOST_BUILD_VERSION = process.env.SYNARA_PROVIDER_HOST_BUILD_VERSION?.trim() || "0.2.0-dev";
+const CLAUDE_AGENT_SDK_VERSION =
+  providerHostPackage.dependencies["@anthropic-ai/claude-agent-sdk"];
+
+export type CodexVersionProbeResult = {
+  readonly available: boolean;
+  readonly output?: string;
+};
+
+export type ProviderHostDescriptorOptions = {
+  readonly environment?: Readonly<Record<string, string | undefined>>;
+  readonly codexVersionProbe?: () => CodexVersionProbeResult;
+  readonly claudeSdkVersion?: string;
+  readonly hostBuildVersion?: string;
+};
+
+type ProviderDescriptorFactory = (
+  provider: ProviderHostProviderKind,
+) => ProviderHostDescriptor;
 
 type ProtocolState = {
   sessionInput: RunnerInput | null;
@@ -46,21 +68,25 @@ type ProtocolHandler = (
   command: ProviderHostCommand,
 ) => Promise<ReadonlyArray<ProviderHostMessageEnvelope>>;
 
-export function providerHostDescriptor(provider: ProviderKind): ProviderHostDescriptor {
-  const remote = provider === "codex" || provider === "claudeAgent";
+export function providerHostDescriptor(
+  provider: ProviderHostProviderKind,
+  options: ProviderHostDescriptorOptions = {},
+): ProviderHostDescriptor {
+  const catalogEntry = catalogEntryForProvider(provider);
+  const remote = catalogEntry.supportTier !== "local-only";
+  const runtime = runtimeDescriptor(catalogEntry, options);
   return {
     protocolVersion: PROVIDER_HOST_PROTOCOL_VERSION,
-    hostBuildVersion: HOST_BUILD_VERSION,
+    hostBuildVersion: options.hostBuildVersion?.trim() || HOST_BUILD_VERSION,
     capabilityDescriptor: {
       provider,
-      supportTier: remote ? "experimental" : "local-only",
-      adapterVersion:
-        provider === "codex"
-          ? "codex-app-server-v2"
-          : provider === "claudeAgent"
-            ? "claude-agent-sdk-v2"
-            : `${provider}-local-only`,
-      ...(remote ? { providerCliVersion: readProviderCliVersion(provider) } : {}),
+      supportTier: catalogEntry.supportTier,
+      adapterVersion: catalogEntry.adapterVersion,
+      ...(provider === "codex" && runtime.version
+        ? { providerCliVersion: runtime.version }
+        : {}),
+      runtime,
+      releasePolicy: releasePolicy(catalogEntry, options.environment ?? process.env),
       capabilities: capabilityMapForProvider(provider),
     },
     maximumCommandBytes: PROVIDER_HOST_MAX_COMMAND_BYTES,
@@ -76,60 +102,162 @@ export function providerHostDescriptor(provider: ProviderKind): ProviderHostDesc
   };
 }
 
-export function capabilityMapForProvider(provider: ProviderKind): ProviderCapabilityMap {
-  const capabilities = Object.fromEntries(
-    PROVIDER_CAPABILITY_IDS.map((capability) => [capability, "unsupported"]),
-  ) as Record<(typeof PROVIDER_CAPABILITY_IDS)[number], ProviderCapabilitySupport>;
+export function capabilityMapForProvider(
+  provider: ProviderHostProviderKind,
+): ProviderCapabilityMap {
+  const capabilities = catalogEntryForProvider(provider).capabilities;
+  return Object.fromEntries(
+    PROVIDER_CAPABILITY_IDS.map((capability) => [capability, capabilities[capability]]),
+  ) as ProviderCapabilityMap;
+}
 
-  if (provider === "codex") {
-    Object.assign(capabilities, {
-      discovery: "native",
-      "start-session": "native",
-      "resume-session": "native",
-      "send-turn": "native",
-      "steer-turn": "native",
-      "interrupt-turn": "native",
-      approval: "native",
-      "structured-user-input": "native",
-      "plan-mode": "native",
-      "read-history": "emulated",
-      "model-switch": "native",
-      "tool-events": "native",
-      "usage-events": "native",
-      "credential-injection": "native",
-      "authoritative-history-reconstruction": "emulated",
-      "worker-migration": "emulated",
-    } satisfies Partial<Record<(typeof PROVIDER_CAPABILITY_IDS)[number], ProviderCapabilitySupport>>);
+function catalogEntryForProvider(
+  provider: ProviderHostProviderKind,
+): ProviderCapabilityCatalogEntry {
+  const entry = PROVIDER_CAPABILITY_CATALOG.providers.find(
+    (candidate) => candidate.provider === provider,
+  );
+  if (!entry) throw new Error(`Provider capability catalog is missing ${provider}.`);
+  return entry;
+}
+
+function runtimeDescriptor(
+  entry: ProviderCapabilityCatalogEntry,
+  options: ProviderHostDescriptorOptions,
+): ProviderRuntimeDescriptor {
+  const policy = entry.runtimePolicy;
+  const compatibleRange = { ...policy.compatibleRange };
+
+  if (entry.provider === "codex") {
+    const probe = options.codexVersionProbe?.() ?? probeCodexVersion();
+    const version = extractStableSemver(probe.output ?? "");
+    return {
+      kind: policy.kind,
+      name: policy.name,
+      ...(version ? { version } : {}),
+      available: probe.available,
+      versionSource: policy.versionSource,
+      compatibleRange,
+      compatible:
+        probe.available && version !== undefined && isCompatibleVersion(version, compatibleRange),
+    };
   }
 
-  if (provider === "claudeAgent") {
-    Object.assign(capabilities, {
-      discovery: "native",
-      "start-session": "native",
-      "resume-session": "native",
-      "send-turn": "native",
-      "steer-turn": "native",
-      "interrupt-turn": "native",
-      approval: "native",
-      "structured-user-input": "native",
-      "plan-mode": "native",
-      "read-history": "emulated",
-      "model-switch": "native",
-      "tool-events": "native",
-      "usage-events": "native",
-      "credential-injection": "native",
-      "authoritative-history-reconstruction": "emulated",
-      "worker-migration": "emulated",
-    } satisfies Partial<Record<(typeof PROVIDER_CAPABILITY_IDS)[number], ProviderCapabilitySupport>>);
+  if (entry.provider === "claudeAgent") {
+    const declaredVersion = (options.claudeSdkVersion ?? CLAUDE_AGENT_SDK_VERSION).trim();
+    const version = extractStableSemver(declaredVersion);
+    const available = declaredVersion.length > 0;
+    return {
+      kind: policy.kind,
+      name: policy.name,
+      ...(version ? { version } : {}),
+      available,
+      versionSource: policy.versionSource,
+      compatibleRange,
+      compatible:
+        available && version !== undefined && isCompatibleVersion(version, compatibleRange),
+    };
   }
 
-  return capabilities;
+  const buildVersion = (options.hostBuildVersion ?? HOST_BUILD_VERSION).trim();
+  const available = buildVersion.length > 0;
+  return {
+    kind: policy.kind,
+    name: policy.name,
+    ...(available ? { version: buildVersion } : {}),
+    available,
+    versionSource: policy.versionSource,
+    compatibleRange,
+    compatible: available && isCompatibleVersion(buildVersion, compatibleRange),
+  };
+}
+
+function releasePolicy(
+  entry: ProviderCapabilityCatalogEntry,
+  environment: Readonly<Record<string, string | undefined>>,
+): ProviderHostDescriptor["capabilityDescriptor"]["releasePolicy"] {
+  const requiresExplicitEnablement = entry.supportTier === "experimental";
+  if (entry.supportTier === "local-only") {
+    return { requiresExplicitEnablement, enabled: true };
+  }
+  if (!requiresExplicitEnablement) {
+    return { requiresExplicitEnablement, enabled: true };
+  }
+  return {
+    requiresExplicitEnablement,
+    enabled: experimentalProviderAllowlist(environment).has(entry.provider),
+  };
+}
+
+function experimentalProviderAllowlist(
+  environment: Readonly<Record<string, string | undefined>>,
+): ReadonlySet<ProviderHostProviderKind> {
+  const providers = new Set<ProviderHostProviderKind>();
+  for (const token of (
+    environment.SYNARA_PROVIDER_HOST_EXPERIMENTAL_PROVIDERS ?? ""
+  ).split(",")) {
+    const normalized = token.trim().toLowerCase();
+    if (normalized === "codex") providers.add("codex");
+    if (normalized === "claude" || normalized === "claudeagent") {
+      providers.add("claudeAgent");
+    }
+  }
+  return providers;
+}
+
+function probeCodexVersion(): CodexVersionProbeResult {
+  const result = spawnSync("codex", ["--version"], {
+    encoding: "utf8",
+    timeout: 5_000,
+    env: { PATH: process.env.PATH, HOME: process.env.HOME },
+  });
+  const output = `${result.stdout ?? ""}\n${result.stderr ?? ""}`.trim();
+  return {
+    available: result.error === undefined && result.status !== null,
+    ...(output ? { output } : {}),
+  };
+}
+
+function extractStableSemver(value: string): string | undefined {
+  const match = /(?:^|[^0-9])(\d+\.\d+\.\d+)(?![0-9A-Za-z.+-])/.exec(value);
+  return match?.[1];
+}
+
+function isCompatibleVersion(
+  version: string,
+  range: ProviderRuntimeCompatibleRange,
+): boolean {
+  const parsed = parseSemver(version);
+  const minimum = parseSemver(range.minimumInclusive);
+  if (!parsed || !minimum || compareSemver(parsed, minimum) < 0) return false;
+  if (!range.maximumExclusive) return true;
+  const maximum = parseSemver(range.maximumExclusive);
+  return maximum !== undefined && compareSemver(parsed, maximum) < 0;
+}
+
+type Semver = readonly [major: number, minor: number, patch: number];
+
+function parseSemver(value: string): Semver | undefined {
+  const match = /^(\d+)\.(\d+)\.(\d+)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.exec(
+    value.trim(),
+  );
+  if (!match) return undefined;
+  return [Number(match[1]), Number(match[2]), Number(match[3])];
+}
+
+function compareSemver(left: Semver, right: Semver): number {
+  for (let index = 0; index < left.length; index += 1) {
+    const difference = left[index] - right[index];
+    if (difference !== 0) return difference;
+  }
+  return 0;
 }
 
 export function createProviderHostProtocolHandler(input: {
   credential: RunnerCredential | null;
   emit: (message: ProviderHostMessageEnvelope) => void;
   startRun?: typeof startProviderHostRun;
+  descriptorForProvider?: ProviderDescriptorFactory;
 }): ProtocolHandler {
   const state: ProtocolState = {
     sessionInput: null,
@@ -138,6 +266,7 @@ export function createProviderHostProtocolHandler(input: {
     terminalByCommandId: new Map(),
   };
   const startRun = input.startRun ?? startProviderHostRun;
+  const descriptorForProvider = input.descriptorForProvider ?? providerHostDescriptor;
 
   return async (command) => {
     const cached = state.terminalByCommandId.get(command.commandId);
@@ -158,9 +287,14 @@ export function createProviderHostProtocolHandler(input: {
       input.emit(message);
     };
 
-    const terminalPromise = executeCommand(command, state, input.credential, emit, startRun).catch(
-      (error) => errorMessage(command, classifyProviderHostError(error)),
-    );
+    const terminalPromise = executeCommand(
+      command,
+      state,
+      input.credential,
+      emit,
+      startRun,
+      descriptorForProvider,
+    ).catch((error) => errorMessage(command, classifyProviderHostError(error)));
     state.inFlightByCommandId.set(command.commandId, terminalPromise);
     const terminal = await terminalPromise;
     state.inFlightByCommandId.delete(command.commandId);
@@ -176,11 +310,15 @@ export async function runProviderHostProtocolV2(input: {
   credential: RunnerCredential | null;
   emit: (message: ProviderHostMessageEnvelope) => void;
   startRun?: typeof startProviderHostRun;
+  descriptorForProvider?: ProviderDescriptorFactory;
 }): Promise<void> {
   const handle = createProviderHostProtocolHandler({
     credential: input.credential,
     emit: input.emit,
     ...(input.startRun ? { startRun: input.startRun } : {}),
+    ...(input.descriptorForProvider
+      ? { descriptorForProvider: input.descriptorForProvider }
+      : {}),
   });
   const lines = createInterface({ input: input.source, crlfDelay: Infinity });
   const inFlight = new Set<Promise<ReadonlyArray<ProviderHostMessageEnvelope>>>();
@@ -253,30 +391,21 @@ async function executeCommand(
   credential: RunnerCredential | null,
   emit: (message: ProviderHostMessageEnvelope) => void,
   startRun: typeof startProviderHostRun,
+  descriptorForProvider: ProviderDescriptorFactory,
 ): Promise<ProviderHostMessageEnvelope> {
   assertCompatibleProtocol(command);
 
   switch (command.commandType) {
     case "Describe": {
       const provider = readProvider(command.payload.provider);
-      return resultMessage(command, { descriptor: providerHostDescriptor(provider) });
+      return resultMessage(command, { descriptor: descriptorForProvider(provider) });
     }
     case "StartSession":
     case "ResumeSession": {
       const runnerInput = readRunnerInput(command.payload.runnerInput);
       const provider = readProvider(runnerInput.workload.provider);
-      const descriptor = providerHostDescriptor(provider);
-      if (descriptor.capabilityDescriptor.supportTier === "local-only") {
-        throw new ProtocolFailure({
-          code: "capability_unsupported",
-          message: `${provider} is Local-only and cannot run in a remote Provider Host.`,
-          retryable: false,
-          requiresNewExecution: false,
-          requiresUserAction: true,
-          canReconstructFromHistory: false,
-          canMoveWorker: false,
-        });
-      }
+      const descriptor = descriptorForProvider(provider);
+      assertProviderExecutionAllowed(provider, descriptor);
       if (
         command.commandType === "ResumeSession" &&
         !runnerInput.providerResumeCursor?.trim() &&
@@ -439,6 +568,67 @@ async function executeCommand(
   }
 }
 
+function assertProviderExecutionAllowed(
+  provider: ProviderHostProviderKind,
+  descriptor: ProviderHostDescriptor,
+): void {
+  const capabilityDescriptor = descriptor.capabilityDescriptor;
+  if (capabilityDescriptor.supportTier === "local-only") {
+    throw new ProtocolFailure({
+      code: "capability_unsupported",
+      message: `${provider} is Local-only and cannot run in a remote Provider Host.`,
+      retryable: false,
+      requiresNewExecution: false,
+      requiresUserAction: true,
+      canReconstructFromHistory: false,
+      canMoveWorker: false,
+    });
+  }
+  if (
+    capabilityDescriptor.releasePolicy.requiresExplicitEnablement &&
+    !capabilityDescriptor.releasePolicy.enabled
+  ) {
+    throw new ProtocolFailure({
+      code: "capability_unsupported",
+      message: `${provider} remote execution is experimental and is not explicitly enabled on this Provider Host.`,
+      retryable: false,
+      requiresNewExecution: false,
+      requiresUserAction: true,
+      canReconstructFromHistory: true,
+      canMoveWorker: true,
+    });
+  }
+  if (!capabilityDescriptor.runtime.available) {
+    throw new ProtocolFailure({
+      code: "provider_not_installed",
+      message: `${capabilityDescriptor.runtime.name} is not available on this Provider Host.`,
+      retryable: false,
+      requiresNewExecution: false,
+      requiresUserAction: true,
+      canReconstructFromHistory: true,
+      canMoveWorker: true,
+    });
+  }
+  if (!capabilityDescriptor.runtime.compatible) {
+    const range = capabilityDescriptor.runtime.compatibleRange;
+    const maximum = range.maximumExclusive
+      ? ` and below ${range.maximumExclusive}`
+      : "";
+    const actual = capabilityDescriptor.runtime.version
+      ? `version ${capabilityDescriptor.runtime.version}`
+      : "version could not be verified";
+    throw new ProtocolFailure({
+      code: "provider_version_incompatible",
+      message: `${capabilityDescriptor.runtime.name} ${actual}; this Host requires ${range.minimumInclusive} or newer${maximum}.`,
+      retryable: false,
+      requiresNewExecution: false,
+      requiresUserAction: true,
+      canReconstructFromHistory: true,
+      canMoveWorker: true,
+    });
+  }
+}
+
 function requireActiveTurn(
   state: ProtocolState,
   commandType: ProviderHostCommand["commandType"],
@@ -536,7 +726,7 @@ function readRunnerInput(value: unknown): RunnerInput {
   return input;
 }
 
-function readProvider(value: unknown): ProviderKind {
+function readProvider(value: unknown): ProviderHostProviderKind {
   if (typeof value !== "string") throw new Error("provider is required");
   const normalized = value.trim().toLowerCase();
   if (normalized === "claude") return "claudeAgent";
@@ -561,17 +751,6 @@ function readProvider(value: unknown): ProviderKind {
     canReconstructFromHistory: false,
     canMoveWorker: false,
   });
-}
-
-function readProviderCliVersion(provider: "codex" | "claudeAgent"): string {
-  const executable = provider === "codex" ? "codex" : "claude";
-  const result = spawnSync(executable, ["--version"], {
-    encoding: "utf8",
-    timeout: 5_000,
-    env: { PATH: process.env.PATH, HOME: process.env.HOME },
-  });
-  const value = `${result.stdout ?? ""}\n${result.stderr ?? ""}`.trim();
-  return value || "unavailable";
 }
 
 function payloadMessage(

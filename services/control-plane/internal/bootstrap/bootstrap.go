@@ -2,6 +2,7 @@ package bootstrap
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -44,10 +45,10 @@ func Ensure(ctx context.Context, db *gorm.DB, profile platform.DeploymentProfile
 			return nil
 		}
 		result.ExecutionTargetID = deterministicID(installationID, "platform-local-target")
-		return createDoNothing(tx, &persistence.ExecutionTarget{
+		return ensureBuiltInLocalExecutionTarget(ctx, tx, persistence.ExecutionTarget{
 			ID: result.ExecutionTargetID, Kind: string(platform.TargetLocal), Name: "platform-local",
 			Status: "active", ConfigurationEncrypted: []byte{},
-			Capabilities: map[string]any{"workspaceModes": []string{"local", "worktree"}},
+			Capabilities: builtInLocalTargetCapabilities(),
 		})
 	})
 	if err != nil {
@@ -99,6 +100,12 @@ func personalResult(installationID string) Result {
 func ensurePersonalDomain(ctx context.Context, tx *gorm.DB, result Result) error {
 	now := time.Now().UTC()
 	suffix := strings.ReplaceAll(result.TenantID.String(), "-", "")[:12]
+	localTarget := persistence.ExecutionTarget{
+		ID: result.ExecutionTargetID, TenantID: &result.TenantID, OrganizationID: &result.OrganizationID,
+		Kind: string(platform.TargetLocal), Name: "local-default", Status: "active",
+		ConfigurationEncrypted: []byte{},
+		Capabilities:           builtInLocalTargetCapabilities(),
+	}
 	models := []any{
 		&persistence.User{
 			ID: result.UserID, Email: "local-owner@localhost.invalid", DisplayName: "Local Owner",
@@ -120,12 +127,6 @@ func ensurePersonalDomain(ctx context.Context, tx *gorm.DB, result Result) error
 			TenantID: result.TenantID, OrganizationID: result.OrganizationID, UserID: result.UserID,
 			Role: "owner", Status: "active",
 		},
-		&persistence.ExecutionTarget{
-			ID: result.ExecutionTargetID, TenantID: &result.TenantID, OrganizationID: &result.OrganizationID,
-			Kind: string(platform.TargetLocal), Name: "local-default", Status: "active",
-			ConfigurationEncrypted: []byte{},
-			Capabilities:           map[string]any{"workspaceModes": []string{"local", "worktree"}},
-		},
 		&persistence.AuditLog{
 			EventID:  deterministicID(result.InstallationID, "personal-bootstrap-audit"),
 			TenantID: result.TenantID, ActorType: "system", Action: "installation.personal_bootstrapped",
@@ -139,7 +140,55 @@ func ensurePersonalDomain(ctx context.Context, tx *gorm.DB, result Result) error
 			return err
 		}
 	}
+	if err := ensureBuiltInLocalExecutionTarget(ctx, tx, localTarget); err != nil {
+		return err
+	}
 	return validatePersonalDomain(ctx, tx, result)
+}
+
+func builtInLocalTargetCapabilities() map[string]any {
+	return map[string]any{
+		"workspaceModes": []string{"local", "worktree"},
+		"providerPolicy": map[string]any{
+			"experimentalProviders": []string{"codex", "claudeAgent"},
+		},
+	}
+}
+
+func ensureBuiltInLocalExecutionTarget(
+	ctx context.Context,
+	tx *gorm.DB,
+	target persistence.ExecutionTarget,
+) error {
+	if err := createDoNothing(tx.WithContext(ctx), &target); err != nil {
+		return err
+	}
+	var persisted persistence.ExecutionTarget
+	if err := tx.WithContext(ctx).Where("id = ?", target.ID).Take(&persisted).Error; err != nil {
+		return err
+	}
+	capabilities := make(map[string]any, len(persisted.Capabilities)+2)
+	for key, value := range persisted.Capabilities {
+		capabilities[key] = value
+	}
+	defaults := builtInLocalTargetCapabilities()
+	if _, found := capabilities["workspaceModes"]; !found {
+		capabilities["workspaceModes"] = defaults["workspaceModes"]
+	}
+	capabilities["providerPolicy"] = defaults["providerPolicy"]
+	currentJSON, err := json.Marshal(persisted.Capabilities)
+	if err != nil {
+		return err
+	}
+	nextJSON, err := json.Marshal(capabilities)
+	if err != nil {
+		return err
+	}
+	if string(currentJSON) == string(nextJSON) {
+		return nil
+	}
+	persisted.Capabilities = capabilities
+	return tx.WithContext(ctx).Model(&persisted).Select("capabilities").Updates(&persisted).Error
 }
 
 func validatePersonalDomain(ctx context.Context, tx *gorm.DB, result Result) error {

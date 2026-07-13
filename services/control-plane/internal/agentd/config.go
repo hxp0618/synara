@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -18,30 +19,35 @@ import (
 )
 
 type Config struct {
-	ControlPlaneURL     *url.URL
-	RegistrationToken   string
-	ExecutionTargetID   uuid.UUID
-	AssignedExecutionID *uuid.UUID
-	TargetKind          platform.ExecutionTargetKind
-	ClusterID           string
-	Namespace           string
-	PodName             string
-	InstanceUID         string
-	Version             string
-	BuildGitSHA         string
-	ImageDigest         string
-	Capabilities        map[string]any
-	RunnerCommand       []string
-	RunnerProtocol      RunnerProtocol
-	WorkspaceRoot       string
-	GitCacheRoot        string
-	PollInterval        time.Duration
-	HeartbeatInterval   time.Duration
-	LeaseRenewInterval  time.Duration
-	DrainTimeout        time.Duration
-	RequestTimeout      time.Duration
-	ArtifactTimeout     time.Duration
-	RunnerMessageBytes  int
+	ControlPlaneURL       *url.URL
+	RegistrationToken     string
+	ExecutionTargetID     uuid.UUID
+	AssignedExecutionID   *uuid.UUID
+	TargetKind            platform.ExecutionTargetKind
+	ClusterID             string
+	Namespace             string
+	PodName               string
+	InstanceUID           string
+	Version               string
+	BuildGitSHA           string
+	ImageDigest           string
+	Capabilities          map[string]any
+	ExperimentalProviders []string
+	RunnerCommand         []string
+	RunnerProtocol        RunnerProtocol
+	WorkspaceRoot         string
+	GitCacheRoot          string
+	PollInterval          time.Duration
+	HeartbeatInterval     time.Duration
+	LeaseRenewInterval    time.Duration
+	DrainTimeout          time.Duration
+	RequestTimeout        time.Duration
+	ArtifactTimeout       time.Duration
+	RunnerMessageBytes    int
+}
+
+var stage3ProviderNames = []string{
+	"codex", "claudeAgent", "cursor", "gemini", "grok", "kilo", "opencode", "pi",
 }
 
 func LoadConfig() (Config, error) {
@@ -68,9 +74,13 @@ func LoadConfig() (Config, error) {
 	}
 	capabilities := map[string]any{}
 	if raw := strings.TrimSpace(os.Getenv("SYNARA_AGENTD_CAPABILITIES_JSON")); raw != "" {
-		if err := json.Unmarshal([]byte(raw), &capabilities); err != nil {
+		if err := json.Unmarshal([]byte(raw), &capabilities); err != nil || capabilities == nil {
 			return Config{}, errors.New("SYNARA_AGENTD_CAPABILITIES_JSON must be a JSON object")
 		}
+	}
+	experimentalProviders, err := parseExperimentalProviders(capabilities)
+	if err != nil {
+		return Config{}, err
 	}
 	workspaceRoot := strings.TrimSpace(os.Getenv("SYNARA_AGENTD_WORKSPACE_ROOT"))
 	if workspaceRoot == "" {
@@ -112,7 +122,8 @@ func LoadConfig() (Config, error) {
 		Version:      envDefault("SYNARA_AGENTD_VERSION", "dev"),
 		BuildGitSHA:  strings.TrimSpace(os.Getenv("SYNARA_AGENTD_BUILD_GIT_SHA")),
 		ImageDigest:  strings.TrimSpace(os.Getenv("SYNARA_AGENTD_IMAGE_DIGEST")),
-		Capabilities: capabilities, RunnerCommand: runnerCommand, RunnerProtocol: runnerProtocol,
+		Capabilities: capabilities, ExperimentalProviders: experimentalProviders,
+		RunnerCommand: runnerCommand, RunnerProtocol: runnerProtocol,
 		WorkspaceRoot: workspaceRoot, GitCacheRoot: gitCacheRoot,
 	}
 	if raw := strings.TrimSpace(os.Getenv("SYNARA_AGENTD_ASSIGNED_EXECUTION_ID")); raw != "" {
@@ -153,6 +164,54 @@ func LoadConfig() (Config, error) {
 		return Config{}, errors.New("agentd build Git SHA or image digest is invalid")
 	}
 	return cfg, nil
+}
+
+func parseExperimentalProviders(capabilities map[string]any) ([]string, error) {
+	rawPolicy, found := capabilities["providerPolicy"]
+	if !found {
+		return nil, nil
+	}
+	policy, ok := rawPolicy.(map[string]any)
+	if !ok || policy == nil {
+		return nil, errors.New("SYNARA_AGENTD_CAPABILITIES_JSON providerPolicy must be a JSON object")
+	}
+	rawProviders, found := policy["experimentalProviders"]
+	if !found {
+		return nil, nil
+	}
+	values, ok := rawProviders.([]any)
+	if !ok {
+		if typed, typedOK := rawProviders.([]string); typedOK {
+			values = make([]any, len(typed))
+			for index := range typed {
+				values[index] = typed[index]
+			}
+		} else {
+			return nil, errors.New("SYNARA_AGENTD_CAPABILITIES_JSON providerPolicy.experimentalProviders must be an array")
+		}
+	}
+	allowed := make(map[string]struct{}, len(stage3ProviderNames))
+	for _, provider := range stage3ProviderNames {
+		allowed[provider] = struct{}{}
+	}
+	result := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		provider, ok := value.(string)
+		if !ok || provider != strings.TrimSpace(provider) || provider == "" {
+			return nil, errors.New("SYNARA_AGENTD_CAPABILITIES_JSON providerPolicy.experimentalProviders contains an invalid Provider ID")
+		}
+		if _, ok := allowed[provider]; !ok {
+			return nil, fmt.Errorf("SYNARA_AGENTD_CAPABILITIES_JSON providerPolicy.experimentalProviders contains unknown Provider %q", provider)
+		}
+		if _, duplicate := seen[provider]; duplicate {
+			return nil, fmt.Errorf("SYNARA_AGENTD_CAPABILITIES_JSON providerPolicy.experimentalProviders contains duplicate Provider %q", provider)
+		}
+		seen[provider] = struct{}{}
+		result = append(result, provider)
+	}
+	sort.Strings(result)
+	return result, nil
 }
 
 func validBuildGitSHA(value string) bool {

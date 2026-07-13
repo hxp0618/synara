@@ -5,15 +5,29 @@
 import { Schema } from "effect";
 
 import { CommandId, IsoDateTime, NonNegativeInt, PositiveInt, TrimmedNonEmptyString } from "./baseSchemas";
-import { ProviderKind } from "./orchestration";
+import providerCapabilityCatalog from "./providerCapabilityCatalog.json";
 import {
   PROVIDER_RUNTIME_EVENT_VERSION,
   ProviderRuntimeEventType,
 } from "./providerRuntime";
 
-export const PROVIDER_HOST_PROTOCOL_VERSION = { major: 2, minor: 0 } as const;
+export const PROVIDER_HOST_PROTOCOL_VERSION = { major: 2, minor: 1 } as const;
 export const PROVIDER_HOST_MAX_COMMAND_BYTES = 2 * 1024 * 1024;
 export const PROVIDER_HOST_MAX_MESSAGE_BYTES = 1024 * 1024;
+
+export const PROVIDER_HOST_PROVIDER_KINDS = [
+  "codex",
+  "claudeAgent",
+  "cursor",
+  "gemini",
+  "grok",
+  "kilo",
+  "opencode",
+  "pi",
+] as const;
+
+export const ProviderHostProviderKind = Schema.Literals(PROVIDER_HOST_PROVIDER_KINDS);
+export type ProviderHostProviderKind = typeof ProviderHostProviderKind.Type;
 
 export const PROVIDER_CAPABILITY_IDS = [
   "discovery",
@@ -78,14 +92,69 @@ export const ProviderCapabilityMap = Schema.Record(
   .check(Schema.isMaxProperties(PROVIDER_CAPABILITY_IDS.length));
 export type ProviderCapabilityMap = typeof ProviderCapabilityMap.Type;
 
+export const ProviderRuntimeKind = Schema.Literals(["cli", "sdk", "local"]);
+export type ProviderRuntimeKind = typeof ProviderRuntimeKind.Type;
+
+export const ProviderRuntimeVersionSource = Schema.Literals(["probe", "package", "build"]);
+export type ProviderRuntimeVersionSource = typeof ProviderRuntimeVersionSource.Type;
+
+export const ProviderRuntimeCompatibleRange = Schema.Struct({
+  minimumInclusive: TrimmedNonEmptyString,
+  maximumExclusive: Schema.optional(TrimmedNonEmptyString),
+});
+export type ProviderRuntimeCompatibleRange = typeof ProviderRuntimeCompatibleRange.Type;
+
+export const ProviderRuntimeDescriptor = Schema.Struct({
+  kind: ProviderRuntimeKind,
+  name: TrimmedNonEmptyString,
+  version: Schema.optional(TrimmedNonEmptyString),
+  available: Schema.Boolean,
+  versionSource: ProviderRuntimeVersionSource,
+  compatibleRange: ProviderRuntimeCompatibleRange,
+  compatible: Schema.Boolean,
+});
+export type ProviderRuntimeDescriptor = typeof ProviderRuntimeDescriptor.Type;
+
+export const ProviderReleasePolicy = Schema.Struct({
+  requiresExplicitEnablement: Schema.Boolean,
+  enabled: Schema.Boolean,
+});
+export type ProviderReleasePolicy = typeof ProviderReleasePolicy.Type;
+
 export const ProviderCapabilityDescriptor = Schema.Struct({
-  provider: ProviderKind,
+  provider: ProviderHostProviderKind,
   supportTier: ProviderSupportTier,
   adapterVersion: TrimmedNonEmptyString,
   providerCliVersion: Schema.optional(TrimmedNonEmptyString),
+  runtime: ProviderRuntimeDescriptor,
+  releasePolicy: ProviderReleasePolicy,
   capabilities: ProviderCapabilityMap,
 });
 export type ProviderCapabilityDescriptor = typeof ProviderCapabilityDescriptor.Type;
+
+export type ProviderCapabilityCatalogRuntimePolicy = {
+  readonly kind: ProviderRuntimeKind;
+  readonly name: string;
+  readonly versionSource: ProviderRuntimeVersionSource;
+  readonly compatibleRange: ProviderRuntimeCompatibleRange;
+};
+
+export type ProviderCapabilityCatalogEntry = {
+  readonly provider: ProviderHostProviderKind;
+  readonly supportTier: ProviderSupportTier;
+  readonly adapterVersion: string;
+  readonly runtimePolicy: ProviderCapabilityCatalogRuntimePolicy;
+  readonly capabilities: ProviderCapabilityMap;
+};
+
+export type ProviderCapabilityCatalog = {
+  readonly version: 1;
+  readonly capabilityIds: ReadonlyArray<ProviderCapabilityId>;
+  readonly providers: ReadonlyArray<ProviderCapabilityCatalogEntry>;
+};
+
+export const PROVIDER_CAPABILITY_CATALOG =
+  providerCapabilityCatalog as ProviderCapabilityCatalog;
 
 export const ProviderCredentialDeliveryMode = Schema.Literals(["anonymous-fd"]);
 export type ProviderCredentialDeliveryMode = typeof ProviderCredentialDeliveryMode.Type;

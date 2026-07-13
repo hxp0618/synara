@@ -5,7 +5,9 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -55,6 +57,55 @@ func TestLocalSupervisorPassesGitCacheRootToDaemon(t *testing.T) {
 	supervisor.Run(ctx)
 	if captured.GitCacheRoot != input.GitCacheRoot {
 		t.Fatalf("daemon received Git cache root %q, want %q", captured.GitCacheRoot, input.GitCacheRoot)
+	}
+}
+
+func TestLocalSupervisorPassesTargetProviderPolicyToDaemon(t *testing.T) {
+	input := validLocalSupervisorInput(t.TempDir())
+	input.Capabilities = map[string]any{
+		"workspaceModes": []string{"local", "worktree"},
+		"providerPolicy": map[string]any{
+			"experimentalProviders": []string{"codex", "claudeAgent"},
+		},
+	}
+	supervisor, err := NewLocalSupervisor(input, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(supervisor.config.ExperimentalProviders, []string{"claudeAgent", "codex"}) {
+		t.Fatalf("local agentd Provider policy = %v", supervisor.config.ExperimentalProviders)
+	}
+	policy := supervisor.config.Capabilities["providerPolicy"].(map[string]any)
+	if !slices.Equal(policy["experimentalProviders"].([]string), []string{"codex", "claudeAgent"}) {
+		t.Fatalf("local agentd capabilities lost the target Provider policy: %#v", supervisor.config.Capabilities)
+	}
+}
+
+func TestLocalSupervisorProviderPolicyEnablesProviderHostDescriptors(t *testing.T) {
+	t.Setenv("GO_WANT_PROVIDER_HOST_HELPER", "1")
+	t.Setenv("PROVIDER_HOST_TEST_MODE", "success")
+	input := validLocalSupervisorInput(t.TempDir())
+	input.RunnerCommand = []string{os.Args[0], "-test.run=TestProviderHostV2HelperProcess", "--"}
+	input.Capabilities = map[string]any{
+		"providerPolicy": map[string]any{
+			"experimentalProviders": []string{"codex", "claudeAgent"},
+		},
+	}
+	supervisor, err := NewLocalSupervisor(input, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	summary, err := NewRunner(supervisor.config).CapabilitySummary(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	providers := summary["providers"].(map[string]any)
+	for _, provider := range []string{"codex", "claudeAgent"} {
+		descriptor := providers[provider].(providerHostDescriptor)
+		if descriptor.CapabilityDescriptor.ReleasePolicy == nil ||
+			!descriptor.CapabilityDescriptor.ReleasePolicy.Enabled {
+			t.Fatalf("local Provider %s was not enabled by the target policy: %#v", provider, descriptor)
+		}
 	}
 }
 

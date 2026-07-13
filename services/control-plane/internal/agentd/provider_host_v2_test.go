@@ -421,8 +421,147 @@ func TestRunnerCapabilitySummaryUsesProviderHostDescribe(t *testing.T) {
 	}
 	codex, ok := providers["codex"].(providerHostDescriptor)
 	if !ok || codex.RuntimeEventVersions.Minimum != providerHostRuntimeEventVersion ||
-		codex.RuntimeEventVersions.Maximum != providerHostRuntimeEventVersion {
+		codex.RuntimeEventVersions.Maximum != providerHostRuntimeEventVersion || codex.ProtocolVersion.Minor < 1 ||
+		codex.CapabilityDescriptor.Runtime == nil || codex.CapabilityDescriptor.ReleasePolicy == nil ||
+		!codex.CapabilityDescriptor.ReleasePolicy.Enabled {
 		t.Fatalf("Provider Host summary advertised an unexpected Runtime Event range: %#v", providers["codex"])
+	}
+}
+
+func TestRunnerProviderHostV2ExperimentalProviderDefaultsDisabled(t *testing.T) {
+	t.Setenv("GO_WANT_PROVIDER_HOST_HELPER", "1")
+	t.Setenv("PROVIDER_HOST_TEST_MODE", "success")
+	commandLog := filepath.Join(t.TempDir(), "commands.log")
+	t.Setenv("PROVIDER_HOST_TEST_COMMAND_LOG", commandLog)
+
+	_, err := providerHostV2TestRunnerWithExperimental().Run(
+		context.Background(), providerHostV2TestInput(t), nil,
+		func(context.Context, RunnerMessage) error { return nil },
+	)
+	if runnerFailureCode(err) != "capability_unsupported" {
+		t.Fatalf("disabled experimental Provider returned %v", err)
+	}
+	commands, readErr := os.ReadFile(commandLog)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(commands) != "Describe\n" {
+		t.Fatalf("disabled experimental Provider ran before rejection: %q", commands)
+	}
+}
+
+func TestRunnerProviderHostV2ExplicitEnablementOverridesInheritedEnvironment(t *testing.T) {
+	t.Setenv("GO_WANT_PROVIDER_HOST_HELPER", "1")
+	t.Setenv("PROVIDER_HOST_TEST_MODE", "success")
+	t.Setenv(providerHostExperimentalEnv, "pi")
+
+	result, err := providerHostV2TestRunner().Run(
+		context.Background(), providerHostV2TestInput(t), nil,
+		func(context.Context, RunnerMessage) error { return nil },
+	)
+	if err != nil || result.Output["text"] != "done" {
+		t.Fatalf("explicit experimental Provider policy was not injected: result=%#v err=%v", result, err)
+	}
+}
+
+func TestRunnerCapabilitySummaryRejectsProviderPolicyMismatch(t *testing.T) {
+	t.Setenv("GO_WANT_PROVIDER_HOST_HELPER", "1")
+	t.Setenv("PROVIDER_HOST_TEST_MODE", "policy-mismatch")
+
+	_, err := providerHostV2TestRunner().CapabilitySummary(context.Background())
+	if runnerFailureCode(err) != "provider_version_incompatible" {
+		t.Fatalf("Provider policy mismatch returned %v", err)
+	}
+}
+
+func TestRunnerProviderHostV2RejectsInvalidRuntimeState(t *testing.T) {
+	for _, test := range []struct {
+		mode string
+		code string
+	}{
+		{mode: "runtime-unavailable", code: "provider_not_installed"},
+		{mode: "runtime-incompatible", code: "provider_version_incompatible"},
+		{mode: "runtime-version-unreported", code: "provider_version_incompatible"},
+		{mode: "runtime-missing-version", code: "protocol_violation"},
+	} {
+		t.Run(test.mode, func(t *testing.T) {
+			t.Setenv("GO_WANT_PROVIDER_HOST_HELPER", "1")
+			t.Setenv("PROVIDER_HOST_TEST_MODE", test.mode)
+			_, err := providerHostV2TestRunner().Run(
+				context.Background(), providerHostV2TestInput(t), nil,
+				func(context.Context, RunnerMessage) error { return nil },
+			)
+			if runnerFailureCode(err) != test.code {
+				t.Fatalf("runtime mode %s returned %v", test.mode, err)
+			}
+		})
+	}
+}
+
+func TestRunnerCapabilitySummaryPreservesClaudeSDKRuntime(t *testing.T) {
+	t.Setenv("GO_WANT_PROVIDER_HOST_HELPER", "1")
+	t.Setenv("PROVIDER_HOST_TEST_MODE", "success")
+
+	summary, err := providerHostV2TestRunner().CapabilitySummary(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	providers := summary["providers"].(map[string]any)
+	claude := providers["claudeAgent"].(providerHostDescriptor)
+	runtime := claude.CapabilityDescriptor.Runtime
+	if runtime == nil || runtime.Kind != "sdk" ||
+		runtime.Name != "@anthropic-ai/claude-agent-sdk" || runtime.VersionSource != "package" ||
+		runtime.Version == nil || *runtime.Version != "0.3.207" || !runtime.Compatible {
+		t.Fatalf("Claude SDK runtime metadata was not preserved: %#v", runtime)
+	}
+}
+
+func TestRunnerCapabilitySummaryRequiresNestedRuntimePolicy(t *testing.T) {
+	t.Setenv("GO_WANT_PROVIDER_HOST_HELPER", "1")
+	t.Setenv("PROVIDER_HOST_TEST_MODE", "root-runtime-policy")
+
+	_, err := providerHostV2TestRunner().CapabilitySummary(context.Background())
+	if runnerFailureCode(err) != "protocol_violation" {
+		t.Fatalf("root-level runtime policy returned %v", err)
+	}
+}
+
+func TestRunnerCapabilitySummaryRequiresNonExperimentalProvidersEnabled(t *testing.T) {
+	for _, test := range []struct {
+		mode    string
+		wantErr bool
+	}{
+		{mode: "local-only-policy-enabled"},
+		{mode: "local-only-policy-disabled", wantErr: true},
+	} {
+		t.Run(test.mode, func(t *testing.T) {
+			t.Setenv("GO_WANT_PROVIDER_HOST_HELPER", "1")
+			t.Setenv("PROVIDER_HOST_TEST_MODE", test.mode)
+
+			_, err := providerHostV2TestRunner().CapabilitySummary(context.Background())
+			if test.wantErr {
+				if runnerFailureCode(err) != "provider_version_incompatible" {
+					t.Fatalf("disabled non-experimental Provider returned %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("enabled non-experimental Provider returned %v", err)
+			}
+		})
+	}
+}
+
+func TestRunnerProviderHostV2ExperimentalProtocol20FailsClosed(t *testing.T) {
+	t.Setenv("GO_WANT_PROVIDER_HOST_HELPER", "1")
+	t.Setenv("PROVIDER_HOST_TEST_MODE", "protocol-2.0")
+
+	_, err := providerHostV2TestRunner().Run(
+		context.Background(), providerHostV2TestInput(t), nil,
+		func(context.Context, RunnerMessage) error { return nil },
+	)
+	if runnerFailureCode(err) != "provider_version_incompatible" {
+		t.Fatalf("experimental Provider Host 2.0 did not fail closed: %v", err)
 	}
 }
 
@@ -447,16 +586,33 @@ func TestRunnerProviderHostV2BuiltHostIntegration(t *testing.T) {
 	for _, provider := range providerHostProviders {
 		descriptor, ok := providers[provider].(providerHostDescriptor)
 		if !ok || descriptor.ProtocolVersion.Major != providerHostProtocolMajor ||
+			descriptor.ProtocolVersion.Minor < providerHostProtocolMinor ||
 			descriptor.RuntimeEventVersions.Minimum > providerHostRuntimeEventVersion ||
-			descriptor.RuntimeEventVersions.Maximum < providerHostRuntimeEventVersion {
+			descriptor.RuntimeEventVersions.Maximum < providerHostRuntimeEventVersion ||
+			descriptor.CapabilityDescriptor.Runtime == nil ||
+			descriptor.CapabilityDescriptor.ReleasePolicy == nil {
 			t.Fatalf("built Provider Host descriptor for %s is incompatible: %#v", provider, providers[provider])
 		}
 		if provider == "codex" || provider == "claudeAgent" {
 			if descriptor.CapabilityDescriptor.Capabilities["send-turn"] != "native" {
 				t.Fatalf("remote Provider %s omitted send-turn: %#v", provider, descriptor)
 			}
+			if !descriptor.CapabilityDescriptor.ReleasePolicy.RequiresExplicitEnablement ||
+				descriptor.CapabilityDescriptor.ReleasePolicy.Enabled {
+				t.Fatalf("experimental Provider %s advertised an invalid release policy: %#v", provider, descriptor)
+			}
 		} else if descriptor.CapabilityDescriptor.SupportTier != "local-only" {
 			t.Fatalf("Provider %s was not kept Local-only: %#v", provider, descriptor)
+		} else if descriptor.CapabilityDescriptor.ReleasePolicy.RequiresExplicitEnablement ||
+			!descriptor.CapabilityDescriptor.ReleasePolicy.Enabled {
+			t.Fatalf("Local-only Provider %s advertised an invalid release policy: %#v", provider, descriptor)
+		}
+		if provider == "claudeAgent" {
+			runtime := descriptor.CapabilityDescriptor.Runtime
+			if runtime.Kind != "sdk" || runtime.Name != "@anthropic-ai/claude-agent-sdk" ||
+				runtime.VersionSource != "package" {
+				t.Fatalf("Claude Provider did not advertise its SDK runtime: %#v", runtime)
+			}
 		}
 	}
 }
@@ -481,10 +637,19 @@ func TestParseRunnerProtocolRequiresExplicitLegacyMode(t *testing.T) {
 }
 
 func providerHostV2TestRunner() *Runner {
+	return providerHostV2TestRunnerWithExperimental("codex", "claudeAgent")
+}
+
+func providerHostV2TestRunnerWithExperimental(providers ...string) *Runner {
+	experimentalProviders := make(map[string]struct{}, len(providers))
+	for _, provider := range providers {
+		experimentalProviders[provider] = struct{}{}
+	}
 	return &Runner{
-		command:         []string{os.Args[0], "-test.run=TestProviderHostV2HelperProcess", "--"},
-		maxMessageBytes: 1 << 20,
-		protocol:        RunnerProtocolV2,
+		command:               []string{os.Args[0], "-test.run=TestProviderHostV2HelperProcess", "--"},
+		maxMessageBytes:       1 << 20,
+		protocol:              RunnerProtocolV2,
+		experimentalProviders: experimentalProviders,
 	}
 }
 
@@ -509,6 +674,49 @@ func providerHostTestRuntimeEventVersions(mode string) map[string]any {
 		return map[string]any{"minimum": 1, "maximum": 1}
 	}
 	return map[string]any{"minimum": 2, "maximum": 2}
+}
+
+func providerHostTestRuntime(provider, mode string) map[string]any {
+	runtime := map[string]any{
+		"kind": "cli", "name": provider, "version": "1.2.3", "available": true,
+		"versionSource": "probe",
+		"compatibleRange": map[string]any{
+			"minimumInclusive": "1.0.0", "maximumExclusive": "2.0.0",
+		},
+		"compatible": true,
+	}
+	if provider == "claudeAgent" {
+		runtime["kind"] = "sdk"
+		runtime["name"] = "@anthropic-ai/claude-agent-sdk"
+		runtime["version"] = "0.3.207"
+		runtime["versionSource"] = "package"
+		runtime["compatibleRange"] = map[string]any{
+			"minimumInclusive": "0.3.0", "maximumExclusive": "0.4.0",
+		}
+	}
+	switch mode {
+	case "runtime-unavailable":
+		runtime["available"] = false
+		runtime["compatible"] = false
+		delete(runtime, "version")
+	case "runtime-incompatible":
+		runtime["compatible"] = false
+	case "runtime-version-unreported":
+		runtime["compatible"] = false
+		delete(runtime, "version")
+	case "runtime-missing-version":
+		delete(runtime, "version")
+	}
+	return runtime
+}
+
+func providerHostTestExperimentalProviderEnabled(provider string) bool {
+	for _, enabled := range strings.Split(os.Getenv(providerHostExperimentalEnv), ",") {
+		if strings.TrimSpace(enabled) == provider {
+			return true
+		}
+	}
+	return false
 }
 
 func TestProviderHostV2HelperProcess(t *testing.T) {
@@ -572,19 +780,50 @@ func TestProviderHostV2HelperProcess(t *testing.T) {
 			if mode == "incompatible-major" {
 				major = 3
 			}
+			minor := providerHostProtocolMinor
+			if mode == "protocol-2.0" {
+				minor = 0
+			}
+			supportTier := "experimental"
+			requiresExplicitEnablement := true
+			enabled := providerHostTestExperimentalProviderEnabled(provider)
+			if mode == "local-only-policy-enabled" || mode == "local-only-policy-disabled" {
+				supportTier = "local-only"
+				requiresExplicitEnablement = false
+				enabled = mode == "local-only-policy-enabled"
+			}
+			if mode == "policy-mismatch" {
+				enabled = !enabled
+			}
+			capabilityDescriptor := map[string]any{
+				"provider": provider, "supportTier": supportTier, "adapterVersion": "test-adapter",
+				"providerCliVersion": "test-cli", "capabilities": capabilities,
+			}
+			descriptor := map[string]any{
+				"protocolVersion":  map[string]any{"major": major, "minor": minor, "futureMinorField": true},
+				"hostBuildVersion": "test-host", "maximumCommandBytes": providerHostCommandLimit,
+				"maximumMessageBytes":     1 << 20,
+				"runtimeEventVersions":    providerHostTestRuntimeEventVersions(mode),
+				"credentialDeliveryModes": []string{"anonymous-fd"},
+				"resumeStrategies":        []string{"native-cursor", "authoritative-history"},
+				"capabilityDescriptor":    capabilityDescriptor,
+			}
+			if minor >= 1 {
+				runtime := providerHostTestRuntime(provider, mode)
+				releasePolicy := map[string]any{
+					"requiresExplicitEnablement": requiresExplicitEnablement,
+					"enabled":                    enabled,
+				}
+				if mode == "root-runtime-policy" {
+					descriptor["runtime"] = runtime
+					descriptor["releasePolicy"] = releasePolicy
+				} else {
+					capabilityDescriptor["runtime"] = runtime
+					capabilityDescriptor["releasePolicy"] = releasePolicy
+				}
+			}
 			emitProviderHostTestMessage(encoder, command, "Result", map[string]any{
-				"descriptor": map[string]any{
-					"protocolVersion":  map[string]any{"major": major, "minor": 7, "futureMinorField": true},
-					"hostBuildVersion": "test-host", "maximumCommandBytes": providerHostCommandLimit,
-					"maximumMessageBytes":     1 << 20,
-					"runtimeEventVersions":    providerHostTestRuntimeEventVersions(mode),
-					"credentialDeliveryModes": []string{"anonymous-fd"},
-					"resumeStrategies":        []string{"native-cursor", "authoritative-history"},
-					"capabilityDescriptor": map[string]any{
-						"provider": provider, "supportTier": "experimental", "adapterVersion": "test-adapter",
-						"providerCliVersion": "test-cli", "capabilities": capabilities,
-					},
-				},
+				"descriptor": descriptor,
 			}, nil)
 		case "StartSession", "ResumeSession":
 			if version, ok := integerField(command.Payload, "runtimeEventVersion"); !ok || version != 2 {

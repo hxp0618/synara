@@ -46,6 +46,21 @@ describe("resolveControlPlaneCapabilities", () => {
     expect(capabilities.canCreateTurn).toBe(true);
     expect(capabilities.canSteerExecution).toBe(true);
     expect(capabilities.canInterruptExecution).toBe(true);
+    expect(capabilities.canReadExecutionTargets).toBe(true);
+  });
+
+  it("keeps execution targets and Worker manifests behind worker.read", () => {
+    const auditor = resolveControlPlaneCapabilities({
+      tenant: tenant("auditor"),
+      organization: organization(null),
+    });
+    const securityAdministrator = resolveControlPlaneCapabilities({
+      tenant: tenant("security_admin"),
+      organization: organization(null),
+    });
+
+    expect(auditor.canReadExecutionTargets).toBe(false);
+    expect(securityAdministrator.canReadExecutionTargets).toBe(true);
   });
 
   it("uses Organization membership for ordinary Tenant members", () => {

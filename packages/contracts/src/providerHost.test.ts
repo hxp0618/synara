@@ -2,8 +2,10 @@ import { Schema } from "effect";
 import { describe, expect, it } from "vitest";
 
 import {
+  PROVIDER_CAPABILITY_CATALOG,
   PROVIDER_CAPABILITY_IDS,
   PROVIDER_HOST_PROTOCOL_VERSION,
+  PROVIDER_HOST_PROVIDER_KINDS,
   ProviderHostCommandEnvelope,
   ProviderHostDescriptor,
   ProviderHostMessageEnvelope,
@@ -19,6 +21,70 @@ function completeCapabilities(value: "native" | "emulated" | "unsupported") {
 }
 
 describe("Provider Host v2 contracts", () => {
+  it("freezes the ordered 8 Provider by 28 Capability catalog without Droid", () => {
+    expect(PROVIDER_HOST_PROVIDER_KINDS).toEqual([
+      "codex",
+      "claudeAgent",
+      "cursor",
+      "gemini",
+      "grok",
+      "kilo",
+      "opencode",
+      "pi",
+    ]);
+    expect(PROVIDER_HOST_PROVIDER_KINDS).not.toContain("droid");
+    expect(PROVIDER_CAPABILITY_IDS).toEqual([
+      "discovery",
+      "start-session",
+      "resume-session",
+      "send-turn",
+      "steer-turn",
+      "interrupt-turn",
+      "approval",
+      "structured-user-input",
+      "plan-mode",
+      "review",
+      "compact",
+      "rollback",
+      "fork",
+      "read-history",
+      "model-list",
+      "model-switch",
+      "skill-discovery",
+      "skill-mentions",
+      "plugin-discovery",
+      "plugin-mentions",
+      "native-commands",
+      "tool-events",
+      "diff-events",
+      "usage-events",
+      "checkpoint",
+      "credential-injection",
+      "authoritative-history-reconstruction",
+      "worker-migration",
+    ]);
+    expect(PROVIDER_CAPABILITY_CATALOG.version).toBe(1);
+    expect(PROVIDER_CAPABILITY_CATALOG.capabilityIds).toEqual(PROVIDER_CAPABILITY_IDS);
+    expect(PROVIDER_CAPABILITY_CATALOG.providers.map(({ provider }) => provider)).toEqual(
+      PROVIDER_HOST_PROVIDER_KINDS,
+    );
+    expect(PROVIDER_CAPABILITY_CATALOG.providers.map(({ supportTier }) => supportTier)).toEqual([
+      "experimental",
+      "experimental",
+      "local-only",
+      "local-only",
+      "local-only",
+      "local-only",
+      "local-only",
+      "local-only",
+    ]);
+
+    for (const entry of PROVIDER_CAPABILITY_CATALOG.providers) {
+      expect(Object.keys(entry.capabilities)).toEqual(PROVIDER_CAPABILITY_IDS);
+      expect(Object.values(entry.capabilities)).toHaveLength(PROVIDER_CAPABILITY_IDS.length);
+    }
+  });
+
   it("decodes a complete capability descriptor", () => {
     const descriptor = decodeDescriptor({
       protocolVersion: PROVIDER_HOST_PROTOCOL_VERSION,
@@ -28,6 +94,22 @@ describe("Provider Host v2 contracts", () => {
         supportTier: "tier-1",
         adapterVersion: "codex-remote-v2",
         providerCliVersion: "0.144.1",
+        runtime: {
+          kind: "cli",
+          name: "codex",
+          version: "0.144.1",
+          available: true,
+          versionSource: "probe",
+          compatibleRange: {
+            minimumInclusive: "0.144.1",
+            maximumExclusive: "0.145.0",
+          },
+          compatible: true,
+        },
+        releasePolicy: {
+          requiresExplicitEnablement: true,
+          enabled: true,
+        },
         capabilities: completeCapabilities("native"),
       },
       maximumCommandBytes: 2_097_152,
@@ -38,6 +120,46 @@ describe("Provider Host v2 contracts", () => {
     });
 
     expect(descriptor.capabilityDescriptor.capabilities["send-turn"]).toBe("native");
+    expect(descriptor.protocolVersion).toEqual({ major: 2, minor: 1 });
+    expect(descriptor.capabilityDescriptor.runtime.versionSource).toBe("probe");
+  });
+
+  it("accepts unknown optional fields from a newer compatible minor", () => {
+    expect(() =>
+      decodeDescriptor({
+        protocolVersion: { major: 2, minor: 2 },
+        hostBuildVersion: "host-test",
+        futureOptionalField: { enabled: true },
+        capabilityDescriptor: {
+          provider: "claudeAgent",
+          supportTier: "experimental",
+          adapterVersion: "claude-agent-sdk-v2",
+          futureProviderField: "ignored",
+          runtime: {
+            kind: "sdk",
+            name: "@anthropic-ai/claude-agent-sdk",
+            version: "0.3.207",
+            available: true,
+            versionSource: "package",
+            compatibleRange: {
+              minimumInclusive: "0.3.207",
+              maximumExclusive: "0.4.0",
+            },
+            compatible: true,
+          },
+          releasePolicy: {
+            requiresExplicitEnablement: true,
+            enabled: false,
+          },
+          capabilities: completeCapabilities("native"),
+        },
+        maximumCommandBytes: 2_097_152,
+        maximumMessageBytes: 1_048_576,
+        runtimeEventVersions: { minimum: 2, maximum: 2 },
+        credentialDeliveryModes: ["anonymous-fd"],
+        resumeStrategies: ["native-cursor"],
+      }),
+    ).not.toThrow();
   });
 
   it("rejects a descriptor that omits a capability", () => {
@@ -52,6 +174,19 @@ describe("Provider Host v2 contracts", () => {
           provider: "cursor",
           supportTier: "local-only",
           adapterVersion: "none",
+          runtime: {
+            kind: "local",
+            name: "cursor",
+            version: "0.2.0-dev",
+            available: true,
+            versionSource: "build",
+            compatibleRange: { minimumInclusive: "0.0.0" },
+            compatible: true,
+          },
+          releasePolicy: {
+            requiresExplicitEnablement: false,
+            enabled: true,
+          },
           capabilities,
         },
         maximumCommandBytes: 2_097_152,

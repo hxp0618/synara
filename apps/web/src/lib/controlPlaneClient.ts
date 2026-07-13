@@ -1,5 +1,10 @@
 import type {
+  ProviderCapabilityMap,
+  ProviderHostProviderKind,
   ProviderInteractionMode,
+  ProviderReleasePolicy,
+  ProviderRuntimeDescriptor,
+  ProviderSupportTier,
   ProviderUserInputAnswers,
   RuntimeMode,
 } from "@synara/contracts";
@@ -255,6 +260,51 @@ export type ControlPlaneExecutionTarget = {
   capabilities: Record<string, unknown>;
   createdAt: string;
   updatedAt: string;
+};
+
+export type ControlPlaneProviderCompatibilityStatus =
+  | "compatible"
+  | "incompatible"
+  | "unavailable"
+  | "local-only"
+  | "disabled";
+
+export type ControlPlaneWorkerProviderManifest = {
+  provider: ProviderHostProviderKind;
+  supportTier: ProviderSupportTier;
+  compatibilityStatus: ControlPlaneProviderCompatibilityStatus;
+  runtime: ProviderRuntimeDescriptor;
+  releasePolicy: ProviderReleasePolicy;
+  incompatibilityCode?: string;
+  incompatibilityMessage?: string;
+  capabilities: ProviderCapabilityMap;
+};
+
+export type ControlPlaneWorkerManifest = {
+  executionTargetId: string;
+  manifestId: string;
+  workerStatusCounts: {
+    online: number;
+    draining: number;
+    offline: number;
+  };
+  lastHeartbeatAt: string;
+  workerBuild: {
+    version: string;
+    gitSha?: string;
+    imageDigest?: string;
+    operatingSystem: string;
+    architecture: string;
+  };
+  workerProtocol: {
+    minimum: number;
+    maximum: number;
+  };
+  runtimeEvent: {
+    minimum: number;
+    maximum: number;
+  };
+  providers: ReadonlyArray<ControlPlaneWorkerProviderManifest>;
 };
 
 export type ControlPlaneSSHProvisionResult = {
@@ -784,6 +834,10 @@ export const controlPlaneClient = {
     controlPlaneRequest<{ items: ReadonlyArray<ControlPlaneExecutionTarget> }>(
       `/v1/tenants/${encodeURIComponent(tenantId)}/execution-targets`,
     ),
+  listWorkerManifests: (tenantId: string) =>
+    controlPlaneRequest<{ items: ReadonlyArray<ControlPlaneWorkerManifest> }>(
+      `/v1/tenants/${encodeURIComponent(tenantId)}/worker-manifests`,
+    ),
   createExecutionTarget: (
     tenantId: string,
     input: {
@@ -797,6 +851,15 @@ export const controlPlaneClient = {
     controlPlaneRequest<ControlPlaneExecutionTarget>(
       `/v1/tenants/${encodeURIComponent(tenantId)}/execution-targets`,
       { method: "POST", body: input },
+    ),
+  updateExecutionTargetProviderPolicy: (
+    tenantId: string,
+    targetId: string,
+    experimentalProviders: ReadonlyArray<ProviderHostProviderKind>,
+  ) =>
+    controlPlaneRequest<ControlPlaneExecutionTarget>(
+      `/v1/tenants/${encodeURIComponent(tenantId)}/execution-targets/${encodeURIComponent(targetId)}/provider-policy`,
+      { method: "PATCH", body: { experimentalProviders } },
     ),
   provisionSSHExecutionTarget: (
     tenantId: string,

@@ -29,6 +29,24 @@ func TestParseProviderPolicyNormalizesExperimentalProviders(t *testing.T) {
 	}
 }
 
+func TestParseProviderPolicyAcceptsOnlyStage3ProviderSet(t *testing.T) {
+	providers := []any{"codex", "claudeAgent", "cursor", "gemini", "grok", "kilo", "opencode", "pi"}
+	policy, err := ParseProviderPolicy(map[string]any{
+		"providerPolicy": map[string]any{"experimentalProviders": providers},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(policy.ExperimentalProviders) != len(stage3ProviderOrder) {
+		t.Fatalf("Stage 3 Provider set = %#v", policy.ExperimentalProviders)
+	}
+	for index := range stage3ProviderOrder {
+		if policy.ExperimentalProviders[index] != stage3ProviderOrder[index] {
+			t.Fatalf("Stage 3 Provider set = %#v, want %#v", policy.ExperimentalProviders, stage3ProviderOrder)
+		}
+	}
+}
+
 func TestParseProviderPolicyRejectsInvalidShape(t *testing.T) {
 	tests := []struct {
 		name         string

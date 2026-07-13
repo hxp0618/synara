@@ -188,9 +188,17 @@ func main() {
 	var localAgentd *agentd.LocalSupervisor
 	var localAgentdDone <-chan struct{}
 	if len(cfg.LocalAgentdRunnerCommand) > 0 {
+		localTarget, _, resolveErr := executionTargetService.ResolveWorkerTarget(
+			ctx, bootstrapped.ExecutionTargetID, string(platform.TargetLocal),
+		)
+		if resolveErr != nil {
+			logger.Error("failed to resolve local agentd execution target", "error", resolveErr)
+			os.Exit(1)
+		}
 		localAgentd, err = agentd.NewLocalSupervisor(agentd.LocalSupervisorInput{
 			ListenAddress: cfg.ListenAddress, RegistrationToken: cfg.WorkerRegistrationToken,
 			ExecutionTargetID: bootstrapped.ExecutionTargetID, RunnerCommand: cfg.LocalAgentdRunnerCommand,
+			Capabilities:  localTarget.Capabilities,
 			WorkspaceRoot: cfg.LocalAgentdWorkspaceRoot, GitCacheRoot: cfg.LocalAgentdGitCacheRoot,
 			WorkerLeaseTTL:   cfg.WorkerLeaseTTL,
 			HeartbeatTimeout: cfg.WorkerHeartbeatTimeout, DrainTimeout: cfg.ShutdownTimeout / 2,

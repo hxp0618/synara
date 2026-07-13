@@ -136,6 +136,8 @@ func TestReregisteredWorkerFencesAuthenticatedHeartbeatAndLeaseRequests(t *testi
 	service := integrationService(t, db)
 	current := time.Now().UTC().Truncate(time.Microsecond)
 	service.now = func() time.Time { return current }
+	initialCapabilities := workerManifestTestCapabilities()
+	initialCapabilities["workerGeneration"] = "old"
 	registration := RegisterWorkerInput{
 		ExecutionTargetID: fixture.TargetID,
 		TargetKind:        fixture.TargetKind,
@@ -145,7 +147,7 @@ func TestReregisteredWorkerFencesAuthenticatedHeartbeatAndLeaseRequests(t *testi
 		PodName:           "worker-incarnation-" + uuid.NewString(),
 		Version:           "current-v1",
 		ProtocolVersion:   WorkerProtocolVersion,
-		Capabilities:      map[string]any{"workerGeneration": "old"},
+		Capabilities:      initialCapabilities,
 		LeaseSupported:    true,
 		FencingSupported:  true,
 	}
@@ -178,7 +180,9 @@ func TestReregisteredWorkerFencesAuthenticatedHeartbeatAndLeaseRequests(t *testi
 	current = current.Add(time.Second)
 	registration.InstanceUID = uuid.NewString()
 	registration.Version = "current-v2"
-	registration.Capabilities = map[string]any{"workerGeneration": "current"}
+	currentCapabilities := workerManifestTestCapabilities()
+	currentCapabilities["workerGeneration"] = "current"
+	registration.Capabilities = currentCapabilities
 	reregistered, err := service.Register(context.Background(), registration)
 	if err != nil {
 		t.Fatal(err)
@@ -198,10 +202,12 @@ func TestReregisteredWorkerFencesAuthenticatedHeartbeatAndLeaseRequests(t *testi
 	}
 	current = current.Add(time.Second)
 	draining := true
+	staleCapabilities := workerManifestTestCapabilities()
+	staleCapabilities["workerGeneration"] = "stale"
 	_, err = service.Heartbeat(context.Background(), staleWorker, HeartbeatInput{
 		Version:         "stale-version",
 		ProtocolVersion: WorkerProtocolVersion,
-		Capabilities:    map[string]any{"workerGeneration": "stale"},
+		Capabilities:    staleCapabilities,
 		Draining:        &draining,
 	})
 	assertWorkerIncarnationFenced := func(operation string, err error) {
@@ -1263,7 +1269,7 @@ func TestDurableInterruptCommandRebindsAfterWorkerRelease(t *testing.T) {
 	}
 
 	firstWorker := registerManifestTestWorker(t, service, fixture.TargetID, fixture.TargetKind, "worker-interrupt-first")
-	legacyWorker := registerTestWorker(t, service, fixture.TargetID, fixture.TargetKind, "worker-interrupt-legacy")
+	legacyWorker := registerLegacyTestWorker(t, service, fixture.TargetID, fixture.TargetKind, "worker-interrupt-legacy")
 	unsupportedCapabilities := workerManifestTestCapabilities()
 	setTestProviderCapability(unsupportedCapabilities, "codex", "interrupt-turn", "unsupported")
 	unsupportedWorker := registerTestWorkerWithCapabilities(
@@ -1322,8 +1328,12 @@ func TestDurableInterruptCommandRebindsAfterWorkerRelease(t *testing.T) {
 				ExecutionTargetID: fixture.TargetID, TargetKind: fixture.TargetKind, ExecutionID: &fixture.ExecutionID,
 			}, attempt.requestID)
 			var apiError *problem.Error
-			if !errors.As(claimErr, &apiError) || apiError.Code != "capability_unsupported" {
-				t.Fatalf("expected capability_unsupported, got %v", claimErr)
+			expectedCode := "capability_unsupported"
+			if attempt.name == "legacy" {
+				expectedCode = "worker_manifest_required"
+			}
+			if !errors.As(claimErr, &apiError) || apiError.Code != expectedCode {
+				t.Fatalf("expected %s, got %v", expectedCode, claimErr)
 			}
 		})
 	}
@@ -1368,32 +1378,24 @@ func TestDurableInterruptCommandRebindsAfterWorkerRelease(t *testing.T) {
 	}
 }
 
-func TestDurableInterruptRejectsActiveWorkerWithoutManifestCapability(t *testing.T) {
+func TestProviderExecutionRejectsWorkerWithoutManifest(t *testing.T) {
 	db := integrationDB(t)
 	fixture := seedExecutionFixture(t, db)
 	service := integrationService(t, db)
-	worker := registerTestWorker(t, service, fixture.TargetID, fixture.TargetKind, "worker-interrupt-legacy-active")
+	worker := registerLegacyTestWorker(t, service, fixture.TargetID, fixture.TargetKind, "worker-without-manifest")
 	cleanupWorkers(t, db, worker.ID)
-	claim, err := service.Claim(context.Background(), worker, ClaimExecutionInput{
+	broad, err := service.Claim(context.Background(), worker, ClaimExecutionInput{
+		ExecutionTargetID: fixture.TargetID, TargetKind: fixture.TargetKind,
+	}, "worker-without-manifest-broad-claim")
+	if err != nil || broad.Value.Execution != nil || broad.Value.Lease != nil {
+		t.Fatalf("Worker without a manifest claimed Provider work: result=%#v err=%v", broad, err)
+	}
+	_, err = service.Claim(context.Background(), worker, ClaimExecutionInput{
 		ExecutionTargetID: fixture.TargetID, TargetKind: fixture.TargetKind, ExecutionID: &fixture.ExecutionID,
-	}, "interrupt-legacy-active-claim")
-	if err != nil || claim.Value.Lease == nil {
-		t.Fatalf("legacy claim failed before a durable command existed: result=%#v err=%v", claim, err)
-	}
-	lease := *claim.Value.Lease
-	if _, err := service.Start(context.Background(), worker, fixture.ExecutionID, LeaseInput{
-		TenantID: fixture.TenantID, Generation: lease.Generation, LeaseToken: lease.LeaseToken,
-	}, "interrupt-legacy-active-start"); err != nil {
-		t.Fatal(err)
-	}
-	principal := identity.Principal{UserID: fixture.UserID, ActiveTenantID: &fixture.TenantID}
-	_, err = service.RequestInterrupt(
-		context.Background(), principal, fixture.SessionID,
-		"interrupt-legacy-active", "interrupt-legacy-active", "127.0.0.1",
-	)
+	}, "worker-without-manifest-explicit-claim")
 	var apiError *problem.Error
-	if !errors.As(err, &apiError) || apiError.Code != "capability_unsupported" {
-		t.Fatalf("expected capability_unsupported, got %v", err)
+	if !errors.As(err, &apiError) || apiError.Code != "worker_manifest_required" {
+		t.Fatalf("expected worker_manifest_required, got %v", err)
 	}
 }
 
@@ -2383,11 +2385,13 @@ func seedExecutionFixture(t *testing.T, db *gorm.DB) executionFixture {
 	organizationID := uuid.New()
 	projectID := uuid.New()
 	sessionID := uuid.New()
+	runtimeBindingID := uuid.New()
 	turnID := uuid.New()
 	executionID := uuid.New()
 	targetID := uuid.New()
 	gitCredentialID := uuid.New()
 	repositoryURL := "https://git.example.com/team/private.git"
+	provider := "codex"
 	slug := "exec-" + strings.ReplaceAll(uuid.NewString(), "-", "")[:12]
 	models := []any{
 		&persistence.User{ID: userID, Email: uuid.NewString() + "@example.com", DisplayName: "Execution test", Status: "active", EmailVerifiedAt: &now},
@@ -2407,14 +2411,19 @@ func seedExecutionFixture(t *testing.T, db *gorm.DB) executionFixture {
 			RepositoryURL: &repositoryURL, DefaultBranch: "main", GitCredentialID: &gitCredentialID,
 			Visibility: "organization", CreatedBy: userID,
 		},
-		&persistence.ExecutionTarget{ID: targetID, TenantID: &tenantID, OrganizationID: &organizationID, Kind: "kubernetes", Name: "test-target", Status: "active", ConfigurationEncrypted: []byte{}, Capabilities: map[string]any{}},
-		&persistence.AgentSession{ID: sessionID, TenantID: tenantID, OrganizationID: organizationID, ProjectID: projectID, CreatedBy: userID, Title: "Execution session", Status: "active", Visibility: "private", Provider: "codex", ExecutionTargetID: targetID},
+		&persistence.ExecutionTarget{ID: targetID, TenantID: &tenantID, OrganizationID: &organizationID, Kind: "kubernetes", Name: "test-target", Status: "active", ConfigurationEncrypted: []byte{}, Capabilities: workerManifestTestTargetCapabilities()},
+		&persistence.AgentSession{ID: sessionID, TenantID: tenantID, OrganizationID: organizationID, ProjectID: projectID, CreatedBy: userID, Title: "Execution session", Status: "active", Visibility: "private", Provider: provider, ExecutionTargetID: targetID, CurrentRuntimeBindingID: &runtimeBindingID},
+		&persistence.ProviderRuntimeBinding{
+			ID: runtimeBindingID, TenantID: tenantID, SessionID: sessionID, Provider: provider,
+			Revision: 1, Status: "active", ResumeStrategy: "authoritative-history",
+			CreatedAt: now, UpdatedAt: now,
+		},
 		&persistence.AgentTurn{
 			ID: turnID, TenantID: tenantID, SessionID: sessionID, CreatedBy: userID,
 			Status: "queued", InputText: "Run integration test",
 			RuntimeMode: "approval-required", InteractionMode: "plan",
 		},
-		&persistence.AgentExecution{ID: executionID, TenantID: tenantID, SessionID: sessionID, TurnID: turnID, Attempt: 1, Status: "queued", ExecutionTargetID: targetID, TargetKind: "kubernetes", Generation: 0, RequestedBy: userID, QueuedAt: now},
+		&persistence.AgentExecution{ID: executionID, TenantID: tenantID, SessionID: sessionID, TurnID: turnID, Attempt: 1, Status: "queued", ExecutionTargetID: targetID, TargetKind: "kubernetes", Provider: &provider, ProviderRuntimeBindingID: &runtimeBindingID, Generation: 0, RequestedBy: userID, QueuedAt: now},
 		&persistence.OutboxMessage{ID: uuid.New(), TenantID: &tenantID, Topic: "execution.queued", MessageKey: executionID.String(), Payload: map[string]any{"executionId": executionID}, Headers: map[string]any{"eventVersion": 1}, CreatedAt: now, AvailableAt: now},
 	}
 	if err := db.Transaction(func(tx *gorm.DB) error {
@@ -2438,6 +2447,17 @@ func seedExecutionFixture(t *testing.T, db *gorm.DB) executionFixture {
 }
 
 func registerTestWorker(
+	t *testing.T,
+	service *Service,
+	targetID uuid.UUID,
+	targetKind string,
+	podName string,
+) persistence.WorkerInstance {
+	t.Helper()
+	return registerManifestTestWorker(t, service, targetID, targetKind, podName)
+}
+
+func registerLegacyTestWorker(
 	t *testing.T,
 	service *Service,
 	targetID uuid.UUID,

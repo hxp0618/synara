@@ -93,7 +93,7 @@ export function resolveControlPlaneCapabilities(input: {
     canApproveExecution: mutationScopeActive && (tenantProjectOperator || organizationOperator),
     canReadMembers: tenantRole !== "member",
     canManageMembers: tenant.status === "active" && tenantAdmin,
-    canReadExecutionTargets: tenantAdmin || tenantSecurity || tenantAuditor,
+    canReadExecutionTargets: tenantAdmin || tenantSecurity,
     canManageExecutionTargets: tenant.status === "active" && tenantAdmin,
     canReadQuota: tenantAdmin || tenantBilling || tenantAuditor,
     canManageQuota: tenant.status === "active" && (tenantAdmin || tenantBilling),

@@ -10,20 +10,40 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"sort"
 	"strings"
 )
 
 type Runner struct {
-	command         []string
-	maxMessageBytes int
-	protocol        RunnerProtocol
+	command               []string
+	maxMessageBytes       int
+	protocol              RunnerProtocol
+	experimentalProviders map[string]struct{}
 }
 
 func NewRunner(cfg Config) *Runner {
+	experimentalProviders := make(map[string]struct{}, len(cfg.ExperimentalProviders))
+	for _, provider := range cfg.ExperimentalProviders {
+		experimentalProviders[provider] = struct{}{}
+	}
 	return &Runner{
 		command: append([]string(nil), cfg.RunnerCommand...), maxMessageBytes: cfg.RunnerMessageBytes,
-		protocol: cfg.RunnerProtocol,
+		protocol: cfg.RunnerProtocol, experimentalProviders: experimentalProviders,
 	}
+}
+
+func (r *Runner) experimentalProviderEnabled(provider string) bool {
+	_, enabled := r.experimentalProviders[provider]
+	return enabled
+}
+
+func (r *Runner) experimentalProviderList() []string {
+	providers := make([]string, 0, len(r.experimentalProviders))
+	for provider := range r.experimentalProviders {
+		providers = append(providers, provider)
+	}
+	sort.Strings(providers)
+	return providers
 }
 
 func (r *Runner) Run(

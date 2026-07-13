@@ -134,6 +134,8 @@ func (s *Service) Claim(
 					  AND provider_manifest.provider = agent_executions.provider
 					  AND provider_manifest.compatibility_status = 'compatible'
 					)`, *claimWorker.CurrentManifestID)
+			} else {
+				claimQuery = claimQuery.Where("agent_executions.provider IS NULL")
 			}
 			claimQuery = controlCommandSupport.filterClaimQuery(claimQuery)
 			claimErr := claimQuery.Order("agent_executions.queued_at, agent_executions.id").Take(&execution).Error
@@ -146,14 +148,15 @@ func (s *Service) Claim(
 							normalizedTarget.ExecutionTargetID, normalizedTarget.TargetKind).
 						Take(&assigned).Error
 					if assignedErr == nil {
-						if claimWorker.CurrentManifestID != nil {
-							supported, supportErr := workerSupportsProvider(tx, claimWorker, assigned.Provider)
-							if supportErr != nil {
-								return problem.Wrap(500, "worker_manifest_lookup_failed", "Failed to inspect Worker Provider compatibility.", supportErr)
+						supported, supportErr := workerSupportsProvider(tx, claimWorker, assigned.Provider)
+						if supportErr != nil {
+							return problem.Wrap(500, "worker_manifest_lookup_failed", "Failed to inspect Worker Provider compatibility.", supportErr)
+						}
+						if !supported {
+							if claimWorker.CurrentManifestID == nil {
+								return problem.New(409, "worker_manifest_required", "Provider executions require a compatible registered Worker manifest.")
 							}
-							if !supported {
-								return problem.New(409, "worker_provider_incompatible", "The Worker manifest does not support the assigned Execution Provider.")
-							}
+							return problem.New(409, "worker_provider_incompatible", "The Worker manifest does not support the assigned Execution Provider.")
 						}
 						commandsSupported, supportErr := controlCommandSupport.supportsExecution(ctx, tx, assigned)
 						if supportErr != nil {

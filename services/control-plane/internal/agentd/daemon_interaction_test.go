@@ -115,6 +115,7 @@ func TestDaemonRunExecutionDeliversInteractionResolutionEndToEnd(t *testing.T) {
 		RunnerProtocol: RunnerProtocolV2, WorkspaceRoot: t.TempDir(), PollInterval: time.Millisecond,
 		HeartbeatInterval: time.Hour, LeaseRenewInterval: time.Hour, RequestTimeout: time.Second,
 		ArtifactTimeout: time.Second, RunnerMessageBytes: 1 << 20,
+		ExperimentalProviders: []string{"codex"},
 	}
 	// The helper is the current Go test binary. Passing -test.run keeps the child
 	// isolated to TestProviderHostV2HelperProcess.
@@ -232,6 +233,7 @@ func TestDaemonRunExecutionDeliversDurableInterruptEndToEnd(t *testing.T) {
 		RunnerProtocol: RunnerProtocolV2, WorkspaceRoot: t.TempDir(), PollInterval: time.Millisecond,
 		HeartbeatInterval: time.Hour, LeaseRenewInterval: time.Hour, RequestTimeout: time.Second,
 		ArtifactTimeout: time.Second, RunnerMessageBytes: 1 << 20,
+		ExperimentalProviders: []string{"codex"},
 	}
 	cfg.RunnerCommand = []string{os.Args[0], "-test.run=TestProviderHostV2HelperProcess", "--"}
 	client := NewClient(cfg)
@@ -340,6 +342,7 @@ func TestDaemonRunExecutionDeliversDurableSteerEndToEnd(t *testing.T) {
 		RunnerProtocol: RunnerProtocolV2, WorkspaceRoot: t.TempDir(), PollInterval: time.Millisecond,
 		HeartbeatInterval: time.Hour, LeaseRenewInterval: time.Hour, RequestTimeout: time.Second,
 		ArtifactTimeout: time.Second, RunnerMessageBytes: 1 << 20,
+		ExperimentalProviders: []string{"codex"},
 	}
 	cfg.RunnerCommand = []string{os.Args[0], "-test.run=TestProviderHostV2HelperProcess", "--"}
 	client := NewClient(cfg)

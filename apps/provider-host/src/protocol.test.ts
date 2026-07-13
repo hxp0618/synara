@@ -1,9 +1,12 @@
 import { PROVIDER_RUNTIME_EVENT_VERSION } from "@synara/contracts";
 import {
+  PROVIDER_CAPABILITY_CATALOG,
   PROVIDER_CAPABILITY_IDS,
   PROVIDER_HOST_PROTOCOL_VERSION,
+  PROVIDER_HOST_PROVIDER_KINDS,
   type ProviderHostCommandEnvelope,
   type ProviderHostMessageEnvelope,
+  type ProviderHostProviderKind,
 } from "@synara/contracts/provider-host";
 import { PassThrough } from "node:stream";
 import { describe, expect, it } from "vitest";
@@ -13,6 +16,7 @@ import {
   createProviderHostProtocolHandler,
   providerHostDescriptor,
   runProviderHostProtocolV2,
+  type CodexVersionProbeResult,
 } from "./protocol";
 import type { ProviderRunController, RunnerMessage } from "./providerHost";
 
@@ -34,35 +38,97 @@ function command(
 }
 
 describe("Provider Host Protocol v2", () => {
-  it("describes every capability and keeps unsupported Providers Local-only", () => {
-    const codex = providerHostDescriptor("codex");
-    const cursor = providerHostDescriptor("cursor");
+  it("describes the fixed ordered 8 by 28 Provider matrix from the catalog", () => {
+    for (const provider of PROVIDER_HOST_PROVIDER_KINDS) {
+      const descriptor = enabledDescriptorForProvider(provider);
+      const catalogEntry = PROVIDER_CAPABILITY_CATALOG.providers.find(
+        (entry) => entry.provider === provider,
+      );
 
-    expect(Object.keys(codex.capabilityDescriptor.capabilities)).toHaveLength(
-      PROVIDER_CAPABILITY_IDS.length,
-    );
-    expect(codex.capabilityDescriptor.capabilities["send-turn"]).toBe("native");
-    expect(codex.capabilityDescriptor.capabilities["steer-turn"]).toBe("native");
-    expect(codex.capabilityDescriptor.capabilities["interrupt-turn"]).toBe("native");
-    expect(codex.capabilityDescriptor.capabilities.approval).toBe("native");
-    expect(codex.capabilityDescriptor.capabilities["structured-user-input"]).toBe("native");
-    expect(codex.capabilityDescriptor.capabilities["plan-mode"]).toBe("native");
+      expect(catalogEntry).toBeDefined();
+      expect(descriptor.protocolVersion).toEqual({ major: 2, minor: 1 });
+      expect(descriptor.capabilityDescriptor).toMatchObject({
+        provider,
+        supportTier: catalogEntry?.supportTier,
+        adapterVersion: catalogEntry?.adapterVersion,
+      });
+      expect(Object.keys(descriptor.capabilityDescriptor.capabilities)).toEqual(
+        PROVIDER_CAPABILITY_IDS,
+      );
+      expect(descriptor.capabilityDescriptor.capabilities).toEqual(
+        catalogEntry?.capabilities,
+      );
+      expect(capabilityMapForProvider(provider)).toEqual(catalogEntry?.capabilities);
+    }
+  });
+
+  it("keeps Experimental Providers disabled by default and separates Local-only policy", () => {
+    const codexDisabled = providerHostDescriptor("codex", {
+      environment: {},
+      codexVersionProbe: compatibleCodexProbe,
+    });
+    const claudeDisabled = providerHostDescriptor("claudeAgent", { environment: {} });
+    const codexEnabled = providerHostDescriptor("codex", {
+      environment: {
+        SYNARA_PROVIDER_HOST_EXPERIMENTAL_PROVIDERS: " codex, claudeAgent ",
+      },
+      codexVersionProbe: compatibleCodexProbe,
+    });
+    const claudeEnabled = providerHostDescriptor("claudeAgent", {
+      environment: { SYNARA_PROVIDER_HOST_EXPERIMENTAL_PROVIDERS: "claude" },
+    });
+    const cursor = providerHostDescriptor("cursor", {
+      environment: { SYNARA_PROVIDER_HOST_EXPERIMENTAL_PROVIDERS: "cursor" },
+    });
+
+    expect(codexDisabled.capabilityDescriptor.releasePolicy).toEqual({
+      requiresExplicitEnablement: true,
+      enabled: false,
+    });
+    expect(claudeDisabled.capabilityDescriptor.releasePolicy.enabled).toBe(false);
+    expect(codexEnabled.capabilityDescriptor.releasePolicy.enabled).toBe(true);
+    expect(claudeEnabled.capabilityDescriptor.releasePolicy.enabled).toBe(true);
+    expect(cursor.capabilityDescriptor).toMatchObject({
+      supportTier: "local-only",
+      releasePolicy: { requiresExplicitEnablement: false, enabled: true },
+    });
+  });
+
+  it("uses Codex CLI and Claude bundle metadata as independent Runtime sources", () => {
+    const codex = enabledDescriptorForProvider("codex");
+    const claude = providerHostDescriptor("claudeAgent", {
+      environment: { SYNARA_PROVIDER_HOST_EXPERIMENTAL_PROVIDERS: "claudeAgent" },
+      codexVersionProbe: () => {
+        throw new Error("Claude descriptor must not execute the Codex or Claude CLI probe.");
+      },
+    });
+
+    expect(codex.capabilityDescriptor.providerCliVersion).toBe("0.144.1");
+    expect(codex.capabilityDescriptor.runtime).toEqual({
+      kind: "cli",
+      name: "codex",
+      version: "0.144.1",
+      available: true,
+      versionSource: "probe",
+      compatibleRange: {
+        minimumInclusive: "0.144.1",
+        maximumExclusive: "0.145.0",
+      },
+      compatible: true,
+    });
+    expect(claude.capabilityDescriptor.providerCliVersion).toBeUndefined();
+    expect(claude.capabilityDescriptor.runtime).toMatchObject({
+      kind: "sdk",
+      name: "@anthropic-ai/claude-agent-sdk",
+      version: "0.3.207",
+      available: true,
+      versionSource: "package",
+      compatible: true,
+    });
     expect(codex.runtimeEventVersions).toEqual({
       minimum: PROVIDER_RUNTIME_EVENT_VERSION,
       maximum: PROVIDER_RUNTIME_EVENT_VERSION,
     });
-    const claude = providerHostDescriptor("claudeAgent");
-    expect(claude.capabilityDescriptor.adapterVersion).toBe("claude-agent-sdk-v2");
-    expect(claude.capabilityDescriptor.capabilities["steer-turn"]).toBe("native");
-    expect(claude.capabilityDescriptor.capabilities["interrupt-turn"]).toBe("native");
-    expect(claude.capabilityDescriptor.capabilities.approval).toBe("native");
-    expect(claude.capabilityDescriptor.capabilities["structured-user-input"]).toBe("native");
-    expect(claude.capabilityDescriptor.capabilities["plan-mode"]).toBe("native");
-    expect(claude.capabilityDescriptor.capabilities["tool-events"]).toBe("native");
-    expect(cursor.capabilityDescriptor.supportTier).toBe("local-only");
-    expect(Object.values(capabilityMapForProvider("cursor"))).toEqual(
-      Array(PROVIDER_CAPABILITY_IDS.length).fill("unsupported"),
-    );
   });
 
   it("returns a versioned Describe result and replays the same terminal by commandId", async () => {
@@ -70,6 +136,7 @@ describe("Provider Host Protocol v2", () => {
     const handle = createProviderHostProtocolHandler({
       credential: null,
       emit: (message) => emitted.push(message),
+      descriptorForProvider: enabledDescriptorForProvider,
     });
     const describe = command("Describe", { provider: "codex" }, "describe-1");
 
@@ -86,6 +153,11 @@ describe("Provider Host Protocol v2", () => {
     const handle = createProviderHostProtocolHandler({
       credential: null,
       emit: (message) => emitted.push(message),
+      descriptorForProvider: (provider) =>
+        providerHostDescriptor(provider, {
+          environment: { SYNARA_PROVIDER_HOST_EXPERIMENTAL_PROVIDERS: "cursor" },
+          codexVersionProbe: compatibleCodexProbe,
+        }),
     });
     const result = await handle(
       command("StartSession", {
@@ -104,11 +176,121 @@ describe("Provider Host Protocol v2", () => {
     }
   });
 
+  it.each(["StartSession", "ResumeSession"] as const)(
+    "fails closed for %s when the Experimental Provider is disabled",
+    async (commandType) => {
+      const handle = createProviderHostProtocolHandler({
+        credential: null,
+        emit: () => {},
+        descriptorForProvider: (provider) =>
+          providerHostDescriptor(provider, {
+            environment: {},
+            codexVersionProbe: compatibleCodexProbe,
+          }),
+      });
+      const result = await handle(
+        command(
+          commandType,
+          { runnerInput: remoteRunnerInput(commandType === "ResumeSession") },
+          `disabled-${commandType}`,
+        ),
+      );
+
+      expect(errorCode(result)).toBe("capability_unsupported");
+    },
+  );
+
+  it.each(["StartSession", "ResumeSession"] as const)(
+    "fails closed for %s when the Runtime version is incompatible",
+    async (commandType) => {
+      const handle = createProviderHostProtocolHandler({
+        credential: null,
+        emit: () => {},
+        descriptorForProvider: codexDescriptorFactory({
+          available: true,
+          output: "codex-cli 0.145.0",
+        }),
+      });
+      const result = await handle(
+        command(
+          commandType,
+          { runnerInput: remoteRunnerInput(commandType === "ResumeSession") },
+          `incompatible-${commandType}`,
+        ),
+      );
+
+      expect(errorCode(result)).toBe("provider_version_incompatible");
+    },
+  );
+
+  it("enforces the Codex Runtime availability and exact compatible range", async () => {
+    const cases = [
+      {
+        label: "unavailable",
+        probe: { available: false },
+        expected: "provider_not_installed",
+      },
+      {
+        label: "unverifiable",
+        probe: { available: true, output: "codex-cli unknown" },
+        expected: "provider_version_incompatible",
+      },
+      {
+        label: "unstable-semver",
+        probe: { available: true, output: "codex-cli 0.144.1-beta.1" },
+        expected: "provider_version_incompatible",
+      },
+      {
+        label: "below-minimum",
+        probe: { available: true, output: "codex-cli 0.144.0" },
+        expected: "provider_version_incompatible",
+      },
+      {
+        label: "minimum",
+        probe: { available: true, output: "codex-cli 0.144.1" },
+        expected: "Result",
+      },
+      {
+        label: "compatible-patch",
+        probe: { available: true, output: "codex-cli 0.144.99" },
+        expected: "Result",
+      },
+      {
+        label: "maximum-exclusive",
+        probe: { available: true, output: "codex-cli 0.145.0" },
+        expected: "provider_version_incompatible",
+      },
+    ] as const;
+
+    for (const testCase of cases) {
+      const handle = createProviderHostProtocolHandler({
+        credential: null,
+        emit: () => {},
+        descriptorForProvider: codexDescriptorFactory(testCase.probe),
+      });
+      const result = await handle(
+        command(
+          "StartSession",
+          { runnerInput: remoteRunnerInput() },
+          `runtime-${testCase.label}`,
+        ),
+      );
+      const terminal = result.at(-1);
+
+      if (testCase.expected === "Result") {
+        expect(terminal?.messageType, testCase.label).toBe("Result");
+      } else {
+        expect(errorCode(result), testCase.label).toBe(testCase.expected);
+      }
+    }
+  });
+
   it("processes InterruptTurn while SendTurn is still active", async () => {
     let rejectRun: ((error: Error) => void) | undefined;
     const handle = createProviderHostProtocolHandler({
       credential: null,
       emit: () => {},
+      descriptorForProvider: enabledDescriptorForProvider,
       startRun: () =>
         ({
           result: new Promise((_, reject) => {
@@ -146,6 +328,7 @@ describe("Provider Host Protocol v2", () => {
     const handle = createProviderHostProtocolHandler({
       credential: null,
       emit: (message) => emitted.push(message),
+      descriptorForProvider: enabledDescriptorForProvider,
       startRun: (_input, _credential, emit) => {
         emit({
           type: "event",
@@ -185,6 +368,7 @@ describe("Provider Host Protocol v2", () => {
     const handle = createProviderHostProtocolHandler({
       credential: null,
       emit: () => {},
+      descriptorForProvider: enabledDescriptorForProvider,
       startRun: () =>
         ({
           result: new Promise((resolve) => {
@@ -227,6 +411,7 @@ describe("Provider Host Protocol v2", () => {
     const handle = createProviderHostProtocolHandler({
       credential: null,
       emit: (message) => emitted.push(message),
+      descriptorForProvider: enabledDescriptorForProvider,
       startRun: (_input, _credential, emit) => {
         emit({
           type: "interaction",
@@ -283,6 +468,7 @@ describe("Provider Host Protocol v2", () => {
       source,
       credential: null,
       emit: (message) => emitted.push(message),
+      descriptorForProvider: enabledDescriptorForProvider,
       startRun: (_input, _credential, emit) => {
         emit({
           type: "interaction",
@@ -328,10 +514,37 @@ describe("Provider Host Protocol v2", () => {
   });
 });
 
-function remoteRunnerInput() {
+function compatibleCodexProbe(): CodexVersionProbeResult {
+  return { available: true, output: "codex-cli 0.144.1" };
+}
+
+function enabledDescriptorForProvider(provider: ProviderHostProviderKind) {
+  return providerHostDescriptor(provider, {
+    environment: {
+      SYNARA_PROVIDER_HOST_EXPERIMENTAL_PROVIDERS: "codex,claudeAgent",
+    },
+    codexVersionProbe: compatibleCodexProbe,
+  });
+}
+
+function codexDescriptorFactory(probe: CodexVersionProbeResult) {
+  return (provider: ProviderHostProviderKind) =>
+    providerHostDescriptor(provider, {
+      environment: { SYNARA_PROVIDER_HOST_EXPERIMENTAL_PROVIDERS: "codex" },
+      codexVersionProbe: () => probe,
+    });
+}
+
+function errorCode(messages: ReadonlyArray<ProviderHostMessageEnvelope>): string | undefined {
+  const terminal = messages.at(-1);
+  return terminal?.messageType === "Error" ? terminal.error.code : terminal?.messageType;
+}
+
+function remoteRunnerInput(resume = false) {
   return {
     execution: { id: "execution-1" },
     workload: { provider: "codex", inputText: "initial" },
     workspaceDirectory: "/tmp/workspace",
+    ...(resume ? { providerResumeCursor: "provider-cursor" } : {}),
   };
 }

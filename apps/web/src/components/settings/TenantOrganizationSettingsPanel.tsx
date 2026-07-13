@@ -39,6 +39,8 @@ const settingsQueryKeys = {
     ["control-plane", "tenants", tenantId, "members"] as const,
   executionTargets: (tenantId: string | null) =>
     ["control-plane", "tenants", tenantId, "execution-targets"] as const,
+  workerManifests: (tenantId: string | null) =>
+    ["control-plane", "tenants", tenantId, "worker-manifests"] as const,
 };
 
 function LoginPanel() {
@@ -243,6 +245,12 @@ function AuthenticatedTenantPanel() {
     enabled: activeTenantId !== null && canReadExecutionTargets,
     retry: false,
   });
+  const workerManifestsQuery = useQuery({
+    queryKey: settingsQueryKeys.workerManifests(activeTenantId),
+    queryFn: () => controlPlaneClient.listWorkerManifests(activeTenantId!),
+    enabled: activeTenantId !== null && canReadExecutionTargets,
+    retry: false,
+  });
   const setActiveTenant = useMutation({
     mutationFn: controlPlane.setActiveTenant,
   });
@@ -336,13 +344,13 @@ function AuthenticatedTenantPanel() {
         />
       ) : null}
 
-		{canReadRetention ? (
-			<TenantRetentionSettingsSection
-				key={`retention-${activeTenant.id}`}
-				canManage={canManageRetention}
-				tenantId={activeTenant.id}
-			/>
-		) : null}
+      {canReadRetention ? (
+        <TenantRetentionSettingsSection
+          key={`retention-${activeTenant.id}`}
+          canManage={canManageRetention}
+          tenantId={activeTenant.id}
+        />
+      ) : null}
 
       {canReadAudit ? (
         <TenantAuditSettingsSection
@@ -361,24 +369,24 @@ function AuthenticatedTenantPanel() {
         />
       ) : null}
 
-		{canReadIdentity ? (
-			<TenantIdentitySettingsSection
-				key={`identity-${activeTenant.id}`}
-				canManage={canManageIdentity}
-				organizations={controlPlane.organizations.filter(
-					(organization) => organization.status === "active",
-				)}
-				tenantId={activeTenant.id}
-			/>
-		) : null}
+      {canReadIdentity ? (
+        <TenantIdentitySettingsSection
+          key={`identity-${activeTenant.id}`}
+          canManage={canManageIdentity}
+          organizations={controlPlane.organizations.filter(
+            (organization) => organization.status === "active",
+          )}
+          tenantId={activeTenant.id}
+        />
+      ) : null}
 
-		{canReadServiceAccounts ? (
-			<TenantServiceAccountSettingsSection
-				key={`service-accounts-${activeTenant.id}`}
-				canManage={canManageServiceAccounts}
-				tenantId={activeTenant.id}
-			/>
-		) : null}
+      {canReadServiceAccounts ? (
+        <TenantServiceAccountSettingsSection
+          key={`service-accounts-${activeTenant.id}`}
+          canManage={canManageServiceAccounts}
+          tenantId={activeTenant.id}
+        />
+      ) : null}
 
       <SettingsSection title="Organizations">
         {controlPlane.organizations.map((organization) => (
@@ -468,12 +476,25 @@ function AuthenticatedTenantPanel() {
                   }),
                 );
               }}
+              onProviderPolicyUpdated={(target) => {
+                queryClient.setQueryData<{ items: ReadonlyArray<ControlPlaneExecutionTarget> }>(
+                  settingsQueryKeys.executionTargets(activeTenantId),
+                  (current) => ({
+                    items: (current?.items ?? []).map((candidate) =>
+                      candidate.id === target.id ? target : candidate,
+                    ),
+                  }),
+                );
+              }}
               organizations={controlPlane.organizations.filter(
                 (organization) => organization.status === "active",
               )}
               requireOrganizationScope={activeTenant.planCode === "personal"}
               targets={executionTargetsQuery.data?.items ?? []}
               tenantId={activeTenant.id}
+              workerManifests={workerManifestsQuery.data?.items ?? []}
+              workerManifestsError={workerManifestsQuery.error}
+              workerManifestsLoading={workerManifestsQuery.isPending}
             />
           ) : null}
           <ProjectSessionSettingsSection

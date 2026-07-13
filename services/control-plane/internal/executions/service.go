@@ -60,7 +60,7 @@ func (s *Service) Register(ctx context.Context, input RegisterWorkerInput) (Regi
 	if err != nil {
 		return RegisteredWorker{}, err
 	}
-	_, targetKind, err := s.targets.ResolveWorkerTarget(ctx, normalized.ExecutionTargetID, normalized.TargetKind)
+	target, targetKind, err := s.targets.ResolveWorkerTarget(ctx, normalized.ExecutionTargetID, normalized.TargetKind)
 	if err != nil {
 		return RegisteredWorker{}, err
 	}
@@ -92,7 +92,9 @@ func (s *Service) Register(ctx context.Context, input RegisterWorkerInput) (Regi
 			if err := tx.WithContext(ctx).Create(&model).Error; err != nil {
 				return problem.Wrap(409, "worker_registration_conflict", "Worker registration conflicts with an active instance.", err)
 			}
-			return persistWorkerManifest(ctx, tx, &model, normalized.Version, normalized.Capabilities, now)
+			return persistWorkerManifest(
+				ctx, tx, &model, normalized.Version, normalized.Capabilities, target.Capabilities, targetKind, now,
+			)
 		}
 		if err != nil {
 			return problem.Wrap(500, "worker_registration_lookup_failed", "Failed to resolve the worker registration.", err)
@@ -127,7 +129,9 @@ func (s *Service) Register(ctx context.Context, input RegisterWorkerInput) (Regi
 		model.LastHeartbeatAt = now
 		model.DrainingAt = nil
 		model.TerminatedAt = nil
-		return persistWorkerManifest(ctx, tx, &model, normalized.Version, normalized.Capabilities, now)
+		return persistWorkerManifest(
+			ctx, tx, &model, normalized.Version, normalized.Capabilities, target.Capabilities, targetKind, now,
+		)
 	})
 	if err != nil {
 		return RegisteredWorker{}, err
@@ -165,6 +169,29 @@ func (s *Service) Heartbeat(
 		return Worker{}, unsupportedWorkerProtocol(worker.ProtocolVersion)
 	}
 	now := s.now()
+	if input.Capabilities != nil {
+		target, targetKind, err := s.targets.ResolveWorkerTarget(ctx, worker.ExecutionTargetID, worker.TargetKind)
+		if err != nil {
+			return Worker{}, err
+		}
+		manifestVersion := worker.Version
+		if version := strings.TrimSpace(input.Version); version != "" {
+			manifestVersion = version
+		}
+		normalized, normalizeErr := normalizeWorkerManifest(
+			manifestVersion, input.Capabilities, target.Capabilities, targetKind, now,
+		)
+		if normalizeErr != nil {
+			return Worker{}, workerManifestReregistrationRequired(normalizeErr.Error())
+		}
+		matches, matchErr := workerManifestMatches(ctx, s.db, worker, normalized)
+		if matchErr != nil {
+			return Worker{}, matchErr
+		}
+		if !matches {
+			return Worker{}, workerManifestReregistrationRequired("Heartbeat Provider capabilities differ from the immutable registered Worker manifest.")
+		}
+	}
 	updates := persistence.WorkerInstance{LastHeartbeatAt: now}
 	fields := []string{"last_heartbeat_at"}
 	if input.Draining != nil && *input.Draining {

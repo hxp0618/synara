@@ -26,14 +26,13 @@ const (
 	RunnerProtocolV2 RunnerProtocol = "v2"
 
 	providerHostProtocolMajor       = 2
-	providerHostProtocolMinor       = 0
+	providerHostProtocolMinor       = 1
 	providerHostCommandLimit        = 2 << 20
 	providerHostRuntimeEventVersion = executions.RuntimeEventVersionV2
+	providerHostExperimentalEnv     = "SYNARA_PROVIDER_HOST_EXPERIMENTAL_PROVIDERS"
 )
 
-var providerHostProviders = []string{
-	"codex", "claudeAgent", "cursor", "gemini", "grok", "kilo", "opencode", "pi",
-}
+var providerHostProviders = append([]string(nil), stage3ProviderNames...)
 
 type providerHostProtocolVersion struct {
 	Major int `json:"major"`
@@ -41,16 +40,38 @@ type providerHostProtocolVersion struct {
 }
 
 type providerHostCapabilityDescriptor struct {
-	Provider           string            `json:"provider"`
-	SupportTier        string            `json:"supportTier"`
-	AdapterVersion     string            `json:"adapterVersion"`
-	ProviderCLIVersion *string           `json:"providerCliVersion,omitempty"`
-	Capabilities       map[string]string `json:"capabilities"`
+	Provider           string                     `json:"provider"`
+	SupportTier        string                     `json:"supportTier"`
+	AdapterVersion     string                     `json:"adapterVersion"`
+	ProviderCLIVersion *string                    `json:"providerCliVersion,omitempty"`
+	Capabilities       map[string]string          `json:"capabilities"`
+	Runtime            *providerRuntimeDescriptor `json:"runtime,omitempty"`
+	ReleasePolicy      *providerReleasePolicy     `json:"releasePolicy,omitempty"`
 }
 
 type providerHostVersionRange struct {
 	Minimum int `json:"minimum"`
 	Maximum int `json:"maximum"`
+}
+
+type providerRuntimeCompatibleRange struct {
+	MinimumInclusive string  `json:"minimumInclusive"`
+	MaximumExclusive *string `json:"maximumExclusive,omitempty"`
+}
+
+type providerRuntimeDescriptor struct {
+	Kind            string                         `json:"kind"`
+	Name            string                         `json:"name"`
+	Version         *string                        `json:"version,omitempty"`
+	Available       bool                           `json:"available"`
+	VersionSource   string                         `json:"versionSource"`
+	CompatibleRange providerRuntimeCompatibleRange `json:"compatibleRange"`
+	Compatible      bool                           `json:"compatible"`
+}
+
+type providerReleasePolicy struct {
+	RequiresExplicitEnablement bool `json:"requiresExplicitEnablement"`
+	Enabled                    bool `json:"enabled"`
 }
 
 type providerHostDescriptor struct {
@@ -168,7 +189,7 @@ func (r *Runner) describeProviderHostV2(ctx context.Context, provider string) (p
 	if err != nil {
 		return providerHostDescriptor{}, err
 	}
-	if err := validateProviderHostDescriptorWire(descriptor, provider); err != nil {
+	if err := r.validateProviderHostDescriptorWire(descriptor, provider); err != nil {
 		return providerHostDescriptor{}, err
 	}
 	process.maximumCommandBytes = min(process.maximumCommandBytes, descriptor.MaximumCommandBytes)
@@ -213,7 +234,7 @@ func (r *Runner) runProviderHostV2(
 	if err != nil {
 		return RunnerResult{}, err
 	}
-	if err := validateProviderHostDescriptorForExecution(descriptor, input, credential); err != nil {
+	if err := r.validateProviderHostDescriptorForExecution(descriptor, input, credential); err != nil {
 		return RunnerResult{}, err
 	}
 	runtimeEventVersion, err := negotiateProviderHostRuntimeEventVersion(descriptor.RuntimeEventVersions)
@@ -427,7 +448,7 @@ func descriptorFromResult(message providerHostMessage) (providerHostDescriptor, 
 	return descriptor, nil
 }
 
-func validateProviderHostDescriptorWire(descriptor providerHostDescriptor, requestedProvider string) error {
+func (r *Runner) validateProviderHostDescriptorWire(descriptor providerHostDescriptor, requestedProvider string) error {
 	if descriptor.ProtocolVersion.Major != providerHostProtocolMajor {
 		return &runnerFailure{
 			code:                 "provider_version_incompatible",
@@ -448,6 +469,9 @@ func validateProviderHostDescriptorWire(descriptor providerHostDescriptor, reque
 	if normalizeProvider(descriptor.CapabilityDescriptor.Provider) != normalizeProvider(requestedProvider) {
 		return protocolFailure("Provider Host descriptor does not match the requested Provider")
 	}
+	if !validProviderSupportTier(descriptor.CapabilityDescriptor.SupportTier) {
+		return protocolFailure("Provider Host descriptor uses an invalid support tier")
+	}
 	if descriptor.RuntimeEventVersions.Minimum > providerHostRuntimeEventVersion ||
 		descriptor.RuntimeEventVersions.Maximum < providerHostRuntimeEventVersion {
 		return &runnerFailure{
@@ -457,7 +481,81 @@ func validateProviderHostDescriptorWire(descriptor providerHostDescriptor, reque
 			canReconstructFromHistory: true, canMoveWorker: true,
 		}
 	}
+	if descriptor.ProtocolVersion.Minor >= 1 {
+		if descriptor.CapabilityDescriptor.Runtime == nil || descriptor.CapabilityDescriptor.ReleasePolicy == nil {
+			return protocolFailure("Provider Host Protocol 2.1 descriptor omitted runtime or releasePolicy")
+		}
+		if err := validateProviderRuntimeDescriptor(*descriptor.CapabilityDescriptor.Runtime); err != nil {
+			return err
+		}
+		if err := r.validateProviderReleasePolicy(
+			requestedProvider, descriptor.CapabilityDescriptor.SupportTier, *descriptor.CapabilityDescriptor.ReleasePolicy,
+		); err != nil {
+			return err
+		}
+	} else if descriptor.CapabilityDescriptor.SupportTier == "experimental" {
+		return &runnerFailure{
+			code:                 "provider_version_incompatible",
+			message:              "Experimental Providers require Provider Host Protocol 2.1 release policy metadata",
+			requiresNewExecution: true, requiresUserAction: true,
+			canReconstructFromHistory: true, canMoveWorker: true,
+		}
+	}
 	return nil
+}
+
+func validateProviderRuntimeDescriptor(runtime providerRuntimeDescriptor) error {
+	if runtime.Kind != "cli" && runtime.Kind != "sdk" && runtime.Kind != "local" {
+		return protocolFailure("Provider Host runtime kind is invalid")
+	}
+	if strings.TrimSpace(runtime.Name) == "" ||
+		(runtime.VersionSource != "probe" && runtime.VersionSource != "package" && runtime.VersionSource != "build") ||
+		strings.TrimSpace(runtime.CompatibleRange.MinimumInclusive) == "" ||
+		(runtime.CompatibleRange.MaximumExclusive != nil && strings.TrimSpace(*runtime.CompatibleRange.MaximumExclusive) == "") {
+		return protocolFailure("Provider Host runtime metadata is incomplete")
+	}
+	if runtime.Version != nil && strings.TrimSpace(*runtime.Version) == "" {
+		return protocolFailure("Provider Host runtime version is empty")
+	}
+	if !runtime.Available && runtime.Compatible {
+		return protocolFailure("Unavailable Provider Host runtime cannot be compatible")
+	}
+	if runtime.Version == nil && runtime.Compatible {
+		return protocolFailure("Provider Host runtime without a version cannot be compatible")
+	}
+	return nil
+}
+
+func (r *Runner) validateProviderReleasePolicy(
+	provider, supportTier string,
+	policy providerReleasePolicy,
+) error {
+	requiresExplicitEnablement := supportTier == "experimental"
+	if policy.RequiresExplicitEnablement != requiresExplicitEnablement {
+		return protocolFailure("Provider Host releasePolicy does not match its support tier")
+	}
+	expectedEnabled := true
+	if requiresExplicitEnablement {
+		expectedEnabled = r.experimentalProviderEnabled(provider)
+	}
+	if policy.Enabled != expectedEnabled {
+		return &runnerFailure{
+			code:                 "provider_version_incompatible",
+			message:              "Provider Host enabled state does not match the Worker target Provider policy",
+			requiresNewExecution: true, requiresUserAction: true,
+			canReconstructFromHistory: true, canMoveWorker: true,
+		}
+	}
+	return nil
+}
+
+func validProviderSupportTier(value string) bool {
+	switch value {
+	case "tier-1", "tier-2", "experimental", "local-only":
+		return true
+	default:
+		return false
+	}
 }
 
 func negotiateProviderHostRuntimeEventVersion(versions providerHostVersionRange) (int, error) {
@@ -471,13 +569,41 @@ func negotiateProviderHostRuntimeEventVersion(versions providerHostVersionRange)
 	}
 }
 
-func validateProviderHostDescriptorForExecution(
+func (r *Runner) validateProviderHostDescriptorForExecution(
 	descriptor providerHostDescriptor,
 	input RunnerInput,
 	credential *RunnerCredential,
 ) error {
-	if err := validateProviderHostDescriptorWire(descriptor, input.Workload.Provider); err != nil {
+	if err := r.validateProviderHostDescriptorWire(descriptor, input.Workload.Provider); err != nil {
 		return err
+	}
+	if descriptor.ProtocolVersion.Minor >= 1 {
+		if descriptor.CapabilityDescriptor.SupportTier == "experimental" &&
+			(descriptor.CapabilityDescriptor.ReleasePolicy == nil ||
+				!descriptor.CapabilityDescriptor.ReleasePolicy.RequiresExplicitEnablement ||
+				!descriptor.CapabilityDescriptor.ReleasePolicy.Enabled) {
+			return &runnerFailure{
+				code:               "capability_unsupported",
+				message:            fmt.Sprintf("Experimental Provider %s is disabled by the Worker target policy", input.Workload.Provider),
+				requiresUserAction: true, canMoveWorker: true,
+			}
+		}
+		runtime := descriptor.CapabilityDescriptor.Runtime
+		if runtime == nil || !runtime.Available {
+			return &runnerFailure{
+				code:               "provider_not_installed",
+				message:            fmt.Sprintf("Provider runtime for %s is unavailable on this Worker", input.Workload.Provider),
+				requiresUserAction: true, canMoveWorker: true,
+			}
+		}
+		if !runtime.Compatible {
+			return &runnerFailure{
+				code:                 "provider_version_incompatible",
+				message:              fmt.Sprintf("Provider runtime version for %s is unavailable or outside the compatible range", input.Workload.Provider),
+				requiresNewExecution: true, requiresUserAction: true,
+				canReconstructFromHistory: true, canMoveWorker: true,
+			}
+		}
 	}
 	capability := descriptor.CapabilityDescriptor.Capabilities["send-turn"]
 	if descriptor.CapabilityDescriptor.SupportTier == "local-only" ||
@@ -635,7 +761,7 @@ func (r *Runner) startProviderHostV2(
 			_ = processTree.release()
 		}
 	}()
-	command.Env = runnerEnvironment(os.Environ())
+	command.Env = providerHostEnvironment(os.Environ(), r.experimentalProviderList())
 	var credentialWrite <-chan error
 	if credential != nil {
 		readPipe, writePipe, err := os.Pipe()
@@ -716,6 +842,20 @@ func (r *Runner) startProviderHostV2(
 	}()
 	go process.readLoop(scanner)
 	return process, nil
+}
+
+func providerHostEnvironment(source []string, experimentalProviders []string) []string {
+	base := runnerEnvironment(source)
+	result := make([]string, 0, len(base)+1)
+	for _, entry := range base {
+		name, _, found := strings.Cut(entry, "=")
+		if found && strings.EqualFold(strings.TrimSpace(name), providerHostExperimentalEnv) {
+			continue
+		}
+		result = append(result, entry)
+	}
+	result = append(result, providerHostExperimentalEnv+"="+strings.Join(experimentalProviders, ","))
+	return result
 }
 
 func closeProviderHostFiles(command *exec.Cmd) {

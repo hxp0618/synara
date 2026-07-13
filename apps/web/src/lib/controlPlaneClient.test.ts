@@ -459,6 +459,114 @@ describe("controlPlaneClient", () => {
     );
   });
 
+  it("lists tenant-scoped observed Worker Manifests", async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(
+        JSON.stringify({
+          items: [
+            {
+              executionTargetId: "target-1",
+              manifestId: "manifest-1",
+              workerStatusCounts: { online: 2, draining: 1, offline: 0 },
+              lastHeartbeatAt: "2026-07-14T08:00:00Z",
+              workerBuild: {
+                version: "0.5.2",
+                gitSha: "abc123",
+                imageDigest: "sha256:worker",
+                operatingSystem: "linux",
+                architecture: "arm64",
+              },
+              workerProtocol: { minimum: 2, maximum: 2 },
+              runtimeEvent: { minimum: 2, maximum: 2 },
+              providers: [
+                {
+                  provider: "codex",
+                  supportTier: "experimental",
+                  compatibilityStatus: "compatible",
+                  runtime: {
+                    kind: "cli",
+                    name: "codex-cli",
+                    version: "0.144.1",
+                    available: true,
+                    versionSource: "probe",
+                    compatibleRange: {
+                      minimumInclusive: "0.144.1",
+                      maximumExclusive: "0.145.0",
+                    },
+                    compatible: true,
+                  },
+                  releasePolicy: {
+                    requiresExplicitEnablement: true,
+                    enabled: true,
+                  },
+                  capabilities: { discovery: "native" },
+                },
+              ],
+            },
+          ],
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const page = await controlPlaneClient.listWorkerManifests("tenant/one");
+
+    expect(page.items[0]).toMatchObject({
+      executionTargetId: "target-1",
+      manifestId: "manifest-1",
+      providers: [
+        expect.objectContaining({
+          provider: "codex",
+          compatibilityStatus: "compatible",
+        }),
+      ],
+    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/v1/tenants/tenant%2Fone/worker-manifests",
+      expect.objectContaining({ credentials: "include" }),
+    );
+  });
+
+  it("updates an Execution Target Provider Policy without replacing the target", async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(
+        JSON.stringify({
+          id: "target/one",
+          tenantId: "tenant/one",
+          organizationId: null,
+          kind: "docker",
+          name: "Docker workers",
+          status: "active",
+          capabilities: {
+            workspaceModes: ["local", "worktree"],
+            providerPolicy: { experimentalProviders: ["codex"] },
+          },
+          createdAt: "2026-07-14T00:00:00Z",
+          updatedAt: "2026-07-14T01:00:00Z",
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const target = await controlPlaneClient.updateExecutionTargetProviderPolicy(
+      "tenant/one",
+      "target/one",
+      ["codex"],
+    );
+
+    expect(target.capabilities.providerPolicy).toEqual({ experimentalProviders: ["codex"] });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/v1/tenants/tenant%2Fone/execution-targets/target%2Fone/provider-policy",
+      expect.objectContaining({
+        method: "PATCH",
+        credentials: "include",
+        body: JSON.stringify({ experimentalProviders: ["codex"] }),
+      }),
+    );
+  });
+
   it("runs SSH target lifecycle operations through the tenant-scoped API", async () => {
     const fetchMock = vi.fn(async () =>
       new Response(

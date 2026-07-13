@@ -58,6 +58,28 @@ func (s *Server) getExecutionTarget(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, item)
 }
 
+func (s *Server) updateExecutionTargetProviderPolicy(w http.ResponseWriter, r *http.Request) {
+	tenantID, ok := s.pathUUID(w, r, "tenantID")
+	if !ok {
+		return
+	}
+	targetID, ok := s.pathUUID(w, r, "executionTargetID")
+	if !ok {
+		return
+	}
+	var policy map[string]any
+	if err := decodeJSON(r, &policy); err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	item, err := s.targets.UpdateProviderPolicy(r.Context(), mustPrincipal(r), tenantID, targetID, policy)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, item)
+}
+
 func (s *Server) installSSHExecutionTarget(w http.ResponseWriter, r *http.Request) {
 	s.provisionSSHExecutionTarget(w, r, "install")
 }

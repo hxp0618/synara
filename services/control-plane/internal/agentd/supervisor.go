@@ -20,6 +20,7 @@ type LocalSupervisorInput struct {
 	ListenAddress     string
 	RegistrationToken string
 	ExecutionTargetID uuid.UUID
+	Capabilities      map[string]any
 	RunnerCommand     []string
 	WorkspaceRoot     string
 	GitCacheRoot      string
@@ -81,12 +82,23 @@ func NewLocalSupervisor(input LocalSupervisorInput, logger *slog.Logger) (*Local
 	if heartbeatInterval < time.Second {
 		heartbeatInterval = time.Second
 	}
+	capabilities := make(map[string]any, len(input.Capabilities)+1)
+	for key, value := range input.Capabilities {
+		capabilities[key] = value
+	}
+	if _, found := capabilities["workspaceModes"]; !found {
+		capabilities["workspaceModes"] = []string{"local", "worktree"}
+	}
+	experimentalProviders, err := parseExperimentalProviders(capabilities)
+	if err != nil {
+		return nil, fmt.Errorf("local agentd target capabilities are invalid: %w", err)
+	}
 	config := Config{
 		ControlPlaneURL: controlPlaneURL, RegistrationToken: input.RegistrationToken,
 		ExecutionTargetID: input.ExecutionTargetID, TargetKind: platform.TargetLocal,
 		ClusterID: "control-plane", Namespace: "local",
 		PodName: "local-agentd-" + input.ExecutionTargetID.String(), Version: "embedded",
-		Capabilities:  map[string]any{"workspaceModes": []string{"local", "worktree"}},
+		Capabilities: capabilities, ExperimentalProviders: experimentalProviders,
 		RunnerCommand: append([]string(nil), input.RunnerCommand...), RunnerProtocol: RunnerProtocolV2,
 		WorkspaceRoot: workspaceRoot, GitCacheRoot: gitCacheRoot,
 		PollInterval: time.Second, HeartbeatInterval: heartbeatInterval,

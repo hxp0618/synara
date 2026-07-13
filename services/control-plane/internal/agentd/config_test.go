@@ -2,11 +2,62 @@ package agentd
 
 import (
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/google/uuid"
 )
+
+func TestLoadConfigDefaultsExperimentalProvidersToDisabled(t *testing.T) {
+	setAgentdConfigEnvironment(t, filepath.Join(t.TempDir(), "workspaces"), "")
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.ExperimentalProviders) != 0 {
+		t.Fatalf("experimental Providers defaulted to enabled: %v", cfg.ExperimentalProviders)
+	}
+}
+
+func TestLoadConfigParsesExperimentalProviderPolicy(t *testing.T) {
+	setAgentdConfigEnvironment(t, filepath.Join(t.TempDir(), "workspaces"), "")
+	t.Setenv("SYNARA_AGENTD_CAPABILITIES_JSON", `{
+		"workspaceModes":["worktree"],
+		"providerPolicy":{"experimentalProviders":["pi","claudeAgent","codex"]}
+	}`)
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"claudeAgent", "codex", "pi"}
+	if !slices.Equal(cfg.ExperimentalProviders, want) {
+		t.Fatalf("experimental Providers = %v, want %v", cfg.ExperimentalProviders, want)
+	}
+}
+
+func TestLoadConfigRejectsInvalidExperimentalProviderPolicy(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		value string
+	}{
+		{name: "policy is not object", value: `{"providerPolicy":[]}`},
+		{name: "allowlist is not array", value: `{"providerPolicy":{"experimentalProviders":"codex"}}`},
+		{name: "unknown Provider", value: `{"providerPolicy":{"experimentalProviders":["unknown"]}}`},
+		{name: "duplicate Provider", value: `{"providerPolicy":{"experimentalProviders":["codex","codex"]}}`},
+		{name: "non canonical Provider", value: `{"providerPolicy":{"experimentalProviders":[" claudeAgent "]}}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			setAgentdConfigEnvironment(t, filepath.Join(t.TempDir(), "workspaces"), "")
+			t.Setenv("SYNARA_AGENTD_CAPABILITIES_JSON", test.value)
+			if _, err := LoadConfig(); err == nil || !strings.Contains(err.Error(), "providerPolicy") {
+				t.Fatalf("invalid Provider policy was accepted: %v", err)
+			}
+		})
+	}
+}
 
 func TestLoadConfigDefaultsGitCacheRootBesideWorkspaceRoot(t *testing.T) {
 	workspaceRoot := filepath.Join(t.TempDir(), "workspaces")

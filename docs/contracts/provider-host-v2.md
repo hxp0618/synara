@@ -1,6 +1,6 @@
-# Provider Host Protocol v2
+# Provider Host Protocol v2.1
 
-Provider Host Protocol v2 is the versioned JSONL boundary between `synara-agentd` and a Provider Host. It is
+Provider Host Protocol v2.1 is the versioned JSONL boundary between `synara-agentd` and a Provider Host. It is
 independent from Worker Protocol and Runtime Event versions.
 
 The schema source of truth is `packages/contracts/src/providerHost.ts`.
@@ -8,7 +8,7 @@ The schema source of truth is `packages/contracts/src/providerHost.ts`.
 ## Version
 
 ```json
-{ "major": 2, "minor": 0 }
+{ "major": 2, "minor": 1 }
 ```
 
 - Major mismatch is incompatible and makes the Host/Provider combination non-schedulable.
@@ -79,10 +79,10 @@ the persisted Steer intent as a marked user message and clears the composer only
 Queue delivery during an active remote Turn remains explicitly unsupported rather than being converted into
 Steer or a new Turn.
 
-Every durable Control Command is mapped to a Provider Capability before Claim. A Worker without a compatible
-immutable Provider Manifest is skipped for ordinary queue Claims and receives `capability_unsupported` for an
-explicit Execution Claim. This check happens before Generation or Lease mutation, so an incompatible Worker
-cannot consume or rebind pending control intent.
+Every durable Control Command is mapped to a Provider Capability before Claim. A Worker without an immutable
+Provider Manifest is skipped for ordinary queue Claims and receives `worker_manifest_required` for an explicit
+Execution Claim. A present but incompatible Manifest receives `capability_unsupported`. This check happens
+before Generation or Lease mutation, so an incompatible Worker cannot consume or rebind pending control intent.
 
 Codex uses `codex app-server` as its production v2 runtime. It initializes a bidirectional JSON-RPC connection,
 starts or resumes the native Thread, streams Turn/Item/usage events, and routes native `turn/interrupt`, command
@@ -101,21 +101,29 @@ forwarding raw SDK payloads.
 
 ## Describe
 
-`Describe` returns the Host build, Adapter/CLI version, complete Capability Descriptor, command/message limits,
-Runtime Event version range, credential delivery modes and Resume strategies. Managed v2 Hosts currently advertise
-Runtime Event `{ minimum: 2, maximum: 2 }`; every Event payload carries that negotiated version and a canonical
-event type from [Runtime Event v2](./runtime-event-v2.md). Static capability claims must be verified by the shared
-Provider Acceptance Suite.
+`Describe` returns the Host build, complete Capability Descriptor, command/message limits, Runtime Event version
+range, credential delivery modes and Resume strategies. Protocol 2.1 keeps the normalized Runtime descriptor and
+Release Policy inside `capabilityDescriptor`: Runtime identifies the CLI, SDK package or local build, its observed
+version source and compatible range; Release Policy states whether explicit enablement is required and whether the
+Host actually enabled the Provider. Managed v2.1 Hosts currently advertise Runtime Event
+`{ minimum: 2, maximum: 2 }`; every Event payload carries that negotiated version and a canonical event type from
+[Runtime Event v2](./runtime-event-v2.md). Static capability claims must be verified by the shared Provider
+Acceptance Suite.
 
 ## agentd negotiation and v1 boundary
 
-Managed Local, SSH, Docker and Kubernetes Workers use v2. Agentd appends `--protocol-v2`, performs
+Managed Local, SSH, Docker and Kubernetes Workers use v2.1. Agentd appends `--protocol-v2`, performs
 side-effect-free `Describe` probes before Worker registration, and publishes the returned Codex and Claude
 plus explicit Local-only Provider descriptors under the registered `providerHost` capability. It performs
 another Describe in the actual Host process before Start/Resume and rejects incompatible Major versions,
-unavailable Provider CLIs, Local-only or
-missing `send-turn` capability, incompatible Runtime Event ranges, unsupported Credential delivery and invalid
-Resume strategies before sending the Provider Turn.
+Protocol minors below 1, unavailable or version-incompatible Provider runtimes, Local-only or missing `send-turn`
+capability, incompatible Runtime Event ranges, unsupported Credential delivery and invalid Resume strategies
+before sending the Provider Turn.
+
+The Execution Target Provider Policy is authoritative. Experimental Providers are disabled unless the Target
+explicitly enables them. Agentd injects that allowlist into the Host process and Control Plane rejects registration
+when the Host's observed Release Policy does not match the persisted Target policy. Runtime and Release Policy
+evidence is copied into the immutable Provider Runtime Binding used by an Execution.
 
 `SYNARA_AGENTD_PROVIDER_HOST_PROTOCOL=v1` is the explicit, bounded compatibility switch for an older one-shot
 runner. The default is `v2`; there is intentionally no `auto` mode and no fallback after a v2 command. Replaying
@@ -136,6 +144,10 @@ canMoveWorker
 
 The message is safe for users and logs. It must not contain Credential values, Worker/Lease Tokens, complete
 Provider stderr or Presigned URLs.
+
+Release-policy rejection uses `capability_unsupported`; Runtime or Protocol version rejection uses
+`provider_version_incompatible`. Manifest projection must not invent a second error-code vocabulary for the same
+failure classes.
 
 ## v1 boundary
 
