@@ -13,10 +13,15 @@ const CONTROLLED_PROVIDER_PROXY =
 
 describe("Codex app-server runtime", () => {
   it("delivers a native approval response and returns streamed output", async () => {
-    await withFakeCodex("approval", async (directory) => {
+    await withFakeCodex("approval", async (directory, _tracePath, environment) => {
       const messages: RunnerMessage[] = [];
       const interaction = waitForInteraction(messages, (message) => message.interactionType === "approval");
-      const run = startProviderHostRun(codexInput(directory), null, (message) => messages.push(message));
+      const run = startProviderHostRun(
+        codexInput(directory),
+        null,
+        (message) => messages.push(message),
+        { environment },
+      );
 
       const request = await interaction;
       expect(request.payload).toMatchObject({
@@ -49,7 +54,7 @@ describe("Codex app-server runtime", () => {
   });
 
   it("answers native structured user input", async () => {
-    await withFakeCodex("user-input", async (directory) => {
+    await withFakeCodex("user-input", async (directory, _tracePath, environment) => {
       const messages: RunnerMessage[] = [];
       const interaction = waitForInteraction(
         messages,
@@ -59,6 +64,7 @@ describe("Codex app-server runtime", () => {
         codexInput(directory, { interactionMode: "plan" }),
         null,
         (message) => messages.push(message),
+        { environment },
       );
 
       const request = await interaction;
@@ -84,7 +90,7 @@ describe("Codex app-server runtime", () => {
   });
 
   it("uses thread/resume even when authoritative history is available", async () => {
-    await withFakeCodex("resume", async (directory) => {
+    await withFakeCodex("resume", async (directory, _tracePath, environment) => {
       const run = startProviderHostRun(
         {
           ...codexInput(directory),
@@ -100,6 +106,7 @@ describe("Codex app-server runtime", () => {
         },
         null,
         () => {},
+        { environment },
       );
 
       await expect(run.result).resolves.toMatchObject({
@@ -110,7 +117,7 @@ describe("Codex app-server runtime", () => {
   });
 
   it("falls back to ResumeSnapshot reconstruction when native thread resume is invalid", async () => {
-    await withFakeCodex("resume-rebuild", async (directory) => {
+    await withFakeCodex("resume-rebuild", async (directory, _tracePath, environment) => {
       const run = startProviderHostRun(
         {
           ...codexInput(directory),
@@ -134,6 +141,7 @@ describe("Codex app-server runtime", () => {
         },
         null,
         () => {},
+        { environment },
       );
 
       await expect(run.result).resolves.toMatchObject({
@@ -144,8 +152,8 @@ describe("Codex app-server runtime", () => {
   });
 
   it("redacts an authenticated controlled proxy from Provider output", async () => {
-    await withFakeCodex("proxy-output", async (directory) => {
-      const run = startProviderHostRun(codexInput(directory), null, () => {});
+    await withFakeCodex("proxy-output", async (directory, _tracePath, environment) => {
+      const run = startProviderHostRun(codexInput(directory), null, () => {}, { environment });
       const result = await run.result;
 
       expect(result).toMatchObject({
@@ -156,14 +164,19 @@ describe("Codex app-server runtime", () => {
   });
 
   it("sends native turn/interrupt before terminating the app-server", async () => {
-    await withFakeCodex("interrupt", async (directory, tracePath) => {
+    await withFakeCodex("interrupt", async (directory, tracePath, environment) => {
       let started!: () => void;
       const startedPromise = new Promise<void>((resolve) => {
         started = resolve;
       });
-      const run = startProviderHostRun(codexInput(directory), null, (message) => {
-        if (message.type === "event" && message.eventType === "runtime.output.delta") started();
-      });
+      const run = startProviderHostRun(
+        codexInput(directory),
+        null,
+        (message) => {
+          if (message.type === "event" && message.eventType === "runtime.output.delta") started();
+        },
+        { environment },
+      );
 
       await startedPromise;
       run.interrupt();
@@ -173,14 +186,19 @@ describe("Codex app-server runtime", () => {
   });
 
   it("steers the active native Turn without creating a second Turn", async () => {
-    await withFakeCodex("steer", async (directory, tracePath) => {
+    await withFakeCodex("steer", async (directory, tracePath, environment) => {
       let started!: () => void;
       const startedPromise = new Promise<void>((resolve) => {
         started = resolve;
       });
-      const run = startProviderHostRun(codexInput(directory), null, (message) => {
-        if (message.type === "event" && message.eventType === "runtime.output.delta") started();
-      });
+      const run = startProviderHostRun(
+        codexInput(directory),
+        null,
+        (message) => {
+          if (message.type === "event" && message.eventType === "runtime.output.delta") started();
+        },
+        { environment },
+      );
 
       await startedPromise;
       await run.steer?.({ inputText: "focus on the failing test" });
@@ -236,14 +254,19 @@ async function withFakeCodex(
     | "interrupt"
     | "steer"
     | "proxy-output",
-  run: (directory: string, tracePath: string) => Promise<void>,
+  run: (
+    directory: string,
+    tracePath: string,
+    environment: NodeJS.ProcessEnv,
+  ) => Promise<void>,
 ): Promise<void> {
   const directory = mkdtempSync(join(tmpdir(), "synara-codex-app-server-"));
   const executable = join(directory, "codex");
   const tracePath = join(directory, "trace.log");
   writeFileSync(executable, fakeCodexSource(scenario, tracePath, directory), "utf8");
   chmodSync(executable, 0o700);
-  const environment = {
+  const environment: NodeJS.ProcessEnv = {
+    ...process.env,
     PATH: `${directory}:${process.env.PATH ?? ""}`,
     HOME: directory,
     TMPDIR: directory,
@@ -270,19 +293,10 @@ async function withFakeCodex(
     SYNARA_PROVIDER_HTTP_PROXY: CONTROLLED_PROVIDER_PROXY,
     SSH_AUTH_SOCK: "/host/agent.sock",
     NODE_OPTIONS: "--require=/host/inject-secrets.js",
-  } as const;
-  const previousEnvironment = new Map<string, string | undefined>();
-  for (const [name, value] of Object.entries(environment)) {
-    previousEnvironment.set(name, process.env[name]);
-    process.env[name] = value;
-  }
+  };
   try {
-    await run(directory, tracePath);
+    await run(directory, tracePath, environment);
   } finally {
-    for (const [name, value] of previousEnvironment) {
-      if (value === undefined) delete process.env[name];
-      else process.env[name] = value;
-    }
     rmSync(directory, { recursive: true, force: true });
   }
 }

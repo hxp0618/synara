@@ -287,8 +287,10 @@ describe("provider process lifecycle", () => {
       "utf8",
     );
     chmodSync(executable, 0o700);
-    const previousPath = process.env.PATH;
-    process.env.PATH = `${directory}:${previousPath ?? ""}`;
+    const environment = {
+      ...process.env,
+      PATH: `${directory}:${process.env.PATH ?? ""}`,
+    };
     try {
       const run = startProviderHostRun(
         {
@@ -298,12 +300,12 @@ describe("provider process lifecycle", () => {
         },
         null,
         () => {},
+        { environment },
       );
       await new Promise((resolve) => setTimeout(resolve, 20));
       run.interrupt();
       await expect(run.result).rejects.toThrow("interrupted");
     } finally {
-      process.env.PATH = previousPath;
       rmSync(directory, { recursive: true, force: true });
     }
   });

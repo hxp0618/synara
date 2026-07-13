@@ -465,11 +465,7 @@ describe("Claude Agent SDK runtime", () => {
       HTTP_PROXY: "http://ambient-user:ambient-secret@proxy.example.test",
       SYNARA_PROVIDER_HTTP_PROXY: controlledProxy,
     } as const;
-    const previousEnvironment = new Map<string, string | undefined>();
-    for (const [name, value] of Object.entries(ambient)) {
-      previousEnvironment.set(name, process.env[name]);
-      process.env[name] = value;
-    }
+    const environment = { ...process.env, ...ambient };
     const queryFactory: ClaudeQueryFactory = ({ options }) =>
       fakeQuery(
         (async function* () {
@@ -496,25 +492,18 @@ describe("Claude Agent SDK runtime", () => {
           });
         })(),
       );
-    try {
-      const run = startProviderHostRun(
-        claudeInput({ inputText: "fail safely" }),
-        { payload: { apiKey: "provider-secret" } },
-        () => {},
-        { claudeQueryFactory: queryFactory },
-      );
+    const run = startProviderHostRun(
+      claudeInput({ inputText: "fail safely" }),
+      { payload: { apiKey: "provider-secret" } },
+      () => {},
+      { claudeQueryFactory: queryFactory, environment },
+    );
 
-      await expect(run.result).rejects.toThrow(
-        "request failed via [REDACTED] with [REDACTED]",
-      );
-      await expect(run.result).rejects.not.toThrow("provider-secret");
-      await expect(run.result).rejects.not.toThrow(controlledProxy);
-    } finally {
-      for (const [name, value] of previousEnvironment) {
-        if (value === undefined) delete process.env[name];
-        else process.env[name] = value;
-      }
-    }
+    await expect(run.result).rejects.toThrow(
+      "request failed via [REDACTED] with [REDACTED]",
+    );
+    await expect(run.result).rejects.not.toThrow("provider-secret");
+    await expect(run.result).rejects.not.toThrow(controlledProxy);
   });
 });
 

@@ -74,6 +74,7 @@ export type ProviderRunController = {
 export type ProviderRunOptions = {
   interactive?: boolean;
   claudeQueryFactory?: ClaudeQueryFactory;
+  environment?: NodeJS.ProcessEnv;
 };
 
 const PROVIDER_PROCESS_ENVIRONMENT_ALLOWLIST = [
@@ -290,7 +291,11 @@ export function startProviderHostRun(
 ): ProviderRunController {
   validateRunnerInput(input);
   const normalizedProvider = input.workload.provider.trim().toLowerCase();
-  const { environment, redact } = providerEnvironment(process.env, normalizedProvider, credential);
+  const { environment, redact } = providerEnvironment(
+    options.environment ?? process.env,
+    normalizedProvider,
+    credential,
+  );
   const hasDurableHistory = hasAuthoritativeResumeData(input.workload);
   const prompt = hasDurableHistory ? reconstructedPrompt(input) : input.workload.inputText;
   const interactive = options.interactive ?? true;
