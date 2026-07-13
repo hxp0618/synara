@@ -29,7 +29,6 @@ import {
 import {
   controlPlaneClient,
   type ControlPlaneExecutionTarget,
-  type ControlPlaneProviderCredential,
   type TenantInvitation,
 } from "~/lib/controlPlaneClient";
 import { cn } from "~/lib/utils";
@@ -226,12 +225,12 @@ function AuthenticatedTenantPanel() {
     canReadServiceAccounts,
     canManageServiceAccounts,
   } = controlPlane.capabilities;
-	const credentialsQuery = useQuery({
-		queryKey: credentialsQueryKey(activeTenantId ?? ""),
-		queryFn: () => controlPlaneClient.listCredentials(activeTenantId!),
-		enabled: activeTenantId !== null && canManageCredentials,
-		retry: false,
-	});
+  const credentialsQuery = useQuery({
+    queryKey: credentialsQueryKey(activeTenantId ?? ""),
+    queryFn: () => controlPlaneClient.listCredentials(activeTenantId!),
+    enabled: activeTenantId !== null && canManageCredentials,
+    retry: false,
+  });
   const membersQuery = useQuery({
     queryKey: settingsQueryKeys.members(activeTenantId),
     queryFn: () => controlPlaneClient.listTenantMembers(activeTenantId!),
@@ -478,7 +477,7 @@ function AuthenticatedTenantPanel() {
             />
           ) : null}
           <ProjectSessionSettingsSection
-			credentials={(credentialsQuery.data?.items ?? []) as ReadonlyArray<ControlPlaneProviderCredential>}
+            credentials={credentialsQuery.data?.items ?? []}
             executionTargets={executionTargetsQuery.data?.items ?? []}
             tenantId={activeTenant.id}
             organizations={controlPlane.organizations.filter(

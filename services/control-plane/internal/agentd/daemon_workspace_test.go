@@ -38,6 +38,7 @@ func TestDaemonPreparesManagedWorkspaceBeforeStartingProvider(t *testing.T) {
 		sync.Mutex
 		order         []string
 		ready         executions.WorkspaceReadyInput
+		dirty         executions.WorkspaceDirtyInput
 		requestBodies []string
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
@@ -63,6 +64,17 @@ func TestDaemonPreparesManagedWorkspaceBeforeStartingProvider(t *testing.T) {
 			state.Lock()
 			state.ready = input
 			state.order = append(state.order, "workspace.ready")
+			state.Unlock()
+			response.WriteHeader(http.StatusNoContent)
+		case base + "workspace/dirty":
+			var input executions.WorkspaceDirtyInput
+			if err := json.NewDecoder(request.Body).Decode(&input); err != nil {
+				http.Error(response, "invalid Workspace dirty payload", http.StatusBadRequest)
+				return
+			}
+			state.Lock()
+			state.dirty = input
+			state.order = append(state.order, "workspace.dirty")
 			state.Unlock()
 			response.WriteHeader(http.StatusNoContent)
 		case base + "start":
@@ -96,18 +108,26 @@ func TestDaemonPreparesManagedWorkspaceBeforeStartingProvider(t *testing.T) {
 	materializedDirectory := t.TempDir()
 	daemon := &Daemon{
 		config: cfg, client: client, runner: NewRunner(cfg),
-		workspace: workspaceMaterializerFunc(func(_ context.Context, _ executions.Execution, _ executions.Workload, credential *GitHTTPSCredential) (WorkspaceMaterialization, error) {
-			if credential == nil || credential.Host != "git.example.com" || credential.Username != "git-user" || credential.Token != "git-secret-token" {
-				t.Fatalf("Workspace materializer received an invalid Git Credential: %#v", credential)
-			}
-			state.Lock()
-			state.order = append(state.order, "workspace.materialize")
-			state.Unlock()
-			return WorkspaceMaterialization{
-				Directory: materializedDirectory, Managed: true, RepositoryFingerprint: fingerprint,
-				CurrentBranch: branch, BaseCommit: baseCommit, HeadCommit: headCommit,
-			}, nil
-		}),
+		workspace: workspaceMaterializerInspector{
+			materialize: func(_ context.Context, _ executions.Execution, _ executions.Workload, credential *GitHTTPSCredential) (WorkspaceMaterialization, error) {
+				if credential == nil || credential.Host != "git.example.com" || credential.Username != "git-user" || credential.Token != "git-secret-token" {
+					t.Fatalf("Workspace materializer received an invalid Git Credential: %#v", credential)
+				}
+				state.Lock()
+				state.order = append(state.order, "workspace.materialize")
+				state.Unlock()
+				return WorkspaceMaterialization{
+					Directory: materializedDirectory, Managed: true, RepositoryFingerprint: fingerprint,
+					CurrentBranch: branch, BaseCommit: baseCommit, HeadCommit: headCommit,
+				}, nil
+			},
+			inspect: func(_ context.Context, _ WorkspaceMaterialization) (WorkspaceInspection, error) {
+				state.Lock()
+				state.order = append(state.order, "workspace.inspect")
+				state.Unlock()
+				return WorkspaceInspection{Dirty: true, CurrentBranch: branch, HeadCommit: headCommit}, nil
+			},
+		},
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 	execution := executions.Execution{ID: executionID, TenantID: tenantID, TurnID: uuid.New(), Generation: 1}
@@ -121,7 +141,10 @@ func TestDaemonPreparesManagedWorkspaceBeforeStartingProvider(t *testing.T) {
 	}
 	state.Lock()
 	defer state.Unlock()
-	expectedOrder := []string{"git.resolve", "workspace.materialize", "workspace.ready", "execution.start", "execution.complete"}
+	expectedOrder := []string{
+		"git.resolve", "workspace.materialize", "workspace.ready", "execution.start",
+		"workspace.inspect", "workspace.dirty", "execution.complete",
+	}
 	if len(state.order) != len(expectedOrder) {
 		t.Fatalf("unexpected Workspace/Execution lifecycle order: %#v", state.order)
 	}
@@ -133,6 +156,10 @@ func TestDaemonPreparesManagedWorkspaceBeforeStartingProvider(t *testing.T) {
 	if state.ready.RepositoryFingerprint == nil || *state.ready.RepositoryFingerprint != *fingerprint ||
 		state.ready.CurrentBranch == nil || *state.ready.CurrentBranch != *branch {
 		t.Fatalf("Workspace metadata was not reported: %#v", state.ready)
+	}
+	if state.dirty.CurrentBranch == nil || *state.dirty.CurrentBranch != *branch ||
+		state.dirty.HeadCommit == nil || *state.dirty.HeadCommit != *headCommit {
+		t.Fatalf("dirty Workspace metadata was not reported: %#v", state.dirty)
 	}
 	if strings.Contains(strings.Join(state.requestBodies, "\n"), "git-secret-token") {
 		t.Fatal("Git Credential leaked into an agentd request after resolution")
@@ -225,4 +252,25 @@ func (f workspaceMaterializerFunc) Materialize(
 	credential *GitHTTPSCredential,
 ) (WorkspaceMaterialization, error) {
 	return f(ctx, execution, workload, credential)
+}
+
+type workspaceMaterializerInspector struct {
+	materialize func(context.Context, executions.Execution, executions.Workload, *GitHTTPSCredential) (WorkspaceMaterialization, error)
+	inspect     func(context.Context, WorkspaceMaterialization) (WorkspaceInspection, error)
+}
+
+func (m workspaceMaterializerInspector) Materialize(
+	ctx context.Context,
+	execution executions.Execution,
+	workload executions.Workload,
+	credential *GitHTTPSCredential,
+) (WorkspaceMaterialization, error) {
+	return m.materialize(ctx, execution, workload, credential)
+}
+
+func (m workspaceMaterializerInspector) Inspect(
+	ctx context.Context,
+	materialized WorkspaceMaterialization,
+) (WorkspaceInspection, error) {
+	return m.inspect(ctx, materialized)
 }

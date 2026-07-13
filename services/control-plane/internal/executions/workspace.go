@@ -139,6 +139,72 @@ func (s *Service) MarkWorkspaceFailed(
 	return result, err
 }
 
+func (s *Service) MarkWorkspaceDirty(
+	ctx context.Context,
+	worker persistence.WorkerInstance,
+	executionID uuid.UUID,
+	input WorkspaceDirtyInput,
+	requestID string,
+) (OperationResult[WorkspaceState], error) {
+	if err := validateWorkspaceDirtyInput(input); err != nil {
+		return OperationResult[WorkspaceState]{}, err
+	}
+	var appended persistence.SessionEvent
+	result, err := runIdempotent(ctx, s, worker.ID, requestID, "workspace.dirty", map[string]any{
+		"executionId": executionID, "tenantId": input.TenantID, "generation": input.Generation,
+		"currentBranch": input.CurrentBranch, "headCommit": input.HeadCommit,
+	}, 200, func(tx *gorm.DB) (WorkspaceState, error) {
+		_, execution, err := s.lockLease(ctx, tx, worker.ID, executionID, input.LeaseInput, true)
+		if err != nil {
+			return WorkspaceState{}, err
+		}
+		workspace, err := lockExecutionWorkspace(ctx, tx, execution)
+		if err != nil {
+			return WorkspaceState{}, err
+		}
+		now := s.now()
+		updates := map[string]any{"state": "dirty", "last_used_at": now, "updated_at": now}
+		if input.CurrentBranch != nil {
+			updates["current_branch"] = input.CurrentBranch
+		}
+		if input.HeadCommit != nil {
+			updates["head_commit"] = input.HeadCommit
+		}
+		updated := tx.WithContext(ctx).Model(&persistence.RemoteWorkspace{}).
+			Where("tenant_id = ? AND id = ? AND last_worker_id = ? AND last_execution_id = ? AND last_generation = ? AND state IN ?",
+				execution.TenantID, workspace.ID, worker.ID, execution.ID, execution.Generation,
+				[]string{"ready", "dirty"}).Updates(updates)
+		if err := expectOne(updated, 409, "workspace_dirty_conflict", "The Workspace change belongs to an obsolete Worker Generation."); err != nil {
+			return WorkspaceState{}, err
+		}
+		workspace.State = "dirty"
+		if input.CurrentBranch != nil {
+			workspace.CurrentBranch = input.CurrentBranch
+		}
+		if input.HeadCommit != nil {
+			workspace.HeadCommit = input.HeadCommit
+		}
+		workspace.LastUsedAt = &now
+		workspace.UpdatedAt = now
+		appended, err = s.sessions.AppendInternalEvent(ctx, tx, execution.TenantID, execution.SessionID, sessions.InternalEventInput{
+			EventType: "workspace.dirty", ActorType: "worker", ActorID: &worker.ID,
+			ExecutionID: &execution.ID, WorkerID: &worker.ID, Generation: &execution.Generation,
+			Payload: map[string]any{
+				"turnId": execution.TurnID, "workspaceId": workspace.ID,
+				"currentBranch": input.CurrentBranch, "headCommit": input.HeadCommit,
+			},
+		})
+		if err != nil {
+			return WorkspaceState{}, err
+		}
+		return toWorkspaceState(workspace), nil
+	})
+	if err == nil && !result.Replayed && appended.EventID != uuid.Nil {
+		s.sessions.PublishInternalEvent(appended)
+	}
+	return result, err
+}
+
 func validateWorkspaceReadyInput(input WorkspaceReadyInput) error {
 	for name, value := range map[string]*string{
 		"repositoryFingerprint": input.RepositoryFingerprint,
@@ -155,6 +221,18 @@ func validateWorkspaceReadyInput(input WorkspaceReadyInput) error {
 	if input.CurrentBranch != nil {
 		branch := strings.TrimSpace(*input.CurrentBranch)
 		if _, err := gitpolicy.NormalizeBranch(branch, ""); err != nil {
+			return problem.New(400, "invalid_workspace_metadata", "currentBranch is invalid.")
+		}
+	}
+	return nil
+}
+
+func validateWorkspaceDirtyInput(input WorkspaceDirtyInput) error {
+	if input.HeadCommit != nil && !workspaceHashPattern.MatchString(strings.TrimSpace(*input.HeadCommit)) {
+		return problem.New(400, "invalid_workspace_metadata", "headCommit is invalid.")
+	}
+	if input.CurrentBranch != nil {
+		if _, err := gitpolicy.NormalizeBranch(strings.TrimSpace(*input.CurrentBranch), ""); err != nil {
 			return problem.New(400, "invalid_workspace_metadata", "currentBranch is invalid.")
 		}
 	}

@@ -160,6 +160,12 @@ type WorkspaceFailedInput struct {
 	FailureMessage string `json:"failureMessage"`
 }
 
+type WorkspaceDirtyInput struct {
+	LeaseInput
+	CurrentBranch *string `json:"currentBranch,omitempty"`
+	HeadCommit    *string `json:"headCommit,omitempty"`
+}
+
 type WorkspaceState struct {
 	ID                    uuid.UUID  `json:"id"`
 	State                 string     `json:"state"`

@@ -253,8 +253,6 @@ export type ControlPlaneExecutionTarget = {
   updatedAt: string;
 };
 
-export type ControlPlaneProviderCredential = ControlPlaneCredential;
-
 export type ControlPlaneSSHProvisionResult = {
   targetId: string;
   operation: "install" | "upgrade" | "revoke";

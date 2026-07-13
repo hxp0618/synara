@@ -90,6 +90,23 @@ func (c *Client) MarkWorkspaceReady(
 	)
 }
 
+func (c *Client) MarkWorkspaceDirty(
+	ctx context.Context,
+	executionID uuid.UUID,
+	lease executions.Lease,
+	result WorkspaceInspection,
+) error {
+	return c.doJSON(
+		ctx, http.MethodPost, executionPath(executionID, "workspace/dirty"), c.workerToken,
+		workspaceRequestID(executionID, lease, "dirty"), executions.WorkspaceDirtyInput{
+			LeaseInput: executions.LeaseInput{
+				TenantID: lease.TenantID, Generation: lease.Generation, LeaseToken: lease.LeaseToken,
+			},
+			CurrentBranch: result.CurrentBranch, HeadCommit: result.HeadCommit,
+		}, nil,
+	)
+}
+
 func (c *Client) MarkWorkspaceFailed(
 	ctx context.Context,
 	executionID uuid.UUID,

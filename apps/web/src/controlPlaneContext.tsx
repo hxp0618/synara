@@ -70,6 +70,7 @@ export type CreateControlPlaneProjectInput = {
   name: string;
   repositoryUrl?: string;
   defaultBranch?: string;
+  gitCredentialId?: string;
   visibility?: ControlPlaneProject["visibility"];
   idempotencyKey?: string;
 };
@@ -399,6 +400,7 @@ export function ControlPlaneProvider({ children }: { children: ReactNode }) {
           name: input.name,
           ...(input.repositoryUrl ? { repositoryUrl: input.repositoryUrl } : {}),
           defaultBranch: input.defaultBranch ?? "main",
+          ...(input.gitCredentialId ? { gitCredentialId: input.gitCredentialId } : {}),
           visibility: input.visibility ?? "organization",
         },
         idempotencyOptions("project", input.idempotencyKey),

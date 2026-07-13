@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -146,6 +147,56 @@ func TestWorkspaceMaterializerRejectsRepositoryRebinding(t *testing.T) {
 	}
 	if _, err := materializer.Materialize(context.Background(), executions.Execution{ID: uuid.New()}, workload, nil); err == nil {
 		t.Fatal("logical Workspace was rebound to a different Repository")
+	}
+}
+
+func TestWorkspaceInspectionDetectsGitAndGeneratedFileChanges(t *testing.T) {
+	directory := t.TempDir()
+	runTestGit(t, directory, "init", "-b", "main")
+	runTestGit(t, directory, "config", "user.email", "worker@example.com")
+	runTestGit(t, directory, "config", "user.name", "Synara Worker")
+	tracked := filepath.Join(directory, "tracked.txt")
+	if err := os.WriteFile(tracked, []byte("baseline\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runTestGit(t, directory, "add", "tracked.txt")
+	runTestGit(t, directory, "commit", "-m", "baseline")
+
+	materializer := NewWorkspaceMaterializer(t.TempDir())
+	clean, err := materializer.Inspect(context.Background(), WorkspaceMaterialization{
+		Directory: directory, Managed: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if clean.Dirty || clean.CurrentBranch == nil || *clean.CurrentBranch != "main" || clean.HeadCommit == nil {
+		t.Fatalf("unexpected clean Workspace inspection: %#v", clean)
+	}
+	if err := os.WriteFile(tracked, []byte("changed\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dirty, err := materializer.Inspect(context.Background(), WorkspaceMaterialization{
+		Directory: directory, Managed: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !dirty.Dirty || dirty.CurrentBranch == nil || dirty.HeadCommit == nil {
+		t.Fatalf("tracked changes were not reported as dirty: %#v", dirty)
+	}
+
+	generatedDirectory := t.TempDir()
+	if err := os.WriteFile(filepath.Join(generatedDirectory, "generated.txt"), []byte("output"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	generated, err := materializer.Inspect(context.Background(), WorkspaceMaterialization{
+		Directory: generatedDirectory, Managed: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !generated.Dirty || generated.CurrentBranch != nil || generated.HeadCommit != nil {
+		t.Fatalf("generated files in a non-Git Workspace were not reported as dirty: %#v", generated)
 	}
 }
 
@@ -306,6 +357,16 @@ func TestGitEnvironmentDropsAmbientCredentials(t *testing.T) {
 		if !strings.Contains(encoded, required) {
 			t.Fatalf("Git isolation environment omitted %s: %s", required, encoded)
 		}
+	}
+}
+
+func runTestGit(t *testing.T, directory string, arguments ...string) {
+	t.Helper()
+	command := exec.Command("git", arguments...)
+	command.Dir = directory
+	command.Env = append(os.Environ(), "LC_ALL=C", "LANG=C", "GIT_CONFIG_NOSYSTEM=1")
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("git %v failed: %v: %s", arguments, err, output)
 	}
 }
 

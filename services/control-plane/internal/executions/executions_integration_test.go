@@ -671,6 +671,19 @@ func TestWorkspacePreparationIsGenerationFencedAcrossWorkerRecovery(t *testing.T
 	if err != nil || !replayed.Replayed {
 		t.Fatalf("Workspace ready transition was not idempotent: result=%#v err=%v", replayed, err)
 	}
+	dirtyHead := strings.Repeat("d", 40)
+	dirty, err := service.MarkWorkspaceDirty(ctx, first, fixture.ExecutionID, WorkspaceDirtyInput{
+		LeaseInput: firstLeaseInput, CurrentBranch: &branch, HeadCommit: &dirtyHead,
+	}, "workspace-dirty")
+	if err != nil || dirty.Value.State != "dirty" || dirty.Value.HeadCommit == nil || *dirty.Value.HeadCommit != dirtyHead {
+		t.Fatalf("Workspace dirty transition failed: result=%#v err=%v", dirty, err)
+	}
+	dirtyReplay, err := service.MarkWorkspaceDirty(ctx, first, fixture.ExecutionID, WorkspaceDirtyInput{
+		LeaseInput: firstLeaseInput, CurrentBranch: &branch, HeadCommit: &dirtyHead,
+	}, "workspace-dirty")
+	if err != nil || !dirtyReplay.Replayed {
+		t.Fatalf("Workspace dirty transition was not idempotent: result=%#v err=%v", dirtyReplay, err)
+	}
 	if _, err := service.Release(ctx, first, fixture.ExecutionID, ReleaseLeaseInput{
 		LeaseInput: firstLeaseInput, Reason: "replace Worker after Workspace preparation",
 	}, "workspace-release"); err != nil {
@@ -688,6 +701,11 @@ func TestWorkspacePreparationIsGenerationFencedAcrossWorkerRecovery(t *testing.T
 		LeaseInput: firstLeaseInput,
 	}, "workspace-stale-ready"); err == nil {
 		t.Fatal("obsolete Worker Generation updated Workspace state")
+	}
+	if _, err := service.MarkWorkspaceDirty(ctx, first, fixture.ExecutionID, WorkspaceDirtyInput{
+		LeaseInput: firstLeaseInput, CurrentBranch: &branch, HeadCommit: &dirtyHead,
+	}, "workspace-stale-dirty"); err == nil {
+		t.Fatal("obsolete Worker Generation updated dirty Workspace state")
 	}
 	secondLease := *secondClaim.Value.Lease
 	failed, err := service.MarkWorkspaceFailed(ctx, second, fixture.ExecutionID, WorkspaceFailedInput{
@@ -707,10 +725,15 @@ func TestWorkspacePreparationIsGenerationFencedAcrossWorkerRecovery(t *testing.T
 		persisted.LastGeneration == nil || *persisted.LastGeneration != secondLease.Generation {
 		t.Fatalf("Workspace generation binding is incorrect: %#v", persisted)
 	}
-	var readyEvents, failedEvents int64
+	var readyEvents, dirtyEvents, failedEvents int64
 	if err := db.Model(&persistence.SessionEvent{}).
 		Where("tenant_id = ? AND session_id = ? AND event_type = ?", fixture.TenantID, fixture.SessionID, "workspace.ready").
 		Count(&readyEvents).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Model(&persistence.SessionEvent{}).
+		Where("tenant_id = ? AND session_id = ? AND event_type = ?", fixture.TenantID, fixture.SessionID, "workspace.dirty").
+		Count(&dirtyEvents).Error; err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Model(&persistence.SessionEvent{}).
@@ -718,8 +741,8 @@ func TestWorkspacePreparationIsGenerationFencedAcrossWorkerRecovery(t *testing.T
 		Count(&failedEvents).Error; err != nil {
 		t.Fatal(err)
 	}
-	if readyEvents != 1 || failedEvents != 1 {
-		t.Fatalf("Workspace lifecycle events are not idempotent: ready=%d failed=%d", readyEvents, failedEvents)
+	if readyEvents != 1 || dirtyEvents != 1 || failedEvents != 1 {
+		t.Fatalf("Workspace lifecycle events are not idempotent: ready=%d dirty=%d failed=%d", readyEvents, dirtyEvents, failedEvents)
 	}
 }
 

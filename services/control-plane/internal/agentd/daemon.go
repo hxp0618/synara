@@ -307,6 +307,20 @@ func (d *Daemon) runExecution(
 			return protocolFailure("Provider Host emitted an unsupported Worker message")
 		}
 	})
+	if runErr == nil && materialized.Managed {
+		if inspector, ok := materializer.(workspaceInspector); ok {
+			inspection, inspectErr := inspector.Inspect(executionContext, materialized)
+			if inspectErr != nil {
+				runErr = workspaceFailure(
+					"workspace_invalid", "The Workspace state could not be inspected after Provider execution.", true, true,
+				)
+			} else if inspection.Dirty {
+				if dirtyErr := d.client.MarkWorkspaceDirty(executionContext, execution.ID, lease, inspection); dirtyErr != nil {
+					runErr = fmt.Errorf("persist dirty Workspace state: %w", dirtyErr)
+				}
+			}
+		}
+	}
 	renewErr := stopRenewal()
 	if runErr != nil && runnerFailurePersisted(runErr) {
 		d.logger.Info("execution interrupted", "executionId", execution.ID, "generation", lease.Generation)

@@ -117,6 +117,24 @@ func (s *Server) markWorkspaceReady(w http.ResponseWriter, r *http.Request) {
 	writeOperation(w, result.Replayed, result.StatusCode, result.Value)
 }
 
+func (s *Server) markWorkspaceDirty(w http.ResponseWriter, r *http.Request) {
+	executionID, ok := s.pathUUID(w, r, "executionID")
+	if !ok {
+		return
+	}
+	var input executions.WorkspaceDirtyInput
+	if err := decodeJSON(r, &input); err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	result, err := s.executions.MarkWorkspaceDirty(r.Context(), mustWorker(r), executionID, input, requestID(r))
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	writeOperation(w, result.Replayed, result.StatusCode, result.Value)
+}
+
 func (s *Server) markWorkspaceFailed(w http.ResponseWriter, r *http.Request) {
 	executionID, ok := s.pathUUID(w, r, "executionID")
 	if !ok {

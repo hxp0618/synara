@@ -7,7 +7,8 @@ message names and fencing behavior remain stable if the transport later moves to
 
 `RegisterWorker`, `Heartbeat`, `ClaimExecution`, `StartSession`, `ResumeSession`, `SendTurn`,
 `InterruptTurn`, `ResolveApproval`, `ResolveUserInput`, `RuntimeEvent`, `UploadArtifact`,
-`ReportWorkspaceReady`, `ReportWorkspaceFailed`, `CompleteExecution`, `FailExecution`, and `ReleaseLease`.
+`ReportWorkspaceReady`, `ReportWorkspaceDirty`, `ReportWorkspaceFailed`, `CompleteExecution`, `FailExecution`,
+and `ReleaseLease`.
 
 ## Common envelope
 
@@ -27,7 +28,8 @@ supported version. Unsupported versions return HTTP `426` with stable code
 remains the Worker build/image version and is not used as the protocol number.
 
 A successful Claim includes a read-only `workload` snapshot with Tenant/Organization/Project/Session/
-Turn IDs, Session title, Provider and Model, Turn input, repository URL, and default branch. The
+Turn IDs, Session title, Provider and Model, Turn input, repository URL, default branch, and the
+Project's optional `gitCredentialId`. The
 snapshot is loaded in the claim transaction and is preserved across idempotent Claim replay. Workers
 never query control-plane tables directly.
 
@@ -35,6 +37,17 @@ The Workload includes the logical `remoteWorkspaceId`. Before `StartExecution`, 
 materializes the stable Session checkout and reports either `workspace.ready` with Repository fingerprint,
 branch, base commit and HEAD, or `workspace.failed` with a safe stable error. Both reports require the current
 Worker ID, Lease Token and Generation. Provider execution cannot begin from an unreported managed Workspace.
+
+When `gitCredentialId` is present, agentd resolves it through the dedicated execution-scoped
+`/git-credentials/{credentialID}/resolve` Worker endpoint. The request is fenced by Worker ID, Lease Token and
+Generation. Control Plane additionally verifies the Project still owns that binding and the Credential host
+matches the HTTPS Repository hostname. The returned username/token is consumed only by the ephemeral Git
+AskPass channel during Clone/Fetch and is cleared before `workspace.ready` and Provider start.
+
+After Provider execution, agentd reports `workspace.dirty` before `CompleteExecution` when tracked/untracked
+Git content or managed non-Git files changed. The report remains Lease/Generation-fenced and carries only the
+safe current branch and HEAD metadata, never file contents. Checkpoint/Artifact persistence consumes the dirty
+state in a later lifecycle step.
 
 The Workload also carries the immutable `runtimeMode` (`approval-required | full-access`) and
 `interactionMode` (`default | plan`) captured when the Control Plane created the Turn. A Worker must not infer

@@ -169,6 +169,62 @@ describe("controlPlaneClient", () => {
     expect(new Headers(request.headers).get("Idempotency-Key")).toBe("web-session-request-1");
   });
 
+  it("creates projects with private Git access and can explicitly unbind it", async () => {
+    const responses = [
+      new Response(JSON.stringify({ id: "project-1", gitCredentialId: "git-credential-1" }), {
+        status: 201,
+        headers: { "Content-Type": "application/json" },
+      }),
+      new Response(JSON.stringify({ id: "project-1", gitCredentialId: null }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    ];
+    const fetchMock = vi.fn(async () => responses.shift()!);
+    vi.stubGlobal("fetch", fetchMock);
+
+    await controlPlaneClient.createProject(
+      "tenant/one",
+      "organization/one",
+      {
+        name: "Private repository",
+        repositoryUrl: "https://github.com/company/private.git",
+        defaultBranch: "main",
+        gitCredentialId: "git-credential-1",
+        visibility: "organization",
+      },
+      { idempotencyKey: "web-project-request-1" },
+    );
+    await controlPlaneClient.updateProject("project/one", { gitCredentialId: null });
+
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
+      "/v1/tenants/tenant%2Fone/organizations/organization%2Fone/projects",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          name: "Private repository",
+          repositoryUrl: "https://github.com/company/private.git",
+          defaultBranch: "main",
+          gitCredentialId: "git-credential-1",
+          visibility: "organization",
+        }),
+      }),
+    );
+    const createRequest = fetchMock.mock.calls[0]?.[1] as RequestInit;
+    expect(new Headers(createRequest.headers).get("Idempotency-Key")).toBe(
+      "web-project-request-1",
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      "/v1/projects/project%2Fone",
+      expect.objectContaining({
+        method: "PATCH",
+        body: JSON.stringify({ gitCredentialId: null }),
+      }),
+    );
+  });
+
   it("loads bounded durable event backlog and sends idempotent Turns", async () => {
     const responses = [
       new Response(JSON.stringify({ items: [], lastSequence: 23 }), {
@@ -466,6 +522,38 @@ describe("controlPlaneClient", () => {
           expectedVersion: 1,
           payload: { apiKey: "rotate-secret" },
           expiresAt: null,
+        }),
+      }),
+    );
+  });
+
+  it("creates a typed private HTTPS Git Credential", async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify({ id: "credential-1", purpose: "git", version: 1 }), {
+        status: 201,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await controlPlaneClient.createCredential("tenant/one", {
+      name: "GitHub private repositories",
+      purpose: "git",
+      provider: "git",
+      credentialType: "https_token",
+      payload: { host: "github.com", username: "x-access-token", token: "git-secret" },
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/v1/tenants/tenant%2Fone/credentials",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          name: "GitHub private repositories",
+          purpose: "git",
+          provider: "git",
+          credentialType: "https_token",
+          payload: { host: "github.com", username: "x-access-token", token: "git-secret" },
         }),
       }),
     );

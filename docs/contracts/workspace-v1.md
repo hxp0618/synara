@@ -47,19 +47,34 @@ Preparation failure reports `workspace.failed` and fails the Execution with a st
 The ready/failed endpoints are idempotent and Generation-fenced; an obsolete Worker cannot overwrite state from
 the replacement Worker.
 
+After Provider execution, agentd inspects the checkout again while the Lease is still being renewed. A changed
+tracked/untracked Git checkout, or any generated content in a managed non-Git Workspace, is reported through
+the idempotent Generation-fenced `workspace.dirty` endpoint before Execution completion. The Control Plane
+persists the latest branch/HEAD and appends `workspace.dirty`; an obsolete Generation cannot mark or overwrite
+the replacement Worker's Workspace state. Unsafe Git configuration discovered after Provider execution fails
+the Execution instead of being accepted as a recoverable state.
+
 ## Repository network policy
 
-The first managed remote implementation accepts public HTTPS repositories only. It rejects embedded Userinfo,
-query strings, fragments, non-HTTPS schemes, ambiguous paths, localhost, private, loopback, link-local,
-multicast and unspecified addresses. All resolved addresses must be public.
+The managed remote implementation accepts HTTPS repositories on the default HTTPS port. It rejects embedded
+Userinfo, query strings, fragments, non-HTTPS schemes, ambiguous paths, localhost, private, loopback,
+link-local, multicast and unspecified addresses. All resolved addresses must be public.
 
 Network Git commands pin the validated address with `http.curloptResolve` and disable HTTP redirects, closing
 the DNS-rebinding and redirect-to-metadata-service gaps between validation and Clone/Fetch. Git runs without
-ambient Credential helpers, interactive prompts, SSH Agent, global/system Git config or LFS smudge downloads.
-Repository URLs with embedded Credentials are never accepted or persisted.
+ambient Credential helpers, SSH Agent, global/system Git config or LFS smudge downloads. Repository URLs with
+embedded Credentials are never accepted or persisted.
 
-Private HTTPS and SSH repositories remain blocked until the separate short-lived Git Credential/SSH Agent
-delivery contract is implemented. Agentd must not fall back to host credentials or interactive login.
+Private HTTPS uses a Project-bound, purpose-isolated `git/https_token` Credential. Agentd resolves it only for
+the current Worker, Lease and Generation and exposes it to Git through an ephemeral Unix-socket AskPass helper.
+The helper accepts only Username/Password prompts containing the exact validated Repository hostname. The
+username/token are not placed in argv, the Repository URL, ordinary environment variables or the Workspace,
+and the socket is removed immediately after Clone/Fetch. Fetch rejects a checkout whose local `.git/config`
+contains Credential helpers, AskPass, hooks, SSH commands, proxy/extra headers, URL rewrites, includes, filters,
+or remote upload/receive command overrides.
+
+SSH repositories remain blocked until the separate short-lived SSH Agent and pinned Host Key delivery contract
+is implemented. Agentd never falls back to host credentials or interactive login.
 
 ## Checkpoints
 
@@ -85,7 +100,7 @@ An absent Worker directory is never interpreted as an empty authoritative Worksp
 
 ## Remaining implementation gate
 
-The schema, Session/Execution bindings, public-HTTPS Clone/Fetch materialization and Generation-fenced state
-reporting are active. Stage 3 still must implement short-lived Git/SSH Credential delivery, shared read-only Git
-cache plus `git worktree` materialization, Patch/Snapshot Checkpoint creation and restore, dirty-state tracking,
-cleanup/retention and the shared Local/SSH/Docker/Kubernetes acceptance fixture.
+The schema, Session/Execution bindings, public/private HTTPS Clone/Fetch materialization, Project Git Credential
+binding and Generation-fenced state reporting are active. Stage 3 still must implement short-lived SSH
+Credential delivery, shared read-only Git cache plus `git worktree` materialization, Patch/Snapshot Checkpoint
+creation and restore, cleanup/retention and the shared Local/SSH/Docker/Kubernetes acceptance fixture.

@@ -18,12 +18,13 @@ import { Textarea } from "~/components/ui/textarea";
 import {
   controlPlaneClient,
   type ControlPlaneAgentSession,
+  type ControlPlaneCredential,
   type ControlPlaneExecutionTarget,
   type ControlPlaneOrganization,
   type ControlPlaneProject,
-  type ControlPlaneProviderCredential,
   type ControlPlaneSessionEvent,
 } from "~/lib/controlPlaneClient";
+import { listUsableControlPlaneCredentials } from "~/lib/controlPlaneCredentials";
 import { cn, randomUUID } from "~/lib/utils";
 
 const projectSessionQueryKeys = {
@@ -64,6 +65,8 @@ function runtimeEventLabel(eventType: string): string {
       return "Failed";
     case "runtime.output.delta":
       return "Output received";
+    case "workspace.dirty":
+      return "Workspace changed";
     case "session.created":
       return "Session created";
     case "session.archived":
@@ -73,11 +76,108 @@ function runtimeEventLabel(eventType: string): string {
   }
 }
 
+function repositorySupportsGitCredential(repositoryUrl: string | null): boolean {
+  if (!repositoryUrl) return false;
+  try {
+    const parsed = new URL(repositoryUrl);
+    return (
+      parsed.protocol === "https:" &&
+      parsed.username === "" &&
+      parsed.password === "" &&
+      (parsed.port === "" || parsed.port === "443")
+    );
+  } catch {
+    return false;
+  }
+}
+
+function ProjectGitCredentialBinding(props: {
+  project: ControlPlaneProject;
+  credentials: ReadonlyArray<ControlPlaneCredential>;
+  queryKey: ReturnType<(typeof projectSessionQueryKeys)["projects"]>;
+}) {
+  const queryClient = useQueryClient();
+  const [credentialSelection, setCredentialSelection] = useState(
+    props.project.gitCredentialId ?? "",
+  );
+  const updateBinding = useMutation({
+    mutationFn: () =>
+      controlPlaneClient.updateProject(props.project.id, {
+        gitCredentialId: credentialSelection || null,
+      }),
+    onSuccess: (project) => {
+      queryClient.setQueryData<{ items: ReadonlyArray<ControlPlaneProject> }>(
+        props.queryKey,
+        (current) => ({
+          items: (current?.items ?? []).map((item) => (item.id === project.id ? project : item)),
+        }),
+      );
+    },
+  });
+  const currentCredentialId = props.project.gitCredentialId;
+  const repositoryConfigured = repositorySupportsGitCredential(props.project.repositoryUrl);
+  const unchanged = credentialSelection === (currentCredentialId ?? "");
+  const currentCredentialUnavailable =
+    currentCredentialId !== null &&
+    !props.credentials.some((credential) => credential.id === currentCredentialId);
+
+  return (
+    <SettingsRow
+      title="Private Git access"
+      description={
+        repositoryConfigured
+          ? "The current leased Worker resolves this Credential only for Clone and Fetch. The token is never returned to the browser."
+          : "Configure an HTTPS repository before binding a private Git Credential."
+      }
+    >
+      <form
+        className={formGridClassName}
+        onSubmit={(event: FormEvent) => {
+          event.preventDefault();
+          updateBinding.mutate();
+        }}
+      >
+        <div className="sm:col-span-2">
+          <FormField label="Git Credential">
+            <select
+              className={nativeSelectClassName}
+              disabled={!repositoryConfigured}
+              value={repositoryConfigured ? credentialSelection : ""}
+              onChange={(event) => setCredentialSelection(event.target.value)}
+            >
+              <option value="">No Git Credential (public repository)</option>
+              {currentCredentialUnavailable && currentCredentialId ? (
+                <option value={currentCredentialId}>Current Git Credential is unavailable</option>
+              ) : null}
+              {props.credentials.map((credential) => (
+                <option key={credential.id} value={credential.id}>
+                  {credential.name}
+                  {credential.organizationId === null ? " · tenant scope" : " · organization scope"}
+                </option>
+              ))}
+            </select>
+          </FormField>
+        </div>
+        <div className="sm:col-span-2">
+          <Button
+            disabled={!repositoryConfigured || unchanged || updateBinding.isPending}
+            size="sm"
+            type="submit"
+          >
+            {updateBinding.isPending ? "Saving Git access…" : "Save Git access"}
+          </Button>
+          <InlineError error={updateBinding.error} />
+        </div>
+      </form>
+    </SettingsRow>
+  );
+}
+
 export function ProjectSessionSettingsSection(props: {
   tenantId: string;
   organizations: ReadonlyArray<ControlPlaneOrganization>;
   executionTargets: ReadonlyArray<ControlPlaneExecutionTarget>;
-	credentials: ReadonlyArray<ControlPlaneProviderCredential>;
+  credentials: ReadonlyArray<ControlPlaneCredential>;
 }) {
   const queryClient = useQueryClient();
   const [organizationSelection, setOrganizationSelection] = useState("");
@@ -92,12 +192,14 @@ export function ProjectSessionSettingsSection(props: {
     useState<ControlPlaneAgentSession["visibility"]>("private");
   const [executionTargetSelection, setExecutionTargetSelection] = useState("");
   const [provider, setProvider] = useState("codex");
-	const [providerCredentialSelection, setProviderCredentialSelection] = useState("");
+  const [providerCredentialSelection, setProviderCredentialSelection] = useState("");
+  const [gitCredentialSelection, setGitCredentialSelection] = useState("");
   const [model, setModel] = useState("");
   const [watchedSessionId, setWatchedSessionId] = useState<string | null>(null);
   const [turnInput, setTurnInput] = useState("");
-  const [streamStatus, setStreamStatus] =
-    useState<"idle" | "connecting" | "live" | "reconnecting">("idle");
+  const [streamStatus, setStreamStatus] = useState<"idle" | "connecting" | "live" | "reconnecting">(
+    "idle",
+  );
   const [lastLiveEvent, setLastLiveEvent] = useState<ControlPlaneSessionEvent | null>(null);
   const projectIdempotencyKeyRef = useRef<string | null>(null);
   const sessionIdempotencyKeyRef = useRef<string | null>(null);
@@ -118,6 +220,7 @@ export function ProjectSessionSettingsSection(props: {
   const selectedProjectId = projects.some((project) => project.id === projectSelection)
     ? projectSelection
     : (projects[0]?.id ?? null);
+  const selectedProject = projects.find((project) => project.id === selectedProjectId) ?? null;
   const sessionsQuery = useQuery({
     queryKey: projectSessionQueryKeys.sessions(selectedProjectId),
     queryFn: () => controlPlaneClient.listProjectSessions(selectedProjectId!),
@@ -135,17 +238,25 @@ export function ProjectSessionSettingsSection(props: {
   )
     ? executionTargetSelection
     : (compatibleExecutionTargets[0]?.id ?? null);
-	const compatibleCredentials = props.credentials.filter(
-		(credential) =>
-			credential.revokedAt === null &&
-			credential.provider === provider &&
-			(credential.organizationId === null || credential.organizationId === selectedOrganizationId),
-	);
-	const selectedProviderCredentialId = compatibleCredentials.some(
-		(credential) => credential.id === providerCredentialSelection,
-	)
-		? providerCredentialSelection
-		: null;
+  const compatibleProviderCredentials = listUsableControlPlaneCredentials(props.credentials, {
+    purpose: "provider",
+    provider,
+    organizationId: selectedOrganizationId,
+  });
+  const compatibleGitCredentials = listUsableControlPlaneCredentials(props.credentials, {
+    purpose: "git",
+    organizationId: selectedOrganizationId,
+  });
+  const selectedProviderCredentialId = compatibleProviderCredentials.some(
+    (credential) => credential.id === providerCredentialSelection,
+  )
+    ? providerCredentialSelection
+    : null;
+  const selectedGitCredentialId =
+    repositorySupportsGitCredential(repositoryUrl) &&
+    compatibleGitCredentials.some((credential) => credential.id === gitCredentialSelection)
+      ? gitCredentialSelection
+      : null;
   const watchedSession = sessions.find((session) => session.id === watchedSessionId) ?? null;
   const watchedSessionAvailable = watchedSession !== null;
 
@@ -193,6 +304,7 @@ export function ProjectSessionSettingsSection(props: {
           name: projectName,
           ...(repositoryUrl ? { repositoryUrl } : {}),
           defaultBranch,
+          ...(selectedGitCredentialId ? { gitCredentialId: selectedGitCredentialId } : {}),
           visibility: projectVisibility,
         },
         {
@@ -206,6 +318,7 @@ export function ProjectSessionSettingsSection(props: {
       setProjectName("");
       setRepositoryUrl("");
       setDefaultBranch("main");
+      setGitCredentialSelection("");
       setProjectSelection(project.id);
       void queryClient.invalidateQueries({
         queryKey: projectSessionQueryKeys.projects(props.tenantId, selectedOrganizationId),
@@ -221,12 +334,10 @@ export function ProjectSessionSettingsSection(props: {
           visibility: sessionVisibility,
           provider,
           ...(model ? { model } : {}),
-		...(selectedProviderCredentialId
-			? { providerCredentialId: selectedProviderCredentialId }
-			: {}),
-          ...(selectedExecutionTargetId
-            ? { executionTargetId: selectedExecutionTargetId }
+          ...(selectedProviderCredentialId
+            ? { providerCredentialId: selectedProviderCredentialId }
             : {}),
+          ...(selectedExecutionTargetId ? { executionTargetId: selectedExecutionTargetId } : {}),
         },
         {
           idempotencyKey:
@@ -277,6 +388,8 @@ export function ProjectSessionSettingsSection(props: {
                 setOrganizationSelection(event.target.value);
                 setProjectSelection("");
                 setExecutionTargetSelection("");
+                setProviderCredentialSelection("");
+                setGitCredentialSelection("");
                 setWatchedSessionId(null);
                 setLastLiveEvent(null);
               }}
@@ -294,7 +407,11 @@ export function ProjectSessionSettingsSection(props: {
           <SettingsListRow
             key={project.id}
             title={project.name}
-            description={`${project.defaultBranch} · ${project.repositoryUrl ?? "No repository configured"}`}
+            description={`${project.defaultBranch} · ${project.repositoryUrl ?? "No repository configured"} · ${
+              project.gitCredentialId
+                ? `Git Credential ${props.credentials.find((credential) => credential.id === project.gitCredentialId)?.name ?? "bound"}`
+                : "No private Git Credential"
+            }`}
             actions={
               <span className="flex flex-wrap justify-end gap-1.5">
                 <ResourceStatus active={project.id === selectedProjectId}>
@@ -345,7 +462,10 @@ export function ProjectSessionSettingsSection(props: {
               <Input
                 placeholder="https://github.com/company/project.git"
                 value={repositoryUrl}
-                onChange={(event) => setRepositoryUrl(event.target.value)}
+                onChange={(event) => {
+                  setRepositoryUrl(event.target.value);
+                  if (event.target.value.trim() === "") setGitCredentialSelection("");
+                }}
               />
             </FormField>
             <FormField label="Default branch">
@@ -369,6 +489,26 @@ export function ProjectSessionSettingsSection(props: {
               </select>
             </FormField>
             <div className="sm:col-span-2">
+              <FormField label="Git Credential">
+                <select
+                  className={nativeSelectClassName}
+                  disabled={!repositorySupportsGitCredential(repositoryUrl)}
+                  value={selectedGitCredentialId ?? ""}
+                  onChange={(event) => setGitCredentialSelection(event.target.value)}
+                >
+                  <option value="">No Git Credential (public repository)</option>
+                  {compatibleGitCredentials.map((credential) => (
+                    <option key={credential.id} value={credential.id}>
+                      {credential.name}
+                      {credential.organizationId === null
+                        ? " · tenant scope"
+                        : " · organization scope"}
+                    </option>
+                  ))}
+                </select>
+              </FormField>
+            </div>
+            <div className="sm:col-span-2">
               <Button disabled={createProject.isPending} size="sm" type="submit">
                 {createProject.isPending ? "Creating project…" : "Create project"}
               </Button>
@@ -376,6 +516,14 @@ export function ProjectSessionSettingsSection(props: {
             </div>
           </form>
         </SettingsRow>
+        {selectedProject ? (
+          <ProjectGitCredentialBinding
+            key={`${selectedProject.id}:${selectedProject.gitCredentialId ?? "none"}`}
+            credentials={compatibleGitCredentials}
+            project={selectedProject}
+            queryKey={projectSessionQueryKeys.projects(props.tenantId, selectedOrganizationId)}
+          />
+        ) : null}
       </SettingsSection>
 
       <SettingsSection title="Agent sessions">
@@ -385,10 +533,16 @@ export function ProjectSessionSettingsSection(props: {
               <SettingsListRow
                 key={session.id}
                 title={session.title}
-				description={`${session.provider}${session.model ? ` · ${session.model}` : ""}${session.providerCredentialId ? ` · Credential ${props.credentials.find((credential) => credential.id === session.providerCredentialId)?.name ?? session.providerCredentialId.slice(0, 8)}` : " · local CLI auth"} · target ${session.executionTargetId.slice(0, 8)} · event sequence ${session.lastEventSequence}`}
+                description={`${session.provider}${session.model ? ` · ${session.model}` : ""}${
+                  session.providerCredentialId
+                    ? ` · Credential ${props.credentials.find((credential) => credential.id === session.providerCredentialId)?.name ?? session.providerCredentialId.slice(0, 8)}`
+                    : " · local CLI auth"
+                } · target ${session.executionTargetId.slice(0, 8)} · event sequence ${session.lastEventSequence}`}
                 actions={
                   <span className="flex flex-wrap justify-end gap-1.5">
-                    <ResourceStatus active={session.status === "active"}>{session.status}</ResourceStatus>
+                    <ResourceStatus active={session.status === "active"}>
+                      {session.status}
+                    </ResourceStatus>
                     <ResourceStatus>{session.visibility}</ResourceStatus>
                     <Button
                       size="sm"
@@ -489,14 +643,14 @@ export function ProjectSessionSettingsSection(props: {
                   </select>
                 </FormField>
                 <FormField label="Provider">
-					<Input
-						required
-						value={provider}
-						onChange={(event) => {
-							setProvider(event.target.value);
-							setProviderCredentialSelection("");
-						}}
-					/>
+                  <Input
+                    required
+                    value={provider}
+                    onChange={(event) => {
+                      setProvider(event.target.value);
+                      setProviderCredentialSelection("");
+                    }}
+                  />
                 </FormField>
                 <FormField label="Model">
                   <Input
@@ -520,20 +674,20 @@ export function ProjectSessionSettingsSection(props: {
                     </select>
                   </FormField>
                 ) : null}
-				<FormField label="Provider Credential">
-					<select
-						className={nativeSelectClassName}
-						value={selectedProviderCredentialId ?? ""}
-						onChange={(event) => setProviderCredentialSelection(event.target.value)}
-					>
-						<option value="">Use Worker CLI authentication</option>
-						{compatibleCredentials.map((credential) => (
-							<option key={credential.id} value={credential.id}>
-								{credential.name} · {credential.credentialType.replaceAll("_", " ")}
-							</option>
-						))}
-					</select>
-				</FormField>
+                <FormField label="Provider Credential">
+                  <select
+                    className={nativeSelectClassName}
+                    value={selectedProviderCredentialId ?? ""}
+                    onChange={(event) => setProviderCredentialSelection(event.target.value)}
+                  >
+                    <option value="">Use Worker CLI authentication</option>
+                    {compatibleProviderCredentials.map((credential) => (
+                      <option key={credential.id} value={credential.id}>
+                        {credential.name} · {credential.credentialType.replaceAll("_", " ")}
+                      </option>
+                    ))}
+                  </select>
+                </FormField>
                 <div className="sm:col-span-2">
                   <Button disabled={createSession.isPending} size="sm" type="submit">
                     {createSession.isPending ? "Creating session…" : "Create agent session"}

@@ -29,6 +29,13 @@ foundations. The existing TypeScript server remains the Provider Runtime during 
   - `000014_execution_interactions.sql`: Approval/User Input persistence and approval-wait Execution state
   - `000015_session_suspension.sql`: explicit active/suspended/archived Session state machine
   - `000016_sse_connection_leases.sql`: cross-replica SSE connection leases and bounded Tenant/User limits
+  - `000017_worker_provider_manifests.sql`: immutable Worker/Image/Provider compatibility manifests
+  - `000018_provider_runtime_bindings.sql`: Session Provider Runtime bindings and Cursor compatibility metadata
+  - `000019_interaction_delivery.sql`: Generation-fenced Approval/User Input delivery lifecycle
+  - `000020_remote_workspaces_checkpoints.sql`: logical remote Workspaces and Artifact-backed Checkpoints
+  - `000021_turn_runtime_modes.sql`: immutable runtime and interaction modes on Turns
+  - `000022_execution_control_commands.sql`: durable Generation-fenced Provider control commands
+  - `000023_git_credentials.sql`: purpose-isolated Git Credentials, Project binding and database enforcement
 - ORM: GORM with PostgreSQL and CGO-free SQLite drivers
 - Shared model/repository/transaction utilities: `internal/persistence`
 - Tenant-scoped queries always include `tenant_id`

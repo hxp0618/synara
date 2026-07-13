@@ -19,6 +19,10 @@ type workspaceMaterializer interface {
 	Materialize(context.Context, executions.Execution, executions.Workload, *GitHTTPSCredential) (WorkspaceMaterialization, error)
 }
 
+type workspaceInspector interface {
+	Inspect(context.Context, WorkspaceMaterialization) (WorkspaceInspection, error)
+}
+
 type WorkspaceMaterialization struct {
 	Directory             string
 	Managed               bool
@@ -26,6 +30,12 @@ type WorkspaceMaterialization struct {
 	CurrentBranch         *string
 	BaseCommit            *string
 	HeadCommit            *string
+}
+
+type WorkspaceInspection struct {
+	Dirty         bool
+	CurrentBranch *string
+	HeadCommit    *string
 }
 
 type WorkspaceMaterializer struct {
@@ -174,6 +184,53 @@ func (m *WorkspaceMaterializer) Materialize(
 	return WorkspaceMaterialization{
 		Directory: directory, Managed: managed, RepositoryFingerprint: &fingerprint,
 		CurrentBranch: &currentBranch, BaseCommit: &baseCommit, HeadCommit: &headCommit,
+	}, nil
+}
+
+func (m *WorkspaceMaterializer) Inspect(
+	ctx context.Context,
+	materialized WorkspaceMaterialization,
+) (WorkspaceInspection, error) {
+	if !materialized.Managed {
+		return WorkspaceInspection{}, nil
+	}
+	gitDirectory := filepath.Join(materialized.Directory, ".git")
+	gitInfo, err := os.Lstat(gitDirectory)
+	if errors.Is(err, os.ErrNotExist) {
+		dirty, inspectErr := directoryContainsEntries(materialized.Directory)
+		return WorkspaceInspection{Dirty: dirty}, inspectErr
+	}
+	if err != nil || gitInfo.Mode()&os.ModeSymlink != 0 || !gitInfo.IsDir() {
+		return WorkspaceInspection{}, errors.New("Workspace Git metadata is unavailable")
+	}
+	environment := gitEnvironment(nil)
+	if err := m.rejectDangerousLocalGitConfig(ctx, materialized.Directory, environment); err != nil {
+		return WorkspaceInspection{}, errors.New("Workspace Git configuration became unsafe")
+	}
+	command := exec.CommandContext(ctx, "git", "status", "--porcelain=v1", "--untracked-files=normal")
+	command.Dir = materialized.Directory
+	command.Env = environment
+	stdout := &boundedBuffer{maximum: 1}
+	stderr := &boundedBuffer{maximum: 32 << 10}
+	command.Stdout = stdout
+	command.Stderr = stderr
+	if err := command.Run(); err != nil {
+		return WorkspaceInspection{}, errors.New("Workspace Git status could not be inspected")
+	}
+	currentBranch, err := m.runGit(ctx, materialized.Directory, environment, "branch", "--show-current")
+	if err != nil || currentBranch == "" {
+		return WorkspaceInspection{}, errors.New("Workspace Git branch could not be inspected")
+	}
+	currentBranch, err = gitpolicy.NormalizeBranch(currentBranch, "")
+	if err != nil {
+		return WorkspaceInspection{}, errors.New("Workspace Git branch is invalid")
+	}
+	headCommit, err := m.runGit(ctx, materialized.Directory, environment, "rev-parse", "HEAD")
+	if err != nil || !validGitObjectID(headCommit) {
+		return WorkspaceInspection{}, errors.New("Workspace Git HEAD could not be inspected")
+	}
+	return WorkspaceInspection{
+		Dirty: stdout.buffer.Len() > 0, CurrentBranch: &currentBranch, HeadCommit: &headCommit,
 	}, nil
 }
 
@@ -422,6 +479,11 @@ func ensureRealDirectory(directory string) error {
 func directoryEmpty(directory string) (bool, error) {
 	entries, err := os.ReadDir(directory)
 	return len(entries) == 0, err
+}
+
+func directoryContainsEntries(directory string) (bool, error) {
+	entries, err := os.ReadDir(directory)
+	return len(entries) > 0, err
 }
 
 func clearDirectory(directory string) error {
