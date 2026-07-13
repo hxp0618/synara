@@ -2,6 +2,7 @@ package agentd
 
 import (
 	"context"
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
@@ -32,7 +33,7 @@ func TestWorkspaceMaterializerClonesThenFetchesStableSessionCheckout(t *testing.
 	materializer := NewWorkspaceMaterializer(root)
 	materializer.resolver = workspaceResolver{"git.example.com": {{IP: net.ParseIP("93.184.216.34")}}}
 	commands := make([][]string, 0)
-	materializer.runGit = func(_ context.Context, directory string, arguments ...string) (string, error) {
+	materializer.runGit = func(_ context.Context, directory string, _ []string, arguments ...string) (string, error) {
 		commands = append(commands, append([]string{directory}, arguments...))
 		commandArguments := gitCommandArguments(arguments)
 		switch {
@@ -53,11 +54,11 @@ func TestWorkspaceMaterializerClonesThenFetchesStableSessionCheckout(t *testing.
 		return "", nil
 	}
 
-	first, err := materializer.Materialize(context.Background(), execution, workload)
+	first, err := materializer.Materialize(context.Background(), execution, workload, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := materializer.Materialize(context.Background(), execution, workload)
+	second, err := materializer.Materialize(context.Background(), execution, workload, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,7 +112,7 @@ func TestWorkspaceMaterializerRejectsSSRFAndSymlinkEscape(t *testing.T) {
 	}
 	materializer := NewWorkspaceMaterializer(root)
 	materializer.resolver = workspaceResolver{"internal.example": {{IP: net.ParseIP("10.0.0.9")}}}
-	if _, err := materializer.Materialize(context.Background(), execution, workload); err == nil {
+	if _, err := materializer.Materialize(context.Background(), execution, workload, nil); err == nil {
 		t.Fatal("Workspace materializer accepted an SSRF target")
 	}
 
@@ -124,7 +125,7 @@ func TestWorkspaceMaterializerRejectsSSRFAndSymlinkEscape(t *testing.T) {
 		t.Fatal(err)
 	}
 	workload.RepositoryURL = nil
-	if _, err := materializer.Materialize(context.Background(), execution, workload); err == nil {
+	if _, err := materializer.Materialize(context.Background(), execution, workload, nil); err == nil {
 		t.Fatal("Workspace materializer followed a symlink outside the Workspace root")
 	}
 }
@@ -139,12 +140,155 @@ func TestWorkspaceMaterializerRejectsRepositoryRebinding(t *testing.T) {
 	}
 	materializer := NewWorkspaceMaterializer(t.TempDir())
 	materializer.resolver = workspaceResolver{"git.example.com": {{IP: net.ParseIP("93.184.216.34")}}}
-	materializer.runGit = func(context.Context, string, ...string) (string, error) {
+	materializer.runGit = func(context.Context, string, []string, ...string) (string, error) {
 		t.Fatal("Git ran before the repository fingerprint mismatch was rejected")
 		return "", nil
 	}
-	if _, err := materializer.Materialize(context.Background(), executions.Execution{ID: uuid.New()}, workload); err == nil {
+	if _, err := materializer.Materialize(context.Background(), executions.Execution{ID: uuid.New()}, workload, nil); err == nil {
 		t.Fatal("logical Workspace was rebound to a different Repository")
+	}
+}
+
+func TestWorkspaceMaterializerUsesAskPassWithoutLeakingCredential(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("TMPDIR", root)
+	workspaceID := uuid.New()
+	workload := executions.Workload{
+		TenantID: uuid.New(), ProjectID: uuid.New(), SessionID: uuid.New(), RemoteWorkspaceID: &workspaceID,
+		DefaultBranch: "main", RepositoryURL: stringPointer("https://git.example.com/team/private.git"),
+	}
+	materializer := NewWorkspaceMaterializer(root)
+	materializer.resolver = workspaceResolver{"git.example.com": {{IP: net.ParseIP("93.184.216.34")}}}
+	materializer.executable = func() (string, error) { return "/usr/local/bin/synara-agentd", nil }
+	secret := "private-git-token"
+	var environments [][]string
+	var commands [][]string
+	var socketPath string
+	materializer.runGit = func(_ context.Context, directory string, environment []string, arguments ...string) (string, error) {
+		environments = append(environments, append([]string(nil), environment...))
+		commands = append(commands, append([]string(nil), arguments...))
+		for _, value := range environment {
+			if strings.HasPrefix(value, GitAskPassSocketEnvironment+"=") {
+				socketPath = strings.TrimPrefix(value, GitAskPassSocketEnvironment+"=")
+			}
+		}
+		commandArguments := gitCommandArguments(arguments)
+		switch {
+		case len(commandArguments) > 0 && commandArguments[0] == "clone":
+			checkout := commandArguments[len(commandArguments)-1]
+			if err := os.MkdirAll(filepath.Join(checkout, ".git"), 0o700); err != nil {
+				return "", err
+			}
+		case reflect.DeepEqual(commandArguments, []string{"branch", "--show-current"}):
+			return sessionBranch(workload.SessionID.String()), nil
+		case reflect.DeepEqual(commandArguments, []string{"rev-parse", "HEAD"}):
+			return strings.Repeat("a", 40), nil
+		case len(commandArguments) > 0 && commandArguments[0] == "merge-base":
+			return strings.Repeat("b", 40), nil
+		}
+		return "", nil
+	}
+	credential := &GitHTTPSCredential{Host: "git.example.com", Username: "git-user", Token: secret}
+	if _, err := materializer.Materialize(
+		context.Background(), executions.Execution{ID: uuid.New()}, workload, credential,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if socketPath == "" {
+		t.Fatal("authenticated Git commands omitted the AskPass socket")
+	}
+	if pathContainedBy(root, socketPath) {
+		t.Fatalf("AskPass socket was created inside the Workspace root: %s", socketPath)
+	}
+	encodedEnvironment := strings.Join(flattenGitCommands(environments), "\n")
+	encodedCommands := strings.Join(flattenGitCommands(commands), "\n")
+	if strings.Contains(encodedEnvironment, secret) || strings.Contains(encodedCommands, secret) {
+		t.Fatalf("Git Credential leaked into environment or argv: env=%s argv=%s", encodedEnvironment, encodedCommands)
+	}
+	if !strings.Contains(encodedEnvironment, "GIT_ASKPASS=/usr/local/bin/synara-agentd") ||
+		!strings.Contains(encodedEnvironment, "GIT_ASKPASS_REQUIRE=force") {
+		t.Fatalf("authenticated Git commands omitted AskPass configuration: %s", encodedEnvironment)
+	}
+	for index, command := range commands {
+		arguments := gitCommandArguments(command)
+		if len(arguments) == 0 {
+			continue
+		}
+		environment := strings.Join(environments[index], "\n")
+		usesAskPass := strings.Contains(environment, GitAskPassSocketEnvironment+"=")
+		if arguments[0] == "clone" && !usesAskPass {
+			t.Fatal("authenticated Clone did not receive AskPass")
+		}
+		if arguments[0] != "clone" && usesAskPass {
+			t.Fatalf("local Git command %q received the Git Credential environment", arguments[0])
+		}
+	}
+	if _, err := os.Stat(socketPath); !os.IsNotExist(err) {
+		t.Fatalf("AskPass socket survived Workspace preparation: %v", err)
+	}
+}
+
+func TestWorkspaceMaterializerRejectsDangerousLocalGitConfiguration(t *testing.T) {
+	workspaceID := uuid.New()
+	workload := executions.Workload{
+		TenantID: uuid.New(), ProjectID: uuid.New(), SessionID: uuid.New(), RemoteWorkspaceID: &workspaceID,
+		DefaultBranch: "main", RepositoryURL: stringPointer("https://git.example.com/team/private.git"),
+	}
+	materializer := NewWorkspaceMaterializer(t.TempDir())
+	materializer.resolver = workspaceResolver{"git.example.com": {{IP: net.ParseIP("93.184.216.34")}}}
+	directory, _, err := materializer.workspaceDirectory(executions.Execution{ID: uuid.New()}, workload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(directory, ".git"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	materializer.runGit = func(_ context.Context, commandDirectory string, _ []string, arguments ...string) (string, error) {
+		commandArguments := gitCommandArguments(arguments)
+		switch {
+		case reflect.DeepEqual(commandArguments, []string{"rev-parse", "--show-toplevel"}):
+			return commandDirectory, nil
+		case reflect.DeepEqual(commandArguments, []string{"config", "--local", "--no-includes", "--null", "--list"}):
+			return "credential.helper\nstore\x00url.https://evil.example/.insteadof\nhttps://git.example.com/\x00", nil
+		case len(commandArguments) > 0 && commandArguments[0] == "fetch":
+			t.Fatal("Fetch ran despite dangerous repository-local Git configuration")
+		}
+		return "", nil
+	}
+	_, err = materializer.Materialize(
+		context.Background(), executions.Execution{ID: uuid.New()}, workload,
+		&GitHTTPSCredential{Host: "git.example.com", Username: "git-user", Token: "private-token"},
+	)
+	if err == nil {
+		t.Fatal("Workspace accepted dangerous repository-local Git configuration")
+	}
+}
+
+func TestWorkspaceMaterializerRedactsCredentialFromGitError(t *testing.T) {
+	workspaceID := uuid.New()
+	secret := "private-token-in-stderr"
+	workload := executions.Workload{
+		TenantID: uuid.New(), ProjectID: uuid.New(), SessionID: uuid.New(), RemoteWorkspaceID: &workspaceID,
+		DefaultBranch: "main", RepositoryURL: stringPointer("https://git.example.com/team/private.git"),
+	}
+	materializer := NewWorkspaceMaterializer(t.TempDir())
+	materializer.resolver = workspaceResolver{"git.example.com": {{IP: net.ParseIP("93.184.216.34")}}}
+	materializer.executable = func() (string, error) { return "/usr/local/bin/synara-agentd", nil }
+	materializer.runGit = func(_ context.Context, _ string, _ []string, arguments ...string) (string, error) {
+		if commandArguments := gitCommandArguments(arguments); len(commandArguments) > 0 && commandArguments[0] == "clone" {
+			return "", errors.New("remote rejected token " + secret)
+		}
+		return "", nil
+	}
+	_, err := materializer.Materialize(
+		context.Background(), executions.Execution{ID: uuid.New()}, workload,
+		&GitHTTPSCredential{Host: "git.example.com", Username: "git-user", Token: secret},
+	)
+	if err == nil {
+		t.Fatal("Workspace Clone failure was not returned")
+	}
+	if strings.Contains(err.Error(), secret) {
+		t.Fatalf("Git Credential leaked through Workspace failure: %v", err)
 	}
 }
 
@@ -152,7 +296,7 @@ func TestGitEnvironmentDropsAmbientCredentials(t *testing.T) {
 	t.Setenv("GITHUB_TOKEN", "github-secret")
 	t.Setenv("SSH_AUTH_SOCK", "/tmp/agent.sock")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "aws-secret")
-	encoded := strings.Join(gitEnvironment(), "\n")
+	encoded := strings.Join(gitEnvironment(nil), "\n")
 	for _, secret := range []string{"github-secret", "/tmp/agent.sock", "aws-secret"} {
 		if strings.Contains(encoded, secret) {
 			t.Fatalf("ambient Credential leaked into Git environment: %s", encoded)

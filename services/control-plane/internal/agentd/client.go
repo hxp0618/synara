@@ -131,6 +131,26 @@ func (c *Client) ResolveCredential(
 	return output, err
 }
 
+func (c *Client) ResolveGitCredential(
+	ctx context.Context,
+	executionID, credentialID uuid.UUID,
+	lease executions.Lease,
+) (RunnerGitCredential, error) {
+	var output RunnerGitCredential
+	err := c.doJSON(
+		ctx,
+		http.MethodPost,
+		executionPath(executionID, "git-credentials/"+credentialID.String()+"/resolve"),
+		c.workerToken,
+		uuid.NewString(),
+		executions.LeaseInput{
+			TenantID: lease.TenantID, Generation: lease.Generation, LeaseToken: lease.LeaseToken,
+		},
+		&output,
+	)
+	return output, err
+}
+
 func (c *Client) Renew(ctx context.Context, executionID uuid.UUID, lease executions.Lease) error {
 	return c.executionRequest(ctx, executionID, "renew", executions.RenewLeaseInput{LeaseInput: executions.LeaseInput{
 		TenantID: lease.TenantID, Generation: lease.Generation, LeaseToken: lease.LeaseToken,

@@ -69,6 +69,8 @@ func TestConcurrentClaimHasSingleWinner(t *testing.T) {
 			}
 			if item.result.Value.Workload == nil || item.result.Value.Workload.InputText != "Run integration test" ||
 				item.result.Value.Workload.Provider != "codex" || item.result.Value.Workload.DefaultBranch != "main" ||
+				item.result.Value.Workload.GitCredentialID == nil ||
+				*item.result.Value.Workload.GitCredentialID != fixture.GitCredentialID ||
 				item.result.Value.Workload.RuntimeMode != "approval-required" ||
 				item.result.Value.Workload.InteractionMode != "plan" {
 				t.Fatalf("claim omitted execution workload: %#v", item.result.Value.Workload)
@@ -1458,13 +1460,14 @@ func TestConcurrentTurnCreationCannotOversubscribeTenantQuota(t *testing.T) {
 }
 
 type executionFixture struct {
-	UserID      uuid.UUID
-	TenantID    uuid.UUID
-	SessionID   uuid.UUID
-	TurnID      uuid.UUID
-	ExecutionID uuid.UUID
-	TargetID    uuid.UUID
-	TargetKind  string
+	UserID          uuid.UUID
+	TenantID        uuid.UUID
+	SessionID       uuid.UUID
+	TurnID          uuid.UUID
+	ExecutionID     uuid.UUID
+	GitCredentialID uuid.UUID
+	TargetID        uuid.UUID
+	TargetKind      string
 }
 
 func integrationDB(t *testing.T) *gorm.DB {
@@ -1507,6 +1510,8 @@ func seedExecutionFixture(t *testing.T, db *gorm.DB) executionFixture {
 	turnID := uuid.New()
 	executionID := uuid.New()
 	targetID := uuid.New()
+	gitCredentialID := uuid.New()
+	repositoryURL := "https://git.example.com/team/private.git"
 	slug := "exec-" + strings.ReplaceAll(uuid.NewString(), "-", "")[:12]
 	models := []any{
 		&persistence.User{ID: userID, Email: uuid.NewString() + "@example.com", DisplayName: "Execution test", Status: "active", EmailVerifiedAt: &now},
@@ -1514,7 +1519,18 @@ func seedExecutionFixture(t *testing.T, db *gorm.DB) executionFixture {
 		&persistence.TenantMembership{TenantID: tenantID, UserID: userID, Role: "owner", Status: "active", JoinedAt: &now},
 		&persistence.Organization{ID: organizationID, TenantID: tenantID, Slug: "root", Name: "Root", Kind: "root", Status: "active", Settings: map[string]any{}, CreatedBy: userID},
 		&persistence.OrganizationMembership{TenantID: tenantID, OrganizationID: organizationID, UserID: userID, Role: "owner", Status: "active"},
-		&persistence.Project{ID: projectID, TenantID: tenantID, OrganizationID: organizationID, Name: "Execution project", DefaultBranch: "main", Visibility: "organization", CreatedBy: userID},
+		&persistence.ProviderCredential{
+			ID: gitCredentialID, TenantID: tenantID, OrganizationID: &organizationID,
+			Name: "Execution Git", Purpose: "git", Provider: "git", CredentialType: "https_token",
+			EncryptedPayload: []byte("encrypted-git-payload"), EncryptedDataKey: []byte("encrypted-git-data-key"),
+			KMSProvider: "local", KMSKeyID: "test", Version: 1,
+			CreatedBy: userID, UpdatedBy: userID, CreatedAt: now, UpdatedAt: now,
+		},
+		&persistence.Project{
+			ID: projectID, TenantID: tenantID, OrganizationID: organizationID, Name: "Execution project",
+			RepositoryURL: &repositoryURL, DefaultBranch: "main", GitCredentialID: &gitCredentialID,
+			Visibility: "organization", CreatedBy: userID,
+		},
 		&persistence.ExecutionTarget{ID: targetID, TenantID: &tenantID, OrganizationID: &organizationID, Kind: "kubernetes", Name: "test-target", Status: "active", ConfigurationEncrypted: []byte{}, Capabilities: map[string]any{}},
 		&persistence.AgentSession{ID: sessionID, TenantID: tenantID, OrganizationID: organizationID, ProjectID: projectID, CreatedBy: userID, Title: "Execution session", Status: "active", Visibility: "private", Provider: "codex", ExecutionTargetID: targetID},
 		&persistence.AgentTurn{
@@ -1540,7 +1556,8 @@ func seedExecutionFixture(t *testing.T, db *gorm.DB) executionFixture {
 	})
 	return executionFixture{
 		UserID: userID, TenantID: tenantID, SessionID: sessionID, TurnID: turnID,
-		ExecutionID: executionID, TargetID: targetID, TargetKind: "kubernetes",
+		ExecutionID: executionID, GitCredentialID: gitCredentialID,
+		TargetID: targetID, TargetKind: "kubernetes",
 	}
 }
 

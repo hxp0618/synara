@@ -156,11 +156,14 @@ export type ControlPlaneIssuedServiceAccount = {
   token: string;
 };
 
-export type ControlPlaneProviderCredential = {
+export type ControlPlaneCredentialPurpose = "provider" | "git";
+
+export type ControlPlaneCredential = {
   id: string;
   tenantId: string;
   organizationId: string | null;
   name: string;
+  purpose: ControlPlaneCredentialPurpose;
   provider: string;
   credentialType: string;
   kmsProvider: string;
@@ -209,6 +212,7 @@ export type ControlPlaneProject = {
   name: string;
   repositoryUrl: string | null;
   defaultBranch: string;
+  gitCredentialId: string | null;
   visibility: "private" | "organization" | "tenant";
   createdBy: string;
   createdAt: string;
@@ -248,6 +252,8 @@ export type ControlPlaneExecutionTarget = {
   createdAt: string;
   updatedAt: string;
 };
+
+export type ControlPlaneProviderCredential = ControlPlaneCredential;
 
 export type ControlPlaneSSHProvisionResult = {
   targetId: string;
@@ -536,10 +542,7 @@ export const controlPlaneClient = {
     ),
   updateRetentionPolicy: (
     tenantId: string,
-    input: Pick<
-      ControlPlaneRetentionPolicy,
-      "sessionArchiveAfterDays" | "artifactDeleteAfterDays"
-    >,
+    input: Pick<ControlPlaneRetentionPolicy, "sessionArchiveAfterDays" | "artifactDeleteAfterDays">,
   ) =>
     controlPlaneRequest<ControlPlaneRetentionPolicy>(
       `/v1/tenants/${encodeURIComponent(tenantId)}/retention-policy`,
@@ -625,7 +628,7 @@ export const controlPlaneClient = {
       { method: "POST" },
     ),
   listCredentials: (tenantId: string) =>
-    controlPlaneRequest<{ items: ReadonlyArray<ControlPlaneProviderCredential> }>(
+    controlPlaneRequest<{ items: ReadonlyArray<ControlPlaneCredential> }>(
       `/v1/tenants/${encodeURIComponent(tenantId)}/credentials`,
     ),
   createCredential: (
@@ -633,13 +636,14 @@ export const controlPlaneClient = {
     input: {
       organizationId?: string;
       name: string;
+      purpose: ControlPlaneCredentialPurpose;
       provider: string;
       credentialType: string;
       payload: Record<string, unknown>;
       expiresAt?: string;
     },
   ) =>
-    controlPlaneRequest<ControlPlaneProviderCredential>(
+    controlPlaneRequest<ControlPlaneCredential>(
       `/v1/tenants/${encodeURIComponent(tenantId)}/credentials`,
       { method: "POST", body: input },
     ),
@@ -652,7 +656,7 @@ export const controlPlaneClient = {
       expiresAt: string | null;
     },
   ) =>
-    controlPlaneRequest<ControlPlaneProviderCredential>(
+    controlPlaneRequest<ControlPlaneCredential>(
       `/v1/tenants/${encodeURIComponent(tenantId)}/credentials/${encodeURIComponent(credentialId)}/rotate`,
       { method: "POST", body: input },
     ),
@@ -695,6 +699,7 @@ export const controlPlaneClient = {
       name: string;
       repositoryUrl?: string;
       defaultBranch: string;
+      gitCredentialId?: string;
       visibility: ControlPlaneProject["visibility"];
     },
     options?: ControlPlaneIdempotencyOptions,
@@ -707,6 +712,20 @@ export const controlPlaneClient = {
         body: input,
       },
     ),
+  updateProject: (
+    projectId: string,
+    input: {
+      name?: string;
+      repositoryUrl?: string;
+      defaultBranch?: string;
+      gitCredentialId?: string | null;
+      visibility?: ControlPlaneProject["visibility"];
+    },
+  ) =>
+    controlPlaneRequest<ControlPlaneProject>(`/v1/projects/${encodeURIComponent(projectId)}`, {
+      method: "PATCH",
+      body: input,
+    }),
   listProjectSessions: (projectId: string) =>
     controlPlaneRequest<{ items: ReadonlyArray<ControlPlaneAgentSession> }>(
       `/v1/projects/${encodeURIComponent(projectId)}/sessions`,
@@ -732,9 +751,7 @@ export const controlPlaneClient = {
       },
     ),
   getAgentSession: (sessionId: string) =>
-    controlPlaneRequest<ControlPlaneAgentSession>(
-      `/v1/sessions/${encodeURIComponent(sessionId)}`,
-    ),
+    controlPlaneRequest<ControlPlaneAgentSession>(`/v1/sessions/${encodeURIComponent(sessionId)}`),
   listExecutionTargets: (tenantId: string) =>
     controlPlaneRequest<{ items: ReadonlyArray<ControlPlaneExecutionTarget> }>(
       `/v1/tenants/${encodeURIComponent(tenantId)}/execution-targets`,

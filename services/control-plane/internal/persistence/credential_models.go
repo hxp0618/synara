@@ -11,6 +11,7 @@ type ProviderCredential struct {
 	TenantID         uuid.UUID  `gorm:"column:tenant_id;type:uuid"`
 	OrganizationID   *uuid.UUID `gorm:"column:organization_id;type:uuid"`
 	Name             string     `gorm:"column:name"`
+	Purpose          string     `gorm:"column:purpose;default:provider"`
 	Provider         string     `gorm:"column:provider"`
 	CredentialType   string     `gorm:"column:credential_type"`
 	EncryptedPayload []byte     `gorm:"column:encrypted_payload"`

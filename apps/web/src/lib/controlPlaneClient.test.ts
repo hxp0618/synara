@@ -430,6 +430,7 @@ describe("controlPlaneClient", () => {
 
     await controlPlaneClient.createCredential("tenant/one", {
       name: "OpenAI",
+      purpose: "provider",
       provider: "openai",
       credentialType: "api_key",
       payload: { apiKey: "create-secret" },
@@ -448,6 +449,7 @@ describe("controlPlaneClient", () => {
         credentials: "include",
         body: JSON.stringify({
           name: "OpenAI",
+          purpose: "provider",
           provider: "openai",
           credentialType: "api_key",
           payload: { apiKey: "create-secret" },

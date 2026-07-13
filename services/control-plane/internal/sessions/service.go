@@ -256,7 +256,7 @@ func (s *Service) resolveProviderCredential(
 	}
 	var credential persistence.ProviderCredential
 	err := s.db.WithContext(ctx).
-		Select("id", "tenant_id", "organization_id", "provider", "expires_at", "revoked_at").
+		Select("id", "tenant_id", "organization_id", "purpose", "provider", "expires_at", "revoked_at").
 		Where("tenant_id = ? AND id = ?", tenantID, *credentialID).
 		Take(&credential).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -267,6 +267,9 @@ func (s *Service) resolveProviderCredential(
 	}
 	if credential.OrganizationID != nil && *credential.OrganizationID != organizationID {
 		return nil, problem.New(404, "credential_not_found", "Provider Credential not found.")
+	}
+	if credential.Purpose != "provider" {
+		return nil, problem.New(409, "credential_purpose_mismatch", "Agent Session requires a Provider Credential.")
 	}
 	if credential.Provider != provider {
 		return nil, problem.New(409, "credential_provider_mismatch", "Provider Credential does not match the Agent Session provider.")

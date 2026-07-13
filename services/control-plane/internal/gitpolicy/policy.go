@@ -30,6 +30,32 @@ type Remote struct {
 	PinnedIP string
 }
 
+func NormalizeHostname(value string) (string, error) {
+	value = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(value), "."))
+	if value == "" || len(value) > 253 || strings.ContainsAny(value, "/\\@?#[]") {
+		return "", ErrInvalidRemote
+	}
+	for _, character := range value {
+		if unicode.IsControl(character) || unicode.IsSpace(character) {
+			return "", ErrInvalidRemote
+		}
+	}
+	if ip := net.ParseIP(value); ip != nil {
+		return strings.ToLower(ip.String()), nil
+	}
+	for _, label := range strings.Split(value, ".") {
+		if label == "" || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return "", ErrInvalidRemote
+		}
+		for _, character := range label {
+			if (character < 'a' || character > 'z') && (character < '0' || character > '9') && character != '-' {
+				return "", ErrInvalidRemote
+			}
+		}
+	}
+	return value, nil
+}
+
 func NormalizeBranch(value, fallback string) (string, error) {
 	value = strings.TrimSpace(value)
 	if value == "" {
@@ -68,7 +94,10 @@ func ResolveRemoteHTTPS(ctx context.Context, resolver Resolver, raw string) (Rem
 		parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
 		return Remote{}, ErrInvalidRemote
 	}
-	hostname := strings.ToLower(strings.TrimSuffix(parsed.Hostname(), "."))
+	hostname, err := NormalizeHostname(parsed.Hostname())
+	if err != nil {
+		return Remote{}, ErrInvalidRemote
+	}
 	if hostname == "" || hostname == "localhost" || strings.HasSuffix(hostname, ".localhost") {
 		return Remote{}, ErrUnsafeRemoteAddress
 	}

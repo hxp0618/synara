@@ -94,6 +94,7 @@ type Workload struct {
 	WorkerManifestID               *uuid.UUID            `json:"workerManifestId,omitempty"`
 	Model                          *string               `json:"model"`
 	ProviderCredentialID           *uuid.UUID            `json:"providerCredentialId"`
+	GitCredentialID                *uuid.UUID            `json:"gitCredentialId"`
 	InputText                      string                `json:"inputText"`
 	RuntimeMode                    string                `json:"runtimeMode"`
 	InteractionMode                string                `json:"interactionMode"`

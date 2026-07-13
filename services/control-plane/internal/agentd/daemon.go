@@ -185,7 +185,26 @@ func (d *Daemon) runExecution(
 	if materializer == nil {
 		materializer = NewWorkspaceMaterializer(d.config.WorkspaceRoot)
 	}
-	materialized, err := materializer.Materialize(executionContext, execution, workload)
+	var err error
+	var gitCredential *GitHTTPSCredential
+	if workload.GitCredentialID != nil {
+		resolved, resolveErr := d.client.ResolveGitCredential(
+			executionContext, execution.ID, *workload.GitCredentialID, lease,
+		)
+		if resolveErr != nil {
+			err = workspaceFailure(
+				"credential_invalid", "The Project Git Credential could not be resolved.", true, false,
+			)
+		} else {
+			gitCredential = &resolved.Payload
+		}
+	}
+	materialized := WorkspaceMaterialization{}
+	if err == nil {
+		materialized, err = materializer.Materialize(executionContext, execution, workload, gitCredential)
+	}
+	clearGitHTTPSCredential(gitCredential)
+	gitCredential = nil
 	if err != nil {
 		if ctx.Err() != nil {
 			renewErr := stopRenewal()
@@ -312,6 +331,15 @@ func (d *Daemon) runExecution(
 	}
 	d.logger.Info("execution completed", "executionId", execution.ID, "generation", lease.Generation)
 	return nil
+}
+
+func clearGitHTTPSCredential(credential *GitHTTPSCredential) {
+	if credential == nil {
+		return
+	}
+	credential.Host = ""
+	credential.Username = ""
+	credential.Token = ""
 }
 
 func (d *Daemon) releaseDuringShutdown(executionID uuid.UUID, lease executions.Lease, reason string) {

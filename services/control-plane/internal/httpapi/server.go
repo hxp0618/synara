@@ -153,6 +153,7 @@ func New(
 	mux.Handle("POST /v1/workers/executions/{executionID}/artifacts", server.requireWorker(http.HandlerFunc(server.createWorkerArtifact)))
 	mux.Handle("POST /v1/workers/executions/{executionID}/artifacts/{artifactID}/complete", server.requireWorker(http.HandlerFunc(server.completeWorkerArtifact)))
 	mux.Handle("POST /v1/workers/executions/{executionID}/credentials/{credentialID}/resolve", server.requireWorker(http.HandlerFunc(server.resolveExecutionCredential)))
+	mux.Handle("POST /v1/workers/executions/{executionID}/git-credentials/{credentialID}/resolve", server.requireWorker(http.HandlerFunc(server.resolveExecutionGitCredential)))
 	mux.Handle("GET /v1/auth/session", server.requireAuth(http.HandlerFunc(server.getSession)))
 	mux.Handle("POST /v1/auth/logout", server.requireAuth(http.HandlerFunc(server.logout)))
 	mux.Handle("PUT /v1/auth/active-tenant", server.requireAuth(http.HandlerFunc(server.setActiveTenant)))

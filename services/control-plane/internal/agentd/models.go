@@ -20,6 +20,16 @@ type RunnerCredential struct {
 	Payload map[string]any `json:"payload"`
 }
 
+type RunnerGitCredential struct {
+	Payload GitHTTPSCredential `json:"payload"`
+}
+
+type GitHTTPSCredential struct {
+	Host     string `json:"host"`
+	Username string `json:"username"`
+	Token    string `json:"token"`
+}
+
 type RunnerMessage struct {
 	Type                 string          `json:"type"`
 	EventID              *uuid.UUID      `json:"eventId,omitempty"`

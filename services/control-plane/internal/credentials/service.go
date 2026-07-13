@@ -27,6 +27,7 @@ type Credential struct {
 	TenantID       uuid.UUID  `json:"tenantId"`
 	OrganizationID *uuid.UUID `json:"organizationId"`
 	Name           string     `json:"name"`
+	Purpose        string     `json:"purpose"`
 	Provider       string     `json:"provider"`
 	CredentialType string     `json:"credentialType"`
 	KMSProvider    string     `json:"kmsProvider"`
@@ -43,6 +44,7 @@ type Credential struct {
 type CreateInput struct {
 	OrganizationID *uuid.UUID     `json:"organizationId"`
 	Name           string         `json:"name"`
+	Purpose        string         `json:"purpose"`
 	Provider       string         `json:"provider"`
 	CredentialType string         `json:"credentialType"`
 	Payload        map[string]any `json:"payload"`
@@ -74,7 +76,7 @@ func (s *Service) Create(ctx context.Context, principal identity.Principal, tena
 		return Credential{}, err
 	}
 	if s.cipher == nil {
-		return Credential{}, problem.New(503, "credential_kms_unavailable", "Provider Credential KMS is not configured.")
+		return Credential{}, problem.New(503, "credential_kms_unavailable", "Credential KMS is not configured.")
 	}
 	normalized, payload, err := normalizeCreate(input, s.now())
 	if err != nil {
@@ -86,24 +88,24 @@ func (s *Service) Create(ctx context.Context, principal identity.Principal, tena
 		}
 	}
 	id := uuid.New()
-	envelope, err := s.cipher.Encrypt(ctx, payload, credentialAAD(tenantID, id, normalized.Provider, normalized.CredentialType, 1))
+	envelope, err := s.cipher.Encrypt(ctx, payload, credentialAAD(tenantID, id, normalized.Purpose, normalized.Provider, normalized.CredentialType, 1))
 	if err != nil {
-		return Credential{}, problem.Wrap(503, "credential_encryption_failed", "Provider Credential could not be encrypted.", err)
+		return Credential{}, problem.Wrap(503, "credential_encryption_failed", "Credential could not be encrypted.", err)
 	}
 	model := persistence.ProviderCredential{
 		ID: id, TenantID: tenantID, OrganizationID: normalized.OrganizationID, Name: normalized.Name,
-		Provider: normalized.Provider, CredentialType: normalized.CredentialType,
+		Purpose: normalized.Purpose, Provider: normalized.Provider, CredentialType: normalized.CredentialType,
 		EncryptedPayload: envelope.EncryptedPayload, EncryptedDataKey: envelope.EncryptedDataKey,
 		KMSProvider: envelope.KMSProvider, KMSKeyID: envelope.KMSKeyID, Version: 1,
 		CreatedBy: principal.UserID, UpdatedBy: principal.UserID, ExpiresAt: normalized.ExpiresAt,
 	}
 	err = persistence.InTransaction(ctx, s.db, func(tx *gorm.DB) error {
 		if err := tx.Create(&model).Error; err != nil {
-			return problem.Wrap(409, "credential_create_rejected", "Provider Credential creation was rejected.", err)
+			return problem.Wrap(409, "credential_create_rejected", "Credential creation was rejected.", err)
 		}
 		return audit.Record(ctx, tx, audit.Entry{
 			TenantID: tenantID, ActorType: "user", ActorID: &principal.UserID,
-			Action: "credential.created", ResourceType: "provider_credential", ResourceID: &id,
+			Action: "credential.created", ResourceType: credentialResourceType(model.Purpose), ResourceID: &id,
 			OrganizationID: normalized.OrganizationID, RequestID: requestID, IPAddress: ipAddress,
 			Metadata: credentialAuditMetadata(model),
 		})
@@ -123,7 +125,7 @@ func (s *Service) List(ctx context.Context, principal identity.Principal, tenant
 	}
 	models := make([]persistence.ProviderCredential, 0)
 	if err := s.db.WithContext(ctx).Where("tenant_id = ?", tenantID).Order("revoked_at IS NOT NULL, LOWER(name), id").Find(&models).Error; err != nil {
-		return nil, problem.Wrap(500, "credentials_load_failed", "Provider Credentials could not be loaded.", err)
+		return nil, problem.Wrap(500, "credentials_load_failed", "Credentials could not be loaded.", err)
 	}
 	items := make([]Credential, 0, len(models))
 	for _, model := range models {
@@ -140,13 +142,13 @@ func (s *Service) Rotate(ctx context.Context, principal identity.Principal, tena
 		return Credential{}, err
 	}
 	if s.cipher == nil {
-		return Credential{}, problem.New(503, "credential_kms_unavailable", "Provider Credential KMS is not configured.")
+		return Credential{}, problem.New(503, "credential_kms_unavailable", "Credential KMS is not configured.")
 	}
 	var current persistence.ProviderCredential
 	if err := s.db.WithContext(ctx).Where("tenant_id = ? AND id = ?", tenantID, credentialID).Take(&current).Error; errors.Is(err, gorm.ErrRecordNotFound) {
-		return Credential{}, problem.New(404, "credential_not_found", "Provider Credential not found.")
+		return Credential{}, problem.New(404, "credential_not_found", "Credential not found.")
 	} else if err != nil {
-		return Credential{}, problem.Wrap(500, "credential_load_failed", "Provider Credential could not be loaded.", err)
+		return Credential{}, problem.Wrap(500, "credential_load_failed", "Credential could not be loaded.", err)
 	}
 	if current.RevokedAt != nil {
 		return Credential{}, problem.New(409, "credential_revoked", "Provider Credential is revoked.")
@@ -154,17 +156,32 @@ func (s *Service) Rotate(ctx context.Context, principal identity.Principal, tena
 	if input.ExpectedVersion != current.Version {
 		return Credential{}, problem.New(409, "credential_version_conflict", "Provider Credential version has changed.")
 	}
-	payload, err := encodePayload(input.Payload)
+	purpose, err := normalizePurpose(current.Purpose)
+	if err != nil {
+		return Credential{}, problem.New(500, "credential_purpose_invalid", "Credential purpose is invalid.")
+	}
+	normalizedPayload, payload, err := normalizeCredentialPayload(purpose, current.Provider, current.CredentialType, input.Payload)
 	if err != nil {
 		return Credential{}, err
+	}
+	if purpose == PurposeGit {
+		currentPayload, resolveErr := s.resolveModel(ctx, current)
+		if resolveErr != nil {
+			return Credential{}, resolveErr
+		}
+		currentGit, currentErr := decodeGitHTTPSPayload(currentPayload)
+		nextGit, nextErr := decodeGitHTTPSPayload(normalizedPayload)
+		if currentErr != nil || nextErr != nil || currentGit.Host != nextGit.Host {
+			return Credential{}, problem.New(409, "git_credential_host_immutable", "Git Credential host cannot change during rotation.")
+		}
 	}
 	if input.ExpiresAt != nil && !input.ExpiresAt.After(s.now()) {
 		return Credential{}, problem.New(400, "invalid_credential_expiry", "Credential expiry must be in the future.")
 	}
 	nextVersion := current.Version + 1
-	envelope, err := s.cipher.Encrypt(ctx, payload, credentialAAD(tenantID, credentialID, current.Provider, current.CredentialType, nextVersion))
+	envelope, err := s.cipher.Encrypt(ctx, payload, credentialAAD(tenantID, credentialID, purpose, current.Provider, current.CredentialType, nextVersion))
 	if err != nil {
-		return Credential{}, problem.Wrap(503, "credential_encryption_failed", "Provider Credential could not be encrypted.", err)
+		return Credential{}, problem.Wrap(503, "credential_encryption_failed", "Credential could not be encrypted.", err)
 	}
 	err = persistence.InTransaction(ctx, s.db, func(tx *gorm.DB) error {
 		expiresAt := any(gorm.Expr("NULL"))
@@ -183,9 +200,9 @@ func (s *Service) Rotate(ctx context.Context, principal identity.Principal, tena
 		}
 		return audit.Record(ctx, tx, audit.Entry{
 			TenantID: tenantID, ActorType: "user", ActorID: &principal.UserID,
-			Action: "credential.rotated", ResourceType: "provider_credential", ResourceID: &credentialID,
+			Action: "credential.rotated", ResourceType: credentialResourceType(purpose), ResourceID: &credentialID,
 			OrganizationID: current.OrganizationID, RequestID: requestID, IPAddress: ipAddress,
-			Metadata: map[string]any{"provider": current.Provider, "credentialType": current.CredentialType, "version": nextVersion},
+			Metadata: map[string]any{"purpose": purpose, "provider": current.Provider, "credentialType": current.CredentialType, "version": nextVersion},
 		})
 	})
 	if err != nil {
@@ -211,7 +228,7 @@ func (s *Service) Revoke(ctx context.Context, principal identity.Principal, tena
 		if err := persistence.WithLocking(tx.WithContext(ctx), "UPDATE", "").
 			Where("tenant_id = ? AND id = ?", tenantID, credentialID).
 			Take(&current).Error; errors.Is(err, gorm.ErrRecordNotFound) {
-			return problem.New(404, "credential_not_found", "Provider Credential not found.")
+			return problem.New(404, "credential_not_found", "Credential not found.")
 		} else if err != nil {
 			return err
 		}
@@ -223,7 +240,7 @@ func (s *Service) Revoke(ctx context.Context, principal identity.Principal, tena
 		}
 		return audit.Record(ctx, tx, audit.Entry{
 			TenantID: tenantID, ActorType: "user", ActorID: &principal.UserID,
-			Action: "credential.revoked", ResourceType: "provider_credential", ResourceID: &credentialID,
+			Action: "credential.revoked", ResourceType: credentialResourceType(current.Purpose), ResourceID: &credentialID,
 			OrganizationID: current.OrganizationID, RequestID: requestID, IPAddress: ipAddress,
 			Metadata: credentialAuditMetadata(current),
 		})
@@ -232,34 +249,45 @@ func (s *Service) Revoke(ctx context.Context, principal identity.Principal, tena
 
 func (s *Service) Resolve(ctx context.Context, tenantID, credentialID uuid.UUID) (map[string]any, error) {
 	if s.cipher == nil {
-		return nil, problem.New(503, "credential_kms_unavailable", "Provider Credential KMS is not configured.")
+		return nil, problem.New(503, "credential_kms_unavailable", "Credential KMS is not configured.")
 	}
 	var model persistence.ProviderCredential
 	err := s.db.WithContext(ctx).Where("tenant_id = ? AND id = ?", tenantID, credentialID).Take(&model).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return nil, problem.New(404, "credential_not_found", "Provider Credential not found.")
+		return nil, problem.New(404, "credential_not_found", "Credential not found.")
 	}
 	if err != nil {
-		return nil, problem.Wrap(500, "credential_load_failed", "Provider Credential could not be loaded.", err)
+		return nil, problem.Wrap(500, "credential_load_failed", "Credential could not be loaded.", err)
 	}
 	return s.resolveModel(ctx, model)
 }
 
 func (s *Service) resolveModel(ctx context.Context, model persistence.ProviderCredential) (map[string]any, error) {
 	if model.RevokedAt != nil || (model.ExpiresAt != nil && !model.ExpiresAt.After(s.now())) {
-		return nil, problem.New(409, "credential_unavailable", "Provider Credential is revoked or expired.")
+		return nil, problem.New(409, "credential_unavailable", "Credential is revoked or expired.")
+	}
+	purpose, purposeErr := normalizePurpose(model.Purpose)
+	if purposeErr != nil {
+		return nil, problem.New(500, "credential_purpose_invalid", "Credential purpose is invalid.")
 	}
 	plaintext, err := s.cipher.Decrypt(ctx, credentialkms.Envelope{
 		EncryptedPayload: model.EncryptedPayload, EncryptedDataKey: model.EncryptedDataKey,
 		KMSProvider: model.KMSProvider, KMSKeyID: model.KMSKeyID,
-	}, credentialAAD(model.TenantID, model.ID, model.Provider, model.CredentialType, model.Version))
+	}, credentialAAD(model.TenantID, model.ID, purpose, model.Provider, model.CredentialType, model.Version))
 	if err != nil {
-		return nil, problem.Wrap(503, "credential_decryption_failed", "Provider Credential could not be decrypted.", err)
+		return nil, problem.Wrap(503, "credential_decryption_failed", "Credential could not be decrypted.", err)
 	}
 	defer zero(plaintext)
 	var payload map[string]any
 	if err := json.Unmarshal(plaintext, &payload); err != nil {
-		return nil, problem.Wrap(500, "credential_payload_invalid", "Provider Credential payload is invalid.", err)
+		return nil, problem.Wrap(500, "credential_payload_invalid", "Credential payload is invalid.", err)
+	}
+	if purpose == PurposeGit {
+		normalized, validationErr := normalizeGitHTTPSPayload(payload)
+		if validationErr != nil || model.Provider != GitProvider || model.CredentialType != GitHTTPSCredentialType {
+			return nil, problem.New(500, "credential_payload_invalid", "Git Credential payload is invalid.")
+		}
+		return map[string]any{"host": normalized.Host, "username": normalized.Username, "token": normalized.Token}, nil
 	}
 	return payload, nil
 }
@@ -267,6 +295,10 @@ func (s *Service) resolveModel(ctx context.Context, model persistence.ProviderCr
 func normalizeCreate(input CreateInput, now time.Time) (CreateInput, []byte, error) {
 	var err error
 	input.Name, err = validation.Name(input.Name, "invalid_credential_name", "Credential name", 160)
+	if err != nil {
+		return CreateInput{}, nil, err
+	}
+	input.Purpose, err = normalizePurpose(input.Purpose)
 	if err != nil {
 		return CreateInput{}, nil, err
 	}
@@ -281,33 +313,32 @@ func normalizeCreate(input CreateInput, now time.Time) (CreateInput, []byte, err
 	if input.ExpiresAt != nil && !input.ExpiresAt.After(now) {
 		return CreateInput{}, nil, problem.New(400, "invalid_credential_expiry", "Credential expiry must be in the future.")
 	}
-	payload, err := encodePayload(input.Payload)
+	_, payload, err := normalizeCredentialPayload(input.Purpose, input.Provider, input.CredentialType, input.Payload)
 	return input, payload, err
 }
 
-func encodePayload(payload map[string]any) ([]byte, error) {
-	if len(payload) == 0 {
-		return nil, problem.New(400, "invalid_credential_payload", "Credential payload must not be empty.")
+func credentialAAD(tenantID, credentialID uuid.UUID, purpose, provider, credentialType string, version int) []byte {
+	if purpose == PurposeProvider {
+		return []byte(strings.Join([]string{"synara-credential-v1", tenantID.String(), credentialID.String(), provider, credentialType, strconv.Itoa(version)}, "\x00"))
 	}
-	encoded, err := json.Marshal(payload)
-	if err != nil || len(encoded) > maxCredentialPayloadBytes {
-		return nil, problem.New(400, "invalid_credential_payload", "Credential payload must be valid JSON no larger than 65536 bytes.")
-	}
-	return encoded, nil
-}
-
-func credentialAAD(tenantID, credentialID uuid.UUID, provider, credentialType string, version int) []byte {
-	return []byte(strings.Join([]string{"synara-credential-v1", tenantID.String(), credentialID.String(), provider, credentialType, strconv.Itoa(version)}, "\x00"))
+	return []byte(strings.Join([]string{"synara-credential-v2", tenantID.String(), credentialID.String(), purpose, provider, credentialType, strconv.Itoa(version)}, "\x00"))
 }
 
 func credentialAuditMetadata(model persistence.ProviderCredential) map[string]any {
-	return map[string]any{"name": model.Name, "provider": model.Provider, "credentialType": model.CredentialType, "version": model.Version}
+	return map[string]any{"name": model.Name, "purpose": model.Purpose, "provider": model.Provider, "credentialType": model.CredentialType, "version": model.Version}
+}
+
+func credentialResourceType(purpose string) string {
+	if purpose == PurposeGit {
+		return "git_credential"
+	}
+	return "provider_credential"
 }
 
 func toCredential(model persistence.ProviderCredential) Credential {
 	return Credential{
 		ID: model.ID, TenantID: model.TenantID, OrganizationID: model.OrganizationID,
-		Name: model.Name, Provider: model.Provider, CredentialType: model.CredentialType,
+		Name: model.Name, Purpose: model.Purpose, Provider: model.Provider, CredentialType: model.CredentialType,
 		KMSProvider: model.KMSProvider, KMSKeyID: model.KMSKeyID, Version: model.Version,
 		CreatedBy: model.CreatedBy, UpdatedBy: model.UpdatedBy, CreatedAt: model.CreatedAt,
 		UpdatedAt: model.UpdatedAt, ExpiresAt: model.ExpiresAt, RevokedAt: model.RevokedAt,

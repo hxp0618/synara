@@ -37,6 +37,13 @@ import (
 )
 
 func main() {
+	if handled, err := agentd.RunGitAskPassHelperFromEnvironment(context.Background(), os.Args, os.Stdout); handled {
+		if err != nil {
+			_, _ = os.Stderr.WriteString("Git Credential helper failed\n")
+			os.Exit(1)
+		}
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == "healthcheck" {
 		if err := runHealthcheck(); err != nil {
 			_, _ = os.Stderr.WriteString(err.Error() + "\n")

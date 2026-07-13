@@ -41,6 +41,13 @@ func TestStage3MigrationsBackfillExistingRuntimeState(t *testing.T) {
 	if session.CurrentRuntimeBindingID == nil {
 		t.Fatal("Stage 3 migration did not attach a Provider runtime binding")
 	}
+	var credential persistence.ProviderCredential
+	if err := db.Where("tenant_id = ? AND id = ?", seed.tenantID, seed.credentialID).Take(&credential).Error; err != nil {
+		t.Fatal(err)
+	}
+	if credential.Purpose != "provider" {
+		t.Fatalf("legacy Provider Credential purpose was not backfilled: %#v", credential)
+	}
 	var binding persistence.ProviderRuntimeBinding
 	if err := db.Where("tenant_id = ? AND id = ?", seed.tenantID, *session.CurrentRuntimeBindingID).Take(&binding).Error; err != nil {
 		t.Fatal(err)
@@ -75,6 +82,130 @@ func TestStage3MigrationsBackfillExistingRuntimeState(t *testing.T) {
 	}
 }
 
+func TestGitCredentialMigrationEnforcesBindingPurposeScopeAndAvailability(t *testing.T) {
+	databaseURL := os.Getenv("SYNARA_TEST_STAGE3_MIGRATION_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("SYNARA_TEST_STAGE3_MIGRATION_DATABASE_URL is not configured")
+	}
+	db, err := Open(context.Background(), databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Migrate(context.Background(), db, migrations.Files); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	userID, tenantID := uuid.New(), uuid.New()
+	organizationID, otherOrganizationID := uuid.New(), uuid.New()
+	targetID := uuid.New()
+	models := []any{
+		&persistence.User{ID: userID, Email: uuid.NewString() + "@example.com", DisplayName: "Git migration", Status: "active", EmailVerifiedAt: &now},
+		&persistence.Tenant{ID: tenantID, Slug: "git-migration-" + strings.ReplaceAll(uuid.NewString(), "-", "")[:10], Name: "Git migration", Status: "active", PlanCode: "free", Region: "default", Settings: map[string]any{}, CreatedBy: userID},
+		&persistence.TenantMembership{TenantID: tenantID, UserID: userID, Role: "owner", Status: "active", JoinedAt: &now},
+		&persistence.Organization{ID: organizationID, TenantID: tenantID, Slug: "root", Name: "Root", Kind: "root", Status: "active", Settings: map[string]any{}, CreatedBy: userID},
+		&persistence.Organization{ID: otherOrganizationID, TenantID: tenantID, Slug: "other", Name: "Other", Kind: "team", Status: "active", Settings: map[string]any{}, CreatedBy: userID},
+		&persistence.ExecutionTarget{ID: targetID, TenantID: &tenantID, OrganizationID: &organizationID, Kind: "local", Name: "Git migration target", Status: "active", ConfigurationEncrypted: []byte{}, Capabilities: map[string]any{}},
+	}
+	if err := db.Transaction(func(tx *gorm.DB) error {
+		for _, model := range models {
+			if err := tx.Create(model).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("seed Git Credential migration state: %v", err)
+	}
+	providerCredentialID := uuid.New()
+	gitCredentialID := uuid.New()
+	expiredGitCredentialID := uuid.New()
+	revokedGitCredentialID := uuid.New()
+	otherOrganizationGitCredentialID := uuid.New()
+	expiredAt := now.Add(-time.Minute)
+	revokedAt := now
+	credentials := []persistence.ProviderCredential{
+		migrationCredential(providerCredentialID, tenantID, &organizationID, userID, "provider", "codex", "api_key", now, nil),
+		migrationCredential(gitCredentialID, tenantID, &organizationID, userID, "git", "git", "https_token", now, nil),
+		migrationCredential(expiredGitCredentialID, tenantID, &organizationID, userID, "git", "git", "https_token", now.Add(-time.Hour), &expiredAt),
+		migrationCredential(revokedGitCredentialID, tenantID, &organizationID, userID, "git", "git", "https_token", now, nil),
+		migrationCredential(otherOrganizationGitCredentialID, tenantID, &otherOrganizationID, userID, "git", "git", "https_token", now, nil),
+	}
+	credentials[3].RevokedAt = &revokedAt
+	credentials[3].RevokedBy = &userID
+	for index := range credentials {
+		if err := db.Create(&credentials[index]).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	repositoryURL := "https://git.example.com/team/private.git"
+	wrongPurposeProject := persistence.Project{
+		ID: uuid.New(), TenantID: tenantID, OrganizationID: organizationID, Name: "Wrong purpose",
+		RepositoryURL: &repositoryURL, DefaultBranch: "main", GitCredentialID: &providerCredentialID,
+		Visibility: "organization", CreatedBy: userID,
+	}
+	if err := db.Create(&wrongPurposeProject).Error; err == nil {
+		t.Fatal("PostgreSQL accepted a Provider Credential as a Project Git Credential")
+	}
+	projectID := uuid.New()
+	project := persistence.Project{
+		ID: projectID, TenantID: tenantID, OrganizationID: organizationID, Name: "Valid Git binding",
+		RepositoryURL: &repositoryURL, DefaultBranch: "main", GitCredentialID: &gitCredentialID,
+		Visibility: "organization", CreatedBy: userID,
+	}
+	if err := db.Create(&project).Error; err != nil {
+		t.Fatal(err)
+	}
+	invalidSession := persistence.AgentSession{
+		ID: uuid.New(), TenantID: tenantID, OrganizationID: organizationID, ProjectID: projectID,
+		CreatedBy: userID, Title: "Wrong purpose", Status: "active", Visibility: "private",
+		Provider: "codex", ProviderCredentialID: &gitCredentialID, ExecutionTargetID: targetID,
+	}
+	if err := db.Create(&invalidSession).Error; err == nil {
+		t.Fatal("PostgreSQL accepted a Git Credential as an Agent Session Provider Credential")
+	}
+	validSession := invalidSession
+	validSession.ID = uuid.New()
+	validSession.Title = "Valid provider binding"
+	validSession.ProviderCredentialID = &providerCredentialID
+	if err := db.Create(&validSession).Error; err != nil {
+		t.Fatal(err)
+	}
+	for name, credentialID := range map[string]uuid.UUID{
+		"expired":            expiredGitCredentialID,
+		"revoked":            revokedGitCredentialID,
+		"cross-organization": otherOrganizationGitCredentialID,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := db.Model(&persistence.Project{}).Where("tenant_id = ? AND id = ?", tenantID, projectID).
+				Update("git_credential_id", credentialID).Error; err == nil {
+				t.Fatalf("PostgreSQL accepted %s Git Credential binding", name)
+			}
+		})
+	}
+	if err := db.Model(&persistence.ProviderCredential{}).
+		Where("tenant_id = ? AND id = ?", tenantID, gitCredentialID).
+		Update("organization_id", otherOrganizationID).Error; err == nil {
+		t.Fatal("PostgreSQL allowed Git Credential identity metadata to mutate")
+	}
+}
+
+func migrationCredential(
+	id, tenantID uuid.UUID,
+	organizationID *uuid.UUID,
+	userID uuid.UUID,
+	purpose, provider, credentialType string,
+	createdAt time.Time,
+	expiresAt *time.Time,
+) persistence.ProviderCredential {
+	return persistence.ProviderCredential{
+		ID: id, TenantID: tenantID, OrganizationID: organizationID,
+		Name: purpose + " credential", Purpose: purpose, Provider: provider, CredentialType: credentialType,
+		EncryptedPayload: []byte("encrypted-credential-payload"), EncryptedDataKey: []byte("encrypted-credential-data-key"),
+		KMSProvider: "local", KMSKeyID: "migration", Version: 1,
+		CreatedBy: userID, UpdatedBy: userID, CreatedAt: createdAt, UpdatedAt: createdAt, ExpiresAt: expiresAt,
+	}
+}
+
 func migrationsThrough(t *testing.T, maximum string) fs.FS {
 	t.Helper()
 	entries, err := fs.ReadDir(migrations.Files, ".")
@@ -97,7 +228,7 @@ func migrationsThrough(t *testing.T, maximum string) fs.FS {
 }
 
 type stage3MigrationSeed struct {
-	tenantID, sessionID, turnID, executionID, interactionID uuid.UUID
+	tenantID, sessionID, turnID, executionID, interactionID, credentialID uuid.UUID
 }
 
 func seedStage3MigrationState(t *testing.T, db *gorm.DB) stage3MigrationSeed {
@@ -107,6 +238,7 @@ func seedStage3MigrationState(t *testing.T, db *gorm.DB) stage3MigrationSeed {
 	projectID, targetID := uuid.New(), uuid.New()
 	sessionID, turnID, executionID := uuid.New(), uuid.New(), uuid.New()
 	workerID, interactionID := uuid.New(), uuid.New()
+	credentialID := uuid.New()
 	repositoryURL := "https://example.com/synara.git"
 	resolvedAt := now.Add(time.Minute)
 	models := []struct {
@@ -118,11 +250,24 @@ func seedStage3MigrationState(t *testing.T, db *gorm.DB) stage3MigrationSeed {
 		{&persistence.TenantMembership{TenantID: tenantID, UserID: userID, Role: "owner", Status: "active", JoinedAt: &now}, nil},
 		{&persistence.Organization{ID: organizationID, TenantID: tenantID, Slug: "root", Name: "Root", Kind: "root", Status: "active", Settings: map[string]any{}, CreatedBy: userID}, nil},
 		{&persistence.OrganizationMembership{TenantID: tenantID, OrganizationID: organizationID, UserID: userID, Role: "owner", Status: "active"}, nil},
-		{&persistence.Project{ID: projectID, TenantID: tenantID, OrganizationID: organizationID, Name: "Migration project", RepositoryURL: &repositoryURL, DefaultBranch: "main", Visibility: "organization", CreatedBy: userID}, nil},
+		{&persistence.ProviderCredential{
+			ID: credentialID, TenantID: tenantID, OrganizationID: &organizationID,
+			Name: "Legacy provider", Provider: "codex", CredentialType: "api_key",
+			EncryptedPayload: []byte("encrypted-provider-payload"), EncryptedDataKey: []byte("encrypted-provider-data-key"),
+			KMSProvider: "local", KMSKeyID: "migration", Version: 1,
+			CreatedBy: userID, UpdatedBy: userID, CreatedAt: now, UpdatedAt: now,
+		}, []string{
+			"id", "tenant_id", "organization_id", "name", "provider", "credential_type",
+			"encrypted_payload", "encrypted_data_key", "kms_provider", "kms_key_id", "version",
+			"created_by", "updated_by", "created_at", "updated_at",
+		}},
+		{&persistence.Project{ID: projectID, TenantID: tenantID, OrganizationID: organizationID, Name: "Migration project", RepositoryURL: &repositoryURL, DefaultBranch: "main", Visibility: "organization", CreatedBy: userID},
+			[]string{"id", "tenant_id", "organization_id", "name", "repository_url", "default_branch", "visibility", "created_by", "created_at", "updated_at"}},
 		{&persistence.ExecutionTarget{ID: targetID, TenantID: &tenantID, OrganizationID: &organizationID, Kind: "kubernetes", Name: "Migration target", Status: "active", ConfigurationEncrypted: []byte{}, Capabilities: map[string]any{}}, nil},
-		{&persistence.AgentSession{ID: sessionID, TenantID: tenantID, OrganizationID: organizationID, ProjectID: projectID, CreatedBy: userID, Title: "Migration session", Status: "active", Visibility: "private", Provider: "codex", ExecutionTargetID: targetID, ProviderResumeCursorEncrypted: []byte("encrypted-cursor"), CreatedAt: now, UpdatedAt: now},
-			[]string{"id", "tenant_id", "organization_id", "project_id", "created_by", "title", "status", "visibility", "provider", "execution_target_id", "provider_resume_cursor_encrypted", "created_at", "updated_at"}},
-		{&persistence.AgentTurn{ID: turnID, TenantID: tenantID, SessionID: sessionID, CreatedBy: userID, Status: "running", InputText: "Continue", StartedAt: &now, CreatedAt: now}, nil},
+		{&persistence.AgentSession{ID: sessionID, TenantID: tenantID, OrganizationID: organizationID, ProjectID: projectID, CreatedBy: userID, Title: "Migration session", Status: "active", Visibility: "private", Provider: "codex", ProviderCredentialID: &credentialID, ExecutionTargetID: targetID, ProviderResumeCursorEncrypted: []byte("encrypted-cursor"), CreatedAt: now, UpdatedAt: now},
+			[]string{"id", "tenant_id", "organization_id", "project_id", "created_by", "title", "status", "visibility", "provider", "provider_credential_id", "execution_target_id", "provider_resume_cursor_encrypted", "created_at", "updated_at"}},
+		{&persistence.AgentTurn{ID: turnID, TenantID: tenantID, SessionID: sessionID, CreatedBy: userID, Status: "running", InputText: "Continue", StartedAt: &now, CreatedAt: now},
+			[]string{"id", "tenant_id", "session_id", "created_by", "status", "input_text", "started_at", "completed_at", "created_at"}},
 		{&persistence.WorkerInstance{ID: workerID, ExecutionTargetID: targetID, TargetKind: "kubernetes", ClusterID: "migration", Namespace: "default", PodName: "migration-worker", Version: "legacy", ProtocolVersion: 1, Capabilities: map[string]any{}, LeaseSupported: true, FencingSupported: true, AuthTokenHash: []byte("migration-worker-token"), Status: "online", RegisteredAt: now, LastHeartbeatAt: now},
 			[]string{"id", "execution_target_id", "target_kind", "cluster_id", "namespace", "pod_name", "version", "protocol_version", "capabilities", "lease_supported", "fencing_supported", "auth_token_hash", "status", "registered_at", "last_heartbeat_at"}},
 		{&persistence.AgentExecution{ID: executionID, TenantID: tenantID, SessionID: sessionID, TurnID: turnID, Attempt: 1, Status: "waiting-for-approval", ExecutionTargetID: targetID, TargetKind: "kubernetes", WorkerID: &workerID, Generation: 1, RequestedBy: userID, QueuedAt: now, StartedAt: &now},
@@ -146,5 +291,8 @@ func seedStage3MigrationState(t *testing.T, db *gorm.DB) stage3MigrationSeed {
 	}); err != nil {
 		t.Fatalf("seed Stage 3 migration state: %v", err)
 	}
-	return stage3MigrationSeed{tenantID: tenantID, sessionID: sessionID, turnID: turnID, executionID: executionID, interactionID: interactionID}
+	return stage3MigrationSeed{
+		tenantID: tenantID, sessionID: sessionID, turnID: turnID, executionID: executionID,
+		interactionID: interactionID, credentialID: credentialID,
+	}
 }

@@ -27,6 +27,7 @@ func (s *Service) loadWorkload(ctx context.Context, tx *gorm.DB, execution persi
 		WorkerManifestID               *uuid.UUID `gorm:"column:worker_manifest_id"`
 		Model                          *string    `gorm:"column:model"`
 		ProviderCredentialID           *uuid.UUID `gorm:"column:provider_credential_id"`
+		GitCredentialID                *uuid.UUID `gorm:"column:git_credential_id"`
 		InputText                      string     `gorm:"column:input_text"`
 		RuntimeMode                    string     `gorm:"column:runtime_mode"`
 		InteractionMode                string     `gorm:"column:interaction_mode"`
@@ -38,8 +39,8 @@ func (s *Service) loadWorkload(ctx context.Context, tx *gorm.DB, execution persi
 			s.title AS session_title, COALESCE(e.provider, s.provider) AS provider,
 			e.provider_runtime_binding_id, e.remote_workspace_id,
 			w.repository_fingerprint AS workspace_repository_fingerprint, e.worker_manifest_id,
-			s.model, s.provider_credential_id, t.input_text, t.runtime_mode, t.interaction_mode,
-			p.repository_url, p.default_branch`).
+				s.model, s.provider_credential_id, p.git_credential_id,
+				t.input_text, t.runtime_mode, t.interaction_mode, p.repository_url, p.default_branch`).
 		Joins("JOIN agent_sessions AS s ON s.tenant_id = e.tenant_id AND s.id = e.session_id").
 		Joins("JOIN agent_turns AS t ON t.tenant_id = e.tenant_id AND t.session_id = e.session_id AND t.id = e.turn_id").
 		Joins("JOIN projects AS p ON p.tenant_id = s.tenant_id AND p.id = s.project_id").
@@ -59,7 +60,8 @@ func (s *Service) loadWorkload(ctx context.Context, tx *gorm.DB, execution persi
 		Provider: row.Provider, ProviderRuntimeBindingID: row.ProviderRuntimeBindingID,
 		RemoteWorkspaceID: row.RemoteWorkspaceID, WorkspaceRepositoryFingerprint: row.WorkspaceRepositoryFingerprint,
 		WorkerManifestID: row.WorkerManifestID,
-		Model:            row.Model, ProviderCredentialID: row.ProviderCredentialID, InputText: row.InputText,
+		Model:            row.Model, ProviderCredentialID: row.ProviderCredentialID,
+		GitCredentialID: row.GitCredentialID, InputText: row.InputText,
 		RuntimeMode: row.RuntimeMode, InteractionMode: row.InteractionMode,
 		RepositoryURL: row.RepositoryURL, DefaultBranch: row.DefaultBranch,
 		ConversationHistory: history,

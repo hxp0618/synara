@@ -18,8 +18,9 @@ import { Input } from "~/components/ui/input";
 import { Textarea } from "~/components/ui/textarea";
 import {
   controlPlaneClient,
+  type ControlPlaneCredential,
+  type ControlPlaneCredentialPurpose,
   type ControlPlaneOrganization,
-  type ControlPlaneProviderCredential,
 } from "~/lib/controlPlaneClient";
 import { cn } from "~/lib/utils";
 
@@ -53,15 +54,17 @@ function parseExpiry(value: string): string | null {
 }
 
 function credentialDescription(
-  item: ControlPlaneProviderCredential,
+  item: ControlPlaneCredential,
   organizationNames: ReadonlyMap<string, string>,
 ): string {
   const scope = item.organizationId
-    ? (organizationNames.get(item.organizationId) ?? `Organization ${item.organizationId.slice(0, 8)}`)
+    ? (organizationNames.get(item.organizationId) ??
+      `Organization ${item.organizationId.slice(0, 8)}`)
     : "All organizations";
   const expiry = item.expiresAt
     ? `expires ${new Date(item.expiresAt).toLocaleString()}`
     : "no expiry";
+  if (item.purpose === "git") return `Git HTTPS token · ${scope} · ${expiry}`;
   return `${item.provider} · ${item.credentialType.replaceAll("_", " ")} · ${scope} · ${expiry}`;
 }
 
@@ -80,16 +83,23 @@ export function TenantCredentialSettingsSection(props: {
     [props.organizations],
   );
   const [name, setName] = useState("");
+  const [purpose, setPurpose] = useState<ControlPlaneCredentialPurpose>("provider");
   const [provider, setProvider] = useState("");
   const [credentialType, setCredentialType] = useState("api_key");
   const [organizationId, setOrganizationId] = useState("");
   const [expiresAt, setExpiresAt] = useState("");
   const [createPayload, setCreatePayload] = useState("");
+  const [gitHost, setGitHost] = useState("");
+  const [gitUsername, setGitUsername] = useState("");
+  const [gitToken, setGitToken] = useState("");
   const [createPending, setCreatePending] = useState(false);
   const [createError, setCreateError] = useState<unknown>(null);
   const [rotateCredentialId, setRotateCredentialId] = useState("");
   const [rotateExpiresAt, setRotateExpiresAt] = useState("");
   const [rotatePayload, setRotatePayload] = useState("");
+  const [rotateGitHost, setRotateGitHost] = useState("");
+  const [rotateGitUsername, setRotateGitUsername] = useState("");
+  const [rotateGitToken, setRotateGitToken] = useState("");
   const [rotatePending, setRotatePending] = useState(false);
   const [rotateError, setRotateError] = useState<unknown>(null);
   const [revokePendingId, setRevokePendingId] = useState<string | null>(null);
@@ -103,16 +113,20 @@ export function TenantCredentialSettingsSection(props: {
     setCreateError(null);
     setCreatePending(true);
     try {
-      const payload = parsePayload(createPayload);
+      const payload =
+        purpose === "git"
+          ? { host: gitHost, username: gitUsername, token: gitToken }
+          : parsePayload(createPayload);
       const item = await controlPlaneClient.createCredential(props.tenantId, {
         organizationId: organizationId || undefined,
         name,
-        provider,
-        credentialType,
+        purpose,
+        provider: purpose === "git" ? "git" : provider,
+        credentialType: purpose === "git" ? "https_token" : credentialType,
         payload,
         expiresAt: parseExpiry(expiresAt) ?? undefined,
       });
-      queryClient.setQueryData<{ items: ReadonlyArray<ControlPlaneProviderCredential> }>(
+      queryClient.setQueryData<{ items: ReadonlyArray<ControlPlaneCredential> }>(
         credentialsQueryKey(props.tenantId),
         (current) => ({ items: [...(current?.items ?? []), item] }),
       );
@@ -120,9 +134,12 @@ export function TenantCredentialSettingsSection(props: {
       setProvider("");
       setExpiresAt("");
       setCreatePayload("");
+      setGitHost("");
+      setGitUsername("");
     } catch (error) {
       setCreateError(error);
     } finally {
+      setGitToken("");
       setCreatePending(false);
     }
   };
@@ -136,17 +153,16 @@ export function TenantCredentialSettingsSection(props: {
     }
     setRotatePending(true);
     try {
-      const payload = parsePayload(rotatePayload);
-      const item = await controlPlaneClient.rotateCredential(
-        props.tenantId,
-        selectedRotation.id,
-        {
-          expectedVersion: selectedRotation.version,
-          payload,
-          expiresAt: parseExpiry(rotateExpiresAt),
-        },
-      );
-      queryClient.setQueryData<{ items: ReadonlyArray<ControlPlaneProviderCredential> }>(
+      const payload =
+        selectedRotation.purpose === "git"
+          ? { host: rotateGitHost, username: rotateGitUsername, token: rotateGitToken }
+          : parsePayload(rotatePayload);
+      const item = await controlPlaneClient.rotateCredential(props.tenantId, selectedRotation.id, {
+        expectedVersion: selectedRotation.version,
+        payload,
+        expiresAt: parseExpiry(rotateExpiresAt),
+      });
+      queryClient.setQueryData<{ items: ReadonlyArray<ControlPlaneCredential> }>(
         credentialsQueryKey(props.tenantId),
         (current) => ({
           items: (current?.items ?? []).map((existing) =>
@@ -156,15 +172,20 @@ export function TenantCredentialSettingsSection(props: {
       );
       setRotatePayload("");
       setRotateExpiresAt("");
+      setRotateGitHost("");
+      setRotateGitUsername("");
     } catch (error) {
       setRotateError(error);
     } finally {
+      setRotateGitToken("");
       setRotatePending(false);
     }
   };
 
-  const revoke = async (item: ControlPlaneProviderCredential) => {
-    if (!window.confirm(`Revoke ${item.name}? Running agents will no longer be able to resolve it.`)) {
+  const revoke = async (item: ControlPlaneCredential) => {
+    if (
+      !window.confirm(`Revoke ${item.name}? Running agents will no longer be able to resolve it.`)
+    ) {
       return;
     }
     setRevokeError(null);
@@ -175,6 +196,9 @@ export function TenantCredentialSettingsSection(props: {
       if (rotateCredentialId === item.id) {
         setRotateCredentialId("");
         setRotatePayload("");
+        setRotateGitHost("");
+        setRotateGitUsername("");
+        setRotateGitToken("");
       }
     } catch (error) {
       setRevokeError(error);
@@ -184,11 +208,11 @@ export function TenantCredentialSettingsSection(props: {
   };
 
   return (
-    <SettingsSection title="Provider credentials">
-      {credentials.isPending ? <SettingsListRow title="Loading Provider Credentials…" /> : null}
+    <SettingsSection title="Credentials">
+      {credentials.isPending ? <SettingsListRow title="Loading Credentials…" /> : null}
       {credentials.error ? (
         <SettingsListRow
-          title="Could not load Provider Credentials"
+          title="Could not load Credentials"
           description={credentials.error.message}
           actions={
             <Button size="sm" variant="outline" onClick={() => void credentials.refetch()}>
@@ -204,7 +228,10 @@ export function TenantCredentialSettingsSection(props: {
           description={credentialDescription(item, organizationNames)}
           actions={
             <span className="flex flex-wrap items-center justify-end gap-1.5">
-              <span className="text-[10px] tabular-nums text-muted-foreground">v{item.version}</span>
+              <span className="text-[10px] tabular-nums text-muted-foreground">
+                v{item.version}
+              </span>
+              <ControlPlaneStatusPill value={item.purpose} />
               <ControlPlaneStatusPill value={item.revokedAt ? "revoked" : "active"} />
               {item.revokedAt === null ? (
                 <Button
@@ -223,36 +250,83 @@ export function TenantCredentialSettingsSection(props: {
       ))}
       {credentials.data?.items.length === 0 ? (
         <SettingsListRow
-          title="No Provider Credentials"
-          description="Add an encrypted tenant-wide or Organization-scoped Credential for agent execution."
+          title="No Credentials"
+          description="Add an encrypted Provider or Git Credential with tenant-wide or Organization scope."
         />
       ) : null}
       <SettingsRow
         title="Add encrypted Credential"
-        description="The JSON payload is envelope-encrypted before storage and is never returned to the browser."
+        description="Provider and Git Credentials share the encrypted Vault but remain purpose-isolated at Project, Session, and Worker boundaries."
       >
-        <form className={CONTROL_PLANE_FORM_GRID_CLASS_NAME} onSubmit={(event) => void create(event)}>
+        <form
+          className={CONTROL_PLANE_FORM_GRID_CLASS_NAME}
+          onSubmit={(event) => void create(event)}
+        >
           <ControlPlaneFormField label="Name">
             <Input required value={name} onChange={(event) => setName(event.target.value)} />
           </ControlPlaneFormField>
-          <ControlPlaneFormField label="Provider">
-            <Input
-              autoCapitalize="none"
-              placeholder="openai"
-              required
-              value={provider}
-              onChange={(event) => setProvider(event.target.value.toLowerCase())}
-            />
+          <ControlPlaneFormField label="Purpose">
+            <select
+              className={CONTROL_PLANE_NATIVE_SELECT_CLASS_NAME}
+              value={purpose}
+              onChange={(event) => {
+                const nextPurpose = event.target.value as ControlPlaneCredentialPurpose;
+                setPurpose(nextPurpose);
+                setCreatePayload("");
+                setGitToken("");
+                if (nextPurpose === "provider") {
+                  setProvider("");
+                  setCredentialType("api_key");
+                }
+              }}
+            >
+              <option value="provider">Provider runtime</option>
+              <option value="git">Private HTTPS Git</option>
+            </select>
           </ControlPlaneFormField>
-          <ControlPlaneFormField label="Credential type">
-            <Input
-              autoCapitalize="none"
-              placeholder="api_key"
-              required
-              value={credentialType}
-              onChange={(event) => setCredentialType(event.target.value.toLowerCase())}
-            />
-          </ControlPlaneFormField>
+          {purpose === "provider" ? (
+            <>
+              <ControlPlaneFormField label="Provider">
+                <Input
+                  autoCapitalize="none"
+                  placeholder="openai"
+                  required
+                  value={provider}
+                  onChange={(event) => setProvider(event.target.value.toLowerCase())}
+                />
+              </ControlPlaneFormField>
+              <ControlPlaneFormField label="Credential type">
+                <Input
+                  autoCapitalize="none"
+                  placeholder="api_key"
+                  required
+                  value={credentialType}
+                  onChange={(event) => setCredentialType(event.target.value.toLowerCase())}
+                />
+              </ControlPlaneFormField>
+            </>
+          ) : (
+            <>
+              <ControlPlaneFormField label="Git host">
+                <Input
+                  autoCapitalize="none"
+                  placeholder="github.com"
+                  required
+                  value={gitHost}
+                  onChange={(event) => setGitHost(event.target.value.toLowerCase())}
+                />
+              </ControlPlaneFormField>
+              <ControlPlaneFormField label="Git username">
+                <Input
+                  autoCapitalize="none"
+                  placeholder="x-access-token"
+                  required
+                  value={gitUsername}
+                  onChange={(event) => setGitUsername(event.target.value)}
+                />
+              </ControlPlaneFormField>
+            </>
+          )}
           <ControlPlaneFormField label="Scope">
             <select
               className={CONTROL_PLANE_NATIVE_SELECT_CLASS_NAME}
@@ -268,19 +342,35 @@ export function TenantCredentialSettingsSection(props: {
             </select>
           </ControlPlaneFormField>
           <ControlPlaneFormField label="Expiry (optional)">
-            <Input type="datetime-local" value={expiresAt} onChange={(event) => setExpiresAt(event.target.value)} />
+            <Input
+              type="datetime-local"
+              value={expiresAt}
+              onChange={(event) => setExpiresAt(event.target.value)}
+            />
           </ControlPlaneFormField>
           <div className="sm:col-span-2">
-            <ControlPlaneFormField label="Secret JSON payload">
-              <Textarea
-                autoComplete="off"
-                placeholder={'{"apiKey":"…"}'}
-                required
-                spellCheck={false}
-                value={createPayload}
-                onChange={(event) => setCreatePayload(event.target.value)}
-              />
-            </ControlPlaneFormField>
+            {purpose === "provider" ? (
+              <ControlPlaneFormField label="Secret JSON payload">
+                <Textarea
+                  autoComplete="off"
+                  placeholder={'{"apiKey":"…"}'}
+                  required
+                  spellCheck={false}
+                  value={createPayload}
+                  onChange={(event) => setCreatePayload(event.target.value)}
+                />
+              </ControlPlaneFormField>
+            ) : (
+              <ControlPlaneFormField label="Git access token">
+                <Input
+                  autoComplete="new-password"
+                  required
+                  type="password"
+                  value={gitToken}
+                  onChange={(event) => setGitToken(event.target.value)}
+                />
+              </ControlPlaneFormField>
+            )}
           </div>
           <div className="sm:col-span-2">
             <Button disabled={createPending} size="sm" type="submit">
@@ -295,13 +385,22 @@ export function TenantCredentialSettingsSection(props: {
           title="Rotate Credential"
           description="Rotation replaces the encrypted payload using optimistic versioning. A blank expiry removes the previous expiry."
         >
-          <form className={CONTROL_PLANE_FORM_GRID_CLASS_NAME} onSubmit={(event) => void rotate(event)}>
+          <form
+            className={CONTROL_PLANE_FORM_GRID_CLASS_NAME}
+            onSubmit={(event) => void rotate(event)}
+          >
             <ControlPlaneFormField label="Credential">
               <select
                 className={CONTROL_PLANE_NATIVE_SELECT_CLASS_NAME}
                 required
                 value={rotateCredentialId}
-                onChange={(event) => setRotateCredentialId(event.target.value)}
+                onChange={(event) => {
+                  setRotateCredentialId(event.target.value);
+                  setRotatePayload("");
+                  setRotateGitHost("");
+                  setRotateGitUsername("");
+                  setRotateGitToken("");
+                }}
               >
                 <option value="">Select a Credential</option>
                 {activeCredentials.map((item) => (
@@ -318,18 +417,51 @@ export function TenantCredentialSettingsSection(props: {
                 onChange={(event) => setRotateExpiresAt(event.target.value)}
               />
             </ControlPlaneFormField>
-            <div className="sm:col-span-2">
-              <ControlPlaneFormField label="Replacement secret JSON payload">
-                <Textarea
-                  autoComplete="off"
-                  placeholder={'{"apiKey":"…"}'}
-                  required
-                  spellCheck={false}
-                  value={rotatePayload}
-                  onChange={(event) => setRotatePayload(event.target.value)}
-                />
-              </ControlPlaneFormField>
-            </div>
+            {selectedRotation?.purpose === "git" ? (
+              <>
+                <ControlPlaneFormField label="Git host (unchanged)">
+                  <Input
+                    autoCapitalize="none"
+                    placeholder="github.com"
+                    required
+                    value={rotateGitHost}
+                    onChange={(event) => setRotateGitHost(event.target.value.toLowerCase())}
+                  />
+                </ControlPlaneFormField>
+                <ControlPlaneFormField label="Git username">
+                  <Input
+                    autoCapitalize="none"
+                    required
+                    value={rotateGitUsername}
+                    onChange={(event) => setRotateGitUsername(event.target.value)}
+                  />
+                </ControlPlaneFormField>
+                <div className="sm:col-span-2">
+                  <ControlPlaneFormField label="Replacement Git access token">
+                    <Input
+                      autoComplete="new-password"
+                      required
+                      type="password"
+                      value={rotateGitToken}
+                      onChange={(event) => setRotateGitToken(event.target.value)}
+                    />
+                  </ControlPlaneFormField>
+                </div>
+              </>
+            ) : (
+              <div className="sm:col-span-2">
+                <ControlPlaneFormField label="Replacement secret JSON payload">
+                  <Textarea
+                    autoComplete="off"
+                    placeholder={'{"apiKey":"…"}'}
+                    required
+                    spellCheck={false}
+                    value={rotatePayload}
+                    onChange={(event) => setRotatePayload(event.target.value)}
+                  />
+                </ControlPlaneFormField>
+              </div>
+            )}
             <div className={cn("sm:col-span-2", !selectedRotation && "text-muted-foreground")}>
               <Button disabled={rotatePending || !selectedRotation} size="sm" type="submit">
                 {rotatePending ? "Rotating…" : "Rotate Credential"}

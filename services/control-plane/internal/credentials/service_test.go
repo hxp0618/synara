@@ -201,6 +201,117 @@ func TestCredentialResolveWithoutKMSFailsClosed(t *testing.T) {
 	assertCredentialProblemCode(t, err, "credential_kms_unavailable")
 }
 
+func TestGitCredentialPayloadIsStrictAndHostIsImmutable(t *testing.T) {
+	fixture := newCredentialFixture(t)
+	ctx := context.Background()
+	secret := "github-private-token"
+	created, err := fixture.service.Create(ctx, fixture.owner, fixture.tenantID, CreateInput{
+		OrganizationID: &fixture.organizationID,
+		Name:           "GitHub private repositories",
+		Purpose:        PurposeGit,
+		Provider:       GitProvider,
+		CredentialType: GitHTTPSCredentialType,
+		Payload: map[string]any{
+			"host": "GITHUB.COM.", "username": "x-access-token", "token": secret,
+		},
+	}, "git-credential-create", "127.0.0.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.Purpose != PurposeGit || created.Provider != GitProvider || created.CredentialType != GitHTTPSCredentialType {
+		t.Fatalf("unexpected Git Credential metadata: %#v", created)
+	}
+	assertMetadataDoesNotContain(t, created, secret)
+	payload, err := fixture.service.Resolve(ctx, fixture.tenantID, created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if payload["host"] != "github.com" || payload["username"] != "x-access-token" || payload["token"] != secret {
+		t.Fatalf("unexpected normalized Git Credential payload: %#v", payload)
+	}
+
+	for name, input := range map[string]CreateInput{
+		"unknown field": {
+			Name: "Unknown field", Purpose: PurposeGit, Provider: GitProvider, CredentialType: GitHTTPSCredentialType,
+			Payload: map[string]any{"host": "github.com", "username": "git", "token": "token", "extra": "forbidden"},
+		},
+		"wrong provider": {
+			Name: "Wrong provider", Purpose: PurposeGit, Provider: "github", CredentialType: GitHTTPSCredentialType,
+			Payload: map[string]any{"host": "github.com", "username": "git", "token": "token"},
+		},
+		"empty token": {
+			Name: "Empty token", Purpose: PurposeGit, Provider: GitProvider, CredentialType: GitHTTPSCredentialType,
+			Payload: map[string]any{"host": "github.com", "username": "git", "token": ""},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, createErr := fixture.service.Create(ctx, fixture.owner, fixture.tenantID, input, "git-invalid-"+name, "127.0.0.1")
+			if createErr == nil {
+				t.Fatal("invalid Git Credential payload was accepted")
+			}
+		})
+	}
+
+	_, err = fixture.service.Rotate(ctx, fixture.owner, fixture.tenantID, created.ID, RotateInput{
+		ExpectedVersion: created.Version,
+		Payload:         map[string]any{"host": "gitlab.com", "username": "oauth2", "token": "replacement"},
+	}, "git-credential-rebind", "127.0.0.1")
+	assertCredentialProblemCode(t, err, "git_credential_host_immutable")
+
+	rotated, err := fixture.service.Rotate(ctx, fixture.owner, fixture.tenantID, created.ID, RotateInput{
+		ExpectedVersion: created.Version,
+		Payload:         map[string]any{"host": "github.com", "username": "oauth2", "token": "replacement"},
+	}, "git-credential-rotate", "127.0.0.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rotated.Version != created.Version+1 {
+		t.Fatalf("Git Credential rotation did not advance the version: %#v", rotated)
+	}
+}
+
+func TestGitCredentialWorkerResolutionRequiresProjectBindingHostAndCurrentLease(t *testing.T) {
+	fixture := newCredentialFixture(t)
+	ctx := context.Background()
+	gitCredential, err := fixture.service.Create(ctx, fixture.owner, fixture.tenantID, CreateInput{
+		OrganizationID: &fixture.organizationID,
+		Name:           "Private Git",
+		Purpose:        PurposeGit,
+		Provider:       GitProvider,
+		CredentialType: GitHTTPSCredentialType,
+		Payload: map[string]any{
+			"host": "git.example.com", "username": "synara", "token": "git-secret-token",
+		},
+	}, "git-worker-create", "127.0.0.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker, executionID, projectID, leaseToken := seedGitCredentialExecution(t, fixture, gitCredential.ID)
+	executionService := executions.NewService(fixture.db, nil, 30*time.Second, 90*time.Second, 24*time.Hour, nil, nil)
+	lease := executions.LeaseInput{TenantID: fixture.tenantID, Generation: 1, LeaseToken: leaseToken}
+
+	payload, err := fixture.service.ResolveGitForExecution(ctx, executionService, worker, executionID, gitCredential.ID, lease)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if payload.Host != "git.example.com" || payload.Username != "synara" || payload.Token != "git-secret-token" {
+		t.Fatalf("unexpected resolved Git Credential: %#v", payload)
+	}
+
+	fenced := lease
+	fenced.Generation++
+	_, err = fixture.service.ResolveGitForExecution(ctx, executionService, worker, executionID, gitCredential.ID, fenced)
+	assertCredentialProblemCode(t, err, "generation_fenced")
+
+	otherRepository := "https://other.example.com/team/repository.git"
+	if err := fixture.db.Model(&persistence.Project{}).Where("id = ?", projectID).
+		Update("repository_url", otherRepository).Error; err != nil {
+		t.Fatal(err)
+	}
+	_, err = fixture.service.ResolveGitForExecution(ctx, executionService, worker, executionID, gitCredential.ID, lease)
+	assertCredentialProblemCode(t, err, "git_credential_host_mismatch")
+}
+
 func TestCredentialWorkerResolutionRequiresCurrentLeaseAndOrganization(t *testing.T) {
 	fixture := newCredentialFixture(t)
 	ctx := context.Background()
@@ -371,6 +482,62 @@ func seedCredentialExecution(
 		}
 	}
 	return worker, executionID, sessionID, leaseToken
+}
+
+func seedGitCredentialExecution(
+	t *testing.T,
+	fixture credentialFixture,
+	credentialID uuid.UUID,
+) (persistence.WorkerInstance, uuid.UUID, uuid.UUID, string) {
+	t.Helper()
+	now := fixture.now
+	projectID := uuid.New()
+	sessionID := uuid.New()
+	turnID := uuid.New()
+	executionID := uuid.New()
+	workerID := uuid.New()
+	leaseToken := "git-credential-worker-lease-token"
+	repositoryURL := "https://git.example.com/team/repository.git"
+	worker := persistence.WorkerInstance{
+		ID: workerID, ExecutionTargetID: fixture.targetID, TargetKind: "local",
+		ClusterID: "git-credential-test", Namespace: "git-credential-test", PodName: "git-credential-test",
+		Version: "test", ProtocolVersion: 1, Capabilities: map[string]any{},
+		LeaseSupported: true, FencingSupported: true,
+		AuthTokenHash: secret.HashToken("git-credential-worker-token"), Status: "online",
+		RegisteredAt: now, LastHeartbeatAt: now,
+	}
+	models := []any{
+		&persistence.Project{
+			ID: projectID, TenantID: fixture.tenantID, OrganizationID: fixture.organizationID,
+			Name: "Git Credential project", RepositoryURL: &repositoryURL, DefaultBranch: "main",
+			GitCredentialID: &credentialID, Visibility: "organization", CreatedBy: fixture.owner.UserID,
+		},
+		&persistence.AgentSession{
+			ID: sessionID, TenantID: fixture.tenantID, OrganizationID: fixture.organizationID,
+			ProjectID: projectID, CreatedBy: fixture.owner.UserID, Title: "Git Credential session",
+			Status: "active", Visibility: "organization", Provider: "codex", ExecutionTargetID: fixture.targetID,
+		},
+		&persistence.AgentTurn{
+			ID: turnID, TenantID: fixture.tenantID, SessionID: sessionID,
+			CreatedBy: fixture.owner.UserID, Status: "running", InputText: "test",
+		},
+		&worker,
+		&persistence.AgentExecution{
+			ID: executionID, TenantID: fixture.tenantID, SessionID: sessionID, TurnID: turnID,
+			Attempt: 1, Status: "running", ExecutionTargetID: fixture.targetID, TargetKind: "local",
+			WorkerID: &workerID, Generation: 1, RequestedBy: fixture.owner.UserID, QueuedAt: now, StartedAt: &now,
+		},
+		&persistence.WorkerLease{
+			ExecutionID: executionID, TenantID: fixture.tenantID, WorkerID: workerID, Generation: 1,
+			LeaseTokenHash: secret.HashToken(leaseToken), AcquiredAt: now, HeartbeatAt: now, ExpiresAt: now.Add(time.Hour),
+		},
+	}
+	for _, model := range models {
+		if err := fixture.db.Create(model).Error; err != nil {
+			t.Fatalf("seed Git Credential execution %T: %v", model, err)
+		}
+	}
+	return worker, executionID, projectID, leaseToken
 }
 
 func assertMetadataDoesNotContain(t *testing.T, value any, secret string) {

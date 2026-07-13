@@ -3,6 +3,7 @@ package projects
 import (
 	"context"
 	"errors"
+	"net/url"
 	"strings"
 	"time"
 
@@ -36,7 +37,8 @@ func toProject(model persistence.Project) Project {
 	return Project{
 		ID: model.ID, TenantID: model.TenantID, OrganizationID: model.OrganizationID,
 		Name: model.Name, RepositoryURL: model.RepositoryURL, DefaultBranch: model.DefaultBranch,
-		Visibility: model.Visibility, CreatedBy: model.CreatedBy, CreatedAt: model.CreatedAt,
+		GitCredentialID: model.GitCredentialID, Visibility: model.Visibility,
+		CreatedBy: model.CreatedBy, CreatedAt: model.CreatedAt,
 		UpdatedAt: model.UpdatedAt, ArchivedAt: model.ArchivedAt,
 	}
 }
@@ -114,18 +116,33 @@ func (s *Service) CreateWithIdempotency(
 		return Project{}, false, err
 	}
 
+	gitCredentialID, err := s.resolveGitCredentialBinding(
+		ctx, principal, tenantID, organizationID, repositoryURL, input.GitCredentialID,
+	)
+	if err != nil {
+		return Project{}, false, err
+	}
+
 	result, err := apiidempotency.Execute(ctx, s.db, apiidempotency.Scope{
 		TenantID: tenantID, ActorID: principal.UserID, Key: idempotencyKey,
 		Operation: "project.create", SuccessStatus: 201,
 		Request: map[string]any{
 			"tenantId": tenantID, "organizationId": organizationID, "name": name,
-			"repositoryUrl": repositoryURL, "defaultBranch": defaultBranch, "visibility": visibility,
+			"repositoryUrl": repositoryURL, "defaultBranch": defaultBranch,
+			"gitCredentialId": gitCredentialID, "visibility": visibility,
 		},
 	}, func(tx *gorm.DB) (Project, error) {
+		gitCredentialID, err := s.validateGitCredentialBinding(
+			ctx, tx, tenantID, organizationID, repositoryURL, gitCredentialID,
+		)
+		if err != nil {
+			return Project{}, err
+		}
 		model := persistence.Project{
 			ID: uuid.New(), TenantID: tenantID, OrganizationID: organizationID,
 			Name: name, RepositoryURL: repositoryURL, DefaultBranch: defaultBranch,
-			Visibility: visibility, CreatedBy: principal.UserID,
+			GitCredentialID: gitCredentialID,
+			Visibility:      visibility, CreatedBy: principal.UserID,
 		}
 		if err := tx.Create(&model).Error; err != nil {
 			return Project{}, problem.Wrap(409, "project_create_rejected", "Project creation was rejected by a tenant isolation constraint.", err)
@@ -134,7 +151,7 @@ func (s *Service) CreateWithIdempotency(
 			TenantID: tenantID, ActorType: "user", ActorID: &principal.UserID,
 			Action: "project.created", ResourceType: "project", ResourceID: &model.ID,
 			OrganizationID: &organizationID, RequestID: requestID, IPAddress: ipAddress,
-			Metadata: map[string]any{"visibility": visibility},
+			Metadata: map[string]any{"visibility": visibility, "gitCredentialId": gitCredentialID},
 		}); err != nil {
 			return Project{}, err
 		}
@@ -211,6 +228,8 @@ func (s *Service) Update(
 		return Project{}, err
 	}
 	updates := map[string]any{}
+	repositoryURL := current.RepositoryURL
+	gitCredentialID := current.GitCredentialID
 	if input.Name != nil {
 		name, err := validation.Name(*input.Name, "invalid_project_name", "Project name", 200)
 		if err != nil {
@@ -219,11 +238,12 @@ func (s *Service) Update(
 		updates["name"] = name
 	}
 	if input.RepositoryURL != nil {
-		repositoryURL, err := normalizeRepositoryURL(input.RepositoryURL)
+		normalizedRepositoryURL, err := normalizeRepositoryURL(input.RepositoryURL)
 		if err != nil {
 			return Project{}, err
 		}
-		updates["repository_url"] = repositoryURL
+		repositoryURL = normalizedRepositoryURL
+		updates["repository_url"] = normalizedRepositoryURL
 	}
 	if input.DefaultBranch != nil {
 		branch, err := normalizeBranch(*input.DefaultBranch)
@@ -239,10 +259,30 @@ func (s *Service) Update(
 		}
 		updates["visibility"] = visibility
 	}
+	if input.GitCredentialID.Set {
+		gitCredentialID = input.GitCredentialID.Value
+		updates["git_credential_id"] = input.GitCredentialID.Value
+	}
+	if (input.RepositoryURL != nil || input.GitCredentialID.Set) && gitCredentialID != nil {
+		resolved, resolveErr := s.resolveGitCredentialBinding(
+			ctx, principal, tenantID, current.OrganizationID, repositoryURL, gitCredentialID,
+		)
+		if resolveErr != nil {
+			return Project{}, resolveErr
+		}
+		updates["git_credential_id"] = *resolved
+	}
 	if len(updates) == 0 {
 		return Project{}, problem.New(400, "empty_update", "Provide at least one project field to update.")
 	}
 	err = persistence.InTransaction(ctx, s.db, func(tx *gorm.DB) error {
+		if gitCredentialID != nil {
+			if _, validateErr := s.validateGitCredentialBinding(
+				ctx, tx, tenantID, current.OrganizationID, repositoryURL, gitCredentialID,
+			); validateErr != nil {
+				return validateErr
+			}
+		}
 		result := tx.Model(&persistence.Project{}).
 			Where("tenant_id = ? AND id = ? AND archived_at IS NULL", tenantID, projectID).
 			Updates(updates)
@@ -262,6 +302,71 @@ func (s *Service) Update(
 		return Project{}, err
 	}
 	return s.Get(ctx, principal, tenantID, projectID)
+}
+
+func (s *Service) resolveGitCredentialBinding(
+	ctx context.Context,
+	principal identity.Principal,
+	tenantID, organizationID uuid.UUID,
+	repositoryURL *string,
+	credentialID *uuid.UUID,
+) (*uuid.UUID, error) {
+	if credentialID == nil || *credentialID == uuid.Nil {
+		return nil, nil
+	}
+	if repositoryURL == nil || !isHTTPSRepository(*repositoryURL) {
+		return nil, problem.New(409, "git_credential_requires_https_repository", "Git Credential requires an HTTPS Project repository URL.")
+	}
+	if _, err := s.authorizer.RequireOrganization(
+		ctx, principal.UserID, tenantID, organizationID, authorization.CredentialsUse,
+	); err != nil {
+		return nil, err
+	}
+	return s.validateGitCredentialBinding(ctx, s.db, tenantID, organizationID, repositoryURL, credentialID)
+}
+
+func (s *Service) validateGitCredentialBinding(
+	ctx context.Context,
+	db *gorm.DB,
+	tenantID, organizationID uuid.UUID,
+	repositoryURL *string,
+	credentialID *uuid.UUID,
+) (*uuid.UUID, error) {
+	if credentialID == nil || *credentialID == uuid.Nil {
+		return nil, nil
+	}
+	if repositoryURL == nil || !isHTTPSRepository(*repositoryURL) {
+		return nil, problem.New(409, "git_credential_requires_https_repository", "Git Credential requires an HTTPS Project repository URL.")
+	}
+	var credential persistence.ProviderCredential
+	err := persistence.WithLocking(db.WithContext(ctx), "SHARE", "").
+		Select("id", "tenant_id", "organization_id", "purpose", "provider", "credential_type", "expires_at", "revoked_at").
+		Where("tenant_id = ? AND id = ?", tenantID, *credentialID).
+		Take(&credential).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, problem.New(404, "credential_not_found", "Git Credential not found.")
+	}
+	if err != nil {
+		return nil, problem.Wrap(500, "credential_load_failed", "Git Credential could not be loaded.", err)
+	}
+	if credential.Purpose != "git" || credential.Provider != "git" || credential.CredentialType != "https_token" {
+		return nil, problem.New(409, "credential_purpose_mismatch", "Project requires a Git https_token Credential.")
+	}
+	if credential.OrganizationID != nil && *credential.OrganizationID != organizationID {
+		return nil, problem.New(404, "credential_not_found", "Git Credential not found.")
+	}
+	if credential.RevokedAt != nil || (credential.ExpiresAt != nil && !credential.ExpiresAt.After(time.Now().UTC())) {
+		return nil, problem.New(409, "credential_unavailable", "Git Credential is revoked or expired.")
+	}
+	value := credential.ID
+	return &value, nil
+}
+
+func isHTTPSRepository(raw string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	return err == nil && parsed.Opaque == "" && strings.EqualFold(parsed.Scheme, "https") &&
+		parsed.Host != "" && parsed.User == nil && parsed.RawQuery == "" && parsed.Fragment == "" &&
+		(parsed.Port() == "" || parsed.Port() == "443")
 }
 
 func (s *Service) Archive(

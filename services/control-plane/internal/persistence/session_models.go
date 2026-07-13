@@ -7,17 +7,18 @@ import (
 )
 
 type Project struct {
-	ID             uuid.UUID  `gorm:"column:id;type:uuid;primaryKey"`
-	TenantID       uuid.UUID  `gorm:"column:tenant_id;type:uuid"`
-	OrganizationID uuid.UUID  `gorm:"column:organization_id;type:uuid"`
-	Name           string     `gorm:"column:name"`
-	RepositoryURL  *string    `gorm:"column:repository_url"`
-	DefaultBranch  string     `gorm:"column:default_branch"`
-	Visibility     string     `gorm:"column:visibility"`
-	CreatedBy      uuid.UUID  `gorm:"column:created_by;type:uuid"`
-	CreatedAt      time.Time  `gorm:"column:created_at"`
-	UpdatedAt      time.Time  `gorm:"column:updated_at"`
-	ArchivedAt     *time.Time `gorm:"column:archived_at"`
+	ID              uuid.UUID  `gorm:"column:id;type:uuid;primaryKey"`
+	TenantID        uuid.UUID  `gorm:"column:tenant_id;type:uuid"`
+	OrganizationID  uuid.UUID  `gorm:"column:organization_id;type:uuid"`
+	Name            string     `gorm:"column:name"`
+	RepositoryURL   *string    `gorm:"column:repository_url"`
+	DefaultBranch   string     `gorm:"column:default_branch"`
+	GitCredentialID *uuid.UUID `gorm:"column:git_credential_id;type:uuid"`
+	Visibility      string     `gorm:"column:visibility"`
+	CreatedBy       uuid.UUID  `gorm:"column:created_by;type:uuid"`
+	CreatedAt       time.Time  `gorm:"column:created_at"`
+	UpdatedAt       time.Time  `gorm:"column:updated_at"`
+	ArchivedAt      *time.Time `gorm:"column:archived_at"`
 }
 
 func (Project) TableName() string { return "projects" }

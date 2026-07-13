@@ -27,6 +27,7 @@ func TestDaemonPreparesManagedWorkspaceBeforeStartingProvider(t *testing.T) {
 	tenantID := uuid.New()
 	workerID := uuid.New()
 	workspaceID := uuid.New()
+	gitCredentialID := uuid.New()
 	lease := executions.Lease{
 		ExecutionID: executionID, TenantID: tenantID, WorkerID: workerID,
 		Generation: 1, LeaseToken: "lease-token", ExpiresAt: time.Now().Add(time.Hour),
@@ -35,12 +36,24 @@ func TestDaemonPreparesManagedWorkspaceBeforeStartingProvider(t *testing.T) {
 	baseCommit, headCommit := stringPointer(strings.Repeat("c", 40)), stringPointer(strings.Repeat("d", 40))
 	var state struct {
 		sync.Mutex
-		order []string
-		ready executions.WorkspaceReadyInput
+		order         []string
+		ready         executions.WorkspaceReadyInput
+		requestBodies []string
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		base := "/v1/workers/executions/" + executionID.String() + "/"
+		requestBody, _ := io.ReadAll(request.Body)
+		request.Body = io.NopCloser(strings.NewReader(string(requestBody)))
+		state.Lock()
+		state.requestBodies = append(state.requestBodies, string(requestBody))
+		state.Unlock()
 		switch request.URL.Path {
+		case base + "git-credentials/" + gitCredentialID.String() + "/resolve":
+			state.Lock()
+			state.order = append(state.order, "git.resolve")
+			state.Unlock()
+			response.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(response, `{"payload":{"host":"git.example.com","username":"git-user","token":"git-secret-token"}}`)
 		case base + "workspace/ready":
 			var input executions.WorkspaceReadyInput
 			if err := json.NewDecoder(request.Body).Decode(&input); err != nil {
@@ -83,7 +96,13 @@ func TestDaemonPreparesManagedWorkspaceBeforeStartingProvider(t *testing.T) {
 	materializedDirectory := t.TempDir()
 	daemon := &Daemon{
 		config: cfg, client: client, runner: NewRunner(cfg),
-		workspace: workspaceMaterializerFunc(func(context.Context, executions.Execution, executions.Workload) (WorkspaceMaterialization, error) {
+		workspace: workspaceMaterializerFunc(func(_ context.Context, _ executions.Execution, _ executions.Workload, credential *GitHTTPSCredential) (WorkspaceMaterialization, error) {
+			if credential == nil || credential.Host != "git.example.com" || credential.Username != "git-user" || credential.Token != "git-secret-token" {
+				t.Fatalf("Workspace materializer received an invalid Git Credential: %#v", credential)
+			}
+			state.Lock()
+			state.order = append(state.order, "workspace.materialize")
+			state.Unlock()
 			return WorkspaceMaterialization{
 				Directory: materializedDirectory, Managed: true, RepositoryFingerprint: fingerprint,
 				CurrentBranch: branch, BaseCommit: baseCommit, HeadCommit: headCommit,
@@ -95,13 +114,14 @@ func TestDaemonPreparesManagedWorkspaceBeforeStartingProvider(t *testing.T) {
 	workload := executions.Workload{
 		TenantID: tenantID, OrganizationID: uuid.New(), ProjectID: uuid.New(), SessionID: uuid.New(),
 		TurnID: execution.TurnID, RemoteWorkspaceID: &workspaceID, Provider: "codex", InputText: "run",
+		GitCredentialID: &gitCredentialID,
 	}
 	if err := daemon.runExecution(context.Background(), execution, lease, workload, nil); err != nil {
 		t.Fatal(err)
 	}
 	state.Lock()
 	defer state.Unlock()
-	expectedOrder := []string{"workspace.ready", "execution.start", "execution.complete"}
+	expectedOrder := []string{"git.resolve", "workspace.materialize", "workspace.ready", "execution.start", "execution.complete"}
 	if len(state.order) != len(expectedOrder) {
 		t.Fatalf("unexpected Workspace/Execution lifecycle order: %#v", state.order)
 	}
@@ -113,6 +133,9 @@ func TestDaemonPreparesManagedWorkspaceBeforeStartingProvider(t *testing.T) {
 	if state.ready.RepositoryFingerprint == nil || *state.ready.RepositoryFingerprint != *fingerprint ||
 		state.ready.CurrentBranch == nil || *state.ready.CurrentBranch != *branch {
 		t.Fatalf("Workspace metadata was not reported: %#v", state.ready)
+	}
+	if strings.Contains(strings.Join(state.requestBodies, "\n"), "git-secret-token") {
+		t.Fatal("Git Credential leaked into an agentd request after resolution")
 	}
 }
 
@@ -168,7 +191,7 @@ func TestDaemonReportsManagedWorkspaceFailureBeforeFailingExecution(t *testing.T
 	client.workerToken = "worker-token"
 	daemon := &Daemon{
 		config: cfg, client: client, runner: NewRunner(cfg),
-		workspace: workspaceMaterializerFunc(func(context.Context, executions.Execution, executions.Workload) (WorkspaceMaterialization, error) {
+		workspace: workspaceMaterializerFunc(func(context.Context, executions.Execution, executions.Workload, *GitHTTPSCredential) (WorkspaceMaterialization, error) {
 			return WorkspaceMaterialization{}, workspaceFailure(
 				"workspace_invalid", "Repository URL is not allowed for a remote Workspace.", true, false,
 			)
@@ -193,12 +216,13 @@ func TestDaemonReportsManagedWorkspaceFailureBeforeFailingExecution(t *testing.T
 	}
 }
 
-type workspaceMaterializerFunc func(context.Context, executions.Execution, executions.Workload) (WorkspaceMaterialization, error)
+type workspaceMaterializerFunc func(context.Context, executions.Execution, executions.Workload, *GitHTTPSCredential) (WorkspaceMaterialization, error)
 
 func (f workspaceMaterializerFunc) Materialize(
 	ctx context.Context,
 	execution executions.Execution,
 	workload executions.Workload,
+	credential *GitHTTPSCredential,
 ) (WorkspaceMaterialization, error) {
-	return f(ctx, execution, workload)
+	return f(ctx, execution, workload, credential)
 }
