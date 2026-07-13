@@ -253,6 +253,9 @@ func (m *WorkspaceMaterializer) validatePrivateGitGeneration(
 	layout workspaceLayout,
 	expected workspaceGenerationManifest,
 ) error {
+	if err := validateWorkspaceGenerationPath(m.root, layout.Root); err != nil {
+		return err
+	}
 	if err := validatePrivateWorktreeFilesystem(layout, expected); err != nil {
 		return err
 	}

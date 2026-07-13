@@ -232,7 +232,7 @@ func (r *Runner) runProviderHostV2(
 		executionID, generation, "SendTurn", commandID(input, "send"),
 		map[string]any{"inputText": input.Workload.InputText, "turnId": input.Workload.TurnID.String()},
 	)
-	sendExecution, err := process.startCommand(send, func(message RunnerMessage) error {
+	sendExecution, err := process.startCommand(ctx, send, func(message RunnerMessage) error {
 		if handle == nil {
 			return protocolFailure("Provider Host emitted a non-terminal message without a Worker handler")
 		}
@@ -296,20 +296,20 @@ func (r *Runner) runProviderHostV2(
 }
 
 func (p *providerHostV2Process) interruptActiveTurn(input RunnerInput, targetCommandID string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
 	command := newProviderHostCommand(
 		input.Execution.ID.String(), input.Execution.Generation, "InterruptTurn", commandID(input, "interrupt"),
 		map[string]any{"targetCommandId": targetCommandID},
 	)
-	execution, err := p.startCommand(command, nil)
+	execution, err := p.startCommand(ctx, command, nil)
 	if err != nil {
 		return err
 	}
-	timer := time.NewTimer(2 * time.Second)
-	defer timer.Stop()
 	select {
 	case outcome := <-execution.result:
 		return outcome.err
-	case <-timer.C:
+	case <-ctx.Done():
 		return &runnerFailure{
 			code: "interrupted", message: "Provider Host did not acknowledge InterruptTurn before the deadline",
 			requiresNewExecution: true, canReconstructFromHistory: true, canMoveWorker: true,
@@ -348,17 +348,20 @@ func (p *providerHostV2Process) executeControl(
 		input.Execution.ID.String(), input.Execution.Generation, delivery.CommandType, delivery.CommandID,
 		payload,
 	)
-	execution, err := p.startCommand(command, nil)
-	if err != nil {
-		return false, err
-	}
 	if control.MarkDelivered == nil || control.Acknowledge == nil {
 		return false, protocolFailure("Worker delivery omitted persistence callbacks")
 	}
-	if err := control.MarkDelivered(ctx); err != nil {
-		return false, fmt.Errorf("mark Provider Host command delivered: %w", err)
+	beforeWrite := func() error {
+		if err := control.MarkDelivered(ctx); err != nil {
+			return fmt.Errorf("mark Provider Host command delivered: %w", err)
+		}
+		return nil
 	}
-	terminal, terminalErr := execution.wait()
+	execution, err := p.startCommandBeforeWrite(ctx, command, nil, beforeWrite)
+	if err != nil {
+		return false, err
+	}
+	terminal, terminalErr := execution.waitContext(ctx)
 	if terminalErr != nil {
 		return false, terminalErr
 	}
@@ -522,6 +525,8 @@ func runnerResultFromTerminal(message providerHostMessage) (RunnerResult, error)
 
 type providerHostV2Process struct {
 	command             *exec.Cmd
+	processTree         *processTree
+	outputPipes         *processOutputPipes
 	stdin               io.WriteCloser
 	stderr              *boundedBuffer
 	credentialWrite     <-chan error
@@ -587,6 +592,19 @@ func (r *Runner) startProviderHostV2(
 		arguments = append(arguments, "--protocol-v2")
 	}
 	command := exec.Command(r.command[0], arguments...)
+	processTree, err := newProcessTree(command)
+	if err != nil {
+		return nil, &runnerFailure{
+			code: "provider_unavailable", message: safeRunnerMessage("prepare Provider Host process tree: " + err.Error()),
+			retryable: true, canReconstructFromHistory: true, canMoveWorker: true,
+		}
+	}
+	processTreeOwned := false
+	defer func() {
+		if !processTreeOwned {
+			_ = processTree.release()
+		}
+	}()
 	command.Env = runnerEnvironment(os.Environ())
 	var credentialWrite <-chan error
 	if credential != nil {
@@ -613,14 +631,24 @@ func (r *Runner) startProviderHostV2(
 		closeProviderHostFiles(command)
 		return nil, fmt.Errorf("open Provider Host stdin: %w", err)
 	}
-	stdout, err := command.StdoutPipe()
+	stderr := &boundedBuffer{maximum: 64 << 10}
+	outputPipes, err := newProcessOutputPipes(command, stderr)
 	if err != nil {
 		_ = stdin.Close()
 		closeProviderHostFiles(command)
-		return nil, fmt.Errorf("open Provider Host stdout: %w", err)
+		return nil, fmt.Errorf("open Provider Host output pipes: %w", err)
 	}
-	stderr := &boundedBuffer{maximum: 64 << 10}
-	command.Stderr = stderr
+	outputPipesOwned := false
+	defer func() {
+		if !outputPipesOwned {
+			outputPipes.close()
+		}
+	}()
+	if err := ctx.Err(); err != nil {
+		_ = stdin.Close()
+		closeProviderHostFiles(command)
+		return nil, err
+	}
 	if err := command.Start(); err != nil {
 		_ = stdin.Close()
 		closeProviderHostFiles(command)
@@ -629,16 +657,33 @@ func (r *Runner) startProviderHostV2(
 			retryable: true, canReconstructFromHistory: true, canMoveWorker: true,
 		}
 	}
+	if err := processTree.started(); err != nil {
+		_ = processTree.terminate()
+		_ = command.Wait()
+		_ = stdin.Close()
+		closeProviderHostFiles(command)
+		return nil, &runnerFailure{
+			code: "provider_unavailable", message: safeRunnerMessage("isolate Provider Host process tree: " + err.Error()),
+			retryable: true, canReconstructFromHistory: true, canMoveWorker: true,
+		}
+	}
+	outputPipes.started()
 	closeProviderHostFiles(command)
-	scanner := bufio.NewScanner(stdout)
+	scanner := bufio.NewScanner(outputPipes.stdoutRead)
 	scanner.Buffer(make([]byte, 64*1024), r.maxMessageBytes)
 	process := &providerHostV2Process{
-		command: command, stdin: stdin, stderr: stderr,
+		command: command, processTree: processTree, outputPipes: outputPipes, stdin: stdin, stderr: stderr,
 		credentialWrite: credentialWrite, maximumCommandBytes: providerHostCommandLimit,
 		maximumMessageBytes: r.maxMessageBytes,
 		commands:            make(map[string]*providerHostCommandState), completed: make(map[string]providerHostCompletedCommand),
 		readerDone: make(chan struct{}),
 	}
+	processTreeOwned = true
+	outputPipesOwned = true
+	go func() {
+		_ = process.waitProcess()
+		_ = process.processTree.terminate()
+	}()
 	go process.readLoop(scanner)
 	return process, nil
 }
@@ -653,7 +698,7 @@ func (p *providerHostV2Process) execute(
 	command providerHostCommand,
 	handle func(RunnerMessage) error,
 ) (providerHostMessage, error) {
-	execution, err := p.startCommand(command, handle)
+	execution, err := p.startCommand(context.Background(), command, handle)
 	if err != nil {
 		return providerHostMessage{}, err
 	}
@@ -665,7 +710,7 @@ func (p *providerHostV2Process) executeContext(
 	command providerHostCommand,
 	handle func(RunnerMessage) error,
 ) (providerHostMessage, error) {
-	execution, err := p.startCommand(command, handle)
+	execution, err := p.startCommand(ctx, command, handle)
 	if err != nil {
 		return providerHostMessage{}, err
 	}
@@ -673,9 +718,22 @@ func (p *providerHostV2Process) executeContext(
 }
 
 func (p *providerHostV2Process) startCommand(
+	ctx context.Context,
 	command providerHostCommand,
 	handle func(RunnerMessage) error,
 ) (*providerHostCommandExecution, error) {
+	return p.startCommandBeforeWrite(ctx, command, handle, nil)
+}
+
+func (p *providerHostV2Process) startCommandBeforeWrite(
+	ctx context.Context,
+	command providerHostCommand,
+	handle func(RunnerMessage) error,
+	beforeWrite func() error,
+) (*providerHostCommandExecution, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	encoded, err := json.Marshal(command)
 	if err != nil {
 		return nil, fmt.Errorf("encode Provider Host command: %w", err)
@@ -701,6 +759,11 @@ func (p *providerHostV2Process) startCommand(
 		if !sameProviderHostCommand(completed.command, command) {
 			return nil, protocolFailure("Provider Host commandId was reused for different command content")
 		}
+		if beforeWrite != nil {
+			if err := beforeWrite(); err != nil {
+				return nil, err
+			}
+		}
 		state.result <- completed.outcome
 		close(state.result)
 		return &providerHostCommandExecution{result: state.result}, nil
@@ -711,19 +774,54 @@ func (p *providerHostV2Process) startCommand(
 	}
 	p.commands[command.CommandID] = state
 	p.mu.Unlock()
+	if beforeWrite != nil {
+		if err := beforeWrite(); err != nil {
+			p.discardPreparedCommand(state, err)
+			return nil, err
+		}
+	}
 
-	p.writeMu.Lock()
-	if _, err := p.stdin.Write(append(encoded, '\n')); err != nil {
+	writeResult := make(chan error, 1)
+	go func() {
+		p.writeMu.Lock()
+		_, err := p.stdin.Write(append(encoded, '\n'))
 		p.writeMu.Unlock()
+		writeResult <- err
+	}()
+	select {
+	case err := <-writeResult:
+		if err == nil {
+			return &providerHostCommandExecution{result: state.result}, nil
+		}
 		failure := &runnerFailure{
 			code: "provider_unavailable", message: safeRunnerMessage("write Provider Host command: " + err.Error()),
 			retryable: true, requiresNewExecution: true, canReconstructFromHistory: true, canMoveWorker: true,
 		}
 		p.fail(failure)
 		return nil, failure
+	case <-ctx.Done():
+		p.fail(&runnerFailure{
+			code: "cancelled", message: "Provider Host command write was cancelled",
+			requiresNewExecution: true, canReconstructFromHistory: true, canMoveWorker: true,
+		})
+		<-writeResult
+		return nil, ctx.Err()
 	}
-	p.writeMu.Unlock()
-	return &providerHostCommandExecution{result: state.result}, nil
+}
+
+func (p *providerHostV2Process) discardPreparedCommand(state *providerHostCommandState, err error) {
+	p.mu.Lock()
+	owned := false
+	if current := p.commands[state.command.CommandID]; current == state {
+		delete(p.commands, state.command.CommandID)
+		owned = true
+	}
+	p.mu.Unlock()
+	if !owned {
+		return
+	}
+	state.result <- providerHostCommandOutcome{err: err}
+	close(state.result)
 }
 
 func (p *providerHostV2Process) readLoop(scanner *bufio.Scanner) {
@@ -742,6 +840,8 @@ func (p *providerHostV2Process) readLoop(scanner *bufio.Scanner) {
 		p.fail(protocolFailure("Provider Host emitted a malformed or oversized JSONL message"))
 	}
 	waitErr := p.waitProcess()
+	_ = p.processTree.terminate()
+	p.outputPipes.waitStderr()
 	p.mu.Lock()
 	fatalErr := p.fatalErr
 	closing := p.closing
@@ -863,6 +963,7 @@ func (p *providerHostV2Process) finish() error {
 		return fmt.Errorf("close Provider Host stdin: %w", err)
 	}
 	<-p.readerDone
+	defer p.releaseProcessResources()
 	p.mu.Lock()
 	fatalErr := p.fatalErr
 	p.mu.Unlock()
@@ -886,12 +987,11 @@ func (p *providerHostV2Process) abort() {
 	p.closing = true
 	p.mu.Unlock()
 	_ = p.stdin.Close()
-	if p.command.Process != nil {
-		_ = p.command.Process.Kill()
-	}
+	_ = p.processTree.terminate()
 	<-p.readerDone
 	_ = p.waitProcess()
 	_ = p.credentialResult()
+	p.releaseProcessResources()
 }
 
 func (p *providerHostV2Process) fail(err error) {
@@ -916,9 +1016,12 @@ func (p *providerHostV2Process) fail(err error) {
 		close(state.result)
 	}
 	_ = p.stdin.Close()
-	if p.command.Process != nil {
-		_ = p.command.Process.Kill()
-	}
+	_ = p.processTree.terminate()
+}
+
+func (p *providerHostV2Process) releaseProcessResources() {
+	p.outputPipes.close()
+	_ = p.processTree.release()
 }
 
 func (p *providerHostV2Process) waitProcess() error {

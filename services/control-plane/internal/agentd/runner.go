@@ -58,7 +58,12 @@ func (r *Runner) runLegacy(
 	if err != nil {
 		return RunnerResult{}, fmt.Errorf("encode runner input: %w", err)
 	}
-	command := exec.CommandContext(ctx, r.command[0], r.command[1:]...)
+	command := exec.Command(r.command[0], r.command[1:]...)
+	processTree, err := newProcessTree(command)
+	if err != nil {
+		return RunnerResult{}, fmt.Errorf("prepare runner process tree: %w", err)
+	}
+	defer processTree.release()
 	command.Dir = input.WorkspaceDirectory
 	command.Env = runnerEnvironment(os.Environ())
 	command.Stdin = bytes.NewReader(append(encoded, '\n'))
@@ -83,21 +88,43 @@ func (r *Runner) runLegacy(
 			writeResult <- err
 		}()
 	}
-	stdout, err := command.StdoutPipe()
-	if err != nil {
-		return RunnerResult{}, fmt.Errorf("open runner stdout: %w", err)
-	}
 	stderr := &boundedBuffer{maximum: 64 << 10}
-	command.Stderr = stderr
+	outputPipes, err := newProcessOutputPipes(command, stderr)
+	if err != nil {
+		return RunnerResult{}, fmt.Errorf("open runner output pipes: %w", err)
+	}
+	defer outputPipes.close()
+	if err := ctx.Err(); err != nil {
+		return RunnerResult{}, err
+	}
 	if err := command.Start(); err != nil {
 		return RunnerResult{}, fmt.Errorf("start runner: %w", err)
 	}
+	if err := processTree.started(); err != nil {
+		_ = processTree.terminate()
+		_ = command.Wait()
+		return RunnerResult{}, fmt.Errorf("isolate runner process tree: %w", err)
+	}
+	outputPipes.started()
 	if len(command.ExtraFiles) > 0 {
 		_ = command.ExtraFiles[0].Close()
 	}
+	waitResult := make(chan error, 1)
+	go func() {
+		err := command.Wait()
+		_ = processTree.terminate()
+		waitResult <- err
+	}()
+	stopCancellation := context.AfterFunc(ctx, func() { _ = processTree.terminate() })
+	defer stopCancellation()
+	waitAfterTermination := func() {
+		_ = processTree.terminate()
+		<-waitResult
+		outputPipes.waitStderr()
+	}
 
 	var result *RunnerResult
-	scanner := bufio.NewScanner(stdout)
+	scanner := bufio.NewScanner(outputPipes.stdoutRead)
 	scanner.Buffer(make([]byte, 64*1024), r.maxMessageBytes)
 	for scanner.Scan() {
 		line := bytes.TrimSpace(scanner.Bytes())
@@ -108,41 +135,35 @@ func (r *Runner) runLegacy(
 		decoder := json.NewDecoder(bytes.NewReader(line))
 		decoder.DisallowUnknownFields()
 		if err := decoder.Decode(&message); err != nil {
-			_ = command.Process.Kill()
-			_ = command.Wait()
+			waitAfterTermination()
 			return RunnerResult{}, fmt.Errorf("decode runner message: %w", err)
 		}
 		switch message.Type {
 		case "event":
 			if strings.TrimSpace(message.EventType) == "" {
-				_ = command.Process.Kill()
-				_ = command.Wait()
+				waitAfterTermination()
 				return RunnerResult{}, errors.New("runner event message requires eventType")
 			}
 			if message.Payload == nil {
 				message.Payload = map[string]any{}
 			}
 			if err := handle(ctx, message); err != nil {
-				_ = command.Process.Kill()
-				_ = command.Wait()
+				waitAfterTermination()
 				return RunnerResult{}, err
 			}
 		case "artifact":
 			if message.Artifact == nil || strings.TrimSpace(message.Artifact.Path) == "" ||
 				strings.TrimSpace(message.Artifact.Kind) == "" || strings.TrimSpace(message.Artifact.ContentType) == "" {
-				_ = command.Process.Kill()
-				_ = command.Wait()
+				waitAfterTermination()
 				return RunnerResult{}, errors.New("runner artifact message requires path, kind, and contentType")
 			}
 			if err := handle(ctx, message); err != nil {
-				_ = command.Process.Kill()
-				_ = command.Wait()
+				waitAfterTermination()
 				return RunnerResult{}, err
 			}
 		case "result":
 			if result != nil {
-				_ = command.Process.Kill()
-				_ = command.Wait()
+				waitAfterTermination()
 				return RunnerResult{}, errors.New("runner emitted more than one result message")
 			}
 			output := message.Output
@@ -151,20 +172,23 @@ func (r *Runner) runLegacy(
 			}
 			result = &RunnerResult{Output: output, ProviderResumeCursor: message.ProviderResumeCursor}
 		default:
-			_ = command.Process.Kill()
-			_ = command.Wait()
+			waitAfterTermination()
 			return RunnerResult{}, fmt.Errorf("unsupported runner message type %q", message.Type)
 		}
 	}
 	if scanErr := scanner.Err(); scanErr != nil {
-		_ = command.Process.Kill()
-		_ = command.Wait()
+		waitAfterTermination()
 		return RunnerResult{}, fmt.Errorf("read runner output: %w", scanErr)
 	}
-	if err := command.Wait(); err != nil {
+	waitErr := <-waitResult
+	outputPipes.waitStderr()
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return RunnerResult{}, ctxErr
+	}
+	if waitErr != nil {
 		message := strings.TrimSpace(stderr.String())
 		if message == "" {
-			message = err.Error()
+			message = waitErr.Error()
 		}
 		return RunnerResult{}, fmt.Errorf("runner failed: %s", message)
 	}

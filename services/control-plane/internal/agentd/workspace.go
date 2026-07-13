@@ -263,6 +263,9 @@ func (m *WorkspaceMaterializer) Inspect(
 			Root: materialized.LogicalRoot, Checkout: materialized.Directory,
 			GitDir: filepath.Join(materialized.LogicalRoot, "repo.git"), Manifest: filepath.Join(materialized.LogicalRoot, "manifest.json"),
 		}
+		if err := validateWorkspaceGenerationPath(m.root, layout.Root); err != nil {
+			return WorkspaceInspection{}, errors.New("Workspace generation path became invalid")
+		}
 		if err := validateNonGitGeneration(layout, materialized.manifest); err != nil {
 			return WorkspaceInspection{}, errors.New("Workspace generation became invalid")
 		}

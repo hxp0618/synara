@@ -176,13 +176,20 @@ func writeWorkspaceManifest(root string, manifest workspaceGenerationManifest) e
 }
 
 func readWorkspaceManifest(path string) (workspaceGenerationManifest, error) {
+	pathInfo, err := os.Lstat(path)
+	if err != nil || pathInfo.Mode()&os.ModeSymlink != 0 || !pathInfo.Mode().IsRegular() || pathInfo.Size() > workspaceManifestMaxSize {
+		return workspaceGenerationManifest{}, errors.New("Workspace manifest is unavailable")
+	}
 	file, err := os.Open(path)
 	if err != nil {
 		return workspaceGenerationManifest{}, err
 	}
 	defer file.Close()
 	info, err := file.Stat()
-	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Size() > workspaceManifestMaxSize {
+	currentPathInfo, pathErr := os.Lstat(path)
+	if err != nil || pathErr != nil || currentPathInfo.Mode()&os.ModeSymlink != 0 || !currentPathInfo.Mode().IsRegular() ||
+		!info.Mode().IsRegular() || info.Size() > workspaceManifestMaxSize ||
+		!os.SameFile(pathInfo, currentPathInfo) || !os.SameFile(currentPathInfo, info) {
 		return workspaceGenerationManifest{}, errors.New("Workspace manifest is unavailable")
 	}
 	encoded, err := io.ReadAll(io.LimitReader(file, workspaceManifestMaxSize+1))
@@ -265,7 +272,7 @@ func validatePrivateWorktreeFilesystem(layout workspaceLayout, expected workspac
 		return errors.New("Workspace common Git directory is unavailable")
 	}
 	commonDir, err := resolveRelativeMetadataPath(worktreeGitDir, strings.TrimSpace(commonValue))
-	if err != nil || !sameExistingPath(commonDir, layout.GitDir) {
+	if err != nil || filepath.Clean(commonDir) != filepath.Clean(layout.GitDir) || !sameExistingPath(commonDir, layout.GitDir) {
 		return errors.New("Workspace common Git directory is not private")
 	}
 	checkoutPointer, err := readSmallRegularFile(filepath.Join(worktreeGitDir, "gitdir"), 4096)
@@ -273,7 +280,7 @@ func validatePrivateWorktreeFilesystem(layout workspaceLayout, expected workspac
 		return errors.New("Workspace checkout Git pointer is unavailable")
 	}
 	checkoutGitFile, err := resolveRelativeMetadataPath(worktreeGitDir, strings.TrimSpace(checkoutPointer))
-	if err != nil || !sameExistingPath(checkoutGitFile, gitFile) {
+	if err != nil || filepath.Clean(checkoutGitFile) != filepath.Clean(gitFile) || !sameExistingPath(checkoutGitFile, gitFile) {
 		return errors.New("Workspace checkout Git pointer is invalid")
 	}
 	for _, relative := range []string{
@@ -323,6 +330,18 @@ func validateExistingContainedDirectory(root, directory string) error {
 	return nil
 }
 
+func validateWorkspaceGenerationPath(workspaceRoot, generationRoot string) error {
+	workspaceRoot, err := filepath.Abs(strings.TrimSpace(workspaceRoot))
+	if err != nil || strings.TrimSpace(workspaceRoot) == "" {
+		return errors.New("Workspace root is invalid")
+	}
+	generationRoot, err = filepath.Abs(strings.TrimSpace(generationRoot))
+	if err != nil || generationRoot == workspaceRoot || !pathContainedBy(workspaceRoot, generationRoot) {
+		return errors.New("Workspace generation escaped the configured root")
+	}
+	return validateExistingContainedDirectory(workspaceRoot, generationRoot)
+}
+
 func readSmallRegularFile(path string, maximum int64) (string, error) {
 	info, err := os.Lstat(path)
 	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Size() > maximum {
@@ -333,6 +352,12 @@ func readSmallRegularFile(path string, maximum int64) (string, error) {
 		return "", err
 	}
 	defer file.Close()
+	fileInfo, statErr := file.Stat()
+	currentPathInfo, pathErr := os.Lstat(path)
+	if statErr != nil || pathErr != nil || currentPathInfo.Mode()&os.ModeSymlink != 0 || !currentPathInfo.Mode().IsRegular() ||
+		!fileInfo.Mode().IsRegular() || !os.SameFile(info, currentPathInfo) || !os.SameFile(currentPathInfo, fileInfo) {
+		return "", errors.New("file changed while it was opened")
+	}
 	value, err := io.ReadAll(io.LimitReader(file, maximum+1))
 	if err != nil || int64(len(value)) > maximum {
 		return "", errors.New("file exceeds its safe limit")
@@ -358,6 +383,17 @@ func sameExistingPath(left, right string) bool {
 }
 
 func replaceWorkspaceGeneration(active, staging string) error {
+	return replaceWorkspaceGenerationWithFS(active, staging, workspaceGenerationFS{
+		rename: os.Rename, removeAll: os.RemoveAll,
+	})
+}
+
+type workspaceGenerationFS struct {
+	rename    func(string, string) error
+	removeAll func(string) error
+}
+
+func replaceWorkspaceGenerationWithFS(active, staging string, fs workspaceGenerationFS) error {
 	active = filepath.Clean(active)
 	staging = filepath.Clean(staging)
 	if filepath.Dir(active) != filepath.Dir(staging) || active == staging {
@@ -372,21 +408,26 @@ func replaceWorkspaceGeneration(active, staging string) error {
 		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
 			return errors.New("active Workspace generation is unsafe")
 		}
-		if err := os.Rename(active, backup); err != nil {
+		if err := fs.rename(active, backup); err != nil {
 			return err
 		}
 		hadActive = true
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	if err := os.Rename(staging, active); err != nil {
+	if err := fs.rename(staging, active); err != nil {
 		if hadActive {
-			_ = os.Rename(backup, active)
+			if rollbackErr := fs.rename(backup, active); rollbackErr != nil {
+				return errors.Join(err, fmt.Errorf("restore previous Workspace generation: %w", rollbackErr))
+			}
 		}
 		return err
 	}
 	if hadActive {
-		return os.RemoveAll(backup)
+		// The new generation is already authoritative. A stale backup is safe
+		// to retry during later physical cleanup and must not turn a successful
+		// atomic install into a false restore failure.
+		_ = fs.removeAll(backup)
 	}
 	return nil
 }
