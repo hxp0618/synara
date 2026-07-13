@@ -151,6 +151,10 @@ func (s *Server) streamSessionEvents(w http.ResponseWriter, r *http.Request) {
 				}
 				continue
 			}
+			event, err = s.sessions.SanitizeSubscribedEvent(r.Context(), principal, event)
+			if err != nil {
+				return
+			}
 			if err := s.writeSSE(w, func() error { return writeSessionEvent(w, event) }); err != nil {
 				return
 			}

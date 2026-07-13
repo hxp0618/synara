@@ -501,7 +501,7 @@ func (s *Service) ListEvents(
 	if err != nil {
 		return EventPage{}, err
 	}
-	session, err := s.Get(ctx, principal, tenantID, sessionID)
+	session, eventAccess, err := s.authorizedEventAccess(ctx, principal, tenantID, sessionID)
 	if err != nil {
 		return EventPage{}, err
 	}
@@ -518,7 +518,7 @@ func (s *Service) ListEvents(
 	}
 	items := make([]Event, 0, len(models))
 	for _, model := range models {
-		items = append(items, toEvent(model))
+		items = append(items, SanitizeEventForAccess(toEvent(model), eventAccess))
 	}
 	return EventPage{Items: items, LastSequence: session.LastEventSequence}, nil
 }
@@ -631,11 +631,73 @@ func (s *Service) SubscribeEvents(
 	if err != nil {
 		return uuid.Nil, nil, nil, err
 	}
-	if _, err := s.Get(ctx, principal, tenantID, sessionID); err != nil {
+	if _, _, err := s.authorizedEventAccess(ctx, principal, tenantID, sessionID); err != nil {
 		return uuid.Nil, nil, nil, err
 	}
 	events, cancel := s.events.subscribe(tenantID, sessionID)
 	return tenantID, events, cancel, nil
+}
+
+func (s *Service) SanitizeSubscribedEvent(
+	ctx context.Context,
+	principal identity.Principal,
+	event Event,
+) (Event, error) {
+	if !isInteractionLifecycleEvent(event.EventType) {
+		return event, nil
+	}
+	_, access, err := s.authorizedEventAccess(ctx, principal, event.TenantID, event.SessionID)
+	if err != nil {
+		return Event{}, err
+	}
+	return SanitizeEventForAccess(event, access), nil
+}
+
+func (s *Service) authorizedEventAccess(
+	ctx context.Context,
+	principal identity.Principal,
+	tenantID, sessionID uuid.UUID,
+) (Session, EventAccess, error) {
+	model, access, err := s.authorizedModel(ctx, principal, tenantID, sessionID, authorization.SessionRead)
+	if err != nil {
+		return Session{}, EventAccess{}, err
+	}
+	if model.Visibility == "private" && model.CreatedBy != principal.UserID && !authorization.TenantAllows(access.TenantRole, authorization.SessionRead) {
+		return Session{}, EventAccess{}, problem.New(404, "session_not_found", "Session not found.")
+	}
+	return toSession(model), eventAccessForOrganization(access), nil
+}
+
+func eventAccessForOrganization(access authorization.OrganizationAccess) EventAccess {
+	return EventAccess{
+		CanReadInteractionDetails: authorization.TenantAllows(access.TenantRole, authorization.ExecutionApprove) ||
+			authorization.OrganizationAllows(access.OrganizationRole, authorization.ExecutionApprove),
+	}
+}
+
+func SanitizeEventForAccess(event Event, access EventAccess) Event {
+	if access.CanReadInteractionDetails || !isInteractionLifecycleEvent(event.EventType) {
+		return event
+	}
+	event.EventVersion = 1
+	event.EventType = "session.event.redacted"
+	event.ExecutionID = nil
+	event.WorkerID = nil
+	event.Generation = nil
+	event.ActorType = "system"
+	event.ActorID = nil
+	event.Payload = map[string]any{}
+	return event
+}
+
+func isInteractionLifecycleEvent(eventType string) bool {
+	switch eventType {
+	case "approval.requested", "approval.resolved", "request.opened", "request.resolved",
+		"user-input.requested", "user-input.resolved":
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *Service) authorizedModel(

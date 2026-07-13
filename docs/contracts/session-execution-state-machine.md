@@ -78,15 +78,31 @@ Legacy Runtime Event v1 uses `approval.requested` or `user-input.requested`. Can
 Authorized users resolve requests through:
 
 ```text
+GET  /v1/sessions/{sessionID}/interactions
 GET  /v1/executions/{executionID}/interactions
 POST /v1/executions/{executionID}/approvals/{requestID}/resolve
 POST /v1/executions/{executionID}/user-input/{requestID}/resolve
 ```
 
-Resolution is rejected after Lease expiry or Generation fencing. The response is idempotent, audited,
-and appended to Session Event replay. A legacy request resolves with its v1 event; a canonical Approval resolves
-as `request.resolved` and canonical Structured Input as `user-input.resolved`. The persisted command is delivered
-through Worker-scoped endpoints:
+The Session endpoint returns only pending, unexpired requests and a `snapshotSequence` watermark for
+refresh/reconnect reconciliation. It requires `ExecutionApprove`; users who may read the Session but
+cannot approve receive sequence-preserving redacted Interaction Events instead of request or resolution
+details.
+
+Resolution is rejected after Interaction expiry, Lease expiry, or Generation fencing. The response is
+idempotent, audited, and appended to Session Event replay. Approval accepts the durable SaaS decisions
+`accept` and `decline`; `acceptForSession` remains a local Provider-runtime behavior and is not silently
+mapped to `accept`. SaaS Cancel creates durable Interrupt intent. Local mode keeps the existing Native API
+response and empty-answer cancel behavior.
+
+Structured User Input answers must contain exactly the persisted question keys. Values are non-empty,
+bounded strings or string arrays. A string is the free-form/single-answer representation even when the
+question offers suggested options; arrays represent multi-select labels and every label must match a
+persisted option without duplicates.
+
+A legacy request resolves with its v1 event; a canonical Approval resolves as `request.resolved` and
+canonical Structured Input as `user-input.resolved`. The persisted command is delivered through
+Worker-scoped endpoints:
 
 ```text
 POST /v1/workers/executions/{executionID}/interaction-resolutions/pull

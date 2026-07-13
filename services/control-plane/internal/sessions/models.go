@@ -76,3 +76,7 @@ type EventPage struct {
 	Items        []Event `json:"items"`
 	LastSequence int64   `json:"lastSequence"`
 }
+
+type EventAccess struct {
+	CanReadInteractionDetails bool
+}

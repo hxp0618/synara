@@ -245,6 +245,7 @@ func New(
 	mux.Handle("GET /v1/sessions/{sessionID}", server.requireAuth(http.HandlerFunc(server.getAgentSession)))
 	mux.Handle("GET /v1/sessions/{sessionID}/events", server.requireAuth(http.HandlerFunc(server.listSessionEvents)))
 	mux.Handle("GET /v1/sessions/{sessionID}/events/stream", server.requireAuth(http.HandlerFunc(server.streamSessionEvents)))
+	mux.Handle("GET /v1/sessions/{sessionID}/interactions", server.requireAuth(http.HandlerFunc(server.listPendingSessionInteractions)))
 	mux.Handle("POST /v1/sessions/{sessionID}/turns", server.requireAuth(http.HandlerFunc(server.createTurn)))
 	mux.Handle("POST /v1/sessions/{sessionID}/turns/active/steer", server.requireAuth(http.HandlerFunc(server.steerActiveTurn)))
 	mux.Handle("POST /v1/sessions/{sessionID}/turns/active/interrupt", server.requireAuth(http.HandlerFunc(server.interruptActiveTurn)))
@@ -1016,6 +1017,19 @@ func (s *Server) listExecutionInteractions(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+func (s *Server) listPendingSessionInteractions(w http.ResponseWriter, r *http.Request) {
+	sessionID, ok := s.pathUUID(w, r, "sessionID")
+	if !ok {
+		return
+	}
+	snapshot, err := s.executions.ListPendingInteractions(r.Context(), mustPrincipal(r), sessionID)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, snapshot)
 }
 
 func (s *Server) resolveExecutionApproval(w http.ResponseWriter, r *http.Request) {

@@ -36,6 +36,7 @@ async function mountApprovalPanel(input?: { approval?: PendingApproval; isRespon
       approval={input?.approval ?? makeApproval()}
       pendingCount={1}
       isResponding={input?.isResponding ?? false}
+      allowSessionDecision
       onRespond={onRespond}
     />,
   );

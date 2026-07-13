@@ -1,4 +1,8 @@
-import type { ProviderInteractionMode, RuntimeMode } from "@synara/contracts";
+import type {
+  ProviderInteractionMode,
+  ProviderUserInputAnswers,
+  RuntimeMode,
+} from "@synara/contracts";
 
 import { resolveWsHttpUrl } from "./wsHttpUrl";
 
@@ -336,6 +340,32 @@ export type ControlPlaneControlCommand = {
   deliveredAt?: string;
   acknowledgedAt?: string;
   deliveryError?: string;
+};
+
+export type ControlPlanePendingInteraction = {
+  id: string;
+  executionId: string;
+  turnId: string;
+  provider: string;
+  requestId: string;
+  kind: "approval" | "user-input";
+  payload: Record<string, unknown>;
+  requestedAt: string;
+  expiresAt: string;
+};
+
+export type ControlPlanePendingInteractionSnapshot = {
+  items: ReadonlyArray<ControlPlanePendingInteraction>;
+  snapshotSequence: number;
+};
+
+export type ControlPlaneInteractionResolution = {
+  id: string;
+  executionId: string;
+  sessionId: string;
+  requestId: string;
+  kind: "approval" | "user-input";
+  status: "resolved" | "expired";
 };
 
 export type ControlPlaneSessionEvent = {
@@ -810,6 +840,38 @@ export const controlPlaneClient = {
       {
         method: "POST",
         ...idempotencyRequestHeaders(options),
+      },
+    ),
+  listPendingInteractions: (sessionId: string) =>
+    controlPlaneRequest<ControlPlanePendingInteractionSnapshot>(
+      `/v1/sessions/${encodeURIComponent(sessionId)}/interactions`,
+    ),
+  resolveApproval: (
+    executionId: string,
+    requestId: string,
+    decision: "accept" | "decline",
+    options?: ControlPlaneIdempotencyOptions,
+  ) =>
+    controlPlaneRequest<ControlPlaneInteractionResolution>(
+      `/v1/executions/${encodeURIComponent(executionId)}/approvals/${encodeURIComponent(requestId)}/resolve`,
+      {
+        method: "POST",
+        ...idempotencyRequestHeaders(options),
+        body: { decision },
+      },
+    ),
+  resolveUserInput: (
+    executionId: string,
+    requestId: string,
+    answers: ProviderUserInputAnswers,
+    options?: ControlPlaneIdempotencyOptions,
+  ) =>
+    controlPlaneRequest<ControlPlaneInteractionResolution>(
+      `/v1/executions/${encodeURIComponent(executionId)}/user-input/${encodeURIComponent(requestId)}/resolve`,
+      {
+        method: "POST",
+        ...idempotencyRequestHeaders(options),
+        body: { answers },
       },
     ),
   listSessionEvents: (sessionId: string, afterSequence = 0, limit = 500) => {

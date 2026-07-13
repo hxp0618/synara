@@ -1,5 +1,10 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { ProjectId, type ProviderInteractionMode, type RuntimeMode } from "@synara/contracts";
+import {
+  ProjectId,
+  type ProviderInteractionMode,
+  type ProviderUserInputAnswers,
+  type RuntimeMode,
+} from "@synara/contracts";
 import {
   createContext,
   createElement,
@@ -19,7 +24,9 @@ import {
   type ControlPlaneAgentTurn,
   type ControlPlaneControlCommand,
   type ControlPlaneIdempotencyOptions,
+  type ControlPlaneInteractionResolution,
   type ControlPlaneOrganization,
+  type ControlPlanePendingInteractionSnapshot,
   type ControlPlanePlatformProfile,
   type ControlPlaneProject,
   type ControlPlaneSessionState,
@@ -63,6 +70,8 @@ export const controlPlaneQueryKeys = {
       "sessions",
       projectIds,
     ] as const,
+  pendingInteractions: (tenantId: string | null, sessionId: string | null) =>
+    ["control-plane", "tenants", tenantId, "sessions", sessionId, "pending-interactions"] as const,
 };
 
 export type ControlPlaneAvailability = "detecting" | "local" | "available" | "unavailable";
@@ -131,6 +140,20 @@ export type ControlPlaneContextValue = {
     sessionId: string,
     idempotencyKey?: string,
   ) => Promise<ControlPlaneControlCommand>;
+  resolveApproval: (
+    sessionId: string,
+    executionId: string,
+    requestId: string,
+    decision: "accept" | "decline",
+    idempotencyKey?: string,
+  ) => Promise<ControlPlaneInteractionResolution>;
+  resolveUserInput: (
+    sessionId: string,
+    executionId: string,
+    requestId: string,
+    answers: ProviderUserInputAnswers,
+    idempotencyKey?: string,
+  ) => Promise<ControlPlaneInteractionResolution>;
   watchSession: (sessionId: string) => () => void;
 };
 
@@ -554,6 +577,92 @@ export function ControlPlaneProvider({ children }: { children: ReactNode }) {
     },
     [capabilities.canSteerExecution, projectionRuntime],
   );
+  const resolveApproval = useCallback(
+    async (
+      sessionId: string,
+      executionId: string,
+      requestId: string,
+      decision: "accept" | "decline",
+      idempotencyKey?: string,
+    ) => {
+      if (!activeTenantId || !capabilities.canApproveExecution) {
+        throw new Error("The active Tenant or Organization cannot resolve approvals.");
+      }
+      const tenantId = activeTenantId;
+      try {
+        const interaction = await controlPlaneClient.resolveApproval(
+          executionId,
+          requestId,
+          decision,
+          idempotencyOptions("approval", idempotencyKey),
+        );
+        queryClient.setQueryData<ControlPlanePendingInteractionSnapshot>(
+          controlPlaneQueryKeys.pendingInteractions(tenantId, sessionId),
+          (current) =>
+            current
+              ? {
+                  ...current,
+                  items: current.items.filter((item) => item.id !== interaction.id),
+                }
+              : current,
+        );
+        void queryClient.invalidateQueries({
+          queryKey: controlPlaneQueryKeys.pendingInteractions(tenantId, sessionId),
+        });
+        void projectionRuntime.catchUp(sessionId).catch(() => undefined);
+        return interaction;
+      } catch (error) {
+        void queryClient.invalidateQueries({
+          queryKey: controlPlaneQueryKeys.pendingInteractions(tenantId, sessionId),
+        });
+        throw error;
+      }
+    },
+    [activeTenantId, capabilities.canApproveExecution, projectionRuntime, queryClient],
+  );
+  const resolveUserInput = useCallback(
+    async (
+      sessionId: string,
+      executionId: string,
+      requestId: string,
+      answers: ProviderUserInputAnswers,
+      idempotencyKey?: string,
+    ) => {
+      if (!activeTenantId || !capabilities.canApproveExecution) {
+        throw new Error("The active Tenant or Organization cannot resolve user input.");
+      }
+      const tenantId = activeTenantId;
+      try {
+        const interaction = await controlPlaneClient.resolveUserInput(
+          executionId,
+          requestId,
+          answers,
+          idempotencyOptions("user-input", idempotencyKey),
+        );
+        queryClient.setQueryData<ControlPlanePendingInteractionSnapshot>(
+          controlPlaneQueryKeys.pendingInteractions(tenantId, sessionId),
+          (current) =>
+            current
+              ? {
+                  ...current,
+                  items: current.items.filter((item) => item.id !== interaction.id),
+                }
+              : current,
+        );
+        void queryClient.invalidateQueries({
+          queryKey: controlPlaneQueryKeys.pendingInteractions(tenantId, sessionId),
+        });
+        void projectionRuntime.catchUp(sessionId).catch(() => undefined);
+        return interaction;
+      } catch (error) {
+        void queryClient.invalidateQueries({
+          queryKey: controlPlaneQueryKeys.pendingInteractions(tenantId, sessionId),
+        });
+        throw error;
+      }
+    },
+    [activeTenantId, capabilities.canApproveExecution, projectionRuntime, queryClient],
+  );
   const watchSession = useCallback(
     (sessionId: string) => projectionRuntime.watch(sessionId),
     [projectionRuntime],
@@ -592,6 +701,8 @@ export function ControlPlaneProvider({ children }: { children: ReactNode }) {
       createTurn,
       steerActiveTurn,
       interruptActiveTurn,
+      resolveApproval,
+      resolveUserInput,
       watchSession,
     }),
     [
@@ -605,6 +716,8 @@ export function ControlPlaneProvider({ children }: { children: ReactNode }) {
       createTurn,
       steerActiveTurn,
       interruptActiveTurn,
+      resolveApproval,
+      resolveUserInput,
       devLogin,
       error,
       isAuthoritative,
@@ -629,4 +742,49 @@ export function useControlPlane(): ControlPlaneContextValue {
   const context = useContext(ControlPlaneContext);
   if (!context) throw new Error("useControlPlane must be used inside ControlPlaneProvider.");
   return context;
+}
+
+export function useControlPlanePendingInteractions(
+  sessionId: string | null,
+  observedInteractionSequence: number | null,
+) {
+  const controlPlane = useControlPlane();
+  const tenantId = controlPlane.activeTenant?.id ?? null;
+  const lastReconciliationRef = useRef<{ sessionId: string | null; sequence: number | null }>({
+    sessionId: null,
+    sequence: null,
+  });
+  const query = useQuery({
+    queryKey: controlPlaneQueryKeys.pendingInteractions(tenantId, sessionId),
+    queryFn: () => controlPlaneClient.listPendingInteractions(sessionId!),
+    enabled:
+      controlPlane.isAuthoritative &&
+      controlPlane.capabilities.canApproveExecution &&
+      tenantId !== null &&
+      sessionId !== null,
+    retry: false,
+  });
+  const snapshotSequence = query.data?.snapshotSequence ?? null;
+  useEffect(() => {
+    if (lastReconciliationRef.current.sessionId !== sessionId) {
+      lastReconciliationRef.current = { sessionId, sequence: null };
+    }
+    if (
+      observedInteractionSequence === null ||
+      (snapshotSequence !== null && observedInteractionSequence <= snapshotSequence) ||
+      query.isFetching ||
+      lastReconciliationRef.current.sequence === observedInteractionSequence
+    ) {
+      return;
+    }
+    lastReconciliationRef.current = { sessionId, sequence: observedInteractionSequence };
+    void query.refetch();
+  }, [
+    observedInteractionSequence,
+    query.isFetching,
+    query.refetch,
+    sessionId,
+    snapshotSequence,
+  ]);
+  return query;
 }

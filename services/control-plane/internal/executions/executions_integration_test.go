@@ -1824,6 +1824,111 @@ func TestApprovalAndUserInputPersistResolveReplayAndResumeExecution(t *testing.T
 	}
 }
 
+func TestPendingSessionInteractionSnapshotSurvivesServiceRestartAndEnforcesApprovalPermission(t *testing.T) {
+	db := integrationDB(t)
+	fixture := seedExecutionFixture(t, db)
+	service := integrationService(t, db)
+	worker := registerTestWorker(t, service, fixture.TargetID, fixture.TargetKind, "worker-pending-snapshot")
+	cleanupWorkers(t, db, worker.ID)
+	claim, err := service.Claim(context.Background(), worker, ClaimExecutionInput{
+		ExecutionTargetID: fixture.TargetID, TargetKind: fixture.TargetKind, ExecutionID: &fixture.ExecutionID,
+	}, "pending-snapshot-claim")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease := claim.Value.Lease
+	if lease == nil {
+		t.Fatal("pending snapshot execution was not leased")
+	}
+	leaseInput := LeaseInput{
+		TenantID: fixture.TenantID, Generation: lease.Generation, LeaseToken: lease.LeaseToken,
+	}
+	if _, err := service.Start(context.Background(), worker, fixture.ExecutionID, leaseInput, "pending-snapshot-start"); err != nil {
+		t.Fatal(err)
+	}
+	requestID := "approval-snapshot-" + uuid.NewString()
+	if _, err := service.AppendRuntimeEvent(context.Background(), worker, fixture.ExecutionID, RuntimeEventInput{
+		LeaseInput: leaseInput, EventID: uuid.New(), EventVersion: RuntimeEventVersionV2, EventType: "request.opened",
+		Payload: map[string]any{
+			"requestId": requestID, "requestType": "exec_command_approval", "detail": "Deploy release",
+		}, OccurredAt: time.Now().UTC(),
+	}, "pending-snapshot-requested"); err != nil {
+		t.Fatal(err)
+	}
+
+	restarted := integrationService(t, db)
+	principal := identity.Principal{UserID: fixture.UserID, ActiveTenantID: &fixture.TenantID}
+	snapshot, err := restarted.ListPendingInteractions(context.Background(), principal, fixture.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Items) != 1 || snapshot.Items[0].ExecutionID != fixture.ExecutionID ||
+		snapshot.Items[0].RequestID != requestID || snapshot.Items[0].Kind != "approval" {
+		t.Fatalf("unexpected pending interaction snapshot: %#v", snapshot)
+	}
+	var session persistence.AgentSession
+	if err := db.Where("tenant_id = ? AND id = ?", fixture.TenantID, fixture.SessionID).Take(&session).Error; err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.SnapshotSequence != session.LastEventSequence {
+		t.Fatalf("snapshot watermark=%d, want %d", snapshot.SnapshotSequence, session.LastEventSequence)
+	}
+	expiredRequestedAt := time.Now().UTC().Add(-2 * time.Hour)
+	if err := db.Model(&persistence.ExecutionInteraction{}).
+		Where("tenant_id = ? AND execution_id = ? AND request_id = ?", fixture.TenantID, fixture.ExecutionID, requestID).
+		Updates(map[string]any{
+			"requested_at": expiredRequestedAt,
+			"expires_at":   expiredRequestedAt.Add(time.Hour),
+		}).Error; err != nil {
+		t.Fatal(err)
+	}
+	expiredSnapshot, err := restarted.ListPendingInteractions(context.Background(), principal, fixture.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(expiredSnapshot.Items) != 0 {
+		t.Fatalf("expired interaction remained actionable: %#v", expiredSnapshot.Items)
+	}
+
+	viewerID := uuid.New()
+	now := time.Now().UTC()
+	models := []any{
+		&persistence.User{
+			ID: viewerID, Email: uuid.NewString() + "@example.com", DisplayName: "Interaction viewer",
+			Status: "active", EmailVerifiedAt: &now, CreatedAt: now, UpdatedAt: now,
+		},
+		&persistence.TenantMembership{
+			TenantID: fixture.TenantID, UserID: viewerID, Role: "member", Status: "active",
+			JoinedAt: &now, CreatedAt: now, UpdatedAt: now,
+		},
+		&persistence.OrganizationMembership{
+			TenantID: fixture.TenantID, OrganizationID: session.OrganizationID, UserID: viewerID,
+			Role: "viewer", Status: "active", CreatedAt: now, UpdatedAt: now,
+		},
+	}
+	if err := db.Transaction(func(tx *gorm.DB) error {
+		for _, model := range models {
+			if err := tx.Create(model).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Model(&persistence.AgentSession{}).
+		Where("tenant_id = ? AND id = ?", fixture.TenantID, fixture.SessionID).
+		Update("visibility", "organization").Error; err != nil {
+		t.Fatal(err)
+	}
+	viewer := identity.Principal{UserID: viewerID, ActiveTenantID: &fixture.TenantID}
+	_, err = restarted.ListPendingInteractions(context.Background(), viewer, fixture.SessionID)
+	var apiError *problem.Error
+	if !errors.As(err, &apiError) || apiError.Code != "organization_forbidden" {
+		t.Fatalf("viewer loaded pending interaction details: %v", err)
+	}
+}
+
 func TestInteractionResolutionRejectsExpiredLease(t *testing.T) {
 	db := integrationDB(t)
 	fixture := seedExecutionFixture(t, db)

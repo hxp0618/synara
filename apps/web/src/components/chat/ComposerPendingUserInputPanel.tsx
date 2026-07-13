@@ -3,7 +3,6 @@
 // the nav arrows stay raw <button> since they are compact icon controls. The card
 // is rendered detached, floating just above the composer (not fused into the
 // composer surface), so it reuses the composer surface chrome to stay in-tint.
-import { type ApprovalRequestId } from "@synara/contracts";
 import { memo, useEffect, useEffectEvent, useRef } from "react";
 import { type PendingUserInput } from "../../session-logic";
 import {
@@ -17,7 +16,7 @@ import { COMPOSER_INPUT_SURFACE_CLASS_NAME } from "./composerPickerStyles";
 
 interface PendingUserInputPanelProps {
   pendingUserInputs: PendingUserInput[];
-  respondingRequestIds: ApprovalRequestId[];
+  respondingRequestIds: string[];
   answers: Record<string, PendingUserInputDraftAnswer>;
   questionIndex: number;
   onToggleOption: (questionId: string, optionLabel: string) => PendingUserInputDraftAnswer | null;
@@ -43,12 +42,13 @@ export const ComposerPendingUserInputPanel = memo(function ComposerPendingUserIn
   if (pendingUserInputs.length === 0) return null;
   const activePrompt = pendingUserInputs[0];
   if (!activePrompt) return null;
+  const requestKey = activePrompt.requestKey ?? activePrompt.requestId;
 
   return (
     <ComposerPendingUserInputCard
-      key={activePrompt.requestId}
+      key={requestKey}
       prompt={activePrompt}
-      isResponding={respondingRequestIds.includes(activePrompt.requestId)}
+      isResponding={respondingRequestIds.includes(requestKey)}
       answers={answers}
       questionIndex={questionIndex}
       onToggleOption={onToggleOption}

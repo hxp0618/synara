@@ -129,6 +129,8 @@ interface DerivedWorkLogEntry extends WorkLogEntry {
 }
 
 export interface PendingApproval {
+  interactionId?: string;
+  requestKey?: string;
   requestId: ApprovalRequestId;
   executionId?: string;
   requestKind: "command" | "file-read" | "file-change" | "network" | "tool";
@@ -154,6 +156,8 @@ export function isProviderFileEditWorkLogEntry(
 }
 
 export interface PendingUserInput {
+  interactionId?: string;
+  requestKey?: string;
   requestId: ApprovalRequestId;
   executionId?: string;
   createdAt: string;
@@ -398,6 +402,11 @@ function requestKindFromRequestType(requestType: unknown): PendingApproval["requ
 }
 
 function pendingRequestKey(payload: Record<string, unknown> | null, requestId: string): string {
+  const interactionId =
+    payload && typeof payload.interactionId === "string" ? payload.interactionId.trim() : "";
+  if (interactionId) {
+    return `interaction:${interactionId}`;
+  }
   const executionId = payload && typeof payload.executionId === "string" ? payload.executionId : "";
   return `${executionId}:${requestId}`;
 }
@@ -435,6 +444,8 @@ export function derivePendingApprovals(
           ? payload.summary
           : undefined;
     const executionId = payload && typeof payload.executionId === "string" ? payload.executionId : undefined;
+    const interactionId =
+      payload && typeof payload.interactionId === "string" ? payload.interactionId : undefined;
     const requestKey = requestId ? pendingRequestKey(payload, requestId) : null;
 
     if (
@@ -444,6 +455,8 @@ export function derivePendingApprovals(
       requestKind
     ) {
       openByRequestId.set(requestKey, {
+        ...(interactionId ? { interactionId } : {}),
+        requestKey,
         requestId,
         requestKind,
         createdAt: activity.createdAt,
@@ -540,6 +553,8 @@ export function derivePendingUserInputs(
         : null;
     const detail = payload && typeof payload.detail === "string" ? payload.detail : undefined;
     const executionId = payload && typeof payload.executionId === "string" ? payload.executionId : undefined;
+    const interactionId =
+      payload && typeof payload.interactionId === "string" ? payload.interactionId : undefined;
     const requestKey = requestId ? pendingRequestKey(payload, requestId) : null;
 
     if (activity.kind === "user-input.requested" && requestId && requestKey) {
@@ -548,6 +563,8 @@ export function derivePendingUserInputs(
         continue;
       }
       openByRequestId.set(requestKey, {
+        ...(interactionId ? { interactionId } : {}),
+        requestKey,
         requestId,
         createdAt: activity.createdAt,
         ...(executionId ? { executionId } : {}),

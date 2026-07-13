@@ -86,6 +86,7 @@ describe("derivePendingApprovals", () => {
     expect(derivePendingApprovals(activities)).toEqual([
       {
         requestId: "req-1",
+        requestKey: ":req-1",
         requestKind: "command",
         createdAt: "2026-02-23T00:00:01.000Z",
         detail: "bun run lint",
@@ -112,6 +113,7 @@ describe("derivePendingApprovals", () => {
     expect(derivePendingApprovals(activities)).toEqual([
       {
         requestId: "req-request-type",
+        requestKey: ":req-request-type",
         requestKind: "command",
         createdAt: "2026-02-23T00:00:01.000Z",
         detail: "pwd",
@@ -163,6 +165,7 @@ describe("derivePendingApprovals", () => {
       {
         executionId: "execution-2",
         requestId: "shared-request",
+        requestKey: "execution-2:shared-request",
         requestKind: "tool",
         createdAt: "2026-02-23T00:00:02.000Z",
         detail: "Claude wants to use a custom tool.",
@@ -297,6 +300,7 @@ describe("derivePendingUserInputs", () => {
     expect(derivePendingUserInputs(activities)).toEqual([
       {
         requestId: "req-user-input-1",
+        requestKey: ":req-user-input-1",
         createdAt: "2026-02-23T00:00:01.000Z",
         questions: [
           {
@@ -359,6 +363,7 @@ describe("derivePendingUserInputs", () => {
       {
         executionId: "execution-2",
         requestId: "shared-input",
+        requestKey: "execution-2:shared-input",
         createdAt: "2026-02-23T00:00:02.000Z",
         questions: [question],
       },

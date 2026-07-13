@@ -18,6 +18,7 @@ interface ComposerPendingApprovalPanelProps {
   approval: PendingApproval;
   pendingCount: number;
   isResponding: boolean;
+  allowSessionDecision: boolean;
   onRespond: (requestId: ApprovalRequestId, decision: ProviderApprovalDecision) => Promise<void>;
 }
 
@@ -64,6 +65,12 @@ const APPROVAL_ACTIONS: ReadonlyArray<ApprovalAction> = [
   },
 ];
 
+export function availableApprovalActions(allowSessionDecision: boolean) {
+  return allowSessionDecision
+    ? APPROVAL_ACTIONS
+    : APPROVAL_ACTIONS.filter((action) => action.decision !== "acceptForSession");
+}
+
 const KIND_PROMPT: Record<PendingApproval["requestKind"], string> = {
   command: "Approve this command?",
   "file-read": "Approve reading this file?",
@@ -76,9 +83,14 @@ export const ComposerPendingApprovalPanel = memo(function ComposerPendingApprova
   approval,
   pendingCount,
   isResponding,
+  allowSessionDecision,
   onRespond,
 }: ComposerPendingApprovalPanelProps) {
   const parsed = useMemo(() => parseApprovalDetail(approval.detail), [approval.detail]);
+  const approvalActions = useMemo(
+    () => availableApprovalActions(allowSessionDecision),
+    [allowSessionDecision],
+  );
   const requestId = approval.requestId;
 
   // Digit shortcuts bubble from focused controls inside this card only; a bare
@@ -94,8 +106,8 @@ export const ComposerPendingApprovalPanel = memo(function ComposerPendingApprova
       return;
     }
     const digit = Number.parseInt(event.key, 10);
-    if (Number.isNaN(digit) || digit < 1 || digit > APPROVAL_ACTIONS.length) return;
-    const action = APPROVAL_ACTIONS[digit - 1];
+    if (Number.isNaN(digit) || digit < 1 || digit > approvalActions.length) return;
+    const action = approvalActions[digit - 1];
     if (!action) return;
     event.preventDefault();
     void onRespond(requestId, action.decision);
@@ -123,7 +135,7 @@ export const ComposerPendingApprovalPanel = memo(function ComposerPendingApprova
       </div>
       <ApprovalDetail parsed={parsed} />
       <div className="mt-2.5 space-y-0.5">
-        {APPROVAL_ACTIONS.map((action, index) => (
+        {approvalActions.map((action, index) => (
           <ComposerChoiceRow
             key={action.decision}
             shortcut={index + 1}

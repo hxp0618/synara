@@ -309,6 +309,76 @@ describe("controlPlaneClient", () => {
     expect(new Headers(request.headers).get("Idempotency-Key")).toBe("web-interrupt-1");
   });
 
+  it("loads the Session pending Interaction snapshot and resolves through encoded durable routes", async () => {
+    const responses = [
+      new Response(JSON.stringify({ items: [], snapshotSequence: 17 }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+      new Response(
+        JSON.stringify({
+          id: "interaction-1",
+          executionId: "execution/one",
+          sessionId: "session/one",
+          requestId: "approval/one",
+          kind: "approval",
+          status: "resolved",
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+      new Response(
+        JSON.stringify({
+          id: "interaction-2",
+          executionId: "execution/one",
+          sessionId: "session/one",
+          requestId: "input/one",
+          kind: "user-input",
+          status: "resolved",
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    ];
+    const fetchMock = vi.fn(async () => responses.shift()!);
+    vi.stubGlobal("fetch", fetchMock);
+
+    const snapshot = await controlPlaneClient.listPendingInteractions("session/one");
+    await controlPlaneClient.resolveApproval("execution/one", "approval/one", "accept", {
+      idempotencyKey: "web-approval-1",
+    });
+    await controlPlaneClient.resolveUserInput(
+      "execution/one",
+      "input/one",
+      { environment: "staging" },
+      { idempotencyKey: "web-input-1" },
+    );
+
+    expect(snapshot.snapshotSequence).toBe(17);
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
+      "/v1/sessions/session%2Fone/interactions",
+      expect.objectContaining({ credentials: "include" }),
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      "/v1/executions/execution%2Fone/approvals/approval%2Fone/resolve",
+      expect.objectContaining({ method: "POST", body: JSON.stringify({ decision: "accept" }) }),
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      3,
+      "/v1/executions/execution%2Fone/user-input/input%2Fone/resolve",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ answers: { environment: "staging" } }),
+      }),
+    );
+    expect(
+      new Headers((fetchMock.mock.calls[1]?.[1] as RequestInit).headers).get("Idempotency-Key"),
+    ).toBe("web-approval-1");
+    expect(
+      new Headers((fetchMock.mock.calls[2]?.[1] as RequestInit).headers).get("Idempotency-Key"),
+    ).toBe("web-input-1");
+  });
+
   it("requests an idempotent durable Steer payload for the active Turn", async () => {
     const fetchMock = vi.fn(async () =>
       new Response(

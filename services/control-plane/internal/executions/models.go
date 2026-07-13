@@ -367,6 +367,23 @@ type Interaction struct {
 	DeliveryError       *string        `json:"deliveryError,omitempty"`
 }
 
+type PendingInteraction struct {
+	ID          uuid.UUID      `json:"id"`
+	ExecutionID uuid.UUID      `json:"executionId"`
+	TurnID      uuid.UUID      `json:"turnId"`
+	Provider    string         `json:"provider"`
+	RequestID   string         `json:"requestId"`
+	Kind        string         `json:"kind"`
+	Payload     map[string]any `json:"payload"`
+	RequestedAt time.Time      `json:"requestedAt"`
+	ExpiresAt   time.Time      `json:"expiresAt"`
+}
+
+type PendingInteractionSnapshot struct {
+	Items            []PendingInteraction `json:"items"`
+	SnapshotSequence int64                `json:"snapshotSequence"`
+}
+
 type ResolveApprovalInput struct {
 	Decision string `json:"decision"`
 }
@@ -480,6 +497,18 @@ func toInteraction(model persistence.ExecutionInteraction) Interaction {
 		DeliveryGeneration: model.DeliveryGeneration, DeliveryAttempts: model.DeliveryAttempts,
 		DeliveryAvailableAt: model.DeliveryAvailableAt, DeliveredAt: model.DeliveredAt,
 		AcknowledgedAt: model.AcknowledgedAt, DeliveryError: model.DeliveryError,
+	}
+}
+
+func toPendingInteraction(model persistence.ExecutionInteraction) PendingInteraction {
+	payload := model.Payload
+	if payload == nil {
+		payload = map[string]any{}
+	}
+	return PendingInteraction{
+		ID: model.ID, ExecutionID: model.ExecutionID, TurnID: model.TurnID,
+		Provider: model.Provider, RequestID: model.RequestID, Kind: model.Kind,
+		Payload: payload, RequestedAt: model.RequestedAt, ExpiresAt: model.ExpiresAt,
 	}
 }
 

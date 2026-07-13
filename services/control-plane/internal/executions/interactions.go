@@ -45,6 +45,33 @@ func (s *Service) ListInteractions(
 	return items, nil
 }
 
+func (s *Service) ListPendingInteractions(
+	ctx context.Context,
+	principal identity.Principal,
+	sessionID uuid.UUID,
+) (PendingInteractionSnapshot, error) {
+	tenantID, session, err := s.authorizeSessionInteraction(ctx, principal, sessionID)
+	if err != nil {
+		return PendingInteractionSnapshot{}, err
+	}
+	models := make([]persistence.ExecutionInteraction, 0)
+	if err := s.db.WithContext(ctx).
+		Where(
+			"tenant_id = ? AND session_id = ? AND status = 'pending' AND expires_at > ?",
+			tenantID, sessionID, s.now(),
+		).
+		Order("requested_at, id").Find(&models).Error; err != nil {
+		return PendingInteractionSnapshot{}, problem.Wrap(
+			500, "interactions_load_failed", "Pending Session interactions could not be loaded.", err,
+		)
+	}
+	items := make([]PendingInteraction, 0, len(models))
+	for _, model := range models {
+		items = append(items, toPendingInteraction(model))
+	}
+	return PendingInteractionSnapshot{Items: items, SnapshotSequence: session.LastEventSequence}, nil
+}
+
 func (s *Service) ResolveApproval(
 	ctx context.Context,
 	principal identity.Principal,
@@ -358,12 +385,21 @@ func (s *Service) resolveInteraction(
 		if interaction.Status != "pending" {
 			return Interaction{}, problem.New(409, "interaction_not_pending", "The execution interaction is no longer pending.")
 		}
+		now := s.now()
+		if !interaction.ExpiresAt.After(now) {
+			return Interaction{}, problem.New(409, "interaction_expired", "The execution interaction expired before it was resolved.")
+		}
+		if kind == "user-input" {
+			answers, _ := resolution["answers"].(map[string]any)
+			if err := validateUserInputResolution(interaction.Payload, answers); err != nil {
+				return Interaction{}, err
+			}
+		}
 		if interaction.WorkerID != lease.WorkerID || interaction.Generation != lease.Generation ||
 			execution.WorkerID == nil || *execution.WorkerID != lease.WorkerID || execution.Generation != lease.Generation {
 			return Interaction{}, problem.New(409, "interaction_generation_fenced", "The interaction belongs to an obsolete Worker generation.")
 		}
 
-		now := s.now()
 		resolutionKind := interactionResolutionKind(kind, resolution)
 		resolutionCommandID := requestID + ":resolution"
 		deliveryWorkerID := lease.WorkerID
@@ -512,7 +548,27 @@ func (s *Service) authorizeInteraction(
 	if err != nil {
 		return uuid.Nil, sessions.Session{}, problem.Wrap(500, "execution_load_failed", "Failed to load the execution.", err)
 	}
-	session, err := s.sessions.Get(ctx, principal, tenantID, execution.SessionID)
+	return s.authorizeSessionInteractionForTenant(ctx, principal, tenantID, execution.SessionID)
+}
+
+func (s *Service) authorizeSessionInteraction(
+	ctx context.Context,
+	principal identity.Principal,
+	sessionID uuid.UUID,
+) (uuid.UUID, sessions.Session, error) {
+	tenantID, err := sessions.ActiveTenant(principal)
+	if err != nil {
+		return uuid.Nil, sessions.Session{}, err
+	}
+	return s.authorizeSessionInteractionForTenant(ctx, principal, tenantID, sessionID)
+}
+
+func (s *Service) authorizeSessionInteractionForTenant(
+	ctx context.Context,
+	principal identity.Principal,
+	tenantID, sessionID uuid.UUID,
+) (uuid.UUID, sessions.Session, error) {
+	session, err := s.sessions.Get(ctx, principal, tenantID, sessionID)
 	if err != nil {
 		return uuid.Nil, sessions.Session{}, err
 	}

@@ -335,8 +335,19 @@ import {
   useEffectiveComposerModelState,
 } from "../composerDraftStore";
 import { useTemporaryThreadStore } from "../temporaryThreadStore";
-import { useControlPlane } from "../controlPlaneContext";
+import {
+  useControlPlane,
+  useControlPlanePendingInteractions,
+} from "../controlPlaneContext";
 import { ControlPlaneTurnDispatcher } from "../lib/controlPlaneTurnDispatch";
+import {
+  latestControlPlaneInteractionSequence,
+  projectPendingControlPlaneInteractions,
+} from "../lib/controlPlaneInteractions";
+import {
+  dispatchApprovalInteractionResponse,
+  dispatchUserInputInteractionResponse,
+} from "../lib/interactionResponseRouting";
 import { useComposerFocusRequestStore } from "../composerFocusRequestStore";
 import { appendComposerPromptText } from "../lib/chatReferences";
 import {
@@ -1209,10 +1220,8 @@ export default function ChatView({
   const [isRevertingCheckpoint, setIsRevertingCheckpoint] = useState(false);
   const [pendingFileUndo, setPendingFileUndo] = useState<PendingFileUndo | null>(null);
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
-  const [respondingRequestIds, setRespondingRequestIds] = useState<ApprovalRequestId[]>([]);
-  const [respondingUserInputRequestIds, setRespondingUserInputRequestIds] = useState<
-    ApprovalRequestId[]
-  >([]);
+  const [respondingRequestIds, setRespondingRequestIds] = useState<string[]>([]);
+  const [respondingUserInputRequestIds, setRespondingUserInputRequestIds] = useState<string[]>([]);
   const [pendingUserInputAnswersByRequestId, setPendingUserInputAnswersByRequestId] = useState<
     Record<string, Record<string, PendingUserInputDraftAnswer>>
   >({});
@@ -2487,25 +2496,62 @@ export default function ChatView({
       setOpenAgentActivityId(null);
     }
   }, [agentActivityTimelineState.detailById, openAgentActivityId]);
-  const pendingApprovals = useMemo(
+  const eventPendingApprovals = useMemo(
     () => derivePendingApprovals(threadActivities),
     [threadActivities],
   );
-  const pendingUserInputs = useMemo(
+  const eventPendingUserInputs = useMemo(
     () => derivePendingUserInputs(threadActivities),
     [threadActivities],
   );
+  const observedInteractionSequence = useMemo(
+    () => latestControlPlaneInteractionSequence(threadActivities),
+    [threadActivities],
+  );
+  const pendingInteractionQuery = useControlPlanePendingInteractions(
+    activeThreadId,
+    observedInteractionSequence,
+  );
+  const durablePendingInteractions = useMemo(
+    () => projectPendingControlPlaneInteractions(pendingInteractionQuery.data?.items ?? []),
+    [pendingInteractionQuery.data?.items],
+  );
+  const pendingApprovals = controlPlane.isAuthoritative
+    ? durablePendingInteractions.approvals
+    : eventPendingApprovals;
+  const pendingUserInputs = controlPlane.isAuthoritative
+    ? durablePendingInteractions.userInputs
+    : eventPendingUserInputs;
+  useEffect(() => {
+    if (!controlPlane.isAuthoritative || !activeThreadId || !pendingInteractionQuery.error) {
+      return;
+    }
+    setStoreThreadError(
+      activeThreadId,
+      pendingInteractionQuery.error instanceof Error
+        ? pendingInteractionQuery.error.message
+        : "Failed to load pending approval and user-input requests.",
+    );
+  }, [
+    activeThreadId,
+    controlPlane.isAuthoritative,
+    pendingInteractionQuery.error,
+    setStoreThreadError,
+  ]);
   const activePendingUserInput = pendingUserInputs[0] ?? null;
+  const activePendingUserInputKey = activePendingUserInput
+    ? (activePendingUserInput.requestKey ?? activePendingUserInput.requestId)
+    : null;
   const activePendingDraftAnswers = useMemo(
     () =>
-      activePendingUserInput
-        ? (pendingUserInputAnswersByRequestId[activePendingUserInput.requestId] ??
+      activePendingUserInputKey
+        ? (pendingUserInputAnswersByRequestId[activePendingUserInputKey] ??
           EMPTY_PENDING_USER_INPUT_ANSWERS)
         : EMPTY_PENDING_USER_INPUT_ANSWERS,
-    [activePendingUserInput, pendingUserInputAnswersByRequestId],
+    [activePendingUserInputKey, pendingUserInputAnswersByRequestId],
   );
-  const activePendingQuestionIndex = activePendingUserInput
-    ? (pendingUserInputQuestionIndexByRequestId[activePendingUserInput.requestId] ?? 0)
+  const activePendingQuestionIndex = activePendingUserInputKey
+    ? (pendingUserInputQuestionIndexByRequestId[activePendingUserInputKey] ?? 0)
     : 0;
   const activePendingProgress = useMemo(
     () =>
@@ -2525,8 +2571,8 @@ export default function ChatView({
         : null,
     [activePendingDraftAnswers, activePendingUserInput],
   );
-  const activePendingIsResponding = activePendingUserInput
-    ? respondingUserInputRequestIds.includes(activePendingUserInput.requestId)
+  const activePendingIsResponding = activePendingUserInputKey
+    ? respondingUserInputRequestIds.includes(activePendingUserInputKey)
     : false;
   const activeProposedPlan = useMemo(() => {
     if (!latestTurnSettled) {
@@ -2657,6 +2703,9 @@ export default function ChatView({
     latestTurnSettled &&
     hasActionableProposedPlan(activeProposedPlan);
   const activePendingApproval = pendingApprovals[0] ?? null;
+  const activePendingApprovalKey = activePendingApproval
+    ? (activePendingApproval.requestKey ?? activePendingApproval.requestId)
+    : null;
   const serverAcknowledgedLocalDispatch = useMemo(
     () =>
       hasServerAcknowledgedLocalDispatch({
@@ -2761,7 +2810,7 @@ export default function ChatView({
       lastSyncedPendingInputRef.current = null;
       return;
     }
-    const nextRequestId = activePendingUserInput?.requestId ?? null;
+    const nextRequestId = activePendingUserInputKey;
     const nextQuestionId = activePendingProgress?.activeQuestion?.id ?? null;
     const questionChanged =
       lastSyncedPendingInputRef.current?.requestId !== nextRequestId ||
@@ -2789,7 +2838,7 @@ export default function ChatView({
     setComposerHighlightedItemId(null);
   }, [
     activePendingProgress?.customAnswer,
-    activePendingUserInput?.requestId,
+    activePendingUserInputKey,
     activePendingProgress?.activeQuestion?.id,
   ]);
   useEffect(() => {
@@ -7015,9 +7064,7 @@ export default function ChatView({
     queuedTurn?: QueuedComposerChatTurn,
   ): Promise<boolean> => {
     e?.preventDefault();
-    const api = readNativeApi();
     if (
-      !api ||
       !activeThread ||
       isSendBusy ||
       isConnecting ||
@@ -7032,8 +7079,8 @@ export default function ChatView({
       const liveComposerSnapshot = composerEditorRef.current?.readSnapshot() ?? null;
       const livePendingAnswerText = liveComposerSnapshot?.value ?? promptRef.current;
       const currentDraftAnswer =
-        activePendingUserInput && activeQuestion
-          ? pendingUserInputAnswersByRequestIdRef.current[activePendingUserInput.requestId]?.[
+        activePendingUserInputKey && activeQuestion
+          ? pendingUserInputAnswersByRequestIdRef.current[activePendingUserInputKey]?.[
               activeQuestion.id
             ]
           : undefined;
@@ -7046,21 +7093,25 @@ export default function ChatView({
               ),
             }
           : undefined;
-      if (activePendingUserInput && answerOverrides) {
+      if (activePendingUserInputKey && answerOverrides) {
         const nextRequestAnswers = {
-          ...pendingUserInputAnswersByRequestIdRef.current[activePendingUserInput.requestId],
+          ...pendingUserInputAnswersByRequestIdRef.current[activePendingUserInputKey],
           ...answerOverrides,
         };
         pendingUserInputAnswersByRequestIdRef.current = {
           ...pendingUserInputAnswersByRequestIdRef.current,
-          [activePendingUserInput.requestId]: nextRequestAnswers,
+          [activePendingUserInputKey]: nextRequestAnswers,
         };
         setPendingUserInputAnswersByRequestId((existing) => ({
           ...existing,
-          [activePendingUserInput.requestId]: nextRequestAnswers,
+          [activePendingUserInputKey]: nextRequestAnswers,
         }));
       }
       return onAdvanceActivePendingUserInput(answerOverrides);
+    }
+    const api = readNativeApi();
+    if (!api) {
+      return false;
     }
     const queuedChatTurn = queuedTurn ?? null;
     const liveComposerSnapshot =
@@ -8137,68 +8188,164 @@ export default function ChatView({
 
   const onRespondToApproval = useCallback(
     async (requestId: ApprovalRequestId, decision: ProviderApprovalDecision) => {
-      const api = readNativeApi();
-      if (!api || !activeThreadId) return;
+      const approval = activePendingApproval;
+      const requestKey = activePendingApprovalKey;
+      if (!approval || approval.requestId !== requestId || !requestKey || !activeThreadId) return;
 
       setRespondingRequestIds((existing) =>
-        existing.includes(requestId) ? existing : [...existing, requestId],
+        existing.includes(requestKey) ? existing : [...existing, requestKey],
       );
-      // Durably persist "always allow" client-side so the next turn (after an
-      // idle-stop or runtime restart) keeps full-access instead of asking again.
-      // The server's session override only covers the current live turn.
-      const durableRuntimeMode = resolveRuntimeModeAfterApprovalDecision(runtimeMode, decision);
-      if (durableRuntimeMode) {
-        setComposerDraftRuntimeMode(activeThreadId, durableRuntimeMode);
-      }
-      await api.orchestration
-        .dispatchCommand({
-          type: "thread.approval.respond",
-          commandId: newCommandId(),
-          threadId: activeThreadId,
+      try {
+        await dispatchApprovalInteractionResponse({
+          authoritative: controlPlane.isAuthoritative,
+          executionId: approval.executionId,
           requestId,
           decision,
-          createdAt: new Date().toISOString(),
-        })
-        .catch((err: unknown) => {
-          setStoreThreadError(
-            activeThreadId,
-            err instanceof Error ? err.message : "Failed to submit approval decision.",
-          );
+          resolveControlPlane: async (executionId, durableRequestId, durableDecision) => {
+            if (!approval.interactionId) {
+              throw new Error("The durable approval is missing its Interaction reference.");
+            }
+            await controlPlane.resolveApproval(
+              activeThreadId,
+              executionId,
+              durableRequestId,
+              durableDecision,
+              `web-interaction-${approval.interactionId}-approval-${durableDecision}`,
+            );
+          },
+          interruptControlPlane: async () => {
+            if (!approval.interactionId) {
+              throw new Error("The durable approval is missing its Interaction reference.");
+            }
+            await controlPlane.interruptActiveTurn(
+              activeThreadId,
+              `web-interaction-${approval.interactionId}-interrupt`,
+            );
+          },
+          respondNative: async () => {
+            const api = readNativeApi();
+            if (!api) {
+              throw new Error("The local provider connection is unavailable.");
+            }
+            // Durably persist "always allow" client-side so the next turn (after an
+            // idle-stop or runtime restart) keeps full-access instead of asking again.
+            // The server's session override only covers the current live turn.
+            const durableRuntimeMode = resolveRuntimeModeAfterApprovalDecision(
+              runtimeMode,
+              decision,
+            );
+            if (durableRuntimeMode) {
+              setComposerDraftRuntimeMode(activeThreadId, durableRuntimeMode);
+            }
+            await api.orchestration.dispatchCommand({
+              type: "thread.approval.respond",
+              commandId: newCommandId(),
+              threadId: activeThreadId,
+              requestId,
+              decision,
+              createdAt: new Date().toISOString(),
+            });
+          },
         });
-      setRespondingRequestIds((existing) => existing.filter((id) => id !== requestId));
+      } catch (err) {
+        setStoreThreadError(
+          activeThreadId,
+          err instanceof Error ? err.message : "Failed to submit approval decision.",
+        );
+      } finally {
+        setRespondingRequestIds((existing) => existing.filter((id) => id !== requestKey));
+      }
     },
-    [activeThreadId, runtimeMode, setComposerDraftRuntimeMode, setStoreThreadError],
+    [
+      activePendingApproval,
+      activePendingApprovalKey,
+      activeThreadId,
+      controlPlane,
+      runtimeMode,
+      setComposerDraftRuntimeMode,
+      setStoreThreadError,
+    ],
   );
 
   const onRespondToUserInput = useCallback(
-    async (requestId: ApprovalRequestId, answers: ProviderUserInputAnswers) => {
-      const api = readNativeApi();
-      if (!api || !activeThreadId) return;
-      const dispatchAnswers = hasCompletePendingUserInputAnswers(answers)
-        ? answers
-        : omitNullPendingUserInputAnswers(answers);
+    async (
+      requestId: ApprovalRequestId,
+      answers: ProviderUserInputAnswers,
+      cancel = false,
+    ) => {
+      const pendingInput = activePendingUserInput;
+      const requestKey = activePendingUserInputKey;
+      if (!pendingInput || pendingInput.requestId !== requestId || !requestKey || !activeThreadId) {
+        return;
+      }
 
       setRespondingUserInputRequestIds((existing) =>
-        existing.includes(requestId) ? existing : [...existing, requestId],
+        existing.includes(requestKey) ? existing : [...existing, requestKey],
       );
-      await api.orchestration
-        .dispatchCommand({
-          type: "thread.user-input.respond",
-          commandId: newCommandId(),
-          threadId: activeThreadId,
+      try {
+        await dispatchUserInputInteractionResponse({
+          authoritative: controlPlane.isAuthoritative,
+          cancel,
+          executionId: pendingInput.executionId,
           requestId,
-          answers: dispatchAnswers,
-          createdAt: new Date().toISOString(),
-        })
-        .catch((err: unknown) => {
-          setStoreThreadError(
-            activeThreadId,
-            err instanceof Error ? err.message : "Failed to submit user input.",
-          );
+          answers,
+          resolveControlPlane: async (executionId, durableRequestId, durableAnswers) => {
+            if (!pendingInput.interactionId) {
+              throw new Error("The durable user-input request is missing its Interaction reference.");
+            }
+            await controlPlane.resolveUserInput(
+              activeThreadId,
+              executionId,
+              durableRequestId,
+              durableAnswers,
+              `web-interaction-${pendingInput.interactionId}-user-input`,
+            );
+          },
+          interruptControlPlane: async () => {
+            if (!pendingInput.interactionId) {
+              throw new Error("The durable user-input request is missing its Interaction reference.");
+            }
+            await controlPlane.interruptActiveTurn(
+              activeThreadId,
+              `web-interaction-${pendingInput.interactionId}-interrupt`,
+            );
+          },
+          respondNative: async () => {
+            const api = readNativeApi();
+            if (!api) {
+              throw new Error("The local provider connection is unavailable.");
+            }
+            const dispatchAnswers = hasCompletePendingUserInputAnswers(answers)
+              ? answers
+              : omitNullPendingUserInputAnswers(answers);
+            await api.orchestration.dispatchCommand({
+              type: "thread.user-input.respond",
+              commandId: newCommandId(),
+              threadId: activeThreadId,
+              requestId,
+              answers: dispatchAnswers,
+              createdAt: new Date().toISOString(),
+            });
+          },
         });
-      setRespondingUserInputRequestIds((existing) => existing.filter((id) => id !== requestId));
+      } catch (err) {
+        setStoreThreadError(
+          activeThreadId,
+          err instanceof Error ? err.message : "Failed to submit user input.",
+        );
+      } finally {
+        setRespondingUserInputRequestIds((existing) =>
+          existing.filter((id) => id !== requestKey),
+        );
+      }
     },
-    [activeThreadId, setStoreThreadError],
+    [
+      activePendingUserInput,
+      activePendingUserInputKey,
+      activeThreadId,
+      controlPlane,
+      setStoreThreadError,
+    ],
   );
 
   const onCancelActivePendingUserInput = useCallback(() => {
@@ -8209,25 +8356,25 @@ export default function ChatView({
     setPrompt("");
     setComposerCursor(0);
     setComposerTrigger(null);
-    void onRespondToUserInput(activePendingUserInput.requestId, {});
+    void onRespondToUserInput(activePendingUserInput.requestId, {}, true);
   }, [activePendingIsResponding, activePendingUserInput, onRespondToUserInput, setPrompt]);
 
   const setActivePendingUserInputQuestionIndex = useCallback(
     (nextQuestionIndex: number) => {
-      if (!activePendingUserInput) {
+      if (!activePendingUserInputKey) {
         return;
       }
       setPendingUserInputQuestionIndexByRequestId((existing) => ({
         ...existing,
-        [activePendingUserInput.requestId]: nextQuestionIndex,
+        [activePendingUserInputKey]: nextQuestionIndex,
       }));
     },
-    [activePendingUserInput],
+    [activePendingUserInputKey],
   );
 
   const onToggleActivePendingUserInputOption = useCallback(
     (questionId: string, optionLabel: string) => {
-      if (!activePendingUserInput) {
+      if (!activePendingUserInput || !activePendingUserInputKey) {
         return null;
       }
       const question = activePendingUserInput.questions.find((entry) => entry.id === questionId);
@@ -8236,29 +8383,27 @@ export default function ChatView({
       }
       const nextDraftAnswer = togglePendingUserInputOptionSelection(
         question,
-        pendingUserInputAnswersByRequestIdRef.current[activePendingUserInput.requestId]?.[
-          questionId
-        ],
+        pendingUserInputAnswersByRequestIdRef.current[activePendingUserInputKey]?.[questionId],
         optionLabel,
       );
       const nextRequestAnswers = {
-        ...pendingUserInputAnswersByRequestIdRef.current[activePendingUserInput.requestId],
+        ...pendingUserInputAnswersByRequestIdRef.current[activePendingUserInputKey],
         [questionId]: nextDraftAnswer,
       };
       pendingUserInputAnswersByRequestIdRef.current = {
         ...pendingUserInputAnswersByRequestIdRef.current,
-        [activePendingUserInput.requestId]: nextRequestAnswers,
+        [activePendingUserInputKey]: nextRequestAnswers,
       };
       setPendingUserInputAnswersByRequestId((existing) => ({
         ...existing,
-        [activePendingUserInput.requestId]: nextRequestAnswers,
+        [activePendingUserInputKey]: nextRequestAnswers,
       }));
       promptRef.current = "";
       setComposerCursor(0);
       setComposerTrigger(null);
       return nextDraftAnswer;
     },
-    [activePendingUserInput],
+    [activePendingUserInput, activePendingUserInputKey],
   );
 
   const onChangeActivePendingUserInputCustomAnswer = useCallback(
@@ -8269,57 +8414,55 @@ export default function ChatView({
       expandedCursor: number,
       cursorAdjacentToMention: boolean,
     ) => {
-      if (!activePendingUserInput) {
+      if (!activePendingUserInput || !activePendingUserInputKey) {
         return;
       }
       promptRef.current = value;
       const nextDraftAnswer = setPendingUserInputCustomAnswer(
-        pendingUserInputAnswersByRequestIdRef.current[activePendingUserInput.requestId]?.[
-          questionId
-        ],
+        pendingUserInputAnswersByRequestIdRef.current[activePendingUserInputKey]?.[questionId],
         value,
       );
       const nextRequestAnswers = {
-        ...pendingUserInputAnswersByRequestIdRef.current[activePendingUserInput.requestId],
+        ...pendingUserInputAnswersByRequestIdRef.current[activePendingUserInputKey],
         [questionId]: nextDraftAnswer,
       };
       pendingUserInputAnswersByRequestIdRef.current = {
         ...pendingUserInputAnswersByRequestIdRef.current,
-        [activePendingUserInput.requestId]: nextRequestAnswers,
+        [activePendingUserInputKey]: nextRequestAnswers,
       };
       setPendingUserInputAnswersByRequestId((existing) => ({
         ...existing,
-        [activePendingUserInput.requestId]: nextRequestAnswers,
+        [activePendingUserInputKey]: nextRequestAnswers,
       }));
       setComposerCursor(nextCursor);
       setComposerTrigger(
         cursorAdjacentToMention ? null : detectComposerTrigger(value, expandedCursor),
       );
     },
-    [activePendingUserInput],
+    [activePendingUserInput, activePendingUserInputKey],
   );
 
   const onAdvanceActivePendingUserInput = useCallback(
     (answerOverrides?: Record<string, PendingUserInputDraftAnswer>): boolean => {
-      if (!activePendingUserInput || !activePendingProgress) {
+      if (!activePendingUserInput || !activePendingUserInputKey || !activePendingProgress) {
         return false;
       }
       const pendingDraftAnswers =
         answerOverrides && Object.keys(answerOverrides).length > 0
           ? {
-              ...pendingUserInputAnswersByRequestIdRef.current[activePendingUserInput.requestId],
+              ...pendingUserInputAnswersByRequestIdRef.current[activePendingUserInputKey],
               ...answerOverrides,
             }
-          : (pendingUserInputAnswersByRequestIdRef.current[activePendingUserInput.requestId] ??
+          : (pendingUserInputAnswersByRequestIdRef.current[activePendingUserInputKey] ??
             activePendingDraftAnswers);
       if (answerOverrides && Object.keys(answerOverrides).length > 0) {
         pendingUserInputAnswersByRequestIdRef.current = {
           ...pendingUserInputAnswersByRequestIdRef.current,
-          [activePendingUserInput.requestId]: pendingDraftAnswers,
+          [activePendingUserInputKey]: pendingDraftAnswers,
         };
         setPendingUserInputAnswersByRequestId((existing) => ({
           ...existing,
-          [activePendingUserInput.requestId]: pendingDraftAnswers,
+          [activePendingUserInputKey]: pendingDraftAnswers,
         }));
       }
       const resolvedAnswers = buildPendingUserInputAnswers(
@@ -8347,6 +8490,7 @@ export default function ChatView({
       activePendingDraftAnswers,
       activePendingProgress,
       activePendingUserInput,
+      activePendingUserInputKey,
       onRespondToUserInput,
       setActivePendingUserInputQuestionIndex,
     ],
@@ -9374,24 +9518,24 @@ export default function ChatView({
       }
       promptRef.current = next.text;
       const activePendingQuestion = activePendingProgress?.activeQuestion;
-      if (activePendingQuestion && activePendingUserInput) {
+      if (activePendingQuestion && activePendingUserInputKey) {
         const nextDraftAnswer = setPendingUserInputCustomAnswer(
-          pendingUserInputAnswersByRequestIdRef.current[activePendingUserInput.requestId]?.[
+          pendingUserInputAnswersByRequestIdRef.current[activePendingUserInputKey]?.[
             activePendingQuestion.id
           ],
           next.text,
         );
         const nextRequestAnswers = {
-          ...pendingUserInputAnswersByRequestIdRef.current[activePendingUserInput.requestId],
+          ...pendingUserInputAnswersByRequestIdRef.current[activePendingUserInputKey],
           [activePendingQuestion.id]: nextDraftAnswer,
         };
         pendingUserInputAnswersByRequestIdRef.current = {
           ...pendingUserInputAnswersByRequestIdRef.current,
-          [activePendingUserInput.requestId]: nextRequestAnswers,
+          [activePendingUserInputKey]: nextRequestAnswers,
         };
         setPendingUserInputAnswersByRequestId((existing) => ({
           ...existing,
-          [activePendingUserInput.requestId]: nextRequestAnswers,
+          [activePendingUserInputKey]: nextRequestAnswers,
         }));
       } else {
         setPrompt(next.text);
@@ -9405,7 +9549,7 @@ export default function ChatView({
       });
       return nextCursor;
     },
-    [activePendingProgress?.activeQuestion, activePendingUserInput, setPrompt],
+    [activePendingProgress?.activeQuestion, activePendingUserInputKey, setPrompt],
   );
 
   const readComposerSnapshot = useCallback((): {
@@ -10547,7 +10691,11 @@ export default function ChatView({
                   <ComposerPendingApprovalPanel
                     approval={activePendingApproval}
                     pendingCount={pendingApprovals.length}
-                    isResponding={respondingRequestIds.includes(activePendingApproval.requestId)}
+                    isResponding={
+                      activePendingApprovalKey !== null &&
+                      respondingRequestIds.includes(activePendingApprovalKey)
+                    }
+                    allowSessionDecision={!controlPlane.isAuthoritative}
                     onRespond={onRespondToApproval}
                   />
                 </div>
