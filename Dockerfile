@@ -94,6 +94,7 @@ COPY packages/contracts/package.json ./packages/contracts/package.json
 COPY packages/effect-acp/package.json ./packages/effect-acp/package.json
 COPY packages/shared/package.json ./packages/shared/package.json
 COPY scripts/package.json ./scripts/package.json
+COPY patches ./patches
 RUN --mount=type=cache,target=/root/.bun/install/cache \
   bun install --frozen-lockfile
 
@@ -155,11 +156,21 @@ COPY packages/contracts/package.json ./packages/contracts/package.json
 COPY packages/effect-acp/package.json ./packages/effect-acp/package.json
 COPY packages/shared/package.json ./packages/shared/package.json
 COPY scripts/package.json ./scripts/package.json
+COPY patches ./patches
 RUN --mount=type=cache,target=/root/.bun/install/cache \
   bun install --frozen-lockfile --filter @synara/provider-host
 COPY apps/provider-host/src ./apps/provider-host/src
 COPY packages/contracts/src ./packages/contracts/src
 RUN bun build apps/provider-host/src/index.ts --target=node --outfile=/out/provider-host.mjs
+
+FROM provider-host-build AS provider-host-fixture-build
+
+RUN --mount=type=cache,target=/root/.bun/install/cache \
+  bun install --frozen-lockfile --filter @synara/scripts
+COPY scripts/stage3-provider-acceptance/provider-host-fixture.ts ./scripts/stage3-provider-acceptance/provider-host-fixture.ts
+RUN bun build scripts/stage3-provider-acceptance/provider-host-fixture.ts \
+  --target=node \
+  --outfile=/out/provider-host-fixture.mjs
 
 FROM node:24-alpine AS worker-runtime-base
 
@@ -188,6 +199,13 @@ ENV HOME=/home/synara \
 WORKDIR /data
 USER 10001:10001
 ENTRYPOINT ["/usr/local/bin/synara-agentd"]
+
+# Deterministic Target acceptance image. This extends the production Worker
+# image with a bundled Provider Host Protocol fixture, while keeping the
+# default and production `worker` targets free of test-only runtime behavior.
+FROM worker AS worker-acceptance
+
+COPY --from=provider-host-fixture-build /out/provider-host-fixture.mjs /opt/synara/acceptance/provider-host-fixture.mjs
 
 # Preserve the Synara web/server runtime as the default image. Worker images are
 # selected explicitly with `--target worker`.

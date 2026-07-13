@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Stage 3 Provider Runtime fixture acceptance runner.
 
-The Local driver deliberately exercises the production HTTP and embedded
-LocalSupervisor path.  It never registers, heartbeats, or claims a Worker on
-behalf of agentd.
+Target drivers exercise production Control Plane, Worker, and agentd paths.
+The runner never registers, heartbeats, or claims a Worker on behalf of
+agentd. The Local driver uses LocalSupervisor; the Docker driver provisions a
+managed Docker Execution Target through the user API and reconciler.
 """
 
 from __future__ import annotations
@@ -12,13 +13,17 @@ import argparse
 import base64
 import dataclasses
 import datetime as dt
+import hashlib
+import http.client
 import http.cookiejar
+import http.server
 import json
 import os
 import pathlib
 import shutil
 import signal
 import socket
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -35,6 +40,11 @@ from typing import Any, Protocol, TypeVar
 
 SCHEMA_VERSION = "synara.provider-acceptance.v1"
 FIXTURE_CREDENTIAL_SENTINEL = "stage3-provider-acceptance-credential-v1"
+FIXTURE_ARTIFACT_RELATIVE_PATH = ".synara-stage3-acceptance/artifact.txt"
+DOCKER_VOLUME_SENTINEL_PATH = "/data/.synara-stage3-provider-acceptance-volume"
+DOCKER_VOLUME_SENTINEL_VALUE = "synara-stage3-named-volume-continuity-v1"
+WORKER_PROXY_ALLOWED_PATH_PREFIXES = ("/v1/workers/", "/v1/artifact-content/")
+WORKER_PROXY_MAX_REQUEST_BYTES = 64 << 20
 CASE_STATUSES = frozenset({"pass", "unsupported", "skipped", "fail"})
 TERMINAL_EVENT_TYPES = frozenset({"execution.completed", "execution.failed", "execution.cancelled"})
 JSON_REPORT_NAME = "acceptance-report.json"
@@ -55,6 +65,34 @@ def elapsed_ms(started: float) -> int:
 
 def random_key() -> str:
     return base64.urlsafe_b64encode(os.urandom(32)).decode("ascii").rstrip("=")
+
+
+def repository_metadata(repo_root: pathlib.Path) -> Mapping[str, Any]:
+    def git_output(arguments: Sequence[str]) -> str | None:
+        try:
+            completed = subprocess.run(
+                ["git", *arguments],
+                cwd=repo_root,
+                env={key: os.environ[key] for key in ("PATH", "HOME") if key in os.environ},
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                timeout=10.0,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        value = completed.stdout.strip()
+        return value if completed.returncode == 0 else None
+
+    catalog_path = repo_root / "packages" / "contracts" / "src" / "providerCapabilityCatalog.json"
+    catalog_hash = hashlib.sha256(catalog_path.read_bytes()).hexdigest() if catalog_path.is_file() else None
+    status = git_output(["status", "--porcelain", "--untracked-files=all"])
+    return {
+        "gitSha": git_output(["rev-parse", "HEAD"]),
+        "worktreeDirty": None if status is None else bool(status),
+        "providerCapabilityCatalogSha256": catalog_hash,
+    }
 
 
 def reserve_loopback_port() -> int:
@@ -182,6 +220,13 @@ class RunnerOptions:
     control_plane_binary: pathlib.Path | None
     keep: bool
     restart_control_plane: bool
+    docker_socket_path: pathlib.Path
+    docker_worker_image: str | None
+    docker_skip_worker_build: bool
+    docker_control_plane_host: str
+    docker_network_mode: str | None
+    docker_memory_bytes: int
+    docker_nano_cpus: int
 
 
 @dataclasses.dataclass
@@ -197,6 +242,8 @@ class ScenarioState:
     pre_restart_sequence: int | None = None
     last_sequence: int = 0
     restarted: bool = False
+    worker_replaced: bool = False
+    replacement_worker_id: str | None = None
 
 
 class APIClient:
@@ -281,6 +328,20 @@ class TargetDriver(Protocol):
 
     def restart(self) -> Mapping[str, Any]: ...
 
+    def provision_target(
+        self,
+        tenant_id: str,
+        organization_id: str,
+        provider: str,
+    ) -> Mapping[str, Any]: ...
+
+    def replace_worker(
+        self,
+        tenant_id: str,
+        target_id: str,
+        provider: str,
+    ) -> Mapping[str, Any]: ...
+
     def stop(self) -> None: ...
 
     def cleanup(self) -> None: ...
@@ -300,6 +361,187 @@ class _RedactingLogPump(threading.Thread):
                 output.write(self.redactor.text(line))
                 output.flush()
         self.source.close()
+
+
+class _WorkerOnlyProxy:
+    """Expose only the Worker API surface while the full Control Plane stays on loopback."""
+
+    def __init__(self, upstream_port: int) -> None:
+        proxy = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.0"
+            server_version = "SynaraStage3WorkerProxy/1"
+            sys_version = ""
+
+            def setup(self) -> None:
+                super().setup()
+                self.connection.settimeout(30.0)
+
+            def do_GET(self) -> None:
+                self._forward()
+
+            def do_POST(self) -> None:
+                self._forward()
+
+            def do_PUT(self) -> None:
+                self._forward()
+
+            def do_HEAD(self) -> None:
+                self._reject_method()
+
+            def do_PATCH(self) -> None:
+                self._reject_method()
+
+            def do_DELETE(self) -> None:
+                self._reject_method()
+
+            def do_OPTIONS(self) -> None:
+                self._reject_method()
+
+            def do_CONNECT(self) -> None:
+                self._reject_method()
+
+            def do_TRACE(self) -> None:
+                self._reject_method()
+
+            def log_message(self, _format: str, *_args: Any) -> None:
+                return None
+
+            def _reject_method(self) -> None:
+                self._json_error(405, "method_not_allowed")
+
+            def _forward(self) -> None:
+                parsed = urllib.parse.urlsplit(self.path)
+                path = parsed.path
+                segments = path.split("/")
+                if (
+                    parsed.scheme
+                    or parsed.netloc
+                    or len(self.path) > 16_384
+                    or "%" in path
+                    or "\\" in path
+                    or "//" in path
+                    or any(segment in {".", ".."} for segment in segments)
+                    or not any(path.startswith(prefix) for prefix in WORKER_PROXY_ALLOWED_PATH_PREFIXES)
+                ):
+                    self._json_error(404, "route_not_exposed")
+                    return
+                if self.headers.get("Transfer-Encoding"):
+                    self._json_error(400, "transfer_encoding_unsupported")
+                    return
+                try:
+                    content_length = int(self.headers.get("Content-Length", "0"))
+                except ValueError:
+                    self._json_error(400, "content_length_invalid")
+                    return
+                if content_length < 0 or content_length > WORKER_PROXY_MAX_REQUEST_BYTES:
+                    self._json_error(413, "request_too_large")
+                    return
+                try:
+                    body = self.rfile.read(content_length) if content_length else None
+                except OSError:
+                    self._json_error(400, "request_body_unavailable")
+                    return
+                if body is not None and len(body) != content_length:
+                    self._json_error(400, "request_body_incomplete")
+                    return
+
+                headers = {
+                    name: value
+                    for name, value in self.headers.items()
+                    if name.lower()
+                    in {
+                        "accept",
+                        "authorization",
+                        "content-type",
+                        "idempotency-key",
+                        "user-agent",
+                        "x-request-id",
+                    }
+                }
+                upstream = http.client.HTTPConnection("127.0.0.1", proxy.upstream_port, timeout=30.0)
+                response_started = False
+                try:
+                    upstream.request(self.command, self.path, body=body, headers=headers)
+                    response = upstream.getresponse()
+                    self.send_response(response.status)
+                    response_started = True
+                    allowed_response_headers = {
+                        "cache-control",
+                        "content-disposition",
+                        "content-length",
+                        "content-type",
+                        "etag",
+                        "last-modified",
+                    }
+                    for name, value in response.getheaders():
+                        if name.lower() in allowed_response_headers:
+                            self.send_header(name, value)
+                    self.send_header("Connection", "close")
+                    self.end_headers()
+                    while True:
+                        chunk = response.read(64 << 10)
+                        if not chunk:
+                            break
+                        self.wfile.write(chunk)
+                except (OSError, http.client.HTTPException):
+                    if not response_started and not self.wfile.closed:
+                        self._json_error(502, "control_plane_unavailable")
+                finally:
+                    upstream.close()
+
+            def _json_error(self, status: int, code: str) -> None:
+                payload = json.dumps({"error": {"code": code}}, separators=(",", ":")).encode("utf-8")
+                try:
+                    self.send_response(status)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(payload)))
+                    self.send_header("Connection", "close")
+                    self.end_headers()
+                    if self.command != "HEAD":
+                        self.wfile.write(payload)
+                except OSError:
+                    return
+
+        try:
+            self.server = http.server.ThreadingHTTPServer(("0.0.0.0", 0), Handler)
+        except OSError as error:
+            raise AcceptanceError(
+                "runner.worker_proxy_start_failed",
+                f"Worker-only proxy could not bind: {error}",
+            ) from None
+        self.server.daemon_threads = True
+        self.upstream_port = upstream_port
+        self.port = int(self.server.server_address[1])
+        self.thread = threading.Thread(
+            target=self.server.serve_forever,
+            kwargs={"poll_interval": 0.1},
+            name="stage3-worker-only-proxy",
+            daemon=True,
+        )
+
+    def start(self) -> None:
+        self.thread.start()
+
+    def stop(self) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=5.0)
+        if self.thread.is_alive():
+            raise AcceptanceError(
+                "runner.worker_proxy_stop_failed",
+                "Worker-only proxy did not stop within five seconds.",
+            )
+
+    def evidence(self, advertised_host: str) -> Mapping[str, Any]:
+        return {
+            "listenAddress": "0.0.0.0",
+            "advertisedHost": advertised_host,
+            "port": self.port,
+            "upstreamAddress": f"127.0.0.1:{self.upstream_port}",
+            "allowedPathPrefixes": list(WORKER_PROXY_ALLOWED_PATH_PREFIXES),
+        }
 
 
 class LocalDriver:
@@ -351,6 +593,10 @@ class LocalDriver:
         for watched, previous in self._previous_signal_handlers.items():
             signal.signal(watched, previous)
         self._previous_signal_handlers.clear()
+
+    def suppress_signals_for_cleanup(self) -> None:
+        for watched in self._previous_signal_handlers:
+            signal.signal(watched, signal.SIG_IGN)
 
     @staticmethod
     def _interrupt(signum: int, _frame: Any) -> None:
@@ -486,16 +732,68 @@ class LocalDriver:
 
     def cleanup(self) -> None:
         self.stop()
+        self._release_state()
+
+    def _release_state(self) -> None:
         self.cursor_key = ""
         self.credential_key = ""
         if self._temporary_state:
             shutil.rmtree(self.state_dir, ignore_errors=True)
 
     def _tool_environment(self) -> dict[str, str]:
-        allowed = ("PATH", "HOME", "TMPDIR", "GOCACHE", "GOMODCACHE", "GOPATH", "GOROOT")
+        allowed = (
+            "PATH",
+            "HOME",
+            "TMPDIR",
+            "GOCACHE",
+            "GOMODCACHE",
+            "GOPATH",
+            "GOROOT",
+            "DOCKER_HOST",
+            "DOCKER_CONTEXT",
+            "DOCKER_CONFIG",
+            "XDG_RUNTIME_DIR",
+        )
         environment = {key: os.environ[key] for key in allowed if key in os.environ}
         environment.setdefault("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
         return environment
+
+    def provision_target(
+        self,
+        tenant_id: str,
+        organization_id: str,
+        _provider: str,
+    ) -> Mapping[str, Any]:
+        targets = json_items(
+            self.api.request("GET", f"/v1/tenants/{tenant_id}/execution-targets"),
+            "execution-targets",
+        )
+        candidates = [
+            target
+            for target in targets
+            if target.get("kind") == "local"
+            and target.get("name") == "local-default"
+            and target.get("status") == "active"
+            and target.get("organizationId") == organization_id
+        ]
+        if len(candidates) != 1:
+            raise AcceptanceError(
+                "runner.local_default_target_missing",
+                "Expected exactly one active local-default Target in the bootstrap Organization.",
+                {"candidateCount": len(candidates), "targets": [AcceptanceSuite._target_summary(item) for item in targets]},
+            )
+        return candidates[0]
+
+    def replace_worker(
+        self,
+        _tenant_id: str,
+        _target_id: str,
+        _provider: str,
+    ) -> Mapping[str, Any]:
+        raise AcceptanceError(
+            "runner.target_replacement_unsupported",
+            "The Local Target uses Control Plane restart for Supervisor recovery instead of container replacement.",
+        )
 
     def _control_plane_environment(self) -> dict[str, str]:
         environment = self._tool_environment()
@@ -532,6 +830,657 @@ class LocalDriver:
         return environment
 
 
+class DockerDriver(LocalDriver):
+    name = "docker"
+
+    def __init__(
+        self,
+        repo_root: pathlib.Path,
+        options: RunnerOptions,
+        deadline: Deadline,
+        redactor: SecretRedactor,
+    ) -> None:
+        super().__init__(repo_root, options, deadline, redactor)
+        suffix = uuid.uuid4().hex[:12]
+        self.registration_token = random_key()
+        self.redactor.add(self.registration_token, "[REDACTED_WORKER_REGISTRATION_TOKEN]")
+        self.target_name = f"stage3-docker-{suffix}"
+        self.volume_name = f"synara-stage3-{suffix}"
+        self.network_name = options.docker_network_mode or f"synara-stage3-{suffix}"
+        self.owns_network = options.docker_network_mode is None
+        self.owns_image = not options.docker_skip_worker_build
+        self.head_sha = self._head_sha()
+        self.image = options.docker_worker_image or f"synara-stage3-provider-acceptance:{self.head_sha}-{suffix}"
+        self.target_id: str | None = None
+        self.container_name: str | None = None
+        self.worker_proxy: _WorkerOnlyProxy | None = None
+
+    def start(self) -> Mapping[str, Any]:
+        control_plane = super().start()
+        if self.worker_proxy is None:
+            try:
+                self.worker_proxy = _WorkerOnlyProxy(self.port)
+                self.worker_proxy.start()
+            except Exception:
+                self.worker_proxy = None
+                super().stop()
+                raise
+        elif not self.worker_proxy.thread.is_alive():
+            raise AcceptanceError(
+                "runner.worker_proxy_exited",
+                "Worker-only proxy exited before the acceptance run completed.",
+            )
+        return {
+            **control_plane,
+            "workerProxy": self.worker_proxy.evidence(self.options.docker_control_plane_host),
+        }
+
+    def prepare(self) -> Mapping[str, Any]:
+        control_plane = super().prepare()
+        socket_evidence = self._ping_socket()
+        version = self._docker_command(
+            ["version", "--format", "{{.Server.Version}}"],
+            log_path=self.logs_dir / "docker-version.log",
+        ).strip()
+        if not version:
+            raise AcceptanceError("runner.docker_engine_unavailable", "Docker did not report a Server version.")
+
+        build_started = time.monotonic()
+        if self.options.docker_skip_worker_build:
+            self._docker_command(
+                ["image", "inspect", "--format", "{{.Id}}", self.image],
+                log_path=self.logs_dir / "docker-image-inspect.log",
+            )
+            build_evidence: dict[str, Any] = {"build": "skipped"}
+        else:
+            self._docker_command(
+                [
+                    "build",
+                    "--target",
+                    "worker-acceptance",
+                    "--tag",
+                    self.image,
+                    "--label",
+                    "synara.io/stage3-provider-acceptance=true",
+                    "--label",
+                    f"org.opencontainers.image.revision={self.head_sha}",
+                    str(self.repo_root),
+                ],
+                log_path=self.logs_dir / "docker-worker-build.log",
+                maximum_timeout=max(60.0, self.deadline.remaining()),
+            )
+            build_evidence = {"build": "completed", "durationMs": elapsed_ms(build_started)}
+
+        self._docker_command(
+            [
+                "run",
+                "--rm",
+                "--entrypoint",
+                "sh",
+                self.image,
+                "-lc",
+                "test -x /usr/local/bin/synara-agentd && "
+                "test -x /usr/local/bin/provider-host && "
+                "test -r /opt/synara/acceptance/provider-host-fixture.mjs && "
+                "node --version",
+            ],
+            log_path=self.logs_dir / "docker-worker-smoke.log",
+        )
+        image_id = self._docker_command(
+            ["image", "inspect", "--format", "{{.Id}}", self.image]
+        ).strip()
+        if self.owns_network:
+            self._docker_command(
+                [
+                    "network",
+                    "create",
+                    "--label",
+                    "synara.io/stage3-provider-acceptance=true",
+                    self.network_name,
+                ],
+                log_path=self.logs_dir / "docker-network-create.log",
+            )
+        else:
+            self._docker_command(["network", "inspect", self.network_name])
+        return {
+            "controlPlane": control_plane,
+            "docker": {
+                "serverVersion": version,
+                "socket": socket_evidence,
+                "workerImage": self.image,
+                "workerImageId": image_id,
+                "networkMode": self.network_name,
+                **build_evidence,
+            },
+        }
+
+    def provision_target(
+        self,
+        tenant_id: str,
+        organization_id: str,
+        provider: str,
+    ) -> Mapping[str, Any]:
+        target = json_object(
+            self.api.request(
+                "POST",
+                f"/v1/tenants/{tenant_id}/execution-targets",
+                {
+                    "organizationId": organization_id,
+                    "kind": "docker",
+                    "name": self.target_name,
+                    "configuration": {
+                        "socketPath": str(self.options.docker_socket_path),
+                        "image": self.image,
+                        "pullPolicy": "never",
+                        "controlPlaneUrl": self._worker_proxy_url(),
+                        "allowInsecureControlPlane": True,
+                        "runnerCommand": list(self.options.runner_command),
+                        "desiredWorkers": 1,
+                        "workspaceVolume": self.volume_name,
+                        "workspaceMount": "/data",
+                        "workspaceRoot": "/data/workspaces",
+                        "gitCacheRoot": "/data/git-cache",
+                        "networkMode": self.network_name,
+                        "user": "10001:10001",
+                        "memoryBytes": self.options.docker_memory_bytes,
+                        "nanoCpus": self.options.docker_nano_cpus,
+                    },
+                    "capabilities": {
+                        "workspaceModes": ["local", "worktree"],
+                        "providerPolicy": {"experimentalProviders": [provider]},
+                    },
+                },
+                expected=(201,),
+            ),
+            "docker execution target",
+        )
+        target_id = target.get("id")
+        if not isinstance(target_id, str) or not target_id:
+            raise AcceptanceError("runner.docker_target_id_missing", "Docker Target creation did not return an ID.")
+        self.target_id = target_id
+        self.container_name = f"synara-agentd-{target_id}-0"
+        snapshot = self._wait_container(target_id)
+        evidence = self._validate_container(snapshot)
+        return {**target, "driverEvidence": evidence}
+
+    def replace_worker(
+        self,
+        tenant_id: str,
+        target_id: str,
+        _provider: str,
+    ) -> Mapping[str, Any]:
+        before_container = self._wait_container(target_id)
+        before_worker = self._worker_identity(target_id)
+        before_container_id = str(before_container.get("Id") or "")
+        if not before_container_id:
+            raise AcceptanceError(
+                "runner.docker_container_id_missing",
+                "Managed Docker Worker inspect omitted its container ID.",
+            )
+        self._write_volume_sentinel(before_container_id)
+        self.api.request(
+            "PATCH",
+            f"/v1/tenants/{tenant_id}/execution-targets/{target_id}/provider-policy",
+            {"experimentalProviders": ["codex", "claudeAgent"]},
+        )
+
+        def replacement_probe() -> tuple[dict[str, Any], dict[str, Any]] | None:
+            container = self._container_snapshot(target_id)
+            if container is None or container.get("Id") == before_container.get("Id"):
+                return None
+            worker = self._worker_identity(target_id, required=False)
+            if worker is None:
+                return None
+            if (
+                worker["id"] != before_worker["id"]
+                or worker["incarnation"] <= before_worker["incarnation"]
+                or worker["instanceUid"] == before_worker["instanceUid"]
+                or worker["status"] != "online"
+            ):
+                return None
+            return container, worker
+
+        after_container, after_worker = self.api.wait_until(
+            "Docker Worker container replacement and new agentd incarnation",
+            replacement_probe,
+        )
+        resources = self._validate_container(after_container)
+        after_container_id = str(after_container.get("Id") or "")
+        self._verify_volume_sentinel(after_container_id)
+        return {
+            "strategy": "provider-policy config-hash replacement",
+            "containerIdChanged": after_container.get("Id") != before_container.get("Id"),
+            "previousContainerId": before_container_id[:12],
+            "replacementContainerId": after_container_id[:12],
+            "replacementWorkerId": after_worker["id"],
+            "workerIdStable": after_worker["id"] == before_worker["id"],
+            "previousIncarnation": before_worker["incarnation"],
+            "replacementIncarnation": after_worker["incarnation"],
+            "instanceUidChanged": after_worker["instanceUid"] != before_worker["instanceUid"],
+            "namedVolumeContinuity": {
+                "sentinelPath": DOCKER_VOLUME_SENTINEL_PATH,
+                "preservedAcrossReplacement": True,
+                "semantics": "named-volume content continuity; not Workspace Checkpoint restore",
+            },
+            "resources": resources,
+        }
+
+    def cleanup(self) -> None:
+        errors: list[str] = []
+
+        def collect_failure(operation: str, action: Callable[[], Any]) -> Any:
+            try:
+                return action()
+            except Exception as error:
+                errors.append(f"{operation}: {error}")
+                return None
+
+        def docker_cleanup(
+            operation: str,
+            arguments: Sequence[str],
+            timeout: float,
+            ignored_output: Sequence[str] = (),
+        ) -> subprocess.CompletedProcess[str] | None:
+            completed = collect_failure(
+                operation,
+                lambda: self._docker_completed(arguments, cleanup_timeout=timeout),
+            )
+            if not isinstance(completed, subprocess.CompletedProcess):
+                return None
+            output = completed.stdout.strip()
+            if completed.returncode != 0 and not any(
+                ignored.lower() in output.lower() for ignored in ignored_output
+            ):
+                errors.append(f"{operation}: {output or f'exit {completed.returncode}'}")
+            return completed
+
+        def remove_managed_workers_until_quiet() -> None:
+            if not self.target_id:
+                return
+            cleanup_deadline = time.monotonic() + 12.0
+            quiet_since: float | None = None
+            while time.monotonic() < cleanup_deadline:
+                listed = docker_cleanup(
+                    "list managed Worker containers",
+                    [
+                        "ps",
+                        "-aq",
+                        "--filter",
+                        "label=synara.io/managed=true",
+                        "--filter",
+                        f"label=synara.io/execution-target-id={self.target_id}",
+                    ],
+                    5.0,
+                )
+                if listed is None or listed.returncode != 0:
+                    return
+                container_ids = [line.strip() for line in listed.stdout.splitlines() if line.strip()]
+                if container_ids:
+                    quiet_since = None
+                    removed = docker_cleanup(
+                        "remove managed Worker containers",
+                        ["rm", "-f", *container_ids],
+                        10.0,
+                    )
+                    if removed is None or removed.returncode != 0:
+                        return
+                else:
+                    now = time.monotonic()
+                    quiet_since = quiet_since or now
+                    if now - quiet_since >= 1.0:
+                        return
+                time.sleep(0.1)
+            errors.append("managed Worker containers did not remain absent during cleanup")
+
+        collect_failure("stop Control Plane", self.stop)
+        remove_managed_workers_until_quiet()
+        if not self.options.keep:
+            docker_cleanup(
+                "remove named Workspace volume",
+                ["volume", "rm", "-f", self.volume_name],
+                20.0,
+                ("no such volume",),
+            )
+            if self.owns_network:
+                docker_cleanup(
+                    "remove acceptance network",
+                    ["network", "rm", self.network_name],
+                    20.0,
+                    ("not found",),
+                )
+            if self.owns_image:
+                docker_cleanup(
+                    "remove acceptance image",
+                    ["image", "rm", "-f", self.image],
+                    30.0,
+                    ("no such image",),
+                )
+        collect_failure("stop Worker-only proxy", self._stop_worker_proxy)
+        self.registration_token = ""
+        collect_failure("release isolated state", self._release_state)
+        if errors:
+            raise AcceptanceError(
+                "runner.docker_cleanup_failed",
+                "Docker acceptance resources could not be cleaned completely.",
+                {"errors": [self.redactor.text(value) for value in errors if value]},
+            )
+
+    def _control_plane_environment(self) -> dict[str, str]:
+        environment = super()._control_plane_environment()
+        for key in (
+            "SYNARA_LOCAL_AGENTD_RUNNER_COMMAND_JSON",
+            "SYNARA_LOCAL_AGENTD_WORKSPACE_ROOT",
+            "SYNARA_LOCAL_AGENTD_GIT_CACHE_ROOT",
+            "SYNARA_LOCAL_AGENTD_RESTART_BACKOFF",
+        ):
+            environment.pop(key, None)
+        environment.update(
+            {
+                "SYNARA_CONTROL_PLANE_LISTEN": f"127.0.0.1:{self.port}",
+                "SYNARA_WORKER_REGISTRATION_TOKEN": self.registration_token,
+                "SYNARA_DOCKER_RECONCILE_INTERVAL": "250ms",
+            }
+        )
+        return environment
+
+    def _worker_proxy_url(self) -> str:
+        if self.worker_proxy is None or not self.worker_proxy.thread.is_alive():
+            raise AcceptanceError(
+                "runner.worker_proxy_unavailable",
+                "Worker-only proxy was unavailable while provisioning the Docker Target.",
+            )
+        return f"http://{self.options.docker_control_plane_host}:{self.worker_proxy.port}"
+
+    def _stop_worker_proxy(self) -> None:
+        proxy = self.worker_proxy
+        self.worker_proxy = None
+        if proxy is not None:
+            proxy.stop()
+
+    def _write_volume_sentinel(self, container_id: str) -> None:
+        self._docker_command(
+            [
+                "exec",
+                container_id,
+                "sh",
+                "-c",
+                "set -eu; path='" + DOCKER_VOLUME_SENTINEL_PATH + "'; "
+                "test ! -e \"$path\"; test ! -L \"$path\"; umask 077; "
+                "printf '%s\\n' '" + DOCKER_VOLUME_SENTINEL_VALUE + "' > \"$path\"",
+            ]
+        )
+
+    def _verify_volume_sentinel(self, container_id: str) -> None:
+        if not container_id:
+            raise AcceptanceError(
+                "runner.docker_container_id_missing",
+                "Replacement Docker Worker inspect omitted its container ID.",
+            )
+        self._docker_command(
+            [
+                "exec",
+                container_id,
+                "sh",
+                "-c",
+                "set -eu; path='" + DOCKER_VOLUME_SENTINEL_PATH + "'; "
+                "test ! -L \"$path\"; test -f \"$path\"; "
+                "test \"$(cat \"$path\")\" = '" + DOCKER_VOLUME_SENTINEL_VALUE + "'",
+            ]
+        )
+
+    def _head_sha(self) -> str:
+        completed = subprocess.run(
+            ["git", "rev-parse", "--short=12", "HEAD"],
+            cwd=self.repo_root,
+            env=self._tool_environment(),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=10.0,
+            check=False,
+        )
+        value = completed.stdout.strip().lower()
+        return value if completed.returncode == 0 and value else "unknown"
+
+    def _docker_environment(self) -> dict[str, str]:
+        environment = self._tool_environment()
+        environment.pop("DOCKER_CONTEXT", None)
+        environment["DOCKER_HOST"] = f"unix://{self.options.docker_socket_path}"
+        return environment
+
+    def _docker_completed(
+        self,
+        arguments: Sequence[str],
+        *,
+        cleanup_timeout: float | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        timeout = cleanup_timeout
+        if timeout is None:
+            timeout = self.deadline.request_timeout(maximum=max(10.0, self.deadline.remaining()))
+        try:
+            return subprocess.run(
+                ["docker", *arguments],
+                cwd=self.repo_root,
+                env=self._docker_environment(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                timeout=timeout,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise AcceptanceError(
+                "runner.docker_command_failed",
+                f"Docker command could not run: {self.redactor.text(str(error))}",
+                {"command": ["docker", *arguments[:3]]},
+            ) from None
+
+    def _docker_command(
+        self,
+        arguments: Sequence[str],
+        *,
+        log_path: pathlib.Path | None = None,
+        maximum_timeout: float | None = None,
+    ) -> str:
+        timeout = self.deadline.request_timeout(maximum=maximum_timeout or 30.0)
+        try:
+            completed = subprocess.run(
+                ["docker", *arguments],
+                cwd=self.repo_root,
+                env=self._docker_environment(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                timeout=timeout,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise AcceptanceError(
+                "runner.docker_command_failed",
+                f"Docker command could not run: {self.redactor.text(str(error))}",
+                {"command": ["docker", *arguments[:3]]},
+            ) from None
+        output = self.redactor.text(completed.stdout)
+        if log_path is not None:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            log_path.write_text(output, encoding="utf-8")
+        if completed.returncode != 0:
+            raise AcceptanceError(
+                "runner.docker_command_failed",
+                f"Docker command exited with status {completed.returncode}.",
+                {
+                    "command": ["docker", *arguments[:3]],
+                    "exitCode": completed.returncode,
+                    "log": str(log_path) if log_path else None,
+                    "outputExcerpt": output[-1000:],
+                },
+            )
+        return output
+
+    def _ping_socket(self) -> Mapping[str, Any]:
+        path = self.options.docker_socket_path
+        if not path.is_absolute():
+            raise AcceptanceError(
+                "runner.docker_socket_invalid",
+                "Docker socket path must be absolute.",
+                {"path": str(path)},
+            )
+        try:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+                client.settimeout(self.deadline.request_timeout(maximum=5.0))
+                client.connect(str(path))
+                client.sendall(b"GET /_ping HTTP/1.1\r\nHost: docker\r\nConnection: close\r\n\r\n")
+                chunks: list[bytes] = []
+                while True:
+                    chunk = client.recv(4096)
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                response = b"".join(chunks)
+        except OSError as error:
+            raise AcceptanceError(
+                "runner.docker_socket_unavailable",
+                f"Docker socket is unavailable: {self.redactor.text(str(error))}",
+                {"path": str(path)},
+            ) from None
+        if b"200 OK" not in response or not response.rstrip().endswith(b"OK"):
+            raise AcceptanceError(
+                "runner.docker_socket_unhealthy",
+                "Docker Engine did not return a successful _ping response.",
+                {"path": str(path), "responseExcerpt": response[:200].decode("ascii", errors="replace")},
+            )
+        return {"path": str(path), "ping": "OK"}
+
+    def _container_snapshot(self, target_id: str) -> dict[str, Any] | None:
+        output = self._docker_command(
+            [
+                "ps",
+                "-aq",
+                "--filter",
+                "label=synara.io/managed=true",
+                "--filter",
+                f"label=synara.io/execution-target-id={target_id}",
+            ]
+        )
+        container_ids = [line.strip() for line in output.splitlines() if line.strip()]
+        if not container_ids:
+            return None
+        if len(container_ids) != 1:
+            raise AcceptanceError(
+                "runner.docker_container_count_invalid",
+                "Expected exactly one managed Docker Worker container.",
+                {"targetId": target_id, "containerCount": len(container_ids)},
+            )
+        completed = self._docker_completed(["inspect", container_ids[0]])
+        output = self.redactor.text(completed.stdout)
+        if completed.returncode != 0:
+            if "no such object" in output.lower() or "no such container" in output.lower():
+                return None
+            raise AcceptanceError(
+                "runner.docker_command_failed",
+                f"Docker inspect exited with status {completed.returncode}.",
+                {
+                    "command": ["docker", "inspect", container_ids[0]],
+                    "exitCode": completed.returncode,
+                    "outputExcerpt": output[-1000:],
+                },
+            )
+        try:
+            inspected = json.loads(output)
+        except json.JSONDecodeError as error:
+            raise AcceptanceError(
+                "runner.docker_inspect_invalid",
+                "Docker inspect returned invalid JSON.",
+                {"message": str(error)},
+            ) from None
+        if not isinstance(inspected, list) or len(inspected) != 1 or not isinstance(inspected[0], dict):
+            raise AcceptanceError("runner.docker_inspect_invalid", "Docker inspect returned an invalid payload.")
+        return inspected[0]
+
+    def _wait_container(self, target_id: str) -> dict[str, Any]:
+        def probe() -> dict[str, Any] | None:
+            snapshot = self._container_snapshot(target_id)
+            if snapshot is None:
+                return None
+            state = snapshot.get("State")
+            return snapshot if isinstance(state, dict) and state.get("Running") is True else None
+
+        return self.api.wait_until("a running managed Docker Worker container", probe)
+
+    def _validate_container(self, snapshot: Mapping[str, Any]) -> Mapping[str, Any]:
+        config = json_object(snapshot.get("Config"), "docker inspect Config")
+        host = json_object(snapshot.get("HostConfig"), "docker inspect HostConfig")
+        mounts = snapshot.get("Mounts")
+        if not isinstance(mounts, list):
+            raise AcceptanceError("runner.docker_mounts_invalid", "Docker inspect Mounts was not an array.")
+        volume = next(
+            (
+                item
+                for item in mounts
+                if isinstance(item, dict)
+                and item.get("Type") == "volume"
+                and item.get("Name") == self.volume_name
+                and item.get("Destination") == "/data"
+            ),
+            None,
+        )
+        expected = {
+            "user": "10001:10001",
+            "memoryBytes": self.options.docker_memory_bytes,
+            "nanoCpus": self.options.docker_nano_cpus,
+            "networkMode": self.network_name,
+        }
+        actual = {
+            "user": config.get("User"),
+            "memoryBytes": host.get("Memory"),
+            "nanoCpus": host.get("NanoCpus"),
+            "networkMode": host.get("NetworkMode"),
+        }
+        if actual != expected or volume is None:
+            raise AcceptanceError(
+                "runner.docker_container_contract_mismatch",
+                "Managed Docker Worker did not apply the requested isolation contract.",
+                {"expected": expected, "actual": actual, "volumeMounted": volume is not None},
+            )
+        return {**actual, "volume": self.volume_name, "workspaceMount": "/data"}
+
+    def _worker_identity(self, target_id: str, *, required: bool = True) -> dict[str, Any] | None:
+        database_path = self.state_dir / "metadata.sqlite"
+        try:
+            connection = sqlite3.connect(f"file:{database_path}?mode=ro", uri=True, timeout=2.0)
+            try:
+                row = connection.execute(
+                    """
+                    SELECT id, incarnation, instance_uid, status, pod_name
+                    FROM worker_instances
+                    WHERE execution_target_id = ? AND terminated_at IS NULL
+                    ORDER BY registered_at DESC, id
+                    LIMIT 1
+                    """,
+                    (target_id,),
+                ).fetchone()
+            finally:
+                connection.close()
+        except sqlite3.Error as error:
+            if not required:
+                return None
+            raise AcceptanceError(
+                "runner.worker_identity_query_failed",
+                f"Worker identity could not be read from the isolated metadata store: {error}",
+            ) from None
+        if row is None:
+            if not required:
+                return None
+            raise AcceptanceError("runner.worker_identity_missing", "The managed Docker Worker identity was missing.")
+        return {
+            "id": str(row[0]),
+            "incarnation": int(row[1]),
+            "instanceUid": str(row[2]),
+            "status": str(row[3]),
+            "podName": str(row[4]),
+        }
+
+
 class MissingTargetDriver:
     def __init__(self, name: str) -> None:
         self.name = name
@@ -548,6 +1497,22 @@ class MissingTargetDriver:
         return self.prepare()
 
     def restart(self) -> Mapping[str, Any]:
+        return self.prepare()
+
+    def provision_target(
+        self,
+        _tenant_id: str,
+        _organization_id: str,
+        _provider: str,
+    ) -> Mapping[str, Any]:
+        return self.prepare()
+
+    def replace_worker(
+        self,
+        _tenant_id: str,
+        _target_id: str,
+        _provider: str,
+    ) -> Mapping[str, Any]:
         return self.prepare()
 
     def stop(self) -> None:
@@ -580,16 +1545,12 @@ class AcceptanceSuite:
         return self.driver.api
 
     def run(self) -> list[dict[str, Any]]:
-        if self.driver.name != "local":
-            self._case("runner.target-driver", "Resolve Target driver", self.driver.prepare)
-            return self.cases
-
-        self._case("environment.control-plane-build", "Build Control Plane", self.driver.prepare)
+        self._case("environment.target-prepare", "Prepare isolated Control Plane and Target runtime", self.driver.prepare)
         self._case(
             "environment.control-plane-start",
-            "Start isolated Personal Control Plane and embedded agentd",
+            "Start isolated Personal Control Plane",
             self.driver.start,
-            requires=("environment.control-plane-build",),
+            requires=("environment.target-prepare",),
         )
         self._case(
             "identity.dev-login",
@@ -599,7 +1560,7 @@ class AcceptanceSuite:
         )
         self._case(
             "runtime.worker-discovery",
-            "Discover local-default Target and real Worker manifest",
+            "Provision the exact Target and discover a real compatible Worker manifest",
             self._discover_worker,
             requires=("identity.dev-login",),
         )
@@ -634,12 +1595,27 @@ class AcceptanceSuite:
             self._provider_error,
             requires=("fixture.user-input-resolution",),
         )
+        recovery_requirement = "fixture.provider-error"
+        if self.driver.name == "docker":
+            self._case(
+                "recovery.worker-replacement",
+                "Replace the managed Docker Worker and verify a new agentd incarnation",
+                self._replace_worker,
+                requires=("fixture.provider-error",),
+            )
+            self._case(
+                "recovery.post-replacement-workspace-turn",
+                "Execute immediately on the replacement Worker and verify persisted Workspace content",
+                self._post_replacement_workspace_turn,
+                requires=("recovery.worker-replacement",),
+            )
+            recovery_requirement = "recovery.post-replacement-workspace-turn"
         if self.options.restart_control_plane:
             self._case(
                 "recovery.control-plane-restart",
                 "Restart Control Plane with persisted state",
                 self._restart_control_plane,
-                requires=("fixture.provider-error",),
+                requires=(recovery_requirement,),
             )
             second_requires = ("recovery.control-plane-restart",)
         else:
@@ -659,6 +1635,15 @@ class AcceptanceSuite:
             requires=second_requires,
         )
         return self.cases
+
+    def record_cleanup_failure(self, error: AcceptanceError) -> None:
+        self._fail_case(
+            "environment.cleanup",
+            "Clean isolated Target resources",
+            error.code,
+            str(error),
+            error.evidence,
+        )
 
     def _case(
         self,
@@ -782,45 +1767,72 @@ class AcceptanceSuite:
         tenant_id = user.get("activeTenantId")
         if not isinstance(tenant_id, str) or not tenant_id:
             raise AcceptanceError("runner.active_tenant_missing", "dev-login did not return an active Tenant.")
-        self.state.tenant_id = tenant_id
-        return {"tenantId": tenant_id, "userId": user.get("userId"), "authenticated": response.get("authenticated")}
-
-    def _discover_worker(self) -> Mapping[str, Any]:
-        tenant_id = self._required("tenant_id")
-        targets = json_items(
-            self.api.request("GET", f"/v1/tenants/{tenant_id}/execution-targets"),
-            "execution-targets",
-        )
-        candidates = [
-            target
-            for target in targets
-            if target.get("kind") == "local" and target.get("name") == "local-default" and target.get("status") == "active"
-        ]
-        if len(candidates) != 1:
-            raise AcceptanceError(
-                "runner.local_default_target_missing",
-                "Expected exactly one active local-default Target.",
-                {"candidateCount": len(candidates), "targets": [self._target_summary(target) for target in targets]},
-            )
-        target = candidates[0]
-        target_id = target.get("id")
-        organization_id = target.get("organizationId")
-        if not isinstance(target_id, str) or not isinstance(organization_id, str):
-            raise AcceptanceError(
-                "runner.local_default_target_scope_invalid",
-                "local-default Target did not have Tenant and Organization scope.",
-            )
         organizations = json_items(
             self.api.request("GET", f"/v1/tenants/{tenant_id}/organizations"),
             "organizations",
         )
-        organization = next((item for item in organizations if item.get("id") == organization_id), None)
-        if organization is None:
+        roots = [item for item in organizations if item.get("kind") == "root"]
+        if len(roots) != 1 or not isinstance(roots[0].get("id"), str):
             raise AcceptanceError(
-                "runner.target_organization_missing",
-                "local-default Target Organization was not visible through the user API.",
-                {"organizationId": organization_id},
+                "runner.bootstrap_organization_missing",
+                "Expected exactly one bootstrap root Organization.",
+                {"rootOrganizationCount": len(roots)},
             )
+        organization = roots[0]
+        self.state.tenant_id = tenant_id
+        self.state.organization_id = str(organization["id"])
+        return {
+            "tenantId": tenant_id,
+            "userId": user.get("userId"),
+            "authenticated": response.get("authenticated"),
+            "organization": {
+                "id": organization.get("id"),
+                "slug": organization.get("slug"),
+                "kind": organization.get("kind"),
+            },
+        }
+
+    def _discover_worker(self) -> Mapping[str, Any]:
+        tenant_id = self._required("tenant_id")
+        organization_id = self._required("organization_id")
+        target = json_object(
+            self.driver.provision_target(tenant_id, organization_id, self.options.provider),
+            "provisioned execution target",
+        )
+        target_id = target.get("id")
+        if (
+            not isinstance(target_id, str)
+            or target.get("organizationId") != organization_id
+            or target.get("kind") != self.driver.name
+        ):
+            raise AcceptanceError(
+                "runner.target_binding_invalid",
+                "The provisioned Target did not retain the requested kind and Organization scope.",
+                {"target": self._target_summary(target), "expectedOrganizationId": organization_id},
+            )
+        discovered = self._wait_compatible_manifest(target_id)
+        self.state.target_id = target_id
+        manifest = discovered["manifest"]
+        provider = discovered["provider"]
+        return {
+            "target": self._target_summary(target),
+            "driverEvidence": target.get("driverEvidence"),
+            "manifestId": manifest.get("manifestId"),
+            "workerStatusCounts": manifest.get("workerStatusCounts"),
+            "workerProtocol": manifest.get("workerProtocol"),
+            "runtimeEvent": manifest.get("runtimeEvent"),
+            "workerBuild": manifest.get("workerBuild"),
+            "provider": {
+                "provider": provider.get("provider"),
+                "supportTier": provider.get("supportTier"),
+                "compatibilityStatus": provider.get("compatibilityStatus"),
+                "runtime": provider.get("runtime"),
+                "releasePolicy": provider.get("releasePolicy"),
+            },
+        }
+
+    def _wait_compatible_manifest(self, target_id: str) -> dict[str, Any]:
+        tenant_id = self._required("tenant_id")
 
         def manifest_probe() -> dict[str, Any] | None:
             manifests = json_items(
@@ -833,6 +1845,19 @@ class AcceptanceSuite:
                     continue
                 if not isinstance(counts.get("online"), int) or counts["online"] < 1:
                     continue
+                worker_protocol = manifest.get("workerProtocol")
+                runtime_event = manifest.get("runtimeEvent")
+                if (
+                    not isinstance(worker_protocol, dict)
+                    or not isinstance(runtime_event, dict)
+                    or not self._version_range_contains(worker_protocol, 2)
+                    or not self._version_range_contains(runtime_event, 2)
+                ):
+                    raise AcceptanceError(
+                        "runner.worker_manifest_protocol_incompatible",
+                        "The real Worker manifest did not include Worker Protocol and Runtime Event version 2.",
+                        {"manifestId": manifest.get("manifestId")},
+                    )
                 providers = manifest.get("providers")
                 if not isinstance(providers, list):
                     continue
@@ -865,30 +1890,13 @@ class AcceptanceSuite:
                 return {"manifest": manifest, "provider": provider}
             return None
 
-        discovered = self.api.wait_until("an online compatible Worker manifest", manifest_probe)
-        self.state.target_id = target_id
-        self.state.organization_id = organization_id
-        manifest = discovered["manifest"]
-        provider = discovered["provider"]
-        return {
-            "target": self._target_summary(target),
-            "organization": {
-                "id": organization.get("id"),
-                "slug": organization.get("slug"),
-                "kind": organization.get("kind"),
-            },
-            "manifestId": manifest.get("manifestId"),
-            "workerStatusCounts": manifest.get("workerStatusCounts"),
-            "workerProtocol": manifest.get("workerProtocol"),
-            "runtimeEvent": manifest.get("runtimeEvent"),
-            "provider": {
-                "provider": provider.get("provider"),
-                "supportTier": provider.get("supportTier"),
-                "compatibilityStatus": provider.get("compatibilityStatus"),
-                "runtime": provider.get("runtime"),
-                "releasePolicy": provider.get("releasePolicy"),
-            },
-        }
+        return self.api.wait_until("an online compatible Worker manifest", manifest_probe)
+
+    @staticmethod
+    def _version_range_contains(value: Mapping[str, Any], version: int) -> bool:
+        minimum = value.get("minimum")
+        maximum = value.get("maximum")
+        return isinstance(minimum, int) and isinstance(maximum, int) and minimum <= version <= maximum
 
     def _create_resources(self) -> Mapping[str, Any]:
         tenant_id = self._required("tenant_id")
@@ -1141,6 +2149,62 @@ class AcceptanceSuite:
             "sequenceRange": self._sequence_range(events),
         }
 
+    def _replace_worker(self) -> Mapping[str, Any]:
+        target_id = self._required("target_id")
+        evidence = self.driver.replace_worker(
+            self._required("tenant_id"),
+            target_id,
+            self.options.provider,
+        )
+        replacement_worker_id = evidence.get("replacementWorkerId")
+        if not isinstance(replacement_worker_id, str) or not replacement_worker_id:
+            raise AcceptanceError(
+                "runner.replacement_worker_id_missing",
+                "Docker replacement evidence omitted the replacement Worker ID.",
+            )
+        discovered = self._wait_compatible_manifest(target_id)
+        self.state.worker_replaced = True
+        self.state.replacement_worker_id = replacement_worker_id
+        return {
+            **dict(evidence),
+            "postReplacementManifestId": discovered["manifest"].get("manifestId"),
+            "workerStatusCounts": discovered["manifest"].get("workerStatusCounts"),
+        }
+
+    def _post_replacement_workspace_turn(self) -> Mapping[str, Any]:
+        turn = self._create_turn("[workspace-verify]")
+        terminal, events = self._wait_for_turn_terminal(str(turn["id"]), "execution.completed")
+        worker_id, generation = self._event_worker_identity(terminal)
+        replacement_worker_id = self._required("replacement_worker_id")
+        if worker_id != replacement_worker_id:
+            raise AcceptanceError(
+                "runner.post_replacement_worker_mismatch",
+                "The post-replacement Turn was not fenced to the replacement Worker slot.",
+                {"expectedWorkerId": replacement_worker_id, "actualWorkerId": worker_id},
+            )
+        terminal_payload = json_object(terminal.get("payload"), "post-replacement execution.completed payload")
+        output = json_object(terminal_payload.get("output"), "post-replacement execution.completed payload.output")
+        workspace_evidence = json_object(output.get("workspaceEvidence"), "post-replacement workspace evidence")
+        expected_evidence = {
+            "artifactRelativePath": FIXTURE_ARTIFACT_RELATIVE_PATH,
+            "artifactContentVerified": True,
+        }
+        if workspace_evidence != expected_evidence:
+            raise AcceptanceError(
+                "runner.post_replacement_workspace_evidence_invalid",
+                "The replacement Worker did not verify the artifact content written before replacement.",
+                {"expected": expected_evidence, "actual": workspace_evidence},
+            )
+        return {
+            "turnId": turn.get("id"),
+            "executionId": terminal.get("executionId"),
+            "workerId": worker_id,
+            "generation": generation,
+            "workspaceEvidence": workspace_evidence,
+            "sequenceRange": self._sequence_range(events),
+            "semantics": "persisted named-volume Workspace content; not Workspace Checkpoint restore",
+        }
+
     def _restart_control_plane(self) -> Mapping[str, Any]:
         events = self._all_events()
         if not events:
@@ -1208,6 +2272,7 @@ class AcceptanceSuite:
             "generation": generation,
             "firstGeneration": self.state.first_generation,
             "generationScope": "per-execution",
+            "targetWorkerReplaced": self.state.worker_replaced,
             "preRestartSequence": before,
             "terminalSequence": terminal.get("sequence"),
             "sessionSequenceRange": self._sequence_range(all_events),
@@ -1485,8 +2550,14 @@ def write_reports(report: dict[str, Any], output_dir: pathlib.Path, redactor: Se
     return json_path, markdown_path
 
 
-def parse_runner_command(raw: str | None, repo_root: pathlib.Path) -> tuple[str, ...]:
+def parse_runner_command(raw: str | None, repo_root: pathlib.Path, target: str) -> tuple[str, ...]:
     if raw is None:
+        if target != "local":
+            return (
+                "node",
+                "/opt/synara/acceptance/provider-host-fixture.mjs",
+                "--protocol-v2",
+            )
         return (
             "bun",
             "run",
@@ -1508,25 +2579,48 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
     parser.add_argument("--target", default="local", choices=("local", "docker", "ssh", "kubernetes"))
     parser.add_argument("--provider", default="codex", choices=PROVIDERS)
     parser.add_argument("--output-dir", type=pathlib.Path)
-    parser.add_argument("--timeout", type=float, default=180.0, help="Overall timeout in seconds")
+    parser.add_argument("--timeout", type=float, help="Overall timeout in seconds (default: Local 180, Docker 900)")
     parser.add_argument("--runner-command-json", help="Provider Host command as a JSON string array")
     parser.add_argument("--skip-build", action="store_true")
     parser.add_argument("--control-plane-binary", type=pathlib.Path)
     parser.add_argument("--keep", action="store_true", help="Keep SQLite, workspace, cache, and built binary")
+    parser.add_argument("--docker-socket-path", type=pathlib.Path, default=pathlib.Path("/var/run/docker.sock"))
+    parser.add_argument("--docker-worker-image", help="Existing worker-acceptance image used with --docker-skip-worker-build")
+    parser.add_argument("--docker-skip-worker-build", action="store_true")
+    parser.add_argument("--docker-control-plane-host", default="host.docker.internal")
+    parser.add_argument("--docker-network-mode", help="Existing Docker network; the runner creates an isolated network by default")
+    parser.add_argument("--docker-memory-bytes", type=int, default=2 << 30)
+    parser.add_argument("--docker-nano-cpus", type=int, default=1_000_000_000)
     parser.add_argument(
         "--no-restart-control-plane",
         action="store_true",
         help="Run the second Turn without restarting the Control Plane",
     )
     parsed = parser.parse_args(argv)
-    if parsed.timeout <= 0:
+    timeout_seconds = parsed.timeout if parsed.timeout is not None else (900.0 if parsed.target == "docker" else 180.0)
+    if timeout_seconds <= 0:
         parser.error("--timeout must be positive")
     if parsed.control_plane_binary is not None and not parsed.skip_build:
         parser.error("--control-plane-binary requires --skip-build to prevent overwriting the configured binary")
     if parsed.skip_build and parsed.control_plane_binary is None:
         parser.error("--skip-build requires --control-plane-binary")
+    if parsed.docker_skip_worker_build and not parsed.docker_worker_image:
+        parser.error("--docker-skip-worker-build requires --docker-worker-image")
+    if parsed.docker_worker_image and not parsed.docker_skip_worker_build:
+        parser.error("--docker-worker-image requires --docker-skip-worker-build to avoid overwriting an operator image")
+    if parsed.docker_memory_bytes < 64 << 20:
+        parser.error("--docker-memory-bytes must be at least 67108864")
+    if parsed.docker_nano_cpus <= 0:
+        parser.error("--docker-nano-cpus must be positive")
+    docker_socket_path = parsed.docker_socket_path.expanduser()
+    if not docker_socket_path.is_absolute():
+        parser.error("--docker-socket-path must be absolute")
+    if not parsed.docker_control_plane_host.strip() or any(
+        character in parsed.docker_control_plane_host for character in "\r\n\t\x00/:"
+    ):
+        parser.error("--docker-control-plane-host must be a hostname or address without scheme or port")
     try:
-        runner_command = parse_runner_command(parsed.runner_command_json, repo_root)
+        runner_command = parse_runner_command(parsed.runner_command_json, repo_root, parsed.target)
     except ValueError as error:
         parser.error(str(error))
     run_id = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:8]
@@ -1535,12 +2629,19 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
         target=parsed.target,
         provider=parsed.provider,
         output_dir=output_dir.resolve(),
-        timeout_seconds=parsed.timeout,
+        timeout_seconds=timeout_seconds,
         runner_command=runner_command,
         skip_build=parsed.skip_build,
         control_plane_binary=parsed.control_plane_binary.resolve() if parsed.control_plane_binary else None,
         keep=parsed.keep,
         restart_control_plane=not parsed.no_restart_control_plane,
+        docker_socket_path=docker_socket_path,
+        docker_worker_image=parsed.docker_worker_image,
+        docker_skip_worker_build=parsed.docker_skip_worker_build,
+        docker_control_plane_host=parsed.docker_control_plane_host.strip(),
+        docker_network_mode=parsed.docker_network_mode,
+        docker_memory_bytes=parsed.docker_memory_bytes,
+        docker_nano_cpus=parsed.docker_nano_cpus,
     )
 
 
@@ -1553,14 +2654,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     started_at = utc_now()
     started = time.monotonic()
     run_id = f"stage3-provider-acceptance-{uuid.uuid4()}"
-    if options.target == "local" and os.name != "posix":
+    if options.target in {"local", "docker"} and os.name != "posix":
         cases = [
             explicit_unsupported_case(
                 "environment.platform-unsupported",
                 started_at,
                 started,
                 "runner.platform_unsupported",
-                "The Local TargetDriver requires a POSIX process-group implementation.",
+                f"The {options.target} TargetDriver requires a POSIX process-group implementation.",
                 {"osName": os.name},
             )
         ]
@@ -1575,8 +2676,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 {"fixtureSupportedProviders": sorted(FIXTURE_SUPPORTED_PROVIDERS)},
             )
         ]
-    elif options.target == "local":
-        driver = LocalDriver(repo_root, options, deadline, redactor)
+    elif options.target in {"local", "docker"}:
+        driver: LocalDriver = (
+            LocalDriver(repo_root, options, deadline, redactor)
+            if options.target == "local"
+            else DockerDriver(repo_root, options, deadline, redactor)
+        )
         suite = AcceptanceSuite(options, driver, deadline, redactor)
         driver.install_signal_handlers()
         try:
@@ -1584,8 +2689,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         except RunnerInterrupted as error:
             suite.record_interruption(error)
         finally:
+            driver.suppress_signals_for_cleanup()
             try:
-                driver.cleanup()
+                try:
+                    driver.cleanup()
+                except AcceptanceError as error:
+                    suite.record_cleanup_failure(error)
             finally:
                 driver.restore_signal_handlers()
         cases = suite.cases
@@ -1603,6 +2712,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "target": options.target,
         "provider": options.provider,
         "mode": "fixture",
+        "source": repository_metadata(repo_root),
         "startedAt": started_at,
         "finishedAt": utc_now(),
         "durationMs": elapsed_ms(started),
@@ -1616,6 +2726,17 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "executable": pathlib.Path(options.runner_command[0]).name,
                 "argumentCount": len(options.runner_command) - 1,
             },
+            "docker": {
+                "socketPath": str(options.docker_socket_path),
+                "workerImage": options.docker_worker_image,
+                "skipWorkerBuild": options.docker_skip_worker_build,
+                "controlPlaneHost": options.docker_control_plane_host,
+                "networkMode": options.docker_network_mode or "isolated-per-run",
+                "memoryBytes": options.docker_memory_bytes,
+                "nanoCpus": options.docker_nano_cpus,
+            }
+            if options.target == "docker"
+            else None,
         },
         "cases": cases,
         "artifacts": {

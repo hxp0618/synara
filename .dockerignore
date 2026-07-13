@@ -3,7 +3,9 @@
 .idea
 .vscode
 .playwright-mcp
+.tmp
 .turbo
+**/__pycache__
 
 node_modules
 **/node_modules
@@ -29,6 +31,7 @@ node_modules
 
 apps/web/.playwright
 apps/web/playwright-report
+apps/server/userdata
 output/playwright
 release
 deploy/remote/workspace

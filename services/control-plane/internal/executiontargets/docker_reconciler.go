@@ -28,10 +28,11 @@ import (
 )
 
 const (
-	dockerManagedLabel = "synara.io/managed"
-	dockerTargetLabel  = "synara.io/execution-target-id"
-	dockerConfigLabel  = "synara.io/config-sha256"
-	dockerIndexLabel   = "synara.io/worker-index"
+	dockerManagedLabel         = "synara.io/managed"
+	dockerTargetLabel          = "synara.io/execution-target-id"
+	dockerConfigLabel          = "synara.io/config-sha256"
+	dockerIndexLabel           = "synara.io/worker-index"
+	dockerContainerSpecVersion = 2
 )
 
 type DockerPoolReconcilerConfig struct {
@@ -79,6 +80,7 @@ type dockerContainerSpec struct {
 	User        string
 	WorkingDir  string
 	Binds       []string
+	ExtraHosts  []string
 	NetworkMode string
 	MemoryBytes int64
 	NanoCPUs    int64
@@ -191,11 +193,12 @@ func (r *DockerPoolReconciler) reconcileTarget(ctx context.Context, target persi
 	}
 	sort.Slice(containers, func(i, j int) bool { return containers[i].Name < containers[j].Name })
 	current := make(map[int]dockerContainer, len(specs))
+	deferred := make(map[int]struct{}, len(specs))
 	changed := false
 	for _, container := range containers {
 		index, indexErr := strconv.Atoi(container.Labels[dockerIndexLabel])
-		valid := indexErr == nil && index >= 0 && index < len(specs) &&
-			container.Labels[dockerConfigLabel] == configHash
+		validIndex := indexErr == nil && index >= 0 && index < len(specs)
+		valid := validIndex && container.Labels[dockerConfigLabel] == configHash
 		if valid {
 			if _, duplicate := current[index]; !duplicate {
 				current[index] = container
@@ -203,6 +206,12 @@ func (r *DockerPoolReconciler) reconcileTarget(ctx context.Context, target persi
 			}
 		}
 		if busy[container.Name] {
+			// A stale Worker with a live Lease must finish or release before it is
+			// replaced. Reserve its deterministic slot so the reconciler does not
+			// attempt to create the desired container under the same Docker name.
+			if validIndex {
+				deferred[index] = struct{}{}
+			}
 			continue
 		}
 		if err := engine.Remove(ctx, container.ID); err != nil {
@@ -214,6 +223,9 @@ func (r *DockerPoolReconciler) reconcileTarget(ctx context.Context, target persi
 	for index := range specs {
 		container, found := current[index]
 		if !found {
+			if _, waitingForLease := deferred[index]; waitingForLease {
+				continue
+			}
 			missing = append(missing, index)
 			continue
 		}
@@ -374,6 +386,14 @@ func (r *DockerPoolReconciler) desiredSpecs(
 	target persistence.ExecutionTarget,
 	configuration dockerTargetConfiguration,
 ) ([]dockerContainerSpec, string, error) {
+	controlPlaneURL, err := url.Parse(configuration.ControlPlaneURL)
+	if err != nil {
+		return nil, "", err
+	}
+	extraHosts := []string(nil)
+	if strings.EqualFold(controlPlaneURL.Hostname(), "host.docker.internal") {
+		extraHosts = []string{"host.docker.internal:host-gateway"}
+	}
 	runner, err := json.Marshal(configuration.RunnerCommand)
 	if err != nil {
 		return nil, "", err
@@ -398,10 +418,11 @@ func (r *DockerPoolReconciler) desiredSpecs(
 		"SYNARA_AGENTD_GIT_CACHE_ROOT=" + configuration.GitCacheRoot,
 	}
 	hashPayload, err := json.Marshal(struct {
+		SpecVersion   int
 		Configuration dockerTargetConfiguration
 		Capabilities  json.RawMessage
 		TokenHash     [32]byte
-	}{configuration, capabilities, sha256.Sum256([]byte(r.config.RegistrationToken))})
+	}{dockerContainerSpecVersion, configuration, capabilities, sha256.Sum256([]byte(r.config.RegistrationToken))})
 	if err != nil {
 		return nil, "", err
 	}
@@ -423,7 +444,7 @@ func (r *DockerPoolReconciler) desiredSpecs(
 			Name: name, Image: configuration.Image, Environment: environment,
 			Entrypoint: []string{"/usr/local/bin/synara-agentd"}, Labels: labels,
 			User: configuration.User, WorkingDir: configuration.WorkspaceMount,
-			Binds:       []string{configuration.WorkspaceVolume + ":" + configuration.WorkspaceMount},
+			Binds: []string{configuration.WorkspaceVolume + ":" + configuration.WorkspaceMount}, ExtraHosts: extraHosts,
 			NetworkMode: configuration.NetworkMode, MemoryBytes: configuration.MemoryBytes, NanoCPUs: configuration.NanoCPUs,
 		}
 	}
@@ -556,6 +577,7 @@ func (e *dockerHTTPEngine) CreateAndStart(ctx context.Context, spec dockerContai
 		WorkingDir string            `json:"WorkingDir"`
 		HostConfig struct {
 			Binds         []string `json:"Binds"`
+			ExtraHosts    []string `json:"ExtraHosts,omitempty"`
 			NetworkMode   string   `json:"NetworkMode"`
 			Memory        int64    `json:"Memory"`
 			NanoCPUs      int64    `json:"NanoCpus"`
@@ -565,6 +587,7 @@ func (e *dockerHTTPEngine) CreateAndStart(ctx context.Context, spec dockerContai
 		} `json:"HostConfig"`
 	}{Image: spec.Image, Env: spec.Environment, Entrypoint: spec.Entrypoint, Labels: spec.Labels, User: spec.User, WorkingDir: spec.WorkingDir}
 	requestBody.HostConfig.Binds = spec.Binds
+	requestBody.HostConfig.ExtraHosts = spec.ExtraHosts
 	requestBody.HostConfig.NetworkMode = spec.NetworkMode
 	requestBody.HostConfig.Memory = spec.MemoryBytes
 	requestBody.HostConfig.NanoCPUs = spec.NanoCPUs

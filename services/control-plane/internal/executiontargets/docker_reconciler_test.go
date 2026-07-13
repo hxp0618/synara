@@ -49,6 +49,9 @@ func TestDockerPoolReconcilerCreatesStableWorkersAndDefersBusyRemoval(t *testing
 		if spec.WorkingDir != "/data" || len(spec.Binds) != 1 || spec.Binds[0] != "synara-docker-test:/data" {
 			t.Fatalf("Docker workspace volume was not mounted consistently: %#v", spec)
 		}
+		if len(spec.ExtraHosts) != 0 {
+			t.Fatalf("Docker Worker unexpectedly added host aliases for a named Control Plane host: %#v", spec.ExtraHosts)
+		}
 		environment := strings.Join(spec.Environment, "\n")
 		if !strings.Contains(environment, "SYNARA_WORKER_REGISTRATION_TOKEN=docker-registration-secret") ||
 			!strings.Contains(environment, "SYNARA_EXECUTION_TARGET_KIND=docker") ||
@@ -127,6 +130,76 @@ func TestDockerPoolReconcilerCreatesStableWorkersAndDefersBusyRemoval(t *testing
 	}
 }
 
+func TestDockerPoolReconcilerAddsHostGatewayForDockerInternalControlPlane(t *testing.T) {
+	fixture := newDockerReconcileFixture(t, 1)
+	engine := newFakeDockerEngine()
+	fixture.reconciler.factory = &fakeDockerFactory{engine: engine}
+	configuration := dockerTestConfiguration(1)
+	configuration["controlPlaneUrl"] = "http://host.docker.internal:3780"
+	fixture.updateConfiguration(t, configuration)
+
+	if err := fixture.reconciler.ReconcileOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(engine.createdSpecs) != 1 {
+		t.Fatalf("Docker Worker create count = %d, want 1", len(engine.createdSpecs))
+	}
+	if got := engine.createdSpecs[0].ExtraHosts; len(got) != 1 || got[0] != "host.docker.internal:host-gateway" {
+		t.Fatalf("Docker Worker host aliases = %#v", got)
+	}
+}
+
+func TestDockerPoolReconcilerDefersBusyConfigReplacementWithoutNameConflict(t *testing.T) {
+	fixture := newDockerReconcileFixture(t, 1)
+	engine := newFakeDockerEngine()
+	fixture.reconciler.factory = &fakeDockerFactory{engine: engine}
+	busy := map[string]bool{}
+	fixture.reconciler.busyWorkers = func(context.Context, uuid.UUID) (map[string]bool, error) {
+		return busy, nil
+	}
+
+	if err := fixture.reconciler.ReconcileOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	workerName := fmt.Sprintf("synara-agentd-%s-0", fixture.targetID)
+	first := engine.containers[workerName]
+	if first.ID == "" || len(engine.createdSpecs) != 1 {
+		t.Fatalf("initial Worker was not created: %#v", engine.containers)
+	}
+
+	busy[workerName] = true
+	configuration := dockerTestConfiguration(1)
+	configuration["image"] = "synara-agentd:next"
+	fixture.updateConfiguration(t, configuration)
+	if err := fixture.reconciler.ReconcileOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(engine.createdSpecs) != 1 {
+		t.Fatalf("busy stale Worker caused a conflicting replacement create: %d", len(engine.createdSpecs))
+	}
+	if current := engine.containers[workerName]; current.ID != first.ID {
+		t.Fatalf("busy stale Worker was replaced before its Lease cleared: before=%s after=%s", first.ID, current.ID)
+	}
+	var target persistence.ExecutionTarget
+	if err := fixture.db.Where("id = ?", fixture.targetID).Take(&target).Error; err != nil {
+		t.Fatal(err)
+	}
+	if target.Status != "offline" {
+		t.Fatalf("target with only a deferred stale Worker remained %q", target.Status)
+	}
+
+	delete(busy, workerName)
+	if err := fixture.reconciler.ReconcileOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(engine.createdSpecs) != 2 {
+		t.Fatalf("cleared Lease did not create the desired replacement: %d", len(engine.createdSpecs))
+	}
+	if current := engine.containers[workerName]; current.ID == first.ID {
+		t.Fatalf("stale Worker was not replaced after its Lease cleared: %#v", current)
+	}
+}
+
 func TestDockerPoolReconcilerRejectsOverlappingWorkspaceAndGitCacheRoots(t *testing.T) {
 	reconciler := &DockerPoolReconciler{config: DockerPoolReconcilerConfig{RegistrationToken: "registration-token"}}
 	target := persistence.ExecutionTarget{ID: uuid.New()}
@@ -198,7 +271,12 @@ func newDockerReconcileFixture(t *testing.T, desiredWorkers int) dockerReconcile
 
 func (f dockerReconcileFixture) updateDesiredWorkers(t *testing.T, desiredWorkers int) {
 	t.Helper()
-	encrypted, err := encryptConfiguration(f.targets.cipher, dockerTestConfiguration(desiredWorkers))
+	f.updateConfiguration(t, dockerTestConfiguration(desiredWorkers))
+}
+
+func (f dockerReconcileFixture) updateConfiguration(t *testing.T, configuration map[string]any) {
+	t.Helper()
+	encrypted, err := encryptConfiguration(f.targets.cipher, configuration)
 	if err != nil {
 		t.Fatal(err)
 	}

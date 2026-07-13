@@ -42,6 +42,7 @@ export const STAGE3_FIXTURE_SCENARIOS = [
   "approval",
   "user-input",
   "artifact",
+  "workspace-verify",
   "credential",
   "provider-error",
   "steer",
@@ -76,11 +77,17 @@ type PendingTurn = {
   readonly requestId?: string;
   readonly outputText: string;
   readonly credentialEvidence?: CredentialEvidence;
+  readonly workspaceEvidence?: WorkspaceEvidence;
 };
 
 type CredentialEvidence = {
   readonly credentialVerified: true;
   readonly credentialPayloadKeys: ReadonlyArray<string>;
+};
+
+type WorkspaceEvidence = {
+  readonly artifactRelativePath: string;
+  readonly artifactContentVerified: true;
 };
 
 type CredentialReadResult =
@@ -98,7 +105,7 @@ const ARTIFACT_CONTENT = "deterministic stage 3 acceptance artifact\n";
 export const STAGE3_FIXTURE_CREDENTIAL_SENTINEL =
   "stage3-provider-acceptance-credential-v1";
 
-function openWorkspaceArtifact(workspaceDirectory: string): number {
+function openWorkspaceArtifact(workspaceDirectory: string, access: "read" | "write"): number {
   const workspaceRoot = realpathSync.native(workspaceDirectory);
   if (!lstatSync(workspaceRoot).isDirectory()) {
     throw new Error("fixture Workspace is not a directory");
@@ -108,10 +115,12 @@ function openWorkspaceArtifact(workspaceDirectory: string): number {
   if (!isPathWithin(workspaceRoot, artifactDirectory)) {
     throw new Error("fixture artifact directory escapes the Workspace");
   }
-  try {
-    mkdirSync(artifactDirectory, { mode: 0o700 });
-  } catch (error) {
-    if (!hasFileSystemCode(error, "EEXIST")) throw error;
+  if (access === "write") {
+    try {
+      mkdirSync(artifactDirectory, { mode: 0o700 });
+    } catch (error) {
+      if (!hasFileSystemCode(error, "EEXIST")) throw error;
+    }
   }
 
   const directoryStat = lstatSync(artifactDirectory);
@@ -128,14 +137,14 @@ function openWorkspaceArtifact(workspaceDirectory: string): number {
     throw new Error("fixture artifact path escapes the Workspace");
   }
 
-  let flags = fsConstants.O_WRONLY | fsConstants.O_NOFOLLOW;
+  let flags = (access === "write" ? fsConstants.O_WRONLY : fsConstants.O_RDONLY) | fsConstants.O_NOFOLLOW;
   try {
     const targetStat = lstatSync(artifactPath);
     if (targetStat.isSymbolicLink() || !targetStat.isFile() || targetStat.nlink !== 1) {
       throw new Error("fixture artifact target must be one regular file");
     }
   } catch (error) {
-    if (!hasFileSystemCode(error, "ENOENT")) throw error;
+    if (access !== "write" || !hasFileSystemCode(error, "ENOENT")) throw error;
     flags |= fsConstants.O_CREAT | fsConstants.O_EXCL;
   }
 
@@ -560,6 +569,25 @@ export class Stage3ProviderAcceptanceHost {
       }
       credentialEvidence = credential.evidence;
     }
+    let workspaceEvidence: WorkspaceEvidence | undefined;
+    if (scenarios.includes("workspace-verify")) {
+      workspaceEvidence = this.#verifyWorkspaceArtifact();
+      if (!workspaceEvidence) {
+        this.#terminalError(
+          command,
+          errorDetail(
+            "workspace_invalid",
+            "The deterministic fixture artifact was not preserved inside the Workspace.",
+            false,
+            false,
+            true,
+            true,
+            true,
+          ),
+        );
+        return;
+      }
+    }
     if (scenarios.includes("provider-error")) {
       this.#terminalError(
         command,
@@ -585,6 +613,7 @@ export class Stage3ProviderAcceptanceHost {
         requestId,
         outputText,
         ...(credentialEvidence ? { credentialEvidence } : {}),
+        ...(workspaceEvidence ? { workspaceEvidence } : {}),
       };
       this.#emitPayload(command, "InteractionRequest", {
         interactionType: "approval",
@@ -604,6 +633,7 @@ export class Stage3ProviderAcceptanceHost {
         requestId,
         outputText,
         ...(credentialEvidence ? { credentialEvidence } : {}),
+        ...(workspaceEvidence ? { workspaceEvidence } : {}),
       };
       this.#emitPayload(command, "InteractionRequest", {
         interactionType: "user-input",
@@ -629,12 +659,13 @@ export class Stage3ProviderAcceptanceHost {
         kind: "steer",
         outputText,
         ...(credentialEvidence ? { credentialEvidence } : {}),
+        ...(workspaceEvidence ? { workspaceEvidence } : {}),
       };
       this.#emitPayload(command, "Progress", { state: "waiting-for-steer" });
       return;
     }
 
-    this.#terminalResult(command, this.#turnResult(outputText, credentialEvidence));
+    this.#terminalResult(command, this.#turnResult(outputText, credentialEvidence, workspaceEvidence));
   }
 
   #resolveInteraction(command: ProviderHostCommand, expected: "approval" | "user-input"): void {
@@ -653,7 +684,7 @@ export class Stage3ProviderAcceptanceHost {
     this.#terminalResult(command, { acknowledged: true, requestId });
     this.#terminalResult(
       pending.command,
-      this.#turnResult(pending.outputText, pending.credentialEvidence),
+      this.#turnResult(pending.outputText, pending.credentialEvidence, pending.workspaceEvidence),
     );
   }
 
@@ -679,7 +710,7 @@ export class Stage3ProviderAcceptanceHost {
     });
     this.#terminalResult(
       pending.command,
-      this.#turnResult("fixture steer complete", pending.credentialEvidence),
+      this.#turnResult("fixture steer complete", pending.credentialEvidence, pending.workspaceEvidence),
     );
   }
 
@@ -720,11 +751,13 @@ export class Stage3ProviderAcceptanceHost {
   #turnResult(
     outputText: string,
     credentialEvidence?: CredentialEvidence,
+    workspaceEvidence?: WorkspaceEvidence,
   ): Record<string, unknown> {
     return {
       output: {
         text: outputText,
         ...(credentialEvidence ? { credentialEvidence } : {}),
+        ...(workspaceEvidence ? { workspaceEvidence } : {}),
       },
       providerResumeCursor: this.#resumeCursor(),
     };
@@ -739,7 +772,7 @@ export class Stage3ProviderAcceptanceHost {
     if (!workspaceDirectory) return null;
     let descriptor: number | undefined;
     try {
-      descriptor = openWorkspaceArtifact(workspaceDirectory);
+      descriptor = openWorkspaceArtifact(workspaceDirectory, "write");
       ftruncateSync(descriptor, 0);
       writeFileSync(descriptor, ARTIFACT_CONTENT, { encoding: "utf8" });
       return {
@@ -756,6 +789,32 @@ export class Stage3ProviderAcceptanceHost {
           closeSync(descriptor);
         } catch {
           // The artifact write has already completed; there is no safe path-based cleanup here.
+        }
+      }
+    }
+  }
+
+  #verifyWorkspaceArtifact(): WorkspaceEvidence | undefined {
+    const workspaceDirectory = this.#session?.workspaceDirectory;
+    if (!workspaceDirectory) return undefined;
+    let descriptor: number | undefined;
+    try {
+      descriptor = openWorkspaceArtifact(workspaceDirectory, "read");
+      const expected = Buffer.from(ARTIFACT_CONTENT, "utf8");
+      if (fstatSync(descriptor).size !== expected.length) return undefined;
+      const actual = Buffer.alloc(expected.length);
+      if (readSync(descriptor, actual, 0, actual.length, 0) !== actual.length || !actual.equals(expected)) {
+        return undefined;
+      }
+      return { artifactRelativePath: ARTIFACT_RELATIVE_PATH, artifactContentVerified: true };
+    } catch {
+      return undefined;
+    } finally {
+      if (descriptor !== undefined) {
+        try {
+          closeSync(descriptor);
+        } catch {
+          // Verification is complete; there is no path-based cleanup to perform.
         }
       }
     }

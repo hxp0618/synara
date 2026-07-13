@@ -109,6 +109,37 @@ describe("Stage 3 Provider Host acceptance fixture", () => {
     for (const message of output) expect(() => decodeMessage(message)).not.toThrow();
   });
 
+  it("verifies the exact artifact sentinel from the persisted Workspace", () => {
+    const workspace = mkdtempSync(join(tmpdir(), "synara-stage3-fixture-workspace-"));
+    temporaryDirectories.push(workspace);
+    const output: ProviderHostMessage[] = [];
+    const host = fixtureHost(output);
+    startCodexSession(host, workspace);
+
+    host.handleCommand(command("SendTurn", "workspace-write", { inputText: "[artifact]" }));
+    host.handleCommand(command("SendTurn", "workspace-verify", { inputText: "[workspace-verify]" }));
+
+    expect(messagesFor(output, "workspace-verify")).toMatchObject([
+      {
+        messageType: "Result",
+        payload: {
+          output: {
+            workspaceEvidence: {
+              artifactRelativePath: ".synara-stage3-acceptance/artifact.txt",
+              artifactContentVerified: true,
+            },
+          },
+        },
+      },
+    ]);
+
+    writeFileSync(join(workspace, ".synara-stage3-acceptance/artifact.txt"), "tampered\n");
+    host.handleCommand(command("SendTurn", "workspace-tampered", { inputText: "[workspace-verify]" }));
+    expect(messagesFor(output, "workspace-tampered")).toMatchObject([
+      { messageType: "Error", error: { code: "workspace_invalid" } },
+    ]);
+  });
+
   it("fails closed when the artifact directory is a symbolic link outside the Workspace", () => {
     const workspace = mkdtempSync(join(tmpdir(), "synara-stage3-fixture-workspace-"));
     const outside = mkdtempSync(join(tmpdir(), "synara-stage3-fixture-outside-"));
@@ -407,10 +438,11 @@ describe("Stage 3 Provider Host acceptance fixture", () => {
 
   it("parses composable scenario directives and defaults to text", () => {
     expect(parseFixtureScenarios("plain input")).toEqual(["text"]);
-    expect(parseFixtureScenarios("[tool] fixture:usage [artifact]")).toEqual([
+    expect(parseFixtureScenarios("[tool] fixture:usage [artifact] [workspace-verify]")).toEqual([
       "tool",
       "usage",
       "artifact",
+      "workspace-verify",
     ]);
   });
 });
