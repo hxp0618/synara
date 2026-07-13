@@ -340,7 +340,7 @@ func (d *Daemon) runExecution(
 					"workspace_invalid", "The Workspace state could not be inspected after Provider execution.", true, true,
 				)
 			} else {
-				candidate, checkpointErr := captureWorkspaceCheckpoint(execution, materialized, inspection)
+				candidate, checkpointErr := captureWorkspaceCheckpoint(executionContext, execution, materialized, inspection)
 				if checkpointErr != nil {
 					runErr = workspaceFailure(
 						"workspace_invalid", "The Workspace Checkpoint could not be captured.", true, true,

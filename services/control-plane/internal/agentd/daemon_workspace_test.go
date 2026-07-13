@@ -47,6 +47,7 @@ func TestDaemonRestoresSnapshotBeforeProviderAndReusesUnchangedCheckpoint(t *tes
 		t.Fatal(err)
 	}
 	candidate, err := captureWorkspaceCheckpoint(
+		context.Background(),
 		executions.Execution{ID: uuid.New(), Generation: 1},
 		WorkspaceMaterialization{Directory: source, Managed: true},
 		WorkspaceInspection{Dirty: true},

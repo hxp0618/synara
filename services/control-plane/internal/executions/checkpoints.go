@@ -16,7 +16,8 @@ import (
 	"github.com/synara-ai/synara/services/control-plane/internal/sessions"
 )
 
-const checkpointManifestMaxBytes = 512 << 10
+// CheckpointManifestMaxBytes is the shared Worker and Control Plane payload ceiling.
+const CheckpointManifestMaxBytes = 512 << 10
 
 func (s *Service) CreateWorkspaceCheckpoint(
 	ctx context.Context,
@@ -358,6 +359,9 @@ func validateCreateWorkspaceCheckpointInput(input CreateWorkspaceCheckpointInput
 	if input.Strategy == "git-reference" && (input.HeadCommit == nil || input.CurrentBranch == nil) {
 		return problem.New(400, "invalid_checkpoint_metadata", "Git-reference Checkpoints require headCommit and currentBranch.")
 	}
+	if input.Strategy == "patch" && (input.BaseCommit == nil || input.CurrentBranch == nil) {
+		return problem.New(400, "invalid_checkpoint_metadata", "Patch Checkpoints require baseCommit and currentBranch.")
+	}
 	if input.Strategy != "git-reference" && (input.FileCount == nil || input.TotalBytes == nil) {
 		return problem.New(400, "invalid_checkpoint_metadata", "Patch and Snapshot Checkpoints require fileCount and totalBytes.")
 	}
@@ -371,7 +375,7 @@ func validateCreateWorkspaceCheckpointInput(input CreateWorkspaceCheckpointInput
 		return problem.New(400, "invalid_checkpoint_manifest", "manifest must describe the Checkpoint content.")
 	}
 	encoded, err := json.Marshal(input.Manifest)
-	if err != nil || len(encoded) > checkpointManifestMaxBytes {
+	if err != nil || len(encoded) > CheckpointManifestMaxBytes {
 		return problem.New(400, "invalid_checkpoint_manifest", "manifest is invalid or exceeds 524288 bytes.")
 	}
 	return nil

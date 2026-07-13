@@ -92,11 +92,38 @@ retention and deletion can identify the owning recovery point without inspecting
 never replace `remote_workspaces.current_checkpoint_id`.
 
 Agentd creates Checkpoints automatically after Provider execution while the Lease is still current. A clean Git
-checkout uses `git-reference`; dirty Git and managed non-Git content currently use a bounded deterministic
-Snapshot of regular files. Snapshot capture excludes `.git`, rejects symlinks/devices/FIFOs/sockets, records a
-sorted path/size/SHA-256/executable manifest, and verifies the complete archive again in an isolated staging
-directory before replacing a Workspace during restore. Provider execution starts only after the frozen ready
-Checkpoint has been downloaded, size/hash verified and restored.
+checkout uses `git-reference`; dirty Git uses a bounded deterministic Patch; managed non-Git content uses a
+bounded deterministic Snapshot of regular files.
+
+A Patch is generated from `baseCommit` to the final Worktree with binary/full-index output and rename detection
+disabled. It therefore captures tracked changes introduced by local commits after the base as well as staged,
+unstaged, binary, deleted and executable tracked paths. The deterministic tar contains `tracked.patch`, the
+final raw bytes or symlink target of every tracked upsert under `tracked/`, and regular untracked files under
+`untracked/`. Individually ignored regular files such as `.env` are durable; whole ignored directory trees such
+as dependency/tool caches are excluded only when they contain a versioned rebuildable path segment (for example
+`node_modules`, `.bun`, `.turbo`, `.venv`, `.next` or `target`). Other ignored directories remain durable and are
+enumerated like ordinary untracked content. The Manifest declares the rebuildable exclusion policy so a normal
+package install cannot make a Checkpoint unusable or silently redefine durability. Unmerged indexes,
+assume-unchanged/skip-worktree/sparse entries, Gitlinks/Submodules, non-reproducible local Git
+attributes/configuration and non-regular included untracked files are rejected.
+
+The `rebuildable-ignored-directory-segments-v1` set is `.astro`, `.bun`, `.gradle`, `.mypy_cache`, `.next`,
+`.nuxt`, `.pnpm-store`, `.pytest_cache`, `.ruff_cache`, `.turbo`, `.venv`, `.vite`, `.yarn`, `__pycache__`,
+`coverage`, `node_modules`, `target`, `venv`, `.synara`, `.synara-*` and `.vitest-*`.
+
+Patch restore clones an isolated sibling staging checkout, anchors its branch to `baseCommit`, applies the tracked
+Patch to the index, overlays the authoritative raw tracked payload, restores untracked files, and verifies every
+path, size, SHA-256, mode, classification, index/worktree consistency and regenerated Patch identity before
+replacing the active Workspace. The raw overlay makes a same-Turn `.gitattributes` change reproducible rather
+than depending on the base checkout's conversion rules. The restored tracked delta is staged and the untracked
+files remain untracked. This contract restores the authoritative file tree and branch name; it does not recreate
+local Commit objects or claim that an unpushed source HEAD/Commit graph survived. The installed HEAD is the
+available `baseCommit`.
+
+Snapshot capture excludes `.git`, rejects symlinks/devices/FIFOs/sockets, records a sorted
+path/size/SHA-256/executable manifest, and verifies the complete archive again in an isolated staging directory
+before replacing a Workspace during restore. Provider execution starts only after the frozen ready Checkpoint
+has been downloaded, size/hash verified and restored.
 
 Checkpoint Artifact creation is deterministic and retryable. The first create transaction binds the Artifact and
 moves the Checkpoint to `uploading`. A lost Create/PUT/Complete response reuses the same Artifact; Local upload
@@ -123,7 +150,7 @@ An absent Worker directory is never interpreted as an empty authoritative Worksp
 ## Remaining implementation gate
 
 The schema, Session/Execution bindings, public/private HTTPS Clone/Fetch materialization, Project Git Credential
-binding, Generation-fenced state reporting, Git-reference/Snapshot Checkpoint capture/restore and safe
+binding, Generation-fenced state reporting, Git-reference/Patch/Snapshot Checkpoint capture/restore and safe
 Checkpoint/Artifact retention are active. Stage 3 still must implement short-lived SSH Credential delivery,
-shared read-only Git cache plus `git worktree` materialization, Patch capture/restore, physical Workspace cleanup
+shared read-only Git cache plus `git worktree` materialization, physical Workspace cleanup
 dispatch/acknowledgement and the shared Local/SSH/Docker/Kubernetes acceptance fixture.

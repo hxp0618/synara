@@ -31,6 +31,7 @@ type checkpointManifestFile struct {
 }
 
 func captureWorkspaceCheckpoint(
+	ctx context.Context,
 	execution executions.Execution,
 	materialized WorkspaceMaterialization,
 	inspection WorkspaceInspection,
@@ -46,6 +47,9 @@ func captureWorkspaceCheckpoint(
 				"currentBranch": *inspection.CurrentBranch,
 			},
 		}, nil
+	}
+	if workspaceHasGitMetadata(materialized.Directory) {
+		return captureWorkspacePatch(ctx, execution, materialized, inspection, idempotencyKey)
 	}
 	return captureWorkspaceSnapshot(execution, materialized, inspection, idempotencyKey)
 }
@@ -150,15 +154,22 @@ func captureWorkspaceSnapshot(
 		return WorkspaceCheckpointCandidate{}, fmt.Errorf("close Workspace snapshot: %w", err)
 	}
 	fileCount := len(files)
+	manifest := map[string]any{
+		"format": "synara-workspace-snapshot-v1", "files": files,
+		"excluded": []string{".git"},
+	}
+	encodedManifest, err := json.Marshal(manifest)
+	if err != nil || len(encodedManifest) > executions.CheckpointManifestMaxBytes {
+		return WorkspaceCheckpointCandidate{}, fmt.Errorf(
+			"Workspace snapshot manifest exceeds %d bytes", executions.CheckpointManifestMaxBytes,
+		)
+	}
 	candidate = WorkspaceCheckpointCandidate{
 		IdempotencyKey: idempotencyKey, Strategy: "snapshot",
 		BaseCommit: materialized.BaseCommit, HeadCommit: inspection.HeadCommit,
 		CurrentBranch: inspection.CurrentBranch,
-		Manifest: map[string]any{
-			"format": "synara-workspace-snapshot-v1", "files": files,
-			"excluded": []string{".git"},
-		},
-		FileCount: fileCount, TotalBytes: totalBytes,
+		Manifest:      manifest,
+		FileCount:     fileCount, TotalBytes: totalBytes,
 		Artifact: &RunnerArtifact{
 			Path: archivePath, Kind: "workspace_snapshot",
 			OriginalName: fmt.Sprintf("workspace-%s-generation-%d.tar", execution.ID, execution.Generation),
@@ -189,7 +200,7 @@ func validateCheckpointRequest(payload map[string]any) error {
 	}
 	if value, found := payload["strategyHint"]; found {
 		strategy, ok := value.(string)
-		if !ok || (strategy != "auto" && strategy != "git-reference" && strategy != "snapshot") {
+		if !ok || (strategy != "auto" && strategy != "git-reference" && strategy != "patch" && strategy != "snapshot") {
 			return protocolFailure("Provider Host Checkpoint strategyHint is invalid")
 		}
 	}
@@ -239,9 +250,11 @@ func checkpointMatchesRestored(
 ) bool {
 	if restored == nil || restored.Status != "ready" || candidate.Strategy != restored.Strategy ||
 		!sameCheckpointString(candidate.BaseCommit, restored.BaseCommit) ||
-		!sameCheckpointString(candidate.HeadCommit, restored.HeadCommit) ||
 		!sameCheckpointString(candidate.CurrentBranch, restored.CurrentBranch) ||
 		candidate.FileCount != checkpointInt(restored.FileCount) || candidate.TotalBytes != checkpointInt64(restored.TotalBytes) {
+		return false
+	}
+	if candidate.Strategy != "patch" && !sameCheckpointString(candidate.HeadCommit, restored.HeadCommit) {
 		return false
 	}
 	left, leftErr := json.Marshal(candidate.Manifest)

@@ -2,6 +2,7 @@ package agentd
 
 import (
 	"archive/tar"
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -24,6 +25,544 @@ import (
 	"github.com/synara-ai/synara/services/control-plane/internal/executions"
 )
 
+func TestWorkspacePatchCaptureAndRestoreUsesBaseCommitAndPreservesFinalTree(t *testing.T) {
+	root := t.TempDir()
+	remote := filepath.Join(root, "remote.git")
+	runGitTestCommand(t, root, "init", "--bare", "--initial-branch=main", remote)
+	source := filepath.Join(root, "source")
+	runGitTestCommand(t, root, "clone", remote, source)
+	runGitTestCommand(t, source, "config", "user.email", "synara@example.com")
+	runGitTestCommand(t, source, "config", "user.name", "Synara Test")
+	if err := os.WriteFile(filepath.Join(source, ".gitignore"), []byte("*.ignored\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(source, "tracked.txt"), []byte("base\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(source, "binary.bin"), []byte{0, 1, 2, 3}, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(source, "delete.txt"), []byte("delete me\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(source, "run.sh"), []byte("#!/bin/sh\necho base\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("tracked.txt", filepath.Join(source, "tracked-link")); err != nil {
+		t.Fatal(err)
+	}
+	runGitTestCommand(t, source, "add", ".")
+	runGitTestCommand(t, source, "commit", "-m", "base")
+	runGitTestCommand(t, source, "push", "origin", "main")
+	baseCommit := runGitTestCommand(t, source, "rev-parse", "HEAD")
+	branch := "synara/session-patch"
+	runGitTestCommand(t, source, "switch", "-c", branch)
+	if err := os.WriteFile(filepath.Join(source, "tracked.txt"), []byte("committed\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGitTestCommand(t, source, "add", "tracked.txt")
+	runGitTestCommand(t, source, "commit", "-m", "local commit not pushed")
+	sourceHead := runGitTestCommand(t, source, "rev-parse", "HEAD")
+	if sourceHead == baseCommit {
+		t.Fatal("test did not create a local Commit after the recovery base")
+	}
+	if err := os.WriteFile(filepath.Join(source, "tracked.txt"), []byte("final tracked\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(source, "binary.bin"), []byte{0, 255, 7, 8, 9, 10}, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(source, "delete.txt")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(filepath.Join(source, "run.sh"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(source, "tracked-link")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("staged.txt", filepath.Join(source, "tracked-link")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(source, "staged.txt"), []byte("staged addition\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGitTestCommand(t, source, "add", "staged.txt")
+	if err := os.WriteFile(filepath.Join(source, "ignored.ignored"), []byte("ignored but durable\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(source, "untracked.sh"), []byte("#!/bin/sh\necho untracked\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	materialized := WorkspaceMaterialization{
+		Directory: source, Managed: true, CurrentBranch: &branch, BaseCommit: &baseCommit, HeadCommit: &baseCommit,
+	}
+	materializer := NewWorkspaceMaterializer(root)
+	inspection, err := materializer.Inspect(context.Background(), materialized)
+	if err != nil || !inspection.Dirty || inspection.HeadCommit == nil || *inspection.HeadCommit != sourceHead {
+		t.Fatalf("unexpected dirty source inspection: %#v err=%v", inspection, err)
+	}
+	execution := executions.Execution{ID: uuid.New(), Generation: 7}
+	first, err := captureWorkspaceCheckpoint(context.Background(), execution, materialized, inspection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Cleanup()
+	second, err := captureWorkspaceCheckpoint(context.Background(), execution, materialized, inspection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Cleanup()
+	if first.Strategy != "patch" || first.Artifact == nil || first.Artifact.Kind != "checkpoint" ||
+		first.BaseCommit == nil || *first.BaseCommit != baseCommit || first.HeadCommit == nil || *first.HeadCommit != sourceHead {
+		t.Fatalf("unexpected Patch candidate: %#v", first)
+	}
+	firstArchive, err := os.ReadFile(first.ArtifactPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondArchive, err := os.ReadFile(second.ArtifactPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(firstArchive, secondArchive) {
+		t.Fatal("identical Workspace state produced non-deterministic Patch Artifacts")
+	}
+	manifest, err := decodePatchManifest(executions.WorkspaceCheckpoint{
+		Strategy: "patch", BaseCommit: first.BaseCommit, CurrentBranch: first.CurrentBranch,
+		Manifest: first.Manifest, FileCount: &first.FileCount, TotalBytes: &first.TotalBytes,
+	})
+	if err != nil || manifest.Format != checkpointPatchFormat || manifest.TrackedPatch.SizeBytes == 0 {
+		t.Fatalf("invalid captured Patch manifest: %#v err=%v", manifest, err)
+	}
+	ignoredFound := false
+	for _, file := range manifest.Untracked {
+		if file.Path == "ignored.ignored" {
+			ignoredFound = true
+		}
+	}
+	if !ignoredFound {
+		t.Fatal("Patch capture silently omitted an ignored untracked file")
+	}
+
+	replacement := filepath.Join(root, "replacement")
+	runGitTestCommand(t, root, "clone", remote, replacement)
+	replacementBranch := "main"
+	replacementMaterialized := WorkspaceMaterialization{
+		Directory: replacement, Managed: true, CurrentBranch: &replacementBranch,
+		BaseCommit: &baseCommit, HeadCommit: &baseCommit,
+	}
+	if err := os.WriteFile(filepath.Join(replacement, "sentinel.txt"), []byte("original workspace\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	invalidManifest := cloneManifestMap(t, first.Manifest)
+	invalidManifest["trackedPatch"].(map[string]any)["sha256"] = strings.Repeat("0", 64)
+	artifactID := uuid.New()
+	artifactSHA := sha256.Sum256(firstArchive)
+	artifactDigest := hex.EncodeToString(artifactSHA[:])
+	invalidCheckpoint := executions.WorkspaceCheckpoint{
+		ID: uuid.New(), Strategy: "patch", Status: "ready", ArtifactID: &artifactID, SHA256: &artifactDigest,
+		BaseCommit: first.BaseCommit, HeadCommit: first.HeadCommit, CurrentBranch: first.CurrentBranch,
+		Manifest: invalidManifest, FileCount: &first.FileCount, TotalBytes: &first.TotalBytes,
+	}
+	if _, err := materializer.Restore(context.Background(), replacementMaterialized, invalidCheckpoint, first.ArtifactPath); err == nil {
+		t.Fatal("Patch restore accepted a manifest with the wrong tracked Patch digest")
+	}
+	if sentinel, err := os.ReadFile(filepath.Join(replacement, "sentinel.txt")); err != nil || string(sentinel) != "original workspace\n" {
+		t.Fatalf("invalid Patch modified the active Workspace: %q err=%v", sentinel, err)
+	}
+
+	checkpoint := invalidCheckpoint
+	checkpoint.Manifest = first.Manifest
+	restored, err := materializer.Restore(context.Background(), replacementMaterialized, checkpoint, first.ArtifactPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restored.RestoredCheckpointID == nil || *restored.RestoredCheckpointID != checkpoint.ID {
+		t.Fatalf("Patch restore did not report the Checkpoint: %#v", restored)
+	}
+	assertFileContent(t, replacement, "tracked.txt", []byte("final tracked\n"))
+	assertFileContent(t, replacement, "binary.bin", []byte{0, 255, 7, 8, 9, 10})
+	assertFileContent(t, replacement, "staged.txt", []byte("staged addition\n"))
+	assertFileContent(t, replacement, "ignored.ignored", []byte("ignored but durable\n"))
+	assertFileContent(t, replacement, "untracked.sh", []byte("#!/bin/sh\necho untracked\n"))
+	if target, err := os.Readlink(filepath.Join(replacement, "tracked-link")); err != nil || target != "staged.txt" {
+		t.Fatalf("Patch restore lost tracked symlink target: %q err=%v", target, err)
+	}
+	if _, err := os.Stat(filepath.Join(replacement, "delete.txt")); !os.IsNotExist(err) {
+		t.Fatalf("Patch restore retained a tracked deletion: %v", err)
+	}
+	for _, executable := range []string{"run.sh", "untracked.sh"} {
+		info, err := os.Stat(filepath.Join(replacement, executable))
+		if err != nil {
+			t.Fatalf("Stat restored executable %s: %v", executable, err)
+		}
+		if info.Mode().Perm()&0o111 == 0 {
+			t.Fatalf("Patch restore lost executable mode for %s: mode=%v", executable, info.Mode())
+		}
+	}
+	if head := runGitTestCommand(t, replacement, "rev-parse", "HEAD"); head != baseCommit {
+		t.Fatalf("Patch restore claimed the unavailable source HEAD instead of the base Commit: %s", head)
+	}
+	if currentBranch := runGitTestCommand(t, replacement, "branch", "--show-current"); currentBranch != branch {
+		t.Fatalf("Patch restore lost the Session branch: %s", currentBranch)
+	}
+	command := exec.Command("git", "cat-file", "-e", sourceHead+"^{commit}")
+	command.Dir = replacement
+	if err := command.Run(); err == nil {
+		t.Fatal("replacement Workspace unexpectedly depended on the unpushed source Commit object")
+	}
+	staged := runGitTestCommand(t, replacement, "diff", "--cached", "--name-only", baseCommit, "--")
+	for _, expected := range []string{"binary.bin", "delete.txt", "run.sh", "staged.txt", "tracked-link", "tracked.txt"} {
+		if !strings.Contains(staged, expected) {
+			t.Fatalf("Patch restore did not stage tracked delta %q: %s", expected, staged)
+		}
+	}
+	untracked := runGitTestCommand(t, replacement, "ls-files", "--others", "--")
+	if !strings.Contains(untracked, "ignored.ignored") || !strings.Contains(untracked, "untracked.sh") {
+		t.Fatalf("Patch restore lost untracked classification: %s", untracked)
+	}
+	restoredInspection, err := materializer.Inspect(context.Background(), restored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recaptured, err := captureWorkspaceCheckpoint(context.Background(), execution, restored, restoredInspection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer recaptured.Cleanup()
+	if !checkpointMatchesRestored(recaptured, &checkpoint) {
+		t.Fatalf("unchanged restored Patch produced a different content identity: %#v", recaptured)
+	}
+}
+
+func TestWorkspacePatchIgnoredPolicyKeepsFilesAndExcludesDirectoryTrees(t *testing.T) {
+	directory, baseCommit, branch := initializeCheckpointGitRepository(t, "*.ignored\nnode_modules/\ndurable-dir/\n")
+	nodeModules := filepath.Join(directory, "node_modules")
+	if err := os.Mkdir(nodeModules, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for index := 0; index <= checkpointSnapshotMaxFiles; index++ {
+		name := filepath.Join(nodeModules, fmt.Sprintf("dependency-%04d.js", index))
+		if err := os.WriteFile(name, []byte("cache"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_ = os.Symlink("dependency-0000.js", filepath.Join(nodeModules, "dependency-link.js"))
+	ignoredPath := filepath.Join(directory, "durable.ignored")
+	if err := os.WriteFile(ignoredPath, []byte("durable ignored file\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(directory, "durable-dir"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, "durable-dir", "state.json"), []byte("durable directory file\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	materialized := WorkspaceMaterialization{
+		Directory: directory, Managed: true, CurrentBranch: &branch, BaseCommit: &baseCommit, HeadCommit: &baseCommit,
+	}
+	materializer := NewWorkspaceMaterializer(t.TempDir())
+	inspection, err := materializer.Inspect(context.Background(), materialized)
+	if err != nil || !inspection.Dirty {
+		t.Fatalf("ignored file was not treated as durable Workspace content: %#v err=%v", inspection, err)
+	}
+	candidate, err := captureWorkspaceCheckpoint(
+		context.Background(), executions.Execution{ID: uuid.New(), Generation: 1}, materialized, inspection,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer candidate.Cleanup()
+	manifest, err := decodePatchManifest(executions.WorkspaceCheckpoint{
+		Strategy: "patch", BaseCommit: candidate.BaseCommit, CurrentBranch: candidate.CurrentBranch,
+		Manifest: candidate.Manifest, FileCount: &candidate.FileCount, TotalBytes: &candidate.TotalBytes,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if candidate.FileCount != 2 || len(manifest.Untracked) != 2 || manifest.Untracked[0].Path != "durable-dir/state.json" ||
+		manifest.Untracked[1].Path != "durable.ignored" {
+		t.Fatalf("rebuildable ignored directory tree leaked into the Patch payload: %#v", manifest.Untracked)
+	}
+	if len(manifest.Excluded) != 2 || manifest.Excluded[0] != checkpointPatchExcludedGit ||
+		manifest.Excluded[1] != checkpointPatchExcludedIgnored {
+		t.Fatalf("Patch manifest did not declare the ignored-directory policy: %#v", manifest.Excluded)
+	}
+	if err := os.Remove(ignoredPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(filepath.Join(directory, "durable-dir")); err != nil {
+		t.Fatal(err)
+	}
+	excludedOnly, err := materializer.Inspect(context.Background(), materialized)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if excludedOnly.Dirty {
+		t.Fatalf("rebuildable ignored directory tree forced a Checkpoint: %#v", excludedOnly)
+	}
+}
+
+func TestWorkspacePatchRestoresRawTrackedBytesAfterAttributesChange(t *testing.T) {
+	root := t.TempDir()
+	remote := filepath.Join(root, "remote.git")
+	runGitTestCommand(t, root, "init", "--bare", "--initial-branch=main", remote)
+	source := filepath.Join(root, "source")
+	runGitTestCommand(t, root, "clone", remote, source)
+	runGitTestCommand(t, source, "config", "user.email", "synara@example.com")
+	runGitTestCommand(t, source, "config", "user.name", "Synara Test")
+	runGitTestCommand(t, source, "config", "core.autocrlf", "false")
+	if err := os.WriteFile(filepath.Join(source, ".gitattributes"), []byte("*.txt text eol=lf\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(source, "tracked.txt"), []byte("base\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGitTestCommand(t, source, "add", ".")
+	runGitTestCommand(t, source, "commit", "-m", "base")
+	runGitTestCommand(t, source, "push", "origin", "main")
+	baseCommit := runGitTestCommand(t, source, "rev-parse", "HEAD")
+	branch := "synara/session-attributes"
+	runGitTestCommand(t, source, "switch", "-c", branch)
+	if err := os.WriteFile(filepath.Join(source, ".gitattributes"), []byte("*.txt text eol=crlf\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	expected := []byte("final\r\nbytes\r\n")
+	if err := os.WriteFile(filepath.Join(source, "tracked.txt"), expected, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	materialized := WorkspaceMaterialization{
+		Directory: source, Managed: true, CurrentBranch: &branch, BaseCommit: &baseCommit, HeadCommit: &baseCommit,
+	}
+	materializer := NewWorkspaceMaterializer(root)
+	inspection, err := materializer.Inspect(context.Background(), materialized)
+	if err != nil || !inspection.Dirty {
+		t.Fatalf("attribute-changing Workspace was not dirty: %#v err=%v", inspection, err)
+	}
+	candidate, err := captureWorkspaceCheckpoint(
+		context.Background(), executions.Execution{ID: uuid.New(), Generation: 2}, materialized, inspection,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer candidate.Cleanup()
+	archive, err := os.ReadFile(candidate.ArtifactPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(archive)
+	artifactID := uuid.New()
+	artifactSHA := hex.EncodeToString(digest[:])
+	checkpoint := executions.WorkspaceCheckpoint{
+		ID: uuid.New(), Strategy: "patch", Status: "ready", ArtifactID: &artifactID, SHA256: &artifactSHA,
+		BaseCommit: candidate.BaseCommit, HeadCommit: candidate.HeadCommit, CurrentBranch: candidate.CurrentBranch,
+		Manifest: candidate.Manifest, FileCount: &candidate.FileCount, TotalBytes: &candidate.TotalBytes,
+	}
+	replacement := filepath.Join(root, "replacement")
+	runGitTestCommand(t, root, "clone", remote, replacement)
+	runGitTestCommand(t, replacement, "config", "core.autocrlf", "false")
+	mainBranch := "main"
+	restored, err := materializer.Restore(context.Background(), WorkspaceMaterialization{
+		Directory: replacement, Managed: true, CurrentBranch: &mainBranch, BaseCommit: &baseCommit, HeadCommit: &baseCommit,
+	}, checkpoint, candidate.ArtifactPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertFileContent(t, replacement, "tracked.txt", expected)
+	runGitTestCommand(t, replacement, "diff", "--quiet", "--")
+	if restored.HeadCommit == nil || *restored.HeadCommit != baseCommit {
+		t.Fatalf("attribute Patch restore was not anchored to the base Commit: %#v", restored)
+	}
+}
+
+func TestWorkspacePatchRejectsIndexFlagsAndNonReproducibleGitMetadata(t *testing.T) {
+	tests := []struct {
+		name    string
+		prepare func(*testing.T, string)
+	}{
+		{
+			name: "assume unchanged",
+			prepare: func(t *testing.T, directory string) {
+				runGitTestCommand(t, directory, "update-index", "--assume-unchanged", "tracked.txt")
+			},
+		},
+		{
+			name: "skip worktree",
+			prepare: func(t *testing.T, directory string) {
+				runGitTestCommand(t, directory, "update-index", "--skip-worktree", "tracked.txt")
+			},
+		},
+		{
+			name: "autocrlf",
+			prepare: func(t *testing.T, directory string) {
+				runGitTestCommand(t, directory, "config", "core.autocrlf", "true")
+			},
+		},
+		{
+			name: "filemode disabled",
+			prepare: func(t *testing.T, directory string) {
+				runGitTestCommand(t, directory, "config", "core.filemode", "false")
+			},
+		},
+		{
+			name: "diff context",
+			prepare: func(t *testing.T, directory string) {
+				runGitTestCommand(t, directory, "config", "diff.context", "1")
+			},
+		},
+		{
+			name: "forced color",
+			prepare: func(t *testing.T, directory string) {
+				runGitTestCommand(t, directory, "config", "color.ui", "always")
+			},
+		},
+		{
+			name: "quoted path semantics",
+			prepare: func(t *testing.T, directory string) {
+				runGitTestCommand(t, directory, "config", "core.quotePath", "false")
+			},
+		},
+		{
+			name: "binary threshold",
+			prepare: func(t *testing.T, directory string) {
+				runGitTestCommand(t, directory, "config", "core.bigFileThreshold", "1")
+			},
+		},
+		{
+			name: "promisor remote",
+			prepare: func(t *testing.T, directory string) {
+				runGitTestCommand(t, directory, "config", "remote.origin.promisor", "true")
+			},
+		},
+		{
+			name: "info attributes",
+			prepare: func(t *testing.T, directory string) {
+				if err := os.WriteFile(filepath.Join(directory, ".git", "info", "attributes"), []byte("*.txt text eol=crlf\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "legacy grafts",
+			prepare: func(t *testing.T, directory string) {
+				if err := os.WriteFile(filepath.Join(directory, ".git", "info", "grafts"), []byte("unsupported\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			directory, baseCommit, branch := initializeCheckpointGitRepository(t, "")
+			test.prepare(t, directory)
+			if err := os.WriteFile(filepath.Join(directory, "tracked.txt"), []byte("changed\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			_, err := NewWorkspaceMaterializer(t.TempDir()).Inspect(context.Background(), WorkspaceMaterialization{
+				Directory: directory, Managed: true, CurrentBranch: &branch, BaseCommit: &baseCommit, HeadCommit: &baseCommit,
+			})
+			if err == nil {
+				t.Fatal("Workspace inspection accepted Git state that Patch restore cannot reproduce")
+			}
+		})
+	}
+}
+
+func TestWorkspacePatchIgnoresReplaceObjectRefs(t *testing.T) {
+	directory, baseCommit, branch := initializeCheckpointGitRepository(t, "")
+	if err := os.WriteFile(filepath.Join(directory, "tracked.txt"), []byte("second\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGitTestCommand(t, directory, "add", "tracked.txt")
+	runGitTestCommand(t, directory, "commit", "-m", "second")
+	headCommit := runGitTestCommand(t, directory, "rev-parse", "HEAD")
+	runGitTestCommand(t, directory, "replace", baseCommit, headCommit)
+	materialized := WorkspaceMaterialization{
+		Directory: directory, Managed: true, CurrentBranch: &branch, BaseCommit: &baseCommit, HeadCommit: &baseCommit,
+	}
+	inspection, err := NewWorkspaceMaterializer(t.TempDir()).Inspect(context.Background(), materialized)
+	if err != nil || !inspection.Dirty || inspection.HeadCommit == nil || *inspection.HeadCommit != headCommit {
+		t.Fatalf("replace refs affected Workspace inspection: %#v err=%v", inspection, err)
+	}
+	candidate, err := captureWorkspaceCheckpoint(
+		context.Background(), executions.Execution{ID: uuid.New(), Generation: 3}, materialized, inspection,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer candidate.Cleanup()
+	manifest, err := decodePatchManifest(executions.WorkspaceCheckpoint{
+		Strategy: "patch", BaseCommit: candidate.BaseCommit, CurrentBranch: candidate.CurrentBranch,
+		Manifest: candidate.Manifest, FileCount: &candidate.FileCount, TotalBytes: &candidate.TotalBytes,
+	})
+	if err != nil || manifest.TrackedPatch.SizeBytes == 0 || len(manifest.TrackedFiles) == 0 {
+		t.Fatalf("replace refs changed Patch content identity: %#v err=%v", manifest, err)
+	}
+}
+
+func TestWorkspacePatchManifestUsesControlPlaneSizeLimit(t *testing.T) {
+	manifest := checkpointPatchManifest{
+		Format: checkpointPatchFormat, BaseCommit: strings.Repeat("a", 40), CurrentBranch: "main",
+		TrackedPatch: checkpointPatchPayload{Path: checkpointPatchEntryName, SHA256: strings.Repeat("b", 64)},
+		Excluded:     []string{strings.Repeat("x", executions.CheckpointManifestMaxBytes)},
+		IndexPolicy:  checkpointPatchIndexPolicy,
+	}
+	if _, err := checkpointManifestMap(manifest); err == nil {
+		t.Fatal("agentd accepted a manifest that the Control Plane would reject")
+	}
+}
+
+func TestWorkspacePatchCaptureRejectsUntrackedSymlink(t *testing.T) {
+	directory := t.TempDir()
+	runGitTestCommand(t, directory, "init", "-b", "main")
+	runGitTestCommand(t, directory, "config", "user.email", "synara@example.com")
+	runGitTestCommand(t, directory, "config", "user.name", "Synara Test")
+	if err := os.WriteFile(filepath.Join(directory, "tracked.txt"), []byte("base\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGitTestCommand(t, directory, "add", "tracked.txt")
+	runGitTestCommand(t, directory, "commit", "-m", "base")
+	base := runGitTestCommand(t, directory, "rev-parse", "HEAD")
+	branch := "main"
+	if err := os.Symlink("tracked.txt", filepath.Join(directory, "untracked-link")); err != nil {
+		t.Fatal(err)
+	}
+	materialized := WorkspaceMaterialization{
+		Directory: directory, Managed: true, CurrentBranch: &branch, BaseCommit: &base, HeadCommit: &base,
+	}
+	inspection, err := NewWorkspaceMaterializer(t.TempDir()).Inspect(context.Background(), materialized)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := captureWorkspaceCheckpoint(
+		context.Background(), executions.Execution{ID: uuid.New(), Generation: 1}, materialized, inspection,
+	); err == nil || !strings.Contains(err.Error(), "symbolic links") {
+		t.Fatalf("Patch capture accepted an untracked symlink: %v", err)
+	}
+}
+
+func cloneManifestMap(t *testing.T, input map[string]any) map[string]any {
+	t.Helper()
+	encoded, err := json.Marshal(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var output map[string]any
+	if err := json.Unmarshal(encoded, &output); err != nil {
+		t.Fatal(err)
+	}
+	return output
+}
+
+func assertFileContent(t *testing.T, root, relative string, expected []byte) {
+	t.Helper()
+	content, err := os.ReadFile(filepath.Join(root, relative))
+	if err != nil || !bytes.Equal(content, expected) {
+		t.Fatalf("unexpected %s content: %v err=%v", relative, content, err)
+	}
+}
+
 func TestWorkspaceSnapshotCaptureAndRestorePreservesVerifiedFiles(t *testing.T) {
 	root := t.TempDir()
 	workspace := filepath.Join(root, "tenant", "project", "session", "workspace")
@@ -38,7 +577,7 @@ func TestWorkspaceSnapshotCaptureAndRestorePreservesVerifiedFiles(t *testing.T) 
 	}
 	execution := executions.Execution{ID: uuid.New(), Generation: 3}
 	materialized := WorkspaceMaterialization{Directory: workspace, Managed: true}
-	candidate, err := captureWorkspaceCheckpoint(execution, materialized, WorkspaceInspection{Dirty: true})
+	candidate, err := captureWorkspaceCheckpoint(context.Background(), execution, materialized, WorkspaceInspection{Dirty: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,8 +615,11 @@ func TestWorkspaceSnapshotCaptureAndRestorePreservesVerifiedFiles(t *testing.T) 
 		t.Fatalf("Snapshot restore retained an unexpected file: %v", err)
 	}
 	info, err := os.Stat(filepath.Join(workspace, "run.sh"))
-	if err != nil || info.Mode().Perm()&0o111 == 0 {
-		t.Fatalf("Snapshot executable mode was not restored: mode=%v err=%v", info.Mode(), err)
+	if err != nil {
+		t.Fatalf("Stat restored Snapshot executable: %v", err)
+	}
+	if info.Mode().Perm()&0o111 == 0 {
+		t.Fatalf("Snapshot executable mode was not restored: mode=%v", info.Mode())
 	}
 }
 
@@ -267,6 +809,24 @@ func TestVerifyReadyArtifactFileRejectsLocalDrift(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "does not match") {
 		t.Fatalf("ready Artifact local drift was not rejected: %v", err)
 	}
+}
+
+func initializeCheckpointGitRepository(t *testing.T, ignoreRules string) (string, string, string) {
+	t.Helper()
+	directory := t.TempDir()
+	runGitTestCommand(t, directory, "init", "-b", "main")
+	runGitTestCommand(t, directory, "config", "user.email", "synara@example.com")
+	runGitTestCommand(t, directory, "config", "user.name", "Synara Test")
+	if err := os.WriteFile(filepath.Join(directory, ".gitignore"), []byte(ignoreRules), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, "tracked.txt"), []byte("base\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGitTestCommand(t, directory, "add", ".")
+	runGitTestCommand(t, directory, "commit", "-m", "base")
+	baseCommit := runGitTestCommand(t, directory, "rev-parse", "HEAD")
+	return directory, baseCommit, "main"
 }
 
 func runGitTestCommand(t *testing.T, directory string, arguments ...string) string {

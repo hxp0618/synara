@@ -40,9 +40,7 @@ func (m *WorkspaceMaterializer) Restore(
 	case "snapshot":
 		return m.restoreSnapshot(ctx, materialized, checkpoint, artifactPath)
 	case "patch":
-		return WorkspaceMaterialization{}, workspaceFailure(
-			"workspace_invalid", "Patch Checkpoint restore is not implemented by this Worker version.", true, true,
-		)
+		return m.restorePatch(ctx, materialized, checkpoint, artifactPath)
 	default:
 		return WorkspaceMaterialization{}, workspaceFailure(
 			"workspace_invalid", "The Workspace Checkpoint strategy is unsupported.", true, false,
@@ -271,8 +269,13 @@ func cleanArchivePath(value string) (string, error) {
 		return "", errors.New("invalid archive path")
 	}
 	clean := pathpkg.Clean(value)
-	if clean == "." || clean == ".." || strings.HasPrefix(clean, "../") || clean == ".git" || strings.HasPrefix(clean, ".git/") {
+	if clean == "." || clean == ".." || strings.HasPrefix(clean, "../") {
 		return "", errors.New("invalid archive path")
+	}
+	for _, segment := range strings.Split(clean, "/") {
+		if strings.EqualFold(segment, ".git") {
+			return "", errors.New("invalid archive path")
+		}
 	}
 	return clean, nil
 }

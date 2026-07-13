@@ -42,6 +42,14 @@ before returning the first grant. Pending replay rotates the Local token or re-s
 key. Ready replay returns metadata without another PUT and first revalidates Lease/Generation plus
 Size/SHA-256/Content-Type. UploadGrant secrets are not persisted as long-lived Worker receipts.
 
+A Patch Checkpoint uses kind `checkpoint` and a deterministic tar containing `tracked.patch`, authoritative raw
+tracked upserts under `tracked/`, and the included regular files under `untracked/`. The PostgreSQL Checkpoint
+manifest is the metadata authority; the tar does not duplicate it. The Manifest declares that whole ignored
+directory trees are excluded only under the versioned rebuildable dependency/tool-cache segment policy;
+individually ignored files and other ignored directories remain durable. Download verifies the Artifact
+size/SHA-256 first, then restore rejects unknown, missing, duplicate, traversal, `.git`, type, size, digest or
+executable-mode mismatches before the payload can replace the active Workspace.
+
 The distributed retention sweep also owns upload-expiry cleanup. An expired `pending` Artifact is first sealed
 as `failed`; if it belongs to a Checkpoint, the same transaction fails that Checkpoint, releases the Workspace
 from `checkpointing` and appends `checkpoint.failed`. Object deletion then runs outside the database transaction.

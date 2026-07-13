@@ -11,8 +11,11 @@ packages/*/dist
 .env.*
 !.env.example
 *.db
+*.db-*
 *.sqlite
+*.sqlite-*
 *.sqlite3
+*.sqlite3-*
 build/
 .logs/
 release/

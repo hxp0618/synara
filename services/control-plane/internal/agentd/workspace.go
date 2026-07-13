@@ -214,7 +214,13 @@ func (m *WorkspaceMaterializer) Inspect(
 	if err := m.rejectDangerousLocalGitConfig(ctx, materialized.Directory, environment); err != nil {
 		return WorkspaceInspection{}, errors.New("Workspace Git configuration became unsafe")
 	}
-	command := exec.CommandContext(ctx, "git", "status", "--porcelain=v1", "--untracked-files=normal")
+	if err := rejectUnsupportedPatchGitMetadata(materialized.Directory); err != nil {
+		return WorkspaceInspection{}, errors.New("Workspace Git metadata became unsupported")
+	}
+	if err := rejectUnsupportedPatchIndexFlags(ctx, materialized.Directory); err != nil {
+		return WorkspaceInspection{}, errors.New("Workspace Git index uses unsupported flags")
+	}
+	command := exec.CommandContext(ctx, "git", "status", "--porcelain=v1", "--untracked-files=all")
 	command.Dir = materialized.Directory
 	command.Env = environment
 	stdout := &boundedBuffer{maximum: 1}
@@ -237,6 +243,13 @@ func (m *WorkspaceMaterializer) Inspect(
 		return WorkspaceInspection{}, errors.New("Workspace Git HEAD could not be inspected")
 	}
 	dirty := stdout.buffer.Len() > 0
+	if !dirty {
+		ignored, ignoredErr := ignoredPatchFilePaths(ctx, materialized.Directory)
+		if ignoredErr != nil {
+			return WorkspaceInspection{}, errors.New("Workspace ignored files could not be inspected")
+		}
+		dirty = len(ignored) > 0
+	}
 	if materialized.CurrentBranch != nil && *materialized.CurrentBranch != currentBranch {
 		dirty = true
 	}
@@ -331,23 +344,60 @@ func (m *WorkspaceMaterializer) rejectDangerousLocalGitConfig(
 		if entry == "" {
 			continue
 		}
-		key := entry
-		if separator := strings.IndexAny(key, "=\n"); separator >= 0 {
-			key = key[:separator]
-		}
-		key = strings.ToLower(strings.TrimSpace(key))
-		if dangerousLocalGitConfigKey(key) {
+		key, value := localGitConfigEntry(entry)
+		if dangerousLocalGitConfigEntry(key, value) {
 			return errors.New("unsafe local Git configuration")
 		}
 	}
 	return nil
 }
 
+func localGitConfigEntry(entry string) (string, string) {
+	separator := strings.IndexAny(entry, "=\n")
+	if separator < 0 {
+		return strings.ToLower(strings.TrimSpace(entry)), ""
+	}
+	return strings.ToLower(strings.TrimSpace(entry[:separator])), strings.TrimSpace(entry[separator+1:])
+}
+
+func dangerousLocalGitConfigEntry(key, value string) bool {
+	if dangerousLocalGitConfigKey(key) {
+		return true
+	}
+	switch key {
+	case "core.autocrlf":
+		return !strings.EqualFold(strings.TrimSpace(value), "false")
+	case "core.filemode", "core.symlinks":
+		return !gitConfigTrue(value)
+	case "core.ignorestat", "core.sparsecheckout", "core.sparsecheckoutcone", "index.sparse":
+		return gitConfigTrue(value)
+	case "core.safecrlf":
+		return !strings.EqualFold(strings.TrimSpace(value), "false")
+	default:
+		return false
+	}
+}
+
+func gitConfigTrue(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "1", "on", "true", "yes":
+		return true
+	default:
+		return false
+	}
+}
+
 func dangerousLocalGitConfigKey(key string) bool {
-	return strings.HasPrefix(key, "credential.") || key == "core.askpass" || key == "core.hookspath" ||
+	return strings.HasPrefix(key, "credential.") || strings.HasPrefix(key, "color.") ||
+		strings.HasPrefix(key, "diff.") || key == "core.askpass" || key == "core.hookspath" ||
+		key == "core.attributesfile" || key == "core.bigfilethreshold" || key == "core.eol" ||
+		key == "core.fsmonitor" || key == "core.quotepath" || key == "core.worktree" ||
+		key == "extensions.partialclone" || key == "extensions.worktreeconfig" ||
 		key == "core.sshcommand" || key == "http.proxy" || key == "http.extraheader" ||
 		(strings.HasPrefix(key, "http.") && (strings.HasSuffix(key, ".proxy") || strings.HasSuffix(key, ".extraheader"))) ||
-		(strings.HasPrefix(key, "remote.") && (strings.HasSuffix(key, ".proxy") || strings.HasSuffix(key, ".receivepack") || strings.HasSuffix(key, ".uploadpack"))) ||
+		(strings.HasPrefix(key, "remote.") && (strings.HasSuffix(key, ".partialclonefilter") ||
+			strings.HasSuffix(key, ".promisor") || strings.HasSuffix(key, ".proxy") ||
+			strings.HasSuffix(key, ".receivepack") || strings.HasSuffix(key, ".uploadpack"))) ||
 		(strings.HasPrefix(key, "url.") && (strings.HasSuffix(key, ".insteadof") || strings.HasSuffix(key, ".pushinsteadof"))) ||
 		key == "include.path" || strings.HasPrefix(key, "includeif.") ||
 		(strings.HasPrefix(key, "filter.") && (strings.HasSuffix(key, ".process") || strings.HasSuffix(key, ".clean") || strings.HasSuffix(key, ".smudge")))
@@ -412,8 +462,8 @@ func (m *WorkspaceMaterializer) runGitCommand(ctx context.Context, directory str
 func gitEnvironment(askPass *gitAskPassEnvironment) []string {
 	environment := []string{
 		"LC_ALL=C", "LANG=C", "GIT_TERMINAL_PROMPT=0", "GCM_INTERACTIVE=Never",
-		"GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null",
-		"GIT_LFS_SKIP_SMUDGE=1",
+		"GIT_ATTR_NOSYSTEM=1", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null",
+		"GIT_LFS_SKIP_SMUDGE=1", "GIT_NO_REPLACE_OBJECTS=1",
 		"SSH_ASKPASS=/bin/false", "GIT_SSH_COMMAND=ssh -o BatchMode=yes -o IdentitiesOnly=yes -o IdentityFile=/dev/null -o StrictHostKeyChecking=yes",
 	}
 	if askPass == nil {

@@ -887,8 +887,54 @@ func TestWorkspaceCheckpointLifecyclePreservesLastReadyRecoveryPoint(t *testing.
 	}); err == nil {
 		t.Fatal("Ready Checkpoint Artifact could be invalidated")
 	}
-	failedInput := snapshotInput
-	failedInput.IdempotencyKey = "turn-terminal-snapshot-failed"
+	patchFileCount, patchTotalBytes := 3, int64(96)
+	patchInput := CreateWorkspaceCheckpointInput{
+		LeaseInput: leaseInput, IdempotencyKey: "turn-terminal-patch", Strategy: "patch",
+		BaseCommit: &baseCommit, HeadCommit: &dirtyHead, CurrentBranch: &branch,
+		Manifest: map[string]any{
+			"format": "synara-workspace-patch-v1", "baseCommit": baseCommit,
+			"currentBranch": branch, "trackedPatch": map[string]any{"path": "tracked.patch", "sizeBytes": 32, "sha256": strings.Repeat("1", 64)},
+		},
+		FileCount: &patchFileCount, TotalBytes: &patchTotalBytes,
+	}
+	patch, err := service.CreateWorkspaceCheckpoint(ctx, worker, fixture.ExecutionID, patchInput, "checkpoint-create-patch")
+	if err != nil || patch.Value.Status != "pending" {
+		t.Fatalf("Patch Checkpoint create failed: result=%#v err=%v", patch, err)
+	}
+	patchSHA := strings.Repeat("1", 64)
+	patchArtifact := persistence.Artifact{
+		ID: uuid.New(), TenantID: fixture.TenantID, OrganizationID: session.OrganizationID,
+		ProjectID: session.ProjectID, SessionID: fixture.SessionID, ExecutionID: &fixture.ExecutionID,
+		WorkspaceCheckpointID: &patch.Value.ID,
+		Kind:                  "checkpoint", Status: "ready", Bucket: "test", ObjectKey: "checkpoint/" + uuid.NewString(),
+		ContentType: &contentType, SizeBytes: &size, SHA256: &patchSHA,
+		CreatedByType: "worker", CreatedByID: worker.ID, ReadyAt: &now, CreatedAt: now,
+	}
+	if err := db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(&patchArtifact).Error; err != nil {
+			return err
+		}
+		return tx.Model(&persistence.WorkspaceCheckpoint{}).
+			Where("tenant_id = ? AND id = ?", fixture.TenantID, patch.Value.ID).
+			Updates(map[string]any{"status": "uploading", "artifact_id": patchArtifact.ID}).Error
+	}); err != nil {
+		t.Fatal(err)
+	}
+	patchReady, err := service.MarkWorkspaceCheckpointReady(ctx, worker, fixture.ExecutionID, patch.Value.ID, WorkspaceCheckpointReadyInput{
+		LeaseInput: leaseInput, ArtifactID: &patchArtifact.ID, SHA256: &patchSHA,
+	}, "checkpoint-ready-patch")
+	if err != nil || patchReady.Value.Status != "ready" || patchReady.Value.ArtifactID == nil ||
+		*patchReady.Value.ArtifactID != patchArtifact.ID {
+		t.Fatalf("Patch Checkpoint ready failed: result=%#v err=%v", patchReady, err)
+	}
+	if err := db.Where("tenant_id = ? AND id = ?", fixture.TenantID, workspace.ID).Take(&persistedWorkspace).Error; err != nil {
+		t.Fatal(err)
+	}
+	if persistedWorkspace.CurrentCheckpointID == nil || *persistedWorkspace.CurrentCheckpointID != patch.Value.ID {
+		t.Fatalf("Patch did not replace the current recovery point: %#v", persistedWorkspace.CurrentCheckpointID)
+	}
+	failedInput := patchInput
+	failedInput.IdempotencyKey = "turn-terminal-patch-failed"
 	failedCheckpoint, err := service.CreateWorkspaceCheckpoint(ctx, worker, fixture.ExecutionID, failedInput, "checkpoint-create-failed")
 	if err != nil {
 		t.Fatal(err)
@@ -901,7 +947,7 @@ func TestWorkspaceCheckpointLifecyclePreservesLastReadyRecoveryPoint(t *testing.
 	if err := db.Where("tenant_id = ? AND id = ?", fixture.TenantID, workspace.ID).Take(&persistedWorkspace).Error; err != nil {
 		t.Fatal(err)
 	}
-	if persistedWorkspace.CurrentCheckpointID == nil || *persistedWorkspace.CurrentCheckpointID != snapshot.Value.ID {
+	if persistedWorkspace.CurrentCheckpointID == nil || *persistedWorkspace.CurrentCheckpointID != patch.Value.ID {
 		t.Fatalf("Failed Checkpoint replaced the last ready recovery point: %#v", persistedWorkspace.CurrentCheckpointID)
 	}
 	if _, err := service.Complete(ctx, worker, fixture.ExecutionID, CompleteExecutionInput{
@@ -953,7 +999,7 @@ func TestWorkspaceCheckpointLifecyclePreservesLastReadyRecoveryPoint(t *testing.
 		t.Fatal(err)
 	}
 	if persistedWorkspace.State != "dirty" || persistedWorkspace.CurrentCheckpointID == nil ||
-		*persistedWorkspace.CurrentCheckpointID != snapshot.Value.ID {
+		*persistedWorkspace.CurrentCheckpointID != patch.Value.ID {
 		t.Fatalf("abandoned Checkpoint damaged the last ready recovery point: %#v", persistedWorkspace)
 	}
 	cipher, err := secret.NewCursorCipher(bytes.Repeat([]byte{0x43}, 32))
@@ -973,14 +1019,14 @@ func TestWorkspaceCheckpointLifecyclePreservesLastReadyRecoveryPoint(t *testing.
 	if err := db.Where("tenant_id = ? AND turn_id = ?", fixture.TenantID, nextTurn.ID).Take(&nextExecution).Error; err != nil {
 		t.Fatal(err)
 	}
-	if nextExecution.RestoreCheckpointID == nil || *nextExecution.RestoreCheckpointID != snapshot.Value.ID {
+	if nextExecution.RestoreCheckpointID == nil || *nextExecution.RestoreCheckpointID != patch.Value.ID {
 		t.Fatalf("new Execution did not freeze the last ready Checkpoint: %#v", nextExecution.RestoreCheckpointID)
 	}
 	nextClaim, err := service.Claim(ctx, worker, ClaimExecutionInput{
 		ExecutionTargetID: fixture.TargetID, TargetKind: fixture.TargetKind, ExecutionID: &nextExecution.ID,
 	}, "checkpoint-next-claim")
 	if err != nil || nextClaim.Value.Workload == nil || nextClaim.Value.Workload.RestoreCheckpoint == nil ||
-		nextClaim.Value.Workload.RestoreCheckpoint.ID != snapshot.Value.ID ||
+		nextClaim.Value.Workload.RestoreCheckpoint.ID != patch.Value.ID ||
 		nextClaim.Value.Workload.RestoreCheckpoint.ArtifactID == nil {
 		t.Fatalf("replacement Workload omitted the frozen Checkpoint: result=%#v err=%v", nextClaim, err)
 	}

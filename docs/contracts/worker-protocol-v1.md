@@ -48,9 +48,16 @@ AskPass channel during Clone/Fetch and is cleared before `workspace.ready` and P
 After Provider execution, agentd reports `workspace.dirty` before `CompleteExecution` when tracked/untracked
 Git content or managed non-Git files changed. The report remains Lease/Generation-fenced and carries only the
 safe current branch and HEAD metadata, never file contents. Before a dirty managed Workspace can complete,
-agentd must create and persist a ready Checkpoint. Clean Git uses a Git reference; dirty Git/non-Git currently
-uses a bounded Snapshot Artifact. A new Turn freezes the last ready Checkpoint into its Workload, and agentd
-downloads and restores it before Provider start.
+agentd must create and persist a ready Checkpoint. Clean Git uses a Git reference, dirty Git uses a bounded Patch
+Artifact, and non-Git content uses a bounded Snapshot Artifact. A Patch is the deterministic `baseCommit` to
+final-Worktree binary diff plus authoritative raw tracked upserts and regular untracked files. Individually
+ignored files and unknown ignored directories are included, while ignored trees containing versioned known
+dependency/tool-cache path segments are declared rebuildable and excluded. Restore validates the Patch and file
+manifest in sibling staging, overlays raw tracked bytes, and requires index/worktree consistency before replacing
+the active checkout. It restores the file tree, tracked
+versus untracked classification and branch name with tracked deltas staged at `baseCommit`; it does not promise
+to recreate an unpushed local Commit graph. A new Turn freezes the last ready Checkpoint into its Workload, and
+agentd downloads and restores it before Provider start.
 
 Checkpoint Artifact create carries `checkpointId`. The Control Plane derives one deterministic Artifact identity,
 binds it to the Checkpoint and changes the Checkpoint to `uploading` before issuing a grant. Create/PUT/Complete
