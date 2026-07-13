@@ -125,6 +125,10 @@ func (s *Service) Create(ctx context.Context, principal identity.Principal, tena
 	if capabilities == nil {
 		capabilities = map[string]any{}
 	}
+	capabilities, err = normalizeProviderPolicyCapabilities(capabilities)
+	if err != nil {
+		return Target{}, err
+	}
 	if err := validatePublicCapabilities(capabilities); err != nil {
 		return Target{}, err
 	}
