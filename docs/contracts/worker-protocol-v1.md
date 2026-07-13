@@ -1,4 +1,8 @@
-# Worker Protocol v1 draft
+# Worker Protocol v1 (legacy)
+
+> Legacy baseline only. New managed Workers implement the breaking
+> [Worker Protocol v2 delta](./worker-protocol-v2.md); this document is retained for historical
+> compatibility and for the semantics that v2 does not replace.
 
 The protocol is transport-neutral. Initial implementations may use HTTP/WebSocket JSON, while
 message names and fencing behavior remain stable if the transport later moves to gRPC.
@@ -23,8 +27,8 @@ Registration binds a worker to one persisted `executionTargetId` and `targetKind
 the same fields and cannot select another target. `shared_pool` and `dedicated_pool` are not Worker
 Protocol v1 domain values.
 
-Registration and Heartbeat carry `protocolVersion`. Version `1` is currently both the minimum and maximum
-supported version. Unsupported versions return HTTP `426` with stable code
+Registration and Heartbeat carry `protocolVersion`. On a legacy v1 Control Plane, version `1` is both the
+minimum and maximum supported version. Unsupported versions return HTTP `426` with stable code
 `worker_protocol_version_unsupported` and `minimumSupported` / `maximumSupported` details. `version`
 remains the Worker build/image version and is not used as the protocol number.
 
@@ -169,5 +173,5 @@ revocable secrets and must never appear in event payloads or logs.
 
 The generic `synara-agentd` implementation keeps Worker and Lease credentials outside provider
 runners, renews the Lease while a runner is active, validates runner Artifact paths against the
-Execution workspace, and negotiates Provider Host Protocol v2 independently from Worker Protocol v1.
+Execution workspace, and negotiates Provider Host Protocol v2 independently from this legacy Worker Protocol.
 `agentd-runner-v1.md` documents only the explicit legacy compatibility boundary.

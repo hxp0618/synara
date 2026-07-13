@@ -427,8 +427,9 @@ func (s *Service) CreateTurnWithIdempotency(
 			ID: uuid.New(), TenantID: tenantID, SessionID: sessionID, TurnID: turn.ID,
 			Attempt: 1, Status: "queued", ExecutionTargetID: target.ID, TargetKind: target.Kind,
 			Provider: &provider, ProviderRuntimeBindingID: &resources.BindingID, RemoteWorkspaceID: &resources.WorkspaceID,
-			RestoreCheckpointID: resources.RestoreCheckpointID,
-			Generation:          0, RequestedBy: principal.UserID, QueuedAt: queuedAt,
+			WorkspaceMaterializationID: &resources.MaterializationID,
+			RestoreCheckpointID:        resources.RestoreCheckpointID,
+			Generation:                 0, RequestedBy: principal.UserID, QueuedAt: queuedAt,
 		}
 		if err := tx.Create(&turn).Error; err != nil {
 			return Turn{}, problem.Wrap(409, "turn_create_rejected", "Turn creation was rejected by a tenant isolation constraint.", err)
@@ -443,8 +444,11 @@ func (s *Service) CreateTurnWithIdempotency(
 				"turnId": turn.ID, "executionTargetId": execution.ExecutionTargetID,
 				"targetKind": execution.TargetKind, "attempt": execution.Attempt,
 				"provider": provider, "providerRuntimeBindingId": resources.BindingID,
-				"remoteWorkspaceId":   resources.WorkspaceID,
-				"restoreCheckpointId": resources.RestoreCheckpointID,
+				"remoteWorkspaceId":                     resources.WorkspaceID,
+				"workspaceMaterializationId":            resources.MaterializationID,
+				"workspaceMaterializationIncarnationId": resources.IncarnationID,
+				"workspaceLayoutVersion":                resources.LayoutVersion,
+				"restoreCheckpointId":                   resources.RestoreCheckpointID,
 			},
 			Headers: map[string]any{"eventVersion": 1}, AvailableAt: queuedAt, CreatedAt: queuedAt,
 		}); err != nil {
@@ -456,8 +460,9 @@ func (s *Service) CreateTurnWithIdempotency(
 			Payload: map[string]any{
 				"turnId": turn.ID, "executionId": execution.ID, "inputText": inputText,
 				"status": "queued", "executionTargetId": execution.ExecutionTargetID,
-				"targetKind":  execution.TargetKind,
-				"runtimeMode": runtimeMode, "interactionMode": interactionMode,
+				"targetKind":                 execution.TargetKind,
+				"workspaceMaterializationId": resources.MaterializationID,
+				"runtimeMode":                runtimeMode, "interactionMode": interactionMode,
 			},
 		})
 		if err != nil {
@@ -567,6 +572,10 @@ func (s *Service) ArchiveWithIdempotency(
 			return Session{}, problem.New(409, "session_not_active", "Session is not active.")
 		}
 		now := time.Now().UTC()
+		cleanupAfterDays, err := loadWorkspaceCleanupAfterDays(ctx, tx, tenantID)
+		if err != nil {
+			return Session{}, err
+		}
 		if err := tx.Model(&persistence.AgentSession{}).
 			Where("tenant_id = ? AND id = ?", tenantID, sessionID).
 			Updates(map[string]any{"status": "archived", "archived_at": now}).Error; err != nil {
@@ -574,6 +583,11 @@ func (s *Service) ArchiveWithIdempotency(
 		}
 		locked.Status = "archived"
 		locked.ArchivedAt = &now
+		if err := scheduleArchivedWorkspaceCleanup(
+			ctx, tx, tenantID, sessionID, now, cleanupAfterDays, "session-archive",
+		); err != nil {
+			return Session{}, err
+		}
 		archivedEvent, err = appendEvent(ctx, tx, &locked, eventInput{
 			EventType: "session.archived", ActorType: "user", ActorID: &principal.UserID,
 			Payload: map[string]any{"archivedAt": now},

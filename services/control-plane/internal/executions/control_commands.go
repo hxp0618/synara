@@ -362,7 +362,7 @@ func (s *Service) PullControlCommands(
 	}
 	items := make([]ControlCommandDelivery, 0)
 	err := persistence.InTransaction(ctx, s.db, func(tx *gorm.DB) error {
-		_, execution, err := s.lockLease(ctx, tx, worker.ID, executionID, input.LeaseInput, true)
+		_, execution, err := s.lockLease(ctx, tx, worker, executionID, input.LeaseInput, true)
 		if err != nil {
 			return err
 		}
@@ -423,12 +423,12 @@ func (s *Service) updateControlCommandDelivery(
 		operation = "control-command.acknowledged"
 	}
 	var appended persistence.SessionEvent
-	result, err := runIdempotent(ctx, s, worker.ID, requestID, operation, struct {
+	result, err := runIdempotent(ctx, s, worker, requestID, operation, struct {
 		ExecutionID      uuid.UUID                   `json:"executionId"`
 		ControlCommandID uuid.UUID                   `json:"controlCommandId"`
 		Input            ControlCommandDeliveryInput `json:"input"`
 	}{executionID, controlCommandID, input}, 200, func(tx *gorm.DB) (ControlCommand, error) {
-		lease, execution, err := s.lockLease(ctx, tx, worker.ID, executionID, input.LeaseInput, true)
+		lease, execution, err := s.lockLease(ctx, tx, worker, executionID, input.LeaseInput, true)
 		if err != nil {
 			return ControlCommand{}, err
 		}

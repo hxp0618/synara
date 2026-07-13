@@ -312,6 +312,9 @@ func bindExecutionRuntimeResources(
 		}
 	}
 	if execution.RemoteWorkspaceID != nil {
+		if _, err := ensureExecutionWorkspaceMaterialization(ctx, tx, worker, &execution, now); err != nil {
+			return err
+		}
 		workspaceState := "preparing"
 		if execution.RestoreCheckpointID != nil {
 			workspaceState = "recovering"
@@ -319,13 +322,14 @@ func bindExecutionRuntimeResources(
 		updates := map[string]any{
 			"last_worker_id": worker.ID, "last_execution_id": execution.ID,
 			"last_generation": execution.Generation, "state": workspaceState,
-			"last_used_at": now, "updated_at": now,
+			"last_used_at": now, "updated_at": now, "cleaned_at": nil,
 		}
-		if err := tx.WithContext(ctx).Model(&persistence.RemoteWorkspace{}).
+		updated := tx.WithContext(ctx).Model(&persistence.RemoteWorkspace{}).
 			Where("tenant_id = ? AND id = ? AND session_id = ? AND execution_target_id = ?",
 				execution.TenantID, *execution.RemoteWorkspaceID, execution.SessionID, execution.ExecutionTargetID).
-			Updates(updates).Error; err != nil {
-			return problem.Wrap(500, "remote_workspace_execution_bind_failed", "Failed to bind the Session Workspace to the Execution.", err)
+			Updates(updates)
+		if err := expectOne(updated, 409, "remote_workspace_execution_bind_failed", "Failed to bind the Session Workspace to the Execution."); err != nil {
+			return err
 		}
 	}
 	return nil

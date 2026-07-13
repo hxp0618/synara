@@ -134,8 +134,24 @@ func TestRetentionArchivesInactiveSessionsAndDeletesArtifactsIdempotently(t *tes
 	}).Error; err != nil {
 		t.Fatal(err)
 	}
+	materializationID := uuid.New()
+	incarnationID := uuid.New()
+	if err := store.DB().Create(&persistence.WorkspaceMaterialization{
+		ID: materializationID, TenantID: domain.TenantID, WorkspaceID: workspaceID,
+		OrganizationID: domain.OrganizationID, ProjectID: projectID, SessionID: sessionID,
+		ExecutionTargetID: domain.ExecutionTargetID, TargetKind: "local", StorageScope: "target",
+		LayoutVersion: 3, IncarnationID: incarnationID, State: "active", CreatedAt: old, UpdatedAt: old,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DB().Model(&persistence.RemoteWorkspace{}).Where("id = ?", workspaceID).
+		Update("current_materialization_id", materializationID).Error; err != nil {
+		t.Fatal(err)
+	}
 	if err := store.DB().Model(&persistence.AgentExecution{}).Where("id = ?", executionID).
-		Update("remote_workspace_id", workspaceID).Error; err != nil {
+		Updates(map[string]any{
+			"remote_workspace_id": workspaceID, "workspace_materialization_id": materializationID,
+		}).Error; err != nil {
 		t.Fatal(err)
 	}
 	baseCommit := strings.Repeat("a", 40)
@@ -211,7 +227,7 @@ func TestRetentionArchivesInactiveSessionsAndDeletesArtifactsIdempotently(t *tes
 	principal := identity.Principal{UserID: domain.UserID, ActiveTenantID: &domain.TenantID}
 	days := 1
 	if _, err := service.Update(ctx, principal, domain.TenantID, UpdateInput{
-		SessionArchiveAfterDays: &days, ArtifactDeleteAfterDays: &days,
+		SessionArchiveAfterDays: &days, ArtifactDeleteAfterDays: &days, WorkspaceCleanupAfterDays: &days,
 	}, "retention-update", "127.0.0.1"); err != nil {
 		t.Fatal(err)
 	}
@@ -234,6 +250,24 @@ func TestRetentionArchivesInactiveSessionsAndDeletesArtifactsIdempotently(t *tes
 	}
 	if archived.Status != "archived" || archived.ArchivedAt == nil {
 		t.Fatalf("retention did not archive the Session: %#v", archived)
+	}
+	var retainedWorkspace persistence.RemoteWorkspace
+	if err := store.DB().Where("id = ?", workspaceID).Take(&retainedWorkspace).Error; err != nil {
+		t.Fatal(err)
+	}
+	if retainedWorkspace.RetentionUntil == nil ||
+		retainedWorkspace.RetentionUntil.Before(now.Add(24*time.Hour-time.Minute)) ||
+		retainedWorkspace.RetentionUntil.After(now.Add(24*time.Hour+time.Minute)) {
+		t.Fatalf("retention did not set the Workspace cleanup deadline: %#v", retainedWorkspace)
+	}
+	var retainedMaterialization persistence.WorkspaceMaterialization
+	if err := store.DB().Where("id = ?", materializationID).Take(&retainedMaterialization).Error; err != nil {
+		t.Fatal(err)
+	}
+	if retainedMaterialization.CleanupReason == nil || *retainedMaterialization.CleanupReason != "retention-session-archive" ||
+		retainedMaterialization.CleanupRequestedAt == nil ||
+		!retainedMaterialization.CleanupRequestedAt.Equal(*retainedWorkspace.RetentionUntil) {
+		t.Fatalf("retention did not persist the current materialization cleanup intent: %#v", retainedMaterialization)
 	}
 	var deleted persistence.Artifact
 	if err := store.DB().Where("id = ?", artifactID).Take(&deleted).Error; err != nil {
@@ -283,8 +317,23 @@ func TestRetentionArchivesInactiveSessionsAndDeletesArtifactsIdempotently(t *tes
 	if _, err := objectStore.Stat(ctx, objectKey); err == nil {
 		t.Fatal("retention left the Artifact payload in object storage")
 	}
+	deletedAt := now.Add(time.Hour)
+	if err := store.DB().Model(&persistence.Tenant{}).Where("id = ?", domain.TenantID).
+		Updates(map[string]any{"status": "deleting", "deleted_at": deletedAt}).Error; err != nil {
+		t.Fatal(err)
+	}
+	service.now = func() time.Time { return now.Add(48 * time.Hour) }
 	if err := service.RunOnce(ctx, 100); err != nil {
 		t.Fatal(err)
+	}
+	var cleanupCommands int64
+	if err := store.DB().Model(&persistence.WorkspaceCleanupCommand{}).
+		Where("tenant_id = ? AND materialization_id = ?", domain.TenantID, materializationID).
+		Count(&cleanupCommands).Error; err != nil {
+		t.Fatal(err)
+	}
+	if cleanupCommands != 1 {
+		t.Fatalf("global retention cleanup excluded a deleted Tenant: commands=%d", cleanupCommands)
 	}
 	var appliedAudits int64
 	if err := store.DB().Model(&persistence.AuditLog{}).
@@ -303,6 +352,18 @@ func TestRetentionPolicyRejectsUnauthorizedAndInvalidUpdates(t *testing.T) {
 	_, err := fixture.service.Update(context.Background(), fixture.owner, fixture.tenantID,
 		UpdateInput{SessionArchiveAfterDays: &invalid}, "invalid", "127.0.0.1")
 	assertRetentionProblemCode(t, err, "invalid_session_retention")
+	_, err = fixture.service.Update(context.Background(), fixture.owner, fixture.tenantID,
+		UpdateInput{WorkspaceCleanupAfterDays: &invalid}, "invalid-workspace", "127.0.0.1")
+	assertRetentionProblemCode(t, err, "invalid_workspace_retention")
+	workspaceDays := 30
+	policy, err := fixture.service.Update(context.Background(), fixture.owner, fixture.tenantID,
+		UpdateInput{WorkspaceCleanupAfterDays: &workspaceDays}, "workspace-policy", "127.0.0.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if policy.WorkspaceCleanupAfterDays == nil || *policy.WorkspaceCleanupAfterDays != workspaceDays {
+		t.Fatalf("Workspace cleanup retention was not persisted: %#v", policy)
+	}
 	_, err = fixture.service.Update(context.Background(), fixture.member, fixture.tenantID,
 		UpdateInput{}, "forbidden", "127.0.0.1")
 	assertRetentionProblemCode(t, err, "tenant_forbidden")

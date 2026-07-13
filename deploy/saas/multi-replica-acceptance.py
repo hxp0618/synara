@@ -20,6 +20,7 @@ from typing import Any
 
 LOGICAL_HOST = "synara-control-plane.test"
 CONTROL_PLANE_PORT = 3780
+WORKER_PROTOCOL_VERSION = 2
 
 
 class AcceptanceError(RuntimeError):
@@ -353,11 +354,12 @@ def phase_one(replica_a: str, replica_b: str, registration_token: str, state_dir
         {
             "executionTargetId": target_id,
             "targetKind": target["kind"],
+            "instanceUid": str(uuid.uuid4()),
             "clusterId": "multi",
             "namespace": "default",
             "podName": f"multi-worker-{run_id}",
             "version": "acceptance",
-            "protocolVersion": 1,
+            "protocolVersion": WORKER_PROTOCOL_VERSION,
             "capabilities": {"codex": True},
             "leaseSupported": True,
             "fencingSupported": True,

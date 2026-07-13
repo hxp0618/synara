@@ -3,6 +3,7 @@ package executions
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/google/uuid"
 	"gorm.io/gorm"
@@ -78,46 +79,16 @@ func (s *Service) Cancel(
 			return Execution{}, problem.New(409, "execution_state_conflict", "The execution cannot be cancelled from its current state.")
 		}
 
-		if leaseErr == nil {
-			if err := tx.WithContext(ctx).Delete(&lease).Error; err != nil {
-				return Execution{}, problem.Wrap(500, "lease_release_failed", "Failed to release the cancelled execution lease.", err)
-			}
-		}
 		now := s.now()
-		execution.Status = "cancelled"
-		execution.WorkerID = nil
-		execution.FinishedAt = &now
-		cancelled := tx.WithContext(ctx).Model(&persistence.AgentExecution{}).
-			Where("tenant_id = ? AND id = ? AND status IN ?", tenantID, executionID,
-				[]string{"queued", "recovering", "leased", "running", "waiting-for-approval"}).
-			Updates(map[string]any{"status": "cancelled", "worker_id": nil, "finished_at": now})
-		if err := expectOne(cancelled, 409, "execution_cancel_conflict", "The execution could not be cancelled from its current state."); err != nil {
-			return Execution{}, err
+		var lockedLease *persistence.WorkerLease
+		if leaseErr == nil {
+			lockedLease = &lease
 		}
-		turnUpdate := tx.WithContext(ctx).Model(&persistence.AgentTurn{}).
-			Where("tenant_id = ? AND session_id = ? AND id = ?", tenantID, execution.SessionID, execution.TurnID).
-			Updates(map[string]any{"status": "cancelled", "completed_at": now})
-		if err := expectOne(turnUpdate, 500, "turn_cancel_failed", "Failed to cancel the Turn."); err != nil {
-			return Execution{}, err
-		}
-		if err := supersedeControlCommands(ctx, tx, execution, uuid.Nil, "The Execution was cancelled before the Control command was acknowledged."); err != nil {
-			return Execution{}, err
-		}
-		appended, err = s.sessions.AppendInternalEvent(ctx, tx, tenantID, execution.SessionID, sessions.InternalEventInput{
-			EventType: "execution.cancelled", ActorType: "user", ActorID: &principal.UserID,
-			ExecutionID: &execution.ID, Payload: map[string]any{"turnId": execution.TurnID, "finishedAt": now},
-		})
+		appended, err = s.cancelExecutionLocked(
+			ctx, tx, &execution, lockedLease, "user", &principal.UserID, now, "user-requested",
+		)
 		if err != nil {
 			return Execution{}, err
-		}
-		if err := outbox.Enqueue(ctx, tx, outbox.EnqueueInput{
-			TenantID: &tenantID, Topic: "execution.cancelled", MessageKey: execution.ID.String(),
-			Payload: map[string]any{
-				"executionId": execution.ID, "tenantId": tenantID, "sessionId": execution.SessionID,
-				"turnId": execution.TurnID, "finishedAt": now,
-			},
-		}); err != nil {
-			return Execution{}, problem.Wrap(500, "execution_cancel_outbox_failed", "The cancelled Execution event could not be queued.", err)
 		}
 		if err := audit.Record(ctx, tx, audit.Entry{
 			TenantID: tenantID, ActorType: "user", ActorID: &principal.UserID,
@@ -135,4 +106,72 @@ func (s *Service) Cancel(
 	return OperationResult[Execution]{
 		Value: result.Value, Replayed: result.Replayed, StatusCode: result.StatusCode,
 	}, err
+}
+
+func (s *Service) cancelExecutionLocked(
+	ctx context.Context,
+	tx *gorm.DB,
+	execution *persistence.AgentExecution,
+	lease *persistence.WorkerLease,
+	actorType string,
+	actorID *uuid.UUID,
+	now time.Time,
+	reason string,
+) (persistence.SessionEvent, error) {
+	if lease != nil {
+		if err := s.supersedeInteractionGenerationWithReason(ctx, tx, *execution, *lease,
+			"The Execution was cancelled before the interaction lifecycle completed."); err != nil {
+			return persistence.SessionEvent{}, err
+		}
+		if err := tx.WithContext(ctx).Delete(lease).Error; err != nil {
+			return persistence.SessionEvent{}, problem.Wrap(500, "lease_release_failed", "Failed to release the cancelled Execution lease.", err)
+		}
+	}
+
+	previousWorkerID := execution.WorkerID
+	previousGeneration := execution.Generation
+	var eventGeneration *int64
+	if previousGeneration > 0 {
+		eventGeneration = &previousGeneration
+	}
+	finishedAt := now
+	cancelled := tx.WithContext(ctx).Model(&persistence.AgentExecution{}).
+		Where("tenant_id = ? AND id = ? AND status IN ?", execution.TenantID, execution.ID,
+			[]string{"queued", "recovering", "leased", "running", "waiting-for-approval"}).
+		Updates(map[string]any{"status": "cancelled", "worker_id": nil, "finished_at": now})
+	if err := expectOne(cancelled, 409, "execution_cancel_conflict", "The Execution could not be cancelled from its current state."); err != nil {
+		return persistence.SessionEvent{}, err
+	}
+	turnUpdate := tx.WithContext(ctx).Model(&persistence.AgentTurn{}).
+		Where("tenant_id = ? AND session_id = ? AND id = ?", execution.TenantID, execution.SessionID, execution.TurnID).
+		Updates(map[string]any{"status": "cancelled", "completed_at": now})
+	if err := expectOne(turnUpdate, 500, "turn_cancel_failed", "Failed to cancel the Turn."); err != nil {
+		return persistence.SessionEvent{}, err
+	}
+	if err := supersedeControlCommands(ctx, tx, *execution, uuid.Nil,
+		"The Execution was cancelled before the Control command was acknowledged."); err != nil {
+		return persistence.SessionEvent{}, err
+	}
+	payload := map[string]any{"turnId": execution.TurnID, "finishedAt": now, "reason": reason}
+	event, err := s.sessions.AppendInternalEvent(ctx, tx, execution.TenantID, execution.SessionID, sessions.InternalEventInput{
+		EventType: "execution.cancelled", ActorType: actorType, ActorID: actorID,
+		ExecutionID: &execution.ID, WorkerID: previousWorkerID, Generation: eventGeneration,
+		Payload: payload,
+	})
+	if err != nil {
+		return persistence.SessionEvent{}, err
+	}
+	if err := outbox.Enqueue(ctx, tx, outbox.EnqueueInput{
+		TenantID: &execution.TenantID, Topic: "execution.cancelled", MessageKey: execution.ID.String(),
+		Payload: map[string]any{
+			"executionId": execution.ID, "tenantId": execution.TenantID, "sessionId": execution.SessionID,
+			"turnId": execution.TurnID, "finishedAt": now, "reason": reason,
+		},
+	}); err != nil {
+		return persistence.SessionEvent{}, problem.Wrap(500, "execution_cancel_outbox_failed", "The cancelled Execution event could not be queued.", err)
+	}
+	execution.Status = "cancelled"
+	execution.WorkerID = nil
+	execution.FinishedAt = &finishedAt
+	return event, nil
 }

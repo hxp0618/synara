@@ -196,8 +196,52 @@ func (s *Service) DeleteTenant(
 	if _, err := s.requireTenantPermission(ctx, principal.UserID, tenantID, authorization.TenantDelete); err != nil {
 		return err
 	}
-	return persistence.InTransaction(ctx, s.db, func(tx *gorm.DB) error {
+	var executionEvents []persistence.SessionEvent
+	err := persistence.InTransaction(ctx, s.db, func(tx *gorm.DB) error {
 		now := time.Now().UTC()
+		var tenant persistence.Tenant
+		lockErr := persistence.WithLocking(tx.WithContext(ctx), "UPDATE", "").
+			Where("id = ? AND deleted_at IS NULL", tenantID).Take(&tenant).Error
+		if errors.Is(lockErr, gorm.ErrRecordNotFound) {
+			return problem.New(404, "tenant_not_found", "Tenant not found.")
+		}
+		if lockErr != nil {
+			return problem.Wrap(500, "tenant_lock_failed", "Failed to lock the tenant for deletion.", lockErr)
+		}
+
+		if s.executionCoordinator != nil {
+			var err error
+			executionEvents, err = s.executionCoordinator.PrepareTenantDeletion(
+				ctx, tx, tenantID, principal.UserID, now,
+			)
+			if err != nil {
+				return err
+			}
+		} else {
+			var activeExecutions int64
+			if err := tx.WithContext(ctx).Model(&persistence.AgentExecution{}).
+				Where("tenant_id = ? AND status IN ?", tenantID,
+					[]string{"queued", "recovering", "leased", "running", "waiting-for-approval"}).
+				Count(&activeExecutions).Error; err != nil {
+				return problem.Wrap(500, "tenant_execution_cleanup_check_failed", "Failed to inspect active Tenant Executions.", err)
+			}
+			if activeExecutions != 0 {
+				return problem.New(500, "tenant_execution_cleanup_unconfigured", "Tenant deletion cannot safely stop active Executions.")
+			}
+		}
+
+		if err := tx.WithContext(ctx).Model(&persistence.WorkspaceMaterialization{}).
+			Where("tenant_id = ? AND state <> ?", tenantID, "cleaned").
+			Updates(map[string]any{
+				"cleanup_reason": "tenant-delete",
+				"cleanup_requested_at": gorm.Expr(
+					"CASE WHEN cleanup_requested_at IS NULL OR cleanup_requested_at > ? THEN ? ELSE cleanup_requested_at END",
+					now, now,
+				),
+				"updated_at": now,
+			}).Error; err != nil {
+			return problem.Wrap(500, "tenant_workspace_cleanup_intent_failed", "Failed to schedule Tenant Workspace cleanup.", err)
+		}
 		result := tx.Model(&persistence.Tenant{}).Where("id = ? AND deleted_at IS NULL", tenantID).
 			Updates(map[string]any{"status": "deleting", "deleted_at": now})
 		if result.Error != nil {
@@ -212,6 +256,10 @@ func (s *Service) DeleteTenant(
 			RequestID: requestID, IPAddress: ipAddress,
 		})
 	})
+	if err == nil && s.executionCoordinator != nil {
+		s.executionCoordinator.PublishTenantDeletionEvents(executionEvents)
+	}
+	return err
 }
 
 func (s *Service) ListTenantMembers(ctx context.Context, principal identity.Principal, tenantID uuid.UUID) ([]TenantMember, error) {

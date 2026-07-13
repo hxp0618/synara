@@ -41,7 +41,7 @@ func (c *Client) Register(ctx context.Context, cfg Config) (executions.Registere
 	var output executions.RegisteredWorker
 	err := c.doJSON(ctx, http.MethodPost, "/v1/workers/register", c.registrationToken, "", executions.RegisterWorkerInput{
 		ExecutionTargetID: cfg.ExecutionTargetID, TargetKind: string(cfg.TargetKind),
-		ClusterID: cfg.ClusterID, Namespace: cfg.Namespace, PodName: cfg.PodName,
+		ClusterID: cfg.ClusterID, Namespace: cfg.Namespace, PodName: cfg.PodName, InstanceUID: cfg.InstanceUID,
 		Version: cfg.Version, ProtocolVersion: executions.WorkerProtocolVersion,
 		Capabilities: cfg.Capabilities, LeaseSupported: true, FencingSupported: true,
 	}, &output)
@@ -65,6 +65,110 @@ func (c *Client) Claim(ctx context.Context, cfg Config) (executions.ClaimResult,
 		ExecutionTargetID: cfg.ExecutionTargetID, TargetKind: string(cfg.TargetKind), ExecutionID: cfg.AssignedExecutionID,
 	}, &output)
 	return output, err
+}
+
+func (c *Client) ClaimWorkspaceCleanup(
+	ctx context.Context,
+	cfg Config,
+) (executions.WorkspaceCleanupClaimResult, error) {
+	var output executions.WorkspaceCleanupClaimResult
+	err := c.doJSON(
+		ctx,
+		http.MethodPost,
+		"/v1/workers/workspace-cleanups/claim",
+		c.workerToken,
+		uuid.NewString(),
+		executions.WorkspaceCleanupClaimInput{
+			ExecutionTargetID: cfg.ExecutionTargetID,
+			TargetKind:        string(cfg.TargetKind),
+		},
+		&output,
+	)
+	return output, err
+}
+
+func (c *Client) RenewWorkspaceCleanup(
+	ctx context.Context,
+	claim executions.WorkspaceCleanupClaim,
+) error {
+	return c.workspaceCleanupRequest(ctx, claim, "renew", nil)
+}
+
+func (c *Client) StartWorkspaceCleanup(
+	ctx context.Context,
+	claim executions.WorkspaceCleanupClaim,
+) error {
+	return c.workspaceCleanupRequest(ctx, claim, "started", nil)
+}
+
+func (c *Client) AcknowledgeWorkspaceCleanup(
+	ctx context.Context,
+	claim executions.WorkspaceCleanupClaim,
+) error {
+	return c.workspaceCleanupRequest(ctx, claim, "acknowledged", nil)
+}
+
+func (c *Client) FailWorkspaceCleanup(
+	ctx context.Context,
+	claim executions.WorkspaceCleanupClaim,
+	code, message string,
+	retryable bool,
+) error {
+	input := executions.WorkspaceCleanupFailedInput{
+		WorkspaceCleanupLeaseInput: workspaceCleanupLeaseInput(claim),
+		ErrorCode:                  code,
+		ErrorMessage:               message,
+		Retryable:                  retryable,
+	}
+	return c.workspaceCleanupRequest(ctx, claim, "failed", input)
+}
+
+func (c *Client) ReleaseWorkspaceCleanup(
+	ctx context.Context,
+	claim executions.WorkspaceCleanupClaim,
+) error {
+	return c.workspaceCleanupRequest(ctx, claim, "release", nil)
+}
+
+func (c *Client) workspaceCleanupRequest(
+	ctx context.Context,
+	claim executions.WorkspaceCleanupClaim,
+	action string,
+	input any,
+) error {
+	if input == nil {
+		input = workspaceCleanupLeaseInput(claim)
+	}
+	requestID := workspaceCleanupRequestID(claim, action)
+	if action == "renew" {
+		// Each renewal must extend the database lease. Reusing one receipt would
+		// replay the first expiry instead of committing a later heartbeat.
+		requestID = uuid.NewString()
+	}
+	return c.doJSON(
+		ctx,
+		http.MethodPost,
+		workspaceCleanupPath(claim.CleanupID, action),
+		c.workerToken,
+		requestID,
+		input,
+		nil,
+	)
+}
+
+func workspaceCleanupLeaseInput(claim executions.WorkspaceCleanupClaim) executions.WorkspaceCleanupLeaseInput {
+	return executions.WorkspaceCleanupLeaseInput{
+		DispatchGeneration: claim.DispatchGeneration,
+		LeaseToken:         claim.Lease.LeaseToken,
+	}
+}
+
+func workspaceCleanupPath(cleanupID uuid.UUID, action string) string {
+	return "/v1/workers/workspace-cleanups/" + cleanupID.String() + "/" + action
+}
+
+func workspaceCleanupRequestID(claim executions.WorkspaceCleanupClaim, action string) string {
+	return fmt.Sprintf("%s:%d:workspace-cleanup:%s", claim.CleanupID, claim.DispatchGeneration, action)
 }
 
 func (c *Client) Start(ctx context.Context, executionID uuid.UUID, lease executions.Lease) error {

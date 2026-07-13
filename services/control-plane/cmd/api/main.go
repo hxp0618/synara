@@ -122,7 +122,6 @@ func main() {
 		identityOptions = append(identityOptions, identity.PersonalDomain{UserID: bootstrapped.UserID, TenantID: bootstrapped.TenantID})
 	}
 	identityService := identity.NewService(db, cfg.SessionTTL, cfg.SessionIdleTTL, identityOptions...)
-	tenancyService := tenancy.NewService(db)
 	projectService := projects.NewService(db)
 	cursorCipher, err := secret.NewCursorCipher(cfg.ProviderCursorKey)
 	if err != nil {
@@ -143,10 +142,12 @@ func main() {
 		db, sessionService, cfg.WorkerLeaseTTL, cfg.WorkerHeartbeatTimeout,
 		cfg.WorkerReceiptTTL, cursorCipher, executionTargetService,
 	)
+	tenancyService := tenancy.NewService(db, executionService)
 	kubernetesReconciler := executiontargets.NewKubernetesReconciler(executionTargetService, executiontargets.KubernetesReconcilerConfig{
 		RegistrationToken: cfg.WorkerRegistrationToken, PublicControlPlaneURL: cfg.PublicControlPlaneURL,
 		Interval: cfg.KubernetesReconcileInterval, RecoverExpired: executionService.RecoverExpired,
-		Observer: metrics,
+		ReconcileEphemeralWorkspaceCleanup: executionService.ReconcileEphemeralWorkspaceCleanup,
+		Observer:                           metrics,
 	}, logger)
 	artifactStore, err := artifacts.NewStore(ctx, cfg)
 	if err != nil {

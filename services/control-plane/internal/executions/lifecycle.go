@@ -48,7 +48,10 @@ func (s *Service) Claim(
 			var receipt persistence.WorkerRequestReceipt
 			lookupErr := persistence.WithLocking(tx.WithContext(ctx), "UPDATE", "").
 				Where("worker_id = ? AND request_id = ?", worker.ID, requestID).Take(&receipt).Error
-			if lookupErr == nil && receipt.ExpiresAt.After(s.now()) {
+			if err := lockCurrentWorkerIncarnation(ctx, tx, worker); err != nil {
+				return err
+			}
+			if lookupErr == nil && receipt.WorkerIncarnation == worker.Incarnation && receipt.ExpiresAt.After(s.now()) {
 				if receipt.Operation != "execution.claim" || receipt.RequestHash != hash {
 					return problem.New(409, "request_id_reused", "X-Request-ID was already used for a different worker request.")
 				}
@@ -61,7 +64,7 @@ func (s *Service) Claim(
 					replayed = true
 					return nil
 				}
-				lease, execution, leaseErr := s.lockLease(ctx, tx, worker.ID, stored.Execution.ID, LeaseInput{
+				lease, execution, leaseErr := s.lockLease(ctx, tx, worker, stored.Execution.ID, LeaseInput{
 					TenantID: stored.Execution.TenantID, Generation: stored.Execution.Generation,
 					LeaseToken: "",
 				}, false)
@@ -244,7 +247,8 @@ func (s *Service) Claim(
 			}
 			now := s.now()
 			receipt = persistence.WorkerRequestReceipt{
-				WorkerID: worker.ID, RequestID: requestID, Operation: "execution.claim", RequestHash: hash,
+				WorkerID: worker.ID, WorkerIncarnation: worker.Incarnation,
+				RequestID: requestID, Operation: "execution.claim", RequestHash: hash,
 				StatusCode: 200, Response: mapped, CreatedAt: now, ExpiresAt: now.Add(s.receiptTTL),
 			}
 			if err := tx.WithContext(ctx).Create(&receipt).Error; err != nil {
@@ -276,12 +280,15 @@ func (s *Service) Renew(
 	input RenewLeaseInput,
 	requestID string,
 ) (OperationResult[Lease], error) {
-	return runIdempotent(ctx, s, worker.ID, requestID, "execution.renew", struct {
+	return runIdempotent(ctx, s, worker, requestID, "execution.renew", struct {
 		ExecutionID uuid.UUID       `json:"executionId"`
 		Input       RenewLeaseInput `json:"input"`
 	}{executionID, input}, 200, func(tx *gorm.DB) (Lease, error) {
-		lease, execution, err := s.lockLease(ctx, tx, worker.ID, executionID, input.LeaseInput, true)
+		lease, execution, err := s.lockLease(ctx, tx, worker, executionID, input.LeaseInput, true)
 		if err != nil {
+			return Lease{}, err
+		}
+		if err := requireExecutionTenantActive(ctx, tx, execution.TenantID); err != nil {
 			return Lease{}, err
 		}
 		if err := s.storeProviderCursor(ctx, tx, execution, input.ProviderResumeCursor); err != nil {
@@ -312,12 +319,15 @@ func (s *Service) Start(
 	requestID string,
 ) (OperationResult[Execution], error) {
 	var appended persistence.SessionEvent
-	result, err := runIdempotent(ctx, s, worker.ID, requestID, "execution.start", struct {
+	result, err := runIdempotent(ctx, s, worker, requestID, "execution.start", struct {
 		ExecutionID uuid.UUID  `json:"executionId"`
 		Input       LeaseInput `json:"input"`
 	}{executionID, input}, 200, func(tx *gorm.DB) (Execution, error) {
-		_, execution, err := s.lockLease(ctx, tx, worker.ID, executionID, input, true)
+		_, execution, err := s.lockLease(ctx, tx, worker, executionID, input, true)
 		if err != nil {
+			return Execution{}, err
+		}
+		if err := requireExecutionTenantActive(ctx, tx, execution.TenantID); err != nil {
 			return Execution{}, err
 		}
 		if execution.Status == "running" {
@@ -362,11 +372,11 @@ func (s *Service) Complete(
 	requestID string,
 ) (OperationResult[Execution], error) {
 	var appended persistence.SessionEvent
-	result, err := runIdempotent(ctx, s, worker.ID, requestID, "execution.complete", struct {
+	result, err := runIdempotent(ctx, s, worker, requestID, "execution.complete", struct {
 		ExecutionID uuid.UUID              `json:"executionId"`
 		Input       CompleteExecutionInput `json:"input"`
 	}{executionID, input}, 200, func(tx *gorm.DB) (Execution, error) {
-		lease, execution, err := s.lockLease(ctx, tx, worker.ID, executionID, input.LeaseInput, true)
+		lease, execution, err := s.lockLease(ctx, tx, worker, executionID, input.LeaseInput, true)
 		if err != nil {
 			return Execution{}, err
 		}
@@ -462,11 +472,11 @@ func (s *Service) Fail(
 		return OperationResult[Execution]{}, problem.New(400, "invalid_failure_message", "failureMessage must not exceed 10000 characters.")
 	}
 	var appended persistence.SessionEvent
-	result, err := runIdempotent(ctx, s, worker.ID, requestID, "execution.fail", struct {
+	result, err := runIdempotent(ctx, s, worker, requestID, "execution.fail", struct {
 		ExecutionID uuid.UUID          `json:"executionId"`
 		Input       FailExecutionInput `json:"input"`
 	}{executionID, input}, 200, func(tx *gorm.DB) (Execution, error) {
-		lease, execution, err := s.lockLease(ctx, tx, worker.ID, executionID, input.LeaseInput, true)
+		lease, execution, err := s.lockLease(ctx, tx, worker, executionID, input.LeaseInput, true)
 		if err != nil {
 			return Execution{}, err
 		}
@@ -533,13 +543,26 @@ func (s *Service) Release(
 		return OperationResult[Execution]{}, problem.New(400, "invalid_release_reason", "reason must not exceed 1000 characters.")
 	}
 	var appended persistence.SessionEvent
-	result, err := runIdempotent(ctx, s, worker.ID, requestID, "execution.release", struct {
+	result, err := runIdempotent(ctx, s, worker, requestID, "execution.release", struct {
 		ExecutionID uuid.UUID         `json:"executionId"`
 		Input       ReleaseLeaseInput `json:"input"`
 	}{executionID, input}, 200, func(tx *gorm.DB) (Execution, error) {
-		lease, execution, err := s.lockLease(ctx, tx, worker.ID, executionID, input.LeaseInput, true)
+		lease, execution, err := s.lockLease(ctx, tx, worker, executionID, input.LeaseInput, true)
 		if err != nil {
 			return Execution{}, err
+		}
+		deleting, err := executionTenantDeleting(ctx, tx, execution.TenantID)
+		if err != nil {
+			return Execution{}, err
+		}
+		if deleting {
+			appended, err = s.cancelExecutionLocked(
+				ctx, tx, &execution, &lease, "worker", &worker.ID, s.now(), "tenant-delete",
+			)
+			if err != nil {
+				return Execution{}, err
+			}
+			return toExecution(execution), nil
 		}
 		if err := tx.WithContext(ctx).Delete(&lease).Error; err != nil {
 			return Execution{}, problem.Wrap(500, "lease_release_failed", "Failed to release the execution lease.", err)
@@ -607,6 +630,20 @@ func (s *Service) RecoverExpired(ctx context.Context, limit int) error {
 			}
 			if err != nil {
 				return problem.Wrap(500, "expired_execution_lock_failed", "Failed to lock an expired execution.", err)
+			}
+			deleting, err := executionTenantDeleting(ctx, tx, execution.TenantID)
+			if err != nil {
+				return err
+			}
+			if deleting && containsExecutionStatus(nonterminalExecutionStatuses, execution.Status) {
+				event, err := s.cancelExecutionLocked(
+					ctx, tx, &execution, &lease, "system", nil, s.now(), "tenant-delete",
+				)
+				if err != nil {
+					return err
+				}
+				appended = append(appended, event)
+				continue
 			}
 			if err := tx.WithContext(ctx).Delete(&lease).Error; err != nil {
 				return problem.Wrap(500, "expired_lease_release_failed", "Failed to release an expired execution lease.", err)
@@ -680,12 +717,16 @@ func (s *Service) RecoverExpired(ctx context.Context, limit int) error {
 func (s *Service) lockLease(
 	ctx context.Context,
 	tx *gorm.DB,
-	workerID, executionID uuid.UUID,
+	worker persistence.WorkerInstance,
+	executionID uuid.UUID,
 	input LeaseInput,
 	requireToken bool,
 ) (persistence.WorkerLease, persistence.AgentExecution, error) {
 	if input.TenantID == uuid.Nil || input.Generation <= 0 || (requireToken && strings.TrimSpace(input.LeaseToken) == "") {
 		return persistence.WorkerLease{}, persistence.AgentExecution{}, problem.New(400, "invalid_lease_envelope", "tenantId, generation, and leaseToken are required.")
+	}
+	if err := lockCurrentWorkerIncarnation(ctx, tx, worker); err != nil {
+		return persistence.WorkerLease{}, persistence.AgentExecution{}, err
 	}
 	var lease persistence.WorkerLease
 	err := persistence.WithLocking(tx.WithContext(ctx), "UPDATE", "").
@@ -696,7 +737,7 @@ func (s *Service) lockLease(
 	if err != nil {
 		return persistence.WorkerLease{}, persistence.AgentExecution{}, problem.Wrap(500, "lease_lock_failed", "Failed to lock the execution lease.", err)
 	}
-	if lease.WorkerID != workerID || lease.Generation != input.Generation {
+	if lease.WorkerID != worker.ID || lease.Generation != input.Generation {
 		return persistence.WorkerLease{}, persistence.AgentExecution{}, problem.New(409, "generation_fenced", "The worker generation is no longer current.")
 	}
 	if requireToken && subtle.ConstantTimeCompare(lease.LeaseTokenHash, secret.HashToken(strings.TrimSpace(input.LeaseToken))) != 1 {
@@ -714,7 +755,7 @@ func (s *Service) lockLease(
 	if err != nil {
 		return persistence.WorkerLease{}, persistence.AgentExecution{}, problem.Wrap(500, "execution_lock_failed", "Failed to lock the execution.", err)
 	}
-	if execution.WorkerID == nil || *execution.WorkerID != workerID || execution.Generation != input.Generation ||
+	if execution.WorkerID == nil || *execution.WorkerID != worker.ID || execution.Generation != input.Generation ||
 		(execution.Status != "leased" && execution.Status != "running" && execution.Status != "waiting-for-approval") {
 		return persistence.WorkerLease{}, persistence.AgentExecution{}, problem.New(409, "generation_fenced", "The worker generation is no longer current.")
 	}
@@ -729,6 +770,9 @@ func (s *Service) requireClaimableWorker(ctx context.Context, tx *gorm.DB, worke
 	}
 	if err != nil {
 		return persistence.WorkerInstance{}, problem.Wrap(500, "worker_lock_failed", "Failed to lock the worker.", err)
+	}
+	if worker.ProtocolVersion != WorkerProtocolVersion {
+		return persistence.WorkerInstance{}, unsupportedWorkerProtocol(worker.ProtocolVersion)
 	}
 	if worker.Status != "online" {
 		return persistence.WorkerInstance{}, problem.New(409, "worker_not_claimable", "Only online workers can claim executions.")

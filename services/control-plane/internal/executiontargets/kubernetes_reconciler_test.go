@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"testing"
 	"time"
@@ -27,9 +29,22 @@ func TestKubernetesReconcilerAppliesSecurityFoundationAndExecutionPods(t *testin
 	client := newFakeKubernetesClient()
 	fixture.reconciler.factory = &fakeKubernetesFactory{client: client}
 	recoveryCalls := 0
+	var observedPodUIDSets [][]string
 	fixture.reconciler.config.RecoverExpired = func(context.Context, int) error {
 		recoveryCalls++
 		return nil
+	}
+	fixture.reconciler.config.ReconcileEphemeralWorkspaceCleanup = func(
+		_ context.Context,
+		targetID uuid.UUID,
+		podUIDs []string,
+		_ time.Time,
+	) (int, error) {
+		if targetID != fixture.targetID {
+			t.Fatalf("unexpected ephemeral cleanup target: %s", targetID)
+		}
+		observedPodUIDSets = append(observedPodUIDSets, append([]string(nil), podUIDs...))
+		return 0, nil
 	}
 
 	if err := fixture.reconciler.ReconcileOnce(context.Background()); err != nil {
@@ -37,6 +52,9 @@ func TestKubernetesReconcilerAppliesSecurityFoundationAndExecutionPods(t *testin
 	}
 	if recoveryCalls != 1 {
 		t.Fatalf("Kubernetes reconciliation did not run lease recovery: %d", recoveryCalls)
+	}
+	if len(observedPodUIDSets) != 1 || len(observedPodUIDSets[0]) != 0 {
+		t.Fatalf("first ephemeral cleanup pass saw unexpected Pods: %#v", observedPodUIDSets)
 	}
 	for _, kind := range []string{"Namespace", "ServiceAccount", "Secret", "ResourceQuota", "NetworkPolicy", "Pod"} {
 		if client.kindCount(kind) == 0 {
@@ -67,6 +85,9 @@ func TestKubernetesReconcilerAppliesSecurityFoundationAndExecutionPods(t *testin
 	}
 	if value, found := kubernetesEnvironmentValue(container, "SYNARA_AGENTD_GIT_CACHE_ROOT"); !found || value != "/data/git-cache" {
 		t.Fatalf("Kubernetes default Git cache root environment is %q", value)
+	}
+	if fieldPath, found := kubernetesEnvironmentFieldPath(container, "SYNARA_AGENTD_INSTANCE_UID"); !found || fieldPath != "metadata.uid" {
+		t.Fatalf("Kubernetes Pod UID environment uses %q", fieldPath)
 	}
 	volumes := spec["volumes"].([]any)
 	workspaceVolume := kubernetesNamedObject(volumes, "workspace")
@@ -118,8 +139,17 @@ func TestKubernetesReconcilerAppliesSecurityFoundationAndExecutionPods(t *testin
 	if err := fixture.db.Model(&persistence.AgentExecution{}).Where("id = ?", fixture.executionIDs[0]).Update("status", "completed").Error; err != nil {
 		t.Fatal(err)
 	}
+	driftedPodUID := uuid.NewString()
+	client.pods["label-drifted-worker"] = kubernetesPod{
+		Name: "label-drifted-worker", UID: driftedPodUID, Phase: "Running",
+		Labels: map[string]string{kubernetesTargetLabel: uuid.NewString()},
+	}
 	if err := fixture.reconciler.ReconcileOnce(context.Background()); err != nil {
 		t.Fatal(err)
+	}
+	if len(observedPodUIDSets) != 2 || len(observedPodUIDSets[1]) != 2 ||
+		!containsString(observedPodUIDSets[1], driftedPodUID) {
+		t.Fatalf("ephemeral cleanup did not receive the namespace-wide Pod UID set: %#v", observedPodUIDSets)
 	}
 	if len(client.deletedPods) != 1 || client.kindCount("Pod") != 2 {
 		t.Fatalf("Kubernetes scheduler did not retire and replace the terminal execution Pod: deleted=%#v pods=%d", client.deletedPods, client.kindCount("Pod"))
@@ -186,6 +216,162 @@ func TestKubernetesReconcilerMountsPersistentGitCacheVolume(t *testing.T) {
 	if workspaceMount == nil || workspaceMount["mountPath"] != "/data" ||
 		gitCacheMount == nil || gitCacheMount["mountPath"] != "/git-cache" {
 		t.Fatalf("Kubernetes workspace or Git cache mount is invalid: %#v", volumeMounts)
+	}
+}
+
+func TestKubernetesReconcilerSkipsCleanupWhenNamespacePodIdentityListFails(t *testing.T) {
+	fixture := newKubernetesReconcileFixture(t, "")
+	client := newFakeKubernetesClient()
+	client.listPodUIDsErr = fmt.Errorf("namespace list failed")
+	fixture.reconciler.factory = &fakeKubernetesFactory{client: client}
+	cleanupCalls := 0
+	fixture.reconciler.config.ReconcileEphemeralWorkspaceCleanup = func(
+		context.Context, uuid.UUID, []string, time.Time,
+	) (int, error) {
+		cleanupCalls++
+		return 0, nil
+	}
+
+	if err := fixture.reconciler.ReconcileOnce(context.Background()); err == nil {
+		t.Fatal("Kubernetes reconciliation accepted an incomplete namespace Pod identity list")
+	}
+	if cleanupCalls != 0 {
+		t.Fatalf("ephemeral Workspace cleanup ran %d times with an incomplete Pod identity list", cleanupCalls)
+	}
+}
+
+func TestKubernetesReconcilerRejectsEmptyNamespacePodUID(t *testing.T) {
+	fixture := newKubernetesReconcileFixture(t, "")
+	client := newFakeKubernetesClient()
+	client.pods["invalid-identity"] = kubernetesPod{
+		Name: "invalid-identity", UID: " ", Phase: "Running", Labels: map[string]string{},
+	}
+	fixture.reconciler.factory = &fakeKubernetesFactory{client: client}
+	cleanupCalls := 0
+	fixture.reconciler.config.ReconcileEphemeralWorkspaceCleanup = func(
+		context.Context, uuid.UUID, []string, time.Time,
+	) (int, error) {
+		cleanupCalls++
+		return 0, nil
+	}
+
+	if err := fixture.reconciler.ReconcileOnce(context.Background()); err == nil {
+		t.Fatal("Kubernetes reconciliation accepted an empty Pod UID")
+	}
+	if cleanupCalls != 0 {
+		t.Fatalf("ephemeral Workspace cleanup ran %d times with an invalid Pod UID", cleanupCalls)
+	}
+}
+
+func TestKubernetesClientDeletePodUsesExactUIDPrecondition(t *testing.T) {
+	currentUID := uuid.NewString()
+	deleted := false
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodDelete || request.URL.Path != "/api/v1/namespaces/synara-test/pods/worker" {
+			t.Fatalf("unexpected Kubernetes delete request: %s %s", request.Method, request.URL.Path)
+		}
+		if request.Header.Get("Content-Type") != "application/json" {
+			t.Fatalf("unexpected Kubernetes delete content type %q", request.Header.Get("Content-Type"))
+		}
+		var options struct {
+			Preconditions struct {
+				UID string `json:"uid"`
+			} `json:"preconditions"`
+		}
+		if err := json.NewDecoder(request.Body).Decode(&options); err != nil {
+			t.Fatal(err)
+		}
+		if options.Preconditions.UID != currentUID {
+			writer.WriteHeader(http.StatusConflict)
+			_, _ = writer.Write([]byte(`{"reason":"Conflict","message":"UID precondition failed"}`))
+			return
+		}
+		deleted = true
+		writer.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	client := &kubernetesHTTPClient{baseURL: server.URL, token: "test-token", client: server.Client()}
+	if err := client.DeletePod(context.Background(), "synara-test", "worker", uuid.NewString()); err == nil {
+		t.Fatal("same-name replacement Pod was deleted with a stale UID")
+	}
+	if deleted {
+		t.Fatal("Kubernetes API accepted deletion with a stale UID")
+	}
+	if err := client.DeletePod(context.Background(), "synara-test", "worker", currentUID); err != nil {
+		t.Fatal(err)
+	}
+	if !deleted {
+		t.Fatal("exact Pod UID precondition did not allow deletion")
+	}
+}
+
+func TestKubernetesClientListsNamespaceWidePodUIDsForCleanup(t *testing.T) {
+	firstUID, secondUID := uuid.NewString(), uuid.NewString()
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		requests++
+		if request.Method != http.MethodGet || request.URL.Path != "/api/v1/namespaces/synara-test/pods" {
+			t.Fatalf("unexpected Kubernetes list request: %s %s", request.Method, request.URL.Path)
+		}
+		if request.URL.Query().Has("labelSelector") {
+			t.Fatalf("cleanup Pod identity list used a mutable label selector: %s", request.URL.RawQuery)
+		}
+		if request.URL.Query().Get("limit") != "100" {
+			t.Fatalf("cleanup Pod identity list omitted its bounded page size: %s", request.URL.RawQuery)
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		if request.URL.Query().Get("continue") == "" {
+			_, _ = fmt.Fprintf(writer, `{"metadata":{"continue":"next-page"},"items":[{"metadata":{"name":"managed","uid":%q,"labels":{"synara.io/execution-target-id":"target"}},"status":{"phase":"Running"}}]}`, firstUID)
+			return
+		}
+		if request.URL.Query().Get("continue") != "next-page" {
+			t.Fatalf("unexpected Kubernetes continuation token: %s", request.URL.RawQuery)
+		}
+		_, _ = fmt.Fprintf(writer, `{"metadata":{"continue":""},"items":[{"metadata":{"name":"drifted","uid":%q,"labels":{}},"status":{"phase":"Running"}}]}`, secondUID)
+	}))
+	defer server.Close()
+
+	client := &kubernetesHTTPClient{baseURL: server.URL, token: "test-token", client: server.Client()}
+	uids, err := client.ListPodUIDs(context.Background(), "synara-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(uids) != 2 || !containsString(uids, firstUID) || !containsString(uids, secondUID) {
+		t.Fatalf("namespace-wide Pod UID list = %#v", uids)
+	}
+	if requests != 2 {
+		t.Fatalf("namespace-wide Pod UID list used %d requests, want 2 paginated requests", requests)
+	}
+}
+
+func TestKubernetesClientRejectsIncompletePaginatedPodUIDList(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		requests++
+		if request.URL.Query().Get("limit") != "100" {
+			t.Fatalf("Kubernetes Pod list omitted its bounded page size: %s", request.URL.RawQuery)
+		}
+		if requests == 1 {
+			writer.Header().Set("Content-Type", "application/json")
+			_, _ = writer.Write([]byte(`{"metadata":{"continue":"next-page"},"items":[{"metadata":{"name":"first","uid":"first-uid","labels":{}},"status":{"phase":"Running"}}]}`))
+			return
+		}
+		writer.WriteHeader(http.StatusInternalServerError)
+		_, _ = writer.Write([]byte(`{"reason":"InternalError","message":"second page failed"}`))
+	}))
+	defer server.Close()
+
+	client := &kubernetesHTTPClient{baseURL: server.URL, token: "test-token", client: server.Client()}
+	uids, err := client.ListPodUIDs(context.Background(), "synara-test")
+	if err == nil {
+		t.Fatalf("Kubernetes client accepted incomplete paginated Pod UIDs: %#v", uids)
+	}
+	if uids != nil {
+		t.Fatalf("Kubernetes client returned partial Pod UIDs after a page failure: %#v", uids)
+	}
+	if requests != 2 {
+		t.Fatalf("Kubernetes client made %d list requests, want 2", requests)
 	}
 }
 
@@ -288,9 +474,10 @@ func (f *fakeKubernetesFactory) Open(kubernetesTargetConfiguration) (kubernetesC
 }
 
 type fakeKubernetesClient struct {
-	applied     []map[string]any
-	pods        map[string]kubernetesPod
-	deletedPods []string
+	applied        []map[string]any
+	pods           map[string]kubernetesPod
+	deletedPods    []string
+	listPodUIDsErr error
 }
 
 func newFakeKubernetesClient() *fakeKubernetesClient {
@@ -303,20 +490,37 @@ func (c *fakeKubernetesClient) Apply(_ context.Context, _ string, object map[str
 		metadata := object["metadata"].(map[string]any)
 		name := metadata["name"].(string)
 		labels := metadata["labels"].(map[string]string)
-		c.pods[name] = kubernetesPod{Name: name, Phase: "Pending", Labels: labels}
+		c.pods[name] = kubernetesPod{Name: name, UID: uuid.NewString(), Phase: "Pending", Labels: labels}
 	}
 	return nil
 }
 
-func (c *fakeKubernetesClient) ListPods(_ context.Context, _ string, _ uuid.UUID) ([]kubernetesPod, error) {
+func (c *fakeKubernetesClient) ListPods(_ context.Context, _ string, targetID uuid.UUID) ([]kubernetesPod, error) {
 	items := make([]kubernetesPod, 0, len(c.pods))
 	for _, pod := range c.pods {
-		items = append(items, pod)
+		if pod.Labels[kubernetesTargetLabel] == targetID.String() {
+			items = append(items, pod)
+		}
 	}
 	return items, nil
 }
 
-func (c *fakeKubernetesClient) DeletePod(_ context.Context, _ string, name string) error {
+func (c *fakeKubernetesClient) ListPodUIDs(_ context.Context, _ string) ([]string, error) {
+	if c.listPodUIDsErr != nil {
+		return nil, c.listPodUIDsErr
+	}
+	uids := make([]string, 0, len(c.pods))
+	for _, pod := range c.pods {
+		uids = append(uids, pod.UID)
+	}
+	return uids, nil
+}
+
+func (c *fakeKubernetesClient) DeletePod(_ context.Context, _ string, name, uid string) error {
+	pod, found := c.pods[name]
+	if found && pod.UID != uid {
+		return fmt.Errorf("Pod UID precondition failed: current=%s requested=%s", pod.UID, uid)
+	}
 	c.deletedPods = append(c.deletedPods, name)
 	delete(c.pods, name)
 	return nil
@@ -341,6 +545,15 @@ func (c *fakeKubernetesClient) lastKind(kind string) map[string]any {
 	return nil
 }
 
+func containsString(values []string, expected string) bool {
+	for _, value := range values {
+		if value == expected {
+			return true
+		}
+	}
+	return false
+}
+
 func kubernetesEnvironmentValue(container map[string]any, name string) (string, bool) {
 	for _, item := range container["env"].([]any) {
 		entry := item.(map[string]any)
@@ -348,6 +561,26 @@ func kubernetesEnvironmentValue(container map[string]any, name string) (string, 
 			value, ok := entry["value"].(string)
 			return value, ok
 		}
+	}
+	return "", false
+}
+
+func kubernetesEnvironmentFieldPath(container map[string]any, name string) (string, bool) {
+	for _, item := range container["env"].([]any) {
+		entry := item.(map[string]any)
+		if entry["name"] != name {
+			continue
+		}
+		valueFrom, ok := entry["valueFrom"].(map[string]any)
+		if !ok {
+			return "", false
+		}
+		fieldRef, ok := valueFrom["fieldRef"].(map[string]any)
+		if !ok {
+			return "", false
+		}
+		fieldPath, ok := fieldRef["fieldPath"].(string)
+		return fieldPath, ok
 	}
 	return "", false
 }

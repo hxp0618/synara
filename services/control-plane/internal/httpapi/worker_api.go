@@ -49,6 +49,99 @@ func (s *Server) workerHeartbeat(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, worker)
 }
 
+func (s *Server) claimWorkspaceCleanup(w http.ResponseWriter, r *http.Request) {
+	var input executions.WorkspaceCleanupClaimInput
+	if err := decodeJSON(r, &input); err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	result, err := s.executions.ClaimWorkspaceCleanup(r.Context(), mustWorker(r), input, requestID(r))
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	writeOperation(w, result.Replayed, result.StatusCode, result.Value)
+}
+
+func (s *Server) renewWorkspaceCleanup(w http.ResponseWriter, r *http.Request) {
+	s.handleWorkspaceCleanupLeaseAction(w, r, "renew")
+}
+
+func (s *Server) startWorkspaceCleanup(w http.ResponseWriter, r *http.Request) {
+	s.handleWorkspaceCleanupLeaseAction(w, r, "started")
+}
+
+func (s *Server) acknowledgeWorkspaceCleanup(w http.ResponseWriter, r *http.Request) {
+	s.handleWorkspaceCleanupLeaseAction(w, r, "acknowledged")
+}
+
+func (s *Server) releaseWorkspaceCleanup(w http.ResponseWriter, r *http.Request) {
+	s.handleWorkspaceCleanupLeaseAction(w, r, "release")
+}
+
+func (s *Server) handleWorkspaceCleanupLeaseAction(w http.ResponseWriter, r *http.Request, action string) {
+	cleanupID, ok := s.pathUUID(w, r, "cleanupID")
+	if !ok {
+		return
+	}
+	var input executions.WorkspaceCleanupLeaseInput
+	if err := decodeJSON(r, &input); err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	worker := mustWorker(r)
+	switch action {
+	case "renew":
+		result, err := s.executions.RenewWorkspaceCleanup(r.Context(), worker, cleanupID, input, requestID(r))
+		if err != nil {
+			s.writeError(w, r, err)
+			return
+		}
+		writeOperation(w, result.Replayed, result.StatusCode, result.Value)
+	case "started":
+		result, err := s.executions.StartWorkspaceCleanup(r.Context(), worker, cleanupID, input, requestID(r))
+		if err != nil {
+			s.writeError(w, r, err)
+			return
+		}
+		writeOperation(w, result.Replayed, result.StatusCode, result.Value)
+	case "acknowledged":
+		result, err := s.executions.AcknowledgeWorkspaceCleanup(r.Context(), worker, cleanupID, input, requestID(r))
+		if err != nil {
+			s.writeError(w, r, err)
+			return
+		}
+		writeOperation(w, result.Replayed, result.StatusCode, result.Value)
+	case "release":
+		result, err := s.executions.ReleaseWorkspaceCleanup(r.Context(), worker, cleanupID, input, requestID(r))
+		if err != nil {
+			s.writeError(w, r, err)
+			return
+		}
+		writeOperation(w, result.Replayed, result.StatusCode, result.Value)
+	default:
+		s.writeError(w, r, problem.New(500, "internal_error", "Unsupported Workspace cleanup action."))
+	}
+}
+
+func (s *Server) failWorkspaceCleanup(w http.ResponseWriter, r *http.Request) {
+	cleanupID, ok := s.pathUUID(w, r, "cleanupID")
+	if !ok {
+		return
+	}
+	var input executions.WorkspaceCleanupFailedInput
+	if err := decodeJSON(r, &input); err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	result, err := s.executions.FailWorkspaceCleanup(r.Context(), mustWorker(r), cleanupID, input, requestID(r))
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	writeOperation(w, result.Replayed, result.StatusCode, result.Value)
+}
+
 func (s *Server) claimExecution(w http.ResponseWriter, r *http.Request) {
 	var input executions.ClaimExecutionInput
 	if err := decodeJSON(r, &input); err != nil {

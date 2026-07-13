@@ -17,6 +17,38 @@ import (
 	"github.com/synara-ai/synara/services/control-plane/internal/executions"
 )
 
+const (
+	workspaceCleanupProbeExecutionInterval = 4
+	workspaceCleanupProbeMaximumInterval   = 30 * time.Second
+)
+
+type workspaceCleanupClaimSchedule struct {
+	executionsSinceProbe int
+	lastProbe            time.Time
+}
+
+func newWorkspaceCleanupClaimSchedule(now time.Time) workspaceCleanupClaimSchedule {
+	return workspaceCleanupClaimSchedule{lastProbe: now}
+}
+
+func (s workspaceCleanupClaimSchedule) due(now time.Time) bool {
+	return s.executionsSinceProbe >= workspaceCleanupProbeExecutionInterval ||
+		(!s.lastProbe.IsZero() && now.Sub(s.lastProbe) >= workspaceCleanupProbeMaximumInterval)
+}
+
+func (s *workspaceCleanupClaimSchedule) recordExecution() {
+	s.executionsSinceProbe++
+}
+
+func (s *workspaceCleanupClaimSchedule) recordProbe(now time.Time) {
+	s.executionsSinceProbe = 0
+	s.lastProbe = now
+}
+
+func workspaceCleanupClaimsEnabled(config Config) bool {
+	return config.AssignedExecutionID == nil
+}
+
 type Daemon struct {
 	config    Config
 	client    *Client
@@ -55,6 +87,8 @@ func (d *Daemon) Run(ctx context.Context) error {
 	heartbeatContext, stopHeartbeat := context.WithCancel(runContext)
 	defer stopHeartbeat()
 	go d.heartbeatLoop(heartbeatContext)
+	cleanupSchedule := newWorkspaceCleanupClaimSchedule(time.Now())
+	canClaimWorkspaceCleanup := workspaceCleanupClaimsEnabled(d.config)
 
 	for {
 		if d.draining.Load() || runContext.Err() != nil {
@@ -62,6 +96,21 @@ func (d *Daemon) Run(ctx context.Context) error {
 				<-drainMarked
 			}
 			return nil
+		}
+		probedWorkspaceCleanup := false
+		if canClaimWorkspaceCleanup && cleanupSchedule.due(time.Now()) {
+			claimedCleanup, enteredDrain, cleanupErr := d.claimAndRunWorkspaceCleanup(runContext)
+			cleanupSchedule.recordProbe(time.Now())
+			probedWorkspaceCleanup = true
+			if enteredDrain {
+				<-drainMarked
+				return nil
+			}
+			if cleanupErr != nil {
+				d.logger.Warn("Workspace cleanup fairness probe failed", "error", cleanupErr)
+			} else if claimedCleanup {
+				continue
+			}
 		}
 		claim, err := d.client.Claim(runContext, d.config)
 		if err != nil {
@@ -78,6 +127,30 @@ func (d *Daemon) Run(ctx context.Context) error {
 			continue
 		}
 		if claim.Execution == nil || claim.Lease == nil {
+			if canClaimWorkspaceCleanup && !probedWorkspaceCleanup {
+				claimedCleanup, enteredDrain, cleanupErr := d.claimAndRunWorkspaceCleanup(runContext)
+				cleanupSchedule.recordProbe(time.Now())
+				if enteredDrain {
+					<-drainMarked
+					return nil
+				}
+				if cleanupErr != nil {
+					if d.draining.Load() || runContext.Err() != nil {
+						if d.draining.Load() {
+							<-drainMarked
+						}
+						return nil
+					}
+					d.logger.Warn("Workspace cleanup claim failed", "error", cleanupErr)
+					if !waitContext(runContext, d.config.PollInterval) {
+						return nil
+					}
+					continue
+				}
+				if claimedCleanup {
+					continue
+				}
+			}
 			if !waitContext(runContext, d.config.PollInterval) {
 				return nil
 			}
@@ -91,15 +164,194 @@ func (d *Daemon) Run(ctx context.Context) error {
 		if claim.Workload == nil {
 			_ = d.client.Release(runContext, claim.Execution.ID, *claim.Lease, "claim omitted workload")
 			d.logger.Error("claimed execution omitted workload", "executionId", claim.Execution.ID)
+			cleanupSchedule.recordExecution()
 			continue
 		}
 		if err := d.runExecution(runContext, *claim.Execution, *claim.Lease, *claim.Workload, claim.ProviderResumeCursor); err != nil {
 			d.logger.Error("execution runner failed", "executionId", claim.Execution.ID, "generation", claim.Lease.Generation, "error", err)
 		}
+		cleanupSchedule.recordExecution()
 		if d.draining.Load() {
 			<-drainMarked
 			return nil
 		}
+	}
+}
+
+func (d *Daemon) claimAndRunWorkspaceCleanup(ctx context.Context) (bool, bool, error) {
+	result, err := d.client.ClaimWorkspaceCleanup(ctx, d.config)
+	if err != nil {
+		return false, false, err
+	}
+	if result.Cleanup == nil {
+		return false, false, nil
+	}
+	claim := *result.Cleanup
+	if d.draining.Load() {
+		d.releaseWorkspaceCleanupDuringShutdown(claim, "Worker entered Drain after claiming Workspace cleanup")
+		return false, true, nil
+	}
+	if err := d.runWorkspaceCleanup(ctx, claim); err != nil {
+		d.logger.Error(
+			"Workspace cleanup failed",
+			"cleanupId", claim.CleanupID,
+			"materializationId", claim.MaterializationID,
+			"dispatchGeneration", claim.DispatchGeneration,
+			"error", err,
+		)
+	}
+	return true, false, nil
+}
+
+func (d *Daemon) runWorkspaceCleanup(
+	ctx context.Context,
+	claim executions.WorkspaceCleanupClaim,
+) error {
+	cleaner, ok := d.workspace.(workspaceCleaner)
+	if !ok {
+		reportErr := d.client.FailWorkspaceCleanup(
+			ctx,
+			claim,
+			"workspace_cleanup_unsupported",
+			"This Worker does not provide the managed Workspace cleanup engine.",
+			false,
+		)
+		return errors.Join(errors.New("Workspace cleanup engine is unavailable"), reportErr)
+	}
+
+	cleanupContext, cancelCleanup := context.WithCancel(ctx)
+	renewErrors := make(chan error, 1)
+	go d.renewWorkspaceCleanupLoop(cleanupContext, claim, cancelCleanup, renewErrors)
+	renewStopped := false
+	stopRenewal := func() error {
+		if renewStopped {
+			return nil
+		}
+		renewStopped = true
+		cancelCleanup()
+		return drainRenewError(renewErrors)
+	}
+	defer func() { _ = stopRenewal() }()
+
+	if err := d.client.StartWorkspaceCleanup(cleanupContext, claim); err != nil {
+		renewErr := stopRenewal()
+		reportErr := d.reportWorkspaceCleanupFailure(
+			claim,
+			"workspace_cleanup_start_failed",
+			"The Workspace cleanup could not be started after its safety fence was revalidated.",
+			true,
+		)
+		return errors.Join(fmt.Errorf("start Workspace cleanup: %w", err), renewErr, reportErr)
+	}
+
+	result, cleanupErr := cleaner.CleanupWorkspace(cleanupContext, workspaceCleanupRequestFromClaim(claim))
+	renewErr := stopRenewal()
+	if cleanupErr != nil {
+		code := "workspace_cleanup_failed"
+		message := "The Workspace cleanup failed before the physical materialization was confirmed absent."
+		retryable := true
+		var typed *WorkspaceCleanupError
+		if errors.As(cleanupErr, &typed) {
+			code = typed.Code
+			message = typed.Message
+			retryable = typed.Retryable
+		}
+		reportErr := d.reportWorkspaceCleanupFailure(claim, code, message, retryable)
+		return errors.Join(cleanupErr, renewErr, reportErr)
+	}
+	if renewErr != nil {
+		return renewErr
+	}
+	if err := d.client.AcknowledgeWorkspaceCleanup(ctx, claim); err != nil {
+		return fmt.Errorf("acknowledge Workspace cleanup: %w", err)
+	}
+	d.logger.Info(
+		"Workspace cleanup acknowledged",
+		"cleanupId", claim.CleanupID,
+		"materializationId", claim.MaterializationID,
+		"dispatchGeneration", claim.DispatchGeneration,
+		"outcome", result.Status,
+	)
+	return nil
+}
+
+func workspaceCleanupRequestFromClaim(claim executions.WorkspaceCleanupClaim) WorkspaceCleanupRequest {
+	return WorkspaceCleanupRequest{
+		CleanupID:          claim.CleanupID,
+		TenantID:           claim.TenantID,
+		OrganizationID:     claim.OrganizationID,
+		ProjectID:          claim.ProjectID,
+		SessionID:          claim.SessionID,
+		LogicalWorkspaceID: claim.LogicalWorkspaceID,
+		MaterializationID:  claim.MaterializationID,
+		IncarnationID:      claim.IncarnationID,
+		ExecutionTargetID:  claim.ExecutionTargetID,
+		TargetKind:         claim.TargetKind,
+		StorageScope:       claim.StorageScope,
+		LayoutVersion:      claim.LayoutVersion,
+		DispatchGeneration: claim.DispatchGeneration,
+	}
+}
+
+func (d *Daemon) renewWorkspaceCleanupLoop(
+	ctx context.Context,
+	claim executions.WorkspaceCleanupClaim,
+	cancel context.CancelFunc,
+	result chan<- error,
+) {
+	ticker := time.NewTicker(d.config.LeaseRenewInterval)
+	defer ticker.Stop()
+	defer close(result)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			requestContext, requestCancel := context.WithTimeout(ctx, d.config.RequestTimeout)
+			err := d.client.RenewWorkspaceCleanup(requestContext, claim)
+			requestCancel()
+			if err != nil {
+				select {
+				case result <- fmt.Errorf("renew Workspace cleanup lease: %w", err):
+				default:
+				}
+				cancel()
+				return
+			}
+		}
+	}
+}
+
+func (d *Daemon) reportWorkspaceCleanupFailure(
+	claim executions.WorkspaceCleanupClaim,
+	code, message string,
+	retryable bool,
+) error {
+	if len(message) > 10_000 {
+		message = message[:10_000]
+	}
+	reportContext, cancel := context.WithTimeout(context.Background(), d.shutdownRequestTimeout())
+	defer cancel()
+	if err := d.client.FailWorkspaceCleanup(reportContext, claim, code, message, retryable); err != nil {
+		return fmt.Errorf("report Workspace cleanup failure: %w", err)
+	}
+	return nil
+}
+
+func (d *Daemon) releaseWorkspaceCleanupDuringShutdown(
+	claim executions.WorkspaceCleanupClaim,
+	reason string,
+) {
+	releaseContext, cancel := context.WithTimeout(context.Background(), d.shutdownRequestTimeout())
+	defer cancel()
+	if err := d.client.ReleaseWorkspaceCleanup(releaseContext, claim); err != nil {
+		d.logger.Warn(
+			"Workspace cleanup release during Drain failed",
+			"cleanupId", claim.CleanupID,
+			"dispatchGeneration", claim.DispatchGeneration,
+			"reason", reason,
+			"error", err,
+		)
 	}
 }
 

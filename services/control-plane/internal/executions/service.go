@@ -79,7 +79,8 @@ func (s *Service) Register(ctx context.Context, input RegisterWorkerInput) (Regi
 			Take(&model).Error
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			model = persistence.WorkerInstance{
-				ID: uuid.New(), ExecutionTargetID: normalized.ExecutionTargetID, TargetKind: normalized.TargetKind,
+				ID: uuid.New(), Incarnation: 1, InstanceUID: normalized.InstanceUID,
+				ExecutionTargetID: normalized.ExecutionTargetID, TargetKind: normalized.TargetKind,
 				ClusterID: normalized.ClusterID,
 				Namespace: normalized.Namespace, PodName: normalized.PodName, Version: normalized.Version,
 				ProtocolVersion: normalized.ProtocolVersion,
@@ -97,6 +98,7 @@ func (s *Service) Register(ctx context.Context, input RegisterWorkerInput) (Regi
 			return problem.Wrap(500, "worker_registration_lookup_failed", "Failed to resolve the worker registration.", err)
 		}
 		updates := persistence.WorkerInstance{
+			Incarnation: model.Incarnation + 1, InstanceUID: normalized.InstanceUID,
 			TargetKind: normalized.TargetKind, Version: normalized.Version, ProtocolVersion: normalized.ProtocolVersion,
 			Capabilities: normalized.Capabilities, AuthTokenHash: tokenHash,
 			LeaseSupported: normalized.LeaseSupported, FencingSupported: normalized.FencingSupported,
@@ -105,13 +107,15 @@ func (s *Service) Register(ctx context.Context, input RegisterWorkerInput) (Regi
 		result := tx.WithContext(ctx).Model(&persistence.WorkerInstance{}).
 			Where("id = ?", model.ID).
 			Select(
-				"target_kind", "version", "protocol_version", "capabilities", "auth_token_hash", "lease_supported",
+				"incarnation", "instance_uid", "target_kind", "version", "protocol_version", "capabilities", "auth_token_hash", "lease_supported",
 				"fencing_supported", "status", "last_heartbeat_at", "draining_at", "terminated_at",
 			).Updates(&updates)
 		if err := expectOne(result, 500, "worker_registration_update_failed", "Failed to refresh the worker registration."); err != nil {
 			return err
 		}
 		model.ExecutionTargetID = normalized.ExecutionTargetID
+		model.Incarnation = updates.Incarnation
+		model.InstanceUID = normalized.InstanceUID
 		model.TargetKind = normalized.TargetKind
 		model.Version = normalized.Version
 		model.ProtocolVersion = normalized.ProtocolVersion
@@ -154,12 +158,11 @@ func (s *Service) Heartbeat(
 	worker persistence.WorkerInstance,
 	input HeartbeatInput,
 ) (Worker, error) {
-	protocolVersion := input.ProtocolVersion
-	if protocolVersion == 0 {
-		protocolVersion = WorkerProtocolVersion
+	if input.ProtocolVersion != WorkerProtocolVersion {
+		return Worker{}, unsupportedWorkerProtocol(input.ProtocolVersion)
 	}
-	if protocolVersion != WorkerProtocolVersion || worker.ProtocolVersion != WorkerProtocolVersion {
-		return Worker{}, unsupportedWorkerProtocol(protocolVersion)
+	if worker.ProtocolVersion != WorkerProtocolVersion {
+		return Worker{}, unsupportedWorkerProtocol(worker.ProtocolVersion)
 	}
 	now := s.now()
 	updates := persistence.WorkerInstance{LastHeartbeatAt: now}
@@ -188,17 +191,45 @@ func (s *Service) Heartbeat(
 		fields = append(fields, "capabilities")
 	}
 	result := s.db.WithContext(ctx).Model(&persistence.WorkerInstance{}).
-		Where("id = ? AND status <> ?", worker.ID, "terminated").Select(fields).Updates(&updates)
+		Where(
+			"id = ? AND incarnation = ? AND instance_uid = ? AND status <> ?",
+			worker.ID, worker.Incarnation, worker.InstanceUID, "terminated",
+		).
+		Select(fields).Updates(&updates)
 	if result.Error != nil {
 		return Worker{}, problem.Wrap(500, "worker_heartbeat_failed", "Failed to record the worker heartbeat.", result.Error)
 	}
 	if result.RowsAffected != 1 {
-		return Worker{}, problem.New(401, "worker_not_active", "The worker is no longer active.")
+		return Worker{}, problem.New(409, "worker_incarnation_fenced", "The Worker registration is no longer current.")
 	}
-	if err := s.db.WithContext(ctx).Where("id = ?", worker.ID).Take(&worker).Error; err != nil {
+	if err := s.db.WithContext(ctx).
+		Where(
+			"id = ? AND incarnation = ? AND instance_uid = ? AND status <> ?",
+			worker.ID, worker.Incarnation, worker.InstanceUID, "terminated",
+		).
+		Take(&worker).Error; errors.Is(err, gorm.ErrRecordNotFound) {
+		return Worker{}, problem.New(409, "worker_incarnation_fenced", "The Worker registration is no longer current.")
+	} else if err != nil {
 		return Worker{}, problem.Wrap(500, "worker_reload_failed", "Failed to reload the worker.", err)
 	}
 	return toWorker(worker), nil
+}
+
+func lockCurrentWorkerIncarnation(ctx context.Context, tx *gorm.DB, worker persistence.WorkerInstance) error {
+	var current persistence.WorkerInstance
+	err := persistence.WithLocking(tx.WithContext(ctx), "UPDATE", "").
+		Select("id", "incarnation", "instance_uid", "status").
+		Where("id = ? AND status <> ?", worker.ID, "terminated").Take(&current).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return problem.New(409, "worker_incarnation_fenced", "The Worker registration is no longer current.")
+	}
+	if err != nil {
+		return problem.Wrap(500, "worker_incarnation_lock_failed", "Failed to lock the current Worker registration.", err)
+	}
+	if current.Incarnation != worker.Incarnation || current.InstanceUID != worker.InstanceUID {
+		return problem.New(409, "worker_incarnation_fenced", "The Worker registration is no longer current.")
+	}
+	return nil
 }
 
 func (s *Service) markStaleWorkers(ctx context.Context) error {
@@ -249,6 +280,14 @@ func enqueueWorkerOffline(ctx context.Context, tx *gorm.DB, worker persistence.W
 }
 
 func normalizeRegistration(input RegisterWorkerInput) (RegisterWorkerInput, error) {
+	protocolVersion := input.ProtocolVersion
+	if protocolVersion != WorkerProtocolVersion {
+		return RegisterWorkerInput{}, unsupportedWorkerProtocol(protocolVersion)
+	}
+	instanceUID, err := uuid.Parse(strings.TrimSpace(input.InstanceUID))
+	if err != nil || instanceUID == uuid.Nil || instanceUID.String() != strings.TrimSpace(input.InstanceUID) {
+		return RegisterWorkerInput{}, problem.New(400, "invalid_worker_registration", "instanceUid must be a canonical lowercase UUID.")
+	}
 	fields := []struct {
 		value   string
 		name    string
@@ -267,13 +306,6 @@ func normalizeRegistration(input RegisterWorkerInput) (RegisterWorkerInput, erro
 	if input.ExecutionTargetID == uuid.Nil {
 		return RegisterWorkerInput{}, problem.New(400, "invalid_worker_registration", "executionTargetId is required.")
 	}
-	protocolVersion := input.ProtocolVersion
-	if protocolVersion == 0 {
-		protocolVersion = WorkerProtocolVersion
-	}
-	if protocolVersion != WorkerProtocolVersion {
-		return RegisterWorkerInput{}, unsupportedWorkerProtocol(protocolVersion)
-	}
 	kind, err := platform.ParseExecutionTargetKind(input.TargetKind)
 	if err != nil {
 		return RegisterWorkerInput{}, problem.New(400, "invalid_worker_registration", "targetKind is invalid.")
@@ -284,7 +316,8 @@ func normalizeRegistration(input RegisterWorkerInput) (RegisterWorkerInput, erro
 	}
 	return RegisterWorkerInput{
 		ExecutionTargetID: input.ExecutionTargetID, TargetKind: string(kind),
-		ClusterID: values[0], Namespace: values[1], PodName: values[2], Version: values[3],
+		InstanceUID: instanceUID.String(),
+		ClusterID:   values[0], Namespace: values[1], PodName: values[2], Version: values[3],
 		ProtocolVersion: protocolVersion,
 		Capabilities:    capabilities, LeaseSupported: input.LeaseSupported,
 		FencingSupported: input.FencingSupported,
@@ -292,7 +325,7 @@ func normalizeRegistration(input RegisterWorkerInput) (RegisterWorkerInput, erro
 }
 
 func unsupportedWorkerProtocol(received int) *problem.Error {
-	err := problem.New(426, "worker_protocol_version_unsupported", "The Worker Protocol version is not supported; upgrade synara-agentd.")
+	err := problem.New(426, "worker_protocol_version_unsupported", "Worker Protocol v2 is required; upgrade synara-agentd.")
 	err.Details = map[string]any{
 		"received": received, "minimumSupported": WorkerProtocolVersion, "maximumSupported": WorkerProtocolVersion,
 	}

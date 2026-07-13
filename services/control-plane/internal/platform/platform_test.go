@@ -1,6 +1,9 @@
 package platform
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestCompatibilityMatrix(t *testing.T) {
 	tests := []struct {
@@ -44,5 +47,16 @@ func TestPostgresSupportsEveryExecutionTargetKind(t *testing.T) {
 		if _, err := ParseExecutionTargetKind(value); err != nil {
 			t.Fatalf("postgres profile rejected target kind %q: %v", value, err)
 		}
+	}
+}
+
+func TestWorkerProtocolValidationNamesCurrentVersion(t *testing.T) {
+	config, err := Defaults(ProfileSingleNode)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config.LeaseEnabled = false
+	if err := config.Validate(); err == nil || !strings.Contains(err.Error(), "v2 worker protocol") {
+		t.Fatalf("expected current Worker Protocol version in validation error, got %v", err)
 	}
 }

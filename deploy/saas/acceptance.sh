@@ -2,6 +2,7 @@
 set -euo pipefail
 
 base_url="${1:-http://127.0.0.1:3773}"
+worker_protocol_version=2
 run_id="$(date +%s)-$$"
 work_dir="$(mktemp -d)"
 sse_pid=""
@@ -111,8 +112,9 @@ jq -e '.items | all(.tenantId != null and .organizationId != null and .projectId
   <<<"$events" >/dev/null
 
 worker_registration_token="${SYNARA_ACCEPTANCE_WORKER_REGISTRATION_TOKEN:-acceptance-worker-registration-token}"
+worker_instance_uid="$(new_uuid)"
 worker_registration="$(worker_json "$worker_registration_token" "register-$run_id" POST /v1/workers/register \
-  "{\"executionTargetId\":\"$execution_target_id\",\"targetKind\":\"$target_kind\",\"clusterId\":\"acceptance\",\"namespace\":\"default\",\"podName\":\"worker-$run_id\",\"version\":\"acceptance\",\"protocolVersion\":1,\"capabilities\":{\"codex\":true},\"leaseSupported\":true,\"fencingSupported\":true}")"
+  "{\"executionTargetId\":\"$execution_target_id\",\"targetKind\":\"$target_kind\",\"instanceUid\":\"$worker_instance_uid\",\"clusterId\":\"acceptance\",\"namespace\":\"default\",\"podName\":\"worker-$run_id\",\"version\":\"acceptance\",\"protocolVersion\":$worker_protocol_version,\"capabilities\":{\"codex\":true},\"leaseSupported\":true,\"fencingSupported\":true}")"
 worker_token="$(jq -er '.token' <<<"$worker_registration")"
 worker_id="$(jq -er '.worker.id' <<<"$worker_registration")"
 

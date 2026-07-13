@@ -5,6 +5,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/google/uuid"
 	"gorm.io/gorm"
 
 	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
@@ -17,7 +18,8 @@ func TestWorkerManifestPersistsAndBindsClaimedExecution(t *testing.T) {
 	service := integrationService(t, db)
 	registered, err := service.Register(context.Background(), RegisterWorkerInput{
 		ExecutionTargetID: fixture.TargetID, TargetKind: fixture.TargetKind,
-		ClusterID: "manifest-test", Namespace: "default", PodName: "manifest-worker",
+		InstanceUID: uuid.NewString(),
+		ClusterID:   "manifest-test", Namespace: "default", PodName: "manifest-worker",
 		Version: "worker-test", ProtocolVersion: WorkerProtocolVersion,
 		Capabilities: workerManifestTestCapabilities(), LeaseSupported: true, FencingSupported: true,
 	})
@@ -72,7 +74,8 @@ func TestWorkerManifestRejectsAssignedUnsupportedProvider(t *testing.T) {
 	}
 	registered, err := service.Register(context.Background(), RegisterWorkerInput{
 		ExecutionTargetID: fixture.TargetID, TargetKind: fixture.TargetKind,
-		ClusterID: "manifest-test", Namespace: "default", PodName: "incompatible-worker",
+		InstanceUID: uuid.NewString(),
+		ClusterID:   "manifest-test", Namespace: "default", PodName: "incompatible-worker",
 		Version: "worker-test", ProtocolVersion: WorkerProtocolVersion,
 		Capabilities: workerManifestTestCapabilities(), LeaseSupported: true, FencingSupported: true,
 	})

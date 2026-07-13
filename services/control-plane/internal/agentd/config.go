@@ -26,6 +26,7 @@ type Config struct {
 	ClusterID           string
 	Namespace           string
 	PodName             string
+	InstanceUID         string
 	Version             string
 	BuildGitSHA         string
 	ImageDigest         string
@@ -91,11 +92,24 @@ func LoadConfig() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	instanceUID := strings.TrimSpace(os.Getenv("SYNARA_AGENTD_INSTANCE_UID"))
+	if instanceUID == "" {
+		if targetKind == platform.TargetKubernetes {
+			return Config{}, errors.New("SYNARA_AGENTD_INSTANCE_UID is required for Kubernetes workers")
+		}
+		instanceUID = uuid.NewString()
+	}
+	parsedInstanceUID, err := uuid.Parse(instanceUID)
+	if err != nil || parsedInstanceUID == uuid.Nil {
+		return Config{}, errors.New("SYNARA_AGENTD_INSTANCE_UID is invalid")
+	}
+	instanceUID = parsedInstanceUID.String()
 	cfg := Config{
 		ControlPlaneURL: parsedURL, RegistrationToken: strings.TrimSpace(os.Getenv("SYNARA_WORKER_REGISTRATION_TOKEN")),
 		ExecutionTargetID: targetID, TargetKind: targetKind,
 		ClusterID: envDefault("SYNARA_AGENTD_CLUSTER_ID", "local"), Namespace: envDefault("SYNARA_AGENTD_NAMESPACE", "default"),
-		PodName: envDefault("SYNARA_AGENTD_INSTANCE_ID", hostname()), Version: envDefault("SYNARA_AGENTD_VERSION", "dev"),
+		PodName: envDefault("SYNARA_AGENTD_INSTANCE_ID", hostname()), InstanceUID: instanceUID,
+		Version:      envDefault("SYNARA_AGENTD_VERSION", "dev"),
 		BuildGitSHA:  strings.TrimSpace(os.Getenv("SYNARA_AGENTD_BUILD_GIT_SHA")),
 		ImageDigest:  strings.TrimSpace(os.Getenv("SYNARA_AGENTD_IMAGE_DIGEST")),
 		Capabilities: capabilities, RunnerCommand: runnerCommand, RunnerProtocol: runnerProtocol,

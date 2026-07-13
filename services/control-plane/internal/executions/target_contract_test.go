@@ -45,7 +45,24 @@ func TestRemoteWorkerRequiresLeaseAndFencingAndCannotSwitchTargets(t *testing.T)
 	service := NewService(store.DB(), nil, 30*time.Second, 90*time.Second, time.Hour, nil, targetService)
 	input := RegisterWorkerInput{
 		ExecutionTargetID: sshTarget.ID, TargetKind: "ssh", ClusterID: "local",
-		Namespace: "default", PodName: "agentd-test", Version: "test", ProtocolVersion: WorkerProtocolVersion,
+		InstanceUID: uuid.NewString(),
+		Namespace:   "default", PodName: "agentd-test", Version: "test", ProtocolVersion: WorkerProtocolVersion,
+	}
+	assertUnsupportedProtocol := func(label string, err error, received int) {
+		t.Helper()
+		var apiError *problem.Error
+		if !errors.As(err, &apiError) || apiError.Status != 426 || apiError.Code != "worker_protocol_version_unsupported" ||
+			apiError.Details["received"] != received || apiError.Details["minimumSupported"] != WorkerProtocolVersion ||
+			apiError.Details["maximumSupported"] != WorkerProtocolVersion {
+			t.Fatalf("%s returned unexpected Worker Protocol rejection: %#v", label, apiError)
+		}
+	}
+	for _, legacyProtocolVersion := range []int{0, 1} {
+		legacyInput := input
+		legacyInput.ProtocolVersion = legacyProtocolVersion
+		legacyInput.InstanceUID = ""
+		_, err := service.Register(ctx, legacyInput)
+		assertUnsupportedProtocol("legacy registration", err, legacyProtocolVersion)
 	}
 	if _, err := service.Register(ctx, input); err == nil {
 		t.Fatal("remote worker without lease/fencing support was accepted")
@@ -54,15 +71,8 @@ func TestRemoteWorkerRequiresLeaseAndFencingAndCannotSwitchTargets(t *testing.T)
 	input.FencingSupported = true
 	input.Capabilities = map[string]any{"workspaceModes": []string{"local"}}
 	input.ProtocolVersion = WorkerProtocolVersion + 1
-	if _, err := service.Register(ctx, input); err == nil {
-		t.Fatal("unsupported Worker Protocol version was accepted")
-	} else {
-		var apiError *problem.Error
-		if !errors.As(err, &apiError) || apiError.Code != "worker_protocol_version_unsupported" ||
-			apiError.Details["minimumSupported"] != WorkerProtocolVersion {
-			t.Fatalf("unexpected Worker Protocol rejection: %#v", apiError)
-		}
-	}
+	_, err = service.Register(ctx, input)
+	assertUnsupportedProtocol("future registration", err, WorkerProtocolVersion+1)
 	input.ProtocolVersion = WorkerProtocolVersion
 	registered, err := service.Register(ctx, input)
 	if err != nil {
@@ -72,7 +82,14 @@ func TestRemoteWorkerRequiresLeaseAndFencingAndCannotSwitchTargets(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
+	firstWorkerID := worker.ID
+	if worker.Incarnation != 1 || worker.InstanceUID != input.InstanceUID {
+		t.Fatalf("initial Worker identity fence is invalid: %#v", worker)
+	}
+	_, err = service.Heartbeat(ctx, worker, HeartbeatInput{})
+	assertUnsupportedProtocol("missing heartbeat protocol", err, 0)
 	input.Version = "test-v2"
+	input.InstanceUID = uuid.NewString()
 	input.Capabilities = map[string]any{"workspaceModes": []string{"local", "worktree"}}
 	reregistered, err := service.Register(ctx, input)
 	if err != nil {
@@ -84,6 +101,9 @@ func TestRemoteWorkerRequiresLeaseAndFencingAndCannotSwitchTargets(t *testing.T)
 	worker, err = service.Authenticate(ctx, reregistered.Token)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if worker.ID != firstWorkerID || worker.Incarnation != 2 || worker.InstanceUID != input.InstanceUID {
+		t.Fatalf("Worker re-registration did not atomically rotate its identity fence: %#v", worker)
 	}
 	draining := true
 	heartbeat, err := service.Heartbeat(ctx, worker, HeartbeatInput{

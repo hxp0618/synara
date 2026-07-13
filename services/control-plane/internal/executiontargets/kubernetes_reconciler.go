@@ -37,11 +37,12 @@ const (
 )
 
 type KubernetesReconcilerConfig struct {
-	RegistrationToken     string
-	PublicControlPlaneURL string
-	Interval              time.Duration
-	RecoverExpired        func(context.Context, int) error
-	Observer              BackgroundObserver
+	RegistrationToken                  string
+	PublicControlPlaneURL              string
+	Interval                           time.Duration
+	RecoverExpired                     func(context.Context, int) error
+	ReconcileEphemeralWorkspaceCleanup func(context.Context, uuid.UUID, []string, time.Time) (int, error)
+	Observer                           BackgroundObserver
 }
 
 type kubernetesTargetConfiguration struct {
@@ -80,6 +81,7 @@ type kubernetesTargetConfiguration struct {
 
 type kubernetesPod struct {
 	Name   string
+	UID    string
 	Phase  string
 	Labels map[string]string
 }
@@ -87,7 +89,8 @@ type kubernetesPod struct {
 type kubernetesClient interface {
 	Apply(context.Context, string, map[string]any) error
 	ListPods(context.Context, string, uuid.UUID) ([]kubernetesPod, error)
-	DeletePod(context.Context, string, string) error
+	ListPodUIDs(context.Context, string) ([]string, error)
+	DeletePod(context.Context, string, string, string) error
 }
 
 type kubernetesClientFactory interface {
@@ -213,6 +216,21 @@ func (r *KubernetesReconciler) reconcileTarget(ctx context.Context, target persi
 	if err != nil {
 		return problem.Wrap(502, "kubernetes_pods_load_failed", "Kubernetes Worker Pods could not be listed.", err)
 	}
+	if r.config.ReconcileEphemeralWorkspaceCleanup != nil {
+		activePodUIDs, err := client.ListPodUIDs(ctx, configuration.Namespace)
+		if err != nil {
+			return problem.Wrap(502, "kubernetes_pod_identities_load_failed", "The complete Kubernetes Pod identity set could not be loaded.", err)
+		}
+		for index := range activePodUIDs {
+			activePodUIDs[index] = strings.TrimSpace(activePodUIDs[index])
+			if activePodUIDs[index] == "" {
+				return problem.New(502, "kubernetes_pod_identities_invalid", "The Kubernetes Pod identity list contained an empty UID.")
+			}
+		}
+		if _, err := r.config.ReconcileEphemeralWorkspaceCleanup(ctx, target.ID, activePodUIDs, r.now()); err != nil {
+			return problem.Wrap(500, "kubernetes_workspace_cleanup_reconcile_failed", "Kubernetes ephemeral Workspace cleanup could not be reconciled.", err)
+		}
+	}
 	active := make(map[uuid.UUID]kubernetesExecution, len(executions))
 	for _, execution := range executions {
 		active[execution.ID] = execution
@@ -222,7 +240,7 @@ func (r *KubernetesReconciler) reconcileTarget(ctx context.Context, target persi
 	for _, pod := range pods {
 		executionID, parseErr := uuid.Parse(pod.Labels[kubernetesExecutionLabel])
 		if parseErr != nil {
-			if err := client.DeletePod(ctx, configuration.Namespace, pod.Name); err != nil {
+			if err := client.DeletePod(ctx, configuration.Namespace, pod.Name, pod.UID); err != nil {
 				return problem.Wrap(502, "kubernetes_pod_delete_failed", "An obsolete Kubernetes Worker Pod could not be deleted.", err)
 			}
 			deleted++
@@ -235,7 +253,7 @@ func (r *KubernetesReconciler) reconcileTarget(ctx context.Context, target persi
 		}
 		terminalPod := pod.Phase == "Succeeded" || pod.Phase == "Failed"
 		if !found || pod.Name != expectedName || terminalPod {
-			if err := client.DeletePod(ctx, configuration.Namespace, pod.Name); err != nil {
+			if err := client.DeletePod(ctx, configuration.Namespace, pod.Name, pod.UID); err != nil {
 				return problem.Wrap(502, "kubernetes_pod_delete_failed", "An obsolete Kubernetes Worker Pod could not be deleted.", err)
 			}
 			deleted++
@@ -555,6 +573,7 @@ func (r *KubernetesReconciler) executionPod(
 		map[string]any{"name": "SYNARA_AGENTD_CLUSTER_ID", "value": "kubernetes"},
 		map[string]any{"name": "SYNARA_AGENTD_NAMESPACE", "value": configuration.Namespace},
 		map[string]any{"name": "SYNARA_AGENTD_INSTANCE_ID", "valueFrom": map[string]any{"fieldRef": map[string]any{"fieldPath": "metadata.name"}}},
+		map[string]any{"name": "SYNARA_AGENTD_INSTANCE_UID", "valueFrom": map[string]any{"fieldRef": map[string]any{"fieldPath": "metadata.uid"}}},
 		map[string]any{"name": "SYNARA_AGENTD_VERSION", "value": "managed"},
 		map[string]any{"name": "SYNARA_AGENTD_CAPABILITIES_JSON", "value": string(capabilities)},
 		map[string]any{"name": "SYNARA_AGENTD_RUNNER_COMMAND_JSON", "value": string(runner)},
@@ -725,32 +744,81 @@ func (c *kubernetesHTTPClient) Apply(ctx context.Context, path string, object ma
 }
 
 func (c *kubernetesHTTPClient) ListPods(ctx context.Context, namespace string, targetID uuid.UUID) ([]kubernetesPod, error) {
-	query := url.Values{"labelSelector": {kubernetesTargetLabel + "=" + targetID.String()}}
-	var response struct {
-		Items []struct {
-			Metadata struct {
-				Name   string            `json:"name"`
-				Labels map[string]string `json:"labels"`
-			} `json:"metadata"`
-			Status struct {
-				Phase string `json:"phase"`
-			} `json:"status"`
-		} `json:"items"`
-	}
-	path := "/api/v1/namespaces/" + url.PathEscape(namespace) + "/pods?" + query.Encode()
-	if err := c.do(ctx, http.MethodGet, path, nil, &response, http.StatusOK); err != nil {
+	return c.listPods(ctx, namespace, kubernetesTargetLabel+"="+targetID.String())
+}
+
+func (c *kubernetesHTTPClient) ListPodUIDs(ctx context.Context, namespace string) ([]string, error) {
+	pods, err := c.listPods(ctx, namespace, "")
+	if err != nil {
 		return nil, err
 	}
-	items := make([]kubernetesPod, 0, len(response.Items))
-	for _, item := range response.Items {
-		items = append(items, kubernetesPod{Name: item.Metadata.Name, Phase: item.Status.Phase, Labels: item.Metadata.Labels})
+	uids := make([]string, 0, len(pods))
+	for _, pod := range pods {
+		uids = append(uids, pod.UID)
+	}
+	return uids, nil
+}
+
+func (c *kubernetesHTTPClient) listPods(ctx context.Context, namespace, labelSelector string) ([]kubernetesPod, error) {
+	items := make([]kubernetesPod, 0)
+	continueToken := ""
+	seenContinueTokens := map[string]struct{}{}
+	for {
+		var response struct {
+			Metadata struct {
+				Continue string `json:"continue"`
+			} `json:"metadata"`
+			Items []struct {
+				Metadata struct {
+					Name   string            `json:"name"`
+					UID    string            `json:"uid"`
+					Labels map[string]string `json:"labels"`
+				} `json:"metadata"`
+				Status struct {
+					Phase string `json:"phase"`
+				} `json:"status"`
+			} `json:"items"`
+		}
+		query := url.Values{}
+		query.Set("limit", "100")
+		if labelSelector != "" {
+			query.Set("labelSelector", labelSelector)
+		}
+		if continueToken != "" {
+			query.Set("continue", continueToken)
+		}
+		path := "/api/v1/namespaces/" + url.PathEscape(namespace) + "/pods"
+		if encoded := query.Encode(); encoded != "" {
+			path += "?" + encoded
+		}
+		if err := c.do(ctx, http.MethodGet, path, nil, &response, http.StatusOK); err != nil {
+			return nil, err
+		}
+		for _, item := range response.Items {
+			items = append(items, kubernetesPod{Name: item.Metadata.Name, UID: item.Metadata.UID, Phase: item.Status.Phase, Labels: item.Metadata.Labels})
+		}
+		continueToken = strings.TrimSpace(response.Metadata.Continue)
+		if continueToken == "" {
+			break
+		}
+		if _, seen := seenContinueTokens[continueToken]; seen {
+			return nil, errors.New("Kubernetes Pod list repeated its continuation token")
+		}
+		seenContinueTokens[continueToken] = struct{}{}
 	}
 	return items, nil
 }
 
-func (c *kubernetesHTTPClient) DeletePod(ctx context.Context, namespace, name string) error {
+func (c *kubernetesHTTPClient) DeletePod(ctx context.Context, namespace, name, uid string) error {
+	uid = strings.TrimSpace(uid)
+	if uid == "" {
+		return errors.New("Kubernetes Pod UID is required for safe deletion")
+	}
 	path := kubernetesNamespacedPath(namespace, "pods", name) + "?gracePeriodSeconds=30&propagationPolicy=Background"
-	return c.do(ctx, http.MethodDelete, path, nil, nil, http.StatusOK, http.StatusAccepted, http.StatusNotFound)
+	return c.do(ctx, http.MethodDelete, path, map[string]any{
+		"apiVersion": "v1", "kind": "DeleteOptions",
+		"preconditions": map[string]any{"uid": uid},
+	}, nil, http.StatusOK, http.StatusAccepted, http.StatusNotFound)
 }
 
 func (c *kubernetesHTTPClient) do(
@@ -773,7 +841,11 @@ func (c *kubernetesHTTPClient) do(
 	}
 	request.Header.Set("Authorization", "Bearer "+c.token)
 	if input != nil {
-		request.Header.Set("Content-Type", "application/apply-patch+yaml")
+		contentType := "application/json"
+		if method == http.MethodPatch {
+			contentType = "application/apply-patch+yaml"
+		}
+		request.Header.Set("Content-Type", contentType)
 	}
 	response, err := c.client.Do(request)
 	if err != nil {

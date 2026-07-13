@@ -96,7 +96,7 @@ func (s *Service) PullInteractionResolutions(
 
 	items := make([]InteractionResolutionDelivery, 0)
 	err := persistence.InTransaction(ctx, s.db, func(tx *gorm.DB) error {
-		_, execution, err := s.lockLease(ctx, tx, worker.ID, executionID, input.LeaseInput, true)
+		_, execution, err := s.lockLease(ctx, tx, worker, executionID, input.LeaseInput, true)
 		if err != nil {
 			return err
 		}
@@ -160,12 +160,12 @@ func (s *Service) updateInteractionResolutionDelivery(
 			400, "invalid_interaction_resolution_command_id", "resolutionCommandId is invalid.",
 		)
 	}
-	return runIdempotent(ctx, s, worker.ID, requestID, "interaction.resolution."+targetStatus, struct {
+	return runIdempotent(ctx, s, worker, requestID, "interaction.resolution."+targetStatus, struct {
 		ExecutionID   uuid.UUID                          `json:"executionId"`
 		InteractionID uuid.UUID                          `json:"interactionId"`
 		Input         InteractionResolutionDeliveryInput `json:"input"`
 	}{executionID, interactionID, input}, 200, func(tx *gorm.DB) (Interaction, error) {
-		_, execution, err := s.lockLease(ctx, tx, worker.ID, executionID, input.LeaseInput, true)
+		_, execution, err := s.lockLease(ctx, tx, worker, executionID, input.LeaseInput, true)
 		if err != nil {
 			return Interaction{}, err
 		}
@@ -265,7 +265,18 @@ func (s *Service) supersedeInteractionGeneration(
 	execution persistence.AgentExecution,
 	lease persistence.WorkerLease,
 ) error {
-	const reason = "The Worker lease expired before the interaction lifecycle completed."
+	return s.supersedeInteractionGenerationWithReason(
+		ctx, tx, execution, lease, "The Worker lease expired before the interaction lifecycle completed.",
+	)
+}
+
+func (s *Service) supersedeInteractionGenerationWithReason(
+	ctx context.Context,
+	tx *gorm.DB,
+	execution persistence.AgentExecution,
+	lease persistence.WorkerLease,
+	reason string,
+) error {
 	if err := tx.WithContext(ctx).Model(&persistence.ExecutionInteraction{}).
 		Where("tenant_id = ? AND execution_id = ? AND worker_id = ? AND generation = ? AND status = ?",
 			execution.TenantID, execution.ID, lease.WorkerID, lease.Generation, "pending").

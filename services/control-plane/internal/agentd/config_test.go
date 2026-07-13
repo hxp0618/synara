@@ -37,6 +37,39 @@ func TestLoadConfigUsesExplicitGitCacheRoot(t *testing.T) {
 	}
 }
 
+func TestLoadConfigGeneratesInstanceUIDOutsideKubernetes(t *testing.T) {
+	workspaceRoot := filepath.Join(t.TempDir(), "workspaces")
+	setAgentdConfigEnvironment(t, workspaceRoot, "")
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := uuid.Parse(cfg.InstanceUID); err != nil {
+		t.Fatalf("generated instance UID is invalid: %q", cfg.InstanceUID)
+	}
+}
+
+func TestLoadConfigRequiresKubernetesInstanceUID(t *testing.T) {
+	workspaceRoot := filepath.Join(t.TempDir(), "workspaces")
+	setAgentdConfigEnvironment(t, workspaceRoot, "")
+	t.Setenv("SYNARA_EXECUTION_TARGET_KIND", "kubernetes")
+
+	if _, err := LoadConfig(); err == nil || !strings.Contains(err.Error(), "SYNARA_AGENTD_INSTANCE_UID is required") {
+		t.Fatalf("expected Kubernetes instance UID requirement, got %v", err)
+	}
+
+	instanceUID := uuid.NewString()
+	t.Setenv("SYNARA_AGENTD_INSTANCE_UID", strings.ToUpper(instanceUID))
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.InstanceUID != instanceUID {
+		t.Fatalf("unexpected Kubernetes instance UID %q", cfg.InstanceUID)
+	}
+}
+
 func TestLoadConfigRejectsOverlappingWorkspaceAndGitCacheRoots(t *testing.T) {
 	root := t.TempDir()
 	for _, test := range []struct {
@@ -64,6 +97,7 @@ func setAgentdConfigEnvironment(t *testing.T, workspaceRoot, gitCacheRoot string
 		"SYNARA_AGENTD_CAPABILITIES_JSON", "SYNARA_AGENTD_CLUSTER_ID",
 		"SYNARA_AGENTD_DRAIN_TIMEOUT", "SYNARA_AGENTD_HEARTBEAT_INTERVAL",
 		"SYNARA_AGENTD_IMAGE_DIGEST", "SYNARA_AGENTD_INSTANCE_ID",
+		"SYNARA_AGENTD_INSTANCE_UID",
 		"SYNARA_AGENTD_LEASE_RENEW_INTERVAL", "SYNARA_AGENTD_NAMESPACE",
 		"SYNARA_AGENTD_POLL_INTERVAL", "SYNARA_AGENTD_PROVIDER_HOST_PROTOCOL",
 		"SYNARA_AGENTD_REQUEST_TIMEOUT", "SYNARA_AGENTD_ARTIFACT_TIMEOUT",

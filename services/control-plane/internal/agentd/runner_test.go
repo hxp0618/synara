@@ -125,7 +125,8 @@ func TestWithProviderHostCapabilitiesIncludesWorkerRuntimeManifest(t *testing.T)
 	})
 	runtimeManifest, ok := result["workerRuntime"].(map[string]any)
 	if !ok || runtimeManifest["workerBuildVersion"] != "agentd-test" ||
-		runtimeManifest["workerBuildGitSha"] != "abcdef0" || runtimeManifest["imageDigest"] != "sha256:test" {
+		runtimeManifest["workerBuildGitSha"] != "abcdef0" || runtimeManifest["imageDigest"] != "sha256:test" ||
+		runtimeManifest["workerProtocolMinimum"] != 2 || runtimeManifest["workerProtocolMaximum"] != 2 {
 		t.Fatalf("worker runtime manifest was not advertised: %#v", result)
 	}
 	if result["providerHost"] == nil || result["gpu"] != false {

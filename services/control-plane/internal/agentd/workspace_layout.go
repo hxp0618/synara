@@ -16,19 +16,29 @@ import (
 )
 
 const (
+	// workspaceLayoutVersion is retained as the legacy v2 Manifest format so
+	// existing on-disk generations and focused tests remain explicit. New
+	// materializations use workspaceLayoutV3Format.
 	workspaceLayoutVersion   = "synara-workspace-layout-v2"
+	workspaceLayoutV3Format  = "synara-workspace-layout-v3"
+	workspaceLayoutV2        = 2
+	workspaceLayoutV3        = 3
 	workspaceManifestMaxSize = 32 << 10
 )
 
 type workspaceLayout struct {
-	Root       string
-	Checkout   string
-	GitDir     string
-	Manifest   string
-	LockPath   string
-	LegacyRoot string
-	TargetID   uuid.UUID
-	LogicalID  uuid.UUID
+	Root                string
+	Checkout            string
+	GitDir              string
+	Manifest            string
+	LockPath            string
+	LegacyRoot          string
+	TargetID            uuid.UUID
+	LogicalID           uuid.UUID
+	MaterializationID   uuid.UUID
+	IncarnationID       uuid.UUID
+	LayoutVersion       int
+	AllowLegacyAdoption bool
 }
 
 type workspaceGenerationManifest struct {
@@ -38,6 +48,9 @@ type workspaceGenerationManifest struct {
 	ProjectID             string `json:"projectId"`
 	SessionID             string `json:"sessionId"`
 	LogicalWorkspaceID    string `json:"logicalWorkspaceId"`
+	MaterializationID     string `json:"materializationId,omitempty"`
+	IncarnationID         string `json:"incarnationId,omitempty"`
+	LayoutVersion         int    `json:"layoutVersion,omitempty"`
 	Managed               bool   `json:"managed"`
 	RepositoryFingerprint string `json:"repositoryFingerprint,omitempty"`
 	RepositoryURL         string `json:"repositoryUrl,omitempty"`
@@ -75,17 +88,48 @@ func (m *WorkspaceMaterializer) resolveWorkspaceLayout(
 	if logicalID == uuid.Nil {
 		return workspaceLayout{}, errors.New("logical Workspace ID is missing")
 	}
-	segments := []string{
+	logicalSegments := []string{
 		targetID.String(), workload.TenantID.String(), workload.ProjectID.String(), workload.SessionID.String(), logicalID.String(),
 	}
-	root := filepath.Join(append([]string{workspaceRoot, "v2"}, segments...)...)
+	layoutVersion := workload.WorkspaceLayoutVersion
+	materializationID := uuid.Nil
+	incarnationID := uuid.Nil
+	legacyCompatibility := layoutVersion == 0 && workload.WorkspaceMaterializationID == nil &&
+		workload.WorkspaceMaterializationIncarnationID == nil
+	if legacyCompatibility {
+		layoutVersion = workspaceLayoutV2
+	} else {
+		if workload.WorkspaceMaterializationID == nil || *workload.WorkspaceMaterializationID == uuid.Nil {
+			return workspaceLayout{}, errors.New("Workspace materialization ID is missing")
+		}
+		if workload.WorkspaceMaterializationIncarnationID == nil || *workload.WorkspaceMaterializationIncarnationID == uuid.Nil {
+			return workspaceLayout{}, errors.New("Workspace materialization incarnation ID is missing")
+		}
+		materializationID = *workload.WorkspaceMaterializationID
+		incarnationID = *workload.WorkspaceMaterializationIncarnationID
+	}
+	pathSegments := append([]string(nil), logicalSegments...)
+	lockNamespace := "workspace-v2"
+	switch layoutVersion {
+	case workspaceLayoutV2:
+		// Explicit layout v2 claims are existing generations being adopted.
+	case workspaceLayoutV3:
+		if legacyCompatibility {
+			return workspaceLayout{}, errors.New("Workspace layout v3 requires a materialization incarnation")
+		}
+		pathSegments = append(pathSegments, incarnationID.String())
+		lockNamespace = "workspace-v3"
+	default:
+		return workspaceLayout{}, errors.New("Workspace layout version is unsupported")
+	}
+	root := filepath.Join(append([]string{workspaceRoot, fmt.Sprintf("v%d", layoutVersion)}, pathSegments...)...)
 	if !pathContainedBy(workspaceRoot, root) || root == workspaceRoot {
 		return workspaceLayout{}, errors.New("Workspace path escapes the configured root")
 	}
 	if err := ensureContainedDirectory(workspaceRoot, filepath.Dir(root)); err != nil {
 		return workspaceLayout{}, err
 	}
-	lockPath, err := lockPathFor(workspaceRoot, "workspace-v2", segments...)
+	lockPath, err := lockPathFor(workspaceRoot, lockNamespace, logicalSegments...)
 	if err != nil {
 		return workspaceLayout{}, err
 	}
@@ -99,7 +143,9 @@ func (m *WorkspaceMaterializer) resolveWorkspaceLayout(
 	return workspaceLayout{
 		Root: root, Checkout: filepath.Join(root, "checkout"), GitDir: filepath.Join(root, "repo.git"),
 		Manifest: filepath.Join(root, "manifest.json"), LockPath: lockPath, LegacyRoot: legacyRoot,
-		TargetID: targetID, LogicalID: logicalID,
+		TargetID: targetID, LogicalID: logicalID, MaterializationID: materializationID,
+		IncarnationID: incarnationID, LayoutVersion: layoutVersion,
+		AllowLegacyAdoption: !legacyCompatibility && layoutVersion == workspaceLayoutV2,
 	}, nil
 }
 
@@ -138,15 +184,25 @@ func expectedWorkspaceManifest(
 	managed bool,
 	repositoryFingerprint, repositoryURL, defaultBranch string,
 ) workspaceGenerationManifest {
-	return workspaceGenerationManifest{
+	manifest := workspaceGenerationManifest{
 		Format: workspaceLayoutVersion, ExecutionTargetID: layout.TargetID.String(),
 		TenantID: workload.TenantID.String(), ProjectID: workload.ProjectID.String(), SessionID: workload.SessionID.String(),
 		LogicalWorkspaceID: layout.LogicalID.String(), Managed: managed,
 		RepositoryFingerprint: repositoryFingerprint, RepositoryURL: repositoryURL, DefaultBranch: defaultBranch,
 	}
+	if layout.MaterializationID != uuid.Nil || layout.IncarnationID != uuid.Nil || layout.LayoutVersion == workspaceLayoutV3 {
+		manifest.Format = workspaceLayoutV3Format
+		manifest.MaterializationID = layout.MaterializationID.String()
+		manifest.IncarnationID = layout.IncarnationID.String()
+		manifest.LayoutVersion = layout.LayoutVersion
+	}
+	return manifest
 }
 
 func writeWorkspaceManifest(root string, manifest workspaceGenerationManifest) error {
+	if err := validateWorkspaceManifestFormat(manifest); err != nil {
+		return err
+	}
 	encoded, err := json.Marshal(manifest)
 	if err != nil || len(encoded) > workspaceManifestMaxSize {
 		return errors.New("Workspace manifest is invalid")
@@ -196,16 +252,44 @@ func readWorkspaceManifest(path string) (workspaceGenerationManifest, error) {
 	if err != nil || len(encoded) > workspaceManifestMaxSize {
 		return workspaceGenerationManifest{}, errors.New("Workspace manifest is too large")
 	}
+	return decodeWorkspaceManifest(encoded)
+}
+
+func decodeWorkspaceManifest(encoded []byte) (workspaceGenerationManifest, error) {
 	var manifest workspaceGenerationManifest
 	decoder := json.NewDecoder(bytes.NewReader(encoded))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&manifest); err != nil {
 		return workspaceGenerationManifest{}, errors.New("Workspace manifest is invalid")
 	}
-	if manifest.Format != workspaceLayoutVersion {
-		return workspaceGenerationManifest{}, errors.New("Workspace manifest format is unsupported")
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return workspaceGenerationManifest{}, errors.New("Workspace manifest contains trailing data")
+	}
+	if err := validateWorkspaceManifestFormat(manifest); err != nil {
+		return workspaceGenerationManifest{}, err
 	}
 	return manifest, nil
+}
+
+func validateWorkspaceManifestFormat(manifest workspaceGenerationManifest) error {
+	switch manifest.Format {
+	case workspaceLayoutVersion:
+		if manifest.LayoutVersion != 0 || manifest.MaterializationID != "" || manifest.IncarnationID != "" {
+			return errors.New("legacy Workspace manifest contains v3 identity fields")
+		}
+	case workspaceLayoutV3Format:
+		if manifest.LayoutVersion != workspaceLayoutV2 && manifest.LayoutVersion != workspaceLayoutV3 {
+			return errors.New("Workspace manifest layout version is unsupported")
+		}
+		materializationID, materializationErr := uuid.Parse(manifest.MaterializationID)
+		incarnationID, incarnationErr := uuid.Parse(manifest.IncarnationID)
+		if materializationErr != nil || incarnationErr != nil || materializationID == uuid.Nil || incarnationID == uuid.Nil {
+			return errors.New("Workspace manifest materialization identity is invalid")
+		}
+	default:
+		return errors.New("Workspace manifest format is unsupported")
+	}
+	return nil
 }
 
 func validateWorkspaceManifest(path string, expected workspaceGenerationManifest) error {
@@ -219,6 +303,36 @@ func validateWorkspaceManifest(path string, expected workspaceGenerationManifest
 	return nil
 }
 
+func validateWorkspaceManifestForLayout(layout workspaceLayout, expected workspaceGenerationManifest) error {
+	actual, err := readWorkspaceManifest(layout.Manifest)
+	if err != nil {
+		return err
+	}
+	if actual == expected {
+		return nil
+	}
+	if !layout.AllowLegacyAdoption || !legacyWorkspaceManifestEquivalent(actual, expected) {
+		return errors.New("Workspace manifest does not match the claimed workload")
+	}
+	if err := writeWorkspaceManifest(layout.Root, expected); err != nil {
+		return errors.New("legacy Workspace manifest could not be adopted")
+	}
+	return validateWorkspaceManifest(layout.Manifest, expected)
+}
+
+func legacyWorkspaceManifestEquivalent(actual, expected workspaceGenerationManifest) bool {
+	if actual.Format != workspaceLayoutVersion || expected.Format != workspaceLayoutV3Format ||
+		expected.LayoutVersion != workspaceLayoutV2 {
+		return false
+	}
+	legacyExpected := expected
+	legacyExpected.Format = workspaceLayoutVersion
+	legacyExpected.MaterializationID = ""
+	legacyExpected.IncarnationID = ""
+	legacyExpected.LayoutVersion = 0
+	return actual == legacyExpected
+}
+
 func validateNonGitGeneration(layout workspaceLayout, expected workspaceGenerationManifest) error {
 	if err := validateExistingRealDirectory(layout.Root); err != nil {
 		return err
@@ -229,7 +343,7 @@ func validateNonGitGeneration(layout workspaceLayout, expected workspaceGenerati
 	if _, err := os.Lstat(layout.GitDir); !errors.Is(err, os.ErrNotExist) {
 		return errors.New("non-Git Workspace unexpectedly contains private Git metadata")
 	}
-	return validateWorkspaceManifest(layout.Manifest, expected)
+	return validateWorkspaceManifestForLayout(layout, expected)
 }
 
 func buildNonGitWorkspaceGeneration(root string, manifest workspaceGenerationManifest) error {
@@ -248,7 +362,7 @@ func validatePrivateWorktreeFilesystem(layout workspaceLayout, expected workspac
 			return err
 		}
 	}
-	if err := validateWorkspaceManifest(layout.Manifest, expected); err != nil {
+	if err := validateWorkspaceManifestForLayout(layout, expected); err != nil {
 		return err
 	}
 	gitFile := filepath.Join(layout.Checkout, ".git")

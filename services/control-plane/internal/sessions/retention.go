@@ -18,6 +18,7 @@ func (s *Service) ArchiveByRetention(
 	ctx context.Context,
 	tenantID uuid.UUID,
 	cutoff, archivedAt time.Time,
+	workspaceCleanupAfterDays *int,
 	limit int,
 ) (int, error) {
 	if limit <= 0 {
@@ -62,6 +63,11 @@ func (s *Service) ArchiveByRetention(
 			if err := tx.Model(&model).Updates(map[string]any{
 				"status": "archived", "archived_at": archivedAt,
 			}).Error; err != nil {
+				return err
+			}
+			if err := scheduleArchivedWorkspaceCleanup(
+				ctx, tx, tenantID, sessionID, archivedAt, workspaceCleanupAfterDays, "retention-session-archive",
+			); err != nil {
 				return err
 			}
 			event, err := appendEvent(ctx, tx, &model, eventInput{

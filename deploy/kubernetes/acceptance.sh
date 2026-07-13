@@ -5,6 +5,7 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 context="${SYNARA_K8S_CONTEXT:-$(kubectl config current-context 2>/dev/null || true)}"
 namespace="synara-system"
 image="${SYNARA_K8S_ACCEPTANCE_IMAGE:-synara-control-plane:stage2-acceptance}"
+worker_protocol_version=2
 work_dir="$(mktemp -d)"
 port_forward_pid=""
 
@@ -317,11 +318,12 @@ start_port_forward() {
 }
 
 start_port_forward
+worker_instance_uid="$(python3 -c 'import uuid; print(uuid.uuid4())')"
 worker_registration="$(curl -sS --fail-with-body -X POST \
   -H "Authorization: Bearer $worker_registration_token" \
   -H "X-Request-ID: k8s-register-$run_id" \
   -H 'Content-Type: application/json' \
-  -d "{\"executionTargetId\":\"$local_target_id\",\"targetKind\":\"local\",\"clusterId\":\"stage2-kind\",\"namespace\":\"$namespace\",\"podName\":\"stage2-worker-$run_id\",\"version\":\"acceptance\",\"protocolVersion\":1,\"capabilities\":{\"codex\":true},\"leaseSupported\":true,\"fencingSupported\":true}" \
+  -d "{\"executionTargetId\":\"$local_target_id\",\"targetKind\":\"local\",\"instanceUid\":\"$worker_instance_uid\",\"clusterId\":\"stage2-kind\",\"namespace\":\"$namespace\",\"podName\":\"stage2-worker-$run_id\",\"version\":\"acceptance\",\"protocolVersion\":$worker_protocol_version,\"capabilities\":{\"codex\":true},\"leaseSupported\":true,\"fencingSupported\":true}" \
   "http://127.0.0.1:$local_port/v1/workers/register")"
 worker_token="$(jq -er '.token' <<<"$worker_registration")"
 worker_id="$(jq -er '.worker.id' <<<"$worker_registration")"

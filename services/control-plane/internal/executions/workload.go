@@ -14,31 +14,37 @@ import (
 
 func (s *Service) loadWorkload(ctx context.Context, tx *gorm.DB, execution persistence.AgentExecution) (Workload, error) {
 	var row struct {
-		TenantID                       uuid.UUID  `gorm:"column:tenant_id"`
-		OrganizationID                 uuid.UUID  `gorm:"column:organization_id"`
-		ProjectID                      uuid.UUID  `gorm:"column:project_id"`
-		SessionID                      uuid.UUID  `gorm:"column:session_id"`
-		TurnID                         uuid.UUID  `gorm:"column:turn_id"`
-		SessionTitle                   string     `gorm:"column:session_title"`
-		Provider                       string     `gorm:"column:provider"`
-		ProviderRuntimeBindingID       *uuid.UUID `gorm:"column:provider_runtime_binding_id"`
-		RemoteWorkspaceID              *uuid.UUID `gorm:"column:remote_workspace_id"`
-		RestoreCheckpointID            *uuid.UUID `gorm:"column:restore_checkpoint_id"`
-		WorkspaceRepositoryFingerprint *string    `gorm:"column:workspace_repository_fingerprint"`
-		WorkerManifestID               *uuid.UUID `gorm:"column:worker_manifest_id"`
-		Model                          *string    `gorm:"column:model"`
-		ProviderCredentialID           *uuid.UUID `gorm:"column:provider_credential_id"`
-		GitCredentialID                *uuid.UUID `gorm:"column:git_credential_id"`
-		InputText                      string     `gorm:"column:input_text"`
-		RuntimeMode                    string     `gorm:"column:runtime_mode"`
-		InteractionMode                string     `gorm:"column:interaction_mode"`
-		RepositoryURL                  *string    `gorm:"column:repository_url"`
-		DefaultBranch                  string     `gorm:"column:default_branch"`
+		TenantID                              uuid.UUID  `gorm:"column:tenant_id"`
+		OrganizationID                        uuid.UUID  `gorm:"column:organization_id"`
+		ProjectID                             uuid.UUID  `gorm:"column:project_id"`
+		SessionID                             uuid.UUID  `gorm:"column:session_id"`
+		TurnID                                uuid.UUID  `gorm:"column:turn_id"`
+		SessionTitle                          string     `gorm:"column:session_title"`
+		Provider                              string     `gorm:"column:provider"`
+		ProviderRuntimeBindingID              *uuid.UUID `gorm:"column:provider_runtime_binding_id"`
+		RemoteWorkspaceID                     *uuid.UUID `gorm:"column:remote_workspace_id"`
+		WorkspaceMaterializationID            *uuid.UUID `gorm:"column:workspace_materialization_id"`
+		WorkspaceMaterializationIncarnationID *uuid.UUID `gorm:"column:workspace_materialization_incarnation_id"`
+		WorkspaceLayoutVersion                int        `gorm:"column:workspace_layout_version"`
+		RestoreCheckpointID                   *uuid.UUID `gorm:"column:restore_checkpoint_id"`
+		WorkspaceRepositoryFingerprint        *string    `gorm:"column:workspace_repository_fingerprint"`
+		WorkerManifestID                      *uuid.UUID `gorm:"column:worker_manifest_id"`
+		Model                                 *string    `gorm:"column:model"`
+		ProviderCredentialID                  *uuid.UUID `gorm:"column:provider_credential_id"`
+		GitCredentialID                       *uuid.UUID `gorm:"column:git_credential_id"`
+		InputText                             string     `gorm:"column:input_text"`
+		RuntimeMode                           string     `gorm:"column:runtime_mode"`
+		InteractionMode                       string     `gorm:"column:interaction_mode"`
+		RepositoryURL                         *string    `gorm:"column:repository_url"`
+		DefaultBranch                         string     `gorm:"column:default_branch"`
 	}
 	err := tx.WithContext(ctx).Table("agent_executions AS e").
 		Select(`e.tenant_id, s.organization_id, s.project_id, e.session_id, e.turn_id,
 			s.title AS session_title, COALESCE(e.provider, s.provider) AS provider,
-			e.provider_runtime_binding_id, e.remote_workspace_id, e.restore_checkpoint_id,
+			e.provider_runtime_binding_id, e.remote_workspace_id, e.workspace_materialization_id,
+			materialization.incarnation_id AS workspace_materialization_incarnation_id,
+			COALESCE(materialization.layout_version, 0) AS workspace_layout_version,
+			e.restore_checkpoint_id,
 			w.repository_fingerprint AS workspace_repository_fingerprint, e.worker_manifest_id,
 				s.model, s.provider_credential_id, p.git_credential_id,
 				t.input_text, t.runtime_mode, t.interaction_mode, p.repository_url, p.default_branch`).
@@ -46,6 +52,7 @@ func (s *Service) loadWorkload(ctx context.Context, tx *gorm.DB, execution persi
 		Joins("JOIN agent_turns AS t ON t.tenant_id = e.tenant_id AND t.session_id = e.session_id AND t.id = e.turn_id").
 		Joins("JOIN projects AS p ON p.tenant_id = s.tenant_id AND p.id = s.project_id").
 		Joins("LEFT JOIN remote_workspaces AS w ON w.tenant_id = e.tenant_id AND w.id = e.remote_workspace_id").
+		Joins("LEFT JOIN workspace_materializations AS materialization ON materialization.tenant_id = e.tenant_id AND materialization.id = e.workspace_materialization_id").
 		Where("e.tenant_id = ? AND e.id = ?", execution.TenantID, execution.ID).
 		Take(&row).Error
 	if err != nil {
@@ -72,10 +79,13 @@ func (s *Service) loadWorkload(ctx context.Context, tx *gorm.DB, execution persi
 		SessionID: row.SessionID, TurnID: row.TurnID, SessionTitle: row.SessionTitle,
 		Provider: row.Provider, ProviderRuntimeBindingID: row.ProviderRuntimeBindingID,
 		RemoteWorkspaceID: row.RemoteWorkspaceID, RestoreCheckpointID: row.RestoreCheckpointID,
-		RestoreCheckpoint:              restoreCheckpoint,
-		WorkspaceRepositoryFingerprint: row.WorkspaceRepositoryFingerprint,
-		WorkerManifestID:               row.WorkerManifestID,
-		Model:                          row.Model, ProviderCredentialID: row.ProviderCredentialID,
+		WorkspaceMaterializationID:            row.WorkspaceMaterializationID,
+		WorkspaceMaterializationIncarnationID: row.WorkspaceMaterializationIncarnationID,
+		WorkspaceLayoutVersion:                row.WorkspaceLayoutVersion,
+		RestoreCheckpoint:                     restoreCheckpoint,
+		WorkspaceRepositoryFingerprint:        row.WorkspaceRepositoryFingerprint,
+		WorkerManifestID:                      row.WorkerManifestID,
+		Model:                                 row.Model, ProviderCredentialID: row.ProviderCredentialID,
 		GitCredentialID: row.GitCredentialID, InputText: row.InputText,
 		RuntimeMode: row.RuntimeMode, InteractionMode: row.InteractionMode,
 		RepositoryURL: row.RepositoryURL, DefaultBranch: row.DefaultBranch,

@@ -49,6 +49,7 @@ func TestTurnCreateIdempotencyDoesNotDuplicateExecutionEventOrOutbox(t *testing.
 	assertCount(t, fixture, &persistence.AgentExecution{}, "session_id = ?", 1, fixture.sessionID)
 	assertCount(t, fixture, &persistence.ProviderRuntimeBinding{}, "session_id = ?", 1, fixture.sessionID)
 	assertCount(t, fixture, &persistence.RemoteWorkspace{}, "session_id = ?", 1, fixture.sessionID)
+	assertCount(t, fixture, &persistence.WorkspaceMaterialization{}, "session_id = ?", 1, fixture.sessionID)
 	assertCount(t, fixture, &persistence.SessionEvent{}, "session_id = ? AND event_type = ?", 1, fixture.sessionID, "turn.created")
 	assertCount(t, fixture, &persistence.OutboxMessage{}, "tenant_id = ? AND topic = ?", 1, fixture.tenantID, "execution.queued")
 	var execution persistence.AgentExecution
@@ -57,8 +58,26 @@ func TestTurnCreateIdempotencyDoesNotDuplicateExecutionEventOrOutbox(t *testing.
 		t.Fatal(err)
 	}
 	if execution.Provider == nil || *execution.Provider != "codex" ||
-		execution.ProviderRuntimeBindingID == nil || execution.RemoteWorkspaceID == nil {
+		execution.ProviderRuntimeBindingID == nil || execution.RemoteWorkspaceID == nil ||
+		execution.WorkspaceMaterializationID == nil {
 		t.Fatalf("Turn Execution omitted Stage 3 runtime resources: %#v", execution)
+	}
+	var workspace persistence.RemoteWorkspace
+	if err := fixture.db.Where("tenant_id = ? AND session_id = ?", fixture.tenantID, fixture.sessionID).
+		Take(&workspace).Error; err != nil {
+		t.Fatal(err)
+	}
+	if workspace.CurrentMaterializationID == nil || *workspace.CurrentMaterializationID != *execution.WorkspaceMaterializationID {
+		t.Fatalf("logical Workspace did not point at the Execution materialization: workspace=%#v execution=%#v", workspace, execution)
+	}
+	var materialization persistence.WorkspaceMaterialization
+	if err := fixture.db.Where("tenant_id = ? AND id = ?", fixture.tenantID, *execution.WorkspaceMaterializationID).
+		Take(&materialization).Error; err != nil {
+		t.Fatal(err)
+	}
+	if materialization.State != "active" || materialization.LayoutVersion != currentWorkspaceLayoutVersion ||
+		materialization.ExecutionTargetID != execution.ExecutionTargetID {
+		t.Fatalf("Turn materialization is invalid: %#v", materialization)
 	}
 	var turn persistence.AgentTurn
 	if err := fixture.db.Where("tenant_id = ? AND id = ?", fixture.tenantID, first.ID).Take(&turn).Error; err != nil {
@@ -126,6 +145,21 @@ func TestSessionCreateAndArchiveIdempotency(t *testing.T) {
 	assertCount(t, fixture, &persistence.SessionEvent{}, "session_id = ? AND event_type = ?", 1, first.ID, "session.created")
 	assertCount(t, fixture, &persistence.SessionEvent{}, "session_id = ? AND event_type = ?", 1, first.ID, "session.archived")
 	assertCount(t, fixture, &persistence.OutboxMessage{}, "tenant_id = ? AND topic = ?", 1, fixture.tenantID, "session.archived")
+	var workspace persistence.RemoteWorkspace
+	if err := fixture.db.Where("tenant_id = ? AND session_id = ?", fixture.tenantID, first.ID).Take(&workspace).Error; err != nil {
+		t.Fatal(err)
+	}
+	if workspace.RetentionUntil != nil || workspace.CurrentMaterializationID == nil {
+		t.Fatalf("archive without a Workspace cleanup policy scheduled automatic cleanup: %#v", workspace)
+	}
+	var materialization persistence.WorkspaceMaterialization
+	if err := fixture.db.Where("tenant_id = ? AND id = ?", fixture.tenantID, *workspace.CurrentMaterializationID).
+		Take(&materialization).Error; err != nil {
+		t.Fatal(err)
+	}
+	if materialization.CleanupRequestedAt != nil {
+		t.Fatalf("archive without a Workspace cleanup policy created cleanup intent: %#v", materialization)
+	}
 }
 
 func TestSessionSuspendResumeTransitionsAreIdempotent(t *testing.T) {

@@ -22,17 +22,19 @@ import (
 )
 
 type Policy struct {
-	TenantID                uuid.UUID `json:"tenantId"`
-	SessionArchiveAfterDays *int      `json:"sessionArchiveAfterDays"`
-	ArtifactDeleteAfterDays *int      `json:"artifactDeleteAfterDays"`
-	UpdatedBy               uuid.UUID `json:"updatedBy"`
-	CreatedAt               time.Time `json:"createdAt"`
-	UpdatedAt               time.Time `json:"updatedAt"`
+	TenantID                  uuid.UUID `json:"tenantId"`
+	SessionArchiveAfterDays   *int      `json:"sessionArchiveAfterDays"`
+	ArtifactDeleteAfterDays   *int      `json:"artifactDeleteAfterDays"`
+	WorkspaceCleanupAfterDays *int      `json:"workspaceCleanupAfterDays"`
+	UpdatedBy                 uuid.UUID `json:"updatedBy"`
+	CreatedAt                 time.Time `json:"createdAt"`
+	UpdatedAt                 time.Time `json:"updatedAt"`
 }
 
 type UpdateInput struct {
-	SessionArchiveAfterDays *int `json:"sessionArchiveAfterDays"`
-	ArtifactDeleteAfterDays *int `json:"artifactDeleteAfterDays"`
+	SessionArchiveAfterDays   *int `json:"sessionArchiveAfterDays"`
+	ArtifactDeleteAfterDays   *int `json:"artifactDeleteAfterDays"`
+	WorkspaceCleanupAfterDays *int `json:"workspaceCleanupAfterDays"`
 }
 
 type Service struct {
@@ -112,17 +114,22 @@ func (s *Service) Update(
 	if err := validateDays(input.ArtifactDeleteAfterDays); err != nil {
 		return Policy{}, problem.New(400, "invalid_artifact_retention", err.Error())
 	}
+	if err := validateDays(input.WorkspaceCleanupAfterDays); err != nil {
+		return Policy{}, problem.New(400, "invalid_workspace_retention", err.Error())
+	}
 	model := persistence.TenantRetentionPolicy{
 		TenantID: tenantID, SessionArchiveAfterDays: input.SessionArchiveAfterDays,
-		ArtifactDeleteAfterDays: input.ArtifactDeleteAfterDays, UpdatedBy: principal.UserID,
+		ArtifactDeleteAfterDays:   input.ArtifactDeleteAfterDays,
+		WorkspaceCleanupAfterDays: input.WorkspaceCleanupAfterDays, UpdatedBy: principal.UserID,
 	}
 	err := persistence.InTransaction(ctx, s.db, func(tx *gorm.DB) error {
 		if err := tx.Clauses(clause.OnConflict{
 			Columns: []clause.Column{{Name: "tenant_id"}},
 			DoUpdates: clause.Assignments(map[string]any{
-				"session_archive_after_days": input.SessionArchiveAfterDays,
-				"artifact_delete_after_days": input.ArtifactDeleteAfterDays,
-				"updated_by":                 principal.UserID,
+				"session_archive_after_days":   input.SessionArchiveAfterDays,
+				"artifact_delete_after_days":   input.ArtifactDeleteAfterDays,
+				"workspace_cleanup_after_days": input.WorkspaceCleanupAfterDays,
+				"updated_by":                   principal.UserID,
 			}),
 		}).Create(&model).Error; err != nil {
 			return problem.Wrap(409, "retention_policy_update_rejected", "Retention policy update was rejected.", err)
@@ -132,8 +139,9 @@ func (s *Service) Update(
 			Action: "retention_policy.updated", ResourceType: "tenant_retention_policy", ResourceID: &tenantID,
 			RequestID: requestID, IPAddress: ipAddress,
 			Metadata: map[string]any{
-				"sessionArchiveAfterDays": input.SessionArchiveAfterDays,
-				"artifactDeleteAfterDays": input.ArtifactDeleteAfterDays,
+				"sessionArchiveAfterDays":   input.SessionArchiveAfterDays,
+				"artifactDeleteAfterDays":   input.ArtifactDeleteAfterDays,
+				"workspaceCleanupAfterDays": input.WorkspaceCleanupAfterDays,
 			},
 		})
 	})
@@ -189,6 +197,9 @@ func (s *Service) RunOnce(ctx context.Context, limit int) error {
 	}
 	if s.executions != nil {
 		if _, err := s.executions.FailAbandonedWorkspaceCheckpoints(ctx, now, limit); err != nil {
+			failures = append(failures, err)
+		}
+		if _, err := s.executions.ReconcileWorkspaceCleanup(ctx, now, limit); err != nil {
 			failures = append(failures, err)
 		}
 	}
@@ -264,7 +275,9 @@ func (s *Service) applyPolicy(
 	metadata := map[string]any{}
 	if policy.SessionArchiveAfterDays != nil {
 		cutoff := now.AddDate(0, 0, -*policy.SessionArchiveAfterDays)
-		count, err := s.sessions.ArchiveByRetention(ctx, policy.TenantID, cutoff, now, limit)
+		count, err := s.sessions.ArchiveByRetention(
+			ctx, policy.TenantID, cutoff, now, policy.WorkspaceCleanupAfterDays, limit,
+		)
 		archived = count
 		metadata["sessionCutoff"] = cutoff
 		if err != nil {
@@ -320,7 +333,8 @@ func requireActiveTenant(principal identity.Principal, tenantID uuid.UUID) error
 func toPolicy(model persistence.TenantRetentionPolicy) Policy {
 	return Policy{
 		TenantID: model.TenantID, SessionArchiveAfterDays: model.SessionArchiveAfterDays,
-		ArtifactDeleteAfterDays: model.ArtifactDeleteAfterDays, UpdatedBy: model.UpdatedBy,
+		ArtifactDeleteAfterDays:   model.ArtifactDeleteAfterDays,
+		WorkspaceCleanupAfterDays: model.WorkspaceCleanupAfterDays, UpdatedBy: model.UpdatedBy,
 		CreatedAt: model.CreatedAt, UpdatedAt: model.UpdatedAt,
 	}
 }

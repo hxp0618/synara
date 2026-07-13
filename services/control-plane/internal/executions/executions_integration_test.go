@@ -89,6 +89,199 @@ func TestConcurrentClaimHasSingleWinner(t *testing.T) {
 	}
 }
 
+func TestWorkerProtocolV1CannotClaimButV2Can(t *testing.T) {
+	db := integrationDB(t)
+	fixture := seedExecutionFixture(t, db)
+	service := integrationService(t, db)
+	legacyWorker := registerTestWorker(t, service, fixture.TargetID, fixture.TargetKind, "worker-protocol-v1")
+	currentWorker := registerTestWorker(t, service, fixture.TargetID, fixture.TargetKind, "worker-protocol-v2")
+	cleanupWorkers(t, db, legacyWorker.ID, currentWorker.ID)
+	if err := db.Model(&persistence.WorkerInstance{}).
+		Where("id = ? AND incarnation = ?", legacyWorker.ID, legacyWorker.Incarnation).
+		Update("protocol_version", 1).Error; err != nil {
+		t.Fatal(err)
+	}
+	legacyWorker.ProtocolVersion = 1
+	claimInput := ClaimExecutionInput{
+		ExecutionTargetID: fixture.TargetID, TargetKind: fixture.TargetKind, ExecutionID: &fixture.ExecutionID,
+	}
+	_, err := service.Claim(context.Background(), legacyWorker, claimInput, "claim-worker-protocol-v1")
+	var apiError *problem.Error
+	if !errors.As(err, &apiError) || apiError.Status != 426 || apiError.Code != "worker_protocol_version_unsupported" ||
+		apiError.Details["received"] != 1 || apiError.Details["minimumSupported"] != WorkerProtocolVersion ||
+		apiError.Details["maximumSupported"] != WorkerProtocolVersion {
+		t.Fatalf("legacy Worker claim returned unexpected error: %#v", apiError)
+	}
+	var queued persistence.AgentExecution
+	if err := db.Where("tenant_id = ? AND id = ?", fixture.TenantID, fixture.ExecutionID).Take(&queued).Error; err != nil {
+		t.Fatal(err)
+	}
+	if queued.Status != "queued" || queued.Generation != 0 || queued.WorkerID != nil {
+		t.Fatalf("legacy Worker Protocol claim changed the queued Execution: %#v", queued)
+	}
+	claimed, err := service.Claim(context.Background(), currentWorker, claimInput, "claim-worker-protocol-v2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claimed.Value.Execution == nil || claimed.Value.Execution.ID != fixture.ExecutionID ||
+		claimed.Value.Lease == nil || claimed.Value.Lease.WorkerID != currentWorker.ID ||
+		claimed.Value.Workload == nil {
+		t.Fatalf("Worker Protocol v2 did not claim the Execution: %#v", claimed.Value)
+	}
+}
+
+func TestReregisteredWorkerFencesAuthenticatedHeartbeatAndLeaseRequests(t *testing.T) {
+	db := integrationDB(t)
+	fixture := seedExecutionFixture(t, db)
+	service := integrationService(t, db)
+	current := time.Now().UTC().Truncate(time.Microsecond)
+	service.now = func() time.Time { return current }
+	registration := RegisterWorkerInput{
+		ExecutionTargetID: fixture.TargetID,
+		TargetKind:        fixture.TargetKind,
+		InstanceUID:       uuid.NewString(),
+		ClusterID:         "test-cluster",
+		Namespace:         "default",
+		PodName:           "worker-incarnation-" + uuid.NewString(),
+		Version:           "current-v1",
+		ProtocolVersion:   WorkerProtocolVersion,
+		Capabilities:      map[string]any{"workerGeneration": "old"},
+		LeaseSupported:    true,
+		FencingSupported:  true,
+	}
+	registered, err := service.Register(context.Background(), registration)
+	if err != nil {
+		t.Fatal(err)
+	}
+	staleWorker, err := service.Authenticate(context.Background(), registered.Token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleanupWorkers(t, db, staleWorker.ID)
+
+	claim, err := service.Claim(context.Background(), staleWorker, ClaimExecutionInput{
+		ExecutionTargetID: fixture.TargetID,
+		TargetKind:        fixture.TargetKind,
+	}, "claim-before-worker-reregistration")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claim.Value.Lease == nil {
+		t.Fatal("worker did not receive an execution lease")
+	}
+	leaseInput := LeaseInput{
+		TenantID:   fixture.TenantID,
+		Generation: claim.Value.Lease.Generation,
+		LeaseToken: claim.Value.Lease.LeaseToken,
+	}
+
+	current = current.Add(time.Second)
+	registration.InstanceUID = uuid.NewString()
+	registration.Version = "current-v2"
+	registration.Capabilities = map[string]any{"workerGeneration": "current"}
+	reregistered, err := service.Register(context.Background(), registration)
+	if err != nil {
+		t.Fatal(err)
+	}
+	currentWorker, err := service.Authenticate(context.Background(), reregistered.Token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if currentWorker.ID != staleWorker.ID || currentWorker.Incarnation != staleWorker.Incarnation+1 ||
+		currentWorker.InstanceUID != registration.InstanceUID {
+		t.Fatalf("worker re-registration did not replace the authenticated incarnation: %#v", currentWorker)
+	}
+
+	var leaseBefore persistence.WorkerLease
+	if err := db.Where("execution_id = ?", fixture.ExecutionID).Take(&leaseBefore).Error; err != nil {
+		t.Fatal(err)
+	}
+	current = current.Add(time.Second)
+	draining := true
+	_, err = service.Heartbeat(context.Background(), staleWorker, HeartbeatInput{
+		Version:         "stale-version",
+		ProtocolVersion: WorkerProtocolVersion,
+		Capabilities:    map[string]any{"workerGeneration": "stale"},
+		Draining:        &draining,
+	})
+	assertWorkerIncarnationFenced := func(operation string, err error) {
+		t.Helper()
+		var apiError *problem.Error
+		if !errors.As(err, &apiError) || apiError.Code != "worker_incarnation_fenced" {
+			t.Fatalf("%s returned %v, want worker_incarnation_fenced", operation, err)
+		}
+	}
+	assertWorkerIncarnationFenced("stale heartbeat", err)
+
+	leaseRequests := []struct {
+		name string
+		run  func() error
+	}{
+		{
+			name: "pull control commands",
+			run: func() error {
+				_, err := service.PullControlCommands(context.Background(), staleWorker, fixture.ExecutionID, PullControlCommandsInput{
+					LeaseInput: leaseInput,
+				})
+				return err
+			},
+		},
+		{
+			name: "pull interaction resolutions",
+			run: func() error {
+				_, err := service.PullInteractionResolutions(context.Background(), staleWorker, fixture.ExecutionID, PullInteractionResolutionsInput{
+					LeaseInput: leaseInput,
+				})
+				return err
+			},
+		},
+		{
+			name: "authorize lease",
+			run: func() error {
+				return db.Transaction(func(tx *gorm.DB) error {
+					_, err := service.AuthorizeLease(context.Background(), tx, staleWorker, fixture.ExecutionID, leaseInput)
+					return err
+				})
+			},
+		},
+		{
+			name: "authorize artifact write",
+			run: func() error {
+				return db.Transaction(func(tx *gorm.DB) error {
+					_, err := service.AuthorizeArtifactWrite(context.Background(), tx, staleWorker, fixture.ExecutionID, leaseInput)
+					return err
+				})
+			},
+		},
+	}
+	for _, request := range leaseRequests {
+		assertWorkerIncarnationFenced(request.name, request.run())
+	}
+	_, err = service.Renew(context.Background(), staleWorker, fixture.ExecutionID, RenewLeaseInput{
+		LeaseInput: leaseInput,
+	}, "renew-stale-worker-incarnation")
+	assertWorkerIncarnationFenced("renew lease", err)
+
+	var workerAfter persistence.WorkerInstance
+	if err := db.Where("id = ?", currentWorker.ID).Take(&workerAfter).Error; err != nil {
+		t.Fatal(err)
+	}
+	if workerAfter.Incarnation != currentWorker.Incarnation || workerAfter.InstanceUID != currentWorker.InstanceUID ||
+		workerAfter.Status != "online" || workerAfter.Version != registration.Version || workerAfter.DrainingAt != nil ||
+		!workerAfter.LastHeartbeatAt.Equal(currentWorker.LastHeartbeatAt) ||
+		workerAfter.Capabilities["workerGeneration"] != "current" {
+		t.Fatalf("stale Worker request overwrote the current incarnation: before=%#v after=%#v", currentWorker, workerAfter)
+	}
+	var leaseAfter persistence.WorkerLease
+	if err := db.Where("execution_id = ?", fixture.ExecutionID).Take(&leaseAfter).Error; err != nil {
+		t.Fatal(err)
+	}
+	if !leaseAfter.HeartbeatAt.Equal(leaseBefore.HeartbeatAt) || !leaseAfter.ExpiresAt.Equal(leaseBefore.ExpiresAt) ||
+		!bytes.Equal(leaseAfter.LeaseTokenHash, leaseBefore.LeaseTokenHash) {
+		t.Fatalf("stale Worker request changed the execution lease: before=%#v after=%#v", leaseBefore, leaseAfter)
+	}
+}
+
 func TestSuspendedTenantExecutionIsNotClaimed(t *testing.T) {
 	db := integrationDB(t)
 	fixture := seedExecutionFixture(t, db)
@@ -650,6 +843,11 @@ func TestWorkspacePreparationIsGenerationFencedAcrossWorkerRecovery(t *testing.T
 		firstClaim.Value.Workload.RemoteWorkspaceID == nil || *firstClaim.Value.Workload.RemoteWorkspaceID != workspaceID {
 		t.Fatalf("first Workspace claim failed: result=%#v err=%v", firstClaim, err)
 	}
+	if firstClaim.Value.Workload.WorkspaceMaterializationID == nil ||
+		firstClaim.Value.Workload.WorkspaceMaterializationIncarnationID == nil ||
+		firstClaim.Value.Workload.WorkspaceLayoutVersion != workspaceLayoutVersionCurrent {
+		t.Fatalf("first Workspace claim omitted materialization fencing: %#v", firstClaim.Value.Workload)
+	}
 	firstLease := *firstClaim.Value.Lease
 	firstLeaseInput := LeaseInput{
 		TenantID: fixture.TenantID, Generation: firstLease.Generation, LeaseToken: firstLease.LeaseToken,
@@ -683,6 +881,25 @@ func TestWorkspacePreparationIsGenerationFencedAcrossWorkerRecovery(t *testing.T
 	}, "workspace-dirty")
 	if err != nil || !dirtyReplay.Replayed {
 		t.Fatalf("Workspace dirty transition was not idempotent: result=%#v err=%v", dirtyReplay, err)
+	}
+	checkpointReadyAt := time.Now().UTC()
+	checkpoint := persistence.WorkspaceCheckpoint{
+		ID: uuid.New(), TenantID: fixture.TenantID, WorkspaceID: workspaceID,
+		SessionID: fixture.SessionID, TurnID: &fixture.TurnID, ExecutionID: fixture.ExecutionID,
+		Generation: firstLease.Generation, IdempotencyKey: "workspace-recovery-fence", Strategy: "git-reference",
+		Status: "ready", BaseCommit: &baseCommit, HeadCommit: &dirtyHead, CurrentBranch: &branch,
+		Manifest:  map[string]any{"format": "synara-git-reference-v1", "headCommit": dirtyHead},
+		CreatedAt: checkpointReadyAt, ReadyAt: &checkpointReadyAt,
+	}
+	if err := db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(&checkpoint).Error; err != nil {
+			return err
+		}
+		return tx.Model(&persistence.RemoteWorkspace{}).
+			Where("tenant_id = ? AND id = ?", fixture.TenantID, workspaceID).
+			Update("current_checkpoint_id", checkpoint.ID).Error
+	}); err != nil {
+		t.Fatal(err)
 	}
 	if _, err := service.Release(ctx, first, fixture.ExecutionID, ReleaseLeaseInput{
 		LeaseInput: firstLeaseInput, Reason: "replace Worker after Workspace preparation",
@@ -1880,8 +2097,10 @@ func registerTestWorker(
 	t.Helper()
 	registered, err := service.Register(context.Background(), RegisterWorkerInput{
 		ExecutionTargetID: targetID, TargetKind: targetKind,
-		ClusterID: "test-cluster", Namespace: "default", PodName: podName + "-" + uuid.NewString(),
-		Version: "test", Capabilities: map[string]any{"codex": true}, LeaseSupported: true, FencingSupported: true,
+		InstanceUID: uuid.NewString(),
+		ClusterID:   "test-cluster", Namespace: "default", PodName: podName + "-" + uuid.NewString(),
+		Version: "test", ProtocolVersion: WorkerProtocolVersion,
+		Capabilities: map[string]any{"codex": true}, LeaseSupported: true, FencingSupported: true,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1917,7 +2136,8 @@ func registerTestWorkerWithCapabilities(
 	t.Helper()
 	registered, err := service.Register(context.Background(), RegisterWorkerInput{
 		ExecutionTargetID: targetID, TargetKind: targetKind,
-		ClusterID: "test-cluster", Namespace: "default", PodName: podName + "-" + uuid.NewString(),
+		InstanceUID: uuid.NewString(),
+		ClusterID:   "test-cluster", Namespace: "default", PodName: podName + "-" + uuid.NewString(),
 		Version: "test", ProtocolVersion: WorkerProtocolVersion, Capabilities: capabilities,
 		LeaseSupported: true, FencingSupported: true,
 	})
@@ -1953,6 +2173,12 @@ func cleanupWorkers(t *testing.T, db *gorm.DB, workerIDs ...uuid.UUID) {
 			Delete(&persistence.ExecutionInteraction{}).Error
 		_ = db.Where("delivery_worker_id IN ?", workerIDs).
 			Delete(&persistence.ExecutionControlCommand{}).Error
+		_ = db.Where("delivery_worker_id IN ?", workerIDs).
+			Delete(&persistence.WorkspaceCleanupCommand{}).Error
+		_ = db.Model(&persistence.WorkspaceMaterialization{}).Where("worker_id IN ?", workerIDs).
+			Updates(map[string]any{
+				"worker_id": nil, "worker_incarnation": nil, "worker_instance_uid": nil,
+			}).Error
 		_ = db.Model(&persistence.AgentExecution{}).Where("worker_id IN ?", workerIDs).
 			Updates(map[string]any{"status": "recovering", "worker_id": nil}).Error
 		_ = db.Where("id IN ?", workerIDs).Delete(&persistence.WorkerInstance{}).Error
@@ -1962,11 +2188,11 @@ func cleanupWorkers(t *testing.T, db *gorm.DB, workerIDs ...uuid.UUID) {
 func cleanupFixture(db *gorm.DB, tenantID uuid.UUID) {
 	_ = db.Transaction(func(tx *gorm.DB) error {
 		if err := tx.Model(&persistence.AgentExecution{}).Where("tenant_id = ?", tenantID).
-			Update("restore_checkpoint_id", nil).Error; err != nil {
+			Updates(map[string]any{"restore_checkpoint_id": nil, "workspace_materialization_id": nil}).Error; err != nil {
 			return err
 		}
 		if err := tx.Model(&persistence.RemoteWorkspace{}).Where("tenant_id = ?", tenantID).
-			Update("current_checkpoint_id", nil).Error; err != nil {
+			Updates(map[string]any{"current_checkpoint_id": nil, "current_materialization_id": nil}).Error; err != nil {
 			return err
 		}
 		if err := tx.Exec("ALTER TABLE artifacts DISABLE TRIGGER trg_artifacts_protect_checkpoint_reference").Error; err != nil {
@@ -1988,6 +2214,7 @@ func cleanupFixture(db *gorm.DB, tenantID uuid.UUID) {
 		models := []any{
 			&persistence.WorkerLease{}, &persistence.SessionEvent{}, &persistence.OutboxMessage{},
 			&persistence.APIIdempotencyKey{}, &persistence.ExecutionInteraction{}, &persistence.ExecutionControlCommand{},
+			&persistence.WorkspaceCleanupCommand{}, &persistence.WorkspaceMaterialization{},
 			&persistence.WorkspaceCheckpoint{}, &persistence.Artifact{},
 			&persistence.TenantQuota{}, &persistence.AgentExecution{}, &persistence.RemoteWorkspace{}, &persistence.AgentTurn{},
 			&persistence.AgentSession{}, &persistence.Project{}, &persistence.ExecutionTarget{},

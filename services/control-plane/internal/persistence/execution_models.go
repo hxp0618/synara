@@ -8,6 +8,8 @@ import (
 
 type WorkerInstance struct {
 	ID                     uuid.UUID      `gorm:"column:id;type:uuid;primaryKey"`
+	Incarnation            int64          `gorm:"column:incarnation;default:1"`
+	InstanceUID            string         `gorm:"column:instance_uid"`
 	ExecutionTargetID      uuid.UUID      `gorm:"column:execution_target_id;type:uuid"`
 	TargetKind             string         `gorm:"column:target_kind"`
 	ClusterID              string         `gorm:"column:cluster_id"`
@@ -33,27 +35,28 @@ type WorkerInstance struct {
 func (WorkerInstance) TableName() string { return "worker_instances" }
 
 type AgentExecution struct {
-	ID                       uuid.UUID  `gorm:"column:id;type:uuid;primaryKey"`
-	TenantID                 uuid.UUID  `gorm:"column:tenant_id;type:uuid"`
-	SessionID                uuid.UUID  `gorm:"column:session_id;type:uuid"`
-	TurnID                   uuid.UUID  `gorm:"column:turn_id;type:uuid"`
-	Attempt                  int        `gorm:"column:attempt"`
-	Status                   string     `gorm:"column:status"`
-	ExecutionTargetID        uuid.UUID  `gorm:"column:execution_target_id;type:uuid"`
-	TargetKind               string     `gorm:"column:target_kind"`
-	Provider                 *string    `gorm:"column:provider"`
-	WorkerID                 *uuid.UUID `gorm:"column:worker_id;type:uuid"`
-	WorkerManifestID         *uuid.UUID `gorm:"column:worker_manifest_id;type:uuid"`
-	ProviderRuntimeBindingID *uuid.UUID `gorm:"column:provider_runtime_binding_id;type:uuid"`
-	RemoteWorkspaceID        *uuid.UUID `gorm:"column:remote_workspace_id;type:uuid"`
-	RestoreCheckpointID      *uuid.UUID `gorm:"column:restore_checkpoint_id;type:uuid"`
-	Generation               int64      `gorm:"column:generation"`
-	RequestedBy              uuid.UUID  `gorm:"column:requested_by;type:uuid"`
-	QueuedAt                 time.Time  `gorm:"column:queued_at"`
-	StartedAt                *time.Time `gorm:"column:started_at"`
-	FinishedAt               *time.Time `gorm:"column:finished_at"`
-	FailureCode              *string    `gorm:"column:failure_code"`
-	FailureMessage           *string    `gorm:"column:failure_message"`
+	ID                         uuid.UUID  `gorm:"column:id;type:uuid;primaryKey"`
+	TenantID                   uuid.UUID  `gorm:"column:tenant_id;type:uuid"`
+	SessionID                  uuid.UUID  `gorm:"column:session_id;type:uuid"`
+	TurnID                     uuid.UUID  `gorm:"column:turn_id;type:uuid"`
+	Attempt                    int        `gorm:"column:attempt"`
+	Status                     string     `gorm:"column:status"`
+	ExecutionTargetID          uuid.UUID  `gorm:"column:execution_target_id;type:uuid"`
+	TargetKind                 string     `gorm:"column:target_kind"`
+	Provider                   *string    `gorm:"column:provider"`
+	WorkerID                   *uuid.UUID `gorm:"column:worker_id;type:uuid"`
+	WorkerManifestID           *uuid.UUID `gorm:"column:worker_manifest_id;type:uuid"`
+	ProviderRuntimeBindingID   *uuid.UUID `gorm:"column:provider_runtime_binding_id;type:uuid"`
+	RemoteWorkspaceID          *uuid.UUID `gorm:"column:remote_workspace_id;type:uuid"`
+	WorkspaceMaterializationID *uuid.UUID `gorm:"column:workspace_materialization_id;type:uuid"`
+	RestoreCheckpointID        *uuid.UUID `gorm:"column:restore_checkpoint_id;type:uuid"`
+	Generation                 int64      `gorm:"column:generation"`
+	RequestedBy                uuid.UUID  `gorm:"column:requested_by;type:uuid"`
+	QueuedAt                   time.Time  `gorm:"column:queued_at"`
+	StartedAt                  *time.Time `gorm:"column:started_at"`
+	FinishedAt                 *time.Time `gorm:"column:finished_at"`
+	FailureCode                *string    `gorm:"column:failure_code"`
+	FailureMessage             *string    `gorm:"column:failure_message"`
 }
 
 func (AgentExecution) TableName() string { return "agent_executions" }
@@ -72,14 +75,15 @@ type WorkerLease struct {
 func (WorkerLease) TableName() string { return "worker_leases" }
 
 type WorkerRequestReceipt struct {
-	WorkerID    uuid.UUID      `gorm:"column:worker_id;type:uuid;primaryKey"`
-	RequestID   string         `gorm:"column:request_id;primaryKey"`
-	Operation   string         `gorm:"column:operation"`
-	RequestHash string         `gorm:"column:request_hash"`
-	StatusCode  int            `gorm:"column:status_code"`
-	Response    map[string]any `gorm:"column:response;serializer:json"`
-	CreatedAt   time.Time      `gorm:"column:created_at"`
-	ExpiresAt   time.Time      `gorm:"column:expires_at"`
+	WorkerID          uuid.UUID      `gorm:"column:worker_id;type:uuid;primaryKey"`
+	WorkerIncarnation int64          `gorm:"column:worker_incarnation;default:1"`
+	RequestID         string         `gorm:"column:request_id;primaryKey"`
+	Operation         string         `gorm:"column:operation"`
+	RequestHash       string         `gorm:"column:request_hash"`
+	StatusCode        int            `gorm:"column:status_code"`
+	Response          map[string]any `gorm:"column:response;serializer:json"`
+	CreatedAt         time.Time      `gorm:"column:created_at"`
+	ExpiresAt         time.Time      `gorm:"column:expires_at"`
 }
 
 func (WorkerRequestReceipt) TableName() string { return "worker_request_receipts" }

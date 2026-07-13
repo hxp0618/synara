@@ -35,14 +35,14 @@ func (s *Service) CreateWorkspaceCheckpoint(
 		return OperationResult[WorkspaceCheckpoint]{}, err
 	}
 	var appended persistence.SessionEvent
-	result, err := runIdempotent(ctx, s, worker.ID, requestID, "workspace.checkpoint.create", map[string]any{
+	result, err := runIdempotent(ctx, s, worker, requestID, "workspace.checkpoint.create", map[string]any{
 		"executionId": executionID, "tenantId": input.TenantID, "generation": input.Generation,
 		"idempotencyKey": input.IdempotencyKey, "strategy": input.Strategy,
 		"baseCommit": input.BaseCommit, "headCommit": input.HeadCommit,
 		"currentBranch": input.CurrentBranch, "manifest": input.Manifest,
 		"fileCount": input.FileCount, "totalBytes": input.TotalBytes, "expiresAt": input.ExpiresAt,
 	}, 201, func(tx *gorm.DB) (WorkspaceCheckpoint, error) {
-		_, execution, err := s.lockLease(ctx, tx, worker.ID, executionID, input.LeaseInput, true)
+		_, execution, err := s.lockLease(ctx, tx, worker, executionID, input.LeaseInput, true)
 		if err != nil {
 			return WorkspaceCheckpoint{}, err
 		}
@@ -141,11 +141,11 @@ func (s *Service) MarkWorkspaceCheckpointReady(
 		return OperationResult[WorkspaceCheckpoint]{}, err
 	}
 	var appended persistence.SessionEvent
-	result, err := runIdempotent(ctx, s, worker.ID, requestID, "workspace.checkpoint.ready", map[string]any{
+	result, err := runIdempotent(ctx, s, worker, requestID, "workspace.checkpoint.ready", map[string]any{
 		"executionId": executionID, "checkpointId": checkpointID, "tenantId": input.TenantID,
 		"generation": input.Generation, "artifactId": input.ArtifactID, "sha256": input.SHA256,
 	}, 200, func(tx *gorm.DB) (WorkspaceCheckpoint, error) {
-		_, execution, err := s.lockLease(ctx, tx, worker.ID, executionID, input.LeaseInput, true)
+		_, execution, err := s.lockLease(ctx, tx, worker, executionID, input.LeaseInput, true)
 		if err != nil {
 			return WorkspaceCheckpoint{}, err
 		}
@@ -263,12 +263,12 @@ func (s *Service) MarkWorkspaceCheckpointFailed(
 		return OperationResult[WorkspaceCheckpoint]{}, problem.New(400, "invalid_checkpoint_failure", "failureMessage must not exceed 10000 characters.")
 	}
 	var appended persistence.SessionEvent
-	result, err := runIdempotent(ctx, s, worker.ID, requestID, "workspace.checkpoint.failed", map[string]any{
+	result, err := runIdempotent(ctx, s, worker, requestID, "workspace.checkpoint.failed", map[string]any{
 		"executionId": executionID, "checkpointId": checkpointID, "tenantId": input.TenantID,
 		"generation": input.Generation, "failureCode": input.FailureCode,
 		"failureMessage": input.FailureMessage,
 	}, 200, func(tx *gorm.DB) (WorkspaceCheckpoint, error) {
-		_, execution, err := s.lockLease(ctx, tx, worker.ID, executionID, input.LeaseInput, true)
+		_, execution, err := s.lockLease(ctx, tx, worker, executionID, input.LeaseInput, true)
 		if err != nil {
 			return WorkspaceCheckpoint{}, err
 		}

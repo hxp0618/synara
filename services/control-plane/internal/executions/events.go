@@ -35,7 +35,7 @@ func (s *Service) AppendRuntimeEvent(
 	}
 
 	var appended persistence.SessionEvent
-	result, err := runIdempotent(ctx, s, worker.ID, requestID, "execution.runtime_event", struct {
+	result, err := runIdempotent(ctx, s, worker, requestID, "execution.runtime_event", struct {
 		ExecutionID uuid.UUID         `json:"executionId"`
 		Input       RuntimeEventInput `json:"input"`
 	}{executionID, input}, 201, func(tx *gorm.DB) (RuntimeEventResult, error) {
@@ -58,7 +58,7 @@ func (s *Service) AppendRuntimeEvent(
 		if !errors.Is(existingErr, gorm.ErrRecordNotFound) {
 			return RuntimeEventResult{}, problem.Wrap(500, "runtime_event_lookup_failed", "Failed to inspect the runtime event.", existingErr)
 		}
-		_, execution, err := s.lockLease(ctx, tx, worker.ID, executionID, input.LeaseInput, true)
+		_, execution, err := s.lockLease(ctx, tx, worker, executionID, input.LeaseInput, true)
 		if err != nil {
 			return RuntimeEventResult{}, err
 		}

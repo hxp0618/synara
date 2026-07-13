@@ -18,15 +18,30 @@ type Service struct {
 	authorizer             *authorization.Authorizer
 	tenantRepository       persistence.Repository[persistence.Tenant]
 	organizationRepository persistence.Repository[persistence.Organization]
+	executionCoordinator   TenantDeletionExecutionCoordinator
 }
 
-func NewService(db *gorm.DB) *Service {
-	return &Service{
+type TenantDeletionExecutionCoordinator interface {
+	PrepareTenantDeletion(
+		ctx context.Context,
+		tx *gorm.DB,
+		tenantID, actorID uuid.UUID,
+		now time.Time,
+	) ([]persistence.SessionEvent, error)
+	PublishTenantDeletionEvents(events []persistence.SessionEvent)
+}
+
+func NewService(db *gorm.DB, coordinators ...TenantDeletionExecutionCoordinator) *Service {
+	service := &Service{
 		db:                     db,
 		authorizer:             authorization.NewAuthorizer(db),
 		tenantRepository:       persistence.NewRepository[persistence.Tenant](db),
 		organizationRepository: persistence.NewRepository[persistence.Organization](db),
 	}
+	if len(coordinators) > 0 {
+		service.executionCoordinator = coordinators[0]
+	}
+	return service
 }
 
 func (s *Service) requireTenantPermission(

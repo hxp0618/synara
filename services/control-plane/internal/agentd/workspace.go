@@ -29,6 +29,10 @@ type workspaceRestorer interface {
 	Restore(context.Context, WorkspaceMaterialization, executions.WorkspaceCheckpoint, string) (WorkspaceMaterialization, error)
 }
 
+type workspaceCleaner interface {
+	CleanupWorkspace(context.Context, WorkspaceCleanupRequest) (WorkspaceCleanupResult, error)
+}
+
 type WorkspaceMaterialization struct {
 	Directory             string
 	LogicalRoot           string
@@ -51,12 +55,13 @@ type WorkspaceInspection struct {
 }
 
 type WorkspaceMaterializer struct {
-	root       string
-	cacheRoot  string
-	targetID   uuid.UUID
-	resolver   gitpolicy.Resolver
-	runGit     func(context.Context, string, []string, ...string) (string, error)
-	executable func() (string, error)
+	root                 string
+	cacheRoot            string
+	targetID             uuid.UUID
+	resolver             gitpolicy.Resolver
+	runGit               func(context.Context, string, []string, ...string) (string, error)
+	executable           func() (string, error)
+	cleanupDirectorySync func(*os.Root, string) error
 }
 
 func NewWorkspaceMaterializer(root string) *WorkspaceMaterializer {

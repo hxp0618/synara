@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/google/uuid"
 	"gorm.io/gorm"
 
 	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
@@ -57,7 +56,7 @@ func decodeReceiptResponse[T any](receipt persistence.WorkerRequestReceipt) (T, 
 func runIdempotent[T any](
 	ctx context.Context,
 	service *Service,
-	workerID uuid.UUID,
+	worker persistence.WorkerInstance,
 	requestID, operation string,
 	input any,
 	statusCode int,
@@ -80,9 +79,13 @@ func runIdempotent[T any](
 		err = persistence.InTransaction(ctx, service.db, func(tx *gorm.DB) error {
 			var receipt persistence.WorkerRequestReceipt
 			lookupErr := persistence.WithLocking(tx.WithContext(ctx), "UPDATE", "").
-				Where("worker_id = ? AND request_id = ?", workerID, requestID).Take(&receipt).Error
+				Where("worker_id = ? AND request_id = ?", worker.ID, requestID).Take(&receipt).Error
+
+			if err := lockCurrentWorkerIncarnation(ctx, tx, worker); err != nil {
+				return err
+			}
 			if lookupErr == nil {
-				if receipt.ExpiresAt.After(service.now()) {
+				if receipt.WorkerIncarnation == worker.Incarnation && receipt.ExpiresAt.After(service.now()) {
 					if receipt.Operation != operation || receipt.RequestHash != hash {
 						return problem.New(409, "request_id_reused", "X-Request-ID was already used for a different worker request.")
 					}
@@ -111,7 +114,8 @@ func runIdempotent[T any](
 				return problem.Wrap(500, "receipt_encode_failed", "Failed to persist the worker response.", mapErr)
 			}
 			receipt = persistence.WorkerRequestReceipt{
-				WorkerID: workerID, RequestID: requestID, Operation: operation,
+				WorkerID: worker.ID, WorkerIncarnation: worker.Incarnation,
+				RequestID: requestID, Operation: operation,
 				RequestHash: hash, StatusCode: statusCode, Response: mapped,
 				CreatedAt: service.now(), ExpiresAt: service.now().Add(service.receiptTTL),
 			}

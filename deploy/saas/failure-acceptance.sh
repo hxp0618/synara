@@ -14,6 +14,7 @@ pick_port() {
 control_plane_port="${SYNARA_FAILURE_CONTROL_PLANE_PORT:-$(pick_port)}"
 minio_port="${SYNARA_FAILURE_MINIO_PORT:-$(pick_port)}"
 base_url="http://127.0.0.1:$control_plane_port"
+worker_protocol_version=2
 
 compose=(
   docker compose -p "$project"
@@ -157,11 +158,12 @@ target_kind="$(jq -er '.kind' <<<"$execution_target")"
 request_json "$owner_cookie" POST "/v1/sessions/$session_id/turns" \
   "{\"inputText\":\"$prompt_sentinel\"}" >/dev/null
 
+worker_instance_uid="$(new_uuid)"
 worker_registration="$(curl -sS --fail-with-body -X POST \
   -H "Authorization: Bearer $SYNARA_WORKER_REGISTRATION_TOKEN" \
   -H "X-Request-ID: register-$run_id" \
   -H 'Content-Type: application/json' \
-  -d "{\"executionTargetId\":\"$execution_target_id\",\"targetKind\":\"$target_kind\",\"clusterId\":\"failure\",\"namespace\":\"default\",\"podName\":\"worker-$run_id\",\"version\":\"acceptance\",\"protocolVersion\":1,\"capabilities\":{\"codex\":true},\"leaseSupported\":true,\"fencingSupported\":true}" \
+  -d "{\"executionTargetId\":\"$execution_target_id\",\"targetKind\":\"$target_kind\",\"instanceUid\":\"$worker_instance_uid\",\"clusterId\":\"failure\",\"namespace\":\"default\",\"podName\":\"worker-$run_id\",\"version\":\"acceptance\",\"protocolVersion\":$worker_protocol_version,\"capabilities\":{\"codex\":true},\"leaseSupported\":true,\"fencingSupported\":true}" \
   "$base_url/v1/workers/register")"
 worker_token="$(jq -er '.token' <<<"$worker_registration")"
 worker_id="$(jq -er '.worker.id' <<<"$worker_registration")"
@@ -186,11 +188,12 @@ stale_claim_status="$(curl -sS -o "$work_dir/stale-worker.json" -w '%{http_code}
 jq -e '.error.code == "worker_not_claimable" or .error.code == "worker_heartbeat_stale"' \
   "$work_dir/stale-worker.json" >/dev/null
 
+replacement_instance_uid="$(new_uuid)"
 replacement_registration="$(curl -sS --fail-with-body -X POST \
   -H "Authorization: Bearer $SYNARA_WORKER_REGISTRATION_TOKEN" \
   -H "X-Request-ID: replacement-register-$run_id" \
   -H 'Content-Type: application/json' \
-  -d "{\"executionTargetId\":\"$execution_target_id\",\"targetKind\":\"$target_kind\",\"clusterId\":\"failure\",\"namespace\":\"default\",\"podName\":\"replacement-$run_id\",\"version\":\"acceptance\",\"protocolVersion\":1,\"capabilities\":{\"codex\":true},\"leaseSupported\":true,\"fencingSupported\":true}" \
+  -d "{\"executionTargetId\":\"$execution_target_id\",\"targetKind\":\"$target_kind\",\"instanceUid\":\"$replacement_instance_uid\",\"clusterId\":\"failure\",\"namespace\":\"default\",\"podName\":\"replacement-$run_id\",\"version\":\"acceptance\",\"protocolVersion\":$worker_protocol_version,\"capabilities\":{\"codex\":true},\"leaseSupported\":true,\"fencingSupported\":true}" \
   "$base_url/v1/workers/register")"
 replacement_token="$(jq -er '.token' <<<"$replacement_registration")"
 replacement_worker_id="$(jq -er '.worker.id' <<<"$replacement_registration")"

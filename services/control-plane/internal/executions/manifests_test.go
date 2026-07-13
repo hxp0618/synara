@@ -53,7 +53,7 @@ func workerManifestTestCapabilities() map[string]any {
 	return map[string]any{
 		"workerRuntime": map[string]any{
 			"workerBuildVersion": "worker-test", "workerBuildGitSha": "abcdef1234567890",
-			"workerProtocolMinimum": 1, "workerProtocolMaximum": 1,
+			"workerProtocolMinimum": WorkerProtocolVersion, "workerProtocolMaximum": WorkerProtocolVersion,
 			"runtimeEventMinimum": 1, "runtimeEventMaximum": 1,
 			"operatingSystem": "linux", "architecture": "amd64",
 			"imageDigest": "sha256:worker-test",

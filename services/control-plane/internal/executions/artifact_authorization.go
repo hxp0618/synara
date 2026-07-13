@@ -33,6 +33,6 @@ func (s *Service) AuthorizeLease(
 	executionID uuid.UUID,
 	input LeaseInput,
 ) (persistence.AgentExecution, error) {
-	_, execution, err := s.lockLease(ctx, tx, worker.ID, executionID, input, true)
+	_, execution, err := s.lockLease(ctx, tx, worker, executionID, input, true)
 	return execution, err
 }

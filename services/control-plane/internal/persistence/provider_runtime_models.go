@@ -76,31 +76,95 @@ type ProviderRuntimeBinding struct {
 func (ProviderRuntimeBinding) TableName() string { return "provider_runtime_bindings" }
 
 type RemoteWorkspace struct {
-	ID                    uuid.UUID  `gorm:"column:id;type:uuid;primaryKey"`
-	TenantID              uuid.UUID  `gorm:"column:tenant_id;type:uuid"`
-	OrganizationID        uuid.UUID  `gorm:"column:organization_id;type:uuid"`
-	ProjectID             uuid.UUID  `gorm:"column:project_id;type:uuid"`
-	SessionID             uuid.UUID  `gorm:"column:session_id;type:uuid"`
-	ExecutionTargetID     uuid.UUID  `gorm:"column:execution_target_id;type:uuid"`
-	WorkspaceMode         string     `gorm:"column:workspace_mode"`
-	State                 string     `gorm:"column:state"`
-	RepositoryFingerprint *string    `gorm:"column:repository_fingerprint"`
-	DefaultBranch         string     `gorm:"column:default_branch"`
-	CurrentBranch         *string    `gorm:"column:current_branch"`
-	BaseCommit            *string    `gorm:"column:base_commit"`
-	HeadCommit            *string    `gorm:"column:head_commit"`
-	LastWorkerID          *uuid.UUID `gorm:"column:last_worker_id;type:uuid"`
-	LastExecutionID       *uuid.UUID `gorm:"column:last_execution_id;type:uuid"`
-	LastGeneration        *int64     `gorm:"column:last_generation"`
-	CurrentCheckpointID   *uuid.UUID `gorm:"column:current_checkpoint_id;type:uuid"`
-	RetentionUntil        *time.Time `gorm:"column:retention_until"`
-	LastUsedAt            *time.Time `gorm:"column:last_used_at"`
-	CreatedAt             time.Time  `gorm:"column:created_at"`
-	UpdatedAt             time.Time  `gorm:"column:updated_at"`
-	CleanedAt             *time.Time `gorm:"column:cleaned_at"`
+	ID                       uuid.UUID  `gorm:"column:id;type:uuid;primaryKey"`
+	TenantID                 uuid.UUID  `gorm:"column:tenant_id;type:uuid"`
+	OrganizationID           uuid.UUID  `gorm:"column:organization_id;type:uuid"`
+	ProjectID                uuid.UUID  `gorm:"column:project_id;type:uuid"`
+	SessionID                uuid.UUID  `gorm:"column:session_id;type:uuid"`
+	ExecutionTargetID        uuid.UUID  `gorm:"column:execution_target_id;type:uuid"`
+	WorkspaceMode            string     `gorm:"column:workspace_mode"`
+	State                    string     `gorm:"column:state"`
+	RepositoryFingerprint    *string    `gorm:"column:repository_fingerprint"`
+	DefaultBranch            string     `gorm:"column:default_branch"`
+	CurrentBranch            *string    `gorm:"column:current_branch"`
+	BaseCommit               *string    `gorm:"column:base_commit"`
+	HeadCommit               *string    `gorm:"column:head_commit"`
+	LastWorkerID             *uuid.UUID `gorm:"column:last_worker_id;type:uuid"`
+	LastExecutionID          *uuid.UUID `gorm:"column:last_execution_id;type:uuid"`
+	LastGeneration           *int64     `gorm:"column:last_generation"`
+	CurrentCheckpointID      *uuid.UUID `gorm:"column:current_checkpoint_id;type:uuid"`
+	CurrentMaterializationID *uuid.UUID `gorm:"column:current_materialization_id;type:uuid"`
+	RetentionUntil           *time.Time `gorm:"column:retention_until"`
+	LastUsedAt               *time.Time `gorm:"column:last_used_at"`
+	CreatedAt                time.Time  `gorm:"column:created_at"`
+	UpdatedAt                time.Time  `gorm:"column:updated_at"`
+	CleanedAt                *time.Time `gorm:"column:cleaned_at"`
 }
 
 func (RemoteWorkspace) TableName() string { return "remote_workspaces" }
+
+type WorkspaceMaterialization struct {
+	ID                 uuid.UUID  `gorm:"column:id;type:uuid;primaryKey"`
+	TenantID           uuid.UUID  `gorm:"column:tenant_id;type:uuid"`
+	WorkspaceID        uuid.UUID  `gorm:"column:workspace_id;type:uuid"`
+	OrganizationID     uuid.UUID  `gorm:"column:organization_id;type:uuid"`
+	ProjectID          uuid.UUID  `gorm:"column:project_id;type:uuid"`
+	SessionID          uuid.UUID  `gorm:"column:session_id;type:uuid"`
+	ExecutionTargetID  uuid.UUID  `gorm:"column:execution_target_id;type:uuid"`
+	TargetKind         string     `gorm:"column:target_kind"`
+	StorageScope       string     `gorm:"column:storage_scope"`
+	LayoutVersion      int        `gorm:"column:layout_version"`
+	IncarnationID      uuid.UUID  `gorm:"column:incarnation_id;type:uuid"`
+	WorkerID           *uuid.UUID `gorm:"column:worker_id;type:uuid"`
+	WorkerIncarnation  *int64     `gorm:"column:worker_incarnation"`
+	WorkerInstanceUID  *string    `gorm:"column:worker_instance_uid"`
+	LastExecutionID    *uuid.UUID `gorm:"column:last_execution_id;type:uuid"`
+	LastGeneration     *int64     `gorm:"column:last_generation"`
+	State              string     `gorm:"column:state"`
+	CleanupReason      *string    `gorm:"column:cleanup_reason"`
+	CleanupRequestedAt *time.Time `gorm:"column:cleanup_requested_at"`
+	FailureCode        *string    `gorm:"column:failure_code"`
+	FailureMessage     *string    `gorm:"column:failure_message"`
+	FailedAt           *time.Time `gorm:"column:failed_at"`
+	CreatedAt          time.Time  `gorm:"column:created_at"`
+	UpdatedAt          time.Time  `gorm:"column:updated_at"`
+	CleanedAt          *time.Time `gorm:"column:cleaned_at"`
+}
+
+func (WorkspaceMaterialization) TableName() string { return "workspace_materializations" }
+
+type WorkspaceCleanupCommand struct {
+	ID                           uuid.UUID  `gorm:"column:id;type:uuid;primaryKey"`
+	TenantID                     uuid.UUID  `gorm:"column:tenant_id;type:uuid"`
+	MaterializationID            uuid.UUID  `gorm:"column:materialization_id;type:uuid"`
+	MaterializationIncarnationID uuid.UUID  `gorm:"column:materialization_incarnation_id;type:uuid"`
+	WorkspaceID                  uuid.UUID  `gorm:"column:workspace_id;type:uuid"`
+	ExecutionTargetID            uuid.UUID  `gorm:"column:execution_target_id;type:uuid"`
+	TargetKind                   string     `gorm:"column:target_kind"`
+	StorageScope                 string     `gorm:"column:storage_scope"`
+	LayoutVersion                int        `gorm:"column:layout_version"`
+	Reason                       string     `gorm:"column:reason"`
+	Status                       string     `gorm:"column:status"`
+	LeaseTokenHash               []byte     `gorm:"column:lease_token_hash"`
+	DispatchGeneration           int64      `gorm:"column:dispatch_generation"`
+	DeliveryWorkerID             *uuid.UUID `gorm:"column:delivery_worker_id;type:uuid"`
+	DeliveryWorkerIncarnation    *int64     `gorm:"column:delivery_worker_incarnation"`
+	DeliveryAttempts             int        `gorm:"column:delivery_attempts"`
+	DeliveryAvailableAt          time.Time  `gorm:"column:delivery_available_at"`
+	LeaseExpiresAt               *time.Time `gorm:"column:lease_expires_at"`
+	RequestedAt                  time.Time  `gorm:"column:requested_at"`
+	LeasedAt                     *time.Time `gorm:"column:leased_at"`
+	StartedAt                    *time.Time `gorm:"column:started_at"`
+	AcknowledgedAt               *time.Time `gorm:"column:acknowledged_at"`
+	FailedAt                     *time.Time `gorm:"column:failed_at"`
+	SupersededAt                 *time.Time `gorm:"column:superseded_at"`
+	LastErrorCode                *string    `gorm:"column:last_error_code"`
+	LastErrorMessage             *string    `gorm:"column:last_error_message"`
+	CreatedAt                    time.Time  `gorm:"column:created_at"`
+	UpdatedAt                    time.Time  `gorm:"column:updated_at"`
+}
+
+func (WorkspaceCleanupCommand) TableName() string { return "workspace_cleanup_commands" }
 
 type WorkspaceCheckpoint struct {
 	ID             uuid.UUID      `gorm:"column:id;type:uuid;primaryKey"`

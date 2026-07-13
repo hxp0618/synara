@@ -175,7 +175,7 @@ func (c Config) Validate() error {
 		return fmt.Errorf("in-process queue requires exactly one control-plane replica")
 	}
 	if !c.LeaseEnabled || !c.FencingEnabled {
-		return fmt.Errorf("the v1 worker protocol requires both execution leases and generation fencing")
+		return fmt.Errorf("the v2 worker protocol requires both execution leases and generation fencing")
 	}
 
 	switch c.Profile {
