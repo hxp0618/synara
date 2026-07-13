@@ -1600,6 +1600,227 @@ func TestConcurrentCancelAndCompleteHasOneTerminalWinner(t *testing.T) {
 	}
 }
 
+func TestPostgresConcurrentApprovalResolveDifferentDecisionsHasSingleWinner(t *testing.T) {
+	fixture := setupConcurrentApprovalResolution(t)
+	outcomes := resolveApprovalConcurrently(
+		fixture,
+		[2]string{"accept", "decline"},
+		[2]string{"approval-different-a-" + uuid.NewString(), "approval-different-b-" + uuid.NewString()},
+	)
+
+	var winner *concurrentApprovalResolutionOutcome
+	conflicts := 0
+	for index := range outcomes {
+		outcome := &outcomes[index]
+		if outcome.err == nil {
+			if winner != nil {
+				t.Fatalf("different concurrent decisions both succeeded: first=%#v second=%#v", winner, outcome)
+			}
+			winner = outcome
+			continue
+		}
+		var apiError *problem.Error
+		if !errors.As(outcome.err, &apiError) || apiError.Code != "interaction_resolution_conflict" {
+			t.Fatalf("different concurrent decision returned unexpected error: %v", outcome.err)
+		}
+		conflicts++
+	}
+	if winner == nil || conflicts != 1 {
+		t.Fatalf("different concurrent decisions produced winner=%#v conflicts=%d", winner, conflicts)
+	}
+	if winner.result.Replayed || winner.result.Value.Status != "resolved" ||
+		winner.result.Value.Resolution["decision"] != winner.decision {
+		t.Fatalf("different concurrent decision winner was not canonical: %#v", winner)
+	}
+	assertSingleConcurrentApprovalResolutionEffects(t, fixture, winner.decision)
+}
+
+func TestPostgresConcurrentApprovalResolveSameDecisionHasNoDuplicateEffects(t *testing.T) {
+	fixture := setupConcurrentApprovalResolution(t)
+	outcomes := resolveApprovalConcurrently(
+		fixture,
+		[2]string{"accept", "accept"},
+		[2]string{"approval-same-a-" + uuid.NewString(), "approval-same-b-" + uuid.NewString()},
+	)
+
+	for _, outcome := range outcomes {
+		if outcome.err != nil {
+			t.Fatalf("same concurrent decision failed: %v", outcome.err)
+		}
+		if outcome.result.Replayed {
+			t.Fatalf("different idempotency keys unexpectedly replayed: %#v", outcome.result)
+		}
+		if outcome.result.Value.Status != "resolved" || outcome.result.Value.Resolution["decision"] != "accept" {
+			t.Fatalf("same concurrent decision returned non-canonical result: %#v", outcome.result)
+		}
+	}
+	if outcomes[0].result.Value.ID != outcomes[1].result.Value.ID ||
+		outcomes[0].result.Value.ResolutionCommandID == nil ||
+		outcomes[1].result.Value.ResolutionCommandID == nil ||
+		*outcomes[0].result.Value.ResolutionCommandID != *outcomes[1].result.Value.ResolutionCommandID {
+		t.Fatalf("same concurrent decision did not converge on one resolution: %#v", outcomes)
+	}
+	assertSingleConcurrentApprovalResolutionEffects(t, fixture, "accept")
+}
+
+type concurrentApprovalResolutionFixture struct {
+	db         *gorm.DB
+	execution  executionFixture
+	services   [2]*Service
+	worker     persistence.WorkerInstance
+	leaseInput LeaseInput
+	principal  identity.Principal
+	requestID  string
+}
+
+type concurrentApprovalResolutionOutcome struct {
+	decision string
+	result   OperationResult[Interaction]
+	err      error
+}
+
+func setupConcurrentApprovalResolution(t *testing.T) concurrentApprovalResolutionFixture {
+	t.Helper()
+	db := integrationDB(t)
+	execution := seedExecutionFixture(t, db)
+	services := [2]*Service{integrationService(t, db), integrationService(t, db)}
+	worker := registerTestWorker(t, services[0], execution.TargetID, execution.TargetKind, "worker-interaction-resolve-race")
+	cleanupWorkers(t, db, worker.ID)
+	claim, err := services[0].Claim(context.Background(), worker, ClaimExecutionInput{
+		ExecutionTargetID: execution.TargetID, TargetKind: execution.TargetKind, ExecutionID: &execution.ExecutionID,
+	}, "interaction-resolve-race-claim")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claim.Value.Lease == nil {
+		t.Fatal("interaction resolve race execution was not leased")
+	}
+	leaseInput := LeaseInput{
+		TenantID: execution.TenantID, Generation: claim.Value.Lease.Generation, LeaseToken: claim.Value.Lease.LeaseToken,
+	}
+	if _, err := services[0].Start(
+		context.Background(), worker, execution.ExecutionID, leaseInput, "interaction-resolve-race-start",
+	); err != nil {
+		t.Fatal(err)
+	}
+	requestID := "approval-race-" + uuid.NewString()
+	if _, err := services[0].AppendRuntimeEvent(context.Background(), worker, execution.ExecutionID, RuntimeEventInput{
+		LeaseInput: leaseInput, EventID: uuid.New(), EventVersion: RuntimeEventVersionV2, EventType: "request.opened",
+		Payload: map[string]any{
+			"requestId": requestID, "requestType": "exec_command_approval", "detail": "Run concurrent command",
+		}, OccurredAt: time.Now().UTC(),
+	}, "interaction-resolve-race-requested"); err != nil {
+		t.Fatal(err)
+	}
+	assertExecutionStatus(t, db, execution, "waiting-for-approval")
+	return concurrentApprovalResolutionFixture{
+		db: db, execution: execution, services: services, worker: worker, leaseInput: leaseInput,
+		principal: identity.Principal{UserID: execution.UserID, ActiveTenantID: &execution.TenantID},
+		requestID: requestID,
+	}
+}
+
+func resolveApprovalConcurrently(
+	fixture concurrentApprovalResolutionFixture,
+	decisions, idempotencyKeys [2]string,
+) [2]concurrentApprovalResolutionOutcome {
+	ready := make(chan struct{}, 2)
+	start := make(chan struct{})
+	completed := make(chan concurrentApprovalResolutionOutcome, 2)
+	var wait sync.WaitGroup
+	for index := range decisions {
+		wait.Add(1)
+		go func(index int) {
+			defer wait.Done()
+			ready <- struct{}{}
+			<-start
+			result, err := fixture.services[index].ResolveApproval(
+				context.Background(), fixture.principal, fixture.execution.ExecutionID, fixture.requestID,
+				ResolveApprovalInput{Decision: decisions[index]}, idempotencyKeys[index],
+				"interaction-resolve-race-audit-"+string(rune('a'+index)), "127.0.0.1",
+			)
+			completed <- concurrentApprovalResolutionOutcome{decision: decisions[index], result: result, err: err}
+		}(index)
+	}
+	<-ready
+	<-ready
+	close(start)
+	wait.Wait()
+	close(completed)
+
+	var outcomes [2]concurrentApprovalResolutionOutcome
+	index := 0
+	for outcome := range completed {
+		outcomes[index] = outcome
+		index++
+	}
+	return outcomes
+}
+
+func assertSingleConcurrentApprovalResolutionEffects(
+	t *testing.T,
+	fixture concurrentApprovalResolutionFixture,
+	decision string,
+) {
+	t.Helper()
+	var interaction persistence.ExecutionInteraction
+	if err := fixture.db.Where(
+		"tenant_id = ? AND execution_id = ? AND request_id = ? AND kind = ?",
+		fixture.execution.TenantID, fixture.execution.ExecutionID, fixture.requestID, "approval",
+	).Take(&interaction).Error; err != nil {
+		t.Fatal(err)
+	}
+	expectedResolutionKind := "denied"
+	if decision == "accept" {
+		expectedResolutionKind = "approved"
+	}
+	if interaction.Status != "resolved" || interaction.Resolution["decision"] != decision ||
+		interaction.ResolutionKind == nil || *interaction.ResolutionKind != expectedResolutionKind ||
+		interaction.ResolutionCommandID == nil || *interaction.ResolutionCommandID != fixture.requestID+":resolution" ||
+		interaction.DeliveryStatus != "pending" || interaction.DeliveryAttempts != 0 ||
+		interaction.DeliveryWorkerID == nil || *interaction.DeliveryWorkerID != fixture.worker.ID ||
+		interaction.DeliveryGeneration == nil || *interaction.DeliveryGeneration != fixture.leaseInput.Generation {
+		t.Fatalf("concurrent approval did not persist one canonical resolution: %#v", interaction)
+	}
+	assertExecutionStatus(t, fixture.db, fixture.execution, "running")
+
+	var resolvedEvents []persistence.SessionEvent
+	if err := fixture.db.Where(
+		"tenant_id = ? AND execution_id = ? AND event_type = ?",
+		fixture.execution.TenantID, fixture.execution.ExecutionID, "request.resolved",
+	).Find(&resolvedEvents).Error; err != nil {
+		t.Fatal(err)
+	}
+	if len(resolvedEvents) != 1 || resolvedEvents[0].Payload["requestId"] != fixture.requestID ||
+		resolvedEvents[0].Payload["decision"] != decision {
+		t.Fatalf("concurrent approval resolved Events = %#v, want one canonical Event", resolvedEvents)
+	}
+
+	var audits []persistence.AuditLog
+	if err := fixture.db.Where(
+		"tenant_id = ? AND action = ? AND resource_type = ? AND resource_id = ?",
+		fixture.execution.TenantID, "execution.approval_resolved", "execution_interaction", interaction.ID,
+	).Find(&audits).Error; err != nil {
+		t.Fatal(err)
+	}
+	if len(audits) != 1 || audits[0].Metadata["requestId"] != fixture.requestID {
+		t.Fatalf("concurrent approval Audit rows = %#v, want one canonical Audit", audits)
+	}
+
+	deliveries, err := fixture.services[0].PullInteractionResolutions(
+		context.Background(), fixture.worker, fixture.execution.ExecutionID,
+		PullInteractionResolutionsInput{LeaseInput: fixture.leaseInput},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(deliveries) != 1 || deliveries[0].InteractionID != interaction.ID ||
+		deliveries[0].CommandID != fixture.requestID+":resolution" ||
+		deliveries[0].Resolution["decision"] != decision || deliveries[0].DeliveryStatus != "pending" {
+		t.Fatalf("concurrent approval Resolution deliveries = %#v, want one canonical delivery", deliveries)
+	}
+}
+
 func TestApprovalAndUserInputPersistResolveReplayAndResumeExecution(t *testing.T) {
 	db := integrationDB(t)
 	fixture := seedExecutionFixture(t, db)

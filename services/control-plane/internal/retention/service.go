@@ -196,6 +196,9 @@ func (s *Service) RunOnce(ctx context.Context, limit int) error {
 		failures = append(failures, err)
 	}
 	if s.executions != nil {
+		if _, err := s.executions.ExpirePendingInteractions(ctx, now, limit); err != nil {
+			failures = append(failures, err)
+		}
 		if _, err := s.executions.FailAbandonedWorkspaceCheckpoints(ctx, now, limit); err != nil {
 			failures = append(failures, err)
 		}

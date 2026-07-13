@@ -17,6 +17,22 @@ import (
 
 var errReceiptRace = errors.New("worker request receipt raced")
 
+type committedWorkerRequestError struct {
+	err error
+}
+
+func (e *committedWorkerRequestError) Error() string {
+	return e.err.Error()
+}
+
+func (e *committedWorkerRequestError) Unwrap() error {
+	return e.err
+}
+
+func commitWorkerRequestError(err error) error {
+	return &committedWorkerRequestError{err: err}
+}
+
 func requestHash(operation string, input any) (string, error) {
 	encoded, err := json.Marshal(struct {
 		Operation string `json:"operation"`
@@ -76,6 +92,7 @@ func runIdempotent[T any](
 		value := zero
 		replayed := false
 		storedStatus := statusCode
+		var committedError error
 		err = persistence.InTransaction(ctx, service.db, func(tx *gorm.DB) error {
 			var receipt persistence.WorkerRequestReceipt
 			lookupErr := persistence.WithLocking(tx.WithContext(ctx), "UPDATE", "").
@@ -107,6 +124,11 @@ func runIdempotent[T any](
 
 			value, err = apply(tx)
 			if err != nil {
+				var committed *committedWorkerRequestError
+				if errors.As(err, &committed) {
+					committedError = committed.err
+					return nil
+				}
 				return err
 			}
 			mapped, mapErr := responseMap(value)
@@ -132,6 +154,9 @@ func runIdempotent[T any](
 		}
 		if err != nil {
 			return OperationResult[T]{}, err
+		}
+		if committedError != nil {
+			return OperationResult[T]{}, committedError
 		}
 		return OperationResult[T]{Value: value, Replayed: replayed, StatusCode: storedStatus}, nil
 	}

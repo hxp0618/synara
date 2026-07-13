@@ -19,8 +19,8 @@
 - **预计工作量**：XL
 - **风险**：HIGH
 - **计划基线分支**：`codex/saas-tenancy-user`
-- **计划基线提交**：`b5ddb15e`
-- **工作区状态**：包含尚未提交的 Stage 2 验收和 Control Plane 实现，执行时以当前工作区为准
+- **最近稳定检查点**：`e88563e9`（Stage 2 已验收并推送；Durable Interaction Web 权威接线已完成）
+- **工作区状态**：Stage 3 持续执行中，执行时以当前分支和已验证证据为准
 - **依赖**：Stage 2 的 Control Plane Session/Execution 权威、Worker Lease/Fencing、Artifact、SSE
 - **目标结果**：所有正式支持的 Provider 可以通过统一 Provider Host 和 Worker Contract，稳定运行在
   Local、SSH、Docker、Kubernetes Execution Target，并能跨 Worker/Pod 恢复后续 Turn
@@ -551,6 +551,19 @@ pending -> approved / denied / answered / expired / cancelled / superseded
 - Worker 丢失、Lease 过期、Control Plane 重启后状态不丢失。
 - Drain 中的 Worker 不再领取新 Execution，并能处理或安全交接 Pending Interaction。
 - 跨 Tenant 无法读取或解决 Interaction。
+
+### D 当前证据（2026-07-13）
+
+- 已完成 Session 级 pending-only Snapshot、`snapshotSequence` 竞态对账、页面刷新恢复和 SaaS/Web
+  Resolve/Interrupt 权威路由；本地模式继续使用 Native API。
+- 已完成 Approval/User Input Schema 校验、过期拒绝、无审批权限 Event 脱敏，以及 SSE 连接内角色
+  降级后的实时重新授权。
+- 已完成 Interaction 24 小时等待上限：Lease Renew 精确检查，Claim/Recovery 与 Retention 后台 Sweep
+  复用 `idx_execution_interactions_expiry`，超时后 Fence 旧 Generation 并转入 `recovering`。
+- 已用真实 PostgreSQL 17 验证双 Control Plane 实例并发 Resolve：不同决策仅一个终态；相同决策、
+  不同幂等键不重复 Event、Audit 或 Resolution delivery。
+- D 尚未整体完成：仍需把 Pending Interaction 纳入统一 Provider Acceptance Suite，并完成 Drain、Pod
+  Eviction、Provider 不支持恢复时的跨 Target 故障矩阵。
 
 ## 10. 工作流 E：Runtime Event 版本与兼容
 

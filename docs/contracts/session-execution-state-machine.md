@@ -116,6 +116,23 @@ correlated terminal Host message. Both transitions are idempotent. Lease recover
 and supersedes unacknowledged resolution delivery for the obsolete Generation before a replacement Worker can
 claim the Execution.
 
+Pending Interactions have a bounded 24-hour wait. Lease Renew performs a targeted expiry check for its
+Execution, while Claim/recovery and the background retention pass use the existing pending-expiry partial index
+to sweep unattended rows. Expiry acquires locks in the same `Lease -> Execution -> Interaction` order as Resolve,
+deletes the obsolete Lease, marks all pending requests for that Generation `expired/superseded`, returns the Turn
+to `queued`, moves the Execution to `recovering`, and appends exactly one `execution.recovering` Event/Outbox
+message with reason `interaction_expired`. The previous Worker is fenced before a replacement can claim the next
+Generation.
+
+Concurrent Resolve semantics are database-defined across Control Plane replicas:
+
+- Different decisions produce one resolved terminal winner; the loser receives
+  `409 interaction_resolution_conflict`.
+- The same decision with different idempotency keys converges on the same Interaction and resolution command
+  without duplicating the resolved Event, Audit row, or Worker delivery.
+- A request after the Interaction deadline receives `409 interaction_expired`, including after the expiry sweep
+  has already removed the old Lease.
+
 ## Browser/API idempotency
 
 Project Create, Session Create, Turn Create, Session Suspend/Resume/Archive, Execution Cancel, and

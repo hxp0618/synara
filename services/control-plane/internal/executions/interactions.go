@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"gorm.io/gorm"
@@ -22,6 +23,12 @@ const (
 	defaultInteractionResolutionPullLimit = 10
 	maximumInteractionResolutionPullLimit = 100
 )
+
+type expiredInteractionCandidate struct {
+	ID          uuid.UUID
+	TenantID    uuid.UUID
+	ExecutionID uuid.UUID
+}
 
 func (s *Service) ListInteractions(
 	ctx context.Context,
@@ -70,6 +77,201 @@ func (s *Service) ListPendingInteractions(
 		items = append(items, toPendingInteraction(model))
 	}
 	return PendingInteractionSnapshot{Items: items, SnapshotSequence: session.LastEventSequence}, nil
+}
+
+func (s *Service) ExpirePendingInteractions(
+	ctx context.Context,
+	expiredAt time.Time,
+	limit int,
+) (int, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	candidates := make([]expiredInteractionCandidate, 0, limit)
+	if err := s.db.WithContext(ctx).Model(&persistence.ExecutionInteraction{}).
+		Select("id", "tenant_id", "execution_id").
+		Where("status = 'pending' AND expires_at <= ?", expiredAt).
+		Order("expires_at, tenant_id, execution_id, id").Limit(limit).
+		Find(&candidates).Error; err != nil {
+		return 0, problem.Wrap(500, "expired_interaction_scan_failed", "Expired interactions could not be scanned.", err)
+	}
+	const reason = "The interaction exceeded its maximum waiting time before a user response was received."
+	expired := 0
+	for _, candidate := range candidates {
+		changed, _, err := s.expirePendingInteractionCandidate(ctx, candidate, expiredAt, reason)
+		if err != nil {
+			return expired, err
+		}
+		if changed {
+			expired++
+		}
+	}
+	return expired, nil
+}
+
+func (s *Service) expireValidatedLeasePendingInteraction(
+	ctx context.Context,
+	tx *gorm.DB,
+	lease persistence.WorkerLease,
+	execution persistence.AgentExecution,
+	expiredAt time.Time,
+) (bool, persistence.SessionEvent, error) {
+	if execution.Status != "waiting-for-approval" {
+		return false, persistence.SessionEvent{}, nil
+	}
+	var interaction persistence.ExecutionInteraction
+	err := persistence.WithLocking(tx.WithContext(ctx), "UPDATE", "").
+		Where(
+			"tenant_id = ? AND execution_id = ? AND worker_id = ? AND generation = ? AND status = 'pending' AND expires_at <= ?",
+			execution.TenantID, execution.ID, lease.WorkerID, lease.Generation, expiredAt,
+		).
+		Order("expires_at, id").Take(&interaction).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return false, persistence.SessionEvent{}, nil
+	}
+	if err != nil {
+		return false, persistence.SessionEvent{}, problem.Wrap(
+			500, "interaction_expiry_lock_failed", "The expired interaction could not be locked.", err,
+		)
+	}
+	leaseDelete := tx.WithContext(ctx).
+		Where(
+			"tenant_id = ? AND execution_id = ? AND worker_id = ? AND generation = ?",
+			lease.TenantID, lease.ExecutionID, lease.WorkerID, lease.Generation,
+		).
+		Delete(&persistence.WorkerLease{})
+	if err := expectOne(
+		leaseDelete, 409, "interaction_expiry_lease_release_conflict", "The interaction lease changed during expiry.",
+	); err != nil {
+		return false, persistence.SessionEvent{}, err
+	}
+	const reason = "The interaction exceeded its maximum waiting time before a user response was received."
+	appended, err := s.recoverExecutionGenerationLocked(
+		ctx, tx, execution, lease, "interaction_expired", reason,
+	)
+	if err != nil {
+		return false, persistence.SessionEvent{}, err
+	}
+	return true, appended, nil
+}
+
+func (s *Service) expirePendingInteractionCandidate(
+	ctx context.Context,
+	candidate expiredInteractionCandidate,
+	expiredAt time.Time,
+	reason string,
+) (bool, persistence.SessionEvent, error) {
+	var appended persistence.SessionEvent
+	changed := false
+	err := persistence.InTransaction(ctx, s.db, func(tx *gorm.DB) error {
+		var lease persistence.WorkerLease
+		leaseErr := persistence.WithLocking(tx.WithContext(ctx), "UPDATE", "").
+			Where("tenant_id = ? AND execution_id = ?", candidate.TenantID, candidate.ExecutionID).
+			Take(&lease).Error
+		if leaseErr != nil && !errors.Is(leaseErr, gorm.ErrRecordNotFound) {
+			return problem.Wrap(500, "interaction_expiry_lease_lock_failed", "The interaction lease could not be locked for expiry.", leaseErr)
+		}
+
+		var execution persistence.AgentExecution
+		executionErr := persistence.WithLocking(tx.WithContext(ctx), "UPDATE", "").
+			Where("tenant_id = ? AND id = ?", candidate.TenantID, candidate.ExecutionID).
+			Take(&execution).Error
+		if errors.Is(executionErr, gorm.ErrRecordNotFound) {
+			return nil
+		}
+		if executionErr != nil {
+			return problem.Wrap(500, "interaction_expiry_execution_lock_failed", "The interaction Execution could not be locked for expiry.", executionErr)
+		}
+
+		var interaction persistence.ExecutionInteraction
+		interactionErr := persistence.WithLocking(tx.WithContext(ctx), "UPDATE", "").
+			Where(
+				"id = ? AND tenant_id = ? AND execution_id = ? AND status = 'pending'",
+				candidate.ID, candidate.TenantID, candidate.ExecutionID,
+			).
+			Take(&interaction).Error
+		if errors.Is(interactionErr, gorm.ErrRecordNotFound) {
+			return nil
+		}
+		if interactionErr != nil {
+			return problem.Wrap(500, "interaction_expiry_lock_failed", "The expired interaction could not be locked.", interactionErr)
+		}
+		if interaction.ExpiresAt.After(expiredAt) {
+			return nil
+		}
+
+		activeGeneration := execution.Status == "waiting-for-approval" &&
+			execution.WorkerID != nil && *execution.WorkerID == interaction.WorkerID &&
+			execution.Generation == interaction.Generation
+		if !activeGeneration {
+			updated, err := expirePendingInteractionRow(ctx, tx, interaction.ID, expiredAt, reason)
+			if err != nil {
+				return err
+			}
+			changed = updated
+			return nil
+		}
+
+		if leaseErr == nil {
+			if lease.WorkerID != interaction.WorkerID || lease.Generation != interaction.Generation {
+				updated, err := expirePendingInteractionRow(ctx, tx, interaction.ID, expiredAt, reason)
+				if err != nil {
+					return err
+				}
+				changed = updated
+				return nil
+			}
+			leaseDelete := tx.WithContext(ctx).
+				Where(
+					"tenant_id = ? AND execution_id = ? AND worker_id = ? AND generation = ?",
+					lease.TenantID, lease.ExecutionID, lease.WorkerID, lease.Generation,
+				).
+				Delete(&persistence.WorkerLease{})
+			if err := expectOne(leaseDelete, 409, "interaction_expiry_lease_release_conflict", "The interaction lease changed during expiry."); err != nil {
+				return err
+			}
+		} else {
+			lease = persistence.WorkerLease{
+				ExecutionID: execution.ID, TenantID: execution.TenantID,
+				WorkerID: interaction.WorkerID, Generation: interaction.Generation,
+			}
+		}
+
+		var err error
+		appended, err = s.recoverExecutionGenerationLocked(
+			ctx, tx, execution, lease, "interaction_expired", reason,
+		)
+		if err != nil {
+			return err
+		}
+		changed = true
+		return nil
+	})
+	if err != nil {
+		return false, persistence.SessionEvent{}, err
+	}
+	if appended.EventID != uuid.Nil {
+		s.sessions.PublishInternalEvent(appended)
+	}
+	return changed, appended, nil
+}
+
+func expirePendingInteractionRow(
+	ctx context.Context,
+	tx *gorm.DB,
+	interactionID uuid.UUID,
+	expiredAt time.Time,
+	reason string,
+) (bool, error) {
+	result := tx.WithContext(ctx).Model(&persistence.ExecutionInteraction{}).
+		Where("id = ? AND status = 'pending' AND expires_at <= ?", interactionID, expiredAt).
+		Updates(map[string]any{
+			"status": "expired", "delivery_status": "superseded", "delivery_error": reason,
+		})
+	if result.Error != nil {
+		return false, problem.Wrap(500, "interaction_expiry_failed", "The expired interaction could not be persisted.", result.Error)
+	}
+	return result.RowsAffected == 1, nil
 }
 
 func (s *Service) ResolveApproval(
@@ -351,6 +553,20 @@ func (s *Service) resolveInteraction(
 		leaseErr := persistence.WithLocking(tx.WithContext(ctx), "UPDATE", "").
 			Where("tenant_id = ? AND execution_id = ?", tenantID, executionID).Take(&lease).Error
 		if errors.Is(leaseErr, gorm.ErrRecordNotFound) {
+			var interactionState persistence.ExecutionInteraction
+			stateErr := tx.WithContext(ctx).
+				Select("id", "status", "expires_at").
+				Where(
+					"tenant_id = ? AND execution_id = ? AND request_id = ? AND kind = ?",
+					tenantID, executionID, requestID, kind,
+				).
+				Take(&interactionState).Error
+			if stateErr == nil && (interactionState.Status == "expired" || !interactionState.ExpiresAt.After(s.now())) {
+				return Interaction{}, problem.New(409, "interaction_expired", "The execution interaction expired before it was resolved.")
+			}
+			if stateErr != nil && !errors.Is(stateErr, gorm.ErrRecordNotFound) {
+				return Interaction{}, problem.Wrap(500, "interaction_load_failed", "The execution interaction could not be loaded.", stateErr)
+			}
 			return Interaction{}, problem.New(409, "interaction_lease_expired", "The execution lease is no longer active.")
 		}
 		if leaseErr != nil {

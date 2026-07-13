@@ -280,7 +280,8 @@ func (s *Service) Renew(
 	input RenewLeaseInput,
 	requestID string,
 ) (OperationResult[Lease], error) {
-	return runIdempotent(ctx, s, worker, requestID, "execution.renew", struct {
+	var appended persistence.SessionEvent
+	result, err := runIdempotent(ctx, s, worker, requestID, "execution.renew", struct {
 		ExecutionID uuid.UUID       `json:"executionId"`
 		Input       RenewLeaseInput `json:"input"`
 	}{executionID, input}, 200, func(tx *gorm.DB) (Lease, error) {
@@ -291,10 +292,20 @@ func (s *Service) Renew(
 		if err := requireExecutionTenantActive(ctx, tx, execution.TenantID); err != nil {
 			return Lease{}, err
 		}
+		now := s.now()
+		expired, event, err := s.expireValidatedLeasePendingInteraction(ctx, tx, lease, execution, now)
+		if err != nil {
+			return Lease{}, err
+		}
+		if expired {
+			appended = event
+			return Lease{}, commitWorkerRequestError(problem.New(
+				409, "interaction_expired", "The execution interaction expired before the lease could be renewed.",
+			))
+		}
 		if err := s.storeProviderCursor(ctx, tx, execution, input.ProviderResumeCursor); err != nil {
 			return Lease{}, err
 		}
-		now := s.now()
 		lease.HeartbeatAt = now
 		lease.ExpiresAt = now.Add(s.leaseTTL)
 		renewal := tx.WithContext(ctx).Model(&persistence.WorkerLease{}).
@@ -309,6 +320,11 @@ func (s *Service) Renew(
 		}
 		return toLease(lease, ""), nil
 	})
+	var apiError *problem.Error
+	if appended.EventID != uuid.Nil && errors.As(err, &apiError) && apiError.Code == "interaction_expired" {
+		s.sessions.PublishInternalEvent(appended)
+	}
+	return result, err
 }
 
 func (s *Service) Start(
@@ -584,7 +600,7 @@ func (s *Service) Release(
 		if err := expectOne(turnUpdate, 500, "turn_recovery_failed", "Failed to return the turn to the recovery queue."); err != nil {
 			return Execution{}, err
 		}
-		if err := s.enqueueRecovery(ctx, tx, execution); err != nil {
+		if err := s.enqueueRecovery(ctx, tx, execution, input.Reason); err != nil {
 			return Execution{}, err
 		}
 		appended, err = s.sessions.AppendInternalEvent(ctx, tx, execution.TenantID, execution.SessionID, sessions.InternalEventInput{
@@ -607,6 +623,10 @@ func (s *Service) RecoverExpired(ctx context.Context, limit int) error {
 	if limit <= 0 || limit > 500 {
 		limit = 100
 	}
+	now := s.now()
+	if _, err := s.ExpirePendingInteractions(ctx, now, limit); err != nil {
+		return err
+	}
 	if err := s.markStaleWorkers(ctx); err != nil {
 		return err
 	}
@@ -614,7 +634,7 @@ func (s *Service) RecoverExpired(ctx context.Context, limit int) error {
 	err := persistence.InTransaction(ctx, s.db, func(tx *gorm.DB) error {
 		leases := make([]persistence.WorkerLease, 0)
 		if err := persistence.WithLocking(tx.WithContext(ctx), "UPDATE", "SKIP LOCKED").
-			Where("expires_at <= ?", s.now()).Order("expires_at, execution_id").Limit(limit).Find(&leases).Error; err != nil {
+			Where("expires_at <= ?", now).Order("expires_at, execution_id").Limit(limit).Find(&leases).Error; err != nil {
 			return problem.Wrap(500, "expired_lease_scan_failed", "Failed to scan expired execution leases.", err)
 		}
 		for index := range leases {
@@ -652,52 +672,10 @@ func (s *Service) RecoverExpired(ctx context.Context, limit int) error {
 				(execution.Status != "leased" && execution.Status != "running" && execution.Status != "waiting-for-approval") {
 				continue
 			}
-			if err := s.supersedeInteractionGeneration(ctx, tx, execution, lease); err != nil {
-				return err
-			}
-			if err := requeueExecutionControlCommands(ctx, tx, execution, lease, "The Worker lease expired before the Control command was acknowledged."); err != nil {
-				return err
-			}
-			var restoreCheckpointID *uuid.UUID
-			if execution.RemoteWorkspaceID != nil {
-				var workspace persistence.RemoteWorkspace
-				if err := persistence.WithLocking(tx.WithContext(ctx), "UPDATE", "").
-					Where("tenant_id = ? AND id = ? AND session_id = ?", execution.TenantID, *execution.RemoteWorkspaceID, execution.SessionID).
-					Take(&workspace).Error; err != nil {
-					return problem.Wrap(500, "workspace_recovery_load_failed", "Failed to load the logical Workspace during Execution recovery.", err)
-				}
-				restoreCheckpointID = workspace.CurrentCheckpointID
-				if err := tx.WithContext(ctx).Model(&persistence.RemoteWorkspace{}).
-					Where("tenant_id = ? AND id = ?", workspace.TenantID, workspace.ID).
-					Updates(map[string]any{"state": "recovering", "updated_at": s.now()}).Error; err != nil {
-					return problem.Wrap(500, "workspace_recovery_update_failed", "Failed to mark the logical Workspace for recovery.", err)
-				}
-			}
-			execution.Status = "recovering"
-			execution.WorkerID = nil
-			recoveryUpdate := tx.WithContext(ctx).Model(&persistence.AgentExecution{}).
-				Where("id = ? AND worker_id = ? AND generation = ? AND status IN ?", execution.ID, lease.WorkerID, lease.Generation, []string{"leased", "running", "waiting-for-approval"}).
-				Updates(map[string]any{
-					"status": "recovering", "worker_id": nil,
-					"restore_checkpoint_id": restoreCheckpointID,
-				})
-			if err := expectOne(recoveryUpdate, 409, "execution_recovery_failed", "Failed to move an expired execution into recovery."); err != nil {
-				return err
-			}
-			turnUpdate := tx.WithContext(ctx).Model(&persistence.AgentTurn{}).
-				Where("tenant_id = ? AND session_id = ? AND id = ?", execution.TenantID, execution.SessionID, execution.TurnID).
-				Update("status", "queued")
-			if err := expectOne(turnUpdate, 500, "turn_recovery_failed", "Failed to return the expired turn to the recovery queue."); err != nil {
-				return err
-			}
-			if err := s.enqueueRecovery(ctx, tx, execution); err != nil {
-				return err
-			}
-			event, err := s.sessions.AppendInternalEvent(ctx, tx, execution.TenantID, execution.SessionID, sessions.InternalEventInput{
-				EventType: "execution.recovering", ActorType: "system",
-				ExecutionID: &execution.ID, WorkerID: &lease.WorkerID, Generation: &execution.Generation,
-				Payload: map[string]any{"turnId": execution.TurnID, "reason": "lease_expired"},
-			})
+			event, err := s.recoverExecutionGenerationLocked(
+				ctx, tx, execution, lease, "lease_expired",
+				"The Worker lease expired before the execution lifecycle completed.",
+			)
 			if err != nil {
 				return err
 			}
@@ -712,6 +690,65 @@ func (s *Service) RecoverExpired(ctx context.Context, limit int) error {
 		s.sessions.PublishInternalEvent(event)
 	}
 	return nil
+}
+
+func (s *Service) recoverExecutionGenerationLocked(
+	ctx context.Context,
+	tx *gorm.DB,
+	execution persistence.AgentExecution,
+	lease persistence.WorkerLease,
+	reasonCode, reasonMessage string,
+) (persistence.SessionEvent, error) {
+	if err := s.supersedeInteractionGenerationWithReason(ctx, tx, execution, lease, reasonMessage); err != nil {
+		return persistence.SessionEvent{}, err
+	}
+	if err := requeueExecutionControlCommands(ctx, tx, execution, lease, reasonMessage); err != nil {
+		return persistence.SessionEvent{}, err
+	}
+	var restoreCheckpointID *uuid.UUID
+	if execution.RemoteWorkspaceID != nil {
+		var workspace persistence.RemoteWorkspace
+		if err := persistence.WithLocking(tx.WithContext(ctx), "UPDATE", "").
+			Where("tenant_id = ? AND id = ? AND session_id = ?", execution.TenantID, *execution.RemoteWorkspaceID, execution.SessionID).
+			Take(&workspace).Error; err != nil {
+			return persistence.SessionEvent{}, problem.Wrap(500, "workspace_recovery_load_failed", "Failed to load the logical Workspace during Execution recovery.", err)
+		}
+		restoreCheckpointID = workspace.CurrentCheckpointID
+		if err := tx.WithContext(ctx).Model(&persistence.RemoteWorkspace{}).
+			Where("tenant_id = ? AND id = ?", workspace.TenantID, workspace.ID).
+			Updates(map[string]any{"state": "recovering", "updated_at": s.now()}).Error; err != nil {
+			return persistence.SessionEvent{}, problem.Wrap(500, "workspace_recovery_update_failed", "Failed to mark the logical Workspace for recovery.", err)
+		}
+	}
+	execution.Status = "recovering"
+	execution.WorkerID = nil
+	recoveryUpdate := tx.WithContext(ctx).Model(&persistence.AgentExecution{}).
+		Where(
+			"tenant_id = ? AND id = ? AND worker_id = ? AND generation = ? AND status IN ?",
+			execution.TenantID, execution.ID, lease.WorkerID, lease.Generation,
+			[]string{"leased", "running", "waiting-for-approval"},
+		).
+		Updates(map[string]any{
+			"status": "recovering", "worker_id": nil,
+			"restore_checkpoint_id": restoreCheckpointID,
+		})
+	if err := expectOne(recoveryUpdate, 409, "execution_recovery_failed", "Failed to move the execution into recovery."); err != nil {
+		return persistence.SessionEvent{}, err
+	}
+	turnUpdate := tx.WithContext(ctx).Model(&persistence.AgentTurn{}).
+		Where("tenant_id = ? AND session_id = ? AND id = ?", execution.TenantID, execution.SessionID, execution.TurnID).
+		Update("status", "queued")
+	if err := expectOne(turnUpdate, 500, "turn_recovery_failed", "Failed to return the turn to the recovery queue."); err != nil {
+		return persistence.SessionEvent{}, err
+	}
+	if err := s.enqueueRecovery(ctx, tx, execution, reasonCode); err != nil {
+		return persistence.SessionEvent{}, err
+	}
+	return s.sessions.AppendInternalEvent(ctx, tx, execution.TenantID, execution.SessionID, sessions.InternalEventInput{
+		EventType: "execution.recovering", ActorType: "system",
+		ExecutionID: &execution.ID, WorkerID: &lease.WorkerID, Generation: &execution.Generation,
+		Payload: map[string]any{"turnId": execution.TurnID, "reason": reasonCode},
+	})
 }
 
 func (s *Service) lockLease(
@@ -799,7 +836,12 @@ func (s *Service) requireClaimableWorker(ctx context.Context, tx *gorm.DB, worke
 	return worker, nil
 }
 
-func (s *Service) enqueueRecovery(ctx context.Context, tx *gorm.DB, execution persistence.AgentExecution) error {
+func (s *Service) enqueueRecovery(
+	ctx context.Context,
+	tx *gorm.DB,
+	execution persistence.AgentExecution,
+	reason string,
+) error {
 	tenantID := execution.TenantID
 	messageKey := execution.ID.String() + ":" + formatGeneration(execution.Generation)
 	err := outbox.Enqueue(ctx, tx, outbox.EnqueueInput{
@@ -808,7 +850,7 @@ func (s *Service) enqueueRecovery(ctx context.Context, tx *gorm.DB, execution pe
 			"executionId": execution.ID, "tenantId": execution.TenantID,
 			"sessionId": execution.SessionID, "turnId": execution.TurnID,
 			"generation": execution.Generation, "executionTargetId": execution.ExecutionTargetID,
-			"targetKind": execution.TargetKind,
+			"targetKind": execution.TargetKind, "reason": reason,
 		},
 		Headers: map[string]any{"eventVersion": 1},
 	})
