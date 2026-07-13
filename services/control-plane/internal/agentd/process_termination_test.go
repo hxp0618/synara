@@ -28,7 +28,7 @@ func TestLegacyRunnerCancellationTerminatesDescendants(t *testing.T) {
 	t.Setenv(processTreeTestReadyEnv, ready)
 	t.Setenv(processTreeTestSentinelEnv, sentinel)
 	runner := &Runner{
-		command:         []string{os.Args[0], "-test.run=^TestProcessTreeHelperProcess$", "--"},
+		command:         processTreeRunnerTestCommand(),
 		maxMessageBytes: 1 << 20,
 		protocol:        RunnerProtocolV1,
 	}
@@ -62,7 +62,7 @@ func TestProviderHostAbortTerminatesDescendants(t *testing.T) {
 	t.Setenv(processTreeTestReadyEnv, ready)
 	t.Setenv(processTreeTestSentinelEnv, sentinel)
 	runner := &Runner{
-		command:         []string{os.Args[0], "-test.run=^TestProcessTreeHelperProcess$", "--"},
+		command:         processTreeRunnerTestCommand(),
 		maxMessageBytes: 1 << 20,
 		protocol:        RunnerProtocolV2,
 	}
@@ -82,7 +82,7 @@ func TestProviderHostBlockedStdinHonorsContext(t *testing.T) {
 	t.Setenv(processTreeTestReadyEnv, ready)
 	t.Setenv(processTreeTestSentinelEnv, sentinel)
 	runner := &Runner{
-		command:         []string{os.Args[0], "-test.run=^TestProcessTreeHelperProcess$", "--"},
+		command:         processTreeRunnerTestCommand(),
 		maxMessageBytes: 1 << 20,
 		protocol:        RunnerProtocolV2,
 	}
@@ -115,7 +115,7 @@ func TestProviderHostControlTerminalWaitHonorsContext(t *testing.T) {
 	t.Setenv(processTreeTestReadyEnv, ready)
 	t.Setenv(processTreeTestObservedEnv, observed)
 	runner := &Runner{
-		command:         []string{os.Args[0], "-test.run=^TestProcessTreeHelperProcess$", "--"},
+		command:         processTreeRunnerTestCommand(),
 		maxMessageBytes: 1 << 20,
 		protocol:        RunnerProtocolV2,
 	}
@@ -173,7 +173,7 @@ func TestProviderHostDoesNotWriteBeforeDeliveredPersistence(t *testing.T) {
 	t.Setenv(processTreeTestReadyEnv, ready)
 	t.Setenv(processTreeTestObservedEnv, observed)
 	runner := &Runner{
-		command:         []string{os.Args[0], "-test.run=^TestProcessTreeHelperProcess$", "--"},
+		command:         processTreeRunnerTestCommand(),
 		maxMessageBytes: 1 << 20,
 		protocol:        RunnerProtocolV2,
 	}
@@ -209,7 +209,7 @@ func TestProviderHostCrashDuringDeliveredPersistenceDoesNotDoubleResolve(t *test
 	t.Setenv(processTreeTestReadyEnv, ready)
 	t.Setenv(processTreeTestObservedEnv, trigger)
 	runner := &Runner{
-		command:         []string{os.Args[0], "-test.run=^TestProcessTreeHelperProcess$", "--"},
+		command:         processTreeRunnerTestCommand(),
 		maxMessageBytes: 1 << 20,
 		protocol:        RunnerProtocolV2,
 	}
@@ -242,7 +242,8 @@ func TestProviderHostCrashDuringDeliveredPersistenceDoesNotDoubleResolve(t *test
 
 func TestProcessTreeTerminateIsSingleShotAfterSuccessfulCleanup(t *testing.T) {
 	t.Setenv(processTreeTestModeEnv, "sleep")
-	command := exec.Command(os.Args[0], "-test.run=^TestProcessTreeHelperProcess$", "--")
+	commandLine := processTreeRunnerTestCommand()
+	command := exec.Command(commandLine[0], commandLine[1:]...)
 	command.Env = os.Environ()
 	tree, err := newProcessTree(command)
 	if err != nil {
@@ -268,17 +269,18 @@ func TestProcessTreeTerminateIsSingleShotAfterSuccessfulCleanup(t *testing.T) {
 }
 
 func TestProcessTreeHelperProcess(t *testing.T) {
-	mode := os.Getenv(processTreeTestModeEnv)
-	if mode == "" {
+	if !containsString(os.Args, "--synara-process-tree-test-helper") {
 		t.Skip("process-tree helper")
 	}
-	ready := os.Getenv(processTreeTestReadyEnv)
-	sentinel := os.Getenv(processTreeTestSentinelEnv)
-	observed := os.Getenv(processTreeTestObservedEnv)
+	mode := processTreeTestArgument("--synara-process-tree-test-mode")
+	ready := processTreeTestArgument("--synara-process-tree-test-ready")
+	sentinel := processTreeTestArgument("--synara-process-tree-test-sentinel")
+	observed := processTreeTestArgument("--synara-process-tree-test-observed")
 	switch mode {
 	case "root":
-		command := exec.Command(os.Args[0], "-test.run=^TestProcessTreeHelperProcess$", "--")
-		command.Env = replaceProcessTreeTestMode(os.Environ(), "grandchild")
+		commandLine := processTreeTestCommand("grandchild", ready, sentinel, observed)
+		command := exec.Command(commandLine[0], commandLine[1:]...)
+		command.Env = runnerEnvironment(os.Environ())
 		command.Stdout = os.Stdout
 		command.Stderr = os.Stderr
 		if err := command.Start(); err != nil {
@@ -366,13 +368,35 @@ func assertProcessTreeSentinelAbsent(t *testing.T, path string) {
 	}
 }
 
-func replaceProcessTreeTestMode(environment []string, mode string) []string {
-	result := make([]string, 0, len(environment)+1)
-	prefix := processTreeTestModeEnv + "="
-	for _, entry := range environment {
-		if !strings.HasPrefix(entry, prefix) {
-			result = append(result, entry)
+func processTreeRunnerTestCommand() []string {
+	return processTreeTestCommand(
+		os.Getenv(processTreeTestModeEnv), os.Getenv(processTreeTestReadyEnv),
+		os.Getenv(processTreeTestSentinelEnv), os.Getenv(processTreeTestObservedEnv),
+	)
+}
+
+func processTreeTestCommand(mode, ready, sentinel, observed string) []string {
+	command := []string{
+		os.Args[0], "-test.run=^TestProcessTreeHelperProcess$", "--", "--synara-process-tree-test-helper",
+		"--synara-process-tree-test-mode", mode,
+	}
+	for _, item := range []struct{ name, value string }{
+		{name: "--synara-process-tree-test-ready", value: ready},
+		{name: "--synara-process-tree-test-sentinel", value: sentinel},
+		{name: "--synara-process-tree-test-observed", value: observed},
+	} {
+		if item.value != "" {
+			command = append(command, item.name, item.value)
 		}
 	}
-	return append(result, prefix+mode)
+	return command
+}
+
+func processTreeTestArgument(name string) string {
+	for index := 0; index+1 < len(os.Args); index++ {
+		if os.Args[index] == name {
+			return os.Args[index+1]
+		}
+	}
+	return ""
 }

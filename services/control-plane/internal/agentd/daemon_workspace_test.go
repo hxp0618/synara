@@ -122,7 +122,7 @@ func TestDaemonRestoresSnapshotBeforeProviderAndReusesUnchangedCheckpoint(t *tes
 	root := t.TempDir()
 	cfg := Config{
 		ControlPlaneURL: controlPlaneURL, TargetKind: platform.TargetLocal,
-		RunnerCommand:  []string{os.Args[0], "-test.run=TestAgentdDrainRunnerHelperProcess", "--"},
+		RunnerCommand:  agentdDrainRunnerTestCommand(),
 		RunnerProtocol: RunnerProtocolV1, WorkspaceRoot: root, PollInterval: time.Millisecond,
 		HeartbeatInterval: time.Hour, LeaseRenewInterval: time.Hour, DrainTimeout: time.Second,
 		RequestTimeout: time.Second, ArtifactTimeout: time.Second, RunnerMessageBytes: 1 << 20,
@@ -285,7 +285,7 @@ func TestDaemonPreparesManagedWorkspaceBeforeStartingProvider(t *testing.T) {
 	}
 	cfg := Config{
 		ControlPlaneURL: controlPlaneURL, TargetKind: platform.TargetLocal,
-		RunnerCommand:  []string{os.Args[0], "-test.run=TestAgentdDrainRunnerHelperProcess", "--"},
+		RunnerCommand:  agentdDrainRunnerTestCommand(),
 		RunnerProtocol: RunnerProtocolV1, WorkspaceRoot: t.TempDir(), PollInterval: time.Millisecond,
 		HeartbeatInterval: time.Hour, LeaseRenewInterval: time.Hour, DrainTimeout: time.Second,
 		RequestTimeout: time.Second, ArtifactTimeout: time.Second, RunnerMessageBytes: 1 << 20,

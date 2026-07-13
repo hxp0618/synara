@@ -66,15 +66,101 @@ printf '%s\n' '{"type":"result","output":{}}'
 	}
 }
 
+func TestRunnerEnvironmentUsesExplicitRuntimeAllowlist(t *testing.T) {
+	source := []string{
+		"PATH=/usr/local/bin:/usr/bin:/bin",
+		"HOME=/home/runner",
+		"TMPDIR=/tmp/synara",
+		"LANG=en_US.UTF-8",
+		"LC_ALL=C.UTF-8",
+		"TERM=xterm-256color",
+		"COLORTERM=truecolor",
+		"SSL_CERT_FILE=/etc/ssl/cert.pem",
+		"SECRET=ordinary-secret",
+		"SYNARA_HOST_SECRET=synara-secret",
+		"SYNARA_AUTH_TOKEN=auth-secret",
+		"SYNARA_WORKER_REGISTRATION_TOKEN=worker-secret",
+		"SYNARA_LEASE_TOKEN=lease-secret",
+		"SYNARA_CONTROL_PLANE_URL=https://control.example.test",
+		"OPENAI_API_KEY=openai-secret",
+		"ANTHROPIC_API_KEY=anthropic-secret",
+		"AWS_ACCESS_KEY_ID=aws-key",
+		"AWS_SECRET_ACCESS_KEY=aws-secret",
+		"GITHUB_TOKEN=github-secret",
+		"GH_TOKEN=gh-secret",
+		"DATABASE_URL=postgres://user:secret@db/synara",
+		"PGPASSWORD=postgres-secret",
+		"S3_ACCESS_KEY_ID=s3-key",
+		"MINIO_ROOT_PASSWORD=minio-secret",
+		"GOOGLE_APPLICATION_CREDENTIALS=/host/gcp-credential.json",
+		"AZURE_CLIENT_SECRET=azure-secret",
+		"HTTP_PROXY=http://user:secret@proxy.example.test",
+		"SSH_AUTH_SOCK=/host/agent.sock",
+		"NODE_OPTIONS=--require=/host/inject-secrets.js",
+	}
+
+	actual := make(map[string]string)
+	for _, entry := range runnerEnvironment(source) {
+		name, value, found := strings.Cut(entry, "=")
+		if !found {
+			t.Fatalf("invalid child environment entry %q", entry)
+		}
+		actual[name] = value
+	}
+	want := map[string]string{
+		"PATH": "/usr/local/bin:/usr/bin:/bin", "HOME": "/home/runner", "TMPDIR": "/tmp/synara",
+		"LANG": "en_US.UTF-8", "LC_ALL": "C.UTF-8", "TERM": "xterm-256color",
+		"COLORTERM": "truecolor", "SSL_CERT_FILE": "/etc/ssl/cert.pem",
+	}
+	if len(actual) != len(want) {
+		t.Fatalf("Runner child environment contains unexpected entries: %#v", actual)
+	}
+	for name, value := range want {
+		if actual[name] != value {
+			t.Fatalf("Runner child environment %s = %q, want %q", name, actual[name], value)
+		}
+	}
+}
+
 func TestRunnerDeliversCredentialOnlyThroughPipeAndStripsWorkerEnvironment(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("TMPDIR", t.TempDir())
+	t.Setenv("LANG", "C.UTF-8")
+	t.Setenv("TERM", "xterm-256color")
+	t.Setenv("SECRET", "ordinary-secret")
+	t.Setenv("SYNARA_HOST_SECRET", "synara-secret")
 	t.Setenv("SYNARA_WORKER_REGISTRATION_TOKEN", "registration-secret")
 	t.Setenv("SYNARA_AGENTD_ASSIGNED_EXECUTION_ID", uuid.NewString())
+	t.Setenv("SYNARA_LEASE_TOKEN", "lease-secret")
+	t.Setenv("SYNARA_CONTROL_PLANE_URL", "https://control.example.test")
+	t.Setenv("AWS_ACCESS_KEY_ID", "aws-key")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "aws-secret")
+	t.Setenv("GITHUB_TOKEN", "github-secret")
+	t.Setenv("DATABASE_URL", "postgres://user:secret@db/synara")
+	t.Setenv("PGPASSWORD", "postgres-secret")
+	t.Setenv("MINIO_ROOT_PASSWORD", "minio-secret")
 	workspace := t.TempDir()
 	runner := &Runner{
 		command: []string{"sh", "-c", `
 cat <&3 > credential.json
+test -n "${PATH:-}"
+test -n "${HOME:-}"
+test -n "${TMPDIR:-}"
+test "${LANG:-}" = "C.UTF-8"
+test "${TERM:-}" = "xterm-256color"
+test -z "${SECRET:-}"
+test -z "${SYNARA_HOST_SECRET:-}"
 test -z "${SYNARA_WORKER_REGISTRATION_TOKEN:-}"
 test -z "${SYNARA_AGENTD_ASSIGNED_EXECUTION_ID:-}"
+test -z "${SYNARA_LEASE_TOKEN:-}"
+test -z "${SYNARA_CONTROL_PLANE_URL:-}"
+test -z "${AWS_ACCESS_KEY_ID:-}"
+test -z "${AWS_SECRET_ACCESS_KEY:-}"
+test -z "${GITHUB_TOKEN:-}"
+test -z "${DATABASE_URL:-}"
+test -z "${PGPASSWORD:-}"
+test -z "${MINIO_ROOT_PASSWORD:-}"
 grep -q 'provider-secret' credential.json
 rm credential.json
 printf '%s\n' '{"type":"result","output":{"summary":"credential received"}}'

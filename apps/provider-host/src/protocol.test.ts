@@ -11,6 +11,7 @@ import {
 import { PassThrough } from "node:stream";
 import { describe, expect, it } from "vitest";
 
+import providerHostPackage from "../package.json";
 import {
   capabilityMapForProvider,
   createProviderHostProtocolHandler,
@@ -131,6 +132,15 @@ describe("Provider Host Protocol v2", () => {
     });
   });
 
+  it("uses package build metadata instead of ambient build-version environment", () => {
+    const descriptor = providerHostDescriptor("cursor", {
+      environment: { SYNARA_PROVIDER_HOST_BUILD_VERSION: "ambient-build-must-not-win" },
+    });
+
+    expect(descriptor.hostBuildVersion).toBe(providerHostPackage.version);
+    expect(descriptor.capabilityDescriptor.runtime?.version).toBe(providerHostPackage.version);
+  });
+
   it("returns a versioned Describe result and replays the same terminal by commandId", async () => {
     const emitted: ProviderHostMessageEnvelope[] = [];
     const handle = createProviderHostProtocolHandler({
@@ -199,6 +209,35 @@ describe("Provider Host Protocol v2", () => {
       expect(errorCode(result)).toBe("capability_unsupported");
     },
   );
+
+  it("accepts ResumeSession when ResumeSnapshot provides authoritative history without a native Cursor", async () => {
+    const handle = createProviderHostProtocolHandler({
+      credential: null,
+      emit: () => {},
+      descriptorForProvider: enabledDescriptorForProvider,
+    });
+
+    const result = await handle(
+      command("ResumeSession", {
+        runnerInput: {
+          ...remoteRunnerInput(false),
+          workload: {
+            provider: "codex",
+            inputText: "continue",
+            resumeSnapshot: {
+              version: 1,
+              sessionId: "session-1",
+              turnId: "turn-2",
+              provider: "codex",
+              messages: [{ role: "user", text: "prior question" }],
+            },
+          },
+        },
+      }),
+    );
+
+    expect(result.at(-1)?.messageType).toBe("Result");
+  });
 
   it.each(["StartSession", "ResumeSession"] as const)(
     "fails closed for %s when the Runtime version is incompatible",

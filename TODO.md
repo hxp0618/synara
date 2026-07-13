@@ -24,8 +24,8 @@
 | Stage | 目标 | 状态 | 依赖 |
 | --- | --- | --- | --- |
 | Stage 1 | 定义 SaaS 边界、Tenant/Organization/User 和协议 | 基线完成 | — |
-| Stage 2 | Go Control Plane 收口与生产化 | TODO / IN PROGRESS | Stage 1 |
-| Stage 3 | Provider Runtime 与远程 Worker 产品化 | TODO | Stage 2 |
+| Stage 2 | Go Control Plane 收口与生产化 | 仓库内完成 / 已验收 | Stage 1 |
+| Stage 3 | Provider Runtime 与远程 Worker 产品化 | IN PROGRESS | Stage 2 |
 | Stage 4 | 分布式执行平台和 K8s 多集群生产化 | TODO | Stage 2、Stage 3 |
 | Stage 5 | 企业 SaaS GA、运营、安全与商业化 | TODO | Stage 2-4 |
 
@@ -37,7 +37,7 @@ Stage 3 的独立执行计划：
 
 ### Stage 3：Provider Runtime 与远程 Worker 产品化
 
-状态：TODO。现有 `provider-host`、`synara-agentd`、Worker Protocol、Local/SSH/Docker/Kubernetes
+状态：IN PROGRESS。现有 `provider-host`、`synara-agentd`、Worker Protocol、Local/SSH/Docker/Kubernetes
 Target 和 Codex/Claude 执行闭环属于基础实现，本阶段负责补齐 Provider 一致性、主流程权威
 切换、协议兼容和长期运行能力。
 

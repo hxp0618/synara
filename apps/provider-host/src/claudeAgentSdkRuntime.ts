@@ -8,10 +8,11 @@ import {
   type SDKUserMessage,
 } from "@anthropic-ai/claude-agent-sdk";
 
-import type {
-  ProviderRunController,
-  RunnerInput,
-  RunnerMessage,
+import {
+  hasAuthoritativeResumeData,
+  type ProviderRunController,
+  type RunnerInput,
+  type RunnerMessage,
 } from "./providerHost";
 import { ProviderInterruptedError } from "./providerRunErrors";
 
@@ -120,7 +121,7 @@ class ClaudeAgentSdkRuntime {
 
   private async run(): Promise<Extract<RunnerMessage, { type: "result" }>> {
     const cursor = trimmedString(this.options.input.providerResumeCursor);
-    const historyAvailable = (this.options.input.workload.conversationHistory?.length ?? 0) > 0;
+    const historyAvailable = hasAuthoritativeResumeData(this.options.input.workload);
     if (cursor) {
       try {
         return await this.runAttempt(this.options.input.workload.inputText, cursor);

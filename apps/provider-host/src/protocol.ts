@@ -27,6 +27,8 @@ import { Schema } from "effect";
 
 import providerHostPackage from "../package.json";
 import {
+  hasAuthoritativeResumeData,
+  providerProcessEnvironment,
   startProviderHostRun,
   validateRunnerInput,
   type ProviderRunController,
@@ -37,7 +39,7 @@ import {
 import { normalizeRuntimeEventV2 } from "./runtimeEventV2";
 
 const decodeCommand = Schema.decodeUnknownSync(ProviderHostCommandEnvelope);
-const HOST_BUILD_VERSION = process.env.SYNARA_PROVIDER_HOST_BUILD_VERSION?.trim() || "0.2.0-dev";
+const HOST_BUILD_VERSION = providerHostPackage.version;
 const CLAUDE_AGENT_SDK_VERSION =
   providerHostPackage.dependencies["@anthropic-ai/claude-agent-sdk"];
 
@@ -209,7 +211,7 @@ function probeCodexVersion(): CodexVersionProbeResult {
   const result = spawnSync("codex", ["--version"], {
     encoding: "utf8",
     timeout: 5_000,
-    env: { PATH: process.env.PATH, HOME: process.env.HOME },
+    env: providerProcessEnvironment(process.env),
   });
   const output = `${result.stdout ?? ""}\n${result.stderr ?? ""}`.trim();
   return {
@@ -409,7 +411,7 @@ async function executeCommand(
       if (
         command.commandType === "ResumeSession" &&
         !runnerInput.providerResumeCursor?.trim() &&
-        (runnerInput.workload.conversationHistory?.length ?? 0) === 0
+        !hasAuthoritativeResumeData(runnerInput.workload)
       ) {
         throw new ProtocolFailure({
           code: "session_resume_invalid",

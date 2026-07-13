@@ -5,7 +5,6 @@ import (
 	"errors"
 	"io"
 	"log/slog"
-	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -85,7 +84,7 @@ func TestLocalSupervisorProviderPolicyEnablesProviderHostDescriptors(t *testing.
 	t.Setenv("GO_WANT_PROVIDER_HOST_HELPER", "1")
 	t.Setenv("PROVIDER_HOST_TEST_MODE", "success")
 	input := validLocalSupervisorInput(t.TempDir())
-	input.RunnerCommand = []string{os.Args[0], "-test.run=TestProviderHostV2HelperProcess", "--"}
+	input.RunnerCommand = providerHostV2TestCommand()
 	input.Capabilities = map[string]any{
 		"providerPolicy": map[string]any{
 			"experimentalProviders": []string{"codex", "claudeAgent"},

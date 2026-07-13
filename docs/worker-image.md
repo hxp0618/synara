@@ -22,3 +22,27 @@ Configure separate writable Workspace and Git cache roots. Docker Workers for on
 the target-scoped volume because agentd uses cross-process locks and private Workspace repositories. Kubernetes
 keeps the cache Pod-local by default; an optional dedicated cache PVC must provide RWX-equivalent access and
 reliable POSIX locking before it is used across Pods.
+
+## Provider process environment
+
+Agentd and Provider Host build child-process environments from an explicit runtime allowlist. Ambient Worker
+credentials, Control Plane/Lease tokens, cloud credentials, database/object-store settings, GitHub tokens,
+`NODE_OPTIONS`, SSH Agent sockets, and standard proxy variables are not inherited by Codex or Claude. Provider
+credentials continue to use the Provider Host credential file descriptor and provider-specific field allowlists.
+
+Directly operated and Local Workers that require an outbound proxy must configure the explicit Provider-only
+inputs below instead of ambient `HTTP_PROXY` variables:
+
+```text
+SYNARA_PROVIDER_HTTP_PROXY
+SYNARA_PROVIDER_HTTPS_PROXY
+SYNARA_PROVIDER_ALL_PROXY
+SYNARA_PROVIDER_NO_PROXY
+```
+
+Provider Host validates these values, maps them to the standard proxy names only in the Provider child
+environment, and redacts authenticated proxy URLs and credentials from Provider diagnostics. Do not use this
+channel for Control Plane, Git Workspace, database, or object-store proxy configuration; those processes retain
+their own separately scoped network settings. Managed SSH, Docker, or Kubernetes Targets must expose these values
+through their target-specific encrypted configuration/Secret plumbing before use; host-level ambient proxy values
+are intentionally not treated as that plumbing.

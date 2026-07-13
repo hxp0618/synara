@@ -50,3 +50,24 @@ continue to negotiate independently.
 Managed Worker Protocol v2 agents currently advertise Runtime Event `{ minimum: 2, maximum: 2 }` and reject a
 Provider Host Event outside the negotiated range. The explicit Provider Host v1 runner advertises Runtime Event v1
 only and remains a bounded compatibility path; it must not claim canonical v2 support.
+
+## Authoritative Resume Snapshot v1
+
+Every claimed Execution carries an additive `workload.resumeSnapshot` object with `version: 1`. The legacy
+`workload.conversationHistory` field remains during the compatibility window, but it is derived from the Snapshot
+messages and is not built by a second history path.
+
+The Snapshot is generated inside the Claim transaction from Session Events strictly before the current
+`turn.created` Sequence. It contains bounded, credential-free recovery context:
+
+- legacy `runtime.output.delta` and canonical v2 `content.delta` assistant text;
+- user Turn/Steer messages, safe Tool summaries, Plan/Review state, and the latest Compact boundary;
+- pending Interaction allowlisted metadata, never arbitrary Provider request payloads;
+- Ready Artifact references and logical Workspace/Materialization/Checkpoint references, never object payloads or
+  host filesystem paths;
+- source and included Sequence ranges, fixed byte/token budgets, and explicit truncation reasons.
+
+The Control Plane monotonically advances the Provider Runtime Binding's `authoritative_history_sequence` in the
+same transaction. Claim replay may rebuild the same Snapshot, but must not move that cursor backwards. A Worker or
+Provider Host must ignore unknown additive Snapshot fields; a future incompatible shape requires a new Snapshot
+version rather than changing v1 semantics.

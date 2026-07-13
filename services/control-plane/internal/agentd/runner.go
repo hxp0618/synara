@@ -224,20 +224,72 @@ func (r *Runner) runLegacy(
 }
 
 func runnerEnvironment(source []string) []string {
-	result := make([]string, 0, len(source))
+	return selectProcessEnvironment(source, runnerEnvironmentAllowlist)
+}
+
+var runnerEnvironmentAllowlist = []string{
+	"PATH",
+	"HOME",
+	"USER",
+	"LOGNAME",
+	"USERNAME",
+	"USERPROFILE",
+	"HOMEDRIVE",
+	"HOMEPATH",
+	"TMPDIR",
+	"TMP",
+	"TEMP",
+	"SYSTEMROOT",
+	"WINDIR",
+	"COMSPEC",
+	"PATHEXT",
+	"LANG",
+	"LANGUAGE",
+	"LC_ALL",
+	"LC_CTYPE",
+	"LC_COLLATE",
+	"LC_MESSAGES",
+	"LC_MONETARY",
+	"LC_NUMERIC",
+	"LC_TIME",
+	"LC_PAPER",
+	"LC_NAME",
+	"LC_ADDRESS",
+	"LC_TELEPHONE",
+	"LC_MEASUREMENT",
+	"LC_IDENTIFICATION",
+	"TZ",
+	"TERM",
+	"COLORTERM",
+	"TERM_PROGRAM",
+	"TERM_PROGRAM_VERSION",
+	"SHELL",
+	"NO_COLOR",
+	"FORCE_COLOR",
+	"CLICOLOR",
+	"CLICOLOR_FORCE",
+	"SSL_CERT_FILE",
+	"SSL_CERT_DIR",
+	"NODE_EXTRA_CA_CERTS",
+}
+
+func selectProcessEnvironment(source []string, allowlist []string) []string {
+	values := make(map[string]string, len(source))
 	for _, entry := range source {
-		name, _, found := strings.Cut(entry, "=")
+		name, value, found := strings.Cut(entry, "=")
 		if !found {
 			continue
 		}
 		normalized := strings.ToUpper(strings.TrimSpace(name))
-		if normalized == "SYNARA_AUTH_TOKEN" || normalized == "SYNARA_CONTROL_PLANE_URL" ||
-			strings.HasPrefix(normalized, "SYNARA_WORKER_") ||
-			strings.HasPrefix(normalized, "SYNARA_AGENTD_") ||
-			strings.HasPrefix(normalized, "SYNARA_EXECUTION_TARGET_") {
-			continue
+		if normalized != "" {
+			values[normalized] = value
 		}
-		result = append(result, entry)
+	}
+	result := make([]string, 0, len(allowlist))
+	for _, name := range allowlist {
+		if value, found := values[name]; found {
+			result = append(result, name+"="+value)
+		}
 	}
 	return result
 }

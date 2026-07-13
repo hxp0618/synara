@@ -179,7 +179,7 @@ func newDaemonDrainHarness(t *testing.T, runnerDelay, drainTimeout time.Duration
 		ControlPlaneURL: controlPlaneURL, RegistrationToken: "registration-token",
 		ExecutionTargetID: targetID, TargetKind: platform.TargetLocal,
 		ClusterID: "test", Namespace: "test", PodName: "drain-worker", Version: "test",
-		RunnerCommand:  []string{os.Args[0], "-test.run=TestAgentdDrainRunnerHelperProcess", "--"},
+		RunnerCommand:  agentdDrainRunnerTestCommand(),
 		RunnerProtocol: RunnerProtocolV1, WorkspaceRoot: t.TempDir(), PollInterval: time.Millisecond,
 		HeartbeatInterval: time.Hour, LeaseRenewInterval: time.Hour, DrainTimeout: drainTimeout,
 		RequestTimeout: time.Second, ArtifactTimeout: time.Second, RunnerMessageBytes: 1 << 20,
@@ -223,10 +223,13 @@ func indexOfDrainEvent(events []string, target string) int {
 }
 
 func TestAgentdDrainRunnerHelperProcess(t *testing.T) {
-	if os.Getenv("GO_WANT_AGENTD_DRAIN_HELPER") != "1" {
+	if !containsString(os.Args, "--synara-agentd-drain-test-helper") {
 		return
 	}
-	delay, err := time.ParseDuration(os.Getenv("AGENTD_DRAIN_HELPER_DELAY"))
+	if os.Getenv("GO_WANT_AGENTD_DRAIN_HELPER") != "" || os.Getenv("AGENTD_DRAIN_HELPER_DELAY") != "" {
+		os.Exit(2)
+	}
+	delay, err := time.ParseDuration(agentdDrainTestArgument("--synara-agentd-drain-test-delay"))
 	if err != nil {
 		os.Exit(2)
 	}
@@ -235,4 +238,21 @@ func TestAgentdDrainRunnerHelperProcess(t *testing.T) {
 		"type": "result", "output": map[string]any{"text": "completed during Drain"},
 	})
 	os.Exit(0)
+}
+
+func agentdDrainRunnerTestCommand() []string {
+	return []string{
+		os.Args[0], "-test.run=^TestAgentdDrainRunnerHelperProcess$", "--",
+		"--synara-agentd-drain-test-helper",
+		"--synara-agentd-drain-test-delay", os.Getenv("AGENTD_DRAIN_HELPER_DELAY"),
+	}
+}
+
+func agentdDrainTestArgument(name string) string {
+	for index := 0; index+1 < len(os.Args); index++ {
+		if os.Args[index] == name {
+			return os.Args[index+1]
+		}
+	}
+	return ""
 }

@@ -8,6 +8,9 @@ import {
   type RunnerMessage,
 } from "./providerHost";
 
+const CONTROLLED_PROVIDER_PROXY =
+  "http://provider-user:provider-password@proxy.example.test:8080";
+
 describe("Codex app-server runtime", () => {
   it("delivers a native approval response and returns streamed output", async () => {
     await withFakeCodex("approval", async (directory) => {
@@ -106,6 +109,52 @@ describe("Codex app-server runtime", () => {
     });
   });
 
+  it("falls back to ResumeSnapshot reconstruction when native thread resume is invalid", async () => {
+    await withFakeCodex("resume-rebuild", async (directory) => {
+      const run = startProviderHostRun(
+        {
+          ...codexInput(directory),
+          providerResumeCursor: "thread-missing",
+          workload: {
+            provider: "codex",
+            inputText: "continue",
+            resumeSnapshot: {
+              version: 1,
+              sessionId: "session-1",
+              turnId: "turn-2",
+              provider: "codex",
+              messages: [
+                { role: "user", text: "first" },
+                { role: "assistant", text: "response" },
+              ],
+              toolResults: [{ summary: "Focused tests passed" }],
+              sourceSequenceRange: { from: 1, through: 4 },
+            },
+          },
+        },
+        null,
+        () => {},
+      );
+
+      await expect(run.result).resolves.toMatchObject({
+        output: { text: "rebuilt" },
+        providerResumeCursor: "thread-new",
+      });
+    });
+  });
+
+  it("redacts an authenticated controlled proxy from Provider output", async () => {
+    await withFakeCodex("proxy-output", async (directory) => {
+      const run = startProviderHostRun(codexInput(directory), null, () => {});
+      const result = await run.result;
+
+      expect(result).toMatchObject({
+        output: { provider: "codex", text: "[REDACTED]" },
+      });
+      expect(JSON.stringify(result)).not.toContain(CONTROLLED_PROVIDER_PROXY);
+    });
+  });
+
   it("sends native turn/interrupt before terminating the app-server", async () => {
     await withFakeCodex("interrupt", async (directory, tracePath) => {
       let started!: () => void;
@@ -179,38 +228,123 @@ function waitForInteraction(
 }
 
 async function withFakeCodex(
-  scenario: "approval" | "user-input" | "resume" | "interrupt" | "steer",
+  scenario:
+    | "approval"
+    | "user-input"
+    | "resume"
+    | "resume-rebuild"
+    | "interrupt"
+    | "steer"
+    | "proxy-output",
   run: (directory: string, tracePath: string) => Promise<void>,
 ): Promise<void> {
   const directory = mkdtempSync(join(tmpdir(), "synara-codex-app-server-"));
   const executable = join(directory, "codex");
   const tracePath = join(directory, "trace.log");
-  writeFileSync(executable, fakeCodexSource(), "utf8");
+  writeFileSync(executable, fakeCodexSource(scenario, tracePath, directory), "utf8");
   chmodSync(executable, 0o700);
-  const previousPath = process.env.PATH;
-  const previousScenario = process.env.FAKE_CODEX_SCENARIO;
-  const previousTrace = process.env.FAKE_CODEX_TRACE;
-  process.env.PATH = `${directory}:${previousPath ?? ""}`;
-  process.env.FAKE_CODEX_SCENARIO = scenario;
-  process.env.FAKE_CODEX_TRACE = tracePath;
+  const environment = {
+    PATH: `${directory}:${process.env.PATH ?? ""}`,
+    HOME: directory,
+    TMPDIR: directory,
+    LANG: "C.UTF-8",
+    TERM: "xterm-256color",
+    SECRET: "ordinary-secret",
+    HOST_SECRET: "host-secret",
+    SYNARA_AUTH_TOKEN: "auth-secret",
+    SYNARA_WORKER_REGISTRATION_TOKEN: "worker-secret",
+    SYNARA_LEASE_TOKEN: "lease-secret",
+    SYNARA_CONTROL_PLANE_URL: "https://control.example.test",
+    OPENAI_API_KEY: "ambient-openai-secret",
+    ANTHROPIC_API_KEY: "ambient-anthropic-secret",
+    AWS_ACCESS_KEY_ID: "aws-key",
+    AWS_SECRET_ACCESS_KEY: "aws-secret",
+    GITHUB_TOKEN: "github-secret",
+    GH_TOKEN: "gh-secret",
+    DATABASE_URL: "postgres://user:secret@db/synara",
+    PGPASSWORD: "postgres-secret",
+    MINIO_ROOT_PASSWORD: "minio-secret",
+    GOOGLE_APPLICATION_CREDENTIALS: "/host/gcp-credential.json",
+    AZURE_CLIENT_SECRET: "azure-secret",
+    HTTP_PROXY: "http://ambient-user:ambient-secret@proxy.example.test",
+    SYNARA_PROVIDER_HTTP_PROXY: CONTROLLED_PROVIDER_PROXY,
+    SSH_AUTH_SOCK: "/host/agent.sock",
+    NODE_OPTIONS: "--require=/host/inject-secrets.js",
+  } as const;
+  const previousEnvironment = new Map<string, string | undefined>();
+  for (const [name, value] of Object.entries(environment)) {
+    previousEnvironment.set(name, process.env[name]);
+    process.env[name] = value;
+  }
   try {
     await run(directory, tracePath);
   } finally {
-    process.env.PATH = previousPath;
-    if (previousScenario === undefined) delete process.env.FAKE_CODEX_SCENARIO;
-    else process.env.FAKE_CODEX_SCENARIO = previousScenario;
-    if (previousTrace === undefined) delete process.env.FAKE_CODEX_TRACE;
-    else process.env.FAKE_CODEX_TRACE = previousTrace;
+    for (const [name, value] of previousEnvironment) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
     rmSync(directory, { recursive: true, force: true });
   }
 }
 
-function fakeCodexSource(): string {
+function fakeCodexSource(
+  scenario:
+    | "approval"
+    | "user-input"
+    | "resume"
+    | "resume-rebuild"
+    | "interrupt"
+    | "steer"
+    | "proxy-output",
+  tracePath: string,
+  directory: string,
+): string {
   return `#!/usr/bin/env node
 const fs = require("node:fs");
 const readline = require("node:readline");
-const scenario = process.env.FAKE_CODEX_SCENARIO;
-const trace = process.env.FAKE_CODEX_TRACE;
+const scenario = ${JSON.stringify(scenario)};
+const trace = ${JSON.stringify(tracePath)};
+const requiredEnvironment = ${JSON.stringify({
+    HOME: directory,
+    TMPDIR: directory,
+    LANG: "C.UTF-8",
+    TERM: "xterm-256color",
+    HTTP_PROXY: CONTROLLED_PROVIDER_PROXY,
+  })};
+for (const [name, value] of Object.entries(requiredEnvironment)) {
+  if (process.env[name] !== value) {
+    process.stderr.write("required Provider environment mismatch: " + name + "\\n");
+    process.exit(90);
+  }
+}
+if (!process.env.PATH) process.exit(91);
+for (const name of ${JSON.stringify([
+    "SECRET",
+    "HOST_SECRET",
+    "SYNARA_AUTH_TOKEN",
+    "SYNARA_WORKER_REGISTRATION_TOKEN",
+    "SYNARA_LEASE_TOKEN",
+    "SYNARA_CONTROL_PLANE_URL",
+    "OPENAI_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "GITHUB_TOKEN",
+    "GH_TOKEN",
+    "DATABASE_URL",
+    "PGPASSWORD",
+    "MINIO_ROOT_PASSWORD",
+    "GOOGLE_APPLICATION_CREDENTIALS",
+    "AZURE_CLIENT_SECRET",
+    "SYNARA_PROVIDER_HTTP_PROXY",
+    "SSH_AUTH_SOCK",
+    "NODE_OPTIONS",
+  ])}) {
+  if (process.env[name] !== undefined) {
+    process.stderr.write("ambient secret leaked to Codex child: " + name + "\\n");
+    process.exit(92);
+  }
+}
 const send = (message) => process.stdout.write(JSON.stringify(message) + "\\n");
 const complete = (text) => {
   send({ method: "item/agentMessage/delta", params: { threadId: "thread-new", turnId: "turn-1", itemId: "agent-1", delta: text } });
@@ -224,11 +358,16 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
   } else if (message.method === "initialized") {
     return;
   } else if (message.method === "thread/resume") {
-    send({ id: message.id, result: { thread: { id: message.params.threadId } } });
+    if (scenario === "resume-rebuild") send({ id: message.id, error: { code: -2, message: "missing thread" } });
+    else send({ id: message.id, result: { thread: { id: message.params.threadId } } });
   } else if (message.method === "thread/start") {
     if (scenario === "resume") send({ id: message.id, error: { code: -1, message: "unexpected thread/start" } });
     else send({ id: message.id, result: { thread: { id: "thread-new" } } });
   } else if (message.method === "turn/start") {
+    if (scenario === "resume-rebuild") {
+      const prompt = message.params?.input?.[0]?.text ?? "";
+			if (!prompt.includes("<synara_resume_snapshot_json>") || !prompt.includes("Focused tests passed") || !prompt.includes("<current_user>\\ncontinue\\n</current_user>")) process.exit(3);
+    }
     send({ id: message.id, result: { turn: { id: "turn-1", items: [], status: "inProgress", error: null } } });
     if (scenario === "approval") {
       send({ id: "approval-rpc", method: "item/commandExecution/requestApproval", params: { threadId: "thread-new", turnId: "turn-1", itemId: "command-1", command: "git status --short", cwd: process.cwd(), reason: "Run a status check" } });
@@ -236,10 +375,14 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
       send({ id: "user-input-rpc", method: "item/tool/requestUserInput", params: { threadId: "thread-new", turnId: "turn-1", itemId: "input-1", autoResolutionMs: null, questions: [{ id: "environment", header: "Environment", question: "Where should this run?", isOther: false, isSecret: false, options: [{ label: "Staging", description: "Use staging." }] }] } });
     } else if (scenario === "resume") {
       complete("resumed");
+    } else if (scenario === "resume-rebuild") {
+      complete("rebuilt");
     } else if (scenario === "interrupt") {
       send({ method: "item/agentMessage/delta", params: { threadId: "thread-new", turnId: "turn-1", itemId: "agent-1", delta: "waiting" } });
     } else if (scenario === "steer") {
       send({ method: "item/agentMessage/delta", params: { threadId: "thread-new", turnId: "turn-1", itemId: "agent-1", delta: "working" } });
+    } else if (scenario === "proxy-output") {
+      complete(process.env.HTTP_PROXY ?? "missing-proxy");
     }
   } else if (message.method === "turn/steer") {
     if (message.params?.expectedTurnId !== "turn-1" || message.params?.input?.[0]?.text !== "focus on the failing test") process.exit(2);

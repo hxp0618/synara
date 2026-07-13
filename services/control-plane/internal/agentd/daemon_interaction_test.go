@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"os"
 	"sync"
 	"testing"
 	"time"
@@ -117,9 +116,9 @@ func TestDaemonRunExecutionDeliversInteractionResolutionEndToEnd(t *testing.T) {
 		ArtifactTimeout: time.Second, RunnerMessageBytes: 1 << 20,
 		ExperimentalProviders: []string{"codex"},
 	}
-	// The helper is the current Go test binary. Passing -test.run keeps the child
-	// isolated to TestProviderHostV2HelperProcess.
-	cfg.RunnerCommand = []string{os.Args[0], "-test.run=TestProviderHostV2HelperProcess", "--"}
+	// The helper is the current Go test binary. Its mode is carried in argv so
+	// the production child-environment allowlist does not need a test backdoor.
+	cfg.RunnerCommand = providerHostV2TestCommand()
 	client := NewClient(cfg)
 	client.workerToken = "worker-token"
 	daemon := &Daemon{
@@ -235,7 +234,7 @@ func TestDaemonRunExecutionDeliversDurableInterruptEndToEnd(t *testing.T) {
 		ArtifactTimeout: time.Second, RunnerMessageBytes: 1 << 20,
 		ExperimentalProviders: []string{"codex"},
 	}
-	cfg.RunnerCommand = []string{os.Args[0], "-test.run=TestProviderHostV2HelperProcess", "--"}
+	cfg.RunnerCommand = providerHostV2TestCommand()
 	client := NewClient(cfg)
 	client.workerToken = "worker-token"
 	daemon := &Daemon{
@@ -344,7 +343,7 @@ func TestDaemonRunExecutionDeliversDurableSteerEndToEnd(t *testing.T) {
 		ArtifactTimeout: time.Second, RunnerMessageBytes: 1 << 20,
 		ExperimentalProviders: []string{"codex"},
 	}
-	cfg.RunnerCommand = []string{os.Args[0], "-test.run=TestProviderHostV2HelperProcess", "--"}
+	cfg.RunnerCommand = providerHostV2TestCommand()
 	client := NewClient(cfg)
 	client.workerToken = "worker-token"
 	daemon := &Daemon{

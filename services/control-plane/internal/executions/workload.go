@@ -2,8 +2,6 @@ package executions
 
 import (
 	"context"
-	"errors"
-	"strings"
 
 	"github.com/google/uuid"
 	"gorm.io/gorm"
@@ -27,7 +25,11 @@ func (s *Service) loadWorkload(ctx context.Context, tx *gorm.DB, execution persi
 		WorkspaceMaterializationIncarnationID *uuid.UUID `gorm:"column:workspace_materialization_incarnation_id"`
 		WorkspaceLayoutVersion                int        `gorm:"column:workspace_layout_version"`
 		RestoreCheckpointID                   *uuid.UUID `gorm:"column:restore_checkpoint_id"`
+		WorkspaceCurrentCheckpointID          *uuid.UUID `gorm:"column:workspace_current_checkpoint_id"`
 		WorkspaceRepositoryFingerprint        *string    `gorm:"column:workspace_repository_fingerprint"`
+		WorkspaceCurrentBranch                *string    `gorm:"column:workspace_current_branch"`
+		WorkspaceBaseCommit                   *string    `gorm:"column:workspace_base_commit"`
+		WorkspaceHeadCommit                   *string    `gorm:"column:workspace_head_commit"`
 		WorkerManifestID                      *uuid.UUID `gorm:"column:worker_manifest_id"`
 		Model                                 *string    `gorm:"column:model"`
 		ProviderCredentialID                  *uuid.UUID `gorm:"column:provider_credential_id"`
@@ -44,8 +46,10 @@ func (s *Service) loadWorkload(ctx context.Context, tx *gorm.DB, execution persi
 			e.provider_runtime_binding_id, e.remote_workspace_id, e.workspace_materialization_id,
 			materialization.incarnation_id AS workspace_materialization_incarnation_id,
 			COALESCE(materialization.layout_version, 0) AS workspace_layout_version,
-			e.restore_checkpoint_id,
-			w.repository_fingerprint AS workspace_repository_fingerprint, e.worker_manifest_id,
+			e.restore_checkpoint_id, w.current_checkpoint_id AS workspace_current_checkpoint_id,
+			w.repository_fingerprint AS workspace_repository_fingerprint,
+			w.current_branch AS workspace_current_branch, w.base_commit AS workspace_base_commit,
+			w.head_commit AS workspace_head_commit, e.worker_manifest_id,
 				s.model, s.provider_credential_id, p.git_credential_id,
 				t.input_text, t.runtime_mode, t.interaction_mode, p.repository_url, p.default_branch`).
 		Joins("JOIN agent_sessions AS s ON s.tenant_id = e.tenant_id AND s.id = e.session_id").
@@ -58,21 +62,42 @@ func (s *Service) loadWorkload(ctx context.Context, tx *gorm.DB, execution persi
 	if err != nil {
 		return Workload{}, problem.Wrap(500, "execution_workload_load_failed", "Failed to load the execution workload.", err)
 	}
-	history, err := loadConversationHistory(ctx, tx, execution)
-	if err != nil {
-		return Workload{}, err
-	}
 	var restoreCheckpoint *WorkspaceCheckpoint
 	if row.RestoreCheckpointID != nil {
-		var checkpoint persistence.WorkspaceCheckpoint
-		if err := tx.WithContext(ctx).
-			Where("tenant_id = ? AND id = ? AND workspace_id = ? AND session_id = ? AND status = ?",
-				execution.TenantID, *row.RestoreCheckpointID, row.RemoteWorkspaceID, execution.SessionID, "ready").
-			Take(&checkpoint).Error; err != nil {
-			return Workload{}, problem.Wrap(409, "restore_checkpoint_unavailable", "The Execution restore Checkpoint is not ready or no longer available.", err)
+		restoreCheckpoint, err = loadReadyResumeCheckpoint(
+			ctx, tx, execution, row.RemoteWorkspaceID, *row.RestoreCheckpointID,
+		)
+		if err != nil {
+			return Workload{}, err
 		}
-		converted := toWorkspaceCheckpoint(checkpoint)
-		restoreCheckpoint = &converted
+	}
+	snapshotCheckpoint := restoreCheckpoint
+	if snapshotCheckpoint == nil && row.WorkspaceCurrentCheckpointID != nil {
+		snapshotCheckpoint, err = loadReadyResumeCheckpoint(
+			ctx, tx, execution, row.RemoteWorkspaceID, *row.WorkspaceCurrentCheckpointID,
+		)
+		if err != nil {
+			return Workload{}, err
+		}
+	}
+	resumeSnapshot, err := s.loadResumeSnapshot(ctx, tx, execution, resumeSnapshotContext{
+		Provider:                              row.Provider,
+		Model:                                 row.Model,
+		RuntimeMode:                           row.RuntimeMode,
+		InteractionMode:                       row.InteractionMode,
+		RemoteWorkspaceID:                     row.RemoteWorkspaceID,
+		WorkspaceMaterializationID:            row.WorkspaceMaterializationID,
+		WorkspaceMaterializationIncarnationID: row.WorkspaceMaterializationIncarnationID,
+		WorkspaceLayoutVersion:                row.WorkspaceLayoutVersion,
+		WorkspaceRepositoryFingerprint:        row.WorkspaceRepositoryFingerprint,
+		WorkspaceDefaultBranch:                row.DefaultBranch,
+		WorkspaceCurrentBranch:                row.WorkspaceCurrentBranch,
+		WorkspaceBaseCommit:                   row.WorkspaceBaseCommit,
+		WorkspaceHeadCommit:                   row.WorkspaceHeadCommit,
+		Checkpoint:                            snapshotCheckpoint,
+	})
+	if err != nil {
+		return Workload{}, err
 	}
 	return Workload{
 		TenantID: row.TenantID, OrganizationID: row.OrganizationID, ProjectID: row.ProjectID,
@@ -89,85 +114,28 @@ func (s *Service) loadWorkload(ctx context.Context, tx *gorm.DB, execution persi
 		GitCredentialID: row.GitCredentialID, InputText: row.InputText,
 		RuntimeMode: row.RuntimeMode, InteractionMode: row.InteractionMode,
 		RepositoryURL: row.RepositoryURL, DefaultBranch: row.DefaultBranch,
-		ConversationHistory: history,
+		ConversationHistory: conversationHistoryFromResumeSnapshot(resumeSnapshot),
+		ResumeSnapshot:      &resumeSnapshot,
 	}, nil
 }
 
-const (
-	conversationHistoryEventLimit = 500
-	conversationHistoryByteLimit  = 256 << 10
-)
-
-func loadConversationHistory(
+func loadReadyResumeCheckpoint(
 	ctx context.Context,
 	tx *gorm.DB,
 	execution persistence.AgentExecution,
-) ([]ConversationMessage, error) {
-	var current persistence.SessionEvent
-	err := tx.WithContext(ctx).
-		Select("tenant_id", "session_id", "sequence").
-		Where("tenant_id = ? AND session_id = ? AND execution_id = ? AND event_type = ?",
-			execution.TenantID, execution.SessionID, execution.ID, "turn.created").
-		Take(&current).Error
-	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return nil, nil
+	workspaceID *uuid.UUID,
+	checkpointID uuid.UUID,
+) (*WorkspaceCheckpoint, error) {
+	if workspaceID == nil {
+		return nil, problem.New(409, "restore_checkpoint_unavailable", "The Execution restore Checkpoint does not have a logical Workspace.")
 	}
-	if err != nil {
-		return nil, problem.Wrap(500, "execution_history_cursor_load_failed", "Failed to locate the current Turn in Session history.", err)
-	}
-	var events []persistence.SessionEvent
+	var checkpoint persistence.WorkspaceCheckpoint
 	if err := tx.WithContext(ctx).
-		Where("tenant_id = ? AND session_id = ? AND sequence < ? AND event_type IN ?",
-			execution.TenantID, execution.SessionID, current.Sequence,
-			[]string{"turn.created", "turn.steer-requested", "runtime.output.delta"}).
-		Order("sequence DESC").Limit(conversationHistoryEventLimit).Find(&events).Error; err != nil {
-		return nil, problem.Wrap(500, "execution_history_load_failed", "Failed to load Session conversation history.", err)
+		Where("tenant_id = ? AND id = ? AND workspace_id = ? AND session_id = ? AND status = ?",
+			execution.TenantID, checkpointID, *workspaceID, execution.SessionID, "ready").
+		Take(&checkpoint).Error; err != nil {
+		return nil, problem.Wrap(409, "restore_checkpoint_unavailable", "The authoritative Workspace Checkpoint is not ready or no longer available.", err)
 	}
-	messages := make([]ConversationMessage, 0, len(events))
-	for index := len(events) - 1; index >= 0; index-- {
-		event := events[index]
-		role, key := "", ""
-		switch event.EventType {
-		case "turn.created":
-			role, key = "user", "inputText"
-		case "turn.steer-requested":
-			role, key = "user", "inputText"
-		case "runtime.output.delta":
-			role, key = "assistant", "text"
-		}
-		text, _ := event.Payload[key].(string)
-		text = strings.TrimSpace(text)
-		if role == "" || text == "" {
-			continue
-		}
-		if role == "assistant" && len(messages) > 0 && messages[len(messages)-1].Role == role {
-			messages[len(messages)-1].Text += text
-			continue
-		}
-		messages = append(messages, ConversationMessage{Role: role, Text: text})
-	}
-	return boundConversationHistory(messages, conversationHistoryByteLimit), nil
-}
-
-func boundConversationHistory(messages []ConversationMessage, byteLimit int) []ConversationMessage {
-	if byteLimit <= 0 || len(messages) == 0 {
-		return nil
-	}
-	start, total := len(messages), 0
-	for index := len(messages) - 1; index >= 0; index-- {
-		size := len(messages[index].Role) + len(messages[index].Text)
-		if total+size > byteLimit {
-			break
-		}
-		total += size
-		start = index
-	}
-	if start == len(messages) {
-		last := messages[len(messages)-1]
-		if len(last.Text) > byteLimit {
-			last.Text = last.Text[len(last.Text)-byteLimit:]
-		}
-		return []ConversationMessage{last}
-	}
-	return append([]ConversationMessage(nil), messages[start:]...)
+	converted := toWorkspaceCheckpoint(checkpoint)
+	return &converted, nil
 }

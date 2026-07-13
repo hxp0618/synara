@@ -34,6 +34,13 @@ const (
 
 var providerHostProviders = append([]string(nil), stage3ProviderNames...)
 
+var providerHostProxyEnvironmentAllowlist = []string{
+	"SYNARA_PROVIDER_HTTP_PROXY",
+	"SYNARA_PROVIDER_HTTPS_PROXY",
+	"SYNARA_PROVIDER_ALL_PROXY",
+	"SYNARA_PROVIDER_NO_PROXY",
+}
+
 type providerHostProtocolVersion struct {
 	Major int `json:"major"`
 	Minor int `json:"minor"`
@@ -845,15 +852,10 @@ func (r *Runner) startProviderHostV2(
 }
 
 func providerHostEnvironment(source []string, experimentalProviders []string) []string {
-	base := runnerEnvironment(source)
-	result := make([]string, 0, len(base)+1)
-	for _, entry := range base {
-		name, _, found := strings.Cut(entry, "=")
-		if found && strings.EqualFold(strings.TrimSpace(name), providerHostExperimentalEnv) {
-			continue
-		}
-		result = append(result, entry)
-	}
+	allowlist := make([]string, 0, len(runnerEnvironmentAllowlist)+len(providerHostProxyEnvironmentAllowlist))
+	allowlist = append(allowlist, runnerEnvironmentAllowlist...)
+	allowlist = append(allowlist, providerHostProxyEnvironmentAllowlist...)
+	result := selectProcessEnvironment(source, allowlist)
 	result = append(result, providerHostExperimentalEnv+"="+strings.Join(experimentalProviders, ","))
 	return result
 }

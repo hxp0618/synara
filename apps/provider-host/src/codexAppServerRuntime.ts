@@ -1,10 +1,11 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createInterface } from "node:readline";
 
-import type {
-  ProviderRunController,
-  RunnerInput,
-  RunnerMessage,
+import {
+  hasAuthoritativeResumeData,
+  type ProviderRunController,
+  type RunnerInput,
+  type RunnerMessage,
 } from "./providerHost";
 import { ProviderInterruptedError } from "./providerRunErrors";
 
@@ -163,7 +164,7 @@ class CodexAppServerRuntime {
 
   private async openThread(): Promise<boolean> {
     const cursor = trimmedString(this.options.input.providerResumeCursor);
-    const historyAvailable = (this.options.input.workload.conversationHistory?.length ?? 0) > 0;
+    const historyAvailable = hasAuthoritativeResumeData(this.options.input.workload);
     const approvalRequired =
       this.options.interactive && this.options.input.workload.runtimeMode === "approval-required";
     const common = {

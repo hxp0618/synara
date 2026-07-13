@@ -20,8 +20,27 @@ import (
 func TestRunnerProviderHostV2NegotiatesAndRunsResumeTurn(t *testing.T) {
 	t.Setenv("GO_WANT_PROVIDER_HOST_HELPER", "1")
 	t.Setenv("PROVIDER_HOST_TEST_MODE", "success")
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("TMPDIR", t.TempDir())
+	t.Setenv("LANG", "C.UTF-8")
+	t.Setenv("TERM", "xterm-256color")
+	t.Setenv("SECRET", "ordinary-secret")
+	t.Setenv("HOST_SECRET", "host-secret")
 	t.Setenv("SYNARA_WORKER_REGISTRATION_TOKEN", "worker-secret")
 	t.Setenv("SYNARA_AGENTD_ASSIGNED_EXECUTION_ID", uuid.NewString())
+	t.Setenv("SYNARA_LEASE_TOKEN", "lease-secret")
+	t.Setenv("SYNARA_CONTROL_PLANE_URL", "https://control.example.test")
+	t.Setenv("OPENAI_API_KEY", "ambient-openai-secret")
+	t.Setenv("ANTHROPIC_API_KEY", "ambient-anthropic-secret")
+	t.Setenv("AWS_ACCESS_KEY_ID", "aws-key")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "aws-secret")
+	t.Setenv("GITHUB_TOKEN", "github-secret")
+	t.Setenv("DATABASE_URL", "postgres://user:secret@db/synara")
+	t.Setenv("PGPASSWORD", "postgres-secret")
+	t.Setenv("MINIO_ROOT_PASSWORD", "minio-secret")
+	t.Setenv("HTTP_PROXY", "http://ambient-user:ambient-secret@proxy.example.test")
+	t.Setenv("SYNARA_PROVIDER_HTTP_PROXY", "http://provider-user:provider-secret@proxy.example.test")
+	t.Setenv("SYNARA_PROVIDER_NO_PROXY", "127.0.0.1,localhost")
 	commandLog := filepath.Join(t.TempDir(), "commands.log")
 	t.Setenv("PROVIDER_HOST_TEST_COMMAND_LOG", commandLog)
 
@@ -464,6 +483,66 @@ func TestRunnerProviderHostV2ExplicitEnablementOverridesInheritedEnvironment(t *
 	}
 }
 
+func TestProviderHostEnvironmentUsesExplicitRuntimeAndPolicyAllowlist(t *testing.T) {
+	source := []string{
+		"PATH=/usr/local/bin:/usr/bin:/bin",
+		"HOME=/home/worker",
+		"TMPDIR=/tmp/synara",
+		"LANG=en_US.UTF-8",
+		"TERM=xterm-256color",
+		"SYNARA_PROVIDER_HOST_BUILD_VERSION=ambient-build-must-not-win",
+		providerHostExperimentalEnv + "=ambient-provider-must-not-win",
+		"HTTP_PROXY=http://ambient-user:ambient-secret@proxy.example.test",
+		"HTTPS_PROXY=https://ambient-user:ambient-secret@proxy.example.test",
+		"ALL_PROXY=socks5://ambient-user:ambient-secret@proxy.example.test",
+		"NO_PROXY=ambient.internal",
+		"SYNARA_PROVIDER_HTTP_PROXY=http://provider-user:provider-secret@proxy.example.test",
+		"SYNARA_PROVIDER_HTTPS_PROXY=https://provider-user:provider-secret@proxy.example.test",
+		"SYNARA_PROVIDER_ALL_PROXY=socks5://provider-user:provider-secret@proxy.example.test",
+		"SYNARA_PROVIDER_NO_PROXY=127.0.0.1,localhost",
+		"SECRET=ordinary-secret",
+		"HOST_SECRET=host-secret",
+		"SYNARA_AUTH_TOKEN=auth-secret",
+		"SYNARA_WORKER_TOKEN=worker-secret",
+		"SYNARA_LEASE_TOKEN=lease-secret",
+		"SYNARA_CONTROL_PLANE_URL=https://control.example.test",
+		"OPENAI_API_KEY=openai-secret",
+		"ANTHROPIC_API_KEY=anthropic-secret",
+		"AWS_ACCESS_KEY_ID=aws-key",
+		"AWS_SECRET_ACCESS_KEY=aws-secret",
+		"GITHUB_TOKEN=github-secret",
+		"DATABASE_URL=postgres://user:secret@db/synara",
+		"PGPASSWORD=postgres-secret",
+		"MINIO_ROOT_PASSWORD=minio-secret",
+	}
+
+	actual := make(map[string]string)
+	for _, entry := range providerHostEnvironment(source, []string{"claudeAgent", "codex"}) {
+		name, value, found := strings.Cut(entry, "=")
+		if !found {
+			t.Fatalf("invalid Provider Host environment entry %q", entry)
+		}
+		actual[name] = value
+	}
+	want := map[string]string{
+		"PATH": "/usr/local/bin:/usr/bin:/bin", "HOME": "/home/worker", "TMPDIR": "/tmp/synara",
+		"LANG": "en_US.UTF-8", "TERM": "xterm-256color",
+		providerHostExperimentalEnv:   "claudeAgent,codex",
+		"SYNARA_PROVIDER_HTTP_PROXY":  "http://provider-user:provider-secret@proxy.example.test",
+		"SYNARA_PROVIDER_HTTPS_PROXY": "https://provider-user:provider-secret@proxy.example.test",
+		"SYNARA_PROVIDER_ALL_PROXY":   "socks5://provider-user:provider-secret@proxy.example.test",
+		"SYNARA_PROVIDER_NO_PROXY":    "127.0.0.1,localhost",
+	}
+	if len(actual) != len(want) {
+		t.Fatalf("Provider Host environment contains unexpected entries: %#v", actual)
+	}
+	for name, value := range want {
+		if actual[name] != value {
+			t.Fatalf("Provider Host environment %s = %q, want %q", name, actual[name], value)
+		}
+	}
+}
+
 func TestRunnerCapabilitySummaryRejectsProviderPolicyMismatch(t *testing.T) {
 	t.Setenv("GO_WANT_PROVIDER_HOST_HELPER", "1")
 	t.Setenv("PROVIDER_HOST_TEST_MODE", "policy-mismatch")
@@ -646,11 +725,58 @@ func providerHostV2TestRunnerWithExperimental(providers ...string) *Runner {
 		experimentalProviders[provider] = struct{}{}
 	}
 	return &Runner{
-		command:               []string{os.Args[0], "-test.run=TestProviderHostV2HelperProcess", "--"},
+		command:               providerHostV2TestCommand(),
 		maxMessageBytes:       1 << 20,
 		protocol:              RunnerProtocolV2,
 		experimentalProviders: experimentalProviders,
 	}
+}
+
+const (
+	providerHostTestHelperArgument     = "--synara-provider-host-test-helper"
+	providerHostTestModeArgument       = "--synara-provider-host-test-mode"
+	providerHostTestCommandLogArgument = "--synara-provider-host-test-command-log"
+	providerHostTestExpectedEnvArg     = "--synara-provider-host-test-expected-env"
+)
+
+func providerHostV2TestCommand() []string {
+	command := []string{
+		os.Args[0], "-test.run=^TestProviderHostV2HelperProcess$", "--", providerHostTestHelperArgument,
+	}
+	if mode := os.Getenv("PROVIDER_HOST_TEST_MODE"); mode != "" {
+		command = append(command, providerHostTestModeArgument, mode)
+	}
+	if commandLog := os.Getenv("PROVIDER_HOST_TEST_COMMAND_LOG"); commandLog != "" {
+		command = append(command, providerHostTestCommandLogArgument, commandLog)
+	}
+	for _, name := range append(
+		[]string{"PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "TERM"},
+		providerHostProxyEnvironmentAllowlist...,
+	) {
+		if value, found := os.LookupEnv(name); found {
+			command = append(command, providerHostTestExpectedEnvArg, name+"="+value)
+		}
+	}
+	return command
+}
+
+func providerHostTestArgument(name string) string {
+	for index := 0; index+1 < len(os.Args); index++ {
+		if os.Args[index] == name {
+			return os.Args[index+1]
+		}
+	}
+	return ""
+}
+
+func providerHostTestExpectedEnvironment() []string {
+	var result []string
+	for index := 0; index+1 < len(os.Args); index++ {
+		if os.Args[index] == providerHostTestExpectedEnvArg {
+			result = append(result, os.Args[index+1])
+		}
+	}
+	return result
 }
 
 func providerHostV2TestInput(t *testing.T) RunnerInput {
@@ -720,12 +846,30 @@ func providerHostTestExperimentalProviderEnabled(provider string) bool {
 }
 
 func TestProviderHostV2HelperProcess(t *testing.T) {
-	if os.Getenv("GO_WANT_PROVIDER_HOST_HELPER") != "1" {
+	if !containsString(os.Args, providerHostTestHelperArgument) {
 		return
 	}
-	if os.Getenv("SYNARA_WORKER_REGISTRATION_TOKEN") != "" || os.Getenv("SYNARA_AGENTD_ASSIGNED_EXECUTION_ID") != "" {
-		fmt.Fprintln(os.Stderr, "worker environment leaked to Provider Host")
-		os.Exit(2)
+	for _, entry := range providerHostTestExpectedEnvironment() {
+		name, value, found := strings.Cut(entry, "=")
+		if !found || os.Getenv(name) != value {
+			fmt.Fprintf(os.Stderr, "Provider Host runtime environment %s = %q, want %q\n", name, os.Getenv(name), value)
+			os.Exit(2)
+		}
+	}
+	for _, name := range []string{
+		"GO_WANT_PROVIDER_HOST_HELPER", "PROVIDER_HOST_TEST_MODE", "PROVIDER_HOST_TEST_COMMAND_LOG",
+		"SYNARA_PROVIDER_HOST_BUILD_VERSION",
+		"SECRET", "HOST_SECRET", "SYNARA_HOST_SECRET", "SYNARA_AUTH_TOKEN", "SYNARA_WORKER_REGISTRATION_TOKEN",
+		"SYNARA_AGENTD_ASSIGNED_EXECUTION_ID", "SYNARA_LEASE_TOKEN", "SYNARA_CONTROL_PLANE_URL",
+		"OPENAI_API_KEY", "ANTHROPIC_API_KEY", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY",
+		"GITHUB_TOKEN", "GH_TOKEN", "DATABASE_URL", "PGPASSWORD", "POSTGRES_PASSWORD",
+		"S3_ACCESS_KEY_ID", "MINIO_ROOT_PASSWORD", "GOOGLE_APPLICATION_CREDENTIALS", "AZURE_CLIENT_SECRET",
+		"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "SSH_AUTH_SOCK", "NODE_OPTIONS",
+	} {
+		if os.Getenv(name) != "" {
+			fmt.Fprintln(os.Stderr, "ambient secret environment leaked to Provider Host:", name)
+			os.Exit(2)
+		}
 	}
 	if fd := strings.TrimSpace(os.Getenv("SYNARA_PROVIDER_CREDENTIAL_FD")); fd != "" {
 		file := os.NewFile(3, "provider-credential")
@@ -737,8 +881,8 @@ func TestProviderHostV2HelperProcess(t *testing.T) {
 		_ = file.Close()
 	}
 
-	mode := os.Getenv("PROVIDER_HOST_TEST_MODE")
-	commandLog := os.Getenv("PROVIDER_HOST_TEST_COMMAND_LOG")
+	mode := providerHostTestArgument(providerHostTestModeArgument)
+	commandLog := providerHostTestArgument(providerHostTestCommandLogArgument)
 	scanner := bufio.NewScanner(os.Stdin)
 	encoder := json.NewEncoder(os.Stdout)
 	var pendingSend *providerHostCommand

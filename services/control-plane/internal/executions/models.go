@@ -162,11 +162,140 @@ type Workload struct {
 	RepositoryURL                         *string               `json:"repositoryUrl"`
 	DefaultBranch                         string                `json:"defaultBranch"`
 	ConversationHistory                   []ConversationMessage `json:"conversationHistory,omitempty"`
+	ResumeSnapshot                        *ResumeSnapshot       `json:"resumeSnapshot,omitempty"`
 }
 
 type ConversationMessage struct {
 	Role string `json:"role"`
 	Text string `json:"text"`
+}
+
+const ResumeSnapshotVersionV1 = 1
+
+type ResumeSnapshot struct {
+	Version                      int                        `json:"version"`
+	SessionID                    uuid.UUID                  `json:"sessionId"`
+	TurnID                       uuid.UUID                  `json:"turnId"`
+	Provider                     string                     `json:"provider"`
+	Model                        *string                    `json:"model,omitempty"`
+	Messages                     []ResumeMessage            `json:"messages"`
+	ToolResults                  []ResumeToolResult         `json:"toolResults"`
+	ArtifactReferences           []ResumeArtifactReference  `json:"artifactReferences"`
+	Mode                         ResumeMode                 `json:"mode"`
+	CompactBoundary              *ResumeCompactBoundary     `json:"compactBoundary,omitempty"`
+	PendingInteractions          []ResumePendingInteraction `json:"pendingInteractions"`
+	Workspace                    *ResumeWorkspaceReference  `json:"workspace,omitempty"`
+	SourceSequenceRange          ResumeSequenceRange        `json:"sourceSequenceRange"`
+	IncludedSequenceRange        *ResumeSequenceRange       `json:"includedSequenceRange,omitempty"`
+	AuthoritativeHistorySequence int64                      `json:"authoritativeHistorySequence"`
+	Budget                       ResumeSnapshotBudget       `json:"budget"`
+	Truncation                   *ResumeSnapshotTruncation  `json:"truncation,omitempty"`
+}
+
+type ResumeSequenceRange struct {
+	From    int64 `json:"from"`
+	Through int64 `json:"through"`
+}
+
+type ResumeMessage struct {
+	Role            string `json:"role"`
+	Text            string `json:"text"`
+	SequenceFrom    int64  `json:"sequenceFrom"`
+	SequenceThrough int64  `json:"sequenceThrough"`
+}
+
+type ResumeToolResult struct {
+	Sequence   int64    `json:"sequence"`
+	Kind       string   `json:"kind"`
+	Title      string   `json:"title,omitempty"`
+	Summary    string   `json:"summary"`
+	ToolUseIDs []string `json:"toolUseIds,omitempty"`
+}
+
+type ResumeArtifactReference struct {
+	Sequence    int64      `json:"sequence"`
+	ArtifactID  uuid.UUID  `json:"artifactId"`
+	ExecutionID *uuid.UUID `json:"executionId,omitempty"`
+	Kind        string     `json:"kind"`
+	ContentType *string    `json:"contentType,omitempty"`
+	SizeBytes   *int64     `json:"sizeBytes,omitempty"`
+	SHA256      *string    `json:"sha256,omitempty"`
+}
+
+type ResumeMode struct {
+	RuntimeMode     string `json:"runtimeMode"`
+	InteractionMode string `json:"interactionMode"`
+	Plan            bool   `json:"plan"`
+	Review          bool   `json:"review"`
+	ReviewSequence  *int64 `json:"reviewSequence,omitempty"`
+}
+
+type ResumeCompactBoundary struct {
+	Sequence int64  `json:"sequence"`
+	Summary  string `json:"summary,omitempty"`
+}
+
+type ResumePendingInteraction struct {
+	ID           uuid.UUID                   `json:"id"`
+	ExecutionID  uuid.UUID                   `json:"executionId"`
+	TurnID       uuid.UUID                   `json:"turnId"`
+	Provider     string                      `json:"provider"`
+	RequestID    string                      `json:"requestId"`
+	EventVersion int                         `json:"eventVersion"`
+	Kind         string                      `json:"kind"`
+	RequestType  string                      `json:"requestType,omitempty"`
+	Detail       string                      `json:"detail,omitempty"`
+	Questions    []ResumeInteractionQuestion `json:"questions,omitempty"`
+	RequestedAt  time.Time                   `json:"requestedAt"`
+	ExpiresAt    time.Time                   `json:"expiresAt"`
+}
+
+type ResumeInteractionQuestion struct {
+	ID          string                    `json:"id"`
+	Header      string                    `json:"header"`
+	Question    string                    `json:"question"`
+	MultiSelect bool                      `json:"multiSelect,omitempty"`
+	Options     []ResumeInteractionOption `json:"options"`
+}
+
+type ResumeInteractionOption struct {
+	Label       string `json:"label"`
+	Description string `json:"description"`
+}
+
+type ResumeWorkspaceReference struct {
+	WorkspaceID                  uuid.UUID                  `json:"workspaceId"`
+	MaterializationID            *uuid.UUID                 `json:"materializationId,omitempty"`
+	MaterializationIncarnationID *uuid.UUID                 `json:"materializationIncarnationId,omitempty"`
+	LayoutVersion                int                        `json:"layoutVersion,omitempty"`
+	RepositoryFingerprint        *string                    `json:"repositoryFingerprint,omitempty"`
+	DefaultBranch                string                     `json:"defaultBranch"`
+	CurrentBranch                *string                    `json:"currentBranch,omitempty"`
+	BaseCommit                   *string                    `json:"baseCommit,omitempty"`
+	HeadCommit                   *string                    `json:"headCommit,omitempty"`
+	Checkpoint                   *ResumeCheckpointReference `json:"checkpoint,omitempty"`
+}
+
+type ResumeCheckpointReference struct {
+	CheckpointID  uuid.UUID  `json:"checkpointId"`
+	Strategy      string     `json:"strategy"`
+	ArtifactID    *uuid.UUID `json:"artifactId,omitempty"`
+	BaseCommit    *string    `json:"baseCommit,omitempty"`
+	HeadCommit    *string    `json:"headCommit,omitempty"`
+	CurrentBranch *string    `json:"currentBranch,omitempty"`
+	SHA256        *string    `json:"sha256,omitempty"`
+}
+
+type ResumeSnapshotBudget struct {
+	ByteLimit       int `json:"byteLimit"`
+	TokenLimit      int `json:"tokenLimit"`
+	UsedBytes       int `json:"usedBytes"`
+	EstimatedTokens int `json:"estimatedTokens"`
+}
+
+type ResumeSnapshotTruncation struct {
+	Reasons               []string `json:"reasons"`
+	DroppedBeforeSequence *int64   `json:"droppedBeforeSequence,omitempty"`
 }
 
 type OperationResult[T any] struct {

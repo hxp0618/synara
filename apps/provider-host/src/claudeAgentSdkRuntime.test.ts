@@ -283,10 +283,18 @@ describe("Claude Agent SDK runtime", () => {
         workload: {
           provider: "claudeAgent",
           inputText: "continue",
-          conversationHistory: [
-            { role: "user", text: "first" },
-            { role: "assistant", text: "response" },
-          ],
+          resumeSnapshot: {
+            version: 1,
+            sessionId: "session-1",
+            turnId: "turn-2",
+            provider: "claudeAgent",
+            messages: [
+              { role: "user", text: "first" },
+              { role: "assistant", text: "response" },
+            ],
+            toolResults: [{ summary: "Focused tests passed" }],
+            sourceSequenceRange: { from: 1, through: 4 },
+          },
         },
       },
       null,
@@ -300,6 +308,8 @@ describe("Claude Agent SDK runtime", () => {
     });
     expect(prompts[0]).toBe("continue");
     expect(prompts[1]).toContain("<assistant>\nresponse\n</assistant>");
+		expect(prompts[1]).toContain("<synara_resume_snapshot_json>");
+    expect(prompts[1]).toContain("Focused tests passed");
     expect(prompts[1]).toContain("<current_user>\ncontinue\n</current_user>");
     expect(messages).toContainEqual({
       type: "event",
@@ -440,29 +450,71 @@ describe("Claude Agent SDK runtime", () => {
   });
 
   it("redacts Provider credentials from SDK terminal errors", async () => {
+    const controlledProxy =
+      "http://provider-user:provider-password@proxy.example.test:8080";
+    const ambient = {
+      SECRET: "ordinary-secret",
+      HOST_SECRET: "host-secret",
+      AWS_ACCESS_KEY_ID: "aws-key",
+      AWS_SECRET_ACCESS_KEY: "aws-secret",
+      GITHUB_TOKEN: "github-secret",
+      DATABASE_URL: "postgres://user:secret@db/synara",
+      PGPASSWORD: "postgres-secret",
+      MINIO_ROOT_PASSWORD: "minio-secret",
+      ANTHROPIC_API_KEY: "ambient-anthropic-secret",
+      HTTP_PROXY: "http://ambient-user:ambient-secret@proxy.example.test",
+      SYNARA_PROVIDER_HTTP_PROXY: controlledProxy,
+    } as const;
+    const previousEnvironment = new Map<string, string | undefined>();
+    for (const [name, value] of Object.entries(ambient)) {
+      previousEnvironment.set(name, process.env[name]);
+      process.env[name] = value;
+    }
     const queryFactory: ClaudeQueryFactory = ({ options }) =>
       fakeQuery(
         (async function* () {
-          expect(requiredOptions(options).env?.ANTHROPIC_API_KEY).toBe("provider-secret");
+          const environment = requiredOptions(options).env;
+          expect(environment?.PATH).toBeTruthy();
+          expect(environment?.ANTHROPIC_API_KEY).toBe("provider-secret");
+          expect(environment?.HTTP_PROXY).toBe(controlledProxy);
+          expect(environment?.SYNARA_PROVIDER_HTTP_PROXY).toBeUndefined();
+          for (const name of Object.keys(ambient).filter(
+            (candidate) =>
+              candidate !== "ANTHROPIC_API_KEY" &&
+              candidate !== "HTTP_PROXY" &&
+              candidate !== "SYNARA_PROVIDER_HTTP_PROXY",
+          )) {
+            expect(environment?.[name]).toBeUndefined();
+          }
           yield sdkMessage({
             type: "result",
             subtype: "error_during_execution",
             is_error: true,
-            errors: ["request failed with provider-secret"],
+            errors: [`request failed via ${controlledProxy} with provider-secret`],
             usage: {},
             session_id: "session-error",
           });
         })(),
       );
-    const run = startProviderHostRun(
-      claudeInput({ inputText: "fail safely" }),
-      { payload: { apiKey: "provider-secret" } },
-      () => {},
-      { claudeQueryFactory: queryFactory },
-    );
+    try {
+      const run = startProviderHostRun(
+        claudeInput({ inputText: "fail safely" }),
+        { payload: { apiKey: "provider-secret" } },
+        () => {},
+        { claudeQueryFactory: queryFactory },
+      );
 
-    await expect(run.result).rejects.toThrow("request failed with [REDACTED]");
-    await expect(run.result).rejects.not.toThrow("provider-secret");
+      await expect(run.result).rejects.toThrow(
+        "request failed via [REDACTED] with [REDACTED]",
+      );
+      await expect(run.result).rejects.not.toThrow("provider-secret");
+      await expect(run.result).rejects.not.toThrow(controlledProxy);
+    } finally {
+      for (const [name, value] of previousEnvironment) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+    }
   });
 });
 

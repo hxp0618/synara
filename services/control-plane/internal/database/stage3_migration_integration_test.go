@@ -633,6 +633,7 @@ func TestWorkspaceCleanupMigrationFencesLegacyKubernetesWorkerUntilPodReregister
 	if registered.Worker.ID == legacyWorker.ID || registered.Worker.InstanceUID != actualPodUID || registered.Worker.Status != "online" {
 		t.Fatalf("actual Pod UID registration did not create a fresh active Worker: %#v", registered.Worker)
 	}
+	attachMigrationCompatibleCodexManifest(t, db, registered.Worker.ID)
 	authenticated, err := service.Authenticate(ctx, registered.Token)
 	if err != nil {
 		t.Fatalf("authenticate re-registered Kubernetes Worker: %v", err)
@@ -665,6 +666,58 @@ func TestWorkspaceCleanupMigrationFencesLegacyKubernetesWorkerUntilPodReregister
 		materialization.LastExecutionID == nil || *materialization.LastExecutionID != seed.executionID ||
 		materialization.LastGeneration == nil || *materialization.LastGeneration != claimed.Value.Execution.Generation {
 		t.Fatalf("Kubernetes materialization did not bind the actual Pod UID fence: %#v", materialization)
+	}
+}
+
+func attachMigrationCompatibleCodexManifest(t *testing.T, db *gorm.DB, workerID uuid.UUID) {
+	t.Helper()
+	now := time.Now().UTC()
+	manifestID := uuid.New()
+	runtimeVersion := "0.144.1"
+	runtimeMaximum := "1.0.0"
+	manifest := persistence.WorkerManifest{
+		ID: manifestID, ManifestHash: strings.Repeat("e", 64),
+		WorkerBuildVersion: "migration-current", WorkerProtocolMinimum: executions.WorkerProtocolVersion,
+		WorkerProtocolMaximum: executions.WorkerProtocolVersion,
+		RuntimeEventMinimum:   executions.RuntimeEventVersionV2,
+		RuntimeEventMaximum:   executions.RuntimeEventVersionV2,
+		OperatingSystem:       "linux", Architecture: "arm64", FeatureFlags: map[string]any{}, CreatedAt: now,
+	}
+	provider := persistence.WorkerProviderManifest{
+		WorkerManifestID: manifestID, Provider: "codex", SupportTier: "experimental",
+		CompatibilityStatus: "compatible", ProviderHostMajor: 2, ProviderHostMinor: 1,
+		HostBuildVersion: "migration-provider-host", AdapterVersion: "codex-app-server-v2",
+		ProviderCLIVersion: &runtimeVersion, RuntimeKind: "cli", RuntimeName: "codex",
+		RuntimeVersion: &runtimeVersion, RuntimeAvailable: true, RuntimeVersionSource: "probe",
+		RuntimeMinimumInclusive: "0.144.0", RuntimeMaximumExclusive: &runtimeMaximum,
+		RuntimeCompatible: true, ReleaseRequiresExplicitEnablement: true, ReleaseEnabled: true,
+		MaximumCommandBytes: 2 << 20, MaximumMessageBytes: 2 << 20,
+		RuntimeEventMinimum:      executions.RuntimeEventVersionV2,
+		RuntimeEventMaximum:      executions.RuntimeEventVersionV2,
+		CredentialDeliveryModes:  []string{"fd3-json"},
+		ResumeStrategies:         []string{"native-cursor", "authoritative-history"},
+		CapabilityDescriptorHash: strings.Repeat("f", 64),
+		Capabilities: map[string]any{
+			"discovery": "native", "start-session": "native", "resume-session": "native",
+			"send-turn": "native", "authoritative-history-reconstruction": "emulated",
+		},
+		CheckedAt: now,
+	}
+	if err := db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(&manifest).Error; err != nil {
+			return err
+		}
+		if err := tx.Create(&provider).Error; err != nil {
+			return err
+		}
+		return tx.Model(&persistence.WorkerInstance{}).
+			Where("id = ?", workerID).
+			Updates(map[string]any{
+				"current_manifest_id": manifestID, "compatibility_status": "compatible",
+				"compatibility_reason": nil, "compatibility_checked_at": now,
+			}).Error
+	}); err != nil {
+		t.Fatalf("attach compatible migration Worker manifest: %v", err)
 	}
 }
 

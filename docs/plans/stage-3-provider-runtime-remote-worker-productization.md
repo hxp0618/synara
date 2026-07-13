@@ -686,6 +686,18 @@ Snapshot 必须有大小上限、Token 预算和确定性排序。
 - 恢复不会重复执行已确认完成的 Turn 或工具副作用。
 - Snapshot 超限时使用 Compact/Artifact 策略并产生可审计记录。
 
+### F 当前证据（2026-07-14）
+
+- `Workload.resumeSnapshot` v1 已作为 additive Worker Contract 实现；旧 `conversationHistory` 从同一
+  Snapshot Message 投影，不再存在独立聚合路径。
+- Snapshot 已覆盖 legacy/v2 Assistant Text、Tool Summary、Plan/Review、Compact Boundary、Pending
+  Interaction 白名单 Metadata、Ready Artifact 与 Workspace/Checkpoint 引用，以及确定性的
+  Sequence/Byte/Token 截断记录。
+- Claim 事务会单调推进 Runtime Binding 的 `authoritative_history_sequence`；SQLite 与 PostgreSQL 17
+  均有测试，超过 500 个 Event 后的 Review/Compact Marker 也有恢复测试。
+- 当前仍未关闭 F：Cursor 尚未绑定 Tenant/Session/Provider/Credential Version AAD；Local/SSH/Docker/
+  Kubernetes 删除本地状态后的同源 Live Acceptance 仍需由工作流 L 证明。
+
 ## 12. 工作流 G：Credential 与 Secret 隔离
 
 ### G1. Provider Credential 作用域
@@ -748,6 +760,18 @@ Provider Credential 与 Workspace Credential 分离：
 - Credential Rotation 后旧版本不能被新 Execution 解析。
 - 旧 Lease/Generation 无法获取 Credential。
 - 每个正式 Provider 的 Credential Allowlist 有测试。
+
+### G 当前证据（2026-07-14）
+
+- agentd、Provider Host 和 Codex/Claude 子进程改为从空环境构造显式运行时白名单；ambient Worker、
+  Lease、Control Plane、Provider、Cloud、GitHub、Database、Object Store、Proxy、SSH Agent 和
+  `NODE_OPTIONS` 均不继承。
+- Provider Credential 继续只经 FD 3 与 Provider-specific Payload Allowlist 注入；认证代理只能经
+  显式 `SYNARA_PROVIDER_*_PROXY` 输入，映射后会参与诊断脱敏。
+- Provider Host Build Version 使用构建包版本，不再接受宿主环境伪造；构建后的真实 Host/agentd
+  Describe 集成已通过。
+- 当前仍未关闭 G：Credential Scope 尚未实现 User/Platform 层及完整优先级 ADR；Registry/Package/
+  SSH Workspace Credential 与全链路 Artifact/Outbox/Audit/Metrics Secret Canary 仍缺失。
 
 ## 13. 工作流 H：Remote Workspace 与 Git 生命周期
 
