@@ -318,6 +318,7 @@ type ReleaseLeaseInput struct {
 
 const (
 	RuntimeEventVersionV1       = 1
+	RuntimeEventVersionV2       = 2
 	RuntimeEventMaxPayloadBytes = 64 << 10
 )
 

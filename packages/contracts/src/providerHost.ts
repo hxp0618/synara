@@ -6,6 +6,10 @@ import { Schema } from "effect";
 
 import { CommandId, IsoDateTime, NonNegativeInt, PositiveInt, TrimmedNonEmptyString } from "./baseSchemas";
 import { ProviderKind } from "./orchestration";
+import {
+  PROVIDER_RUNTIME_EVENT_VERSION,
+  ProviderRuntimeEventType,
+} from "./providerRuntime";
 
 export const PROVIDER_HOST_PROTOCOL_VERSION = { major: 2, minor: 0 } as const;
 export const PROVIDER_HOST_MAX_COMMAND_BYTES = 2 * 1024 * 1024;
@@ -189,7 +193,18 @@ const messageWithPayload = <MessageType extends string>(messageType: MessageType
     payload: WirePayload,
   });
 
-export const ProviderHostEventMessage = messageWithPayload("Event");
+export const ProviderHostRuntimeEventPayload = Schema.Struct({
+  eventVersion: Schema.Literal(PROVIDER_RUNTIME_EVENT_VERSION),
+  eventType: ProviderRuntimeEventType,
+  payload: WirePayload,
+});
+export type ProviderHostRuntimeEventPayload = typeof ProviderHostRuntimeEventPayload.Type;
+
+export const ProviderHostEventMessage = Schema.Struct({
+  ...ProviderHostMessageBase,
+  messageType: Schema.Literal("Event"),
+  payload: ProviderHostRuntimeEventPayload,
+});
 export const ProviderHostInteractionRequestMessage = messageWithPayload("InteractionRequest");
 export const ProviderHostArtifactCandidateMessage = messageWithPayload("ArtifactCandidate");
 export const ProviderHostCheckpointMessage = messageWithPayload("Checkpoint");

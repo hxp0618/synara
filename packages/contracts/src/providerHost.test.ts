@@ -6,10 +6,13 @@ import {
   PROVIDER_HOST_PROTOCOL_VERSION,
   ProviderHostCommandEnvelope,
   ProviderHostDescriptor,
+  ProviderHostMessageEnvelope,
 } from "./providerHost";
+import { PROVIDER_RUNTIME_EVENT_VERSION } from "./providerRuntime";
 
 const decodeDescriptor = Schema.decodeUnknownSync(ProviderHostDescriptor);
 const decodeCommand = Schema.decodeUnknownSync(ProviderHostCommandEnvelope);
+const decodeMessage = Schema.decodeUnknownSync(ProviderHostMessageEnvelope);
 
 function completeCapabilities(value: "native" | "emulated" | "unsupported") {
   return Object.fromEntries(PROVIDER_CAPABILITY_IDS.map((capability) => [capability, value]));
@@ -73,5 +76,39 @@ describe("Provider Host v2 contracts", () => {
     });
 
     expect(command.commandType).toBe("SendTurn");
+  });
+
+  it("accepts only canonical Runtime Event v2 payloads on Event messages", () => {
+    const base = {
+      requestId: "request-1",
+      protocolVersion: PROVIDER_HOST_PROTOCOL_VERSION,
+      executionId: "execution-1",
+      generation: 2,
+      commandId: "command-1",
+      occurredAt: "2026-07-13T02:00:00.000Z",
+      messageType: "Event",
+    } as const;
+
+    expect(
+      decodeMessage({
+        ...base,
+        payload: {
+          eventVersion: PROVIDER_RUNTIME_EVENT_VERSION,
+          eventType: "content.delta",
+          payload: { streamKind: "assistant_text", delta: "hello" },
+        },
+      }).messageType,
+    ).toBe("Event");
+
+    expect(() =>
+      decodeMessage({
+        ...base,
+        payload: {
+          eventVersion: 1,
+          eventType: "runtime.output.delta",
+          payload: { text: "legacy" },
+        },
+      }),
+    ).toThrow();
   });
 });

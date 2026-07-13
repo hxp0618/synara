@@ -1,0 +1,116 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://synara.dev/schemas/runtime-event-v2.schema.json",
+  "title": "Synara Runtime Event v2 Persisted Session Event Envelope",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "eventId",
+    "eventVersion",
+    "tenantId",
+    "organizationId",
+    "projectId",
+    "sessionId",
+    "executionId",
+    "workerId",
+    "generation",
+    "sequence",
+    "eventType",
+    "actorType",
+    "actorId",
+    "occurredAt",
+    "payload"
+  ],
+  "properties": {
+    "eventId": { "type": "string", "format": "uuid" },
+    "eventVersion": { "const": 2 },
+    "tenantId": { "type": "string", "format": "uuid" },
+    "organizationId": { "type": "string", "format": "uuid" },
+    "projectId": { "type": "string", "format": "uuid" },
+    "sessionId": { "type": "string", "format": "uuid" },
+    "executionId": {
+      "oneOf": [
+        { "type": "string", "format": "uuid" },
+        { "type": "null" }
+      ]
+    },
+    "workerId": {
+      "oneOf": [
+        { "type": "string", "format": "uuid" },
+        { "type": "null" }
+      ]
+    },
+    "generation": {
+      "oneOf": [
+        { "type": "integer", "minimum": 1 },
+        { "type": "null" }
+      ]
+    },
+    "sequence": { "type": "integer", "minimum": 1 },
+    "eventType": {
+      "enum": [
+        "session.started",
+        "session.configured",
+        "session.state.changed",
+        "session.exited",
+        "thread.started",
+        "thread.state.changed",
+        "thread.metadata.updated",
+        "thread.token-usage.updated",
+        "thread.realtime.started",
+        "thread.realtime.item-added",
+        "thread.realtime.audio.delta",
+        "thread.realtime.error",
+        "thread.realtime.closed",
+        "turn.started",
+        "turn.completed",
+        "turn.aborted",
+        "turn.tasks.updated",
+        "turn.proposed.delta",
+        "turn.proposed.completed",
+        "turn.diff.updated",
+        "item.started",
+        "item.updated",
+        "item.completed",
+        "content.delta",
+        "request.opened",
+        "request.resolved",
+        "user-input.requested",
+        "user-input.resolved",
+        "task.started",
+        "task.progress",
+        "task.completed",
+        "hook.started",
+        "hook.progress",
+        "hook.completed",
+        "tool.progress",
+        "tool.summary",
+        "auth.status",
+        "account.updated",
+        "account.rate-limits.updated",
+        "mcp.status.updated",
+        "mcp.oauth.completed",
+        "model.rerouted",
+        "config.warning",
+        "deprecation.notice",
+        "files.persisted",
+        "runtime.warning",
+        "runtime.error"
+      ]
+    },
+    "actorType": {
+      "enum": ["user", "service_account", "worker", "system"]
+    },
+    "actorId": {
+      "oneOf": [
+        { "type": "string", "format": "uuid" },
+        { "type": "null" }
+      ]
+    },
+    "occurredAt": { "type": "string", "format": "date-time" },
+    "payload": {
+      "type": "object",
+      "description": "Canonical ProviderRuntimeEventV2 payload plus documented SaaS correlation extensions such as requestId. Serialized JSON is limited to 65536 bytes; larger content must use an Artifact reference."
+    }
+  }
+}

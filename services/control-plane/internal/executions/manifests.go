@@ -151,7 +151,11 @@ func normalizeWorkerManifest(
 	}
 	status := "compatible"
 	var reason *string
-	if compatibleProviders == 0 {
+	if runtime.RuntimeEventMinimum > RuntimeEventVersionV2 || runtime.RuntimeEventMaximum < RuntimeEventVersionV2 {
+		status = "incompatible"
+		value := "Worker runtime does not support Runtime Event version 2."
+		reason = &value
+	} else if compatibleProviders == 0 {
 		status = "incompatible"
 		value := "No remote Provider has a compatible send-turn capability on this Worker manifest."
 		reason = &value
@@ -190,7 +194,8 @@ func normalizeProviderManifest(
 		status = "incompatible"
 		code, message = stringReference("capability_unsupported"), stringReference("Provider does not declare a supported send-turn capability.")
 	case descriptor.MaximumCommandBytes <= 0 || descriptor.MaximumMessageBytes <= 0 ||
-		descriptor.RuntimeEventVersions.Minimum > 1 || descriptor.RuntimeEventVersions.Maximum < 1:
+		descriptor.RuntimeEventVersions.Minimum > RuntimeEventVersionV2 ||
+		descriptor.RuntimeEventVersions.Maximum < RuntimeEventVersionV2:
 		status = "incompatible"
 		code, message = stringReference("provider_version_incompatible"), stringReference("Provider Host message or Runtime Event range is incompatible.")
 	case !containsCapabilityString(descriptor.CredentialDeliveryModes, "anonymous-fd") || len(descriptor.ResumeStrategies) == 0:

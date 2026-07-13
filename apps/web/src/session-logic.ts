@@ -130,7 +130,8 @@ interface DerivedWorkLogEntry extends WorkLogEntry {
 
 export interface PendingApproval {
   requestId: ApprovalRequestId;
-  requestKind: "command" | "file-read" | "file-change";
+  executionId?: string;
+  requestKind: "command" | "file-read" | "file-change" | "network" | "tool";
   createdAt: string;
   detail?: string;
 }
@@ -154,6 +155,7 @@ export function isProviderFileEditWorkLogEntry(
 
 export interface PendingUserInput {
   requestId: ApprovalRequestId;
+  executionId?: string;
   createdAt: string;
   questions: ReadonlyArray<UserInputQuestion>;
 }
@@ -384,15 +386,26 @@ function requestKindFromRequestType(requestType: unknown): PendingApproval["requ
     case "file_change_approval":
     case "apply_patch_approval":
       return "file-change";
+    case "auth_tokens_refresh":
+      return "network";
+    case "dynamic_tool_call":
+    case "tool_user_input":
+    case "unknown":
+      return "tool";
     default:
       return null;
   }
 }
 
+function pendingRequestKey(payload: Record<string, unknown> | null, requestId: string): string {
+  const executionId = payload && typeof payload.executionId === "string" ? payload.executionId : "";
+  return `${executionId}:${requestId}`;
+}
+
 export function derivePendingApprovals(
   activities: ReadonlyArray<OrchestrationThreadActivity>,
 ): PendingApproval[] {
-  const openByRequestId = new Map<ApprovalRequestId, PendingApproval>();
+  const openByRequestId = new Map<string, PendingApproval>();
   const ordered = orderedActivities(activities);
 
   for (const activity of ordered) {
@@ -408,34 +421,52 @@ export function derivePendingApprovals(
       payload &&
       (payload.requestKind === "command" ||
         payload.requestKind === "file-read" ||
-        payload.requestKind === "file-change")
+        payload.requestKind === "file-change" ||
+        payload.requestKind === "network" ||
+        payload.requestKind === "tool")
         ? payload.requestKind
         : payload
           ? requestKindFromRequestType(payload.requestType)
           : null;
-    const detail = payload && typeof payload.detail === "string" ? payload.detail : undefined;
+    const detail =
+      payload && typeof payload.detail === "string"
+        ? payload.detail
+        : payload && typeof payload.summary === "string"
+          ? payload.summary
+          : undefined;
+    const executionId = payload && typeof payload.executionId === "string" ? payload.executionId : undefined;
+    const requestKey = requestId ? pendingRequestKey(payload, requestId) : null;
 
-    if (activity.kind === "approval.requested" && requestId && requestKind) {
-      openByRequestId.set(requestId, {
+    if (
+      (activity.kind === "approval.requested" || activity.kind === "request.opened") &&
+      requestId &&
+      requestKey &&
+      requestKind
+    ) {
+      openByRequestId.set(requestKey, {
         requestId,
         requestKind,
         createdAt: activity.createdAt,
+        ...(executionId ? { executionId } : {}),
         ...(detail ? { detail } : {}),
       });
       continue;
     }
 
-    if (activity.kind === "approval.resolved" && requestId) {
-      openByRequestId.delete(requestId);
+    if (
+      (activity.kind === "approval.resolved" || activity.kind === "request.resolved") &&
+      requestKey
+    ) {
+      openByRequestId.delete(requestKey);
       continue;
     }
 
     if (
       activity.kind === "provider.approval.respond.failed" &&
-      requestId &&
+      requestKey &&
       isStalePendingRequestFailureDetail(detail)
     ) {
-      openByRequestId.delete(requestId);
+      openByRequestId.delete(requestKey);
       continue;
     }
   }
@@ -495,7 +526,7 @@ function parseUserInputQuestions(
 export function derivePendingUserInputs(
   activities: ReadonlyArray<OrchestrationThreadActivity>,
 ): PendingUserInput[] {
-  const openByRequestId = new Map<ApprovalRequestId, PendingUserInput>();
+  const openByRequestId = new Map<string, PendingUserInput>();
   const ordered = orderedActivities(activities);
 
   for (const activity of ordered) {
@@ -508,31 +539,34 @@ export function derivePendingUserInputs(
         ? ApprovalRequestId.makeUnsafe(payload.requestId)
         : null;
     const detail = payload && typeof payload.detail === "string" ? payload.detail : undefined;
+    const executionId = payload && typeof payload.executionId === "string" ? payload.executionId : undefined;
+    const requestKey = requestId ? pendingRequestKey(payload, requestId) : null;
 
-    if (activity.kind === "user-input.requested" && requestId) {
+    if (activity.kind === "user-input.requested" && requestId && requestKey) {
       const questions = parseUserInputQuestions(payload);
       if (!questions) {
         continue;
       }
-      openByRequestId.set(requestId, {
+      openByRequestId.set(requestKey, {
         requestId,
         createdAt: activity.createdAt,
+        ...(executionId ? { executionId } : {}),
         questions,
       });
       continue;
     }
 
-    if (activity.kind === "user-input.resolved" && requestId) {
-      openByRequestId.delete(requestId);
+    if (activity.kind === "user-input.resolved" && requestKey) {
+      openByRequestId.delete(requestKey);
       continue;
     }
 
     if (
       activity.kind === "provider.user-input.respond.failed" &&
-      requestId &&
+      requestKey &&
       isStalePendingRequestFailureDetail(detail)
     ) {
-      openByRequestId.delete(requestId);
+      openByRequestId.delete(requestKey);
     }
   }
 

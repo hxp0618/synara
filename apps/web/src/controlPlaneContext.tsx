@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import type { ProviderInteractionMode, RuntimeMode } from "@synara/contracts";
+import { ProjectId, type ProviderInteractionMode, type RuntimeMode } from "@synara/contracts";
 import {
   createContext,
   createElement,
@@ -36,7 +36,13 @@ import {
   resolveControlPlaneCapabilities,
   type ControlPlaneCapabilities,
 } from "./lib/controlPlanePermissions";
+import {
+  cancelControlPlaneTenantSwitchQueries,
+  disposeControlPlaneTenantScope,
+  enqueueControlPlaneTenantSwitch,
+} from "./lib/controlPlaneTenantScope";
 import { randomUUID } from "./lib/utils";
+import { useComposerDraftStore } from "./composerDraftStore";
 import { useStore } from "./store";
 
 export const controlPlaneQueryKeys = {
@@ -176,6 +182,7 @@ export function ControlPlaneProvider({ children }: { children: ReactNode }) {
   const hadAuthoritativeProjectionRef = useRef(false);
   const authoritativeProjectionEnabledRef = useRef(false);
   const runtimeDisposeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const tenantSwitchQueueRef = useRef<Promise<void>>(Promise.resolve());
   const projectionHandlerRef = useRef<
     (projections: ReadonlyMap<string, ControlPlaneSessionProjection>) => void
   >(() => undefined);
@@ -371,12 +378,42 @@ export function ControlPlaneProvider({ children }: { children: ReactNode }) {
     await queryClient.invalidateQueries({ queryKey: controlPlaneQueryKeys.session });
   }, [profileQuery.data, queryClient]);
   const setActiveTenant = useCallback(
-    async (tenantId: string) => {
-      const nextSession = await controlPlaneClient.setActiveTenant(tenantId);
-      queryClient.setQueryData(controlPlaneQueryKeys.session, nextSession);
-      await queryClient.invalidateQueries({ queryKey: ["control-plane", "tenants"] });
+    (tenantId: string) => {
+      return enqueueControlPlaneTenantSwitch(tenantSwitchQueueRef, async () => {
+        const currentSession = queryClient.getQueryData<ControlPlaneSessionState>(
+          controlPlaneQueryKeys.session,
+        );
+        const previousTenantId = currentSession?.user.activeTenantId ?? null;
+        if (previousTenantId && previousTenantId !== tenantId) {
+          await cancelControlPlaneTenantSwitchQueries(queryClient, previousTenantId);
+        }
+        const nextSession = await controlPlaneClient.setActiveTenant(tenantId);
+        if (previousTenantId && previousTenantId !== tenantId) {
+          disposeControlPlaneTenantScope({
+            queryClient,
+            tenantId: previousTenantId,
+            currentProjectIds: useStore.getState().projects.map((project) => project.id),
+            closeProjection: () => {
+              authoritativeProjectionEnabledRef.current = false;
+              resourcesRef.current = { projects: [], sessions: [] };
+              projectionRuntime.setScope("", []);
+              setStreamStatusBySessionId({});
+              setProjectionError(null);
+              useStore.getState().syncAuthoritativeProjection([], []);
+            },
+            clearProjectDrafts: (projectId) =>
+              useComposerDraftStore
+                .getState()
+                .clearProjectDraftThreads(ProjectId.makeUnsafe(projectId)),
+          });
+        }
+        queryClient.setQueryData(controlPlaneQueryKeys.session, nextSession);
+        await queryClient.invalidateQueries({
+          queryKey: controlPlaneQueryKeys.organizations(tenantId),
+        });
+      });
     },
-    [queryClient],
+    [projectionRuntime, queryClient],
   );
   const setActiveOrganization = useCallback(
     (organizationId: string) => {

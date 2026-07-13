@@ -1626,9 +1626,9 @@ func TestApprovalAndUserInputPersistResolveReplayAndResumeExecution(t *testing.T
 
 	approvalRequestID := "approval-" + uuid.NewString()
 	if _, err := service.AppendRuntimeEvent(context.Background(), worker, fixture.ExecutionID, RuntimeEventInput{
-		LeaseInput: leaseInput, EventID: uuid.New(), EventVersion: 1, EventType: "approval.requested",
+		LeaseInput: leaseInput, EventID: uuid.New(), EventVersion: RuntimeEventVersionV2, EventType: "request.opened",
 		Payload: map[string]any{
-			"requestId": approvalRequestID, "requestType": "exec_command_approval", "summary": "Run command",
+			"requestId": approvalRequestID, "requestType": "exec_command_approval", "detail": "Run command",
 		}, OccurredAt: time.Now().UTC(),
 	}, "approval-requested"); err != nil {
 		t.Fatal(err)
@@ -1722,10 +1722,12 @@ func TestApprovalAndUserInputPersistResolveReplayAndResumeExecution(t *testing.T
 
 	userInputRequestID := "user-input-" + uuid.NewString()
 	if _, err := service.AppendRuntimeEvent(context.Background(), worker, fixture.ExecutionID, RuntimeEventInput{
-		LeaseInput: leaseInput, EventID: uuid.New(), EventVersion: 1, EventType: "user-input.requested",
+		LeaseInput: leaseInput, EventID: uuid.New(), EventVersion: RuntimeEventVersionV2, EventType: "user-input.requested",
 		Payload: map[string]any{
 			"requestId": userInputRequestID,
-			"questions": []any{map[string]any{"id": "environment", "question": "Which environment?"}},
+			"questions": []any{map[string]any{
+				"id": "environment", "header": "Environment", "question": "Which environment?", "options": []any{},
+			}},
 		}, OccurredAt: time.Now().UTC(),
 	}, "user-input-requested"); err != nil {
 		t.Fatal(err)
@@ -1787,16 +1789,38 @@ func TestApprovalAndUserInputPersistResolveReplayAndResumeExecution(t *testing.T
 	var requestedEvents, resolvedEvents int64
 	if err := db.Model(&persistence.SessionEvent{}).
 		Where("tenant_id = ? AND execution_id = ? AND event_type IN ?", fixture.TenantID, fixture.ExecutionID,
-			[]string{"approval.requested", "user-input.requested"}).Count(&requestedEvents).Error; err != nil {
+			[]string{"request.opened", "user-input.requested"}).Count(&requestedEvents).Error; err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Model(&persistence.SessionEvent{}).
 		Where("tenant_id = ? AND execution_id = ? AND event_type IN ?", fixture.TenantID, fixture.ExecutionID,
-			[]string{"approval.resolved", "user-input.resolved"}).Count(&resolvedEvents).Error; err != nil {
+			[]string{"request.resolved", "user-input.resolved"}).Count(&resolvedEvents).Error; err != nil {
 		t.Fatal(err)
 	}
 	if requestedEvents != 2 || resolvedEvents != 2 {
 		t.Fatalf("interaction replay duplicated events: requested=%d resolved=%d", requestedEvents, resolvedEvents)
+	}
+	var nonCanonicalEvents int64
+	if err := db.Model(&persistence.SessionEvent{}).
+		Where("tenant_id = ? AND execution_id = ? AND event_version <> ?", fixture.TenantID, fixture.ExecutionID, RuntimeEventVersionV2).
+		Where("event_type IN ?", []string{"request.opened", "request.resolved", "user-input.requested", "user-input.resolved"}).
+		Count(&nonCanonicalEvents).Error; err != nil {
+		t.Fatal(err)
+	}
+	if nonCanonicalEvents != 0 {
+		t.Fatalf("canonical interaction lifecycle persisted %d non-v2 events", nonCanonicalEvents)
+	}
+	var resolutionEvents []persistence.SessionEvent
+	if err := db.Where(
+		"tenant_id = ? AND execution_id = ? AND event_type IN ?",
+		fixture.TenantID, fixture.ExecutionID, []string{"request.resolved", "user-input.resolved"},
+	).Find(&resolutionEvents).Error; err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range resolutionEvents {
+		if event.WorkerID == nil || *event.WorkerID != worker.ID || event.Generation == nil || *event.Generation != lease.Generation {
+			t.Fatalf("canonical resolution Event lost Worker generation correlation: %#v", event)
+		}
 	}
 }
 

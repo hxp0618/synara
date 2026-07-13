@@ -281,6 +281,13 @@ func (c *Client) Renew(ctx context.Context, executionID uuid.UUID, lease executi
 }
 
 func (c *Client) AppendEvent(ctx context.Context, executionID uuid.UUID, lease executions.Lease, message RunnerMessage) error {
+	eventVersion := message.EventVersion
+	if eventVersion == 0 {
+		eventVersion = executions.RuntimeEventVersionV1
+	}
+	if eventVersion != executions.RuntimeEventVersionV1 && eventVersion != executions.RuntimeEventVersionV2 {
+		return fmt.Errorf("append Runtime Event: unsupported event version %d", eventVersion)
+	}
 	eventID := uuid.New()
 	if message.EventID != nil && *message.EventID != uuid.Nil {
 		eventID = *message.EventID
@@ -291,7 +298,7 @@ func (c *Client) AppendEvent(ctx context.Context, executionID uuid.UUID, lease e
 	}
 	return c.doJSON(ctx, http.MethodPost, executionPath(executionID, "events"), c.workerToken, uuid.NewString(), executions.RuntimeEventInput{
 		LeaseInput: executions.LeaseInput{TenantID: lease.TenantID, Generation: lease.Generation, LeaseToken: lease.LeaseToken},
-		EventID:    eventID, EventVersion: 1, EventType: message.EventType, Payload: message.Payload, OccurredAt: occurredAt,
+		EventID:    eventID, EventVersion: eventVersion, EventType: message.EventType, Payload: message.Payload, OccurredAt: occurredAt,
 	}, nil)
 }
 

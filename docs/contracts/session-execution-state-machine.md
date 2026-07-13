@@ -69,9 +69,11 @@ produce exactly one legal terminal winner instead of relying on process-local sy
 
 ## Approval and user input
 
-Worker Runtime Events with type `approval.requested` or `user-input.requested` must contain a
-`requestId`. The Control Plane persists the request in `execution_interactions` in the same transaction
-as the Session Event and moves the Execution to `waiting-for-approval`.
+Legacy Runtime Event v1 uses `approval.requested` or `user-input.requested`. Canonical Runtime Event v2 uses
+`request.opened` for Approval and `user-input.requested` for Structured Input. All forms carry the stable
+`requestId` correlation extension. The Control Plane persists the request and its exact Event version in
+`execution_interactions` in the same transaction as the Session Event and moves the Execution to
+`waiting-for-approval`.
 
 Authorized users resolve requests through:
 
@@ -82,7 +84,9 @@ POST /v1/executions/{executionID}/user-input/{requestID}/resolve
 ```
 
 Resolution is rejected after Lease expiry or Generation fencing. The response is idempotent, audited,
-and appended to Session Event replay. Stage 3 delivers the persisted command through Worker-scoped endpoints:
+and appended to Session Event replay. A legacy request resolves with its v1 event; a canonical Approval resolves
+as `request.resolved` and canonical Structured Input as `user-input.resolved`. The persisted command is delivered
+through Worker-scoped endpoints:
 
 ```text
 POST /v1/workers/executions/{executionID}/interaction-resolutions/pull

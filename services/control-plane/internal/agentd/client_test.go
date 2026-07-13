@@ -83,3 +83,46 @@ func TestClientAdvertisesWorkerProtocolV2OnRegisterAndHeartbeat(t *testing.T) {
 		t.Fatalf("heartbeat protocolVersion = %d, want Worker Protocol v2", heartbeatInput.ProtocolVersion)
 	}
 }
+
+func TestClientAppendEventCarriesNegotiatedVersionAndDefaultsLegacyToV1(t *testing.T) {
+	versions := make(chan int, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		var input executions.RuntimeEventInput
+		if err := json.NewDecoder(request.Body).Decode(&input); err != nil {
+			t.Errorf("decode Runtime Event: %v", err)
+			http.Error(response, "invalid Runtime Event", http.StatusBadRequest)
+			return
+		}
+		versions <- input.EventVersion
+		response.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(server.Close)
+	controlPlaneURL, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := NewClient(Config{ControlPlaneURL: controlPlaneURL, RequestTimeout: time.Second, ArtifactTimeout: time.Second})
+	client.workerToken = "worker-token"
+	lease := executions.Lease{TenantID: uuid.New(), Generation: 1, LeaseToken: "lease-token"}
+	executionID := uuid.New()
+
+	if err := client.AppendEvent(context.Background(), executionID, lease, RunnerMessage{
+		Type: "event", EventVersion: executions.RuntimeEventVersionV2, EventType: "content.delta",
+		Payload: map[string]any{"streamKind": "assistant_text", "delta": "hello"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.AppendEvent(context.Background(), executionID, lease, RunnerMessage{
+		Type: "event", EventType: "runtime.output.delta", Payload: map[string]any{"text": "legacy"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if first, second := <-versions, <-versions; first != executions.RuntimeEventVersionV2 || second != executions.RuntimeEventVersionV1 {
+		t.Fatalf("Runtime Event versions = %d, %d; want 2, 1", first, second)
+	}
+	if err := client.AppendEvent(context.Background(), executionID, lease, RunnerMessage{
+		Type: "event", EventVersion: 3, EventType: "future.event", Payload: map[string]any{},
+	}); err == nil {
+		t.Fatal("Client accepted an unsupported Runtime Event version")
+	}
+}

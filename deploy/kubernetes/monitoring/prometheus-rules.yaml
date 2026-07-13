@@ -70,6 +70,22 @@ spec:
           annotations:
             summary: Synara has expired Worker leases awaiting recovery
             description: One or more expired Worker leases remain in authoritative metadata.
+        - alert: SynaraWorkerOfflineSurge
+          expr: sum(synara_workers{status="offline"}) >= 3
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: Synara Worker offline count is surging
+            description: At least three Workers have remained offline for five minutes.
+        - alert: SynaraExecutionRecoverySurge
+          expr: sum(synara_executions{status="recovering"}) >= 5
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: Synara Execution recovery count is surging
+            description: At least five Executions have remained recovering for five minutes.
         - alert: SynaraOutboxBacklog
           expr: synara_outbox_pending > 1000
           for: 10m

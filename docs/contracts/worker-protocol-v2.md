@@ -46,3 +46,7 @@ downgrade a v3 Claim.
 Worker Protocol v2 and v1 are not registration-compatible. Supporting a legacy on-disk layout v2 does not make a
 Worker Protocol v1 client compatible with a v2 Control Plane. Provider Host Protocol and Runtime Event versions
 continue to negotiate independently.
+
+Managed Worker Protocol v2 agents currently advertise Runtime Event `{ minimum: 2, maximum: 2 }` and reject a
+Provider Host Event outside the negotiated range. The explicit Provider Host v1 runner advertises Runtime Event v1
+only and remains a bounded compatibility path; it must not claim canonical v2 support.

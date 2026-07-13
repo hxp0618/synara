@@ -68,6 +68,8 @@ const KIND_PROMPT: Record<PendingApproval["requestKind"], string> = {
   command: "Approve this command?",
   "file-read": "Approve reading this file?",
   "file-change": "Approve this file change?",
+  network: "Approve network access?",
+  tool: "Approve this tool call?",
 };
 
 export const ComposerPendingApprovalPanel = memo(function ComposerPendingApprovalPanel({

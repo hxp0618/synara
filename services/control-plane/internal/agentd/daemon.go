@@ -579,11 +579,10 @@ func (d *Daemon) runExecution(
 		case "progress":
 			return nil
 		case "interaction":
-			eventType, err := interactionRuntimeEventType(message.Payload)
+			message, err := canonicalInteractionRuntimeEvent(message)
 			if err != nil {
 				return err
 			}
-			message.EventType = eventType
 			return d.client.AppendEvent(messageContext, execution.ID, lease, message)
 		case "checkpoint":
 			return validateCheckpointRequest(message.Payload)
@@ -802,16 +801,125 @@ func (d *Daemon) retryInteractionDeliveryUpdate(
 	return lastErr
 }
 
-func interactionRuntimeEventType(payload map[string]any) (string, error) {
+func canonicalInteractionRuntimeEvent(message RunnerMessage) (RunnerMessage, error) {
+	if message.EventVersion != executions.RuntimeEventVersionV2 {
+		return RunnerMessage{}, protocolFailure("Provider Host InteractionRequest did not use the negotiated Runtime Event version")
+	}
+	requestID, _ := message.Payload["requestId"].(string)
+	requestID = strings.TrimSpace(requestID)
+	if requestID == "" || len(requestID) > 200 || strings.ContainsAny(requestID, "\r\n\t") {
+		return RunnerMessage{}, protocolFailure("Provider Host InteractionRequest omitted a valid requestId")
+	}
+	payload := make(map[string]any, len(message.Payload)+2)
+	for key, value := range message.Payload {
+		payload[key] = value
+	}
+	payload["requestId"] = requestID
+
 	interactionType, _ := payload["interactionType"].(string)
 	switch strings.ToLower(strings.TrimSpace(interactionType)) {
 	case "approval":
-		return "approval.requested", nil
+		requestType := canonicalApprovalRequestType(payload)
+		payload["requestType"] = requestType
+		if summary, ok := payload["summary"].(string); ok && strings.TrimSpace(summary) != "" {
+			payload["detail"] = summary
+		}
+		message.EventType = "request.opened"
 	case "user-input":
-		return "user-input.requested", nil
+		questions, err := canonicalUserInputQuestions(payload["questions"])
+		if err != nil {
+			return RunnerMessage{}, err
+		}
+		payload["questions"] = questions
+		message.EventType = "user-input.requested"
 	default:
-		return "", protocolFailure("Provider Host InteractionRequest omitted a supported interactionType")
+		return RunnerMessage{}, protocolFailure("Provider Host InteractionRequest omitted a supported interactionType")
 	}
+	message.Payload = payload
+	return message, nil
+}
+
+func canonicalApprovalRequestType(payload map[string]any) string {
+	if requestType, ok := payload["requestType"].(string); ok {
+		switch requestType {
+		case "command_execution_approval", "file_read_approval", "file_change_approval",
+			"apply_patch_approval", "exec_command_approval", "dynamic_tool_call", "auth_tokens_refresh", "unknown":
+			return requestType
+		}
+	}
+	requestKind, _ := payload["requestKind"].(string)
+	switch strings.ToLower(strings.TrimSpace(requestKind)) {
+	case "command":
+		return "command_execution_approval"
+	case "file-read":
+		return "file_read_approval"
+	case "file-change":
+		return "file_change_approval"
+	case "apply-patch":
+		return "apply_patch_approval"
+	case "exec-command":
+		return "exec_command_approval"
+	case "dynamic-tool-call":
+		return "dynamic_tool_call"
+	default:
+		return "unknown"
+	}
+}
+
+func canonicalUserInputQuestions(value any) ([]any, error) {
+	questions, ok := value.([]any)
+	if !ok {
+		return nil, protocolFailure("Provider Host user-input InteractionRequest questions are not an array")
+	}
+	result := make([]any, 0, len(questions))
+	for _, value := range questions {
+		question, ok := value.(map[string]any)
+		if !ok || question == nil {
+			return nil, protocolFailure("Provider Host user-input InteractionRequest contains an invalid question")
+		}
+		for _, key := range []string{"id", "header", "question"} {
+			text, ok := question[key].(string)
+			if !ok || strings.TrimSpace(text) == "" {
+				return nil, protocolFailure("Provider Host user-input InteractionRequest question omitted required text")
+			}
+		}
+		optionsValue, found := question["options"]
+		if !found || optionsValue == nil {
+			optionsValue = []any{}
+		}
+		options, ok := optionsValue.([]any)
+		if !ok {
+			return nil, protocolFailure("Provider Host user-input InteractionRequest options are not an array")
+		}
+		normalizedOptions := make([]any, 0, len(options))
+		for _, optionValue := range options {
+			option, ok := optionValue.(map[string]any)
+			if !ok || option == nil {
+				return nil, protocolFailure("Provider Host user-input InteractionRequest contains an invalid option")
+			}
+			label, ok := option["label"].(string)
+			if !ok || strings.TrimSpace(label) == "" {
+				return nil, protocolFailure("Provider Host user-input InteractionRequest option omitted a label")
+			}
+			description, _ := option["description"].(string)
+			if strings.TrimSpace(description) == "" {
+				description = label
+			}
+			normalizedOption := make(map[string]any, len(option)+1)
+			for key, value := range option {
+				normalizedOption[key] = value
+			}
+			normalizedOption["description"] = description
+			normalizedOptions = append(normalizedOptions, normalizedOption)
+		}
+		copy := make(map[string]any, len(question)+1)
+		for key, value := range question {
+			copy[key] = value
+		}
+		copy["options"] = normalizedOptions
+		result = append(result, copy)
+	}
+	return result, nil
 }
 
 func (d *Daemon) renewLeaseLoop(ctx context.Context, executionID uuid.UUID, lease executions.Lease, cancel context.CancelFunc, result chan<- error) {
@@ -855,12 +963,16 @@ func withProviderHostCapabilities(base map[string]any, providerHost map[string]a
 		result[key] = value
 	}
 	result["providerHost"] = providerHost
+	runtimeEventVersion := executions.RuntimeEventVersionV1
+	if config.RunnerProtocol == RunnerProtocolV2 {
+		runtimeEventVersion = executions.RuntimeEventVersionV2
+	}
 	workerRuntime := map[string]any{
 		"workerBuildVersion":    config.Version,
 		"workerProtocolMinimum": executions.WorkerProtocolVersion,
 		"workerProtocolMaximum": executions.WorkerProtocolVersion,
-		"runtimeEventMinimum":   1,
-		"runtimeEventMaximum":   1,
+		"runtimeEventMinimum":   runtimeEventVersion,
+		"runtimeEventMaximum":   runtimeEventVersion,
 		"operatingSystem":       runtime.GOOS,
 		"architecture":          runtime.GOARCH,
 	}

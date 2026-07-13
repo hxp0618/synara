@@ -1,11 +1,34 @@
+import { readFileSync } from "node:fs";
+
 import { describe, expect, it } from "vitest";
 import { Schema } from "effect";
 
-import { ProviderRuntimeEvent } from "./providerRuntime";
+import {
+  PROVIDER_RUNTIME_EVENT_TYPES,
+  PROVIDER_RUNTIME_EVENT_VERSION,
+  ProviderRuntimeEvent,
+} from "./providerRuntime";
 
 const decodeRuntimeEvent = Schema.decodeUnknownSync(ProviderRuntimeEvent);
 
 describe("ProviderRuntimeEvent", () => {
+  it("keeps the persisted Runtime Event v2 JSON schema aligned with the canonical vocabulary", () => {
+    const schema = JSON.parse(
+      readFileSync(
+        new URL("../../../docs/contracts/runtime-event-v2.schema.json", import.meta.url),
+        "utf8",
+      ),
+    ) as {
+      properties: {
+        eventVersion: { const: number };
+        eventType: { enum: ReadonlyArray<string> };
+      };
+    };
+
+    expect(schema.properties.eventVersion.const).toBe(PROVIDER_RUNTIME_EVENT_VERSION);
+    expect(schema.properties.eventType.enum).toEqual(PROVIDER_RUNTIME_EVENT_TYPES);
+  });
+
   it("decodes turn.tasks.updated for task-list rendering", () => {
     const parsed = decodeRuntimeEvent({
       type: "turn.tasks.updated",

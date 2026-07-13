@@ -49,12 +49,45 @@ func TestNormalizeWorkerManifestRejectsIncompleteV2Summary(t *testing.T) {
 	}
 }
 
+func TestNormalizeWorkerManifestRejectsRuntimeEventV1MasqueradingAsV2(t *testing.T) {
+	capabilities := workerManifestTestCapabilities()
+	workerRuntime := capabilities["workerRuntime"].(map[string]any)
+	workerRuntime["runtimeEventMinimum"] = 1
+	workerRuntime["runtimeEventMaximum"] = 1
+
+	normalized, err := normalizeWorkerManifest("worker-test", capabilities, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if normalized == nil || normalized.Status != "incompatible" || normalized.Reason == nil {
+		t.Fatalf("v1-only Worker runtime was accepted as v2: %#v", normalized)
+	}
+
+	capabilities = workerManifestTestCapabilities()
+	providerHost := capabilities["providerHost"].(map[string]any)
+	providers := providerHost["providers"].(map[string]any)
+	codex := providers["codex"].(map[string]any)
+	codex["runtimeEventVersions"] = map[string]any{"minimum": 1, "maximum": 1}
+	normalized, err = normalizeWorkerManifest("worker-test", capabilities, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if normalized == nil {
+		t.Fatal("Provider manifest was omitted")
+	}
+	for _, provider := range normalized.Providers {
+		if provider.Provider == "codex" && provider.CompatibilityStatus != "incompatible" {
+			t.Fatalf("v1-only Provider descriptor was accepted as v2: %#v", provider)
+		}
+	}
+}
+
 func workerManifestTestCapabilities() map[string]any {
 	return map[string]any{
 		"workerRuntime": map[string]any{
 			"workerBuildVersion": "worker-test", "workerBuildGitSha": "abcdef1234567890",
 			"workerProtocolMinimum": WorkerProtocolVersion, "workerProtocolMaximum": WorkerProtocolVersion,
-			"runtimeEventMinimum": 1, "runtimeEventMaximum": 1,
+			"runtimeEventMinimum": RuntimeEventVersionV2, "runtimeEventMaximum": RuntimeEventVersionV2,
 			"operatingSystem": "linux", "architecture": "amd64",
 			"imageDigest": "sha256:worker-test",
 		},
@@ -74,7 +107,7 @@ func providerManifestTestDescriptor(provider, cliVersion, supportTier string) ma
 		"protocolVersion":  map[string]any{"major": 2, "minor": 0},
 		"hostBuildVersion": "host-test", "maximumCommandBytes": 2 << 20,
 		"maximumMessageBytes":     1 << 20,
-		"runtimeEventVersions":    map[string]any{"minimum": 1, "maximum": 1},
+		"runtimeEventVersions":    map[string]any{"minimum": RuntimeEventVersionV2, "maximum": RuntimeEventVersionV2},
 		"credentialDeliveryModes": []string{"anonymous-fd"},
 		"resumeStrategies":        []string{"native-cursor", "authoritative-history"},
 		"capabilityDescriptor": map[string]any{

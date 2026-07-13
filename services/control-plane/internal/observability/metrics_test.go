@@ -1,6 +1,7 @@
 package observability
 
 import (
+	"bytes"
 	"context"
 	"strings"
 	"testing"
@@ -71,8 +72,8 @@ func TestGatherUsesBoundedRoutePatternsAndAuthoritativeState(t *testing.T) {
 	}
 
 	registry := New(db)
-	registry.ObserveHTTP("GET", "GET /v1/sessions/{sessionID}", 200, 25*time.Millisecond)
-	registry.ObserveHTTP("GET", "/v1/sessions/"+executionID.String(), 404, 10*time.Millisecond)
+	registry.ObserveHTTP("GET", "GET /v1/sessions/{sessionID}", 200, 25*time.Millisecond, "")
+	registry.ObserveHTTP("GET", "/v1/sessions/"+executionID.String(), 404, 10*time.Millisecond, "")
 	registry.ObserveBackground("docker", now, nil)
 	registry.ObserveArtifact("complete", 128, nil)
 	registry.ObserveSSECatchup(20*time.Millisecond, 3, nil)
@@ -99,5 +100,42 @@ func TestGatherUsesBoundedRoutePatternsAndAuthoritativeState(t *testing.T) {
 	}
 	if strings.Contains(metrics, executionID.String()) {
 		t.Fatalf("metrics leaked a high-cardinality execution identifier:\n%s", metrics)
+	}
+}
+
+func TestObserveHTTPDerivesBoundedLoginLeaseFencingAndEventMetrics(t *testing.T) {
+	registry := New(nil)
+	registry.ObserveHTTP("POST", "POST /v1/auth/dev-login", 200, 10*time.Millisecond, "")
+	registry.ObserveHTTP("GET", "GET /v1/auth/sso/{connectionID}/callback", 401, 15*time.Millisecond, "oidc_id_token_invalid")
+	registry.ObserveHTTP("POST", "POST /v1/auth/sso/{connectionID}/callback", 303, 20*time.Millisecond, "")
+	registry.ObserveHTTP("POST", "POST /v1/workers/executions/{executionID}/renew", 200, 5*time.Millisecond, "")
+	registry.ObserveHTTP("POST", "POST /v1/workers/executions/{executionID}/renew", 409, 7*time.Millisecond, "generation_fenced")
+	registry.ObserveHTTP("POST", "POST /v1/workers/executions/{executionID}/events", 201, 25*time.Millisecond, "")
+	registry.ObserveHTTP("POST", "POST /v1/workers/executions/{executionID}/events", 409, 30*time.Millisecond, "lease_expired")
+	registry.ObserveHTTP("POST", "POST /v1/workers/heartbeat", 409, 3*time.Millisecond, "worker_incarnation_fenced")
+
+	var output bytes.Buffer
+	registry.writeProcessMetrics(&output)
+	metrics := output.String()
+	for _, expected := range []string{
+		`synara_login_attempts_total{method="dev",result="success"} 1`,
+		`synara_login_attempts_total{method="oidc",result="failure"} 1`,
+		`synara_login_attempts_total{method="saml",result="success"} 1`,
+		`synara_worker_lease_renewals_total{result="success"} 1`,
+		`synara_worker_lease_renewals_total{result="rejected"} 1`,
+		`synara_worker_fencing_rejections_total{operation="lease-renew"} 1`,
+		`synara_worker_fencing_rejections_total{operation="session-event"} 1`,
+		`synara_worker_fencing_rejections_total{operation="heartbeat"} 1`,
+		`synara_session_event_append_duration_seconds_count{result="success"} 1`,
+		`synara_session_event_append_duration_seconds_count{result="rejected"} 1`,
+	} {
+		if !strings.Contains(metrics, expected) {
+			t.Fatalf("metrics omitted %q:\n%s", expected, metrics)
+		}
+	}
+	for _, forbidden := range []string{"oidc_id_token_invalid", "generation_fenced", "lease_expired", "worker_incarnation_fenced"} {
+		if strings.Contains(metrics, forbidden) {
+			t.Fatalf("metrics leaked unbounded problem code %q:\n%s", forbidden, metrics)
+		}
 	}
 }

@@ -41,8 +41,9 @@ func TestRunnerProviderHostV2NegotiatesAndRunsResumeTurn(t *testing.T) {
 	if result.Output["text"] != "done" || result.ProviderResumeCursor == nil || *result.ProviderResumeCursor != "cursor-next" {
 		t.Fatalf("unexpected Provider Host result: %#v", result)
 	}
-	if len(messages) != 1 || messages[0].Type != "event" || messages[0].EventType != "runtime.output.delta" ||
-		messages[0].Payload["text"] != "hello" {
+	if len(messages) != 1 || messages[0].Type != "event" ||
+		messages[0].EventVersion != executions.RuntimeEventVersionV2 || messages[0].EventType != "content.delta" ||
+		messages[0].Payload["streamKind"] != "assistant_text" || messages[0].Payload["delta"] != "hello" {
 		t.Fatalf("unexpected Provider Host messages: %#v", messages)
 	}
 	commands, err := os.ReadFile(commandLog)
@@ -68,7 +69,7 @@ func TestRunnerProviderHostV2DeliversInteractionResolutionDuringSend(t *testing.
 	result, err := providerHostV2TestRunner().RunControlled(
 		context.Background(), input, nil, controls,
 		func(_ context.Context, message RunnerMessage) error {
-			if message.Type != "interaction" {
+			if message.Type != "interaction" || message.EventVersion != executions.RuntimeEventVersionV2 {
 				return fmt.Errorf("unexpected Runner message %#v", message)
 			}
 			controls <- RunnerControl{
@@ -292,6 +293,47 @@ func TestRunnerProviderHostV2RejectsIncompatibleMajor(t *testing.T) {
 	}
 }
 
+func TestRunnerProviderHostV2RejectsIncompatibleRuntimeEventRange(t *testing.T) {
+	t.Setenv("GO_WANT_PROVIDER_HOST_HELPER", "1")
+	t.Setenv("PROVIDER_HOST_TEST_MODE", "runtime-event-v1-only")
+	commandLog := filepath.Join(t.TempDir(), "commands.log")
+	t.Setenv("PROVIDER_HOST_TEST_COMMAND_LOG", commandLog)
+
+	_, err := providerHostV2TestRunner().Run(
+		context.Background(), providerHostV2TestInput(t), nil,
+		func(context.Context, RunnerMessage) error { return nil },
+	)
+	if runnerFailureCode(err) != "provider_version_incompatible" {
+		t.Fatalf("expected provider_version_incompatible, got %v", err)
+	}
+	commands, readErr := os.ReadFile(commandLog)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(commands) != "Describe\n" {
+		t.Fatalf("Provider command ran before Runtime Event negotiation rejection: %q", commands)
+	}
+}
+
+func TestRunnerProviderHostV2RejectsInvalidCanonicalEventFrames(t *testing.T) {
+	for _, mode := range []string{
+		"event-version-missing", "event-version-v1", "event-type-unknown",
+		"event-payload-not-object", "event-payload-invalid-shape", "event-payload-too-large",
+	} {
+		t.Run(mode, func(t *testing.T) {
+			t.Setenv("GO_WANT_PROVIDER_HOST_HELPER", "1")
+			t.Setenv("PROVIDER_HOST_TEST_MODE", mode)
+			_, err := providerHostV2TestRunner().Run(
+				context.Background(), providerHostV2TestInput(t), nil,
+				func(context.Context, RunnerMessage) error { return nil },
+			)
+			if runnerFailureCode(err) != "protocol_violation" {
+				t.Fatalf("expected protocol_violation, got %v", err)
+			}
+		})
+	}
+}
+
 func TestRunnerProviderHostV2PreservesStableHostError(t *testing.T) {
 	t.Setenv("GO_WANT_PROVIDER_HOST_HELPER", "1")
 	t.Setenv("PROVIDER_HOST_TEST_MODE", "provider-error")
@@ -377,6 +419,11 @@ func TestRunnerCapabilitySummaryUsesProviderHostDescribe(t *testing.T) {
 	if !ok || providers["codex"] == nil || providers["claudeAgent"] == nil {
 		t.Fatalf("Provider Host summary omitted remote Providers: %#v", summary)
 	}
+	codex, ok := providers["codex"].(providerHostDescriptor)
+	if !ok || codex.RuntimeEventVersions.Minimum != providerHostRuntimeEventVersion ||
+		codex.RuntimeEventVersions.Maximum != providerHostRuntimeEventVersion {
+		t.Fatalf("Provider Host summary advertised an unexpected Runtime Event range: %#v", providers["codex"])
+	}
 }
 
 func TestRunnerProviderHostV2BuiltHostIntegration(t *testing.T) {
@@ -399,7 +446,9 @@ func TestRunnerProviderHostV2BuiltHostIntegration(t *testing.T) {
 	}
 	for _, provider := range providerHostProviders {
 		descriptor, ok := providers[provider].(providerHostDescriptor)
-		if !ok || descriptor.ProtocolVersion.Major != providerHostProtocolMajor {
+		if !ok || descriptor.ProtocolVersion.Major != providerHostProtocolMajor ||
+			descriptor.RuntimeEventVersions.Minimum > providerHostRuntimeEventVersion ||
+			descriptor.RuntimeEventVersions.Maximum < providerHostRuntimeEventVersion {
 			t.Fatalf("built Provider Host descriptor for %s is incompatible: %#v", provider, providers[provider])
 		}
 		if provider == "codex" || provider == "claudeAgent" {
@@ -454,6 +503,13 @@ func providerHostV2TestInput(t *testing.T) RunnerInput {
 }
 
 func stringPointer(value string) *string { return &value }
+
+func providerHostTestRuntimeEventVersions(mode string) map[string]any {
+	if mode == "runtime-event-v1-only" {
+		return map[string]any{"minimum": 1, "maximum": 1}
+	}
+	return map[string]any{"minimum": 2, "maximum": 2}
+}
 
 func TestProviderHostV2HelperProcess(t *testing.T) {
 	if os.Getenv("GO_WANT_PROVIDER_HOST_HELPER") != "1" {
@@ -521,7 +577,7 @@ func TestProviderHostV2HelperProcess(t *testing.T) {
 					"protocolVersion":  map[string]any{"major": major, "minor": 7, "futureMinorField": true},
 					"hostBuildVersion": "test-host", "maximumCommandBytes": providerHostCommandLimit,
 					"maximumMessageBytes":     1 << 20,
-					"runtimeEventVersions":    map[string]any{"minimum": 1, "maximum": 1},
+					"runtimeEventVersions":    providerHostTestRuntimeEventVersions(mode),
 					"credentialDeliveryModes": []string{"anonymous-fd"},
 					"resumeStrategies":        []string{"native-cursor", "authoritative-history"},
 					"capabilityDescriptor": map[string]any{
@@ -531,8 +587,16 @@ func TestProviderHostV2HelperProcess(t *testing.T) {
 				},
 			}, nil)
 		case "StartSession", "ResumeSession":
+			if version, ok := integerField(command.Payload, "runtimeEventVersion"); !ok || version != 2 {
+				fmt.Fprintln(os.Stderr, "Runtime Event negotiation was not carried into the session command")
+				os.Exit(2)
+			}
 			emitProviderHostTestMessage(encoder, command, "Result", map[string]any{"started": true}, nil)
 		case "SendTurn":
+			if version, ok := integerField(command.Payload, "runtimeEventVersion"); !ok || version != 2 {
+				fmt.Fprintln(os.Stderr, "Runtime Event negotiation was not carried into SendTurn")
+				os.Exit(2)
+			}
 			if mode == "provider-error" {
 				retryable, yes, no := true, true, false
 				emitProviderHostTestMessage(encoder, command, "Error", nil, &providerHostWireError{
@@ -546,7 +610,7 @@ func TestProviderHostV2HelperProcess(t *testing.T) {
 				copy := command
 				pendingSend = &copy
 				emitProviderHostTestMessage(encoder, command, "InteractionRequest", map[string]any{
-					"interactionType": "approval", "requestId": "approval-1", "summary": "Run command",
+					"interactionType": "approval", "requestId": "approval-1", "requestKind": "command", "summary": "Run command",
 				}, nil)
 				continue
 			}
@@ -556,9 +620,27 @@ func TestProviderHostV2HelperProcess(t *testing.T) {
 				emitProviderHostTestMessage(encoder, command, "Progress", map[string]any{"ready": true}, nil)
 				continue
 			}
-			emitProviderHostTestMessage(encoder, command, "Event", map[string]any{
-				"eventType": "runtime.output.delta", "payload": map[string]any{"text": "hello"},
-			}, nil)
+			eventPayload := map[string]any{
+				"eventVersion": 2, "eventType": "content.delta",
+				"payload": map[string]any{"streamKind": "assistant_text", "delta": "hello"},
+			}
+			switch mode {
+			case "event-version-missing":
+				delete(eventPayload, "eventVersion")
+			case "event-version-v1":
+				eventPayload["eventVersion"] = 1
+			case "event-type-unknown":
+				eventPayload["eventType"] = "runtime.output.delta"
+			case "event-payload-not-object":
+				eventPayload["payload"] = "hello"
+			case "event-payload-invalid-shape":
+				eventPayload["payload"] = map[string]any{"delta": "hello"}
+			case "event-payload-too-large":
+				eventPayload["payload"] = map[string]any{
+					"streamKind": "assistant_text", "delta": strings.Repeat("x", executions.RuntimeEventMaxPayloadBytes),
+				}
+			}
+			emitProviderHostTestMessage(encoder, command, "Event", eventPayload, nil)
 			emitProviderHostTestMessage(encoder, command, "Result", map[string]any{
 				"output": map[string]any{"text": "done"}, "providerResumeCursor": "cursor-next",
 			}, nil)

@@ -16,6 +16,7 @@ type ExecutionInteraction struct {
 	Generation          int64          `gorm:"column:generation"`
 	Provider            string         `gorm:"column:provider"`
 	RequestID           string         `gorm:"column:request_id"`
+	EventVersion        int            `gorm:"column:event_version;default:1"`
 	Kind                string         `gorm:"column:kind"`
 	Status              string         `gorm:"column:status"`
 	Payload             map[string]any `gorm:"column:payload;serializer:json"`

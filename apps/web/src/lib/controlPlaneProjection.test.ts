@@ -34,10 +34,11 @@ function event(
   sequence: number,
   eventType: string,
   payload: Record<string, unknown>,
+  eventVersion = 1,
 ): ControlPlaneSessionEvent {
   return {
     eventId: `event-${sequence}`,
-    eventVersion: 1,
+    eventVersion,
     tenantId: session.tenantId,
     organizationId: session.organizationId,
     projectId: session.projectId,
@@ -113,6 +114,57 @@ describe("Control Plane Session projection", () => {
     expect(thread.session?.orchestrationStatus).toBe("running");
     expect(thread.runtimeMode).toBe("approval-required");
     expect(thread.interactionMode).toBe("plan");
+  });
+
+  it("projects canonical content.delta once and keeps non-assistant streams out of transcript", () => {
+    let projection = createControlPlaneSessionProjection(session);
+    for (const item of [
+      event(1, "turn.created", { turnId: "turn-1", inputText: "Build it" }),
+      event(2, "execution.started", { turnId: "turn-1" }),
+      event(
+        3,
+        "content.delta",
+        { turnId: "turn-1", streamKind: "assistant_text", delta: "Canonical" },
+        2,
+      ),
+      event(
+        4,
+        "content.delta",
+        { turnId: "turn-1", streamKind: "reasoning_text", delta: "Hidden reasoning" },
+        2,
+      ),
+    ]) {
+      projection = applyControlPlaneSessionEvent(projection, item).projection;
+    }
+
+    expect(projection.messages.map((message) => message.text)).toEqual(["Build it", "Canonical"]);
+    expect(projection.activities.map((activity) => activity.kind)).toEqual(["execution.started"]);
+    expect(applyControlPlaneSessionEvent(projection, event(4, "content.delta", {}, 2)).projection).toBe(
+      projection,
+    );
+  });
+
+  it("degrades canonical lifecycle, warning, and future v2 events into stable activities", () => {
+    let projection = createControlPlaneSessionProjection(session);
+    for (const item of [
+      event(
+        1,
+        "item.started",
+        { itemType: "command_execution", status: "inProgress", title: "Run tests" },
+        2,
+      ),
+      event(2, "runtime.warning", { message: "Resume cursor expired" }, 2),
+      event(3, "provider.extension.future", { safe: true }, 2),
+    ]) {
+      projection = applyControlPlaneSessionEvent(projection, item).projection;
+    }
+
+    expect(projection.activities.map((activity) => activity.summary)).toEqual([
+      "Run tests",
+      "Resume cursor expired",
+      "provider.extension.future",
+    ]);
+    expect(projection.activities.map((activity) => activity.tone)).toEqual(["tool", "tool", "info"]);
   });
 
   it("finishes assistant output only from the durable completion Event", () => {

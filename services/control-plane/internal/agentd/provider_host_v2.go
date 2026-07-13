@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/synara-ai/synara/services/control-plane/internal/executions"
 )
 
 type RunnerProtocol string
@@ -23,9 +25,10 @@ const (
 	RunnerProtocolV1 RunnerProtocol = "v1"
 	RunnerProtocolV2 RunnerProtocol = "v2"
 
-	providerHostProtocolMajor = 2
-	providerHostProtocolMinor = 0
-	providerHostCommandLimit  = 2 << 20
+	providerHostProtocolMajor       = 2
+	providerHostProtocolMinor       = 0
+	providerHostCommandLimit        = 2 << 20
+	providerHostRuntimeEventVersion = executions.RuntimeEventVersionV2
 )
 
 var providerHostProviders = []string{
@@ -213,6 +216,11 @@ func (r *Runner) runProviderHostV2(
 	if err := validateProviderHostDescriptorForExecution(descriptor, input, credential); err != nil {
 		return RunnerResult{}, err
 	}
+	runtimeEventVersion, err := negotiateProviderHostRuntimeEventVersion(descriptor.RuntimeEventVersions)
+	if err != nil {
+		return RunnerResult{}, err
+	}
+	process.setRuntimeEventVersion(runtimeEventVersion)
 	process.maximumCommandBytes = min(process.maximumCommandBytes, descriptor.MaximumCommandBytes)
 	process.maximumMessageBytes = min(process.maximumMessageBytes, descriptor.MaximumMessageBytes)
 
@@ -222,7 +230,7 @@ func (r *Runner) runProviderHostV2(
 	}
 	start := newProviderHostCommand(
 		executionID, generation, sessionCommand, commandID(input, "session"),
-		map[string]any{"runnerInput": input},
+		map[string]any{"runnerInput": input, "runtimeEventVersion": runtimeEventVersion},
 	)
 	if _, err := process.executeContext(ctx, start, nil); err != nil {
 		return RunnerResult{}, err
@@ -230,7 +238,10 @@ func (r *Runner) runProviderHostV2(
 
 	send := newProviderHostCommand(
 		executionID, generation, "SendTurn", commandID(input, "send"),
-		map[string]any{"inputText": input.Workload.InputText, "turnId": input.Workload.TurnID.String()},
+		map[string]any{
+			"inputText": input.Workload.InputText, "turnId": input.Workload.TurnID.String(),
+			"runtimeEventVersion": runtimeEventVersion,
+		},
 	)
 	sendExecution, err := process.startCommand(ctx, send, func(message RunnerMessage) error {
 		if handle == nil {
@@ -437,15 +448,27 @@ func validateProviderHostDescriptorWire(descriptor providerHostDescriptor, reque
 	if normalizeProvider(descriptor.CapabilityDescriptor.Provider) != normalizeProvider(requestedProvider) {
 		return protocolFailure("Provider Host descriptor does not match the requested Provider")
 	}
-	if descriptor.RuntimeEventVersions.Minimum > 1 || descriptor.RuntimeEventVersions.Maximum < 1 {
+	if descriptor.RuntimeEventVersions.Minimum > providerHostRuntimeEventVersion ||
+		descriptor.RuntimeEventVersions.Maximum < providerHostRuntimeEventVersion {
 		return &runnerFailure{
 			code:                 "provider_version_incompatible",
-			message:              "Provider Host does not support Runtime Event version 1",
+			message:              "Provider Host does not support Runtime Event version 2",
 			requiresNewExecution: true, requiresUserAction: true,
 			canReconstructFromHistory: true, canMoveWorker: true,
 		}
 	}
 	return nil
+}
+
+func negotiateProviderHostRuntimeEventVersion(versions providerHostVersionRange) (int, error) {
+	if versions.Minimum <= providerHostRuntimeEventVersion && versions.Maximum >= providerHostRuntimeEventVersion {
+		return providerHostRuntimeEventVersion, nil
+	}
+	return 0, &runnerFailure{
+		code: "provider_version_incompatible", message: "Provider Host has no compatible Runtime Event version",
+		requiresNewExecution: true, requiresUserAction: true,
+		canReconstructFromHistory: true, canMoveWorker: true,
+	}
 }
 
 func validateProviderHostDescriptorForExecution(
@@ -532,6 +555,7 @@ type providerHostV2Process struct {
 	credentialWrite     <-chan error
 	maximumCommandBytes int
 	maximumMessageBytes int
+	runtimeEventVersion int
 
 	mu             sync.Mutex
 	writeMu        sync.Mutex
@@ -544,6 +568,12 @@ type providerHostV2Process struct {
 	waitErr        error
 	credentialOnce sync.Once
 	credentialErr  error
+}
+
+func (p *providerHostV2Process) setRuntimeEventVersion(version int) {
+	p.mu.Lock()
+	p.runtimeEventVersion = version
+	p.mu.Unlock()
 }
 
 type providerHostCommandOutcome struct {
@@ -896,11 +926,12 @@ func (p *providerHostV2Process) handleLine(line []byte) error {
 		return nil
 	case "Event", "ArtifactCandidate", "InteractionRequest", "Checkpoint", "Progress":
 		handle := state.handle
+		runtimeEventVersion := p.runtimeEventVersion
 		p.mu.Unlock()
 		if handle == nil {
 			return protocolFailure("Provider Host emitted a non-terminal message for a control command")
 		}
-		runnerMessage, err := runnerMessageFromProviderHost(message)
+		runnerMessage, err := runnerMessageFromProviderHost(message, runtimeEventVersion)
 		if err != nil {
 			return err
 		}
@@ -1059,23 +1090,45 @@ func sameProviderHostCommand(left, right providerHostCommand) bool {
 	return leftErr == nil && rightErr == nil && bytes.Equal(leftPayload, rightPayload)
 }
 
-func runnerMessageFromProviderHost(message providerHostMessage) (RunnerMessage, error) {
+func runnerMessageFromProviderHost(message providerHostMessage, negotiatedRuntimeEventVersion int) (RunnerMessage, error) {
 	occurredAt, _ := time.Parse(time.RFC3339Nano, message.OccurredAt)
 	switch message.MessageType {
 	case "Event":
+		if negotiatedRuntimeEventVersion != providerHostRuntimeEventVersion {
+			return RunnerMessage{}, protocolFailure("Provider Host emitted an Event before Runtime Event negotiation")
+		}
+		eventVersion, ok := integerField(message.Payload, "eventVersion")
+		if !ok {
+			return RunnerMessage{}, protocolFailure("Provider Host Event omitted a valid eventVersion")
+		}
+		if eventVersion != negotiatedRuntimeEventVersion {
+			return RunnerMessage{}, protocolFailure("Provider Host Event version is outside the negotiated Runtime Event version")
+		}
 		eventType, _ := message.Payload["eventType"].(string)
 		if strings.TrimSpace(eventType) == "" {
 			return RunnerMessage{}, protocolFailure("Provider Host Event omitted eventType")
 		}
-		payload := map[string]any{}
-		if value, found := message.Payload["payload"]; found {
-			decoded, ok := value.(map[string]any)
-			if !ok {
-				return RunnerMessage{}, protocolFailure("Provider Host Event payload is not an object")
-			}
-			payload = decoded
+		if !executions.IsCanonicalRuntimeEventV2Type(eventType) {
+			return RunnerMessage{}, protocolFailure("Provider Host Event type is not canonical for Runtime Event version 2")
 		}
-		return RunnerMessage{Type: "event", EventType: eventType, Payload: payload, OccurredAt: &occurredAt}, nil
+		value, found := message.Payload["payload"]
+		if !found {
+			return RunnerMessage{}, protocolFailure("Provider Host Event omitted payload")
+		}
+		payload, ok := value.(map[string]any)
+		if !ok || payload == nil {
+			return RunnerMessage{}, protocolFailure("Provider Host Event payload is not an object")
+		}
+		encodedPayload, err := json.Marshal(payload)
+		if err != nil || len(encodedPayload) > executions.RuntimeEventMaxPayloadBytes {
+			return RunnerMessage{}, protocolFailure("Provider Host Event payload exceeds the Runtime Event size limit")
+		}
+		if !executions.IsCanonicalRuntimeEventV2Payload(eventType, payload) {
+			return RunnerMessage{}, protocolFailure("Provider Host Event payload is invalid for the canonical Runtime Event type")
+		}
+		return RunnerMessage{
+			Type: "event", EventVersion: eventVersion, EventType: eventType, Payload: payload, OccurredAt: &occurredAt,
+		}, nil
 	case "ArtifactCandidate":
 		artifactPayload := message.Payload
 		if value, found := message.Payload["artifact"]; found {
@@ -1095,7 +1148,13 @@ func runnerMessageFromProviderHost(message providerHostMessage) (RunnerMessage, 
 		}
 		return RunnerMessage{Type: "artifact", Artifact: artifact, OccurredAt: &occurredAt}, nil
 	case "InteractionRequest":
-		return RunnerMessage{Type: "interaction", Payload: message.Payload, OccurredAt: &occurredAt}, nil
+		if negotiatedRuntimeEventVersion != providerHostRuntimeEventVersion {
+			return RunnerMessage{}, protocolFailure("Provider Host emitted an InteractionRequest before Runtime Event negotiation")
+		}
+		return RunnerMessage{
+			Type: "interaction", EventVersion: negotiatedRuntimeEventVersion,
+			Payload: message.Payload, OccurredAt: &occurredAt,
+		}, nil
 	case "Checkpoint":
 		return RunnerMessage{Type: "checkpoint", Payload: message.Payload, OccurredAt: &occurredAt}, nil
 	case "Progress":
@@ -1168,4 +1227,23 @@ func containsString(values []string, expected string) bool {
 func stringField(value map[string]any, key string) string {
 	decoded, _ := value[key].(string)
 	return decoded
+}
+
+func integerField(value map[string]any, key string) (int, bool) {
+	switch decoded := value[key].(type) {
+	case int:
+		return decoded, true
+	case int32:
+		return int(decoded), true
+	case int64:
+		return int(decoded), int64(int(decoded)) == decoded
+	case float64:
+		converted := int(decoded)
+		return converted, float64(converted) == decoded
+	case json.Number:
+		converted, err := decoded.Int64()
+		return int(converted), err == nil && int64(int(converted)) == converted
+	default:
+		return 0, false
+	}
 }

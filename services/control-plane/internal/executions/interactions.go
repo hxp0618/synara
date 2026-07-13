@@ -409,9 +409,15 @@ func (s *Service) resolveInteraction(
 				return Interaction{}, err
 			}
 		}
+		eventVersion, eventType, eventPayload, eventErr := resolvedInteractionRuntimeEvent(interaction, resolution)
+		if eventErr != nil {
+			return Interaction{}, eventErr
+		}
+		workerID := interaction.WorkerID
+		generation := interaction.Generation
 		appended, err = s.sessions.AppendInternalEvent(ctx, tx, tenantID, execution.SessionID, sessions.InternalEventInput{
-			EventType: kind + ".resolved", ActorType: "user", ActorID: &principal.UserID,
-			ExecutionID: &execution.ID, Payload: map[string]any{"requestId": requestID, "resolution": resolution},
+			EventVersion: eventVersion, EventType: eventType, ActorType: "user", ActorID: &principal.UserID,
+			ExecutionID: &execution.ID, WorkerID: &workerID, Generation: &generation, Payload: eventPayload,
 		})
 		if err != nil {
 			return Interaction{}, err
@@ -432,6 +438,49 @@ func (s *Service) resolveInteraction(
 	return OperationResult[Interaction]{
 		Value: result.Value, Replayed: result.Replayed, StatusCode: result.StatusCode,
 	}, err
+}
+
+func resolvedInteractionRuntimeEvent(
+	interaction persistence.ExecutionInteraction,
+	resolution map[string]any,
+) (int, string, map[string]any, error) {
+	eventVersion := interaction.EventVersion
+	if eventVersion <= 0 {
+		eventVersion = RuntimeEventVersionV1
+	}
+	if eventVersion == RuntimeEventVersionV1 {
+		return eventVersion, interaction.Kind + ".resolved", map[string]any{
+			"requestId": interaction.RequestID, "resolution": resolution,
+		}, nil
+	}
+	if eventVersion != RuntimeEventVersionV2 {
+		return 0, "", nil, problem.New(500, "interaction_event_version_corrupt", "The persisted interaction Runtime Event version is unsupported.")
+	}
+
+	switch interaction.Kind {
+	case "approval":
+		requestType, _ := interaction.Payload["requestType"].(string)
+		if !requiredCanonicalRequestType(map[string]any{"requestType": requestType}) {
+			return 0, "", nil, problem.New(500, "interaction_event_payload_corrupt", "The persisted approval requestType is invalid.")
+		}
+		payload := map[string]any{
+			"requestId": interaction.RequestID, "requestType": requestType, "resolution": resolution,
+		}
+		if decision, ok := resolution["decision"].(string); ok && strings.TrimSpace(decision) != "" {
+			payload["decision"] = decision
+		}
+		return eventVersion, "request.resolved", payload, nil
+	case "user-input":
+		answers, ok := resolution["answers"].(map[string]any)
+		if !ok || answers == nil {
+			return 0, "", nil, problem.New(500, "interaction_event_payload_corrupt", "The persisted user-input answers are invalid.")
+		}
+		return eventVersion, "user-input.resolved", map[string]any{
+			"requestId": interaction.RequestID, "answers": answers,
+		}, nil
+	default:
+		return 0, "", nil, problem.New(500, "interaction_kind_corrupt", "The persisted interaction kind is unsupported.")
+	}
 }
 
 func interactionResolutionKind(kind string, resolution map[string]any) string {

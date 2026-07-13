@@ -102,8 +102,10 @@ forwarding raw SDK payloads.
 ## Describe
 
 `Describe` returns the Host build, Adapter/CLI version, complete Capability Descriptor, command/message limits,
-Runtime Event version range, credential delivery modes and Resume strategies. Static capability claims must be
-verified by the shared Provider Acceptance Suite.
+Runtime Event version range, credential delivery modes and Resume strategies. Managed v2 Hosts currently advertise
+Runtime Event `{ minimum: 2, maximum: 2 }`; every Event payload carries that negotiated version and a canonical
+event type from [Runtime Event v2](./runtime-event-v2.md). Static capability claims must be verified by the shared
+Provider Acceptance Suite.
 
 ## agentd negotiation and v1 boundary
 

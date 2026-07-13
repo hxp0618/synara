@@ -25,10 +25,17 @@ type requestKey struct {
 	status int
 }
 
-type requestMetric struct {
+type durationMetric struct {
 	count   uint64
 	sum     float64
 	buckets [len(requestDurationBuckets)]uint64
+}
+
+type requestMetric = durationMetric
+
+type loginMetricKey struct {
+	method string
+	result string
 }
 
 type backgroundMetric struct {
@@ -63,12 +70,16 @@ type Registry struct {
 	db             *gorm.DB
 	sessionIdleTTL time.Duration
 
-	mu         sync.RWMutex
-	requests   map[requestKey]requestMetric
-	background map[string]backgroundMetric
-	artifacts  map[artifactMetricKey]artifactMetric
-	sseCatchup sseCatchupMetric
-	sseLimits  map[string]uint64
+	mu          sync.RWMutex
+	requests    map[requestKey]requestMetric
+	logins      map[loginMetricKey]uint64
+	leaseRenew  map[string]uint64
+	fencing     map[string]uint64
+	eventAppend map[string]durationMetric
+	background  map[string]backgroundMetric
+	artifacts   map[artifactMetricKey]artifactMetric
+	sseCatchup  sseCatchupMetric
+	sseLimits   map[string]uint64
 }
 
 func New(db *gorm.DB, sessionIdleTTLs ...time.Duration) *Registry {
@@ -78,12 +89,14 @@ func New(db *gorm.DB, sessionIdleTTLs ...time.Duration) *Registry {
 	}
 	return &Registry{
 		db: db, sessionIdleTTL: sessionIdleTTL, requests: make(map[requestKey]requestMetric),
+		logins: make(map[loginMetricKey]uint64), leaseRenew: make(map[string]uint64),
+		fencing: make(map[string]uint64), eventAppend: make(map[string]durationMetric),
 		background: make(map[string]backgroundMetric), artifacts: make(map[artifactMetricKey]artifactMetric),
 		sseLimits: make(map[string]uint64),
 	}
 }
 
-func (r *Registry) ObserveHTTP(method, route string, status int, duration time.Duration) {
+func (r *Registry) ObserveHTTP(method, route string, status int, duration time.Duration, problemCode string) {
 	method = strings.ToUpper(strings.TrimSpace(method))
 	if method == "" {
 		method = "UNKNOWN"
@@ -91,8 +104,39 @@ func (r *Registry) ObserveHTTP(method, route string, status int, duration time.D
 	route = normalizeRoute(method, route)
 	key := requestKey{method: method, route: route, status: status}
 	seconds := duration.Seconds()
+	problemCode = strings.TrimSpace(problemCode)
 	r.mu.Lock()
 	metric := r.requests[key]
+	observeDuration(&metric, seconds)
+	r.requests[key] = metric
+	r.observeLifecycleRequestLocked(method, route, status, seconds, problemCode)
+	r.mu.Unlock()
+}
+
+func (r *Registry) observeLifecycleRequestLocked(method, route string, status int, seconds float64, problemCode string) {
+	if loginMethod, ok := loginMethodForRequest(method, route); ok {
+		result := "failure"
+		if status >= 200 && status < 400 {
+			result = "success"
+		}
+		r.logins[loginMetricKey{method: loginMethod, result: result}]++
+	}
+
+	if route == "/v1/workers/executions/{executionID}/renew" {
+		r.leaseRenew[requestResult(status)]++
+	}
+	if route == "/v1/workers/executions/{executionID}/events" {
+		result := requestResult(status)
+		metric := r.eventAppend[result]
+		observeDuration(&metric, seconds)
+		r.eventAppend[result] = metric
+	}
+	if strings.HasPrefix(route, "/v1/workers/") && isWorkerFencingProblem(problemCode) {
+		r.fencing[fencingOperation(route)]++
+	}
+}
+
+func observeDuration(metric *durationMetric, seconds float64) {
 	metric.count++
 	metric.sum += seconds
 	for index, upperBound := range requestDurationBuckets {
@@ -100,8 +144,67 @@ func (r *Registry) ObserveHTTP(method, route string, status int, duration time.D
 			metric.buckets[index]++
 		}
 	}
-	r.requests[key] = metric
-	r.mu.Unlock()
+}
+
+func loginMethodForRequest(method, route string) (string, bool) {
+	switch route {
+	case "/v1/auth/dev-login":
+		return "dev", true
+	case "/v1/auth/sso/{connectionID}/callback":
+		if method == "POST" {
+			return "saml", true
+		}
+		if method == "GET" {
+			return "oidc", true
+		}
+	}
+	return "", false
+}
+
+func requestResult(status int) string {
+	switch {
+	case status >= 200 && status < 400:
+		return "success"
+	case status >= 400 && status < 500:
+		return "rejected"
+	default:
+		return "failure"
+	}
+}
+
+func isWorkerFencingProblem(code string) bool {
+	if strings.HasSuffix(code, "_fenced") {
+		return true
+	}
+	switch code {
+	case "invalid_lease_token", "lease_expired", "lease_not_current", "interaction_lease_expired":
+		return true
+	default:
+		return false
+	}
+}
+
+func fencingOperation(route string) string {
+	switch {
+	case route == "/v1/workers/heartbeat":
+		return "heartbeat"
+	case route == "/v1/workers/executions/{executionID}/renew":
+		return "lease-renew"
+	case route == "/v1/workers/executions/{executionID}/events":
+		return "session-event"
+	case strings.Contains(route, "/workspace-cleanups/"):
+		return "workspace-cleanup"
+	case strings.Contains(route, "/interaction-resolutions/"):
+		return "interaction"
+	case strings.Contains(route, "/control-commands/"):
+		return "control-command"
+	case strings.Contains(route, "/artifacts"):
+		return "artifact"
+	case strings.HasPrefix(route, "/v1/workers/executions/"):
+		return "execution"
+	default:
+		return "other"
+	}
 }
 
 func (r *Registry) ObserveBackground(kind string, started time.Time, err error) {
@@ -186,23 +289,15 @@ func (r *Registry) Gather(ctx context.Context) ([]byte, error) {
 
 func (r *Registry) writeProcessMetrics(output *bytes.Buffer) {
 	r.mu.RLock()
-	requests := make(map[requestKey]requestMetric, len(r.requests))
-	for key, value := range r.requests {
-		requests[key] = value
-	}
-	background := make(map[string]backgroundMetric, len(r.background))
-	for key, value := range r.background {
-		background[key] = value
-	}
-	artifacts := make(map[artifactMetricKey]artifactMetric, len(r.artifacts))
-	for key, value := range r.artifacts {
-		artifacts[key] = value
-	}
+	requests := cloneMap(r.requests)
+	logins := cloneMap(r.logins)
+	leaseRenew := cloneMap(r.leaseRenew)
+	fencing := cloneMap(r.fencing)
+	eventAppend := cloneMap(r.eventAppend)
+	background := cloneMap(r.background)
+	artifacts := cloneMap(r.artifacts)
 	sseCatchup := r.sseCatchup
-	sseLimits := make(map[string]uint64, len(r.sseLimits))
-	for key, value := range r.sseLimits {
-		sseLimits[key] = value
-	}
+	sseLimits := cloneMap(r.sseLimits)
 	r.mu.RUnlock()
 
 	requestKeys := make([]requestKey, 0, len(requests))
@@ -230,6 +325,46 @@ func (r *Registry) writeProcessMetrics(output *bytes.Buffer) {
 		fmt.Fprintf(output, "synara_http_request_duration_seconds_bucket%s %d\n", addLabel(labels, "le", "+Inf"), metric.count)
 		fmt.Fprintf(output, "synara_http_request_duration_seconds_sum%s %s\n", labels, formatFloat(metric.sum))
 		fmt.Fprintf(output, "synara_http_request_duration_seconds_count%s %d\n", labels, metric.count)
+	}
+
+	loginKeys := make([]loginMetricKey, 0, len(logins))
+	for key := range logins {
+		loginKeys = append(loginKeys, key)
+	}
+	sort.Slice(loginKeys, func(i, j int) bool {
+		if loginKeys[i].method != loginKeys[j].method {
+			return loginKeys[i].method < loginKeys[j].method
+		}
+		return loginKeys[i].result < loginKeys[j].result
+	})
+	writeHelp(output, "synara_login_attempts_total", "Completed control-plane login attempts by bounded authentication method and result.", "counter")
+	for _, key := range loginKeys {
+		fmt.Fprintf(output, "synara_login_attempts_total%s %d\n", labels(map[string]string{"method": key.method, "result": key.result}), logins[key])
+	}
+
+	writeHelp(output, "synara_worker_lease_renewals_total", "Worker execution Lease renewal requests by bounded result.", "counter")
+	leaseResults := sortedStringKeys(leaseRenew)
+	for _, result := range leaseResults {
+		fmt.Fprintf(output, "synara_worker_lease_renewals_total%s %d\n", labels(map[string]string{"result": result}), leaseRenew[result])
+	}
+
+	writeHelp(output, "synara_worker_fencing_rejections_total", "Worker requests rejected by Lease, Generation, or Worker incarnation fencing.", "counter")
+	fencingOperations := sortedStringKeys(fencing)
+	for _, operation := range fencingOperations {
+		fmt.Fprintf(output, "synara_worker_fencing_rejections_total%s %d\n", labels(map[string]string{"operation": operation}), fencing[operation])
+	}
+
+	writeHelp(output, "synara_session_event_append_duration_seconds", "Worker Runtime Event append latency by bounded result.", "histogram")
+	eventResults := sortedStringKeys(eventAppend)
+	for _, result := range eventResults {
+		metric := eventAppend[result]
+		resultLabels := labels(map[string]string{"result": result})
+		for index, upperBound := range requestDurationBuckets {
+			fmt.Fprintf(output, "synara_session_event_append_duration_seconds_bucket%s %d\n", addLabel(resultLabels, "le", strconv.FormatFloat(upperBound, 'g', -1, 64)), metric.buckets[index])
+		}
+		fmt.Fprintf(output, "synara_session_event_append_duration_seconds_bucket%s %d\n", addLabel(resultLabels, "le", "+Inf"), metric.count)
+		fmt.Fprintf(output, "synara_session_event_append_duration_seconds_sum%s %s\n", resultLabels, formatFloat(metric.sum))
+		fmt.Fprintf(output, "synara_session_event_append_duration_seconds_count%s %d\n", resultLabels, metric.count)
 	}
 
 	writeHelp(output, "synara_background_runs_total", "Control-plane background reconciliation and retention runs.", "counter")
@@ -436,6 +571,23 @@ func requestLabels(key requestKey) string {
 	return labels(map[string]string{
 		"method": key.method, "route": key.route, "status": strconv.Itoa(key.status),
 	})
+}
+
+func sortedStringKeys[V any](values map[string]V) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func cloneMap[K comparable, V any](values map[K]V) map[K]V {
+	cloned := make(map[K]V, len(values))
+	for key, value := range values {
+		cloned[key] = value
+	}
+	return cloned
 }
 
 func labels(values map[string]string) string {

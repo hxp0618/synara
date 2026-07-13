@@ -119,6 +119,57 @@ describe("derivePendingApprovals", () => {
     ]);
   });
 
+  it("tracks canonical v2 approvals by Execution and preserves network/tool kinds", () => {
+    const activities: OrchestrationThreadActivity[] = [
+      makeActivity({
+        id: "approval-v2-network",
+        createdAt: "2026-02-23T00:00:01.000Z",
+        kind: "request.opened",
+        tone: "approval",
+        payload: {
+          executionId: "execution-1",
+          requestId: "shared-request",
+          requestKind: "network",
+          requestType: "dynamic_tool_call",
+          summary: "Claude wants to access the network.",
+        },
+      }),
+      makeActivity({
+        id: "approval-v2-tool",
+        createdAt: "2026-02-23T00:00:02.000Z",
+        kind: "request.opened",
+        tone: "approval",
+        payload: {
+          executionId: "execution-2",
+          requestId: "shared-request",
+          requestType: "dynamic_tool_call",
+          detail: "Claude wants to use a custom tool.",
+        },
+      }),
+      makeActivity({
+        id: "approval-v2-network-resolved",
+        createdAt: "2026-02-23T00:00:03.000Z",
+        kind: "request.resolved",
+        payload: {
+          executionId: "execution-1",
+          requestId: "shared-request",
+          requestType: "dynamic_tool_call",
+          decision: "accept",
+        },
+      }),
+    ];
+
+    expect(derivePendingApprovals(activities)).toEqual([
+      {
+        executionId: "execution-2",
+        requestId: "shared-request",
+        requestKind: "tool",
+        createdAt: "2026-02-23T00:00:02.000Z",
+        detail: "Claude wants to use a custom tool.",
+      },
+    ]);
+  });
+
   it("clears stale pending approvals when provider reports unknown pending request", () => {
     const activities: OrchestrationThreadActivity[] = [
       makeActivity({
@@ -260,6 +311,56 @@ describe("derivePendingUserInputs", () => {
             ],
           },
         ],
+      },
+    ]);
+  });
+
+  it("keeps equal request IDs isolated by Execution for canonical input events", () => {
+    const question = {
+      id: "choice",
+      header: "Choice",
+      question: "Continue?",
+      options: [{ label: "Yes", description: "Continue" }],
+    };
+    const activities: OrchestrationThreadActivity[] = [
+      makeActivity({
+        id: "input-execution-1",
+        createdAt: "2026-02-23T00:00:01.000Z",
+        kind: "user-input.requested",
+        payload: {
+          executionId: "execution-1",
+          requestId: "shared-input",
+          questions: [question],
+        },
+      }),
+      makeActivity({
+        id: "input-execution-2",
+        createdAt: "2026-02-23T00:00:02.000Z",
+        kind: "user-input.requested",
+        payload: {
+          executionId: "execution-2",
+          requestId: "shared-input",
+          questions: [question],
+        },
+      }),
+      makeActivity({
+        id: "input-execution-1-resolved",
+        createdAt: "2026-02-23T00:00:03.000Z",
+        kind: "user-input.resolved",
+        payload: {
+          executionId: "execution-1",
+          requestId: "shared-input",
+          answers: { choice: "Yes" },
+        },
+      }),
+    ];
+
+    expect(derivePendingUserInputs(activities)).toEqual([
+      {
+        executionId: "execution-2",
+        requestId: "shared-input",
+        createdAt: "2026-02-23T00:00:02.000Z",
+        questions: [question],
       },
     ]);
   });

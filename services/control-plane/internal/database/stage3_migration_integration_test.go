@@ -85,10 +85,42 @@ func TestStage3MigrationsBackfillExistingRuntimeState(t *testing.T) {
 		t.Fatal(err)
 	}
 	if interaction.TurnID != seed.turnID || interaction.Provider != "codex" ||
+		interaction.EventVersion != executions.RuntimeEventVersionV1 ||
 		interaction.ResolutionKind == nil || *interaction.ResolutionKind != "approved" ||
 		interaction.DeliveryStatus != "pending" || interaction.DeliveryWorkerID == nil ||
 		interaction.DeliveryGeneration == nil || interaction.DeliveryAvailableAt == nil {
 		t.Fatalf("unexpected backfilled interaction delivery: %#v", interaction)
+	}
+}
+
+func TestInteractionRuntimeEventVersionMigrationBackfillsExistingRows(t *testing.T) {
+	databaseURL := os.Getenv("SYNARA_TEST_STAGE3_MIGRATION_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("SYNARA_TEST_STAGE3_MIGRATION_DATABASE_URL is not configured")
+	}
+	db := openIsolatedMigrationSchema(t, databaseURL)
+	if err := Migrate(context.Background(), db, migrationsThrough(t, "000016_sse_connection_leases.sql")); err != nil {
+		t.Fatal(err)
+	}
+	seed := seedStage3MigrationState(t, db)
+	if err := Migrate(context.Background(), db, migrationsThrough(t, "000027_workspace_cleanup_dispatch.sql")); err != nil {
+		t.Fatal(err)
+	}
+	if err := Migrate(context.Background(), db, migrations.Files); err != nil {
+		t.Fatal(err)
+	}
+
+	var interaction persistence.ExecutionInteraction
+	if err := db.Where("tenant_id = ? AND id = ?", seed.tenantID, seed.interactionID).Take(&interaction).Error; err != nil {
+		t.Fatal(err)
+	}
+	if interaction.EventVersion != executions.RuntimeEventVersionV1 {
+		t.Fatalf("legacy interaction Event version = %d, want 1", interaction.EventVersion)
+	}
+	if err := db.Model(&persistence.ExecutionInteraction{}).
+		Where("tenant_id = ? AND id = ?", seed.tenantID, seed.interactionID).
+		Update("event_version", 3).Error; err == nil {
+		t.Fatal("000028 accepted an unsupported interaction Runtime Event version")
 	}
 }
 

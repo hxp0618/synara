@@ -1125,7 +1125,8 @@ func (s *Server) withRequestContext(next http.Handler) http.Handler {
 
 type responseStatusRecorder struct {
 	http.ResponseWriter
-	status int
+	status      int
+	problemCode string
 }
 
 func (w *responseStatusRecorder) WriteHeader(status int) {
@@ -1154,6 +1155,8 @@ func (w *responseStatusRecorder) Flush() {
 
 func (w *responseStatusRecorder) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
+func (w *responseStatusRecorder) recordProblem(code string) { w.problemCode = code }
+
 func (s *Server) observeRequests(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		started := time.Now()
@@ -1164,7 +1167,7 @@ func (s *Server) observeRequests(next http.Handler) http.Handler {
 			status = http.StatusOK
 		}
 		duration := time.Since(started)
-		s.metrics.ObserveHTTP(r.Method, r.Pattern, status, duration)
+		s.metrics.ObserveHTTP(r.Method, r.Pattern, status, duration, recorder.problemCode)
 		s.logger.Info("control-plane request completed",
 			"requestId", requestID(r), "traceId", traceID(r), "method", r.Method,
 			"route", normalizedLogRoute(r), "status", status, "durationMs", duration.Milliseconds(),
@@ -1256,6 +1259,9 @@ func (s *Server) writeError(w http.ResponseWriter, r *http.Request, err error) {
 	var apiError *problem.Error
 	if !errors.As(err, &apiError) {
 		apiError = problem.Wrap(500, "internal_error", "The control plane encountered an unexpected error.", err)
+	}
+	if recorder, ok := w.(interface{ recordProblem(string) }); ok {
+		recorder.recordProblem(apiError.Code)
 	}
 	if apiError.Status >= 500 {
 		s.logger.Error("control-plane request failed", "requestId", requestID(r), "traceId", traceID(r), "code", apiError.Code, "error", apiError)

@@ -33,6 +33,7 @@ type GitHTTPSCredential struct {
 type RunnerMessage struct {
 	Type                 string          `json:"type"`
 	EventID              *uuid.UUID      `json:"eventId,omitempty"`
+	EventVersion         int             `json:"-"`
 	EventType            string          `json:"eventType,omitempty"`
 	Payload              map[string]any  `json:"payload,omitempty"`
 	OccurredAt           *time.Time      `json:"occurredAt,omitempty"`

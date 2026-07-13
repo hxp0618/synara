@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/synara-ai/synara/services/control-plane/internal/config"
+	"github.com/synara-ai/synara/services/control-plane/internal/problem"
 )
 
 func TestClientIPTrustsOnlyConfiguredProxyChain(t *testing.T) {
@@ -94,5 +95,19 @@ func TestSecurityHeadersDisableCaching(t *testing.T) {
 	})).ServeHTTP(recorder, httptest.NewRequest("GET", "/v1/auth/session", nil))
 	if recorder.Header().Get("Cache-Control") != "no-store" {
 		t.Fatalf("Cache-Control = %q", recorder.Header().Get("Cache-Control"))
+	}
+}
+
+func TestWriteErrorRecordsStableProblemCodeForRequestMetrics(t *testing.T) {
+	server := &Server{}
+	response := httptest.NewRecorder()
+	recorder := &responseStatusRecorder{ResponseWriter: response}
+	server.writeError(
+		recorder,
+		httptest.NewRequest(http.MethodPost, "/v1/workers/executions/test/renew", nil),
+		problem.New(http.StatusConflict, "generation_fenced", "The Worker generation is obsolete."),
+	)
+	if recorder.status != http.StatusConflict || recorder.problemCode != "generation_fenced" {
+		t.Fatalf("recorded response = status %d problem %q", recorder.status, recorder.problemCode)
 	}
 }

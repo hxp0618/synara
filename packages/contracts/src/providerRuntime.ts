@@ -153,7 +153,9 @@ export const CanonicalRequestType = Schema.Literals([
 ]);
 export type CanonicalRequestType = typeof CanonicalRequestType.Type;
 
-const ProviderRuntimeEventType = Schema.Literals([
+export const PROVIDER_RUNTIME_EVENT_VERSION = 2 as const;
+
+export const PROVIDER_RUNTIME_EVENT_TYPES = [
   "session.started",
   "session.configured",
   "session.state.changed",
@@ -201,7 +203,9 @@ const ProviderRuntimeEventType = Schema.Literals([
   "files.persisted",
   "runtime.warning",
   "runtime.error",
-]);
+] as const;
+
+export const ProviderRuntimeEventType = Schema.Literals(PROVIDER_RUNTIME_EVENT_TYPES);
 export type ProviderRuntimeEventType = typeof ProviderRuntimeEventType.Type;
 
 const SessionStartedType = Schema.Literal("session.started");

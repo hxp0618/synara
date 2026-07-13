@@ -68,6 +68,18 @@ function payloadString(event: ControlPlaneSessionEvent, key: string): string | n
   return typeof value === "string" && value.length > 0 ? value : null;
 }
 
+function runtimeItemSummary(event: ControlPlaneSessionEvent): string {
+  const title = payloadString(event, "title");
+  const itemType = payloadString(event, "itemType")?.replaceAll("_", " ");
+  if (title) return title;
+  if (itemType) {
+    if (event.eventType === "item.started") return `${itemType} started`;
+    if (event.eventType === "item.completed") return `${itemType} completed`;
+    return `${itemType} updated`;
+  }
+  return event.eventType;
+}
+
 function eventTurnId(event: ControlPlaneSessionEvent): TurnId | null {
   const value = payloadString(event, "turnId");
   return value ? TurnId.makeUnsafe(value) : null;
@@ -166,8 +178,10 @@ function activitySummary(event: ControlPlaneSessionEvent): string | null {
     case "execution.interrupted":
       return "Execution interrupted";
     case "approval.requested":
+    case "request.opened":
       return "Approval required";
     case "approval.resolved":
+    case "request.resolved":
       return "Approval resolved";
     case "user-input.requested":
       return "User input required";
@@ -195,8 +209,35 @@ function activitySummary(event: ControlPlaneSessionEvent): string | null {
       return "Session resumed";
     case "session.archived":
       return "Session archived";
+    case "content.delta":
+      return null;
+    case "item.started":
+    case "item.updated":
+    case "item.completed":
+      return runtimeItemSummary(event);
+    case "thread.token-usage.updated":
+      return "Token usage updated";
+    case "turn.started":
+      return "Provider turn started";
+    case "turn.completed":
+      return "Provider turn completed";
+    case "turn.aborted":
+      return payloadString(event, "reason") ?? "Provider turn aborted";
+    case "turn.tasks.updated":
+      return "Plan tasks updated";
+    case "turn.proposed.delta":
+    case "turn.proposed.completed":
+      return "Plan updated";
+    case "turn.diff.updated":
+      return "Diff updated";
+    case "runtime.warning":
+      return payloadString(event, "message") ?? "Provider warning";
+    case "runtime.error":
+      return payloadString(event, "message") ?? "Provider error";
     default:
-      return event.eventType.startsWith("runtime.") ? event.eventType : null;
+      return event.eventType.startsWith("runtime.") || event.eventVersion >= 2
+        ? event.eventType
+        : null;
   }
 }
 
@@ -205,16 +246,28 @@ function appendActivity(
   event: ControlPlaneSessionEvent,
 ): Thread["activities"] {
   const summary = activitySummary(event);
-  if (!summary || event.eventType === "runtime.output.delta") return activities;
+  if (
+    !summary ||
+    event.eventType === "runtime.output.delta" ||
+    event.eventType === "content.delta"
+  ) {
+    return activities;
+  }
   const tone: OrchestrationThreadActivity["tone"] =
     event.eventType === "execution.failed" ||
     event.eventType === "execution.cancelled" ||
     event.eventType === "workspace.failed" ||
-    event.eventType === "checkpoint.failed"
+    event.eventType === "checkpoint.failed" ||
+    event.eventType === "runtime.error" ||
+    event.eventType === "turn.aborted"
       ? "error"
-      : event.eventType.includes("approval") || event.eventType.includes("user-input")
+      : event.eventType.includes("approval") ||
+          event.eventType.includes("user-input") ||
+          event.eventType.startsWith("request.")
         ? "approval"
-        : event.eventType.startsWith("runtime.")
+        : event.eventType.startsWith("runtime.") ||
+            event.eventType.startsWith("item.") ||
+            event.eventType.startsWith("tool.")
           ? "tool"
           : "info";
   const next = [
@@ -224,7 +277,12 @@ function appendActivity(
       tone,
       kind: event.eventType,
       summary,
-      payload: event.payload as OrchestrationThreadActivity["payload"],
+      payload: {
+        ...event.payload,
+        ...(event.executionId && event.payload.executionId === undefined
+          ? { executionId: event.executionId }
+          : {}),
+      } as OrchestrationThreadActivity["payload"],
       turnId: eventTurnId(event),
       sequence: event.sequence,
       createdAt: event.occurredAt,
@@ -357,8 +415,14 @@ export function applyControlPlaneSessionEvent(
     case "execution.recovering":
       orchestrationStatus = "starting";
       break;
-    case "runtime.output.delta": {
-      const text = payloadString(event, "text");
+    case "runtime.output.delta":
+    case "content.delta": {
+      const text =
+        event.eventType === "content.delta"
+          ? payloadString(event, "streamKind") === "assistant_text"
+            ? payloadString(event, "delta")
+            : null
+          : payloadString(event, "text");
       if (text) {
         messages = appendAssistantDelta(messages, event, text);
         const executionId = event.executionId ?? `event-${event.eventId}`;

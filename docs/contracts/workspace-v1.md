@@ -5,7 +5,7 @@ PostgreSQL owns identity and lifecycle metadata; Git and ready Artifact payloads
 checkout is only a cache.
 
 The DDL source of truth is the forward migration chain through
-`000026_checkpoint_retention.sql`; published migrations are never rewritten in place.
+`000027_workspace_cleanup_dispatch.sql`; published migrations are never rewritten in place.
 
 ## Identity and states
 
@@ -45,11 +45,15 @@ GIT_CACHE_ROOT/
 
 WORKSPACE_ROOT/
   .locks/...
-  v2/<target>/<tenant>/<project>/<session>/<workspace>/
+  v3/<target>/<tenant>/<project>/<session>/<workspace>/<materialization-incarnation>/
     manifest.json
     repo.git
     checkout/
 ```
+
+Layout v3 binds a logical materialization ID to an immutable physical incarnation ID. Every new managed
+materialization uses v3; layout v2 is adoption-only for an existing row explicitly migrated by Control Plane and
+is never inferred from omitted v3 fields. Worker Protocol v2 carries both identities and rejects a downgrade.
 
 The cache is a bare, read-only materialization input from the Provider's perspective. Agentd takes a cross-process
 cache lock and performs a credential-authorized network Fetch on every Turn, so a warm cache cannot bypass a
@@ -180,12 +184,26 @@ Recovery prefers:
 
 An absent Worker directory is never interpreted as an empty authoritative Workspace.
 
+## Physical cleanup
+
+Control Plane creates a durable cleanup command only after the logical Workspace reaches a cleanup-eligible state.
+The command carries the exact Target, storage scope, materialization ID, physical incarnation ID and layout version.
+Agentd revalidates that complete tuple against the managed root and Manifest before deletion, takes the same
+Workspace lock used by execution, refuses symlink/path escape, and deletes only that physical root. Kubernetes
+cleanup additionally requires the current Pod UID/Worker incarnation evidence and fails closed when ownership is
+ambiguous.
+
+Cleanup Claim, renew, complete, fail and release are Worker-incarnation and Lease fenced. The scheduler interleaves
+cleanup and Execution Claims so cleanup cannot starve ordinary work or monopolize a Worker. A stale Worker,
+Generation, layout-v2 inference, or historical physical incarnation cannot acknowledge or delete a replacement
+Workspace.
+
 ## Remaining implementation gate
 
 The schema, Session/Execution bindings, public/private HTTPS Clone/Fetch materialization, Project Git Credential
 binding, cross-process locked shared Git cache, Workspace-private relative `git worktree` generations,
 Generation-fenced state reporting, Git-reference/Patch/Snapshot Checkpoint capture/restore and safe
 Checkpoint/Artifact retention are active. Stage 3 still must implement short-lived SSH Credential delivery,
-physical Workspace cleanup dispatch/acknowledgement and the shared Local/SSH/Docker/Kubernetes acceptance
-fixture. Kubernetes cache sharing additionally requires an explicitly configured RWX-equivalent PVC; its default
-cache remains Pod-local and disposable.
+leftover staging/backup reconciliation after host-level crashes and the shared Local/SSH/Docker/Kubernetes
+acceptance fixture. Kubernetes cache sharing additionally requires an explicitly configured RWX-equivalent PVC;
+its default cache remains Pod-local and disposable.

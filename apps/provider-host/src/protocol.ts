@@ -19,6 +19,7 @@ import {
   type ProviderHostMessageEnvelope,
 } from "@synara/contracts/provider-host";
 import type { ProviderKind } from "@synara/contracts";
+import { PROVIDER_RUNTIME_EVENT_VERSION } from "@synara/contracts";
 import { Schema } from "effect";
 
 import {
@@ -29,6 +30,7 @@ import {
   type RunnerInput,
   type RunnerMessage,
 } from "./providerHost";
+import { normalizeRuntimeEventV2 } from "./runtimeEventV2";
 
 const decodeCommand = Schema.decodeUnknownSync(ProviderHostCommandEnvelope);
 const HOST_BUILD_VERSION = process.env.SYNARA_PROVIDER_HOST_BUILD_VERSION?.trim() || "0.2.0-dev";
@@ -63,7 +65,10 @@ export function providerHostDescriptor(provider: ProviderKind): ProviderHostDesc
     },
     maximumCommandBytes: PROVIDER_HOST_MAX_COMMAND_BYTES,
     maximumMessageBytes: PROVIDER_HOST_MAX_MESSAGE_BYTES,
-    runtimeEventVersions: { minimum: 1, maximum: 1 },
+    runtimeEventVersions: {
+      minimum: PROVIDER_RUNTIME_EVENT_VERSION,
+      maximum: PROVIDER_RUNTIME_EVENT_VERSION,
+    },
     credentialDeliveryModes: remote ? ["anonymous-fd"] : [],
     resumeStrategies: remote
       ? ["native-cursor", "authoritative-history"]
@@ -327,10 +332,7 @@ async function executeCommand(
       const run = startRun(runInput, credential, (message) => {
         if (message.type === "event") {
           emit(
-            payloadMessage(command, "Event", {
-              eventType: message.eventType,
-              payload: message.payload,
-            }),
+            payloadMessage(command, "Event", normalizeRuntimeEventV2(message)),
           );
         } else if (message.type === "interaction") {
           emit(

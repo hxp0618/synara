@@ -59,7 +59,8 @@ func TestDaemonRunExecutionDeliversInteractionResolutionEndToEnd(t *testing.T) {
 		case base + "events":
 			var input executions.RuntimeEventInput
 			if err := json.NewDecoder(request.Body).Decode(&input); err != nil ||
-				input.EventType != "approval.requested" || input.Payload["requestId"] != "approval-1" {
+				input.EventVersion != executions.RuntimeEventVersionV2 || input.EventType != "request.opened" ||
+				input.Payload["requestId"] != "approval-1" || input.Payload["requestType"] != "command_execution_approval" {
 				http.Error(response, "invalid interaction event", http.StatusBadRequest)
 				return
 			}

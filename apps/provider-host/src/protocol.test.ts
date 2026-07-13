@@ -1,3 +1,4 @@
+import { PROVIDER_RUNTIME_EVENT_VERSION } from "@synara/contracts";
 import {
   PROVIDER_CAPABILITY_IDS,
   PROVIDER_HOST_PROTOCOL_VERSION,
@@ -46,6 +47,10 @@ describe("Provider Host Protocol v2", () => {
     expect(codex.capabilityDescriptor.capabilities.approval).toBe("native");
     expect(codex.capabilityDescriptor.capabilities["structured-user-input"]).toBe("native");
     expect(codex.capabilityDescriptor.capabilities["plan-mode"]).toBe("native");
+    expect(codex.runtimeEventVersions).toEqual({
+      minimum: PROVIDER_RUNTIME_EVENT_VERSION,
+      maximum: PROVIDER_RUNTIME_EVENT_VERSION,
+    });
     const claude = providerHostDescriptor("claudeAgent");
     expect(claude.capabilityDescriptor.adapterVersion).toBe("claude-agent-sdk-v2");
     expect(claude.capabilityDescriptor.capabilities["steer-turn"]).toBe("native");
@@ -133,6 +138,45 @@ describe("Provider Host Protocol v2", () => {
       messageType: "Error",
       error: { code: "interrupted" },
     });
+  });
+
+  it("emits only canonical Runtime Event v2 payloads on the v2 wire", async () => {
+    let completeRun: ((message: Extract<RunnerMessage, { type: "result" }>) => void) | undefined;
+    const emitted: ProviderHostMessageEnvelope[] = [];
+    const handle = createProviderHostProtocolHandler({
+      credential: null,
+      emit: (message) => emitted.push(message),
+      startRun: (_input, _credential, emit) => {
+        emit({
+          type: "event",
+          eventType: "runtime.output.delta",
+          payload: { text: "canonical" },
+        });
+        return {
+          result: new Promise((resolve) => {
+            completeRun = resolve;
+          }),
+          interrupt: () => {},
+        } satisfies ProviderRunController;
+      },
+    });
+    await handle(command("StartSession", { runnerInput: remoteRunnerInput() }, "session-events"));
+
+    const send = handle(command("SendTurn", { inputText: "stream" }, "send-events"));
+    completeRun?.({ type: "result", output: { text: "canonical" } });
+    await send;
+
+    expect(emitted).toContainEqual(
+      expect.objectContaining({
+        commandId: "send-events",
+        messageType: "Event",
+        payload: {
+          eventVersion: PROVIDER_RUNTIME_EVENT_VERSION,
+          eventType: "content.delta",
+          payload: { streamKind: "assistant_text", delta: "canonical" },
+        },
+      }),
+    );
   });
 
   it("processes SteerTurn while SendTurn remains active", async () => {
