@@ -33,17 +33,55 @@ func TestWorkerManifestPersistsAndBindsClaimedExecution(t *testing.T) {
 	if worker.CurrentManifestID == nil || worker.CompatibilityStatus != "compatible" {
 		t.Fatalf("Worker manifest was not attached: %#v", worker)
 	}
-	claim, err := service.Claim(context.Background(), worker, ClaimExecutionInput{
+	claimInput := ClaimExecutionInput{
 		ExecutionTargetID: fixture.TargetID, TargetKind: fixture.TargetKind, ExecutionID: &fixture.ExecutionID,
-	}, "manifest-claim")
+	}
+	claim, err := service.Claim(context.Background(), worker, claimInput, "manifest-claim")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if claim.Value.Execution == nil || claim.Value.Execution.WorkerManifestID == nil ||
 		*claim.Value.Execution.WorkerManifestID != *worker.CurrentManifestID ||
 		claim.Value.Workload == nil || claim.Value.Workload.WorkerManifestID == nil ||
-		*claim.Value.Workload.WorkerManifestID != *worker.CurrentManifestID {
+		*claim.Value.Workload.WorkerManifestID != *worker.CurrentManifestID ||
+		claim.Value.Workload.ProviderCredentialID == nil ||
+		*claim.Value.Workload.ProviderCredentialID != fixture.ProviderCredentialID {
 		t.Fatalf("Claim did not bind the Worker manifest: %#v", claim.Value)
+	}
+	var execution persistence.AgentExecution
+	if err := db.Where("tenant_id = ? AND id = ?", fixture.TenantID, fixture.ExecutionID).Take(&execution).Error; err != nil {
+		t.Fatal(err)
+	}
+	if execution.ProviderCredentialIDSnapshot == nil ||
+		*execution.ProviderCredentialIDSnapshot != fixture.ProviderCredentialID ||
+		execution.ProviderCredentialVersionSnapshot == nil || *execution.ProviderCredentialVersionSnapshot != 1 ||
+		execution.ProviderResumeStrategySnapshot != "native-cursor" ||
+		execution.ProviderCursorBindingVersion == nil || *execution.ProviderCursorBindingVersion != providerCursorBindingVersion ||
+		len(execution.ProviderCursorBindingDigest) != 32 {
+		t.Fatalf("Claim did not persist a complete Provider generation snapshot: %#v", execution)
+	}
+	var reboundCredential persistence.ProviderCredential
+	if err := db.Where("tenant_id = ? AND id = ?", fixture.TenantID, fixture.ProviderCredentialID).
+		Take(&reboundCredential).Error; err != nil {
+		t.Fatal(err)
+	}
+	reboundCredential.ID = uuid.New()
+	reboundCredential.Name = "Rebound Execution Provider"
+	if err := db.Create(&reboundCredential).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Model(&persistence.AgentSession{}).
+		Where("tenant_id = ? AND id = ?", fixture.TenantID, fixture.SessionID).
+		Update("provider_credential_id", reboundCredential.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	replayed, err := service.Claim(context.Background(), worker, claimInput, "manifest-claim")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !replayed.Replayed || replayed.Value.Workload == nil || replayed.Value.Workload.ProviderCredentialID == nil ||
+		*replayed.Value.Workload.ProviderCredentialID != fixture.ProviderCredentialID {
+		t.Fatalf("Session rebind changed the active generation Workload Credential: %#v", replayed)
 	}
 	var providerCount int64
 	if err := db.Model(&persistence.WorkerProviderManifest{}).

@@ -28,12 +28,13 @@ func TestTenantDeletionInterruptsLiveLeaseAndCancelsInsteadOfRecovering(t *testi
 		t.Fatal("manifest Worker has no current Manifest")
 	}
 	provider := "codex"
+	const activeGeneration int64 = 2
 	if err := db.Transaction(func(tx *gorm.DB) error {
 		if err := tx.Model(&persistence.AgentExecution{}).
 			Where("tenant_id = ? AND id = ?", fixture.TenantID, fixture.ExecutionID).
 			Updates(map[string]any{
 				"status": "running", "worker_id": worker.ID, "worker_manifest_id": *worker.CurrentManifestID,
-				"provider": provider, "generation": 1, "started_at": now,
+				"provider": provider, "generation": activeGeneration, "started_at": now,
 			}).Error; err != nil {
 			return err
 		}
@@ -44,7 +45,7 @@ func TestTenantDeletionInterruptsLiveLeaseAndCancelsInsteadOfRecovering(t *testi
 		}
 		return tx.Create(&persistence.WorkerLease{
 			ExecutionID: fixture.ExecutionID, TenantID: fixture.TenantID, WorkerID: worker.ID,
-			Generation: 1, LeaseTokenHash: tokenHash, AcquiredAt: now, HeartbeatAt: now,
+			Generation: activeGeneration, LeaseTokenHash: tokenHash, AcquiredAt: now, HeartbeatAt: now,
 			ExpiresAt: now.Add(30 * time.Second),
 		}).Error
 	}); err != nil {
@@ -86,7 +87,7 @@ func TestTenantDeletionInterruptsLiveLeaseAndCancelsInsteadOfRecovering(t *testi
 		t.Fatal(err)
 	}
 	_, err = service.Renew(context.Background(), worker, fixture.ExecutionID, RenewLeaseInput{
-		LeaseInput: LeaseInput{TenantID: fixture.TenantID, Generation: 1, LeaseToken: plainToken},
+		LeaseInput: LeaseInput{TenantID: fixture.TenantID, Generation: activeGeneration, LeaseToken: plainToken},
 	}, uuid.NewString())
 	assertProblemCode(t, err, "tenant_deleting")
 	service.now = func() time.Time { return now.Add(time.Minute) }

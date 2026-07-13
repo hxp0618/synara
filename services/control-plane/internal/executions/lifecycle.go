@@ -173,14 +173,23 @@ func (s *Service) Claim(
 			} else {
 				previousStatus := execution.Status
 				previousGeneration := execution.Generation
+				now := s.now()
+				claimSnapshot, snapshotErr := loadProviderCursorClaimSnapshot(ctx, tx, execution, claimWorker, now)
+				if snapshotErr != nil {
+					return snapshotErr
+				}
 				plainToken, tokenHash, tokenErr := secret.NewToken()
 				if tokenErr != nil {
 					return problem.Wrap(500, "lease_token_generation_failed", "Failed to generate an execution lease token.", tokenErr)
 				}
-				now := s.now()
 				execution.Status = "leased"
 				execution.WorkerID = &worker.ID
 				execution.WorkerManifestID = claimWorker.CurrentManifestID
+				execution.ProviderCredentialIDSnapshot = claimSnapshot.CredentialID
+				execution.ProviderCredentialVersionSnapshot = claimSnapshot.CredentialVersion
+				execution.ProviderResumeStrategySnapshot = claimSnapshot.ResumeStrategy
+				execution.ProviderCursorBindingVersion = claimSnapshot.BindingVersion
+				execution.ProviderCursorBindingDigest = claimSnapshot.BindingDigest
 				execution.Generation++
 				execution.FinishedAt = nil
 				execution.FailureCode = nil
@@ -189,8 +198,13 @@ func (s *Service) Claim(
 					Where("id = ? AND status = ? AND generation = ?", execution.ID, previousStatus, previousGeneration).
 					Updates(map[string]any{
 						"status": execution.Status, "worker_id": worker.ID, "generation": execution.Generation,
-						"worker_manifest_id": execution.WorkerManifestID,
-						"finished_at":        nil, "failure_code": nil, "failure_message": nil,
+						"worker_manifest_id":                   execution.WorkerManifestID,
+						"provider_credential_id_snapshot":      execution.ProviderCredentialIDSnapshot,
+						"provider_credential_version_snapshot": execution.ProviderCredentialVersionSnapshot,
+						"provider_resume_strategy_snapshot":    execution.ProviderResumeStrategySnapshot,
+						"provider_cursor_binding_version":      execution.ProviderCursorBindingVersion,
+						"provider_cursor_binding_digest":       execution.ProviderCursorBindingDigest,
+						"finished_at":                          nil, "failure_code": nil, "failure_message": nil,
 					})
 				if err := expectOne(claimUpdate, 409, "execution_claim_conflict", "The execution was claimed concurrently."); err != nil {
 					return err
@@ -864,91 +878,6 @@ func (s *Service) enqueueRecovery(
 		return problem.Wrap(500, "execution_recovery_outbox_failed", "Failed to queue the recovering execution.", err)
 	}
 	return nil
-}
-
-func (s *Service) storeProviderCursor(
-	ctx context.Context,
-	tx *gorm.DB,
-	execution persistence.AgentExecution,
-	cursor *string,
-) error {
-	if cursor == nil || strings.TrimSpace(*cursor) == "" {
-		return nil
-	}
-	if len(*cursor) > 1_000_000 {
-		return problem.New(400, "provider_cursor_too_large", "providerResumeCursor must not exceed 1000000 characters.")
-	}
-	encrypted, err := s.cursorCipher.Encrypt(*cursor)
-	if err != nil {
-		return problem.Wrap(503, "provider_cursor_encryption_unavailable", "Provider resume cursor encryption is not configured.", err)
-	}
-	if err := tx.WithContext(ctx).Model(&persistence.AgentSession{}).
-		Where("tenant_id = ? AND id = ?", execution.TenantID, execution.SessionID).
-		Update("provider_resume_cursor_encrypted", encrypted).Error; err != nil {
-		return problem.Wrap(500, "provider_cursor_store_failed", "Failed to store the encrypted provider resume cursor.", err)
-	}
-	if execution.ProviderRuntimeBindingID != nil {
-		now := s.now()
-		updates := map[string]any{
-			"cursor_updated_at": now, "resume_strategy": "native-cursor",
-			"last_execution_id": execution.ID, "last_generation": execution.Generation,
-			"updated_at": now,
-		}
-		var binding persistence.ProviderRuntimeBinding
-		if err := tx.WithContext(ctx).
-			Select("capability_descriptor_hash").
-			Where("tenant_id = ? AND id = ?", execution.TenantID, *execution.ProviderRuntimeBindingID).
-			Take(&binding).Error; err != nil {
-			return problem.Wrap(500, "runtime_binding_cursor_load_failed", "Failed to load the Provider runtime binding for Cursor persistence.", err)
-		}
-		if binding.CapabilityDescriptorHash != nil {
-			updates["cursor_compatibility_key"] = *binding.CapabilityDescriptorHash
-		}
-		if err := tx.WithContext(ctx).Model(&persistence.ProviderRuntimeBinding{}).
-			Where("tenant_id = ? AND id = ?", execution.TenantID, *execution.ProviderRuntimeBindingID).
-			Updates(updates).Error; err != nil {
-			return problem.Wrap(500, "runtime_binding_cursor_store_failed", "Failed to update Provider Cursor compatibility metadata.", err)
-		}
-	}
-	return nil
-}
-
-func (s *Service) loadProviderCursor(
-	ctx context.Context,
-	tx *gorm.DB,
-	execution persistence.AgentExecution,
-) (*string, error) {
-	if execution.ProviderRuntimeBindingID != nil {
-		var binding persistence.ProviderRuntimeBinding
-		if err := tx.WithContext(ctx).
-			Select("status", "resume_strategy", "cursor_compatibility_key", "capability_descriptor_hash").
-			Where("tenant_id = ? AND id = ?", execution.TenantID, *execution.ProviderRuntimeBindingID).
-			Take(&binding).Error; err != nil {
-			return nil, problem.Wrap(500, "runtime_binding_cursor_load_failed", "Failed to load Provider Cursor compatibility metadata.", err)
-		}
-		if binding.Status == "incompatible" || binding.Status == "released" || binding.ResumeStrategy == "none" {
-			return nil, nil
-		}
-		if binding.CapabilityDescriptorHash != nil &&
-			(binding.CursorCompatibilityKey == nil || *binding.CursorCompatibilityKey != *binding.CapabilityDescriptorHash) {
-			return nil, nil
-		}
-	}
-	var session persistence.AgentSession
-	if err := tx.WithContext(ctx).
-		Select("provider_resume_cursor_encrypted").
-		Where("tenant_id = ? AND id = ?", execution.TenantID, execution.SessionID).
-		Take(&session).Error; err != nil {
-		return nil, problem.Wrap(500, "provider_cursor_load_failed", "Failed to load the provider resume cursor.", err)
-	}
-	if len(session.ProviderResumeCursorEncrypted) == 0 {
-		return nil, nil
-	}
-	plain, err := s.cursorCipher.Decrypt(session.ProviderResumeCursorEncrypted)
-	if err != nil {
-		return nil, problem.Wrap(503, "provider_cursor_decryption_unavailable", "Provider resume cursor decryption is unavailable.", err)
-	}
-	return &plain, nil
 }
 
 func normalizeClaimTarget(worker persistence.WorkerInstance, input ClaimExecutionInput) (ClaimExecutionInput, error) {

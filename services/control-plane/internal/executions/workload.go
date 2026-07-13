@@ -50,7 +50,7 @@ func (s *Service) loadWorkload(ctx context.Context, tx *gorm.DB, execution persi
 			w.repository_fingerprint AS workspace_repository_fingerprint,
 			w.current_branch AS workspace_current_branch, w.base_commit AS workspace_base_commit,
 			w.head_commit AS workspace_head_commit, e.worker_manifest_id,
-				s.model, s.provider_credential_id, p.git_credential_id,
+				s.model, e.provider_credential_id_snapshot AS provider_credential_id, p.git_credential_id,
 				t.input_text, t.runtime_mode, t.interaction_mode, p.repository_url, p.default_branch`).
 		Joins("JOIN agent_sessions AS s ON s.tenant_id = e.tenant_id AND s.id = e.session_id").
 		Joins("JOIN agent_turns AS t ON t.tenant_id = e.tenant_id AND t.session_id = e.session_id AND t.id = e.turn_id").

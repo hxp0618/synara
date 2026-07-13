@@ -2338,14 +2338,15 @@ func TestConcurrentTurnCreationCannotOversubscribeTenantQuota(t *testing.T) {
 }
 
 type executionFixture struct {
-	UserID          uuid.UUID
-	TenantID        uuid.UUID
-	SessionID       uuid.UUID
-	TurnID          uuid.UUID
-	ExecutionID     uuid.UUID
-	GitCredentialID uuid.UUID
-	TargetID        uuid.UUID
-	TargetKind      string
+	UserID               uuid.UUID
+	TenantID             uuid.UUID
+	SessionID            uuid.UUID
+	TurnID               uuid.UUID
+	ExecutionID          uuid.UUID
+	ProviderCredentialID uuid.UUID
+	GitCredentialID      uuid.UUID
+	TargetID             uuid.UUID
+	TargetKind           string
 }
 
 func integrationDB(t *testing.T) *gorm.DB {
@@ -2389,6 +2390,7 @@ func seedExecutionFixture(t *testing.T, db *gorm.DB) executionFixture {
 	turnID := uuid.New()
 	executionID := uuid.New()
 	targetID := uuid.New()
+	providerCredentialID := uuid.New()
 	gitCredentialID := uuid.New()
 	repositoryURL := "https://git.example.com/team/private.git"
 	provider := "codex"
@@ -2399,6 +2401,13 @@ func seedExecutionFixture(t *testing.T, db *gorm.DB) executionFixture {
 		&persistence.TenantMembership{TenantID: tenantID, UserID: userID, Role: "owner", Status: "active", JoinedAt: &now},
 		&persistence.Organization{ID: organizationID, TenantID: tenantID, Slug: "root", Name: "Root", Kind: "root", Status: "active", Settings: map[string]any{}, CreatedBy: userID},
 		&persistence.OrganizationMembership{TenantID: tenantID, OrganizationID: organizationID, UserID: userID, Role: "owner", Status: "active"},
+		&persistence.ProviderCredential{
+			ID: providerCredentialID, TenantID: tenantID, OrganizationID: &organizationID,
+			Name: "Execution Provider", Purpose: "provider", Provider: provider, CredentialType: "api_key",
+			EncryptedPayload: []byte("encrypted-provider-payload"), EncryptedDataKey: []byte("encrypted-provider-data-key"),
+			KMSProvider: "local", KMSKeyID: "test", Version: 1,
+			CreatedBy: userID, UpdatedBy: userID, CreatedAt: now, UpdatedAt: now,
+		},
 		&persistence.ProviderCredential{
 			ID: gitCredentialID, TenantID: tenantID, OrganizationID: &organizationID,
 			Name: "Execution Git", Purpose: "git", Provider: "git", CredentialType: "https_token",
@@ -2412,7 +2421,7 @@ func seedExecutionFixture(t *testing.T, db *gorm.DB) executionFixture {
 			Visibility: "organization", CreatedBy: userID,
 		},
 		&persistence.ExecutionTarget{ID: targetID, TenantID: &tenantID, OrganizationID: &organizationID, Kind: "kubernetes", Name: "test-target", Status: "active", ConfigurationEncrypted: []byte{}, Capabilities: workerManifestTestTargetCapabilities()},
-		&persistence.AgentSession{ID: sessionID, TenantID: tenantID, OrganizationID: organizationID, ProjectID: projectID, CreatedBy: userID, Title: "Execution session", Status: "active", Visibility: "private", Provider: provider, ExecutionTargetID: targetID, CurrentRuntimeBindingID: &runtimeBindingID},
+		&persistence.AgentSession{ID: sessionID, TenantID: tenantID, OrganizationID: organizationID, ProjectID: projectID, CreatedBy: userID, Title: "Execution session", Status: "active", Visibility: "private", Provider: provider, ProviderCredentialID: &providerCredentialID, ExecutionTargetID: targetID, CurrentRuntimeBindingID: &runtimeBindingID},
 		&persistence.ProviderRuntimeBinding{
 			ID: runtimeBindingID, TenantID: tenantID, SessionID: sessionID, Provider: provider,
 			Revision: 1, Status: "active", ResumeStrategy: "authoritative-history",
@@ -2441,7 +2450,7 @@ func seedExecutionFixture(t *testing.T, db *gorm.DB) executionFixture {
 	})
 	return executionFixture{
 		UserID: userID, TenantID: tenantID, SessionID: sessionID, TurnID: turnID,
-		ExecutionID: executionID, GitCredentialID: gitCredentialID,
+		ExecutionID: executionID, ProviderCredentialID: providerCredentialID, GitCredentialID: gitCredentialID,
 		TargetID: targetID, TargetKind: "kubernetes",
 	}
 }

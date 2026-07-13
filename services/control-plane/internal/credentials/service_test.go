@@ -347,21 +347,23 @@ func TestCredentialWorkerResolutionRequiresCurrentLeaseAndOrganization(t *testin
 		Update("provider_credential_id", tenantCredential.ID).Error; err != nil {
 		t.Fatal(err)
 	}
-	payload, err = fixture.service.ResolveForExecution(ctx, executionService, worker, executionID, tenantCredential.ID, lease)
+	payload, err = fixture.service.ResolveForExecution(ctx, executionService, worker, executionID, organizationCredential.ID, lease)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if payload["apiKey"] != "tenant-secret" {
-		t.Fatalf("unexpected tenant credential payload: %#v", payload)
+	if payload["apiKey"] != "organization-secret" {
+		t.Fatalf("Session rebind changed the in-flight Execution Credential: %#v", payload)
 	}
+	_, err = fixture.service.ResolveForExecution(ctx, executionService, worker, executionID, tenantCredential.ID, lease)
+	assertCredentialProblemCode(t, err, "credential_not_found")
 
 	invalidToken := lease
 	invalidToken.LeaseToken = "wrong-token"
-	_, err = fixture.service.ResolveForExecution(ctx, executionService, worker, executionID, tenantCredential.ID, invalidToken)
+	_, err = fixture.service.ResolveForExecution(ctx, executionService, worker, executionID, organizationCredential.ID, invalidToken)
 	assertCredentialProblemCode(t, err, "invalid_lease_token")
 	fenced := lease
 	fenced.Generation++
-	_, err = fixture.service.ResolveForExecution(ctx, executionService, worker, executionID, tenantCredential.ID, fenced)
+	_, err = fixture.service.ResolveForExecution(ctx, executionService, worker, executionID, organizationCredential.ID, fenced)
 	assertCredentialProblemCode(t, err, "generation_fenced")
 
 	otherOrganizationID := uuid.New()
@@ -385,6 +387,19 @@ func TestCredentialWorkerResolutionRequiresCurrentLeaseAndOrganization(t *testin
 	}
 	_, err = fixture.service.ResolveForExecution(ctx, executionService, worker, executionID, otherCredential.ID, lease)
 	assertCredentialProblemCode(t, err, "credential_not_found")
+
+	rotated, err := fixture.service.Rotate(ctx, fixture.owner, fixture.tenantID, organizationCredential.ID, RotateInput{
+		ExpectedVersion: organizationCredential.Version,
+		Payload:         map[string]any{"apiKey": "rotated-organization-secret"},
+	}, "credential-organization-rotate", "127.0.0.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rotated.Version != organizationCredential.Version+1 {
+		t.Fatalf("rotated Credential version = %d", rotated.Version)
+	}
+	_, err = fixture.service.ResolveForExecution(ctx, executionService, worker, executionID, organizationCredential.ID, lease)
+	assertCredentialProblemCode(t, err, "credential_version_fenced")
 }
 
 type credentialFixture struct {
@@ -461,6 +476,8 @@ func seedCredentialExecution(
 	executionID := uuid.New()
 	workerID := uuid.New()
 	leaseToken := "credential-worker-lease-token"
+	provider := "codex"
+	credentialVersion := 1
 	worker := persistence.WorkerInstance{
 		ID: workerID, ExecutionTargetID: fixture.targetID, TargetKind: "local",
 		ClusterID: "credential-test", Namespace: "credential-test", PodName: "credential-test", Version: "test", ProtocolVersion: 1,
@@ -473,7 +490,14 @@ func seedCredentialExecution(
 		&persistence.AgentSession{ID: sessionID, TenantID: fixture.tenantID, OrganizationID: organizationID, ProjectID: projectID, CreatedBy: fixture.owner.UserID, Title: "Credential session", Status: "active", Visibility: "organization", Provider: "codex", ProviderCredentialID: &credentialID, ExecutionTargetID: fixture.targetID},
 		&persistence.AgentTurn{ID: turnID, TenantID: fixture.tenantID, SessionID: sessionID, CreatedBy: fixture.owner.UserID, Status: "running", InputText: "test"},
 		&worker,
-		&persistence.AgentExecution{ID: executionID, TenantID: fixture.tenantID, SessionID: sessionID, TurnID: turnID, Attempt: 1, Status: "running", ExecutionTargetID: fixture.targetID, TargetKind: "local", WorkerID: &workerID, Generation: 1, RequestedBy: fixture.owner.UserID, QueuedAt: now, StartedAt: &now},
+		&persistence.AgentExecution{
+			ID: executionID, TenantID: fixture.tenantID, SessionID: sessionID, TurnID: turnID,
+			Attempt: 1, Status: "running", ExecutionTargetID: fixture.targetID, TargetKind: "local",
+			Provider: &provider, WorkerID: &workerID,
+			ProviderCredentialIDSnapshot: &credentialID, ProviderCredentialVersionSnapshot: &credentialVersion,
+			ProviderResumeStrategySnapshot: "authoritative-history",
+			Generation:                     1, RequestedBy: fixture.owner.UserID, QueuedAt: now, StartedAt: &now,
+		},
 		&persistence.WorkerLease{ExecutionID: executionID, TenantID: fixture.tenantID, WorkerID: workerID, Generation: 1, LeaseTokenHash: secret.HashToken(leaseToken), AcquiredAt: now, HeartbeatAt: now, ExpiresAt: now.Add(time.Hour)},
 	}
 	for _, model := range models {

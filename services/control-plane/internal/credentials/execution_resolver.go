@@ -15,9 +15,10 @@ import (
 )
 
 // ResolveForExecution returns a Credential only to the Worker that owns the
-// current Execution Lease and Generation. The encrypted snapshot is selected
-// in the same transaction as lease authorization so a Worker cannot retrieve a
-// Credential for another Tenant or Organization.
+// current Execution Lease and Generation. The immutable Credential ID/version
+// snapshot captured by Claim is selected in the same transaction as lease
+// authorization so Session rebinding or Credential rotation cannot silently
+// change the secret available to an in-flight generation.
 func (s *Service) ResolveForExecution(
 	ctx context.Context,
 	executionService *executions.Service,
@@ -34,9 +35,15 @@ func (s *Service) ResolveForExecution(
 		if err != nil {
 			return err
 		}
+		if execution.ProviderCredentialIDSnapshot == nil || *execution.ProviderCredentialIDSnapshot != credentialID {
+			return problem.New(404, "credential_not_found", "Provider Credential not found.")
+		}
+		if execution.ProviderCredentialVersionSnapshot == nil || *execution.ProviderCredentialVersionSnapshot <= 0 {
+			return problem.New(500, "execution_credential_snapshot_invalid", "Execution Provider Credential snapshot is invalid.")
+		}
 		var session persistence.AgentSession
 		err = tx.WithContext(ctx).
-			Select("id", "tenant_id", "organization_id", "provider", "provider_credential_id").
+			Select("id", "tenant_id", "organization_id").
 			Where("id = ? AND tenant_id = ?", execution.SessionID, execution.TenantID).
 			Take(&session).Error
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -44,9 +51,6 @@ func (s *Service) ResolveForExecution(
 		}
 		if err != nil {
 			return problem.Wrap(500, "session_load_failed", "Agent Session could not be loaded.", err)
-		}
-		if session.ProviderCredentialID == nil || *session.ProviderCredentialID != credentialID {
-			return problem.New(404, "credential_not_found", "Provider Credential not found.")
 		}
 		err = persistence.WithLocking(tx.WithContext(ctx), "SHARE", "").
 			Where("tenant_id = ? AND id = ?", execution.TenantID, credentialID).
@@ -63,8 +67,11 @@ func (s *Service) ResolveForExecution(
 		if credential.Purpose != PurposeProvider {
 			return problem.New(404, "credential_not_found", "Provider Credential not found.")
 		}
-		if credential.Provider != session.Provider {
+		if execution.Provider == nil || credential.Provider != *execution.Provider {
 			return problem.New(409, "credential_provider_mismatch", "Provider Credential does not match the Agent Session provider.")
+		}
+		if credential.Version != *execution.ProviderCredentialVersionSnapshot {
+			return problem.New(409, "credential_version_fenced", "Provider Credential version no longer matches the Execution generation snapshot.")
 		}
 		return nil
 	})
