@@ -16,12 +16,15 @@ packages/*/dist
 *.sqlite-*
 *.sqlite3
 *.sqlite3-*
-build/
+/build/
 .logs/
-release/
+/release/
+/release-mock/
 /deploy/remote/prebuilt/
 /deploy/*/workspace/
 /services/control-plane/data/
+/services/control-plane/personal-metadata.json
+/apps/server/package.json.bak
 /apps/server/userdata/
 .synara
 /.synara/electron-dev
