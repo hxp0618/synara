@@ -217,25 +217,34 @@ class SSECollector:
             connection.close()
 
 
-def assert_ready(client: CookieClient, replica: str) -> None:
+def assert_ready(client: CookieClient, replica: str, expected_schema_version: int) -> None:
     ready = client.json(replica, "GET", "/ready")
     schema = ready.get("checks", {}).get("schema", {})
     require(ready.get("status") == "ready", f"{replica} did not report ready")
     require(schema.get("status") == "ready", f"{replica} schema was not ready")
-    require(schema.get("expectedVersion", 0) >= 16, f"{replica} expected schema version was too old")
     require(
-        schema.get("appliedVersion", 0) >= schema.get("expectedVersion", 0),
+        schema.get("expectedVersion") == expected_schema_version,
+        f"{replica} expected schema version did not match the checked-out migrations",
+    )
+    require(
+        schema.get("appliedVersion") == expected_schema_version,
         f"{replica} had unapplied migrations",
     )
 
 
-def phase_one(replica_a: str, replica_b: str, registration_token: str, state_dir: Path) -> None:
+def phase_one(
+    replica_a: str,
+    replica_b: str,
+    registration_token: str,
+    state_dir: Path,
+    expected_schema_version: int,
+) -> None:
     if state_dir.exists():
         shutil.rmtree(state_dir)
     state_dir.mkdir(parents=True)
     anonymous = CookieClient()
-    assert_ready(anonymous, replica_a)
-    assert_ready(anonymous, replica_b)
+    assert_ready(anonymous, replica_a, expected_schema_version)
+    assert_ready(anonymous, replica_b, expected_schema_version)
 
     run_id = f"{int(time.time())}-{os.getpid()}-{uuid.uuid4().hex[:8]}"
     revoke_client = CookieClient(state_dir / "revoke-cookie.json")
@@ -421,10 +430,10 @@ def phase_one(replica_a: str, replica_b: str, registration_token: str, state_dir
     print(f"Cross-replica SSE and unique Claim passed: session={session_id}", flush=True)
 
 
-def phase_two(replica_b: str, state_dir: Path) -> None:
+def phase_two(replica_b: str, state_dir: Path, expected_schema_version: int) -> None:
     session_id = (state_dir / "session-id").read_text().strip()
     owner = CookieClient(state_dir / "owner-cookie.json")
-    assert_ready(CookieClient(), replica_b)
+    assert_ready(CookieClient(), replica_b, expected_schema_version)
 
     failover = SSECollector(
         replica_b,
@@ -453,15 +462,22 @@ def main() -> None:
     parser.add_argument("--replica-a")
     parser.add_argument("--replica-b", required=True)
     parser.add_argument("--registration-token")
+    parser.add_argument("--expected-schema-version", type=int, required=True)
     parser.add_argument("--state-dir", type=Path, default=Path("/state/multi-replica-acceptance"))
     arguments = parser.parse_args()
 
     if arguments.phase == "phase-one":
         require(arguments.replica_a is not None, "phase one requires --replica-a")
         require(arguments.registration_token is not None, "phase one requires --registration-token")
-        phase_one(arguments.replica_a, arguments.replica_b, arguments.registration_token, arguments.state_dir)
+        phase_one(
+            arguments.replica_a,
+            arguments.replica_b,
+            arguments.registration_token,
+            arguments.state_dir,
+            arguments.expected_schema_version,
+        )
     else:
-        phase_two(arguments.replica_b, arguments.state_dir)
+        phase_two(arguments.replica_b, arguments.state_dir, arguments.expected_schema_version)
 
 
 if __name__ == "__main__":

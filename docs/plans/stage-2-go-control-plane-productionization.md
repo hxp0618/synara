@@ -811,6 +811,10 @@ errorCode
   Credential/Token/Prompt 日志泄漏审计已完成。
 - [x] Stage 2 仓库内实现与可控环境验收完成。真实 AWS S3 是目标部署使用 AWS 时的外部发布证据，
   仍保持未执行状态，不能以 MinIO 结果替代。
+- [x] 当前 `1a53c93a` 基线在迁移扩展到 `000028` 后重新通过完整 Go/Race、四套独立 PostgreSQL
+  集成数据库、Single-node、双副本 Compose、故障注入和 Kind 双副本验收；验收脚本已同步 Worker
+  Protocol v2 Heartbeat 与 ready Workspace 完成约束，当前报告见
+  `docs/reports/stage-2-production-acceptance-1a53c93a.md`。
 
 ### Step 2：多副本正确性
 

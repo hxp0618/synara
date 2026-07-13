@@ -119,7 +119,7 @@ worker_token="$(jq -er '.token' <<<"$worker_registration")"
 worker_id="$(jq -er '.worker.id' <<<"$worker_registration")"
 
 worker_json "$worker_token" "heartbeat-$run_id" POST /v1/workers/heartbeat \
-  '{"version":"acceptance","capabilities":{"codex":true}}' >/dev/null
+  "{\"version\":\"acceptance\",\"protocolVersion\":$worker_protocol_version,\"capabilities\":{\"codex\":true}}" >/dev/null
 
 first_claim="$(worker_json "$worker_token" "claim-first-$run_id" POST /v1/workers/executions/claim \
   "{\"executionTargetId\":\"$execution_target_id\",\"targetKind\":\"$target_kind\"}")"
@@ -148,6 +148,9 @@ recovery_lease_token="$(jq -er '.lease.leaseToken' <<<"$recovery_claim")"
 jq -e --arg execution_id "$first_execution_id" \
   '.execution.id == $execution_id and .lease.generation == 2 and .providerResumeCursor == "acceptance-resume-cursor"' \
   <<<"$recovery_claim" >/dev/null
+worker_json "$worker_token" "workspace-ready-recovery-$run_id" POST \
+  "/v1/workers/executions/$recovery_execution_id/workspace/ready" \
+  "{\"tenantId\":\"$tenant_id\",\"generation\":$recovery_generation,\"leaseToken\":\"$recovery_lease_token\"}" >/dev/null
 worker_json "$worker_token" "complete-first-$run_id" POST "/v1/workers/executions/$recovery_execution_id/complete" \
   "{\"tenantId\":\"$tenant_id\",\"generation\":$recovery_generation,\"leaseToken\":\"$recovery_lease_token\",\"output\":{\"summary\":\"done\"}}" >/dev/null
 
@@ -162,7 +165,7 @@ worker_json "$worker_token" "fail-second-$run_id" POST "/v1/workers/executions/$
   "{\"tenantId\":\"$tenant_id\",\"generation\":$second_generation,\"leaseToken\":\"$second_lease_token\",\"failureCode\":\"acceptance_failure\",\"failureMessage\":\"Expected acceptance failure\"}" >/dev/null
 
 runtime_events="$(request_json "$owner_cookie" GET "/v1/sessions/$session_id/events?afterSequence=3&limit=20")"
-jq -e '.lastSequence == 11 and (.items | map(.eventType) == ["execution.leased", "execution.started", "runtime.output.delta", "execution.recovering", "execution.leased", "execution.completed", "execution.leased", "execution.failed"])' \
+jq -e '.lastSequence == 12 and (.items | map(.eventType) == ["execution.leased", "execution.started", "runtime.output.delta", "execution.recovering", "execution.leased", "workspace.ready", "execution.completed", "execution.leased", "execution.failed"])' \
   <<<"$runtime_events" >/dev/null
 
 artifact_payload="$work_dir/acceptance-artifact.txt"
@@ -254,7 +257,7 @@ jq -e '.items | length >= 4' <<<"$audit_logs" >/dev/null
 jq -e '.items | all(.occurredAt | startswith("0001-") | not)' <<<"$audit_logs" >/dev/null
 
 archived_session="$(request_json "$owner_cookie" POST "/v1/sessions/$session_id/archive")"
-jq -e '.status == "archived" and .lastEventSequence == 13 and .archivedAt != null' \
+jq -e '.status == "archived" and .lastEventSequence == 14 and .archivedAt != null' \
   <<<"$archived_session" >/dev/null
 request_json "$owner_cookie" DELETE "/v1/projects/$project_id" >/dev/null
 

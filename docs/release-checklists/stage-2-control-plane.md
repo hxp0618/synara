@@ -22,7 +22,11 @@
 cd services/control-plane
 go test ./...
 go test -race ./...
-SYNARA_TEST_DATABASE_URL='postgres://...' go test -count=1 ./...
+SYNARA_TEST_DATABASE_URL='postgres://.../synara_general?sslmode=disable' \
+SYNARA_TEST_STAGE3_MIGRATION_DATABASE_URL='postgres://.../synara_stage3?sslmode=disable' \
+SYNARA_TEST_WORKSPACE_CLEANUP_MIGRATION_DATABASE_URL='postgres://.../synara_workspace?sslmode=disable' \
+SYNARA_TEST_CHECKPOINT_MIGRATION_DATABASE_URL='postgres://.../synara_checkpoint?sslmode=disable' \
+  go test -p 1 -count=1 ./...
 ```
 
 - [ ] Go 全量测试通过。
@@ -40,8 +44,18 @@ bun run test src/controlPlaneProxy.test.ts
 cd ../web
 bun run test src/lib/controlPlaneClient.test.ts \
   src/controlPlaneStoreProjection.test.ts \
+  src/lib/controlPlaneProjection.test.ts \
+  src/lib/controlPlaneTenantScope.test.ts \
+  src/lib/controlPlaneTurnDispatch.test.ts \
+  src/session-logic.test.ts \
   src/components/ChatView.logic.test.ts
 bun run build
+
+cd ../../apps/provider-host
+bun run test src/protocol.test.ts src/runtimeEventV2.test.ts
+
+cd ../../packages/contracts
+bun run test src/providerHost.test.ts src/providerRuntime.test.ts
 ```
 
 - [ ] Proxy Cookie、多 `Set-Cookie`、SSE 和流式下载测试通过。

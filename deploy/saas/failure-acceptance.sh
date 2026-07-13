@@ -168,7 +168,7 @@ worker_registration="$(curl -sS --fail-with-body -X POST \
 worker_token="$(jq -er '.token' <<<"$worker_registration")"
 worker_id="$(jq -er '.worker.id' <<<"$worker_registration")"
 worker_json "$worker_token" "heartbeat-$run_id" POST /v1/workers/heartbeat \
-  '{"version":"acceptance","capabilities":{"codex":true}}' >/dev/null
+  "{\"version\":\"acceptance\",\"protocolVersion\":$worker_protocol_version,\"capabilities\":{\"codex\":true}}" >/dev/null
 
 first_claim="$(worker_json "$worker_token" "claim-$run_id" POST /v1/workers/executions/claim \
   "{\"executionTargetId\":\"$execution_target_id\",\"targetKind\":\"$target_kind\"}")"
@@ -216,6 +216,9 @@ old_generation_status="$(curl -sS -o "$work_dir/old-generation.json" -w '%{http_
 jq -e '.error.code == "generation_fenced" or .error.code == "lease_not_current" or .error.code == "lease_expired"' \
   "$work_dir/old-generation.json" >/dev/null
 
+worker_json "$replacement_token" "replacement-workspace-ready-$run_id" POST \
+  "/v1/workers/executions/$replacement_execution_id/workspace/ready" \
+  "{\"tenantId\":\"$tenant_id\",\"generation\":$replacement_generation,\"leaseToken\":\"$replacement_lease_token\"}" >/dev/null
 worker_json "$replacement_token" "replacement-complete-$run_id" POST \
   "/v1/workers/executions/$replacement_execution_id/complete" \
   "{\"tenantId\":\"$tenant_id\",\"generation\":$replacement_generation,\"leaseToken\":\"$replacement_lease_token\",\"output\":{\"summary\":\"recovered\"}}" >/dev/null
@@ -279,7 +282,7 @@ jq -e --arg owner_id "$owner_id" --arg tenant_id "$tenant_id" \
   '.user.userId == $owner_id and .user.activeTenantId == $tenant_id' \
   <<<"$session_after_database_recovery" >/dev/null
 worker_json "$replacement_token" "post-db-heartbeat-$run_id" POST /v1/workers/heartbeat \
-  '{"version":"acceptance","capabilities":{"codex":true}}' >/dev/null
+  "{\"version\":\"acceptance\",\"protocolVersion\":$worker_protocol_version,\"capabilities\":{\"codex\":true}}" >/dev/null
 printf 'PostgreSQL outage and recovery passed\n'
 
 logs_file="$work_dir/control-plane.log"

@@ -330,7 +330,7 @@ worker_id="$(jq -er '.worker.id' <<<"$worker_registration")"
 curl -sS --fail-with-body -X POST \
   -H "Authorization: Bearer $worker_token" -H "X-Request-ID: k8s-heartbeat-$run_id" \
   -H 'Content-Type: application/json' \
-  -d '{"version":"acceptance","capabilities":{"codex":true}}' \
+  -d "{\"version\":\"acceptance\",\"protocolVersion\":$worker_protocol_version,\"capabilities\":{\"codex\":true}}" \
   "http://127.0.0.1:$local_port/v1/workers/heartbeat" >/dev/null
 
 pods_before=()
@@ -376,7 +376,7 @@ start_port_forward
 curl -sS --fail-with-body -X POST \
   -H "Authorization: Bearer $worker_token" -H "X-Request-ID: post-delete-heartbeat-$run_id" \
   -H 'Content-Type: application/json' \
-  -d '{"version":"acceptance","capabilities":{"codex":true}}' \
+  -d "{\"version\":\"acceptance\",\"protocolVersion\":$worker_protocol_version,\"capabilities\":{\"codex\":true}}" \
   "http://127.0.0.1:$local_port/v1/workers/heartbeat" >/dev/null
 printf 'Worker token remained valid after Pod replacement\n'
 
@@ -404,7 +404,7 @@ start_port_forward
 curl -sS --fail-with-body -X POST \
   -H "Authorization: Bearer $worker_token" -H "X-Request-ID: post-db-heartbeat-$run_id" \
   -H 'Content-Type: application/json' \
-  -d '{"version":"acceptance","capabilities":{"codex":true}}' \
+  -d "{\"version\":\"acceptance\",\"protocolVersion\":$worker_protocol_version,\"capabilities\":{\"codex\":true}}" \
   "http://127.0.0.1:$local_port/v1/workers/heartbeat" >/dev/null
 
 "${kube[@]}" -n "$namespace" scale deployment/synara-stage2-minio --replicas=0 >/dev/null

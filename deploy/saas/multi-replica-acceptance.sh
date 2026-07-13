@@ -2,6 +2,7 @@
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd "$script_dir/../.." && pwd)"
 project="${SYNARA_MULTI_REPLICA_PROJECT:-synara-stage2-multi-$$}"
 work_dir="$(mktemp -d)"
 workspace="$work_dir/workspace"
@@ -28,6 +29,14 @@ export SYNARA_SSE_MAX_CONNECTIONS_PER_TENANT=10
 export SYNARA_WORKSPACE_PATH="$workspace"
 export SYNARA_HOST_PORT="${SYNARA_MULTI_REPLICA_WEB_PORT:-59890}"
 export MINIO_HOST_PORT="${SYNARA_MULTI_REPLICA_MINIO_PORT:-59092}"
+
+latest_migration="$(find "$repo_root/services/control-plane/migrations" -maxdepth 1 -type f -name '[0-9]*.sql' \
+  -exec basename {} \; | sort | tail -n 1)"
+if [[ -z "$latest_migration" ]]; then
+  printf 'No Control Plane migrations were found\n' >&2
+  exit 1
+fi
+expected_schema_version="$((10#${latest_migration%%_*}))"
 
 "${compose[@]}" up -d --build --scale control-plane=2 postgres minio control-plane
 
@@ -79,10 +88,14 @@ runner=(
 "${runner[@]}" phase-one \
   --replica-a "$replica_a" \
   --replica-b "$replica_b" \
+  --expected-schema-version "$expected_schema_version" \
   --registration-token "$SYNARA_WORKER_REGISTRATION_TOKEN"
 
 docker stop "${control_plane_ids[0]}" >/dev/null
 
-"${runner[@]}" phase-two --replica-b "$replica_b"
+"${runner[@]}" phase-two \
+  --replica-b "$replica_b" \
+  --expected-schema-version "$expected_schema_version"
 
-printf 'Multi-replica SaaS acceptance passed: project=%s replicas=%s,%s\n' "$project" "$replica_a" "$replica_b"
+printf 'Multi-replica SaaS acceptance passed: project=%s replicas=%s,%s migrations=%s\n' \
+  "$project" "$replica_a" "$replica_b" "$expected_schema_version"

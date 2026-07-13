@@ -41,7 +41,8 @@ docker compose --env-file deploy/saas/.env -f deploy/saas/docker-compose.yml log
 症状：`/ready=503`，Schema Check 显示缺失/Checksum 不一致，或数据库写能力失败。
 
 1. 确认 PostgreSQL 网络、证书、权限、连接数和磁盘状态。
-2. 对照当前镜像内 Migration 数量；Stage 2 基线为 `000001` 至 `000016`。
+2. 读取 `/ready.checks.schema.expectedVersion`，并与当前镜像内最高的 forward migration 对照；
+   不使用历史 Stage 2 固定数量。当前仓库迁移已连续到 `000028`，后续新增迁移时以运行构建返回值为准。
 3. 查询已应用版本，只读取，不手工补写：
 
    ```sql
@@ -166,6 +167,7 @@ KIND_BIN=/path/to/kind deploy/kubernetes/kind-acceptance.sh
 
 - `docs/release-checklists/stage-2-control-plane.md`
 - `docs/reports/stage-2-production-acceptance.md`
+- `docs/reports/stage-2-production-acceptance-1a53c93a.md`
 - `deploy/saas/README.md`
 - `deploy/kubernetes/README.md`
 - `deploy/kubernetes/monitoring/prometheus-rules.yaml`

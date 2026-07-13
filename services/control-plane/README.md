@@ -42,6 +42,10 @@ foundations. The existing TypeScript server remains the Provider Runtime during 
     scope validation and retention-safe ready Artifact protection
   - `000026_checkpoint_retention.sql`: evidence-preserving Checkpoint expiry, bounded late-PUT cleanup state and
     upload/abandoned-cleanup indexes
+  - `000027_workspace_cleanup_dispatch.sql`: Worker-incarnation and layout-fenced physical Workspace cleanup
+    dispatch, retry and acknowledgement state
+  - `000028_interaction_runtime_event_version.sql`: explicit Runtime Event version continuity for durable
+    Interaction requests and their matching resolution Events
 - ORM: GORM with PostgreSQL and CGO-free SQLite drivers
 - Shared model/repository/transaction utilities: `internal/persistence`
 - Tenant-scoped queries always include `tenant_id`
