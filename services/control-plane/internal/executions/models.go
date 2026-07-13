@@ -90,6 +90,8 @@ type Workload struct {
 	Provider                       string                `json:"provider"`
 	ProviderRuntimeBindingID       *uuid.UUID            `json:"providerRuntimeBindingId,omitempty"`
 	RemoteWorkspaceID              *uuid.UUID            `json:"remoteWorkspaceId,omitempty"`
+	RestoreCheckpointID            *uuid.UUID            `json:"restoreCheckpointId,omitempty"`
+	RestoreCheckpoint              *WorkspaceCheckpoint  `json:"restoreCheckpoint,omitempty"`
 	WorkspaceRepositoryFingerprint *string               `json:"workspaceRepositoryFingerprint,omitempty"`
 	WorkerManifestID               *uuid.UUID            `json:"workerManifestId,omitempty"`
 	Model                          *string               `json:"model"`
@@ -148,10 +150,11 @@ type LeaseInput struct {
 
 type WorkspaceReadyInput struct {
 	LeaseInput
-	RepositoryFingerprint *string `json:"repositoryFingerprint,omitempty"`
-	CurrentBranch         *string `json:"currentBranch,omitempty"`
-	BaseCommit            *string `json:"baseCommit,omitempty"`
-	HeadCommit            *string `json:"headCommit,omitempty"`
+	RepositoryFingerprint *string    `json:"repositoryFingerprint,omitempty"`
+	CurrentBranch         *string    `json:"currentBranch,omitempty"`
+	BaseCommit            *string    `json:"baseCommit,omitempty"`
+	HeadCommit            *string    `json:"headCommit,omitempty"`
+	RestoredCheckpointID  *uuid.UUID `json:"restoredCheckpointId,omitempty"`
 }
 
 type WorkspaceFailedInput struct {
@@ -177,6 +180,57 @@ type WorkspaceState struct {
 	LastExecutionID       *uuid.UUID `json:"lastExecutionId,omitempty"`
 	LastGeneration        *int64     `json:"lastGeneration,omitempty"`
 	UpdatedAt             time.Time  `json:"updatedAt"`
+}
+
+type CreateWorkspaceCheckpointInput struct {
+	LeaseInput
+	IdempotencyKey string         `json:"idempotencyKey"`
+	Strategy       string         `json:"strategy"`
+	BaseCommit     *string        `json:"baseCommit,omitempty"`
+	HeadCommit     *string        `json:"headCommit,omitempty"`
+	CurrentBranch  *string        `json:"currentBranch,omitempty"`
+	Manifest       map[string]any `json:"manifest,omitempty"`
+	FileCount      *int           `json:"fileCount,omitempty"`
+	TotalBytes     *int64         `json:"totalBytes,omitempty"`
+	ExpiresAt      *time.Time     `json:"expiresAt,omitempty"`
+}
+
+type WorkspaceCheckpointReadyInput struct {
+	LeaseInput
+	ArtifactID *uuid.UUID `json:"artifactId,omitempty"`
+	SHA256     *string    `json:"sha256,omitempty"`
+}
+
+type WorkspaceCheckpointFailedInput struct {
+	LeaseInput
+	FailureCode    string `json:"failureCode"`
+	FailureMessage string `json:"failureMessage"`
+}
+
+type WorkspaceCheckpoint struct {
+	ID             uuid.UUID      `json:"id"`
+	WorkspaceID    uuid.UUID      `json:"workspaceId"`
+	SessionID      uuid.UUID      `json:"sessionId"`
+	TurnID         *uuid.UUID     `json:"turnId,omitempty"`
+	ExecutionID    uuid.UUID      `json:"executionId"`
+	Generation     int64          `json:"generation"`
+	IdempotencyKey string         `json:"idempotencyKey"`
+	Strategy       string         `json:"strategy"`
+	Status         string         `json:"status"`
+	BaseCommit     *string        `json:"baseCommit,omitempty"`
+	HeadCommit     *string        `json:"headCommit,omitempty"`
+	CurrentBranch  *string        `json:"currentBranch,omitempty"`
+	ArtifactID     *uuid.UUID     `json:"artifactId,omitempty"`
+	Manifest       map[string]any `json:"manifest"`
+	FileCount      *int           `json:"fileCount,omitempty"`
+	TotalBytes     *int64         `json:"totalBytes,omitempty"`
+	SHA256         *string        `json:"sha256,omitempty"`
+	FailureCode    *string        `json:"failureCode,omitempty"`
+	FailureMessage *string        `json:"failureMessage,omitempty"`
+	CreatedAt      time.Time      `json:"createdAt"`
+	ReadyAt        *time.Time     `json:"readyAt,omitempty"`
+	FailedAt       *time.Time     `json:"failedAt,omitempty"`
+	ExpiresAt      *time.Time     `json:"expiresAt,omitempty"`
 }
 
 type RenewLeaseInput struct {

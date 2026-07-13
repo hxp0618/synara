@@ -373,6 +373,35 @@ func (s *Service) Complete(
 		if execution.Status == "waiting-for-approval" {
 			return Execution{}, problem.New(409, "execution_interaction_pending", "The execution is waiting for approval or user input.")
 		}
+		if execution.RemoteWorkspaceID != nil {
+			workspace, err := lockExecutionWorkspace(ctx, tx, execution)
+			if err != nil {
+				return Execution{}, err
+			}
+			if workspace.LastWorkerID == nil || *workspace.LastWorkerID != worker.ID ||
+				workspace.LastExecutionID == nil || *workspace.LastExecutionID != execution.ID ||
+				workspace.LastGeneration == nil || *workspace.LastGeneration != execution.Generation {
+				return Execution{}, problem.New(409, "workspace_generation_conflict", "The logical Workspace is not owned by the current Execution Generation.")
+			}
+			if workspace.State != "ready" && workspace.State != "dirty" {
+				return Execution{}, problem.New(409, "workspace_checkpoint_required", "The logical Workspace must have a ready Checkpoint before the Execution can complete.")
+			}
+			if workspace.State == "dirty" {
+				if workspace.CurrentCheckpointID == nil {
+					return Execution{}, problem.New(409, "workspace_checkpoint_required", "The dirty logical Workspace must have a ready Checkpoint before the Execution can complete.")
+				}
+				var checkpoint persistence.WorkspaceCheckpoint
+				if err := tx.WithContext(ctx).
+					Where("tenant_id = ? AND workspace_id = ? AND id = ? AND status = ?",
+						execution.TenantID, workspace.ID, *workspace.CurrentCheckpointID, "ready").
+					Take(&checkpoint).Error; err != nil {
+					return Execution{}, problem.Wrap(409, "workspace_checkpoint_required", "The dirty logical Workspace does not have an available ready Checkpoint.", err)
+				}
+				if checkpoint.ExecutionID != execution.ID || checkpoint.Generation != execution.Generation {
+					return Execution{}, problem.New(409, "workspace_checkpoint_stale", "The dirty logical Workspace was not checkpointed by the current Execution Generation.")
+				}
+			}
+		}
 		if err := s.storeProviderCursor(ctx, tx, execution, input.ProviderResumeCursor); err != nil {
 			return Execution{}, err
 		}
@@ -592,11 +621,29 @@ func (s *Service) RecoverExpired(ctx context.Context, limit int) error {
 			if err := requeueExecutionControlCommands(ctx, tx, execution, lease, "The Worker lease expired before the Control command was acknowledged."); err != nil {
 				return err
 			}
+			var restoreCheckpointID *uuid.UUID
+			if execution.RemoteWorkspaceID != nil {
+				var workspace persistence.RemoteWorkspace
+				if err := persistence.WithLocking(tx.WithContext(ctx), "UPDATE", "").
+					Where("tenant_id = ? AND id = ? AND session_id = ?", execution.TenantID, *execution.RemoteWorkspaceID, execution.SessionID).
+					Take(&workspace).Error; err != nil {
+					return problem.Wrap(500, "workspace_recovery_load_failed", "Failed to load the logical Workspace during Execution recovery.", err)
+				}
+				restoreCheckpointID = workspace.CurrentCheckpointID
+				if err := tx.WithContext(ctx).Model(&persistence.RemoteWorkspace{}).
+					Where("tenant_id = ? AND id = ?", workspace.TenantID, workspace.ID).
+					Updates(map[string]any{"state": "recovering", "updated_at": s.now()}).Error; err != nil {
+					return problem.Wrap(500, "workspace_recovery_update_failed", "Failed to mark the logical Workspace for recovery.", err)
+				}
+			}
 			execution.Status = "recovering"
 			execution.WorkerID = nil
 			recoveryUpdate := tx.WithContext(ctx).Model(&persistence.AgentExecution{}).
 				Where("id = ? AND worker_id = ? AND generation = ? AND status IN ?", execution.ID, lease.WorkerID, lease.Generation, []string{"leased", "running", "waiting-for-approval"}).
-				Updates(map[string]any{"status": "recovering", "worker_id": nil})
+				Updates(map[string]any{
+					"status": "recovering", "worker_id": nil,
+					"restore_checkpoint_id": restoreCheckpointID,
+				})
 			if err := expectOne(recoveryUpdate, 409, "execution_recovery_failed", "Failed to move an expired execution into recovery."); err != nil {
 				return err
 			}

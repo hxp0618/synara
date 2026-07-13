@@ -2,13 +2,18 @@ package agentd
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -20,6 +25,142 @@ import (
 	"github.com/synara-ai/synara/services/control-plane/internal/platform"
 )
 
+func TestDaemonRestoresSnapshotBeforeProviderAndReusesUnchangedCheckpoint(t *testing.T) {
+	t.Setenv("GO_WANT_AGENTD_DRAIN_HELPER", "1")
+	t.Setenv("AGENTD_DRAIN_HELPER_DELAY", "1ms")
+	executionID := uuid.New()
+	tenantID := uuid.New()
+	organizationID := uuid.New()
+	projectID := uuid.New()
+	sessionID := uuid.New()
+	turnID := uuid.New()
+	workspaceID := uuid.New()
+	workerID := uuid.New()
+	checkpointID := uuid.New()
+	artifactID := uuid.New()
+	lease := executions.Lease{
+		ExecutionID: executionID, TenantID: tenantID, WorkerID: workerID,
+		Generation: 2, LeaseToken: "lease-token", ExpiresAt: time.Now().Add(time.Hour),
+	}
+	source := t.TempDir()
+	if err := os.WriteFile(filepath.Join(source, "restored.txt"), []byte("checkpoint payload\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	candidate, err := captureWorkspaceCheckpoint(
+		executions.Execution{ID: uuid.New(), Generation: 1},
+		WorkspaceMaterialization{Directory: source, Managed: true},
+		WorkspaceInspection{Dirty: true},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer candidate.Cleanup()
+	archive, err := os.ReadFile(candidate.ArtifactPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(archive)
+	sha := hex.EncodeToString(digest[:])
+	archiveSize := int64(len(archive))
+	checkpoint := executions.WorkspaceCheckpoint{
+		ID: checkpointID, WorkspaceID: workspaceID, SessionID: sessionID, TurnID: &turnID,
+		ExecutionID: uuid.New(), Generation: 1, IdempotencyKey: "previous-snapshot",
+		Strategy: "snapshot", Status: "ready", ArtifactID: &artifactID,
+		Manifest: candidate.Manifest, FileCount: &candidate.FileCount,
+		TotalBytes: &candidate.TotalBytes, SHA256: &sha,
+	}
+	var state struct {
+		sync.Mutex
+		order []string
+		ready executions.WorkspaceReadyInput
+	}
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		base := "/v1/workers/executions/" + executionID.String() + "/"
+		switch request.URL.Path {
+		case base + "workspace/checkpoints/" + checkpointID.String() + "/artifact/download":
+			state.Lock()
+			state.order = append(state.order, "checkpoint.download.grant")
+			state.Unlock()
+			response.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(response, `{"artifact":{"id":"`+artifactID.String()+`","sizeBytes":`+fmt.Sprint(archiveSize)+`,"sha256":"`+sha+`"},"url":"`+server.URL+`/checkpoint-content","expiresAt":"2030-01-01T00:00:00Z"}`)
+		case "/checkpoint-content":
+			state.Lock()
+			state.order = append(state.order, "checkpoint.download.content")
+			state.Unlock()
+			response.Header().Set("Content-Type", "application/x-tar")
+			_, _ = response.Write(archive)
+		case base + "workspace/ready":
+			if err := json.NewDecoder(request.Body).Decode(&state.ready); err != nil {
+				http.Error(response, "invalid Workspace ready payload", http.StatusBadRequest)
+				return
+			}
+			state.Lock()
+			state.order = append(state.order, "workspace.ready")
+			state.Unlock()
+			response.WriteHeader(http.StatusNoContent)
+		case base + "start":
+			state.Lock()
+			state.order = append(state.order, "execution.start")
+			state.Unlock()
+			response.WriteHeader(http.StatusNoContent)
+		case base + "complete":
+			state.Lock()
+			state.order = append(state.order, "execution.complete")
+			state.Unlock()
+			response.WriteHeader(http.StatusNoContent)
+		default:
+			http.Error(response, "unexpected path", http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	controlPlaneURL, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	cfg := Config{
+		ControlPlaneURL: controlPlaneURL, TargetKind: platform.TargetLocal,
+		RunnerCommand:  []string{os.Args[0], "-test.run=TestAgentdDrainRunnerHelperProcess", "--"},
+		RunnerProtocol: RunnerProtocolV1, WorkspaceRoot: root, PollInterval: time.Millisecond,
+		HeartbeatInterval: time.Hour, LeaseRenewInterval: time.Hour, DrainTimeout: time.Second,
+		RequestTimeout: time.Second, ArtifactTimeout: time.Second, RunnerMessageBytes: 1 << 20,
+	}
+	client := NewClient(cfg)
+	client.workerToken = "worker-token"
+	daemon := &Daemon{
+		config: cfg, client: client, runner: NewRunner(cfg),
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	execution := executions.Execution{ID: executionID, TenantID: tenantID, TurnID: turnID, Generation: lease.Generation}
+	workload := executions.Workload{
+		TenantID: tenantID, OrganizationID: organizationID, ProjectID: projectID,
+		SessionID: sessionID, TurnID: turnID, RemoteWorkspaceID: &workspaceID,
+		RestoreCheckpointID: &checkpointID, RestoreCheckpoint: &checkpoint,
+		Provider: "codex", InputText: "continue", DefaultBranch: "main",
+	}
+	if err := daemon.runExecution(context.Background(), execution, lease, workload, nil); err != nil {
+		t.Fatal(err)
+	}
+	workspace := filepath.Join(root, tenantID.String(), projectID.String(), sessionID.String(), workspaceID.String())
+	content, err := os.ReadFile(filepath.Join(workspace, "restored.txt"))
+	if err != nil || string(content) != "checkpoint payload\n" {
+		t.Fatalf("Provider did not receive the restored Workspace: %q err=%v", content, err)
+	}
+	state.Lock()
+	defer state.Unlock()
+	expectedOrder := []string{
+		"checkpoint.download.grant", "checkpoint.download.content", "workspace.ready",
+		"execution.start", "execution.complete",
+	}
+	if !reflect.DeepEqual(state.order, expectedOrder) {
+		t.Fatalf("unexpected restore lifecycle order: %#v", state.order)
+	}
+	if state.ready.RestoredCheckpointID == nil || *state.ready.RestoredCheckpointID != checkpointID {
+		t.Fatalf("Workspace restore was not reported: %#v", state.ready)
+	}
+}
+
 func TestDaemonPreparesManagedWorkspaceBeforeStartingProvider(t *testing.T) {
 	t.Setenv("GO_WANT_AGENTD_DRAIN_HELPER", "1")
 	t.Setenv("AGENTD_DRAIN_HELPER_DELAY", "1ms")
@@ -28,6 +169,8 @@ func TestDaemonPreparesManagedWorkspaceBeforeStartingProvider(t *testing.T) {
 	workerID := uuid.New()
 	workspaceID := uuid.New()
 	gitCredentialID := uuid.New()
+	checkpointID := uuid.New()
+	artifactID := uuid.New()
 	lease := executions.Lease{
 		ExecutionID: executionID, TenantID: tenantID, WorkerID: workerID,
 		Generation: 1, LeaseToken: "lease-token", ExpiresAt: time.Now().Add(time.Hour),
@@ -41,7 +184,8 @@ func TestDaemonPreparesManagedWorkspaceBeforeStartingProvider(t *testing.T) {
 		dirty         executions.WorkspaceDirtyInput
 		requestBodies []string
 	}
-	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		base := "/v1/workers/executions/" + executionID.String() + "/"
 		requestBody, _ := io.ReadAll(request.Body)
 		request.Body = io.NopCloser(strings.NewReader(string(requestBody)))
@@ -49,6 +193,11 @@ func TestDaemonPreparesManagedWorkspaceBeforeStartingProvider(t *testing.T) {
 		state.requestBodies = append(state.requestBodies, string(requestBody))
 		state.Unlock()
 		switch request.URL.Path {
+		case "/checkpoint-upload":
+			state.Lock()
+			state.order = append(state.order, "checkpoint.upload")
+			state.Unlock()
+			response.WriteHeader(http.StatusNoContent)
 		case base + "git-credentials/" + gitCredentialID.String() + "/resolve":
 			state.Lock()
 			state.order = append(state.order, "git.resolve")
@@ -75,6 +224,41 @@ func TestDaemonPreparesManagedWorkspaceBeforeStartingProvider(t *testing.T) {
 			state.Lock()
 			state.dirty = input
 			state.order = append(state.order, "workspace.dirty")
+			state.Unlock()
+			response.WriteHeader(http.StatusNoContent)
+		case base + "workspace/checkpoints":
+			var input executions.CreateWorkspaceCheckpointInput
+			if err := json.NewDecoder(request.Body).Decode(&input); err != nil {
+				http.Error(response, "invalid Checkpoint payload", http.StatusBadRequest)
+				return
+			}
+			state.Lock()
+			state.order = append(state.order, "checkpoint.create")
+			state.Unlock()
+			response.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(response, `{"id":"`+checkpointID.String()+`","status":"pending"}`)
+		case base + "artifacts":
+			state.Lock()
+			state.order = append(state.order, "checkpoint.artifact.create")
+			state.Unlock()
+			response.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(response, `{"artifact":{"id":"`+artifactID.String()+`"},"method":"PUT","url":"`+server.URL+`/checkpoint-upload","headers":{},"expiresAt":"2030-01-01T00:00:00Z"}`)
+		case base + "artifacts/" + artifactID.String() + "/complete":
+			var input struct {
+				SHA256 string `json:"sha256"`
+			}
+			if err := json.NewDecoder(request.Body).Decode(&input); err != nil {
+				http.Error(response, "invalid Artifact complete payload", http.StatusBadRequest)
+				return
+			}
+			state.Lock()
+			state.order = append(state.order, "checkpoint.artifact.ready")
+			state.Unlock()
+			response.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(response, `{"id":"`+artifactID.String()+`","sha256":"`+input.SHA256+`"}`)
+		case base + "workspace/checkpoints/" + checkpointID.String() + "/ready":
+			state.Lock()
+			state.order = append(state.order, "checkpoint.ready")
 			state.Unlock()
 			response.WriteHeader(http.StatusNoContent)
 		case base + "start":
@@ -143,7 +327,8 @@ func TestDaemonPreparesManagedWorkspaceBeforeStartingProvider(t *testing.T) {
 	defer state.Unlock()
 	expectedOrder := []string{
 		"git.resolve", "workspace.materialize", "workspace.ready", "execution.start",
-		"workspace.inspect", "workspace.dirty", "execution.complete",
+		"workspace.inspect", "workspace.dirty", "checkpoint.create", "checkpoint.artifact.create",
+		"checkpoint.upload", "checkpoint.artifact.ready", "checkpoint.ready", "execution.complete",
 	}
 	if len(state.order) != len(expectedOrder) {
 		t.Fatalf("unexpected Workspace/Execution lifecycle order: %#v", state.order)

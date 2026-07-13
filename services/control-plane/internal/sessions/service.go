@@ -427,7 +427,8 @@ func (s *Service) CreateTurnWithIdempotency(
 			ID: uuid.New(), TenantID: tenantID, SessionID: sessionID, TurnID: turn.ID,
 			Attempt: 1, Status: "queued", ExecutionTargetID: target.ID, TargetKind: target.Kind,
 			Provider: &provider, ProviderRuntimeBindingID: &resources.BindingID, RemoteWorkspaceID: &resources.WorkspaceID,
-			Generation: 0, RequestedBy: principal.UserID, QueuedAt: queuedAt,
+			RestoreCheckpointID: resources.RestoreCheckpointID,
+			Generation:          0, RequestedBy: principal.UserID, QueuedAt: queuedAt,
 		}
 		if err := tx.Create(&turn).Error; err != nil {
 			return Turn{}, problem.Wrap(409, "turn_create_rejected", "Turn creation was rejected by a tenant isolation constraint.", err)
@@ -442,7 +443,8 @@ func (s *Service) CreateTurnWithIdempotency(
 				"turnId": turn.ID, "executionTargetId": execution.ExecutionTargetID,
 				"targetKind": execution.TargetKind, "attempt": execution.Attempt,
 				"provider": provider, "providerRuntimeBindingId": resources.BindingID,
-				"remoteWorkspaceId": resources.WorkspaceID,
+				"remoteWorkspaceId":   resources.WorkspaceID,
+				"restoreCheckpointId": resources.RestoreCheckpointID,
 			},
 			Headers: map[string]any{"eventVersion": 1}, AvailableAt: queuedAt, CreatedAt: queuedAt,
 		}); err != nil {

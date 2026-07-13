@@ -135,6 +135,72 @@ func (s *Server) markWorkspaceDirty(w http.ResponseWriter, r *http.Request) {
 	writeOperation(w, result.Replayed, result.StatusCode, result.Value)
 }
 
+func (s *Server) createWorkspaceCheckpoint(w http.ResponseWriter, r *http.Request) {
+	executionID, ok := s.pathUUID(w, r, "executionID")
+	if !ok {
+		return
+	}
+	var input executions.CreateWorkspaceCheckpointInput
+	if err := decodeJSON(r, &input); err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	result, err := s.executions.CreateWorkspaceCheckpoint(r.Context(), mustWorker(r), executionID, input, requestID(r))
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	writeOperation(w, result.Replayed, result.StatusCode, result.Value)
+}
+
+func (s *Server) markWorkspaceCheckpointReady(w http.ResponseWriter, r *http.Request) {
+	executionID, ok := s.pathUUID(w, r, "executionID")
+	if !ok {
+		return
+	}
+	checkpointID, ok := s.pathUUID(w, r, "checkpointID")
+	if !ok {
+		return
+	}
+	var input executions.WorkspaceCheckpointReadyInput
+	if err := decodeJSON(r, &input); err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	result, err := s.executions.MarkWorkspaceCheckpointReady(
+		r.Context(), mustWorker(r), executionID, checkpointID, input, requestID(r),
+	)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	writeOperation(w, result.Replayed, result.StatusCode, result.Value)
+}
+
+func (s *Server) markWorkspaceCheckpointFailed(w http.ResponseWriter, r *http.Request) {
+	executionID, ok := s.pathUUID(w, r, "executionID")
+	if !ok {
+		return
+	}
+	checkpointID, ok := s.pathUUID(w, r, "checkpointID")
+	if !ok {
+		return
+	}
+	var input executions.WorkspaceCheckpointFailedInput
+	if err := decodeJSON(r, &input); err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	result, err := s.executions.MarkWorkspaceCheckpointFailed(
+		r.Context(), mustWorker(r), executionID, checkpointID, input, requestID(r),
+	)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	writeOperation(w, result.Replayed, result.StatusCode, result.Value)
+}
+
 func (s *Server) markWorkspaceFailed(w http.ResponseWriter, r *http.Request) {
 	executionID, ok := s.pathUUID(w, r, "executionID")
 	if !ok {

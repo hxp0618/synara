@@ -746,6 +746,191 @@ func TestWorkspacePreparationIsGenerationFencedAcrossWorkerRecovery(t *testing.T
 	}
 }
 
+func TestWorkspaceCheckpointLifecyclePreservesLastReadyRecoveryPoint(t *testing.T) {
+	ctx := context.Background()
+	db := integrationDB(t)
+	fixture := seedExecutionFixture(t, db)
+	service := integrationService(t, db)
+	var session persistence.AgentSession
+	if err := db.Where("tenant_id = ? AND id = ?", fixture.TenantID, fixture.SessionID).Take(&session).Error; err != nil {
+		t.Fatal(err)
+	}
+	workspace := persistence.RemoteWorkspace{
+		ID: uuid.New(), TenantID: fixture.TenantID, OrganizationID: session.OrganizationID,
+		ProjectID: session.ProjectID, SessionID: fixture.SessionID, ExecutionTargetID: fixture.TargetID,
+		WorkspaceMode: "clone", State: "pending", DefaultBranch: "main",
+	}
+	if err := db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(&workspace).Error; err != nil {
+			return err
+		}
+		return tx.Model(&persistence.AgentExecution{}).
+			Where("tenant_id = ? AND id = ?", fixture.TenantID, fixture.ExecutionID).
+			Update("remote_workspace_id", workspace.ID).Error
+	}); err != nil {
+		t.Fatal(err)
+	}
+	worker := registerManifestTestWorker(t, service, fixture.TargetID, fixture.TargetKind, "worker-checkpoint")
+	cleanupWorkers(t, db, worker.ID)
+	claim, err := service.Claim(ctx, worker, ClaimExecutionInput{
+		ExecutionTargetID: fixture.TargetID, TargetKind: fixture.TargetKind, ExecutionID: &fixture.ExecutionID,
+	}, "checkpoint-claim")
+	if err != nil || claim.Value.Lease == nil {
+		t.Fatalf("Checkpoint claim failed: result=%#v err=%v", claim, err)
+	}
+	lease := *claim.Value.Lease
+	leaseInput := LeaseInput{TenantID: fixture.TenantID, Generation: lease.Generation, LeaseToken: lease.LeaseToken}
+	fingerprint := strings.Repeat("a", 64)
+	branch := "synara/session-checkpoint"
+	baseCommit, headCommit := strings.Repeat("b", 40), strings.Repeat("c", 40)
+	if _, err := service.MarkWorkspaceReady(ctx, worker, fixture.ExecutionID, WorkspaceReadyInput{
+		LeaseInput: leaseInput, RepositoryFingerprint: &fingerprint, CurrentBranch: &branch,
+		BaseCommit: &baseCommit, HeadCommit: &headCommit,
+	}, "checkpoint-workspace-ready"); err != nil {
+		t.Fatal(err)
+	}
+	gitReferenceInput := CreateWorkspaceCheckpointInput{
+		LeaseInput: leaseInput, IdempotencyKey: "turn-terminal-git-reference", Strategy: "git-reference",
+		BaseCommit: &baseCommit, HeadCommit: &headCommit, CurrentBranch: &branch,
+		Manifest: map[string]any{"format": "synara-git-reference-v1", "headCommit": headCommit},
+	}
+	created, err := service.CreateWorkspaceCheckpoint(ctx, worker, fixture.ExecutionID, gitReferenceInput, "checkpoint-create-git")
+	if err != nil || created.Value.Status != "pending" {
+		t.Fatalf("Git-reference Checkpoint create failed: result=%#v err=%v", created, err)
+	}
+	replayed, err := service.CreateWorkspaceCheckpoint(ctx, worker, fixture.ExecutionID, gitReferenceInput, "checkpoint-create-git-replay")
+	if err != nil || replayed.Value.ID != created.Value.ID {
+		t.Fatalf("Git-reference domain idempotency failed: result=%#v err=%v", replayed, err)
+	}
+	conflictingHead := strings.Repeat("d", 40)
+	conflictInput := gitReferenceInput
+	conflictInput.HeadCommit = &conflictingHead
+	if _, err := service.CreateWorkspaceCheckpoint(ctx, worker, fixture.ExecutionID, conflictInput, "checkpoint-create-git-conflict"); err == nil {
+		t.Fatal("Checkpoint idempotency key accepted different content")
+	}
+	gitReady, err := service.MarkWorkspaceCheckpointReady(ctx, worker, fixture.ExecutionID, created.Value.ID, WorkspaceCheckpointReadyInput{
+		LeaseInput: leaseInput,
+	}, "checkpoint-ready-git")
+	if err != nil || gitReady.Value.Status != "ready" || gitReady.Value.ArtifactID != nil {
+		t.Fatalf("Git-reference Checkpoint ready failed: result=%#v err=%v", gitReady, err)
+	}
+
+	dirtyHead := strings.Repeat("e", 40)
+	if _, err := service.MarkWorkspaceDirty(ctx, worker, fixture.ExecutionID, WorkspaceDirtyInput{
+		LeaseInput: leaseInput, CurrentBranch: &branch, HeadCommit: &dirtyHead,
+	}, "checkpoint-workspace-dirty"); err != nil {
+		t.Fatal(err)
+	}
+	fileCount, totalBytes := 2, int64(128)
+	snapshotInput := CreateWorkspaceCheckpointInput{
+		LeaseInput: leaseInput, IdempotencyKey: "turn-terminal-snapshot", Strategy: "snapshot",
+		BaseCommit: &baseCommit, HeadCommit: &dirtyHead, CurrentBranch: &branch,
+		Manifest:  map[string]any{"format": "synara-workspace-snapshot-v1", "files": []any{}},
+		FileCount: &fileCount, TotalBytes: &totalBytes,
+	}
+	snapshot, err := service.CreateWorkspaceCheckpoint(ctx, worker, fixture.ExecutionID, snapshotInput, "checkpoint-create-snapshot")
+	if err != nil || snapshot.Value.Status != "pending" {
+		t.Fatalf("Snapshot Checkpoint create failed: result=%#v err=%v", snapshot, err)
+	}
+	secondInput := snapshotInput
+	secondInput.IdempotencyKey = "turn-terminal-snapshot-second"
+	if _, err := service.CreateWorkspaceCheckpoint(ctx, worker, fixture.ExecutionID, secondInput, "checkpoint-create-snapshot-second"); err == nil {
+		t.Fatal("Workspace accepted more than one active Checkpoint")
+	}
+	now := time.Now().UTC()
+	sha := strings.Repeat("f", 64)
+	contentType := "application/x-tar"
+	size := int64(256)
+	artifact := persistence.Artifact{
+		ID: uuid.New(), TenantID: fixture.TenantID, OrganizationID: session.OrganizationID,
+		ProjectID: session.ProjectID, SessionID: fixture.SessionID, ExecutionID: &fixture.ExecutionID,
+		Kind: "workspace_snapshot", Status: "ready", Bucket: "test", ObjectKey: "checkpoint/" + uuid.NewString(),
+		ContentType: &contentType, SizeBytes: &size, SHA256: &sha,
+		CreatedByType: "worker", CreatedByID: worker.ID, ReadyAt: &now, CreatedAt: now,
+	}
+	if err := db.Create(&artifact).Error; err != nil {
+		t.Fatal(err)
+	}
+	snapshotReady, err := service.MarkWorkspaceCheckpointReady(ctx, worker, fixture.ExecutionID, snapshot.Value.ID, WorkspaceCheckpointReadyInput{
+		LeaseInput: leaseInput, ArtifactID: &artifact.ID, SHA256: &sha,
+	}, "checkpoint-ready-snapshot")
+	if err != nil || snapshotReady.Value.Status != "ready" || snapshotReady.Value.ArtifactID == nil ||
+		*snapshotReady.Value.ArtifactID != artifact.ID {
+		t.Fatalf("Snapshot Checkpoint ready failed: result=%#v err=%v", snapshotReady, err)
+	}
+	var persistedWorkspace persistence.RemoteWorkspace
+	if err := db.Where("tenant_id = ? AND id = ?", fixture.TenantID, workspace.ID).Take(&persistedWorkspace).Error; err != nil {
+		t.Fatal(err)
+	}
+	if persistedWorkspace.State != "dirty" || persistedWorkspace.CurrentCheckpointID == nil ||
+		*persistedWorkspace.CurrentCheckpointID != snapshot.Value.ID {
+		t.Fatalf("Snapshot did not become the last ready recovery point: %#v", persistedWorkspace)
+	}
+	var persistedExecution persistence.AgentExecution
+	if err := db.Where("tenant_id = ? AND id = ?", fixture.TenantID, fixture.ExecutionID).Take(&persistedExecution).Error; err != nil {
+		t.Fatal(err)
+	}
+	if persistedExecution.RestoreCheckpointID == nil || *persistedExecution.RestoreCheckpointID != snapshot.Value.ID {
+		t.Fatalf("Execution did not bind the last ready Checkpoint: %#v", persistedExecution.RestoreCheckpointID)
+	}
+	if err := db.Transaction(func(tx *gorm.DB) error {
+		return tx.Model(&persistence.Artifact{}).Where("tenant_id = ? AND id = ?", fixture.TenantID, artifact.ID).
+			Update("status", "deleting").Error
+	}); err == nil {
+		t.Fatal("Ready Checkpoint Artifact could be invalidated")
+	}
+	failedInput := snapshotInput
+	failedInput.IdempotencyKey = "turn-terminal-snapshot-failed"
+	failedCheckpoint, err := service.CreateWorkspaceCheckpoint(ctx, worker, fixture.ExecutionID, failedInput, "checkpoint-create-failed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.MarkWorkspaceCheckpointFailed(ctx, worker, fixture.ExecutionID, failedCheckpoint.Value.ID, WorkspaceCheckpointFailedInput{
+		LeaseInput: leaseInput, FailureCode: "checkpoint_persist_failed", FailureMessage: "object storage unavailable",
+	}, "checkpoint-failed"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Where("tenant_id = ? AND id = ?", fixture.TenantID, workspace.ID).Take(&persistedWorkspace).Error; err != nil {
+		t.Fatal(err)
+	}
+	if persistedWorkspace.CurrentCheckpointID == nil || *persistedWorkspace.CurrentCheckpointID != snapshot.Value.ID {
+		t.Fatalf("Failed Checkpoint replaced the last ready recovery point: %#v", persistedWorkspace.CurrentCheckpointID)
+	}
+	if _, err := service.Complete(ctx, worker, fixture.ExecutionID, CompleteExecutionInput{
+		LeaseInput: leaseInput, Output: map[string]any{"status": "checkpointed"},
+	}, "checkpoint-complete"); err != nil {
+		t.Fatalf("Checkpointed dirty Workspace could not complete: %v", err)
+	}
+	cipher, err := secret.NewCursorCipher(bytes.Repeat([]byte{0x43}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetService := executiontargets.NewService(db, testPlatformConfig(), cipher)
+	sessionService := sessions.NewService(db, projects.NewService(db), targetService)
+	principal := identity.Principal{UserID: fixture.UserID, ActiveTenantID: &fixture.TenantID}
+	nextTurn, err := sessionService.CreateTurn(ctx, principal, fixture.SessionID, sessions.CreateTurnInput{
+		InputText: "Continue from the durable Workspace Checkpoint",
+	}, "checkpoint-next-turn", "127.0.0.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var nextExecution persistence.AgentExecution
+	if err := db.Where("tenant_id = ? AND turn_id = ?", fixture.TenantID, nextTurn.ID).Take(&nextExecution).Error; err != nil {
+		t.Fatal(err)
+	}
+	if nextExecution.RestoreCheckpointID == nil || *nextExecution.RestoreCheckpointID != snapshot.Value.ID {
+		t.Fatalf("new Execution did not freeze the last ready Checkpoint: %#v", nextExecution.RestoreCheckpointID)
+	}
+	nextClaim, err := service.Claim(ctx, worker, ClaimExecutionInput{
+		ExecutionTargetID: fixture.TargetID, TargetKind: fixture.TargetKind, ExecutionID: &nextExecution.ID,
+	}, "checkpoint-next-claim")
+	if err != nil || nextClaim.Value.Workload == nil || nextClaim.Value.Workload.RestoreCheckpoint == nil ||
+		nextClaim.Value.Workload.RestoreCheckpoint.ID != snapshot.Value.ID ||
+		nextClaim.Value.Workload.RestoreCheckpoint.ArtifactID == nil {
+		t.Fatalf("replacement Workload omitted the frozen Checkpoint: result=%#v err=%v", nextClaim, err)
+	}
+}
+
 func TestDurableInterruptCommandRebindsAfterWorkerRelease(t *testing.T) {
 	db := integrationDB(t)
 	fixture := seedExecutionFixture(t, db)
@@ -1675,10 +1860,19 @@ func cleanupWorkers(t *testing.T, db *gorm.DB, workerIDs ...uuid.UUID) {
 
 func cleanupFixture(db *gorm.DB, tenantID uuid.UUID) {
 	_ = db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(&persistence.AgentExecution{}).Where("tenant_id = ?", tenantID).
+			Update("restore_checkpoint_id", nil).Error; err != nil {
+			return err
+		}
+		if err := tx.Model(&persistence.RemoteWorkspace{}).Where("tenant_id = ?", tenantID).
+			Update("current_checkpoint_id", nil).Error; err != nil {
+			return err
+		}
 		models := []any{
 			&persistence.WorkerLease{}, &persistence.SessionEvent{}, &persistence.OutboxMessage{},
 			&persistence.APIIdempotencyKey{}, &persistence.ExecutionInteraction{}, &persistence.ExecutionControlCommand{},
-			&persistence.TenantQuota{}, &persistence.AgentExecution{}, &persistence.AgentTurn{},
+			&persistence.WorkspaceCheckpoint{}, &persistence.Artifact{},
+			&persistence.TenantQuota{}, &persistence.AgentExecution{}, &persistence.RemoteWorkspace{}, &persistence.AgentTurn{},
 			&persistence.AgentSession{}, &persistence.Project{}, &persistence.ExecutionTarget{},
 		}
 		for _, model := range models {

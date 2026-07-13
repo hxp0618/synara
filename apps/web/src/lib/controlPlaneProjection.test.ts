@@ -198,4 +198,46 @@ describe("Control Plane Session projection", () => {
       expect.arrayContaining(["turn.steer-requested", "turn.steered"]),
     );
   });
+
+  it("projects Workspace restore, dirty, and Checkpoint lifecycle events explicitly", () => {
+    let projection = createControlPlaneSessionProjection(session);
+    for (const item of [
+      event(1, "workspace.ready", {
+        turnId: "turn-1",
+        workspaceId: "workspace-1",
+        restoredCheckpointId: "checkpoint-previous",
+      }),
+      event(2, "workspace.dirty", {
+        turnId: "turn-1",
+        workspaceId: "workspace-1",
+      }),
+      event(3, "checkpoint.created", {
+        turnId: "turn-1",
+        workspaceId: "workspace-1",
+        checkpointId: "checkpoint-1",
+      }),
+      event(4, "checkpoint.ready", {
+        turnId: "turn-1",
+        workspaceId: "workspace-1",
+        checkpointId: "checkpoint-1",
+      }),
+      event(5, "checkpoint.failed", {
+        turnId: "turn-1",
+        workspaceId: "workspace-1",
+        checkpointId: "checkpoint-2",
+        failureMessage: "Object storage unavailable",
+      }),
+    ]) {
+      projection = applyControlPlaneSessionEvent(projection, item).projection;
+    }
+
+    expect(projection.activities.map((activity) => activity.summary)).toEqual([
+      "Workspace restored",
+      "Workspace changed",
+      "Workspace checkpoint started",
+      "Workspace checkpoint ready",
+      "Object storage unavailable",
+    ]);
+    expect(projection.activities.at(-1)?.tone).toBe("error");
+  });
 });

@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -86,6 +87,7 @@ func (c *Client) MarkWorkspaceReady(
 			},
 			RepositoryFingerprint: result.RepositoryFingerprint, CurrentBranch: result.CurrentBranch,
 			BaseCommit: result.BaseCommit, HeadCommit: result.HeadCommit,
+			RestoredCheckpointID: result.RestoredCheckpointID,
 		}, nil,
 	)
 }
@@ -363,32 +365,32 @@ func (c *Client) UploadArtifact(
 	lease executions.Lease,
 	artifact RunnerArtifact,
 	absolutePath string,
-) error {
+) (artifacts.Artifact, error) {
 	var grant artifacts.UploadGrant
 	err := c.doJSON(ctx, http.MethodPost, executionPath(executionID, "artifacts"), c.workerToken, uuid.NewString(), artifacts.WorkerCreateInput{
 		TenantID: lease.TenantID, Generation: lease.Generation, LeaseToken: lease.LeaseToken,
 		Kind: artifact.Kind, OriginalName: optionalName(artifact.OriginalName),
 	}, &grant)
 	if err != nil {
-		return err
+		return artifacts.Artifact{}, err
 	}
 	file, err := os.Open(absolutePath)
 	if err != nil {
-		return fmt.Errorf("open runner artifact: %w", err)
+		return artifacts.Artifact{}, fmt.Errorf("open runner artifact: %w", err)
 	}
 	defer file.Close()
 	info, err := file.Stat()
 	if err != nil {
-		return fmt.Errorf("stat runner artifact: %w", err)
+		return artifacts.Artifact{}, fmt.Errorf("stat runner artifact: %w", err)
 	}
 	hash := sha256.New()
 	uploadURL, err := c.resolveURL(grant.URL)
 	if err != nil {
-		return err
+		return artifacts.Artifact{}, err
 	}
 	request, err := http.NewRequestWithContext(ctx, grant.Method, uploadURL.String(), io.TeeReader(file, hash))
 	if err != nil {
-		return err
+		return artifacts.Artifact{}, err
 	}
 	request.ContentLength = info.Size()
 	for name, value := range grant.Headers {
@@ -397,18 +399,165 @@ func (c *Client) UploadArtifact(
 	request.Header.Set("Content-Type", artifact.ContentType)
 	response, err := c.uploadHTTP.Do(request)
 	if err != nil {
-		return fmt.Errorf("upload runner artifact: %w", err)
+		return artifacts.Artifact{}, fmt.Errorf("upload runner artifact: %w", err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return responseError(response)
+		return artifacts.Artifact{}, responseError(response)
 	}
-	return c.doJSONUsing(ctx, c.uploadHTTP, http.MethodPost, executionPath(executionID, "artifacts/"+grant.Artifact.ID.String()+"/complete"), c.workerToken, uuid.NewString(), artifacts.WorkerCompleteInput{
+	var completed artifacts.Artifact
+	err = c.doJSONUsing(ctx, c.uploadHTTP, http.MethodPost, executionPath(executionID, "artifacts/"+grant.Artifact.ID.String()+"/complete"), c.workerToken, uuid.NewString(), artifacts.WorkerCompleteInput{
 		TenantID: lease.TenantID, Generation: lease.Generation, LeaseToken: lease.LeaseToken,
 		CompleteInput: artifacts.CompleteInput{
 			SizeBytes: info.Size(), SHA256: hex.EncodeToString(hash.Sum(nil)), ContentType: artifact.ContentType,
 		},
-	}, nil)
+	}, &completed)
+	return completed, err
+}
+
+func (c *Client) CreateWorkspaceCheckpoint(
+	ctx context.Context,
+	executionID uuid.UUID,
+	lease executions.Lease,
+	candidate WorkspaceCheckpointCandidate,
+) (executions.WorkspaceCheckpoint, error) {
+	var checkpoint executions.WorkspaceCheckpoint
+	err := c.doJSON(
+		ctx, http.MethodPost, executionPath(executionID, "workspace/checkpoints"), c.workerToken,
+		checkpointRequestID(executionID, lease, candidate.IdempotencyKey, "create"),
+		executions.CreateWorkspaceCheckpointInput{
+			LeaseInput: executions.LeaseInput{
+				TenantID: lease.TenantID, Generation: lease.Generation, LeaseToken: lease.LeaseToken,
+			},
+			IdempotencyKey: candidate.IdempotencyKey, Strategy: candidate.Strategy,
+			BaseCommit: candidate.BaseCommit, HeadCommit: candidate.HeadCommit,
+			CurrentBranch: candidate.CurrentBranch, Manifest: candidate.Manifest,
+			FileCount: &candidate.FileCount, TotalBytes: &candidate.TotalBytes,
+		}, &checkpoint,
+	)
+	return checkpoint, err
+}
+
+func (c *Client) MarkWorkspaceCheckpointReady(
+	ctx context.Context,
+	executionID uuid.UUID,
+	lease executions.Lease,
+	candidate WorkspaceCheckpointCandidate,
+	checkpoint executions.WorkspaceCheckpoint,
+	artifact *artifacts.Artifact,
+) error {
+	input := executions.WorkspaceCheckpointReadyInput{LeaseInput: executions.LeaseInput{
+		TenantID: lease.TenantID, Generation: lease.Generation, LeaseToken: lease.LeaseToken,
+	}}
+	if artifact != nil {
+		input.ArtifactID = &artifact.ID
+		input.SHA256 = artifact.SHA256
+	}
+	return c.doJSON(
+		ctx, http.MethodPost,
+		executionPath(executionID, "workspace/checkpoints/"+checkpoint.ID.String()+"/ready"),
+		c.workerToken, checkpointRequestID(executionID, lease, candidate.IdempotencyKey, "ready"), input, nil,
+	)
+}
+
+func (c *Client) MarkWorkspaceCheckpointFailed(
+	ctx context.Context,
+	executionID uuid.UUID,
+	lease executions.Lease,
+	candidate WorkspaceCheckpointCandidate,
+	checkpoint executions.WorkspaceCheckpoint,
+	failure error,
+) error {
+	message := strings.TrimSpace(failure.Error())
+	if len(message) > 10_000 {
+		message = message[:10_000]
+	}
+	return c.doJSON(
+		ctx, http.MethodPost,
+		executionPath(executionID, "workspace/checkpoints/"+checkpoint.ID.String()+"/failed"),
+		c.workerToken, checkpointRequestID(executionID, lease, candidate.IdempotencyKey, "failed"),
+		executions.WorkspaceCheckpointFailedInput{
+			LeaseInput: executions.LeaseInput{
+				TenantID: lease.TenantID, Generation: lease.Generation, LeaseToken: lease.LeaseToken,
+			},
+			FailureCode: "checkpoint_persist_failed", FailureMessage: message,
+		}, nil,
+	)
+}
+
+func (c *Client) DownloadWorkspaceCheckpointArtifact(
+	ctx context.Context,
+	executionID uuid.UUID,
+	lease executions.Lease,
+	checkpoint executions.WorkspaceCheckpoint,
+) (string, func(), error) {
+	if checkpoint.ArtifactID == nil || checkpoint.SHA256 == nil {
+		return "", nil, errors.New("Workspace Checkpoint does not reference an Artifact")
+	}
+	var grant artifacts.DownloadGrant
+	err := c.doJSON(
+		ctx, http.MethodPost,
+		executionPath(executionID, "workspace/checkpoints/"+checkpoint.ID.String()+"/artifact/download"),
+		c.workerToken, checkpointRequestID(executionID, lease, checkpoint.IdempotencyKey, "download"),
+		executions.LeaseInput{
+			TenantID: lease.TenantID, Generation: lease.Generation, LeaseToken: lease.LeaseToken,
+		}, &grant,
+	)
+	if err != nil {
+		return "", nil, err
+	}
+	if grant.Artifact.ID != *checkpoint.ArtifactID || grant.Artifact.SizeBytes == nil || grant.Artifact.SHA256 == nil ||
+		*grant.Artifact.SHA256 != *checkpoint.SHA256 || *grant.Artifact.SizeBytes < 0 || *grant.Artifact.SizeBytes > checkpointSnapshotMaxBytes {
+		return "", nil, errors.New("Workspace Checkpoint Artifact grant does not match the persisted Checkpoint")
+	}
+	downloadURL, err := c.resolveURL(grant.URL)
+	if err != nil {
+		return "", nil, err
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, downloadURL.String(), nil)
+	if err != nil {
+		return "", nil, err
+	}
+	response, err := c.uploadHTTP.Do(request)
+	if err != nil {
+		return "", nil, fmt.Errorf("download Workspace Checkpoint Artifact: %w", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return "", nil, responseError(response)
+	}
+	file, err := os.CreateTemp("", "synara-workspace-restore-*.tar")
+	if err != nil {
+		return "", nil, err
+	}
+	path := file.Name()
+	cleanup := func() { _ = os.Remove(path) }
+	hash := sha256.New()
+	written, copyErr := io.Copy(io.MultiWriter(file, hash), io.LimitReader(response.Body, *grant.Artifact.SizeBytes+1))
+	closeErr := file.Close()
+	if copyErr != nil || closeErr != nil || written != *grant.Artifact.SizeBytes ||
+		hex.EncodeToString(hash.Sum(nil)) != *checkpoint.SHA256 {
+		cleanup()
+		if copyErr != nil {
+			return "", nil, copyErr
+		}
+		if closeErr != nil {
+			return "", nil, closeErr
+		}
+		return "", nil, errors.New("Workspace Checkpoint Artifact size or SHA-256 verification failed")
+	}
+	return path, cleanup, nil
+}
+
+func checkpointRequestID(
+	executionID uuid.UUID,
+	lease executions.Lease,
+	idempotencyKey, operation string,
+) string {
+	digest := sha256.Sum256([]byte(strings.Join([]string{
+		executionID.String(), fmt.Sprintf("%d", lease.Generation), idempotencyKey, operation,
+	}, "\x00")))
+	return "checkpoint-" + operation + "-" + hex.EncodeToString(digest[:16])
 }
 
 func (c *Client) executionRequest(ctx context.Context, executionID uuid.UUID, operation string, input, output any) error {

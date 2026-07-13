@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/synara-ai/synara/services/control-plane/internal/artifacts"
+	"github.com/synara-ai/synara/services/control-plane/internal/executions"
 )
 
 func (s *Server) createArtifact(w http.ResponseWriter, r *http.Request) {
@@ -135,6 +136,30 @@ func (s *Server) completeWorkerArtifact(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	writeJSON(w, http.StatusOK, item)
+}
+
+func (s *Server) downloadWorkerCheckpointArtifact(w http.ResponseWriter, r *http.Request) {
+	executionID, ok := s.pathUUID(w, r, "executionID")
+	if !ok {
+		return
+	}
+	checkpointID, ok := s.pathUUID(w, r, "checkpointID")
+	if !ok {
+		return
+	}
+	var input executions.LeaseInput
+	if err := decodeJSON(r, &input); err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	grant, err := s.artifacts.DownloadCheckpointForWorker(
+		r.Context(), mustWorker(r), executionID, checkpointID, input,
+	)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, grant)
 }
 
 func (s *Server) uploadArtifactContent(w http.ResponseWriter, r *http.Request) {

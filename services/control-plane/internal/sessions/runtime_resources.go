@@ -14,8 +14,9 @@ import (
 )
 
 type sessionRuntimeResources struct {
-	BindingID   uuid.UUID
-	WorkspaceID uuid.UUID
+	BindingID           uuid.UUID
+	WorkspaceID         uuid.UUID
+	RestoreCheckpointID *uuid.UUID
 }
 
 func (s *Service) ensureRuntimeResources(
@@ -31,7 +32,10 @@ func (s *Service) ensureRuntimeResources(
 	if err != nil {
 		return sessionRuntimeResources{}, err
 	}
-	return sessionRuntimeResources{BindingID: binding.ID, WorkspaceID: workspace.ID}, nil
+	return sessionRuntimeResources{
+		BindingID: binding.ID, WorkspaceID: workspace.ID,
+		RestoreCheckpointID: workspace.CurrentCheckpointID,
+	}, nil
 }
 
 func (s *Service) ensureRuntimeBinding(
@@ -81,7 +85,7 @@ func (s *Service) ensureRemoteWorkspace(
 	session *persistence.AgentSession,
 ) (persistence.RemoteWorkspace, error) {
 	var workspace persistence.RemoteWorkspace
-	err := tx.WithContext(ctx).
+	err := persistence.WithLocking(tx.WithContext(ctx), "UPDATE", "").
 		Where("tenant_id = ? AND session_id = ?", session.TenantID, session.ID).
 		Take(&workspace).Error
 	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {

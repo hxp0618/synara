@@ -312,9 +312,13 @@ func bindExecutionRuntimeResources(
 		}
 	}
 	if execution.RemoteWorkspaceID != nil {
+		workspaceState := "preparing"
+		if execution.RestoreCheckpointID != nil {
+			workspaceState = "recovering"
+		}
 		updates := map[string]any{
 			"last_worker_id": worker.ID, "last_execution_id": execution.ID,
-			"last_generation": execution.Generation, "state": "preparing",
+			"last_generation": execution.Generation, "state": workspaceState,
 			"last_used_at": now, "updated_at": now,
 		}
 		if err := tx.WithContext(ctx).Model(&persistence.RemoteWorkspace{}).

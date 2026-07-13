@@ -189,6 +189,82 @@ func TestGitCredentialMigrationEnforcesBindingPurposeScopeAndAvailability(t *tes
 	}
 }
 
+func TestCheckpointMigrationUpgradesExistingGitReferenceAndReadyPointers(t *testing.T) {
+	databaseURL := os.Getenv("SYNARA_TEST_CHECKPOINT_MIGRATION_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("SYNARA_TEST_CHECKPOINT_MIGRATION_DATABASE_URL is not configured")
+	}
+	db, err := Open(context.Background(), databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Migrate(context.Background(), db, migrationsThrough(t, "000016_sse_connection_leases.sql")); err != nil {
+		t.Fatal(err)
+	}
+	seed := seedStage3MigrationState(t, db)
+	if err := Migrate(context.Background(), db, migrationsThrough(t, "000023_git_credentials.sql")); err != nil {
+		t.Fatal(err)
+	}
+	var execution persistence.AgentExecution
+	if err := db.Where("tenant_id = ? AND id = ?", seed.tenantID, seed.executionID).Take(&execution).Error; err != nil {
+		t.Fatal(err)
+	}
+	if execution.RemoteWorkspaceID == nil {
+		t.Fatal("000020 did not bind the legacy Execution to a logical Workspace")
+	}
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	baseCommit, headCommit := strings.Repeat("a", 40), strings.Repeat("b", 40)
+	branch := "synara/session-migration"
+	checkpoint := persistence.WorkspaceCheckpoint{
+		ID: uuid.New(), TenantID: seed.tenantID, WorkspaceID: *execution.RemoteWorkspaceID,
+		SessionID: seed.sessionID, TurnID: &seed.turnID, ExecutionID: seed.executionID,
+		Generation: execution.Generation, IdempotencyKey: "migration-git-reference",
+		Strategy: "git-reference", Status: "pending", BaseCommit: &baseCommit,
+		HeadCommit: &headCommit, CurrentBranch: &branch,
+		Manifest:  map[string]any{"format": "synara-git-reference-v1", "headCommit": headCommit},
+		CreatedAt: now,
+	}
+	if err := db.Create(&checkpoint).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := Migrate(context.Background(), db, migrations.Files); err != nil {
+		t.Fatal(err)
+	}
+	readyAt := now.Add(time.Second)
+	if err := db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(&persistence.WorkspaceCheckpoint{}).
+			Where("tenant_id = ? AND id = ?", checkpoint.TenantID, checkpoint.ID).
+			Updates(map[string]any{"status": "ready", "ready_at": readyAt}).Error; err != nil {
+			return err
+		}
+		if err := tx.Model(&persistence.RemoteWorkspace{}).
+			Where("tenant_id = ? AND id = ?", checkpoint.TenantID, checkpoint.WorkspaceID).
+			Update("current_checkpoint_id", checkpoint.ID).Error; err != nil {
+			return err
+		}
+		return tx.Model(&persistence.AgentExecution{}).
+			Where("tenant_id = ? AND id = ?", checkpoint.TenantID, checkpoint.ExecutionID).
+			Update("restore_checkpoint_id", checkpoint.ID).Error
+	}); err != nil {
+		t.Fatalf("000024 did not allow an Artifact-free ready Git-reference Checkpoint: %v", err)
+	}
+	pending := checkpoint
+	pending.ID = uuid.New()
+	pending.IdempotencyKey = "migration-pending-reference"
+	pending.Status = "pending"
+	pending.ReadyAt = nil
+	if err := db.Create(&pending).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Transaction(func(tx *gorm.DB) error {
+		return tx.Model(&persistence.RemoteWorkspace{}).
+			Where("tenant_id = ? AND id = ?", checkpoint.TenantID, checkpoint.WorkspaceID).
+			Update("current_checkpoint_id", pending.ID).Error
+	}); err == nil {
+		t.Fatal("000024 allowed current_checkpoint_id to reference a pending Checkpoint")
+	}
+}
+
 func migrationCredential(
 	id, tenantID uuid.UUID,
 	organizationID *uuid.UUID,

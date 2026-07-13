@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/google/uuid"
+
 	"github.com/synara-ai/synara/services/control-plane/internal/executions"
 	"github.com/synara-ai/synara/services/control-plane/internal/gitpolicy"
 )
@@ -23,9 +25,14 @@ type workspaceInspector interface {
 	Inspect(context.Context, WorkspaceMaterialization) (WorkspaceInspection, error)
 }
 
+type workspaceRestorer interface {
+	Restore(context.Context, WorkspaceMaterialization, executions.WorkspaceCheckpoint, string) (WorkspaceMaterialization, error)
+}
+
 type WorkspaceMaterialization struct {
 	Directory             string
 	Managed               bool
+	RestoredCheckpointID  *uuid.UUID
 	RepositoryFingerprint *string
 	CurrentBranch         *string
 	BaseCommit            *string
@@ -229,8 +236,15 @@ func (m *WorkspaceMaterializer) Inspect(
 	if err != nil || !validGitObjectID(headCommit) {
 		return WorkspaceInspection{}, errors.New("Workspace Git HEAD could not be inspected")
 	}
+	dirty := stdout.buffer.Len() > 0
+	if materialized.CurrentBranch != nil && *materialized.CurrentBranch != currentBranch {
+		dirty = true
+	}
+	if materialized.HeadCommit != nil && *materialized.HeadCommit != headCommit {
+		dirty = true
+	}
 	return WorkspaceInspection{
-		Dirty: stdout.buffer.Len() > 0, CurrentBranch: &currentBranch, HeadCommit: &headCommit,
+		Dirty: dirty, CurrentBranch: &currentBranch, HeadCommit: &headCommit,
 	}, nil
 }
 

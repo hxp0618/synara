@@ -483,16 +483,59 @@ func (s *Service) Download(ctx context.Context, principal identity.Principal, ar
 	if err != nil {
 		return DownloadGrant{}, err
 	}
+	return s.downloadGrant(ctx, model)
+}
+
+func (s *Service) DownloadCheckpointForWorker(
+	ctx context.Context,
+	worker persistence.WorkerInstance,
+	executionID, checkpointID uuid.UUID,
+	input executions.LeaseInput,
+) (DownloadGrant, error) {
+	var model persistence.Artifact
+	err := persistence.InTransaction(ctx, s.db, func(tx *gorm.DB) error {
+		execution, err := s.executions.AuthorizeArtifactWrite(ctx, tx, worker, executionID, input)
+		if err != nil {
+			return err
+		}
+		if execution.RemoteWorkspaceID == nil || execution.RestoreCheckpointID == nil ||
+			*execution.RestoreCheckpointID != checkpointID {
+			return problem.New(409, "restore_checkpoint_not_bound", "The Checkpoint is not bound to the current Execution recovery.")
+		}
+		var checkpoint persistence.WorkspaceCheckpoint
+		if err := tx.WithContext(ctx).
+			Where("tenant_id = ? AND workspace_id = ? AND id = ? AND session_id = ? AND status = ? AND artifact_id IS NOT NULL",
+				execution.TenantID, *execution.RemoteWorkspaceID, checkpointID, execution.SessionID, "ready").
+			Take(&checkpoint).Error; err != nil {
+			return problem.Wrap(409, "restore_checkpoint_unavailable", "The restore Checkpoint Artifact is unavailable.", err)
+		}
+		if err := tx.WithContext(ctx).
+			Where("tenant_id = ? AND id = ? AND session_id = ? AND execution_id = ? AND status = ? AND deleted_at IS NULL AND sha256 = ?",
+				checkpoint.TenantID, checkpoint.ArtifactID, checkpoint.SessionID, checkpoint.ExecutionID,
+				"ready", checkpoint.SHA256).
+			Take(&model).Error; err != nil {
+			return problem.Wrap(409, "restore_checkpoint_artifact_unavailable", "The restore Checkpoint Artifact is not ready.", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return DownloadGrant{}, err
+	}
+	return s.downloadGrant(ctx, model)
+}
+
+func (s *Service) downloadGrant(ctx context.Context, model persistence.Artifact) (DownloadGrant, error) {
 	if model.Status != "ready" || model.DeletedAt != nil {
 		return DownloadGrant{}, problem.New(409, "artifact_not_ready", "Artifact is not available for download.")
 	}
 	expiresAt := s.now().Add(s.presignTTL)
 	grant := DownloadGrant{Artifact: toArtifact(model), ExpiresAt: expiresAt}
 	if !s.store.IsLocal() {
-		grant.URL, err = s.store.PresignDownload(ctx, model.ObjectKey, s.presignTTL)
+		signed, err := s.store.PresignDownload(ctx, model.ObjectKey, s.presignTTL)
 		if err != nil {
 			return DownloadGrant{}, problem.Wrap(503, "artifact_download_signing_failed", "Failed to issue an artifact download URL.", err)
 		}
+		grant.URL = signed
 		return grant, nil
 	}
 	plain, hash, err := secret.NewToken()

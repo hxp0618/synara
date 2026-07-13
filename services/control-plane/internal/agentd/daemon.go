@@ -205,6 +205,35 @@ func (d *Daemon) runExecution(
 	}
 	clearGitHTTPSCredential(gitCredential)
 	gitCredential = nil
+	if err == nil && workload.RestoreCheckpoint != nil {
+		restorer, ok := materializer.(workspaceRestorer)
+		if !ok {
+			err = workspaceFailure(
+				"workspace_invalid", "This Worker cannot restore the persisted Workspace Checkpoint.", true, true,
+			)
+		} else {
+			artifactPath := ""
+			var cleanup func()
+			if workload.RestoreCheckpoint.ArtifactID != nil {
+				artifactPath, cleanup, err = d.client.DownloadWorkspaceCheckpointArtifact(
+					executionContext, execution.ID, lease, *workload.RestoreCheckpoint,
+				)
+				if err != nil {
+					err = workspaceFailure(
+						"workspace_invalid", "The Workspace Checkpoint Artifact could not be downloaded or verified.", true, true,
+					)
+				}
+			}
+			if err == nil {
+				materialized, err = restorer.Restore(
+					executionContext, materialized, *workload.RestoreCheckpoint, artifactPath,
+				)
+			}
+			if cleanup != nil {
+				cleanup()
+			}
+		}
+	}
 	if err != nil {
 		if ctx.Err() != nil {
 			renewErr := stopRenewal()
@@ -286,7 +315,8 @@ func (d *Daemon) runExecution(
 			if strings.TrimSpace(message.Artifact.OriginalName) == "" {
 				message.Artifact.OriginalName = filepath.Base(artifactPath)
 			}
-			return d.client.UploadArtifact(messageContext, execution.ID, lease, *message.Artifact, artifactPath)
+			_, err = d.client.UploadArtifact(messageContext, execution.ID, lease, *message.Artifact, artifactPath)
+			return err
 		case "progress":
 			return nil
 		case "interaction":
@@ -297,12 +327,7 @@ func (d *Daemon) runExecution(
 			message.EventType = eventType
 			return d.client.AppendEvent(messageContext, execution.ID, lease, message)
 		case "checkpoint":
-			return &runnerFailure{
-				code:                 "capability_unsupported",
-				message:              "Provider Host emitted a lifecycle message that this Worker version cannot persist",
-				requiresNewExecution: true, requiresUserAction: true,
-				canReconstructFromHistory: true, canMoveWorker: true,
-			}
+			return validateCheckpointRequest(message.Payload)
 		default:
 			return protocolFailure("Provider Host emitted an unsupported Worker message")
 		}
@@ -314,9 +339,31 @@ func (d *Daemon) runExecution(
 				runErr = workspaceFailure(
 					"workspace_invalid", "The Workspace state could not be inspected after Provider execution.", true, true,
 				)
-			} else if inspection.Dirty {
-				if dirtyErr := d.client.MarkWorkspaceDirty(executionContext, execution.ID, lease, inspection); dirtyErr != nil {
-					runErr = fmt.Errorf("persist dirty Workspace state: %w", dirtyErr)
+			} else {
+				candidate, checkpointErr := captureWorkspaceCheckpoint(execution, materialized, inspection)
+				if checkpointErr != nil {
+					runErr = workspaceFailure(
+						"workspace_invalid", "The Workspace Checkpoint could not be captured.", true, true,
+					)
+				} else if checkpointMatchesRestored(candidate, workload.RestoreCheckpoint) {
+					if candidate.Cleanup != nil {
+						candidate.Cleanup()
+					}
+				} else {
+					if inspection.Dirty {
+						if dirtyErr := d.client.MarkWorkspaceDirty(executionContext, execution.ID, lease, inspection); dirtyErr != nil {
+							runErr = fmt.Errorf("persist dirty Workspace state: %w", dirtyErr)
+						}
+					}
+					if runErr == nil {
+						if checkpointErr := d.persistWorkspaceCheckpoint(
+							executionContext, execution, lease, candidate,
+						); checkpointErr != nil {
+							runErr = checkpointErr
+						}
+					} else if candidate.Cleanup != nil {
+						candidate.Cleanup()
+					}
 				}
 			}
 		}

@@ -48,6 +48,20 @@ type RunnerArtifact struct {
 	ContentType  string `json:"contentType"`
 }
 
+type WorkspaceCheckpointCandidate struct {
+	IdempotencyKey string
+	Strategy       string
+	BaseCommit     *string
+	HeadCommit     *string
+	CurrentBranch  *string
+	Manifest       map[string]any
+	FileCount      int
+	TotalBytes     int64
+	Artifact       *RunnerArtifact
+	ArtifactPath   string
+	Cleanup        func()
+}
+
 type RunnerResult struct {
 	Output               map[string]any
 	ProviderResumeCursor *string

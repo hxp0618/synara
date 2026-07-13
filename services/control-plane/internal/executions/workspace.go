@@ -31,6 +31,7 @@ func (s *Service) MarkWorkspaceReady(
 		"executionId": executionID, "tenantId": input.TenantID, "generation": input.Generation,
 		"repositoryFingerprint": input.RepositoryFingerprint, "currentBranch": input.CurrentBranch,
 		"baseCommit": input.BaseCommit, "headCommit": input.HeadCommit,
+		"restoredCheckpointId": input.RestoredCheckpointID,
 	}, 200, func(tx *gorm.DB) (WorkspaceState, error) {
 		_, execution, err := s.lockLease(ctx, tx, worker.ID, executionID, input.LeaseInput, true)
 		if err != nil {
@@ -39,6 +40,18 @@ func (s *Service) MarkWorkspaceReady(
 		workspace, err := lockExecutionWorkspace(ctx, tx, execution)
 		if err != nil {
 			return WorkspaceState{}, err
+		}
+		if input.RestoredCheckpointID != nil {
+			if execution.RestoreCheckpointID == nil || *execution.RestoreCheckpointID != *input.RestoredCheckpointID {
+				return WorkspaceState{}, problem.New(409, "restore_checkpoint_not_bound", "The restored Checkpoint is not bound to the current Execution.")
+			}
+			var checkpoint persistence.WorkspaceCheckpoint
+			if err := tx.WithContext(ctx).
+				Where("tenant_id = ? AND workspace_id = ? AND id = ? AND status = ?",
+					execution.TenantID, workspace.ID, *input.RestoredCheckpointID, "ready").
+				Take(&checkpoint).Error; err != nil {
+				return WorkspaceState{}, problem.Wrap(409, "restore_checkpoint_unavailable", "The restored Checkpoint is not ready.", err)
+			}
 		}
 		now := s.now()
 		updates := map[string]any{
@@ -67,6 +80,7 @@ func (s *Service) MarkWorkspaceReady(
 				"turnId": execution.TurnID, "workspaceId": workspace.ID,
 				"repositoryFingerprint": input.RepositoryFingerprint, "currentBranch": input.CurrentBranch,
 				"baseCommit": input.BaseCommit, "headCommit": input.HeadCommit,
+				"restoredCheckpointId": input.RestoredCheckpointID,
 			},
 		})
 		if err != nil {

@@ -23,6 +23,7 @@ func (s *Service) loadWorkload(ctx context.Context, tx *gorm.DB, execution persi
 		Provider                       string     `gorm:"column:provider"`
 		ProviderRuntimeBindingID       *uuid.UUID `gorm:"column:provider_runtime_binding_id"`
 		RemoteWorkspaceID              *uuid.UUID `gorm:"column:remote_workspace_id"`
+		RestoreCheckpointID            *uuid.UUID `gorm:"column:restore_checkpoint_id"`
 		WorkspaceRepositoryFingerprint *string    `gorm:"column:workspace_repository_fingerprint"`
 		WorkerManifestID               *uuid.UUID `gorm:"column:worker_manifest_id"`
 		Model                          *string    `gorm:"column:model"`
@@ -37,7 +38,7 @@ func (s *Service) loadWorkload(ctx context.Context, tx *gorm.DB, execution persi
 	err := tx.WithContext(ctx).Table("agent_executions AS e").
 		Select(`e.tenant_id, s.organization_id, s.project_id, e.session_id, e.turn_id,
 			s.title AS session_title, COALESCE(e.provider, s.provider) AS provider,
-			e.provider_runtime_binding_id, e.remote_workspace_id,
+			e.provider_runtime_binding_id, e.remote_workspace_id, e.restore_checkpoint_id,
 			w.repository_fingerprint AS workspace_repository_fingerprint, e.worker_manifest_id,
 				s.model, s.provider_credential_id, p.git_credential_id,
 				t.input_text, t.runtime_mode, t.interaction_mode, p.repository_url, p.default_branch`).
@@ -54,13 +55,27 @@ func (s *Service) loadWorkload(ctx context.Context, tx *gorm.DB, execution persi
 	if err != nil {
 		return Workload{}, err
 	}
+	var restoreCheckpoint *WorkspaceCheckpoint
+	if row.RestoreCheckpointID != nil {
+		var checkpoint persistence.WorkspaceCheckpoint
+		if err := tx.WithContext(ctx).
+			Where("tenant_id = ? AND id = ? AND workspace_id = ? AND session_id = ? AND status = ?",
+				execution.TenantID, *row.RestoreCheckpointID, row.RemoteWorkspaceID, execution.SessionID, "ready").
+			Take(&checkpoint).Error; err != nil {
+			return Workload{}, problem.Wrap(409, "restore_checkpoint_unavailable", "The Execution restore Checkpoint is not ready or no longer available.", err)
+		}
+		converted := toWorkspaceCheckpoint(checkpoint)
+		restoreCheckpoint = &converted
+	}
 	return Workload{
 		TenantID: row.TenantID, OrganizationID: row.OrganizationID, ProjectID: row.ProjectID,
 		SessionID: row.SessionID, TurnID: row.TurnID, SessionTitle: row.SessionTitle,
 		Provider: row.Provider, ProviderRuntimeBindingID: row.ProviderRuntimeBindingID,
-		RemoteWorkspaceID: row.RemoteWorkspaceID, WorkspaceRepositoryFingerprint: row.WorkspaceRepositoryFingerprint,
-		WorkerManifestID: row.WorkerManifestID,
-		Model:            row.Model, ProviderCredentialID: row.ProviderCredentialID,
+		RemoteWorkspaceID: row.RemoteWorkspaceID, RestoreCheckpointID: row.RestoreCheckpointID,
+		RestoreCheckpoint:              restoreCheckpoint,
+		WorkspaceRepositoryFingerprint: row.WorkspaceRepositoryFingerprint,
+		WorkerManifestID:               row.WorkerManifestID,
+		Model:                          row.Model, ProviderCredentialID: row.ProviderCredentialID,
 		GitCredentialID: row.GitCredentialID, InputText: row.InputText,
 		RuntimeMode: row.RuntimeMode, InteractionMode: row.InteractionMode,
 		RepositoryURL: row.RepositoryURL, DefaultBranch: row.DefaultBranch,

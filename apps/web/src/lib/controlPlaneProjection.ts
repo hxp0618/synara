@@ -175,6 +175,20 @@ function activitySummary(event: ControlPlaneSessionEvent): string | null {
       return "User input resolved";
     case "artifact.ready":
       return "Artifact ready";
+    case "workspace.ready":
+      return payloadString(event, "restoredCheckpointId")
+        ? "Workspace restored"
+        : "Workspace ready";
+    case "workspace.dirty":
+      return "Workspace changed";
+    case "workspace.failed":
+      return payloadString(event, "failureMessage") ?? "Workspace failed";
+    case "checkpoint.created":
+      return "Workspace checkpoint started";
+    case "checkpoint.ready":
+      return "Workspace checkpoint ready";
+    case "checkpoint.failed":
+      return payloadString(event, "failureMessage") ?? "Workspace checkpoint failed";
     case "session.suspended":
       return "Session suspended";
     case "session.resumed":
@@ -193,7 +207,10 @@ function appendActivity(
   const summary = activitySummary(event);
   if (!summary || event.eventType === "runtime.output.delta") return activities;
   const tone: OrchestrationThreadActivity["tone"] =
-    event.eventType === "execution.failed" || event.eventType === "execution.cancelled"
+    event.eventType === "execution.failed" ||
+    event.eventType === "execution.cancelled" ||
+    event.eventType === "workspace.failed" ||
+    event.eventType === "checkpoint.failed"
       ? "error"
       : event.eventType.includes("approval") || event.eventType.includes("user-input")
         ? "approval"
