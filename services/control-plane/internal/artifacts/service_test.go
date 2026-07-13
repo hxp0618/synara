@@ -177,6 +177,251 @@ func TestWorkerArtifactConfirmationRequiresCurrentLease(t *testing.T) {
 	}
 }
 
+func TestCheckpointArtifactCreateAndReadyReplayUseOneDeterministicArtifact(t *testing.T) {
+	fixture := newArtifactFixture(t)
+	worker, executionID, checkpointID, leaseToken := seedCheckpointArtifactFixture(t, fixture, "snapshot")
+	input := WorkerCreateInput{
+		TenantID: fixture.tenantID, Generation: 2, LeaseToken: leaseToken,
+		CheckpointID: &checkpointID, Kind: "workspace_snapshot", OriginalName: pointerString("workspace.tar"),
+	}
+	first, err := fixture.service.CreateForWorker(context.Background(), worker, executionID, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := fixture.service.CreateForWorker(context.Background(), worker, executionID, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Artifact.ID != checkpointArtifactID(checkpointID) || second.Artifact.ID != first.Artifact.ID {
+		t.Fatalf("Checkpoint Artifact identity was not deterministic: first=%s second=%s", first.Artifact.ID, second.Artifact.ID)
+	}
+	if !first.UploadRequired || !second.UploadRequired || first.URL == second.URL {
+		t.Fatalf("pending replay did not refresh the Local upload grant: first=%#v second=%#v", first, second)
+	}
+	var count int64
+	if err := fixture.db.Model(&persistence.Artifact{}).
+		Where("tenant_id = ? AND workspace_checkpoint_id = ?", fixture.tenantID, checkpointID).
+		Count(&count).Error; err != nil || count != 1 {
+		t.Fatalf("Checkpoint Artifact count = %d, %v", count, err)
+	}
+	var checkpoint persistence.WorkspaceCheckpoint
+	if err := fixture.db.Where("tenant_id = ? AND id = ?", fixture.tenantID, checkpointID).Take(&checkpoint).Error; err != nil {
+		t.Fatal(err)
+	}
+	if checkpoint.Status != "uploading" || checkpoint.ArtifactID == nil || *checkpoint.ArtifactID != first.Artifact.ID {
+		t.Fatalf("Checkpoint was not bound before upload: %#v", checkpoint)
+	}
+
+	payload := []byte("checkpoint payload")
+	if err := fixture.service.UploadLocal(
+		context.Background(), second.Artifact.ID, uploadToken(t, second.URL), "application/x-tar",
+		int64(len(payload)), bytes.NewReader(payload),
+	); err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(payload)
+	complete := WorkerCompleteInput{
+		TenantID: fixture.tenantID, Generation: 2, LeaseToken: leaseToken,
+		CompleteInput: CompleteInput{
+			SizeBytes: int64(len(payload)), SHA256: hex.EncodeToString(digest[:]), ContentType: "application/x-tar",
+		},
+	}
+	ready, err := fixture.service.CompleteForWorker(context.Background(), worker, executionID, second.Artifact.ID, complete)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replayed, err := fixture.service.CompleteForWorker(context.Background(), worker, executionID, second.Artifact.ID, complete)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ready.Status != "ready" || replayed.ID != ready.ID || replayed.Status != "ready" {
+		t.Fatalf("ready replay mismatch: ready=%#v replayed=%#v", ready, replayed)
+	}
+	prepared, err := fixture.service.CreateForWorker(context.Background(), worker, executionID, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prepared.UploadRequired || prepared.URL != "" || prepared.Artifact.Status != "ready" || prepared.Artifact.ID != ready.ID {
+		t.Fatalf("ready Artifact replay unexpectedly issued an upload grant: %#v", prepared)
+	}
+	complete.SHA256 = strings.Repeat("a", 64)
+	_, err = fixture.service.CompleteForWorker(context.Background(), worker, executionID, ready.ID, complete)
+	assertProblemCode(t, err, "artifact_already_ready")
+
+	if err := fixture.db.Model(&persistence.AgentExecution{}).Where("id = ?", executionID).Update("generation", 3).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.db.Model(&persistence.WorkerLease{}).Where("execution_id = ?", executionID).
+		Updates(map[string]any{"generation": 3, "lease_token_hash": secret.HashToken("replacement-lease")}).Error; err != nil {
+		t.Fatal(err)
+	}
+	complete.SHA256 = hex.EncodeToString(digest[:])
+	_, err = fixture.service.CompleteForWorker(context.Background(), worker, executionID, ready.ID, complete)
+	assertProblemCode(t, err, "generation_fenced")
+}
+
+func TestCheckpointArtifactObjectGrantReplayKeepsOneTemporaryKey(t *testing.T) {
+	fixture := newArtifactFixture(t)
+	store := &testObjectStore{bucket: "artifact-bucket", objects: map[string][]byte{}, contentTypes: map[string]string{}}
+	fixture.service.store = store
+	worker, executionID, checkpointID, leaseToken := seedCheckpointArtifactFixture(t, fixture, "snapshot")
+	input := WorkerCreateInput{
+		TenantID: fixture.tenantID, Generation: 2, LeaseToken: leaseToken,
+		CheckpointID: &checkpointID, Kind: "workspace_snapshot", OriginalName: pointerString("workspace.tar"),
+	}
+	first, err := fixture.service.CreateForWorker(context.Background(), worker, executionID, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var initial persistence.Artifact
+	if err := fixture.db.Where("id = ?", first.Artifact.ID).Take(&initial).Error; err != nil {
+		t.Fatal(err)
+	}
+	second, err := fixture.service.CreateForWorker(context.Background(), worker, executionID, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var refreshed persistence.Artifact
+	if err := fixture.db.Where("id = ?", first.Artifact.ID).Take(&refreshed).Error; err != nil {
+		t.Fatal(err)
+	}
+	if second.Artifact.ID != first.Artifact.ID || initial.UploadObjectKey == nil || refreshed.UploadObjectKey == nil ||
+		*initial.UploadObjectKey != *refreshed.UploadObjectKey {
+		t.Fatalf("object-store grant replay changed Artifact identity or temporary key: first=%#v second=%#v", initial, refreshed)
+	}
+}
+
+func TestDeleteRejectsActiveCheckpointArtifactReference(t *testing.T) {
+	fixture := newArtifactFixture(t)
+	worker, executionID, checkpointID, leaseToken := seedCheckpointArtifactFixture(t, fixture, "snapshot")
+	grant, err := fixture.service.CreateForWorker(context.Background(), worker, executionID, WorkerCreateInput{
+		TenantID: fixture.tenantID, Generation: 2, LeaseToken: leaseToken,
+		CheckpointID: &checkpointID, Kind: "workspace_snapshot", OriginalName: pointerString("workspace.tar"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = fixture.service.Delete(context.Background(), fixture.principal, grant.Artifact.ID, "delete-checkpoint-artifact", "127.0.0.1")
+	assertProblemCode(t, err, "artifact_checkpoint_referenced")
+	var artifact persistence.Artifact
+	if err := fixture.db.Where("id = ?", grant.Artifact.ID).Take(&artifact).Error; err != nil {
+		t.Fatal(err)
+	}
+	if artifact.Status != "pending" {
+		t.Fatalf("referenced Artifact changed during rejected delete: %#v", artifact)
+	}
+}
+
+func TestExpiredCheckpointArtifactFailsCheckpointAndReleasesWorkspace(t *testing.T) {
+	fixture := newArtifactFixture(t)
+	worker, executionID, checkpointID, leaseToken := seedCheckpointArtifactFixture(t, fixture, "snapshot")
+	grant, err := fixture.service.CreateForWorker(context.Background(), worker, executionID, WorkerCreateInput{
+		TenantID: fixture.tenantID, Generation: 2, LeaseToken: leaseToken,
+		CheckpointID: &checkpointID, Kind: "workspace_snapshot", OriginalName: pointerString("workspace.tar"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleaned, err := fixture.service.CleanupExpiredUploads(context.Background(), grant.ExpiresAt.Add(time.Second), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cleaned != 1 {
+		t.Fatalf("expired Checkpoint Artifact cleanup = %d, want 1", cleaned)
+	}
+	var artifact persistence.Artifact
+	if err := fixture.db.Where("id = ?", grant.Artifact.ID).Take(&artifact).Error; err != nil {
+		t.Fatal(err)
+	}
+	if artifact.Status != "failed" || artifact.UploadExpiresAt != nil || artifact.UploadCleanupAt != nil || artifact.UploadObjectKey != nil || len(artifact.UploadTokenHash) != 0 {
+		t.Fatalf("expired Checkpoint Artifact was not sealed: %#v", artifact)
+	}
+	var checkpoint persistence.WorkspaceCheckpoint
+	if err := fixture.db.Where("id = ?", checkpointID).Take(&checkpoint).Error; err != nil {
+		t.Fatal(err)
+	}
+	if checkpoint.Status != "failed" || checkpoint.FailureCode == nil || *checkpoint.FailureCode != "artifact_upload_expired" {
+		t.Fatalf("expired Artifact did not fail its Checkpoint: %#v", checkpoint)
+	}
+	var workspace persistence.RemoteWorkspace
+	if err := fixture.db.Where("id = ?", checkpoint.WorkspaceID).Take(&workspace).Error; err != nil {
+		t.Fatal(err)
+	}
+	if workspace.State != "dirty" || workspace.CurrentCheckpointID != nil {
+		t.Fatalf("expired Checkpoint did not release the logical Workspace: %#v", workspace)
+	}
+	var event persistence.SessionEvent
+	if err := fixture.db.Where("tenant_id = ? AND session_id = ? AND event_type = ?",
+		fixture.tenantID, fixture.sessionID, "checkpoint.failed").Take(&event).Error; err != nil {
+		t.Fatal(err)
+	}
+	if event.ExecutionID == nil || *event.ExecutionID != executionID || event.Generation == nil || *event.Generation != 2 {
+		t.Fatalf("expired Checkpoint event lost its execution fencing envelope: %#v", event)
+	}
+	cleaned, err = fixture.service.CleanupExpiredUploads(context.Background(), grant.ExpiresAt.Add(time.Second), 10)
+	if err != nil || cleaned != 0 {
+		t.Fatalf("expired Checkpoint Artifact cleanup was not idempotent: %d, %v", cleaned, err)
+	}
+}
+
+func seedCheckpointArtifactFixture(
+	t *testing.T,
+	fixture artifactFixture,
+	strategy string,
+) (persistence.WorkerInstance, uuid.UUID, uuid.UUID, string) {
+	t.Helper()
+	now := time.Now().UTC()
+	workerID := uuid.New()
+	executionID := uuid.New()
+	turnID := uuid.New()
+	workspaceID := uuid.New()
+	checkpointID := uuid.New()
+	leaseToken := "checkpoint-lease-token"
+	worker := persistence.WorkerInstance{
+		ID: workerID, ExecutionTargetID: fixture.targetID, TargetKind: "local", ClusterID: "local",
+		Namespace: "default", PodName: "checkpoint-worker", Version: "test", ProtocolVersion: 1,
+		Capabilities: map[string]any{}, LeaseSupported: true, FencingSupported: true,
+		AuthTokenHash: secret.HashToken("worker-token"), Status: "online", RegisteredAt: now, LastHeartbeatAt: now,
+	}
+	branch, commit := "main", strings.Repeat("b", 40)
+	models := []any{
+		&worker,
+		&persistence.AgentTurn{
+			ID: turnID, TenantID: fixture.tenantID, SessionID: fixture.sessionID,
+			CreatedBy: fixture.principal.UserID, Status: "running", InputText: "checkpoint test",
+		},
+		&persistence.RemoteWorkspace{
+			ID: workspaceID, TenantID: fixture.tenantID, OrganizationID: fixture.organizationID,
+			ProjectID: fixture.projectID, SessionID: fixture.sessionID, ExecutionTargetID: fixture.targetID,
+			WorkspaceMode: "snapshot", State: "checkpointing", DefaultBranch: "main", CurrentBranch: &branch,
+			BaseCommit: &commit, HeadCommit: &commit, LastWorkerID: &workerID, CreatedAt: now, UpdatedAt: now,
+		},
+		&persistence.AgentExecution{
+			ID: executionID, TenantID: fixture.tenantID, SessionID: fixture.sessionID, TurnID: turnID,
+			Attempt: 1, Status: "running", ExecutionTargetID: fixture.targetID, TargetKind: "local",
+			WorkerID: &workerID, RemoteWorkspaceID: &workspaceID, Generation: 2,
+			RequestedBy: fixture.principal.UserID, QueuedAt: now, StartedAt: &now,
+		},
+		&persistence.WorkerLease{
+			ExecutionID: executionID, TenantID: fixture.tenantID, WorkerID: workerID, Generation: 2,
+			LeaseTokenHash: secret.HashToken(leaseToken), AcquiredAt: now, HeartbeatAt: now, ExpiresAt: now.Add(time.Hour),
+		},
+		&persistence.WorkspaceCheckpoint{
+			ID: checkpointID, TenantID: fixture.tenantID, WorkspaceID: workspaceID,
+			SessionID: fixture.sessionID, TurnID: &turnID, ExecutionID: executionID, Generation: 2,
+			IdempotencyKey: "checkpoint-artifact-test", Strategy: strategy, Status: "pending",
+			BaseCommit: &commit, HeadCommit: &commit, CurrentBranch: &branch,
+			Manifest: map[string]any{"format": "test"}, CreatedAt: now,
+		},
+	}
+	for _, model := range models {
+		if err := fixture.db.Create(model).Error; err != nil {
+			t.Fatalf("seed Checkpoint Artifact fixture %T: %v", model, err)
+		}
+	}
+	return worker, executionID, checkpointID, leaseToken
+}
+
 func TestLocalStoreRejectsEscapingObjectKeys(t *testing.T) {
 	store, err := NewLocalStore(t.TempDir())
 	if err != nil {
@@ -235,8 +480,30 @@ func TestObjectStoreUploadGrantCannotOverwriteReadyArtifact(t *testing.T) {
 	if err := fixture.db.Where("id = ?", pending.ID).Take(&ready).Error; err != nil {
 		t.Fatal(err)
 	}
-	if ready.Status != "ready" || ready.UploadObjectKey != nil || ready.UploadExpiresAt != nil {
-		t.Fatalf("ready Artifact upload metadata was not sealed: %#v", ready)
+	if ready.Status != "ready" || ready.UploadObjectKey == nil || ready.UploadExpiresAt == nil || ready.UploadCleanupAt == nil || !ready.UploadExpiresAt.After(pending.UploadExpiresAt.Add(time.Second)) {
+		t.Fatalf("ready Artifact cleanup tombstone was not retained: %#v", ready)
+	}
+	lateUploadKey := *ready.UploadObjectKey
+	if _, err := store.Put(context.Background(), lateUploadKey, strings.NewReader("late ready upload"), 17, "text/plain"); err != nil {
+		t.Fatal(err)
+	}
+	cleaned, err = fixture.service.CleanupExpiredUploads(context.Background(), ready.UploadExpiresAt.Add(time.Second), 10)
+	if err != nil || cleaned != 1 {
+		t.Fatalf("ready Artifact final tombstone cleanup = %d, %v", cleaned, err)
+	}
+	if _, ok := store.objects[lateUploadKey]; ok {
+		t.Fatal("late ready Artifact upload survived the final tombstone cleanup")
+	}
+	var finalizedReady persistence.Artifact
+	if err := fixture.db.Where("id = ?", pending.ID).Take(&finalizedReady).Error; err != nil {
+		t.Fatal(err)
+	}
+	if finalizedReady.UploadObjectKey != nil || finalizedReady.UploadExpiresAt != nil || finalizedReady.UploadCleanupAt != nil {
+		t.Fatalf("ready Artifact cleanup tombstone did not terminate: %#v", finalizedReady)
+	}
+	cleaned, err = fixture.service.CleanupExpiredUploads(context.Background(), pending.UploadExpiresAt.Add(48*time.Hour), 10)
+	if err != nil || cleaned != 0 {
+		t.Fatalf("terminated ready Artifact cleanup remained a sweep candidate: %d, %v", cleaned, err)
 	}
 }
 
@@ -280,12 +547,34 @@ func TestCleanupExpiredUploadRemovesTemporaryAndPromotedObjects(t *testing.T) {
 	if err := fixture.db.Where("id = ?", pending.ID).Take(&failed).Error; err != nil {
 		t.Fatal(err)
 	}
-	if failed.Status != "failed" || failed.UploadExpiresAt != nil || failed.UploadObjectKey != nil || len(failed.UploadTokenHash) != 0 {
-		t.Fatalf("expired Artifact metadata was not sealed: %#v", failed)
+	if failed.Status != "failed" || failed.UploadExpiresAt == nil || failed.UploadCleanupAt == nil || failed.UploadObjectKey == nil || len(failed.UploadTokenHash) != 0 {
+		t.Fatalf("expired Artifact cleanup tombstone was not retained: %#v", failed)
 	}
 	cleaned, err = fixture.service.CleanupExpiredUploads(context.Background(), expiredAt, 10)
 	if err != nil || cleaned != 0 {
 		t.Fatalf("idempotent cleanup = %d, %v", cleaned, err)
+	}
+	lateUploadKey := *failed.UploadObjectKey
+	if _, err := store.Put(context.Background(), lateUploadKey, strings.NewReader("late upload"), 11, "text/plain"); err != nil {
+		t.Fatal(err)
+	}
+	cleaned, err = fixture.service.CleanupExpiredUploads(context.Background(), failed.UploadExpiresAt.Add(time.Second), 10)
+	if err != nil || cleaned != 1 {
+		t.Fatalf("late upload tombstone cleanup = %d, %v", cleaned, err)
+	}
+	if _, ok := store.objects[lateUploadKey]; ok {
+		t.Fatal("late object-store upload survived the retained cleanup tombstone")
+	}
+	var finalizedFailed persistence.Artifact
+	if err := fixture.db.Where("id = ?", pending.ID).Take(&finalizedFailed).Error; err != nil {
+		t.Fatal(err)
+	}
+	if finalizedFailed.UploadObjectKey != nil || finalizedFailed.UploadExpiresAt != nil || finalizedFailed.UploadCleanupAt != nil {
+		t.Fatalf("expired Artifact cleanup tombstone did not terminate: %#v", finalizedFailed)
+	}
+	cleaned, err = fixture.service.CleanupExpiredUploads(context.Background(), expiredAt.Add(48*time.Hour), 10)
+	if err != nil || cleaned != 0 {
+		t.Fatalf("terminated expired Artifact cleanup remained a sweep candidate: %d, %v", cleaned, err)
 	}
 }
 

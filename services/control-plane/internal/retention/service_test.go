@@ -16,6 +16,7 @@ import (
 	"github.com/synara-ai/synara/services/control-plane/internal/bootstrap"
 	"github.com/synara-ai/synara/services/control-plane/internal/config"
 	"github.com/synara-ai/synara/services/control-plane/internal/database"
+	"github.com/synara-ai/synara/services/control-plane/internal/executions"
 	"github.com/synara-ai/synara/services/control-plane/internal/executiontargets"
 	"github.com/synara-ai/synara/services/control-plane/internal/identity"
 	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
@@ -50,10 +51,16 @@ func TestRetentionArchivesInactiveSessionsAndDeletesArtifactsIdempotently(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	artifactService := artifacts.NewService(store.DB(), objectStore, config.Config{
+	retentionConfig := config.Config{
 		ArtifactPresignTTL: 15 * time.Minute, ArtifactMaxUploadBytes: 1 << 20,
-	}, nil, sessionService)
-	service := NewService(store.DB(), sessionService, artifactService, time.Hour, slog.Default())
+		WorkerLeaseTTL: time.Minute, WorkerHeartbeatTimeout: 2 * time.Minute, WorkerReceiptTTL: time.Hour,
+	}
+	executionService := executions.NewService(
+		store.DB(), sessionService, retentionConfig.WorkerLeaseTTL, retentionConfig.WorkerHeartbeatTimeout,
+		retentionConfig.WorkerReceiptTTL, nil, targetService,
+	)
+	artifactService := artifacts.NewService(store.DB(), objectStore, retentionConfig, executionService, sessionService)
+	service := NewService(store.DB(), sessionService, artifactService, executionService, time.Hour, slog.Default())
 	now := time.Now().UTC().Truncate(time.Second)
 	service.now = func() time.Time { return now }
 	expiredSessionID := uuid.New()
@@ -105,6 +112,102 @@ func TestRetentionArchivesInactiveSessionsAndDeletesArtifactsIdempotently(t *tes
 	}).Error; err != nil {
 		t.Fatal(err)
 	}
+	turnID, executionID, workspaceID, checkpointID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	finishedAt := old
+	if err := store.DB().Create(&persistence.AgentTurn{
+		ID: turnID, TenantID: domain.TenantID, SessionID: sessionID, CreatedBy: domain.UserID,
+		Status: "completed", InputText: "retained checkpoint", CreatedAt: old, CompletedAt: &finishedAt,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DB().Create(&persistence.AgentExecution{
+		ID: executionID, TenantID: domain.TenantID, SessionID: sessionID, TurnID: turnID,
+		Attempt: 1, Status: "completed", ExecutionTargetID: domain.ExecutionTargetID, TargetKind: "local",
+		Generation: 1, RequestedBy: domain.UserID, QueuedAt: old, StartedAt: &old, FinishedAt: &finishedAt,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DB().Create(&persistence.RemoteWorkspace{
+		ID: workspaceID, TenantID: domain.TenantID, OrganizationID: domain.OrganizationID,
+		ProjectID: projectID, SessionID: sessionID, ExecutionTargetID: domain.ExecutionTargetID,
+		WorkspaceMode: "clone", State: "ready", DefaultBranch: "main", CreatedAt: old, UpdatedAt: old,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DB().Model(&persistence.AgentExecution{}).Where("id = ?", executionID).
+		Update("remote_workspace_id", workspaceID).Error; err != nil {
+		t.Fatal(err)
+	}
+	baseCommit := strings.Repeat("a", 40)
+	headCommit := strings.Repeat("b", 40)
+	branch := "main"
+	fileCount := 1
+	checkpointBytes := int64(len(payload))
+	checkpointSHA := sha
+	if err := store.DB().Create(&persistence.WorkspaceCheckpoint{
+		ID: checkpointID, TenantID: domain.TenantID, WorkspaceID: workspaceID, SessionID: sessionID,
+		TurnID: &turnID, ExecutionID: executionID, Generation: 1, IdempotencyKey: "retention-checkpoint",
+		Strategy: "snapshot", Status: "pending", BaseCommit: &baseCommit, HeadCommit: &headCommit,
+		CurrentBranch: &branch, Manifest: map[string]any{"format": "synara-workspace-snapshot-v1"},
+		FileCount: &fileCount, TotalBytes: &checkpointBytes, CreatedAt: old,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	checkpointObjectKey := domain.TenantID.String() + "/retention-checkpoint.tar"
+	if _, err := objectStore.Put(ctx, checkpointObjectKey, strings.NewReader(payload), int64(len(payload)), "application/x-tar"); err != nil {
+		t.Fatal(err)
+	}
+	checkpointContentType := "application/x-tar"
+	if err := store.DB().Create(&persistence.Artifact{
+		ID: checkpointID, TenantID: domain.TenantID, OrganizationID: domain.OrganizationID,
+		ProjectID: projectID, SessionID: sessionID, ExecutionID: &executionID,
+		WorkspaceCheckpointID: &checkpointID, Kind: "workspace_snapshot", Status: "ready",
+		Bucket: objectStore.Bucket(), ObjectKey: checkpointObjectKey, ContentType: &checkpointContentType,
+		SizeBytes: &checkpointBytes, SHA256: &checkpointSHA, CreatedByType: "worker", CreatedByID: domain.UserID,
+		ReadyAt: &old, CreatedAt: old,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DB().Model(&persistence.WorkspaceCheckpoint{}).Where("id = ?", checkpointID).
+		Updates(map[string]any{"status": "ready", "artifact_id": checkpointID, "sha256": checkpointSHA, "ready_at": old}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DB().Model(&persistence.AgentExecution{}).Where("id = ?", executionID).
+		Update("restore_checkpoint_id", checkpointID).Error; err != nil {
+		t.Fatal(err)
+	}
+	currentCheckpointID := uuid.New()
+	if err := store.DB().Create(&persistence.WorkspaceCheckpoint{
+		ID: currentCheckpointID, TenantID: domain.TenantID, WorkspaceID: workspaceID, SessionID: sessionID,
+		TurnID: &turnID, ExecutionID: executionID, Generation: 1, IdempotencyKey: "current-retention-checkpoint",
+		Strategy: "snapshot", Status: "pending", BaseCommit: &baseCommit, HeadCommit: &headCommit,
+		CurrentBranch: &branch, Manifest: map[string]any{"format": "synara-workspace-snapshot-v1"},
+		FileCount: &fileCount, TotalBytes: &checkpointBytes, CreatedAt: old,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	currentObjectKey := domain.TenantID.String() + "/current-retention-checkpoint.tar"
+	if _, err := objectStore.Put(ctx, currentObjectKey, strings.NewReader(payload), int64(len(payload)), "application/x-tar"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DB().Create(&persistence.Artifact{
+		ID: currentCheckpointID, TenantID: domain.TenantID, OrganizationID: domain.OrganizationID,
+		ProjectID: projectID, SessionID: sessionID, ExecutionID: &executionID,
+		WorkspaceCheckpointID: &currentCheckpointID, Kind: "workspace_snapshot", Status: "ready",
+		Bucket: objectStore.Bucket(), ObjectKey: currentObjectKey, ContentType: &checkpointContentType,
+		SizeBytes: &checkpointBytes, SHA256: &checkpointSHA, CreatedByType: "worker", CreatedByID: domain.UserID,
+		ReadyAt: &old, CreatedAt: old,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DB().Model(&persistence.WorkspaceCheckpoint{}).Where("id = ?", currentCheckpointID).
+		Updates(map[string]any{"status": "ready", "artifact_id": currentCheckpointID, "sha256": checkpointSHA, "ready_at": old}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DB().Model(&persistence.RemoteWorkspace{}).Where("id = ?", workspaceID).
+		Update("current_checkpoint_id", currentCheckpointID).Error; err != nil {
+		t.Fatal(err)
+	}
 	principal := identity.Principal{UserID: domain.UserID, ActiveTenantID: &domain.TenantID}
 	days := 1
 	if _, err := service.Update(ctx, principal, domain.TenantID, UpdateInput{
@@ -138,6 +241,44 @@ func TestRetentionArchivesInactiveSessionsAndDeletesArtifactsIdempotently(t *tes
 	}
 	if deleted.Status != "deleted" || deleted.DeletedAt == nil {
 		t.Fatalf("retention did not delete the Artifact: %#v", deleted)
+	}
+	var retainedExecution persistence.AgentExecution
+	if err := store.DB().Where("id = ?", executionID).Take(&retainedExecution).Error; err != nil {
+		t.Fatal(err)
+	}
+	if retainedExecution.RestoreCheckpointID != nil {
+		t.Fatalf("retention kept a terminal Execution restore reference: %#v", retainedExecution.RestoreCheckpointID)
+	}
+	var expiredCheckpoint persistence.WorkspaceCheckpoint
+	if err := store.DB().Where("id = ?", checkpointID).Take(&expiredCheckpoint).Error; err != nil {
+		t.Fatal(err)
+	}
+	if expiredCheckpoint.Status != "expired" {
+		t.Fatalf("retention did not expire the unreferenced Checkpoint: %#v", expiredCheckpoint)
+	}
+	var deletedCheckpointArtifact persistence.Artifact
+	if err := store.DB().Where("id = ?", checkpointID).Take(&deletedCheckpointArtifact).Error; err != nil {
+		t.Fatal(err)
+	}
+	if deletedCheckpointArtifact.Status != "deleted" || deletedCheckpointArtifact.DeletedAt == nil {
+		t.Fatalf("retention did not delete the expired Checkpoint Artifact: %#v", deletedCheckpointArtifact)
+	}
+	var currentCheckpoint persistence.WorkspaceCheckpoint
+	if err := store.DB().Where("id = ?", currentCheckpointID).Take(&currentCheckpoint).Error; err != nil {
+		t.Fatal(err)
+	}
+	if currentCheckpoint.Status != "ready" {
+		t.Fatalf("retention expired the current Workspace Checkpoint: %#v", currentCheckpoint)
+	}
+	var currentArtifact persistence.Artifact
+	if err := store.DB().Where("id = ?", currentCheckpointID).Take(&currentArtifact).Error; err != nil {
+		t.Fatal(err)
+	}
+	if currentArtifact.Status != "ready" || currentArtifact.DeletedAt != nil {
+		t.Fatalf("retention deleted the current Workspace Checkpoint Artifact: %#v", currentArtifact)
+	}
+	if _, err := objectStore.Stat(ctx, currentObjectKey); err != nil {
+		t.Fatalf("retention removed the current Workspace Checkpoint payload: %v", err)
 	}
 	if _, err := objectStore.Stat(ctx, objectKey); err == nil {
 		t.Fatal("retention left the Artifact payload in object storage")
@@ -205,7 +346,7 @@ func newPolicyFixture(t *testing.T) policyFixture {
 	localStore, _ := artifacts.NewLocalStore(filepath.Join(t.TempDir(), "artifacts"))
 	artifactService := artifacts.NewService(store.DB(), localStore, config.Config{}, nil, sessionService)
 	return policyFixture{
-		service:  NewService(store.DB(), sessionService, artifactService, time.Hour, slog.Default()),
+		service:  NewService(store.DB(), sessionService, artifactService, nil, time.Hour, slog.Default()),
 		tenantID: domain.TenantID,
 		owner:    identity.Principal{UserID: domain.UserID, ActiveTenantID: &domain.TenantID},
 		member:   identity.Principal{UserID: memberID, ActiveTenantID: &domain.TenantID},

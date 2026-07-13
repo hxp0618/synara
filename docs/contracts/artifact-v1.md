@@ -9,6 +9,10 @@ Every Artifact persists `tenant_id`, `organization_id`, `project_id`, and `sessi
 Artifacts also require `execution_id`. PostgreSQL composite foreign keys prevent cross-tenant or
 cross-project associations.
 
+Checkpoint payload Artifacts additionally persist `workspace_checkpoint_id`. It is an immutable reverse binding
+to the same Tenant/Session/Execution and to the strategy-specific kind (`checkpoint` for Patch,
+`workspace_snapshot` for Snapshot). One Checkpoint can own at most one Artifact.
+
 Object keys are deterministic and never accepted from clients:
 
 ```text
@@ -33,11 +37,22 @@ States are `pending`, `ready`, `deleting`, `deleted`, and `failed`.
 6. Deletion transitions through `deleting`, removes the payload idempotently, then persists
    `deleted` and `deleted_at`.
 
-The distributed retention sweep also owns upload-expiry cleanup. An expired `pending` Artifact loses
-its temporary key plus any final key orphaned by a crash between promotion and metadata commit, then
-becomes `failed`. An expired upload grant for an already `ready` Artifact can only recreate the isolated
-temporary key; the sweep deletes that key and clears the grant metadata without touching the verified
-final object. Cleanup is idempotent and runs under the same PostgreSQL Advisory Lock as retention.
+For a Checkpoint upload, the Control Plane derives a deterministic Artifact ID from `checkpointId` and binds it
+before returning the first grant. Pending replay rotates the Local token or re-signs the same S3/MinIO temporary
+key. Ready replay returns metadata without another PUT and first revalidates Lease/Generation plus
+Size/SHA-256/Content-Type. UploadGrant secrets are not persisted as long-lived Worker receipts.
+
+The distributed retention sweep also owns upload-expiry cleanup. An expired `pending` Artifact is first sealed
+as `failed`; if it belongs to a Checkpoint, the same transaction fails that Checkpoint, releases the Workspace
+from `checkpointing` and appends `checkpoint.failed`. Object deletion then runs outside the database transaction.
+Local uploads terminate cleanup immediately after a successful delete. S3/MinIO keeps the isolated temporary key
+for one bounded grace interval, deletes it once more to catch an in-flight late PUT, then clears the cleanup handle
+so terminal Artifacts stop entering the sweep. A `ready` Artifact's verified final object is never touched.
+
+Retention skips every Artifact referenced by a `pending`, `uploading` or `ready` Checkpoint. Terminal Execution
+restore references are cleared before an unreferenced non-current Checkpoint becomes `expired`; only then can its
+Artifact be deleted. User deletion under an active Checkpoint reference returns
+`artifact_checkpoint_referenced`.
 
 Worker create and completion both validate Worker ID, Tenant ID, Execution ID, Generation, Lease
 token, and lease expiry. A user cannot confirm an Artifact created by a Worker, so an old Generation

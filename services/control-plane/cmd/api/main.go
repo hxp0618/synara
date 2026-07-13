@@ -168,7 +168,7 @@ func main() {
 	enterpriseIdentityService := enterpriseidentity.NewService(db, identityService, credentialCipher)
 	scimService := scim.NewService(db)
 	retentionService := retention.NewService(
-		db, sessionService, artifactService, cfg.RetentionSweepInterval, logger, metrics,
+		db, sessionService, artifactService, executionService, cfg.RetentionSweepInterval, logger, metrics,
 	)
 	api, err := httpapi.New(
 		cfg, db, identityService, tenancyService, projectService, sessionService,

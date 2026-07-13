@@ -844,11 +844,19 @@ func TestWorkspaceCheckpointLifecyclePreservesLastReadyRecoveryPoint(t *testing.
 	artifact := persistence.Artifact{
 		ID: uuid.New(), TenantID: fixture.TenantID, OrganizationID: session.OrganizationID,
 		ProjectID: session.ProjectID, SessionID: fixture.SessionID, ExecutionID: &fixture.ExecutionID,
-		Kind: "workspace_snapshot", Status: "ready", Bucket: "test", ObjectKey: "checkpoint/" + uuid.NewString(),
+		WorkspaceCheckpointID: &snapshot.Value.ID,
+		Kind:                  "workspace_snapshot", Status: "ready", Bucket: "test", ObjectKey: "checkpoint/" + uuid.NewString(),
 		ContentType: &contentType, SizeBytes: &size, SHA256: &sha,
 		CreatedByType: "worker", CreatedByID: worker.ID, ReadyAt: &now, CreatedAt: now,
 	}
-	if err := db.Create(&artifact).Error; err != nil {
+	if err := db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(&artifact).Error; err != nil {
+			return err
+		}
+		return tx.Model(&persistence.WorkspaceCheckpoint{}).
+			Where("tenant_id = ? AND id = ?", fixture.TenantID, snapshot.Value.ID).
+			Updates(map[string]any{"status": "uploading", "artifact_id": artifact.ID}).Error
+	}); err != nil {
 		t.Fatal(err)
 	}
 	snapshotReady, err := service.MarkWorkspaceCheckpointReady(ctx, worker, fixture.ExecutionID, snapshot.Value.ID, WorkspaceCheckpointReadyInput{
@@ -900,6 +908,53 @@ func TestWorkspaceCheckpointLifecyclePreservesLastReadyRecoveryPoint(t *testing.
 		LeaseInput: leaseInput, Output: map[string]any{"status": "checkpointed"},
 	}, "checkpoint-complete"); err != nil {
 		t.Fatalf("Checkpointed dirty Workspace could not complete: %v", err)
+	}
+	abandonedID := uuid.New()
+	abandonedCreatedAt := time.Now().UTC()
+	abandonedExpiresAt := abandonedCreatedAt.Add(time.Minute)
+	if err := db.Create(&persistence.WorkspaceCheckpoint{
+		ID: abandonedID, TenantID: fixture.TenantID, WorkspaceID: workspace.ID,
+		SessionID: fixture.SessionID, TurnID: &fixture.TurnID, ExecutionID: fixture.ExecutionID,
+		Generation: lease.Generation, IdempotencyKey: "abandoned-after-complete", Strategy: "snapshot",
+		Status: "pending", BaseCommit: &baseCommit, HeadCommit: &dirtyHead, CurrentBranch: &branch,
+		Manifest:  map[string]any{"format": "synara-workspace-snapshot-v1", "files": []any{}},
+		FileCount: &fileCount, TotalBytes: &totalBytes, CreatedAt: abandonedCreatedAt, ExpiresAt: &abandonedExpiresAt,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Model(&persistence.RemoteWorkspace{}).Where("tenant_id = ? AND id = ?", fixture.TenantID, workspace.ID).
+		Update("state", "checkpointing").Error; err != nil {
+		t.Fatal(err)
+	}
+	failedAbandoned, err := service.FailAbandonedWorkspaceCheckpoints(ctx, time.Now().UTC(), 10)
+	if err != nil || failedAbandoned != 1 {
+		t.Fatalf("abandoned Checkpoint cleanup = %d, %v", failedAbandoned, err)
+	}
+	var abandoned persistence.WorkspaceCheckpoint
+	if err := db.Where("tenant_id = ? AND id = ?", fixture.TenantID, abandonedID).Take(&abandoned).Error; err != nil {
+		t.Fatal(err)
+	}
+	if abandoned.Status != "failed" || abandoned.FailureCode == nil || *abandoned.FailureCode != "checkpoint_lease_inactive" {
+		t.Fatalf("abandoned Checkpoint was not failed: %#v", abandoned)
+	}
+	retained, err := service.ApplyWorkspaceCheckpointRetention(
+		ctx, fixture.TenantID, abandonedCreatedAt.Add(-time.Hour), abandonedExpiresAt.Add(time.Second), 10,
+	)
+	if err != nil || retained.CheckpointsExpired != 1 {
+		t.Fatalf("failed Checkpoint retention = %#v, %v", retained, err)
+	}
+	if err := db.Where("tenant_id = ? AND id = ?", fixture.TenantID, abandonedID).Take(&abandoned).Error; err != nil {
+		t.Fatal(err)
+	}
+	if abandoned.Status != "expired" || abandoned.FailureCode == nil || *abandoned.FailureCode != "checkpoint_lease_inactive" {
+		t.Fatalf("expired Checkpoint lost immutable failure evidence: %#v", abandoned)
+	}
+	if err := db.Where("tenant_id = ? AND id = ?", fixture.TenantID, workspace.ID).Take(&persistedWorkspace).Error; err != nil {
+		t.Fatal(err)
+	}
+	if persistedWorkspace.State != "dirty" || persistedWorkspace.CurrentCheckpointID == nil ||
+		*persistedWorkspace.CurrentCheckpointID != snapshot.Value.ID {
+		t.Fatalf("abandoned Checkpoint damaged the last ready recovery point: %#v", persistedWorkspace)
 	}
 	cipher, err := secret.NewCursorCipher(bytes.Repeat([]byte{0x43}, 32))
 	if err != nil {
@@ -1866,6 +1921,22 @@ func cleanupFixture(db *gorm.DB, tenantID uuid.UUID) {
 		}
 		if err := tx.Model(&persistence.RemoteWorkspace{}).Where("tenant_id = ?", tenantID).
 			Update("current_checkpoint_id", nil).Error; err != nil {
+			return err
+		}
+		if err := tx.Exec("ALTER TABLE artifacts DISABLE TRIGGER trg_artifacts_protect_checkpoint_reference").Error; err != nil {
+			return err
+		}
+		if err := tx.Model(&persistence.Artifact{}).Where("tenant_id = ?", tenantID).
+			Update("workspace_checkpoint_id", nil).Error; err != nil {
+			return err
+		}
+		if err := tx.Exec("SET CONSTRAINTS ALL IMMEDIATE").Error; err != nil {
+			return err
+		}
+		if err := tx.Exec("ALTER TABLE artifacts ENABLE TRIGGER trg_artifacts_protect_checkpoint_reference").Error; err != nil {
+			return err
+		}
+		if err := tx.Exec("SET CONSTRAINTS ALL DEFERRED").Error; err != nil {
 			return err
 		}
 		models := []any{

@@ -3,14 +3,24 @@ package agentd
 import (
 	"archive/tar"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
+	"github.com/synara-ai/synara/services/control-plane/internal/artifacts"
 	"github.com/synara-ai/synara/services/control-plane/internal/executions"
 )
 
@@ -150,6 +160,112 @@ func TestWorkspaceInspectionDetectsCommittedHeadChange(t *testing.T) {
 	}
 	if !inspection.Dirty || inspection.HeadCommit == nil || *inspection.HeadCommit == initialHead {
 		t.Fatalf("committed HEAD change was not detected: %#v", inspection)
+	}
+}
+
+func TestUploadCheckpointArtifactRecoversCompletedArtifactAfterResponseLoss(t *testing.T) {
+	executionID := uuid.New()
+	tenantID := uuid.New()
+	workerID := uuid.New()
+	checkpointID := uuid.New()
+	artifactID := uuid.New()
+	payload := []byte("durable checkpoint payload")
+	artifactPath := filepath.Join(t.TempDir(), "workspace.tar")
+	if err := os.WriteFile(artifactPath, payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(payload)
+	sha := hex.EncodeToString(digest[:])
+	var createRequestIDs []string
+	createCalls, uploadCalls, completeCalls := 0, 0, 0
+	ready := false
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		base := "/v1/workers/executions/" + executionID.String() + "/"
+		switch request.URL.Path {
+		case base + "artifacts":
+			createCalls++
+			createRequestIDs = append(createRequestIDs, request.Header.Get("X-Request-ID"))
+			var input artifacts.WorkerCreateInput
+			if err := json.NewDecoder(request.Body).Decode(&input); err != nil || input.CheckpointID == nil || *input.CheckpointID != checkpointID {
+				http.Error(response, "invalid Checkpoint Artifact create", http.StatusBadRequest)
+				return
+			}
+			response.Header().Set("Content-Type", "application/json")
+			if ready {
+				_, _ = io.WriteString(response, `{"artifact":{"id":"`+artifactID.String()+`","status":"ready","sizeBytes":`+
+					fmt.Sprint(len(payload))+`,"sha256":"`+sha+`","contentType":"application/x-tar"},"uploadRequired":false}`)
+				return
+			}
+			_, _ = io.WriteString(response, `{"artifact":{"id":"`+artifactID.String()+`","status":"pending"},"uploadRequired":true,"method":"PUT","url":"`+
+				server.URL+`/checkpoint-upload","headers":{},"expiresAt":"2030-01-01T00:00:00Z"}`)
+		case "/checkpoint-upload":
+			uploadCalls++
+			uploaded, _ := io.ReadAll(request.Body)
+			if string(uploaded) != string(payload) {
+				http.Error(response, "payload mismatch", http.StatusBadRequest)
+				return
+			}
+			response.WriteHeader(http.StatusNoContent)
+		case base + "artifacts/" + artifactID.String() + "/complete":
+			completeCalls++
+			var input artifacts.WorkerCompleteInput
+			if err := json.NewDecoder(request.Body).Decode(&input); err != nil || input.SHA256 != sha || input.SizeBytes != int64(len(payload)) {
+				http.Error(response, "invalid Artifact complete", http.StatusBadRequest)
+				return
+			}
+			ready = true
+			response.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(response, `{"id":"`+artifactID.String()+`"`)
+		default:
+			http.Error(response, "unexpected path", http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	controlPlaneURL, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := NewClient(Config{ControlPlaneURL: controlPlaneURL, RequestTimeout: time.Second, ArtifactTimeout: time.Second})
+	client.workerToken = "worker-token"
+	lease := executions.Lease{
+		ExecutionID: executionID, TenantID: tenantID, WorkerID: workerID,
+		Generation: 4, LeaseToken: "lease-token", ExpiresAt: time.Now().Add(time.Hour),
+	}
+	candidate := WorkspaceCheckpointCandidate{
+		IdempotencyKey: "response-loss", ArtifactPath: artifactPath,
+		Artifact: &RunnerArtifact{Kind: "workspace_snapshot", OriginalName: "workspace.tar", ContentType: "application/x-tar"},
+	}
+	completed, err := client.UploadCheckpointArtifact(
+		context.Background(), executionID, lease, executions.WorkspaceCheckpoint{ID: checkpointID}, candidate,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if completed.ID != artifactID || completed.Status != "ready" {
+		t.Fatalf("unexpected recovered Artifact: %#v", completed)
+	}
+	if createCalls != 2 || uploadCalls != 1 || completeCalls != 1 {
+		t.Fatalf("unexpected recovery calls: create=%d upload=%d complete=%d", createCalls, uploadCalls, completeCalls)
+	}
+	if len(createRequestIDs) != 2 || createRequestIDs[0] == "" || createRequestIDs[0] != createRequestIDs[1] {
+		t.Fatalf("Checkpoint Artifact create did not reuse a stable request ID: %#v", createRequestIDs)
+	}
+}
+
+func TestVerifyReadyArtifactFileRejectsLocalDrift(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "workspace.tar")
+	if err := os.WriteFile(path, []byte("new payload"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	size := int64(len("old payload"))
+	sha := strings.Repeat("a", 64)
+	contentType := "application/x-tar"
+	err := verifyReadyArtifactFile(path, contentType, artifacts.Artifact{
+		Status: "ready", SizeBytes: &size, SHA256: &sha, ContentType: &contentType,
+	})
+	if err == nil || !strings.Contains(err.Error(), "does not match") {
+		t.Fatalf("ready Artifact local drift was not rejected: %v", err)
 	}
 }
 

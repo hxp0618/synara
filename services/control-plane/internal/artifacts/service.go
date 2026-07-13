@@ -35,6 +35,8 @@ var allowedKinds = map[string]struct{}{
 	"workspace_snapshot": {}, "checkpoint": {},
 }
 
+var checkpointArtifactNamespace = uuid.MustParse("2a54ef28-e6e7-5b78-91e6-d268e84da111")
+
 type Service struct {
 	db             *gorm.DB
 	store          Store
@@ -120,6 +122,12 @@ func (s *Service) CreateForWorker(
 	if err != nil {
 		return UploadGrant{}, err
 	}
+	if input.CheckpointID != nil {
+		if *input.CheckpointID == uuid.Nil {
+			return UploadGrant{}, problem.New(400, "invalid_checkpoint_id", "checkpointId is invalid.")
+		}
+		return s.createCheckpointArtifactForWorker(ctx, worker, executionID, input, normalized)
+	}
 	var model persistence.Artifact
 	var plainToken string
 	err = persistence.InTransaction(ctx, s.db, func(tx *gorm.DB) error {
@@ -154,7 +162,8 @@ func (s *Service) CreateForWorker(
 
 func (s *Service) uploadGrant(ctx context.Context, model persistence.Artifact, plainToken string) (UploadGrant, error) {
 	grant := UploadGrant{
-		Artifact: toArtifact(model), Method: "PUT", Headers: map[string]string{}, ExpiresAt: *model.UploadExpiresAt,
+		Artifact: toArtifact(model), UploadRequired: true,
+		Method: "PUT", Headers: map[string]string{}, ExpiresAt: *model.UploadExpiresAt,
 	}
 	if s.store.IsLocal() {
 		grant.URL = "/v1/artifact-content/" + model.ID.String() + "?token=" + url.QueryEscape(plainToken)
@@ -166,11 +175,174 @@ func (s *Service) uploadGrant(ctx context.Context, model persistence.Artifact, p
 	}
 	signed, err := s.store.PresignUpload(ctx, uploadKey, s.presignTTL)
 	if err != nil {
-		_ = s.db.WithContext(ctx).Model(&persistence.Artifact{}).Where("id = ? AND status = ?", model.ID, "pending").Update("status", "failed").Error
 		return UploadGrant{}, problem.Wrap(503, "artifact_upload_signing_failed", "Failed to issue an artifact upload URL.", err)
 	}
 	grant.URL = signed
 	return grant, nil
+}
+
+func (s *Service) createCheckpointArtifactForWorker(
+	ctx context.Context,
+	worker persistence.WorkerInstance,
+	executionID uuid.UUID,
+	input WorkerCreateInput,
+	normalized CreateInput,
+) (UploadGrant, error) {
+	checkpointID := *input.CheckpointID
+	artifactID := checkpointArtifactID(checkpointID)
+	var model persistence.Artifact
+	var plainToken string
+	err := persistence.InTransaction(ctx, s.db, func(tx *gorm.DB) error {
+		execution, err := s.executions.AuthorizeArtifactWrite(ctx, tx, worker, executionID, executions.LeaseInput{
+			TenantID: input.TenantID, Generation: input.Generation, LeaseToken: input.LeaseToken,
+		})
+		if err != nil {
+			return err
+		}
+		var session persistence.AgentSession
+		if err := tx.WithContext(ctx).
+			Where("tenant_id = ? AND id = ? AND status = ?", execution.TenantID, execution.SessionID, "active").
+			Take(&session).Error; err != nil {
+			return problem.Wrap(409, "artifact_session_unavailable", "The execution session is unavailable for artifact upload.", err)
+		}
+		var checkpoint persistence.WorkspaceCheckpoint
+		if err := persistence.WithLocking(tx.WithContext(ctx), "UPDATE", "").
+			Where("tenant_id = ? AND id = ? AND session_id = ? AND execution_id = ? AND generation = ?",
+				execution.TenantID, checkpointID, execution.SessionID, execution.ID, execution.Generation).
+			Take(&checkpoint).Error; err != nil {
+			return problem.Wrap(404, "checkpoint_not_found", "The Workspace Checkpoint is unavailable for this Execution Generation.", err)
+		}
+		expectedKind, err := checkpointArtifactKind(checkpoint.Strategy)
+		if err != nil {
+			return err
+		}
+		if normalized.Kind != expectedKind {
+			return problem.New(409, "checkpoint_artifact_kind_mismatch", "The Artifact kind does not match the Workspace Checkpoint strategy.")
+		}
+		if checkpoint.ArtifactID != nil && *checkpoint.ArtifactID != artifactID {
+			return problem.New(409, "checkpoint_artifact_conflict", "The Workspace Checkpoint is already bound to a different Artifact.")
+		}
+		if checkpoint.Status != "pending" && checkpoint.Status != "uploading" && checkpoint.Status != "ready" {
+			return problem.New(409, "checkpoint_not_pending", "The Workspace Checkpoint cannot accept an Artifact from its current state.")
+		}
+
+		loadErr := persistence.WithLocking(tx.WithContext(ctx), "UPDATE", "").
+			Where("tenant_id = ? AND id = ?", execution.TenantID, artifactID).Take(&model).Error
+		if errors.Is(loadErr, gorm.ErrRecordNotFound) {
+			if checkpoint.Status == "ready" {
+				return problem.New(409, "checkpoint_artifact_unavailable", "The ready Workspace Checkpoint Artifact is unavailable.")
+			}
+			model, plainToken, err = s.pendingModelWithID(session, normalized, "worker", worker.ID, artifactID, &checkpointID)
+			if err != nil {
+				return err
+			}
+			if err := tx.WithContext(ctx).Create(&model).Error; err != nil {
+				return problem.Wrap(409, "artifact_create_rejected", "Artifact creation was rejected by an isolation constraint.", err)
+			}
+		} else if loadErr != nil {
+			return problem.Wrap(500, "artifact_load_failed", "Failed to inspect the Checkpoint Artifact.", loadErr)
+		} else {
+			if !checkpointArtifactMatchesCreate(model, execution, worker, checkpointID, normalized) {
+				return problem.New(409, "checkpoint_artifact_conflict", "The deterministic Checkpoint Artifact already exists with different ownership or metadata.")
+			}
+			if model.Status == "pending" {
+				model, plainToken, err = s.refreshPendingArtifactGrant(ctx, tx, model)
+				if err != nil {
+					return err
+				}
+			} else if model.Status != "ready" {
+				return problem.New(409, "checkpoint_artifact_unavailable", "The Checkpoint Artifact is no longer available for upload.")
+			}
+		}
+
+		if checkpoint.Status == "ready" && model.Status != "ready" {
+			return problem.New(409, "checkpoint_artifact_unavailable", "The ready Workspace Checkpoint Artifact is unavailable.")
+		}
+		if checkpoint.Status != "ready" {
+			updated := tx.WithContext(ctx).Model(&persistence.WorkspaceCheckpoint{}).
+				Where("tenant_id = ? AND id = ? AND execution_id = ? AND generation = ? AND status IN ? AND (artifact_id IS NULL OR artifact_id = ?)",
+					execution.TenantID, checkpoint.ID, execution.ID, execution.Generation,
+					[]string{"pending", "uploading"}, model.ID).
+				Updates(map[string]any{"status": "uploading", "artifact_id": model.ID})
+			if updated.Error != nil || updated.RowsAffected != 1 {
+				return problem.Wrap(409, "checkpoint_artifact_bind_conflict", "The Workspace Checkpoint Artifact binding changed concurrently.", updated.Error)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return UploadGrant{}, err
+	}
+	if model.Status == "ready" {
+		return UploadGrant{Artifact: toArtifact(model), UploadRequired: false}, nil
+	}
+	grant, err := s.uploadGrant(ctx, model, plainToken)
+	s.observe("create", 0, err)
+	return grant, err
+}
+
+func checkpointArtifactID(checkpointID uuid.UUID) uuid.UUID {
+	return uuid.NewSHA1(checkpointArtifactNamespace, checkpointID[:])
+}
+
+func checkpointArtifactKind(strategy string) (string, error) {
+	switch strategy {
+	case "patch":
+		return "checkpoint", nil
+	case "snapshot":
+		return "workspace_snapshot", nil
+	default:
+		return "", problem.New(409, "checkpoint_artifact_not_required", "Git-reference Workspace Checkpoints do not accept an Artifact.")
+	}
+}
+
+func checkpointArtifactMatchesCreate(
+	model persistence.Artifact,
+	execution persistence.AgentExecution,
+	worker persistence.WorkerInstance,
+	checkpointID uuid.UUID,
+	input CreateInput,
+) bool {
+	return model.ID == checkpointArtifactID(checkpointID) && model.TenantID == execution.TenantID &&
+		model.SessionID == execution.SessionID && model.ExecutionID != nil && *model.ExecutionID == execution.ID &&
+		model.WorkspaceCheckpointID != nil && *model.WorkspaceCheckpointID == checkpointID &&
+		model.Kind == input.Kind && model.CreatedByType == "worker" && model.CreatedByID == worker.ID &&
+		sameOptionalString(model.OriginalName, input.OriginalName) && sameOptionalTime(model.ExpiresAt, input.ExpiresAt)
+}
+
+func (s *Service) refreshPendingArtifactGrant(
+	ctx context.Context,
+	tx *gorm.DB,
+	model persistence.Artifact,
+) (persistence.Artifact, string, error) {
+	uploadExpiry := s.now().Add(s.presignTTL)
+	updates := map[string]any{"upload_expires_at": uploadExpiry}
+	plainToken := ""
+	if s.store.IsLocal() {
+		plain, hash, err := secret.NewToken()
+		if err != nil {
+			return persistence.Artifact{}, "", problem.Wrap(500, "artifact_upload_token_failed", "Failed to refresh the artifact upload token.", err)
+		}
+		plainToken = plain
+		updates["upload_token_hash"] = hash
+		model.UploadTokenHash = hash
+	}
+	updated := tx.WithContext(ctx).Model(&persistence.Artifact{}).
+		Where("tenant_id = ? AND id = ? AND status = ?", model.TenantID, model.ID, "pending").
+		Updates(updates)
+	if updated.Error != nil || updated.RowsAffected != 1 {
+		return persistence.Artifact{}, "", problem.Wrap(409, "artifact_grant_refresh_conflict", "The Checkpoint Artifact upload grant changed concurrently.", updated.Error)
+	}
+	model.UploadExpiresAt = &uploadExpiry
+	return model, plainToken, nil
+}
+
+func sameOptionalString(left, right *string) bool {
+	return (left == nil && right == nil) || (left != nil && right != nil && *left == *right)
+}
+
+func sameOptionalTime(left, right *time.Time) bool {
+	return (left == nil && right == nil) || (left != nil && right != nil && left.Equal(*right))
 }
 
 func (s *Service) UploadLocal(
@@ -304,12 +476,16 @@ func (s *Service) complete(
 		return Artifact{}, err
 	}
 	if model.Status == "ready" {
-		if model.SizeBytes != nil && *model.SizeBytes == input.SizeBytes && model.SHA256 != nil && *model.SHA256 == input.SHA256 &&
-			model.ContentType != nil && *model.ContentType == input.ContentType {
-			s.cleanupPromotedUpload(ctx, model)
-			return toArtifact(model), nil
+		if workerLease != nil {
+			model, err = s.confirmReadyWorkerArtifactReplay(ctx, model, input, *workerLease)
+			if err != nil {
+				return Artifact{}, err
+			}
+		} else if !artifactCompletionMatches(model, input) {
+			return Artifact{}, problem.New(409, "artifact_already_ready", "Artifact is already ready with different metadata.")
 		}
-		return Artifact{}, problem.New(409, "artifact_already_ready", "Artifact is already ready with different metadata.")
+		s.cleanupPromotedUpload(ctx, model)
+		return toArtifact(model), nil
 	}
 	if model.Status != "pending" {
 		return Artifact{}, problem.New(409, "artifact_not_pending", "Artifact is not pending upload confirmation.")
@@ -348,6 +524,11 @@ func (s *Service) complete(
 
 	var appended persistence.SessionEvent
 	err = persistence.InTransaction(ctx, s.db, func(tx *gorm.DB) error {
+		if workerLease != nil {
+			if _, err := s.executions.AuthorizeArtifactWrite(ctx, tx, workerLease.worker, workerLease.executionID, workerLease.input); err != nil {
+				return err
+			}
+		}
 		var tenant persistence.Tenant
 		if err := persistence.WithLocking(tx.WithContext(ctx), "UPDATE", "").
 			Select("id").Where("id = ? AND deleted_at IS NULL", model.TenantID).Take(&tenant).Error; err != nil {
@@ -373,12 +554,11 @@ func (s *Service) complete(
 		if err := persistence.WithLocking(tx.WithContext(ctx), "UPDATE", "").Where("id = ? AND tenant_id = ?", model.ID, model.TenantID).Take(&current).Error; err != nil {
 			return problem.Wrap(404, "artifact_not_found", "Artifact not found.", err)
 		}
-		if workerLease != nil {
-			if _, err := s.executions.AuthorizeArtifactWrite(ctx, tx, workerLease.worker, workerLease.executionID, workerLease.input); err != nil {
-				return err
-			}
-		}
 		if current.Status == "ready" {
+			if !artifactCompletionMatches(current, input) {
+				return problem.New(409, "artifact_already_ready", "Artifact is already ready with different metadata.")
+			}
+			model = current
 			return nil
 		}
 		if current.Status != "pending" {
@@ -450,6 +630,39 @@ func (s *Service) complete(
 		return Artifact{}, problem.Wrap(500, "artifact_reload_failed", "Failed to reload the completed artifact.", err)
 	}
 	return toArtifact(model), nil
+}
+
+func (s *Service) confirmReadyWorkerArtifactReplay(
+	ctx context.Context,
+	model persistence.Artifact,
+	input CompleteInput,
+	lease workerLeaseConfirmation,
+) (persistence.Artifact, error) {
+	err := persistence.InTransaction(ctx, s.db, func(tx *gorm.DB) error {
+		if _, err := s.executions.AuthorizeArtifactWrite(ctx, tx, lease.worker, lease.executionID, lease.input); err != nil {
+			return err
+		}
+		if err := persistence.WithLocking(tx.WithContext(ctx), "UPDATE", "").
+			Where("tenant_id = ? AND id = ? AND execution_id = ? AND created_by_type = ? AND created_by_id = ?",
+				model.TenantID, model.ID, lease.executionID, "worker", lease.worker.ID).
+			Take(&model).Error; err != nil {
+			return problem.Wrap(404, "artifact_not_found", "Artifact not found.", err)
+		}
+		if model.Status != "ready" {
+			return problem.New(409, "artifact_not_ready", "Artifact replay is no longer ready.")
+		}
+		if !artifactCompletionMatches(model, input) {
+			return problem.New(409, "artifact_already_ready", "Artifact is already ready with different metadata.")
+		}
+		return nil
+	})
+	return model, err
+}
+
+func artifactCompletionMatches(model persistence.Artifact, input CompleteInput) bool {
+	return model.SizeBytes != nil && *model.SizeBytes == input.SizeBytes &&
+		model.SHA256 != nil && *model.SHA256 == input.SHA256 &&
+		model.ContentType != nil && *model.ContentType == input.ContentType
 }
 
 func (s *Service) List(ctx context.Context, principal identity.Principal, sessionID uuid.UUID) ([]Artifact, error) {
@@ -616,10 +829,30 @@ func (s *Service) deleteModel(
 	if model.Status == "deleted" {
 		return false, nil
 	}
+	referenced, err := s.artifactReferencedByCheckpoint(ctx, s.db, model.TenantID, model.ID)
+	if err != nil {
+		return false, err
+	}
+	if referenced {
+		return false, problem.New(409, "artifact_checkpoint_referenced", "Artifact is referenced by an active Workspace Checkpoint.")
+	}
 	result := s.db.WithContext(ctx).Model(&persistence.Artifact{}).
 		Where("id = ? AND tenant_id = ? AND status IN ?", model.ID, model.TenantID, []string{"pending", "ready", "failed", "deleting"}).
+		Where(`NOT EXISTS (
+			SELECT 1 FROM workspace_checkpoints checkpoint
+			WHERE checkpoint.tenant_id = artifacts.tenant_id
+			  AND checkpoint.artifact_id = artifacts.id
+			  AND checkpoint.status IN ('pending', 'uploading', 'ready')
+		)`).
 		Update("status", "deleting")
 	if result.Error != nil || result.RowsAffected != 1 {
+		referenced, referenceErr := s.artifactReferencedByCheckpoint(ctx, s.db, model.TenantID, model.ID)
+		if referenceErr != nil {
+			return false, referenceErr
+		}
+		if referenced {
+			return false, problem.New(409, "artifact_checkpoint_referenced", "Artifact is referenced by an active Workspace Checkpoint.")
+		}
 		return false, problem.Wrap(409, "artifact_delete_conflict", "Artifact deletion conflicted with another request.", result.Error)
 	}
 	if err := s.store.Delete(ctx, model.ObjectKey); err != nil {
@@ -631,13 +864,12 @@ func (s *Service) deleteModel(
 		}
 	}
 	now := s.now()
-	err := persistence.InTransaction(ctx, s.db, func(tx *gorm.DB) error {
+	err = persistence.InTransaction(ctx, s.db, func(tx *gorm.DB) error {
 		update := tx.WithContext(ctx).Model(&persistence.Artifact{}).
 			Where("id = ? AND tenant_id = ? AND status = ?", model.ID, model.TenantID, "deleting").
-			Updates(map[string]any{
-				"status": "deleted", "deleted_at": now, "upload_token_hash": nil,
-				"upload_expires_at": nil, "upload_object_key": nil,
-			})
+				Updates(map[string]any{
+					"status": "deleted", "deleted_at": now, "upload_token_hash": nil,
+				})
 		if update.Error != nil || update.RowsAffected != 1 {
 			return problem.Wrap(409, "artifact_delete_commit_failed", "Failed to commit artifact deletion.", update.Error)
 		}
@@ -655,6 +887,20 @@ func (s *Service) deleteModel(
 		return false, err
 	}
 	return true, nil
+}
+
+func (s *Service) artifactReferencedByCheckpoint(
+	ctx context.Context,
+	db *gorm.DB,
+	tenantID, artifactID uuid.UUID,
+) (bool, error) {
+	var count int64
+	if err := db.WithContext(ctx).Model(&persistence.WorkspaceCheckpoint{}).
+		Where("tenant_id = ? AND artifact_id = ? AND status IN ?", tenantID, artifactID, []string{"pending", "uploading", "ready"}).
+		Count(&count).Error; err != nil {
+		return false, problem.Wrap(500, "artifact_checkpoint_reference_lookup_failed", "Failed to inspect Workspace Checkpoint references.", err)
+	}
+	return count > 0, nil
 }
 
 func (s *Service) authorizedArtifact(ctx context.Context, principal identity.Principal, artifactID uuid.UUID, permission authorization.Permission) (persistence.Artifact, error) {
@@ -745,7 +991,16 @@ func (s *Service) normalizeCreate(input CreateInput) (CreateInput, error) {
 }
 
 func (s *Service) pendingModel(session persistence.AgentSession, input CreateInput, actorType string, actorID uuid.UUID) (persistence.Artifact, string, error) {
-	id := uuid.New()
+	return s.pendingModelWithID(session, input, actorType, actorID, uuid.New(), nil)
+}
+
+func (s *Service) pendingModelWithID(
+	session persistence.AgentSession,
+	input CreateInput,
+	actorType string,
+	actorID, id uuid.UUID,
+	workspaceCheckpointID *uuid.UUID,
+) (persistence.Artifact, string, error) {
 	executionSegment := "_session"
 	if input.ExecutionID != nil {
 		executionSegment = input.ExecutionID.String()
@@ -759,7 +1014,8 @@ func (s *Service) pendingModel(session persistence.AgentSession, input CreateInp
 	model := persistence.Artifact{
 		ID: id, TenantID: session.TenantID, OrganizationID: session.OrganizationID,
 		ProjectID: session.ProjectID, SessionID: session.ID, ExecutionID: input.ExecutionID,
-		Kind: input.Kind, Status: "pending", OriginalName: input.OriginalName,
+		WorkspaceCheckpointID: workspaceCheckpointID,
+		Kind:                  input.Kind, Status: "pending", OriginalName: input.OriginalName,
 		Bucket: s.store.Bucket(), ObjectKey: objectKey, CreatedByType: actorType,
 		CreatedByID: actorID, UploadExpiresAt: &uploadExpiry, ExpiresAt: input.ExpiresAt,
 	}

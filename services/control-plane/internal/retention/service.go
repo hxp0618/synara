@@ -14,6 +14,7 @@ import (
 	"github.com/synara-ai/synara/services/control-plane/internal/artifacts"
 	"github.com/synara-ai/synara/services/control-plane/internal/audit"
 	"github.com/synara-ai/synara/services/control-plane/internal/authorization"
+	"github.com/synara-ai/synara/services/control-plane/internal/executions"
 	"github.com/synara-ai/synara/services/control-plane/internal/identity"
 	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
 	"github.com/synara-ai/synara/services/control-plane/internal/problem"
@@ -39,6 +40,7 @@ type Service struct {
 	authorizer *authorization.Authorizer
 	sessions   *sessions.Service
 	artifacts  *artifacts.Service
+	executions *executions.Service
 	interval   time.Duration
 	logger     *slog.Logger
 	now        func() time.Time
@@ -53,13 +55,14 @@ func NewService(
 	db *gorm.DB,
 	sessionService *sessions.Service,
 	artifactService *artifacts.Service,
+	executionService *executions.Service,
 	interval time.Duration,
 	logger *slog.Logger,
 	observers ...backgroundObserver,
 ) *Service {
 	service := &Service{
 		db: db, authorizer: authorization.NewAuthorizer(db), sessions: sessionService,
-		artifacts: artifactService, interval: interval, logger: logger,
+		artifacts: artifactService, executions: executionService, interval: interval, logger: logger,
 		now: func() time.Time { return time.Now().UTC() },
 	}
 	if len(observers) > 0 {
@@ -184,6 +187,11 @@ func (s *Service) RunOnce(ctx context.Context, limit int) error {
 	if _, err := s.artifacts.CleanupExpiredUploads(ctx, now, limit); err != nil {
 		failures = append(failures, err)
 	}
+	if s.executions != nil {
+		if _, err := s.executions.FailAbandonedWorkspaceCheckpoints(ctx, now, limit); err != nil {
+			failures = append(failures, err)
+		}
+	}
 	for _, policy := range policies {
 		if err := s.applyPolicy(ctx, policy, now, limit); err != nil {
 			failures = append(failures, fmt.Errorf("tenant %s: %w", policy.TenantID, err))
@@ -251,6 +259,7 @@ func (s *Service) applyPolicy(
 	limit int,
 ) error {
 	archived, deleted := 0, 0
+	checkpointRetention := executions.WorkspaceCheckpointRetentionResult{}
 	var failures []error
 	metadata := map[string]any{}
 	if policy.SessionArchiveAfterDays != nil {
@@ -264,6 +273,15 @@ func (s *Service) applyPolicy(
 	}
 	if policy.ArtifactDeleteAfterDays != nil {
 		cutoff := now.AddDate(0, 0, -*policy.ArtifactDeleteAfterDays)
+		if s.executions != nil {
+			result, err := s.executions.ApplyWorkspaceCheckpointRetention(ctx, policy.TenantID, cutoff, now, limit)
+			checkpointRetention = result
+			metadata["checkpointRestoreReferencesCleared"] = result.RestoreReferencesCleared
+			metadata["checkpointsExpired"] = result.CheckpointsExpired
+			if err != nil {
+				failures = append(failures, err)
+			}
+		}
 		count, err := s.artifacts.DeleteByRetention(ctx, policy.TenantID, cutoff, now, limit)
 		deleted = count
 		metadata["artifactCutoff"] = cutoff
@@ -271,7 +289,7 @@ func (s *Service) applyPolicy(
 			failures = append(failures, err)
 		}
 	}
-	if archived > 0 || deleted > 0 {
+	if archived > 0 || deleted > 0 || checkpointRetention.RestoreReferencesCleared > 0 || checkpointRetention.CheckpointsExpired > 0 {
 		metadata["sessionsArchived"] = archived
 		metadata["artifactsDeleted"] = deleted
 		if err := audit.Record(ctx, s.db, audit.Entry{

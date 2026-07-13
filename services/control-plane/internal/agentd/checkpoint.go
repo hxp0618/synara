@@ -217,9 +217,7 @@ func (d *Daemon) persistWorkspaceCheckpoint(
 	}
 	var completedArtifact *artifacts.Artifact
 	if candidate.Artifact != nil {
-		artifact, uploadErr := d.client.UploadArtifact(
-			ctx, execution.ID, lease, *candidate.Artifact, candidate.ArtifactPath,
-		)
+		artifact, uploadErr := d.client.UploadCheckpointArtifact(ctx, execution.ID, lease, checkpoint, candidate)
 		if uploadErr != nil {
 			failedErr := d.client.MarkWorkspaceCheckpointFailed(ctx, execution.ID, lease, candidate, checkpoint, uploadErr)
 			return errors.Join(fmt.Errorf("upload Workspace Checkpoint Artifact: %w", uploadErr), failedErr)

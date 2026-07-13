@@ -227,8 +227,49 @@ func TestCheckpointMigrationUpgradesExistingGitReferenceAndReadyPointers(t *test
 	if err := db.Create(&checkpoint).Error; err != nil {
 		t.Fatal(err)
 	}
+	var session persistence.AgentSession
+	if err := db.Where("tenant_id = ? AND id = ?", seed.tenantID, seed.sessionID).Take(&session).Error; err != nil {
+		t.Fatal(err)
+	}
+	legacySnapshotID := uuid.New()
+	legacySnapshotBytes := int64(18)
+	legacySnapshotSHA := strings.Repeat("c", 64)
+	legacySnapshotContentType := "application/x-tar"
+	legacySnapshotReadyAt := now.Add(time.Second)
+	legacySnapshot := persistence.Artifact{
+		ID: legacySnapshotID, TenantID: seed.tenantID, OrganizationID: session.OrganizationID,
+		ProjectID: session.ProjectID, SessionID: seed.sessionID, ExecutionID: &seed.executionID,
+		Kind: "workspace_snapshot", Status: "ready", Bucket: "migration-artifacts",
+		ObjectKey: "checkpoint-migration/" + legacySnapshotID.String(), ContentType: &legacySnapshotContentType,
+		SizeBytes: &legacySnapshotBytes, SHA256: &legacySnapshotSHA, CreatedByType: "system",
+		CreatedByID: seed.tenantID, ReadyAt: &legacySnapshotReadyAt, CreatedAt: now,
+	}
+	legacySnapshotCheckpoint := persistence.WorkspaceCheckpoint{
+		ID: uuid.New(), TenantID: seed.tenantID, WorkspaceID: *execution.RemoteWorkspaceID,
+		SessionID: seed.sessionID, TurnID: &seed.turnID, ExecutionID: seed.executionID,
+		Generation: execution.Generation, IdempotencyKey: "migration-snapshot-reference",
+		Strategy: "snapshot", Status: "ready", ArtifactID: &legacySnapshotID,
+		Manifest: map[string]any{"format": "synara-workspace-snapshot-v1"}, FileCount: pointerInt(1),
+		TotalBytes: &legacySnapshotBytes, SHA256: &legacySnapshotSHA, CreatedAt: now,
+		ReadyAt: &legacySnapshotReadyAt,
+	}
+	if err := db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Omit("WorkspaceCheckpointID", "UploadCleanupAt").Create(&legacySnapshot).Error; err != nil {
+			return err
+		}
+		return tx.Create(&legacySnapshotCheckpoint).Error
+	}); err != nil {
+		t.Fatalf("seed pre-000025 ready Checkpoint Artifact: %v", err)
+	}
 	if err := Migrate(context.Background(), db, migrations.Files); err != nil {
 		t.Fatal(err)
+	}
+	var migratedSnapshot persistence.Artifact
+	if err := db.Where("tenant_id = ? AND id = ?", seed.tenantID, legacySnapshotID).Take(&migratedSnapshot).Error; err != nil {
+		t.Fatal(err)
+	}
+	if migratedSnapshot.WorkspaceCheckpointID == nil || *migratedSnapshot.WorkspaceCheckpointID != legacySnapshotCheckpoint.ID {
+		t.Fatalf("000025 did not backfill the reverse Checkpoint binding: %#v", migratedSnapshot)
 	}
 	readyAt := now.Add(time.Second)
 	if err := db.Transaction(func(tx *gorm.DB) error {
@@ -263,7 +304,338 @@ func TestCheckpointMigrationUpgradesExistingGitReferenceAndReadyPointers(t *test
 	}); err == nil {
 		t.Fatal("000024 allowed current_checkpoint_id to reference a pending Checkpoint")
 	}
+	failedAt := readyAt.Add(time.Second)
+	if err := db.Model(&persistence.WorkspaceCheckpoint{}).
+		Where("tenant_id = ? AND id = ?", pending.TenantID, pending.ID).
+		Updates(map[string]any{
+			"status": "failed", "failure_code": "migration_test_complete",
+			"failure_message": "release the active Checkpoint slot", "failed_at": failedAt,
+		}).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	boundCheckpoint := persistence.WorkspaceCheckpoint{
+		ID: uuid.New(), TenantID: seed.tenantID, WorkspaceID: *execution.RemoteWorkspaceID,
+		SessionID: seed.sessionID, TurnID: &seed.turnID, ExecutionID: seed.executionID,
+		Generation: execution.Generation, IdempotencyKey: "migration-reverse-binding-enforcement",
+		Strategy: "snapshot", Status: "pending", Manifest: map[string]any{"format": "synara-workspace-snapshot-v1"},
+		FileCount: pointerInt(1), TotalBytes: &legacySnapshotBytes, CreatedAt: failedAt,
+	}
+	if err := db.Create(&boundCheckpoint).Error; err != nil {
+		t.Fatal(err)
+	}
+	unboundArtifactID := uuid.New()
+	unboundArtifact := legacySnapshot
+	unboundArtifact.ID = unboundArtifactID
+	unboundArtifact.ObjectKey = "checkpoint-migration/" + unboundArtifactID.String()
+	unboundArtifact.WorkspaceCheckpointID = nil
+	if err := db.Create(&unboundArtifact).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Transaction(func(tx *gorm.DB) error {
+		return tx.Model(&persistence.WorkspaceCheckpoint{}).
+			Where("tenant_id = ? AND id = ?", boundCheckpoint.TenantID, boundCheckpoint.ID).
+			Updates(map[string]any{
+				"status": "ready", "artifact_id": unboundArtifactID,
+				"sha256": legacySnapshotSHA, "ready_at": failedAt.Add(time.Second),
+			}).Error
+	}); err == nil {
+		t.Fatal("000025 allowed a ready Checkpoint to use an Artifact without the reverse binding")
+	}
+	if err := db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(&persistence.Artifact{}).
+			Where("tenant_id = ? AND id = ?", seed.tenantID, unboundArtifactID).
+			Update("workspace_checkpoint_id", boundCheckpoint.ID).Error; err != nil {
+			return err
+		}
+		return tx.Model(&persistence.WorkspaceCheckpoint{}).
+			Where("tenant_id = ? AND id = ?", boundCheckpoint.TenantID, boundCheckpoint.ID).
+			Updates(map[string]any{
+				"status": "ready", "artifact_id": unboundArtifactID,
+				"sha256": legacySnapshotSHA, "ready_at": failedAt.Add(time.Second),
+			}).Error
+	}); err != nil {
+		t.Fatalf("000025 rejected a correctly reverse-bound ready Checkpoint Artifact: %v", err)
+	}
+	if err := db.Model(&persistence.Artifact{}).
+		Where("tenant_id = ? AND id = ?", seed.tenantID, unboundArtifactID).
+		Update("workspace_checkpoint_id", nil).Error; err == nil {
+		t.Fatal("000025 allowed a ready Checkpoint Artifact reverse binding to be removed")
+	}
+
+	scopeCheckpoint := boundCheckpoint
+	scopeCheckpoint.ID = uuid.New()
+	scopeCheckpoint.IdempotencyKey = "migration-artifact-scope"
+	scopeCheckpoint.Status = "pending"
+	scopeCheckpoint.ArtifactID = nil
+	scopeCheckpoint.SHA256 = nil
+	scopeCheckpoint.ReadyAt = nil
+	scopeCheckpoint.CreatedAt = failedAt.Add(2 * time.Second)
+	if err := db.Create(&scopeCheckpoint).Error; err != nil {
+		t.Fatal(err)
+	}
+	wrongKind := legacySnapshot
+	wrongKind.ID = uuid.New()
+	wrongKind.ObjectKey = "checkpoint-migration/" + wrongKind.ID.String()
+	wrongKind.Kind = "generated_file"
+	wrongKind.Status = "pending"
+	wrongKind.ContentType = nil
+	wrongKind.SizeBytes = nil
+	wrongKind.SHA256 = nil
+	wrongKind.ReadyAt = nil
+	wrongKind.WorkspaceCheckpointID = &scopeCheckpoint.ID
+	if err := db.Create(&wrongKind).Error; err == nil {
+		t.Fatal("000025 allowed a non-Checkpoint Artifact kind to bind a Workspace Checkpoint")
+	}
+
+	otherTurnID, otherExecutionID := uuid.New(), uuid.New()
+	if err := db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(&persistence.AgentTurn{
+			ID: otherTurnID, TenantID: seed.tenantID, SessionID: seed.sessionID,
+			CreatedBy: session.CreatedBy, Status: "queued", InputText: "Scope test", CreatedAt: failedAt,
+		}).Error; err != nil {
+			return err
+		}
+		return tx.Create(&persistence.AgentExecution{
+			ID: otherExecutionID, TenantID: seed.tenantID, SessionID: seed.sessionID, TurnID: otherTurnID,
+			Attempt: 1, Status: "queued", ExecutionTargetID: execution.ExecutionTargetID,
+			TargetKind: execution.TargetKind, RequestedBy: session.CreatedBy, QueuedAt: failedAt,
+		}).Error
+	}); err != nil {
+		t.Fatal(err)
+	}
+	wrongExecution := legacySnapshot
+	wrongExecution.ID = uuid.New()
+	wrongExecution.ObjectKey = "checkpoint-migration/" + wrongExecution.ID.String()
+	wrongExecution.Status = "pending"
+	wrongExecution.ContentType = nil
+	wrongExecution.SizeBytes = nil
+	wrongExecution.SHA256 = nil
+	wrongExecution.ReadyAt = nil
+	wrongExecution.ExecutionID = &otherExecutionID
+	wrongExecution.WorkspaceCheckpointID = &scopeCheckpoint.ID
+	if err := db.Create(&wrongExecution).Error; err == nil {
+		t.Fatal("000025 allowed a Checkpoint Artifact from another Execution")
+	}
+
+	otherSession := session
+	otherSession.ID = uuid.New()
+	otherSession.Title = "Checkpoint Artifact scope"
+	otherSession.CurrentRuntimeBindingID = nil
+	otherSession.ProviderResumeCursorEncrypted = nil
+	otherSession.LastEventSequence = 0
+	otherSession.CreatedAt = failedAt
+	otherSession.UpdatedAt = failedAt
+	if err := db.Create(&otherSession).Error; err != nil {
+		t.Fatal(err)
+	}
+	wrongSession := legacySnapshot
+	wrongSession.ID = uuid.New()
+	wrongSession.ObjectKey = "checkpoint-migration/" + wrongSession.ID.String()
+	wrongSession.Status = "pending"
+	wrongSession.ContentType = nil
+	wrongSession.SizeBytes = nil
+	wrongSession.SHA256 = nil
+	wrongSession.ReadyAt = nil
+	wrongSession.SessionID = otherSession.ID
+	wrongSession.WorkspaceCheckpointID = &scopeCheckpoint.ID
+	if err := db.Create(&wrongSession).Error; err == nil {
+		t.Fatal("000025 allowed a Checkpoint Artifact from another Session")
+	}
+
+	validPending := legacySnapshot
+	validPending.ID = uuid.New()
+	validPending.ObjectKey = "checkpoint-migration/" + validPending.ID.String()
+	validPending.Status = "pending"
+	validPending.ContentType = nil
+	validPending.SizeBytes = nil
+	validPending.SHA256 = nil
+	validPending.ReadyAt = nil
+	validPending.WorkspaceCheckpointID = &scopeCheckpoint.ID
+	if err := db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(&validPending).Error; err != nil {
+			return err
+		}
+		return tx.Model(&persistence.WorkspaceCheckpoint{}).
+			Where("tenant_id = ? AND id = ?", scopeCheckpoint.TenantID, scopeCheckpoint.ID).
+			Updates(map[string]any{"status": "uploading", "artifact_id": validPending.ID}).Error
+	}); err != nil {
+		t.Fatalf("000025 rejected a valid pending Checkpoint Artifact binding: %v", err)
+	}
+	duplicateBinding := validPending
+	duplicateBinding.ID = uuid.New()
+	duplicateBinding.ObjectKey = "checkpoint-migration/" + duplicateBinding.ID.String()
+	if err := db.Create(&duplicateBinding).Error; err == nil {
+		t.Fatal("000025 allowed multiple Artifacts to bind the same Workspace Checkpoint")
+	}
+	for name, updates := range map[string]map[string]any{
+		"reverse binding removal": {"workspace_checkpoint_id": nil},
+		"kind change":             {"kind": "checkpoint"},
+		"execution change":        {"execution_id": otherExecutionID},
+		"session change":          {"session_id": otherSession.ID},
+		"premature failure":       {"status": "failed"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := db.Model(&persistence.Artifact{}).
+				Where("tenant_id = ? AND id = ?", seed.tenantID, validPending.ID).
+				Updates(updates).Error; err == nil {
+				t.Fatalf("000025 allowed active Checkpoint Artifact mutation: %#v", updates)
+			}
+		})
+	}
+	activeFailureAt := failedAt.Add(3 * time.Second)
+	if err := db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(&persistence.WorkspaceCheckpoint{}).
+			Where("tenant_id = ? AND id = ?", scopeCheckpoint.TenantID, scopeCheckpoint.ID).
+			Updates(map[string]any{
+				"status": "failed", "failure_code": "migration_test_failed",
+				"failure_message": "active binding failure transaction", "failed_at": activeFailureAt,
+			}).Error; err != nil {
+			return err
+		}
+		return tx.Model(&persistence.Artifact{}).
+			Where("tenant_id = ? AND id = ?", seed.tenantID, validPending.ID).
+			Update("status", "failed").Error
+	}); err != nil {
+		t.Fatalf("000025 rejected an atomic Checkpoint and Artifact failure: %v", err)
+	}
+
+	var foreignKeyDefinition string
+	if err := db.Raw(`
+		SELECT pg_get_constraintdef(oid)
+		FROM pg_constraint
+		WHERE conrelid = 'artifacts'::regclass
+		  AND conname = 'fk_artifacts_workspace_checkpoint'
+	`).Scan(&foreignKeyDefinition).Error; err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(foreignKeyDefinition, "FOREIGN KEY (workspace_checkpoint_id)") ||
+		strings.Contains(foreignKeyDefinition, "tenant_id") {
+		t.Fatalf("000025 Checkpoint Artifact foreign key should reuse the global Checkpoint primary key: %q", foreignKeyDefinition)
+	}
+	for tableName, constraintName := range map[string]string{
+		"provider_runtime_bindings": "fk_provider_runtime_bindings_last_execution",
+		"remote_workspaces":         "fk_remote_workspaces_last_execution",
+	} {
+		var definition string
+		if err := db.Raw(`
+			SELECT pg_get_constraintdef(oid)
+			FROM pg_constraint
+			WHERE conrelid = ?::regclass AND conname = ?
+		`, tableName, constraintName).Scan(&definition).Error; err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(definition, "ON DELETE SET NULL (last_execution_id)") {
+			t.Fatalf("000026 %s tenant-preserving Execution cleanup foreign key is invalid: %q", tableName, definition)
+		}
+	}
 }
+
+func TestCheckpointMigrationRejectsInvalidLegacyReadyArtifactKind(t *testing.T) {
+	databaseURL := os.Getenv("SYNARA_TEST_CHECKPOINT_MIGRATION_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("SYNARA_TEST_CHECKPOINT_MIGRATION_DATABASE_URL is not configured")
+	}
+	db := openIsolatedMigrationSchema(t, databaseURL)
+	if err := Migrate(context.Background(), db, migrationsThrough(t, "000016_sse_connection_leases.sql")); err != nil {
+		t.Fatal(err)
+	}
+	seed := seedStage3MigrationState(t, db)
+	if err := Migrate(context.Background(), db, migrationsThrough(t, "000023_git_credentials.sql")); err != nil {
+		t.Fatal(err)
+	}
+	var execution persistence.AgentExecution
+	if err := db.Where("tenant_id = ? AND id = ?", seed.tenantID, seed.executionID).Take(&execution).Error; err != nil {
+		t.Fatal(err)
+	}
+	var session persistence.AgentSession
+	if err := db.Where("tenant_id = ? AND id = ?", seed.tenantID, seed.sessionID).Take(&session).Error; err != nil {
+		t.Fatal(err)
+	}
+	if execution.RemoteWorkspaceID == nil {
+		t.Fatal("000020 did not bind the legacy Execution to a logical Workspace")
+	}
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	artifactID := uuid.New()
+	sizeBytes := int64(18)
+	sha := strings.Repeat("d", 64)
+	contentType := "application/x-tar"
+	readyAt := now.Add(time.Second)
+	baseCommit := strings.Repeat("a", 40)
+	branch := "main"
+	artifact := persistence.Artifact{
+		ID: artifactID, TenantID: seed.tenantID, OrganizationID: session.OrganizationID,
+		ProjectID: session.ProjectID, SessionID: seed.sessionID, ExecutionID: &seed.executionID,
+		Kind: "workspace_snapshot", Status: "ready", Bucket: "invalid-checkpoint-migration",
+		ObjectKey: "invalid-checkpoint-migration/" + artifactID.String(), ContentType: &contentType,
+		SizeBytes: &sizeBytes, SHA256: &sha, CreatedByType: "system", CreatedByID: seed.tenantID,
+		ReadyAt: &readyAt, CreatedAt: now,
+	}
+	checkpoint := persistence.WorkspaceCheckpoint{
+		ID: uuid.New(), TenantID: seed.tenantID, WorkspaceID: *execution.RemoteWorkspaceID,
+		SessionID: seed.sessionID, TurnID: &seed.turnID, ExecutionID: seed.executionID,
+		Generation: execution.Generation, IdempotencyKey: "invalid-legacy-ready-kind",
+		Strategy: "patch", Status: "ready", BaseCommit: &baseCommit, HeadCommit: &baseCommit,
+		CurrentBranch: &branch, ArtifactID: &artifactID, Manifest: map[string]any{"format": "synara-workspace-patch-v1"},
+		FileCount: pointerInt(1), TotalBytes: &sizeBytes, SHA256: &sha, CreatedAt: now, ReadyAt: &readyAt,
+	}
+	if err := db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Omit("WorkspaceCheckpointID", "UploadCleanupAt").Create(&artifact).Error; err != nil {
+			return err
+		}
+		return tx.Create(&checkpoint).Error
+	}); err != nil {
+		t.Fatalf("seed legacy kind-mismatched ready Checkpoint: %v", err)
+	}
+	if err := Migrate(context.Background(), db, migrationsThrough(t, "000024_checkpoint_lifecycle.sql")); err != nil {
+		t.Fatalf("000024 should preserve the legacy row for 000025 validation: %v", err)
+	}
+	err := Migrate(context.Background(), db, migrations.Files)
+	if err == nil {
+		t.Fatalf("000025 did not reject the invalid legacy ready Checkpoint: %v", err)
+	}
+	var applied int64
+	if countErr := db.Table("control_plane_schema_migrations").Where("version = ?", 25).Count(&applied).Error; countErr != nil {
+		t.Fatal(countErr)
+	}
+	if applied != 0 {
+		t.Fatal("000025 recorded a failed invalid legacy Checkpoint migration as applied")
+	}
+}
+
+func openIsolatedMigrationSchema(t *testing.T, databaseURL string) *gorm.DB {
+	t.Helper()
+	admin, err := Open(context.Background(), databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	schemaName := "checkpoint_migration_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+	if err := admin.Exec(`CREATE SCHEMA "` + schemaName + `"`).Error; err != nil {
+		t.Fatal(err)
+	}
+	options := DefaultOptions()
+	options.MaxOpenConnections = 1
+	options.MaxIdleConnections = 1
+	db, err := Open(context.Background(), databaseURL, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Exec(`SET search_path TO "` + schemaName + `"`).Error; err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if sqlDB, dbErr := db.DB(); dbErr == nil {
+			_ = sqlDB.Close()
+		}
+		_ = admin.Exec(`DROP SCHEMA IF EXISTS "` + schemaName + `" CASCADE`).Error
+		if sqlDB, dbErr := admin.DB(); dbErr == nil {
+			_ = sqlDB.Close()
+		}
+	})
+	return db
+}
+
+func pointerInt(value int) *int { return &value }
 
 func migrationCredential(
 	id, tenantID uuid.UUID,

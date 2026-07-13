@@ -36,6 +36,12 @@ foundations. The existing TypeScript server remains the Provider Runtime during 
   - `000021_turn_runtime_modes.sql`: immutable runtime and interaction modes on Turns
   - `000022_execution_control_commands.sql`: durable Generation-fenced Provider control commands
   - `000023_git_credentials.sql`: purpose-isolated Git Credentials, Project binding and database enforcement
+  - `000024_checkpoint_lifecycle.sql`: Generation-fenced Checkpoint lifecycle, ready recovery pointers,
+    immutable terminal payloads and access-path indexes
+  - `000025_checkpoint_artifact_binding.sql`: reverse Checkpoint Artifact binding, one-payload uniqueness,
+    scope validation and retention-safe ready Artifact protection
+  - `000026_checkpoint_retention.sql`: evidence-preserving Checkpoint expiry, bounded late-PUT cleanup state and
+    upload/abandoned-cleanup indexes
 - ORM: GORM with PostgreSQL and CGO-free SQLite drivers
 - Shared model/repository/transaction utilities: `internal/persistence`
 - Tenant-scoped queries always include `tenant_id`
@@ -152,9 +158,13 @@ SYNARA_SSE_MAX_CONNECTIONS_PER_USER
 SYNARA_SSE_MAX_CONNECTIONS_PER_TENANT
 ```
 
-The retention sweeper also removes expired pending Artifact temporary objects even when the Tenant has no
-long-term Artifact retention policy. It deletes both the temporary key and any final key orphaned by a crash
-between object promotion and metadata commit, then seals the metadata as `failed`.
+The retention sweeper also handles expired pending Artifact uploads even when the Tenant has no long-term
+Artifact retention policy. It first seals metadata as `failed`; a Checkpoint-bound upload atomically fails its
+Checkpoint, releases the logical Workspace from `checkpointing` and emits `checkpoint.failed`. Object deletion
+runs afterward. Local cleanup terminates on success; S3/MinIO keeps the temporary key for one grace interval,
+deletes it again to catch a late presigned PUT, then clears the cleanup handle. For long-term retention, terminal
+restore references are cleared before an unreferenced, non-current Checkpoint expires, and Artifact deletion skips every
+`pending`/`uploading`/`ready` Checkpoint reference.
 Payloads are not returned by the operational list API and are never included in publisher error logs.
 
 ## Multi-replica readiness and acceptance

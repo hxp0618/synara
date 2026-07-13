@@ -4,7 +4,8 @@ Remote Workspace v1 separates the logical Session Workspace from any disposable 
 PostgreSQL owns identity and lifecycle metadata; Git and ready Artifact payloads own recoverable content; a Worker
 checkout is only a cache.
 
-The DDL source of truth is `000020_remote_workspaces_checkpoints.sql`.
+The DDL source of truth is the forward migration chain through
+`000026_checkpoint_retention.sql`; published migrations are never rewritten in place.
 
 ## Identity and states
 
@@ -86,7 +87,28 @@ git-reference | patch | snapshot
 
 Patch and snapshot payloads are Artifacts. A Checkpoint cannot become `ready` unless the referenced Artifact is
 also `ready`, belongs to the same Session/Execution, has kind `checkpoint` or `workspace_snapshot`, and has the
-same SHA-256. Failed Checkpoints never replace `remote_workspaces.current_checkpoint_id`.
+same SHA-256. The Artifact also carries an immutable reverse `workspace_checkpoint_id` binding, so upload retry,
+retention and deletion can identify the owning recovery point without inspecting object keys. Failed Checkpoints
+never replace `remote_workspaces.current_checkpoint_id`.
+
+Agentd creates Checkpoints automatically after Provider execution while the Lease is still current. A clean Git
+checkout uses `git-reference`; dirty Git and managed non-Git content currently use a bounded deterministic
+Snapshot of regular files. Snapshot capture excludes `.git`, rejects symlinks/devices/FIFOs/sockets, records a
+sorted path/size/SHA-256/executable manifest, and verifies the complete archive again in an isolated staging
+directory before replacing a Workspace during restore. Provider execution starts only after the frozen ready
+Checkpoint has been downloaded, size/hash verified and restored.
+
+Checkpoint Artifact creation is deterministic and retryable. The first create transaction binds the Artifact and
+moves the Checkpoint to `uploading`. A lost Create/PUT/Complete response reuses the same Artifact; Local upload
+tokens rotate, while S3/MinIO re-sign the same temporary key. A ready replay is Lease/Generation-fenced and the
+Worker rechecks the local payload metadata before accepting it.
+
+Expired pending uploads atomically fail their Checkpoint, return the Workspace from `checkpointing` to
+`ready`/`dirty`, and preserve the previous current Checkpoint. Retention clears terminal Execution restore
+references, expires only non-current/unreferenced Checkpoints, and deletes an Artifact only after no
+`pending`/`uploading`/`ready` Checkpoint references it. User deletion returns the stable
+`artifact_checkpoint_referenced` conflict while such a reference exists. S3/MinIO temporary upload keys use one
+bounded post-expiry cleanup grace pass to catch late presigned PUTs, then leave the sweep permanently.
 
 ## Recovery order
 
@@ -101,6 +123,7 @@ An absent Worker directory is never interpreted as an empty authoritative Worksp
 ## Remaining implementation gate
 
 The schema, Session/Execution bindings, public/private HTTPS Clone/Fetch materialization, Project Git Credential
-binding and Generation-fenced state reporting are active. Stage 3 still must implement short-lived SSH
-Credential delivery, shared read-only Git cache plus `git worktree` materialization, Patch/Snapshot Checkpoint
-creation and restore, cleanup/retention and the shared Local/SSH/Docker/Kubernetes acceptance fixture.
+binding, Generation-fenced state reporting, Git-reference/Snapshot Checkpoint capture/restore and safe
+Checkpoint/Artifact retention are active. Stage 3 still must implement short-lived SSH Credential delivery,
+shared read-only Git cache plus `git worktree` materialization, Patch capture/restore, physical Workspace cleanup
+dispatch/acknowledgement and the shared Local/SSH/Docker/Kubernetes acceptance fixture.

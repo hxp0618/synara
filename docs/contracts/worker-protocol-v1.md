@@ -7,8 +7,9 @@ message names and fencing behavior remain stable if the transport later moves to
 
 `RegisterWorker`, `Heartbeat`, `ClaimExecution`, `StartSession`, `ResumeSession`, `SendTurn`,
 `InterruptTurn`, `ResolveApproval`, `ResolveUserInput`, `RuntimeEvent`, `UploadArtifact`,
-`ReportWorkspaceReady`, `ReportWorkspaceDirty`, `ReportWorkspaceFailed`, `CompleteExecution`, `FailExecution`,
-and `ReleaseLease`.
+`ReportWorkspaceReady`, `ReportWorkspaceDirty`, `ReportWorkspaceFailed`, `CreateWorkspaceCheckpoint`,
+`ReadyWorkspaceCheckpoint`, `FailWorkspaceCheckpoint`, `DownloadWorkspaceCheckpointArtifact`,
+`CompleteExecution`, `FailExecution`, and `ReleaseLease`.
 
 ## Common envelope
 
@@ -46,8 +47,19 @@ AskPass channel during Clone/Fetch and is cleared before `workspace.ready` and P
 
 After Provider execution, agentd reports `workspace.dirty` before `CompleteExecution` when tracked/untracked
 Git content or managed non-Git files changed. The report remains Lease/Generation-fenced and carries only the
-safe current branch and HEAD metadata, never file contents. Checkpoint/Artifact persistence consumes the dirty
-state in a later lifecycle step.
+safe current branch and HEAD metadata, never file contents. Before a dirty managed Workspace can complete,
+agentd must create and persist a ready Checkpoint. Clean Git uses a Git reference; dirty Git/non-Git currently
+uses a bounded Snapshot Artifact. A new Turn freezes the last ready Checkpoint into its Workload, and agentd
+downloads and restores it before Provider start.
+
+Checkpoint Artifact create carries `checkpointId`. The Control Plane derives one deterministic Artifact identity,
+binds it to the Checkpoint and changes the Checkpoint to `uploading` before issuing a grant. Create/PUT/Complete
+may be replayed after an ambiguous response without creating another Artifact or another `artifact.ready` event.
+Ready replay still validates the current Lease/Generation and submitted Size/SHA-256/Content-Type.
+
+The retention sweeper fails abandoned or upload-expired Checkpoints with a durable `checkpoint.failed` event.
+It never replaces the last ready recovery point and never deletes an Artifact referenced by a
+`pending`, `uploading` or `ready` Checkpoint.
 
 The Workload also carries the immutable `runtimeMode` (`approval-required | full-access`) and
 `interactionMode` (`default | plan`) captured when the Control Plane created the Turn. A Worker must not infer

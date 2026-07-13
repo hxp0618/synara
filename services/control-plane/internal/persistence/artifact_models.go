@@ -28,10 +28,13 @@ type Artifact struct {
 	CreatedByID     uuid.UUID  `gorm:"column:created_by_id;type:uuid"`
 	UploadTokenHash []byte     `gorm:"column:upload_token_hash"`
 	UploadExpiresAt *time.Time `gorm:"column:upload_expires_at"`
+	UploadCleanupAt *time.Time `gorm:"column:upload_cleanup_at"`
 	ReadyAt         *time.Time `gorm:"column:ready_at"`
 	CreatedAt       time.Time  `gorm:"column:created_at"`
 	ExpiresAt       *time.Time `gorm:"column:expires_at"`
 	DeletedAt       *time.Time `gorm:"column:deleted_at"`
+
+	WorkspaceCheckpointID *uuid.UUID `gorm:"column:workspace_checkpoint_id;type:uuid"`
 }
 
 func (Artifact) TableName() string { return "artifacts" }

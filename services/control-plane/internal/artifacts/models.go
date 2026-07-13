@@ -44,6 +44,7 @@ type WorkerCreateInput struct {
 	TenantID     uuid.UUID  `json:"tenantId"`
 	Generation   int64      `json:"generation"`
 	LeaseToken   string     `json:"leaseToken"`
+	CheckpointID *uuid.UUID `json:"checkpointId,omitempty"`
 	Kind         string     `json:"kind"`
 	OriginalName *string    `json:"originalName"`
 	ExpiresAt    *time.Time `json:"expiresAt"`
@@ -57,11 +58,12 @@ type WorkerCompleteInput struct {
 }
 
 type UploadGrant struct {
-	Artifact  Artifact          `json:"artifact"`
-	Method    string            `json:"method"`
-	URL       string            `json:"url"`
-	Headers   map[string]string `json:"headers"`
-	ExpiresAt time.Time         `json:"expiresAt"`
+	Artifact       Artifact          `json:"artifact"`
+	UploadRequired bool              `json:"uploadRequired"`
+	Method         string            `json:"method,omitempty"`
+	URL            string            `json:"url,omitempty"`
+	Headers        map[string]string `json:"headers,omitempty"`
+	ExpiresAt      time.Time         `json:"expiresAt,omitempty"`
 }
 
 type DownloadGrant struct {
