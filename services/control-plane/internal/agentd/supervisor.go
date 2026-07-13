@@ -97,7 +97,7 @@ func NewLocalSupervisor(input LocalSupervisorInput, logger *slog.Logger) (*Local
 		ControlPlaneURL: controlPlaneURL, RegistrationToken: input.RegistrationToken,
 		ExecutionTargetID: input.ExecutionTargetID, TargetKind: platform.TargetLocal,
 		ClusterID: "control-plane", Namespace: "local",
-		PodName: "local-agentd-" + input.ExecutionTargetID.String(), Version: "embedded",
+		PodName: "local-agentd-" + input.ExecutionTargetID.String(), InstanceUID: uuid.NewString(), Version: "embedded",
 		Capabilities: capabilities, ExperimentalProviders: experimentalProviders,
 		RunnerCommand: append([]string(nil), input.RunnerCommand...), RunnerProtocol: RunnerProtocolV2,
 		WorkspaceRoot: workspaceRoot, GitCacheRoot: gitCacheRoot,

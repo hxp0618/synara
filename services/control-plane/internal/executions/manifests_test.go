@@ -43,9 +43,53 @@ func TestNormalizeWorkerManifestIsStableAndClassifiesProviders(t *testing.T) {
 			t.Fatalf("Provider manifest omitted compatibility evidence: %#v", provider)
 		}
 	}
-	if statuses["codex"] != "compatible" || statuses["claudeAgent"] != "unavailable" ||
+	if statuses["codex"] != "compatible" || statuses["claudeagent"] != "unavailable" ||
 		statuses["cursor"] != "local-only" {
 		t.Fatalf("unexpected Provider compatibility statuses: %#v", statuses)
+	}
+	if _, storedCanonicalName := statuses["claudeAgent"]; storedCanonicalName {
+		t.Fatalf("Claude Provider was not normalized to its lowercase storage code: %#v", statuses)
+	}
+}
+
+func TestNormalizeWorkerManifestHashIncludesStorageSchemaVersion(t *testing.T) {
+	capabilities := workerManifestTestCapabilities()
+	normalized, err := normalizeWorkerManifest(
+		"worker-test", capabilities, workerManifestTestTargetCapabilities(), platform.TargetKubernetes, time.Now().UTC(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var runtime workerRuntimeCapability
+	if err := decodeCapability(capabilities["workerRuntime"], &runtime); err != nil {
+		t.Fatal(err)
+	}
+	var providerHost providerHostCapabilitySummary
+	if err := decodeCapability(capabilities["providerHost"], &providerHost); err != nil {
+		t.Fatal(err)
+	}
+	legacyHash, err := canonicalHash(struct {
+		Runtime      workerRuntimeCapability
+		ProviderHost providerHostCapabilitySummary
+		FeatureFlags map[string]any
+	}{runtime, providerHost, map[string]any{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectedHash, err := canonicalHash(workerManifestHashPayload{
+		StorageSchemaVersion: workerManifestStorageSchemaVersion,
+		Runtime:              runtime,
+		ProviderHost:         providerHost,
+		FeatureFlags:         map[string]any{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if normalized.Manifest.ManifestHash != expectedHash {
+		t.Fatalf("manifest hash = %q, want storage schema hash %q", normalized.Manifest.ManifestHash, expectedHash)
+	}
+	if normalized.Manifest.ManifestHash == legacyHash {
+		t.Fatal("storage schema version did not fence the legacy canonical-name manifest hash")
 	}
 }
 

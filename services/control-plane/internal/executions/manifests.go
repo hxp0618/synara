@@ -20,8 +20,9 @@ import (
 )
 
 const (
-	providerHostProtocolMajor        = 2
-	providerHostProtocolMinimumMinor = 1
+	providerHostProtocolMajor          = 2
+	providerHostProtocolMinimumMinor   = 1
+	workerManifestStorageSchemaVersion = 2
 )
 
 var stage3ProviderNames = []string{
@@ -135,6 +136,13 @@ type normalizedWorkerManifest struct {
 	Reason    *string
 }
 
+type workerManifestHashPayload struct {
+	StorageSchemaVersion int
+	Runtime              workerRuntimeCapability
+	ProviderHost         providerHostCapabilitySummary
+	FeatureFlags         map[string]any
+}
+
 func normalizeWorkerManifest(
 	version string,
 	capabilities map[string]any,
@@ -204,11 +212,12 @@ func normalizeWorkerManifest(
 	if value, ok := capabilities["featureFlags"].(map[string]any); ok {
 		featureFlags = value
 	}
-	hashPayload := struct {
-		Runtime      workerRuntimeCapability
-		ProviderHost providerHostCapabilitySummary
-		FeatureFlags map[string]any
-	}{runtime, providerHost, featureFlags}
+	hashPayload := workerManifestHashPayload{
+		StorageSchemaVersion: workerManifestStorageSchemaVersion,
+		Runtime:              runtime,
+		ProviderHost:         providerHost,
+		FeatureFlags:         featureFlags,
+	}
 	manifestHash, err := canonicalHash(hashPayload)
 	if err != nil {
 		return nil, problem.Wrap(500, "worker_manifest_hash_failed", "Failed to hash the Worker manifest.", err)
@@ -256,12 +265,13 @@ func normalizeProviderManifest(
 	now time.Time,
 ) (persistence.WorkerProviderManifest, error) {
 	capability := descriptor.CapabilityDescriptor
-	if provider != capability.Provider ||
+	canonicalProvider, validProvider := executiontargets.CanonicalStage3Provider(provider)
+	if !validProvider || provider != canonicalProvider || capability.Provider != canonicalProvider ||
 		strings.TrimSpace(capability.AdapterVersion) == "" || strings.TrimSpace(descriptor.HostBuildVersion) == "" ||
 		capability.Capabilities == nil {
 		return persistence.WorkerProviderManifest{}, problem.New(400, "invalid_worker_manifest", "Provider descriptor is incomplete.")
 	}
-	if !containsString(stage3ProviderNames, provider) || !validProviderSupportTier(capability.SupportTier) {
+	if !validProviderSupportTier(capability.SupportTier) {
 		return persistence.WorkerProviderManifest{}, problem.New(400, "invalid_worker_manifest", "Provider descriptor contains an unsupported Provider or support tier.")
 	}
 	if err := validateProviderCapabilityMatrix(capability.Capabilities); err != nil {
@@ -365,7 +375,7 @@ func normalizeProviderManifest(
 		code, message = stringReference("provider_version_incompatible"), stringReference("Provider Host Credential or Resume strategy is incompatible.")
 	}
 	return persistence.WorkerProviderManifest{
-		Provider: capability.Provider, SupportTier: capability.SupportTier, CompatibilityStatus: status,
+		Provider: providerStorageName(canonicalProvider), SupportTier: capability.SupportTier, CompatibilityStatus: status,
 		ProviderHostMajor: descriptor.ProtocolVersion.Major, ProviderHostMinor: descriptor.ProtocolVersion.Minor,
 		HostBuildVersion: strings.TrimSpace(descriptor.HostBuildVersion), AdapterVersion: strings.TrimSpace(capability.AdapterVersion),
 		ProviderCLIVersion: legacyProviderVersion,
@@ -382,6 +392,10 @@ func normalizeProviderManifest(
 		Capabilities:             stringMapToAny(capability.Capabilities), IncompatibilityCode: code,
 		IncompatibilityMessage: message, CheckedAt: now,
 	}, nil
+}
+
+func providerStorageName(provider string) string {
+	return strings.ToLower(strings.TrimSpace(provider))
 }
 
 func persistWorkerManifest(

@@ -38,7 +38,7 @@ func ParseProviderPolicy(capabilities map[string]any) (ProviderPolicy, error) {
 	}
 	selected := make(map[string]struct{}, len(providers))
 	for _, provider := range providers {
-		canonical, valid := normalizeStage3Provider(provider)
+		canonical, valid := CanonicalStage3Provider(provider)
 		if !valid {
 			return ProviderPolicy{}, invalidProviderPolicy("providerPolicy.experimentalProviders contains an unknown Provider.")
 		}
@@ -57,7 +57,7 @@ func ParseProviderPolicy(capabilities map[string]any) (ProviderPolicy, error) {
 }
 
 func (policy ProviderPolicy) ExperimentalProviderEnabled(provider string) bool {
-	canonical, valid := normalizeStage3Provider(provider)
+	canonical, valid := CanonicalStage3Provider(provider)
 	if !valid {
 		return false
 	}
@@ -113,7 +113,10 @@ func providerPolicyStrings(value any) ([]string, bool) {
 	}
 }
 
-func normalizeStage3Provider(value string) (string, bool) {
+// CanonicalStage3Provider returns the Provider catalog name for a supported
+// Stage 3 Provider. Matching is case-insensitive so persisted storage codes can
+// be safely projected back to the canonical Provider Host/API name.
+func CanonicalStage3Provider(value string) (string, bool) {
 	normalized := strings.ToLower(strings.TrimSpace(value))
 	for _, provider := range stage3ProviderOrder {
 		if strings.ToLower(provider) == normalized {

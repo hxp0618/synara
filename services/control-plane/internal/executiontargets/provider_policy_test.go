@@ -2,6 +2,25 @@ package executiontargets
 
 import "testing"
 
+func TestCanonicalStage3Provider(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+		valid bool
+	}{
+		{input: " claudeagent ", want: "claudeAgent", valid: true},
+		{input: "CODEX", want: "codex", valid: true},
+		{input: "droid", valid: false},
+	}
+	for _, test := range tests {
+		got, valid := CanonicalStage3Provider(test.input)
+		if got != test.want || valid != test.valid {
+			t.Fatalf("CanonicalStage3Provider(%q) = (%q, %t), want (%q, %t)",
+				test.input, got, valid, test.want, test.valid)
+		}
+	}
+}
+
 func TestParseProviderPolicyNormalizesExperimentalProviders(t *testing.T) {
 	policy, err := ParseProviderPolicy(map[string]any{
 		"providerPolicy": map[string]any{

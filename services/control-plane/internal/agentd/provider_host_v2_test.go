@@ -595,6 +595,62 @@ func TestRunnerCapabilitySummaryPreservesClaudeSDKRuntime(t *testing.T) {
 	}
 }
 
+func TestRunnerExperimentalProviderEnablementNormalizesProviderID(t *testing.T) {
+	runner := providerHostV2TestRunnerWithExperimental("claudeAgent")
+	if !runner.experimentalProviderEnabled("claudeagent") || runner.experimentalProviderEnabled("codex") {
+		t.Fatalf("experimental Provider enablement did not normalize Provider IDs: %#v", runner.experimentalProviders)
+	}
+}
+
+func TestRunnerProviderHostV2RunsClaudeSDKWithoutLegacyProviderCLIVersion(t *testing.T) {
+	t.Setenv("GO_WANT_PROVIDER_HOST_HELPER", "1")
+	t.Setenv("PROVIDER_HOST_TEST_MODE", "missing-provider-cli-version")
+	commandLog := filepath.Join(t.TempDir(), "commands.log")
+	t.Setenv("PROVIDER_HOST_TEST_COMMAND_LOG", commandLog)
+
+	input := providerHostV2TestInput(t)
+	input.Workload.Provider = "claudeAgent"
+	result, err := providerHostV2TestRunner().Run(
+		context.Background(), input, nil,
+		func(context.Context, RunnerMessage) error { return nil },
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Output["text"] != "done" {
+		t.Fatalf("unexpected Claude SDK result: %#v", result)
+	}
+	commands, err := os.ReadFile(commandLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(commands) != "Describe\nStartSession\nSendTurn\n" {
+		t.Fatalf("unexpected Claude SDK command sequence %q", commands)
+	}
+}
+
+func TestRunnerProviderHostV2RejectsCodexCLIWithoutProviderCLIVersion(t *testing.T) {
+	t.Setenv("GO_WANT_PROVIDER_HOST_HELPER", "1")
+	t.Setenv("PROVIDER_HOST_TEST_MODE", "missing-provider-cli-version")
+	commandLog := filepath.Join(t.TempDir(), "commands.log")
+	t.Setenv("PROVIDER_HOST_TEST_COMMAND_LOG", commandLog)
+
+	_, err := providerHostV2TestRunner().Run(
+		context.Background(), providerHostV2TestInput(t), nil,
+		func(context.Context, RunnerMessage) error { return nil },
+	)
+	if runnerFailureCode(err) != "provider_not_installed" {
+		t.Fatalf("Codex CLI without providerCliVersion returned %v", err)
+	}
+	commands, readErr := os.ReadFile(commandLog)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(commands) != "Describe\n" {
+		t.Fatalf("Codex CLI command ran before providerCliVersion rejection: %q", commands)
+	}
+}
+
 func TestRunnerCapabilitySummaryRequiresNestedRuntimePolicy(t *testing.T) {
 	t.Setenv("GO_WANT_PROVIDER_HOST_HELPER", "1")
 	t.Setenv("PROVIDER_HOST_TEST_MODE", "root-runtime-policy")
@@ -942,6 +998,9 @@ func TestProviderHostV2HelperProcess(t *testing.T) {
 			capabilityDescriptor := map[string]any{
 				"provider": provider, "supportTier": supportTier, "adapterVersion": "test-adapter",
 				"providerCliVersion": "test-cli", "capabilities": capabilities,
+			}
+			if mode == "missing-provider-cli-version" {
+				delete(capabilityDescriptor, "providerCliVersion")
 			}
 			descriptor := map[string]any{
 				"protocolVersion":  map[string]any{"major": major, "minor": minor, "futureMinorField": true},

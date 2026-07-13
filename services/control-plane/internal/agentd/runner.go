@@ -33,8 +33,13 @@ func NewRunner(cfg Config) *Runner {
 }
 
 func (r *Runner) experimentalProviderEnabled(provider string) bool {
-	_, enabled := r.experimentalProviders[provider]
-	return enabled
+	normalized := normalizeProvider(provider)
+	for enabled := range r.experimentalProviders {
+		if normalizeProvider(enabled) == normalized {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *Runner) experimentalProviderList() []string {

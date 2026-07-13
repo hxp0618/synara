@@ -59,6 +59,27 @@ func TestLocalSupervisorPassesGitCacheRootToDaemon(t *testing.T) {
 	}
 }
 
+func TestLocalSupervisorGeneratesDistinctCanonicalInstanceUIDs(t *testing.T) {
+	input := validLocalSupervisorInput(t.TempDir())
+	first, err := NewLocalSupervisor(input, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := NewLocalSupervisor(input, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, instanceUID := range []string{first.config.InstanceUID, second.config.InstanceUID} {
+		parsed, err := uuid.Parse(instanceUID)
+		if err != nil || parsed == uuid.Nil || parsed.String() != instanceUID {
+			t.Fatalf("local supervisor generated a non-canonical Instance UID %q: %v", instanceUID, err)
+		}
+	}
+	if first.config.InstanceUID == second.config.InstanceUID {
+		t.Fatalf("separate local supervisors reused Instance UID %q", first.config.InstanceUID)
+	}
+}
+
 func TestLocalSupervisorPassesTargetProviderPolicyToDaemon(t *testing.T) {
 	input := validLocalSupervisorInput(t.TempDir())
 	input.Capabilities = map[string]any{
@@ -139,7 +160,9 @@ func TestLocalSupervisorRestartsDaemonUntilCancelled(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	var starts atomic.Int32
-	supervisor.newDaemon = func(Config, *slog.Logger) daemonRunner {
+	instanceUIDs := make([]string, 0, 2)
+	supervisor.newDaemon = func(cfg Config, _ *slog.Logger) daemonRunner {
+		instanceUIDs = append(instanceUIDs, cfg.InstanceUID)
 		return daemonRunnerFunc(func(context.Context) error {
 			if starts.Add(1) == 2 {
 				cancel()
@@ -150,6 +173,9 @@ func TestLocalSupervisorRestartsDaemonUntilCancelled(t *testing.T) {
 	supervisor.Run(ctx)
 	if starts.Load() != 2 {
 		t.Fatalf("expected two daemon starts, got %d", starts.Load())
+	}
+	if len(instanceUIDs) != 2 || instanceUIDs[0] == "" || instanceUIDs[0] != instanceUIDs[1] {
+		t.Fatalf("daemon restarts did not reuse one supervisor Instance UID: %v", instanceUIDs)
 	}
 }
 

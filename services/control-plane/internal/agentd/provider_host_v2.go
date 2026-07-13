@@ -621,9 +621,14 @@ func (r *Runner) validateProviderHostDescriptorForExecution(
 			requiresUserAction: true,
 		}
 	}
-	if descriptor.CapabilityDescriptor.ProviderCLIVersion == nil ||
-		strings.TrimSpace(*descriptor.CapabilityDescriptor.ProviderCLIVersion) == "" ||
-		strings.EqualFold(strings.TrimSpace(*descriptor.CapabilityDescriptor.ProviderCLIVersion), "unavailable") {
+	requiresProviderCLIVersion := descriptor.ProtocolVersion.Minor < 1
+	if runtime := descriptor.CapabilityDescriptor.Runtime; runtime != nil && runtime.Kind == "cli" {
+		requiresProviderCLIVersion = true
+	}
+	if requiresProviderCLIVersion &&
+		(descriptor.CapabilityDescriptor.ProviderCLIVersion == nil ||
+			strings.TrimSpace(*descriptor.CapabilityDescriptor.ProviderCLIVersion) == "" ||
+			strings.EqualFold(strings.TrimSpace(*descriptor.CapabilityDescriptor.ProviderCLIVersion), "unavailable")) {
 		return &runnerFailure{
 			code:               "provider_not_installed",
 			message:            fmt.Sprintf("Provider CLI for %s is unavailable on this Worker", input.Workload.Provider),

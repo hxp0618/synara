@@ -8,6 +8,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/synara-ai/synara/services/control-plane/internal/authorization"
+	"github.com/synara-ai/synara/services/control-plane/internal/executiontargets"
 	"github.com/synara-ai/synara/services/control-plane/internal/identity"
 	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
 	"github.com/synara-ai/synara/services/control-plane/internal/problem"
@@ -220,10 +221,14 @@ func projectWorkerProviders(models []persistence.WorkerProviderManifest) ([]Work
 	}
 	byName := make(map[string]persistence.WorkerProviderManifest, len(models))
 	for _, model := range models {
-		if _, duplicate := byName[model.Provider]; duplicate {
+		canonical, valid := executiontargets.CanonicalStage3Provider(model.Provider)
+		if !valid {
 			return nil, invalidStoredWorkerManifest()
 		}
-		byName[model.Provider] = model
+		if _, duplicate := byName[canonical]; duplicate {
+			return nil, invalidStoredWorkerManifest()
+		}
+		byName[canonical] = model
 	}
 	providers := make([]WorkerProviderManifestView, 0, len(stage3ProviderNames))
 	for _, name := range stage3ProviderNames {

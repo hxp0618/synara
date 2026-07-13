@@ -218,7 +218,7 @@ func seedProjectionManifest(t *testing.T, db *gorm.DB, manifestID uuid.UUID, ver
 			runtimeSource = "package"
 		}
 		model := persistence.WorkerProviderManifest{
-			WorkerManifestID: manifestID, Provider: provider, SupportTier: supportTier,
+			WorkerManifestID: manifestID, Provider: providerStorageName(provider), SupportTier: supportTier,
 			CompatibilityStatus: compatibilityStatus, ProviderHostMajor: 2, ProviderHostMinor: 1,
 			HostBuildVersion: "host-test", AdapterVersion: "adapter-test",
 			RuntimeKind: runtimeKind, RuntimeName: provider + "-runtime", RuntimeVersion: runtimeVersion,
