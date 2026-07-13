@@ -82,6 +82,8 @@ runner=(
   docker run --rm --network "$network_id"
   -v "$work_dir:/state"
   -v "$script_dir/multi-replica-acceptance.py:/runner.py:ro"
+  -v "$repo_root/scripts/stage3-provider-acceptance/worker_manifest.py:/worker_manifest.py:ro"
+  -v "$repo_root/packages/contracts/src/providerCapabilityCatalog.json:/provider-capability-catalog.json:ro"
   python:3.13-alpine python /runner.py
 )
 
@@ -89,7 +91,9 @@ runner=(
   --replica-a "$replica_a" \
   --replica-b "$replica_b" \
   --expected-schema-version "$expected_schema_version" \
-  --registration-token "$SYNARA_WORKER_REGISTRATION_TOKEN"
+  --registration-token "$SYNARA_WORKER_REGISTRATION_TOKEN" \
+  --worker-manifest-generator /worker_manifest.py \
+  --provider-capability-catalog /provider-capability-catalog.json
 
 docker stop "${control_plane_ids[0]}" >/dev/null
 

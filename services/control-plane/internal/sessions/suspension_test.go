@@ -54,7 +54,15 @@ func TestConcurrentExecutionQuotaRejectsSecondActiveExecution(t *testing.T) {
 		CreateTurnInput{InputText: "first execution"}, "quota-turn-first", "127.0.0.1"); err != nil {
 		t.Fatal(err)
 	}
-	_, err := fixture.service.CreateTurn(ctx, fixture.principal, fixture.sessionID,
+	secondSessionID := uuid.New()
+	if err := fixture.db.Create(&persistence.AgentSession{
+		ID: secondSessionID, TenantID: fixture.tenantID, OrganizationID: fixture.organizationID,
+		ProjectID: fixture.projectID, CreatedBy: fixture.principal.UserID, Title: "Second quota Session",
+		Status: "active", Visibility: "private", Provider: "codex", ExecutionTargetID: fixture.executionTargetID,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	_, err := fixture.service.CreateTurn(ctx, fixture.principal, secondSessionID,
 		CreateTurnInput{InputText: "second execution"}, "quota-turn-second", "127.0.0.1")
 	var apiError *problem.Error
 	if !errors.As(err, &apiError) || apiError.Code != "execution_quota_exceeded" {
@@ -107,13 +115,14 @@ func TestSessionProviderCredentialBindingValidatesProviderAndAvailability(t *tes
 }
 
 type tenantExecutionPolicyFixture struct {
-	db             *gorm.DB
-	service        *Service
-	principal      identity.Principal
-	tenantID       uuid.UUID
-	organizationID uuid.UUID
-	projectID      uuid.UUID
-	sessionID      uuid.UUID
+	db                *gorm.DB
+	service           *Service
+	principal         identity.Principal
+	tenantID          uuid.UUID
+	organizationID    uuid.UUID
+	projectID         uuid.UUID
+	sessionID         uuid.UUID
+	executionTargetID uuid.UUID
 }
 
 func newTenantExecutionPolicyFixture(t *testing.T) tenantExecutionPolicyFixture {
@@ -155,7 +164,7 @@ func newTenantExecutionPolicyFixture(t *testing.T) tenantExecutionPolicyFixture 
 		db: store.DB(), service: NewService(store.DB(), projects.NewService(store.DB()), targetService),
 		principal: identity.Principal{UserID: domain.UserID, ActiveTenantID: &domain.TenantID},
 		tenantID:  domain.TenantID, organizationID: domain.OrganizationID,
-		projectID: projectID, sessionID: sessionID,
+		projectID: projectID, sessionID: sessionID, executionTargetID: domain.ExecutionTargetID,
 	}
 }
 

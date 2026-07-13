@@ -151,8 +151,14 @@ func TestKubernetesReconcilerAppliesSecurityFoundationAndExecutionPods(t *testin
 		!containsString(observedPodUIDSets[1], driftedPodUID) {
 		t.Fatalf("ephemeral cleanup did not receive the namespace-wide Pod UID set: %#v", observedPodUIDSets)
 	}
-	if len(client.deletedPods) != 1 || client.kindCount("Pod") != 2 {
-		t.Fatalf("Kubernetes scheduler did not retire and replace the terminal execution Pod: deleted=%#v pods=%d", client.deletedPods, client.kindCount("Pod"))
+	if len(client.deletedPods) != 1 || client.kindCount("Pod") != 1 {
+		t.Fatalf("Kubernetes scheduler created a replacement before the deleted Pod released quota: deleted=%#v pods=%d", client.deletedPods, client.kindCount("Pod"))
+	}
+	if err := fixture.reconciler.ReconcileOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if client.kindCount("Pod") != 2 {
+		t.Fatalf("Kubernetes scheduler did not create the next Pod after deletion settled: pods=%d", client.kindCount("Pod"))
 	}
 	secondPod := client.lastKind("Pod")
 	secondLabels := secondPod["metadata"].(map[string]any)["labels"].(map[string]string)
@@ -171,8 +177,8 @@ func TestKubernetesReconcilerAppliesSecurityFoundationAndExecutionPods(t *testin
 	if err := fixture.db.Where("resource_id = ? AND action = ?", fixture.targetID, "execution_target.kubernetes_reconciled").Find(&audits).Error; err != nil {
 		t.Fatal(err)
 	}
-	if len(audits) != 2 {
-		t.Fatalf("expected two material Kubernetes reconciliation audits, got %d", len(audits))
+	if len(audits) != 3 {
+		t.Fatalf("expected three material Kubernetes reconciliation audits, got %d", len(audits))
 	}
 	encodedAudits, _ := json.Marshal(audits)
 	if bytes.Contains(encodedAudits, []byte("kubernetes-registration-secret")) || bytes.Contains(encodedAudits, []byte("kubernetes-api-token")) {
@@ -437,16 +443,17 @@ func newKubernetesReconcileFixture(t *testing.T, gitCachePersistentVolumeClaims 
 		t.Fatal(err)
 	}
 	projectID := uuid.New()
-	sessionID := uuid.New()
+	sessionIDs := []uuid.UUID{uuid.New(), uuid.New()}
 	executionIDs := []uuid.UUID{uuid.New(), uuid.New()}
 	now := time.Now().UTC()
 	models := []any{
 		&persistence.Project{ID: projectID, TenantID: domain.TenantID, OrganizationID: domain.OrganizationID, Name: "Kubernetes project", DefaultBranch: "main", Visibility: "organization", CreatedBy: domain.UserID},
-		&persistence.AgentSession{ID: sessionID, TenantID: domain.TenantID, OrganizationID: domain.OrganizationID, ProjectID: projectID, CreatedBy: domain.UserID, Title: "Kubernetes session", Status: "active", Visibility: "organization", Provider: "codex", ExecutionTargetID: target.ID},
 	}
 	for index, executionID := range executionIDs {
 		turnID := uuid.New()
+		sessionID := sessionIDs[index]
 		models = append(models,
+			&persistence.AgentSession{ID: sessionID, TenantID: domain.TenantID, OrganizationID: domain.OrganizationID, ProjectID: projectID, CreatedBy: domain.UserID, Title: fmt.Sprintf("Kubernetes session %d", index), Status: "active", Visibility: "organization", Provider: "codex", ExecutionTargetID: target.ID},
 			&persistence.AgentTurn{ID: turnID, TenantID: domain.TenantID, SessionID: sessionID, CreatedBy: domain.UserID, Status: "queued", InputText: fmt.Sprintf("Kubernetes turn %d", index)},
 			&persistence.AgentExecution{ID: executionID, TenantID: domain.TenantID, SessionID: sessionID, TurnID: turnID, Attempt: 1, Status: "queued", ExecutionTargetID: target.ID, TargetKind: "kubernetes", RequestedBy: domain.UserID, QueuedAt: now.Add(time.Duration(index) * time.Second)},
 		)
@@ -461,7 +468,7 @@ func newKubernetesReconcileFixture(t *testing.T, gitCachePersistentVolumeClaims 
 	}, slog.Default())
 	return kubernetesReconcileFixture{
 		db: store.DB(), reconciler: reconciler, tenantID: domain.TenantID, organizationID: domain.OrganizationID,
-		projectID: projectID, sessionID: sessionID, targetID: target.ID, executionIDs: executionIDs,
+		projectID: projectID, sessionID: sessionIDs[0], targetID: target.ID, executionIDs: executionIDs,
 	}
 }
 

@@ -108,7 +108,7 @@ func (s *Service) requestControlCommand(
 		return OperationResult[ControlCommand]{}, err
 	}
 
-	var appended persistence.SessionEvent
+	appended := make([]persistence.SessionEvent, 0, 2)
 	result, err := apiidempotency.Execute(ctx, s.db, apiidempotency.Scope{
 		TenantID: tenantID, ActorID: principal.UserID, Key: idempotencyKey,
 		Operation: request.Operation, SuccessStatus: 202,
@@ -168,6 +168,13 @@ func (s *Service) requestControlCommand(
 			Status: "pending", RequestedBy: principal.UserID, RequestedAt: now,
 			DeliveryAvailableAt: now,
 		}
+		immediateInterrupt := request.CommandType == "InterruptTurn" &&
+			(execution.Status == "queued" || execution.Status == "recovering")
+		if immediateInterrupt {
+			model.Status = "acknowledged"
+			model.DeliveredAt = &now
+			model.AcknowledgedAt = &now
+		}
 		if execution.WorkerID != nil && execution.Generation > 0 {
 			generation := execution.Generation
 			model.DeliveryWorkerID = execution.WorkerID
@@ -176,7 +183,7 @@ func (s *Service) requestControlCommand(
 		if err := tx.WithContext(ctx).Create(&model).Error; err != nil {
 			return ControlCommand{}, problem.Wrap(409, "control_command_conflict", "The Control command conflicts with another active command.", err)
 		}
-		appended, err = s.sessions.AppendInternalEvent(ctx, tx, tenantID, execution.SessionID, sessions.InternalEventInput{
+		requestedEvent, err := s.sessions.AppendInternalEvent(ctx, tx, tenantID, execution.SessionID, sessions.InternalEventInput{
 			EventType: request.RequestedEvent, ActorType: "user", ActorID: &principal.UserID,
 			ExecutionID: &execution.ID, WorkerID: execution.WorkerID,
 			Generation: model.DeliveryGeneration,
@@ -185,6 +192,7 @@ func (s *Service) requestControlCommand(
 		if err != nil {
 			return ControlCommand{}, err
 		}
+		appended = append(appended, requestedEvent)
 		if err := outbox.Enqueue(ctx, tx, outbox.EnqueueInput{
 			TenantID: &tenantID, Topic: request.RequestedEvent, MessageKey: model.ID.String(),
 			Payload: controlCommandOutboxPayload(model, request.Payload),
@@ -201,10 +209,23 @@ func (s *Service) requestControlCommand(
 		}); err != nil {
 			return ControlCommand{}, err
 		}
+		if immediateInterrupt {
+			cancelledEvent, err := s.cancelExecutionLocked(
+				ctx, tx, &execution, nil, "user", &principal.UserID, now, "interrupt-before-claim",
+			)
+			if err != nil {
+				return ControlCommand{}, err
+			}
+			appended = append(appended, cancelledEvent)
+		}
 		return toControlCommand(model), nil
 	})
-	if err == nil && !result.Replayed && appended.EventID != uuid.Nil {
-		s.sessions.PublishInternalEvent(appended)
+	if err == nil && !result.Replayed {
+		for _, event := range appended {
+			if event.EventID != uuid.Nil {
+				s.sessions.PublishInternalEvent(event)
+			}
+		}
 	}
 	return OperationResult[ControlCommand]{
 		Value: result.Value, Replayed: result.Replayed, StatusCode: result.StatusCode,
@@ -510,7 +531,7 @@ func (s *Service) acknowledgeInterruptControlCommand(
 	now time.Time,
 	appended *persistence.SessionEvent,
 ) (ControlCommand, error) {
-	if err := s.storeProviderCursor(ctx, tx, execution, input.ProviderResumeCursor); err != nil {
+	if err := s.storeProviderCursor(ctx, tx, execution, input.ProviderResumeCursor, true); err != nil {
 		return ControlCommand{}, err
 	}
 	if err := s.supersedeInteractionGeneration(ctx, tx, execution, lease); err != nil {
@@ -581,7 +602,7 @@ func (s *Service) acknowledgeSteerControlCommand(
 	now time.Time,
 	appended *persistence.SessionEvent,
 ) (ControlCommand, error) {
-	if err := s.storeProviderCursor(ctx, tx, execution, input.ProviderResumeCursor); err != nil {
+	if err := s.storeProviderCursor(ctx, tx, execution, input.ProviderResumeCursor, false); err != nil {
 		return ControlCommand{}, err
 	}
 	inputText, _ := command.Payload["inputText"].(string)

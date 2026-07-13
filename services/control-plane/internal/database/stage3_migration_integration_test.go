@@ -62,8 +62,14 @@ func TestStage3MigrationsBackfillExistingRuntimeState(t *testing.T) {
 	if err := db.Where("tenant_id = ? AND id = ?", seed.tenantID, *session.CurrentRuntimeBindingID).Take(&binding).Error; err != nil {
 		t.Fatal(err)
 	}
-	if binding.Provider != "codex" || binding.ResumeStrategy != "native-cursor" || binding.AuthoritativeHistorySequence != 1 {
+	if binding.Provider != "codex" || binding.ResumeStrategy != "authoritative-history" ||
+		binding.CursorCompatibilityKey != nil || binding.AuthoritativeHistorySequence != 1 {
 		t.Fatalf("unexpected backfilled Provider runtime binding: %#v", binding)
+	}
+	if session.ProviderResumeCursorState != "quarantined" || len(session.ProviderResumeCursorEncrypted) == 0 ||
+		session.ProviderResumeCursorSourceExecutionID != nil ||
+		session.ProviderResumeCursorSourceGeneration != nil || session.ProviderResumeCursorHistorySequence != nil {
+		t.Fatalf("legacy Provider Cursor was not preserved in quarantine: %#v", session)
 	}
 	var execution persistence.AgentExecution
 	if err := db.Where("tenant_id = ? AND id = ?", seed.tenantID, seed.executionID).Take(&execution).Error; err != nil {

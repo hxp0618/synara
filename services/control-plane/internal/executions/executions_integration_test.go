@@ -463,6 +463,7 @@ func TestClaimReplayRotatesTokenWithoutPersistingPlaintext(t *testing.T) {
 func TestCreateTurnQueuesExecutionAndOutboxAtomically(t *testing.T) {
 	db := integrationDB(t)
 	fixture := seedExecutionFixture(t, db)
+	completeExecutionFixtureForNextTurn(t, db, fixture)
 	rollback := errors.New("rollback create turn integration test")
 	err := db.Transaction(func(tx *gorm.DB) error {
 		targetService := executiontargets.NewService(tx, testPlatformConfig(), nil)
@@ -564,6 +565,18 @@ func TestDurableInterruptCommandTerminatesTurn(t *testing.T) {
 	fixture := seedExecutionFixture(t, db)
 	service := integrationService(t, db)
 	principal := identity.Principal{UserID: fixture.UserID, ActiveTenantID: &fixture.TenantID}
+	worker := registerManifestTestWorker(t, service, fixture.TargetID, fixture.TargetKind, "worker-interrupt")
+	cleanupWorkers(t, db, worker.ID)
+	claim, err := service.Claim(context.Background(), worker, ClaimExecutionInput{
+		ExecutionTargetID: fixture.TargetID, TargetKind: fixture.TargetKind, ExecutionID: &fixture.ExecutionID,
+	}, "interrupt-claim")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claim.Value.Lease == nil {
+		t.Fatal("interrupt test execution was not leased")
+	}
+	lease := *claim.Value.Lease
 
 	first, err := service.RequestInterrupt(
 		context.Background(), principal, fixture.SessionID,
@@ -582,22 +595,10 @@ func TestDurableInterruptCommandTerminatesTurn(t *testing.T) {
 	if first.Replayed || !replayed.Replayed || first.Value.ID != replayed.Value.ID || first.StatusCode != 202 {
 		t.Fatalf("unexpected interrupt idempotency result: first=%#v replayed=%#v", first, replayed)
 	}
-	if first.Value.DeliveryWorkerID != nil || first.Value.DeliveryGeneration != nil {
-		t.Fatalf("queued interrupt was bound before claim: %#v", first.Value)
+	if first.Value.DeliveryWorkerID == nil || *first.Value.DeliveryWorkerID != worker.ID ||
+		first.Value.DeliveryGeneration == nil || *first.Value.DeliveryGeneration != lease.Generation {
+		t.Fatalf("leased interrupt was not bound to the current generation: %#v", first.Value)
 	}
-
-	worker := registerManifestTestWorker(t, service, fixture.TargetID, fixture.TargetKind, "worker-interrupt")
-	cleanupWorkers(t, db, worker.ID)
-	claim, err := service.Claim(context.Background(), worker, ClaimExecutionInput{
-		ExecutionTargetID: fixture.TargetID, TargetKind: fixture.TargetKind, ExecutionID: &fixture.ExecutionID,
-	}, "interrupt-claim")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if claim.Value.Lease == nil {
-		t.Fatal("interrupt test execution was not leased")
-	}
-	lease := *claim.Value.Lease
 	leaseInput := LeaseInput{TenantID: fixture.TenantID, Generation: lease.Generation, LeaseToken: lease.LeaseToken}
 	deliveries, err := service.PullControlCommands(context.Background(), worker, fixture.ExecutionID, PullControlCommandsInput{
 		LeaseInput: leaseInput, Limit: 10,
@@ -660,6 +661,59 @@ func TestDurableInterruptCommandTerminatesTurn(t *testing.T) {
 	}
 	if requestedEvents != 1 || interruptedEvents != 1 {
 		t.Fatalf("unexpected interrupt event counts: requested=%d interrupted=%d", requestedEvents, interruptedEvents)
+	}
+}
+
+func TestQueuedInterruptCancelsWithoutWorkerAndReleasesSessionSlot(t *testing.T) {
+	ctx := context.Background()
+	db := integrationDB(t)
+	fixture := seedExecutionFixture(t, db)
+	service := integrationService(t, db)
+	principal := identity.Principal{UserID: fixture.UserID, ActiveTenantID: &fixture.TenantID}
+
+	requested, err := service.RequestInterrupt(
+		ctx, principal, fixture.SessionID, "queued-interrupt", "queued-interrupt", "127.0.0.1",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requested.Value.Status != "acknowledged" || requested.Value.DeliveredAt == nil ||
+		requested.Value.AcknowledgedAt == nil || requested.Value.DeliveryWorkerID != nil ||
+		requested.Value.DeliveryGeneration != nil {
+		t.Fatalf("queued interrupt was not acknowledged synchronously: %#v", requested.Value)
+	}
+	replayed, err := service.RequestInterrupt(
+		ctx, principal, fixture.SessionID, "queued-interrupt", "queued-interrupt-replay", "127.0.0.1",
+	)
+	if err != nil || !replayed.Replayed || replayed.Value.ID != requested.Value.ID {
+		t.Fatalf("queued interrupt replay failed: result=%#v err=%v", replayed, err)
+	}
+	var execution persistence.AgentExecution
+	if err := db.Where("tenant_id = ? AND id = ?", fixture.TenantID, fixture.ExecutionID).Take(&execution).Error; err != nil {
+		t.Fatal(err)
+	}
+	if execution.Status != "cancelled" || execution.FinishedAt == nil || execution.WorkerID != nil {
+		t.Fatalf("queued interrupt did not release the active Session slot: %#v", execution)
+	}
+	var requestedEvents, cancelledEvents int64
+	if err := db.Model(&persistence.SessionEvent{}).
+		Where("tenant_id = ? AND execution_id = ? AND event_type = ?", fixture.TenantID, fixture.ExecutionID, "turn.interrupt-requested").
+		Count(&requestedEvents).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Model(&persistence.SessionEvent{}).
+		Where("tenant_id = ? AND execution_id = ? AND event_type = ?", fixture.TenantID, fixture.ExecutionID, "execution.cancelled").
+		Count(&cancelledEvents).Error; err != nil {
+		t.Fatal(err)
+	}
+	if requestedEvents != 1 || cancelledEvents != 1 {
+		t.Fatalf("queued interrupt Event counts = requested:%d cancelled:%d", requestedEvents, cancelledEvents)
+	}
+	if _, err := service.sessions.CreateTurn(
+		ctx, principal, fixture.SessionID, sessions.CreateTurnInput{InputText: "Continue after queued interrupt"},
+		"after-queued-interrupt", "127.0.0.1",
+	); err != nil {
+		t.Fatalf("queued interrupt retained the Session active slot: %v", err)
 	}
 }
 
@@ -1260,13 +1314,6 @@ func TestDurableInterruptCommandRebindsAfterWorkerRelease(t *testing.T) {
 	fixture := seedExecutionFixture(t, db)
 	service := integrationService(t, db)
 	principal := identity.Principal{UserID: fixture.UserID, ActiveTenantID: &fixture.TenantID}
-	requested, err := service.RequestInterrupt(
-		context.Background(), principal, fixture.SessionID,
-		"interrupt-rebind", "interrupt-rebind", "127.0.0.1",
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
 
 	firstWorker := registerManifestTestWorker(t, service, fixture.TargetID, fixture.TargetKind, "worker-interrupt-first")
 	legacyWorker := registerLegacyTestWorker(t, service, fixture.TargetID, fixture.TargetKind, "worker-interrupt-legacy")
@@ -1284,6 +1331,13 @@ func TestDurableInterruptCommandRebindsAfterWorkerRelease(t *testing.T) {
 		t.Fatalf("first claim failed: result=%#v err=%v", firstClaim, err)
 	}
 	firstLease := *firstClaim.Value.Lease
+	requested, err := service.RequestInterrupt(
+		context.Background(), principal, fixture.SessionID,
+		"interrupt-rebind", "interrupt-rebind", "127.0.0.1",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
 	firstLeaseInput := LeaseInput{TenantID: fixture.TenantID, Generation: firstLease.Generation, LeaseToken: firstLease.LeaseToken}
 	firstDeliveries, err := service.PullControlCommands(context.Background(), firstWorker, fixture.ExecutionID, PullControlCommandsInput{
 		LeaseInput: firstLeaseInput, Limit: 1,
@@ -2275,15 +2329,10 @@ func assertExecutionStatus(t *testing.T, db *gorm.DB, fixture executionFixture, 
 	}
 }
 
-func TestConcurrentTurnCreationCannotOversubscribeTenantQuota(t *testing.T) {
+func TestConcurrentTurnCreationHasSingleSessionWinner(t *testing.T) {
 	db := integrationDB(t)
 	fixture := seedExecutionFixture(t, db)
-	maxExecutions := 2
-	if err := db.Create(&persistence.TenantQuota{
-		TenantID: fixture.TenantID, MaxConcurrentExecutions: &maxExecutions, UpdatedBy: fixture.UserID,
-	}).Error; err != nil {
-		t.Fatal(err)
-	}
+	completeExecutionFixtureForNextTurn(t, db, fixture)
 	targetService := executiontargets.NewService(db, testPlatformConfig(), nil)
 	service := sessions.NewService(db, projects.NewService(db), targetService)
 	principal := identity.Principal{UserID: fixture.UserID, ActiveTenantID: &fixture.TenantID}
@@ -2300,8 +2349,8 @@ func TestConcurrentTurnCreationCannotOversubscribeTenantQuota(t *testing.T) {
 			defer wait.Done()
 			<-start
 			_, err := service.CreateTurn(context.Background(), principal, fixture.SessionID, sessions.CreateTurnInput{
-				InputText: "Concurrent quota request " + uuid.NewString(),
-			}, "quota-concurrent-"+uuid.NewString(), "127.0.0.1")
+				InputText: "Concurrent Session request " + uuid.NewString(),
+			}, "session-concurrent-"+uuid.NewString(), "127.0.0.1")
 			outcomes <- outcome{err: err}
 		}()
 	}
@@ -2317,14 +2366,14 @@ func TestConcurrentTurnCreationCannotOversubscribeTenantQuota(t *testing.T) {
 			continue
 		}
 		var apiError *problem.Error
-		if errors.As(item.err, &apiError) && apiError.Code == "execution_quota_exceeded" {
+		if errors.As(item.err, &apiError) && apiError.Code == "session_execution_active" {
 			rejected++
 			continue
 		}
-		t.Fatalf("concurrent quota request failed unexpectedly: %v", item.err)
+		t.Fatalf("concurrent Session request failed unexpectedly: %v", item.err)
 	}
 	if succeeded != 1 || rejected != 1 {
-		t.Fatalf("expected one success and one quota rejection, got success=%d rejected=%d", succeeded, rejected)
+		t.Fatalf("expected one success and one active-Session rejection, got success=%d rejected=%d", succeeded, rejected)
 	}
 	var activeExecutions int64
 	if err := db.Model(&persistence.AgentExecution{}).
@@ -2332,8 +2381,25 @@ func TestConcurrentTurnCreationCannotOversubscribeTenantQuota(t *testing.T) {
 		Count(&activeExecutions).Error; err != nil {
 		t.Fatal(err)
 	}
-	if activeExecutions != 2 {
-		t.Fatalf("tenant quota was oversubscribed: %d active executions", activeExecutions)
+	if activeExecutions != 1 {
+		t.Fatalf("Session single-active invariant retained %d active executions", activeExecutions)
+	}
+}
+
+func completeExecutionFixtureForNextTurn(t *testing.T, db *gorm.DB, fixture executionFixture) {
+	t.Helper()
+	now := time.Now().UTC()
+	if err := db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(&persistence.AgentExecution{}).
+			Where("tenant_id = ? AND id = ?", fixture.TenantID, fixture.ExecutionID).
+			Updates(map[string]any{"status": "completed", "finished_at": now, "worker_id": nil}).Error; err != nil {
+			return err
+		}
+		return tx.Model(&persistence.AgentTurn{}).
+			Where("tenant_id = ? AND session_id = ? AND id = ?", fixture.TenantID, fixture.SessionID, fixture.TurnID).
+			Updates(map[string]any{"status": "completed", "completed_at": now}).Error
+	}); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -2558,7 +2624,8 @@ func cleanupWorkers(t *testing.T, db *gorm.DB, workerIDs ...uuid.UUID) {
 			Updates(map[string]any{
 				"worker_id": nil, "worker_incarnation": nil, "worker_instance_uid": nil,
 			}).Error
-		_ = db.Model(&persistence.AgentExecution{}).Where("worker_id IN ?", workerIDs).
+		_ = db.Model(&persistence.AgentExecution{}).
+			Where("worker_id IN ? AND status IN ?", workerIDs, []string{"leased", "running", "waiting-for-approval"}).
 			Updates(map[string]any{"status": "recovering", "worker_id": nil}).Error
 		_ = db.Where("id IN ?", workerIDs).Delete(&persistence.WorkerInstance{}).Error
 	})
@@ -2566,6 +2633,15 @@ func cleanupWorkers(t *testing.T, db *gorm.DB, workerIDs ...uuid.UUID) {
 
 func cleanupFixture(db *gorm.DB, tenantID uuid.UUID) {
 	_ = db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(&persistence.AgentSession{}).Where("tenant_id = ?", tenantID).
+			Updates(map[string]any{
+				"provider_resume_cursor_encrypted": nil, "provider_resume_cursor_state": providerCursorStateAbsent,
+				"provider_resume_cursor_source_execution_id": nil,
+				"provider_resume_cursor_source_generation":   nil,
+				"provider_resume_cursor_history_sequence":    nil,
+			}).Error; err != nil {
+			return err
+		}
 		if err := tx.Model(&persistence.AgentExecution{}).Where("tenant_id = ?", tenantID).
 			Updates(map[string]any{"restore_checkpoint_id": nil, "workspace_materialization_id": nil}).Error; err != nil {
 			return err

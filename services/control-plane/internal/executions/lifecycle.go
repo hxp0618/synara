@@ -320,7 +320,7 @@ func (s *Service) Renew(
 				409, "interaction_expired", "The execution interaction expired before the lease could be renewed.",
 			))
 		}
-		if err := s.storeProviderCursor(ctx, tx, execution, input.ProviderResumeCursor); err != nil {
+		if err := s.storeProviderCursor(ctx, tx, execution, input.ProviderResumeCursor, false); err != nil {
 			return Lease{}, err
 		}
 		lease.HeartbeatAt = now
@@ -445,7 +445,7 @@ func (s *Service) Complete(
 				}
 			}
 		}
-		if err := s.storeProviderCursor(ctx, tx, execution, input.ProviderResumeCursor); err != nil {
+		if err := s.storeProviderCursor(ctx, tx, execution, input.ProviderResumeCursor, true); err != nil {
 			return Execution{}, err
 		}
 		now := s.now()
@@ -516,7 +516,7 @@ func (s *Service) Fail(
 		if execution.Status == "waiting-for-approval" {
 			return Execution{}, problem.New(409, "execution_interaction_pending", "The execution is waiting for approval or user input.")
 		}
-		if err := s.storeProviderCursor(ctx, tx, execution, input.ProviderResumeCursor); err != nil {
+		if err := s.storeProviderCursor(ctx, tx, execution, input.ProviderResumeCursor, true); err != nil {
 			return Execution{}, err
 		}
 		now := s.now()

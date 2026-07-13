@@ -662,7 +662,14 @@ Snapshot 必须有大小上限、Token 预算和确定性排序。
 ### F3. Provider Cursor 规则
 
 - Cursor 以 Credential KMS 或等价机制加密。
-- Cursor 与 Tenant、Session、Provider、Credential Version、Provider CLI/Adapter Version 绑定。
+- Cursor Envelope v2 必须通过认证头与 Execution Claim 冻结的 Tenant、Session、Provider、
+  Model、Credential ID/Version、Capability Descriptor、Provider Host/Adapter/Runtime 与 Release Policy
+  摘要绑定。
+- Session Cursor 状态只能是 `absent`、`usable` 或 `quarantined`；`quarantined` 保留密文但
+  强制使用 Authoritative History，不得因密钥恢复或 Runtime 回切而复活旧 Cursor。
+- `usable` Cursor 必须持久化产生它的 Execution ID、Generation 和当时的 Authoritative
+  History Sequence；只有当前 Execution 产生的新 Cursor 才能从 `quarantined` 恢复为
+  `usable`。
 - Credential Rotation、Provider 版本跨越或 Cursor 过期时，按策略失效。
 - Cursor 不进入 Web API、日志、Event Payload 或 Artifact Metadata。
 - Retry 当前未持久化 Turn 和恢复历史 Turn 必须区分，避免重复副作用。
@@ -695,8 +702,22 @@ Snapshot 必须有大小上限、Token 预算和确定性排序。
   Sequence/Byte/Token 截断记录。
 - Claim 事务会单调推进 Runtime Binding 的 `authoritative_history_sequence`；SQLite 与 PostgreSQL 17
   均有测试，超过 500 个 Event 后的 Review/Compact Marker 也有恢复测试。
-- 当前仍未关闭 F：Cursor 尚未绑定 Tenant/Session/Provider/Credential Version AAD；Local/SSH/Docker/
-  Kubernetes 删除本地状态后的同源 Live Acceptance 仍需由工作流 L 证明。
+- Forward Migration `000030_execution_provider_cursor_snapshots.sql` 将 Credential Version、Resume Strategy
+  和 Cursor Binding Digest 冻结到 Execution Generation；Cursor Envelope v2 使用该 Digest 作为
+  AES-GCM 认证头的一部分。
+- Forward Migration `000031_session_execution_cursor_lineage.sql` 增加 `absent / usable /
+  quarantined` 状态、来源 Execution/Generation/History Sequence 约束和存量 Cursor 安全
+  隔离；错误密钥、缺失 Cipher、未知/旧 Envelope 或非原生 Resume Runtime 不会阻断
+  Execution Lifecycle，也不会让旧 Cursor 复活。明确的 Binding/Credential 不匹配会丢弃不
+  兼容密文。
+- 同一 Session 仅允许一个活跃 Execution，范围包含 `queued`、`leased`、`running`、
+  `waiting-for-approval` 和 `recovering`；Service 锁内检查与 PostgreSQL/SQLite 部分唯一
+  索引共同防止并发占用 Session。
+- `queued` 或 `recovering` Execution 收到 Interrupt 时不等待 Worker：Control Command 立即
+  `acknowledged`，Execution/Turn 同步取消并释放 Session 单活槽位。
+- 当前仍未关闭 F：Cursor Payload 已记录 `IssuedAt`，但还没有完整的过期策略；
+  Local/SSH/Docker/Kubernetes 删除本地状态后的同源 Live Acceptance 仍需由工作流 L
+  证明。
 
 ## 12. 工作流 G：Credential 与 Secret 隔离
 
@@ -1134,6 +1155,23 @@ Provider × Capability × Execution Target
 - Tier 2 的 Unsupported 项与 Capability Descriptor 一致。
 - 故障测试没有 Event 丢失、重复终态、双 Worker 写入或 Credential 泄漏。
 - Acceptance 结果生成机器可读报告和 Markdown 摘要。
+
+### L 当前证据（2026-07-14）
+
+- `scripts/stage3-provider-acceptance/acceptance_runner.py` 已形成同一套用例编排、红线脱敏与
+  JSON/Markdown 报告；Local、Docker 和 Kubernetes 通过用户 API、真实 Control Plane/agentd
+  与产品 Target 生命周期执行，不代替 Worker 注册、Heartbeat 或 Claim。
+- Runner 已显式建模 `standing` 与 `execution-pinned` Worker Allocation，并以 Capability 声明
+  Managed Replacement；execution-pinned 路径使用 Approval 作为 Worker/Manifest 可观测屏障。
+- Kubernetes Driver 已在 disposable kind Context 上通过真实 Kubernetes API 创建隔离 Namespace、
+  ServiceAccount/RBAC、短期 Token/CA 和 execution-pinned Pod/Manifest；deterministic Codex fixture
+  的核心连续性用例通过，并验证终态 Pod/Manifest 清理。该证据尚不覆盖 Eviction、网络故障、
+  Image Rollout 或真实 Provider Release Gate。
+- 默认运行的是 deterministic Provider Host Protocol 2.1 fixture。它能证明共享 Contract、
+  Control Plane-to-Worker-to-Host 通路和 Local/Docker/Kubernetes 恢复编排，**不等于**使用真实
+  Codex App Server 或 Claude Agent SDK 的 Release Acceptance。
+- SSH 当前仍返回 `runner.target_driver_missing`；Kubernetes Claude/failure matrix、真实
+  Codex/Claude、SSH、长 Session 和完整故障矩阵仍待执行，不得声称四 Target 统一发布门禁已完成。
 
 ## 18. 实施顺序
 

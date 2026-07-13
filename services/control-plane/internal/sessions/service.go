@@ -21,6 +21,8 @@ import (
 	"github.com/synara-ai/synara/services/control-plane/internal/validation"
 )
 
+var activeSessionExecutionStatuses = []string{"queued", "leased", "running", "waiting-for-approval", "recovering"}
+
 type Service struct {
 	db         *gorm.DB
 	authorizer *authorization.Authorizer
@@ -394,12 +396,25 @@ func (s *Service) CreateTurnWithIdempotency(
 		if tenant.Status != "active" {
 			return Turn{}, problem.New(409, "tenant_suspended", "The tenant is suspended and cannot create new executions.")
 		}
+		locked, err := lockActiveSession(ctx, tx, tenantID, sessionID)
+		if err != nil {
+			return Turn{}, err
+		}
+		var activeSessionExecutions int64
+		if err := tx.WithContext(ctx).Model(&persistence.AgentExecution{}).
+			Where("tenant_id = ? AND session_id = ? AND status IN ?", tenantID, sessionID, activeSessionExecutionStatuses).
+			Count(&activeSessionExecutions).Error; err != nil {
+			return Turn{}, problem.Wrap(500, "session_execution_check_failed", "Failed to inspect the active Session execution.", err)
+		}
+		if activeSessionExecutions > 0 {
+			return Turn{}, problem.New(409, "session_execution_active", "The Session already has an active Turn execution.")
+		}
 		var quota persistence.TenantQuota
 		quotaErr := tx.WithContext(ctx).Where("tenant_id = ?", tenantID).Take(&quota).Error
 		if quotaErr == nil && quota.MaxConcurrentExecutions != nil {
 			var activeExecutions int64
 			if err := tx.WithContext(ctx).Model(&persistence.AgentExecution{}).
-				Where("tenant_id = ? AND status IN ?", tenantID, []string{"queued", "leased", "running", "waiting-for-approval", "recovering"}).
+				Where("tenant_id = ? AND status IN ?", tenantID, activeSessionExecutionStatuses).
 				Count(&activeExecutions).Error; err != nil {
 				return Turn{}, problem.Wrap(500, "execution_quota_check_failed", "Failed to check tenant execution quota.", err)
 			}
@@ -408,10 +423,6 @@ func (s *Service) CreateTurnWithIdempotency(
 			}
 		} else if quotaErr != nil && !errors.Is(quotaErr, gorm.ErrRecordNotFound) {
 			return Turn{}, problem.Wrap(500, "execution_quota_check_failed", "Failed to load tenant execution quota.", quotaErr)
-		}
-		locked, err := lockActiveSession(ctx, tx, tenantID, sessionID)
-		if err != nil {
-			return Turn{}, err
 		}
 		var target persistence.ExecutionTarget
 		if err := tx.WithContext(ctx).

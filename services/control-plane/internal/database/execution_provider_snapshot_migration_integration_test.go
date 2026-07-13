@@ -6,8 +6,10 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
+	"gorm.io/gorm"
 
 	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
 	"github.com/synara-ai/synara/services/control-plane/migrations"
@@ -47,11 +49,21 @@ func TestExecutionProviderSnapshotMigrationFencesLegacyStateAndManifestMutation(
 		t.Fatalf("legacy Execution received a guessed Provider snapshot: %#v", execution)
 	}
 	var migratedSession persistence.AgentSession
-	if err := db.Where("tenant_id = ? AND id = ?", seed.tenantID, seed.sessionID).Take(&migratedSession).Error; err != nil {
+	if err := db.Select(
+		"id", "tenant_id", "provider_resume_cursor_encrypted", "provider_resume_cursor_state",
+		"provider_resume_cursor_source_execution_id", "provider_resume_cursor_source_generation",
+		"provider_resume_cursor_history_sequence",
+	).Where("tenant_id = ? AND id = ?", seed.tenantID, seed.sessionID).Take(&migratedSession).Error; err != nil {
 		t.Fatal(err)
 	}
 	if !bytes.Equal(migratedSession.ProviderResumeCursorEncrypted, legacyCiphertext) {
 		t.Fatal("000030 modified the legacy encrypted Provider Cursor")
+	}
+	if migratedSession.ProviderResumeCursorState != "quarantined" ||
+		migratedSession.ProviderResumeCursorSourceExecutionID != nil ||
+		migratedSession.ProviderResumeCursorSourceGeneration != nil ||
+		migratedSession.ProviderResumeCursorHistorySequence != nil {
+		t.Fatalf("000031 did not quarantine the legacy Provider Cursor safely: %#v", migratedSession)
 	}
 
 	assertMigrationIndex(
@@ -159,6 +171,54 @@ func TestExecutionProviderSnapshotMigrationFencesLegacyStateAndManifestMutation(
 		Where("worker_manifest_id = ? AND provider = ?", manifestID, "codex").
 		Update("adapter_version", "mutated-adapter").Error; err == nil {
 		t.Fatal("000030 allowed a content-addressed Worker Provider manifest update")
+	}
+}
+
+func TestSessionActiveExecutionMigrationRejectsAmbiguousLegacyQueue(t *testing.T) {
+	databaseURL := os.Getenv("SYNARA_TEST_STAGE3_MIGRATION_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("SYNARA_TEST_STAGE3_MIGRATION_DATABASE_URL is not configured")
+	}
+	db := openIsolatedMigrationSchema(t, databaseURL)
+	if err := Migrate(context.Background(), db, migrationsThrough(t, "000016_sse_connection_leases.sql")); err != nil {
+		t.Fatal(err)
+	}
+	seed := seedStage3MigrationState(t, db)
+	if err := Migrate(context.Background(), db, migrationsThrough(t, "000030_execution_provider_cursor_snapshots.sql")); err != nil {
+		t.Fatal(err)
+	}
+	var first persistence.AgentExecution
+	if err := db.Where("tenant_id = ? AND id = ?", seed.tenantID, seed.executionID).Take(&first).Error; err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	turnID := uuid.New()
+	if err := db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(&persistence.AgentTurn{
+			ID: turnID, TenantID: seed.tenantID, SessionID: seed.sessionID,
+			CreatedBy: first.RequestedBy, Status: "queued", InputText: "ambiguous queued Turn", CreatedAt: now,
+		}).Error; err != nil {
+			return err
+		}
+		return tx.Create(&persistence.AgentExecution{
+			ID: uuid.New(), TenantID: seed.tenantID, SessionID: seed.sessionID, TurnID: turnID,
+			Attempt: 1, Status: "queued", ExecutionTargetID: first.ExecutionTargetID, TargetKind: first.TargetKind,
+			Provider: first.Provider, ProviderRuntimeBindingID: first.ProviderRuntimeBindingID,
+			Generation: 0, RequestedBy: first.RequestedBy, QueuedAt: now,
+		}).Error
+	}); err != nil {
+		t.Fatal(err)
+	}
+	err := Migrate(context.Background(), db, migrations.Files)
+	if err == nil || !strings.Contains(err.Error(), "duplicate active rows exist") {
+		t.Fatalf("000031 did not fail closed on ambiguous active Session executions: %v", err)
+	}
+	var applied int64
+	if err := db.Table("control_plane_schema_migrations").Where("version = ?", 31).Count(&applied).Error; err != nil {
+		t.Fatal(err)
+	}
+	if applied != 0 {
+		t.Fatal("000031 recorded a failed active Session migration as applied")
 	}
 }
 

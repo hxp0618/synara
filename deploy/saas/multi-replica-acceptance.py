@@ -7,6 +7,7 @@ import argparse
 import concurrent.futures
 import http.client
 import http.cookies
+import importlib.util
 import json
 import os
 import shutil
@@ -30,6 +31,26 @@ class AcceptanceError(RuntimeError):
 def require(condition: bool, message: str) -> None:
     if not condition:
         raise AcceptanceError(message)
+
+
+def build_worker_capabilities(
+    generator_path: Path,
+    catalog_path: Path,
+    target_capabilities: Any,
+) -> dict[str, Any]:
+    require(isinstance(target_capabilities, dict), "Execution Target capabilities must be a JSON object")
+    specification = importlib.util.spec_from_file_location("acceptance_worker_manifest", generator_path)
+    require(
+        specification is not None and specification.loader is not None,
+        "Worker Manifest generator could not be loaded",
+    )
+    module = importlib.util.module_from_spec(specification)
+    specification.loader.exec_module(module)
+    catalog = json.loads(catalog_path.read_text())
+    require(isinstance(catalog, dict), "Provider capability catalog must be a JSON object")
+    capabilities = module.build_worker_capabilities(catalog, target_capabilities)
+    require(isinstance(capabilities, dict), "Worker Manifest generator did not return a JSON object")
+    return capabilities
 
 
 class CookieClient:
@@ -236,6 +257,8 @@ def phase_one(
     replica_a: str,
     replica_b: str,
     registration_token: str,
+    worker_manifest_generator: Path,
+    provider_capability_catalog: Path,
     state_dir: Path,
     expected_schema_version: int,
 ) -> None:
@@ -313,6 +336,11 @@ def phase_one(
     session_id = session["id"]
     target_id = session["executionTargetId"]
     target = owner.json(replica_a, "GET", f"/v1/tenants/{tenant_id}/execution-targets/{target_id}")
+    worker_capabilities = build_worker_capabilities(
+        worker_manifest_generator,
+        provider_capability_catalog,
+        target.get("capabilities"),
+    )
 
     cross_replica = SSECollector(
         replica_a,
@@ -369,7 +397,7 @@ def phase_one(
             "podName": f"multi-worker-{run_id}",
             "version": "acceptance",
             "protocolVersion": WORKER_PROTOCOL_VERSION,
-            "capabilities": {"codex": True},
+            "capabilities": worker_capabilities,
             "leaseSupported": True,
             "fencingSupported": True,
         },
@@ -394,7 +422,45 @@ def phase_one(
                 [(replica_a, f"claim-a-{run_id}"), (replica_b, f"claim-b-{run_id}")],
             )
         )
-    require(sum(1 for claim in claims if claim.get("execution") is not None) == 1, "Execution was not claimed exactly once")
+    require(
+        sum(1 for claim in claims if claim.get("execution") is not None) == 1,
+        "Execution was not claimed exactly once",
+    )
+    winning_index = next(index for index, claim in enumerate(claims) if claim.get("execution") is not None)
+    winning_claim = claims[winning_index]
+    winning_replica = (replica_a, replica_b)[winning_index]
+    other_replica = (replica_b, replica_a)[winning_index]
+
+    cancelled = owner.json(
+        other_replica,
+        "POST",
+        f"/v1/executions/{execution_id}/cancel",
+        headers={"Idempotency-Key": f"cancel-claimed-{run_id}"},
+    )
+    require(
+        cancelled.get("status") == "cancelled",
+        "cross-replica cancellation did not terminate the claimed Execution",
+    )
+    stale_renew_status, stale_renew_body, _ = worker.request(
+        winning_replica,
+        "POST",
+        f"/v1/workers/executions/{execution_id}/renew",
+        {
+            "tenantId": tenant_id,
+            "generation": winning_claim["lease"]["generation"],
+            "leaseToken": winning_claim["lease"]["leaseToken"],
+        },
+        worker_headers | {"X-Request-ID": f"renew-cancelled-{run_id}"},
+    )
+    require(
+        stale_renew_status == 409,
+        f"cancelled cross-replica Lease renewed with status {stale_renew_status}",
+    )
+    stale_renew_error = json.loads(stale_renew_body)
+    require(
+        stale_renew_error.get("error", {}).get("code") == "lease_not_current",
+        "cancelled cross-replica Lease returned the wrong fencing error",
+    )
 
     concurrent_turn_body = {"inputText": "same idempotent Turn through both replicas"}
     concurrent_turn_key = f"turn-{run_id}"
@@ -416,7 +482,27 @@ def phase_one(
         sum(1 for _, headers in turns if headers.get("Idempotency-Replayed") == "true") == 1,
         "same-key concurrent Turns did not produce exactly one replay",
     )
-    owner.json(
+
+    same_key_turn_id = turns[0][0]["id"]
+    events = owner.json(replica_a, "GET", f"/v1/sessions/{session_id}/events?afterSequence=4&limit=10")
+    same_key_event = next(
+        item
+        for item in events["items"]
+        if item["eventType"] == "turn.created" and item["payload"].get("turnId") == same_key_turn_id
+    )
+    same_key_execution_id = same_key_event["executionId"]
+    cancelled_same_key = owner.json(
+        replica_b,
+        "POST",
+        f"/v1/executions/{same_key_execution_id}/cancel",
+        headers={"Idempotency-Key": f"cancel-same-key-{run_id}"},
+    )
+    require(
+        cancelled_same_key.get("status") == "cancelled",
+        "same-key Turn did not reach a legal terminal state",
+    )
+
+    independent_turn = owner.json(
         replica_b,
         "POST",
         f"/v1/sessions/{session_id}/turns",
@@ -424,14 +510,29 @@ def phase_one(
         {"Idempotency-Key": f"turn-independent-{run_id}"},
     )
     events = owner.json(replica_b, "GET", f"/v1/sessions/{session_id}/events?afterSequence=2&limit=10")
-    require([item["sequence"] for item in events["items"]] == [3, 4, 5], "concurrent Turn sequences were not contiguous")
+    require(
+        [item["sequence"] for item in events["items"]] == [3, 4, 5, 6, 7],
+        "cross-replica terminal and Turn sequences were not contiguous",
+    )
+    require(
+        [item["eventType"] for item in events["items"]]
+        == ["execution.leased", "execution.cancelled", "turn.created", "execution.cancelled", "turn.created"],
+        "cross-replica terminal and Turn events were not ordered as expected",
+    )
+    independent_event = next(
+        item
+        for item in events["items"]
+        if item["eventType"] == "turn.created" and item["payload"].get("turnId") == independent_turn["id"]
+    )
 
     (state_dir / "session-id").write_text(session_id)
-    print(f"Cross-replica SSE and unique Claim passed: session={session_id}", flush=True)
+    (state_dir / "active-execution-id").write_text(independent_event["executionId"])
+    print(f"Cross-replica SSE, unique Claim, and legal sequential Turns passed: session={session_id}", flush=True)
 
 
 def phase_two(replica_b: str, state_dir: Path, expected_schema_version: int) -> None:
     session_id = (state_dir / "session-id").read_text().strip()
+    active_execution_id = (state_dir / "active-execution-id").read_text().strip()
     owner = CookieClient(state_dir / "owner-cookie.json")
     assert_ready(CookieClient(), replica_b, expected_schema_version)
 
@@ -439,20 +540,27 @@ def phase_two(replica_b: str, state_dir: Path, expected_schema_version: int) -> 
         replica_b,
         f"/v1/sessions/{session_id}/events/stream",
         owner.cookie_header(),
-        {4, 5, 6},
-        {"Last-Event-ID": "3"},
+        {5, 6, 7, 8, 9},
+        {"Last-Event-ID": "4"},
     )
     failover.start()
-    failover.wait_for({4, 5})
+    failover.wait_for({5, 6, 7})
+    cancelled = owner.json(
+        replica_b,
+        "POST",
+        f"/v1/executions/{active_execution_id}/cancel",
+        headers={"Idempotency-Key": f"cancel-before-failover-turn-{uuid.uuid4().hex}"},
+    )
+    require(cancelled.get("status") == "cancelled", "failover replica did not terminate the active Execution")
     owner.json(
         replica_b,
         "POST",
         f"/v1/sessions/{session_id}/turns",
         {"inputText": "continued after replica A stopped"},
     )
-    failover.wait_for({6})
+    failover.wait_for({8, 9})
     failover.finish()
-    require(3 not in failover.observed, "failover SSE replayed acknowledged Event 3")
+    require(4 not in failover.observed, "failover SSE replayed acknowledged Event 4")
     print(f"Replica failover and Last-Event-ID catch-up passed: session={session_id}", flush=True)
 
 
@@ -462,6 +570,8 @@ def main() -> None:
     parser.add_argument("--replica-a")
     parser.add_argument("--replica-b", required=True)
     parser.add_argument("--registration-token")
+    parser.add_argument("--worker-manifest-generator", type=Path)
+    parser.add_argument("--provider-capability-catalog", type=Path)
     parser.add_argument("--expected-schema-version", type=int, required=True)
     parser.add_argument("--state-dir", type=Path, default=Path("/state/multi-replica-acceptance"))
     arguments = parser.parse_args()
@@ -469,10 +579,20 @@ def main() -> None:
     if arguments.phase == "phase-one":
         require(arguments.replica_a is not None, "phase one requires --replica-a")
         require(arguments.registration_token is not None, "phase one requires --registration-token")
+        require(
+            arguments.worker_manifest_generator is not None,
+            "phase one requires --worker-manifest-generator",
+        )
+        require(
+            arguments.provider_capability_catalog is not None,
+            "phase one requires --provider-capability-catalog",
+        )
         phase_one(
             arguments.replica_a,
             arguments.replica_b,
             arguments.registration_token,
+            arguments.worker_manifest_generator,
+            arguments.provider_capability_catalog,
             arguments.state_dir,
             arguments.expected_schema_version,
         )

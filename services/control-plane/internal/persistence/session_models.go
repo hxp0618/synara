@@ -24,24 +24,28 @@ type Project struct {
 func (Project) TableName() string { return "projects" }
 
 type AgentSession struct {
-	ID                            uuid.UUID  `gorm:"column:id;type:uuid;primaryKey"`
-	TenantID                      uuid.UUID  `gorm:"column:tenant_id;type:uuid"`
-	OrganizationID                uuid.UUID  `gorm:"column:organization_id;type:uuid"`
-	ProjectID                     uuid.UUID  `gorm:"column:project_id;type:uuid"`
-	CreatedBy                     uuid.UUID  `gorm:"column:created_by;type:uuid"`
-	Title                         string     `gorm:"column:title"`
-	Status                        string     `gorm:"column:status"`
-	Visibility                    string     `gorm:"column:visibility"`
-	Provider                      string     `gorm:"column:provider"`
-	Model                         *string    `gorm:"column:model"`
-	ProviderCredentialID          *uuid.UUID `gorm:"column:provider_credential_id;type:uuid"`
-	ExecutionTargetID             uuid.UUID  `gorm:"column:execution_target_id;type:uuid"`
-	ProviderResumeCursorEncrypted []byte     `gorm:"column:provider_resume_cursor_encrypted"`
-	CurrentRuntimeBindingID       *uuid.UUID `gorm:"column:current_runtime_binding_id;type:uuid"`
-	LastEventSequence             int64      `gorm:"column:last_event_sequence"`
-	CreatedAt                     time.Time  `gorm:"column:created_at"`
-	UpdatedAt                     time.Time  `gorm:"column:updated_at"`
-	ArchivedAt                    *time.Time `gorm:"column:archived_at"`
+	ID                                    uuid.UUID  `gorm:"column:id;type:uuid;primaryKey"`
+	TenantID                              uuid.UUID  `gorm:"column:tenant_id;type:uuid"`
+	OrganizationID                        uuid.UUID  `gorm:"column:organization_id;type:uuid"`
+	ProjectID                             uuid.UUID  `gorm:"column:project_id;type:uuid"`
+	CreatedBy                             uuid.UUID  `gorm:"column:created_by;type:uuid"`
+	Title                                 string     `gorm:"column:title"`
+	Status                                string     `gorm:"column:status"`
+	Visibility                            string     `gorm:"column:visibility"`
+	Provider                              string     `gorm:"column:provider"`
+	Model                                 *string    `gorm:"column:model"`
+	ProviderCredentialID                  *uuid.UUID `gorm:"column:provider_credential_id;type:uuid"`
+	ExecutionTargetID                     uuid.UUID  `gorm:"column:execution_target_id;type:uuid"`
+	ProviderResumeCursorEncrypted         []byte     `gorm:"column:provider_resume_cursor_encrypted"`
+	ProviderResumeCursorState             string     `gorm:"column:provider_resume_cursor_state;default:absent"`
+	ProviderResumeCursorSourceExecutionID *uuid.UUID `gorm:"column:provider_resume_cursor_source_execution_id;type:uuid"`
+	ProviderResumeCursorSourceGeneration  *int64     `gorm:"column:provider_resume_cursor_source_generation"`
+	ProviderResumeCursorHistorySequence   *int64     `gorm:"column:provider_resume_cursor_history_sequence"`
+	CurrentRuntimeBindingID               *uuid.UUID `gorm:"column:current_runtime_binding_id;type:uuid"`
+	LastEventSequence                     int64      `gorm:"column:last_event_sequence"`
+	CreatedAt                             time.Time  `gorm:"column:created_at"`
+	UpdatedAt                             time.Time  `gorm:"column:updated_at"`
+	ArchivedAt                            *time.Time `gorm:"column:archived_at"`
 }
 
 func (AgentSession) TableName() string { return "agent_sessions" }

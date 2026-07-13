@@ -2,6 +2,7 @@
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd "$script_dir/../.." && pwd)"
 project="${SYNARA_FAILURE_ACCEPTANCE_PROJECT:-synara-stage2-failure-$$}"
 work_dir="$(mktemp -d)"
 workspace="$work_dir/workspace"
@@ -154,6 +155,8 @@ session_id="$(jq -er '.id' <<<"$session_json")"
 execution_target_id="$(jq -er '.executionTargetId' <<<"$session_json")"
 execution_target="$(request_json "$owner_cookie" GET "/v1/tenants/$tenant_id/execution-targets/$execution_target_id")"
 target_kind="$(jq -er '.kind' <<<"$execution_target")"
+worker_capabilities="$(python3 "$repo_root/scripts/stage3-provider-acceptance/worker_manifest.py" \
+  --target-capabilities-json "$(jq -c '.capabilities' <<<"$execution_target")")"
 
 request_json "$owner_cookie" POST "/v1/sessions/$session_id/turns" \
   "{\"inputText\":\"$prompt_sentinel\"}" >/dev/null
@@ -163,12 +166,12 @@ worker_registration="$(curl -sS --fail-with-body -X POST \
   -H "Authorization: Bearer $SYNARA_WORKER_REGISTRATION_TOKEN" \
   -H "X-Request-ID: register-$run_id" \
   -H 'Content-Type: application/json' \
-  -d "{\"executionTargetId\":\"$execution_target_id\",\"targetKind\":\"$target_kind\",\"instanceUid\":\"$worker_instance_uid\",\"clusterId\":\"failure\",\"namespace\":\"default\",\"podName\":\"worker-$run_id\",\"version\":\"acceptance\",\"protocolVersion\":$worker_protocol_version,\"capabilities\":{\"codex\":true},\"leaseSupported\":true,\"fencingSupported\":true}" \
+  -d "{\"executionTargetId\":\"$execution_target_id\",\"targetKind\":\"$target_kind\",\"instanceUid\":\"$worker_instance_uid\",\"clusterId\":\"failure\",\"namespace\":\"default\",\"podName\":\"worker-$run_id\",\"version\":\"acceptance\",\"protocolVersion\":$worker_protocol_version,\"capabilities\":$worker_capabilities,\"leaseSupported\":true,\"fencingSupported\":true}" \
   "$base_url/v1/workers/register")"
 worker_token="$(jq -er '.token' <<<"$worker_registration")"
 worker_id="$(jq -er '.worker.id' <<<"$worker_registration")"
 worker_json "$worker_token" "heartbeat-$run_id" POST /v1/workers/heartbeat \
-  "{\"version\":\"acceptance\",\"protocolVersion\":$worker_protocol_version,\"capabilities\":{\"codex\":true}}" >/dev/null
+  "{\"version\":\"acceptance\",\"protocolVersion\":$worker_protocol_version,\"capabilities\":$worker_capabilities}" >/dev/null
 
 first_claim="$(worker_json "$worker_token" "claim-$run_id" POST /v1/workers/executions/claim \
   "{\"executionTargetId\":\"$execution_target_id\",\"targetKind\":\"$target_kind\"}")"
@@ -193,7 +196,7 @@ replacement_registration="$(curl -sS --fail-with-body -X POST \
   -H "Authorization: Bearer $SYNARA_WORKER_REGISTRATION_TOKEN" \
   -H "X-Request-ID: replacement-register-$run_id" \
   -H 'Content-Type: application/json' \
-  -d "{\"executionTargetId\":\"$execution_target_id\",\"targetKind\":\"$target_kind\",\"instanceUid\":\"$replacement_instance_uid\",\"clusterId\":\"failure\",\"namespace\":\"default\",\"podName\":\"replacement-$run_id\",\"version\":\"acceptance\",\"protocolVersion\":$worker_protocol_version,\"capabilities\":{\"codex\":true},\"leaseSupported\":true,\"fencingSupported\":true}" \
+  -d "{\"executionTargetId\":\"$execution_target_id\",\"targetKind\":\"$target_kind\",\"instanceUid\":\"$replacement_instance_uid\",\"clusterId\":\"failure\",\"namespace\":\"default\",\"podName\":\"replacement-$run_id\",\"version\":\"acceptance\",\"protocolVersion\":$worker_protocol_version,\"capabilities\":$worker_capabilities,\"leaseSupported\":true,\"fencingSupported\":true}" \
   "$base_url/v1/workers/register")"
 replacement_token="$(jq -er '.token' <<<"$replacement_registration")"
 replacement_worker_id="$(jq -er '.worker.id' <<<"$replacement_registration")"
@@ -282,7 +285,7 @@ jq -e --arg owner_id "$owner_id" --arg tenant_id "$tenant_id" \
   '.user.userId == $owner_id and .user.activeTenantId == $tenant_id' \
   <<<"$session_after_database_recovery" >/dev/null
 worker_json "$replacement_token" "post-db-heartbeat-$run_id" POST /v1/workers/heartbeat \
-  "{\"version\":\"acceptance\",\"protocolVersion\":$worker_protocol_version,\"capabilities\":{\"codex\":true}}" >/dev/null
+  "{\"version\":\"acceptance\",\"protocolVersion\":$worker_protocol_version,\"capabilities\":$worker_capabilities}" >/dev/null
 printf 'PostgreSQL outage and recovery passed\n'
 
 logs_file="$work_dir/control-plane.log"

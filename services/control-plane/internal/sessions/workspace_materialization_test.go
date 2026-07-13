@@ -112,6 +112,7 @@ func TestTurnMovesWorkspaceToNewTargetWithoutLosingOldMaterialization(t *testing
 	if first.WorkspaceMaterializationID == nil {
 		t.Fatal("first Execution omitted its materialization")
 	}
+	completeSessionExecutionForNextTurn(t, fixture, first)
 
 	targetID := uuid.New()
 	if err := fixture.db.Create(&persistence.ExecutionTarget{
@@ -174,6 +175,7 @@ func TestTurnReplacesCleanupPendingCurrentMaterialization(t *testing.T) {
 		t.Fatal(err)
 	}
 	first := loadSessionExecution(t, fixture, "before cleanup")
+	completeSessionExecutionForNextTurn(t, fixture, first)
 	now := time.Now().UTC()
 	if err := fixture.db.Model(&persistence.WorkspaceMaterialization{}).
 		Where("tenant_id = ? AND id = ?", fixture.tenantID, *first.WorkspaceMaterializationID).
@@ -228,6 +230,7 @@ func TestTurnRejectsDirtyWorkspaceTargetMoveWithoutLatestReadyCheckpoint(t *test
 		}).Error; err != nil {
 		t.Fatal(err)
 	}
+	completeSessionExecutionForNextTurn(t, fixture, execution)
 	var before persistence.RemoteWorkspace
 	if err := fixture.db.Where("tenant_id = ? AND session_id = ?", fixture.tenantID, fixture.sessionID).
 		Take(&before).Error; err != nil {
@@ -315,6 +318,27 @@ func loadSessionExecution(t *testing.T, fixture tenantExecutionPolicyFixture, in
 		t.Fatal(err)
 	}
 	return execution
+}
+
+func completeSessionExecutionForNextTurn(
+	t *testing.T,
+	fixture tenantExecutionPolicyFixture,
+	execution persistence.AgentExecution,
+) {
+	t.Helper()
+	now := time.Now().UTC()
+	if err := fixture.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(&persistence.AgentExecution{}).
+			Where("tenant_id = ? AND id = ?", fixture.tenantID, execution.ID).
+			Updates(map[string]any{"status": "completed", "finished_at": now, "worker_id": nil}).Error; err != nil {
+			return err
+		}
+		return tx.Model(&persistence.AgentTurn{}).
+			Where("tenant_id = ? AND session_id = ? AND id = ?", fixture.tenantID, fixture.sessionID, execution.TurnID).
+			Updates(map[string]any{"status": "completed", "completed_at": now}).Error
+	}); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func configureSessionKubernetesTarget(

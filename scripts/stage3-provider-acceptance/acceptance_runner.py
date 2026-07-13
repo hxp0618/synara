@@ -3,8 +3,8 @@
 
 Target drivers exercise production Control Plane, Worker, and agentd paths.
 The runner never registers, heartbeats, or claims a Worker on behalf of
-agentd. The Local driver uses LocalSupervisor; the Docker driver provisions a
-managed Docker Execution Target through the user API and reconciler.
+agentd. The Local driver uses LocalSupervisor; Docker and Kubernetes drivers
+provision managed Execution Targets through the user API and reconcilers.
 """
 
 from __future__ import annotations
@@ -227,6 +227,40 @@ class RunnerOptions:
     docker_network_mode: str | None
     docker_memory_bytes: int
     docker_nano_cpus: int
+    kubernetes_context: str | None
+    kubernetes_kubeconfig: pathlib.Path | None
+    kubernetes_allow_nondisposable: bool
+    kubernetes_worker_image: str | None
+    kubernetes_skip_worker_build: bool
+    kubernetes_control_plane_host: str
+    kind_bin: str
+    kind_cluster_name: str | None
+    kind_node_image: str
+
+
+@dataclasses.dataclass(frozen=True)
+class TargetLifecycle:
+    worker_allocation: str
+    replacement: str
+
+    def __post_init__(self) -> None:
+        if self.worker_allocation not in {"standing", "execution-pinned"}:
+            raise ValueError(f"unsupported worker allocation: {self.worker_allocation}")
+        if self.replacement not in {"none", "managed"}:
+            raise ValueError(f"unsupported replacement capability: {self.replacement}")
+
+    @property
+    def execution_pinned(self) -> bool:
+        return self.worker_allocation == "execution-pinned"
+
+    @property
+    def managed_replacement(self) -> bool:
+        return self.replacement == "managed"
+
+
+STANDING_WORKER = TargetLifecycle(worker_allocation="standing", replacement="none")
+STANDING_MANAGED_WORKER = TargetLifecycle(worker_allocation="standing", replacement="managed")
+EXECUTION_PINNED_WORKER = TargetLifecycle(worker_allocation="execution-pinned", replacement="none")
 
 
 @dataclasses.dataclass
@@ -244,6 +278,7 @@ class ScenarioState:
     restarted: bool = False
     worker_replaced: bool = False
     replacement_worker_id: str | None = None
+    pending_approval: dict[str, Any] | None = None
 
 
 class APIClient:
@@ -321,6 +356,7 @@ class APIClient:
 class TargetDriver(Protocol):
     name: str
     api: APIClient | None
+    lifecycle: TargetLifecycle
 
     def prepare(self) -> Mapping[str, Any]: ...
 
@@ -341,6 +377,10 @@ class TargetDriver(Protocol):
         target_id: str,
         provider: str,
     ) -> Mapping[str, Any]: ...
+
+    def observe_execution(self, target_id: str, execution_id: str) -> Mapping[str, Any]: ...
+
+    def observe_terminal_execution(self, target_id: str, execution_id: str) -> Mapping[str, Any]: ...
 
     def stop(self) -> None: ...
 
@@ -546,6 +586,7 @@ class _WorkerOnlyProxy:
 
 class LocalDriver:
     name = "local"
+    lifecycle = STANDING_WORKER
 
     def __init__(
         self,
@@ -795,6 +836,12 @@ class LocalDriver:
             "The Local Target uses Control Plane restart for Supervisor recovery instead of container replacement.",
         )
 
+    def observe_execution(self, _target_id: str, _execution_id: str) -> Mapping[str, Any]:
+        return {}
+
+    def observe_terminal_execution(self, _target_id: str, _execution_id: str) -> Mapping[str, Any]:
+        return {}
+
     def _control_plane_environment(self) -> dict[str, str]:
         environment = self._tool_environment()
         environment.update(
@@ -830,9 +877,7 @@ class LocalDriver:
         return environment
 
 
-class DockerDriver(LocalDriver):
-    name = "docker"
-
+class ManagedWorkerDriver(LocalDriver):
     def __init__(
         self,
         repo_root: pathlib.Path,
@@ -841,19 +886,13 @@ class DockerDriver(LocalDriver):
         redactor: SecretRedactor,
     ) -> None:
         super().__init__(repo_root, options, deadline, redactor)
-        suffix = uuid.uuid4().hex[:12]
         self.registration_token = random_key()
         self.redactor.add(self.registration_token, "[REDACTED_WORKER_REGISTRATION_TOKEN]")
-        self.target_name = f"stage3-docker-{suffix}"
-        self.volume_name = f"synara-stage3-{suffix}"
-        self.network_name = options.docker_network_mode or f"synara-stage3-{suffix}"
-        self.owns_network = options.docker_network_mode is None
-        self.owns_image = not options.docker_skip_worker_build
-        self.head_sha = self._head_sha()
-        self.image = options.docker_worker_image or f"synara-stage3-provider-acceptance:{self.head_sha}-{suffix}"
-        self.target_id: str | None = None
-        self.container_name: str | None = None
         self.worker_proxy: _WorkerOnlyProxy | None = None
+
+    @property
+    def worker_proxy_host(self) -> str:
+        raise NotImplementedError
 
     def start(self) -> Mapping[str, Any]:
         control_plane = super().start()
@@ -872,24 +911,182 @@ class DockerDriver(LocalDriver):
             )
         return {
             **control_plane,
-            "workerProxy": self.worker_proxy.evidence(self.options.docker_control_plane_host),
+            "workerProxy": self.worker_proxy.evidence(self.worker_proxy_host),
         }
 
-    def prepare(self) -> Mapping[str, Any]:
-        control_plane = super().prepare()
+    def _control_plane_environment(self) -> dict[str, str]:
+        environment = super()._control_plane_environment()
+        for key in (
+            "SYNARA_LOCAL_AGENTD_RUNNER_COMMAND_JSON",
+            "SYNARA_LOCAL_AGENTD_WORKSPACE_ROOT",
+            "SYNARA_LOCAL_AGENTD_GIT_CACHE_ROOT",
+            "SYNARA_LOCAL_AGENTD_RESTART_BACKOFF",
+        ):
+            environment.pop(key, None)
+        environment.update(
+            {
+                "SYNARA_CONTROL_PLANE_LISTEN": f"127.0.0.1:{self.port}",
+                "SYNARA_WORKER_REGISTRATION_TOKEN": self.registration_token,
+            }
+        )
+        return environment
+
+    def _worker_proxy_url(self) -> str:
+        if self.worker_proxy is None or not self.worker_proxy.thread.is_alive():
+            raise AcceptanceError(
+                "runner.worker_proxy_unavailable",
+                "Worker-only proxy was unavailable while provisioning the managed Target.",
+            )
+        return f"http://{self.worker_proxy_host}:{self.worker_proxy.port}"
+
+    def _stop_worker_proxy(self) -> None:
+        proxy = self.worker_proxy
+        self.worker_proxy = None
+        if proxy is not None:
+            proxy.stop()
+
+    def _head_sha(self) -> str:
+        completed = subprocess.run(
+            ["git", "rev-parse", "--short=12", "HEAD"],
+            cwd=self.repo_root,
+            env=self._tool_environment(),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=10.0,
+            check=False,
+        )
+        value = completed.stdout.strip().lower()
+        return value if completed.returncode == 0 and value else "unknown"
+
+    def _docker_environment(self) -> dict[str, str]:
+        environment = self._tool_environment()
+        environment.pop("DOCKER_CONTEXT", None)
+        environment["DOCKER_HOST"] = f"unix://{self.options.docker_socket_path}"
+        return environment
+
+    def _docker_completed(
+        self,
+        arguments: Sequence[str],
+        *,
+        cleanup_timeout: float | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        timeout = cleanup_timeout
+        if timeout is None:
+            timeout = self.deadline.request_timeout(maximum=max(10.0, self.deadline.remaining()))
+        try:
+            return subprocess.run(
+                ["docker", *arguments],
+                cwd=self.repo_root,
+                env=self._docker_environment(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                timeout=timeout,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise AcceptanceError(
+                "runner.docker_command_failed",
+                f"Docker command could not run: {self.redactor.text(str(error))}",
+                {"command": ["docker", *arguments[:3]]},
+            ) from None
+
+    def _docker_command(
+        self,
+        arguments: Sequence[str],
+        *,
+        log_path: pathlib.Path | None = None,
+        maximum_timeout: float | None = None,
+    ) -> str:
+        timeout = self.deadline.request_timeout(maximum=maximum_timeout or 30.0)
+        try:
+            completed = subprocess.run(
+                ["docker", *arguments],
+                cwd=self.repo_root,
+                env=self._docker_environment(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                timeout=timeout,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise AcceptanceError(
+                "runner.docker_command_failed",
+                f"Docker command could not run: {self.redactor.text(str(error))}",
+                {"command": ["docker", *arguments[:3]]},
+            ) from None
+        output = self.redactor.text(completed.stdout)
+        if log_path is not None:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            log_path.write_text(output, encoding="utf-8")
+        if completed.returncode != 0:
+            raise AcceptanceError(
+                "runner.docker_command_failed",
+                f"Docker command exited with status {completed.returncode}.",
+                {
+                    "command": ["docker", *arguments[:3]],
+                    "exitCode": completed.returncode,
+                    "log": str(log_path) if log_path else None,
+                    "outputExcerpt": output[-1000:],
+                },
+            )
+        return output
+
+    def _ping_socket(self) -> Mapping[str, Any]:
+        path = self.options.docker_socket_path
+        if not path.is_absolute():
+            raise AcceptanceError(
+                "runner.docker_socket_invalid",
+                "Docker socket path must be absolute.",
+                {"path": str(path)},
+            )
+        try:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+                client.settimeout(self.deadline.request_timeout(maximum=5.0))
+                client.connect(str(path))
+                client.sendall(b"GET /_ping HTTP/1.1\r\nHost: docker\r\nConnection: close\r\n\r\n")
+                chunks: list[bytes] = []
+                while True:
+                    chunk = client.recv(4096)
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                response = b"".join(chunks)
+        except OSError as error:
+            raise AcceptanceError(
+                "runner.docker_socket_unavailable",
+                f"Docker socket is unavailable: {self.redactor.text(str(error))}",
+                {"path": str(path)},
+            ) from None
+        if b"200 OK" not in response or not response.rstrip().endswith(b"OK"):
+            raise AcceptanceError(
+                "runner.docker_socket_unhealthy",
+                "Docker Engine did not return a successful _ping response.",
+                {"path": str(path), "responseExcerpt": response[:200].decode("ascii", errors="replace")},
+            )
+        return {"path": str(path), "ping": "OK"}
+
+    def _prepare_worker_image(
+        self,
+        image: str,
+        *,
+        skip_build: bool,
+        log_prefix: str,
+    ) -> Mapping[str, Any]:
         socket_evidence = self._ping_socket()
         version = self._docker_command(
             ["version", "--format", "{{.Server.Version}}"],
-            log_path=self.logs_dir / "docker-version.log",
+            log_path=self.logs_dir / f"{log_prefix}-docker-version.log",
         ).strip()
         if not version:
             raise AcceptanceError("runner.docker_engine_unavailable", "Docker did not report a Server version.")
-
         build_started = time.monotonic()
-        if self.options.docker_skip_worker_build:
+        if skip_build:
             self._docker_command(
-                ["image", "inspect", "--format", "{{.Id}}", self.image],
-                log_path=self.logs_dir / "docker-image-inspect.log",
+                ["image", "inspect", "--format", "{{.Id}}", image],
+                log_path=self.logs_dir / f"{log_prefix}-image-inspect.log",
             )
             build_evidence: dict[str, Any] = {"build": "skipped"}
         else:
@@ -899,36 +1096,76 @@ class DockerDriver(LocalDriver):
                     "--target",
                     "worker-acceptance",
                     "--tag",
-                    self.image,
+                    image,
                     "--label",
                     "synara.io/stage3-provider-acceptance=true",
                     "--label",
-                    f"org.opencontainers.image.revision={self.head_sha}",
+                    f"org.opencontainers.image.revision={self._head_sha()}",
                     str(self.repo_root),
                 ],
-                log_path=self.logs_dir / "docker-worker-build.log",
+                log_path=self.logs_dir / f"{log_prefix}-worker-build.log",
                 maximum_timeout=max(60.0, self.deadline.remaining()),
             )
             build_evidence = {"build": "completed", "durationMs": elapsed_ms(build_started)}
-
         self._docker_command(
             [
                 "run",
                 "--rm",
                 "--entrypoint",
                 "sh",
-                self.image,
+                image,
                 "-lc",
                 "test -x /usr/local/bin/synara-agentd && "
                 "test -x /usr/local/bin/provider-host && "
                 "test -r /opt/synara/acceptance/provider-host-fixture.mjs && "
                 "node --version",
             ],
-            log_path=self.logs_dir / "docker-worker-smoke.log",
+            log_path=self.logs_dir / f"{log_prefix}-worker-smoke.log",
         )
-        image_id = self._docker_command(
-            ["image", "inspect", "--format", "{{.Id}}", self.image]
-        ).strip()
+        image_id = self._docker_command(["image", "inspect", "--format", "{{.Id}}", image]).strip()
+        return {
+            "serverVersion": version,
+            "socket": socket_evidence,
+            "workerImage": image,
+            "workerImageId": image_id,
+            **build_evidence,
+        }
+
+
+class DockerDriver(ManagedWorkerDriver):
+    name = "docker"
+    lifecycle = STANDING_MANAGED_WORKER
+
+    def __init__(
+        self,
+        repo_root: pathlib.Path,
+        options: RunnerOptions,
+        deadline: Deadline,
+        redactor: SecretRedactor,
+    ) -> None:
+        super().__init__(repo_root, options, deadline, redactor)
+        suffix = uuid.uuid4().hex[:12]
+        self.target_name = f"stage3-docker-{suffix}"
+        self.volume_name = f"synara-stage3-{suffix}"
+        self.network_name = options.docker_network_mode or f"synara-stage3-{suffix}"
+        self.owns_network = options.docker_network_mode is None
+        self.owns_image = not options.docker_skip_worker_build
+        self.head_sha = self._head_sha()
+        self.image = options.docker_worker_image or f"synara-stage3-provider-acceptance:{self.head_sha}-{suffix}"
+        self.target_id: str | None = None
+        self.container_name: str | None = None
+
+    @property
+    def worker_proxy_host(self) -> str:
+        return self.options.docker_control_plane_host
+
+    def prepare(self) -> Mapping[str, Any]:
+        control_plane = super().prepare()
+        image_evidence = self._prepare_worker_image(
+            self.image,
+            skip_build=self.options.docker_skip_worker_build,
+            log_prefix="docker",
+        )
         if self.owns_network:
             self._docker_command(
                 [
@@ -945,12 +1182,8 @@ class DockerDriver(LocalDriver):
         return {
             "controlPlane": control_plane,
             "docker": {
-                "serverVersion": version,
-                "socket": socket_evidence,
-                "workerImage": self.image,
-                "workerImageId": image_id,
                 "networkMode": self.network_name,
-                **build_evidence,
+                **image_evidence,
             },
         }
 
@@ -1167,35 +1400,8 @@ class DockerDriver(LocalDriver):
 
     def _control_plane_environment(self) -> dict[str, str]:
         environment = super()._control_plane_environment()
-        for key in (
-            "SYNARA_LOCAL_AGENTD_RUNNER_COMMAND_JSON",
-            "SYNARA_LOCAL_AGENTD_WORKSPACE_ROOT",
-            "SYNARA_LOCAL_AGENTD_GIT_CACHE_ROOT",
-            "SYNARA_LOCAL_AGENTD_RESTART_BACKOFF",
-        ):
-            environment.pop(key, None)
-        environment.update(
-            {
-                "SYNARA_CONTROL_PLANE_LISTEN": f"127.0.0.1:{self.port}",
-                "SYNARA_WORKER_REGISTRATION_TOKEN": self.registration_token,
-                "SYNARA_DOCKER_RECONCILE_INTERVAL": "250ms",
-            }
-        )
+        environment["SYNARA_DOCKER_RECONCILE_INTERVAL"] = "250ms"
         return environment
-
-    def _worker_proxy_url(self) -> str:
-        if self.worker_proxy is None or not self.worker_proxy.thread.is_alive():
-            raise AcceptanceError(
-                "runner.worker_proxy_unavailable",
-                "Worker-only proxy was unavailable while provisioning the Docker Target.",
-            )
-        return f"http://{self.options.docker_control_plane_host}:{self.worker_proxy.port}"
-
-    def _stop_worker_proxy(self) -> None:
-        proxy = self.worker_proxy
-        self.worker_proxy = None
-        if proxy is not None:
-            proxy.stop()
 
     def _write_volume_sentinel(self, container_id: str) -> None:
         self._docker_command(
@@ -1228,128 +1434,6 @@ class DockerDriver(LocalDriver):
             ]
         )
 
-    def _head_sha(self) -> str:
-        completed = subprocess.run(
-            ["git", "rev-parse", "--short=12", "HEAD"],
-            cwd=self.repo_root,
-            env=self._tool_environment(),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            timeout=10.0,
-            check=False,
-        )
-        value = completed.stdout.strip().lower()
-        return value if completed.returncode == 0 and value else "unknown"
-
-    def _docker_environment(self) -> dict[str, str]:
-        environment = self._tool_environment()
-        environment.pop("DOCKER_CONTEXT", None)
-        environment["DOCKER_HOST"] = f"unix://{self.options.docker_socket_path}"
-        return environment
-
-    def _docker_completed(
-        self,
-        arguments: Sequence[str],
-        *,
-        cleanup_timeout: float | None = None,
-    ) -> subprocess.CompletedProcess[str]:
-        timeout = cleanup_timeout
-        if timeout is None:
-            timeout = self.deadline.request_timeout(maximum=max(10.0, self.deadline.remaining()))
-        try:
-            return subprocess.run(
-                ["docker", *arguments],
-                cwd=self.repo_root,
-                env=self._docker_environment(),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                timeout=timeout,
-                check=False,
-            )
-        except (OSError, subprocess.TimeoutExpired) as error:
-            raise AcceptanceError(
-                "runner.docker_command_failed",
-                f"Docker command could not run: {self.redactor.text(str(error))}",
-                {"command": ["docker", *arguments[:3]]},
-            ) from None
-
-    def _docker_command(
-        self,
-        arguments: Sequence[str],
-        *,
-        log_path: pathlib.Path | None = None,
-        maximum_timeout: float | None = None,
-    ) -> str:
-        timeout = self.deadline.request_timeout(maximum=maximum_timeout or 30.0)
-        try:
-            completed = subprocess.run(
-                ["docker", *arguments],
-                cwd=self.repo_root,
-                env=self._docker_environment(),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                timeout=timeout,
-                check=False,
-            )
-        except (OSError, subprocess.TimeoutExpired) as error:
-            raise AcceptanceError(
-                "runner.docker_command_failed",
-                f"Docker command could not run: {self.redactor.text(str(error))}",
-                {"command": ["docker", *arguments[:3]]},
-            ) from None
-        output = self.redactor.text(completed.stdout)
-        if log_path is not None:
-            log_path.parent.mkdir(parents=True, exist_ok=True)
-            log_path.write_text(output, encoding="utf-8")
-        if completed.returncode != 0:
-            raise AcceptanceError(
-                "runner.docker_command_failed",
-                f"Docker command exited with status {completed.returncode}.",
-                {
-                    "command": ["docker", *arguments[:3]],
-                    "exitCode": completed.returncode,
-                    "log": str(log_path) if log_path else None,
-                    "outputExcerpt": output[-1000:],
-                },
-            )
-        return output
-
-    def _ping_socket(self) -> Mapping[str, Any]:
-        path = self.options.docker_socket_path
-        if not path.is_absolute():
-            raise AcceptanceError(
-                "runner.docker_socket_invalid",
-                "Docker socket path must be absolute.",
-                {"path": str(path)},
-            )
-        try:
-            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
-                client.settimeout(self.deadline.request_timeout(maximum=5.0))
-                client.connect(str(path))
-                client.sendall(b"GET /_ping HTTP/1.1\r\nHost: docker\r\nConnection: close\r\n\r\n")
-                chunks: list[bytes] = []
-                while True:
-                    chunk = client.recv(4096)
-                    if not chunk:
-                        break
-                    chunks.append(chunk)
-                response = b"".join(chunks)
-        except OSError as error:
-            raise AcceptanceError(
-                "runner.docker_socket_unavailable",
-                f"Docker socket is unavailable: {self.redactor.text(str(error))}",
-                {"path": str(path)},
-            ) from None
-        if b"200 OK" not in response or not response.rstrip().endswith(b"OK"):
-            raise AcceptanceError(
-                "runner.docker_socket_unhealthy",
-                "Docker Engine did not return a successful _ping response.",
-                {"path": str(path), "responseExcerpt": response[:200].decode("ascii", errors="replace")},
-            )
-        return {"path": str(path), "ping": "OK"}
 
     def _container_snapshot(self, target_id: str) -> dict[str, Any] | None:
         output = self._docker_command(
@@ -1481,10 +1565,707 @@ class DockerDriver(LocalDriver):
         }
 
 
+class KubernetesDriver(ManagedWorkerDriver):
+    name = "kubernetes"
+    lifecycle = EXECUTION_PINNED_WORKER
+
+    def __init__(
+        self,
+        repo_root: pathlib.Path,
+        options: RunnerOptions,
+        deadline: Deadline,
+        redactor: SecretRedactor,
+    ) -> None:
+        super().__init__(repo_root, options, deadline, redactor)
+        suffix = uuid.uuid4().hex[:12]
+        self.target_name = f"stage3-kubernetes-{suffix}"
+        self.target_namespace = f"synara-stage3-worker-{suffix}"
+        self.bootstrap_namespace = f"synara-stage3-control-{suffix}"
+        self.bootstrap_service_account = "synara-control-plane"
+        self.bootstrap_role = f"synara-stage3-{suffix}"
+        self.worker_service_account = f"synara-worker-{suffix}"
+        self.target_id: str | None = None
+        self.owns_cluster = options.kubernetes_context is None
+        self.cluster_created = False
+        self.cluster_name = options.kind_cluster_name or f"synara-stage3-{suffix}"
+        self.context = options.kubernetes_context or f"kind-{self.cluster_name}"
+        if not self.owns_cluster and self.context.startswith("kind-"):
+            self.cluster_name = self.context.removeprefix("kind-")
+        self.kubeconfig = (
+            options.kubernetes_kubeconfig
+            if options.kubernetes_kubeconfig is not None
+            else self.state_dir / "kubeconfig"
+            if self.owns_cluster
+            else None
+        )
+        self.owns_image = not options.kubernetes_skip_worker_build
+        self.image = options.kubernetes_worker_image or (
+            f"synara-stage3-provider-acceptance:{self._head_sha()}-kubernetes-{suffix}"
+        )
+        self.api_server = ""
+        self.ca_certificate = ""
+        self.kubernetes_token = ""
+
+    @property
+    def worker_proxy_host(self) -> str:
+        return self.options.kubernetes_control_plane_host
+
+    def prepare(self) -> Mapping[str, Any]:
+        control_plane = super().prepare()
+        cluster_evidence = self._prepare_cluster()
+        image_evidence = self._prepare_worker_image(
+            self.image,
+            skip_build=self.options.kubernetes_skip_worker_build,
+            log_prefix="kubernetes",
+        )
+        if self.context.startswith("kind-"):
+            cluster_name = self.context.removeprefix("kind-")
+            self._kind_command(
+                ["load", "docker-image", "--name", cluster_name, self.image],
+                log_path=self.logs_dir / "kubernetes-kind-load-image.log",
+                maximum_timeout=max(60.0, self.deadline.remaining()),
+            )
+        elif not self.options.kubernetes_skip_worker_build:
+            raise AcceptanceError(
+                "runner.kubernetes_image_load_unsupported",
+                "A locally built Kubernetes Worker image can only be loaded into a Kind context.",
+                {"context": self.context, "requiredInputs": ["--kubernetes-skip-worker-build"]},
+            )
+        access_evidence = self._prepare_cluster_access()
+        return {
+            "controlPlane": control_plane,
+            "kubernetes": {
+                **cluster_evidence,
+                **access_evidence,
+                "containerEngine": image_evidence,
+            },
+        }
+
+    def provision_target(
+        self,
+        tenant_id: str,
+        organization_id: str,
+        provider: str,
+    ) -> Mapping[str, Any]:
+        if not self.api_server or not self.ca_certificate or not self.kubernetes_token:
+            raise AcceptanceError(
+                "runner.kubernetes_access_unavailable",
+                "Kubernetes API access was unavailable while provisioning the Target.",
+            )
+        target = json_object(
+            self.api.request(
+                "POST",
+                f"/v1/tenants/{tenant_id}/execution-targets",
+                {
+                    "organizationId": organization_id,
+                    "kind": "kubernetes",
+                    "name": self.target_name,
+                    "configuration": {
+                        "apiServer": self.api_server,
+                        "bearerToken": self.kubernetes_token,
+                        "caCertificate": self.ca_certificate,
+                        "namespace": self.target_namespace,
+                        "manageNamespace": True,
+                        "serviceAccountName": self.worker_service_account,
+                        "image": self.image,
+                        "imagePullPolicy": "Never" if self.context.startswith("kind-") else "IfNotPresent",
+                        "controlPlaneUrl": self._worker_proxy_url(),
+                        "allowInsecureControlPlane": True,
+                        "runnerCommand": list(self.options.runner_command),
+                        "maxActivePods": 1,
+                        "egressCidrs": ["0.0.0.0/0"],
+                        "cpuRequest": "100m",
+                        "cpuLimit": "1",
+                        "memoryRequest": "128Mi",
+                        "memoryLimit": "1Gi",
+                        "ephemeralStorageRequest": "128Mi",
+                        "ephemeralStorageLimit": "2Gi",
+                        "workspaceSizeLimit": "1Gi",
+                        "quotaCpuRequests": "1",
+                        "quotaCpuLimits": "2",
+                        "quotaMemoryRequests": "1Gi",
+                        "quotaMemoryLimits": "2Gi",
+                        "quotaEphemeralStorage": "4Gi",
+                    },
+                    "capabilities": {
+                        "workspaceModes": ["local", "worktree"],
+                        "providerPolicy": {"experimentalProviders": [provider]},
+                    },
+                },
+                expected=(201,),
+            ),
+            "kubernetes execution target",
+        )
+        target_id = target.get("id")
+        if not isinstance(target_id, str) or not target_id:
+            raise AcceptanceError(
+                "runner.kubernetes_target_id_missing",
+                "Kubernetes Target creation did not return an ID.",
+            )
+        self.target_id = target_id
+        return {
+            **target,
+            "driverEvidence": {
+                "context": self.context,
+                "namespace": self.target_namespace,
+                "workerAllocation": self.lifecycle.worker_allocation,
+                "image": self.image,
+                "imagePullPolicy": "Never" if self.context.startswith("kind-") else "IfNotPresent",
+                "networkPolicyImplementation": "cluster-dependent",
+            },
+        }
+
+    def replace_worker(
+        self,
+        _tenant_id: str,
+        _target_id: str,
+        _provider: str,
+    ) -> Mapping[str, Any]:
+        raise AcceptanceError(
+            "runner.target_replacement_unsupported",
+            "The Kubernetes Target uses one execution-pinned Pod per Execution.",
+        )
+
+    def observe_execution(self, target_id: str, execution_id: str) -> Mapping[str, Any]:
+        pod = self._wait_execution_pod(target_id, execution_id)
+        metadata = json_object(pod.get("metadata"), "Kubernetes Pod metadata")
+        spec = json_object(pod.get("spec"), "Kubernetes Pod spec")
+        status = json_object(pod.get("status"), "Kubernetes Pod status")
+        labels = json_object(metadata.get("labels"), "Kubernetes Pod labels")
+        containers = spec.get("containers")
+        if not isinstance(containers, list) or len(containers) != 1 or not isinstance(containers[0], dict):
+            raise AcceptanceError(
+                "runner.kubernetes_pod_contract_mismatch",
+                "The execution-pinned Pod did not contain exactly one agentd container.",
+            )
+        container = containers[0]
+        environment = {
+            str(item.get("name")): item
+            for item in container.get("env", [])
+            if isinstance(item, dict) and isinstance(item.get("name"), str)
+        }
+        registration = json_object(
+            json_object(environment.get("SYNARA_WORKER_REGISTRATION_TOKEN"), "registration environment").get("valueFrom"),
+            "registration valueFrom",
+        )
+        secret_ref = json_object(registration.get("secretKeyRef"), "registration secretKeyRef")
+        container_security = json_object(container.get("securityContext"), "container securityContext")
+        pod_security = json_object(spec.get("securityContext"), "Pod securityContext")
+        capabilities = json_object(container_security.get("capabilities"), "container capabilities")
+        expected_labels = {
+            "synara.io/managed": "true",
+            "synara.io/execution-target-id": target_id,
+            "synara.io/execution-id": execution_id,
+        }
+        actual_labels = {key: labels.get(key) for key in expected_labels}
+        assigned_execution = json_object(
+            environment.get("SYNARA_AGENTD_ASSIGNED_EXECUTION_ID"),
+            "assigned execution environment",
+        ).get("value")
+        expected_security = {
+            "allowPrivilegeEscalation": False,
+            "readOnlyRootFilesystem": True,
+            "runAsNonRoot": True,
+            "runAsUser": 10001,
+            "runAsGroup": 10001,
+        }
+        actual_security = {key: container_security.get(key) for key in expected_security}
+        if (
+            actual_labels != expected_labels
+            or labels.get("synara.io/generation") in (None, "")
+            or container.get("name") != "agentd"
+            or container.get("image") != self.image
+            or container.get("imagePullPolicy") not in {"Never", "IfNotPresent"}
+            or assigned_execution != execution_id
+            or secret_ref.get("key") != "registration-token"
+            or actual_security != expected_security
+            or capabilities.get("drop") != ["ALL"]
+            or pod_security.get("runAsNonRoot") is not True
+            or pod_security.get("fsGroup") != 10001
+            or spec.get("automountServiceAccountToken") is not False
+            or spec.get("restartPolicy") != "Never"
+            or spec.get("serviceAccountName") != self.worker_service_account
+        ):
+            raise AcceptanceError(
+                "runner.kubernetes_pod_contract_mismatch",
+                "The execution-pinned Pod did not apply the requested identity and security contract.",
+                {
+                    "labels": actual_labels,
+                    "assignedExecutionId": assigned_execution,
+                    "containerSecurity": actual_security,
+                    "serviceAccountName": spec.get("serviceAccountName"),
+                },
+            )
+        volume_names = sorted(
+            str(item.get("name"))
+            for item in spec.get("volumes", [])
+            if isinstance(item, dict) and isinstance(item.get("name"), str)
+        )
+        if volume_names != ["home", "tmp", "workspace"]:
+            raise AcceptanceError(
+                "runner.kubernetes_pod_contract_mismatch",
+                "The execution-pinned Pod did not use the expected ephemeral volumes.",
+                {"volumes": volume_names},
+            )
+        foundation = self._foundation_evidence(target_id, secret_ref.get("name"))
+        return {
+            "podName": metadata.get("name"),
+            "podUid": metadata.get("uid"),
+            "phase": status.get("phase"),
+            "generation": labels.get("synara.io/generation"),
+            "image": container.get("image"),
+            "serviceAccountName": spec.get("serviceAccountName"),
+            "security": actual_security,
+            "volumes": volume_names,
+            "foundation": foundation,
+        }
+
+    def observe_terminal_execution(self, target_id: str, execution_id: str) -> Mapping[str, Any]:
+        while True:
+            pods = self._execution_pods(target_id, execution_id)
+            if not pods:
+                return {"podDeleted": True, "executionId": execution_id}
+            self.deadline.sleep(0.2)
+
+    def cleanup(self) -> None:
+        errors: list[str] = []
+
+        def collect(operation: str, action: Callable[[], Any]) -> None:
+            try:
+                action()
+            except Exception as error:
+                errors.append(f"{operation}: {self.redactor.text(str(error))}")
+
+        collect("stop Control Plane", self.stop)
+        if self.options.keep:
+            if self.target_id:
+                collect(
+                    "delete active execution Pods",
+                    lambda: self._kubectl_command(
+                        [
+                            "-n",
+                            self.target_namespace,
+                            "delete",
+                            "pods",
+                            "-l",
+                            f"synara.io/execution-target-id={self.target_id}",
+                            "--ignore-not-found",
+                            "--wait=false",
+                        ],
+                        cleanup_timeout=20.0,
+                    ),
+                )
+        elif self.owns_cluster and self.cluster_created:
+            collect(
+                "delete Kind cluster",
+                lambda: self._kind_command(
+                    ["delete", "cluster", "--name", self.cluster_name],
+                    cleanup_timeout=60.0,
+                ),
+            )
+            self.cluster_created = False
+        else:
+            collect("delete Kubernetes acceptance resources", self._delete_cluster_resources)
+        if self.owns_image and not self.options.keep:
+            collect(
+                "remove Kubernetes acceptance image",
+                lambda: self._docker_cleanup_image(),
+            )
+        collect("stop Worker-only proxy", self._stop_worker_proxy)
+        self.registration_token = ""
+        self.kubernetes_token = ""
+        collect("release isolated state", self._release_state)
+        if errors:
+            raise AcceptanceError(
+                "runner.kubernetes_cleanup_failed",
+                "Kubernetes acceptance resources could not be cleaned completely.",
+                {"errors": errors},
+            )
+
+    def _prepare_cluster(self) -> Mapping[str, Any]:
+        if self.owns_cluster:
+            if self.kubeconfig is None:
+                raise AcceptanceError("runner.kubernetes_kubeconfig_missing", "Owned Kind cluster omitted kubeconfig.")
+            self.kubeconfig.parent.mkdir(parents=True, exist_ok=True)
+            self._kind_command(
+                [
+                    "create",
+                    "cluster",
+                    "--name",
+                    self.cluster_name,
+                    "--image",
+                    self.options.kind_node_image,
+                    "--kubeconfig",
+                    str(self.kubeconfig),
+                    "--wait",
+                    "180s",
+                ],
+                log_path=self.logs_dir / "kubernetes-kind-create.log",
+                maximum_timeout=max(190.0, self.deadline.remaining()),
+            )
+            self.cluster_created = True
+        elif not self.context.startswith("kind-") and not self.options.kubernetes_allow_nondisposable:
+            raise AcceptanceError(
+                "runner.kubernetes_context_not_disposable",
+                "Reusing a non-Kind Kubernetes context requires --kubernetes-allow-nondisposable.",
+                {"context": self.context},
+            )
+        context_name = self._kubectl_command(["config", "get-contexts", self.context, "-o", "name"]).strip()
+        if context_name != self.context:
+            raise AcceptanceError(
+                "runner.kubernetes_context_missing",
+                "The configured Kubernetes context was not found.",
+                {"context": self.context},
+            )
+        version = json.loads(self._kubectl_command(["version", "-o", "json"]))
+        server = json_object(version.get("serverVersion"), "Kubernetes serverVersion")
+        return {
+            "context": self.context,
+            "ownedCluster": self.owns_cluster,
+            "clusterName": self.cluster_name if self.context.startswith("kind-") else None,
+            "serverVersion": server.get("gitVersion"),
+            "kubeconfig": str(self.kubeconfig) if self.kubeconfig is not None else "default",
+        }
+
+    def _prepare_cluster_access(self) -> Mapping[str, Any]:
+        manifest = {
+            "apiVersion": "v1",
+            "kind": "List",
+            "items": [
+                {
+                    "apiVersion": "v1",
+                    "kind": "Namespace",
+                    "metadata": {"name": self.bootstrap_namespace},
+                },
+                {
+                    "apiVersion": "v1",
+                    "kind": "ServiceAccount",
+                    "metadata": {
+                        "name": self.bootstrap_service_account,
+                        "namespace": self.bootstrap_namespace,
+                    },
+                },
+                {
+                    "apiVersion": "rbac.authorization.k8s.io/v1",
+                    "kind": "ClusterRole",
+                    "metadata": {"name": self.bootstrap_role},
+                    "rules": [
+                        {
+                            "apiGroups": [""],
+                            "resources": [
+                                "namespaces",
+                                "pods",
+                                "serviceaccounts",
+                                "secrets",
+                                "resourcequotas",
+                            ],
+                            "verbs": ["get", "list", "watch", "create", "update", "patch", "delete"],
+                        },
+                        {
+                            "apiGroups": ["networking.k8s.io"],
+                            "resources": ["networkpolicies"],
+                            "verbs": ["get", "list", "watch", "create", "update", "patch", "delete"],
+                        },
+                    ],
+                },
+                {
+                    "apiVersion": "rbac.authorization.k8s.io/v1",
+                    "kind": "ClusterRoleBinding",
+                    "metadata": {"name": self.bootstrap_role},
+                    "subjects": [
+                        {
+                            "kind": "ServiceAccount",
+                            "name": self.bootstrap_service_account,
+                            "namespace": self.bootstrap_namespace,
+                        }
+                    ],
+                    "roleRef": {
+                        "apiGroup": "rbac.authorization.k8s.io",
+                        "kind": "ClusterRole",
+                        "name": self.bootstrap_role,
+                    },
+                },
+            ],
+        }
+        self._kubectl_command(["apply", "-f", "-"], input_text=json.dumps(manifest))
+        completed = self._kubectl_completed(
+            [
+                "-n",
+                self.bootstrap_namespace,
+                "create",
+                "token",
+                self.bootstrap_service_account,
+                "--duration=1h",
+            ]
+        )
+        if completed.returncode != 0:
+            raise AcceptanceError(
+                "runner.kubernetes_token_failed",
+                "The disposable Kubernetes ServiceAccount token could not be created.",
+                {"outputExcerpt": self.redactor.text(completed.stdout)[-1000:]},
+            )
+        token = completed.stdout.strip()
+        if not token:
+            raise AcceptanceError("runner.kubernetes_token_failed", "Kubernetes returned an empty token.")
+        self.kubernetes_token = token
+        self.redactor.add(token, "[REDACTED_KUBERNETES_TOKEN]")
+        config = json.loads(
+            self._kubectl_command(["config", "view", "--raw", "--minify", "--context", self.context, "-o", "json"])
+        )
+        clusters = config.get("clusters")
+        if not isinstance(clusters, list) or len(clusters) != 1 or not isinstance(clusters[0], dict):
+            raise AcceptanceError("runner.kubernetes_config_invalid", "Kubernetes kubeconfig omitted the active cluster.")
+        cluster = json_object(clusters[0].get("cluster"), "Kubernetes cluster configuration")
+        api_server = cluster.get("server")
+        if not isinstance(api_server, str) or not api_server.startswith("https://"):
+            raise AcceptanceError("runner.kubernetes_config_invalid", "Kubernetes API server must use HTTPS.")
+        ca_data = cluster.get("certificate-authority-data")
+        if isinstance(ca_data, str) and ca_data:
+            try:
+                ca_certificate = base64.b64decode(ca_data, validate=True).decode("utf-8")
+            except (ValueError, UnicodeDecodeError) as error:
+                raise AcceptanceError(
+                    "runner.kubernetes_config_invalid",
+                    f"Kubernetes CA data could not be decoded: {error}",
+                ) from None
+        else:
+            ca_path = cluster.get("certificate-authority")
+            if not isinstance(ca_path, str) or not ca_path:
+                raise AcceptanceError("runner.kubernetes_config_invalid", "Kubernetes kubeconfig omitted its CA.")
+            ca_certificate = pathlib.Path(ca_path).expanduser().read_text(encoding="utf-8")
+        self.api_server = api_server.rstrip("/")
+        self.ca_certificate = ca_certificate
+        return {
+            "bootstrapNamespace": self.bootstrap_namespace,
+            "targetNamespace": self.target_namespace,
+            "apiServerHost": urllib.parse.urlparse(self.api_server).netloc,
+            "serviceAccount": self.bootstrap_service_account,
+            "rbacScope": "cluster-wide disposable acceptance role",
+        }
+
+    def _foundation_evidence(self, target_id: str, secret_name: Any) -> Mapping[str, Any]:
+        compact = target_id.replace("-", "")[:12]
+        expected_secret = f"synara-agentd-{compact}"
+        expected_quota = expected_secret
+        if secret_name != expected_secret:
+            raise AcceptanceError(
+                "runner.kubernetes_foundation_mismatch",
+                "The Pod did not reference the target-scoped registration Secret.",
+                {"expectedSecret": expected_secret, "actualSecret": secret_name},
+            )
+        resources = {
+            "serviceAccount": ("serviceaccount", self.worker_service_account),
+            "secret": ("secret", expected_secret),
+            "resourceQuota": ("resourcequota", expected_quota),
+            "networkPolicy": ("networkpolicy.networking.k8s.io", expected_quota),
+        }
+        evidence: dict[str, Any] = {}
+        for label, (resource, name) in resources.items():
+            actual = self._kubectl_command(
+                ["-n", self.target_namespace, "get", resource, name, "-o", "jsonpath={.metadata.name}"]
+            ).strip()
+            if actual != name:
+                raise AcceptanceError(
+                    "runner.kubernetes_foundation_mismatch",
+                    f"The Kubernetes Target foundation omitted {label}.",
+                    {"expected": name, "actual": actual},
+                )
+            evidence[label] = actual
+        return evidence
+
+    def _wait_execution_pod(self, target_id: str, execution_id: str) -> dict[str, Any]:
+        while True:
+            pods = self._execution_pods(target_id, execution_id)
+            running = [
+                pod
+                for pod in pods
+                if isinstance(pod.get("status"), dict) and pod["status"].get("phase") == "Running"
+            ]
+            if len(running) == 1:
+                return running[0]
+            if len(pods) > 1:
+                raise AcceptanceError(
+                    "runner.kubernetes_pod_count_invalid",
+                    "More than one execution-pinned Pod existed for one Execution.",
+                    {"targetId": target_id, "executionId": execution_id, "podCount": len(pods)},
+                )
+            self.deadline.sleep(0.2)
+
+    def _execution_pods(self, target_id: str, execution_id: str) -> list[dict[str, Any]]:
+        output = self._kubectl_command(
+            [
+                "-n",
+                self.target_namespace,
+                "get",
+                "pods",
+                "-l",
+                f"synara.io/execution-target-id={target_id},synara.io/execution-id={execution_id}",
+                "-o",
+                "json",
+            ]
+        )
+        payload = json.loads(output)
+        items = payload.get("items")
+        if not isinstance(items, list) or not all(isinstance(item, dict) for item in items):
+            raise AcceptanceError("runner.kubernetes_pods_invalid", "Kubernetes Pod list was invalid.")
+        return items
+
+    def _kubernetes_environment(self) -> dict[str, str]:
+        environment = self._tool_environment()
+        if self.kubeconfig is not None:
+            environment["KUBECONFIG"] = str(self.kubeconfig)
+        return environment
+
+    def _kubectl_completed(
+        self,
+        arguments: Sequence[str],
+        *,
+        input_text: str | None = None,
+        cleanup_timeout: float | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        timeout = cleanup_timeout or self.deadline.request_timeout(maximum=30.0)
+        try:
+            return subprocess.run(
+                ["kubectl", "--context", self.context, *arguments],
+                cwd=self.repo_root,
+                env=self._kubernetes_environment(),
+                input=input_text,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                timeout=timeout,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise AcceptanceError(
+                "runner.kubernetes_command_failed",
+                f"kubectl could not run: {self.redactor.text(str(error))}",
+                {"command": ["kubectl", *arguments[:3]]},
+            ) from None
+
+    def _kubectl_command(
+        self,
+        arguments: Sequence[str],
+        *,
+        input_text: str | None = None,
+        cleanup_timeout: float | None = None,
+    ) -> str:
+        completed = self._kubectl_completed(
+            arguments,
+            input_text=input_text,
+            cleanup_timeout=cleanup_timeout,
+        )
+        output = self.redactor.text(completed.stdout)
+        if completed.returncode != 0:
+            raise AcceptanceError(
+                "runner.kubernetes_command_failed",
+                f"kubectl exited with status {completed.returncode}.",
+                {
+                    "command": ["kubectl", *arguments[:3]],
+                    "exitCode": completed.returncode,
+                    "outputExcerpt": output[-1000:],
+                },
+            )
+        return output
+
+    def _kind_completed(
+        self,
+        arguments: Sequence[str],
+        *,
+        cleanup_timeout: float | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        timeout = cleanup_timeout or self.deadline.request_timeout(maximum=max(30.0, self.deadline.remaining()))
+        try:
+            return subprocess.run(
+                [self.options.kind_bin, *arguments],
+                cwd=self.repo_root,
+                env=self._kubernetes_environment(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                timeout=timeout,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise AcceptanceError(
+                "runner.kind_command_failed",
+                f"Kind could not run: {self.redactor.text(str(error))}",
+                {"command": [self.options.kind_bin, *arguments[:3]]},
+            ) from None
+
+    def _kind_command(
+        self,
+        arguments: Sequence[str],
+        *,
+        log_path: pathlib.Path | None = None,
+        maximum_timeout: float | None = None,
+        cleanup_timeout: float | None = None,
+    ) -> str:
+        completed = self._kind_completed(
+            arguments,
+            cleanup_timeout=cleanup_timeout or maximum_timeout,
+        )
+        output = self.redactor.text(completed.stdout)
+        if log_path is not None:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            log_path.write_text(output, encoding="utf-8")
+        if completed.returncode != 0:
+            raise AcceptanceError(
+                "runner.kind_command_failed",
+                f"Kind exited with status {completed.returncode}.",
+                {
+                    "command": [self.options.kind_bin, *arguments[:3]],
+                    "exitCode": completed.returncode,
+                    "log": str(log_path) if log_path else None,
+                    "outputExcerpt": output[-1000:],
+                },
+            )
+        return output
+
+    def _delete_cluster_resources(self) -> None:
+        self._kubectl_command(
+            [
+                "delete",
+                "namespace",
+                self.target_namespace,
+                self.bootstrap_namespace,
+                "--ignore-not-found",
+                "--wait=true",
+                "--timeout=30s",
+            ],
+            cleanup_timeout=40.0,
+        )
+        self._kubectl_command(
+            [
+                "delete",
+                "clusterrolebinding,clusterrole",
+                self.bootstrap_role,
+                "--ignore-not-found",
+            ],
+            cleanup_timeout=20.0,
+        )
+
+    def _docker_cleanup_image(self) -> None:
+        completed = self._docker_completed(["image", "rm", "-f", self.image], cleanup_timeout=30.0)
+        output = self.redactor.text(completed.stdout)
+        if completed.returncode != 0 and "no such image" not in output.lower():
+            raise AcceptanceError(
+                "runner.kubernetes_image_cleanup_failed",
+                "The Kubernetes acceptance image could not be removed.",
+                {"outputExcerpt": output[-1000:]},
+            )
+
+    def _control_plane_environment(self) -> dict[str, str]:
+        environment = super()._control_plane_environment()
+        environment["SYNARA_KUBERNETES_RECONCILE_INTERVAL"] = "250ms"
+        return environment
+
+
 class MissingTargetDriver:
     def __init__(self, name: str) -> None:
         self.name = name
         self.api: APIClient | None = None
+        self.lifecycle = STANDING_WORKER
 
     def prepare(self) -> Mapping[str, Any]:
         raise AcceptanceError(
@@ -1513,6 +2294,12 @@ class MissingTargetDriver:
         _target_id: str,
         _provider: str,
     ) -> Mapping[str, Any]:
+        return self.prepare()
+
+    def observe_execution(self, _target_id: str, _execution_id: str) -> Mapping[str, Any]:
+        return self.prepare()
+
+    def observe_terminal_execution(self, _target_id: str, _execution_id: str) -> Mapping[str, Any]:
         return self.prepare()
 
     def stop(self) -> None:
@@ -1558,31 +2345,62 @@ class AcceptanceSuite:
             self._dev_login,
             requires=("environment.control-plane-start",),
         )
-        self._case(
-            "runtime.worker-discovery",
-            "Provision the exact Target and discover a real compatible Worker manifest",
-            self._discover_worker,
-            requires=("identity.dev-login",),
-        )
-        self._case(
-            "resources.credential-project-session",
-            "Create bound Credential, empty Repository Project, and Session",
-            self._create_resources,
-            requires=("runtime.worker-discovery",),
-        )
-        scenario_requirement = ("resources.credential-project-session",)
-        self._case(
-            "fixture.text-tool-usage-artifact",
-            "Run text, tool, usage, Artifact, and Credential fixture flow",
-            self._text_tool_usage_artifact,
-            requires=scenario_requirement,
-        )
-        self._case(
-            "fixture.approval-resolution",
-            "Resolve Provider approval through the user API",
-            self._approval_resolution,
-            requires=("fixture.text-tool-usage-artifact",),
-        )
+        if self.driver.lifecycle.execution_pinned:
+            self._case(
+                "runtime.target-provision",
+                "Provision the exact execution-pinned Target",
+                self._provision_target,
+                requires=("identity.dev-login",),
+            )
+            self._case(
+                "resources.credential-project-session",
+                "Create bound Credential, empty Repository Project, and Session",
+                self._create_resources,
+                requires=("runtime.target-provision",),
+            )
+            self._case(
+                "runtime.worker-discovery",
+                "Start an Approval barrier and discover its execution-pinned compatible Worker manifest",
+                self._discover_worker,
+                requires=("resources.credential-project-session",),
+            )
+            self._case(
+                "fixture.approval-resolution",
+                "Resolve Provider approval through the user API",
+                self._approval_resolution,
+                requires=("runtime.worker-discovery",),
+            )
+            self._case(
+                "fixture.text-tool-usage-artifact",
+                "Run text, tool, usage, Artifact, and Credential fixture flow",
+                self._text_tool_usage_artifact,
+                requires=("fixture.approval-resolution",),
+            )
+        else:
+            self._case(
+                "runtime.worker-discovery",
+                "Provision the exact Target and discover a real compatible Worker manifest",
+                self._provision_standing_target_and_discover_worker,
+                requires=("identity.dev-login",),
+            )
+            self._case(
+                "resources.credential-project-session",
+                "Create bound Credential, empty Repository Project, and Session",
+                self._create_resources,
+                requires=("runtime.worker-discovery",),
+            )
+            self._case(
+                "fixture.text-tool-usage-artifact",
+                "Run text, tool, usage, Artifact, and Credential fixture flow",
+                self._text_tool_usage_artifact,
+                requires=("resources.credential-project-session",),
+            )
+            self._case(
+                "fixture.approval-resolution",
+                "Resolve Provider approval through the user API",
+                self._approval_resolution,
+                requires=("fixture.text-tool-usage-artifact",),
+            )
         self._case(
             "fixture.user-input-resolution",
             "Resolve Provider user input through the user API",
@@ -1596,7 +2414,7 @@ class AcceptanceSuite:
             requires=("fixture.user-input-resolution",),
         )
         recovery_requirement = "fixture.provider-error"
-        if self.driver.name == "docker":
+        if self.driver.lifecycle.managed_replacement:
             self._case(
                 "recovery.worker-replacement",
                 "Replace the managed Docker Worker and verify a new agentd incarnation",
@@ -1792,7 +2610,7 @@ class AcceptanceSuite:
             },
         }
 
-    def _discover_worker(self) -> Mapping[str, Any]:
+    def _provision_target(self) -> Mapping[str, Any]:
         tenant_id = self._required("tenant_id")
         organization_id = self._required("organization_id")
         target = json_object(
@@ -1810,13 +2628,26 @@ class AcceptanceSuite:
                 "The provisioned Target did not retain the requested kind and Organization scope.",
                 {"target": self._target_summary(target), "expectedOrganizationId": organization_id},
             )
-        discovered = self._wait_compatible_manifest(target_id)
         self.state.target_id = target_id
-        manifest = discovered["manifest"]
-        provider = discovered["provider"]
         return {
             "target": self._target_summary(target),
             "driverEvidence": target.get("driverEvidence"),
+        }
+
+    def _provision_standing_target_and_discover_worker(self) -> Mapping[str, Any]:
+        target = self._provision_target()
+        discovered = self._discover_worker()
+        return {**target, **discovered}
+
+    def _discover_worker(self) -> Mapping[str, Any]:
+        target_id = self._required("target_id")
+        readiness_barrier: Mapping[str, Any] | None = None
+        if self.driver.lifecycle.execution_pinned:
+            readiness_barrier = self._begin_approval_readiness_barrier()
+        discovered = self._wait_compatible_manifest(target_id)
+        manifest = discovered["manifest"]
+        provider = discovered["provider"]
+        evidence: dict[str, Any] = {
             "manifestId": manifest.get("manifestId"),
             "workerStatusCounts": manifest.get("workerStatusCounts"),
             "workerProtocol": manifest.get("workerProtocol"),
@@ -1829,6 +2660,42 @@ class AcceptanceSuite:
                 "runtime": provider.get("runtime"),
                 "releasePolicy": provider.get("releasePolicy"),
             },
+        }
+        if readiness_barrier is not None:
+            evidence["readinessBarrier"] = dict(readiness_barrier)
+            execution_id = readiness_barrier.get("executionId")
+            if isinstance(execution_id, str) and execution_id:
+                target_evidence = self.driver.observe_execution(target_id, execution_id)
+                if target_evidence:
+                    evidence["targetExecution"] = dict(target_evidence)
+        return evidence
+
+    def _begin_approval_readiness_barrier(self) -> Mapping[str, Any]:
+        if self.state.pending_approval is not None:
+            raise AcceptanceError(
+                "runner.approval_barrier_already_started",
+                "The execution-pinned Approval readiness barrier was already started.",
+            )
+        turn = self._create_turn("[approval]")
+        turn_id = turn.get("id")
+        if not isinstance(turn_id, str) or not turn_id:
+            raise AcceptanceError("runner.turn_id_missing", "Approval readiness Turn did not return an ID.")
+        interaction = self._wait_for_interaction(turn_id, "approval")
+        execution_id = interaction.get("executionId")
+        request_id = interaction.get("requestId")
+        if not isinstance(execution_id, str) or not execution_id or not isinstance(request_id, str) or not request_id:
+            raise AcceptanceError(
+                "runner.approval_barrier_invalid",
+                "The execution-pinned Approval readiness barrier omitted its Execution or Request ID.",
+                {"turnId": turn_id, "interactionId": interaction.get("id")},
+            )
+        self.state.pending_approval = {"turn": turn, "interaction": interaction}
+        return {
+            "kind": "approval",
+            "turnId": turn_id,
+            "executionId": execution_id,
+            "requestId": request_id,
+            "interactionId": interaction.get("id"),
         }
 
     def _wait_compatible_manifest(self, target_id: str) -> dict[str, Any]:
@@ -2073,10 +2940,22 @@ class AcceptanceSuite:
         }
 
     def _approval_resolution(self) -> Mapping[str, Any]:
-        turn = self._create_turn("[approval]")
-        interaction = self._wait_for_interaction(str(turn["id"]), "approval")
-        execution_id = str(interaction["executionId"])
-        request_id = str(interaction["requestId"])
+        pending = self.state.pending_approval
+        if pending is None:
+            turn = self._create_turn("[approval]")
+            interaction = self._wait_for_interaction(str(turn["id"]), "approval")
+        else:
+            turn = json_object(pending.get("turn"), "pending approval turn")
+            interaction = json_object(pending.get("interaction"), "pending approval interaction")
+            self.state.pending_approval = None
+        execution_id = interaction.get("executionId")
+        request_id = interaction.get("requestId")
+        if not isinstance(execution_id, str) or not execution_id or not isinstance(request_id, str) or not request_id:
+            raise AcceptanceError(
+                "runner.approval_interaction_invalid",
+                "The Approval interaction omitted its Execution or Request ID.",
+                {"turnId": turn.get("id"), "interactionId": interaction.get("id")},
+            )
         resolved = json_object(
             self.api.request(
                 "POST",
@@ -2092,6 +2971,10 @@ class AcceptanceSuite:
                 "Approval completed without a request.resolved event.",
                 {"eventTypes": [event.get("eventType") for event in events]},
             )
+        target_evidence = self.driver.observe_terminal_execution(
+            self._required("target_id"),
+            execution_id,
+        )
         return {
             "turnId": turn.get("id"),
             "executionId": terminal.get("executionId"),
@@ -2100,6 +2983,7 @@ class AcceptanceSuite:
             "resolutionStatus": resolved.get("status"),
             "deliveryStatus": resolved.get("deliveryStatus"),
             "sequenceRange": self._sequence_range(events),
+            "targetTerminal": dict(target_evidence) if target_evidence else None,
         }
 
     def _user_input_resolution(self) -> Mapping[str, Any]:
@@ -2160,7 +3044,7 @@ class AcceptanceSuite:
         if not isinstance(replacement_worker_id, str) or not replacement_worker_id:
             raise AcceptanceError(
                 "runner.replacement_worker_id_missing",
-                "Docker replacement evidence omitted the replacement Worker ID.",
+                "Managed replacement evidence omitted the replacement Worker ID.",
             )
         discovered = self._wait_compatible_manifest(target_id)
         self.state.worker_replaced = True
@@ -2212,8 +3096,26 @@ class AcceptanceSuite:
         self.state.pre_restart_sequence = int(events[-1]["sequence"])
         restarted = self.driver.restart()
         self.state.restarted = True
-        tenant_id = self._required("tenant_id")
         target_id = self._required("target_id")
+        result: dict[str, Any] = {
+            **restarted,
+            "preRestartSequence": self.state.pre_restart_sequence,
+        }
+        if self.driver.lifecycle.execution_pinned:
+            result["workerAllocation"] = self.driver.lifecycle.worker_allocation
+            result["postRestartWorkerExpectation"] = "deferred-until-next-execution"
+            return result
+        manifest = self._wait_post_restart_online_worker(target_id)
+        result.update(
+            {
+                "postRestartManifestId": manifest.get("manifestId"),
+                "workerStatusCounts": manifest.get("workerStatusCounts"),
+            }
+        )
+        return result
+
+    def _wait_post_restart_online_worker(self, target_id: str) -> dict[str, Any]:
+        tenant_id = self._required("tenant_id")
 
         def worker_probe() -> dict[str, Any] | None:
             manifests = json_items(
@@ -2231,13 +3133,7 @@ class AcceptanceSuite:
                     return manifest
             return None
 
-        manifest = self.api.wait_until("a post-restart online Worker", worker_probe)
-        return {
-            **restarted,
-            "preRestartSequence": self.state.pre_restart_sequence,
-            "postRestartManifestId": manifest.get("manifestId"),
-            "workerStatusCounts": manifest.get("workerStatusCounts"),
-        }
+        return self.api.wait_until("a post-restart online Worker", worker_probe)
 
     def _second_turn_continuity(self) -> Mapping[str, Any]:
         before = self.state.pre_restart_sequence
@@ -2268,7 +3164,11 @@ class AcceptanceSuite:
             "workerId": worker_id,
             "preRestartWorkerId": self.state.first_worker_id,
             "workerIdChangedAfterRestart": worker_id != self.state.first_worker_id,
-            "workerIdSemantics": "stable registration slot; a restarted agentd registration may reuse the Worker ID",
+            "workerIdSemantics": (
+                "execution-pinned registration; each Execution may use a different Worker ID"
+                if self.driver.lifecycle.execution_pinned
+                else "stable registration slot; a restarted agentd registration may reuse the Worker ID"
+            ),
             "generation": generation,
             "firstGeneration": self.state.first_generation,
             "generationScope": "per-execution",
@@ -2579,7 +3479,11 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
     parser.add_argument("--target", default="local", choices=("local", "docker", "ssh", "kubernetes"))
     parser.add_argument("--provider", default="codex", choices=PROVIDERS)
     parser.add_argument("--output-dir", type=pathlib.Path)
-    parser.add_argument("--timeout", type=float, help="Overall timeout in seconds (default: Local 180, Docker 900)")
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        help="Overall timeout in seconds (default: Local/SSH 180, Docker 900, Kubernetes 1200)",
+    )
     parser.add_argument("--runner-command-json", help="Provider Host command as a JSON string array")
     parser.add_argument("--skip-build", action="store_true")
     parser.add_argument("--control-plane-binary", type=pathlib.Path)
@@ -2591,13 +3495,26 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
     parser.add_argument("--docker-network-mode", help="Existing Docker network; the runner creates an isolated network by default")
     parser.add_argument("--docker-memory-bytes", type=int, default=2 << 30)
     parser.add_argument("--docker-nano-cpus", type=int, default=1_000_000_000)
+    parser.add_argument("--kubernetes-context", help="Explicit reusable Kubernetes context; defaults to an owned Kind cluster")
+    parser.add_argument("--kubernetes-kubeconfig", type=pathlib.Path)
+    parser.add_argument("--kubernetes-allow-nondisposable", action="store_true")
+    parser.add_argument(
+        "--kubernetes-worker-image",
+        help="Existing worker-acceptance image used with --kubernetes-skip-worker-build",
+    )
+    parser.add_argument("--kubernetes-skip-worker-build", action="store_true")
+    parser.add_argument("--kubernetes-control-plane-host", default="host.docker.internal")
+    parser.add_argument("--kind-bin", default="kind")
+    parser.add_argument("--kind-cluster-name")
+    parser.add_argument("--kind-node-image", default="kindest/node:v1.33.1")
     parser.add_argument(
         "--no-restart-control-plane",
         action="store_true",
         help="Run the second Turn without restarting the Control Plane",
     )
     parsed = parser.parse_args(argv)
-    timeout_seconds = parsed.timeout if parsed.timeout is not None else (900.0 if parsed.target == "docker" else 180.0)
+    default_timeout = 1200.0 if parsed.target == "kubernetes" else 900.0 if parsed.target == "docker" else 180.0
+    timeout_seconds = parsed.timeout if parsed.timeout is not None else default_timeout
     if timeout_seconds <= 0:
         parser.error("--timeout must be positive")
     if parsed.control_plane_binary is not None and not parsed.skip_build:
@@ -2608,6 +3525,16 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
         parser.error("--docker-skip-worker-build requires --docker-worker-image")
     if parsed.docker_worker_image and not parsed.docker_skip_worker_build:
         parser.error("--docker-worker-image requires --docker-skip-worker-build to avoid overwriting an operator image")
+    if parsed.kubernetes_skip_worker_build and not parsed.kubernetes_worker_image:
+        parser.error("--kubernetes-skip-worker-build requires --kubernetes-worker-image")
+    if parsed.kubernetes_worker_image and not parsed.kubernetes_skip_worker_build:
+        parser.error(
+            "--kubernetes-worker-image requires --kubernetes-skip-worker-build to avoid overwriting an operator image"
+        )
+    if parsed.kubernetes_kubeconfig is not None and not parsed.kubernetes_context:
+        parser.error("--kubernetes-kubeconfig requires --kubernetes-context")
+    if parsed.kind_cluster_name and parsed.kubernetes_context:
+        parser.error("--kind-cluster-name cannot be combined with --kubernetes-context")
     if parsed.docker_memory_bytes < 64 << 20:
         parser.error("--docker-memory-bytes must be at least 67108864")
     if parsed.docker_nano_cpus <= 0:
@@ -2619,12 +3546,33 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
         character in parsed.docker_control_plane_host for character in "\r\n\t\x00/:"
     ):
         parser.error("--docker-control-plane-host must be a hostname or address without scheme or port")
+    if not parsed.kubernetes_control_plane_host.strip() or any(
+        character in parsed.kubernetes_control_plane_host for character in "\r\n\t\x00/:"
+    ):
+        parser.error("--kubernetes-control-plane-host must be a hostname or address without scheme or port")
+    if not parsed.kind_bin.strip() or any(character in parsed.kind_bin for character in "\r\n\t\x00"):
+        parser.error("--kind-bin must be a command or executable path")
+    if not parsed.kind_node_image.strip() or any(character in parsed.kind_node_image for character in "\r\n\t\x00"):
+        parser.error("--kind-node-image must be a non-empty image reference")
+    kubernetes_context = parsed.kubernetes_context.strip() if parsed.kubernetes_context else None
+    if kubernetes_context is not None and any(character in kubernetes_context for character in "\r\n\t\x00"):
+        parser.error("--kubernetes-context contains invalid characters")
+    kind_cluster_name = parsed.kind_cluster_name.strip() if parsed.kind_cluster_name else None
+    if kind_cluster_name is not None and (
+        not kind_cluster_name
+        or len(kind_cluster_name) > 63
+        or kind_cluster_name[0] == "-"
+        or kind_cluster_name[-1] == "-"
+        or any(character not in "abcdefghijklmnopqrstuvwxyz0123456789-" for character in kind_cluster_name)
+    ):
+        parser.error("--kind-cluster-name must be a lowercase DNS label")
     try:
         runner_command = parse_runner_command(parsed.runner_command_json, repo_root, parsed.target)
     except ValueError as error:
         parser.error(str(error))
     run_id = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:8]
     output_dir = parsed.output_dir or repo_root / ".tmp" / "stage3-provider-acceptance-results" / run_id
+    kubernetes_kubeconfig = parsed.kubernetes_kubeconfig.expanduser().resolve() if parsed.kubernetes_kubeconfig else None
     return RunnerOptions(
         target=parsed.target,
         provider=parsed.provider,
@@ -2642,6 +3590,15 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
         docker_network_mode=parsed.docker_network_mode,
         docker_memory_bytes=parsed.docker_memory_bytes,
         docker_nano_cpus=parsed.docker_nano_cpus,
+        kubernetes_context=kubernetes_context,
+        kubernetes_kubeconfig=kubernetes_kubeconfig,
+        kubernetes_allow_nondisposable=parsed.kubernetes_allow_nondisposable,
+        kubernetes_worker_image=parsed.kubernetes_worker_image,
+        kubernetes_skip_worker_build=parsed.kubernetes_skip_worker_build,
+        kubernetes_control_plane_host=parsed.kubernetes_control_plane_host.strip(),
+        kind_bin=parsed.kind_bin.strip(),
+        kind_cluster_name=kind_cluster_name,
+        kind_node_image=parsed.kind_node_image.strip(),
     )
 
 
@@ -2654,7 +3611,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     started_at = utc_now()
     started = time.monotonic()
     run_id = f"stage3-provider-acceptance-{uuid.uuid4()}"
-    if options.target in {"local", "docker"} and os.name != "posix":
+    if options.target in {"local", "docker", "kubernetes"} and os.name != "posix":
         cases = [
             explicit_unsupported_case(
                 "environment.platform-unsupported",
@@ -2676,12 +3633,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 {"fixtureSupportedProviders": sorted(FIXTURE_SUPPORTED_PROVIDERS)},
             )
         ]
-    elif options.target in {"local", "docker"}:
-        driver: LocalDriver = (
-            LocalDriver(repo_root, options, deadline, redactor)
-            if options.target == "local"
-            else DockerDriver(repo_root, options, deadline, redactor)
-        )
+    elif options.target in {"local", "docker", "kubernetes"}:
+        if options.target == "local":
+            driver: LocalDriver = LocalDriver(repo_root, options, deadline, redactor)
+        elif options.target == "docker":
+            driver = DockerDriver(repo_root, options, deadline, redactor)
+        else:
+            driver = KubernetesDriver(repo_root, options, deadline, redactor)
         suite = AcceptanceSuite(options, driver, deadline, redactor)
         driver.install_signal_handlers()
         try:
@@ -2736,6 +3694,19 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "nanoCpus": options.docker_nano_cpus,
             }
             if options.target == "docker"
+            else None,
+            "kubernetes": {
+                "context": options.kubernetes_context or "owned-kind-cluster",
+                "kubeconfig": str(options.kubernetes_kubeconfig) if options.kubernetes_kubeconfig else None,
+                "allowNondisposable": options.kubernetes_allow_nondisposable,
+                "workerImage": options.kubernetes_worker_image,
+                "skipWorkerBuild": options.kubernetes_skip_worker_build,
+                "controlPlaneHost": options.kubernetes_control_plane_host,
+                "kindBinary": options.kind_bin,
+                "kindClusterName": options.kind_cluster_name,
+                "kindNodeImage": options.kind_node_image,
+            }
+            if options.target == "kubernetes"
             else None,
         },
         "cases": cases,

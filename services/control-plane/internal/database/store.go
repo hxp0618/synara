@@ -88,6 +88,40 @@ func (s *store) Migrate(ctx context.Context, files fs.FS) error {
 	if err := s.db.WithContext(ctx).AutoMigrate(persistence.AllModels()...); err != nil {
 		return fmt.Errorf("auto-migrate sqlite metadata schema: %w", err)
 	}
+	if err := migrateSQLiteSafety(ctx, s.db); err != nil {
+		return err
+	}
+	return nil
+}
+
+func migrateSQLiteSafety(ctx context.Context, db *gorm.DB) error {
+	statements := []string{
+		`UPDATE agent_sessions
+		 SET provider_resume_cursor_encrypted = NULL,
+		     provider_resume_cursor_state = 'absent',
+		     provider_resume_cursor_source_execution_id = NULL,
+		     provider_resume_cursor_source_generation = NULL,
+		     provider_resume_cursor_history_sequence = NULL
+		 WHERE provider_resume_cursor_encrypted IS NULL
+		    OR length(provider_resume_cursor_encrypted) = 0`,
+		`UPDATE agent_sessions
+		 SET provider_resume_cursor_state = 'quarantined',
+		     provider_resume_cursor_source_execution_id = NULL,
+		     provider_resume_cursor_source_generation = NULL,
+		     provider_resume_cursor_history_sequence = NULL
+		 WHERE length(provider_resume_cursor_encrypted) > 0
+		   AND (provider_resume_cursor_state IS NULL
+		     OR provider_resume_cursor_state = ''
+		     OR provider_resume_cursor_state = 'absent')`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_agent_executions_session_active
+		 ON agent_executions (tenant_id, session_id)
+		 WHERE status IN ('queued', 'leased', 'running', 'waiting-for-approval', 'recovering')`,
+	}
+	for _, statement := range statements {
+		if err := db.WithContext(ctx).Exec(statement).Error; err != nil {
+			return fmt.Errorf("apply sqlite metadata safety migration: %w", err)
+		}
+	}
 	return nil
 }
 

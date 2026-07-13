@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd "$script_dir/../.." && pwd)"
 base_url="${1:-http://127.0.0.1:3773}"
 worker_protocol_version=2
 run_id="$(date +%s)-$$"
@@ -70,6 +72,8 @@ session_id="$(jq -er '.id' <<<"$agent_session")"
 execution_target_id="$(jq -er '.executionTargetId' <<<"$agent_session")"
 execution_target="$(request_json "$owner_cookie" GET "/v1/tenants/$tenant_id/execution-targets/$execution_target_id")"
 target_kind="$(jq -er '.kind' <<<"$execution_target")"
+worker_capabilities="$(python3 "$repo_root/scripts/stage3-provider-acceptance/worker_manifest.py" \
+  --target-capabilities-json "$(jq -c '.capabilities' <<<"$execution_target")")"
 jq -e '.lastEventSequence == 1 and .status == "active"' <<<"$agent_session" >/dev/null
 
 curl -sS -N --max-time 10 -b "$owner_cookie" \
@@ -84,42 +88,31 @@ grep -q '^retry: 2000' "$work_dir/events.sse"
 
 request_json "$owner_cookie" POST "/v1/sessions/$session_id/turns" \
   '{"inputText":"First acceptance turn"}' >/dev/null
-request_json "$owner_cookie" POST "/v1/sessions/$session_id/turns" \
-  '{"inputText":"Second acceptance turn"}' >/dev/null
 
 for _ in {1..50}; do
-  grep -q '^id: 3$' "$work_dir/events.sse" && break
+  grep -q '^id: 2$' "$work_dir/events.sse" && break
   sleep 0.1
 done
 grep -q '^id: 2$' "$work_dir/events.sse"
-grep -q '^id: 3$' "$work_dir/events.sse"
 grep -q '^event: session-event$' "$work_dir/events.sse"
 kill "$sse_pid" >/dev/null 2>&1 || true
 wait "$sse_pid" >/dev/null 2>&1 || true
 sse_pid=""
 
-curl -sS -N --max-time 1 -b "$owner_cookie" -H 'Last-Event-ID: 2' \
-  "$base_url/v1/sessions/$session_id/events/stream" >"$work_dir/reconnected-events.sse" 2>/dev/null || true
-grep -q '^id: 3$' "$work_dir/reconnected-events.sse"
-if grep -q '^id: 2$' "$work_dir/reconnected-events.sse"; then
-  printf 'SSE reconnect replayed an already acknowledged event\n' >&2
-  exit 1
-fi
-
 events="$(request_json "$owner_cookie" GET "/v1/sessions/$session_id/events?afterSequence=1&limit=10")"
-jq -e '.lastSequence == 3 and (.items | map(.sequence) == [2, 3])' <<<"$events" >/dev/null
+jq -e '.lastSequence == 2 and (.items | map(.sequence) == [2])' <<<"$events" >/dev/null
 jq -e '.items | all(.tenantId != null and .organizationId != null and .projectId != null)' \
   <<<"$events" >/dev/null
 
 worker_registration_token="${SYNARA_ACCEPTANCE_WORKER_REGISTRATION_TOKEN:-acceptance-worker-registration-token}"
 worker_instance_uid="$(new_uuid)"
 worker_registration="$(worker_json "$worker_registration_token" "register-$run_id" POST /v1/workers/register \
-  "{\"executionTargetId\":\"$execution_target_id\",\"targetKind\":\"$target_kind\",\"instanceUid\":\"$worker_instance_uid\",\"clusterId\":\"acceptance\",\"namespace\":\"default\",\"podName\":\"worker-$run_id\",\"version\":\"acceptance\",\"protocolVersion\":$worker_protocol_version,\"capabilities\":{\"codex\":true},\"leaseSupported\":true,\"fencingSupported\":true}")"
+  "{\"executionTargetId\":\"$execution_target_id\",\"targetKind\":\"$target_kind\",\"instanceUid\":\"$worker_instance_uid\",\"clusterId\":\"acceptance\",\"namespace\":\"default\",\"podName\":\"worker-$run_id\",\"version\":\"acceptance\",\"protocolVersion\":$worker_protocol_version,\"capabilities\":$worker_capabilities,\"leaseSupported\":true,\"fencingSupported\":true}")"
 worker_token="$(jq -er '.token' <<<"$worker_registration")"
 worker_id="$(jq -er '.worker.id' <<<"$worker_registration")"
 
 worker_json "$worker_token" "heartbeat-$run_id" POST /v1/workers/heartbeat \
-  "{\"version\":\"acceptance\",\"protocolVersion\":$worker_protocol_version,\"capabilities\":{\"codex\":true}}" >/dev/null
+  "{\"version\":\"acceptance\",\"protocolVersion\":$worker_protocol_version,\"capabilities\":$worker_capabilities}" >/dev/null
 
 first_claim="$(worker_json "$worker_token" "claim-first-$run_id" POST /v1/workers/executions/claim \
   "{\"executionTargetId\":\"$execution_target_id\",\"targetKind\":\"$target_kind\"}")"
@@ -154,6 +147,20 @@ worker_json "$worker_token" "workspace-ready-recovery-$run_id" POST \
 worker_json "$worker_token" "complete-first-$run_id" POST "/v1/workers/executions/$recovery_execution_id/complete" \
   "{\"tenantId\":\"$tenant_id\",\"generation\":$recovery_generation,\"leaseToken\":\"$recovery_lease_token\",\"output\":{\"summary\":\"done\"}}" >/dev/null
 
+curl -sS -N --max-time 1 -b "$owner_cookie" -H 'Last-Event-ID: 2' \
+  "$base_url/v1/sessions/$session_id/events/stream" >"$work_dir/reconnected-events.sse" 2>/dev/null || true
+grep -q '^id: 3$' "$work_dir/reconnected-events.sse"
+grep -q '^id: 9$' "$work_dir/reconnected-events.sse"
+if grep -q '^id: 2$' "$work_dir/reconnected-events.sse"; then
+  printf 'SSE reconnect replayed an already acknowledged event\n' >&2
+  exit 1
+fi
+
+# A Session may only have one nonterminal Execution. The first Turn has completed,
+# so this independent Turn is now legal and can be claimed separately.
+request_json "$owner_cookie" POST "/v1/sessions/$session_id/turns" \
+  '{"inputText":"Second acceptance turn"}' >/dev/null
+
 second_claim="$(worker_json "$worker_token" "claim-second-$run_id" POST /v1/workers/executions/claim \
   "{\"executionTargetId\":\"$execution_target_id\",\"targetKind\":\"$target_kind\"}")"
 second_execution_id="$(jq -er '.execution.id' <<<"$second_claim")"
@@ -164,8 +171,10 @@ jq -e --arg session_id "$session_id" '.execution.sessionId == $session_id and .e
 worker_json "$worker_token" "fail-second-$run_id" POST "/v1/workers/executions/$second_execution_id/fail" \
   "{\"tenantId\":\"$tenant_id\",\"generation\":$second_generation,\"leaseToken\":\"$second_lease_token\",\"failureCode\":\"acceptance_failure\",\"failureMessage\":\"Expected acceptance failure\"}" >/dev/null
 
-runtime_events="$(request_json "$owner_cookie" GET "/v1/sessions/$session_id/events?afterSequence=3&limit=20")"
-jq -e '.lastSequence == 12 and (.items | map(.eventType) == ["execution.leased", "execution.started", "runtime.output.delta", "execution.recovering", "execution.leased", "workspace.ready", "execution.completed", "execution.leased", "execution.failed"])' \
+runtime_events="$(request_json "$owner_cookie" GET "/v1/sessions/$session_id/events?afterSequence=2&limit=20")"
+jq -e '.lastSequence == 12 and
+  (.items | map(.sequence) == [3, 4, 5, 6, 7, 8, 9, 10, 11, 12]) and
+  (.items | map(.eventType) == ["execution.leased", "execution.started", "runtime.output.delta", "execution.recovering", "execution.leased", "workspace.ready", "execution.completed", "turn.created", "execution.leased", "execution.failed"])' \
   <<<"$runtime_events" >/dev/null
 
 artifact_payload="$work_dir/acceptance-artifact.txt"

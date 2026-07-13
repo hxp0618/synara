@@ -30,7 +30,7 @@ func (s *Service) ArchiveByRetention(
 		Where("tenant_id = ? AND status = ? AND updated_at <= ?", tenantID, "active", cutoff).
 		Where("NOT EXISTS (?)", s.db.Model(&persistence.AgentExecution{}).
 			Select("1").Where("agent_executions.tenant_id = agent_sessions.tenant_id AND agent_executions.session_id = agent_sessions.id AND agent_executions.status IN ?",
-			[]string{"queued", "leased", "running", "waiting-for-approval", "recovering"})).
+			activeSessionExecutionStatuses)).
 		Order("updated_at, id").Limit(limit).Scan(&candidates).Error
 	if err != nil {
 		return 0, problem.Wrap(500, "retention_sessions_load_failed", "Retention could not load eligible Agent Sessions.", err)
@@ -53,7 +53,7 @@ func (s *Service) ArchiveByRetention(
 			var activeExecutions int64
 			if err := tx.WithContext(ctx).Model(&persistence.AgentExecution{}).
 				Where("tenant_id = ? AND session_id = ? AND status IN ?", tenantID, sessionID,
-					[]string{"queued", "leased", "running", "waiting-for-approval", "recovering"}).
+					activeSessionExecutionStatuses).
 				Count(&activeExecutions).Error; err != nil {
 				return err
 			}

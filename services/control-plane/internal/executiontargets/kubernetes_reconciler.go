@@ -261,7 +261,11 @@ func (r *KubernetesReconciler) reconcileTarget(ctx context.Context, target persi
 		}
 		existing[pod.Name] = pod
 	}
-	scheduled := len(existing)
+	// A Pod accepted for deletion still consumes ResourceQuota until Kubernetes
+	// finishes its grace period. Count deletion-pending Pods against the target
+	// capacity so reconciliation does not create a replacement that the API
+	// server must reject with an exceeded-quota error.
+	scheduled := len(existing) + deleted
 	for _, execution := range executions {
 		if execution.Status != "queued" && execution.Status != "recovering" {
 			continue
