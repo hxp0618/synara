@@ -39,6 +39,14 @@ materializes the stable Session checkout and reports either `workspace.ready` wi
 branch, base commit and HEAD, or `workspace.failed` with a safe stable error. Both reports require the current
 Worker ID, Lease Token and Generation. Provider execution cannot begin from an unreported managed Workspace.
 
+Materialization uses separate configured Workspace and Git cache roots. The cache is keyed by Execution Target,
+Tenant, Project and repository fingerprint, protected by a cross-process lock and network-Fetched on every Turn.
+The mutable Workspace owns a private bare repository plus relative linked worktree; it cannot use the cache as its
+Git common directory or object alternate. Agentd holds the Workspace lock until the Provider process has left its
+managed process scope, final inspection and Checkpoint work have finished, and the terminal Execution
+request has been attempted. A cancelled or failed Runner must terminate managed descendants before that lock can
+be released.
+
 When `gitCredentialId` is present, agentd resolves it through the dedicated execution-scoped
 `/git-credentials/{credentialID}/resolve` Worker endpoint. The request is fenced by Worker ID, Lease Token and
 Generation. Control Plane additionally verifies the Project still owns that binding and the Credential host
@@ -107,8 +115,8 @@ Lease has expired or the Generation is fenced and is replayed as `approval.resol
 
 The current Worker/Generation pulls resolved commands from the execution-scoped resolution endpoint. A
 delivery carries the persisted `interactionId`, stable `commandId`, `ResolveApproval` or `ResolveUserInput`
-command type, and the validated resolution payload. The Worker marks the command `delivered` only after it is
-written to the Provider Host channel and marks it `acknowledged` only after the Host returns a correlated
+command type, and the validated resolution payload. The Worker marks the command `delivered` before writing it
+to the Provider Host channel and marks it `acknowledged` only after the Host returns a correlated
 terminal message. Both transitions are idempotent. `delivered` commands remain pullable until acknowledged so
 an agentd restart can replay the stable command ID without duplicating the Provider action. A stale Worker or
 Generation is permanently fenced from pull, delivery, and acknowledgement.
@@ -143,6 +151,10 @@ On SIGINT/SIGTERM, agentd sends an immediate Heartbeat with `draining=true`, sto
 continues Heartbeat plus Lease renewal for the active Execution. If the Runner reaches a normal terminal result
 before `SYNARA_AGENTD_DRAIN_TIMEOUT`, agentd reports Complete/Fail normally. At the deadline it cancels the
 Provider Runner and explicitly releases the Lease; it never reports a forced shutdown as successful completion.
+
+Runner cancellation and Provider Host abort apply to the isolated Unix process group or Windows Job Object, not
+only the direct child. Deliberate Unix process-group escape remains a process-sandbox release gate; support claims
+must not treat the current group boundary as containment of an adversarial detached descendant.
 
 Managed SSH, Docker and Kubernetes Workers use a 20-second Drain deadline inside a 30-second process/container
 termination window. The embedded Local Worker drains before the Control Plane HTTP server shuts down, so its

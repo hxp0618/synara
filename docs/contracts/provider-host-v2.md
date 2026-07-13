@@ -42,6 +42,12 @@ terminal, malformed JSONL or an oversized line is a `protocol_violation`.
 Provider diagnostics use stderr, are bounded and redacted, and are never parsed by Control Plane. Large logs,
 files, Diffs and snapshots use Artifact references.
 
+Agentd owns the Host process and its managed process scope. Windows starts the Host suspended, assigns it to a
+kill-on-close Job Object, then resumes it. Unix starts an isolated process group and terminates descendants that
+remain in that group on normal exit, protocol failure, cancellation or Drain. Deliberately detached Unix
+descendants are not yet a supported containment boundary; closing that escape requires the remaining Stage 3
+process-sandbox gate and must not be represented as complete process-tree isolation.
+
 ## Bidirectional command execution
 
 The Host keeps reading stdin while `SendTurn` is active. Agentd multiplexes stdout by `commandId`, so a live

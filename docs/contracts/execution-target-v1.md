@@ -84,7 +84,7 @@ POST /v1/tenants/{tenantId}/execution-targets/{targetId}/ssh/revoke
 
 The encrypted SSH configuration requires `host`, `user`, `privateKey`, pinned OpenSSH `hostKey`,
 `controlPlaneUrl` (or the server-wide public URL), and `runnerCommand`. Optional fields include
-`port`, `privateKeyPassphrase`, `workspaceRoot`, `installRoot`, `serviceUser`, and `useSudo`.
+`port`, `privateKeyPassphrase`, `workspaceRoot`, `gitCacheRoot`, `installRoot`, `serviceUser`, and `useSudo`.
 Plain HTTP control-plane URLs are rejected unless `allowInsecureControlPlane` is explicitly true.
 
 Provisioning uploads `synara-agentd`, a root-readable EnvironmentFile, and a target-specific systemd
@@ -92,12 +92,15 @@ unit through the verified SSH connection. It never places SSH keys or Worker reg
 remote command arguments, browser responses, logs, or Audit metadata. Install/upgrade temporarily mark
 the target offline and activate it only after systemd restart succeeds. Revoke stops and disables the
 unit, removes binary/configuration files, preserves the workspace, and marks the target disabled.
+The default roots are `/var/lib/synara/targets/<target>/workspaces` and
+`/var/lib/synara/targets/<target>/git-cache`. Provisioning creates and assigns both roots to the service user;
+they must be separate absolute paths.
 
 ## Managed Docker Worker Pool
 
 The control plane reconciles every non-disabled Docker target through the Docker Engine Unix socket.
 Encrypted configuration supports `image`, `runnerCommand`, `desiredWorkers`, `pullPolicy`,
-`controlPlaneUrl`, `workspaceVolume`, `workspaceMount`, `workspaceRoot`, `networkMode`, `user`,
+`controlPlaneUrl`, `workspaceVolume`, `workspaceMount`, `workspaceRoot`, `gitCacheRoot`, `networkMode`, `user`,
 `memoryBytes`, and `nanoCpus`. HTTP control-plane URLs require explicit
 `allowInsecureControlPlane=true`.
 
@@ -106,6 +109,9 @@ and a configuration digest. They override the image entrypoint with
 `/usr/local/bin/synara-agentd`, mount one persistent target workspace volume, use `unless-stopped`, and
 receive CPU/memory limits from the encrypted target configuration. Registration secrets exist only in
 the container environment and never in labels, responses, logs, or Audit metadata.
+`workspaceRoot` defaults to `/data/workspaces` and `gitCacheRoot` defaults to `/data/git-cache`; both live on the
+same target-scoped named volume but remain separate trees. Multiple Workers for one Docker Target therefore share
+the cache and coordinate it with filesystem locks while retaining private Workspace repositories.
 
 Reconciliation is idempotent: stable pools produce no writes or Audit rows. Configuration changes use
 the digest to replace stale containers. Scale-down and replacement skip Workers with an unexpired
@@ -128,7 +134,10 @@ deleted, while PostgreSQL remains the authority for Session, Event, Lease, and r
 
 Worker Pods run as UID/GID 10001 with a read-only root filesystem, RuntimeDefault seccomp, no Linux
 capabilities, no privilege escalation, no ServiceAccount token, bounded EmptyDir workspace/tmp/home,
-and explicit CPU/memory/ephemeral-storage limits. The registration token is referenced from a Secret;
+and explicit CPU/memory/ephemeral-storage limits. By default `/data/workspaces` and `/data/git-cache` are
+separate trees on the Pod-local workspace EmptyDir. Optional `gitCachePersistentVolumeClaim` mounts a dedicated
+cache at `/git-cache`; cross-Pod sharing is valid only when the claim supplies RWX-equivalent access and reliable
+POSIX file locking. The registration token is referenced from a Secret;
 it is not embedded in Pod labels, Audit metadata, responses, or runner arguments.
 
 The in-cluster control-plane RBAC and Kustomize base live in `deploy/kubernetes`. The reconciler role is

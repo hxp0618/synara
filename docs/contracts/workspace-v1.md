@@ -31,18 +31,51 @@ stores `provider_runtime_binding_id` and `remote_workspace_id`. Claim records th
 Worker/Generation and last-use time before Provider work begins. Database constraint triggers reject a Runtime
 Binding or Workspace from another Session, Provider, Tenant or Execution Target.
 
-Agentd materializes a managed checkout at a stable path derived from Tenant, Project, Session and logical
-Workspace IDs. The path no longer includes the current Execution ID, so a later Turn on the same Worker reuses
-the Session checkout. The Provider receives only the checkout directory; PostgreSQL never stores that path.
+Agentd materializes a managed checkout at a stable path derived from Execution Target, Tenant, Project, Session
+and logical Workspace IDs. The path no longer includes the current Execution ID, so a later Turn on the same
+Target reuses the Session checkout. The Provider receives only the `checkout` directory; PostgreSQL never stores
+that path.
+
+The Worker-local layout is versioned and keeps disposable shared Git objects separate from the private mutable
+Workspace generation:
+
+```text
+GIT_CACHE_ROOT/
+  v1/<target>/<tenant>/<project>/<repository-fingerprint>/repo.git
+
+WORKSPACE_ROOT/
+  .locks/...
+  v2/<target>/<tenant>/<project>/<session>/<workspace>/
+    manifest.json
+    repo.git
+    checkout/
+```
+
+The cache is a bare, read-only materialization input from the Provider's perspective. Agentd takes a cross-process
+cache lock and performs a credential-authorized network Fetch on every Turn, so a warm cache cannot bypass a
+revoked Credential. It then Fetches through an explicitly enabled, controlled `file://` transport into the
+Workspace-private `repo.git` and creates a relative linked worktree under `checkout`. The private repository must
+not use hardlinks, alternates, `--shared`, `--reference*`, or the shared cache as its Git common directory. Deleting
+or rebuilding the cache therefore cannot corrupt an existing dirty Workspace.
+
+One cross-process Workspace lock is held from materialization through Provider exit, final inspection,
+Checkpoint creation and the terminal Complete/Fail/Release attempt. Lock ordering is always Workspace then cache.
+The generation Manifest and linked-worktree metadata are revalidated before reuse or restore: `manifest.json`,
+`checkout/.git`, `commondir`, `gitdir`, the private `repo.git` and all ancestors are checked. All directories must
+be non-symlink directories below the configured Workspace root and all metadata files must be bounded regular files.
+Absolute or escaping metadata paths, symlinks and object alternates are rejected.
 
 Workspace preparation happens while the claimed Lease is being renewed and before `execution.started`:
 
 1. Create and verify each Workspace path component without following symlinks.
-2. Validate the Repository URL and default branch.
-3. Clone the default branch or Fetch the explicit remote ref into an existing checkout.
-4. Create/restore a deterministic `synara/session-<session-id>` branch when the checkout is still on the default branch.
-5. Read the current branch, merge base and HEAD.
-6. Report `workspace.ready` under the current Worker/Generation, then start the Provider.
+2. Validate the Repository URL, default branch and repository fingerprint.
+3. Under the cache lock, Fetch the default branch from the validated network remote on every Turn; atomically
+   rebuild a missing or corrupt bare cache.
+4. Build or validate a Workspace-private bare repository and relative linked worktree without shared object
+   storage, then Fetch the requested ref from the controlled cache input.
+5. Create/restore a deterministic `synara/session-<session-id>` branch when the checkout is still on the default branch.
+6. Read the current branch, merge base and HEAD and revalidate the private Git metadata.
+7. Report `workspace.ready` under the current Worker/Generation, then start the Provider.
 
 Preparation failure reports `workspace.failed` and fails the Execution with a stable `workspace_invalid` code.
 The ready/failed endpoints are idempotent and Generation-fenced; an obsolete Worker cannot overwrite state from
@@ -150,7 +183,9 @@ An absent Worker directory is never interpreted as an empty authoritative Worksp
 ## Remaining implementation gate
 
 The schema, Session/Execution bindings, public/private HTTPS Clone/Fetch materialization, Project Git Credential
-binding, Generation-fenced state reporting, Git-reference/Patch/Snapshot Checkpoint capture/restore and safe
+binding, cross-process locked shared Git cache, Workspace-private relative `git worktree` generations,
+Generation-fenced state reporting, Git-reference/Patch/Snapshot Checkpoint capture/restore and safe
 Checkpoint/Artifact retention are active. Stage 3 still must implement short-lived SSH Credential delivery,
-shared read-only Git cache plus `git worktree` materialization, physical Workspace cleanup
-dispatch/acknowledgement and the shared Local/SSH/Docker/Kubernetes acceptance fixture.
+physical Workspace cleanup dispatch/acknowledgement and the shared Local/SSH/Docker/Kubernetes acceptance
+fixture. Kubernetes cache sharing additionally requires an explicitly configured RWX-equivalent PVC; its default
+cache remains Pod-local and disposable.

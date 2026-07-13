@@ -23,7 +23,7 @@ import (
 )
 
 func TestKubernetesReconcilerAppliesSecurityFoundationAndExecutionPods(t *testing.T) {
-	fixture := newKubernetesReconcileFixture(t)
+	fixture := newKubernetesReconcileFixture(t, "")
 	client := newFakeKubernetesClient()
 	fixture.reconciler.factory = &fakeKubernetesFactory{client: client}
 	recoveryCalls := 0
@@ -62,6 +62,28 @@ func TestKubernetesReconcilerAppliesSecurityFoundationAndExecutionPods(t *testin
 		t.Fatalf("Kubernetes Pod runtime policy is unsafe: %#v", spec)
 	}
 	container := spec["containers"].([]any)[0].(map[string]any)
+	if value, found := kubernetesEnvironmentValue(container, "SYNARA_AGENTD_WORKSPACE_ROOT"); !found || value != "/data/workspaces" {
+		t.Fatalf("Kubernetes workspace root environment is %q", value)
+	}
+	if value, found := kubernetesEnvironmentValue(container, "SYNARA_AGENTD_GIT_CACHE_ROOT"); !found || value != "/data/git-cache" {
+		t.Fatalf("Kubernetes default Git cache root environment is %q", value)
+	}
+	volumes := spec["volumes"].([]any)
+	workspaceVolume := kubernetesNamedObject(volumes, "workspace")
+	if workspaceVolume == nil || workspaceVolume["emptyDir"] == nil {
+		t.Fatalf("Kubernetes default workspace volume is not emptyDir: %#v", volumes)
+	}
+	if kubernetesNamedObject(volumes, "git-cache") != nil {
+		t.Fatalf("Kubernetes default Pod created a redundant Git cache volume: %#v", volumes)
+	}
+	volumeMounts := container["volumeMounts"].([]any)
+	workspaceMount := kubernetesNamedObject(volumeMounts, "workspace")
+	if workspaceMount == nil || workspaceMount["mountPath"] != "/data" {
+		t.Fatalf("Kubernetes workspace mount is invalid: %#v", volumeMounts)
+	}
+	if kubernetesNamedObject(volumeMounts, "git-cache") != nil {
+		t.Fatalf("Kubernetes default Pod created a redundant Git cache mount: %#v", volumeMounts)
+	}
 	securityContext := container["securityContext"].(map[string]any)
 	if securityContext["runAsNonRoot"] != true || securityContext["readOnlyRootFilesystem"] != true || securityContext["allowPrivilegeEscalation"] != false {
 		t.Fatalf("Kubernetes container security context is incomplete: %#v", securityContext)
@@ -128,6 +150,45 @@ func TestKubernetesReconcilerAppliesSecurityFoundationAndExecutionPods(t *testin
 	}
 }
 
+func TestKubernetesReconcilerMountsPersistentGitCacheVolume(t *testing.T) {
+	fixture := newKubernetesReconcileFixture(t, "synara-git-cache")
+	client := newFakeKubernetesClient()
+	fixture.reconciler.factory = &fakeKubernetesFactory{client: client}
+
+	if err := fixture.reconciler.ReconcileOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	pod := client.lastKind("Pod")
+	if pod == nil {
+		t.Fatal("Kubernetes reconciliation did not create a Pod")
+	}
+	spec := pod["spec"].(map[string]any)
+	container := spec["containers"].([]any)[0].(map[string]any)
+	if value, found := kubernetesEnvironmentValue(container, "SYNARA_AGENTD_WORKSPACE_ROOT"); !found || value != "/data/workspaces" {
+		t.Fatalf("Kubernetes PVC Pod workspace root environment is %q", value)
+	}
+	if value, found := kubernetesEnvironmentValue(container, "SYNARA_AGENTD_GIT_CACHE_ROOT"); !found || value != "/git-cache" {
+		t.Fatalf("Kubernetes PVC Git cache root environment is %q", value)
+	}
+	volumes := spec["volumes"].([]any)
+	workspaceVolume := kubernetesNamedObject(volumes, "workspace")
+	if workspaceVolume == nil || workspaceVolume["emptyDir"] == nil {
+		t.Fatalf("Kubernetes PVC Pod lost its workspace emptyDir: %#v", volumes)
+	}
+	gitCacheVolume := kubernetesNamedObject(volumes, "git-cache")
+	claim, ok := gitCacheVolume["persistentVolumeClaim"].(map[string]any)
+	if gitCacheVolume == nil || !ok || claim["claimName"] != "synara-git-cache" {
+		t.Fatalf("Kubernetes Git cache PVC is invalid: %#v", gitCacheVolume)
+	}
+	volumeMounts := container["volumeMounts"].([]any)
+	workspaceMount := kubernetesNamedObject(volumeMounts, "workspace")
+	gitCacheMount := kubernetesNamedObject(volumeMounts, "git-cache")
+	if workspaceMount == nil || workspaceMount["mountPath"] != "/data" ||
+		gitCacheMount == nil || gitCacheMount["mountPath"] != "/git-cache" {
+		t.Fatalf("Kubernetes workspace or Git cache mount is invalid: %#v", volumeMounts)
+	}
+}
+
 type kubernetesReconcileFixture struct {
 	db             *gorm.DB
 	reconciler     *KubernetesReconciler
@@ -139,8 +200,12 @@ type kubernetesReconcileFixture struct {
 	executionIDs   []uuid.UUID
 }
 
-func newKubernetesReconcileFixture(t *testing.T) kubernetesReconcileFixture {
+func newKubernetesReconcileFixture(t *testing.T, gitCachePersistentVolumeClaims ...string) kubernetesReconcileFixture {
 	t.Helper()
+	gitCachePersistentVolumeClaim := ""
+	if len(gitCachePersistentVolumeClaims) > 0 {
+		gitCachePersistentVolumeClaim = gitCachePersistentVolumeClaims[0]
+	}
 	ctx := context.Background()
 	platformConfig, err := platform.Defaults(platform.ProfilePersonal)
 	if err != nil {
@@ -164,19 +229,23 @@ func newKubernetesReconcileFixture(t *testing.T) kubernetesReconcileFixture {
 	}
 	targetService := NewService(store.DB(), platformConfig, cipher)
 	principal := identity.Principal{UserID: domain.UserID, ActiveTenantID: &domain.TenantID}
+	configuration := map[string]any{
+		"apiServer": "https://kubernetes.example.com", "bearerToken": "kubernetes-api-token",
+		"caCertificate": "fake-ca-for-client-factory", "namespace": "synara-test", "manageNamespace": true,
+		"image": "synara-agentd:test", "imagePullPolicy": "IfNotPresent",
+		"controlPlaneUrl": "http://control-plane.test:3780", "allowInsecureControlPlane": true,
+		"runnerCommand": []string{"provider-host", "run", "--jsonl"}, "maxActivePods": 1,
+		"egressCidrs": []string{"0.0.0.0/0"}, "cpuRequest": "250m", "cpuLimit": "1",
+		"memoryRequest": "256Mi", "memoryLimit": "1Gi", "workspaceSizeLimit": "2Gi",
+		"quotaCpuRequests": "1", "quotaCpuLimits": "2", "quotaMemoryRequests": "2Gi", "quotaMemoryLimits": "4Gi",
+	}
+	if gitCachePersistentVolumeClaim != "" {
+		configuration["gitCachePersistentVolumeClaim"] = gitCachePersistentVolumeClaim
+	}
 	target, err := targetService.Create(ctx, principal, domain.TenantID, CreateInput{
 		OrganizationID: &domain.OrganizationID, Kind: "kubernetes", Name: "managed-kubernetes",
-		Configuration: map[string]any{
-			"apiServer": "https://kubernetes.example.com", "bearerToken": "kubernetes-api-token",
-			"caCertificate": "fake-ca-for-client-factory", "namespace": "synara-test", "manageNamespace": true,
-			"image": "synara-agentd:test", "imagePullPolicy": "IfNotPresent",
-			"controlPlaneUrl": "http://control-plane.test:3780", "allowInsecureControlPlane": true,
-			"runnerCommand": []string{"provider-host", "run", "--jsonl"}, "maxActivePods": 1,
-			"egressCidrs": []string{"0.0.0.0/0"}, "cpuRequest": "250m", "cpuLimit": "1",
-			"memoryRequest": "256Mi", "memoryLimit": "1Gi", "workspaceSizeLimit": "2Gi",
-			"quotaCpuRequests": "1", "quotaCpuLimits": "2", "quotaMemoryRequests": "2Gi", "quotaMemoryLimits": "4Gi",
-		},
-		Capabilities: map[string]any{"workspaceModes": []string{"local", "worktree"}},
+		Configuration: configuration,
+		Capabilities:  map[string]any{"workspaceModes": []string{"local", "worktree"}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -267,6 +336,27 @@ func (c *fakeKubernetesClient) lastKind(kind string) map[string]any {
 	for index := len(c.applied) - 1; index >= 0; index-- {
 		if c.applied[index]["kind"] == kind {
 			return c.applied[index]
+		}
+	}
+	return nil
+}
+
+func kubernetesEnvironmentValue(container map[string]any, name string) (string, bool) {
+	for _, item := range container["env"].([]any) {
+		entry := item.(map[string]any)
+		if entry["name"] == name {
+			value, ok := entry["value"].(string)
+			return value, ok
+		}
+	}
+	return "", false
+}
+
+func kubernetesNamedObject(items []any, name string) map[string]any {
+	for _, item := range items {
+		entry := item.(map[string]any)
+		if entry["name"] == name {
+			return entry
 		}
 	}
 	return nil

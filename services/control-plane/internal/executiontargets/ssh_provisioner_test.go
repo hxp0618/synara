@@ -47,6 +47,8 @@ func TestSSHProvisionerInstallsUpgradesAndRevokesWithoutLeakingSecrets(t *testin
 	if string(dialer.input.PrivateKey) != "ssh-private-key-secret" {
 		t.Fatal("encrypted SSH private key was not delivered to the SSH transport")
 	}
+	expectedWorkspaceRoot := "/var/lib/synara/test/workspaces"
+	expectedGitCacheRoot := "/var/lib/synara/targets/" + fixture.targetID.String() + "/git-cache"
 	var environment []byte
 	for path, payload := range remote.uploads {
 		if strings.HasSuffix(path, ".env") {
@@ -56,8 +58,16 @@ func TestSSHProvisionerInstallsUpgradesAndRevokesWithoutLeakingSecrets(t *testin
 	if !bytes.Contains(environment, []byte("worker-registration-secret")) ||
 		!bytes.Contains(environment, []byte(`SYNARA_AGENTD_RUNNER_COMMAND_JSON="[\"provider-host\",\"run\",\"--jsonl\"]"`)) ||
 		!bytes.Contains(environment, []byte(`SYNARA_AGENTD_PROVIDER_HOST_PROTOCOL="v2"`)) ||
-		!bytes.Contains(environment, []byte(`SYNARA_AGENTD_DRAIN_TIMEOUT="20s"`)) {
+		!bytes.Contains(environment, []byte(`SYNARA_AGENTD_DRAIN_TIMEOUT="20s"`)) ||
+		!bytes.Contains(environment, []byte(`SYNARA_AGENTD_WORKSPACE_ROOT="`+expectedWorkspaceRoot+`"`)) ||
+		!bytes.Contains(environment, []byte(`SYNARA_AGENTD_GIT_CACHE_ROOT="`+expectedGitCacheRoot+`"`)) {
 		t.Fatalf("uploaded agentd environment is incomplete: %s", environment)
+	}
+	if !commandsContainAll(remote.commands, "install -d -m 0755", expectedWorkspaceRoot, expectedGitCacheRoot) {
+		t.Fatalf("SSH provisioning did not create both storage roots: %#v", remote.commands)
+	}
+	if !commandsContainAll(remote.commands, "chown", expectedWorkspaceRoot, expectedGitCacheRoot) {
+		t.Fatalf("SSH provisioning did not assign both storage roots to the service user: %#v", remote.commands)
 	}
 	for _, command := range remote.commands {
 		if strings.Contains(command, "worker-registration-secret") || strings.Contains(command, "ssh-private-key-secret") {
@@ -125,7 +135,7 @@ func TestSSHProvisionerFailsClosedBeforeDialForUnsafeControlPlaneURL(t *testing.
 		context.Background(), fixture.principal, fixture.tenantID, fixture.targetID,
 		"ssh-invalid", "127.0.0.1",
 	)
-	assertSSHProblemCode(t, err, "invalid_ssh_configuration")
+	assertExecutionTargetProblemCode(t, err, "invalid_ssh_configuration")
 	if dialer.calls != 0 {
 		t.Fatal("unsafe SSH configuration reached the network dialer")
 	}
@@ -140,6 +150,29 @@ func TestSSHProvisionerFailsClosedBeforeDialForUnsafeControlPlaneURL(t *testing.
 	}
 }
 
+func TestSSHProvisionerRejectsOverlappingWorkspaceAndGitCacheRoots(t *testing.T) {
+	provisioner := &SSHProvisioner{}
+	target := persistence.ExecutionTarget{ID: uuid.New()}
+	for _, test := range []struct {
+		name          string
+		workspaceRoot string
+		gitCacheRoot  string
+	}{
+		{name: "same root", workspaceRoot: "/var/lib/synara/shared", gitCacheRoot: "/var/lib/synara/shared"},
+		{name: "cache inside workspace", workspaceRoot: "/var/lib/synara/workspaces", gitCacheRoot: "/var/lib/synara/workspaces/git-cache"},
+		{name: "workspace inside cache", workspaceRoot: "/var/lib/synara/git-cache/workspaces", gitCacheRoot: "/var/lib/synara/git-cache"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, _, err := provisioner.normalize(target, sshTargetConfiguration{
+				Host: "ssh.example.com", User: "root", PrivateKey: "private-key", HostKey: "host-key",
+				ControlPlaneURL: "https://control-plane.example.com", RunnerCommand: []string{"runner"},
+				WorkspaceRoot: test.workspaceRoot, GitCacheRoot: test.gitCacheRoot,
+			})
+			assertExecutionTargetProblemCode(t, err, "invalid_ssh_configuration")
+		})
+	}
+}
+
 func TestSSHProvisionerRecordsFailedConnectionAndLeavesTargetOffline(t *testing.T) {
 	fixture := newSSHProvisionFixture(t, "https://control-plane.example.com")
 	fixture.provisioner.dialer = &fakeSSHDialer{err: errors.New("connection refused")}
@@ -148,7 +181,7 @@ func TestSSHProvisionerRecordsFailedConnectionAndLeavesTargetOffline(t *testing.
 		context.Background(), fixture.principal, fixture.tenantID, fixture.targetID,
 		"ssh-failed", "127.0.0.1",
 	)
-	assertSSHProblemCode(t, err, "ssh_connection_failed")
+	assertExecutionTargetProblemCode(t, err, "ssh_connection_failed")
 	var target persistence.ExecutionTarget
 	if err := fixture.db.Where("id = ?", fixture.targetID).Take(&target).Error; err != nil {
 		t.Fatal(err)
@@ -267,10 +300,26 @@ func (r *fakeSSHRemote) Close() error {
 	return nil
 }
 
-func assertSSHProblemCode(t *testing.T, err error, code string) {
+func assertExecutionTargetProblemCode(t *testing.T, err error, code string) {
 	t.Helper()
 	var apiError *problem.Error
 	if !errors.As(err, &apiError) || apiError.Code != code {
 		t.Fatalf("expected problem code %q, got %v", code, err)
 	}
+}
+
+func commandsContainAll(commands []string, fragments ...string) bool {
+	for _, command := range commands {
+		matched := true
+		for _, fragment := range fragments {
+			if !strings.Contains(command, fragment) {
+				matched = false
+				break
+			}
+		}
+		if matched {
+			return true
+		}
+	}
+	return false
 }

@@ -46,11 +46,16 @@ func TestDockerPoolReconcilerCreatesStableWorkersAndDefersBusyRemoval(t *testing
 		if spec.MemoryBytes != 256<<20 || spec.NanoCPUs != 500_000_000 || spec.User != "10001:10001" {
 			t.Fatalf("Docker resource limits were not applied: %#v", spec)
 		}
+		if spec.WorkingDir != "/data" || len(spec.Binds) != 1 || spec.Binds[0] != "synara-docker-test:/data" {
+			t.Fatalf("Docker workspace volume was not mounted consistently: %#v", spec)
+		}
 		environment := strings.Join(spec.Environment, "\n")
 		if !strings.Contains(environment, "SYNARA_WORKER_REGISTRATION_TOKEN=docker-registration-secret") ||
 			!strings.Contains(environment, "SYNARA_EXECUTION_TARGET_KIND=docker") ||
 			!strings.Contains(environment, "SYNARA_AGENTD_PROVIDER_HOST_PROTOCOL=v2") ||
-			!strings.Contains(environment, "SYNARA_AGENTD_DRAIN_TIMEOUT=20s") {
+			!strings.Contains(environment, "SYNARA_AGENTD_DRAIN_TIMEOUT=20s") ||
+			!strings.Contains(environment, "SYNARA_AGENTD_WORKSPACE_ROOT=/data/workspaces") ||
+			!strings.Contains(environment, "SYNARA_AGENTD_GIT_CACHE_ROOT=/data/git-cache") {
 			t.Fatalf("Docker Worker environment is incomplete: %s", environment)
 		}
 		encodedLabels, _ := json.Marshal(spec.Labels)
@@ -119,6 +124,29 @@ func TestDockerPoolReconcilerCreatesStableWorkersAndDefersBusyRemoval(t *testing
 	}
 	if bytes.Contains(encodedAudits, []byte("docker-registration-secret")) {
 		t.Fatalf("Docker registration secret leaked into audit logs: %s", encodedAudits)
+	}
+}
+
+func TestDockerPoolReconcilerRejectsOverlappingWorkspaceAndGitCacheRoots(t *testing.T) {
+	reconciler := &DockerPoolReconciler{config: DockerPoolReconcilerConfig{RegistrationToken: "registration-token"}}
+	target := persistence.ExecutionTarget{ID: uuid.New()}
+	for _, test := range []struct {
+		name          string
+		workspaceRoot string
+		gitCacheRoot  string
+	}{
+		{name: "same root", workspaceRoot: "/data/shared", gitCacheRoot: "/data/shared"},
+		{name: "cache inside workspace", workspaceRoot: "/data/workspaces", gitCacheRoot: "/data/workspaces/git-cache"},
+		{name: "workspace inside cache", workspaceRoot: "/data/git-cache/workspaces", gitCacheRoot: "/data/git-cache"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := reconciler.normalize(target, dockerTargetConfiguration{
+				Image: "synara-agentd:test", ControlPlaneURL: "https://control-plane.example.com",
+				RunnerCommand: []string{"runner"}, WorkspaceMount: "/data",
+				WorkspaceRoot: test.workspaceRoot, GitCacheRoot: test.gitCacheRoot,
+			})
+			assertExecutionTargetProblemCode(t, err, "invalid_docker_configuration")
+		})
 	}
 }
 

@@ -18,3 +18,7 @@ operator-only compatibility switch and is never an automatic execution fallback.
 Production deployments should publish an immutable digest and configure CPU, memory,
 ephemeral storage, read-only root filesystem, disabled ServiceAccount token automount,
 and a dedicated Workspace volume or `emptyDir` according to recovery requirements.
+Configure separate writable Workspace and Git cache roots. Docker Workers for one Target may share both roots on
+the target-scoped volume because agentd uses cross-process locks and private Workspace repositories. Kubernetes
+keeps the cache Pod-local by default; an optional dedicated cache PVC must provide RWX-equivalent access and
+reliable POSIX locking before it is used across Pods.

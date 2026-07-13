@@ -125,7 +125,9 @@ root/personal Organization, local owner User, both owner memberships, and the te
 `SYNARA_LOCAL_AGENTD_RUNNER_COMMAND_JSON` is configured, the control plane also supervises an
 embedded Local agentd loop, generates an internal registration credential when necessary, and
 restarts the Worker after unexpected exits. Its workspace defaults to `./data/workspaces` and can be
-changed with `SYNARA_LOCAL_AGENTD_WORKSPACE_ROOT`.
+changed with `SYNARA_LOCAL_AGENTD_WORKSPACE_ROOT`. The shared Git cache defaults to the sibling
+`./data/git-cache` directory and can be changed with `SYNARA_LOCAL_AGENTD_GIT_CACHE_ROOT`; the two roots must
+be separate and neither may be the filesystem root or the current user's home directory.
 
 ## Reliable Outbox
 
@@ -253,4 +255,7 @@ Provider Credential payloads use a fresh AES-256-GCM data key per Credential ver
 KMS-wrapped data key and authenticated ciphertext are stored.
 Managed SSH targets pin the remote host key and install a target-specific systemd service. Configure
 `SYNARA_PUBLIC_CONTROL_PLANE_URL` to an origin reachable by the remote Worker and keep
-`SYNARA_AGENTD_BINARY_PATH` pointed at the built `synara-agentd` binary.
+`SYNARA_AGENTD_BINARY_PATH` pointed at the built `synara-agentd` binary. Managed SSH and Docker target
+configuration accepts separate `workspaceRoot` and `gitCacheRoot` paths. Kubernetes uses a Pod-local cache by
+default; configure `gitCachePersistentVolumeClaim` only with a cache volume that supports cross-Pod access and
+reliable filesystem locking.

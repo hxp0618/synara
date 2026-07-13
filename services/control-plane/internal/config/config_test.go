@@ -1,6 +1,7 @@
 package config
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -154,6 +155,22 @@ func TestLoadParsesOptionalLocalAgentdConfiguration(t *testing.T) {
 	if cfg.LocalAgentdRestartBackoff.String() != "2s" {
 		t.Fatalf("unexpected local agentd restart backoff: %s", cfg.LocalAgentdRestartBackoff)
 	}
+	expectedGitCacheRoot := filepath.Join(filepath.Dir("./test-workspaces"), "git-cache")
+	if cfg.LocalAgentdWorkspaceRoot != "./test-workspaces" || cfg.LocalAgentdGitCacheRoot != expectedGitCacheRoot {
+		t.Fatalf("unexpected local agentd storage roots: workspace=%q gitCache=%q", cfg.LocalAgentdWorkspaceRoot, cfg.LocalAgentdGitCacheRoot)
+	}
+
+	clearConfigEnvironment(t)
+	t.Setenv("SYNARA_LOCAL_AGENTD_RUNNER_COMMAND_JSON", `["runner"]`)
+	t.Setenv("SYNARA_LOCAL_AGENTD_WORKSPACE_ROOT", "./test-workspaces")
+	t.Setenv("SYNARA_LOCAL_AGENTD_GIT_CACHE_ROOT", "./test-git-cache")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.LocalAgentdGitCacheRoot != "./test-git-cache" {
+		t.Fatalf("unexpected explicit local agentd Git cache root: %q", cfg.LocalAgentdGitCacheRoot)
+	}
 
 	clearConfigEnvironment(t)
 	t.Setenv("SYNARA_LOCAL_AGENTD_RUNNER_COMMAND_JSON", `{}`)
@@ -282,7 +299,7 @@ func clearConfigEnvironment(t *testing.T) {
 		"SYNARA_DATABASE_MIGRATION_LOCK_TIMEOUT",
 		"SYNARA_WORKER_HEARTBEAT_TIMEOUT", "SYNARA_WORKER_RECEIPT_TTL",
 		"SYNARA_LOCAL_AGENTD_RUNNER_COMMAND_JSON", "SYNARA_LOCAL_AGENTD_WORKSPACE_ROOT",
-		"SYNARA_LOCAL_AGENTD_RESTART_BACKOFF",
+		"SYNARA_LOCAL_AGENTD_GIT_CACHE_ROOT", "SYNARA_LOCAL_AGENTD_RESTART_BACKOFF",
 		"SYNARA_CREDENTIAL_KMS_PROVIDER", "SYNARA_CREDENTIAL_KMS_KEY_ID",
 		"SYNARA_CREDENTIAL_MASTER_KEY", "SYNARA_CREDENTIAL_KMS_AWS_REGION",
 		"SYNARA_PUBLIC_CONTROL_PLANE_URL", "SYNARA_AGENTD_BINARY_PATH",

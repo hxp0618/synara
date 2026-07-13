@@ -58,5 +58,6 @@ Set `SYNARA_LOCAL_AGENTD_RUNNER_COMMAND_JSON` on the control plane instead of st
 `synara-agentd` process. The supervisor uses the loopback listener, keeps Worker credentials internal,
 restarts the daemon after unexpected exits, and cancels/releases active work during control-plane
 shutdown. `SYNARA_LOCAL_AGENTD_WORKSPACE_ROOT` and `SYNARA_LOCAL_AGENTD_RESTART_BACKOFF` control the
-workspace and restart delay. This mode preserves the Worker Protocol boundary; the runner still never
-receives Worker or Lease tokens.
+workspace and restart delay. `SYNARA_LOCAL_AGENTD_GIT_CACHE_ROOT` selects the separate shared Git cache root;
+when omitted it defaults to a `git-cache` sibling of the Workspace root. This mode preserves the Worker Protocol
+boundary; the runner still never receives Worker or Lease tokens.
