@@ -33,6 +33,7 @@ type Config struct {
 	RunnerCommand       []string
 	RunnerProtocol      RunnerProtocol
 	WorkspaceRoot       string
+	GitCacheRoot        string
 	PollInterval        time.Duration
 	HeartbeatInterval   time.Duration
 	LeaseRenewInterval  time.Duration
@@ -78,6 +79,18 @@ func LoadConfig() (Config, error) {
 	if err != nil {
 		return Config{}, fmt.Errorf("resolve SYNARA_AGENTD_WORKSPACE_ROOT: %w", err)
 	}
+	gitCacheRoot := strings.TrimSpace(os.Getenv("SYNARA_AGENTD_GIT_CACHE_ROOT"))
+	if gitCacheRoot == "" {
+		gitCacheRoot = filepath.Join(filepath.Dir(workspaceRoot), "git-cache")
+	}
+	gitCacheRoot, err = filepath.Abs(gitCacheRoot)
+	if err != nil {
+		return Config{}, fmt.Errorf("resolve SYNARA_AGENTD_GIT_CACHE_ROOT: %w", err)
+	}
+	workspaceRoot, gitCacheRoot, err = validateWorkspaceRoots(workspaceRoot, gitCacheRoot)
+	if err != nil {
+		return Config{}, err
+	}
 	cfg := Config{
 		ControlPlaneURL: parsedURL, RegistrationToken: strings.TrimSpace(os.Getenv("SYNARA_WORKER_REGISTRATION_TOKEN")),
 		ExecutionTargetID: targetID, TargetKind: targetKind,
@@ -85,7 +98,8 @@ func LoadConfig() (Config, error) {
 		PodName: envDefault("SYNARA_AGENTD_INSTANCE_ID", hostname()), Version: envDefault("SYNARA_AGENTD_VERSION", "dev"),
 		BuildGitSHA:  strings.TrimSpace(os.Getenv("SYNARA_AGENTD_BUILD_GIT_SHA")),
 		ImageDigest:  strings.TrimSpace(os.Getenv("SYNARA_AGENTD_IMAGE_DIGEST")),
-		Capabilities: capabilities, RunnerCommand: runnerCommand, RunnerProtocol: runnerProtocol, WorkspaceRoot: workspaceRoot,
+		Capabilities: capabilities, RunnerCommand: runnerCommand, RunnerProtocol: runnerProtocol,
+		WorkspaceRoot: workspaceRoot, GitCacheRoot: gitCacheRoot,
 	}
 	if raw := strings.TrimSpace(os.Getenv("SYNARA_AGENTD_ASSIGNED_EXECUTION_ID")); raw != "" {
 		assignedExecutionID, parseErr := uuid.Parse(raw)

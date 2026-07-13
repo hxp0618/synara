@@ -65,6 +65,47 @@ func (m *WorkspaceMaterializer) restoreGitReference(
 			"workspace_invalid", "The Git-reference Checkpoint metadata is invalid.", true, false,
 		)
 	}
+	if materialized.LogicalRoot != "" {
+		if materialized.GitDir == "" || materialized.cache.RepoGit == "" || materialized.cache.LockPath == "" {
+			return WorkspaceMaterialization{}, workspaceFailure(
+				"workspace_invalid", "The private Git Workspace recovery metadata is incomplete.", true, false,
+			)
+		}
+		staging, err := createWorkspaceStagingRoot(materialized.LogicalRoot)
+		if err != nil {
+			return WorkspaceMaterialization{}, workspaceFailure(
+				"workspace_invalid", "The Git-reference Workspace generation could not be staged.", false, true,
+			)
+		}
+		defer os.RemoveAll(staging)
+		if err := m.withCacheReadLock(ctx, materialized.cache, materialized.manifest.RepositoryURL, func(cacheRepository string) error {
+			return m.buildPrivateGitGeneration(ctx, staging, materialized.manifest, cacheRepository, branch, head)
+		}); err != nil {
+			return WorkspaceMaterialization{}, workspaceFailure(
+				"workspace_invalid", "The Git-reference Checkpoint commit is unavailable from the validated cache.", true, true,
+			)
+		}
+		if err := replaceWorkspaceGeneration(materialized.LogicalRoot, staging); err != nil {
+			return WorkspaceMaterialization{}, workspaceFailure(
+				"workspace_invalid", "The Git-reference Workspace generation could not be installed.", false, true,
+			)
+		}
+		materialized.CurrentBranch = &branch
+		materialized.HeadCommit = &head
+		inspection, err := m.Inspect(ctx, materialized)
+		if err != nil || inspection.Dirty || inspection.HeadCommit == nil || *inspection.HeadCommit != head {
+			return WorkspaceMaterialization{}, workspaceFailure(
+				"workspace_invalid", "The Git-reference Checkpoint restore did not reproduce the expected checkout.", true, true,
+			)
+		}
+		materialized.CurrentBranch = inspection.CurrentBranch
+		materialized.HeadCommit = inspection.HeadCommit
+		materialized.RestoredCheckpointID = &checkpoint.ID
+		if checkpoint.BaseCommit != nil {
+			materialized.BaseCommit = checkpoint.BaseCommit
+		}
+		return materialized, nil
+	}
 	environment := gitEnvironment(nil)
 	if err := m.rejectDangerousLocalGitConfig(ctx, materialized.Directory, environment); err != nil {
 		return WorkspaceMaterialization{}, workspaceFailure(
@@ -122,6 +163,48 @@ func (m *WorkspaceMaterializer) restoreSnapshot(
 		return WorkspaceMaterialization{}, workspaceFailure(
 			"workspace_invalid", "The Snapshot Checkpoint manifest is invalid.", true, false,
 		)
+	}
+	if materialized.LogicalRoot != "" {
+		if materialized.GitDir != "" {
+			return WorkspaceMaterialization{}, workspaceFailure(
+				"workspace_invalid", "A Git Workspace cannot consume a Snapshot Checkpoint.", true, false,
+			)
+		}
+		stagingRoot, err := createWorkspaceStagingRoot(materialized.LogicalRoot)
+		if err != nil {
+			return WorkspaceMaterialization{}, workspaceFailure(
+				"workspace_invalid", "The Snapshot Workspace generation could not be staged.", false, true,
+			)
+		}
+		defer os.RemoveAll(stagingRoot)
+		if err := buildNonGitWorkspaceGeneration(stagingRoot, materialized.manifest); err != nil {
+			return WorkspaceMaterialization{}, workspaceFailure(
+				"workspace_invalid", "The Snapshot Workspace generation could not be initialized.", false, true,
+			)
+		}
+		if err := extractSnapshotArchive(artifactPath, filepath.Join(stagingRoot, "checkout"), manifest); err != nil {
+			return WorkspaceMaterialization{}, workspaceFailure(
+				"workspace_invalid", "The Snapshot Checkpoint failed archive verification.", true, false,
+			)
+		}
+		if err := replaceWorkspaceGeneration(materialized.LogicalRoot, stagingRoot); err != nil {
+			return WorkspaceMaterialization{}, workspaceFailure(
+				"workspace_invalid", "The Snapshot Workspace generation could not be installed.", false, true,
+			)
+		}
+		inspection, err := m.Inspect(ctx, materialized)
+		if err != nil {
+			return WorkspaceMaterialization{}, workspaceFailure(
+				"workspace_invalid", "The restored Snapshot Workspace could not be inspected.", true, true,
+			)
+		}
+		materialized.CurrentBranch = inspection.CurrentBranch
+		materialized.HeadCommit = inspection.HeadCommit
+		materialized.RestoredCheckpointID = &checkpoint.ID
+		if checkpoint.BaseCommit != nil {
+			materialized.BaseCommit = checkpoint.BaseCommit
+		}
+		return materialized, nil
 	}
 	staging, err := os.MkdirTemp(filepath.Dir(materialized.Directory), ".synara-restore-*")
 	if err != nil {

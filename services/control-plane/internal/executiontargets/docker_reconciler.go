@@ -56,6 +56,7 @@ type dockerTargetConfiguration struct {
 	WorkspaceVolume           string   `json:"workspaceVolume"`
 	WorkspaceMount            string   `json:"workspaceMount"`
 	WorkspaceRoot             string   `json:"workspaceRoot"`
+	GitCacheRoot              string   `json:"gitCacheRoot"`
 	NetworkMode               string   `json:"networkMode"`
 	User                      string   `json:"user"`
 	MemoryBytes               int64    `json:"memoryBytes"`
@@ -312,6 +313,10 @@ func (r *DockerPoolReconciler) normalize(
 	if configuration.WorkspaceRoot == "" {
 		configuration.WorkspaceRoot = configuration.WorkspaceMount + "/workspaces"
 	}
+	configuration.GitCacheRoot = strings.TrimSpace(configuration.GitCacheRoot)
+	if configuration.GitCacheRoot == "" {
+		configuration.GitCacheRoot = configuration.WorkspaceMount + "/git-cache"
+	}
 	configuration.NetworkMode = strings.TrimSpace(configuration.NetworkMode)
 	if configuration.NetworkMode == "" {
 		configuration.NetworkMode = "bridge"
@@ -321,10 +326,14 @@ func (r *DockerPoolReconciler) normalize(
 		configuration.User = "10001:10001"
 	}
 	if !remotePathPattern.MatchString(configuration.SocketPath) || !remotePathPattern.MatchString(configuration.WorkspaceMount) ||
-		!remotePathPattern.MatchString(configuration.WorkspaceRoot) || strings.Contains(configuration.SocketPath, "..") ||
-		strings.Contains(configuration.WorkspaceMount, "..") || strings.Contains(configuration.WorkspaceRoot, "..") ||
-		(configuration.WorkspaceRoot != configuration.WorkspaceMount && !strings.HasPrefix(configuration.WorkspaceRoot, configuration.WorkspaceMount+"/")) {
-		return dockerTargetConfiguration{}, problem.New(400, "invalid_docker_configuration", "Docker socketPath, workspaceMount, and workspaceRoot must be safe compatible absolute paths.")
+		!remotePathPattern.MatchString(configuration.WorkspaceRoot) || !remotePathPattern.MatchString(configuration.GitCacheRoot) ||
+		strings.Contains(configuration.SocketPath, "..") || strings.Contains(configuration.WorkspaceMount, "..") ||
+		strings.Contains(configuration.WorkspaceRoot, "..") || strings.Contains(configuration.GitCacheRoot, "..") ||
+		(configuration.WorkspaceRoot != configuration.WorkspaceMount && !strings.HasPrefix(configuration.WorkspaceRoot, configuration.WorkspaceMount+"/")) ||
+		(configuration.GitCacheRoot != configuration.WorkspaceMount && !strings.HasPrefix(configuration.GitCacheRoot, configuration.WorkspaceMount+"/")) ||
+		configuration.WorkspaceRoot == configuration.GitCacheRoot || strings.HasPrefix(configuration.WorkspaceRoot, configuration.GitCacheRoot+"/") ||
+		strings.HasPrefix(configuration.GitCacheRoot, configuration.WorkspaceRoot+"/") {
+		return dockerTargetConfiguration{}, problem.New(400, "invalid_docker_configuration", "Docker socketPath, workspaceMount, workspaceRoot, and gitCacheRoot must be safe compatible absolute paths.")
 	}
 	if configuration.Image == "" || len(configuration.Image) > 512 || strings.ContainsAny(configuration.Image, "\r\n\t\x00") {
 		return dockerTargetConfiguration{}, problem.New(400, "invalid_docker_configuration", "Docker image is required and must be valid.")
@@ -386,6 +395,7 @@ func (r *DockerPoolReconciler) desiredSpecs(
 		"SYNARA_AGENTD_PROVIDER_HOST_PROTOCOL=v2",
 		"SYNARA_AGENTD_DRAIN_TIMEOUT=20s",
 		"SYNARA_AGENTD_WORKSPACE_ROOT=" + configuration.WorkspaceRoot,
+		"SYNARA_AGENTD_GIT_CACHE_ROOT=" + configuration.GitCacheRoot,
 	}
 	hashPayload, err := json.Marshal(struct {
 		Configuration dockerTargetConfiguration

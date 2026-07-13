@@ -45,36 +45,37 @@ type KubernetesReconcilerConfig struct {
 }
 
 type kubernetesTargetConfiguration struct {
-	APIServer                 string            `json:"apiServer"`
-	BearerToken               string            `json:"bearerToken"`
-	BearerTokenFile           string            `json:"bearerTokenFile"`
-	CACertificate             string            `json:"caCertificate"`
-	CAFile                    string            `json:"caFile"`
-	Namespace                 string            `json:"namespace"`
-	ManageNamespace           *bool             `json:"manageNamespace"`
-	ServiceAccountName        string            `json:"serviceAccountName"`
-	Image                     string            `json:"image"`
-	ImagePullPolicy           string            `json:"imagePullPolicy"`
-	ImagePullSecrets          []string          `json:"imagePullSecrets"`
-	ControlPlaneURL           string            `json:"controlPlaneUrl"`
-	AllowInsecureControlPlane bool              `json:"allowInsecureControlPlane"`
-	RunnerCommand             []string          `json:"runnerCommand"`
-	MaxActivePods             int               `json:"maxActivePods"`
-	EgressCIDRs               []string          `json:"egressCidrs"`
-	CPURequest                string            `json:"cpuRequest"`
-	CPULimit                  string            `json:"cpuLimit"`
-	MemoryRequest             string            `json:"memoryRequest"`
-	MemoryLimit               string            `json:"memoryLimit"`
-	EphemeralStorageRequest   string            `json:"ephemeralStorageRequest"`
-	EphemeralStorageLimit     string            `json:"ephemeralStorageLimit"`
-	WorkspaceSizeLimit        string            `json:"workspaceSizeLimit"`
-	QuotaCPURequests          string            `json:"quotaCpuRequests"`
-	QuotaCPULimits            string            `json:"quotaCpuLimits"`
-	QuotaMemoryRequests       string            `json:"quotaMemoryRequests"`
-	QuotaMemoryLimits         string            `json:"quotaMemoryLimits"`
-	QuotaEphemeralStorage     string            `json:"quotaEphemeralStorage"`
-	NodeSelector              map[string]string `json:"nodeSelector"`
-	Tolerations               []map[string]any  `json:"tolerations"`
+	APIServer                     string            `json:"apiServer"`
+	BearerToken                   string            `json:"bearerToken"`
+	BearerTokenFile               string            `json:"bearerTokenFile"`
+	CACertificate                 string            `json:"caCertificate"`
+	CAFile                        string            `json:"caFile"`
+	Namespace                     string            `json:"namespace"`
+	ManageNamespace               *bool             `json:"manageNamespace"`
+	ServiceAccountName            string            `json:"serviceAccountName"`
+	Image                         string            `json:"image"`
+	ImagePullPolicy               string            `json:"imagePullPolicy"`
+	ImagePullSecrets              []string          `json:"imagePullSecrets"`
+	ControlPlaneURL               string            `json:"controlPlaneUrl"`
+	AllowInsecureControlPlane     bool              `json:"allowInsecureControlPlane"`
+	RunnerCommand                 []string          `json:"runnerCommand"`
+	MaxActivePods                 int               `json:"maxActivePods"`
+	EgressCIDRs                   []string          `json:"egressCidrs"`
+	CPURequest                    string            `json:"cpuRequest"`
+	CPULimit                      string            `json:"cpuLimit"`
+	MemoryRequest                 string            `json:"memoryRequest"`
+	MemoryLimit                   string            `json:"memoryLimit"`
+	EphemeralStorageRequest       string            `json:"ephemeralStorageRequest"`
+	EphemeralStorageLimit         string            `json:"ephemeralStorageLimit"`
+	WorkspaceSizeLimit            string            `json:"workspaceSizeLimit"`
+	GitCachePersistentVolumeClaim string            `json:"gitCachePersistentVolumeClaim"`
+	QuotaCPURequests              string            `json:"quotaCpuRequests"`
+	QuotaCPULimits                string            `json:"quotaCpuLimits"`
+	QuotaMemoryRequests           string            `json:"quotaMemoryRequests"`
+	QuotaMemoryLimits             string            `json:"quotaMemoryLimits"`
+	QuotaEphemeralStorage         string            `json:"quotaEphemeralStorage"`
+	NodeSelector                  map[string]string `json:"nodeSelector"`
+	Tolerations                   []map[string]any  `json:"tolerations"`
 }
 
 type kubernetesPod struct {
@@ -366,8 +367,11 @@ func (r *KubernetesReconciler) normalizeKubernetes(
 	if configuration.MaxActivePods == 0 {
 		configuration.MaxActivePods = 50
 	}
+	configuration.GitCachePersistentVolumeClaim = strings.TrimSpace(configuration.GitCachePersistentVolumeClaim)
 	if !kubernetesNamePattern.MatchString(configuration.Namespace) || len(configuration.Namespace) > 63 ||
-		!kubernetesNamePattern.MatchString(configuration.ServiceAccountName) || len(configuration.ServiceAccountName) > 63 {
+		!kubernetesNamePattern.MatchString(configuration.ServiceAccountName) || len(configuration.ServiceAccountName) > 63 ||
+		(configuration.GitCachePersistentVolumeClaim != "" &&
+			(!kubernetesNamePattern.MatchString(configuration.GitCachePersistentVolumeClaim) || len(configuration.GitCachePersistentVolumeClaim) > 63)) {
 		return kubernetesTargetConfiguration{}, problem.New(400, "invalid_kubernetes_configuration", "Kubernetes namespace or serviceAccountName is invalid.")
 	}
 	apiURL, err := url.Parse(configuration.APIServer)
@@ -538,6 +542,10 @@ func (r *KubernetesReconciler) executionPod(
 			limits[key] = value
 		}
 	}
+	gitCacheRoot := "/data/git-cache"
+	if configuration.GitCachePersistentVolumeClaim != "" {
+		gitCacheRoot = "/git-cache"
+	}
 	environment := []any{
 		map[string]any{"name": "SYNARA_CONTROL_PLANE_URL", "value": configuration.ControlPlaneURL},
 		map[string]any{"name": "SYNARA_WORKER_REGISTRATION_TOKEN", "valueFrom": map[string]any{"secretKeyRef": map[string]any{"name": kubernetesSecretName(target.ID), "key": "registration-token"}}},
@@ -553,6 +561,7 @@ func (r *KubernetesReconciler) executionPod(
 		map[string]any{"name": "SYNARA_AGENTD_PROVIDER_HOST_PROTOCOL", "value": "v2"},
 		map[string]any{"name": "SYNARA_AGENTD_DRAIN_TIMEOUT", "value": "20s"},
 		map[string]any{"name": "SYNARA_AGENTD_WORKSPACE_ROOT", "value": "/data/workspaces"},
+		map[string]any{"name": "SYNARA_AGENTD_GIT_CACHE_ROOT", "value": gitCacheRoot},
 	}
 	volumes := []any{
 		map[string]any{"name": "workspace", "emptyDir": map[string]any{}},
@@ -562,14 +571,21 @@ func (r *KubernetesReconciler) executionPod(
 	if configuration.WorkspaceSizeLimit != "" {
 		volumes[0] = map[string]any{"name": "workspace", "emptyDir": map[string]any{"sizeLimit": configuration.WorkspaceSizeLimit}}
 	}
+	volumeMounts := []any{
+		map[string]any{"name": "workspace", "mountPath": "/data"},
+		map[string]any{"name": "tmp", "mountPath": "/tmp"},
+		map[string]any{"name": "home", "mountPath": "/home/synara"},
+	}
+	if configuration.GitCachePersistentVolumeClaim != "" {
+		volumes = append(volumes, map[string]any{
+			"name": "git-cache", "persistentVolumeClaim": map[string]any{"claimName": configuration.GitCachePersistentVolumeClaim},
+		})
+		volumeMounts = append(volumeMounts, map[string]any{"name": "git-cache", "mountPath": "/git-cache"})
+	}
 	container := map[string]any{
 		"name": "agentd", "image": configuration.Image, "imagePullPolicy": configuration.ImagePullPolicy,
 		"command": []any{"/usr/local/bin/synara-agentd"}, "env": environment,
-		"workingDir": "/data", "volumeMounts": []any{
-			map[string]any{"name": "workspace", "mountPath": "/data"},
-			map[string]any{"name": "tmp", "mountPath": "/tmp"},
-			map[string]any{"name": "home", "mountPath": "/home/synara"},
-		},
+		"workingDir": "/data", "volumeMounts": volumeMounts,
 		"securityContext": map[string]any{
 			"allowPrivilegeEscalation": false, "readOnlyRootFilesystem": true,
 			"runAsNonRoot": true, "runAsUser": 10001, "runAsGroup": 10001,

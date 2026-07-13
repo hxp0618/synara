@@ -22,6 +22,7 @@ type LocalSupervisorInput struct {
 	ExecutionTargetID uuid.UUID
 	RunnerCommand     []string
 	WorkspaceRoot     string
+	GitCacheRoot      string
 	WorkerLeaseTTL    time.Duration
 	HeartbeatTimeout  time.Duration
 	DrainTimeout      time.Duration
@@ -57,6 +58,14 @@ func NewLocalSupervisor(input LocalSupervisorInput, logger *slog.Logger) (*Local
 	if err != nil || strings.TrimSpace(input.WorkspaceRoot) == "" {
 		return nil, errors.New("local agentd workspace root is invalid")
 	}
+	gitCacheRoot := strings.TrimSpace(input.GitCacheRoot)
+	if gitCacheRoot == "" {
+		gitCacheRoot = filepath.Join(filepath.Dir(workspaceRoot), "git-cache")
+	}
+	workspaceRoot, gitCacheRoot, err = validateWorkspaceRoots(workspaceRoot, gitCacheRoot)
+	if err != nil {
+		return nil, fmt.Errorf("local agentd storage roots are invalid: %w", err)
+	}
 	if input.WorkerLeaseTTL <= 0 || input.HeartbeatTimeout <= input.WorkerLeaseTTL {
 		return nil, errors.New("local agentd lease and heartbeat durations are invalid")
 	}
@@ -78,7 +87,8 @@ func NewLocalSupervisor(input LocalSupervisorInput, logger *slog.Logger) (*Local
 		ClusterID: "control-plane", Namespace: "local",
 		PodName: "local-agentd-" + input.ExecutionTargetID.String(), Version: "embedded",
 		Capabilities:  map[string]any{"workspaceModes": []string{"local", "worktree"}},
-		RunnerCommand: append([]string(nil), input.RunnerCommand...), RunnerProtocol: RunnerProtocolV2, WorkspaceRoot: workspaceRoot,
+		RunnerCommand: append([]string(nil), input.RunnerCommand...), RunnerProtocol: RunnerProtocolV2,
+		WorkspaceRoot: workspaceRoot, GitCacheRoot: gitCacheRoot,
 		PollInterval: time.Second, HeartbeatInterval: heartbeatInterval,
 		LeaseRenewInterval: leaseRenewInterval, DrainTimeout: input.DrainTimeout, RequestTimeout: 30 * time.Second,
 		ArtifactTimeout: 30 * time.Minute, RunnerMessageBytes: 1 << 20,

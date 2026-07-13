@@ -190,7 +190,8 @@ func main() {
 		localAgentd, err = agentd.NewLocalSupervisor(agentd.LocalSupervisorInput{
 			ListenAddress: cfg.ListenAddress, RegistrationToken: cfg.WorkerRegistrationToken,
 			ExecutionTargetID: bootstrapped.ExecutionTargetID, RunnerCommand: cfg.LocalAgentdRunnerCommand,
-			WorkspaceRoot: cfg.LocalAgentdWorkspaceRoot, WorkerLeaseTTL: cfg.WorkerLeaseTTL,
+			WorkspaceRoot: cfg.LocalAgentdWorkspaceRoot, GitCacheRoot: cfg.LocalAgentdGitCacheRoot,
+			WorkerLeaseTTL:   cfg.WorkerLeaseTTL,
 			HeartbeatTimeout: cfg.WorkerHeartbeatTimeout, DrainTimeout: cfg.ShutdownTimeout / 2,
 			RestartBackoff: cfg.LocalAgentdRestartBackoff,
 		}, logger)
@@ -210,7 +211,10 @@ func main() {
 	go retentionService.Run(ctx)
 	go outboxDispatcher.Run(ctx)
 	if localAgentd != nil {
-		logger.Info("local agentd supervisor enabled", "executionTargetId", bootstrapped.ExecutionTargetID, "workspaceRoot", cfg.LocalAgentdWorkspaceRoot)
+		logger.Info(
+			"local agentd supervisor enabled", "executionTargetId", bootstrapped.ExecutionTargetID,
+			"workspaceRoot", cfg.LocalAgentdWorkspaceRoot, "gitCacheRoot", cfg.LocalAgentdGitCacheRoot,
+		)
 		done := make(chan struct{})
 		localAgentdDone = done
 		go func() {

@@ -143,7 +143,9 @@ func TestDaemonRestoresSnapshotBeforeProviderAndReusesUnchangedCheckpoint(t *tes
 	if err := daemon.runExecution(context.Background(), execution, lease, workload, nil); err != nil {
 		t.Fatal(err)
 	}
-	workspace := filepath.Join(root, tenantID.String(), projectID.String(), sessionID.String(), workspaceID.String())
+	workspace := filepath.Join(
+		root, "v2", uuid.Nil.String(), tenantID.String(), projectID.String(), sessionID.String(), workspaceID.String(), "checkout",
+	)
 	content, err := os.ReadFile(filepath.Join(workspace, "restored.txt"))
 	if err != nil || string(content) != "checkpoint payload\n" {
 		t.Fatalf("Provider did not receive the restored Workspace: %q err=%v", content, err)

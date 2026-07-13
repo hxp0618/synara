@@ -54,6 +54,7 @@ type sshTargetConfiguration struct {
 	AllowInsecureControlPlane bool     `json:"allowInsecureControlPlane"`
 	RunnerCommand             []string `json:"runnerCommand"`
 	WorkspaceRoot             string   `json:"workspaceRoot"`
+	GitCacheRoot              string   `json:"gitCacheRoot"`
 	InstallRoot               string   `json:"installRoot"`
 	ServiceUser               string   `json:"serviceUser"`
 	UseSudo                   *bool    `json:"useSudo"`
@@ -203,8 +204,8 @@ func (p *SSHProvisioner) apply(
 		return SSHProvisionResult{}, problem.Wrap(502, "ssh_agentd_upload_failed", "The synara-agentd service unit could not be uploaded.", err)
 	}
 	commands := []string{
-		"install -d -m 0755 " + shellQuote(paths.installRoot) + " " + shellQuote(paths.workspaceRoot),
-		"chown " + shellQuote(configuration.ServiceUser+":") + " " + shellQuote(paths.workspaceRoot),
+		"install -d -m 0755 " + shellQuote(paths.installRoot) + " " + shellQuote(paths.workspaceRoot) + " " + shellQuote(paths.gitCacheRoot),
+		"chown " + shellQuote(configuration.ServiceUser+":") + " " + shellQuote(paths.workspaceRoot) + " " + shellQuote(paths.gitCacheRoot),
 		"install -m 0755 " + shellQuote(paths.temporaryBinaryPath) + " " + shellQuote(paths.binaryPath),
 		"install -m 0600 " + shellQuote(paths.temporaryEnvPath) + " " + shellQuote(paths.envPath),
 		"install -m 0644 " + shellQuote(paths.temporaryUnitPath) + " " + shellQuote(paths.unitPath),
@@ -232,6 +233,7 @@ type sshProvisionPaths struct {
 	serviceName         string
 	installRoot         string
 	workspaceRoot       string
+	gitCacheRoot        string
 	binaryPath          string
 	envPath             string
 	unitPath            string
@@ -325,6 +327,9 @@ func (p *SSHProvisioner) normalize(
 	if configuration.WorkspaceRoot = strings.TrimSpace(configuration.WorkspaceRoot); configuration.WorkspaceRoot == "" {
 		configuration.WorkspaceRoot = "/var/lib/synara/targets/" + target.ID.String() + "/workspaces"
 	}
+	if configuration.GitCacheRoot = strings.TrimSpace(configuration.GitCacheRoot); configuration.GitCacheRoot == "" {
+		configuration.GitCacheRoot = "/var/lib/synara/targets/" + target.ID.String() + "/git-cache"
+	}
 	configuration.ControlPlaneURL = strings.TrimRight(strings.TrimSpace(configuration.ControlPlaneURL), "/")
 	if configuration.ControlPlaneURL == "" {
 		configuration.ControlPlaneURL = strings.TrimRight(strings.TrimSpace(p.config.PublicControlPlaneURL), "/")
@@ -350,10 +355,14 @@ func (p *SSHProvisioner) normalize(
 		(parsedURL.Scheme != "https" && !(parsedURL.Scheme == "http" && configuration.AllowInsecureControlPlane)) {
 		return sshTargetConfiguration{}, sshProvisionPaths{}, problem.New(400, "invalid_ssh_configuration", "SSH controlPlaneUrl must use HTTPS unless allowInsecureControlPlane is explicitly enabled.")
 	}
-	for _, value := range []string{configuration.InstallRoot, configuration.WorkspaceRoot} {
+	for _, value := range []string{configuration.InstallRoot, configuration.WorkspaceRoot, configuration.GitCacheRoot} {
 		if !remotePathPattern.MatchString(value) || strings.Contains(value, "//") || strings.Contains(value, "..") {
-			return sshTargetConfiguration{}, sshProvisionPaths{}, problem.New(400, "invalid_ssh_configuration", "SSH installRoot and workspaceRoot must be safe absolute paths.")
+			return sshTargetConfiguration{}, sshProvisionPaths{}, problem.New(400, "invalid_ssh_configuration", "SSH installRoot, workspaceRoot, and gitCacheRoot must be safe absolute paths.")
 		}
+	}
+	if configuration.WorkspaceRoot == configuration.GitCacheRoot || strings.HasPrefix(configuration.WorkspaceRoot, configuration.GitCacheRoot+"/") ||
+		strings.HasPrefix(configuration.GitCacheRoot, configuration.WorkspaceRoot+"/") {
+		return sshTargetConfiguration{}, sshProvisionPaths{}, problem.New(400, "invalid_ssh_configuration", "SSH workspaceRoot and gitCacheRoot must be separate.")
 	}
 	useSudo := true
 	if configuration.UseSudo != nil {
@@ -368,6 +377,7 @@ func (p *SSHProvisioner) normalize(
 	paths := sshProvisionPaths{
 		prefix: prefix, serviceName: serviceName, installRoot: configuration.InstallRoot,
 		workspaceRoot:       configuration.WorkspaceRoot,
+		gitCacheRoot:        configuration.GitCacheRoot,
 		binaryPath:          configuration.InstallRoot + "/synara-agentd",
 		envPath:             configuration.InstallRoot + "/agentd.env",
 		unitPath:            "/etc/systemd/system/" + serviceName,
@@ -405,6 +415,7 @@ func (p *SSHProvisioner) environmentFile(
 		{"SYNARA_AGENTD_PROVIDER_HOST_PROTOCOL", "v2"},
 		{"SYNARA_AGENTD_DRAIN_TIMEOUT", "20s"},
 		{"SYNARA_AGENTD_WORKSPACE_ROOT", paths.workspaceRoot},
+		{"SYNARA_AGENTD_GIT_CACHE_ROOT", paths.gitCacheRoot},
 	}
 	var output strings.Builder
 	for _, item := range values {

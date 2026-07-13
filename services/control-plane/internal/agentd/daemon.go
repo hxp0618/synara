@@ -29,7 +29,7 @@ type Daemon struct {
 func NewDaemon(cfg Config, logger *slog.Logger) *Daemon {
 	return &Daemon{
 		config: cfg, client: NewClient(cfg), runner: NewRunner(cfg),
-		workspace: NewWorkspaceMaterializer(cfg.WorkspaceRoot), logger: logger,
+		workspace: NewWorkspaceMaterializerWithCache(cfg.WorkspaceRoot, cfg.GitCacheRoot, cfg.ExecutionTargetID), logger: logger,
 	}
 }
 
@@ -183,7 +183,7 @@ func (d *Daemon) runExecution(
 	defer func() { _ = stopRenewal() }()
 	materializer := d.workspace
 	if materializer == nil {
-		materializer = NewWorkspaceMaterializer(d.config.WorkspaceRoot)
+		materializer = NewWorkspaceMaterializerWithCache(d.config.WorkspaceRoot, d.config.GitCacheRoot, d.config.ExecutionTargetID)
 	}
 	var err error
 	var gitCredential *GitHTTPSCredential
@@ -202,6 +202,13 @@ func (d *Daemon) runExecution(
 	materialized := WorkspaceMaterialization{}
 	if err == nil {
 		materialized, err = materializer.Materialize(executionContext, execution, workload, gitCredential)
+	}
+	if err == nil {
+		defer func() {
+			if releaseErr := materialized.Release(); releaseErr != nil {
+				d.logger.Error("Workspace lock release failed", "executionId", execution.ID, "error", releaseErr)
+			}
+		}()
 	}
 	clearGitHTTPSCredential(gitCredential)
 	gitCredential = nil

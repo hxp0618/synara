@@ -55,6 +55,7 @@ type Config struct {
 	ProviderCursorKey             []byte
 	LocalAgentdRunnerCommand      []string
 	LocalAgentdWorkspaceRoot      string
+	LocalAgentdGitCacheRoot       string
 	LocalAgentdRestartBackoff     time.Duration
 	CredentialKMSProvider         string
 	CredentialKMSKeyID            string
@@ -199,6 +200,9 @@ func Load() (Config, error) {
 		}
 	}
 	cfg.LocalAgentdWorkspaceRoot = envOrDefault("SYNARA_LOCAL_AGENTD_WORKSPACE_ROOT", filepath.Join(defaultDataDir, "workspaces"))
+	cfg.LocalAgentdGitCacheRoot = envOrDefault(
+		"SYNARA_LOCAL_AGENTD_GIT_CACHE_ROOT", filepath.Join(filepath.Dir(cfg.LocalAgentdWorkspaceRoot), "git-cache"),
+	)
 	if cfg.LocalAgentdRestartBackoff, err = envDurationStrict("SYNARA_LOCAL_AGENTD_RESTART_BACKOFF", time.Second); err != nil {
 		return Config{}, err
 	}
@@ -346,8 +350,9 @@ func Load() (Config, error) {
 	if cfg.LocalAgentdRestartBackoff <= 0 {
 		return Config{}, errors.New("SYNARA_LOCAL_AGENTD_RESTART_BACKOFF must be positive")
 	}
-	if len(cfg.LocalAgentdRunnerCommand) > 0 && strings.TrimSpace(cfg.LocalAgentdWorkspaceRoot) == "" {
-		return Config{}, errors.New("SYNARA_LOCAL_AGENTD_WORKSPACE_ROOT must not be empty")
+	if len(cfg.LocalAgentdRunnerCommand) > 0 &&
+		(strings.TrimSpace(cfg.LocalAgentdWorkspaceRoot) == "" || strings.TrimSpace(cfg.LocalAgentdGitCacheRoot) == "") {
+		return Config{}, errors.New("SYNARA_LOCAL_AGENTD_WORKSPACE_ROOT and SYNARA_LOCAL_AGENTD_GIT_CACHE_ROOT must not be empty")
 	}
 	if cfg.Platform.Profile == platform.ProfileEnterprise && cfg.PublicControlPlaneURL == "" {
 		return Config{}, errors.New("SYNARA_PUBLIC_CONTROL_PLANE_URL is required for enterprise deployments")

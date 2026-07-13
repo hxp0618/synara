@@ -114,7 +114,7 @@ func (w *checkpointLimitedWriter) Write(value []byte) (int, error) {
 
 func workspaceHasGitMetadata(directory string) bool {
 	info, err := os.Lstat(filepath.Join(directory, ".git"))
-	return err == nil && info.IsDir() && info.Mode()&os.ModeSymlink == 0
+	return err == nil && info.Mode()&os.ModeSymlink == 0 && (info.IsDir() || info.Mode().IsRegular())
 }
 
 func captureWorkspacePatch(
@@ -219,7 +219,7 @@ func validatePatchGitRepository(ctx context.Context, directory, baseCommit strin
 			return errors.New("Workspace Patch rejected unsafe local Git configuration")
 		}
 	}
-	if err := rejectUnsupportedPatchGitMetadata(directory); err != nil {
+	if err := rejectUnsupportedPatchGitMetadata(ctx, directory); err != nil {
 		return err
 	}
 	if err := rejectUnsupportedPatchIndexFlags(ctx, directory); err != nil {
@@ -252,19 +252,27 @@ func validatePatchGitRepository(ctx context.Context, directory, baseCommit strin
 	return nil
 }
 
-func rejectUnsupportedPatchGitMetadata(directory string) error {
+func rejectUnsupportedPatchGitMetadata(ctx context.Context, directory string) error {
 	paths := []struct {
 		path       string
 		allowEmpty bool
 	}{
-		{path: filepath.Join(".git", "info", "attributes"), allowEmpty: true},
-		{path: filepath.Join(".git", "info", "grafts"), allowEmpty: true},
-		{path: filepath.Join(".git", "info", "sparse-checkout")},
-		{path: filepath.Join(".git", "objects", "info", "alternates")},
-		{path: filepath.Join(".git", "objects", "info", "http-alternates")},
+		{path: filepath.Join("info", "attributes"), allowEmpty: true},
+		{path: filepath.Join("info", "grafts"), allowEmpty: true},
+		{path: filepath.Join("info", "sparse-checkout")},
+		{path: filepath.Join("objects", "info", "alternates")},
+		{path: filepath.Join("objects", "info", "http-alternates")},
 	}
 	for _, candidate := range paths {
-		info, err := os.Lstat(filepath.Join(directory, candidate.path))
+		output, err := runCheckpointGitOutput(ctx, directory, "rev-parse", "--git-path", filepath.ToSlash(candidate.path))
+		resolved := strings.TrimSpace(string(output))
+		if err != nil || resolved == "" {
+			return errors.New("Workspace Patch could not resolve repository-local Git metadata")
+		}
+		if !filepath.IsAbs(resolved) {
+			resolved = filepath.Join(directory, resolved)
+		}
+		info, err := os.Lstat(filepath.Clean(resolved))
 		if errors.Is(err, os.ErrNotExist) {
 			continue
 		}
@@ -824,6 +832,9 @@ func (m *WorkspaceMaterializer) restorePatch(
 		)
 	}
 	parent := filepath.Dir(materialized.Directory)
+	if materialized.LogicalRoot != "" {
+		parent = filepath.Dir(materialized.LogicalRoot)
+	}
 	payloadDirectory, err := os.MkdirTemp(parent, ".synara-patch-payload-*")
 	if err != nil {
 		return WorkspaceMaterialization{}, workspaceFailure(
@@ -837,6 +848,55 @@ func (m *WorkspaceMaterializer) restorePatch(
 			"workspace_invalid", "The Patch Checkpoint failed archive verification.", true, false,
 		)
 	}
+	if materialized.LogicalRoot != "" {
+		if materialized.GitDir == "" || materialized.cache.RepoGit == "" || materialized.cache.LockPath == "" {
+			return WorkspaceMaterialization{}, workspaceFailure(
+				"workspace_invalid", "The private Git Workspace recovery metadata is incomplete.", true, false,
+			)
+		}
+		stagingRoot, err := createWorkspaceStagingRoot(materialized.LogicalRoot)
+		if err != nil {
+			return WorkspaceMaterialization{}, workspaceFailure(
+				"workspace_invalid", "The Patch Checkpoint Workspace generation could not be staged.", false, true,
+			)
+		}
+		defer os.RemoveAll(stagingRoot)
+		if err := m.withCacheReadLock(ctx, materialized.cache, materialized.manifest.RepositoryURL, func(cacheRepository string) error {
+			return m.buildPrivateGitGeneration(
+				ctx, stagingRoot, materialized.manifest, cacheRepository, manifest.CurrentBranch, manifest.BaseCommit,
+			)
+		}); err != nil {
+			return WorkspaceMaterialization{}, workspaceFailure(
+				"workspace_invalid", "The Patch Checkpoint base Commit is unavailable from the validated cache.", true, true,
+			)
+		}
+		stagingCheckout := filepath.Join(stagingRoot, "checkout")
+		branch, head, err := m.applyPatchToCheckout(ctx, stagingCheckout, payloadDirectory, patchPath, manifest)
+		if err != nil {
+			return WorkspaceMaterialization{}, workspaceFailure(
+				"workspace_invalid", "The Patch Checkpoint failed isolated Workspace verification.", true, false,
+			)
+		}
+		stagingLayout := workspaceLayout{
+			Root: stagingRoot, Checkout: stagingCheckout, GitDir: filepath.Join(stagingRoot, "repo.git"),
+			Manifest: filepath.Join(stagingRoot, "manifest.json"),
+		}
+		if err := m.validatePrivateGitGeneration(ctx, stagingLayout, materialized.manifest); err != nil {
+			return WorkspaceMaterialization{}, workspaceFailure(
+				"workspace_invalid", "The Patch Checkpoint private Git generation is invalid.", true, false,
+			)
+		}
+		if err := replaceWorkspaceGeneration(materialized.LogicalRoot, stagingRoot); err != nil {
+			return WorkspaceMaterialization{}, workspaceFailure(
+				"workspace_invalid", "The verified Patch Workspace generation could not replace the active generation.", false, true,
+			)
+		}
+		materialized.CurrentBranch = &branch
+		materialized.BaseCommit = &head
+		materialized.HeadCommit = &head
+		materialized.RestoredCheckpointID = &checkpoint.ID
+		return materialized, nil
+	}
 	staging, err := os.MkdirTemp(parent, ".synara-patch-restore-*")
 	if err != nil {
 		return WorkspaceMaterialization{}, workspaceFailure(
@@ -845,7 +905,7 @@ func (m *WorkspaceMaterializer) restorePatch(
 	}
 	defer os.RemoveAll(staging)
 	if _, err := m.runGit(ctx, parent, environment,
-		"clone", "--local", "--no-checkout", "--", materialized.Directory, staging,
+		"-c", "protocol.file.allow=always", "clone", "--no-local", "--no-hardlinks", "--no-checkout", "--", materialized.Directory, staging,
 	); err != nil {
 		return WorkspaceMaterialization{}, workspaceFailure(
 			"workspace_invalid", "The Patch Checkpoint staging repository could not be created.", true, true,
@@ -861,45 +921,55 @@ func (m *WorkspaceMaterializer) restorePatch(
 			"workspace_invalid", "The Patch Checkpoint staging repository contains unsafe configuration.", true, false,
 		)
 	}
-	if _, err := m.runGit(ctx, staging, environment, "switch", "-C", manifest.CurrentBranch, manifest.BaseCommit); err != nil {
+	branch, head, err := m.applyPatchToCheckout(ctx, staging, payloadDirectory, patchPath, manifest)
+	if err != nil {
 		return WorkspaceMaterialization{}, workspaceFailure(
-			"workspace_invalid", "The Patch Checkpoint base branch could not be prepared.", true, true,
+			"workspace_invalid", "The Patch Checkpoint failed isolated Workspace verification.", true, false,
 		)
+	}
+	if err := replaceWorkspaceDirectory(materialized.Directory, staging); err != nil {
+		return WorkspaceMaterialization{}, workspaceFailure(
+			"workspace_invalid", "The verified Patch Workspace could not replace the active checkout.", true, true,
+		)
+	}
+	materialized.CurrentBranch = &branch
+	materialized.BaseCommit = &head
+	materialized.HeadCommit = &head
+	materialized.RestoredCheckpointID = &checkpoint.ID
+	return materialized, nil
+}
+
+func (m *WorkspaceMaterializer) applyPatchToCheckout(
+	ctx context.Context,
+	staging, payloadDirectory, patchPath string,
+	manifest checkpointPatchManifest,
+) (string, string, error) {
+	environment := gitEnvironment(nil)
+	if _, err := m.runGit(ctx, staging, environment, "switch", "-C", manifest.CurrentBranch, manifest.BaseCommit); err != nil {
+		return "", "", errors.New("The Patch Checkpoint base branch could not be prepared")
 	}
 	if manifest.TrackedPatch.SizeBytes > 0 {
 		applyArguments := []string{"apply", "--index", "--binary", "--whitespace=nowarn", "--", patchPath}
 		checkArguments := append([]string{"apply", "--check", "--index", "--binary", "--whitespace=nowarn", "--"}, patchPath)
 		if _, err := m.runGit(ctx, staging, environment, checkArguments...); err != nil {
-			return WorkspaceMaterialization{}, workspaceFailure(
-				"workspace_invalid", "The tracked Patch cannot be applied to its base Commit.", true, false,
-			)
+			return "", "", errors.New("The tracked Patch cannot be applied to its base Commit")
 		}
 		if _, err := m.runGit(ctx, staging, environment, applyArguments...); err != nil {
-			return WorkspaceMaterialization{}, workspaceFailure(
-				"workspace_invalid", "The tracked Patch could not be applied in staging.", true, true,
-			)
+			return "", "", errors.New("The tracked Patch could not be applied in staging")
 		}
 	}
 	if err := installPatchTrackedFiles(payloadDirectory, staging, manifest.TrackedFiles); err != nil {
-		return WorkspaceMaterialization{}, workspaceFailure(
-			"workspace_invalid", "The Patch Checkpoint tracked files could not be installed in staging.", true, false,
-		)
+		return "", "", errors.New("The Patch Checkpoint tracked files could not be installed in staging")
 	}
 	if _, err := m.runGit(ctx, staging, environment, "diff", "--quiet", "--"); err != nil {
-		return WorkspaceMaterialization{}, workspaceFailure(
-			"workspace_invalid", "The Patch Checkpoint tracked file bytes do not match the staged Patch.", true, false,
-		)
+		return "", "", errors.New("The Patch Checkpoint tracked file bytes do not match the staged Patch")
 	}
 	if err := installPatchUntrackedFiles(payloadDirectory, staging, manifest.Untracked); err != nil {
-		return WorkspaceMaterialization{}, workspaceFailure(
-			"workspace_invalid", "The Patch Checkpoint untracked files could not be installed in staging.", true, false,
-		)
+		return "", "", errors.New("The Patch Checkpoint untracked files could not be installed in staging")
 	}
 	stagedState, err := capturePatchState(ctx, staging, manifest.BaseCommit)
 	if err != nil {
-		return WorkspaceMaterialization{}, workspaceFailure(
-			"workspace_invalid", "The restored Patch Workspace manifest could not be verified.", true, false,
-		)
+		return "", "", errors.New("The restored Patch Workspace manifest could not be verified")
 	}
 	expectedState := checkpointPatchState{
 		tracked: manifest.TrackedFiles, untracked: manifest.Untracked,
@@ -914,38 +984,21 @@ func (m *WorkspaceMaterializer) restorePatch(
 		expectedState.total += file.Size
 	}
 	if !samePatchState(stagedState, expectedState) {
-		return WorkspaceMaterialization{}, workspaceFailure(
-			"workspace_invalid", "The restored Patch Workspace does not match its file manifest.", true, false,
-		)
+		return "", "", errors.New("The restored Patch Workspace does not match its file manifest")
 	}
 	patchSize, patchSHA, err := streamTrackedPatch(ctx, staging, manifest.BaseCommit, io.Discard)
 	if err != nil || patchSize != manifest.TrackedPatch.SizeBytes || patchSHA != manifest.TrackedPatch.SHA256 {
-		return WorkspaceMaterialization{}, workspaceFailure(
-			"workspace_invalid", "The restored tracked Patch does not match its content identity.", true, false,
-		)
+		return "", "", errors.New("The restored tracked Patch does not match its content identity")
 	}
 	branch, err := m.runGit(ctx, staging, environment, "branch", "--show-current")
 	if err != nil || branch != manifest.CurrentBranch {
-		return WorkspaceMaterialization{}, workspaceFailure(
-			"workspace_invalid", "The restored Patch Workspace branch is invalid.", true, false,
-		)
+		return "", "", errors.New("The restored Patch Workspace branch is invalid")
 	}
 	head, err := m.runGit(ctx, staging, environment, "rev-parse", "HEAD")
 	if err != nil || head != manifest.BaseCommit {
-		return WorkspaceMaterialization{}, workspaceFailure(
-			"workspace_invalid", "The restored Patch Workspace is not anchored to its base Commit.", true, false,
-		)
+		return "", "", errors.New("The restored Patch Workspace is not anchored to its base Commit")
 	}
-	if err := replaceWorkspaceDirectory(materialized.Directory, staging); err != nil {
-		return WorkspaceMaterialization{}, workspaceFailure(
-			"workspace_invalid", "The verified Patch Workspace could not replace the active checkout.", true, true,
-		)
-	}
-	materialized.CurrentBranch = &branch
-	materialized.BaseCommit = &head
-	materialized.HeadCommit = &head
-	materialized.RestoredCheckpointID = &checkpoint.ID
-	return materialized, nil
+	return branch, head, nil
 }
 
 func installPatchTrackedFiles(
