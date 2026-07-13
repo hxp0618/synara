@@ -286,7 +286,8 @@ grep -q '^synara_outbox_pending' <<<"$metrics"
 
 migration_count="$("${kube[@]}" -n "$namespace" exec deployment/synara-stage2-postgres -- \
   psql -U synara -d synara -Atc 'SELECT count(*) FROM control_plane_schema_migrations')"
-[[ "$migration_count" == "16" ]]
+expected_migration_count="$(jq -er '.checks.schema.expectedVersion | select(type == "number" and . > 0)' <<<"$ready_json")"
+[[ "$migration_count" == "$expected_migration_count" ]]
 
 local_target_id="$("${kube[@]}" -n "$namespace" exec deployment/synara-stage2-postgres -- \
   psql -U synara -d synara -Atc "SELECT id FROM execution_targets WHERE tenant_id IS NULL AND kind = 'local' ORDER BY created_at LIMIT 1")"
