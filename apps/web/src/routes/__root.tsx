@@ -23,6 +23,8 @@ import { Throttler } from "@tanstack/react-pacer";
 
 import { APP_DISPLAY_NAME } from "../branding";
 import { DesktopWindowControls } from "../components/DesktopWindowControls";
+import { AppSnapCoordinator } from "../components/AppSnapCoordinator";
+import { AppSnapWelcomeDialog } from "../components/AppSnapWelcomeDialog";
 import { ControlPlaneGate } from "../components/ControlPlaneGate";
 import { useControlPlane } from "../controlPlaneContext";
 import { SETTINGS_TARGETS } from "../settingsNavigation";
@@ -190,6 +192,8 @@ function RootRouteView() {
           <GlobalShortcutsDialog />
           <GlobalWhatsNewSurface />
           <TaskCompletionNotifications />
+          <AppSnapWelcomeDialog />
+          <AppSnapCoordinator />
           <ProviderUpdateNotifications />
           {controlPlane.isAuthoritative ? null : <DesktopProjectBootstrap />}
           <Outlet />
