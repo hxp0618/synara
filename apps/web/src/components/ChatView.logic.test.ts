@@ -52,15 +52,15 @@ import {
 
 describe("authoritative Turn dispatch", () => {
   it("uses durable Steer only for an explicit steer while a Turn is live", () => {
-    expect(
-      resolveAuthoritativeTurnDispatch({ hasLiveTurn: true, dispatchMode: "steer" }),
-    ).toBe("steer");
-    expect(
-      resolveAuthoritativeTurnDispatch({ hasLiveTurn: true, dispatchMode: "queue" }),
-    ).toBe("queue-unsupported");
-    expect(
-      resolveAuthoritativeTurnDispatch({ hasLiveTurn: false, dispatchMode: "queue" }),
-    ).toBe("create-turn");
+    expect(resolveAuthoritativeTurnDispatch({ hasLiveTurn: true, dispatchMode: "steer" })).toBe(
+      "steer",
+    );
+    expect(resolveAuthoritativeTurnDispatch({ hasLiveTurn: true, dispatchMode: "queue" })).toBe(
+      "queue-unsupported",
+    );
+    expect(resolveAuthoritativeTurnDispatch({ hasLiveTurn: false, dispatchMode: "queue" })).toBe(
+      "create-turn",
+    );
   });
 });
 

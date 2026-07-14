@@ -5,17 +5,17 @@ describes where an Agent executes; that is the independent Execution Target cont
 
 ## Profiles and capabilities
 
-| Capability | `personal` | `single-node` | `enterprise` |
-| --- | --- | --- | --- |
-| Metadata store | SQLite | PostgreSQL | PostgreSQL |
-| Artifact store declaration | local | MinIO or S3 | S3 |
-| Queue declaration | in-process | PostgreSQL outbox | PostgreSQL outbox or external |
-| Replicas | 1 | 1 | 2+ |
-| High availability | no | no | yes |
-| Identity baseline | deterministic local owner | local/dev or future OIDC | future OIDC/SAML/SCIM |
-| Execution target kinds | local, SSH, Docker, Kubernetes | local, SSH, Docker, Kubernetes | local, SSH, Docker, Kubernetes |
-| Metadata export/import | export | import | import |
-| Artifact payload migration | export Local payload references | import to MinIO/S3 | import to S3 |
+| Capability                 | `personal`                      | `single-node`                  | `enterprise`                   |
+| -------------------------- | ------------------------------- | ------------------------------ | ------------------------------ |
+| Metadata store             | SQLite                          | PostgreSQL                     | PostgreSQL                     |
+| Artifact store declaration | local                           | MinIO or S3                    | S3                             |
+| Queue declaration          | in-process                      | PostgreSQL outbox              | PostgreSQL outbox or external  |
+| Replicas                   | 1                               | 1                              | 2+                             |
+| High availability          | no                              | no                             | yes                            |
+| Identity baseline          | deterministic local owner       | local/dev or future OIDC       | future OIDC/SAML/SCIM          |
+| Execution target kinds     | local, SSH, Docker, Kubernetes  | local, SSH, Docker, Kubernetes | local, SSH, Docker, Kubernetes |
+| Metadata export/import     | export                          | import                         | import                         |
+| Artifact payload migration | export Local payload references | import to MinIO/S3             | import to S3                   |
 
 Execution target support is intentionally the same across profiles. Availability of a driver or
 worker pool is operational capability, not a reason to merge the two dimensions.

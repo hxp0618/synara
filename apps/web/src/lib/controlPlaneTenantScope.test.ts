@@ -25,14 +25,7 @@ describe("Control Plane Tenant scope cleanup", () => {
     let resolveRequest!: (value: { items: ReadonlyArray<{ id: string }> }) => void;
     const request = queryClient
       .fetchQuery({
-        queryKey: [
-          "control-plane",
-          "tenants",
-          "tenant-old",
-          "organizations",
-          "org-1",
-          "projects",
-        ],
+        queryKey: ["control-plane", "tenants", "tenant-old", "organizations", "org-1", "projects"],
         queryFn: () =>
           new Promise<{ items: ReadonlyArray<{ id: string }> }>((resolve) => {
             resolveRequest = resolve;
@@ -111,11 +104,7 @@ describe("Control Plane Tenant scope cleanup", () => {
       clearProjectDrafts: (projectId) => calls.push(`draft:${projectId}`),
     });
 
-    expect(calls).toEqual([
-      "projection:closed",
-      "draft:project-cached",
-      "draft:project-current",
-    ]);
+    expect(calls).toEqual(["projection:closed", "draft:project-cached", "draft:project-current"]);
     expect(
       queryClient.getQueriesData({
         queryKey: ["control-plane", "tenants", "tenant-old"],

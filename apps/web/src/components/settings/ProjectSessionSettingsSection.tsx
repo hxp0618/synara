@@ -41,9 +41,7 @@ import {
 } from "~/lib/controlPlaneProviderCapabilities";
 import { cn, randomUUID } from "~/lib/utils";
 
-const SAAS_PROVIDER_OPTIONS = PROVIDER_CAPABILITY_CATALOG.providers.map(
-  (entry) => entry.provider,
-);
+const SAAS_PROVIDER_OPTIONS = PROVIDER_CAPABILITY_CATALOG.providers.map((entry) => entry.provider);
 
 const projectSessionQueryKeys = {
   projects: (tenantId: string, organizationId: string | null) =>
@@ -423,9 +421,8 @@ export function ProjectSessionSettingsSection(props: {
       if (!watchedSessionId || !watchedSession) {
         throw new Error("Select an active Session before creating a Turn.");
       }
-      const freshProjection = await controlPlaneClient.getSessionProviderCapabilities(
-        watchedSessionId,
-      );
+      const freshProjection =
+        await controlPlaneClient.getSessionProviderCapabilities(watchedSessionId);
       assertControlPlaneCapabilityAllowed(
         resolveControlPlaneTurnDispatchDecision({
           isAuthoritative: true,

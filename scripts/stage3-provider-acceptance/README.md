@@ -100,18 +100,18 @@ must be explicitly enabled; the other six Providers remain Local-only.
 
 SendTurn scenarios are selected with composable `inputText` directives:
 
-| Directive | Deterministic behavior |
-| --- | --- |
-| `[text]` | Canonical `content.delta` |
-| `[tool]` | Canonical tool item start/completion |
-| `[usage]` | Canonical token usage event |
-| `[approval]` | Approval InteractionRequest, completed by ResolveApproval |
-| `[user-input]` | User-input InteractionRequest, completed by ResolveUserInput |
-| `[artifact]` | Creates and emits a Workspace-local artifact candidate |
+| Directive            | Deterministic behavior                                                         |
+| -------------------- | ------------------------------------------------------------------------------ |
+| `[text]`             | Canonical `content.delta`                                                      |
+| `[tool]`             | Canonical tool item start/completion                                           |
+| `[usage]`            | Canonical token usage event                                                    |
+| `[approval]`         | Approval InteractionRequest, completed by ResolveApproval                      |
+| `[user-input]`       | User-input InteractionRequest, completed by ResolveUserInput                   |
+| `[artifact]`         | Creates and emits a Workspace-local artifact candidate                         |
 | `[workspace-verify]` | Reads and verifies the exact artifact sentinel already stored in the Workspace |
-| `[credential]` | Reads the anonymous FD once and returns boolean/key-only verification evidence |
-| `[provider-error]` | Stable `provider_rate_limited` terminal Error |
-| `[steer]` | Pending turn completed by SteerTurn |
+| `[credential]`       | Reads the anonymous FD once and returns boolean/key-only verification evidence |
+| `[provider-error]`   | Stable `provider_rate_limited` terminal Error                                  |
+| `[steer]`            | Pending turn completed by SteerTurn                                            |
 
 Input without a directive defaults to `[text]`. Only one blocking directive (`approval`, `user-input`, or
 `steer`) may be active in a SendTurn.
@@ -129,7 +129,7 @@ The fixture reads the anonymous Credential FD only when `[credential]` is reques
 shape and Sentinel:
 
 ```json
-{"payload":{"acceptanceToken":"stage3-provider-acceptance-credential-v1"}}
+{ "payload": { "acceptanceToken": "stage3-provider-acceptance-credential-v1" } }
 ```
 
 It closes the FD, clears byte buffers, and returns only `credentialVerified` plus sorted payload key names under

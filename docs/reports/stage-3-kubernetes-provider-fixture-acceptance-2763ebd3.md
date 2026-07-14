@@ -46,21 +46,21 @@ compatible Codex CLI runtime at `0.144.1`, while release policy kept the Provide
 
 ## Case results
 
-| Case | Result |
-| --- | --- |
-| `environment.target-prepare` | pass |
-| `environment.control-plane-start` | pass |
-| `identity.dev-login` | pass |
-| `runtime.target-provision` | pass |
-| `resources.credential-project-session` | pass |
-| `runtime.worker-discovery` | pass |
-| `recovery.pending-approval-runtime-loss` | pass |
-| `fixture.approval-resolution` | pass |
-| `fixture.text-tool-usage-artifact` | pass |
-| `fixture.user-input-resolution` | pass |
-| `fixture.provider-error` | pass |
-| `recovery.control-plane-restart` | pass |
-| `fixture.second-turn-continuity` | pass |
+| Case                                     | Result |
+| ---------------------------------------- | ------ |
+| `environment.target-prepare`             | pass   |
+| `environment.control-plane-start`        | pass   |
+| `identity.dev-login`                     | pass   |
+| `runtime.target-provision`               | pass   |
+| `resources.credential-project-session`   | pass   |
+| `runtime.worker-discovery`               | pass   |
+| `recovery.pending-approval-runtime-loss` | pass   |
+| `fixture.approval-resolution`            | pass   |
+| `fixture.text-tool-usage-artifact`       | pass   |
+| `fixture.user-input-resolution`          | pass   |
+| `fixture.provider-error`                 | pass   |
+| `recovery.control-plane-restart`         | pass   |
+| `fixture.second-turn-continuity`         | pass   |
 
 ## Pending Approval Pod-loss recovery
 
@@ -70,12 +70,12 @@ observed `execution.recovering` at Session Event Sequence 7.
 
 Recovery preserved the Execution but replaced every Generation-owned identity:
 
-| Evidence | Obsolete Generation | Replacement Generation |
-| --- | --- | --- |
-| Generation | `1` | `2` |
-| Request ID | `fixture-approval-generation-1-1` | `fixture-approval-generation-2-1` |
+| Evidence       | Obsolete Generation                    | Replacement Generation                 |
+| -------------- | -------------------------------------- | -------------------------------------- |
+| Generation     | `1`                                    | `2`                                    |
+| Request ID     | `fixture-approval-generation-1-1`      | `fixture-approval-generation-2-1`      |
 | Interaction ID | `5f4d0021-ede8-47c3-8eb8-d447b020c3c9` | `a44d84df-bb5e-4ddd-a9b1-635df2d0d1b2` |
-| Pod UID | `c9701409-99d0-42b0-b6d0-f39a680da967` | `7a7c3f19-a883-47ac-9d12-707c922b3dc8` |
+| Pod UID        | `c9701409-99d0-42b0-b6d0-f39a680da967` | `7a7c3f19-a883-47ac-9d12-707c922b3dc8` |
 
 Only the replacement Request was resolved. The Turn then emitted one valid terminal path over Sequence 2 through
 16, and the generated report observed the execution-pinned terminal Pod as absent.
@@ -86,8 +86,7 @@ Only the replacement Request was resolved. The Turn then emitted one valid termi
   17 through 30. The Artifact was hash-verified and the anonymous Credential FD returned only the approved payload
   key name plus `credentialVerified=true`.
 - Structured User Input resolved through the user API over Sequence 31 through 41.
-- The deterministic `provider_rate_limited` failure produced one classified terminal path over Sequence 42 through
-  46.
+- The deterministic `provider_rate_limited` failure produced one classified terminal path over Sequence 42 through 46.
 - The isolated Control Plane restarted from process Generation 1 to 2 with persisted state at Sequence 46.
 - A second post-restart Turn completed at Sequence 57. The Session range remained contiguous from 1 through 57;
   the new execution-pinned Worker ID changed as expected without changing Session authority.

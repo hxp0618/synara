@@ -6,7 +6,11 @@ import {
   ControlPlaneFormField as FormField,
   ControlPlaneInlineError as InlineError,
 } from "~/components/settings/ControlPlaneSettingsPrimitives";
-import { SettingsListRow, SettingsRow, SettingsSection } from "~/components/settings/SettingsPanelPrimitives";
+import {
+  SettingsListRow,
+  SettingsRow,
+  SettingsSection,
+} from "~/components/settings/SettingsPanelPrimitives";
 import { Button } from "~/components/ui/button";
 import { Input } from "~/components/ui/input";
 import { controlPlaneClient } from "~/lib/controlPlaneClient";
@@ -24,10 +28,7 @@ function parseDays(value: string): number | null {
   return parsed;
 }
 
-export function TenantRetentionSettingsSection(props: {
-  tenantId: string;
-  canManage: boolean;
-}) {
+export function TenantRetentionSettingsSection(props: { tenantId: string; canManage: boolean }) {
   const queryClient = useQueryClient();
   const policy = useQuery({
     queryKey: retentionQueryKey(props.tenantId),

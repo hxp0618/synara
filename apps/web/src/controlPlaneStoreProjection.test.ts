@@ -3,11 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { OrchestrationReadModel, OrchestrationShellSnapshot } from "@synara/contracts";
 
 import type { AppState } from "./store";
-import {
-  syncAuthoritativeProjection,
-  syncServerReadModel,
-  syncServerShellSnapshot,
-} from "./store";
+import { syncAuthoritativeProjection, syncServerReadModel, syncServerShellSnapshot } from "./store";
 import type { Project, Thread } from "./types";
 
 const project: Project = {

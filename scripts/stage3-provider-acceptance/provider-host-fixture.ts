@@ -102,8 +102,7 @@ const ARTIFACT_DIRECTORY_NAME = ".synara-stage3-acceptance";
 const ARTIFACT_FILE_NAME = "artifact.txt";
 const ARTIFACT_RELATIVE_PATH = `${ARTIFACT_DIRECTORY_NAME}/${ARTIFACT_FILE_NAME}`;
 const ARTIFACT_CONTENT = "deterministic stage 3 acceptance artifact\n";
-export const STAGE3_FIXTURE_CREDENTIAL_SENTINEL =
-  "stage3-provider-acceptance-credential-v1";
+export const STAGE3_FIXTURE_CREDENTIAL_SENTINEL = "stage3-provider-acceptance-credential-v1";
 
 function openWorkspaceArtifact(workspaceDirectory: string, access: "read" | "write"): number {
   const workspaceRoot = realpathSync.native(workspaceDirectory);
@@ -137,7 +136,8 @@ function openWorkspaceArtifact(workspaceDirectory: string, access: "read" | "wri
     throw new Error("fixture artifact path escapes the Workspace");
   }
 
-  let flags = (access === "write" ? fsConstants.O_WRONLY : fsConstants.O_RDONLY) | fsConstants.O_NOFOLLOW;
+  let flags =
+    (access === "write" ? fsConstants.O_WRONLY : fsConstants.O_RDONLY) | fsConstants.O_NOFOLLOW;
   try {
     const targetStat = lstatSync(artifactPath);
     if (targetStat.isSymbolicLink() || !targetStat.isFile() || targetStat.nlink !== 1) {
@@ -218,7 +218,10 @@ export class Stage3ProviderAcceptanceHost {
   receiveLine(line: string): void {
     if (!line.trim()) return;
     if (Buffer.byteLength(line) > PROVIDER_HOST_MAX_COMMAND_BYTES) {
-      this.#emitProtocolInputError(undefined, "Provider Host command exceeds the negotiated size limit.");
+      this.#emitProtocolInputError(
+        undefined,
+        "Provider Host command exceeds the negotiated size limit.",
+      );
       return;
     }
 
@@ -314,7 +317,9 @@ export class Stage3ProviderAcceptanceHost {
     if (containsForbiddenSecretMaterial(command.payload)) {
       this.#terminalError(
         command,
-        protocolError("Provider Host commands must not contain Credential, Worker, or Lease Token material."),
+        protocolError(
+          "Provider Host commands must not contain Credential, Worker, or Lease Token material.",
+        ),
       );
       return;
     }
@@ -363,7 +368,15 @@ export class Stage3ProviderAcceptanceHost {
           this.#pendingTurn = null;
           this.#terminalError(
             pending.command,
-            errorDetail("cancelled", "Provider Session was stopped.", false, false, false, true, true),
+            errorDetail(
+              "cancelled",
+              "Provider Session was stopped.",
+              false,
+              false,
+              false,
+              true,
+              true,
+            ),
           );
         }
         this.#session = null;
@@ -396,7 +409,10 @@ export class Stage3ProviderAcceptanceHost {
     const workload = asRecord(runnerInput?.workload);
     const provider = readProvider(workload?.provider);
     if (!runnerInput || !workload || !provider) {
-      this.#terminalError(command, protocolError("Session command requires runnerInput.workload.provider."));
+      this.#terminalError(
+        command,
+        protocolError("Session command requires runnerInput.workload.provider."),
+      );
       return;
     }
     if (provider !== "codex" && provider !== "claudeAgent") {
@@ -430,7 +446,10 @@ export class Stage3ProviderAcceptanceHost {
       return;
     }
     if (!validRuntimeEventVersion(command.payload.runtimeEventVersion)) {
-      this.#terminalError(command, protocolError("Session command requested an unsupported Runtime Event version."));
+      this.#terminalError(
+        command,
+        protocolError("Session command requested an unsupported Runtime Event version."),
+      );
       return;
     }
     if (command.commandType === "ResumeSession" && !hasResumeData(runnerInput, workload)) {
@@ -474,11 +493,17 @@ export class Stage3ProviderAcceptanceHost {
       return;
     }
     if (this.#pendingTurn) {
-      this.#terminalError(command, protocolError("Only one SendTurn command may be active in a Provider Session."));
+      this.#terminalError(
+        command,
+        protocolError("Only one SendTurn command may be active in a Provider Session."),
+      );
       return;
     }
     if (!validRuntimeEventVersion(command.payload.runtimeEventVersion)) {
-      this.#terminalError(command, protocolError("SendTurn requested an unsupported Runtime Event version."));
+      this.#terminalError(
+        command,
+        protocolError("SendTurn requested an unsupported Runtime Event version."),
+      );
       return;
     }
     const inputText = optionalString(command.payload.inputText);
@@ -493,7 +518,10 @@ export class Stage3ProviderAcceptanceHost {
         scenario === "approval" || scenario === "user-input" || scenario === "steer",
     );
     if (blocking.length > 1) {
-      this.#terminalError(command, protocolError("SendTurn may request only one blocking fixture scenario."));
+      this.#terminalError(
+        command,
+        protocolError("SendTurn may request only one blocking fixture scenario."),
+      );
       return;
     }
     this.#turnSequence += 1;
@@ -665,18 +693,27 @@ export class Stage3ProviderAcceptanceHost {
       return;
     }
 
-    this.#terminalResult(command, this.#turnResult(outputText, credentialEvidence, workspaceEvidence));
+    this.#terminalResult(
+      command,
+      this.#turnResult(outputText, credentialEvidence, workspaceEvidence),
+    );
   }
 
   #resolveInteraction(command: ProviderHostCommand, expected: "approval" | "user-input"): void {
     const pending = this.#pendingTurn;
     if (!pending || pending.kind !== expected) {
-      this.#terminalError(command, protocolError(`${command.commandType} has no matching active interaction.`));
+      this.#terminalError(
+        command,
+        protocolError(`${command.commandType} has no matching active interaction.`),
+      );
       return;
     }
     const requestId = optionalString(command.payload.requestId);
     if (requestId !== pending.requestId || !asRecord(command.payload.resolution)) {
-      this.#terminalError(command, protocolError(`${command.commandType} payload does not match the active interaction.`));
+      this.#terminalError(
+        command,
+        protocolError(`${command.commandType} payload does not match the active interaction.`),
+      );
       return;
     }
 
@@ -691,11 +728,20 @@ export class Stage3ProviderAcceptanceHost {
   #steerTurn(command: ProviderHostCommand): void {
     const pending = this.#pendingTurn;
     if (!pending || pending.kind !== "steer") {
-      this.#terminalError(command, protocolError("SteerTurn requires an active steer fixture turn."));
+      this.#terminalError(
+        command,
+        protocolError("SteerTurn requires an active steer fixture turn."),
+      );
       return;
     }
-    if (!matchesTargetCommand(command, pending.command.commandId) || !optionalString(command.payload.inputText)) {
-      this.#terminalError(command, protocolError("SteerTurn payload does not match the active SendTurn command."));
+    if (
+      !matchesTargetCommand(command, pending.command.commandId) ||
+      !optionalString(command.payload.inputText)
+    ) {
+      this.#terminalError(
+        command,
+        protocolError("SteerTurn payload does not match the active SendTurn command."),
+      );
       return;
     }
 
@@ -710,7 +756,11 @@ export class Stage3ProviderAcceptanceHost {
     });
     this.#terminalResult(
       pending.command,
-      this.#turnResult("fixture steer complete", pending.credentialEvidence, pending.workspaceEvidence),
+      this.#turnResult(
+        "fixture steer complete",
+        pending.credentialEvidence,
+        pending.workspaceEvidence,
+      ),
     );
   }
 
@@ -732,7 +782,10 @@ export class Stage3ProviderAcceptanceHost {
       return;
     }
     if (!matchesTargetCommand(command, pending.command.commandId)) {
-      this.#terminalError(command, protocolError("InterruptTurn targetCommandId does not match the active SendTurn command."));
+      this.#terminalError(
+        command,
+        protocolError("InterruptTurn targetCommandId does not match the active SendTurn command."),
+      );
       return;
     }
 
@@ -767,7 +820,12 @@ export class Stage3ProviderAcceptanceHost {
     return `fixture-cursor-${this.#turnSequence}`;
   }
 
-  #writeArtifact(): { path: string; kind: string; originalName: string; contentType: string } | null {
+  #writeArtifact(): {
+    path: string;
+    kind: string;
+    originalName: string;
+    contentType: string;
+  } | null {
     const workspaceDirectory = this.#session?.workspaceDirectory;
     if (!workspaceDirectory) return null;
     let descriptor: number | undefined;
@@ -803,7 +861,10 @@ export class Stage3ProviderAcceptanceHost {
       const expected = Buffer.from(ARTIFACT_CONTENT, "utf8");
       if (fstatSync(descriptor).size !== expected.length) return undefined;
       const actual = Buffer.alloc(expected.length);
-      if (readSync(descriptor, actual, 0, actual.length, 0) !== actual.length || !actual.equals(expected)) {
+      if (
+        readSync(descriptor, actual, 0, actual.length, 0) !== actual.length ||
+        !actual.equals(expected)
+      ) {
         return undefined;
       }
       return { artifactRelativePath: ARTIFACT_RELATIVE_PATH, artifactContentVerified: true };
@@ -882,7 +943,11 @@ export class Stage3ProviderAcceptanceHost {
     return this.#credentialReadResult;
   }
 
-  #emitRuntimeEvent(command: ProviderHostCommand, eventType: string, payload: Record<string, unknown>): void {
+  #emitRuntimeEvent(
+    command: ProviderHostCommand,
+    eventType: string,
+    payload: Record<string, unknown>,
+  ): void {
     this.#emitPayload(command, "Event", {
       eventVersion: PROVIDER_RUNTIME_EVENT_VERSION,
       eventType,
@@ -930,7 +995,11 @@ export class Stage3ProviderAcceptanceHost {
   }
 
   #emitConfiguredFault(command: ProviderHostCommand): boolean {
-    if (this.#faultEmitted || this.#fault === "none" || command.commandType !== this.#faultCommand) {
+    if (
+      this.#faultEmitted ||
+      this.#fault === "none" ||
+      command.commandType !== this.#faultCommand
+    ) {
       return false;
     }
     this.#faultEmitted = true;
@@ -1018,7 +1087,9 @@ export function parseFixtureScenarios(inputText: string): ReadonlyArray<Stage3Fi
 }
 
 function catalogEntry(provider: ProviderHostProviderKind): ProviderCapabilityCatalogEntry {
-  const entry = PROVIDER_CAPABILITY_CATALOG.providers.find((candidate) => candidate.provider === provider);
+  const entry = PROVIDER_CAPABILITY_CATALOG.providers.find(
+    (candidate) => candidate.provider === provider,
+  );
   if (!entry) throw new Error("Provider capability catalog is incomplete");
   return entry;
 }
@@ -1041,9 +1112,13 @@ function validRuntimeEventVersion(value: unknown): boolean {
   return value === undefined || value === PROVIDER_RUNTIME_EVENT_VERSION;
 }
 
-function hasResumeData(runnerInput: Record<string, unknown>, workload: Record<string, unknown>): boolean {
+function hasResumeData(
+  runnerInput: Record<string, unknown>,
+  workload: Record<string, unknown>,
+): boolean {
   if (optionalString(runnerInput.providerResumeCursor)) return true;
-  if (Array.isArray(workload.conversationHistory) && workload.conversationHistory.length > 0) return true;
+  if (Array.isArray(workload.conversationHistory) && workload.conversationHistory.length > 0)
+    return true;
   return asRecord(workload.resumeSnapshot) !== undefined;
 }
 
@@ -1165,7 +1240,10 @@ function fallbackCommand(value: unknown): ProviderHostCommand {
         ? Math.floor(candidate.generation)
         : 1,
     commandType: "Describe",
-    commandId: safeWireString(candidate.commandId, "fixture-protocol-command") as ProviderHostCommand["commandId"],
+    commandId: safeWireString(
+      candidate.commandId,
+      "fixture-protocol-command",
+    ) as ProviderHostCommand["commandId"],
     occurredAt: new Date(FIXTURE_TIME_ORIGIN).toISOString(),
     payload: {},
   };
@@ -1185,7 +1263,9 @@ function optionalString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
-function enabledProvidersFromEnvironment(value: string | undefined): ReadonlySet<ProviderHostProviderKind> {
+function enabledProvidersFromEnvironment(
+  value: string | undefined,
+): ReadonlySet<ProviderHostProviderKind> {
   const providers = new Set<ProviderHostProviderKind>();
   for (const token of (value ?? "").split(",")) {
     const provider = readProvider(token);
@@ -1194,7 +1274,9 @@ function enabledProvidersFromEnvironment(value: string | undefined): ReadonlySet
   return providers;
 }
 
-function parseCliOptions(arguments_: ReadonlyArray<string>): Omit<Stage3ProviderFixtureOptions, "emitLine"> {
+function parseCliOptions(
+  arguments_: ReadonlyArray<string>,
+): Omit<Stage3ProviderFixtureOptions, "emitLine"> {
   let enabledProviders = enabledProvidersFromEnvironment(
     process.env.SYNARA_PROVIDER_HOST_EXPERIMENTAL_PROVIDERS,
   );
@@ -1204,7 +1286,9 @@ function parseCliOptions(arguments_: ReadonlyArray<string>): Omit<Stage3Provider
   for (const argument of arguments_) {
     if (argument === "--protocol-v2") continue;
     if (argument.startsWith("--enable-providers=")) {
-      enabledProviders = enabledProvidersFromEnvironment(argument.slice("--enable-providers=".length));
+      enabledProviders = enabledProvidersFromEnvironment(
+        argument.slice("--enable-providers=".length),
+      );
       continue;
     }
     if (argument.startsWith("--fault=")) {

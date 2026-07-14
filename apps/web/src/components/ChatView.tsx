@@ -1123,9 +1123,7 @@ export default function ChatView({
   const setStoreThreadError = useStore((store) => store.setError);
   const setStoreThreadWorkspace = useStore((store) => store.setThreadWorkspace);
   const controlPlane = useControlPlane();
-  const [controlPlaneTurnDispatcher] = useState(
-    () => new ControlPlaneTurnDispatcher(randomUUID),
-  );
+  const [controlPlaneTurnDispatcher] = useState(() => new ControlPlaneTurnDispatcher(randomUUID));
   const { settings, updateSettings } = useAppSettings();
   const assistantDeliveryMode = resolveAssistantDeliveryMode(settings);
   const desktopTopBarTrafficLightGutterClassName = useDesktopTopBarTrafficLightGutterClassName();
@@ -2046,14 +2044,14 @@ export default function ChatView({
   const phase = derivePhase(activeThread?.session ?? null);
   const isServerThreadModelSwitchPending = Boolean(
     isServerThread &&
-      activeThread &&
-      controlPlane.sessionModelSwitchingBySessionId[activeThread.id] === true,
+    activeThread &&
+    controlPlane.sessionModelSwitchingBySessionId[activeThread.id] === true,
   );
   const hasActiveServerExecution = Boolean(
     isServerThread &&
-      (phase === "running" ||
-        activeThread?.latestTurn?.state === "running" ||
-        activeThread?.session?.activeTurnId !== undefined),
+    (phase === "running" ||
+      activeThread?.latestTurn?.state === "running" ||
+      activeThread?.session?.activeTurnId !== undefined),
   );
   const projectProviderCapabilitiesQuery = useControlPlaneProjectProviderCapabilities(
     controlPlane.isAuthoritative && !isServerThread ? (activeProject?.id ?? null) : null,
@@ -2165,20 +2163,18 @@ export default function ChatView({
   const advancedCapabilityDecisions = useMemo(
     () =>
       Object.fromEntries(
-        (["compact", "review", "rollback", "fork", "checkpoint"] as const).map(
-          (capabilityId) => [
+        (["compact", "review", "rollback", "fork", "checkpoint"] as const).map((capabilityId) => [
+          capabilityId,
+          resolveControlPlaneCapabilityDecision({
+            isAuthoritative: controlPlane.isAuthoritative,
+            projection: activeProviderCapabilityProjection,
+            ...(activeProviderCapabilityError
+              ? { projectionError: activeProviderCapabilityError }
+              : {}),
+            provider: selectedProvider,
             capabilityId,
-            resolveControlPlaneCapabilityDecision({
-              isAuthoritative: controlPlane.isAuthoritative,
-              projection: activeProviderCapabilityProjection,
-              ...(activeProviderCapabilityError
-                ? { projectionError: activeProviderCapabilityError }
-                : {}),
-              provider: selectedProvider,
-              capabilityId,
-            }),
-          ],
-        ),
+          }),
+        ]),
       ) as Record<
         "compact" | "review" | "rollback" | "fork" | "checkpoint",
         ReturnType<typeof resolveControlPlaneCapabilityDecision>
@@ -2370,8 +2366,7 @@ export default function ChatView({
     }),
   );
   const droidModelDiscoveryEnabled =
-    localProviderDiscoveryEnabled &&
-    (selectedProvider === "droid" || lockedProvider === "droid");
+    localProviderDiscoveryEnabled && (selectedProvider === "droid" || lockedProvider === "droid");
   const droidDynamicModelsQuery = useQuery(
     providerModelsQueryOptions({
       provider: "droid",
@@ -3691,10 +3686,9 @@ export default function ChatView({
         : EMPTY_COMPOSER_PLUGIN_SUGGESTIONS,
     [localProviderDiscoveryEnabled, providerPluginsQuery.data],
   );
-  const providerNativeCommands =
-    localProviderDiscoveryEnabled
-      ? (providerCommandsQuery.data?.commands ?? EMPTY_PROVIDER_NATIVE_COMMANDS)
-      : EMPTY_PROVIDER_NATIVE_COMMANDS;
+  const providerNativeCommands = localProviderDiscoveryEnabled
+    ? (providerCommandsQuery.data?.commands ?? EMPTY_PROVIDER_NATIVE_COMMANDS)
+    : EMPTY_PROVIDER_NATIVE_COMMANDS;
   const providerNativeCommandNames = useMemo(
     () => providerNativeCommands.map((command) => command.name),
     [providerNativeCommands],
@@ -6250,7 +6244,9 @@ export default function ChatView({
             type: "error",
             title: "Failed to switch model",
             description:
-              error instanceof Error ? error.message : "The SaaS Session model could not be updated.",
+              error instanceof Error
+                ? error.message
+                : "The SaaS Session model could not be updated.",
           });
         }
         scheduleComposerFocus();
@@ -7795,13 +7791,7 @@ export default function ChatView({
           interactionMode: interactionModeForSend,
           createSession: ({ projectId, idempotencyKey, ...input }) =>
             controlPlane.createSession(projectId, { ...input, idempotencyKey }),
-          createTurn: ({
-            sessionId,
-            inputText,
-            runtimeMode,
-            interactionMode,
-            idempotencyKey,
-          }) =>
+          createTurn: ({ sessionId, inputText, runtimeMode, interactionMode, idempotencyKey }) =>
             controlPlane.createTurn(sessionId, inputText, idempotencyKey, {
               runtimeMode,
               interactionMode,
@@ -8752,11 +8742,7 @@ export default function ChatView({
   );
 
   const onRespondToUserInput = useCallback(
-    async (
-      requestId: ApprovalRequestId,
-      answers: ProviderUserInputAnswers,
-      cancel = false,
-    ) => {
+    async (requestId: ApprovalRequestId, answers: ProviderUserInputAnswers, cancel = false) => {
       const pendingInput = activePendingUserInput;
       const requestKey = activePendingUserInputKey;
       if (!pendingInput || pendingInput.requestId !== requestId || !requestKey || !activeThreadId) {
@@ -8775,7 +8761,9 @@ export default function ChatView({
           answers,
           resolveControlPlane: async (executionId, durableRequestId, durableAnswers) => {
             if (!pendingInput.interactionId) {
-              throw new Error("The durable user-input request is missing its Interaction reference.");
+              throw new Error(
+                "The durable user-input request is missing its Interaction reference.",
+              );
             }
             await controlPlane.resolveUserInput(
               activeThreadId,
@@ -8787,7 +8775,9 @@ export default function ChatView({
           },
           interruptControlPlane: async () => {
             if (!pendingInput.interactionId) {
-              throw new Error("The durable user-input request is missing its Interaction reference.");
+              throw new Error(
+                "The durable user-input request is missing its Interaction reference.",
+              );
             }
             await controlPlane.interruptActiveTurn(
               activeThreadId,
@@ -8818,9 +8808,7 @@ export default function ChatView({
           err instanceof Error ? err.message : "Failed to submit user input.",
         );
       } finally {
-        setRespondingUserInputRequestIds((existing) =>
-          existing.filter((id) => id !== requestKey),
-        );
+        setRespondingUserInputRequestIds((existing) => existing.filter((id) => id !== requestKey));
       }
     },
     [
@@ -8998,13 +8986,7 @@ export default function ChatView({
     dispatchMode: "queue" | "steer";
     queuedTurn?: QueuedComposerPlanFollowUp;
   }): Promise<boolean> {
-    if (
-      !activeThread ||
-      !isServerThread ||
-      isSendBusy ||
-      isConnecting ||
-      sendInFlightRef.current
-    ) {
+    if (!activeThread || !isServerThread || isSendBusy || isConnecting || sendInFlightRef.current) {
       return false;
     }
 
@@ -9679,9 +9661,7 @@ export default function ChatView({
         model={selectedModelForPickerWithCustomFallback}
         lockedProvider={lockedProvider}
         providers={effectiveProviderStatuses}
-        {...(providerAvailabilityByProvider
-          ? { providerAvailabilityByProvider }
-          : {})}
+        {...(providerAvailabilityByProvider ? { providerAvailabilityByProvider } : {})}
         modelOptionsByProvider={modelOptionsByProvider}
         loadingModelProviders={{
           cursor: cursorModelDiscoveryPending,
@@ -9724,9 +9704,7 @@ export default function ChatView({
       model={selectedModelForPickerWithCustomFallback}
       lockedProvider={lockedProvider}
       providers={effectiveProviderStatuses}
-      {...(providerAvailabilityByProvider
-        ? { providerAvailabilityByProvider }
-        : {})}
+      {...(providerAvailabilityByProvider ? { providerAvailabilityByProvider } : {})}
       modelOptionsByProvider={modelOptionsByProvider}
       loadingModelProviders={{
         cursor: cursorModelDiscoveryPending,

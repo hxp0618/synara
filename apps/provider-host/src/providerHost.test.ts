@@ -84,8 +84,7 @@ describe("provider credential isolation", () => {
   });
 
   it("maps only controlled Provider proxy aliases and redacts authenticated URLs", () => {
-    const authenticatedProxy =
-      "http://provider-user:provider-password@proxy.example.test:8080";
+    const authenticatedProxy = "http://provider-user:provider-password@proxy.example.test:8080";
     const result = providerEnvironment(
       {
         PATH: "/bin",
@@ -186,7 +185,9 @@ describe("durable conversation reconstruction", () => {
             { role: "user", text: "prior question", sequenceFrom: 1, sequenceThrough: 1 },
             { role: "assistant", text: "prior answer", sequenceFrom: 2, sequenceThrough: 4 },
           ],
-          toolResults: [{ sequence: 5, kind: "command_execution", summary: "Focused tests passed" }],
+          toolResults: [
+            { sequence: 5, kind: "command_execution", summary: "Focused tests passed" },
+          ],
           artifactReferences: [{ sequence: 6, kind: "generated_file", artifactId: "artifact-1" }],
           mode: {
             runtimeMode: "approval-required",
@@ -225,12 +226,18 @@ describe("durable conversation reconstruction", () => {
     expect(prompt).toContain(
       '"mode":{"runtimeMode":"approval-required","interactionMode":"plan","plan":true,"review":true,"reviewSequence":7}',
     );
-    expect(prompt).toContain('"toolResults":[{"sequence":5,"kind":"command_execution","summary":"Focused tests passed"}]');
-    expect(prompt).toContain('"artifactReferences":[{"sequence":6,"kind":"generated_file","artifactId":"artifact-1"}]');
+    expect(prompt).toContain(
+      '"toolResults":[{"sequence":5,"kind":"command_execution","summary":"Focused tests passed"}]',
+    );
+    expect(prompt).toContain(
+      '"artifactReferences":[{"sequence":6,"kind":"generated_file","artifactId":"artifact-1"}]',
+    );
     expect(prompt).toContain('"workspace":{"workspaceId":"workspace-1"');
     expect(prompt).not.toContain('"messages"');
     expect(prompt).toContain("<assistant>\nprior answer\n</assistant>");
-    expect(prompt).toContain("<current_user>\ncontinue from the checkpointed state\n</current_user>");
+    expect(prompt).toContain(
+      "<current_user>\ncontinue from the checkpointed state\n</current_user>",
+    );
   });
 
   it("escapes Snapshot text that attempts to close the recovery-data boundary", () => {

@@ -5,15 +5,8 @@ import type {
 } from "@anthropic-ai/claude-agent-sdk";
 import { describe, expect, it } from "vitest";
 
-import type {
-  ClaudeQueryFactory,
-  ClaudeQueryRuntime,
-} from "./claudeAgentSdkRuntime";
-import {
-  startProviderHostRun,
-  type RunnerInput,
-  type RunnerMessage,
-} from "./providerHost";
+import type { ClaudeQueryFactory, ClaudeQueryRuntime } from "./claudeAgentSdkRuntime";
+import { startProviderHostRun, type RunnerInput, type RunnerMessage } from "./providerHost";
 
 describe("Claude Agent SDK runtime", () => {
   it("delivers approval, safe tool lifecycle, usage and streamed output", async () => {
@@ -63,6 +56,7 @@ describe("Claude Agent SDK runtime", () => {
             {
               signal: new AbortController().signal,
               toolUseID: "tool-approval",
+              requestId: "permission-tool-approval",
               title: "Run repository status",
             },
           );
@@ -71,9 +65,7 @@ describe("Claude Agent SDK runtime", () => {
             type: "user",
             session_id: "session-approval",
             message: {
-              content: [
-                { type: "tool_result", tool_use_id: "tool-approval", content: "clean" },
-              ],
+              content: [{ type: "tool_result", tool_use_id: "tool-approval", content: "clean" }],
             },
           });
           yield sdkMessage({
@@ -81,10 +73,12 @@ describe("Claude Agent SDK runtime", () => {
             session_id: "session-approval",
             message: { content: [{ type: "text", text: "approved" }] },
           });
-          yield sdkMessage(successResult("session-approval", "approved", {
-            input_tokens: 4,
-            output_tokens: 2,
-          }));
+          yield sdkMessage(
+            successResult("session-approval", "approved", {
+              input_tokens: 4,
+              output_tokens: 2,
+            }),
+          );
         })(),
       );
 
@@ -174,6 +168,7 @@ describe("Claude Agent SDK runtime", () => {
             {
               signal: new AbortController().signal,
               toolUseID: "tool-question",
+              requestId: "permission-tool-question",
             },
           );
           expect(decision).toMatchObject({
@@ -235,6 +230,7 @@ describe("Claude Agent SDK runtime", () => {
             {
               signal: new AbortController().signal,
               toolUseID: longApprovalId,
+              requestId: "permission-long-approval-1",
             },
           );
           const duplicateApproval = queryOptions.canUseTool?.(
@@ -243,6 +239,7 @@ describe("Claude Agent SDK runtime", () => {
             {
               signal: new AbortController().signal,
               toolUseID: longApprovalId,
+              requestId: "permission-long-approval-2",
             },
           );
           await expect(Promise.all([approval, duplicateApproval])).resolves.toEqual([
@@ -264,6 +261,7 @@ describe("Claude Agent SDK runtime", () => {
             {
               signal: new AbortController().signal,
               toolUseID: "stable-user-input",
+              requestId: "permission-stable-user-input",
             },
           );
           expect(userInput).toMatchObject({
@@ -301,9 +299,7 @@ describe("Claude Agent SDK runtime", () => {
     }
 
     const userInput = await userInputInteraction;
-    expect(userInput.payload.requestId).toBe(
-      "claude:generation-9:user-input:stable-user-input",
-    );
+    expect(userInput.payload.requestId).toBe("claude:generation-9:user-input:stable-user-input");
     await run.resolveUserInput?.({
       requestId: userInput.payload.requestId,
       resolution: { answers: { "question-1": "Staging" } },
@@ -539,12 +535,9 @@ describe("Claude Agent SDK runtime", () => {
           yield sdkMessage(successResult("session-steer", "steered", {}));
         })(),
       );
-    const run = startProviderHostRun(
-      claudeInput({ inputText: "long task" }),
-      null,
-      () => {},
-      { claudeQueryFactory: queryFactory },
-    );
+    const run = startProviderHostRun(claudeInput({ inputText: "long task" }), null, () => {}, {
+      claudeQueryFactory: queryFactory,
+    });
 
     await initialReadPromise;
     await run.steer?.({ inputText: "focus on the failing test" });
@@ -566,9 +559,7 @@ describe("Claude Agent SDK runtime", () => {
             type: "assistant",
             session_id: "session-pending-approval",
             message: {
-              content: [
-                { type: "tool_use", id: "tool-pending", name: "Bash", input: {} },
-              ],
+              content: [{ type: "tool_use", id: "tool-pending", name: "Bash", input: {} }],
             },
           });
           const decision = await requiredOptions(options).canUseTool?.(
@@ -577,6 +568,7 @@ describe("Claude Agent SDK runtime", () => {
             {
               signal: new AbortController().signal,
               toolUseID: "tool-pending",
+              requestId: "permission-tool-pending",
             },
           );
           expect(decision).toMatchObject({ behavior: "deny" });
@@ -598,8 +590,7 @@ describe("Claude Agent SDK runtime", () => {
   });
 
   it("redacts Provider credentials from SDK terminal errors", async () => {
-    const controlledProxy =
-      "http://provider-user:provider-password@proxy.example.test:8080";
+    const controlledProxy = "http://provider-user:provider-password@proxy.example.test:8080";
     const ambient = {
       SECRET: "ordinary-secret",
       HOST_SECRET: "host-secret",
@@ -647,22 +638,18 @@ describe("Claude Agent SDK runtime", () => {
       { claudeQueryFactory: queryFactory, environment },
     );
 
-    await expect(run.result).rejects.toThrow(
-      "request failed via [REDACTED] with [REDACTED]",
-    );
+    await expect(run.result).rejects.toThrow("request failed via [REDACTED] with [REDACTED]");
     await expect(run.result).rejects.not.toThrow("provider-secret");
     await expect(run.result).rejects.not.toThrow(controlledProxy);
   });
 });
 
-function claudeInput(
-  input: {
-    inputText: string;
-    runtimeMode?: "approval-required" | "full-access";
-    interactionMode?: "default" | "plan";
-    generation?: number;
-  },
-): RunnerInput {
+function claudeInput(input: {
+  inputText: string;
+  runtimeMode?: "approval-required" | "full-access";
+  interactionMode?: "default" | "plan";
+  generation?: number;
+}): RunnerInput {
   return {
     execution: {
       id: "execution-claude-sdk",
@@ -727,9 +714,7 @@ function fakeQuery(
   };
 }
 
-async function promptText(
-  prompt: string | AsyncIterable<SDKUserMessage>,
-): Promise<string> {
+async function promptText(prompt: string | AsyncIterable<SDKUserMessage>): Promise<string> {
   if (typeof prompt === "string") return prompt;
   const message = await prompt[Symbol.asyncIterator]().next();
   if (message.done) return "";

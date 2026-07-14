@@ -35,9 +35,7 @@ export function ControlPlaneGate({ children }: { children: ReactNode }) {
   const startSSO = (event: FormEvent) => {
     event.preventDefault();
     void run("sso", async () => {
-      const connections = await controlPlaneClient.listPublicIdentityConnections(
-        tenantSlug.trim(),
-      );
+      const connections = await controlPlaneClient.listPublicIdentityConnections(tenantSlug.trim());
       const connection = connections.items[0];
       if (!connection) throw new Error("No active SSO connection was found for this Tenant.");
       const result = await controlPlaneClient.startSSO(connection.id, window.location.pathname);
@@ -52,8 +50,7 @@ export function ControlPlaneGate({ children }: { children: ReactNode }) {
         <p className="text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground">
           {APP_DISPLAY_NAME} Control Plane
         </p>
-        {controlPlane.availability === "detecting" ||
-        controlPlane.authentication === "unknown" ? (
+        {controlPlane.availability === "detecting" || controlPlane.authentication === "unknown" ? (
           <div className="mt-4">
             <h1 className="text-lg font-semibold">Connecting to the Control Plane…</h1>
             <p className="mt-2 text-sm text-muted-foreground">

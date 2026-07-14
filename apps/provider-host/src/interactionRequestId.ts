@@ -7,11 +7,12 @@ export function providerInteractionRequestId(
   nativeId: string | number,
   disambiguator?: number,
 ): string {
-  const prefix = [
-    provider,
-    ...(generation === undefined ? [] : [`generation-${generation}`]),
-    ...(kind === undefined ? [] : [kind]),
-  ].join(":") + ":";
+  const prefix =
+    [
+      provider,
+      ...(generation === undefined ? [] : [`generation-${generation}`]),
+      ...(kind === undefined ? [] : [kind]),
+    ].join(":") + ":";
   const suffix = disambiguator === undefined ? "" : `:${disambiguator}`;
   const nativeIdByteLimit =
     MAX_INTERACTION_REQUEST_ID_BYTES - Buffer.byteLength(prefix) - Buffer.byteLength(suffix);

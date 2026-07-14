@@ -28,23 +28,24 @@ describe("controlPlaneClient", () => {
   });
 
   it("probes the public platform profile before requiring authentication", async () => {
-    const fetchMock = vi.fn(async () =>
-      new Response(
-        JSON.stringify({
-          profile: "single-node",
-          metadataStore: "postgresql",
-          artifactStore: "minio",
-          queueDriver: "postgres-outbox",
-          controlPlaneReplicas: 1,
-          highAvailability: false,
-          leaseEnabled: true,
-          fencingEnabled: true,
-          executionTargetKinds: ["docker", "kubernetes", "local", "ssh"],
-          artifactPayloadMigration: true,
-          metadataExportImport: true,
-        }),
-        { status: 200, headers: { "Content-Type": "application/json" } },
-      ),
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            profile: "single-node",
+            metadataStore: "postgresql",
+            artifactStore: "minio",
+            queueDriver: "postgres-outbox",
+            controlPlaneReplicas: 1,
+            highAvailability: false,
+            leaseEnabled: true,
+            fencingEnabled: true,
+            executionTargetKinds: ["docker", "kubernetes", "local", "ssh"],
+            artifactPayloadMigration: true,
+            metadataExportImport: true,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
     );
     vi.stubGlobal("fetch", fetchMock);
 
@@ -58,21 +59,22 @@ describe("controlPlaneClient", () => {
   });
 
   it("sends JSON with same-origin credentials", async () => {
-    const fetchMock = vi.fn(async () =>
-      new Response(
-        JSON.stringify({
-          authenticated: true,
-          user: {
-            userId: "user-1",
-            sessionId: "session-1",
-            activeTenantId: "tenant-1",
-            email: "owner@example.com",
-            displayName: "Owner",
-          },
-          tenants: [],
-        }),
-        { status: 200, headers: { "Content-Type": "application/json" } },
-      ),
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            authenticated: true,
+            user: {
+              userId: "user-1",
+              sessionId: "session-1",
+              activeTenantId: "tenant-1",
+              email: "owner@example.com",
+              displayName: "Owner",
+            },
+            tenants: [],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
     );
     vi.stubGlobal("fetch", fetchMock);
 
@@ -91,17 +93,18 @@ describe("controlPlaneClient", () => {
   it("preserves stable API error details", async () => {
     vi.stubGlobal(
       "fetch",
-      vi.fn(async () =>
-        new Response(
-          JSON.stringify({
-            error: {
-              code: "tenant_forbidden",
-              message: "Tenant access denied.",
-              requestId: "request-1",
-            },
-          }),
-          { status: 403, headers: { "Content-Type": "application/json" } },
-        ),
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              error: {
+                code: "tenant_forbidden",
+                message: "Tenant access denied.",
+                requestId: "request-1",
+              },
+            }),
+            { status: 403, headers: { "Content-Type": "application/json" } },
+          ),
       ),
     );
 
@@ -115,27 +118,28 @@ describe("controlPlaneClient", () => {
   });
 
   it("creates agent sessions through the active-tenant project route", async () => {
-    const fetchMock = vi.fn(async () =>
-      new Response(
-        JSON.stringify({
-          id: "session-1",
-          tenantId: "tenant-1",
-          organizationId: "organization-1",
-          projectId: "project-1",
-          createdBy: "user-1",
-          title: "Session",
-          status: "active",
-          visibility: "private",
-          provider: "codex",
-          model: "gpt-5.6-sol",
-          executionTargetId: "target-1",
-          lastEventSequence: 1,
-          createdAt: "2026-07-12T00:00:00Z",
-          updatedAt: "2026-07-12T00:00:00Z",
-          archivedAt: null,
-        }),
-        { status: 201, headers: { "Content-Type": "application/json" } },
-      ),
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            id: "session-1",
+            tenantId: "tenant-1",
+            organizationId: "organization-1",
+            projectId: "project-1",
+            createdBy: "user-1",
+            title: "Session",
+            status: "active",
+            visibility: "private",
+            provider: "codex",
+            model: "gpt-5.6-sol",
+            executionTargetId: "target-1",
+            lastEventSequence: 1,
+            createdAt: "2026-07-12T00:00:00Z",
+            updatedAt: "2026-07-12T00:00:00Z",
+            archivedAt: null,
+          }),
+          { status: 201, headers: { "Content-Type": "application/json" } },
+        ),
     );
     vi.stubGlobal("fetch", fetchMock);
 
@@ -170,16 +174,17 @@ describe("controlPlaneClient", () => {
   });
 
   it("loads project Provider capabilities with the resolved or explicit execution target", async () => {
-    const fetchMock = vi.fn(async () =>
-      new Response(
-        JSON.stringify({
-          executionTargetId: "target/one",
-          targetKind: "kubernetes",
-          basis: "target",
-          items: [],
-        }),
-        { status: 200, headers: { "Content-Type": "application/json" } },
-      ),
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            executionTargetId: "target/one",
+            targetKind: "kubernetes",
+            basis: "target",
+            items: [],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
     );
     vi.stubGlobal("fetch", fetchMock);
 
@@ -199,24 +204,25 @@ describe("controlPlaneClient", () => {
   });
 
   it("loads execution-bound Session Provider capabilities", async () => {
-    const fetchMock = vi.fn(async () =>
-      new Response(
-        JSON.stringify({
-          executionTargetId: "target-1",
-          targetKind: "docker",
-          executionId: "execution-1",
-          basis: "execution",
-          items: [
-            {
-              provider: "droid",
-              capabilityId: "send-turn",
-              status: "unsupported",
-              reasonCode: "capability_unsupported",
-            },
-          ],
-        }),
-        { status: 200, headers: { "Content-Type": "application/json" } },
-      ),
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            executionTargetId: "target-1",
+            targetKind: "docker",
+            executionId: "execution-1",
+            basis: "execution",
+            items: [
+              {
+                provider: "droid",
+                capabilityId: "send-turn",
+                status: "unsupported",
+                reasonCode: "capability_unsupported",
+              },
+            ],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
     );
     vi.stubGlobal("fetch", fetchMock);
 
@@ -231,27 +237,28 @@ describe("controlPlaneClient", () => {
   });
 
   it("switches a Session model through the dedicated model-switch route", async () => {
-    const fetchMock = vi.fn(async () =>
-      new Response(
-        JSON.stringify({
-          id: "session-1",
-          tenantId: "tenant-1",
-          organizationId: "organization-1",
-          projectId: "project-1",
-          createdBy: "user-1",
-          title: "Session",
-          status: "active",
-          visibility: "private",
-          provider: "codex",
-          model: "gpt-5.6-sol",
-          executionTargetId: "target-1",
-          lastEventSequence: 7,
-          createdAt: "2026-07-12T00:00:00Z",
-          updatedAt: "2026-07-12T00:00:07Z",
-          archivedAt: null,
-        }),
-        { status: 200, headers: { "Content-Type": "application/json" } },
-      ),
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            id: "session-1",
+            tenantId: "tenant-1",
+            organizationId: "organization-1",
+            projectId: "project-1",
+            createdBy: "user-1",
+            title: "Session",
+            status: "active",
+            visibility: "private",
+            provider: "codex",
+            model: "gpt-5.6-sol",
+            executionTargetId: "target-1",
+            lastEventSequence: 7,
+            createdAt: "2026-07-12T00:00:00Z",
+            updatedAt: "2026-07-12T00:00:07Z",
+            archivedAt: null,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
     );
     vi.stubGlobal("fetch", fetchMock);
 
@@ -270,33 +277,32 @@ describe("controlPlaneClient", () => {
       }),
     );
     const request = fetchMock.mock.calls[0]?.[1] as RequestInit;
-    expect(new Headers(request.headers).get("Idempotency-Key")).toBe(
-      "web-session-model-switch-1",
-    );
+    expect(new Headers(request.headers).get("Idempotency-Key")).toBe("web-session-model-switch-1");
   });
 
   it("sends expectedModel null explicitly when the Session has no current model", async () => {
-    const fetchMock = vi.fn(async () =>
-      new Response(
-        JSON.stringify({
-          id: "session-1",
-          tenantId: "tenant-1",
-          organizationId: "organization-1",
-          projectId: "project-1",
-          createdBy: "user-1",
-          title: "Session",
-          status: "active",
-          visibility: "private",
-          provider: "claudeAgent",
-          model: "claude-sonnet-5",
-          executionTargetId: "target-1",
-          lastEventSequence: 7,
-          createdAt: "2026-07-12T00:00:00Z",
-          updatedAt: "2026-07-12T00:00:07Z",
-          archivedAt: null,
-        }),
-        { status: 200, headers: { "Content-Type": "application/json" } },
-      ),
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            id: "session-1",
+            tenantId: "tenant-1",
+            organizationId: "organization-1",
+            projectId: "project-1",
+            createdBy: "user-1",
+            title: "Session",
+            status: "active",
+            visibility: "private",
+            provider: "claudeAgent",
+            model: "claude-sonnet-5",
+            executionTargetId: "target-1",
+            lastEventSequence: 7,
+            createdAt: "2026-07-12T00:00:00Z",
+            updatedAt: "2026-07-12T00:00:07Z",
+            archivedAt: null,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
     );
     vi.stubGlobal("fetch", fetchMock);
 
@@ -352,9 +358,7 @@ describe("controlPlaneClient", () => {
       }),
     );
     const createRequest = fetchMock.mock.calls[0]?.[1] as RequestInit;
-    expect(new Headers(createRequest.headers).get("Idempotency-Key")).toBe(
-      "web-project-request-1",
-    );
+    expect(new Headers(createRequest.headers).get("Idempotency-Key")).toBe("web-project-request-1");
     expect(fetchMock).toHaveBeenNthCalledWith(
       2,
       "/v1/projects/project%2Fone",
@@ -390,12 +394,17 @@ describe("controlPlaneClient", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     const page = await controlPlaneClient.listSessionEvents("session/one", -5, 5_000);
-    await controlPlaneClient.createTurn("session/one", "Continue", {
-      idempotencyKey: "web-turn-request-1",
-    }, {
-      runtimeMode: "approval-required",
-      interactionMode: "plan",
-    });
+    await controlPlaneClient.createTurn(
+      "session/one",
+      "Continue",
+      {
+        idempotencyKey: "web-turn-request-1",
+      },
+      {
+        runtimeMode: "approval-required",
+        interactionMode: "plan",
+      },
+    );
 
     expect(page.lastSequence).toBe(23);
     expect(fetchMock).toHaveBeenNthCalledWith(
@@ -404,9 +413,7 @@ describe("controlPlaneClient", () => {
       expect.objectContaining({ credentials: "include" }),
     );
     const turnRequest = fetchMock.mock.calls[1]?.[1] as RequestInit;
-    expect(new Headers(turnRequest.headers).get("Idempotency-Key")).toBe(
-      "web-turn-request-1",
-    );
+    expect(new Headers(turnRequest.headers).get("Idempotency-Key")).toBe("web-turn-request-1");
     expect(JSON.parse(String(turnRequest.body))).toEqual({
       inputText: "Continue",
       runtimeMode: "approval-required",
@@ -415,25 +422,26 @@ describe("controlPlaneClient", () => {
   });
 
   it("requests an idempotent durable interrupt for the active Turn", async () => {
-    const fetchMock = vi.fn(async () =>
-      new Response(
-        JSON.stringify({
-          id: "control-1",
-          executionId: "execution-1",
-          sessionId: "session/one",
-          turnId: "turn-1",
-          provider: "codex",
-          commandType: "InterruptTurn",
-          commandId: "interrupt:control-1",
-          payload: { turnId: "turn-1" },
-          status: "pending",
-          requestedBy: "user-1",
-          requestedAt: "2026-07-13T00:00:00Z",
-          deliveryAttempts: 0,
-          deliveryAvailableAt: "2026-07-13T00:00:00Z",
-        }),
-        { status: 202, headers: { "Content-Type": "application/json" } },
-      ),
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            id: "control-1",
+            executionId: "execution-1",
+            sessionId: "session/one",
+            turnId: "turn-1",
+            provider: "codex",
+            commandType: "InterruptTurn",
+            commandId: "interrupt:control-1",
+            payload: { turnId: "turn-1" },
+            status: "pending",
+            requestedBy: "user-1",
+            requestedAt: "2026-07-13T00:00:00Z",
+            deliveryAttempts: 0,
+            deliveryAvailableAt: "2026-07-13T00:00:00Z",
+          }),
+          { status: 202, headers: { "Content-Type": "application/json" } },
+        ),
     );
     vi.stubGlobal("fetch", fetchMock);
 
@@ -520,25 +528,26 @@ describe("controlPlaneClient", () => {
   });
 
   it("requests an idempotent durable Steer payload for the active Turn", async () => {
-    const fetchMock = vi.fn(async () =>
-      new Response(
-        JSON.stringify({
-          id: "control-steer-1",
-          executionId: "execution-1",
-          sessionId: "session/one",
-          turnId: "turn-1",
-          provider: "codex",
-          commandType: "SteerTurn",
-          commandId: "steer:control-steer-1",
-          payload: { turnId: "turn-1", inputText: "Focus on tests" },
-          status: "pending",
-          requestedBy: "user-1",
-          requestedAt: "2026-07-13T00:00:00Z",
-          deliveryAttempts: 0,
-          deliveryAvailableAt: "2026-07-13T00:00:00Z",
-        }),
-        { status: 202, headers: { "Content-Type": "application/json" } },
-      ),
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            id: "control-steer-1",
+            executionId: "execution-1",
+            sessionId: "session/one",
+            turnId: "turn-1",
+            provider: "codex",
+            commandType: "SteerTurn",
+            commandId: "steer:control-steer-1",
+            payload: { turnId: "turn-1", inputText: "Focus on tests" },
+            status: "pending",
+            requestedBy: "user-1",
+            requestedAt: "2026-07-13T00:00:00Z",
+            deliveryAttempts: 0,
+            deliveryAvailableAt: "2026-07-13T00:00:00Z",
+          }),
+          { status: 202, headers: { "Content-Type": "application/json" } },
+        ),
     );
     vi.stubGlobal("fetch", fetchMock);
 
@@ -556,21 +565,22 @@ describe("controlPlaneClient", () => {
   });
 
   it("creates execution targets without expecting secret configuration in the response", async () => {
-    const fetchMock = vi.fn(async () =>
-      new Response(
-        JSON.stringify({
-          id: "target-1",
-          tenantId: "tenant-1",
-          organizationId: "organization-1",
-          kind: "ssh",
-          name: "Build host",
-          status: "active",
-          capabilities: { workspaceModes: ["local"] },
-          createdAt: "2026-07-12T00:00:00Z",
-          updatedAt: "2026-07-12T00:00:00Z",
-        }),
-        { status: 201, headers: { "Content-Type": "application/json" } },
-      ),
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            id: "target-1",
+            tenantId: "tenant-1",
+            organizationId: "organization-1",
+            kind: "ssh",
+            name: "Build host",
+            status: "active",
+            capabilities: { workspaceModes: ["local"] },
+            createdAt: "2026-07-12T00:00:00Z",
+            updatedAt: "2026-07-12T00:00:00Z",
+          }),
+          { status: 201, headers: { "Content-Type": "application/json" } },
+        ),
     );
     vi.stubGlobal("fetch", fetchMock);
 
@@ -600,53 +610,54 @@ describe("controlPlaneClient", () => {
   });
 
   it("lists tenant-scoped observed Worker Manifests", async () => {
-    const fetchMock = vi.fn(async () =>
-      new Response(
-        JSON.stringify({
-          items: [
-            {
-              executionTargetId: "target-1",
-              manifestId: "manifest-1",
-              workerStatusCounts: { online: 2, draining: 1, offline: 0 },
-              lastHeartbeatAt: "2026-07-14T08:00:00Z",
-              workerBuild: {
-                version: "0.5.2",
-                gitSha: "abc123",
-                imageDigest: "sha256:worker",
-                operatingSystem: "linux",
-                architecture: "arm64",
-              },
-              workerProtocol: { minimum: 2, maximum: 2 },
-              runtimeEvent: { minimum: 2, maximum: 2 },
-              providers: [
-                {
-                  provider: "codex",
-                  supportTier: "experimental",
-                  compatibilityStatus: "compatible",
-                  runtime: {
-                    kind: "cli",
-                    name: "codex-cli",
-                    version: "0.144.1",
-                    available: true,
-                    versionSource: "probe",
-                    compatibleRange: {
-                      minimumInclusive: "0.144.1",
-                      maximumExclusive: "0.145.0",
-                    },
-                    compatible: true,
-                  },
-                  releasePolicy: {
-                    requiresExplicitEnablement: true,
-                    enabled: true,
-                  },
-                  capabilities: { discovery: "native" },
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            items: [
+              {
+                executionTargetId: "target-1",
+                manifestId: "manifest-1",
+                workerStatusCounts: { online: 2, draining: 1, offline: 0 },
+                lastHeartbeatAt: "2026-07-14T08:00:00Z",
+                workerBuild: {
+                  version: "0.5.2",
+                  gitSha: "abc123",
+                  imageDigest: "sha256:worker",
+                  operatingSystem: "linux",
+                  architecture: "arm64",
                 },
-              ],
-            },
-          ],
-        }),
-        { status: 200, headers: { "Content-Type": "application/json" } },
-      ),
+                workerProtocol: { minimum: 2, maximum: 2 },
+                runtimeEvent: { minimum: 2, maximum: 2 },
+                providers: [
+                  {
+                    provider: "codex",
+                    supportTier: "experimental",
+                    compatibilityStatus: "compatible",
+                    runtime: {
+                      kind: "cli",
+                      name: "codex-cli",
+                      version: "0.144.1",
+                      available: true,
+                      versionSource: "probe",
+                      compatibleRange: {
+                        minimumInclusive: "0.144.1",
+                        maximumExclusive: "0.145.0",
+                      },
+                      compatible: true,
+                    },
+                    releasePolicy: {
+                      requiresExplicitEnablement: true,
+                      enabled: true,
+                    },
+                    capabilities: { discovery: "native" },
+                  },
+                ],
+              },
+            ],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
     );
     vi.stubGlobal("fetch", fetchMock);
 
@@ -669,24 +680,25 @@ describe("controlPlaneClient", () => {
   });
 
   it("updates an Execution Target Provider Policy without replacing the target", async () => {
-    const fetchMock = vi.fn(async () =>
-      new Response(
-        JSON.stringify({
-          id: "target/one",
-          tenantId: "tenant/one",
-          organizationId: null,
-          kind: "docker",
-          name: "Docker workers",
-          status: "active",
-          capabilities: {
-            workspaceModes: ["local", "worktree"],
-            providerPolicy: { experimentalProviders: ["codex"] },
-          },
-          createdAt: "2026-07-14T00:00:00Z",
-          updatedAt: "2026-07-14T01:00:00Z",
-        }),
-        { status: 200, headers: { "Content-Type": "application/json" } },
-      ),
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            id: "target/one",
+            tenantId: "tenant/one",
+            organizationId: null,
+            kind: "docker",
+            name: "Docker workers",
+            status: "active",
+            capabilities: {
+              workspaceModes: ["local", "worktree"],
+              providerPolicy: { experimentalProviders: ["codex"] },
+            },
+            createdAt: "2026-07-14T00:00:00Z",
+            updatedAt: "2026-07-14T01:00:00Z",
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
     );
     vi.stubGlobal("fetch", fetchMock);
 
@@ -708,16 +720,17 @@ describe("controlPlaneClient", () => {
   });
 
   it("runs SSH target lifecycle operations through the tenant-scoped API", async () => {
-    const fetchMock = vi.fn(async () =>
-      new Response(
-        JSON.stringify({
-          targetId: "target-1",
-          operation: "upgrade",
-          status: "active",
-          serviceName: "synara-agentd-target-1.service",
-        }),
-        { status: 200, headers: { "Content-Type": "application/json" } },
-      ),
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            targetId: "target-1",
+            operation: "upgrade",
+            status: "active",
+            serviceName: "synara-agentd-target-1.service",
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
     );
     vi.stubGlobal("fetch", fetchMock);
 
@@ -730,15 +743,16 @@ describe("controlPlaneClient", () => {
   });
 
   it("updates tenant quotas with explicit unlimited values", async () => {
-    const fetchMock = vi.fn(async () =>
-      new Response(
-        JSON.stringify({
-          tenantId: "tenant/one",
-          maxConcurrentExecutions: 4,
-          maxArtifactBytes: null,
-        }),
-        { status: 200, headers: { "Content-Type": "application/json" } },
-      ),
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            tenantId: "tenant/one",
+            maxConcurrentExecutions: 4,
+            maxArtifactBytes: null,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
     );
     vi.stubGlobal("fetch", fetchMock);
 
@@ -758,15 +772,16 @@ describe("controlPlaneClient", () => {
   });
 
   it("updates retention with explicit disabled values", async () => {
-    const fetchMock = vi.fn(async () =>
-      new Response(
-        JSON.stringify({
-          tenantId: "tenant/one",
-          sessionArchiveAfterDays: 30,
-          artifactDeleteAfterDays: null,
-        }),
-        { status: 200, headers: { "Content-Type": "application/json" } },
-      ),
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            tenantId: "tenant/one",
+            sessionArchiveAfterDays: 30,
+            artifactDeleteAfterDays: null,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
     );
     vi.stubGlobal("fetch", fetchMock);
 
@@ -846,11 +861,12 @@ describe("controlPlaneClient", () => {
   });
 
   it("creates a typed private HTTPS Git Credential", async () => {
-    const fetchMock = vi.fn(async () =>
-      new Response(JSON.stringify({ id: "credential-1", purpose: "git", version: 1 }), {
-        status: 201,
-        headers: { "Content-Type": "application/json" },
-      }),
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ id: "credential-1", purpose: "git", version: 1 }), {
+          status: 201,
+          headers: { "Content-Type": "application/json" },
+        }),
     );
     vi.stubGlobal("fetch", fetchMock);
 
@@ -885,7 +901,12 @@ describe("controlPlaneClient", () => {
       }),
       new Response(
         JSON.stringify({
-          account: { id: "service-account-1", name: "SCIM", status: "active", scopes: ["scim.write"] },
+          account: {
+            id: "service-account-1",
+            name: "SCIM",
+            status: "active",
+            scopes: ["scim.write"],
+          },
           token: "one-time-token",
         }),
         { status: 201, headers: { "Content-Type": "application/json" } },
@@ -940,16 +961,17 @@ describe("controlPlaneClient", () => {
   });
 
   it("creates SAML connections with metadata and claim mapping configuration", async () => {
-    const fetchMock = vi.fn(async () =>
-      new Response(
-        JSON.stringify({
-          id: "connection-1",
-          kind: "saml",
-          status: "active",
-          configuration: { entityId: "urn:synara:saml:sp:connection-1" },
-        }),
-        { status: 201, headers: { "Content-Type": "application/json" } },
-      ),
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            id: "connection-1",
+            kind: "saml",
+            status: "active",
+            configuration: { entityId: "urn:synara:saml:sp:connection-1" },
+          }),
+          { status: 201, headers: { "Content-Type": "application/json" } },
+        ),
     );
     vi.stubGlobal("fetch", fetchMock);
 
@@ -1023,11 +1045,12 @@ describe("controlPlaneClient", () => {
 
   it("builds filtered audit list and export URLs without buffering downloads", async () => {
     vi.stubGlobal("window", { location: new URL("https://synara.example/settings") });
-    const fetchMock = vi.fn(async () =>
-      new Response(JSON.stringify({ items: [], nextCursor: null }), {
-        status: 200,
-        headers: { "Content-Type": "application/json" },
-      }),
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ items: [], nextCursor: null }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
     );
     vi.stubGlobal("fetch", fetchMock);
 

@@ -66,11 +66,7 @@ describe("ControlPlaneProjectionRuntime", () => {
           : { items: [], lastSequence: afterSequence },
     );
     const subscribeSessionEvents = vi.fn(
-      (
-        _sessionId: string,
-        _afterSequence: number,
-        nextHandlers: NonNullable<typeof handlers>,
-      ) => {
+      (_sessionId: string, _afterSequence: number, nextHandlers: NonNullable<typeof handlers>) => {
         handlers = nextHandlers;
         return close;
       },
@@ -89,11 +85,7 @@ describe("ControlPlaneProjectionRuntime", () => {
     const unwatchTwo = runtime.watch(session.id);
     await vi.waitFor(() => expect(subscribeSessionEvents).toHaveBeenCalledTimes(1));
 
-    expect(subscribeSessionEvents).toHaveBeenCalledWith(
-      session.id,
-      2,
-      expect.any(Object),
-    );
+    expect(subscribeSessionEvents).toHaveBeenCalledWith(session.id, 2, expect.any(Object));
     handlers?.onOpen?.();
     expect(latest.get(session.id)?.streamStatus).toBe("live");
 
@@ -115,7 +107,9 @@ describe("ControlPlaneProjectionRuntime", () => {
     });
     runtime.setScope("tenant-1:organization-1", [{ ...session, lastEventSequence: 0 }]);
     runtime.watch(session.id);
-    await vi.waitFor(() => expect(runtime.projections.get(session.id)?.streamStatus).toBe("connecting"));
+    await vi.waitFor(() =>
+      expect(runtime.projections.get(session.id)?.streamStatus).toBe("connecting"),
+    );
     runtime.setScope("tenant-2:organization-2", []);
 
     expect(close).toHaveBeenCalledTimes(1);

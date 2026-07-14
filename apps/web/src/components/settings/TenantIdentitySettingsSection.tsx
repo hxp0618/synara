@@ -8,7 +8,11 @@ import {
   ControlPlaneInlineError as InlineError,
   ControlPlaneStatusPill as StatusPill,
 } from "~/components/settings/ControlPlaneSettingsPrimitives";
-import { SettingsListRow, SettingsRow, SettingsSection } from "~/components/settings/SettingsPanelPrimitives";
+import {
+  SettingsListRow,
+  SettingsRow,
+  SettingsSection,
+} from "~/components/settings/SettingsPanelPrimitives";
 import { Button } from "~/components/ui/button";
 import { Input } from "~/components/ui/input";
 import {
@@ -26,7 +30,14 @@ function connectionsQueryKey(tenantId: string) {
 }
 
 function mappingsQueryKey(tenantId: string, connectionId: string) {
-  return ["control-plane", "tenants", tenantId, "identity-connections", connectionId, "group-mappings"] as const;
+  return [
+    "control-plane",
+    "tenants",
+    tenantId,
+    "identity-connections",
+    connectionId,
+    "group-mappings",
+  ] as const;
 }
 
 export function TenantIdentitySettingsSection(props: {
@@ -156,40 +167,85 @@ function SAMLConnectionForm(props: {
       }}
     >
       <FormField label="Connection name">
-        <Input data-testid="saml-connection-name" required value={name} onChange={(event) => setName(event.target.value)} />
+        <Input
+          data-testid="saml-connection-name"
+          required
+          value={name}
+          onChange={(event) => setName(event.target.value)}
+        />
       </FormField>
       <FormField label="IdP metadata URL">
-        <Input data-testid="saml-metadata-url" placeholder="https://id.example.com/metadata" required type="url" value={metadataUrl} onChange={(event) => setMetadataUrl(event.target.value)} />
+        <Input
+          data-testid="saml-metadata-url"
+          placeholder="https://id.example.com/metadata"
+          required
+          type="url"
+          value={metadataUrl}
+          onChange={(event) => setMetadataUrl(event.target.value)}
+        />
       </FormField>
       <FormField label="IdP issuer (optional)">
-        <Input placeholder="Auto-detected from metadata" value={issuer} onChange={(event) => setIssuer(event.target.value)} />
+        <Input
+          placeholder="Auto-detected from metadata"
+          value={issuer}
+          onChange={(event) => setIssuer(event.target.value)}
+        />
       </FormField>
       <FormField label="SP entity ID (optional)">
-        <Input placeholder="Generated when blank" value={entityId} onChange={(event) => setEntityId(event.target.value)} />
+        <Input
+          placeholder="Generated when blank"
+          value={entityId}
+          onChange={(event) => setEntityId(event.target.value)}
+        />
       </FormField>
       <FormField label="Email attribute">
         <Input value={emailAttribute} onChange={(event) => setEmailAttribute(event.target.value)} />
       </FormField>
       <FormField label="Display name attribute">
-        <Input value={displayNameAttribute} onChange={(event) => setDisplayNameAttribute(event.target.value)} />
+        <Input
+          value={displayNameAttribute}
+          onChange={(event) => setDisplayNameAttribute(event.target.value)}
+        />
       </FormField>
       <FormField label="Groups attribute">
-        <Input value={groupsAttribute} onChange={(event) => setGroupsAttribute(event.target.value)} />
+        <Input
+          value={groupsAttribute}
+          onChange={(event) => setGroupsAttribute(event.target.value)}
+        />
       </FormField>
       <FormField label="Allowed email domains">
-        <Input placeholder="example.com, subsidiary.com" value={allowedDomains} onChange={(event) => setAllowedDomains(event.target.value)} />
+        <Input
+          placeholder="example.com, subsidiary.com"
+          value={allowedDomains}
+          onChange={(event) => setAllowedDomains(event.target.value)}
+        />
       </FormField>
       <FormField label="Default Tenant role">
-        <select className={nativeSelectClassName} value={defaultTenantRole} onChange={(event) => setDefaultTenantRole(event.target.value)}>
-          {TENANT_ROLES.map((role) => <option key={role} value={role}>{role}</option>)}
+        <select
+          className={nativeSelectClassName}
+          value={defaultTenantRole}
+          onChange={(event) => setDefaultTenantRole(event.target.value)}
+        >
+          {TENANT_ROLES.map((role) => (
+            <option key={role} value={role}>
+              {role}
+            </option>
+          ))}
         </select>
       </FormField>
       <div className="flex items-end">
-        <Button data-testid="saml-connection-submit" disabled={create.isPending} size="sm" type="submit">
+        <Button
+          data-testid="saml-connection-submit"
+          disabled={create.isPending}
+          size="sm"
+          type="submit"
+        >
           {create.isPending ? "Creating SAML connection…" : "Create SAML connection"}
         </Button>
       </div>
-      <div className="sm:col-span-2"><InlineError error={create.error} /></div>
+      <div className="sm:col-span-2">
+        <InlineError error={create.error} />
+      </div>
     </form>
   );
 }
@@ -241,34 +297,76 @@ function OIDCConnectionForm(props: {
       }}
     >
       <FormField label="Connection name">
-        <Input data-testid="oidc-connection-name" required value={name} onChange={(event) => setName(event.target.value)} />
+        <Input
+          data-testid="oidc-connection-name"
+          required
+          value={name}
+          onChange={(event) => setName(event.target.value)}
+        />
       </FormField>
       <FormField label="Issuer URL">
-        <Input data-testid="oidc-issuer-url" placeholder="https://id.example.com" required type="url" value={issuer} onChange={(event) => setIssuer(event.target.value)} />
+        <Input
+          data-testid="oidc-issuer-url"
+          placeholder="https://id.example.com"
+          required
+          type="url"
+          value={issuer}
+          onChange={(event) => setIssuer(event.target.value)}
+        />
       </FormField>
       <FormField label="Client ID">
-        <Input data-testid="oidc-client-id" required value={clientId} onChange={(event) => setClientId(event.target.value)} />
+        <Input
+          data-testid="oidc-client-id"
+          required
+          value={clientId}
+          onChange={(event) => setClientId(event.target.value)}
+        />
       </FormField>
       <FormField label="Client secret">
-        <Input data-testid="oidc-client-secret" autoComplete="new-password" type="password" value={clientSecret} onChange={(event) => setClientSecret(event.target.value)} />
+        <Input
+          data-testid="oidc-client-secret"
+          autoComplete="new-password"
+          type="password"
+          value={clientSecret}
+          onChange={(event) => setClientSecret(event.target.value)}
+        />
       </FormField>
       <FormField label="Allowed email domains">
-        <Input placeholder="example.com, subsidiary.com" value={allowedDomains} onChange={(event) => setAllowedDomains(event.target.value)} />
+        <Input
+          placeholder="example.com, subsidiary.com"
+          value={allowedDomains}
+          onChange={(event) => setAllowedDomains(event.target.value)}
+        />
       </FormField>
       <FormField label="Groups claim">
         <Input value={groupsClaim} onChange={(event) => setGroupsClaim(event.target.value)} />
       </FormField>
       <FormField label="Default Tenant role">
-        <select className={nativeSelectClassName} value={defaultTenantRole} onChange={(event) => setDefaultTenantRole(event.target.value)}>
-          {TENANT_ROLES.map((role) => <option key={role} value={role}>{role}</option>)}
+        <select
+          className={nativeSelectClassName}
+          value={defaultTenantRole}
+          onChange={(event) => setDefaultTenantRole(event.target.value)}
+        >
+          {TENANT_ROLES.map((role) => (
+            <option key={role} value={role}>
+              {role}
+            </option>
+          ))}
         </select>
       </FormField>
       <div className="flex items-end">
-        <Button data-testid="oidc-connection-submit" disabled={create.isPending} size="sm" type="submit">
+        <Button
+          data-testid="oidc-connection-submit"
+          disabled={create.isPending}
+          size="sm"
+          type="submit"
+        >
           {create.isPending ? "Creating OIDC connection…" : "Create OIDC connection"}
         </Button>
       </div>
-      <div className="sm:col-span-2"><InlineError error={create.error} /></div>
+      <div className="sm:col-span-2">
+        <InlineError error={create.error} />
+      </div>
     </form>
   );
 }
@@ -280,12 +378,15 @@ function IdentityConnectionRow(props: {
 }) {
   const queryClient = useQueryClient();
   const disable = useMutation({
-    mutationFn: () => controlPlaneClient.disableIdentityConnection(props.tenantId, props.connection.id),
+    mutationFn: () =>
+      controlPlaneClient.disableIdentityConnection(props.tenantId, props.connection.id),
     onSuccess: () => {
       queryClient.setQueryData<{ items: ReadonlyArray<ControlPlaneIdentityConnection> }>(
         connectionsQueryKey(props.tenantId),
         (current) => ({
-          items: (current?.items ?? []).map((item) => item.id === props.connection.id ? { ...item, status: "disabled" } : item),
+          items: (current?.items ?? []).map((item) =>
+            item.id === props.connection.id ? { ...item, status: "disabled" } : item,
+          ),
         }),
       );
     },
@@ -318,7 +419,12 @@ function IdentityConnectionRow(props: {
         <span className="flex items-center gap-2">
           <StatusPill value={props.connection.status} />
           {props.canManage && props.connection.status === "active" ? (
-            <Button disabled={disable.isPending} size="sm" variant="outline" onClick={() => disable.mutate()}>
+            <Button
+              disabled={disable.isPending}
+              size="sm"
+              variant="outline"
+              onClick={() => disable.mutate()}
+            >
               Disable
             </Button>
           ) : null}
@@ -352,7 +458,8 @@ function IdentityGroupMappingsForm(props: {
   const replace = useMutation({
     mutationFn: (items: ReadonlyArray<Omit<ControlPlaneIdentityGroupMapping, "id">>) =>
       controlPlaneClient.replaceIdentityGroupMappings(props.tenantId, props.connectionId, items),
-    onSuccess: (next) => queryClient.setQueryData(mappingsQueryKey(props.tenantId, props.connectionId), next),
+    onSuccess: (next) =>
+      queryClient.setQueryData(mappingsQueryKey(props.tenantId, props.connectionId), next),
   });
   const currentItems = mappings.data?.items ?? [];
   return (
@@ -375,13 +482,27 @@ function IdentityGroupMappingsForm(props: {
           </select>
         </FormField>
         {currentItems.map((mapping) => (
-          <div key={mapping.id} className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
-            <span>{mapping.externalGroup} → {mapping.tenantRole ?? "no Tenant role"}{mapping.organizationId ? ` · ${organizationNamesById.get(mapping.organizationId) ?? mapping.organizationId} / ${mapping.organizationRole}` : ""}</span>
+          <div
+            key={mapping.id}
+            className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground"
+          >
+            <span>
+              {mapping.externalGroup} → {mapping.tenantRole ?? "no Tenant role"}
+              {mapping.organizationId
+                ? ` · ${organizationNamesById.get(mapping.organizationId) ?? mapping.organizationId} / ${mapping.organizationRole}`
+                : ""}
+            </span>
             <Button
               disabled={replace.isPending}
               size="sm"
               variant="ghost"
-              onClick={() => replace.mutate(currentItems.filter((item) => item.id !== mapping.id).map(({ id: _id, ...item }) => item))}
+              onClick={() =>
+                replace.mutate(
+                  currentItems
+                    .filter((item) => item.id !== mapping.id)
+                    .map(({ id: _id, ...item }) => item),
+                )
+              }
             >
               Remove
             </Button>
@@ -404,27 +525,62 @@ function IdentityGroupMappingsForm(props: {
           }}
         >
           <FormField label="External Group">
-            <Input required value={externalGroup} onChange={(event) => setExternalGroup(event.target.value)} />
+            <Input
+              required
+              value={externalGroup}
+              onChange={(event) => setExternalGroup(event.target.value)}
+            />
           </FormField>
           <FormField label="Tenant role">
-            <select className={nativeSelectClassName} value={tenantRole} onChange={(event) => setTenantRole(event.target.value)}>
+            <select
+              className={nativeSelectClassName}
+              value={tenantRole}
+              onChange={(event) => setTenantRole(event.target.value)}
+            >
               <option value="">No Tenant role</option>
-              {TENANT_ROLES.map((role) => <option key={role} value={role}>{role}</option>)}
+              {TENANT_ROLES.map((role) => (
+                <option key={role} value={role}>
+                  {role}
+                </option>
+              ))}
             </select>
           </FormField>
           <FormField label="Organization">
-            <select className={nativeSelectClassName} value={organizationId} onChange={(event) => setOrganizationId(event.target.value)}>
+            <select
+              className={nativeSelectClassName}
+              value={organizationId}
+              onChange={(event) => setOrganizationId(event.target.value)}
+            >
               <option value="">No Organization role</option>
-              {props.organizations.map((organization) => <option key={organization.id} value={organization.id}>{organization.name}</option>)}
+              {props.organizations.map((organization) => (
+                <option key={organization.id} value={organization.id}>
+                  {organization.name}
+                </option>
+              ))}
             </select>
           </FormField>
           <FormField label="Organization role">
-            <select className={nativeSelectClassName} disabled={!organizationId} value={organizationRole} onChange={(event) => setOrganizationRole(event.target.value)}>
-              {ORGANIZATION_ROLES.map((role) => <option key={role} value={role}>{role}</option>)}
+            <select
+              className={nativeSelectClassName}
+              disabled={!organizationId}
+              value={organizationRole}
+              onChange={(event) => setOrganizationRole(event.target.value)}
+            >
+              {ORGANIZATION_ROLES.map((role) => (
+                <option key={role} value={role}>
+                  {role}
+                </option>
+              ))}
             </select>
           </FormField>
           <div className="sm:col-span-2">
-            <Button disabled={replace.isPending || (!tenantRole && !organizationId)} size="sm" type="submit">Add Group mapping</Button>
+            <Button
+              disabled={replace.isPending || (!tenantRole && !organizationId)}
+              size="sm"
+              type="submit"
+            >
+              Add Group mapping
+            </Button>
             <InlineError error={replace.error ?? mappings.error} />
           </div>
         </form>

@@ -29,22 +29,13 @@
     "projectId": { "type": "string", "format": "uuid" },
     "sessionId": { "type": "string", "format": "uuid" },
     "executionId": {
-      "oneOf": [
-        { "type": "string", "format": "uuid" },
-        { "type": "null" }
-      ]
+      "oneOf": [{ "type": "string", "format": "uuid" }, { "type": "null" }]
     },
     "workerId": {
-      "oneOf": [
-        { "type": "string", "format": "uuid" },
-        { "type": "null" }
-      ]
+      "oneOf": [{ "type": "string", "format": "uuid" }, { "type": "null" }]
     },
     "generation": {
-      "oneOf": [
-        { "type": "integer", "minimum": 1 },
-        { "type": "null" }
-      ]
+      "oneOf": [{ "type": "integer", "minimum": 1 }, { "type": "null" }]
     },
     "sequence": { "type": "integer", "minimum": 1 },
     "eventType": {
@@ -102,10 +93,7 @@
       "enum": ["user", "service_account", "worker", "system"]
     },
     "actorId": {
-      "oneOf": [
-        { "type": "string", "format": "uuid" },
-        { "type": "null" }
-      ]
+      "oneOf": [{ "type": "string", "format": "uuid" }, { "type": "null" }]
     },
     "occurredAt": { "type": "string", "format": "date-time" },
     "payload": {

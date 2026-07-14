@@ -126,7 +126,9 @@ class CodexAppServerRuntime {
       this.writeMessage({ method: "initialized", params: {} });
 
       const resumed = await this.openThread();
-      const prompt = resumed ? this.options.input.workload.inputText : this.options.authoritativePrompt;
+      const prompt = resumed
+        ? this.options.input.workload.inputText
+        : this.options.authoritativePrompt;
       const turnParams = {
         threadId: this.threadId,
         input: [{ type: "text", text: prompt, text_elements: [] }],
@@ -142,7 +144,7 @@ class CodexAppServerRuntime {
           ...turnParams,
         }),
       );
-      this.turnId = readString(asRecord(response.turn), "id");
+      this.turnId = readString(asRecord(response?.turn), "id");
       if (!this.turnId) {
         throw new Error("Codex app-server turn/start response did not include a turn id.");
       }
@@ -191,7 +193,8 @@ class CodexAppServerRuntime {
           }),
         );
         this.threadId = readThreadId(response);
-        this.model = readString(response, "model") ?? trimmedString(this.options.input.workload.model);
+        this.model =
+          readString(response, "model") ?? trimmedString(this.options.input.workload.model);
         if (!this.threadId) {
           throw new Error("Codex app-server thread/resume response did not include a thread id.");
         }
@@ -298,10 +301,7 @@ class CodexAppServerRuntime {
 
   private handleServerRequest(request: JsonRpcRequest): void {
     const params = asRecord(request.params) ?? {};
-    const requestId = interactionRequestId(
-      request.id,
-      this.options.input.execution.generation,
-    );
+    const requestId = interactionRequestId(request.id, this.options.input.execution.generation);
     if (
       request.method === "item/commandExecution/requestApproval" ||
       request.method === "item/fileChange/requestApproval" ||
@@ -489,7 +489,10 @@ class CodexAppServerRuntime {
     const answers = asRecord(resolution?.answers);
     if (!answers) throw new Error("Codex user-input resolution must include an answers object.");
     this.pendingUserInputs.delete(requestId);
-    this.writeMessage({ id: pending.jsonRpcId, result: { answers: codexUserInputAnswers(answers) } });
+    this.writeMessage({
+      id: pending.jsonRpcId,
+      result: { answers: codexUserInputAnswers(answers) },
+    });
   }
 
   private async steer(payload: Record<string, unknown>): Promise<void> {
@@ -524,7 +527,11 @@ class CodexAppServerRuntime {
     this.scheduleForceKill();
   }
 
-  private sendRequest(method: string, params: unknown, timeoutMs = REQUEST_TIMEOUT_MS): Promise<unknown> {
+  private sendRequest(
+    method: string,
+    params: unknown,
+    timeoutMs = REQUEST_TIMEOUT_MS,
+  ): Promise<unknown> {
     const id = this.nextRequestId++;
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
@@ -666,7 +673,10 @@ function codexUserInputAnswers(
     Object.entries(answers).map(([questionId, value]) => {
       if (typeof value === "string") return [questionId, { answers: [value] }];
       if (Array.isArray(value)) {
-        return [questionId, { answers: value.filter((item): item is string => typeof item === "string") }];
+        return [
+          questionId,
+          { answers: value.filter((item): item is string => typeof item === "string") },
+        ];
       }
       const record = asRecord(value);
       if (Array.isArray(record?.answers)) {
@@ -689,8 +699,8 @@ function finalAgentText(turn: Record<string, unknown>): string | undefined {
   return messages.at(-1);
 }
 
-function readThreadId(response: Record<string, unknown>): string | undefined {
-  return readString(asRecord(response.thread), "id") ?? readString(response, "threadId");
+function readThreadId(response: Record<string, unknown> | undefined): string | undefined {
+  return readString(asRecord(response?.thread), "id") ?? readString(response, "threadId");
 }
 
 function interactionRequestId(id: JsonRpcId, generation?: number): string {
@@ -705,12 +715,16 @@ function approvalSummary(requestKind: string): string {
 
 function numericFields(value: Record<string, unknown>): Record<string, number> {
   return Object.fromEntries(
-    Object.entries(value).filter((entry): entry is [string, number] => typeof entry[1] === "number"),
+    Object.entries(value).filter(
+      (entry): entry is [string, number] => typeof entry[1] === "number",
+    ),
   );
 }
 
 function boundedString(value: unknown, maximumLength: number): string | undefined {
-  return typeof value === "string" && value.trim() ? value.trim().slice(0, maximumLength) : undefined;
+  return typeof value === "string" && value.trim()
+    ? value.trim().slice(0, maximumLength)
+    : undefined;
 }
 
 function trimmedString(value: unknown): string | undefined {

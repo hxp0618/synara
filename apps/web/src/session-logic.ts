@@ -443,7 +443,8 @@ export function derivePendingApprovals(
         : payload && typeof payload.summary === "string"
           ? payload.summary
           : undefined;
-    const executionId = payload && typeof payload.executionId === "string" ? payload.executionId : undefined;
+    const executionId =
+      payload && typeof payload.executionId === "string" ? payload.executionId : undefined;
     const interactionId =
       payload && typeof payload.interactionId === "string" ? payload.interactionId : undefined;
     const requestKey = requestId ? pendingRequestKey(payload, requestId) : null;
@@ -552,7 +553,8 @@ export function derivePendingUserInputs(
         ? ApprovalRequestId.makeUnsafe(payload.requestId)
         : null;
     const detail = payload && typeof payload.detail === "string" ? payload.detail : undefined;
-    const executionId = payload && typeof payload.executionId === "string" ? payload.executionId : undefined;
+    const executionId =
+      payload && typeof payload.executionId === "string" ? payload.executionId : undefined;
     const interactionId =
       payload && typeof payload.interactionId === "string" ? payload.interactionId : undefined;
     const requestKey = requestId ? pendingRequestKey(payload, requestId) : null;

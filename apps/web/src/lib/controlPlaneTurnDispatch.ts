@@ -47,8 +47,7 @@ export class ControlPlaneTurnDispatcher {
     let createdSession = false;
     if (!sessionId) {
       const idempotencyKey =
-        this.#sessionCreateKeys.get(input.draftThreadId) ??
-        `web-session-${this.#randomUUID()}`;
+        this.#sessionCreateKeys.get(input.draftThreadId) ?? `web-session-${this.#randomUUID()}`;
       this.#sessionCreateKeys.set(input.draftThreadId, idempotencyKey);
       const session = await input.createSession({
         projectId: input.projectId,

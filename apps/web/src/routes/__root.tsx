@@ -178,27 +178,25 @@ function RootRouteView() {
   const content = !readNativeApi() ? (
     <div className="flex h-screen flex-col bg-background text-foreground">
       <div className="flex flex-1 items-center justify-center">
-        <p className="text-sm text-muted-foreground">
-          Connecting to {APP_DISPLAY_NAME} server...
-        </p>
+        <p className="text-sm text-muted-foreground">Connecting to {APP_DISPLAY_NAME} server...</p>
       </div>
     </div>
   ) : (
-      <ToastProvider position="top-center">
-        <AnchoredToastProvider>
-          <GitProgressToastPreviewDev />
-          {controlPlane.isAuthoritative ? <ControlPlaneSessionRouteCoordinator /> : <EventRouter />}
-          <ProviderStatusRefreshCoordinator />
-          <GlobalShortcutsDialog />
-          <GlobalWhatsNewSurface />
-          <TaskCompletionNotifications />
-          <AppSnapWelcomeDialog />
-          <AppSnapCoordinator />
-          <ProviderUpdateNotifications />
-          {controlPlane.isAuthoritative ? null : <DesktopProjectBootstrap />}
-          <Outlet />
-        </AnchoredToastProvider>
-      </ToastProvider>
+    <ToastProvider position="top-center">
+      <AnchoredToastProvider>
+        <GitProgressToastPreviewDev />
+        {controlPlane.isAuthoritative ? <ControlPlaneSessionRouteCoordinator /> : <EventRouter />}
+        <ProviderStatusRefreshCoordinator />
+        <GlobalShortcutsDialog />
+        <GlobalWhatsNewSurface />
+        <TaskCompletionNotifications />
+        <AppSnapWelcomeDialog />
+        <AppSnapCoordinator />
+        <ProviderUpdateNotifications />
+        {controlPlane.isAuthoritative ? null : <DesktopProjectBootstrap />}
+        <Outlet />
+      </AnchoredToastProvider>
+    </ToastProvider>
   );
 
   return (

@@ -149,15 +149,15 @@ Go 优先承担：
 
 ### 2.3 数据存储职责
 
-| 数据类型 | 权威存储 |
-| --- | --- |
-| 用户、租户、组织、成员关系 | PostgreSQL |
-| Project、Agent Session、Turn、Execution | PostgreSQL |
-| Session Event、审批、幂等记录、Worker Lease | PostgreSQL |
-| 附件、图片、生成文件、终端长日志 | S3 / MinIO |
-| Workspace 快照、Checkpoint 压缩包 | S3 / MinIO |
-| 在线状态、短期缓存、限流计数 | Redis，可选，非权威 |
-| 任务分发 | PostgreSQL Outbox 起步，后续可迁移 NATS/Kafka |
+| 数据类型                                    | 权威存储                                      |
+| ------------------------------------------- | --------------------------------------------- |
+| 用户、租户、组织、成员关系                  | PostgreSQL                                    |
+| Project、Agent Session、Turn、Execution     | PostgreSQL                                    |
+| Session Event、审批、幂等记录、Worker Lease | PostgreSQL                                    |
+| 附件、图片、生成文件、终端长日志            | S3 / MinIO                                    |
+| Workspace 快照、Checkpoint 压缩包           | S3 / MinIO                                    |
+| 在线状态、短期缓存、限流计数                | Redis，可选，非权威                           |
+| 任务分发                                    | PostgreSQL Outbox 起步，后续可迁移 NATS/Kafka |
 
 ### 2.4 Deployment Profile
 
@@ -169,16 +169,16 @@ single-node
 enterprise
 ```
 
-| 能力 | `personal` | `single-node` | `enterprise` |
-| --- | --- | --- | --- |
-| 典型安装 | 本地安装、SSH、单 Docker | 远程服务器、Docker Compose | K8s/Helm |
-| 控制面副本 | 1 | 1 | 多副本 |
-| Metadata Store | SQLite | PostgreSQL | PostgreSQL HA |
-| Artifact Store | Local FS | MinIO/S3 | S3/Object Storage |
-| 任务分发 | 进程内或数据库 | PostgreSQL Outbox | Outbox + NATS/Kafka 可选 |
-| 认证 | Local Owner | Local/OIDC | OIDC/SAML/SCIM |
-| 多租户 | 自动 Personal Tenant | 支持 | 强制 |
-| 高可用 | 不支持 | 不支持或有限 | 支持 |
+| 能力           | `personal`               | `single-node`              | `enterprise`             |
+| -------------- | ------------------------ | -------------------------- | ------------------------ |
+| 典型安装       | 本地安装、SSH、单 Docker | 远程服务器、Docker Compose | K8s/Helm                 |
+| 控制面副本     | 1                        | 1                          | 多副本                   |
+| Metadata Store | SQLite                   | PostgreSQL                 | PostgreSQL HA            |
+| Artifact Store | Local FS                 | MinIO/S3                   | S3/Object Storage        |
+| 任务分发       | 进程内或数据库           | PostgreSQL Outbox          | Outbox + NATS/Kafka 可选 |
+| 认证           | Local Owner              | Local/OIDC                 | OIDC/SAML/SCIM           |
+| 多租户         | 自动 Personal Tenant     | 支持                       | 强制                     |
+| 高可用         | 不支持                   | 不支持或有限               | 支持                     |
 
 Profile 是经过验证的能力集合，不是配置模板名称。启动时必须拒绝不安全组合，例如：
 
@@ -363,24 +363,24 @@ Tenant
 
 ### 5.1 Tenant 固定角色
 
-| 角色 | 职责 |
-| --- | --- |
-| `owner` | 全部权限，包括转移所有权和删除 Tenant |
-| `admin` | 用户、组织、项目和 Agent 管理 |
-| `security_admin` | SSO、Credential、审计和安全策略 |
-| `billing_admin` | 套餐、额度和用量 |
-| `auditor` | 只读审计和执行记录 |
-| `member` | 只能进入被授权的 Organization |
+| 角色             | 职责                                  |
+| ---------------- | ------------------------------------- |
+| `owner`          | 全部权限，包括转移所有权和删除 Tenant |
+| `admin`          | 用户、组织、项目和 Agent 管理         |
+| `security_admin` | SSO、Credential、审计和安全策略       |
+| `billing_admin`  | 套餐、额度和用量                      |
+| `auditor`        | 只读审计和执行记录                    |
+| `member`         | 只能进入被授权的 Organization         |
 
 ### 5.2 Organization 固定角色
 
-| 角色 | 职责 |
-| --- | --- |
-| `owner` | 组织全部管理权限 |
-| `admin` | 成员、Project 和 Agent 设置管理 |
+| 角色             | 职责                             |
+| ---------------- | -------------------------------- |
+| `owner`          | 组织全部管理权限                 |
+| `admin`          | 成员、Project 和 Agent 设置管理  |
 | `agent_operator` | 创建、停止、审批 Agent Execution |
-| `member` | 创建和使用普通 Agent Session |
-| `viewer` | 只读查看被授权资源 |
+| `member`         | 创建和使用普通 Agent Session     |
+| `viewer`         | 只读查看被授权资源               |
 
 ### 5.3 Permission 命名
 

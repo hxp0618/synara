@@ -176,11 +176,11 @@ last_error
 
 明确每个 Deployment Profile 允许的认证方式：
 
-| Profile | 允许方式 |
-| --- | --- |
-| `personal` | 自动 Local Owner、显式本地登录 |
+| Profile       | 允许方式                                |
+| ------------- | --------------------------------------- |
+| `personal`    | 自动 Local Owner、显式本地登录          |
 | `single-node` | OIDC/SAML，受控环境可启用 Dev Bootstrap |
-| `enterprise` | OIDC/SAML/SCIM，禁止 Dev Bootstrap |
+| `enterprise`  | OIDC/SAML/SCIM，禁止 Dev Bootstrap      |
 
 ### A2. 强制生产配置
 
@@ -769,66 +769,66 @@ errorCode
 ### 当前执行进度（2026-07-14 文档同步）
 
 - [x] Step 0 Drift Audit：已完成，结果记录在
-  `docs/plans/stage-2-drift-audit.md`；初次审计把工作流 A-F、H-I 标为 `partial`、G 标为 `missing`，
-  后续进度项已关闭这些实现缺口，当前证据边界以更新后的 Drift Audit 为准。
+      `docs/plans/stage-2-drift-audit.md`；初次审计把工作流 A-F、H-I 标为 `partial`、G 标为 `missing`，
+      后续进度项已关闭这些实现缺口，当前证据边界以更新后的 Drift Audit 为准。
 - [x] Step 1 Reliable Outbox：已完成 Delivery Migration、PostgreSQL 多副本安全 Claim、Claim
-  超时恢复、至少一次投递、指数退避、Dead Letter、审计 Replay、Tenant 运维 API、权限、Metrics、
-  Alert 和 Contract。
+      超时恢复、至少一次投递、指数退避、Dead Letter、审计 Replay、Tenant 运维 API、权限、Metrics、
+      Alert 和 Contract。
 - [x] Outbox 已接入 `execution.queued`、`execution.recovering`、`session.archived`、
-  `worker.offline`、`artifact.ready` 生命周期事务。
+      `worker.offline`、`artifact.ready` 生命周期事务。
 - [x] Go 单元测试和真实 PostgreSQL 17 集成测试通过，包括双 Dispatcher Claim 唯一性与过期恢复。
 - [x] Single-node SaaS Compose Acceptance 通过，覆盖 Outbox 发布结果，并修复 Synara Web 镜像错误
-  落到 `worker` Stage 的 Docker 构建缺陷。
+      落到 `worker` Stage 的 Docker 构建缺陷。
 - [x] Step 2 多副本正确性：已完成进程内状态分类、Background Job Advisory Lock 审计、数据库连接池
-  配置、Migration Lock 超时、Schema/写能力 Readiness、跨副本 SSE Catch-up、并发 Turn/Claim、跨副本
-  Login Session 撤销和单副本退出恢复。
+      配置、Migration Lock 超时、Schema/写能力 Readiness、跨副本 SSE Catch-up、并发 Turn/Claim、跨副本
+      Login Session 撤销和单副本退出恢复。
 - [x] 可重复的双副本 Compose Acceptance 已通过，报告见
-  `docs/reports/stage-2-multi-replica-acceptance.md`。
+      `docs/reports/stage-2-multi-replica-acceptance.md`。
 - [x] Step 3 生产认证收口：已完成 Profile 启动策略、Cookie/Public URL/可信代理规则、绝对与空闲
-  Session 过期、登录 Token Rotation、管理员审计撤销，以及独立 PostgreSQL 连接池下的跨副本撤销和
-  Authenticate/Revoke 并发测试。
+      Session 过期、登录 Token Rotation、管理员审计撤销，以及独立 PostgreSQL 连接池下的跨副本撤销和
+      Authenticate/Revoke 并发测试。
 - [x] 生产认证改动后的双副本 Compose Acceptance 已重新通过；验收客户端改为 Python 标准库，
-  不再重复构建 TypeScript Provider Runtime，也不依赖测试容器在线安装工具。
+      不再重复构建 TypeScript Provider Runtime，也不依赖测试容器在线安装工具。
 - [x] Step 4 Session/Execution API 幂等：已完成 Project/Session/Turn、Suspend/Resume/Archive、
-  Execution Cancel 和 Approval/User Input Resolve 的事务型 `Idempotency-Key`，同 Key 冲突返回稳定
-  `409`，跨 PostgreSQL 连接池并发只执行一次副作用。
+      Execution Cancel 和 Approval/User Input Resolve 的事务型 `Idempotency-Key`，同 Key 冲突返回稳定
+      `409`，跨 PostgreSQL 连接池并发只执行一次副作用。
 - [x] Session 状态机已补齐 active/suspended/archived；Execution 已补齐用户 Cancel、
-  waiting-for-approval、Cancel/Complete 终态竞争、Worker Protocol Version、Drain 和重新注册 Token
-  Rotation 语义。
+      waiting-for-approval、Cancel/Complete 终态竞争、Worker Protocol Version、Drain 和重新注册 Token
+      Rotation 语义。
 - [x] Approval/User Input 请求与 Runtime Event 原子持久化；Resolve 校验 Lease/Generation、拒绝过期
-  Lease 并生成可回放 resolved Event。Provider Runner 双向投递明确进入 Stage 3。
+      Lease 并生成可回放 resolved Event。Provider Runner 双向投递明确进入 Stage 3。
 - [x] Step 4 后双副本 Compose Acceptance 已通过，包含跨副本 Project/Session Replay 和同 Key Turn
-  并发。
+      并发。
 - [x] Step 5 Artifact/SSE 实现收口：Artifact 临时 Key 提升、Pending/Ready 过期临时对象分布式清理、
-  伪造 Hash 拒绝、真实 MinIO Presigned 生命周期、SSE PostgreSQL 全局 Tenant/User 连接租约、慢客户端
-  写超时、Catch-up/连接/Artifact/DB Pool Metrics 和告警已完成。
+      伪造 Hash 拒绝、真实 MinIO Presigned 生命周期、SSE PostgreSQL 全局 Tenant/User 连接租约、慢客户端
+      写超时、Catch-up/连接/Artifact/DB Pool Metrics 和告警已完成。
 - [x] Step 5 默认 SQLite、完整 PostgreSQL 17 + MinIO、单节点 Control Plane Acceptance 和双副本
-  Compose Acceptance 已通过；独立 PostgreSQL 连接池并发 SSE 配额只有一个合法赢家。
+      Compose Acceptance 已通过；独立 PostgreSQL 连接池并发 SSE 配额只有一个合法赢家。
 - [ ] 真实 AWS S3 Live Store 验收需要操作人提供明确授权的可写测试 Bucket；共享
-  `SYNARA_TEST_S3_*` 测试入口已完成。在此之前不宣称真实 AWS S3 已验收。
+      `SYNARA_TEST_S3_*` 测试入口已完成。在此之前不宣称真实 AWS S3 已验收。
 - [x] Step 6 Web 主流程切换：应用级 Authentication/Tenant/Organization Context、Control Plane
-  Project/Session/Turn 主路径、SSE 到 Thread UI 的单向投影和 Control Plane Projection Authority 已完成。
+      Project/Session/Turn 主路径、SSE 到 Thread UI 的单向投影和 Control Plane Projection Authority 已完成。
 - [x] SaaS 浏览器闭环通过：登录、Context、Project、Session、Turn、Worker Event/Complete、SSE 输出和
-  PostgreSQL 刷新恢复均正常；延迟本地 Snapshot 不会覆盖 SaaS Projection。
+      PostgreSQL 刷新恢复均正常；延迟本地 Snapshot 不会覆盖 SaaS Projection。
 - [x] Settings 空闲预热不再调用会创建临时 Match 的 `preloadRoute`，改为只加载生成的 Route Chunk；
-  三个全新浏览器标签在预热、导航和刷新后均无相关 TanStack Router Warning/Error。
+      三个全新浏览器标签在预热、导航和刷新后均无相关 TanStack Router Warning/Error。
 - [x] 未配置 Control Plane 的隔离本地实例通过：无登录门、可从真实路径创建 Project、刷新后从 SQLite
-  Snapshot 恢复，Console 无相关错误。
+      Snapshot 恢复，Console 无相关错误。
 - [x] Step 7 部署与生产验收：Single-node、双副本 Compose、PVC-backed Kind 双副本、Pod 删除、数据库
-  和 MinIO 暂时不可用、Worker 失联/Generation 接管均已通过。
+      和 MinIO 暂时不可用、Worker 失联/Generation 接管均已通过。
 - [x] Control Plane Operations Runbook、Stage 2 Release Checklist、生产验收报告和随机 Sentinel
-  Credential/Token/Prompt 日志泄漏审计已完成。
+      Credential/Token/Prompt 日志泄漏审计已完成。
 - [x] Stage 2 仓库内实现与可控环境验收完成。真实 AWS S3 是目标部署使用 AWS 时的外部发布证据，
-  仍保持未执行状态，不能以 MinIO 结果替代。
+      仍保持未执行状态，不能以 MinIO 结果替代。
 - [x] 当前 `1a53c93a` 基线在迁移扩展到 `000028` 后重新通过完整 Go/Race、四套独立 PostgreSQL
-  集成数据库、Single-node、双副本 Compose、故障注入和 Kind 双副本验收；验收脚本已同步 Worker
-  Protocol v2 Heartbeat 与 ready Workspace 完成约束，基线固定报告见
-  `docs/reports/stage-2-production-acceptance-1a53c93a.md`。
+      集成数据库、Single-node、双副本 Compose、故障注入和 Kind 双副本验收；验收脚本已同步 Worker
+      Protocol v2 Heartbeat 与 ready Workspace 完成约束，基线固定报告见
+      `docs/reports/stage-2-production-acceptance-1a53c93a.md`。
 - [x] `acf63b43` / Migration `000031` 已重新通过 Single-node、双副本 Compose、故障注入和
-  disposable Stage 2 Kind；报告固定 Commit、Migration Version、前后端 Proxy、故障与清理证据，见
-  `docs/reports/stage-2-production-acceptance-acf63b43.md`。
+      disposable Stage 2 Kind；报告固定 Commit、Migration Version、前后端 Proxy、故障与清理证据，见
+      `docs/reports/stage-2-production-acceptance-acf63b43.md`。
 - [x] `0c42b0ec` / Migration `000031` 在 Session/Execution Capability Projection 变更后再次通过四套
-  部署验收，当前固定报告见 `docs/reports/stage-2-production-acceptance-0c42b0ec.md`。
+      部署验收，当前固定报告见 `docs/reports/stage-2-production-acceptance-0c42b0ec.md`。
 
 ### Step 2：多副本正确性
 

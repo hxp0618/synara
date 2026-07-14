@@ -217,5 +217,4 @@ describe("Execution Target Provider Policy", () => {
     expect(markup).toContain("Enable Claude");
     expect(markup).toContain("re-registers with the new policy");
   });
-
 });

@@ -79,27 +79,14 @@ export const controlPlaneQueryKeys = {
     ] as const,
   pendingInteractions: (tenantId: string | null, sessionId: string | null) =>
     ["control-plane", "tenants", tenantId, "sessions", sessionId, "pending-interactions"] as const,
-  projectProviderCapabilities: (
-    projectId: string | null,
-    executionTargetId: string | null,
-  ) =>
-    [
-      "control-plane",
-      "projects",
-      projectId,
-      "provider-capabilities",
-      executionTargetId,
-    ] as const,
+  projectProviderCapabilities: (projectId: string | null, executionTargetId: string | null) =>
+    ["control-plane", "projects", projectId, "provider-capabilities", executionTargetId] as const,
   sessionProviderCapabilities: (sessionId: string | null) =>
     ["control-plane", "sessions", sessionId, "provider-capabilities"] as const,
 };
 
 export type ControlPlaneAvailability = "detecting" | "local" | "available" | "unavailable";
-export type ControlPlaneAuthentication =
-  | "unknown"
-  | "unauthenticated"
-  | "authenticated"
-  | "error";
+export type ControlPlaneAuthentication = "unknown" | "unauthenticated" | "authenticated" | "error";
 
 export type CreateControlPlaneProjectInput = {
   name: string;
@@ -197,10 +184,7 @@ function projectProviderCapabilitiesQueryOptions(
   return queryOptions({
     queryKey: controlPlaneQueryKeys.projectProviderCapabilities(projectId, executionTargetId),
     queryFn: () =>
-      controlPlaneClient.getProjectProviderCapabilities(
-        projectId!,
-        executionTargetId ?? undefined,
-      ),
+      controlPlaneClient.getProjectProviderCapabilities(projectId!, executionTargetId ?? undefined),
     enabled: enabled && projectId !== null,
     retry: false,
     staleTime: CONTROL_PLANE_CAPABILITY_STALE_TIME_MS,
@@ -230,10 +214,7 @@ function sameStreamStatuses(
 ): boolean {
   const leftKeys = Object.keys(left);
   const rightKeys = Object.keys(right);
-  return (
-    leftKeys.length === rightKeys.length &&
-    leftKeys.every((key) => left[key] === right[key])
-  );
+  return leftKeys.length === rightKeys.length && leftKeys.every((key) => left[key] === right[key]);
 }
 
 function controlPlaneUnavailable(error: unknown): boolean {
@@ -306,8 +287,7 @@ export function ControlPlaneProvider({ children }: { children: ReactNode }) {
   });
   const session = sessionQuery.data ?? null;
   const activeTenant = useMemo(
-    () =>
-      session?.tenants.find((tenant) => tenant.id === session.user.activeTenantId) ?? null,
+    () => session?.tenants.find((tenant) => tenant.id === session.user.activeTenantId) ?? null,
     [session?.tenants, session?.user.activeTenantId],
   );
   const activeTenantId = activeTenant?.id ?? null;
@@ -328,7 +308,8 @@ export function ControlPlaneProvider({ children }: { children: ReactNode }) {
     null;
   const activeOrganizationId = activeOrganization?.id ?? null;
   const capabilities = useMemo(
-    () => resolveControlPlaneCapabilities({ tenant: activeTenant, organization: activeOrganization }),
+    () =>
+      resolveControlPlaneCapabilities({ tenant: activeTenant, organization: activeOrganization }),
     [activeOrganization, activeTenant],
   );
   const projectsQuery = useQuery({
@@ -339,13 +320,12 @@ export function ControlPlaneProvider({ children }: { children: ReactNode }) {
     retry: false,
   });
   const projects = projectsQuery.data?.items ?? EMPTY_PROJECTS;
-  const projectIdsKey = projects.map((project) => project.id).sort().join(",");
+  const projectIdsKey = projects
+    .map((project) => project.id)
+    .sort()
+    .join(",");
   const sessionsQuery = useQuery({
-    queryKey: controlPlaneQueryKeys.sessions(
-      activeTenantId,
-      activeOrganizationId,
-      projectIdsKey,
-    ),
+    queryKey: controlPlaneQueryKeys.sessions(activeTenantId, activeOrganizationId, projectIdsKey),
     queryFn: async () => {
       const pages = await Promise.all(
         projects.map((project) => controlPlaneClient.listProjectSessions(project.id)),
@@ -374,10 +354,7 @@ export function ControlPlaneProvider({ children }: { children: ReactNode }) {
 
   let authentication: ControlPlaneAuthentication = "unknown";
   if (sessionQuery.isSuccess) authentication = "authenticated";
-  else if (
-    sessionQuery.error instanceof ControlPlaneError &&
-    sessionQuery.error.status === 401
-  ) {
+  else if (sessionQuery.error instanceof ControlPlaneError && sessionQuery.error.status === 401) {
     authentication = "unauthenticated";
   } else if (sessionQuery.isError) authentication = "error";
   const isAuthoritative = availability === "available" && authentication === "authenticated";
@@ -563,7 +540,9 @@ export function ControlPlaneProvider({ children }: { children: ReactNode }) {
     ],
   );
   const loadSessionProviderCapabilityContext = useCallback(
-    async (sessionId: string): Promise<{
+    async (
+      sessionId: string,
+    ): Promise<{
       session: ControlPlaneAgentSession;
       projection: ProviderCapabilityProjection;
     }> => {
@@ -613,10 +592,7 @@ export function ControlPlaneProvider({ children }: { children: ReactNode }) {
         : [...sessions, nextSession];
       resourcesRef.current = { projects, sessions: nextSessions };
       if (activeTenantId && activeOrganizationId) {
-        projectionRuntime.setScope(
-          `${activeTenantId}:${activeOrganizationId}`,
-          nextSessions,
-        );
+        projectionRuntime.setScope(`${activeTenantId}:${activeOrganizationId}`, nextSessions);
       }
       await sessionsQuery.refetch();
       return nextSession;
@@ -639,9 +615,8 @@ export function ControlPlaneProvider({ children }: { children: ReactNode }) {
         activeOrganizationId,
         projectIdsKey,
       );
-      queryClient.setQueryData<ReadonlyArray<ControlPlaneAgentSession>>(
-        queryKey,
-        (current) => (current ? replaceControlPlaneSession(current, nextSession) : current),
+      queryClient.setQueryData<ReadonlyArray<ControlPlaneAgentSession>>(queryKey, (current) =>
+        current ? replaceControlPlaneSession(current, nextSession) : current,
       );
       const liveScope = resourceScopeRef.current;
       if (
@@ -666,18 +641,14 @@ export function ControlPlaneProvider({ children }: { children: ReactNode }) {
         nextScopedSessions,
       );
     },
-    [
-      activeOrganizationId,
-      activeTenantId,
-      projectionRuntime,
-      projectIdsKey,
-      queryClient,
-    ],
+    [activeOrganizationId, activeTenantId, projectionRuntime, projectIdsKey, queryClient],
   );
   const switchSessionModel = useCallback(
     async (sessionId: string, model: string, idempotencyKey?: string) => {
       if (!isAuthoritative || !capabilities.canCreateTurn) {
-        throw new Error("The active Tenant or Organization is read-only for Session model changes.");
+        throw new Error(
+          "The active Tenant or Organization is read-only for Session model changes.",
+        );
       }
       setSessionModelSwitchingBySessionId((current) =>
         current[sessionId] ? current : { ...current, [sessionId]: true },
@@ -710,10 +681,7 @@ export function ControlPlaneProvider({ children }: { children: ReactNode }) {
         void projectionRuntime.catchUp(sessionId).catch(() => undefined);
         return nextSession;
       } catch (error) {
-        if (
-          error instanceof ControlPlaneError &&
-          error.code === "session_model_conflict"
-        ) {
+        if (error instanceof ControlPlaneError && error.code === "session_model_conflict") {
           try {
             const refreshedSession = await controlPlaneClient.getAgentSession(sessionId);
             syncReturnedSession(refreshedSession);
@@ -800,11 +768,7 @@ export function ControlPlaneProvider({ children }: { children: ReactNode }) {
       void projectionRuntime.catchUp(sessionId).catch(() => undefined);
       return command;
     },
-    [
-      capabilities.canInterruptExecution,
-      loadSessionProviderCapabilityContext,
-      projectionRuntime,
-    ],
+    [capabilities.canInterruptExecution, loadSessionProviderCapabilityContext, projectionRuntime],
   );
   const steerActiveTurn = useCallback(
     async (sessionId: string, inputText: string, idempotencyKey?: string) => {
@@ -1017,9 +981,7 @@ export function useControlPlaneProjectProviderCapabilities(
 
 export function useControlPlaneSessionProviderCapabilities(sessionId: string | null) {
   const controlPlane = useControlPlane();
-  return useQuery(
-    sessionProviderCapabilitiesQueryOptions(sessionId, controlPlane.isAuthoritative),
-  );
+  return useQuery(sessionProviderCapabilitiesQueryOptions(sessionId, controlPlane.isAuthoritative));
 }
 
 export function useControlPlanePendingInteractions(
@@ -1057,12 +1019,6 @@ export function useControlPlanePendingInteractions(
     }
     lastReconciliationRef.current = { sessionId, sequence: observedInteractionSequence };
     void query.refetch();
-  }, [
-    observedInteractionSequence,
-    query.isFetching,
-    query.refetch,
-    sessionId,
-    snapshotSequence,
-  ]);
+  }, [observedInteractionSequence, query.isFetching, query.refetch, sessionId, snapshotSequence]);
   return query;
 }

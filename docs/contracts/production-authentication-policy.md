@@ -4,11 +4,11 @@ This contract defines the deployment-profile authentication boundary for the Go 
 
 ## Profile policy
 
-| Deployment profile | Authentication policy |
-| --- | --- |
-| `personal` | The deterministic local owner may use explicit local login. The installation remains single-replica. |
-| `single-node` | OIDC or SAML is the production path. Dev Bootstrap may be enabled only for a controlled development or acceptance environment. |
-| `enterprise` | OIDC/SAML login and SCIM provisioning are supported. Dev Bootstrap is rejected during startup. |
+| Deployment profile | Authentication policy                                                                                                          |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------------------ |
+| `personal`         | The deterministic local owner may use explicit local login. The installation remains single-replica.                           |
+| `single-node`      | OIDC or SAML is the production path. Dev Bootstrap may be enabled only for a controlled development or acceptance environment. |
+| `enterprise`       | OIDC/SAML login and SCIM provisioning are supported. Dev Bootstrap is rejected during startup.                                 |
 
 Enterprise startup also requires `SYNARA_PUBLIC_CONTROL_PLANE_URL`. A non-loopback public URL must use
 HTTPS and requires a Secure login cookie. `SameSite=None` also requires a Secure cookie.

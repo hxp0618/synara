@@ -39,7 +39,9 @@ export function resolveControlPlaneTarget(baseUrl: URL, requestUrl: URL): URL {
 export function shouldStreamControlPlaneResponse(response: Response): boolean {
   if (response.body === null) return false;
   if (response.headers.get("content-type")?.startsWith("text/event-stream") === true) return true;
-  return response.headers.get("content-disposition")?.toLowerCase().startsWith("attachment;") === true;
+  return (
+    response.headers.get("content-disposition")?.toLowerCase().startsWith("attachment;") === true
+  );
 }
 
 export function buildControlPlaneProxyRequestHeaders(input: {
@@ -83,63 +85,67 @@ export function buildControlPlaneProxyResponseHeaders(response: Response) {
 }
 
 const proxyControlPlaneRequest = Effect.gen(function* () {
-    const config = yield* ServerConfig;
-    const request = yield* HttpServerRequest.HttpServerRequest;
-    const requestUrl = HttpServerRequest.toURL(request);
-    if (!requestUrl) {
-      return unavailableResponse(502, "invalid_proxy_request", "The control-plane request URL is invalid.");
-    }
-    if (!config.controlPlaneUrl) {
-      return unavailableResponse(
-        503,
-        "control_plane_unavailable",
-        "The SaaS control plane is not configured for this Synara instance.",
-      );
-    }
+  const config = yield* ServerConfig;
+  const request = yield* HttpServerRequest.HttpServerRequest;
+  const requestUrl = HttpServerRequest.toURL(request);
+  if (!requestUrl) {
+    return unavailableResponse(
+      502,
+      "invalid_proxy_request",
+      "The control-plane request URL is invalid.",
+    );
+  }
+  if (!config.controlPlaneUrl) {
+    return unavailableResponse(
+      503,
+      "control_plane_unavailable",
+      "The SaaS control plane is not configured for this Synara instance.",
+    );
+  }
 
-    const webRequest = yield* HttpServerRequest.toWeb(request);
-    const body = request.method === "GET" || request.method === "HEAD" ? undefined : webRequest.body;
-    const response = yield* Effect.tryPromise({
-      try: (signal) =>
-        fetch(resolveControlPlaneTarget(config.controlPlaneUrl!, requestUrl), {
-          method: request.method,
-          headers: buildControlPlaneProxyRequestHeaders({
-            headers: request.headers,
-            requestUrl,
-            ...(request.remoteAddress ? { remoteAddress: request.remoteAddress } : {}),
-          }),
-          body,
-          ...(body === undefined ? {} : { duplex: "half" as const }),
-          redirect: "manual",
-          signal,
-        } as RequestInit & { duplex?: "half" }),
-      catch: (cause) => cause,
-    }).pipe(Effect.option);
+  const webRequest = yield* HttpServerRequest.toWeb(request);
+  const body = request.method === "GET" || request.method === "HEAD" ? undefined : webRequest.body;
+  const response = yield* Effect.tryPromise({
+    try: (signal) =>
+      fetch(resolveControlPlaneTarget(config.controlPlaneUrl!, requestUrl), {
+        method: request.method,
+        headers: buildControlPlaneProxyRequestHeaders({
+          headers: request.headers,
+          requestUrl,
+          ...(request.remoteAddress ? { remoteAddress: request.remoteAddress } : {}),
+        }),
+        body,
+        ...(body === undefined ? {} : { duplex: "half" as const }),
+        redirect: "manual",
+        signal,
+      } as RequestInit & { duplex?: "half" }),
+    catch: (cause) => cause,
+  }).pipe(Effect.option);
 
-    if (response._tag === "None") {
-      return unavailableResponse(
-        502,
-        "control_plane_proxy_failed",
-        "The SaaS control plane could not be reached.",
-      );
-    }
-    const upstream = response.value;
-    if (shouldStreamControlPlaneResponse(upstream)) {
-      return HttpServerResponse.stream(
-        Stream.fromAsyncIterable(upstream.body!, (cause) => cause),
-        {
-          status: upstream.status,
-          statusText: upstream.statusText,
-          headers: buildControlPlaneProxyResponseHeaders(upstream),
-        },
-      );
-    }
-    const bytes = new Uint8Array(yield* Effect.promise(() => upstream.arrayBuffer()));
-    return HttpServerResponse.uint8Array(bytes, {
-      status: upstream.status,
-      statusText: upstream.statusText,
-      headers: buildControlPlaneProxyResponseHeaders(upstream),
-    });
+  if (response._tag === "None") {
+    return unavailableResponse(
+      502,
+      "control_plane_proxy_failed",
+      "The SaaS control plane could not be reached.",
+    );
+  }
+  const upstream = response.value;
+  if (shouldStreamControlPlaneResponse(upstream)) {
+    return HttpServerResponse.stream(
+      Stream.fromAsyncIterable(upstream.body!, (cause) => cause),
+      {
+        status: upstream.status,
+        statusText: upstream.statusText,
+        headers: buildControlPlaneProxyResponseHeaders(upstream),
+      },
+    );
+  }
+  const bytes = new Uint8Array(yield* Effect.promise(() => upstream.arrayBuffer()));
+  return HttpServerResponse.uint8Array(bytes, {
+    status: upstream.status,
+    statusText: upstream.statusText,
+    headers: buildControlPlaneProxyResponseHeaders(upstream),
+  });
 });
 
 export const controlPlaneProxyEffectRouteLayer = Layer.mergeAll(

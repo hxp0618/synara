@@ -4,13 +4,16 @@
 
 import { Schema } from "effect";
 
-import { CommandId, IsoDateTime, NonNegativeInt, PositiveInt, TrimmedNonEmptyString } from "./baseSchemas";
+import {
+  CommandId,
+  IsoDateTime,
+  NonNegativeInt,
+  PositiveInt,
+  TrimmedNonEmptyString,
+} from "./baseSchemas";
 import providerCapabilityCatalog from "./providerCapabilityCatalog.json";
 import { ProviderKind } from "./orchestration";
-import {
-  PROVIDER_RUNTIME_EVENT_VERSION,
-  ProviderRuntimeEventType,
-} from "./providerRuntime";
+import { PROVIDER_RUNTIME_EVENT_VERSION, ProviderRuntimeEventType } from "./providerRuntime";
 
 export const PROVIDER_HOST_PROTOCOL_VERSION = { major: 2, minor: 1 } as const;
 export const PROVIDER_HOST_MAX_COMMAND_BYTES = 2 * 1024 * 1024;
@@ -64,11 +67,7 @@ export const PROVIDER_CAPABILITY_IDS = [
 export const ProviderCapabilityId = Schema.Literals(PROVIDER_CAPABILITY_IDS);
 export type ProviderCapabilityId = typeof ProviderCapabilityId.Type;
 
-export const ProviderCapabilitySupport = Schema.Literals([
-  "native",
-  "emulated",
-  "unsupported",
-]);
+export const ProviderCapabilitySupport = Schema.Literals(["native", "emulated", "unsupported"]);
 export type ProviderCapabilitySupport = typeof ProviderCapabilitySupport.Type;
 
 export const ProviderCapabilityProjectionTargetKind = Schema.Literals([
@@ -138,10 +137,7 @@ export const ProviderHostProtocolVersion = Schema.Struct({
 });
 export type ProviderHostProtocolVersion = typeof ProviderHostProtocolVersion.Type;
 
-export const ProviderCapabilityMap = Schema.Record(
-  ProviderCapabilityId,
-  ProviderCapabilitySupport,
-)
+export const ProviderCapabilityMap = Schema.Record(ProviderCapabilityId, ProviderCapabilitySupport)
   .check(Schema.isMinProperties(PROVIDER_CAPABILITY_IDS.length))
   .check(Schema.isMaxProperties(PROVIDER_CAPABILITY_IDS.length));
 export type ProviderCapabilityMap = typeof ProviderCapabilityMap.Type;
@@ -207,16 +203,12 @@ export type ProviderCapabilityCatalog = {
   readonly providers: ReadonlyArray<ProviderCapabilityCatalogEntry>;
 };
 
-export const PROVIDER_CAPABILITY_CATALOG =
-  providerCapabilityCatalog as ProviderCapabilityCatalog;
+export const PROVIDER_CAPABILITY_CATALOG = providerCapabilityCatalog as ProviderCapabilityCatalog;
 
 export const ProviderCredentialDeliveryMode = Schema.Literals(["anonymous-fd"]);
 export type ProviderCredentialDeliveryMode = typeof ProviderCredentialDeliveryMode.Type;
 
-export const ProviderResumeStrategy = Schema.Literals([
-  "native-cursor",
-  "authoritative-history",
-]);
+export const ProviderResumeStrategy = Schema.Literals(["native-cursor", "authoritative-history"]);
 export type ProviderResumeStrategy = typeof ProviderResumeStrategy.Type;
 
 export const ProviderHostDescriptor = Schema.Struct({

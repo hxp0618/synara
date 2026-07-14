@@ -1,9 +1,6 @@
 import { readFileSync } from "node:fs";
 
-import {
-  startClaudeAgentSdkRun,
-  type ClaudeQueryFactory,
-} from "./claudeAgentSdkRuntime";
+import { startClaudeAgentSdkRun, type ClaudeQueryFactory } from "./claudeAgentSdkRuntime";
 import { startCodexAppServerRun } from "./codexAppServerRuntime";
 
 export type RunnerInput = {
@@ -342,9 +339,10 @@ export function hasAuthoritativeResumeData(workload: RunnerInput["workload"]): b
 
 export function reconstructedPrompt(input: RunnerInput): string {
   const snapshot = input.workload.resumeSnapshot;
+  const snapshotMessages = snapshot?.messages;
   const history =
-    (snapshot?.messages?.length ?? 0) > 0
-      ? snapshot.messages.map((message) => ({ role: message.role, text: message.text }))
+    snapshotMessages && snapshotMessages.length > 0
+      ? snapshotMessages.map((message) => ({ role: message.role, text: message.text }))
       : (input.workload.conversationHistory ?? []);
   const lines = [
     "Continue the durable Synara Agent Session below.",
@@ -362,12 +360,7 @@ export function reconstructedPrompt(input: RunnerInput): string {
   for (const message of history) {
     lines.push(`<${message.role}>`, message.text, `</${message.role}>`);
   }
-  lines.push(
-    "</synara_transcript>",
-    "<current_user>",
-    input.workload.inputText,
-    "</current_user>",
-  );
+  lines.push("</synara_transcript>", "<current_user>", input.workload.inputText, "</current_user>");
   return lines.join("\n");
 }
 
@@ -433,7 +426,9 @@ function assertOnlyKeys(payload: Record<string, unknown>, allowed: ReadonlyArray
   const allowedSet = new Set(allowed);
   const unsupported = Object.keys(payload).filter((key) => !allowedSet.has(key));
   if (unsupported.length > 0) {
-    throw new Error(`Provider Credential contains unsupported fields: ${unsupported.sort().join(", ")}`);
+    throw new Error(
+      `Provider Credential contains unsupported fields: ${unsupported.sort().join(", ")}`,
+    );
   }
 }
 

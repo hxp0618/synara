@@ -52,17 +52,17 @@ The stable persisted terminal name is `completed`; it is the v1 equivalent of th
 Provider-acknowledged Turn interrupt is distinct: it releases the Lease and moves the current Turn and
 Execution to the terminal `interrupted` state while leaving the Session active for a later Turn.
 
-| Transition | Actor | Coordination | Durable side effects |
-| --- | --- | --- | --- |
-| `queued/recovering -> leased` | Worker | Row Claim and Generation increment | Lease, authoritative Resume Snapshot and one Generation-scoped `execution.leased.providerResume` decision |
-| `leased -> running` | Worker | Current Worker/Lease/Generation | Turn running, `execution.started` Event |
-| `running -> waiting-for-approval` | Worker Runtime Event | Current Lease/Generation | Pending interaction and requested Event |
-| `waiting-for-approval -> running` | Authorized user | Current unexpired Lease/Generation | Resolution and resolved Event |
-| `leased/running -> completed` | Worker | Lease then Execution row lock | Lease deletion, Turn completion, Event |
-| `leased/running -> failed` | Worker | Lease then Execution row lock | Lease deletion, Turn failure, Event |
-| `leased/running/waiting-for-approval -> interrupted` | Worker acknowledgement of durable user intent | Current Lease/Worker/Generation and Control Command row lock | Provider Cursor persistence, interaction expiry, Lease deletion, Turn interruption, Event, Outbox |
-| active state -> `cancelled` | Authorized user | Lease then Execution row lock | Lease deletion, Turn cancellation, Event, Outbox, Audit |
-| `leased/running/waiting-for-approval -> recovering` | Worker or expiry sweeper | Lease then Execution row lock | Recovery Outbox and Event |
+| Transition                                           | Actor                                         | Coordination                                                 | Durable side effects                                                                                      |
+| ---------------------------------------------------- | --------------------------------------------- | ------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------- |
+| `queued/recovering -> leased`                        | Worker                                        | Row Claim and Generation increment                           | Lease, authoritative Resume Snapshot and one Generation-scoped `execution.leased.providerResume` decision |
+| `leased -> running`                                  | Worker                                        | Current Worker/Lease/Generation                              | Turn running, `execution.started` Event                                                                   |
+| `running -> waiting-for-approval`                    | Worker Runtime Event                          | Current Lease/Generation                                     | Pending interaction and requested Event                                                                   |
+| `waiting-for-approval -> running`                    | Authorized user                               | Current unexpired Lease/Generation                           | Resolution and resolved Event                                                                             |
+| `leased/running -> completed`                        | Worker                                        | Lease then Execution row lock                                | Lease deletion, Turn completion, Event                                                                    |
+| `leased/running -> failed`                           | Worker                                        | Lease then Execution row lock                                | Lease deletion, Turn failure, Event                                                                       |
+| `leased/running/waiting-for-approval -> interrupted` | Worker acknowledgement of durable user intent | Current Lease/Worker/Generation and Control Command row lock | Provider Cursor persistence, interaction expiry, Lease deletion, Turn interruption, Event, Outbox         |
+| active state -> `cancelled`                          | Authorized user                               | Lease then Execution row lock                                | Lease deletion, Turn cancellation, Event, Outbox, Audit                                                   |
+| `leased/running/waiting-for-approval -> recovering`  | Worker or expiry sweeper                      | Lease then Execution row lock                                | Recovery Outbox and Event                                                                                 |
 
 Terminal transitions use the same Lease-before-Execution lock order. Cancel/Complete races therefore
 produce exactly one legal terminal winner instead of relying on process-local synchronization.

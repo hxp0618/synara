@@ -7,7 +7,11 @@ import {
   ControlPlaneInlineError as InlineError,
   ControlPlaneStatusPill as StatusPill,
 } from "~/components/settings/ControlPlaneSettingsPrimitives";
-import { SettingsListRow, SettingsRow, SettingsSection } from "~/components/settings/SettingsPanelPrimitives";
+import {
+  SettingsListRow,
+  SettingsRow,
+  SettingsSection,
+} from "~/components/settings/SettingsPanelPrimitives";
 import { Button } from "~/components/ui/button";
 import { Input } from "~/components/ui/input";
 import { controlPlaneClient, type ControlPlaneServiceAccount } from "~/lib/controlPlaneClient";
@@ -23,7 +27,10 @@ function queryKey(tenantId: string) {
   return ["control-plane", "tenants", tenantId, "service-accounts"] as const;
 }
 
-export function TenantServiceAccountSettingsSection(props: { tenantId: string; canManage: boolean }) {
+export function TenantServiceAccountSettingsSection(props: {
+  tenantId: string;
+  canManage: boolean;
+}) {
   const queryClient = useQueryClient();
   const accounts = useQuery({
     queryKey: queryKey(props.tenantId),
@@ -54,16 +61,33 @@ export function TenantServiceAccountSettingsSection(props: { tenantId: string; c
         <SettingsRow
           title="Copy the new token now"
           description="Synara cannot display this token again. Store it in the identity provider or secret manager, then clear it from this screen."
-          control={<Button size="sm" variant="outline" onClick={() => setIssuedToken("")}>Clear token</Button>}
+          control={
+            <Button size="sm" variant="outline" onClick={() => setIssuedToken("")}>
+              Clear token
+            </Button>
+          }
         >
-          <code className="block break-all rounded-md border border-border bg-muted/40 p-3 text-xs text-foreground">{issuedToken}</code>
+          <code className="block break-all rounded-md border border-border bg-muted/40 p-3 text-xs text-foreground">
+            {issuedToken}
+          </code>
         </SettingsRow>
       ) : null}
       {accounts.isPending ? <SettingsListRow title="Loading Service Accounts…" /> : null}
       {accounts.data?.items.map((account) => (
-        <ServiceAccountRow key={account.id} account={account} canManage={props.canManage} tenantId={props.tenantId} onToken={setIssuedToken} />
+        <ServiceAccountRow
+          key={account.id}
+          account={account}
+          canManage={props.canManage}
+          tenantId={props.tenantId}
+          onToken={setIssuedToken}
+        />
       ))}
-      {accounts.data?.items.length === 0 ? <SettingsListRow title="No Service Accounts" description="Create one with SCIM scopes before connecting a directory provider." /> : null}
+      {accounts.data?.items.length === 0 ? (
+        <SettingsListRow
+          title="No Service Accounts"
+          description="Create one with SCIM scopes before connecting a directory provider."
+        />
+      ) : null}
       <InlineError error={accounts.error} />
     </SettingsSection>
   );
@@ -77,7 +101,8 @@ function ServiceAccountForm(props: {
   const [description, setDescription] = useState("");
   const [scopes, setScopes] = useState<ReadonlyArray<string>>(["scim.read", "scim.write"]);
   const create = useMutation({
-    mutationFn: () => controlPlaneClient.createServiceAccount(props.tenantId, { name, description, scopes }),
+    mutationFn: () =>
+      controlPlaneClient.createServiceAccount(props.tenantId, { name, description, scopes }),
     onSuccess: (issued) => {
       props.onCreated(issued.account, issued.token);
       setName("");
@@ -85,23 +110,58 @@ function ServiceAccountForm(props: {
     },
   });
   return (
-    <form data-testid="service-account-form" className={formGridClassName} onSubmit={(event: FormEvent) => { event.preventDefault(); create.mutate(); }}>
-      <FormField label="Name"><Input data-testid="service-account-name" required value={name} onChange={(event) => setName(event.target.value)} /></FormField>
-      <FormField label="Description"><Input data-testid="service-account-description" value={description} onChange={(event) => setDescription(event.target.value)} /></FormField>
+    <form
+      data-testid="service-account-form"
+      className={formGridClassName}
+      onSubmit={(event: FormEvent) => {
+        event.preventDefault();
+        create.mutate();
+      }}
+    >
+      <FormField label="Name">
+        <Input
+          data-testid="service-account-name"
+          required
+          value={name}
+          onChange={(event) => setName(event.target.value)}
+        />
+      </FormField>
+      <FormField label="Description">
+        <Input
+          data-testid="service-account-description"
+          value={description}
+          onChange={(event) => setDescription(event.target.value)}
+        />
+      </FormField>
       <div className="space-y-2 sm:col-span-2">
         {SCOPES.map(([scope, label]) => (
           <label key={scope} className="flex items-center gap-2 text-xs text-muted-foreground">
             <input
               checked={scopes.includes(scope)}
               type="checkbox"
-              onChange={(event) => setScopes((current) => event.target.checked ? [...current, scope] : current.filter((item) => item !== scope))}
+              onChange={(event) =>
+                setScopes((current) =>
+                  event.target.checked
+                    ? [...current, scope]
+                    : current.filter((item) => item !== scope),
+                )
+              }
             />
-            <span><span className="font-medium text-foreground">{scope}</span> · {label}</span>
+            <span>
+              <span className="font-medium text-foreground">{scope}</span> · {label}
+            </span>
           </label>
         ))}
       </div>
       <div className="sm:col-span-2">
-        <Button data-testid="service-account-submit" disabled={create.isPending || scopes.length === 0} size="sm" type="submit">{create.isPending ? "Creating Service Account…" : "Create Service Account"}</Button>
+        <Button
+          data-testid="service-account-submit"
+          disabled={create.isPending || scopes.length === 0}
+          size="sm"
+          type="submit"
+        >
+          {create.isPending ? "Creating Service Account…" : "Create Service Account"}
+        </Button>
         <InlineError error={create.error} />
       </div>
     </form>
@@ -116,21 +176,53 @@ function ServiceAccountRow(props: {
 }) {
   const queryClient = useQueryClient();
   const rotate = useMutation({
-    mutationFn: () => controlPlaneClient.rotateServiceAccountToken(props.tenantId, props.account.id),
+    mutationFn: () =>
+      controlPlaneClient.rotateServiceAccountToken(props.tenantId, props.account.id),
     onSuccess: (issued) => props.onToken(issued.token),
   });
   const revoke = useMutation({
     mutationFn: () => controlPlaneClient.revokeServiceAccount(props.tenantId, props.account.id),
-    onSuccess: () => queryClient.setQueryData<{ items: ReadonlyArray<ControlPlaneServiceAccount> }>(
-      queryKey(props.tenantId),
-      (current) => ({ items: (current?.items ?? []).map((item) => item.id === props.account.id ? { ...item, status: "revoked", revokedAt: new Date().toISOString() } : item) }),
-    ),
+    onSuccess: () =>
+      queryClient.setQueryData<{ items: ReadonlyArray<ControlPlaneServiceAccount> }>(
+        queryKey(props.tenantId),
+        (current) => ({
+          items: (current?.items ?? []).map((item) =>
+            item.id === props.account.id
+              ? { ...item, status: "revoked", revokedAt: new Date().toISOString() }
+              : item,
+          ),
+        }),
+      ),
   });
   return (
     <SettingsListRow
       title={props.account.name}
       description={`${props.account.description || "No description"} · ${props.account.scopes.join(", ")}`}
-      actions={<span className="flex items-center gap-2"><StatusPill value={props.account.status} />{props.canManage && props.account.status === "active" ? <><Button disabled={rotate.isPending} size="sm" variant="outline" onClick={() => rotate.mutate()}>Rotate token</Button><Button disabled={revoke.isPending} size="sm" variant="outline" onClick={() => revoke.mutate()}>Revoke</Button></> : null}</span>}
+      actions={
+        <span className="flex items-center gap-2">
+          <StatusPill value={props.account.status} />
+          {props.canManage && props.account.status === "active" ? (
+            <>
+              <Button
+                disabled={rotate.isPending}
+                size="sm"
+                variant="outline"
+                onClick={() => rotate.mutate()}
+              >
+                Rotate token
+              </Button>
+              <Button
+                disabled={revoke.isPending}
+                size="sm"
+                variant="outline"
+                onClick={() => revoke.mutate()}
+              >
+                Revoke
+              </Button>
+            </>
+          ) : null}
+        </span>
+      }
     />
   );
 }

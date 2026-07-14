@@ -21,13 +21,13 @@
 > Artifact、Credential 和企业身份基础实现。下面的 TODO 表示生产化与产品收口目标；执行每个
 > Stage 前必须先做差距审计，禁止按旧计划重复实现已有模块。
 
-| Stage | 目标 | 状态 | 依赖 |
-| --- | --- | --- | --- |
-| Stage 1 | 定义 SaaS 边界、Tenant/Organization/User 和协议 | 基线完成 | — |
-| Stage 2 | Go Control Plane 收口与生产化 | 仓库内完成 / 已验收 | Stage 1 |
-| Stage 3 | Provider Runtime 与远程 Worker 产品化 | IN PROGRESS | Stage 2 |
-| Stage 4 | 分布式执行平台和 K8s 多集群生产化 | TODO | Stage 2、Stage 3 |
-| Stage 5 | 企业 SaaS GA、运营、安全与商业化 | TODO | Stage 2-4 |
+| Stage   | 目标                                            | 状态                | 依赖             |
+| ------- | ----------------------------------------------- | ------------------- | ---------------- |
+| Stage 1 | 定义 SaaS 边界、Tenant/Organization/User 和协议 | 基线完成            | —                |
+| Stage 2 | Go Control Plane 收口与生产化                   | 仓库内完成 / 已验收 | Stage 1          |
+| Stage 3 | Provider Runtime 与远程 Worker 产品化           | IN PROGRESS         | Stage 2          |
+| Stage 4 | 分布式执行平台和 K8s 多集群生产化               | TODO                | Stage 2、Stage 3 |
+| Stage 5 | 企业 SaaS GA、运营、安全与商业化                | TODO                | Stage 2-4        |
 
 Stage 2 的独立执行计划：
 [`docs/plans/stage-2-go-control-plane-productionization.md`](docs/plans/stage-2-go-control-plane-productionization.md)
@@ -58,9 +58,9 @@ Target 和 Codex/Claude 执行闭环属于基础实现，本阶段负责补齐 P
 - [ ] 统一 Approval、Structured User Input、Plan Mode 和 Review 流程。
 - [ ] 统一 Runtime Event 映射、Event Version 和未知事件兼容策略。
 - [x] 实现 Provider Cursor TTL、未来时钟隔离、不可复活状态、可审计 Claim 选择，以及 Provider
-  native invalid/expired 的 Turn-activity 前安全 fallback。
+      native invalid/expired 的 Turn-activity 前安全 fallback。
 - [ ] 在真实 Codex/Claude 的 Local、SSH、Docker、Kubernetes Worker/Pod 迁移中验证 native Cursor
-  invalid/expired、删除 Provider 本地状态后的恢复，以及已完成副作用不重复。
+      invalid/expired、删除 Provider 本地状态后的恢复，以及已完成副作用不重复。
 - [ ] 保持 Worker Token、Lease Token 和 Credential 不进入 Provider Runner 输入或日志。
 - [ ] 完成 Tenant/Organization/User/Platform 四级 Provider Credential 解析策略评审。
 - [ ] 完成 Git Clone/Fetch/Branch/Worktree/Push/PR 的远程 Workspace 生命周期。

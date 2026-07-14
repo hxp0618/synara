@@ -1849,7 +1849,7 @@ export function deriveEffectiveComposerModelState(input: {
       : null,
   );
   const selectedModel = input.preferThreadModelSelection
-    ? availableThreadModel ??
+    ? (availableThreadModel ??
       persistedThreadModel ??
       availableDraftModel ??
       availableProjectModel ??
@@ -1859,8 +1859,8 @@ export function deriveEffectiveComposerModelState(input: {
       input.availableModelOptionsByProvider?.[input.selectedProvider]?.[0]?.slug ??
       selectedDraftModel ??
       baseModel ??
-      getDefaultModel("codex")
-    : availableDraftModel ??
+      getDefaultModel("codex"))
+    : (availableDraftModel ??
       availableThreadModel ??
       availableProjectModel ??
       resolveAvailableModel(selectedDraftModel) ??
@@ -1870,7 +1870,7 @@ export function deriveEffectiveComposerModelState(input: {
       input.availableModelOptionsByProvider?.[input.selectedProvider]?.[0]?.slug ??
       selectedDraftModel ??
       baseModel ??
-      getDefaultModel("codex");
+      getDefaultModel("codex"));
   const modelOptions = deriveEffectiveComposerModelOptions(input);
 
   return {
@@ -5149,9 +5149,7 @@ export function useEffectiveComposerModelState(input: {
         selectedProvider: input.selectedProvider,
         threadModelSelection: input.threadModelSelection,
         projectModelSelection: input.projectModelSelection,
-        ...(input.preferThreadModelSelection === true
-          ? { preferThreadModelSelection: true }
-          : {}),
+        ...(input.preferThreadModelSelection === true ? { preferThreadModelSelection: true } : {}),
         customModelsByProvider: input.customModelsByProvider,
         ...(input.availableModelOptionsByProvider !== undefined
           ? { availableModelOptionsByProvider: input.availableModelOptionsByProvider }

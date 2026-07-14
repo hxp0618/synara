@@ -1,7 +1,4 @@
-import type {
-  ControlPlaneOrganization,
-  ControlPlaneTenantAccess,
-} from "./controlPlaneClient";
+import type { ControlPlaneOrganization, ControlPlaneTenantAccess } from "./controlPlaneClient";
 
 export type ControlPlaneCapabilities = {
   canReadOrganizations: boolean;

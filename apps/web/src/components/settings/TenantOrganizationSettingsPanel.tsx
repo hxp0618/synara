@@ -35,8 +35,7 @@ import { cn } from "~/lib/utils";
 import { controlPlaneQueryKeys, useControlPlane } from "~/controlPlaneContext";
 
 const settingsQueryKeys = {
-  members: (tenantId: string | null) =>
-    ["control-plane", "tenants", tenantId, "members"] as const,
+  members: (tenantId: string | null) => ["control-plane", "tenants", tenantId, "members"] as const,
   executionTargets: (tenantId: string | null) =>
     ["control-plane", "tenants", tenantId, "execution-targets"] as const,
   workerManifests: (tenantId: string | null) =>
@@ -124,7 +123,10 @@ function LoginPanel() {
             </Button>
           </div>
           {discoverSSO.data?.items.map((connection) => (
-            <div key={connection.id} className="flex items-center justify-between gap-3 sm:col-span-2">
+            <div
+              key={connection.id}
+              className="flex items-center justify-between gap-3 sm:col-span-2"
+            >
               <span className="text-xs text-muted-foreground">
                 {connection.name} · {connection.kind.toUpperCase()}
               </span>
@@ -161,7 +163,10 @@ export function TenantOrganizationSettingsPanel() {
   ) {
     return (
       <SettingsSection title="SaaS control plane">
-        <SettingsListRow title="Connecting…" description="Loading tenant and organization context." />
+        <SettingsListRow
+          title="Connecting…"
+          description="Loading tenant and organization context."
+        />
       </SettingsSection>
     );
   }
@@ -205,8 +210,9 @@ function AuthenticatedTenantPanel() {
   const activeTenantId = activeTenant?.id ?? null;
   const [organizationName, setOrganizationName] = useState("");
   const [organizationSlug, setOrganizationSlug] = useState("");
-  const [organizationKind, setOrganizationKind] =
-    useState<"team" | "department" | "personal">("team");
+  const [organizationKind, setOrganizationKind] = useState<"team" | "department" | "personal">(
+    "team",
+  );
   const [inviteEmail, setInviteEmail] = useState("");
   const [inviteRole, setInviteRole] = useState("member");
   const [createdInvitation, setCreatedInvitation] = useState<TenantInvitation | null>(null);
@@ -329,7 +335,12 @@ function AuthenticatedTenantPanel() {
           title={controlPlane.session?.user.displayName ?? "Signed-in user"}
           description={controlPlane.session?.user.email ?? ""}
           control={
-            <Button disabled={logout.isPending} size="sm" variant="outline" onClick={() => logout.mutate()}>
+            <Button
+              disabled={logout.isPending}
+              size="sm"
+              variant="outline"
+              onClick={() => logout.mutate()}
+            >
               Sign out
             </Button>
           }
@@ -353,10 +364,7 @@ function AuthenticatedTenantPanel() {
       ) : null}
 
       {canReadAudit ? (
-        <TenantAuditSettingsSection
-          key={`audit-${activeTenant.id}`}
-          tenantId={activeTenant.id}
-        />
+        <TenantAuditSettingsSection key={`audit-${activeTenant.id}`} tenantId={activeTenant.id} />
       ) : null}
 
       {canManageCredentials ? (
@@ -416,7 +424,11 @@ function AuthenticatedTenantPanel() {
               }}
             >
               <FormField label="Name">
-                <Input required value={organizationName} onChange={(event) => setOrganizationName(event.target.value)} />
+                <Input
+                  required
+                  value={organizationName}
+                  onChange={(event) => setOrganizationName(event.target.value)}
+                />
               </FormField>
               <FormField label="Slug">
                 <Input
@@ -568,7 +580,9 @@ function AuthenticatedTenantPanel() {
               </form>
               {createdInvitation?.token ? (
                 <div className="mt-3 rounded-lg border border-border bg-foreground/3 p-3">
-                  <p className="text-[11px] font-medium text-foreground">One-time invitation token</p>
+                  <p className="text-[11px] font-medium text-foreground">
+                    One-time invitation token
+                  </p>
                   <code className="mt-1 block break-all text-[11px] text-muted-foreground">
                     {createdInvitation.token}
                   </code>

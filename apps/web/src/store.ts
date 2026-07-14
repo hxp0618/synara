@@ -4322,10 +4322,7 @@ export function syncAuthoritativeProjection(
       state.proposedPlanIdsByThreadId,
       nextThreadIds,
     ),
-    proposedPlanByThreadId: retainThreadScopedRecord(
-      state.proposedPlanByThreadId,
-      nextThreadIds,
-    ),
+    proposedPlanByThreadId: retainThreadScopedRecord(state.proposedPlanByThreadId, nextThreadIds),
     turnDiffIdsByThreadId: retainThreadScopedRecord(state.turnDiffIdsByThreadId, nextThreadIds),
     turnDiffSummaryByThreadId: retainThreadScopedRecord(
       state.turnDiffSummaryByThreadId,
@@ -4577,7 +4574,9 @@ export const useStore = create<AppStore>((set) => ({
   ...readPersistedState(),
   setProjectionAuthority: (authority) =>
     set((state) =>
-      state.projectionAuthority === authority ? state : { ...state, projectionAuthority: authority },
+      state.projectionAuthority === authority
+        ? state
+        : { ...state, projectionAuthority: authority },
     ),
   syncServerShellSnapshot: (snapshot) => set((state) => syncServerShellSnapshot(state, snapshot)),
   syncServerThreadDetail: (thread) => set((state) => syncServerThreadDetail(state, thread)),

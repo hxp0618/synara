@@ -1,9 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import type {
-  ControlPlaneAgentSession,
-  ControlPlaneSessionEvent,
-} from "./controlPlaneClient";
+import type { ControlPlaneAgentSession, ControlPlaneSessionEvent } from "./controlPlaneClient";
 import {
   applyControlPlaneSessionEvent,
   createControlPlaneSessionProjection,
@@ -165,9 +162,9 @@ describe("Control Plane Session projection", () => {
 
     expect(projection.messages.map((message) => message.text)).toEqual(["Build it", "Canonical"]);
     expect(projection.activities.map((activity) => activity.kind)).toEqual(["execution.started"]);
-    expect(applyControlPlaneSessionEvent(projection, event(4, "content.delta", {}, 2)).projection).toBe(
-      projection,
-    );
+    expect(
+      applyControlPlaneSessionEvent(projection, event(4, "content.delta", {}, 2)).projection,
+    ).toBe(projection);
   });
 
   it("degrades canonical lifecycle, warning, and future v2 events into stable activities", () => {
@@ -190,7 +187,11 @@ describe("Control Plane Session projection", () => {
       "Resume cursor expired",
       "provider.extension.future",
     ]);
-    expect(projection.activities.map((activity) => activity.tone)).toEqual(["tool", "tool", "info"]);
+    expect(projection.activities.map((activity) => activity.tone)).toEqual([
+      "tool",
+      "tool",
+      "info",
+    ]);
   });
 
   it("finishes assistant output only from the durable completion Event", () => {

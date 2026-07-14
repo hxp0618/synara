@@ -17,11 +17,11 @@ in either dimension, so one combined deployment/execution enum would be ambiguou
 
 The supported deployment profiles are:
 
-| Profile | Metadata | Artifacts | Queue | Control-plane replicas |
-| --- | --- | --- | --- | --- |
-| `personal` | SQLite | local filesystem | in-process | exactly one |
-| `single-node` | PostgreSQL | MinIO or S3 | PostgreSQL outbox | exactly one |
-| `enterprise` | PostgreSQL | S3 | PostgreSQL outbox, with an optional external queue | two or more |
+| Profile       | Metadata   | Artifacts        | Queue                                              | Control-plane replicas |
+| ------------- | ---------- | ---------------- | -------------------------------------------------- | ---------------------- |
+| `personal`    | SQLite     | local filesystem | in-process                                         | exactly one            |
+| `single-node` | PostgreSQL | MinIO or S3      | PostgreSQL outbox                                  | exactly one            |
+| `enterprise`  | PostgreSQL | S3               | PostgreSQL outbox, with an optional external queue | two or more            |
 
 The supported execution target kinds are `local`, `ssh`, `docker`, and `kubernetes`. Every kind uses
 the same Worker Protocol, Execution lease, generation fencing, runtime event, and future artifact

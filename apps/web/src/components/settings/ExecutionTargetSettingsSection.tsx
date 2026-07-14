@@ -1,7 +1,4 @@
-import {
-  PROVIDER_CAPABILITY_CATALOG,
-  type ProviderHostProviderKind,
-} from "@synara/contracts";
+import { PROVIDER_CAPABILITY_CATALOG, type ProviderHostProviderKind } from "@synara/contracts";
 import { useMutation } from "@tanstack/react-query";
 import { useState, type FormEvent } from "react";
 
@@ -113,7 +110,11 @@ export function ExecutionTargetSettingsSection(props: {
 
   const requestError = createTarget.error ?? props.error;
   const requestErrorMessage =
-    requestError instanceof Error ? requestError.message : requestError ? "The request failed." : null;
+    requestError instanceof Error
+      ? requestError.message
+      : requestError
+        ? "The request failed."
+        : null;
   const workerManifestsByTarget = groupWorkerManifestsByTarget(props.workerManifests);
 
   return (
@@ -122,7 +123,8 @@ export function ExecutionTargetSettingsSection(props: {
         const organization = props.organizations.find(
           (candidate) => candidate.id === target.organizationId,
         );
-        const scope = organization?.name ?? (target.tenantId === null ? "Platform shared" : "Tenant wide");
+        const scope =
+          organization?.name ?? (target.tenantId === null ? "Platform shared" : "Tenant wide");
         return (
           <ExecutionTargetRow
             key={target.id}
@@ -159,9 +161,7 @@ export function ExecutionTargetSettingsSection(props: {
               <select
                 className={CONTROL_PLANE_NATIVE_SELECT_CLASS_NAME}
                 value={kind}
-                onChange={(event) =>
-                  setKind(event.target.value as ControlPlaneExecutionTargetKind)
-                }
+                onChange={(event) => setKind(event.target.value as ControlPlaneExecutionTargetKind)}
               >
                 <option value="local">Local</option>
                 <option value="ssh">SSH</option>
@@ -392,9 +392,9 @@ function ProviderPolicyControls(props: {
     if (next.has(provider)) next.delete(provider);
     else next.add(provider);
     updatePolicy.mutate(
-      PROVIDER_CAPABILITY_CATALOG.providers.map((entry) => entry.provider).filter((candidate) =>
-        next.has(candidate),
-      ),
+      PROVIDER_CAPABILITY_CATALOG.providers
+        .map((entry) => entry.provider)
+        .filter((candidate) => next.has(candidate)),
     );
   };
 
@@ -424,7 +424,8 @@ function ProviderPolicyControls(props: {
         <p className="text-destructive">{manifestErrorMessage(updatePolicy.error)}</p>
       ) : (
         <p className="text-muted-foreground">
-          A change fences current Worker Manifests until the Worker re-registers with the new policy.
+          A change fences current Worker Manifests until the Worker re-registers with the new
+          policy.
         </p>
       )}
     </div>
@@ -458,7 +459,9 @@ function ObservedWorkerManifestDetails(props: {
     <article className="space-y-3 rounded-md border border-border/80 bg-background/70 p-2.5">
       <header className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
         <p className="font-medium text-foreground">
-          {props.variantCount === 1 ? "Manifest variant" : `Manifest variant ${props.variantIndex + 1}`}
+          {props.variantCount === 1
+            ? "Manifest variant"
+            : `Manifest variant ${props.variantIndex + 1}`}
         </p>
         <code className="break-all font-mono text-[9px] text-muted-foreground">
           {manifest.manifestId}
@@ -486,7 +489,10 @@ function ObservedWorkerManifestDetails(props: {
         ) : null}
         <ManifestFact
           label="Worker Protocol"
-          value={formatVersionRange(manifest.workerProtocol.minimum, manifest.workerProtocol.maximum)}
+          value={formatVersionRange(
+            manifest.workerProtocol.minimum,
+            manifest.workerProtocol.maximum,
+          )}
         />
         <ManifestFact
           label="Runtime Event"
@@ -503,16 +509,15 @@ function ObservedWorkerManifestDetails(props: {
   );
 }
 
-function ManifestFact(props: {
-  label: string;
-  value: string;
-  mono?: boolean;
-  dateTime?: string;
-}) {
+function ManifestFact(props: { label: string; value: string; mono?: boolean; dateTime?: string }) {
   return (
     <div className="min-w-0">
       <dt className="font-medium text-foreground">{props.label}</dt>
-      <dd className={props.mono ? "break-all font-mono text-muted-foreground" : "text-muted-foreground"}>
+      <dd
+        className={
+          props.mono ? "break-all font-mono text-muted-foreground" : "text-muted-foreground"
+        }
+      >
         {props.dateTime ? <time dateTime={props.dateTime}>{props.value}</time> : props.value}
       </dd>
     </div>
@@ -548,10 +553,7 @@ function ObservedProviderManifest(props: { provider: ControlPlaneWorkerProviderM
           value={`${provider.runtime.available ? "available" : "unavailable"} · ${provider.runtime.compatible ? "compatible" : "incompatible"} · ${provider.runtime.versionSource}`}
         />
         <ManifestFact label="Compatible range" value={runtimeRange} />
-        <ManifestFact
-          label="Release policy"
-          value={formatReleasePolicy(provider)}
-        />
+        <ManifestFact label="Release policy" value={formatReleasePolicy(provider)} />
       </dl>
       {provider.incompatibilityCode || provider.incompatibilityMessage ? (
         <p className="rounded-md border border-border bg-foreground/[0.025] px-2 py-1.5 text-muted-foreground">
@@ -565,10 +567,7 @@ function ObservedProviderManifest(props: { provider: ControlPlaneWorkerProviderM
         {capabilityGroups.map((group) => (
           <div key={group.support} className="grid gap-0.5 sm:grid-cols-[6rem_1fr] sm:gap-2">
             <dt>
-              <ControlPlaneStatusPill
-                value={group.support}
-                active={group.support === "native"}
-              />
+              <ControlPlaneStatusPill value={group.support} active={group.support === "native"} />
             </dt>
             <dd className="break-words font-mono text-[9px] text-muted-foreground">
               {group.capabilities.length > 0 ? group.capabilities.join(", ") : "None"}
@@ -623,7 +622,9 @@ function compareWorkerManifestVariants(
 
 function formatReleasePolicy(provider: ControlPlaneWorkerProviderManifest): string {
   if (!provider.releasePolicy.requiresExplicitEnablement) return "No explicit enablement required";
-  return provider.releasePolicy.enabled ? "Explicitly enabled" : "Explicit enablement required · disabled";
+  return provider.releasePolicy.enabled
+    ? "Explicitly enabled"
+    : "Explicit enablement required · disabled";
 }
 
 function formatVersionRange(minimum: number, maximum: number): string {

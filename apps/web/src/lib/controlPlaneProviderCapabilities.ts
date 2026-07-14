@@ -176,8 +176,7 @@ export function resolveControlPlaneCapabilityDecision(input: {
 
   const allowed =
     item.status === "supported" ||
-    (item.status === "unobserved" &&
-      UNOBSERVED_QUEUEABLE_CAPABILITIES.has(input.capabilityId));
+    (item.status === "unobserved" && UNOBSERVED_QUEUEABLE_CAPABILITIES.has(input.capabilityId));
   const decision = {
     provider: input.provider,
     capabilityId: input.capabilityId,

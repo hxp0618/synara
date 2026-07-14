@@ -25,11 +25,7 @@ export function getRouter(history: RouterHistory) {
       createElement(
         QueryClientProvider,
         { client: queryClient },
-        createElement(
-          ControlPlaneProvider,
-          null,
-          createElement(StoreProvider, null, children),
-        ),
+        createElement(ControlPlaneProvider, null, createElement(StoreProvider, null, children)),
       ),
   });
 }

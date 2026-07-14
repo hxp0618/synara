@@ -48,7 +48,9 @@ describe("Stage 3 Provider Host acceptance fixture", () => {
 
     for (const provider of PROVIDER_HOST_PROVIDER_KINDS) {
       const descriptor = decodeDescriptor(fixtureDescriptor(provider, enabled));
-      const catalog = PROVIDER_CAPABILITY_CATALOG.providers.find((entry) => entry.provider === provider);
+      const catalog = PROVIDER_CAPABILITY_CATALOG.providers.find(
+        (entry) => entry.provider === provider,
+      );
 
       expect(descriptor.protocolVersion).toEqual({ major: 2, minor: 1 });
       expect(descriptor.capabilityDescriptor.provider).toBe(provider);
@@ -100,7 +102,9 @@ describe("Stage 3 Provider Host acceptance fixture", () => {
       "item.completed",
       "thread.token-usage.updated",
     ]);
-    expect(sendMessages.find((message) => message.messageType === "ArtifactCandidate")).toMatchObject({
+    expect(
+      sendMessages.find((message) => message.messageType === "ArtifactCandidate"),
+    ).toMatchObject({
       payload: { artifact: { kind: "generated_file" } },
     });
     expect(readFileSync(join(workspace, ".synara-stage3-acceptance/artifact.txt"), "utf8")).toBe(
@@ -117,7 +121,9 @@ describe("Stage 3 Provider Host acceptance fixture", () => {
     startCodexSession(host, workspace);
 
     host.handleCommand(command("SendTurn", "workspace-write", { inputText: "[artifact]" }));
-    host.handleCommand(command("SendTurn", "workspace-verify", { inputText: "[workspace-verify]" }));
+    host.handleCommand(
+      command("SendTurn", "workspace-verify", { inputText: "[workspace-verify]" }),
+    );
 
     expect(messagesFor(output, "workspace-verify")).toMatchObject([
       {
@@ -134,7 +140,9 @@ describe("Stage 3 Provider Host acceptance fixture", () => {
     ]);
 
     writeFileSync(join(workspace, ".synara-stage3-acceptance/artifact.txt"), "tampered\n");
-    host.handleCommand(command("SendTurn", "workspace-tampered", { inputText: "[workspace-verify]" }));
+    host.handleCommand(
+      command("SendTurn", "workspace-tampered", { inputText: "[workspace-verify]" }),
+    );
     expect(messagesFor(output, "workspace-tampered")).toMatchObject([
       { messageType: "Error", error: { code: "workspace_invalid" } },
     ]);
@@ -172,9 +180,7 @@ describe("Stage 3 Provider Host acceptance fixture", () => {
     const host = fixtureHost(output);
     startCodexSession(host, workspace);
 
-    host.handleCommand(
-      command("SendTurn", "artifact-target-symlink", { inputText: "[artifact]" }),
-    );
+    host.handleCommand(command("SendTurn", "artifact-target-symlink", { inputText: "[artifact]" }));
 
     expect(messagesFor(output, "artifact-target-symlink")).toMatchObject([
       { messageType: "Error", error: { code: "workspace_invalid" } },
@@ -273,10 +279,14 @@ describe("Stage 3 Provider Host acceptance fixture", () => {
         ),
       );
 
-      const firstRequestId =
-        messagesFor(firstOutput, `generation-1-${interactionType}`)[0]?.payload.requestId;
-      const recoveredRequestId =
-        messagesFor(recoveredOutput, `generation-2-${interactionType}`)[0]?.payload.requestId;
+      const firstRequestId = interactionRequestIdFor(
+        firstOutput,
+        `generation-1-${interactionType}`,
+      );
+      const recoveredRequestId = interactionRequestIdFor(
+        recoveredOutput,
+        `generation-2-${interactionType}`,
+      );
       expect(firstRequestId).toBe(`fixture-${interactionType}-generation-1-1`);
       expect(recoveredRequestId).toBe(`fixture-${interactionType}-generation-2-1`);
       expect(recoveredRequestId).not.toBe(firstRequestId);
@@ -289,7 +299,10 @@ describe("Stage 3 Provider Host acceptance fixture", () => {
     host.handleCommand(
       command("ResumeSession", "resume-1", {
         runnerInput: {
-          workload: { provider: "claudeAgent", conversationHistory: [{ role: "user", text: "before" }] },
+          workload: {
+            provider: "claudeAgent",
+            conversationHistory: [{ role: "user", text: "before" }],
+          },
           workspaceDirectory: tmpdir(),
         },
         runtimeEventVersion: 2,
@@ -344,7 +357,9 @@ describe("Stage 3 Provider Host acceptance fixture", () => {
     const describe = command("Describe", "describe-replay", { provider: "codex" });
     host.handleCommand(describe);
     host.handleCommand(describe);
-    expect(messagesFor(output, "describe-replay")[1]).toEqual(messagesFor(output, "describe-replay")[0]);
+    expect(messagesFor(output, "describe-replay")[1]).toEqual(
+      messagesFor(output, "describe-replay")[0],
+    );
     host.handleCommand(command("Describe", "describe-replay", { provider: "claudeAgent" }));
     expect(messagesFor(output, "describe-replay").at(-1)).toMatchObject({
       messageType: "Error",
@@ -372,7 +387,7 @@ describe("Stage 3 Provider Host acceptance fixture", () => {
     );
 
     expect(output.join("\n")).not.toContain(secret);
-    expect(JSON.parse(output[0])).toMatchObject({
+    expect(JSON.parse(output[0] ?? "{}")).toMatchObject({
       messageType: "Error",
       error: { code: "protocol_violation" },
     });
@@ -470,7 +485,9 @@ describe("Stage 3 Provider Host acceptance fixture", () => {
       { input: `${describe}\n`, encoding: "utf8", maxBuffer: 2 * PROVIDER_HOST_MAX_MESSAGE_BYTES },
     );
     expect(oversized.status).toBe(0);
-    expect(Buffer.byteLength(oversized.stdout.trim())).toBeGreaterThan(PROVIDER_HOST_MAX_MESSAGE_BYTES);
+    expect(Buffer.byteLength(oversized.stdout.trim())).toBeGreaterThan(
+      PROVIDER_HOST_MAX_MESSAGE_BYTES,
+    );
   });
 
   it("parses composable scenario directives and defaults to text", () => {
@@ -529,6 +546,14 @@ function command(
 
 function messagesFor(output: ReadonlyArray<ProviderHostMessage>, commandId: string) {
   return output.filter((message) => message.commandId === commandId);
+}
+
+function interactionRequestIdFor(
+  output: ReadonlyArray<ProviderHostMessage>,
+  commandId: string,
+): string | undefined {
+  return messagesFor(output, commandId).find((message) => message.messageType === "InteractionRequest")
+    ?.payload.requestId as string | undefined;
 }
 
 function isTerminal(message: ProviderHostMessage): boolean {

@@ -13,12 +13,12 @@ single-server, single-replica runtime, not a distributed Synara control plane.
 
 ## Runtime layout
 
-| Path | Purpose | Persistence |
-| --- | --- | --- |
-| `/home/synara` | Linux home, Codex/Claude/GitHub/SSH credentials and user config | Docker volume `synara-remote-home` |
-| `/home/synara/.synara` | SQLite state, settings, logs, attachments, Codex overlay and managed worktrees | Included in the home volume |
-| `/workspace` | User repositories operated on by agents | Host bind mount |
-| `/app` | Built Synara server and web client | Replaced with the image |
+| Path                   | Purpose                                                                        | Persistence                        |
+| ---------------------- | ------------------------------------------------------------------------------ | ---------------------------------- |
+| `/home/synara`         | Linux home, Codex/Claude/GitHub/SSH credentials and user config                | Docker volume `synara-remote-home` |
+| `/home/synara/.synara` | SQLite state, settings, logs, attachments, Codex overlay and managed worktrees | Included in the home volume        |
+| `/workspace`           | User repositories operated on by agents                                        | Host bind mount                    |
+| `/app`                 | Built Synara server and web client                                             | Replaced with the image            |
 
 Back up `/home/synara` and the host workspace. Never treat the container
 filesystem outside those mounts as durable.
@@ -411,12 +411,12 @@ service manager.
 
 ## CLI and environment reference
 
-| CLI flag | Environment variable | Meaning |
-| --- | --- | --- |
-| `--mode <web\|desktop>` | `SYNARA_MODE` | Runtime mode |
-| `--port <number>` | `SYNARA_PORT` | HTTP/WebSocket port |
-| `--host <address>` | `SYNARA_HOST` | Bind interface |
-| `--home-dir <path>` | `SYNARA_HOME` | Synara state base directory |
-| `--dev-url <url>` | `VITE_DEV_SERVER_URL` | Development web URL |
-| `--no-browser` | `SYNARA_NO_BROWSER` | Disable automatic browser launch |
-| `--auth-token <token>` | `SYNARA_AUTH_TOKEN` | Legacy remote WebSocket/asset access token |
+| CLI flag                | Environment variable  | Meaning                                    |
+| ----------------------- | --------------------- | ------------------------------------------ |
+| `--mode <web\|desktop>` | `SYNARA_MODE`         | Runtime mode                               |
+| `--port <number>`       | `SYNARA_PORT`         | HTTP/WebSocket port                        |
+| `--host <address>`      | `SYNARA_HOST`         | Bind interface                             |
+| `--home-dir <path>`     | `SYNARA_HOME`         | Synara state base directory                |
+| `--dev-url <url>`       | `VITE_DEV_SERVER_URL` | Development web URL                        |
+| `--no-browser`          | `SYNARA_NO_BROWSER`   | Disable automatic browser launch           |
+| `--auth-token <token>`  | `SYNARA_AUTH_TOKEN`   | Legacy remote WebSocket/asset access token |

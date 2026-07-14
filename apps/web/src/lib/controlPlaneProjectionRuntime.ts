@@ -90,10 +90,7 @@ export class ControlPlaneProjectionRuntime {
             existing.session.lastEventSequence,
           ),
         },
-        durableLastSequence: Math.max(
-          existing.durableLastSequence,
-          session.lastEventSequence,
-        ),
+        durableLastSequence: Math.max(existing.durableLastSequence, session.lastEventSequence),
       });
     }
     for (const sessionId of this.#streams.keys()) {
@@ -224,41 +221,37 @@ export class ControlPlaneProjectionRuntime {
     if (!projection) return;
     this.#setStreamStatus(sessionId, "connecting");
     try {
-      const close = this.#client.subscribeSessionEvents(
-        sessionId,
-        projection.lastAppliedSequence,
-        {
-          onOpen: () => {
-            if (generation === this.#generation) this.#setStreamStatus(sessionId, "live");
-          },
-          onError: () => {
-            if (generation !== this.#generation) return;
+      const close = this.#client.subscribeSessionEvents(sessionId, projection.lastAppliedSequence, {
+        onOpen: () => {
+          if (generation === this.#generation) this.#setStreamStatus(sessionId, "live");
+        },
+        onError: () => {
+          if (generation !== this.#generation) return;
+          this.#closeStream(sessionId);
+          this.#setStreamStatus(sessionId, "reconnecting");
+          this.#scheduleReconnect(sessionId);
+        },
+        onEvent: (event) => {
+          if (generation !== this.#generation) return;
+          const current = this.#projections.get(sessionId);
+          if (!current) return;
+          const applied = applyControlPlaneSessionEvent(current, event);
+          if (applied.gap) {
             this.#closeStream(sessionId);
             this.#setStreamStatus(sessionId, "reconnecting");
-            this.#scheduleReconnect(sessionId);
-          },
-          onEvent: (event) => {
-            if (generation !== this.#generation) return;
-            const current = this.#projections.get(sessionId);
-            if (!current) return;
-            const applied = applyControlPlaneSessionEvent(current, event);
-            if (applied.gap) {
-              this.#closeStream(sessionId);
-              this.#setStreamStatus(sessionId, "reconnecting");
-              void this.catchUp(sessionId).then(
-                () => this.#ensureLive(sessionId),
-                () => undefined,
-              );
-              return;
-            }
-            if (applied.projection !== current) {
-              this.#projections.set(sessionId, applied.projection);
-              this.#notify();
-            }
-            this.#setStreamStatus(sessionId, "live");
-          },
+            void this.catchUp(sessionId).then(
+              () => this.#ensureLive(sessionId),
+              () => undefined,
+            );
+            return;
+          }
+          if (applied.projection !== current) {
+            this.#projections.set(sessionId, applied.projection);
+            this.#notify();
+          }
+          this.#setStreamStatus(sessionId, "live");
         },
-      );
+      });
       this.#streams.set(sessionId, { close, reconnectTimer: null });
     } catch {
       this.#setStreamStatus(sessionId, "reconnecting");

@@ -49,16 +49,16 @@ outer envelope evolves; their meaning and validation still follow the canonical 
 The bounded v1 runner keeps its historical types. Provider Host Protocol v2 maps its internal runner messages as
 follows:
 
-| Internal/legacy source | Runtime Event v2 |
-| --- | --- |
-| `runtime.output.delta` | `content.delta` with `streamKind=assistant_text` |
-| `runtime.provider.activity` | `item.started`, `item.updated`, or `item.completed` |
-| `runtime.usage` | `thread.token-usage.updated` |
-| `runtime.provider.warning` | `runtime.warning` |
-| Approval `InteractionRequest` | `request.opened` |
-| Structured input `InteractionRequest` | `user-input.requested` |
-| Approval resolution | `request.resolved` |
-| Structured input resolution | `user-input.resolved` |
+| Internal/legacy source                | Runtime Event v2                                    |
+| ------------------------------------- | --------------------------------------------------- |
+| `runtime.output.delta`                | `content.delta` with `streamKind=assistant_text`    |
+| `runtime.provider.activity`           | `item.started`, `item.updated`, or `item.completed` |
+| `runtime.usage`                       | `thread.token-usage.updated`                        |
+| `runtime.provider.warning`            | `runtime.warning`                                   |
+| Approval `InteractionRequest`         | `request.opened`                                    |
+| Structured input `InteractionRequest` | `user-input.requested`                              |
+| Approval resolution                   | `request.resolved`                                  |
+| Structured input resolution           | `user-input.resolved`                               |
 
 Provider-specific tool names are retained only as bounded title/data references. The lifecycle `itemType` uses the
 canonical values from `ProviderRuntimeEventV2`. Raw Provider payloads, credentials, token values, complete stderr,

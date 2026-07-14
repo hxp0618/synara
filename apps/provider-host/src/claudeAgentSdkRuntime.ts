@@ -202,11 +202,10 @@ class ClaudeAgentSdkRuntime {
 
   private queryOptions(state: AttemptState, resume?: string): ClaudeQueryOptions {
     const permissionMode = this.permissionMode();
+    const model = trimmedString(this.options.input.workload.model);
     return {
       cwd: this.options.input.workspaceDirectory,
-      ...(trimmedString(this.options.input.workload.model)
-        ? { model: trimmedString(this.options.input.workload.model) }
-        : {}),
+      ...(model ? { model } : {}),
       pathToClaudeCodeExecutable: "claude",
       settingSources: ["user", "project", "local"],
       systemPrompt: {
@@ -215,9 +214,7 @@ class ClaudeAgentSdkRuntime {
         append: CLAUDE_SYSTEM_PROMPT_APPEND,
       },
       permissionMode,
-      ...(permissionMode === "bypassPermissions"
-        ? { allowDangerouslySkipPermissions: true }
-        : {}),
+      ...(permissionMode === "bypassPermissions" ? { allowDangerouslySkipPermissions: true } : {}),
       ...(resume ? { resume } : {}),
       includePartialMessages: true,
       hooks: {
@@ -279,10 +276,7 @@ class ClaudeAgentSdkRuntime {
         }
         return this.requestUserInput(toolInput, callbackOptions);
       }
-      if (
-        toolName === "ExitPlanMode" &&
-        this.options.input.workload.interactionMode === "plan"
-      ) {
+      if (toolName === "ExitPlanMode" && this.options.input.workload.interactionMode === "plan") {
         this.options.emit({
           type: "event",
           eventType: "runtime.provider.activity",
@@ -457,7 +451,8 @@ class ClaudeAgentSdkRuntime {
     }
     const type = readString(record, "type");
     if (type === "system" && readString(record, "subtype") === "init") {
-      state.model = readString(record, "model") ?? state.model;
+      const model = readString(record, "model");
+      if (model) state.model = model;
       return undefined;
     }
     if (type === "stream_event") {
@@ -556,7 +551,11 @@ class ClaudeAgentSdkRuntime {
       if (!toolName) continue;
       state.tools.delete(toolUseId);
       if (!isClientSurfacedTool(toolName)) {
-        this.emitToolActivity(toolName, block?.is_error === true ? "failed" : "completed", toolUseId);
+        this.emitToolActivity(
+          toolName,
+          block?.is_error === true ? "failed" : "completed",
+          toolUseId,
+        );
       }
     }
   }
@@ -620,9 +619,7 @@ class ClaudeAgentSdkRuntime {
       ...(callbackOptions.toolUseID ? { toolUseId: callbackOptions.toolUseID } : {}),
       ...(command ? { command } : {}),
       ...(path ? { path } : {}),
-      ...(requestKind === "command"
-        ? { cwd: this.options.input.workspaceDirectory }
-        : {}),
+      ...(requestKind === "command" ? { cwd: this.options.input.workspaceDirectory } : {}),
     };
   }
 
@@ -856,7 +853,9 @@ function resultErrorMessage(result: Record<string, unknown>): string {
 
 function numericFields(value: Record<string, unknown>): Record<string, number> {
   return Object.fromEntries(
-    Object.entries(value).filter((entry): entry is [string, number] => typeof entry[1] === "number"),
+    Object.entries(value).filter(
+      (entry): entry is [string, number] => typeof entry[1] === "number",
+    ),
   );
 }
 
@@ -876,10 +875,7 @@ function requiredString(value: unknown, label: string): string {
   return normalized;
 }
 
-function readString(
-  value: Record<string, unknown> | undefined,
-  key: string,
-): string | undefined {
+function readString(value: Record<string, unknown> | undefined, key: string): string | undefined {
   return value && typeof value[key] === "string" ? value[key] : undefined;
 }
 

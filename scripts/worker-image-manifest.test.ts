@@ -1,6 +1,63 @@
 import { describe, expect, it } from "vitest";
 
-import { buildWorkerImageArtifacts, sha256Hex } from "../deploy/worker/worker-image-manifest.mjs";
+// @ts-expect-error -- the Worker image helper is an executable ESM script without a published
+// declaration file; keep the test-side contract explicit here.
+import * as workerImageManifestModule from "../deploy/worker/worker-image-manifest.mjs";
+
+type WorkerImageBaseImage = {
+  name: string;
+  reference: string;
+};
+
+type WorkerImageProviderRuntime = {
+  provider: string;
+  kind: string;
+  package: string;
+  version: string;
+};
+
+type WorkerImageLockfile = {
+  name: string;
+  path: string;
+  sha256: string;
+};
+
+type WorkerImageSbom = {
+  name: string;
+  format: string;
+  path: string;
+  sha256: string;
+};
+
+type WorkerImageArtifacts = {
+  manifest: {
+    schemaVersion: number;
+    source: { version: string; gitSha: string };
+    platform: { os: string; architecture: string };
+    baseImages: WorkerImageBaseImage[];
+    lockfiles: WorkerImageLockfile[];
+    providerRuntimes: WorkerImageProviderRuntime[];
+    sboms: WorkerImageSbom[];
+  };
+  manifestJSON: string;
+  providerToolsSBOM: string;
+};
+
+const { buildWorkerImageArtifacts, sha256Hex } = workerImageManifestModule as {
+  buildWorkerImageArtifacts(input: {
+    version: string;
+    gitSHA: string;
+    sourceDateEpoch: string;
+    architecture: string;
+    baseImages: string[];
+    providerToolsLockfile: string;
+    providerHostLockfile: string;
+    providerHostPackageJSON: string;
+    workerAPKLockfile: string;
+    rawProviderToolsSBOM: string;
+  }): WorkerImageArtifacts;
+  sha256Hex(value: string): string;
+};
 
 const gitSHA = "c0efe20098f71ce23ae0099769313ea0fd2d7bf0";
 const baseImages = [
@@ -120,14 +177,13 @@ describe("Worker image manifest", () => {
   it("rejects mutable base images and incomplete dependency locks", () => {
     expect(() =>
       build({
-        baseImages: [
-          ...baseImages.slice(0, 2),
-          "agentd-build=golang:1.26-bookworm",
-        ],
+        baseImages: [...baseImages.slice(0, 2), "agentd-build=golang:1.26-bookworm"],
       }),
     ).toThrow(/immutable sha256/);
 
-    expect(() => build({ workerAPKLockfile: "bash=5.3.9-r1\n" })).toThrow(/missing ca-certificates/);
+    expect(() => build({ workerAPKLockfile: "bash=5.3.9-r1\n" })).toThrow(
+      /missing ca-certificates/,
+    );
     expect(() =>
       build({
         rawProviderToolsSBOM: rawSBOM("2026-01-01T00:00:00.000Z", "urn:uuid:missing").replace(

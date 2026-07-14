@@ -11,7 +11,7 @@
 - [ ] Cookie Secure/SameSite/Path、Trusted Proxy CIDR 和 Ingress Timeout 已复核。
 - [ ] PostgreSQL 备份完成，并验证可恢复。
 - [ ] 当前构建嵌入的全部 Migration 完整、Checksum 未变化；以
-  `/ready.checks.schema.expectedVersion` 为 Required Schema Version，不在检查单中写死版本号。
+      `/ready.checks.schema.expectedVersion` 为 Required Schema Version，不在检查单中写死版本号。
 - [ ] Provider Cursor Key、Credential KMS、Worker Registration Token 来自 Secret Manager。
 - [ ] MinIO/S3 Bucket、Region、CORS、Lifecycle 和 Workload Identity 已验证。
 - [ ] 真实 AWS S3 部署已使用明确授权的测试 Bucket 运行 Live Store；若不适用，记录原因和审批人。
@@ -74,7 +74,7 @@ bun run test src/providerHost.test.ts src/providerRuntime.test.ts
 - [ ] MinIO/S3 不可用时 Readiness 降级，恢复后 Pending Artifact 可继续完成。
 - [ ] Worker 失联后 Execution 进入 Recovering，新 Generation 接管，旧 Generation 被拒绝。
 - [ ] 两副本 Migration 表的唯一版本数等于 `/ready.checks.schema.expectedVersion`，且
-  `appliedVersion == expectedVersion`；新增 forward migration 后无需人工修改固定计数。
+      `appliedVersion == expectedVersion`；新增 forward migration 后无需人工修改固定计数。
 - [ ] Reconciler ServiceAccount 的 Pod/Secret 权限符合清单，不向 Worker 注入控制面 Token。
 
 ## 4. 浏览器主流程
@@ -91,7 +91,7 @@ bun run test src/providerHost.test.ts src/providerRuntime.test.ts
 ## 5. 可观测性和安全
 
 - [ ] HTTP、DB Pool、Login Result、Active Login Session、Execution、Worker、Lease Renew/Fencing、
-  Session Event Append、SSE、Artifact、Outbox、Background 指标存在。
+      Session Event Append、SSE、Artifact、Outbox、Background 指标存在。
 - [ ] Prometheus Rules 已由 Operator 加载，并验证关键告警表达式。
 - [ ] Worker Offline Surge 和 Execution Recovery Surge 告警已加载并通过规则校验。
 - [ ] 随机 Sentinel 日志审计未发现 Credential、Token、Prompt 或 Presigned Query。

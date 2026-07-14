@@ -57,9 +57,7 @@ describe("Provider Host Protocol v2", () => {
       expect(Object.keys(descriptor.capabilityDescriptor.capabilities)).toEqual(
         PROVIDER_CAPABILITY_IDS,
       );
-      expect(descriptor.capabilityDescriptor.capabilities).toEqual(
-        catalogEntry?.capabilities,
-      );
+      expect(descriptor.capabilityDescriptor.capabilities).toEqual(catalogEntry?.capabilities);
       expect(capabilityMapForProvider(provider)).toEqual(catalogEntry?.capabilities);
     }
   });
@@ -375,11 +373,7 @@ describe("Provider Host Protocol v2", () => {
         descriptorForProvider: codexDescriptorFactory(testCase.probe),
       });
       const result = await handle(
-        command(
-          "StartSession",
-          { runnerInput: remoteRunnerInput() },
-          `runtime-${testCase.label}`,
-        ),
+        command("StartSession", { runnerInput: remoteRunnerInput() }, `runtime-${testCase.label}`),
       );
       const terminal = result.at(-1);
 
@@ -406,7 +400,9 @@ describe("Provider Host Protocol v2", () => {
           getResumeCursor: () => "provider-cursor-after-interrupt",
         }) satisfies ProviderRunController,
     });
-    await handle(command("StartSession", { runnerInput: remoteRunnerInput() }, "session-interrupt"));
+    await handle(
+      command("StartSession", { runnerInput: remoteRunnerInput() }, "session-interrupt"),
+    );
 
     const send = handle(command("SendTurn", { inputText: "long task" }, "send-interrupt"));
     const interrupt = await handle(

@@ -39,7 +39,9 @@ function parseJSONObject(value, label) {
   try {
     parsed = JSON.parse(value);
   } catch (error) {
-    throw new Error(`${label} is not valid JSON: ${error instanceof Error ? error.message : String(error)}`);
+    throw new Error(
+      `${label} is not valid JSON: ${error instanceof Error ? error.message : String(error)}`,
+    );
   }
   invariant(isRecord(parsed), `${label} must be a JSON object`);
   return parsed;
@@ -70,19 +72,28 @@ function canonicalJSON(value) {
 function normalizeSourceVersion(value) {
   const version = String(value ?? "").trim();
   invariant(version.length > 0 && version.length <= 128, "source version must be 1-128 characters");
-  invariant(/^[0-9A-Za-z][0-9A-Za-z._+\-]*$/.test(version), "source version contains unsupported characters");
+  invariant(
+    /^[0-9A-Za-z][0-9A-Za-z._+\-]*$/.test(version),
+    "source version contains unsupported characters",
+  );
   return version;
 }
 
 function normalizeGitSHA(value) {
   const gitSHA = String(value ?? "").trim();
-  invariant(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(gitSHA), "source Git SHA must be a full lowercase hexadecimal object ID");
+  invariant(
+    /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(gitSHA),
+    "source Git SHA must be a full lowercase hexadecimal object ID",
+  );
   return gitSHA;
 }
 
 function normalizeArchitecture(value) {
   const architecture = String(value ?? "").trim();
-  invariant(architecture === "amd64" || architecture === "arm64", "worker architecture must be amd64 or arm64");
+  invariant(
+    architecture === "amd64" || architecture === "arm64",
+    "worker architecture must be amd64 or arm64",
+  );
   return architecture;
 }
 
@@ -97,7 +108,10 @@ function normalizeSourceDateEpoch(value) {
 }
 
 function normalizeBaseImages(values) {
-  invariant(Array.isArray(values) && values.length === REQUIRED_BASE_IMAGES.size, "exactly three Worker base images are required");
+  invariant(
+    Array.isArray(values) && values.length === REQUIRED_BASE_IMAGES.size,
+    "exactly three Worker base images are required",
+  );
   const result = [];
   const names = new Set();
   for (const value of values) {
@@ -107,7 +121,10 @@ function normalizeBaseImages(values) {
     const reference = value.slice(separator + 1);
     invariant(REQUIRED_BASE_IMAGES.has(name), `unknown Worker base image ${name}`);
     invariant(!names.has(name), `duplicate Worker base image ${name}`);
-    invariant(/^[^\s@]+@sha256:[0-9a-f]{64}$/.test(reference), `${name} must use an immutable sha256 image reference`);
+    invariant(
+      /^[^\s@]+@sha256:[0-9a-f]{64}$/.test(reference),
+      `${name} must use an immutable sha256 image reference`,
+    );
     names.add(name);
     result.push({ name, reference });
   }
@@ -125,17 +142,34 @@ function packageVersion(lockfile, packageName) {
   const version = String(entry.version ?? "").trim();
   invariant(version.length > 0, `Provider tools package-lock has no version for ${packageName}`);
   const root = packages[""];
-  invariant(isRecord(root) && isRecord(root.dependencies), "Provider tools package-lock is missing root dependencies");
-  invariant(root.dependencies[packageName] === version, `Provider tools dependency ${packageName} is not exactly locked to ${version}`);
+  invariant(
+    isRecord(root) && isRecord(root.dependencies),
+    "Provider tools package-lock is missing root dependencies",
+  );
+  invariant(
+    root.dependencies[packageName] === version,
+    `Provider tools dependency ${packageName} is not exactly locked to ${version}`,
+  );
   return version;
 }
 
 function providerRuntimes(providerToolsLockfile, providerHostPackageJSON) {
   const lockfile = parseJSONObject(providerToolsLockfile, "Provider tools package-lock");
-  const providerHostPackage = parseJSONObject(providerHostPackageJSON, "Provider Host package.json");
-  invariant(isRecord(providerHostPackage.dependencies), "Provider Host package.json is missing dependencies");
-  const sdkVersion = String(providerHostPackage.dependencies["@anthropic-ai/claude-agent-sdk"] ?? "").trim();
-  invariant(/^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$/.test(sdkVersion), "Claude Agent SDK must use an exact version");
+  const providerHostPackage = parseJSONObject(
+    providerHostPackageJSON,
+    "Provider Host package.json",
+  );
+  invariant(
+    isRecord(providerHostPackage.dependencies),
+    "Provider Host package.json is missing dependencies",
+  );
+  const sdkVersion = String(
+    providerHostPackage.dependencies["@anthropic-ai/claude-agent-sdk"] ?? "",
+  ).trim();
+  invariant(
+    /^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$/.test(sdkVersion),
+    "Claude Agent SDK must use an exact version",
+  );
   const runtimes = REQUIRED_PROVIDER_TOOLS.map((runtime) => ({
     ...runtime,
     version: packageVersion(lockfile, runtime.package),
@@ -147,7 +181,9 @@ function providerRuntimes(providerToolsLockfile, providerHostPackageJSON) {
     version: sdkVersion,
   });
   return runtimes.sort((left, right) =>
-    `${left.provider}:${left.kind}:${left.package}`.localeCompare(`${right.provider}:${right.kind}:${right.package}`),
+    `${left.provider}:${left.kind}:${left.package}`.localeCompare(
+      `${right.provider}:${right.kind}:${right.package}`,
+    ),
   );
 }
 
@@ -168,7 +204,10 @@ function validateAPKLockfile(value) {
   for (const packageName of REQUIRED_APK_PACKAGES) {
     invariant(names.has(packageName), `Worker APK lock is missing ${packageName}`);
   }
-  invariant(entries.length > REQUIRED_APK_PACKAGES.size, "Worker APK lock must include the resolved dependency closure");
+  invariant(
+    entries.length > REQUIRED_APK_PACKAGES.size,
+    "Worker APK lock must include the resolved dependency closure",
+  );
 }
 
 function normalizeProviderToolsSBOM(rawValue, { lockfileSHA256, created, architecture, runtimes }) {
@@ -177,7 +216,11 @@ function normalizeProviderToolsSBOM(rawValue, { lockfileSHA256, created, archite
   invariant(Array.isArray(document.packages), "Provider tools SBOM is missing packages");
   const packages = new Set();
   for (const entry of document.packages) {
-    if (isRecord(entry) && typeof entry.name === "string" && typeof entry.versionInfo === "string") {
+    if (
+      isRecord(entry) &&
+      typeof entry.name === "string" &&
+      typeof entry.versionInfo === "string"
+    ) {
       packages.add(`${entry.name}\x00${entry.versionInfo}`);
     }
   }

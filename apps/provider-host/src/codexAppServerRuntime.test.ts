@@ -3,19 +3,18 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
-import {
-  startProviderHostRun,
-  type RunnerMessage,
-} from "./providerHost";
+import { startProviderHostRun, type RunnerMessage } from "./providerHost";
 
-const CONTROLLED_PROVIDER_PROXY =
-  "http://provider-user:provider-password@proxy.example.test:8080";
+const CONTROLLED_PROVIDER_PROXY = "http://provider-user:provider-password@proxy.example.test:8080";
 
 describe("Codex app-server runtime", () => {
   it("delivers a native approval response and returns streamed output", async () => {
     await withFakeCodex("approval", async (directory, _tracePath, environment) => {
       const messages: RunnerMessage[] = [];
-      const interaction = waitForInteraction(messages, (message) => message.interactionType === "approval");
+      const interaction = waitForInteraction(
+        messages,
+        (message) => message.interactionType === "approval",
+      );
       const run = startProviderHostRun(
         codexInput(directory),
         null,
@@ -391,11 +390,7 @@ async function withFakeCodex(
     | "interrupt"
     | "steer"
     | "proxy-output",
-  run: (
-    directory: string,
-    tracePath: string,
-    environment: NodeJS.ProcessEnv,
-  ) => Promise<void>,
+  run: (directory: string, tracePath: string, environment: NodeJS.ProcessEnv) => Promise<void>,
 ): Promise<void> {
   const directory = mkdtempSync(join(tmpdir(), "synara-codex-app-server-"));
   const executable = join(directory, "codex");

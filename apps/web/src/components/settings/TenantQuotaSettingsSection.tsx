@@ -14,10 +14,7 @@ import {
 } from "~/components/settings/SettingsPanelPrimitives";
 import { Button } from "~/components/ui/button";
 import { Input } from "~/components/ui/input";
-import {
-  controlPlaneClient,
-  type ControlPlaneTenantQuota,
-} from "~/lib/controlPlaneClient";
+import { controlPlaneClient, type ControlPlaneTenantQuota } from "~/lib/controlPlaneClient";
 
 const MAX_CONCURRENT_EXECUTIONS = 1_000_000;
 const MAX_EXACT_ARTIFACT_BYTES = Number.MAX_SAFE_INTEGER;
@@ -26,7 +23,11 @@ function quotaQueryKey(tenantId: string) {
   return ["control-plane", "tenants", tenantId, "quota"] as const;
 }
 
-function parseOptionalPositiveInteger(value: string, label: string, maximum: number): number | null {
+function parseOptionalPositiveInteger(
+  value: string,
+  label: string,
+  maximum: number,
+): number | null {
   const trimmed = value.trim();
   if (trimmed === "") return null;
   if (!/^\d+$/.test(trimmed)) {
@@ -138,8 +139,9 @@ function TenantQuotaForm(props: {
   );
   const [inputError, setInputError] = useState<string | null>(null);
   const update = useMutation({
-    mutationFn: (input: Pick<ControlPlaneTenantQuota, "maxConcurrentExecutions" | "maxArtifactBytes">) =>
-      controlPlaneClient.updateTenantQuota(props.quota.tenantId, input),
+    mutationFn: (
+      input: Pick<ControlPlaneTenantQuota, "maxConcurrentExecutions" | "maxArtifactBytes">,
+    ) => controlPlaneClient.updateTenantQuota(props.quota.tenantId, input),
     onSuccess: props.onSaved,
   });
 

@@ -2,10 +2,10 @@
   "name": "@synara/provider-host",
   "version": "0.2.0",
   "private": true,
-  "type": "module",
   "bin": {
     "provider-host": "./dist/index.mjs"
   },
+  "type": "module",
   "scripts": {
     "build": "bun build src/index.ts --target=node --outfile=dist/index.mjs",
     "typecheck": "tsc --noEmit",

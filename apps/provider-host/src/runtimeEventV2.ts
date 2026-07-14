@@ -92,7 +92,11 @@ function normalizeUsage(payload: Record<string, unknown>): ThreadTokenUsageSnaps
     payload.totalProcessedTokens,
     payload.total_processed_tokens,
   );
-  const maxTokens = firstPositive(payload.maxTokens, payload.modelContextWindow, payload.model_context_window);
+  const maxTokens = firstPositive(
+    payload.maxTokens,
+    payload.modelContextWindow,
+    payload.model_context_window,
+  );
 
   return {
     usedTokens,

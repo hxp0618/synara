@@ -1,8 +1,6 @@
 import type { RunnerInput, RunnerMessage } from "./providerHost";
 
-export type ProviderResumeFallbackReasonCode =
-  | "session_resume_invalid"
-  | "session_resume_expired";
+export type ProviderResumeFallbackReasonCode = "session_resume_invalid" | "session_resume_expired";
 
 type ResumeFallbackProvider = "codex" | "claudeAgent";
 

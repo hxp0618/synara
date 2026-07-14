@@ -40,8 +40,7 @@ import { normalizeRuntimeEventV2 } from "./runtimeEventV2";
 
 const decodeCommand = Schema.decodeUnknownSync(ProviderHostCommandEnvelope);
 const HOST_BUILD_VERSION = providerHostPackage.version;
-const CLAUDE_AGENT_SDK_VERSION =
-  providerHostPackage.dependencies["@anthropic-ai/claude-agent-sdk"];
+const CLAUDE_AGENT_SDK_VERSION = providerHostPackage.dependencies["@anthropic-ai/claude-agent-sdk"];
 
 export type CodexVersionProbeResult = {
   readonly available: boolean;
@@ -55,9 +54,7 @@ export type ProviderHostDescriptorOptions = {
   readonly hostBuildVersion?: string;
 };
 
-type ProviderDescriptorFactory = (
-  provider: ProviderHostProviderKind,
-) => ProviderHostDescriptor;
+type ProviderDescriptorFactory = (provider: ProviderHostProviderKind) => ProviderHostDescriptor;
 
 type ProtocolState = {
   sessionInput: RunnerInput | null;
@@ -84,9 +81,7 @@ export function providerHostDescriptor(
       provider,
       supportTier: catalogEntry.supportTier,
       adapterVersion: catalogEntry.adapterVersion,
-      ...(provider === "codex" && runtime.version
-        ? { providerCliVersion: runtime.version }
-        : {}),
+      ...(provider === "codex" && runtime.version ? { providerCliVersion: runtime.version } : {}),
       runtime,
       releasePolicy: releasePolicy(catalogEntry, options.environment ?? process.env),
       capabilities: capabilityMapForProvider(provider),
@@ -98,9 +93,7 @@ export function providerHostDescriptor(
       maximum: PROVIDER_RUNTIME_EVENT_VERSION,
     },
     credentialDeliveryModes: remote ? ["anonymous-fd"] : [],
-    resumeStrategies: remote
-      ? ["native-cursor", "authoritative-history"]
-      : [],
+    resumeStrategies: remote ? ["native-cursor", "authoritative-history"] : [],
   };
 }
 
@@ -195,9 +188,7 @@ function experimentalProviderAllowlist(
   environment: Readonly<Record<string, string | undefined>>,
 ): ReadonlySet<ProviderHostProviderKind> {
   const providers = new Set<ProviderHostProviderKind>();
-  for (const token of (
-    environment.SYNARA_PROVIDER_HOST_EXPERIMENTAL_PROVIDERS ?? ""
-  ).split(",")) {
+  for (const token of (environment.SYNARA_PROVIDER_HOST_EXPERIMENTAL_PROVIDERS ?? "").split(",")) {
     const normalized = token.trim().toLowerCase();
     if (normalized === "codex") providers.add("codex");
     if (normalized === "claude" || normalized === "claudeagent") {
@@ -225,10 +216,7 @@ function extractStableSemver(value: string): string | undefined {
   return match?.[1];
 }
 
-function isCompatibleVersion(
-  version: string,
-  range: ProviderRuntimeCompatibleRange,
-): boolean {
+function isCompatibleVersion(version: string, range: ProviderRuntimeCompatibleRange): boolean {
   const parsed = parseSemver(version);
   const minimum = parseSemver(range.minimumInclusive);
   if (!parsed || !minimum || compareSemver(parsed, minimum) < 0) return false;
@@ -240,19 +228,13 @@ function isCompatibleVersion(
 type Semver = readonly [major: number, minor: number, patch: number];
 
 function parseSemver(value: string): Semver | undefined {
-  const match = /^(\d+)\.(\d+)\.(\d+)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.exec(
-    value.trim(),
-  );
+  const match = /^(\d+)\.(\d+)\.(\d+)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.exec(value.trim());
   if (!match) return undefined;
   return [Number(match[1]), Number(match[2]), Number(match[3])];
 }
 
 function compareSemver(left: Semver, right: Semver): number {
-  for (let index = 0; index < left.length; index += 1) {
-    const difference = left[index] - right[index];
-    if (difference !== 0) return difference;
-  }
-  return 0;
+  return left[0] - right[0] || left[1] - right[1] || left[2] - right[2];
 }
 
 export function createProviderHostProtocolHandler(input: {
@@ -318,9 +300,7 @@ export async function runProviderHostProtocolV2(input: {
     credential: input.credential,
     emit: input.emit,
     ...(input.startRun ? { startRun: input.startRun } : {}),
-    ...(input.descriptorForProvider
-      ? { descriptorForProvider: input.descriptorForProvider }
-      : {}),
+    ...(input.descriptorForProvider ? { descriptorForProvider: input.descriptorForProvider } : {}),
   });
   const lines = createInterface({ input: input.source, crlfDelay: Infinity });
   const inFlight = new Set<Promise<ReadonlyArray<ProviderHostMessageEnvelope>>>();
@@ -465,9 +445,7 @@ async function executeCommand(
       }
       const run = startRun(runInput, credential, (message) => {
         if (message.type === "event") {
-          emit(
-            payloadMessage(command, "Event", normalizeRuntimeEventV2(message)),
-          );
+          emit(payloadMessage(command, "Event", normalizeRuntimeEventV2(message)));
         } else if (message.type === "interaction") {
           emit(
             payloadMessage(command, "InteractionRequest", {
@@ -616,9 +594,7 @@ function assertProviderExecutionAllowed(
   }
   if (!capabilityDescriptor.runtime.compatible) {
     const range = capabilityDescriptor.runtime.compatibleRange;
-    const maximum = range.maximumExclusive
-      ? ` and below ${range.maximumExclusive}`
-      : "";
+    const maximum = range.maximumExclusive ? ` and below ${range.maximumExclusive}` : "";
     const actual = capabilityDescriptor.runtime.version
       ? `version ${capabilityDescriptor.runtime.version}`
       : "version could not be verified";
@@ -664,9 +640,7 @@ function validateTargetCommandId(value: unknown, activeCommandId: string): void 
   });
 }
 
-function unsupportedActiveTurnCommand(
-  commandType: "SteerTurn",
-): ProtocolFailure {
+function unsupportedActiveTurnCommand(commandType: "SteerTurn"): ProtocolFailure {
   return new ProtocolFailure({
     code: "capability_unsupported",
     message: `${commandType} is not supported by the active Provider runtime.`,
@@ -833,7 +807,10 @@ function protocolFallbackCommand(value?: unknown): ProviderHostCommand {
         ? Math.floor(candidate.generation)
         : 1,
     commandType: "Describe",
-    commandId: safeWireString(candidate.commandId, "protocol-command") as ProviderHostCommand["commandId"],
+    commandId: safeWireString(
+      candidate.commandId,
+      "protocol-command",
+    ) as ProviderHostCommand["commandId"],
     occurredAt: new Date().toISOString(),
     payload: {},
   };
