@@ -141,6 +141,71 @@ func TestLoadConfigRejectsOverlappingWorkspaceAndGitCacheRoots(t *testing.T) {
 	}
 }
 
+func TestLoadConfigUsesAndValidatesWorkerImageManifestBuildIdentity(t *testing.T) {
+	fixture := newWorkerImageManifestFixture(t)
+	setAgentdConfigEnvironment(t, filepath.Join(t.TempDir(), "workspaces"), "")
+	t.Setenv(workerImageManifestEnvironment, fixture.Path)
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Version != fixture.Manifest.Source.Version || cfg.BuildGitSHA != fixture.Manifest.Source.GitSHA ||
+		cfg.WorkerImageManifest == nil {
+		t.Fatalf("Worker image build identity was not loaded: %#v", cfg)
+	}
+
+	t.Setenv("SYNARA_AGENTD_VERSION", fixture.Manifest.Source.Version)
+	t.Setenv("SYNARA_AGENTD_BUILD_GIT_SHA", fixture.Manifest.Source.GitSHA)
+	if _, err := LoadConfig(); err != nil {
+		t.Fatalf("matching explicit Worker build identity was rejected: %v", err)
+	}
+}
+
+func TestLoadConfigRejectsWorkerImageManifestBuildIdentityDrift(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		variable string
+		value    string
+		message  string
+	}{
+		{name: "version", variable: "SYNARA_AGENTD_VERSION", value: "9.9.9", message: "VERSION"},
+		{name: "Git SHA", variable: "SYNARA_AGENTD_BUILD_GIT_SHA", value: strings.Repeat("e", 40), message: "BUILD_GIT_SHA"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newWorkerImageManifestFixture(t)
+			setAgentdConfigEnvironment(t, filepath.Join(t.TempDir(), "workspaces"), "")
+			t.Setenv(workerImageManifestEnvironment, fixture.Path)
+			t.Setenv(test.variable, test.value)
+			if _, err := LoadConfig(); err == nil || !strings.Contains(err.Error(), test.message) {
+				t.Fatalf("Worker image build identity drift was accepted: %v", err)
+			}
+		})
+	}
+}
+
+func TestLoadConfigRejectsReservedWorkerImageBuildFeatureFlag(t *testing.T) {
+	setAgentdConfigEnvironment(t, filepath.Join(t.TempDir(), "workspaces"), "")
+	t.Setenv("SYNARA_AGENTD_CAPABILITIES_JSON", `{
+		"featureFlags":{"workerImageBuild":{"forged":true}}
+	}`)
+	if _, err := LoadConfig(); err == nil || !strings.Contains(err.Error(), "reserved") {
+		t.Fatalf("reserved Worker image build Feature Flag was accepted: %v", err)
+	}
+}
+
+func TestLoadConfigRequiresCanonicalSHA256ImageDigest(t *testing.T) {
+	setAgentdConfigEnvironment(t, filepath.Join(t.TempDir(), "workspaces"), "")
+	t.Setenv("SYNARA_AGENTD_IMAGE_DIGEST", "sha256:test")
+	if _, err := LoadConfig(); err == nil || !strings.Contains(err.Error(), "image digest") {
+		t.Fatalf("invalid Worker image digest was accepted: %v", err)
+	}
+	t.Setenv("SYNARA_AGENTD_IMAGE_DIGEST", "sha256:"+strings.Repeat("a", 64))
+	if _, err := LoadConfig(); err != nil {
+		t.Fatalf("canonical Worker image digest was rejected: %v", err)
+	}
+}
+
 func setAgentdConfigEnvironment(t *testing.T, workspaceRoot, gitCacheRoot string) {
 	t.Helper()
 	for _, name := range []string{
@@ -153,6 +218,7 @@ func setAgentdConfigEnvironment(t *testing.T, workspaceRoot, gitCacheRoot string
 		"SYNARA_AGENTD_POLL_INTERVAL", "SYNARA_AGENTD_PROVIDER_HOST_PROTOCOL",
 		"SYNARA_AGENTD_REQUEST_TIMEOUT", "SYNARA_AGENTD_ARTIFACT_TIMEOUT",
 		"SYNARA_AGENTD_RUNNER_MESSAGE_BYTES", "SYNARA_AGENTD_VERSION",
+		workerImageManifestEnvironment,
 	} {
 		t.Setenv(name, "")
 	}

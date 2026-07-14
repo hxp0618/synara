@@ -1,0 +1,13 @@
+{
+  "name": "@synara/worker-provider-tools",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Locked Provider CLI inputs for the Synara Worker image.",
+  "engines": {
+    "node": ">=24"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-code": "2.1.197",
+    "@openai/codex": "0.144.1"
+  }
+}

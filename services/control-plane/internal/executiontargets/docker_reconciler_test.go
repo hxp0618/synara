@@ -61,6 +61,9 @@ func TestDockerPoolReconcilerCreatesStableWorkersAndDefersBusyRemoval(t *testing
 			!strings.Contains(environment, "SYNARA_AGENTD_GIT_CACHE_ROOT=/data/git-cache") {
 			t.Fatalf("Docker Worker environment is incomplete: %s", environment)
 		}
+		if strings.Contains(environment, "SYNARA_AGENTD_VERSION=managed") {
+			t.Fatalf("Docker Worker overrides the immutable image version: %s", environment)
+		}
 		encodedLabels, _ := json.Marshal(spec.Labels)
 		if bytes.Contains(encodedLabels, []byte("docker-registration-secret")) {
 			t.Fatalf("Docker Worker secret leaked into labels: %s", encodedLabels)

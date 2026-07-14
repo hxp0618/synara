@@ -93,6 +93,66 @@ func TestNormalizeWorkerManifestHashIncludesStorageSchemaVersion(t *testing.T) {
 	}
 }
 
+func TestNormalizeWorkerManifestRejectsWorkerBuildIdentityDrift(t *testing.T) {
+	capabilities := workerManifestTestCapabilities()
+	workerRuntime := capabilities["workerRuntime"].(map[string]any)
+	workerRuntime["workerBuildVersion"] = "different-worker"
+	if _, err := normalizeWorkerManifest(
+		"worker-test", capabilities, workerManifestTestTargetCapabilities(), platform.TargetKubernetes, time.Now().UTC(),
+	); err == nil {
+		t.Fatal("Worker manifest accepted a build version that differed from Worker registration")
+	}
+
+	capabilities = workerManifestTestCapabilities()
+	workerRuntime = capabilities["workerRuntime"].(map[string]any)
+	workerRuntime["workerBuildGitSha"] = "not-a-sha"
+	if _, err := normalizeWorkerManifest(
+		"worker-test", capabilities, workerManifestTestTargetCapabilities(), platform.TargetKubernetes, time.Now().UTC(),
+	); err == nil {
+		t.Fatal("Worker manifest accepted an invalid build Git SHA")
+	}
+
+	capabilities = workerManifestTestCapabilities()
+	workerRuntime = capabilities["workerRuntime"].(map[string]any)
+	workerRuntime["imageDigest"] = "sha256:not-a-digest"
+	if _, err := normalizeWorkerManifest(
+		"worker-test", capabilities, workerManifestTestTargetCapabilities(), platform.TargetKubernetes, time.Now().UTC(),
+	); err == nil {
+		t.Fatal("Worker manifest accepted an invalid image digest")
+	}
+}
+
+func TestNormalizeWorkerManifestPersistsWorkerImageBuildFeatureFlag(t *testing.T) {
+	baselineCapabilities := workerManifestTestCapabilities()
+	baseline, err := normalizeWorkerManifest(
+		"worker-test", baselineCapabilities, workerManifestTestTargetCapabilities(), platform.TargetKubernetes, time.Now().UTC(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	capabilities := workerManifestTestCapabilities()
+	capabilities["featureFlags"] = map[string]any{
+		"workerImageBuild": map[string]any{
+			"schemaVersion": 1,
+			"source":        map[string]any{"version": "worker-test", "gitSha": "abcdef1234567890"},
+		},
+		"existing": true,
+	}
+	normalized, err := normalizeWorkerManifest(
+		"worker-test", capabilities, workerManifestTestTargetCapabilities(), platform.TargetKubernetes, time.Now().UTC(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	imageBuild, ok := normalized.Manifest.FeatureFlags["workerImageBuild"].(map[string]any)
+	if !ok || imageBuild["schemaVersion"] != 1 || normalized.Manifest.FeatureFlags["existing"] != true {
+		t.Fatalf("Worker image build Feature Flag was not persisted: %#v", normalized.Manifest.FeatureFlags)
+	}
+	if normalized.Manifest.ManifestHash == baseline.Manifest.ManifestHash {
+		t.Fatal("Worker image build Feature Flag did not participate in immutable Manifest identity")
+	}
+}
+
 func TestNormalizeWorkerManifestRejectsIncompleteV21Summary(t *testing.T) {
 	_, err := normalizeWorkerManifest("worker-test", map[string]any{
 		"providerHost": map[string]any{
@@ -313,7 +373,7 @@ func workerManifestTestCapabilities() map[string]any {
 			"workerProtocolMinimum": WorkerProtocolVersion, "workerProtocolMaximum": WorkerProtocolVersion,
 			"runtimeEventMinimum": RuntimeEventVersionV2, "runtimeEventMaximum": RuntimeEventVersionV2,
 			"operatingSystem": "linux", "architecture": "amd64",
-			"imageDigest": "sha256:worker-test",
+			"imageDigest": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
 		},
 		"providerHost": map[string]any{
 			"protocolVersion": map[string]any{"major": providerHostProtocolMajor, "minor": providerHostProtocolMinimumMinor},

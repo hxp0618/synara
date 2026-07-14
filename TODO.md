@@ -67,7 +67,7 @@ Target 和 Codex/Claude 执行闭环属于基础实现，本阶段负责补齐 P
 - [ ] 明确 Workspace 清理、保留、快照、恢复和磁盘配额策略。
 - [ ] 将终端、长日志、生成文件和 Checkpoint 统一投影为 Artifact/Event 引用。
 - [ ] 建立 Worker/Provider Host 的 Graceful Shutdown、Drain 和正在执行任务交接协议。
-- [ ] 增加 Worker Image 与 Provider CLI/SDK 的版本清单和可重复构建机制。
+- [x] 增加 Worker Image 与 Provider CLI/SDK 的版本清单和可重复构建机制。
 - [ ] 增加 Worker 自动升级、回滚和不兼容版本隔离能力。
 - [ ] 建立应用级 Control Plane Context 和 SaaS Session Projection Adapter。
 - [ ] 将主聊天创建 Project/Session/Turn 的权威写入切换到 Go Control Plane。

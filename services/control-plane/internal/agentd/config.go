@@ -32,6 +32,7 @@ type Config struct {
 	Version               string
 	BuildGitSHA           string
 	ImageDigest           string
+	WorkerImageManifest   *workerImageManifest
 	Capabilities          map[string]any
 	ExperimentalProviders []string
 	RunnerCommand         []string
@@ -77,7 +78,22 @@ func LoadConfig() (Config, error) {
 			return Config{}, errors.New("SYNARA_AGENTD_CAPABILITIES_JSON must be a JSON object")
 		}
 	}
+	if err := validateWorkerImageBuildFeatureFlagReservation(capabilities); err != nil {
+		return Config{}, err
+	}
 	experimentalProviders, err := parseExperimentalProviders(capabilities)
+	if err != nil {
+		return Config{}, err
+	}
+	workerImageManifest, err := loadConfiguredWorkerImageManifest()
+	if err != nil {
+		return Config{}, err
+	}
+	version, buildGitSHA, err := resolveWorkerBuildIdentity(
+		os.Getenv("SYNARA_AGENTD_VERSION"),
+		os.Getenv("SYNARA_AGENTD_BUILD_GIT_SHA"),
+		workerImageManifest,
+	)
 	if err != nil {
 		return Config{}, err
 	}
@@ -118,10 +134,10 @@ func LoadConfig() (Config, error) {
 		ExecutionTargetID: targetID, TargetKind: targetKind,
 		ClusterID: envDefault("SYNARA_AGENTD_CLUSTER_ID", "local"), Namespace: envDefault("SYNARA_AGENTD_NAMESPACE", "default"),
 		PodName: envDefault("SYNARA_AGENTD_INSTANCE_ID", hostname()), InstanceUID: instanceUID,
-		Version:      envDefault("SYNARA_AGENTD_VERSION", "dev"),
-		BuildGitSHA:  strings.TrimSpace(os.Getenv("SYNARA_AGENTD_BUILD_GIT_SHA")),
-		ImageDigest:  strings.TrimSpace(os.Getenv("SYNARA_AGENTD_IMAGE_DIGEST")),
-		Capabilities: capabilities, ExperimentalProviders: experimentalProviders,
+		Version: version, BuildGitSHA: buildGitSHA,
+		ImageDigest:         strings.TrimSpace(os.Getenv("SYNARA_AGENTD_IMAGE_DIGEST")),
+		WorkerImageManifest: workerImageManifest,
+		Capabilities:        capabilities, ExperimentalProviders: experimentalProviders,
 		RunnerCommand: runnerCommand, RunnerProtocol: runnerProtocol,
 		WorkspaceRoot: workspaceRoot, GitCacheRoot: gitCacheRoot,
 	}
@@ -159,8 +175,8 @@ func LoadConfig() (Config, error) {
 	if cfg.PollInterval <= 0 || cfg.HeartbeatInterval <= 0 || cfg.LeaseRenewInterval <= 0 || cfg.DrainTimeout <= 0 || cfg.RequestTimeout <= 0 || cfg.ArtifactTimeout <= 0 || cfg.RunnerMessageBytes < 1024 {
 		return Config{}, errors.New("agentd intervals, request timeout, and runner message limit must be positive")
 	}
-	if (cfg.BuildGitSHA != "" && !validBuildGitSHA(cfg.BuildGitSHA)) || len(cfg.ImageDigest) > 512 {
-		return Config{}, errors.New("agentd build Git SHA or image digest is invalid")
+	if cfg.ImageDigest != "" && !validImageDigest(cfg.ImageDigest) {
+		return Config{}, errors.New("agentd image digest is invalid")
 	}
 	return cfg, nil
 }

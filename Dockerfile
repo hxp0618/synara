@@ -1,8 +1,21 @@
-# syntax=docker/dockerfile:1.7
+# syntax=docker/dockerfile:1.7@sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e
 
-FROM oven/bun:1.3.14 AS bun
+ARG BUN_IMAGE=oven/bun:1.3.14@sha256:e10577f0db68676a7024391c6e5cb4b879ebd17188ab750cf10024a6d700e5c4
+ARG SERVER_RUNTIME_IMAGE=node:24-bookworm@sha256:d5adb040f90e206d1dc91453d08a4fa4165ec0faebd62a3421e6181a14e7f41f
+ARG AGENTD_BUILD_IMAGE=golang:1.26-bookworm@sha256:e60d708a92ad26a6d61901334510d3debd23ddcba125663ecd6008d42e8ec669
+ARG WORKER_RUNTIME_IMAGE=node:24-alpine@sha256:a0b9bf06e4e6193cf7a0f58816cc935ff8c2a908f81e6f1a95432d679c54fbfd
 
-FROM node:24-bookworm AS runtime-base
+FROM ${BUN_IMAGE} AS bun
+
+FROM ${SERVER_RUNTIME_IMAGE} AS provider-tools-bookworm
+
+WORKDIR /opt/synara/provider-tools
+COPY deploy/worker/provider-tools/package.json deploy/worker/provider-tools/package-lock.json ./
+RUN npm ci --omit=dev --ignore-scripts --no-audit --no-fund \
+  && node node_modules/@anthropic-ai/claude-code/install.cjs \
+  && npm cache clean --force
+
+FROM ${SERVER_RUNTIME_IMAGE} AS runtime-base
 
 ARG TARGETARCH
 ARG GH_VERSION=2.96.0
@@ -14,6 +27,7 @@ ARG SYNARA_UID=1000
 ARG SYNARA_GID=1000
 
 COPY --from=bun /usr/local/bin/bun /usr/local/bin/bun
+COPY --from=provider-tools-bookworm /opt/synara/provider-tools /opt/synara/provider-tools
 
 RUN set -eux; \
   case "${TARGETARCH}" in \
@@ -39,15 +53,7 @@ RUN set -eux; \
     "${GITHUB_DOWNLOAD_PREFIX}https://github.com/krallin/tini/releases/download/v${TINI_VERSION}/tini-${tini_arch}" \
     --output /usr/local/bin/tini; \
   chmod 0755 /usr/local/bin/tini; \
-  rm -rf /tmp/gh.tar.gz /tmp/gh_* /tmp/ripgrep.tar.gz /tmp/ripgrep-*; \
-  npm install --global \
-    @openai/codex@0.144.1 \
-    @anthropic-ai/claude-code@2.1.197; \
-  npm cache clean --force
-
-# npm 11 leaves dependency lifecycle scripts pending by default. Run Claude's
-# documented postinstall explicitly as root so its native launcher is present.
-RUN node /usr/local/lib/node_modules/@anthropic-ai/claude-code/install.cjs
+  rm -rf /tmp/gh.tar.gz /tmp/gh_* /tmp/ripgrep.tar.gz /tmp/ripgrep-*
 
 # Bun invokes `node-gyp` directly for native packages such as node-pty. The
 # official Node image ships it inside npm but does not expose a PATH shim.
@@ -119,7 +125,7 @@ COPY --from=build /app/apps/server/dist ./apps/server/dist
 COPY --from=build /runtime/package.json ./package.json
 
 ENV HOME=/home/synara \
-  PATH=/home/synara/.local/bin:${PATH} \
+  PATH=/opt/synara/provider-tools/node_modules/.bin:/home/synara/.local/bin:${PATH} \
   NPM_CONFIG_UPDATE_NOTIFIER=false
 
 WORKDIR /workspace
@@ -130,7 +136,7 @@ EXPOSE 3773
 ENTRYPOINT ["/usr/local/bin/tini", "--"]
 CMD ["node", "/app/apps/server/dist/index.mjs"]
 
-FROM golang:1.26-bookworm AS agentd-build
+FROM ${AGENTD_BUILD_IMAGE} AS agentd-build
 
 ARG GOPROXY=https://proxy.golang.org,direct
 ENV GOPROXY=${GOPROXY}
@@ -143,7 +149,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
   --mount=type=cache,target=/root/.cache/go-build \
   CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/synara-agentd ./cmd/agentd
 
-FROM oven/bun:1.3.14 AS provider-host-build
+FROM ${BUN_IMAGE} AS provider-host-build
 
 WORKDIR /src
 COPY package.json bun.lock bunfig.toml ./
@@ -172,13 +178,49 @@ RUN bun build scripts/stage3-provider-acceptance/provider-host-fixture.ts \
   --target=node \
   --outfile=/out/provider-host-fixture.mjs
 
-FROM node:24-alpine AS worker-runtime-base
+FROM ${WORKER_RUNTIME_IMAGE} AS worker-provider-tools
 
-RUN apk add --no-cache bash ca-certificates git jq openssh-client ripgrep
+WORKDIR /opt/synara/provider-tools
+COPY deploy/worker/provider-tools/package.json deploy/worker/provider-tools/package-lock.json ./
+RUN npm ci --omit=dev --ignore-scripts --no-audit --no-fund \
+  && node node_modules/@anthropic-ai/claude-code/install.cjs \
+  && npm sbom --omit=dev --sbom-format spdx > /tmp/provider-tools.raw.spdx.json \
+  && npm cache clean --force
 
-RUN npm install --global @openai/codex@0.144.1 @anthropic-ai/claude-code@2.1.197 && \
-  node /usr/local/lib/node_modules/@anthropic-ai/claude-code/install.cjs && \
-  npm cache clean --force
+FROM ${WORKER_RUNTIME_IMAGE} AS worker-runtime-base
+
+ARG TARGETARCH
+ARG SYNARA_VERSION
+ARG SYNARA_GIT_SHA
+ARG SOURCE_DATE_EPOCH=0
+ARG BUN_IMAGE
+ARG AGENTD_BUILD_IMAGE
+ARG WORKER_RUNTIME_IMAGE
+
+COPY deploy/worker/apk-packages.lock /opt/synara/worker-apk-packages.lock
+RUN xargs apk add --no-cache < /opt/synara/worker-apk-packages.lock
+
+COPY --from=worker-provider-tools /opt/synara/provider-tools /opt/synara/provider-tools
+COPY --from=worker-provider-tools /tmp/provider-tools.raw.spdx.json /tmp/provider-tools.raw.spdx.json
+COPY bun.lock /opt/synara/provider-host/bun.lock
+COPY apps/provider-host/package.json /opt/synara/provider-host/package.json
+COPY deploy/worker/worker-image-manifest.mjs /opt/synara/build/worker-image-manifest.mjs
+RUN node /opt/synara/build/worker-image-manifest.mjs \
+    --version "${SYNARA_VERSION}" \
+    --git-sha "${SYNARA_GIT_SHA}" \
+    --source-date-epoch "${SOURCE_DATE_EPOCH}" \
+    --architecture "${TARGETARCH}" \
+    --base-image "agentd-build=${AGENTD_BUILD_IMAGE}" \
+    --base-image "provider-host-build=${BUN_IMAGE}" \
+    --base-image "worker-runtime=${WORKER_RUNTIME_IMAGE}" \
+    --provider-tools-lockfile /opt/synara/provider-tools/package-lock.json \
+    --provider-host-lockfile /opt/synara/provider-host/bun.lock \
+    --provider-host-package /opt/synara/provider-host/package.json \
+    --worker-apk-lockfile /opt/synara/worker-apk-packages.lock \
+    --raw-provider-tools-sbom /tmp/provider-tools.raw.spdx.json \
+    --provider-tools-sbom-output /opt/synara/provider-tools.spdx.json \
+    --manifest-output /opt/synara/worker-image-manifest.json \
+  && rm -rf /opt/synara/build /tmp/provider-tools.raw.spdx.json
 
 RUN addgroup -g 10001 -S synara-worker && \
   adduser -u 10001 -S -D -h /home/synara -s /bin/bash -G synara-worker synara-worker && \
@@ -186,15 +228,23 @@ RUN addgroup -g 10001 -S synara-worker && \
 
 FROM worker-runtime-base AS worker
 
+ARG SYNARA_VERSION
+ARG SYNARA_GIT_SHA
+
 COPY --from=agentd-build /out/synara-agentd /usr/local/bin/synara-agentd
 COPY --from=provider-host-build /out/provider-host.mjs /opt/synara/provider-host/index.mjs
 RUN printf '%s\n' '#!/bin/sh' 'exec node /opt/synara/provider-host/index.mjs "$@"' \
   > /usr/local/bin/provider-host && chmod 0755 /usr/local/bin/provider-host
 
 ENV HOME=/home/synara \
-  PATH=/home/synara/.local/bin:${PATH} \
+  PATH=/opt/synara/provider-tools/node_modules/.bin:/home/synara/.local/bin:${PATH} \
   SYNARA_AGENTD_WORKSPACE_ROOT=/data/workspaces \
+  SYNARA_AGENTD_WORKER_IMAGE_MANIFEST_PATH=/opt/synara/worker-image-manifest.json \
   NPM_CONFIG_UPDATE_NOTIFIER=false
+
+LABEL org.opencontainers.image.title="Synara Worker" \
+  org.opencontainers.image.version="${SYNARA_VERSION}" \
+  org.opencontainers.image.revision="${SYNARA_GIT_SHA}"
 
 WORKDIR /data
 USER 10001:10001

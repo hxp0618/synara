@@ -89,6 +89,9 @@ func TestKubernetesReconcilerAppliesSecurityFoundationAndExecutionPods(t *testin
 	if fieldPath, found := kubernetesEnvironmentFieldPath(container, "SYNARA_AGENTD_INSTANCE_UID"); !found || fieldPath != "metadata.uid" {
 		t.Fatalf("Kubernetes Pod UID environment uses %q", fieldPath)
 	}
+	if value, found := kubernetesEnvironmentValue(container, "SYNARA_AGENTD_VERSION"); found {
+		t.Fatalf("Kubernetes Worker overrides the immutable image version with %q", value)
+	}
 	volumes := spec["volumes"].([]any)
 	workspaceVolume := kubernetesNamedObject(volumes, "workspace")
 	if workspaceVolume == nil || workspaceVolume["emptyDir"] == nil {

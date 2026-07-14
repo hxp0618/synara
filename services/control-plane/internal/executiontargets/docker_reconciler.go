@@ -32,7 +32,7 @@ const (
 	dockerTargetLabel          = "synara.io/execution-target-id"
 	dockerConfigLabel          = "synara.io/config-sha256"
 	dockerIndexLabel           = "synara.io/worker-index"
-	dockerContainerSpecVersion = 2
+	dockerContainerSpecVersion = 3
 )
 
 type DockerPoolReconcilerConfig struct {
@@ -409,13 +409,15 @@ func (r *DockerPoolReconciler) desiredSpecs(
 		"SYNARA_EXECUTION_TARGET_KIND=docker",
 		"SYNARA_AGENTD_CLUSTER_ID=docker",
 		"SYNARA_AGENTD_NAMESPACE=" + target.ID.String(),
-		"SYNARA_AGENTD_VERSION=managed",
 		"SYNARA_AGENTD_CAPABILITIES_JSON=" + string(capabilities),
 		"SYNARA_AGENTD_RUNNER_COMMAND_JSON=" + string(runner),
 		"SYNARA_AGENTD_PROVIDER_HOST_PROTOCOL=v2",
 		"SYNARA_AGENTD_DRAIN_TIMEOUT=20s",
 		"SYNARA_AGENTD_WORKSPACE_ROOT=" + configuration.WorkspaceRoot,
 		"SYNARA_AGENTD_GIT_CACHE_ROOT=" + configuration.GitCacheRoot,
+	}
+	if digest := immutableImageDigest(configuration.Image); digest != "" {
+		baseEnvironment = append(baseEnvironment, "SYNARA_AGENTD_IMAGE_DIGEST="+digest)
 	}
 	hashPayload, err := json.Marshal(struct {
 		SpecVersion   int

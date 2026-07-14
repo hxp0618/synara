@@ -2583,7 +2583,7 @@ func registerTestWorkerWithCapabilities(
 		ExecutionTargetID: targetID, TargetKind: targetKind,
 		InstanceUID: uuid.NewString(),
 		ClusterID:   "test-cluster", Namespace: "default", PodName: podName + "-" + uuid.NewString(),
-		Version: "test", ProtocolVersion: WorkerProtocolVersion, Capabilities: capabilities,
+		Version: "worker-test", ProtocolVersion: WorkerProtocolVersion, Capabilities: capabilities,
 		LeaseSupported: true, FencingSupported: true,
 	})
 	if err != nil {

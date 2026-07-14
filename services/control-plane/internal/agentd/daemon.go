@@ -958,9 +958,25 @@ func (d *Daemon) failExecution(ctx context.Context, executionID uuid.UUID, lease
 }
 
 func withProviderHostCapabilities(base map[string]any, providerHost map[string]any, config Config) map[string]any {
-	result := make(map[string]any, len(base)+2)
+	result := make(map[string]any, len(base)+3)
 	for key, value := range base {
 		result[key] = value
+	}
+	featureFlags := map[string]any{}
+	if raw, ok := base["featureFlags"].(map[string]any); ok {
+		featureFlags = make(map[string]any, len(raw)+1)
+		for key, value := range raw {
+			featureFlags[key] = value
+		}
+	}
+	delete(featureFlags, workerImageBuildFeatureFlag)
+	if config.WorkerImageManifest != nil {
+		featureFlags[workerImageBuildFeatureFlag] = config.WorkerImageManifest.featureFlagValue()
+	}
+	if len(featureFlags) == 0 {
+		delete(result, "featureFlags")
+	} else {
+		result["featureFlags"] = featureFlags
 	}
 	result["providerHost"] = providerHost
 	runtimeEventVersion := executions.RuntimeEventVersionV1

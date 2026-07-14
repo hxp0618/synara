@@ -1,23 +1,126 @@
 # Synara Worker image
 
-Build the root Dockerfile `worker` target:
+The production Worker image is built through the checked-in Buildx entrypoint. Do not publish or deploy
+`synara-worker:latest`.
 
 ```bash
-docker build --target worker -t synara-worker:latest .
+deploy/worker/build.sh \
+  --image registry.example.com/synara-worker:0.5.3 \
+  --load
 ```
 
-The image contains Node.js 24, `synara-agentd`, `provider-host`, pinned Codex and Claude
-CLIs, and a writable Workspace root. It runs as non-root UID/GID 10001 with no embedded
-registration, Lease, Provider, or cloud credentials. Docker and Kubernetes Execution
-Target configuration should use `synara-worker`, not the older `synara-agentd` example.
+The script derives the full Git SHA, product version, and Git commit timestamp and writes Buildx metadata under
+`build/`. It refuses a dirty worktree because image contents would no longer match the declared Git SHA.
+`--allow-dirty` is only for a local verification build. A local `--load` build keeps the embedded normalized SPDX
+document but disables outer attestations because the Docker image store cannot retain them; `--push` enables
+BuildKit SPDX and `mode=max` provenance attestations through a `docker-container` builder.
+
+Publish a multi-platform image and preserve its attestations with:
+
+```bash
+deploy/worker/build.sh \
+  --image registry.example.com/synara-worker:0.5.3 \
+  --platform linux/amd64,linux/arm64 \
+  --push
+```
+
+The image contains Node.js 24, `synara-agentd`, `provider-host`, Codex CLI, Claude Agent SDK, Claude Code CLI,
+and a writable Workspace root. It runs as non-root UID/GID 10001 with no embedded registration, Lease,
+Provider, Git, or cloud credentials.
+
+## Reproducible inputs
+
+The Worker build fails closed unless all of these inputs are immutable:
+
+- `agentd-build`, `provider-host-build`, and `worker-runtime` base images use full `sha256` digests.
+- `deploy/worker/provider-tools/package-lock.json` pins npm integrity hashes for Codex CLI and Claude Code CLI.
+- `bun.lock` pins the Provider Host and Claude Agent SDK graph.
+- `deploy/worker/apk-packages.lock` pins the complete Alpine package closure installed over the runtime base.
+- `SOURCE_DATE_EPOCH` fixes the embedded SPDX creation time to the source commit time.
+
+The tracked Provider runtime versions are intentionally separate:
+
+```text
+Codex CLI:        @openai/codex@0.144.1
+Claude SDK:       @anthropic-ai/claude-agent-sdk@0.3.207
+Claude Code CLI:  @anthropic-ai/claude-code@2.1.197
+```
+
+When upgrading one Provider runtime, update its package declaration and lockfile together, rebuild the image,
+inspect the embedded manifest/SBOM, and run the shared Provider acceptance suite before changing a deployment
+digest. Never replace a package version in the Dockerfile without updating the corresponding lock.
+
+Pinned APK versions prevent a repository update from silently changing the image. If the external Alpine mirror
+no longer serves a locked artifact, the build fails instead of selecting a newer package; long-term release
+retention therefore also requires an operator-controlled package mirror or archived build cache.
+
+## Embedded manifest and SBOM
+
+Every official Worker image contains:
+
+```text
+/opt/synara/worker-image-manifest.json
+/opt/synara/provider-tools.spdx.json
+/opt/synara/provider-tools/package-lock.json
+/opt/synara/provider-host/bun.lock
+/opt/synara/worker-apk-packages.lock
+```
+
+The version manifest records schema version, source version and full Git SHA, target OS/architecture, immutable
+base image references, lockfile SHA-256 values, the three Provider runtime versions, and normalized SPDX hashes.
+It deliberately excludes build-host paths, build time, credentials, and the final image digest.
+
+`npm sbom` normally emits a current timestamp and a generated namespace. The Worker build normalizes those fields
+using `SOURCE_DATE_EPOCH` and the provider lock hash before hashing the SPDX JSON, so repeated builds do not drift
+solely because of SBOM metadata.
+
+The image sets `SYNARA_AGENTD_WORKER_IMAGE_MANIFEST_PATH` to the embedded manifest. Agentd treats a missing,
+malformed, unknown-schema, or hash-mismatched file as a startup error. Explicit `SYNARA_AGENTD_VERSION` and
+`SYNARA_AGENTD_BUILD_GIT_SHA` values must match the embedded source identity. Local and SSH Workers that run a
+standalone agentd binary do not set this variable and retain their existing environment-based identity.
+
+The final image digest cannot be embedded in the image that it hashes. Production Docker and Kubernetes Targets
+must use a digest-qualified reference such as:
+
+```text
+registry.example.com/synara-worker@sha256:...
+```
+
+The reconcilers extract that digest and pass it to agentd as `SYNARA_AGENTD_IMAGE_DIGEST`. Tag-only development
+images remain usable, but cannot provide immutable image-digest evidence in the Worker Manifest.
+
+Inspect a locally loaded image with:
+
+```bash
+docker run --rm --entrypoint sh synara-worker:0.5.3 -euxc '
+  test "$(id -u)" = 10001
+  sha256sum \
+    /opt/synara/worker-image-manifest.json \
+    /opt/synara/provider-tools.spdx.json \
+    /opt/synara/provider-tools/package-lock.json \
+    /opt/synara/provider-host/bun.lock \
+    /opt/synara/worker-apk-packages.lock
+  codex --version
+  claude --version
+'
+```
+
+For release builds, retain the Buildx metadata file and registry attestations alongside the digest. Buildx
+provenance describes the outer build environment and can differ in attestation metadata; equivalent Worker image
+inputs are established by the embedded manifest, normalized SBOM, lock hashes, binaries, and installed package
+set.
+
+## Runtime and storage
+
+Docker and Kubernetes Execution Target configuration should use the official Worker image, not the older
+`synara-agentd` example.
 
 Managed Workers explicitly select Provider Host Protocol v2. Agentd performs Describe/compatibility
 gating before registration and again before the actual Provider Turn; v1 requires the documented
 operator-only compatibility switch and is never an automatic execution fallback.
 
-Production deployments should publish an immutable digest and configure CPU, memory,
-ephemeral storage, read-only root filesystem, disabled ServiceAccount token automount,
-and a dedicated Workspace volume or `emptyDir` according to recovery requirements.
+Production deployments should configure CPU, memory, ephemeral storage, a read-only root filesystem, disabled
+ServiceAccount token automount, and a dedicated Workspace volume or `emptyDir` according to recovery requirements.
 Configure separate writable Workspace and Git cache roots. Docker Workers for one Target may share both roots on
 the target-scoped volume because agentd uses cross-process locks and private Workspace repositories. Kubernetes
 keeps the cache Pod-local by default; an optional dedicated cache PVC must provide RWX-equivalent access and

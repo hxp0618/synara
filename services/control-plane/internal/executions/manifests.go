@@ -149,14 +149,20 @@ func normalizeWorkerManifest(
 	if err := decodeCapability(rawRuntime, &runtime); err != nil {
 		return nil, problem.New(400, "invalid_worker_manifest", "workerRuntime capability is invalid.")
 	}
+	registrationVersion := strings.TrimSpace(version)
 	if strings.TrimSpace(runtime.WorkerBuildVersion) == "" {
-		runtime.WorkerBuildVersion = version
+		runtime.WorkerBuildVersion = registrationVersion
 	}
 	runtime.WorkerBuildVersion = strings.TrimSpace(runtime.WorkerBuildVersion)
 	runtime.OperatingSystem = strings.TrimSpace(runtime.OperatingSystem)
 	runtime.Architecture = strings.TrimSpace(runtime.Architecture)
 	runtime.WorkerBuildGitSHA = trimOptionalString(runtime.WorkerBuildGitSHA)
 	runtime.ImageDigest = trimOptionalString(runtime.ImageDigest)
+	if runtime.WorkerBuildVersion != registrationVersion || len(runtime.WorkerBuildVersion) > 160 ||
+		(runtime.WorkerBuildGitSHA != nil && !validWorkerManifestBuildGitSHA(*runtime.WorkerBuildGitSHA)) ||
+		(runtime.ImageDigest != nil && !validWorkerManifestImageDigest(*runtime.ImageDigest)) {
+		return nil, problem.New(400, "invalid_worker_manifest", "workerRuntime build identity is invalid.")
+	}
 	if runtime.WorkerProtocolMinimum <= 0 || runtime.WorkerProtocolMaximum < runtime.WorkerProtocolMinimum ||
 		runtime.RuntimeEventMinimum <= 0 || runtime.RuntimeEventMaximum < runtime.RuntimeEventMinimum ||
 		strings.TrimSpace(runtime.OperatingSystem) == "" || strings.TrimSpace(runtime.Architecture) == "" {
@@ -647,6 +653,34 @@ func trimOptionalString(value *string) *string {
 		return nil
 	}
 	return &normalized
+}
+
+func validWorkerManifestBuildGitSHA(value string) bool {
+	if len(value) < 7 || len(value) > 64 {
+		return false
+	}
+	for _, character := range value {
+		if (character < '0' || character > '9') && (character < 'a' || character > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func validWorkerManifestImageDigest(value string) bool {
+	return strings.HasPrefix(value, "sha256:") && validWorkerManifestSHA256(strings.TrimPrefix(value, "sha256:"))
+}
+
+func validWorkerManifestSHA256(value string) bool {
+	if len(value) != 64 {
+		return false
+	}
+	for _, character := range value {
+		if (character < '0' || character > '9') && (character < 'a' || character > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 type semanticVersion struct {

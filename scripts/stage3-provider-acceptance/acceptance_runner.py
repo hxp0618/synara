@@ -981,7 +981,7 @@ class ManagedWorkerDriver(LocalDriver):
 
     def _head_sha(self) -> str:
         completed = subprocess.run(
-            ["git", "rev-parse", "--short=12", "HEAD"],
+            ["git", "rev-parse", "HEAD"],
             cwd=self.repo_root,
             env=self._tool_environment(),
             stdout=subprocess.PIPE,
@@ -991,7 +991,39 @@ class ManagedWorkerDriver(LocalDriver):
             check=False,
         )
         value = completed.stdout.strip().lower()
-        return value if completed.returncode == 0 and value else "unknown"
+        if completed.returncode != 0 or re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", value) is None:
+            raise AcceptanceError("runner.git_sha_unavailable", "The full source Git SHA could not be resolved.")
+        return value
+
+    def _source_version(self) -> str:
+        try:
+            value = json.loads((self.repo_root / "apps" / "server" / "package.json").read_text(encoding="utf-8"))[
+                "version"
+            ]
+        except (OSError, KeyError, TypeError, json.JSONDecodeError) as error:
+            raise AcceptanceError(
+                "runner.source_version_unavailable",
+                f"The Worker source version could not be resolved: {self.redactor.text(str(error))}",
+            ) from None
+        if not isinstance(value, str) or not value.strip():
+            raise AcceptanceError("runner.source_version_unavailable", "The Worker source version is empty.")
+        return value.strip()
+
+    def _source_date_epoch(self, git_sha: str) -> str:
+        completed = subprocess.run(
+            ["git", "show", "-s", "--format=%ct", git_sha],
+            cwd=self.repo_root,
+            env=self._tool_environment(),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=10.0,
+            check=False,
+        )
+        value = completed.stdout.strip()
+        if completed.returncode != 0 or re.fullmatch(r"(?:0|[1-9][0-9]*)", value) is None:
+            raise AcceptanceError("runner.source_date_unavailable", "The source commit timestamp could not be resolved.")
+        return value
 
     def _docker_environment(self) -> dict[str, str]:
         environment = self._tool_environment()
@@ -1068,6 +1100,43 @@ class ManagedWorkerDriver(LocalDriver):
             )
         return output
 
+    def _worker_build_command(
+        self,
+        arguments: Sequence[str],
+        *,
+        log_path: pathlib.Path,
+        maximum_timeout: float,
+    ) -> str:
+        command = [str(self.repo_root / "deploy" / "worker" / "build.sh"), *arguments]
+        timeout = self.deadline.request_timeout(maximum=maximum_timeout)
+        try:
+            completed = subprocess.run(
+                command,
+                cwd=self.repo_root,
+                env=self._docker_environment(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                timeout=timeout,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise AcceptanceError(
+                "runner.worker_build_failed",
+                f"The official Worker image build could not run: {self.redactor.text(str(error))}",
+                {"command": command[:4]},
+            ) from None
+        output = self.redactor.text(completed.stdout)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_text(output, encoding="utf-8")
+        if completed.returncode != 0:
+            raise AcceptanceError(
+                "runner.worker_build_failed",
+                f"The official Worker image build exited with status {completed.returncode}.",
+                {"command": command[:4], "exitCode": completed.returncode, "log": str(log_path)},
+            )
+        return output
+
     def _ping_socket(self) -> Mapping[str, Any]:
         path = self.options.docker_socket_path
         if not path.is_absolute():
@@ -1124,23 +1193,37 @@ class ManagedWorkerDriver(LocalDriver):
             )
             build_evidence: dict[str, Any] = {"build": "skipped"}
         else:
-            self._docker_command(
+            git_sha = self._head_sha()
+            metadata_path = self.logs_dir / f"{log_prefix}-worker-build-metadata.json"
+            self._worker_build_command(
                 [
-                    "build",
                     "--target",
                     "worker-acceptance",
-                    "--tag",
+                    "--image",
                     image,
+                    "--version",
+                    self._source_version(),
+                    "--git-sha",
+                    git_sha,
+                    "--source-date-epoch",
+                    self._source_date_epoch(git_sha),
+                    "--metadata-file",
+                    str(metadata_path),
                     "--label",
                     "synara.io/stage3-provider-acceptance=true",
                     "--label",
-                    f"org.opencontainers.image.revision={self._head_sha()}",
-                    str(self.repo_root),
+                    f"org.opencontainers.image.revision={git_sha}",
+                    "--allow-dirty",
+                    "--load",
                 ],
                 log_path=self.logs_dir / f"{log_prefix}-worker-build.log",
                 maximum_timeout=max(60.0, self.deadline.remaining()),
             )
-            build_evidence = {"build": "completed", "durationMs": elapsed_ms(build_started)}
+            build_evidence = {
+                "build": "completed",
+                "durationMs": elapsed_ms(build_started),
+                "metadata": str(metadata_path),
+            }
         self._docker_command(
             [
                 "run",
@@ -1152,7 +1235,13 @@ class ManagedWorkerDriver(LocalDriver):
                 "test -x /usr/local/bin/synara-agentd && "
                 "test -x /usr/local/bin/provider-host && "
                 "test -r /opt/synara/acceptance/provider-host-fixture.mjs && "
-                "node --version",
+                "test -r /opt/synara/worker-image-manifest.json && "
+                "test -r /opt/synara/provider-tools.spdx.json && "
+                "test -r /opt/synara/provider-tools/package-lock.json && "
+                "test -r /opt/synara/provider-host/bun.lock && "
+                "test -r /opt/synara/worker-apk-packages.lock && "
+                "test \"$(id -u)\" = 10001 && "
+                "node --version && codex --version && claude --version",
             ],
             log_path=self.logs_dir / f"{log_prefix}-worker-smoke.log",
         )
