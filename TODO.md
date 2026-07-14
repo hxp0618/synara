@@ -56,7 +56,10 @@ Target 和 Codex/Claude 执行闭环属于基础实现，本阶段负责补齐 P
 - [ ] 统一 Start、Resume、Send、Steer、Interrupt、Compact、Rollback 和 Fork 语义。
 - [ ] 统一 Approval、Structured User Input、Plan Mode 和 Review 流程。
 - [ ] 统一 Runtime Event 映射、Event Version 和未知事件兼容策略。
-- [ ] 验证 Provider 原生 Resume Cursor 在 Worker/Pod 迁移后的安全恢复边界。
+- [x] 实现 Provider Cursor TTL、未来时钟隔离、不可复活状态、可审计 Claim 选择，以及 Provider
+  native invalid/expired 的 Turn-activity 前安全 fallback。
+- [ ] 在真实 Codex/Claude 的 Local、SSH、Docker、Kubernetes Worker/Pod 迁移中验证 native Cursor
+  invalid/expired、删除 Provider 本地状态后的恢复，以及已完成副作用不重复。
 - [ ] 保持 Worker Token、Lease Token 和 Credential 不进入 Provider Runner 输入或日志。
 - [ ] 完成 Tenant/Organization/User/Platform 四级 Provider Credential 解析策略评审。
 - [ ] 完成 Git Clone/Fetch/Branch/Worktree/Push/PR 的远程 Workspace 生命周期。

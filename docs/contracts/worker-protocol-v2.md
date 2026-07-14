@@ -71,3 +71,17 @@ The Control Plane monotonically advances the Provider Runtime Binding's `authori
 same transaction. Claim replay may rebuild the same Snapshot, but must not move that cursor backwards. A Worker or
 Provider Host must ignore unknown additive Snapshot fields; a future incompatible shape requires a new Snapshot
 version rather than changing v1 semantics.
+
+## Claim Resume selection
+
+`workload.resumeSnapshot` is always the authoritative recovery input. The optional top-level
+`providerResumeCursor` is an optimization supplied only when the same Claim transaction committed
+`selectedStrategy=native-cursor` in `execution.leased.providerResume`; its absence means use the Snapshot, not
+that durable history is absent.
+
+Worker request receipts deliberately omit Cursor plaintext. A same-Generation Claim replay loads the persisted
+Workload and committed Resume decision, then reopens only ciphertext whose Binding, authenticated `IssuedAt` and
+source Execution/Generation/History Sequence still match. It does not reapply the age policy. If the selected
+native Cursor has since been replaced, quarantined or become unavailable, Control Plane returns
+`409 claim_replay_resume_cursor_unavailable` and does not return a Lease, Workload or alternate strategy. A new
+Generation performs a new policy evaluation.

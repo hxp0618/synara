@@ -54,7 +54,7 @@ Execution to the terminal `interrupted` state while leaving the Session active f
 
 | Transition | Actor | Coordination | Durable side effects |
 | --- | --- | --- | --- |
-| `queued/recovering -> leased` | Worker | Row Claim and Generation increment | Lease, `execution.leased` Event |
+| `queued/recovering -> leased` | Worker | Row Claim and Generation increment | Lease, authoritative Resume Snapshot and one Generation-scoped `execution.leased.providerResume` decision |
 | `leased -> running` | Worker | Current Worker/Lease/Generation | Turn running, `execution.started` Event |
 | `running -> waiting-for-approval` | Worker Runtime Event | Current Lease/Generation | Pending interaction and requested Event |
 | `waiting-for-approval -> running` | Authorized user | Current unexpired Lease/Generation | Resolution and resolved Event |
@@ -66,6 +66,33 @@ Execution to the terminal `interrupted` state while leaving the Session active f
 
 Terminal transitions use the same Lease-before-Execution lock order. Cancel/Complete races therefore
 produce exactly one legal terminal winner instead of relying on process-local synchronization.
+
+## Provider Resume decision
+
+Each successful new-Generation Claim commits one Resume decision in the same transaction as the Lease and the
+existing `execution.leased` Event. The payload records only bounded metadata: requested/selected strategy, stable
+reason code, Cursor state, configured maximum age, authenticated issued/expiry timestamps, source
+Execution/Generation/History Sequence and the exact authoritative Resume Snapshot Sequence. Cursor plaintext,
+ciphertext, Credential material and Binding Digest are forbidden.
+
+The default maximum age is 720 hours through `SYNARA_PROVIDER_CURSOR_MAX_AGE`, capped at 8760 hours. A Cursor is
+expired when `now >= issuedAt + maximumAge`; an authenticated `IssuedAt` more than five minutes in the future is
+invalid. Wrong-key, missing-Cipher, unsupported/legacy Envelope, non-native Runtime, expiry and future-clock cases
+preserve ciphertext as `quarantined`. Explicit Binding/Credential mismatch may clear it to `absent`. Extending TTL,
+restoring a key or returning to a compatible Runtime never revives quarantined ciphertext; only a fresh Cursor from
+the current Execution can restore `usable`.
+
+Reason codes are a bounded contract: `cursor_usable`, `cursor_absent`, `cursor_quarantined`, `cursor_expired`,
+`cursor_issued_in_future`, `cursor_binding_unavailable`, `cursor_binding_mismatch`,
+`cursor_cipher_unavailable`, `cursor_authentication_failed`, `cursor_legacy_unbound`,
+`cursor_envelope_unsupported`, `cursor_payload_invalid`, `cursor_lineage_mismatch`, `cursor_open_failed`,
+`cursor_unusable`, and `resume_strategy_authoritative_history`.
+
+Claim receipt replay uses the committed Workload and `execution.leased.providerResume` decision and does not
+reapply Cursor age inside the same Generation. It may return a native Cursor only when current ciphertext,
+Binding, authenticated `IssuedAt` and complete source Lineage still match the committed decision. Otherwise it
+returns `409 claim_replay_resume_cursor_unavailable`; replay must never silently switch a committed native
+selection to authoritative history after Turn activity may have begun.
 
 ## Approval and user input
 

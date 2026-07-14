@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -13,10 +15,362 @@ import (
 	"github.com/synara-ai/synara/services/control-plane/internal/executiontargets"
 	"github.com/synara-ai/synara/services/control-plane/internal/identity"
 	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
+	"github.com/synara-ai/synara/services/control-plane/internal/problem"
 	"github.com/synara-ai/synara/services/control-plane/internal/projects"
 	"github.com/synara-ai/synara/services/control-plane/internal/secret"
 	"github.com/synara-ai/synara/services/control-plane/internal/sessions"
 )
+
+func TestProviderCursorMaximumAgeBoundaryOnPostgres(t *testing.T) {
+	t.Run("usable immediately before expiry", func(t *testing.T) {
+		ctx := context.Background()
+		db := integrationDB(t)
+		fixture := seedExecutionFixture(t, db)
+		service := cursorIntegrationService(t, db, bytes.Repeat([]byte{0x42}, 32))
+		service.providerCursorMaximumAge = time.Hour
+		service.heartbeatTimeout = 24 * time.Hour
+		current := time.Now().UTC().Truncate(time.Second)
+		service.now = func() time.Time { return current }
+		worker := registerManifestTestWorker(t, service, fixture.TargetID, fixture.TargetKind, "cursor-age-before-expiry")
+		cleanupWorkers(t, db, worker.ID)
+
+		const cursor = "postgres-cursor-before-expiry"
+		seedUsableProviderCursor(t, ctx, db, service, worker, fixture, fixture.ExecutionID, cursor)
+		execution := createNextCursorExecution(t, db, fixture, "resume immediately before Cursor expiry")
+		current = current.Add(time.Hour - time.Nanosecond)
+		claim := claimCursorExecution(t, ctx, service, worker, fixture, execution.ID, "cursor-age-before-expiry-claim")
+		if claim.Value.ProviderResumeCursor == nil || *claim.Value.ProviderResumeCursor != cursor {
+			t.Fatalf("pre-expiry Claim did not receive the native Cursor: %#v", claim.Value.ProviderResumeCursor)
+		}
+		decision := loadProviderResumeDecision(t, db, fixture, execution.ID)
+		if decision["selectedStrategy"] != "native-cursor" || decision["reasonCode"] != "cursor_usable" ||
+			jsonInt64(t, decision["authoritativeHistorySequence"]) != claim.Value.Workload.ResumeSnapshot.AuthoritativeHistorySequence {
+			t.Fatalf("pre-expiry Claim decision = %#v", decision)
+		}
+		lease := *claim.Value.Lease
+		if _, err := service.Complete(ctx, worker, execution.ID, CompleteExecutionInput{
+			LeaseInput: LeaseInput{
+				TenantID: fixture.TenantID, Generation: lease.Generation, LeaseToken: lease.LeaseToken,
+			},
+			ProviderResumeCursor: pointer(cursor), Output: map[string]any{"boundary": "before-expiry"},
+		}, "cursor-age-before-expiry-complete"); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("expired at exact boundary", func(t *testing.T) {
+		ctx := context.Background()
+		db := integrationDB(t)
+		fixture := seedExecutionFixture(t, db)
+		service := cursorIntegrationService(t, db, bytes.Repeat([]byte{0x42}, 32))
+		service.providerCursorMaximumAge = time.Hour
+		service.heartbeatTimeout = 24 * time.Hour
+		current := time.Now().UTC().Truncate(time.Second)
+		service.now = func() time.Time { return current }
+		worker := registerManifestTestWorker(t, service, fixture.TargetID, fixture.TargetKind, "cursor-age-at-expiry")
+		cleanupWorkers(t, db, worker.ID)
+
+		const cursor = "postgres-cursor-at-expiry"
+		seedUsableProviderCursor(t, ctx, db, service, worker, fixture, fixture.ExecutionID, cursor)
+		before := loadProviderCursorSessionForTest(t, db, fixture)
+		execution := createNextCursorExecution(t, db, fixture, "resume at exact Cursor expiry")
+		current = current.Add(time.Hour)
+		claim := claimCursorExecution(t, ctx, service, worker, fixture, execution.ID, "cursor-age-at-expiry-claim")
+		if claim.Value.ProviderResumeCursor != nil {
+			t.Fatalf("exact-expiry Claim received the stale Cursor: %#v", claim.Value.ProviderResumeCursor)
+		}
+		assertProviderCursorState(t, db, fixture, providerCursorStateQuarantined, before.ProviderResumeCursorEncrypted)
+		decision := loadProviderResumeDecision(t, db, fixture, execution.ID)
+		if decision["selectedStrategy"] != "authoritative-history" || decision["reasonCode"] != "cursor_expired" ||
+			decision["cursorState"] != providerCursorStateQuarantined ||
+			jsonInt64(t, decision["authoritativeHistorySequence"]) != claim.Value.Workload.ResumeSnapshot.AuthoritativeHistorySequence {
+			t.Fatalf("exact-expiry Claim decision = %#v", decision)
+		}
+		lease := *claim.Value.Lease
+		if _, err := service.Fail(ctx, worker, execution.ID, FailExecutionInput{
+			LeaseInput: LeaseInput{
+				TenantID: fixture.TenantID, Generation: lease.Generation, LeaseToken: lease.LeaseToken,
+			},
+			FailureCode: "test_cursor_expired", FailureMessage: "exact Cursor expiry boundary",
+		}, "cursor-age-at-expiry-fail"); err != nil {
+			t.Fatal(err)
+		}
+		assertProviderCursorState(t, db, fixture, providerCursorStateQuarantined, before.ProviderResumeCursorEncrypted)
+	})
+}
+
+func TestProviderCursorExpiredQuarantineCannotBeRevivedByPolicyChangeOnPostgres(t *testing.T) {
+	ctx := context.Background()
+	db := integrationDB(t)
+	fixture := seedExecutionFixture(t, db)
+	key := bytes.Repeat([]byte{0x42}, 32)
+	expiring := cursorIntegrationService(t, db, key)
+	expiring.providerCursorMaximumAge = time.Hour
+	expiring.heartbeatTimeout = 24 * time.Hour
+	current := time.Now().UTC().Truncate(time.Second)
+	expiring.now = func() time.Time { return current }
+	worker := registerManifestTestWorker(t, expiring, fixture.TargetID, fixture.TargetKind, "cursor-expiry-no-revive")
+	cleanupWorkers(t, db, worker.ID)
+
+	seedUsableProviderCursor(t, ctx, db, expiring, worker, fixture, fixture.ExecutionID, "postgres-expiring-cursor")
+	before := loadProviderCursorSessionForTest(t, db, fixture)
+	expiredExecution := createNextCursorExecution(t, db, fixture, "expire Provider Cursor")
+	current = current.Add(time.Hour)
+	expiredClaim := claimCursorExecution(t, ctx, expiring, worker, fixture, expiredExecution.ID, "cursor-expiry-no-revive-expire")
+	if expiredClaim.Value.ProviderResumeCursor != nil {
+		t.Fatalf("expired Cursor reached the Worker: %#v", expiredClaim.Value.ProviderResumeCursor)
+	}
+	assertProviderCursorState(t, db, fixture, providerCursorStateQuarantined, before.ProviderResumeCursorEncrypted)
+	expiredLease := *expiredClaim.Value.Lease
+	if _, err := expiring.Fail(ctx, worker, expiredExecution.ID, FailExecutionInput{
+		LeaseInput: LeaseInput{
+			TenantID: fixture.TenantID, Generation: expiredLease.Generation, LeaseToken: expiredLease.LeaseToken,
+		},
+		FailureCode: "test_cursor_expired", FailureMessage: "preserve quarantined ciphertext",
+	}, "cursor-expiry-no-revive-fail"); err != nil {
+		t.Fatal(err)
+	}
+
+	extended := cursorIntegrationService(t, db, key)
+	extended.providerCursorMaximumAge = 365 * 24 * time.Hour
+	extended.heartbeatTimeout = 24 * time.Hour
+	extended.now = func() time.Time { return current }
+	rebuildExecution := createNextCursorExecution(t, db, fixture, "rebuild after Cursor expiry")
+	rebuildClaim := claimCursorExecution(t, ctx, extended, worker, fixture, rebuildExecution.ID, "cursor-expiry-no-revive-rebuild")
+	if rebuildClaim.Value.ProviderResumeCursor != nil {
+		t.Fatalf("longer maximum age revived a quarantined Cursor: %#v", rebuildClaim.Value.ProviderResumeCursor)
+	}
+	assertProviderCursorState(t, db, fixture, providerCursorStateQuarantined, before.ProviderResumeCursorEncrypted)
+	rebuildDecision := loadProviderResumeDecision(t, db, fixture, rebuildExecution.ID)
+	if rebuildDecision["reasonCode"] != "cursor_quarantined" || rebuildDecision["selectedStrategy"] != "authoritative-history" {
+		t.Fatalf("quarantined Cursor rebuild decision = %#v", rebuildDecision)
+	}
+
+	rebuildLease := *rebuildClaim.Value.Lease
+	const freshCursor = "postgres-fresh-cursor-after-expiry"
+	if _, err := extended.Complete(ctx, worker, rebuildExecution.ID, CompleteExecutionInput{
+		LeaseInput: LeaseInput{
+			TenantID: fixture.TenantID, Generation: rebuildLease.Generation, LeaseToken: rebuildLease.LeaseToken,
+		},
+		ProviderResumeCursor: pointer(freshCursor), Output: map[string]any{"mode": "fresh-cursor"},
+	}, "cursor-expiry-no-revive-complete"); err != nil {
+		t.Fatal(err)
+	}
+	stored := loadProviderCursorSessionForTest(t, db, fixture)
+	if stored.ProviderResumeCursorState != providerCursorStateUsable ||
+		stored.ProviderResumeCursorSourceExecutionID == nil || *stored.ProviderResumeCursorSourceExecutionID != rebuildExecution.ID ||
+		stored.ProviderResumeCursorSourceGeneration == nil || *stored.ProviderResumeCursorSourceGeneration != rebuildLease.Generation ||
+		bytes.Equal(stored.ProviderResumeCursorEncrypted, before.ProviderResumeCursorEncrypted) {
+		t.Fatalf("fresh current-Generation Cursor did not replace quarantine: %#v", stored)
+	}
+	consumeExecution := createNextCursorExecution(t, db, fixture, "consume fresh Cursor after expiry")
+	consumeClaim := claimCursorExecution(t, ctx, extended, worker, fixture, consumeExecution.ID, "cursor-expiry-no-revive-consume")
+	if consumeClaim.Value.ProviderResumeCursor == nil || *consumeClaim.Value.ProviderResumeCursor != freshCursor {
+		t.Fatalf("fresh Cursor did not restore native resume: %#v", consumeClaim.Value.ProviderResumeCursor)
+	}
+}
+
+func TestProviderCursorIssuedBeyondClockSkewIsQuarantinedOnPostgres(t *testing.T) {
+	ctx := context.Background()
+	db := integrationDB(t)
+	fixture := seedExecutionFixture(t, db)
+	service := cursorIntegrationService(t, db, bytes.Repeat([]byte{0x42}, 32))
+	service.providerCursorMaximumAge = time.Hour
+	service.heartbeatTimeout = 24 * time.Hour
+	issuedAt := time.Now().UTC().Truncate(time.Second).Add(10 * time.Minute)
+	current := issuedAt
+	service.now = func() time.Time { return current }
+	worker := registerManifestTestWorker(t, service, fixture.TargetID, fixture.TargetKind, "cursor-future-issued")
+	cleanupWorkers(t, db, worker.ID)
+
+	seedUsableProviderCursor(t, ctx, db, service, worker, fixture, fixture.ExecutionID, "postgres-future-issued-cursor")
+	before := loadProviderCursorSessionForTest(t, db, fixture)
+	execution := createNextCursorExecution(t, db, fixture, "resume with future-issued Cursor")
+	current = issuedAt.Add(-providerCursorMaximumFutureSkew - time.Nanosecond)
+	claim := claimCursorExecution(t, ctx, service, worker, fixture, execution.ID, "cursor-future-issued-claim")
+	if claim.Value.ProviderResumeCursor != nil {
+		t.Fatalf("future-issued Cursor reached the Worker: %#v", claim.Value.ProviderResumeCursor)
+	}
+	assertProviderCursorState(t, db, fixture, providerCursorStateQuarantined, before.ProviderResumeCursorEncrypted)
+	decision := loadProviderResumeDecision(t, db, fixture, execution.ID)
+	if decision["reasonCode"] != "cursor_issued_in_future" || decision["selectedStrategy"] != "authoritative-history" {
+		t.Fatalf("future-issued Cursor decision = %#v", decision)
+	}
+}
+
+func TestProviderCursorMaximumFutureClockSkewRemainsUsableOnPostgres(t *testing.T) {
+	ctx := context.Background()
+	db := integrationDB(t)
+	fixture := seedExecutionFixture(t, db)
+	service := cursorIntegrationService(t, db, bytes.Repeat([]byte{0x42}, 32))
+	service.providerCursorMaximumAge = time.Hour
+	service.heartbeatTimeout = 24 * time.Hour
+	issuedAt := time.Now().UTC().Truncate(time.Second).Add(10 * time.Minute)
+	current := issuedAt
+	service.now = func() time.Time { return current }
+	worker := registerManifestTestWorker(t, service, fixture.TargetID, fixture.TargetKind, "cursor-maximum-future-skew")
+	cleanupWorkers(t, db, worker.ID)
+
+	const cursor = "postgres-maximum-future-skew-cursor"
+	seedUsableProviderCursor(t, ctx, db, service, worker, fixture, fixture.ExecutionID, cursor)
+	execution := createNextCursorExecution(t, db, fixture, "resume at maximum future Cursor skew")
+	current = issuedAt.Add(-providerCursorMaximumFutureSkew)
+	claim := claimCursorExecution(t, ctx, service, worker, fixture, execution.ID, "cursor-maximum-future-skew-claim")
+	if claim.Value.ProviderResumeCursor == nil || *claim.Value.ProviderResumeCursor != cursor {
+		t.Fatalf("maximum allowed future skew rejected the Cursor: %#v", claim.Value.ProviderResumeCursor)
+	}
+	decision := loadProviderResumeDecision(t, db, fixture, execution.ID)
+	if decision["reasonCode"] != "cursor_usable" || decision["selectedStrategy"] != "native-cursor" {
+		t.Fatalf("maximum future skew Cursor decision = %#v", decision)
+	}
+	lease := *claim.Value.Lease
+	if _, err := service.Complete(ctx, worker, execution.ID, CompleteExecutionInput{
+		LeaseInput: LeaseInput{
+			TenantID: fixture.TenantID, Generation: lease.Generation, LeaseToken: lease.LeaseToken,
+		},
+		ProviderResumeCursor: pointer(cursor), Output: map[string]any{"boundary": "maximum-future-skew"},
+	}, "cursor-maximum-future-skew-complete"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestProviderCursorClaimReplayAcrossServicesPreservesDecisionPastExpiryOnPostgres(t *testing.T) {
+	ctx := context.Background()
+	db := integrationDB(t)
+	replicaDB := integrationDB(t)
+	fixture := seedExecutionFixture(t, db)
+	key := bytes.Repeat([]byte{0x42}, 32)
+	services := [2]*Service{cursorIntegrationService(t, db, key), cursorIntegrationService(t, replicaDB, key)}
+	current := time.Now().UTC().Truncate(time.Second)
+	for _, service := range services {
+		service.providerCursorMaximumAge = time.Hour
+		service.heartbeatTimeout = 24 * time.Hour
+		service.now = func() time.Time { return current }
+	}
+	worker := registerManifestTestWorker(t, services[0], fixture.TargetID, fixture.TargetKind, "cursor-replay-past-expiry")
+	cleanupWorkers(t, db, worker.ID)
+	const cursor = "postgres-replay-past-expiry-cursor"
+	seedUsableProviderCursor(t, ctx, db, services[0], worker, fixture, fixture.ExecutionID, cursor)
+
+	execution := createNextCursorExecution(t, db, fixture, "Claim replay across Cursor expiry")
+	const requestID = "cursor-replay-past-expiry"
+	current = current.Add(time.Hour - time.Nanosecond)
+	first := claimCursorExecution(t, ctx, services[0], worker, fixture, execution.ID, requestID)
+	if first.Value.ProviderResumeCursor == nil || *first.Value.ProviderResumeCursor != cursor || first.Replayed {
+		t.Fatalf("pre-expiry Claim did not select the native Cursor: %#v", first)
+	}
+	current = current.Add(2 * time.Nanosecond)
+	replayed := claimCursorExecution(t, ctx, services[1], worker, fixture, execution.ID, requestID)
+	if replayed.Value.ProviderResumeCursor == nil || *replayed.Value.ProviderResumeCursor != cursor || !replayed.Replayed {
+		t.Fatalf("cross-Service Claim replay changed the committed native decision: %#v", replayed)
+	}
+	if state := loadProviderCursorSessionForTest(t, db, fixture); state.ProviderResumeCursorState != providerCursorStateUsable {
+		t.Fatalf("cross-Service Claim replay quarantined the committed Cursor: %#v", state)
+	}
+	var eventCount int64
+	if err := db.Model(&persistence.SessionEvent{}).
+		Where("tenant_id = ? AND session_id = ? AND execution_id = ? AND generation = ? AND event_type = ?",
+			fixture.TenantID, fixture.SessionID, execution.ID, replayed.Value.Execution.Generation, "execution.leased").
+		Count(&eventCount).Error; err != nil {
+		t.Fatal(err)
+	}
+	if eventCount != 1 {
+		t.Fatalf("cross-Service Claim replay appended %d execution.leased decisions", eventCount)
+	}
+	decision := loadProviderResumeDecision(t, db, fixture, execution.ID)
+	if decision["selectedStrategy"] != "native-cursor" || decision["reasonCode"] != "cursor_usable" {
+		t.Fatalf("cross-Service replay decision = %#v", decision)
+	}
+}
+
+func TestProviderCursorExpiredClaimRetryAcrossServicesAppendsOneDecisionOnPostgres(t *testing.T) {
+	ctx := context.Background()
+	db := integrationDB(t)
+	replicaDB := integrationDB(t)
+	fixture := seedExecutionFixture(t, db)
+	key := bytes.Repeat([]byte{0x42}, 32)
+	services := [2]*Service{cursorIntegrationService(t, db, key), cursorIntegrationService(t, replicaDB, key)}
+	current := time.Now().UTC().Truncate(time.Second)
+	for _, service := range services {
+		service.providerCursorMaximumAge = time.Hour
+		service.heartbeatTimeout = 24 * time.Hour
+		service.now = func() time.Time { return current }
+	}
+	worker := registerManifestTestWorker(t, services[0], fixture.TargetID, fixture.TargetKind, "cursor-claim-retry")
+	cleanupWorkers(t, db, worker.ID)
+	const cursor = "postgres-concurrent-expired-cursor"
+	seedUsableProviderCursor(t, ctx, db, services[0], worker, fixture, fixture.ExecutionID, cursor)
+	before := loadProviderCursorSessionForTest(t, db, fixture)
+	current = current.Add(time.Hour)
+	execution := createNextCursorExecution(t, db, fixture, "concurrent expired Provider Cursor Claim")
+	const requestID = "cursor-concurrent-expired-claim-retry"
+
+	type outcome struct {
+		result OperationResult[ClaimResult]
+		err    error
+	}
+	start := make(chan struct{})
+	completed := make(chan outcome, len(services))
+	var wait sync.WaitGroup
+	for _, service := range services {
+		wait.Add(1)
+		go func(service *Service) {
+			defer wait.Done()
+			<-start
+			result, err := service.Claim(ctx, worker, ClaimExecutionInput{
+				ExecutionTargetID: fixture.TargetID, TargetKind: fixture.TargetKind, ExecutionID: &execution.ID,
+			}, requestID)
+			completed <- outcome{result: result, err: err}
+		}(service)
+	}
+	close(start)
+	wait.Wait()
+	close(completed)
+
+	successes := 0
+	for item := range completed {
+		if item.err != nil {
+			var apiError *problem.Error
+			if !errors.As(item.err, &apiError) || apiError.Status != 409 || apiError.Code != "request_receipt_conflict" {
+				t.Fatalf("concurrent Claim failed unexpectedly: %#v, result=%#v", apiError, item.result)
+			}
+			continue
+		}
+		successes++
+		if item.result.Value.ProviderResumeCursor != nil || item.result.Value.Workload == nil ||
+			item.result.Value.Workload.ResumeSnapshot == nil {
+			t.Fatalf("concurrent Claim returned an invalid resume decision: %#v", item.result)
+		}
+	}
+	if successes == 0 {
+		t.Fatal("concurrent Claims produced no successful response")
+	}
+
+	var replayed OperationResult[ClaimResult]
+	for index, service := range services {
+		replayed = claimCursorExecution(t, ctx, service, worker, fixture, execution.ID, requestID)
+		if !replayed.Replayed || replayed.Value.ProviderResumeCursor != nil {
+			t.Fatalf("Service %d did not converge on the committed authoritative-history decision: %#v", index, replayed)
+		}
+	}
+	assertProviderCursorState(t, db, fixture, providerCursorStateQuarantined, before.ProviderResumeCursorEncrypted)
+	var eventCount int64
+	if err := db.Model(&persistence.SessionEvent{}).
+		Where("tenant_id = ? AND session_id = ? AND execution_id = ? AND generation = ? AND event_type = ?",
+			fixture.TenantID, fixture.SessionID, execution.ID, replayed.Value.Execution.Generation, "execution.leased").
+		Count(&eventCount).Error; err != nil {
+		t.Fatal(err)
+	}
+	if eventCount != 1 {
+		t.Fatalf("cross-Service Claim retry appended %d execution.leased decisions", eventCount)
+	}
+	decision := loadProviderResumeDecision(t, db, fixture, execution.ID)
+	if decision["selectedStrategy"] != "authoritative-history" || decision["reasonCode"] != "cursor_expired" ||
+		decision["cursorState"] != providerCursorStateQuarantined ||
+		jsonInt64(t, decision["authoritativeHistorySequence"]) != replayed.Value.Workload.ResumeSnapshot.AuthoritativeHistorySequence {
+		t.Fatalf("cross-Service Claim decision = %#v", decision)
+	}
+}
 
 func TestProviderCursorWrongKeyQuarantinesWithoutBlockingLifecycleAndFreshCursorRecovers(t *testing.T) {
 	ctx := context.Background()

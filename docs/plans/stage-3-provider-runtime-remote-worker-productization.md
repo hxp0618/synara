@@ -647,8 +647,11 @@ UI 不解析 Provider 原生 Event，不根据 Provider Name 分叉核心 Sessio
 
 1. Control Plane 读取 Agent Session、Turn、Event、Interaction 和 Artifact Metadata。
 2. 根据 Context Policy 生成有界、确定性的 Resume Snapshot。
-3. 如果 Provider Resume Cursor 仍有效且安全，则作为优化尝试原生 Resume。
-4. 原生 Resume 失败时，按 Capability 退回权威历史重建或返回稳定错误。
+3. Control Plane 在 Claim 时验证 Cursor Envelope、Binding、Lineage、年龄和时钟偏差；不满足策略时直接
+   选择权威历史，不把 Cursor 交给 Worker。
+4. 只有已通过 Control Plane 策略的 Cursor 才作为优化尝试原生 Resume。Provider Host 仅在 Provider
+   明确返回 native Session invalid/expired 且尚无 Turn activity 时选择权威历史；认证、限流、传输和
+   模糊错误保持终态失败，不静默重放 Turn。
 5. 任何情况下不依赖旧 Worker 本地唯一目录才能继续 Session。
 
 ### F2. Resume Snapshot
@@ -677,9 +680,15 @@ Snapshot 必须有大小上限、Token 预算和确定性排序。
 - `usable` Cursor 必须持久化产生它的 Execution ID、Generation 和当时的 Authoritative
   History Sequence；只有当前 Execution 产生的新 Cursor 才能从 `quarantined` 恢复为
   `usable`。
-- Credential Rotation、Provider 版本跨越或 Cursor 过期时，按策略失效。
-- Cursor 不进入 Web API、日志、Event Payload 或 Artifact Metadata。
-- Retry 当前未持久化 Turn 和恢复历史 Turn 必须区分，避免重复副作用。
+- 默认最大年龄为 720 小时，由 `SYNARA_PROVIDER_CURSOR_MAX_AGE` 配置且不得超过 8760 小时；
+  `now >= issuedAt + TTL` 在精确边界失效。允许最多五分钟未来时钟偏差，超过时隔离。
+- Credential/Binding 明确不兼容时可以清空为 `absent`；错误密钥、缺失 Cipher、未知/旧 Envelope、
+  非原生 Runtime、过期或未来时间戳必须保留密文并转为 `quarantined`。
+- Cursor 明文、密文和 Binding Digest 不进入 Web API、日志、Event 或 Artifact Metadata；既有
+  `execution.leased.providerResume` 只记录 bounded Resume 决策、时间和来源 Lineage。
+- 同一 Generation 的 Claim receipt replay 复用已提交决策，不重新计算 TTL。首次选择的 native Cursor
+  已被替换、隔离或无法精确打开时返回 `409 claim_replay_resume_cursor_unavailable`，不得静默切换到
+  Authoritative History；新 Generation 才重新评估策略。
 
 ### F4. 迁移边界
 
@@ -725,9 +734,16 @@ Snapshot 必须有大小上限、Token 预算和确定性排序。
 - `2763ebd3` 的 disposable Kind deterministic fixture 证明 Pod 替换后 Session Event Sequence 从 1 到
   57 连续，Control Plane 重启后第二 Turn 可继续；该用例使用空 Repository Project 和 fixture Cursor，
   不替代真实 Provider Cursor 失效或删除本地 Workspace/Provider State 的四 Target 验收。
-- 当前仍未关闭 F：Cursor Payload 已记录 `IssuedAt`，但还没有完整的过期策略；
-  Local/SSH/Docker/Kubernetes 删除本地状态后的同源 Live Acceptance 仍需由工作流 L
-  证明。
+- `36ae47d6` 实现完整 Cursor 年龄策略和可审计选择：默认 720 小时、8760 小时上限、精确 TTL
+  边界、五分钟未来时钟容差、隔离不复活、当前 Execution 新 Cursor 恢复，以及 receipt replay
+  固化/冲突规则。Provider Host 只分类明确 invalid/expired，并发出 exact-shape canonical warning；
+  agentd 为该语义槽派生稳定 Event ID。
+- SQLite 与真实 PostgreSQL 17 覆盖 TTL 前 1ns、精确 TTL、最大/超限未来时钟偏差、密文保留、延长
+  TTL 或恢复密钥不复活、fresh current-Generation Cursor 恢复，以及两个独立数据库连接池的 Claim
+  重试/并发只提交一条 `execution.leased` 决策。
+- F 仍未完全关闭：真实 Codex/Claude native Session invalid/expired、Local/SSH/Docker/Kubernetes 删除
+  Provider 本地状态后的迁移，以及已完成 Turn/工具副作用不重复，仍需由工作流 L 的 Live Acceptance
+  证明。deterministic fixture Cursor 不能替代真实 Provider Release Gate。
 
 ## 12. 工作流 G：Credential 与 Secret 隔离
 
@@ -1432,7 +1448,8 @@ bun run test
 - [ ] Start/Resume/Send/Steer/Interrupt/Compact/Rollback/Fork/Review 语义冻结并测试。
 - [ ] Approval、Structured User Input 和 Plan Mode 可以跨页面刷新、Control Plane 重启恢复。
 - [ ] Runtime Event 版本和未知事件策略完成。
-- [ ] Provider Resume Cursor 失效时可以按策略从权威历史继续。
+- [ ] Provider Resume Cursor 失效时可以按策略从权威历史继续。（策略、数据库与 Host 契约测试已完成；
+  真实 Codex/Claude 跨 Target Live Acceptance 仍未完成。）
 - [ ] Worker/Pod 替换后可继续后续 Turn，Event Sequence 连续。
 - [ ] Worker、Lease、Provider、Git Credential 没有非预期日志或 Artifact 泄漏。
 - [ ] Remote Workspace Clone/Fetch/Worktree/Checkpoint/Cleanup 生命周期完成。

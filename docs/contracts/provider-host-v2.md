@@ -113,6 +113,12 @@ replacement Turn succeeded. Canonical `detail` allows only `kind=session_resume`
 `outcome=fallback_selected`, `reasonCode=session_resume_invalid|session_resume_expired`,
 `fallbackSafety=before_turn_activity`, `authoritativeHistorySequence`, and `provider`.
 Provider errors, Cursor values, credentials, and other native payload fields are never copied into this outcome.
+This warning is only for a Provider-native rejection after Control Plane already selected native resume; a
+Claim-time TTL/quarantine decision does not emit a Host fallback warning. Managed canonical detail is an exact
+shape, `provider` is limited to `codex|claudeAgent`, and Control Plane rejects missing or additional fields.
+Agentd derives the warning Event ID from Execution, Generation, Send command ID and the fixed resume-fallback
+semantic slot, so replay does not append duplicate audit evidence. The warning proves only
+`fallback_selected`, never that the replacement Turn succeeded.
 
 ## Describe
 
