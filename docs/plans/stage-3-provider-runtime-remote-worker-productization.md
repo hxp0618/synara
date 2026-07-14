@@ -1170,8 +1170,9 @@ Provider × Capability × Execution Target
 - 默认运行的是 deterministic Provider Host Protocol 2.1 fixture。它能证明共享 Contract、
   Control Plane-to-Worker-to-Host 通路和 Local/Docker/Kubernetes 恢复编排，**不等于**使用真实
   Codex App Server 或 Claude Agent SDK 的 Release Acceptance。
-- SSH 当前仍返回 `runner.target_driver_missing`；Kubernetes Claude/failure matrix、真实
-  Codex/Claude、SSH、长 Session 和完整故障矩阵仍待执行，不得声称四 Target 统一发布门禁已完成。
+- SSH Driver 已实现 disposable OrbStack VM、一次性 SSH Credential、Host Key 固定以及产品级
+  install/upgrade/revoke 生命周期，但真实 SSH live acceptance 尚未完成；Kubernetes Claude/failure
+  matrix、真实 Codex/Claude、SSH、长 Session 和完整故障矩阵仍待执行，不得声称四 Target 统一发布门禁已完成。
 
 ## 18. 实施顺序
 

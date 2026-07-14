@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -67,8 +69,10 @@ func main() {
 		cfg.WorkerRegistrationToken = registrationToken
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
+	ctx, stopSignals := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stopSignals()
+	runtimeContext, stopRuntime := context.WithCancel(context.Background())
+	defer stopRuntime()
 	databaseOptions := database.Options{
 		MaxOpenConnections: cfg.DatabaseMaxOpenConnections, MaxIdleConnections: cfg.DatabaseMaxIdleConnections,
 		ConnectionMaxLifetime: cfg.DatabaseConnectionMaxLifetime, ConnectionMaxIdleTime: cfg.DatabaseConnectionMaxIdleTime,
@@ -90,7 +94,9 @@ func main() {
 		logger.Error("failed to configure schema readiness", "kind", metadataStore.Kind(), "error", err)
 		os.Exit(1)
 	}
-	metrics := observability.New(db, cfg.SessionIdleTTL)
+	metrics := observability.New(db, observability.Config{
+		SessionIdleTTL: cfg.SessionIdleTTL, WorkerHeartbeatTimeout: cfg.WorkerHeartbeatTimeout,
+	})
 	if cfg.Platform.QueueDriver == platform.QueueExternal {
 		logger.Error("external queue driver requires a publisher adapter that is not configured in this build")
 		os.Exit(1)
@@ -181,12 +187,8 @@ func main() {
 		logger.Error("failed to configure HTTP API", "error", err)
 		os.Exit(1)
 	}
-	server := &http.Server{
-		Addr: cfg.ListenAddress, Handler: api.Handler(),
-		ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 90 * time.Second,
-	}
+	server := newControlPlaneHTTPServer(cfg.ListenAddress, api.Handler(), runtimeContext, stopRuntime)
 	var localAgentd *agentd.LocalSupervisor
-	var localAgentdDone <-chan struct{}
 	if len(cfg.LocalAgentdRunnerCommand) > 0 {
 		localTarget, _, resolveErr := executionTargetService.ResolveWorkerTarget(
 			ctx, bootstrapped.ExecutionTargetID, string(platform.TargetLocal),
@@ -215,46 +217,79 @@ func main() {
 		logger.Info("control plane listening", "address", cfg.ListenAddress)
 		serverErrors <- server.ListenAndServe()
 	}()
-	go dockerReconciler.Run(ctx)
-	go kubernetesReconciler.Run(ctx)
-	go retentionService.Run(ctx)
-	go outboxDispatcher.Run(ctx)
+	var background sync.WaitGroup
+	startBackground := func(run func()) {
+		background.Add(1)
+		go func() {
+			defer background.Done()
+			run()
+		}()
+	}
+	startBackground(func() { dockerReconciler.Run(runtimeContext) })
+	startBackground(func() { kubernetesReconciler.Run(runtimeContext) })
+	startBackground(func() { retentionService.Run(runtimeContext) })
+	startBackground(func() { outboxDispatcher.Run(runtimeContext) })
 	if localAgentd != nil {
 		logger.Info(
 			"local agentd supervisor enabled", "executionTargetId", bootstrapped.ExecutionTargetID,
 			"workspaceRoot", cfg.LocalAgentdWorkspaceRoot, "gitCacheRoot", cfg.LocalAgentdGitCacheRoot,
 		)
-		done := make(chan struct{})
-		localAgentdDone = done
-		go func() {
-			defer close(done)
-			localAgentd.Run(ctx)
-		}()
+		startBackground(func() {
+			localAgentd.Run(runtimeContext)
+		})
 	}
 
+	var serveErr error
 	select {
 	case <-ctx.Done():
 	case err := <-serverErrors:
 		if !errors.Is(err, http.ErrServerClosed) {
+			serveErr = err
 			logger.Error("control plane stopped unexpectedly", "error", err)
-			os.Exit(1)
 		}
 	}
 
-	stop()
 	shutdownContext, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
 	defer cancel()
-	if localAgentdDone != nil {
-		select {
-		case <-localAgentdDone:
-		case <-shutdownContext.Done():
-			logger.Warn("local agentd Drain did not finish before the control-plane shutdown deadline")
+	httpShutdownErr := server.Shutdown(shutdownContext)
+	if httpShutdownErr != nil {
+		logger.Error("control plane HTTP shutdown failed", "error", httpShutdownErr)
+		if closeErr := server.Close(); closeErr != nil && !errors.Is(closeErr, net.ErrClosed) {
+			logger.Error("control plane forced HTTP close failed", "error", closeErr)
 		}
 	}
-	if err := server.Shutdown(shutdownContext); err != nil {
-		logger.Error("control plane shutdown failed", "error", err)
+
+	stopRuntime()
+	backgroundDone := make(chan struct{})
+	go func() {
+		background.Wait()
+		close(backgroundDone)
+	}()
+	select {
+	case <-backgroundDone:
+	case <-shutdownContext.Done():
+		logger.Warn("control plane background shutdown did not finish before the deadline")
+	}
+	if serveErr != nil || httpShutdownErr != nil {
 		os.Exit(1)
 	}
+}
+
+func newControlPlaneHTTPServer(
+	address string,
+	handler http.Handler,
+	runtimeContext context.Context,
+	stopRuntime context.CancelFunc,
+) *http.Server {
+	server := &http.Server{
+		Addr: address, Handler: handler,
+		ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 90 * time.Second,
+		BaseContext: func(net.Listener) context.Context { return runtimeContext },
+	}
+	// Shutdown closes listeners before invoking this callback, so no new HTTP
+	// request can arrive after request contexts and background loops start draining.
+	server.RegisterOnShutdown(stopRuntime)
+	return server
 }
 
 func runHealthcheck() error {

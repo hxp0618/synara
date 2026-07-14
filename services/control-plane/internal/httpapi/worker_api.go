@@ -511,6 +511,7 @@ func (s *Server) requireWorker(next http.Handler) http.Handler {
 			s.writeError(w, r, err)
 			return
 		}
+		requestLogScopeFor(r).workerID = worker.ID
 		ctx := context.WithValue(r.Context(), workerContextKey{}, worker)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})

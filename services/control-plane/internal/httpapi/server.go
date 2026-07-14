@@ -11,6 +11,7 @@ import (
 	"mime"
 	"net/http"
 	"net/netip"
+	"reflect"
 	"strconv"
 	"strings"
 	"time"
@@ -47,6 +48,14 @@ type traceIDContextKey struct{}
 type clientIPContextKey struct{}
 type workerContextKey struct{}
 type serviceAccountContextKey struct{}
+type requestLogScopeContextKey struct{}
+
+type requestLogScope struct {
+	tenantID       uuid.UUID
+	organizationID uuid.UUID
+	workerID       uuid.UUID
+	generation     int64
+}
 
 type Server struct {
 	config             config.Config
@@ -1096,6 +1105,9 @@ func (s *Server) requireAuth(next http.Handler) http.Handler {
 			s.writeError(w, r, err)
 			return
 		}
+		if principal.ActiveTenantID != nil {
+			requestLogScopeFor(r).tenantID = *principal.ActiveTenantID
+		}
 		ctx := context.WithValue(r.Context(), principalContextKey{}, principal)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
@@ -1112,6 +1124,11 @@ func (s *Server) requireServiceAccount(next http.Handler) http.Handler {
 		if err != nil {
 			s.writeError(w, r, err)
 			return
+		}
+		scope := requestLogScopeFor(r)
+		scope.tenantID = principal.TenantID
+		if principal.OrganizationID != nil {
+			scope.organizationID = *principal.OrganizationID
 		}
 		ctx := context.WithValue(r.Context(), serviceAccountContextKey{}, principal)
 		next.ServeHTTP(w, r.WithContext(ctx))
@@ -1135,6 +1152,7 @@ func (s *Server) withRequestContext(next http.Handler) http.Handler {
 		ctx := context.WithValue(r.Context(), requestIDContextKey{}, id)
 		ctx = context.WithValue(ctx, traceIDContextKey{}, trace)
 		ctx = context.WithValue(ctx, clientIPContextKey{}, s.resolveClientIP(r))
+		ctx = context.WithValue(ctx, requestLogScopeContextKey{}, &requestLogScope{})
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
@@ -1184,10 +1202,12 @@ func (s *Server) observeRequests(next http.Handler) http.Handler {
 		}
 		duration := time.Since(started)
 		s.metrics.ObserveHTTP(r.Method, r.Pattern, status, duration, recorder.problemCode)
-		s.logger.Info("control-plane request completed",
+		attributes := []any{
 			"requestId", requestID(r), "traceId", traceID(r), "method", r.Method,
 			"route", normalizedLogRoute(r), "status", status, "durationMs", duration.Milliseconds(),
-		)
+		}
+		attributes = append(attributes, requestScopeLogAttributes(r, recorder.problemCode)...)
+		s.logger.Info("control-plane request completed", attributes...)
 	})
 }
 
@@ -1224,6 +1244,7 @@ func decodeJSON(r *http.Request, target any) error {
 	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
 		return problem.New(400, "invalid_json", "Request body must contain one JSON value.")
 	}
+	captureDecodedRequestScope(r, target)
 	return nil
 }
 
@@ -1280,7 +1301,10 @@ func (s *Server) writeError(w http.ResponseWriter, r *http.Request, err error) {
 		recorder.recordProblem(apiError.Code)
 	}
 	if apiError.Status >= 500 {
-		s.logger.Error("control-plane request failed", "requestId", requestID(r), "traceId", traceID(r), "code", apiError.Code, "error", apiError)
+		attributes := []any{"requestId", requestID(r), "traceId", traceID(r)}
+		attributes = append(attributes, requestScopeLogAttributes(r, apiError.Code)...)
+		attributes = append(attributes, "error", apiError)
+		s.logger.Error("control-plane request failed", attributes...)
 	}
 	writeJSON(w, apiError.Status, map[string]any{
 		"error": map[string]any{
@@ -1312,6 +1336,81 @@ func requestID(r *http.Request) string {
 func traceID(r *http.Request) string {
 	value, _ := r.Context().Value(traceIDContextKey{}).(string)
 	return value
+}
+
+func requestLogScopeFor(r *http.Request) *requestLogScope {
+	if r != nil {
+		if scope, ok := r.Context().Value(requestLogScopeContextKey{}).(*requestLogScope); ok && scope != nil {
+			return scope
+		}
+	}
+	return &requestLogScope{}
+}
+
+func captureDecodedRequestScope(r *http.Request, target any) {
+	scope := requestLogScopeFor(r)
+	value := reflect.ValueOf(target)
+	for value.IsValid() && value.Kind() == reflect.Pointer {
+		if value.IsNil() {
+			return
+		}
+		value = value.Elem()
+	}
+	if !value.IsValid() || value.Kind() != reflect.Struct {
+		return
+	}
+	if tenantID, ok := decodedUUIDField(value, "TenantID"); ok {
+		scope.tenantID = tenantID
+	}
+	if organizationID, ok := decodedUUIDField(value, "OrganizationID"); ok {
+		scope.organizationID = organizationID
+	}
+	if generation := value.FieldByName("Generation"); generation.IsValid() && generation.CanInt() && generation.Int() > 0 {
+		scope.generation = generation.Int()
+	}
+}
+
+func decodedUUIDField(value reflect.Value, name string) (uuid.UUID, bool) {
+	field := value.FieldByName(name)
+	for field.IsValid() && field.Kind() == reflect.Pointer {
+		if field.IsNil() {
+			return uuid.Nil, false
+		}
+		field = field.Elem()
+	}
+	if !field.IsValid() || !field.CanInterface() {
+		return uuid.Nil, false
+	}
+	id, ok := field.Interface().(uuid.UUID)
+	return id, ok && id != uuid.Nil
+}
+
+func requestScopeLogAttributes(r *http.Request, errorCode string) []any {
+	scope := requestLogScopeFor(r)
+	attributes := make([]any, 0, 14)
+	appendID := func(key, pathName string, fallback uuid.UUID) {
+		id, err := uuid.Parse(r.PathValue(pathName))
+		if err != nil || id == uuid.Nil {
+			id = fallback
+		}
+		if id != uuid.Nil {
+			attributes = append(attributes, key, id.String())
+		}
+	}
+	appendID("tenantId", "tenantID", scope.tenantID)
+	appendID("organizationId", "organizationID", scope.organizationID)
+	appendID("sessionId", "sessionID", uuid.Nil)
+	appendID("executionId", "executionID", uuid.Nil)
+	if scope.workerID != uuid.Nil {
+		attributes = append(attributes, "workerId", scope.workerID.String())
+	}
+	if scope.generation > 0 {
+		attributes = append(attributes, "generation", scope.generation)
+	}
+	if errorCode = strings.TrimSpace(errorCode); errorCode != "" {
+		attributes = append(attributes, "errorCode", errorCode)
+	}
+	return attributes
 }
 
 func incomingTraceID(r *http.Request) string {

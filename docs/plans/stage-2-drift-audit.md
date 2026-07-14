@@ -3,6 +3,11 @@
 Baseline: `codex/saas-tenancy-user` at `425554e6`; status updated after Stage 2 Steps 0-7 implementation,
 repository-controlled acceptance, and the post-`702cb0d0` browser route verification on 2026-07-13.
 
+Evidence boundary: the newest complete deployment report is fixed to `1a53c93a` and Migration `000028`.
+The forward migration chain now reaches `000031`; no report currently proves that the present HEAD has rerun the
+Single-node, Multi-replica, Failure and Stage 2 Kind deployment suites. The implementation classifications below
+must not be read as a current-HEAD deployment PASS.
+
 This audit classifies the productionization plan against executable code rather than plan status text.
 
 | Workflow | Status | Evidence and remaining work |
@@ -15,7 +20,7 @@ This audit classifies the productionization plan against executable code rather 
 | F. SSE | implemented | Sequence replay, `Last-Event-ID`, heartbeat, PostgreSQL cross-replica catch-up, globally exact Tenant/User connection leases, write-deadline slow-client handling and SSE metrics are covered by unit, PostgreSQL and two-replica acceptance tests. Web projection/reconnect ownership remains in Workflow H rather than this transport workflow. |
 | G. Reliable Outbox | implemented | Durable Claim/Dispatcher, claim recovery, bounded retry, Dead Letter, audited Replay, lifecycle transaction integration, metrics and alerts are implemented and covered by SQLite/PostgreSQL tests. |
 | H. Web main flow | implemented | Application-level Control Plane context owns authentication, Tenant/Organization capabilities and SaaS projection. Main Project/Session/Turn/SSE flow is Control Plane authoritative; delayed local snapshots are rejected, refresh restores PostgreSQL state, and unconfigured instances retain local SQLite behavior. |
-| I. Operations | implemented | HTTP, DB pool, Login Session, Worker, Execution, Artifact, SSE, Outbox and background metrics, Prometheus alerts, Compose/Kind failure acceptance, production Runbook, release checklist and dynamic sensitive-log audits are complete. |
+| I. Operations | implemented; current-head deployment evidence refresh pending | HTTP, DB pool, Login Session, Worker, Execution, Artifact, SSE, Outbox and background metrics, Prometheus alerts, production Runbook, release checklist and dynamic sensitive-log audits are implemented. Complete Compose/Kind deployment evidence is fixed to `1a53c93a`/`000028`; the current `000031` chain still requires a baseline-pinned rerun. |
 
 ## Process-local state classification
 
@@ -30,9 +35,11 @@ This audit classifies the productionization plan against executable code rather 
 | Provider resume cursor | `authoritative-postgres`, encrypted. |
 | Artifact metadata | `authoritative-postgres`; payload is `authoritative-object-store`. |
 
-Steps 0-7 and every repository-controlled completion gate are implemented and accepted. Evidence includes the
-SaaS browser main flow, local-mode refresh recovery, single-node and multi-replica Compose, Worker/MinIO/database
-fault drills, and a disposable two-replica Kind rollout with Pod deletion and PVC-backed dependency recovery.
+At the cited report baselines, Steps 0-7 and the repository-controlled completion gates were implemented and
+accepted. That historical evidence includes the SaaS browser main flow, local-mode refresh recovery, single-node
+and multi-replica Compose, Worker/MinIO/database fault drills, and a disposable two-replica Kind rollout with Pod
+deletion and PVC-backed dependency recovery. It does not prove deployment acceptance for the later `000029`-
+`000031` schema and runtime changes; those suites must be rerun and recorded against an immutable current commit.
 
 The only remaining external provider-specific evidence is the real AWS S3 Live Store run. It requires an
 explicitly authorized writable Bucket and must remain recorded as not executed until that authority is supplied;

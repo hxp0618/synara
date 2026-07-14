@@ -33,7 +33,7 @@ foundations. The existing TypeScript server remains the Provider Runtime during 
   - `000018_provider_runtime_bindings.sql`: Session Provider Runtime bindings and Cursor compatibility metadata
   - `000019_interaction_delivery.sql`: Generation-fenced Approval/User Input delivery lifecycle
   - `000020_remote_workspaces_checkpoints.sql`: logical remote Workspaces and Artifact-backed Checkpoints
-  - `000021_turn_runtime_modes.sql`: immutable runtime and interaction modes on Turns
+  - `000021_agent_turn_modes.sql`: immutable runtime and interaction modes on Turns
   - `000022_execution_control_commands.sql`: durable Generation-fenced Provider control commands
   - `000023_git_credentials.sql`: purpose-isolated Git Credentials, Project binding and database enforcement
   - `000024_checkpoint_lifecycle.sql`: Generation-fenced Checkpoint lifecycle, ready recovery pointers,
@@ -46,6 +46,12 @@ foundations. The existing TypeScript server remains the Provider Runtime during 
     dispatch, retry and acknowledgement state
   - `000028_interaction_runtime_event_version.sql`: explicit Runtime Event version continuity for durable
     Interaction requests and their matching resolution Events
+  - `000029_provider_runtime_release_policy.sql`: normalized Provider runtime availability/version compatibility,
+    explicit experimental-provider enablement and Runtime Binding policy snapshots
+  - `000030_execution_provider_cursor_snapshots.sql`: Generation-scoped Provider Credential/version, resume-strategy
+    and Cursor-binding snapshots, plus content-addressed Worker Manifest immutability
+  - `000031_session_execution_cursor_lineage.sql`: Session Cursor `absent`/`usable`/`quarantined` state and source
+    lineage, legacy ciphertext quarantine, and one active Execution per Session across the five active statuses
 - ORM: GORM with PostgreSQL and CGO-free SQLite drivers
 - Shared model/repository/transaction utilities: `internal/persistence`
 - Tenant-scoped queries always include `tenant_id`

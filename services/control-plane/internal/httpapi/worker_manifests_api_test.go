@@ -246,7 +246,7 @@ func newWorkerManifestHTTPFixture(t *testing.T) workerManifestHTTPFixture {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	server, err := New(
 		cfg, store.DB(), identityService, nil, projectService, sessionService, executionService, targetService,
-		nil, nil, nil, nil, nil, observability.New(store.DB(), cfg.SessionIdleTTL), nil, nil, nil, nil, nil, logger,
+		nil, nil, nil, nil, nil, observability.New(store.DB(), observability.Config{SessionIdleTTL: cfg.SessionIdleTTL}), nil, nil, nil, nil, nil, logger,
 	)
 	if err != nil {
 		t.Fatal(err)

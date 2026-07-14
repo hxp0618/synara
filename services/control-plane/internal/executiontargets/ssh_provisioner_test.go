@@ -3,16 +3,21 @@ package executiontargets
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/rsa"
 	"encoding/json"
 	"errors"
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"golang.org/x/crypto/ssh"
 	"gorm.io/gorm"
 
 	"github.com/synara-ai/synara/services/control-plane/internal/bootstrap"
@@ -199,6 +204,63 @@ func TestSSHProvisionerRecordsFailedConnectionAndLeavesTargetOffline(t *testing.
 	}
 }
 
+func TestNewSSHClientConfigPinsEd25519HostKeyAlgorithmAndRejectsMismatches(t *testing.T) {
+	clientSigner := mustNewEd25519Signer(t)
+	expectedHostKey := mustNewEd25519Signer(t).PublicKey()
+	otherHostKey := mustNewEd25519Signer(t).PublicKey()
+
+	clientConfig, err := newSSHClientConfig("root", clientSigner, expectedHostKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{ssh.KeyAlgoED25519}; !reflect.DeepEqual(clientConfig.HostKeyAlgorithms, want) {
+		t.Fatalf("unexpected Ed25519 host key algorithms: got %v want %v", clientConfig.HostKeyAlgorithms, want)
+	}
+	if err := clientConfig.HostKeyCallback("ssh.example.com:22", dummyAddr("127.0.0.1:22"), expectedHostKey); err != nil {
+		t.Fatalf("expected pinned host key to be accepted: %v", err)
+	}
+	if err := clientConfig.HostKeyCallback("ssh.example.com:22", dummyAddr("127.0.0.1:22"), otherHostKey); err == nil || !strings.Contains(err.Error(), "mismatch") {
+		t.Fatalf("expected mismatched host key rejection, got %v", err)
+	}
+}
+
+func TestSupportedSSHHostKeyAlgorithmsRestrictsRSAKeysToSupportedSHA2(t *testing.T) {
+	rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rsaSigner, err := ssh.NewSignerFromKey(rsaKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	algorithms, err := supportedSSHHostKeyAlgorithms(rsaSigner.PublicKey())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{ssh.KeyAlgoRSASHA256, ssh.KeyAlgoRSASHA512}
+	if !reflect.DeepEqual(algorithms, want) {
+		t.Fatalf("unexpected RSA host key algorithms: got %v want %v", algorithms, want)
+	}
+}
+
+func TestSupportedSSHHostKeyAlgorithmsRestrictsRSACertsToSupportedSHA2(t *testing.T) {
+	algorithms, err := supportedSSHHostKeyAlgorithms(fakeSSHPublicKey{typ: ssh.CertAlgoRSAv01})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{ssh.CertAlgoRSASHA256v01, ssh.CertAlgoRSASHA512v01}
+	if !reflect.DeepEqual(algorithms, want) {
+		t.Fatalf("unexpected RSA cert host key algorithms: got %v want %v", algorithms, want)
+	}
+}
+
+func TestSupportedSSHHostKeyAlgorithmsRejectsUnsupportedTypes(t *testing.T) {
+	_, err := supportedSSHHostKeyAlgorithms(fakeSSHPublicKey{typ: "ssh-unsupported"})
+	if err == nil || !strings.Contains(err.Error(), "unsupported") {
+		t.Fatalf("expected unsupported host key algorithm error, got %v", err)
+	}
+}
+
 type sshProvisionFixture struct {
 	db          *gorm.DB
 	provisioner *SSHProvisioner
@@ -323,3 +385,32 @@ func commandsContainAll(commands []string, fragments ...string) bool {
 	}
 	return false
 }
+
+func mustNewEd25519Signer(t *testing.T) ssh.Signer {
+	t.Helper()
+	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer, err := ssh.NewSignerFromKey(privateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return signer
+}
+
+type fakeSSHPublicKey struct {
+	typ string
+}
+
+func (k fakeSSHPublicKey) Type() string { return k.typ }
+
+func (k fakeSSHPublicKey) Marshal() []byte { return []byte(k.typ) }
+
+func (k fakeSSHPublicKey) Verify(_ []byte, _ *ssh.Signature) error { return nil }
+
+type dummyAddr string
+
+func (a dummyAddr) Network() string { return "tcp" }
+
+func (a dummyAddr) String() string { return string(a) }

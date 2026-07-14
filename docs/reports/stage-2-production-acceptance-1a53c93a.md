@@ -11,9 +11,18 @@
 This report supplements rather than overwrites the historical Stage 2 reports. It was created because the
 previous production report was tied to an earlier 16-migration baseline and could not prove the current build.
 
-## Compatibility fixes found by current-head verification
+## Evidence status after this baseline
 
-The first current-head failure run exposed two stale acceptance assumptions introduced before Stage 3 hardened
+The repository migration chain now reaches `000031_session_execution_cursor_lineage.sql`. This report remains
+valid only for the immutable `1a53c93a`/`000028` source baseline: no complete current-HEAD rerun of
+`deploy/saas/acceptance.sh`, `deploy/saas/multi-replica-acceptance.sh`,
+`deploy/saas/failure-acceptance.sh` and `deploy/kubernetes/kind-acceptance.sh` is recorded here. Until a new report
+pins the tested commit, expected/applied Migration `000031`, commands and cleanup evidence, this document must not
+be used to claim current-HEAD deployment acceptance.
+
+## Compatibility fixes found by `1a53c93a` baseline verification
+
+The first baseline failure run exposed two stale acceptance assumptions introduced before Stage 3 hardened
 the Worker boundary:
 
 1. Acceptance Heartbeats omitted `protocolVersion: 2` and were rejected with

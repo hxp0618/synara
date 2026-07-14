@@ -595,7 +595,12 @@ func TestWorkspaceCleanupMigrationFencesLegacyKubernetesWorkerUntilPodReregister
 	if err := db.Model(&persistence.AgentSession{}).
 		Where("tenant_id = ? AND id = ?", seed.tenantID, seed.sessionID).
 		Updates(map[string]any{
-			"last_event_sequence": 1, "provider_resume_cursor_encrypted": nil,
+			"last_event_sequence":                        1,
+			"provider_resume_cursor_encrypted":           nil,
+			"provider_resume_cursor_state":               "absent",
+			"provider_resume_cursor_source_execution_id": nil,
+			"provider_resume_cursor_source_generation":   nil,
+			"provider_resume_cursor_history_sequence":    nil,
 		}).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -1075,8 +1080,9 @@ func TestCheckpointMigrationUpgradesExistingGitReferenceAndReadyPointers(t *test
 		}
 		return tx.Create(&persistence.AgentExecution{
 			ID: otherExecutionID, TenantID: seed.tenantID, SessionID: seed.sessionID, TurnID: otherTurnID,
-			Attempt: 1, Status: "queued", ExecutionTargetID: execution.ExecutionTargetID,
+			Attempt: 1, Status: "completed", ExecutionTargetID: execution.ExecutionTargetID,
 			TargetKind: execution.TargetKind, RequestedBy: session.CreatedBy, QueuedAt: failedAt,
+			FinishedAt: &failedAt,
 		}).Error
 	}); err != nil {
 		t.Fatal(err)

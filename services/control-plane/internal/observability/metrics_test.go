@@ -29,6 +29,8 @@ func TestGatherUsesBoundedRoutePatternsAndAuthoritativeState(t *testing.T) {
 	}
 	targetID := uuid.New()
 	workerID := uuid.New()
+	staleWorkerID := uuid.New()
+	freshWorkerID := uuid.New()
 	executionID := uuid.New()
 	now := time.Now().UTC()
 	if err := db.Create(&persistence.ExecutionTarget{ID: targetID, Kind: "docker", Name: "test", Status: "active", Capabilities: map[string]any{}}).Error; err != nil {
@@ -41,6 +43,26 @@ func TestGatherUsesBoundedRoutePatternsAndAuthoritativeState(t *testing.T) {
 		RegisteredAt: now, LastHeartbeatAt: now,
 	}).Error; err != nil {
 		t.Fatal(err)
+	}
+	for _, worker := range []persistence.WorkerInstance{
+		{
+			ID: staleWorkerID, ExecutionTargetID: targetID, TargetKind: "docker", ClusterID: "test",
+			Namespace: "test", PodName: "stale-worker", Version: "test", ProtocolVersion: 2,
+			Capabilities: map[string]any{}, LeaseSupported: true, FencingSupported: true,
+			AuthTokenHash: []byte("stale-hash"), Status: "online", RegisteredAt: now,
+			LastHeartbeatAt: now.Add(-2 * time.Minute),
+		},
+		{
+			ID: freshWorkerID, ExecutionTargetID: targetID, TargetKind: "docker", ClusterID: "test",
+			Namespace: "test", PodName: "fresh-worker", Version: "test", ProtocolVersion: 2,
+			Capabilities: map[string]any{}, LeaseSupported: true, FencingSupported: true,
+			AuthTokenHash: []byte("fresh-hash"), Status: "online", RegisteredAt: now,
+			LastHeartbeatAt: now,
+		},
+	} {
+		if err := db.Create(&worker).Error; err != nil {
+			t.Fatal(err)
+		}
 	}
 	if err := db.Create(&persistence.AgentExecution{
 		ID: executionID, TenantID: uuid.New(), SessionID: uuid.New(), TurnID: uuid.New(), Attempt: 1,
@@ -71,7 +93,7 @@ func TestGatherUsesBoundedRoutePatternsAndAuthoritativeState(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	registry := New(db)
+	registry := New(db, Config{SessionIdleTTL: 7 * 24 * time.Hour, WorkerHeartbeatTimeout: 90 * time.Second})
 	registry.ObserveHTTP("GET", "GET /v1/sessions/{sessionID}", 200, 25*time.Millisecond, "")
 	registry.ObserveHTTP("GET", "/v1/sessions/"+executionID.String(), 404, 10*time.Millisecond, "")
 	registry.ObserveBackground("docker", now, nil)
@@ -86,6 +108,7 @@ func TestGatherUsesBoundedRoutePatternsAndAuthoritativeState(t *testing.T) {
 	for _, expected := range []string{
 		`route="/v1/sessions/{sessionID}"`, `route="unmatched"`,
 		`synara_workers{status="ready",target_kind="docker"} 1`,
+		`synara_stale_workers{status="online",target_kind="docker"} 1`,
 		`synara_executions{status="running",target_kind="docker"} 1`,
 		`synara_worker_leases{state="active"} 1`, `synara_metrics_collection_success 1`,
 		`synara_outbox_pending 1`, `synara_outbox_retrying 1`,

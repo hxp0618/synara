@@ -519,15 +519,9 @@ func (realSSHDialer) Dial(ctx context.Context, input sshDialInput) (sshRemote, e
 	if err != nil {
 		return nil, errors.New("SSH host key is invalid")
 	}
-	clientConfig := &ssh.ClientConfig{
-		User: input.User,
-		Auth: []ssh.AuthMethod{ssh.PublicKeys(signer)},
-		HostKeyCallback: func(_ string, _ net.Addr, key ssh.PublicKey) error {
-			if key.Type() != expectedHostKey.Type() || !bytes.Equal(key.Marshal(), expectedHostKey.Marshal()) {
-				return errors.New("SSH host key mismatch")
-			}
-			return nil
-		},
+	clientConfig, err := newSSHClientConfig(input.User, signer, expectedHostKey)
+	if err != nil {
+		return nil, err
 	}
 	dialer := net.Dialer{Timeout: input.Timeout}
 	connection, err := dialer.DialContext(ctx, "tcp", input.Address)
@@ -540,6 +534,52 @@ func (realSSHDialer) Dial(ctx context.Context, input sshDialInput) (sshRemote, e
 		return nil, err
 	}
 	return &realSSHRemote{client: ssh.NewClient(clientConnection, channels, requests)}, nil
+}
+
+func newSSHClientConfig(user string, signer ssh.Signer, expectedHostKey ssh.PublicKey) (*ssh.ClientConfig, error) {
+	hostKeyAlgorithms, err := supportedSSHHostKeyAlgorithms(expectedHostKey)
+	if err != nil {
+		return nil, err
+	}
+	return &ssh.ClientConfig{
+		User:              user,
+		Auth:              []ssh.AuthMethod{ssh.PublicKeys(signer)},
+		HostKeyAlgorithms: hostKeyAlgorithms,
+		HostKeyCallback:   pinnedSSHHostKeyCallback(expectedHostKey),
+	}, nil
+}
+
+func supportedSSHHostKeyAlgorithms(expectedHostKey ssh.PublicKey) ([]string, error) {
+	candidates := []string{expectedHostKey.Type()}
+	switch expectedHostKey.Type() {
+	case ssh.KeyAlgoRSA:
+		candidates = []string{ssh.KeyAlgoRSASHA256, ssh.KeyAlgoRSASHA512}
+	case ssh.CertAlgoRSAv01:
+		candidates = []string{ssh.CertAlgoRSASHA256v01, ssh.CertAlgoRSASHA512v01}
+	}
+	supported := ssh.SupportedAlgorithms().HostKeys
+	algorithms := make([]string, 0, len(candidates))
+	for _, supportedAlgorithm := range supported {
+		for _, candidate := range candidates {
+			if supportedAlgorithm == candidate {
+				algorithms = append(algorithms, supportedAlgorithm)
+				break
+			}
+		}
+	}
+	if len(algorithms) == 0 {
+		return nil, fmt.Errorf("SSH host key algorithm %q is unsupported", expectedHostKey.Type())
+	}
+	return algorithms, nil
+}
+
+func pinnedSSHHostKeyCallback(expectedHostKey ssh.PublicKey) ssh.HostKeyCallback {
+	return func(_ string, _ net.Addr, key ssh.PublicKey) error {
+		if key.Type() != expectedHostKey.Type() || !bytes.Equal(key.Marshal(), expectedHostKey.Marshal()) {
+			return errors.New("SSH host key mismatch")
+		}
+		return nil
+	}
 }
 
 type realSSHRemote struct {

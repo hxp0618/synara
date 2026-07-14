@@ -45,6 +45,8 @@ The endpoint includes:
 - completed login attempts as `synara_login_attempts_total{method,result}`;
 - active login sessions using absolute and idle expiry;
 - authoritative Execution, Worker, Target and Lease state;
+- online/draining Workers whose last Heartbeat is older than the configured Worker timeout as
+  `synara_stale_workers{status,target_kind}`; offline/terminated Workers are not double-counted as stale;
 - Worker Lease renewal outcomes as `synara_worker_lease_renewals_total{result}`;
 - Lease, Generation and Worker-incarnation rejections as
   `synara_worker_fencing_rejections_total{operation}`;

@@ -41,6 +41,11 @@ and `kubernetes`). Personal uses a CGO-free SQLite metadata store and determinis
 bootstrap; the server profiles retain PostgreSQL migrations, execution leases, generation fencing, and
 ordered SSE event recovery.
 
+The forward-only Control Plane schema chain currently ends at
+[`000031_session_execution_cursor_lineage.sql`](./services/control-plane/migrations/000031_session_execution_cursor_lineage.sql);
+the migration inventory and semantics are maintained in the
+[`services/control-plane` README](./services/control-plane/README.md#persistence).
+
 - Personal Compose example: [`deploy/personal`](./deploy/personal)
 - Single-node SaaS Compose example: [`deploy/saas`](./deploy/saas)
 - Revised tenancy plan: [`docs/plans/saas-tenancy-organization-user-plan.md`](docs/plans/saas-tenancy-organization-user-plan.md)

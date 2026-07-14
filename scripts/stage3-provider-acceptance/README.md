@@ -67,10 +67,12 @@ Cleanup is narrowly scoped to the exact Execution Target label plus the run's un
 and auto-built image. It never runs a Docker prune command. `--keep` still stops/removes the Worker container but
 preserves the isolated Control Plane state, volume, network, and image for diagnostics.
 
-The report status vocabulary is `pass | unsupported | skipped | fail`. SSH and Kubernetes currently return
-`fail / runner.target_driver_missing`; a missing product driver is not reported as an infrastructure skip. The
-fixture executes Codex and Claude Agent. Cursor, Gemini, Grok, Kilo, OpenCode, and Pi produce an explicit
-`unsupported` report instead of being rejected before a report can be written.
+The report status vocabulary is `pass | unsupported | skipped | fail`. Local, Docker, SSH, and Kubernetes have
+product Target drivers; a missing driver is reported as `fail / runner.target_driver_missing`, never as an
+infrastructure skip. The SSH Driver owns a disposable OrbStack VM and one-time credential lifecycle, but real SSH
+live-acceptance evidence is still required before claiming the four-Target release gate. The fixture executes Codex
+and Claude Agent. Cursor, Gemini, Grok, Kilo, OpenCode, and Pi produce an explicit `unsupported` report instead of
+being rejected before a report can be written.
 
 ## Provider Host Protocol fixture
 

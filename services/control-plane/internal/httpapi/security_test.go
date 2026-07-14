@@ -1,13 +1,21 @@
 package httpapi
 
 import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/synara-ai/synara/services/control-plane/internal/config"
+	"github.com/synara-ai/synara/services/control-plane/internal/executions"
 	"github.com/synara-ai/synara/services/control-plane/internal/problem"
 )
 
@@ -110,4 +118,78 @@ func TestWriteErrorRecordsStableProblemCodeForRequestMetrics(t *testing.T) {
 	if recorder.status != http.StatusConflict || recorder.problemCode != "generation_fenced" {
 		t.Fatalf("recorded response = status %d problem %q", recorder.status, recorder.problemCode)
 	}
+}
+
+func TestRequestLogScopeIncludesAvailableDomainAndGenerationContext(t *testing.T) {
+	tenantID := uuid.New()
+	organizationID := uuid.New()
+	sessionID := uuid.New()
+	executionID := uuid.New()
+	workerID := uuid.New()
+	scope := &requestLogScope{organizationID: organizationID, workerID: workerID}
+	request := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/workers/executions/"+executionID.String()+"/renew",
+		strings.NewReader(`{"tenantId":"`+tenantID.String()+`","generation":7,"leaseToken":"secret"}`),
+	)
+	request.Header.Set("Content-Type", "application/json")
+	request.SetPathValue("sessionID", sessionID.String())
+	request.SetPathValue("executionID", executionID.String())
+	request = request.WithContext(context.WithValue(request.Context(), requestLogScopeContextKey{}, scope))
+	var input executions.RenewLeaseInput
+	if err := decodeJSON(request, &input); err != nil {
+		t.Fatal(err)
+	}
+
+	attributes := logAttributeMap(requestScopeLogAttributes(request, "lease_renew_failed"))
+	want := map[string]any{
+		"tenantId": tenantID.String(), "organizationId": organizationID.String(),
+		"sessionId": sessionID.String(), "executionId": executionID.String(),
+		"workerId": workerID.String(), "generation": int64(7), "errorCode": "lease_renew_failed",
+	}
+	for key, expected := range want {
+		if attributes[key] != expected {
+			t.Fatalf("log attribute %s = %#v, want %#v; all=%#v", key, attributes[key], expected, attributes)
+		}
+	}
+	if _, found := attributes["code"]; found {
+		t.Fatalf("legacy code log attribute remains: %#v", attributes)
+	}
+}
+
+func TestWriteErrorUsesStructuredErrorCodeAndRequestScope(t *testing.T) {
+	var output bytes.Buffer
+	server := &Server{logger: slog.New(slog.NewJSONHandler(&output, nil))}
+	executionID := uuid.New()
+	request := httptest.NewRequest(http.MethodPost, "/v1/executions/"+executionID.String()+"/cancel", nil)
+	request.SetPathValue("executionID", executionID.String())
+	ctx := context.WithValue(request.Context(), requestIDContextKey{}, "request-1")
+	ctx = context.WithValue(ctx, traceIDContextKey{}, "0123456789abcdef0123456789abcdef")
+	request = request.WithContext(ctx)
+
+	server.writeError(
+		httptest.NewRecorder(), request,
+		problem.New(http.StatusInternalServerError, "execution_cancel_failed", "Execution cancellation failed."),
+	)
+	var entry map[string]any
+	if err := json.Unmarshal(output.Bytes(), &entry); err != nil {
+		t.Fatal(err)
+	}
+	if entry["errorCode"] != "execution_cancel_failed" || entry["executionId"] != executionID.String() {
+		t.Fatalf("structured error log omitted request scope: %#v", entry)
+	}
+	if _, found := entry["code"]; found {
+		t.Fatalf("structured error log retained the legacy code field: %#v", entry)
+	}
+}
+
+func logAttributeMap(attributes []any) map[string]any {
+	result := make(map[string]any, len(attributes)/2)
+	for index := 0; index+1 < len(attributes); index += 2 {
+		key, ok := attributes[index].(string)
+		if ok {
+			result[key] = attributes[index+1]
+		}
+	}
+	return result
 }

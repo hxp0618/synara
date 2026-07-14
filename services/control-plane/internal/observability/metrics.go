@@ -55,6 +55,11 @@ type artifactMetric struct {
 	bytes uint64
 }
 
+type Config struct {
+	SessionIdleTTL         time.Duration
+	WorkerHeartbeatTimeout time.Duration
+}
+
 type sseCatchupMetric struct {
 	count    uint64
 	failures uint64
@@ -67,8 +72,9 @@ type sseCatchupMetric struct {
 // state is read from PostgreSQL/SQLite when Prometheus scrapes the endpoint, so
 // Worker and Execution counts cannot drift from the database.
 type Registry struct {
-	db             *gorm.DB
-	sessionIdleTTL time.Duration
+	db                     *gorm.DB
+	sessionIdleTTL         time.Duration
+	workerHeartbeatTimeout time.Duration
 
 	mu          sync.RWMutex
 	requests    map[requestKey]requestMetric
@@ -82,14 +88,21 @@ type Registry struct {
 	sseLimits   map[string]uint64
 }
 
-func New(db *gorm.DB, sessionIdleTTLs ...time.Duration) *Registry {
+func New(db *gorm.DB, configurations ...Config) *Registry {
 	sessionIdleTTL := 7 * 24 * time.Hour
-	if len(sessionIdleTTLs) > 0 && sessionIdleTTLs[0] > 0 {
-		sessionIdleTTL = sessionIdleTTLs[0]
+	workerHeartbeatTimeout := 90 * time.Second
+	if len(configurations) > 0 {
+		if configurations[0].SessionIdleTTL > 0 {
+			sessionIdleTTL = configurations[0].SessionIdleTTL
+		}
+		if configurations[0].WorkerHeartbeatTimeout > 0 {
+			workerHeartbeatTimeout = configurations[0].WorkerHeartbeatTimeout
+		}
 	}
 	return &Registry{
-		db: db, sessionIdleTTL: sessionIdleTTL, requests: make(map[requestKey]requestMetric),
-		logins: make(map[loginMetricKey]uint64), leaseRenew: make(map[string]uint64),
+		db: db, sessionIdleTTL: sessionIdleTTL, workerHeartbeatTimeout: workerHeartbeatTimeout,
+		requests: make(map[requestKey]requestMetric),
+		logins:   make(map[loginMetricKey]uint64), leaseRenew: make(map[string]uint64),
 		fencing: make(map[string]uint64), eventAppend: make(map[string]durationMetric),
 		background: make(map[string]backgroundMetric), artifacts: make(map[artifactMetricKey]artifactMetric),
 		sseLimits: make(map[string]uint64),
@@ -437,6 +450,7 @@ type groupedCount struct {
 }
 
 func (r *Registry) writeDatabaseMetrics(ctx context.Context, output *bytes.Buffer) error {
+	now := time.Now().UTC()
 	executions, err := groupedCounts(ctx, r.db, "agent_executions", "status", "target_kind")
 	if err != nil {
 		return fmt.Errorf("collect execution metrics: %w", err)
@@ -445,11 +459,18 @@ func (r *Registry) writeDatabaseMetrics(ctx context.Context, output *bytes.Buffe
 	if err != nil {
 		return fmt.Errorf("collect worker metrics: %w", err)
 	}
+	staleWorkers, err := groupedCountsWhere(
+		ctx, r.db, "worker_instances", "status", "target_kind",
+		"status IN ? AND last_heartbeat_at <= ?",
+		[]string{"online", "draining"}, now.Add(-r.workerHeartbeatTimeout),
+	)
+	if err != nil {
+		return fmt.Errorf("collect stale worker metrics: %w", err)
+	}
 	targets, err := groupedCounts(ctx, r.db, "execution_targets", "status", "kind AS target_kind")
 	if err != nil {
 		return fmt.Errorf("collect execution target metrics: %w", err)
 	}
-	now := time.Now().UTC()
 	var activeLeases, expiredLeases, outboxPending, outboxRetrying, outboxDeadLetter int64
 	var activeSSEConnections, expiredSSEConnections, activeLoginSessions, readyArtifactBytes int64
 	if err := r.db.WithContext(ctx).Table("worker_leases").Where("expires_at > ?", now).Count(&activeLeases).Error; err != nil {
@@ -496,6 +517,7 @@ func (r *Registry) writeDatabaseMetrics(ctx context.Context, output *bytes.Buffe
 
 	writeGroupedGauge(output, "synara_executions", "Authoritative Execution count by status and target kind.", executions)
 	writeGroupedGauge(output, "synara_workers", "Authoritative Worker count by status and target kind.", workers)
+	writeGroupedGauge(output, "synara_stale_workers", "Authoritative online or draining Worker count past the configured heartbeat timeout.", staleWorkers)
 	writeGroupedGauge(output, "synara_execution_targets", "Authoritative Execution Target count by status and kind.", targets)
 	writeHelp(output, "synara_worker_leases", "Authoritative Worker Lease count by expiration state.", "gauge")
 	fmt.Fprintf(output, "synara_worker_leases%s %d\n", labels(map[string]string{"state": "active"}), activeLeases)
@@ -533,9 +555,21 @@ func (r *Registry) writeDatabaseMetrics(ctx context.Context, output *bytes.Buffe
 }
 
 func groupedCounts(ctx context.Context, db *gorm.DB, table, statusColumn, kindExpression string) ([]groupedCount, error) {
+	return groupedCountsWhere(ctx, db, table, statusColumn, kindExpression, "")
+}
+
+func groupedCountsWhere(
+	ctx context.Context,
+	db *gorm.DB,
+	table, statusColumn, kindExpression, condition string,
+	arguments ...any,
+) ([]groupedCount, error) {
 	var rows []groupedCount
-	err := db.WithContext(ctx).Table(table).
-		Select(statusColumn + " AS status, " + kindExpression + ", COUNT(*) AS count").
+	query := db.WithContext(ctx).Table(table)
+	if condition != "" {
+		query = query.Where(condition, arguments...)
+	}
+	err := query.Select(statusColumn + " AS status, " + kindExpression + ", COUNT(*) AS count").
 		Group(statusColumn + ", target_kind").Order(statusColumn + ", target_kind").Scan(&rows).Error
 	return rows, err
 }

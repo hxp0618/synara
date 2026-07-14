@@ -224,7 +224,7 @@ func newSessionInteractionHTTPFixture(t *testing.T) sessionInteractionHTTPFixtur
 	crossTenantToken := createCrossTenantSessionInteractionHTTPUser(t, store.DB())
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	metrics := observability.New(store.DB(), cfg.SessionIdleTTL)
+	metrics := observability.New(store.DB(), observability.Config{SessionIdleTTL: cfg.SessionIdleTTL})
 	server, err := New(
 		cfg, store.DB(), identityService, nil, projectService, sessionService, executionService, targetService,
 		nil, nil, nil, nil, nil, metrics, nil, nil, nil, nil, nil, logger,

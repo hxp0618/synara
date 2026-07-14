@@ -3,8 +3,8 @@
 
 Target drivers exercise production Control Plane, Worker, and agentd paths.
 The runner never registers, heartbeats, or claims a Worker on behalf of
-agentd. The Local driver uses LocalSupervisor; Docker and Kubernetes drivers
-provision managed Execution Targets through the user API and reconcilers.
+agentd. The Local driver uses LocalSupervisor; SSH, Docker, and Kubernetes
+drivers provision managed Execution Targets through the user API.
 """
 
 from __future__ import annotations
@@ -17,9 +17,11 @@ import hashlib
 import http.client
 import http.cookiejar
 import http.server
+import ipaddress
 import json
 import os
 import pathlib
+import re
 import shutil
 import signal
 import socket
@@ -43,6 +45,14 @@ FIXTURE_CREDENTIAL_SENTINEL = "stage3-provider-acceptance-credential-v1"
 FIXTURE_ARTIFACT_RELATIVE_PATH = ".synara-stage3-acceptance/artifact.txt"
 DOCKER_VOLUME_SENTINEL_PATH = "/data/.synara-stage3-provider-acceptance-volume"
 DOCKER_VOLUME_SENTINEL_VALUE = "synara-stage3-named-volume-continuity-v1"
+SSH_REMOTE_FIXTURE_PATH = "/opt/synara/acceptance/provider-host-fixture.mjs"
+SSH_SERVICE_USER = "synara"
+SSH_RELAY_LOOPBACK_HOST = "127.0.0.1"
+SSH_RELAY_TRANSPORT = "runner-owned reverse SSH relay to the local Worker-only proxy"
+SSH_CREDENTIAL_LIFECYCLE = (
+    "runner posts the one-time private key once during Target creation, deletes the local plaintext copy after "
+    "provisioning, and relies on the Control Plane encrypted credential until ssh/revoke"
+)
 WORKER_PROXY_ALLOWED_PATH_PREFIXES = ("/v1/workers/", "/v1/artifact-content/")
 WORKER_PROXY_MAX_REQUEST_BYTES = 64 << 20
 CASE_STATUSES = frozenset({"pass", "unsupported", "skipped", "fail"})
@@ -220,6 +230,11 @@ class RunnerOptions:
     control_plane_binary: pathlib.Path | None
     keep: bool
     restart_control_plane: bool
+    ssh_orbctl_bin: str
+    ssh_machine_name: str | None
+    ssh_machine_arch: str
+    ssh_machine_image: str
+    ssh_node_version: str
     docker_socket_path: pathlib.Path
     docker_worker_image: str | None
     docker_skip_worker_build: bool
@@ -357,6 +372,7 @@ class TargetDriver(Protocol):
     name: str
     api: APIClient | None
     lifecycle: TargetLifecycle
+    replacement_workspace_semantics: str
 
     def prepare(self) -> Mapping[str, Any]: ...
 
@@ -587,6 +603,7 @@ class _WorkerOnlyProxy:
 class LocalDriver:
     name = "local"
     lifecycle = STANDING_WORKER
+    replacement_workspace_semantics = "no managed Worker replacement"
 
     def __init__(
         self,
@@ -1131,10 +1148,47 @@ class ManagedWorkerDriver(LocalDriver):
             **build_evidence,
         }
 
+    def _worker_identity(self, target_id: str, *, required: bool = True) -> dict[str, Any] | None:
+        database_path = self.state_dir / "metadata.sqlite"
+        try:
+            connection = sqlite3.connect(f"file:{database_path}?mode=ro", uri=True, timeout=2.0)
+            try:
+                row = connection.execute(
+                    """
+                    SELECT id, incarnation, instance_uid, status, pod_name
+                    FROM worker_instances
+                    WHERE execution_target_id = ? AND terminated_at IS NULL
+                    ORDER BY registered_at DESC, id
+                    LIMIT 1
+                    """,
+                    (target_id,),
+                ).fetchone()
+            finally:
+                connection.close()
+        except sqlite3.Error as error:
+            if not required:
+                return None
+            raise AcceptanceError(
+                "runner.worker_identity_query_failed",
+                f"Worker identity could not be read from the isolated metadata store: {error}",
+            ) from None
+        if row is None:
+            if not required:
+                return None
+            raise AcceptanceError("runner.worker_identity_missing", "The managed Worker identity was missing.")
+        return {
+            "id": str(row[0]),
+            "incarnation": int(row[1]),
+            "instanceUid": str(row[2]),
+            "status": str(row[3]),
+            "podName": str(row[4]),
+        }
+
 
 class DockerDriver(ManagedWorkerDriver):
     name = "docker"
     lifecycle = STANDING_MANAGED_WORKER
+    replacement_workspace_semantics = "persisted named-volume Workspace content; not Workspace Checkpoint restore"
 
     def __init__(
         self,
@@ -1528,41 +1582,1099 @@ class DockerDriver(ManagedWorkerDriver):
             )
         return {**actual, "volume": self.volume_name, "workspaceMount": "/data"}
 
-    def _worker_identity(self, target_id: str, *, required: bool = True) -> dict[str, Any] | None:
-        database_path = self.state_dir / "metadata.sqlite"
-        try:
-            connection = sqlite3.connect(f"file:{database_path}?mode=ro", uri=True, timeout=2.0)
-            try:
-                row = connection.execute(
-                    """
-                    SELECT id, incarnation, instance_uid, status, pod_name
-                    FROM worker_instances
-                    WHERE execution_target_id = ? AND terminated_at IS NULL
-                    ORDER BY registered_at DESC, id
-                    LIMIT 1
-                    """,
-                    (target_id,),
-                ).fetchone()
-            finally:
-                connection.close()
-        except sqlite3.Error as error:
-            if not required:
-                return None
-            raise AcceptanceError(
-                "runner.worker_identity_query_failed",
-                f"Worker identity could not be read from the isolated metadata store: {error}",
-            ) from None
-        if row is None:
-            if not required:
-                return None
-            raise AcceptanceError("runner.worker_identity_missing", "The managed Docker Worker identity was missing.")
+class SSHDriver(ManagedWorkerDriver):
+    name = "ssh"
+    lifecycle = STANDING_MANAGED_WORKER
+    replacement_workspace_semantics = (
+        "persisted remote-filesystem Workspace content; not Workspace Checkpoint restore"
+    )
+
+    def __init__(
+        self,
+        repo_root: pathlib.Path,
+        options: RunnerOptions,
+        deadline: Deadline,
+        redactor: SecretRedactor,
+    ) -> None:
+        super().__init__(repo_root, options, deadline, redactor)
+        suffix = uuid.uuid4().hex[:12]
+        self.target_name = f"stage3-ssh-{suffix}"
+        self.machine_name = options.ssh_machine_name or f"synara-stage3-{suffix}"
+        self.machine_create_attempted = False
+        self.machine_created = False
+        self.tenant_id: str | None = None
+        self.target_id: str | None = None
+        self.service_name: str | None = None
+        self.machine_ip = ""
+        self.host_key = ""
+        self.client_private_key = ""
+        self.client_public_key = ""
+        self.credentials_dir = self.state_dir / "ssh-credentials"
+        self.client_key_path = self.credentials_dir / "id_ed25519"
+        self.client_public_key_path = self.credentials_dir / "id_ed25519.pub"
+        self.known_hosts_path = self.credentials_dir / "known_hosts"
+        self.agentd_binary_path = self.state_dir / "bin" / (
+            f"synara-agentd-linux-{options.ssh_machine_arch}"
+        )
+        self.fixture_bundle_path = self.state_dir / "bin" / "provider-host-fixture.mjs"
+        self.worker_proxy_relay_process: subprocess.Popen[str] | None = None
+        self.worker_proxy_relay_log_handle: Any | None = None
+        self.worker_proxy_relay_log_path = self.logs_dir / "ssh-worker-proxy-relay.log"
+        self.worker_proxy_relay_port = 0
+
+    @property
+    def worker_proxy_host(self) -> str:
+        return SSH_RELAY_LOOPBACK_HOST
+
+    def prepare(self) -> Mapping[str, Any]:
+        control_plane = super().prepare()
+        artifacts = self._prepare_ssh_artifacts()
+        credential = self._generate_client_key()
+        machine = self._prepare_machine()
         return {
-            "id": str(row[0]),
-            "incarnation": int(row[1]),
-            "instanceUid": str(row[2]),
-            "status": str(row[3]),
-            "podName": str(row[4]),
+            "controlPlane": control_plane,
+            "ssh": {
+                **artifacts,
+                **credential,
+                **machine,
+            },
         }
+
+    def start(self) -> Mapping[str, Any]:
+        control_plane = super().start()
+        try:
+            self._ensure_worker_proxy_relay()
+        except Exception:
+            try:
+                self._stop_worker_proxy_relay()
+            except Exception:
+                pass
+            try:
+                self._stop_worker_proxy()
+            except Exception:
+                pass
+            super().stop()
+            raise
+        return {
+            **control_plane,
+            "workerProxyRelay": self._worker_proxy_relay_evidence(),
+        }
+
+    def provision_target(
+        self,
+        tenant_id: str,
+        organization_id: str,
+        provider: str,
+    ) -> Mapping[str, Any]:
+        if not self.machine_ip or not self.host_key or not self.client_private_key or not self.client_public_key:
+            raise AcceptanceError(
+                "runner.ssh_runtime_unavailable",
+                "The disposable SSH runtime was unavailable while provisioning the Target.",
+            )
+        self.tenant_id = tenant_id
+        negative_evidence: dict[str, Any] = {}
+        try:
+            negative = self._create_ssh_target(
+                tenant_id,
+                organization_id,
+                f"{self.target_name}-host-key-negative",
+                self.client_public_key,
+                provider,
+            )
+            negative_id = self._target_id(negative, "negative SSH execution target")
+            try:
+                self.api.request(
+                    "POST",
+                    f"/v1/tenants/{tenant_id}/execution-targets/{negative_id}/ssh/install",
+                )
+            except AcceptanceError as error:
+                if error.code != "ssh_connection_failed":
+                    raise
+                negative_evidence = {
+                    "targetId": negative_id,
+                    "rejected": True,
+                    "errorCode": error.code,
+                }
+            else:
+                raise AcceptanceError(
+                    "runner.ssh_host_key_mismatch_accepted",
+                    "The managed SSH Target accepted a valid but incorrect pinned Host Key.",
+                    {"targetId": negative_id},
+                )
+            self._assert_remote_target_absent(negative_id)
+
+            target = self._create_ssh_target(
+                tenant_id,
+                organization_id,
+                self.target_name,
+                self.host_key,
+                provider,
+            )
+            target_id = self._target_id(target, "SSH execution target")
+            self.target_id = target_id
+            installed = json_object(
+                self.api.request(
+                    "POST",
+                    f"/v1/tenants/{tenant_id}/execution-targets/{target_id}/ssh/install",
+                ),
+                "SSH install result",
+            )
+            expected_service = f"synara-agentd-{target_id}.service"
+            if (
+                installed.get("targetId") != target_id
+                or installed.get("operation") != "install"
+                or installed.get("status") != "active"
+                or installed.get("serviceName") != expected_service
+                or not isinstance(installed.get("binarySha256"), str)
+                or len(str(installed.get("binarySha256"))) != 64
+            ):
+                raise AcceptanceError(
+                    "runner.ssh_install_contract_mismatch",
+                    "SSH Target installation returned an invalid result.",
+                    {"result": self.redactor.value(installed)},
+                )
+            self.service_name = expected_service
+            service = self._require_service_active(expected_service)
+            return {
+                **target,
+                "driverEvidence": {
+                    "machineName": self.machine_name,
+                    "machineAddress": self.machine_ip,
+                    "hostKeyAlgorithm": self.host_key.split()[0],
+                    "hostKeyFingerprint": self._host_key_fingerprint(self.host_key),
+                    "hostKeyMismatch": negative_evidence,
+                    "service": service,
+                    "binarySha256": installed.get("binarySha256"),
+                    "credentialSource": "runner-generated one-time Ed25519 key",
+                    "controlPlaneTransport": self._worker_proxy_relay_evidence(),
+                    "controlPlaneCredentialLifecycle": SSH_CREDENTIAL_LIFECYCLE,
+                    "workerAllocation": self.lifecycle.worker_allocation,
+                },
+            }
+        finally:
+            self._discard_local_private_key()
+
+    def replace_worker(
+        self,
+        tenant_id: str,
+        target_id: str,
+        _provider: str,
+    ) -> Mapping[str, Any]:
+        service_name = self.service_name
+        if not service_name:
+            raise AcceptanceError("runner.ssh_service_missing", "The managed SSH systemd service was unavailable.")
+        before_worker = self._worker_identity(target_id)
+        before_service = self._require_service_active(service_name)
+        self._remote_command(
+            ["systemctl", "restart", "ssh"],
+            log_path=self.logs_dir / "ssh-sshd-restart.log",
+        )
+        sshd_state = self._remote_command(["systemctl", "is-active", "ssh"]).strip()
+        if sshd_state != "active":
+            raise AcceptanceError(
+                "runner.sshd_restart_failed",
+                "The disposable SSH daemon did not recover after restart.",
+                {"activeState": sshd_state},
+            )
+        self.api.request(
+            "PATCH",
+            f"/v1/tenants/{tenant_id}/execution-targets/{target_id}/provider-policy",
+            {"experimentalProviders": ["codex", "claudeAgent"]},
+        )
+        upgraded = json_object(
+            self.api.request(
+                "POST",
+                f"/v1/tenants/{tenant_id}/execution-targets/{target_id}/ssh/upgrade",
+            ),
+            "SSH upgrade result",
+        )
+        if (
+            upgraded.get("targetId") != target_id
+            or upgraded.get("operation") != "upgrade"
+            or upgraded.get("status") != "active"
+            or upgraded.get("serviceName") != service_name
+        ):
+            raise AcceptanceError(
+                "runner.ssh_upgrade_contract_mismatch",
+                "SSH Target upgrade returned an invalid result.",
+                {"result": self.redactor.value(upgraded)},
+            )
+
+        def replacement_probe() -> tuple[dict[str, Any], dict[str, Any]] | None:
+            worker = self._worker_identity(target_id, required=False)
+            if worker is None:
+                return None
+            try:
+                service = self._require_service_active(service_name)
+            except AcceptanceError:
+                return None
+            if (
+                worker["id"] != before_worker["id"]
+                or worker["incarnation"] <= before_worker["incarnation"]
+                or worker["instanceUid"] == before_worker["instanceUid"]
+                or worker["status"] != "online"
+                or service["mainPid"] == before_service["mainPid"]
+            ):
+                return None
+            return worker, service
+
+        after_worker, after_service = self.api.wait_until(
+            "SSH Worker systemd replacement and new agentd incarnation",
+            replacement_probe,
+        )
+        return {
+            "strategy": "pinned-Host-Key SSH upgrade with systemd restart",
+            "sshdRestarted": True,
+            "serviceName": service_name,
+            "previousMainPid": before_service["mainPid"],
+            "replacementMainPid": after_service["mainPid"],
+            "replacementWorkerId": after_worker["id"],
+            "workerIdStable": after_worker["id"] == before_worker["id"],
+            "previousIncarnation": before_worker["incarnation"],
+            "replacementIncarnation": after_worker["incarnation"],
+            "instanceUidChanged": after_worker["instanceUid"] != before_worker["instanceUid"],
+            "hostKeyFingerprint": self._host_key_fingerprint(self.host_key),
+            "remoteFilesystemContinuity": {
+                "preservedAcrossReplacement": True,
+                "semantics": self.replacement_workspace_semantics,
+            },
+        }
+
+    def cleanup(self) -> None:
+        errors: list[str] = []
+
+        def collect(operation: str, action: Callable[[], Any]) -> Any:
+            try:
+                return action()
+            except Exception as error:
+                errors.append(f"{operation}: {self.redactor.text(str(error))}")
+                return None
+
+        if self.machine_created and self.service_name:
+            collect(
+                "capture SSH Worker journal",
+                lambda: self._remote_command(
+                    ["journalctl", "--no-pager", "-u", self.service_name, "-n", "500"],
+                    log_path=self.logs_dir / "ssh-agentd-journal.log",
+                    cleanup_timeout=20.0,
+                ),
+            )
+        if self.target_id and self.tenant_id and self.process is not None and self.process.poll() is None:
+            result = collect(
+                "revoke managed SSH Target",
+                lambda: self.api.request(
+                    "POST",
+                    f"/v1/tenants/{self.tenant_id}/execution-targets/{self.target_id}/ssh/revoke",
+                ),
+            )
+            if isinstance(result, dict) and (
+                result.get("operation") != "revoke" or result.get("status") != "disabled"
+            ):
+                errors.append("revoke managed SSH Target: API returned an invalid result")
+        if self.machine_created and self.target_id:
+            collect(
+                "verify revoked SSH Target files",
+                lambda: self._assert_remote_target_absent(self.target_id, cleanup_timeout=20.0),
+            )
+        if self.machine_created:
+            collect(
+                "remove disposable SSH authorization",
+                lambda: self._remote_command(
+                    ["rm", "-f", "/root/.ssh/authorized_keys"],
+                    cleanup_timeout=10.0,
+                ),
+            )
+        collect("stop Worker proxy relay", self._stop_worker_proxy_relay)
+        collect("stop Control Plane", self.stop)
+        if self.machine_created and not self.options.keep:
+            completed = collect(
+                "delete disposable OrbStack machine",
+                lambda: self._orbctl_completed(
+                    ["delete", "--force", self.machine_name],
+                    cleanup_timeout=60.0,
+                ),
+            )
+            if isinstance(completed, subprocess.CompletedProcess) and completed.returncode != 0:
+                output = self.redactor.text(completed.stdout)
+                if "not found" not in output.lower() and "does not exist" not in output.lower():
+                    errors.append(f"delete disposable OrbStack machine: {output or completed.returncode}")
+                else:
+                    self.machine_create_attempted = False
+                    self.machine_created = False
+            elif isinstance(completed, subprocess.CompletedProcess):
+                self.machine_create_attempted = False
+                self.machine_created = False
+        self._discard_local_key_material()
+        collect("stop Worker-only proxy", self._stop_worker_proxy)
+        self.registration_token = ""
+        collect("release isolated state", self._release_state)
+        if errors:
+            raise AcceptanceError(
+                "runner.ssh_cleanup_failed",
+                "SSH acceptance resources could not be cleaned completely.",
+                {"errors": errors},
+            )
+
+    def _control_plane_environment(self) -> dict[str, str]:
+        environment = super()._control_plane_environment()
+        environment["SYNARA_AGENTD_BINARY_PATH"] = str(self.agentd_binary_path)
+        environment["SYNARA_SSH_PROVISION_TIMEOUT"] = "120s"
+        return environment
+
+    def _worker_proxy_url(self) -> str:
+        self._ensure_worker_proxy_relay()
+        return f"http://{SSH_RELAY_LOOPBACK_HOST}:{self.worker_proxy_relay_port}"
+
+    def _worker_proxy_relay_evidence(self) -> Mapping[str, Any]:
+        if self.worker_proxy is None or self.worker_proxy_relay_port <= 0:
+            raise AcceptanceError(
+                "runner.ssh_worker_proxy_relay_unavailable",
+                "The runner-owned reverse SSH relay was unavailable.",
+            )
+        return {
+            "mode": "reverse-ssh-loopback",
+            "vmListenHost": SSH_RELAY_LOOPBACK_HOST,
+            "vmListenPort": self.worker_proxy_relay_port,
+            "upstreamAddress": f"127.0.0.1:{self.worker_proxy.port}",
+            "readsUserSSHConfiguration": False,
+            "log": str(self.worker_proxy_relay_log_path),
+        }
+
+    def _ensure_worker_proxy_relay(self) -> None:
+        if self.worker_proxy is None or not self.worker_proxy.thread.is_alive():
+            raise AcceptanceError(
+                "runner.worker_proxy_unavailable",
+                "Worker-only proxy was unavailable while preparing the SSH relay.",
+            )
+        process = self.worker_proxy_relay_process
+        if process is not None:
+            if process.poll() is None:
+                return
+            exit_code = process.returncode
+            self._close_worker_proxy_relay_log_handle()
+            self.worker_proxy_relay_process = None
+            self.worker_proxy_relay_port = 0
+            raise AcceptanceError(
+                "runner.ssh_worker_proxy_relay_exited",
+                "The runner-owned reverse SSH relay exited before the acceptance run completed.",
+                {"log": str(self.worker_proxy_relay_log_path), "exitCode": exit_code},
+            )
+        self._start_worker_proxy_relay()
+
+    def _start_worker_proxy_relay(self) -> None:
+        if not self.machine_created or not self.machine_ip or not self.host_key:
+            raise AcceptanceError(
+                "runner.ssh_worker_proxy_relay_unavailable",
+                "The disposable SSH runtime was unavailable while starting the reverse relay.",
+            )
+        if self.worker_proxy is None or not self.worker_proxy.thread.is_alive():
+            raise AcceptanceError(
+                "runner.worker_proxy_unavailable",
+                "Worker-only proxy was unavailable while starting the SSH relay.",
+            )
+        if not self.client_key_path.is_file():
+            raise AcceptanceError(
+                "runner.ssh_private_key_missing",
+                "The one-time SSH private key was unavailable while starting the reverse relay.",
+                {"path": str(self.client_key_path)},
+            )
+        self.credentials_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        # OpenSSH canonicalizes the default port as the bare host token. The
+        # bracketed ``[host]:port`` form is reserved for non-default ports and
+        # would make strict checking reject this otherwise pinned key.
+        self.known_hosts_path.write_text(f"{self.machine_ip} {self.host_key}\n", encoding="utf-8")
+        os.chmod(self.known_hosts_path, 0o600)
+        attempts: list[dict[str, Any]] = []
+        for _attempt in range(5):
+            relay_port = reserve_loopback_port()
+            command = [
+                "ssh",
+                "-F",
+                "/dev/null",
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "IdentitiesOnly=yes",
+                "-o",
+                "IdentityAgent=none",
+                "-o",
+                "PreferredAuthentications=publickey",
+                "-o",
+                "PasswordAuthentication=no",
+                "-o",
+                "KbdInteractiveAuthentication=no",
+                "-o",
+                "StrictHostKeyChecking=yes",
+                "-o",
+                "GlobalKnownHostsFile=/dev/null",
+                "-o",
+                f"UserKnownHostsFile={self.known_hosts_path}",
+                "-o",
+                "LogLevel=ERROR",
+                "-o",
+                "ExitOnForwardFailure=yes",
+                "-o",
+                "ServerAliveInterval=5",
+                "-o",
+                "ServerAliveCountMax=3",
+                "-o",
+                "ConnectTimeout=10",
+                "-i",
+                str(self.client_key_path),
+                "-N",
+                "-T",
+                "-R",
+                f"{SSH_RELAY_LOOPBACK_HOST}:{relay_port}:127.0.0.1:{self.worker_proxy.port}",
+                f"root@{self.machine_ip}",
+            ]
+            self._close_worker_proxy_relay_log_handle()
+            self.worker_proxy_relay_log_path.parent.mkdir(parents=True, exist_ok=True)
+            log_handle = self.worker_proxy_relay_log_path.open("w", encoding="utf-8")
+            try:
+                process = self._spawn_worker_proxy_relay(command, log_handle)
+            except OSError as error:
+                log_handle.close()
+                raise AcceptanceError(
+                    "runner.ssh_worker_proxy_relay_failed",
+                    f"The runner-owned reverse SSH relay could not start: {self.redactor.text(str(error))}",
+                ) from None
+            self.deadline.sleep(0.25)
+            if process.poll() is None:
+                self.worker_proxy_relay_process = process
+                self.worker_proxy_relay_log_handle = log_handle
+                self.worker_proxy_relay_port = relay_port
+                return
+            log_handle.close()
+            attempts.append(
+                {
+                    "relayPort": relay_port,
+                    "exitCode": process.returncode,
+                    "outputExcerpt": self._worker_proxy_relay_log_excerpt(),
+                }
+            )
+        raise AcceptanceError(
+            "runner.ssh_worker_proxy_relay_failed",
+            "The runner-owned reverse SSH relay could not establish a VM loopback listener.",
+            {"attempts": attempts, "log": str(self.worker_proxy_relay_log_path)},
+        )
+
+    def _spawn_worker_proxy_relay(
+        self,
+        command: Sequence[str],
+        log_handle: Any,
+    ) -> subprocess.Popen[str]:
+        return subprocess.Popen(
+            list(command),
+            cwd=self.repo_root,
+            env=self._tool_environment(),
+            stdout=log_handle,
+            stderr=subprocess.STDOUT,
+            text=True,
+            start_new_session=True,
+        )
+
+    def _worker_proxy_relay_log_excerpt(self) -> str:
+        if not self.worker_proxy_relay_log_path.is_file():
+            return ""
+        try:
+            return self.redactor.text(self.worker_proxy_relay_log_path.read_text(encoding="utf-8")[-1000:])
+        except OSError:
+            return ""
+
+    def _close_worker_proxy_relay_log_handle(self) -> None:
+        log_handle = self.worker_proxy_relay_log_handle
+        self.worker_proxy_relay_log_handle = None
+        if log_handle is None:
+            return
+        try:
+            log_handle.close()
+        except OSError:
+            return
+
+    def _stop_worker_proxy_relay(self) -> None:
+        process = self.worker_proxy_relay_process
+        self.worker_proxy_relay_process = None
+        self.worker_proxy_relay_port = 0
+        try:
+            self.known_hosts_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        if process is not None and process.poll() is None:
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            try:
+                process.wait(timeout=min(5.0, max(0.25, self.deadline.remaining())))
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                process.wait(timeout=3.0)
+        self._close_worker_proxy_relay_log_handle()
+
+    def _prepare_ssh_artifacts(self) -> Mapping[str, Any]:
+        self.agentd_binary_path.parent.mkdir(parents=True, exist_ok=True)
+        environment = self._tool_environment()
+        environment.update(
+            {
+                "CGO_ENABLED": "0",
+                "GOOS": "linux",
+                "GOARCH": self.options.ssh_machine_arch,
+            }
+        )
+        agentd_started = time.monotonic()
+        self._local_command(
+            [
+                "go",
+                "build",
+                "-trimpath",
+                "-ldflags=-s -w",
+                "-o",
+                str(self.agentd_binary_path),
+                "./cmd/agentd",
+            ],
+            cwd=self.repo_root / "services" / "control-plane",
+            environment=environment,
+            log_path=self.logs_dir / "ssh-agentd-build.log",
+            maximum_timeout=max(60.0, self.deadline.remaining()),
+            error_code="runner.ssh_agentd_build_failed",
+            description="Linux synara-agentd cross-build",
+        )
+        agentd_duration = elapsed_ms(agentd_started)
+        fixture_started = time.monotonic()
+        self._local_command(
+            [
+                "bun",
+                "build",
+                str(
+                    self.repo_root
+                    / "scripts"
+                    / "stage3-provider-acceptance"
+                    / "provider-host-fixture.ts"
+                ),
+                "--target=node",
+                "--outfile",
+                str(self.fixture_bundle_path),
+            ],
+            cwd=self.repo_root,
+            environment=self._tool_environment(),
+            log_path=self.logs_dir / "ssh-provider-host-fixture-build.log",
+            maximum_timeout=max(60.0, self.deadline.remaining()),
+            error_code="runner.ssh_fixture_build_failed",
+            description="Provider Host fixture build",
+        )
+        fixture_duration = elapsed_ms(fixture_started)
+        if not self.agentd_binary_path.is_file() or not self.fixture_bundle_path.is_file():
+            raise AcceptanceError(
+                "runner.ssh_artifact_missing",
+                "SSH acceptance build did not produce the required runtime artifacts.",
+            )
+        return {
+            "agentd": {
+                "path": str(self.agentd_binary_path),
+                "goos": "linux",
+                "goarch": self.options.ssh_machine_arch,
+                "sha256": hashlib.sha256(self.agentd_binary_path.read_bytes()).hexdigest(),
+                "durationMs": agentd_duration,
+            },
+            "providerHostFixture": {
+                "path": str(self.fixture_bundle_path),
+                "remotePath": SSH_REMOTE_FIXTURE_PATH,
+                "sha256": hashlib.sha256(self.fixture_bundle_path.read_bytes()).hexdigest(),
+                "durationMs": fixture_duration,
+            },
+        }
+
+    def _local_command(
+        self,
+        arguments: Sequence[str],
+        *,
+        cwd: pathlib.Path,
+        environment: Mapping[str, str],
+        log_path: pathlib.Path,
+        maximum_timeout: float,
+        error_code: str,
+        description: str,
+    ) -> None:
+        try:
+            completed = subprocess.run(
+                list(arguments),
+                cwd=cwd,
+                env=dict(environment),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                timeout=self.deadline.request_timeout(maximum=maximum_timeout),
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise AcceptanceError(
+                error_code,
+                f"{description} could not run: {self.redactor.text(str(error))}",
+            ) from None
+        output = self.redactor.text(completed.stdout)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_text(output, encoding="utf-8")
+        if completed.returncode != 0:
+            raise AcceptanceError(
+                error_code,
+                f"{description} exited with status {completed.returncode}.",
+                {"log": str(log_path), "exitCode": completed.returncode, "outputExcerpt": output[-1000:]},
+            )
+
+    def _generate_client_key(self) -> Mapping[str, Any]:
+        self.credentials_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(self.credentials_dir, 0o700)
+        self._local_command(
+            [
+                "ssh-keygen",
+                "-q",
+                "-t",
+                "ed25519",
+                "-N",
+                "",
+                "-C",
+                f"synara-stage3-{self.machine_name}",
+                "-f",
+                str(self.client_key_path),
+            ],
+            cwd=self.state_dir,
+            environment=self._tool_environment(),
+            log_path=self.logs_dir / "ssh-keygen.log",
+            maximum_timeout=15.0,
+            error_code="runner.ssh_key_generation_failed",
+            description="one-time SSH key generation",
+        )
+        os.chmod(self.client_key_path, 0o600)
+        self.client_private_key = self.client_key_path.read_text(encoding="utf-8")
+        self.client_public_key = self.client_public_key_path.read_text(encoding="utf-8").strip()
+        if not self.client_private_key or not self.client_public_key.startswith("ssh-ed25519 "):
+            raise AcceptanceError(
+                "runner.ssh_key_generation_failed",
+                "The generated one-time SSH key pair was invalid.",
+            )
+        self.redactor.add(self.client_private_key, "[REDACTED_SSH_PRIVATE_KEY]")
+        for line in self.client_private_key.splitlines():
+            if len(line) >= 32 and not line.startswith("-----"):
+                self.redactor.add(line, "[REDACTED_SSH_PRIVATE_KEY_DATA]")
+        return {
+            "credentialSource": "generated under isolated acceptance state",
+            "algorithm": "ssh-ed25519",
+            "localPrivateKeyPlaintextDeletedAfterProvision": True,
+            "controlPlaneCredentialLifecycle": SSH_CREDENTIAL_LIFECYCLE,
+        }
+
+    def _prepare_machine(self) -> Mapping[str, Any]:
+        listed = self._orbctl_command(["list", "--format", "json"])
+        try:
+            decoded = json.loads(listed)
+        except json.JSONDecodeError as error:
+            raise AcceptanceError(
+                "runner.orbstack_list_invalid",
+                f"OrbStack machine inventory was invalid JSON: {error}",
+            ) from None
+        machines = decoded if isinstance(decoded, list) else decoded.get("machines") if isinstance(decoded, dict) else None
+        if not isinstance(machines, list):
+            raise AcceptanceError("runner.orbstack_list_invalid", "OrbStack machine inventory was not an array.")
+        existing_names = {
+            str(item.get("name"))
+            for item in machines
+            if isinstance(item, dict) and isinstance(item.get("name"), str)
+        }
+        if self.machine_name in existing_names:
+            raise AcceptanceError(
+                "runner.ssh_machine_exists",
+                "The disposable OrbStack machine name is already in use.",
+                {"machineName": self.machine_name},
+            )
+        self.machine_create_attempted = True
+        self._orbctl_command(
+            [
+                "create",
+                "--arch",
+                self.options.ssh_machine_arch,
+                "--user",
+                SSH_SERVICE_USER,
+                "--cpus",
+                "2",
+                "--memory",
+                "4G",
+                "--disk",
+                "16G",
+                "--isolated",
+                self.options.ssh_machine_image,
+                self.machine_name,
+            ],
+            log_path=self.logs_dir / "ssh-orbstack-create.log",
+            maximum_timeout=max(180.0, self.deadline.remaining()),
+        )
+        self.machine_created = True
+        stage = "/tmp/synara-stage3-acceptance"
+        self._remote_command(["install", "-d", "-m", "0700", stage])
+        self._remote_upload(
+            self.client_public_key_path,
+            f"{stage}/{self.client_public_key_path.name}",
+            "0600",
+        )
+        self._remote_upload(
+            self.fixture_bundle_path,
+            f"{stage}/{self.fixture_bundle_path.name}",
+            "0600",
+        )
+        self._remote_command(
+            ["sh", "-ceu", self._machine_setup_script()],
+            log_path=self.logs_dir / "ssh-machine-setup.log",
+            maximum_timeout=max(240.0, self.deadline.remaining()),
+        )
+        address_output = self._remote_command(["hostname", "-I"]).strip()
+        addresses: list[str] = []
+        for candidate in address_output.split():
+            try:
+                address = ipaddress.ip_address(candidate)
+            except ValueError:
+                continue
+            if address.version == 4 and not address.is_loopback and not address.is_link_local:
+                addresses.append(str(address))
+        if not addresses:
+            raise AcceptanceError(
+                "runner.ssh_machine_address_missing",
+                "The disposable OrbStack machine did not expose an IPv4 address.",
+                {"machineName": self.machine_name},
+            )
+        self.machine_ip = addresses[0]
+        self.host_key = self._remote_command(
+            ["cat", "/etc/ssh/ssh_host_ed25519_key.pub"]
+        ).strip()
+        if not self.host_key.startswith("ssh-ed25519 "):
+            raise AcceptanceError(
+                "runner.ssh_host_key_invalid",
+                "The disposable SSH daemon did not expose an Ed25519 Host Key.",
+            )
+        try:
+            with socket.create_connection(
+                (self.machine_ip, 22),
+                timeout=self.deadline.request_timeout(maximum=5.0),
+            ) as connection:
+                connection.settimeout(self.deadline.request_timeout(maximum=5.0))
+                banner = connection.recv(128)
+        except OSError as error:
+            raise AcceptanceError(
+                "runner.sshd_unreachable",
+                f"The disposable SSH daemon was unreachable: {self.redactor.text(str(error))}",
+                {"machineAddress": self.machine_ip, "port": 22},
+            ) from None
+        if not banner.startswith(b"SSH-"):
+            raise AcceptanceError(
+                "runner.sshd_banner_invalid",
+                "The disposable SSH endpoint did not return an SSH protocol banner.",
+                {"machineAddress": self.machine_ip, "port": 22},
+            )
+        return {
+            "machineName": self.machine_name,
+            "ownedMachine": True,
+            "machineImage": self.options.ssh_machine_image,
+            "machineArch": self.options.ssh_machine_arch,
+            "machineAddress": self.machine_ip,
+            "controlPlaneTransport": {
+                "mode": "reverse-ssh-loopback",
+                "description": SSH_RELAY_TRANSPORT,
+                "vmListenHost": SSH_RELAY_LOOPBACK_HOST,
+            },
+            "nodeVersion": self.options.ssh_node_version,
+            "sshd": "active",
+            "initSystem": "systemd",
+            "hostKeyFingerprint": self._host_key_fingerprint(self.host_key),
+        }
+
+    def _machine_setup_script(self) -> str:
+        node_arch = "x64" if self.options.ssh_machine_arch == "amd64" else "arm64"
+        version = self.options.ssh_node_version
+        archive = f"node-v{version}-linux-{node_arch}.tar.xz"
+        stage = "/tmp/synara-stage3-acceptance"
+        return "\n".join(
+            [
+                "export DEBIAN_FRONTEND=noninteractive",
+                "apt-get update",
+                "apt-get install -y --no-install-recommends ca-certificates curl git openssh-client openssh-server xz-utils",
+                f"id -u {SSH_SERVICE_USER} >/dev/null",
+                "install -d -m 0700 /root/.ssh",
+                f"install -m 0600 {stage}/{self.client_public_key_path.name} /root/.ssh/authorized_keys",
+                f"install -d -m 0755 {pathlib.PurePosixPath(SSH_REMOTE_FIXTURE_PATH).parent}",
+                f"install -m 0644 {stage}/{self.fixture_bundle_path.name} {SSH_REMOTE_FIXTURE_PATH}",
+                "workdir=$(mktemp -d /tmp/synara-node.XXXXXX)",
+                "trap 'rm -rf \"$workdir\"' EXIT",
+                "cd \"$workdir\"",
+                f"curl -fsSLO https://nodejs.org/dist/v{version}/{archive}",
+                f"curl -fsSLO https://nodejs.org/dist/v{version}/SHASUMS256.txt",
+                f"grep '  {archive}$' SHASUMS256.txt | sha256sum -c -",
+                f"tar -xJf {archive} -C /usr/local --strip-components=1",
+                "cat > /etc/ssh/sshd_config.d/99-synara-stage3-acceptance.conf <<'EOF'",
+                "PasswordAuthentication no",
+                "KbdInteractiveAuthentication no",
+                "PubkeyAuthentication yes",
+                "PermitRootLogin prohibit-password",
+                "EOF",
+                "install -d -o root -g root -m 0755 /run/sshd",
+                "sshd -t",
+                "systemctl enable ssh",
+                "systemctl restart ssh",
+                "test \"$(cat /proc/1/comm)\" = systemd",
+                "systemctl is-active --quiet ssh",
+                "systemctl is-enabled --quiet ssh",
+                f"test \"$(node --version)\" = v{version}",
+                f"rm -rf {stage}",
+            ]
+        )
+
+    def _create_ssh_target(
+        self,
+        tenant_id: str,
+        organization_id: str,
+        name: str,
+        host_key: str,
+        provider: str,
+    ) -> dict[str, Any]:
+        return json_object(
+            self.api.request(
+                "POST",
+                f"/v1/tenants/{tenant_id}/execution-targets",
+                {
+                    "organizationId": organization_id,
+                    "kind": "ssh",
+                    "name": name,
+                    "configuration": {
+                        "host": self.machine_ip,
+                        "port": 22,
+                        "user": "root",
+                        "privateKey": self.client_private_key,
+                        "hostKey": host_key,
+                        "controlPlaneUrl": self._worker_proxy_url(),
+                        "allowInsecureControlPlane": True,
+                        "runnerCommand": list(self.options.runner_command),
+                        "serviceUser": SSH_SERVICE_USER,
+                        "useSudo": False,
+                    },
+                    "capabilities": {
+                        "workspaceModes": ["local", "worktree"],
+                        "providerPolicy": {"experimentalProviders": [provider]},
+                    },
+                },
+                expected=(201,),
+            ),
+            name,
+        )
+
+    @staticmethod
+    def _target_id(target: Mapping[str, Any], label: str) -> str:
+        target_id = target.get("id")
+        if not isinstance(target_id, str) or not target_id:
+            raise AcceptanceError("runner.ssh_target_id_missing", f"{label} creation did not return an ID.")
+        return target_id
+
+    def _service_state(self, service_name: str, *, cleanup_timeout: float | None = None) -> dict[str, Any]:
+        output = self._remote_command(
+            [
+                "systemctl",
+                "show",
+                service_name,
+                "--property=ActiveState,SubState,MainPID,UnitFileState,NRestarts",
+            ],
+            cleanup_timeout=cleanup_timeout,
+        )
+        values: dict[str, str] = {}
+        for line in output.splitlines():
+            key, separator, value = line.partition("=")
+            if separator:
+                values[key] = value
+        try:
+            main_pid = int(values.get("MainPID", "0"))
+            restarts = int(values.get("NRestarts", "0"))
+        except ValueError as error:
+            raise AcceptanceError(
+                "runner.ssh_service_state_invalid",
+                f"systemd returned an invalid numeric service state: {error}",
+                {"serviceName": service_name},
+            ) from None
+        return {
+            "serviceName": service_name,
+            "activeState": values.get("ActiveState"),
+            "subState": values.get("SubState"),
+            "unitFileState": values.get("UnitFileState"),
+            "mainPid": main_pid,
+            "restartCount": restarts,
+        }
+
+    def _require_service_active(self, service_name: str) -> dict[str, Any]:
+        state = self._service_state(service_name)
+        if (
+            state["activeState"] != "active"
+            or state["subState"] != "running"
+            or state["mainPid"] <= 0
+            or state["unitFileState"] not in {"enabled", "enabled-runtime"}
+        ):
+            raise AcceptanceError(
+                "runner.ssh_service_not_active",
+                "The managed SSH agentd systemd service was not active and enabled.",
+                state,
+            )
+        return state
+
+    def _assert_remote_target_absent(
+        self,
+        target_id: str,
+        *,
+        cleanup_timeout: float | None = None,
+    ) -> None:
+        service_name = f"synara-agentd-{target_id}.service"
+        install_root = f"/opt/synara/targets/{target_id}"
+        temporary = f"/tmp/synara-agentd-{target_id}"
+        script = "\n".join(
+            [
+                f"if systemctl cat {service_name} >/dev/null 2>&1; then exit 1; fi",
+                f"test ! -e {install_root}/synara-agentd",
+                f"test ! -e {install_root}/agentd.env",
+                f"test ! -e {temporary}",
+                f"test ! -e {temporary}.env",
+                f"test ! -e {temporary}.service",
+            ]
+        )
+        self._remote_command(["sh", "-ceu", script], cleanup_timeout=cleanup_timeout)
+
+    def _orbctl_completed(
+        self,
+        arguments: Sequence[str],
+        *,
+        cleanup_timeout: float | None = None,
+        input_text: str | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        timeout = cleanup_timeout
+        if timeout is None:
+            timeout = self.deadline.request_timeout(maximum=max(10.0, self.deadline.remaining()))
+        try:
+            return subprocess.run(
+                [self.options.ssh_orbctl_bin, *arguments],
+                cwd=self.repo_root,
+                env=self._tool_environment(),
+                input=input_text,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                timeout=timeout,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise AcceptanceError(
+                "runner.orbstack_command_failed",
+                f"OrbStack command could not run: {self.redactor.text(str(error))}",
+                {"command": [self.options.ssh_orbctl_bin, *arguments[:3]]},
+            ) from None
+
+    def _orbctl_command(
+        self,
+        arguments: Sequence[str],
+        *,
+        log_path: pathlib.Path | None = None,
+        maximum_timeout: float | None = None,
+        cleanup_timeout: float | None = None,
+        input_text: str | None = None,
+    ) -> str:
+        timeout = cleanup_timeout
+        if timeout is None:
+            timeout = self.deadline.request_timeout(maximum=maximum_timeout or 30.0)
+        completed = self._orbctl_completed(arguments, cleanup_timeout=timeout, input_text=input_text)
+        output = self.redactor.text(completed.stdout)
+        if log_path is not None:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            log_path.write_text(output, encoding="utf-8")
+        if completed.returncode != 0:
+            raise AcceptanceError(
+                "runner.orbstack_command_failed",
+                f"OrbStack command exited with status {completed.returncode}.",
+                {
+                    "command": [self.options.ssh_orbctl_bin, *arguments[:3]],
+                    "exitCode": completed.returncode,
+                    "log": str(log_path) if log_path else None,
+                    "outputExcerpt": output[-1000:],
+                },
+            )
+        return output
+
+    def _remote_command(
+        self,
+        command: Sequence[str],
+        *,
+        user: str = "root",
+        log_path: pathlib.Path | None = None,
+        maximum_timeout: float | None = None,
+        cleanup_timeout: float | None = None,
+        input_text: str | None = None,
+    ) -> str:
+        return self._orbctl_command(
+            ["run", "--machine", self.machine_name, "--user", user, *command],
+            log_path=log_path,
+            maximum_timeout=maximum_timeout,
+            cleanup_timeout=cleanup_timeout,
+            input_text=input_text,
+        )
+
+    def _remote_upload(self, source: pathlib.Path, destination: str, mode: str) -> None:
+        if not source.is_file():
+            raise AcceptanceError(
+                "runner.ssh_upload_source_missing",
+                "An SSH acceptance runtime artifact was unavailable for upload.",
+                {"path": str(source)},
+            )
+        payload = base64.b64encode(source.read_bytes()).decode("ascii")
+        self._remote_command(
+            [
+                "sh",
+                "-ceu",
+                f"umask 077; base64 --decode > {destination}; chmod {mode} {destination}",
+            ],
+            input_text=payload,
+            maximum_timeout=max(30.0, self.deadline.remaining()),
+        )
+
+    @staticmethod
+    def _host_key_fingerprint(host_key: str) -> str:
+        fields = host_key.split()
+        if len(fields) < 2:
+            raise AcceptanceError("runner.ssh_host_key_invalid", "SSH Host Key was malformed.")
+        try:
+            payload = fields[1] + "=" * (-len(fields[1]) % 4)
+            decoded = base64.b64decode(payload, validate=True)
+        except ValueError as error:
+            raise AcceptanceError(
+                "runner.ssh_host_key_invalid",
+                f"SSH Host Key payload was invalid: {error}",
+            ) from None
+        digest = base64.b64encode(hashlib.sha256(decoded).digest()).decode("ascii").rstrip("=")
+        return f"SHA256:{digest}"
+
+    def _discard_local_private_key(self) -> None:
+        self.client_private_key = ""
+        try:
+            self.client_key_path.unlink(missing_ok=True)
+        except OSError as error:
+            raise AcceptanceError(
+                "runner.ssh_private_key_cleanup_failed",
+                f"The one-time SSH private key could not be removed: {error}",
+            ) from None
+
+    def _discard_local_key_material(self) -> None:
+        self.client_private_key = ""
+        self.client_public_key = ""
+        for path in (self.client_key_path, self.client_public_key_path, self.known_hosts_path):
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        try:
+            self.credentials_dir.rmdir()
+        except OSError:
+            pass
 
 
 class KubernetesDriver(ManagedWorkerDriver):
@@ -2417,7 +3529,7 @@ class AcceptanceSuite:
         if self.driver.lifecycle.managed_replacement:
             self._case(
                 "recovery.worker-replacement",
-                "Replace the managed Docker Worker and verify a new agentd incarnation",
+                "Replace the managed Worker and verify a new agentd incarnation",
                 self._replace_worker,
                 requires=("fixture.provider-error",),
             )
@@ -3086,7 +4198,7 @@ class AcceptanceSuite:
             "generation": generation,
             "workspaceEvidence": workspace_evidence,
             "sequenceRange": self._sequence_range(events),
-            "semantics": "persisted named-volume Workspace content; not Workspace Checkpoint restore",
+            "semantics": self.driver.replacement_workspace_semantics,
         }
 
     def _restart_control_plane(self) -> Mapping[str, Any]:
@@ -3482,12 +4594,17 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
     parser.add_argument(
         "--timeout",
         type=float,
-        help="Overall timeout in seconds (default: Local/SSH 180, Docker 900, Kubernetes 1200)",
+        help="Overall timeout in seconds (default: Local 180, SSH/Docker 900, Kubernetes 1200)",
     )
     parser.add_argument("--runner-command-json", help="Provider Host command as a JSON string array")
     parser.add_argument("--skip-build", action="store_true")
     parser.add_argument("--control-plane-binary", type=pathlib.Path)
     parser.add_argument("--keep", action="store_true", help="Keep SQLite, workspace, cache, and built binary")
+    parser.add_argument("--ssh-orbctl-bin", default="orbctl")
+    parser.add_argument("--ssh-machine-name", help="Owned disposable OrbStack machine name")
+    parser.add_argument("--ssh-machine-arch", choices=("arm64", "amd64"), default="arm64")
+    parser.add_argument("--ssh-machine-image", default="ubuntu:24.04")
+    parser.add_argument("--ssh-node-version", default="24.13.1")
     parser.add_argument("--docker-socket-path", type=pathlib.Path, default=pathlib.Path("/var/run/docker.sock"))
     parser.add_argument("--docker-worker-image", help="Existing worker-acceptance image used with --docker-skip-worker-build")
     parser.add_argument("--docker-skip-worker-build", action="store_true")
@@ -3513,7 +4630,13 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
         help="Run the second Turn without restarting the Control Plane",
     )
     parsed = parser.parse_args(argv)
-    default_timeout = 1200.0 if parsed.target == "kubernetes" else 900.0 if parsed.target == "docker" else 180.0
+    default_timeout = (
+        1200.0
+        if parsed.target == "kubernetes"
+        else 900.0
+        if parsed.target in {"docker", "ssh"}
+        else 180.0
+    )
     timeout_seconds = parsed.timeout if parsed.timeout is not None else default_timeout
     if timeout_seconds <= 0:
         parser.error("--timeout must be positive")
@@ -3521,6 +4644,11 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
         parser.error("--control-plane-binary requires --skip-build to prevent overwriting the configured binary")
     if parsed.skip_build and parsed.control_plane_binary is None:
         parser.error("--skip-build requires --control-plane-binary")
+    if parsed.target == "ssh" and parsed.skip_build:
+        parser.error(
+            "--skip-build is not supported for SSH because the runner must cross-build Linux agentd and the "
+            "Provider Host fixture together with the Control Plane"
+        )
     if parsed.docker_skip_worker_build and not parsed.docker_worker_image:
         parser.error("--docker-skip-worker-build requires --docker-worker-image")
     if parsed.docker_worker_image and not parsed.docker_skip_worker_build:
@@ -3539,6 +4667,22 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
         parser.error("--docker-memory-bytes must be at least 67108864")
     if parsed.docker_nano_cpus <= 0:
         parser.error("--docker-nano-cpus must be positive")
+    if not parsed.ssh_orbctl_bin.strip() or any(
+        character in parsed.ssh_orbctl_bin for character in "\r\n\t\x00"
+    ):
+        parser.error("--ssh-orbctl-bin must be a command or executable path")
+    ssh_machine_name = parsed.ssh_machine_name.strip() if parsed.ssh_machine_name else None
+    if ssh_machine_name is not None and (
+        len(ssh_machine_name) > 63
+        or not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?", ssh_machine_name)
+    ):
+        parser.error("--ssh-machine-name must be a lowercase DNS label")
+    if not parsed.ssh_machine_image.strip() or len(parsed.ssh_machine_image.strip()) > 128 or any(
+        character in parsed.ssh_machine_image for character in "\r\n\t\x00"
+    ):
+        parser.error("--ssh-machine-image must be a non-empty OrbStack distro reference")
+    if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", parsed.ssh_node_version.strip()):
+        parser.error("--ssh-node-version must be a three-component numeric version")
     docker_socket_path = parsed.docker_socket_path.expanduser()
     if not docker_socket_path.is_absolute():
         parser.error("--docker-socket-path must be absolute")
@@ -3583,6 +4727,11 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
         control_plane_binary=parsed.control_plane_binary.resolve() if parsed.control_plane_binary else None,
         keep=parsed.keep,
         restart_control_plane=not parsed.no_restart_control_plane,
+        ssh_orbctl_bin=parsed.ssh_orbctl_bin.strip(),
+        ssh_machine_name=ssh_machine_name,
+        ssh_machine_arch=parsed.ssh_machine_arch,
+        ssh_machine_image=parsed.ssh_machine_image.strip(),
+        ssh_node_version=parsed.ssh_node_version.strip(),
         docker_socket_path=docker_socket_path,
         docker_worker_image=parsed.docker_worker_image,
         docker_skip_worker_build=parsed.docker_skip_worker_build,
@@ -3611,7 +4760,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     started_at = utc_now()
     started = time.monotonic()
     run_id = f"stage3-provider-acceptance-{uuid.uuid4()}"
-    if options.target in {"local", "docker", "kubernetes"} and os.name != "posix":
+    if options.target in {"local", "ssh", "docker", "kubernetes"} and os.name != "posix":
         cases = [
             explicit_unsupported_case(
                 "environment.platform-unsupported",
@@ -3633,9 +4782,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 {"fixtureSupportedProviders": sorted(FIXTURE_SUPPORTED_PROVIDERS)},
             )
         ]
-    elif options.target in {"local", "docker", "kubernetes"}:
+    elif options.target in {"local", "ssh", "docker", "kubernetes"}:
         if options.target == "local":
             driver: LocalDriver = LocalDriver(repo_root, options, deadline, redactor)
+        elif options.target == "ssh":
+            driver = SSHDriver(repo_root, options, deadline, redactor)
         elif options.target == "docker":
             driver = DockerDriver(repo_root, options, deadline, redactor)
         else:
@@ -3684,6 +4835,30 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "executable": pathlib.Path(options.runner_command[0]).name,
                 "argumentCount": len(options.runner_command) - 1,
             },
+            "ssh": {
+                "runtime": "owned-disposable-orbstack",
+                "orbctlBinary": options.ssh_orbctl_bin,
+                "machineName": options.ssh_machine_name or "generated-per-run",
+                "machineArch": options.ssh_machine_arch,
+                "machineImage": options.ssh_machine_image,
+                "controlPlaneTransport": {
+                    "mode": "reverse-ssh-loopback",
+                    "description": SSH_RELAY_TRANSPORT,
+                    "vmListenHost": SSH_RELAY_LOOPBACK_HOST,
+                },
+                "nodeVersion": options.ssh_node_version,
+                "credentialSource": "runner-generated one-time Ed25519 key",
+                "localPrivateKeyPlaintextDeletedAfterProvision": True,
+                "controlPlaneCredentialLifecycle": SSH_CREDENTIAL_LIFECYCLE,
+                "readsUserSSHConfiguration": False,
+                "runtimeBuild": "cross-built-per-run",
+                "cleanupSemantics": (
+                    "ssh/revoke removes the systemd unit, environment, and agentd binary; deletion of the owned "
+                    "OrbStack machine is infrastructure cleanup and does not prove product-level Workspace purge"
+                ),
+            }
+            if options.target == "ssh"
+            else None,
             "docker": {
                 "socketPath": str(options.docker_socket_path),
                 "workerImage": options.docker_worker_image,
