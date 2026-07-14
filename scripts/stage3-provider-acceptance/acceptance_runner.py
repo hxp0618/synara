@@ -4559,8 +4559,6 @@ class AcceptanceSuite:
                     "runner.response_shape_invalid",
                     "pending interactions.items was not an array.",
                 )
-            if any(isinstance(item, dict) and item.get("id") == previous_interaction_id for item in items):
-                return None
             for item in items:
                 if isinstance(item, dict) and item.get("turnId") == turn_id and item.get("kind") == kind:
                     return item
@@ -4587,6 +4585,8 @@ class AcceptanceSuite:
                     "runner.response_shape_invalid",
                     "pending interactions.items was not an array.",
                 )
+            if any(isinstance(item, dict) and item.get("id") == previous_interaction_id for item in items):
+                return None
             for item in items:
                 if (
                     isinstance(item, dict)

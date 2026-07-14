@@ -359,6 +359,86 @@ class APIClientTimeoutTest(unittest.TestCase):
 
 
 class AcceptanceSuiteLifecycleTest(unittest.TestCase):
+    def test_interaction_waits_distinguish_initial_and_replacement_snapshots(self) -> None:
+        suite = BarrierSuite(acceptance.EXECUTION_PINNED_WORKER)
+
+        class InteractionAPI(FakeAPI):
+            def __init__(self) -> None:
+                super().__init__()
+                self.snapshots = [
+                    {
+                        "items": [
+                            {
+                                "id": "interaction-1",
+                                "turnId": "turn-1",
+                                "kind": "approval",
+                            }
+                        ]
+                    },
+                    {
+                        "items": [
+                            {
+                                "id": "interaction-1",
+                                "turnId": "turn-1",
+                                "kind": "approval",
+                            },
+                            {
+                                "id": "interaction-2",
+                                "turnId": "turn-1",
+                                "kind": "approval",
+                            },
+                        ]
+                    },
+                    {
+                        "items": [
+                            {
+                                "id": "interaction-2",
+                                "turnId": "turn-1",
+                                "kind": "approval",
+                            }
+                        ]
+                    },
+                ]
+
+            def request(
+                self,
+                method: str,
+                path: str,
+                payload: Mapping[str, Any] | None = None,
+                expected: Sequence[int] = (200,),
+                *,
+                maximum_timeout: float = 10.0,
+            ) -> Any:
+                del method, path, payload, expected, maximum_timeout
+                return self.snapshots.pop(0)
+
+            def wait_until(
+                self,
+                _description: str,
+                probe: Callable[[], Any | None],
+                interval: float = 0.25,
+            ) -> Any:
+                del interval
+                while self.snapshots:
+                    value = probe()
+                    if value is not None:
+                        return value
+                raise AssertionError("interaction probe did not become ready")
+
+        api = InteractionAPI()
+        suite.fake_driver.api = api  # type: ignore[assignment]
+
+        initial = acceptance.AcceptanceSuite._wait_for_interaction(suite, "turn-1", "approval")
+        replacement = acceptance.AcceptanceSuite._wait_for_replacement_interaction(
+            suite,
+            "turn-1",
+            "approval",
+            "interaction-1",
+        )
+
+        self.assertEqual(initial["id"], "interaction-1")
+        self.assertEqual(replacement["id"], "interaction-2")
+
     def test_standing_worker_preserves_existing_case_order(self) -> None:
         suite = CaseOrderSuite(FakeDriver(acceptance.STANDING_WORKER))
 
