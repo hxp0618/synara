@@ -147,6 +147,7 @@ func main() {
 	executionService := executions.NewService(
 		db, sessionService, cfg.WorkerLeaseTTL, cfg.WorkerHeartbeatTimeout,
 		cfg.WorkerReceiptTTL, cursorCipher, executionTargetService,
+		executions.WithProviderCursorMaximumAge(cfg.ProviderCursorMaximumAge),
 	)
 	tenancyService := tenancy.NewService(db, executionService)
 	kubernetesReconciler := executiontargets.NewKubernetesReconciler(executionTargetService, executiontargets.KubernetesReconcilerConfig{

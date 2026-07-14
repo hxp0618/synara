@@ -34,6 +34,11 @@ const (
 
 var providerHostProviders = append([]string(nil), stage3ProviderNames...)
 
+var providerHostRuntimeEventNamespace = uuid.NewSHA1(
+	uuid.NameSpaceURL,
+	[]byte("https://synara.dev/runtime-events/provider-host-v2"),
+)
+
 var providerHostProxyEnvironmentAllowlist = []string{
 	"SYNARA_PROVIDER_HTTP_PROXY",
 	"SYNARA_PROVIDER_HTTPS_PROXY",
@@ -1273,8 +1278,10 @@ func runnerMessageFromProviderHost(message providerHostMessage, negotiatedRuntim
 		if !executions.IsCanonicalRuntimeEventV2Payload(eventType, payload) {
 			return RunnerMessage{}, protocolFailure("Provider Host Event payload is invalid for the canonical Runtime Event type")
 		}
+		eventID := providerHostRuntimeEventID(message, eventType, payload)
 		return RunnerMessage{
-			Type: "event", EventVersion: eventVersion, EventType: eventType, Payload: payload, OccurredAt: &occurredAt,
+			Type: "event", EventID: eventID, EventVersion: eventVersion, EventType: eventType,
+			Payload: payload, OccurredAt: &occurredAt,
 		}, nil
 	case "ArtifactCandidate":
 		artifactPayload := message.Payload
@@ -1309,6 +1316,25 @@ func runnerMessageFromProviderHost(message providerHostMessage, negotiatedRuntim
 	default:
 		return RunnerMessage{}, protocolFailure("Provider Host message type is unsupported")
 	}
+}
+
+func providerHostRuntimeEventID(message providerHostMessage, eventType string, payload map[string]any) *uuid.UUID {
+	if eventType != "runtime.warning" || !executions.IsProviderResumeFallbackRuntimeWarningPayload(payload) {
+		return nil
+	}
+	seed, _ := json.Marshal(struct {
+		ExecutionID string `json:"executionId"`
+		Generation  int64  `json:"generation"`
+		CommandID   string `json:"commandId"`
+		Slot        string `json:"slot"`
+	}{
+		ExecutionID: message.ExecutionID,
+		Generation:  message.Generation,
+		CommandID:   message.CommandID,
+		Slot:        "provider_resume_fallback",
+	})
+	eventID := uuid.NewSHA1(providerHostRuntimeEventNamespace, seed)
+	return &eventID
 }
 
 func failureFromProviderHost(value *providerHostWireError) error {

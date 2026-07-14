@@ -90,6 +90,8 @@ spec:
                 secretKeyRef:
                   name: synara-control-plane-secrets
                   key: provider-cursor-key
+            - name: SYNARA_PROVIDER_CURSOR_MAX_AGE
+              value: 720h
             - name: SYNARA_CREDENTIAL_KMS_PROVIDER
               value: aws-kms
             - name: SYNARA_CREDENTIAL_KMS_KEY_ID

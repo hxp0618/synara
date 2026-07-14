@@ -19,6 +19,18 @@ import (
 	"github.com/synara-ai/synara/services/control-plane/internal/sessions"
 )
 
+const defaultProviderCursorMaximumAge = 30 * 24 * time.Hour
+
+type ServiceOption func(*Service)
+
+func WithProviderCursorMaximumAge(maximumAge time.Duration) ServiceOption {
+	return func(service *Service) {
+		if maximumAge > 0 {
+			service.providerCursorMaximumAge = maximumAge
+		}
+	}
+}
+
 func expectOne(result *gorm.DB, status int, code, message string) error {
 	if result.Error != nil {
 		return problem.Wrap(status, code, message, result.Error)
@@ -30,15 +42,16 @@ func expectOne(result *gorm.DB, status int, code, message string) error {
 }
 
 type Service struct {
-	db               *gorm.DB
-	authorizer       *authorization.Authorizer
-	sessions         *sessions.Service
-	leaseTTL         time.Duration
-	heartbeatTimeout time.Duration
-	receiptTTL       time.Duration
-	cursorCipher     *secret.CursorCipher
-	targets          *executiontargets.Service
-	now              func() time.Time
+	db                       *gorm.DB
+	authorizer               *authorization.Authorizer
+	sessions                 *sessions.Service
+	leaseTTL                 time.Duration
+	heartbeatTimeout         time.Duration
+	receiptTTL               time.Duration
+	cursorCipher             *secret.CursorCipher
+	providerCursorMaximumAge time.Duration
+	targets                  *executiontargets.Service
+	now                      func() time.Time
 }
 
 func NewService(
@@ -47,12 +60,18 @@ func NewService(
 	leaseTTL, heartbeatTimeout, receiptTTL time.Duration,
 	cursorCipher *secret.CursorCipher,
 	targetService *executiontargets.Service,
+	options ...ServiceOption,
 ) *Service {
-	return &Service{
+	service := &Service{
 		db: db, authorizer: authorization.NewAuthorizer(db), sessions: sessionService, leaseTTL: leaseTTL,
 		heartbeatTimeout: heartbeatTimeout, receiptTTL: receiptTTL,
-		cursorCipher: cursorCipher, targets: targetService, now: func() time.Time { return time.Now().UTC() },
+		cursorCipher: cursorCipher, providerCursorMaximumAge: defaultProviderCursorMaximumAge,
+		targets: targetService, now: func() time.Time { return time.Now().UTC() },
 	}
+	for _, option := range options {
+		option(service)
+	}
+	return service
 }
 
 func (s *Service) Register(ctx context.Context, input RegisterWorkerInput) (RegisteredWorker, error) {

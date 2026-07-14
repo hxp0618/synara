@@ -147,6 +147,121 @@ func TestValidateRuntimeEventContractChecksCanonicalPayloadShape(t *testing.T) {
 	}
 }
 
+func TestValidateProviderResumeFallbackRuntimeWarningPayload(t *testing.T) {
+	validPayload := func() map[string]any {
+		return map[string]any{
+			"message": "Native Provider resume failed before turn activity; authoritative-history fallback selected.",
+			"detail": map[string]any{
+				"kind":                         "session_resume",
+				"attemptedStrategy":            "native-cursor",
+				"selectedStrategy":             "authoritative-history",
+				"outcome":                      "fallback_selected",
+				"reasonCode":                   "session_resume_invalid",
+				"fallbackSafety":               "before_turn_activity",
+				"authoritativeHistorySequence": float64(42),
+				"provider":                     "codex",
+			},
+		}
+	}
+	tests := []struct {
+		name   string
+		mutate func(map[string]any, map[string]any)
+		valid  bool
+	}{
+		{name: "codex invalid cursor", valid: true},
+		{name: "claude expired cursor", mutate: func(_ map[string]any, detail map[string]any) {
+			detail["provider"] = "claudeAgent"
+			detail["reasonCode"] = "session_resume_expired"
+		}, valid: true},
+		{name: "maximum safe history sequence", mutate: func(_ map[string]any, detail map[string]any) {
+			detail["authoritativeHistorySequence"] = float64(9_007_199_254_740_991)
+		}, valid: true},
+		{name: "missing required field", mutate: func(_ map[string]any, detail map[string]any) {
+			delete(detail, "fallbackSafety")
+		}},
+		{name: "partial fallback marker", mutate: func(_ map[string]any, detail map[string]any) {
+			for key := range detail {
+				if key != "kind" && key != "provider" {
+					delete(detail, key)
+				}
+			}
+		}},
+		{name: "wrong attempted strategy", mutate: func(_ map[string]any, detail map[string]any) {
+			detail["attemptedStrategy"] = "authoritative-history"
+		}},
+		{name: "wrong selected strategy", mutate: func(_ map[string]any, detail map[string]any) {
+			detail["selectedStrategy"] = "native-cursor"
+		}},
+		{name: "wrong outcome", mutate: func(_ map[string]any, detail map[string]any) {
+			detail["outcome"] = "fallback_succeeded"
+		}},
+		{name: "wrong reason", mutate: func(_ map[string]any, detail map[string]any) {
+			detail["reasonCode"] = "provider_unavailable"
+		}},
+		{name: "unsafe fallback point", mutate: func(_ map[string]any, detail map[string]any) {
+			detail["fallbackSafety"] = "after_turn_activity"
+		}},
+		{name: "provider alias", mutate: func(_ map[string]any, detail map[string]any) {
+			detail["provider"] = "claude"
+		}},
+		{name: "negative history sequence", mutate: func(_ map[string]any, detail map[string]any) {
+			detail["authoritativeHistorySequence"] = float64(-1)
+		}},
+		{name: "fractional history sequence", mutate: func(_ map[string]any, detail map[string]any) {
+			detail["authoritativeHistorySequence"] = 1.5
+		}},
+		{name: "unsafe history sequence", mutate: func(_ map[string]any, detail map[string]any) {
+			detail["authoritativeHistorySequence"] = float64(9_007_199_254_740_992)
+		}},
+		{name: "raw provider error", mutate: func(_ map[string]any, detail map[string]any) {
+			detail["rawError"] = "native provider error"
+		}},
+		{name: "cursor", mutate: func(_ map[string]any, detail map[string]any) {
+			detail["cursor"] = "provider-cursor"
+		}},
+		{name: "secret", mutate: func(_ map[string]any, detail map[string]any) {
+			detail["secret"] = "credential"
+		}},
+		{name: "unexpected detail field", mutate: func(_ map[string]any, detail map[string]any) {
+			detail["extra"] = true
+		}},
+		{name: "unexpected outer field", mutate: func(payload map[string]any, _ map[string]any) {
+			payload["rawError"] = "native provider error"
+		}},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			payload := validPayload()
+			detail := payload["detail"].(map[string]any)
+			if test.mutate != nil {
+				test.mutate(payload, detail)
+			}
+			input := RuntimeEventInput{
+				EventID: uuid.New(), EventVersion: RuntimeEventVersionV2,
+				EventType: "runtime.warning", Payload: payload,
+			}
+			err := validateRuntimeEventContract(input)
+			if test.valid {
+				if err != nil {
+					t.Fatalf("valid provider resume fallback warning was rejected: %v", err)
+				}
+				if !IsProviderResumeFallbackRuntimeWarningPayload(payload) {
+					t.Fatal("valid provider resume fallback warning was not identified")
+				}
+				return
+			}
+			var apiError *problem.Error
+			if !errors.As(err, &apiError) || apiError.Status != 400 || apiError.Code != "invalid_runtime_event_payload" {
+				t.Fatalf("invalid provider resume fallback warning error = %#v, %v", apiError, err)
+			}
+			if IsProviderResumeFallbackRuntimeWarningPayload(payload) {
+				t.Fatal("invalid provider resume fallback warning was identified as canonical")
+			}
+		})
+	}
+}
+
 func TestPendingInteractionKindIsVersioned(t *testing.T) {
 	for _, test := range []struct {
 		version   int

@@ -89,16 +89,20 @@ func (s *Service) Claim(
 				}
 				convertedExecution := toExecution(execution)
 				convertedLease := toLease(lease, plainToken)
-				resumeCursor, cursorErr := s.loadProviderCursor(ctx, tx, execution)
+				workload := stored.Workload
+				if workload == nil {
+					loadedWorkload, workloadErr := s.loadWorkload(ctx, tx, execution)
+					if workloadErr != nil {
+						return workloadErr
+					}
+					workload = &loadedWorkload
+				}
+				resumeCursor, cursorErr := s.loadReplayedProviderCursor(ctx, tx, execution, *workload)
 				if cursorErr != nil {
 					return cursorErr
 				}
-				workload, workloadErr := s.loadWorkload(ctx, tx, execution)
-				if workloadErr != nil {
-					return workloadErr
-				}
 				result = ClaimResult{
-					Execution: &convertedExecution, Lease: &convertedLease, Workload: &workload,
+					Execution: &convertedExecution, Lease: &convertedLease, Workload: workload,
 					ProviderResumeCursor: resumeCursor,
 				}
 				replayed = true
@@ -223,6 +227,23 @@ func (s *Service) Claim(
 				if err := bindExecutionControlCommands(ctx, tx, execution, worker.ID, now); err != nil {
 					return err
 				}
+				workload, workloadErr := s.loadWorkload(ctx, tx, execution)
+				if workloadErr != nil {
+					return workloadErr
+				}
+				if workload.ResumeSnapshot == nil {
+					return problem.New(500, "execution_workload_resume_snapshot_missing", "The execution workload omitted its authoritative Resume Snapshot.")
+				}
+				resumeSelection, cursorErr := s.loadProviderCursor(
+					ctx,
+					tx,
+					execution,
+					true,
+					workload.ResumeSnapshot.AuthoritativeHistorySequence,
+				)
+				if cursorErr != nil {
+					return cursorErr
+				}
 				appended, err = s.sessions.AppendInternalEvent(ctx, tx, execution.TenantID, execution.SessionID, sessions.InternalEventInput{
 					EventType: "execution.leased", ActorType: "worker", ActorID: &worker.ID,
 					ExecutionID: &execution.ID, WorkerID: &worker.ID, Generation: &execution.Generation,
@@ -230,6 +251,7 @@ func (s *Service) Claim(
 						"turnId": execution.TurnID, "expiresAt": lease.ExpiresAt,
 						"executionTargetId": execution.ExecutionTargetID, "targetKind": execution.TargetKind,
 						"workerManifestId": execution.WorkerManifestID,
+						"providerResume":   resumeSelection.eventPayload(execution.ProviderResumeStrategySnapshot),
 					},
 				})
 				if err != nil {
@@ -237,17 +259,9 @@ func (s *Service) Claim(
 				}
 				convertedExecution := toExecution(execution)
 				convertedLease := toLease(lease, plainToken)
-				resumeCursor, cursorErr := s.loadProviderCursor(ctx, tx, execution)
-				if cursorErr != nil {
-					return cursorErr
-				}
-				workload, workloadErr := s.loadWorkload(ctx, tx, execution)
-				if workloadErr != nil {
-					return workloadErr
-				}
 				result = ClaimResult{
 					Execution: &convertedExecution, Lease: &convertedLease, Workload: &workload,
-					ProviderResumeCursor: resumeCursor,
+					ProviderResumeCursor: resumeSelection.Cursor,
 				}
 			}
 

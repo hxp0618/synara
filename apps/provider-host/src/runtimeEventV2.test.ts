@@ -77,6 +77,47 @@ describe("Runtime Event v2 normalization", () => {
     });
   });
 
+  it("projects only stable resume-fallback outcome fields into warning detail", () => {
+    expect(
+      normalizeRuntimeEventV2({
+        type: "event",
+        eventType: "runtime.provider.warning",
+        payload: {
+          provider: "codex",
+          message:
+            "Native Codex resume failed before turn activity; authoritative-history fallback selected.",
+          kind: "session_resume",
+          attemptedStrategy: "native-cursor",
+          selectedStrategy: "authoritative-history",
+          outcome: "fallback_selected",
+          reasonCode: "session_resume_invalid",
+          fallbackSafety: "before_turn_activity",
+          authoritativeHistorySequence: 31,
+          providerResumeCursor: "cursor-must-not-cross-the-wire",
+          rawError: "error-must-not-cross-the-wire",
+          secret: "secret-must-not-cross-the-wire",
+        },
+      }),
+    ).toEqual({
+      eventVersion: PROVIDER_RUNTIME_EVENT_VERSION,
+      eventType: "runtime.warning",
+      payload: {
+        message:
+          "Native Codex resume failed before turn activity; authoritative-history fallback selected.",
+        detail: {
+          provider: "codex",
+          kind: "session_resume",
+          attemptedStrategy: "native-cursor",
+          selectedStrategy: "authoritative-history",
+          outcome: "fallback_selected",
+          reasonCode: "session_resume_invalid",
+          fallbackSafety: "before_turn_activity",
+          authoritativeHistorySequence: 31,
+        },
+      },
+    });
+  });
+
   it("passes canonical events through and degrades unknown internal events safely", () => {
     expect(
       normalizeRuntimeEventV2({

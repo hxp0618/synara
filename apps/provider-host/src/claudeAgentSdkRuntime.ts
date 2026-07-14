@@ -16,6 +16,10 @@ import {
 } from "./providerHost";
 import { providerInteractionRequestId } from "./interactionRequestId";
 import { ProviderInterruptedError } from "./providerRunErrors";
+import {
+  classifyProviderResumeFailure,
+  providerResumeFallbackWarning,
+} from "./providerResumeFallback";
 
 export type ClaudeQueryRuntime = AsyncIterable<SDKMessage> & {
   interrupt: () => Promise<unknown>;
@@ -128,23 +132,21 @@ class ClaudeAgentSdkRuntime {
         return await this.runAttempt(this.options.input.workload.inputText, cursor);
       } catch (error) {
         if (error instanceof ProviderInterruptedError) throw error;
+        const reasonCode =
+          error instanceof ClaudeAttemptError
+            ? classifyProviderResumeFailure(error.message)
+            : undefined;
         if (
           !historyAvailable ||
           !(error instanceof ClaudeAttemptError) ||
           error.hadTurnActivity ||
-          !isResumeFailure(error.message)
+          !reasonCode
         ) {
           throw error;
         }
-        this.options.emit({
-          type: "event",
-          eventType: "runtime.provider.warning",
-          payload: {
-            provider: "claudeAgent",
-            message:
-              "Native Claude resume was unavailable; rebuilt the turn from authoritative history.",
-          },
-        });
+        this.options.emit(
+          providerResumeFallbackWarning(this.options.input, "claudeAgent", reasonCode),
+        );
       }
     }
     return this.runAttempt(this.options.authoritativePrompt);
@@ -850,21 +852,6 @@ function resultErrorMessage(result: Record<string, unknown>): string {
   }
   const subtype = readString(result, "subtype") ?? "error_during_execution";
   return `Claude Agent SDK returned ${subtype}.`;
-}
-
-function isResumeFailure(message: string): boolean {
-  const normalized = message.toLowerCase();
-  return (
-    normalized.includes("no conversation found") ||
-    normalized.includes("session not found") ||
-    normalized.includes("invalid session") ||
-    normalized.includes("expired session") ||
-    (normalized.includes("resume") &&
-      (normalized.includes("invalid") ||
-        normalized.includes("expired") ||
-        normalized.includes("not found") ||
-        normalized.includes("does not exist")))
-  );
 }
 
 function numericFields(value: Record<string, unknown>): Record<string, number> {

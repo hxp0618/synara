@@ -92,6 +92,9 @@ are defined in `docs/contracts/production-authentication-policy.md`. In particul
 - Non-loopback public URLs require HTTPS and Secure cookies.
 - Forwarded client IPs are accepted only from `SYNARA_TRUSTED_PROXY_CIDRS`.
 - Login Sessions enforce both absolute and idle expiry from authoritative database rows.
+- Authenticated Provider Cursors default to a 720-hour maximum age through
+  `SYNARA_PROVIDER_CURSOR_MAX_AGE`; expired Cursors are quarantined and the Worker receives
+  authoritative Session history instead. Values must be positive and no greater than 8760 hours.
 - Tenant administrators can revoke a member's active-Tenant sessions through the audited
   `POST /v1/tenants/{tenantID}/members/{userID}/revoke-sessions` endpoint.
 

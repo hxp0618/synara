@@ -140,6 +140,39 @@ func TestLoadValidatesDatabasePoolAndMigrationConfiguration(t *testing.T) {
 	}
 }
 
+func TestLoadValidatesProviderCursorMaximumAge(t *testing.T) {
+	clearConfigEnvironment(t)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ProviderCursorMaximumAge != 30*24*time.Hour {
+		t.Fatalf("default Provider Cursor maximum age = %s", cfg.ProviderCursorMaximumAge)
+	}
+
+	clearConfigEnvironment(t)
+	t.Setenv("SYNARA_PROVIDER_CURSOR_MAX_AGE", "48h")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ProviderCursorMaximumAge != 48*time.Hour {
+		t.Fatalf("configured Provider Cursor maximum age = %s", cfg.ProviderCursorMaximumAge)
+	}
+
+	clearConfigEnvironment(t)
+	t.Setenv("SYNARA_PROVIDER_CURSOR_MAX_AGE", "0s")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "SYNARA_PROVIDER_CURSOR_MAX_AGE") {
+		t.Fatalf("expected invalid Provider Cursor maximum age, got %v", err)
+	}
+
+	clearConfigEnvironment(t)
+	t.Setenv("SYNARA_PROVIDER_CURSOR_MAX_AGE", "8761h")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "SYNARA_PROVIDER_CURSOR_MAX_AGE") {
+		t.Fatalf("expected excessive Provider Cursor maximum age rejection, got %v", err)
+	}
+}
+
 func TestLoadParsesOptionalLocalAgentdConfiguration(t *testing.T) {
 	clearConfigEnvironment(t)
 	t.Setenv("SYNARA_LOCAL_AGENTD_RUNNER_COMMAND_JSON", `["runner","--jsonl"]`)
@@ -298,6 +331,7 @@ func clearConfigEnvironment(t *testing.T) {
 		"SYNARA_DATABASE_CONNECTION_MAX_LIFETIME", "SYNARA_DATABASE_CONNECTION_MAX_IDLE_TIME",
 		"SYNARA_DATABASE_MIGRATION_LOCK_TIMEOUT",
 		"SYNARA_WORKER_HEARTBEAT_TIMEOUT", "SYNARA_WORKER_RECEIPT_TTL",
+		"SYNARA_PROVIDER_CURSOR_MAX_AGE",
 		"SYNARA_LOCAL_AGENTD_RUNNER_COMMAND_JSON", "SYNARA_LOCAL_AGENTD_WORKSPACE_ROOT",
 		"SYNARA_LOCAL_AGENTD_GIT_CACHE_ROOT", "SYNARA_LOCAL_AGENTD_RESTART_BACKOFF",
 		"SYNARA_CREDENTIAL_KMS_PROVIDER", "SYNARA_CREDENTIAL_KMS_KEY_ID",

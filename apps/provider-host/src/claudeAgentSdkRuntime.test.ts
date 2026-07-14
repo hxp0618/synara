@@ -364,7 +364,7 @@ describe("Claude Agent SDK runtime", () => {
           prompts.push(await promptText(prompt));
           if (attempt === 1) {
             expect(requiredOptions(options).resume).toBe("session-invalid");
-            throw new Error("No conversation found with session ID session-invalid");
+            throw new Error("Session session-invalid expired: native-resume-secret");
           }
           expect(requiredOptions(options).resume).toBeUndefined();
           yield sdkMessage(systemInit("session-rebuilt", "claude-test"));
@@ -390,6 +390,7 @@ describe("Claude Agent SDK runtime", () => {
             ],
             toolResults: [{ summary: "Focused tests passed" }],
             sourceSequenceRange: { from: 1, through: 4 },
+            authoritativeHistorySequence: 23,
           },
         },
       },
@@ -404,7 +405,7 @@ describe("Claude Agent SDK runtime", () => {
     });
     expect(prompts[0]).toBe("continue");
     expect(prompts[1]).toContain("<assistant>\nresponse\n</assistant>");
-		expect(prompts[1]).toContain("<synara_resume_snapshot_json>");
+    expect(prompts[1]).toContain("<synara_resume_snapshot_json>");
     expect(prompts[1]).toContain("Focused tests passed");
     expect(prompts[1]).toContain("<current_user>\ncontinue\n</current_user>");
     expect(messages).toContainEqual({
@@ -413,9 +414,60 @@ describe("Claude Agent SDK runtime", () => {
       payload: {
         provider: "claudeAgent",
         message:
-          "Native Claude resume was unavailable; rebuilt the turn from authoritative history.",
+          "Native Claude resume failed before turn activity; authoritative-history fallback selected.",
+        kind: "session_resume",
+        attemptedStrategy: "native-cursor",
+        selectedStrategy: "authoritative-history",
+        outcome: "fallback_selected",
+        reasonCode: "session_resume_expired",
+        fallbackSafety: "before_turn_activity",
+        authoritativeHistorySequence: 23,
       },
     });
+    expect(JSON.stringify(messages)).not.toContain("native-resume-secret");
+    expect(JSON.stringify(messages)).not.toContain("session-invalid");
+  });
+
+  it("does not rebuild from history for a native resume rate-limit failure", async () => {
+    const messages: RunnerMessage[] = [];
+    let calls = 0;
+    const queryFactory: ClaudeQueryFactory = ({ prompt, options }) => {
+      calls += 1;
+      return fakeQuery(
+        (async function* () {
+          await promptText(prompt);
+          expect(requiredOptions(options).resume).toBe("session-rate-limited");
+          throw new Error("Rate limit exceeded while resuming session");
+        })(),
+      );
+    };
+    const run = startProviderHostRun(
+      {
+        ...claudeInput({ inputText: "continue" }),
+        providerResumeCursor: "session-rate-limited",
+        workload: {
+          provider: "claudeAgent",
+          inputText: "continue",
+          resumeSnapshot: {
+            version: 1,
+            sessionId: "session-1",
+            turnId: "turn-2",
+            provider: "claudeAgent",
+            messages: [{ role: "assistant", text: "authoritative response" }],
+            authoritativeHistorySequence: 24,
+          },
+        },
+      },
+      null,
+      (message) => messages.push(message),
+      { claudeQueryFactory: queryFactory },
+    );
+
+    await expect(run.result).rejects.toThrow("Rate limit exceeded");
+    expect(calls).toBe(1);
+    expect(messages).not.toContainEqual(
+      expect.objectContaining({ eventType: "runtime.provider.warning" }),
+    );
   });
 
   it("uses native query interrupt and rejects the active turn", async () => {

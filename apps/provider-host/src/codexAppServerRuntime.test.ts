@@ -197,6 +197,7 @@ describe("Codex app-server runtime", () => {
 
   it("falls back to ResumeSnapshot reconstruction when native thread resume is invalid", async () => {
     await withFakeCodex("resume-rebuild", async (directory, _tracePath, environment) => {
+      const messages: RunnerMessage[] = [];
       const run = startProviderHostRun(
         {
           ...codexInput(directory),
@@ -215,11 +216,12 @@ describe("Codex app-server runtime", () => {
               ],
               toolResults: [{ summary: "Focused tests passed" }],
               sourceSequenceRange: { from: 1, through: 4 },
+              authoritativeHistorySequence: 19,
             },
           },
         },
         null,
-        () => {},
+        (message) => messages.push(message),
         { environment },
       );
 
@@ -227,6 +229,57 @@ describe("Codex app-server runtime", () => {
         output: { text: "rebuilt" },
         providerResumeCursor: "thread-new",
       });
+      expect(messages).toContainEqual({
+        type: "event",
+        eventType: "runtime.provider.warning",
+        payload: {
+          provider: "codex",
+          message:
+            "Native Codex resume failed before turn activity; authoritative-history fallback selected.",
+          kind: "session_resume",
+          attemptedStrategy: "native-cursor",
+          selectedStrategy: "authoritative-history",
+          outcome: "fallback_selected",
+          reasonCode: "session_resume_invalid",
+          fallbackSafety: "before_turn_activity",
+          authoritativeHistorySequence: 19,
+        },
+      });
+      expect(JSON.stringify(messages)).not.toContain("native-resume-secret");
+      expect(JSON.stringify(messages)).not.toContain("thread-missing");
+    });
+  });
+
+  it("does not rebuild from history for a native resume authentication failure", async () => {
+    await withFakeCodex("resume-auth-failure", async (directory, tracePath, environment) => {
+      const messages: RunnerMessage[] = [];
+      const run = startProviderHostRun(
+        {
+          ...codexInput(directory),
+          providerResumeCursor: "thread-private",
+          workload: {
+            provider: "codex",
+            inputText: "continue",
+            resumeSnapshot: {
+              version: 1,
+              sessionId: "session-1",
+              turnId: "turn-2",
+              provider: "codex",
+              messages: [{ role: "assistant", text: "authoritative response" }],
+              authoritativeHistorySequence: 20,
+            },
+          },
+        },
+        null,
+        (message) => messages.push(message),
+        { environment },
+      );
+
+      await expect(run.result).rejects.toThrow("Unauthorized");
+      expect(messages).not.toContainEqual(
+        expect.objectContaining({ eventType: "runtime.provider.warning" }),
+      );
+      expect(readFileSync(tracePath, "utf8")).not.toContain("thread/start");
     });
   });
 
@@ -334,6 +387,7 @@ async function withFakeCodex(
     | "user-input"
     | "resume"
     | "resume-rebuild"
+    | "resume-auth-failure"
     | "interrupt"
     | "steer"
     | "proxy-output",
@@ -391,6 +445,7 @@ function fakeCodexSource(
     | "user-input"
     | "resume"
     | "resume-rebuild"
+    | "resume-auth-failure"
     | "interrupt"
     | "steer"
     | "proxy-output",
@@ -457,10 +512,11 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
   } else if (message.method === "initialized") {
     return;
   } else if (message.method === "thread/resume") {
-    if (scenario === "resume-rebuild") send({ id: message.id, error: { code: -2, message: "missing thread" } });
+    if (scenario === "resume-rebuild") send({ id: message.id, error: { code: -2, message: "missing thread: native-resume-secret" } });
+    else if (scenario === "resume-auth-failure") send({ id: message.id, error: { code: 401, message: "Unauthorized: invalid API key" } });
     else send({ id: message.id, result: { thread: { id: message.params.threadId } } });
   } else if (message.method === "thread/start") {
-    if (scenario === "resume") send({ id: message.id, error: { code: -1, message: "unexpected thread/start" } });
+    if (scenario === "resume" || scenario === "resume-auth-failure") send({ id: message.id, error: { code: -1, message: "unexpected thread/start" } });
     else send({ id: message.id, result: { thread: { id: "thread-new" } } });
   } else if (message.method === "turn/start") {
     if (scenario === "resume-rebuild") {

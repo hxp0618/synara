@@ -53,6 +53,7 @@ type Config struct {
 	WorkerHeartbeatTimeout        time.Duration
 	WorkerReceiptTTL              time.Duration
 	ProviderCursorKey             []byte
+	ProviderCursorMaximumAge      time.Duration
 	LocalAgentdRunnerCommand      []string
 	LocalAgentdWorkspaceRoot      string
 	LocalAgentdGitCacheRoot       string
@@ -182,6 +183,9 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	if cfg.WorkerReceiptTTL, err = envDurationStrict("SYNARA_WORKER_RECEIPT_TTL", 24*time.Hour); err != nil {
+		return Config{}, err
+	}
+	if cfg.ProviderCursorMaximumAge, err = envDurationStrict("SYNARA_PROVIDER_CURSOR_MAX_AGE", 30*24*time.Hour); err != nil {
 		return Config{}, err
 	}
 	if cfg.ArtifactUsePathStyle, err = envBoolStrict("SYNARA_ARTIFACT_USE_PATH_STYLE", cfg.Platform.ArtifactStore == platform.ArtifactMinIO); err != nil {
@@ -340,6 +344,9 @@ func Load() (Config, error) {
 	}
 	if cfg.WorkerReceiptTTL <= 0 {
 		return Config{}, errors.New("SYNARA_WORKER_RECEIPT_TTL must be positive")
+	}
+	if cfg.ProviderCursorMaximumAge <= 0 || cfg.ProviderCursorMaximumAge > 365*24*time.Hour {
+		return Config{}, errors.New("SYNARA_PROVIDER_CURSOR_MAX_AGE must be positive and at most 8760h")
 	}
 	if cfg.ArtifactPresignTTL <= 0 || cfg.ArtifactPresignTTL > 24*time.Hour {
 		return Config{}, errors.New("SYNARA_ARTIFACT_PRESIGN_TTL must be positive and at most 24h")

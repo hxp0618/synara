@@ -284,12 +284,64 @@ func IsCanonicalRuntimeEventV2Payload(eventType string, payload map[string]any) 
 			return requiredTrimmedString(file, "filename") && requiredTrimmedString(file, "error")
 		})
 	case "runtime.warning":
-		return requiredTrimmedString(payload, "message")
+		if !requiredTrimmedString(payload, "message") {
+			return false
+		}
+		detail, ok := objectField(payload, "detail")
+		if !ok || !providerResumeFallbackWarningDetailCandidate(detail) {
+			return true
+		}
+		return IsProviderResumeFallbackRuntimeWarningPayload(payload)
 	case "runtime.error":
 		return requiredTrimmedString(payload, "message") && optionalEnum(payload, "class", "provider_error", "transport_error", "permission_error", "validation_error", "unknown")
 	default:
 		return false
 	}
+}
+
+// IsProviderResumeFallbackRuntimeWarningPayload identifies the one warning semantic slot
+// that agentd may replay with a deterministic Event ID. Keep this stricter than generic
+// runtime.warning detail so resume fallback outcomes cannot carry Provider errors or secrets.
+func IsProviderResumeFallbackRuntimeWarningPayload(payload map[string]any) bool {
+	if !exactObjectFields(payload, "message", "detail") || !requiredTrimmedString(payload, "message") {
+		return false
+	}
+	detail, ok := objectField(payload, "detail")
+	return ok && validProviderResumeFallbackWarningDetail(detail)
+}
+
+func providerResumeFallbackWarningDetailCandidate(detail map[string]any) bool {
+	for _, field := range []string{
+		"kind", "attemptedStrategy", "selectedStrategy", "outcome", "reasonCode", "fallbackSafety",
+		"authoritativeHistorySequence",
+	} {
+		if _, found := detail[field]; found {
+			return true
+		}
+	}
+	return false
+}
+
+func validProviderResumeFallbackWarningDetail(detail map[string]any) bool {
+	return exactObjectFields(
+		detail,
+		"kind",
+		"attemptedStrategy",
+		"selectedStrategy",
+		"outcome",
+		"reasonCode",
+		"fallbackSafety",
+		"authoritativeHistorySequence",
+		"provider",
+	) &&
+		requiredEnum(detail, "kind", "session_resume") &&
+		requiredEnum(detail, "attemptedStrategy", "native-cursor") &&
+		requiredEnum(detail, "selectedStrategy", "authoritative-history") &&
+		requiredEnum(detail, "outcome", "fallback_selected") &&
+		requiredEnum(detail, "reasonCode", "session_resume_invalid", "session_resume_expired") &&
+		requiredEnum(detail, "fallbackSafety", "before_turn_activity") &&
+		requiredNonNegativeSafeInteger(detail, "authoritativeHistorySequence") &&
+		requiredEnum(detail, "provider", "codex", "claudeAgent")
 }
 
 func validTokenUsage(usage map[string]any) bool {
@@ -434,6 +486,15 @@ func optionalNonNegativeInteger(value map[string]any, key string) bool {
 	return !found || (isJSONInteger(decoded) && numberValue(decoded) >= 0)
 }
 
+func requiredNonNegativeSafeInteger(value map[string]any, key string) bool {
+	decoded, found := value[key]
+	if !found || !isJSONInteger(decoded) {
+		return false
+	}
+	number := numberValue(decoded)
+	return number >= 0 && number <= 9_007_199_254_740_991
+}
+
 func optionalNumber(value map[string]any, key string) bool {
 	decoded, found := value[key]
 	return !found || isJSONNumber(decoded)
@@ -470,6 +531,18 @@ func allObjects(values []any, validate func(map[string]any) bool) bool {
 	for _, value := range values {
 		object, ok := value.(map[string]any)
 		if !ok || object == nil || !validate(object) {
+			return false
+		}
+	}
+	return true
+}
+
+func exactObjectFields(value map[string]any, fields ...string) bool {
+	if len(value) != len(fields) {
+		return false
+	}
+	for _, field := range fields {
+		if _, found := value[field]; !found {
 			return false
 		}
 	}

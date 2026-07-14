@@ -9,6 +9,10 @@ import {
 } from "./providerHost";
 import { providerInteractionRequestId } from "./interactionRequestId";
 import { ProviderInterruptedError } from "./providerRunErrors";
+import {
+  classifyProviderResumeFailure,
+  providerResumeFallbackWarning,
+} from "./providerResumeFallback";
 
 type JsonRpcId = string | number;
 
@@ -197,14 +201,9 @@ class CodexAppServerRuntime {
           const detail = error instanceof Error ? error.message : String(error);
           throw new Error(`Codex app-server session resume is invalid: ${detail}`);
         }
-        this.options.emit({
-          type: "event",
-          eventType: "runtime.provider.warning",
-          payload: {
-            provider: "codex",
-            message: "Native Codex resume was unavailable; rebuilt the turn from authoritative history.",
-          },
-        });
+        const reasonCode = classifyProviderResumeFailure(error);
+        if (!reasonCode) throw error;
+        this.options.emit(providerResumeFallbackWarning(this.options.input, "codex", reasonCode));
       }
     }
 

@@ -74,6 +74,110 @@ func TestRunnerProviderHostV2NegotiatesAndRunsResumeTurn(t *testing.T) {
 	}
 }
 
+func TestRunnerMessageFromProviderHostDerivesStableProviderResumeFallbackEventIDForReplay(t *testing.T) {
+	payload := map[string]any{
+		"message": "Native Provider resume failed before turn activity; authoritative-history fallback selected.",
+		"detail": map[string]any{
+			"kind":                         "session_resume",
+			"attemptedStrategy":            "native-cursor",
+			"selectedStrategy":             "authoritative-history",
+			"outcome":                      "fallback_selected",
+			"reasonCode":                   "session_resume_invalid",
+			"fallbackSafety":               "before_turn_activity",
+			"authoritativeHistorySequence": float64(31),
+			"provider":                     "codex",
+		},
+	}
+	message := providerHostMessage{
+		RequestID: "request-1", ProtocolVersion: providerHostProtocolVersion{Major: 2, Minor: 1},
+		ExecutionID: uuid.NewString(), Generation: 3, CommandID: "send:stable-command",
+		OccurredAt: time.Now().UTC().Format(time.RFC3339Nano), MessageType: "Event",
+		Payload: map[string]any{
+			"eventVersion": float64(executions.RuntimeEventVersionV2),
+			"eventType":    "runtime.warning",
+			"payload":      payload,
+		},
+	}
+	first, err := runnerMessageFromProviderHost(message, executions.RuntimeEventVersionV2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	message.RequestID = "request-2"
+	message.OccurredAt = time.Now().UTC().Add(time.Second).Format(time.RFC3339Nano)
+	replayed, err := runnerMessageFromProviderHost(message, executions.RuntimeEventVersionV2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.EventID == nil || replayed.EventID == nil || *first.EventID != *replayed.EventID {
+		t.Fatalf("fallback replay Event IDs differ: first=%v replayed=%v", first.EventID, replayed.EventID)
+	}
+
+	changedReason := message
+	changedPayload := map[string]any{}
+	for key, value := range payload {
+		changedPayload[key] = value
+	}
+	changedDetail := map[string]any{}
+	for key, value := range payload["detail"].(map[string]any) {
+		changedDetail[key] = value
+	}
+	changedDetail["reasonCode"] = "session_resume_expired"
+	changedPayload["detail"] = changedDetail
+	changedReason.Payload = map[string]any{
+		"eventVersion": float64(executions.RuntimeEventVersionV2),
+		"eventType":    "runtime.warning",
+		"payload":      changedPayload,
+	}
+	changedReasonMessage, err := runnerMessageFromProviderHost(changedReason, executions.RuntimeEventVersionV2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changedReasonMessage.EventID == nil || *changedReasonMessage.EventID != *first.EventID {
+		t.Fatalf("same Send fallback semantic slot changed Event ID: first=%v changed=%v", first.EventID, changedReasonMessage.EventID)
+	}
+
+	changedGeneration := message
+	changedGeneration.Generation++
+	nextGeneration, err := runnerMessageFromProviderHost(changedGeneration, executions.RuntimeEventVersionV2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changedCommand := message
+	changedCommand.CommandID = "send:next-command"
+	nextCommand, err := runnerMessageFromProviderHost(changedCommand, executions.RuntimeEventVersionV2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if nextGeneration.EventID == nil || nextCommand.EventID == nil ||
+		*nextGeneration.EventID == *first.EventID || *nextCommand.EventID == *first.EventID {
+		t.Fatalf("fallback Event ID was not scoped by generation and Send command: first=%v generation=%v command=%v",
+			first.EventID, nextGeneration.EventID, nextCommand.EventID)
+	}
+}
+
+func TestRunnerMessageFromProviderHostLeavesOtherRuntimeEventsWithoutDerivedEventID(t *testing.T) {
+	message := providerHostMessage{
+		RequestID: "request-1", ProtocolVersion: providerHostProtocolVersion{Major: 2, Minor: 1},
+		ExecutionID: uuid.NewString(), Generation: 1, CommandID: "send:ordinary-warning",
+		OccurredAt: time.Now().UTC().Format(time.RFC3339Nano), MessageType: "Event",
+		Payload: map[string]any{
+			"eventVersion": float64(executions.RuntimeEventVersionV2),
+			"eventType":    "runtime.warning",
+			"payload": map[string]any{
+				"message": "Provider emitted an unknown native event",
+				"detail":  map[string]any{"provider": "codex"},
+			},
+		},
+	}
+	runnerMessage, err := runnerMessageFromProviderHost(message, executions.RuntimeEventVersionV2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runnerMessage.EventID != nil {
+		t.Fatalf("ordinary Runtime Event received a derived Event ID: %v", runnerMessage.EventID)
+	}
+}
+
 func TestRunnerProviderHostV2DeliversInteractionResolutionDuringSend(t *testing.T) {
 	t.Setenv("GO_WANT_PROVIDER_HOST_HELPER", "1")
 	t.Setenv("PROVIDER_HOST_TEST_MODE", "interaction")

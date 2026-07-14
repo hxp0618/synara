@@ -94,7 +94,9 @@ starts or resumes the native Thread, streams Turn/Item/usage events, and routes 
 or file Approval, and Plan Mode Structured User Input through durable Worker Interaction delivery. The immutable
 Turn `runtimeMode` selects approval-required versus full-access permissions, while `interactionMode=plan`
 activates Codex Plan Mode. Native Cursor resume is attempted first; when it is unavailable, a new Thread is
-rebuilt from bounded authoritative history instead of depending on the old Worker state.
+rebuilt from bounded authoritative history instead of depending on the old Worker state. Fallback is selected
+only for an explicitly invalid or expired native Session before Turn activity begins; authentication, rate-limit,
+transport, and ambiguous Provider failures remain terminal instead of silently replaying a Turn.
 
 Claude uses `@anthropic-ai/claude-agent-sdk` as its production v2 runtime. Each Send Turn owns one streaming
 SDK Query, tries the native Session Cursor before authoritative-history reconstruction, and uses native
@@ -103,6 +105,14 @@ Synara policy: approval-required Turns force mutating/network/command tools thro
 channel, while full-access Turns auto-allow them. `AskUserQuestion` is projected as Structured User Input and
 Plan Mode uses the native SDK permission mode. Provider output, tool lifecycle and usage are normalized without
 forwarding raw SDK payloads.
+
+Selecting authoritative-history fallback emits internal `runtime.provider.warning`, normalized to canonical
+`runtime.warning`. Its fixed message states that fallback was selected before Turn activity; it does not claim the
+replacement Turn succeeded. Canonical `detail` allows only `kind=session_resume`,
+`attemptedStrategy=native-cursor`, `selectedStrategy=authoritative-history`,
+`outcome=fallback_selected`, `reasonCode=session_resume_invalid|session_resume_expired`,
+`fallbackSafety=before_turn_activity`, `authoritativeHistorySequence`, and `provider`.
+Provider errors, Cursor values, credentials, and other native payload fields are never copied into this outcome.
 
 ## Describe
 

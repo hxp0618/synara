@@ -39,7 +39,7 @@ export function normalizeRuntimeEventV2(message: RunnerEvent): RuntimeEventV2Wir
     case "runtime.provider.warning":
       return runtimeEvent("runtime.warning", {
         message: stringValue(message.payload.message) ?? "Provider runtime reported a warning.",
-        detail: safeProviderDetail(message.payload),
+        detail: safeProviderWarningDetail(message.payload),
       });
     default:
       return runtimeEvent("runtime.warning", {
@@ -159,6 +159,35 @@ function normalizeStatus(value: unknown): RuntimeItemStatus {
 function safeProviderDetail(payload: Record<string, unknown>): Record<string, unknown> {
   const provider = stringValue(payload.provider);
   return provider ? { provider: boundedString(provider, 80) } : {};
+}
+
+function safeProviderWarningDetail(payload: Record<string, unknown>): Record<string, unknown> {
+  const detail = safeProviderDetail(payload);
+  if (payload.kind === "session_resume") detail.kind = payload.kind;
+  if (payload.attemptedStrategy === "native-cursor") {
+    detail.attemptedStrategy = payload.attemptedStrategy;
+  }
+  if (payload.selectedStrategy === "authoritative-history") {
+    detail.selectedStrategy = payload.selectedStrategy;
+  }
+  if (payload.outcome === "fallback_selected") detail.outcome = payload.outcome;
+  if (
+    payload.reasonCode === "session_resume_invalid" ||
+    payload.reasonCode === "session_resume_expired"
+  ) {
+    detail.reasonCode = payload.reasonCode;
+  }
+  if (payload.fallbackSafety === "before_turn_activity") {
+    detail.fallbackSafety = payload.fallbackSafety;
+  }
+  if (
+    typeof payload.authoritativeHistorySequence === "number" &&
+    Number.isSafeInteger(payload.authoritativeHistorySequence) &&
+    payload.authoritativeHistorySequence >= 0
+  ) {
+    detail.authoritativeHistorySequence = payload.authoritativeHistorySequence;
+  }
+  return detail;
 }
 
 function runtimeEvent(
