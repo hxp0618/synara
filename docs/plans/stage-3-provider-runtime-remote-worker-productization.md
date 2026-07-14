@@ -19,7 +19,9 @@
 - **预计工作量**：XL
 - **风险**：HIGH
 - **计划基线分支**：`codex/saas-tenancy-user`
-- **最近稳定检查点**：`e88563e9`（Stage 2 已验收并推送；Durable Interaction Web 权威接线已完成）
+- **最近稳定检查点**：`2763ebd3`（Kubernetes deterministic Provider fixture 13/13，通过 Pending
+  Approval Pod-loss Generation 恢复；正式证据见
+  `docs/reports/stage-3-kubernetes-provider-fixture-acceptance-2763ebd3.md`）
 - **工作区状态**：Stage 3 持续执行中，执行时以当前分支和已验证证据为准
 - **依赖**：Stage 2 的 Control Plane Session/Execution 权威、Worker Lease/Fencing、Artifact、SSE
 - **目标结果**：所有正式支持的 Provider 可以通过统一 Provider Host 和 Worker Contract，稳定运行在
@@ -552,7 +554,7 @@ pending -> approved / denied / answered / expired / cancelled / superseded
 - Drain 中的 Worker 不再领取新 Execution，并能处理或安全交接 Pending Interaction。
 - 跨 Tenant 无法读取或解决 Interaction。
 
-### D 当前证据（2026-07-13）
+### D 当前证据（2026-07-14）
 
 - 已完成 Session 级 pending-only Snapshot、`snapshotSequence` 竞态对账、页面刷新恢复和 SaaS/Web
   Resolve/Interrupt 权威路由；本地模式继续使用 Native API。
@@ -562,8 +564,13 @@ pending -> approved / denied / answered / expired / cancelled / superseded
   复用 `idx_execution_interactions_expiry`，超时后 Fence 旧 Generation 并转入 `recovering`。
 - 已用真实 PostgreSQL 17 验证双 Control Plane 实例并发 Resolve：不同决策仅一个终态；相同决策、
   不同幂等键不重复 Event、Audit 或 Resolution delivery。
-- D 尚未整体完成：仍需把 Pending Interaction 纳入统一 Provider Acceptance Suite，并完成 Drain、Pod
-  Eviction、Provider 不支持恢复时的跨 Target 故障矩阵。
+- `2763ebd3` 的 disposable Kind deterministic Codex fixture 13/13 通过：Pending Approval 期间删除准确的
+  execution-pinned Pod 后，同一 Execution 从 Generation 1 恢复到 2，旧 Interaction/Request/Pod UID 均被
+  替换，只有新 Request 可以 Resolve，后续 Artifact、User Input、Provider Error、Control Plane Restart
+  和第二 Turn 连续完成；见
+  `docs/reports/stage-3-kubernetes-provider-fixture-acceptance-2763ebd3.md`。
+- D 尚未整体完成：仍需完成 Drain、真实 Eviction、Provider 不支持恢复时的跨 Target 故障矩阵，以及
+  真实 Codex/Claude Adapter 的 Interaction Release Acceptance。
 
 ## 10. 工作流 E：Runtime Event 版本与兼容
 
@@ -715,6 +722,9 @@ Snapshot 必须有大小上限、Token 预算和确定性排序。
   索引共同防止并发占用 Session。
 - `queued` 或 `recovering` Execution 收到 Interrupt 时不等待 Worker：Control Command 立即
   `acknowledged`，Execution/Turn 同步取消并释放 Session 单活槽位。
+- `2763ebd3` 的 disposable Kind deterministic fixture 证明 Pod 替换后 Session Event Sequence 从 1 到
+  57 连续，Control Plane 重启后第二 Turn 可继续；该用例使用空 Repository Project 和 fixture Cursor，
+  不替代真实 Provider Cursor 失效或删除本地 Workspace/Provider State 的四 Target 验收。
 - 当前仍未关闭 F：Cursor Payload 已记录 `IssuedAt`，但还没有完整的过期策略；
   Local/SSH/Docker/Kubernetes 删除本地状态后的同源 Live Acceptance 仍需由工作流 L
   证明。
@@ -1163,10 +1173,13 @@ Provider × Capability × Execution Target
   与产品 Target 生命周期执行，不代替 Worker 注册、Heartbeat 或 Claim。
 - Runner 已显式建模 `standing` 与 `execution-pinned` Worker Allocation，并以 Capability 声明
   Managed Replacement；execution-pinned 路径使用 Approval 作为 Worker/Manifest 可观测屏障。
-- Kubernetes Driver 已在 disposable kind Context 上通过真实 Kubernetes API 创建隔离 Namespace、
-  ServiceAccount/RBAC、短期 Token/CA 和 execution-pinned Pod/Manifest；deterministic Codex fixture
-  的核心连续性用例通过，并验证终态 Pod/Manifest 清理。该证据尚不覆盖 Eviction、网络故障、
-  Image Rollout 或真实 Provider Release Gate。
+- `2763ebd3` 的 Kubernetes Driver 在 owned disposable Kind Context 上通过真实 Kubernetes API 创建隔离
+  Namespace、ServiceAccount/RBAC、短期 Token/CA 和 execution-pinned Pod/Manifest；重新构建当前
+  Worker fixture 后 13/13 通过。该结果覆盖 Pending Approval Pod Delete、Generation 1→2 Fence、
+  Interaction Request 换代、Artifact/User Input/Provider Error、Control Plane Restart、第二 Turn、
+  Event Sequence 1→57；报告生成后的定向检查确认 owned 集群和精确自动构建镜像均已不存在。见
+  `docs/reports/stage-3-kubernetes-provider-fixture-acceptance-2763ebd3.md`。该证据尚不覆盖 Drain、
+  Eviction、网络故障、Image Rollout 或真实 Provider Release Gate。
 - 默认运行的是 deterministic Provider Host Protocol 2.1 fixture。它能证明共享 Contract、
   Control Plane-to-Worker-to-Host 通路和 Local/SSH/Docker/Kubernetes 恢复编排，**不等于**使用真实
   Codex App Server 或 Claude Agent SDK 的 Release Acceptance。
