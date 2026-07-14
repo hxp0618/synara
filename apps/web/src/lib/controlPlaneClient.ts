@@ -461,8 +461,14 @@ type ErrorEnvelope = {
   error?: { code?: string; message?: string; requestId?: string };
 };
 
+function normalizeSessionEventSequence(sequence: number): number {
+  return Number.isSafeInteger(sequence) && sequence > 0 ? sequence : 0;
+}
+
 export function resolveSessionEventStreamUrl(sessionId: string, afterSequence: number): string {
-  const query = new URLSearchParams({ afterSequence: String(Math.max(0, afterSequence)) });
+  const query = new URLSearchParams({
+    afterSequence: String(normalizeSessionEventSequence(afterSequence)),
+  });
   return resolveControlPlaneHttpUrl(
     `/v1/sessions/${encodeURIComponent(sessionId)}/events/stream?${query.toString()}`,
   );
@@ -481,7 +487,7 @@ function subscribeSessionEvents(
   let closed = false;
   let source: EventSource | null = null;
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-  let lastSequence = Math.max(0, afterSequence);
+  let lastSequence = normalizeSessionEventSequence(afterSequence);
 
   const scheduleReconnect = () => {
     if (closed || reconnectTimer !== null) return;
@@ -495,8 +501,11 @@ function subscribeSessionEvents(
     if (closed || source !== failedSource) return;
     failedSource.close();
     source = null;
-    handlers.onError?.();
-    scheduleReconnect();
+    try {
+      handlers.onError?.();
+    } finally {
+      scheduleReconnect();
+    }
   };
 
   const connect = () => {
@@ -510,10 +519,19 @@ function subscribeSessionEvents(
     };
     nextSource.onerror = () => fail(nextSource);
     nextSource.addEventListener("session-event", (message) => {
+      if (closed || source !== nextSource) return;
       try {
         const event = JSON.parse(message.data) as ControlPlaneSessionEvent;
+        if (!Number.isSafeInteger(event.sequence) || event.sequence < 1) {
+          throw new Error("Session Event sequence must be a positive safe integer.");
+        }
+        if (event.sequence <= lastSequence) return;
+        if (event.sequence !== lastSequence + 1) {
+          fail(nextSource);
+          return;
+        }
         handlers.onEvent(event);
-        lastSequence = Math.max(lastSequence, event.sequence);
+        lastSequence = event.sequence;
       } catch {
         fail(nextSource);
       }
@@ -1007,7 +1025,7 @@ export const controlPlaneClient = {
     ),
   listSessionEvents: (sessionId: string, afterSequence = 0, limit = 500) => {
     const query = new URLSearchParams({
-      afterSequence: String(Math.max(0, afterSequence)),
+      afterSequence: String(normalizeSessionEventSequence(afterSequence)),
       limit: String(Math.max(1, Math.min(500, limit))),
     });
     return controlPlaneRequest<ControlPlaneSessionEventPage>(

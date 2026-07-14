@@ -8,7 +8,32 @@ import {
   resolveSessionEventStreamUrl,
 } from "./controlPlaneClient";
 
+class FakeEventSource {
+  static instances: FakeEventSource[] = [];
+
+  readonly close = vi.fn();
+  readonly listeners = new Map<string, (event: MessageEvent<string>) => void>();
+  onerror: (() => void) | null = null;
+  onopen: (() => void) | null = null;
+
+  constructor(
+    readonly url: string,
+    readonly options: EventSourceInit,
+  ) {
+    FakeEventSource.instances.push(this);
+  }
+
+  addEventListener(type: string, listener: (event: MessageEvent<string>) => void) {
+    this.listeners.set(type, listener);
+  }
+
+  emitSessionEvent(event: { sequence: unknown }) {
+    this.listeners.get("session-event")?.({ data: JSON.stringify(event) } as MessageEvent<string>);
+  }
+}
+
 afterEach(() => {
+  FakeEventSource.instances = [];
   vi.useRealTimers();
   vi.unstubAllGlobals();
 });
@@ -26,36 +51,14 @@ describe("controlPlaneClient", () => {
     expect(resolveSessionEventStreamUrl("session/one", 12)).toBe(
       "https://synara.example/v1/sessions/session%2Fone/events/stream?afterSequence=12",
     );
+    expect(resolveSessionEventStreamUrl("session/one", Number.NaN)).toBe(
+      "https://synara.example/v1/sessions/session%2Fone/events/stream?afterSequence=0",
+    );
   });
 
   it("reconnects session event streams from the last applied sequence", async () => {
     vi.useFakeTimers();
     vi.stubGlobal("window", { location: new URL("https://synara.example/settings") });
-
-    class FakeEventSource {
-      static instances: FakeEventSource[] = [];
-
-      readonly close = vi.fn();
-      readonly listeners = new Map<string, (event: MessageEvent<string>) => void>();
-      onerror: (() => void) | null = null;
-      onopen: (() => void) | null = null;
-
-      constructor(
-        readonly url: string,
-        readonly options: EventSourceInit,
-      ) {
-        FakeEventSource.instances.push(this);
-      }
-
-      addEventListener(type: string, listener: (event: MessageEvent<string>) => void) {
-        this.listeners.set(type, listener);
-      }
-
-      emitSessionEvent(event: { sequence: number }) {
-        this.listeners.get("session-event")?.({ data: JSON.stringify(event) } as MessageEvent<string>);
-      }
-    }
-
     vi.stubGlobal("EventSource", FakeEventSource);
     const onEvent = vi.fn();
     const onError = vi.fn();
@@ -105,6 +108,72 @@ describe("controlPlaneClient", () => {
     expect(FakeEventSource.instances[2]!.close).toHaveBeenCalledTimes(1);
     await vi.advanceTimersByTimeAsync(2_000);
     expect(FakeEventSource.instances).toHaveLength(3);
+  });
+
+  it.each([0, -1, 1.5, "13", null, Number.MAX_SAFE_INTEGER + 1])(
+    "rejects invalid session event sequence %s without advancing the cursor",
+    async (sequence) => {
+      vi.useFakeTimers();
+      vi.stubGlobal("window", { location: new URL("https://synara.example/settings") });
+      vi.stubGlobal("EventSource", FakeEventSource);
+      const onEvent = vi.fn();
+      const onError = vi.fn();
+      const close = controlPlaneClient.subscribeSessionEvents("session-one", 12, {
+        onEvent,
+        onError,
+      });
+
+      FakeEventSource.instances[0]!.emitSessionEvent({ sequence });
+      expect(FakeEventSource.instances[0]!.close).toHaveBeenCalledTimes(1);
+      expect(onEvent).not.toHaveBeenCalled();
+      expect(onError).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(2_000);
+
+      expect(FakeEventSource.instances).toHaveLength(2);
+      expect(FakeEventSource.instances[1]!.url).toBe(
+        "https://synara.example/v1/sessions/session-one/events/stream?afterSequence=12",
+      );
+      close();
+    },
+  );
+
+  it("deduplicates events, reconnects gaps, and ignores stale sources", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("window", { location: new URL("https://synara.example/settings") });
+    vi.stubGlobal("EventSource", FakeEventSource);
+    const onEvent = vi.fn();
+    const onError = vi.fn();
+    const close = controlPlaneClient.subscribeSessionEvents("session-one", 12, {
+      onEvent,
+      onError,
+    });
+
+    const firstSource = FakeEventSource.instances[0]!;
+    firstSource.emitSessionEvent({ sequence: 13 });
+    firstSource.emitSessionEvent({ sequence: 13 });
+    expect(onEvent).toHaveBeenCalledTimes(1);
+    expect(firstSource.close).not.toHaveBeenCalled();
+
+    firstSource.emitSessionEvent({ sequence: 15 });
+    expect(firstSource.close).toHaveBeenCalledTimes(1);
+    expect(onError).toHaveBeenCalledTimes(1);
+
+    firstSource.emitSessionEvent({ sequence: 14 });
+    expect(onEvent).toHaveBeenCalledTimes(1);
+    expect(onError).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(2_000);
+
+    expect(FakeEventSource.instances).toHaveLength(2);
+    expect(FakeEventSource.instances[1]!.url).toBe(
+      "https://synara.example/v1/sessions/session-one/events/stream?afterSequence=13",
+    );
+    FakeEventSource.instances[1]!.emitSessionEvent({ sequence: 14 });
+    expect(onEvent).toHaveBeenCalledTimes(2);
+    expect(onEvent).toHaveBeenLastCalledWith({ sequence: 14 });
+
+    close();
+    FakeEventSource.instances[1]!.emitSessionEvent({ sequence: 15 });
+    expect(onEvent).toHaveBeenCalledTimes(2);
   });
 
   it("probes the public platform profile before requiring authentication", async () => {

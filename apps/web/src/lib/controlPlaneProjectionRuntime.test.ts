@@ -1,11 +1,41 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type {
-  ControlPlaneAgentSession,
-  ControlPlaneSessionEvent,
-  ControlPlaneSessionEventPage,
+import {
+  controlPlaneClient,
+  type ControlPlaneAgentSession,
+  type ControlPlaneSessionEvent,
+  type ControlPlaneSessionEventPage,
 } from "./controlPlaneClient";
 import { ControlPlaneProjectionRuntime } from "./controlPlaneProjectionRuntime";
+
+class FakeEventSource {
+  static instances: FakeEventSource[] = [];
+
+  readonly close = vi.fn();
+  readonly listeners = new Map<string, (event: MessageEvent<string>) => void>();
+  onerror: (() => void) | null = null;
+  onopen: (() => void) | null = null;
+
+  constructor(readonly url: string) {
+    FakeEventSource.instances.push(this);
+  }
+
+  addEventListener(type: string, listener: (event: MessageEvent<string>) => void) {
+    this.listeners.set(type, listener);
+  }
+
+  emitSessionEvent(nextEvent: ControlPlaneSessionEvent) {
+    this.listeners.get("session-event")?.({
+      data: JSON.stringify(nextEvent),
+    } as MessageEvent<string>);
+  }
+}
+
+afterEach(() => {
+  FakeEventSource.instances = [];
+  vi.useRealTimers();
+  vi.unstubAllGlobals();
+});
 
 const session: ControlPlaneAgentSession = {
   id: "session-1",
@@ -94,6 +124,56 @@ describe("ControlPlaneProjectionRuntime", () => {
     unwatchTwo();
     expect(close).toHaveBeenCalledTimes(1);
     runtime.dispose();
+  });
+
+  it("keeps a single reconnect loop when using the real SSE client", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("window", { location: new URL("https://synara.example/settings") });
+    vi.stubGlobal("EventSource", FakeEventSource);
+    const listSessionEvents = vi.fn(
+      async (_sessionId: string, afterSequence: number): Promise<ControlPlaneSessionEventPage> =>
+        afterSequence === 0
+          ? { items: [event(1, "turn.created"), event(2)], lastSequence: 2 }
+          : { items: [], lastSequence: afterSequence },
+    );
+    const runtime = new ControlPlaneProjectionRuntime({
+      client: {
+        listSessionEvents,
+        subscribeSessionEvents: controlPlaneClient.subscribeSessionEvents,
+      },
+      onChange: () => undefined,
+      reconnectDelayMs: 2_000,
+    });
+    runtime.setScope("tenant-1:organization-1", [session]);
+    runtime.watch(session.id);
+    await vi.waitFor(() => expect(FakeEventSource.instances).toHaveLength(1));
+
+    const firstSource = FakeEventSource.instances[0]!;
+    expect(firstSource.url).toBe(
+      "https://synara.example/v1/sessions/session-1/events/stream?afterSequence=2",
+    );
+    firstSource.onopen?.();
+    expect(runtime.projections.get(session.id)?.streamStatus).toBe("live");
+    firstSource.emitSessionEvent(event(3));
+    expect(runtime.projections.get(session.id)?.lastAppliedSequence).toBe(3);
+    firstSource.onerror?.();
+    expect(firstSource.close).toHaveBeenCalledTimes(1);
+    expect(runtime.projections.get(session.id)?.streamStatus).toBe("reconnecting");
+
+    await vi.advanceTimersByTimeAsync(1_999);
+    expect(FakeEventSource.instances).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1);
+    await vi.waitFor(() => expect(FakeEventSource.instances).toHaveLength(2));
+    expect(listSessionEvents).toHaveBeenCalledTimes(2);
+    expect(listSessionEvents).toHaveBeenLastCalledWith(session.id, 3, 500);
+    expect(FakeEventSource.instances[1]!.url).toBe(
+      "https://synara.example/v1/sessions/session-1/events/stream?afterSequence=3",
+    );
+
+    runtime.dispose();
+    expect(FakeEventSource.instances[1]!.close).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(FakeEventSource.instances).toHaveLength(2);
   });
 
   it("closes the old Tenant stream when scope changes", async () => {
