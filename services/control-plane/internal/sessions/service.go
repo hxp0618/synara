@@ -23,22 +23,45 @@ import (
 
 var activeSessionExecutionStatuses = []string{"queued", "leased", "running", "waiting-for-approval", "recovering"}
 
-type Service struct {
-	db         *gorm.DB
-	authorizer *authorization.Authorizer
-	projects   *projects.Service
-	targets    *executiontargets.Service
-	repository persistence.Repository[persistence.AgentSession]
-	events     *eventBroker
+const defaultProviderCapabilityHeartbeatTimeout = 90 * time.Second
+
+type ServiceOption func(*Service)
+
+func WithProviderCapabilityHeartbeatTimeout(timeout time.Duration) ServiceOption {
+	return func(service *Service) {
+		if timeout > 0 {
+			service.providerCapabilityHeartbeatTimeout = timeout
+		}
+	}
 }
 
-func NewService(db *gorm.DB, projectService *projects.Service, targetService *executiontargets.Service) *Service {
-	return &Service{
+type Service struct {
+	db                                 *gorm.DB
+	authorizer                         *authorization.Authorizer
+	projects                           *projects.Service
+	targets                            *executiontargets.Service
+	repository                         persistence.Repository[persistence.AgentSession]
+	events                             *eventBroker
+	providerCapabilityHeartbeatTimeout time.Duration
+	now                                func() time.Time
+}
+
+func NewService(
+	db *gorm.DB,
+	projectService *projects.Service,
+	targetService *executiontargets.Service,
+	options ...ServiceOption,
+) *Service {
+	service := &Service{
 		db: db, authorizer: authorization.NewAuthorizer(db), projects: projectService,
-		targets:    targetService,
-		repository: persistence.NewRepository[persistence.AgentSession](db),
-		events:     newEventBroker(),
+		targets: targetService, repository: persistence.NewRepository[persistence.AgentSession](db),
+		events: newEventBroker(), providerCapabilityHeartbeatTimeout: defaultProviderCapabilityHeartbeatTimeout,
+		now: func() time.Time { return time.Now().UTC() },
 	}
+	for _, option := range options {
+		option(service)
+	}
+	return service
 }
 
 func ActiveTenant(principal identity.Principal) (uuid.UUID, error) {
@@ -49,10 +72,16 @@ func ActiveTenant(principal identity.Principal) (uuid.UUID, error) {
 }
 
 func toSession(model persistence.AgentSession) Session {
+	provider := strings.TrimSpace(model.Provider)
+	if strings.EqualFold(provider, "claude") {
+		provider = "claudeAgent"
+	} else if canonical, valid := executiontargets.CanonicalStage3Provider(provider); valid {
+		provider = canonical
+	}
 	return Session{
 		ID: model.ID, TenantID: model.TenantID, OrganizationID: model.OrganizationID,
 		ProjectID: model.ProjectID, CreatedBy: model.CreatedBy, Title: model.Title,
-		Status: model.Status, Visibility: model.Visibility, Provider: model.Provider,
+		Status: model.Status, Visibility: model.Visibility, Provider: provider,
 		Model: model.Model, ProviderCredentialID: model.ProviderCredentialID, ExecutionTargetID: model.ExecutionTargetID,
 		LastEventSequence: model.LastEventSequence, CreatedAt: model.CreatedAt,
 		UpdatedAt: model.UpdatedAt, ArchivedAt: model.ArchivedAt,
@@ -199,11 +228,27 @@ func (s *Service) CreateWithIdempotency(
 			"model": modelName, "providerCredentialId": credentialID, "executionTargetId": target.ID,
 		},
 	}, func(tx *gorm.DB) (Session, error) {
+		var targetModel persistence.ExecutionTarget
+		targetErr := tx.WithContext(ctx).
+			Where("id = ? AND status = ?", target.ID, "active").
+			Where("(tenant_id IS NULL OR tenant_id = ?) AND (organization_id IS NULL OR organization_id = ?)", tenantID, project.OrganizationID).
+			Take(&targetModel).Error
+		if errors.Is(targetErr, gorm.ErrRecordNotFound) {
+			return Session{}, problem.New(409, "execution_target_unavailable", "The selected Execution Target is no longer available.")
+		}
+		if targetErr != nil {
+			return Session{}, problem.Wrap(500, "execution_target_lookup_failed", "Failed to reload the selected Execution Target.", targetErr)
+		}
+		if err := s.requireTargetProviderCapabilities(
+			ctx, tx, targetModel, provider, "start-session", "send-turn",
+		); err != nil {
+			return Session{}, err
+		}
 		model := persistence.AgentSession{
 			ID: uuid.New(), TenantID: tenantID, OrganizationID: project.OrganizationID,
 			ProjectID: project.ID, CreatedBy: principal.UserID, Title: title, Status: "active",
 			Visibility: visibility, Provider: provider, Model: modelName,
-			ProviderCredentialID: credentialID, ExecutionTargetID: target.ID,
+			ProviderCredentialID: credentialID, ExecutionTargetID: targetModel.ID,
 		}
 		if err := tx.Create(&model).Error; err != nil {
 			return Session{}, problem.Wrap(409, "session_create_rejected", "Session creation was rejected by a tenant isolation constraint.", err)
@@ -215,7 +260,7 @@ func (s *Service) CreateWithIdempotency(
 			EventType: "session.created", ActorType: "user", ActorID: &principal.UserID,
 			Payload: map[string]any{
 				"title": title, "provider": provider, "visibility": visibility,
-				"executionTargetId": target.ID, "targetKind": target.Kind,
+				"executionTargetId": targetModel.ID, "targetKind": targetModel.Kind,
 				"providerCredentialId": credentialID,
 			},
 		})
@@ -428,6 +473,15 @@ func (s *Service) CreateTurnWithIdempotency(
 		if err := tx.WithContext(ctx).
 			Where("id = ? AND status = ?", locked.ExecutionTargetID, "active").Take(&target).Error; err != nil {
 			return Turn{}, problem.Wrap(409, "execution_target_unavailable", "The session execution target is unavailable.", err)
+		}
+		requiredCapabilities := []string{"send-turn"}
+		if interactionMode == "plan" {
+			requiredCapabilities = append(requiredCapabilities, "plan-mode")
+		}
+		if err := s.requireTargetProviderCapabilities(
+			ctx, tx, target, locked.Provider, requiredCapabilities...,
+		); err != nil {
+			return Turn{}, err
 		}
 		resources, err := s.ensureRuntimeResources(ctx, tx, &locked)
 		if err != nil {

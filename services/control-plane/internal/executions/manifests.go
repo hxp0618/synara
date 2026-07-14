@@ -17,6 +17,7 @@ import (
 	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
 	"github.com/synara-ai/synara/services/control-plane/internal/platform"
 	"github.com/synara-ai/synara/services/control-plane/internal/problem"
+	"github.com/synara-ai/synara/services/control-plane/internal/providercatalog"
 )
 
 const (
@@ -25,40 +26,9 @@ const (
 	workerManifestStorageSchemaVersion = 2
 )
 
-var stage3ProviderNames = []string{
-	"codex", "claudeAgent", "cursor", "gemini", "grok", "kilo", "opencode", "pi",
-}
+var stage3ProviderNames = providercatalog.ProviderNames()
 
-var stage3ProviderCapabilityIDs = []string{
-	"discovery",
-	"start-session",
-	"resume-session",
-	"send-turn",
-	"steer-turn",
-	"interrupt-turn",
-	"approval",
-	"structured-user-input",
-	"plan-mode",
-	"review",
-	"compact",
-	"rollback",
-	"fork",
-	"read-history",
-	"model-list",
-	"model-switch",
-	"skill-discovery",
-	"skill-mentions",
-	"plugin-discovery",
-	"plugin-mentions",
-	"native-commands",
-	"tool-events",
-	"diff-events",
-	"usage-events",
-	"checkpoint",
-	"credential-injection",
-	"authoritative-history-reconstruction",
-	"worker-migration",
-}
+var stage3ProviderCapabilityIDs = providercatalog.CapabilityIDs()
 
 type workerRuntimeCapability struct {
 	WorkerBuildVersion    string  `json:"workerBuildVersion"`

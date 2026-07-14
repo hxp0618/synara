@@ -274,6 +274,21 @@ Descriptor，至少包含：
 
 静态声明必须由 Acceptance Test 校验，避免声明和实现漂移。
 
+### A5. 当前实现证据（2026-07-14）
+
+- `packages/contracts/src/providerCapabilityCatalog.json` 是机器可读能力清单的单一 TypeScript 源；
+  Control Plane 的 Go Catalog 由它生成，并以 Source SHA256 和 generator `-check` 防止漂移。
+- Control Plane 提供脱敏的 Project Target Projection 与 Session Execution Projection，只暴露
+  `supported / unsupported / unobserved`、稳定 Reason Code 和 `native / emulated`，不暴露 Worker、
+  Manifest、心跳、Build 或 Runtime Version 运维字段。
+- 有 Active Execution 时只使用该 Execution 固定的 Worker Manifest；Target Projection 只聚合当前
+  可 Claim 的兼容 Manifest，不能借用不兼容或未声明能力的 Worker。
+- Create Session 和 Create Turn 在幂等事务内分别复检 Start/Send 与 Send/Plan；local-only、Droid、
+  明确不兼容或不支持的能力在持久化前拒绝，`unobserved` 的可排队能力保留 scale-to-zero 语义。
+- Web Provider Picker、Plan、Steer、Interrupt 和高级命令门禁消费同一 Projection；未配置 Control
+  Plane 时保持既有本地行为。
+- 本增量复用既有 Target、Manifest、Session 和 Execution 表，不新增或修改 DDL。
+
 ### A 验收
 
 - 八个 Provider 均有审计记录和支持等级。
@@ -1095,6 +1110,19 @@ Control Plane Agent Session/Event
 5. 删除只为双写/双权威保留的临时代码。
 
 Feature Flag 只能控制路由，不能允许同一 Session 同时双写两个权威 Store。
+
+### K6. 当前实现证据（2026-07-14）
+
+- 首次 SaaS 发送在创建 Session 前组合校验 Start/Send/Plan，避免能力不满足时留下孤立 Session；
+  后续 Turn、Steer 和 Interrupt 使用 Session/Execution Projection，并由 Control Plane 再次校验。
+- SaaS Provider Picker 和 Settings 使用受 Target Projection 约束的 Provider Catalog，不依赖本机 CLI
+  可用性；local-only Provider 与未进入 Catalog 的 Droid 无法绕过搜索或直接 Mutation。
+- 已有 SaaS Session 的模型切换保持显式禁用：Worker 即使声明 `model-switch`，在 Control Plane 尚未
+  持久化 Session/Turn 模型选择前，Web 不制造只改变本地显示、实际仍使用旧模型的假切换。
+- SaaS 模式不执行本地 Provider discovery、Provider-native Slash Command、Compact、Review、Fork、
+  Side、Checkpoint 回滚、历史消息回滚重发或“Implement in a new thread”；handler 仍保留二次门禁。
+- 未配置 Control Plane 时，上述门禁返回 local-allowed，现有本地 Provider Runtime 和 Native API 路径
+  保持不变。
 
 ### K 验收
 

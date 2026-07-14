@@ -351,6 +351,7 @@ export function getAvailableComposerSlashCommands(input: {
   provider: ProviderKind;
   supportsFastSlashCommand: boolean;
   canOfferCompactCommand: boolean;
+  canOfferPlanCommand: boolean;
   canOfferReviewCommand: boolean;
   canOfferForkCommand: boolean;
   canOfferSideCommand: boolean;
@@ -375,7 +376,7 @@ export function getAvailableComposerSlashCommands(input: {
           ...(input.canOfferCompactCommand ? (["compact"] as const) : []),
           "model",
           ...(input.supportsFastSlashCommand ? (["fast"] as const) : []),
-          "plan",
+          ...(input.canOfferPlanCommand ? (["plan"] as const) : []),
           "default",
           ...(input.canOfferReviewCommand ? (["review"] as const) : []),
           ...(input.canOfferForkCommand ? (["fork"] as const) : []),

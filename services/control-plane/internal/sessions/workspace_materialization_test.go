@@ -118,7 +118,7 @@ func TestTurnMovesWorkspaceToNewTargetWithoutLosingOldMaterialization(t *testing
 	if err := fixture.db.Create(&persistence.ExecutionTarget{
 		ID: targetID, TenantID: &fixture.tenantID, OrganizationID: &fixture.organizationID,
 		Kind: "docker", Name: "replacement", Status: "active", ConfigurationEncrypted: []byte{},
-		Capabilities: map[string]any{},
+		Capabilities: enabledProviderPolicyTestCapabilities(),
 	}).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -240,7 +240,7 @@ func TestTurnRejectsDirtyWorkspaceTargetMoveWithoutLatestReadyCheckpoint(t *test
 	if err := fixture.db.Create(&persistence.ExecutionTarget{
 		ID: targetID, TenantID: &fixture.tenantID, OrganizationID: &fixture.organizationID,
 		Kind: "docker", Name: "unsafe-replacement", Status: "active", ConfigurationEncrypted: []byte{},
-		Capabilities: map[string]any{},
+		Capabilities: enabledProviderPolicyTestCapabilities(),
 	}).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -349,7 +349,7 @@ func configureSessionKubernetesTarget(
 	target := persistence.ExecutionTarget{
 		ID: uuid.New(), TenantID: &fixture.tenantID, OrganizationID: &fixture.organizationID,
 		Kind: "kubernetes", Name: "workspace-pod-" + uuid.NewString(), Status: "active",
-		ConfigurationEncrypted: []byte{}, Capabilities: map[string]any{},
+		ConfigurationEncrypted: []byte{}, Capabilities: enabledProviderPolicyTestCapabilities(),
 	}
 	if err := fixture.db.Create(&target).Error; err != nil {
 		t.Fatal(err)
@@ -360,6 +360,14 @@ func configureSessionKubernetesTarget(
 		t.Fatal(err)
 	}
 	return target
+}
+
+func enabledProviderPolicyTestCapabilities() map[string]any {
+	return map[string]any{
+		"providerPolicy": map[string]any{
+			"experimentalProviders": []string{"codex", "claudeAgent"},
+		},
+	}
 }
 
 func seedCurrentPodMaterialization(

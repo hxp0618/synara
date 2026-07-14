@@ -3640,11 +3640,13 @@ export default function Sidebar() {
         threadSummary?.hasPendingApprovals ?? derivePendingApprovals(thread.activities).length > 0;
       const hasPendingUserInput =
         threadSummary?.hasPendingUserInput ?? derivePendingUserInputs(thread.activities).length > 0;
-      const canHandoff = canCreateThreadHandoff({
-        thread,
-        hasPendingApprovals,
-        hasPendingUserInput,
-      });
+      const canHandoff =
+        !controlPlane.isAuthoritative &&
+        canCreateThreadHandoff({
+          thread,
+          hasPendingApprovals,
+          hasPendingUserInput,
+        });
       const threadStatus = threadSummary ? resolveThreadStatusForSidebar(threadSummary) : null;
       const handoffTargets = canHandoff
         ? resolveAvailableHandoffTargetProviders(thread.modelSelection.provider)
@@ -3824,6 +3826,7 @@ export default function Sidebar() {
       copyThreadIdToClipboard,
       clearDismissedThreadStatus,
       clearThreadNotification,
+      controlPlane.isAuthoritative,
       handoffThread,
       markThreadUnread,
       navigate,

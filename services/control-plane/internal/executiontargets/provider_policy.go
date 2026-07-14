@@ -1,14 +1,11 @@
 package executiontargets
 
 import (
-	"strings"
-
 	"github.com/synara-ai/synara/services/control-plane/internal/problem"
+	"github.com/synara-ai/synara/services/control-plane/internal/providercatalog"
 )
 
-var stage3ProviderOrder = []string{
-	"codex", "claudeAgent", "cursor", "gemini", "grok", "kilo", "opencode", "pi",
-}
+var stage3ProviderOrder = providercatalog.ProviderNames()
 
 type ProviderPolicy struct {
 	ExperimentalProviders []string `json:"experimentalProviders"`
@@ -117,13 +114,7 @@ func providerPolicyStrings(value any) ([]string, bool) {
 // Stage 3 Provider. Matching is case-insensitive so persisted storage codes can
 // be safely projected back to the canonical Provider Host/API name.
 func CanonicalStage3Provider(value string) (string, bool) {
-	normalized := strings.ToLower(strings.TrimSpace(value))
-	for _, provider := range stage3ProviderOrder {
-		if strings.ToLower(provider) == normalized {
-			return provider, true
-		}
-	}
-	return "", false
+	return providercatalog.CanonicalName(value)
 }
 
 func invalidProviderPolicy(message string) error {

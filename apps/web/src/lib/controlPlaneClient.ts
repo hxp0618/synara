@@ -1,7 +1,9 @@
 import type {
   ProviderCapabilityMap,
+  ProviderCapabilityProjection,
   ProviderHostProviderKind,
   ProviderInteractionMode,
+  ProviderKind,
   ProviderReleasePolicy,
   ProviderRuntimeDescriptor,
   ProviderSupportTier,
@@ -238,7 +240,7 @@ export type ControlPlaneAgentSession = {
   title: string;
   status: "active" | "suspended" | "archived";
   visibility: "private" | "project" | "organization";
-  provider: string;
+  provider: ProviderKind;
   model: string | null;
   providerCredentialId: string | null;
   executionTargetId: string;
@@ -808,12 +810,20 @@ export const controlPlaneClient = {
     controlPlaneRequest<{ items: ReadonlyArray<ControlPlaneAgentSession> }>(
       `/v1/projects/${encodeURIComponent(projectId)}/sessions`,
     ),
+  getProjectProviderCapabilities: (projectId: string, executionTargetId?: string) => {
+    const query = executionTargetId
+      ? `?${new URLSearchParams({ executionTargetId }).toString()}`
+      : "";
+    return controlPlaneRequest<ProviderCapabilityProjection>(
+      `/v1/projects/${encodeURIComponent(projectId)}/provider-capabilities${query}`,
+    );
+  },
   createSession: (
     projectId: string,
     input: {
       title: string;
       visibility: ControlPlaneAgentSession["visibility"];
-      provider: string;
+      provider: ProviderKind;
       model?: string;
       providerCredentialId?: string;
       executionTargetId?: string;
@@ -830,6 +840,10 @@ export const controlPlaneClient = {
     ),
   getAgentSession: (sessionId: string) =>
     controlPlaneRequest<ControlPlaneAgentSession>(`/v1/sessions/${encodeURIComponent(sessionId)}`),
+  getSessionProviderCapabilities: (sessionId: string) =>
+    controlPlaneRequest<ProviderCapabilityProjection>(
+      `/v1/sessions/${encodeURIComponent(sessionId)}/provider-capabilities`,
+    ),
   listExecutionTargets: (tenantId: string) =>
     controlPlaneRequest<{ items: ReadonlyArray<ControlPlaneExecutionTarget> }>(
       `/v1/tenants/${encodeURIComponent(tenantId)}/execution-targets`,

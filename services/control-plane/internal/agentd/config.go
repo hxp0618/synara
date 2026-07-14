@@ -15,6 +15,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/synara-ai/synara/services/control-plane/internal/platform"
+	"github.com/synara-ai/synara/services/control-plane/internal/providercatalog"
 	"github.com/synara-ai/synara/services/control-plane/internal/validation"
 )
 
@@ -46,9 +47,7 @@ type Config struct {
 	RunnerMessageBytes    int
 }
 
-var stage3ProviderNames = []string{
-	"codex", "claudeAgent", "cursor", "gemini", "grok", "kilo", "opencode", "pi",
-}
+var stage3ProviderNames = providercatalog.ProviderNames()
 
 func LoadConfig() (Config, error) {
 	rawURL := strings.TrimSpace(os.Getenv("SYNARA_CONTROL_PLANE_URL"))

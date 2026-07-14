@@ -250,10 +250,12 @@ func New(
 	mux.Handle("GET /v1/projects/{projectID}", server.requireAuth(http.HandlerFunc(server.getProject)))
 	mux.Handle("PATCH /v1/projects/{projectID}", server.requireAuth(http.HandlerFunc(server.updateProject)))
 	mux.Handle("DELETE /v1/projects/{projectID}", server.requireAuth(http.HandlerFunc(server.archiveProject)))
+	mux.Handle("GET /v1/projects/{projectID}/provider-capabilities", server.requireAuth(http.HandlerFunc(server.projectProviderCapabilities)))
 	mux.Handle("GET /v1/projects/{projectID}/sessions", server.requireAuth(http.HandlerFunc(server.listProjectSessions)))
 	mux.Handle("POST /v1/projects/{projectID}/sessions", server.requireAuth(http.HandlerFunc(server.createSession)))
 
 	mux.Handle("GET /v1/sessions/{sessionID}", server.requireAuth(http.HandlerFunc(server.getAgentSession)))
+	mux.Handle("GET /v1/sessions/{sessionID}/provider-capabilities", server.requireAuth(http.HandlerFunc(server.sessionProviderCapabilities)))
 	mux.Handle("GET /v1/sessions/{sessionID}/events", server.requireAuth(http.HandlerFunc(server.listSessionEvents)))
 	mux.Handle("GET /v1/sessions/{sessionID}/events/stream", server.requireAuth(http.HandlerFunc(server.streamSessionEvents)))
 	mux.Handle("GET /v1/sessions/{sessionID}/interactions", server.requireAuth(http.HandlerFunc(server.listPendingSessionInteractions)))

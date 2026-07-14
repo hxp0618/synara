@@ -55,7 +55,11 @@ export function useComposerSlashCommands(input: {
   activeRootBranch: string | null;
   isServerThread: boolean;
   supportsFastSlashCommand: boolean;
+  canUseLocalProviderCommands: boolean;
   canOfferCompactCommand: boolean;
+  canOfferPlanCommand: boolean;
+  canOfferReviewCommand: boolean;
+  canOfferForkCommand: boolean;
   canOfferSideCommand: boolean;
   canOfferExportCommand: boolean;
   supportsTextNativeReviewCommand: boolean;
@@ -104,7 +108,11 @@ export function useComposerSlashCommands(input: {
     activeRootBranch,
     isServerThread,
     supportsFastSlashCommand,
+    canUseLocalProviderCommands,
     canOfferCompactCommand,
+    canOfferPlanCommand,
+    canOfferReviewCommand,
+    canOfferForkCommand,
     canOfferSideCommand,
     canOfferExportCommand,
     supportsTextNativeReviewCommand,
@@ -131,9 +139,10 @@ export function useComposerSlashCommands(input: {
     provider: selectedProvider,
     supportsFastSlashCommand,
     canOfferCompactCommand,
-    canOfferReviewCommand: true,
-    canOfferForkCommand: true,
-    canOfferSideCommand: true,
+    canOfferPlanCommand,
+    canOfferReviewCommand,
+    canOfferForkCommand,
+    canOfferSideCommand,
     canOfferExportCommand,
     providerNativeCommandNames,
   });
@@ -240,6 +249,14 @@ export function useComposerSlashCommands(input: {
 
   const createForkThreadFromSlashCommand = useCallback(
     async (inputOptions?: { target?: ForkSlashCommandTarget }) => {
+      if (!canOfferForkCommand) {
+        toastManager.add({
+          type: "warning",
+          title: "Fork is unavailable",
+          description: "This thread cannot be forked in the current execution mode.",
+        });
+        return true;
+      }
       const api = readNativeApi();
       if (!api || !activeProject || !activeThread || !isServerThread) {
         toastManager.add({
@@ -289,6 +306,7 @@ export function useComposerSlashCommands(input: {
       activeProject,
       activeRootBranch,
       activeThread,
+      canOfferForkCommand,
       interactionMode,
       isServerThread,
       navigateToThread,
@@ -300,8 +318,16 @@ export function useComposerSlashCommands(input: {
 
   const createSidechatFromSlashCommand = useCallback(
     async (inputOptions?: { initialPrompt?: string }) => {
+      if (!canOfferSideCommand) {
+        toastManager.add({
+          type: "warning",
+          title: "Side is unavailable",
+          description: "This thread cannot create a local Side in the current execution mode.",
+        });
+        return true;
+      }
       const api = readNativeApi();
-      if (!api || !activeProject || !activeThread || !isServerThread || !canOfferSideCommand) {
+      if (!api || !activeProject || !activeThread || !isServerThread) {
         toastManager.add({
           type: "warning",
           title: "Side is unavailable",
@@ -389,6 +415,14 @@ export function useComposerSlashCommands(input: {
 
   const runCodexReviewStart = useCallback(
     async (target: "changes" | "base-branch") => {
+      if (!canOfferReviewCommand) {
+        toastManager.add({
+          type: "warning",
+          title: "Review is unavailable",
+          description: "This thread cannot start a local review in the current execution mode.",
+        });
+        return false;
+      }
       const api = readNativeApi();
       if (!api || !activeThread || !activeProject) {
         toastManager.add({
@@ -485,6 +519,7 @@ export function useComposerSlashCommands(input: {
       activeProject,
       activeRootBranch,
       activeThread,
+      canOfferReviewCommand,
       navigateToThread,
       runtimeMode,
       selectedModelSelection,
@@ -494,6 +529,14 @@ export function useComposerSlashCommands(input: {
 
   const handleReviewTargetSelection = useCallback(
     async (target: "changes" | "base-branch") => {
+      if (!canOfferReviewCommand) {
+        toastManager.add({
+          type: "warning",
+          title: "Review is unavailable",
+          description: "This thread cannot start a local review in the current execution mode.",
+        });
+        return;
+      }
       if (selectedProvider === "codex") {
         await runCodexReviewStart(target);
       } else {
@@ -502,11 +545,19 @@ export function useComposerSlashCommands(input: {
       }
       editorActions.scheduleComposerFocus();
     },
-    [editorActions, selectedProvider, runCodexReviewStart],
+    [canOfferReviewCommand, editorActions, selectedProvider, runCodexReviewStart],
   );
 
   const handleForkTargetSelection = useCallback(
     async (target: ForkSlashCommandTarget) => {
+      if (!canOfferForkCommand) {
+        toastManager.add({
+          type: "warning",
+          title: "Fork is unavailable",
+          description: "This thread cannot be forked in the current execution mode.",
+        });
+        return;
+      }
       try {
         await createForkThreadFromSlashCommand({ target });
       } catch (error) {
@@ -520,10 +571,19 @@ export function useComposerSlashCommands(input: {
         });
       }
     },
-    [createForkThreadFromSlashCommand],
+    [canOfferForkCommand, createForkThreadFromSlashCommand],
   );
 
   const checkClaudeFastSlashCommandAvailability = useCallback(async (): Promise<boolean> => {
+    if (!canUseLocalProviderCommands) {
+      editorActions.clearComposerSlashDraft();
+      toastManager.add({
+        type: "warning",
+        title: "Fast mode is unavailable",
+        description: "Provider-native commands are unavailable in SaaS execution mode.",
+      });
+      return false;
+    }
     const api = readNativeApi();
     if (!api || !providerCommandDiscoveryCwd) {
       editorActions.clearComposerSlashDraft();
@@ -568,7 +628,7 @@ export function useComposerSlashCommands(input: {
       description: "Claude did not expose /fast for this account or environment.",
     });
     return false;
-  }, [editorActions, providerCommandDiscoveryCwd, threadId]);
+  }, [canUseLocalProviderCommands, editorActions, providerCommandDiscoveryCwd, threadId]);
 
   const runExportSlashCommand = useCallback(() => {
     // Re-validate at call time (mirrors /compact): menu selections and stale
@@ -624,6 +684,14 @@ export function useComposerSlashCommands(input: {
         return true;
       }
       if (slashInvocation.command === "plan" || slashInvocation.command === "default") {
+        if (slashInvocation.command === "plan" && !canOfferPlanCommand) {
+          toastManager.add({
+            type: "warning",
+            title: "Plan mode is unavailable",
+            description: "The selected Provider cannot start a Plan Turn on this target.",
+          });
+          return true;
+        }
         await handleInteractionModeChange(slashInvocation.command === "plan" ? "plan" : "default");
         editorActions.clearComposerSlashDraft();
         return true;
@@ -730,6 +798,7 @@ export function useComposerSlashCommands(input: {
     },
     [
       availableBuiltInSlashCommands,
+      canOfferPlanCommand,
       checkClaudeFastSlashCommandAvailability,
       compactProviderThread,
       createForkThreadFromSlashCommand,
@@ -819,6 +888,14 @@ export function useComposerSlashCommands(input: {
       }
 
       if (item.command === "plan" || item.command === "default") {
+        if (item.command === "plan" && !canOfferPlanCommand) {
+          toastManager.add({
+            type: "warning",
+            title: "Plan mode is unavailable",
+            description: "The selected Provider cannot start a Plan Turn on this target.",
+          });
+          return;
+        }
         void handleInteractionModeChange(item.command === "plan" ? "plan" : "default");
         const applied = clearSlashCommandFromComposer();
         if (wasPromptReplacementApplied(applied)) {
@@ -941,6 +1018,7 @@ export function useComposerSlashCommands(input: {
     },
     [
       compactProviderThread,
+      canOfferPlanCommand,
       createSidechatFromSlashCommand,
       editorActions,
       handleClearConversation,

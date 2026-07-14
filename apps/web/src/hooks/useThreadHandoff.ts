@@ -7,6 +7,7 @@ import { useNavigate } from "@tanstack/react-router";
 import { useCallback } from "react";
 import { type ProviderKind } from "@synara/contracts";
 import { useComposerDraftStore } from "../composerDraftStore";
+import { useControlPlane } from "../controlPlaneContext";
 import { useProviderStatusesForLocalConfig } from "./useProviderStatusesForLocalConfig";
 import { useRefreshProviderStatusesNow } from "./useProviderStatusRefresh";
 import {
@@ -25,6 +26,7 @@ import { type Thread } from "../types";
 
 export function useThreadHandoff() {
   const navigate = useNavigate();
+  const controlPlane = useControlPlane();
   const projects = useStore((store) => store.projects);
   const syncServerShellSnapshot = useStore((store) => store.syncServerShellSnapshot);
   const providerStatuses = useProviderStatusesForLocalConfig();
@@ -32,6 +34,9 @@ export function useThreadHandoff() {
 
   const createThreadHandoff = useCallback(
     async (thread: Thread, targetProvider: ProviderKind): Promise<Thread["id"]> => {
+      if (controlPlane.isAuthoritative) {
+        throw new Error("Thread handoff is unavailable in SaaS execution mode.");
+      }
       const api = readNativeApi();
       if (!api) {
         throw new Error("Native API not found");
@@ -116,7 +121,14 @@ export function useThreadHandoff() {
 
       return nextThreadId;
     },
-    [navigate, projects, providerStatuses, refreshProviderStatuses, syncServerShellSnapshot],
+    [
+      controlPlane.isAuthoritative,
+      navigate,
+      projects,
+      providerStatuses,
+      refreshProviderStatuses,
+      syncServerShellSnapshot,
+    ],
   );
 
   return {

@@ -6,6 +6,7 @@ import { Schema } from "effect";
 
 import { CommandId, IsoDateTime, NonNegativeInt, PositiveInt, TrimmedNonEmptyString } from "./baseSchemas";
 import providerCapabilityCatalog from "./providerCapabilityCatalog.json";
+import { ProviderKind } from "./orchestration";
 import {
   PROVIDER_RUNTIME_EVENT_VERSION,
   ProviderRuntimeEventType,
@@ -69,6 +70,59 @@ export const ProviderCapabilitySupport = Schema.Literals([
   "unsupported",
 ]);
 export type ProviderCapabilitySupport = typeof ProviderCapabilitySupport.Type;
+
+export const ProviderCapabilityProjectionTargetKind = Schema.Literals([
+  "local",
+  "ssh",
+  "docker",
+  "kubernetes",
+]);
+export type ProviderCapabilityProjectionTargetKind =
+  typeof ProviderCapabilityProjectionTargetKind.Type;
+
+export const ProviderCapabilityProjectionBasis = Schema.Literals(["target", "execution"]);
+export type ProviderCapabilityProjectionBasis = typeof ProviderCapabilityProjectionBasis.Type;
+
+export const ProviderCapabilityProjectionStatus = Schema.Literals([
+  "supported",
+  "unsupported",
+  "unobserved",
+]);
+export type ProviderCapabilityProjectionStatus = typeof ProviderCapabilityProjectionStatus.Type;
+
+export const ProviderCapabilityProjectionReasonCode = Schema.Literals([
+  "capability_supported",
+  "capability_unsupported",
+  "provider_not_installed",
+  "provider_version_incompatible",
+  "worker_manifest_required",
+  "worker_manifest_reregistration_required",
+  "execution_target_unavailable",
+]);
+export type ProviderCapabilityProjectionReasonCode =
+  typeof ProviderCapabilityProjectionReasonCode.Type;
+
+export const ProviderCapabilityProjectionSupportMode = Schema.Literals(["native", "emulated"]);
+export type ProviderCapabilityProjectionSupportMode =
+  typeof ProviderCapabilityProjectionSupportMode.Type;
+
+export const ProviderCapabilityProjectionItem = Schema.Struct({
+  provider: ProviderKind,
+  capabilityId: ProviderCapabilityId,
+  status: ProviderCapabilityProjectionStatus,
+  reasonCode: Schema.NullOr(ProviderCapabilityProjectionReasonCode),
+  supportMode: Schema.optional(ProviderCapabilityProjectionSupportMode),
+});
+export type ProviderCapabilityProjectionItem = typeof ProviderCapabilityProjectionItem.Type;
+
+export const ProviderCapabilityProjection = Schema.Struct({
+  executionTargetId: TrimmedNonEmptyString,
+  targetKind: ProviderCapabilityProjectionTargetKind,
+  executionId: Schema.optional(TrimmedNonEmptyString),
+  basis: ProviderCapabilityProjectionBasis,
+  items: Schema.Array(ProviderCapabilityProjectionItem),
+});
+export type ProviderCapabilityProjection = typeof ProviderCapabilityProjection.Type;
 
 export const ProviderSupportTier = Schema.Literals([
   "tier-1",

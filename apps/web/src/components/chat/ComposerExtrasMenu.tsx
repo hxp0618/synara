@@ -24,6 +24,8 @@ import {
 
 export const ComposerExtrasMenu = memo(function ComposerExtrasMenu(props: {
   interactionMode: ProviderInteractionMode;
+  planModeAvailable?: boolean;
+  planModeUnavailableReason?: string | null;
   supportsFastMode: boolean;
   fastModeEnabled: boolean;
   onAddPhotos: (files: File[]) => void;
@@ -80,6 +82,12 @@ export const ComposerExtrasMenu = memo(function ComposerExtrasMenu(props: {
           <MenuSeparator />
           <MenuCheckboxItem
             checked={props.interactionMode === "plan"}
+            disabled={props.interactionMode !== "plan" && props.planModeAvailable === false}
+            title={
+              props.interactionMode !== "plan" && props.planModeAvailable === false
+                ? (props.planModeUnavailableReason ?? "Plan mode is unavailable.")
+                : undefined
+            }
             variant="switch"
             onCheckedChange={(checked) => {
               props.onSetPlanMode(checked === true);

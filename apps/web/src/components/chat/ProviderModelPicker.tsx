@@ -176,11 +176,19 @@ type ProviderModelMenuItemsProps = {
   loadingModelProviders?: Partial<Record<ProviderKind, boolean>>;
   hiddenProviders?: ReadonlyArray<ProviderKind>;
   providerOrder?: ReadonlyArray<ProviderKind>;
+  providerAvailabilityByProvider?: Partial<Record<ProviderKind, ProviderModelAvailability>>;
   disabled?: boolean;
   onProviderModelChange: (provider: ProviderKind, model: ModelSlug) => void;
   // Invoked after a model selection commits so callers can close ancestor
   // menus and refocus the composer.
   onAfterSelection?: () => void;
+};
+
+export type ProviderModelAvailability = {
+  selectable: boolean;
+  label: string;
+  temporary?: boolean;
+  message?: string | null;
 };
 
 // Renders only the popup body of the provider/model picker. Designed to be
@@ -280,6 +288,7 @@ export const ProviderModelMenuItems = memo(function ProviderModelMenuItems(
   );
   const handleModelChange = (provider: ProviderKind, value: string) => {
     if (props.disabled) return;
+    if (props.providerAvailabilityByProvider?.[provider]?.selectable === false) return;
     if (!value) return;
     const resolvedModel = resolveSelectableModel(
       provider,
@@ -411,6 +420,14 @@ export const ProviderModelMenuItems = memo(function ProviderModelMenuItems(
   };
 
   if (props.lockedProvider !== null) {
+    const availability = props.providerAvailabilityByProvider?.[props.lockedProvider];
+    if (availability?.selectable === false) {
+      return (
+        <MenuItem disabled>
+          <span>{availability.label}</span>
+        </MenuItem>
+      );
+    }
     return <>{renderModelRadioGroup(props.lockedProvider)}</>;
   }
 
@@ -418,9 +435,14 @@ export const ProviderModelMenuItems = memo(function ProviderModelMenuItems(
     <>
       {visibleAvailableProviderOptions.map((option) => {
         const OptionIcon = PROVIDER_ICON_COMPONENT_BY_PROVIDER[option.value];
+        const projectedAvailability = props.providerAvailabilityByProvider?.[option.value];
         const liveProvider = props.providers?.find((entry) => entry.provider === option.value);
-        const availability = resolveLiveProviderAvailability(liveProvider);
-        if (availability.disabled) {
+        const localAvailability = resolveLiveProviderAvailability(liveProvider);
+        const disabled = projectedAvailability
+          ? !projectedAvailability.selectable
+          : localAvailability.disabled;
+        const availabilityLabel = projectedAvailability?.label ?? localAvailability.label;
+        if (disabled) {
           return (
             <MenuItem key={option.value} disabled>
               <OptionIcon
@@ -432,7 +454,7 @@ export const ProviderModelMenuItems = memo(function ProviderModelMenuItems(
               />
               <span>{option.label}</span>
               <span className="ms-auto text-[11px] text-muted-foreground/80">
-                {availability.label}
+                {availabilityLabel}
               </span>
             </MenuItem>
           );
@@ -507,6 +529,7 @@ type ProviderModelPickerProps = {
   loadingModelProviders?: Partial<Record<ProviderKind, boolean>>;
   hiddenProviders?: ReadonlyArray<ProviderKind>;
   providerOrder?: ReadonlyArray<ProviderKind>;
+  providerAvailabilityByProvider?: Partial<Record<ProviderKind, ProviderModelAvailability>>;
   activeProviderIconClassName?: string;
   compact?: boolean;
   // Icon-only trigger for narrow composers; the model name moves to title/sr-only.
@@ -632,6 +655,9 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(
             : {})}
           {...(props.hiddenProviders ? { hiddenProviders: props.hiddenProviders } : {})}
           {...(props.providerOrder ? { providerOrder: props.providerOrder } : {})}
+          {...(props.providerAvailabilityByProvider
+            ? { providerAvailabilityByProvider: props.providerAvailabilityByProvider }
+            : {})}
           {...(props.disabled !== undefined ? { disabled: props.disabled } : {})}
           onProviderModelChange={props.onProviderModelChange}
           onAfterSelection={handleAfterSelection}

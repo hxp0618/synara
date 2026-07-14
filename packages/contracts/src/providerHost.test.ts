@@ -6,6 +6,7 @@ import {
   PROVIDER_CAPABILITY_IDS,
   PROVIDER_HOST_PROTOCOL_VERSION,
   PROVIDER_HOST_PROVIDER_KINDS,
+  ProviderCapabilityProjection,
   ProviderHostCommandEnvelope,
   ProviderHostDescriptor,
   ProviderHostMessageEnvelope,
@@ -15,6 +16,7 @@ import { PROVIDER_RUNTIME_EVENT_VERSION } from "./providerRuntime";
 const decodeDescriptor = Schema.decodeUnknownSync(ProviderHostDescriptor);
 const decodeCommand = Schema.decodeUnknownSync(ProviderHostCommandEnvelope);
 const decodeMessage = Schema.decodeUnknownSync(ProviderHostMessageEnvelope);
+const decodeCapabilityProjection = Schema.decodeUnknownSync(ProviderCapabilityProjection);
 
 function completeCapabilities(value: "native" | "emulated" | "unsupported") {
   return Object.fromEntries(PROVIDER_CAPABILITY_IDS.map((capability) => [capability, value]));
@@ -122,6 +124,79 @@ describe("Provider Host v2 contracts", () => {
     expect(descriptor.capabilityDescriptor.capabilities["send-turn"]).toBe("native");
     expect(descriptor.protocolVersion).toEqual({ major: 2, minor: 1 });
     expect(descriptor.capabilityDescriptor.runtime.versionSource).toBe("probe");
+  });
+
+  it("decodes a sanitized Target and Execution capability projection including Droid", () => {
+    const targetProjection = decodeCapabilityProjection({
+      executionTargetId: "target-1",
+      targetKind: "kubernetes",
+      basis: "target",
+      items: [
+        {
+          provider: "codex",
+          capabilityId: "send-turn",
+          status: "supported",
+          reasonCode: null,
+          supportMode: "native",
+        },
+        {
+          provider: "droid",
+          capabilityId: "send-turn",
+          status: "unsupported",
+          reasonCode: "capability_unsupported",
+        },
+      ],
+    });
+    const executionProjection = decodeCapabilityProjection({
+      executionTargetId: "target-1",
+      targetKind: "kubernetes",
+      executionId: "execution-1",
+      basis: "execution",
+      items: [
+        {
+          provider: "claudeAgent",
+          capabilityId: "interrupt-turn",
+          status: "unobserved",
+          reasonCode: "worker_manifest_required",
+        },
+      ],
+    });
+
+    expect(targetProjection.items[0]?.supportMode).toBe("native");
+    expect(targetProjection.items[1]?.provider).toBe("droid");
+    expect(executionProjection.executionId).toBe("execution-1");
+    expect(executionProjection.items[0]?.status).toBe("unobserved");
+  });
+
+  it("rejects invalid capability projection states and support modes", () => {
+    const projection = {
+      executionTargetId: "target-1",
+      targetKind: "kubernetes",
+      basis: "target",
+      items: [
+        {
+          provider: "codex",
+          capabilityId: "send-turn",
+          status: "available",
+          reasonCode: null,
+        },
+      ],
+    };
+    expect(() => decodeCapabilityProjection(projection)).toThrow();
+    expect(() =>
+      decodeCapabilityProjection({
+        ...projection,
+        items: [
+          {
+            provider: "codex",
+            capabilityId: "send-turn",
+            status: "supported",
+            reasonCode: "capability_supported",
+            supportMode: "unsupported",
+          },
+        ],
+      }),
+    ).toThrow();
   });
 
   it("accepts unknown optional fields from a newer compatible minor", () => {

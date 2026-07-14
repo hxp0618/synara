@@ -43,6 +43,7 @@ import {
   getProviderIconClassName,
   ProviderModelMenuItems,
   resolveProviderModelLabel,
+  type ProviderModelAvailability,
 } from "./ProviderModelPicker";
 import { TraitsMenuContent } from "./TraitsPicker";
 
@@ -56,6 +57,7 @@ type ComposerModelEffortPickerProps = {
   loadingModelProviders?: Partial<Record<ProviderKind, boolean>>;
   hiddenProviders?: ReadonlyArray<ProviderKind>;
   providerOrder?: ReadonlyArray<ProviderKind>;
+  providerAvailabilityByProvider?: Partial<Record<ProviderKind, ProviderModelAvailability>>;
   compact?: boolean;
   // Narrow-composer degradation: drop the model name (provider icon stays)
   // and/or the effort/status label; both remain available to assistive tech.
@@ -306,6 +308,9 @@ export const ComposerModelEffortPicker = memo(function ComposerModelEffortPicker
                 : {})}
               {...(props.hiddenProviders ? { hiddenProviders: props.hiddenProviders } : {})}
               {...(props.providerOrder ? { providerOrder: props.providerOrder } : {})}
+              {...(props.providerAvailabilityByProvider
+                ? { providerAvailabilityByProvider: props.providerAvailabilityByProvider }
+                : {})}
               {...(props.disabled !== undefined ? { disabled: props.disabled } : {})}
               onProviderModelChange={props.onProviderModelChange}
               onAfterSelection={handleAfterModelSelection}

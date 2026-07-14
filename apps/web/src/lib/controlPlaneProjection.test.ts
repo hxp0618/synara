@@ -56,6 +56,32 @@ function event(
 }
 
 describe("Control Plane Session projection", () => {
+  it("preserves Droid identity and fails closed for an unknown Provider", () => {
+    const droidSession = { ...session, provider: "droid" as const, model: "claude-opus-4-8" };
+    expect(projectControlPlaneThreads([droidSession], new Map())[0]?.modelSelection.provider).toBe(
+      "droid",
+    );
+
+    expect(() =>
+      projectControlPlaneThreads(
+        [{ ...session, provider: "unknown-provider" as ControlPlaneAgentSession["provider"] }],
+        new Map(),
+      ),
+    ).toThrow("unsupported Provider");
+  });
+
+  it.each(["claude", "claudeagent", "claudeAgent"])(
+    "hydrates the persisted Claude Provider alias %s canonically",
+    (provider) => {
+      expect(
+        projectControlPlaneThreads(
+          [{ ...session, provider: provider as ControlPlaneAgentSession["provider"] }],
+          new Map(),
+        )[0]?.modelSelection.provider,
+      ).toBe("claudeAgent");
+    },
+  );
+
   it("deduplicates Sequence values and reports gaps before applying later events", () => {
     const initial = createControlPlaneSessionProjection(session);
     const first = applyControlPlaneSessionEvent(

@@ -262,6 +262,7 @@ export function useKanbanTaskComposerDiscovery(input: UseKanbanTaskComposerDisco
     searchableModelOptions,
     supportsFastSlashCommand: false,
     canOfferCompactCommand: false,
+    canOfferPlanCommand: true,
     canOfferReviewCommand: false,
     canOfferForkCommand: false,
     canOfferSideCommand: false,

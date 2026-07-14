@@ -197,6 +197,7 @@ describe("composerSlashCommands", () => {
       provider: "codex",
       supportsFastSlashCommand: true,
       canOfferCompactCommand: true,
+      canOfferPlanCommand: true,
       canOfferReviewCommand: true,
       canOfferForkCommand: true,
       canOfferSideCommand: true,
@@ -216,6 +217,7 @@ describe("composerSlashCommands", () => {
       provider: "codex",
       supportsFastSlashCommand: true,
       canOfferCompactCommand: true,
+      canOfferPlanCommand: true,
       canOfferReviewCommand: true,
       canOfferForkCommand: true,
       canOfferSideCommand: true,
@@ -233,6 +235,7 @@ describe("composerSlashCommands", () => {
       provider: "gemini",
       supportsFastSlashCommand: false,
       canOfferCompactCommand: false,
+      canOfferPlanCommand: true,
       canOfferReviewCommand: true,
       canOfferForkCommand: true,
       canOfferSideCommand: true,
@@ -250,6 +253,7 @@ describe("composerSlashCommands", () => {
         provider: "claudeAgent",
         supportsFastSlashCommand: true,
         canOfferCompactCommand: true,
+        canOfferPlanCommand: true,
         canOfferReviewCommand: true,
         canOfferForkCommand: true,
         canOfferSideCommand: true,
@@ -264,6 +268,7 @@ describe("composerSlashCommands", () => {
         provider: "codex",
         supportsFastSlashCommand: true,
         canOfferCompactCommand: true,
+        canOfferPlanCommand: true,
         canOfferReviewCommand: true,
         canOfferForkCommand: true,
         canOfferSideCommand: true,
@@ -278,6 +283,7 @@ describe("composerSlashCommands", () => {
         provider: "codex",
         supportsFastSlashCommand: true,
         canOfferCompactCommand: true,
+        canOfferPlanCommand: true,
         canOfferReviewCommand: true,
         canOfferForkCommand: true,
         canOfferSideCommand: true,
@@ -291,6 +297,7 @@ describe("composerSlashCommands", () => {
       provider: "claudeAgent",
       supportsFastSlashCommand: true,
       canOfferCompactCommand: true,
+      canOfferPlanCommand: true,
       canOfferReviewCommand: true,
       canOfferForkCommand: true,
       canOfferSideCommand: true,
@@ -324,6 +331,7 @@ describe("composerSlashCommands", () => {
         provider: "codex",
         supportsFastSlashCommand: true,
         canOfferCompactCommand: true,
+        canOfferPlanCommand: true,
         canOfferReviewCommand: true,
         canOfferForkCommand: true,
         canOfferSideCommand: true,
@@ -336,6 +344,7 @@ describe("composerSlashCommands", () => {
         provider: "codex",
         supportsFastSlashCommand: true,
         canOfferCompactCommand: false,
+        canOfferPlanCommand: true,
         canOfferReviewCommand: true,
         canOfferForkCommand: true,
         canOfferSideCommand: true,
@@ -344,12 +353,28 @@ describe("composerSlashCommands", () => {
     ).not.toContain("compact");
   });
 
+  it("only offers /plan when plan mode is available", () => {
+    expect(
+      getAvailableComposerSlashCommands({
+        provider: "codex",
+        supportsFastSlashCommand: true,
+        canOfferCompactCommand: true,
+        canOfferPlanCommand: false,
+        canOfferReviewCommand: true,
+        canOfferForkCommand: true,
+        canOfferSideCommand: true,
+        canOfferExportCommand: true,
+      }),
+    ).not.toContain("plan");
+  });
+
   it("exposes shared app slash commands for gemini", () => {
     expect(
       getAvailableComposerSlashCommands({
         provider: "gemini",
         supportsFastSlashCommand: false,
         canOfferCompactCommand: false,
+        canOfferPlanCommand: true,
         canOfferReviewCommand: true,
         canOfferForkCommand: true,
         canOfferSideCommand: true,

@@ -15,6 +15,7 @@ import (
 	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
 	"github.com/synara-ai/synara/services/control-plane/internal/platform"
 	"github.com/synara-ai/synara/services/control-plane/internal/problem"
+	"github.com/synara-ai/synara/services/control-plane/internal/projects"
 	"github.com/synara-ai/synara/services/control-plane/internal/secret"
 	"github.com/synara-ai/synara/services/control-plane/internal/sessions"
 )
@@ -28,6 +29,12 @@ func WithProviderCursorMaximumAge(maximumAge time.Duration) ServiceOption {
 		if maximumAge > 0 {
 			service.providerCursorMaximumAge = maximumAge
 		}
+	}
+}
+
+func WithProjectService(projectService *projects.Service) ServiceOption {
+	return func(service *Service) {
+		service.projects = projectService
 	}
 }
 
@@ -51,6 +58,7 @@ type Service struct {
 	cursorCipher             *secret.CursorCipher
 	providerCursorMaximumAge time.Duration
 	targets                  *executiontargets.Service
+	projects                 *projects.Service
 	now                      func() time.Time
 }
 

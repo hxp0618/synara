@@ -53,14 +53,16 @@ const PROVIDERS = new Set<ProviderKind>([
   "cursor",
   "gemini",
   "grok",
+  "droid",
   "kilo",
   "opencode",
   "pi",
 ]);
 
 function providerKind(value: string): ProviderKind {
-  if (value === "claude") return "claudeAgent";
-  return PROVIDERS.has(value as ProviderKind) ? (value as ProviderKind) : "codex";
+  if (value === "claude" || value === "claudeagent") return "claudeAgent";
+  if (PROVIDERS.has(value as ProviderKind)) return value as ProviderKind;
+  throw new Error(`Control Plane Session uses unsupported Provider ${JSON.stringify(value)}.`);
 }
 
 function payloadString(event: ControlPlaneSessionEvent, key: string): string | null {

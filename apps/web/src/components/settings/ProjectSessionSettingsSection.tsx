@@ -1,4 +1,9 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  PROVIDER_CAPABILITY_CATALOG,
+  PROVIDER_DISPLAY_NAMES,
+  type ProviderKind,
+} from "@synara/contracts";
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 
 import {
@@ -16,6 +21,10 @@ import { Button } from "~/components/ui/button";
 import { Input } from "~/components/ui/input";
 import { Textarea } from "~/components/ui/textarea";
 import {
+  useControlPlaneProjectProviderCapabilities,
+  useControlPlaneSessionProviderCapabilities,
+} from "~/controlPlaneContext";
+import {
   controlPlaneClient,
   type ControlPlaneAgentSession,
   type ControlPlaneCredential,
@@ -25,7 +34,16 @@ import {
   type ControlPlaneSessionEvent,
 } from "~/lib/controlPlaneClient";
 import { listUsableControlPlaneCredentials } from "~/lib/controlPlaneCredentials";
+import {
+  assertControlPlaneCapabilityAllowed,
+  providerCanStartSaaSSession,
+  resolveControlPlaneTurnDispatchDecision,
+} from "~/lib/controlPlaneProviderCapabilities";
 import { cn, randomUUID } from "~/lib/utils";
+
+const SAAS_PROVIDER_OPTIONS = PROVIDER_CAPABILITY_CATALOG.providers.map(
+  (entry) => entry.provider,
+);
 
 const projectSessionQueryKeys = {
   projects: (tenantId: string, organizationId: string | null) =>
@@ -191,7 +209,7 @@ export function ProjectSessionSettingsSection(props: {
   const [sessionVisibility, setSessionVisibility] =
     useState<ControlPlaneAgentSession["visibility"]>("private");
   const [executionTargetSelection, setExecutionTargetSelection] = useState("");
-  const [provider, setProvider] = useState("codex");
+  const [provider, setProvider] = useState<ProviderKind>("codex");
   const [providerCredentialSelection, setProviderCredentialSelection] = useState("");
   const [gitCredentialSelection, setGitCredentialSelection] = useState("");
   const [model, setModel] = useState("");
@@ -259,6 +277,42 @@ export function ProjectSessionSettingsSection(props: {
       : null;
   const watchedSession = sessions.find((session) => session.id === watchedSessionId) ?? null;
   const watchedSessionAvailable = watchedSession !== null;
+  const projectProviderCapabilitiesQuery = useControlPlaneProjectProviderCapabilities(
+    selectedProjectId,
+    selectedExecutionTargetId,
+  );
+  const watchedSessionProviderCapabilitiesQuery = useControlPlaneSessionProviderCapabilities(
+    watchedSession?.id ?? null,
+  );
+  const createSessionCapabilityDecision = providerCanStartSaaSSession({
+    projection: projectProviderCapabilitiesQuery.data,
+    ...(projectProviderCapabilitiesQuery.error
+      ? { projectionError: projectProviderCapabilitiesQuery.error }
+      : {}),
+    provider,
+  });
+  const providerOptions = SAAS_PROVIDER_OPTIONS.map((providerOption) => ({
+    provider: providerOption,
+    decision: providerCanStartSaaSSession({
+      projection: projectProviderCapabilitiesQuery.data,
+      ...(projectProviderCapabilitiesQuery.error
+        ? { projectionError: projectProviderCapabilitiesQuery.error }
+        : {}),
+      provider: providerOption,
+    }),
+  }));
+  const createTurnCapabilityDecision = watchedSession
+    ? resolveControlPlaneTurnDispatchDecision({
+        isAuthoritative: true,
+        projection: watchedSessionProviderCapabilitiesQuery.data,
+        ...(watchedSessionProviderCapabilitiesQuery.error
+          ? { projectionError: watchedSessionProviderCapabilitiesQuery.error }
+          : {}),
+        provider: watchedSession.provider,
+        includeSessionStart: false,
+        interactionMode: "default",
+      })
+    : null;
 
   useEffect(() => {
     if (!selectedProjectId || !watchedSessionId || !watchedSessionAvailable) {
@@ -326,8 +380,15 @@ export function ProjectSessionSettingsSection(props: {
     },
   });
   const createSession = useMutation({
-    mutationFn: () =>
-      controlPlaneClient.createSession(
+    mutationFn: async () => {
+      const freshProjection = await controlPlaneClient.getProjectProviderCapabilities(
+        selectedProjectId!,
+        selectedExecutionTargetId ?? undefined,
+      );
+      assertControlPlaneCapabilityAllowed(
+        providerCanStartSaaSSession({ projection: freshProjection, provider }),
+      );
+      return controlPlaneClient.createSession(
         selectedProjectId!,
         {
           title: sessionTitle,
@@ -344,7 +405,8 @@ export function ProjectSessionSettingsSection(props: {
             sessionIdempotencyKeyRef.current ??
             (sessionIdempotencyKeyRef.current = `web-settings-session-${randomUUID()}`),
         },
-      ),
+      );
+    },
     onSuccess: (session) => {
       sessionIdempotencyKeyRef.current = null;
       setSessionTitle("");
@@ -357,12 +419,28 @@ export function ProjectSessionSettingsSection(props: {
     },
   });
   const createTurn = useMutation({
-    mutationFn: () =>
-      controlPlaneClient.createTurn(watchedSessionId!, turnInput, {
+    mutationFn: async () => {
+      if (!watchedSessionId || !watchedSession) {
+        throw new Error("Select an active Session before creating a Turn.");
+      }
+      const freshProjection = await controlPlaneClient.getSessionProviderCapabilities(
+        watchedSessionId,
+      );
+      assertControlPlaneCapabilityAllowed(
+        resolveControlPlaneTurnDispatchDecision({
+          isAuthoritative: true,
+          projection: freshProjection,
+          provider: watchedSession.provider,
+          includeSessionStart: false,
+          interactionMode: "default",
+        }),
+      );
+      return controlPlaneClient.createTurn(watchedSessionId!, turnInput, {
         idempotencyKey:
           turnIdempotencyKeyRef.current ??
           (turnIdempotencyKeyRef.current = `web-settings-turn-${randomUUID()}`),
-      }),
+      });
+    },
     onSuccess: () => {
       turnIdempotencyKeyRef.current = null;
       setTurnInput("");
@@ -601,10 +679,21 @@ export function ProjectSessionSettingsSection(props: {
                     />
                   </FormField>
                   <div>
-                    <Button disabled={createTurn.isPending} size="sm" type="submit">
+                    <Button
+                      disabled={
+                        createTurn.isPending || createTurnCapabilityDecision?.allowed !== true
+                      }
+                      size="sm"
+                      type="submit"
+                    >
                       {createTurn.isPending ? "Queueing turn…" : "Queue turn"}
                     </Button>
                     <InlineError error={createTurn.error} />
+                    {!createTurn.isPending && createTurnCapabilityDecision?.message ? (
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        {createTurnCapabilityDecision.message}
+                      </p>
+                    ) : null}
                   </div>
                 </form>
               </SettingsRow>
@@ -643,14 +732,31 @@ export function ProjectSessionSettingsSection(props: {
                   </select>
                 </FormField>
                 <FormField label="Provider">
-                  <Input
-                    required
+                  <select
+                    className={nativeSelectClassName}
                     value={provider}
                     onChange={(event) => {
-                      setProvider(event.target.value);
+                      setProvider(event.target.value as ProviderKind);
                       setProviderCredentialSelection("");
                     }}
-                  />
+                  >
+                    {providerOptions.map((option) => (
+                      <option
+                        key={option.provider}
+                        value={option.provider}
+                        disabled={!option.decision.allowed}
+                      >
+                        {PROVIDER_DISPLAY_NAMES[option.provider]}
+                        {option.decision.allowed
+                          ? option.decision.temporary
+                            ? " · waiting for Worker"
+                            : ""
+                          : option.decision.blockingDecision?.status === "loading"
+                            ? " · checking"
+                            : " · unavailable"}
+                      </option>
+                    ))}
+                  </select>
                 </FormField>
                 <FormField label="Model">
                   <Input
@@ -689,10 +795,19 @@ export function ProjectSessionSettingsSection(props: {
                   </select>
                 </FormField>
                 <div className="sm:col-span-2">
-                  <Button disabled={createSession.isPending} size="sm" type="submit">
+                  <Button
+                    disabled={createSession.isPending || !createSessionCapabilityDecision.allowed}
+                    size="sm"
+                    type="submit"
+                  >
                     {createSession.isPending ? "Creating session…" : "Create agent session"}
                   </Button>
                   <InlineError error={createSession.error ?? sessionsQuery.error} />
+                  {!createSession.isPending && createSessionCapabilityDecision.message ? (
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      {createSessionCapabilityDecision.message}
+                    </p>
+                  ) : null}
                 </div>
               </form>
             </SettingsRow>

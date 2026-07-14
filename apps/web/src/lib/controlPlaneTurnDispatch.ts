@@ -1,11 +1,11 @@
-import type { ProviderInteractionMode, RuntimeMode } from "@synara/contracts";
+import type { ProviderInteractionMode, ProviderKind, RuntimeMode } from "@synara/contracts";
 
 export type ControlPlaneTurnDispatchInput = {
   draftThreadId: string;
   persistedSessionId: string | null;
   projectId: string;
   title: string;
-  provider: string;
+  provider: ProviderKind;
   model?: string;
   inputText: string;
   runtimeMode: RuntimeMode;
@@ -13,7 +13,7 @@ export type ControlPlaneTurnDispatchInput = {
   createSession: (input: {
     projectId: string;
     title: string;
-    provider: string;
+    provider: ProviderKind;
     model?: string;
     idempotencyKey: string;
   }) => Promise<{ id: string }>;

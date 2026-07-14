@@ -53,6 +53,7 @@ Target 和 Codex/Claude 执行闭环属于基础实现，本阶段负责补齐 P
 - [ ] 对 Codex、Claude、Cursor、Gemini、Grok、Kilo、OpenCode、Pi 做 Provider Host 能力矩阵审计。
 - [ ] 冻结 Provider Host Protocol Version、最低兼容版本和能力协商规则。
 - [ ] 为不支持的 Provider 能力返回显式 Capability/Unsupported 错误，不静默降级。
+- [x] 实现 Web/Control Plane Provider Capability 投影与发送前门禁，并保持本地模式不变。
 - [ ] 统一 Start、Resume、Send、Steer、Interrupt、Compact、Rollback 和 Fork 语义。
 - [ ] 统一 Approval、Structured User Input、Plan Mode 和 Review 流程。
 - [ ] 统一 Runtime Event 映射、Event Version 和未知事件兼容策略。

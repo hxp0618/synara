@@ -143,10 +143,14 @@ func main() {
 		RegistrationToken: cfg.WorkerRegistrationToken, PublicControlPlaneURL: cfg.PublicControlPlaneURL,
 		Interval: cfg.DockerReconcileInterval, Observer: metrics,
 	}, logger)
-	sessionService := sessions.NewService(db, projectService, executionTargetService)
+	sessionService := sessions.NewService(
+		db, projectService, executionTargetService,
+		sessions.WithProviderCapabilityHeartbeatTimeout(cfg.WorkerHeartbeatTimeout),
+	)
 	executionService := executions.NewService(
 		db, sessionService, cfg.WorkerLeaseTTL, cfg.WorkerHeartbeatTimeout,
 		cfg.WorkerReceiptTTL, cursorCipher, executionTargetService,
+		executions.WithProjectService(projectService),
 		executions.WithProviderCursorMaximumAge(cfg.ProviderCursorMaximumAge),
 	)
 	tenancyService := tenancy.NewService(db, executionService)

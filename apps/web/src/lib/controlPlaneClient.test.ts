@@ -169,6 +169,67 @@ describe("controlPlaneClient", () => {
     expect(new Headers(request.headers).get("Idempotency-Key")).toBe("web-session-request-1");
   });
 
+  it("loads project Provider capabilities with the resolved or explicit execution target", async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(
+        JSON.stringify({
+          executionTargetId: "target/one",
+          targetKind: "kubernetes",
+          basis: "target",
+          items: [],
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await controlPlaneClient.getProjectProviderCapabilities("project/one");
+    await controlPlaneClient.getProjectProviderCapabilities("project/one", "target/one");
+
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
+      "/v1/projects/project%2Fone/provider-capabilities",
+      expect.objectContaining({ credentials: "include" }),
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      "/v1/projects/project%2Fone/provider-capabilities?executionTargetId=target%2Fone",
+      expect.objectContaining({ credentials: "include" }),
+    );
+  });
+
+  it("loads execution-bound Session Provider capabilities", async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(
+        JSON.stringify({
+          executionTargetId: "target-1",
+          targetKind: "docker",
+          executionId: "execution-1",
+          basis: "execution",
+          items: [
+            {
+              provider: "droid",
+              capabilityId: "send-turn",
+              status: "unsupported",
+              reasonCode: "capability_unsupported",
+            },
+          ],
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await controlPlaneClient.getSessionProviderCapabilities("session/one");
+
+    expect(result.basis).toBe("execution");
+    expect(result.items[0]).toMatchObject({ provider: "droid", status: "unsupported" });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/v1/sessions/session%2Fone/provider-capabilities",
+      expect.objectContaining({ credentials: "include" }),
+    );
+  });
+
   it("creates projects with private Git access and can explicitly unbind it", async () => {
     const responses = [
       new Response(JSON.stringify({ id: "project-1", gitCredentialId: "git-credential-1" }), {

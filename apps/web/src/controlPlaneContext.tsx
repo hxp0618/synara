@@ -1,7 +1,9 @@
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { queryOptions, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ProjectId,
+  type ProviderCapabilityProjection,
   type ProviderInteractionMode,
+  type ProviderKind,
   type ProviderUserInputAnswers,
   type RuntimeMode,
 } from "@synara/contracts";
@@ -40,6 +42,11 @@ import {
 } from "./lib/controlPlaneProjection";
 import { ControlPlaneProjectionRuntime } from "./lib/controlPlaneProjectionRuntime";
 import {
+  assertControlPlaneCapabilityAllowed,
+  resolveControlPlaneCapabilityDecision,
+  resolveControlPlaneTurnDispatchDecision,
+} from "./lib/controlPlaneProviderCapabilities";
+import {
   resolveControlPlaneCapabilities,
   type ControlPlaneCapabilities,
 } from "./lib/controlPlanePermissions";
@@ -72,6 +79,19 @@ export const controlPlaneQueryKeys = {
     ] as const,
   pendingInteractions: (tenantId: string | null, sessionId: string | null) =>
     ["control-plane", "tenants", tenantId, "sessions", sessionId, "pending-interactions"] as const,
+  projectProviderCapabilities: (
+    projectId: string | null,
+    executionTargetId: string | null,
+  ) =>
+    [
+      "control-plane",
+      "projects",
+      projectId,
+      "provider-capabilities",
+      executionTargetId,
+    ] as const,
+  sessionProviderCapabilities: (sessionId: string | null) =>
+    ["control-plane", "sessions", sessionId, "provider-capabilities"] as const,
 };
 
 export type ControlPlaneAvailability = "detecting" | "local" | "available" | "unavailable";
@@ -93,7 +113,7 @@ export type CreateControlPlaneProjectInput = {
 export type CreateControlPlaneSessionInput = {
   title: string;
   visibility?: ControlPlaneAgentSession["visibility"];
-  provider: string;
+  provider: ProviderKind;
   model?: string;
   providerCredentialId?: string;
   executionTargetId?: string;
@@ -161,6 +181,35 @@ const ControlPlaneContext = createContext<ControlPlaneContextValue | null>(null)
 const EMPTY_ORGANIZATIONS: ReadonlyArray<ControlPlaneOrganization> = [];
 const EMPTY_PROJECTS: ReadonlyArray<ControlPlaneProject> = [];
 const EMPTY_SESSIONS: ReadonlyArray<ControlPlaneAgentSession> = [];
+const CONTROL_PLANE_CAPABILITY_STALE_TIME_MS = 5_000;
+
+function projectProviderCapabilitiesQueryOptions(
+  projectId: string | null,
+  executionTargetId: string | null,
+  enabled = true,
+) {
+  return queryOptions({
+    queryKey: controlPlaneQueryKeys.projectProviderCapabilities(projectId, executionTargetId),
+    queryFn: () =>
+      controlPlaneClient.getProjectProviderCapabilities(
+        projectId!,
+        executionTargetId ?? undefined,
+      ),
+    enabled: enabled && projectId !== null,
+    retry: false,
+    staleTime: CONTROL_PLANE_CAPABILITY_STALE_TIME_MS,
+  });
+}
+
+function sessionProviderCapabilitiesQueryOptions(sessionId: string | null, enabled = true) {
+  return queryOptions({
+    queryKey: controlPlaneQueryKeys.sessionProviderCapabilities(sessionId),
+    queryFn: () => controlPlaneClient.getSessionProviderCapabilities(sessionId!),
+    enabled: enabled && sessionId !== null,
+    retry: false,
+    staleTime: 0,
+  });
+}
 
 function idempotencyOptions(
   operation: string,
@@ -485,11 +534,38 @@ export function ControlPlaneProvider({ children }: { children: ReactNode }) {
       sessions,
     ],
   );
+  const loadSessionProviderCapabilityContext = useCallback(
+    async (sessionId: string): Promise<{
+      session: ControlPlaneAgentSession;
+      projection: ProviderCapabilityProjection;
+    }> => {
+      const sessionItem =
+        resourcesRef.current.sessions.find((item) => item.id === sessionId) ??
+        (await controlPlaneClient.getAgentSession(sessionId));
+      const projection = await queryClient.fetchQuery(
+        sessionProviderCapabilitiesQueryOptions(sessionId),
+      );
+      return { session: sessionItem, projection };
+    },
+    [queryClient],
+  );
   const createSession = useCallback(
     async (projectId: string, input: CreateControlPlaneSessionInput) => {
       if (!capabilities.canCreateSession) {
         throw new Error("The active Tenant or Organization does not allow Session creation.");
       }
+      const providerProjection = await queryClient.fetchQuery(
+        projectProviderCapabilitiesQueryOptions(projectId, input.executionTargetId ?? null),
+      );
+      assertControlPlaneCapabilityAllowed(
+        resolveControlPlaneTurnDispatchDecision({
+          isAuthoritative: true,
+          projection: providerProjection,
+          provider: input.provider,
+          includeSessionStart: true,
+          interactionMode: "default",
+        }),
+      );
       const nextSession = await controlPlaneClient.createSession(
         projectId,
         {
@@ -523,6 +599,7 @@ export function ControlPlaneProvider({ children }: { children: ReactNode }) {
       capabilities.canCreateSession,
       projectionRuntime,
       projects,
+      queryClient,
       sessions,
       sessionsQuery,
     ],
@@ -537,22 +614,49 @@ export function ControlPlaneProvider({ children }: { children: ReactNode }) {
       if (!capabilities.canCreateTurn) {
         throw new Error("The active Tenant or Organization is read-only for new Turns.");
       }
+      const capabilityContext = await loadSessionProviderCapabilityContext(sessionId);
+      assertControlPlaneCapabilityAllowed(
+        resolveControlPlaneTurnDispatchDecision({
+          isAuthoritative: true,
+          projection: capabilityContext.projection,
+          provider: capabilityContext.session.provider,
+          includeSessionStart: false,
+          interactionMode: modes?.interactionMode ?? "default",
+        }),
+      );
       const turn = await controlPlaneClient.createTurn(
         sessionId,
         inputText,
         idempotencyOptions("turn", idempotencyKey),
         modes,
       );
+      void queryClient.invalidateQueries({
+        queryKey: controlPlaneQueryKeys.sessionProviderCapabilities(sessionId),
+      });
       void projectionRuntime.catchUp(sessionId).catch(() => undefined);
       return turn;
     },
-    [capabilities.canCreateTurn, projectionRuntime],
+    [
+      capabilities.canCreateTurn,
+      loadSessionProviderCapabilityContext,
+      projectionRuntime,
+      queryClient,
+    ],
   );
   const interruptActiveTurn = useCallback(
     async (sessionId: string, idempotencyKey?: string) => {
       if (!capabilities.canInterruptExecution) {
         throw new Error("The active Tenant or Organization cannot interrupt Executions.");
       }
+      const capabilityContext = await loadSessionProviderCapabilityContext(sessionId);
+      assertControlPlaneCapabilityAllowed(
+        resolveControlPlaneCapabilityDecision({
+          isAuthoritative: true,
+          projection: capabilityContext.projection,
+          provider: capabilityContext.session.provider,
+          capabilityId: "interrupt-turn",
+        }),
+      );
       const command = await controlPlaneClient.interruptActiveTurn(
         sessionId,
         idempotencyOptions("interrupt", idempotencyKey),
@@ -560,13 +664,26 @@ export function ControlPlaneProvider({ children }: { children: ReactNode }) {
       void projectionRuntime.catchUp(sessionId).catch(() => undefined);
       return command;
     },
-    [capabilities.canInterruptExecution, projectionRuntime],
+    [
+      capabilities.canInterruptExecution,
+      loadSessionProviderCapabilityContext,
+      projectionRuntime,
+    ],
   );
   const steerActiveTurn = useCallback(
     async (sessionId: string, inputText: string, idempotencyKey?: string) => {
       if (!capabilities.canSteerExecution) {
         throw new Error("The active Tenant or Organization cannot steer Executions.");
       }
+      const capabilityContext = await loadSessionProviderCapabilityContext(sessionId);
+      assertControlPlaneCapabilityAllowed(
+        resolveControlPlaneCapabilityDecision({
+          isAuthoritative: true,
+          projection: capabilityContext.projection,
+          provider: capabilityContext.session.provider,
+          capabilityId: "steer-turn",
+        }),
+      );
       const command = await controlPlaneClient.steerActiveTurn(
         sessionId,
         inputText,
@@ -575,7 +692,7 @@ export function ControlPlaneProvider({ children }: { children: ReactNode }) {
       void projectionRuntime.catchUp(sessionId).catch(() => undefined);
       return command;
     },
-    [capabilities.canSteerExecution, projectionRuntime],
+    [capabilities.canSteerExecution, loadSessionProviderCapabilityContext, projectionRuntime],
   );
   const resolveApproval = useCallback(
     async (
@@ -742,6 +859,27 @@ export function useControlPlane(): ControlPlaneContextValue {
   const context = useContext(ControlPlaneContext);
   if (!context) throw new Error("useControlPlane must be used inside ControlPlaneProvider.");
   return context;
+}
+
+export function useControlPlaneProjectProviderCapabilities(
+  projectId: string | null,
+  executionTargetId: string | null = null,
+) {
+  const controlPlane = useControlPlane();
+  return useQuery(
+    projectProviderCapabilitiesQueryOptions(
+      projectId,
+      executionTargetId,
+      controlPlane.isAuthoritative,
+    ),
+  );
+}
+
+export function useControlPlaneSessionProviderCapabilities(sessionId: string | null) {
+  const controlPlane = useControlPlane();
+  return useQuery(
+    sessionProviderCapabilitiesQueryOptions(sessionId, controlPlane.isAuthoritative),
+  );
 }
 
 export function useControlPlanePendingInteractions(
