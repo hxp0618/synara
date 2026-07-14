@@ -29,31 +29,45 @@ ARG SYNARA_GID=1000
 COPY --from=bun /usr/local/bin/bun /usr/local/bin/bun
 COPY --from=provider-tools-bookworm /opt/synara/provider-tools /opt/synara/provider-tools
 
-RUN set -eux; \
+RUN --mount=type=cache,target=/var/cache/synara-runtime-tools,sharing=locked \
+  set -eux; \
   case "${TARGETARCH}" in \
     amd64) gh_arch="amd64"; jq_arch="amd64"; rg_target="x86_64-unknown-linux-musl"; tini_arch="amd64" ;; \
     arm64) gh_arch="arm64"; jq_arch="arm64"; rg_target="aarch64-unknown-linux-gnu"; tini_arch="arm64" ;; \
     *) echo "Unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
   esac; \
-  curl --fail --location --retry 5 --retry-all-errors --connect-timeout 15 \
-    "${GITHUB_DOWNLOAD_PREFIX}https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_${gh_arch}.tar.gz" \
-    --output /tmp/gh.tar.gz; \
-  tar -xzf /tmp/gh.tar.gz -C /tmp; \
-  install -m 0755 "/tmp/gh_${GH_VERSION}_linux_${gh_arch}/bin/gh" /usr/local/bin/gh; \
-  curl --fail --location --retry 5 --retry-all-errors --connect-timeout 15 \
-    "${GITHUB_DOWNLOAD_PREFIX}https://github.com/jqlang/jq/releases/download/jq-${JQ_VERSION}/jq-linux-${jq_arch}" \
-    --output /usr/local/bin/jq; \
-  chmod 0755 /usr/local/bin/jq; \
-  curl --fail --location --retry 5 --retry-all-errors --connect-timeout 15 \
-    "${GITHUB_DOWNLOAD_PREFIX}https://github.com/BurntSushi/ripgrep/releases/download/${RIPGREP_VERSION}/ripgrep-${RIPGREP_VERSION}-${rg_target}.tar.gz" \
-    --output /tmp/ripgrep.tar.gz; \
-  tar -xzf /tmp/ripgrep.tar.gz -C /tmp; \
-  install -m 0755 "/tmp/ripgrep-${RIPGREP_VERSION}-${rg_target}/rg" /usr/local/bin/rg; \
-  curl --fail --location --retry 5 --retry-all-errors --connect-timeout 15 \
+  download() { \
+    source_url="$1"; destination="$2"; \
+    if [ ! -s "$destination" ]; then \
+      rm -f "$destination.partial"; \
+      curl --fail --location --http1.1 --ipv4 --retry 8 --retry-all-errors --retry-delay 1 --connect-timeout 30 \
+        --output "$destination.partial" "$source_url"; \
+      mv "$destination.partial" "$destination"; \
+    fi; \
+  }; \
+  tini_archive="/var/cache/synara-runtime-tools/tini-${TINI_VERSION}-${tini_arch}"; \
+  download \
     "${GITHUB_DOWNLOAD_PREFIX}https://github.com/krallin/tini/releases/download/v${TINI_VERSION}/tini-${tini_arch}" \
-    --output /usr/local/bin/tini; \
-  chmod 0755 /usr/local/bin/tini; \
-  rm -rf /tmp/gh.tar.gz /tmp/gh_* /tmp/ripgrep.tar.gz /tmp/ripgrep-*
+    "$tini_archive"; \
+  install -m 0755 "$tini_archive" /usr/local/bin/tini; \
+  gh_archive="/var/cache/synara-runtime-tools/gh_${GH_VERSION}_linux_${gh_arch}.tar.gz"; \
+  download \
+    "${GITHUB_DOWNLOAD_PREFIX}https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_${gh_arch}.tar.gz" \
+    "$gh_archive"; \
+  tar -xzf "$gh_archive" -C /tmp; \
+  install -m 0755 "/tmp/gh_${GH_VERSION}_linux_${gh_arch}/bin/gh" /usr/local/bin/gh; \
+  jq_archive="/var/cache/synara-runtime-tools/jq-${JQ_VERSION}-${jq_arch}"; \
+  download \
+    "${GITHUB_DOWNLOAD_PREFIX}https://github.com/jqlang/jq/releases/download/jq-${JQ_VERSION}/jq-linux-${jq_arch}" \
+    "$jq_archive"; \
+  install -m 0755 "$jq_archive" /usr/local/bin/jq; \
+  ripgrep_archive="/var/cache/synara-runtime-tools/ripgrep-${RIPGREP_VERSION}-${rg_target}.tar.gz"; \
+  download \
+    "${GITHUB_DOWNLOAD_PREFIX}https://github.com/BurntSushi/ripgrep/releases/download/${RIPGREP_VERSION}/ripgrep-${RIPGREP_VERSION}-${rg_target}.tar.gz" \
+    "$ripgrep_archive"; \
+  tar -xzf "$ripgrep_archive" -C /tmp; \
+  install -m 0755 "/tmp/ripgrep-${RIPGREP_VERSION}-${rg_target}/rg" /usr/local/bin/rg; \
+  rm -rf /tmp/gh_* /tmp/ripgrep-*
 
 # Bun invokes `node-gyp` directly for native packages such as node-pty. The
 # official Node image ships it inside npm but does not expose a PATH shim.

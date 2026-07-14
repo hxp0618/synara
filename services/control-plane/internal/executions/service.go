@@ -195,6 +195,18 @@ func (s *Service) Heartbeat(
 	if worker.ProtocolVersion != WorkerProtocolVersion {
 		return Worker{}, unsupportedWorkerProtocol(worker.ProtocolVersion)
 	}
+	var currentWorkerCount int64
+	if err := s.db.WithContext(ctx).Model(&persistence.WorkerInstance{}).
+		Where(
+			"id = ? AND incarnation = ? AND instance_uid = ? AND auth_token_hash = ? AND status <> ?",
+			worker.ID, worker.Incarnation, worker.InstanceUID, worker.AuthTokenHash, "terminated",
+		).
+		Count(&currentWorkerCount).Error; err != nil {
+		return Worker{}, problem.Wrap(500, "worker_heartbeat_failed", "Failed to validate the worker heartbeat.", err)
+	}
+	if currentWorkerCount != 1 {
+		return Worker{}, problem.New(409, "worker_incarnation_fenced", "The Worker registration is no longer current.")
+	}
 	now := s.now()
 	if input.Capabilities != nil {
 		target, targetKind, err := s.targets.ResolveWorkerTarget(ctx, worker.ExecutionTargetID, worker.TargetKind)

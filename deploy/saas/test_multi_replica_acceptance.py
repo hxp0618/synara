@@ -23,9 +23,11 @@ class MultiReplicaWorkerManifestTest(unittest.TestCase):
             REPO_ROOT / "scripts/stage3-provider-acceptance/worker_manifest.py",
             REPO_ROOT / "packages/contracts/src/providerCapabilityCatalog.json",
             {"providerPolicy": {"experimentalProviders": ["codex"]}},
+            "acceptance",
         )
 
         providers = capabilities["providerHost"]["providers"]
+        self.assertEqual(capabilities["workerRuntime"]["workerBuildVersion"], "acceptance")
         self.assertTrue(providers["codex"]["capabilityDescriptor"]["releasePolicy"]["enabled"])
         self.assertFalse(providers["claudeAgent"]["capabilityDescriptor"]["releasePolicy"]["enabled"])
         self.assertEqual(len(providers), 8)
@@ -36,6 +38,7 @@ class MultiReplicaWorkerManifestTest(unittest.TestCase):
                 REPO_ROOT / "scripts/stage3-provider-acceptance/worker_manifest.py",
                 REPO_ROOT / "packages/contracts/src/providerCapabilityCatalog.json",
                 None,
+                "acceptance",
             )
 
 

@@ -319,6 +319,10 @@ func TestGoProviderCatalogKeysMatchSharedCatalog(t *testing.T) {
 }
 
 func workerManifestTestCapabilities() map[string]any {
+	return workerManifestTestCapabilitiesForVersion("worker-test")
+}
+
+func workerManifestTestCapabilitiesForVersion(workerVersion string) map[string]any {
 	catalog := loadProviderCapabilityCatalogForTests()
 	providers := make(map[string]any, len(catalog.Providers))
 	for _, entry := range catalog.Providers {
@@ -369,7 +373,7 @@ func workerManifestTestCapabilities() map[string]any {
 	}
 	return map[string]any{
 		"workerRuntime": map[string]any{
-			"workerBuildVersion": "worker-test", "workerBuildGitSha": "abcdef1234567890",
+			"workerBuildVersion": workerVersion, "workerBuildGitSha": "abcdef1234567890",
 			"workerProtocolMinimum": WorkerProtocolVersion, "workerProtocolMaximum": WorkerProtocolVersion,
 			"runtimeEventMinimum": RuntimeEventVersionV2, "runtimeEventMaximum": RuntimeEventVersionV2,
 			"operatingSystem": "linux", "architecture": "amd64",

@@ -7,6 +7,7 @@ context="${SYNARA_K8S_CONTEXT:-$(kubectl config current-context 2>/dev/null || t
 namespace="synara-system"
 image="${SYNARA_K8S_ACCEPTANCE_IMAGE:-synara-control-plane:stage2-acceptance}"
 worker_protocol_version=2
+worker_version="${SYNARA_ACCEPTANCE_WORKER_VERSION:-acceptance}"
 work_dir="$(mktemp -d)"
 port_forward_pid=""
 
@@ -297,6 +298,7 @@ local_target_id="$("${kube[@]}" -n "$namespace" exec deployment/synara-stage2-po
 local_target_capabilities="$("${kube[@]}" -n "$namespace" exec deployment/synara-stage2-postgres -- \
   psql -U synara -d synara -Atc "SELECT capabilities::text FROM execution_targets WHERE id = '$local_target_id'")"
 worker_capabilities="$(python3 "$repo_root/scripts/stage3-provider-acceptance/worker_manifest.py" \
+  --worker-version "$worker_version" \
   --target-capabilities-json "$local_target_capabilities")"
 
 pick_port() {
@@ -328,14 +330,14 @@ worker_registration="$(curl -sS --fail-with-body -X POST \
   -H "Authorization: Bearer $worker_registration_token" \
   -H "X-Request-ID: k8s-register-$run_id" \
   -H 'Content-Type: application/json' \
-  -d "{\"executionTargetId\":\"$local_target_id\",\"targetKind\":\"local\",\"instanceUid\":\"$worker_instance_uid\",\"clusterId\":\"stage2-kind\",\"namespace\":\"$namespace\",\"podName\":\"stage2-worker-$run_id\",\"version\":\"acceptance\",\"protocolVersion\":$worker_protocol_version,\"capabilities\":$worker_capabilities,\"leaseSupported\":true,\"fencingSupported\":true}" \
+  -d "{\"executionTargetId\":\"$local_target_id\",\"targetKind\":\"local\",\"instanceUid\":\"$worker_instance_uid\",\"clusterId\":\"stage2-kind\",\"namespace\":\"$namespace\",\"podName\":\"stage2-worker-$run_id\",\"version\":\"$worker_version\",\"protocolVersion\":$worker_protocol_version,\"capabilities\":$worker_capabilities,\"leaseSupported\":true,\"fencingSupported\":true}" \
   "http://127.0.0.1:$local_port/v1/workers/register")"
 worker_token="$(jq -er '.token' <<<"$worker_registration")"
 worker_id="$(jq -er '.worker.id' <<<"$worker_registration")"
 curl -sS --fail-with-body -X POST \
   -H "Authorization: Bearer $worker_token" -H "X-Request-ID: k8s-heartbeat-$run_id" \
   -H 'Content-Type: application/json' \
-  -d "{\"version\":\"acceptance\",\"protocolVersion\":$worker_protocol_version,\"capabilities\":$worker_capabilities}" \
+  -d "{\"version\":\"$worker_version\",\"protocolVersion\":$worker_protocol_version,\"capabilities\":$worker_capabilities}" \
   "http://127.0.0.1:$local_port/v1/workers/heartbeat" >/dev/null
 
 pods_before=()
@@ -381,7 +383,7 @@ start_port_forward
 curl -sS --fail-with-body -X POST \
   -H "Authorization: Bearer $worker_token" -H "X-Request-ID: post-delete-heartbeat-$run_id" \
   -H 'Content-Type: application/json' \
-  -d "{\"version\":\"acceptance\",\"protocolVersion\":$worker_protocol_version,\"capabilities\":$worker_capabilities}" \
+  -d "{\"version\":\"$worker_version\",\"protocolVersion\":$worker_protocol_version,\"capabilities\":$worker_capabilities}" \
   "http://127.0.0.1:$local_port/v1/workers/heartbeat" >/dev/null
 printf 'Worker token remained valid after Pod replacement\n'
 
@@ -409,7 +411,7 @@ start_port_forward
 curl -sS --fail-with-body -X POST \
   -H "Authorization: Bearer $worker_token" -H "X-Request-ID: post-db-heartbeat-$run_id" \
   -H 'Content-Type: application/json' \
-  -d "{\"version\":\"acceptance\",\"protocolVersion\":$worker_protocol_version,\"capabilities\":$worker_capabilities}" \
+  -d "{\"version\":\"$worker_version\",\"protocolVersion\":$worker_protocol_version,\"capabilities\":$worker_capabilities}" \
   "http://127.0.0.1:$local_port/v1/workers/heartbeat" >/dev/null
 
 "${kube[@]}" -n "$namespace" scale deployment/synara-stage2-minio --replicas=0 >/dev/null

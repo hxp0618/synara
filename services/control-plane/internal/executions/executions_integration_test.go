@@ -136,7 +136,7 @@ func TestReregisteredWorkerFencesAuthenticatedHeartbeatAndLeaseRequests(t *testi
 	service := integrationService(t, db)
 	current := time.Now().UTC().Truncate(time.Microsecond)
 	service.now = func() time.Time { return current }
-	initialCapabilities := workerManifestTestCapabilities()
+	initialCapabilities := workerManifestTestCapabilitiesForVersion("current-v1")
 	initialCapabilities["workerGeneration"] = "old"
 	registration := RegisterWorkerInput{
 		ExecutionTargetID: fixture.TargetID,
@@ -180,7 +180,7 @@ func TestReregisteredWorkerFencesAuthenticatedHeartbeatAndLeaseRequests(t *testi
 	current = current.Add(time.Second)
 	registration.InstanceUID = uuid.NewString()
 	registration.Version = "current-v2"
-	currentCapabilities := workerManifestTestCapabilities()
+	currentCapabilities := workerManifestTestCapabilitiesForVersion("current-v2")
 	currentCapabilities["workerGeneration"] = "current"
 	registration.Capabilities = currentCapabilities
 	reregistered, err := service.Register(context.Background(), registration)

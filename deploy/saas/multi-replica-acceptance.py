@@ -22,6 +22,7 @@ from typing import Any
 LOGICAL_HOST = "synara-control-plane.test"
 CONTROL_PLANE_PORT = 3780
 WORKER_PROTOCOL_VERSION = 2
+WORKER_VERSION = "acceptance"
 
 
 class AcceptanceError(RuntimeError):
@@ -37,6 +38,7 @@ def build_worker_capabilities(
     generator_path: Path,
     catalog_path: Path,
     target_capabilities: Any,
+    worker_version: str,
 ) -> dict[str, Any]:
     require(isinstance(target_capabilities, dict), "Execution Target capabilities must be a JSON object")
     specification = importlib.util.spec_from_file_location("acceptance_worker_manifest", generator_path)
@@ -48,7 +50,11 @@ def build_worker_capabilities(
     specification.loader.exec_module(module)
     catalog = json.loads(catalog_path.read_text())
     require(isinstance(catalog, dict), "Provider capability catalog must be a JSON object")
-    capabilities = module.build_worker_capabilities(catalog, target_capabilities)
+    capabilities = module.build_worker_capabilities(
+        catalog,
+        target_capabilities,
+        worker_version=worker_version,
+    )
     require(isinstance(capabilities, dict), "Worker Manifest generator did not return a JSON object")
     return capabilities
 
@@ -340,6 +346,7 @@ def phase_one(
         worker_manifest_generator,
         provider_capability_catalog,
         target.get("capabilities"),
+        WORKER_VERSION,
     )
 
     cross_replica = SSECollector(
@@ -395,7 +402,7 @@ def phase_one(
             "clusterId": "multi",
             "namespace": "default",
             "podName": f"multi-worker-{run_id}",
-            "version": "acceptance",
+            "version": WORKER_VERSION,
             "protocolVersion": WORKER_PROTOCOL_VERSION,
             "capabilities": worker_capabilities,
             "leaseSupported": True,

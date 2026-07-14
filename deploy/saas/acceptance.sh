@@ -5,6 +5,7 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$script_dir/../.." && pwd)"
 base_url="${1:-http://127.0.0.1:3773}"
 worker_protocol_version=2
+worker_version="${SYNARA_ACCEPTANCE_WORKER_VERSION:-acceptance}"
 run_id="$(date +%s)-$$"
 work_dir="$(mktemp -d)"
 sse_pid=""
@@ -77,6 +78,7 @@ execution_target_id="$(jq -er '.executionTargetId' <<<"$agent_session")"
 execution_target="$(request_json "$owner_cookie" GET "/v1/tenants/$tenant_id/execution-targets/$execution_target_id")"
 target_kind="$(jq -er '.kind' <<<"$execution_target")"
 worker_capabilities="$(python3 "$repo_root/scripts/stage3-provider-acceptance/worker_manifest.py" \
+  --worker-version "$worker_version" \
   --target-capabilities-json "$(jq -c '.capabilities' <<<"$execution_target")")"
 jq -e '.lastEventSequence == 1 and .status == "active"' <<<"$agent_session" >/dev/null
 
@@ -111,12 +113,12 @@ jq -e '.items | all(.tenantId != null and .organizationId != null and .projectId
 worker_registration_token="${SYNARA_ACCEPTANCE_WORKER_REGISTRATION_TOKEN:-acceptance-worker-registration-token}"
 worker_instance_uid="$(new_uuid)"
 worker_registration="$(worker_json "$worker_registration_token" "register-$run_id" POST /v1/workers/register \
-  "{\"executionTargetId\":\"$execution_target_id\",\"targetKind\":\"$target_kind\",\"instanceUid\":\"$worker_instance_uid\",\"clusterId\":\"acceptance\",\"namespace\":\"default\",\"podName\":\"worker-$run_id\",\"version\":\"acceptance\",\"protocolVersion\":$worker_protocol_version,\"capabilities\":$worker_capabilities,\"leaseSupported\":true,\"fencingSupported\":true}")"
+  "{\"executionTargetId\":\"$execution_target_id\",\"targetKind\":\"$target_kind\",\"instanceUid\":\"$worker_instance_uid\",\"clusterId\":\"acceptance\",\"namespace\":\"default\",\"podName\":\"worker-$run_id\",\"version\":\"$worker_version\",\"protocolVersion\":$worker_protocol_version,\"capabilities\":$worker_capabilities,\"leaseSupported\":true,\"fencingSupported\":true}")"
 worker_token="$(jq -er '.token' <<<"$worker_registration")"
 worker_id="$(jq -er '.worker.id' <<<"$worker_registration")"
 
 worker_json "$worker_token" "heartbeat-$run_id" POST /v1/workers/heartbeat \
-  "{\"version\":\"acceptance\",\"protocolVersion\":$worker_protocol_version,\"capabilities\":$worker_capabilities}" >/dev/null
+  "{\"version\":\"$worker_version\",\"protocolVersion\":$worker_protocol_version,\"capabilities\":$worker_capabilities}" >/dev/null
 
 first_claim="$(worker_json "$worker_token" "claim-first-$run_id" POST /v1/workers/executions/claim \
   "{\"executionTargetId\":\"$execution_target_id\",\"targetKind\":\"$target_kind\"}")"

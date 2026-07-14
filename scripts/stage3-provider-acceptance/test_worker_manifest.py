@@ -16,9 +16,11 @@ class WorkerManifestTest(unittest.TestCase):
         capabilities = worker_manifest.build_worker_capabilities(
             self.catalog,
             {"providerPolicy": {"experimentalProviders": ["codex", "claudeAgent"]}},
+            worker_version="acceptance",
         )
 
         runtime = capabilities["workerRuntime"]
+        self.assertEqual(runtime["workerBuildVersion"], "acceptance")
         self.assertEqual(runtime["workerProtocolMinimum"], 2)
         self.assertEqual(runtime["runtimeEventMaximum"], 2)
         provider_host = capabilities["providerHost"]
@@ -38,6 +40,7 @@ class WorkerManifestTest(unittest.TestCase):
         capabilities = worker_manifest.build_worker_capabilities(
             self.catalog,
             {"providerPolicy": {"experimentalProviders": ["codex"]}},
+            worker_version="acceptance",
         )
         providers = capabilities["providerHost"]["providers"]
         self.assertTrue(providers["codex"]["capabilityDescriptor"]["releasePolicy"]["enabled"])
@@ -47,7 +50,11 @@ class WorkerManifestTest(unittest.TestCase):
         catalog = copy.deepcopy(self.catalog)
         del catalog["providers"][0]["capabilities"][catalog["capabilityIds"][0]]
         with self.assertRaisesRegex(ValueError, "capability matrix"):
-            worker_manifest.build_worker_capabilities(catalog, {})
+            worker_manifest.build_worker_capabilities(catalog, {}, worker_version="acceptance")
+
+    def test_rejects_empty_worker_version(self) -> None:
+        with self.assertRaisesRegex(ValueError, "worker version"):
+            worker_manifest.build_worker_capabilities(self.catalog, {}, worker_version="  ")
 
 
 if __name__ == "__main__":

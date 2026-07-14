@@ -31,7 +31,10 @@ def load_json_object(path: Path, label: str) -> dict[str, Any]:
 def build_worker_capabilities(
     catalog: Mapping[str, Any],
     target_capabilities: Mapping[str, Any],
+    *,
+    worker_version: str,
 ) -> dict[str, Any]:
+    normalized_worker_version = _non_empty_string(worker_version, "worker version")
     capability_ids = _string_sequence(catalog.get("capabilityIds"), "catalog capabilityIds")
     provider_entries = catalog.get("providers")
     if catalog.get("version") != 1 or not isinstance(provider_entries, Sequence) or not provider_entries:
@@ -126,7 +129,7 @@ def build_worker_capabilities(
 
     return {
         "workerRuntime": {
-            "workerBuildVersion": "acceptance-fixture",
+            "workerBuildVersion": normalized_worker_version,
             "workerBuildGitSha": "0000000000000000",
             "workerProtocolMinimum": WORKER_PROTOCOL_VERSION,
             "workerProtocolMaximum": WORKER_PROTOCOL_VERSION,
@@ -165,6 +168,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--catalog", type=Path, default=default_catalog_path())
     parser.add_argument("--target-capabilities-json")
+    parser.add_argument("--worker-version", required=True)
     arguments = parser.parse_args()
 
     target_capabilities: dict[str, Any]
@@ -179,7 +183,9 @@ def main() -> None:
         target_capabilities = value
 
     capabilities = build_worker_capabilities(
-        load_json_object(arguments.catalog, "Provider capability catalog"), target_capabilities
+        load_json_object(arguments.catalog, "Provider capability catalog"),
+        target_capabilities,
+        worker_version=arguments.worker_version,
     )
     print(json.dumps(capabilities, separators=(",", ":"), sort_keys=True))
 
