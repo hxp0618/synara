@@ -1,2 +1,5 @@
 [install]
 linker = "isolated"
+# Effect Language Service prepare hooks patch the shared isolated-store
+# TypeScript files, so running them concurrently can corrupt a clean install.
+concurrentScripts = 1
