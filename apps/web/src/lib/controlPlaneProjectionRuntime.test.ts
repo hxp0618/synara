@@ -126,6 +126,32 @@ describe("ControlPlaneProjectionRuntime", () => {
     runtime.dispose();
   });
 
+  it("starts a watcher that is registered before its Session scope is published", async () => {
+    const close = vi.fn();
+    const listSessionEvents = vi.fn(
+      async (_sessionId: string, afterSequence: number): Promise<ControlPlaneSessionEventPage> => ({
+        items: afterSequence === 0 ? [event(1, "turn.created"), event(2)] : [],
+        lastSequence: 2,
+      }),
+    );
+    const subscribeSessionEvents = vi.fn(() => close);
+    const runtime = new ControlPlaneProjectionRuntime({
+      client: { listSessionEvents, subscribeSessionEvents },
+      onChange: () => undefined,
+    });
+
+    const stopWatching = runtime.watch(session.id);
+    expect(subscribeSessionEvents).not.toHaveBeenCalled();
+
+    runtime.setScope("tenant-1:organization-1", [session]);
+    await vi.waitFor(() => expect(subscribeSessionEvents).toHaveBeenCalledTimes(1));
+    expect(subscribeSessionEvents).toHaveBeenCalledWith(session.id, 2, expect.any(Object));
+
+    stopWatching();
+    expect(close).toHaveBeenCalledTimes(1);
+    runtime.dispose();
+  });
+
   it("keeps a single reconnect loop when using the real SSE client", async () => {
     vi.useFakeTimers();
     vi.stubGlobal("window", { location: new URL("https://synara.example/settings") });

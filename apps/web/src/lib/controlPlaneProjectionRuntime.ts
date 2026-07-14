@@ -68,12 +68,14 @@ export class ControlPlaneProjectionRuntime {
       this.#scopeKey = scopeKey;
       this.#closeAllStreams();
       this.#catchups.clear();
-      this.#watchCounts.clear();
       this.#sessions = new Map();
       this.#projections = new Map();
     }
 
     const nextSessions = new Map(sessions.map((session) => [session.id, session] as const));
+    for (const sessionId of this.#watchCounts.keys()) {
+      if (!nextSessions.has(sessionId)) this.#watchCounts.delete(sessionId);
+    }
     const nextProjections = new Map<string, ControlPlaneSessionProjection>();
     for (const session of sessions) {
       const existing = this.#projections.get(session.id);
@@ -99,6 +101,12 @@ export class ControlPlaneProjectionRuntime {
     this.#sessions = nextSessions;
     this.#projections = nextProjections;
     this.#notify();
+    // Descendant route effects can register a watcher before the Provider effect
+    // publishes the matching Session scope. Reconcile those watchers here so a
+    // newly visible Session cannot get stuck after REST catch-up without its SSE.
+    for (const [sessionId, watchCount] of this.#watchCounts) {
+      if (watchCount > 0) void this.#ensureLive(sessionId);
+    }
   }
 
   async catchUpAll(): Promise<void> {
