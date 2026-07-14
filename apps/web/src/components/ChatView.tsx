@@ -11111,6 +11111,7 @@ export default function ChatView({
     gitCwd: threadWorkspaceCwd,
     openInTarget: threadWorkspaceCwd,
     githubRepository: githubRepositoryQuery.data?.repository ?? null,
+    githubRepositories: githubRepositoryQuery.data?.repositories ?? [],
     isGitRepo,
     keybindings,
     availableEditors,
