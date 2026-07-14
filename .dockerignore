@@ -29,6 +29,10 @@ node_modules
 *.sqlite-*
 *.sqlite3
 *.sqlite3-*
+*.dump
+*.backup
+*.sql.gz
+*.sql.zst
 
 .synara
 .synara-*
