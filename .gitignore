@@ -27,6 +27,7 @@ packages/*/dist
 .env
 .env.*
 !.env.example
+**/.claude/settings.local.json
 *.db
 *.db-*
 *.sqlite
@@ -39,6 +40,13 @@ packages/*/dist
 /release-mock/
 /deploy/remote/prebuilt/
 /deploy/*/workspace/
+/deploy/kubernetes/config.yaml
+/deploy/kubernetes/secret.yaml
+/deploy/kubernetes/*kubeconfig*
+/deploy/kubernetes/*.pem
+/deploy/kubernetes/*.key
+/deploy/kubernetes/*.p12
+/deploy/kubernetes/*.pfx
 /services/control-plane/data/
 /services/control-plane/personal-metadata.json
 /apps/server/package.json.bak
