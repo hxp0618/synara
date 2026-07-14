@@ -606,7 +606,7 @@ export class Stage3ProviderAcceptanceHost {
 
     const outputText = `fixture ${this.#session.provider} turn ${this.#turnSequence} complete`;
     if (blocking[0] === "approval") {
-      const requestId = `fixture-approval-${this.#turnSequence}`;
+      const requestId = `fixture-approval-generation-${command.generation}-${this.#turnSequence}`;
       this.#pendingTurn = {
         command,
         kind: "approval",
@@ -626,7 +626,7 @@ export class Stage3ProviderAcceptanceHost {
       return;
     }
     if (blocking[0] === "user-input") {
-      const requestId = `fixture-user-input-${this.#turnSequence}`;
+      const requestId = `fixture-user-input-generation-${command.generation}-${this.#turnSequence}`;
       this.#pendingTurn = {
         command,
         kind: "user-input",

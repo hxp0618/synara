@@ -14,6 +14,7 @@ import {
   type RunnerInput,
   type RunnerMessage,
 } from "./providerHost";
+import { providerInteractionRequestId } from "./interactionRequestId";
 import { ProviderInterruptedError } from "./providerRunErrors";
 
 export type ClaudeQueryRuntime = AsyncIterable<SDKMessage> & {
@@ -657,9 +658,16 @@ class ClaudeAgentSdkRuntime {
 
   private uniqueRequestId(kind: string, nativeId?: string): string {
     const base = this.safeString(nativeId, 200) ?? String(++this.requestSequence);
-    let requestId = `claude:${kind}:${base}`;
+    const generation = this.options.input.execution.generation;
+    let requestId = providerInteractionRequestId("claude", generation, kind, base);
     while (this.pendingApprovals.has(requestId) || this.pendingUserInputs.has(requestId)) {
-      requestId = `claude:${kind}:${base}:${++this.requestSequence}`;
+      requestId = providerInteractionRequestId(
+        "claude",
+        generation,
+        kind,
+        base,
+        ++this.requestSequence,
+      );
     }
     return requestId;
   }

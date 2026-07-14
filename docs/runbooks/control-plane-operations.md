@@ -299,6 +299,7 @@ KIND_BIN=/path/to/kind deploy/kubernetes/kind-acceptance.sh
 - `docs/release-checklists/stage-2-control-plane.md`
 - `docs/reports/stage-2-production-acceptance.md`
 - `docs/reports/stage-2-production-acceptance-1a53c93a.md`
+- `docs/reports/stage-2-production-acceptance-acf63b43.md`
 - `deploy/saas/README.md`
 - `deploy/kubernetes/README.md`
 - `deploy/kubernetes/monitoring/prometheus-rules.yaml`

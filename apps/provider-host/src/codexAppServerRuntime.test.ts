@@ -89,6 +89,85 @@ describe("Codex app-server runtime", () => {
     });
   });
 
+  it.each([
+    {
+      scenario: "approval",
+      generation: 7,
+      interactionType: "approval",
+      expectedRequestId: "codex:generation-7:approval-rpc",
+    },
+    {
+      scenario: "user-input",
+      generation: 8,
+      interactionType: "user-input",
+      expectedRequestId: "codex:generation-8:user-input-rpc",
+    },
+  ] as const)(
+    "scopes native $interactionType request IDs to Execution Generation $generation",
+    async ({ scenario, generation, interactionType, expectedRequestId }) => {
+      await withFakeCodex(scenario, async (directory, _tracePath, environment) => {
+        const messages: RunnerMessage[] = [];
+        const interaction = waitForInteraction(
+          messages,
+          (message) => message.interactionType === interactionType,
+        );
+        const run = startProviderHostRun(
+          codexInput(directory, { generation, interactionMode: "plan" }),
+          null,
+          (message) => messages.push(message),
+          { environment },
+        );
+
+        const request = await interaction;
+        expect(request.payload.requestId).toBe(expectedRequestId);
+        if (interactionType === "approval") {
+          await run.resolveApproval?.({
+            requestId: request.payload.requestId,
+            resolution: { decision: "accept" },
+          });
+        } else {
+          await run.resolveUserInput?.({
+            requestId: request.payload.requestId,
+            resolution: { answers: { environment: "staging" } },
+          });
+        }
+        await expect(run.result).resolves.toMatchObject({ type: "result" });
+      });
+    },
+  );
+
+  it("bounds long native request IDs while preserving the Codex Generation scope", async () => {
+    const requestIds: string[] = [];
+    for (const generation of [10, 11]) {
+      await withFakeCodex("long-approval", async (directory, _tracePath, environment) => {
+        const messages: RunnerMessage[] = [];
+        const interaction = waitForInteraction(
+          messages,
+          (message) => message.interactionType === "approval",
+        );
+        const run = startProviderHostRun(
+          codexInput(directory, { generation }),
+          null,
+          (message) => messages.push(message),
+          { environment },
+        );
+
+        const request = await interaction;
+        const requestId = String(request.payload.requestId);
+        requestIds.push(requestId);
+        expect(Buffer.byteLength(requestId)).toBeLessThanOrEqual(200);
+        expect(requestId).toMatch(new RegExp(`^codex:generation-${generation}:`));
+        await run.resolveApproval?.({
+          requestId,
+          resolution: { decision: "accept" },
+        });
+        await expect(run.result).resolves.toMatchObject({ output: { text: "approved" } });
+      });
+    }
+
+    expect(requestIds[1]).not.toBe(requestIds[0]);
+  });
+
   it("uses thread/resume even when authoritative history is available", async () => {
     await withFakeCodex("resume", async (directory, _tracePath, environment) => {
       const run = startProviderHostRun(
@@ -213,10 +292,13 @@ describe("Codex app-server runtime", () => {
 
 function codexInput(
   directory: string,
-  modes: { interactionMode?: "default" | "plan" } = {},
+  modes: { interactionMode?: "default" | "plan"; generation?: number } = {},
 ) {
   return {
-    execution: { id: "execution-codex-app-server" },
+    execution: {
+      id: "execution-codex-app-server",
+      ...(modes.generation === undefined ? {} : { generation: modes.generation }),
+    },
     workload: {
       provider: "codex",
       model: "gpt-test",
@@ -248,6 +330,7 @@ function waitForInteraction(
 async function withFakeCodex(
   scenario:
     | "approval"
+    | "long-approval"
     | "user-input"
     | "resume"
     | "resume-rebuild"
@@ -304,6 +387,7 @@ async function withFakeCodex(
 function fakeCodexSource(
   scenario:
     | "approval"
+    | "long-approval"
     | "user-input"
     | "resume"
     | "resume-rebuild"
@@ -360,6 +444,7 @@ for (const name of ${JSON.stringify([
   }
 }
 const send = (message) => process.stdout.write(JSON.stringify(message) + "\\n");
+const longApprovalId = "approval-" + "x".repeat(400);
 const complete = (text) => {
   send({ method: "item/agentMessage/delta", params: { threadId: "thread-new", turnId: "turn-1", itemId: "agent-1", delta: text } });
   send({ method: "turn/completed", params: { threadId: "thread-new", turn: { id: "turn-1", items: [], status: "completed", error: null } } });
@@ -385,6 +470,8 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
     send({ id: message.id, result: { turn: { id: "turn-1", items: [], status: "inProgress", error: null } } });
     if (scenario === "approval") {
       send({ id: "approval-rpc", method: "item/commandExecution/requestApproval", params: { threadId: "thread-new", turnId: "turn-1", itemId: "command-1", command: "git status --short", cwd: process.cwd(), reason: "Run a status check" } });
+    } else if (scenario === "long-approval") {
+      send({ id: longApprovalId, method: "item/commandExecution/requestApproval", params: { threadId: "thread-new", turnId: "turn-1", itemId: "command-long", command: "git status --short", cwd: process.cwd(), reason: "Run a status check" } });
     } else if (scenario === "user-input") {
       send({ id: "user-input-rpc", method: "item/tool/requestUserInput", params: { threadId: "thread-new", turnId: "turn-1", itemId: "input-1", autoResolutionMs: null, questions: [{ id: "environment", header: "Environment", question: "Where should this run?", isOther: false, isSecret: false, options: [{ label: "Staging", description: "Use staging." }] }] } });
     } else if (scenario === "resume") {
@@ -408,6 +495,9 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
   } else if (message.id === "approval-rpc") {
     if (message.result?.decision !== "accept") process.exit(2);
     send({ method: "thread/tokenUsage/updated", params: { threadId: "thread-new", turnId: "turn-1", tokenUsage: { total: {}, last: { totalTokens: 8, inputTokens: 5, cachedInputTokens: 1, outputTokens: 3, reasoningOutputTokens: 0 }, modelContextWindow: 100 } } });
+    complete("approved");
+  } else if (message.id === longApprovalId) {
+    if (message.result?.decision !== "accept") process.exit(2);
     complete("approved");
   } else if (message.id === "user-input-rpc") {
     complete(message.result?.answers?.environment?.answers?.[0] ?? "missing");

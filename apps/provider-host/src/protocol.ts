@@ -404,7 +404,10 @@ async function executeCommand(
     }
     case "StartSession":
     case "ResumeSession": {
-      const runnerInput = readRunnerInput(command.payload.runnerInput);
+      const runnerInput = bindRunnerInputGeneration(
+        readRunnerInput(command.payload.runnerInput),
+        command.generation,
+      );
       const provider = readProvider(runnerInput.workload.provider);
       const descriptor = descriptorForProvider(provider);
       assertProviderExecutionAllowed(provider, descriptor);
@@ -726,6 +729,25 @@ function readRunnerInput(value: unknown): RunnerInput {
   const input = value as RunnerInput;
   validateRunnerInput(input);
   return input;
+}
+
+function bindRunnerInputGeneration(input: RunnerInput, commandGeneration: number): RunnerInput {
+  const inputGeneration = input.execution.generation;
+  if (inputGeneration !== undefined && inputGeneration !== commandGeneration) {
+    throw new ProtocolFailure({
+      code: "protocol_violation",
+      message: "runnerInput.execution.generation does not match command.generation.",
+      retryable: false,
+      requiresNewExecution: true,
+      requiresUserAction: false,
+      canReconstructFromHistory: true,
+      canMoveWorker: true,
+    });
+  }
+  return {
+    ...input,
+    execution: { ...input.execution, generation: commandGeneration },
+  };
 }
 
 function readProvider(value: unknown): ProviderHostProviderKind {

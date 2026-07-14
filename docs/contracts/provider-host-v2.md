@@ -63,6 +63,11 @@ Interaction delivery is durable across the Control Plane boundary:
 4. Agentd pulls the resolution, writes the command to the active Host, then marks it `delivered`.
 5. After a correlated Host terminal message, agentd marks the resolution `acknowledged`.
 
+Provider-native request identifiers are namespaced by the current Execution Generation before they cross the Host
+boundary. Retries in the same Generation keep the same external `requestId`; a replacement Generation must emit a
+different external ID even when native resume reproduces the same Provider request. This prevents a recovered
+Approval or Structured Input from resolving the expired Interaction owned by the obsolete Worker.
+
 Delivered-but-unacknowledged commands remain pullable and use the stable command ID for replay. A stale
 Worker/Generation cannot pull, deliver, or acknowledge them. Lease recovery expires unresolved requests and
 supersedes unacknowledged deliveries from the obsolete Generation.

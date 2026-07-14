@@ -116,6 +116,8 @@ func migrateSQLiteSafety(ctx context.Context, db *gorm.DB) error {
 		`CREATE UNIQUE INDEX IF NOT EXISTS uq_agent_executions_session_active
 		 ON agent_executions (tenant_id, session_id)
 		 WHERE status IN ('queued', 'leased', 'running', 'waiting-for-approval', 'recovering')`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_execution_interactions_request
+		 ON execution_interactions (tenant_id, execution_id, request_id)`,
 	}
 	for _, statement := range statements {
 		if err := db.WithContext(ctx).Exec(statement).Error; err != nil {

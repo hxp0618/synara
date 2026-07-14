@@ -1,8 +1,9 @@
 # Stage 2 Production Acceptance Report
 
 > Historical evidence only: this report is fixed to the commits named below and its 16-Migration Kind baseline.
-> It does not prove the current repository state, whose forward chain now reaches `000031`. The newer historical
-> baseline is `docs/reports/stage-2-production-acceptance-1a53c93a.md`, which is itself fixed to `000028`.
+> It does not prove the current repository state. The current complete Stage 2 deployment baseline is
+> `docs/reports/stage-2-production-acceptance-acf63b43.md`, fixed to Migration `000031`; the intermediate
+> `docs/reports/stage-2-production-acceptance-1a53c93a.md` report remains fixed to `000028`.
 
 - Date: 2026-07-13
 - Branch: `codex/saas-tenancy-user`

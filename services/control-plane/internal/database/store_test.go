@@ -120,6 +120,13 @@ func TestSQLiteMetadataStoreQuarantinesLegacyProviderCursorAndCreatesSessionActi
 	if indexCount != 1 {
 		t.Fatal("SQLite migration omitted the one-active-Execution Session index")
 	}
+	if err := store.DB().Raw(`SELECT count(*) FROM sqlite_master
+		WHERE type = 'index' AND name = 'uq_execution_interactions_request'`).Scan(&indexCount).Error; err != nil {
+		t.Fatal(err)
+	}
+	if indexCount != 1 {
+		t.Fatal("SQLite migration omitted the execution-wide Interaction request index")
+	}
 }
 
 func TestSQLiteMetadataStoreRejectsAmbiguousLegacyActiveExecutions(t *testing.T) {

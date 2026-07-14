@@ -275,6 +275,22 @@ describe("durable conversation reconstruction", () => {
       }),
     ).toThrow("version is unsupported");
   });
+
+  it("accepts an Execution Generation and rejects invalid Generation values", () => {
+    const input = {
+      execution: { id: "execution-1", generation: 3 },
+      workload: { provider: "codex", inputText: "continue" },
+      workspaceDirectory: "/tmp/workspace",
+    };
+
+    expect(() => validateRunnerInput(input)).not.toThrow();
+    expect(() =>
+      validateRunnerInput({
+        ...input,
+        execution: { ...input.execution, generation: 0 },
+      }),
+    ).toThrow("execution.generation must be a positive integer");
+  });
 });
 
 describe("provider process lifecycle", () => {

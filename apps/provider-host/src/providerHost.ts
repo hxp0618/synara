@@ -7,7 +7,7 @@ import {
 import { startCodexAppServerRun } from "./codexAppServerRuntime";
 
 export type RunnerInput = {
-  execution: { id: string };
+  execution: { id: string; generation?: number };
   workload: {
     provider: string;
     model?: string | null;
@@ -390,6 +390,12 @@ export function validateRunnerInput(input: RunnerInput): void {
     ["workspaceDirectory", input.workspaceDirectory],
   ] as const) {
     if (typeof value !== "string" || value.trim() === "") throw new Error(`${label} is required`);
+  }
+  if (
+    input.execution.generation !== undefined &&
+    (!Number.isSafeInteger(input.execution.generation) || input.execution.generation < 1)
+  ) {
+    throw new Error("execution.generation must be a positive integer");
   }
   const snapshot = input.workload.resumeSnapshot;
   if (snapshot !== undefined && snapshot !== null) {

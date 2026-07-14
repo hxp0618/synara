@@ -25,12 +25,13 @@ function command(
   commandType: ProviderHostCommandEnvelope["commandType"],
   payload: Record<string, unknown>,
   commandId = `command-${commandType}`,
+  generation = 1,
 ): ProviderHostCommandEnvelope {
   return {
     requestId: `request-${commandType}`,
     protocolVersion: PROVIDER_HOST_PROTOCOL_VERSION,
     executionId: "execution-1",
-    generation: 1,
+    generation,
     commandType,
     commandId: commandId as ProviderHostCommandEnvelope["commandId"],
     occurredAt: "2026-07-13T02:00:00.000Z",
@@ -238,6 +239,72 @@ describe("Provider Host Protocol v2", () => {
 
     expect(result.at(-1)?.messageType).toBe("Result");
   });
+
+  it.each(["StartSession", "ResumeSession"] as const)(
+    "binds %s runner input to the command Generation",
+    async (commandType) => {
+      let receivedGeneration: number | undefined;
+      const handle = createProviderHostProtocolHandler({
+        credential: null,
+        emit: () => {},
+        descriptorForProvider: enabledDescriptorForProvider,
+        startRun: (input) => {
+          receivedGeneration = input.execution.generation;
+          return {
+            result: Promise.resolve({ type: "result", output: { text: "done" } }),
+            interrupt: () => {},
+          } satisfies ProviderRunController;
+        },
+      });
+      await handle(
+        command(
+          commandType,
+          { runnerInput: remoteRunnerInput(commandType === "ResumeSession") },
+          `generation-session-${commandType}`,
+          7,
+        ),
+      );
+
+      await handle(
+        command("SendTurn", { inputText: "continue" }, `generation-turn-${commandType}`, 7),
+      );
+
+      expect(receivedGeneration).toBe(7);
+    },
+  );
+
+  it.each(["StartSession", "ResumeSession"] as const)(
+    "rejects %s when runner input explicitly names a different Generation",
+    async (commandType) => {
+      const handle = createProviderHostProtocolHandler({
+        credential: null,
+        emit: () => {},
+        descriptorForProvider: enabledDescriptorForProvider,
+      });
+      const runnerInput = remoteRunnerInput(commandType === "ResumeSession");
+      const result = await handle(
+        command(
+          commandType,
+          {
+            runnerInput: {
+              ...runnerInput,
+              execution: { ...runnerInput.execution, generation: 6 },
+            },
+          },
+          `generation-mismatch-${commandType}`,
+          7,
+        ),
+      );
+
+      expect(result.at(-1)).toMatchObject({
+        messageType: "Error",
+        error: {
+          code: "protocol_violation",
+          message: "runnerInput.execution.generation does not match command.generation.",
+        },
+      });
+    },
+  );
 
   it.each(["StartSession", "ResumeSession"] as const)(
     "fails closed for %s when the Runtime version is incompatible",

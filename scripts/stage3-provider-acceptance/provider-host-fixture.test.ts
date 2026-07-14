@@ -193,7 +193,7 @@ describe("Stage 3 Provider Host acceptance fixture", () => {
     ]);
     host.handleCommand(
       command("ResolveApproval", "resolve-approval", {
-        requestId: "fixture-approval-1",
+        requestId: "fixture-approval-generation-1-1",
         resolution: { decision: "accept" },
       }),
     );
@@ -206,12 +206,12 @@ describe("Stage 3 Provider Host acceptance fixture", () => {
       messageType: "InteractionRequest",
       payload: {
         interactionType: "user-input",
-        requestId: "fixture-user-input-2",
+        requestId: "fixture-user-input-generation-1-2",
       },
     });
     host.handleCommand(
       command("ResolveUserInput", "resolve-input", {
-        requestId: "fixture-user-input-2",
+        requestId: "fixture-user-input-generation-1-2",
         resolution: { answers: { "fixture-choice": "Continue" } },
       }),
     );
@@ -245,6 +245,43 @@ describe("Stage 3 Provider Host acceptance fixture", () => {
       error: { code: "interrupted" },
     });
   });
+
+  it.each(["approval", "user-input"] as const)(
+    "changes deterministic %s IDs across recovered Execution Generations",
+    (interactionType) => {
+      const firstOutput: ProviderHostMessage[] = [];
+      const firstHost = fixtureHost(firstOutput);
+      startCodexSession(firstHost, tmpdir(), 1);
+      firstHost.handleCommand(
+        command(
+          "SendTurn",
+          `generation-1-${interactionType}`,
+          { inputText: `[${interactionType}]` },
+          1,
+        ),
+      );
+
+      const recoveredOutput: ProviderHostMessage[] = [];
+      const recoveredHost = fixtureHost(recoveredOutput);
+      startCodexSession(recoveredHost, tmpdir(), 2);
+      recoveredHost.handleCommand(
+        command(
+          "SendTurn",
+          `generation-2-${interactionType}`,
+          { inputText: `[${interactionType}]` },
+          2,
+        ),
+      );
+
+      const firstRequestId =
+        messagesFor(firstOutput, `generation-1-${interactionType}`)[0]?.payload.requestId;
+      const recoveredRequestId =
+        messagesFor(recoveredOutput, `generation-2-${interactionType}`)[0]?.payload.requestId;
+      expect(firstRequestId).toBe(`fixture-${interactionType}-generation-1-1`);
+      expect(recoveredRequestId).toBe(`fixture-${interactionType}-generation-2-1`);
+      expect(recoveredRequestId).not.toBe(firstRequestId);
+    },
+  );
 
   it("supports authoritative ResumeSession and StopSession cancellation without enabling Local-only Providers", () => {
     const output: ProviderHostMessage[] = [];
@@ -395,7 +432,7 @@ describe("Stage 3 Provider Host acceptance fixture", () => {
       JSON.stringify(command("SendTurn", "send-cli", { inputText: "[approval]" })),
       JSON.stringify(
         command("ResolveApproval", "resolve-cli", {
-          requestId: "fixture-approval-1",
+          requestId: "fixture-approval-generation-1-1",
           resolution: { decision: "accept" },
         }),
       ),
@@ -457,12 +494,18 @@ function fixtureHost(output: ProviderHostMessage[]): Stage3ProviderAcceptanceHos
 function startCodexSession(
   host: Stage3ProviderAcceptanceHost,
   workspaceDirectory = tmpdir(),
+  generation = 1,
 ): void {
   host.handleCommand(
-    command("StartSession", "session-start", {
-      runnerInput: { workload: { provider: "codex" }, workspaceDirectory },
-      runtimeEventVersion: 2,
-    }),
+    command(
+      "StartSession",
+      "session-start",
+      {
+        runnerInput: { workload: { provider: "codex" }, workspaceDirectory },
+        runtimeEventVersion: 2,
+      },
+      generation,
+    ),
   );
 }
 
@@ -470,12 +513,13 @@ function command(
   commandType: ProviderHostCommandEnvelope["commandType"],
   commandId: string,
   payload: Record<string, unknown>,
+  generation = 1,
 ): ProviderHostCommandEnvelope {
   return {
     requestId: `request-${commandId}`,
     protocolVersion: PROVIDER_HOST_PROTOCOL_VERSION,
     executionId: "fixture-execution",
-    generation: 1,
+    generation,
     commandType,
     commandId: commandId as ProviderHostCommandEnvelope["commandId"],
     occurredAt: "2026-07-14T00:00:00.000Z",

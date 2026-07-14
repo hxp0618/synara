@@ -117,6 +117,10 @@ Plane persists the pending request, current Worker, and Generation. User resolut
 Lease has expired or the Generation is fenced and is replayed as `approval.resolved` or
 `user-input.resolved` Session Events.
 
+The stable scope is one Execution Generation. Provider Host normalization includes the current Generation in the
+external request identity, so a replacement Worker can safely replay the same native Provider request without
+colliding with or resolving the expired Interaction from the obsolete Generation.
+
 The current Worker/Generation pulls resolved commands from the execution-scoped resolution endpoint. A
 delivery carries the persisted `interactionId`, stable `commandId`, `ResolveApproval` or `ResolveUserInput`
 command type, and the validated resolution payload. The Worker marks the command `delivered` before writing it

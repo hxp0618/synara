@@ -228,11 +228,12 @@ class BarrierSuite(acceptance.AcceptanceSuite):
 
 
 class PendingApprovalRecoverySuite(BarrierSuite):
-    def __init__(self) -> None:
+    def __init__(self, *, replacement_request_id: str = "approval-request-2") -> None:
         super().__init__(acceptance.EXECUTION_PINNED_WORKER)
         self.fake_driver.pending_interaction_recovery = "delete-pod"
         self.fake_driver.recover_pending_interaction = self._recover_pending_interaction  # type: ignore[method-assign]
         self.fake_driver.observe_execution = self._observe_execution  # type: ignore[method-assign]
+        self.replacement_request_id = replacement_request_id
         self.recovered = False
 
     def _recover_pending_interaction(self, target_id: str, execution_id: str) -> Mapping[str, Any]:
@@ -258,7 +259,7 @@ class PendingApprovalRecoverySuite(BarrierSuite):
             "turnId": turn_id,
             "kind": kind,
             "executionId": "execution-1",
-            "requestId": "approval-request-2",
+            "requestId": self.replacement_request_id,
         }
 
     def _wait_for_replacement_interaction(
@@ -483,6 +484,7 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
         self.assertTrue(suite.recovered)
         self.assertEqual(recovery["staleInteractionId"], "interaction-1")
         self.assertEqual(recovery["replacementInteractionId"], "interaction-2")
+        self.assertEqual(recovery["replacementRequestId"], "approval-request-2")
         self.assertEqual(recovery["targetRuntime"]["podUid"], "pod-uid-2")
         self.assertEqual(resolution["requestId"], "approval-request-2")
         self.assertEqual(
@@ -495,6 +497,15 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
                 )
             ],
         )
+
+    def test_pending_approval_runtime_recovery_rejects_reused_request_identity(self) -> None:
+        suite = PendingApprovalRecoverySuite(replacement_request_id="approval-request-1")
+
+        suite._discover_worker()
+        with self.assertRaises(acceptance.AcceptanceError) as raised:
+            suite._recover_pending_approval_runtime()
+
+        self.assertEqual(raised.exception.code, "runner.pending_interaction_request_not_replaced")
 
     def test_standing_restart_waits_for_online_worker(self) -> None:
         suite = BarrierSuite(acceptance.STANDING_WORKER)

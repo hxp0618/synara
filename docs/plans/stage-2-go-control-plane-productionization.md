@@ -19,9 +19,9 @@
 - **计划基线提交**：`05c3c5da`
 - **工作区状态**：以执行时的 Git 状态为准，不再假设计划基线中的未提交文件仍存在
 - **当前 Schema**：forward-only migration 已连续到 `000031_session_execution_cursor_lineage.sql`
-- **验收证据边界**：最新完整 Stage 2 部署验收固定在 `1a53c93a`、Migration `000028`；
-  `000029`-`000031` 尚无新的完整 Single-node/Multi-replica/Failure/Kind 报告，不得据此宣称当前
-  HEAD 已通过部署验收
+- **验收证据边界**：最新完整 Stage 2 部署验收固定在 `acf63b43`、Migration `000031`；
+  Single-node、Multi-replica、Failure 与 disposable Kind 证据见
+  `docs/reports/stage-2-production-acceptance-acf63b43.md`
 - **依赖**：SaaS Tenant/Organization/User 领域模型、Worker Protocol v1、Runtime Event v1
 - **目标结果**：Go Control Plane 达到可供前端长期依赖、支持多副本部署和可靠恢复的生产基线
 
@@ -72,7 +72,7 @@
 `services/control-plane/README.md#persistence` 和 `services/control-plane/migrations/` 为准，不再在本计划
 复制一份会漂移的完整清单。
 
-最新完整 Stage 2 部署验收 `1a53c93a` 覆盖到 `000028`。该报告之后新增：
+上一份 Stage 2 部署验收 `1a53c93a` 覆盖到 `000028`。该报告之后新增：
 
 ```text
 000029 provider runtime/version compatibility and explicit release policy
@@ -80,8 +80,8 @@
 000031 Session Cursor state/lineage quarantine and one active Execution per Session
 ```
 
-这些 Migration 属于同一生产 Schema 链，必须在当前构建的 PostgreSQL、Compose 和 Kind 部署验收中
-一并验证；不能用 `000028` 的历史 PASS 推断它们已通过。
+这些 Migration 属于同一生产 Schema 链，已在 `acf63b43` 的 PostgreSQL、Compose 和 Kind 部署验收中
+一并验证；历史 `000028` 报告仍保留，但当前证据以 `000031` 报告为准。
 
 ### 3.3 已有前端接入
 
@@ -824,9 +824,9 @@ errorCode
   集成数据库、Single-node、双副本 Compose、故障注入和 Kind 双副本验收；验收脚本已同步 Worker
   Protocol v2 Heartbeat 与 ready Workspace 完成约束，基线固定报告见
   `docs/reports/stage-2-production-acceptance-1a53c93a.md`。
-- [ ] 当前 migration 链已扩展到 `000031`。尚未记录针对当前 HEAD 的完整 Single-node、双副本
-  Compose、故障注入和 Stage 2 Kind 部署重跑；在新报告固定 Commit、Migration Version 与命令输出前，
-  `1a53c93a` 只能作为历史基线证据。
+- [x] `acf63b43` / Migration `000031` 已重新通过 Single-node、双副本 Compose、故障注入和
+  disposable Stage 2 Kind；报告固定 Commit、Migration Version、前后端 Proxy、故障与清理证据，见
+  `docs/reports/stage-2-production-acceptance-acf63b43.md`。
 
 ### Step 2：多副本正确性
 
@@ -1019,8 +1019,7 @@ bun run test
 - [x] 未配置 Control Plane 时本地模式保持可用。
 - [x] `1a53c93a` / Migration `000028` 基线的 Single-node Compose Acceptance 通过。
 - [x] `1a53c93a` / Migration `000028` 基线的 Enterprise 双副本 Acceptance 通过。
-- [ ] 当前 Migration `000031` HEAD 的 Single-node、Multi-replica、Failure 和 Kind 部署验收需重新
-  固定证据。
+- [x] `acf63b43` / Migration `000031` 的 Single-node、Multi-replica、Failure 和 Kind 部署验收已固定。
 - [x] 生产 Runbook 和告警规则完成。
 - [x] 未引入 Credential、Token、Prompt 的日志泄漏。
 

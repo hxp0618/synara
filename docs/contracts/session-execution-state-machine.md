@@ -75,6 +75,12 @@ Legacy Runtime Event v1 uses `approval.requested` or `user-input.requested`. Can
 `execution_interactions` in the same transaction as the Session Event and moves the Execution to
 `waiting-for-approval`.
 
+`requestId` is stable for retries within one Execution Generation, while the Provider Host namespaces a native
+Provider request with the current Generation. Recovery expires the obsolete Interaction before a replacement
+Worker claims the next Generation; if the Provider replays the same native request, the replacement Interaction
+must therefore receive a different external `requestId`. PostgreSQL enforces execution-wide request uniqueness,
+and Personal SQLite creates the matching unique index during metadata migration.
+
 Authorized users resolve requests through:
 
 ```text

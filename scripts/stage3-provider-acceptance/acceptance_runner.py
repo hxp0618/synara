@@ -4227,11 +4227,37 @@ class AcceptanceSuite:
         )
         replacement = self._wait_for_replacement_interaction(turn_id, "approval", previous_interaction_id)
         replacement_execution_id = replacement.get("executionId")
-        if not isinstance(replacement_execution_id, str) or not replacement_execution_id:
+        replacement_request_id = replacement.get("requestId")
+        if (
+            not isinstance(replacement_execution_id, str)
+            or not replacement_execution_id
+            or not isinstance(replacement_request_id, str)
+            or not replacement_request_id
+        ):
             raise AcceptanceError(
                 "runner.recovered_interaction_invalid",
-                "The recovered Approval omitted its Execution identity.",
+                "The recovered Approval omitted its Execution or Request identity.",
                 {"interaction": replacement},
+            )
+        if replacement_request_id == request_id:
+            raise AcceptanceError(
+                "runner.pending_interaction_request_not_replaced",
+                "Pending Approval recovery reused the obsolete Generation's Request identity.",
+                {
+                    "staleInteractionId": previous_interaction_id,
+                    "staleRequestId": request_id,
+                    "replacementInteractionId": replacement.get("id"),
+                    "replacementRequestId": replacement_request_id,
+                },
+            )
+        if replacement_execution_id != execution_id:
+            raise AcceptanceError(
+                "runner.pending_interaction_execution_changed",
+                "Pending Approval recovery created a different Execution instead of advancing its Generation.",
+                {
+                    "staleExecutionId": execution_id,
+                    "replacementExecutionId": replacement_execution_id,
+                },
             )
         target_runtime = self.driver.observe_execution(self._required("target_id"), replacement_execution_id)
         deleted_uid = target_evidence.get("deletedPodUid") if isinstance(target_evidence, Mapping) else None
@@ -4250,7 +4276,7 @@ class AcceptanceSuite:
             "staleExecutionId": execution_id,
             "recoveryEvent": self._event_summary(recovery_event),
             "replacementInteractionId": replacement.get("id"),
-            "replacementRequestId": replacement.get("requestId"),
+            "replacementRequestId": replacement_request_id,
             "replacementExecutionId": replacement_execution_id,
             "targetRecovery": dict(target_evidence),
             "targetRuntime": dict(target_runtime),
@@ -4533,6 +4559,8 @@ class AcceptanceSuite:
                     "runner.response_shape_invalid",
                     "pending interactions.items was not an array.",
                 )
+            if any(isinstance(item, dict) and item.get("id") == previous_interaction_id for item in items):
+                return None
             for item in items:
                 if isinstance(item, dict) and item.get("turnId") == turn_id and item.get("kind") == kind:
                     return item

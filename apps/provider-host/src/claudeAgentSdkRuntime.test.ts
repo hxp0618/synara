@@ -219,6 +219,102 @@ describe("Claude Agent SDK runtime", () => {
     });
   });
 
+  it("scopes approval and user-input request IDs to the Execution Generation", async () => {
+    const messages: RunnerMessage[] = [];
+    const approvalInteractions = nextInteractions(messages, "approval", 2);
+    const userInputInteraction = nextInteraction(messages, "user-input");
+    const longApprovalId = `stable-approval-${"x".repeat(300)}`;
+    const queryFactory: ClaudeQueryFactory = ({ prompt, options }) =>
+      fakeQuery(
+        (async function* () {
+          expect(await promptText(prompt)).toBe("exercise generated interactions");
+          const queryOptions = requiredOptions(options);
+          const approval = queryOptions.canUseTool?.(
+            "Bash",
+            { command: "git status --short" },
+            {
+              signal: new AbortController().signal,
+              toolUseID: longApprovalId,
+            },
+          );
+          const duplicateApproval = queryOptions.canUseTool?.(
+            "Bash",
+            { command: "git diff --stat" },
+            {
+              signal: new AbortController().signal,
+              toolUseID: longApprovalId,
+            },
+          );
+          await expect(Promise.all([approval, duplicateApproval])).resolves.toEqual([
+            expect.objectContaining({ behavior: "allow" }),
+            expect.objectContaining({ behavior: "allow" }),
+          ]);
+          const userInput = await queryOptions.canUseTool?.(
+            "AskUserQuestion",
+            {
+              questions: [
+                {
+                  header: "Environment",
+                  question: "Where should this run?",
+                  options: [{ label: "Staging", description: "Use staging." }],
+                  multiSelect: false,
+                },
+              ],
+            },
+            {
+              signal: new AbortController().signal,
+              toolUseID: "stable-user-input",
+            },
+          );
+          expect(userInput).toMatchObject({
+            behavior: "allow",
+            updatedInput: { answers: { "Where should this run?": "Staging" } },
+          });
+          yield sdkMessage(systemInit("session-generated-interactions", "claude-test"));
+          yield sdkMessage(successResult("session-generated-interactions", "done", {}));
+        })(),
+      );
+
+    const run = startProviderHostRun(
+      claudeInput({
+        inputText: "exercise generated interactions",
+        runtimeMode: "approval-required",
+        generation: 9,
+      }),
+      null,
+      (message) => messages.push(message),
+      { claudeQueryFactory: queryFactory },
+    );
+
+    const approvals = await approvalInteractions;
+    const approvalRequestIds = approvals.map((approval) => String(approval.payload.requestId));
+    expect(approvalRequestIds).toHaveLength(2);
+    expect(new Set(approvalRequestIds).size).toBe(2);
+    expect(approvalRequestIds[0]).toMatch(/^claude:generation-9:approval:/);
+    expect(approvalRequestIds[1]).toMatch(/:1$/);
+    for (const requestId of approvalRequestIds) {
+      expect(Buffer.byteLength(requestId)).toBeLessThanOrEqual(200);
+      await run.resolveApproval?.({
+        requestId,
+        resolution: { decision: "accept" },
+      });
+    }
+
+    const userInput = await userInputInteraction;
+    expect(userInput.payload.requestId).toBe(
+      "claude:generation-9:user-input:stable-user-input",
+    );
+    await run.resolveUserInput?.({
+      requestId: userInput.payload.requestId,
+      resolution: { answers: { "question-1": "Staging" } },
+    });
+
+    await expect(run.result).resolves.toMatchObject({
+      output: { text: "done" },
+      providerResumeCursor: "session-generated-interactions",
+    });
+  });
+
   it("prefers native resume even when authoritative history is present", async () => {
     let calls = 0;
     const queryFactory: ClaudeQueryFactory = ({ prompt, options }) =>
@@ -512,10 +608,14 @@ function claudeInput(
     inputText: string;
     runtimeMode?: "approval-required" | "full-access";
     interactionMode?: "default" | "plan";
+    generation?: number;
   },
 ): RunnerInput {
   return {
-    execution: { id: "execution-claude-sdk" },
+    execution: {
+      id: "execution-claude-sdk",
+      ...(input.generation === undefined ? {} : { generation: input.generation }),
+    },
     workload: {
       provider: "claudeAgent",
       model: "claude-test",
@@ -540,6 +640,24 @@ function nextInteraction(
       if (!message) return;
       clearInterval(timer);
       resolve(message);
+    }, 1);
+  });
+}
+
+function nextInteractions(
+  messages: RunnerMessage[],
+  interactionType: "approval" | "user-input",
+  count: number,
+): Promise<ReadonlyArray<Extract<RunnerMessage, { type: "interaction" }>>> {
+  return new Promise((resolve) => {
+    const timer = setInterval(() => {
+      const matching = messages.filter(
+        (item): item is Extract<RunnerMessage, { type: "interaction" }> =>
+          item.type === "interaction" && item.interactionType === interactionType,
+      );
+      if (matching.length < count) return;
+      clearInterval(timer);
+      resolve(matching.slice(0, count));
     }, 1);
   });
 }

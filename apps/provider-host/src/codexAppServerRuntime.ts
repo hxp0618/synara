@@ -7,6 +7,7 @@ import {
   type RunnerInput,
   type RunnerMessage,
 } from "./providerHost";
+import { providerInteractionRequestId } from "./interactionRequestId";
 import { ProviderInterruptedError } from "./providerRunErrors";
 
 type JsonRpcId = string | number;
@@ -298,7 +299,10 @@ class CodexAppServerRuntime {
 
   private handleServerRequest(request: JsonRpcRequest): void {
     const params = asRecord(request.params) ?? {};
-    const requestId = interactionRequestId(request.id);
+    const requestId = interactionRequestId(
+      request.id,
+      this.options.input.execution.generation,
+    );
     if (
       request.method === "item/commandExecution/requestApproval" ||
       request.method === "item/fileChange/requestApproval" ||
@@ -413,7 +417,10 @@ class CodexAppServerRuntime {
       case "serverRequest/resolved": {
         const resolvedId = params.requestId;
         if (typeof resolvedId === "string" || typeof resolvedId === "number") {
-          const requestId = interactionRequestId(resolvedId);
+          const requestId = interactionRequestId(
+            resolvedId,
+            this.options.input.execution.generation,
+          );
           this.pendingApprovals.delete(requestId);
           this.pendingUserInputs.delete(requestId);
         }
@@ -687,8 +694,8 @@ function readThreadId(response: Record<string, unknown>): string | undefined {
   return readString(asRecord(response.thread), "id") ?? readString(response, "threadId");
 }
 
-function interactionRequestId(id: JsonRpcId): string {
-  return `codex:${String(id)}`.slice(0, 200);
+function interactionRequestId(id: JsonRpcId, generation?: number): string {
+  return providerInteractionRequestId("codex", generation, undefined, id);
 }
 
 function approvalSummary(requestKind: string): string {
