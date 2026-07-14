@@ -207,17 +207,55 @@ function RootRouteView() {
   );
 }
 
+function useVisibleRouteThreadIds(): readonly ThreadId[] {
+  const routeThreadId = useParams({
+    strict: false,
+    select: (params) => (params.threadId ? ThreadId.makeUnsafe(params.threadId) : null),
+  });
+  const routeSearch = useDiffRouteSearch();
+  const activeSplitView = useSplitViewStore(selectSplitView(routeSearch.splitViewId ?? null));
+  return useMemo(
+    () =>
+      activeSplitView
+        ? resolveSplitViewThreadIds(activeSplitView)
+        : routeThreadId
+          ? [routeThreadId]
+          : [],
+    [activeSplitView, routeThreadId],
+  );
+}
+
 function ControlPlaneSessionRouteCoordinator() {
   const controlPlane = useControlPlane();
-  const params = useParams({ strict: false }) as { threadId?: string };
-  const sessionId = params.threadId ?? null;
-  const sessionAvailable =
-    sessionId !== null && controlPlane.sessions.some((session) => session.id === sessionId);
+  const visibleSessionIds = useVisibleRouteThreadIds();
+  const watchedSessionStopsRef = useRef(new Map<ThreadId, () => void>());
+  const availableSessionIds = useMemo(() => {
+    const available = new Set(controlPlane.sessions.map((session) => session.id));
+    return visibleSessionIds.filter((sessionId) => available.has(sessionId));
+  }, [controlPlane.sessions, visibleSessionIds]);
 
   useEffect(() => {
-    if (!sessionId || !sessionAvailable) return;
-    return controlPlane.watchSession(sessionId);
-  }, [controlPlane.watchSession, sessionAvailable, sessionId]);
+    const watchedSessionStops = watchedSessionStopsRef.current;
+    const desiredSessionIds = new Set(availableSessionIds);
+
+    for (const [sessionId, stopWatching] of watchedSessionStops) {
+      if (desiredSessionIds.has(sessionId)) continue;
+      stopWatching();
+      watchedSessionStops.delete(sessionId);
+    }
+    for (const sessionId of availableSessionIds) {
+      if (watchedSessionStops.has(sessionId)) continue;
+      watchedSessionStops.set(sessionId, controlPlane.watchSession(sessionId));
+    }
+  }, [availableSessionIds, controlPlane.watchSession]);
+
+  useEffect(() => {
+    const watchedSessionStops = watchedSessionStopsRef.current;
+    return () => {
+      for (const stopWatching of watchedSessionStops.values()) stopWatching();
+      watchedSessionStops.clear();
+    };
+  }, []);
 
   return null;
 }
@@ -806,18 +844,7 @@ function EventRouter() {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
   const pathname = useRouterState({ select: (state) => state.location.pathname });
-  const routeThreadId = useParams({
-    strict: false,
-    select: (params) => (params.threadId ? ThreadId.makeUnsafe(params.threadId) : null),
-  });
-  const routeSearch = useDiffRouteSearch();
-  const activeSplitView = useSplitViewStore(selectSplitView(routeSearch.splitViewId ?? null));
-  const visibleThreadIds = useMemo(() => {
-    if (activeSplitView) {
-      return resolveSplitViewThreadIds(activeSplitView);
-    }
-    return routeThreadId ? [routeThreadId] : [];
-  }, [activeSplitView, routeThreadId]);
+  const visibleThreadIds = useVisibleRouteThreadIds();
   const retainedThreadIds = useRetainedThreadDetailIds();
   const serverThreadIds = useMemo(
     () => new Set(serverThreads.map((thread) => thread.id)),
