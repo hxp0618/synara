@@ -230,6 +230,85 @@ describe("controlPlaneClient", () => {
     );
   });
 
+  it("switches a Session model through the dedicated model-switch route", async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(
+        JSON.stringify({
+          id: "session-1",
+          tenantId: "tenant-1",
+          organizationId: "organization-1",
+          projectId: "project-1",
+          createdBy: "user-1",
+          title: "Session",
+          status: "active",
+          visibility: "private",
+          provider: "codex",
+          model: "gpt-5.6-sol",
+          executionTargetId: "target-1",
+          lastEventSequence: 7,
+          createdAt: "2026-07-12T00:00:00Z",
+          updatedAt: "2026-07-12T00:00:07Z",
+          archivedAt: null,
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await controlPlaneClient.switchSessionModel(
+      "session/one",
+      { model: "gpt-5.6-sol", expectedModel: "gpt-5" },
+      { idempotencyKey: "web-session-model-switch-1" },
+    );
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/v1/sessions/session%2Fone/model-switch",
+      expect.objectContaining({
+        method: "POST",
+        credentials: "include",
+        body: JSON.stringify({ model: "gpt-5.6-sol", expectedModel: "gpt-5" }),
+      }),
+    );
+    const request = fetchMock.mock.calls[0]?.[1] as RequestInit;
+    expect(new Headers(request.headers).get("Idempotency-Key")).toBe(
+      "web-session-model-switch-1",
+    );
+  });
+
+  it("sends expectedModel null explicitly when the Session has no current model", async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(
+        JSON.stringify({
+          id: "session-1",
+          tenantId: "tenant-1",
+          organizationId: "organization-1",
+          projectId: "project-1",
+          createdBy: "user-1",
+          title: "Session",
+          status: "active",
+          visibility: "private",
+          provider: "claudeAgent",
+          model: "claude-sonnet-5",
+          executionTargetId: "target-1",
+          lastEventSequence: 7,
+          createdAt: "2026-07-12T00:00:00Z",
+          updatedAt: "2026-07-12T00:00:07Z",
+          archivedAt: null,
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await controlPlaneClient.switchSessionModel("session/one", {
+      model: "claude-sonnet-5",
+      expectedModel: null,
+    });
+
+    const request = fetchMock.mock.calls[0]?.[1] as RequestInit;
+    expect(request.body).toBe(JSON.stringify({ model: "claude-sonnet-5", expectedModel: null }));
+  });
+
   it("creates projects with private Git access and can explicitly unbind it", async () => {
     const responses = [
       new Response(JSON.stringify({ id: "project-1", gitCredentialId: "git-credential-1" }), {

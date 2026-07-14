@@ -3,7 +3,7 @@
 package providercatalog
 
 const SchemaVersion = 1
-const SourceSHA256 = "e58f3fe17835c9c767963fa003da09964f06f22ece8a37fc77cb73362537ca12"
+const SourceSHA256 = "e1e5d512b625bfdd85f9181389889be072b4dae1b338f0d91c77e9533ddb9229"
 
 var generatedCapabilityIDs = []string{
 	"discovery",
@@ -77,7 +77,7 @@ var generatedProviders = []Provider{
 			"fork":                                 "unsupported",
 			"read-history":                         "emulated",
 			"model-list":                           "unsupported",
-			"model-switch":                         "native",
+			"model-switch":                         "emulated",
 			"skill-discovery":                      "unsupported",
 			"skill-mentions":                       "unsupported",
 			"plugin-discovery":                     "unsupported",
@@ -121,7 +121,7 @@ var generatedProviders = []Provider{
 			"fork":                                 "unsupported",
 			"read-history":                         "emulated",
 			"model-list":                           "unsupported",
-			"model-switch":                         "native",
+			"model-switch":                         "emulated",
 			"skill-discovery":                      "unsupported",
 			"skill-mentions":                       "unsupported",
 			"plugin-discovery":                     "unsupported",

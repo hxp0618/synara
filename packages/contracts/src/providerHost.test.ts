@@ -126,6 +126,15 @@ describe("Provider Host v2 contracts", () => {
     expect(descriptor.capabilityDescriptor.runtime.versionSource).toBe("probe");
   });
 
+  it("marks SaaS model-switch as emulated for Codex and Claude Agent", () => {
+    const providers = new Map(
+      PROVIDER_CAPABILITY_CATALOG.providers.map((entry) => [entry.provider, entry] as const),
+    );
+
+    expect(providers.get("codex")?.capabilities["model-switch"]).toBe("emulated");
+    expect(providers.get("claudeAgent")?.capabilities["model-switch"]).toBe("emulated");
+  });
+
   it("decodes a sanitized Target and Execution capability projection including Droid", () => {
     const targetProjection = decodeCapabilityProjection({
       executionTargetId: "target-1",

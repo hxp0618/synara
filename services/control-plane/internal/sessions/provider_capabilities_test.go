@@ -156,17 +156,49 @@ func TestCapabilityGateRunsInsideIdempotentOperationAndDoesNotBreakReplay(t *tes
 	}
 }
 
+func TestSwitchModelCapabilityGateRequiresObservedSupportedModelSwitch(t *testing.T) {
+	t.Run("unobserved", func(t *testing.T) {
+		fixture := newTenantExecutionPolicyFixture(t)
+		_, err := fixture.service.SwitchModel(
+			context.Background(), fixture.principal, fixture.sessionID,
+			SwitchModelInput{Model: "gpt-5.6", ExpectedModelProvided: true},
+			"model-switch-unobserved", "127.0.0.1",
+		)
+		assertSessionProblemCode(t, err, providercapabilities.ReasonWorkerManifestRequired)
+		assertCount(t, fixture, &persistence.SessionEvent{},
+			"tenant_id = ? AND session_id = ? AND event_type = ?", 0,
+			fixture.tenantID, fixture.sessionID, "session.model.changed")
+	})
+
+	t.Run("unsupported", func(t *testing.T) {
+		fixture := newTenantExecutionPolicyFixture(t)
+		seedSessionCapabilityWorker(t, fixture, sessionCapabilityManifestOptions{
+			CodexModelSwitch: "unsupported",
+		})
+		_, err := fixture.service.SwitchModel(
+			context.Background(), fixture.principal, fixture.sessionID,
+			SwitchModelInput{Model: "gpt-5.6", ExpectedModelProvided: true},
+			"model-switch-unsupported", "127.0.0.1",
+		)
+		assertSessionProblemCode(t, err, providercapabilities.ReasonCapabilityUnsupported)
+		assertCount(t, fixture, &persistence.SessionEvent{},
+			"tenant_id = ? AND session_id = ? AND event_type = ?", 0,
+			fixture.tenantID, fixture.sessionID, "session.model.changed")
+	})
+}
+
 type sessionCapabilityManifestOptions struct {
 	CodexCompatibilityStatus string
 	CodexIncompatibilityCode string
 	CodexPlanMode            string
+	CodexModelSwitch         string
 }
 
 func seedSessionCapabilityWorker(
 	t *testing.T,
 	fixture tenantExecutionPolicyFixture,
 	options sessionCapabilityManifestOptions,
-) {
+) uuid.UUID {
 	t.Helper()
 	manifestID := uuid.New()
 	now := time.Now().UTC()
@@ -197,6 +229,9 @@ func seedSessionCapabilityWorker(
 			code = options.CodexIncompatibilityCode
 			if options.CodexPlanMode != "" {
 				capabilities["plan-mode"] = options.CodexPlanMode
+			}
+			if options.CodexModelSwitch != "" {
+				capabilities["model-switch"] = options.CodexModelSwitch
 			}
 		}
 		var codePointer, messagePointer *string
@@ -236,6 +271,7 @@ func seedSessionCapabilityWorker(
 	}).Error; err != nil {
 		t.Fatal(err)
 	}
+	return manifestID
 }
 
 func disableExperimentalProviders(t *testing.T, db *gorm.DB, targetID uuid.UUID) {

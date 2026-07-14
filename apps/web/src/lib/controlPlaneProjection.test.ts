@@ -318,4 +318,42 @@ describe("Control Plane Session projection", () => {
     ]);
     expect(projection.activities.at(-1)?.tone).toBe("error");
   });
+
+  it("applies session.model.changed to the projected Session authority and activity feed", () => {
+    let projection = createControlPlaneSessionProjection(session);
+    projection = applyControlPlaneSessionEvent(
+      projection,
+      event(1, "session.model.changed", {
+        provider: "codex",
+        previousModel: "gpt-5.5",
+        model: "gpt-5.6-sol",
+        supportMode: "emulated",
+      }),
+    ).projection;
+
+    expect(projection.session.model).toBe("gpt-5.6-sol");
+    expect(projection.session.updatedAt).toBe("2026-07-12T00:00:01Z");
+    expect(projection.activities.at(-1)).toEqual(
+      expect.objectContaining({
+        kind: "session.model.changed",
+        summary: "Model switched to gpt-5.6-sol",
+      }),
+    );
+  });
+
+  it("projects top-level thread model and timestamps from the projection Session authority", () => {
+    const projection = {
+      ...createControlPlaneSessionProjection(session),
+      session: {
+        ...session,
+        model: "gpt-5.6-sol",
+        updatedAt: "2026-07-12T00:00:09Z",
+      },
+    };
+
+    const thread = projectControlPlaneThreads([session], new Map([[session.id, projection]]))[0]!;
+
+    expect(thread.modelSelection).toEqual({ provider: "codex", model: "gpt-5.6-sol" });
+    expect(thread.updatedAt).toBe("2026-07-12T00:00:09Z");
+  });
 });

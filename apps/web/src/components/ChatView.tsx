@@ -176,6 +176,7 @@ import {
   resolveProjectScriptTerminalTarget,
   resolvePromptHistoryNavigation,
   resolveAuthoritativeTurnDispatch,
+  resolveServerThreadModelSwitchAvailability,
   shouldHandlePromptHistoryNavigationKey,
   shouldEnableComposerPastedTextCollapse,
   shouldEnableThreadRecap,
@@ -1974,6 +1975,18 @@ export default function ChatView({
     : null;
   const selectedProvider: ProviderKind =
     lockedProvider ?? selectedProviderByThreadId ?? threadProvider ?? settings.defaultProvider;
+  const phase = derivePhase(activeThread?.session ?? null);
+  const isServerThreadModelSwitchPending = Boolean(
+    isServerThread &&
+      activeThread &&
+      controlPlane.sessionModelSwitchingBySessionId[activeThread.id] === true,
+  );
+  const hasActiveServerExecution = Boolean(
+    isServerThread &&
+      (phase === "running" ||
+        activeThread?.latestTurn?.state === "running" ||
+        activeThread?.session?.activeTurnId !== undefined),
+  );
   const projectProviderCapabilitiesQuery = useControlPlaneProjectProviderCapabilities(
     controlPlane.isAuthoritative && !isServerThread ? (activeProject?.id ?? null) : null,
   );
@@ -2063,6 +2076,24 @@ export default function ChatView({
       selectedProvider,
     ],
   );
+  const modelSwitchCapabilityDecision = useMemo(
+    () =>
+      resolveControlPlaneCapabilityDecision({
+        isAuthoritative: controlPlane.isAuthoritative,
+        projection: activeProviderCapabilityProjection,
+        ...(activeProviderCapabilityError
+          ? { projectionError: activeProviderCapabilityError }
+          : {}),
+        provider: selectedProvider,
+        capabilityId: "model-switch",
+      }),
+    [
+      activeProviderCapabilityError,
+      activeProviderCapabilityProjection,
+      controlPlane.isAuthoritative,
+      selectedProvider,
+    ],
+  );
   const advancedCapabilityDecisions = useMemo(
     () =>
       Object.fromEntries(
@@ -2104,6 +2135,30 @@ export default function ChatView({
     if (!controlPlane.isAuthoritative) return undefined;
     return Object.fromEntries(
       AVAILABLE_PROVIDER_OPTIONS.map((option) => {
+        if (isServerThread) {
+          if (sessionProvider && option.value !== sessionProvider) {
+            return [
+              option.value,
+              {
+                selectable: false,
+                label: "Locked",
+                temporary: false,
+                message: `This SaaS Session is locked to ${PROVIDER_DISPLAY_NAMES[sessionProvider]}.`,
+              },
+            ] as const;
+          }
+          return [
+            option.value,
+            resolveServerThreadModelSwitchAvailability({
+              capabilityAllowed: modelSwitchCapabilityDecision.allowed,
+              capabilityTemporary: modelSwitchCapabilityDecision.temporary,
+              capabilityMessage: modelSwitchCapabilityDecision.message,
+              phase,
+              hasActiveExecution: hasActiveServerExecution,
+              isPending: isServerThreadModelSwitchPending,
+            }),
+          ] as const;
+        }
         const dispatchDecision = resolveControlPlaneTurnDispatchDecision({
           isAuthoritative: true,
           projection: activeProviderCapabilityProjection,
@@ -2114,14 +2169,9 @@ export default function ChatView({
           includeSessionStart: !isServerThread,
           interactionMode,
         });
-        const modelSwitchUnavailable = isServerThread;
-        const selectable = dispatchDecision.allowed && !modelSwitchUnavailable;
+        const selectable = dispatchDecision.allowed;
         const temporary = dispatchDecision.temporary;
-        const message = !dispatchDecision.allowed
-          ? dispatchDecision.message
-          : modelSwitchUnavailable
-            ? "Model switching is unavailable for an existing SaaS Session until the Control Plane can persist the selected model."
-            : dispatchDecision.message;
+        const message = dispatchDecision.message;
         return [
           option.value,
           {
@@ -2143,8 +2193,15 @@ export default function ChatView({
     activeProviderCapabilityError,
     activeProviderCapabilityProjection,
     controlPlane.isAuthoritative,
+    hasActiveServerExecution,
     interactionMode,
     isServerThread,
+    isServerThreadModelSwitchPending,
+    modelSwitchCapabilityDecision.allowed,
+    modelSwitchCapabilityDecision.message,
+    modelSwitchCapabilityDecision.temporary,
+    phase,
+    sessionProvider,
   ]);
   const previousSelectedProviderRef = useRef<{
     threadId: ThreadId;
@@ -2167,8 +2224,12 @@ export default function ChatView({
     const draftSelections = composerDraft.modelSelectionByProvider;
 
     const resolveHint = (provider: ProviderKind): string | null =>
-      draftSelections[provider]?.model ??
-      (threadModelSelection?.provider === provider ? threadModelSelection.model : null) ??
+      (isServerThread && threadModelSelection?.provider === provider
+        ? threadModelSelection.model
+        : draftSelections[provider]?.model) ??
+      (!isServerThread && threadModelSelection?.provider === provider
+        ? threadModelSelection.model
+        : null) ??
       (projectModelSelection?.provider === provider ? projectModelSelection.model : null);
 
     return {
@@ -2186,6 +2247,7 @@ export default function ChatView({
     activeProject?.defaultModelSelection,
     activeThread?.modelSelection,
     composerDraft.modelSelectionByProvider,
+    isServerThread,
   ]);
   const providerModelDiscoveryCwd = resolveProviderDiscoveryCwd({
     activeThreadWorktreePath: resolvedThreadWorktreePath,
@@ -2453,6 +2515,7 @@ export default function ChatView({
     selectedProvider,
     threadModelSelection: activeThread?.modelSelection,
     projectModelSelection: activeProject?.defaultModelSelection,
+    preferThreadModelSelection: isServerThread,
     customModelsByProvider,
     availableModelOptionsByProvider: modelOptionsByProvider,
   });
@@ -2615,7 +2678,8 @@ export default function ChatView({
         .filter((option) => {
           if (
             controlPlane.isAuthoritative &&
-            providerAvailabilityByProvider?.[option.value]?.selectable === false
+            providerAvailabilityByProvider?.[option.value]?.selectable === false &&
+            !(isServerThread && option.value === selectedProvider)
           ) {
             return false;
           }
@@ -2654,11 +2718,11 @@ export default function ChatView({
       modelOptionsByProvider,
       controlPlane.isAuthoritative,
       providerAvailabilityByProvider,
+      isServerThread,
       selectedProvider,
       settings.providerOrder,
     ],
   );
-  const phase = derivePhase(activeThread?.session ?? null);
   const isConnecting = isLocalConnecting || phase === "connecting";
   // User messages intentionally have no turn id; assistant messages are the stable
   // bridge for deciding which historical work can fold into visible replies.
@@ -6132,26 +6196,20 @@ export default function ChatView({
   }, [activeThread, controlPlane, interruptCapabilityDecision, setThreadError]);
 
   const onProviderModelSelect = useCallback(
-    (provider: ProviderKind, model: ModelSlug) => {
+    async (provider: ProviderKind, model: ModelSlug) => {
       if (!activeThread) return;
-      if (controlPlane.isAuthoritative && isServerThread) {
-        toastManager.add({
-          type: "warning",
-          title: "Model switching is unavailable",
-          description:
-            "The Control Plane does not yet persist model changes for an existing SaaS Session.",
-        });
-        scheduleComposerFocus();
-        return;
-      }
       const providerAvailability = providerAvailabilityByProvider?.[provider];
       if (providerAvailability?.selectable === false) {
         toastManager.add({
           type: providerAvailability.temporary ? "warning" : "error",
-          title: `${PROVIDER_DISPLAY_NAMES[provider]} is unavailable`,
+          title: isServerThread
+            ? "Model switching is unavailable"
+            : `${PROVIDER_DISPLAY_NAMES[provider]} is unavailable`,
           description:
             providerAvailability.message ??
-            "This Provider or model cannot be selected on the active SaaS target.",
+            (isServerThread
+              ? "This SaaS Session cannot switch models right now."
+              : "This Provider or model cannot be selected on the active SaaS target."),
         });
         scheduleComposerFocus();
         return;
@@ -6169,6 +6227,27 @@ export default function ChatView({
         provider,
         model: resolvedModel,
       };
+      if (controlPlane.isAuthoritative && isServerThread) {
+        if (
+          activeThread.modelSelection.provider === nextModelSelection.provider &&
+          activeThread.modelSelection.model === nextModelSelection.model
+        ) {
+          scheduleComposerFocus();
+          return;
+        }
+        try {
+          await controlPlane.switchSessionModel(activeThread.id, nextModelSelection.model);
+        } catch (error) {
+          toastManager.add({
+            type: "error",
+            title: "Failed to switch model",
+            description:
+              error instanceof Error ? error.message : "The SaaS Session model could not be updated.",
+          });
+        }
+        scheduleComposerFocus();
+        return;
+      }
       setComposerDraftModelSelectionAndSticky(activeThread.id, nextModelSelection);
       if (provider === "cursor" && !showExpandedCursorModelVariants) {
         setComposerDraftProviderModelOptions(activeThread.id, provider, undefined, {
@@ -6180,6 +6259,7 @@ export default function ChatView({
     },
     [
       activeThread,
+      controlPlane,
       controlPlane.isAuthoritative,
       isServerThread,
       lockedProvider,

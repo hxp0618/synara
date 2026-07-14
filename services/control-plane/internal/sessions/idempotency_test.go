@@ -4,6 +4,10 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
+
+	"github.com/google/uuid"
+	"gorm.io/gorm"
 
 	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
 	"github.com/synara-ai/synara/services/control-plane/internal/problem"
@@ -160,6 +164,66 @@ func TestSessionCreateAndArchiveIdempotency(t *testing.T) {
 	if materialization.CleanupRequestedAt != nil {
 		t.Fatalf("archive without a Workspace cleanup policy created cleanup intent: %#v", materialization)
 	}
+}
+
+func TestSessionModelSwitchIdempotencyDoesNotDuplicateBindingEventOrAudit(t *testing.T) {
+	fixture := newTenantExecutionPolicyFixture(t)
+	ctx := context.Background()
+	previousModel := "gpt-5"
+	nextModel := "gpt-5.6"
+	oldBindingID := uuid.New()
+	now := time.Now().UTC()
+	if err := fixture.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(&persistence.ProviderRuntimeBinding{
+			ID: oldBindingID, TenantID: fixture.tenantID, SessionID: fixture.sessionID,
+			Provider: "codex", Revision: 1, Status: "active", ResumeStrategy: "native-cursor",
+			CreatedAt: now, UpdatedAt: now,
+		}).Error; err != nil {
+			return err
+		}
+		return tx.Model(&persistence.AgentSession{}).
+			Where("tenant_id = ? AND id = ?", fixture.tenantID, fixture.sessionID).
+			Updates(map[string]any{"model": previousModel, "current_runtime_binding_id": oldBindingID}).Error
+	}); err != nil {
+		t.Fatal(err)
+	}
+	seedSessionCapabilityWorker(t, fixture, sessionCapabilityManifestOptions{})
+	input := SwitchModelInput{
+		Model: nextModel, ExpectedModel: &previousModel, ExpectedModelProvided: true,
+	}
+
+	first, replayed, err := fixture.service.SwitchModelWithIdempotency(
+		ctx, fixture.principal, fixture.sessionID, input,
+		"model-switch-key", "model-switch-first", "127.0.0.1",
+	)
+	if err != nil || replayed {
+		t.Fatalf("first model switch = %#v replayed=%t err=%v", first, replayed, err)
+	}
+	second, replayed, err := fixture.service.SwitchModelWithIdempotency(
+		ctx, fixture.principal, fixture.sessionID, input,
+		"model-switch-key", "model-switch-second", "127.0.0.1",
+	)
+	if err != nil || !replayed || second.ID != first.ID || second.LastEventSequence != first.LastEventSequence {
+		t.Fatalf("model switch replay = %#v replayed=%t err=%v", second, replayed, err)
+	}
+	_, _, err = fixture.service.SwitchModelWithIdempotency(
+		ctx, fixture.principal, fixture.sessionID,
+		SwitchModelInput{Model: "gpt-6", ExpectedModel: &nextModel, ExpectedModelProvided: true},
+		"model-switch-key", "model-switch-conflict", "127.0.0.1",
+	)
+	assertIdempotencyConflict(t, err)
+
+	assertCount(t, fixture, &persistence.ProviderRuntimeBinding{},
+		"tenant_id = ? AND session_id = ?", 2, fixture.tenantID, fixture.sessionID)
+	assertCount(t, fixture, &persistence.SessionEvent{},
+		"tenant_id = ? AND session_id = ? AND event_type = ?", 1,
+		fixture.tenantID, fixture.sessionID, "session.model.changed")
+	assertCount(t, fixture, &persistence.AuditLog{},
+		"tenant_id = ? AND resource_id = ? AND action = ?", 1,
+		fixture.tenantID, fixture.sessionID, "session.model.changed")
+	assertCount(t, fixture, &persistence.APIIdempotencyKey{},
+		"tenant_id = ? AND actor_id = ? AND idempotency_key = ?", 1,
+		fixture.tenantID, fixture.principal.UserID, "model-switch-key")
 }
 
 func TestSessionSuspendResumeTransitionsAreIdempotent(t *testing.T) {

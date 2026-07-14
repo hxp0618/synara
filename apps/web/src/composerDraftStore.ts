@@ -1711,6 +1711,7 @@ export function deriveEffectiveComposerModelState(input: {
   selectedProvider: ProviderKind;
   threadModelSelection: ModelSelection | null | undefined;
   projectModelSelection: ModelSelection | null | undefined;
+  preferThreadModelSelection?: boolean;
   customModelsByProvider: Record<ProviderKind, readonly string[]>;
   availableModelOptionsByProvider?: Partial<
     Record<ProviderKind, ReadonlyArray<{ slug: string; name: string }>>
@@ -1752,26 +1753,40 @@ export function deriveEffectiveComposerModelState(input: {
       )
     : null;
   const unlistedDraftModel = input.selectedProvider === "pi" ? selectedDraftModel : null;
-  const selectedModel =
-    resolveAvailableModel(activeSelection?.model) ??
-    resolveAvailableModel(
-      input.threadModelSelection?.provider === input.selectedProvider
-        ? input.threadModelSelection.model
-        : null,
-    ) ??
-    resolveAvailableModel(
-      input.projectModelSelection?.provider === input.selectedProvider
-        ? input.projectModelSelection.model
-        : null,
-    ) ??
-    resolveAvailableModel(selectedDraftModel) ??
-    persistedThreadModel ??
-    persistedProjectModel ??
-    unlistedDraftModel ??
-    input.availableModelOptionsByProvider?.[input.selectedProvider]?.[0]?.slug ??
-    selectedDraftModel ??
-    baseModel ??
-    getDefaultModel("codex");
+  const availableThreadModel = resolveAvailableModel(
+    input.threadModelSelection?.provider === input.selectedProvider
+      ? input.threadModelSelection.model
+      : null,
+  );
+  const availableDraftModel = resolveAvailableModel(activeSelection?.model);
+  const availableProjectModel = resolveAvailableModel(
+    input.projectModelSelection?.provider === input.selectedProvider
+      ? input.projectModelSelection.model
+      : null,
+  );
+  const selectedModel = input.preferThreadModelSelection
+    ? availableThreadModel ??
+      persistedThreadModel ??
+      availableDraftModel ??
+      availableProjectModel ??
+      resolveAvailableModel(selectedDraftModel) ??
+      persistedProjectModel ??
+      unlistedDraftModel ??
+      input.availableModelOptionsByProvider?.[input.selectedProvider]?.[0]?.slug ??
+      selectedDraftModel ??
+      baseModel ??
+      getDefaultModel("codex")
+    : availableDraftModel ??
+      availableThreadModel ??
+      availableProjectModel ??
+      resolveAvailableModel(selectedDraftModel) ??
+      persistedThreadModel ??
+      persistedProjectModel ??
+      unlistedDraftModel ??
+      input.availableModelOptionsByProvider?.[input.selectedProvider]?.[0]?.slug ??
+      selectedDraftModel ??
+      baseModel ??
+      getDefaultModel("codex");
   const modelOptions = deriveEffectiveComposerModelOptions(input);
 
   return {
@@ -4780,6 +4795,7 @@ export function useEffectiveComposerModelState(input: {
   selectedProvider: ProviderKind;
   threadModelSelection: ModelSelection | null | undefined;
   projectModelSelection: ModelSelection | null | undefined;
+  preferThreadModelSelection?: boolean;
   customModelsByProvider: Record<ProviderKind, readonly string[]>;
   availableModelOptionsByProvider?: Partial<
     Record<ProviderKind, ReadonlyArray<{ slug: string; name: string }>>
@@ -4794,6 +4810,9 @@ export function useEffectiveComposerModelState(input: {
         selectedProvider: input.selectedProvider,
         threadModelSelection: input.threadModelSelection,
         projectModelSelection: input.projectModelSelection,
+        ...(input.preferThreadModelSelection === true
+          ? { preferThreadModelSelection: true }
+          : {}),
         customModelsByProvider: input.customModelsByProvider,
         ...(input.availableModelOptionsByProvider !== undefined
           ? { availableModelOptionsByProvider: input.availableModelOptionsByProvider }
@@ -4803,6 +4822,7 @@ export function useEffectiveComposerModelState(input: {
       input.availableModelOptionsByProvider,
       draft,
       input.customModelsByProvider,
+      input.preferThreadModelSelection,
       input.projectModelSelection,
       input.selectedProvider,
       input.threadModelSelection,

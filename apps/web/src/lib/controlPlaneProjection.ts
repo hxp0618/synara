@@ -211,6 +211,10 @@ function activitySummary(event: ControlPlaneSessionEvent): string | null {
       return "Session resumed";
     case "session.archived":
       return "Session archived";
+    case "session.model.changed": {
+      const model = payloadString(event, "model");
+      return model ? `Model switched to ${model}` : "Session model switched";
+    }
     case "content.delta":
       return null;
     case "item.started":
@@ -495,6 +499,14 @@ export function applyControlPlaneSessionEvent(
       };
       orchestrationStatus = "stopped";
       break;
+    case "session.model.changed":
+      session = {
+        ...session,
+        provider: payloadString(event, "provider") ?? session.provider,
+        model: payloadString(event, "model") ?? session.model,
+        updatedAt: event.occurredAt,
+      };
+      break;
   }
 
   return {
@@ -574,13 +586,14 @@ export function projectControlPlaneThreads(
 ): Thread[] {
   return sessions.map((session) => {
     const projection = projections.get(session.id) ?? createControlPlaneSessionProjection(session);
-    const provider = providerKind(session.provider);
-    const model = session.model ?? getDefaultModel(provider) ?? "default";
+    const sourceSession = projection.session;
+    const provider = providerKind(sourceSession.provider);
+    const model = sourceSession.model ?? getDefaultModel(provider) ?? "default";
     return {
-      id: ThreadId.makeUnsafe(session.id),
+      id: ThreadId.makeUnsafe(sourceSession.id),
       codexThreadId: null,
-      projectId: ProjectId.makeUnsafe(session.projectId),
-      title: session.title,
+      projectId: ProjectId.makeUnsafe(sourceSession.projectId),
+      title: sourceSession.title,
       modelSelection: { provider, model },
       runtimeMode: projection.runtimeMode,
       interactionMode: projection.interactionMode,
@@ -588,9 +601,9 @@ export function projectControlPlaneThreads(
       messages: projection.messages,
       proposedPlans: [],
       error: projection.error,
-      createdAt: session.createdAt,
-      archivedAt: projection.session.archivedAt,
-      updatedAt: projection.session.updatedAt,
+      createdAt: sourceSession.createdAt,
+      archivedAt: sourceSession.archivedAt,
+      updatedAt: sourceSession.updatedAt,
       branch: null,
       worktreePath: null,
       envMode: "local",

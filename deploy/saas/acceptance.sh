@@ -22,7 +22,11 @@ request_json() {
   local method="$2"
   local path="$3"
   local body="${4:-}"
+  local idempotency_key="${5:-}"
   local args=(-sS -b "$cookie_jar" -c "$cookie_jar" -X "$method")
+  if [[ -n "$idempotency_key" ]]; then
+    args+=(-H "Idempotency-Key: $idempotency_key")
+  fi
   if [[ -n "$body" ]]; then
     args+=(-H 'Content-Type: application/json' -d "$body")
   fi
@@ -119,6 +123,7 @@ first_claim="$(worker_json "$worker_token" "claim-first-$run_id" POST /v1/worker
 first_execution_id="$(jq -er '.execution.id' <<<"$first_claim")"
 first_generation="$(jq -er '.lease.generation' <<<"$first_claim")"
 first_lease_token="$(jq -er '.lease.leaseToken' <<<"$first_claim")"
+first_runtime_binding_id="$(jq -er '.workload.providerRuntimeBindingId' <<<"$first_claim")"
 jq -e --arg session_id "$session_id" '.execution.sessionId == $session_id and .execution.status == "leased"' \
   <<<"$first_claim" >/dev/null
 
@@ -156,6 +161,19 @@ if grep -q '^id: 2$' "$work_dir/reconnected-events.sse"; then
   exit 1
 fi
 
+model_switch_key="model-switch-$run_id"
+model_switch_body='{"model":"gpt-5.4","expectedModel":"gpt-5.6-sol"}'
+switched_session="$(request_json "$owner_cookie" POST "/v1/sessions/$session_id/model-switch" \
+  "$model_switch_body" "$model_switch_key")"
+jq -e '.model == "gpt-5.4" and .lastEventSequence == 10' <<<"$switched_session" >/dev/null
+curl -sS -D "$work_dir/model-switch-replay.headers" -o "$work_dir/model-switch-replay.json" \
+  -b "$owner_cookie" -c "$owner_cookie" -X POST -H 'Content-Type: application/json' \
+  -H "Idempotency-Key: $model_switch_key" -d "$model_switch_body" \
+  "$base_url/v1/sessions/$session_id/model-switch"
+tr -d '\r' <"$work_dir/model-switch-replay.headers" | grep -qi '^Idempotency-Replayed: true$'
+jq -e '.model == "gpt-5.4" and .lastEventSequence == 10' \
+  "$work_dir/model-switch-replay.json" >/dev/null
+
 # A Session may only have one nonterminal Execution. The first Turn has completed,
 # so this independent Turn is now legal and can be claimed separately.
 request_json "$owner_cookie" POST "/v1/sessions/$session_id/turns" \
@@ -166,15 +184,22 @@ second_claim="$(worker_json "$worker_token" "claim-second-$run_id" POST /v1/work
 second_execution_id="$(jq -er '.execution.id' <<<"$second_claim")"
 second_generation="$(jq -er '.lease.generation' <<<"$second_claim")"
 second_lease_token="$(jq -er '.lease.leaseToken' <<<"$second_claim")"
-jq -e --arg session_id "$session_id" '.execution.sessionId == $session_id and .execution.status == "leased"' \
-  <<<"$second_claim" >/dev/null
+jq -e --arg session_id "$session_id" --arg previous_binding "$first_runtime_binding_id" '
+  .execution.sessionId == $session_id and
+  .execution.status == "leased" and
+  .workload.model == "gpt-5.4" and
+  .workload.resumeSnapshot.model == "gpt-5.4" and
+  .workload.providerRuntimeBindingId != $previous_binding and
+  .providerResumeCursor == null and
+  (.workload.conversationHistory | any(.role == "assistant" and .text == "acceptance output"))
+' <<<"$second_claim" >/dev/null
 worker_json "$worker_token" "fail-second-$run_id" POST "/v1/workers/executions/$second_execution_id/fail" \
   "{\"tenantId\":\"$tenant_id\",\"generation\":$second_generation,\"leaseToken\":\"$second_lease_token\",\"failureCode\":\"acceptance_failure\",\"failureMessage\":\"Expected acceptance failure\"}" >/dev/null
 
 runtime_events="$(request_json "$owner_cookie" GET "/v1/sessions/$session_id/events?afterSequence=2&limit=20")"
-jq -e '.lastSequence == 12 and
-  (.items | map(.sequence) == [3, 4, 5, 6, 7, 8, 9, 10, 11, 12]) and
-  (.items | map(.eventType) == ["execution.leased", "execution.started", "runtime.output.delta", "execution.recovering", "execution.leased", "workspace.ready", "execution.completed", "turn.created", "execution.leased", "execution.failed"])' \
+jq -e '.lastSequence == 13 and
+  (.items | map(.sequence) == [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]) and
+  (.items | map(.eventType) == ["execution.leased", "execution.started", "runtime.output.delta", "execution.recovering", "execution.leased", "workspace.ready", "execution.completed", "session.model.changed", "turn.created", "execution.leased", "execution.failed"])' \
   <<<"$runtime_events" >/dev/null
 
 artifact_payload="$work_dir/acceptance-artifact.txt"
@@ -266,7 +291,7 @@ jq -e '.items | length >= 4' <<<"$audit_logs" >/dev/null
 jq -e '.items | all(.occurredAt | startswith("0001-") | not)' <<<"$audit_logs" >/dev/null
 
 archived_session="$(request_json "$owner_cookie" POST "/v1/sessions/$session_id/archive")"
-jq -e '.status == "archived" and .lastEventSequence == 14 and .archivedAt != null' \
+jq -e '.status == "archived" and .lastEventSequence == 15 and .archivedAt != null' \
   <<<"$archived_session" >/dev/null
 request_json "$owner_cookie" DELETE "/v1/projects/$project_id" >/dev/null
 

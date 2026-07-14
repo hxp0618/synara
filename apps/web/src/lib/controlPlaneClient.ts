@@ -840,6 +840,22 @@ export const controlPlaneClient = {
     ),
   getAgentSession: (sessionId: string) =>
     controlPlaneRequest<ControlPlaneAgentSession>(`/v1/sessions/${encodeURIComponent(sessionId)}`),
+  switchSessionModel: (
+    sessionId: string,
+    input: {
+      model: string;
+      expectedModel: string | null;
+    },
+    options?: ControlPlaneIdempotencyOptions,
+  ) =>
+    controlPlaneRequest<ControlPlaneAgentSession>(
+      `/v1/sessions/${encodeURIComponent(sessionId)}/model-switch`,
+      {
+        method: "POST",
+        ...idempotencyRequestHeaders(options),
+        body: input,
+      },
+    ),
   getSessionProviderCapabilities: (sessionId: string) =>
     controlPlaneRequest<ProviderCapabilityProjection>(
       `/v1/sessions/${encodeURIComponent(sessionId)}/provider-capabilities`,

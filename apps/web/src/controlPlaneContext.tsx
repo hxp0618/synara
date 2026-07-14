@@ -133,6 +133,7 @@ export type ControlPlaneContextValue = {
   sessions: ReadonlyArray<ControlPlaneAgentSession>;
   capabilities: ControlPlaneCapabilities;
   streamStatusBySessionId: Readonly<Record<string, ControlPlaneStreamStatus>>;
+  sessionModelSwitchingBySessionId: Readonly<Record<string, boolean>>;
   error: Error | null;
   projectionError: Error | null;
   retry: () => Promise<void>;
@@ -144,6 +145,11 @@ export type ControlPlaneContextValue = {
   createSession: (
     projectId: string,
     input: CreateControlPlaneSessionInput,
+  ) => Promise<ControlPlaneAgentSession>;
+  switchSessionModel: (
+    sessionId: string,
+    model: string,
+    idempotencyKey?: string,
   ) => Promise<ControlPlaneAgentSession>;
   createTurn: (
     sessionId: string,
@@ -238,6 +244,17 @@ function controlPlaneUnavailable(error: unknown): boolean {
   );
 }
 
+function replaceControlPlaneSession(
+  sessions: ReadonlyArray<ControlPlaneAgentSession>,
+  nextSession: ControlPlaneAgentSession,
+): ReadonlyArray<ControlPlaneAgentSession> {
+  const existingIndex = sessions.findIndex((session) => session.id === nextSession.id);
+  if (existingIndex < 0) {
+    return [...sessions, nextSession];
+  }
+  return sessions.map((session, index) => (index === existingIndex ? nextSession : session));
+}
+
 export function ControlPlaneProvider({ children }: { children: ReactNode }) {
   const queryClient = useQueryClient();
   const [organizationSelectionByTenant, setOrganizationSelectionByTenant] = useState<
@@ -246,11 +263,18 @@ export function ControlPlaneProvider({ children }: { children: ReactNode }) {
   const [streamStatusBySessionId, setStreamStatusBySessionId] = useState<
     Readonly<Record<string, ControlPlaneStreamStatus>>
   >({});
+  const [sessionModelSwitchingBySessionId, setSessionModelSwitchingBySessionId] = useState<
+    Readonly<Record<string, boolean>>
+  >({});
   const [projectionError, setProjectionError] = useState<Error | null>(null);
   const resourcesRef = useRef<{
     projects: ReadonlyArray<ControlPlaneProject>;
     sessions: ReadonlyArray<ControlPlaneAgentSession>;
   }>({ projects: [], sessions: [] });
+  const resourceScopeRef = useRef<{
+    tenantId: string | null;
+    organizationId: string | null;
+  }>({ tenantId: null, organizationId: null });
   const hadAuthoritativeProjectionRef = useRef(false);
   const authoritativeProjectionEnabledRef = useRef(false);
   const runtimeDisposeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -332,6 +356,10 @@ export function ControlPlaneProvider({ children }: { children: ReactNode }) {
     retry: false,
   });
   const sessions = sessionsQuery.data ?? EMPTY_SESSIONS;
+  resourceScopeRef.current = {
+    tenantId: activeTenantId,
+    organizationId: activeOrganizationId,
+  };
 
   let availability: ControlPlaneAvailability = "detecting";
   if (profileQuery.isSuccess) availability = "available";
@@ -604,6 +632,114 @@ export function ControlPlaneProvider({ children }: { children: ReactNode }) {
       sessionsQuery,
     ],
   );
+  const syncReturnedSession = useCallback(
+    (nextSession: ControlPlaneAgentSession) => {
+      const queryKey = controlPlaneQueryKeys.sessions(
+        activeTenantId,
+        activeOrganizationId,
+        projectIdsKey,
+      );
+      queryClient.setQueryData<ReadonlyArray<ControlPlaneAgentSession>>(
+        queryKey,
+        (current) => (current ? replaceControlPlaneSession(current, nextSession) : current),
+      );
+      const liveScope = resourceScopeRef.current;
+      if (
+        !liveScope.tenantId ||
+        !liveScope.organizationId ||
+        nextSession.tenantId !== liveScope.tenantId ||
+        nextSession.organizationId !== liveScope.organizationId
+      ) {
+        return;
+      }
+      const currentProjects = resourcesRef.current.projects;
+      if (!currentProjects.some((project) => project.id === nextSession.projectId)) {
+        return;
+      }
+      const nextScopedSessions = replaceControlPlaneSession(
+        resourcesRef.current.sessions,
+        nextSession,
+      );
+      resourcesRef.current = { projects: currentProjects, sessions: nextScopedSessions };
+      projectionRuntime.setScope(
+        `${liveScope.tenantId}:${liveScope.organizationId}`,
+        nextScopedSessions,
+      );
+    },
+    [
+      activeOrganizationId,
+      activeTenantId,
+      projectionRuntime,
+      projectIdsKey,
+      queryClient,
+    ],
+  );
+  const switchSessionModel = useCallback(
+    async (sessionId: string, model: string, idempotencyKey?: string) => {
+      if (!isAuthoritative || !capabilities.canCreateTurn) {
+        throw new Error("The active Tenant or Organization is read-only for Session model changes.");
+      }
+      setSessionModelSwitchingBySessionId((current) =>
+        current[sessionId] ? current : { ...current, [sessionId]: true },
+      );
+      try {
+        const [currentSession, projection] = await Promise.all([
+          controlPlaneClient.getAgentSession(sessionId),
+          queryClient.fetchQuery(sessionProviderCapabilitiesQueryOptions(sessionId)),
+        ]);
+        assertControlPlaneCapabilityAllowed(
+          resolveControlPlaneCapabilityDecision({
+            isAuthoritative: true,
+            projection,
+            provider: currentSession.provider,
+            capabilityId: "model-switch",
+          }),
+        );
+        const nextSession = await controlPlaneClient.switchSessionModel(
+          sessionId,
+          {
+            model,
+            expectedModel: currentSession.model ?? null,
+          },
+          idempotencyOptions("session-model-switch", idempotencyKey),
+        );
+        syncReturnedSession(nextSession);
+        void queryClient.invalidateQueries({
+          queryKey: controlPlaneQueryKeys.sessionProviderCapabilities(sessionId),
+        });
+        void projectionRuntime.catchUp(sessionId).catch(() => undefined);
+        return nextSession;
+      } catch (error) {
+        if (
+          error instanceof ControlPlaneError &&
+          error.code === "session_model_conflict"
+        ) {
+          try {
+            const refreshedSession = await controlPlaneClient.getAgentSession(sessionId);
+            syncReturnedSession(refreshedSession);
+            void projectionRuntime.catchUp(sessionId).catch(() => undefined);
+          } catch {
+            // Preserve the original conflict error when the refresh probe fails.
+          }
+        }
+        throw error;
+      } finally {
+        setSessionModelSwitchingBySessionId((current) => {
+          if (!(sessionId in current)) return current;
+          const next = { ...current };
+          delete next[sessionId];
+          return next;
+        });
+      }
+    },
+    [
+      capabilities.canCreateTurn,
+      isAuthoritative,
+      projectionRuntime,
+      queryClient,
+      syncReturnedSession,
+    ],
+  );
   const createTurn = useCallback(
     async (
       sessionId: string,
@@ -806,6 +942,7 @@ export function ControlPlaneProvider({ children }: { children: ReactNode }) {
       sessions,
       capabilities,
       streamStatusBySessionId,
+      sessionModelSwitchingBySessionId,
       error: error instanceof Error ? error : error ? new Error(String(error)) : null,
       projectionError,
       retry,
@@ -815,6 +952,7 @@ export function ControlPlaneProvider({ children }: { children: ReactNode }) {
       setActiveOrganization,
       createProject,
       createSession,
+      switchSessionModel,
       createTurn,
       steerActiveTurn,
       interruptActiveTurn,
@@ -830,6 +968,7 @@ export function ControlPlaneProvider({ children }: { children: ReactNode }) {
       capabilities,
       createProject,
       createSession,
+      switchSessionModel,
       createTurn,
       steerActiveTurn,
       interruptActiveTurn,
@@ -845,6 +984,7 @@ export function ControlPlaneProvider({ children }: { children: ReactNode }) {
       projects,
       retry,
       session,
+      sessionModelSwitchingBySessionId,
       sessions,
       setActiveOrganization,
       setActiveTenant,

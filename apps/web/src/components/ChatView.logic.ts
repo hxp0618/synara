@@ -439,6 +439,59 @@ export function shouldEnableThreadRecap(input: {
   return input.environmentPanelVisible && !input.controlPlaneAuthoritative;
 }
 
+export function resolveServerThreadModelSwitchAvailability(input: {
+  capabilityAllowed: boolean;
+  capabilityTemporary: boolean;
+  capabilityMessage: string | null;
+  phase: SessionPhase;
+  hasActiveExecution: boolean;
+  isPending: boolean;
+}): {
+  selectable: boolean;
+  label: string;
+  temporary: boolean;
+  message: string | null;
+} {
+  if (input.isPending) {
+    return {
+      selectable: false,
+      label: "Switching",
+      temporary: true,
+      message: "The Control Plane is switching this SaaS Session model.",
+    };
+  }
+  if (input.phase === "connecting") {
+    return {
+      selectable: false,
+      label: "Busy",
+      temporary: true,
+      message: "Wait for the SaaS Session to finish connecting before switching models.",
+    };
+  }
+  if (input.phase === "running" || input.hasActiveExecution) {
+    return {
+      selectable: false,
+      label: "Busy",
+      temporary: true,
+      message: "Wait for the active SaaS Turn to finish before switching models.",
+    };
+  }
+  if (!input.capabilityAllowed) {
+    return {
+      selectable: false,
+      label: input.capabilityTemporary ? "Checking" : "Unavailable",
+      temporary: input.capabilityTemporary,
+      message: input.capabilityMessage,
+    };
+  }
+  return {
+    selectable: true,
+    label: input.capabilityTemporary ? "Waiting for worker" : "Available",
+    temporary: input.capabilityTemporary,
+    message: input.capabilityMessage,
+  };
+}
+
 export type AuthoritativeTurnDispatch = "create-turn" | "steer" | "queue-unsupported";
 
 export function resolveAuthoritativeTurnDispatch(input: {

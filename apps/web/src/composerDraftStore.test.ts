@@ -1965,6 +1965,104 @@ describe("composerDraftStore modelSelection", () => {
     expect(state.selectedModel).toBe("openai/gpt-5.4");
   });
 
+  it("can prioritize the authoritative thread model over a stale draft selection", () => {
+    const state = deriveEffectiveComposerModelState({
+      draft: {
+        modelSelectionByProvider: {
+          codex: modelSelection("codex", "gpt-5.5"),
+        },
+        activeProvider: "codex",
+      },
+      selectedProvider: "codex",
+      threadModelSelection: modelSelection("codex", "gpt-5.6-sol"),
+      projectModelSelection: null,
+      preferThreadModelSelection: true,
+      customModelsByProvider: {
+        codex: [],
+        claudeAgent: [],
+        cursor: [],
+        gemini: [],
+        grok: [],
+        droid: [],
+        kilo: [],
+        opencode: [],
+        pi: [],
+      },
+      availableModelOptionsByProvider: {
+        codex: [
+          { slug: "gpt-5.5", name: "GPT-5.5" },
+          { slug: "gpt-5.6-sol", name: "GPT-5.6 Sol" },
+        ],
+      },
+    });
+
+    expect(state.selectedModel).toBe("gpt-5.6-sol");
+  });
+
+  it("keeps draft-first precedence unless authoritative thread preference is requested", () => {
+    const state = deriveEffectiveComposerModelState({
+      draft: {
+        modelSelectionByProvider: {
+          codex: modelSelection("codex", "gpt-5.5"),
+        },
+        activeProvider: "codex",
+      },
+      selectedProvider: "codex",
+      threadModelSelection: modelSelection("codex", "gpt-5.6-sol"),
+      projectModelSelection: null,
+      customModelsByProvider: {
+        codex: [],
+        claudeAgent: [],
+        cursor: [],
+        gemini: [],
+        grok: [],
+        droid: [],
+        kilo: [],
+        opencode: [],
+        pi: [],
+      },
+      availableModelOptionsByProvider: {
+        codex: [
+          { slug: "gpt-5.5", name: "GPT-5.5" },
+          { slug: "gpt-5.6-sol", name: "GPT-5.6 Sol" },
+        ],
+      },
+    });
+
+    expect(state.selectedModel).toBe("gpt-5.5");
+  });
+
+  it("keeps an unlisted authoritative thread model ahead of a listed stale draft selection", () => {
+    const state = deriveEffectiveComposerModelState({
+      draft: {
+        modelSelectionByProvider: {
+          codex: modelSelection("codex", "gpt-5.5"),
+        },
+        activeProvider: "codex",
+      },
+      selectedProvider: "codex",
+      threadModelSelection: modelSelection("codex", "gpt-5.6-sol"),
+      projectModelSelection: null,
+      preferThreadModelSelection: true,
+      customModelsByProvider: {
+        codex: [],
+        claudeAgent: [],
+        cursor: [],
+        gemini: [],
+        grok: [],
+        droid: [],
+        kilo: [],
+        opencode: [],
+        pi: [],
+      },
+      availableModelOptionsByProvider: {
+        codex: [{ slug: "gpt-5.5", name: "GPT-5.5" }],
+      },
+    });
+
+    expect(state.selectedModel).toBe("gpt-5.6-sol");
+  });
+
   it("falls back to the first exposed OpenCode runtime model when the draft selection is stale", () => {
     const state = deriveEffectiveComposerModelState({
       draft: {

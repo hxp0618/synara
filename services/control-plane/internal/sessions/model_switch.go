@@ -99,9 +99,6 @@ func (s *Service) SwitchModelWithIdempotency(
 		if locked.Visibility == "private" && locked.CreatedBy != principal.UserID {
 			return Session{}, problem.New(404, "session_not_found", "Session not found.")
 		}
-		if locked.Model != nil && *locked.Model == modelName {
-			return toSession(locked), nil
-		}
 		if !modelsEqual(locked.Model, expectedModel) {
 			apiError := problem.New(
 				409,
@@ -113,6 +110,9 @@ func (s *Service) SwitchModelWithIdempotency(
 				"currentModel":  nullableModelValue(locked.Model),
 			}
 			return Session{}, apiError
+		}
+		if modelsEqual(locked.Model, &modelName) {
+			return toSession(locked), nil
 		}
 
 		var activeExecutions int64
@@ -143,7 +143,7 @@ func (s *Service) SwitchModelWithIdempotency(
 		}
 
 		now := s.now().UTC()
-		if err := releaseActiveRuntimeBindings(ctx, tx, locked, now); err != nil {
+		if err := releaseRuntimeBindings(ctx, tx, locked, now); err != nil {
 			return Session{}, err
 		}
 		if err := tx.WithContext(ctx).Model(&persistence.AgentSession{}).
@@ -205,14 +205,14 @@ func (s *Service) SwitchModelWithIdempotency(
 	return result.Value, result.Replayed, nil
 }
 
-func releaseActiveRuntimeBindings(
+func releaseRuntimeBindings(
 	ctx context.Context,
 	tx *gorm.DB,
 	session persistence.AgentSession,
 	now time.Time,
 ) error {
 	if err := tx.WithContext(ctx).Model(&persistence.ProviderRuntimeBinding{}).
-		Where("tenant_id = ? AND session_id = ? AND status = ?", session.TenantID, session.ID, "active").
+		Where("tenant_id = ? AND session_id = ? AND status <> ?", session.TenantID, session.ID, "released").
 		Updates(map[string]any{"status": "released", "released_at": now, "updated_at": now}).Error; err != nil {
 		return problem.Wrap(500, "runtime_binding_release_failed", "Failed to release the previous Provider runtime binding.", err)
 	}

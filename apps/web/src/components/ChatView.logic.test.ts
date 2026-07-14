@@ -21,6 +21,7 @@ import {
   describeVoiceRecordingStartError,
   hasServerAcknowledgedLocalDispatch,
   isVoiceAuthExpiredMessage,
+  resolveServerThreadModelSwitchAvailability,
   resolveActiveThreadTitle,
   resolveActiveTurnLiveDiffState,
   resolveCommittedProviderModel,
@@ -60,6 +61,76 @@ describe("authoritative Turn dispatch", () => {
     expect(
       resolveAuthoritativeTurnDispatch({ hasLiveTurn: false, dispatchMode: "queue" }),
     ).toBe("create-turn");
+  });
+});
+
+describe("server thread model switching availability", () => {
+  it("blocks switching while a Control Plane model-switch request is pending", () => {
+    expect(
+      resolveServerThreadModelSwitchAvailability({
+        capabilityAllowed: true,
+        capabilityTemporary: false,
+        capabilityMessage: null,
+        phase: "ready",
+        hasActiveExecution: false,
+        isPending: true,
+      }),
+    ).toEqual({
+      selectable: false,
+      label: "Switching",
+      temporary: true,
+      message: "The Control Plane is switching this SaaS Session model.",
+    });
+  });
+
+  it("blocks switching while the SaaS Session is connecting or running", () => {
+    expect(
+      resolveServerThreadModelSwitchAvailability({
+        capabilityAllowed: true,
+        capabilityTemporary: false,
+        capabilityMessage: null,
+        phase: "connecting",
+        hasActiveExecution: false,
+        isPending: false,
+      }),
+    ).toMatchObject({
+      selectable: false,
+      label: "Busy",
+      message: "Wait for the SaaS Session to finish connecting before switching models.",
+    });
+
+    expect(
+      resolveServerThreadModelSwitchAvailability({
+        capabilityAllowed: true,
+        capabilityTemporary: false,
+        capabilityMessage: null,
+        phase: "ready",
+        hasActiveExecution: true,
+        isPending: false,
+      }),
+    ).toMatchObject({
+      selectable: false,
+      label: "Busy",
+      message: "Wait for the active SaaS Turn to finish before switching models.",
+    });
+  });
+
+  it("surfaces capability gating once the Session is otherwise idle", () => {
+    expect(
+      resolveServerThreadModelSwitchAvailability({
+        capabilityAllowed: false,
+        capabilityTemporary: false,
+        capabilityMessage: "Codex does not support model switch on this SaaS target.",
+        phase: "ready",
+        hasActiveExecution: false,
+        isPending: false,
+      }),
+    ).toEqual({
+      selectable: false,
+      label: "Unavailable",
+      temporary: false,
+      message: "Codex does not support model switch on this SaaS target.",
+    });
   });
 });
 
