@@ -9,6 +9,7 @@ import {
 } from "./controlPlaneClient";
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.unstubAllGlobals();
 });
 
@@ -25,6 +26,85 @@ describe("controlPlaneClient", () => {
     expect(resolveSessionEventStreamUrl("session/one", 12)).toBe(
       "https://synara.example/v1/sessions/session%2Fone/events/stream?afterSequence=12",
     );
+  });
+
+  it("reconnects session event streams from the last applied sequence", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("window", { location: new URL("https://synara.example/settings") });
+
+    class FakeEventSource {
+      static instances: FakeEventSource[] = [];
+
+      readonly close = vi.fn();
+      readonly listeners = new Map<string, (event: MessageEvent<string>) => void>();
+      onerror: (() => void) | null = null;
+      onopen: (() => void) | null = null;
+
+      constructor(
+        readonly url: string,
+        readonly options: EventSourceInit,
+      ) {
+        FakeEventSource.instances.push(this);
+      }
+
+      addEventListener(type: string, listener: (event: MessageEvent<string>) => void) {
+        this.listeners.set(type, listener);
+      }
+
+      emitSessionEvent(event: { sequence: number }) {
+        this.listeners.get("session-event")?.({ data: JSON.stringify(event) } as MessageEvent<string>);
+      }
+    }
+
+    vi.stubGlobal("EventSource", FakeEventSource);
+    const onEvent = vi.fn();
+    const onError = vi.fn();
+    const onOpen = vi.fn();
+    const close = controlPlaneClient.subscribeSessionEvents("session/one", 12, {
+      onEvent,
+      onError,
+      onOpen,
+    });
+
+    expect(FakeEventSource.instances).toHaveLength(1);
+    expect(FakeEventSource.instances[0]).toMatchObject({
+      options: { withCredentials: true },
+      url: "https://synara.example/v1/sessions/session%2Fone/events/stream?afterSequence=12",
+    });
+    FakeEventSource.instances[0]!.onopen?.();
+    FakeEventSource.instances[0]!.emitSessionEvent({ sequence: 13 });
+    expect(onOpen).toHaveBeenCalledTimes(1);
+    expect(onEvent).toHaveBeenCalledWith({ sequence: 13 });
+
+    FakeEventSource.instances[0]!.onerror?.();
+    expect(FakeEventSource.instances[0]!.close).toHaveBeenCalledTimes(1);
+    expect(onError).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(2_000);
+
+    expect(FakeEventSource.instances).toHaveLength(2);
+    expect(FakeEventSource.instances[1]!.url).toBe(
+      "https://synara.example/v1/sessions/session%2Fone/events/stream?afterSequence=13",
+    );
+    FakeEventSource.instances[1]!.onopen?.();
+    expect(onOpen).toHaveBeenCalledTimes(2);
+
+    onEvent.mockImplementationOnce(() => {
+      throw new Error("projection rejected event");
+    });
+    FakeEventSource.instances[1]!.emitSessionEvent({ sequence: 14 });
+    expect(FakeEventSource.instances[1]!.close).toHaveBeenCalledTimes(1);
+    expect(onError).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(2_000);
+
+    expect(FakeEventSource.instances).toHaveLength(3);
+    expect(FakeEventSource.instances[2]!.url).toBe(
+      "https://synara.example/v1/sessions/session%2Fone/events/stream?afterSequence=13",
+    );
+
+    close();
+    expect(FakeEventSource.instances[2]!.close).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(FakeEventSource.instances).toHaveLength(3);
   });
 
   it("probes the public platform profile before requiring authentication", async () => {

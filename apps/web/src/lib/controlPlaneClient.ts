@@ -477,19 +477,57 @@ function subscribeSessionEvents(
     onError?: () => void;
   },
 ): () => void {
-  const source = new EventSource(resolveSessionEventStreamUrl(sessionId, afterSequence), {
-    withCredentials: true,
-  });
-  source.onopen = () => handlers.onOpen?.();
-  source.onerror = () => handlers.onError?.();
-  source.addEventListener("session-event", (message) => {
-    try {
-      handlers.onEvent(JSON.parse(message.data) as ControlPlaneSessionEvent);
-    } catch {
-      handlers.onError?.();
-    }
-  });
-  return () => source.close();
+  const reconnectDelayMs = 2_000;
+  let closed = false;
+  let source: EventSource | null = null;
+  let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  let lastSequence = Math.max(0, afterSequence);
+
+  const scheduleReconnect = () => {
+    if (closed || reconnectTimer !== null) return;
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = null;
+      connect();
+    }, reconnectDelayMs);
+  };
+
+  const fail = (failedSource: EventSource) => {
+    if (closed || source !== failedSource) return;
+    failedSource.close();
+    source = null;
+    handlers.onError?.();
+    scheduleReconnect();
+  };
+
+  const connect = () => {
+    if (closed || source !== null) return;
+    const nextSource = new EventSource(resolveSessionEventStreamUrl(sessionId, lastSequence), {
+      withCredentials: true,
+    });
+    source = nextSource;
+    nextSource.onopen = () => {
+      if (!closed && source === nextSource) handlers.onOpen?.();
+    };
+    nextSource.onerror = () => fail(nextSource);
+    nextSource.addEventListener("session-event", (message) => {
+      try {
+        const event = JSON.parse(message.data) as ControlPlaneSessionEvent;
+        handlers.onEvent(event);
+        lastSequence = Math.max(lastSequence, event.sequence);
+      } catch {
+        fail(nextSource);
+      }
+    });
+  };
+
+  connect();
+  return () => {
+    closed = true;
+    if (reconnectTimer !== null) clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+    source?.close();
+    source = null;
+  };
 }
 
 function resolveArtifactGrantUrl(url: string): string {
