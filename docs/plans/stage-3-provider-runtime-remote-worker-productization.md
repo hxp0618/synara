@@ -1168,11 +1168,15 @@ Provider × Capability × Execution Target
   的核心连续性用例通过，并验证终态 Pod/Manifest 清理。该证据尚不覆盖 Eviction、网络故障、
   Image Rollout 或真实 Provider Release Gate。
 - 默认运行的是 deterministic Provider Host Protocol 2.1 fixture。它能证明共享 Contract、
-  Control Plane-to-Worker-to-Host 通路和 Local/Docker/Kubernetes 恢复编排，**不等于**使用真实
+  Control Plane-to-Worker-to-Host 通路和 Local/SSH/Docker/Kubernetes 恢复编排，**不等于**使用真实
   Codex App Server 或 Claude Agent SDK 的 Release Acceptance。
 - SSH Driver 已实现 disposable OrbStack VM、一次性 SSH Credential、Host Key 固定以及产品级
-  install/upgrade/revoke 生命周期，但真实 SSH live acceptance 尚未完成；Kubernetes Claude/failure
-  matrix、真实 Codex/Claude、SSH、长 Session 和完整故障矩阵仍待执行，不得声称四 Target 统一发布门禁已完成。
+  install/upgrade/revoke 生命周期。2026-07-14 的 deterministic Codex fixture 在 isolated disposable
+  OrbStack Ubuntu 24.04 VM 上 13/13 通过，覆盖 Host Key mismatch 负例、sshd 重启、systemd Worker
+  replacement、Workspace 连续性、Control Plane 重启、第二 Turn、revoke 与精确 VM 清理；另行对报告和
+  日志执行的 Secret Scan 未发现 Private Key 模式。该结果不等于真实 Codex/Claude Adapter Release
+  Acceptance；Kubernetes Claude/failure matrix、真实 Codex/Claude 各 Target、长 Session 和完整故障
+  矩阵仍待执行，不得声称四 Target 统一发布门禁已完成。
 
 ## 18. 实施顺序
 

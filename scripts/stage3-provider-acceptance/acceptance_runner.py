@@ -49,6 +49,7 @@ SSH_REMOTE_FIXTURE_PATH = "/opt/synara/acceptance/provider-host-fixture.mjs"
 SSH_SERVICE_USER = "synara"
 SSH_RELAY_LOOPBACK_HOST = "127.0.0.1"
 SSH_RELAY_TRANSPORT = "runner-owned reverse SSH relay to the local Worker-only proxy"
+SSH_CONTROL_PLANE_OPERATION_TIMEOUT = 180.0
 SSH_CREDENTIAL_LIFECYCLE = (
     "runner posts the one-time private key once during Target creation, deletes the local plaintext copy after "
     "provisioning, and relies on the Control Plane encrypted credential until ssh/revoke"
@@ -310,6 +311,8 @@ class APIClient:
         path: str,
         payload: Mapping[str, Any] | None = None,
         expected: Iterable[int] = (200,),
+        *,
+        maximum_timeout: float = 10.0,
     ) -> Any:
         data = None
         headers = {
@@ -323,7 +326,10 @@ class APIClient:
             headers["Idempotency-Key"] = str(uuid.uuid4())
         request = urllib.request.Request(self.base_url + path, data=data, headers=headers, method=method)
         try:
-            with self.opener.open(request, timeout=self.deadline.request_timeout()) as response:
+            with self.opener.open(
+                request,
+                timeout=self.deadline.request_timeout(maximum=maximum_timeout),
+            ) as response:
                 status = int(response.status)
                 body = response.read().decode("utf-8", errors="replace")
         except urllib.error.HTTPError as error:
@@ -1686,6 +1692,7 @@ class SSHDriver(ManagedWorkerDriver):
                 self.api.request(
                     "POST",
                     f"/v1/tenants/{tenant_id}/execution-targets/{negative_id}/ssh/install",
+                    maximum_timeout=SSH_CONTROL_PLANE_OPERATION_TIMEOUT,
                 )
             except AcceptanceError as error:
                 if error.code != "ssh_connection_failed":
@@ -1716,6 +1723,7 @@ class SSHDriver(ManagedWorkerDriver):
                 self.api.request(
                     "POST",
                     f"/v1/tenants/{tenant_id}/execution-targets/{target_id}/ssh/install",
+                    maximum_timeout=SSH_CONTROL_PLANE_OPERATION_TIMEOUT,
                 ),
                 "SSH install result",
             )
@@ -1785,6 +1793,7 @@ class SSHDriver(ManagedWorkerDriver):
             self.api.request(
                 "POST",
                 f"/v1/tenants/{tenant_id}/execution-targets/{target_id}/ssh/upgrade",
+                maximum_timeout=SSH_CONTROL_PLANE_OPERATION_TIMEOUT,
             ),
             "SSH upgrade result",
         )
@@ -1865,6 +1874,7 @@ class SSHDriver(ManagedWorkerDriver):
                 lambda: self.api.request(
                     "POST",
                     f"/v1/tenants/{self.tenant_id}/execution-targets/{self.target_id}/ssh/revoke",
+                    maximum_timeout=SSH_CONTROL_PLANE_OPERATION_TIMEOUT,
                 ),
             )
             if isinstance(result, dict) and (

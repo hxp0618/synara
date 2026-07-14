@@ -60,8 +60,10 @@ class FakeAPI:
         path: str,
         payload: Mapping[str, Any] | None = None,
         expected: Sequence[int] = (200,),
+        *,
+        maximum_timeout: float = 10.0,
     ) -> Any:
-        del expected
+        del expected, maximum_timeout
         self.requests.append((method, path, payload))
         return {"status": "resolved", "deliveryStatus": "delivered"}
 
@@ -206,6 +208,42 @@ class BarrierSuite(acceptance.AcceptanceSuite):
         if target_id != "target-id":
             raise AssertionError(f"unexpected target ID: {target_id}")
         return {"manifestId": "manifest-after-restart", "workerStatusCounts": {"online": 1}}
+
+
+class APIClientTimeoutTest(unittest.TestCase):
+    def test_request_keeps_short_default_and_allows_explicit_long_operation_timeout(self) -> None:
+        timeouts: list[float] = []
+
+        class Response:
+            status = 200
+
+            def __enter__(self) -> Response:
+                return self
+
+            def __exit__(self, *_args: Any) -> None:
+                return None
+
+            @staticmethod
+            def read() -> bytes:
+                return b"{}"
+
+        class Opener:
+            @staticmethod
+            def open(_request: Any, timeout: float) -> Response:
+                timeouts.append(timeout)
+                return Response()
+
+        client = acceptance.APIClient(
+            "http://127.0.0.1:3780",
+            acceptance.Deadline(30.0),
+            acceptance.SecretRedactor(),
+        )
+        client.opener = Opener()  # type: ignore[assignment]
+        client.request("GET", "/default")
+        client.request("GET", "/long", maximum_timeout=25.0)
+
+        self.assertAlmostEqual(timeouts[0], 10.0, delta=0.1)
+        self.assertAlmostEqual(timeouts[1], 25.0, delta=0.1)
 
 
 class AcceptanceSuiteLifecycleTest(unittest.TestCase):
@@ -386,9 +424,13 @@ class SSHDriverTest(unittest.TestCase):
                 path: str,
                 payload: Mapping[str, Any] | None = None,
                 expected: Sequence[int] = (200,),
+                *,
+                maximum_timeout: float = 10.0,
             ) -> Any:
                 del expected
                 inner_self.requests.append((method, path, payload))
+                if path.endswith("/ssh/install"):
+                    self.assertEqual(maximum_timeout, acceptance.SSH_CONTROL_PLANE_OPERATION_TIMEOUT)
                 if method == "POST" and path.endswith("/execution-targets"):
                     assert payload is not None
                     inner_self.created.append(payload)
@@ -490,8 +532,12 @@ class SSHDriverTest(unittest.TestCase):
                 path: str,
                 payload: Mapping[str, Any] | None = None,
                 expected: Sequence[int] = (200,),
+                *,
+                maximum_timeout: float = 10.0,
             ) -> Any:
                 del payload, expected
+                if path.endswith("/ssh/upgrade"):
+                    events.append(f"timeout:{maximum_timeout}")
                 events.append(f"api:{method}:{path}")
                 if path.endswith("/provider-policy"):
                     return {"status": "active"}
@@ -563,6 +609,7 @@ class SSHDriverTest(unittest.TestCase):
         self.assertEqual(evidence["replacementMainPid"], 200)
         self.assertIn("remote:systemctl restart ssh", events)
         self.assertTrue(any(event.endswith("/ssh/upgrade") for event in events))
+        self.assertIn(f"timeout:{acceptance.SSH_CONTROL_PLANE_OPERATION_TIMEOUT}", events)
 
     def test_cleanup_revokes_before_stopping_and_deletes_only_owned_machine(self) -> None:
         events: list[str] = []
@@ -574,8 +621,12 @@ class SSHDriverTest(unittest.TestCase):
                 path: str,
                 payload: Mapping[str, Any] | None = None,
                 expected: Sequence[int] = (200,),
+                *,
+                maximum_timeout: float = 10.0,
             ) -> Any:
                 del payload, expected
+                if path.endswith("/ssh/revoke"):
+                    events.append(f"timeout:{maximum_timeout}")
                 events.append(f"api:{method}:{path}")
                 return {"operation": "revoke", "status": "disabled"}
 
@@ -629,6 +680,7 @@ class SSHDriverTest(unittest.TestCase):
         driver.cleanup()
 
         revoke_index = next(index for index, event in enumerate(events) if event.endswith("/ssh/revoke"))
+        self.assertIn(f"timeout:{acceptance.SSH_CONTROL_PLANE_OPERATION_TIMEOUT}", events)
         relay_stop_index = events.index("stop-worker-proxy-relay")
         stop_index = events.index("stop-control-plane")
         delete = next(event for event in events if event.startswith("orbctl:delete"))

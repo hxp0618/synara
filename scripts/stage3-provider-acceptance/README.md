@@ -69,10 +69,13 @@ preserves the isolated Control Plane state, volume, network, and image for diagn
 
 The report status vocabulary is `pass | unsupported | skipped | fail`. Local, Docker, SSH, and Kubernetes have
 product Target drivers; a missing driver is reported as `fail / runner.target_driver_missing`, never as an
-infrastructure skip. The SSH Driver owns a disposable OrbStack VM and one-time credential lifecycle, but real SSH
-live-acceptance evidence is still required before claiming the four-Target release gate. The fixture executes Codex
-and Claude Agent. Cursor, Gemini, Grok, Kilo, OpenCode, and Pi produce an explicit `unsupported` report instead of
-being rejected before a report can be written.
+infrastructure skip. On 2026-07-14 the deterministic Codex fixture passed all 13 SSH cases on a disposable isolated
+OrbStack Ubuntu 24.04 VM, including pinned-Host-Key rejection, product install/upgrade/revoke, sshd restart, systemd
+Worker replacement, Workspace continuity, Control Plane restart, second-Turn continuity, and exact machine cleanup;
+a post-run report/log scan found no private-key patterns. This is live SSH Target evidence, not real Codex App
+Server or Claude Agent SDK release acceptance. The fixture executes Codex and Claude Agent. Cursor, Gemini, Grok,
+Kilo, OpenCode, and Pi produce an explicit `unsupported` report instead of being rejected before a report can be
+written.
 
 ## Provider Host Protocol fixture
 
