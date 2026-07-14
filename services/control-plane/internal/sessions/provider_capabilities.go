@@ -18,6 +18,31 @@ func (s *Service) requireTargetProviderCapabilities(
 	provider string,
 	capabilityIDs ...string,
 ) error {
+	return s.requireTargetProviderCapabilitiesWithObservation(
+		ctx, tx, target, provider, false, capabilityIDs...,
+	)
+}
+
+func (s *Service) requireObservedTargetProviderCapabilities(
+	ctx context.Context,
+	tx *gorm.DB,
+	target persistence.ExecutionTarget,
+	provider string,
+	capabilityIDs ...string,
+) error {
+	return s.requireTargetProviderCapabilitiesWithObservation(
+		ctx, tx, target, provider, true, capabilityIDs...,
+	)
+}
+
+func (s *Service) requireTargetProviderCapabilitiesWithObservation(
+	ctx context.Context,
+	tx *gorm.DB,
+	target persistence.ExecutionTarget,
+	provider string,
+	requireObserved bool,
+	capabilityIDs ...string,
+) error {
 	projection, err := providercapabilities.LoadTargetProjection(
 		ctx, tx, target, s.now(), s.providerCapabilityHeartbeatTimeout,
 	)
@@ -28,18 +53,24 @@ func (s *Service) requireTargetProviderCapabilities(
 		return problem.Wrap(500, "provider_capabilities_load_failed", "Provider capabilities could not be loaded.", err)
 	}
 	decision := providercapabilities.Check(projection, provider, capabilityIDs...)
-	if decision.Status != providercapabilities.StatusUnsupported {
+	if decision.Status == providercapabilities.StatusSupported ||
+		(!requireObserved && decision.Status == providercapabilities.StatusUnobserved) {
 		return nil
+	}
+	message := "The selected Provider does not support a required capability on this Execution Target."
+	if decision.Status == providercapabilities.StatusUnobserved {
+		message = "The selected Provider capability has not been observed on this Execution Target."
 	}
 	apiError := problem.New(
 		409,
 		decision.ReasonCode,
-		"The selected Provider does not support a required capability on this Execution Target.",
+		message,
 	)
 	apiError.Details = map[string]any{
 		"executionTargetId": target.ID,
 		"provider":          decision.Provider,
 		"capabilityId":      decision.CapabilityID,
+		"status":            decision.Status,
 	}
 	return apiError
 }

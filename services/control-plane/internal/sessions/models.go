@@ -72,6 +72,12 @@ type CreateTurnInput struct {
 	InteractionMode string `json:"interactionMode"`
 }
 
+type SwitchModelInput struct {
+	Model                 string  `json:"model"`
+	ExpectedModel         *string `json:"expectedModel"`
+	ExpectedModelProvided bool    `json:"-"`
+}
+
 type EventPage struct {
 	Items        []Event `json:"items"`
 	LastSequence int64   `json:"lastSequence"`

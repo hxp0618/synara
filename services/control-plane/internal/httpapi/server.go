@@ -255,6 +255,7 @@ func New(
 	mux.Handle("POST /v1/projects/{projectID}/sessions", server.requireAuth(http.HandlerFunc(server.createSession)))
 
 	mux.Handle("GET /v1/sessions/{sessionID}", server.requireAuth(http.HandlerFunc(server.getAgentSession)))
+	mux.Handle("POST /v1/sessions/{sessionID}/model-switch", server.requireAuth(http.HandlerFunc(server.switchSessionModel)))
 	mux.Handle("GET /v1/sessions/{sessionID}/provider-capabilities", server.requireAuth(http.HandlerFunc(server.sessionProviderCapabilities)))
 	mux.Handle("GET /v1/sessions/{sessionID}/events", server.requireAuth(http.HandlerFunc(server.listSessionEvents)))
 	mux.Handle("GET /v1/sessions/{sessionID}/events/stream", server.requireAuth(http.HandlerFunc(server.streamSessionEvents)))
