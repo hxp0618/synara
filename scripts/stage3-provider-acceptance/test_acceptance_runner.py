@@ -67,6 +67,18 @@ class FakeAPI:
         self.requests.append((method, path, payload))
         return {"status": "resolved", "deliveryStatus": "delivered"}
 
+    def wait_until(
+        self,
+        _description: str,
+        probe: Callable[[], Any | None],
+        interval: float = 0.25,
+    ) -> Any:
+        del interval
+        value = probe()
+        if value is None:
+            raise AssertionError("probe did not become ready in fake API wait")
+        return value
+
 
 class FakeDriver:
     def __init__(self, lifecycle: acceptance.TargetLifecycle, *, name: str = "fake") -> None:
@@ -74,6 +86,7 @@ class FakeDriver:
         self.lifecycle = lifecycle
         self.api = FakeAPI()
         self.restart_calls = 0
+        self.pending_interaction_recovery: str | None = None
 
     def prepare(self) -> Mapping[str, Any]:
         return {}
@@ -103,6 +116,10 @@ class FakeDriver:
 
     def observe_terminal_execution(self, target_id: str, execution_id: str) -> Mapping[str, Any]:
         return {"targetId": target_id, "executionId": execution_id, "terminal": True}
+
+    def recover_pending_interaction(self, target_id: str, execution_id: str) -> Mapping[str, Any]:
+        del target_id, execution_id
+        return {"recoveryMode": "unsupported"}
 
     def stop(self) -> None:
         return None
@@ -210,6 +227,100 @@ class BarrierSuite(acceptance.AcceptanceSuite):
         return {"manifestId": "manifest-after-restart", "workerStatusCounts": {"online": 1}}
 
 
+class PendingApprovalRecoverySuite(BarrierSuite):
+    def __init__(self) -> None:
+        super().__init__(acceptance.EXECUTION_PINNED_WORKER)
+        self.fake_driver.pending_interaction_recovery = "delete-pod"
+        self.fake_driver.recover_pending_interaction = self._recover_pending_interaction  # type: ignore[method-assign]
+        self.fake_driver.observe_execution = self._observe_execution  # type: ignore[method-assign]
+        self.recovered = False
+
+    def _recover_pending_interaction(self, target_id: str, execution_id: str) -> Mapping[str, Any]:
+        if target_id != "target-id":
+            raise AssertionError(f"unexpected target ID: {target_id}")
+        if execution_id != "execution-1":
+            raise AssertionError(f"unexpected execution ID: {execution_id}")
+        self.recovered = True
+        return {"deletedPodUid": "pod-uid-1", "recoveryMode": "delete-pod"}
+
+    def _wait_for_interaction(self, turn_id: str, kind: str) -> dict[str, Any]:
+        self.interaction_waits += 1
+        if not self.recovered:
+            return {
+                "id": "interaction-1",
+                "turnId": turn_id,
+                "kind": kind,
+                "executionId": "execution-1",
+                "requestId": "approval-request-1",
+            }
+        return {
+            "id": "interaction-2",
+            "turnId": turn_id,
+            "kind": kind,
+            "executionId": "execution-1",
+            "requestId": "approval-request-2",
+        }
+
+    def _wait_for_replacement_interaction(
+        self,
+        turn_id: str,
+        kind: str,
+        previous_interaction_id: str,
+    ) -> dict[str, Any]:
+        if not self.recovered:
+            raise AssertionError("pending interaction recovery did not run before replacement wait")
+        if previous_interaction_id != "interaction-1":
+            raise AssertionError(f"unexpected prior interaction ID: {previous_interaction_id}")
+        return self._wait_for_interaction(turn_id, kind)
+
+    def _all_events(self) -> list[dict[str, Any]]:
+        events = [
+            {
+                "sequence": 1,
+                "eventType": "turn.created",
+                "executionId": "execution-1",
+                "payload": {"turnId": "turn-1", "executionId": "execution-1"},
+            }
+        ]
+        if self.recovered:
+            events.append(
+                {
+                    "sequence": 2,
+                    "eventType": "execution.recovering",
+                    "executionId": "execution-1",
+                    "payload": {"turnId": "turn-1", "reason": "lease_expired"},
+                }
+            )
+        return events
+
+    def _wait_for_turn_terminal(
+        self,
+        turn_id: str,
+        expected_event_type: str,
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        terminal = {
+            "sequence": 3,
+            "eventType": expected_event_type,
+            "executionId": "execution-1",
+            "workerId": "worker-2",
+            "generation": 2,
+        }
+        return terminal, [
+            {
+                "sequence": 1,
+                "eventType": "turn.created",
+                "executionId": "execution-1",
+                "payload": {"turnId": turn_id, "executionId": "execution-1"},
+            },
+            {"sequence": 2, "eventType": "request.resolved", "executionId": "execution-1"},
+            terminal,
+        ]
+
+    def _observe_execution(self, target_id: str, execution_id: str) -> Mapping[str, Any]:
+        del target_id, execution_id
+        return {"podUid": "pod-uid-2", "generation": "2"}
+
+
 class APIClientTimeoutTest(unittest.TestCase):
     def test_request_keeps_short_default_and_allows_explicit_long_operation_timeout(self) -> None:
         timeouts: list[float] = []
@@ -304,6 +415,32 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
         self.assertNotIn("recovery.worker-replacement", unmanaged_docker.case_order)
         self.assertNotIn("recovery.post-replacement-workspace-turn", unmanaged_docker.case_order)
 
+    def test_pending_interaction_recovery_cases_follow_driver_capability(self) -> None:
+        recovering = FakeDriver(acceptance.EXECUTION_PINNED_WORKER, name="kubernetes-like")
+        recovering.pending_interaction_recovery = "delete-pod"
+        suite = CaseOrderSuite(recovering)
+
+        suite.run()
+
+        self.assertEqual(
+            suite.case_order,
+            [
+                "environment.target-prepare",
+                "environment.control-plane-start",
+                "identity.dev-login",
+                "runtime.target-provision",
+                "resources.credential-project-session",
+                "runtime.worker-discovery",
+                "recovery.pending-approval-runtime-loss",
+                "fixture.approval-resolution",
+                "fixture.text-tool-usage-artifact",
+                "fixture.user-input-resolution",
+                "fixture.provider-error",
+                "recovery.control-plane-restart",
+                "fixture.second-turn-continuity",
+            ],
+        )
+
     def test_execution_pinned_approval_barrier_is_resolved_without_second_turn(self) -> None:
         suite = BarrierSuite(acceptance.EXECUTION_PINNED_WORKER)
 
@@ -334,6 +471,30 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
         self.assertEqual(suite.post_restart_waits, 0)
         self.assertEqual(evidence["workerAllocation"], "execution-pinned")
         self.assertEqual(evidence["postRestartWorkerExpectation"], "deferred-until-next-execution")
+
+    def test_pending_approval_runtime_recovery_rebinds_the_barrier(self) -> None:
+        suite = PendingApprovalRecoverySuite()
+
+        discovery = suite._discover_worker()
+        recovery = suite._recover_pending_approval_runtime()
+        resolution = suite._approval_resolution()
+
+        self.assertEqual(discovery["readinessBarrier"]["requestId"], "approval-request-1")
+        self.assertTrue(suite.recovered)
+        self.assertEqual(recovery["staleInteractionId"], "interaction-1")
+        self.assertEqual(recovery["replacementInteractionId"], "interaction-2")
+        self.assertEqual(recovery["targetRuntime"]["podUid"], "pod-uid-2")
+        self.assertEqual(resolution["requestId"], "approval-request-2")
+        self.assertEqual(
+            suite.fake_driver.api.requests,
+            [
+                (
+                    "POST",
+                    "/v1/executions/execution-1/approvals/approval-request-2/resolve",
+                    {"decision": "accept"},
+                )
+            ],
+        )
 
     def test_standing_restart_waits_for_online_worker(self) -> None:
         suite = BarrierSuite(acceptance.STANDING_WORKER)
@@ -853,6 +1014,52 @@ class SSHDriverTest(unittest.TestCase):
 
 
 class KubernetesDriverObservationTest(unittest.TestCase):
+    def test_wait_execution_pod_ignores_terminating_runtime_during_replacement(self) -> None:
+        options = dataclasses.replace(
+            runner_options(),
+            target="kubernetes",
+            kubernetes_context="kind-fixture",
+            kubernetes_kubeconfig=pathlib.Path("/tmp/kind-fixture-kubeconfig"),
+        )
+
+        class ReplacementDriver(acceptance.KubernetesDriver):
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                super().__init__(*args, **kwargs)
+                self.observations = 0
+
+            def _execution_pods(self, target_id: str, execution_id: str) -> list[dict[str, Any]]:
+                del target_id, execution_id
+                self.observations += 1
+                replacement_phase = "Pending" if self.observations == 1 else "Running"
+                return [
+                    {
+                        "metadata": {
+                            "name": "synara-exec-stale",
+                            "uid": "pod-uid-stale",
+                            "deletionTimestamp": "2026-07-14T00:00:00Z",
+                        },
+                        "status": {"phase": "Running"},
+                    },
+                    {
+                        "metadata": {"name": "synara-exec-replacement", "uid": "pod-uid-replacement"},
+                        "status": {"phase": replacement_phase},
+                    },
+                ]
+
+        driver = ReplacementDriver(
+            pathlib.Path.cwd(),
+            options,
+            acceptance.Deadline(30.0),
+            acceptance.SecretRedactor(),
+        )
+        self.addCleanup(driver._release_state)
+
+        with mock.patch.object(driver.deadline, "sleep", return_value=None):
+            pod = driver._wait_execution_pod("target-id", "execution-id")
+
+        self.assertEqual(pod["metadata"]["uid"], "pod-uid-replacement")
+        self.assertEqual(driver.observations, 2)
+
     def test_observe_execution_validates_real_pod_contract(self) -> None:
         options = dataclasses.replace(
             runner_options(),
@@ -936,6 +1143,70 @@ class KubernetesDriverObservationTest(unittest.TestCase):
         self.assertEqual(evidence["phase"], "Running")
         self.assertEqual(evidence["volumes"], ["home", "tmp", "workspace"])
         self.assertEqual(evidence["foundation"]["serviceAccount"], driver.worker_service_account)
+
+    def test_recover_pending_interaction_force_deletes_exact_execution_pod(self) -> None:
+        options = dataclasses.replace(
+            runner_options(),
+            target="kubernetes",
+            kubernetes_context="kind-fixture",
+            kubernetes_kubeconfig=pathlib.Path("/tmp/kind-fixture-kubeconfig"),
+        )
+
+        class RecoveryDriver(acceptance.KubernetesDriver):
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                super().__init__(*args, **kwargs)
+                self.commands: list[list[str]] = []
+
+            def _wait_execution_pod(self, target_id: str, execution_id: str) -> dict[str, Any]:
+                del target_id, execution_id
+                return {
+                    "metadata": {
+                        "name": "synara-exec-fixture",
+                        "uid": "pod-uid",
+                        "labels": {"synara.io/generation": "2"},
+                    },
+                    "status": {"phase": "Running"},
+                }
+
+            def _kubectl_command(
+                self,
+                arguments: Sequence[str],
+                *,
+                input_text: str | None = None,
+                cleanup_timeout: float | None = None,
+            ) -> str:
+                del input_text, cleanup_timeout
+                self.commands.append(list(arguments))
+                return ""
+
+        driver = RecoveryDriver(
+            pathlib.Path.cwd(),
+            options,
+            acceptance.Deadline(30.0),
+            acceptance.SecretRedactor(),
+        )
+        self.addCleanup(driver._release_state)
+
+        evidence = driver.recover_pending_interaction("target-id", "execution-id")
+
+        self.assertEqual(evidence["deletedPodName"], "synara-exec-fixture")
+        self.assertEqual(evidence["deletedPodUid"], "pod-uid")
+        self.assertEqual(evidence["deletedPodGeneration"], "2")
+        self.assertEqual(
+            driver.commands,
+            [
+                [
+                    "-n",
+                    driver.target_namespace,
+                    "delete",
+                    "pod",
+                    "synara-exec-fixture",
+                    "--grace-period=0",
+                    "--force",
+                    "--wait=false",
+                ]
+            ],
+        )
 
 
 if __name__ == "__main__":

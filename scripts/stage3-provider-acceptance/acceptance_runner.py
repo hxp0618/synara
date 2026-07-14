@@ -379,6 +379,7 @@ class TargetDriver(Protocol):
     api: APIClient | None
     lifecycle: TargetLifecycle
     replacement_workspace_semantics: str
+    pending_interaction_recovery: str | None
 
     def prepare(self) -> Mapping[str, Any]: ...
 
@@ -403,6 +404,8 @@ class TargetDriver(Protocol):
     def observe_execution(self, target_id: str, execution_id: str) -> Mapping[str, Any]: ...
 
     def observe_terminal_execution(self, target_id: str, execution_id: str) -> Mapping[str, Any]: ...
+
+    def recover_pending_interaction(self, target_id: str, execution_id: str) -> Mapping[str, Any]: ...
 
     def stop(self) -> None: ...
 
@@ -610,6 +613,7 @@ class LocalDriver:
     name = "local"
     lifecycle = STANDING_WORKER
     replacement_workspace_semantics = "no managed Worker replacement"
+    pending_interaction_recovery: str | None = None
 
     def __init__(
         self,
@@ -864,6 +868,13 @@ class LocalDriver:
 
     def observe_terminal_execution(self, _target_id: str, _execution_id: str) -> Mapping[str, Any]:
         return {}
+
+    def recover_pending_interaction(self, _target_id: str, _execution_id: str) -> Mapping[str, Any]:
+        raise AcceptanceError(
+            "runner.pending_interaction_recovery_unsupported",
+            f"The {self.name} TargetDriver does not support pending interaction runtime recovery.",
+            {"target": self.name},
+        )
 
     def _control_plane_environment(self) -> dict[str, str]:
         environment = self._tool_environment()
@@ -2690,6 +2701,7 @@ class SSHDriver(ManagedWorkerDriver):
 class KubernetesDriver(ManagedWorkerDriver):
     name = "kubernetes"
     lifecycle = EXECUTION_PINNED_WORKER
+    pending_interaction_recovery = "delete-pod"
 
     def __init__(
         self,
@@ -2847,6 +2859,40 @@ class KubernetesDriver(ManagedWorkerDriver):
             "runner.target_replacement_unsupported",
             "The Kubernetes Target uses one execution-pinned Pod per Execution.",
         )
+
+    def recover_pending_interaction(self, target_id: str, execution_id: str) -> Mapping[str, Any]:
+        pod = self._wait_execution_pod(target_id, execution_id)
+        metadata = json_object(pod.get("metadata"), "Kubernetes Pod metadata")
+        status = json_object(pod.get("status"), "Kubernetes Pod status")
+        labels = json_object(metadata.get("labels"), "Kubernetes Pod labels")
+        name = metadata.get("name")
+        uid = metadata.get("uid")
+        if not isinstance(name, str) or not name or not isinstance(uid, str) or not uid:
+            raise AcceptanceError(
+                "runner.kubernetes_pod_contract_mismatch",
+                "The execution-pinned Pod omitted its stable identity.",
+                {"metadata": metadata},
+            )
+        self._kubectl_command(
+            [
+                "-n",
+                self.target_namespace,
+                "delete",
+                "pod",
+                name,
+                "--grace-period=0",
+                "--force",
+                "--wait=false",
+            ],
+            cleanup_timeout=20.0,
+        )
+        return {
+            "recoveryMode": self.pending_interaction_recovery,
+            "deletedPodName": name,
+            "deletedPodUid": uid,
+            "deletedPodPhase": status.get("phase"),
+            "deletedPodGeneration": labels.get("synara.io/generation"),
+        }
 
     def observe_execution(self, target_id: str, execution_id: str) -> Mapping[str, Any]:
         pod = self._wait_execution_pod(target_id, execution_id)
@@ -3198,18 +3244,31 @@ class KubernetesDriver(ManagedWorkerDriver):
     def _wait_execution_pod(self, target_id: str, execution_id: str) -> dict[str, Any]:
         while True:
             pods = self._execution_pods(target_id, execution_id)
-            running = [
+            active = [
                 pod
                 for pod in pods
+                if not (
+                    isinstance(pod.get("metadata"), dict)
+                    and pod["metadata"].get("deletionTimestamp") is not None
+                )
+            ]
+            running = [
+                pod
+                for pod in active
                 if isinstance(pod.get("status"), dict) and pod["status"].get("phase") == "Running"
             ]
             if len(running) == 1:
                 return running[0]
-            if len(pods) > 1:
+            if len(active) > 1:
                 raise AcceptanceError(
                     "runner.kubernetes_pod_count_invalid",
                     "More than one execution-pinned Pod existed for one Execution.",
-                    {"targetId": target_id, "executionId": execution_id, "podCount": len(pods)},
+                    {
+                        "targetId": target_id,
+                        "executionId": execution_id,
+                        "activePodCount": len(active),
+                        "totalPodCount": len(pods),
+                    },
                 )
             self.deadline.sleep(0.2)
 
@@ -3388,6 +3447,7 @@ class MissingTargetDriver:
         self.name = name
         self.api: APIClient | None = None
         self.lifecycle = STANDING_WORKER
+        self.pending_interaction_recovery: str | None = None
 
     def prepare(self) -> Mapping[str, Any]:
         raise AcceptanceError(
@@ -3422,6 +3482,9 @@ class MissingTargetDriver:
         return self.prepare()
 
     def observe_terminal_execution(self, _target_id: str, _execution_id: str) -> Mapping[str, Any]:
+        return self.prepare()
+
+    def recover_pending_interaction(self, _target_id: str, _execution_id: str) -> Mapping[str, Any]:
         return self.prepare()
 
     def stop(self) -> None:
@@ -3486,11 +3549,20 @@ class AcceptanceSuite:
                 self._discover_worker,
                 requires=("resources.credential-project-session",),
             )
+            approval_requirement = "runtime.worker-discovery"
+            if getattr(self.driver, "pending_interaction_recovery", None) is not None:
+                self._case(
+                    "recovery.pending-approval-runtime-loss",
+                    "Force pending Approval runtime loss and verify recovery fencing",
+                    self._recover_pending_approval_runtime,
+                    requires=("runtime.worker-discovery",),
+                )
+                approval_requirement = "recovery.pending-approval-runtime-loss"
             self._case(
                 "fixture.approval-resolution",
                 "Resolve Provider approval through the user API",
                 self._approval_resolution,
-                requires=("runtime.worker-discovery",),
+                requires=(approval_requirement,),
             )
             self._case(
                 "fixture.text-tool-usage-artifact",
@@ -4108,6 +4180,82 @@ class AcceptanceSuite:
             "targetTerminal": dict(target_evidence) if target_evidence else None,
         }
 
+    def _recover_pending_approval_runtime(self) -> Mapping[str, Any]:
+        pending = self.state.pending_approval
+        if pending is None:
+            raise AcceptanceError(
+                "runner.pending_approval_missing",
+                "The pending Approval barrier was unavailable for runtime recovery.",
+            )
+        recover = getattr(self.driver, "recover_pending_interaction", None)
+        if not callable(recover):
+            raise AcceptanceError(
+                "runner.pending_interaction_recovery_unsupported",
+                "The TargetDriver cannot recover a pending interaction runtime.",
+                {"target": self.driver.name},
+            )
+        turn = json_object(pending.get("turn"), "pending approval turn")
+        interaction = json_object(pending.get("interaction"), "pending approval interaction")
+        turn_id = turn.get("id")
+        previous_interaction_id = interaction.get("id")
+        execution_id = interaction.get("executionId")
+        request_id = interaction.get("requestId")
+        if (
+            not isinstance(turn_id, str)
+            or not turn_id
+            or not isinstance(previous_interaction_id, str)
+            or not previous_interaction_id
+            or not isinstance(execution_id, str)
+            or not execution_id
+            or not isinstance(request_id, str)
+            or not request_id
+        ):
+            raise AcceptanceError(
+                "runner.pending_approval_invalid",
+                "The pending Approval barrier omitted its Turn, Interaction, Execution, or Request identity.",
+                {"turn": turn, "interaction": interaction},
+            )
+        before_sequence = max(
+            self.state.last_sequence,
+            max((int(event.get("sequence") or 0) for event in self._all_events()), default=0),
+        )
+        target_evidence = recover(self._required("target_id"), execution_id)
+        recovery_event = self._wait_for_execution_event(
+            execution_id,
+            "execution.recovering",
+            after_sequence=before_sequence,
+        )
+        replacement = self._wait_for_replacement_interaction(turn_id, "approval", previous_interaction_id)
+        replacement_execution_id = replacement.get("executionId")
+        if not isinstance(replacement_execution_id, str) or not replacement_execution_id:
+            raise AcceptanceError(
+                "runner.recovered_interaction_invalid",
+                "The recovered Approval omitted its Execution identity.",
+                {"interaction": replacement},
+            )
+        target_runtime = self.driver.observe_execution(self._required("target_id"), replacement_execution_id)
+        deleted_uid = target_evidence.get("deletedPodUid") if isinstance(target_evidence, Mapping) else None
+        replacement_uid = target_runtime.get("podUid") if isinstance(target_runtime, Mapping) else None
+        if isinstance(deleted_uid, str) and isinstance(replacement_uid, str) and deleted_uid == replacement_uid:
+            raise AcceptanceError(
+                "runner.pending_interaction_recovery_not_replaced",
+                "Pending Approval recovery reused the deleted execution-pinned runtime identity.",
+                {"deletedPodUid": deleted_uid, "replacementPodUid": replacement_uid},
+            )
+        self.state.pending_approval = {"turn": turn, "interaction": replacement}
+        return {
+            "turnId": turn_id,
+            "staleInteractionId": previous_interaction_id,
+            "staleRequestId": request_id,
+            "staleExecutionId": execution_id,
+            "recoveryEvent": self._event_summary(recovery_event),
+            "replacementInteractionId": replacement.get("id"),
+            "replacementRequestId": replacement.get("requestId"),
+            "replacementExecutionId": replacement_execution_id,
+            "targetRecovery": dict(target_evidence),
+            "targetRuntime": dict(target_runtime),
+        }
+
     def _user_input_resolution(self) -> Mapping[str, Any]:
         turn = self._create_turn("[user-input]")
         interaction = self._wait_for_interaction(str(turn["id"]), "user-input")
@@ -4391,6 +4539,56 @@ class AcceptanceSuite:
             return None
 
         return self.api.wait_until(f"{kind} interaction for Turn {turn_id}", interaction_probe)
+
+    def _wait_for_replacement_interaction(
+        self,
+        turn_id: str,
+        kind: str,
+        previous_interaction_id: str,
+    ) -> dict[str, Any]:
+        session_id = self._required("session_id")
+
+        def interaction_probe() -> dict[str, Any] | None:
+            snapshot = json_object(
+                self.api.request("GET", f"/v1/sessions/{session_id}/interactions"),
+                "pending interactions",
+            )
+            items = snapshot.get("items")
+            if not isinstance(items, list):
+                raise AcceptanceError(
+                    "runner.response_shape_invalid",
+                    "pending interactions.items was not an array.",
+                )
+            for item in items:
+                if (
+                    isinstance(item, dict)
+                    and item.get("turnId") == turn_id
+                    and item.get("kind") == kind
+                    and item.get("id") != previous_interaction_id
+                ):
+                    return item
+            return None
+
+        return self.api.wait_until(f"replacement {kind} interaction for Turn {turn_id}", interaction_probe)
+
+    def _wait_for_execution_event(
+        self,
+        execution_id: str,
+        event_type: str,
+        *,
+        after_sequence: int,
+    ) -> dict[str, Any]:
+        def event_probe() -> dict[str, Any] | None:
+            for event in self._all_events():
+                sequence = int(event.get("sequence") or 0)
+                if sequence <= after_sequence:
+                    continue
+                if event.get("executionId") == execution_id and event.get("eventType") == event_type:
+                    self.state.last_sequence = max(self.state.last_sequence, sequence)
+                    return event
+            return None
+
+        return self.api.wait_until(f"{event_type} for Execution {execution_id}", event_probe)
 
     def _all_events(self) -> list[dict[str, Any]]:
         session_id = self._required("session_id")
