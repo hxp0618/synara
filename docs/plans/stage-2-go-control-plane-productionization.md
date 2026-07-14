@@ -19,9 +19,9 @@
 - **计划基线提交**：`05c3c5da`
 - **工作区状态**：以执行时的 Git 状态为准，不再假设计划基线中的未提交文件仍存在
 - **当前 Schema**：forward-only migration 已连续到 `000031_session_execution_cursor_lineage.sql`
-- **验收证据边界**：最新完整 Stage 2 部署验收固定在 `acf63b43`、Migration `000031`；
+- **验收证据边界**：最新完整 Stage 2 部署验收固定在 `0c42b0ec`、Migration `000031`；
   Single-node、Multi-replica、Failure 与 disposable Kind 证据见
-  `docs/reports/stage-2-production-acceptance-acf63b43.md`
+  `docs/reports/stage-2-production-acceptance-0c42b0ec.md`
 - **依赖**：SaaS Tenant/Organization/User 领域模型、Worker Protocol v1、Runtime Event v1
 - **目标结果**：Go Control Plane 达到可供前端长期依赖、支持多副本部署和可靠恢复的生产基线
 
@@ -80,8 +80,8 @@
 000031 Session Cursor state/lineage quarantine and one active Execution per Session
 ```
 
-这些 Migration 属于同一生产 Schema 链，已在 `acf63b43` 的 PostgreSQL、Compose 和 Kind 部署验收中
-一并验证；历史 `000028` 报告仍保留，但当前证据以 `000031` 报告为准。
+这些 Migration 属于同一生产 Schema 链，已在 `acf63b43` 首次固定，并在 `0c42b0ec` 的 PostgreSQL、
+Compose 和 Kind 部署验收中重新验证；历史报告仍保留，但当前证据以最新 `000031` 报告为准。
 
 ### 3.3 已有前端接入
 
@@ -827,6 +827,8 @@ errorCode
 - [x] `acf63b43` / Migration `000031` 已重新通过 Single-node、双副本 Compose、故障注入和
   disposable Stage 2 Kind；报告固定 Commit、Migration Version、前后端 Proxy、故障与清理证据，见
   `docs/reports/stage-2-production-acceptance-acf63b43.md`。
+- [x] `0c42b0ec` / Migration `000031` 在 Session/Execution Capability Projection 变更后再次通过四套
+  部署验收，当前固定报告见 `docs/reports/stage-2-production-acceptance-0c42b0ec.md`。
 
 ### Step 2：多副本正确性
 
@@ -1019,7 +1021,7 @@ bun run test
 - [x] 未配置 Control Plane 时本地模式保持可用。
 - [x] `1a53c93a` / Migration `000028` 基线的 Single-node Compose Acceptance 通过。
 - [x] `1a53c93a` / Migration `000028` 基线的 Enterprise 双副本 Acceptance 通过。
-- [x] `acf63b43` / Migration `000031` 的 Single-node、Multi-replica、Failure 和 Kind 部署验收已固定。
+- [x] `0c42b0ec` / Migration `000031` 的 Single-node、Multi-replica、Failure 和 Kind 部署验收已固定。
 - [x] 生产 Runbook 和告警规则完成。
 - [x] 未引入 Credential、Token、Prompt 的日志泄漏。
 
