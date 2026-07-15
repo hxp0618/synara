@@ -4,6 +4,7 @@ import contextlib
 import base64
 import dataclasses
 import io
+import json
 import pathlib
 import subprocess
 import tempfile
@@ -47,6 +48,11 @@ def runner_options(*, restart_control_plane: bool = True) -> acceptance.RunnerOp
         kind_bin="kind",
         kind_cluster_name=None,
         kind_node_image="kindest/node:v1.33.1",
+        failure_cases=(),
+        network_outage_seconds=8.0,
+        docker_allow_network_interruption=False,
+        kubernetes_allow_node_drain=False,
+        failure_only=False,
     )
 
 
@@ -129,9 +135,13 @@ class FakeDriver:
 
 
 class CaseOrderSuite(acceptance.AcceptanceSuite):
-    def __init__(self, driver: FakeDriver) -> None:
+    def __init__(
+        self,
+        driver: FakeDriver,
+        options: acceptance.RunnerOptions | None = None,
+    ) -> None:
         super().__init__(
-            runner_options(),
+            options or runner_options(),
             driver,
             acceptance.Deadline(30.0),
             acceptance.SecretRedactor(),
@@ -322,6 +332,226 @@ class PendingApprovalRecoverySuite(BarrierSuite):
         return {"podUid": "pod-uid-2", "generation": "2"}
 
 
+class ProviderFailureSuite(BarrierSuite):
+    def __init__(self, actual_failure_code: str) -> None:
+        super().__init__(acceptance.STANDING_WORKER)
+        self.actual_failure_code = actual_failure_code
+
+    def _wait_for_turn_terminal(
+        self,
+        turn_id: str,
+        expected_event_type: str,
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        execution_id = f"execution-{turn_id}"
+        terminal = {
+            "sequence": 2,
+            "eventType": expected_event_type,
+            "executionId": execution_id,
+            "workerId": "worker-1",
+            "generation": 1,
+            "payload": {
+                "failureCode": self.actual_failure_code,
+            }
+            if expected_event_type == "execution.failed"
+            else {},
+        }
+        return terminal, [
+            {
+                "sequence": 1,
+                "eventType": "turn.created",
+                "executionId": execution_id,
+                "payload": {"turnId": turn_id},
+            },
+            terminal,
+        ]
+
+
+class TerminalLargeAPI(FakeAPI):
+    def __init__(self, artifacts: Sequence[Mapping[str, Any]]) -> None:
+        super().__init__()
+        self.artifacts = list(artifacts)
+
+    def request(
+        self,
+        method: str,
+        path: str,
+        payload: Mapping[str, Any] | None = None,
+        expected: Sequence[int] = (200,),
+        *,
+        maximum_timeout: float = 10.0,
+    ) -> Any:
+        if method == "GET" and path == "/v1/sessions/session-id/artifacts":
+            return {"items": self.artifacts}
+        return super().request(method, path, payload, expected, maximum_timeout=maximum_timeout)
+
+
+class TerminalLargeSuite(acceptance.AcceptanceSuite):
+    def __init__(self, *, leak_runtime_path: bool = False, corrupt_artifact: bool = False) -> None:
+        expected_segments = acceptance.terminal_large_expected_segments()
+        artifact_ids = [
+            f"00000000-0000-4000-8000-{segment['segmentIndex'] + 1:012d}"
+            for segment in expected_segments
+        ]
+        artifacts = [
+            {
+                "id": artifact_id,
+                "executionId": "execution-terminal-large",
+                "kind": "terminal_log",
+                "status": "ready",
+                "originalName": f"terminal-log-{segment['segmentIndex'] + 1:06d}.log",
+                "contentType": "text/plain; charset=utf-8",
+                "sizeBytes": segment["length"],
+                "sha256": "0" * 64 if corrupt_artifact and index == 0 else segment["sha256"],
+            }
+            for index, (artifact_id, segment) in enumerate(
+                zip(artifact_ids, expected_segments, strict=True)
+            )
+        ]
+        driver = FakeDriver(acceptance.STANDING_WORKER)
+        driver.api = TerminalLargeAPI(artifacts)
+        super().__init__(
+            runner_options(),
+            driver,
+            acceptance.Deadline(30.0),
+            acceptance.SecretRedactor(),
+        )
+        self.state.session_id = "session-id"
+        terminal_id = "fixture-terminal-large-1"
+        events: list[dict[str, Any]] = [
+            {
+                "sequence": 1,
+                "eventType": "item.started",
+                "executionId": "execution-terminal-large",
+                "payload": {
+                    "itemType": "command_execution",
+                    "status": "inProgress",
+                    "data": {
+                        "provider": "codex",
+                        "terminal": {
+                            "terminalId": terminal_id,
+                            "eventType": "terminal.started",
+                            "commandSummary": "fixture-terminal-large --bytes=2097409",
+                            "cwdLabel": ".",
+                        },
+                    },
+                },
+            },
+            {
+                "sequence": 2,
+                "eventType": "content.delta",
+                "executionId": "execution-terminal-large",
+                "payload": {
+                    "streamKind": "command_output",
+                    "terminalId": terminal_id,
+                    "encoding": "utf-8",
+                    "delta": acceptance.terminal_large_bytes(
+                        0, acceptance.TERMINAL_LOG_PREVIEW_BYTES
+                    ).decode("ascii"),
+                    "byteOffset": 0,
+                    "byteLength": acceptance.TERMINAL_LOG_PREVIEW_BYTES,
+                    "truncated": True,
+                },
+            },
+        ]
+        for artifact_id, segment in zip(artifact_ids, expected_segments, strict=True):
+            events.extend(
+                [
+                    {
+                        "sequence": len(events) + 1,
+                        "eventType": "artifact.ready",
+                        "executionId": "execution-terminal-large",
+                        "payload": {
+                            "artifactId": artifact_id,
+                            "kind": "terminal_log",
+                            "sizeBytes": segment["length"],
+                            "contentType": "text/plain; charset=utf-8",
+                        },
+                    },
+                    {
+                        "sequence": len(events) + 2,
+                        "eventType": "item.updated",
+                        "executionId": "execution-terminal-large",
+                        "payload": {
+                            "itemType": "command_execution",
+                            "status": "inProgress",
+                            "title": "Terminal log",
+                            "data": {
+                                "provider": "codex",
+                                "terminal": {
+                                    "terminalId": terminal_id,
+                                    "eventType": "terminal.output.reference",
+                                    "artifactId": artifact_id,
+                                    "offset": segment["offset"],
+                                    "length": segment["length"],
+                                    "segmentIndex": segment["segmentIndex"],
+                                    "encoding": segment["encoding"],
+                                },
+                            },
+                        },
+                    },
+                ]
+            )
+        events.append(
+            {
+                "sequence": len(events) + 1,
+                "eventType": "artifact.ready",
+                "executionId": "execution-terminal-large",
+                "payload": {
+                    "artifactId": "00000000-0000-4000-8000-000000000099",
+                    "kind": "checkpoint",
+                    "sizeBytes": 128,
+                    "contentType": "application/gzip",
+                },
+            }
+        )
+        completion_terminal: dict[str, Any] = {
+            "terminalId": terminal_id,
+            "eventType": "terminal.exited",
+            "totalBytes": acceptance.TERMINAL_LARGE_TOTAL_BYTES,
+            "previewBytes": acceptance.TERMINAL_LOG_PREVIEW_BYTES,
+            "segmentCount": len(expected_segments),
+            "truncated": True,
+            "exitCode": 0,
+        }
+        if leak_runtime_path:
+            completion_terminal["runtimeOutputDirectory"] = "/tmp/synara-runtime-output"
+        events.append(
+            {
+                "sequence": len(events) + 1,
+                "eventType": "item.completed",
+                "executionId": "execution-terminal-large",
+                "payload": {
+                    "itemType": "command_execution",
+                    "status": "completed",
+                    "data": {"provider": "codex", "terminal": completion_terminal},
+                },
+            }
+        )
+        self.execution_terminal = {
+            "sequence": len(events) + 1,
+            "eventType": "execution.completed",
+            "executionId": "execution-terminal-large",
+            "workerId": "worker-1",
+            "generation": 1,
+        }
+        events.append(self.execution_terminal)
+        self.events = events
+
+    def _create_turn(self, input_text: str) -> dict[str, Any]:
+        if input_text != "[terminal-large]":
+            raise AssertionError(f"unexpected fixture directive: {input_text}")
+        return {"id": "turn-terminal-large"}
+
+    def _wait_for_turn_terminal(
+        self,
+        turn_id: str,
+        expected_event_type: str,
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        if turn_id != "turn-terminal-large" or expected_event_type != "execution.completed":
+            raise AssertionError("unexpected large Terminal wait")
+        return self.execution_terminal, self.events
+
+
 class APIClientTimeoutTest(unittest.TestCase):
     def test_request_keeps_short_default_and_allows_explicit_long_operation_timeout(self) -> None:
         timeouts: list[float] = []
@@ -358,7 +588,87 @@ class APIClientTimeoutTest(unittest.TestCase):
         self.assertAlmostEqual(timeouts[1], 25.0, delta=0.1)
 
 
+class ManagedWorkerImageTest(unittest.TestCase):
+    def test_worker_smoke_preserves_image_path_with_non_login_shell(self) -> None:
+        driver = object.__new__(acceptance.ManagedWorkerDriver)
+        driver.logs_dir = pathlib.Path(tempfile.gettempdir()) / "synara-stage3-worker-smoke-test"
+        driver.deadline = acceptance.Deadline(30.0)
+        driver._ping_socket = mock.Mock(return_value={"path": "/var/run/docker.sock", "ping": "OK"})
+        commands: list[list[str]] = []
+
+        def docker_command(arguments: Sequence[str], **_kwargs: Any) -> str:
+            commands.append(list(arguments))
+            if arguments[:2] == ["version", "--format"]:
+                return "29.4.0\n"
+            if arguments[:2] == ["image", "inspect"]:
+                return "sha256:image-id\n"
+            return ""
+
+        driver._docker_command = docker_command
+
+        driver._prepare_worker_image("fixture-image", skip_build=True, log_prefix="fixture")
+
+        smoke = next(command for command in commands if command[:2] == ["run", "--rm"])
+        self.assertIn("-c", smoke)
+        self.assertNotIn("-lc", smoke)
+        self.assertIn("codex --version", smoke[-1])
+
+
 class AcceptanceSuiteLifecycleTest(unittest.TestCase):
+    def test_terminal_large_pattern_has_stable_segment_hashes(self) -> None:
+        self.assertEqual(
+            acceptance.terminal_large_expected_segments(),
+            [
+                {
+                    "offset": 0,
+                    "length": 1 << 20,
+                    "segmentIndex": 0,
+                    "encoding": "utf-8",
+                    "sha256": "f22d03ccbcfd9f40f8a8adb9deaa74e9c4fddc6f0325158a260021c698f0c869",
+                },
+                {
+                    "offset": 1 << 20,
+                    "length": 1 << 20,
+                    "segmentIndex": 1,
+                    "encoding": "utf-8",
+                    "sha256": "eb149a408fa80e2faf39670f5e8e357a61d723d5d5b5d3620a9ca05105b636be",
+                },
+                {
+                    "offset": 2 << 20,
+                    "length": 257,
+                    "segmentIndex": 2,
+                    "encoding": "utf-8",
+                    "sha256": "5fa2911d4a2a4821ba301f5256983895d62da71a9a5c4e8237e6a8900d4c09c1",
+                },
+            ],
+        )
+
+    def test_terminal_large_case_validates_preview_references_and_artifacts(self) -> None:
+        evidence = TerminalLargeSuite()._terminal_large_log()
+
+        self.assertEqual(evidence["terminalId"], "fixture-terminal-large-1")
+        self.assertEqual(evidence["preview"]["bytes"], 32 << 10)
+        self.assertTrue(evidence["preview"]["truncated"])
+        self.assertEqual(evidence["completion"]["totalBytes"], 2 * (1 << 20) + 257)
+        self.assertEqual(evidence["completion"]["segmentCount"], 3)
+        self.assertEqual(
+            [segment["length"] for segment in evidence["segments"]],
+            [1 << 20, 1 << 20, 257],
+        )
+        self.assertFalse(evidence["runtimePhysicalPathLeak"])
+
+    def test_terminal_large_case_rejects_runtime_output_path_leak(self) -> None:
+        with self.assertRaises(acceptance.AcceptanceError) as caught:
+            TerminalLargeSuite(leak_runtime_path=True)._terminal_large_log()
+
+        self.assertEqual(caught.exception.code, "runner.terminal_runtime_path_leaked")
+
+    def test_terminal_large_case_rejects_artifact_hash_mismatch(self) -> None:
+        with self.assertRaises(acceptance.AcceptanceError) as caught:
+            TerminalLargeSuite(corrupt_artifact=True)._terminal_large_log()
+
+        self.assertEqual(caught.exception.code, "runner.terminal_artifact_mismatch")
+
     def test_interaction_waits_distinguish_initial_and_replacement_snapshots(self) -> None:
         suite = BarrierSuite(acceptance.EXECUTION_PINNED_WORKER)
 
@@ -454,6 +764,7 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
                 "resources.credential-project-session",
                 "fixture.text-tool-usage-artifact",
                 "fixture.approval-resolution",
+                "fixture.terminal-large-log",
                 "fixture.user-input-resolution",
                 "fixture.provider-error",
                 "recovery.control-plane-restart",
@@ -477,6 +788,7 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
                 "runtime.worker-discovery",
                 "fixture.approval-resolution",
                 "fixture.text-tool-usage-artifact",
+                "fixture.terminal-large-log",
                 "fixture.user-input-resolution",
                 "fixture.provider-error",
                 "recovery.control-plane-restart",
@@ -495,6 +807,51 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
         self.assertIn("recovery.post-replacement-workspace-turn", managed.case_order)
         self.assertNotIn("recovery.worker-replacement", unmanaged_docker.case_order)
         self.assertNotIn("recovery.post-replacement-workspace-turn", unmanaged_docker.case_order)
+
+    def test_selected_failure_matrix_is_ordered_before_replacement_and_restart(self) -> None:
+        suite = CaseOrderSuite(
+            FakeDriver(acceptance.STANDING_MANAGED_WORKER, name="docker"),
+            dataclasses.replace(
+                runner_options(),
+                failure_cases=("provider-malformed", "worker-network"),
+            ),
+        )
+
+        suite.run()
+
+        malformed = suite.case_order.index("failure.provider-host-malformed")
+        network = suite.case_order.index("failure.worker-network-interruption")
+        replacement = suite.case_order.index("recovery.worker-replacement")
+        restart = suite.case_order.index("recovery.control-plane-restart")
+        self.assertLess(malformed, network)
+        self.assertLess(network, replacement)
+        self.assertLess(replacement, restart)
+
+    def test_failure_only_uses_minimal_setup_and_continuity_smoke(self) -> None:
+        suite = CaseOrderSuite(
+            FakeDriver(acceptance.STANDING_WORKER, name="local"),
+            dataclasses.replace(
+                runner_options(),
+                failure_cases=("provider-malformed",),
+                failure_only=True,
+            ),
+        )
+
+        suite.run()
+
+        self.assertEqual(
+            suite.case_order,
+            [
+                "environment.target-prepare",
+                "environment.control-plane-start",
+                "identity.dev-login",
+                "runtime.worker-discovery",
+                "resources.credential-project-session",
+                "fixture.baseline-smoke",
+                "failure.provider-host-malformed",
+                "fixture.post-failure-continuity",
+            ],
+        )
 
     def test_pending_interaction_recovery_cases_follow_driver_capability(self) -> None:
         recovering = FakeDriver(acceptance.EXECUTION_PINNED_WORKER, name="kubernetes-like")
@@ -515,6 +872,7 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
                 "recovery.pending-approval-runtime-loss",
                 "fixture.approval-resolution",
                 "fixture.text-tool-usage-artifact",
+                "fixture.terminal-large-log",
                 "fixture.user-input-resolution",
                 "fixture.provider-error",
                 "recovery.control-plane-restart",
@@ -587,6 +945,46 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
 
         self.assertEqual(raised.exception.code, "runner.pending_interaction_request_not_replaced")
 
+    def test_provider_host_fault_requires_stable_code_and_next_turn_recovery(self) -> None:
+        suite = ProviderFailureSuite("protocol_violation")
+
+        evidence = suite._provider_host_failure(
+            "provider-malformed",
+            "[provider-malformed]",
+            "protocol_violation",
+        )
+
+        self.assertEqual(suite.created_turns, ["[provider-malformed]", "[text]"])
+        self.assertEqual(evidence["failureCode"], "protocol_violation")
+        self.assertTrue(evidence["hostRecoveredForNextTurn"])
+
+    def test_provider_host_fault_rejects_unexpected_code(self) -> None:
+        suite = ProviderFailureSuite("provider_unavailable")
+
+        with self.assertRaises(acceptance.AcceptanceError) as raised:
+            suite._provider_host_failure(
+                "provider-malformed",
+                "[provider-malformed]",
+                "protocol_violation",
+            )
+
+        self.assertEqual(raised.exception.code, "runner.provider_fault_code_mismatch")
+
+    def test_worker_network_failure_recovers_and_resolves_new_generation(self) -> None:
+        suite = PendingApprovalRecoverySuite()
+        suite.fake_driver.validate_failure = lambda fault: None  # type: ignore[attr-defined]
+        suite.fake_driver.inject_failure = (  # type: ignore[attr-defined]
+            lambda fault, target_id, execution_id: suite._recover_pending_interaction(
+                target_id, execution_id
+            )
+        )
+
+        evidence = suite._pending_approval_failure("worker-network")
+
+        self.assertEqual(evidence["recovery"]["replacementRequestId"], "approval-request-2")
+        self.assertTrue(evidence["generationFenced"])
+        self.assertEqual(evidence["resolution"]["executionId"], "execution-1")
+
     def test_standing_restart_waits_for_online_worker(self) -> None:
         suite = BarrierSuite(acceptance.STANDING_WORKER)
 
@@ -597,6 +995,28 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
 
 
 class RunnerOptionsTest(unittest.TestCase):
+    def test_failure_matrix_expands_target_cases_without_duplicates(self) -> None:
+        options = acceptance.parse_args(
+            [
+                "--target",
+                "kubernetes",
+                "--failure-case",
+                "provider-crash",
+                "--failure-matrix",
+            ]
+        )
+
+        self.assertEqual(options.failure_cases, acceptance.TARGET_FAILURE_CASES["kubernetes"])
+        self.assertEqual(options.network_outage_seconds, 8.0)
+
+    def test_network_outage_must_cross_acceptance_lease_ttl(self) -> None:
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            acceptance.parse_args(["--network-outage-seconds", "6.5"])
+
+    def test_failure_only_requires_at_least_one_case(self) -> None:
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            acceptance.parse_args(["--failure-only"])
+
     def test_ssh_options_use_owned_orbstack_defaults_and_release_timeout(self) -> None:
         options = acceptance.parse_args(["--target", "ssh", "--ssh-machine-name", "synara-stage3-test"])
 
@@ -652,6 +1072,44 @@ class RunnerOptionsTest(unittest.TestCase):
             acceptance.parse_args(
                 ["--target", "kubernetes", "--kubernetes-worker-image", "operator-owned:image"]
             )
+
+
+class OutputSecretScanTest(unittest.TestCase):
+    def test_scan_fails_closed_without_echoing_secret_material(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            output_dir = pathlib.Path(directory)
+            redactor = acceptance.SecretRedactor()
+            secret = "stage3-dynamic-secret-value"
+            redactor.add(secret)
+            (output_dir / "control-plane.log").write_text(
+                f"unexpected payload {secret}\n-----BEGIN OPENSSH PRIVATE KEY-----\n",
+                encoding="utf-8",
+            )
+
+            evidence = acceptance.scan_output_secrets(output_dir, redactor)
+
+            self.assertEqual(evidence["status"], "fail")
+            self.assertEqual(
+                {finding["kind"] for finding in evidence["findings"]},
+                {"known-secret-2", "private-key-pem"},
+            )
+            self.assertNotIn(secret, str(evidence))
+
+    def test_scan_passes_redacted_reports_and_logs(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            output_dir = pathlib.Path(directory)
+            redactor = acceptance.SecretRedactor()
+            redactor.add("stage3-dynamic-secret-value")
+            (output_dir / "acceptance-report.json").write_text(
+                '{"credential":"[REDACTED]"}\n',
+                encoding="utf-8",
+            )
+            (output_dir / "control-plane.log").write_text("safe output\n", encoding="utf-8")
+
+            evidence = acceptance.scan_output_secrets(output_dir, redactor)
+
+            self.assertEqual(evidence["status"], "pass")
+            self.assertEqual(evidence["findings"], [])
 
 
 class SSHDriverTest(unittest.TestCase):
@@ -1217,7 +1675,12 @@ class KubernetesDriverObservationTest(unittest.TestCase):
                     "status": {"phase": "Running"},
                 }
 
-            def _foundation_evidence(self, target_id: str, secret_name: Any) -> Mapping[str, Any]:
+            def _foundation_evidence(
+                self,
+                target_id: str,
+                secret_name: Any,
+                **_kwargs: Any,
+            ) -> Mapping[str, Any]:
                 del target_id, secret_name
                 return {"serviceAccount": self.worker_service_account}
 
@@ -1298,6 +1761,119 @@ class KubernetesDriverObservationTest(unittest.TestCase):
                 ]
             ],
         )
+
+    def test_eviction_uses_policy_v1_uid_precondition_for_exact_pod(self) -> None:
+        options = dataclasses.replace(
+            runner_options(),
+            target="kubernetes",
+            kubernetes_context="kind-fixture",
+            kubernetes_kubeconfig=pathlib.Path("/tmp/kind-fixture-kubeconfig"),
+        )
+
+        class EvictionDriver(acceptance.KubernetesDriver):
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                super().__init__(*args, **kwargs)
+                self.commands: list[tuple[list[str], str | None]] = []
+
+            def _wait_execution_pod(self, target_id: str, execution_id: str) -> dict[str, Any]:
+                del target_id, execution_id
+                return {
+                    "metadata": {
+                        "name": "synara-exec-fixture",
+                        "uid": "pod-uid",
+                        "labels": {"synara.io/generation": "3"},
+                    },
+                    "spec": {"nodeName": "kind-control-plane"},
+                    "status": {"phase": "Running"},
+                }
+
+            def _kubectl_command(
+                self,
+                arguments: Sequence[str],
+                *,
+                input_text: str | None = None,
+                cleanup_timeout: float | None = None,
+            ) -> str:
+                del cleanup_timeout
+                self.commands.append((list(arguments), input_text))
+                return ""
+
+        driver = EvictionDriver(
+            pathlib.Path.cwd(),
+            options,
+            acceptance.Deadline(30.0),
+            acceptance.SecretRedactor(),
+        )
+        self.addCleanup(driver._release_state)
+
+        evidence = driver.inject_failure("kubernetes-eviction", "target-id", "execution-id")
+
+        command, payload = driver.commands[0]
+        self.assertEqual(command[:2], ["create", "--raw"])
+        self.assertTrue(command[2].endswith("/pods/synara-exec-fixture/eviction"))
+        self.assertEqual(
+            json.loads(payload or "{}")["deleteOptions"]["preconditions"]["uid"],
+            "pod-uid",
+        )
+        self.assertTrue(evidence["uidPrecondition"])
+
+    def test_node_drain_is_scoped_and_always_uncordons_owned_node(self) -> None:
+        options = dataclasses.replace(
+            runner_options(),
+            target="kubernetes",
+            kubernetes_context="kind-fixture",
+            kubernetes_kubeconfig=pathlib.Path("/tmp/kind-fixture-kubeconfig"),
+            kubernetes_allow_node_drain=True,
+        )
+
+        class DrainDriver(acceptance.KubernetesDriver):
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                super().__init__(*args, **kwargs)
+                self.commands: list[list[str]] = []
+
+            def _wait_execution_pod(self, target_id: str, execution_id: str) -> dict[str, Any]:
+                del target_id, execution_id
+                return {
+                    "metadata": {
+                        "name": "synara-exec-fixture",
+                        "uid": "pod-uid",
+                        "labels": {"synara.io/generation": "4"},
+                    },
+                    "spec": {"nodeName": "kind-control-plane"},
+                    "status": {"phase": "Running"},
+                }
+
+            def _kubectl_command(
+                self,
+                arguments: Sequence[str],
+                *,
+                input_text: str | None = None,
+                cleanup_timeout: float | None = None,
+            ) -> str:
+                del input_text, cleanup_timeout
+                self.commands.append(list(arguments))
+                return ""
+
+        driver = DrainDriver(
+            pathlib.Path.cwd(),
+            options,
+            acceptance.Deadline(30.0),
+            acceptance.SecretRedactor(),
+        )
+        self.addCleanup(driver._release_state)
+
+        evidence = driver.inject_failure("kubernetes-drain", "target-id", "execution-id")
+
+        self.assertEqual(driver.commands[0], ["cordon", "kind-control-plane"])
+        self.assertEqual(driver.commands[-1], ["uncordon", "kind-control-plane"])
+        drain = driver.commands[1]
+        self.assertEqual(drain[:2], ["drain", "kind-control-plane"])
+        self.assertIn(
+            "--pod-selector=synara.io/execution-target-id=target-id,synara.io/execution-id=execution-id",
+            drain,
+        )
+        self.assertIn("--disable-eviction", drain)
+        self.assertTrue(evidence["uncordoned"])
 
 
 if __name__ == "__main__":

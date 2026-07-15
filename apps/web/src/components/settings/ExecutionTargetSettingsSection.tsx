@@ -1,6 +1,6 @@
 import { PROVIDER_CAPABILITY_CATALOG, type ProviderHostProviderKind } from "@synara/contracts";
 import { useMutation } from "@tanstack/react-query";
-import { useState, type FormEvent } from "react";
+import { useMemo, useState, type FormEvent } from "react";
 
 import {
   CONTROL_PLANE_FORM_GRID_CLASS_NAME,
@@ -8,6 +8,8 @@ import {
   ControlPlaneFormField,
   ControlPlaneStatusPill,
 } from "~/components/settings/ControlPlaneSettingsPrimitives";
+import { ExecutionTargetCredentialBindings } from "~/components/settings/ExecutionTargetCredentialBindings";
+import { WorkerReleaseControls } from "~/components/settings/WorkerReleaseControls";
 import {
   SettingsListRow,
   SettingsRow,
@@ -20,6 +22,7 @@ import { Input } from "~/components/ui/input";
 import { Textarea } from "~/components/ui/textarea";
 import {
   controlPlaneClient,
+  type ControlPlaneCredential,
   type ControlPlaneExecutionTarget,
   type ControlPlaneExecutionTargetKind,
   type ControlPlaneOrganization,
@@ -57,6 +60,8 @@ export function ExecutionTargetSettingsSection(props: {
   workerManifestsLoading: boolean;
   workerManifestsError: unknown;
   canManage: boolean;
+  canManageCredentialBindings: boolean;
+  credentials: ReadonlyArray<ControlPlaneCredential>;
   requireOrganizationScope: boolean;
   isLoading: boolean;
   error: unknown;
@@ -115,14 +120,21 @@ export function ExecutionTargetSettingsSection(props: {
       : requestError
         ? "The request failed."
         : null;
-  const workerManifestsByTarget = groupWorkerManifestsByTarget(props.workerManifests);
+  const workerManifestsByTarget = useMemo(
+    () => groupWorkerManifestsByTarget(props.workerManifests),
+    [props.workerManifests],
+  );
+  const organizationByID = useMemo(
+    () => new Map(props.organizations.map((organization) => [organization.id, organization])),
+    [props.organizations],
+  );
 
   return (
     <SettingsSection title="Execution targets">
       {props.targets.map((target) => {
-        const organization = props.organizations.find(
-          (candidate) => candidate.id === target.organizationId,
-        );
+        const organization = target.organizationId
+          ? organizationByID.get(target.organizationId)
+          : undefined;
         const scope =
           organization?.name ?? (target.tenantId === null ? "Platform shared" : "Tenant wide");
         return (
@@ -134,6 +146,7 @@ export function ExecutionTargetSettingsSection(props: {
             scope={scope}
             target={target}
             tenantId={props.tenantId}
+            releaseManifests={props.workerManifests}
             workerManifests={workerManifestsByTarget.get(target.id) ?? EMPTY_WORKER_MANIFESTS}
             workerManifestsError={props.workerManifestsError}
             workerManifestsLoading={props.workerManifestsLoading}
@@ -146,6 +159,13 @@ export function ExecutionTargetSettingsSection(props: {
         <SettingsListRow
           title="No execution target available"
           description="Create a target before starting an agent session in this tenant."
+        />
+      ) : null}
+      {props.canManageCredentialBindings ? (
+        <ExecutionTargetCredentialBindings
+          credentials={props.credentials}
+          targets={props.targets}
+          tenantId={props.tenantId}
         />
       ) : null}
       {props.canManage ? (
@@ -228,6 +248,7 @@ function ExecutionTargetRow(props: {
   target: ControlPlaneExecutionTarget;
   scope: string;
   canManage: boolean;
+  releaseManifests: ReadonlyArray<ControlPlaneWorkerManifest>;
   workerManifests: ReadonlyArray<ControlPlaneWorkerManifest>;
   workerManifestsLoading: boolean;
   workerManifestsError: unknown;
@@ -246,6 +267,7 @@ function ExecutionTargetRow(props: {
             manifestError={props.workerManifestsError}
             manifestLoading={props.workerManifestsLoading}
             manifests={props.workerManifests}
+            releaseManifests={props.releaseManifests}
             onProviderPolicyUpdated={props.onProviderPolicyUpdated}
             tenantId={props.tenantId}
             target={props.target}
@@ -272,6 +294,7 @@ function ExecutionTargetRow(props: {
 export function ExecutionTargetPolicyDisclosure(props: {
   target: ControlPlaneExecutionTarget;
   manifests?: ReadonlyArray<ControlPlaneWorkerManifest>;
+  releaseManifests?: ReadonlyArray<ControlPlaneWorkerManifest>;
   manifestLoading?: boolean;
   manifestError?: unknown;
   canManage?: boolean;
@@ -329,6 +352,15 @@ export function ExecutionTargetPolicyDisclosure(props: {
             <ProviderPolicyControls
               enabledProviders={experimentalProviders}
               onUpdated={props.onProviderPolicyUpdated}
+              target={props.target}
+              tenantId={props.tenantId}
+            />
+          ) : null}
+          {props.tenantId && props.target.tenantId !== null ? (
+            <WorkerReleaseControls
+              canManage={props.canManage ?? false}
+              enabled={open}
+              manifests={props.releaseManifests ?? manifests}
               target={props.target}
               tenantId={props.tenantId}
             />

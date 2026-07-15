@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -30,10 +31,13 @@ import (
 )
 
 const (
-	kubernetesManagedLabel    = "synara.io/managed"
-	kubernetesTargetLabel     = "synara.io/execution-target-id"
-	kubernetesExecutionLabel  = "synara.io/execution-id"
-	kubernetesGenerationLabel = "synara.io/generation"
+	kubernetesManagedLabel     = "synara.io/managed"
+	kubernetesTargetLabel      = "synara.io/execution-target-id"
+	kubernetesExecutionLabel   = "synara.io/execution-id"
+	kubernetesGenerationLabel  = "synara.io/generation"
+	kubernetesReleaseLabel     = "synara.io/worker-release-revision-id"
+	kubernetesChannelLabel     = "synara.io/worker-release-channel"
+	kubernetesConfigAnnotation = "synara.io/config-sha256"
 )
 
 type KubernetesReconcilerConfig struct {
@@ -43,6 +47,7 @@ type KubernetesReconcilerConfig struct {
 	RecoverExpired                     func(context.Context, int) error
 	ReconcileEphemeralWorkspaceCleanup func(context.Context, uuid.UUID, []string, time.Time) (int, error)
 	Observer                           BackgroundObserver
+	ResolveImagePull                   ImagePullCredentialResolver
 }
 
 type kubernetesTargetConfiguration struct {
@@ -80,10 +85,11 @@ type kubernetesTargetConfiguration struct {
 }
 
 type kubernetesPod struct {
-	Name   string
-	UID    string
-	Phase  string
-	Labels map[string]string
+	Name        string
+	UID         string
+	Phase       string
+	Labels      map[string]string
+	Annotations map[string]string
 }
 
 type kubernetesClient interface {
@@ -175,13 +181,16 @@ func (r *KubernetesReconciler) ReconcileOnce(ctx context.Context) error {
 }
 
 type kubernetesExecution struct {
-	ID             uuid.UUID `gorm:"column:id"`
-	TenantID       uuid.UUID `gorm:"column:tenant_id"`
-	OrganizationID uuid.UUID `gorm:"column:organization_id"`
-	ProjectID      uuid.UUID `gorm:"column:project_id"`
-	SessionID      uuid.UUID `gorm:"column:session_id"`
-	Status         string    `gorm:"column:status"`
-	Generation     int64     `gorm:"column:generation"`
+	ID                       uuid.UUID  `gorm:"column:id"`
+	TenantID                 uuid.UUID  `gorm:"column:tenant_id"`
+	OrganizationID           uuid.UUID  `gorm:"column:organization_id"`
+	ProjectID                uuid.UUID  `gorm:"column:project_id"`
+	SessionID                uuid.UUID  `gorm:"column:session_id"`
+	Status                   string     `gorm:"column:status"`
+	Generation               int64      `gorm:"column:generation"`
+	WorkerReleaseRevisionID  *uuid.UUID `gorm:"column:worker_release_revision_id"`
+	WorkerReleaseChannel     *string    `gorm:"column:worker_release_channel"`
+	WorkerReleaseImageDigest *string    `gorm:"column:worker_release_image_digest"`
 }
 
 func (r *KubernetesReconciler) reconcileTarget(ctx context.Context, target persistence.ExecutionTarget) error {
@@ -195,14 +204,26 @@ func (r *KubernetesReconciler) reconcileTarget(ctx context.Context, target persi
 		r.setKubernetesStatus(ctx, target, "offline", false, false, 0, 0)
 		return problem.Wrap(503, "kubernetes_api_unavailable", "Kubernetes API configuration is unavailable.", err)
 	}
-	foundationHash, err := r.foundationHash(target, configuration)
+	resolution, err := r.resolveImagePullCredential(ctx, target, configuration.Image)
+	if err != nil {
+		return r.rejectImagePullCredential(ctx, client, target, configuration, resolution.Authoritative, err)
+	}
+	credential := resolution.Credential
+	if err := validateKubernetesImagePullCredential(configuration.Image, credential); err != nil {
+		return r.rejectImagePullCredential(ctx, client, target, configuration, resolution.Authoritative, err)
+	}
+	podBaseHash, err := r.foundationHash(target, configuration)
+	if err != nil {
+		return err
+	}
+	foundationHash, err := kubernetesFoundationApplyHash(podBaseHash, credential)
 	if err != nil {
 		return err
 	}
 	state := r.foundation[target.ID]
 	foundationChanged := state.hash != foundationHash || r.now().Sub(state.appliedAt) >= 5*time.Minute
 	if foundationChanged {
-		if err := r.applyFoundation(ctx, client, target, configuration); err != nil {
+		if err := r.applyFoundation(ctx, client, target, configuration, credential); err != nil {
 			r.setKubernetesStatus(ctx, target, "offline", false, false, 0, 0)
 			return err
 		}
@@ -248,11 +269,16 @@ func (r *KubernetesReconciler) reconcileTarget(ctx context.Context, target persi
 		}
 		execution, found := active[executionID]
 		expectedName := ""
+		expectedHash := ""
 		if found {
 			expectedName = kubernetesPodName(execution)
+			expectedHash, err = kubernetesExecutionPodHash(podBaseHash, configuration.Image, execution)
+			if err != nil {
+				return err
+			}
 		}
 		terminalPod := pod.Phase == "Succeeded" || pod.Phase == "Failed"
-		if !found || pod.Name != expectedName || terminalPod {
+		if !found || pod.Name != expectedName || pod.Annotations[kubernetesConfigAnnotation] != expectedHash || terminalPod {
 			if err := client.DeletePod(ctx, configuration.Namespace, pod.Name, pod.UID); err != nil {
 				return problem.Wrap(502, "kubernetes_pod_delete_failed", "An obsolete Kubernetes Worker Pod could not be deleted.", err)
 			}
@@ -277,7 +303,11 @@ func (r *KubernetesReconciler) reconcileTarget(ctx context.Context, target persi
 		if _, found := existing[name]; found {
 			continue
 		}
-		pod, err := r.executionPod(target, configuration, foundationHash, execution)
+		podHash, err := kubernetesExecutionPodHash(podBaseHash, configuration.Image, execution)
+		if err != nil {
+			return err
+		}
+		pod, err := r.executionPod(target, configuration, podHash, execution, credential)
 		if err != nil {
 			return err
 		}
@@ -297,8 +327,12 @@ func (r *KubernetesReconciler) reconcileTarget(ctx context.Context, target persi
 func (r *KubernetesReconciler) loadKubernetesExecutions(ctx context.Context, targetID uuid.UUID) ([]kubernetesExecution, error) {
 	var items []kubernetesExecution
 	err := r.targets.db.WithContext(ctx).Table("agent_executions AS e").
-		Select("e.id, e.tenant_id, s.organization_id, s.project_id, e.session_id, e.status, e.generation").
+		Select(`e.id, e.tenant_id, s.organization_id, s.project_id, e.session_id, e.status, e.generation,
+			e.worker_release_revision_id, e.worker_release_channel,
+			manifest.image_digest AS worker_release_image_digest`).
 		Joins("JOIN agent_sessions AS s ON s.tenant_id = e.tenant_id AND s.id = e.session_id").
+		Joins("LEFT JOIN worker_release_revisions AS release ON release.execution_target_id = e.execution_target_id AND release.id = e.worker_release_revision_id").
+		Joins("LEFT JOIN worker_manifests AS manifest ON manifest.id = release.worker_manifest_id").
 		Where("e.execution_target_id = ? AND e.target_kind = ? AND e.status IN ?", targetID, "kubernetes", []string{"queued", "recovering", "leased", "running", "waiting-for-approval"}).
 		Order("e.queued_at, e.id").Scan(&items).Error
 	if err != nil {
@@ -463,6 +497,7 @@ func (r *KubernetesReconciler) applyFoundation(
 	client kubernetesClient,
 	target persistence.ExecutionTarget,
 	configuration kubernetesTargetConfiguration,
+	credential *ImagePullCredential,
 ) error {
 	labels := kubernetesTargetLabels(target)
 	if configuration.ManageNamespace != nil && *configuration.ManageNamespace {
@@ -481,6 +516,14 @@ func (r *KubernetesReconciler) applyFoundation(
 	}
 	if err := client.Apply(ctx, kubernetesNamespacedPath(configuration.Namespace, "serviceaccounts", configuration.ServiceAccountName), serviceAccount); err != nil {
 		return problem.Wrap(502, "kubernetes_service_account_apply_failed", "Kubernetes Worker ServiceAccount could not be applied.", err)
+	}
+	registrySecret, err := kubernetesRegistrySecret(target, configuration.Namespace, labels, credential)
+	if err != nil {
+		return err
+	}
+	registrySecretName := kubernetesRegistrySecretName(target.ID)
+	if err := client.Apply(ctx, kubernetesNamespacedPath(configuration.Namespace, "secrets", registrySecretName), registrySecret); err != nil {
+		return problem.Wrap(502, "kubernetes_registry_secret_apply_failed", "Kubernetes Worker Registry Secret could not be applied.", err)
 	}
 	secretName := kubernetesSecretName(target.ID)
 	secret := map[string]any{
@@ -537,6 +580,7 @@ func (r *KubernetesReconciler) executionPod(
 	configuration kubernetesTargetConfiguration,
 	configHash string,
 	execution kubernetesExecution,
+	credential *ImagePullCredential,
 ) (map[string]any, error) {
 	runner, err := json.Marshal(configuration.RunnerCommand)
 	if err != nil {
@@ -552,6 +596,17 @@ func (r *KubernetesReconciler) executionPod(
 	labels["synara.io/session-id"] = execution.SessionID.String()
 	labels[kubernetesExecutionLabel] = execution.ID.String()
 	labels[kubernetesGenerationLabel] = strconv.FormatInt(generation, 10)
+	image, err := kubernetesExecutionImage(configuration.Image, execution)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateKubernetesImagePullCredential(image, credential); err != nil {
+		return nil, err
+	}
+	if execution.WorkerReleaseRevisionID != nil {
+		labels[kubernetesReleaseLabel] = execution.WorkerReleaseRevisionID.String()
+		labels[kubernetesChannelLabel] = stringValue(execution.WorkerReleaseChannel)
+	}
 	requests := map[string]any{}
 	limits := map[string]any{}
 	for key, value := range map[string]string{"cpu": configuration.CPURequest, "memory": configuration.MemoryRequest, "ephemeral-storage": configuration.EphemeralStorageRequest} {
@@ -585,7 +640,7 @@ func (r *KubernetesReconciler) executionPod(
 		map[string]any{"name": "SYNARA_AGENTD_WORKSPACE_ROOT", "value": "/data/workspaces"},
 		map[string]any{"name": "SYNARA_AGENTD_GIT_CACHE_ROOT", "value": gitCacheRoot},
 	}
-	if digest := immutableImageDigest(configuration.Image); digest != "" {
+	if digest := immutableImageDigest(image); digest != "" {
 		environment = append(environment, map[string]any{"name": "SYNARA_AGENTD_IMAGE_DIGEST", "value": digest})
 	}
 	volumes := []any{
@@ -608,7 +663,7 @@ func (r *KubernetesReconciler) executionPod(
 		volumeMounts = append(volumeMounts, map[string]any{"name": "git-cache", "mountPath": "/git-cache"})
 	}
 	container := map[string]any{
-		"name": "agentd", "image": configuration.Image, "imagePullPolicy": configuration.ImagePullPolicy,
+		"name": "agentd", "image": image, "imagePullPolicy": configuration.ImagePullPolicy,
 		"command": []any{"/usr/local/bin/synara-agentd"}, "env": environment,
 		"workingDir": "/data", "volumeMounts": volumeMounts,
 		"securityContext": map[string]any{
@@ -630,10 +685,21 @@ func (r *KubernetesReconciler) executionPod(
 	if len(configuration.Tolerations) > 0 {
 		podSpec["tolerations"] = configuration.Tolerations
 	}
-	if len(configuration.ImagePullSecrets) > 0 {
-		secrets := make([]any, 0, len(configuration.ImagePullSecrets))
+	if len(configuration.ImagePullSecrets) > 0 || credential != nil {
+		secrets := make([]any, 0, len(configuration.ImagePullSecrets)+1)
+		seen := make(map[string]struct{}, len(configuration.ImagePullSecrets)+1)
 		for _, name := range configuration.ImagePullSecrets {
+			if _, duplicate := seen[name]; duplicate {
+				continue
+			}
 			secrets = append(secrets, map[string]any{"name": name})
+			seen[name] = struct{}{}
+		}
+		if credential != nil {
+			name := kubernetesRegistrySecretName(target.ID)
+			if _, duplicate := seen[name]; !duplicate {
+				secrets = append(secrets, map[string]any{"name": name})
+			}
 		}
 		podSpec["imagePullSecrets"] = secrets
 	}
@@ -641,7 +707,7 @@ func (r *KubernetesReconciler) executionPod(
 		"apiVersion": "v1", "kind": "Pod",
 		"metadata": map[string]any{
 			"name": kubernetesPodName(execution), "namespace": configuration.Namespace, "labels": labels,
-			"annotations": map[string]any{"synara.io/config-sha256": configHash},
+			"annotations": map[string]any{kubernetesConfigAnnotation: configHash},
 		},
 		"spec": podSpec,
 	}, nil
@@ -662,6 +728,172 @@ func kubernetesTargetLabels(target persistence.ExecutionTarget) map[string]strin
 
 func kubernetesSecretName(targetID uuid.UUID) string {
 	return "synara-agentd-" + strings.ReplaceAll(targetID.String(), "-", "")[:12]
+}
+
+func kubernetesRegistrySecretName(targetID uuid.UUID) string {
+	return kubernetesSecretName(targetID) + "-registry"
+}
+
+func kubernetesRegistrySecret(
+	target persistence.ExecutionTarget,
+	namespace string,
+	labels map[string]string,
+	credential *ImagePullCredential,
+) (map[string]any, error) {
+	auths := map[string]any{}
+	if credential != nil {
+		if credential.RegistryToken != "" {
+			return nil, problem.New(
+				409,
+				"worker_image_pull_bearer_unsupported",
+				"Kubernetes Worker image pull Secrets require an OCI Registry basic Credential.",
+			)
+		}
+		authority, err := normalizeRegistryAuthority(credential.Host)
+		if err != nil {
+			return nil, problem.New(500, "worker_image_pull_credential_invalid", "Worker image pull Credential projection is invalid.")
+		}
+		auths[registryAuthServerAddress(authority)] = map[string]any{
+			"username": credential.Username,
+			"password": credential.Password,
+			"auth":     base64.StdEncoding.EncodeToString([]byte(credential.Username + ":" + credential.Password)),
+		}
+	}
+	config, err := json.Marshal(map[string]any{"auths": auths})
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{
+		"apiVersion": "v1", "kind": "Secret", "type": "kubernetes.io/dockerconfigjson",
+		"metadata": map[string]any{
+			"name": kubernetesRegistrySecretName(target.ID), "namespace": namespace, "labels": labels,
+		},
+		"data": map[string]any{".dockerconfigjson": base64.StdEncoding.EncodeToString(config)},
+	}, nil
+}
+
+func kubernetesFoundationApplyHash(baseHash string, credential *ImagePullCredential) (string, error) {
+	var identity any
+	if credential != nil {
+		identity = struct {
+			BindingID         uuid.UUID
+			CredentialID      uuid.UUID
+			CredentialVersion int
+			Host              string
+		}{credential.BindingID, credential.CredentialID, credential.CredentialVersion, credential.Host}
+	}
+	payload, err := json.Marshal(struct {
+		BaseHash   string
+		Credential any
+	}{baseHash, identity})
+	if err != nil {
+		return "", err
+	}
+	digest := sha256.Sum256(payload)
+	return hex.EncodeToString(digest[:]), nil
+}
+
+func kubernetesExecutionPodHash(baseHash, baseImage string, execution kubernetesExecution) (string, error) {
+	image, err := kubernetesExecutionImage(baseImage, execution)
+	if err != nil {
+		return "", err
+	}
+	payload, err := json.Marshal(struct {
+		BaseHash   string
+		Image      string
+		RevisionID *uuid.UUID
+		Channel    *string
+	}{baseHash, image, execution.WorkerReleaseRevisionID, execution.WorkerReleaseChannel})
+	if err != nil {
+		return "", err
+	}
+	digest := sha256.Sum256(payload)
+	return hex.EncodeToString(digest[:]), nil
+}
+
+func kubernetesExecutionImage(baseImage string, execution kubernetesExecution) (string, error) {
+	if execution.WorkerReleaseRevisionID == nil && execution.WorkerReleaseChannel == nil && execution.WorkerReleaseImageDigest == nil {
+		return baseImage, nil
+	}
+	if execution.WorkerReleaseRevisionID == nil || execution.WorkerReleaseChannel == nil ||
+		execution.WorkerReleaseImageDigest == nil ||
+		(*execution.WorkerReleaseChannel != "promoted" && *execution.WorkerReleaseChannel != "canary") {
+		return "", problem.New(409, "worker_release_execution_invalid", "Execution Worker release selection is invalid.")
+	}
+	return pinImageReference(baseImage, *execution.WorkerReleaseImageDigest)
+}
+
+func (r *KubernetesReconciler) resolveImagePullCredential(
+	ctx context.Context,
+	target persistence.ExecutionTarget,
+	image string,
+) (ImagePullCredentialResolution, error) {
+	if r.config.ResolveImagePull == nil {
+		return ImagePullCredentialResolution{Authoritative: true}, nil
+	}
+	if target.TenantID == nil {
+		return ImagePullCredentialResolution{Authoritative: true}, problem.New(409, "kubernetes_target_tenant_required", "Managed Kubernetes targets must belong to a Tenant.")
+	}
+	authority, err := registryAuthorityFromImageReference(image)
+	if err != nil {
+		return ImagePullCredentialResolution{Authoritative: true}, err
+	}
+	return r.config.ResolveImagePull(ctx, *target.TenantID, target.ID, registryComparisonAuthority(authority))
+}
+
+func validateKubernetesImagePullCredential(image string, credential *ImagePullCredential) error {
+	if err := validateImagePullCredential(image, credential); err != nil {
+		return err
+	}
+	if credential != nil && credential.RegistryToken != "" {
+		return problem.New(
+			409,
+			"worker_image_pull_bearer_unsupported",
+			"Kubernetes Worker image pull Secrets require an OCI Registry basic Credential.",
+		)
+	}
+	return nil
+}
+
+func (r *KubernetesReconciler) rejectImagePullCredential(
+	ctx context.Context,
+	client kubernetesClient,
+	target persistence.ExecutionTarget,
+	configuration kubernetesTargetConfiguration,
+	authoritative bool,
+	cause error,
+) error {
+	if authoritative {
+		clearHash := ""
+		if baseHash, err := r.foundationHash(target, configuration); err == nil {
+			clearHash, _ = kubernetesFoundationApplyHash(baseHash, nil)
+		}
+		state := r.foundation[target.ID]
+		shouldApply := clearHash == "" || state.hash != clearHash || r.now().Sub(state.appliedAt) >= 5*time.Minute
+		if shouldApply {
+			if err := r.applyFoundation(ctx, client, target, configuration, nil); err != nil {
+				r.setKubernetesStatus(ctx, target, "offline", false, false, 0, 0)
+				return problem.Wrap(
+					502,
+					"kubernetes_registry_secret_clear_failed",
+					"The invalid Kubernetes Worker Registry Secret could not be cleared.",
+					errors.Join(cause, err),
+				)
+			}
+			if clearHash != "" {
+				r.foundation[target.ID] = kubernetesFoundationState{hash: clearHash, appliedAt: r.now()}
+			}
+		}
+	}
+	r.setKubernetesStatus(ctx, target, "offline", false, false, 0, 0)
+	return cause
+}
+
+func stringValue(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
 }
 
 func kubernetesNamespacedPath(namespace, resource, name string) string {
@@ -776,9 +1008,10 @@ func (c *kubernetesHTTPClient) listPods(ctx context.Context, namespace, labelSel
 			} `json:"metadata"`
 			Items []struct {
 				Metadata struct {
-					Name   string            `json:"name"`
-					UID    string            `json:"uid"`
-					Labels map[string]string `json:"labels"`
+					Name        string            `json:"name"`
+					UID         string            `json:"uid"`
+					Labels      map[string]string `json:"labels"`
+					Annotations map[string]string `json:"annotations"`
 				} `json:"metadata"`
 				Status struct {
 					Phase string `json:"phase"`
@@ -801,7 +1034,10 @@ func (c *kubernetesHTTPClient) listPods(ctx context.Context, namespace, labelSel
 			return nil, err
 		}
 		for _, item := range response.Items {
-			items = append(items, kubernetesPod{Name: item.Metadata.Name, UID: item.Metadata.UID, Phase: item.Status.Phase, Labels: item.Metadata.Labels})
+			items = append(items, kubernetesPod{
+				Name: item.Metadata.Name, UID: item.Metadata.UID, Phase: item.Status.Phase,
+				Labels: item.Metadata.Labels, Annotations: item.Metadata.Annotations,
+			})
 		}
 		continueToken = strings.TrimSpace(response.Metadata.Continue)
 		if continueToken == "" {

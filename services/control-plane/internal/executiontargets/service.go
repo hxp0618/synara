@@ -202,7 +202,7 @@ func (s *Service) UpdateProviderPolicy(
 		}
 		reason := "Execution Target Provider Policy changed; re-register the Worker before claiming more executions."
 		if err := tx.WithContext(ctx).Model(&persistence.WorkerInstance{}).
-			Where("execution_target_id = ? AND current_manifest_id IS NOT NULL AND compatibility_status <> ? AND terminated_at IS NULL", targetID, "revoked").
+			Where("execution_target_id = ? AND current_manifest_id IS NOT NULL AND administrative_status <> ? AND terminated_at IS NULL", targetID, "revoked").
 			Updates(map[string]any{
 				"compatibility_status":     "incompatible",
 				"compatibility_reason":     reason,
@@ -243,12 +243,30 @@ func (s *Service) ResolveForSession(ctx context.Context, tenantID, organizationI
 }
 
 func (s *Service) ResolveWorkerTarget(ctx context.Context, targetID uuid.UUID, targetKind string) (persistence.ExecutionTarget, platform.ExecutionTargetKind, error) {
+	return resolveWorkerTarget(ctx, s.db, targetID, targetKind)
+}
+
+func (s *Service) ResolveWorkerTargetInTransaction(
+	ctx context.Context,
+	tx *gorm.DB,
+	targetID uuid.UUID,
+	targetKind string,
+) (persistence.ExecutionTarget, platform.ExecutionTargetKind, error) {
+	return resolveWorkerTarget(ctx, tx, targetID, targetKind)
+}
+
+func resolveWorkerTarget(
+	ctx context.Context,
+	db *gorm.DB,
+	targetID uuid.UUID,
+	targetKind string,
+) (persistence.ExecutionTarget, platform.ExecutionTargetKind, error) {
 	kind, err := platform.ParseExecutionTargetKind(targetKind)
 	if err != nil {
 		return persistence.ExecutionTarget{}, "", problem.New(400, "invalid_execution_target_kind", err.Error()+".")
 	}
 	var model persistence.ExecutionTarget
-	if err := s.db.WithContext(ctx).Where("id = ? AND status = ?", targetID, "active").Take(&model).Error; errors.Is(err, gorm.ErrRecordNotFound) {
+	if err := db.WithContext(ctx).Where("id = ? AND status = ?", targetID, "active").Take(&model).Error; errors.Is(err, gorm.ErrRecordNotFound) {
 		return persistence.ExecutionTarget{}, "", problem.New(404, "execution_target_not_found", "Execution target not found.")
 	} else if err != nil {
 		return persistence.ExecutionTarget{}, "", problem.Wrap(500, "execution_target_lookup_failed", "Failed to resolve the execution target.", err)

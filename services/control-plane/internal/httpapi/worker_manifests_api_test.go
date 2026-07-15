@@ -152,8 +152,10 @@ type workerManifestHTTPFixture struct {
 	cookieName       string
 	tenantID         uuid.UUID
 	targetID         uuid.UUID
+	workerID         uuid.UUID
 	manifestID       uuid.UUID
 	ownerToken       string
+	readOnlyToken    string
 	memberToken      string
 	crossTenantToken string
 	sensitiveValues  []string
@@ -210,6 +212,22 @@ func newWorkerManifestHTTPFixture(t *testing.T) workerManifestHTTPFixture {
 		t.Fatal(err)
 	}
 	memberToken := createWorkerManifestHTTPLogin(t, store.DB(), memberID, domain.TenantID)
+	securityAdminID := uuid.New()
+	if err := store.DB().Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(&persistence.User{
+			ID: securityAdminID, Email: uuid.NewString() + "@example.com", DisplayName: "Worker reader",
+			Status: "active", EmailVerifiedAt: &now, CreatedAt: now, UpdatedAt: now,
+		}).Error; err != nil {
+			return err
+		}
+		return tx.Create(&persistence.TenantMembership{
+			TenantID: domain.TenantID, UserID: securityAdminID, Role: "security_admin", Status: "active",
+			JoinedAt: &now, CreatedAt: now, UpdatedAt: now,
+		}).Error
+	}); err != nil {
+		t.Fatal(err)
+	}
+	readOnlyToken := createWorkerManifestHTTPLogin(t, store.DB(), securityAdminID, domain.TenantID)
 
 	otherTenantID := uuid.New()
 	if err := store.DB().Transaction(func(tx *gorm.DB) error {
@@ -253,8 +271,8 @@ func newWorkerManifestHTTPFixture(t *testing.T) workerManifestHTTPFixture {
 	}
 	return workerManifestHTTPFixture{
 		handler: server.Handler(), cookieName: cfg.CookieName, tenantID: domain.TenantID,
-		targetID: domain.ExecutionTargetID, manifestID: manifestID,
-		ownerToken: ownerToken, memberToken: memberToken, crossTenantToken: crossTenantToken,
+		targetID: domain.ExecutionTargetID, workerID: workerID, manifestID: manifestID,
+		ownerToken: ownerToken, readOnlyToken: readOnlyToken, memberToken: memberToken, crossTenantToken: crossTenantToken,
 		sensitiveValues: sensitive,
 	}
 }

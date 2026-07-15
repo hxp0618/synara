@@ -1,5 +1,9 @@
 # Credential v1 contract
 
+> Scope resolution, opt-in automatic selection, Platform policy, and scope-aware AAD v3 are defined by
+> `provider-credential-v2.md`. This document remains authoritative for legacy v1/v2 ciphertext and Git
+> delivery compatibility.
+
 ## Scope
 
 Provider and Git Credentials are Tenant-owned encrypted resources in one Vault. The persisted

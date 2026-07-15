@@ -368,6 +368,22 @@ func (m *WorkspaceMaterializer) cleanupWorkspaceLocked(
 		}
 	}
 
+	residueNames, err := inspectRequestedWorkspaceCleanupResidue(root, layout, request)
+	if err != nil {
+		return WorkspaceCleanupResult{}, err
+	}
+	residueDeleted, err := removeRequestedWorkspaceCleanupResidue(
+		ctx, root, layout, request, residueNames, m.persistWorkspaceCleanupDirectory,
+	)
+	if err != nil {
+		return WorkspaceCleanupResult{}, err
+	}
+	if err := verifyRequestedWorkspaceCleanupResidueAbsent(
+		root, layout, request,
+	); err != nil {
+		return WorkspaceCleanupResult{}, err
+	}
+
 	if !sourceExists && !payloadExists {
 		if err := persistRootRelativeAbsence(
 			root, layout.SourceRelative, m.persistWorkspaceCleanupDirectory,
@@ -389,7 +405,11 @@ func (m *WorkspaceMaterializer) cleanupWorkspaceLocked(
 				"workspace_cleanup_durability_failed", "The absent Workspace quarantine was not durably confirmed.", err,
 			)
 		}
-		return WorkspaceCleanupResult{Status: WorkspaceCleanupAlreadyAbsent}, nil
+		status := WorkspaceCleanupAlreadyAbsent
+		if residueDeleted {
+			status = WorkspaceCleanupDeleted
+		}
+		return WorkspaceCleanupResult{Status: status}, nil
 	}
 	if sourceExists && sourceMatch == workspaceCleanupManifestStaleIncarnation && !payloadExists {
 		if claimExists {
@@ -405,7 +425,11 @@ func (m *WorkspaceMaterializer) cleanupWorkspaceLocked(
 				"workspace_cleanup_durability_failed", "The old Workspace quarantine was not durably absent.", err,
 			)
 		}
-		return WorkspaceCleanupResult{Status: WorkspaceCleanupAlreadyAbsent}, nil
+		status := WorkspaceCleanupAlreadyAbsent
+		if residueDeleted {
+			status = WorkspaceCleanupDeleted
+		}
+		return WorkspaceCleanupResult{Status: status}, nil
 	}
 
 	if sourceExists && !payloadExists {
@@ -981,6 +1005,196 @@ func compareWorkspaceCleanupManifest(
 	return workspaceCleanupManifestMismatch
 }
 
+func inspectRequestedWorkspaceCleanupResidue(
+	root *os.Root,
+	layout workspaceCleanupLayout,
+	request WorkspaceCleanupRequest,
+) ([]string, error) {
+	parentRelative := filepath.Dir(layout.SourceRelative)
+	parentExists, err := inspectRootRelativeDirectory(root, parentRelative)
+	if err != nil {
+		return nil, permanentWorkspaceCleanupError(
+			"workspace_cleanup_unsafe_path", "The Workspace generation parent is unsafe.", err,
+		)
+	}
+	if !parentExists {
+		return nil, nil
+	}
+	parent, err := openVerifiedRootRelativeDirectory(root, parentRelative)
+	if err != nil {
+		return nil, permanentWorkspaceCleanupError(
+			"workspace_cleanup_unsafe_path", "The Workspace generation parent changed during cleanup.", err,
+		)
+	}
+	defer parent.Close()
+	entries, err := readRootDirectoryEntries(parent)
+	if err != nil {
+		return nil, retryableWorkspaceCleanupError(
+			"workspace_cleanup_retryable", "Workspace generation residue could not be inspected.", err,
+		)
+	}
+	base := filepath.Base(layout.SourceRelative)
+	stagingPrefix := "." + base + ".staging-"
+	backupPrefix := "." + base + ".backup-"
+	exact := make([]string, 0)
+	for _, entry := range entries {
+		name := entry.Name()
+		if !workspaceCleanupResidueNameMatches(name, stagingPrefix, backupPrefix) {
+			continue
+		}
+		info, statErr := parent.Lstat(name)
+		if statErr != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			return nil, permanentWorkspaceCleanupError(
+				"workspace_cleanup_unsafe_path", "Workspace generation residue is unsafe.", statErr,
+			)
+		}
+		if request.LayoutVersion == workspaceLayoutV3 {
+			// The v3 active basename is the immutable incarnation UUID, so every
+			// generation sibling with this prefix belongs to the cleanup request.
+			exact = append(exact, name)
+			continue
+		}
+		matches, matchErr := v2WorkspaceCleanupResidueMatchesRequest(parent, name, request)
+		if matchErr != nil {
+			return nil, matchErr
+		}
+		if matches {
+			exact = append(exact, name)
+		}
+	}
+	return exact, nil
+}
+
+func workspaceCleanupResidueNameMatches(name, stagingPrefix, backupPrefix string) bool {
+	return (strings.HasPrefix(name, stagingPrefix) && len(name) > len(stagingPrefix)) ||
+		(strings.HasPrefix(name, backupPrefix) && len(name) > len(backupPrefix))
+}
+
+func v2WorkspaceCleanupResidueMatchesRequest(
+	parent *os.Root,
+	name string,
+	request WorkspaceCleanupRequest,
+) (bool, error) {
+	generation, err := openVerifiedRootRelativeDirectory(parent, name)
+	if err != nil {
+		return false, permanentWorkspaceCleanupError(
+			"workspace_cleanup_unsafe_path", "Workspace generation residue changed during cleanup.", err,
+		)
+	}
+	manifest, manifestErr := readWorkspaceManifestAt(generation, "manifest.json")
+	closeErr := generation.Close()
+	if manifestErr != nil {
+		return false, permanentWorkspaceCleanupError(
+			"workspace_cleanup_identity_mismatch",
+			"A v2 Workspace generation residue has no verifiable materialization identity.",
+			manifestErr,
+		)
+	}
+	if closeErr != nil {
+		return false, retryableWorkspaceCleanupError(
+			"workspace_cleanup_retryable", "Workspace generation residue could not be closed after inspection.", closeErr,
+		)
+	}
+	if !workspaceCleanupV2ManifestSharesNamespace(manifest, request) {
+		return false, permanentWorkspaceCleanupError(
+			"workspace_cleanup_identity_mismatch",
+			"A v2 Workspace generation residue claims another logical Workspace.",
+			nil,
+		)
+	}
+	return manifest.MaterializationID == request.MaterializationID.String() &&
+		manifest.IncarnationID == request.IncarnationID.String(), nil
+}
+
+func workspaceCleanupV2ManifestSharesNamespace(
+	manifest workspaceGenerationManifest,
+	request WorkspaceCleanupRequest,
+) bool {
+	return manifest.Format == workspaceLayoutV3Format && manifest.LayoutVersion == workspaceLayoutV2 && manifest.Managed &&
+		manifest.ExecutionTargetID == request.ExecutionTargetID.String() &&
+		manifest.TenantID == request.TenantID.String() && manifest.ProjectID == request.ProjectID.String() &&
+		manifest.SessionID == request.SessionID.String() &&
+		manifest.LogicalWorkspaceID == request.LogicalWorkspaceID.String()
+}
+
+func removeRequestedWorkspaceCleanupResidue(
+	ctx context.Context,
+	root *os.Root,
+	layout workspaceCleanupLayout,
+	request WorkspaceCleanupRequest,
+	names []string,
+	persist workspaceCleanupDirectorySync,
+) (bool, error) {
+	if len(names) == 0 {
+		return false, nil
+	}
+	parentRelative := filepath.Dir(layout.SourceRelative)
+	parent, err := openVerifiedRootRelativeDirectory(root, parentRelative)
+	if err != nil {
+		return false, retryableWorkspaceCleanupError(
+			"workspace_cleanup_retryable", "Workspace generation residue changed before deletion.", err,
+		)
+	}
+	defer parent.Close()
+	deleted := false
+	for _, name := range names {
+		if err := ctx.Err(); err != nil {
+			return false, retryableWorkspaceCleanupError(
+				"workspace_cleanup_cancelled", "Workspace cleanup was cancelled during residue deletion.", err,
+			)
+		}
+		info, statErr := parent.Lstat(name)
+		if errors.Is(statErr, os.ErrNotExist) {
+			continue
+		}
+		if statErr != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			return false, permanentWorkspaceCleanupError(
+				"workspace_cleanup_unsafe_path", "Workspace generation residue became unsafe before deletion.", statErr,
+			)
+		}
+		if request.LayoutVersion == workspaceLayoutV2 {
+			matches, matchErr := v2WorkspaceCleanupResidueMatchesRequest(parent, name, request)
+			if matchErr != nil {
+				return false, matchErr
+			}
+			if !matches {
+				// A new incarnation may replace a v2 residue between inspection
+				// and removal. Preserve it; only exact identities are deletable.
+				continue
+			}
+		}
+		if err := removeRootRelativeTree(ctx, parent, name, persist); err != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return false, retryableWorkspaceCleanupError(
+					"workspace_cleanup_cancelled", "Workspace cleanup was cancelled during residue deletion.", err,
+				)
+			}
+			return false, retryableWorkspaceCleanupError(
+				"workspace_cleanup_retryable", "Workspace generation residue could not be fully deleted.", err,
+			)
+		}
+		deleted = true
+	}
+	return deleted, nil
+}
+
+func verifyRequestedWorkspaceCleanupResidueAbsent(
+	root *os.Root,
+	layout workspaceCleanupLayout,
+	request WorkspaceCleanupRequest,
+) error {
+	names, err := inspectRequestedWorkspaceCleanupResidue(root, layout, request)
+	if err != nil {
+		return err
+	}
+	if len(names) != 0 {
+		return retryableWorkspaceCleanupError(
+			"workspace_cleanup_retryable", "The requested Workspace generation residue still exists.", nil,
+		)
+	}
+	return nil
+}
+
 func adoptLegacyWorkspaceManifest(
 	manifest workspaceGenerationManifest,
 	request WorkspaceCleanupRequest,
@@ -1091,6 +1305,9 @@ func removeRootRelativeTreeEntry(
 		return err
 	}
 	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		if persistParent {
+			return errors.New("cleanup root entry is a symlink or non-directory")
+		}
 		current, currentErr := parent.Lstat(name)
 		if currentErr != nil || !os.SameFile(info, current) {
 			return errors.New("cleanup entry changed before removal")
@@ -1182,6 +1399,9 @@ func verifyRequestedWorkspaceAbsent(
 		return retryableWorkspaceCleanupError(
 			"workspace_cleanup_durability_failed", "The Workspace quarantine deletion was not durable.", err,
 		)
+	}
+	if err := verifyRequestedWorkspaceCleanupResidueAbsent(root, layout, request); err != nil {
+		return err
 	}
 	sourceExists, err := inspectRootRelativeDirectory(root, layout.SourceRelative)
 	if err != nil {

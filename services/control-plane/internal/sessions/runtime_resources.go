@@ -22,6 +22,16 @@ type sessionRuntimeResources struct {
 	RestoreCheckpointID *uuid.UUID
 }
 
+type RuntimeResources = sessionRuntimeResources
+
+func (s *Service) EnsureRuntimeResources(
+	ctx context.Context,
+	tx *gorm.DB,
+	session *persistence.AgentSession,
+) (RuntimeResources, error) {
+	return s.ensureRuntimeResources(ctx, tx, session)
+}
+
 const currentWorkspaceLayoutVersion = 3
 
 func (s *Service) ensureRuntimeResources(

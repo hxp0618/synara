@@ -43,6 +43,11 @@ from typing import Any, Protocol, TypeVar
 SCHEMA_VERSION = "synara.provider-acceptance.v1"
 FIXTURE_CREDENTIAL_SENTINEL = "stage3-provider-acceptance-credential-v1"
 FIXTURE_ARTIFACT_RELATIVE_PATH = ".synara-stage3-acceptance/artifact.txt"
+TERMINAL_LARGE_TOTAL_BYTES = 2 * (1 << 20) + 257
+TERMINAL_LARGE_CHUNK_BYTES = 63 << 10
+TERMINAL_LOG_PREVIEW_BYTES = 32 << 10
+TERMINAL_LOG_SEGMENT_BYTES = 1 << 20
+TERMINAL_LARGE_PATTERN = b"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ._-"
 DOCKER_VOLUME_SENTINEL_PATH = "/data/.synara-stage3-provider-acceptance-volume"
 DOCKER_VOLUME_SENTINEL_VALUE = "synara-stage3-named-volume-continuity-v1"
 SSH_REMOTE_FIXTURE_PATH = "/opt/synara/acceptance/provider-host-fixture.mjs"
@@ -62,6 +67,68 @@ JSON_REPORT_NAME = "acceptance-report.json"
 MARKDOWN_REPORT_NAME = "acceptance-report.md"
 PROVIDERS = ("codex", "claudeAgent", "cursor", "gemini", "grok", "kilo", "opencode", "pi")
 FIXTURE_SUPPORTED_PROVIDERS = frozenset({"codex", "claudeAgent"})
+FAILURE_CASES = (
+    "provider-malformed",
+    "provider-oversized",
+    "provider-crash",
+    "worker-network",
+    "kubernetes-drain",
+    "kubernetes-eviction",
+    "kubernetes-image-canary",
+)
+COMMON_PROVIDER_FAILURE_CASES = (
+    "provider-malformed",
+    "provider-oversized",
+    "provider-crash",
+)
+TARGET_FAILURE_CASES: Mapping[str, tuple[str, ...]] = {
+    "local": COMMON_PROVIDER_FAILURE_CASES,
+    "ssh": COMMON_PROVIDER_FAILURE_CASES,
+    "docker": (*COMMON_PROVIDER_FAILURE_CASES, "worker-network"),
+    "kubernetes": (
+        *COMMON_PROVIDER_FAILURE_CASES,
+        "worker-network",
+        "kubernetes-drain",
+        "kubernetes-eviction",
+        "kubernetes-image-canary",
+    ),
+}
+FAILURE_CASE_METADATA: Mapping[str, Mapping[str, str]] = {
+    "provider-malformed": {
+        "id": "failure.provider-host-malformed",
+        "name": "Classify malformed Provider Host JSONL and recover the Host",
+    },
+    "provider-oversized": {
+        "id": "failure.provider-host-oversized",
+        "name": "Classify oversized Provider Host JSONL and recover the Host",
+    },
+    "provider-crash": {
+        "id": "failure.provider-host-crash",
+        "name": "Classify a mid-Turn Provider Host crash and recover the Host",
+    },
+    "worker-network": {
+        "id": "failure.worker-network-interruption",
+        "name": "Interrupt Worker network transport and verify Generation-fenced recovery",
+    },
+    "kubernetes-drain": {
+        "id": "failure.kubernetes-node-drain",
+        "name": "Drain the exact Kubernetes execution Pod and verify safe recovery",
+    },
+    "kubernetes-eviction": {
+        "id": "failure.kubernetes-pod-eviction",
+        "name": "Evict the exact Kubernetes execution Pod and verify safe recovery",
+    },
+    "kubernetes-image-canary": {
+        "id": "canary.kubernetes-worker-image",
+        "name": "Run an isolated Kubernetes Worker image canary through the user API",
+    },
+}
+SECRET_SCAN_PATTERNS: tuple[tuple[str, re.Pattern[bytes]], ...] = (
+    ("private-key-pem", re.compile(br"-----BEGIN (?:OPENSSH |RSA |EC |DSA )?PRIVATE KEY-----")),
+    ("aws-access-key", re.compile(br"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b")),
+    ("github-token", re.compile(br"\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}\b")),
+    ("openai-style-key", re.compile(br"\bsk-[A-Za-z0-9_-]{20,}\b")),
+)
 
 T = TypeVar("T")
 
@@ -76,6 +143,73 @@ def elapsed_ms(started: float) -> int:
 
 def random_key() -> str:
     return base64.urlsafe_b64encode(os.urandom(32)).decode("ascii").rstrip("=")
+
+
+def terminal_large_bytes(byte_offset: int, byte_length: int) -> bytes:
+    if byte_offset < 0 or byte_length < 0:
+        raise ValueError("terminal fixture offsets and lengths must be non-negative")
+    if byte_length == 0:
+        return b""
+    pattern_offset = byte_offset % len(TERMINAL_LARGE_PATTERN)
+    repetitions = (pattern_offset + byte_length + len(TERMINAL_LARGE_PATTERN) - 1) // len(
+        TERMINAL_LARGE_PATTERN
+    )
+    return (TERMINAL_LARGE_PATTERN * repetitions)[pattern_offset : pattern_offset + byte_length]
+
+
+def terminal_large_expected_segments() -> list[dict[str, Any]]:
+    segments: list[dict[str, Any]] = []
+    byte_offset = 0
+    segment_index = 0
+    while byte_offset < TERMINAL_LARGE_TOTAL_BYTES:
+        byte_length = min(TERMINAL_LOG_SEGMENT_BYTES, TERMINAL_LARGE_TOTAL_BYTES - byte_offset)
+        payload = terminal_large_bytes(byte_offset, byte_length)
+        segments.append(
+            {
+                "offset": byte_offset,
+                "length": byte_length,
+                "segmentIndex": segment_index,
+                "encoding": "utf-8",
+                "sha256": hashlib.sha256(payload).hexdigest(),
+            }
+        )
+        byte_offset += byte_length
+        segment_index += 1
+    return segments
+
+
+def contains_runtime_physical_path(value: Any) -> bool:
+    if isinstance(value, Mapping):
+        for key, child in value.items():
+            normalized_key = str(key).replace("_", "").replace("-", "").casefold()
+            if normalized_key in {
+                "path",
+                "physicalpath",
+                "sourcepath",
+                "sourceroot",
+                "runtimeroot",
+                "runtimeoutputdirectory",
+                "runtimeoutputroot",
+                "persistedoutputpath",
+                "rawoutputpath",
+                "outputfile",
+                "workspacedirectory",
+            }:
+                return True
+            if contains_runtime_physical_path(child):
+                return True
+        return False
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return any(contains_runtime_physical_path(child) for child in value)
+    if not isinstance(value, str):
+        return False
+    normalized = value.strip()
+    return (
+        normalized.startswith(("/", "\\\\"))
+        or re.match(r"^[A-Za-z]:[\\\\/]", normalized) is not None
+        or "runtime-output" in normalized.casefold()
+        or ".synara-runtime" in normalized.casefold()
+    )
 
 
 def repository_metadata(repo_root: pathlib.Path) -> Mapping[str, Any]:
@@ -179,12 +313,20 @@ class SecretRedactor:
             return {str(key): self.value(item) for key, item in value.items()}
         return value
 
+    def secret_values(self) -> tuple[str, ...]:
+        with self._lock:
+            return tuple(secret for secret, _ in self._values if secret)
+
 
 class AcceptanceError(RuntimeError):
     def __init__(self, code: str, message: str, evidence: Mapping[str, Any] | None = None) -> None:
         super().__init__(message)
         self.code = code
         self.evidence = dict(evidence or {})
+
+
+class AcceptanceUnsupported(AcceptanceError):
+    """An explicit capability boundary, not an implicit pass."""
 
 
 class RunnerInterrupted(BaseException):
@@ -252,6 +394,11 @@ class RunnerOptions:
     kind_bin: str
     kind_cluster_name: str | None
     kind_node_image: str
+    failure_cases: tuple[str, ...]
+    network_outage_seconds: float
+    docker_allow_network_interruption: bool
+    kubernetes_allow_node_drain: bool
+    failure_only: bool
 
 
 @dataclasses.dataclass(frozen=True)
@@ -409,7 +556,7 @@ class TargetDriver(Protocol):
 
     def stop(self) -> None: ...
 
-    def cleanup(self) -> None: ...
+    def cleanup(self) -> Mapping[str, Any] | None: ...
 
 
 class _RedactingLogPump(threading.Thread):
@@ -477,6 +624,14 @@ class _WorkerOnlyProxy:
                 self._json_error(405, "method_not_allowed")
 
             def _forward(self) -> None:
+                if proxy._transport_interrupted.is_set():
+                    proxy._record_interrupted_request()
+                    try:
+                        self.connection.shutdown(socket.SHUT_RDWR)
+                    except OSError:
+                        pass
+                    self.connection.close()
+                    return
                 parsed = urllib.parse.urlsplit(self.path)
                 path = parsed.path
                 segments = path.split("/")
@@ -579,6 +734,9 @@ class _WorkerOnlyProxy:
         self.server.daemon_threads = True
         self.upstream_port = upstream_port
         self.port = int(self.server.server_address[1])
+        self._transport_interrupted = threading.Event()
+        self._interrupted_request_lock = threading.Lock()
+        self._interrupted_request_count = 0
         self.thread = threading.Thread(
             target=self.server.serve_forever,
             kwargs={"poll_interval": 0.1},
@@ -590,6 +748,7 @@ class _WorkerOnlyProxy:
         self.thread.start()
 
     def stop(self) -> None:
+        self.resume_transport()
         self.server.shutdown()
         self.server.server_close()
         self.thread.join(timeout=5.0)
@@ -599,6 +758,20 @@ class _WorkerOnlyProxy:
                 "Worker-only proxy did not stop within five seconds.",
             )
 
+    def interrupt_transport(self) -> None:
+        self._transport_interrupted.set()
+
+    def resume_transport(self) -> None:
+        self._transport_interrupted.clear()
+
+    def interrupted_request_count(self) -> int:
+        with self._interrupted_request_lock:
+            return self._interrupted_request_count
+
+    def _record_interrupted_request(self) -> None:
+        with self._interrupted_request_lock:
+            self._interrupted_request_count += 1
+
     def evidence(self, advertised_host: str) -> Mapping[str, Any]:
         return {
             "listenAddress": "0.0.0.0",
@@ -606,6 +779,7 @@ class _WorkerOnlyProxy:
             "port": self.port,
             "upstreamAddress": f"127.0.0.1:{self.upstream_port}",
             "allowedPathPrefixes": list(WORKER_PROXY_ALLOWED_PATH_PREFIXES),
+            "faultInjection": "runner-owned transport close before HTTP forwarding",
         }
 
 
@@ -642,6 +816,7 @@ class LocalDriver:
         self.process: subprocess.Popen[str] | None = None
         self.log_pump: _RedactingLogPump | None = None
         self.generation = 0
+        self.resource_owner = uuid.uuid4().hex[:20]
         self.installation_id = f"stage3-provider-acceptance-{uuid.uuid4()}"
         self.cookie_name = "synara_stage3_acceptance"
         self.cursor_key = random_key()
@@ -684,7 +859,11 @@ class LocalDriver:
                     "The configured Control Plane binary is not an executable file.",
                     {"path": str(self.binary_path)},
                 )
-            return {"build": "skipped", "binary": str(self.binary_path)}
+            return {
+                "build": "skipped",
+                "binary": str(self.binary_path),
+                "resourceOwner": self.resource_owner,
+            }
 
         self.binary_path.parent.mkdir(parents=True, exist_ok=True)
         command = ["go", "build", "-o", str(self.binary_path), "./cmd/api"]
@@ -718,6 +897,7 @@ class LocalDriver:
             "durationMs": elapsed_ms(started),
             "binary": str(self.binary_path),
             "log": str(build_log),
+            "resourceOwner": self.resource_owner,
         }
 
     def start(self) -> Mapping[str, Any]:
@@ -798,9 +978,28 @@ class LocalDriver:
         if pump is not None:
             pump.join(timeout=2.0)
 
-    def cleanup(self) -> None:
+    def cleanup(self) -> Mapping[str, Any]:
         self.stop()
         self._release_state()
+        return {
+            "target": self.name,
+            "resourceOwner": self.resource_owner,
+            "stateDirectory": str(self.state_dir),
+            "stateRemoved": self._temporary_state and not self.state_dir.exists(),
+            "statePreservedByRequest": not self._temporary_state,
+            "controlPlaneStopped": True,
+        }
+
+    def collect_failure_diagnostics(self, case_id: str) -> Mapping[str, Any]:
+        logs = sorted(self.logs_dir.glob("*.log"), key=lambda path: path.stat().st_mtime_ns)
+        selected = logs[-3:]
+        return {
+            "caseId": case_id,
+            "controlPlaneGeneration": self.generation,
+            "controlPlaneRunning": self.process is not None and self.process.poll() is None,
+            "logFiles": [str(path) for path in selected],
+            "retention": "redacted logs only; no SQLite, Credential payload, or runtime Workspace dump",
+        }
 
     def _release_state(self) -> None:
         self.cursor_key = ""
@@ -978,6 +1177,48 @@ class ManagedWorkerDriver(LocalDriver):
         self.worker_proxy = None
         if proxy is not None:
             proxy.stop()
+
+    def inject_failure(
+        self,
+        fault: str,
+        _target_id: str,
+        _execution_id: str,
+    ) -> Mapping[str, Any]:
+        if fault != "worker-network":
+            raise AcceptanceUnsupported(
+                "runner.failure_case_unsupported",
+                f"The {self.name} Target does not implement failure injection {fault}.",
+                {"target": self.name, "failureCase": fault},
+            )
+        proxy = self.worker_proxy
+        if proxy is None or not proxy.thread.is_alive():
+            raise AcceptanceError(
+                "runner.worker_proxy_unavailable",
+                "The Worker-only proxy was unavailable for network fault injection.",
+            )
+        before = proxy.interrupted_request_count()
+        proxy.interrupt_transport()
+        started = time.monotonic()
+        try:
+            self.deadline.sleep(self.options.network_outage_seconds)
+        finally:
+            proxy.resume_transport()
+        return {
+            "fault": fault,
+            "transport": "runner-owned Worker-only proxy",
+            "durationMs": elapsed_ms(started),
+            "droppedRequests": proxy.interrupted_request_count() - before,
+            "controlPlaneUserApiInterrupted": False,
+        }
+
+    def validate_failure(self, fault: str) -> None:
+        if fault == "worker-network":
+            return
+        raise AcceptanceUnsupported(
+            "runner.failure_case_unsupported",
+            f"The {self.name} Target does not implement failure injection {fault}.",
+            {"target": self.name, "failureCase": fault},
+        )
 
     def _head_sha(self) -> str:
         completed = subprocess.run(
@@ -1212,6 +1453,8 @@ class ManagedWorkerDriver(LocalDriver):
                     "--label",
                     "synara.io/stage3-provider-acceptance=true",
                     "--label",
+                    f"synara.io/stage3-provider-acceptance-owner={self.resource_owner}",
+                    "--label",
                     f"org.opencontainers.image.revision={git_sha}",
                     "--allow-dirty",
                     "--load",
@@ -1231,7 +1474,7 @@ class ManagedWorkerDriver(LocalDriver):
                 "--entrypoint",
                 "sh",
                 image,
-                "-lc",
+                "-c",
                 "test -x /usr/local/bin/synara-agentd && "
                 "test -x /usr/local/bin/provider-host && "
                 "test -r /opt/synara/acceptance/provider-host-fixture.mjs && "
@@ -1333,16 +1576,32 @@ class DockerDriver(ManagedWorkerDriver):
                     "create",
                     "--label",
                     "synara.io/stage3-provider-acceptance=true",
+                    "--label",
+                    f"synara.io/stage3-provider-acceptance-owner={self.resource_owner}",
                     self.network_name,
                 ],
                 log_path=self.logs_dir / "docker-network-create.log",
             )
         else:
             self._docker_command(["network", "inspect", self.network_name])
+        self._docker_command(
+            [
+                "volume",
+                "create",
+                "--label",
+                "synara.io/stage3-provider-acceptance=true",
+                "--label",
+                f"synara.io/stage3-provider-acceptance-owner={self.resource_owner}",
+                self.volume_name,
+            ],
+            log_path=self.logs_dir / "docker-volume-create.log",
+        )
         return {
             "controlPlane": control_plane,
             "docker": {
                 "networkMode": self.network_name,
+                "workspaceVolume": self.volume_name,
+                "resourceOwner": self.resource_owner,
                 **image_evidence,
             },
         }
@@ -1458,7 +1717,91 @@ class DockerDriver(ManagedWorkerDriver):
             "resources": resources,
         }
 
-    def cleanup(self) -> None:
+    def inject_failure(
+        self,
+        fault: str,
+        target_id: str,
+        _execution_id: str,
+    ) -> Mapping[str, Any]:
+        if fault != "worker-network":
+            return super().inject_failure(fault, target_id, _execution_id)
+        if not self.owns_network and not self.options.docker_allow_network_interruption:
+            raise AcceptanceUnsupported(
+                "runner.docker_network_fault_not_authorized",
+                "Docker network interruption is disabled for an operator-owned network.",
+                {
+                    "network": self.network_name,
+                    "requiredInputs": ["--docker-allow-network-interruption"],
+                },
+            )
+        snapshot = self._wait_container(target_id)
+        container_id = str(snapshot.get("Id") or "")
+        if not container_id:
+            raise AcceptanceError(
+                "runner.docker_container_id_missing",
+                "The managed Docker Worker omitted its container ID before network interruption.",
+            )
+        before_worker = self._worker_identity(target_id)
+        started = time.monotonic()
+        disconnected = False
+        try:
+            self._docker_command(["network", "disconnect", self.network_name, container_id])
+            disconnected = True
+            self.deadline.sleep(self.options.network_outage_seconds)
+        finally:
+            if disconnected:
+                completed = self._docker_completed(
+                    ["network", "connect", self.network_name, container_id],
+                    cleanup_timeout=15.0,
+                )
+                output = self.redactor.text(completed.stdout)
+                if completed.returncode != 0 and "no such container" not in output.lower():
+                    raise AcceptanceError(
+                        "runner.docker_network_restore_failed",
+                        "The managed Docker Worker network could not be restored.",
+                        {"outputExcerpt": output[-1000:]},
+                    )
+        return {
+            "fault": fault,
+            "network": self.network_name,
+            "networkOwnedByRunner": self.owns_network,
+            "containerId": container_id[:12],
+            "workerId": before_worker.get("id") if before_worker else None,
+            "durationMs": elapsed_ms(started),
+            "restored": True,
+        }
+
+    def validate_failure(self, fault: str) -> None:
+        if fault != "worker-network":
+            return super().validate_failure(fault)
+        if not self.owns_network and not self.options.docker_allow_network_interruption:
+            raise AcceptanceUnsupported(
+                "runner.docker_network_fault_not_authorized",
+                "Docker network interruption is disabled for an operator-owned network.",
+                {
+                    "network": self.network_name,
+                    "requiredInputs": ["--docker-allow-network-interruption"],
+                },
+            )
+
+    def collect_failure_diagnostics(self, case_id: str) -> Mapping[str, Any]:
+        evidence = dict(super().collect_failure_diagnostics(case_id))
+        if self.target_id:
+            completed = self._docker_completed(
+                [
+                    "ps",
+                    "-a",
+                    "--filter",
+                    f"label=synara.io/execution-target-id={self.target_id}",
+                    "--format",
+                    "{{.ID}} {{.Status}} {{.Names}}",
+                ],
+                cleanup_timeout=5.0,
+            )
+            evidence["managedContainers"] = self.redactor.text(completed.stdout).splitlines()[:5]
+        return evidence
+
+    def cleanup(self) -> Mapping[str, Any]:
         errors: list[str] = []
 
         def collect_failure(operation: str, action: Callable[[], Any]) -> Any:
@@ -1528,19 +1871,29 @@ class DockerDriver(ManagedWorkerDriver):
         collect_failure("stop Control Plane", self.stop)
         remove_managed_workers_until_quiet()
         if not self.options.keep:
-            docker_cleanup(
-                "remove named Workspace volume",
-                ["volume", "rm", "-f", self.volume_name],
-                20.0,
-                ("no such volume",),
+            volume_owned = collect_failure(
+                "verify named Workspace volume ownership",
+                lambda: self._assert_docker_resource_owner("volume", self.volume_name),
             )
-            if self.owns_network:
+            if volume_owned is True:
                 docker_cleanup(
-                    "remove acceptance network",
-                    ["network", "rm", self.network_name],
+                    "remove named Workspace volume",
+                    ["volume", "rm", "-f", self.volume_name],
                     20.0,
-                    ("not found",),
+                    ("no such volume",),
                 )
+            if self.owns_network:
+                network_owned = collect_failure(
+                    "verify acceptance network ownership",
+                    lambda: self._assert_docker_resource_owner("network", self.network_name),
+                )
+                if network_owned is True:
+                    docker_cleanup(
+                        "remove acceptance network",
+                        ["network", "rm", self.network_name],
+                        20.0,
+                        ("not found",),
+                    )
             if self.owns_image:
                 docker_cleanup(
                     "remove acceptance image",
@@ -1557,6 +1910,52 @@ class DockerDriver(ManagedWorkerDriver):
                 "Docker acceptance resources could not be cleaned completely.",
                 {"errors": [self.redactor.text(value) for value in errors if value]},
             )
+        return {
+            "target": self.name,
+            "resourceOwner": self.resource_owner,
+            "managedWorkerContainersRemoved": True,
+            "workspaceVolume": self.volume_name,
+            "workspaceVolumeRemoved": not self.options.keep,
+            "network": self.network_name,
+            "networkOwnedByRunner": self.owns_network,
+            "ownedNetworkRemoved": self.owns_network and not self.options.keep,
+            "workerImage": self.image,
+            "ownedImageRemoved": self.owns_image and not self.options.keep,
+            "stateRemoved": self._temporary_state,
+            "broadCleanupUsed": False,
+        }
+
+    def _assert_docker_resource_owner(self, resource: str, name: str) -> bool:
+        completed = self._docker_completed(
+            [
+                resource,
+                "inspect",
+                "--format",
+                "{{ index .Labels \"synara.io/stage3-provider-acceptance-owner\" }}",
+                name,
+            ],
+            cleanup_timeout=5.0,
+        )
+        output = self.redactor.text(completed.stdout).strip()
+        if completed.returncode != 0:
+            if (
+                "no such" in output.lower()
+                or "not found" in output.lower()
+                or "notfound" in output.lower()
+            ):
+                return True
+            raise AcceptanceError(
+                "runner.docker_ownership_check_failed",
+                f"Docker {resource} ownership could not be verified.",
+                {"resource": resource, "name": name, "outputExcerpt": output[-500:]},
+            )
+        if output != self.resource_owner:
+            raise AcceptanceError(
+                "runner.docker_resource_not_owned",
+                f"Refusing to delete a Docker {resource} without the acceptance ownership label.",
+                {"resource": resource, "name": name},
+            )
+        return True
 
     def _control_plane_environment(self) -> dict[str, str]:
         environment = super()._control_plane_environment()
@@ -1949,7 +2348,7 @@ class SSHDriver(ManagedWorkerDriver):
             },
         }
 
-    def cleanup(self) -> None:
+    def cleanup(self) -> Mapping[str, Any]:
         errors: list[str] = []
 
         def collect(operation: str, action: Callable[[], Any]) -> Any:
@@ -2024,6 +2423,17 @@ class SSHDriver(ManagedWorkerDriver):
                 "SSH acceptance resources could not be cleaned completely.",
                 {"errors": errors},
             )
+        return {
+            "target": self.name,
+            "resourceOwner": self.resource_owner,
+            "machineName": self.machine_name,
+            "machineRemoved": not self.options.keep and not self.machine_created,
+            "machinePreservedByRequest": self.options.keep,
+            "productRevokeRequested": bool(self.target_id and self.tenant_id),
+            "machineLifecycleCompleted": self.options.keep or not self.machine_created,
+            "localKeyMaterialRemoved": not self.credentials_dir.exists(),
+            "broadCleanupUsed": False,
+        }
 
     def _control_plane_environment(self) -> dict[str, str]:
         environment = super()._control_plane_environment()
@@ -2803,11 +3213,17 @@ class KubernetesDriver(ManagedWorkerDriver):
         suffix = uuid.uuid4().hex[:12]
         self.target_name = f"stage3-kubernetes-{suffix}"
         self.target_namespace = f"synara-stage3-worker-{suffix}"
+        self.canary_target_name = f"stage3-kubernetes-canary-{suffix}"
+        self.canary_namespace = f"synara-stage3-canary-{suffix}"
         self.bootstrap_namespace = f"synara-stage3-control-{suffix}"
         self.bootstrap_service_account = "synara-control-plane"
         self.bootstrap_role = f"synara-stage3-{suffix}"
         self.worker_service_account = f"synara-worker-{suffix}"
+        self.canary_service_account = f"synara-canary-{suffix}"
         self.target_id: str | None = None
+        self.canary_target_id: str | None = None
+        self.target_runtimes: dict[str, dict[str, str]] = {}
+        self.owned_namespaces = {self.bootstrap_namespace, self.target_namespace, self.canary_namespace}
         self.owns_cluster = options.kubernetes_context is None
         self.cluster_created = False
         self.cluster_name = options.kind_cluster_name or f"synara-stage3-{suffix}"
@@ -2822,9 +3238,12 @@ class KubernetesDriver(ManagedWorkerDriver):
             else None
         )
         self.owns_image = not options.kubernetes_skip_worker_build
+        head_sha = self._head_sha()
         self.image = options.kubernetes_worker_image or (
-            f"synara-stage3-provider-acceptance:{self._head_sha()}-kubernetes-{suffix}"
+            f"synara-stage3-provider-acceptance:{head_sha}-kubernetes-{suffix}"
         )
+        self.canary_image = f"synara-stage3-provider-canary:{head_sha[:16]}-{suffix}"
+        self.canary_image_prepared = False
         self.api_server = ""
         self.ca_certificate = ""
         self.kubernetes_token = ""
@@ -2860,8 +3279,48 @@ class KubernetesDriver(ManagedWorkerDriver):
             "kubernetes": {
                 **cluster_evidence,
                 **access_evidence,
+                "resourceOwner": self.resource_owner,
                 "containerEngine": image_evidence,
             },
+        }
+
+    def _prepare_canary_image(self) -> Mapping[str, Any]:
+        if self.canary_image_prepared:
+            return {"image": self.canary_image, "prepared": True}
+        if not self.context.startswith("kind-"):
+            raise AcceptanceUnsupported(
+                "runner.kubernetes_canary_registry_required",
+                "A non-Kind canary requires a caller-published immutable image; the fixture only creates local aliases.",
+                {
+                    "context": self.context,
+                    "requiredInputs": ["published immutable canary image and product release revision"],
+                },
+            )
+        self._docker_command(
+            ["image", "tag", self.image, self.canary_image],
+            log_path=self.logs_dir / "kubernetes-canary-tag.log",
+        )
+        self._kind_command(
+            [
+                "load",
+                "docker-image",
+                "--name",
+                self.context.removeprefix("kind-"),
+                self.canary_image,
+            ],
+            log_path=self.logs_dir / "kubernetes-kind-load-canary-image.log",
+            maximum_timeout=max(60.0, self.deadline.remaining()),
+        )
+        self.canary_image_prepared = True
+        image_id = self._docker_command(
+            ["image", "inspect", "--format", "{{.Id}}", self.canary_image]
+        ).strip()
+        return {
+            "image": self.canary_image,
+            "sourceImage": self.image,
+            "imageId": image_id,
+            "prepared": True,
+            "ownership": "runner-owned alias; source image is never deleted unless it was built by this run",
         }
 
     def provision_target(
@@ -2870,27 +3329,117 @@ class KubernetesDriver(ManagedWorkerDriver):
         organization_id: str,
         provider: str,
     ) -> Mapping[str, Any]:
+        target = self._create_kubernetes_target(
+            tenant_id,
+            organization_id,
+            provider,
+            name=self.target_name,
+            namespace=self.target_namespace,
+            service_account=self.worker_service_account,
+            image=self.image,
+        )
+        target_id = target.get("id")
+        if not isinstance(target_id, str) or not target_id:
+            raise AcceptanceError(
+                "runner.kubernetes_target_id_missing",
+                "Kubernetes Target creation did not return an ID.",
+            )
+        self.target_id = target_id
+        self._remember_target_runtime(
+            target_id,
+            namespace=self.target_namespace,
+            service_account=self.worker_service_account,
+            image=self.image,
+        )
+        self._wait_and_label_namespace(self.target_namespace)
+        return {
+            **target,
+            "driverEvidence": {
+                "context": self.context,
+                "namespace": self.target_namespace,
+                "workerAllocation": self.lifecycle.worker_allocation,
+                "image": self.image,
+                "imagePullPolicy": "Never" if self.context.startswith("kind-") else "IfNotPresent",
+                "networkPolicyImplementation": "cluster-dependent",
+                "resourceOwner": self.resource_owner,
+            },
+        }
+
+    def provision_canary_target(
+        self,
+        tenant_id: str,
+        organization_id: str,
+        provider: str,
+    ) -> Mapping[str, Any]:
+        image_evidence = self._prepare_canary_image()
+        target = self._create_kubernetes_target(
+            tenant_id,
+            organization_id,
+            provider,
+            name=self.canary_target_name,
+            namespace=self.canary_namespace,
+            service_account=self.canary_service_account,
+            image=self.canary_image,
+        )
+        target_id = target.get("id")
+        if not isinstance(target_id, str) or not target_id:
+            raise AcceptanceError(
+                "runner.kubernetes_canary_target_id_missing",
+                "Kubernetes canary Target creation did not return an ID.",
+            )
+        self.canary_target_id = target_id
+        self._remember_target_runtime(
+            target_id,
+            namespace=self.canary_namespace,
+            service_account=self.canary_service_account,
+            image=self.canary_image,
+        )
+        self._wait_and_label_namespace(self.canary_namespace)
+        return {
+            **target,
+            "driverEvidence": {
+                "context": self.context,
+                "namespace": self.canary_namespace,
+                "image": self.canary_image,
+                "sourceImage": self.image,
+                "imagePullPolicy": "Never" if self.context.startswith("kind-") else "IfNotPresent",
+                "resourceOwner": self.resource_owner,
+                "imagePreparation": image_evidence,
+            },
+        }
+
+    def _create_kubernetes_target(
+        self,
+        tenant_id: str,
+        organization_id: str,
+        provider: str,
+        *,
+        name: str,
+        namespace: str,
+        service_account: str,
+        image: str,
+    ) -> dict[str, Any]:
         if not self.api_server or not self.ca_certificate or not self.kubernetes_token:
             raise AcceptanceError(
                 "runner.kubernetes_access_unavailable",
                 "Kubernetes API access was unavailable while provisioning the Target.",
             )
-        target = json_object(
+        return json_object(
             self.api.request(
                 "POST",
                 f"/v1/tenants/{tenant_id}/execution-targets",
                 {
                     "organizationId": organization_id,
                     "kind": "kubernetes",
-                    "name": self.target_name,
+                    "name": name,
                     "configuration": {
                         "apiServer": self.api_server,
                         "bearerToken": self.kubernetes_token,
                         "caCertificate": self.ca_certificate,
-                        "namespace": self.target_namespace,
+                        "namespace": namespace,
                         "manageNamespace": True,
-                        "serviceAccountName": self.worker_service_account,
-                        "image": self.image,
+                        "serviceAccountName": service_account,
+                        "image": image,
                         "imagePullPolicy": "Never" if self.context.startswith("kind-") else "IfNotPresent",
                         "controlPlaneUrl": self._worker_proxy_url(),
                         "allowInsecureControlPlane": True,
@@ -2919,23 +3468,29 @@ class KubernetesDriver(ManagedWorkerDriver):
             ),
             "kubernetes execution target",
         )
-        target_id = target.get("id")
-        if not isinstance(target_id, str) or not target_id:
-            raise AcceptanceError(
-                "runner.kubernetes_target_id_missing",
-                "Kubernetes Target creation did not return an ID.",
-            )
-        self.target_id = target_id
+
+    def _remember_target_runtime(
+        self,
+        target_id: str,
+        *,
+        namespace: str,
+        service_account: str,
+        image: str,
+    ) -> None:
+        self.target_runtimes[target_id] = {
+            "namespace": namespace,
+            "serviceAccount": service_account,
+            "image": image,
+        }
+
+    def _target_runtime(self, target_id: str) -> Mapping[str, str]:
+        runtime = self.target_runtimes.get(target_id)
+        if runtime is not None:
+            return runtime
         return {
-            **target,
-            "driverEvidence": {
-                "context": self.context,
-                "namespace": self.target_namespace,
-                "workerAllocation": self.lifecycle.worker_allocation,
-                "image": self.image,
-                "imagePullPolicy": "Never" if self.context.startswith("kind-") else "IfNotPresent",
-                "networkPolicyImplementation": "cluster-dependent",
-            },
+            "namespace": self.target_namespace,
+            "serviceAccount": self.worker_service_account,
+            "image": self.image,
         }
 
     def replace_worker(
@@ -2950,6 +3505,8 @@ class KubernetesDriver(ManagedWorkerDriver):
         )
 
     def recover_pending_interaction(self, target_id: str, execution_id: str) -> Mapping[str, Any]:
+        runtime = self._target_runtime(target_id)
+        namespace = runtime["namespace"]
         pod = self._wait_execution_pod(target_id, execution_id)
         metadata = json_object(pod.get("metadata"), "Kubernetes Pod metadata")
         status = json_object(pod.get("status"), "Kubernetes Pod status")
@@ -2965,7 +3522,7 @@ class KubernetesDriver(ManagedWorkerDriver):
         self._kubectl_command(
             [
                 "-n",
-                self.target_namespace,
+                namespace,
                 "delete",
                 "pod",
                 name,
@@ -2983,7 +3540,136 @@ class KubernetesDriver(ManagedWorkerDriver):
             "deletedPodGeneration": labels.get("synara.io/generation"),
         }
 
+    def inject_failure(
+        self,
+        fault: str,
+        target_id: str,
+        execution_id: str,
+    ) -> Mapping[str, Any]:
+        if fault == "worker-network":
+            return super().inject_failure(fault, target_id, execution_id)
+        if fault not in {"kubernetes-drain", "kubernetes-eviction"}:
+            raise AcceptanceUnsupported(
+                "runner.failure_case_unsupported",
+                f"The Kubernetes Target does not implement failure injection {fault}.",
+                {"target": self.name, "failureCase": fault},
+            )
+        runtime = self._target_runtime(target_id)
+        namespace = runtime["namespace"]
+        pod = self._wait_execution_pod(target_id, execution_id)
+        metadata = json_object(pod.get("metadata"), "Kubernetes Pod metadata")
+        spec = json_object(pod.get("spec"), "Kubernetes Pod spec")
+        labels = json_object(metadata.get("labels"), "Kubernetes Pod labels")
+        name = metadata.get("name")
+        uid = metadata.get("uid")
+        if not isinstance(name, str) or not name or not isinstance(uid, str) or not uid:
+            raise AcceptanceError(
+                "runner.kubernetes_pod_contract_mismatch",
+                "The fault target Pod omitted its stable name or UID.",
+                {"metadata": metadata},
+            )
+        if fault == "kubernetes-eviction":
+            eviction = {
+                "apiVersion": "policy/v1",
+                "kind": "Eviction",
+                "metadata": {"name": name, "namespace": namespace},
+                "deleteOptions": {
+                    "gracePeriodSeconds": 0,
+                    "preconditions": {"uid": uid},
+                },
+            }
+            path = (
+                f"/api/v1/namespaces/{urllib.parse.quote(namespace, safe='')}/pods/"
+                f"{urllib.parse.quote(name, safe='')}/eviction"
+            )
+            self._kubectl_command(
+                ["create", "--raw", path, "-f", "-"],
+                input_text=json.dumps(eviction, separators=(",", ":")),
+                cleanup_timeout=20.0,
+            )
+            return {
+                "fault": fault,
+                "evictionApiVersion": "policy/v1",
+                "deletedPodName": name,
+                "deletedPodUid": uid,
+                "deletedPodGeneration": labels.get("synara.io/generation"),
+                "namespace": namespace,
+                "uidPrecondition": True,
+            }
+
+        if not self.owns_cluster and not self.options.kubernetes_allow_node_drain:
+            raise AcceptanceUnsupported(
+                "runner.kubernetes_node_drain_not_authorized",
+                "Node drain is disabled for an operator-owned Kubernetes context.",
+                {
+                    "context": self.context,
+                    "requiredInputs": ["--kubernetes-allow-node-drain"],
+                },
+            )
+        node_name = spec.get("nodeName")
+        if not isinstance(node_name, str) or not node_name:
+            raise AcceptanceError(
+                "runner.kubernetes_node_name_missing",
+                "The execution Pod was not assigned to a Kubernetes Node.",
+                {"podName": name},
+            )
+        selector = (
+            f"synara.io/execution-target-id={target_id},"
+            f"synara.io/execution-id={execution_id}"
+        )
+        self._kubectl_command(["cordon", node_name], cleanup_timeout=15.0)
+        started = time.monotonic()
+        try:
+            self._kubectl_command(
+                [
+                    "drain",
+                    node_name,
+                    f"--pod-selector={selector}",
+                    "--ignore-daemonsets",
+                    "--delete-emptydir-data",
+                    "--force",
+                    "--disable-eviction",
+                    "--grace-period=20",
+                    "--timeout=45s",
+                ],
+                cleanup_timeout=55.0,
+            )
+        finally:
+            self._kubectl_command(["uncordon", node_name], cleanup_timeout=15.0)
+        return {
+            "fault": fault,
+            "node": node_name,
+            "selector": selector,
+            "deletedPodName": name,
+            "deletedPodUid": uid,
+            "deletedPodGeneration": labels.get("synara.io/generation"),
+            "namespace": namespace,
+            "durationMs": elapsed_ms(started),
+            "uncordoned": True,
+            "deleteMechanism": "kubectl drain with graceful Pod DELETE, not Eviction subresource",
+        }
+
+    def validate_failure(self, fault: str) -> None:
+        if fault == "worker-network" or fault == "kubernetes-eviction":
+            return
+        if fault == "kubernetes-drain":
+            if not self.owns_cluster and not self.options.kubernetes_allow_node_drain:
+                raise AcceptanceUnsupported(
+                    "runner.kubernetes_node_drain_not_authorized",
+                    "Node drain is disabled for an operator-owned Kubernetes context.",
+                    {
+                        "context": self.context,
+                        "requiredInputs": ["--kubernetes-allow-node-drain"],
+                    },
+                )
+            return
+        return super().validate_failure(fault)
+
     def observe_execution(self, target_id: str, execution_id: str) -> Mapping[str, Any]:
+        runtime = self._target_runtime(target_id)
+        expected_namespace = runtime["namespace"]
+        expected_service_account = runtime["serviceAccount"]
+        expected_image = runtime["image"]
         pod = self._wait_execution_pod(target_id, execution_id)
         metadata = json_object(pod.get("metadata"), "Kubernetes Pod metadata")
         spec = json_object(pod.get("spec"), "Kubernetes Pod spec")
@@ -3031,7 +3717,7 @@ class KubernetesDriver(ManagedWorkerDriver):
             actual_labels != expected_labels
             or labels.get("synara.io/generation") in (None, "")
             or container.get("name") != "agentd"
-            or container.get("image") != self.image
+            or container.get("image") != expected_image
             or container.get("imagePullPolicy") not in {"Never", "IfNotPresent"}
             or assigned_execution != execution_id
             or secret_ref.get("key") != "registration-token"
@@ -3041,7 +3727,7 @@ class KubernetesDriver(ManagedWorkerDriver):
             or pod_security.get("fsGroup") != 10001
             or spec.get("automountServiceAccountToken") is not False
             or spec.get("restartPolicy") != "Never"
-            or spec.get("serviceAccountName") != self.worker_service_account
+            or spec.get("serviceAccountName") != expected_service_account
         ):
             raise AcceptanceError(
                 "runner.kubernetes_pod_contract_mismatch",
@@ -3064,7 +3750,12 @@ class KubernetesDriver(ManagedWorkerDriver):
                 "The execution-pinned Pod did not use the expected ephemeral volumes.",
                 {"volumes": volume_names},
             )
-        foundation = self._foundation_evidence(target_id, secret_ref.get("name"))
+        foundation = self._foundation_evidence(
+            target_id,
+            secret_ref.get("name"),
+            namespace=expected_namespace,
+            service_account=expected_service_account,
+        )
         return {
             "podName": metadata.get("name"),
             "podUid": metadata.get("uid"),
@@ -3084,7 +3775,47 @@ class KubernetesDriver(ManagedWorkerDriver):
                 return {"podDeleted": True, "executionId": execution_id}
             self.deadline.sleep(0.2)
 
-    def cleanup(self) -> None:
+    def collect_failure_diagnostics(self, case_id: str) -> Mapping[str, Any]:
+        evidence = dict(super().collect_failure_diagnostics(case_id))
+        pod_summaries: list[dict[str, Any]] = []
+        for namespace in sorted({runtime["namespace"] for runtime in self.target_runtimes.values()}):
+            completed = self._kubectl_completed(
+                [
+                    "-n",
+                    namespace,
+                    "get",
+                    "pods",
+                    "-o",
+                    "json",
+                ],
+                cleanup_timeout=8.0,
+            )
+            if completed.returncode != 0:
+                continue
+            try:
+                items = json.loads(completed.stdout).get("items", [])
+            except (AttributeError, json.JSONDecodeError):
+                continue
+            for pod in items[:5] if isinstance(items, list) else []:
+                if not isinstance(pod, dict):
+                    continue
+                metadata = pod.get("metadata") if isinstance(pod.get("metadata"), dict) else {}
+                status = pod.get("status") if isinstance(pod.get("status"), dict) else {}
+                pod_summaries.append(
+                    {
+                        "namespace": namespace,
+                        "name": metadata.get("name"),
+                        "uid": metadata.get("uid"),
+                        "deletionTimestamp": metadata.get("deletionTimestamp"),
+                        "phase": status.get("phase"),
+                        "reason": status.get("reason"),
+                    }
+                )
+        evidence["pods"] = pod_summaries
+        evidence["context"] = self.context
+        return evidence
+
+    def cleanup(self) -> Mapping[str, Any]:
         errors: list[str] = []
 
         def collect(operation: str, action: Callable[[], Any]) -> None:
@@ -3095,17 +3826,17 @@ class KubernetesDriver(ManagedWorkerDriver):
 
         collect("stop Control Plane", self.stop)
         if self.options.keep:
-            if self.target_id:
+            for target_id, runtime in self.target_runtimes.items():
                 collect(
-                    "delete active execution Pods",
-                    lambda: self._kubectl_command(
+                    f"delete active execution Pods for {target_id}",
+                    lambda target_id=target_id, runtime=runtime: self._kubectl_command(
                         [
                             "-n",
-                            self.target_namespace,
+                            runtime["namespace"],
                             "delete",
                             "pods",
                             "-l",
-                            f"synara.io/execution-target-id={self.target_id}",
+                            f"synara.io/execution-target-id={target_id}",
                             "--ignore-not-found",
                             "--wait=false",
                         ],
@@ -3123,11 +3854,17 @@ class KubernetesDriver(ManagedWorkerDriver):
             self.cluster_created = False
         else:
             collect("delete Kubernetes acceptance resources", self._delete_cluster_resources)
-        if self.owns_image and not self.options.keep:
-            collect(
-                "remove Kubernetes acceptance image",
-                lambda: self._docker_cleanup_image(),
-            )
+        if not self.options.keep:
+            if self.canary_image_prepared:
+                collect(
+                    "remove Kubernetes canary image alias",
+                    lambda: self._docker_cleanup_image(self.canary_image),
+                )
+            if self.owns_image:
+                collect(
+                    "remove Kubernetes acceptance image",
+                    lambda: self._docker_cleanup_image(self.image),
+                )
         collect("stop Worker-only proxy", self._stop_worker_proxy)
         self.registration_token = ""
         self.kubernetes_token = ""
@@ -3138,6 +3875,20 @@ class KubernetesDriver(ManagedWorkerDriver):
                 "Kubernetes acceptance resources could not be cleaned completely.",
                 {"errors": errors},
             )
+        return {
+            "target": self.name,
+            "resourceOwner": self.resource_owner,
+            "context": self.context,
+            "ownedCluster": self.owns_cluster,
+            "ownedClusterRemoved": self.owns_cluster and not self.options.keep,
+            "ownedNamespaces": sorted(self.owned_namespaces),
+            "reusedClusterResourcesRemoved": not self.owns_cluster and not self.options.keep,
+            "workerImage": self.image,
+            "ownedWorkerImageRemoved": self.owns_image and not self.options.keep,
+            "canaryImage": self.canary_image if self.canary_image_prepared else None,
+            "ownedCanaryImageRemoved": self.canary_image_prepared and not self.options.keep,
+            "broadCleanupUsed": False,
+        }
 
     def _prepare_cluster(self) -> Mapping[str, Any]:
         if self.owns_cluster:
@@ -3185,6 +3936,7 @@ class KubernetesDriver(ManagedWorkerDriver):
         }
 
     def _prepare_cluster_access(self) -> Mapping[str, Any]:
+        ownership_labels = self._ownership_labels()
         manifest = {
             "apiVersion": "v1",
             "kind": "List",
@@ -3192,7 +3944,7 @@ class KubernetesDriver(ManagedWorkerDriver):
                 {
                     "apiVersion": "v1",
                     "kind": "Namespace",
-                    "metadata": {"name": self.bootstrap_namespace},
+                    "metadata": {"name": self.bootstrap_namespace, "labels": ownership_labels},
                 },
                 {
                     "apiVersion": "v1",
@@ -3200,12 +3952,13 @@ class KubernetesDriver(ManagedWorkerDriver):
                     "metadata": {
                         "name": self.bootstrap_service_account,
                         "namespace": self.bootstrap_namespace,
+                        "labels": ownership_labels,
                     },
                 },
                 {
                     "apiVersion": "rbac.authorization.k8s.io/v1",
                     "kind": "ClusterRole",
-                    "metadata": {"name": self.bootstrap_role},
+                    "metadata": {"name": self.bootstrap_role, "labels": ownership_labels},
                     "rules": [
                         {
                             "apiGroups": [""],
@@ -3228,7 +3981,7 @@ class KubernetesDriver(ManagedWorkerDriver):
                 {
                     "apiVersion": "rbac.authorization.k8s.io/v1",
                     "kind": "ClusterRoleBinding",
-                    "metadata": {"name": self.bootstrap_role},
+                    "metadata": {"name": self.bootstrap_role, "labels": ownership_labels},
                     "subjects": [
                         {
                             "kind": "ServiceAccount",
@@ -3298,9 +4051,40 @@ class KubernetesDriver(ManagedWorkerDriver):
             "apiServerHost": urllib.parse.urlparse(self.api_server).netloc,
             "serviceAccount": self.bootstrap_service_account,
             "rbacScope": "cluster-wide disposable acceptance role",
+            "ownershipLabels": ownership_labels,
         }
 
-    def _foundation_evidence(self, target_id: str, secret_name: Any) -> Mapping[str, Any]:
+    def _ownership_labels(self) -> dict[str, str]:
+        return {
+            "synara.io/stage3-provider-acceptance": "true",
+            "synara.io/stage3-provider-acceptance-owner": self.resource_owner,
+        }
+
+    def _wait_and_label_namespace(self, namespace: str) -> None:
+        def namespace_probe() -> bool | None:
+            completed = self._kubectl_completed(
+                ["get", "namespace", namespace, "-o", "name"],
+                cleanup_timeout=5.0,
+            )
+            return True if completed.returncode == 0 else None
+
+        self.api.wait_until(f"Kubernetes Namespace {namespace}", namespace_probe, interval=0.2)
+        for key, value in self._ownership_labels().items():
+            self._kubectl_command(
+                ["label", "namespace", namespace, f"{key}={value}", "--overwrite"],
+                cleanup_timeout=10.0,
+            )
+
+    def _foundation_evidence(
+        self,
+        target_id: str,
+        secret_name: Any,
+        *,
+        namespace: str | None = None,
+        service_account: str | None = None,
+    ) -> Mapping[str, Any]:
+        namespace = namespace or self.target_namespace
+        service_account = service_account or self.worker_service_account
         compact = target_id.replace("-", "")[:12]
         expected_secret = f"synara-agentd-{compact}"
         expected_quota = expected_secret
@@ -3311,7 +4095,7 @@ class KubernetesDriver(ManagedWorkerDriver):
                 {"expectedSecret": expected_secret, "actualSecret": secret_name},
             )
         resources = {
-            "serviceAccount": ("serviceaccount", self.worker_service_account),
+            "serviceAccount": ("serviceaccount", service_account),
             "secret": ("secret", expected_secret),
             "resourceQuota": ("resourcequota", expected_quota),
             "networkPolicy": ("networkpolicy.networking.k8s.io", expected_quota),
@@ -3319,7 +4103,7 @@ class KubernetesDriver(ManagedWorkerDriver):
         evidence: dict[str, Any] = {}
         for label, (resource, name) in resources.items():
             actual = self._kubectl_command(
-                ["-n", self.target_namespace, "get", resource, name, "-o", "jsonpath={.metadata.name}"]
+                ["-n", namespace, "get", resource, name, "-o", "jsonpath={.metadata.name}"]
             ).strip()
             if actual != name:
                 raise AcceptanceError(
@@ -3362,10 +4146,11 @@ class KubernetesDriver(ManagedWorkerDriver):
             self.deadline.sleep(0.2)
 
     def _execution_pods(self, target_id: str, execution_id: str) -> list[dict[str, Any]]:
+        runtime = self._target_runtime(target_id)
         output = self._kubectl_command(
             [
                 "-n",
-                self.target_namespace,
+                runtime["namespace"],
                 "get",
                 "pods",
                 "-l",
@@ -3493,36 +4278,70 @@ class KubernetesDriver(ManagedWorkerDriver):
         return output
 
     def _delete_cluster_resources(self) -> None:
-        self._kubectl_command(
-            [
-                "delete",
-                "namespace",
-                self.target_namespace,
-                self.bootstrap_namespace,
-                "--ignore-not-found",
-                "--wait=true",
-                "--timeout=30s",
-            ],
-            cleanup_timeout=40.0,
-        )
-        self._kubectl_command(
-            [
-                "delete",
-                "clusterrolebinding,clusterrole",
-                self.bootstrap_role,
-                "--ignore-not-found",
-            ],
-            cleanup_timeout=20.0,
-        )
+        for namespace in sorted(self.owned_namespaces):
+            if not self._kubernetes_resource_is_owned("namespace", namespace):
+                continue
+            self._kubectl_command(
+                [
+                    "delete",
+                    "namespace",
+                    namespace,
+                    "--ignore-not-found",
+                    "--wait=true",
+                    "--timeout=30s",
+                ],
+                cleanup_timeout=40.0,
+            )
+        for resource in ("clusterrolebinding", "clusterrole"):
+            if not self._kubernetes_resource_is_owned(resource, self.bootstrap_role):
+                continue
+            self._kubectl_command(
+                ["delete", resource, self.bootstrap_role, "--ignore-not-found"],
+                cleanup_timeout=20.0,
+            )
 
-    def _docker_cleanup_image(self) -> None:
-        completed = self._docker_completed(["image", "rm", "-f", self.image], cleanup_timeout=30.0)
+    def _kubernetes_resource_is_owned(self, resource: str, name: str) -> bool:
+        completed = self._kubectl_completed(
+            ["get", resource, name, "-o", "json"],
+            cleanup_timeout=8.0,
+        )
+        output = self.redactor.text(completed.stdout).strip()
+        if completed.returncode != 0:
+            if "not found" in output.lower() or "notfound" in output.lower():
+                return False
+            raise AcceptanceError(
+                "runner.kubernetes_ownership_check_failed",
+                "Kubernetes acceptance resource ownership could not be verified.",
+                {"resource": resource, "name": name, "outputExcerpt": output[-500:]},
+            )
+        try:
+            payload = json.loads(output)
+            labels = json_object(
+                json_object(payload.get("metadata"), "Kubernetes resource metadata").get("labels"),
+                "Kubernetes resource labels",
+            )
+        except (AcceptanceError, json.JSONDecodeError) as error:
+            raise AcceptanceError(
+                "runner.kubernetes_ownership_check_failed",
+                "Kubernetes acceptance resource ownership response was invalid.",
+                {"resource": resource, "name": name, "message": str(error)},
+            ) from None
+        if labels.get("synara.io/stage3-provider-acceptance-owner") != self.resource_owner:
+            raise AcceptanceError(
+                "runner.kubernetes_resource_not_owned",
+                "Refusing to delete a Kubernetes resource without the acceptance ownership label.",
+                {"resource": resource, "name": name},
+            )
+        return True
+
+    def _docker_cleanup_image(self, image: str) -> None:
+        completed = self._docker_completed(["image", "rm", "-f", image], cleanup_timeout=30.0)
         output = self.redactor.text(completed.stdout)
         if completed.returncode != 0 and "no such image" not in output.lower():
             raise AcceptanceError(
                 "runner.kubernetes_image_cleanup_failed",
                 "The Kubernetes acceptance image could not be removed.",
-                {"outputExcerpt": output[-1000:]},
+                {"image": image, "outputExcerpt": output[-1000:]},
             )
 
     def _control_plane_environment(self) -> dict[str, str]:
@@ -3619,6 +4438,9 @@ class AcceptanceSuite:
             self._dev_login,
             requires=("environment.control-plane-start",),
         )
+        if self.options.failure_only:
+            self._run_failure_only()
+            return self.cases
         if self.driver.lifecycle.execution_pinned:
             self._case(
                 "runtime.target-provision",
@@ -3685,10 +4507,16 @@ class AcceptanceSuite:
                 requires=("fixture.text-tool-usage-artifact",),
             )
         self._case(
+            "fixture.terminal-large-log",
+            "Persist a large Terminal stream as a bounded preview and segmented Artifacts",
+            self._terminal_large_log,
+            requires=("fixture.text-tool-usage-artifact", "fixture.approval-resolution"),
+        )
+        self._case(
             "fixture.user-input-resolution",
             "Resolve Provider user input through the user API",
             self._user_input_resolution,
-            requires=("fixture.approval-resolution",),
+            requires=("fixture.terminal-large-log",),
         )
         self._case(
             "fixture.provider-error",
@@ -3697,6 +4525,16 @@ class AcceptanceSuite:
             requires=("fixture.user-input-resolution",),
         )
         recovery_requirement = "fixture.provider-error"
+        for failure_case in self.options.failure_cases:
+            metadata = FAILURE_CASE_METADATA[failure_case]
+            case_id = metadata["id"]
+            self._case(
+                case_id,
+                metadata["name"],
+                lambda failure_case=failure_case: self._execute_failure_case(failure_case),
+                requires=(recovery_requirement,),
+            )
+            recovery_requirement = case_id
         if self.driver.lifecycle.managed_replacement:
             self._case(
                 "recovery.worker-replacement",
@@ -3737,6 +4575,71 @@ class AcceptanceSuite:
         )
         return self.cases
 
+    def _run_failure_only(self) -> None:
+        if self.driver.lifecycle.execution_pinned:
+            self._case(
+                "runtime.target-provision",
+                "Provision the exact execution-pinned Target",
+                self._provision_target,
+                requires=("identity.dev-login",),
+            )
+            self._case(
+                "resources.credential-project-session",
+                "Create bound Credential, empty Repository Project, and Session",
+                self._create_resources,
+                requires=("runtime.target-provision",),
+            )
+            self._case(
+                "runtime.worker-discovery",
+                "Start an Approval barrier and discover its execution-pinned compatible Worker manifest",
+                self._discover_worker,
+                requires=("resources.credential-project-session",),
+            )
+            self._case(
+                "fixture.baseline-approval",
+                "Resolve the baseline Approval before fault injection",
+                self._approval_resolution,
+                requires=("runtime.worker-discovery",),
+            )
+            requirement = "fixture.baseline-approval"
+        else:
+            self._case(
+                "runtime.worker-discovery",
+                "Provision the exact Target and discover a real compatible Worker manifest",
+                self._provision_standing_target_and_discover_worker,
+                requires=("identity.dev-login",),
+            )
+            self._case(
+                "resources.credential-project-session",
+                "Create bound Credential, empty Repository Project, and Session",
+                self._create_resources,
+                requires=("runtime.worker-discovery",),
+            )
+            self._case(
+                "fixture.baseline-smoke",
+                "Run a baseline text/usage Turn before fault injection",
+                self._baseline_smoke,
+                requires=("resources.credential-project-session",),
+            )
+            requirement = "fixture.baseline-smoke"
+
+        for failure_case in self.options.failure_cases:
+            metadata = FAILURE_CASE_METADATA[failure_case]
+            case_id = metadata["id"]
+            self._case(
+                case_id,
+                metadata["name"],
+                lambda failure_case=failure_case: self._execute_failure_case(failure_case),
+                requires=(requirement,),
+            )
+            requirement = case_id
+        self._case(
+            "fixture.post-failure-continuity",
+            "Run a final text/usage Turn after fault injection",
+            self._baseline_smoke,
+            requires=(requirement,),
+        )
+
     def record_cleanup_failure(self, error: AcceptanceError) -> None:
         self._fail_case(
             "environment.cleanup",
@@ -3744,6 +4647,29 @@ class AcceptanceSuite:
             error.code,
             str(error),
             error.evidence,
+        )
+
+    def record_cleanup_success(self, evidence: Mapping[str, Any] | None = None) -> None:
+        now = utc_now()
+        self.cases.append(
+            {
+                "id": "environment.cleanup",
+                "name": "Clean exact runner-owned Target resources",
+                "status": "pass",
+                "startedAt": now,
+                "finishedAt": now,
+                "durationMs": 0,
+                "evidence": self.redactor.value(
+                    dict(
+                        evidence
+                        or {
+                            "target": self.driver.name,
+                            "driverCleanupCompleted": True,
+                            "broadCleanupUsed": False,
+                        }
+                    )
+                ),
+            }
         )
 
     def _case(
@@ -3777,7 +4703,22 @@ class AcceptanceSuite:
                     "evidence": self.redactor.value(dict(evidence)),
                 }
             )
+        except AcceptanceUnsupported as error:
+            case.update(
+                {
+                    "status": "unsupported",
+                    "finishedAt": utc_now(),
+                    "durationMs": elapsed_ms(started),
+                    "reasonCode": error.code,
+                    "message": self.redactor.text(str(error)),
+                    "evidence": self.redactor.value(error.evidence),
+                }
+            )
         except AcceptanceError as error:
+            evidence = dict(error.evidence)
+            diagnostics = self._collect_failure_diagnostics(case_id)
+            if diagnostics:
+                evidence["diagnostics"] = diagnostics
             case.update(
                 {
                     "status": "fail",
@@ -3785,7 +4726,7 @@ class AcceptanceSuite:
                     "durationMs": elapsed_ms(started),
                     "reasonCode": error.code,
                     "message": self.redactor.text(str(error)),
-                    "evidence": self.redactor.value(error.evidence),
+                    "evidence": self.redactor.value(evidence),
                 }
             )
             self._failed_cases.add(case_id)
@@ -3821,6 +4762,18 @@ class AcceptanceSuite:
         if case.get("status") not in CASE_STATUSES:
             raise RuntimeError(f"invalid acceptance case status: {case.get('status')}")
         self.cases.append(case)
+
+    def _collect_failure_diagnostics(self, case_id: str) -> Mapping[str, Any]:
+        collector = getattr(self.driver, "collect_failure_diagnostics", None)
+        if not callable(collector):
+            return {}
+        try:
+            return dict(collector(case_id))
+        except Exception as error:
+            return {
+                "captureFailed": True,
+                "message": self.redactor.text(str(error) or error.__class__.__name__),
+            }
 
     def record_interruption(self, error: RunnerInterrupted) -> None:
         if any(case.get("reasonCode") == "runner.interrupted" for case in self.cases):
@@ -4222,6 +5175,288 @@ class AcceptanceSuite:
             "credentialEvidence": credential_evidence,
         }
 
+    def _terminal_large_log(self) -> Mapping[str, Any]:
+        turn = self._create_turn("[terminal-large]")
+        execution_terminal, events = self._wait_for_turn_terminal(
+            str(turn["id"]), "execution.completed"
+        )
+        expected_segments = terminal_large_expected_segments()
+        lifecycle = [
+            (event, terminal)
+            for event in events
+            if (terminal := self._event_terminal_data(event)) is not None
+        ]
+        started = [entry for entry in lifecycle if entry[1].get("eventType") == "terminal.started"]
+        completed = [entry for entry in lifecycle if entry[1].get("eventType") == "terminal.exited"]
+        if len(started) != 1 or len(completed) != 1:
+            raise AcceptanceError(
+                "runner.terminal_lifecycle_invalid",
+                "The large Terminal Turn did not persist exactly one start and one exit event.",
+                {
+                    "started": len(started),
+                    "completed": len(completed),
+                    "eventTypes": [event.get("eventType") for event in events],
+                },
+            )
+        lifecycle_types = sorted(str(terminal.get("eventType")) for _, terminal in lifecycle)
+        expected_lifecycle_types = sorted(
+            ["terminal.started", "terminal.exited"]
+            + ["terminal.output.reference"] * len(expected_segments)
+        )
+        if lifecycle_types != expected_lifecycle_types:
+            raise AcceptanceError(
+                "runner.terminal_lifecycle_invalid",
+                "The large Terminal lifecycle contained a missing or extra state.",
+                {"actual": lifecycle_types, "expected": expected_lifecycle_types},
+            )
+        if (
+            started[0][0].get("eventType") != "item.started"
+            or completed[0][0].get("eventType") != "item.completed"
+        ):
+            raise AcceptanceError(
+                "runner.terminal_lifecycle_projection_invalid",
+                "The large Terminal start or exit used the wrong canonical item event.",
+                {
+                    "startedEventType": started[0][0].get("eventType"),
+                    "completedEventType": completed[0][0].get("eventType"),
+                },
+            )
+        terminal_id = started[0][1].get("terminalId")
+        if not isinstance(terminal_id, str) or not terminal_id:
+            raise AcceptanceError(
+                "runner.terminal_id_missing",
+                "The large Terminal start event omitted terminalId.",
+            )
+        if any(terminal.get("terminalId") != terminal_id for _, terminal in lifecycle):
+            raise AcceptanceError(
+                "runner.terminal_lifecycle_split",
+                "The large Terminal lifecycle was split across multiple terminalId values.",
+                {"terminalIds": sorted({str(item.get("terminalId")) for _, item in lifecycle})},
+            )
+
+        preview_events: list[dict[str, Any]] = []
+        for event in events:
+            if event.get("eventType") != "content.delta":
+                continue
+            payload = event.get("payload")
+            if not isinstance(payload, dict) or payload.get("streamKind") != "command_output":
+                continue
+            if payload.get("terminalId") != terminal_id:
+                raise AcceptanceError(
+                    "runner.terminal_preview_split",
+                    "Command output preview used a different terminalId.",
+                    {"terminalId": terminal_id, "event": self._event_summary(event)},
+                )
+            preview_events.append(event)
+
+        preview = bytearray()
+        for event in preview_events:
+            payload = json_object(event.get("payload"), "terminal preview payload")
+            delta = payload.get("delta")
+            byte_offset = payload.get("byteOffset")
+            byte_length = payload.get("byteLength")
+            if (
+                payload.get("encoding") != "utf-8"
+                or not isinstance(delta, str)
+                or not isinstance(byte_offset, int)
+                or not isinstance(byte_length, int)
+            ):
+                raise AcceptanceError(
+                    "runner.terminal_preview_invalid",
+                    "The large Terminal preview did not use canonical UTF-8 byte metadata.",
+                    {"event": self._event_summary(event)},
+                )
+            encoded = delta.encode("utf-8")
+            if byte_offset != len(preview) or byte_length != len(encoded):
+                raise AcceptanceError(
+                    "runner.terminal_preview_noncontiguous",
+                    "The large Terminal preview byte range was not contiguous.",
+                    {
+                        "expectedOffset": len(preview),
+                        "byteOffset": byte_offset,
+                        "byteLength": byte_length,
+                        "actualLength": len(encoded),
+                    },
+                )
+            preview.extend(encoded)
+        expected_preview = terminal_large_bytes(0, TERMINAL_LOG_PREVIEW_BYTES)
+        if bytes(preview) != expected_preview or not preview_events:
+            raise AcceptanceError(
+                "runner.terminal_preview_mismatch",
+                "The large Terminal preview was not the exact deterministic first 32 KiB.",
+                {
+                    "previewBytes": len(preview),
+                    "previewEventCount": len(preview_events),
+                    "previewSha256": hashlib.sha256(preview).hexdigest(),
+                },
+            )
+        last_preview_payload = json_object(
+            preview_events[-1].get("payload"), "terminal final preview payload"
+        )
+        if last_preview_payload.get("truncated") is not True:
+            raise AcceptanceError(
+                "runner.terminal_preview_not_truncated",
+                "The bounded Terminal preview did not record truncation.",
+            )
+
+        references = sorted(
+            (
+                terminal
+                for _, terminal in lifecycle
+                if terminal.get("eventType") == "terminal.output.reference"
+            ),
+            key=lambda item: int(item.get("segmentIndex") or 0),
+        )
+        if len(references) != len(expected_segments):
+            raise AcceptanceError(
+                "runner.terminal_reference_count_mismatch",
+                "The large Terminal did not produce exactly three Artifact references.",
+                {"references": references, "expectedSegmentCount": len(expected_segments)},
+            )
+
+        reference_artifact_ids: list[str] = []
+        for reference, expected in zip(references, expected_segments, strict=True):
+            actual = {
+                key: reference.get(key)
+                for key in ("offset", "length", "segmentIndex", "encoding")
+            }
+            expected_reference = {
+                key: expected[key] for key in ("offset", "length", "segmentIndex", "encoding")
+            }
+            artifact_id = reference.get("artifactId")
+            if actual != expected_reference or not isinstance(artifact_id, str) or not artifact_id:
+                raise AcceptanceError(
+                    "runner.terminal_reference_invalid",
+                    "A large Terminal Artifact reference had the wrong byte range or Artifact ID.",
+                    {"actual": actual, "expected": expected_reference},
+                )
+            reference_artifact_ids.append(artifact_id)
+        if len(set(reference_artifact_ids)) != len(reference_artifact_ids):
+            raise AcceptanceError(
+                "runner.terminal_reference_duplicate",
+                "The large Terminal reused an Artifact ID across segments.",
+                {"artifactIds": reference_artifact_ids},
+            )
+
+        completion = completed[0][1]
+        expected_completion = {
+            "totalBytes": TERMINAL_LARGE_TOTAL_BYTES,
+            "previewBytes": TERMINAL_LOG_PREVIEW_BYTES,
+            "segmentCount": len(expected_segments),
+            "truncated": True,
+            "exitCode": 0,
+        }
+        actual_completion = {key: completion.get(key) for key in expected_completion}
+        if actual_completion != expected_completion:
+            raise AcceptanceError(
+                "runner.terminal_completion_mismatch",
+                "The large Terminal completion totals did not match the persisted stream.",
+                {"actual": actual_completion, "expected": expected_completion},
+            )
+
+        artifact_ready_ids: list[str] = []
+        for event in events:
+            if event.get("eventType") != "artifact.ready":
+                continue
+            payload = event.get("payload")
+            if (
+                isinstance(payload, dict)
+                and payload.get("kind") == "terminal_log"
+                and isinstance(payload.get("artifactId"), str)
+            ):
+                artifact_ready_ids.append(str(payload["artifactId"]))
+        if (
+            len(artifact_ready_ids) != len(expected_segments)
+            or set(artifact_ready_ids) != set(reference_artifact_ids)
+        ):
+            raise AcceptanceError(
+                "runner.terminal_artifact_events_mismatch",
+                "The large Terminal references did not have matching artifact.ready events.",
+                {
+                    "referenceArtifactIds": reference_artifact_ids,
+                    "readyArtifactIds": artifact_ready_ids,
+                },
+            )
+
+        terminal_related_events = [
+            event
+            for event in events
+            if self._event_terminal_data(event) is not None
+            or event in preview_events
+            or event.get("eventType") == "artifact.ready"
+        ]
+        leaked_events = [
+            self._event_summary(event)
+            for event in terminal_related_events
+            if contains_runtime_physical_path(event.get("payload"))
+        ]
+        if leaked_events:
+            raise AcceptanceError(
+                "runner.terminal_runtime_path_leaked",
+                "A Terminal Event exposed a Runtime Output physical path.",
+                {"events": leaked_events},
+            )
+
+        artifacts = json_items(
+            self.api.request("GET", f"/v1/sessions/{self._required('session_id')}/artifacts"),
+            "artifacts",
+        )
+        artifacts_by_id = {str(item.get("id")): item for item in artifacts}
+        segment_evidence: list[dict[str, Any]] = []
+        execution_id = execution_terminal.get("executionId")
+        for artifact_id, expected in zip(reference_artifact_ids, expected_segments, strict=True):
+            artifact = artifacts_by_id.get(artifact_id)
+            if artifact is None:
+                raise AcceptanceError(
+                    "runner.terminal_artifact_missing",
+                    "A referenced Terminal log Artifact was absent from the Session Artifact list.",
+                    {"artifactId": artifact_id},
+                )
+            expected_artifact = {
+                "kind": "terminal_log",
+                "status": "ready",
+                "originalName": f"terminal-log-{expected['segmentIndex'] + 1:06d}.log",
+                "contentType": "text/plain; charset=utf-8",
+                "sizeBytes": expected["length"],
+                "sha256": expected["sha256"],
+                "executionId": execution_id,
+            }
+            actual_artifact = {key: artifact.get(key) for key in expected_artifact}
+            if actual_artifact != expected_artifact:
+                raise AcceptanceError(
+                    "runner.terminal_artifact_mismatch",
+                    "A Terminal log Artifact did not match the deterministic segment.",
+                    {
+                        "artifactId": artifact_id,
+                        "actual": actual_artifact,
+                        "expected": expected_artifact,
+                    },
+                )
+            segment_evidence.append(
+                {
+                    "artifact": self._artifact_summary(artifact),
+                    "offset": expected["offset"],
+                    "length": expected["length"],
+                    "segmentIndex": expected["segmentIndex"],
+                }
+            )
+
+        return {
+            "turnId": turn.get("id"),
+            "executionId": execution_id,
+            "terminalId": terminal_id,
+            "sequenceRange": self._sequence_range(events),
+            "preview": {
+                "bytes": len(preview),
+                "eventCount": len(preview_events),
+                "sha256": hashlib.sha256(preview).hexdigest(),
+                "truncated": True,
+            },
+            "completion": actual_completion,
+            "segments": segment_evidence,
+            "runtimePhysicalPathLeak": False,
+        }
+
     def _approval_resolution(self) -> Mapping[str, Any]:
         pending = self.state.pending_approval
         if pending is None:
@@ -4270,18 +5505,24 @@ class AcceptanceSuite:
         }
 
     def _recover_pending_approval_runtime(self) -> Mapping[str, Any]:
-        pending = self.state.pending_approval
-        if pending is None:
-            raise AcceptanceError(
-                "runner.pending_approval_missing",
-                "The pending Approval barrier was unavailable for runtime recovery.",
-            )
         recover = getattr(self.driver, "recover_pending_interaction", None)
         if not callable(recover):
             raise AcceptanceError(
                 "runner.pending_interaction_recovery_unsupported",
                 "The TargetDriver cannot recover a pending interaction runtime.",
                 {"target": self.driver.name},
+            )
+        return self._recover_pending_approval_with(recover)
+
+    def _recover_pending_approval_with(
+        self,
+        recover: Callable[[str, str], Mapping[str, Any]],
+    ) -> Mapping[str, Any]:
+        pending = self.state.pending_approval
+        if pending is None:
+            raise AcceptanceError(
+                "runner.pending_approval_missing",
+                "The pending Approval barrier was unavailable for runtime recovery.",
             )
         turn = json_object(pending.get("turn"), "pending approval turn")
         interaction = json_object(pending.get("interaction"), "pending approval interaction")
@@ -4416,6 +5657,198 @@ class AcceptanceSuite:
             "executionId": terminal.get("executionId"),
             "failureCode": payload.get("failureCode"),
             "sequenceRange": self._sequence_range(events),
+        }
+
+    def _baseline_smoke(self) -> Mapping[str, Any]:
+        turn = self._create_turn("[text] [usage]")
+        terminal, events = self._wait_for_turn_terminal(str(turn["id"]), "execution.completed")
+        return {
+            "turnId": turn.get("id"),
+            "executionId": terminal.get("executionId"),
+            "sequenceRange": self._sequence_range(events),
+        }
+
+    def _execute_failure_case(self, failure_case: str) -> Mapping[str, Any]:
+        provider_failures = {
+            "provider-malformed": ("protocol_violation", "[provider-malformed]"),
+            "provider-oversized": ("protocol_violation", "[provider-oversized]"),
+            "provider-crash": ("provider_unavailable", "[provider-crash]"),
+        }
+        if failure_case in provider_failures:
+            expected_code, directive = provider_failures[failure_case]
+            return self._provider_host_failure(failure_case, directive, expected_code)
+        if failure_case == "kubernetes-image-canary":
+            return self._kubernetes_image_canary()
+        return self._pending_approval_failure(failure_case)
+
+    def _provider_host_failure(
+        self,
+        failure_case: str,
+        directive: str,
+        expected_code: str,
+    ) -> Mapping[str, Any]:
+        turn = self._create_turn(directive)
+        terminal, events = self._wait_for_turn_terminal(str(turn["id"]), "execution.failed")
+        payload = json_object(terminal.get("payload"), "execution.failed payload")
+        if payload.get("failureCode") != expected_code:
+            raise AcceptanceError(
+                "runner.provider_fault_code_mismatch",
+                "The Provider Host fault did not preserve the expected stable failure code.",
+                {
+                    "failureCase": failure_case,
+                    "expectedFailureCode": expected_code,
+                    "actualFailureCode": payload.get("failureCode"),
+                },
+            )
+        recovery_turn = self._create_turn("[text]")
+        recovery_terminal, recovery_events = self._wait_for_turn_terminal(
+            str(recovery_turn["id"]),
+            "execution.completed",
+        )
+        return {
+            "failureCase": failure_case,
+            "faultTurnId": turn.get("id"),
+            "faultExecutionId": terminal.get("executionId"),
+            "failureCode": payload.get("failureCode"),
+            "faultSequenceRange": self._sequence_range(events),
+            "recoveryTurnId": recovery_turn.get("id"),
+            "recoveryExecutionId": recovery_terminal.get("executionId"),
+            "recoverySequenceRange": self._sequence_range(recovery_events),
+            "hostRecoveredForNextTurn": True,
+        }
+
+    def _pending_approval_failure(self, failure_case: str) -> Mapping[str, Any]:
+        inject = getattr(self.driver, "inject_failure", None)
+        if not callable(inject):
+            raise AcceptanceUnsupported(
+                "runner.failure_case_unsupported",
+                f"The {self.driver.name} Target does not implement failure injection {failure_case}.",
+                {"target": self.driver.name, "failureCase": failure_case},
+            )
+        preflight = getattr(self.driver, "validate_failure", None)
+        if callable(preflight):
+            preflight(failure_case)
+        barrier = self._begin_approval_readiness_barrier()
+        recovery = self._recover_pending_approval_with(
+            lambda target_id, execution_id: inject(failure_case, target_id, execution_id)
+        )
+        resolution = self._approval_resolution()
+        return {
+            "failureCase": failure_case,
+            "barrier": barrier,
+            "recovery": recovery,
+            "resolution": resolution,
+            "generationFenced": True,
+            "terminalCount": 1,
+        }
+
+    def _kubernetes_image_canary(self) -> Mapping[str, Any]:
+        provision = getattr(self.driver, "provision_canary_target", None)
+        if not callable(provision):
+            raise AcceptanceUnsupported(
+                "runner.kubernetes_canary_unsupported",
+                "The selected TargetDriver cannot provision a Kubernetes image canary.",
+                {"target": self.driver.name},
+            )
+        target = json_object(
+            provision(
+                self._required("tenant_id"),
+                self._required("organization_id"),
+                self.options.provider,
+            ),
+            "Kubernetes canary target",
+        )
+        target_id = target.get("id")
+        if (
+            not isinstance(target_id, str)
+            or not target_id
+            or target.get("kind") != "kubernetes"
+            or target.get("organizationId") != self._required("organization_id")
+        ):
+            raise AcceptanceError(
+                "runner.kubernetes_canary_target_invalid",
+                "The canary Target did not retain its Kubernetes kind and Organization scope.",
+                {"target": self._target_summary(target)},
+            )
+        session = json_object(
+            self.api.request(
+                "POST",
+                f"/v1/projects/{self._required('project_id')}/sessions",
+                {
+                    "title": "Stage 3 Kubernetes Worker Image Canary",
+                    "visibility": "project",
+                    "provider": self.options.provider,
+                    "model": "stage3-acceptance-fixture",
+                    "providerCredentialId": self._required("credential_id"),
+                    "executionTargetId": target_id,
+                },
+                expected=(201,),
+            ),
+            "Kubernetes canary session",
+        )
+        canary_session_id = session.get("id")
+        if not isinstance(canary_session_id, str) or not canary_session_id:
+            raise AcceptanceError(
+                "runner.kubernetes_canary_session_id_missing",
+                "The Kubernetes canary Session did not return an ID.",
+            )
+
+        original_session_id = self.state.session_id
+        original_target_id = self.state.target_id
+        original_last_sequence = self.state.last_sequence
+        original_pending = self.state.pending_approval
+        canary_evidence: dict[str, Any]
+        self.state.session_id = canary_session_id
+        self.state.target_id = target_id
+        self.state.last_sequence = int(session.get("lastEventSequence") or 0)
+        self.state.pending_approval = None
+        try:
+            barrier = self._begin_approval_readiness_barrier()
+            discovered = self._wait_compatible_manifest(target_id)
+            interaction = json_object(
+                json_object(self.state.pending_approval, "canary pending approval").get("interaction"),
+                "canary pending approval interaction",
+            )
+            execution_id = interaction.get("executionId")
+            if not isinstance(execution_id, str) or not execution_id:
+                raise AcceptanceError(
+                    "runner.kubernetes_canary_execution_id_missing",
+                    "The canary Approval barrier omitted its Execution ID.",
+                )
+            runtime = self.driver.observe_execution(target_id, execution_id)
+            resolution = self._approval_resolution()
+            canary_evidence = {
+                "target": self._target_summary(target),
+                "driverEvidence": target.get("driverEvidence"),
+                "sessionId": canary_session_id,
+                "barrier": barrier,
+                "manifestId": discovered["manifest"].get("manifestId"),
+                "workerBuild": discovered["manifest"].get("workerBuild"),
+                "runtime": dict(runtime),
+                "resolution": resolution,
+            }
+        finally:
+            self.state.session_id = original_session_id
+            self.state.target_id = original_target_id
+            self.state.last_sequence = original_last_sequence
+            self.state.pending_approval = original_pending
+
+        rollback_turn = self._create_turn("[text] [usage]")
+        rollback_terminal, rollback_events = self._wait_for_turn_terminal(
+            str(rollback_turn["id"]),
+            "execution.completed",
+        )
+        return {
+            **canary_evidence,
+            "baselineAfterCanary": {
+                "targetId": original_target_id,
+                "turnId": rollback_turn.get("id"),
+                "executionId": rollback_terminal.get("executionId"),
+                "sequenceRange": self._sequence_range(rollback_events),
+            },
+            "releaseBoundary": (
+                "deterministic isolated Target canary only; no product release promotion or immutable digest rollback API"
+            ),
         }
 
     def _replace_worker(self) -> Mapping[str, Any]:
@@ -4743,6 +6176,17 @@ class AcceptanceSuite:
         return events
 
     @staticmethod
+    def _event_terminal_data(event: Mapping[str, Any]) -> dict[str, Any] | None:
+        payload = event.get("payload")
+        if not isinstance(payload, dict):
+            return None
+        data = payload.get("data")
+        if not isinstance(data, dict):
+            return None
+        terminal = data.get("terminal")
+        return terminal if isinstance(terminal, dict) else None
+
+    @staticmethod
     def _event_turn_id(event: Mapping[str, Any]) -> str | None:
         payload = event.get("payload")
         if isinstance(payload, dict) and isinstance(payload.get("turnId"), str):
@@ -4847,11 +6291,36 @@ def markdown_from_report(report: Mapping[str, Any]) -> str:
         f"- Finished: `{report['finishedAt']}`",
         f"- Duration: `{report['durationMs']} ms`",
         "",
-        "## Cases",
+        "## Evidence boundary",
         "",
-        "| Case | Status | Duration | Reason |",
-        "| --- | --- | ---: | --- |",
+        (
+            "This report uses the deterministic Provider Host fixture through the real Control Plane, agentd, "
+            "Worker Protocol, and selected Target lifecycle. It is not a real Codex App Server or Claude Agent "
+            "SDK release gate."
+        ),
     ]
+    configuration = report.get("configuration")
+    failure_matrix = configuration.get("failureMatrix") if isinstance(configuration, dict) else None
+    if isinstance(failure_matrix, dict) and failure_matrix.get("requestedCases"):
+        lines.extend(
+            [
+                "",
+                "## Requested failure/canary matrix",
+                "",
+                "```json",
+                json.dumps(failure_matrix, indent=2, sort_keys=True, ensure_ascii=False),
+                "```",
+            ]
+        )
+    lines.extend(
+        [
+            "",
+            "## Cases",
+            "",
+            "| Case | Status | Duration | Reason |",
+            "| --- | --- | ---: | --- |",
+        ]
+    )
     for case in report.get("cases", []):
         if not isinstance(case, dict):
             continue
@@ -4885,6 +6354,92 @@ def write_reports(report: dict[str, Any], output_dir: pathlib.Path, redactor: Se
     json_path.write_text(json.dumps(sanitized, indent=2, sort_keys=True, ensure_ascii=False) + "\n", encoding="utf-8")
     markdown_path.write_text(markdown_from_report(sanitized), encoding="utf-8")
     return json_path, markdown_path
+
+
+def scan_output_secrets(output_dir: pathlib.Path, redactor: SecretRedactor) -> Mapping[str, Any]:
+    allowed_suffixes = {".json", ".log", ".md", ".txt", ".yaml", ".yml"}
+    known_secrets = [value.encode("utf-8") for value in redactor.secret_values() if value]
+    overlap_bytes = max([512, *(len(value) for value in known_secrets)])
+    findings: list[dict[str, Any]] = []
+    scanned_files = 0
+    scanned_bytes = 0
+
+    for path in sorted(output_dir.rglob("*")):
+        if path.is_symlink() or not path.is_file() or path.suffix.lower() not in allowed_suffixes:
+            continue
+        scanned_files += 1
+        file_size = path.stat().st_size
+        scanned_bytes += file_size
+        seen: set[str] = set()
+        carry = b""
+        offset = 0
+        with path.open("rb") as source:
+            while True:
+                chunk = source.read(1 << 20)
+                if not chunk:
+                    break
+                window = carry + chunk
+                window_offset = max(0, offset - len(carry))
+                for index, secret in enumerate(known_secrets):
+                    if secret and secret in window:
+                        kind = f"known-secret-{index + 1}"
+                        if kind not in seen:
+                            findings.append(
+                                {
+                                    "file": str(path.relative_to(output_dir)),
+                                    "kind": kind,
+                                    "offset": window_offset + window.find(secret),
+                                }
+                            )
+                            seen.add(kind)
+                for kind, pattern in SECRET_SCAN_PATTERNS:
+                    match = pattern.search(window)
+                    if match is not None and kind not in seen:
+                        findings.append(
+                            {
+                                "file": str(path.relative_to(output_dir)),
+                                "kind": kind,
+                                "offset": window_offset + match.start(),
+                            }
+                        )
+                        seen.add(kind)
+                carry = window[-overlap_bytes:]
+                offset += len(chunk)
+
+    return {
+        "status": "pass" if not findings else "fail",
+        "scannedFiles": scanned_files,
+        "scannedBytes": scanned_bytes,
+        "fileTypes": sorted(allowed_suffixes),
+        "knownSecretCount": len(known_secrets),
+        "patternNames": [name for name, _ in SECRET_SCAN_PATTERNS],
+        "findings": findings,
+        "scope": "acceptance JSON, Markdown, text metadata, and redacted logs; binary SQLite/Artifacts excluded",
+    }
+
+
+def output_secret_scan_case(output_dir: pathlib.Path, redactor: SecretRedactor) -> dict[str, Any]:
+    started_at = utc_now()
+    started = time.monotonic()
+    evidence = dict(scan_output_secrets(output_dir, redactor))
+    passed = evidence.pop("status") == "pass"
+    case: dict[str, Any] = {
+        "id": "security.output-secret-scan",
+        "name": "Scan acceptance reports and logs for known or high-confidence Secret patterns",
+        "status": "pass" if passed else "fail",
+        "startedAt": started_at,
+        "finishedAt": utc_now(),
+        "durationMs": elapsed_ms(started),
+        "evidence": evidence,
+    }
+    if not passed:
+        case.update(
+            {
+                "reasonCode": "runner.output_secret_detected",
+                "message": "Acceptance output contained a known Secret or high-confidence Secret pattern.",
+            }
+        )
+    return case
 
 
 def parse_runner_command(raw: str | None, repo_root: pathlib.Path, target: str) -> tuple[str, ...]:
@@ -4935,6 +6490,11 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
     parser.add_argument("--docker-skip-worker-build", action="store_true")
     parser.add_argument("--docker-control-plane-host", default="host.docker.internal")
     parser.add_argument("--docker-network-mode", help="Existing Docker network; the runner creates an isolated network by default")
+    parser.add_argument(
+        "--docker-allow-network-interruption",
+        action="store_true",
+        help="Allow disconnect/reconnect of the exact managed Worker on an operator-owned Docker network",
+    )
     parser.add_argument("--docker-memory-bytes", type=int, default=2 << 30)
     parser.add_argument("--docker-nano-cpus", type=int, default=1_000_000_000)
     parser.add_argument("--kubernetes-context", help="Explicit reusable Kubernetes context; defaults to an owned Kind cluster")
@@ -4949,6 +6509,34 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
     parser.add_argument("--kind-bin", default="kind")
     parser.add_argument("--kind-cluster-name")
     parser.add_argument("--kind-node-image", default="kindest/node:v1.33.1")
+    parser.add_argument(
+        "--kubernetes-allow-node-drain",
+        action="store_true",
+        help="Allow cordon/drain/uncordon of the exact Worker Node on a reused Kubernetes context",
+    )
+    parser.add_argument(
+        "--failure-matrix",
+        action="store_true",
+        help="Run the deterministic target-specific failure/canary matrix after the core fixture suite",
+    )
+    parser.add_argument(
+        "--failure-case",
+        action="append",
+        choices=FAILURE_CASES,
+        default=[],
+        help="Run one deterministic failure/canary case; repeat to select multiple cases",
+    )
+    parser.add_argument(
+        "--failure-only",
+        action="store_true",
+        help="Run minimal setup, selected failure/canary cases, and a continuity smoke instead of the core suite",
+    )
+    parser.add_argument(
+        "--network-outage-seconds",
+        type=float,
+        default=8.0,
+        help="Worker-only network interruption duration (minimum 7 seconds; default: 8)",
+    )
     parser.add_argument(
         "--no-restart-control-plane",
         action="store_true",
@@ -4992,6 +6580,8 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
         parser.error("--docker-memory-bytes must be at least 67108864")
     if parsed.docker_nano_cpus <= 0:
         parser.error("--docker-nano-cpus must be positive")
+    if parsed.network_outage_seconds < 7.0:
+        parser.error("--network-outage-seconds must be at least 7 seconds to cross the acceptance Lease TTL")
     if not parsed.ssh_orbctl_bin.strip() or any(
         character in parsed.ssh_orbctl_bin for character in "\r\n\t\x00"
     ):
@@ -5042,6 +6632,13 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
     run_id = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:8]
     output_dir = parsed.output_dir or repo_root / ".tmp" / "stage3-provider-acceptance-results" / run_id
     kubernetes_kubeconfig = parsed.kubernetes_kubeconfig.expanduser().resolve() if parsed.kubernetes_kubeconfig else None
+    requested_failure_cases = list(parsed.failure_case)
+    if parsed.failure_matrix:
+        requested_failure_cases.extend(TARGET_FAILURE_CASES[parsed.target])
+    requested_failure_case_set = set(requested_failure_cases)
+    failure_cases = tuple(case for case in FAILURE_CASES if case in requested_failure_case_set)
+    if parsed.failure_only and not failure_cases:
+        parser.error("--failure-only requires --failure-matrix or at least one --failure-case")
     return RunnerOptions(
         target=parsed.target,
         provider=parsed.provider,
@@ -5073,6 +6670,11 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
         kind_bin=parsed.kind_bin.strip(),
         kind_cluster_name=kind_cluster_name,
         kind_node_image=parsed.kind_node_image.strip(),
+        failure_cases=failure_cases,
+        network_outage_seconds=parsed.network_outage_seconds,
+        docker_allow_network_interruption=parsed.docker_allow_network_interruption,
+        kubernetes_allow_node_drain=parsed.kubernetes_allow_node_drain,
+        failure_only=parsed.failure_only,
     )
 
 
@@ -5126,7 +6728,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             driver.suppress_signals_for_cleanup()
             try:
                 try:
-                    driver.cleanup()
+                    cleanup_evidence = driver.cleanup()
+                    suite.record_cleanup_success(
+                        cleanup_evidence if isinstance(cleanup_evidence, Mapping) else None
+                    )
                 except AcceptanceError as error:
                     suite.record_cleanup_failure(error)
             finally:
@@ -5138,14 +6743,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         try:
             suite.run()
         finally:
-            driver.cleanup()
+            cleanup_evidence = driver.cleanup()
+            suite.record_cleanup_success(
+                cleanup_evidence if isinstance(cleanup_evidence, Mapping) else None
+            )
         cases = suite.cases
     report: dict[str, Any] = {
         "schemaVersion": SCHEMA_VERSION,
         "runId": run_id,
         "target": options.target,
         "provider": options.provider,
-        "mode": "fixture",
+        "mode": "fixture+failure-matrix" if options.failure_cases else "fixture",
         "source": repository_metadata(repo_root),
         "startedAt": started_at,
         "finishedAt": utc_now(),
@@ -5156,6 +6764,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             "restartControlPlane": options.restart_control_plane,
             "skipBuild": options.skip_build,
             "keepState": options.keep,
+            "failureMatrix": {
+                "requestedCases": list(options.failure_cases),
+                "failureOnly": options.failure_only,
+                "networkOutageSeconds": options.network_outage_seconds,
+                "realProviderReleaseGate": False,
+                "boundary": (
+                    "deterministic Provider Host fixture over real Control Plane, agentd, Worker Protocol, and Target paths"
+                ),
+            },
             "runnerCommand": {
                 "executable": pathlib.Path(options.runner_command[0]).name,
                 "argumentCount": len(options.runner_command) - 1,
@@ -5192,6 +6809,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "networkMode": options.docker_network_mode or "isolated-per-run",
                 "memoryBytes": options.docker_memory_bytes,
                 "nanoCpus": options.docker_nano_cpus,
+                "allowOperatorNetworkInterruption": options.docker_allow_network_interruption,
             }
             if options.target == "docker"
             else None,
@@ -5205,6 +6823,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "kindBinary": options.kind_bin,
                 "kindClusterName": options.kind_cluster_name,
                 "kindNodeImage": options.kind_node_image,
+                "allowOperatorNodeDrain": options.kubernetes_allow_node_drain,
             }
             if options.target == "kubernetes"
             else None,
@@ -5216,6 +6835,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             "logsDirectory": str(options.output_dir / "logs"),
         },
     }
+    json_path, markdown_path = write_reports(report, options.output_dir, redactor)
+    secret_scan = output_secret_scan_case(options.output_dir, redactor)
+    cases.append(secret_scan)
+    report["cases"] = cases
+    report["status"] = aggregate_status(cases)
+    report["finishedAt"] = utc_now()
+    report["durationMs"] = elapsed_ms(started)
     json_path, markdown_path = write_reports(report, options.output_dir, redactor)
     print(f"Stage 3 Provider fixture acceptance: {report['status']}")
     print(f"JSON: {json_path}")

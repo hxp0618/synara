@@ -424,6 +424,123 @@ describe("Provider Host Protocol v2", () => {
     });
   });
 
+  it("runs native CompactSession as the sole active primary operation and exposes its boundary", async () => {
+    let completeRun: ((message: Extract<RunnerMessage, { type: "result" }>) => void) | undefined;
+    let operation: unknown;
+    const handle = createProviderHostProtocolHandler({
+      credential: null,
+      emit: () => {},
+      descriptorForProvider: enabledDescriptorForProvider,
+      startRun: (_input, _credential, _emit, options) => {
+        operation = options?.operation;
+        return {
+          result: new Promise((resolve) => {
+            completeRun = resolve;
+          }),
+          interrupt: () => {},
+        } satisfies ProviderRunController;
+      },
+    });
+    await handle(
+      command("ResumeSession", { runnerInput: remoteRunnerInput(true) }, "session-compact"),
+    );
+
+    const compact = handle(command("CompactSession", {}, "compact-active"));
+    expect(operation).toEqual({ commandType: "CompactSession", payload: {} });
+    completeRun?.({
+      type: "result",
+      output: {
+        operation: "compact",
+        supportMode: "native",
+        boundary: {
+          kind: "context_compaction",
+          summaryAvailable: false,
+          detail: "Codex did not expose a summary.",
+        },
+      },
+      providerResumeCursor: "provider-cursor",
+    });
+
+    await expect(compact).resolves.toEqual([
+      expect.objectContaining({
+        messageType: "Result",
+        payload: {
+          output: expect.objectContaining({ operation: "compact", supportMode: "native" }),
+          providerResumeCursor: "provider-cursor",
+          supportMode: "native",
+          boundary: expect.objectContaining({
+            kind: "context_compaction",
+            summaryAvailable: false,
+          }),
+        },
+      }),
+    ]);
+  });
+
+  it("targets InterruptTurn at an active primary operation", async () => {
+    let rejectRun: ((error: Error) => void) | undefined;
+    const handle = createProviderHostProtocolHandler({
+      credential: null,
+      emit: () => {},
+      descriptorForProvider: enabledDescriptorForProvider,
+      startRun: () =>
+        ({
+          result: new Promise((_, reject) => {
+            rejectRun = reject;
+          }),
+          interrupt: () => rejectRun?.(new Error("Provider operation was interrupted.")),
+          getResumeCursor: () => "provider-cursor-after-primary-interrupt",
+        }) satisfies ProviderRunController,
+    });
+    await handle(
+      command(
+        "ResumeSession",
+        { runnerInput: remoteRunnerInput(true) },
+        "session-primary-interrupt",
+      ),
+    );
+
+    const compact = handle(command("CompactSession", {}, "compact-interrupt"));
+    const interrupt = await handle(
+      command("InterruptTurn", { targetCommandId: "compact-interrupt" }, "interrupt-primary"),
+    );
+
+    expect(interrupt.at(-1)).toMatchObject({
+      messageType: "Result",
+      payload: {
+        interrupted: true,
+        targetCommandId: "compact-interrupt",
+        providerResumeCursor: "provider-cursor-after-primary-interrupt",
+      },
+    });
+    expect((await compact).at(-1)).toMatchObject({
+      messageType: "Error",
+      error: { code: "interrupted" },
+    });
+  });
+
+  it("keeps Claude manual compact and Provider-native rollback/fork stably unsupported", async () => {
+    const handle = createProviderHostProtocolHandler({
+      credential: null,
+      emit: () => {},
+      descriptorForProvider: enabledDescriptorForProvider,
+    });
+    const claudeInput = {
+      ...remoteRunnerInput(),
+      workload: { provider: "claudeAgent", inputText: "initial" },
+    };
+    await handle(command("StartSession", { runnerInput: claudeInput }, "session-claude-compact"));
+    expect(errorCode(await handle(command("CompactSession", {}, "compact-claude")))).toBe(
+      "capability_unsupported",
+    );
+
+    for (const commandType of ["RollbackSession", "ForkSession"] as const) {
+      expect(errorCode(await handle(command(commandType, {}, `unsupported-${commandType}`)))).toBe(
+        "capability_unsupported",
+      );
+    }
+  });
+
   it("emits only canonical Runtime Event v2 payloads on the v2 wire", async () => {
     let completeRun: ((message: Extract<RunnerMessage, { type: "result" }>) => void) | undefined;
     const emitted: ProviderHostMessageEnvelope[] = [];
@@ -459,6 +576,61 @@ describe("Provider Host Protocol v2", () => {
           eventVersion: PROVIDER_RUNTIME_EVENT_VERSION,
           eventType: "content.delta",
           payload: { streamKind: "assistant_text", delta: "canonical" },
+        },
+      }),
+    );
+  });
+
+  it("maps Runner Artifacts to Provider Host ArtifactCandidate messages", async () => {
+    let completeRun: ((message: Extract<RunnerMessage, { type: "result" }>) => void) | undefined;
+    const emitted: ProviderHostMessageEnvelope[] = [];
+    const handle = createProviderHostProtocolHandler({
+      credential: null,
+      emit: (message) => emitted.push(message),
+      descriptorForProvider: enabledDescriptorForProvider,
+      startRun: (_input, _credential, emit) => {
+        emit({
+          type: "artifact",
+          artifact: {
+            path: "tool-results/terminal.log",
+            kind: "terminal_log",
+            originalName: "claude-terminal.log",
+            contentType: "text/plain",
+            sourceRoot: "runtime-output",
+            terminalId: "terminal-1",
+            encoding: "utf-8",
+            reportedSize: 8_192,
+          },
+        });
+        return {
+          result: new Promise((resolve) => {
+            completeRun = resolve;
+          }),
+          interrupt: () => {},
+        } satisfies ProviderRunController;
+      },
+    });
+    await handle(command("StartSession", { runnerInput: remoteRunnerInput() }, "session-artifact"));
+
+    const send = handle(command("SendTurn", { inputText: "produce output" }, "send-artifact"));
+    completeRun?.({ type: "result", output: { text: "done" } });
+    await send;
+
+    expect(emitted).toContainEqual(
+      expect.objectContaining({
+        commandId: "send-artifact",
+        messageType: "ArtifactCandidate",
+        payload: {
+          artifact: {
+            path: "tool-results/terminal.log",
+            kind: "terminal_log",
+            originalName: "claude-terminal.log",
+            contentType: "text/plain",
+            sourceRoot: "runtime-output",
+            terminalId: "terminal-1",
+            encoding: "utf-8",
+            reportedSize: 8_192,
+          },
         },
       }),
     );

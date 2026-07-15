@@ -42,9 +42,13 @@ export const STAGE3_FIXTURE_SCENARIOS = [
   "approval",
   "user-input",
   "artifact",
+  "terminal-large",
   "workspace-verify",
   "credential",
   "provider-error",
+  "provider-malformed",
+  "provider-oversized",
+  "provider-crash",
   "steer",
 ] as const;
 
@@ -57,6 +61,7 @@ export type Stage3ProviderFixtureOptions = {
   readonly fault?: Stage3FixtureFault;
   readonly faultCommand?: Stage3FixtureFaultCommand;
   readonly emitLine: (line: string) => void;
+  readonly terminate?: (exitCode: number) => void;
 };
 
 type CommandRecord = {
@@ -97,12 +102,30 @@ type CredentialReadResult =
 const decodeCommand = Schema.decodeUnknownSync(ProviderHostCommandEnvelope);
 const FIXTURE_BUILD_VERSION = "stage3-provider-acceptance-fixture-v1";
 const FIXTURE_RUNTIME_VERSION = "0.0.0";
-const FIXTURE_TIME_ORIGIN = Date.parse("2026-07-14T00:00:00.000Z");
 const ARTIFACT_DIRECTORY_NAME = ".synara-stage3-acceptance";
 const ARTIFACT_FILE_NAME = "artifact.txt";
 const ARTIFACT_RELATIVE_PATH = `${ARTIFACT_DIRECTORY_NAME}/${ARTIFACT_FILE_NAME}`;
 const ARTIFACT_CONTENT = "deterministic stage 3 acceptance artifact\n";
+export const STAGE3_TERMINAL_LARGE_TOTAL_BYTES = 2 * 1024 * 1024 + 257;
+export const STAGE3_TERMINAL_LARGE_CHUNK_BYTES = 63 * 1024;
+const STAGE3_TERMINAL_PATTERN = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ._-";
 export const STAGE3_FIXTURE_CREDENTIAL_SENTINEL = "stage3-provider-acceptance-credential-v1";
+
+export function stage3TerminalLargeChunk(byteOffset: number, byteLength: number): string {
+  if (!Number.isSafeInteger(byteOffset) || byteOffset < 0) {
+    throw new RangeError("terminal fixture byteOffset must be a non-negative safe integer");
+  }
+  if (!Number.isSafeInteger(byteLength) || byteLength < 0) {
+    throw new RangeError("terminal fixture byteLength must be a non-negative safe integer");
+  }
+  const chunk = Buffer.allocUnsafe(byteLength);
+  for (let index = 0; index < byteLength; index += 1) {
+    chunk[index] = STAGE3_TERMINAL_PATTERN.charCodeAt(
+      (byteOffset + index) % STAGE3_TERMINAL_PATTERN.length,
+    );
+  }
+  return chunk.toString("ascii");
+}
 
 function openWorkspaceArtifact(workspaceDirectory: string, access: "read" | "write"): number {
   const workspaceRoot = realpathSync.native(workspaceDirectory);
@@ -199,7 +222,9 @@ export class Stage3ProviderAcceptanceHost {
   readonly #fault: Stage3FixtureFault;
   readonly #faultCommand: Stage3FixtureFaultCommand;
   readonly #emitLine: (line: string) => void;
+  readonly #terminate: (exitCode: number) => void;
   readonly #commands = new Map<string, CommandRecord>();
+  readonly #timeOrigin = Date.now();
 
   #session: FixtureSession | null = null;
   #pendingTurn: PendingTurn | null = null;
@@ -213,6 +238,11 @@ export class Stage3ProviderAcceptanceHost {
     this.#fault = options.fault ?? "none";
     this.#faultCommand = options.faultCommand ?? "Describe";
     this.#emitLine = options.emitLine;
+    this.#terminate =
+      options.terminate ??
+      ((exitCode) => {
+        throw new Error(`fixture requested process termination with exit code ${exitCode}`);
+      });
   }
 
   receiveLine(line: string): void {
@@ -526,6 +556,24 @@ export class Stage3ProviderAcceptanceHost {
     }
     this.#turnSequence += 1;
 
+    if (scenarios.includes("provider-malformed")) {
+      this.#emitLine("{malformed-provider-host-jsonl");
+      return;
+    }
+    if (scenarios.includes("provider-oversized")) {
+      this.#emitLine(
+        JSON.stringify({
+          fixtureFault: "oversized-provider-host-jsonl",
+          payload: "x".repeat(PROVIDER_HOST_MAX_MESSAGE_BYTES + 1),
+        }),
+      );
+      return;
+    }
+    if (scenarios.includes("provider-crash")) {
+      this.#terminate(73);
+      return;
+    }
+
     if (scenarios.includes("text")) {
       this.#emitRuntimeEvent(command, "content.delta", {
         streamKind: "assistant_text",
@@ -555,6 +603,9 @@ export class Stage3ProviderAcceptanceHost {
           toolUses: scenarios.includes("tool") ? 1 : 0,
         },
       });
+    }
+    if (scenarios.includes("terminal-large")) {
+      this.#emitLargeTerminal(command);
     }
     if (scenarios.includes("artifact")) {
       const artifact = this.#writeArtifact();
@@ -697,6 +748,61 @@ export class Stage3ProviderAcceptanceHost {
       command,
       this.#turnResult(outputText, credentialEvidence, workspaceEvidence),
     );
+  }
+
+  #emitLargeTerminal(command: ProviderHostCommand): void {
+    if (!this.#session) return;
+    const provider = this.#session.provider;
+    const terminalId = `fixture-terminal-large-${this.#turnSequence}`;
+    const title = "Deterministic large terminal";
+    const commandSummary = `fixture-terminal-large --bytes=${STAGE3_TERMINAL_LARGE_TOTAL_BYTES}`;
+    const terminalData = (terminal: Record<string, unknown>) => ({
+      provider,
+      terminal: {
+        terminalId,
+        commandSummary,
+        cwdLabel: ".",
+        ...terminal,
+      },
+    });
+
+    this.#emitRuntimeEvent(command, "item.started", {
+      itemType: "command_execution",
+      status: "inProgress",
+      title,
+      data: terminalData({ eventType: "terminal.started" }),
+    });
+    for (
+      let byteOffset = 0;
+      byteOffset < STAGE3_TERMINAL_LARGE_TOTAL_BYTES;
+      byteOffset += STAGE3_TERMINAL_LARGE_CHUNK_BYTES
+    ) {
+      const byteLength = Math.min(
+        STAGE3_TERMINAL_LARGE_CHUNK_BYTES,
+        STAGE3_TERMINAL_LARGE_TOTAL_BYTES - byteOffset,
+      );
+      this.#emitRuntimeEvent(command, "content.delta", {
+        streamKind: "command_output",
+        terminalId,
+        encoding: "utf-8",
+        delta: stage3TerminalLargeChunk(byteOffset, byteLength),
+        byteOffset,
+        byteLength,
+      });
+    }
+    this.#emitRuntimeEvent(command, "item.completed", {
+      itemType: "command_execution",
+      status: "completed",
+      title,
+      data: terminalData({
+        eventType: "terminal.exited",
+        totalBytes: STAGE3_TERMINAL_LARGE_TOTAL_BYTES,
+        previewBytes: STAGE3_TERMINAL_LARGE_TOTAL_BYTES,
+        segmentCount: 0,
+        truncated: false,
+        exitCode: 0,
+      }),
+    });
   }
 
   #resolveInteraction(command: ProviderHostCommand, expected: "approval" | "user-input"): void {
@@ -1017,7 +1123,7 @@ export class Stage3ProviderAcceptanceHost {
   }
 
   #nextOccurredAt(): string {
-    const occurredAt = new Date(FIXTURE_TIME_ORIGIN + this.#messageSequence).toISOString();
+    const occurredAt = new Date(this.#timeOrigin + this.#messageSequence).toISOString();
     this.#messageSequence += 1;
     return occurredAt;
   }
@@ -1244,7 +1350,7 @@ function fallbackCommand(value: unknown): ProviderHostCommand {
       candidate.commandId,
       "fixture-protocol-command",
     ) as ProviderHostCommand["commandId"],
-    occurredAt: new Date(FIXTURE_TIME_ORIGIN).toISOString(),
+    occurredAt: new Date().toISOString(),
     payload: {},
   };
 }
@@ -1323,7 +1429,10 @@ async function main(): Promise<void> {
   }
   await runStage3ProviderAcceptanceFixture({
     source: process.stdin,
-    options,
+    options: {
+      ...options,
+      terminate: (exitCode) => process.exit(exitCode),
+    },
     emitLine: (line) => process.stdout.write(`${line}\n`),
   });
 }

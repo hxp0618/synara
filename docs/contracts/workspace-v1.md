@@ -103,6 +103,14 @@ the DNS-rebinding and redirect-to-metadata-service gaps between validation and C
 ambient Credential helpers, SSH Agent, global/system Git config or LFS smudge downloads. Repository URLs with
 embedded Credentials are never accepted or persisted.
 
+Workspace Credential ownership is modeled by immutable `credential_bindings`, not by a mutable secret field on a
+Project. Project stages use `git_fetch`, `git_push`, `registry_pull`, `registry_push`, `package_read` and
+`package_publish`; Execution Targets use the separate `worker_image_pull` infrastructure stage. A Binding owns one
+normalized non-secret selector and can only transition once from active to disabled. Claim creates a new immutable
+Generation-fenced Grant for each active Project Binding. Claim receipt replay reuses those Grant IDs, while recovery
+creates new Grants and snapshots the then-current Credential versions. Workload and Worker resolve APIs expose the
+Grant descriptor, never the underlying Credential ID or version.
+
 Private HTTPS uses a Project-bound, purpose-isolated `git/https_token` Credential. Agentd resolves it only for
 the current Worker, Lease and Generation and exposes it to Git through an ephemeral Unix-socket AskPass helper.
 The helper accepts only Username/Password prompts containing the exact validated Repository hostname. The
@@ -203,7 +211,7 @@ Workspace.
 The schema, Session/Execution bindings, public/private HTTPS Clone/Fetch materialization, Project Git Credential
 binding, cross-process locked shared Git cache, Workspace-private relative `git worktree` generations,
 Generation-fenced state reporting, Git-reference/Patch/Snapshot Checkpoint capture/restore and safe
-Checkpoint/Artifact retention are active. Stage 3 still must implement short-lived SSH Credential delivery,
-leftover staging/backup reconciliation after host-level crashes and the shared Local/SSH/Docker/Kubernetes
-acceptance fixture. Kubernetes cache sharing additionally requires an explicitly configured RWX-equivalent PVC;
-its default cache remains Pod-local and disposable.
+Checkpoint/Artifact retention, interrupted staging/backup reconciliation and the shared deterministic
+Local/SSH/Docker/Kubernetes fixture are active. Stage 3 still must implement short-lived SSH Credential delivery
+and real multi-Worker/Target release acceptance. Kubernetes cache sharing additionally requires an explicitly
+configured RWX-equivalent PVC; its default cache remains Pod-local and disposable.

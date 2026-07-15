@@ -51,7 +51,10 @@ packages/*/dist
 /deploy/kubernetes/*.key
 /deploy/kubernetes/*.p12
 /deploy/kubernetes/*.pfx
+/services/control-plane/agentd
+/services/control-plane/api
 /services/control-plane/data/
+/services/control-plane/metadata
 /services/control-plane/personal-metadata.json
 /apps/server/package.json.bak
 /apps/server/userdata/

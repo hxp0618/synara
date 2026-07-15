@@ -6,6 +6,12 @@ import (
 	"github.com/google/uuid"
 )
 
+const (
+	WorkerIdempotencyKeyHeader          = "X-Synara-Artifact-Idempotency-Key"
+	WorkerIdempotencyFeatureHeader      = "X-Synara-Artifact-Idempotency"
+	WorkerIdempotencyFeatureHeaderValue = "v1"
+)
+
 type Artifact struct {
 	ID             uuid.UUID  `json:"id"`
 	TenantID       uuid.UUID  `json:"tenantId"`
@@ -41,13 +47,14 @@ type CompleteInput struct {
 }
 
 type WorkerCreateInput struct {
-	TenantID     uuid.UUID  `json:"tenantId"`
-	Generation   int64      `json:"generation"`
-	LeaseToken   string     `json:"leaseToken"`
-	CheckpointID *uuid.UUID `json:"checkpointId,omitempty"`
-	Kind         string     `json:"kind"`
-	OriginalName *string    `json:"originalName"`
-	ExpiresAt    *time.Time `json:"expiresAt"`
+	TenantID       uuid.UUID  `json:"tenantId"`
+	Generation     int64      `json:"generation"`
+	LeaseToken     string     `json:"leaseToken"`
+	CheckpointID   *uuid.UUID `json:"checkpointId,omitempty"`
+	IdempotencyKey *string    `json:"-"`
+	Kind           string     `json:"kind"`
+	OriginalName   *string    `json:"originalName"`
+	ExpiresAt      *time.Time `json:"expiresAt"`
 }
 
 type WorkerCompleteInput struct {

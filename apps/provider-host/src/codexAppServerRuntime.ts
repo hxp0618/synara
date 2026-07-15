@@ -3,6 +3,8 @@ import { createInterface } from "node:readline";
 
 import {
   hasAuthoritativeResumeData,
+  type ProviderPrimaryOperation,
+  type ProviderReviewTarget,
   type ProviderRunController,
   type RunnerInput,
   type RunnerMessage,
@@ -13,6 +15,14 @@ import {
   classifyProviderResumeFailure,
   providerResumeFallbackWarning,
 } from "./providerResumeFallback";
+import {
+  createTerminalOutputStream,
+  terminalCommandSummary,
+  terminalCwdLabel,
+  terminalResultText,
+  type TerminalOutputStream,
+  type TerminalRedactor,
+} from "./terminalEvents";
 
 type JsonRpcId = string | number;
 
@@ -44,13 +54,22 @@ type PendingInteraction = {
   jsonRpcId: JsonRpcId;
 };
 
+type CodexTerminalState = {
+  terminalId: string;
+  commandSummary?: string;
+  cwdLabel?: string;
+  output: TerminalOutputStream;
+  sawOutputDelta: boolean;
+};
+
 type CodexRunOptions = {
   input: RunnerInput;
   environment: NodeJS.ProcessEnv;
-  redact: (value: string) => string;
+  redact: TerminalRedactor;
   emit: (message: RunnerMessage) => void;
   authoritativePrompt: string;
   interactive: boolean;
+  operation?: ProviderPrimaryOperation;
 };
 
 const REQUEST_TIMEOUT_MS = 20_000;
@@ -68,11 +87,13 @@ class CodexAppServerRuntime {
   private readonly pendingRequests = new Map<string, PendingRequest>();
   private readonly pendingApprovals = new Map<string, PendingInteraction>();
   private readonly pendingUserInputs = new Map<string, PendingInteraction>();
+  private readonly commandTerminals = new Map<string, CodexTerminalState>();
   private readonly outputText: string[] = [];
   private readonly turnCompletion: Promise<Record<string, unknown>>;
   private resolveTurn!: (turn: Record<string, unknown>) => void;
   private rejectTurn!: (error: Error) => void;
   private nextRequestId = 1;
+  private terminalSequence = 0;
   private threadId: string | undefined;
   private turnId: string | undefined;
   private model: string | undefined;
@@ -125,7 +146,17 @@ class CodexAppServerRuntime {
       });
       this.writeMessage({ method: "initialized", params: {} });
 
-      const resumed = await this.openThread();
+      const operation = this.options.operation?.commandType;
+      const resumed = await this.openThread(
+        operation === "CompactSession",
+        operation === "StartReview",
+      );
+      if (this.options.operation?.commandType === "CompactSession") {
+        return await this.runCompact();
+      }
+      if (this.options.operation?.commandType === "StartReview") {
+        return await this.runReview(this.options.operation.payload.target);
+      }
       const prompt = resumed
         ? this.options.input.workload.inputText
         : this.options.authoritativePrompt;
@@ -169,7 +200,66 @@ class CodexAppServerRuntime {
     }
   }
 
-  private async openThread(): Promise<boolean> {
+  private async runCompact(): Promise<Extract<RunnerMessage, { type: "result" }>> {
+    if (!this.threadId) {
+      throw new Error("Codex app-server native compact requires a resumed Provider Thread.");
+    }
+    await this.sendRequest("thread/compact/start", { threadId: this.threadId });
+    if (this.interruptRequested) this.interrupt();
+    const completed = await this.turnCompletion;
+    const boundary = codexCompactionBoundary(completed);
+    return {
+      type: "result",
+      output: {
+        provider: "codex",
+        operation: "compact",
+        supportMode: "native",
+        boundary,
+      },
+      providerResumeCursor: this.threadId,
+    };
+  }
+
+  private async runReview(
+    target: ProviderReviewTarget,
+  ): Promise<Extract<RunnerMessage, { type: "result" }>> {
+    if (!this.threadId) {
+      throw new Error("Codex app-server native review requires a resumed Provider Thread.");
+    }
+    const response = asRecord(
+      await this.sendRequest("review/start", {
+        threadId: this.threadId,
+        delivery: "inline",
+        target: codexReviewTarget(target),
+      }),
+    );
+    this.turnId = readString(asRecord(response?.turn), "id");
+    if (!this.turnId) {
+      throw new Error("Codex app-server review/start response did not include a turn id.");
+    }
+    if (this.interruptRequested) this.requestNativeInterrupt();
+    const completedTurn = await this.turnCompletion;
+    if (this.outputText.length === 0) {
+      const finalText = finalAgentText(completedTurn);
+      if (finalText) this.outputText.push(this.options.redact(finalText));
+    }
+    return {
+      type: "result",
+      output: {
+        provider: "codex",
+        operation: "review",
+        supportMode: "native",
+        providerTurnId: this.turnId,
+        text: this.outputText.join(""),
+      },
+      providerResumeCursor: this.threadId,
+    };
+  }
+
+  private async openThread(
+    requireNativeResume = false,
+    allowFreshThreadOnResumeFailure = false,
+  ): Promise<boolean> {
     const cursor = trimmedString(this.options.input.providerResumeCursor);
     const historyAvailable = hasAuthoritativeResumeData(this.options.input.workload);
     const approvalRequired =
@@ -200,14 +290,24 @@ class CodexAppServerRuntime {
         }
         return true;
       } catch (error) {
-        if (!historyAvailable) {
+        if (requireNativeResume) {
           const detail = error instanceof Error ? error.message : String(error);
           throw new Error(`Codex app-server session resume is invalid: ${detail}`);
         }
         const reasonCode = classifyProviderResumeFailure(error);
         if (!reasonCode) throw error;
-        this.options.emit(providerResumeFallbackWarning(this.options.input, "codex", reasonCode));
+        if (!historyAvailable && !allowFreshThreadOnResumeFailure) {
+          const detail = error instanceof Error ? error.message : String(error);
+          throw new Error(`Codex app-server session resume is invalid: ${detail}`);
+        }
+        if (historyAvailable) {
+          this.options.emit(providerResumeFallbackWarning(this.options.input, "codex", reasonCode));
+        }
       }
+    }
+
+    if (requireNativeResume) {
+      throw new Error("Codex app-server native Session operation requires a Provider Cursor.");
     }
 
     const response = asRecord(await this.sendRequest("thread/start", common));
@@ -243,7 +343,7 @@ class CodexAppServerRuntime {
       this.failRuntime(
         new Error(
           detail ||
-            `Codex app-server exited before turn completion (code=${code ?? "null"}, signal=${signal ?? "null"}).`,
+            `Codex app-server exited before operation completion (code=${code ?? "null"}, signal=${signal ?? "null"}).`,
         ),
       );
     });
@@ -358,21 +458,128 @@ class CodexAppServerRuntime {
         });
         return;
       }
+      case "item/commandExecution/outputDelta": {
+        const itemId = readString(params, "itemId");
+        const delta = typeof params.delta === "string" ? params.delta : undefined;
+        if (!itemId || delta === undefined) {
+          this.failRuntime(
+            new Error("Codex app-server command output delta omitted itemId or delta."),
+          );
+          return;
+        }
+        if (
+          (this.threadId && readString(params, "threadId") !== this.threadId) ||
+          (this.turnId && readString(params, "turnId") !== this.turnId)
+        ) {
+          return;
+        }
+        const terminal = this.commandTerminalState(undefined, itemId);
+        terminal.sawOutputDelta = true;
+        terminal.output.write(delta);
+        return;
+      }
       case "item/started":
       case "item/completed": {
         const item = asRecord(params.item);
         const itemType = readString(item, "type");
         if (!itemType || itemType === "agentMessage" || itemType === "userMessage") return;
+        const itemId = readString(item, "id");
+        const isCommand = isCommandExecutionItem(itemType);
+        const terminal = isCommand ? this.commandTerminalState(item, itemId) : undefined;
+        const exitCode = readSafeInteger(item, "exitCode");
+        const signal = readString(item, "signal");
+        const itemStatus = readString(item, "status")?.toLowerCase();
+        const declined = notification.method === "item/completed" && itemStatus === "declined";
+        const failed =
+          notification.method === "item/completed" &&
+          ((exitCode !== undefined && exitCode !== 0) ||
+            itemStatus === "failed" ||
+            itemStatus === "error");
+        if (terminal && notification.method === "item/completed") {
+          if (!terminal.sawOutputDelta) terminal.output.write(codexTerminalOutput(item));
+          terminal.output.flush();
+        }
+        const terminalBytes = terminal?.output.bytesWritten() ?? 0;
         this.options.emit({
           type: "event",
           eventType: "runtime.provider.activity",
           payload: {
             provider: "codex",
             itemType,
-            status: notification.method === "item/started" ? "started" : "completed",
-            ...(readString(item, "id") ? { itemId: readString(item, "id") } : {}),
+            status:
+              notification.method === "item/started"
+                ? "started"
+                : declined
+                  ? "declined"
+                  : failed
+                    ? "failed"
+                    : "completed",
+            ...(itemId ? { itemId } : {}),
+            ...(terminal
+              ? {
+                  terminalId: terminal.terminalId,
+                  terminalEventType:
+                    notification.method === "item/started"
+                      ? "terminal.started"
+                      : failed || declined
+                        ? "terminal.failed"
+                        : "terminal.exited",
+                  ...(terminal.commandSummary ? { commandSummary: terminal.commandSummary } : {}),
+                  ...(terminal.cwdLabel ? { cwdLabel: terminal.cwdLabel } : {}),
+                  ...(exitCode !== undefined ? { exitCode } : {}),
+                  ...(signal ? { signal } : {}),
+                  ...(notification.method === "item/completed"
+                    ? {
+                        totalBytes: terminalBytes,
+                        previewBytes: terminalBytes,
+                        segmentCount: 0,
+                        truncated: false,
+                      }
+                    : {}),
+                  ...(failed || declined
+                    ? {
+                        failureKind: signal
+                          ? "signal"
+                          : exitCode !== undefined && exitCode !== 0
+                            ? "exit"
+                            : "provider_error",
+                      }
+                    : {}),
+                }
+              : {}),
           },
         });
+        if (terminal && notification.method === "item/completed" && itemId) {
+          this.commandTerminals.delete(itemId);
+        }
+        if (
+          notification.method === "item/completed" &&
+          this.options.operation?.commandType === "StartReview" &&
+          itemType === "exitedReviewMode" &&
+          this.outputText.length === 0
+        ) {
+          const review = readString(item, "review");
+          if (review) {
+            const text = this.options.redact(review);
+            this.outputText.push(text);
+            this.options.emit({
+              type: "event",
+              eventType: "runtime.output.delta",
+              payload: { text },
+            });
+          }
+        }
+        if (
+          notification.method === "item/completed" &&
+          this.options.operation?.commandType === "CompactSession" &&
+          itemType === "contextCompaction"
+        ) {
+          this.settleTurn(undefined, {
+            terminalKind: "contextCompaction",
+            item: item ?? {},
+            ...(readString(params, "turnId") ? { turnId: readString(params, "turnId") } : {}),
+          });
+        }
         return;
       }
       case "turn/diff/updated":
@@ -426,19 +633,35 @@ class CodexAppServerRuntime {
         return;
       }
       case "turn/aborted": {
+        this.failOpenCommandTerminals();
         this.settleTurn(new ProviderInterruptedError());
         return;
       }
       case "turn/completed": {
+        if (this.options.operation?.commandType === "CompactSession") {
+          // The RPC acknowledgement and a generic Turn terminal do not prove
+          // that compaction committed. Only contextCompaction or the legacy
+          // thread/compacted notification may settle the primary operation.
+          return;
+        }
         const turn = asRecord(params.turn);
         const completedTurnId = readString(turn, "id");
         if (this.turnId && completedTurnId && completedTurnId !== this.turnId) return;
         const status = readString(turn, "status");
         if (status === "completed") {
+          if (this.commandTerminals.size > 0) {
+            this.failOpenCommandTerminals();
+            this.settleTurn(
+              new Error("Codex app-server completed a Turn with an open command execution."),
+            );
+            return;
+          }
           this.settleTurn(undefined, turn ?? {});
         } else if (status === "interrupted") {
+          this.failOpenCommandTerminals();
           this.settleTurn(new ProviderInterruptedError());
         } else {
+          this.failOpenCommandTerminals();
           const message =
             readString(asRecord(turn?.error), "message") ??
             this.lastError ??
@@ -447,9 +670,58 @@ class CodexAppServerRuntime {
         }
         return;
       }
+      case "thread/compacted": {
+        if (this.options.operation?.commandType !== "CompactSession") return;
+        const notificationThreadId = readString(params, "threadId");
+        if (this.threadId && notificationThreadId && notificationThreadId !== this.threadId) {
+          return;
+        }
+        this.settleTurn(undefined, {
+          terminalKind: "thread/compacted",
+          ...(readString(params, "turnId") ? { turnId: readString(params, "turnId") } : {}),
+        });
+        return;
+      }
       default:
         return;
     }
+  }
+
+  private commandTerminalState(
+    item: Record<string, unknown> | undefined,
+    itemId: string | undefined,
+  ): CodexTerminalState {
+    if (itemId) {
+      const existing = this.commandTerminals.get(itemId);
+      if (existing) {
+        if (!existing.commandSummary) {
+          const commandSummary = terminalCommandSummary(item?.command, this.options.redact);
+          if (commandSummary) existing.commandSummary = commandSummary;
+        }
+        if (!existing.cwdLabel) {
+          const cwdLabel = terminalCwdLabel(this.options.input.workspaceDirectory, item?.cwd);
+          if (cwdLabel) existing.cwdLabel = cwdLabel;
+        }
+        return existing;
+      }
+    }
+    const commandSummary = terminalCommandSummary(item?.command, this.options.redact);
+    const cwdLabel = terminalCwdLabel(this.options.input.workspaceDirectory, item?.cwd);
+    const terminalId = itemId ?? `codex-terminal-${++this.terminalSequence}`;
+    const terminal: CodexTerminalState = {
+      terminalId,
+      ...(commandSummary ? { commandSummary } : {}),
+      ...(cwdLabel ? { cwdLabel } : {}),
+      output: createTerminalOutputStream({
+        emit: this.options.emit,
+        provider: "codex",
+        terminalId,
+        redact: this.options.redact,
+      }),
+      sawOutputDelta: false,
+    };
+    if (itemId) this.commandTerminals.set(itemId, terminal);
+    return terminal;
   }
 
   private handleResponse(response: JsonRpcResponse): void {
@@ -568,8 +840,36 @@ class CodexAppServerRuntime {
       pending.reject(error);
     }
     this.pendingRequests.clear();
+    this.failOpenCommandTerminals();
     this.settleTurn(error);
     this.terminateProcess();
+  }
+
+  private failOpenCommandTerminals(): void {
+    for (const [itemId, terminal] of this.commandTerminals) {
+      terminal.output.flush();
+      const terminalBytes = terminal.output.bytesWritten();
+      this.options.emit({
+        type: "event",
+        eventType: "runtime.provider.activity",
+        payload: {
+          provider: "codex",
+          itemType: "commandExecution",
+          itemId,
+          status: "failed",
+          terminalId: terminal.terminalId,
+          terminalEventType: "terminal.failed",
+          ...(terminal.commandSummary ? { commandSummary: terminal.commandSummary } : {}),
+          ...(terminal.cwdLabel ? { cwdLabel: terminal.cwdLabel } : {}),
+          failureKind: "provider_error",
+          totalBytes: terminalBytes,
+          previewBytes: terminalBytes,
+          segmentCount: 0,
+          truncated: false,
+        },
+      });
+    }
+    this.commandTerminals.clear();
   }
 
   private terminateProcess(): void {
@@ -699,6 +999,36 @@ function finalAgentText(turn: Record<string, unknown>): string | undefined {
   return messages.at(-1);
 }
 
+function codexReviewTarget(target: ProviderReviewTarget): Record<string, unknown> {
+  if (target.type === "uncommittedChanges") return { type: target.type };
+  const branch = boundedString(target.branch, 500);
+  if (!branch || /[\r\n\0]/u.test(branch)) {
+    throw new Error("StartReview baseBranch target requires a valid branch.");
+  }
+  return { type: target.type, branch };
+}
+
+function codexCompactionBoundary(completed: Record<string, unknown>): Record<string, unknown> {
+  const item = asRecord(completed.item);
+  const summary = boundedString(item?.summary, 20_000) ?? boundedString(completed.summary, 20_000);
+  const providerItemId = readString(item, "id");
+  const providerTurnId = readString(completed, "turnId");
+  const terminalKind = readString(completed, "terminalKind") ?? "contextCompaction";
+  return {
+    kind: "context_compaction",
+    terminalKind,
+    summaryAvailable: summary !== undefined,
+    ...(providerItemId ? { providerItemId } : {}),
+    ...(providerTurnId ? { providerTurnId } : {}),
+    ...(summary
+      ? { summary }
+      : {
+          detail:
+            "Codex completed native context compaction without exposing a summary on the Provider wire.",
+        }),
+  };
+}
+
 function readThreadId(response: Record<string, unknown> | undefined): string | undefined {
   return readString(asRecord(response?.thread), "id") ?? readString(response, "threadId");
 }
@@ -719,6 +1049,31 @@ function numericFields(value: Record<string, unknown>): Record<string, number> {
       (entry): entry is [string, number] => typeof entry[1] === "number",
     ),
   );
+}
+
+function isCommandExecutionItem(itemType: string): boolean {
+  const normalized = itemType.replaceAll(/[^a-z0-9]/giu, "").toLowerCase();
+  return normalized.includes("command") || normalized === "bash" || normalized === "shell";
+}
+
+function codexTerminalOutput(item: Record<string, unknown> | undefined): string {
+  if (!item) return "";
+  const primary =
+    terminalResultText(item.aggregatedOutput) ||
+    terminalResultText(item.output) ||
+    terminalResultText(item.result);
+  if (primary) return primary;
+  return [terminalResultText(item.stdout), terminalResultText(item.stderr)]
+    .filter((value) => value.length > 0)
+    .join("\n");
+}
+
+function readSafeInteger(
+  value: Record<string, unknown> | undefined,
+  key: string,
+): number | undefined {
+  const candidate = value?.[key];
+  return typeof candidate === "number" && Number.isSafeInteger(candidate) ? candidate : undefined;
 }
 
 function boundedString(value: unknown, maximumLength: number): string | undefined {

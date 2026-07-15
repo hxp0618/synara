@@ -29,7 +29,7 @@ func (d daemonCleanupWorkspace) Materialize(
 	context.Context,
 	executions.Execution,
 	executions.Workload,
-	*GitHTTPSCredential,
+	*WorkspaceGitCredential,
 ) (WorkspaceMaterialization, error) {
 	return WorkspaceMaterialization{}, errors.New("Materialize was not expected")
 }

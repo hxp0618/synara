@@ -42,6 +42,11 @@ const UNOBSERVED_QUEUEABLE_CAPABILITIES = new Set<ProviderCapabilityId>([
   "interrupt-turn",
 ]);
 
+const CONTROL_PLANE_EMULATED_CAPABILITY_OVERRIDES = new Set<ProviderCapabilityId>([
+  "rollback",
+  "fork",
+]);
+
 const catalogByProvider = new Map(
   PROVIDER_CAPABILITY_CATALOG.providers.map((entry) => [entry.provider, entry] as const),
 );
@@ -80,6 +85,8 @@ function capabilityMessage(input: {
       return `${provider} is installed, but its runtime version is incompatible with this SaaS target.`;
     case "execution_target_unavailable":
       return "The selected SaaS execution target is unavailable.";
+    case "provider_cursor_required":
+      return `${provider} needs one completed Turn with a usable native resume cursor before ${capability} is available.`;
     default:
       return `${provider} does not support ${capability} on this SaaS target.`;
   }
@@ -95,6 +102,11 @@ function staticCapabilityUnsupported(
     catalog.supportTier === "local-only" ||
     catalog.capabilities[capabilityId] === "unsupported"
   );
+}
+
+function providerEligibleForControlPlaneEmulation(provider: ProviderKind): boolean {
+  const catalog = catalogByProvider.get(provider as Exclude<ProviderKind, "droid">);
+  return Boolean(catalog && catalog.supportTier !== "local-only");
 }
 
 export function resolveControlPlaneCapabilityDecision(input: {
@@ -117,7 +129,11 @@ export function resolveControlPlaneCapabilityDecision(input: {
     };
   }
 
-  if (staticCapabilityUnsupported(input.provider, input.capabilityId)) {
+  const staticallyUnsupported = staticCapabilityUnsupported(input.provider, input.capabilityId);
+  const allowsControlPlaneEmulationOverride =
+    CONTROL_PLANE_EMULATED_CAPABILITY_OVERRIDES.has(input.capabilityId) &&
+    providerEligibleForControlPlaneEmulation(input.provider);
+  if (staticallyUnsupported && !allowsControlPlaneEmulationOverride) {
     const decision = {
       provider: input.provider,
       capabilityId: input.capabilityId,
@@ -170,6 +186,23 @@ export function resolveControlPlaneCapabilityDecision(input: {
       status: "unobserved" as const,
       reasonCode: "worker_manifest_required" as const,
       supportMode: null,
+    };
+    return { ...decision, message: capabilityMessage(decision) };
+  }
+
+  if (
+    staticallyUnsupported &&
+    allowsControlPlaneEmulationOverride &&
+    !(item.status === "supported" && item.supportMode === "emulated")
+  ) {
+    const decision = {
+      provider: input.provider,
+      capabilityId: input.capabilityId,
+      allowed: false,
+      temporary: item.status === "unobserved",
+      status: item.status,
+      reasonCode: item.reasonCode,
+      supportMode: item.supportMode ?? null,
     };
     return { ...decision, message: capabilityMessage(decision) };
   }

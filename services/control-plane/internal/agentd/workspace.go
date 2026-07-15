@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/google/uuid"
@@ -18,7 +19,7 @@ import (
 )
 
 type workspaceMaterializer interface {
-	Materialize(context.Context, executions.Execution, executions.Workload, *GitHTTPSCredential) (WorkspaceMaterialization, error)
+	Materialize(context.Context, executions.Execution, executions.Workload, *WorkspaceGitCredential) (WorkspaceMaterialization, error)
 }
 
 type workspaceInspector interface {
@@ -91,7 +92,7 @@ func (m *WorkspaceMaterializer) Materialize(
 	ctx context.Context,
 	execution executions.Execution,
 	workload executions.Workload,
-	credential *GitHTTPSCredential,
+	credential *WorkspaceGitCredential,
 ) (WorkspaceMaterialization, error) {
 	layout, err := m.resolveWorkspaceLayout(execution, workload)
 	if err != nil {
@@ -123,6 +124,13 @@ func (m *WorkspaceMaterializer) Materialize(
 		}
 		expected := expectedWorkspaceManifest(layout, workload, managed, "", "", "")
 		baseMaterialization.manifest = expected
+		if err := reconcileWorkspaceGeneration(layout.Root, func(root string) error {
+			return validateNonGitGeneration(workspaceLayoutAtRoot(layout, root), expected)
+		}); err != nil {
+			return WorkspaceMaterialization{}, workspaceFailure(
+				"workspace_invalid", "The Workspace generation could not be reconciled after an interrupted install.", true, false,
+			)
+		}
 		exists, existsErr := pathExists(layout.Root)
 		if existsErr != nil {
 			return WorkspaceMaterialization{}, workspaceFailure("workspace_invalid", "The Workspace generation is unavailable.", true, true)
@@ -152,21 +160,17 @@ func (m *WorkspaceMaterializer) Materialize(
 		releaseOnFailure = false
 		return baseMaterialization, nil
 	}
-	remote, err := gitpolicy.ResolveRemoteHTTPS(ctx, m.resolver, *workload.RepositoryURL)
+	remote, err := gitpolicy.ResolveRemote(ctx, m.resolver, *workload.RepositoryURL)
 	if err != nil {
 		return WorkspaceMaterialization{}, workspaceFailure(
 			"workspace_invalid", "Repository URL is not allowed for a remote Workspace.", true, false,
 		)
 	}
 	environment := gitEnvironment(nil)
-	if credential != nil {
-		credentialHost, hostErr := gitpolicy.NormalizeHostname(credential.Host)
-		if hostErr != nil || credentialHost != remote.Hostname || remote.Port != "443" ||
-			strings.TrimSpace(credential.Username) == "" || credential.Token == "" {
-			return WorkspaceMaterialization{}, workspaceFailure(
-				"credential_invalid", "The Git Credential does not match the Project repository.", true, false,
-			)
-		}
+	if err := validateWorkspaceGitCredential(remote, credential); err != nil {
+		return WorkspaceMaterialization{}, workspaceFailure(
+			"credential_invalid", "The Git Credential does not match the Project repository.", true, false,
+		)
 	}
 	defaultBranch, err := gitpolicy.NormalizeBranch(workload.DefaultBranch, "main")
 	if err != nil {
@@ -191,6 +195,11 @@ func (m *WorkspaceMaterializer) Materialize(
 	baseMaterialization.manifest = expected
 	baseMaterialization.RepositoryFingerprint = &fingerprint
 	if err := m.withPreparedCache(ctx, cache, remote, defaultBranch, credential, func(cacheRepository string) error {
+		if err := reconcileWorkspaceGeneration(layout.Root, func(root string) error {
+			return m.validatePrivateGitGeneration(ctx, workspaceLayoutAtRoot(layout, root), expected)
+		}); err != nil {
+			return fmt.Errorf("reconcile interrupted Workspace generation install: %w", err)
+		}
 		exists, err := pathExists(layout.Root)
 		if err != nil {
 			return err
@@ -348,38 +357,102 @@ func (m *WorkspaceMaterializer) runNetworkGit(
 	ctx context.Context,
 	directory string,
 	remote gitpolicy.Remote,
-	credential *GitHTTPSCredential,
+	credential *WorkspaceGitCredential,
 	arguments ...string,
 ) (string, error) {
 	environment := gitEnvironment(nil)
-	if credential == nil {
+	if remote.Scheme == "https" && credential == nil {
 		return m.runGit(ctx, directory, environment, networkGitArguments(remote, arguments...)...)
 	}
-	askPass, err := m.newWorkspaceGitAskPassServer(remote.Hostname, credential.Username, credential.Token)
-	if err != nil {
-		return "", errors.New("Git Credential helper could not be initialized")
+	switch remote.Scheme {
+	case "https":
+		if credential == nil || credential.HTTPS == nil || credential.SSH != nil {
+			return "", errors.New("Git HTTPS Credential is unavailable")
+		}
+		askPass, err := m.newWorkspaceGitAskPassServer(
+			remote.Hostname, credential.HTTPS.Username, credential.HTTPS.Token,
+		)
+		if err != nil {
+			return "", errors.New("Git Credential helper could not be initialized")
+		}
+		executable, executableErr := m.executable()
+		if executableErr != nil {
+			_ = askPass.Close()
+			return "", errors.New("Git Credential helper executable is unavailable")
+		}
+		askPassEnvironment, environmentErr := askPass.Environment(executable)
+		if environmentErr != nil {
+			_ = askPass.Close()
+			return "", errors.New("Git Credential helper environment is invalid")
+		}
+		output, runErr := m.runGit(
+			ctx, directory, gitEnvironment(&askPassEnvironment), networkGitArguments(remote, arguments...)...,
+		)
+		closeErr := askPass.Close()
+		if runErr != nil {
+			return "", redactGitCredentialError(runErr, credential.HTTPS.Token)
+		}
+		if closeErr != nil {
+			return "", errors.New("Git Credential helper cleanup failed")
+		}
+		return output, nil
+	case "ssh":
+		if credential == nil || credential.SSH == nil || credential.HTTPS != nil {
+			return "", errors.New("Git SSH Credential is unavailable")
+		}
+		temporaryAgent, err := m.newWorkspaceGitSSHAgent(remote, *credential.SSH)
+		if err != nil {
+			return "", errors.New("Git SSH temporary agent could not be initialized")
+		}
+		sshEnvironment, environmentErr := temporaryAgent.Environment(remote)
+		if environmentErr != nil {
+			_ = temporaryAgent.Close()
+			return "", errors.New("Git SSH temporary agent environment is invalid")
+		}
+		environment = replaceEnvironmentValue(environment, "GIT_SSH_COMMAND", sshEnvironment.GitSSHCommand)
+		environment = replaceEnvironmentValue(environment, "SSH_AUTH_SOCK", sshEnvironment.AuthSocket)
+		output, runErr := m.runGit(ctx, directory, environment, networkGitArguments(remote, arguments...)...)
+		closeErr := temporaryAgent.Close()
+		if runErr != nil {
+			return "", errors.New("Git SSH operation failed")
+		}
+		if closeErr != nil {
+			return "", errors.New("Git SSH temporary agent cleanup failed")
+		}
+		return output, nil
+	default:
+		return "", errors.New("Git Repository transport is unsupported")
 	}
-	executable, executableErr := m.executable()
-	if executableErr != nil {
-		_ = askPass.Close()
-		return "", errors.New("Git Credential helper executable is unavailable")
+}
+
+func validateWorkspaceGitCredential(remote gitpolicy.Remote, credential *WorkspaceGitCredential) error {
+	switch remote.Scheme {
+	case "https":
+		if credential == nil {
+			return nil
+		}
+		if credential.HTTPS == nil || credential.SSH != nil {
+			return errors.New("invalid Git HTTPS Credential")
+		}
+		host, err := gitpolicy.NormalizeHostname(credential.HTTPS.Host)
+		if err != nil || host != remote.Hostname || remote.Port != "443" ||
+			strings.TrimSpace(credential.HTTPS.Username) == "" || credential.HTTPS.Token == "" {
+			return errors.New("Git HTTPS Credential does not match Repository")
+		}
+		return nil
+	case "ssh":
+		if credential == nil || credential.SSH == nil || credential.HTTPS != nil {
+			return errors.New("Git SSH Repository requires one SSH Credential")
+		}
+		host, err := gitpolicy.NormalizeHostname(credential.SSH.Host)
+		if err != nil || host != remote.Hostname || remote.Port != strconv.Itoa(credential.SSH.Port) ||
+			remote.Username != credential.SSH.Username || credential.SSH.PrivateKey == "" || credential.SSH.HostKey == "" {
+			return errors.New("Git SSH Credential does not match Repository")
+		}
+		return nil
+	default:
+		return errors.New("unsupported Git Repository transport")
 	}
-	askPassEnvironment, environmentErr := askPass.Environment(executable)
-	if environmentErr != nil {
-		_ = askPass.Close()
-		return "", errors.New("Git Credential helper environment is invalid")
-	}
-	output, runErr := m.runGit(
-		ctx, directory, gitEnvironment(&askPassEnvironment), networkGitArguments(remote, arguments...)...,
-	)
-	closeErr := askPass.Close()
-	if runErr != nil {
-		return "", redactGitCredentialError(runErr, credential.Token)
-	}
-	if closeErr != nil {
-		return "", errors.New("Git Credential helper cleanup failed")
-	}
-	return output, nil
 }
 
 func (m *WorkspaceMaterializer) newWorkspaceGitAskPassServer(
@@ -415,6 +488,45 @@ func (m *WorkspaceMaterializer) newWorkspaceGitAskPassServer(
 		return server, nil
 	}
 	return nil, errors.New("no safe temporary directory is available for Git AskPass")
+}
+
+func (m *WorkspaceMaterializer) newWorkspaceGitSSHAgent(
+	remote gitpolicy.Remote,
+	credential GitSSHCredential,
+) (*gitSSHAgent, error) {
+	workspaceRoot, err := filepath.Abs(strings.TrimSpace(m.root))
+	if err != nil {
+		return nil, err
+	}
+	cacheRoot, err := filepath.Abs(strings.TrimSpace(m.cacheRoot))
+	if err != nil {
+		return nil, err
+	}
+	candidates := []string{os.TempDir(), "/tmp", filepath.Dir(workspaceRoot)}
+	seen := map[string]struct{}{}
+	for _, candidate := range candidates {
+		candidate, err = filepath.Abs(strings.TrimSpace(candidate))
+		if err != nil || candidate == "" {
+			continue
+		}
+		if _, exists := seen[candidate]; exists {
+			continue
+		}
+		seen[candidate] = struct{}{}
+		temporaryAgent, createErr := newGitSSHAgent(candidate, remote, credential)
+		if createErr != nil {
+			continue
+		}
+		if pathContainedBy(workspaceRoot, temporaryAgent.directory) ||
+			pathContainedBy(cacheRoot, temporaryAgent.directory) ||
+			pathContainedBy(workspaceRoot, temporaryAgent.socketDirectory) ||
+			pathContainedBy(cacheRoot, temporaryAgent.socketDirectory) {
+			_ = temporaryAgent.Close()
+			continue
+		}
+		return temporaryAgent, nil
+	}
+	return nil, errors.New("no safe temporary directory is available for Git SSH")
 }
 
 func (m *WorkspaceMaterializer) rejectDangerousLocalGitConfig(
@@ -577,20 +689,44 @@ func gitEnvironment(askPass *gitAskPassEnvironment) []string {
 }
 
 func networkGitArguments(remote gitpolicy.Remote, arguments ...string) []string {
-	address := remote.PinnedIP
-	if strings.Contains(address, ":") {
-		address = "[" + address + "]"
-	}
-	resolve := "+" + remote.Hostname + ":" + remote.Port + ":" + address
 	prefix := []string{
-		"-c", "http.followRedirects=false",
-		"-c", "http.curloptResolve=" + resolve,
 		"-c", "credential.helper=",
 		"-c", "core.hooksPath=/dev/null",
 		"-c", "http.proxy=",
 		"-c", "http.extraHeader=",
 	}
+	if remote.Scheme == "https" {
+		address := remote.PinnedIP
+		if strings.Contains(address, ":") {
+			address = "[" + address + "]"
+		}
+		resolve := "+" + remote.Hostname + ":" + remote.Port + ":" + address
+		prefix = append([]string{
+			"-c", "http.followRedirects=false",
+			"-c", "http.curloptResolve=" + resolve,
+		}, prefix...)
+	}
 	return append(prefix, arguments...)
+}
+
+func replaceEnvironmentValue(environment []string, name, value string) []string {
+	prefix := name + "="
+	result := make([]string, 0, len(environment)+1)
+	replaced := false
+	for _, entry := range environment {
+		if strings.HasPrefix(entry, prefix) {
+			if !replaced {
+				result = append(result, prefix+value)
+				replaced = true
+			}
+			continue
+		}
+		result = append(result, entry)
+	}
+	if !replaced {
+		result = append(result, prefix+value)
+	}
+	return result
 }
 
 func ensureContainedDirectory(root, directory string) error {

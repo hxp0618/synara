@@ -182,58 +182,17 @@ func (s *Service) RecoverExpiredWorkspaceCleanupLeases(ctx context.Context, now 
 			return err
 		}
 		for _, command := range commands {
-			code := "workspace_cleanup_lease_expired"
-			message := "The Workspace cleanup lease expired before acknowledgement."
-			status := "pending"
-			materializationState := "cleanup-pending"
-			var failedAt any
-			if command.DeliveryAttempts >= workspaceCleanupMaxAttempts {
-				status = "failed"
-				materializationState = "failed"
-				code = "workspace_cleanup_attempts_exhausted"
-				message = "Workspace cleanup exhausted its delivery attempt limit after a lease expired."
-				failedAt = now
-			}
-			updated := tx.WithContext(ctx).Model(&persistence.WorkspaceCleanupCommand{}).
-				Where("id = ? AND status IN ? AND lease_expires_at <= ?", command.ID, []string{"leased", "running"}, now).
-				Updates(map[string]any{
-					"status": status, "lease_token_hash": nil,
-					"delivery_worker_id": nil, "delivery_worker_incarnation": nil,
-					"delivery_available_at": now, "lease_expires_at": nil,
-					"failed_at": failedAt, "last_error_code": code, "last_error_message": message, "updated_at": now,
-				})
-			if updated.Error != nil {
-				return updated.Error
-			}
-			if updated.RowsAffected != 1 {
-				continue
-			}
-			materialization, _, err := lockWorkspaceCleanupScope(ctx, tx, command.MaterializationID)
-			if err != nil || materialization.IncarnationID != command.MaterializationIncarnationID {
-				return problem.New(409, "workspace_cleanup_scope_fenced", "The Workspace cleanup scope changed while its lease was recovered.")
-			}
-			materializationUpdates := map[string]any{"state": materializationState, "updated_at": now}
-			if status == "failed" {
-				materializationUpdates["failure_code"] = code
-				materializationUpdates["failure_message"] = message
-				materializationUpdates["failed_at"] = now
-			}
-			if err := tx.WithContext(ctx).Model(&persistence.WorkspaceMaterialization{}).
-				Where("tenant_id = ? AND id = ? AND incarnation_id = ? AND state IN ?",
-					command.TenantID, command.MaterializationID, command.MaterializationIncarnationID,
-					[]string{"cleanup-pending", "cleaning"}).
-				Updates(materializationUpdates).Error; err != nil {
+			wasRecovered, err := s.recoverWorkspaceCleanupCommandLocked(
+				ctx, tx, command, now,
+				"workspace_cleanup_lease_expired",
+				"The Workspace cleanup lease expired before acknowledgement.",
+			)
+			if err != nil {
 				return err
 			}
-			if status == "failed" {
-				if err := tx.WithContext(ctx).Model(&persistence.RemoteWorkspace{}).
-					Where("tenant_id = ? AND id = ? AND current_materialization_id = ?",
-						command.TenantID, command.WorkspaceID, command.MaterializationID).
-					Updates(map[string]any{"state": "failed", "updated_at": now, "cleaned_at": nil}).Error; err != nil {
-					return err
-				}
+			if wasRecovered {
+				recovered++
 			}
-			recovered++
 		}
 		return nil
 	})
@@ -241,6 +200,72 @@ func (s *Service) RecoverExpiredWorkspaceCleanupLeases(ctx context.Context, now 
 		return 0, problem.Wrap(500, "workspace_cleanup_lease_recovery_failed", "Failed to recover expired Workspace cleanup leases.", err)
 	}
 	return recovered, nil
+}
+
+func (s *Service) recoverWorkspaceCleanupCommandLocked(
+	ctx context.Context,
+	tx *gorm.DB,
+	command persistence.WorkspaceCleanupCommand,
+	now time.Time,
+	code, message string,
+) (bool, error) {
+	if command.DeliveryWorkerID == nil || command.DeliveryWorkerIncarnation == nil {
+		return false, nil
+	}
+	status := "pending"
+	materializationState := "cleanup-pending"
+	var failedAt any
+	if command.DeliveryAttempts >= workspaceCleanupMaxAttempts {
+		status = "failed"
+		materializationState = "failed"
+		code = "workspace_cleanup_attempts_exhausted"
+		message = "Workspace cleanup exhausted its delivery attempt limit. " + message
+		failedAt = now
+	}
+	updated := tx.WithContext(ctx).Model(&persistence.WorkspaceCleanupCommand{}).
+		Where(
+			"id = ? AND status IN ? AND dispatch_generation = ? AND delivery_worker_id = ? AND delivery_worker_incarnation = ?",
+			command.ID, []string{"leased", "running"}, command.DispatchGeneration,
+			*command.DeliveryWorkerID, *command.DeliveryWorkerIncarnation,
+		).
+		Updates(map[string]any{
+			"status": status, "lease_token_hash": nil,
+			"delivery_worker_id": nil, "delivery_worker_incarnation": nil,
+			"delivery_available_at": now, "lease_expires_at": nil,
+			"failed_at": failedAt, "last_error_code": code, "last_error_message": message, "updated_at": now,
+		})
+	if updated.Error != nil {
+		return false, updated.Error
+	}
+	if updated.RowsAffected != 1 {
+		return false, nil
+	}
+	materialization, _, err := lockWorkspaceCleanupScope(ctx, tx, command.MaterializationID)
+	if err != nil || materialization.IncarnationID != command.MaterializationIncarnationID {
+		return false, problem.New(409, "workspace_cleanup_scope_fenced", "The Workspace cleanup scope changed while its lease was recovered.")
+	}
+	materializationUpdates := map[string]any{"state": materializationState, "updated_at": now}
+	if status == "failed" {
+		materializationUpdates["failure_code"] = code
+		materializationUpdates["failure_message"] = message
+		materializationUpdates["failed_at"] = now
+	}
+	if err := tx.WithContext(ctx).Model(&persistence.WorkspaceMaterialization{}).
+		Where("tenant_id = ? AND id = ? AND incarnation_id = ? AND state IN ?",
+			command.TenantID, command.MaterializationID, command.MaterializationIncarnationID,
+			[]string{"cleanup-pending", "cleaning"}).
+		Updates(materializationUpdates).Error; err != nil {
+		return false, err
+	}
+	if status == "failed" {
+		if err := tx.WithContext(ctx).Model(&persistence.RemoteWorkspace{}).
+			Where("tenant_id = ? AND id = ? AND current_materialization_id = ?",
+				command.TenantID, command.WorkspaceID, command.MaterializationID).
+			Updates(map[string]any{"state": "failed", "updated_at": now, "cleaned_at": nil}).Error; err != nil {
+			return false, err
+		}
+	}
+	return true, nil
 }
 
 func (s *Service) ClaimWorkspaceCleanup(

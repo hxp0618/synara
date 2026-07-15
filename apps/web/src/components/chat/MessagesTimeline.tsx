@@ -2640,6 +2640,10 @@ function workEntryPreview(workEntry: TimelineWorkEntry): string | null {
     workEntry.requestKind === "file-change" ||
     workEntry.itemType === "file_change";
 
+  if (workEntry.terminalEventType && workEntry.preview) {
+    return workEntry.preview;
+  }
+
   if (workEntry.itemType === "command_execution" || workEntry.command || workEntry.rawCommand) {
     const command = workEntry.command ?? workEntry.rawCommand;
     if (command) return deriveReadableCommandDisplay(command).target;

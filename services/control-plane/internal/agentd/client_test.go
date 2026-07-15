@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/synara-ai/synara/services/control-plane/internal/artifacts"
 	"github.com/synara-ai/synara/services/control-plane/internal/executions"
 	"github.com/synara-ai/synara/services/control-plane/internal/platform"
 )
@@ -29,6 +30,7 @@ func TestClientAdvertisesWorkerProtocolV2OnRegisterAndHeartbeat(t *testing.T) {
 				return
 			}
 			registerInputs <- registerInput
+			response.Header().Set(artifacts.WorkerIdempotencyFeatureHeader, artifacts.WorkerIdempotencyFeatureHeaderValue)
 			_ = json.NewEncoder(response).Encode(executions.RegisteredWorker{Token: "worker-token"})
 		case "/v1/workers/heartbeat":
 			if request.Header.Get("Authorization") != "Bearer worker-token" {
@@ -73,6 +75,9 @@ func TestClientAdvertisesWorkerProtocolV2OnRegisterAndHeartbeat(t *testing.T) {
 	if err := client.Heartbeat(context.Background(), cfg, false); err != nil {
 		t.Fatalf("heartbeat Worker: %v", err)
 	}
+	if !client.artifactIdempotencySupported {
+		t.Fatal("Client did not negotiate the Worker Artifact idempotency feature")
+	}
 
 	registerInput := <-registerInputs
 	heartbeatInput := <-heartbeatInputs
@@ -81,6 +86,29 @@ func TestClientAdvertisesWorkerProtocolV2OnRegisterAndHeartbeat(t *testing.T) {
 	}
 	if heartbeatInput.ProtocolVersion != 2 {
 		t.Fatalf("heartbeat protocolVersion = %d, want Worker Protocol v2", heartbeatInput.ProtocolVersion)
+	}
+}
+
+func TestClientRegisterTreatsMissingArtifactIdempotencyHeaderAsLegacy(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(response).Encode(executions.RegisteredWorker{Token: "worker-token"})
+	}))
+	t.Cleanup(server.Close)
+	controlPlaneURL, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := Config{
+		ControlPlaneURL: controlPlaneURL, RegistrationToken: "registration-token",
+		ExecutionTargetID: uuid.New(), TargetKind: platform.TargetLocal, InstanceUID: uuid.NewString(),
+		RequestTimeout: time.Second, ArtifactTimeout: time.Second,
+	}
+	client := NewClient(cfg)
+	if _, err := client.Register(context.Background(), cfg); err != nil {
+		t.Fatal(err)
+	}
+	if client.artifactIdempotencySupported {
+		t.Fatal("Client enabled Artifact retries against a legacy Control Plane")
 	}
 }
 

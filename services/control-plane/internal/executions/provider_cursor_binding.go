@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
-	"errors"
 	"hash"
 	"strconv"
 	"strings"
@@ -13,6 +12,7 @@ import (
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 
+	"github.com/synara-ai/synara/services/control-plane/internal/credentialscope"
 	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
 	"github.com/synara-ai/synara/services/control-plane/internal/problem"
 )
@@ -67,13 +67,14 @@ func loadProviderCursorClaimSnapshot(
 	provider := strings.TrimSpace(*execution.Provider)
 	var session struct {
 		OrganizationID       uuid.UUID  `gorm:"column:organization_id"`
+		CreatedBy            uuid.UUID  `gorm:"column:created_by"`
 		Provider             string     `gorm:"column:provider"`
 		Model                *string    `gorm:"column:model"`
 		ProviderCredentialID *uuid.UUID `gorm:"column:provider_credential_id"`
 	}
 	if err := persistence.WithLocking(tx.WithContext(ctx), "UPDATE", "").
 		Table("agent_sessions").
-		Select("organization_id", "provider", "model", "provider_credential_id").
+		Select("organization_id", "created_by", "provider", "model", "provider_credential_id").
 		Where("tenant_id = ? AND id = ?", execution.TenantID, execution.SessionID).
 		Take(&session).Error; err != nil {
 		return providerCursorClaimSnapshot{}, problem.Wrap(500, "provider_cursor_session_snapshot_failed", "Failed to capture the Session Provider Cursor snapshot.", err)
@@ -82,21 +83,18 @@ func loadProviderCursorClaimSnapshot(
 		return providerCursorClaimSnapshot{}, problem.New(409, "provider_cursor_provider_mismatch", "The Execution Provider does not match the Agent Session provider.")
 	}
 	if session.ProviderCredentialID != nil {
-		var credential persistence.ProviderCredential
-		if err := persistence.WithLocking(tx.WithContext(ctx), "SHARE", "").
-			Select("id", "tenant_id", "organization_id", "purpose", "provider", "version", "expires_at", "revoked_at").
-			Where("tenant_id = ? AND id = ?", execution.TenantID, *session.ProviderCredentialID).
-			Take(&credential).Error; err != nil {
-			if errors.Is(err, gorm.ErrRecordNotFound) {
-				return providerCursorClaimSnapshot{}, problem.New(409, "credential_unavailable", "The bound Provider Credential is unavailable for this Execution.")
-			}
-			return providerCursorClaimSnapshot{}, problem.Wrap(500, "provider_cursor_credential_snapshot_failed", "Failed to capture the Provider Credential version for this Execution.", err)
+		selection, err := credentialscope.Resolve(ctx, tx, credentialscope.Request{
+			TenantID: execution.TenantID, OrganizationID: session.OrganizationID,
+			SessionOwnerUserID: session.CreatedBy, Provider: provider, Model: session.Model,
+			ExplicitCredentialID: session.ProviderCredentialID, Now: now,
+		})
+		if err != nil {
+			return providerCursorClaimSnapshot{}, err
 		}
-		if credential.Purpose != "provider" || credential.Provider != provider ||
-			(credential.OrganizationID != nil && *credential.OrganizationID != session.OrganizationID) ||
-			credential.RevokedAt != nil || (credential.ExpiresAt != nil && !credential.ExpiresAt.After(now)) {
+		if selection == nil {
 			return providerCursorClaimSnapshot{}, problem.New(409, "credential_unavailable", "The bound Provider Credential is unavailable for this Execution.")
 		}
+		credential := selection.Credential
 		credentialID := credential.ID
 		credentialVersion := credential.Version
 		snapshot.CredentialID = &credentialID

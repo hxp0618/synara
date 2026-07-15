@@ -42,7 +42,7 @@ docker compose --env-file deploy/saas/.env -f deploy/saas/docker-compose.yml log
 
 1. 确认 PostgreSQL 网络、证书、权限、连接数和磁盘状态。
 2. 读取 `/ready.checks.schema.expectedVersion`，并与当前镜像内最高的 forward migration 对照；
-   不使用历史 Stage 2 固定数量。当前仓库迁移已连续到 `000031`，后续新增迁移时以运行构建返回值为准。
+   不使用历史 Stage 2 固定数量。当前仓库迁移已连续到 `000040`，后续新增迁移时以运行构建返回值为准。
 3. 查询已应用版本，只读取，不手工补写：
 
    ```sql
@@ -297,6 +297,9 @@ KIND_BIN=/path/to/kind deploy/kubernetes/kind-acceptance.sh
 ## 12. 相关资料
 
 - `docs/release-checklists/stage-2-control-plane.md`
+- `docs/release-checklists/stage-3-provider-runtime-remote-worker.md`
+- `docs/runbooks/worker-release-rollout.md`
+- `docs/reports/stage-3-provider-runtime-acceptance-2026-07-15.md`
 - `docs/reports/stage-2-production-acceptance-b507b0c3.md`（当前固定 PASS 证据）
 - `docs/reports/stage-2-production-acceptance.md`
 - `docs/reports/stage-2-production-acceptance-1a53c93a.md`

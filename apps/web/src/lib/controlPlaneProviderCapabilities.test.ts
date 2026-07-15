@@ -64,15 +64,80 @@ describe("Control Plane Provider capability decisions", () => {
     },
   );
 
-  it("blocks statically unsupported advanced commands before consulting a Worker projection", () => {
+  it("waits for an observed Worker projection for implemented advanced commands", () => {
     expect(
       resolveControlPlaneCapabilityDecision({
         isAuthoritative: true,
         projection: undefined,
         provider: "codex",
+        capabilityId: "compact",
+      }),
+    ).toMatchObject({ allowed: false, status: "loading", temporary: true });
+  });
+
+  it.each(["rollback", "fork"] as const)(
+    "accepts only explicit Control Plane emulation for statically unsupported %s",
+    (capabilityId) => {
+      expect(
+        resolveControlPlaneCapabilityDecision({
+          isAuthoritative: true,
+          projection: projection("codex", {
+            capabilityId,
+            status: "supported",
+            reasonCode: "capability_supported",
+            supportMode: "emulated",
+          }),
+          provider: "codex",
+          capabilityId,
+        }),
+      ).toMatchObject({ allowed: true, status: "supported", supportMode: "emulated" });
+
+      expect(
+        resolveControlPlaneCapabilityDecision({
+          isAuthoritative: true,
+          projection: projection("codex", {
+            capabilityId,
+            status: "supported",
+            reasonCode: "capability_supported",
+            supportMode: "native",
+          }),
+          provider: "codex",
+          capabilityId,
+        }),
+      ).toMatchObject({ allowed: false, status: "supported", supportMode: "native" });
+    },
+  );
+
+  it("uses observed support mode for Provider-backed compact", () => {
+    expect(
+      resolveControlPlaneCapabilityDecision({
+        isAuthoritative: true,
+        projection: projection("codex", {
+          capabilityId: "compact",
+          status: "supported",
+          reasonCode: "capability_supported",
+          supportMode: "emulated",
+        }),
+        provider: "codex",
+        capabilityId: "compact",
+      }),
+    ).toMatchObject({ allowed: true, status: "supported", supportMode: "emulated" });
+  });
+
+  it("does not let a projection override a local-only Provider", () => {
+    expect(
+      resolveControlPlaneCapabilityDecision({
+        isAuthoritative: true,
+        projection: projection("cursor", {
+          capabilityId: "fork",
+          status: "supported",
+          reasonCode: "capability_supported",
+          supportMode: "emulated",
+        }),
+        provider: "cursor",
         capabilityId: "fork",
       }),
-    ).toMatchObject({ allowed: false, status: "unsupported", temporary: false });
+    ).toMatchObject({ allowed: false, status: "unsupported" });
   });
 
   it("allows native and emulated projected support", () => {

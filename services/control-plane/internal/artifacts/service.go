@@ -35,7 +35,11 @@ var allowedKinds = map[string]struct{}{
 	"workspace_snapshot": {}, "checkpoint": {},
 }
 
-var checkpointArtifactNamespace = uuid.MustParse("2a54ef28-e6e7-5b78-91e6-d268e84da111")
+var (
+	checkpointArtifactNamespace = uuid.MustParse("2a54ef28-e6e7-5b78-91e6-d268e84da111")
+	workerArtifactNamespace     = uuid.MustParse("7836bb83-81d3-5a45-bff1-420789e2024f")
+	errWorkerArtifactCreateRace = errors.New("worker artifact create raced")
+)
 
 type Service struct {
 	db             *gorm.DB
@@ -128,36 +132,129 @@ func (s *Service) CreateForWorker(
 		}
 		return s.createCheckpointArtifactForWorker(ctx, worker, executionID, input, normalized)
 	}
-	var model persistence.Artifact
-	var plainToken string
-	err = persistence.InTransaction(ctx, s.db, func(tx *gorm.DB) error {
-		execution, err := s.executions.AuthorizeArtifactWrite(ctx, tx, worker, executionID, executions.LeaseInput{
-			TenantID: input.TenantID, Generation: input.Generation, LeaseToken: input.LeaseToken,
-		})
-		if err != nil {
-			return err
-		}
-		var session persistence.AgentSession
-		if err := tx.WithContext(ctx).
-			Where("tenant_id = ? AND id = ? AND status = ?", execution.TenantID, execution.SessionID, "active").
-			Take(&session).Error; err != nil {
-			return problem.Wrap(409, "artifact_session_unavailable", "The execution session is unavailable for artifact upload.", err)
-		}
-		model, plainToken, err = s.pendingModel(session, normalized, "worker", worker.ID)
-		if err != nil {
-			return err
-		}
-		if err := tx.WithContext(ctx).Create(&model).Error; err != nil {
-			return problem.Wrap(409, "artifact_create_rejected", "Artifact creation was rejected by an isolation constraint.", err)
-		}
-		return nil
-	})
+	idempotencyKey, err := normalizeWorkerArtifactIdempotencyKey(input.IdempotencyKey)
 	if err != nil {
 		return UploadGrant{}, err
 	}
-	grant, err := s.uploadGrant(ctx, model, plainToken)
-	s.observe("create", 0, err)
-	return grant, err
+	return s.createRegularArtifactForWorker(ctx, worker, executionID, input, normalized, idempotencyKey)
+}
+
+func (s *Service) createRegularArtifactForWorker(
+	ctx context.Context,
+	worker persistence.WorkerInstance,
+	executionID uuid.UUID,
+	input WorkerCreateInput,
+	normalized CreateInput,
+	idempotencyKey *string,
+) (UploadGrant, error) {
+	for attempt := 0; attempt < 2; attempt++ {
+		var model persistence.Artifact
+		var plainToken string
+		err := persistence.InTransaction(ctx, s.db, func(tx *gorm.DB) error {
+			execution, err := s.executions.AuthorizeArtifactWrite(ctx, tx, worker, executionID, executions.LeaseInput{
+				TenantID: input.TenantID, Generation: input.Generation, LeaseToken: input.LeaseToken,
+			})
+			if err != nil {
+				return err
+			}
+			var session persistence.AgentSession
+			if err := tx.WithContext(ctx).
+				Where("tenant_id = ? AND id = ? AND status = ?", execution.TenantID, execution.SessionID, "active").
+				Take(&session).Error; err != nil {
+				return problem.Wrap(409, "artifact_session_unavailable", "The execution session is unavailable for artifact upload.", err)
+			}
+			if idempotencyKey == nil {
+				model, plainToken, err = s.pendingModel(session, normalized, "worker", worker.ID)
+				if err != nil {
+					return err
+				}
+				if err := tx.WithContext(ctx).Create(&model).Error; err != nil {
+					return problem.Wrap(409, "artifact_create_rejected", "Artifact creation was rejected by an isolation constraint.", err)
+				}
+				return nil
+			}
+
+			artifactID := workerArtifactID(executionID, input.Generation, *idempotencyKey)
+			loadErr := persistence.WithLocking(tx.WithContext(ctx), "UPDATE", "").
+				Where("tenant_id = ? AND id = ?", execution.TenantID, artifactID).Take(&model).Error
+			if errors.Is(loadErr, gorm.ErrRecordNotFound) {
+				model, plainToken, err = s.pendingModelWithID(session, normalized, "worker", worker.ID, artifactID, nil)
+				if err != nil {
+					return err
+				}
+				if err := tx.WithContext(ctx).Create(&model).Error; err != nil {
+					if errors.Is(err, gorm.ErrDuplicatedKey) {
+						return errWorkerArtifactCreateRace
+					}
+					return problem.Wrap(409, "artifact_create_rejected", "Artifact creation was rejected by an isolation constraint.", err)
+				}
+				return nil
+			}
+			if loadErr != nil {
+				return problem.Wrap(500, "artifact_load_failed", "Failed to inspect the idempotent Artifact.", loadErr)
+			}
+			if !workerArtifactMatchesCreate(model, execution, worker, artifactID, normalized) {
+				return problem.New(409, "artifact_idempotency_conflict", "The Artifact idempotency key was already used with different ownership or metadata.")
+			}
+			switch model.Status {
+			case "pending":
+				model, plainToken, err = s.refreshPendingArtifactGrant(ctx, tx, model)
+				return err
+			case "ready":
+				return nil
+			default:
+				return problem.New(409, "artifact_idempotency_unavailable", "The idempotent Artifact is no longer available for upload.")
+			}
+		})
+		if errors.Is(err, errWorkerArtifactCreateRace) {
+			continue
+		}
+		if err != nil {
+			return UploadGrant{}, err
+		}
+		if model.Status == "ready" {
+			return UploadGrant{Artifact: toArtifact(model), UploadRequired: false}, nil
+		}
+		grant, err := s.uploadGrant(ctx, model, plainToken)
+		s.observe("create", 0, err)
+		return grant, err
+	}
+	return UploadGrant{}, problem.New(409, "artifact_idempotency_race", "The idempotent Artifact is still being committed; retry with the same key.")
+}
+
+func normalizeWorkerArtifactIdempotencyKey(value *string) (*string, error) {
+	if value == nil {
+		return nil, nil
+	}
+	key := strings.TrimSpace(*value)
+	if key == "" || key != *value || len(key) > 200 {
+		return nil, problem.New(400, "invalid_artifact_idempotency_key", "idempotencyKey is invalid.")
+	}
+	for _, character := range key {
+		if unicode.IsSpace(character) || unicode.IsControl(character) {
+			return nil, problem.New(400, "invalid_artifact_idempotency_key", "idempotencyKey is invalid.")
+		}
+	}
+	return &key, nil
+}
+
+func workerArtifactID(executionID uuid.UUID, generation int64, idempotencyKey string) uuid.UUID {
+	seed := []byte(fmt.Sprintf("%s\x00%d\x00%s", executionID, generation, idempotencyKey))
+	return uuid.NewSHA1(workerArtifactNamespace, seed)
+}
+
+func workerArtifactMatchesCreate(
+	model persistence.Artifact,
+	execution persistence.AgentExecution,
+	worker persistence.WorkerInstance,
+	artifactID uuid.UUID,
+	input CreateInput,
+) bool {
+	return model.ID == artifactID && model.TenantID == execution.TenantID &&
+		model.SessionID == execution.SessionID && model.ExecutionID != nil && *model.ExecutionID == execution.ID &&
+		model.WorkspaceCheckpointID == nil && model.Kind == input.Kind &&
+		model.CreatedByType == "worker" && model.CreatedByID == worker.ID &&
+		sameOptionalString(model.OriginalName, input.OriginalName) && sameOptionalTime(model.ExpiresAt, input.ExpiresAt)
 }
 
 func (s *Service) uploadGrant(ctx context.Context, model persistence.Artifact, plainToken string) (UploadGrant, error) {
@@ -331,7 +428,7 @@ func (s *Service) refreshPendingArtifactGrant(
 		Where("tenant_id = ? AND id = ? AND status = ?", model.TenantID, model.ID, "pending").
 		Updates(updates)
 	if updated.Error != nil || updated.RowsAffected != 1 {
-		return persistence.Artifact{}, "", problem.Wrap(409, "artifact_grant_refresh_conflict", "The Checkpoint Artifact upload grant changed concurrently.", updated.Error)
+		return persistence.Artifact{}, "", problem.Wrap(409, "artifact_grant_refresh_conflict", "The Artifact upload grant changed concurrently.", updated.Error)
 	}
 	model.UploadExpiresAt = &uploadExpiry
 	return model, plainToken, nil
@@ -867,9 +964,9 @@ func (s *Service) deleteModel(
 	err = persistence.InTransaction(ctx, s.db, func(tx *gorm.DB) error {
 		update := tx.WithContext(ctx).Model(&persistence.Artifact{}).
 			Where("id = ? AND tenant_id = ? AND status = ?", model.ID, model.TenantID, "deleting").
-				Updates(map[string]any{
-					"status": "deleted", "deleted_at": now, "upload_token_hash": nil,
-				})
+			Updates(map[string]any{
+				"status": "deleted", "deleted_at": now, "upload_token_hash": nil,
+			})
 		if update.Error != nil || update.RowsAffected != 1 {
 			return problem.Wrap(409, "artifact_delete_commit_failed", "Failed to commit artifact deletion.", update.Error)
 		}

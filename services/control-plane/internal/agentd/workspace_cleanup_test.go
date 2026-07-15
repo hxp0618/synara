@@ -61,8 +61,129 @@ func TestWorkspaceCleanupDeletesV3WithoutFollowingCheckoutSymlinkOrTouchingCache
 	}
 }
 
+func TestWorkspaceCleanupDeletesV3ActiveBackupAndStagingGenerations(t *testing.T) {
+	fixture := newWorkspaceCleanupTestFixture(t, workspaceLayoutV3, false)
+	backup := createWorkspaceCleanupResidue(t, fixture, "backup", nil)
+	staging := createWorkspaceCleanupResidue(t, fixture, "staging", nil)
+
+	result, err := fixture.materializer.CleanupWorkspace(context.Background(), fixture.request)
+	if err != nil || result.Status != WorkspaceCleanupDeleted {
+		t.Fatalf("CleanupWorkspace() = %#v, %v", result, err)
+	}
+	assertPathAbsent(t, fixture.source)
+	assertPathAbsent(t, backup)
+	assertPathAbsent(t, staging)
+}
+
+func TestWorkspaceCleanupDeletesV3OrphanGenerationsWhenActiveIsAbsent(t *testing.T) {
+	fixture := newWorkspaceCleanupTestFixture(t, workspaceLayoutV3, false)
+	if err := os.RemoveAll(fixture.source); err != nil {
+		t.Fatal(err)
+	}
+	backup := createWorkspaceCleanupResidue(t, fixture, "backup", nil)
+	staging := createWorkspaceCleanupResidue(t, fixture, "staging", nil)
+
+	result, err := fixture.materializer.CleanupWorkspace(context.Background(), fixture.request)
+	if err != nil || result.Status != WorkspaceCleanupDeleted {
+		t.Fatalf("orphan-only CleanupWorkspace() = %#v, %v", result, err)
+	}
+	assertPathAbsent(t, backup)
+	assertPathAbsent(t, staging)
+
+	replayed, err := fixture.materializer.CleanupWorkspace(context.Background(), fixture.request)
+	if err != nil || replayed.Status != WorkspaceCleanupAlreadyAbsent {
+		t.Fatalf("orphan-only cleanup replay = %#v, %v", replayed, err)
+	}
+}
+
+func TestWorkspaceCleanupV2DeletesOnlyExactGenerationResidue(t *testing.T) {
+	fixture := newWorkspaceCleanupTestFixture(t, workspaceLayoutV2, false)
+	if err := os.RemoveAll(fixture.source); err != nil {
+		t.Fatal(err)
+	}
+	exactManifest := cleanupManifestForRequest(fixture.request)
+	exactBackup := createWorkspaceCleanupResidue(t, fixture, "backup", &exactManifest)
+	exactStaging := createWorkspaceCleanupResidue(t, fixture, "staging", &exactManifest)
+	staleManifest := cleanupManifestForRequest(fixture.request)
+	staleManifest.MaterializationID = uuid.NewString()
+	staleManifest.IncarnationID = uuid.NewString()
+	staleStaging := createWorkspaceCleanupResidue(t, fixture, "staging", &staleManifest)
+	staleSentinel := filepath.Join(staleStaging, "checkout", "new-incarnation")
+	if err := os.WriteFile(staleSentinel, []byte("preserve"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := fixture.materializer.CleanupWorkspace(context.Background(), fixture.request)
+	if err != nil || result.Status != WorkspaceCleanupDeleted {
+		t.Fatalf("v2 residue CleanupWorkspace() = %#v, %v", result, err)
+	}
+	assertPathAbsent(t, fixture.source)
+	assertPathAbsent(t, exactBackup)
+	assertPathAbsent(t, exactStaging)
+	assertFileContents(t, staleSentinel, "preserve")
+	manifest, err := readWorkspaceManifest(filepath.Join(staleStaging, "manifest.json"))
+	if err != nil || manifest.MaterializationID != staleManifest.MaterializationID ||
+		manifest.IncarnationID != staleManifest.IncarnationID {
+		t.Fatalf("stale v2 residue changed: %#v, %v", manifest, err)
+	}
+}
+
+func TestWorkspaceCleanupV2RejectsResidueWithoutVerifiableIdentity(t *testing.T) {
+	fixture := newWorkspaceCleanupTestFixture(t, workspaceLayoutV2, false)
+	if err := os.RemoveAll(fixture.source); err != nil {
+		t.Fatal(err)
+	}
+	staging := createWorkspaceCleanupResidue(t, fixture, "staging", nil)
+	sentinel := filepath.Join(staging, "checkout", "preserve")
+	if err := os.WriteFile(sentinel, []byte("preserve"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := fixture.materializer.CleanupWorkspace(context.Background(), fixture.request)
+	assertPermanentWorkspaceCleanupError(t, err, "workspace_cleanup_identity_mismatch")
+	assertFileContents(t, sentinel, "preserve")
+}
+
+func TestWorkspaceCleanupRejectsUnsafeGenerationResidueWithoutMutation(t *testing.T) {
+	t.Run("symlink", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("symlink setup requires Developer Mode on Windows")
+		}
+		fixture := newWorkspaceCleanupTestFixture(t, workspaceLayoutV3, false)
+		external := t.TempDir()
+		sentinel := filepath.Join(external, "sentinel")
+		if err := os.WriteFile(sentinel, []byte("preserve"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		residue := newWorkspaceCleanupResiduePath(fixture, "backup")
+		if err := os.Symlink(external, residue); err != nil {
+			t.Fatal(err)
+		}
+
+		_, err := fixture.materializer.CleanupWorkspace(context.Background(), fixture.request)
+		assertPermanentWorkspaceCleanupError(t, err, "workspace_cleanup_unsafe_path")
+		assertPathPresent(t, fixture.source)
+		assertPathPresent(t, residue)
+		assertFileContents(t, sentinel, "preserve")
+	})
+
+	t.Run("non-directory", func(t *testing.T) {
+		fixture := newWorkspaceCleanupTestFixture(t, workspaceLayoutV3, false)
+		residue := newWorkspaceCleanupResiduePath(fixture, "staging")
+		if err := os.WriteFile(residue, []byte("preserve"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		_, err := fixture.materializer.CleanupWorkspace(context.Background(), fixture.request)
+		assertPermanentWorkspaceCleanupError(t, err, "workspace_cleanup_unsafe_path")
+		assertPathPresent(t, fixture.source)
+		assertFileContents(t, residue, "preserve")
+	})
+}
+
 func TestWorkspaceCleanupPersistsEveryNamespaceTransitionBeforeSuccess(t *testing.T) {
 	fixture := newWorkspaceCleanupTestFixture(t, workspaceLayoutV3, false)
+	createWorkspaceCleanupResidue(t, fixture, "staging", nil)
 	calls := make([]workspaceCleanupSyncCall, 0, 24)
 	fixture.materializer.cleanupDirectorySync = func(root *os.Root, relative string) error {
 		calls = append(calls, workspaceCleanupSyncCall{
@@ -86,6 +207,7 @@ func TestWorkspaceCleanupPersistsEveryNamespaceTransitionBeforeSuccess(t *testin
 			root:     filepath.Join(mainRoot, fixture.layout.PayloadRelative),
 			relative: ".",
 		},
+		{root: filepath.Clean(filepath.Dir(fixture.source)), relative: "."},
 	}
 	for _, expected := range required {
 		found := false
@@ -646,6 +768,32 @@ func createWorkspaceCleanupGeneration(t *testing.T, root string, manifest worksp
 	if err := writeWorkspaceManifest(root, manifest); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func newWorkspaceCleanupResiduePath(fixture workspaceCleanupTestFixture, kind string) string {
+	return filepath.Join(
+		filepath.Dir(fixture.source),
+		"."+filepath.Base(fixture.source)+"."+kind+"-"+uuid.NewString(),
+	)
+}
+
+func createWorkspaceCleanupResidue(
+	t *testing.T,
+	fixture workspaceCleanupTestFixture,
+	kind string,
+	manifest *workspaceGenerationManifest,
+) string {
+	t.Helper()
+	path := newWorkspaceCleanupResiduePath(fixture, kind)
+	if err := os.MkdirAll(filepath.Join(path, "checkout"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if manifest != nil {
+		if err := writeWorkspaceManifest(path, *manifest); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return path
 }
 
 func assertPermanentWorkspaceCleanupError(t *testing.T, err error, code string) {

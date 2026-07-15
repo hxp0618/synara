@@ -171,7 +171,7 @@ func TestDaemonPreparesManagedWorkspaceBeforeStartingProvider(t *testing.T) {
 	tenantID := uuid.New()
 	workerID := uuid.New()
 	workspaceID := uuid.New()
-	gitCredentialID := uuid.New()
+	gitGrantID := uuid.New()
 	checkpointID := uuid.New()
 	artifactID := uuid.New()
 	lease := executions.Lease{
@@ -201,12 +201,12 @@ func TestDaemonPreparesManagedWorkspaceBeforeStartingProvider(t *testing.T) {
 			state.order = append(state.order, "checkpoint.upload")
 			state.Unlock()
 			response.WriteHeader(http.StatusNoContent)
-		case base + "git-credentials/" + gitCredentialID.String() + "/resolve":
+		case base + "credential-grants/" + gitGrantID.String() + "/resolve":
 			state.Lock()
 			state.order = append(state.order, "git.resolve")
 			state.Unlock()
 			response.Header().Set("Content-Type", "application/json")
-			_, _ = io.WriteString(response, `{"payload":{"host":"git.example.com","username":"git-user","token":"git-secret-token"}}`)
+			_, _ = io.WriteString(response, `{"grantId":"`+gitGrantID.String()+`","bindingKind":"git_fetch","purpose":"git","provider":"git","credentialType":"https_token","selector":"https://git.example.com/team/repository.git","payload":{"host":"git.example.com","username":"git-user","token":"git-secret-token"}}`)
 		case base + "workspace/ready":
 			var input executions.WorkspaceReadyInput
 			if err := json.NewDecoder(request.Body).Decode(&input); err != nil {
@@ -296,8 +296,10 @@ func TestDaemonPreparesManagedWorkspaceBeforeStartingProvider(t *testing.T) {
 	daemon := &Daemon{
 		config: cfg, client: client, runner: NewRunner(cfg),
 		workspace: workspaceMaterializerInspector{
-			materialize: func(_ context.Context, _ executions.Execution, _ executions.Workload, credential *GitHTTPSCredential) (WorkspaceMaterialization, error) {
-				if credential == nil || credential.Host != "git.example.com" || credential.Username != "git-user" || credential.Token != "git-secret-token" {
+			materialize: func(_ context.Context, _ executions.Execution, _ executions.Workload, credential *WorkspaceGitCredential) (WorkspaceMaterialization, error) {
+				if credential == nil || credential.HTTPS == nil || credential.SSH != nil ||
+					credential.HTTPS.Host != "git.example.com" || credential.HTTPS.Username != "git-user" ||
+					credential.HTTPS.Token != "git-secret-token" {
 					t.Fatalf("Workspace materializer received an invalid Git Credential: %#v", credential)
 				}
 				state.Lock()
@@ -321,7 +323,10 @@ func TestDaemonPreparesManagedWorkspaceBeforeStartingProvider(t *testing.T) {
 	workload := executions.Workload{
 		TenantID: tenantID, OrganizationID: uuid.New(), ProjectID: uuid.New(), SessionID: uuid.New(),
 		TurnID: execution.TurnID, RemoteWorkspaceID: &workspaceID, Provider: "codex", InputText: "run",
-		GitCredentialID: &gitCredentialID,
+		CredentialGrants: []executions.CredentialGrantDescriptor{{
+			GrantID: gitGrantID, BindingKind: "git_fetch", Purpose: "git", Provider: "git",
+			CredentialType: "https_token", Selector: "https://git.example.com/team/repository.git",
+		}},
 	}
 	if err := daemon.runExecution(context.Background(), execution, lease, workload, nil); err != nil {
 		t.Fatal(err)
@@ -406,7 +411,7 @@ func TestDaemonReportsManagedWorkspaceFailureBeforeFailingExecution(t *testing.T
 	client.workerToken = "worker-token"
 	daemon := &Daemon{
 		config: cfg, client: client, runner: NewRunner(cfg),
-		workspace: workspaceMaterializerFunc(func(context.Context, executions.Execution, executions.Workload, *GitHTTPSCredential) (WorkspaceMaterialization, error) {
+		workspace: workspaceMaterializerFunc(func(context.Context, executions.Execution, executions.Workload, *WorkspaceGitCredential) (WorkspaceMaterialization, error) {
 			return WorkspaceMaterialization{}, workspaceFailure(
 				"workspace_invalid", "Repository URL is not allowed for a remote Workspace.", true, false,
 			)
@@ -431,19 +436,19 @@ func TestDaemonReportsManagedWorkspaceFailureBeforeFailingExecution(t *testing.T
 	}
 }
 
-type workspaceMaterializerFunc func(context.Context, executions.Execution, executions.Workload, *GitHTTPSCredential) (WorkspaceMaterialization, error)
+type workspaceMaterializerFunc func(context.Context, executions.Execution, executions.Workload, *WorkspaceGitCredential) (WorkspaceMaterialization, error)
 
 func (f workspaceMaterializerFunc) Materialize(
 	ctx context.Context,
 	execution executions.Execution,
 	workload executions.Workload,
-	credential *GitHTTPSCredential,
+	credential *WorkspaceGitCredential,
 ) (WorkspaceMaterialization, error) {
 	return f(ctx, execution, workload, credential)
 }
 
 type workspaceMaterializerInspector struct {
-	materialize func(context.Context, executions.Execution, executions.Workload, *GitHTTPSCredential) (WorkspaceMaterialization, error)
+	materialize func(context.Context, executions.Execution, executions.Workload, *WorkspaceGitCredential) (WorkspaceMaterialization, error)
 	inspect     func(context.Context, WorkspaceMaterialization) (WorkspaceInspection, error)
 }
 
@@ -451,7 +456,7 @@ func (m workspaceMaterializerInspector) Materialize(
 	ctx context.Context,
 	execution executions.Execution,
 	workload executions.Workload,
-	credential *GitHTTPSCredential,
+	credential *WorkspaceGitCredential,
 ) (WorkspaceMaterialization, error) {
 	return m.materialize(ctx, execution, workload, credential)
 }

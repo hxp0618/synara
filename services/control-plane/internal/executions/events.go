@@ -3,11 +3,13 @@ package executions
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"math"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"gorm.io/gorm"
@@ -215,8 +217,7 @@ func IsCanonicalRuntimeEventV2Payload(eventType string, payload map[string]any) 
 	case "item.started", "item.updated", "item.completed":
 		return validItemLifecycle(payload)
 	case "content.delta":
-		return requiredEnum(payload, "streamKind", "assistant_text", "reasoning_text", "reasoning_summary_text", "plan_text", "command_output", "file_change_output", "unknown") &&
-			requiredString(payload, "delta") && optionalInteger(payload, "contentIndex") && optionalInteger(payload, "summaryIndex")
+		return validContentDelta(payload)
 	case "request.opened":
 		return requiredCanonicalRequestType(payload) && optionalTrimmedString(payload, "detail")
 	case "request.resolved":
@@ -365,12 +366,125 @@ func validTokenUsage(usage map[string]any) bool {
 }
 
 func validItemLifecycle(payload map[string]any) bool {
-	return requiredEnum(payload, "itemType", "user_message", "assistant_message", "reasoning", "plan",
+	if !requiredEnum(payload, "itemType", "user_message", "assistant_message", "reasoning", "plan",
 		"command_execution", "file_change", "mcp_tool_call", "dynamic_tool_call", "collab_agent_tool_call",
 		"web_search", "image_view", "image_generation", "review_entered", "review_exited",
 		"context_compaction", "error", "unknown") &&
 		optionalEnum(payload, "status", "inProgress", "completed", "failed", "declined") &&
-		optionalTrimmedString(payload, "title") && optionalTrimmedString(payload, "detail")
+		optionalTrimmedString(payload, "title") && optionalTrimmedString(payload, "detail") {
+		return false
+	}
+	dataValue, found := payload["data"]
+	if !found {
+		return true
+	}
+	data, ok := dataValue.(map[string]any)
+	if !ok || data == nil {
+		return true
+	}
+	terminalValue, found := data["terminal"]
+	if !found {
+		return true
+	}
+	if payload["itemType"] != "command_execution" {
+		return false
+	}
+	terminal, ok := terminalValue.(map[string]any)
+	return ok && terminal != nil && validTerminalLifecycleData(terminal)
+}
+
+func validContentDelta(payload map[string]any) bool {
+	if !requiredEnum(payload, "streamKind", "assistant_text", "reasoning_text", "reasoning_summary_text", "plan_text", "command_output", "file_change_output", "unknown") ||
+		!requiredString(payload, "delta") || !optionalInteger(payload, "contentIndex") || !optionalInteger(payload, "summaryIndex") ||
+		!optionalTrimmedString(payload, "terminalId") || !optionalEnum(payload, "encoding", "utf-8", "binary") ||
+		!optionalNonNegativeInteger(payload, "byteOffset") || !optionalNonNegativeInteger(payload, "byteLength") ||
+		!optionalBool(payload, "truncated") {
+		return false
+	}
+
+	streamKind, _ := payload["streamKind"].(string)
+	encoding, hasEncoding := payload["encoding"].(string)
+	if streamKind == "command_output" {
+		if !requiredTrimmedString(payload, "terminalId") ||
+			!requiredEnum(payload, "encoding", "utf-8", "binary") ||
+			!requiredNonNegativeInteger(payload, "byteOffset") ||
+			!requiredNonNegativeInteger(payload, "byteLength") {
+			return false
+		}
+		return validContentDeltaByteLength(payload, encoding)
+	}
+
+	if !hasEncoding {
+		return true
+	}
+	if encoding == "binary" {
+		return requiredNonNegativeInteger(payload, "byteLength") && validContentDeltaByteLength(payload, encoding)
+	}
+	if _, hasByteLength := payload["byteLength"]; hasByteLength {
+		return validContentDeltaByteLength(payload, encoding)
+	}
+	return true
+}
+
+func validContentDeltaByteLength(payload map[string]any, encoding string) bool {
+	delta, ok := payload["delta"].(string)
+	if !ok || !requiredNonNegativeInteger(payload, "byteLength") {
+		return false
+	}
+	want := numberValue(payload["byteLength"])
+	switch encoding {
+	case "utf-8":
+		return utf8.ValidString(delta) && want == float64(len([]byte(delta)))
+	case "binary":
+		decoded, err := base64.StdEncoding.Strict().DecodeString(delta)
+		return err == nil && base64.StdEncoding.EncodeToString(decoded) == delta && want == float64(len(decoded))
+	default:
+		return false
+	}
+}
+
+func validTerminalLifecycleData(terminal map[string]any) bool {
+	if !requiredTrimmedString(terminal, "terminalId") ||
+		!optionalTrimmedString(terminal, "commandSummary") ||
+		!optionalTrimmedString(terminal, "cwdLabel") {
+		return false
+	}
+	eventType, ok := terminal["eventType"].(string)
+	if !ok {
+		return false
+	}
+	switch eventType {
+	case "terminal.started":
+		return true
+	case "terminal.output.reference":
+		return requiredCanonicalUUID(terminal, "artifactId") &&
+			requiredNonNegativeInteger(terminal, "offset") &&
+			requiredNonNegativeInteger(terminal, "length") &&
+			requiredNonNegativeInteger(terminal, "segmentIndex") &&
+			requiredEnum(terminal, "encoding", "utf-8", "binary")
+	case "terminal.exited", "terminal.failed":
+		if !requiredNonNegativeInteger(terminal, "totalBytes") ||
+			!requiredNonNegativeInteger(terminal, "previewBytes") ||
+			!requiredNonNegativeInteger(terminal, "segmentCount") ||
+			!requiredBool(terminal, "truncated") ||
+			!optionalInteger(terminal, "exitCode") ||
+			!optionalTrimmedString(terminal, "signal") ||
+			!optionalEnum(terminal, "failureKind", "exit", "signal", "timeout", "oom", "provider_error") {
+			return false
+		}
+		return numberValue(terminal["previewBytes"]) <= numberValue(terminal["totalBytes"])
+	default:
+		return false
+	}
+}
+
+func requiredCanonicalUUID(value map[string]any, key string) bool {
+	text, ok := value[key].(string)
+	if !ok {
+		return false
+	}
+	parsed, err := uuid.Parse(text)
+	return err == nil && strings.EqualFold(parsed.String(), text)
 }
 
 func requiredCanonicalRequestType(payload map[string]any) bool {

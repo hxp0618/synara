@@ -179,13 +179,21 @@ func TestResumeSnapshotStateAndSequenceQueriesAreSQLiteCompatible(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.AutoMigrate(&persistence.SessionEvent{}); err != nil {
+	if err := db.AutoMigrate(&persistence.AgentSession{}, &persistence.SessionEvent{}); err != nil {
 		t.Fatal(err)
 	}
 	tenantID := uuid.New()
 	sessionID := uuid.New()
 	executionID := uuid.New()
 	now := time.Now().UTC()
+	if err := db.Create(&persistence.AgentSession{
+		ID: sessionID, TenantID: tenantID, OrganizationID: uuid.New(), ProjectID: uuid.New(),
+		CreatedBy: uuid.New(), Title: "SQLite state marker projection", Status: "active",
+		Visibility: "private", Provider: "codex", ExecutionTargetID: uuid.New(),
+		LastEventSequence: 2, CreatedAt: now, UpdatedAt: now,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
 	for _, event := range []persistence.SessionEvent{
 		{
 			TenantID: tenantID, SessionID: sessionID, Sequence: 1, EventID: uuid.New(),

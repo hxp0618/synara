@@ -4,8 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
-	"os"
+	"net"
+	"net/http"
+	"net/url"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -15,11 +18,16 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/synara-ai/synara/services/control-plane/internal/executions"
+	"github.com/synara-ai/synara/services/control-plane/internal/secretguard"
 )
 
 const (
 	workspaceCleanupProbeExecutionInterval = 4
 	workspaceCleanupProbeMaximumInterval   = 30 * time.Second
+	drainCheckpointTimeout                 = 2 * time.Second
+	drainPreservationTimeout               = 8 * time.Second
+	drainCheckpointRenewMaximumAttempts    = 3
+	drainCheckpointRenewRequestIDPrefix    = "drain-checkpoint-renew-"
 )
 
 type workspaceCleanupClaimSchedule struct {
@@ -86,12 +94,16 @@ func (d *Daemon) Run(ctx context.Context) error {
 	go d.waitForDrain(ctx, cancelRun, runDone, drainMarked)
 	heartbeatContext, stopHeartbeat := context.WithCancel(runContext)
 	defer stopHeartbeat()
-	go d.heartbeatLoop(heartbeatContext)
+	workerFatalErrors := make(chan error, 1)
+	go d.heartbeatLoop(heartbeatContext, cancelRun, workerFatalErrors)
 	cleanupSchedule := newWorkspaceCleanupClaimSchedule(time.Now())
 	canClaimWorkspaceCleanup := workspaceCleanupClaimsEnabled(d.config)
 
 	for {
 		if d.draining.Load() || runContext.Err() != nil {
+			if fatalErr := receiveWorkerFatalError(workerFatalErrors); fatalErr != nil {
+				return fmt.Errorf("Worker authorization was revoked: %w", fatalErr)
+			}
 			if d.draining.Load() {
 				<-drainMarked
 			}
@@ -107,6 +119,10 @@ func (d *Daemon) Run(ctx context.Context) error {
 				return nil
 			}
 			if cleanupErr != nil {
+				if isWorkerRevocationError(cleanupErr) {
+					cancelRun()
+					return fmt.Errorf("claim Workspace cleanup: %w", cleanupErr)
+				}
 				d.logger.Warn("Workspace cleanup fairness probe failed", "error", cleanupErr)
 			} else if claimedCleanup {
 				continue
@@ -114,7 +130,14 @@ func (d *Daemon) Run(ctx context.Context) error {
 		}
 		claim, err := d.client.Claim(runContext, d.config)
 		if err != nil {
+			if isWorkerRevocationError(err) {
+				cancelRun()
+				return fmt.Errorf("claim execution: %w", err)
+			}
 			if d.draining.Load() || runContext.Err() != nil {
+				if fatalErr := receiveWorkerFatalError(workerFatalErrors); fatalErr != nil {
+					return fmt.Errorf("Worker authorization was revoked: %w", fatalErr)
+				}
 				if d.draining.Load() {
 					<-drainMarked
 				}
@@ -122,6 +145,9 @@ func (d *Daemon) Run(ctx context.Context) error {
 			}
 			d.logger.Warn("execution claim failed", "error", err)
 			if !waitContext(runContext, d.config.PollInterval) {
+				if fatalErr := receiveWorkerFatalError(workerFatalErrors); fatalErr != nil {
+					return fmt.Errorf("Worker authorization was revoked: %w", fatalErr)
+				}
 				return nil
 			}
 			continue
@@ -135,6 +161,10 @@ func (d *Daemon) Run(ctx context.Context) error {
 					return nil
 				}
 				if cleanupErr != nil {
+					if isWorkerRevocationError(cleanupErr) {
+						cancelRun()
+						return fmt.Errorf("claim Workspace cleanup: %w", cleanupErr)
+					}
 					if d.draining.Load() || runContext.Err() != nil {
 						if d.draining.Load() {
 							<-drainMarked
@@ -143,6 +173,9 @@ func (d *Daemon) Run(ctx context.Context) error {
 					}
 					d.logger.Warn("Workspace cleanup claim failed", "error", cleanupErr)
 					if !waitContext(runContext, d.config.PollInterval) {
+						if fatalErr := receiveWorkerFatalError(workerFatalErrors); fatalErr != nil {
+							return fmt.Errorf("Worker authorization was revoked: %w", fatalErr)
+						}
 						return nil
 					}
 					continue
@@ -152,6 +185,9 @@ func (d *Daemon) Run(ctx context.Context) error {
 				}
 			}
 			if !waitContext(runContext, d.config.PollInterval) {
+				if fatalErr := receiveWorkerFatalError(workerFatalErrors); fatalErr != nil {
+					return fmt.Errorf("Worker authorization was revoked: %w", fatalErr)
+				}
 				return nil
 			}
 			continue
@@ -168,6 +204,10 @@ func (d *Daemon) Run(ctx context.Context) error {
 			continue
 		}
 		if err := d.runExecution(runContext, *claim.Execution, *claim.Lease, *claim.Workload, claim.ProviderResumeCursor); err != nil {
+			if isWorkerRevocationError(err) {
+				cancelRun()
+				return fmt.Errorf("run execution after Worker revocation: %w", err)
+			}
 			d.logger.Error("execution runner failed", "executionId", claim.Execution.ID, "generation", claim.Lease.Generation, "error", err)
 		}
 		cleanupSchedule.recordExecution()
@@ -192,6 +232,9 @@ func (d *Daemon) claimAndRunWorkspaceCleanup(ctx context.Context) (bool, bool, e
 		return false, true, nil
 	}
 	if err := d.runWorkspaceCleanup(ctx, claim); err != nil {
+		if isWorkerRevocationError(err) {
+			return true, false, err
+		}
 		d.logger.Error(
 			"Workspace cleanup failed",
 			"cleanupId", claim.CleanupID,
@@ -395,7 +438,11 @@ func (d *Daemon) waitForDrain(
 	}
 }
 
-func (d *Daemon) heartbeatLoop(ctx context.Context) {
+func (d *Daemon) heartbeatLoop(
+	ctx context.Context,
+	cancelRun context.CancelFunc,
+	fatalErrors chan<- error,
+) {
 	ticker := time.NewTicker(d.config.HeartbeatInterval)
 	defer ticker.Stop()
 	for {
@@ -407,9 +454,26 @@ func (d *Daemon) heartbeatLoop(ctx context.Context) {
 			err := d.client.Heartbeat(requestContext, d.config, d.draining.Load())
 			cancel()
 			if err != nil && ctx.Err() == nil {
+				if isWorkerRevocationError(err) {
+					select {
+					case fatalErrors <- err:
+					default:
+					}
+					cancelRun()
+					return
+				}
 				d.logger.Warn("worker heartbeat failed", "error", err)
 			}
 		}
+	}
+}
+
+func receiveWorkerFatalError(fatalErrors <-chan error) error {
+	select {
+	case err := <-fatalErrors:
+		return err
+	default:
+		return nil
 	}
 }
 
@@ -433,23 +497,25 @@ func (d *Daemon) runExecution(
 		return drainRenewError(renewErrors)
 	}
 	defer func() { _ = stopRenewal() }()
+	executionGuard, guardErr := newExecutionSecretGuard(resumeCursor)
+	if guardErr != nil {
+		return d.failExecution(executionContext, execution.ID, lease, guardErr)
+	}
+	defer executionGuard.Close()
+	executionContext = withExecutionSecretGuard(executionContext, executionGuard)
 	materializer := d.workspace
 	if materializer == nil {
 		materializer = NewWorkspaceMaterializerWithCache(d.config.WorkspaceRoot, d.config.GitCacheRoot, d.config.ExecutionTargetID)
 	}
 	var err error
-	var gitCredential *GitHTTPSCredential
-	if workload.GitCredentialID != nil {
-		resolved, resolveErr := d.client.ResolveGitCredential(
-			executionContext, execution.ID, *workload.GitCredentialID, lease,
+	var gitCredential *WorkspaceGitCredential
+	gitCredential, err = resolveWorkspaceGitCredentialStage(
+		executionContext, d.client, execution.ID, lease, workload.CredentialGrants, "git_fetch", executionGuard,
+	)
+	if err != nil && !secretguard.IsExposure(err) {
+		err = workspaceFailure(
+			"credential_invalid", "The Project Git Credential could not be resolved or validated.", true, false,
 		)
-		if resolveErr != nil {
-			err = workspaceFailure(
-				"credential_invalid", "The Project Git Credential could not be resolved.", true, false,
-			)
-		} else {
-			gitCredential = &resolved.Payload
-		}
 	}
 	materialized := WorkspaceMaterialization{}
 	if err == nil {
@@ -462,7 +528,7 @@ func (d *Daemon) runExecution(
 			}
 		}()
 	}
-	clearGitHTTPSCredential(gitCredential)
+	clearWorkspaceGitCredential(gitCredential)
 	gitCredential = nil
 	if err == nil && workload.RestoreCheckpoint != nil {
 		restorer, ok := materializer.(workspaceRestorer)
@@ -493,6 +559,18 @@ func (d *Daemon) runExecution(
 			}
 		}
 	}
+	var artifactRoot *workspaceArtifactRoot
+	if err == nil {
+		artifactRoot, err = openWorkspaceArtifactRoot(materialized.Directory)
+		if err != nil {
+			err = workspaceFailure(
+				"workspace_invalid", "The Workspace Artifact root could not be bound safely.", true, false,
+			)
+		}
+	}
+	if artifactRoot != nil {
+		defer artifactRoot.Close()
+	}
 	if err != nil {
 		if ctx.Err() != nil {
 			renewErr := stopRenewal()
@@ -504,6 +582,7 @@ func (d *Daemon) runExecution(
 				return renewErr
 			}
 		}
+		err = executionGuard.SanitizeError(err)
 		failureMessage := err.Error()
 		if len(failureMessage) > 10_000 {
 			failureMessage = failureMessage[:10_000]
@@ -514,7 +593,7 @@ func (d *Daemon) runExecution(
 				executionContext, execution.ID, lease, runnerFailureCode(err), failureMessage,
 			)
 		}
-		failErr := d.failExecution(executionContext, execution.ID, lease, err)
+		failErr := d.failExecutionGuarded(executionContext, execution.ID, lease, executionGuard, err)
 		renewErr := stopRenewal()
 		return errors.Join(failErr, reportErr, renewErr)
 	}
@@ -525,7 +604,7 @@ func (d *Daemon) runExecution(
 				d.releaseDuringShutdown(execution.ID, lease, "agentd Drain deadline reached while reporting Workspace readiness")
 				return errors.Join(ctx.Err(), renewErr)
 			}
-			failErr := d.failExecution(executionContext, execution.ID, lease, fmt.Errorf("persist prepared Workspace: %w", err))
+			failErr := d.failExecutionGuarded(executionContext, execution.ID, lease, executionGuard, fmt.Errorf("persist prepared Workspace: %w", err))
 			return errors.Join(failErr, stopRenewal())
 		}
 	}
@@ -538,11 +617,42 @@ func (d *Daemon) runExecution(
 				d.releaseDuringShutdown(execution.ID, lease, "agentd Drain deadline reached while resolving Provider Credential")
 				return errors.Join(ctx.Err(), renewErr)
 			}
-			failErr := d.failExecution(executionContext, execution.ID, lease, fmt.Errorf("resolve provider credential: %w", err))
+			failErr := d.failExecutionGuarded(executionContext, execution.ID, lease, executionGuard, fmt.Errorf("resolve provider credential: %w", err))
 			return errors.Join(failErr, stopRenewal())
 		}
 		credential = &resolved
+		if guardErr := executionGuard.AddProviderCredential(credential); guardErr != nil {
+			clearRunnerCredential(credential)
+			return d.failExecutionGuarded(executionContext, execution.ID, lease, executionGuard, guardErr)
+		}
+		defer clearRunnerCredential(credential)
 	}
+	runtimeOutputRoot, err := newRuntimeOutputArtifactRoot()
+	if err != nil {
+		if ctx.Err() != nil {
+			renewErr := stopRenewal()
+			d.releaseDuringShutdown(execution.ID, lease, "agentd Drain deadline reached while preparing Runtime Output")
+			return errors.Join(ctx.Err(), renewErr)
+		}
+		failErr := d.failExecutionGuarded(
+			executionContext,
+			execution.ID,
+			lease,
+			executionGuard,
+			fmt.Errorf("prepare Provider Runtime Output: %w", err),
+		)
+		return errors.Join(failErr, stopRenewal())
+	}
+	defer func() {
+		if closeErr := runtimeOutputRoot.Close(); closeErr != nil {
+			d.logger.Warn(
+				"Runtime Output root cleanup failed",
+				"executionId", execution.ID,
+				"generation", lease.Generation,
+				"error", closeErr,
+			)
+		}
+	}()
 	if err := d.client.Start(executionContext, execution.ID, lease); err != nil {
 		if ctx.Err() != nil {
 			renewErr := stopRenewal()
@@ -554,27 +664,99 @@ func (d *Daemon) runExecution(
 		}
 		return fmt.Errorf("start execution: %w", err)
 	}
+	var primaryDelivery *executions.ControlCommandDelivery
+	var primaryControl *RunnerPrimaryOperationControl
+	if operation := workload.PrimaryOperation; operation != nil {
+		delivery := executions.ControlCommandDelivery{
+			ControlCommandID: operation.ControlCommandID,
+			Provider:         operation.Provider, CommandType: operation.CommandType,
+			CommandID: operation.CommandID, Payload: operation.Payload,
+		}
+		primaryDelivery = &delivery
+		primaryControl = &RunnerPrimaryOperationControl{
+			MarkDelivered: func(controlContext context.Context) error {
+				return d.retryInteractionDeliveryUpdate(controlContext, func(requestContext context.Context) error {
+					return d.client.MarkControlCommandDelivered(requestContext, execution.ID, lease, delivery)
+				})
+			},
+		}
+	}
 	var controls <-chan RunnerControl
 	if d.runner.protocol == RunnerProtocolV2 {
 		controlChannel := make(chan RunnerControl)
 		controls = controlChannel
-		go d.runnerControlLoop(executionContext, execution.ID, lease, controlChannel)
+		go d.runnerControlLoop(executionContext, execution.ID, lease, executionGuard, controlChannel)
 	}
+	terminalLogs := newTerminalLogCollector(d.client, execution.ID, lease, executionGuard)
+	defer func() {
+		if closeErr := terminalLogs.Close(); closeErr != nil {
+			d.logger.Warn(
+				"terminal log temp cleanup failed",
+				"executionId", execution.ID,
+				"generation", lease.Generation,
+				"error", closeErr,
+			)
+		}
+	}()
 	result, runErr := d.runner.RunControlled(executionContext, RunnerInput{
-		Execution: execution, Workload: workload, ProviderResumeCursor: resumeCursor, WorkspaceDirectory: materialized.Directory,
-	}, credential, controls, func(messageContext context.Context, message RunnerMessage) error {
+		Execution: execution, Workload: workload, ProviderResumeCursor: resumeCursor,
+		WorkspaceDirectory: materialized.Directory, RuntimeOutputDirectory: runtimeOutputRoot.directory,
+	}, credential, primaryControl, controls, func(messageContext context.Context, message RunnerMessage) error {
 		switch message.Type {
 		case "event":
-			return d.client.AppendEvent(messageContext, execution.ID, lease, message)
+			return terminalLogs.Handle(messageContext, message)
 		case "artifact":
-			artifactPath, err := resolveWorkspaceArtifact(materialized.Directory, message.Artifact.Path)
+			var sanitizeErr error
+			message, sanitizeErr = executionGuard.SanitizeRunnerMessage(message)
+			if sanitizeErr != nil {
+				return sanitizeErr
+			}
+			if message.Artifact.SourceRoot == "runtime-output" {
+				source, _, err := runtimeOutputRoot.open(message.Artifact.Path)
+				if err != nil {
+					return err
+				}
+				defer source.Close()
+				return terminalLogs.HandleArtifactSource(
+					messageContext,
+					*message.Artifact,
+					source,
+					message.OccurredAt,
+				)
+			}
+			if message.Artifact.SourceRoot != "" && message.Artifact.SourceRoot != "workspace" {
+				return protocolFailure("Runner Artifact sourceRoot is unsupported")
+			}
+			source, relativePath, err := artifactRoot.open(message.Artifact.Path)
 			if err != nil {
 				return err
 			}
+			defer source.Close()
 			if strings.TrimSpace(message.Artifact.OriginalName) == "" {
-				message.Artifact.OriginalName = filepath.Base(artifactPath)
+				message.Artifact.OriginalName = filepath.Base(relativePath)
 			}
-			_, err = d.client.UploadArtifact(messageContext, execution.ID, lease, *message.Artifact, artifactPath)
+			if err := executionGuard.RequireSafeStructuralString(message.Artifact.OriginalName); err != nil {
+				return err
+			}
+			normalizedContentType, err := normalizeRunnerArtifactContentType(message.Artifact.ContentType)
+			if err != nil {
+				return err
+			}
+			message.Artifact.ContentType = normalizedContentType
+			safeSource, cleanupSafeSource, err := guardedArtifactUploadSource(
+				messageContext, executionGuard, normalizedContentType, source,
+			)
+			if err != nil {
+				return err
+			}
+			defer cleanupSafeSource()
+			_, err = d.client.uploadArtifactSource(
+				messageContext,
+				execution.ID,
+				lease,
+				*message.Artifact,
+				safeSource,
+			)
 			return err
 		case "progress":
 			return nil
@@ -583,67 +765,124 @@ func (d *Daemon) runExecution(
 			if err != nil {
 				return err
 			}
+			message, err = executionGuard.SanitizeRunnerMessage(message)
+			if err != nil {
+				return err
+			}
 			return d.client.AppendEvent(messageContext, execution.ID, lease, message)
 		case "checkpoint":
-			return validateCheckpointRequest(message.Payload)
+			payload, err := executionGuard.SanitizeMap(message.Payload)
+			if err != nil {
+				return err
+			}
+			return validateCheckpointRequest(payload)
 		default:
 			return protocolFailure("Provider Host emitted an unsupported Worker message")
 		}
 	})
-	if runErr == nil && materialized.Managed {
-		if inspector, ok := materializer.(workspaceInspector); ok {
-			inspection, inspectErr := inspector.Inspect(executionContext, materialized)
-			if inspectErr != nil {
-				runErr = workspaceFailure(
-					"workspace_invalid", "The Workspace state could not be inspected after Provider execution.", true, true,
-				)
-			} else {
-				candidate, checkpointErr := captureWorkspaceCheckpoint(executionContext, execution, materialized, inspection)
-				if checkpointErr != nil {
-					runErr = workspaceFailure(
-						"workspace_invalid", "The Workspace Checkpoint could not be captured.", true, true,
-					)
-				} else if checkpointMatchesRestored(candidate, workload.RestoreCheckpoint) {
-					if candidate.Cleanup != nil {
-						candidate.Cleanup()
-					}
-				} else {
-					if inspection.Dirty {
-						if dirtyErr := d.client.MarkWorkspaceDirty(executionContext, execution.ID, lease, inspection); dirtyErr != nil {
-							runErr = fmt.Errorf("persist dirty Workspace state: %w", dirtyErr)
-						}
-					}
-					if runErr == nil {
-						if checkpointErr := d.persistWorkspaceCheckpoint(
-							executionContext, execution, lease, candidate,
-						); checkpointErr != nil {
-							runErr = checkpointErr
-						}
-					} else if candidate.Cleanup != nil {
-						candidate.Cleanup()
-					}
-				}
-			}
+	if ctx.Err() == nil {
+		hadOpenTerminals, terminalErr := terminalLogs.FinalizeOpen(executionContext, "provider_error")
+		if terminalErr != nil {
+			runErr = errors.Join(runErr, fmt.Errorf("flush terminal logs: %w", terminalErr))
+		}
+		if hadOpenTerminals && runErr == nil {
+			runErr = protocolFailure("Provider Host completed with an open terminal")
 		}
 	}
+	if runErr != nil {
+		runErr = executionGuard.SanitizeError(runErr)
+	} else {
+		result, runErr = executionGuard.SanitizeResult(result)
+	}
+	drainPreservationStatus := ""
+	drainPreservationKnown := false
+	if runErr == nil && materialized.Managed && primaryDelivery == nil {
+		checkpointCreated, checkpointErr := d.persistManagedWorkspaceState(
+			executionContext, execution, lease, workload, materializer, materialized,
+		)
+		if checkpointErr != nil {
+			runErr = checkpointErr
+		} else {
+			drainPreservationKnown = true
+			drainPreservationStatus = appendDrainCheckpointStatus(
+				"terminal-log=flushed",
+				drainCheckpointReleaseStatus(checkpointCreated),
+			)
+		}
+	}
+	preserveForDrain := func() string {
+		if drainPreservationKnown {
+			return drainPreservationStatus
+		}
+		drainPreservationKnown = true
+		drainPreservationStatus = d.persistExecutionStateDuringDrain(
+			execution, lease, workload, materializer, materialized, terminalLogs,
+		)
+		return drainPreservationStatus
+	}
 	renewErr := stopRenewal()
+	if ctx.Err() != nil {
+		preserveForDrain()
+	}
 	if runErr != nil && runnerFailurePersisted(runErr) {
 		d.logger.Info("execution interrupted", "executionId", execution.ID, "generation", lease.Generation)
 		return nil
+	}
+	if ctx.Err() != nil {
+		reason := "agentd Drain deadline reached"
+		if runErr == nil {
+			reason = "agentd Drain deadline reached before completion was acknowledged"
+		}
+		d.releaseDuringShutdown(
+			execution.ID,
+			lease,
+			appendDrainCheckpointStatus(reason, preserveForDrain()),
+		)
+		return errors.Join(ctx.Err(), renewErr)
 	}
 	if renewErr != nil {
 		return renewErr
 	}
 	if runErr != nil {
-		if ctx.Err() != nil {
-			d.releaseDuringShutdown(execution.ID, lease, "agentd Drain deadline reached")
-			return ctx.Err()
+		return d.failExecutionGuarded(ctx, execution.ID, lease, executionGuard, runErr)
+	}
+	if primaryDelivery != nil {
+		if result.PrimaryOperationResult == nil {
+			return d.failExecutionGuarded(ctx, execution.ID, lease, executionGuard, protocolFailure("Primary Provider operation omitted its terminal Result payload"))
 		}
-		return d.failExecution(ctx, execution.ID, lease, runErr)
+		if err := d.retryInteractionDeliveryUpdate(ctx, func(requestContext context.Context) error {
+			return d.client.AcknowledgeControlCommand(
+				requestContext, execution.ID, lease, *primaryDelivery, result.PrimaryOperationResult,
+			)
+		}); err != nil {
+			if ctx.Err() != nil {
+				d.releaseDuringShutdown(
+					execution.ID,
+					lease,
+					"agentd Drain deadline reached before the primary Provider operation was acknowledged",
+				)
+				return ctx.Err()
+			}
+			return fmt.Errorf("acknowledge primary Provider operation: %w", err)
+		}
+		d.logger.Info(
+			"primary Provider operation completed",
+			"executionId", execution.ID,
+			"generation", lease.Generation,
+			"commandType", primaryDelivery.CommandType,
+		)
+		return nil
 	}
 	if err := d.client.Complete(ctx, execution.ID, lease, result); err != nil {
 		if ctx.Err() != nil {
-			d.releaseDuringShutdown(execution.ID, lease, "agentd Drain deadline reached before completion was acknowledged")
+			d.releaseDuringShutdown(
+				execution.ID,
+				lease,
+				appendDrainCheckpointStatus(
+					"agentd Drain deadline reached before completion was acknowledged",
+					preserveForDrain(),
+				),
+			)
 			return ctx.Err()
 		}
 		return fmt.Errorf("complete execution: %w", err)
@@ -652,13 +891,184 @@ func (d *Daemon) runExecution(
 	return nil
 }
 
-func clearGitHTTPSCredential(credential *GitHTTPSCredential) {
-	if credential == nil {
-		return
+func (d *Daemon) persistManagedWorkspaceState(
+	ctx context.Context,
+	execution executions.Execution,
+	lease executions.Lease,
+	workload executions.Workload,
+	materializer workspaceMaterializer,
+	materialized WorkspaceMaterialization,
+) (bool, error) {
+	inspector, ok := materializer.(workspaceInspector)
+	if !ok {
+		return false, workspaceFailure(
+			"workspace_invalid", "This Worker cannot inspect a managed Workspace before Checkpoint.", true, true,
+		)
 	}
-	credential.Host = ""
-	credential.Username = ""
-	credential.Token = ""
+	inspection, err := inspector.Inspect(ctx, materialized)
+	if err != nil {
+		return false, workspaceFailure(
+			"workspace_invalid", "The Workspace state could not be inspected after Provider execution.", true, true,
+		)
+	}
+	candidate, err := captureWorkspaceCheckpoint(ctx, execution, materialized, inspection)
+	if err != nil {
+		return false, workspaceFailure(
+			"workspace_invalid", "The Workspace Checkpoint could not be captured.", true, true,
+		)
+	}
+	if checkpointMatchesRestored(candidate, workload.RestoreCheckpoint) {
+		if candidate.Cleanup != nil {
+			candidate.Cleanup()
+		}
+		return false, nil
+	}
+	if inspection.Dirty {
+		if err := d.client.MarkWorkspaceDirty(ctx, execution.ID, lease, inspection); err != nil {
+			if candidate.Cleanup != nil {
+				candidate.Cleanup()
+			}
+			return false, fmt.Errorf("persist dirty Workspace state: %w", err)
+		}
+	}
+	if err := d.persistWorkspaceCheckpoint(ctx, execution, lease, candidate); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (d *Daemon) persistExecutionStateDuringDrain(
+	execution executions.Execution,
+	lease executions.Lease,
+	workload executions.Workload,
+	materializer workspaceMaterializer,
+	materialized WorkspaceMaterialization,
+	terminalLogs *terminalLogCollector,
+) string {
+	terminalPending := terminalLogs.HasOpen()
+	workspacePending := materialized.Managed
+	if !terminalPending && !workspacePending {
+		return "terminal-log=flushed"
+	}
+	preservationContext, cancel := context.WithTimeout(context.Background(), drainPreservationTimeout)
+	defer cancel()
+	preservationContext = withExecutionSecretGuard(preservationContext, terminalLogs.guard)
+	renewContext, cancelRenew := context.WithTimeout(preservationContext, drainCheckpointTimeout)
+	err := d.renewLeaseForDrainCheckpoint(renewContext, execution.ID, lease)
+	cancelRenew()
+	if err != nil {
+		d.logger.Warn(
+			"execution persistence Lease probe during Drain failed",
+			"executionId", execution.ID,
+			"generation", lease.Generation,
+			"error", err,
+		)
+		status := "terminal-log=flushed"
+		if terminalPending {
+			status = "data-loss-risk=terminal-log-flush-failed"
+		}
+		if workspacePending {
+			status = appendDrainCheckpointStatus(status, "data-loss-risk=workspace-checkpoint-failed")
+		}
+		return status
+	}
+	status := "terminal-log=flushed"
+	if terminalPending {
+		_, terminalErr := terminalLogs.FinalizeOpen(preservationContext, "timeout")
+		if terminalErr != nil {
+			d.logger.Warn(
+				"terminal log flush during Drain failed",
+				"executionId", execution.ID,
+				"generation", lease.Generation,
+				"error", terminalErr,
+			)
+			status = "data-loss-risk=terminal-log-flush-failed"
+		}
+	}
+	if workspacePending {
+		checkpointCreated, checkpointErr := d.persistManagedWorkspaceState(
+			preservationContext, execution, lease, workload, materializer, materialized,
+		)
+		if checkpointErr != nil {
+			d.logger.Warn(
+				"managed Workspace Checkpoint during Drain failed",
+				"executionId", execution.ID,
+				"generation", lease.Generation,
+				"error", checkpointErr,
+			)
+			status = appendDrainCheckpointStatus(status, "data-loss-risk=workspace-checkpoint-failed")
+		} else {
+			checkpointStatus := drainCheckpointReleaseStatus(checkpointCreated)
+			status = appendDrainCheckpointStatus(status, checkpointStatus)
+			d.logger.Info(
+				"managed Workspace state preserved during Drain",
+				"executionId", execution.ID,
+				"generation", lease.Generation,
+				"checkpointStatus", checkpointStatus,
+			)
+		}
+	}
+	return status
+}
+
+func (d *Daemon) renewLeaseForDrainCheckpoint(
+	ctx context.Context,
+	executionID uuid.UUID,
+	lease executions.Lease,
+) error {
+	requestID := drainCheckpointRenewRequestIDPrefix + uuid.NewString()
+	input := executions.RenewLeaseInput{LeaseInput: executions.LeaseInput{
+		TenantID: lease.TenantID, Generation: lease.Generation, LeaseToken: lease.LeaseToken,
+	}}
+	var lastErr error
+	for attempt := 0; attempt < drainCheckpointRenewMaximumAttempts; attempt++ {
+		err := d.client.doJSON(
+			ctx,
+			http.MethodPost,
+			executionPath(executionID, "renew"),
+			d.client.workerToken,
+			requestID,
+			input,
+			nil,
+		)
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		if ctx.Err() != nil || !ambiguousDrainCheckpointRenewError(err) {
+			return err
+		}
+	}
+	return lastErr
+}
+
+func ambiguousDrainCheckpointRenewError(err error) bool {
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	var requestErr *url.Error
+	if errors.As(err, &requestErr) {
+		return true
+	}
+	var networkErr net.Error
+	return errors.As(err, &networkErr)
+}
+
+func drainCheckpointReleaseStatus(checkpointCreated bool) string {
+	if checkpointCreated {
+		return "workspace-checkpoint=ready"
+	}
+	return "workspace-checkpoint=unchanged"
+}
+
+func appendDrainCheckpointStatus(reason, status string) string {
+	if strings.TrimSpace(status) == "" {
+		return reason
+	}
+	return reason + "; " + status
 }
 
 func (d *Daemon) releaseDuringShutdown(executionID uuid.UUID, lease executions.Lease, reason string) {
@@ -681,6 +1091,7 @@ func (d *Daemon) runnerControlLoop(
 	ctx context.Context,
 	executionID uuid.UUID,
 	lease executions.Lease,
+	guard *executionSecretGuard,
 	output chan<- RunnerControl,
 ) {
 	defer close(output)
@@ -696,7 +1107,7 @@ func (d *Daemon) runnerControlLoop(
 			if ctx.Err() != nil {
 				return
 			}
-			d.logger.Warn("control command pull failed", "executionId", executionID, "generation", lease.Generation, "error", err)
+			d.logger.Warn("control command pull failed", "executionId", executionID, "generation", lease.Generation, "error", guard.SanitizeError(err))
 			if !waitContext(ctx, interval) {
 				return
 			}
@@ -716,8 +1127,12 @@ func (d *Daemon) runnerControlLoop(
 					})
 				},
 				Acknowledge: func(controlContext context.Context, result map[string]any) error {
+					sanitized, sanitizeErr := guard.SanitizeControlResult(result)
+					if sanitizeErr != nil {
+						return sanitizeErr
+					}
 					return d.retryInteractionDeliveryUpdate(controlContext, func(requestContext context.Context) error {
-						return d.client.AcknowledgeControlCommand(requestContext, executionID, lease, delivery, result)
+						return d.client.AcknowledgeControlCommand(requestContext, executionID, lease, delivery, sanitized)
 					})
 				},
 			}
@@ -729,7 +1144,7 @@ func (d *Daemon) runnerControlLoop(
 				if ctx.Err() != nil {
 					return
 				}
-				d.logger.Warn("interaction resolution pull failed", "executionId", executionID, "generation", lease.Generation, "error", interactionErr)
+				d.logger.Warn("interaction resolution pull failed", "executionId", executionID, "generation", lease.Generation, "error", guard.SanitizeError(interactionErr))
 				if !waitContext(ctx, interval) {
 					return
 				}
@@ -957,6 +1372,19 @@ func (d *Daemon) failExecution(ctx context.Context, executionID uuid.UUID, lease
 	return cause
 }
 
+func (d *Daemon) failExecutionGuarded(
+	ctx context.Context,
+	executionID uuid.UUID,
+	lease executions.Lease,
+	guard *executionSecretGuard,
+	cause error,
+) error {
+	if guard != nil {
+		cause = guard.SanitizeError(cause)
+	}
+	return d.failExecution(ctx, executionID, lease, cause)
+}
+
 func withProviderHostCapabilities(base map[string]any, providerHost map[string]any, config Config) map[string]any {
 	result := make(map[string]any, len(base)+3)
 	for key, value := range base {
@@ -1003,33 +1431,16 @@ func withProviderHostCapabilities(base map[string]any, providerHost map[string]a
 }
 
 func resolveWorkspaceArtifact(workspaceDirectory, candidate string) (string, error) {
-	candidate = strings.TrimSpace(candidate)
-	if candidate == "" {
-		return "", errors.New("runner artifact path is empty")
-	}
-	if !filepath.IsAbs(candidate) {
-		candidate = filepath.Join(workspaceDirectory, candidate)
-	}
-	resolved, err := filepath.EvalSymlinks(candidate)
+	source, relative, err := openWorkspaceArtifactSource(workspaceDirectory, candidate)
 	if err != nil {
-		return "", fmt.Errorf("resolve runner artifact path: %w", err)
+		return "", err
 	}
-	workspace, err := filepath.EvalSymlinks(workspaceDirectory)
+	defer source.Close()
+	rootPath, _, err := workspaceArtifactPath(workspaceDirectory, relative)
 	if err != nil {
-		return "", fmt.Errorf("resolve execution workspace: %w", err)
+		return "", err
 	}
-	relative, err := filepath.Rel(workspace, resolved)
-	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) || filepath.IsAbs(relative) {
-		return "", errors.New("runner artifact path escapes the execution workspace")
-	}
-	info, err := os.Stat(resolved)
-	if err != nil {
-		return "", fmt.Errorf("stat runner artifact: %w", err)
-	}
-	if !info.Mode().IsRegular() {
-		return "", errors.New("runner artifact must be a regular file")
-	}
-	return resolved, nil
+	return filepath.Join(rootPath, relative), nil
 }
 
 func drainRenewError(channel <-chan error) error {

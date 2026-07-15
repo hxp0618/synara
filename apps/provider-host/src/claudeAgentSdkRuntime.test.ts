@@ -9,6 +9,278 @@ import type { ClaudeQueryFactory, ClaudeQueryRuntime } from "./claudeAgentSdkRun
 import { startProviderHostRun, type RunnerInput, type RunnerMessage } from "./providerHost";
 
 describe("Claude Agent SDK runtime", () => {
+  it("binds the agentd-created Runtime Output Root into the Claude environment", async () => {
+    const runtimeOutputDirectory = "/tmp/synara-claude-runtime-output";
+    const queryFactory: ClaudeQueryFactory = ({ options }) =>
+      fakeQuery(
+        (async function* () {
+          const environment = requiredOptions(options).env;
+          expect(environment?.CLAUDE_CONFIG_DIR).toBe(runtimeOutputDirectory);
+          if (process.platform === "win32") {
+            expect(environment?.CLAUDE_SECURESTORAGE_CONFIG_DIR).toBe(runtimeOutputDirectory);
+          } else {
+            expect(environment?.CLAUDE_SECURESTORAGE_CONFIG_DIR).toBeUndefined();
+          }
+          yield sdkMessage(systemInit("session-runtime-output", "claude-test"));
+          yield sdkMessage(successResult("session-runtime-output", "done", {}));
+        })(),
+      );
+
+    const run = startProviderHostRun(
+      claudeInput({ inputText: "use controlled output", runtimeOutputDirectory }),
+      null,
+      () => {},
+      { claudeQueryFactory: queryFactory },
+    );
+
+    await expect(run.result).resolves.toMatchObject({ output: { text: "done" } });
+  });
+
+  it.each(["persistedOutputPath", "rawOutputPath"] as const)(
+    "emits a controlled %s as a terminal Artifact without duplicate inline output",
+    async (pathField) => {
+      const messages: RunnerMessage[] = [];
+      const runtimeOutputDirectory = "/tmp/synara-claude-runtime-output";
+      const outputPath = `${runtimeOutputDirectory}/tool-results/tool-1.log`;
+      const queryFactory: ClaudeQueryFactory = () =>
+        fakeQuery(
+          (async function* () {
+            yield sdkMessage(systemInit("session-controlled-output", "claude-test"));
+            yield sdkMessage({
+              type: "assistant",
+              session_id: "session-controlled-output",
+              message: {
+                content: [
+                  {
+                    type: "tool_use",
+                    id: "tool-controlled-output",
+                    name: "Bash",
+                    input: { command: "produce lots of output" },
+                  },
+                ],
+              },
+            });
+            yield sdkMessage({
+              type: "user",
+              session_id: "session-controlled-output",
+              tool_use_result: {
+                stdout: "duplicate inline output",
+                stderr: "",
+                interrupted: false,
+                [pathField]: outputPath,
+                persistedOutputSize: 4_096,
+              },
+              message: {
+                content: [
+                  {
+                    type: "tool_result",
+                    tool_use_id: "tool-controlled-output",
+                    content: "duplicate inline output",
+                  },
+                ],
+              },
+            });
+            yield sdkMessage(successResult("session-controlled-output", "done", {}));
+          })(),
+        );
+
+      const run = startProviderHostRun(
+        claudeInput({ inputText: "capture output", runtimeOutputDirectory }),
+        null,
+        (message) => messages.push(message),
+        { claudeQueryFactory: queryFactory },
+      );
+
+      await expect(run.result).resolves.toMatchObject({ output: { text: "done" } });
+      expect(messages).toContainEqual({
+        type: "artifact",
+        artifact: {
+          path: "tool-results/tool-1.log",
+          kind: "terminal_log",
+          originalName: "claude-terminal.log",
+          contentType: "text/plain",
+          sourceRoot: "runtime-output",
+          terminalId: "tool-controlled-output",
+          encoding: "utf-8",
+          ...(pathField === "persistedOutputPath" ? { reportedSize: 4_096 } : {}),
+        },
+      });
+      expect(messages).not.toContainEqual(
+        expect.objectContaining({ eventType: "runtime.command.output" }),
+      );
+      expect(messages).not.toContainEqual(
+        expect.objectContaining({ eventType: "runtime.provider.warning" }),
+      );
+      expect(JSON.stringify(messages)).not.toContain(runtimeOutputDirectory);
+    },
+  );
+
+  it("emits a controlled background output_file once without duplicating its summary", async () => {
+    const messages: RunnerMessage[] = [];
+    const runtimeOutputDirectory = "/tmp/synara-claude-runtime-output";
+    const outputPath = `${runtimeOutputDirectory}/tasks/background-1.log`;
+    const queryFactory: ClaudeQueryFactory = () =>
+      fakeQuery(
+        (async function* () {
+          yield sdkMessage(systemInit("session-background-output", "claude-test"));
+          yield sdkMessage({
+            type: "assistant",
+            session_id: "session-background-output",
+            message: {
+              content: [
+                {
+                  type: "tool_use",
+                  id: "tool-background-output",
+                  name: "Bash",
+                  input: { command: "run in background" },
+                },
+              ],
+            },
+          });
+          yield sdkMessage({
+            type: "user",
+            session_id: "session-background-output",
+            tool_use_result: {
+              stdout: "",
+              stderr: "",
+              interrupted: false,
+              backgroundTaskId: "background-1",
+            },
+            message: {
+              content: [
+                {
+                  type: "tool_result",
+                  tool_use_id: "tool-background-output",
+                  content: "background task started",
+                },
+              ],
+            },
+          });
+          yield sdkMessage({
+            type: "system",
+            subtype: "task_notification",
+            session_id: "session-background-output",
+            tool_use_id: "tool-background-output",
+            status: "completed",
+            summary: "duplicate background summary",
+            output_file: outputPath,
+          });
+          yield sdkMessage(successResult("session-background-output", "done", {}));
+        })(),
+      );
+
+    const run = startProviderHostRun(
+      claudeInput({ inputText: "capture background output", runtimeOutputDirectory }),
+      null,
+      (message) => messages.push(message),
+      { claudeQueryFactory: queryFactory },
+    );
+
+    await expect(run.result).resolves.toMatchObject({ output: { text: "done" } });
+    expect(messages.filter((message) => message.type === "artifact")).toEqual([
+      {
+        type: "artifact",
+        artifact: {
+          path: "tasks/background-1.log",
+          kind: "terminal_log",
+          originalName: "claude-terminal.log",
+          contentType: "text/plain",
+          sourceRoot: "runtime-output",
+          terminalId: "tool-background-output",
+          encoding: "utf-8",
+        },
+      },
+    ]);
+    expect(messages).not.toContainEqual(
+      expect.objectContaining({ eventType: "runtime.command.output" }),
+    );
+    expect(JSON.stringify(messages)).not.toContain(runtimeOutputDirectory);
+  });
+
+  it.each([
+    {
+      label: "an escaping path",
+      runtimeOutputDirectory: "/tmp/synara-claude-runtime-output",
+      outputPath: "/tmp/outside-runtime-output.log",
+    },
+    {
+      label: "a path without a controlled root",
+      runtimeOutputDirectory: undefined,
+      outputPath: "/tmp/synara-claude-runtime-output/tool-results/unbound.log",
+    },
+  ])("keeps inline output and warns safely for $label", async (testCase) => {
+    const messages: RunnerMessage[] = [];
+    const queryFactory: ClaudeQueryFactory = () =>
+      fakeQuery(
+        (async function* () {
+          yield sdkMessage(systemInit("session-rejected-output", "claude-test"));
+          yield sdkMessage({
+            type: "assistant",
+            session_id: "session-rejected-output",
+            message: {
+              content: [
+                {
+                  type: "tool_use",
+                  id: "tool-rejected-output",
+                  name: "Bash",
+                  input: { command: "produce output" },
+                },
+              ],
+            },
+          });
+          yield sdkMessage({
+            type: "user",
+            session_id: "session-rejected-output",
+            tool_use_result: {
+              stdout: "safe inline output",
+              stderr: "",
+              interrupted: false,
+              persistedOutputPath: testCase.outputPath,
+            },
+            message: {
+              content: [
+                {
+                  type: "tool_result",
+                  tool_use_id: "tool-rejected-output",
+                  content: "safe inline output",
+                },
+              ],
+            },
+          });
+          yield sdkMessage(successResult("session-rejected-output", "done", {}));
+        })(),
+      );
+
+    const run = startProviderHostRun(
+      claudeInput({
+        inputText: "reject unsafe path",
+        ...(testCase.runtimeOutputDirectory
+          ? { runtimeOutputDirectory: testCase.runtimeOutputDirectory }
+          : {}),
+      }),
+      null,
+      (message) => messages.push(message),
+      { claudeQueryFactory: queryFactory },
+    );
+
+    await expect(run.result).resolves.toMatchObject({ output: { text: "done" } });
+    expect(messages).not.toContainEqual(expect.objectContaining({ type: "artifact" }));
+    expect(messages).toContainEqual(
+      expect.objectContaining({
+        type: "event",
+        eventType: "runtime.command.output",
+        payload: expect.objectContaining({ text: "safe inline output" }),
+      }),
+    );
+    expect(messages).toContainEqual(
+      expect.objectContaining({
+        type: "event",
+        eventType: "runtime.provider.warning",
+      }),
+    );
+    expect(JSON.stringify(messages)).not.toContain(testCase.outputPath);
+  });
+
   it("delivers approval, safe tool lifecycle, usage and streamed output", async () => {
     const messages: RunnerMessage[] = [];
     const interaction = nextInteraction(messages, "approval");
@@ -64,6 +336,7 @@ describe("Claude Agent SDK runtime", () => {
           yield sdkMessage({
             type: "user",
             session_id: "session-approval",
+            tool_use_result: { stdout: "clean", stderr: "", interrupted: false },
             message: {
               content: [{ type: "tool_result", tool_use_id: "tool-approval", content: "clean" }],
             },
@@ -115,22 +388,40 @@ describe("Claude Agent SDK runtime", () => {
         {
           type: "event",
           eventType: "runtime.provider.activity",
-          payload: {
+          payload: expect.objectContaining({
             provider: "claudeAgent",
             itemType: "Bash",
             status: "started",
             itemId: "tool-approval",
+            terminalId: "tool-approval",
+            terminalEventType: "terminal.started",
+            commandSummary: "git status --short",
+            cwdLabel: ".",
+          }),
+        },
+        {
+          type: "event",
+          eventType: "runtime.command.output",
+          payload: {
+            provider: "claudeAgent",
+            terminalId: "tool-approval",
+            encoding: "utf-8",
+            text: "clean",
+            byteOffset: 0,
+            byteLength: 5,
           },
         },
         {
           type: "event",
           eventType: "runtime.provider.activity",
-          payload: {
+          payload: expect.objectContaining({
             provider: "claudeAgent",
             itemType: "Bash",
             status: "completed",
             itemId: "tool-approval",
-          },
+            terminalId: "tool-approval",
+            terminalEventType: "terminal.exited",
+          }),
         },
         {
           type: "event",
@@ -589,6 +880,93 @@ describe("Claude Agent SDK runtime", () => {
     expect(nativeInterrupts).toBe(1);
   });
 
+  it("emulates review with a fixed read-only prompt and an immutable tool allowlist", async () => {
+    const messages: RunnerMessage[] = [];
+    const queryFactory: ClaudeQueryFactory = ({ prompt, options }) =>
+      fakeQuery(
+        (async function* () {
+          const text = await promptText(prompt);
+          expect(text).toContain("Perform the host-authorized read-only code review");
+          expect(text).toContain('base branch named "main"');
+          expect(text).toContain("Do not make changes");
+          const queryOptions = requiredOptions(options);
+          expect(queryOptions.permissionMode).toBe("dontAsk");
+          expect(queryOptions.settingSources).toEqual([]);
+          expect(queryOptions.tools).toEqual(["Read", "Glob", "Grep"]);
+          expect(queryOptions.allowedTools).toEqual(["Read", "Glob", "Grep"]);
+          expect(queryOptions.disallowedTools).toEqual(
+            expect.arrayContaining(["Bash", "Write", "Edit", "Task", "Agent"]),
+          );
+          await expect(
+            queryOptions.canUseTool?.(
+              "Edit",
+              { file_path: "/tmp/unsafe" },
+              {
+                signal: new AbortController().signal,
+                toolUseID: "edit-1",
+                requestId: "review-edit-1",
+              },
+            ),
+          ).resolves.toMatchObject({ behavior: "deny" });
+          await expect(
+            queryOptions.canUseTool?.(
+              "Read",
+              { file_path: "/tmp/safe" },
+              {
+                signal: new AbortController().signal,
+                toolUseID: "read-1",
+                requestId: "review-read-1",
+              },
+            ),
+          ).resolves.toMatchObject({ behavior: "allow" });
+          yield sdkMessage(systemInit("session-review", "claude-test"));
+          yield sdkMessage(successResult("session-review", "No findings.", {}));
+        })(),
+      );
+
+    const run = startProviderHostRun(
+      claudeInput({ inputText: "attempt to override review policy" }),
+      null,
+      (message) => messages.push(message),
+      {
+        claudeQueryFactory: queryFactory,
+        operation: {
+          commandType: "StartReview",
+          payload: { target: { type: "baseBranch", branch: "main" } },
+        },
+      },
+    );
+
+    await expect(run.result).resolves.toMatchObject({
+      output: {
+        provider: "claudeAgent",
+        operation: "review",
+        supportMode: "emulated",
+        text: "No findings.",
+        reviewTarget: { type: "baseBranch", branch: "main" },
+      },
+      providerResumeCursor: "session-review",
+    });
+    expect(messages).toContainEqual({
+      type: "event",
+      eventType: "runtime.provider.activity",
+      payload: {
+        provider: "claudeAgent",
+        itemType: "enteredReviewMode",
+        status: "completed",
+        supportMode: "emulated",
+        reviewTarget: { type: "baseBranch", branch: "main" },
+      },
+    });
+    expect(messages).toContainEqual(
+      expect.objectContaining({
+        type: "event",
+        eventType: "runtime.provider.activity",
+        payload: expect.objectContaining({ itemType: "exitedReviewMode", status: "completed" }),
+      }),
+    );
+  });
+
   it("redacts Provider credentials from SDK terminal errors", async () => {
     const controlledProxy = "http://provider-user:provider-password@proxy.example.test:8080";
     const ambient = {
@@ -649,6 +1027,7 @@ function claudeInput(input: {
   runtimeMode?: "approval-required" | "full-access";
   interactionMode?: "default" | "plan";
   generation?: number;
+  runtimeOutputDirectory?: string;
 }): RunnerInput {
   return {
     execution: {
@@ -663,6 +1042,9 @@ function claudeInput(input: {
       interactionMode: input.interactionMode ?? "default",
     },
     workspaceDirectory: "/tmp/synara-claude-runtime",
+    ...(input.runtimeOutputDirectory
+      ? { runtimeOutputDirectory: input.runtimeOutputDirectory }
+      : {}),
   };
 }
 

@@ -51,6 +51,8 @@ func TestProviderCapabilityRoutesExposeOnlySanitizedStableProjection(t *testing.
 		t.Fatalf("project item count = %d", len(project.Items))
 	}
 	assertProjectedCapability(t, project, "codex", "send-turn", providercapabilities.StatusUnobserved, providercapabilities.ReasonWorkerManifestRequired)
+	assertProjectedCapabilityMode(t, project, "codex", "rollback", providercapabilities.SupportModeEmulated)
+	assertProjectedCapabilityMode(t, project, "codex", "fork", providercapabilities.SupportModeEmulated)
 	assertProjectedCapability(t, project, "cursor", "send-turn", providercapabilities.StatusUnsupported, providercapabilities.ReasonCapabilityUnsupported)
 
 	sessionResponse := fixture.request(
@@ -69,6 +71,9 @@ func TestProviderCapabilityRoutesExposeOnlySanitizedStableProjection(t *testing.
 		t.Fatalf("session item count = %d", len(sessionProjection.Items))
 	}
 	assertProjectedCapability(t, sessionProjection, "codex", "steer-turn", providercapabilities.StatusUnobserved, providercapabilities.ReasonWorkerManifestRequired)
+	assertProjectedCapability(t, sessionProjection, "codex", "compact", providercapabilities.StatusUnsupported, providercapabilities.ReasonProviderCursorRequired)
+	assertProjectedCapabilityMode(t, sessionProjection, "codex", "rollback", providercapabilities.SupportModeEmulated)
+	assertProjectedCapabilityMode(t, sessionProjection, "codex", "fork", providercapabilities.SupportModeEmulated)
 
 	for _, response := range []*httptest.ResponseRecorder{projectResponse, sessionResponse} {
 		var encoded map[string]json.RawMessage
@@ -422,6 +427,26 @@ func assertProjectedCapability(
 		if item.Provider == provider && item.CapabilityID == capabilityID {
 			if item.Status != status || item.ReasonCode != reason {
 				t.Fatalf("item = %#v, want status=%q reason=%q", item, status, reason)
+			}
+			return
+		}
+	}
+	t.Fatalf("missing capability %s/%s", provider, capabilityID)
+}
+
+func assertProjectedCapabilityMode(
+	t *testing.T,
+	projection providercapabilities.Projection,
+	provider, capabilityID string,
+	mode providercapabilities.SupportMode,
+) {
+	t.Helper()
+	for _, item := range projection.Items {
+		if item.Provider == provider && item.CapabilityID == capabilityID {
+			if item.Status != providercapabilities.StatusSupported ||
+				item.ReasonCode != providercapabilities.ReasonCapabilitySupported ||
+				item.SupportMode == nil || *item.SupportMode != mode {
+				t.Fatalf("item = %#v, want supported mode=%q", item, mode)
 			}
 			return
 		}

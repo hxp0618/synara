@@ -3,7 +3,7 @@
 package providercatalog
 
 const SchemaVersion = 1
-const SourceSHA256 = "e1e5d512b625bfdd85f9181389889be072b4dae1b338f0d91c77e9533ddb9229"
+const SourceSHA256 = "5f912b33629e9da83969a96a14dc468bca4c3425848421527e8987d373221d9e"
 
 var generatedCapabilityIDs = []string{
 	"discovery",
@@ -71,8 +71,8 @@ var generatedProviders = []Provider{
 			"approval":                             "native",
 			"structured-user-input":                "native",
 			"plan-mode":                            "native",
-			"review":                               "unsupported",
-			"compact":                              "unsupported",
+			"review":                               "native",
+			"compact":                              "native",
 			"rollback":                             "unsupported",
 			"fork":                                 "unsupported",
 			"read-history":                         "emulated",
@@ -115,7 +115,7 @@ var generatedProviders = []Provider{
 			"approval":                             "native",
 			"structured-user-input":                "native",
 			"plan-mode":                            "native",
-			"review":                               "unsupported",
+			"review":                               "emulated",
 			"compact":                              "unsupported",
 			"rollback":                             "unsupported",
 			"fork":                                 "unsupported",

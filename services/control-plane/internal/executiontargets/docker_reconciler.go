@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -32,7 +33,9 @@ const (
 	dockerTargetLabel          = "synara.io/execution-target-id"
 	dockerConfigLabel          = "synara.io/config-sha256"
 	dockerIndexLabel           = "synara.io/worker-index"
-	dockerContainerSpecVersion = 3
+	dockerReleaseRevisionLabel = "synara.io/worker-release-revision-id"
+	dockerReleaseChannelLabel  = "synara.io/worker-release-channel"
+	dockerContainerSpecVersion = 4
 )
 
 type DockerPoolReconcilerConfig struct {
@@ -40,6 +43,7 @@ type DockerPoolReconcilerConfig struct {
 	PublicControlPlaneURL string
 	Interval              time.Duration
 	Observer              BackgroundObserver
+	ResolveImagePull      ImagePullCredentialResolver
 }
 
 type BackgroundObserver interface {
@@ -88,7 +92,7 @@ type dockerContainerSpec struct {
 
 type dockerEngine interface {
 	ListManaged(context.Context, uuid.UUID) ([]dockerContainer, error)
-	EnsureImage(context.Context, string, string) error
+	EnsureImage(context.Context, string, string, *ImagePullCredential) error
 	CreateAndStart(context.Context, dockerContainerSpec) (dockerContainer, error)
 	Start(context.Context, string) error
 	Remove(context.Context, string) error
@@ -177,7 +181,13 @@ func (r *DockerPoolReconciler) reconcileTarget(ctx context.Context, target persi
 		r.setStatus(ctx, target, "offline", false, "engine_unavailable", 0, 0)
 		return problem.Wrap(503, "docker_engine_unavailable", "Docker Engine is unavailable.", err)
 	}
-	specs, configHash, err := r.desiredSpecs(target, configuration)
+	resolution, err := r.resolveImagePullCredential(ctx, target, configuration.Image)
+	if err != nil {
+		r.setStatus(ctx, target, "offline", false, "image_pull_credential_invalid", 0, 0)
+		return err
+	}
+	credential := resolution.Credential
+	specs, configHash, err := r.desiredSpecs(ctx, target, configuration, credential)
 	if err != nil {
 		r.setStatus(ctx, target, "offline", false, "configuration_invalid", 0, 0)
 		return err
@@ -194,11 +204,13 @@ func (r *DockerPoolReconciler) reconcileTarget(ctx context.Context, target persi
 	sort.Slice(containers, func(i, j int) bool { return containers[i].Name < containers[j].Name })
 	current := make(map[int]dockerContainer, len(specs))
 	deferred := make(map[int]struct{}, len(specs))
+	busyStale := make([]dockerContainer, 0)
 	changed := false
 	for _, container := range containers {
 		index, indexErr := strconv.Atoi(container.Labels[dockerIndexLabel])
 		validIndex := indexErr == nil && index >= 0 && index < len(specs)
-		valid := validIndex && container.Labels[dockerConfigLabel] == configHash
+		valid := validIndex && container.Labels[dockerConfigLabel] == configHash &&
+			container.Name == specs[index].Name
 		if valid {
 			if _, duplicate := current[index]; !duplicate {
 				current[index] = container
@@ -206,18 +218,44 @@ func (r *DockerPoolReconciler) reconcileTarget(ctx context.Context, target persi
 			}
 		}
 		if busy[container.Name] {
-			// A stale Worker with a live Lease must finish or release before it is
-			// replaced. Reserve its deterministic slot so the reconciler does not
-			// attempt to create the desired container under the same Docker name.
-			if validIndex {
-				deferred[index] = struct{}{}
-			}
+			busyStale = append(busyStale, container)
 			continue
 		}
 		if err := engine.Remove(ctx, container.ID); err != nil {
 			return problem.Wrap(502, "docker_container_remove_failed", "A stale Docker Worker could not be removed.", err)
 		}
 		changed = true
+	}
+	for _, container := range busyStale {
+		reserved := false
+		for index := range specs {
+			if _, occupied := current[index]; occupied {
+				continue
+			}
+			if _, reserved := deferred[index]; reserved {
+				continue
+			}
+			if dockerReleaseClassMatches(container.Labels, specs[index].Labels) {
+				deferred[index] = struct{}{}
+				reserved = true
+				break
+			}
+		}
+		if reserved {
+			continue
+		}
+		for index := range specs {
+			if specs[index].Name != container.Name {
+				continue
+			}
+			if _, occupied := current[index]; occupied {
+				continue
+			}
+			if _, alreadyReserved := deferred[index]; !alreadyReserved {
+				deferred[index] = struct{}{}
+			}
+			break
+		}
 	}
 	missing := make([]int, 0)
 	for index := range specs {
@@ -239,10 +277,15 @@ func (r *DockerPoolReconciler) reconcileTarget(ctx context.Context, target persi
 		}
 	}
 	if len(missing) > 0 {
-		if err := engine.EnsureImage(ctx, configuration.Image, configuration.PullPolicy); err != nil {
-			return problem.Wrap(502, "docker_image_unavailable", "The Docker Worker image is unavailable.", err)
-		}
+		ensured := make(map[string]struct{}, len(missing))
 		for _, index := range missing {
+			image := specs[index].Image
+			if _, found := ensured[image]; !found {
+				if err := engine.EnsureImage(ctx, image, configuration.PullPolicy, credential); err != nil {
+					return problem.Wrap(502, "docker_image_unavailable", "The Docker Worker image is unavailable.", err)
+				}
+				ensured[image] = struct{}{}
+			}
 			created, err := engine.CreateAndStart(ctx, specs[index])
 			if err != nil {
 				return problem.Wrap(502, "docker_container_create_failed", "A Docker Worker could not be created.", err)
@@ -383,8 +426,10 @@ func (r *DockerPoolReconciler) normalize(
 }
 
 func (r *DockerPoolReconciler) desiredSpecs(
+	ctx context.Context,
 	target persistence.ExecutionTarget,
 	configuration dockerTargetConfiguration,
+	credential *ImagePullCredential,
 ) ([]dockerContainerSpec, string, error) {
 	controlPlaneURL, err := url.Parse(configuration.ControlPlaneURL)
 	if err != nil {
@@ -416,25 +461,42 @@ func (r *DockerPoolReconciler) desiredSpecs(
 		"SYNARA_AGENTD_WORKSPACE_ROOT=" + configuration.WorkspaceRoot,
 		"SYNARA_AGENTD_GIT_CACHE_ROOT=" + configuration.GitCacheRoot,
 	}
-	if digest := immutableImageDigest(configuration.Image); digest != "" {
-		baseEnvironment = append(baseEnvironment, "SYNARA_AGENTD_IMAGE_DIGEST="+digest)
+	releasePlan, err := loadManagedReleasePlan(ctx, r.targets.db, target.ID, configuration.Image)
+	if err != nil {
+		return nil, "", err
+	}
+	slots, err := dockerReleaseSlots(configuration.DesiredWorkers, configuration.Image, releasePlan)
+	if err != nil {
+		return nil, "", err
+	}
+	for _, slot := range slots {
+		if err := validateImagePullCredential(slot.Image, credential); err != nil {
+			return nil, "", err
+		}
 	}
 	hashPayload, err := json.Marshal(struct {
 		SpecVersion   int
 		Configuration dockerTargetConfiguration
 		Capabilities  json.RawMessage
 		TokenHash     [32]byte
-	}{dockerContainerSpecVersion, configuration, capabilities, sha256.Sum256([]byte(r.config.RegistrationToken))})
+		ReleasePlan   *managedReleasePlan
+	}{dockerContainerSpecVersion, configuration, capabilities, sha256.Sum256([]byte(r.config.RegistrationToken)), releasePlan})
 	if err != nil {
 		return nil, "", err
 	}
 	digest := sha256.Sum256(hashPayload)
 	configHash := hex.EncodeToString(digest[:])
-	specs := make([]dockerContainerSpec, configuration.DesiredWorkers)
-	for index := range specs {
+	specs := make([]dockerContainerSpec, len(slots))
+	for index, slot := range slots {
 		name := fmt.Sprintf("synara-agentd-%s-%d", target.ID, index)
+		if slot.Channel != "" {
+			name = fmt.Sprintf("synara-agentd-%s-%s-%d", target.ID, slot.Channel, slot.Ordinal)
+		}
 		environment := append([]string(nil), baseEnvironment...)
 		environment = append(environment, "SYNARA_AGENTD_INSTANCE_ID="+name)
+		if digest := immutableImageDigest(slot.Image); digest != "" {
+			environment = append(environment, "SYNARA_AGENTD_IMAGE_DIGEST="+digest)
+		}
 		labels := map[string]string{
 			dockerManagedLabel: "true", dockerTargetLabel: target.ID.String(), dockerConfigLabel: configHash,
 			dockerIndexLabel: strconv.Itoa(index), "synara.io/tenant-id": target.TenantID.String(),
@@ -442,8 +504,12 @@ func (r *DockerPoolReconciler) desiredSpecs(
 		if target.OrganizationID != nil {
 			labels["synara.io/organization-id"] = target.OrganizationID.String()
 		}
+		if slot.RevisionID != uuid.Nil {
+			labels[dockerReleaseRevisionLabel] = slot.RevisionID.String()
+			labels[dockerReleaseChannelLabel] = slot.Channel
+		}
 		specs[index] = dockerContainerSpec{
-			Name: name, Image: configuration.Image, Environment: environment,
+			Name: name, Image: slot.Image, Environment: environment,
 			Entrypoint: []string{"/usr/local/bin/synara-agentd"}, Labels: labels,
 			User: configuration.User, WorkingDir: configuration.WorkspaceMount,
 			Binds: []string{configuration.WorkspaceVolume + ":" + configuration.WorkspaceMount}, ExtraHosts: extraHosts,
@@ -451,6 +517,81 @@ func (r *DockerPoolReconciler) desiredSpecs(
 		}
 	}
 	return specs, configHash, nil
+}
+
+type dockerReleaseSlot struct {
+	Image      string
+	RevisionID uuid.UUID
+	Channel    string
+	Ordinal    int
+}
+
+func dockerReleaseSlots(desiredWorkers int, baseImage string, plan *managedReleasePlan) ([]dockerReleaseSlot, error) {
+	if plan == nil {
+		slots := make([]dockerReleaseSlot, desiredWorkers)
+		for index := range slots {
+			slots[index] = dockerReleaseSlot{Image: baseImage, Ordinal: index}
+		}
+		return slots, nil
+	}
+	promotedCount := desiredWorkers
+	canaryCount := 0
+	if plan.Canary != nil {
+		if desiredWorkers < 2 {
+			return nil, problem.New(
+				409,
+				"docker_worker_release_canary_capacity_insufficient",
+				"Managed Docker canary releases require at least two desired Workers.",
+			)
+		}
+		canaryCount = (desiredWorkers*plan.CanaryPercent + 99) / 100
+		if canaryCount < 1 {
+			canaryCount = 1
+		}
+		if canaryCount >= desiredWorkers {
+			canaryCount = desiredWorkers - 1
+		}
+		promotedCount = desiredWorkers - canaryCount
+	}
+	slots := make([]dockerReleaseSlot, 0, promotedCount+canaryCount)
+	for index := 0; index < promotedCount; index++ {
+		slots = append(slots, dockerReleaseSlot{
+			Image: plan.Promoted.Image, RevisionID: plan.Promoted.RevisionID,
+			Channel: plan.Promoted.Channel, Ordinal: index,
+		})
+	}
+	if plan.Canary != nil {
+		for index := 0; index < canaryCount; index++ {
+			slots = append(slots, dockerReleaseSlot{
+				Image: plan.Canary.Image, RevisionID: plan.Canary.RevisionID,
+				Channel: plan.Canary.Channel, Ordinal: index,
+			})
+		}
+	}
+	return slots, nil
+}
+
+func dockerReleaseClassMatches(current, desired map[string]string) bool {
+	return current[dockerReleaseRevisionLabel] == desired[dockerReleaseRevisionLabel] &&
+		current[dockerReleaseChannelLabel] == desired[dockerReleaseChannelLabel]
+}
+
+func (r *DockerPoolReconciler) resolveImagePullCredential(
+	ctx context.Context,
+	target persistence.ExecutionTarget,
+	image string,
+) (ImagePullCredentialResolution, error) {
+	if r.config.ResolveImagePull == nil {
+		return ImagePullCredentialResolution{Authoritative: true}, nil
+	}
+	if target.TenantID == nil {
+		return ImagePullCredentialResolution{Authoritative: true}, problem.New(409, "docker_target_tenant_required", "Managed Docker targets must belong to a Tenant.")
+	}
+	authority, err := registryAuthorityFromImageReference(image)
+	if err != nil {
+		return ImagePullCredentialResolution{Authoritative: true}, err
+	}
+	return r.config.ResolveImagePull(ctx, *target.TenantID, target.ID, registryComparisonAuthority(authority))
 }
 
 func (r *DockerPoolReconciler) busyWorkerNames(ctx context.Context, targetID uuid.UUID) (map[string]bool, error) {
@@ -544,7 +685,11 @@ func (e *dockerHTTPEngine) ListManaged(ctx context.Context, targetID uuid.UUID) 
 	return items, nil
 }
 
-func (e *dockerHTTPEngine) EnsureImage(ctx context.Context, image, policy string) error {
+func (e *dockerHTTPEngine) EnsureImage(
+	ctx context.Context,
+	image, policy string,
+	credential *ImagePullCredential,
+) error {
 	needPull := policy == "always"
 	if policy == "if-not-present" {
 		request, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://docker/images/"+url.PathEscape(image)+"/json", nil)
@@ -566,7 +711,40 @@ func (e *dockerHTTPEngine) EnsureImage(ctx context.Context, image, policy string
 		return nil
 	}
 	query := url.Values{"fromImage": {image}}
-	return e.do(ctx, http.MethodPost, "/images/create?"+query.Encode(), nil, nil, http.StatusOK)
+	headers := http.Header{}
+	if credential != nil {
+		auth, err := dockerRegistryAuthHeader(credential)
+		if err != nil {
+			return err
+		}
+		headers.Set("X-Registry-Auth", auth)
+	}
+	return e.doWithHeaders(ctx, http.MethodPost, "/images/create?"+query.Encode(), nil, nil, headers, http.StatusOK)
+}
+
+func dockerRegistryAuthHeader(credential *ImagePullCredential) (string, error) {
+	if credential == nil {
+		return "", nil
+	}
+	payload := struct {
+		Username      string `json:"username,omitempty"`
+		Password      string `json:"password,omitempty"`
+		ServerAddress string `json:"serveraddress"`
+		RegistryToken string `json:"registrytoken,omitempty"`
+	}{
+		Username: credential.Username, Password: credential.Password,
+		RegistryToken: credential.RegistryToken,
+	}
+	authority, err := normalizeRegistryAuthority(credential.Host)
+	if err != nil {
+		return "", err
+	}
+	payload.ServerAddress = registryAuthServerAddress(authority)
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+	return base64.URLEncoding.EncodeToString(encoded), nil
 }
 
 func (e *dockerHTTPEngine) CreateAndStart(ctx context.Context, spec dockerContainerSpec) (dockerContainer, error) {
@@ -623,6 +801,16 @@ func (e *dockerHTTPEngine) do(
 	input, output any,
 	accepted ...int,
 ) error {
+	return e.doWithHeaders(ctx, method, path, input, output, nil, accepted...)
+}
+
+func (e *dockerHTTPEngine) doWithHeaders(
+	ctx context.Context,
+	method, path string,
+	input, output any,
+	headers http.Header,
+	accepted ...int,
+) error {
 	var body io.Reader
 	if input != nil {
 		encoded, err := json.Marshal(input)
@@ -637,6 +825,11 @@ func (e *dockerHTTPEngine) do(
 	}
 	if input != nil {
 		request.Header.Set("Content-Type", "application/json")
+	}
+	for name, values := range headers {
+		for _, value := range values {
+			request.Header.Add(name, value)
+		}
 	}
 	response, err := e.client.Do(request)
 	if err != nil {

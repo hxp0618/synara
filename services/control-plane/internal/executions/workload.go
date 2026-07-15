@@ -33,8 +33,8 @@ func (s *Service) loadWorkload(ctx context.Context, tx *gorm.DB, execution persi
 		WorkerManifestID                      *uuid.UUID `gorm:"column:worker_manifest_id"`
 		Model                                 *string    `gorm:"column:model"`
 		ProviderCredentialID                  *uuid.UUID `gorm:"column:provider_credential_id"`
-		GitCredentialID                       *uuid.UUID `gorm:"column:git_credential_id"`
 		InputText                             string     `gorm:"column:input_text"`
+		TurnKind                              string     `gorm:"column:turn_kind"`
 		RuntimeMode                           string     `gorm:"column:runtime_mode"`
 		InteractionMode                       string     `gorm:"column:interaction_mode"`
 		RepositoryURL                         *string    `gorm:"column:repository_url"`
@@ -50,8 +50,8 @@ func (s *Service) loadWorkload(ctx context.Context, tx *gorm.DB, execution persi
 			w.repository_fingerprint AS workspace_repository_fingerprint,
 			w.current_branch AS workspace_current_branch, w.base_commit AS workspace_base_commit,
 			w.head_commit AS workspace_head_commit, e.worker_manifest_id,
-				s.model, e.provider_credential_id_snapshot AS provider_credential_id, p.git_credential_id,
-				t.input_text, t.runtime_mode, t.interaction_mode, p.repository_url, p.default_branch`).
+				s.model, e.provider_credential_id_snapshot AS provider_credential_id,
+				t.input_text, t.turn_kind, t.runtime_mode, t.interaction_mode, p.repository_url, p.default_branch`).
 		Joins("JOIN agent_sessions AS s ON s.tenant_id = e.tenant_id AND s.id = e.session_id").
 		Joins("JOIN agent_turns AS t ON t.tenant_id = e.tenant_id AND t.session_id = e.session_id AND t.id = e.turn_id").
 		Joins("JOIN projects AS p ON p.tenant_id = s.tenant_id AND p.id = s.project_id").
@@ -62,6 +62,29 @@ func (s *Service) loadWorkload(ctx context.Context, tx *gorm.DB, execution persi
 	if err != nil {
 		return Workload{}, problem.Wrap(500, "execution_workload_load_failed", "Failed to load the execution workload.", err)
 	}
+	var primaryOperation *PrimaryOperation
+	if row.TurnKind != "message" {
+		var command persistence.ExecutionControlCommand
+		commandErr := tx.WithContext(ctx).
+			Where("tenant_id = ? AND execution_id = ? AND turn_id = ? AND command_type IN ? AND status = ? AND delivery_worker_id = ? AND delivery_generation = ?",
+				execution.TenantID, execution.ID, execution.TurnID, primaryControlCommandTypes,
+				"pending", execution.WorkerID, execution.Generation).
+			Take(&command).Error
+		if commandErr != nil {
+			return Workload{}, problem.Wrap(500, "primary_operation_load_failed", "The Execution primary operation is missing or not bound to this generation.", commandErr)
+		}
+		payload := command.Payload
+		if payload == nil {
+			payload = map[string]any{}
+		}
+		primaryOperation = &PrimaryOperation{
+			ControlCommandID: command.ID,
+			Provider:         command.Provider,
+			CommandType:      command.CommandType,
+			CommandID:        command.CommandID,
+			Payload:          payload,
+		}
+	}
 	var restoreCheckpoint *WorkspaceCheckpoint
 	if row.RestoreCheckpointID != nil {
 		restoreCheckpoint, err = loadReadyResumeCheckpoint(
@@ -70,6 +93,10 @@ func (s *Service) loadWorkload(ctx context.Context, tx *gorm.DB, execution persi
 		if err != nil {
 			return Workload{}, err
 		}
+	}
+	credentialGrants, err := loadExecutionCredentialGrantDescriptors(ctx, tx, execution)
+	if err != nil {
+		return Workload{}, err
 	}
 	snapshotCheckpoint := restoreCheckpoint
 	if snapshotCheckpoint == nil && row.WorkspaceCurrentCheckpointID != nil {
@@ -111,7 +138,9 @@ func (s *Service) loadWorkload(ctx context.Context, tx *gorm.DB, execution persi
 		WorkspaceRepositoryFingerprint:        row.WorkspaceRepositoryFingerprint,
 		WorkerManifestID:                      row.WorkerManifestID,
 		Model:                                 row.Model, ProviderCredentialID: row.ProviderCredentialID,
-		GitCredentialID: row.GitCredentialID, InputText: row.InputText,
+		CredentialGrants: credentialGrants,
+		InputText:        row.InputText,
+		TurnKind:         row.TurnKind, PrimaryOperation: primaryOperation,
 		RuntimeMode: row.RuntimeMode, InteractionMode: row.InteractionMode,
 		RepositoryURL: row.RepositoryURL, DefaultBranch: row.DefaultBranch,
 		ConversationHistory: conversationHistoryFromResumeSnapshot(resumeSnapshot),

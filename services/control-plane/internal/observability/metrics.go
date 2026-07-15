@@ -190,7 +190,7 @@ func isWorkerFencingProblem(code string) bool {
 		return true
 	}
 	switch code {
-	case "invalid_lease_token", "lease_expired", "lease_not_current", "interaction_lease_expired":
+	case "invalid_lease_token", "lease_expired", "lease_not_current", "interaction_lease_expired", "worker_token_revoked":
 		return true
 	default:
 		return false
@@ -459,10 +459,14 @@ func (r *Registry) writeDatabaseMetrics(ctx context.Context, output *bytes.Buffe
 	if err != nil {
 		return fmt.Errorf("collect worker metrics: %w", err)
 	}
+	workerAdministrative, err := groupedCounts(ctx, r.db, "worker_instances", "administrative_status", "target_kind")
+	if err != nil {
+		return fmt.Errorf("collect Worker administrative metrics: %w", err)
+	}
 	staleWorkers, err := groupedCountsWhere(
 		ctx, r.db, "worker_instances", "status", "target_kind",
-		"status IN ? AND last_heartbeat_at <= ?",
-		[]string{"online", "draining"}, now.Add(-r.workerHeartbeatTimeout),
+		"administrative_status <> ? AND status IN ? AND last_heartbeat_at <= ?",
+		"revoked", []string{"online", "draining"}, now.Add(-r.workerHeartbeatTimeout),
 	)
 	if err != nil {
 		return fmt.Errorf("collect stale worker metrics: %w", err)
@@ -517,6 +521,7 @@ func (r *Registry) writeDatabaseMetrics(ctx context.Context, output *bytes.Buffe
 
 	writeGroupedGauge(output, "synara_executions", "Authoritative Execution count by status and target kind.", executions)
 	writeGroupedGauge(output, "synara_workers", "Authoritative Worker count by status and target kind.", workers)
+	writeGroupedGauge(output, "synara_workers_administrative", "Authoritative Worker count by administrative status and target kind.", workerAdministrative)
 	writeGroupedGauge(output, "synara_stale_workers", "Authoritative online or draining Worker count past the configured heartbeat timeout.", staleWorkers)
 	writeGroupedGauge(output, "synara_execution_targets", "Authoritative Execution Target count by status and kind.", targets)
 	writeHelp(output, "synara_worker_leases", "Authoritative Worker Lease count by expiration state.", "gauge")

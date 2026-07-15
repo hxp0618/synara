@@ -1,6 +1,8 @@
 // FILE: runtimeEventV2.ts
 // Purpose: Normalizes internal Provider Host runner events onto the canonical Runtime Event v2 wire.
 
+import { createHash } from "node:crypto";
+
 import {
   PROVIDER_RUNTIME_EVENT_TYPES,
   PROVIDER_RUNTIME_EVENT_VERSION,
@@ -30,6 +32,26 @@ export function normalizeRuntimeEventV2(message: RunnerEvent): RuntimeEventV2Wir
         streamKind: "assistant_text",
         delta: stringValue(message.payload.text) ?? "",
       });
+    case "runtime.command.output": {
+      const delta = stringValue(message.payload.text) ?? "";
+      const encoding = message.payload.encoding === "binary" ? "binary" : "utf-8";
+      const terminalId = stringValue(message.payload.terminalId);
+      const byteOffset = nonNegativeInteger(message.payload.byteOffset) ?? 0;
+      const byteLength =
+        nonNegativeInteger(message.payload.byteLength) ??
+        (encoding === "binary"
+          ? Buffer.from(delta, "base64").byteLength
+          : Buffer.byteLength(delta, "utf8"));
+      return runtimeEvent("content.delta", {
+        streamKind: "command_output",
+        delta,
+        ...(terminalId ? { terminalId: boundedIdentifier(terminalId, 200) } : {}),
+        encoding,
+        byteOffset,
+        byteLength,
+        ...(message.payload.truncated === true ? { truncated: true } : {}),
+      });
+    }
     case "runtime.provider.activity":
       return normalizeProviderActivity(message.payload);
     case "runtime.usage":
@@ -51,6 +73,7 @@ export function normalizeRuntimeEventV2(message: RunnerEvent): RuntimeEventV2Wir
 
 function normalizeProviderActivity(payload: Record<string, unknown>): RuntimeEventV2WirePayload {
   const sourceItemType = stringValue(payload.itemType) ?? "unknown";
+  const itemType = canonicalItemType(sourceItemType);
   const status = normalizeStatus(payload.status);
   const eventType =
     status === "inProgress"
@@ -61,11 +84,11 @@ function normalizeProviderActivity(payload: Record<string, unknown>): RuntimeEve
   const providerItemId = stringValue(payload.itemId);
 
   return runtimeEvent(eventType, {
-    itemType: canonicalItemType(sourceItemType),
+    itemType,
     status,
     title: boundedString(sourceItemType, 200),
     data: {
-      ...safeProviderDetail(payload),
+      ...safeProviderDetail(payload, itemType, status),
       sourceItemType: boundedString(sourceItemType, 200),
       ...(providerItemId ? { providerItemId: boundedString(providerItemId, 200) } : {}),
     },
@@ -120,6 +143,9 @@ function normalizeUsage(payload: Record<string, unknown>): ThreadTokenUsageSnaps
 
 function canonicalItemType(value: string): CanonicalItemType {
   const normalized = value.replaceAll(/[^a-z0-9]/giu, "").toLowerCase();
+  if (normalized === "enteredreviewmode") return "review_entered";
+  if (normalized === "exitedreviewmode") return "review_exited";
+  if (normalized === "contextcompaction") return "context_compaction";
   if (normalized === "plan") return "plan";
   if (normalized === "reasoning" || normalized === "thinking") return "reasoning";
   if (normalized.includes("command") || normalized === "bash" || normalized === "shell") {
@@ -160,9 +186,74 @@ function normalizeStatus(value: unknown): RuntimeItemStatus {
   }
 }
 
-function safeProviderDetail(payload: Record<string, unknown>): Record<string, unknown> {
+function safeProviderDetail(
+  payload: Record<string, unknown>,
+  itemType?: CanonicalItemType,
+  status?: RuntimeItemStatus,
+): Record<string, unknown> {
   const provider = stringValue(payload.provider);
-  return provider ? { provider: boundedString(provider, 80) } : {};
+  const detail: Record<string, unknown> = provider ? { provider: boundedString(provider, 80) } : {};
+  if (payload.supportMode === "native" || payload.supportMode === "emulated") {
+    detail.supportMode = payload.supportMode;
+  }
+  if (itemType === "review_entered" || itemType === "review_exited") {
+    const reviewTarget = safeReviewTarget(payload.reviewTarget);
+    if (reviewTarget) detail.reviewTarget = reviewTarget;
+  }
+  const terminalId = stringValue(payload.terminalId);
+  if (itemType !== "command_execution" || !terminalId) return detail;
+  const terminal: Record<string, unknown> = {
+    terminalId: boundedIdentifier(terminalId, 200),
+    eventType:
+      payload.terminalEventType === "terminal.started" ||
+      payload.terminalEventType === "terminal.output.reference" ||
+      payload.terminalEventType === "terminal.exited" ||
+      payload.terminalEventType === "terminal.failed"
+        ? payload.terminalEventType
+        : status === "completed"
+          ? "terminal.exited"
+          : status === "failed" || status === "declined"
+            ? "terminal.failed"
+            : "terminal.started",
+  };
+  const commandSummary = stringValue(payload.commandSummary);
+  const cwdLabel = stringValue(payload.cwdLabel);
+  const signal = stringValue(payload.signal);
+  if (commandSummary) terminal.commandSummary = boundedString(commandSummary, 1_000);
+  if (cwdLabel) terminal.cwdLabel = boundedString(cwdLabel, 500);
+  if (typeof payload.exitCode === "number" && Number.isSafeInteger(payload.exitCode)) {
+    terminal.exitCode = payload.exitCode;
+  }
+  if (signal && /^[A-Z0-9_-]{1,40}$/u.test(signal)) terminal.signal = signal;
+  if (
+    payload.failureKind === "exit" ||
+    payload.failureKind === "signal" ||
+    payload.failureKind === "timeout" ||
+    payload.failureKind === "oom" ||
+    payload.failureKind === "provider_error"
+  ) {
+    terminal.failureKind = payload.failureKind;
+  }
+  if (terminal.eventType === "terminal.exited" || terminal.eventType === "terminal.failed") {
+    const totalBytes = nonNegativeInteger(payload.totalBytes) ?? 0;
+    const previewBytes = Math.min(nonNegativeInteger(payload.previewBytes) ?? 0, totalBytes);
+    terminal.totalBytes = totalBytes;
+    terminal.previewBytes = previewBytes;
+    terminal.segmentCount = nonNegativeInteger(payload.segmentCount) ?? 0;
+    terminal.truncated = payload.truncated === true || previewBytes < totalBytes;
+  }
+  detail.terminal = terminal;
+  return detail;
+}
+
+function safeReviewTarget(value: unknown): Record<string, unknown> | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const target = value as Record<string, unknown>;
+  if (target.type === "uncommittedChanges") return { type: target.type };
+  if (target.type === "baseBranch" && typeof target.branch === "string" && target.branch.trim()) {
+    return { type: target.type, branch: boundedString(target.branch.trim(), 500) };
+  }
+  return undefined;
 }
 
 function safeProviderWarningDetail(payload: Record<string, unknown>): Record<string, unknown> {
@@ -203,6 +294,16 @@ function runtimeEvent(
 
 function stringValue(value: unknown): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function nonNegativeInteger(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+}
+
+function boundedIdentifier(value: string, maximumLength: number): string {
+  if (value.length <= maximumLength) return value;
+  const digest = createHash("sha256").update(value).digest("hex").slice(0, 16);
+  return `${value.slice(0, maximumLength - digest.length - 1)}-${digest}`;
 }
 
 function boundedString(value: string, maximumLength: number): string {

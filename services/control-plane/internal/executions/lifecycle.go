@@ -16,7 +16,10 @@ import (
 	"github.com/synara-ai/synara/services/control-plane/internal/problem"
 	"github.com/synara-ai/synara/services/control-plane/internal/secret"
 	"github.com/synara-ai/synara/services/control-plane/internal/sessions"
+	"github.com/synara-ai/synara/services/control-plane/internal/workerreleases"
 )
+
+const workspaceCheckpointUnconfirmedRisk = "data-loss-risk=workspace-checkpoint-unconfirmed"
 
 func (s *Service) Claim(
 	ctx context.Context,
@@ -45,6 +48,9 @@ func (s *Service) Claim(
 		var appended persistence.SessionEvent
 		replayed := false
 		err = persistence.InTransaction(ctx, s.db, func(tx *gorm.DB) error {
+			if err := workerreleases.LockTargetForRelease(ctx, tx, normalizedTarget.ExecutionTargetID); err != nil {
+				return err
+			}
 			var receipt persistence.WorkerRequestReceipt
 			lookupErr := persistence.WithLocking(tx.WithContext(ctx), "UPDATE", "").
 				Where("worker_id = ? AND request_id = ?", worker.ID, requestID).Take(&receipt).Error
@@ -141,6 +147,7 @@ func (s *Service) Claim(
 			} else {
 				claimQuery = claimQuery.Where("agent_executions.provider IS NULL")
 			}
+			claimQuery = workerreleases.FilterClaimQuery(claimQuery, claimWorker)
 			claimQuery = controlCommandSupport.filterClaimQuery(claimQuery)
 			claimErr := claimQuery.Order("agent_executions.queued_at, agent_executions.id").Take(&execution).Error
 			if errors.Is(claimErr, gorm.ErrRecordNotFound) {
@@ -152,6 +159,9 @@ func (s *Service) Claim(
 							normalizedTarget.ExecutionTargetID, normalizedTarget.TargetKind).
 						Take(&assigned).Error
 					if assignedErr == nil {
+						if !workerreleases.WorkerMatchesExecution(claimWorker, assigned) {
+							return problem.New(409, "worker_release_assignment_mismatch", "The Execution is assigned to another active Worker release pool.")
+						}
 						supported, supportErr := workerSupportsProvider(tx, claimWorker, assigned.Provider)
 						if supportErr != nil {
 							return problem.Wrap(500, "worker_manifest_lookup_failed", "Failed to inspect Worker Provider compatibility.", supportErr)
@@ -227,6 +237,9 @@ func (s *Service) Claim(
 				if err := bindExecutionControlCommands(ctx, tx, execution, worker.ID, now); err != nil {
 					return err
 				}
+				if _, err := bindExecutionCredentialGrants(ctx, tx, execution, now); err != nil {
+					return err
+				}
 				workload, workloadErr := s.loadWorkload(ctx, tx, execution)
 				if workloadErr != nil {
 					return workloadErr
@@ -250,8 +263,10 @@ func (s *Service) Claim(
 					Payload: map[string]any{
 						"turnId": execution.TurnID, "expiresAt": lease.ExpiresAt,
 						"executionTargetId": execution.ExecutionTargetID, "targetKind": execution.TargetKind,
-						"workerManifestId": execution.WorkerManifestID,
-						"providerResume":   resumeSelection.eventPayload(execution.ProviderResumeStrategySnapshot),
+						"workerManifestId":        execution.WorkerManifestID,
+						"workerReleaseRevisionId": execution.WorkerReleaseRevisionID,
+						"workerReleaseChannel":    execution.WorkerReleaseChannel,
+						"providerResume":          resumeSelection.eventPayload(execution.ProviderResumeStrategySnapshot),
 					},
 				})
 				if err != nil {
@@ -614,8 +629,19 @@ func (s *Service) Release(
 		if err := tx.WithContext(ctx).Delete(&lease).Error; err != nil {
 			return Execution{}, problem.Wrap(500, "lease_release_failed", "Failed to release the execution lease.", err)
 		}
-		if err := requeueExecutionControlCommands(ctx, tx, execution, lease, "The Worker released the Execution before the Control command was acknowledged."); err != nil {
+		outcomeUnknown, err := requeueExecutionControlCommands(ctx, tx, execution, lease, "The Worker released the Execution after delivering a primary operation without an acknowledgement.")
+		if err != nil {
 			return Execution{}, err
+		}
+		if outcomeUnknown {
+			appended, err = s.failPrimaryOperationOutcomeUnknownLocked(
+				ctx, tx, &execution, "worker", &worker.ID,
+				"The Provider operation may have completed before the Worker response was lost.",
+			)
+			if err != nil {
+				return Execution{}, err
+			}
+			return toExecution(execution), nil
 		}
 		execution.Status = "recovering"
 		execution.WorkerID = nil
@@ -631,7 +657,7 @@ func (s *Service) Release(
 		if err := expectOne(turnUpdate, 500, "turn_recovery_failed", "Failed to return the turn to the recovery queue."); err != nil {
 			return Execution{}, err
 		}
-		if err := s.enqueueRecovery(ctx, tx, execution, input.Reason); err != nil {
+		if err := s.enqueueRecovery(ctx, tx, execution, input.Reason, ""); err != nil {
 			return Execution{}, err
 		}
 		appended, err = s.sessions.AppendInternalEvent(ctx, tx, execution.TenantID, execution.SessionID, sessions.InternalEventInput{
@@ -703,9 +729,16 @@ func (s *Service) RecoverExpired(ctx context.Context, limit int) error {
 				(execution.Status != "leased" && execution.Status != "running" && execution.Status != "waiting-for-approval") {
 				continue
 			}
+			recoveryRisk, err := s.expiredLeaseRecoveryRisk(ctx, tx, execution, lease)
+			if err != nil {
+				return err
+			}
+			reasonMessage := "The Worker lease expired before the execution lifecycle completed."
+			if recoveryRisk != "" {
+				reasonMessage += " The managed Workspace Checkpoint could not be confirmed."
+			}
 			event, err := s.recoverExecutionGenerationLocked(
-				ctx, tx, execution, lease, "lease_expired",
-				"The Worker lease expired before the execution lifecycle completed.",
+				ctx, tx, execution, lease, "lease_expired", reasonMessage, recoveryRisk,
 			)
 			if err != nil {
 				return err
@@ -728,13 +761,20 @@ func (s *Service) recoverExecutionGenerationLocked(
 	tx *gorm.DB,
 	execution persistence.AgentExecution,
 	lease persistence.WorkerLease,
-	reasonCode, reasonMessage string,
+	reasonCode, reasonMessage, recoveryRisk string,
 ) (persistence.SessionEvent, error) {
 	if err := s.supersedeInteractionGenerationWithReason(ctx, tx, execution, lease, reasonMessage); err != nil {
 		return persistence.SessionEvent{}, err
 	}
-	if err := requeueExecutionControlCommands(ctx, tx, execution, lease, reasonMessage); err != nil {
+	outcomeUnknown, err := requeueExecutionControlCommands(ctx, tx, execution, lease, reasonMessage)
+	if err != nil {
 		return persistence.SessionEvent{}, err
+	}
+	if outcomeUnknown {
+		outcomeMessage := "The Provider operation outcome is unknown because its Worker generation was lost after delivery. " + reasonMessage
+		return s.failPrimaryOperationOutcomeUnknownLocked(
+			ctx, tx, &execution, "system", nil, outcomeMessage,
+		)
 	}
 	var restoreCheckpointID *uuid.UUID
 	if execution.RemoteWorkspaceID != nil {
@@ -772,14 +812,123 @@ func (s *Service) recoverExecutionGenerationLocked(
 	if err := expectOne(turnUpdate, 500, "turn_recovery_failed", "Failed to return the turn to the recovery queue."); err != nil {
 		return persistence.SessionEvent{}, err
 	}
-	if err := s.enqueueRecovery(ctx, tx, execution, reasonCode); err != nil {
+	if err := s.enqueueRecovery(ctx, tx, execution, reasonCode, recoveryRisk); err != nil {
 		return persistence.SessionEvent{}, err
+	}
+	payload := map[string]any{"turnId": execution.TurnID, "reason": reasonCode}
+	if recoveryRisk != "" {
+		payload["risk"] = recoveryRisk
 	}
 	return s.sessions.AppendInternalEvent(ctx, tx, execution.TenantID, execution.SessionID, sessions.InternalEventInput{
 		EventType: "execution.recovering", ActorType: "system",
 		ExecutionID: &execution.ID, WorkerID: &lease.WorkerID, Generation: &execution.Generation,
-		Payload: map[string]any{"turnId": execution.TurnID, "reason": reasonCode},
+		Payload: payload,
 	})
+}
+
+func (s *Service) failPrimaryOperationOutcomeUnknownLocked(
+	ctx context.Context,
+	tx *gorm.DB,
+	execution *persistence.AgentExecution,
+	actorType string,
+	actorID *uuid.UUID,
+	message string,
+) (persistence.SessionEvent, error) {
+	now := s.now()
+	failureCode := "provider_operation_outcome_unknown"
+	execution.Status = "failed"
+	execution.FinishedAt = &now
+	execution.FailureCode = &failureCode
+	execution.FailureMessage = &message
+	updated := tx.WithContext(ctx).Model(&persistence.AgentExecution{}).
+		Where("tenant_id = ? AND id = ? AND generation = ? AND status IN ?",
+			execution.TenantID, execution.ID, execution.Generation,
+			[]string{"leased", "running", "waiting-for-approval"}).
+		Updates(map[string]any{
+			"status": "failed", "finished_at": now,
+			"failure_code": failureCode, "failure_message": message,
+		})
+	if err := expectOne(updated, 409, "primary_operation_outcome_conflict", "The uncertain Provider operation could not be terminalized safely."); err != nil {
+		return persistence.SessionEvent{}, err
+	}
+	turnUpdate := tx.WithContext(ctx).Model(&persistence.AgentTurn{}).
+		Where("tenant_id = ? AND session_id = ? AND id = ?", execution.TenantID, execution.SessionID, execution.TurnID).
+		Updates(map[string]any{"status": "failed", "completed_at": now})
+	if err := expectOne(turnUpdate, 500, "turn_outcome_unknown_failed", "Failed to terminalize the uncertain operation Turn."); err != nil {
+		return persistence.SessionEvent{}, err
+	}
+	if err := supersedeControlCommands(ctx, tx, *execution, uuid.Nil, message); err != nil {
+		return persistence.SessionEvent{}, err
+	}
+	event, err := s.sessions.AppendInternalEvent(ctx, tx, execution.TenantID, execution.SessionID, sessions.InternalEventInput{
+		EventType: "execution.failed", ActorType: actorType, ActorID: actorID,
+		ExecutionID: &execution.ID, WorkerID: execution.WorkerID, Generation: &execution.Generation,
+		Payload: map[string]any{
+			"turnId": execution.TurnID, "failureCode": failureCode,
+			"failureMessage": message, "outcomeUnknown": true, "finishedAt": now,
+		},
+	})
+	if err != nil {
+		return persistence.SessionEvent{}, err
+	}
+	if err := outbox.Enqueue(ctx, tx, outbox.EnqueueInput{
+		TenantID: &execution.TenantID, Topic: "execution.failed", MessageKey: execution.ID.String(),
+		Payload: map[string]any{
+			"tenantId": execution.TenantID, "sessionId": execution.SessionID,
+			"turnId": execution.TurnID, "executionId": execution.ID,
+			"failureCode": failureCode, "outcomeUnknown": true, "finishedAt": now,
+		},
+	}); err != nil {
+		return persistence.SessionEvent{}, problem.Wrap(500, "primary_operation_outcome_outbox_failed", "The uncertain operation failure event could not be queued.", err)
+	}
+	return event, nil
+}
+
+func (s *Service) expiredLeaseRecoveryRisk(
+	ctx context.Context,
+	tx *gorm.DB,
+	execution persistence.AgentExecution,
+	lease persistence.WorkerLease,
+) (string, error) {
+	if execution.RemoteWorkspaceID == nil {
+		return "", nil
+	}
+	var worker persistence.WorkerInstance
+	if err := tx.WithContext(ctx).Select("id", "status", "administrative_status", "draining_at").
+		Where("id = ?", lease.WorkerID).Take(&worker).Error; err != nil {
+		return "", problem.Wrap(
+			500, "expired_lease_worker_load_failed", "Failed to inspect the expired lease Worker lifecycle.", err,
+		)
+	}
+	if worker.AdministrativeStatus != "draining" && worker.Status != "draining" && worker.DrainingAt == nil {
+		return "", nil
+	}
+	return s.executionGenerationCheckpointRisk(ctx, tx, execution, lease.Generation)
+}
+
+func (s *Service) executionGenerationCheckpointRisk(
+	ctx context.Context,
+	tx *gorm.DB,
+	execution persistence.AgentExecution,
+	generation int64,
+) (string, error) {
+	if execution.RemoteWorkspaceID == nil {
+		return "", nil
+	}
+	var readyCount int64
+	if err := tx.WithContext(ctx).Model(&persistence.WorkspaceCheckpoint{}).
+		Where(
+			"tenant_id = ? AND workspace_id = ? AND execution_id = ? AND generation = ? AND status = ?",
+			execution.TenantID, *execution.RemoteWorkspaceID, execution.ID, generation, "ready",
+		).Count(&readyCount).Error; err != nil {
+		return "", problem.Wrap(
+			500, "expired_lease_checkpoint_probe_failed", "Failed to confirm the expired Generation Workspace Checkpoint.", err,
+		)
+	}
+	if readyCount == 0 {
+		return workspaceCheckpointUnconfirmedRisk, nil
+	}
+	return "", nil
 }
 
 func (s *Service) lockLease(
@@ -842,11 +991,20 @@ func (s *Service) requireClaimableWorker(ctx context.Context, tx *gorm.DB, worke
 	if worker.ProtocolVersion != WorkerProtocolVersion {
 		return persistence.WorkerInstance{}, unsupportedWorkerProtocol(worker.ProtocolVersion)
 	}
+	if worker.AdministrativeStatus == "revoked" {
+		return persistence.WorkerInstance{}, workerTokenRevoked()
+	}
+	if worker.AdministrativeStatus != "active" {
+		return persistence.WorkerInstance{}, problem.New(409, "worker_not_claimable", "Only administratively active workers can claim executions.")
+	}
 	if worker.Status != "online" {
 		return persistence.WorkerInstance{}, problem.New(409, "worker_not_claimable", "Only online workers can claim executions.")
 	}
 	if worker.CompatibilityStatus == "incompatible" || worker.CompatibilityStatus == "revoked" {
 		return persistence.WorkerInstance{}, problem.New(409, "worker_manifest_incompatible", "The Worker manifest is not compatible with this Control Plane.")
+	}
+	if err := workerreleases.RequireActiveWorker(ctx, tx, worker); err != nil {
+		return persistence.WorkerInstance{}, err
 	}
 	kind, err := platform.ParseExecutionTargetKind(worker.TargetKind)
 	if err != nil {
@@ -871,18 +1029,22 @@ func (s *Service) enqueueRecovery(
 	ctx context.Context,
 	tx *gorm.DB,
 	execution persistence.AgentExecution,
-	reason string,
+	reason, recoveryRisk string,
 ) error {
 	tenantID := execution.TenantID
 	messageKey := execution.ID.String() + ":" + formatGeneration(execution.Generation)
+	payload := map[string]any{
+		"executionId": execution.ID, "tenantId": execution.TenantID,
+		"sessionId": execution.SessionID, "turnId": execution.TurnID,
+		"generation": execution.Generation, "executionTargetId": execution.ExecutionTargetID,
+		"targetKind": execution.TargetKind, "reason": reason,
+	}
+	if recoveryRisk != "" {
+		payload["risk"] = recoveryRisk
+	}
 	err := outbox.Enqueue(ctx, tx, outbox.EnqueueInput{
 		TenantID: &tenantID, Topic: "execution.recovering", MessageKey: messageKey,
-		Payload: map[string]any{
-			"executionId": execution.ID, "tenantId": execution.TenantID,
-			"sessionId": execution.SessionID, "turnId": execution.TurnID,
-			"generation": execution.Generation, "executionTargetId": execution.ExecutionTargetID,
-			"targetKind": execution.TargetKind, "reason": reason,
-		},
+		Payload: payload,
 		Headers: map[string]any{"eventVersion": 1},
 	})
 	if errors.Is(err, gorm.ErrDuplicatedKey) {

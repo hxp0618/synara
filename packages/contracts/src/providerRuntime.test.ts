@@ -12,6 +12,14 @@ import {
 const decodeRuntimeEvent = Schema.decodeUnknownSync(ProviderRuntimeEvent);
 
 describe("ProviderRuntimeEvent", () => {
+  const eventBase = {
+    eventId: "event-terminal-1",
+    provider: "codex",
+    createdAt: "2026-02-28T00:00:00.000Z",
+    threadId: "thread-terminal-1",
+    turnId: "turn-terminal-1",
+  } as const;
+
   it("keeps the persisted Runtime Event v2 JSON schema aligned with the canonical vocabulary", () => {
     const schema = JSON.parse(
       readFileSync(
@@ -188,5 +196,221 @@ describe("ProviderRuntimeEvent", () => {
     expect(parsed.payload.usage.maxTokens).toBe(200000);
     expect(parsed.payload.usage.usedTokens).toBe(31251);
     expect(parsed.payload.usage.usedPercent).toBe(15.6255);
+  });
+
+  it("requires complete command-output byte metadata and exact UTF-8 lengths", () => {
+    const valid = {
+      ...eventBase,
+      type: "content.delta",
+      payload: {
+        streamKind: "command_output",
+        terminalId: "terminal-1",
+        encoding: "utf-8",
+        byteOffset: 0,
+        byteLength: 5,
+        delta: "A🙂",
+      },
+    };
+
+    expect(decodeRuntimeEvent(valid).type).toBe("content.delta");
+
+    for (const field of ["terminalId", "encoding", "byteOffset", "byteLength"] as const) {
+      const payload = { ...valid.payload } as Record<string, unknown>;
+      delete payload[field];
+      expect(() => decodeRuntimeEvent({ ...valid, payload })).toThrow();
+    }
+
+    expect(() =>
+      decodeRuntimeEvent({
+        ...valid,
+        payload: { ...valid.payload, byteLength: 4 },
+      }),
+    ).toThrow();
+    expect(() =>
+      decodeRuntimeEvent({
+        ...valid,
+        payload: { ...valid.payload, delta: "\ud800", byteLength: 3 },
+      }),
+    ).toThrow();
+  });
+
+  it("accepts only canonical base64 command output with the decoded byte length", () => {
+    const valid = {
+      ...eventBase,
+      type: "content.delta",
+      payload: {
+        streamKind: "command_output",
+        terminalId: "terminal-1",
+        encoding: "binary",
+        byteOffset: 8,
+        byteLength: 4,
+        delta: "AAEC/w==",
+      },
+    };
+
+    expect(decodeRuntimeEvent(valid).type).toBe("content.delta");
+    expect(() =>
+      decodeRuntimeEvent({ ...valid, payload: { ...valid.payload, delta: "AB==", byteLength: 1 } }),
+    ).toThrow();
+    expect(() =>
+      decodeRuntimeEvent({ ...valid, payload: { ...valid.payload, delta: "AAEC/w==\n" } }),
+    ).toThrow();
+    expect(() =>
+      decodeRuntimeEvent({ ...valid, payload: { ...valid.payload, byteLength: 3 } }),
+    ).toThrow();
+  });
+
+  it("keeps non-command content deltas backward compatible", () => {
+    const parsed = decodeRuntimeEvent({
+      ...eventBase,
+      type: "content.delta",
+      payload: {
+        streamKind: "assistant_text",
+        delta: "hello",
+      },
+    });
+
+    expect(parsed.type).toBe("content.delta");
+  });
+
+  it("decodes typed terminal lifecycle data and rejects invalid references", () => {
+    const started = decodeRuntimeEvent({
+      ...eventBase,
+      type: "item.started",
+      itemId: "item-terminal-1",
+      payload: {
+        itemType: "command_execution",
+        status: "inProgress",
+        data: {
+          provider: "codex",
+          terminal: {
+            terminalId: "terminal-1",
+            eventType: "terminal.started",
+            commandSummary: "bun run test",
+            cwdLabel: "apps/provider-host",
+          },
+        },
+      },
+    });
+    expect(started.type).toBe("item.started");
+    if (started.type !== "item.started" || started.payload.itemType !== "command_execution") {
+      throw new Error("expected command execution item");
+    }
+    const startedData = started.payload.data;
+    if (
+      !startedData ||
+      typeof startedData !== "object" ||
+      Array.isArray(startedData) ||
+      !("terminal" in startedData)
+    ) {
+      throw new Error("expected typed command data");
+    }
+    expect(startedData.terminal?.eventType).toBe("terminal.started");
+
+    const reference = {
+      ...eventBase,
+      type: "item.updated",
+      payload: {
+        itemType: "command_execution",
+        status: "inProgress",
+        data: {
+          terminal: {
+            terminalId: "terminal-1",
+            eventType: "terminal.output.reference",
+            artifactId: "550e8400-e29b-41d4-a716-446655440000",
+            offset: 0,
+            length: 1_048_576,
+            segmentIndex: 0,
+            encoding: "binary",
+          },
+        },
+      },
+    };
+    expect(decodeRuntimeEvent(reference).type).toBe("item.updated");
+
+    for (const [field, value] of [
+      ["artifactId", "not-a-uuid"],
+      ["offset", -1],
+      ["length", -1],
+      ["segmentIndex", -1],
+    ] as const) {
+      expect(() =>
+        decodeRuntimeEvent({
+          ...reference,
+          payload: {
+            ...reference.payload,
+            data: {
+              terminal: { ...reference.payload.data.terminal, [field]: value },
+            },
+          },
+        }),
+      ).toThrow();
+    }
+  });
+
+  it("validates terminal completion counters and failure metadata", () => {
+    const completed = {
+      ...eventBase,
+      type: "item.completed",
+      payload: {
+        itemType: "command_execution",
+        status: "failed",
+        data: {
+          terminal: {
+            terminalId: "terminal-1",
+            eventType: "terminal.failed",
+            totalBytes: 65_536,
+            previewBytes: 32_768,
+            segmentCount: 1,
+            truncated: true,
+            exitCode: 137,
+            signal: "SIGKILL",
+            failureKind: "oom",
+          },
+        },
+      },
+    };
+
+    expect(decodeRuntimeEvent(completed).type).toBe("item.completed");
+    expect(() =>
+      decodeRuntimeEvent({
+        ...completed,
+        payload: {
+          ...completed.payload,
+          data: {
+            terminal: { ...completed.payload.data.terminal, previewBytes: 65_537 },
+          },
+        },
+      }),
+    ).toThrow();
+    expect(() =>
+      decodeRuntimeEvent({
+        ...completed,
+        payload: {
+          ...completed.payload,
+          data: {
+            terminal: { ...completed.payload.data.terminal, segmentCount: -1 },
+          },
+        },
+      }),
+    ).toThrow();
+  });
+
+  it("rejects terminal lifecycle data on non-command items", () => {
+    expect(() =>
+      decodeRuntimeEvent({
+        ...eventBase,
+        type: "item.started",
+        payload: {
+          itemType: "mcp_tool_call",
+          data: {
+            terminal: {
+              terminalId: "terminal-1",
+              eventType: "terminal.started",
+            },
+          },
+        },
+      }),
+    ).toThrow();
   });
 });

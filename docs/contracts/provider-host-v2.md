@@ -42,6 +42,24 @@ terminal, malformed JSONL or an oversized line is a `protocol_violation`.
 Provider diagnostics use stderr, are bounded and redacted, and are never parsed by Control Plane. Large logs,
 files, Diffs and snapshots use Artifact references.
 
+`StartSession` / `ResumeSession` may carry the optional `runnerInput.runtimeOutputDirectory` assigned by agentd.
+It is an absolute, private directory created and bound before Provider start; it is never supplied by the Provider
+or persisted in Session Events. A Host that does not understand the optional field keeps the bounded inline-output
+behavior. A newer Host receiving no root must not accept a Provider-reported output path.
+
+For a retained Terminal log inside that root, the Host emits an `ArtifactCandidate` with a root-relative `path`,
+`sourceRoot=runtime-output`, `kind=terminal_log`, `terminalId`, `encoding`, and optional `reportedSize`. The Host
+performs only lexical containment and never opens the Provider-returned path. Agentd is the filesystem authority:
+it resolves the relative candidate below the already bound Root descriptor, rejects absolute/traversal paths,
+symlinks and non-regular files, verifies the reported size, and streams the opened descriptor through the Terminal
+collector. The candidate path and physical root never enter the durable Event payload or Artifact logical name.
+
+Claude binds `CLAUDE_CONFIG_DIR` to this agentd-owned root so SDK `persistedOutputPath`, `rawOutputPath`, and
+background `output_file` values can be recovered without granting arbitrary host-file reads. A contained file
+replaces the duplicate inline/summary copy; an absent root or escaping path keeps only the bounded inline/summary
+and emits a path-free warning. Agentd classifies unsafe control data or invalid UTF-8 as binary, stores it only in
+Artifact payload, emits at most the bounded safe preview, and preserves the same Terminal lifecycle completion.
+
 Agentd owns the Host process and its managed process scope. Windows starts the Host suspended, assigns it to a
 kill-on-close Job Object, then resumes it. Unix starts an isolated process group and terminates descendants that
 remain in that group on normal exit, protocol failure, cancellation or Drain. Deliberately detached Unix
@@ -104,7 +122,8 @@ SDK Query, tries the native Session Cursor before authoritative-history reconstr
 Synara policy: approval-required Turns force mutating/network/command tools through the durable Interaction
 channel, while full-access Turns auto-allow them. `AskUserQuestion` is projected as Structured User Input and
 Plan Mode uses the native SDK permission mode. Provider output, tool lifecycle and usage are normalized without
-forwarding raw SDK payloads.
+forwarding raw SDK payloads. Because the Runtime Output root is execution-scoped and removed after collection,
+native Cursor resume remains an optimization; authoritative-history fallback is the portable recovery authority.
 
 Selecting authoritative-history fallback emits internal `runtime.provider.warning`, normalized to canonical
 `runtime.warning`. Its fixed message states that fallback was selected before Turn activity; it does not claim the

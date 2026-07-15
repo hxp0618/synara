@@ -97,6 +97,7 @@ export const ProviderCapabilityProjectionReasonCode = Schema.Literals([
   "worker_manifest_required",
   "worker_manifest_reregistration_required",
   "execution_target_unavailable",
+  "provider_cursor_required",
 ]);
 export type ProviderCapabilityProjectionReasonCode =
   typeof ProviderCapabilityProjectionReasonCode.Type;

@@ -36,6 +36,9 @@ export type ControlPlaneSessionProjection = {
   messages: Thread["messages"];
   activities: Thread["activities"];
   latestTurn: OrchestrationLatestTurn | null;
+  latestTurnKind: "message" | "compact" | "review" | "rollback" | "fork" | null;
+  forkSourceSessionId: string | null;
+  forkSourceEventSequence: number | null;
   runtimeMode: RuntimeMode;
   interactionMode: ProviderInteractionMode;
   orchestrationStatus: OrchestrationSessionStatus;
@@ -59,6 +62,15 @@ const PROVIDERS = new Set<ProviderKind>([
   "pi",
 ]);
 
+const WORKSPACE_CHECKPOINT_UNCONFIRMED_RISK = "data-loss-risk=workspace-checkpoint-unconfirmed";
+const TERMINAL_FAILURE_LABELS: Readonly<Record<string, string>> = {
+  exit: "exit failure",
+  signal: "signal failure",
+  timeout: "timed out",
+  oom: "out of memory",
+  provider_error: "provider error",
+};
+
 function providerKind(value: string): ProviderKind {
   if (value === "claude" || value === "claudeagent") return "claudeAgent";
   if (PROVIDERS.has(value as ProviderKind)) return value as ProviderKind;
@@ -70,7 +82,123 @@ function payloadString(event: ControlPlaneSessionEvent, key: string): string | n
   return typeof value === "string" && value.length > 0 ? value : null;
 }
 
+function payloadNumber(event: ControlPlaneSessionEvent, key: string): number | null {
+  const value = event.payload[key];
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+
+function eventTurnKind(
+  event: ControlPlaneSessionEvent,
+): "message" | "compact" | "review" | "rollback" | "fork" {
+  const value = payloadString(event, "turnKind");
+  return value === "compact" || value === "review" || value === "rollback" || value === "fork"
+    ? value
+    : "message";
+}
+
+function rollbackMessages(
+  messages: Thread["messages"],
+  event: ControlPlaneSessionEvent,
+): Thread["messages"] {
+  const removedTurnIds = Array.isArray(event.payload.removedTurnIds)
+    ? new Set(
+        event.payload.removedTurnIds.filter(
+          (value): value is string => typeof value === "string" && value.length > 0,
+        ),
+      )
+    : null;
+  if (removedTurnIds && removedTurnIds.size > 0) {
+    return messages.filter((message) => !message.turnId || !removedTurnIds.has(message.turnId));
+  }
+
+  const fromTurnId = payloadString(event, "fromTurnId");
+  if (!fromTurnId) return messages;
+  const rollbackIndex = messages.findIndex((message) => message.turnId === fromTurnId);
+  return rollbackIndex < 0 ? messages : messages.slice(0, rollbackIndex);
+}
+
+function recordValue(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function terminalData(event: ControlPlaneSessionEvent): Record<string, unknown> | null {
+  return recordValue(recordValue(event.payload.data)?.terminal);
+}
+
+function recordString(value: Record<string, unknown>, key: string): string | null {
+  const field = value[key];
+  return typeof field === "string" && field.length > 0 ? field : null;
+}
+
+function recordNumber(value: Record<string, unknown>, key: string): number | null {
+  const field = value[key];
+  return typeof field === "number" && Number.isFinite(field) ? field : null;
+}
+
+function formatByteCount(value: number): string {
+  return `${value.toLocaleString("en-US")} ${value === 1 ? "byte" : "bytes"}`;
+}
+
+function terminalCompletionSummary(terminal: Record<string, unknown>, failed: boolean): string {
+  const details: string[] = [];
+  const failureKind = recordString(terminal, "failureKind");
+  if (failed && failureKind) {
+    details.push(TERMINAL_FAILURE_LABELS[failureKind] ?? failureKind.replaceAll("_", " "));
+  }
+  const exitCode = recordNumber(terminal, "exitCode");
+  if (exitCode !== null) details.push(`exit ${exitCode}`);
+  const signal = recordString(terminal, "signal");
+  if (signal) details.push(signal);
+  const totalBytes = recordNumber(terminal, "totalBytes");
+  if (totalBytes !== null) details.push(formatByteCount(totalBytes));
+  if (terminal.truncated === true) details.push("output truncated");
+
+  const label = failed ? "Terminal failed" : "Terminal exited";
+  return details.length > 0 ? `${label} (${details.join(", ")})` : label;
+}
+
+function terminalLifecycleSummary(event: ControlPlaneSessionEvent): string | null {
+  const terminal = terminalData(event);
+  if (!terminal) return null;
+
+  switch (recordString(terminal, "eventType")) {
+    case "terminal.started": {
+      const command = recordString(terminal, "commandSummary");
+      const cwd = recordString(terminal, "cwdLabel");
+      if (command && cwd) return `Running ${command} in ${cwd}`;
+      if (command) return `Running ${command}`;
+      return cwd ? `Terminal started in ${cwd}` : "Terminal started";
+    }
+    case "terminal.output.reference": {
+      const details: string[] = [];
+      const segmentIndex = recordNumber(terminal, "segmentIndex");
+      if (segmentIndex !== null) details.push(`segment ${segmentIndex + 1}`);
+      const length = recordNumber(terminal, "length");
+      if (length !== null) details.push(formatByteCount(length));
+      return details.length > 0
+        ? `Terminal output saved to Artifact (${details.join(", ")})`
+        : "Terminal output saved to Artifact";
+    }
+    case "terminal.exited":
+      return terminalCompletionSummary(terminal, false);
+    case "terminal.failed":
+      return terminalCompletionSummary(terminal, true);
+    default:
+      return null;
+  }
+}
+
+function hasUnconfirmedWorkspaceCheckpoint(event: ControlPlaneSessionEvent): boolean {
+  return ["reason", "risk", "releaseReason"].some((key) =>
+    payloadString(event, key)?.includes(WORKSPACE_CHECKPOINT_UNCONFIRMED_RISK),
+  );
+}
+
 function runtimeItemSummary(event: ControlPlaneSessionEvent): string {
+  const terminalSummary = terminalLifecycleSummary(event);
+  if (terminalSummary) return terminalSummary;
   const title = payloadString(event, "title");
   const itemType = payloadString(event, "itemType")?.replaceAll("_", " ");
   if (title) return title;
@@ -158,6 +286,9 @@ function appendAssistantDelta(
 }
 
 function activitySummary(event: ControlPlaneSessionEvent): string | null {
+  if (hasUnconfirmedWorkspaceCheckpoint(event)) {
+    return "Workspace checkpoint unconfirmed; local changes may be lost";
+  }
   switch (event.eventType) {
     case "execution.leased":
       return "Worker assigned";
@@ -177,6 +308,16 @@ function activitySummary(event: ControlPlaneSessionEvent): string | null {
       return "Steer requested";
     case "turn.steered":
       return "Steer applied";
+    case "session.compact-requested":
+      return "Context compaction requested";
+    case "session.compacted":
+      return "Context compacted";
+    case "session.review-requested":
+      return "Review requested";
+    case "session.history.rolled-back":
+      return "Session history rolled back";
+    case "session.forked":
+      return payloadString(event, "sourceSessionId") ? "Session fork created" : "Session forked";
     case "execution.interrupted":
       return "Execution interrupted";
     case "approval.requested":
@@ -260,6 +401,7 @@ function appendActivity(
     return activities;
   }
   const tone: OrchestrationThreadActivity["tone"] =
+    hasUnconfirmedWorkspaceCheckpoint(event) ||
     event.eventType === "execution.failed" ||
     event.eventType === "execution.cancelled" ||
     event.eventType === "workspace.failed" ||
@@ -308,6 +450,9 @@ export function createControlPlaneSessionProjection(
     messages: [],
     activities: [],
     latestTurn: null,
+    latestTurnKind: null,
+    forkSourceSessionId: null,
+    forkSourceEventSequence: null,
     runtimeMode: "full-access",
     interactionMode: "default",
     orchestrationStatus: session.status === "active" ? "ready" : "stopped",
@@ -346,6 +491,9 @@ export function applyControlPlaneSessionEvent(
   let session = projection.session;
   let messages = projection.messages;
   let latestTurn = projection.latestTurn;
+  let latestTurnKind = projection.latestTurnKind;
+  let forkSourceSessionId = projection.forkSourceSessionId;
+  let forkSourceEventSequence = projection.forkSourceEventSequence;
   let runtimeMode = projection.runtimeMode;
   let interactionMode = projection.interactionMode;
   let orchestrationStatus = projection.orchestrationStatus;
@@ -356,19 +504,22 @@ export function applyControlPlaneSessionEvent(
     case "turn.created": {
       const rawTurnId = payloadString(event, "turnId");
       const inputText = payloadString(event, "inputText") ?? "";
+      const turnKind = eventTurnKind(event);
       if (rawTurnId) {
-        messages = [
-          ...messages,
-          {
-            id: userMessageId(rawTurnId),
-            role: "user",
-            text: inputText,
-            turnId: TurnId.makeUnsafe(rawTurnId),
-            createdAt: event.occurredAt,
-            streaming: false,
-            source: "native",
-          },
-        ];
+        if (turnKind === "message") {
+          messages = [
+            ...messages,
+            {
+              id: userMessageId(rawTurnId),
+              role: "user",
+              text: inputText,
+              turnId: TurnId.makeUnsafe(rawTurnId),
+              createdAt: event.occurredAt,
+              streaming: false,
+              source: "native",
+            },
+          ];
+        }
         latestTurn = {
           turnId: TurnId.makeUnsafe(rawTurnId),
           state: "running",
@@ -377,11 +528,30 @@ export function applyControlPlaneSessionEvent(
           completedAt: null,
           assistantMessageId: null,
         };
+        latestTurnKind = turnKind;
       }
       runtimeMode = eventRuntimeMode(event) ?? runtimeMode;
       interactionMode = eventInteractionMode(event) ?? interactionMode;
       orchestrationStatus = "starting";
       error = null;
+      break;
+    }
+    case "session.history.rolled-back":
+      messages = rollbackMessages(messages, event);
+      latestTurn = null;
+      latestTurnKind = null;
+      orchestrationStatus = "ready";
+      error = null;
+      break;
+    case "session.forked": {
+      const sourceSessionId = payloadString(event, "sourceSessionId");
+      if (sourceSessionId && sourceSessionId !== projection.session.id) {
+        forkSourceSessionId = sourceSessionId;
+        forkSourceEventSequence =
+          payloadNumber(event, "sourceEventSequence") ??
+          payloadNumber(event, "sourceSequence") ??
+          forkSourceEventSequence;
+      }
       break;
     }
     case "turn.steer-requested": {
@@ -429,7 +599,7 @@ export function applyControlPlaneSessionEvent(
             ? payloadString(event, "delta")
             : null
           : payloadString(event, "text");
-      if (text) {
+      if (text && (latestTurnKind === "message" || latestTurnKind === "review")) {
         messages = appendAssistantDelta(messages, event, text);
         const executionId = event.executionId ?? `event-${event.eventId}`;
         if (latestTurn && (!turnId || latestTurn.turnId === turnId)) {
@@ -523,6 +693,9 @@ export function applyControlPlaneSessionEvent(
       messages,
       activities: appendActivity(projection.activities, event),
       latestTurn,
+      latestTurnKind,
+      forkSourceSessionId,
+      forkSourceEventSequence,
       runtimeMode,
       interactionMode,
       orchestrationStatus,
@@ -610,6 +783,9 @@ export function projectControlPlaneThreads(
       worktreePath: null,
       envMode: "local",
       latestTurn: projection.latestTurn,
+      ...(projection.forkSourceSessionId
+        ? { forkSourceThreadId: ThreadId.makeUnsafe(projection.forkSourceSessionId) }
+        : {}),
       turnDiffSummaries: [],
       activities: projection.activities,
     };

@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -623,6 +624,21 @@ func TestWorkspaceSnapshotCaptureAndRestorePreservesVerifiedFiles(t *testing.T) 
 	}
 }
 
+func TestWorkspaceSnapshotCaptureRejectsCanceledContextForEmptyWorkspace(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := captureWorkspaceSnapshot(
+		ctx,
+		executions.Execution{ID: uuid.New(), Generation: 1},
+		WorkspaceMaterialization{Directory: t.TempDir(), Managed: true},
+		WorkspaceInspection{Dirty: true},
+		"cancelled-snapshot",
+	)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled empty Workspace snapshot returned %v", err)
+	}
+}
+
 func TestWorkspaceSnapshotRestoreRejectsTraversalArchive(t *testing.T) {
 	root := t.TempDir()
 	workspace := filepath.Join(root, "tenant", "project", "session", "workspace")
@@ -792,6 +808,135 @@ func TestUploadCheckpointArtifactRecoversCompletedArtifactAfterResponseLoss(t *t
 	}
 	if len(createRequestIDs) != 2 || createRequestIDs[0] == "" || createRequestIDs[0] != createRequestIDs[1] {
 		t.Fatalf("Checkpoint Artifact create did not reuse a stable request ID: %#v", createRequestIDs)
+	}
+}
+
+func TestUploadArtifactRecoversCompletedArtifactAfterResponseLoss(t *testing.T) {
+	executionID := uuid.New()
+	tenantID := uuid.New()
+	workerID := uuid.New()
+	artifactID := uuid.New()
+	payload := []byte("durable generated file\n")
+	artifactPath := filepath.Join(t.TempDir(), "report.txt")
+	if err := os.WriteFile(artifactPath, payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(payload)
+	sha := hex.EncodeToString(digest[:])
+	const normalizedContentType = "text/plain; charset=UTF-8"
+	var createRequestIDs, createIdempotencyKeys []string
+	createCalls, uploadCalls, completeCalls := 0, 0, 0
+	ready := false
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		base := "/v1/workers/executions/" + executionID.String() + "/"
+		switch request.URL.Path {
+		case base + "artifacts":
+			createCalls++
+			createRequestIDs = append(createRequestIDs, request.Header.Get("X-Request-ID"))
+			var input struct {
+				TenantID     uuid.UUID  `json:"tenantId"`
+				Generation   int64      `json:"generation"`
+				LeaseToken   string     `json:"leaseToken"`
+				CheckpointID *uuid.UUID `json:"checkpointId,omitempty"`
+				Kind         string     `json:"kind"`
+				OriginalName *string    `json:"originalName"`
+				ExpiresAt    *time.Time `json:"expiresAt"`
+			}
+			idempotencyKey := request.Header.Get(artifacts.WorkerIdempotencyKeyHeader)
+			decoder := json.NewDecoder(request.Body)
+			decoder.DisallowUnknownFields()
+			if err := decoder.Decode(&input); err != nil || input.CheckpointID != nil ||
+				!strings.HasPrefix(idempotencyKey, "artifact-") {
+				http.Error(response, "invalid idempotent Artifact create", http.StatusBadRequest)
+				return
+			}
+			createIdempotencyKeys = append(createIdempotencyKeys, idempotencyKey)
+			response.Header().Set("Content-Type", "application/json")
+			if ready {
+				_, _ = io.WriteString(response, `{"artifact":{"id":"`+artifactID.String()+`","status":"ready","sizeBytes":`+
+					fmt.Sprint(len(payload))+`,"sha256":"`+sha+`","contentType":"`+normalizedContentType+`"},"uploadRequired":false}`)
+				return
+			}
+			_, _ = io.WriteString(response, `{"artifact":{"id":"`+artifactID.String()+`","status":"pending"},"uploadRequired":true,"method":"PUT","url":"`+
+				server.URL+`/generated-file-upload","headers":{},"expiresAt":"2030-01-01T00:00:00Z"}`)
+		case "/generated-file-upload":
+			uploadCalls++
+			if request.Header.Get("Content-Type") != normalizedContentType {
+				http.Error(response, "Content-Type was not normalized", http.StatusBadRequest)
+				return
+			}
+			uploaded, _ := io.ReadAll(request.Body)
+			if string(uploaded) != string(payload) {
+				http.Error(response, "payload mismatch", http.StatusBadRequest)
+				return
+			}
+			response.WriteHeader(http.StatusNoContent)
+		case base + "artifacts/" + artifactID.String() + "/complete":
+			completeCalls++
+			var input artifacts.WorkerCompleteInput
+			if err := json.NewDecoder(request.Body).Decode(&input); err != nil || input.SHA256 != sha ||
+				input.SizeBytes != int64(len(payload)) || input.ContentType != normalizedContentType {
+				http.Error(response, "invalid Artifact complete", http.StatusBadRequest)
+				return
+			}
+			ready = true
+			response.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(response, `{"id":"`+artifactID.String()+`"`)
+		default:
+			http.Error(response, "unexpected path", http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	controlPlaneURL, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := NewClient(Config{ControlPlaneURL: controlPlaneURL, RequestTimeout: time.Second, ArtifactTimeout: time.Second})
+	client.workerToken = "worker-token"
+	client.artifactIdempotencySupported = true
+	lease := executions.Lease{
+		ExecutionID: executionID, TenantID: tenantID, WorkerID: workerID,
+		Generation: 4, LeaseToken: "lease-token", ExpiresAt: time.Now().Add(time.Hour),
+	}
+	completed, err := client.UploadArtifact(context.Background(), executionID, lease, RunnerArtifact{
+		Path: "generated/report.txt", Kind: "generated_file", OriginalName: "report.txt",
+		ContentType: "TEXT/PLAIN; Charset=UTF-8",
+	}, artifactPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if completed.ID != artifactID || completed.Status != "ready" {
+		t.Fatalf("unexpected recovered Artifact: %#v", completed)
+	}
+	if createCalls != 2 || uploadCalls != 1 || completeCalls != 1 {
+		t.Fatalf("unexpected recovery calls: create=%d upload=%d complete=%d", createCalls, uploadCalls, completeCalls)
+	}
+	if len(createRequestIDs) != 2 || createRequestIDs[0] == "" || createRequestIDs[0] != createRequestIDs[1] {
+		t.Fatalf("Artifact create did not reuse a stable request ID: %#v", createRequestIDs)
+	}
+	if len(createIdempotencyKeys) != 2 || createIdempotencyKeys[0] != createIdempotencyKeys[1] {
+		t.Fatalf("Artifact create did not reuse a stable idempotency key: %#v", createIdempotencyKeys)
+	}
+}
+
+func TestInspectArtifactUploadIdentityHonorsCanceledContext(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "large.log")
+	if err := os.WriteFile(path, bytes.Repeat([]byte("x"), 1<<20), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	source, err := openRegularArtifactSource(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer source.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err = inspectArtifactUploadIdentity(ctx, uuid.New(), executions.Lease{Generation: 1}, RunnerArtifact{
+		Path: "large.log", Kind: "terminal_log", ContentType: "text/plain",
+	}, source)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Artifact pre-hash ignored cancellation: %v", err)
 	}
 }
 

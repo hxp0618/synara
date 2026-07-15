@@ -15,6 +15,11 @@ control plane's Deployment Profile and to workspace mode.
 All kinds use `RegisterWorker`, `Heartbeat`, `ClaimExecution`, leases, generation fencing, runtime
 events, idempotent receipts, and provider resume cursors. Drivers must not write Session state directly.
 
+Stage 3 adds managed Worker Release and target-scoped image-pull Credential contracts for Docker and
+Kubernetes. The persistence/API/reconciler baseline exists, but the real Codex/Claude four-Target release gate,
+registry-pushed multi-arch reproduction, production multi-node Kubernetes and soak remain open. An implemented
+reconciler is not by itself production release evidence.
+
 ## Persistence and ownership
 
 `execution_targets` stores:
@@ -44,6 +49,16 @@ Sessions persist a non-null `execution_target_id`. Executions copy both `executi
 GET  /v1/tenants/{tenantId}/execution-targets
 POST /v1/tenants/{tenantId}/execution-targets
 GET  /v1/tenants/{tenantId}/execution-targets/{executionTargetId}
+GET  /v1/tenants/{tenantId}/workers
+POST /v1/tenants/{tenantId}/workers/{workerId}/revoke
+GET  /v1/tenants/{tenantId}/execution-targets/{executionTargetId}/worker-releases
+POST /v1/tenants/{tenantId}/execution-targets/{executionTargetId}/worker-releases
+POST /v1/tenants/{tenantId}/execution-targets/{executionTargetId}/worker-releases/{revisionId}/canary
+POST /v1/tenants/{tenantId}/execution-targets/{executionTargetId}/worker-releases/{revisionId}/promote
+POST /v1/tenants/{tenantId}/execution-targets/{executionTargetId}/worker-releases/{revisionId}/rollback
+GET  /v1/tenants/{tenantId}/credential-bindings?executionTargetId={executionTargetId}
+POST /v1/tenants/{tenantId}/credential-bindings
+POST /v1/tenants/{tenantId}/credential-bindings/{bindingId}/disable
 ```
 
 Responses contain only `id`, ownership, `kind`, `name`, `status`, safe `capabilities`, and timestamps.
@@ -53,6 +68,87 @@ outbox payloads.
 
 Tenant `worker.read` authorizes list/read and `worker.manage` authorizes create. Organization ownership
 is separately validated against the target tenant.
+
+Worker Release mutations and operator revocation also require `worker.manage` and an `Idempotency-Key`.
+Credential Binding management requires `credentials.manage`. Responses expose release/Worker identifiers,
+versions, channels, status and safe reasons; they never expose encrypted Target configuration, registry auth,
+Worker/Lease tokens or Credential plaintext.
+
+## Managed Worker Release Revision and Policy
+
+Migration `000037_worker_release_rollout.sql` adds three target-owned resources:
+
+| Resource                     | Contract                                                                         |
+| ---------------------------- | -------------------------------------------------------------------------------- |
+| `worker_release_revisions`   | immutable monotonic Revision binding one Target to one immutable Worker Manifest |
+| `worker_release_policies`    | one CAS row per Target with one promoted and optional canary Revision            |
+| `worker_release_transitions` | immutable policy history keyed by Target and Policy Version                      |
+
+Managed Docker/Kubernetes Revision creation and every Policy transition require the referenced Worker Manifest to
+contain an immutable image Digest. A mutable tag or Target configuration image alone is not sufficient once a Policy
+exists. The reconciler joins the Revision to the Manifest and uses that Digest as the desired image.
+
+Policy rules:
+
+- Initial `promote` uses `expectedPolicyVersion = 0`.
+- A canary Revision must be newer than promoted, different from promoted and use `canaryPercent` in `1..100`.
+- Only the current active canary can be promoted.
+- Rollback to an older Revision changes promoted and removes canary.
+- Calling the rollback endpoint with the current promoted Revision while a canary exists is the explicit
+  abort-canary operation.
+- Policy Version advances exactly once. Stale CAS must fail; clients reload and re-evaluate intent rather than
+  replacing only the Version and replaying an obsolete operation.
+
+The persisted Transition row action remains `rollback` for abort-canary because `000037` freezes the database action
+vocabulary as `promote | canary | rollback`. `GET .../worker-releases` projects that exact rollback shape as
+`abort-canary`; Audit uses `worker_release.canary_aborted`, and Outbox uses
+`worker.release.canary-aborted`. Consumers must not infer abort solely from the stored action string.
+
+Execution selection is deterministic. When a Policy exists, a queued/recovering Execution receives promoted or
+canary Revision/Channel before Lease acquisition. Claim requires an active Worker with the same Target, Revision and
+Channel. A Policy transition may reassign only unleased Executions; it must not silently mutate a leased/running
+Execution's release identity.
+
+Workers whose Manifest is no longer selected become release-inactive and cannot claim new work. Policy transitions
+that would retire a Revision/Channel are rejected while it owns `leased`, `running` or `waiting-for-approval`
+Executions. Reconciliation may prepare replacements, but an active Lease remains a drain boundary: Docker retains
+busy stale containers until the Lease clears, and Kubernetes preserves the execution-pinned Pod until its Execution
+reaches a replaceable/terminal state. Operators must not delete a busy Worker merely to make the desired release count
+look converged.
+
+## Target-scoped Worker image-pull Credential
+
+Migration `000035_workspace_credential_bindings.sql` adds `worker_image_pull` as an Execution Target-scoped
+Credential Binding. Migration `000038_credential_binding_fk_indexes.sql` keeps disabled history usable for foreign-key
+enforcement without making it active again. Migration `000039_worker_image_pull_binding_uniqueness.sql` enforces at
+most one active image-pull Binding per Target. Migration `000040_worker_release_transition_policy_fencing.sql` keeps
+the latest immutable Transition exactly aligned with the current Release Policy.
+
+Provisioning requires exactly one active `worker_image_pull` Binding per Target. Multiple active candidates are
+ambiguous and must fail closed rather than relying on database row order. The Binding must reference a Tenant- or
+matching Organization-scoped `purpose=registry`, `provider=oci` Credential. The server derives an immutable selector
+from the encrypted payload and requires it to match the image Registry authority exactly, with Docker Hub aliases
+normalized. Binding plaintext, registry username/password/token and the resolved auth header are never returned by
+the API.
+
+Resolution rules:
+
+- Target ownership, Binding state, Credential scope/version/expiry/revocation and selector are checked under database
+  locks before KMS I/O.
+- KMS decryption occurs outside the transaction, followed by a second snapshot check so Rotation/Disable/Revoke cannot
+  race a stale pull credential into use.
+- Docker supports OCI basic or registry token auth and sends it only as the Engine pull request's `X-Registry-Auth`.
+- Kubernetes currently accepts OCI basic auth for `kubernetes.io/dockerconfigjson`; bearer-only auth is Explicit
+  Unsupported for this Target.
+- Registry authorities preserve custom ports during image parsing, but the current Registry Credential payload accepts
+  hostname-only selectors. Custom-port authenticated pulls therefore fail closed until that contract is extended.
+- The resolved registry Credential is a short-lived Control Plane provisioner projection. It never enters an agentd
+  Workload, Worker/Provider environment, command argument, Session Event, Audit/Outbox metadata or log.
+
+The resolver distinguishes authoritative absence/disable/revoke/invalid scope from a transient database/KMS failure.
+Kubernetes may clear the managed Target registry Secret only for an authoritative result; a transient lookup/KMS
+failure marks the Target offline but must not erase the last known Secret. An authoritative clear applies an empty
+auth map. Existing node image cache is a separate platform concern and is not erased by Credential revocation.
 
 ## Worker binding and claim rules
 
@@ -105,7 +201,7 @@ Encrypted configuration supports `image`, `runnerCommand`, `desiredWorkers`, `pu
 `allowInsecureControlPlane=true`.
 
 Managed containers use deterministic names and labels for Target, Tenant, Organization, Worker index,
-and a configuration digest. They override the image entrypoint with
+configuration digest, Worker Release Revision and release Channel. They override the image entrypoint with
 `/usr/local/bin/synara-agentd`, mount one persistent target workspace volume, use `unless-stopped`, and
 receive CPU/memory limits from the encrypted target configuration. Registration secrets exist only in
 the container environment and never in labels, responses, logs, or Audit metadata.
@@ -118,6 +214,11 @@ the digest to replace stale containers. Scale-down and replacement skip Workers 
 Lease; those containers are removed on a later pass after the Lease clears. A fully running desired
 pool marks the target active; partial or failed reconciliation marks it offline.
 
+Without a Release Policy the pool remains unmanaged and uses the encrypted Target `image`. With a Policy, each slot
+uses the promoted or canary Manifest Digest. Docker canary requires `desiredWorkers >= 2`; percentage rounding must
+leave at least one promoted and one canary slot. Registry auth is used for image pull only and is not written into
+container Environment or labels.
+
 ## Managed Kubernetes execution
 
 The control plane reconciles every non-disabled Kubernetes target under a PostgreSQL advisory lock.
@@ -127,9 +228,12 @@ CIDRs, and optional scheduling constraints. External cluster credentials must be
 inline values; file references are restricted to the standard in-cluster ServiceAccount paths.
 
 For each target the reconciler server-side-applies the Namespace when requested, a tokenless Worker
-ServiceAccount, registration Secret, ResourceQuota, and default-deny NetworkPolicy. It creates one
+ServiceAccount, registration Secret, target-scoped registry Secret, ResourceQuota, and default-deny NetworkPolicy.
+The registry Secret is referenced only through Pod `imagePullSecrets` and is not mounted or exposed to agentd. It
+creates one
 execution-pinned Pod for each queued or recovering Execution up to `maxActivePods`. Pod names and
-labels encode the expected next Generation. Terminal, stale-generation, and no-longer-owned Pods are
+labels encode the expected next Generation plus selected Release Revision/Channel. A release-pinned Execution uses
+the exact immutable Manifest Digest instead of the mutable Target image. Terminal, stale-generation, and no-longer-owned Pods are
 deleted, while PostgreSQL remains the authority for Session, Event, Lease, and recovery state.
 
 Worker Pods run as UID/GID 10001 with a read-only root filesystem, RuntimeDefault seccomp, no Linux
@@ -143,3 +247,14 @@ it is not embedded in Pod labels, Audit metadata, responses, or runner arguments
 The in-cluster control-plane RBAC and Kustomize base live in `deploy/kubernetes`. The reconciler role is
 cluster-scoped only because managed targets may create dedicated Namespaces; operators that disable
 Namespace management may replace it with equivalent per-Namespace Roles.
+
+## Release and acceptance boundary
+
+The operator workflow is documented in `docs/runbooks/worker-release-rollout.md`; the required release evidence is in
+`docs/release-checklists/stage-3-provider-runtime-remote-worker.md`. Current implementation evidence is summarized in
+`docs/reports/stage-3-provider-runtime-acceptance-2026-07-15.md`.
+
+Current deterministic Local/Docker/Kubernetes and historical SSH/Kubernetes fixture evidence proves selected shared
+orchestration and failure paths, not a real Provider release. Stage 3 remains `partial` until the same committed,
+registry-pushed immutable image passes real Codex and Claude acceptance across Local, SSH, Docker and Kubernetes,
+including canary, rollback, active-execution drain, credential revocation and long-session/production soak.

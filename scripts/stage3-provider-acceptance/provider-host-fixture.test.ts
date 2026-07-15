@@ -28,8 +28,11 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   Stage3ProviderAcceptanceHost,
   STAGE3_FIXTURE_CREDENTIAL_SENTINEL,
+  STAGE3_TERMINAL_LARGE_CHUNK_BYTES,
+  STAGE3_TERMINAL_LARGE_TOTAL_BYTES,
   fixtureDescriptor,
   parseFixtureScenarios,
+  stage3TerminalLargeChunk,
 } from "./provider-host-fixture";
 
 const decodeDescriptor = Schema.decodeUnknownSync(ProviderHostDescriptor);
@@ -113,6 +116,88 @@ describe("Stage 3 Provider Host acceptance fixture", () => {
     for (const message of output) expect(() => decodeMessage(message)).not.toThrow();
   });
 
+  it("emits a deterministic contiguous large terminal stream before one Result", () => {
+    const output: ProviderHostMessage[] = [];
+    const host = fixtureHost(output);
+    startCodexSession(host);
+
+    host.handleCommand(
+      command("SendTurn", "terminal-large", {
+        inputText: "[terminal-large]",
+        runtimeEventVersion: 2,
+      }),
+    );
+
+    const sendMessages = messagesFor(output, "terminal-large");
+    const events = sendMessages.filter(
+      (message): message is ProviderHostMessage & { messageType: "Event" } =>
+        message.messageType === "Event",
+    );
+    const outputEvents = events.filter((message) => message.payload.eventType === "content.delta");
+    const expectedChunkCount = Math.ceil(
+      STAGE3_TERMINAL_LARGE_TOTAL_BYTES / STAGE3_TERMINAL_LARGE_CHUNK_BYTES,
+    );
+
+    expect(sendMessages.filter(isTerminal)).toHaveLength(1);
+    expect(sendMessages.at(-1)?.messageType).toBe("Result");
+    expect(events).toHaveLength(expectedChunkCount + 2);
+    expect(outputEvents).toHaveLength(expectedChunkCount);
+    expect(events[0]).toMatchObject({
+      payload: {
+        eventType: "item.started",
+        payload: {
+          data: {
+            terminal: {
+              terminalId: "fixture-terminal-large-1",
+              eventType: "terminal.started",
+              cwdLabel: ".",
+            },
+          },
+        },
+      },
+    });
+
+    let byteOffset = 0;
+    for (const message of outputEvents) {
+      const payload = message.payload.payload as Record<string, unknown>;
+      const byteLength = Math.min(
+        STAGE3_TERMINAL_LARGE_CHUNK_BYTES,
+        STAGE3_TERMINAL_LARGE_TOTAL_BYTES - byteOffset,
+      );
+      expect(payload).toMatchObject({
+        streamKind: "command_output",
+        terminalId: "fixture-terminal-large-1",
+        encoding: "utf-8",
+        byteOffset,
+        byteLength,
+      });
+      expect(payload.delta).toBe(stage3TerminalLargeChunk(byteOffset, byteLength));
+      expect(payload.delta).toMatch(/^[0-9A-Za-z._-]+$/u);
+      expect(Buffer.byteLength(payload.delta as string, "utf8")).toBe(byteLength);
+      expect(Buffer.byteLength(JSON.stringify(payload), "utf8")).toBeLessThanOrEqual(64 * 1024);
+      byteOffset += byteLength;
+    }
+    expect(byteOffset).toBe(STAGE3_TERMINAL_LARGE_TOTAL_BYTES);
+    expect(events.at(-1)).toMatchObject({
+      payload: {
+        eventType: "item.completed",
+        payload: {
+          data: {
+            terminal: {
+              terminalId: "fixture-terminal-large-1",
+              eventType: "terminal.exited",
+              totalBytes: STAGE3_TERMINAL_LARGE_TOTAL_BYTES,
+              previewBytes: STAGE3_TERMINAL_LARGE_TOTAL_BYTES,
+              segmentCount: 0,
+              truncated: false,
+              exitCode: 0,
+            },
+          },
+        },
+      },
+    });
+  });
+
   it("verifies the exact artifact sentinel from the persisted Workspace", () => {
     const workspace = mkdtempSync(join(tmpdir(), "synara-stage3-fixture-workspace-"));
     temporaryDirectories.push(workspace);
@@ -189,6 +274,7 @@ describe("Stage 3 Provider Host acceptance fixture", () => {
   });
 
   it("keeps approval and user-input turns active until their correlated resolution", () => {
+    const startedAt = Date.now();
     const output: ProviderHostMessage[] = [];
     const host = fixtureHost(output);
     startCodexSession(host);
@@ -197,6 +283,11 @@ describe("Stage 3 Provider Host acceptance fixture", () => {
     expect(messagesFor(output, "send-approval").map((message) => message.messageType)).toEqual([
       "InteractionRequest",
     ]);
+    const approvalOccurredAt = Date.parse(
+      messagesFor(output, "send-approval")[0]?.occurredAt ?? "",
+    );
+    expect(approvalOccurredAt).toBeGreaterThanOrEqual(startedAt);
+    expect(approvalOccurredAt).toBeLessThanOrEqual(Date.now() + 1_000);
     host.handleCommand(
       command("ResolveApproval", "resolve-approval", {
         requestId: "fixture-approval-generation-1-1",
@@ -490,13 +581,66 @@ describe("Stage 3 Provider Host acceptance fixture", () => {
     );
   });
 
+  it("injects turn-scoped malformed, oversized, and crash faults without changing discovery", () => {
+    for (const scenario of ["provider-malformed", "provider-oversized"] as const) {
+      const lines: string[] = [];
+      const host = new Stage3ProviderAcceptanceHost({
+        enabledProviders: new Set(["codex", "claudeAgent"]),
+        emitLine: (line) => lines.push(line),
+      });
+      startCodexSession(host);
+      lines.length = 0;
+
+      host.handleCommand(
+        command("SendTurn", `send-${scenario}`, {
+          inputText: `[${scenario}]`,
+          runtimeEventVersion: 2,
+        }),
+      );
+
+      expect(lines).toHaveLength(1);
+      if (scenario === "provider-malformed") {
+        expect(lines[0]).toBe("{malformed-provider-host-jsonl");
+      } else {
+        expect(Buffer.byteLength(lines[0] ?? "", "utf8")).toBeGreaterThan(
+          PROVIDER_HOST_MAX_MESSAGE_BYTES,
+        );
+      }
+    }
+
+    const exitCodes: number[] = [];
+    const crashLines: string[] = [];
+    const crashingHost = new Stage3ProviderAcceptanceHost({
+      enabledProviders: new Set(["codex", "claudeAgent"]),
+      emitLine: (line) => crashLines.push(line),
+      terminate: (exitCode) => exitCodes.push(exitCode),
+    });
+    startCodexSession(crashingHost);
+    crashLines.length = 0;
+    crashingHost.handleCommand(
+      command("SendTurn", "send-provider-crash", {
+        inputText: "[provider-crash]",
+        runtimeEventVersion: 2,
+      }),
+    );
+
+    expect(exitCodes).toEqual([73]);
+    expect(crashLines).toEqual([]);
+  });
+
   it("parses composable scenario directives and defaults to text", () => {
     expect(parseFixtureScenarios("plain input")).toEqual(["text"]);
-    expect(parseFixtureScenarios("[tool] fixture:usage [artifact] [workspace-verify]")).toEqual([
+    expect(
+      parseFixtureScenarios(
+        "[tool] fixture:usage [artifact] fixture:terminal-large [workspace-verify] [provider-crash]",
+      ),
+    ).toEqual([
       "tool",
       "usage",
       "artifact",
+      "terminal-large",
       "workspace-verify",
+      "provider-crash",
     ]);
   });
 });

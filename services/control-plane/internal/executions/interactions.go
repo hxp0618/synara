@@ -147,7 +147,7 @@ func (s *Service) expireValidatedLeasePendingInteraction(
 	}
 	const reason = "The interaction exceeded its maximum waiting time before a user response was received."
 	appended, err := s.recoverExecutionGenerationLocked(
-		ctx, tx, execution, lease, "interaction_expired", reason,
+		ctx, tx, execution, lease, "interaction_expired", reason, "",
 	)
 	if err != nil {
 		return false, persistence.SessionEvent{}, err
@@ -239,7 +239,7 @@ func (s *Service) expirePendingInteractionCandidate(
 
 		var err error
 		appended, err = s.recoverExecutionGenerationLocked(
-			ctx, tx, execution, lease, "interaction_expired", reason,
+			ctx, tx, execution, lease, "interaction_expired", reason, "",
 		)
 		if err != nil {
 			return err

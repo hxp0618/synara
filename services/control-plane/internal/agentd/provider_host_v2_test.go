@@ -74,6 +74,56 @@ func TestRunnerProviderHostV2NegotiatesAndRunsResumeTurn(t *testing.T) {
 	}
 }
 
+func TestRunnerProviderHostV2MarksPrimaryOperationDeliveredBeforeWriteAndReturnsTerminal(t *testing.T) {
+	t.Setenv("GO_WANT_PROVIDER_HOST_HELPER", "1")
+	t.Setenv("PROVIDER_HOST_TEST_MODE", "primary-operation")
+	commandLog := filepath.Join(t.TempDir(), "commands.log")
+	t.Setenv("PROVIDER_HOST_TEST_COMMAND_LOG", commandLog)
+
+	input := providerHostV2TestInput(t)
+	input.Workload.InputText = ""
+	input.Workload.TurnKind = "compact"
+	controlCommandID := uuid.New()
+	input.Workload.PrimaryOperation = &executions.PrimaryOperation{
+		ControlCommandID: controlCommandID,
+		Provider:         "codex",
+		CommandType:      "CompactSession",
+		CommandID:        "compact:" + controlCommandID.String(),
+		Payload:          map[string]any{"turnId": input.Workload.TurnID.String()},
+	}
+	markedBeforeWrite := false
+	result, err := providerHostV2TestRunner().RunControlled(
+		context.Background(), input, nil,
+		&RunnerPrimaryOperationControl{MarkDelivered: func(context.Context) error {
+			commands, readErr := os.ReadFile(commandLog)
+			if readErr != nil {
+				return readErr
+			}
+			markedBeforeWrite = string(commands) == "Describe\nStartSession\n"
+			return nil
+		}},
+		nil,
+		func(context.Context, RunnerMessage) error { return nil },
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !markedBeforeWrite {
+		t.Fatal("primary operation was not durably marked before its Provider Host command write")
+	}
+	if result.ProviderResumeCursor == nil || *result.ProviderResumeCursor != "cursor-compacted" ||
+		result.Output["operation"] != "compact" || result.PrimaryOperationResult["supportMode"] != "native" {
+		t.Fatalf("unexpected primary operation terminal: %#v", result)
+	}
+	commands, err := os.ReadFile(commandLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(commands) != "Describe\nStartSession\nCompactSession\n" {
+		t.Fatalf("unexpected primary operation command sequence %q", commands)
+	}
+}
+
 func TestRunnerMessageFromProviderHostDerivesStableProviderResumeFallbackEventIDForReplay(t *testing.T) {
 	payload := map[string]any{
 		"message": "Native Provider resume failed before turn activity; authoritative-history fallback selected.",
@@ -178,6 +228,73 @@ func TestRunnerMessageFromProviderHostLeavesOtherRuntimeEventsWithoutDerivedEven
 	}
 }
 
+func TestRunnerMessageFromProviderHostAcceptsBoundRuntimeOutputArtifactCandidate(t *testing.T) {
+	message := providerHostMessage{
+		RequestID: "request-1", ProtocolVersion: providerHostProtocolVersion{Major: 2, Minor: 1},
+		ExecutionID: uuid.NewString(), Generation: 2, CommandID: "send:runtime-output",
+		OccurredAt: time.Now().UTC().Format(time.RFC3339Nano), MessageType: "ArtifactCandidate",
+		Payload: map[string]any{
+			"artifact": map[string]any{
+				"path": "projects/session/tool-results/command.log", "kind": "terminal_log",
+				"originalName": "terminal-output.log", "contentType": "text/plain; charset=utf-8",
+				"sourceRoot": "runtime-output", "terminalId": "terminal-1", "encoding": "utf-8",
+				"reportedSize": float64(65_537),
+			},
+		},
+	}
+	runnerMessage, err := runnerMessageFromProviderHost(message, executions.RuntimeEventVersionV2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runnerMessage.Type != "artifact" || runnerMessage.Artifact == nil {
+		t.Fatalf("unexpected Runner message: %#v", runnerMessage)
+	}
+	artifact := runnerMessage.Artifact
+	if artifact.Path != filepath.Clean("projects/session/tool-results/command.log") ||
+		artifact.SourceRoot != "runtime-output" || artifact.Kind != "terminal_log" ||
+		artifact.TerminalID != "terminal-1" || artifact.Encoding != "utf-8" ||
+		artifact.ReportedSize == nil || *artifact.ReportedSize != 65_537 {
+		t.Fatalf("unexpected Runtime Output ArtifactCandidate: %#v", artifact)
+	}
+}
+
+func TestRunnerMessageFromProviderHostRejectsUnsafeRuntimeOutputArtifactCandidate(t *testing.T) {
+	base := map[string]any{
+		"path": "projects/session/tool-results/command.log", "kind": "terminal_log",
+		"contentType": "text/plain; charset=utf-8", "sourceRoot": "runtime-output",
+		"terminalId": "terminal-1", "encoding": "utf-8", "reportedSize": float64(1),
+	}
+	tests := []struct {
+		name   string
+		mutate func(map[string]any)
+	}{
+		{name: "absolute path", mutate: func(value map[string]any) { value["path"] = filepath.Join(string(filepath.Separator), "tmp", "secret") }},
+		{name: "traversal", mutate: func(value map[string]any) { value["path"] = "../secret" }},
+		{name: "unknown root", mutate: func(value map[string]any) { value["sourceRoot"] = "host" }},
+		{name: "missing terminal", mutate: func(value map[string]any) { delete(value, "terminalId") }},
+		{name: "unknown encoding", mutate: func(value map[string]any) { value["encoding"] = "base64" }},
+		{name: "negative size", mutate: func(value map[string]any) { value["reportedSize"] = float64(-1) }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			artifact := make(map[string]any, len(base))
+			for key, value := range base {
+				artifact[key] = value
+			}
+			test.mutate(artifact)
+			_, err := runnerMessageFromProviderHost(providerHostMessage{
+				RequestID: "request-1", ProtocolVersion: providerHostProtocolVersion{Major: 2, Minor: 1},
+				ExecutionID: uuid.NewString(), Generation: 2, CommandID: "send:runtime-output",
+				OccurredAt: time.Now().UTC().Format(time.RFC3339Nano), MessageType: "ArtifactCandidate",
+				Payload: map[string]any{"artifact": artifact},
+			}, executions.RuntimeEventVersionV2)
+			if err == nil {
+				t.Fatalf("unsafe Runtime Output ArtifactCandidate was accepted: %#v", artifact)
+			}
+		})
+	}
+}
+
 func TestRunnerProviderHostV2DeliversInteractionResolutionDuringSend(t *testing.T) {
 	t.Setenv("GO_WANT_PROVIDER_HOST_HELPER", "1")
 	t.Setenv("PROVIDER_HOST_TEST_MODE", "interaction")
@@ -190,7 +307,7 @@ func TestRunnerProviderHostV2DeliversInteractionResolutionDuringSend(t *testing.
 	markedDelivered := false
 	acknowledged := false
 	result, err := providerHostV2TestRunner().RunControlled(
-		context.Background(), input, nil, controls,
+		context.Background(), input, nil, nil, controls,
 		func(_ context.Context, message RunnerMessage) error {
 			if message.Type != "interaction" || message.EventVersion != executions.RuntimeEventVersionV2 {
 				return fmt.Errorf("unexpected Runner message %#v", message)
@@ -251,7 +368,7 @@ func TestRunnerProviderHostV2DeliversDurableInterruptDuringSend(t *testing.T) {
 	markedDelivered := false
 	acknowledgedCursor := ""
 	result, err := providerHostV2TestRunner().RunControlled(
-		context.Background(), input, nil, controls,
+		context.Background(), input, nil, nil, controls,
 		func(_ context.Context, message RunnerMessage) error {
 			if message.Type == "progress" {
 				controls <- RunnerControl{
@@ -308,7 +425,7 @@ func TestRunnerProviderHostV2DeliversDurableSteerDuringSend(t *testing.T) {
 	markedDelivered := false
 	acknowledged := false
 	result, err := providerHostV2TestRunner().RunControlled(
-		context.Background(), input, nil, controls,
+		context.Background(), input, nil, nil, controls,
 		func(_ context.Context, message RunnerMessage) error {
 			if message.Type == "progress" {
 				controls <- RunnerControl{
@@ -949,7 +1066,7 @@ func providerHostV2TestInput(t *testing.T) RunnerInput {
 			TenantID: uuid.New(), OrganizationID: uuid.New(), ProjectID: uuid.New(),
 			SessionID: uuid.New(), TurnID: turnID, Provider: "codex", InputText: "run",
 		},
-		WorkspaceDirectory: t.TempDir(),
+		WorkspaceDirectory: t.TempDir(), RuntimeOutputDirectory: t.TempDir(),
 	}
 }
 
@@ -1076,7 +1193,9 @@ func TestProviderHostV2HelperProcess(t *testing.T) {
 		switch command.CommandType {
 		case "Describe":
 			provider, _ := command.Payload["provider"].(string)
-			capabilities := map[string]any{"send-turn": "native", "steer-turn": "native"}
+			capabilities := map[string]any{
+				"send-turn": "native", "steer-turn": "native", "compact": "native", "review": "native",
+			}
 			if mode == "missing-capability" {
 				capabilities = map[string]any{"send-turn": "unsupported"}
 			}
@@ -1193,6 +1312,19 @@ func TestProviderHostV2HelperProcess(t *testing.T) {
 			if mode == "output-after-terminal" {
 				emitProviderHostTestMessage(encoder, command, "Progress", map[string]any{"late": true}, nil)
 			}
+		case "CompactSession":
+			if mode != "primary-operation" {
+				fmt.Fprintln(os.Stderr, "unexpected CompactSession")
+				os.Exit(2)
+			}
+			if version, ok := integerField(command.Payload, "runtimeEventVersion"); !ok || version != 2 {
+				fmt.Fprintln(os.Stderr, "Runtime Event negotiation was not carried into CompactSession")
+				os.Exit(2)
+			}
+			emitProviderHostTestMessage(encoder, command, "Result", map[string]any{
+				"output":               map[string]any{"operation": "compact", "supportMode": "native"},
+				"providerResumeCursor": "cursor-compacted", "supportMode": "native", "summary": "condensed",
+			}, nil)
 		case "ResolveApproval":
 			if mode != "interaction" || pendingSend == nil || command.Payload["requestId"] != "approval-1" {
 				fmt.Fprintln(os.Stderr, "unexpected approval resolution")

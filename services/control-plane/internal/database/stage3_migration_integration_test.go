@@ -31,10 +31,7 @@ func TestStage3MigrationsBackfillExistingRuntimeState(t *testing.T) {
 	if databaseURL == "" {
 		t.Skip("SYNARA_TEST_STAGE3_MIGRATION_DATABASE_URL is not configured")
 	}
-	db, err := Open(context.Background(), databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
+	db := openIsolatedMigrationSchema(t, databaseURL)
 	legacyFiles := migrationsThrough(t, "000016_sse_connection_leases.sql")
 	if err := Migrate(context.Background(), db, legacyFiles); err != nil {
 		t.Fatal(err)
@@ -162,6 +159,10 @@ func TestWorkspaceCleanupMigrationPreservesTargetHistoryAndPhysicalFences(t *tes
 	legacyGenerationZeroExecutionID := uuid.New()
 	unmaterializedTurnID := uuid.New()
 	unmaterializedExecutionID := uuid.New()
+	preAdvancedTurnColumns := []string{
+		"id", "tenant_id", "session_id", "created_by", "status", "input_text",
+		"runtime_mode", "interaction_mode", "started_at", "completed_at", "created_at",
+	}
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	newTarget := persistence.ExecutionTarget{
 		ID: newTargetID, TenantID: &seed.tenantID, OrganizationID: &session.OrganizationID,
@@ -204,7 +205,7 @@ func TestWorkspaceCleanupMigrationPreservesTargetHistoryAndPhysicalFences(t *tes
 			RuntimeMode: "approval-required", InteractionMode: "default",
 			CompletedAt: &queuedAt, CreatedAt: queuedAt,
 		}
-		if err := tx.Create(&turn).Error; err != nil {
+		if err := tx.Select(preAdvancedTurnColumns).Create(&turn).Error; err != nil {
 			return err
 		}
 		execution := persistence.AgentExecution{
@@ -265,7 +266,7 @@ func TestWorkspaceCleanupMigrationPreservesTargetHistoryAndPhysicalFences(t *tes
 			RuntimeMode: "approval-required", InteractionMode: "default",
 			StartedAt: &now, CompletedAt: &now, CreatedAt: now,
 		}
-		if err := tx.Create(&turn).Error; err != nil {
+		if err := tx.Select(preAdvancedTurnColumns).Create(&turn).Error; err != nil {
 			return err
 		}
 		execution := persistence.AgentExecution{
@@ -769,11 +770,8 @@ func TestGitCredentialMigrationEnforcesBindingPurposeScopeAndAvailability(t *tes
 	if databaseURL == "" {
 		t.Skip("SYNARA_TEST_STAGE3_MIGRATION_DATABASE_URL is not configured")
 	}
-	db, err := Open(context.Background(), databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := Migrate(context.Background(), db, migrations.Files); err != nil {
+	db := openIsolatedMigrationSchema(t, databaseURL)
+	if err := Migrate(context.Background(), db, migrationsThrough(t, "000035_workspace_credential_bindings.sql")); err != nil {
 		t.Fatal(err)
 	}
 	now := time.Now().UTC().Truncate(time.Microsecond)

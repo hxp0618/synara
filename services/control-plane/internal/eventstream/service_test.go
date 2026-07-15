@@ -140,7 +140,10 @@ func TestPostgresConcurrentAcquireEnforcesGlobalUserLimit(t *testing.T) {
 	if err := database.Migrate(ctx, firstDB, migrations.Files); err != nil {
 		t.Fatal(err)
 	}
-	domain, err := bootstrap.Ensure(ctx, firstDB, platform.ProfilePersonal, "event-stream-postgres-"+uuid.NewString())
+	// PostgreSQL integration packages share the configured database when
+	// `go test ./...` runs. Reuse its persisted installation instead of racing
+	// other packages with a test-specific installation ID.
+	domain, err := bootstrap.Ensure(ctx, firstDB, platform.ProfilePersonal, "")
 	if err != nil {
 		t.Fatal(err)
 	}

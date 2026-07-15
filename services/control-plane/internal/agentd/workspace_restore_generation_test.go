@@ -150,6 +150,157 @@ func TestReplaceWorkspaceGenerationReportsRollbackFailure(t *testing.T) {
 	}
 }
 
+func TestReconcileWorkspaceGenerationRestoresSingleBackupAndRemovesStaging(t *testing.T) {
+	parent := t.TempDir()
+	active := filepath.Join(parent, "active")
+	backup := filepath.Join(parent, ".active.backup-"+uuid.NewString())
+	staging := filepath.Join(parent, ".active.staging-"+uuid.NewString())
+	if err := os.Mkdir(backup, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(staging, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeWorkspaceTestFile(t, filepath.Join(backup, "preserved.txt"), "previous generation\n")
+	writeWorkspaceTestFile(t, filepath.Join(staging, "partial.txt"), "partial replacement\n")
+	if err := reconcileWorkspaceGeneration(active, func(root string) error {
+		value, err := os.ReadFile(filepath.Join(root, "preserved.txt"))
+		if err != nil || string(value) != "previous generation\n" {
+			return errors.New("generation marker is invalid")
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	assertWorkspaceTestFile(t, filepath.Join(active, "preserved.txt"), "previous generation\n")
+	for _, path := range []string{backup, staging} {
+		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("Workspace recovery residue survived at %s: %v", path, err)
+		}
+	}
+}
+
+func TestReconcileWorkspaceGenerationKeepsValidActiveAndCleansResidue(t *testing.T) {
+	parent := t.TempDir()
+	active := filepath.Join(parent, "active")
+	backup := filepath.Join(parent, ".active.backup-"+uuid.NewString())
+	staging := filepath.Join(parent, ".active.staging-"+uuid.NewString())
+	for _, path := range []string{active, backup, staging} {
+		if err := os.Mkdir(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeWorkspaceTestFile(t, filepath.Join(active, "authoritative.txt"), "active generation\n")
+	writeWorkspaceTestFile(t, filepath.Join(backup, "authoritative.txt"), "stale backup\n")
+	if err := reconcileWorkspaceGeneration(active, func(root string) error {
+		value, err := os.ReadFile(filepath.Join(root, "authoritative.txt"))
+		if err != nil || string(value) != "active generation\n" {
+			return errors.New("active generation is invalid")
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	assertWorkspaceTestFile(t, filepath.Join(active, "authoritative.txt"), "active generation\n")
+	for _, path := range []string{backup, staging} {
+		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("stale Workspace residue survived at %s: %v", path, err)
+		}
+	}
+}
+
+func TestReconcileWorkspaceGenerationRejectsAmbiguousBackups(t *testing.T) {
+	parent := t.TempDir()
+	active := filepath.Join(parent, "active")
+	backups := []string{
+		filepath.Join(parent, ".active.backup-"+uuid.NewString()),
+		filepath.Join(parent, ".active.backup-"+uuid.NewString()),
+	}
+	for _, backup := range backups {
+		if err := os.Mkdir(backup, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := reconcileWorkspaceGeneration(active, func(string) error { return nil }); err == nil {
+		t.Fatal("Workspace reconciliation selected one of multiple ambiguous backups")
+	}
+	for _, backup := range backups {
+		if _, err := os.Lstat(backup); err != nil {
+			t.Fatalf("ambiguous Workspace backup was not preserved: %v", err)
+		}
+	}
+}
+
+func TestReconcileWorkspaceGenerationPreservesInvalidActiveAndResidue(t *testing.T) {
+	parent := t.TempDir()
+	active := filepath.Join(parent, "active")
+	backup := filepath.Join(parent, ".active.backup-"+uuid.NewString())
+	staging := filepath.Join(parent, ".active.staging-"+uuid.NewString())
+	for _, path := range []string{active, backup, staging} {
+		if err := os.Mkdir(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeWorkspaceTestFile(t, filepath.Join(active, "invalid.txt"), "uncheckpointed state\n")
+	writeWorkspaceTestFile(t, filepath.Join(backup, "valid.txt"), "previous state\n")
+	if err := reconcileWorkspaceGeneration(active, func(root string) error {
+		if _, err := os.Stat(filepath.Join(root, "valid.txt")); err != nil {
+			return errors.New("generation is invalid")
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	assertWorkspaceTestFile(t, filepath.Join(active, "invalid.txt"), "uncheckpointed state\n")
+	for _, path := range []string{backup, staging} {
+		if _, err := os.Lstat(path); err != nil {
+			t.Fatalf("invalid active reconciliation discarded recovery evidence at %s: %v", path, err)
+		}
+	}
+}
+
+func TestWorkspaceMaterializerRecoversInterruptedNonGitGenerationInstall(t *testing.T) {
+	workspaceRoot := t.TempDir()
+	cacheRoot := t.TempDir()
+	targetID := uuid.New()
+	execution, workload := workspaceTestWorkload(targetID)
+	workload.RepositoryURL = nil
+	materializer := NewWorkspaceMaterializerWithCache(workspaceRoot, cacheRoot, targetID)
+	first, err := materializer.Materialize(context.Background(), execution, workload, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeWorkspaceTestFile(t, filepath.Join(first.Directory, "preserved.txt"), "durable workspace\n")
+	if err := first.Release(); err != nil {
+		t.Fatal(err)
+	}
+	backup := filepath.Join(
+		filepath.Dir(first.LogicalRoot), "."+filepath.Base(first.LogicalRoot)+".backup-"+uuid.NewString(),
+	)
+	if err := os.Rename(first.LogicalRoot, backup); err != nil {
+		t.Fatal(err)
+	}
+	staging := filepath.Join(
+		filepath.Dir(first.LogicalRoot), "."+filepath.Base(first.LogicalRoot)+".staging-"+uuid.NewString(),
+	)
+	if err := os.Mkdir(staging, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeWorkspaceTestFile(t, filepath.Join(staging, "partial.txt"), "partial install\n")
+
+	recovered, err := materializer.Materialize(context.Background(), execution, workload, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer recovered.Release()
+	assertWorkspaceTestFile(t, filepath.Join(recovered.Directory, "preserved.txt"), "durable workspace\n")
+	for _, path := range []string{backup, staging} {
+		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("interrupted Workspace install residue survived at %s: %v", path, err)
+		}
+	}
+}
+
 func TestPrivateWorkspaceRejectsGitFileOutsideItsGeneration(t *testing.T) {
 	materializer, _, materialized := materializeV2GitWorkspace(t)
 	gitFile := filepath.Join(materialized.Directory, ".git")

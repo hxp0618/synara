@@ -13,6 +13,7 @@ import (
 
 	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
 	"github.com/synara-ai/synara/services/control-plane/internal/problem"
+	"github.com/synara-ai/synara/services/control-plane/internal/sessions"
 )
 
 const (
@@ -22,6 +23,7 @@ const (
 	resumeSnapshotPendingInteractionLimit = 64
 	resumeSnapshotToolSummaryByteLimit    = 8 << 10
 	resumeSnapshotCompactSummaryByteLimit = 16 << 10
+	resumeSnapshotStateMarkerPageLimit    = 512
 )
 
 var resumeSnapshotEventTypes = []string{
@@ -35,6 +37,13 @@ var resumeSnapshotEventTypes = []string{
 	"item.completed",
 	"thread.state.changed",
 	"artifact.ready",
+}
+
+var resumeSnapshotStateEventTypes = []string{
+	"item.started",
+	"item.updated",
+	"item.completed",
+	"thread.state.changed",
 }
 
 type resumeSnapshotContext struct {
@@ -108,28 +117,28 @@ func (s *Service) loadResumeSnapshot(
 		ArtifactEvents: make([]resumeArtifactEvent, 0),
 	}
 	if found {
-		rangeValue, rangeErr := loadResumeSourceSequenceRange(ctx, tx, execution, currentSequence)
-		if rangeErr != nil {
-			return ResumeSnapshot{}, rangeErr
+		allEvents, truncated, historyErr := loadEffectiveResumeSnapshotEvents(
+			ctx, tx, execution, currentSequence-1,
+		)
+		if historyErr != nil {
+			return ResumeSnapshot{}, historyErr
 		}
-		snapshot.SourceSequenceRange = rangeValue
-		snapshot.AuthoritativeHistorySequence = rangeValue.Through
+		snapshot.SourceSequenceRange = resumeSourceSequenceRange(allEvents, currentSequence-1)
+		snapshot.AuthoritativeHistorySequence = currentSequence - 1
 
-		events, truncated, eventsErr := loadResumeSnapshotEvents(ctx, tx, execution, currentSequence)
-		if eventsErr != nil {
-			return ResumeSnapshot{}, eventsErr
-		}
-		projection = projectResumeSnapshotEvents(events)
-		if err := loadResumeStateMarkers(ctx, tx, execution, currentSequence, &projection); err != nil {
-			return ResumeSnapshot{}, err
-		}
+		projection = projectResumeSnapshotEvents(allEvents)
+		projectResumeStateMarkers(allEvents, &projection)
 		if truncated {
+			if err := loadResumeStateMarkers(ctx, tx, execution, currentSequence, &projection); err != nil {
+				return ResumeSnapshot{}, err
+			}
 			projection.TruncationReasons = appendUniqueString(projection.TruncationReasons, "event_limit")
-			if len(events) > 0 {
-				droppedBefore := events[0].Sequence - 1
+			if len(allEvents) > 0 {
+				droppedBefore := allEvents[0].Sequence - 1
 				projection.DroppedBefore = &droppedBefore
 			}
 		}
+		applyResumeCompactBoundary(&projection)
 	}
 
 	snapshot.Messages = projection.Messages
@@ -161,6 +170,198 @@ func (s *Service) loadResumeSnapshot(
 		return ResumeSnapshot{}, err
 	}
 	return snapshot, nil
+}
+
+func loadEffectiveResumeSnapshotEvents(
+	ctx context.Context,
+	tx *gorm.DB,
+	execution persistence.AgentExecution,
+	throughSequence int64,
+) ([]persistence.SessionEvent, bool, error) {
+	if throughSequence <= 0 {
+		return []persistence.SessionEvent{}, false, nil
+	}
+	remaining := resumeSnapshotEventLimit + 1
+	cursor := throughSequence
+	chunksNewestFirst := make([][]persistence.SessionEvent, 0, 4)
+	for cursor > 0 && remaining > 0 {
+		rollbacks, err := sessions.LoadLogicalEventsTail(
+			ctx,
+			tx,
+			execution.TenantID,
+			execution.SessionID,
+			0,
+			cursor,
+			1,
+			[]string{"session.history.rolled-back"},
+		)
+		if err != nil {
+			return nil, false, problem.Wrap(500, "execution_history_load_failed", "Failed to load logical Session rollback history.", err)
+		}
+		lowerBound := int64(0)
+		if len(rollbacks) > 0 {
+			lowerBound = rollbacks[0].Event.Sequence
+		}
+		logical, err := sessions.LoadLogicalEventsTail(
+			ctx,
+			tx,
+			execution.TenantID,
+			execution.SessionID,
+			lowerBound,
+			cursor,
+			remaining,
+			resumeSnapshotEventTypes,
+		)
+		if err != nil {
+			return nil, false, problem.Wrap(500, "execution_history_load_failed", "Failed to load logical Session resume history.", err)
+		}
+		chunk := make([]persistence.SessionEvent, 0, len(logical))
+		for _, item := range logical {
+			chunk = append(chunk, item.Event)
+		}
+		chunksNewestFirst = append(chunksNewestFirst, chunk)
+		remaining -= len(chunk)
+		if len(rollbacks) == 0 {
+			break
+		}
+		fromSequence, ok := safeInt64Payload(rollbacks[0].Event.Payload, "fromSequence")
+		if !ok || fromSequence <= 0 || fromSequence >= rollbacks[0].Event.Sequence {
+			return nil, false, problem.New(409, "rollback_target_stale", "The rollback event contains an invalid source sequence.")
+		}
+		cursor = fromSequence - 1
+	}
+
+	combined := make([]persistence.SessionEvent, 0, resumeSnapshotEventLimit+1-remaining)
+	for index := len(chunksNewestFirst) - 1; index >= 0; index-- {
+		combined = append(combined, chunksNewestFirst[index]...)
+	}
+	truncated := len(combined) > resumeSnapshotEventLimit
+	if truncated {
+		combined = combined[len(combined)-resumeSnapshotEventLimit:]
+	}
+	return combined, truncated, nil
+}
+
+func applyResumeCompactBoundary(projection *resumeSnapshotProjection) {
+	if projection.CompactBoundary == nil || projection.CompactBoundary.Sequence <= 0 {
+		return
+	}
+	boundary := projection.CompactBoundary.Sequence
+	messages := projection.Messages[:0]
+	for _, message := range projection.Messages {
+		if message.SequenceFrom > boundary {
+			messages = append(messages, message)
+		}
+	}
+	projection.Messages = messages
+	tools := projection.ToolResults[:0]
+	for _, result := range projection.ToolResults {
+		if result.Sequence > boundary {
+			tools = append(tools, result)
+		}
+	}
+	projection.ToolResults = tools
+	artifacts := projection.ArtifactEvents[:0]
+	for _, reference := range projection.ArtifactEvents {
+		if reference.Sequence > boundary {
+			artifacts = append(artifacts, reference)
+		}
+	}
+	projection.ArtifactEvents = artifacts
+}
+
+func resumeSourceSequenceRange(events []persistence.SessionEvent, through int64) ResumeSequenceRange {
+	if through <= 0 {
+		return ResumeSequenceRange{}
+	}
+	from := int64(0)
+	for _, event := range events {
+		if from == 0 || event.Sequence < from {
+			from = event.Sequence
+		}
+	}
+	return ResumeSequenceRange{From: from, Through: through}
+}
+
+func boundedResumeSnapshotEvents(all []persistence.SessionEvent) ([]persistence.SessionEvent, bool) {
+	events := make([]persistence.SessionEvent, 0, len(all))
+	allowed := make(map[string]struct{}, len(resumeSnapshotEventTypes))
+	for _, eventType := range resumeSnapshotEventTypes {
+		allowed[eventType] = struct{}{}
+	}
+	for _, event := range all {
+		if _, ok := allowed[event.EventType]; ok {
+			events = append(events, event)
+		}
+	}
+	truncated := len(events) > resumeSnapshotEventLimit
+	if truncated {
+		events = events[len(events)-resumeSnapshotEventLimit:]
+	}
+	return events, truncated
+}
+
+func projectResumeStateMarkers(events []persistence.SessionEvent, projection *resumeSnapshotProjection) {
+	for _, event := range events {
+		switch event.EventType {
+		case "item.started", "item.updated", "item.completed":
+			switch stringPayload(event.Payload, "itemType") {
+			case "review_entered":
+				projection.Review = true
+				sequence := event.Sequence
+				projection.ReviewSequence = &sequence
+			case "review_exited":
+				projection.Review = false
+				sequence := event.Sequence
+				projection.ReviewSequence = &sequence
+			case "context_compaction":
+				if event.EventType == "item.completed" || stringPayload(event.Payload, "status") == "completed" {
+					projection.CompactBoundary = &ResumeCompactBoundary{
+						Sequence: event.Sequence,
+						Summary:  truncateResumeText(firstResumeString(event.Payload, "detail", "title"), resumeSnapshotCompactSummaryByteLimit),
+					}
+				}
+			}
+		case "thread.state.changed":
+			if stringPayload(event.Payload, "state") == "compacted" {
+				sequence := event.Sequence
+				if value, ok := safeInt64Payload(event.Payload, "compactedThroughSequence"); ok {
+					sequence = value
+				}
+				projection.CompactBoundary = &ResumeCompactBoundary{
+					Sequence: sequence,
+					Summary:  truncateResumeText(strings.TrimSpace(stringPayload(event.Payload, "summary")), resumeSnapshotCompactSummaryByteLimit),
+				}
+			}
+		}
+	}
+}
+
+func firstResumeString(payload map[string]any, keys ...string) string {
+	for _, key := range keys {
+		if value := strings.TrimSpace(stringPayload(payload, key)); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func safeInt64Payload(payload map[string]any, key string) (int64, bool) {
+	value, ok := payload[key]
+	if !ok {
+		return 0, false
+	}
+	switch typed := value.(type) {
+	case int64:
+		return typed, typed >= 0
+	case int:
+		return int64(typed), typed >= 0
+	case float64:
+		converted := int64(typed)
+		return converted, typed >= 0 && float64(converted) == typed
+	default:
+		return 0, false
+	}
 }
 
 func loadCurrentTurnSequence(
@@ -294,47 +495,113 @@ func loadResumeStateMarkers(
 	currentSequence int64,
 	projection *resumeSnapshotProjection,
 ) error {
-	var review persistence.SessionEvent
-	reviewErr := tx.WithContext(ctx).
-		Where("tenant_id = ? AND session_id = ? AND sequence < ? AND event_type IN ? AND payload ->> 'itemType' IN ?",
-			execution.TenantID, execution.SessionID, currentSequence,
-			[]string{"item.started", "item.updated", "item.completed"},
-			[]string{"review_entered", "review_exited"}).
-		Order("sequence DESC").Take(&review).Error
-	if reviewErr != nil && !errors.Is(reviewErr, gorm.ErrRecordNotFound) {
-		return problem.Wrap(500, "execution_history_mode_load_failed", "Failed to load the authoritative review mode marker.", reviewErr)
+	if currentSequence <= 1 {
+		return nil
 	}
-	if reviewErr == nil {
-		projection.Review = stringPayload(review.Payload, "itemType") == "review_entered"
-		sequence := review.Sequence
-		projection.ReviewSequence = &sequence
-	}
-
-	var compact persistence.SessionEvent
-	compactErr := tx.WithContext(ctx).
-		Where(`tenant_id = ? AND session_id = ? AND sequence < ? AND (
-			(event_type IN ? AND payload ->> 'itemType' = 'context_compaction') OR
-			(event_type = 'thread.state.changed' AND payload ->> 'state' = 'compacted')
-		)`, execution.TenantID, execution.SessionID, currentSequence,
-			[]string{"item.started", "item.updated", "item.completed"}).
-		Order("sequence DESC").Take(&compact).Error
-	if compactErr != nil && !errors.Is(compactErr, gorm.ErrRecordNotFound) {
-		return problem.Wrap(500, "execution_history_compaction_load_failed", "Failed to load the authoritative compact boundary.", compactErr)
-	}
-	if compactErr == nil {
-		summary := ""
-		if stringPayload(compact.Payload, "itemType") == "context_compaction" {
-			summary = strings.TrimSpace(stringPayload(compact.Payload, "detail"))
-			if summary == "" {
-				summary = strings.TrimSpace(stringPayload(compact.Payload, "title"))
+	reviewFound := projection.ReviewSequence != nil
+	compactFound := projection.CompactBoundary != nil
+	cursor := currentSequence - 1
+	for cursor > 0 && (!reviewFound || !compactFound) {
+		rollbacks, err := sessions.LoadLogicalEventsTail(
+			ctx, tx, execution.TenantID, execution.SessionID, 0, cursor, 1,
+			[]string{"session.history.rolled-back"},
+		)
+		if err != nil {
+			return problem.Wrap(500, "execution_history_state_load_failed", "Failed to load logical Session state history.", err)
+		}
+		lowerBound := int64(0)
+		if len(rollbacks) > 0 {
+			lowerBound = rollbacks[0].Event.Sequence
+		}
+		segmentCursor := cursor
+		for segmentCursor > lowerBound && (!reviewFound || !compactFound) {
+			logical, err := sessions.LoadLogicalEventsTail(
+				ctx, tx, execution.TenantID, execution.SessionID,
+				lowerBound, segmentCursor, resumeSnapshotStateMarkerPageLimit,
+				resumeSnapshotStateEventTypes,
+			)
+			if err != nil {
+				return problem.Wrap(500, "execution_history_state_load_failed", "Failed to load logical Session state markers.", err)
 			}
+			if len(logical) == 0 {
+				break
+			}
+			for index := len(logical) - 1; index >= 0 && (!reviewFound || !compactFound); index-- {
+				event := logical[index].Event
+				if !reviewFound {
+					reviewFound = projectLatestResumeReviewMarker(event, projection)
+				}
+				if !compactFound {
+					compactFound = projectLatestResumeCompactMarker(event, projection)
+				}
+			}
+			earliest := logical[0].Event.Sequence
+			if earliest <= lowerBound+1 {
+				break
+			}
+			segmentCursor = earliest - 1
 		}
-		projection.CompactBoundary = &ResumeCompactBoundary{
-			Sequence: compact.Sequence,
-			Summary:  truncateResumeText(summary, resumeSnapshotCompactSummaryByteLimit),
+		if len(rollbacks) == 0 {
+			break
 		}
+		fromSequence, ok := safeInt64Payload(rollbacks[0].Event.Payload, "fromSequence")
+		if !ok || fromSequence <= 0 || fromSequence >= rollbacks[0].Event.Sequence {
+			return problem.New(409, "rollback_target_stale", "The rollback event contains an invalid source sequence.")
+		}
+		cursor = fromSequence - 1
 	}
 	return nil
+}
+
+func projectLatestResumeReviewMarker(
+	event persistence.SessionEvent,
+	projection *resumeSnapshotProjection,
+) bool {
+	if event.EventType != "item.started" && event.EventType != "item.updated" && event.EventType != "item.completed" {
+		return false
+	}
+	switch stringPayload(event.Payload, "itemType") {
+	case "review_entered":
+		projection.Review = true
+	case "review_exited":
+		projection.Review = false
+	default:
+		return false
+	}
+	sequence := event.Sequence
+	projection.ReviewSequence = &sequence
+	return true
+}
+
+func projectLatestResumeCompactMarker(
+	event persistence.SessionEvent,
+	projection *resumeSnapshotProjection,
+) bool {
+	sequence := event.Sequence
+	summary := ""
+	switch event.EventType {
+	case "item.started", "item.updated", "item.completed":
+		if stringPayload(event.Payload, "itemType") != "context_compaction" ||
+			(event.EventType != "item.completed" && stringPayload(event.Payload, "status") != "completed") {
+			return false
+		}
+		summary = firstResumeString(event.Payload, "detail", "title")
+	case "thread.state.changed":
+		if stringPayload(event.Payload, "state") != "compacted" {
+			return false
+		}
+		if value, ok := safeInt64Payload(event.Payload, "compactedThroughSequence"); ok {
+			sequence = value
+		}
+		summary = strings.TrimSpace(stringPayload(event.Payload, "summary"))
+	default:
+		return false
+	}
+	projection.CompactBoundary = &ResumeCompactBoundary{
+		Sequence: sequence,
+		Summary:  truncateResumeText(summary, resumeSnapshotCompactSummaryByteLimit),
+	}
+	return true
 }
 
 func appendResumeUserMessage(messages *[]ResumeMessage, event persistence.SessionEvent) {
@@ -449,8 +716,8 @@ func loadResumeArtifactReferences(
 	}
 	models := make([]persistence.Artifact, 0, len(ids))
 	if err := tx.WithContext(ctx).
-		Where("tenant_id = ? AND session_id = ? AND id IN ? AND status = ? AND deleted_at IS NULL",
-			execution.TenantID, execution.SessionID, ids, "ready").
+		Where("tenant_id = ? AND id IN ? AND status = ? AND deleted_at IS NULL",
+			execution.TenantID, ids, "ready").
 		Find(&models).Error; err != nil {
 		return nil, problem.Wrap(500, "execution_history_artifacts_load_failed", "Failed to load authoritative Artifact references.", err)
 	}

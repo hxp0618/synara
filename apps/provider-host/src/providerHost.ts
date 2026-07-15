@@ -1,7 +1,9 @@
 import { readFileSync } from "node:fs";
+import { isAbsolute } from "node:path";
 
 import { startClaudeAgentSdkRun, type ClaudeQueryFactory } from "./claudeAgentSdkRuntime";
 import { startCodexAppServerRun } from "./codexAppServerRuntime";
+import type { TerminalRedactor } from "./terminalEvents";
 
 export type RunnerInput = {
   execution: { id: string; generation?: number };
@@ -9,6 +11,14 @@ export type RunnerInput = {
     provider: string;
     model?: string | null;
     inputText: string;
+    turnKind?: string;
+    primaryOperation?: {
+      controlCommandId: string;
+      provider: string;
+      commandType: string;
+      commandId: string;
+      payload: Record<string, unknown>;
+    } | null;
     runtimeMode?: "approval-required" | "full-access";
     interactionMode?: "default" | "plan";
     conversationHistory?: ReadonlyArray<{ role: "user" | "assistant"; text: string }>;
@@ -16,6 +26,7 @@ export type RunnerInput = {
   };
   providerResumeCursor?: string | null;
   workspaceDirectory: string;
+  runtimeOutputDirectory?: string;
 };
 
 export type ResumeSnapshot = {
@@ -49,6 +60,19 @@ export type RunnerCredential = {
 export type RunnerMessage =
   | { type: "event"; eventType: string; payload: Record<string, unknown> }
   | {
+      type: "artifact";
+      artifact: {
+        path: string;
+        kind: string;
+        originalName?: string;
+        contentType: string;
+        sourceRoot?: "workspace" | "runtime-output";
+        terminalId?: string;
+        encoding?: "utf-8" | "binary";
+        reportedSize?: number;
+      };
+    }
+  | {
       type: "interaction";
       interactionType: "approval" | "user-input";
       payload: Record<string, unknown>;
@@ -72,7 +96,19 @@ export type ProviderRunOptions = {
   interactive?: boolean;
   claudeQueryFactory?: ClaudeQueryFactory;
   environment?: NodeJS.ProcessEnv;
+  operation?: ProviderPrimaryOperation;
 };
+
+export type ProviderReviewTarget =
+  | { type: "uncommittedChanges" }
+  | { type: "baseBranch"; branch: string };
+
+export type ProviderPrimaryOperation =
+  | { commandType: "CompactSession"; payload: Record<string, unknown> }
+  | {
+      commandType: "StartReview";
+      payload: Record<string, unknown> & { target: ProviderReviewTarget };
+    };
 
 const PROVIDER_PROCESS_ENVIRONMENT_ALLOWLIST = [
   "PATH",
@@ -158,7 +194,7 @@ export function providerEnvironment(
   source: NodeJS.ProcessEnv,
   provider: string,
   credential: RunnerCredential | null,
-): { environment: NodeJS.ProcessEnv; redact: (value: string) => string } {
+): { environment: NodeJS.ProcessEnv; redact: TerminalRedactor } {
   const selected = selectProviderProcessEnvironment(source);
 
   const secrets = [
@@ -260,15 +296,17 @@ function applyCredentialEnvironment(
   throw new Error(`Provider Credential injection is not supported for provider ${provider}`);
 }
 
-export function createRedactor(secrets: ReadonlyArray<string>): (value: string) => string {
+export function createRedactor(secrets: ReadonlyArray<string>): TerminalRedactor {
   const values = [...new Set(secrets.filter((value) => value.length >= 4))].sort(
     (left, right) => right.length - left.length,
   );
-  return (value) => {
+  const redact: TerminalRedactor = (value) => {
     let result = value;
     for (const secret of values) result = result.replaceAll(secret, "[REDACTED]");
     return result;
   };
+  Object.defineProperty(redact, "secretValues", { value: values });
+  return redact;
 }
 
 export async function runProviderHost(
@@ -304,6 +342,7 @@ export function startProviderHostRun(
       emit,
       authoritativePrompt: prompt,
       interactive,
+      ...(options.operation ? { operation: options.operation } : {}),
     });
   }
   if (normalizedProvider === "claude" || normalizedProvider === "claudeagent") {
@@ -314,6 +353,7 @@ export function startProviderHostRun(
       emit,
       authoritativePrompt: prompt,
       interactive,
+      ...(options.operation ? { operation: options.operation } : {}),
       ...(options.claudeQueryFactory ? { queryFactory: options.claudeQueryFactory } : {}),
     });
   }
@@ -379,10 +419,25 @@ export function validateRunnerInput(input: RunnerInput): void {
   for (const [label, value] of [
     ["execution.id", input.execution.id],
     ["workload.provider", input.workload.provider],
-    ["workload.inputText", input.workload.inputText],
     ["workspaceDirectory", input.workspaceDirectory],
   ] as const) {
     if (typeof value !== "string" || value.trim() === "") throw new Error(`${label} is required`);
+  }
+  const hasPrimaryOperation = isRecord(input.workload.primaryOperation);
+  if (
+    typeof input.workload.inputText !== "string" ||
+    (!input.workload.inputText.trim() && !hasPrimaryOperation)
+  ) {
+    throw new Error("workload.inputText is required");
+  }
+  if (
+    input.runtimeOutputDirectory !== undefined &&
+    (typeof input.runtimeOutputDirectory !== "string" ||
+      input.runtimeOutputDirectory.trim() === "" ||
+      /[\r\n\0]/u.test(input.runtimeOutputDirectory) ||
+      !isAbsolute(input.runtimeOutputDirectory))
+  ) {
+    throw new Error("runtimeOutputDirectory must be an absolute path without control characters");
   }
   if (
     input.execution.generation !== undefined &&

@@ -48,7 +48,7 @@ func (m *WorkspaceMaterializer) withPreparedCache(
 	cache workspaceCacheLayout,
 	remote gitpolicy.Remote,
 	defaultBranch string,
-	credential *GitHTTPSCredential,
+	credential *WorkspaceGitCredential,
 	use func(string) error,
 ) error {
 	lock, err := acquireWorkspaceFileLock(ctx, m.cacheRoot, cache.LockPath)
@@ -87,8 +87,11 @@ func (m *WorkspaceMaterializer) ensureCacheRepository(
 	cache workspaceCacheLayout,
 	remote gitpolicy.Remote,
 	defaultBranch string,
-	credential *GitHTTPSCredential,
+	credential *WorkspaceGitCredential,
 ) error {
+	if err := m.reconcileCacheRepository(ctx, cache, remote.URL); err != nil {
+		return errors.New("Git cache repository could not be reconciled")
+	}
 	if m.validateBareRepository(ctx, cache.RepoGit, remote.URL) == nil {
 		if err := m.fetchCacheRepository(ctx, cache.RepoGit, remote, defaultBranch, credential); err == nil {
 			return nil
@@ -107,6 +110,103 @@ func (m *WorkspaceMaterializer) ensureCacheRepository(
 	}
 	if err := replaceWorkspaceGeneration(cache.RepoGit, staging); err != nil {
 		return errors.New("Git cache repository could not be installed")
+	}
+	return nil
+}
+
+func (m *WorkspaceMaterializer) reconcileCacheRepository(
+	ctx context.Context,
+	cache workspaceCacheLayout,
+	expectedRepositoryURL string,
+) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	staging, backups, err := workspaceGenerationResidue(cache.RepoGit)
+	if err != nil {
+		return err
+	}
+	activeInfo, activeErr := os.Lstat(cache.RepoGit)
+	switch {
+	case activeErr == nil:
+		if activeInfo.Mode()&os.ModeSymlink != 0 || !activeInfo.IsDir() {
+			return errors.New("Git cache repository is unsafe")
+		}
+		// A valid active cache is the sole commit point. Any sibling generation
+		// is residue from an interrupted install and can be rebuilt later.
+		if m.validateBareRepository(ctx, cache.RepoGit, expectedRepositoryURL) == nil {
+			return m.removeWorkspaceGenerationResidueStrict(ctx, append(staging, backups...))
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		// The cache is rebuildable, but keep the invalid active directory in
+		// place until replaceWorkspaceGeneration atomically installs its
+		// replacement. Only stale siblings are discarded here.
+		return m.removeWorkspaceGenerationResidueStrict(ctx, append(staging, backups...))
+	case !errors.Is(activeErr, os.ErrNotExist):
+		return activeErr
+	}
+
+	// An orphan staging directory is never authoritative: Git cache population
+	// can fail after creating a structurally valid tree.
+	// A single backup, however, was previously the committed active cache and
+	// may be restored before the normal Fetch refreshes it.
+	if len(backups) == 1 && m.validateBareRepository(ctx, backups[0], expectedRepositoryURL) == nil {
+		backup := backups[0]
+		if err := os.Rename(backup, cache.RepoGit); err != nil {
+			return err
+		}
+		if err := m.validateBareRepository(ctx, cache.RepoGit, expectedRepositoryURL); err != nil {
+			rollbackErr := os.Rename(cache.RepoGit, backup)
+			if rollbackErr != nil {
+				return errors.Join(err, fmt.Errorf("preserve invalid restored Git cache: %w", rollbackErr))
+			}
+			return err
+		}
+		return m.removeWorkspaceGenerationResidueStrict(ctx, staging)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	// Multiple or invalid backups are deliberately not ranked by UUID or
+	// mtime. Unlike a Workspace, this cache contains no authoritative user
+	// state, so fail-safe recovery is to discard every residue and rebuild.
+	return m.removeWorkspaceGenerationResidueStrict(ctx, append(staging, backups...))
+}
+
+func (m *WorkspaceMaterializer) removeWorkspaceGenerationResidueStrict(
+	ctx context.Context,
+	paths []string,
+) error {
+	if len(paths) == 0 {
+		return nil
+	}
+	parentPath := filepath.Dir(filepath.Clean(paths[0]))
+	parent, err := openVerifiedWorkspaceRoot(parentPath)
+	if err != nil {
+		return err
+	}
+	defer parent.Close()
+	for _, path := range paths {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		path = filepath.Clean(path)
+		if filepath.Dir(path) != parentPath || !pathContainedBy(parentPath, path) {
+			return errors.New("Workspace generation residue escaped its parent")
+		}
+		name := filepath.Base(path)
+		if err := removeRootRelativeTree(ctx, parent, name, m.persistWorkspaceCleanupDirectory); err != nil {
+			return err
+		}
+		if _, err := parent.Lstat(name); !errors.Is(err, os.ErrNotExist) {
+			if err == nil {
+				return errors.New("Workspace generation residue still exists")
+			}
+			return err
+		}
 	}
 	return nil
 }
@@ -143,7 +243,7 @@ func (m *WorkspaceMaterializer) fetchCacheRepository(
 	repository string,
 	remote gitpolicy.Remote,
 	defaultBranch string,
-	credential *GitHTTPSCredential,
+	credential *WorkspaceGitCredential,
 ) error {
 	refspec := "+refs/heads/" + defaultBranch + ":refs/remotes/origin/" + defaultBranch
 	if _, err := m.runNetworkGit(

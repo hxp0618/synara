@@ -31,6 +31,7 @@ import {
   providerProcessEnvironment,
   startProviderHostRun,
   validateRunnerInput,
+  type ProviderPrimaryOperation,
   type ProviderRunController,
   type RunnerCredential,
   type RunnerInput,
@@ -58,7 +59,11 @@ type ProviderDescriptorFactory = (provider: ProviderHostProviderKind) => Provide
 
 type ProtocolState = {
   sessionInput: RunnerInput | null;
-  activeTurn: { commandId: string; run: ProviderRunController } | null;
+  activeOperation: {
+    commandId: string;
+    commandType: "SendTurn" | "CompactSession" | "StartReview";
+    run: ProviderRunController;
+  } | null;
   inFlightByCommandId: Map<string, Promise<ProviderHostMessageEnvelope>>;
   terminalByCommandId: Map<string, ProviderHostMessageEnvelope>;
 };
@@ -245,7 +250,7 @@ export function createProviderHostProtocolHandler(input: {
 }): ProtocolHandler {
   const state: ProtocolState = {
     sessionInput: null,
-    activeTurn: null,
+    activeOperation: null,
     inFlightByCommandId: new Map(),
     terminalByCommandId: new Map(),
   };
@@ -432,10 +437,10 @@ async function executeCommand(
         ...state.sessionInput,
         workload: { ...state.sessionInput.workload, inputText },
       };
-      if (state.activeTurn) {
+      if (state.activeOperation) {
         throw new ProtocolFailure({
           code: "protocol_violation",
-          message: "Only one SendTurn command may be active in a Provider Session.",
+          message: "Only one primary operation may be active in a Provider Session.",
           retryable: false,
           requiresNewExecution: true,
           requiresUserAction: false,
@@ -446,6 +451,8 @@ async function executeCommand(
       const run = startRun(runInput, credential, (message) => {
         if (message.type === "event") {
           emit(payloadMessage(command, "Event", normalizeRuntimeEventV2(message)));
+        } else if (message.type === "artifact") {
+          emit(payloadMessage(command, "ArtifactCandidate", { artifact: message.artifact }));
         } else if (message.type === "interaction") {
           emit(
             payloadMessage(command, "InteractionRequest", {
@@ -455,12 +462,18 @@ async function executeCommand(
           );
         }
       });
-      state.activeTurn = { commandId: command.commandId, run };
+      state.activeOperation = {
+        commandId: command.commandId,
+        commandType: command.commandType,
+        run,
+      };
       let terminalResult: Extract<RunnerMessage, { type: "result" }>;
       try {
         terminalResult = await run.result;
       } finally {
-        if (state.activeTurn?.commandId === command.commandId) state.activeTurn = null;
+        if (state.activeOperation?.commandId === command.commandId) {
+          state.activeOperation = null;
+        }
       }
       const outputText = terminalResult.output.text;
       const history = [...(state.sessionInput.workload.conversationHistory ?? [])];
@@ -486,8 +499,74 @@ async function executeCommand(
           : {}),
       });
     }
+    case "CompactSession":
+    case "StartReview": {
+      if (!state.sessionInput) {
+        throw sessionOperationRequiresSession(command.commandType);
+      }
+      if (state.activeOperation) {
+        throw new ProtocolFailure({
+          code: "protocol_violation",
+          message: "Only one primary operation may be active in a Provider Session.",
+          retryable: false,
+          requiresNewExecution: true,
+          requiresUserAction: false,
+          canReconstructFromHistory: true,
+          canMoveWorker: true,
+        });
+      }
+      const provider = readProvider(state.sessionInput.workload.provider);
+      if (command.commandType === "CompactSession" && provider !== "codex") {
+        throw unsupportedSessionOperation(
+          command.commandType,
+          "Claude Agent SDK does not expose a stable manual compact API.",
+        );
+      }
+      const operation: ProviderPrimaryOperation =
+        command.commandType === "CompactSession"
+          ? { commandType: command.commandType, payload: command.payload }
+          : {
+              commandType: command.commandType,
+              payload: { ...command.payload, target: readReviewTarget(command.payload.target) },
+            };
+      const run = startRun(
+        state.sessionInput,
+        credential,
+        (message) => emitRunnerMessage(command, message, emit),
+        { operation },
+      );
+      state.activeOperation = {
+        commandId: command.commandId,
+        commandType: command.commandType,
+        run,
+      };
+      let terminalResult: Extract<RunnerMessage, { type: "result" }>;
+      try {
+        terminalResult = await run.result;
+      } finally {
+        if (state.activeOperation?.commandId === command.commandId) {
+          state.activeOperation = null;
+        }
+      }
+      if (terminalResult.providerResumeCursor) {
+        state.sessionInput = {
+          ...state.sessionInput,
+          providerResumeCursor: terminalResult.providerResumeCursor,
+        };
+      }
+      return primaryOperationResultMessage(command, terminalResult);
+    }
+    case "RollbackSession":
+    case "ForkSession":
+      throw unsupportedSessionOperation(
+        command.commandType,
+        `${command.commandType} is intentionally emulated by the Control Plane in this release.`,
+      );
     case "SteerTurn": {
-      const activeTurn = requireActiveTurn(state, command.commandType);
+      const activeTurn = requireActiveOperation(state, command.commandType);
+      if (activeTurn.commandType !== "SendTurn") {
+        throw unsupportedActiveTurnCommand(command.commandType);
+      }
       validateTargetCommandId(command.payload.targetCommandId, activeTurn.commandId);
       if (!activeTurn.run.steer) {
         throw unsupportedActiveTurnCommand(command.commandType);
@@ -500,7 +579,7 @@ async function executeCommand(
       });
     }
     case "InterruptTurn": {
-      const activeTurn = requireActiveTurn(state, command.commandType);
+      const activeTurn = requireActiveOperation(state, command.commandType);
       validateTargetCommandId(command.payload.targetCommandId, activeTurn.commandId);
       activeTurn.run.interrupt();
       const providerResumeCursor = activeTurn.run.getResumeCursor?.();
@@ -511,7 +590,7 @@ async function executeCommand(
       });
     }
     case "ResolveApproval": {
-      const activeTurn = requireActiveTurn(state, command.commandType);
+      const activeTurn = requireActiveOperation(state, command.commandType);
       if (!activeTurn.run.resolveApproval) {
         throw unsupportedInteractiveCommand(command.commandType);
       }
@@ -523,7 +602,7 @@ async function executeCommand(
       });
     }
     case "ResolveUserInput": {
-      const activeTurn = requireActiveTurn(state, command.commandType);
+      const activeTurn = requireActiveOperation(state, command.commandType);
       if (!activeTurn.run.resolveUserInput) {
         throw unsupportedInteractiveCommand(command.commandType);
       }
@@ -535,7 +614,7 @@ async function executeCommand(
       });
     }
     case "StopSession":
-      state.activeTurn?.run.interrupt();
+      state.activeOperation?.run.interrupt();
       state.sessionInput = null;
       return resultMessage(command, { stopped: true });
     default:
@@ -610,14 +689,14 @@ function assertProviderExecutionAllowed(
   }
 }
 
-function requireActiveTurn(
+function requireActiveOperation(
   state: ProtocolState,
   commandType: ProviderHostCommand["commandType"],
-): NonNullable<ProtocolState["activeTurn"]> {
-  if (state.activeTurn) return state.activeTurn;
+): NonNullable<ProtocolState["activeOperation"]> {
+  if (state.activeOperation) return state.activeOperation;
   throw new ProtocolFailure({
     code: "session_resume_invalid",
-    message: `${commandType} requires an active SendTurn command.`,
+    message: `${commandType} requires an active Provider operation.`,
     retryable: false,
     requiresNewExecution: false,
     requiresUserAction: false,
@@ -631,7 +710,7 @@ function validateTargetCommandId(value: unknown, activeCommandId: string): void 
   if (typeof value === "string" && value.trim() === activeCommandId) return;
   throw new ProtocolFailure({
     code: "protocol_violation",
-    message: "Control command targetCommandId does not match the active SendTurn command.",
+    message: "Control command targetCommandId does not match the active Provider operation.",
     retryable: false,
     requiresNewExecution: false,
     requiresUserAction: false,
@@ -681,6 +760,102 @@ function unsupportedInteractiveCommand(
     requiresUserAction: true,
     canReconstructFromHistory: true,
     canMoveWorker: true,
+  });
+}
+
+function sessionOperationRequiresSession(
+  commandType: "CompactSession" | "StartReview",
+): ProtocolFailure {
+  return new ProtocolFailure({
+    code: "session_resume_invalid",
+    message: `StartSession or ResumeSession must succeed before ${commandType}.`,
+    retryable: false,
+    requiresNewExecution: false,
+    requiresUserAction: false,
+    canReconstructFromHistory: true,
+    canMoveWorker: true,
+  });
+}
+
+function unsupportedSessionOperation(
+  commandType: "CompactSession" | "RollbackSession" | "ForkSession" | "StartReview",
+  detail: string,
+): ProtocolFailure {
+  return new ProtocolFailure({
+    code: "capability_unsupported",
+    message: `${commandType} is unsupported by this Provider Host path. ${detail}`,
+    retryable: false,
+    requiresNewExecution: false,
+    requiresUserAction: true,
+    canReconstructFromHistory: true,
+    canMoveWorker: true,
+  });
+}
+
+function readReviewTarget(
+  value: unknown,
+): { type: "uncommittedChanges" } | { type: "baseBranch"; branch: string };
+function readReviewTarget(
+  value: unknown,
+): { type: "uncommittedChanges" } | { type: "baseBranch"; branch: string } {
+  if (!isRecord(value)) throw new Error("StartReview target is required");
+  if (value.type === "uncommittedChanges") return { type: value.type };
+  if (value.type === "baseBranch") {
+    const branch = requiredString(value.branch, "StartReview target branch").trim();
+    if (branch.length > 500 || /[\r\n\0]/u.test(branch)) {
+      throw new Error("StartReview target branch is invalid");
+    }
+    return { type: value.type, branch };
+  }
+  throw new Error("StartReview target type is unsupported");
+}
+
+function emitRunnerMessage(
+  command: ProviderHostCommand,
+  message: RunnerMessage,
+  emit: (message: ProviderHostMessageEnvelope) => void,
+): void {
+  if (message.type === "event") {
+    emit(payloadMessage(command, "Event", normalizeRuntimeEventV2(message)));
+  } else if (message.type === "artifact") {
+    emit(payloadMessage(command, "ArtifactCandidate", { artifact: message.artifact }));
+  } else if (message.type === "interaction") {
+    emit(
+      payloadMessage(command, "InteractionRequest", {
+        ...message.payload,
+        interactionType: message.interactionType,
+      }),
+    );
+  }
+}
+
+function primaryOperationResultMessage(
+  command: ProviderHostCommand,
+  terminal: Extract<RunnerMessage, { type: "result" }>,
+): ProviderHostMessageEnvelope {
+  const output = terminal.output;
+  const boundary = isRecord(output.boundary) ? output.boundary : undefined;
+  const supportMode =
+    output.supportMode === "native" || output.supportMode === "emulated"
+      ? output.supportMode
+      : undefined;
+  const providerTurnId =
+    typeof output.providerTurnId === "string" && output.providerTurnId.trim()
+      ? output.providerTurnId.trim()
+      : undefined;
+  const summary =
+    boundary && typeof boundary.summary === "string" && boundary.summary.trim()
+      ? boundary.summary.trim()
+      : undefined;
+  return resultMessage(command, {
+    output,
+    ...(terminal.providerResumeCursor
+      ? { providerResumeCursor: terminal.providerResumeCursor }
+      : {}),
+    ...(supportMode ? { supportMode } : {}),
+    ...(providerTurnId ? { providerTurnId } : {}),
+    ...(summary ? { summary } : {}),
+    ...(boundary ? { boundary } : {}),
   });
 }
 

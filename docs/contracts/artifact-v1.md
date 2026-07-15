@@ -42,6 +42,29 @@ before returning the first grant. Pending replay rotates the Local token or re-s
 key. Ready replay returns metadata without another PUT and first revalidates Lease/Generation plus
 Size/SHA-256/Content-Type. UploadGrant secrets are not persisted as long-lived Worker receipts.
 
+Ordinary Worker `generated_file` and `terminal_log` uploads use the same response-loss safety without borrowing
+Checkpoint identity. Agentd hashes the regular-file payload before Create and derives an opaque idempotency key
+from Execution, Generation, Workspace-relative candidate path, Artifact metadata, size and SHA-256. The Control
+Plane derives one deterministic Artifact ID from Execution, Generation and that key. A pending Create replay
+refreshes the upload grant, while a ready replay returns the same Artifact without another PUT. Reusing the key
+with different ownership or metadata fails closed. Agentd resolves every path component below an anchored
+Workspace Root descriptor bound before Provider start, rejects symlinks and non-regular files, then retains the
+safely opened file descriptor through pre-hash, retry, PUT and Ready replay verification. Replacing the Workspace
+root path or a checked parent directory therefore cannot redirect the upload outside the bound Workspace.
+Content-Type is normalized before identity derivation and confirmation, and pre-hash plus Checkpoint archive copies
+honor Execution/Drain cancellation. Snapshot traversal checks the cancellation context for directories as well as
+files. Agentd refuses to Complete if the bytes uploaded no longer match the precomputed identity.
+
+Provider-retained Terminal output uses a separate agentd-owned Runtime Output Root rather than the Workspace Root.
+Agentd creates and binds that private root before Provider start, passes only its path in the internal Runner input,
+and accepts only a root-relative `terminal_log` candidate correlated to an already-started `terminalId`. The
+Provider Host never opens the reported file. Agentd rejects traversal, absolute paths, symlinks, non-regular files,
+size drift, or a candidate that follows inline bytes for the same Terminal; the latter prevents duplicated prefixes.
+It then reads the bound descriptor from byte zero, emits at most a 32 KiB safe UTF-8 preview, and persists the full
+stream as fixed 1 MiB Artifact segments. Invalid UTF-8, NUL, ANSI/control, and bidirectional-control content receive
+no Session Event preview and are stored as binary Artifact payload. The physical Runtime Output path is removed
+after the Execution and never becomes an object key, original name, Event field, or resume-state value.
+
 A Patch Checkpoint uses kind `checkpoint` and a deterministic tar containing `tracked.patch`, authoritative raw
 tracked upserts under `tracked/`, and the included regular files under `untracked/`. The PostgreSQL Checkpoint
 manifest is the metadata authority; the tar does not duplicate it. The Manifest declares that whole ignored

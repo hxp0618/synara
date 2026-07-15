@@ -502,6 +502,13 @@ export function resolveAuthoritativeTurnDispatch(input: {
   return input.dispatchMode === "steer" ? "steer" : "queue-unsupported";
 }
 
+export function readNativeApiForConversationRollback<T>(input: {
+  controlPlaneAuthoritative: boolean;
+  readNativeApi: () => T;
+}): T | undefined {
+  return input.controlPlaneAuthoritative ? undefined : input.readNativeApi();
+}
+
 // The composer live strip prefers the turn's computed diff (the
 // `thread.turn-diff-completed` event) so it can show real per-file +/- stats.
 // Before that lands, it falls back to mid-turn file-edit work-log activity so

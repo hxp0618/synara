@@ -58,6 +58,7 @@ import { GeminiAdapter, type GeminiAdapterShape } from "../Services/GeminiAdapte
 import { asArray, asNumber, asRecord, asString, trimToUndefined } from "../geminiValue.ts";
 import { extractProposedPlanMarkdown, withProviderPlanModePrompt } from "../planMode.ts";
 import { makeRuntimeTaskListItem } from "../runtimeTaskList.ts";
+import { makeRuntimeItemLifecyclePayload } from "../runtimeEventPayload.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
 
 const PROVIDER = "gemini" as const;
@@ -1101,11 +1102,12 @@ const makeGeminiAdapter = Effect.fn("makeGeminiAdapter")(function* (
     const status = statusFromToolStatus(toolCall.status);
     const detail = toolContentDetail(toolCall.content) ?? toolDetail(toolCall);
     const title = trimToUndefined(toolCall.title);
+    const toolData = Object.fromEntries(Object.entries(toolCall));
     const toolPatch: Partial<GeminiRecordedItem> = {
       ...(title ? { title } : {}),
       ...(detail ? { detail } : {}),
       ...(status ? { status } : {}),
-      data: toolCall,
+      data: toolData,
     };
     upsertGeminiTurnItem(turnState, itemId, itemType, toolPatch);
 
@@ -1114,13 +1116,13 @@ const makeGeminiAdapter = Effect.fn("makeGeminiAdapter")(function* (
       turnId: turnState.turnId,
       itemId,
       type: lifecycle,
-      payload: {
+      payload: makeRuntimeItemLifecyclePayload({
         itemType,
         ...(status ? { status } : {}),
-        ...(trimToUndefined(toolCall.title) ? { title: trimToUndefined(toolCall.title) } : {}),
+        ...(title ? { title } : {}),
         ...(detail ? { detail } : {}),
-        data: toolCall,
-      },
+        data: toolData,
+      }),
       providerRefs: {
         providerItemId: ProviderItemId.makeUnsafe(providerItemId),
       },

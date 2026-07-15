@@ -37,6 +37,10 @@ var controlCommandCapabilityIDs = map[string]string{
 
 var outstandingControlCommandStatuses = []string{"pending", "delivered"}
 
+var primaryControlCommandTypes = []string{
+	"CompactSession", "RollbackSession", "ForkSession", "StartReview",
+}
+
 type controlCommandRequest struct {
 	CommandType     string
 	CommandPrefix   string
@@ -392,6 +396,7 @@ func (s *Service) PullControlCommands(
 			Where("tenant_id = ? AND execution_id = ? AND delivery_worker_id = ? AND delivery_generation = ? AND status IN ? AND delivery_available_at <= ?",
 				execution.TenantID, execution.ID, worker.ID, input.Generation,
 				[]string{"pending", "delivered"}, s.now()).
+			Where("command_type NOT IN ?", primaryControlCommandTypes).
 			Order("delivery_available_at, id").Limit(limit).Find(&models).Error; err != nil {
 			return problem.Wrap(500, "control_commands_load_failed", "Control commands could not be loaded.", err)
 		}
@@ -443,7 +448,7 @@ func (s *Service) updateControlCommandDelivery(
 	if acknowledge {
 		operation = "control-command.acknowledged"
 	}
-	var appended persistence.SessionEvent
+	appended := make([]persistence.SessionEvent, 0, 2)
 	result, err := runIdempotent(ctx, s, worker, requestID, operation, struct {
 		ExecutionID      uuid.UUID                   `json:"executionId"`
 		ControlCommandID uuid.UUID                   `json:"controlCommandId"`
@@ -510,12 +515,20 @@ func (s *Service) updateControlCommandDelivery(
 			return s.acknowledgeSteerControlCommand(
 				ctx, tx, worker, execution, command, input, now, &appended,
 			)
+		case "CompactSession", "StartReview", "RollbackSession", "ForkSession":
+			return s.acknowledgePrimaryControlCommand(
+				ctx, tx, worker, lease, execution, command, input, now, &appended,
+			)
 		default:
 			return ControlCommand{}, problem.New(409, "control_command_not_implemented", fmt.Sprintf("Control command %q is not implemented.", command.CommandType))
 		}
 	})
-	if err == nil && acknowledge && !result.Replayed && appended.EventID != uuid.Nil {
-		s.sessions.PublishInternalEvent(appended)
+	if err == nil && acknowledge && !result.Replayed {
+		for _, event := range appended {
+			if event.EventID != uuid.Nil {
+				s.sessions.PublishInternalEvent(event)
+			}
+		}
 	}
 	return result, err
 }
@@ -529,7 +542,7 @@ func (s *Service) acknowledgeInterruptControlCommand(
 	command persistence.ExecutionControlCommand,
 	input ControlCommandDeliveryInput,
 	now time.Time,
-	appended *persistence.SessionEvent,
+	appended *[]persistence.SessionEvent,
 ) (ControlCommand, error) {
 	if err := s.storeProviderCursor(ctx, tx, execution, input.ProviderResumeCursor, true); err != nil {
 		return ControlCommand{}, err
@@ -566,7 +579,7 @@ func (s *Service) acknowledgeInterruptControlCommand(
 		return ControlCommand{}, err
 	}
 	var err error
-	*appended, err = s.sessions.AppendInternalEvent(ctx, tx, execution.TenantID, execution.SessionID, sessions.InternalEventInput{
+	event, err := s.sessions.AppendInternalEvent(ctx, tx, execution.TenantID, execution.SessionID, sessions.InternalEventInput{
 		EventType: "execution.interrupted", ActorType: "worker", ActorID: &worker.ID,
 		ExecutionID: &execution.ID, WorkerID: &worker.ID, Generation: &execution.Generation,
 		Payload: map[string]any{
@@ -577,6 +590,7 @@ func (s *Service) acknowledgeInterruptControlCommand(
 	if err != nil {
 		return ControlCommand{}, err
 	}
+	*appended = append(*appended, event)
 	if err := outbox.Enqueue(ctx, tx, outbox.EnqueueInput{
 		TenantID: &execution.TenantID, Topic: "execution.interrupted", MessageKey: execution.ID.String(),
 		Payload: map[string]any{
@@ -600,7 +614,7 @@ func (s *Service) acknowledgeSteerControlCommand(
 	command persistence.ExecutionControlCommand,
 	input ControlCommandDeliveryInput,
 	now time.Time,
-	appended *persistence.SessionEvent,
+	appended *[]persistence.SessionEvent,
 ) (ControlCommand, error) {
 	if err := s.storeProviderCursor(ctx, tx, execution, input.ProviderResumeCursor, false); err != nil {
 		return ControlCommand{}, err
@@ -613,7 +627,7 @@ func (s *Service) acknowledgeSteerControlCommand(
 		return ControlCommand{}, err
 	}
 	var err error
-	*appended, err = s.sessions.AppendInternalEvent(ctx, tx, execution.TenantID, execution.SessionID, sessions.InternalEventInput{
+	event, err := s.sessions.AppendInternalEvent(ctx, tx, execution.TenantID, execution.SessionID, sessions.InternalEventInput{
 		EventType: "turn.steered", ActorType: "worker", ActorID: &worker.ID,
 		ExecutionID: &execution.ID, WorkerID: &worker.ID, Generation: &execution.Generation,
 		Payload: map[string]any{
@@ -623,6 +637,7 @@ func (s *Service) acknowledgeSteerControlCommand(
 	if err != nil {
 		return ControlCommand{}, err
 	}
+	*appended = append(*appended, event)
 	if err := outbox.Enqueue(ctx, tx, outbox.EnqueueInput{
 		TenantID: &execution.TenantID, Topic: "turn.steered", MessageKey: command.ID.String(),
 		Payload: map[string]any{
@@ -631,6 +646,110 @@ func (s *Service) acknowledgeSteerControlCommand(
 		},
 	}); err != nil {
 		return ControlCommand{}, problem.Wrap(500, "execution_steer_outbox_failed", "The Steer acknowledgement event could not be queued.", err)
+	}
+	command.Status = "acknowledged"
+	command.AcknowledgedAt = &now
+	command.DeliveryError = nil
+	return toControlCommand(command), nil
+}
+
+func (s *Service) acknowledgePrimaryControlCommand(
+	ctx context.Context,
+	tx *gorm.DB,
+	worker persistence.WorkerInstance,
+	lease persistence.WorkerLease,
+	execution persistence.AgentExecution,
+	command persistence.ExecutionControlCommand,
+	input ControlCommandDeliveryInput,
+	now time.Time,
+	appended *[]persistence.SessionEvent,
+) (ControlCommand, error) {
+	if err := s.storeProviderCursor(ctx, tx, execution, input.ProviderResumeCursor, true); err != nil {
+		return ControlCommand{}, err
+	}
+	if err := acknowledgeControlCommandRow(ctx, tx, execution, command, now); err != nil {
+		return ControlCommand{}, err
+	}
+	if err := s.supersedeInteractionGeneration(ctx, tx, execution, lease); err != nil {
+		return ControlCommand{}, err
+	}
+	if err := tx.WithContext(ctx).Delete(&lease).Error; err != nil {
+		return ControlCommand{}, problem.Wrap(500, "lease_release_failed", "Failed to release the completed operation lease.", err)
+	}
+	execution.Status = "completed"
+	execution.FinishedAt = &now
+	updatedExecution := tx.WithContext(ctx).Model(&persistence.AgentExecution{}).
+		Where("tenant_id = ? AND id = ? AND worker_id = ? AND generation = ? AND status IN ?",
+			execution.TenantID, execution.ID, worker.ID, input.Generation,
+			[]string{"leased", "running", "waiting-for-approval"}).
+		Updates(map[string]any{"status": "completed", "finished_at": now})
+	if err := expectOne(updatedExecution, 409, "execution_complete_conflict", "The operation Execution could not be completed from its current state."); err != nil {
+		return ControlCommand{}, err
+	}
+	updatedTurn := tx.WithContext(ctx).Model(&persistence.AgentTurn{}).
+		Where("tenant_id = ? AND session_id = ? AND id = ?", execution.TenantID, execution.SessionID, execution.TurnID).
+		Updates(map[string]any{"status": "completed", "completed_at": now})
+	if err := expectOne(updatedTurn, 500, "turn_complete_failed", "Failed to complete the operation Turn."); err != nil {
+		return ControlCommand{}, err
+	}
+	if err := supersedeControlCommands(ctx, tx, execution, command.ID, "The primary Session operation completed."); err != nil {
+		return ControlCommand{}, err
+	}
+
+	semanticType := map[string]string{
+		"CompactSession":  "thread.state.changed",
+		"StartReview":     "session.review.completed",
+		"RollbackSession": "session.history.rolled-back",
+		"ForkSession":     "session.fork.completed",
+	}[command.CommandType]
+	semanticPayload := map[string]any{
+		"turnId": execution.TurnID, "controlCommandId": command.ID,
+		"commandId": command.CommandID, "commandType": command.CommandType,
+	}
+	if command.CommandType == "CompactSession" {
+		semanticPayload["state"] = "compacted"
+	}
+	for _, key := range []string{"summary", "compactedThroughSequence", "supportMode", "providerTurnId"} {
+		if value, ok := input.Result[key]; ok {
+			semanticPayload[key] = value
+		}
+	}
+	semanticEvent, err := s.sessions.AppendInternalEvent(ctx, tx, execution.TenantID, execution.SessionID, sessions.InternalEventInput{
+		EventType: semanticType, ActorType: "worker", ActorID: &worker.ID,
+		ExecutionID: &execution.ID, WorkerID: &worker.ID, Generation: &execution.Generation,
+		Payload: semanticPayload,
+	})
+	if err != nil {
+		return ControlCommand{}, err
+	}
+	*appended = append(*appended, semanticEvent)
+	completedPayload := map[string]any{
+		"turnId": execution.TurnID, "turnKind": strings.TrimSuffix(strings.TrimPrefix(command.CommandType, "Start"), "Session"),
+		"controlCommandId": command.ID, "finishedAt": now,
+	}
+	if input.Result != nil {
+		completedPayload["output"] = input.Result
+	}
+	completedEvent, err := s.sessions.AppendInternalEvent(ctx, tx, execution.TenantID, execution.SessionID, sessions.InternalEventInput{
+		EventType: "execution.completed", ActorType: "worker", ActorID: &worker.ID,
+		ExecutionID: &execution.ID, WorkerID: &worker.ID, Generation: &execution.Generation,
+		Payload: completedPayload,
+	})
+	if err != nil {
+		return ControlCommand{}, err
+	}
+	*appended = append(*appended, completedEvent)
+	for _, event := range []persistence.SessionEvent{semanticEvent, completedEvent} {
+		if err := outbox.Enqueue(ctx, tx, outbox.EnqueueInput{
+			TenantID: &execution.TenantID, Topic: event.EventType, MessageKey: event.EventID.String(),
+			Payload: map[string]any{
+				"tenantId": execution.TenantID, "sessionId": execution.SessionID,
+				"turnId": execution.TurnID, "executionId": execution.ID,
+				"controlCommandId": command.ID, "eventId": event.EventID, "sequence": event.Sequence,
+			},
+		}); err != nil {
+			return ControlCommand{}, problem.Wrap(500, "primary_operation_outbox_failed", "The primary operation event could not be queued.", err)
+		}
 	}
 	command.Status = "acknowledged"
 	command.AcknowledgedAt = &now
@@ -688,7 +807,14 @@ func requeueExecutionControlCommands(
 	execution persistence.AgentExecution,
 	lease persistence.WorkerLease,
 	reason string,
-) error {
+) (bool, error) {
+	unknown := tx.WithContext(ctx).Model(&persistence.ExecutionControlCommand{}).
+		Where("tenant_id = ? AND execution_id = ? AND delivery_worker_id = ? AND delivery_generation = ? AND command_type IN ? AND status = ?",
+			execution.TenantID, execution.ID, lease.WorkerID, lease.Generation, primaryControlCommandTypes, "delivered").
+		Updates(map[string]any{"status": "outcome_unknown", "delivery_error": reason})
+	if unknown.Error != nil {
+		return false, problem.Wrap(500, "primary_operation_outcome_update_failed", "The uncertain primary operation could not be fenced.", unknown.Error)
+	}
 	if err := tx.WithContext(ctx).Model(&persistence.ExecutionControlCommand{}).
 		Where("tenant_id = ? AND execution_id = ? AND delivery_worker_id = ? AND delivery_generation = ? AND status IN ?",
 			execution.TenantID, execution.ID, lease.WorkerID, lease.Generation, []string{"pending", "delivered"}).
@@ -696,9 +822,9 @@ func requeueExecutionControlCommands(
 			"status": "pending", "delivery_worker_id": nil, "delivery_generation": nil,
 			"delivered_at": nil, "delivery_error": reason,
 		}).Error; err != nil {
-		return problem.Wrap(500, "control_command_requeue_failed", "Control commands could not be requeued for Worker recovery.", err)
+		return false, problem.Wrap(500, "control_command_requeue_failed", "Control commands could not be requeued for Worker recovery.", err)
 	}
-	return nil
+	return unknown.RowsAffected > 0, nil
 }
 
 func supersedeControlCommands(

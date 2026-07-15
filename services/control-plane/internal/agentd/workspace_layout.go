@@ -546,6 +546,123 @@ func replaceWorkspaceGenerationWithFS(active, staging string, fs workspaceGenera
 	return nil
 }
 
+func reconcileWorkspaceGeneration(
+	active string,
+	validate func(string) error,
+) error {
+	active = filepath.Clean(active)
+	parent := filepath.Dir(active)
+	if err := validateExistingRealDirectory(parent); err != nil {
+		return err
+	}
+	staging, backups, err := workspaceGenerationResidue(active)
+	if err != nil {
+		return err
+	}
+	activeInfo, activeErr := os.Lstat(active)
+	switch {
+	case activeErr == nil:
+		if activeInfo.Mode()&os.ModeSymlink != 0 || !activeInfo.IsDir() {
+			return errors.New("active Workspace generation is unsafe")
+		}
+		if err := validate(active); err != nil {
+			// The active path remains authoritative until the normal materialization
+			// policy decides whether a bound Ready Checkpoint may replace it. Keep
+			// every residue so an invalid generation is never silently discarded.
+			return nil
+		}
+		removeWorkspaceGenerationResidue(staging)
+		removeWorkspaceGenerationResidue(backups)
+		return nil
+	case !errors.Is(activeErr, os.ErrNotExist):
+		return activeErr
+	}
+
+	if len(backups) > 1 {
+		return errors.New("Workspace generation recovery found multiple authoritative backups")
+	}
+	if len(backups) == 0 {
+		removeWorkspaceGenerationResidue(staging)
+		return nil
+	}
+
+	backup := backups[0]
+	if err := validate(backup); err != nil {
+		return fmt.Errorf("Workspace generation backup is invalid: %w", err)
+	}
+	if err := os.Rename(backup, active); err != nil {
+		return fmt.Errorf("restore Workspace generation backup: %w", err)
+	}
+	if err := validate(active); err != nil {
+		rollbackErr := os.Rename(active, backup)
+		if rollbackErr != nil {
+			return errors.Join(
+				fmt.Errorf("validate restored Workspace generation: %w", err),
+				fmt.Errorf("preserve invalid restored Workspace generation: %w", rollbackErr),
+			)
+		}
+		return fmt.Errorf("validate restored Workspace generation: %w", err)
+	}
+	removeWorkspaceGenerationResidue(staging)
+	return nil
+}
+
+func workspaceLayoutAtRoot(layout workspaceLayout, root string) workspaceLayout {
+	layout.Root = root
+	layout.Checkout = filepath.Join(root, "checkout")
+	layout.GitDir = filepath.Join(root, "repo.git")
+	layout.Manifest = filepath.Join(root, "manifest.json")
+	return layout
+}
+
+func workspaceGenerationResidue(active string) ([]string, []string, error) {
+	parent := filepath.Dir(active)
+	base := filepath.Base(active)
+	stagingPrefix := "." + base + ".staging-"
+	backupPrefix := "." + base + ".backup-"
+	entries, err := os.ReadDir(parent)
+	if err != nil {
+		return nil, nil, err
+	}
+	staging := make([]string, 0)
+	backups := make([]string, 0)
+	for _, entry := range entries {
+		name := entry.Name()
+		kind := ""
+		switch {
+		case strings.HasPrefix(name, stagingPrefix) && len(name) > len(stagingPrefix):
+			kind = "staging"
+		case strings.HasPrefix(name, backupPrefix) && len(name) > len(backupPrefix):
+			kind = "backup"
+		default:
+			continue
+		}
+		path := filepath.Join(parent, name)
+		if !pathContainedBy(parent, path) || filepath.Dir(path) != parent {
+			return nil, nil, errors.New("Workspace generation residue escaped its parent")
+		}
+		info, err := os.Lstat(path)
+		if err != nil {
+			return nil, nil, err
+		}
+		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			return nil, nil, errors.New("Workspace generation residue is unsafe")
+		}
+		if kind == "staging" {
+			staging = append(staging, path)
+		} else {
+			backups = append(backups, path)
+		}
+	}
+	return staging, backups, nil
+}
+
+func removeWorkspaceGenerationResidue(paths []string) {
+	for _, path := range paths {
+		_ = os.RemoveAll(path)
+	}
+}
+
 func legacyWorkspaceContainsData(path string) (bool, error) {
 	info, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {

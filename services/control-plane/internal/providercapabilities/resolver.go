@@ -47,7 +47,7 @@ func LoadTargetProjection(
 	}
 	workers := make([]persistence.WorkerInstance, 0)
 	query := db.WithContext(ctx).
-		Where("execution_target_id = ? AND status = ? AND terminated_at IS NULL", target.ID, "online").
+		Where("execution_target_id = ? AND administrative_status = ? AND status = ? AND terminated_at IS NULL", target.ID, "active", "online").
 		Where("last_heartbeat_at >= ? AND current_manifest_id IS NOT NULL", now.Add(-heartbeatTimeout)).
 		Where("protocol_version = ?", workerProtocolVersion)
 	if target.Kind != "local" {

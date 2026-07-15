@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -17,6 +18,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/synara-ai/synara/services/control-plane/internal/executions"
+	"github.com/synara-ai/synara/services/control-plane/internal/secretguard"
 )
 
 type RunnerProtocol string
@@ -149,6 +151,10 @@ func runnerFailurePersisted(err error) bool {
 func (e *runnerFailure) Error() string { return e.message }
 
 func runnerFailureCode(err error) string {
+	var exposure *secretguard.ExposureError
+	if errors.As(err, &exposure) && exposure.Code == secretguard.ErrorCode {
+		return secretguard.ErrorCode
+	}
 	var failure *runnerFailure
 	if errors.As(err, &failure) && strings.TrimSpace(failure.code) != "" {
 		return failure.code
@@ -217,6 +223,7 @@ func (r *Runner) runProviderHostV2(
 	ctx context.Context,
 	input RunnerInput,
 	credential *RunnerCredential,
+	primary *RunnerPrimaryOperationControl,
 	controls <-chan RunnerControl,
 	handle func(context.Context, RunnerMessage) error,
 ) (RunnerResult, error) {
@@ -269,31 +276,33 @@ func (r *Runner) runProviderHostV2(
 		return RunnerResult{}, err
 	}
 
-	send := newProviderHostCommand(
-		executionID, generation, "SendTurn", commandID(input, "send"),
-		map[string]any{
-			"inputText": input.Workload.InputText, "turnId": input.Workload.TurnID.String(),
-			"runtimeEventVersion": runtimeEventVersion,
-		},
+	activeCommand, beforeWrite, primaryOperation, err := providerHostPrimaryCommand(
+		ctx, input, runtimeEventVersion, primary,
 	)
-	sendExecution, err := process.startCommand(ctx, send, func(message RunnerMessage) error {
+	if err != nil {
+		return RunnerResult{}, err
+	}
+	activeExecution, err := process.startCommandBeforeWrite(ctx, activeCommand, func(message RunnerMessage) error {
 		if handle == nil {
 			return protocolFailure("Provider Host emitted a non-terminal message without a Worker handler")
 		}
 		return handle(ctx, message)
-	})
+	}, beforeWrite)
 	if err != nil {
 		return RunnerResult{}, err
 	}
 	for {
 		select {
-		case outcome := <-sendExecution.result:
+		case outcome := <-activeExecution.result:
 			if outcome.err != nil {
 				return RunnerResult{}, outcome.err
 			}
 			result, err := runnerResultFromTerminal(outcome.message)
 			if err != nil {
 				return RunnerResult{}, err
+			}
+			if primaryOperation {
+				result.PrimaryOperationResult = cloneProviderPayload(outcome.message.Payload)
 			}
 			if err := process.finish(); err != nil {
 				return RunnerResult{}, err
@@ -305,7 +314,7 @@ func (r *Runner) runProviderHostV2(
 				controls = nil
 				continue
 			}
-			terminalized, controlErr := process.executeControl(ctx, input, send.CommandID, control)
+			terminalized, controlErr := process.executeControl(ctx, input, activeCommand.CommandID, control)
 			if control.Done != nil {
 				control.Done <- controlErr
 			}
@@ -318,10 +327,10 @@ func (r *Runner) runProviderHostV2(
 				}
 			}
 		case <-ctx.Done():
-			if err := process.interruptActiveTurn(input, send.CommandID); err == nil {
+			if err := process.interruptActiveTurn(input, activeCommand.CommandID); err == nil {
 				timer := time.NewTimer(2 * time.Second)
 				select {
-				case <-sendExecution.result:
+				case <-activeExecution.result:
 					if finishErr := process.finish(); finishErr == nil {
 						finished = true
 					}
@@ -337,6 +346,58 @@ func (r *Runner) runProviderHostV2(
 			return RunnerResult{}, ctx.Err()
 		}
 	}
+}
+
+func providerHostPrimaryCommand(
+	ctx context.Context,
+	input RunnerInput,
+	runtimeEventVersion int,
+	primary *RunnerPrimaryOperationControl,
+) (providerHostCommand, func() error, bool, error) {
+	operation := input.Workload.PrimaryOperation
+	if operation == nil {
+		if primary != nil {
+			return providerHostCommand{}, nil, false, protocolFailure("Primary operation delivery control was provided for a message Turn")
+		}
+		return newProviderHostCommand(
+			input.Execution.ID.String(), input.Execution.Generation, "SendTurn", commandID(input, "send"),
+			map[string]any{
+				"inputText": input.Workload.InputText, "turnId": input.Workload.TurnID.String(),
+				"runtimeEventVersion": runtimeEventVersion,
+			},
+		), nil, false, nil
+	}
+	if primary == nil || primary.MarkDelivered == nil {
+		return providerHostCommand{}, nil, false, protocolFailure("Primary operation omitted its durable delivery callback")
+	}
+	if normalizeProvider(operation.Provider) != normalizeProvider(input.Workload.Provider) {
+		return providerHostCommand{}, nil, false, protocolFailure("Primary operation Provider does not match the Provider Session")
+	}
+	if operation.CommandType != "CompactSession" && operation.CommandType != "StartReview" {
+		return providerHostCommand{}, nil, false, protocolFailure("Worker received an unsupported primary Provider operation")
+	}
+	if operation.ControlCommandID == uuid.Nil || strings.TrimSpace(operation.CommandID) == "" || operation.Payload == nil {
+		return providerHostCommand{}, nil, false, protocolFailure("Primary operation omitted required command fields")
+	}
+	payload := cloneProviderPayload(operation.Payload)
+	payload["runtimeEventVersion"] = runtimeEventVersion
+	return newProviderHostCommand(
+			input.Execution.ID.String(), input.Execution.Generation,
+			operation.CommandType, operation.CommandID, payload,
+		), func() error {
+			if err := primary.MarkDelivered(ctx); err != nil {
+				return fmt.Errorf("mark primary Provider operation delivered: %w", err)
+			}
+			return nil
+		}, true, nil
+}
+
+func cloneProviderPayload(payload map[string]any) map[string]any {
+	cloned := make(map[string]any, len(payload))
+	for key, value := range payload {
+		cloned[key] = value
+	}
+	return cloned
 }
 
 func (p *providerHostV2Process) interruptActiveTurn(input RunnerInput, targetCommandID string) error {
@@ -617,12 +678,23 @@ func (r *Runner) validateProviderHostDescriptorForExecution(
 			}
 		}
 	}
-	capability := descriptor.CapabilityDescriptor.Capabilities["send-turn"]
+	capabilityID := "send-turn"
+	if operation := input.Workload.PrimaryOperation; operation != nil {
+		switch operation.CommandType {
+		case "CompactSession":
+			capabilityID = "compact"
+		case "StartReview":
+			capabilityID = "review"
+		default:
+			return protocolFailure("Execution workload requested an unsupported primary Provider operation")
+		}
+	}
+	capability := descriptor.CapabilityDescriptor.Capabilities[capabilityID]
 	if descriptor.CapabilityDescriptor.SupportTier == "local-only" ||
 		(capability != "native" && capability != "emulated") {
 		return &runnerFailure{
 			code:               "capability_unsupported",
-			message:            fmt.Sprintf("Provider %s is not supported by this remote Provider Host", input.Workload.Provider),
+			message:            fmt.Sprintf("Provider %s does not support capability %s on this remote Provider Host", input.Workload.Provider, capabilityID),
 			requiresUserAction: true,
 		}
 	}
@@ -668,13 +740,13 @@ func (r *Runner) validateProviderHostDescriptorForExecution(
 
 func runnerResultFromTerminal(message providerHostMessage) (RunnerResult, error) {
 	if message.MessageType != "Result" {
-		return RunnerResult{}, protocolFailure("SendTurn did not return a Result message")
+		return RunnerResult{}, protocolFailure("Provider operation did not return a Result message")
 	}
 	output := map[string]any{}
 	if value, found := message.Payload["output"]; found {
 		decoded, ok := value.(map[string]any)
 		if !ok {
-			return RunnerResult{}, protocolFailure("SendTurn Result output is not an object")
+			return RunnerResult{}, protocolFailure("Provider operation Result output is not an object")
 		}
 		output = decoded
 	}
@@ -682,7 +754,7 @@ func runnerResultFromTerminal(message providerHostMessage) (RunnerResult, error)
 	if value, found := message.Payload["providerResumeCursor"]; found {
 		decoded, ok := value.(string)
 		if !ok || strings.TrimSpace(decoded) == "" {
-			return RunnerResult{}, protocolFailure("SendTurn Result providerResumeCursor is invalid")
+			return RunnerResult{}, protocolFailure("Provider operation Result providerResumeCursor is invalid")
 		}
 		cursor = &decoded
 	}
@@ -1295,10 +1367,41 @@ func runnerMessageFromProviderHost(message providerHostMessage, negotiatedRuntim
 		artifact := &RunnerArtifact{
 			Path: stringField(artifactPayload, "path"), Kind: stringField(artifactPayload, "kind"),
 			OriginalName: stringField(artifactPayload, "originalName"), ContentType: stringField(artifactPayload, "contentType"),
+			SourceRoot: stringField(artifactPayload, "sourceRoot"), TerminalID: stringField(artifactPayload, "terminalId"),
+			Encoding: stringField(artifactPayload, "encoding"),
 		}
 		if strings.TrimSpace(artifact.Path) == "" || strings.TrimSpace(artifact.Kind) == "" ||
 			strings.TrimSpace(artifact.ContentType) == "" {
 			return RunnerMessage{}, protocolFailure("Provider Host ArtifactCandidate omitted required fields")
+		}
+		if _, found := artifactPayload["reportedSize"]; found {
+			reportedSize, ok := nonNegativeInt64MapField(artifactPayload, "reportedSize")
+			if !ok {
+				return RunnerMessage{}, protocolFailure("Provider Host ArtifactCandidate reportedSize is invalid")
+			}
+			artifact.ReportedSize = &reportedSize
+		}
+		artifact.SourceRoot = strings.TrimSpace(artifact.SourceRoot)
+		if artifact.SourceRoot == "" {
+			artifact.SourceRoot = "workspace"
+		}
+		switch artifact.SourceRoot {
+		case "workspace":
+			if strings.TrimSpace(artifact.TerminalID) != "" || strings.TrimSpace(artifact.Encoding) != "" || artifact.ReportedSize != nil {
+				return RunnerMessage{}, protocolFailure("Provider Host Workspace ArtifactCandidate contains Runtime Output metadata")
+			}
+		case "runtime-output":
+			cleanPath := filepath.Clean(strings.TrimSpace(artifact.Path))
+			if filepath.IsAbs(cleanPath) || !pathContainedRelative(cleanPath) {
+				return RunnerMessage{}, protocolFailure("Provider Host Runtime Output path must be relative to its bound root")
+			}
+			if artifact.Kind != "terminal_log" || strings.TrimSpace(artifact.TerminalID) == "" ||
+				(artifact.Encoding != "utf-8" && artifact.Encoding != "binary") {
+				return RunnerMessage{}, protocolFailure("Provider Host Runtime Output ArtifactCandidate is invalid")
+			}
+			artifact.Path = cleanPath
+		default:
+			return RunnerMessage{}, protocolFailure("Provider Host ArtifactCandidate sourceRoot is unsupported")
 		}
 		return RunnerMessage{Type: "artifact", Artifact: artifact, OccurredAt: &occurredAt}, nil
 	case "InteractionRequest":

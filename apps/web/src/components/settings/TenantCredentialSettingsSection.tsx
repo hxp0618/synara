@@ -8,6 +8,7 @@ import {
   ControlPlaneInlineError,
   ControlPlaneStatusPill,
 } from "~/components/settings/ControlPlaneSettingsPrimitives";
+import { CredentialPayloadFields } from "~/components/settings/CredentialPayloadFields";
 import {
   SettingsListRow,
   SettingsRow,
@@ -15,33 +16,30 @@ import {
 } from "~/components/settings/SettingsPanelPrimitives";
 import { Button } from "~/components/ui/button";
 import { Input } from "~/components/ui/input";
-import { Textarea } from "~/components/ui/textarea";
 import {
   controlPlaneClient,
   type ControlPlaneCredential,
-  type ControlPlaneCredentialPurpose,
+  type ControlPlaneCredentialScope,
   type ControlPlaneOrganization,
+  type ControlPlaneTenantMember,
 } from "~/lib/controlPlaneClient";
+import {
+  buildCredentialPayload,
+  CREDENTIAL_FORM_KIND_OPTIONS,
+  clearCredentialSecrets,
+  createCredentialPayloadDraft,
+  credentialFormKindForCredential,
+  describeCredentialForm,
+  type CredentialFormKind,
+} from "~/lib/credentialPayloadForm";
 import { cn } from "~/lib/utils";
 
 export function credentialsQueryKey(tenantId: string) {
   return ["control-plane", "tenants", tenantId, "credentials"] as const;
 }
 
-function parsePayload(value: string): Record<string, unknown> {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(value);
-  } catch {
-    throw new Error("Credential payload must be a valid JSON object.");
-  }
-  if (parsed === null || Array.isArray(parsed) || typeof parsed !== "object") {
-    throw new Error("Credential payload must be a JSON object.");
-  }
-  if (Object.keys(parsed).length === 0) {
-    throw new Error("Credential payload must not be empty.");
-  }
-  return parsed as Record<string, unknown>;
+export function credentialScopePolicyQueryKey(tenantId: string) {
+  return ["control-plane", "tenants", tenantId, "provider-credential-scope-policy"] as const;
 }
 
 function parseExpiry(value: string): string | null {
@@ -56,21 +54,56 @@ function parseExpiry(value: string): string | null {
 function credentialDescription(
   item: ControlPlaneCredential,
   organizationNames: ReadonlyMap<string, string>,
+  memberNames: ReadonlyMap<string, string>,
 ): string {
-  const scope = item.organizationId
-    ? (organizationNames.get(item.organizationId) ??
-      `Organization ${item.organizationId.slice(0, 8)}`)
-    : "All organizations";
+  let scope: string;
+  switch (item.scope) {
+    case "user":
+      scope = item.scopeUserId
+        ? `User ${memberNames.get(item.scopeUserId) ?? item.scopeUserId.slice(0, 8)}`
+        : "Invalid user scope";
+      break;
+    case "organization":
+      scope = item.organizationId
+        ? (organizationNames.get(item.organizationId) ??
+          `Organization ${item.organizationId.slice(0, 8)}`)
+        : "Invalid Organization scope";
+      break;
+    case "tenant": {
+      const selectors = [
+        item.selectorOrganizationId
+          ? (organizationNames.get(item.selectorOrganizationId) ??
+            `Organization ${item.selectorOrganizationId.slice(0, 8)}`)
+          : null,
+        item.selectorModel ? `model ${item.selectorModel}` : null,
+      ].filter((value): value is string => value !== null);
+      scope = selectors.length > 0 ? `Tenant · ${selectors.join(" · ")}` : "Tenant";
+      break;
+    }
+    case "platform":
+      scope = "Platform fallback";
+      break;
+  }
   const expiry = item.expiresAt
     ? `expires ${new Date(item.expiresAt).toLocaleString()}`
     : "no expiry";
-  if (item.purpose === "git") return `Git HTTPS token · ${scope} · ${expiry}`;
-  return `${item.provider} · ${item.credentialType.replaceAll("_", " ")} · ${scope} · ${expiry}`;
+  if (item.purpose === "git") {
+    return `Git ${item.credentialType === "ssh_key" ? "SSH key" : "HTTPS token"} · ${scope} · ${expiry}`;
+  }
+  if (item.purpose === "registry") {
+    return `OCI Registry · ${item.credentialType.replaceAll("_", " ")} · ${scope} · ${expiry}`;
+  }
+  if (item.purpose === "package") {
+    return `${item.provider} packages · ${item.credentialType.replaceAll("_", " ")} · ${scope} · ${expiry}`;
+  }
+  const automatic = item.autoSelectEnabled ? "automatic" : "explicit only";
+  return `${item.provider} · ${item.credentialType.replaceAll("_", " ")} · ${scope} · ${automatic} · ${expiry}`;
 }
 
 export function TenantCredentialSettingsSection(props: {
   tenantId: string;
   organizations: ReadonlyArray<ControlPlaneOrganization>;
+  members: ReadonlyArray<ControlPlaneTenantMember>;
 }) {
   const queryClient = useQueryClient();
   const credentials = useQuery({
@@ -78,52 +111,72 @@ export function TenantCredentialSettingsSection(props: {
     queryFn: () => controlPlaneClient.listCredentials(props.tenantId),
     retry: false,
   });
+  const scopePolicy = useQuery({
+    queryKey: credentialScopePolicyQueryKey(props.tenantId),
+    queryFn: () => controlPlaneClient.getProviderCredentialScopePolicy(props.tenantId),
+    retry: false,
+  });
   const organizationNames = useMemo(
     () => new Map(props.organizations.map((item) => [item.id, item.name])),
     [props.organizations],
   );
+  const memberNames = useMemo(
+    () => new Map(props.members.map((item) => [item.userId, item.displayName || item.email])),
+    [props.members],
+  );
   const [name, setName] = useState("");
-  const [purpose, setPurpose] = useState<ControlPlaneCredentialPurpose>("provider");
-  const [provider, setProvider] = useState("");
-  const [credentialType, setCredentialType] = useState("api_key");
+  const [createKind, setCreateKind] = useState<CredentialFormKind>("provider");
+  const [createDraft, setCreateDraft] = useState(() => createCredentialPayloadDraft("provider"));
+  const [scope, setScope] = useState<ControlPlaneCredentialScope>("tenant");
+  const [scopeUserId, setScopeUserId] = useState("");
   const [organizationId, setOrganizationId] = useState("");
+  const [selectorOrganizationId, setSelectorOrganizationId] = useState("");
+  const [selectorModel, setSelectorModel] = useState("");
+  const [autoSelectEnabled, setAutoSelectEnabled] = useState(false);
   const [expiresAt, setExpiresAt] = useState("");
-  const [createPayload, setCreatePayload] = useState("");
-  const [gitHost, setGitHost] = useState("");
-  const [gitUsername, setGitUsername] = useState("");
-  const [gitToken, setGitToken] = useState("");
   const [createPending, setCreatePending] = useState(false);
   const [createError, setCreateError] = useState<unknown>(null);
   const [rotateCredentialId, setRotateCredentialId] = useState("");
   const [rotateExpiresAt, setRotateExpiresAt] = useState("");
-  const [rotatePayload, setRotatePayload] = useState("");
-  const [rotateGitHost, setRotateGitHost] = useState("");
-  const [rotateGitUsername, setRotateGitUsername] = useState("");
-  const [rotateGitToken, setRotateGitToken] = useState("");
+  const [rotateDraft, setRotateDraft] = useState(() => createCredentialPayloadDraft("provider"));
   const [rotatePending, setRotatePending] = useState(false);
   const [rotateError, setRotateError] = useState<unknown>(null);
   const [revokePendingId, setRevokePendingId] = useState<string | null>(null);
   const [revokeError, setRevokeError] = useState<unknown>(null);
+  const [autoSelectPendingId, setAutoSelectPendingId] = useState<string | null>(null);
+  const [autoSelectError, setAutoSelectError] = useState<unknown>(null);
+  const [policyPending, setPolicyPending] = useState(false);
+  const [policyError, setPolicyError] = useState<unknown>(null);
 
   const activeCredentials = credentials.data?.items.filter((item) => item.revokedAt === null) ?? [];
   const selectedRotation = activeCredentials.find((item) => item.id === rotateCredentialId) ?? null;
+  const selectedRotationKind = selectedRotation
+    ? credentialFormKindForCredential(selectedRotation)
+    : null;
+  const createDescriptor = describeCredentialForm(createKind, createDraft);
 
   const create = async (event: FormEvent) => {
     event.preventDefault();
     setCreateError(null);
     setCreatePending(true);
+    const submittedKind = createKind;
     try {
-      const payload =
-        purpose === "git"
-          ? { host: gitHost, username: gitUsername, token: gitToken }
-          : parsePayload(createPayload);
+      const descriptor = describeCredentialForm(submittedKind, createDraft);
+      const payload = buildCredentialPayload(submittedKind, createDraft);
       const parsedExpiresAt = parseExpiry(expiresAt);
       const item = await controlPlaneClient.createCredential(props.tenantId, {
-        ...(organizationId ? { organizationId } : {}),
+        scope,
+        ...(scope === "user" && scopeUserId ? { scopeUserId } : {}),
+        ...(scope === "organization" && organizationId ? { organizationId } : {}),
+        ...(scope === "tenant" && selectorOrganizationId ? { selectorOrganizationId } : {}),
+        ...(scope === "tenant" && selectorModel.trim()
+          ? { selectorModel: selectorModel.trim() }
+          : {}),
+        ...(descriptor.purpose === "provider" ? { autoSelectEnabled } : {}),
         name,
-        purpose,
-        provider: purpose === "git" ? "git" : provider,
-        credentialType: purpose === "git" ? "https_token" : credentialType,
+        purpose: descriptor.purpose,
+        provider: descriptor.provider,
+        credentialType: descriptor.credentialType,
         payload,
         ...(parsedExpiresAt === null ? {} : { expiresAt: parsedExpiresAt }),
       });
@@ -132,15 +185,20 @@ export function TenantCredentialSettingsSection(props: {
         (current) => ({ items: [...(current?.items ?? []), item] }),
       );
       setName("");
-      setProvider("");
+      setScope("tenant");
+      setScopeUserId("");
+      setOrganizationId("");
+      setSelectorOrganizationId("");
+      setSelectorModel("");
+      setAutoSelectEnabled(false);
       setExpiresAt("");
-      setCreatePayload("");
-      setGitHost("");
-      setGitUsername("");
+      setCreateDraft(createCredentialPayloadDraft(submittedKind));
     } catch (error) {
       setCreateError(error);
     } finally {
-      setGitToken("");
+      if (submittedKind !== "provider") {
+        setCreateDraft((current) => clearCredentialSecrets(current));
+      }
       setCreatePending(false);
     }
   };
@@ -148,16 +206,13 @@ export function TenantCredentialSettingsSection(props: {
   const rotate = async (event: FormEvent) => {
     event.preventDefault();
     setRotateError(null);
-    if (!selectedRotation) {
+    if (!selectedRotation || !selectedRotationKind) {
       setRotateError(new Error("Select an active Credential to rotate."));
       return;
     }
     setRotatePending(true);
     try {
-      const payload =
-        selectedRotation.purpose === "git"
-          ? { host: rotateGitHost, username: rotateGitUsername, token: rotateGitToken }
-          : parsePayload(rotatePayload);
+      const payload = buildCredentialPayload(selectedRotationKind, rotateDraft);
       const item = await controlPlaneClient.rotateCredential(props.tenantId, selectedRotation.id, {
         expectedVersion: selectedRotation.version,
         payload,
@@ -171,14 +226,23 @@ export function TenantCredentialSettingsSection(props: {
           ),
         }),
       );
-      setRotatePayload("");
       setRotateExpiresAt("");
-      setRotateGitHost("");
-      setRotateGitUsername("");
+      const nextDraft = createCredentialPayloadDraft(selectedRotationKind);
+      setRotateDraft(
+        selectedRotationKind === "provider"
+          ? {
+              ...nextDraft,
+              provider: selectedRotation.provider,
+              credentialType: selectedRotation.credentialType,
+            }
+          : nextDraft,
+      );
     } catch (error) {
       setRotateError(error);
     } finally {
-      setRotateGitToken("");
+      if (selectedRotationKind !== "provider") {
+        setRotateDraft((current) => clearCredentialSecrets(current));
+      }
       setRotatePending(false);
     }
   };
@@ -196,10 +260,7 @@ export function TenantCredentialSettingsSection(props: {
       await credentials.refetch();
       if (rotateCredentialId === item.id) {
         setRotateCredentialId("");
-        setRotatePayload("");
-        setRotateGitHost("");
-        setRotateGitUsername("");
-        setRotateGitToken("");
+        setRotateDraft(createCredentialPayloadDraft("provider"));
       }
     } catch (error) {
       setRevokeError(error);
@@ -208,8 +269,94 @@ export function TenantCredentialSettingsSection(props: {
     }
   };
 
+  const setAutoSelect = async (item: ControlPlaneCredential) => {
+    setAutoSelectError(null);
+    setAutoSelectPendingId(item.id);
+    try {
+      const updated = await controlPlaneClient.setCredentialAutoSelect(
+        props.tenantId,
+        item.id,
+        !item.autoSelectEnabled,
+      );
+      queryClient.setQueryData<{ items: ReadonlyArray<ControlPlaneCredential> }>(
+        credentialsQueryKey(props.tenantId),
+        (current) => ({
+          items: (current?.items ?? []).map((existing) =>
+            existing.id === updated.id ? updated : existing,
+          ),
+        }),
+      );
+    } catch (error) {
+      setAutoSelectError(error);
+    } finally {
+      setAutoSelectPendingId(null);
+    }
+  };
+
+  const updateScopePolicy = async (
+    platformCredentialsEnabled: boolean,
+    platformCredentialAutoSelect: boolean,
+  ) => {
+    setPolicyError(null);
+    setPolicyPending(true);
+    try {
+      const updated = await controlPlaneClient.updateProviderCredentialScopePolicy(props.tenantId, {
+        platformCredentialsEnabled,
+        platformCredentialAutoSelect,
+      });
+      queryClient.setQueryData(credentialScopePolicyQueryKey(props.tenantId), updated);
+    } catch (error) {
+      setPolicyError(error);
+    } finally {
+      setPolicyPending(false);
+    }
+  };
+
   return (
     <SettingsSection title="Credentials">
+      <SettingsRow
+        title="Platform Credential policy"
+        description="Enterprise-only fallback. Tenant policy and each Credential must both opt in before automatic selection is allowed."
+      >
+        {scopePolicy.isPending ? (
+          <span className="text-xs text-muted-foreground">Loading policy…</span>
+        ) : scopePolicy.error ? (
+          <div>
+            <Button size="sm" variant="outline" onClick={() => void scopePolicy.refetch()}>
+              Retry
+            </Button>
+            <ControlPlaneInlineError error={scopePolicy.error} />
+          </div>
+        ) : (
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              disabled={policyPending}
+              size="sm"
+              variant="outline"
+              onClick={() =>
+                void updateScopePolicy(!scopePolicy.data!.platformCredentialsEnabled, false)
+              }
+            >
+              {scopePolicy.data!.platformCredentialsEnabled
+                ? "Disable Platform Credentials"
+                : "Enable Platform Credentials"}
+            </Button>
+            <Button
+              disabled={policyPending || !scopePolicy.data!.platformCredentialsEnabled}
+              size="sm"
+              variant="outline"
+              onClick={() =>
+                void updateScopePolicy(true, !scopePolicy.data!.platformCredentialAutoSelect)
+              }
+            >
+              {scopePolicy.data!.platformCredentialAutoSelect
+                ? "Disable automatic fallback"
+                : "Enable automatic fallback"}
+            </Button>
+            <ControlPlaneInlineError error={policyError} />
+          </div>
+        )}
+      </SettingsRow>
       {credentials.isPending ? <SettingsListRow title="Loading Credentials…" /> : null}
       {credentials.error ? (
         <SettingsListRow
@@ -226,24 +373,41 @@ export function TenantCredentialSettingsSection(props: {
         <SettingsListRow
           key={item.id}
           title={item.name}
-          description={credentialDescription(item, organizationNames)}
+          description={credentialDescription(item, organizationNames, memberNames)}
           actions={
             <span className="flex flex-wrap items-center justify-end gap-1.5">
               <span className="text-[10px] tabular-nums text-muted-foreground">
                 v{item.version}
               </span>
               <ControlPlaneStatusPill value={item.purpose} />
+              <ControlPlaneStatusPill value={item.scope} />
               <ControlPlaneStatusPill value={item.revokedAt ? "revoked" : "active"} />
               {item.revokedAt === null ? (
-                <Button
-                  className="text-destructive hover:text-destructive"
-                  disabled={revokePendingId === item.id}
-                  size="sm"
-                  variant="outline"
-                  onClick={() => void revoke(item)}
-                >
-                  {revokePendingId === item.id ? "Revoking…" : "Revoke"}
-                </Button>
+                <>
+                  {item.purpose === "provider" ? (
+                    <Button
+                      disabled={autoSelectPendingId === item.id}
+                      size="sm"
+                      variant="outline"
+                      onClick={() => void setAutoSelect(item)}
+                    >
+                      {autoSelectPendingId === item.id
+                        ? "Saving…"
+                        : item.autoSelectEnabled
+                          ? "Automatic on"
+                          : "Explicit only"}
+                    </Button>
+                  ) : null}
+                  <Button
+                    className="text-destructive hover:text-destructive"
+                    disabled={revokePendingId === item.id}
+                    size="sm"
+                    variant="outline"
+                    onClick={() => void revoke(item)}
+                  >
+                    {revokePendingId === item.id ? "Revoking…" : "Revoke"}
+                  </Button>
+                </>
               ) : null}
             </span>
           }
@@ -252,12 +416,18 @@ export function TenantCredentialSettingsSection(props: {
       {credentials.data?.items.length === 0 ? (
         <SettingsListRow
           title="No Credentials"
-          description="Add an encrypted Provider or Git Credential with tenant-wide or Organization scope."
+          description="Add an encrypted Provider, Git, Registry, or Package Credential with the narrowest usable scope."
+        />
+      ) : null}
+      {autoSelectError ? (
+        <SettingsListRow
+          title="Credential automatic selection update failed"
+          description={String(autoSelectError)}
         />
       ) : null}
       <SettingsRow
         title="Add encrypted Credential"
-        description="Provider and Git Credentials share the encrypted Vault but remain purpose-isolated at Project, Session, and Worker boundaries."
+        description="Provider, Git, Registry, and Package Credentials share the encrypted Vault but remain purpose-isolated at Session, Project, stage, and Worker boundaries."
       >
         <form
           className={CONTROL_PLANE_FORM_GRID_CLASS_NAME}
@@ -266,82 +436,138 @@ export function TenantCredentialSettingsSection(props: {
           <ControlPlaneFormField label="Name">
             <Input required value={name} onChange={(event) => setName(event.target.value)} />
           </ControlPlaneFormField>
-          <ControlPlaneFormField label="Purpose">
+          <ControlPlaneFormField label="Credential kind">
             <select
               className={CONTROL_PLANE_NATIVE_SELECT_CLASS_NAME}
-              value={purpose}
+              disabled={createPending}
+              value={createKind}
               onChange={(event) => {
-                const nextPurpose = event.target.value as ControlPlaneCredentialPurpose;
-                setPurpose(nextPurpose);
-                setCreatePayload("");
-                setGitToken("");
-                if (nextPurpose === "provider") {
-                  setProvider("");
-                  setCredentialType("api_key");
-                }
+                const nextKind = event.target.value as CredentialFormKind;
+                setCreateKind(nextKind);
+                setCreateDraft(createCredentialPayloadDraft(nextKind));
+                setScope("tenant");
+                setScopeUserId("");
+                setOrganizationId("");
+                setSelectorOrganizationId("");
+                setSelectorModel("");
+                setAutoSelectEnabled(false);
               }}
             >
-              <option value="provider">Provider runtime</option>
-              <option value="git">Private HTTPS Git</option>
-            </select>
-          </ControlPlaneFormField>
-          {purpose === "provider" ? (
-            <>
-              <ControlPlaneFormField label="Provider">
-                <Input
-                  autoCapitalize="none"
-                  placeholder="openai"
-                  required
-                  value={provider}
-                  onChange={(event) => setProvider(event.target.value.toLowerCase())}
-                />
-              </ControlPlaneFormField>
-              <ControlPlaneFormField label="Credential type">
-                <Input
-                  autoCapitalize="none"
-                  placeholder="api_key"
-                  required
-                  value={credentialType}
-                  onChange={(event) => setCredentialType(event.target.value.toLowerCase())}
-                />
-              </ControlPlaneFormField>
-            </>
-          ) : (
-            <>
-              <ControlPlaneFormField label="Git host">
-                <Input
-                  autoCapitalize="none"
-                  placeholder="github.com"
-                  required
-                  value={gitHost}
-                  onChange={(event) => setGitHost(event.target.value.toLowerCase())}
-                />
-              </ControlPlaneFormField>
-              <ControlPlaneFormField label="Git username">
-                <Input
-                  autoCapitalize="none"
-                  placeholder="x-access-token"
-                  required
-                  value={gitUsername}
-                  onChange={(event) => setGitUsername(event.target.value)}
-                />
-              </ControlPlaneFormField>
-            </>
-          )}
-          <ControlPlaneFormField label="Scope">
-            <select
-              className={CONTROL_PLANE_NATIVE_SELECT_CLASS_NAME}
-              value={organizationId}
-              onChange={(event) => setOrganizationId(event.target.value)}
-            >
-              <option value="">All organizations in this tenant</option>
-              {props.organizations.map((organization) => (
-                <option key={organization.id} value={organization.id}>
-                  {organization.name}
+              {CREDENTIAL_FORM_KIND_OPTIONS.map((option) => (
+                <option key={option.kind} value={option.kind}>
+                  {option.label}
                 </option>
               ))}
             </select>
           </ControlPlaneFormField>
+          <CredentialPayloadFields
+            draft={createDraft}
+            kind={createKind}
+            mode="create"
+            onChange={setCreateDraft}
+          />
+          <ControlPlaneFormField label="Scope">
+            <select
+              className={CONTROL_PLANE_NATIVE_SELECT_CLASS_NAME}
+              value={scope}
+              onChange={(event) => {
+                setScope(event.target.value as ControlPlaneCredentialScope);
+                setScopeUserId("");
+                setOrganizationId("");
+                setSelectorOrganizationId("");
+                setSelectorModel("");
+              }}
+            >
+              {createDescriptor.purpose === "provider" ? <option value="user">User</option> : null}
+              <option value="organization">Organization</option>
+              <option value="tenant">Tenant</option>
+              {createDescriptor.purpose === "provider" ? (
+                <option value="platform">Platform fallback</option>
+              ) : null}
+            </select>
+          </ControlPlaneFormField>
+          {scope === "user" ? (
+            <ControlPlaneFormField label="User">
+              <select
+                className={CONTROL_PLANE_NATIVE_SELECT_CLASS_NAME}
+                required
+                value={scopeUserId}
+                onChange={(event) => setScopeUserId(event.target.value)}
+              >
+                <option value="">Select an active Tenant member</option>
+                {props.members
+                  .filter((member) => member.status === "active")
+                  .map((member) => (
+                    <option key={member.userId} value={member.userId}>
+                      {member.displayName || member.email}
+                    </option>
+                  ))}
+              </select>
+            </ControlPlaneFormField>
+          ) : null}
+          {scope === "organization" ? (
+            <ControlPlaneFormField label="Organization">
+              <select
+                className={CONTROL_PLANE_NATIVE_SELECT_CLASS_NAME}
+                required
+                value={organizationId}
+                onChange={(event) => setOrganizationId(event.target.value)}
+              >
+                <option value="">Select an Organization</option>
+                {props.organizations.map((organization) => (
+                  <option key={organization.id} value={organization.id}>
+                    {organization.name}
+                  </option>
+                ))}
+              </select>
+            </ControlPlaneFormField>
+          ) : null}
+          {scope === "tenant" && createDescriptor.purpose === "provider" ? (
+            <>
+              <ControlPlaneFormField label="Organization selector (optional)">
+                <select
+                  className={CONTROL_PLANE_NATIVE_SELECT_CLASS_NAME}
+                  value={selectorOrganizationId}
+                  onChange={(event) => setSelectorOrganizationId(event.target.value)}
+                >
+                  <option value="">Any Organization</option>
+                  {props.organizations.map((organization) => (
+                    <option key={organization.id} value={organization.id}>
+                      {organization.name}
+                    </option>
+                  ))}
+                </select>
+              </ControlPlaneFormField>
+              <ControlPlaneFormField label="Model selector (optional)">
+                <Input
+                  autoCapitalize="none"
+                  placeholder="gpt-5.6"
+                  value={selectorModel}
+                  onChange={(event) => setSelectorModel(event.target.value)}
+                />
+              </ControlPlaneFormField>
+            </>
+          ) : null}
+          {scope === "platform" ? (
+            <div className="text-xs text-muted-foreground sm:col-span-2">
+              Platform scope requires an enterprise installation, an enterprise Tenant plan, and the
+              explicit policy above. It is still Tenant-owned and never shared across Tenant
+              boundaries.
+            </div>
+          ) : null}
+          {createDescriptor.purpose === "provider" ? (
+            <label className="flex items-center gap-2 text-xs text-muted-foreground sm:col-span-2">
+              <input
+                checked={autoSelectEnabled}
+                type="checkbox"
+                onChange={(event) => setAutoSelectEnabled(event.target.checked)}
+              />
+              <span>
+                Allow automatic selection. Explicit Session binding always takes precedence;
+                ambiguous Credentials at the same scope fail closed.
+              </span>
+            </label>
+          ) : null}
           <ControlPlaneFormField label="Expiry (optional)">
             <Input
               type="datetime-local"
@@ -349,30 +575,6 @@ export function TenantCredentialSettingsSection(props: {
               onChange={(event) => setExpiresAt(event.target.value)}
             />
           </ControlPlaneFormField>
-          <div className="sm:col-span-2">
-            {purpose === "provider" ? (
-              <ControlPlaneFormField label="Secret JSON payload">
-                <Textarea
-                  autoComplete="off"
-                  placeholder={'{"apiKey":"…"}'}
-                  required
-                  spellCheck={false}
-                  value={createPayload}
-                  onChange={(event) => setCreatePayload(event.target.value)}
-                />
-              </ControlPlaneFormField>
-            ) : (
-              <ControlPlaneFormField label="Git access token">
-                <Input
-                  autoComplete="new-password"
-                  required
-                  type="password"
-                  value={gitToken}
-                  onChange={(event) => setGitToken(event.target.value)}
-                />
-              </ControlPlaneFormField>
-            )}
-          </div>
           <div className="sm:col-span-2">
             <Button disabled={createPending} size="sm" type="submit">
               {createPending ? "Encrypting…" : "Add Credential"}
@@ -396,11 +598,21 @@ export function TenantCredentialSettingsSection(props: {
                 required
                 value={rotateCredentialId}
                 onChange={(event) => {
-                  setRotateCredentialId(event.target.value);
-                  setRotatePayload("");
-                  setRotateGitHost("");
-                  setRotateGitUsername("");
-                  setRotateGitToken("");
+                  const credentialId = event.target.value;
+                  setRotateCredentialId(credentialId);
+                  setRotateExpiresAt("");
+                  const credential = activeCredentials.find((item) => item.id === credentialId);
+                  const kind = credential ? credentialFormKindForCredential(credential) : null;
+                  const nextDraft = createCredentialPayloadDraft(kind ?? "provider");
+                  setRotateDraft(
+                    credential?.purpose === "provider"
+                      ? {
+                          ...nextDraft,
+                          provider: credential.provider,
+                          credentialType: credential.credentialType,
+                        }
+                      : nextDraft,
+                  );
                 }}
               >
                 <option value="">Select a Credential</option>
@@ -418,53 +630,25 @@ export function TenantCredentialSettingsSection(props: {
                 onChange={(event) => setRotateExpiresAt(event.target.value)}
               />
             </ControlPlaneFormField>
-            {selectedRotation?.purpose === "git" ? (
-              <>
-                <ControlPlaneFormField label="Git host (unchanged)">
-                  <Input
-                    autoCapitalize="none"
-                    placeholder="github.com"
-                    required
-                    value={rotateGitHost}
-                    onChange={(event) => setRotateGitHost(event.target.value.toLowerCase())}
-                  />
-                </ControlPlaneFormField>
-                <ControlPlaneFormField label="Git username">
-                  <Input
-                    autoCapitalize="none"
-                    required
-                    value={rotateGitUsername}
-                    onChange={(event) => setRotateGitUsername(event.target.value)}
-                  />
-                </ControlPlaneFormField>
-                <div className="sm:col-span-2">
-                  <ControlPlaneFormField label="Replacement Git access token">
-                    <Input
-                      autoComplete="new-password"
-                      required
-                      type="password"
-                      value={rotateGitToken}
-                      onChange={(event) => setRotateGitToken(event.target.value)}
-                    />
-                  </ControlPlaneFormField>
-                </div>
-              </>
-            ) : (
-              <div className="sm:col-span-2">
-                <ControlPlaneFormField label="Replacement secret JSON payload">
-                  <Textarea
-                    autoComplete="off"
-                    placeholder={'{"apiKey":"…"}'}
-                    required
-                    spellCheck={false}
-                    value={rotatePayload}
-                    onChange={(event) => setRotatePayload(event.target.value)}
-                  />
-                </ControlPlaneFormField>
-              </div>
-            )}
+            {selectedRotationKind ? (
+              <CredentialPayloadFields
+                draft={rotateDraft}
+                kind={selectedRotationKind}
+                mode="rotate"
+                onChange={setRotateDraft}
+              />
+            ) : selectedRotation ? (
+              <p className="text-xs text-destructive sm:col-span-2">
+                This Credential uses an unsupported purpose/type combination and cannot be rotated
+                from this client.
+              </p>
+            ) : null}
             <div className={cn("sm:col-span-2", !selectedRotation && "text-muted-foreground")}>
-              <Button disabled={rotatePending || !selectedRotation} size="sm" type="submit">
+              <Button
+                disabled={rotatePending || !selectedRotation || !selectedRotationKind}
+                size="sm"
+                type="submit"
+              >
                 {rotatePending ? "Rotating…" : "Rotate Credential"}
               </Button>
               <ControlPlaneInlineError error={rotateError ?? revokeError} />

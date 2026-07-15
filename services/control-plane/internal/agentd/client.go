@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"net/url"
 	"os"
@@ -23,11 +24,36 @@ import (
 )
 
 type Client struct {
-	baseURL           *url.URL
-	http              *http.Client
-	uploadHTTP        *http.Client
-	registrationToken string
-	workerToken       string
+	baseURL                      *url.URL
+	http                         *http.Client
+	uploadHTTP                   *http.Client
+	registrationToken            string
+	workerToken                  string
+	artifactIdempotencySupported bool
+}
+
+type controlPlaneProblem struct {
+	Code    string
+	Status  int
+	Message string
+}
+
+func (e *controlPlaneProblem) Error() string {
+	if strings.TrimSpace(e.Code) != "" && strings.TrimSpace(e.Message) != "" {
+		return fmt.Sprintf("control plane %s (%d): %s", e.Code, e.Status, e.Message)
+	}
+	if strings.TrimSpace(e.Code) != "" {
+		return fmt.Sprintf("control plane %s (%d)", e.Code, e.Status)
+	}
+	return fmt.Sprintf("control plane request failed with status %d", e.Status)
+}
+
+func isWorkerRevocationError(err error) bool {
+	var problem *controlPlaneProblem
+	if !errors.As(err, &problem) {
+		return false
+	}
+	return problem.Code == "worker_token_revoked" || problem.Code == "worker_identity_revoked"
 }
 
 func NewClient(cfg Config) *Client {
@@ -39,7 +65,7 @@ func NewClient(cfg Config) *Client {
 
 func (c *Client) Register(ctx context.Context, cfg Config) (executions.RegisteredWorker, error) {
 	var output executions.RegisteredWorker
-	err := c.doJSON(ctx, http.MethodPost, "/v1/workers/register", c.registrationToken, "", executions.RegisterWorkerInput{
+	headers, err := c.doJSONResponse(ctx, http.MethodPost, "/v1/workers/register", c.registrationToken, "", executions.RegisterWorkerInput{
 		ExecutionTargetID: cfg.ExecutionTargetID, TargetKind: string(cfg.TargetKind),
 		ClusterID: cfg.ClusterID, Namespace: cfg.Namespace, PodName: cfg.PodName, InstanceUID: cfg.InstanceUID,
 		Version: cfg.Version, ProtocolVersion: executions.WorkerProtocolVersion,
@@ -49,6 +75,8 @@ func (c *Client) Register(ctx context.Context, cfg Config) (executions.Registere
 		return executions.RegisteredWorker{}, err
 	}
 	c.workerToken = output.Token
+	c.artifactIdempotencySupported =
+		headers.Get(artifacts.WorkerIdempotencyFeatureHeader) == artifacts.WorkerIdempotencyFeatureHeaderValue
 	return output, nil
 }
 
@@ -254,26 +282,6 @@ func (c *Client) ResolveCredential(
 	return output, err
 }
 
-func (c *Client) ResolveGitCredential(
-	ctx context.Context,
-	executionID, credentialID uuid.UUID,
-	lease executions.Lease,
-) (RunnerGitCredential, error) {
-	var output RunnerGitCredential
-	err := c.doJSON(
-		ctx,
-		http.MethodPost,
-		executionPath(executionID, "git-credentials/"+credentialID.String()+"/resolve"),
-		c.workerToken,
-		uuid.NewString(),
-		executions.LeaseInput{
-			TenantID: lease.TenantID, Generation: lease.Generation, LeaseToken: lease.LeaseToken,
-		},
-		&output,
-	)
-	return output, err
-}
-
 func (c *Client) Renew(ctx context.Context, executionID uuid.UUID, lease executions.Lease) error {
 	return c.executionRequest(ctx, executionID, "renew", executions.RenewLeaseInput{LeaseInput: executions.LeaseInput{
 		TenantID: lease.TenantID, Generation: lease.Generation, LeaseToken: lease.LeaseToken,
@@ -424,6 +432,15 @@ func (c *Client) updateControlCommandDelivery(
 		trimmed := strings.TrimSpace(value)
 		providerResumeCursor = &trimmed
 	}
+	deliveryResult := result
+	if result != nil {
+		deliveryResult = make(map[string]any, len(result))
+		for key, value := range result {
+			if key != "providerResumeCursor" {
+				deliveryResult[key] = value
+			}
+		}
+	}
 	return c.doJSON(
 		ctx, http.MethodPost,
 		executionPath(executionID, "control-commands/"+delivery.ControlCommandID.String()+"/"+status),
@@ -431,7 +448,7 @@ func (c *Client) updateControlCommandDelivery(
 			LeaseInput: executions.LeaseInput{
 				TenantID: lease.TenantID, Generation: lease.Generation, LeaseToken: lease.LeaseToken,
 			},
-			CommandID: delivery.CommandID, ProviderResumeCursor: providerResumeCursor, Result: result,
+			CommandID: delivery.CommandID, ProviderResumeCursor: providerResumeCursor, Result: deliveryResult,
 		}, nil,
 	)
 }
@@ -464,10 +481,27 @@ func (c *Client) Fail(ctx context.Context, executionID uuid.UUID, lease executio
 }
 
 func (c *Client) Release(ctx context.Context, executionID uuid.UUID, lease executions.Lease, reason string) error {
-	return c.executionRequest(ctx, executionID, "release", executions.ReleaseLeaseInput{
+	input := executions.ReleaseLeaseInput{
 		LeaseInput: executions.LeaseInput{TenantID: lease.TenantID, Generation: lease.Generation, LeaseToken: lease.LeaseToken},
 		Reason:     reason,
-	}, nil)
+	}
+	requestID := executionLifecycleRequestID(executionID, lease, "release", reason)
+	return retryCheckpointOperation(ctx, func() error {
+		return c.doJSON(
+			ctx, http.MethodPost, executionPath(executionID, "release"), c.workerToken, requestID, input, nil,
+		)
+	})
+}
+
+func executionLifecycleRequestID(
+	executionID uuid.UUID,
+	lease executions.Lease,
+	operation, detail string,
+) string {
+	digest := sha256.Sum256([]byte(strings.Join([]string{
+		executionID.String(), fmt.Sprintf("%d", lease.Generation), operation, detail,
+	}, "\x00")))
+	return "execution-" + operation + "-" + hex.EncodeToString(digest[:16])
 }
 
 func (c *Client) UploadArtifact(
@@ -477,9 +511,51 @@ func (c *Client) UploadArtifact(
 	artifact RunnerArtifact,
 	absolutePath string,
 ) (artifacts.Artifact, error) {
-	return c.uploadArtifactAttempt(
-		ctx, executionID, lease, artifact, absolutePath, nil, uuid.NewString(), uuid.NewString(),
-	)
+	source, err := openRegularArtifactSource(absolutePath)
+	if err != nil {
+		return artifacts.Artifact{}, fmt.Errorf("open runner artifact: %w", err)
+	}
+	defer source.Close()
+	return c.uploadArtifactSource(ctx, executionID, lease, artifact, source)
+}
+
+func (c *Client) uploadArtifactSource(
+	ctx context.Context,
+	executionID uuid.UUID,
+	lease executions.Lease,
+	artifact RunnerArtifact,
+	source *artifactUploadSource,
+) (artifacts.Artifact, error) {
+	contentType, err := normalizeRunnerArtifactContentType(artifact.ContentType)
+	if err != nil {
+		return artifacts.Artifact{}, err
+	}
+	artifact.ContentType = contentType
+	identity, err := inspectArtifactUploadIdentity(ctx, executionID, lease, artifact, source)
+	if err != nil {
+		return artifacts.Artifact{}, err
+	}
+	var lastErr error
+	createRequestID := artifactRequestID(executionID, lease, identity.IdempotencyKey, "create")
+	completeRequestID := artifactRequestID(executionID, lease, identity.IdempotencyKey, "complete")
+	maximumAttempts := 1
+	if c.artifactIdempotencySupported {
+		maximumAttempts = 3
+	}
+	for attempt := 1; attempt <= maximumAttempts; attempt++ {
+		artifact, err := c.uploadArtifactAttempt(
+			ctx, executionID, lease, artifact, source, nil, &identity,
+			createRequestID, completeRequestID,
+		)
+		if err == nil {
+			return artifact, nil
+		}
+		lastErr = err
+		if ctx.Err() != nil {
+			break
+		}
+	}
+	return artifacts.Artifact{}, lastErr
 }
 
 func (c *Client) UploadCheckpointArtifact(
@@ -489,16 +565,38 @@ func (c *Client) UploadCheckpointArtifact(
 	checkpoint executions.WorkspaceCheckpoint,
 	candidate WorkspaceCheckpointCandidate,
 ) (artifacts.Artifact, error) {
+	contentType, err := normalizeRunnerArtifactContentType(candidate.Artifact.ContentType)
+	if err != nil {
+		return artifacts.Artifact{}, err
+	}
+	artifact := *candidate.Artifact
+	artifact.ContentType = contentType
+	source, err := openRegularArtifactSource(candidate.ArtifactPath)
+	if err != nil {
+		return artifacts.Artifact{}, fmt.Errorf("open Workspace Checkpoint Artifact: %w", err)
+	}
+	defer source.Close()
+	uploadSource := source
+	cleanupUploadSource := func() {}
+	if guard := executionSecretGuardFromContext(ctx); guard != nil {
+		uploadSource, cleanupUploadSource, err = guardedArtifactUploadSource(
+			ctx, guard, artifact.ContentType, source,
+		)
+		if err != nil {
+			return artifacts.Artifact{}, err
+		}
+	}
+	defer cleanupUploadSource()
 	var lastErr error
 	createRequestID := checkpointRequestID(executionID, lease, candidate.IdempotencyKey, "artifact-create")
 	completeRequestID := checkpointRequestID(executionID, lease, candidate.IdempotencyKey, "artifact-complete")
 	for attempt := 1; attempt <= 3; attempt++ {
-		artifact, err := c.uploadArtifactAttempt(
-			ctx, executionID, lease, *candidate.Artifact, candidate.ArtifactPath,
-			&checkpoint.ID, createRequestID, completeRequestID,
+		completed, err := c.uploadArtifactAttempt(
+			ctx, executionID, lease, artifact, uploadSource,
+			&checkpoint.ID, nil, createRequestID, completeRequestID,
 		)
 		if err == nil {
-			return artifact, nil
+			return completed, nil
 		}
 		lastErr = err
 		if ctx.Err() != nil {
@@ -513,20 +611,28 @@ func (c *Client) uploadArtifactAttempt(
 	executionID uuid.UUID,
 	lease executions.Lease,
 	artifact RunnerArtifact,
-	absolutePath string,
+	source *artifactUploadSource,
 	checkpointID *uuid.UUID,
+	identity *artifactUploadIdentity,
 	createRequestID, completeRequestID string,
 ) (artifacts.Artifact, error) {
 	var grant artifacts.UploadGrant
-	err := c.doJSON(ctx, http.MethodPost, executionPath(executionID, "artifacts"), c.workerToken, createRequestID, artifacts.WorkerCreateInput{
+	var idempotencyKey *string
+	requestHeaders := make(http.Header)
+	if identity != nil && c.artifactIdempotencySupported {
+		idempotencyKey = &identity.IdempotencyKey
+		requestHeaders.Set(artifacts.WorkerIdempotencyKeyHeader, identity.IdempotencyKey)
+	}
+	err := c.doJSONWithHeaders(ctx, http.MethodPost, executionPath(executionID, "artifacts"), c.workerToken, createRequestID, requestHeaders, artifacts.WorkerCreateInput{
 		TenantID: lease.TenantID, Generation: lease.Generation, LeaseToken: lease.LeaseToken,
-		CheckpointID: checkpointID, Kind: artifact.Kind, OriginalName: optionalName(artifact.OriginalName),
+		CheckpointID: checkpointID, IdempotencyKey: idempotencyKey,
+		Kind: artifact.Kind, OriginalName: optionalName(artifact.OriginalName),
 	}, &grant)
 	if err != nil {
 		return artifacts.Artifact{}, err
 	}
 	if grant.Artifact.Status == "ready" {
-		if err := verifyReadyArtifactFile(absolutePath, artifact.ContentType, grant.Artifact); err != nil {
+		if err := verifyReadyArtifactSource(ctx, source, artifact.ContentType, grant.Artifact); err != nil {
 			return artifacts.Artifact{}, err
 		}
 		return grant.Artifact, nil
@@ -534,23 +640,21 @@ func (c *Client) uploadArtifactAttempt(
 	if strings.TrimSpace(grant.URL) == "" || strings.TrimSpace(grant.Method) == "" {
 		return artifacts.Artifact{}, errors.New("control plane returned a pending Artifact without an upload grant")
 	}
-	file, err := os.Open(absolutePath)
+	info, err := source.rewind()
 	if err != nil {
-		return artifacts.Artifact{}, fmt.Errorf("open runner artifact: %w", err)
+		return artifacts.Artifact{}, fmt.Errorf("rewind runner artifact: %w", err)
 	}
-	defer file.Close()
-	info, err := file.Stat()
-	if err != nil {
-		return artifacts.Artifact{}, fmt.Errorf("stat runner artifact: %w", err)
+	if identity != nil && info.Size() != identity.SizeBytes {
+		return artifacts.Artifact{}, errors.New("runner artifact changed after its upload identity was calculated")
 	}
 	hash := sha256.New()
 	uploadURL, err := c.resolveURL(grant.URL)
 	if err != nil {
-		return artifacts.Artifact{}, err
+		return artifacts.Artifact{}, errors.New("control plane returned an invalid Artifact upload URL")
 	}
-	request, err := http.NewRequestWithContext(ctx, grant.Method, uploadURL.String(), io.TeeReader(file, hash))
+	request, err := http.NewRequestWithContext(ctx, grant.Method, uploadURL.String(), io.TeeReader(source.file, hash))
 	if err != nil {
-		return artifacts.Artifact{}, err
+		return artifacts.Artifact{}, errors.New("control plane returned an invalid Artifact upload request")
 	}
 	request.ContentLength = info.Size()
 	for name, value := range grant.Headers {
@@ -559,45 +663,130 @@ func (c *Client) uploadArtifactAttempt(
 	request.Header.Set("Content-Type", artifact.ContentType)
 	response, err := c.uploadHTTP.Do(request)
 	if err != nil {
-		return artifacts.Artifact{}, fmt.Errorf("upload runner artifact: %w", err)
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return artifacts.Artifact{}, fmt.Errorf("upload runner Artifact: %w", ctxErr)
+		}
+		return artifacts.Artifact{}, fmt.Errorf(
+			"upload runner Artifact to %s failed", safeArtifactUploadTarget(uploadURL),
+		)
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return artifacts.Artifact{}, responseError(response)
+		return artifacts.Artifact{}, fmt.Errorf(
+			"upload runner Artifact to %s failed with status %d",
+			safeArtifactUploadTarget(uploadURL), response.StatusCode,
+		)
+	}
+	digest := hex.EncodeToString(hash.Sum(nil))
+	if identity != nil && digest != identity.SHA256 {
+		return artifacts.Artifact{}, errors.New("runner artifact changed while it was being uploaded")
 	}
 	var completed artifacts.Artifact
 	err = c.doJSONUsing(ctx, c.uploadHTTP, http.MethodPost, executionPath(executionID, "artifacts/"+grant.Artifact.ID.String()+"/complete"), c.workerToken, completeRequestID, artifacts.WorkerCompleteInput{
 		TenantID: lease.TenantID, Generation: lease.Generation, LeaseToken: lease.LeaseToken,
 		CompleteInput: artifacts.CompleteInput{
-			SizeBytes: info.Size(), SHA256: hex.EncodeToString(hash.Sum(nil)), ContentType: artifact.ContentType,
+			SizeBytes: info.Size(), SHA256: digest, ContentType: artifact.ContentType,
 		},
 	}, &completed)
 	return completed, err
 }
 
-func verifyReadyArtifactFile(absolutePath, contentType string, ready artifacts.Artifact) error {
-	if ready.SizeBytes == nil || ready.SHA256 == nil || ready.ContentType == nil {
-		return errors.New("ready Checkpoint Artifact is missing verification metadata")
-	}
-	file, err := os.Open(absolutePath)
+type artifactUploadIdentity struct {
+	IdempotencyKey string
+	SizeBytes      int64
+	SHA256         string
+}
+
+func inspectArtifactUploadIdentity(
+	ctx context.Context,
+	executionID uuid.UUID,
+	lease executions.Lease,
+	artifact RunnerArtifact,
+	source *artifactUploadSource,
+) (artifactUploadIdentity, error) {
+	info, err := source.rewind()
 	if err != nil {
-		return fmt.Errorf("open ready Checkpoint Artifact source: %w", err)
-	}
-	defer file.Close()
-	info, err := file.Stat()
-	if err != nil {
-		return fmt.Errorf("stat ready Checkpoint Artifact source: %w", err)
+		return artifactUploadIdentity{}, fmt.Errorf("rewind runner artifact: %w", err)
 	}
 	hash := sha256.New()
-	written, err := io.Copy(hash, file)
+	written, err := copyWithContext(ctx, hash, source.file)
 	if err != nil {
-		return fmt.Errorf("hash ready Checkpoint Artifact source: %w", err)
+		return artifactUploadIdentity{}, fmt.Errorf("runner artifact could not be hashed for stable upload identity: %w", err)
+	}
+	if written != info.Size() {
+		return artifactUploadIdentity{}, errors.New("runner artifact could not be hashed for stable upload identity")
+	}
+	digest := hex.EncodeToString(hash.Sum(nil))
+	seed := strings.Join([]string{
+		executionID.String(), fmt.Sprintf("%d", lease.Generation), artifact.Path, artifact.Kind,
+		artifact.OriginalName, artifact.ContentType, fmt.Sprintf("%d", info.Size()), digest,
+	}, "\x00")
+	idempotencyDigest := sha256.Sum256([]byte(seed))
+	return artifactUploadIdentity{
+		IdempotencyKey: "artifact-" + hex.EncodeToString(idempotencyDigest[:]),
+		SizeBytes:      info.Size(), SHA256: digest,
+	}, nil
+}
+
+func artifactRequestID(
+	executionID uuid.UUID,
+	lease executions.Lease,
+	idempotencyKey, operation string,
+) string {
+	digest := sha256.Sum256([]byte(strings.Join([]string{
+		executionID.String(), fmt.Sprintf("%d", lease.Generation), idempotencyKey, operation,
+	}, "\x00")))
+	return "artifact-" + operation + "-" + hex.EncodeToString(digest[:16])
+}
+
+func verifyReadyArtifactFile(absolutePath, contentType string, ready artifacts.Artifact) error {
+	source, err := openRegularArtifactSource(absolutePath)
+	if err != nil {
+		return fmt.Errorf("open ready Artifact source: %w", err)
+	}
+	defer source.Close()
+	normalized, err := normalizeRunnerArtifactContentType(contentType)
+	if err != nil {
+		return err
+	}
+	return verifyReadyArtifactSource(context.Background(), source, normalized, ready)
+}
+
+func verifyReadyArtifactSource(
+	ctx context.Context,
+	source *artifactUploadSource,
+	contentType string,
+	ready artifacts.Artifact,
+) error {
+	if ready.SizeBytes == nil || ready.SHA256 == nil || ready.ContentType == nil {
+		return errors.New("ready Artifact is missing verification metadata")
+	}
+	info, err := source.rewind()
+	if err != nil {
+		return fmt.Errorf("rewind ready Artifact source: %w", err)
+	}
+	hash := sha256.New()
+	written, err := copyWithContext(ctx, hash, source.file)
+	if err != nil {
+		return fmt.Errorf("hash ready Artifact source: %w", err)
 	}
 	if info.Size() != *ready.SizeBytes || written != *ready.SizeBytes ||
 		hex.EncodeToString(hash.Sum(nil)) != *ready.SHA256 || contentType != *ready.ContentType {
-		return errors.New("ready Checkpoint Artifact does not match the current local payload")
+		return errors.New("ready Artifact does not match the current local payload")
 	}
 	return nil
+}
+
+func normalizeRunnerArtifactContentType(value string) (string, error) {
+	mediaType, parameters, err := mime.ParseMediaType(strings.TrimSpace(value))
+	if err != nil || len(mediaType) > 200 {
+		return "", errors.New("runner artifact Content-Type is invalid")
+	}
+	normalized := mime.FormatMediaType(strings.ToLower(mediaType), parameters)
+	if normalized == "" || len(normalized) > 255 {
+		return "", errors.New("runner artifact Content-Type is invalid")
+	}
+	return normalized, nil
 }
 
 func (c *Client) CreateWorkspaceCheckpoint(
@@ -656,6 +845,7 @@ func (c *Client) MarkWorkspaceCheckpointFailed(
 	checkpoint executions.WorkspaceCheckpoint,
 	failure error,
 ) error {
+	failure = sanitizeExecutionContextError(ctx, failure)
 	message := strings.TrimSpace(failure.Error())
 	if len(message) > 10_000 {
 		message = message[:10_000]
@@ -671,6 +861,18 @@ func (c *Client) MarkWorkspaceCheckpointFailed(
 	return retryCheckpointOperation(ctx, func() error {
 		return c.doJSON(ctx, http.MethodPost, requestPath, c.workerToken, requestID, input, nil)
 	})
+}
+
+func safeArtifactUploadTarget(value *url.URL) string {
+	if value == nil {
+		return "the granted target"
+	}
+	safe := *value
+	safe.User = nil
+	safe.RawQuery = ""
+	safe.ForceQuery = false
+	safe.Fragment = ""
+	return safe.String()
 }
 
 func retryCheckpointOperation(ctx context.Context, operation func() error) error {
@@ -772,25 +974,64 @@ func executionPath(executionID uuid.UUID, suffix string) string {
 }
 
 func (c *Client) doJSON(ctx context.Context, method, requestPath, bearer, requestID string, input, output any) error {
-	return c.doJSONUsing(ctx, c.http, method, requestPath, bearer, requestID, input, output)
+	return c.doJSONWithHeaders(ctx, method, requestPath, bearer, requestID, nil, input, output)
+}
+
+func (c *Client) doJSONResponse(
+	ctx context.Context,
+	method, requestPath, bearer, requestID string,
+	input, output any,
+) (http.Header, error) {
+	return c.doJSONUsingHeadersResponse(ctx, c.http, method, requestPath, bearer, requestID, nil, input, output)
+}
+
+func (c *Client) doJSONWithHeaders(
+	ctx context.Context,
+	method, requestPath, bearer, requestID string,
+	headers http.Header,
+	input, output any,
+) error {
+	_, err := c.doJSONUsingHeadersResponse(ctx, c.http, method, requestPath, bearer, requestID, headers, input, output)
+	return err
 }
 
 func (c *Client) doJSONUsing(ctx context.Context, client *http.Client, method, requestPath, bearer, requestID string, input, output any) error {
+	return c.doJSONUsingHeaders(ctx, client, method, requestPath, bearer, requestID, nil, input, output)
+}
+
+func (c *Client) doJSONUsingHeaders(
+	ctx context.Context,
+	client *http.Client,
+	method, requestPath, bearer, requestID string,
+	headers http.Header,
+	input, output any,
+) error {
+	_, err := c.doJSONUsingHeadersResponse(ctx, client, method, requestPath, bearer, requestID, headers, input, output)
+	return err
+}
+
+func (c *Client) doJSONUsingHeadersResponse(
+	ctx context.Context,
+	client *http.Client,
+	method, requestPath, bearer, requestID string,
+	headers http.Header,
+	input, output any,
+) (http.Header, error) {
 	var body io.Reader
 	if input != nil {
 		encoded, err := json.Marshal(input)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		body = bytes.NewReader(encoded)
 	}
 	target, err := c.resolveURL(requestPath)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	request, err := http.NewRequestWithContext(ctx, method, target.String(), body)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if input != nil {
 		request.Header.Set("Content-Type", "application/json")
@@ -801,23 +1042,29 @@ func (c *Client) doJSONUsing(ctx context.Context, client *http.Client, method, r
 	if requestID != "" {
 		request.Header.Set("X-Request-ID", requestID)
 	}
+	for name, values := range headers {
+		for _, value := range values {
+			request.Header.Add(name, value)
+		}
+	}
 	response, err := client.Do(request)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return responseError(response)
+		return nil, responseError(response)
 	}
+	responseHeaders := response.Header.Clone()
 	if output == nil || response.StatusCode == http.StatusNoContent {
 		_, _ = io.Copy(io.Discard, response.Body)
-		return nil
+		return responseHeaders, nil
 	}
 	decoder := json.NewDecoder(io.LimitReader(response.Body, 4<<20))
 	if err := decoder.Decode(output); err != nil {
-		return fmt.Errorf("decode control-plane response: %w", err)
+		return nil, fmt.Errorf("decode control-plane response: %w", err)
 	}
-	return nil
+	return responseHeaders, nil
 }
 
 func (c *Client) resolveURL(value string) (*url.URL, error) {
@@ -843,10 +1090,12 @@ func responseError(response *http.Response) error {
 		} `json:"error"`
 	}
 	_ = json.Unmarshal(encoded, &envelope)
-	if envelope.Error.Message != "" {
-		return fmt.Errorf("control plane %s (%d): %s", envelope.Error.Code, response.StatusCode, envelope.Error.Message)
+	if envelope.Error.Code != "" || envelope.Error.Message != "" {
+		return &controlPlaneProblem{
+			Code: envelope.Error.Code, Status: response.StatusCode, Message: envelope.Error.Message,
+		}
 	}
-	return fmt.Errorf("control plane request failed with status %d: %s", response.StatusCode, strings.TrimSpace(string(encoded)))
+	return &controlPlaneProblem{Status: response.StatusCode}
 }
 
 func optionalName(value string) *string {

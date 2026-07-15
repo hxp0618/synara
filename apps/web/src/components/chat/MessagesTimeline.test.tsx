@@ -1964,6 +1964,51 @@ describe("MessagesTimeline", () => {
     expect(markup).not.toContain("&gt;/bin/zsh -lc");
   });
 
+  it("shows Terminal completion metadata instead of hiding it behind the command target", async () => {
+    const { MessagesTimeline } = await import("./MessagesTimeline");
+    const markup = renderToStaticMarkup(
+      <MessagesTimeline
+        hasMessages
+        isWorking={false}
+        activeTurnInProgress={false}
+        activeTurnStartedAt={null}
+        timelineEntries={[
+          {
+            id: "entry-terminal-completion",
+            kind: "work",
+            createdAt: "2026-07-15T00:00:03.000Z",
+            entry: {
+              id: "terminal-completion",
+              createdAt: "2026-07-15T00:00:03.000Z",
+              label: "Terminal exited",
+              tone: "tool",
+              itemType: "command_execution",
+              toolTitle: "Ran",
+              command: "bun run test",
+              terminalEventType: "terminal.exited",
+              preview: "Exit code 0 · 64 KB output · 1 Artifact segment",
+            },
+          },
+        ]}
+        turnDiffSummaryByAssistantMessageId={new Map()}
+        nowIso="2026-07-15T00:00:04.000Z"
+        expandedWorkGroups={{}}
+        onToggleWorkGroup={() => {}}
+        onOpenTurnDiff={() => {}}
+        revertTurnCountByUserMessageId={new Map()}
+        onRevertUserMessage={() => {}}
+        isRevertingCheckpoint={false}
+        onImageExpand={() => {}}
+        markdownCwd={undefined}
+        resolvedTheme="dark"
+        timestampFormat="locale"
+        workspaceRoot={undefined}
+      />,
+    );
+
+    expect(markup).toContain("Exit code 0 · 64 KB output · 1 Artifact segment");
+  });
+
   it("uses the GitHub logo for git and GitHub CLI command rows", async () => {
     const { MessagesTimeline } = await import("./MessagesTimeline");
     const markup = renderToStaticMarkup(

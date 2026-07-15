@@ -23,6 +23,10 @@
   Approval Pod-loss Generation 恢复；正式证据见
   `docs/reports/stage-3-kubernetes-provider-fixture-acceptance-2763ebd3.md`）
 - **工作区状态**：Stage 3 持续执行中，执行时以当前分支和已验证证据为准
+- **发布文档**：
+  `docs/release-checklists/stage-3-provider-runtime-remote-worker.md`、
+  `docs/runbooks/worker-release-rollout.md`、
+  `docs/reports/stage-3-provider-runtime-acceptance-2026-07-15.md`
 - **依赖**：Stage 2 的 Control Plane Session/Execution 权威、Worker Lease/Fencing、Artifact、SSE
 - **目标结果**：所有正式支持的 Provider 可以通过统一 Provider Host 和 Worker Contract，稳定运行在
   Local、SSH、Docker、Kubernetes Execution Target，并能跨 Worker/Pod 恢复后续 Turn
@@ -501,6 +505,26 @@ Provider 不支持精确 Interrupt 时，允许终止子进程，但必须上报
 - Compact/Rollback/Fork 后跨 Worker 重建结果与原 Worker 一致。
 - 不支持能力不会被静默转换为另一种命令。
 
+### C 当前证据（2026-07-15）
+
+- Forward Migration `000032_session_advanced_operations.sql` 将 Compact、Review、Rollback、Fork 冻结为
+  独立 Turn Kind，并要求每个 Provider 执行型高级 Turn 只有一个匹配的 Primary Control Command；
+  PostgreSQL deferred trigger 同时保护 Fork 形状、逻辑祖先 Turn、循环、Primary Command UPDATE/DELETE
+  与父 Execution cascade。SQLite 镜像关键唯一索引和安全触发器。
+- Compact/Review 作为 queued Execution 执行，Provider Host 写命令前先持久化 `delivered`，等待真实
+  Provider 终态后原子确认 Control Command、Execution、Turn 与 Lease；普通 `Complete` 不会覆盖该终态。
+  Rollback/Fork 由 Control Plane 以零拷贝逻辑历史 `emulated`，不启动 Worker；Rollback 明确记录
+  `workspaceDisposition=unchanged` 和 `externalSideEffectsReverted=false`。
+- Codex Review/Compact 为 native；Claude Review 使用固定只读 Tool Policy 的 `emulated` 路径，Compact
+  为 Explicit Unsupported。Codex Review 可以从无 Cursor 的新 Thread 启动，Compact 必须有 usable native
+  Cursor；新 Session、Fork 或 Rollback 后会在 Capability Projection 与 API 返回稳定门禁。
+- Service、HTTP、agentd、Provider Host、Contracts 与 Web 定向测试覆盖 private Session、CAS、Quota、
+  Capability、幂等 replay、并发单赢家、HTTP Replay Header/非法 JSON/缺 Key、Primary terminal-before-ack、
+  Fork Prefix Page/Tail、循环/深链终止、501 条 Resume 尾部、Rollback Chain 和 SaaS 路由不读取本地
+  Native API。PostgreSQL 17 Migration Integration 与 SQLite Safety 测试均通过。
+- C 仍需真实 Codex/Claude 在 Remote Worker 替换后的 Compact/Review/后续 Turn Release Acceptance；
+  deterministic fixture 与静态 Capability 证据不能替代该发布门禁。
+
 ## 9. 工作流 D：Approval 与 Structured User Input
 
 ### D1. 持久化交互状态
@@ -823,17 +847,27 @@ Provider Credential 与 Workspace Credential 分离：
 - 旧 Lease/Generation 无法获取 Credential。
 - 每个正式 Provider 的 Credential Allowlist 有测试。
 
-### G 当前证据（2026-07-14）
+### G 当前证据（2026-07-16）
 
-- agentd、Provider Host 和 Codex/Claude 子进程改为从空环境构造显式运行时白名单；ambient Worker、
-  Lease、Control Plane、Provider、Cloud、GitHub、Database、Object Store、Proxy、SSH Agent 和
-  `NODE_OPTIONS` 均不继承。
-- Provider Credential 继续只经 FD 3 与 Provider-specific Payload Allowlist 注入；认证代理只能经
-  显式 `SYNARA_PROVIDER_*_PROXY` 输入，映射后会参与诊断脱敏。
-- Provider Host Build Version 使用构建包版本，不再接受宿主环境伪造；构建后的真实 Host/agentd
-  Describe 集成已通过。
-- 当前仍未关闭 G：Credential Scope 尚未实现 User/Platform 层及完整优先级 ADR；Registry/Package/
-  SSH Workspace Credential 与全链路 Artifact/Outbox/Audit/Metrics Secret Canary 仍缺失。
+- agentd、Provider Host 和 Codex/Claude 子进程从显式 allowlist 构造运行时环境；ambient Worker、Lease、
+  Control Plane、Cloud、GitHub、Database、Object Store、Proxy、SSH Agent 和 `NODE_OPTIONS` 不继承。
+  Provider Credential 只经 FD 3 与 Provider-specific Payload Allowlist 注入；显式
+  `SYNARA_PROVIDER_*_PROXY` 映射后的认证信息也进入 SecretGuard redaction set。
+- Migration `000033` 实现 User/Organization/Tenant/Platform Provider Credential Scope、selector、
+  per-Credential auto-select 和 Tenant Platform policy。解析优先级固定为 explicit Session、User、
+  Organization、Tenant、Platform；同层多候选返回稳定 ambiguity error，Platform 需 enterprise
+  entitlement 与两层显式 policy。
+- Migration `000035` 增加 Project/Target Credential Binding 与 immutable per-Generation Grant；
+  `000036` 完成 legacy Project Git backfill 后清空并禁止继续写 `projects.git_credential_id`；`000038`
+  为 disabled Binding 历史补齐 FK lookup indexes；`000039` 保证每个 Target 最多一个 active
+  `worker_image_pull` Binding。Agentd 只在当前 Git/Registry/Package stage 解析
+  Grant，HTTPS 使用 exact-host AskPass，SSH 使用 pinned Host Key 和临时单 Key Agent。
+- `worker_image_pull` Registry Credential 只由 Control Plane Target provisioner 解析，Binding selector
+  必须精确匹配镜像 Registry Host，不进入 Worker Workload、agentd Provider 环境、Event 或 Audit。
+- SecretGuard、agentd Credential/terminal tests、真实 PostgreSQL/SQLite migration tests，以及当前
+  deterministic Local/Docker/Kubernetes report output scans 已通过。真实 Provider 四 Target 的
+  stdout/stderr、Crash dump、Artifact/集中日志 Secret canary 与 Windows FD transport 仍未关闭，因此
+  G 保持 `partial`。
 
 ## 13. 工作流 H：Remote Workspace 与 Git 生命周期
 
@@ -976,6 +1010,12 @@ terminal.failed
 - Terminal/Artifact 重试不产生重复 Ready Artifact。
 - Checkpoint 失败后仍保留上一个可恢复版本。
 
+当前实现记录（2026-07-15）：deterministic fixture 使用不触发 JSON/HTML 转义的 63 KiB Chunk 产生
+`2 MiB + 257 B` Terminal Stream；agentd 在真实 Local 与 Docker 产品路径中均只持久化前 32 KiB 安全
+Preview，并生成 `1 MiB / 1 MiB / 257 B` 三个 Ready `terminal_log` Artifact。Acceptance 已校验连续
+Offset、固定 SHA-256、Completion Total/Exit Code、无重复 `artifact.ready` 以及 Session Event 中不存在
+Runtime Output 物理路径。Generated File、大 Diff 和真实 Codex/Claude 大日志仍待 Release Acceptance。
+
 ## 15. 工作流 J：Worker Drain、升级与版本隔离
 
 ### J1. Worker 生命周期
@@ -1051,6 +1091,25 @@ Manifest 不包含 Credential、路径中的用户信息或高基数 Secret。
 - 旧 Generation 在新 Worker 接管后永久失效。
 - Image/CLI 版本可以从 Execution 和运维视图追溯。
 - 不兼容 Worker 不影响兼容 Worker 继续服务。
+
+### J 当前证据（2026-07-16）
+
+- Migration `000034` 将 compatibility 与不可逆 operator revocation 分离，新增 immutable logical
+  identity tombstone，并在 Token、Heartbeat、Claim、Lease 和同身份 re-registration 边界 fail closed。
+  Revoke API 使用 Idempotency Key 与 expected Incarnation，返回 released Lease、recovering、outcome
+  unknown、checkpoint unconfirmed 和 requeued cleanup 计数；普通 rollout 不得以 Revoke 代替 Drain。
+- Migration `000037` 增加 target-scoped immutable Release Revision、单行 CAS Policy、immutable
+  Transition History，以及 Worker/未租用 Execution 的 Revision/Channel pin。Policy 支持 initial
+  promote、newer canary、active-canary promote、abort-canary 和 older-revision rollback，stale Version
+  必须返回 conflict；`000040` 进一步要求最新 Transition 与当前 Policy 完全一致。
+- Control Plane API 和 SaaS Settings 已提供 Worker list/revoke、Release Overview/Create、Canary、Promote、
+  Rollback；Registry `worker_image_pull` Binding 为 Docker pull request 和 Kubernetes target-scoped
+  docker config 提供最小 auth。运维边界已记录在
+  `docs/runbooks/worker-release-rollout.md`。
+- 当前 deterministic Docker/Kubernetes tests 与 failure-only image-canary 只证明 release shape、Target
+  isolation、replacement 和恢复编排。它们没有证明 registry-pushed immutable multi-arch Revision、真实
+  Codex/Claude rollout、Busy Worker 长任务、生产多节点 Drain/PDB/Eviction 或 rollback under load；
+  rollout/reconciler 最终评审和真实 Gate 完成前，J 保持 `partial`。
 
 ## 16. 工作流 K：Web 主流程权威切换
 
@@ -1221,20 +1280,35 @@ Provider × Capability × Execution Target
 - 故障测试没有 Event 丢失、重复终态、双 Worker 写入或 Credential 泄漏。
 - Acceptance 结果生成机器可读报告和 Markdown 摘要。
 
-### L 当前证据（2026-07-14）
+### L 当前证据（2026-07-16）
 
 - `scripts/stage3-provider-acceptance/acceptance_runner.py` 已形成同一套用例编排、红线脱敏与
   JSON/Markdown 报告；Local、Docker 和 Kubernetes 通过用户 API、真实 Control Plane/agentd
   与产品 Target 生命周期执行，不代替 Worker 注册、Heartbeat 或 Claim。
 - Runner 已显式建模 `standing` 与 `execution-pinned` Worker Allocation，并以 Capability 声明
   Managed Replacement；execution-pinned 路径使用 Approval 作为 Worker/Manifest 可观测屏障。
+- 2026-07-15 当前工作区的 deterministic Codex fixture 已通过 Local 12/12 与 Docker 14/14；新增的
+  Terminal Large Log case 覆盖 32 KiB Preview、三个 1 MiB 分段边界、Ready Artifact Size/SHA、退出汇总
+  和物理路径泄漏扫描。Docker 同时通过 Managed Worker Replacement、Workspace 连续性、Control Plane
+  Restart 与后续 Turn；Runner 精确清理其 Container、Volume、Network 和自动构建 Image。该结果来自
+  未提交工作区，只作为实现期证据，最终 Commit 后仍需重新生成发布报告。
+- 当前源码构建的真实 Provider Host 使用 Node.js 24 分别完成 Codex App Server 与 Claude Agent SDK
+  的 direct Local `Describe -> StartSession -> SendTurn -> StopSession`。Codex CLI `0.144.4` 与 Claude
+  Agent SDK `0.3.207` 均返回 expected marker 和 Resume Cursor，exit `0`、stderr 为空。该运行没有经过
+  Local Supervisor、Control Plane、agentd 或 Target lifecycle，因此只是 Adapter smoke，不是 Local
+  Release Gate。
+- 当前 dirty worktree 的 failure-only reports 通过 Local Provider malformed/oversized/crash、Docker
+  Worker network interruption，以及 Kubernetes Worker network、Node drain、Pod eviction 和 image
+  canary；所有 cleanup 和 output Secret scan 均通过。Kubernetes image canary 使用同内容 alias，不是
+  registry-pushed immutable Revision promote/rollback。
 - `2763ebd3` 的 Kubernetes Driver 在 owned disposable Kind Context 上通过真实 Kubernetes API 创建隔离
   Namespace、ServiceAccount/RBAC、短期 Token/CA 和 execution-pinned Pod/Manifest；重新构建当前
   Worker fixture 后 13/13 通过。该结果覆盖 Pending Approval Pod Delete、Generation 1→2 Fence、
   Interaction Request 换代、Artifact/User Input/Provider Error、Control Plane Restart、第二 Turn、
   Event Sequence 1→57；报告生成后的定向检查确认 owned 集群和精确自动构建镜像均已不存在。见
-  `docs/reports/stage-3-kubernetes-provider-fixture-acceptance-2763ebd3.md`。该证据尚不覆盖 Drain、
-  Eviction、网络故障、Image Rollout 或真实 Provider Release Gate。
+  `docs/reports/stage-3-kubernetes-provider-fixture-acceptance-2763ebd3.md`。当前 failure-only run 已补充
+  deterministic Drain、Eviction、网络和同内容 Image Canary，但 clean-commit core report 仍是旧证据，
+  两者都不覆盖真实 Provider Release Gate。
 - 默认运行的是 deterministic Provider Host Protocol 2.1 fixture。它能证明共享 Contract、
   Control Plane-to-Worker-to-Host 通路和 Local/SSH/Docker/Kubernetes 恢复编排，**不等于**使用真实
   Codex App Server 或 Claude Agent SDK 的 Release Acceptance。
@@ -1243,8 +1317,9 @@ Provider × Capability × Execution Target
   OrbStack Ubuntu 24.04 VM 上 13/13 通过，覆盖 Host Key mismatch 负例、sshd 重启、systemd Worker
   replacement、Workspace 连续性、Control Plane 重启、第二 Turn、revoke 与精确 VM 清理；另行对报告和
   日志执行的 Secret Scan 未发现 Private Key 模式。该结果不等于真实 Codex/Claude Adapter Release
-  Acceptance；Kubernetes Claude/failure matrix、真实 Codex/Claude 各 Target、长 Session 和完整故障
-  矩阵仍待执行，不得声称四 Target 统一发布门禁已完成。
+  Acceptance；真实 Codex/Claude 各 Target、registry-pushed multi-arch rollout、长 Session、生产多节点
+  Kubernetes 和真实 Provider 故障矩阵仍待执行，不得声称四 Target 统一发布门禁已完成。当前证据汇总见
+  `docs/reports/stage-3-provider-runtime-acceptance-2026-07-15.md`。
 
 ## 18. 实施顺序
 
@@ -1287,6 +1362,8 @@ Provider × Capability × Execution Target
 - 完成 Drain/Graceful Shutdown。
 - 增加 Worker/Host/CLI Manifest。
 - 完成可重复 Worker Image、灰度、隔离和回滚。
+- 当前进度：`000034`/`000037`、Worker/Releases API、Web 运维入口和 rollout Runbook 已形成；真实
+  registry-pushed multi-arch canary/rollback、Busy Worker 长任务和生产多节点证据仍是完成门禁。
 
 ### Step 6：Web 主流程切换
 
@@ -1300,6 +1377,10 @@ Provider × Capability × Execution Target
 - Local/SSH/Docker/Kubernetes 运行同一 Provider Suite。
 - 执行 Crash/Network/Upgrade/Approval 故障测试。
 - 生成兼容矩阵和 Acceptance Report。
+- 当前进度：deterministic Local/Docker core、Local Provider fault、Docker network、Kubernetes
+  Network/Drain/Eviction/Image Canary 已通过实现期运行；SSH 13/13 与 Kubernetes 13/13 core 仍是
+  2026-07-14 历史 fixture 证据。真实 Codex/Claude 只有 direct Local Host smoke，四 Target 与 soak
+  尚未完成。
 
 ### Step 8：文档、Runbook 与发布门禁
 

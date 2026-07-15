@@ -64,6 +64,37 @@ Provider-specific tool names are retained only as bounded title/data references.
 canonical values from `ProviderRuntimeEventV2`. Raw Provider payloads, credentials, token values, complete stderr,
 and presigned URLs do not cross this boundary.
 
+## Terminal projection
+
+Terminal activity reuses the frozen canonical event vocabulary; it does not add top-level Runtime Event v2 types.
+
+- `item.started`, `item.updated`, and `item.completed` carry typed `data.terminal` lifecycle data for
+  `itemType=command_execution`.
+- `content.delta` with `streamKind=command_output` carries the bounded live preview. It requires `terminalId`,
+  `encoding`, `byteOffset`, and `byteLength`.
+- For `encoding=utf-8`, `delta` must be well-formed Unicode and `byteLength` equals its encoded UTF-8 byte count.
+- For `encoding=binary`, `delta` is canonical padded standard base64 and `byteLength` equals the decoded byte count.
+  This branch is a bounded Host-to-agentd transport and defense-in-depth validation boundary. Managed agentd must
+  intercept it, upload the bytes as a `terminal_log` Artifact, and persist `terminal.output.reference`; binary or
+  invalid UTF-8 output must not be retained as a Session Event Delta.
+- A Provider Host `ArtifactCandidate` with `sourceRoot=runtime-output` is another internal Host-to-agentd transport,
+  not a durable Runtime Event. Agentd opens it only below its execution-scoped bound Root, streams it through the
+  same preview/segment collector, and emits the canonical `content.delta` preview plus
+  `terminal.output.reference` lifecycle rows. Physical paths never appear in the resulting payload.
+- Non-`command_output` `content.delta` payloads keep their existing shape; Terminal byte metadata remains optional.
+
+`data.terminal.eventType` is one of:
+
+| Terminal event               | Required data                                                                   |
+| ---------------------------- | ------------------------------------------------------------------------------- |
+| `terminal.started`           | `terminalId`                                                                    |
+| `terminal.output.reference`  | `terminalId`, UUID `artifactId`, `offset`, `length`, `segmentIndex`, `encoding` |
+| `terminal.exited` / `failed` | `terminalId`, `totalBytes`, `previewBytes`, `segmentCount`, `truncated`         |
+
+Completion data may additionally include integer `exitCode`, `signal`, and `failureKind` (`exit`, `signal`,
+`timeout`, `oom`, or `provider_error`). `previewBytes` cannot exceed `totalBytes`. A started or completed event may
+also contain bounded, redacted `commandSummary` and Workspace-relative `cwdLabel` values.
+
 ## Validation and unknown events
 
 - Serialized payload is limited to 65,536 bytes. Larger logs, Diffs, files, and snapshots use Artifact references.

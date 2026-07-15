@@ -3,6 +3,7 @@ package agentd
 import (
 	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -193,6 +194,163 @@ func TestResolveWorkspaceArtifactRejectsSymlinkEscape(t *testing.T) {
 	}
 	if _, err := resolveWorkspaceArtifact(workspace, "escape.txt"); err == nil {
 		t.Fatal("agentd accepted an artifact symlink outside the execution workspace")
+	}
+}
+
+func TestResolveWorkspaceArtifactRejectsInternalSymlinks(t *testing.T) {
+	workspace := t.TempDir()
+	realDirectory := filepath.Join(workspace, "real")
+	if err := os.Mkdir(realDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	realFile := filepath.Join(realDirectory, "report.txt")
+	if err := os.WriteFile(realFile, []byte("report"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := resolveWorkspaceArtifact(workspace, "real/report.txt")
+	resolvedInfo, resolvedErr := os.Stat(resolved)
+	realInfo, realErr := os.Stat(realFile)
+	if err != nil || resolvedErr != nil || realErr != nil || !os.SameFile(resolvedInfo, realInfo) {
+		t.Fatalf("agentd rejected a regular Workspace artifact: resolved=%q err=%v stat=%v/%v", resolved, err, resolvedErr, realErr)
+	}
+	if err := os.Symlink(realFile, filepath.Join(workspace, "file-link.txt")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resolveWorkspaceArtifact(workspace, "file-link.txt"); err == nil {
+		t.Fatal("agentd accepted an artifact file symlink inside the execution workspace")
+	}
+	if err := os.Symlink(realDirectory, filepath.Join(workspace, "directory-link")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resolveWorkspaceArtifact(workspace, "directory-link/report.txt"); err == nil {
+		t.Fatal("agentd accepted an artifact path with a symlinked parent")
+	}
+}
+
+func TestWorkspaceArtifactSourceDoesNotFollowParentReplacement(t *testing.T) {
+	workspace := t.TempDir()
+	parent := filepath.Join(workspace, "generated")
+	if err := os.Mkdir(parent, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(parent, "report.txt"), []byte("workspace report"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "report.txt"), []byte("host secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	source, _, err := openWorkspaceArtifactSource(workspace, "generated/report.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer source.Close()
+	retained := filepath.Join(workspace, "generated-retained")
+	if err := os.Rename(parent, retained); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, parent); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := source.rewind(); err != nil {
+		t.Fatal(err)
+	}
+	payload, err := io.ReadAll(source.file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(payload) != "workspace report" || strings.Contains(string(payload), "host secret") {
+		t.Fatalf("opened Workspace Artifact source followed a replaced parent: %q", payload)
+	}
+}
+
+func TestBoundWorkspaceArtifactRootDoesNotFollowRootReplacement(t *testing.T) {
+	parent := t.TempDir()
+	workspace := filepath.Join(parent, "checkout")
+	if err := os.Mkdir(workspace, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace, "report.txt"), []byte("workspace report"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "report.txt"), []byte("host secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	root, err := openWorkspaceArtifactRoot(workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	retained := filepath.Join(parent, "checkout-retained")
+	if err := os.Rename(workspace, retained); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, workspace); err != nil {
+		t.Fatal(err)
+	}
+
+	source, relative, err := root.open(filepath.Join(workspace, "report.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer source.Close()
+	if relative != "report.txt" {
+		t.Fatalf("unexpected bound Artifact relative path: %q", relative)
+	}
+	payload, err := io.ReadAll(source.file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(payload) != "workspace report" || strings.Contains(string(payload), "host secret") {
+		t.Fatalf("bound Workspace Artifact root followed its replaced path: %q", payload)
+	}
+	if _, _, err := openWorkspaceArtifactSource(workspace, "report.txt"); err == nil {
+		t.Fatal("unbound Workspace Artifact source accepted a replaced symlink root")
+	}
+}
+
+func TestRuntimeOutputArtifactRootRejectsEscapeAndCleansPhysicalState(t *testing.T) {
+	root, err := newRuntimeOutputArtifactRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	directory := root.directory
+	resultDirectory := filepath.Join(directory, "projects", "session", "tool-results")
+	if err := os.MkdirAll(resultDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	payloadPath := filepath.Join(resultDirectory, "command.log")
+	if err := os.WriteFile(payloadPath, []byte("controlled output"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	source, relative, err := root.open("projects/session/tool-results/command.log")
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, readErr := io.ReadAll(source.file)
+	closeErr := source.Close()
+	if readErr != nil || closeErr != nil || string(payload) != "controlled output" {
+		t.Fatalf("read bound Runtime Output: payload=%q read=%v close=%v", payload, readErr, closeErr)
+	}
+	if relative != filepath.Join("projects", "session", "tool-results", "command.log") {
+		t.Fatalf("unexpected Runtime Output relative path %q", relative)
+	}
+	if _, _, err := root.open(filepath.Join(t.TempDir(), "outside.log")); err == nil {
+		t.Fatal("Runtime Output root accepted an absolute escaping path")
+	}
+	if err := os.Symlink(payloadPath, filepath.Join(directory, "link.log")); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := root.open("link.log"); err == nil {
+		t.Fatal("Runtime Output root accepted a symlink candidate")
+	}
+	if err := root.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(directory); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("Runtime Output root remained after cleanup: %v", err)
 	}
 }
 

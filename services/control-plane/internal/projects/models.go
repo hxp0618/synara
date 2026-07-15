@@ -24,11 +24,11 @@ type Project struct {
 }
 
 type CreateProjectInput struct {
-	Name            string     `json:"name"`
-	RepositoryURL   *string    `json:"repositoryUrl"`
-	DefaultBranch   string     `json:"defaultBranch"`
-	GitCredentialID *uuid.UUID `json:"gitCredentialId"`
-	Visibility      string     `json:"visibility"`
+	Name            string               `json:"name"`
+	RepositoryURL   *string              `json:"repositoryUrl"`
+	DefaultBranch   string               `json:"defaultBranch"`
+	GitCredentialID OptionalNullableUUID `json:"gitCredentialId"`
+	Visibility      string               `json:"visibility"`
 }
 
 type UpdateProjectInput struct {

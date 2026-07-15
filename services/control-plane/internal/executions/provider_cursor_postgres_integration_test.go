@@ -584,7 +584,12 @@ func TestProviderCursorRuntimeAndCredentialDriftCannotResurrectOldCursor(t *test
 	}
 	if err := db.Model(&persistence.ProviderCredential{}).
 		Where("tenant_id = ? AND id = ?", fixture.TenantID, fixture.ProviderCredentialID).
-		Update("version", 2).Error; err != nil {
+		Updates(map[string]any{
+			"version":            2,
+			"encrypted_payload":  []byte("rotated-provider-payload"),
+			"encrypted_data_key": []byte("rotated-provider-data-key"),
+			"updated_at":         time.Now().UTC(),
+		}).Error; err != nil {
 		t.Fatal(err)
 	}
 	credentialExecution := createNextCursorExecution(t, db, fixture, "credential version drift")

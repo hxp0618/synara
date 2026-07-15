@@ -97,6 +97,8 @@ function renderExecutionTargetSection(input: {
     <QueryClientProvider client={new QueryClient()}>
       <ExecutionTargetSettingsSection
         canManage={input.canManage ?? false}
+        canManageCredentialBindings={false}
+        credentials={[]}
         error={null}
         isLoading={false}
         onCreated={() => undefined}

@@ -58,6 +58,53 @@ func TestWorkspaceMaterializerClonesThenFetchesStableSessionCheckout(t *testing.
 	}
 }
 
+func TestWorkspaceMaterializerRecoversInterruptedGitGenerationInstall(t *testing.T) {
+	workspaceRoot := t.TempDir()
+	cacheRoot := t.TempDir()
+	targetID := uuid.New()
+	execution, workload := workspaceTestWorkload(targetID)
+	materializer := NewWorkspaceMaterializerWithCache(workspaceRoot, cacheRoot, targetID)
+	materializer.resolver = workspaceResolver{"git.example.com": {{IP: net.ParseIP("93.184.216.34")}}}
+	configureWorkspaceTestNetwork(t, materializer, createWorkspaceTestSource(t), nil)
+	first, err := materializer.Materialize(context.Background(), execution, workload, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeWorkspaceTestFile(t, filepath.Join(first.Directory, "preserved-untracked.txt"), "durable git workspace\n")
+	if err := first.Release(); err != nil {
+		t.Fatal(err)
+	}
+	backup := filepath.Join(
+		filepath.Dir(first.LogicalRoot), "."+filepath.Base(first.LogicalRoot)+".backup-"+uuid.NewString(),
+	)
+	if err := os.Rename(first.LogicalRoot, backup); err != nil {
+		t.Fatal(err)
+	}
+	staging := filepath.Join(
+		filepath.Dir(first.LogicalRoot), "."+filepath.Base(first.LogicalRoot)+".staging-"+uuid.NewString(),
+	)
+	if err := os.Mkdir(staging, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeWorkspaceTestFile(t, filepath.Join(staging, "partial.txt"), "partial git install\n")
+
+	recovered, err := materializer.Materialize(context.Background(), execution, workload, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer recovered.Release()
+	assertWorkspaceTestFile(
+		t,
+		filepath.Join(recovered.Directory, "preserved-untracked.txt"),
+		"durable git workspace\n",
+	)
+	for _, path := range []string{backup, staging} {
+		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("interrupted Git Workspace residue survived at %s: %v", path, err)
+		}
+	}
+}
+
 func gitCommandArguments(arguments []string) []string {
 	for len(arguments) >= 2 && arguments[0] == "-c" {
 		arguments = arguments[2:]
@@ -195,7 +242,7 @@ func TestWorkspaceMaterializerUsesAskPassWithoutLeakingCredential(t *testing.T) 
 			}
 		}
 	})
-	credential := &GitHTTPSCredential{Host: "git.example.com", Username: "git-user", Token: secret}
+	credential := &WorkspaceGitCredential{HTTPS: &GitHTTPSCredential{Host: "git.example.com", Username: "git-user", Token: secret}}
 	materialized, err := materializer.Materialize(context.Background(), execution, workload, credential)
 	if err != nil {
 		t.Fatal(err)
@@ -248,7 +295,7 @@ func TestWorkspaceMaterializerRejectsDangerousLocalGitConfiguration(t *testing.T
 	materializer := NewWorkspaceMaterializerWithCache(t.TempDir(), t.TempDir(), targetID)
 	materializer.resolver = workspaceResolver{"git.example.com": {{IP: net.ParseIP("93.184.216.34")}}}
 	configureWorkspaceTestNetwork(t, materializer, createWorkspaceTestSource(t), nil)
-	credential := &GitHTTPSCredential{Host: "git.example.com", Username: "git-user", Token: "private-token"}
+	credential := &WorkspaceGitCredential{HTTPS: &GitHTTPSCredential{Host: "git.example.com", Username: "git-user", Token: "private-token"}}
 	materialized, err := materializer.Materialize(context.Background(), execution, workload, credential)
 	if err != nil {
 		t.Fatal(err)
@@ -289,7 +336,7 @@ func TestWorkspaceMaterializerRedactsCredentialFromGitError(t *testing.T) {
 	}
 	_, err := materializer.Materialize(
 		context.Background(), execution, workload,
-		&GitHTTPSCredential{Host: "git.example.com", Username: "git-user", Token: secret},
+		&WorkspaceGitCredential{HTTPS: &GitHTTPSCredential{Host: "git.example.com", Username: "git-user", Token: secret}},
 	)
 	if err == nil {
 		t.Fatal("Workspace Clone failure was not returned")

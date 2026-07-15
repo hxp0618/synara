@@ -435,6 +435,57 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
     }),
   );
 
+  it.effect("tracks UTF-8 byte offsets across Codex command output deltas", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      const eventsFiber = yield* Stream.runCollect(Stream.take(adapter.streamEvents, 2)).pipe(
+        Effect.forkChild,
+      );
+
+      for (const [id, delta] of [
+        ["evt-command-output-1", "A🙂"],
+        ["evt-command-output-2", "!"],
+      ] as const) {
+        lifecycleManager.emit("event", {
+          id: asEventId(id),
+          kind: "notification",
+          provider: "codex",
+          createdAt: new Date().toISOString(),
+          method: "item/commandExecution/outputDelta",
+          threadId: asThreadId("thread-1"),
+          turnId: asTurnId("turn-1"),
+          itemId: asItemId("command-1"),
+          payload: {
+            threadId: "provider-thread-1",
+            turnId: "turn-1",
+            itemId: "command-1",
+            delta,
+          },
+        } satisfies ProviderEvent);
+      }
+
+      const events = Array.from(yield* Fiber.join(eventsFiber));
+      const first = events[0];
+      const second = events[1];
+      assert.equal(first?.type, "content.delta");
+      assert.equal(second?.type, "content.delta");
+      if (
+        first?.type !== "content.delta" ||
+        first.payload.streamKind !== "command_output" ||
+        second?.type !== "content.delta" ||
+        second.payload.streamKind !== "command_output"
+      ) {
+        return;
+      }
+      assert.equal(first.payload.terminalId, "command-1");
+      assert.equal(first.payload.encoding, "utf-8");
+      assert.equal(first.payload.byteOffset, 0);
+      assert.equal(first.payload.byteLength, 5);
+      assert.equal(second.payload.byteOffset, 5);
+      assert.equal(second.payload.byteLength, 1);
+    }),
+  );
+
   it.effect("preserves failed commandExecution status from canonical completed items", () =>
     Effect.gen(function* () {
       const adapter = yield* CodexAdapter;

@@ -2,6 +2,7 @@ package agentd
 
 import (
 	"context"
+	"errors"
 	"net"
 	"net/url"
 	"os"
@@ -216,6 +217,150 @@ func TestWorkspaceCacheRebuildPreservesPrivateDirtyWorkspace(t *testing.T) {
 	}
 	if err := materializer.validateBareRepository(context.Background(), second.cache.RepoGit, *workload.RepositoryURL); err != nil {
 		t.Fatalf("cache was not rebuilt: %v", err)
+	}
+}
+
+func TestWorkspaceCacheReconciliationRestoresCommittedBackupAndDiscardsStaging(t *testing.T) {
+	workspaceRoot := t.TempDir()
+	cacheRoot := t.TempDir()
+	targetID := uuid.New()
+	execution, workload := workspaceTestWorkload(targetID)
+	materializer := NewWorkspaceMaterializerWithCache(workspaceRoot, cacheRoot, targetID)
+	materializer.resolver = workspaceResolver{"git.example.com": {{IP: net.ParseIP("93.184.216.34")}}}
+	networkFetches := configureWorkspaceTestNetwork(t, materializer, createWorkspaceTestSource(t), nil)
+
+	first, err := materializer.Materialize(context.Background(), execution, workload, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache := first.cache
+	if err := first.Release(); err != nil {
+		t.Fatal(err)
+	}
+
+	backup := filepath.Join(cache.Root, ".repo.git.backup-"+uuid.NewString())
+	staging := filepath.Join(cache.Root, ".repo.git.staging-"+uuid.NewString())
+	if err := os.Rename(cache.RepoGit, backup); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(staging, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(staging, "partial"), []byte("not committed\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	second, err := materializer.Materialize(context.Background(), execution, workload, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Release()
+	if err := materializer.validateBareRepository(context.Background(), cache.RepoGit, *workload.RepositoryURL); err != nil {
+		t.Fatalf("restored Git cache is invalid: %v", err)
+	}
+	for _, residue := range []string{backup, staging} {
+		if _, err := os.Lstat(residue); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("Git cache reconciliation left residue %s: %v", residue, err)
+		}
+	}
+	if networkFetches.Load() != 2 {
+		t.Fatalf("restored Git cache was not refreshed: fetches=%d", networkFetches.Load())
+	}
+}
+
+func TestWorkspaceCacheReconciliationNeverPromotesOrphanStaging(t *testing.T) {
+	workspaceRoot := t.TempDir()
+	cacheRoot := t.TempDir()
+	targetID := uuid.New()
+	execution, workload := workspaceTestWorkload(targetID)
+	materializer := NewWorkspaceMaterializerWithCache(workspaceRoot, cacheRoot, targetID)
+	materializer.resolver = workspaceResolver{"git.example.com": {{IP: net.ParseIP("93.184.216.34")}}}
+	configureWorkspaceTestNetwork(t, materializer, createWorkspaceTestSource(t), nil)
+
+	first, err := materializer.Materialize(context.Background(), execution, workload, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache := first.cache
+	if err := first.Release(); err != nil {
+		t.Fatal(err)
+	}
+
+	staging := filepath.Join(cache.Root, ".repo.git.staging-"+uuid.NewString())
+	if err := os.Rename(cache.RepoGit, staging); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(staging, "orphan-staging-sentinel"), []byte("must not survive\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	second, err := materializer.Materialize(context.Background(), execution, workload, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Release()
+	if _, err := os.Lstat(filepath.Join(cache.RepoGit, "orphan-staging-sentinel")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("orphan staging was promoted into the active Git cache: %v", err)
+	}
+	if _, err := os.Lstat(staging); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("orphan Git cache staging survived reconciliation: %v", err)
+	}
+	if err := materializer.validateBareRepository(context.Background(), cache.RepoGit, *workload.RepositoryURL); err != nil {
+		t.Fatalf("rebuilt Git cache is invalid: %v", err)
+	}
+}
+
+func TestWorkspaceCacheReconciliationCancellationPreservesCommittedBackup(t *testing.T) {
+	workspaceRoot := t.TempDir()
+	cacheRoot := t.TempDir()
+	targetID := uuid.New()
+	execution, workload := workspaceTestWorkload(targetID)
+	materializer := NewWorkspaceMaterializerWithCache(workspaceRoot, cacheRoot, targetID)
+	materializer.resolver = workspaceResolver{"git.example.com": {{IP: net.ParseIP("93.184.216.34")}}}
+	configureWorkspaceTestNetwork(t, materializer, createWorkspaceTestSource(t), nil)
+
+	first, err := materializer.Materialize(context.Background(), execution, workload, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache := first.cache
+	if err := first.Release(); err != nil {
+		t.Fatal(err)
+	}
+
+	backup := filepath.Join(cache.Root, ".repo.git.backup-"+uuid.NewString())
+	staging := filepath.Join(cache.Root, ".repo.git.staging-"+uuid.NewString())
+	if err := os.Rename(cache.RepoGit, backup); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(staging, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sentinel := filepath.Join(backup, "preserve-on-cancel")
+	if err := os.WriteFile(sentinel, []byte("preserve\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	originalRunGit := materializer.runGit
+	materializer.runGit = func(
+		commandContext context.Context,
+		directory string,
+		environment []string,
+		arguments ...string,
+	) (string, error) {
+		cancel()
+		return originalRunGit(commandContext, directory, environment, arguments...)
+	}
+	err = materializer.reconcileCacheRepository(ctx, cache, *workload.RepositoryURL)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled Git cache reconciliation returned %v", err)
+	}
+	if content, err := os.ReadFile(sentinel); err != nil || string(content) != "preserve\n" {
+		t.Fatalf("canceled reconciliation deleted the committed backup: %q, %v", content, err)
+	}
+	if _, err := os.Lstat(staging); err != nil {
+		t.Fatalf("canceled reconciliation deleted orphan staging before a safe decision: %v", err)
 	}
 }
 

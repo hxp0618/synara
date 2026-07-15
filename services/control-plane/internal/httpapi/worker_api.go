@@ -6,10 +6,49 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/synara-ai/synara/services/control-plane/internal/artifacts"
 	"github.com/synara-ai/synara/services/control-plane/internal/executions"
 	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
 	"github.com/synara-ai/synara/services/control-plane/internal/problem"
 )
+
+func (s *Server) listTenantWorkers(w http.ResponseWriter, r *http.Request) {
+	tenantID, ok := s.pathUUID(w, r, "tenantID")
+	if !ok {
+		return
+	}
+	items, err := s.executions.ListWorkers(r.Context(), mustPrincipal(r), tenantID)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+func (s *Server) revokeTenantWorker(w http.ResponseWriter, r *http.Request) {
+	tenantID, ok := s.pathUUID(w, r, "tenantID")
+	if !ok {
+		return
+	}
+	workerID, ok := s.pathUUID(w, r, "workerID")
+	if !ok {
+		return
+	}
+	var input executions.RevokeWorkerInput
+	if err := decodeJSON(r, &input); err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	result, err := s.executions.RevokeWorker(
+		r.Context(), mustPrincipal(r), tenantID, workerID, input,
+		r.Header.Get("Idempotency-Key"), requestID(r), clientIP(r),
+	)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	writeOperation(w, result.Replayed, result.StatusCode, result.Value)
+}
 
 func (s *Server) registerWorker(w http.ResponseWriter, r *http.Request) {
 	configured := strings.TrimSpace(s.config.WorkerRegistrationToken)
@@ -32,6 +71,7 @@ func (s *Server) registerWorker(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, err)
 		return
 	}
+	w.Header().Set(artifacts.WorkerIdempotencyFeatureHeader, artifacts.WorkerIdempotencyFeatureHeaderValue)
 	writeJSON(w, http.StatusCreated, registered)
 }
 

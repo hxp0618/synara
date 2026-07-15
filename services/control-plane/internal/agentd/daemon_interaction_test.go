@@ -203,6 +203,9 @@ func TestDaemonRunExecutionDeliversDurableInterruptEndToEnd(t *testing.T) {
 			if input.ProviderResumeCursor != nil {
 				state.acknowledgedCursor = *input.ProviderResumeCursor
 			}
+			if _, leaked := input.Result["providerResumeCursor"]; leaked {
+				state.acknowledgedCursor = "cursor-leaked-in-result"
+			}
 			state.Unlock()
 			response.WriteHeader(http.StatusNoContent)
 		case base + "interaction-resolutions/pull":
@@ -246,7 +249,8 @@ func TestDaemonRunExecutionDeliversDurableInterruptEndToEnd(t *testing.T) {
 		TenantID: tenantID, OrganizationID: uuid.New(), ProjectID: uuid.New(), SessionID: uuid.New(),
 		TurnID: turnID, Provider: "codex", InputText: "run until interrupted",
 	}
-	if err := daemon.runExecution(context.Background(), execution, lease, workload, nil); err != nil {
+	resumeCursor := "cursor-interrupted"
+	if err := daemon.runExecution(context.Background(), execution, lease, workload, &resumeCursor); err != nil {
 		t.Fatal(err)
 	}
 	state.Lock()

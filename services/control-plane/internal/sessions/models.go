@@ -19,6 +19,10 @@ type Session struct {
 	Model                *string    `json:"model"`
 	ProviderCredentialID *uuid.UUID `json:"providerCredentialId"`
 	ExecutionTargetID    uuid.UUID  `json:"executionTargetId"`
+	ForkSourceSessionID  *uuid.UUID `json:"forkSourceSessionId,omitempty"`
+	ForkSourceTurnID     *uuid.UUID `json:"forkSourceTurnId,omitempty"`
+	ForkSourceSequence   *int64     `json:"forkSourceEventSequence,omitempty"`
+	ForkStrategy         *string    `json:"forkStrategy,omitempty"`
 	LastEventSequence    int64      `json:"lastEventSequence"`
 	CreatedAt            time.Time  `json:"createdAt"`
 	UpdatedAt            time.Time  `json:"updatedAt"`
@@ -32,6 +36,7 @@ type Turn struct {
 	CreatedBy       uuid.UUID  `json:"createdBy"`
 	Status          string     `json:"status"`
 	InputText       string     `json:"inputText"`
+	TurnKind        string     `json:"turnKind"`
 	RuntimeMode     string     `json:"runtimeMode"`
 	InteractionMode string     `json:"interactionMode"`
 	StartedAt       *time.Time `json:"startedAt"`
@@ -76,6 +81,39 @@ type SwitchModelInput struct {
 	Model                 string  `json:"model"`
 	ExpectedModel         *string `json:"expectedModel"`
 	ExpectedModelProvided bool    `json:"-"`
+}
+
+type RollbackSessionInput struct {
+	ExpectedLastEventSequence *int64    `json:"expectedLastEventSequence"`
+	FromTurnID                uuid.UUID `json:"fromTurnId"`
+}
+
+type RollbackSessionResult struct {
+	SessionID                   uuid.UUID `json:"sessionId"`
+	EventID                     uuid.UUID `json:"eventId"`
+	EventSequence               int64     `json:"eventSequence"`
+	FromSessionID               uuid.UUID `json:"fromSessionId"`
+	FromTurnID                  uuid.UUID `json:"fromTurnId"`
+	FromSequence                int64     `json:"fromSequence"`
+	RemovedTurnCount            int       `json:"removedTurnCount"`
+	SupportMode                 string    `json:"supportMode"`
+	WorkspaceDisposition        string    `json:"workspaceDisposition"`
+	ExternalSideEffectsReverted bool      `json:"externalSideEffectsReverted"`
+}
+
+type ForkSessionInput struct {
+	ExpectedLastEventSequence *int64     `json:"expectedLastEventSequence"`
+	Title                     string     `json:"title"`
+	Visibility                string     `json:"visibility"`
+	ProviderCredentialID      *uuid.UUID `json:"providerCredentialId,omitempty"`
+	ExecutionTargetID         *uuid.UUID `json:"executionTargetId,omitempty"`
+}
+
+type ForkSessionResult struct {
+	Session             Session   `json:"session"`
+	SourceSessionID     uuid.UUID `json:"sourceSessionId"`
+	SourceEventSequence int64     `json:"sourceEventSequence"`
+	SupportMode         string    `json:"supportMode"`
 }
 
 type EventPage struct {

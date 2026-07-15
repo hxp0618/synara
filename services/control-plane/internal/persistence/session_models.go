@@ -42,6 +42,10 @@ type AgentSession struct {
 	ProviderResumeCursorSourceGeneration  *int64     `gorm:"column:provider_resume_cursor_source_generation"`
 	ProviderResumeCursorHistorySequence   *int64     `gorm:"column:provider_resume_cursor_history_sequence"`
 	CurrentRuntimeBindingID               *uuid.UUID `gorm:"column:current_runtime_binding_id;type:uuid"`
+	ForkSourceSessionID                   *uuid.UUID `gorm:"column:fork_source_session_id;type:uuid"`
+	ForkSourceTurnID                      *uuid.UUID `gorm:"column:fork_source_turn_id;type:uuid"`
+	ForkSourceEventSequence               *int64     `gorm:"column:fork_source_event_sequence"`
+	ForkStrategy                          *string    `gorm:"column:fork_strategy"`
 	LastEventSequence                     int64      `gorm:"column:last_event_sequence"`
 	CreatedAt                             time.Time  `gorm:"column:created_at"`
 	UpdatedAt                             time.Time  `gorm:"column:updated_at"`
@@ -57,6 +61,7 @@ type AgentTurn struct {
 	CreatedBy       uuid.UUID  `gorm:"column:created_by;type:uuid"`
 	Status          string     `gorm:"column:status"`
 	InputText       string     `gorm:"column:input_text"`
+	TurnKind        string     `gorm:"column:turn_kind;default:message"`
 	RuntimeMode     string     `gorm:"column:runtime_mode;default:full-access"`
 	InteractionMode string     `gorm:"column:interaction_mode;default:default"`
 	StartedAt       *time.Time `gorm:"column:started_at"`

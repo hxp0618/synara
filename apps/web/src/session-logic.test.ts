@@ -1479,6 +1479,149 @@ describe("deriveWorkLogEntries", () => {
     expect(entry?.command).toBe("bun run lint");
   });
 
+  it("collapses canonical Terminal item lifecycle rows by terminalId", () => {
+    const activities: OrchestrationThreadActivity[] = [
+      makeActivity({
+        id: "terminal-started",
+        createdAt: "2026-07-15T00:00:01.000Z",
+        kind: "item.started",
+        summary: "Terminal started",
+        payload: {
+          itemType: "command_execution",
+          status: "inProgress",
+          title: "Terminal",
+          data: {
+            item: { id: "provider-item-id" },
+            terminal: {
+              terminalId: "terminal-1",
+              eventType: "terminal.started",
+              commandSummary: "bun run test",
+              cwdLabel: "apps/web",
+            },
+          },
+        },
+      }),
+      makeActivity({
+        id: "terminal-reference",
+        createdAt: "2026-07-15T00:00:02.000Z",
+        kind: "item.updated",
+        summary: "Terminal log updated",
+        payload: {
+          itemType: "command_execution",
+          status: "inProgress",
+          title: "Terminal log",
+          data: {
+            terminal: {
+              terminalId: "terminal-1",
+              eventType: "terminal.output.reference",
+              artifactId: "550e8400-e29b-41d4-a716-446655440000",
+              offset: 0,
+              length: 65_536,
+              segmentIndex: 0,
+              encoding: "utf-8",
+            },
+          },
+        },
+      }),
+      makeActivity({
+        id: "terminal-completed",
+        createdAt: "2026-07-15T00:00:03.000Z",
+        kind: "item.completed",
+        summary: "Terminal completed",
+        payload: {
+          itemType: "command_execution",
+          status: "completed",
+          title: "Terminal",
+          data: {
+            terminal: {
+              terminalId: "terminal-1",
+              eventType: "terminal.exited",
+              commandSummary: "bun run test",
+              totalBytes: 65_536,
+              previewBytes: 65_536,
+              segmentCount: 1,
+              truncated: false,
+              exitCode: 0,
+            },
+          },
+        },
+      }),
+    ];
+
+    expect(deriveWorkLogEntries(activities.slice(0, 2), undefined)).toMatchObject([
+      {
+        id: "terminal-reference",
+        activityKind: "item.updated",
+        itemType: "command_execution",
+        toolCallId: "terminal-1",
+        terminalEventType: "terminal.output.reference",
+        command: "bun run test",
+        toolTitle: "Running",
+        detail: "Log segment 1 · 64 KB · Artifact 550e8400-e29b-41d4-a716-446655440000",
+        preview: "Log segment 1 · 64 KB · Artifact 550e8400-e29b-41d4-a716-446655440000",
+      },
+    ]);
+
+    expect(deriveWorkLogEntries(activities, undefined)).toMatchObject([
+      {
+        id: "terminal-completed",
+        activityKind: "item.completed",
+        itemType: "command_execution",
+        toolCallId: "terminal-1",
+        terminalEventType: "terminal.exited",
+        command: "bun run test",
+        toolTitle: "Ran",
+        detail: "Exit code 0 · 64 KB output · 1 Artifact segment",
+        preview: "Exit code 0 · 64 KB output · 1 Artifact segment",
+      },
+    ]);
+  });
+
+  it("projects failed Terminal completion metadata without leaving a running title", () => {
+    const activities: OrchestrationThreadActivity[] = [
+      makeActivity({
+        id: "terminal-failed",
+        kind: "item.completed",
+        summary: "Terminal failed",
+        tone: "error",
+        payload: {
+          itemType: "command_execution",
+          status: "failed",
+          title: "Terminal",
+          data: {
+            terminal: {
+              terminalId: "terminal-failed",
+              eventType: "terminal.failed",
+              commandSummary: "node worker.js",
+              totalBytes: 65_536,
+              previewBytes: 32_768,
+              segmentCount: 1,
+              truncated: true,
+              exitCode: 137,
+              signal: "SIGKILL",
+              failureKind: "oom",
+            },
+          },
+        },
+      }),
+    ];
+
+    expect(deriveWorkLogEntries(activities, undefined)).toMatchObject([
+      {
+        activityKind: "item.completed",
+        tone: "error",
+        toolCallId: "terminal-failed",
+        terminalEventType: "terminal.failed",
+        command: "node worker.js",
+        toolTitle: "Command failed",
+        detail:
+          "Out of memory · Signal SIGKILL · Exit code 137 · Truncated output: 32 KB preview of 64 KB · 1 Artifact segment",
+        preview:
+          "Out of memory · Signal SIGKILL · Exit code 137 · Truncated output: 32 KB preview of 64 KB · 1 Artifact segment",
+      },
+    ]);
+  });
+
   it("keeps full command output details for command tool activities", () => {
     const activities: OrchestrationThreadActivity[] = [
       makeActivity({

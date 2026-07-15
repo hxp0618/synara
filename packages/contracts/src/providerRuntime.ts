@@ -413,13 +413,134 @@ const TurnDiffUpdatedPayload = Schema.Struct({
 });
 export type TurnDiffUpdatedPayload = typeof TurnDiffUpdatedPayload.Type;
 
-export const ItemLifecyclePayload = Schema.Struct({
-  itemType: CanonicalItemType,
+const NonCommandCanonicalItemType = Schema.Literals([
+  "user_message",
+  "assistant_message",
+  "reasoning",
+  "plan",
+  "file_change",
+  "mcp_tool_call",
+  "dynamic_tool_call",
+  "collab_agent_tool_call",
+  "web_search",
+  "image_view",
+  "image_generation",
+  "review_entered",
+  "review_exited",
+  "context_compaction",
+  "error",
+  "unknown",
+]);
+
+const TerminalEncoding = Schema.Literals(["utf-8", "binary"]);
+export type TerminalEncoding = typeof TerminalEncoding.Type;
+
+const TerminalFailureKind = Schema.Literals(["exit", "signal", "timeout", "oom", "provider_error"]);
+export type TerminalFailureKind = typeof TerminalFailureKind.Type;
+
+const TerminalLifecycleCommonFields = {
+  terminalId: TrimmedNonEmptyStringSchema,
+  commandSummary: Schema.optional(TrimmedNonEmptyStringSchema),
+  cwdLabel: Schema.optional(TrimmedNonEmptyStringSchema),
+} as const;
+
+const TerminalStartedData = Schema.Struct({
+  ...TerminalLifecycleCommonFields,
+  eventType: Schema.Literal("terminal.started"),
+});
+
+const TerminalOutputReferenceData = Schema.Struct({
+  ...TerminalLifecycleCommonFields,
+  eventType: Schema.Literal("terminal.output.reference"),
+  artifactId: Schema.String.check(Schema.isUUID(undefined)),
+  offset: NonNegativeInt,
+  length: NonNegativeInt,
+  segmentIndex: NonNegativeInt,
+  encoding: TerminalEncoding,
+});
+
+const TerminalCompletionCommonFields = {
+  ...TerminalLifecycleCommonFields,
+  totalBytes: NonNegativeInt,
+  previewBytes: NonNegativeInt,
+  segmentCount: NonNegativeInt,
+  truncated: Schema.Boolean,
+  exitCode: Schema.optional(Schema.Int),
+  signal: Schema.optional(TrimmedNonEmptyStringSchema),
+  failureKind: Schema.optional(TerminalFailureKind),
+} as const;
+
+const TerminalExitedDataBase = Schema.Struct({
+  ...TerminalCompletionCommonFields,
+  eventType: Schema.Literal("terminal.exited"),
+});
+const TerminalExitedData = TerminalExitedDataBase.pipe(
+  Schema.refine(
+    (value): value is typeof TerminalExitedDataBase.Type => value.previewBytes <= value.totalBytes,
+  ),
+);
+
+const TerminalFailedDataBase = Schema.Struct({
+  ...TerminalCompletionCommonFields,
+  eventType: Schema.Literal("terminal.failed"),
+});
+const TerminalFailedData = TerminalFailedDataBase.pipe(
+  Schema.refine(
+    (value): value is typeof TerminalFailedDataBase.Type => value.previewBytes <= value.totalBytes,
+  ),
+);
+
+export const ProviderRuntimeTerminalData = Schema.Union([
+  TerminalStartedData,
+  TerminalOutputReferenceData,
+  TerminalExitedData,
+  TerminalFailedData,
+]);
+export type ProviderRuntimeTerminalData = typeof ProviderRuntimeTerminalData.Type;
+
+const CommandExecutionItemData = Schema.StructWithRest(
+  Schema.Struct({
+    terminal: Schema.optional(ProviderRuntimeTerminalData),
+  }),
+  [UnknownRecordSchema],
+);
+
+const JsonNonObject = Schema.Union([
+  Schema.String,
+  Schema.Number,
+  Schema.Boolean,
+  Schema.Null,
+  Schema.Array(Schema.Unknown),
+]);
+
+const ItemLifecycleCommonFields = {
   status: Schema.optional(RuntimeItemStatus),
   title: Schema.optional(TrimmedNonEmptyStringSchema),
   detail: Schema.optional(TrimmedNonEmptyStringSchema),
+} as const;
+
+const CommandExecutionItemLifecyclePayload = Schema.Struct({
+  ...ItemLifecycleCommonFields,
+  itemType: Schema.Literal("command_execution"),
+  data: Schema.optional(Schema.Union([CommandExecutionItemData, JsonNonObject])),
+});
+
+const NonCommandItemLifecyclePayloadBase = Schema.Struct({
+  ...ItemLifecycleCommonFields,
+  itemType: NonCommandCanonicalItemType,
   data: Schema.optional(Schema.Unknown),
 });
+const NonCommandItemLifecyclePayload = NonCommandItemLifecyclePayloadBase.pipe(
+  Schema.refine(
+    (value): value is typeof NonCommandItemLifecyclePayloadBase.Type =>
+      !hasOwnTerminalData(value.data),
+  ),
+);
+
+export const ItemLifecyclePayload = Schema.Union([
+  CommandExecutionItemLifecyclePayload,
+  NonCommandItemLifecyclePayload,
+]);
 export type ItemLifecyclePayload = typeof ItemLifecyclePayload.Type;
 
 // Codex-generated images are persisted as local file references, never inline bytes.
@@ -431,13 +552,131 @@ export const CodexGeneratedImageArtifact = Schema.Struct({
 });
 export type CodexGeneratedImageArtifact = typeof CodexGeneratedImageArtifact.Type;
 
-const ContentDeltaPayload = Schema.Struct({
-  streamKind: RuntimeContentStreamKind,
+const STRICT_BASE64_PATTERN =
+  /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/][AQgw]==|[A-Za-z0-9+/]{2}[AEIMQUYcgkosw048]=)?$/u;
+const UTF8_ENCODER = new TextEncoder();
+const StrictBase64String = Schema.String.check(Schema.isPattern(STRICT_BASE64_PATTERN));
+
+const ContentDeltaCommonFields = {
   delta: Schema.String,
   contentIndex: Schema.optional(Schema.Int),
   summaryIndex: Schema.optional(Schema.Int),
+  truncated: Schema.optional(Schema.Boolean),
+} as const;
+
+const CommandOutputUtf8PayloadBase = Schema.Struct({
+  ...ContentDeltaCommonFields,
+  streamKind: Schema.Literal("command_output"),
+  terminalId: TrimmedNonEmptyStringSchema,
+  encoding: Schema.Literal("utf-8"),
+  byteOffset: NonNegativeInt,
+  byteLength: NonNegativeInt,
 });
+const CommandOutputUtf8Payload = CommandOutputUtf8PayloadBase.pipe(
+  Schema.refine(
+    (value): value is typeof CommandOutputUtf8PayloadBase.Type =>
+      isWellFormedUnicode(value.delta) && utf8ByteLength(value.delta) === value.byteLength,
+  ),
+);
+
+const CommandOutputBinaryPayloadBase = Schema.Struct({
+  ...ContentDeltaCommonFields,
+  streamKind: Schema.Literal("command_output"),
+  delta: StrictBase64String,
+  terminalId: TrimmedNonEmptyStringSchema,
+  encoding: Schema.Literal("binary"),
+  byteOffset: NonNegativeInt,
+  byteLength: NonNegativeInt,
+});
+const CommandOutputBinaryPayload = CommandOutputBinaryPayloadBase.pipe(
+  Schema.refine(
+    (value): value is typeof CommandOutputBinaryPayloadBase.Type =>
+      strictBase64DecodedLength(value.delta) === value.byteLength,
+  ),
+);
+
+const NonCommandContentStreamKind = Schema.Literals([
+  "assistant_text",
+  "reasoning_text",
+  "reasoning_summary_text",
+  "plan_text",
+  "file_change_output",
+  "unknown",
+]);
+
+const NonCommandUtf8ContentDeltaPayloadBase = Schema.Struct({
+  ...ContentDeltaCommonFields,
+  streamKind: NonCommandContentStreamKind,
+  terminalId: Schema.optional(TrimmedNonEmptyStringSchema),
+  encoding: Schema.optional(Schema.Literal("utf-8")),
+  byteOffset: Schema.optional(NonNegativeInt),
+  byteLength: Schema.optional(NonNegativeInt),
+});
+const NonCommandUtf8ContentDeltaPayload = NonCommandUtf8ContentDeltaPayloadBase.pipe(
+  Schema.refine(
+    (value): value is typeof NonCommandUtf8ContentDeltaPayloadBase.Type =>
+      value.encoding !== "utf-8" ||
+      value.byteLength === undefined ||
+      (isWellFormedUnicode(value.delta) && utf8ByteLength(value.delta) === value.byteLength),
+  ),
+);
+
+const NonCommandBinaryContentDeltaPayloadBase = Schema.Struct({
+  ...ContentDeltaCommonFields,
+  streamKind: NonCommandContentStreamKind,
+  delta: StrictBase64String,
+  terminalId: Schema.optional(TrimmedNonEmptyStringSchema),
+  encoding: Schema.Literal("binary"),
+  byteOffset: Schema.optional(NonNegativeInt),
+  byteLength: NonNegativeInt,
+});
+const NonCommandBinaryContentDeltaPayload = NonCommandBinaryContentDeltaPayloadBase.pipe(
+  Schema.refine(
+    (value): value is typeof NonCommandBinaryContentDeltaPayloadBase.Type =>
+      strictBase64DecodedLength(value.delta) === value.byteLength,
+  ),
+);
+
+const ContentDeltaPayload = Schema.Union([
+  CommandOutputUtf8Payload,
+  CommandOutputBinaryPayload,
+  NonCommandUtf8ContentDeltaPayload,
+  NonCommandBinaryContentDeltaPayload,
+]);
 export type ContentDeltaPayload = typeof ContentDeltaPayload.Type;
+
+function hasOwnTerminalData(value: unknown): boolean {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    !Array.isArray(value) &&
+    Object.hasOwn(value, "terminal")
+  );
+}
+
+function isWellFormedUnicode(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const codeUnit = value.charCodeAt(index);
+    if (codeUnit >= 0xd800 && codeUnit <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (!(next >= 0xdc00 && next <= 0xdfff)) return false;
+      index += 1;
+    } else if (codeUnit >= 0xdc00 && codeUnit <= 0xdfff) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function utf8ByteLength(value: string): number {
+  return UTF8_ENCODER.encode(value).byteLength;
+}
+
+function strictBase64DecodedLength(value: string): number | undefined {
+  if (!STRICT_BASE64_PATTERN.test(value)) return undefined;
+  const padding = value.endsWith("==") ? 2 : value.endsWith("=") ? 1 : 0;
+  return (value.length / 4) * 3 - padding;
+}
 
 const RequestOpenedPayload = Schema.Struct({
   requestType: CanonicalRequestType,

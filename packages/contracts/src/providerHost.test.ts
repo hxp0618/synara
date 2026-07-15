@@ -135,6 +135,25 @@ describe("Provider Host v2 contracts", () => {
     expect(providers.get("claudeAgent")?.capabilities["model-switch"]).toBe("emulated");
   });
 
+  it("advertises the implemented advanced Provider operations", () => {
+    const providers = new Map(
+      PROVIDER_CAPABILITY_CATALOG.providers.map((entry) => [entry.provider, entry] as const),
+    );
+
+    expect(providers.get("codex")?.capabilities).toMatchObject({
+      review: "native",
+      compact: "native",
+      rollback: "unsupported",
+      fork: "unsupported",
+    });
+    expect(providers.get("claudeAgent")?.capabilities).toMatchObject({
+      review: "emulated",
+      compact: "unsupported",
+      rollback: "unsupported",
+      fork: "unsupported",
+    });
+  });
+
   it("decodes a sanitized Target and Execution capability projection including Droid", () => {
     const targetProjection = decodeCapabilityProjection({
       executionTargetId: "target-1",

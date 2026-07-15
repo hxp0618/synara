@@ -49,6 +49,7 @@ type SearchableModelOption = {
 export function useComposerCommandMenuItems(input: {
   composerTrigger: ComposerTrigger | null;
   provider: ProviderKind;
+  commandRoutingMode?: "local" | "control-plane";
   providerPlugins: readonly ComposerPluginSuggestion[];
   providerNativeCommands: readonly ProviderNativeCommandDescriptor[];
   providerSkills: readonly ProviderSkillDescriptor[];
@@ -67,6 +68,7 @@ export function useComposerCommandMenuItems(input: {
   const {
     composerTrigger,
     provider,
+    commandRoutingMode,
     providerPlugins,
     providerNativeCommands,
     providerSkills,
@@ -162,6 +164,7 @@ export function useComposerCommandMenuItems(input: {
       const query = normalizeProviderDiscoveryText(composerTrigger.query);
       const availableCommands = getAvailableComposerSlashCommands({
         provider,
+        ...(commandRoutingMode ? { routingMode: commandRoutingMode } : {}),
         supportsFastSlashCommand,
         canOfferCompactCommand,
         canOfferPlanCommand,
@@ -268,6 +271,7 @@ export function useComposerCommandMenuItems(input: {
     composerTrigger,
     dynamicAgents,
     provider,
+    commandRoutingMode,
     providerPlugins,
     providerNativeCommands,
     providerSkills,

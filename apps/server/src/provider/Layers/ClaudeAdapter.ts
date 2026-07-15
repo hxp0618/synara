@@ -97,6 +97,7 @@ import {
   parseClaudeTrackedTasks,
   type ClaudeTrackedTask,
 } from "../claudeTaskTracker.ts";
+import { makeUtf8RuntimeContentDeltaPayload } from "../runtimeEventPayload.ts";
 import { positiveFiniteNumber } from "../tokenUsage.ts";
 import {
   ProviderAdapterProcessError,
@@ -2547,10 +2548,18 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
               threadId: context.session.threadId,
               turnId: context.turnState.turnId,
               itemId: asRuntimeItemId(tool.itemId),
-              payload: {
-                streamKind,
-                delta: toolResult.text,
-              },
+              payload:
+                streamKind === "command_output"
+                  ? makeUtf8RuntimeContentDeltaPayload({
+                      streamKind,
+                      delta: toolResult.text,
+                      terminalId: tool.itemId,
+                      byteOffset: 0,
+                    })
+                  : makeUtf8RuntimeContentDeltaPayload({
+                      streamKind,
+                      delta: toolResult.text,
+                    }),
               providerRefs: nativeProviderRefs(context, { providerItemId: tool.itemId }),
               raw: {
                 source: "claude.sdk.message",

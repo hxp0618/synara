@@ -9,6 +9,8 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -55,6 +57,270 @@ func TestDaemonDrainReleasesExecutionAfterDeadline(t *testing.T) {
 	}
 }
 
+func TestDaemonDrainCheckpointsManagedWorkspaceBeforeRelease(t *testing.T) {
+	harness := newDaemonDrainHarnessWithOptions(t, daemonDrainHarnessOptions{
+		runnerDelay:  5 * time.Second,
+		drainTimeout: 50 * time.Millisecond,
+		managed:      true,
+	})
+	harness.startAndCancel(t)
+	harness.wait(t)
+
+	harness.state.Lock()
+	defer harness.state.Unlock()
+	if !harness.state.released || !harness.state.checkpointReady || harness.state.failed {
+		t.Fatalf(
+			"managed Drain did not checkpoint before release: released=%t checkpointReady=%t failed=%t events=%#v",
+			harness.state.released, harness.state.checkpointReady, harness.state.failed, harness.state.events,
+		)
+	}
+	if !strings.Contains(harness.state.releaseReason, "workspace-checkpoint=ready") ||
+		strings.Contains(harness.state.releaseReason, "data-loss-risk") {
+		t.Fatalf("managed Drain release reason did not prove a ready Checkpoint: %q", harness.state.releaseReason)
+	}
+	renewIndex := indexOfDrainEvent(harness.state.events, "lease.renew")
+	inspectIndex := indexOfDrainEvent(harness.state.events, "workspace.inspect")
+	checkpointIndex := indexOfDrainEvent(harness.state.events, "checkpoint.ready")
+	releaseIndex := indexOfDrainEvent(harness.state.events, "release")
+	workspaceReleaseIndex := indexOfDrainEvent(harness.state.events, "workspace.release")
+	if renewIndex >= inspectIndex || inspectIndex >= checkpointIndex || checkpointIndex >= releaseIndex ||
+		releaseIndex >= workspaceReleaseIndex {
+		t.Fatalf("managed Drain did not retain the Workspace lock through Checkpoint and release: %#v", harness.state.events)
+	}
+}
+
+func TestDaemonDrainRetriesCommittedLeaseProbeWithStableRequestIDAfterResponseLoss(t *testing.T) {
+	harness := newDaemonDrainHarnessWithOptions(t, daemonDrainHarnessOptions{
+		runnerDelay:                 5 * time.Second,
+		drainTimeout:                50 * time.Millisecond,
+		managed:                     true,
+		drainRenewLoseFirstResponse: true,
+	})
+	harness.startAndCancel(t)
+	harness.wait(t)
+
+	harness.state.Lock()
+	defer harness.state.Unlock()
+	if !harness.state.released || !harness.state.checkpointReady || harness.state.failed {
+		t.Fatalf(
+			"Drain did not continue through Checkpoint and Release after Renew response loss: %#v",
+			harness.state.events,
+		)
+	}
+	if harness.state.drainRenewCommits != 1 || harness.state.drainRenewReplays != 1 {
+		t.Fatalf(
+			"Drain Renew did not commit once and replay one receipt: commits=%d replays=%d events=%#v",
+			harness.state.drainRenewCommits,
+			harness.state.drainRenewReplays,
+			harness.state.events,
+		)
+	}
+	requestIDs := harness.state.drainRenewRequestIDs
+	if len(requestIDs) != 2 || requestIDs[0] == "" || requestIDs[0] != requestIDs[1] ||
+		!strings.HasPrefix(requestIDs[0], drainCheckpointRenewRequestIDPrefix) {
+		t.Fatalf("Drain Renew did not retry with one stable attempt ID: %#v", requestIDs)
+	}
+	commitIndex := indexOfDrainEvent(harness.state.events, "lease.renew.commit")
+	replayIndex := indexOfDrainEvent(harness.state.events, "lease.renew.replay")
+	checkpointIndex := indexOfDrainEvent(harness.state.events, "checkpoint.ready")
+	releaseIndex := indexOfDrainEvent(harness.state.events, "release")
+	if commitIndex >= replayIndex || replayIndex >= checkpointIndex || checkpointIndex >= releaseIndex {
+		t.Fatalf("Drain Renew replay did not fence Checkpoint and Release: %#v", harness.state.events)
+	}
+}
+
+func TestDaemonDrainMarksDataLossRiskWhenManagedCheckpointFails(t *testing.T) {
+	harness := newDaemonDrainHarnessWithOptions(t, daemonDrainHarnessOptions{
+		runnerDelay:          5 * time.Second,
+		drainTimeout:         50 * time.Millisecond,
+		managed:              true,
+		checkpointCreateFail: true,
+	})
+	harness.startAndCancel(t)
+	harness.wait(t)
+
+	harness.state.Lock()
+	defer harness.state.Unlock()
+	if !harness.state.released || harness.state.checkpointReady || harness.state.checkpointCreateCalls != 3 {
+		t.Fatalf(
+			"failed managed Drain Checkpoint had an unexpected lifecycle: released=%t checkpointReady=%t createCalls=%d events=%#v",
+			harness.state.released, harness.state.checkpointReady, harness.state.checkpointCreateCalls, harness.state.events,
+		)
+	}
+	if !strings.Contains(harness.state.releaseReason, "data-loss-risk=workspace-checkpoint-failed") ||
+		strings.Contains(harness.state.releaseReason, "workspace-checkpoint=ready") {
+		t.Fatalf("failed managed Drain Checkpoint was not explicit in the recovery Event reason: %q", harness.state.releaseReason)
+	}
+	checkpointIndex := indexOfDrainEvent(harness.state.events, "checkpoint.create")
+	releaseIndex := indexOfDrainEvent(harness.state.events, "release")
+	workspaceReleaseIndex := indexOfDrainEvent(harness.state.events, "workspace.release")
+	if checkpointIndex >= releaseIndex || releaseIndex >= workspaceReleaseIndex {
+		t.Fatalf("failed managed Drain did not retain the Workspace lock through release: %#v", harness.state.events)
+	}
+}
+
+func TestDaemonDrainDoesNotInspectWorkspaceAfterLeaseProbeFails(t *testing.T) {
+	harness := newDaemonDrainHarnessWithOptions(t, daemonDrainHarnessOptions{
+		runnerDelay:  5 * time.Second,
+		drainTimeout: 50 * time.Millisecond,
+		managed:      true,
+		renewFail:    true,
+	})
+	harness.startAndCancel(t)
+	harness.wait(t)
+
+	harness.state.Lock()
+	defer harness.state.Unlock()
+	if !harness.state.released || harness.state.checkpointCreateCalls != 0 ||
+		indexOfDrainEvent(harness.state.events, "workspace.inspect") != len(harness.state.events) {
+		t.Fatalf("fenced Drain inspected or checkpointed the Workspace: %#v", harness.state.events)
+	}
+	if !strings.Contains(harness.state.releaseReason, "data-loss-risk=workspace-checkpoint-failed") {
+		t.Fatalf("fenced Drain release did not preserve the data-loss warning: %q", harness.state.releaseReason)
+	}
+	if len(harness.state.drainRenewRequestIDs) != 1 {
+		t.Fatalf(
+			"deterministic 409 Drain Renew was retried: requestIDs=%#v events=%#v",
+			harness.state.drainRenewRequestIDs,
+			harness.state.events,
+		)
+	}
+}
+
+func TestDaemonDrainReleasesAfterNormalRenewalIsCanceled(t *testing.T) {
+	harness := newDaemonDrainHarnessWithOptions(t, daemonDrainHarnessOptions{
+		runnerDelay:        5 * time.Second,
+		drainTimeout:       50 * time.Millisecond,
+		managed:            true,
+		blockFirstRenew:    true,
+		leaseRenewInterval: time.Millisecond,
+	})
+	select {
+	case <-harness.state.started:
+	case <-time.After(3 * time.Second):
+		t.Fatal("agentd did not start the claimed Execution")
+	}
+	select {
+	case <-harness.state.renewStarted:
+	case <-time.After(3 * time.Second):
+		t.Fatal("agentd did not begin normal Lease renewal")
+	}
+	harness.cancel()
+	time.Sleep(100 * time.Millisecond)
+	close(harness.state.unblockRenew)
+	harness.wait(t)
+
+	harness.state.Lock()
+	defer harness.state.Unlock()
+	if !harness.state.released || !harness.state.checkpointReady {
+		t.Fatalf("cancelled normal renewal skipped Drain Checkpoint or Release: %#v", harness.state.events)
+	}
+	if !strings.Contains(harness.state.releaseReason, "workspace-checkpoint=ready") {
+		t.Fatalf("cancelled normal renewal lost the safe Drain reason: %q", harness.state.releaseReason)
+	}
+	if len(harness.state.normalRenewRequestIDs) != 1 || len(harness.state.drainRenewRequestIDs) != 1 ||
+		harness.state.normalRenewRequestIDs[0] == harness.state.drainRenewRequestIDs[0] {
+		t.Fatalf(
+			"normal and Drain Renew did not use isolated request identities: normal=%#v drain=%#v",
+			harness.state.normalRenewRequestIDs,
+			harness.state.drainRenewRequestIDs,
+		)
+	}
+}
+
+func TestClientReleaseRetriesWithStableRequestIDAfterResponseLoss(t *testing.T) {
+	executionID := uuid.New()
+	lease := executions.Lease{
+		ExecutionID: executionID,
+		TenantID:    uuid.New(),
+		WorkerID:    uuid.New(),
+		Generation:  7,
+		LeaseToken:  "lease-token",
+	}
+	var requestIDs []string
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		requestIDs = append(requestIDs, request.Header.Get("X-Request-ID"))
+		if len(requestIDs) == 1 {
+			connection, _, err := response.(http.Hijacker).Hijack()
+			if err != nil {
+				t.Fatal(err)
+			}
+			_ = connection.Close()
+			return
+		}
+		response.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+	controlPlaneURL, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := NewClient(Config{ControlPlaneURL: controlPlaneURL, RequestTimeout: time.Second})
+	client.workerToken = "worker-token"
+	if err := client.Release(context.Background(), executionID, lease, "worker-drain; data-loss-risk=workspace-checkpoint-failed"); err != nil {
+		t.Fatal(err)
+	}
+	if len(requestIDs) != 2 || requestIDs[0] == "" || requestIDs[0] != requestIDs[1] {
+		t.Fatalf("Execution release did not retry with one stable request ID: %#v", requestIDs)
+	}
+}
+
+func TestRenewRequestIDsAreFreshAcrossOrdinaryCallsAndDrainAttempts(t *testing.T) {
+	requestIDs := make(chan string, 4)
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		requestIDs <- request.Header.Get("X-Request-ID")
+		response.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+	controlPlaneURL, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := NewClient(Config{ControlPlaneURL: controlPlaneURL, RequestTimeout: time.Second})
+	client.workerToken = "worker-token"
+	executionID := uuid.New()
+	lease := executions.Lease{
+		ExecutionID: executionID,
+		TenantID:    uuid.New(),
+		WorkerID:    uuid.New(),
+		Generation:  7,
+		LeaseToken:  "lease-token",
+	}
+	if err := client.Renew(context.Background(), executionID, lease); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Renew(context.Background(), executionID, lease); err != nil {
+		t.Fatal(err)
+	}
+	daemon := &Daemon{client: client}
+	if err := daemon.renewLeaseForDrainCheckpoint(context.Background(), executionID, lease); err != nil {
+		t.Fatal(err)
+	}
+	if err := daemon.renewLeaseForDrainCheckpoint(context.Background(), executionID, lease); err != nil {
+		t.Fatal(err)
+	}
+	ordinaryFirst, ordinarySecond := <-requestIDs, <-requestIDs
+	drainFirst, drainSecond := <-requestIDs, <-requestIDs
+	if ordinaryFirst == "" || ordinarySecond == "" || ordinaryFirst == ordinarySecond ||
+		strings.HasPrefix(ordinaryFirst, drainCheckpointRenewRequestIDPrefix) ||
+		strings.HasPrefix(ordinarySecond, drainCheckpointRenewRequestIDPrefix) {
+		t.Fatalf(
+			"ordinary Renew did not use a fresh request ID per call: %q, %q",
+			ordinaryFirst,
+			ordinarySecond,
+		)
+	}
+	if drainFirst == "" || drainSecond == "" || drainFirst == drainSecond ||
+		!strings.HasPrefix(drainFirst, drainCheckpointRenewRequestIDPrefix) ||
+		!strings.HasPrefix(drainSecond, drainCheckpointRenewRequestIDPrefix) {
+		t.Fatalf(
+			"Drain Renew attempts did not use unique attempt IDs: %q, %q",
+			drainFirst,
+			drainSecond,
+		)
+	}
+}
+
 type daemonDrainHarness struct {
 	cancel context.CancelFunc
 	done   <-chan error
@@ -63,27 +329,62 @@ type daemonDrainHarness struct {
 
 type daemonDrainState struct {
 	sync.Mutex
-	claimIssued bool
-	draining    bool
-	completed   bool
-	released    bool
-	failed      bool
-	events      []string
-	started     chan struct{}
-	startOnce   sync.Once
+	claimIssued           bool
+	draining              bool
+	completed             bool
+	released              bool
+	failed                bool
+	checkpointReady       bool
+	checkpointCreateCalls int
+	releaseReason         string
+	events                []string
+	started               chan struct{}
+	startOnce             sync.Once
+	renewStarted          chan struct{}
+	unblockRenew          chan struct{}
+	renewStartOnce        sync.Once
+	renewCalls            int
+	normalRenewRequestIDs []string
+	drainRenewRequestIDs  []string
+	drainRenewReceiptID   string
+	drainRenewCommits     int
+	drainRenewReplays     int
 }
 
 func newDaemonDrainHarness(t *testing.T, runnerDelay, drainTimeout time.Duration) daemonDrainHarness {
+	return newDaemonDrainHarnessWithOptions(t, daemonDrainHarnessOptions{
+		runnerDelay:  runnerDelay,
+		drainTimeout: drainTimeout,
+	})
+}
+
+type daemonDrainHarnessOptions struct {
+	runnerDelay                 time.Duration
+	drainTimeout                time.Duration
+	managed                     bool
+	checkpointCreateFail        bool
+	renewFail                   bool
+	blockFirstRenew             bool
+	leaseRenewInterval          time.Duration
+	drainRenewLoseFirstResponse bool
+}
+
+func newDaemonDrainHarnessWithOptions(t *testing.T, options daemonDrainHarnessOptions) daemonDrainHarness {
 	t.Helper()
 	t.Setenv("GO_WANT_AGENTD_DRAIN_HELPER", "1")
-	t.Setenv("AGENTD_DRAIN_HELPER_DELAY", runnerDelay.String())
+	t.Setenv("AGENTD_DRAIN_HELPER_DELAY", options.runnerDelay.String())
 
 	executionID := uuid.New()
 	tenantID := uuid.New()
 	workerID := uuid.New()
 	targetID := uuid.New()
 	turnID := uuid.New()
-	state := &daemonDrainState{started: make(chan struct{})}
+	workspaceID := uuid.New()
+	checkpointID := uuid.New()
+	artifactID := uuid.New()
+	state := &daemonDrainState{
+		started: make(chan struct{}), renewStarted: make(chan struct{}), unblockRenew: make(chan struct{}),
+	}
 	execution := executions.Execution{
 		ID: executionID, TenantID: tenantID, SessionID: uuid.New(), TurnID: turnID,
 		Status: "leased", ExecutionTargetID: targetID, TargetKind: "local", Generation: 1,
@@ -97,8 +398,13 @@ func newDaemonDrainHarness(t *testing.T, runnerDelay, drainTimeout time.Duration
 		TurnID: turnID, Provider: "codex", InputText: "finish safely while the Worker drains",
 		RuntimeMode: "approval-required", InteractionMode: "default", DefaultBranch: "main",
 	}
+	if options.managed {
+		workload.RemoteWorkspaceID = &workspaceID
+	}
 
-	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		base := "/v1/workers/executions/" + executionID.String() + "/"
 		switch request.URL.Path {
 		case "/v1/workers/register":
 			if request.Header.Get("Authorization") != "Bearer registration-token" {
@@ -145,22 +451,130 @@ func newDaemonDrainHarness(t *testing.T, runnerDelay, drainTimeout time.Duration
 			_ = json.NewEncoder(response).Encode(executions.ClaimResult{
 				Execution: &execution, Lease: &lease, Workload: &workload,
 			})
-		case "/v1/workers/executions/" + executionID.String() + "/start":
+		case base + "workspace/ready":
+			state.Lock()
+			state.events = append(state.events, "workspace.ready")
+			state.Unlock()
+			response.WriteHeader(http.StatusNoContent)
+		case base + "workspace/dirty":
+			state.Lock()
+			state.events = append(state.events, "workspace.dirty")
+			state.Unlock()
+			response.WriteHeader(http.StatusNoContent)
+		case base + "renew":
+			requestID := request.Header.Get("X-Request-ID")
+			drainRenew := strings.HasPrefix(requestID, drainCheckpointRenewRequestIDPrefix)
+			loseResponse := false
+			state.Lock()
+			state.renewCalls++
+			renewCall := state.renewCalls
+			state.events = append(state.events, "lease.renew")
+			if drainRenew {
+				state.drainRenewRequestIDs = append(state.drainRenewRequestIDs, requestID)
+			} else {
+				state.normalRenewRequestIDs = append(state.normalRenewRequestIDs, requestID)
+			}
+			if options.drainRenewLoseFirstResponse && drainRenew {
+				switch {
+				case state.drainRenewReceiptID == "":
+					state.drainRenewReceiptID = requestID
+					state.drainRenewCommits++
+					state.events = append(state.events, "lease.renew.commit")
+					loseResponse = true
+				case state.drainRenewReceiptID == requestID:
+					state.drainRenewReplays++
+					state.events = append(state.events, "lease.renew.replay")
+				default:
+					state.drainRenewCommits++
+					state.events = append(state.events, "lease.renew.commit")
+				}
+			}
+			state.renewStartOnce.Do(func() { close(state.renewStarted) })
+			state.Unlock()
+			if loseResponse {
+				connection, _, err := response.(http.Hijacker).Hijack()
+				if err != nil {
+					t.Errorf("hijack committed Drain Renew response: %v", err)
+					return
+				}
+				_ = connection.Close()
+				return
+			}
+			if options.blockFirstRenew && renewCall == 1 {
+				<-state.unblockRenew
+				http.Error(response, "normal renewal canceled", http.StatusServiceUnavailable)
+				return
+			}
+			if options.renewFail {
+				http.Error(response, "generation fenced", http.StatusConflict)
+				return
+			}
+			response.WriteHeader(http.StatusNoContent)
+		case base + "workspace/checkpoints":
+			state.Lock()
+			state.checkpointCreateCalls++
+			state.events = append(state.events, "checkpoint.create")
+			state.Unlock()
+			if options.checkpointCreateFail {
+				http.Error(response, "checkpoint unavailable", http.StatusServiceUnavailable)
+				return
+			}
+			response.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(response, `{"id":"`+checkpointID.String()+`","status":"pending"}`)
+		case base + "artifacts":
+			state.Lock()
+			state.events = append(state.events, "checkpoint.artifact.create")
+			state.Unlock()
+			response.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(response, `{"artifact":{"id":"`+artifactID.String()+`","status":"pending"},"method":"PUT","url":"`+
+				server.URL+`/checkpoint-upload","headers":{},"expiresAt":"2030-01-01T00:00:00Z"}`)
+		case "/checkpoint-upload":
+			state.Lock()
+			state.events = append(state.events, "checkpoint.upload")
+			state.Unlock()
+			_, _ = io.Copy(io.Discard, request.Body)
+			response.WriteHeader(http.StatusNoContent)
+		case base + "artifacts/" + artifactID.String() + "/complete":
+			var input struct {
+				SHA256 string `json:"sha256"`
+			}
+			if err := json.NewDecoder(request.Body).Decode(&input); err != nil || input.SHA256 == "" {
+				http.Error(response, "invalid Artifact completion", http.StatusBadRequest)
+				return
+			}
+			state.Lock()
+			state.events = append(state.events, "checkpoint.artifact.ready")
+			state.Unlock()
+			response.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(response, `{"id":"`+artifactID.String()+`","status":"ready","sha256":"`+input.SHA256+`"}`)
+		case base + "workspace/checkpoints/" + checkpointID.String() + "/ready":
+			state.Lock()
+			state.checkpointReady = true
+			state.events = append(state.events, "checkpoint.ready")
+			state.Unlock()
+			response.WriteHeader(http.StatusNoContent)
+		case base + "start":
 			state.startOnce.Do(func() { close(state.started) })
 			response.WriteHeader(http.StatusNoContent)
-		case "/v1/workers/executions/" + executionID.String() + "/complete":
+		case base + "complete":
 			state.Lock()
 			state.completed = true
 			state.events = append(state.events, "complete")
 			state.Unlock()
 			response.WriteHeader(http.StatusNoContent)
-		case "/v1/workers/executions/" + executionID.String() + "/release":
+		case base + "release":
+			var input executions.ReleaseLeaseInput
+			if err := json.NewDecoder(request.Body).Decode(&input); err != nil {
+				http.Error(response, "invalid release", http.StatusBadRequest)
+				return
+			}
 			state.Lock()
 			state.released = true
+			state.releaseReason = input.Reason
 			state.events = append(state.events, "release")
 			state.Unlock()
 			response.WriteHeader(http.StatusNoContent)
-		case "/v1/workers/executions/" + executionID.String() + "/fail":
+		case base + "fail":
 			state.Lock()
 			state.failed = true
 			state.events = append(state.events, "fail")
@@ -175,16 +589,46 @@ func newDaemonDrainHarness(t *testing.T, runnerDelay, drainTimeout time.Duration
 	if err != nil {
 		t.Fatal(err)
 	}
+	leaseRenewInterval := time.Hour
+	if options.leaseRenewInterval > 0 {
+		leaseRenewInterval = options.leaseRenewInterval
+	}
 	cfg := Config{
 		ControlPlaneURL: controlPlaneURL, RegistrationToken: "registration-token",
 		ExecutionTargetID: targetID, TargetKind: platform.TargetLocal,
 		ClusterID: "test", Namespace: "test", PodName: "drain-worker", Version: "test",
 		RunnerCommand:  agentdDrainRunnerTestCommand(),
 		RunnerProtocol: RunnerProtocolV1, WorkspaceRoot: t.TempDir(), PollInterval: time.Millisecond,
-		HeartbeatInterval: time.Hour, LeaseRenewInterval: time.Hour, DrainTimeout: drainTimeout,
+		HeartbeatInterval: time.Hour, LeaseRenewInterval: leaseRenewInterval, DrainTimeout: options.drainTimeout,
 		RequestTimeout: time.Second, ArtifactTimeout: time.Second, RunnerMessageBytes: 1 << 20,
 	}
 	daemon := NewDaemon(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if options.managed {
+		workspaceDirectory := t.TempDir()
+		if err := os.WriteFile(filepath.Join(workspaceDirectory, "drain-result.txt"), []byte("preserve me\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		daemon.workspace = workspaceMaterializerInspector{
+			materialize: func(context.Context, executions.Execution, executions.Workload, *WorkspaceGitCredential) (WorkspaceMaterialization, error) {
+				return WorkspaceMaterialization{
+					Directory: workspaceDirectory,
+					Managed:   true,
+					release: func() error {
+						state.Lock()
+						state.events = append(state.events, "workspace.release")
+						state.Unlock()
+						return nil
+					},
+				}, nil
+			},
+			inspect: func(context.Context, WorkspaceMaterialization) (WorkspaceInspection, error) {
+				state.Lock()
+				state.events = append(state.events, "workspace.inspect")
+				state.Unlock()
+				return WorkspaceInspection{Dirty: true}, nil
+			},
+		}
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- daemon.Run(ctx) }()

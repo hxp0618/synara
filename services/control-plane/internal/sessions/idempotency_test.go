@@ -166,6 +166,61 @@ func TestSessionCreateAndArchiveIdempotency(t *testing.T) {
 	}
 }
 
+func TestSessionCreateAutoSelectUsesTransactionSelectionWithoutChangingIdempotencyHash(t *testing.T) {
+	fixture := newTenantExecutionPolicyFixture(t)
+	ctx := context.Background()
+	organizationCredentialID := uuid.New()
+	userCredentialID := uuid.New()
+	for _, credential := range []persistence.ProviderCredential{
+		{
+			ID: organizationCredentialID, TenantID: fixture.tenantID, OrganizationID: &fixture.organizationID,
+			Scope: "organization", AutoSelectEnabled: true, Name: "Organization Codex",
+			Purpose: "provider", Provider: "codex", CredentialType: "api_key",
+			EncryptedPayload: []byte("organization"), EncryptedDataKey: []byte("organization-key"),
+			KMSProvider: "local", KMSKeyID: "test", Version: 1,
+			CreatedBy: fixture.principal.UserID, UpdatedBy: fixture.principal.UserID,
+		},
+		{
+			ID: userCredentialID, TenantID: fixture.tenantID, Scope: "user",
+			ScopeUserID: &fixture.principal.UserID, AutoSelectEnabled: true, Name: "User Codex",
+			Purpose: "provider", Provider: "codex", CredentialType: "api_key",
+			EncryptedPayload: []byte("user"), EncryptedDataKey: []byte("user-key"),
+			KMSProvider: "local", KMSKeyID: "test", Version: 1,
+			CreatedBy: fixture.principal.UserID, UpdatedBy: fixture.principal.UserID,
+		},
+	} {
+		if err := fixture.db.Create(&credential).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	input := CreateSessionInput{Title: "Automatic Credential", Visibility: "private", Provider: "codex"}
+	first, replayed, err := fixture.service.CreateWithIdempotency(
+		ctx, fixture.principal, fixture.projectID, input, "session-auto-credential", "session-auto-first", "127.0.0.1",
+	)
+	if err != nil || replayed {
+		t.Fatalf("first automatic Session = %#v replayed=%t err=%v", first, replayed, err)
+	}
+	if first.ProviderCredentialID == nil || *first.ProviderCredentialID != userCredentialID {
+		t.Fatalf("automatic selection did not prefer User scope: %#v", first.ProviderCredentialID)
+	}
+
+	if err := fixture.db.Model(&persistence.ProviderCredential{}).
+		Where("tenant_id = ? AND id = ?", fixture.tenantID, userCredentialID).
+		Update("auto_select_enabled", false).Error; err != nil {
+		t.Fatal(err)
+	}
+	replayedSession, replayed, err := fixture.service.CreateWithIdempotency(
+		ctx, fixture.principal, fixture.projectID, input, "session-auto-credential", "session-auto-replay", "127.0.0.1",
+	)
+	if err != nil || !replayed || replayedSession.ID != first.ID {
+		t.Fatalf("policy drift changed the idempotent request identity: first=%#v replay=%#v replayed=%t err=%v", first, replayedSession, replayed, err)
+	}
+	if replayedSession.ProviderCredentialID == nil || *replayedSession.ProviderCredentialID != userCredentialID {
+		t.Fatalf("idempotent replay changed the persisted Credential binding: %#v", replayedSession.ProviderCredentialID)
+	}
+}
+
 func TestSessionModelSwitchIdempotencyDoesNotDuplicateBindingEventOrAudit(t *testing.T) {
 	fixture := newTenantExecutionPolicyFixture(t)
 	ctx := context.Background()

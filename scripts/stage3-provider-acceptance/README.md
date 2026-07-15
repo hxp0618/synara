@@ -25,6 +25,84 @@ JSON, Markdown, and redacted logs are written under `.tmp/stage3-provider-accept
 `--output-dir` for an explicit destination. `--keep` additionally preserves the isolated SQLite, Artifact,
 Workspace, Git cache, and built Control Plane state beneath that destination.
 
+Every run ends with `security.output-secret-scan`. It scans generated JSON, Markdown, text metadata, and logs for
+all runtime Secrets known to the redactor plus high-confidence private-key, AWS, GitHub, and OpenAI-style key
+patterns. The report records only file, pattern name, and byte offset; it never echoes matched material. Binary
+SQLite and Artifact payloads are deliberately excluded from this output scan and remain covered by their own
+storage/SecretGuard acceptance.
+
+## Deterministic failure and canary matrix
+
+The fault matrix is opt-in so the default core suite remains stable and fast:
+
+```sh
+python3 scripts/stage3-provider-acceptance/acceptance_runner.py \
+  --target local \
+  --provider codex \
+  --failure-matrix
+
+python3 scripts/stage3-provider-acceptance/acceptance_runner.py \
+  --target docker \
+  --provider codex \
+  --failure-matrix
+
+python3 scripts/stage3-provider-acceptance/acceptance_runner.py \
+  --target kubernetes \
+  --provider codex \
+  --failure-matrix \
+  --timeout 1800
+```
+
+Use repeated `--failure-case` flags for a minimal targeted run. The canonical case order is stable regardless of
+CLI argument order:
+
+```sh
+python3 scripts/stage3-provider-acceptance/acceptance_runner.py \
+  --target local \
+  --failure-only \
+  --failure-case provider-malformed \
+  --failure-case provider-crash
+```
+
+`--failure-only` runs only isolated setup, one baseline smoke, the selected fault/canary cases, one final
+continuity smoke, cleanup, and the output Secret scan. It is intended for focused iteration; a release report
+still requires the default core suite plus the required failure matrix.
+
+The available cases are:
+
+| Case                      | Targets           | Product-path assertion                                                                                   |
+| ------------------------- | ----------------- | -------------------------------------------------------------------------------------------------------- |
+| `provider-malformed`      | all               | `protocol_violation`, one failed terminal, then a successful next Turn                                   |
+| `provider-oversized`      | all               | oversized JSONL is `protocol_violation`, then Host recovery                                              |
+| `provider-crash`          | all               | mid-Turn Host exit is `provider_unavailable`, then Host recovery                                         |
+| `worker-network`          | Docker/Kubernetes | outage crosses the 6-second acceptance Lease TTL, then Generation-fenced Approval recovery               |
+| `kubernetes-drain`        | Kubernetes        | exact Node cordon/drain/uncordon with a target+execution Pod selector and graceful Pod DELETE            |
+| `kubernetes-eviction`     | Kubernetes        | `policy/v1` Eviction with exact Namespace, Pod name, and UID precondition                                |
+| `kubernetes-image-canary` | Kind Kubernetes   | independent canary Target/Namespace/Session through the user API, followed by baseline Target continuity |
+
+Docker network interruption disconnects only the exact managed Worker container. It runs automatically only on
+the runner-created network; mutating a supplied network requires `--docker-allow-network-interruption`.
+Kubernetes Worker network interruption closes connections at the runner-owned Worker-only proxy while the user API
+remains reachable. This is deterministic transport-loss evidence, not proof that a particular CNI enforces
+NetworkPolicy. The default outage is eight seconds and cannot be configured below seven seconds.
+
+Kubernetes Node drain runs automatically only on an owned disposable Kind cluster. Reused contexts require both
+the existing `--kubernetes-allow-nondisposable` gate and the separate
+`--kubernetes-allow-node-drain` authorization. The runner always attempts `uncordon` in `finally`. Eviction stays
+scoped to the unique acceptance Namespace and Pod UID and does not require Node mutation.
+
+The image canary creates a runner-owned local image alias and loads it into Kind, then creates a second Target via
+the real user API. It proves Target isolation, image selection, Worker Manifest discovery, Approval round-trip,
+and baseline continuity. Because the alias points to the same deterministic fixture image, it does **not** prove
+an immutable-digest promotion/rollback implementation or a real Codex/Claude upgrade. Non-Kind clusters are
+reported as explicit unsupported until a product release revision API and caller-published immutable image exist.
+
+All Docker networks/volumes and Kubernetes bootstrap/Target Namespaces receive a unique acceptance owner label.
+Cleanup verifies that label before deleting reusable-cluster or Docker resources, uses exact Target labels for
+Worker containers/Pods, and never runs prune or broad label-only deletion. On failure the report retains only
+redacted Control Plane log paths plus a bounded container/Pod status summary; it does not dump SQLite, Credential
+payloads, Workspace contents, or Kubernetes Secrets.
+
 Run the Docker fixture suite against the current checkout:
 
 ```sh
@@ -100,21 +178,31 @@ must be explicitly enabled; the other six Providers remain Local-only.
 
 SendTurn scenarios are selected with composable `inputText` directives:
 
-| Directive            | Deterministic behavior                                                         |
-| -------------------- | ------------------------------------------------------------------------------ |
-| `[text]`             | Canonical `content.delta`                                                      |
-| `[tool]`             | Canonical tool item start/completion                                           |
-| `[usage]`            | Canonical token usage event                                                    |
-| `[approval]`         | Approval InteractionRequest, completed by ResolveApproval                      |
-| `[user-input]`       | User-input InteractionRequest, completed by ResolveUserInput                   |
-| `[artifact]`         | Creates and emits a Workspace-local artifact candidate                         |
-| `[workspace-verify]` | Reads and verifies the exact artifact sentinel already stored in the Workspace |
-| `[credential]`       | Reads the anonymous FD once and returns boolean/key-only verification evidence |
-| `[provider-error]`   | Stable `provider_rate_limited` terminal Error                                  |
-| `[steer]`            | Pending turn completed by SteerTurn                                            |
+| Directive              | Deterministic behavior                                                         |
+| ---------------------- | ------------------------------------------------------------------------------ |
+| `[text]`               | Canonical `content.delta`                                                      |
+| `[tool]`               | Canonical tool item start/completion                                           |
+| `[usage]`              | Canonical token usage event                                                    |
+| `[approval]`           | Approval InteractionRequest, completed by ResolveApproval                      |
+| `[user-input]`         | User-input InteractionRequest, completed by ResolveUserInput                   |
+| `[artifact]`           | Creates and emits a Workspace-local artifact candidate                         |
+| `[terminal-large]`     | Emits `2 MiB + 257 B` of deterministic safe Terminal output in 63 KiB chunks   |
+| `[workspace-verify]`   | Reads and verifies the exact artifact sentinel already stored in the Workspace |
+| `[credential]`         | Reads the anonymous FD once and returns boolean/key-only verification evidence |
+| `[provider-error]`     | Stable `provider_rate_limited` terminal Error                                  |
+| `[provider-malformed]` | Emits one malformed JSONL line for agentd protocol classification              |
+| `[provider-oversized]` | Emits one over-limit JSONL line for agentd protocol classification             |
+| `[provider-crash]`     | Exits the fixture process with status 73 during SendTurn                       |
+| `[steer]`              | Pending turn completed by SteerTurn                                            |
 
 Input without a directive defaults to `[text]`. Only one blocking directive (`approval`, `user-input`, or
 `steer`) may be active in a SendTurn.
+
+Every Target suite runs `[terminal-large]` through the real agentd collector. Acceptance requires an exact 32 KiB
+Session Event preview, three `terminal_log` Artifact references at offsets `0 / 1 MiB / 2 MiB`, segment lengths
+`1 MiB / 1 MiB / 257 B`, matching Ready Artifact size/SHA-256 metadata, correct completion totals, and no Runtime
+Output physical path in Session Events. The escape-free 63 KiB fixture chunks leave room beneath the 64 KiB Runtime
+Event payload limit; Artifact segmentation remains fixed at 1 MiB.
 
 Protocol fault hooks are opt-in and fire once on the selected command:
 

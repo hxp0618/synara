@@ -3,6 +3,7 @@ package executiontargets
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -10,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"gorm.io/gorm"
@@ -203,6 +205,182 @@ func TestDockerPoolReconcilerDefersBusyConfigReplacementWithoutNameConflict(t *t
 	}
 }
 
+func TestDockerPoolReconcilerMaterializesPromotedAndCanaryReleaseImagesWithPullCredential(t *testing.T) {
+	fixture := newDockerReconcileFixture(t, 4)
+	configuration := dockerTestConfiguration(4)
+	configuration["image"] = "ghcr.io/synara/worker:mutable"
+	fixture.updateConfiguration(t, configuration)
+	promotedDigest := "sha256:" + strings.Repeat("a", 64)
+	canaryDigest := "sha256:" + strings.Repeat("b", 64)
+	promotedRevision := fixture.seedReleaseRevision(t, 1, promotedDigest)
+	canaryRevision := fixture.seedReleaseRevision(t, 2, canaryDigest)
+	policy := persistence.WorkerReleasePolicy{
+		TenantID: fixture.tenantID, ExecutionTargetID: fixture.targetID, PolicyVersion: 1,
+		PromotedRevisionID: promotedRevision, CanaryRevisionID: &canaryRevision, CanaryPercent: 25,
+		UpdatedBy: fixture.userID, UpdatedAt: time.Now().UTC(),
+	}
+	if err := fixture.db.Create(&policy).Error; err != nil {
+		t.Fatal(err)
+	}
+	credential := &ImagePullCredential{
+		BindingID: uuid.New(), CredentialID: uuid.New(), CredentialVersion: 3,
+		Host: "ghcr.io", Username: "synara", Password: "registry-secret",
+	}
+	fixture.reconciler.config.ResolveImagePull = func(_ context.Context, _, _ uuid.UUID, selector string) (ImagePullCredentialResolution, error) {
+		if selector != "ghcr.io" {
+			t.Fatalf("Docker image pull selector = %q", selector)
+		}
+		return ImagePullCredentialResolution{Credential: credential, Authoritative: true}, nil
+	}
+	engine := newFakeDockerEngine()
+	fixture.reconciler.factory = &fakeDockerFactory{engine: engine}
+
+	if err := fixture.reconciler.ReconcileOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(engine.createdSpecs) != 4 || len(engine.ensuredImages) != 2 {
+		t.Fatalf("release reconciliation creates=%d images=%#v", len(engine.createdSpecs), engine.ensuredImages)
+	}
+	channels := map[string]int{}
+	for _, spec := range engine.createdSpecs {
+		channel := spec.Labels[dockerReleaseChannelLabel]
+		channels[channel]++
+		if channel == "promoted" && spec.Image != "ghcr.io/synara/worker@"+promotedDigest {
+			t.Fatalf("promoted image = %q", spec.Image)
+		}
+		if channel == "canary" && spec.Image != "ghcr.io/synara/worker@"+canaryDigest {
+			t.Fatalf("canary image = %q", spec.Image)
+		}
+		imageParts := strings.SplitN(spec.Image, "@", 2)
+		if len(imageParts) != 2 || !strings.Contains(strings.Join(spec.Environment, "\n"), "SYNARA_AGENTD_IMAGE_DIGEST="+imageParts[1]) {
+			t.Fatalf("release digest was not projected into the Worker environment: %#v", spec.Environment)
+		}
+	}
+	if channels["promoted"] != 3 || channels["canary"] != 1 {
+		t.Fatalf("release channel allocation = %#v", channels)
+	}
+	for _, resolved := range engine.pullCredentials {
+		if resolved != credential {
+			t.Fatalf("image pull Credential projection changed: %#v", resolved)
+		}
+	}
+}
+
+func TestDockerPoolReconcilerBusyPromotedWorkerDoesNotReserveCanarySlot(t *testing.T) {
+	fixture := newDockerReconcileFixture(t, 4)
+	configuration := dockerTestConfiguration(4)
+	configuration["image"] = "ghcr.io/synara/worker:mutable"
+	fixture.updateConfiguration(t, configuration)
+	promotedRevision := fixture.seedReleaseRevision(t, 1, "sha256:"+strings.Repeat("a", 64))
+	canaryRevision := fixture.seedReleaseRevision(t, 2, "sha256:"+strings.Repeat("b", 64))
+	policy := persistence.WorkerReleasePolicy{
+		TenantID: fixture.tenantID, ExecutionTargetID: fixture.targetID, PolicyVersion: 1,
+		PromotedRevisionID: promotedRevision, UpdatedBy: fixture.userID, UpdatedAt: time.Now().UTC(),
+	}
+	if err := fixture.db.Create(&policy).Error; err != nil {
+		t.Fatal(err)
+	}
+	engine := newFakeDockerEngine()
+	fixture.reconciler.factory = &fakeDockerFactory{engine: engine}
+	busy := map[string]bool{}
+	fixture.reconciler.busyWorkers = func(context.Context, uuid.UUID) (map[string]bool, error) { return busy, nil }
+	if err := fixture.reconciler.ReconcileOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	busyName := fmt.Sprintf("synara-agentd-%s-promoted-3", fixture.targetID)
+	busyContainer := engine.containers[busyName]
+	if busyContainer.ID == "" {
+		t.Fatalf("baseline promoted Worker %q was not created", busyName)
+	}
+	busy[busyName] = true
+	if err := fixture.db.Model(&persistence.WorkerReleasePolicy{}).
+		Where("execution_target_id = ? AND policy_version = ?", fixture.targetID, 1).
+		Updates(map[string]any{
+			"policy_version": 2, "canary_revision_id": canaryRevision,
+			"canary_percent": 25, "updated_at": time.Now().UTC(),
+		}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.reconciler.ReconcileOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if current := engine.containers[busyName]; current.ID != busyContainer.ID {
+		t.Fatalf("busy promoted Worker was replaced: before=%s after=%s", busyContainer.ID, current.ID)
+	}
+	canaryName := fmt.Sprintf("synara-agentd-%s-canary-0", fixture.targetID)
+	if canary := engine.containers[canaryName]; canary.ID == "" {
+		t.Fatalf("busy promoted Worker reserved the canary slot: containers=%#v", engine.containers)
+	}
+}
+
+func TestDockerReleaseSlotsStayWithinDesiredCapacity(t *testing.T) {
+	promoted := managedReleaseImage{RevisionID: uuid.New(), Channel: "promoted", Image: "worker@sha256:" + strings.Repeat("a", 64)}
+	canary := managedReleaseImage{RevisionID: uuid.New(), Channel: "canary", Image: "worker@sha256:" + strings.Repeat("b", 64)}
+	plan := &managedReleasePlan{Promoted: promoted, Canary: &canary, CanaryPercent: 100}
+
+	if _, err := dockerReleaseSlots(1, "worker:latest", plan); err == nil {
+		t.Fatal("one-Worker Docker pool accepted a two-channel canary policy")
+	} else {
+		assertExecutionTargetProblemCode(t, err, "docker_worker_release_canary_capacity_insufficient")
+	}
+	slots, err := dockerReleaseSlots(4, "worker:latest", plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	channels := map[string]int{}
+	for _, slot := range slots {
+		channels[slot.Channel]++
+	}
+	if len(slots) != 4 || channels["promoted"] != 1 || channels["canary"] != 3 {
+		t.Fatalf("100%% canary slots = %#v, channels=%#v", slots, channels)
+	}
+}
+
+func TestDockerRegistryAuthHeaderUsesOpaqueEngineHeader(t *testing.T) {
+	header, err := dockerRegistryAuthHeader(&ImagePullCredential{
+		Host: "ghcr.io", Username: "synara", Password: "registry-secret",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := base64.URLEncoding.DecodeString(header)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]string
+	if err := json.Unmarshal(decoded, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["serveraddress"] != "ghcr.io" || payload["username"] != "synara" ||
+		payload["password"] != "registry-secret" {
+		t.Fatalf("Docker Registry auth payload = %#v", payload)
+	}
+}
+
+func TestDockerRegistryAuthHeaderUsesPaddedEncodingAndDirectRegistryToken(t *testing.T) {
+	header, err := dockerRegistryAuthHeader(&ImagePullCredential{
+		Host: "docker.io", RegistryToken: "registry-bearer-secret",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasSuffix(header, "=") {
+		t.Fatalf("Docker Registry auth header is not padded base64url: %q", header)
+	}
+	decoded, err := base64.URLEncoding.DecodeString(header)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]string
+	if err := json.Unmarshal(decoded, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["serveraddress"] != "https://index.docker.io/v1/" ||
+		payload["registrytoken"] != "registry-bearer-secret" || payload["identitytoken"] != "" {
+		t.Fatalf("Docker Registry bearer auth payload = %#v", payload)
+	}
+}
+
 func TestDockerPoolReconcilerRejectsOverlappingWorkspaceAndGitCacheRoots(t *testing.T) {
 	reconciler := &DockerPoolReconciler{config: DockerPoolReconcilerConfig{RegistrationToken: "registration-token"}}
 	target := persistence.ExecutionTarget{ID: uuid.New()}
@@ -231,6 +409,8 @@ type dockerReconcileFixture struct {
 	targets    *Service
 	reconciler *DockerPoolReconciler
 	targetID   uuid.UUID
+	tenantID   uuid.UUID
+	userID     uuid.UUID
 }
 
 func newDockerReconcileFixture(t *testing.T, desiredWorkers int) dockerReconcileFixture {
@@ -269,7 +449,34 @@ func newDockerReconcileFixture(t *testing.T, desiredWorkers int) dockerReconcile
 	reconciler := NewDockerPoolReconciler(targetService, DockerPoolReconcilerConfig{
 		RegistrationToken: "docker-registration-secret", PublicControlPlaneURL: "http://control-plane:3780",
 	}, slog.Default())
-	return dockerReconcileFixture{db: store.DB(), targets: targetService, reconciler: reconciler, targetID: target.ID}
+	return dockerReconcileFixture{
+		db: store.DB(), targets: targetService, reconciler: reconciler,
+		targetID: target.ID, tenantID: domain.TenantID, userID: domain.UserID,
+	}
+}
+
+func (f dockerReconcileFixture) seedReleaseRevision(t *testing.T, revision int64, imageDigest string) uuid.UUID {
+	t.Helper()
+	manifestID := uuid.New()
+	manifest := persistence.WorkerManifest{
+		ID: manifestID, ManifestHash: fmt.Sprintf("%064x", revision),
+		WorkerBuildVersion: fmt.Sprintf("release-%d", revision), WorkerProtocolMinimum: 2, WorkerProtocolMaximum: 2,
+		RuntimeEventMinimum: 2, RuntimeEventMaximum: 2, OperatingSystem: "linux", Architecture: "amd64",
+		ImageDigest: &imageDigest, FeatureFlags: map[string]any{}, CreatedAt: time.Now().UTC(),
+	}
+	if err := f.db.Create(&manifest).Error; err != nil {
+		t.Fatal(err)
+	}
+	revisionID := uuid.New()
+	model := persistence.WorkerReleaseRevision{
+		ID: revisionID, TenantID: f.tenantID, ExecutionTargetID: f.targetID,
+		Revision: revision, WorkerManifestID: manifestID, Description: "test release",
+		CreatedBy: f.userID, CreatedAt: time.Now().UTC(),
+	}
+	if err := f.db.Create(&model).Error; err != nil {
+		t.Fatal(err)
+	}
+	return revisionID
 }
 
 func (f dockerReconcileFixture) updateDesiredWorkers(t *testing.T, desiredWorkers int) {
@@ -309,6 +516,8 @@ type fakeDockerEngine struct {
 	containers       map[string]dockerContainer
 	createdSpecs     []dockerContainerSpec
 	removedNames     []string
+	ensuredImages    []string
+	pullCredentials  []*ImagePullCredential
 	ensureImageCalls int
 	nextID           int
 }
@@ -328,12 +537,21 @@ func (e *fakeDockerEngine) ListManaged(_ context.Context, targetID uuid.UUID) ([
 	return items, nil
 }
 
-func (e *fakeDockerEngine) EnsureImage(context.Context, string, string) error {
+func (e *fakeDockerEngine) EnsureImage(
+	_ context.Context,
+	image, _ string,
+	credential *ImagePullCredential,
+) error {
 	e.ensureImageCalls++
+	e.ensuredImages = append(e.ensuredImages, image)
+	e.pullCredentials = append(e.pullCredentials, credential)
 	return nil
 }
 
 func (e *fakeDockerEngine) CreateAndStart(_ context.Context, spec dockerContainerSpec) (dockerContainer, error) {
+	if current, exists := e.containers[spec.Name]; exists {
+		return dockerContainer{}, fmt.Errorf("container name %s is already owned by %s", spec.Name, current.ID)
+	}
 	e.nextID++
 	container := dockerContainer{ID: fmt.Sprintf("container-%d", e.nextID), Name: spec.Name, State: "running", Labels: spec.Labels}
 	e.createdSpecs = append(e.createdSpecs, spec)

@@ -370,6 +370,7 @@ function AuthenticatedTenantPanel() {
       {canManageCredentials ? (
         <TenantCredentialSettingsSection
           key={`credentials-${activeTenant.id}`}
+          members={membersQuery.data?.items ?? []}
           organizations={controlPlane.organizations.filter(
             (organization) => organization.status === "active",
           )}
@@ -470,6 +471,8 @@ function AuthenticatedTenantPanel() {
           {canReadExecutionTargets ? (
             <ExecutionTargetSettingsSection
               canManage={canManageExecutionTargets}
+              canManageCredentialBindings={canManageExecutionTargets && canManageCredentials}
+              credentials={credentialsQuery.data?.items ?? []}
               error={executionTargetsQuery.error}
               isLoading={executionTargetsQuery.isPending}
               onCreated={(target) => {
@@ -513,6 +516,7 @@ function AuthenticatedTenantPanel() {
             credentials={credentialsQuery.data?.items ?? []}
             executionTargets={executionTargetsQuery.data?.items ?? []}
             tenantId={activeTenant.id}
+            userId={controlPlane.session!.user.userId}
             organizations={controlPlane.organizations.filter(
               (organization) => organization.status === "active",
             )}

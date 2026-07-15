@@ -180,6 +180,7 @@ import {
   resolveProjectScriptTerminalTarget,
   resolvePromptHistoryNavigation,
   resolveAuthoritativeTurnDispatch,
+  readNativeApiForConversationRollback,
   resolveServerThreadModelSwitchAvailability,
   shouldHandlePromptHistoryNavigationKey,
   shouldEnableComposerPastedTextCollapse,
@@ -1758,6 +1759,14 @@ export default function ChatView({
   const activeProject = useStore(
     useMemo(() => createProjectSelector(activeProjectId), [activeProjectId]),
   );
+  const activeControlPlaneProject = useMemo(
+    () => controlPlane.projects.find((project) => project.id === activeProjectId) ?? null,
+    [activeProjectId, controlPlane.projects],
+  );
+  const activeControlPlaneSession = useMemo(
+    () => controlPlane.sessions.find((session) => session.id === activeThreadId) ?? null,
+    [activeThreadId, controlPlane.sessions],
+  );
   const automationProjects = useStore((state) => state.projects);
   const automationThreads = useStore((state) => state.threads);
   const { data: automationData, updateMutation: automationUpdateMutation } = useAutomations();
@@ -2107,6 +2116,25 @@ export default function ChatView({
       selectedProvider,
     ],
   );
+  const forkTargetDispatchDecision = useMemo(
+    () =>
+      resolveControlPlaneTurnDispatchDecision({
+        isAuthoritative: controlPlane.isAuthoritative,
+        projection: activeProviderCapabilityProjection,
+        ...(activeProviderCapabilityError
+          ? { projectionError: activeProviderCapabilityError }
+          : {}),
+        provider: selectedProvider,
+        includeSessionStart: true,
+        interactionMode: "default",
+      }),
+    [
+      activeProviderCapabilityError,
+      activeProviderCapabilityProjection,
+      controlPlane.isAuthoritative,
+      selectedProvider,
+    ],
+  );
   const planModeCapabilityDecision = useMemo(
     () =>
       resolveControlPlaneCapabilityDecision({
@@ -2192,6 +2220,10 @@ export default function ChatView({
     canUseLocalProviderCommands &&
     advancedCapabilityDecisions.rollback.allowed &&
     advancedCapabilityDecisions.checkpoint.allowed;
+  const canUseConversationRollbackActions =
+    advancedCapabilityDecisions.rollback.allowed &&
+    (canUseLocalProviderCommands ||
+      (isServerThread && !hasActiveServerExecution && controlPlane.capabilities.canCreateTurn));
   const canImplementPlanInNewThread =
     canUseLocalProviderCommands && advancedCapabilityDecisions.fork.allowed;
   const providerAvailabilityByProvider = useMemo<
@@ -3731,13 +3763,20 @@ export default function ChatView({
       : prompt;
   const canOfferCompactCommand =
     advancedCapabilityDecisions.compact.allowed &&
-    supportsThreadCompaction(providerComposerCapabilitiesQuery.data) &&
     isServerThread &&
     activeThread?.session !== null &&
-    activeThread?.session?.status !== "closed";
+    activeThread?.session?.status !== "closed" &&
+    (controlPlane.isAuthoritative
+      ? !hasActiveServerExecution && controlPlane.capabilities.canCreateTurn
+      : supportsThreadCompaction(providerComposerCapabilitiesQuery.data));
   const canOfferReviewCommand =
     advancedCapabilityDecisions.review.allowed &&
-    (branchesQuery.data?.isRepo ?? true) &&
+    (controlPlane.isAuthoritative
+      ? isServerThread &&
+        !hasActiveServerExecution &&
+        controlPlane.capabilities.canCreateTurn &&
+        Boolean(activeControlPlaneProject?.repositoryUrl)
+      : (branchesQuery.data?.isRepo ?? true)) &&
     canOfferReviewSlashCommand({
       prompt: composerPromptWithoutActiveSlashTrigger,
       imageCount: composerImages.length,
@@ -3749,6 +3788,10 @@ export default function ChatView({
     advancedCapabilityDecisions.fork.allowed &&
     isServerThread &&
     activeThread !== undefined &&
+    (!controlPlane.isAuthoritative ||
+      (!hasActiveServerExecution &&
+        controlPlane.capabilities.canCreateSession &&
+        forkTargetDispatchDecision.allowed)) &&
     canOfferForkSlashCommand({
       prompt: composerPromptWithoutActiveSlashTrigger,
       imageCount: composerImages.length,
@@ -3758,6 +3801,7 @@ export default function ChatView({
       interactionMode,
     });
   const canOfferSideCommand =
+    canUseLocalProviderCommands &&
     canOfferForkCommand &&
     isServerThread &&
     activeThread !== undefined &&
@@ -3798,6 +3842,7 @@ export default function ChatView({
   const normalComposerMenuItems = useComposerCommandMenuItems({
     composerTrigger: effectiveComposerTrigger,
     provider: selectedProvider,
+    commandRoutingMode: controlPlane.isAuthoritative ? "control-plane" : "local",
     providerPlugins,
     providerNativeCommands,
     providerSkills,
@@ -3840,15 +3885,23 @@ export default function ChatView({
           id: "review-target:changes",
           type: "review-target" as const,
           target: "changes" as const,
-          label: "Review Uncommitted Changes",
-          description: "Review local uncommitted changes",
+          label: controlPlane.isAuthoritative
+            ? "Review Workspace Changes"
+            : "Review Uncommitted Changes",
+          description: controlPlane.isAuthoritative
+            ? "Review changes in the authoritative SaaS workspace"
+            : "Review local uncommitted changes",
         },
         {
           id: "review-target:base-branch",
           type: "review-target" as const,
           target: "base-branch" as const,
-          label: "Review Against Base Branch",
-          description: "Review the current branch diff against its base",
+          label: controlPlane.isAuthoritative
+            ? "Review Against Default Branch"
+            : "Review Against Base Branch",
+          description: controlPlane.isAuthoritative
+            ? `Review the workspace against ${activeControlPlaneProject?.defaultBranch ?? "the Project default branch"}`
+            : "Review the current branch diff against its base",
         },
       ];
     }
@@ -3857,7 +3910,9 @@ export default function ChatView({
   }, [
     activeThread?.envMode,
     activeThread?.worktreePath,
+    activeControlPlaneProject?.defaultBranch,
     composerCommandPicker,
+    controlPlane.isAuthoritative,
     normalComposerMenuItems,
   ]);
   const composerMenuOpen = Boolean(composerTrigger || composerCommandPicker);
@@ -7670,6 +7725,14 @@ export default function ChatView({
       // Provider mentions are structured turn metadata, and automation definitions persist text only.
       selectedComposerMentionsForSend.length === 0;
     const hasPromptOnlySendableContent = hasNoStructuredComposerContext;
+    if (hasPromptOnlySendableContent) {
+      const handledSlashCommand = await handleStandaloneSlashCommand(trimmedPromptForSend);
+      if (handledSlashCommand) {
+        pendingAutomationConversationRef.current = null;
+        setPendingAutomationConversation(null);
+        return true;
+      }
+    }
     if (controlPlane.isAuthoritative) {
       if (!hasSendableContent) return false;
       if (!hasNoStructuredComposerContext || selectedComposerMentionsForSend.length > 0) {
@@ -7822,16 +7885,6 @@ export default function ChatView({
     const api = readNativeApi();
     if (!api) {
       return false;
-    }
-    if (hasPromptOnlySendableContent) {
-      const handledSlashCommand = await handleStandaloneSlashCommand(trimmedPromptForSend);
-      if (handledSlashCommand) {
-        // A slash command (e.g. /clear) consumes the composer, so abandon any in-progress
-        // automation setup rather than leaving a stale banner/request behind.
-        pendingAutomationConversationRef.current = null;
-        setPendingAutomationConversation(null);
-        return true;
-      }
     }
     const sourceProposedPlanForSend =
       queuedChatTurn?.sourceProposedPlan ??
@@ -9163,7 +9216,7 @@ export default function ChatView({
 
   const onEditUserMessage = useCallback(
     async (messageId: MessageId, text: string): Promise<boolean> => {
-      if (!canUseCheckpointActions) {
+      if (!canUseConversationRollbackActions) {
         toastManager.add({
           type: "warning",
           title: "Message editing is unavailable",
@@ -9171,8 +9224,7 @@ export default function ChatView({
         });
         return false;
       }
-      const api = readNativeApi();
-      if (!api || !activeThread || !isServerThread || isRevertingCheckpoint) {
+      if (!activeThread || !isServerThread || isRevertingCheckpoint) {
         return false;
       }
       const editTarget = resolveTailUserMessageEditTarget({
@@ -9196,6 +9248,56 @@ export default function ChatView({
         setThreadError(activeThread.id, "Wait for the current send to start before editing.");
         return false;
       }
+
+      const rollbackNativeApi = readNativeApiForConversationRollback({
+        controlPlaneAuthoritative: controlPlane.isAuthoritative,
+        readNativeApi,
+      });
+
+      if (controlPlane.isAuthoritative) {
+        if (!originalMessage.turnId) {
+          setThreadError(
+            activeThread.id,
+            "The rollback target is missing its authoritative Turn ID.",
+          );
+          return false;
+        }
+        const confirmed = window.confirm(
+          "This rolls back conversation history only. Workspace files and external side effects such as deployments, messages, or API calls are unchanged. Continue?",
+        );
+        if (!confirmed) return false;
+
+        setIsRevertingCheckpoint(true);
+        setThreadError(activeThread.id, null);
+        try {
+          await controlPlane.rollbackSession(activeThread.id, originalMessage.turnId);
+          promptRef.current = text;
+          setPrompt(text);
+          const restoredCursor = collapseExpandedComposerCursor(text, text.length);
+          setComposerCursor(restoredCursor);
+          setComposerTrigger(detectComposerTrigger(text, text.length));
+          setComposerHighlightedItemId(null);
+          toastManager.add({
+            type: "success",
+            title: "Session history rolled back",
+            description:
+              "Your edited message is in the composer and has not been sent. Workspace files were not changed.",
+          });
+          scheduleComposerFocus();
+          return true;
+        } catch (error) {
+          setThreadError(
+            activeThread.id,
+            error instanceof Error ? error.message : "Failed to roll back the remote Session.",
+          );
+          return false;
+        } finally {
+          setIsRevertingCheckpoint(false);
+        }
+      }
+
+      const api = rollbackNativeApi;
+      if (!api) return false;
 
       setIsRevertingCheckpoint(true);
       setThreadError(activeThread.id, null);
@@ -9244,7 +9346,8 @@ export default function ChatView({
     },
     [
       activeThread,
-      canUseCheckpointActions,
+      canUseConversationRollbackActions,
+      controlPlane,
       isConnecting,
       isRevertingCheckpoint,
       isSendBusy,
@@ -9257,6 +9360,8 @@ export default function ChatView({
       selectedModelSelection,
       selectedPromptEffort,
       selectedProvider,
+      scheduleComposerFocus,
+      setPrompt,
       setThreadError,
       assistantDeliveryMode,
     ],
@@ -10246,6 +10351,46 @@ export default function ChatView({
     canOfferForkCommand,
     canOfferSideCommand,
     canOfferExportCommand,
+    advancedCommandUnavailableMessages: {
+      compact: advancedCapabilityDecisions.compact.message,
+      review: advancedCapabilityDecisions.review.message,
+      fork: advancedCapabilityDecisions.fork.message,
+    },
+    ...(controlPlane.isAuthoritative
+      ? {
+          compactControlPlaneSession: async () => {
+            if (!activeThread) {
+              throw new Error("Open a persisted SaaS Session before compacting.");
+            }
+            await controlPlane.compactSession(activeThread.id);
+          },
+          forkControlPlaneSession: async () => {
+            if (!activeThread || !activeControlPlaneSession) {
+              throw new Error("Open a persisted SaaS Session before forking.");
+            }
+            const result = await controlPlane.forkSession(activeThread.id, {
+              title: `${activeThread.title} Fork`,
+              visibility: activeControlPlaneSession.visibility,
+            });
+            return ThreadId.makeUnsafe(result.session.id);
+          },
+          startControlPlaneReview: async (target: "changes" | "base-branch") => {
+            if (!activeThread) throw new Error("Open a persisted SaaS Session before reviewing.");
+            await controlPlane.startReview(
+              activeThread.id,
+              runtimeMode,
+              target === "base-branch"
+                ? {
+                    type: "baseBranch",
+                    ...(activeControlPlaneProject?.defaultBranch
+                      ? { branch: activeControlPlaneProject.defaultBranch }
+                      : {}),
+                  }
+                : { type: "uncommittedChanges" },
+            );
+          },
+        }
+      : {}),
     supportsTextNativeReviewCommand,
     fastModeEnabled,
     providerNativeCommands,
@@ -11948,7 +12093,8 @@ export default function ChatView({
                     onOpenAutomation={onOpenAutomation}
                     revertTurnCountByUserMessageId={visibleRevertTurnCountByUserMessageId}
                     onRevertUserMessage={onRevertUserMessage}
-                    {...(canUseCheckpointActions ? { onUndoTurnFiles, onEditUserMessage } : {})}
+                    {...(canUseCheckpointActions ? { onUndoTurnFiles } : {})}
+                    {...(canUseConversationRollbackActions ? { onEditUserMessage } : {})}
                     isRevertingCheckpoint={isRevertingCheckpoint}
                     onExpandTimelineImage={onExpandTimelineImage}
                     followLiveOutput={hasStreamingAssistantText}

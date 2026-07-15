@@ -1,5 +1,5 @@
 import { CheckpointRef, EventId, ThreadId, TurnId, type ModelSlug } from "@synara/contracts";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   appendVoiceTranscriptToPrompt,
@@ -33,6 +33,7 @@ import {
   resolveEnvironmentPanelVisible,
   resolveProjectScriptTerminalTarget,
   resolveAuthoritativeTurnDispatch,
+  readNativeApiForConversationRollback,
   resolveQueuedSteerGateTransition,
   resolveRuntimeModeAfterApprovalDecision,
   QUEUED_STEER_GATE_TIMEOUT_MS,
@@ -61,6 +62,29 @@ describe("authoritative Turn dispatch", () => {
     expect(resolveAuthoritativeTurnDispatch({ hasLiveTurn: false, dispatchMode: "queue" })).toBe(
       "create-turn",
     );
+  });
+});
+
+describe("authoritative conversation rollback routing", () => {
+  it("never reads the local Native API for a SaaS rollback", () => {
+    const nativeApi = { source: "local" };
+    const readNativeApi = vi.fn(() => nativeApi);
+
+    expect(
+      readNativeApiForConversationRollback({
+        controlPlaneAuthoritative: true,
+        readNativeApi,
+      }),
+    ).toBeUndefined();
+    expect(readNativeApi).not.toHaveBeenCalled();
+
+    expect(
+      readNativeApiForConversationRollback({
+        controlPlaneAuthoritative: false,
+        readNativeApi,
+      }),
+    ).toBe(nativeApi);
+    expect(readNativeApi).toHaveBeenCalledOnce();
   });
 });
 

@@ -4,7 +4,6 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import {
-  createRedactor,
   providerEnvironment,
   reconstructedPrompt,
   startProviderHostRun,
@@ -297,6 +296,28 @@ describe("durable conversation reconstruction", () => {
         execution: { ...input.execution, generation: 0 },
       }),
     ).toThrow("execution.generation must be a positive integer");
+  });
+
+  it("accepts only a safe absolute Runtime Output Directory", () => {
+    const input = {
+      execution: { id: "execution-1" },
+      workload: { provider: "claudeAgent", inputText: "continue" },
+      workspaceDirectory: "/tmp/workspace",
+      runtimeOutputDirectory: "/tmp/synara-runtime-output",
+    };
+
+    expect(() => validateRunnerInput(input)).not.toThrow();
+    for (const runtimeOutputDirectory of [
+      "",
+      "   ",
+      "relative/runtime-output",
+      "/tmp/runtime-output\nforged",
+      "/tmp/runtime-output\0forged",
+    ]) {
+      expect(() => validateRunnerInput({ ...input, runtimeOutputDirectory })).toThrow(
+        "runtimeOutputDirectory must be an absolute path without control characters",
+      );
+    }
   });
 });
 

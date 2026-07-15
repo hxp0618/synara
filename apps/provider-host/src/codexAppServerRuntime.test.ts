@@ -8,6 +8,55 @@ import { startProviderHostRun, type RunnerMessage } from "./providerHost";
 const CONTROLLED_PROVIDER_PROXY = "http://provider-user:provider-password@proxy.example.test:8080";
 
 describe("Codex app-server runtime", () => {
+  it("emits safe terminal lifecycle metadata and bounded command output", async () => {
+    await withFakeCodex("terminal", async (directory, _tracePath, environment) => {
+      const messages: RunnerMessage[] = [];
+      const run = startProviderHostRun(
+        codexInput(directory),
+        null,
+        (message) => messages.push(message),
+        { environment },
+      );
+
+      await expect(run.result).resolves.toMatchObject({ output: { text: "terminal complete" } });
+      expect(messages).toContainEqual({
+        type: "event",
+        eventType: "runtime.command.output",
+        payload: {
+          provider: "codex",
+          terminalId: "command-terminal-1",
+          encoding: "utf-8",
+          text: "tests passed\n",
+          byteOffset: 0,
+          byteLength: 13,
+        },
+      });
+      expect(messages).toContainEqual({
+        type: "event",
+        eventType: "runtime.provider.activity",
+        payload: expect.objectContaining({
+          provider: "codex",
+          itemType: "commandExecution",
+          itemId: "command-terminal-1",
+          status: "started",
+          terminalId: "command-terminal-1",
+          terminalEventType: "terminal.started",
+          commandSummary: "bun run test",
+          cwdLabel: ".",
+        }),
+      });
+      expect(messages).toContainEqual({
+        type: "event",
+        eventType: "runtime.provider.activity",
+        payload: expect.objectContaining({
+          status: "completed",
+          terminalEventType: "terminal.exited",
+          exitCode: 0,
+        }),
+      });
+    });
+  });
+
   it("delivers a native approval response and returns streamed output", async () => {
     await withFakeCodex("approval", async (directory, _tracePath, environment) => {
       const messages: RunnerMessage[] = [];
@@ -191,6 +240,139 @@ describe("Codex app-server runtime", () => {
         output: { text: "resumed" },
         providerResumeCursor: "thread-resume",
       });
+    });
+  });
+
+  it("waits for a real contextCompaction terminal after thread/compact/start acknowledgement", async () => {
+    await withFakeCodex("compact", async (directory, tracePath, environment) => {
+      const messages: RunnerMessage[] = [];
+      const run = startProviderHostRun(
+        { ...codexInput(directory), providerResumeCursor: "thread-resume" },
+        null,
+        (message) => messages.push(message),
+        {
+          environment,
+          operation: { commandType: "CompactSession", payload: {} },
+        },
+      );
+
+      await expect(run.result).resolves.toMatchObject({
+        output: {
+          provider: "codex",
+          operation: "compact",
+          supportMode: "native",
+          boundary: {
+            kind: "context_compaction",
+            terminalKind: "contextCompaction",
+            summaryAvailable: false,
+            providerItemId: "compact-item-1",
+          },
+        },
+        providerResumeCursor: "thread-resume",
+      });
+      expect(messages).toContainEqual(
+        expect.objectContaining({
+          type: "event",
+          eventType: "runtime.provider.activity",
+          payload: expect.objectContaining({
+            itemType: "contextCompaction",
+            status: "completed",
+          }),
+        }),
+      );
+      expect(readFileSync(tracePath, "utf8")).toBe(
+        "initialize\ninitialized\nthread/resume\nthread/compact/start\n",
+      );
+    });
+  });
+
+  it("runs native inline review and waits for the matching review Turn terminal", async () => {
+    await withFakeCodex("review", async (directory, tracePath, environment) => {
+      const messages: RunnerMessage[] = [];
+      const run = startProviderHostRun(
+        { ...codexInput(directory), providerResumeCursor: "thread-resume" },
+        null,
+        (message) => messages.push(message),
+        {
+          environment,
+          operation: {
+            commandType: "StartReview",
+            payload: { target: { type: "baseBranch", branch: "main" } },
+          },
+        },
+      );
+
+      await expect(run.result).resolves.toMatchObject({
+        output: {
+          provider: "codex",
+          operation: "review",
+          supportMode: "native",
+          providerTurnId: "turn-review-1",
+          text: "Working tree is clean.",
+        },
+        providerResumeCursor: "thread-resume",
+      });
+      expect(messages).toContainEqual(
+        expect.objectContaining({
+          type: "event",
+          eventType: "runtime.provider.activity",
+          payload: expect.objectContaining({
+            itemType: "enteredReviewMode",
+            status: "completed",
+          }),
+        }),
+      );
+      expect(messages).toContainEqual(
+        expect.objectContaining({
+          type: "event",
+          eventType: "runtime.provider.activity",
+          payload: expect.objectContaining({
+            itemType: "exitedReviewMode",
+            status: "completed",
+          }),
+        }),
+      );
+      expect(readFileSync(tracePath, "utf8")).toBe(
+        "initialize\ninitialized\nthread/resume\nreview/start\n",
+      );
+    });
+  });
+
+  it("starts a fresh Codex Thread for review when no native cursor exists", async () => {
+    await withFakeCodex("review-fresh", async (directory, tracePath, environment) => {
+      const run = startProviderHostRun(codexInput(directory), null, () => {}, {
+        environment,
+        operation: {
+          commandType: "StartReview",
+          payload: { target: { type: "baseBranch", branch: "main" } },
+        },
+      });
+
+      await expect(run.result).resolves.toMatchObject({
+        output: {
+          operation: "review",
+          supportMode: "native",
+          providerTurnId: "turn-review-1",
+        },
+        providerResumeCursor: "thread-new",
+      });
+      expect(readFileSync(tracePath, "utf8")).toBe(
+        "initialize\ninitialized\nthread/start\nreview/start\n",
+      );
+    });
+  });
+
+  it("refuses native compaction before a Provider Cursor exists", async () => {
+    await withFakeCodex("compact", async (directory, tracePath, environment) => {
+      const run = startProviderHostRun(codexInput(directory), null, () => {}, {
+        environment,
+        operation: { commandType: "CompactSession", payload: {} },
+      });
+
+      await expect(run.result).rejects.toThrow(
+        "Codex app-server native Session operation requires a Provider Cursor.",
+      );
+      expect(readFileSync(tracePath, "utf8")).toBe("initialize\ninitialized\n");
     });
   });
 
@@ -389,7 +571,11 @@ async function withFakeCodex(
     | "resume-auth-failure"
     | "interrupt"
     | "steer"
-    | "proxy-output",
+    | "proxy-output"
+    | "terminal"
+    | "compact"
+    | "review"
+    | "review-fresh",
   run: (directory: string, tracePath: string, environment: NodeJS.ProcessEnv) => Promise<void>,
 ): Promise<void> {
   const directory = mkdtempSync(join(tmpdir(), "synara-codex-app-server-"));
@@ -443,7 +629,11 @@ function fakeCodexSource(
     | "resume-auth-failure"
     | "interrupt"
     | "steer"
-    | "proxy-output",
+    | "proxy-output"
+    | "terminal"
+    | "compact"
+    | "review"
+    | "review-fresh",
   tracePath: string,
   directory: string,
 ): string {
@@ -513,6 +703,20 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
   } else if (message.method === "thread/start") {
     if (scenario === "resume" || scenario === "resume-auth-failure") send({ id: message.id, error: { code: -1, message: "unexpected thread/start" } });
     else send({ id: message.id, result: { thread: { id: "thread-new" } } });
+  } else if (message.method === "thread/compact/start") {
+    if (scenario !== "compact" || message.params?.threadId !== "thread-resume") process.exit(4);
+    send({ id: message.id, result: {} });
+    send({ method: "turn/completed", params: { threadId: "thread-resume", turn: { id: "turn-compact-1", items: [], status: "completed", error: null } } });
+    setTimeout(() => {
+      send({ method: "item/completed", params: { threadId: "thread-resume", turnId: "turn-compact-1", item: { id: "compact-item-1", type: "contextCompaction" } } });
+    }, 15);
+  } else if (message.method === "review/start") {
+    const expectedReviewThread = scenario === "review-fresh" ? "thread-new" : "thread-resume";
+    if ((scenario !== "review" && scenario !== "review-fresh") || message.params?.threadId !== expectedReviewThread || message.params?.delivery !== "inline" || message.params?.target?.type !== "baseBranch" || message.params?.target?.branch !== "main") process.exit(5);
+    send({ id: message.id, result: { turn: { id: "turn-review-1", items: [], status: "inProgress", error: null }, reviewThreadId: "thread-resume" } });
+    send({ method: "item/completed", params: { threadId: expectedReviewThread, turnId: "turn-review-1", item: { id: "review-enter-1", type: "enteredReviewMode", review: "" } } });
+    send({ method: "item/completed", params: { threadId: expectedReviewThread, turnId: "turn-review-1", item: { id: "review-exit-1", type: "exitedReviewMode", review: "Working tree is clean." } } });
+    send({ method: "turn/completed", params: { threadId: expectedReviewThread, turn: { id: "turn-review-1", items: [], status: "completed", error: null } } });
   } else if (message.method === "turn/start") {
     if (scenario === "resume-rebuild") {
       const prompt = message.params?.input?.[0]?.text ?? "";
@@ -535,6 +739,12 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
       send({ method: "item/agentMessage/delta", params: { threadId: "thread-new", turnId: "turn-1", itemId: "agent-1", delta: "working" } });
     } else if (scenario === "proxy-output") {
       complete(process.env.HTTP_PROXY ?? "missing-proxy");
+    } else if (scenario === "terminal") {
+      send({ method: "item/started", params: { threadId: "thread-new", turnId: "turn-1", item: { id: "command-terminal-1", type: "commandExecution", command: "bun run test", cwd: process.cwd(), status: "inProgress" } } });
+      send({ method: "item/commandExecution/outputDelta", params: { threadId: "thread-new", turnId: "turn-1", itemId: "command-terminal-1", delta: "tests " } });
+      send({ method: "item/commandExecution/outputDelta", params: { threadId: "thread-new", turnId: "turn-1", itemId: "command-terminal-1", delta: "passed\\n" } });
+      send({ method: "item/completed", params: { threadId: "thread-new", turnId: "turn-1", item: { id: "command-terminal-1", type: "commandExecution", command: "bun run test", cwd: process.cwd(), aggregatedOutput: "tests passed\\n", exitCode: 0, status: "completed" } } });
+      complete("terminal complete");
     }
   } else if (message.method === "turn/steer") {
     if (message.params?.expectedTurnId !== "turn-1" || message.params?.input?.[0]?.text !== "focus on the failing test") process.exit(2);

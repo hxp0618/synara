@@ -18,6 +18,7 @@ import (
 	"github.com/synara-ai/synara/services/control-plane/internal/projects"
 	"github.com/synara-ai/synara/services/control-plane/internal/secret"
 	"github.com/synara-ai/synara/services/control-plane/internal/sessions"
+	"github.com/synara-ai/synara/services/control-plane/internal/workerreleases"
 )
 
 const defaultProviderCursorMaximumAge = 30 * 24 * time.Hour
@@ -101,6 +102,22 @@ func (s *Service) Register(ctx context.Context, input RegisterWorkerInput) (Regi
 	now := s.now()
 	var model persistence.WorkerInstance
 	err = persistence.InTransaction(ctx, s.db, func(tx *gorm.DB) error {
+		if err := workerreleases.LockTargetForRelease(ctx, tx, normalized.ExecutionTargetID); err != nil {
+			return err
+		}
+		var tombstone persistence.WorkerIdentityTombstone
+		tombstoneErr := tx.WithContext(ctx).
+			Where(
+				"execution_target_id = ? AND cluster_id = ? AND namespace = ? AND pod_name = ?",
+				normalized.ExecutionTargetID, normalized.ClusterID, normalized.Namespace, normalized.PodName,
+			).
+			Take(&tombstone).Error
+		if tombstoneErr == nil {
+			return problem.New(409, "worker_identity_revoked", "The logical Worker identity was administratively revoked and cannot be registered again.")
+		}
+		if !errors.Is(tombstoneErr, gorm.ErrRecordNotFound) {
+			return problem.Wrap(500, "worker_revocation_lookup_failed", "Failed to inspect the Worker revocation fence.", tombstoneErr)
+		}
 		err := persistence.WithLocking(tx.WithContext(ctx), "UPDATE", "").
 			Where("execution_target_id = ? AND cluster_id = ? AND namespace = ? AND pod_name = ? AND status <> ?", normalized.ExecutionTargetID, normalized.ClusterID, normalized.Namespace, normalized.PodName, "terminated").
 			Take(&model).Error
@@ -113,18 +130,25 @@ func (s *Service) Register(ctx context.Context, input RegisterWorkerInput) (Regi
 				ProtocolVersion: normalized.ProtocolVersion,
 				Capabilities:    normalized.Capabilities, LeaseSupported: normalized.LeaseSupported,
 				FencingSupported: normalized.FencingSupported, AuthTokenHash: tokenHash, Status: "online",
-				CompatibilityStatus: "unknown",
-				RegisteredAt:        now, LastHeartbeatAt: now,
+				CompatibilityStatus:  "unknown",
+				AdministrativeStatus: "active",
+				RegisteredAt:         now, LastHeartbeatAt: now,
 			}
 			if err := tx.WithContext(ctx).Create(&model).Error; err != nil {
 				return problem.Wrap(409, "worker_registration_conflict", "Worker registration conflicts with an active instance.", err)
 			}
-			return persistWorkerManifest(
+			if err := persistWorkerManifest(
 				ctx, tx, &model, normalized.Version, normalized.Capabilities, target.Capabilities, targetKind, now,
-			)
+			); err != nil {
+				return err
+			}
+			return workerreleases.SynchronizeWorker(ctx, tx, &model, now)
 		}
 		if err != nil {
 			return problem.Wrap(500, "worker_registration_lookup_failed", "Failed to resolve the worker registration.", err)
+		}
+		if model.AdministrativeStatus == "revoked" {
+			return problem.New(409, "worker_identity_revoked", "The logical Worker identity was administratively revoked and cannot be registered again.")
 		}
 		updates := persistence.WorkerInstance{
 			Incarnation: model.Incarnation + 1, InstanceUID: normalized.InstanceUID,
@@ -156,9 +180,12 @@ func (s *Service) Register(ctx context.Context, input RegisterWorkerInput) (Regi
 		model.LastHeartbeatAt = now
 		model.DrainingAt = nil
 		model.TerminatedAt = nil
-		return persistWorkerManifest(
+		if err := persistWorkerManifest(
 			ctx, tx, &model, normalized.Version, normalized.Capabilities, target.Capabilities, targetKind, now,
-		)
+		); err != nil {
+			return err
+		}
+		return workerreleases.SynchronizeWorker(ctx, tx, &model, now)
 	})
 	if err != nil {
 		return RegisteredWorker{}, err
@@ -173,13 +200,19 @@ func (s *Service) Authenticate(ctx context.Context, plainToken string) (persiste
 	}
 	var worker persistence.WorkerInstance
 	err := s.db.WithContext(ctx).
-		Where("auth_token_hash = ? AND status <> ?", secret.HashToken(plainToken), "terminated").
+		Where("auth_token_hash = ?", secret.HashToken(plainToken)).
 		Take(&worker).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return persistence.WorkerInstance{}, problem.New(401, "invalid_worker_token", "The worker bearer token is invalid.")
 	}
 	if err != nil {
 		return persistence.WorkerInstance{}, problem.Wrap(500, "worker_authentication_failed", "Worker authentication failed.", err)
+	}
+	if worker.AdministrativeStatus == "revoked" {
+		return persistence.WorkerInstance{}, workerTokenRevoked()
+	}
+	if worker.Status == "terminated" {
+		return persistence.WorkerInstance{}, problem.New(401, "invalid_worker_token", "The worker bearer token is invalid.")
 	}
 	return worker, nil
 }
@@ -195,107 +228,119 @@ func (s *Service) Heartbeat(
 	if worker.ProtocolVersion != WorkerProtocolVersion {
 		return Worker{}, unsupportedWorkerProtocol(worker.ProtocolVersion)
 	}
-	var currentWorkerCount int64
-	if err := s.db.WithContext(ctx).Model(&persistence.WorkerInstance{}).
-		Where(
-			"id = ? AND incarnation = ? AND instance_uid = ? AND auth_token_hash = ? AND status <> ?",
-			worker.ID, worker.Incarnation, worker.InstanceUID, worker.AuthTokenHash, "terminated",
-		).
-		Count(&currentWorkerCount).Error; err != nil {
-		return Worker{}, problem.Wrap(500, "worker_heartbeat_failed", "Failed to validate the worker heartbeat.", err)
+	version := strings.TrimSpace(input.Version)
+	if len(version) > 160 {
+		return Worker{}, problem.New(400, "invalid_worker_version", "Worker version must not exceed 160 characters.")
 	}
-	if currentWorkerCount != 1 {
-		return Worker{}, problem.New(409, "worker_incarnation_fenced", "The Worker registration is no longer current.")
-	}
-	now := s.now()
-	if input.Capabilities != nil {
-		target, targetKind, err := s.targets.ResolveWorkerTarget(ctx, worker.ExecutionTargetID, worker.TargetKind)
+	var current persistence.WorkerInstance
+	err := persistence.InTransaction(ctx, s.db, func(tx *gorm.DB) error {
+		if err := workerreleases.LockTargetForRelease(ctx, tx, worker.ExecutionTargetID); err != nil {
+			return err
+		}
+		locked, err := lockCurrentWorker(ctx, tx, worker)
 		if err != nil {
-			return Worker{}, err
+			return err
 		}
-		manifestVersion := worker.Version
-		if version := strings.TrimSpace(input.Version); version != "" {
-			manifestVersion = version
+		current = locked
+		now := s.now()
+		if input.Capabilities != nil {
+			target, targetKind, err := s.targets.ResolveWorkerTargetInTransaction(
+				ctx, tx, current.ExecutionTargetID, current.TargetKind,
+			)
+			if err != nil {
+				return err
+			}
+			manifestVersion := current.Version
+			if version != "" {
+				manifestVersion = version
+			}
+			normalized, normalizeErr := normalizeWorkerManifest(
+				manifestVersion, input.Capabilities, target.Capabilities, targetKind, now,
+			)
+			if normalizeErr != nil {
+				return workerManifestReregistrationRequired(normalizeErr.Error())
+			}
+			matches, matchErr := workerManifestMatches(ctx, tx, current, normalized)
+			if matchErr != nil {
+				return matchErr
+			}
+			if !matches {
+				return workerManifestReregistrationRequired("Heartbeat Provider capabilities differ from the immutable registered Worker manifest.")
+			}
 		}
-		normalized, normalizeErr := normalizeWorkerManifest(
-			manifestVersion, input.Capabilities, target.Capabilities, targetKind, now,
-		)
-		if normalizeErr != nil {
-			return Worker{}, workerManifestReregistrationRequired(normalizeErr.Error())
+		updates := persistence.WorkerInstance{LastHeartbeatAt: now}
+		fields := []string{"last_heartbeat_at"}
+		if input.Draining != nil && *input.Draining {
+			updates.Status = "draining"
+			updates.DrainingAt = &now
+			fields = append(fields, "status", "draining_at")
+		} else if input.Draining != nil && !*input.Draining {
+			updates.Status = "online"
+			updates.DrainingAt = nil
+			fields = append(fields, "status", "draining_at")
+		} else if current.Status == "offline" {
+			updates.Status = "online"
+			fields = append(fields, "status")
 		}
-		matches, matchErr := workerManifestMatches(ctx, s.db, worker, normalized)
-		if matchErr != nil {
-			return Worker{}, matchErr
+		if version != "" {
+			updates.Version = version
+			fields = append(fields, "version")
 		}
-		if !matches {
-			return Worker{}, workerManifestReregistrationRequired("Heartbeat Provider capabilities differ from the immutable registered Worker manifest.")
+		if input.Capabilities != nil {
+			updates.Capabilities = input.Capabilities
+			fields = append(fields, "capabilities")
 		}
-	}
-	updates := persistence.WorkerInstance{LastHeartbeatAt: now}
-	fields := []string{"last_heartbeat_at"}
-	if input.Draining != nil && *input.Draining {
-		updates.Status = "draining"
-		updates.DrainingAt = &now
-		fields = append(fields, "status", "draining_at")
-	} else if input.Draining != nil && !*input.Draining {
-		updates.Status = "online"
-		updates.DrainingAt = nil
-		fields = append(fields, "status", "draining_at")
-	} else if worker.Status == "offline" {
-		updates.Status = "online"
-		fields = append(fields, "status")
-	}
-	if version := strings.TrimSpace(input.Version); version != "" {
-		if len(version) > 160 {
-			return Worker{}, problem.New(400, "invalid_worker_version", "Worker version must not exceed 160 characters.")
+		result := tx.WithContext(ctx).Model(&persistence.WorkerInstance{}).
+			Where("id = ? AND incarnation = ? AND instance_uid = ? AND administrative_status <> ?",
+				current.ID, current.Incarnation, current.InstanceUID, "revoked").
+			Select(fields).Updates(&updates)
+		if result.Error != nil {
+			return problem.Wrap(500, "worker_heartbeat_failed", "Failed to record the worker heartbeat.", result.Error)
 		}
-		updates.Version = version
-		fields = append(fields, "version")
+		if result.RowsAffected != 1 {
+			return workerTokenRevoked()
+		}
+		if err := tx.WithContext(ctx).Where("id = ?", current.ID).Take(&current).Error; err != nil {
+			return problem.Wrap(500, "worker_reload_failed", "Failed to reload the worker.", err)
+		}
+		return workerreleases.SynchronizeWorker(ctx, tx, &current, now)
+	})
+	if err != nil {
+		return Worker{}, err
 	}
-	if input.Capabilities != nil {
-		updates.Capabilities = input.Capabilities
-		fields = append(fields, "capabilities")
-	}
-	result := s.db.WithContext(ctx).Model(&persistence.WorkerInstance{}).
-		Where(
-			"id = ? AND incarnation = ? AND instance_uid = ? AND status <> ?",
-			worker.ID, worker.Incarnation, worker.InstanceUID, "terminated",
-		).
-		Select(fields).Updates(&updates)
-	if result.Error != nil {
-		return Worker{}, problem.Wrap(500, "worker_heartbeat_failed", "Failed to record the worker heartbeat.", result.Error)
-	}
-	if result.RowsAffected != 1 {
-		return Worker{}, problem.New(409, "worker_incarnation_fenced", "The Worker registration is no longer current.")
-	}
-	if err := s.db.WithContext(ctx).
-		Where(
-			"id = ? AND incarnation = ? AND instance_uid = ? AND status <> ?",
-			worker.ID, worker.Incarnation, worker.InstanceUID, "terminated",
-		).
-		Take(&worker).Error; errors.Is(err, gorm.ErrRecordNotFound) {
-		return Worker{}, problem.New(409, "worker_incarnation_fenced", "The Worker registration is no longer current.")
-	} else if err != nil {
-		return Worker{}, problem.Wrap(500, "worker_reload_failed", "Failed to reload the worker.", err)
-	}
-	return toWorker(worker), nil
+	return toWorker(current), nil
 }
 
 func lockCurrentWorkerIncarnation(ctx context.Context, tx *gorm.DB, worker persistence.WorkerInstance) error {
+	_, err := lockCurrentWorker(ctx, tx, worker)
+	return err
+}
+
+func lockCurrentWorker(
+	ctx context.Context,
+	tx *gorm.DB,
+	worker persistence.WorkerInstance,
+) (persistence.WorkerInstance, error) {
 	var current persistence.WorkerInstance
 	err := persistence.WithLocking(tx.WithContext(ctx), "UPDATE", "").
-		Select("id", "incarnation", "instance_uid", "status").
-		Where("id = ? AND status <> ?", worker.ID, "terminated").Take(&current).Error
+		Where("id = ?", worker.ID).Take(&current).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return problem.New(409, "worker_incarnation_fenced", "The Worker registration is no longer current.")
+		return persistence.WorkerInstance{}, problem.New(409, "worker_incarnation_fenced", "The Worker registration is no longer current.")
 	}
 	if err != nil {
-		return problem.Wrap(500, "worker_incarnation_lock_failed", "Failed to lock the current Worker registration.", err)
+		return persistence.WorkerInstance{}, problem.Wrap(500, "worker_incarnation_lock_failed", "Failed to lock the current Worker registration.", err)
 	}
-	if current.Incarnation != worker.Incarnation || current.InstanceUID != worker.InstanceUID {
-		return problem.New(409, "worker_incarnation_fenced", "The Worker registration is no longer current.")
+	if current.AdministrativeStatus == "revoked" {
+		return persistence.WorkerInstance{}, workerTokenRevoked()
 	}
-	return nil
+	if current.Status == "terminated" {
+		return persistence.WorkerInstance{}, problem.New(409, "worker_incarnation_fenced", "The Worker registration is no longer current.")
+	}
+	if current.Incarnation != worker.Incarnation || current.InstanceUID != worker.InstanceUID ||
+		!equalTokenHashes(current.AuthTokenHash, worker.AuthTokenHash) {
+		return persistence.WorkerInstance{}, problem.New(409, "worker_incarnation_fenced", "The Worker registration is no longer current.")
+	}
+	return current, nil
 }
 
 func (s *Service) markStaleWorkers(ctx context.Context) error {
@@ -303,13 +348,13 @@ func (s *Service) markStaleWorkers(ctx context.Context) error {
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		workers := make([]persistence.WorkerInstance, 0, 100)
 		if err := persistence.WithLocking(tx.WithContext(ctx), "UPDATE", "SKIP LOCKED").
-			Where("status IN ? AND last_heartbeat_at < ?", []string{"online", "draining"}, cutoff).
+			Where("administrative_status <> ? AND status IN ? AND last_heartbeat_at < ?", "revoked", []string{"online", "draining"}, cutoff).
 			Order("last_heartbeat_at, id").Limit(100).Find(&workers).Error; err != nil {
 			return err
 		}
 		for _, worker := range workers {
 			result := tx.WithContext(ctx).Model(&persistence.WorkerInstance{}).
-				Where("id = ? AND status = ? AND last_heartbeat_at = ?", worker.ID, worker.Status, worker.LastHeartbeatAt).
+				Where("id = ? AND administrative_status <> ? AND status = ? AND last_heartbeat_at = ?", worker.ID, "revoked", worker.Status, worker.LastHeartbeatAt).
 				Update("status", "offline")
 			if result.Error != nil {
 				return result.Error

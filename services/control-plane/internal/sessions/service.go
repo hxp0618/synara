@@ -11,6 +11,7 @@ import (
 
 	"github.com/synara-ai/synara/services/control-plane/internal/audit"
 	"github.com/synara-ai/synara/services/control-plane/internal/authorization"
+	"github.com/synara-ai/synara/services/control-plane/internal/credentialscope"
 	"github.com/synara-ai/synara/services/control-plane/internal/executiontargets"
 	apiidempotency "github.com/synara-ai/synara/services/control-plane/internal/idempotency"
 	"github.com/synara-ai/synara/services/control-plane/internal/identity"
@@ -19,6 +20,7 @@ import (
 	"github.com/synara-ai/synara/services/control-plane/internal/problem"
 	"github.com/synara-ai/synara/services/control-plane/internal/projects"
 	"github.com/synara-ai/synara/services/control-plane/internal/validation"
+	"github.com/synara-ai/synara/services/control-plane/internal/workerreleases"
 )
 
 var activeSessionExecutionStatuses = []string{"queued", "leased", "running", "waiting-for-approval", "recovering"}
@@ -71,6 +73,31 @@ func ActiveTenant(principal identity.Principal) (uuid.UUID, error) {
 	return *principal.ActiveTenantID, nil
 }
 
+func (s *Service) RequireExecutionQuotaAvailable(
+	ctx context.Context,
+	tx *gorm.DB,
+	tenantID uuid.UUID,
+) error {
+	var quota persistence.TenantQuota
+	quotaErr := tx.WithContext(ctx).Where("tenant_id = ?", tenantID).Take(&quota).Error
+	if errors.Is(quotaErr, gorm.ErrRecordNotFound) || quota.MaxConcurrentExecutions == nil {
+		return nil
+	}
+	if quotaErr != nil {
+		return problem.Wrap(500, "execution_quota_check_failed", "Failed to load the tenant execution quota.", quotaErr)
+	}
+	var activeExecutions int64
+	if err := tx.WithContext(ctx).Model(&persistence.AgentExecution{}).
+		Where("tenant_id = ? AND status IN ?", tenantID, activeSessionExecutionStatuses).
+		Count(&activeExecutions).Error; err != nil {
+		return problem.Wrap(500, "execution_quota_check_failed", "Failed to check tenant execution quota.", err)
+	}
+	if activeExecutions >= int64(*quota.MaxConcurrentExecutions) {
+		return problem.New(409, "execution_quota_exceeded", "The tenant concurrent execution quota has been reached.")
+	}
+	return nil
+}
+
 func toSession(model persistence.AgentSession) Session {
 	provider := strings.TrimSpace(model.Provider)
 	if strings.EqualFold(provider, "claude") {
@@ -83,6 +110,8 @@ func toSession(model persistence.AgentSession) Session {
 		ProjectID: model.ProjectID, CreatedBy: model.CreatedBy, Title: model.Title,
 		Status: model.Status, Visibility: model.Visibility, Provider: provider,
 		Model: model.Model, ProviderCredentialID: model.ProviderCredentialID, ExecutionTargetID: model.ExecutionTargetID,
+		ForkSourceSessionID: model.ForkSourceSessionID, ForkSourceTurnID: model.ForkSourceTurnID,
+		ForkSourceSequence: model.ForkSourceEventSequence, ForkStrategy: model.ForkStrategy,
 		LastEventSequence: model.LastEventSequence, CreatedAt: model.CreatedAt,
 		UpdatedAt: model.UpdatedAt, ArchivedAt: model.ArchivedAt,
 	}
@@ -92,6 +121,7 @@ func toTurn(model persistence.AgentTurn) Turn {
 	return Turn{
 		ID: model.ID, TenantID: model.TenantID, SessionID: model.SessionID,
 		CreatedBy: model.CreatedBy, Status: model.Status, InputText: model.InputText,
+		TurnKind:    model.TurnKind,
 		RuntimeMode: model.RuntimeMode, InteractionMode: model.InteractionMode,
 		StartedAt: model.StartedAt, CompletedAt: model.CompletedAt, CreatedAt: model.CreatedAt,
 	}
@@ -207,11 +237,13 @@ func (s *Service) CreateWithIdempotency(
 	if err != nil {
 		return Session{}, false, err
 	}
-	credentialID, err := s.resolveProviderCredential(
-		ctx, principal, tenantID, project.OrganizationID, provider, input.ProviderCredentialID,
-	)
-	if err != nil {
-		return Session{}, false, err
+	requestedCredentialID := normalizeRequestedCredentialID(input.ProviderCredentialID)
+	if requestedCredentialID != nil {
+		if _, err := s.authorizer.RequireOrganization(
+			ctx, principal.UserID, tenantID, project.OrganizationID, authorization.CredentialsUse,
+		); err != nil {
+			return Session{}, false, err
+		}
 	}
 
 	target, err := s.targets.ResolveForSession(ctx, tenantID, project.OrganizationID, input.ExecutionTargetID)
@@ -225,7 +257,7 @@ func (s *Service) CreateWithIdempotency(
 		Operation: "session.create", SuccessStatus: 201,
 		Request: map[string]any{
 			"projectId": projectID, "title": title, "visibility": visibility, "provider": provider,
-			"model": modelName, "providerCredentialId": credentialID, "executionTargetId": target.ID,
+			"model": modelName, "providerCredentialId": requestedCredentialID, "executionTargetId": target.ID,
 		},
 	}, func(tx *gorm.DB) (Session, error) {
 		var targetModel persistence.ExecutionTarget
@@ -242,6 +274,19 @@ func (s *Service) CreateWithIdempotency(
 		if err := s.requireTargetProviderCapabilities(
 			ctx, tx, targetModel, provider, "start-session", "send-turn",
 		); err != nil {
+			return Session{}, err
+		}
+		credentialID, err := s.resolveProviderCredentialSelection(
+			ctx,
+			tx,
+			tenantID,
+			project.OrganizationID,
+			principal.UserID,
+			provider,
+			modelName,
+			requestedCredentialID,
+		)
+		if err != nil {
 			return Session{}, err
 		}
 		model := persistence.AgentSession{
@@ -286,46 +331,34 @@ func (s *Service) CreateWithIdempotency(
 	return result.Value, result.Replayed, nil
 }
 
-func (s *Service) resolveProviderCredential(
+func (s *Service) resolveProviderCredentialSelection(
 	ctx context.Context,
-	principal identity.Principal,
-	tenantID, organizationID uuid.UUID,
+	db *gorm.DB,
+	tenantID, organizationID, sessionOwnerUserID uuid.UUID,
 	provider string,
-	credentialID *uuid.UUID,
+	model *string,
+	requestedCredentialID *uuid.UUID,
 ) (*uuid.UUID, error) {
-	if credentialID == nil || *credentialID == uuid.Nil {
-		return nil, nil
-	}
-	if _, err := s.authorizer.RequireOrganization(
-		ctx, principal.UserID, tenantID, organizationID, authorization.CredentialsUse,
-	); err != nil {
+	selection, err := credentialscope.Resolve(ctx, db, credentialscope.Request{
+		TenantID: tenantID, OrganizationID: organizationID, SessionOwnerUserID: sessionOwnerUserID,
+		Provider: provider, Model: model, ExplicitCredentialID: requestedCredentialID, Now: s.now(),
+	})
+	if err != nil {
 		return nil, err
 	}
-	var credential persistence.ProviderCredential
-	err := s.db.WithContext(ctx).
-		Select("id", "tenant_id", "organization_id", "purpose", "provider", "expires_at", "revoked_at").
-		Where("tenant_id = ? AND id = ?", tenantID, *credentialID).
-		Take(&credential).Error
-	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return nil, problem.New(404, "credential_not_found", "Provider Credential not found.")
+	if selection == nil {
+		return nil, nil
 	}
-	if err != nil {
-		return nil, problem.Wrap(500, "credential_load_failed", "Provider Credential could not be loaded.", err)
-	}
-	if credential.OrganizationID != nil && *credential.OrganizationID != organizationID {
-		return nil, problem.New(404, "credential_not_found", "Provider Credential not found.")
-	}
-	if credential.Purpose != "provider" {
-		return nil, problem.New(409, "credential_purpose_mismatch", "Agent Session requires a Provider Credential.")
-	}
-	if credential.Provider != provider {
-		return nil, problem.New(409, "credential_provider_mismatch", "Provider Credential does not match the Agent Session provider.")
-	}
-	if credential.RevokedAt != nil || (credential.ExpiresAt != nil && !credential.ExpiresAt.After(time.Now().UTC())) {
-		return nil, problem.New(409, "credential_unavailable", "Provider Credential is revoked or expired.")
-	}
-	value := credential.ID
+	value := selection.Credential.ID
 	return &value, nil
+}
+
+func normalizeRequestedCredentialID(value *uuid.UUID) *uuid.UUID {
+	if value == nil || *value == uuid.Nil {
+		return nil
+	}
+	normalized := *value
+	return &normalized
 }
 
 func (s *Service) ListByProject(
@@ -431,6 +464,7 @@ func (s *Service) CreateTurnWithIdempotency(
 		turn := persistence.AgentTurn{
 			ID: uuid.New(), TenantID: tenantID, SessionID: sessionID,
 			CreatedBy: principal.UserID, Status: "queued", InputText: inputText,
+			TurnKind:    "message",
 			RuntimeMode: runtimeMode, InteractionMode: interactionMode,
 		}
 		var tenant persistence.Tenant
@@ -454,20 +488,8 @@ func (s *Service) CreateTurnWithIdempotency(
 		if activeSessionExecutions > 0 {
 			return Turn{}, problem.New(409, "session_execution_active", "The Session already has an active Turn execution.")
 		}
-		var quota persistence.TenantQuota
-		quotaErr := tx.WithContext(ctx).Where("tenant_id = ?", tenantID).Take(&quota).Error
-		if quotaErr == nil && quota.MaxConcurrentExecutions != nil {
-			var activeExecutions int64
-			if err := tx.WithContext(ctx).Model(&persistence.AgentExecution{}).
-				Where("tenant_id = ? AND status IN ?", tenantID, activeSessionExecutionStatuses).
-				Count(&activeExecutions).Error; err != nil {
-				return Turn{}, problem.Wrap(500, "execution_quota_check_failed", "Failed to check tenant execution quota.", err)
-			}
-			if activeExecutions >= int64(*quota.MaxConcurrentExecutions) {
-				return Turn{}, problem.New(409, "execution_quota_exceeded", "The tenant concurrent execution quota has been reached.")
-			}
-		} else if quotaErr != nil && !errors.Is(quotaErr, gorm.ErrRecordNotFound) {
-			return Turn{}, problem.Wrap(500, "execution_quota_check_failed", "Failed to load tenant execution quota.", quotaErr)
+		if err := s.RequireExecutionQuotaAvailable(ctx, tx, tenantID); err != nil {
+			return Turn{}, err
 		}
 		var target persistence.ExecutionTarget
 		if err := tx.WithContext(ctx).
@@ -496,6 +518,14 @@ func (s *Service) CreateTurnWithIdempotency(
 			RestoreCheckpointID:        resources.RestoreCheckpointID,
 			Generation:                 0, RequestedBy: principal.UserID, QueuedAt: queuedAt,
 		}
+		releaseSelection, err := workerreleases.SelectExecution(ctx, tx, target.ID, execution.ID)
+		if err != nil {
+			return Turn{}, err
+		}
+		if releaseSelection != nil {
+			execution.WorkerReleaseRevisionID = &releaseSelection.RevisionID
+			execution.WorkerReleaseChannel = &releaseSelection.Channel
+		}
 		if err := tx.Create(&turn).Error; err != nil {
 			return Turn{}, problem.Wrap(409, "turn_create_rejected", "Turn creation was rejected by a tenant isolation constraint.", err)
 		}
@@ -508,7 +538,9 @@ func (s *Service) CreateTurnWithIdempotency(
 				"executionId": execution.ID, "tenantId": tenantID, "sessionId": sessionID,
 				"turnId": turn.ID, "executionTargetId": execution.ExecutionTargetID,
 				"targetKind": execution.TargetKind, "attempt": execution.Attempt,
-				"provider": provider, "providerRuntimeBindingId": resources.BindingID,
+				"workerReleaseRevisionId": execution.WorkerReleaseRevisionID,
+				"workerReleaseChannel":    execution.WorkerReleaseChannel,
+				"provider":                provider, "providerRuntimeBindingId": resources.BindingID,
 				"remoteWorkspaceId":                     resources.WorkspaceID,
 				"workspaceMaterializationId":            resources.MaterializationID,
 				"workspaceMaterializationIncarnationId": resources.IncarnationID,
@@ -526,6 +558,8 @@ func (s *Service) CreateTurnWithIdempotency(
 				"turnId": turn.ID, "executionId": execution.ID, "inputText": inputText,
 				"status": "queued", "executionTargetId": execution.ExecutionTargetID,
 				"targetKind":                 execution.TargetKind,
+				"workerReleaseRevisionId":    execution.WorkerReleaseRevisionID,
+				"workerReleaseChannel":       execution.WorkerReleaseChannel,
 				"workspaceMaterializationId": resources.MaterializationID,
 				"runtimeMode":                runtimeMode, "interactionMode": interactionMode,
 			},
@@ -574,12 +608,19 @@ func (s *Service) ListEvents(
 		return EventPage{}, problem.New(400, "invalid_event_sequence", "afterSequence must be zero or greater.")
 	}
 	limit = persistence.NormalizeLimit(limit, 100, 500)
-	models := make([]persistence.SessionEvent, 0)
-	err = s.db.WithContext(ctx).
-		Where("tenant_id = ? AND session_id = ? AND sequence > ?", tenantID, sessionID, afterSequence).
-		Order("sequence").Limit(limit).Find(&models).Error
+	logical, err := LoadLogicalEventsPage(
+		ctx, s.db, tenantID, sessionID, afterSequence, session.LastEventSequence, limit,
+	)
 	if err != nil {
 		return EventPage{}, problem.Wrap(500, "session_events_load_failed", "Failed to load session events.", err)
+	}
+	models := make([]persistence.SessionEvent, 0, len(logical))
+	for _, item := range logical {
+		model := item.Event
+		model.SessionID = sessionID
+		model.OrganizationID = session.OrganizationID
+		model.ProjectID = session.ProjectID
+		models = append(models, model)
 	}
 	items := make([]Event, 0, len(models))
 	for _, model := range models {

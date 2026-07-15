@@ -109,6 +109,7 @@ func (s *Service) ListWorkerManifests(
 		`).
 		Joins("JOIN execution_targets AS target ON target.id = worker.execution_target_id").
 		Where("worker.current_manifest_id IS NOT NULL").
+		Where("worker.administrative_status <> ?", "revoked").
 		Where("worker.status <> ? AND worker.terminated_at IS NULL", "terminated").
 		Where("target.tenant_id = ?", tenantID).
 		Group("worker.execution_target_id, worker.current_manifest_id").

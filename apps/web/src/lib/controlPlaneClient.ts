@@ -29,6 +29,7 @@ export class ControlPlaneError extends Error {
     readonly code: string,
     message: string,
     readonly requestId?: string,
+    readonly details?: Readonly<Record<string, unknown>>,
   ) {
     super(message);
     this.name = "ControlPlaneError";
@@ -167,12 +168,18 @@ export type ControlPlaneIssuedServiceAccount = {
   token: string;
 };
 
-export type ControlPlaneCredentialPurpose = "provider" | "git";
+export type ControlPlaneCredentialPurpose = "provider" | "git" | "registry" | "package";
+export type ControlPlaneCredentialScope = "user" | "organization" | "tenant" | "platform";
 
 export type ControlPlaneCredential = {
   id: string;
   tenantId: string;
   organizationId: string | null;
+  scope: ControlPlaneCredentialScope;
+  scopeUserId: string | null;
+  selectorOrganizationId: string | null;
+  selectorModel: string | null;
+  autoSelectEnabled: boolean;
   name: string;
   purpose: ControlPlaneCredentialPurpose;
   provider: string;
@@ -186,6 +193,39 @@ export type ControlPlaneCredential = {
   updatedAt: string;
   expiresAt: string | null;
   revokedAt: string | null;
+};
+
+export type ControlPlaneProviderCredentialScopePolicy = {
+  tenantId: string;
+  platformCredentialsEnabled: boolean;
+  platformCredentialAutoSelect: boolean;
+  updatedBy: string | null;
+  createdAt: string | null;
+  updatedAt: string | null;
+};
+
+export type ControlPlaneCredentialBindingKind =
+  | "git_fetch"
+  | "git_push"
+  | "registry_pull"
+  | "registry_push"
+  | "package_read"
+  | "package_publish"
+  | "worker_image_pull";
+
+export type ControlPlaneCredentialBinding = {
+  id: string;
+  tenantId: string;
+  organizationId: string | null;
+  projectId: string | null;
+  executionTargetId: string | null;
+  credentialId: string;
+  bindingKind: ControlPlaneCredentialBindingKind;
+  selector: string;
+  createdBy: string;
+  createdAt: string;
+  disabledAt: string | null;
+  disabledBy: string | null;
 };
 
 export type ControlPlaneAuditLogEntry = {
@@ -309,6 +349,54 @@ export type ControlPlaneWorkerManifest = {
   providers: ReadonlyArray<ControlPlaneWorkerProviderManifest>;
 };
 
+export type ControlPlaneWorkerReleaseRevision = {
+  id: string;
+  tenantId: string;
+  executionTargetId: string;
+  revision: number;
+  workerManifestId: string;
+  workerBuildVersion: string;
+  workerBuildGitSha?: string;
+  imageDigest?: string;
+  description: string;
+  createdBy: string;
+  createdAt: string;
+};
+
+export type ControlPlaneWorkerReleasePolicy = {
+  tenantId: string;
+  executionTargetId: string;
+  policyVersion: number;
+  promotedRevisionId: string;
+  canaryRevisionId?: string;
+  canaryPercent: number;
+  updatedBy: string;
+  updatedAt: string;
+};
+
+export type ControlPlaneWorkerReleaseTransition = {
+  id: string;
+  tenantId: string;
+  executionTargetId: string;
+  policyVersion: number;
+  action: "promote" | "canary" | "rollback" | "abort-canary";
+  fromPromotedRevisionId?: string;
+  fromCanaryRevisionId?: string;
+  toPromotedRevisionId: string;
+  toCanaryRevisionId?: string;
+  canaryPercent: number;
+  reason: string;
+  actorId: string;
+  requestId?: string;
+  occurredAt: string;
+};
+
+export type ControlPlaneWorkerReleaseOverview = {
+  policy: ControlPlaneWorkerReleasePolicy | null;
+  revisions: ReadonlyArray<ControlPlaneWorkerReleaseRevision>;
+  transitions: ReadonlyArray<ControlPlaneWorkerReleaseTransition>;
+};
+
 export type ControlPlaneSSHProvisionResult = {
   targetId: string;
   operation: "install" | "upgrade" | "revoke";
@@ -366,12 +454,17 @@ export type ControlPlaneAgentTurn = {
   createdBy: string;
   status: "queued" | "running" | "completed" | "failed" | "cancelled" | "interrupted";
   inputText: string;
+  turnKind?: "message" | "compact" | "review" | "rollback" | "fork";
   runtimeMode: RuntimeMode;
   interactionMode: ProviderInteractionMode;
   startedAt: string | null;
   completedAt: string | null;
   createdAt: string;
 };
+
+export type ControlPlaneReviewTarget =
+  | { type: "uncommittedChanges" }
+  | { type: "baseBranch"; branch?: string };
 
 export type ControlPlaneControlCommand = {
   id: string;
@@ -382,7 +475,7 @@ export type ControlPlaneControlCommand = {
   commandType: string;
   commandId: string;
   payload: Record<string, unknown>;
-  status: "pending" | "delivered" | "acknowledged" | "superseded";
+  status: "pending" | "delivered" | "acknowledged" | "superseded" | "outcome_unknown";
   requestedBy: string;
   requestedAt: string;
   deliveryWorkerId?: string;
@@ -392,6 +485,33 @@ export type ControlPlaneControlCommand = {
   deliveredAt?: string;
   acknowledgedAt?: string;
   deliveryError?: string;
+};
+
+export type ControlPlaneAdvancedCommandResult = {
+  type: "compact" | "review";
+  turn: ControlPlaneAgentTurn;
+  executionId: string;
+  controlCommand: ControlPlaneControlCommand;
+};
+
+export type ControlPlaneRollbackResult = {
+  sessionId: string;
+  eventId: string;
+  eventSequence: number;
+  fromSessionId: string;
+  fromTurnId: string;
+  fromSequence: number;
+  removedTurnCount: number;
+  supportMode: "emulated";
+  workspaceDisposition: "unchanged";
+  externalSideEffectsReverted: false;
+};
+
+export type ControlPlaneForkResult = {
+  session: ControlPlaneAgentSession;
+  sourceSessionId: string;
+  sourceEventSequence: number;
+  supportMode: "emulated";
 };
 
 export type ControlPlanePendingInteraction = {
@@ -458,7 +578,12 @@ export type TenantInvitation = {
 };
 
 type ErrorEnvelope = {
-  error?: { code?: string; message?: string; requestId?: string };
+  error?: {
+    code?: string;
+    message?: string;
+    requestId?: string;
+    details?: Record<string, unknown> | null;
+  };
 };
 
 function normalizeSessionEventSequence(sequence: number): number {
@@ -622,6 +747,7 @@ async function controlPlaneRequest<T>(
       payload?.error?.code ?? "control_plane_request_failed",
       payload?.error?.message ?? `Control-plane request failed (${response.status}).`,
       payload?.error?.requestId,
+      payload?.error?.details ?? undefined,
     );
   }
   if (response.status === 204) return undefined as T;
@@ -772,6 +898,11 @@ export const controlPlaneClient = {
     tenantId: string,
     input: {
       organizationId?: string;
+      scope?: ControlPlaneCredentialScope;
+      scopeUserId?: string;
+      selectorOrganizationId?: string;
+      selectorModel?: string;
+      autoSelectEnabled?: boolean;
       name: string;
       purpose: ControlPlaneCredentialPurpose;
       provider: string;
@@ -800,6 +931,54 @@ export const controlPlaneClient = {
   revokeCredential: (tenantId: string, credentialId: string) =>
     controlPlaneRequest<void>(
       `/v1/tenants/${encodeURIComponent(tenantId)}/credentials/${encodeURIComponent(credentialId)}/revoke`,
+      { method: "POST" },
+    ),
+  setCredentialAutoSelect: (tenantId: string, credentialId: string, enabled: boolean) =>
+    controlPlaneRequest<ControlPlaneCredential>(
+      `/v1/tenants/${encodeURIComponent(tenantId)}/credentials/${encodeURIComponent(credentialId)}/auto-select`,
+      { method: "PUT", body: { enabled } },
+    ),
+  getProviderCredentialScopePolicy: (tenantId: string) =>
+    controlPlaneRequest<ControlPlaneProviderCredentialScopePolicy>(
+      `/v1/tenants/${encodeURIComponent(tenantId)}/provider-credential-scope-policy`,
+    ),
+  updateProviderCredentialScopePolicy: (
+    tenantId: string,
+    input: {
+      platformCredentialsEnabled: boolean;
+      platformCredentialAutoSelect: boolean;
+    },
+  ) =>
+    controlPlaneRequest<ControlPlaneProviderCredentialScopePolicy>(
+      `/v1/tenants/${encodeURIComponent(tenantId)}/provider-credential-scope-policy`,
+      { method: "PUT", body: input },
+    ),
+  listCredentialBindings: (
+    tenantId: string,
+    owner: { projectId: string } | { executionTargetId: string },
+  ) => {
+    const query = new URLSearchParams(owner).toString();
+    return controlPlaneRequest<{ items: ReadonlyArray<ControlPlaneCredentialBinding> }>(
+      `/v1/tenants/${encodeURIComponent(tenantId)}/credential-bindings?${query}`,
+    );
+  },
+  createCredentialBinding: (
+    tenantId: string,
+    input: {
+      projectId?: string;
+      executionTargetId?: string;
+      credentialId: string;
+      bindingKind: ControlPlaneCredentialBindingKind;
+      selector?: string;
+    },
+  ) =>
+    controlPlaneRequest<ControlPlaneCredentialBinding>(
+      `/v1/tenants/${encodeURIComponent(tenantId)}/credential-bindings`,
+      { method: "POST", body: input },
+    ),
+  disableCredentialBinding: (tenantId: string, bindingId: string) =>
+    controlPlaneRequest<ControlPlaneCredentialBinding>(
+      `/v1/tenants/${encodeURIComponent(tenantId)}/credential-bindings/${encodeURIComponent(bindingId)}/disable`,
       { method: "POST" },
     ),
   listAuditLogs: (
@@ -836,7 +1015,6 @@ export const controlPlaneClient = {
       name: string;
       repositoryUrl?: string;
       defaultBranch: string;
-      gitCredentialId?: string;
       visibility: ControlPlaneProject["visibility"];
     },
     options?: ControlPlaneIdempotencyOptions,
@@ -855,7 +1033,6 @@ export const controlPlaneClient = {
       name?: string;
       repositoryUrl?: string;
       defaultBranch?: string;
-      gitCredentialId?: string | null;
       visibility?: ControlPlaneProject["visibility"];
     },
   ) =>
@@ -925,6 +1102,40 @@ export const controlPlaneClient = {
     controlPlaneRequest<{ items: ReadonlyArray<ControlPlaneWorkerManifest> }>(
       `/v1/tenants/${encodeURIComponent(tenantId)}/worker-manifests`,
     ),
+  listWorkerReleases: (tenantId: string, targetId: string) =>
+    controlPlaneRequest<ControlPlaneWorkerReleaseOverview>(
+      `/v1/tenants/${encodeURIComponent(tenantId)}/execution-targets/${encodeURIComponent(targetId)}/worker-releases`,
+    ),
+  createWorkerRelease: (
+    tenantId: string,
+    targetId: string,
+    input: { workerManifestId: string; description: string },
+    options?: ControlPlaneIdempotencyOptions,
+  ) =>
+    controlPlaneRequest<ControlPlaneWorkerReleaseRevision>(
+      `/v1/tenants/${encodeURIComponent(tenantId)}/execution-targets/${encodeURIComponent(targetId)}/worker-releases`,
+      {
+        method: "POST",
+        ...idempotencyRequestHeaders(options),
+        body: input,
+      },
+    ),
+  transitionWorkerRelease: (
+    tenantId: string,
+    targetId: string,
+    revisionId: string,
+    action: "canary" | "promote" | "rollback",
+    input: { expectedPolicyVersion: number; reason: string; canaryPercent?: number },
+    options?: ControlPlaneIdempotencyOptions,
+  ) =>
+    controlPlaneRequest<ControlPlaneWorkerReleasePolicy>(
+      `/v1/tenants/${encodeURIComponent(tenantId)}/execution-targets/${encodeURIComponent(targetId)}/worker-releases/${encodeURIComponent(revisionId)}/${action}`,
+      {
+        method: "POST",
+        ...idempotencyRequestHeaders(options),
+        body: input,
+      },
+    ),
   createExecutionTarget: (
     tenantId: string,
     input: {
@@ -969,6 +1180,67 @@ export const controlPlaneClient = {
         method: "POST",
         ...idempotencyRequestHeaders(options),
         body: { inputText, ...modes },
+      },
+    ),
+  compactSession: (
+    sessionId: string,
+    expectedLastEventSequence: number,
+    options?: ControlPlaneIdempotencyOptions,
+  ) =>
+    controlPlaneRequest<ControlPlaneAdvancedCommandResult>(
+      `/v1/sessions/${encodeURIComponent(sessionId)}/compact`,
+      {
+        method: "POST",
+        ...idempotencyRequestHeaders(options),
+        body: { expectedLastEventSequence },
+      },
+    ),
+  startReview: (
+    sessionId: string,
+    input: {
+      expectedLastEventSequence: number;
+      runtimeMode: RuntimeMode;
+      target: ControlPlaneReviewTarget;
+    },
+    options?: ControlPlaneIdempotencyOptions,
+  ) =>
+    controlPlaneRequest<ControlPlaneAdvancedCommandResult>(
+      `/v1/sessions/${encodeURIComponent(sessionId)}/reviews`,
+      {
+        method: "POST",
+        ...idempotencyRequestHeaders(options),
+        body: input,
+      },
+    ),
+  rollbackSession: (
+    sessionId: string,
+    input: { expectedLastEventSequence: number; fromTurnId: string },
+    options?: ControlPlaneIdempotencyOptions,
+  ) =>
+    controlPlaneRequest<ControlPlaneRollbackResult>(
+      `/v1/sessions/${encodeURIComponent(sessionId)}/rollback`,
+      {
+        method: "POST",
+        ...idempotencyRequestHeaders(options),
+        body: input,
+      },
+    ),
+  forkSession: (
+    sessionId: string,
+    input: {
+      expectedLastEventSequence: number;
+      title: string;
+      visibility: ControlPlaneAgentSession["visibility"];
+      providerCredentialId?: string;
+    },
+    options?: ControlPlaneIdempotencyOptions,
+  ) =>
+    controlPlaneRequest<ControlPlaneForkResult>(
+      `/v1/sessions/${encodeURIComponent(sessionId)}/fork`,
+      {
+        method: "POST",
+        ...idempotencyRequestHeaders(options),
+        body: input,
       },
     ),
   steerActiveTurn: (

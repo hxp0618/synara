@@ -108,35 +108,8 @@ func TestLocalArtifactLifecycleAndTenantIsolation(t *testing.T) {
 
 func TestWorkerArtifactConfirmationRequiresCurrentLease(t *testing.T) {
 	fixture := newArtifactFixture(t)
-	workerID := uuid.New()
-	executionID := uuid.New()
-	turnID := uuid.New()
-	leaseToken := "current-lease-token"
-	now := time.Now().UTC()
-	worker := persistence.WorkerInstance{
-		ID: workerID, ExecutionTargetID: fixture.targetID, TargetKind: "local", ClusterID: "local",
-		Namespace: "default", PodName: "worker-1", Version: "test", ProtocolVersion: 1, Capabilities: map[string]any{},
-		LeaseSupported: true, FencingSupported: true, AuthTokenHash: secret.HashToken("worker-token"),
-		Status: "online", RegisteredAt: now, LastHeartbeatAt: now,
-	}
-	models := []any{
-		&worker,
-		&persistence.AgentTurn{ID: turnID, TenantID: fixture.tenantID, SessionID: fixture.sessionID, CreatedBy: fixture.principal.UserID, Status: "running", InputText: "test"},
-		&persistence.AgentExecution{
-			ID: executionID, TenantID: fixture.tenantID, SessionID: fixture.sessionID, TurnID: turnID,
-			Attempt: 1, Status: "running", ExecutionTargetID: fixture.targetID, TargetKind: "local",
-			WorkerID: &workerID, Generation: 2, RequestedBy: fixture.principal.UserID, QueuedAt: now, StartedAt: &now,
-		},
-		&persistence.WorkerLease{
-			ExecutionID: executionID, TenantID: fixture.tenantID, WorkerID: workerID, Generation: 2,
-			LeaseTokenHash: secret.HashToken(leaseToken), AcquiredAt: now, HeartbeatAt: now, ExpiresAt: now.Add(time.Hour),
-		},
-	}
-	for _, model := range models {
-		if err := fixture.db.Create(model).Error; err != nil {
-			t.Fatalf("seed worker artifact fixture %T: %v", model, err)
-		}
-	}
+	worker, executionID, leaseToken := seedWorkerArtifactFixture(t, fixture)
+	workerID := worker.ID
 
 	grant, err := fixture.service.CreateForWorker(context.Background(), worker, executionID, WorkerCreateInput{
 		TenantID: fixture.tenantID, Generation: 2, LeaseToken: leaseToken,
@@ -175,6 +148,73 @@ func TestWorkerArtifactConfirmationRequiresCurrentLease(t *testing.T) {
 	if event.WorkerID == nil || *event.WorkerID != workerID || event.Generation == nil || *event.Generation != 2 {
 		t.Fatalf("artifact event lost fencing envelope: %#v", event)
 	}
+}
+
+func TestWorkerArtifactIdempotencyReusesPendingAndReadyArtifact(t *testing.T) {
+	fixture := newArtifactFixture(t)
+	worker, executionID, leaseToken := seedWorkerArtifactFixture(t, fixture)
+	idempotencyKey := "generated-file-response-loss"
+	input := WorkerCreateInput{
+		TenantID: fixture.tenantID, Generation: 2, LeaseToken: leaseToken,
+		IdempotencyKey: &idempotencyKey, Kind: "generated_file", OriginalName: pointerString("report.txt"),
+	}
+	first, err := fixture.service.CreateForWorker(context.Background(), worker, executionID, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := fixture.service.CreateForWorker(context.Background(), worker, executionID, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectedID := workerArtifactID(executionID, 2, idempotencyKey)
+	if first.Artifact.ID != expectedID || second.Artifact.ID != expectedID {
+		t.Fatalf("worker Artifact identity was not deterministic: first=%s second=%s expected=%s", first.Artifact.ID, second.Artifact.ID, expectedID)
+	}
+	if !first.UploadRequired || !second.UploadRequired || first.URL == second.URL {
+		t.Fatalf("pending worker Artifact replay did not refresh its upload grant: first=%#v second=%#v", first, second)
+	}
+	var count int64
+	if err := fixture.db.Model(&persistence.Artifact{}).
+		Where("tenant_id = ? AND execution_id = ? AND id = ?", fixture.tenantID, executionID, expectedID).
+		Count(&count).Error; err != nil || count != 1 {
+		t.Fatalf("idempotent worker Artifact count = %d, %v", count, err)
+	}
+
+	payload := []byte("generated report\n")
+	if err := fixture.service.UploadLocal(
+		context.Background(), expectedID, uploadToken(t, second.URL), "text/plain",
+		int64(len(payload)), bytes.NewReader(payload),
+	); err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(payload)
+	complete := WorkerCompleteInput{
+		TenantID: fixture.tenantID, Generation: 2, LeaseToken: leaseToken,
+		CompleteInput: CompleteInput{
+			SizeBytes: int64(len(payload)), SHA256: hex.EncodeToString(digest[:]), ContentType: "text/plain",
+		},
+	}
+	ready, err := fixture.service.CompleteForWorker(context.Background(), worker, executionID, expectedID, complete)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replayed, err := fixture.service.CreateForWorker(context.Background(), worker, executionID, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replayed.UploadRequired || replayed.URL != "" || replayed.Artifact.ID != ready.ID || replayed.Artifact.Status != "ready" {
+		t.Fatalf("ready worker Artifact replay unexpectedly issued another upload grant: %#v", replayed)
+	}
+
+	conflict := input
+	conflict.OriginalName = pointerString("different.txt")
+	_, err = fixture.service.CreateForWorker(context.Background(), worker, executionID, conflict)
+	assertProblemCode(t, err, "artifact_idempotency_conflict")
+	invalidKey := " invalid"
+	conflict = input
+	conflict.IdempotencyKey = &invalidKey
+	_, err = fixture.service.CreateForWorker(context.Background(), worker, executionID, conflict)
+	assertProblemCode(t, err, "invalid_artifact_idempotency_key")
 }
 
 func TestCheckpointArtifactCreateAndReadyReplayUseOneDeterministicArtifact(t *testing.T) {
@@ -420,6 +460,46 @@ func seedCheckpointArtifactFixture(
 		}
 	}
 	return worker, executionID, checkpointID, leaseToken
+}
+
+func seedWorkerArtifactFixture(
+	t *testing.T,
+	fixture artifactFixture,
+) (persistence.WorkerInstance, uuid.UUID, string) {
+	t.Helper()
+	workerID := uuid.New()
+	executionID := uuid.New()
+	turnID := uuid.New()
+	leaseToken := "current-lease-token"
+	now := time.Now().UTC()
+	worker := persistence.WorkerInstance{
+		ID: workerID, ExecutionTargetID: fixture.targetID, TargetKind: "local", ClusterID: "local",
+		Namespace: "default", PodName: "worker-1", Version: "test", ProtocolVersion: 1,
+		Capabilities: map[string]any{}, LeaseSupported: true, FencingSupported: true,
+		AuthTokenHash: secret.HashToken("worker-token"), Status: "online", RegisteredAt: now, LastHeartbeatAt: now,
+	}
+	models := []any{
+		&worker,
+		&persistence.AgentTurn{
+			ID: turnID, TenantID: fixture.tenantID, SessionID: fixture.sessionID,
+			CreatedBy: fixture.principal.UserID, Status: "running", InputText: "test",
+		},
+		&persistence.AgentExecution{
+			ID: executionID, TenantID: fixture.tenantID, SessionID: fixture.sessionID, TurnID: turnID,
+			Attempt: 1, Status: "running", ExecutionTargetID: fixture.targetID, TargetKind: "local",
+			WorkerID: &workerID, Generation: 2, RequestedBy: fixture.principal.UserID, QueuedAt: now, StartedAt: &now,
+		},
+		&persistence.WorkerLease{
+			ExecutionID: executionID, TenantID: fixture.tenantID, WorkerID: workerID, Generation: 2,
+			LeaseTokenHash: secret.HashToken(leaseToken), AcquiredAt: now, HeartbeatAt: now, ExpiresAt: now.Add(time.Hour),
+		},
+	}
+	for _, model := range models {
+		if err := fixture.db.Create(model).Error; err != nil {
+			t.Fatalf("seed worker Artifact fixture %T: %v", model, err)
+		}
+	}
+	return worker, executionID, leaseToken
 }
 
 func TestLocalStoreRejectsEscapingObjectKeys(t *testing.T) {

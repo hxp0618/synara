@@ -40,6 +40,7 @@ const (
 	ReasonWorkerManifestRequired               = "worker_manifest_required"
 	ReasonWorkerManifestReregistrationRequired = "worker_manifest_reregistration_required"
 	ReasonExecutionTargetUnavailable           = "execution_target_unavailable"
+	ReasonProviderCursorRequired               = "provider_cursor_required"
 )
 
 var ErrInvalidManifest = errors.New("stored Provider manifest is invalid")
@@ -135,7 +136,19 @@ func ProjectExecution(input ExecutionInput) (Projection, error) {
 			continue
 		}
 		provider, _ := providercatalog.Lookup(providerName)
-		if provider.SupportTier == "local-only" || provider.Capabilities[capabilityID] == "unsupported" {
+		if provider.SupportTier == "local-only" {
+			projection.Items = append(projection.Items, unsupportedItem(providerName, capabilityID, ReasonCapabilityUnsupported))
+			continue
+		}
+		if controlPlaneHistoryCapability(provider, capabilityID) {
+			projection.Items = append(projection.Items, supportedItem(providerName, capabilityID, SupportModeEmulated))
+			continue
+		}
+		if input.TargetStatus != "active" {
+			projection.Items = append(projection.Items, unsupportedItem(providerName, capabilityID, ReasonExecutionTargetUnavailable))
+			continue
+		}
+		if provider.Capabilities[capabilityID] == "unsupported" {
 			projection.Items = append(projection.Items, unsupportedItem(providerName, capabilityID, ReasonCapabilityUnsupported))
 			continue
 		}
@@ -208,19 +221,32 @@ func projectTargetItem(
 	capabilityID string,
 	observations []ManifestObservation,
 ) (Item, error) {
+	if provider.SupportTier == "local-only" {
+		return unsupportedItem(provider.Name, capabilityID, ReasonCapabilityUnsupported), nil
+	}
+	if controlPlaneHistoryCapability(provider, capabilityID) {
+		return supportedItem(provider.Name, capabilityID, SupportModeEmulated), nil
+	}
 	if input.TargetStatus != "active" {
 		return unsupportedItem(provider.Name, capabilityID, ReasonExecutionTargetUnavailable), nil
 	}
-	if provider.SupportTier == "local-only" || provider.Capabilities[capabilityID] == "unsupported" {
+	if provider.SupportTier == "experimental" && !input.ExperimentalProviderEnabled[provider.Name] {
 		return unsupportedItem(provider.Name, capabilityID, ReasonCapabilityUnsupported), nil
 	}
-	if provider.SupportTier == "experimental" && !input.ExperimentalProviderEnabled[provider.Name] {
+	if provider.Capabilities[capabilityID] == "unsupported" {
 		return unsupportedItem(provider.Name, capabilityID, ReasonCapabilityUnsupported), nil
 	}
 	if len(observations) == 0 {
 		return unobservedItem(provider.Name, capabilityID), nil
 	}
 	return projectObservedItem(provider.Name, capabilityID, observations)
+}
+
+func controlPlaneHistoryCapability(provider providercatalog.Provider, capabilityID string) bool {
+	if provider.SupportTier == "local-only" {
+		return false
+	}
+	return capabilityID == "rollback" || capabilityID == "fork"
 }
 
 func projectObservedItem(provider, capabilityID string, observations []ManifestObservation) (Item, error) {

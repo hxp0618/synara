@@ -31,6 +31,7 @@ func TestGatherUsesBoundedRoutePatternsAndAuthoritativeState(t *testing.T) {
 	workerID := uuid.New()
 	staleWorkerID := uuid.New()
 	freshWorkerID := uuid.New()
+	revokedWorkerID := uuid.New()
 	executionID := uuid.New()
 	now := time.Now().UTC()
 	if err := db.Create(&persistence.ExecutionTarget{ID: targetID, Kind: "docker", Name: "test", Status: "active", Capabilities: map[string]any{}}).Error; err != nil {
@@ -40,7 +41,7 @@ func TestGatherUsesBoundedRoutePatternsAndAuthoritativeState(t *testing.T) {
 		ID: workerID, ExecutionTargetID: targetID, TargetKind: "docker", ClusterID: "test",
 		Namespace: "test", PodName: "worker", Version: "test", ProtocolVersion: 1, Capabilities: map[string]any{},
 		LeaseSupported: true, FencingSupported: true, AuthTokenHash: []byte("hash"), Status: "ready",
-		RegisteredAt: now, LastHeartbeatAt: now,
+		AdministrativeStatus: "active", RegisteredAt: now, LastHeartbeatAt: now,
 	}).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -49,15 +50,22 @@ func TestGatherUsesBoundedRoutePatternsAndAuthoritativeState(t *testing.T) {
 			ID: staleWorkerID, ExecutionTargetID: targetID, TargetKind: "docker", ClusterID: "test",
 			Namespace: "test", PodName: "stale-worker", Version: "test", ProtocolVersion: 2,
 			Capabilities: map[string]any{}, LeaseSupported: true, FencingSupported: true,
-			AuthTokenHash: []byte("stale-hash"), Status: "online", RegisteredAt: now,
+			AuthTokenHash: []byte("stale-hash"), Status: "online", AdministrativeStatus: "active", RegisteredAt: now,
 			LastHeartbeatAt: now.Add(-2 * time.Minute),
 		},
 		{
 			ID: freshWorkerID, ExecutionTargetID: targetID, TargetKind: "docker", ClusterID: "test",
 			Namespace: "test", PodName: "fresh-worker", Version: "test", ProtocolVersion: 2,
 			Capabilities: map[string]any{}, LeaseSupported: true, FencingSupported: true,
-			AuthTokenHash: []byte("fresh-hash"), Status: "online", RegisteredAt: now,
+			AuthTokenHash: []byte("fresh-hash"), Status: "online", AdministrativeStatus: "active", RegisteredAt: now,
 			LastHeartbeatAt: now,
+		},
+		{
+			ID: revokedWorkerID, ExecutionTargetID: targetID, TargetKind: "docker", ClusterID: "test",
+			Namespace: "test", PodName: "revoked-worker", Version: "test", ProtocolVersion: 2,
+			Capabilities: map[string]any{}, LeaseSupported: true, FencingSupported: true,
+			AuthTokenHash: []byte("revoked-hash"), Status: "online", AdministrativeStatus: "revoked", RegisteredAt: now,
+			LastHeartbeatAt: now.Add(-2 * time.Minute), RevokedAt: &now,
 		},
 	} {
 		if err := db.Create(&worker).Error; err != nil {
@@ -108,6 +116,8 @@ func TestGatherUsesBoundedRoutePatternsAndAuthoritativeState(t *testing.T) {
 	for _, expected := range []string{
 		`route="/v1/sessions/{sessionID}"`, `route="unmatched"`,
 		`synara_workers{status="ready",target_kind="docker"} 1`,
+		`synara_workers_administrative{status="active",target_kind="docker"} 3`,
+		`synara_workers_administrative{status="revoked",target_kind="docker"} 1`,
 		`synara_stale_workers{status="online",target_kind="docker"} 1`,
 		`synara_executions{status="running",target_kind="docker"} 1`,
 		`synara_worker_leases{state="active"} 1`, `synara_metrics_collection_success 1`,
@@ -136,6 +146,7 @@ func TestObserveHTTPDerivesBoundedLoginLeaseFencingAndEventMetrics(t *testing.T)
 	registry.ObserveHTTP("POST", "POST /v1/workers/executions/{executionID}/events", 201, 25*time.Millisecond, "")
 	registry.ObserveHTTP("POST", "POST /v1/workers/executions/{executionID}/events", 409, 30*time.Millisecond, "lease_expired")
 	registry.ObserveHTTP("POST", "POST /v1/workers/heartbeat", 409, 3*time.Millisecond, "worker_incarnation_fenced")
+	registry.ObserveHTTP("POST", "POST /v1/workers/heartbeat", 401, 3*time.Millisecond, "worker_token_revoked")
 
 	var output bytes.Buffer
 	registry.writeProcessMetrics(&output)
@@ -148,7 +159,7 @@ func TestObserveHTTPDerivesBoundedLoginLeaseFencingAndEventMetrics(t *testing.T)
 		`synara_worker_lease_renewals_total{result="rejected"} 1`,
 		`synara_worker_fencing_rejections_total{operation="lease-renew"} 1`,
 		`synara_worker_fencing_rejections_total{operation="session-event"} 1`,
-		`synara_worker_fencing_rejections_total{operation="heartbeat"} 1`,
+		`synara_worker_fencing_rejections_total{operation="heartbeat"} 2`,
 		`synara_session_event_append_duration_seconds_count{result="success"} 1`,
 		`synara_session_event_append_duration_seconds_count{result="rejected"} 1`,
 	} {
@@ -156,7 +167,7 @@ func TestObserveHTTPDerivesBoundedLoginLeaseFencingAndEventMetrics(t *testing.T)
 			t.Fatalf("metrics omitted %q:\n%s", expected, metrics)
 		}
 	}
-	for _, forbidden := range []string{"oidc_id_token_invalid", "generation_fenced", "lease_expired", "worker_incarnation_fenced"} {
+	for _, forbidden := range []string{"oidc_id_token_invalid", "generation_fenced", "lease_expired", "worker_incarnation_fenced", "worker_token_revoked"} {
 		if strings.Contains(metrics, forbidden) {
 			t.Fatalf("metrics leaked unbounded problem code %q:\n%s", forbidden, metrics)
 		}

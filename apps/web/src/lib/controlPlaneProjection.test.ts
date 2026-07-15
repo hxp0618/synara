@@ -32,6 +32,7 @@ function event(
   eventType: string,
   payload: Record<string, unknown>,
   eventVersion = 1,
+  executionId = "execution-1",
 ): ControlPlaneSessionEvent {
   return {
     eventId: `event-${sequence}`,
@@ -40,7 +41,7 @@ function event(
     organizationId: session.organizationId,
     projectId: session.projectId,
     sessionId: session.id,
-    executionId: sequence === 1 ? "execution-1" : "execution-1",
+    executionId,
     workerId: null,
     generation: null,
     sequence,
@@ -194,6 +195,135 @@ describe("Control Plane Session projection", () => {
     ]);
   });
 
+  it("projects Terminal lifecycle data as concise tool activities without losing payload fields", () => {
+    const artifactId = "8606c570-1a52-4b64-8445-a4198ff08ca0";
+    const payloads = [
+      {
+        itemType: "command_execution",
+        status: "inProgress",
+        title: "Terminal",
+        data: {
+          provider: "codex",
+          terminal: {
+            terminalId: "terminal-1",
+            eventType: "terminal.started",
+            commandSummary: "bun run test",
+            cwdLabel: "apps/provider-host",
+          },
+        },
+      },
+      {
+        itemType: "command_execution",
+        status: "inProgress",
+        title: "Terminal log",
+        data: {
+          provider: "codex",
+          terminal: {
+            terminalId: "terminal-1",
+            eventType: "terminal.output.reference",
+            artifactId,
+            offset: 0,
+            length: 1_048_576,
+            segmentIndex: 0,
+            encoding: "utf-8",
+          },
+        },
+      },
+      {
+        itemType: "command_execution",
+        status: "completed",
+        title: "Terminal",
+        data: {
+          provider: "codex",
+          terminal: {
+            terminalId: "terminal-1",
+            eventType: "terminal.exited",
+            totalBytes: 64,
+            previewBytes: 64,
+            segmentCount: 0,
+            truncated: false,
+            exitCode: 0,
+          },
+        },
+      },
+      {
+        itemType: "command_execution",
+        status: "failed",
+        title: "Terminal",
+        data: {
+          provider: "codex",
+          terminal: {
+            terminalId: "terminal-2",
+            eventType: "terminal.failed",
+            totalBytes: 65_536,
+            previewBytes: 32_768,
+            segmentCount: 1,
+            truncated: true,
+            exitCode: 137,
+            signal: "SIGKILL",
+            failureKind: "oom",
+          },
+        },
+      },
+    ];
+    let projection = createControlPlaneSessionProjection(session);
+    for (const [index, payload] of payloads.entries()) {
+      projection = applyControlPlaneSessionEvent(
+        projection,
+        event(
+          index + 1,
+          index === 0 ? "item.started" : index === 3 ? "item.completed" : "item.updated",
+          payload,
+          2,
+        ),
+      ).projection;
+    }
+
+    expect(projection.activities.map((activity) => activity.summary)).toEqual([
+      "Running bun run test in apps/provider-host",
+      "Terminal output saved to Artifact (segment 1, 1,048,576 bytes)",
+      "Terminal exited (exit 0, 64 bytes)",
+      "Terminal failed (out of memory, exit 137, SIGKILL, 65,536 bytes, output truncated)",
+    ]);
+    expect(projection.activities.map((activity) => activity.tone)).toEqual([
+      "tool",
+      "tool",
+      "tool",
+      "tool",
+    ]);
+    expect(projection.activities.map((activity) => activity.payload)).toEqual(
+      payloads.map((payload) => ({ ...payload, executionId: "execution-1" })),
+    );
+  });
+
+  it("surfaces an unconfirmed Workspace Checkpoint as an explicit error activity", () => {
+    const risk = "data-loss-risk=workspace-checkpoint-unconfirmed";
+    let projection = createControlPlaneSessionProjection(session);
+    for (const item of [
+      event(1, "execution.recovering", { reason: "lease_expired", risk }),
+      event(2, "execution.recovering", { reason: `worker-drain; ${risk}` }),
+      event(3, "execution.recovering", { reason: "lease_expired" }),
+    ]) {
+      projection = applyControlPlaneSessionEvent(projection, item).projection;
+    }
+
+    expect(projection.activities.map((activity) => activity.summary)).toEqual([
+      "Workspace checkpoint unconfirmed; local changes may be lost",
+      "Workspace checkpoint unconfirmed; local changes may be lost",
+      "Execution reconnecting",
+    ]);
+    expect(projection.activities.map((activity) => activity.tone)).toEqual([
+      "error",
+      "error",
+      "info",
+    ]);
+    expect(projection.activities[0]?.payload).toEqual({
+      reason: "lease_expired",
+      risk,
+      executionId: "execution-1",
+    });
+  });
+
   it("finishes assistant output only from the durable completion Event", () => {
     let projection = createControlPlaneSessionProjection(session);
     for (const item of [
@@ -340,6 +470,124 @@ describe("Control Plane Session projection", () => {
         summary: "Model switched to gpt-5.6-sol",
       }),
     );
+  });
+
+  it("projects special compact and review Turn kinds without creating synthetic user prompts", () => {
+    let compact = createControlPlaneSessionProjection(session);
+    compact = applyControlPlaneSessionEvent(
+      compact,
+      event(1, "turn.created", {
+        turnId: "turn-compact",
+        inputText: "Compact this Session",
+        turnKind: "compact",
+      }),
+    ).projection;
+    compact = applyControlPlaneSessionEvent(
+      compact,
+      event(2, "content.delta", {
+        turnId: "turn-compact",
+        streamKind: "assistant_text",
+        delta: "Internal compact summary",
+      }),
+    ).projection;
+
+    expect(compact.latestTurnKind).toBe("compact");
+    expect(compact.messages).toEqual([]);
+
+    let review = createControlPlaneSessionProjection(session);
+    review = applyControlPlaneSessionEvent(
+      review,
+      event(1, "turn.created", {
+        turnId: "turn-review",
+        inputText: "Review workspace changes",
+        turnKind: "review",
+      }),
+    ).projection;
+    review = applyControlPlaneSessionEvent(
+      review,
+      event(2, "content.delta", {
+        turnId: "turn-review",
+        streamKind: "assistant_text",
+        delta: "Finding one",
+      }),
+    ).projection;
+
+    expect(review.latestTurnKind).toBe("review");
+    expect(review.messages).toHaveLength(1);
+    expect(review.messages[0]).toMatchObject({ role: "assistant", text: "Finding one" });
+  });
+
+  it("replays Session history rollback deterministically without deleting audit activity", () => {
+    let projection = createControlPlaneSessionProjection(session);
+    for (const item of [
+      event(1, "turn.created", { turnId: "turn-1", inputText: "First" }),
+      event(2, "content.delta", {
+        turnId: "turn-1",
+        streamKind: "assistant_text",
+        delta: "First result",
+      }),
+      event(3, "turn.created", { turnId: "turn-2", inputText: "Second" }),
+      event(
+        4,
+        "content.delta",
+        {
+          turnId: "turn-2",
+          streamKind: "assistant_text",
+          delta: "Second result",
+        },
+        1,
+        "execution-2",
+      ),
+      event(5, "session.history.rolled-back", {
+        fromTurnId: "turn-2",
+        fromSequence: 3,
+        removedTurnCount: 1,
+        supportMode: "emulated",
+        workspaceDisposition: "unchanged",
+        externalSideEffectsReverted: false,
+      }),
+    ]) {
+      projection = applyControlPlaneSessionEvent(projection, item).projection;
+    }
+
+    expect(projection.messages.map((message) => message.text)).toEqual(["First", "First result"]);
+    expect(projection.latestTurn).toBeNull();
+    expect(projection.latestTurnKind).toBeNull();
+    expect(projection.activities.at(-1)).toMatchObject({
+      kind: "session.history.rolled-back",
+      summary: "Session history rolled back",
+      payload: {
+        fromTurnId: "turn-2",
+        fromSequence: 3,
+        removedTurnCount: 1,
+        supportMode: "emulated",
+        workspaceDisposition: "unchanged",
+        externalSideEffectsReverted: false,
+        executionId: "execution-1",
+      },
+    });
+
+    const duplicate = applyControlPlaneSessionEvent(
+      projection,
+      event(5, "session.history.rolled-back", { fromTurnId: "turn-2" }),
+    ).projection;
+    expect(duplicate).toBe(projection);
+  });
+
+  it("projects authoritative Fork lineage onto the derived Thread", () => {
+    const projection = applyControlPlaneSessionEvent(
+      createControlPlaneSessionProjection(session),
+      event(1, "session.forked", {
+        sourceSessionId: "source-session",
+        sourceEventSequence: 27,
+        supportMode: "emulated",
+      }),
+    ).projection;
+
+    expect(projection.forkSourceSessionId).toBe("source-session");
+    expect(projection.forkSourceEventSequence).toBe(27);
+    const thread = projectControlPlaneThreads([session], new Map([[session.id, projection]]))[0]!;
+    expect(thread.forkSourceThreadId).toBe("source-session");
   });
 
   it("projects top-level thread model and timestamps from the projection Session authority", () => {

@@ -54,6 +54,10 @@ import {
 import { isNonFatalCodexErrorMessage } from "../../codexErrorClassification.ts";
 import { ServerConfig } from "../../config.ts";
 import { makeRuntimeTaskListItem } from "../runtimeTaskList.ts";
+import {
+  makeRuntimeItemLifecyclePayload,
+  makeUtf8RuntimeContentDeltaPayload,
+} from "../runtimeEventPayload.ts";
 import { extractProposedPlanMarkdown } from "../planMode.ts";
 import { appendFileAttachmentsPromptBlock } from "../attachmentProjection.ts";
 import { synaraSkillsDir } from "../skillsCatalog.ts";
@@ -531,6 +535,14 @@ function contentStreamKindFromMethod(
   }
 }
 
+function commandOutputOffsetKey(
+  threadId: ThreadId,
+  turnId: TurnId | undefined,
+  terminalId: string,
+): string {
+  return `${threadId}:${turnId ?? ""}:${terminalId}`;
+}
+
 function asRuntimeItemId(itemId: ProviderItemId): RuntimeItemId {
   return RuntimeItemId.makeUnsafe(itemId);
 }
@@ -754,6 +766,21 @@ function runtimeEventBase(
 function mapItemLifecycle(
   event: ProviderEvent,
   canonicalThreadId: ThreadId,
+  lifecycle: "item.started",
+): Extract<ProviderRuntimeEvent, { readonly type: "item.started" }> | undefined;
+function mapItemLifecycle(
+  event: ProviderEvent,
+  canonicalThreadId: ThreadId,
+  lifecycle: "item.updated",
+): Extract<ProviderRuntimeEvent, { readonly type: "item.updated" }> | undefined;
+function mapItemLifecycle(
+  event: ProviderEvent,
+  canonicalThreadId: ThreadId,
+  lifecycle: "item.completed",
+): Extract<ProviderRuntimeEvent, { readonly type: "item.completed" }> | undefined;
+function mapItemLifecycle(
+  event: ProviderEvent,
+  canonicalThreadId: ThreadId,
   lifecycle: "item.started" | "item.updated" | "item.completed",
 ): ProviderRuntimeEvent | undefined {
   const payload = asObject(event.payload);
@@ -790,6 +817,11 @@ function mapItemLifecycle(
   const detail =
     itemType === "reasoning" ? reasoningSummaryDetail(source) : itemDetail(source, payload ?? {});
   const status = itemStatus(lifecycle, source.status);
+  const title = itemTitle(canonicalItemType);
+  const lifecycleDetail = generatedImageReference?.path ?? detail;
+  const data = generatedImageReference
+    ? codexGeneratedImageArtifact(generatedImageReference)
+    : event.payload;
 
   return {
     ...(generatedImageReference
@@ -800,27 +832,20 @@ function mapItemLifecycle(
         )
       : runtimeEventBase(event, canonicalThreadId)),
     type: lifecycle,
-    payload: {
+    payload: makeRuntimeItemLifecyclePayload({
       itemType: canonicalItemType,
       ...(status ? { status } : {}),
-      ...(itemTitle(canonicalItemType) ? { title: itemTitle(canonicalItemType) } : {}),
-      ...(generatedImageReference
-        ? { detail: generatedImageReference.path }
-        : detail
-          ? { detail }
-          : {}),
-      ...(generatedImageReference
-        ? { data: codexGeneratedImageArtifact(generatedImageReference) }
-        : event.payload !== undefined
-          ? { data: event.payload }
-          : {}),
-    },
+      ...(title ? { title } : {}),
+      ...(lifecycleDetail ? { detail: lifecycleDetail } : {}),
+      ...(data === undefined ? {} : { data }),
+    }),
   };
 }
 
 function mapToRuntimeEvents(
   event: ProviderEvent,
   canonicalThreadId: ThreadId,
+  commandOutputOffsets: Map<string, number>,
 ): ReadonlyArray<ProviderRuntimeEvent> {
   const payload = asObject(event.payload);
   const turn = asObject(payload?.turn);
@@ -1133,6 +1158,11 @@ function mapToRuntimeEvents(
 
   if (event.method === "item/started") {
     const started = mapItemLifecycle(event, canonicalThreadId, "item.started");
+    if (started?.payload.itemType === "command_execution" && event.itemId) {
+      commandOutputOffsets.delete(
+        commandOutputOffsetKey(canonicalThreadId, event.turnId, event.itemId),
+      );
+    }
     return started ? [started] : [];
   }
 
@@ -1160,6 +1190,14 @@ function mapToRuntimeEvents(
       ];
     }
     const completed = mapItemLifecycle(event, canonicalThreadId, "item.completed");
+    if (completed?.payload.itemType === "command_execution") {
+      const terminalId = event.itemId ?? toProviderItemId(asString(source.id));
+      if (terminalId) {
+        commandOutputOffsets.delete(
+          commandOutputOffsetKey(canonicalThreadId, event.turnId, terminalId),
+        );
+      }
+    }
     return completed ? [completed] : [];
   }
 
@@ -1206,20 +1244,52 @@ function mapToRuntimeEvents(
     if (!delta || delta.length === 0) {
       return [];
     }
+    const streamKind = contentStreamKindFromMethod(event.method);
+    const contentIndex =
+      typeof payload?.contentIndex === "number" ? payload.contentIndex : undefined;
+    const summaryIndex =
+      typeof payload?.summaryIndex === "number" ? payload.summaryIndex : undefined;
+    if (streamKind === "command_output") {
+      const terminalId =
+        event.itemId ?? toProviderItemId(asString(payload?.itemId) ?? asString(payload?.item_id));
+      if (!terminalId) {
+        return [];
+      }
+      const offsetKey = commandOutputOffsetKey(canonicalThreadId, event.turnId, terminalId);
+      const nativeByteOffset = asNumber(payload?.byteOffset) ?? asNumber(payload?.byte_offset);
+      const byteOffset =
+        nativeByteOffset !== undefined &&
+        Number.isSafeInteger(nativeByteOffset) &&
+        nativeByteOffset >= 0
+          ? nativeByteOffset
+          : (commandOutputOffsets.get(offsetKey) ?? 0);
+      const runtimePayload = makeUtf8RuntimeContentDeltaPayload({
+        streamKind,
+        delta,
+        terminalId,
+        byteOffset,
+        ...(contentIndex === undefined ? {} : { contentIndex }),
+        ...(summaryIndex === undefined ? {} : { summaryIndex }),
+      });
+      commandOutputOffsets.set(offsetKey, byteOffset + runtimePayload.byteLength);
+      return [
+        {
+          ...runtimeEventBase(event, canonicalThreadId),
+          type: "content.delta",
+          payload: runtimePayload,
+        },
+      ];
+    }
     return [
       {
         ...runtimeEventBase(event, canonicalThreadId),
         type: "content.delta",
-        payload: {
-          streamKind: contentStreamKindFromMethod(event.method),
+        payload: makeUtf8RuntimeContentDeltaPayload({
+          streamKind,
           delta,
-          ...(typeof payload?.contentIndex === "number"
-            ? { contentIndex: payload.contentIndex }
-            : {}),
-          ...(typeof payload?.summaryIndex === "number"
-            ? { summaryIndex: payload.summaryIndex }
-            : {}),
-        },
+          ...(contentIndex === undefined ? {} : { contentIndex }),
+          ...(summaryIndex === undefined ? {} : { summaryIndex }),
+        }),
       },
     ];
   }
@@ -2022,6 +2092,7 @@ const makeCodexAdapter = (options?: CodexAdapterLiveOptions) =>
       }).pipe(Effect.map((result) => result satisfies ServerVoiceTranscriptionResult));
 
     const runtimeEventQueue = yield* Queue.unbounded<ProviderRuntimeEvent>();
+    const commandOutputOffsets = new Map<string, number>();
 
     yield* Effect.acquireRelease(
       Effect.gen(function* () {
@@ -2037,7 +2108,7 @@ const makeCodexAdapter = (options?: CodexAdapterLiveOptions) =>
         const listener = (event: ProviderEvent) =>
           Effect.gen(function* () {
             yield* writeNativeEvent(event);
-            const runtimeEvents = mapToRuntimeEvents(event, event.threadId);
+            const runtimeEvents = mapToRuntimeEvents(event, event.threadId, commandOutputOffsets);
             if (runtimeEvents.length === 0) {
               yield* Effect.logDebug("ignoring unhandled Codex provider event", {
                 method: event.method,
@@ -2056,6 +2127,7 @@ const makeCodexAdapter = (options?: CodexAdapterLiveOptions) =>
         Effect.gen(function* () {
           yield* Effect.sync(() => {
             manager.off("event", listener);
+            commandOutputOffsets.clear();
           });
           yield* Queue.shutdown(runtimeEventQueue);
         }),

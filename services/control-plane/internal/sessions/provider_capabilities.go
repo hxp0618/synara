@@ -35,6 +35,16 @@ func (s *Service) requireObservedTargetProviderCapabilities(
 	)
 }
 
+func (s *Service) RequireObservedTargetProviderCapabilities(
+	ctx context.Context,
+	tx *gorm.DB,
+	target persistence.ExecutionTarget,
+	provider string,
+	capabilityIDs ...string,
+) error {
+	return s.requireObservedTargetProviderCapabilities(ctx, tx, target, provider, capabilityIDs...)
+}
+
 func (s *Service) requireTargetProviderCapabilitiesWithObservation(
 	ctx context.Context,
 	tx *gorm.DB,

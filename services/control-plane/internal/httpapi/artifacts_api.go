@@ -108,6 +108,9 @@ func (s *Server) createWorkerArtifact(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, err)
 		return
 	}
+	if idempotencyKey := r.Header.Get(artifacts.WorkerIdempotencyKeyHeader); idempotencyKey != "" {
+		input.IdempotencyKey = &idempotencyKey
+	}
 	grant, err := s.artifacts.CreateForWorker(r.Context(), mustWorker(r), executionID, input)
 	if err != nil {
 		s.writeError(w, r, err)

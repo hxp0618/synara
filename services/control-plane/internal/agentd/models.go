@@ -10,18 +10,15 @@ import (
 )
 
 type RunnerInput struct {
-	Execution            executions.Execution `json:"execution"`
-	Workload             executions.Workload  `json:"workload"`
-	ProviderResumeCursor *string              `json:"providerResumeCursor,omitempty"`
-	WorkspaceDirectory   string               `json:"workspaceDirectory"`
+	Execution              executions.Execution `json:"execution"`
+	Workload               executions.Workload  `json:"workload"`
+	ProviderResumeCursor   *string              `json:"providerResumeCursor,omitempty"`
+	WorkspaceDirectory     string               `json:"workspaceDirectory"`
+	RuntimeOutputDirectory string               `json:"runtimeOutputDirectory,omitempty"`
 }
 
 type RunnerCredential struct {
 	Payload map[string]any `json:"payload"`
-}
-
-type RunnerGitCredential struct {
-	Payload GitHTTPSCredential `json:"payload"`
 }
 
 type GitHTTPSCredential struct {
@@ -47,6 +44,10 @@ type RunnerArtifact struct {
 	Kind         string `json:"kind"`
 	OriginalName string `json:"originalName,omitempty"`
 	ContentType  string `json:"contentType"`
+	SourceRoot   string `json:"sourceRoot,omitempty"`
+	TerminalID   string `json:"terminalId,omitempty"`
+	Encoding     string `json:"encoding,omitempty"`
+	ReportedSize *int64 `json:"reportedSize,omitempty"`
 }
 
 type WorkspaceCheckpointCandidate struct {
@@ -64,8 +65,13 @@ type WorkspaceCheckpointCandidate struct {
 }
 
 type RunnerResult struct {
-	Output               map[string]any
-	ProviderResumeCursor *string
+	Output                 map[string]any
+	ProviderResumeCursor   *string
+	PrimaryOperationResult map[string]any
+}
+
+type RunnerPrimaryOperationControl struct {
+	MarkDelivered func(context.Context) error
 }
 
 type RunnerControl struct {

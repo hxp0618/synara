@@ -13,6 +13,7 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/synara-ai/synara/services/control-plane/internal/bootstrap"
+	"github.com/synara-ai/synara/services/control-plane/internal/credentialscope"
 	"github.com/synara-ai/synara/services/control-plane/internal/database"
 	"github.com/synara-ai/synara/services/control-plane/internal/executions"
 	"github.com/synara-ai/synara/services/control-plane/internal/identity"
@@ -101,14 +102,247 @@ func TestCredentialCiphertextIsBoundToCredentialAAD(t *testing.T) {
 	if err := fixture.db.Where("id = ?", second.ID).Take(&secondModel).Error; err != nil {
 		t.Fatal(err)
 	}
+	altered := firstModel
+	modelSelector := "different-model"
+	altered.SelectorModel = &modelSelector
+	aad, err := credentialAAD(altered)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.service.cipher.Decrypt(context.Background(), credentialkms.Envelope{
+		EncryptedPayload: firstModel.EncryptedPayload, EncryptedDataKey: firstModel.EncryptedDataKey,
+		KMSProvider: firstModel.KMSProvider, KMSKeyID: firstModel.KMSKeyID,
+	}, aad); err == nil {
+		t.Fatal("scope-aware AAD accepted ciphertext under different selector metadata")
+	}
 	if err := fixture.db.Model(&persistence.ProviderCredential{}).Where("id = ?", first.ID).Updates(map[string]any{
 		"encrypted_payload":  secondModel.EncryptedPayload,
 		"encrypted_data_key": secondModel.EncryptedDataKey,
-	}).Error; err != nil {
+	}).Error; err == nil {
+		t.Fatal("database allowed encrypted Credential material to change without rotation")
+	}
+}
+
+func TestCredentialLegacyAADRemainsReadableAndRotationUpgradesToScopeAwareV3(t *testing.T) {
+	fixture := newCredentialFixture(t)
+	ctx := context.Background()
+
+	for _, test := range []struct {
+		name           string
+		purpose        string
+		provider       string
+		credentialType string
+		aadVersion     int
+		payload        map[string]any
+		wantKey        string
+		wantValue      string
+	}{
+		{
+			name: "legacy Provider v1", purpose: PurposeProvider, provider: "codex",
+			credentialType: "api_key", aadVersion: 1,
+			payload: map[string]any{"apiKey": "legacy-provider-secret"},
+			wantKey: "apiKey", wantValue: "legacy-provider-secret",
+		},
+		{
+			name: "legacy Git v2", purpose: PurposeGit, provider: GitProvider,
+			credentialType: GitHTTPSCredentialType, aadVersion: 2,
+			payload: map[string]any{"host": "github.com", "username": "git", "token": "legacy-git-secret"},
+			wantKey: "token", wantValue: "legacy-git-secret",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			payload, err := json.Marshal(test.payload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			model := persistence.ProviderCredential{
+				ID: uuid.New(), TenantID: fixture.tenantID, OrganizationID: &fixture.organizationID,
+				Scope: credentialscope.ScopeOrganization,
+				Name:  test.name, Purpose: test.purpose, Provider: test.provider, CredentialType: test.credentialType,
+				AADVersion: test.aadVersion, Version: 1,
+				CreatedBy: fixture.owner.UserID, UpdatedBy: fixture.owner.UserID,
+			}
+			aad, err := credentialAAD(model)
+			if err != nil {
+				t.Fatal(err)
+			}
+			envelope, err := fixture.service.cipher.Encrypt(ctx, payload, aad)
+			if err != nil {
+				t.Fatal(err)
+			}
+			model.EncryptedPayload = envelope.EncryptedPayload
+			model.EncryptedDataKey = envelope.EncryptedDataKey
+			model.KMSProvider = envelope.KMSProvider
+			model.KMSKeyID = envelope.KMSKeyID
+			if err := fixture.db.Create(&model).Error; err != nil {
+				t.Fatal(err)
+			}
+
+			resolved, err := fixture.service.Resolve(ctx, fixture.tenantID, model.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if resolved[test.wantKey] != test.wantValue {
+				t.Fatalf("legacy payload = %#v", resolved)
+			}
+
+			rotated, err := fixture.service.Rotate(ctx, fixture.owner, fixture.tenantID, model.ID, RotateInput{
+				ExpectedVersion: 1, Payload: test.payload,
+			}, "legacy-aad-rotate", "127.0.0.1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if rotated.Version != 2 {
+				t.Fatalf("rotation version = %d, want 2", rotated.Version)
+			}
+			metadata, err := json.Marshal(rotated)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if bytes.Contains(metadata, []byte("aadVersion")) {
+				t.Fatalf("internal AAD version leaked through metadata: %s", metadata)
+			}
+			var stored persistence.ProviderCredential
+			if err := fixture.db.Where("id = ?", model.ID).Take(&stored).Error; err != nil {
+				t.Fatal(err)
+			}
+			if stored.AADVersion != 3 {
+				t.Fatalf("rotated AAD version = %d, want 3", stored.AADVersion)
+			}
+		})
+	}
+}
+
+func TestCredentialAutoSelectToggleIsAuthorizedAuditedAndDoesNotRotateCiphertext(t *testing.T) {
+	fixture := newCredentialFixture(t)
+	ctx := context.Background()
+	created, err := fixture.service.Create(ctx, fixture.owner, fixture.tenantID, CreateInput{
+		Scope: credentialscope.ScopeUser, ScopeUserID: &fixture.owner.UserID,
+		Name: "User automatic selection", Provider: "codex", CredentialType: "api_key",
+		Payload: map[string]any{"apiKey": "auto-select-secret"},
+	}, "auto-select-create", "127.0.0.1")
+	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = fixture.service.Resolve(ctx, fixture.tenantID, first.ID)
-	assertCredentialProblemCode(t, err, "credential_decryption_failed")
+	if created.AutoSelectEnabled {
+		t.Fatal("new Credential unexpectedly enabled automatic selection")
+	}
+	var before persistence.ProviderCredential
+	if err := fixture.db.Where("id = ?", created.ID).Take(&before).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	updated, err := fixture.service.SetAutoSelect(
+		ctx, fixture.owner, fixture.tenantID, created.ID, SetAutoSelectInput{Enabled: true},
+		"auto-select-enable", "127.0.0.1",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !updated.AutoSelectEnabled || updated.Version != created.Version {
+		t.Fatalf("auto-select update rotated or did not enable Credential: %#v", updated)
+	}
+	var after persistence.ProviderCredential
+	if err := fixture.db.Where("id = ?", created.ID).Take(&after).Error; err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before.EncryptedPayload, after.EncryptedPayload) ||
+		!bytes.Equal(before.EncryptedDataKey, after.EncryptedDataKey) || before.AADVersion != after.AADVersion {
+		t.Fatal("auto-select policy update rewrote encrypted Credential material")
+	}
+
+	_, err = fixture.service.SetAutoSelect(
+		ctx, fixture.member, fixture.tenantID, created.ID, SetAutoSelectInput{Enabled: false},
+		"auto-select-forbidden", "127.0.0.1",
+	)
+	assertCredentialProblemCode(t, err, "tenant_forbidden")
+
+	var audits int64
+	if err := fixture.db.Model(&persistence.AuditLog{}).
+		Where("tenant_id = ? AND resource_id = ? AND action = ?", fixture.tenantID, created.ID, "credential.auto_select.changed").
+		Count(&audits).Error; err != nil {
+		t.Fatal(err)
+	}
+	if audits != 1 {
+		t.Fatalf("auto-select update audits = %d, want 1", audits)
+	}
+}
+
+func TestCredentialScopePolicyRequiresEnterpriseEntitlementAndAuthorizedUpdate(t *testing.T) {
+	fixture := newCredentialFixture(t)
+	ctx := context.Background()
+	policy, err := fixture.service.GetScopePolicy(ctx, fixture.owner, fixture.tenantID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if policy.PlatformCredentialsEnabled || policy.PlatformCredentialAutoSelect || policy.UpdatedBy != nil {
+		t.Fatalf("default scope policy = %#v", policy)
+	}
+
+	_, err = fixture.service.UpdateScopePolicy(
+		ctx, fixture.member, fixture.tenantID,
+		UpdateScopePolicyInput{PlatformCredentialsEnabled: true},
+		"scope-policy-forbidden", "127.0.0.1",
+	)
+	assertCredentialProblemCode(t, err, "tenant_forbidden")
+	_, err = fixture.service.UpdateScopePolicy(
+		ctx, fixture.owner, fixture.tenantID,
+		UpdateScopePolicyInput{PlatformCredentialsEnabled: true},
+		"scope-policy-not-entitled", "127.0.0.1",
+	)
+	assertCredentialProblemCode(t, err, "platform_credential_not_entitled")
+	_, err = fixture.service.UpdateScopePolicy(
+		ctx, fixture.owner, fixture.tenantID,
+		UpdateScopePolicyInput{PlatformCredentialAutoSelect: true},
+		"scope-policy-invalid", "127.0.0.1",
+	)
+	assertCredentialProblemCode(t, err, "invalid_credential_scope_policy")
+
+	if err := fixture.db.Model(&persistence.Tenant{}).Where("id = ?", fixture.tenantID).
+		Update("plan_code", "enterprise").Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.db.Model(&persistence.PlatformInstallation{}).Where("key = ?", "control-plane").
+		Update("profile", "enterprise").Error; err != nil {
+		t.Fatal(err)
+	}
+	policy, err = fixture.service.UpdateScopePolicy(
+		ctx, fixture.owner, fixture.tenantID,
+		UpdateScopePolicyInput{PlatformCredentialsEnabled: true, PlatformCredentialAutoSelect: true},
+		"scope-policy-enable", "127.0.0.1",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !policy.PlatformCredentialsEnabled || !policy.PlatformCredentialAutoSelect ||
+		policy.UpdatedBy == nil || *policy.UpdatedBy != fixture.owner.UserID {
+		t.Fatalf("enabled scope policy = %#v", policy)
+	}
+
+	if err := fixture.db.Model(&persistence.PlatformInstallation{}).Where("key = ?", "control-plane").
+		Update("profile", "personal").Error; err != nil {
+		t.Fatal(err)
+	}
+	policy, err = fixture.service.UpdateScopePolicy(
+		ctx, fixture.owner, fixture.tenantID, UpdateScopePolicyInput{},
+		"scope-policy-emergency-disable", "127.0.0.1",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if policy.PlatformCredentialsEnabled || policy.PlatformCredentialAutoSelect {
+		t.Fatalf("disabled scope policy = %#v", policy)
+	}
+
+	var audits int64
+	if err := fixture.db.Model(&persistence.AuditLog{}).
+		Where("tenant_id = ? AND action = ?", fixture.tenantID, "credential.scope_policy.updated").
+		Count(&audits).Error; err != nil {
+		t.Fatal(err)
+	}
+	if audits != 2 {
+		t.Fatalf("scope policy update audits = %d, want 2", audits)
+	}
 }
 
 func TestCredentialRotationUsesOptimisticVersionAndNullableExpiry(t *testing.T) {
@@ -270,48 +504,6 @@ func TestGitCredentialPayloadIsStrictAndHostIsImmutable(t *testing.T) {
 	}
 }
 
-func TestGitCredentialWorkerResolutionRequiresProjectBindingHostAndCurrentLease(t *testing.T) {
-	fixture := newCredentialFixture(t)
-	ctx := context.Background()
-	gitCredential, err := fixture.service.Create(ctx, fixture.owner, fixture.tenantID, CreateInput{
-		OrganizationID: &fixture.organizationID,
-		Name:           "Private Git",
-		Purpose:        PurposeGit,
-		Provider:       GitProvider,
-		CredentialType: GitHTTPSCredentialType,
-		Payload: map[string]any{
-			"host": "git.example.com", "username": "synara", "token": "git-secret-token",
-		},
-	}, "git-worker-create", "127.0.0.1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	worker, executionID, projectID, leaseToken := seedGitCredentialExecution(t, fixture, gitCredential.ID)
-	executionService := executions.NewService(fixture.db, nil, 30*time.Second, 90*time.Second, 24*time.Hour, nil, nil)
-	lease := executions.LeaseInput{TenantID: fixture.tenantID, Generation: 1, LeaseToken: leaseToken}
-
-	payload, err := fixture.service.ResolveGitForExecution(ctx, executionService, worker, executionID, gitCredential.ID, lease)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if payload.Host != "git.example.com" || payload.Username != "synara" || payload.Token != "git-secret-token" {
-		t.Fatalf("unexpected resolved Git Credential: %#v", payload)
-	}
-
-	fenced := lease
-	fenced.Generation++
-	_, err = fixture.service.ResolveGitForExecution(ctx, executionService, worker, executionID, gitCredential.ID, fenced)
-	assertCredentialProblemCode(t, err, "generation_fenced")
-
-	otherRepository := "https://other.example.com/team/repository.git"
-	if err := fixture.db.Model(&persistence.Project{}).Where("id = ?", projectID).
-		Update("repository_url", otherRepository).Error; err != nil {
-		t.Fatal(err)
-	}
-	_, err = fixture.service.ResolveGitForExecution(ctx, executionService, worker, executionID, gitCredential.ID, lease)
-	assertCredentialProblemCode(t, err, "git_credential_host_mismatch")
-}
-
 func TestCredentialWorkerResolutionRequiresCurrentLeaseAndOrganization(t *testing.T) {
 	fixture := newCredentialFixture(t)
 	ctx := context.Background()
@@ -382,8 +574,8 @@ func TestCredentialWorkerResolutionRequiresCurrentLeaseAndOrganization(t *testin
 		t.Fatal(err)
 	}
 	if err := fixture.db.Model(&persistence.AgentSession{}).Where("id = ?", sessionID).
-		Update("provider_credential_id", otherCredential.ID).Error; err != nil {
-		t.Fatal(err)
+		Update("provider_credential_id", otherCredential.ID).Error; err == nil {
+		t.Fatal("database allowed an Agent Session to bind another Organization's Credential")
 	}
 	_, err = fixture.service.ResolveForExecution(ctx, executionService, worker, executionID, otherCredential.ID, lease)
 	assertCredentialProblemCode(t, err, "credential_not_found")
@@ -400,6 +592,36 @@ func TestCredentialWorkerResolutionRequiresCurrentLeaseAndOrganization(t *testin
 	}
 	_, err = fixture.service.ResolveForExecution(ctx, executionService, worker, executionID, organizationCredential.ID, lease)
 	assertCredentialProblemCode(t, err, "credential_version_fenced")
+}
+
+func TestUserCredentialWorkerResolutionFailsClosedAfterMembershipSuspension(t *testing.T) {
+	fixture := newCredentialFixture(t)
+	ctx := context.Background()
+	credential, err := fixture.service.Create(ctx, fixture.owner, fixture.tenantID, CreateInput{
+		Scope: credentialscope.ScopeUser, ScopeUserID: &fixture.owner.UserID,
+		Name: "Owner Credential", Provider: "codex", CredentialType: "api_key",
+		Payload: map[string]any{"apiKey": "owner-secret"},
+	}, "credential-user", "127.0.0.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker, executionID, _, leaseToken := seedCredentialExecution(
+		t, fixture, fixture.organizationID, credential.ID,
+	)
+	executionService := executions.NewService(fixture.db, nil, 30*time.Second, 90*time.Second, 24*time.Hour, nil, nil)
+	lease := executions.LeaseInput{TenantID: fixture.tenantID, Generation: 1, LeaseToken: leaseToken}
+
+	payload, err := fixture.service.ResolveForExecution(ctx, executionService, worker, executionID, credential.ID, lease)
+	if err != nil || payload["apiKey"] != "owner-secret" {
+		t.Fatalf("active User Credential resolve = %#v, err=%v", payload, err)
+	}
+	if err := fixture.db.Model(&persistence.TenantMembership{}).
+		Where("tenant_id = ? AND user_id = ?", fixture.tenantID, fixture.owner.UserID).
+		Update("status", "suspended").Error; err != nil {
+		t.Fatal(err)
+	}
+	_, err = fixture.service.ResolveForExecution(ctx, executionService, worker, executionID, credential.ID, lease)
+	assertCredentialProblemCode(t, err, "credential_not_found")
 }
 
 type credentialFixture struct {
@@ -511,7 +733,6 @@ func seedCredentialExecution(
 func seedGitCredentialExecution(
 	t *testing.T,
 	fixture credentialFixture,
-	credentialID uuid.UUID,
 ) (persistence.WorkerInstance, uuid.UUID, uuid.UUID, string) {
 	t.Helper()
 	now := fixture.now
@@ -534,7 +755,7 @@ func seedGitCredentialExecution(
 		&persistence.Project{
 			ID: projectID, TenantID: fixture.tenantID, OrganizationID: fixture.organizationID,
 			Name: "Git Credential project", RepositoryURL: &repositoryURL, DefaultBranch: "main",
-			GitCredentialID: &credentialID, Visibility: "organization", CreatedBy: fixture.owner.UserID,
+			Visibility: "organization", CreatedBy: fixture.owner.UserID,
 		},
 		&persistence.AgentSession{
 			ID: sessionID, TenantID: fixture.tenantID, OrganizationID: fixture.organizationID,

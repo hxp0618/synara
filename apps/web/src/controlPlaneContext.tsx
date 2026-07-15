@@ -22,15 +22,19 @@ import {
 import {
   controlPlaneClient,
   ControlPlaneError,
+  type ControlPlaneAdvancedCommandResult,
   type ControlPlaneAgentSession,
   type ControlPlaneAgentTurn,
   type ControlPlaneControlCommand,
+  type ControlPlaneForkResult,
   type ControlPlaneIdempotencyOptions,
   type ControlPlaneInteractionResolution,
   type ControlPlaneOrganization,
   type ControlPlanePendingInteractionSnapshot,
   type ControlPlanePlatformProfile,
   type ControlPlaneProject,
+  type ControlPlaneReviewTarget,
+  type ControlPlaneRollbackResult,
   type ControlPlaneSessionState,
   type ControlPlaneTenantAccess,
 } from "./lib/controlPlaneClient";
@@ -92,7 +96,6 @@ export type CreateControlPlaneProjectInput = {
   name: string;
   repositoryUrl?: string;
   defaultBranch?: string;
-  gitCredentialId?: string;
   visibility?: ControlPlaneProject["visibility"];
   idempotencyKey?: string;
 };
@@ -144,6 +147,30 @@ export type ControlPlaneContextValue = {
     idempotencyKey?: string,
     modes?: { runtimeMode: RuntimeMode; interactionMode: ProviderInteractionMode },
   ) => Promise<ControlPlaneAgentTurn>;
+  compactSession: (
+    sessionId: string,
+    idempotencyKey?: string,
+  ) => Promise<ControlPlaneAdvancedCommandResult>;
+  startReview: (
+    sessionId: string,
+    runtimeMode: RuntimeMode,
+    target: ControlPlaneReviewTarget,
+    idempotencyKey?: string,
+  ) => Promise<ControlPlaneAdvancedCommandResult>;
+  rollbackSession: (
+    sessionId: string,
+    fromTurnId: string,
+    idempotencyKey?: string,
+  ) => Promise<ControlPlaneRollbackResult>;
+  forkSession: (
+    sessionId: string,
+    input: {
+      title: string;
+      visibility: ControlPlaneAgentSession["visibility"];
+      providerCredentialId?: string;
+      idempotencyKey?: string;
+    },
+  ) => Promise<ControlPlaneForkResult>;
   steerActiveTurn: (
     sessionId: string,
     inputText: string,
@@ -514,7 +541,6 @@ export function ControlPlaneProvider({ children }: { children: ReactNode }) {
           name: input.name,
           ...(input.repositoryUrl ? { repositoryUrl: input.repositoryUrl } : {}),
           defaultBranch: input.defaultBranch ?? "main",
-          ...(input.gitCredentialId ? { gitCredentialId: input.gitCredentialId } : {}),
           visibility: input.visibility ?? "organization",
         },
         idempotencyOptions("project", input.idempotencyKey),
@@ -642,6 +668,200 @@ export function ControlPlaneProvider({ children }: { children: ReactNode }) {
       );
     },
     [activeOrganizationId, activeTenantId, projectionRuntime, projectIdsKey, queryClient],
+  );
+  const refreshAdvancedSessionAuthority = useCallback(
+    async (...sessionIds: ReadonlyArray<string>) => {
+      const uniqueSessionIds = [...new Set(sessionIds.filter(Boolean))];
+      await Promise.all(
+        uniqueSessionIds.map(async (sessionId) => {
+          void queryClient.invalidateQueries({
+            queryKey: controlPlaneQueryKeys.sessionProviderCapabilities(sessionId),
+          });
+          try {
+            syncReturnedSession(await controlPlaneClient.getAgentSession(sessionId));
+          } catch {
+            // The original mutation error remains authoritative when a refresh probe fails.
+          }
+          void projectionRuntime.catchUp(sessionId).catch(() => undefined);
+        }),
+      );
+    },
+    [projectionRuntime, queryClient, syncReturnedSession],
+  );
+  const loadFreshAdvancedCapabilityContext = useCallback(
+    async (sessionId: string) => {
+      const [sessionItem, projection] = await Promise.all([
+        controlPlaneClient.getAgentSession(sessionId),
+        queryClient.fetchQuery(sessionProviderCapabilitiesQueryOptions(sessionId)),
+      ]);
+      return { session: sessionItem, projection };
+    },
+    [queryClient],
+  );
+  const compactSession = useCallback(
+    async (sessionId: string, idempotencyKey?: string) => {
+      if (!isAuthoritative || !capabilities.canCreateTurn) {
+        throw new Error("The active Tenant or Organization cannot compact this Session.");
+      }
+      const capabilityContext = await loadFreshAdvancedCapabilityContext(sessionId);
+      assertControlPlaneCapabilityAllowed(
+        resolveControlPlaneCapabilityDecision({
+          isAuthoritative: true,
+          projection: capabilityContext.projection,
+          provider: capabilityContext.session.provider,
+          capabilityId: "compact",
+        }),
+      );
+      try {
+        const result = await controlPlaneClient.compactSession(
+          sessionId,
+          capabilityContext.session.lastEventSequence,
+          idempotencyOptions("session-compact", idempotencyKey),
+        );
+        void refreshAdvancedSessionAuthority(sessionId);
+        return result;
+      } catch (error) {
+        await refreshAdvancedSessionAuthority(sessionId);
+        throw error;
+      }
+    },
+    [
+      capabilities.canCreateTurn,
+      isAuthoritative,
+      loadFreshAdvancedCapabilityContext,
+      refreshAdvancedSessionAuthority,
+    ],
+  );
+  const startReview = useCallback(
+    async (
+      sessionId: string,
+      runtimeMode: RuntimeMode,
+      target: ControlPlaneReviewTarget,
+      idempotencyKey?: string,
+    ) => {
+      if (!isAuthoritative || !capabilities.canCreateTurn) {
+        throw new Error("The active Tenant or Organization cannot start a Review Turn.");
+      }
+      const capabilityContext = await loadFreshAdvancedCapabilityContext(sessionId);
+      assertControlPlaneCapabilityAllowed(
+        resolveControlPlaneCapabilityDecision({
+          isAuthoritative: true,
+          projection: capabilityContext.projection,
+          provider: capabilityContext.session.provider,
+          capabilityId: "review",
+        }),
+      );
+      try {
+        const result = await controlPlaneClient.startReview(
+          sessionId,
+          {
+            expectedLastEventSequence: capabilityContext.session.lastEventSequence,
+            runtimeMode,
+            target,
+          },
+          idempotencyOptions("session-review", idempotencyKey),
+        );
+        void refreshAdvancedSessionAuthority(sessionId);
+        return result;
+      } catch (error) {
+        await refreshAdvancedSessionAuthority(sessionId);
+        throw error;
+      }
+    },
+    [
+      capabilities.canCreateTurn,
+      isAuthoritative,
+      loadFreshAdvancedCapabilityContext,
+      refreshAdvancedSessionAuthority,
+    ],
+  );
+  const rollbackSession = useCallback(
+    async (sessionId: string, fromTurnId: string, idempotencyKey?: string) => {
+      if (!isAuthoritative || !capabilities.canCreateTurn) {
+        throw new Error("The active Tenant or Organization cannot roll back this Session.");
+      }
+      const capabilityContext = await loadFreshAdvancedCapabilityContext(sessionId);
+      assertControlPlaneCapabilityAllowed(
+        resolveControlPlaneCapabilityDecision({
+          isAuthoritative: true,
+          projection: capabilityContext.projection,
+          provider: capabilityContext.session.provider,
+          capabilityId: "rollback",
+        }),
+      );
+      try {
+        const result = await controlPlaneClient.rollbackSession(
+          sessionId,
+          {
+            expectedLastEventSequence: capabilityContext.session.lastEventSequence,
+            fromTurnId,
+          },
+          idempotencyOptions("session-rollback", idempotencyKey),
+        );
+        void refreshAdvancedSessionAuthority(sessionId);
+        return result;
+      } catch (error) {
+        await refreshAdvancedSessionAuthority(sessionId);
+        throw error;
+      }
+    },
+    [
+      capabilities.canCreateTurn,
+      isAuthoritative,
+      loadFreshAdvancedCapabilityContext,
+      refreshAdvancedSessionAuthority,
+    ],
+  );
+  const forkSession = useCallback(
+    async (
+      sessionId: string,
+      input: {
+        title: string;
+        visibility: ControlPlaneAgentSession["visibility"];
+        providerCredentialId?: string;
+        idempotencyKey?: string;
+      },
+    ) => {
+      if (!isAuthoritative || !capabilities.canCreateSession) {
+        throw new Error("The active Tenant or Organization cannot fork this Session.");
+      }
+      const capabilityContext = await loadFreshAdvancedCapabilityContext(sessionId);
+      assertControlPlaneCapabilityAllowed(
+        resolveControlPlaneCapabilityDecision({
+          isAuthoritative: true,
+          projection: capabilityContext.projection,
+          provider: capabilityContext.session.provider,
+          capabilityId: "fork",
+        }),
+      );
+      try {
+        const result = await controlPlaneClient.forkSession(
+          sessionId,
+          {
+            expectedLastEventSequence: capabilityContext.session.lastEventSequence,
+            title: input.title,
+            visibility: input.visibility,
+            ...(input.providerCredentialId
+              ? { providerCredentialId: input.providerCredentialId }
+              : {}),
+          },
+          idempotencyOptions("session-fork", input.idempotencyKey),
+        );
+        syncReturnedSession(result.session);
+        void refreshAdvancedSessionAuthority(sessionId, result.session.id);
+        return result;
+      } catch (error) {
+        await refreshAdvancedSessionAuthority(sessionId);
+        throw error;
+      }
+    },
+    [
+      capabilities.canCreateSession,
+      isAuthoritative,
+      loadFreshAdvancedCapabilityContext,
+      refreshAdvancedSessionAuthority,
+      syncReturnedSession,
+    ],
   );
   const switchSessionModel = useCallback(
     async (sessionId: string, model: string, idempotencyKey?: string) => {
@@ -918,6 +1138,10 @@ export function ControlPlaneProvider({ children }: { children: ReactNode }) {
       createSession,
       switchSessionModel,
       createTurn,
+      compactSession,
+      startReview,
+      rollbackSession,
+      forkSession,
       steerActiveTurn,
       interruptActiveTurn,
       resolveApproval,
@@ -934,6 +1158,10 @@ export function ControlPlaneProvider({ children }: { children: ReactNode }) {
       createSession,
       switchSessionModel,
       createTurn,
+      compactSession,
+      startReview,
+      rollbackSession,
+      forkSession,
       steerActiveTurn,
       interruptActiveTurn,
       resolveApproval,

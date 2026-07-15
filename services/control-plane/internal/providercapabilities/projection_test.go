@@ -12,16 +12,47 @@ func TestTargetProjectionSeparatesStaticUnsupportedUnobservedAndObservedSupport(
 	targetID := uuid.New()
 	projection, err := ProjectTarget(TargetInput{
 		ExecutionTargetID: targetID, TargetKind: "kubernetes", TargetStatus: "active",
-		ExperimentalProviderEnabled: map[string]bool{"codex": true},
+		ExperimentalProviderEnabled: map[string]bool{"codex": true, "claudeAgent": true},
 		Observations:                map[string][]ManifestObservation{},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	assertDecision(t, Check(projection, "codex", "send-turn"), StatusUnobserved, ReasonWorkerManifestRequired)
-	assertDecision(t, Check(projection, "codex", "compact"), StatusUnsupported, ReasonCapabilityUnsupported)
+	assertDecision(t, Check(projection, "codex", "compact"), StatusUnobserved, ReasonWorkerManifestRequired)
+	assertDecision(t, Check(projection, "claudeAgent", "review"), StatusUnobserved, ReasonWorkerManifestRequired)
+	assertDecision(t, Check(projection, "claudeAgent", "compact"), StatusUnsupported, ReasonCapabilityUnsupported)
+	assertSupportedMode(t, Check(projection, "codex", "rollback"), SupportModeEmulated)
+	assertSupportedMode(t, Check(projection, "codex", "fork"), SupportModeEmulated)
+	assertSupportedMode(t, Check(projection, "claudeAgent", "rollback"), SupportModeEmulated)
+	assertSupportedMode(t, Check(projection, "claudeAgent", "fork"), SupportModeEmulated)
 	assertDecision(t, Check(projection, "cursor", "send-turn"), StatusUnsupported, ReasonCapabilityUnsupported)
 	assertDecision(t, Check(projection, "droid", "send-turn"), StatusUnsupported, ReasonCapabilityUnsupported)
+}
+
+func TestControlPlaneHistoryCapabilitiesDoNotDependOnWorkerOrTargetAvailability(t *testing.T) {
+	projection, err := ProjectTarget(TargetInput{
+		ExecutionTargetID: uuid.New(), TargetKind: "kubernetes", TargetStatus: "unavailable",
+		ExperimentalProviderEnabled: map[string]bool{}, Observations: map[string][]ManifestObservation{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSupportedMode(t, Check(projection, "codex", "rollback"), SupportModeEmulated)
+	assertSupportedMode(t, Check(projection, "codex", "fork"), SupportModeEmulated)
+	assertDecision(t, Check(projection, "codex", "send-turn"), StatusUnsupported, ReasonExecutionTargetUnavailable)
+	assertDecision(t, Check(projection, "cursor", "rollback"), StatusUnsupported, ReasonCapabilityUnsupported)
+
+	execution, err := ProjectExecution(ExecutionInput{
+		ExecutionTargetID: uuid.New(), TargetKind: "kubernetes", TargetStatus: "unavailable",
+		ExecutionID: uuid.New(), Provider: "codex",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSupportedMode(t, Check(execution, "codex", "rollback"), SupportModeEmulated)
+	assertSupportedMode(t, Check(execution, "codex", "fork"), SupportModeEmulated)
+	assertDecision(t, Check(execution, "codex", "send-turn"), StatusUnsupported, ReasonExecutionTargetUnavailable)
 }
 
 func TestTargetProjectionRequiresEveryClaimableManifestToSupportCapability(t *testing.T) {
@@ -102,6 +133,14 @@ func assertDecision(t *testing.T, decision Decision, status Status, reason strin
 	t.Helper()
 	if decision.Status != status || decision.ReasonCode != reason {
 		t.Fatalf("decision = %#v, want status=%q reason=%q", decision, status, reason)
+	}
+}
+
+func assertSupportedMode(t *testing.T, decision Decision, mode SupportMode) {
+	t.Helper()
+	assertDecision(t, decision, StatusSupported, ReasonCapabilitySupported)
+	if decision.SupportMode == nil || *decision.SupportMode != mode {
+		t.Fatalf("decision support mode = %#v, want %q", decision.SupportMode, mode)
 	}
 }
 

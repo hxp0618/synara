@@ -3,12 +3,14 @@ package executiontargets
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -20,6 +22,7 @@ import (
 	"github.com/synara-ai/synara/services/control-plane/internal/identity"
 	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
 	"github.com/synara-ai/synara/services/control-plane/internal/platform"
+	"github.com/synara-ai/synara/services/control-plane/internal/problem"
 	"github.com/synara-ai/synara/services/control-plane/internal/secret"
 	"github.com/synara-ai/synara/services/control-plane/migrations"
 )
@@ -228,6 +231,202 @@ func TestKubernetesReconcilerMountsPersistentGitCacheVolume(t *testing.T) {
 	}
 }
 
+func TestKubernetesReconcilerPinsExecutionReleaseImageAndUsesTargetPullCredential(t *testing.T) {
+	fixture := newKubernetesReconcileFixture(t, "")
+	configuration := kubernetesTestConfiguration("")
+	configuration["image"] = "ghcr.io/synara/worker:mutable"
+	fixture.updateConfiguration(t, configuration)
+	firstDigest := "sha256:" + strings.Repeat("a", 64)
+	secondDigest := "sha256:" + strings.Repeat("b", 64)
+	firstRevision := fixture.seedReleaseRevision(t, 1, firstDigest)
+	secondRevision := fixture.seedReleaseRevision(t, 2, secondDigest)
+	channel := "promoted"
+	if err := fixture.db.Model(&persistence.AgentExecution{}).Where("id = ?", fixture.executionIDs[0]).
+		Updates(map[string]any{"worker_release_revision_id": firstRevision, "worker_release_channel": channel}).Error; err != nil {
+		t.Fatal(err)
+	}
+	credential := &ImagePullCredential{
+		BindingID: uuid.New(), CredentialID: uuid.New(), CredentialVersion: 4,
+		Host: "ghcr.io", Username: "synara", Password: "registry-password-secret",
+	}
+	fixture.reconciler.config.ResolveImagePull = func(_ context.Context, _, _ uuid.UUID, selector string) (ImagePullCredentialResolution, error) {
+		if selector != "ghcr.io" {
+			t.Fatalf("Kubernetes image pull selector = %q", selector)
+		}
+		return ImagePullCredentialResolution{Credential: credential, Authoritative: true}, nil
+	}
+	client := newFakeKubernetesClient()
+	fixture.reconciler.factory = &fakeKubernetesFactory{client: client}
+
+	if err := fixture.reconciler.ReconcileOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	pod := client.lastKind("Pod")
+	container := pod["spec"].(map[string]any)["containers"].([]any)[0].(map[string]any)
+	if container["image"] != "ghcr.io/synara/worker@"+firstDigest {
+		t.Fatalf("release Pod image = %q", container["image"])
+	}
+	metadata := pod["metadata"].(map[string]any)
+	labels := metadata["labels"].(map[string]string)
+	if labels[kubernetesReleaseLabel] != firstRevision.String() || labels[kubernetesChannelLabel] != channel {
+		t.Fatalf("release Pod labels = %#v", labels)
+	}
+	podSpec := pod["spec"].(map[string]any)
+	pullSecrets := podSpec["imagePullSecrets"].([]any)
+	if kubernetesNamedObject(pullSecrets, kubernetesRegistrySecretName(fixture.targetID)) == nil {
+		t.Fatalf("release Pod imagePullSecrets = %#v", pullSecrets)
+	}
+	registrySecret := client.namedKind("Secret", kubernetesRegistrySecretName(fixture.targetID))
+	if registrySecret == nil || registrySecret["type"] != "kubernetes.io/dockerconfigjson" {
+		t.Fatalf("registry Secret = %#v", registrySecret)
+	}
+	encodedConfig := registrySecret["data"].(map[string]any)[".dockerconfigjson"].(string)
+	decodedConfig, err := base64.StdEncoding.DecodeString(encodedConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(decodedConfig, []byte("registry-password-secret")) || bytes.Contains(mustJSON(t, registrySecret), []byte("registry-password-secret")) {
+		t.Fatalf("registry Secret encoding is invalid: decoded=%s object=%s", decodedConfig, mustJSON(t, registrySecret))
+	}
+
+	if err := fixture.db.Model(&persistence.AgentExecution{}).Where("id = ?", fixture.executionIDs[0]).
+		Updates(map[string]any{"worker_release_revision_id": secondRevision, "worker_release_channel": channel}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.reconciler.ReconcileOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(client.deletedPods) != 1 {
+		t.Fatalf("release drift deleted Pods = %#v", client.deletedPods)
+	}
+	if err := fixture.reconciler.ReconcileOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	newPod := client.lastKind("Pod")
+	newContainer := newPod["spec"].(map[string]any)["containers"].([]any)[0].(map[string]any)
+	if newContainer["image"] != "ghcr.io/synara/worker@"+secondDigest {
+		t.Fatalf("replacement release Pod image = %q", newContainer["image"])
+	}
+}
+
+func TestKubernetesReconcilerClearsAuthoritativelyInvalidRegistryCredential(t *testing.T) {
+	fixture := newKubernetesReconcileFixture(t, "")
+	configuration := kubernetesTestConfiguration("")
+	configuration["image"] = "ghcr.io/synara/worker:mutable"
+	fixture.updateConfiguration(t, configuration)
+	credential := &ImagePullCredential{
+		BindingID: uuid.New(), CredentialID: uuid.New(), CredentialVersion: 1,
+		Host: "ghcr.io", Username: "synara", Password: "registry-password-secret",
+	}
+	fixture.reconciler.config.ResolveImagePull = func(context.Context, uuid.UUID, uuid.UUID, string) (ImagePullCredentialResolution, error) {
+		return ImagePullCredentialResolution{Credential: credential, Authoritative: true}, nil
+	}
+	client := newFakeKubernetesClient()
+	fixture.reconciler.factory = &fakeKubernetesFactory{client: client}
+	if err := fixture.reconciler.ReconcileOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	initialPods := len(client.pods)
+	fixture.reconciler.config.ResolveImagePull = func(context.Context, uuid.UUID, uuid.UUID, string) (ImagePullCredentialResolution, error) {
+		return ImagePullCredentialResolution{Authoritative: true}, problem.New(
+			409, "worker_image_pull_credential_unavailable", "Worker image pull Credential is revoked or expired.",
+		)
+	}
+	err := fixture.reconciler.ReconcileOnce(context.Background())
+	assertExecutionTargetProblemCode(t, err, "worker_image_pull_credential_unavailable")
+	if len(client.pods) != initialPods {
+		t.Fatalf("authoritative Credential failure created a new Pod: before=%d after=%d", initialPods, len(client.pods))
+	}
+	secret := client.namedKind("Secret", kubernetesRegistrySecretName(fixture.targetID))
+	if auths := kubernetesRegistrySecretAuths(t, secret); len(auths) != 0 {
+		t.Fatalf("revoked registry Secret retained auths: %#v", auths)
+	}
+	if bytes.Contains(mustJSON(t, client.applied), []byte("registry-password-secret")) {
+		// The first valid Secret necessarily remains in the fake client's request
+		// history. The latest named Secret above is the authoritative cluster state.
+		latest := client.namedKind("Secret", kubernetesRegistrySecretName(fixture.targetID))
+		if bytes.Contains(mustJSON(t, latest), []byte("registry-password-secret")) {
+			t.Fatal("cleared Registry Secret still contains the revoked password")
+		}
+	}
+}
+
+func TestKubernetesReconcilerPreservesRegistrySecretOnTransientResolutionFailure(t *testing.T) {
+	fixture := newKubernetesReconcileFixture(t, "")
+	configuration := kubernetesTestConfiguration("")
+	configuration["image"] = "ghcr.io/synara/worker:mutable"
+	fixture.updateConfiguration(t, configuration)
+	credential := &ImagePullCredential{
+		BindingID: uuid.New(), CredentialID: uuid.New(), CredentialVersion: 1,
+		Host: "ghcr.io", Username: "synara", Password: "registry-password-secret",
+	}
+	fixture.reconciler.config.ResolveImagePull = func(context.Context, uuid.UUID, uuid.UUID, string) (ImagePullCredentialResolution, error) {
+		return ImagePullCredentialResolution{Credential: credential, Authoritative: true}, nil
+	}
+	client := newFakeKubernetesClient()
+	fixture.reconciler.factory = &fakeKubernetesFactory{client: client}
+	if err := fixture.reconciler.ReconcileOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	applied := len(client.applied)
+	fixture.reconciler.config.ResolveImagePull = func(context.Context, uuid.UUID, uuid.UUID, string) (ImagePullCredentialResolution, error) {
+		return ImagePullCredentialResolution{}, problem.New(503, "credential_decryption_failed", "Credential KMS is temporarily unavailable.")
+	}
+	err := fixture.reconciler.ReconcileOnce(context.Background())
+	assertExecutionTargetProblemCode(t, err, "credential_decryption_failed")
+	if len(client.applied) != applied {
+		t.Fatalf("transient Credential failure mutated Kubernetes resources: before=%d after=%d", applied, len(client.applied))
+	}
+	secret := client.namedKind("Secret", kubernetesRegistrySecretName(fixture.targetID))
+	if auths := kubernetesRegistrySecretAuths(t, secret); len(auths) != 1 {
+		t.Fatalf("transient Credential failure cleared registry auths: %#v", auths)
+	}
+}
+
+func TestKubernetesReconcilerRejectsBearerRegistryCredentialAndClearsSecret(t *testing.T) {
+	fixture := newKubernetesReconcileFixture(t, "")
+	configuration := kubernetesTestConfiguration("")
+	configuration["image"] = "ghcr.io/synara/worker:mutable"
+	fixture.updateConfiguration(t, configuration)
+	fixture.reconciler.config.ResolveImagePull = func(context.Context, uuid.UUID, uuid.UUID, string) (ImagePullCredentialResolution, error) {
+		return ImagePullCredentialResolution{
+			Credential: &ImagePullCredential{
+				BindingID: uuid.New(), CredentialID: uuid.New(), CredentialVersion: 1,
+				Host: "ghcr.io", RegistryToken: "registry-bearer-secret",
+			},
+			Authoritative: true,
+		}, nil
+	}
+	client := newFakeKubernetesClient()
+	fixture.reconciler.factory = &fakeKubernetesFactory{client: client}
+	err := fixture.reconciler.ReconcileOnce(context.Background())
+	assertExecutionTargetProblemCode(t, err, "worker_image_pull_bearer_unsupported")
+	if len(client.pods) != 0 {
+		t.Fatalf("unsupported bearer Credential created Pods: %#v", client.pods)
+	}
+	secret := client.namedKind("Secret", kubernetesRegistrySecretName(fixture.targetID))
+	if auths := kubernetesRegistrySecretAuths(t, secret); len(auths) != 0 {
+		t.Fatalf("unsupported bearer Credential materialized auths: %#v", auths)
+	}
+	if bytes.Contains(mustJSON(t, client.applied), []byte("registry-bearer-secret")) {
+		t.Fatal("unsupported bearer token leaked into a Kubernetes object")
+	}
+}
+
+func TestKubernetesRegistrySecretUsesCanonicalDockerHubKey(t *testing.T) {
+	target := persistence.ExecutionTarget{ID: uuid.New()}
+	secret, err := kubernetesRegistrySecret(target, "synara-test", map[string]string{}, &ImagePullCredential{
+		Host: "docker.io", Username: "synara", Password: "registry-password-secret",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	auths := kubernetesRegistrySecretAuths(t, secret)
+	if _, found := auths["https://index.docker.io/v1/"]; !found || len(auths) != 1 {
+		t.Fatalf("Docker Hub registry Secret auths = %#v", auths)
+	}
+}
+
 func TestKubernetesReconcilerSkipsCleanupWhenNamespacePodIdentityListFails(t *testing.T) {
 	fixture := newKubernetesReconcileFixture(t, "")
 	client := newFakeKubernetesClient()
@@ -392,6 +591,7 @@ type kubernetesReconcileFixture struct {
 	projectID      uuid.UUID
 	sessionID      uuid.UUID
 	targetID       uuid.UUID
+	userID         uuid.UUID
 	executionIDs   []uuid.UUID
 }
 
@@ -424,19 +624,7 @@ func newKubernetesReconcileFixture(t *testing.T, gitCachePersistentVolumeClaims 
 	}
 	targetService := NewService(store.DB(), platformConfig, cipher)
 	principal := identity.Principal{UserID: domain.UserID, ActiveTenantID: &domain.TenantID}
-	configuration := map[string]any{
-		"apiServer": "https://kubernetes.example.com", "bearerToken": "kubernetes-api-token",
-		"caCertificate": "fake-ca-for-client-factory", "namespace": "synara-test", "manageNamespace": true,
-		"image": "synara-agentd:test", "imagePullPolicy": "IfNotPresent",
-		"controlPlaneUrl": "http://control-plane.test:3780", "allowInsecureControlPlane": true,
-		"runnerCommand": []string{"provider-host", "run", "--jsonl"}, "maxActivePods": 1,
-		"egressCidrs": []string{"0.0.0.0/0"}, "cpuRequest": "250m", "cpuLimit": "1",
-		"memoryRequest": "256Mi", "memoryLimit": "1Gi", "workspaceSizeLimit": "2Gi",
-		"quotaCpuRequests": "1", "quotaCpuLimits": "2", "quotaMemoryRequests": "2Gi", "quotaMemoryLimits": "4Gi",
-	}
-	if gitCachePersistentVolumeClaim != "" {
-		configuration["gitCachePersistentVolumeClaim"] = gitCachePersistentVolumeClaim
-	}
+	configuration := kubernetesTestConfiguration(gitCachePersistentVolumeClaim)
 	target, err := targetService.Create(ctx, principal, domain.TenantID, CreateInput{
 		OrganizationID: &domain.OrganizationID, Kind: "kubernetes", Name: "managed-kubernetes",
 		Configuration: configuration,
@@ -471,8 +659,63 @@ func newKubernetesReconcileFixture(t *testing.T, gitCachePersistentVolumeClaims 
 	}, slog.Default())
 	return kubernetesReconcileFixture{
 		db: store.DB(), reconciler: reconciler, tenantID: domain.TenantID, organizationID: domain.OrganizationID,
-		projectID: projectID, sessionID: sessionIDs[0], targetID: target.ID, executionIDs: executionIDs,
+		projectID: projectID, sessionID: sessionIDs[0], targetID: target.ID, userID: domain.UserID,
+		executionIDs: executionIDs,
 	}
+}
+
+func kubernetesTestConfiguration(gitCachePersistentVolumeClaim string) map[string]any {
+	configuration := map[string]any{
+		"apiServer": "https://kubernetes.example.com", "bearerToken": "kubernetes-api-token",
+		"caCertificate": "fake-ca-for-client-factory", "namespace": "synara-test", "manageNamespace": true,
+		"image": "synara-agentd:test", "imagePullPolicy": "IfNotPresent",
+		"controlPlaneUrl": "http://control-plane.test:3780", "allowInsecureControlPlane": true,
+		"runnerCommand": []string{"provider-host", "run", "--jsonl"}, "maxActivePods": 1,
+		"egressCidrs": []string{"0.0.0.0/0"}, "cpuRequest": "250m", "cpuLimit": "1",
+		"memoryRequest": "256Mi", "memoryLimit": "1Gi", "workspaceSizeLimit": "2Gi",
+		"quotaCpuRequests": "1", "quotaCpuLimits": "2", "quotaMemoryRequests": "2Gi", "quotaMemoryLimits": "4Gi",
+	}
+	if gitCachePersistentVolumeClaim != "" {
+		configuration["gitCachePersistentVolumeClaim"] = gitCachePersistentVolumeClaim
+	}
+	return configuration
+}
+
+func (f kubernetesReconcileFixture) updateConfiguration(t *testing.T, configuration map[string]any) {
+	t.Helper()
+	encrypted, err := encryptConfiguration(f.reconciler.targets.cipher, configuration)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.Model(&persistence.ExecutionTarget{}).Where("id = ?", f.targetID).
+		Update("configuration_encrypted", encrypted).Error; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func (f kubernetesReconcileFixture) seedReleaseRevision(t *testing.T, revision int64, imageDigest string) uuid.UUID {
+	t.Helper()
+	manifestID := uuid.New()
+	manifest := persistence.WorkerManifest{
+		ID: manifestID, ManifestHash: fmt.Sprintf("%064x", revision+100),
+		WorkerBuildVersion:    fmt.Sprintf("kubernetes-release-%d", revision),
+		WorkerProtocolMinimum: 2, WorkerProtocolMaximum: 2, RuntimeEventMinimum: 2, RuntimeEventMaximum: 2,
+		OperatingSystem: "linux", Architecture: "amd64", ImageDigest: &imageDigest,
+		FeatureFlags: map[string]any{}, CreatedAt: time.Now().UTC(),
+	}
+	if err := f.db.Create(&manifest).Error; err != nil {
+		t.Fatal(err)
+	}
+	revisionID := uuid.New()
+	model := persistence.WorkerReleaseRevision{
+		ID: revisionID, TenantID: f.tenantID, ExecutionTargetID: f.targetID,
+		Revision: revision, WorkerManifestID: manifestID, Description: "Kubernetes release test",
+		CreatedBy: f.userID, CreatedAt: time.Now().UTC(),
+	}
+	if err := f.db.Create(&model).Error; err != nil {
+		t.Fatal(err)
+	}
+	return revisionID
 }
 
 type fakeKubernetesFactory struct {
@@ -500,7 +743,15 @@ func (c *fakeKubernetesClient) Apply(_ context.Context, _ string, object map[str
 		metadata := object["metadata"].(map[string]any)
 		name := metadata["name"].(string)
 		labels := metadata["labels"].(map[string]string)
-		c.pods[name] = kubernetesPod{Name: name, UID: uuid.NewString(), Phase: "Pending", Labels: labels}
+		annotations := map[string]string{}
+		if raw, ok := metadata["annotations"].(map[string]any); ok {
+			for key, value := range raw {
+				annotations[key], _ = value.(string)
+			}
+		}
+		c.pods[name] = kubernetesPod{
+			Name: name, UID: uuid.NewString(), Phase: "Pending", Labels: labels, Annotations: annotations,
+		}
 	}
 	return nil
 }
@@ -553,6 +804,55 @@ func (c *fakeKubernetesClient) lastKind(kind string) map[string]any {
 		}
 	}
 	return nil
+}
+
+func (c *fakeKubernetesClient) namedKind(kind, name string) map[string]any {
+	for index := len(c.applied) - 1; index >= 0; index-- {
+		object := c.applied[index]
+		if object["kind"] != kind {
+			continue
+		}
+		metadata, _ := object["metadata"].(map[string]any)
+		if metadata["name"] == name {
+			return object
+		}
+	}
+	return nil
+}
+
+func mustJSON(t *testing.T, value any) []byte {
+	t.Helper()
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return encoded
+}
+
+func kubernetesRegistrySecretAuths(t *testing.T, secret map[string]any) map[string]any {
+	t.Helper()
+	if secret == nil {
+		t.Fatal("Kubernetes Registry Secret was not applied")
+	}
+	data, ok := secret["data"].(map[string]any)
+	if !ok {
+		t.Fatalf("Kubernetes Registry Secret data = %#v", secret["data"])
+	}
+	encoded, ok := data[".dockerconfigjson"].(string)
+	if !ok {
+		t.Fatalf("Kubernetes Registry Secret docker config = %#v", data)
+	}
+	decoded, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var config struct {
+		Auths map[string]any `json:"auths"`
+	}
+	if err := json.Unmarshal(decoded, &config); err != nil {
+		t.Fatal(err)
+	}
+	return config.Auths
 }
 
 func containsString(values []string, expected string) bool {

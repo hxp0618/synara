@@ -69,8 +69,10 @@ func TestConcurrentClaimHasSingleWinner(t *testing.T) {
 			}
 			if item.result.Value.Workload == nil || item.result.Value.Workload.InputText != "Run integration test" ||
 				item.result.Value.Workload.Provider != "codex" || item.result.Value.Workload.DefaultBranch != "main" ||
-				item.result.Value.Workload.GitCredentialID == nil ||
-				*item.result.Value.Workload.GitCredentialID != fixture.GitCredentialID ||
+				len(item.result.Value.Workload.CredentialGrants) != 1 ||
+				item.result.Value.Workload.CredentialGrants[0].BindingKind != "git_fetch" ||
+				item.result.Value.Workload.CredentialGrants[0].Purpose != "git" ||
+				item.result.Value.Workload.CredentialGrants[0].CredentialType != "https_token" ||
 				item.result.Value.Workload.RuntimeMode != "approval-required" ||
 				item.result.Value.Workload.InteractionMode != "plan" {
 				t.Fatalf("claim omitted execution workload: %#v", item.result.Value.Workload)
@@ -870,11 +872,6 @@ func TestWorkspacePreparationIsGenerationFencedAcrossWorkerRecovery(t *testing.T
 	service := integrationService(t, db)
 	var session persistence.AgentSession
 	if err := db.Where("tenant_id = ? AND id = ?", fixture.TenantID, fixture.SessionID).Take(&session).Error; err != nil {
-		t.Fatal(err)
-	}
-	repositoryURL := "https://git.example.com/team/repository.git"
-	if err := db.Model(&persistence.Project{}).Where("tenant_id = ? AND id = ?", fixture.TenantID, session.ProjectID).
-		Update("repository_url", repositoryURL).Error; err != nil {
 		t.Fatal(err)
 	}
 	workspaceID := uuid.New()
@@ -2483,8 +2480,13 @@ func seedExecutionFixture(t *testing.T, db *gorm.DB) executionFixture {
 		},
 		&persistence.Project{
 			ID: projectID, TenantID: tenantID, OrganizationID: organizationID, Name: "Execution project",
-			RepositoryURL: &repositoryURL, DefaultBranch: "main", GitCredentialID: &gitCredentialID,
+			RepositoryURL: &repositoryURL, DefaultBranch: "main",
 			Visibility: "organization", CreatedBy: userID,
+		},
+		&persistence.CredentialBinding{
+			ID: uuid.New(), TenantID: tenantID, OrganizationID: &organizationID, ProjectID: &projectID,
+			CredentialID: gitCredentialID, BindingKind: "git_fetch", SelectorValue: repositoryURL,
+			CreatedBy: userID, CreatedAt: now,
 		},
 		&persistence.ExecutionTarget{ID: targetID, TenantID: &tenantID, OrganizationID: &organizationID, Kind: "kubernetes", Name: "test-target", Status: "active", ConfigurationEncrypted: []byte{}, Capabilities: workerManifestTestTargetCapabilities()},
 		&persistence.AgentSession{ID: sessionID, TenantID: tenantID, OrganizationID: organizationID, ProjectID: projectID, CreatedBy: userID, Title: "Execution session", Status: "active", Visibility: "private", Provider: provider, ProviderCredentialID: &providerCredentialID, ExecutionTargetID: targetID, CurrentRuntimeBindingID: &runtimeBindingID},
@@ -2511,9 +2513,13 @@ func seedExecutionFixture(t *testing.T, db *gorm.DB) executionFixture {
 	}); err != nil {
 		t.Fatalf("seed execution fixture: %v", err)
 	}
-	t.Cleanup(func() {
-		cleanupFixture(db, tenantID)
-	})
+	if db.Dialector.Name() == "postgres" {
+		t.Cleanup(func() {
+			if err := cleanupFixture(db, tenantID); err != nil {
+				t.Errorf("cleanup execution fixture: %v", err)
+			}
+		})
+	}
 	return executionFixture{
 		UserID: userID, TenantID: tenantID, SessionID: sessionID, TurnID: turnID,
 		ExecutionID: executionID, ProviderCredentialID: providerCredentialID, GitCredentialID: gitCredentialID,
@@ -2608,31 +2614,77 @@ func setTestProviderCapability(
 
 func cleanupWorkers(t *testing.T, db *gorm.DB, workerIDs ...uuid.UUID) {
 	t.Helper()
+	if len(workerIDs) == 0 || db.Dialector.Name() != "postgres" {
+		return
+	}
+	workerIDs = append([]uuid.UUID(nil), workerIDs...)
 	t.Cleanup(func() {
-		if len(workerIDs) == 0 {
-			return
+		err := db.Transaction(func(tx *gorm.DB) error {
+			if err := tx.Where("worker_id IN ?", workerIDs).
+				Delete(&persistence.WorkerRequestReceipt{}).Error; err != nil {
+				return err
+			}
+			if err := tx.Where("worker_id IN ?", workerIDs).
+				Delete(&persistence.WorkerLease{}).Error; err != nil {
+				return err
+			}
+			if err := tx.Where("delivery_worker_id IN ? OR worker_id IN ?", workerIDs, workerIDs).
+				Delete(&persistence.ExecutionInteraction{}).Error; err != nil {
+				return err
+			}
+			if err := tx.Where("delivery_worker_id IN ?", workerIDs).
+				Delete(&persistence.ExecutionControlCommand{}).Error; err != nil {
+				return err
+			}
+			if err := tx.Where("delivery_worker_id IN ?", workerIDs).
+				Delete(&persistence.WorkspaceCleanupCommand{}).Error; err != nil {
+				return err
+			}
+			if err := tx.Model(&persistence.WorkspaceMaterialization{}).Where("worker_id IN ?", workerIDs).
+				Updates(map[string]any{
+					"worker_id": nil, "worker_incarnation": nil, "worker_instance_uid": nil,
+				}).Error; err != nil {
+				return err
+			}
+			if err := tx.Model(&persistence.AgentExecution{}).
+				Where("worker_id IN ? AND status IN ?", workerIDs, []string{"leased", "running", "waiting-for-approval"}).
+				Updates(map[string]any{"status": "recovering", "worker_id": nil}).Error; err != nil {
+				return err
+			}
+			if err := tx.Exec(
+				"ALTER TABLE worker_identity_tombstones DISABLE TRIGGER trg_worker_identity_tombstones_immutable",
+			).Error; err != nil {
+				return err
+			}
+			if err := tx.Where("worker_id IN ?", workerIDs).
+				Delete(&persistence.WorkerIdentityTombstone{}).Error; err != nil {
+				return err
+			}
+			if err := tx.Exec(
+				"ALTER TABLE worker_identity_tombstones ENABLE TRIGGER trg_worker_identity_tombstones_immutable",
+			).Error; err != nil {
+				return err
+			}
+			if err := tx.Exec(
+				"ALTER TABLE worker_instances DISABLE TRIGGER trg_worker_instances_revoked_immutable",
+			).Error; err != nil {
+				return err
+			}
+			if err := tx.Where("id IN ?", workerIDs).Delete(&persistence.WorkerInstance{}).Error; err != nil {
+				return err
+			}
+			return tx.Exec(
+				"ALTER TABLE worker_instances ENABLE TRIGGER trg_worker_instances_revoked_immutable",
+			).Error
+		})
+		if err != nil {
+			t.Errorf("cleanup Workers: %v", err)
 		}
-		_ = db.Where("worker_id IN ?", workerIDs).Delete(&persistence.WorkerRequestReceipt{}).Error
-		_ = db.Where("worker_id IN ?", workerIDs).Delete(&persistence.WorkerLease{}).Error
-		_ = db.Where("delivery_worker_id IN ? OR worker_id IN ?", workerIDs, workerIDs).
-			Delete(&persistence.ExecutionInteraction{}).Error
-		_ = db.Where("delivery_worker_id IN ?", workerIDs).
-			Delete(&persistence.ExecutionControlCommand{}).Error
-		_ = db.Where("delivery_worker_id IN ?", workerIDs).
-			Delete(&persistence.WorkspaceCleanupCommand{}).Error
-		_ = db.Model(&persistence.WorkspaceMaterialization{}).Where("worker_id IN ?", workerIDs).
-			Updates(map[string]any{
-				"worker_id": nil, "worker_incarnation": nil, "worker_instance_uid": nil,
-			}).Error
-		_ = db.Model(&persistence.AgentExecution{}).
-			Where("worker_id IN ? AND status IN ?", workerIDs, []string{"leased", "running", "waiting-for-approval"}).
-			Updates(map[string]any{"status": "recovering", "worker_id": nil}).Error
-		_ = db.Where("id IN ?", workerIDs).Delete(&persistence.WorkerInstance{}).Error
 	})
 }
 
-func cleanupFixture(db *gorm.DB, tenantID uuid.UUID) {
-	_ = db.Transaction(func(tx *gorm.DB) error {
+func cleanupFixture(db *gorm.DB, tenantID uuid.UUID) error {
+	return db.Transaction(func(tx *gorm.DB) error {
 		if err := tx.Model(&persistence.AgentSession{}).Where("tenant_id = ?", tenantID).
 			Updates(map[string]any{
 				"provider_resume_cursor_encrypted": nil, "provider_resume_cursor_state": providerCursorStateAbsent,
@@ -2664,6 +2716,34 @@ func cleanupFixture(db *gorm.DB, tenantID uuid.UUID) {
 			return err
 		}
 		if err := tx.Exec("SET CONSTRAINTS ALL DEFERRED").Error; err != nil {
+			return err
+		}
+		if err := tx.Exec(
+			"ALTER TABLE execution_credential_grants DISABLE TRIGGER trg_execution_credential_grants_no_delete",
+		).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("tenant_id = ?", tenantID).
+			Delete(&persistence.ExecutionCredentialGrant{}).Error; err != nil {
+			return err
+		}
+		if err := tx.Exec(
+			"ALTER TABLE execution_credential_grants ENABLE TRIGGER trg_execution_credential_grants_no_delete",
+		).Error; err != nil {
+			return err
+		}
+		if err := tx.Exec(
+			"ALTER TABLE credential_bindings DISABLE TRIGGER trg_credential_bindings_no_delete",
+		).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("tenant_id = ?", tenantID).
+			Delete(&persistence.CredentialBinding{}).Error; err != nil {
+			return err
+		}
+		if err := tx.Exec(
+			"ALTER TABLE credential_bindings ENABLE TRIGGER trg_credential_bindings_no_delete",
+		).Error; err != nil {
 			return err
 		}
 		models := []any{

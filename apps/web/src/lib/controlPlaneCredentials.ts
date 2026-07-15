@@ -5,6 +5,8 @@ export function listUsableControlPlaneCredentials(
   options: {
     purpose: ControlPlaneCredentialPurpose;
     organizationId: string | null;
+    userId?: string;
+    model?: string | null;
     provider?: string;
     now?: number;
   },
@@ -15,8 +17,33 @@ export function listUsableControlPlaneCredentials(
       credential.purpose === options.purpose &&
       credential.revokedAt === null &&
       (credential.expiresAt === null || Date.parse(credential.expiresAt) > now) &&
-      (credential.organizationId === null ||
-        credential.organizationId === options.organizationId) &&
+      credentialMatchesScope(credential, options) &&
       (options.provider === undefined || credential.provider === options.provider),
   );
+}
+
+function credentialMatchesScope(
+  credential: ControlPlaneCredential,
+  options: { organizationId: string | null; userId?: string; model?: string | null },
+): boolean {
+  switch (credential.scope) {
+    case "user":
+      return credential.scopeUserId !== null && credential.scopeUserId === options.userId;
+    case "organization":
+      return (
+        credential.organizationId !== null && credential.organizationId === options.organizationId
+      );
+    case "tenant": {
+      if (
+        credential.selectorOrganizationId !== null &&
+        credential.selectorOrganizationId !== options.organizationId
+      ) {
+        return false;
+      }
+      const model = options.model?.trim() || null;
+      return credential.selectorModel === null || credential.selectorModel === model;
+    }
+    case "platform":
+      return true;
+  }
 }

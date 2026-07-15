@@ -51,15 +51,19 @@ func captureWorkspaceCheckpoint(
 	if workspaceHasGitMetadata(materialized.Directory) {
 		return captureWorkspacePatch(ctx, execution, materialized, inspection, idempotencyKey)
 	}
-	return captureWorkspaceSnapshot(execution, materialized, inspection, idempotencyKey)
+	return captureWorkspaceSnapshot(ctx, execution, materialized, inspection, idempotencyKey)
 }
 
 func captureWorkspaceSnapshot(
+	ctx context.Context,
 	execution executions.Execution,
 	materialized WorkspaceMaterialization,
 	inspection WorkspaceInspection,
 	idempotencyKey string,
 ) (candidate WorkspaceCheckpointCandidate, resultErr error) {
+	if err := ctx.Err(); err != nil {
+		return WorkspaceCheckpointCandidate{}, err
+	}
 	archive, err := os.CreateTemp("", "synara-workspace-snapshot-*.tar")
 	if err != nil {
 		return WorkspaceCheckpointCandidate{}, fmt.Errorf("create Workspace snapshot: %w", err)
@@ -77,6 +81,9 @@ func captureWorkspaceSnapshot(
 	files := make([]checkpointManifestFile, 0)
 	var totalBytes int64
 	err = filepath.WalkDir(materialized.Directory, func(path string, entry fs.DirEntry, walkErr error) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if walkErr != nil {
 			return walkErr
 		}
@@ -129,7 +136,7 @@ func captureWorkspaceSnapshot(
 			return err
 		}
 		hash := sha256.New()
-		_, copyErr := io.Copy(io.MultiWriter(writer, hash), file)
+		_, copyErr := copyWithContext(ctx, io.MultiWriter(writer, hash), file)
 		closeErr := file.Close()
 		if copyErr != nil {
 			return copyErr

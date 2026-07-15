@@ -147,6 +147,176 @@ func TestValidateRuntimeEventContractChecksCanonicalPayloadShape(t *testing.T) {
 	}
 }
 
+func TestCanonicalRuntimeEventV2TerminalContentDelta(t *testing.T) {
+	validUTF8 := map[string]any{
+		"streamKind": "command_output", "delta": "A🙂", "terminalId": "terminal-1",
+		"encoding": "utf-8", "byteOffset": 0, "byteLength": 5,
+	}
+	if !IsCanonicalRuntimeEventV2Payload("content.delta", validUTF8) {
+		t.Fatal("valid UTF-8 command output was rejected")
+	}
+
+	for _, field := range []string{"terminalId", "encoding", "byteOffset", "byteLength"} {
+		payload := cloneRuntimeEventPayload(validUTF8)
+		delete(payload, field)
+		if IsCanonicalRuntimeEventV2Payload("content.delta", payload) {
+			t.Fatalf("command output missing %s was accepted", field)
+		}
+	}
+
+	for _, test := range []struct {
+		name   string
+		mutate func(map[string]any)
+	}{
+		{name: "wrong UTF-8 length", mutate: func(payload map[string]any) { payload["byteLength"] = 4 }},
+		{name: "invalid UTF-8", mutate: func(payload map[string]any) {
+			payload["delta"] = string([]byte{0xff})
+			payload["byteLength"] = 1
+		}},
+		{name: "negative offset", mutate: func(payload map[string]any) { payload["byteOffset"] = -1 }},
+		{name: "negative length", mutate: func(payload map[string]any) { payload["byteLength"] = -1 }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			payload := cloneRuntimeEventPayload(validUTF8)
+			test.mutate(payload)
+			if IsCanonicalRuntimeEventV2Payload("content.delta", payload) {
+				t.Fatal("invalid UTF-8 command output was accepted")
+			}
+		})
+	}
+
+	validBinary := map[string]any{
+		"streamKind": "command_output", "delta": "AAEC/w==", "terminalId": "terminal-1",
+		"encoding": "binary", "byteOffset": 8, "byteLength": 4,
+	}
+	if !IsCanonicalRuntimeEventV2Payload("content.delta", validBinary) {
+		t.Fatal("valid binary command output was rejected")
+	}
+	for _, test := range []struct {
+		name       string
+		delta      string
+		byteLength int
+	}{
+		{name: "noncanonical padding bits", delta: "AB==", byteLength: 1},
+		{name: "embedded newline", delta: "AAEC/w==\n", byteLength: 4},
+		{name: "invalid alphabet", delta: "AAEC_w==", byteLength: 4},
+		{name: "decoded length mismatch", delta: "AAEC/w==", byteLength: 3},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			payload := cloneRuntimeEventPayload(validBinary)
+			payload["delta"] = test.delta
+			payload["byteLength"] = test.byteLength
+			if IsCanonicalRuntimeEventV2Payload("content.delta", payload) {
+				t.Fatal("invalid binary command output was accepted")
+			}
+		})
+	}
+
+	if !IsCanonicalRuntimeEventV2Payload("content.delta", map[string]any{
+		"streamKind": "assistant_text", "delta": "legacy-compatible",
+	}) {
+		t.Fatal("non-command content delta lost backward compatibility")
+	}
+}
+
+func TestCanonicalRuntimeEventV2TerminalLifecycleData(t *testing.T) {
+	artifactID := uuid.New().String()
+	basePayload := func(eventType string, terminal map[string]any) map[string]any {
+		terminal["terminalId"] = "terminal-1"
+		terminal["eventType"] = eventType
+		return map[string]any{
+			"itemType": "command_execution", "status": "inProgress",
+			"data": map[string]any{"provider": "codex", "terminal": terminal},
+		}
+	}
+
+	validPayloads := []map[string]any{
+		basePayload("terminal.started", map[string]any{
+			"commandSummary": "bun run test", "cwdLabel": "apps/provider-host",
+		}),
+		basePayload("terminal.output.reference", map[string]any{
+			"artifactId": artifactID, "offset": 0, "length": 1_048_576,
+			"segmentIndex": 0, "encoding": "binary",
+		}),
+		basePayload("terminal.exited", map[string]any{
+			"totalBytes": 64, "previewBytes": 64, "segmentCount": 0, "truncated": false,
+			"exitCode": 0,
+		}),
+		basePayload("terminal.failed", map[string]any{
+			"totalBytes": 65_536, "previewBytes": 32_768, "segmentCount": 1, "truncated": true,
+			"exitCode": 137, "signal": "SIGKILL", "failureKind": "oom",
+		}),
+	}
+	for index, payload := range validPayloads {
+		if !IsCanonicalRuntimeEventV2Payload("item.updated", payload) {
+			t.Fatalf("valid terminal lifecycle payload %d was rejected", index)
+		}
+	}
+
+	referenceTerminal := func() map[string]any {
+		return map[string]any{
+			"terminalId": "terminal-1", "eventType": "terminal.output.reference",
+			"artifactId": artifactID, "offset": 0, "length": 1, "segmentIndex": 0, "encoding": "utf-8",
+		}
+	}
+	for _, test := range []struct {
+		name   string
+		mutate func(map[string]any)
+	}{
+		{name: "invalid artifact UUID", mutate: func(terminal map[string]any) { terminal["artifactId"] = "not-a-uuid" }},
+		{name: "noncanonical artifact UUID", mutate: func(terminal map[string]any) { terminal["artifactId"] = strings.ReplaceAll(artifactID, "-", "") }},
+		{name: "negative offset", mutate: func(terminal map[string]any) { terminal["offset"] = -1 }},
+		{name: "negative length", mutate: func(terminal map[string]any) { terminal["length"] = -1 }},
+		{name: "negative segment", mutate: func(terminal map[string]any) { terminal["segmentIndex"] = -1 }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			terminal := referenceTerminal()
+			test.mutate(terminal)
+			if IsCanonicalRuntimeEventV2Payload("item.updated", basePayload("terminal.output.reference", terminal)) {
+				t.Fatal("invalid terminal reference was accepted")
+			}
+		})
+	}
+
+	for _, test := range []struct {
+		name   string
+		mutate func(map[string]any)
+	}{
+		{name: "preview exceeds total", mutate: func(terminal map[string]any) { terminal["previewBytes"] = 65 }},
+		{name: "negative segment count", mutate: func(terminal map[string]any) { terminal["segmentCount"] = -1 }},
+		{name: "invalid failure kind", mutate: func(terminal map[string]any) { terminal["failureKind"] = "crash" }},
+		{name: "missing truncation marker", mutate: func(terminal map[string]any) { delete(terminal, "truncated") }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			terminal := map[string]any{
+				"totalBytes": 64, "previewBytes": 64, "segmentCount": 1, "truncated": false,
+				"failureKind": "exit",
+			}
+			test.mutate(terminal)
+			if IsCanonicalRuntimeEventV2Payload("item.completed", basePayload("terminal.failed", terminal)) {
+				t.Fatal("invalid terminal completion was accepted")
+			}
+		})
+	}
+
+	if IsCanonicalRuntimeEventV2Payload("item.started", map[string]any{
+		"itemType": "mcp_tool_call",
+		"data": map[string]any{"terminal": map[string]any{
+			"terminalId": "terminal-1", "eventType": "terminal.started",
+		}},
+	}) {
+		t.Fatal("terminal lifecycle data was accepted on a non-command item")
+	}
+}
+
+func cloneRuntimeEventPayload(payload map[string]any) map[string]any {
+	cloned := make(map[string]any, len(payload))
+	for key, value := range payload {
+		cloned[key] = value
+	}
+	return cloned
+}
+
 func TestValidateProviderResumeFallbackRuntimeWarningPayload(t *testing.T) {
 	validPayload := func() map[string]any {
 		return map[string]any{

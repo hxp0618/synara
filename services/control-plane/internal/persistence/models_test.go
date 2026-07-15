@@ -11,7 +11,7 @@ func TestModelsHaveValidGormSchemas(t *testing.T) {
 	models := []any{
 		&User{}, &LoginSession{}, &Tenant{}, &TenantMembership{}, &Organization{},
 		&OrganizationMembership{}, &TenantInvitation{}, &AuditLog{}, &Project{},
-		&AgentSession{}, &AgentTurn{}, &SessionEvent{}, &Automation{}, &WorkerInstance{},
+		&AgentSession{}, &AgentTurn{}, &SessionEvent{}, &Automation{}, &WorkerInstance{}, &WorkerIdentityTombstone{},
 		&AgentExecution{}, &WorkerLease{}, &WorkerRequestReceipt{}, &APIIdempotencyKey{}, &ExecutionInteraction{}, &OutboxMessage{},
 	}
 	for _, model := range models {

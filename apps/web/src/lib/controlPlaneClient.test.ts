@@ -252,6 +252,7 @@ describe("controlPlaneClient", () => {
                 code: "tenant_forbidden",
                 message: "Tenant access denied.",
                 requestId: "request-1",
+                details: { currentPolicyVersion: 4 },
               },
             }),
             { status: 403, headers: { "Content-Type": "application/json" } },
@@ -264,6 +265,7 @@ describe("controlPlaneClient", () => {
         status: 403,
         code: "tenant_forbidden",
         requestId: "request-1",
+        details: { currentPolicyVersion: 4 },
       }),
     );
   });
@@ -466,9 +468,9 @@ describe("controlPlaneClient", () => {
     expect(request.body).toBe(JSON.stringify({ model: "claude-sonnet-5", expectedModel: null }));
   });
 
-  it("creates projects with private Git access and can explicitly unbind it", async () => {
+  it("creates and updates Project metadata without the retired Git Credential field", async () => {
     const responses = [
-      new Response(JSON.stringify({ id: "project-1", gitCredentialId: "git-credential-1" }), {
+      new Response(JSON.stringify({ id: "project-1", gitCredentialId: null }), {
         status: 201,
         headers: { "Content-Type": "application/json" },
       }),
@@ -487,12 +489,11 @@ describe("controlPlaneClient", () => {
         name: "Private repository",
         repositoryUrl: "https://github.com/company/private.git",
         defaultBranch: "main",
-        gitCredentialId: "git-credential-1",
         visibility: "organization",
       },
       { idempotencyKey: "web-project-request-1" },
     );
-    await controlPlaneClient.updateProject("project/one", { gitCredentialId: null });
+    await controlPlaneClient.updateProject("project/one", { defaultBranch: "trunk" });
 
     expect(fetchMock).toHaveBeenNthCalledWith(
       1,
@@ -503,7 +504,6 @@ describe("controlPlaneClient", () => {
           name: "Private repository",
           repositoryUrl: "https://github.com/company/private.git",
           defaultBranch: "main",
-          gitCredentialId: "git-credential-1",
           visibility: "organization",
         }),
       }),
@@ -515,7 +515,7 @@ describe("controlPlaneClient", () => {
       "/v1/projects/project%2Fone",
       expect.objectContaining({
         method: "PATCH",
-        body: JSON.stringify({ gitCredentialId: null }),
+        body: JSON.stringify({ defaultBranch: "trunk" }),
       }),
     );
   });
@@ -569,6 +569,133 @@ describe("controlPlaneClient", () => {
       inputText: "Continue",
       runtimeMode: "approval-required",
       interactionMode: "plan",
+    });
+  });
+
+  it("routes advanced Session commands through encoded idempotent Control Plane endpoints", async () => {
+    const specialResult = (type: "compact" | "review", sessionId = "session/one") => ({
+      type,
+      turn: {
+        id: `turn-${type}`,
+        tenantId: "tenant-1",
+        sessionId,
+        createdBy: "user-1",
+        status: "queued",
+        inputText: type,
+        turnKind: type,
+        runtimeMode: "approval-required",
+        interactionMode: "default",
+        startedAt: null,
+        completedAt: null,
+        createdAt: "2026-07-15T00:00:00Z",
+      },
+      executionId: `execution-${type}`,
+      controlCommand: {
+        id: `control-${type}`,
+        executionId: `execution-${type}`,
+        sessionId,
+        turnId: `turn-${type}`,
+        provider: "codex",
+        commandType: type === "compact" ? "CompactSession" : "StartReview",
+        commandId: `${type}:control-${type}`,
+        payload: {},
+        status: "pending",
+        requestedBy: "user-1",
+        requestedAt: "2026-07-15T00:00:00Z",
+        deliveryAttempts: 0,
+        deliveryAvailableAt: "2026-07-15T00:00:00Z",
+      },
+    });
+    const responses = [
+      new Response(JSON.stringify(specialResult("compact")), {
+        status: 202,
+        headers: { "Content-Type": "application/json" },
+      }),
+      new Response(JSON.stringify(specialResult("review", "review/session")), {
+        status: 202,
+        headers: { "Content-Type": "application/json" },
+      }),
+      new Response(
+        JSON.stringify({
+          sessionId: "session/one",
+          eventId: "event-rollback",
+          eventSequence: 42,
+          fromSessionId: "session/one",
+          fromTurnId: "turn/one",
+          fromSequence: 17,
+          removedTurnCount: 1,
+          supportMode: "emulated",
+          workspaceDisposition: "unchanged",
+          externalSideEffectsReverted: false,
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+      new Response(
+        JSON.stringify({
+          session: { id: "fork/session" },
+          sourceSessionId: "session/one",
+          sourceEventSequence: 41,
+          supportMode: "emulated",
+        }),
+        { status: 201, headers: { "Content-Type": "application/json" } },
+      ),
+    ];
+    const fetchMock = vi.fn<RequiredInitFetch>(async () => responses.shift()!);
+    vi.stubGlobal("fetch", fetchMock);
+
+    await controlPlaneClient.compactSession("session/one", 41, {
+      idempotencyKey: "compact-key",
+    });
+    await controlPlaneClient.startReview(
+      "session/one",
+      {
+        expectedLastEventSequence: 41,
+        runtimeMode: "approval-required",
+        target: { type: "baseBranch", branch: "main" },
+      },
+      { idempotencyKey: "review-key" },
+    );
+    const rollback = await controlPlaneClient.rollbackSession(
+      "session/one",
+      { expectedLastEventSequence: 41, fromTurnId: "turn/one" },
+      { idempotencyKey: "rollback-key" },
+    );
+    await controlPlaneClient.forkSession(
+      "session/one",
+      { expectedLastEventSequence: 41, title: "Forked", visibility: "private" },
+      { idempotencyKey: "fork-key" },
+    );
+
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      "/v1/sessions/session%2Fone/compact",
+      "/v1/sessions/session%2Fone/reviews",
+      "/v1/sessions/session%2Fone/rollback",
+      "/v1/sessions/session%2Fone/fork",
+    ]);
+    expect(JSON.parse(String(fetchMock.mock.calls[0]![1].body))).toEqual({
+      expectedLastEventSequence: 41,
+    });
+    expect(JSON.parse(String(fetchMock.mock.calls[1]![1].body))).toEqual({
+      expectedLastEventSequence: 41,
+      runtimeMode: "approval-required",
+      target: { type: "baseBranch", branch: "main" },
+    });
+    expect(JSON.parse(String(fetchMock.mock.calls[2]![1].body))).toEqual({
+      expectedLastEventSequence: 41,
+      fromTurnId: "turn/one",
+    });
+    expect(JSON.parse(String(fetchMock.mock.calls[3]![1].body))).toEqual({
+      expectedLastEventSequence: 41,
+      title: "Forked",
+      visibility: "private",
+    });
+    expect(
+      fetchMock.mock.calls.map(([, init]) => new Headers(init.headers).get("Idempotency-Key")),
+    ).toEqual(["compact-key", "review-key", "rollback-key", "fork-key"]);
+    expect(rollback).toMatchObject({
+      supportMode: "emulated",
+      workspaceDisposition: "unchanged",
+      externalSideEffectsReverted: false,
     });
   });
 
@@ -830,6 +957,88 @@ describe("controlPlaneClient", () => {
     );
   });
 
+  it("lists and transitions immutable Worker release revisions with CAS idempotency", async () => {
+    const fetchMock = vi
+      .fn<RequiredInitFetch>()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ policy: null, revisions: [], transitions: [] }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            id: "release/one",
+            tenantId: "tenant/one",
+            executionTargetId: "target/one",
+            revision: 1,
+            workerManifestId: "manifest/one",
+            workerBuildVersion: "0.6.0",
+            imageDigest: "sha256:release",
+            description: "Initial release",
+            createdBy: "user-1",
+            createdAt: "2026-07-15T00:00:00Z",
+          }),
+          { status: 201, headers: { "Content-Type": "application/json" } },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            tenantId: "tenant/one",
+            executionTargetId: "target/one",
+            policyVersion: 1,
+            promotedRevisionId: "release/one",
+            canaryPercent: 0,
+            updatedBy: "user-1",
+            updatedAt: "2026-07-15T00:01:00Z",
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await controlPlaneClient.listWorkerReleases("tenant/one", "target/one");
+    await controlPlaneClient.createWorkerRelease(
+      "tenant/one",
+      "target/one",
+      { workerManifestId: "manifest/one", description: "Initial release" },
+      { idempotencyKey: "worker-release-create-1" },
+    );
+    await controlPlaneClient.transitionWorkerRelease(
+      "tenant/one",
+      "target/one",
+      "release/one",
+      "promote",
+      { expectedPolicyVersion: 0, reason: "Establish baseline" },
+      { idempotencyKey: "worker-release-policy-1" },
+    );
+
+    expect(fetchMock.mock.calls[0]![0]).toBe(
+      "/v1/tenants/tenant%2Fone/execution-targets/target%2Fone/worker-releases",
+    );
+    const createRequest = fetchMock.mock.calls[1]![1];
+    expect(new Headers(createRequest.headers).get("Idempotency-Key")).toBe(
+      "worker-release-create-1",
+    );
+    expect(JSON.parse(String(createRequest.body))).toEqual({
+      workerManifestId: "manifest/one",
+      description: "Initial release",
+    });
+    const transitionRequest = fetchMock.mock.calls[2]![1];
+    expect(fetchMock.mock.calls[2]![0]).toBe(
+      "/v1/tenants/tenant%2Fone/execution-targets/target%2Fone/worker-releases/release%2Fone/promote",
+    );
+    expect(new Headers(transitionRequest.headers).get("Idempotency-Key")).toBe(
+      "worker-release-policy-1",
+    );
+    expect(JSON.parse(String(transitionRequest.body))).toEqual({
+      expectedPolicyVersion: 0,
+      reason: "Establish baseline",
+    });
+  });
+
   it("updates an Execution Target Provider Policy without replacing the target", async () => {
     const fetchMock = vi.fn(
       async () =>
@@ -1041,6 +1250,121 @@ describe("controlPlaneClient", () => {
           payload: { host: "github.com", username: "x-access-token", token: "git-secret" },
         }),
       }),
+    );
+  });
+
+  it("updates Credential auto-selection and the Platform scope policy", async () => {
+    const responses = [
+      new Response(JSON.stringify({ id: "credential-1", autoSelectEnabled: true }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+      new Response(
+        JSON.stringify({
+          tenantId: "tenant-1",
+          platformCredentialsEnabled: false,
+          platformCredentialAutoSelect: false,
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+      new Response(
+        JSON.stringify({
+          tenantId: "tenant-1",
+          platformCredentialsEnabled: true,
+          platformCredentialAutoSelect: true,
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    ];
+    const fetchMock = vi.fn(async () => responses.shift()!);
+    vi.stubGlobal("fetch", fetchMock);
+
+    await controlPlaneClient.setCredentialAutoSelect("tenant/one", "credential/one", true);
+    await controlPlaneClient.getProviderCredentialScopePolicy("tenant/one");
+    await controlPlaneClient.updateProviderCredentialScopePolicy("tenant/one", {
+      platformCredentialsEnabled: true,
+      platformCredentialAutoSelect: true,
+    });
+
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
+      "/v1/tenants/tenant%2Fone/credentials/credential%2Fone/auto-select",
+      expect.objectContaining({
+        method: "PUT",
+        credentials: "include",
+        body: JSON.stringify({ enabled: true }),
+      }),
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      "/v1/tenants/tenant%2Fone/provider-credential-scope-policy",
+      expect.objectContaining({ credentials: "include" }),
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      3,
+      "/v1/tenants/tenant%2Fone/provider-credential-scope-policy",
+      expect.objectContaining({
+        method: "PUT",
+        credentials: "include",
+        body: JSON.stringify({
+          platformCredentialsEnabled: true,
+          platformCredentialAutoSelect: true,
+        }),
+      }),
+    );
+  });
+
+  it("lists, creates, and disables immutable Workspace Credential Bindings", async () => {
+    const responses = [
+      new Response(JSON.stringify({ items: [] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+      new Response(JSON.stringify({ id: "binding-1", bindingKind: "registry_pull" }), {
+        status: 201,
+        headers: { "Content-Type": "application/json" },
+      }),
+      new Response(
+        JSON.stringify({
+          id: "binding-1",
+          bindingKind: "registry_pull",
+          disabledAt: "2026-07-15T00:00:00Z",
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    ];
+    const fetchMock = vi.fn(async () => responses.shift()!);
+    vi.stubGlobal("fetch", fetchMock);
+
+    await controlPlaneClient.listCredentialBindings("tenant/one", { projectId: "project/one" });
+    await controlPlaneClient.createCredentialBinding("tenant/one", {
+      projectId: "project/one",
+      credentialId: "credential/one",
+      bindingKind: "registry_pull",
+    });
+    await controlPlaneClient.disableCredentialBinding("tenant/one", "binding/one");
+
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
+      "/v1/tenants/tenant%2Fone/credential-bindings?projectId=project%2Fone",
+      expect.objectContaining({ credentials: "include" }),
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      "/v1/tenants/tenant%2Fone/credential-bindings",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          projectId: "project/one",
+          credentialId: "credential/one",
+          bindingKind: "registry_pull",
+        }),
+      }),
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      3,
+      "/v1/tenants/tenant%2Fone/credential-bindings/binding%2Fone/disable",
+      expect.objectContaining({ method: "POST" }),
     );
   });
 

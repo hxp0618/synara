@@ -25,6 +25,7 @@ export interface ComposerSlashInvocation {
 
 export type FastSlashCommandAction = "toggle" | "on" | "off" | "status" | "invalid";
 export type ForkSlashCommandTarget = "local" | "worktree";
+export type ControlPlaneAdvancedSlashCommand = "compact" | "review" | "fork";
 
 const CLAUDE_NATIVE_COMMAND_ALIASES: Record<string, readonly string[]> = {
   clear: ["reset", "new"],
@@ -211,6 +212,23 @@ export function parseComposerSlashInvocationForCommands(
   };
 }
 
+export function resolveUnavailableControlPlaneAdvancedSlashCommand(input: {
+  text: string;
+  availableCommands: ReadonlyArray<ComposerSlashCommand>;
+}): ControlPlaneAdvancedSlashCommand | null {
+  const invocation = parseComposerSlashInvocation(input.text);
+  if (
+    !invocation ||
+    (invocation.command !== "compact" &&
+      invocation.command !== "review" &&
+      invocation.command !== "fork") ||
+    input.availableCommands.includes(invocation.command)
+  ) {
+    return null;
+  }
+  return invocation.command;
+}
+
 export function getComposerSlashCommandDefinition(
   command: ComposerSlashCommand,
 ): ComposerSlashCommandDefinition {
@@ -349,6 +367,7 @@ export function resolveComposerSlashRootBranch(input: {
 
 export function getAvailableComposerSlashCommands(input: {
   provider: ProviderKind;
+  routingMode?: "local" | "control-plane";
   supportsFastSlashCommand: boolean;
   canOfferCompactCommand: boolean;
   canOfferPlanCommand: boolean;
@@ -370,7 +389,7 @@ export function getAvailableComposerSlashCommands(input: {
   );
 
   const availableCommands: ComposerSlashCommand[] =
-    input.provider !== "claudeAgent"
+    input.routingMode === "control-plane" || input.provider !== "claudeAgent"
       ? [
           "clear",
           ...(input.canOfferCompactCommand ? (["compact"] as const) : []),

@@ -24,6 +24,7 @@ import {
   parseComposerSlashInvocationForCommands,
   parseFastSlashCommandAction,
   parseForkSlashCommandArgs,
+  resolveUnavailableControlPlaneAdvancedSlashCommand,
   type ForkSlashCommandTarget,
 } from "../composerSlashCommands";
 import { buildThreadHandoffImportedMessages } from "../lib/threadHandoff";
@@ -62,6 +63,12 @@ export function useComposerSlashCommands(input: {
   canOfferForkCommand: boolean;
   canOfferSideCommand: boolean;
   canOfferExportCommand: boolean;
+  advancedCommandUnavailableMessages?: Partial<
+    Record<"compact" | "review" | "fork", string | null>
+  >;
+  compactControlPlaneSession?: () => Promise<void>;
+  forkControlPlaneSession?: () => Promise<ThreadId>;
+  startControlPlaneReview?: (target: "changes" | "base-branch") => Promise<void>;
   supportsTextNativeReviewCommand: boolean;
   fastModeEnabled: boolean;
   providerNativeCommands: readonly ProviderNativeCommandDescriptor[];
@@ -115,6 +122,10 @@ export function useComposerSlashCommands(input: {
     canOfferForkCommand,
     canOfferSideCommand,
     canOfferExportCommand,
+    advancedCommandUnavailableMessages,
+    compactControlPlaneSession,
+    forkControlPlaneSession,
+    startControlPlaneReview,
     supportsTextNativeReviewCommand,
     fastModeEnabled,
     providerNativeCommands,
@@ -137,6 +148,7 @@ export function useComposerSlashCommands(input: {
   const providerNativeCommandNames = providerNativeCommands.map((command) => command.name);
   const availableBuiltInSlashCommands = getAvailableComposerSlashCommands({
     provider: selectedProvider,
+    routingMode: canUseLocalProviderCommands ? "local" : "control-plane",
     supportsFastSlashCommand,
     canOfferCompactCommand,
     canOfferPlanCommand,
@@ -148,14 +160,42 @@ export function useComposerSlashCommands(input: {
   });
 
   const compactProviderThread = useCallback(async (): Promise<boolean> => {
+    if (!canOfferCompactCommand || !isServerThread || !activeThread?.session) {
+      toastManager.add({
+        type: "warning",
+        title: "Compact is unavailable",
+        description:
+          advancedCommandUnavailableMessages?.compact ??
+          "Open an active supported server thread before compacting context.",
+      });
+      return false;
+    }
+
+    if (!canUseLocalProviderCommands) {
+      if (!compactControlPlaneSession) {
+        toastManager.add({
+          type: "warning",
+          title: "Compact is unavailable",
+          description: "The SaaS Control Plane compact route is unavailable right now.",
+        });
+        return false;
+      }
+      try {
+        await compactControlPlaneSession();
+        return true;
+      } catch (error) {
+        toastManager.add({
+          type: "error",
+          title: "Could not compact thread",
+          description:
+            error instanceof Error ? error.message : "An error occurred while compacting context.",
+        });
+        return false;
+      }
+    }
+
     const api = readNativeApi();
-    if (
-      !api ||
-      !canOfferCompactCommand ||
-      !isServerThread ||
-      !activeThread?.session ||
-      activeThread.session.status === "closed"
-    ) {
+    if (!api || activeThread.session.status === "closed") {
       toastManager.add({
         type: "warning",
         title: "Compact is unavailable",
@@ -189,7 +229,14 @@ export function useComposerSlashCommands(input: {
       });
       return false;
     }
-  }, [activeThread, canOfferCompactCommand, isServerThread]);
+  }, [
+    activeThread,
+    advancedCommandUnavailableMessages?.compact,
+    canOfferCompactCommand,
+    canUseLocalProviderCommands,
+    compactControlPlaneSession,
+    isServerThread,
+  ]);
 
   const setFastModeFromSlashCommand = useCallback(
     (enabled: boolean) => {
@@ -253,10 +300,31 @@ export function useComposerSlashCommands(input: {
         toastManager.add({
           type: "warning",
           title: "Fork is unavailable",
-          description: "This thread cannot be forked in the current execution mode.",
+          description:
+            advancedCommandUnavailableMessages?.fork ??
+            "This thread cannot be forked in the current execution mode.",
         });
         return true;
       }
+
+      if (!canUseLocalProviderCommands) {
+        if (inputOptions?.target) {
+          toastManager.add({
+            type: "warning",
+            title: "Invalid SaaS /fork command",
+            description:
+              "SaaS Fork creates an isolated authoritative Session and does not accept Local or New Worktree targets.",
+          });
+          return true;
+        }
+        if (!forkControlPlaneSession) {
+          throw new Error("The SaaS Control Plane fork route is unavailable right now.");
+        }
+        const nextThreadId = await forkControlPlaneSession();
+        await navigateToThread(nextThreadId);
+        return true;
+      }
+
       const api = readNativeApi();
       if (!api || !activeProject || !activeThread || !isServerThread) {
         toastManager.add({
@@ -306,7 +374,10 @@ export function useComposerSlashCommands(input: {
       activeProject,
       activeRootBranch,
       activeThread,
+      advancedCommandUnavailableMessages?.fork,
       canOfferForkCommand,
+      canUseLocalProviderCommands,
+      forkControlPlaneSession,
       interactionMode,
       isServerThread,
       navigateToThread,
@@ -419,10 +490,36 @@ export function useComposerSlashCommands(input: {
         toastManager.add({
           type: "warning",
           title: "Review is unavailable",
-          description: "This thread cannot start a local review in the current execution mode.",
+          description:
+            advancedCommandUnavailableMessages?.review ??
+            "This thread cannot start a review in the current execution mode.",
         });
         return false;
       }
+
+      if (!canUseLocalProviderCommands) {
+        if (!startControlPlaneReview) {
+          toastManager.add({
+            type: "warning",
+            title: "Review is unavailable",
+            description: "The SaaS Control Plane review route is unavailable right now.",
+          });
+          return false;
+        }
+        try {
+          await startControlPlaneReview(target);
+          return true;
+        } catch (error) {
+          toastManager.add({
+            type: "error",
+            title: "Could not start review",
+            description:
+              error instanceof Error ? error.message : "An error occurred while starting review.",
+          });
+          return false;
+        }
+      }
+
       const api = readNativeApi();
       if (!api || !activeThread || !activeProject) {
         toastManager.add({
@@ -519,10 +616,13 @@ export function useComposerSlashCommands(input: {
       activeProject,
       activeRootBranch,
       activeThread,
+      advancedCommandUnavailableMessages?.review,
       canOfferReviewCommand,
+      canUseLocalProviderCommands,
       navigateToThread,
       runtimeMode,
       selectedModelSelection,
+      startControlPlaneReview,
       syncServerShellSnapshot,
     ],
   );
@@ -533,11 +633,13 @@ export function useComposerSlashCommands(input: {
         toastManager.add({
           type: "warning",
           title: "Review is unavailable",
-          description: "This thread cannot start a local review in the current execution mode.",
+          description:
+            advancedCommandUnavailableMessages?.review ??
+            "This thread cannot start a review in the current execution mode.",
         });
         return;
       }
-      if (selectedProvider === "codex") {
+      if (!canUseLocalProviderCommands || selectedProvider === "codex") {
         await runCodexReviewStart(target);
       } else {
         const replacement = buildSlashReviewComposerPrompt(target === "base-branch" ? "base" : "");
@@ -545,7 +647,14 @@ export function useComposerSlashCommands(input: {
       }
       editorActions.scheduleComposerFocus();
     },
-    [canOfferReviewCommand, editorActions, selectedProvider, runCodexReviewStart],
+    [
+      canOfferReviewCommand,
+      canUseLocalProviderCommands,
+      advancedCommandUnavailableMessages?.review,
+      editorActions,
+      selectedProvider,
+      runCodexReviewStart,
+    ],
   );
 
   const handleForkTargetSelection = useCallback(
@@ -666,6 +775,23 @@ export function useComposerSlashCommands(input: {
         return true;
       }
 
+      if (!canUseLocalProviderCommands) {
+        const command = resolveUnavailableControlPlaneAdvancedSlashCommand({
+          text: trimmed,
+          availableCommands: availableBuiltInSlashCommands,
+        });
+        if (command) {
+          toastManager.add({
+            type: "warning",
+            title: `${command[0]!.toUpperCase()}${command.slice(1)} is unavailable`,
+            description:
+              advancedCommandUnavailableMessages?.[command] ??
+              `The selected Provider cannot use ${command} on this SaaS target right now.`,
+          });
+          return true;
+        }
+      }
+
       const slashInvocation = parseComposerSlashInvocationForCommands(
         trimmed,
         availableBuiltInSlashCommands,
@@ -711,6 +837,31 @@ export function useComposerSlashCommands(input: {
         return true;
       }
       if (slashInvocation.command === "review") {
+        if (!canUseLocalProviderCommands) {
+          const normalizedArgs = slashInvocation.args.trim().toLowerCase();
+          if (normalizedArgs.length === 0) {
+            editorActions.clearComposerSlashDraft();
+            openReviewTargetPicker();
+            return true;
+          }
+          const target =
+            normalizedArgs === "base" || normalizedArgs.startsWith("base ")
+              ? "base-branch"
+              : normalizedArgs === "changes" || normalizedArgs === "workspace"
+                ? "changes"
+                : null;
+          if (!target) {
+            toastManager.add({
+              type: "warning",
+              title: "Invalid SaaS /review command",
+              description: "Use /review, /review changes, or /review base.",
+            });
+            return true;
+          }
+          editorActions.clearComposerSlashDraft();
+          await runCodexReviewStart(target);
+          return true;
+        }
         if (selectedProvider === "codex") {
           const normalizedArgs = slashInvocation.args.trim().toLowerCase();
           if (normalizedArgs.length === 0) {
@@ -749,6 +900,31 @@ export function useComposerSlashCommands(input: {
         return true;
       }
       if (slashInvocation.command === "fork") {
+        if (!canUseLocalProviderCommands) {
+          if (slashInvocation.args.trim().length > 0) {
+            toastManager.add({
+              type: "warning",
+              title: "Invalid SaaS /fork command",
+              description:
+                "Use /fork without Local or New Worktree arguments. SaaS creates an isolated authoritative Session.",
+            });
+            return true;
+          }
+          try {
+            editorActions.clearComposerSlashDraft();
+            await createForkThreadFromSlashCommand();
+          } catch (error) {
+            toastManager.add({
+              type: "error",
+              title: "Could not fork thread",
+              description:
+                error instanceof Error
+                  ? error.message
+                  : "An error occurred while creating the forked thread.",
+            });
+          }
+          return true;
+        }
         const { target, invalid } = parseForkSlashCommandArgs(slashInvocation.args);
         if (invalid) {
           toastManager.add({
@@ -798,7 +974,9 @@ export function useComposerSlashCommands(input: {
     },
     [
       availableBuiltInSlashCommands,
+      advancedCommandUnavailableMessages,
       canOfferPlanCommand,
+      canUseLocalProviderCommands,
       checkClaudeFastSlashCommandAvailability,
       compactProviderThread,
       createForkThreadFromSlashCommand,
@@ -995,6 +1173,20 @@ export function useComposerSlashCommands(input: {
           return;
         }
         editorActions.setComposerHighlightedItemId(null);
+        if (!canUseLocalProviderCommands) {
+          void createForkThreadFromSlashCommand().catch((error) => {
+            toastManager.add({
+              type: "error",
+              title: "Could not fork thread",
+              description:
+                error instanceof Error
+                  ? error.message
+                  : "An error occurred while creating the forked thread.",
+            });
+          });
+          editorActions.scheduleComposerFocus();
+          return;
+        }
         openForkTargetPicker();
         editorActions.scheduleComposerFocus();
         return;
@@ -1019,6 +1211,8 @@ export function useComposerSlashCommands(input: {
     [
       compactProviderThread,
       canOfferPlanCommand,
+      canUseLocalProviderCommands,
+      createForkThreadFromSlashCommand,
       createSidechatFromSlashCommand,
       editorActions,
       handleClearConversation,

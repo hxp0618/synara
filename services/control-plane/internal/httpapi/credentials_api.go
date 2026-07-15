@@ -76,6 +76,63 @@ func (s *Server) revokeCredential(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+func (s *Server) putCredentialAutoSelect(w http.ResponseWriter, r *http.Request) {
+	tenantID, ok := s.pathUUID(w, r, "tenantID")
+	if !ok {
+		return
+	}
+	credentialID, ok := s.pathUUID(w, r, "credentialID")
+	if !ok {
+		return
+	}
+	var input credentials.SetAutoSelectInput
+	if err := decodeJSON(r, &input); err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	item, err := s.credentials.SetAutoSelect(
+		r.Context(), mustPrincipal(r), tenantID, credentialID, input, requestID(r), clientIP(r),
+	)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, item)
+}
+
+func (s *Server) getProviderCredentialScopePolicy(w http.ResponseWriter, r *http.Request) {
+	tenantID, ok := s.pathUUID(w, r, "tenantID")
+	if !ok {
+		return
+	}
+	item, err := s.credentials.GetScopePolicy(r.Context(), mustPrincipal(r), tenantID)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, item)
+}
+
+func (s *Server) putProviderCredentialScopePolicy(w http.ResponseWriter, r *http.Request) {
+	tenantID, ok := s.pathUUID(w, r, "tenantID")
+	if !ok {
+		return
+	}
+	var input credentials.UpdateScopePolicyInput
+	if err := decodeJSON(r, &input); err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	item, err := s.credentials.UpdateScopePolicy(
+		r.Context(), mustPrincipal(r), tenantID, input, requestID(r), clientIP(r),
+	)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, item)
+}
+
 func (s *Server) resolveExecutionCredential(w http.ResponseWriter, r *http.Request) {
 	executionID, ok := s.pathUUID(w, r, "executionID")
 	if !ok {
@@ -91,31 +148,6 @@ func (s *Server) resolveExecutionCredential(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	payload, err := s.credentials.ResolveForExecution(
-		r.Context(), s.executions, mustWorker(r), executionID, credentialID, input,
-	)
-	if err != nil {
-		s.writeError(w, r, err)
-		return
-	}
-	w.Header().Set("Cache-Control", "no-store")
-	writeJSON(w, http.StatusOK, map[string]any{"payload": payload})
-}
-
-func (s *Server) resolveExecutionGitCredential(w http.ResponseWriter, r *http.Request) {
-	executionID, ok := s.pathUUID(w, r, "executionID")
-	if !ok {
-		return
-	}
-	credentialID, ok := s.pathUUID(w, r, "credentialID")
-	if !ok {
-		return
-	}
-	var input executions.LeaseInput
-	if err := decodeJSON(r, &input); err != nil {
-		s.writeError(w, r, err)
-		return
-	}
-	payload, err := s.credentials.ResolveGitForExecution(
 		r.Context(), s.executions, mustWorker(r), executionID, credentialID, input,
 	)
 	if err != nil {

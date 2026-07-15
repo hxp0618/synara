@@ -12,6 +12,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/synara-ai/synara/services/control-plane/internal/agentd"
 	"github.com/synara-ai/synara/services/control-plane/internal/artifacts"
 	"github.com/synara-ai/synara/services/control-plane/internal/bootstrap"
@@ -129,6 +131,33 @@ func main() {
 	}
 	identityService := identity.NewService(db, cfg.SessionTTL, cfg.SessionIdleTTL, identityOptions...)
 	projectService := projects.NewService(db)
+	credentialCipher, err := credentialkms.New(ctx, credentialkms.Config{
+		Provider: cfg.CredentialKMSProvider, KeyID: cfg.CredentialKMSKeyID,
+		LocalKey: cfg.CredentialKMSLocalKey, Region: cfg.CredentialKMSAWSRegion,
+	})
+	if err != nil {
+		logger.Error("failed to configure provider credential KMS", "provider", cfg.CredentialKMSProvider, "error", err)
+		os.Exit(1)
+	}
+	credentialService := credentials.NewService(db, credentialCipher)
+	resolveImagePull := func(
+		ctx context.Context,
+		tenantID, targetID uuid.UUID,
+		registrySelector string,
+	) (executiontargets.ImagePullCredentialResolution, error) {
+		resolved, err := credentialService.ResolveWorkerImagePullForTarget(ctx, tenantID, targetID, registrySelector)
+		resolution := executiontargets.ImagePullCredentialResolution{Authoritative: resolved.Authoritative}
+		if resolved.Credential == nil {
+			return resolution, err
+		}
+		resolution.Credential = &executiontargets.ImagePullCredential{
+			BindingID: resolved.Credential.BindingID, CredentialID: resolved.Credential.CredentialID,
+			CredentialVersion: resolved.Credential.CredentialVersion, Host: resolved.Credential.Host,
+			Username: resolved.Credential.Username, Password: resolved.Credential.Password,
+			RegistryToken: resolved.Credential.RegistryToken,
+		}
+		return resolution, err
+	}
 	cursorCipher, err := secret.NewCursorCipher(cfg.ProviderCursorKey)
 	if err != nil {
 		logger.Error("failed to configure provider cursor encryption", "error", err)
@@ -141,7 +170,7 @@ func main() {
 	})
 	dockerReconciler := executiontargets.NewDockerPoolReconciler(executionTargetService, executiontargets.DockerPoolReconcilerConfig{
 		RegistrationToken: cfg.WorkerRegistrationToken, PublicControlPlaneURL: cfg.PublicControlPlaneURL,
-		Interval: cfg.DockerReconcileInterval, Observer: metrics,
+		Interval: cfg.DockerReconcileInterval, Observer: metrics, ResolveImagePull: resolveImagePull,
 	}, logger)
 	sessionService := sessions.NewService(
 		db, projectService, executionTargetService,
@@ -158,7 +187,7 @@ func main() {
 		RegistrationToken: cfg.WorkerRegistrationToken, PublicControlPlaneURL: cfg.PublicControlPlaneURL,
 		Interval: cfg.KubernetesReconcileInterval, RecoverExpired: executionService.RecoverExpired,
 		ReconcileEphemeralWorkspaceCleanup: executionService.ReconcileEphemeralWorkspaceCleanup,
-		Observer:                           metrics,
+		Observer:                           metrics, ResolveImagePull: resolveImagePull,
 	}, logger)
 	artifactStore, err := artifacts.NewStore(ctx, cfg)
 	if err != nil {
@@ -167,15 +196,6 @@ func main() {
 	}
 	artifactService := artifacts.NewService(db, artifactStore, cfg, executionService, sessionService, metrics)
 	quotaService := quotas.NewService(db)
-	credentialCipher, err := credentialkms.New(ctx, credentialkms.Config{
-		Provider: cfg.CredentialKMSProvider, KeyID: cfg.CredentialKMSKeyID,
-		LocalKey: cfg.CredentialKMSLocalKey, Region: cfg.CredentialKMSAWSRegion,
-	})
-	if err != nil {
-		logger.Error("failed to configure provider credential KMS", "provider", cfg.CredentialKMSProvider, "error", err)
-		os.Exit(1)
-	}
-	credentialService := credentials.NewService(db, credentialCipher)
 	serviceAccountService := serviceaccounts.NewService(db)
 	enterpriseIdentityService := enterpriseidentity.NewService(db, identityService, credentialCipher)
 	scimService := scim.NewService(db)

@@ -164,7 +164,7 @@ func captureWorkspacePatch(
 		Excluded:    []string{checkpointPatchExcludedGit, checkpointPatchExcludedIgnored},
 		IndexPolicy: checkpointPatchIndexPolicy,
 	}
-	archivePath, cleanup, err := createPatchArchive(materialized.Directory, patchPath, manifest)
+	archivePath, cleanup, err := createPatchArchive(ctx, materialized.Directory, patchPath, manifest)
 	if err != nil {
 		return WorkspaceCheckpointCandidate{}, err
 	}
@@ -330,7 +330,7 @@ func capturePatchState(ctx context.Context, directory, baseCommit string) (check
 			entry.Operation = "delete"
 		case "A", "M", "T":
 			entry.Operation = "upsert"
-			kind, size, digest, executable, inspectErr := inspectPatchPath(root, change.path, true)
+			kind, size, digest, executable, inspectErr := inspectPatchPath(ctx, root, change.path, true)
 			if inspectErr != nil {
 				return checkpointPatchState{}, fmt.Errorf("inspect tracked Workspace Patch path %q: %w", change.path, inspectErr)
 			}
@@ -352,7 +352,7 @@ func capturePatchState(ctx context.Context, directory, baseCommit string) (check
 		if operation, exists := trackedOperations[path]; exists && operation != "delete" {
 			return checkpointPatchState{}, fmt.Errorf("Workspace Patch path %q is both tracked and untracked", path)
 		}
-		kind, size, digest, executable, inspectErr := inspectPatchPath(root, path, false)
+		kind, size, digest, executable, inspectErr := inspectPatchPath(ctx, root, path, false)
 		if inspectErr != nil {
 			return checkpointPatchState{}, fmt.Errorf("inspect untracked Workspace Patch path %q: %w", path, inspectErr)
 		}
@@ -543,7 +543,12 @@ func normalizeCheckpointPath(value string) (string, error) {
 	return clean, nil
 }
 
-func inspectPatchPath(root *os.Root, path string, allowSymlink bool) (string, int64, string, bool, error) {
+func inspectPatchPath(
+	ctx context.Context,
+	root *os.Root,
+	path string,
+	allowSymlink bool,
+) (string, int64, string, bool, error) {
 	info, err := root.Lstat(filepath.FromSlash(path))
 	if err != nil {
 		return "", 0, "", false, err
@@ -572,7 +577,7 @@ func inspectPatchPath(root *os.Root, path string, allowSymlink bool) (string, in
 		return "", 0, "", false, errors.New("file changed while it was inspected")
 	}
 	hash := sha256.New()
-	written, err := io.Copy(hash, file)
+	written, err := copyWithContext(ctx, hash, file)
 	if err != nil || written != info.Size() {
 		return "", 0, "", false, errors.New("file changed while it was hashed")
 	}
@@ -606,6 +611,7 @@ func streamTrackedPatch(
 }
 
 func createPatchArchive(
+	ctx context.Context,
 	directory, patchPath string,
 	manifest checkpointPatchManifest,
 ) (archivePath string, cleanup func(), resultErr error) {
@@ -622,7 +628,7 @@ func createPatchArchive(
 		}
 	}()
 	writer := tar.NewWriter(archive)
-	if err := writePatchArchiveEntry(writer, patchPath, checkpointPatchEntryName, manifest.TrackedPatch.SizeBytes, manifest.TrackedPatch.SHA256, false); err != nil {
+	if err := writePatchArchiveEntry(ctx, writer, patchPath, checkpointPatchEntryName, manifest.TrackedPatch.SizeBytes, manifest.TrackedPatch.SHA256, false); err != nil {
 		return "", nil, fmt.Errorf("archive tracked Workspace Patch: %w", err)
 	}
 	root, err := os.OpenRoot(directory)
@@ -634,12 +640,12 @@ func createPatchArchive(
 		if file.Operation == "delete" {
 			continue
 		}
-		if err := writePatchTrackedEntry(writer, root, file); err != nil {
+		if err := writePatchTrackedEntry(ctx, writer, root, file); err != nil {
 			return "", nil, fmt.Errorf("archive tracked Workspace Patch file %q: %w", file.Path, err)
 		}
 	}
 	for _, file := range manifest.Untracked {
-		if err := writePatchUntrackedEntry(writer, root, file); err != nil {
+		if err := writePatchUntrackedEntry(ctx, writer, root, file); err != nil {
 			return "", nil, fmt.Errorf("archive untracked Workspace Patch file %q: %w", file.Path, err)
 		}
 	}
@@ -656,11 +662,16 @@ func createPatchArchive(
 	return archivePath, cleanup, nil
 }
 
-func writePatchTrackedEntry(writer *tar.Writer, root *os.Root, expected checkpointPatchTrackedFile) error {
+func writePatchTrackedEntry(
+	ctx context.Context,
+	writer *tar.Writer,
+	root *os.Root,
+	expected checkpointPatchTrackedFile,
+) error {
 	archiveName := checkpointPatchTrackedPrefix + expected.Path
 	if expected.Kind == "regular" {
 		return writePatchWorkspaceRegularEntry(
-			writer, root, expected.Path, archiveName, expected.SizeBytes, expected.SHA256, expected.Executable,
+			ctx, writer, root, expected.Path, archiveName, expected.SizeBytes, expected.SHA256, expected.Executable,
 		)
 	}
 	if expected.Kind != "symlink" {
@@ -682,6 +693,7 @@ func writePatchTrackedEntry(writer *tar.Writer, root *os.Root, expected checkpoi
 }
 
 func writePatchArchiveEntry(
+	ctx context.Context,
 	writer *tar.Writer,
 	sourcePath, archiveName string,
 	size int64,
@@ -704,21 +716,27 @@ func writePatchArchiveEntry(
 		return err
 	}
 	hash := sha256.New()
-	written, err := io.Copy(io.MultiWriter(writer, hash), file)
+	written, err := copyWithContext(ctx, io.MultiWriter(writer, hash), file)
 	if err != nil || written != size || hex.EncodeToString(hash.Sum(nil)) != digest {
 		return errors.New("Workspace Patch archive source changed")
 	}
 	return nil
 }
 
-func writePatchUntrackedEntry(writer *tar.Writer, root *os.Root, expected checkpointManifestFile) error {
+func writePatchUntrackedEntry(
+	ctx context.Context,
+	writer *tar.Writer,
+	root *os.Root,
+	expected checkpointManifestFile,
+) error {
 	return writePatchWorkspaceRegularEntry(
-		writer, root, expected.Path, checkpointPatchUntrackedPrefix+expected.Path,
+		ctx, writer, root, expected.Path, checkpointPatchUntrackedPrefix+expected.Path,
 		expected.Size, expected.SHA256, expected.Executable,
 	)
 }
 
 func writePatchWorkspaceRegularEntry(
+	ctx context.Context,
 	writer *tar.Writer,
 	root *os.Root,
 	sourcePath, archiveName string,
@@ -746,7 +764,7 @@ func writePatchWorkspaceRegularEntry(
 		return err
 	}
 	hash := sha256.New()
-	written, err := io.Copy(io.MultiWriter(writer, hash), file)
+	written, err := copyWithContext(ctx, io.MultiWriter(writer, hash), file)
 	if err != nil || written != size || hex.EncodeToString(hash.Sum(nil)) != digest {
 		return errors.New("Workspace Patch source changed")
 	}

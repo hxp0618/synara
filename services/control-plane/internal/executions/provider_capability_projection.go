@@ -92,6 +92,9 @@ func (s *Service) ProjectProviderCapabilitiesForSession(
 		if err != nil {
 			return providercapabilities.Projection{}, capabilityProjectionError(err)
 		}
+		if err := s.applySessionCapabilityConstraints(ctx, tenantID, sessionID, provider, &projection); err != nil {
+			return providercapabilities.Projection{}, err
+		}
 		return projection, nil
 	}
 
@@ -116,7 +119,44 @@ func (s *Service) ProjectProviderCapabilitiesForSession(
 		}
 	}
 	projection.Items = filtered
+	if err := s.applySessionCapabilityConstraints(ctx, tenantID, sessionID, session.Provider, &projection); err != nil {
+		return providercapabilities.Projection{}, err
+	}
 	return projection, nil
+}
+
+func (s *Service) applySessionCapabilityConstraints(
+	ctx context.Context,
+	tenantID, sessionID uuid.UUID,
+	provider string,
+	projection *providercapabilities.Projection,
+) error {
+	if canonicalProviderName(provider) != "codex" {
+		return nil
+	}
+	var cursor struct {
+		State     string `gorm:"column:provider_resume_cursor_state"`
+		Encrypted []byte `gorm:"column:provider_resume_cursor_encrypted"`
+	}
+	if err := s.db.WithContext(ctx).Table("agent_sessions").
+		Select("provider_resume_cursor_state", "provider_resume_cursor_encrypted").
+		Where("tenant_id = ? AND id = ?", tenantID, sessionID).
+		Take(&cursor).Error; err != nil {
+		return problem.Wrap(500, "session_cursor_state_load_failed", "Failed to load the Session Provider Cursor state.", err)
+	}
+	if cursor.State == "usable" && len(cursor.Encrypted) > 0 {
+		return nil
+	}
+	for index := range projection.Items {
+		item := &projection.Items[index]
+		if canonicalProviderName(item.Provider) != "codex" || item.CapabilityID != "compact" {
+			continue
+		}
+		item.Status = providercapabilities.StatusUnsupported
+		item.ReasonCode = providercapabilities.ReasonProviderCursorRequired
+		item.SupportMode = nil
+	}
+	return nil
 }
 
 func capabilityProjectionError(err error) error {

@@ -11,6 +11,7 @@ import {
   type ThreadId,
   type TurnId,
 } from "@synara/contracts";
+import { formatBytes } from "@synara/shared/formatBytes";
 import {
   decodeSubagentAgentStates,
   extractSubagentIdentityHints,
@@ -74,6 +75,11 @@ export interface WorkLogEntry {
   toolTitle?: string;
   toolName?: string;
   toolCallId?: string;
+  terminalEventType?:
+    | "terminal.started"
+    | "terminal.output.reference"
+    | "terminal.exited"
+    | "terminal.failed";
   toolDetails?: WorkLogToolDetails;
   itemType?: ToolLifecycleItemType;
   requestKind?: WorkLogRequestKind;
@@ -986,12 +992,13 @@ function toDerivedWorkLogEntry(activity: OrchestrationThreadActivity): DerivedWo
     activity.payload && typeof activity.payload === "object"
       ? (activity.payload as Record<string, unknown>)
       : null;
+  const terminal = extractTerminalLifecycleData(payload);
   const commandAction = extractPrimaryCommandAction(payload);
-  const commandPreview = extractToolCommand(payload, commandAction);
+  const commandPreview = extractToolCommand(payload, commandAction, terminal);
   const changedFiles = extractChangedFiles(payload);
   const title = extractToolTitle(payload);
   const toolName = extractToolName(payload);
-  const toolCallId = extractToolCallId(payload);
+  const toolCallId = extractToolCallId(payload, terminal);
   const entry: DerivedWorkLogEntry = {
     id: activity.id,
     createdAt: activity.createdAt,
@@ -1001,6 +1008,7 @@ function toDerivedWorkLogEntry(activity: OrchestrationThreadActivity): DerivedWo
     activityKind: activity.kind,
     ...(toolName ? { toolName } : {}),
     ...(toolCallId ? { toolCallId } : {}),
+    ...(terminal ? { terminalEventType: terminal.eventType } : {}),
   };
   const itemType = extractWorkLogItemType(payload);
   const requestKind = extractWorkLogRequestKind(payload);
@@ -1038,6 +1046,11 @@ function toDerivedWorkLogEntry(activity: OrchestrationThreadActivity): DerivedWo
   if (commandActionDisplay?.preview) {
     entry.preview = commandActionDisplay.preview;
   }
+  const terminalSummary = summarizeTerminalLifecycle(terminal);
+  if (terminalSummary) {
+    entry.detail = terminalSummary;
+    entry.preview = terminalSummary;
+  }
   if (changedFiles.length > 0) {
     entry.changedFiles = changedFiles;
   }
@@ -1063,15 +1076,21 @@ function toDerivedWorkLogEntry(activity: OrchestrationThreadActivity): DerivedWo
   }
   const readableTitle =
     extractCollabActionTitle(payload) ??
-    deriveReadableToolTitle({
-      title: commandActionDisplay?.title ?? title,
-      fallbackLabel: activity.summary,
-      itemType,
-      requestKind,
-      command: commandPreview.command,
-      payload,
-      isRunning: activity.kind !== "tool.completed",
-    });
+    (terminal?.eventType === "terminal.failed"
+      ? "Command failed"
+      : terminal?.eventType === "terminal.output.reference" && !commandPreview.command
+        ? null
+        : deriveReadableToolTitle({
+            // Provider-host terminal titles are transport labels ("Terminal" /
+            // "Terminal log"), so derive the familiar command verb instead.
+            title: terminal ? null : (commandActionDisplay?.title ?? title),
+            fallbackLabel: activity.summary,
+            itemType,
+            requestKind,
+            command: commandPreview.command,
+            payload,
+            isRunning: !isCompletedToolLifecycleActivity(activity.kind),
+          }));
   if (readableTitle) {
     entry.toolTitle = readableTitle;
   }
@@ -1327,7 +1346,7 @@ function shouldCollapseToolLifecycleEntries(
   if (!isRenderableToolLifecycleActivity(next.activityKind)) {
     return false;
   }
-  if (previous.activityKind === "tool.completed") {
+  if (isCompletedToolLifecycleActivity(previous.activityKind)) {
     return false;
   }
   if (previous.collapseKey !== undefined && previous.collapseKey === next.collapseKey) {
@@ -1447,8 +1466,25 @@ function deriveToolLifecycleCollapseKey(entry: DerivedWorkLogEntry): string | un
 
 function isRenderableToolLifecycleActivity(
   kind: OrchestrationThreadActivity["kind"],
-): kind is "tool.started" | "tool.updated" | "tool.completed" {
-  return kind === "tool.started" || kind === "tool.updated" || kind === "tool.completed";
+): kind is
+  | "tool.started"
+  | "tool.updated"
+  | "tool.completed"
+  | "item.started"
+  | "item.updated"
+  | "item.completed" {
+  return (
+    kind === "tool.started" ||
+    kind === "tool.updated" ||
+    kind === "tool.completed" ||
+    kind === "item.started" ||
+    kind === "item.updated" ||
+    kind === "item.completed"
+  );
+}
+
+function isCompletedToolLifecycleActivity(kind: OrchestrationThreadActivity["kind"]): boolean {
+  return kind === "tool.completed" || kind === "item.completed";
 }
 
 function deriveToolLifecycleCollapseCommand(entry: DerivedWorkLogEntry): string | undefined {
@@ -1498,6 +1534,112 @@ function asTrimmedString(value: unknown): string | null {
   }
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : null;
+}
+
+type TerminalLifecycleEventType =
+  | "terminal.started"
+  | "terminal.output.reference"
+  | "terminal.exited"
+  | "terminal.failed";
+
+interface TerminalLifecycleData extends Record<string, unknown> {
+  eventType: TerminalLifecycleEventType;
+}
+
+function extractTerminalLifecycleData(
+  payload: Record<string, unknown> | null,
+): TerminalLifecycleData | null {
+  const terminal = asRecord(asRecord(payload?.data)?.terminal);
+  const eventType = asTrimmedString(terminal?.eventType);
+  if (
+    eventType !== "terminal.started" &&
+    eventType !== "terminal.output.reference" &&
+    eventType !== "terminal.exited" &&
+    eventType !== "terminal.failed"
+  ) {
+    return null;
+  }
+  return terminal as TerminalLifecycleData;
+}
+
+function asNonNegativeInteger(value: unknown): number | null {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+
+function terminalFailureLabel(terminal: TerminalLifecycleData): string | null {
+  switch (asTrimmedString(terminal.failureKind)) {
+    case "timeout":
+      return "Timed out";
+    case "oom":
+      return "Out of memory";
+    case "provider_error":
+      return "Provider error";
+    case "exit":
+      return asNonNegativeInteger(terminal.exitCode) === null ? "Command failed" : null;
+    case "signal":
+      return asTrimmedString(terminal.signal) ? null : "Terminated by signal";
+    default:
+      return terminal.eventType === "terminal.failed" ? "Command failed" : null;
+  }
+}
+
+function summarizeTerminalLifecycle(terminal: TerminalLifecycleData | null): string | null {
+  if (!terminal || terminal.eventType === "terminal.started") {
+    return null;
+  }
+
+  if (terminal.eventType === "terminal.output.reference") {
+    const segmentIndex = asNonNegativeInteger(terminal.segmentIndex);
+    const length = asNonNegativeInteger(terminal.length);
+    const artifactId = asTrimmedString(terminal.artifactId);
+    const parts = [segmentIndex === null ? "Log segment" : `Log segment ${segmentIndex + 1}`];
+    if (length !== null) {
+      parts.push(formatBytes(length));
+    }
+    if (artifactId) {
+      parts.push(`Artifact ${artifactId}`);
+    }
+    return parts.join(" · ");
+  }
+
+  const parts: string[] = [];
+  const failureLabel = terminalFailureLabel(terminal);
+  const signal = asTrimmedString(terminal.signal);
+  const exitCode =
+    typeof terminal.exitCode === "number" && Number.isSafeInteger(terminal.exitCode)
+      ? terminal.exitCode
+      : null;
+  const totalBytes = asNonNegativeInteger(terminal.totalBytes);
+  const previewBytes = asNonNegativeInteger(terminal.previewBytes);
+  const segmentCount = asNonNegativeInteger(terminal.segmentCount);
+
+  if (failureLabel) {
+    parts.push(failureLabel);
+  }
+  if (signal) {
+    parts.push(`Signal ${signal}`);
+  }
+  if (exitCode !== null) {
+    parts.push(`Exit code ${exitCode}`);
+  }
+  if (terminal.truncated === true) {
+    if (previewBytes !== null && totalBytes !== null) {
+      parts.push(
+        `Truncated output: ${formatBytes(previewBytes)} preview of ${formatBytes(totalBytes)}`,
+      );
+    } else if (totalBytes !== null) {
+      parts.push(`Truncated output: ${formatBytes(totalBytes)} total`);
+    } else {
+      parts.push("Truncated output");
+    }
+  } else if (totalBytes !== null) {
+    parts.push(`${formatBytes(totalBytes)} output`);
+  }
+  if (segmentCount !== null && segmentCount > 0) {
+    parts.push(`${segmentCount} Artifact ${pluralize(segmentCount, "segment")}`);
+  }
+
+  return parts.length > 0 ? parts.join(" · ") : null;
 }
 
 function normalizeCollabIdentifier(value: string | null | undefined): string | null {
@@ -1780,6 +1922,7 @@ function makeCommandActionDisplay(
 function extractToolCommand(
   payload: Record<string, unknown> | null,
   commandAction: CommandAction | null = extractPrimaryCommandAction(payload),
+  terminal: TerminalLifecycleData | null = extractTerminalLifecycleData(payload),
 ): { command: string | null; rawCommand: string | null } {
   const data = asRecord(payload?.data);
   const item = asRecord(data?.item);
@@ -1796,6 +1939,7 @@ function extractToolCommand(
       ? stripTrailingExitCode(payload.detail).output
       : null;
   const rawCommandCandidates = [
+    terminal?.commandSummary,
     item?.command,
     item?.cmd,
     itemInput?.command,
@@ -1899,7 +2043,7 @@ function deriveCommandActionDisplay(
   if (!action) {
     return null;
   }
-  const running = activityKind !== "tool.completed";
+  const running = !isCompletedToolLifecycleActivity(activityKind);
   switch (normalizeCommandActionType(action.type)) {
     case "read":
     case "readfile":
@@ -1981,10 +2125,15 @@ function extractToolName(payload: Record<string, unknown> | null): string | null
   return null;
 }
 
-function extractToolCallId(payload: Record<string, unknown> | null): string | null {
+function extractToolCallId(
+  payload: Record<string, unknown> | null,
+  terminal: TerminalLifecycleData | null = extractTerminalLifecycleData(payload),
+): string | null {
   const data = asRecord(payload?.data);
   const item = asRecord(data?.item);
-  return asTrimmedString(data?.toolCallId ?? data?.callID ?? data?.callId ?? item?.id);
+  return asTrimmedString(
+    terminal?.terminalId ?? data?.toolCallId ?? data?.callID ?? data?.callId ?? item?.id,
+  );
 }
 
 function stripTrailingExitCode(value: string): {

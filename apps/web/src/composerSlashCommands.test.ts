@@ -14,6 +14,7 @@ import {
   parseComposerSlashInvocationForCommands,
   parseFastSlashCommandAction,
   parseForkSlashCommandArgs,
+  resolveUnavailableControlPlaneAdvancedSlashCommand,
   shouldHideProviderNativeCommandFromComposerMenu,
 } from "./composerSlashCommands";
 
@@ -68,6 +69,27 @@ describe("composerSlashCommands", () => {
       command: "clear",
       args: "",
     });
+  });
+
+  it("consumes recognized unavailable SaaS advanced commands instead of treating them as prompts", () => {
+    expect(
+      resolveUnavailableControlPlaneAdvancedSlashCommand({
+        text: "/compact",
+        availableCommands: ["clear", "model"],
+      }),
+    ).toBe("compact");
+    expect(
+      resolveUnavailableControlPlaneAdvancedSlashCommand({
+        text: "/fork local",
+        availableCommands: ["fork"],
+      }),
+    ).toBeNull();
+    expect(
+      resolveUnavailableControlPlaneAdvancedSlashCommand({
+        text: "/unknown",
+        availableCommands: [],
+      }),
+    ).toBeNull();
   });
 
   it("parses /fast actions", () => {
@@ -260,6 +282,34 @@ describe("composerSlashCommands", () => {
         canOfferExportCommand: true,
       }),
     ).toEqual(["side", "export", "automation"]);
+  });
+
+  it("uses cross-provider app advanced commands for Claude in SaaS routing mode", () => {
+    expect(
+      getAvailableComposerSlashCommands({
+        provider: "claudeAgent",
+        routingMode: "control-plane",
+        supportsFastSlashCommand: false,
+        canOfferCompactCommand: true,
+        canOfferPlanCommand: true,
+        canOfferReviewCommand: true,
+        canOfferForkCommand: true,
+        canOfferSideCommand: false,
+        canOfferExportCommand: true,
+      }),
+    ).toEqual([
+      "clear",
+      "compact",
+      "model",
+      "plan",
+      "default",
+      "review",
+      "fork",
+      "status",
+      "subagents",
+      "export",
+      "automation",
+    ]);
   });
 
   it("offers the app-level /export command on every provider", () => {
