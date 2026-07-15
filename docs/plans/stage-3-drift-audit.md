@@ -3,10 +3,10 @@
 Baseline: `codex/saas-tenancy-user` after clean commit `36ae47d6`, including the Provider Cursor expiry policy,
 audited Resume selection, safe Provider-native fallback and replay-stable fallback Event identity. The immutable
 Kubernetes deterministic Provider fixture report remains tied to `2763ebd3` and was recorded on 2026-07-14.
-The latest clean-commit real Local two-Turn evidence is summarized in
-`docs/reports/stage-3-provider-runtime-acceptance-fb9e25ec.md`. Earlier dirty-worktree and deterministic fixture
-evidence remains in `docs/reports/stage-3-provider-runtime-acceptance-2026-07-15.md`; neither report closes the
-four-Target release gate.
+The latest clean-commit real Local control/capability matrix is summarized in
+`docs/reports/stage-3-real-provider-local-control-matrix-0b3f9214.md`. The earlier two-Turn smoke, dirty-worktree
+and deterministic fixture evidence remains in `docs/reports/stage-3-provider-runtime-acceptance-fb9e25ec.md` and
+`docs/reports/stage-3-provider-runtime-acceptance-2026-07-15.md`; none closes the four-Target release gate.
 
 This audit treats executable code, migrations and repeatable tests as evidence. A local Provider Adapter is not
 evidence that the Provider is supported by a remote Worker.
@@ -99,6 +99,13 @@ Acceptance Fixture used by Codex and Claude.
   Control Plane restart 后第二 Turn 使用 `native-cursor / cursor_usable` 并精确重复上一轮 marker。Codex
   Session Sequence 为 `1..42`，Claude 为 `1..41`；报告均记录 `worktreeDirty=false`、精确 cleanup 和零
   Secret finding。该结果是 narrow Local two-Turn smoke，不是完整 Local 或四 Target Release Gate。
+- Clean commit `0b3f9214` 将共享 Runner 扩展为 8 个可组合真实能力 case。Codex 为 20 pass；Claude 为
+  19 pass + 1 explicit unsupported。Approval、Plan Mode User Input、Steer、Interrupt、Restart/Continuity、
+  Review、Compact boundary、Rollback 和 Fork 均经过真实产品路径；Codex Review/Compact 为 native，Claude
+  Review 为只读 emulated、Compact 为不改变 Session Sequence 的稳定 `capability_unsupported`，Rollback/Fork
+  为 Worker-free Control Plane emulation。两份报告均记录 `worktreeDirty=false`、精确 cleanup 和零 Secret
+  finding。详见 `docs/reports/stage-3-real-provider-local-control-matrix-0b3f9214.md`；该结果关闭已实现能力的
+  Local control/capability matrix，但不关闭真实 Provider 大输出、故障、四 Target 或 soak Release Gate。
 - 首次真实 Claude 产品路径运行发现 Execution-local `CLAUDE_CONFIG_DIR` 会让已登录的 ambient OAuth
   不可见。Provider Host 已区分 controlled Credential 与 ambient authentication：前者保留 Runtime Output
   Root 隔离，后者保留用户 Claude 配置查找路径；Provider Host 全量测试与真实 clean-commit smoke 均通过。
@@ -206,13 +213,14 @@ local no-new-DDL statements do not redefine the repository-wide migration bounda
 
 1. Completed: add shared Capability and Provider Host Protocol 2.1 contracts plus contract fixtures.
 2. Completed: implement Host Describe/Handshake, persisted compatibility gating and the bounded v1 path.
-3. In progress: Codex App Server and Claude Agent SDK multi-Turn, native Interrupt/Steer, Approval, Plan Mode Input and history fallback are implemented. Runtime Event v2 is canonical end to end. Cursor Envelope v2, per-Execution Provider snapshots, Cursor quarantine/lineage, the bounded expiry policy, audited Claim selection, safe Provider-native invalid/expired fallback, one active Execution per Session and pre-Claim Interrupt cancellation are implemented. Clean commit `fb9e25ec` passes the real Codex/Claude Local two-Turn restart/native-Cursor smoke; run the complete Local suite and SSH, Docker and Kubernetes acceptance next.
+3. In progress: Codex App Server and Claude Agent SDK multi-Turn, native Interrupt/Steer, Approval, Plan Mode Input and history fallback are implemented. Runtime Event v2 is canonical end to end. Cursor Envelope v2, per-Execution Provider snapshots, Cursor quarantine/lineage, the bounded expiry policy, audited Claim selection, safe Provider-native invalid/expired fallback, one active Execution per Session and pre-Claim Interrupt cancellation are implemented. Clean commit `0b3f9214` passes the implemented real Codex/Claude Local control/capability matrix: Codex 20 pass, Claude 19 pass plus one explicit unsupported Compact boundary. Continue with real Provider generated-file, large Diff/Terminal, Artifact/Checkpoint and failure matrices, then SSH, Docker and Kubernetes acceptance.
 4. In progress: Workspace/Git/Checkpoint DDL, public/private HTTPS Clone/Fetch, Git Credential, state reporting, cross-process locked cache plus private relative worktree generations, Git-reference/Patch/Snapshot capture/restore, interrupted staging/backup reconciliation, physical cleanup and Checkpoint/Artifact retention are implemented; add SSH Credential delivery and real multi-Worker/Target acceptance.
 5. In progress: Worker Manifest and graceful Drain are implemented; add reproducible image evidence, canary/rollback and upgrade isolation.
 6. In progress: the deterministic shared Runner covers Local, Docker, SSH and Kubernetes and emits JSON/Markdown
    evidence. The SSH Driver's deterministic Codex fixture passed the 13-case live suite on 2026-07-14; clean commit
    `2763ebd3` passed the 13-case Kubernetes core suite. Current dirty-worktree failure-only runs also pass Local
    Provider faults, Docker network interruption and Kubernetes Network/Drain/Eviction/Image Canary. Re-run the
-   real Codex/Claude Local two-Turn smoke now passes on clean commit `fb9e25ec`. Complete the remaining Local suite
-   and run both adapters across SSH, Docker and Kubernetes plus long-session, registry-pushed rollout and
-   real-Provider failure matrices before promoting any Local-only Provider or claiming the four-Target release gate.
+   implemented real Codex/Claude Local control/capability matrix now passes on clean commit `0b3f9214`. Complete the
+   generated-file, large Diff/Terminal, Artifact/Checkpoint and failure matrices, then run both adapters across SSH,
+   Docker and Kubernetes plus long-session and registry-pushed rollout before promoting any Local-only Provider or
+   claiming the four-Target release gate.

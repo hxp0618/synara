@@ -1298,6 +1298,14 @@ Provider × Capability × Execution Target
   Plane restart 后第二 Turn 均命中 `native-cursor / cursor_usable` 并精确复现上一轮 marker。Codex Session
   Sequence 为 `1..42`，Claude 为 `1..41`；两份报告均为 `worktreeDirty=false`、精确 cleanup 和零 Secret
   finding。该证据关闭真实 Provider 的最小 Local 两轮产品路径 smoke，但仍不是完整 Local Release Suite。
+- Clean commit `0b3f9214` 将 `real-provider-smoke` 扩展为 8 个可组合真实能力 case。Codex clean
+  worktree 报告为 20 pass；Claude 为 19 pass + 1 explicit unsupported。Approval、Plan Mode User Input、
+  Steer、Interrupt、Restart/Continuity、Review、Compact boundary、Rollback 和 Fork 均经过真实产品路径；
+  Codex Review/Compact 为 native，Claude Review 为只读 emulated、Compact 为无 Session mutation 的稳定
+  `capability_unsupported`，Rollback/Fork 为 Worker-free Control Plane emulation，Fork 后真实 Turn 使用
+  `authoritative-history / cursor_absent` 精确复现 source marker。详见
+  `docs/reports/stage-3-real-provider-local-control-matrix-0b3f9214.md`。该证据关闭已实现能力的 Local matrix，
+  仍不替代真实 Provider 四 Target、故障、大输出和 soak Release Gate。
 - 首次 Claude 产品路径运行暴露 ambient OAuth 被 Execution-local `CLAUDE_CONFIG_DIR` 隔离掉的问题；
   Provider Host 现仅在受控 Credential 路径使用 Runtime Output Root 作为 Claude Config，ambient OAuth
   保留用户配置查找路径，并由单测和真实 clean-commit smoke 保护。
