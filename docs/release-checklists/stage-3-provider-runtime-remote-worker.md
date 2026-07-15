@@ -4,7 +4,7 @@
 未满足项必须保持未勾选，不能用 deterministic fixture、单一 Target 或静态代码检查替代真实发布证据。
 
 当前实现期证据汇总见
-`docs/reports/stage-3-provider-runtime-acceptance-2026-07-15.md`。该报告明确保持
+`docs/reports/stage-3-provider-runtime-acceptance-fb9e25ec.md`。该报告明确保持
 `PARTIAL / RELEASE GATE OPEN`，不能直接作为目标环境发布批准。
 
 ## 1. 发布身份与证据边界
@@ -127,14 +127,14 @@ bun run --cwd apps/web test \
 
 当前仓库已有的实现期证据不能替代下列发布勾选项：
 
-| 证据                                                                 | 当前结论                         | 发布边界                                                             |
-| -------------------------------------------------------------------- | -------------------------------- | -------------------------------------------------------------------- |
-| 真实 Codex/Claude Provider Host `Describe + StartSession + SendTurn` | Local direct Host smoke 已通过   | 未经过四 Target product lifecycle                                    |
-| deterministic Local/Docker core suite                                | 已通过                           | 证明共享 Control Plane/agentd/Host orchestration，不证明真实 Adapter |
-| deterministic Provider fault matrix                                  | malformed/oversized/crash 已通过 | 不是真实 Provider failure 分类                                       |
-| deterministic Docker/Kubernetes network/failure-only matrix          | 已通过实现期运行                 | 不等于生产网络、真实 CNI 或正式 rollout                              |
-| SSH fixture                                                          | 2026-07-14 disposable VM 13/13   | 不是当前 Commit 的真实 Provider gate                                 |
-| Kubernetes fixture                                                   | clean commit `2763ebd3` 13/13    | 不是当前 Commit 的真实 Provider gate                                 |
+| 证据                                                | 当前结论                         | 发布边界                                                             |
+| --------------------------------------------------- | -------------------------------- | -------------------------------------------------------------------- |
+| 真实 Codex/Claude Local two-Turn product-path smoke | clean commit `fb9e25ec` 各 12/12 | 经过 Control Plane/LocalSupervisor/agentd，但不是完整 Local Gate     |
+| deterministic Local/Docker core suite               | 已通过                           | 证明共享 Control Plane/agentd/Host orchestration，不证明真实 Adapter |
+| deterministic Provider fault matrix                 | malformed/oversized/crash 已通过 | 不是真实 Provider failure 分类                                       |
+| deterministic Docker/Kubernetes failure matrix      | 已通过实现期运行                 | 不等于生产网络、真实 CNI 或正式 rollout                              |
+| SSH fixture                                         | 2026-07-14 disposable VM 13/13   | 不是当前 Commit 的真实 Provider gate                                 |
+| Kubernetes fixture                                  | clean commit `2763ebd3` 13/13    | 不是当前 Commit 的真实 Provider gate                                 |
 
 真实 Provider × Target gate：
 

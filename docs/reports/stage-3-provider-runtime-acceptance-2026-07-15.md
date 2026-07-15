@@ -1,5 +1,9 @@
 # Stage 3 Provider Runtime / Remote Worker 当前验收报告
 
+> 本文保留 2026-07-15 至 2026-07-16 的 dirty-worktree 与历史 fixture 证据。真实 Codex/Claude 的
+> clean-commit Local 产品路径后续证据见
+> `docs/reports/stage-3-provider-runtime-acceptance-fb9e25ec.md`。
+
 - Evidence window: `2026-07-15`–`2026-07-16` Asia/Shanghai
 - Branch: `codex/saas-tenancy-user`
 - Starting clean checkpoint: `93da9b29`

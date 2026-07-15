@@ -3,9 +3,10 @@
 Baseline: `codex/saas-tenancy-user` after clean commit `36ae47d6`, including the Provider Cursor expiry policy,
 audited Resume selection, safe Provider-native fallback and replay-stable fallback Event identity. The immutable
 Kubernetes deterministic Provider fixture report remains tied to `2763ebd3` and was recorded on 2026-07-14.
-Current dirty-worktree closeout evidence is summarized in
-`docs/reports/stage-3-provider-runtime-acceptance-2026-07-15.md`; it is implementation evidence, not an immutable
-release report.
+The latest clean-commit real Local two-Turn evidence is summarized in
+`docs/reports/stage-3-provider-runtime-acceptance-fb9e25ec.md`. Earlier dirty-worktree and deterministic fixture
+evidence remains in `docs/reports/stage-3-provider-runtime-acceptance-2026-07-15.md`; neither report closes the
+four-Target release gate.
 
 This audit treats executable code, migrations and repeatable tests as evidence. A local Provider Adapter is not
 evidence that the Provider is supported by a remote Worker.
@@ -92,22 +93,26 @@ Acceptance Fixture used by Codex and Claude.
 
 ### 2026-07-16 Release documentation and real Local adapter smoke update
 
-- 当前源码重新构建 `apps/provider-host/dist/index.mjs` 后，使用 Node.js 24 和 Provider Host Protocol
-  `2.1` 分别运行真实 Codex App Server 与 Claude Agent SDK。两者的 `Describe`、`StartSession`、
-  `SendTurn`、`StopSession` 均返回 `Result`，精确输出预期 marker，并返回 native Resume Cursor；Codex
-  CLI 为 `0.144.4`，Claude Agent SDK 为 `0.3.207`，进程 exit `0` 且 stderr 为空。该证据是 direct Local
-  Provider Host smoke，没有经过 Local Supervisor、Control Plane、agentd 或四 Target lifecycle。
+- Clean commit `fb9e25ec` 上，真实 Codex App Server 与 Claude Agent SDK 使用共享
+  `real-provider-smoke` 分别通过 Local 12/12。两条路径都经过用户 API、Control Plane、LocalSupervisor、
+  agentd、Worker Protocol 和真实 Provider Host；第一 Turn 使用 `authoritative-history / cursor_absent`，
+  Control Plane restart 后第二 Turn 使用 `native-cursor / cursor_usable` 并精确重复上一轮 marker。Codex
+  Session Sequence 为 `1..42`，Claude 为 `1..41`；报告均记录 `worktreeDirty=false`、精确 cleanup 和零
+  Secret finding。该结果是 narrow Local two-Turn smoke，不是完整 Local 或四 Target Release Gate。
+- 首次真实 Claude 产品路径运行发现 Execution-local `CLAUDE_CONFIG_DIR` 会让已登录的 ambient OAuth
+  不可见。Provider Host 已区分 controlled Credential 与 ambient authentication：前者保留 Runtime Output
+  Root 隔离，后者保留用户 Claude 配置查找路径；Provider Host 全量测试与真实 clean-commit smoke 均通过。
 - 当前 dirty worktree 的 deterministic failure-only reports 通过 Local malformed/oversized/crash、Docker
   Worker network interruption，以及 owned Kind 上的 Worker network、Node drain、Pod eviction 和 image
   canary；所有运行的 cleanup 与 output Secret scan 均通过。Kind image canary 使用同内容 alias，不是
   `000037` immutable Release Revision rollout，也不替代真实 Provider gate。
-- 2026-07-14 的 SSH 13/13 和 clean commit `2763ebd3` Kubernetes 13/13 仍只作为历史 fixture 证据；
-  当前 Commit 必须重跑，且真实 Codex/Claude 仍需完成 Local/SSH/Docker/Kubernetes Release Acceptance。
+- 2026-07-14 的 SSH 13/13 和 clean commit `2763ebd3` Kubernetes 13/13 仍只作为历史 fixture 证据；真实
+  Codex/Claude 仍需完成完整 Local Release Suite 与 SSH/Docker/Kubernetes Release Acceptance。
 - 新增 Stage 3 发布检查单、Worker Release rollout Runbook 和当前验收报告：
   `docs/release-checklists/stage-3-provider-runtime-remote-worker.md`、
   `docs/runbooks/worker-release-rollout.md`、
-  `docs/reports/stage-3-provider-runtime-acceptance-2026-07-15.md`。文档将真实 Provider、deterministic
-  fixture、旧 Commit 和当前 dirty-worktree 证据分层，并保持 Release Gate open。
+  `docs/reports/stage-3-provider-runtime-acceptance-fb9e25ec.md`。早期 dirty-worktree/fixture 汇总仍保留在
+  `docs/reports/stage-3-provider-runtime-acceptance-2026-07-15.md`；所有文档继续保持 Release Gate open。
 
 ## Frozen version boundary
 
@@ -201,13 +206,13 @@ local no-new-DDL statements do not redefine the repository-wide migration bounda
 
 1. Completed: add shared Capability and Provider Host Protocol 2.1 contracts plus contract fixtures.
 2. Completed: implement Host Describe/Handshake, persisted compatibility gating and the bounded v1 path.
-3. In progress: Codex App Server and Claude Agent SDK multi-Turn, native Interrupt/Steer, Approval, Plan Mode Input and history fallback are implemented. Runtime Event v2 is canonical end to end. Cursor Envelope v2, per-Execution Provider snapshots, Cursor quarantine/lineage, the bounded expiry policy, audited Claim selection, safe Provider-native invalid/expired fallback, one active Execution per Session and pre-Claim Interrupt cancellation are implemented. Run real Codex/Claude migration and restart acceptance across Local, SSH, Docker and Kubernetes next.
+3. In progress: Codex App Server and Claude Agent SDK multi-Turn, native Interrupt/Steer, Approval, Plan Mode Input and history fallback are implemented. Runtime Event v2 is canonical end to end. Cursor Envelope v2, per-Execution Provider snapshots, Cursor quarantine/lineage, the bounded expiry policy, audited Claim selection, safe Provider-native invalid/expired fallback, one active Execution per Session and pre-Claim Interrupt cancellation are implemented. Clean commit `fb9e25ec` passes the real Codex/Claude Local two-Turn restart/native-Cursor smoke; run the complete Local suite and SSH, Docker and Kubernetes acceptance next.
 4. In progress: Workspace/Git/Checkpoint DDL, public/private HTTPS Clone/Fetch, Git Credential, state reporting, cross-process locked cache plus private relative worktree generations, Git-reference/Patch/Snapshot capture/restore, interrupted staging/backup reconciliation, physical cleanup and Checkpoint/Artifact retention are implemented; add SSH Credential delivery and real multi-Worker/Target acceptance.
 5. In progress: Worker Manifest and graceful Drain are implemented; add reproducible image evidence, canary/rollback and upgrade isolation.
 6. In progress: the deterministic shared Runner covers Local, Docker, SSH and Kubernetes and emits JSON/Markdown
    evidence. The SSH Driver's deterministic Codex fixture passed the 13-case live suite on 2026-07-14; clean commit
    `2763ebd3` passed the 13-case Kubernetes core suite. Current dirty-worktree failure-only runs also pass Local
    Provider faults, Docker network interruption and Kubernetes Network/Drain/Eviction/Image Canary. Re-run the
-   final Commit and run real Codex/Claude adapters across all required Targets plus long-session, registry-pushed
-   rollout and real-Provider failure matrices before promoting any Local-only Provider or claiming the four-Target
-   release gate.
+   real Codex/Claude Local two-Turn smoke now passes on clean commit `fb9e25ec`. Complete the remaining Local suite
+   and run both adapters across SSH, Docker and Kubernetes plus long-session, registry-pushed rollout and
+   real-Provider failure matrices before promoting any Local-only Provider or claiming the four-Target release gate.

@@ -19,14 +19,14 @@
 - **预计工作量**：XL
 - **风险**：HIGH
 - **计划基线分支**：`codex/saas-tenancy-user`
-- **最近稳定检查点**：`2763ebd3`（Kubernetes deterministic Provider fixture 13/13，通过 Pending
-  Approval Pod-loss Generation 恢复；正式证据见
-  `docs/reports/stage-3-kubernetes-provider-fixture-acceptance-2763ebd3.md`）
+- **最近稳定检查点**：`fb9e25ec`（真实 Codex/Claude Local 产品路径两轮 restart/native-Cursor smoke
+  12/12；正式证据见 `docs/reports/stage-3-provider-runtime-acceptance-fb9e25ec.md`。Kubernetes
+  deterministic fixture 13/13 的历史 clean checkpoint 仍为 `2763ebd3`）
 - **工作区状态**：Stage 3 持续执行中，执行时以当前分支和已验证证据为准
 - **发布文档**：
   `docs/release-checklists/stage-3-provider-runtime-remote-worker.md`、
   `docs/runbooks/worker-release-rollout.md`、
-  `docs/reports/stage-3-provider-runtime-acceptance-2026-07-15.md`
+  `docs/reports/stage-3-provider-runtime-acceptance-fb9e25ec.md`
 - **依赖**：Stage 2 的 Control Plane Session/Execution 权威、Worker Lease/Fencing、Artifact、SSE
 - **目标结果**：所有正式支持的 Provider 可以通过统一 Provider Host 和 Worker Contract，稳定运行在
   Local、SSH、Docker、Kubernetes Execution Target，并能跨 Worker/Pod 恢复后续 Turn
@@ -1292,11 +1292,15 @@ Provider × Capability × Execution Target
   和物理路径泄漏扫描。Docker 同时通过 Managed Worker Replacement、Workspace 连续性、Control Plane
   Restart 与后续 Turn；Runner 精确清理其 Container、Volume、Network 和自动构建 Image。该结果来自
   未提交工作区，只作为实现期证据，最终 Commit 后仍需重新生成发布报告。
-- 当前源码构建的真实 Provider Host 使用 Node.js 24 分别完成 Codex App Server 与 Claude Agent SDK
-  的 direct Local `Describe -> StartSession -> SendTurn -> StopSession`。Codex CLI `0.144.4` 与 Claude
-  Agent SDK `0.3.207` 均返回 expected marker 和 Resume Cursor，exit `0`、stderr 为空。该运行没有经过
-  Local Supervisor、Control Plane、agentd 或 Target lifecycle，因此只是 Adapter smoke，不是 Local
-  Release Gate。
+- Clean commit `fb9e25ec` 上，真实 Codex App Server 与 Claude Agent SDK 均通过共享 Runner 的 Local
+  `real-provider-smoke` 12/12：路径经过用户 API、Control Plane、LocalSupervisor、agentd、Worker
+  Protocol 与真实 Provider Host。第一 Turn 从 `cursor_absent` 的 authoritative history 启动；Control
+  Plane restart 后第二 Turn 均命中 `native-cursor / cursor_usable` 并精确复现上一轮 marker。Codex Session
+  Sequence 为 `1..42`，Claude 为 `1..41`；两份报告均为 `worktreeDirty=false`、精确 cleanup 和零 Secret
+  finding。该证据关闭真实 Provider 的最小 Local 两轮产品路径 smoke，但仍不是完整 Local Release Suite。
+- 首次 Claude 产品路径运行暴露 ambient OAuth 被 Execution-local `CLAUDE_CONFIG_DIR` 隔离掉的问题；
+  Provider Host 现仅在受控 Credential 路径使用 Runtime Output Root 作为 Claude Config，ambient OAuth
+  保留用户配置查找路径，并由单测和真实 clean-commit smoke 保护。
 - 当前 dirty worktree 的 failure-only reports 通过 Local Provider malformed/oversized/crash、Docker
   Worker network interruption，以及 Kubernetes Worker network、Node drain、Pod eviction 和 image
   canary；所有 cleanup 和 output Secret scan 均通过。Kubernetes image canary 使用同内容 alias，不是
@@ -1319,6 +1323,7 @@ Provider × Capability × Execution Target
   日志执行的 Secret Scan 未发现 Private Key 模式。该结果不等于真实 Codex/Claude Adapter Release
   Acceptance；真实 Codex/Claude 各 Target、registry-pushed multi-arch rollout、长 Session、生产多节点
   Kubernetes 和真实 Provider 故障矩阵仍待执行，不得声称四 Target 统一发布门禁已完成。当前证据汇总见
+  `docs/reports/stage-3-provider-runtime-acceptance-fb9e25ec.md`；早期 dirty-worktree/fixture 汇总保留在
   `docs/reports/stage-3-provider-runtime-acceptance-2026-07-15.md`。
 
 ## 18. 实施顺序
@@ -1379,8 +1384,8 @@ Provider × Capability × Execution Target
 - 生成兼容矩阵和 Acceptance Report。
 - 当前进度：deterministic Local/Docker core、Local Provider fault、Docker network、Kubernetes
   Network/Drain/Eviction/Image Canary 已通过实现期运行；SSH 13/13 与 Kubernetes 13/13 core 仍是
-  2026-07-14 历史 fixture 证据。真实 Codex/Claude 只有 direct Local Host smoke，四 Target 与 soak
-  尚未完成。
+  2026-07-14 历史 fixture 证据。真实 Codex/Claude 已在 clean commit `fb9e25ec` 通过 Local 产品路径
+  两轮 restart/native-Cursor smoke；完整 Local、SSH、Docker、Kubernetes Gate 与 soak 尚未完成。
 
 ### Step 8：文档、Runbook 与发布门禁
 
