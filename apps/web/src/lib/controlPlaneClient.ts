@@ -602,16 +602,17 @@ async function controlPlaneRequest<T>(
   path: string,
   init: Omit<RequestInit, "body"> & { body?: unknown } = {},
 ): Promise<T> {
-  const headers = new Headers(init.headers);
+  const { body: inputBody, ...requestInit } = init;
+  const headers = new Headers(requestInit.headers);
   let body: BodyInit | undefined;
-  if (init.body !== undefined) {
+  if (inputBody !== undefined) {
     headers.set("Content-Type", "application/json");
-    body = JSON.stringify(init.body);
+    body = JSON.stringify(inputBody);
   }
   const response = await fetch(resolveControlPlaneHttpUrl(path), {
-    ...init,
+    ...requestInit,
     headers,
-    body,
+    ...(body === undefined ? {} : { body }),
     credentials: "include",
   });
   if (!response.ok) {

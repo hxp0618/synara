@@ -6,7 +6,7 @@
 
 import type { ToolLifecycleItemType } from "@synara/contracts";
 
-type WorkLogRequestKind = "command" | "file-read" | "file-change";
+export type WorkLogRequestKind = "command" | "file-read" | "file-change" | "network" | "tool";
 
 export interface WorkLogToolOutputDetails {
   output?: string;

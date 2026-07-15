@@ -48,7 +48,7 @@ export function TenantAuditSettingsSection(props: { tenantId: string }) {
     queryFn: () =>
       controlPlaneClient.listAuditLogs(props.tenantId, filters, {
         limit: AUDIT_PAGE_SIZE,
-        cursor,
+        ...(cursor === undefined ? {} : { cursor }),
       }),
     retry: false,
   });
@@ -57,7 +57,11 @@ export function TenantAuditSettingsSection(props: { tenantId: string }) {
     event.preventDefault();
     setCursor(undefined);
     setCursorHistory([]);
-    setFilters({ action, actorType, resourceType });
+    setFilters({
+      ...(action.trim() === "" ? {} : { action: action.trim() }),
+      ...(actorType ? { actorType } : {}),
+      ...(resourceType.trim() === "" ? {} : { resourceType: resourceType.trim() }),
+    });
   };
   const reset = () => {
     setAction("");

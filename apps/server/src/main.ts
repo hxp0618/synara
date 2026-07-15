@@ -216,7 +216,7 @@ const ServerConfigLive = (input: CliInput) =>
         devUrl,
         noBrowser,
         authToken,
-        controlPlaneUrl,
+        ...(controlPlaneUrl === undefined ? {} : { controlPlaneUrl }),
         autoBootstrapProjectFromCwd,
         logProviderEvents,
         logWebSocketEvents,

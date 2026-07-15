@@ -15,7 +15,7 @@ import { ComposerChoiceRow } from "./ComposerChoiceRow";
 import { COMPOSER_INPUT_SURFACE_CLASS_NAME } from "./composerPickerStyles";
 
 interface PendingUserInputPanelProps {
-  pendingUserInputs: PendingUserInput[];
+  pendingUserInputs: ReadonlyArray<PendingUserInput>;
   respondingRequestIds: string[];
   answers: Record<string, PendingUserInputDraftAnswer>;
   questionIndex: number;

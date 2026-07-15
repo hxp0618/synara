@@ -499,14 +499,16 @@ export function applyControlPlaneSessionEvent(
       };
       orchestrationStatus = "stopped";
       break;
-    case "session.model.changed":
+    case "session.model.changed": {
+      const nextProvider = payloadString(event, "provider");
       session = {
         ...session,
-        provider: payloadString(event, "provider") ?? session.provider,
+        provider: nextProvider ? providerKind(nextProvider) : session.provider,
         model: payloadString(event, "model") ?? session.model,
         updatedAt: event.occurredAt,
       };
       break;
+    }
   }
 
   return {

@@ -5,6 +5,7 @@
 // Depends on: @synara/contracts tool lifecycle item types
 
 import type { ToolLifecycleItemType } from "@synara/contracts";
+import type { WorkLogRequestKind } from "./toolCallDetails";
 
 export function normalizeCompactToolLabel(value: string): string {
   return value
@@ -91,7 +92,7 @@ export interface ReadableToolTitleInput {
   readonly title?: string | null;
   readonly fallbackLabel: string;
   readonly itemType?: ToolLifecycleItemType | undefined;
-  readonly requestKind?: "command" | "file-read" | "file-change" | undefined;
+  readonly requestKind?: WorkLogRequestKind | undefined;
   readonly command?: string | null;
   readonly payload?: Record<string, unknown> | null;
   readonly isRunning?: boolean;

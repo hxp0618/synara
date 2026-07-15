@@ -974,6 +974,36 @@ describe("deriveWorkLogEntries", () => {
     expect(entries.map((entry) => entry.id)).toEqual(["tool-start"]);
   });
 
+  it("preserves explicit network and tool approval kinds in work log entries", () => {
+    const activities: OrchestrationThreadActivity[] = [
+      makeActivity({
+        id: "network-approval",
+        createdAt: "2026-02-23T00:00:01.000Z",
+        summary: "Network approval requested",
+        kind: "tool.started",
+        payload: {
+          itemType: "dynamic_tool_call",
+          requestKind: "network",
+          requestType: "dynamic_tool_call",
+        },
+      }),
+      makeActivity({
+        id: "tool-approval",
+        createdAt: "2026-02-23T00:00:02.000Z",
+        summary: "Tool approval requested",
+        kind: "tool.started",
+        payload: {
+          itemType: "dynamic_tool_call",
+          requestKind: "tool",
+          requestType: "dynamic_tool_call",
+        },
+      }),
+    ];
+
+    const entries = deriveWorkLogEntries(activities, undefined);
+    expect(entries.map((entry) => entry.requestKind)).toEqual(["network", "tool"]);
+  });
+
   it("omits task start and completion lifecycle entries", () => {
     const activities: OrchestrationThreadActivity[] = [
       makeActivity({

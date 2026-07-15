@@ -22,12 +22,12 @@ export function useHandleNewChat() {
             error: "Create a SaaS Project from the sidebar before starting a chat.",
           };
         }
-        await handleNewThread(project.id, {
+        const threadId = await handleNewThread(project.id, {
           ...(options?.fresh ? { fresh: true } : {}),
           envMode: "local",
           worktreePath: null,
         });
-        return { ok: true };
+        return { ok: true, threadId };
       }
       if (!homeDir) {
         return {

@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { ControlPlaneTurnDispatcher } from "./controlPlaneTurnDispatch";
+import {
+  ControlPlaneTurnDispatcher,
+  type ControlPlaneTurnDispatchInput,
+} from "./controlPlaneTurnDispatch";
 
 describe("ControlPlaneTurnDispatcher", () => {
   it("reuses Session and Turn idempotency keys after an uncertain Turn failure", async () => {
@@ -23,7 +26,7 @@ describe("ControlPlaneTurnDispatcher", () => {
       interactionMode: "plan" as const,
       createSession,
       createTurn,
-    };
+    } satisfies ControlPlaneTurnDispatchInput;
 
     await expect(dispatcher.dispatch(input)).rejects.toThrow("connection reset");
     await expect(dispatcher.dispatch(input)).resolves.toEqual({

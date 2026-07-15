@@ -117,14 +117,15 @@ export function TenantCredentialSettingsSection(props: {
         purpose === "git"
           ? { host: gitHost, username: gitUsername, token: gitToken }
           : parsePayload(createPayload);
+      const parsedExpiresAt = parseExpiry(expiresAt);
       const item = await controlPlaneClient.createCredential(props.tenantId, {
-        organizationId: organizationId || undefined,
+        ...(organizationId ? { organizationId } : {}),
         name,
         purpose,
         provider: purpose === "git" ? "git" : provider,
         credentialType: purpose === "git" ? "https_token" : credentialType,
         payload,
-        expiresAt: parseExpiry(expiresAt) ?? undefined,
+        ...(parsedExpiresAt === null ? {} : { expiresAt: parsedExpiresAt }),
       });
       queryClient.setQueryData<{ items: ReadonlyArray<ControlPlaneCredential> }>(
         credentialsQueryKey(props.tenantId),

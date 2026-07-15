@@ -5,9 +5,7 @@ import { ControlPlaneSessionStreamBanner } from "./ControlPlaneSessionStreamBann
 
 describe("ControlPlaneSessionStreamBanner", () => {
   it("shows an explicit reconnecting state without implying the Session completed", () => {
-    const markup = renderToStaticMarkup(
-      <ControlPlaneSessionStreamBanner status="reconnecting" />,
-    );
+    const markup = renderToStaticMarkup(<ControlPlaneSessionStreamBanner status="reconnecting" />);
 
     expect(markup).toContain("Reconnecting to Session Events");
     expect(markup).toContain("resume from the last persisted event sequence");

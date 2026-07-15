@@ -6,14 +6,15 @@ import { listUsableControlPlaneCredentials } from "./controlPlaneCredentials";
 function credential(
   input: Partial<ControlPlaneCredential> & Pick<ControlPlaneCredential, "id" | "purpose">,
 ): ControlPlaneCredential {
+  const { id, purpose, ...overrides } = input;
   return {
-    id: input.id,
+    id,
     tenantId: "tenant-1",
     organizationId: null,
-    name: input.id,
-    purpose: input.purpose,
-    provider: input.purpose === "git" ? "git" : "codex",
-    credentialType: input.purpose === "git" ? "https_token" : "api_key",
+    name: id,
+    purpose,
+    provider: purpose === "git" ? "git" : "codex",
+    credentialType: purpose === "git" ? "https_token" : "api_key",
     kmsProvider: "local",
     kmsKeyId: "test",
     version: 1,
@@ -23,7 +24,7 @@ function credential(
     revokedAt: null,
     createdAt: "2026-07-13T00:00:00Z",
     updatedAt: "2026-07-13T00:00:00Z",
-    ...input,
+    ...overrides,
   };
 }
 

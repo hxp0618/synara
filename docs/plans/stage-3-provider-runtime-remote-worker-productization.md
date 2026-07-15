@@ -736,8 +736,8 @@ Snapshot 必须有大小上限、Token 预算和确定性排序。
 - Forward Migration `000030_execution_provider_cursor_snapshots.sql` 将 Credential Version、Resume Strategy
   和 Cursor Binding Digest 冻结到 Execution Generation；Cursor Envelope v2 使用该 Digest 作为
   AES-GCM 认证头的一部分。
-- Forward Migration `000031_session_execution_cursor_lineage.sql` 增加 `absent / usable /
-  quarantined` 状态、来源 Execution/Generation/History Sequence 约束和存量 Cursor 安全
+- Forward Migration `000031_session_execution_cursor_lineage.sql` 增加 `absent`、`usable`、`quarantined`
+  状态、来源 Execution/Generation/History Sequence 约束和存量 Cursor 安全
   隔离；错误密钥、缺失 Cipher、未知/旧 Envelope 或非原生 Resume Runtime 不会阻断
   Execution Lifecycle，也不会让旧 Cursor 复活。明确的 Binding/Credential 不匹配会丢弃不
   兼容密文。

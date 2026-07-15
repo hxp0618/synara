@@ -577,6 +577,26 @@ describe("buildInputNeededCopy", () => {
     });
   });
 
+  it.each([
+    ["network", "Network access approval requested."],
+    ["tool", "Tool approval requested."],
+  ] as const)("describes %s approvals", (requestKind, summary) => {
+    expect(
+      buildInputNeededCopy({
+        kind: "approval",
+        threadId: ThreadId.makeUnsafe("thread-1"),
+        projectId: ProjectId.makeUnsafe("project-1"),
+        title: "Polish notifications",
+        createdAt: "2026-04-05T10:00:04.000Z",
+        requestId: ApprovalRequestId.makeUnsafe("approval-request-1"),
+        requestKind,
+      }),
+    ).toEqual({
+      title: "Input needed",
+      body: `Polish notifications: ${summary}`,
+    });
+  });
+
   it("describes user-input requests succinctly", () => {
     expect(
       buildInputNeededCopy({

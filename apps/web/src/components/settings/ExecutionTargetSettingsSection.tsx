@@ -81,7 +81,7 @@ export function ExecutionTargetSettingsSection(props: {
   const createTarget = useMutation({
     mutationFn: () =>
       controlPlaneClient.createExecutionTarget(props.tenantId, {
-        organizationId: resolvedOrganizationId || undefined,
+        ...(resolvedOrganizationId ? { organizationId: resolvedOrganizationId } : {}),
         kind,
         name,
         configuration: parseJSONObject(configuration, "Configuration"),
@@ -351,7 +351,7 @@ export function ExecutionTargetPolicyDisclosure(props: {
             </ObservedManifestNotice>
           ) : props.manifestError ? (
             <ObservedManifestNotice title="Observed manifest could not be loaded">
-              {manifestErrorMessage(props.manifestError)} The execution target status is unchanged.
+              {`${manifestErrorMessage(props.manifestError)} The execution target status is unchanged.`}
             </ObservedManifestNotice>
           ) : props.target.tenantId === null ? (
             <ObservedManifestNotice title="Shared target observation is not available">

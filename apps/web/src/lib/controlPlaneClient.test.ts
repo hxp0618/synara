@@ -8,6 +8,8 @@ import {
   resolveSessionEventStreamUrl,
 } from "./controlPlaneClient";
 
+type RequiredInitFetch = (input: RequestInfo | URL, init: RequestInit) => Promise<Response>;
+
 class FakeEventSource {
   static instances: FakeEventSource[] = [];
 
@@ -177,7 +179,7 @@ describe("controlPlaneClient", () => {
   });
 
   it("probes the public platform profile before requiring authentication", async () => {
-    const fetchMock = vi.fn(
+    const fetchMock = vi.fn<RequiredInitFetch>(
       async () =>
         new Response(
           JSON.stringify({
@@ -267,7 +269,7 @@ describe("controlPlaneClient", () => {
   });
 
   it("creates agent sessions through the active-tenant project route", async () => {
-    const fetchMock = vi.fn(
+    const fetchMock = vi.fn<RequiredInitFetch>(
       async () =>
         new Response(
           JSON.stringify({
@@ -318,12 +320,12 @@ describe("controlPlaneClient", () => {
         }),
       }),
     );
-    const request = fetchMock.mock.calls[0]?.[1] as RequestInit;
+    const request = fetchMock.mock.calls[0]![1];
     expect(new Headers(request.headers).get("Idempotency-Key")).toBe("web-session-request-1");
   });
 
   it("loads project Provider capabilities with the resolved or explicit execution target", async () => {
-    const fetchMock = vi.fn(
+    const fetchMock = vi.fn<RequiredInitFetch>(
       async () =>
         new Response(
           JSON.stringify({
@@ -386,7 +388,7 @@ describe("controlPlaneClient", () => {
   });
 
   it("switches a Session model through the dedicated model-switch route", async () => {
-    const fetchMock = vi.fn(
+    const fetchMock = vi.fn<RequiredInitFetch>(
       async () =>
         new Response(
           JSON.stringify({
@@ -425,12 +427,12 @@ describe("controlPlaneClient", () => {
         body: JSON.stringify({ model: "gpt-5.6-sol", expectedModel: "gpt-5" }),
       }),
     );
-    const request = fetchMock.mock.calls[0]?.[1] as RequestInit;
+    const request = fetchMock.mock.calls[0]![1];
     expect(new Headers(request.headers).get("Idempotency-Key")).toBe("web-session-model-switch-1");
   });
 
   it("sends expectedModel null explicitly when the Session has no current model", async () => {
-    const fetchMock = vi.fn(
+    const fetchMock = vi.fn<RequiredInitFetch>(
       async () =>
         new Response(
           JSON.stringify({
@@ -460,7 +462,7 @@ describe("controlPlaneClient", () => {
       expectedModel: null,
     });
 
-    const request = fetchMock.mock.calls[0]?.[1] as RequestInit;
+    const request = fetchMock.mock.calls[0]![1];
     expect(request.body).toBe(JSON.stringify({ model: "claude-sonnet-5", expectedModel: null }));
   });
 
@@ -475,7 +477,7 @@ describe("controlPlaneClient", () => {
         headers: { "Content-Type": "application/json" },
       }),
     ];
-    const fetchMock = vi.fn(async () => responses.shift()!);
+    const fetchMock = vi.fn<RequiredInitFetch>(async () => responses.shift()!);
     vi.stubGlobal("fetch", fetchMock);
 
     await controlPlaneClient.createProject(
@@ -506,7 +508,7 @@ describe("controlPlaneClient", () => {
         }),
       }),
     );
-    const createRequest = fetchMock.mock.calls[0]?.[1] as RequestInit;
+    const createRequest = fetchMock.mock.calls[0]![1];
     expect(new Headers(createRequest.headers).get("Idempotency-Key")).toBe("web-project-request-1");
     expect(fetchMock).toHaveBeenNthCalledWith(
       2,
@@ -539,7 +541,7 @@ describe("controlPlaneClient", () => {
         { status: 201, headers: { "Content-Type": "application/json" } },
       ),
     ];
-    const fetchMock = vi.fn(async () => responses.shift()!);
+    const fetchMock = vi.fn<RequiredInitFetch>(async () => responses.shift()!);
     vi.stubGlobal("fetch", fetchMock);
 
     const page = await controlPlaneClient.listSessionEvents("session/one", -5, 5_000);
@@ -561,7 +563,7 @@ describe("controlPlaneClient", () => {
       "/v1/sessions/session%2Fone/events?afterSequence=0&limit=500",
       expect.objectContaining({ credentials: "include" }),
     );
-    const turnRequest = fetchMock.mock.calls[1]?.[1] as RequestInit;
+    const turnRequest = fetchMock.mock.calls[1]![1];
     expect(new Headers(turnRequest.headers).get("Idempotency-Key")).toBe("web-turn-request-1");
     expect(JSON.parse(String(turnRequest.body))).toEqual({
       inputText: "Continue",
@@ -571,7 +573,7 @@ describe("controlPlaneClient", () => {
   });
 
   it("requests an idempotent durable interrupt for the active Turn", async () => {
-    const fetchMock = vi.fn(
+    const fetchMock = vi.fn<RequiredInitFetch>(
       async () =>
         new Response(
           JSON.stringify({
@@ -602,7 +604,7 @@ describe("controlPlaneClient", () => {
       "/v1/sessions/session%2Fone/turns/active/interrupt",
       expect.objectContaining({ method: "POST", credentials: "include" }),
     );
-    const request = fetchMock.mock.calls[0]?.[1] as RequestInit;
+    const request = fetchMock.mock.calls[0]![1];
     expect(new Headers(request.headers).get("Idempotency-Key")).toBe("web-interrupt-1");
   });
 
@@ -635,7 +637,7 @@ describe("controlPlaneClient", () => {
         { status: 200, headers: { "Content-Type": "application/json" } },
       ),
     ];
-    const fetchMock = vi.fn(async () => responses.shift()!);
+    const fetchMock = vi.fn<RequiredInitFetch>(async () => responses.shift()!);
     vi.stubGlobal("fetch", fetchMock);
 
     const snapshot = await controlPlaneClient.listPendingInteractions("session/one");
@@ -668,16 +670,16 @@ describe("controlPlaneClient", () => {
         body: JSON.stringify({ answers: { environment: "staging" } }),
       }),
     );
-    expect(
-      new Headers((fetchMock.mock.calls[1]?.[1] as RequestInit).headers).get("Idempotency-Key"),
-    ).toBe("web-approval-1");
-    expect(
-      new Headers((fetchMock.mock.calls[2]?.[1] as RequestInit).headers).get("Idempotency-Key"),
-    ).toBe("web-input-1");
+    expect(new Headers(fetchMock.mock.calls[1]![1].headers).get("Idempotency-Key")).toBe(
+      "web-approval-1",
+    );
+    expect(new Headers(fetchMock.mock.calls[2]![1].headers).get("Idempotency-Key")).toBe(
+      "web-input-1",
+    );
   });
 
   it("requests an idempotent durable Steer payload for the active Turn", async () => {
-    const fetchMock = vi.fn(
+    const fetchMock = vi.fn<RequiredInitFetch>(
       async () =>
         new Response(
           JSON.stringify({
@@ -708,7 +710,7 @@ describe("controlPlaneClient", () => {
       "/v1/sessions/session%2Fone/turns/active/steer",
       expect.objectContaining({ method: "POST", credentials: "include" }),
     );
-    const request = fetchMock.mock.calls[0]?.[1] as RequestInit;
+    const request = fetchMock.mock.calls[0]![1];
     expect(new Headers(request.headers).get("Idempotency-Key")).toBe("web-steer-1");
     expect(JSON.parse(String(request.body))).toEqual({ inputText: "Focus on tests" });
   });
@@ -1225,7 +1227,7 @@ describe("controlPlaneClient", () => {
 
   it("uploads artifact payloads directly to the issued grant without JSON buffering", async () => {
     vi.stubGlobal("window", { location: new URL("https://synara.example/settings") });
-    const fetchMock = vi.fn(async () => new Response(null, { status: 204 }));
+    const fetchMock = vi.fn<RequiredInitFetch>(async () => new Response(null, { status: 204 }));
     vi.stubGlobal("fetch", fetchMock);
     const payload = new Uint8Array([1, 2, 3]);
 
@@ -1245,7 +1247,7 @@ describe("controlPlaneClient", () => {
       "https://synara.example/v1/artifact-content/artifact-1?token=secret",
       expect.objectContaining({ method: "PUT", body: payload }),
     );
-    const request = fetchMock.mock.calls[0]?.[1] as RequestInit;
+    const request = fetchMock.mock.calls[0]![1];
     expect(new Headers(request.headers).get("Content-Type")).toBe("application/octet-stream");
     expect(new Headers(request.headers).get("X-Artifact-Header")).toBe("value");
   });

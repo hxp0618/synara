@@ -27,6 +27,7 @@ import {
 import {
   deriveWorkLogToolDetails,
   mergeWorkLogToolDetails,
+  type WorkLogRequestKind,
   type WorkLogToolDetails,
 } from "./lib/toolCallDetails";
 import { isStalePendingRequestFailureDetail } from "./lib/pendingInteraction";
@@ -75,7 +76,7 @@ export interface WorkLogEntry {
   toolCallId?: string;
   toolDetails?: WorkLogToolDetails;
   itemType?: ToolLifecycleItemType;
-  requestKind?: PendingApproval["requestKind"];
+  requestKind?: WorkLogRequestKind;
   subagents?: ReadonlyArray<WorkLogSubagent>;
   subagentAction?: WorkLogSubagentAction;
   automation?: WorkLogAutomation;
@@ -133,7 +134,7 @@ export interface PendingApproval {
   requestKey?: string;
   requestId: ApprovalRequestId;
   executionId?: string;
-  requestKind: "command" | "file-read" | "file-change" | "network" | "tool";
+  requestKind: WorkLogRequestKind;
   createdAt: string;
   detail?: string;
 }
@@ -380,7 +381,17 @@ export function deriveActiveWorkStartedAt(
   return sendStartedAt;
 }
 
-function requestKindFromRequestType(requestType: unknown): PendingApproval["requestKind"] | null {
+function isWorkLogRequestKind(value: unknown): value is WorkLogRequestKind {
+  return (
+    value === "command" ||
+    value === "file-read" ||
+    value === "file-change" ||
+    value === "network" ||
+    value === "tool"
+  );
+}
+
+function requestKindFromRequestType(requestType: unknown): WorkLogRequestKind | null {
   switch (requestType) {
     case "command_execution_approval":
     case "exec_command_approval":
@@ -427,12 +438,7 @@ export function derivePendingApprovals(
         ? ApprovalRequestId.makeUnsafe(payload.requestId)
         : null;
     const requestKind =
-      payload &&
-      (payload.requestKind === "command" ||
-        payload.requestKind === "file-read" ||
-        payload.requestKind === "file-change" ||
-        payload.requestKind === "network" ||
-        payload.requestKind === "tool")
+      payload && isWorkLogRequestKind(payload.requestKind)
         ? payload.requestKind
         : payload
           ? requestKindFromRequestType(payload.requestType)
@@ -2037,11 +2043,7 @@ function extractWorkLogItemType(
 function extractWorkLogRequestKind(
   payload: Record<string, unknown> | null,
 ): WorkLogEntry["requestKind"] | undefined {
-  if (
-    payload?.requestKind === "command" ||
-    payload?.requestKind === "file-read" ||
-    payload?.requestKind === "file-change"
-  ) {
+  if (isWorkLogRequestKind(payload?.requestKind)) {
     return payload.requestKind;
   }
   return requestKindFromRequestType(payload?.requestType) ?? undefined;

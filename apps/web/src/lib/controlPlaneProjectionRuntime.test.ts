@@ -209,15 +209,13 @@ describe("ControlPlaneProjectionRuntime", () => {
       resolveCatchUp = resolve;
     });
     let catchUpAttempt = 0;
-    const listSessionEvents = vi.fn(
-      async (): Promise<ControlPlaneSessionEventPage> => {
-        catchUpAttempt += 1;
-        if (catchUpAttempt === 1) {
-          return { items: [event(1, "turn.created"), event(2)], lastSequence: 2 };
-        }
-        return pendingCatchUp;
-      },
-    );
+    const listSessionEvents = vi.fn(async (): Promise<ControlPlaneSessionEventPage> => {
+      catchUpAttempt += 1;
+      if (catchUpAttempt === 1) {
+        return { items: [event(1, "turn.created"), event(2)], lastSequence: 2 };
+      }
+      return pendingCatchUp;
+    });
     const subscribeSessionEvents = vi.fn(
       (_sessionId: string, _afterSequence: number, nextHandlers: NonNullable<typeof handlers>) => {
         handlers = nextHandlers;

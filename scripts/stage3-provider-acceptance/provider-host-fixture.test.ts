@@ -552,8 +552,9 @@ function interactionRequestIdFor(
   output: ReadonlyArray<ProviderHostMessage>,
   commandId: string,
 ): string | undefined {
-  return messagesFor(output, commandId).find((message) => message.messageType === "InteractionRequest")
-    ?.payload.requestId as string | undefined;
+  return messagesFor(output, commandId).find(
+    (message) => message.messageType === "InteractionRequest",
+  )?.payload.requestId as string | undefined;
 }
 
 function isTerminal(message: ProviderHostMessage): boolean {

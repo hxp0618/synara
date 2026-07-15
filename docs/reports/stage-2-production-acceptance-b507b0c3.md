@@ -32,12 +32,12 @@ authoritative Single-node PostgreSQL query returned `31|31` for `count(*)|max(ve
 
 Focused Stage 2 TypeScript suites passed without changing the tracked tree:
 
-| Package/area  | Test files | Tests |
-| ------------- | ---------: | ----: |
-| Server Proxy  |          1 |     7 |
-| Web Stage 2   |         13 |   205 |
-| Provider Host |          6 |    64 |
-| Contracts     |         12 |   122 |
+| Package/area  | Test files |   Tests |
+| ------------- | ---------: | ------: |
+| Server Proxy  |          1 |       7 |
+| Web Stage 2   |         13 |     205 |
+| Provider Host |          6 |      64 |
+| Contracts     |         12 |     122 |
 | **Total**     |     **32** | **398** |
 
 Production builds passed for Contracts, Server, Web and Provider Host. Output contained only non-blocking

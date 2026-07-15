@@ -8673,7 +8673,7 @@ export default function ChatView({
       try {
         await dispatchApprovalInteractionResponse({
           authoritative: controlPlane.isAuthoritative,
-          executionId: approval.executionId,
+          ...(approval.executionId !== undefined ? { executionId: approval.executionId } : {}),
           requestId,
           decision,
           resolveControlPlane: async (executionId, durableRequestId, durableDecision) => {
@@ -8757,7 +8757,9 @@ export default function ChatView({
         await dispatchUserInputInteractionResponse({
           authoritative: controlPlane.isAuthoritative,
           cancel,
-          executionId: pendingInput.executionId,
+          ...(pendingInput.executionId !== undefined
+            ? { executionId: pendingInput.executionId }
+            : {}),
           requestId,
           answers,
           resolveControlPlane: async (executionId, durableRequestId, durableAnswers) => {
