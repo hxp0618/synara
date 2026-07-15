@@ -166,9 +166,7 @@ class CodexAppServerRuntime {
         ...(trimmedString(this.options.input.workload.model)
           ? { model: trimmedString(this.options.input.workload.model) }
           : {}),
-        ...(this.options.interactive && this.options.input.workload.interactionMode === "plan"
-          ? { collaborationMode: this.planCollaborationMode() }
-          : {}),
+        ...(this.options.interactive ? { collaborationMode: this.collaborationMode() } : {}),
       };
       const response = asRecord(
         await this.sendRequest("turn/start", {
@@ -349,14 +347,15 @@ class CodexAppServerRuntime {
     });
   }
 
-  private planCollaborationMode(): Record<string, unknown> {
-    if (!this.model) {
-      throw new Error("Codex app-server did not report a model required for Plan Mode.");
+  private collaborationMode(): Record<string, unknown> {
+    const model = this.model ?? trimmedString(this.options.input.workload.model);
+    if (!model) {
+      throw new Error("Codex app-server did not report a model required for collaboration mode.");
     }
     return {
-      mode: "plan",
+      mode: this.options.input.workload.interactionMode ?? "default",
       settings: {
-        model: this.model,
+        model,
         reasoning_effort: "medium",
         developer_instructions: null,
       },

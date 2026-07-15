@@ -847,6 +847,7 @@ describe("Claude Agent SDK runtime", () => {
           expect(messageText(steered.value)).toBe("focus on the failing test");
           expect(steered.value?.priority).toBe("now");
           yield sdkMessage(systemInit("session-steer", "claude-test"));
+          yield sdkMessage(successResult("session-steer", "superseded", {}));
           yield sdkMessage(successResult("session-steer", "steered", {}));
         })(),
       );
@@ -859,6 +860,70 @@ describe("Claude Agent SDK runtime", () => {
     await expect(run.result).resolves.toMatchObject({
       output: { text: "steered" },
       providerResumeCursor: "session-steer",
+    });
+  });
+
+  it("ignores a late approval resolution after steering cancels the Provider request", async () => {
+    const messages: RunnerMessage[] = [];
+    const interaction = nextInteraction(messages, "approval");
+    let approvalCancelled!: () => void;
+    const approvalCancelledPromise = new Promise<void>((resolve) => {
+      approvalCancelled = resolve;
+    });
+    let releaseResult!: () => void;
+    const resultReleased = new Promise<void>((resolve) => {
+      releaseResult = resolve;
+    });
+    const queryFactory: ClaudeQueryFactory = ({ prompt, options }) =>
+      fakeQuery(
+        (async function* () {
+          if (typeof prompt === "string") throw new Error("Expected streaming Claude input.");
+          const iterator = prompt[Symbol.asyncIterator]();
+          const initial = await iterator.next();
+          expect(messageText(initial.value)).toBe("wait for approval");
+          const controller = new AbortController();
+          const canUseTool = requiredOptions(options).canUseTool;
+          if (!canUseTool) throw new Error("Expected Claude permission callback.");
+          const decision = canUseTool(
+            "Bash",
+            { command: "printf ok" },
+            {
+              signal: controller.signal,
+              toolUseID: "tool-steer-cancelled",
+              requestId: "permission-steer-cancelled",
+            },
+          );
+          const steered = await iterator.next();
+          expect(messageText(steered.value)).toBe("focus on the failing test");
+          controller.abort();
+          await expect(decision).resolves.toMatchObject({ behavior: "deny" });
+          approvalCancelled();
+          await resultReleased;
+          yield sdkMessage(systemInit("session-steer-cancelled", "claude-test"));
+          yield sdkMessage(successResult("session-steer-cancelled", "superseded", {}));
+          yield sdkMessage(successResult("session-steer-cancelled", "steered", {}));
+        })(),
+      );
+    const run = startProviderHostRun(
+      claudeInput({ inputText: "wait for approval", runtimeMode: "approval-required" }),
+      null,
+      (message) => messages.push(message),
+      { claudeQueryFactory: queryFactory },
+    );
+
+    const request = await interaction;
+    await run.steer?.({ inputText: "focus on the failing test" });
+    await approvalCancelledPromise;
+    expect(() =>
+      run.resolveApproval?.({
+        requestId: request.payload.requestId,
+        resolution: { decision: "accept" },
+      }),
+    ).not.toThrow();
+    releaseResult();
+    await expect(run.result).resolves.toMatchObject({
+      output: { text: "steered" },
+      providerResumeCursor: "session-steer-cancelled",
     });
   });
 
@@ -989,6 +1054,53 @@ describe("Claude Agent SDK runtime", () => {
         payload: expect.objectContaining({ itemType: "exitedReviewMode", status: "completed" }),
       }),
     );
+  });
+
+  it("accepts a contradictory successful Review result only with text and no explicit errors", async () => {
+    const messages: RunnerMessage[] = [];
+    const queryFactory: ClaudeQueryFactory = () =>
+      fakeQuery(
+        (async function* () {
+          yield sdkMessage(systemInit("session-review-warning", "claude-test"));
+          yield sdkMessage({
+            ...successResult("session-review-warning", "No actionable findings.", {}),
+            is_error: true,
+            errors: [],
+          });
+        })(),
+      );
+    const run = startProviderHostRun(
+      claudeInput({ inputText: "review" }),
+      null,
+      (message) => {
+        messages.push(message);
+      },
+      {
+        claudeQueryFactory: queryFactory,
+        operation: {
+          commandType: "StartReview",
+          payload: { target: { type: "uncommittedChanges" } },
+        },
+      },
+    );
+
+    await expect(run.result).resolves.toMatchObject({
+      output: {
+        operation: "review",
+        supportMode: "emulated",
+        text: "No actionable findings.",
+      },
+      providerResumeCursor: "session-review-warning",
+    });
+    expect(messages).toContainEqual({
+      type: "event",
+      eventType: "runtime.provider.warning",
+      payload: {
+        provider: "claudeAgent",
+        message:
+          "Claude Agent SDK marked a successful read-only Review with text as an error; Synara accepted the review because no explicit errors were reported.",
+      },
+    });
   });
 
   it("redacts Provider credentials from SDK terminal errors", async () => {

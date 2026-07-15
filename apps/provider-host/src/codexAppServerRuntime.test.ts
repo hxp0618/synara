@@ -141,18 +141,20 @@ describe("Codex app-server runtime", () => {
     {
       scenario: "approval",
       generation: 7,
+      interactionMode: "default",
       interactionType: "approval",
       expectedRequestId: "codex:generation-7:approval-rpc",
     },
     {
       scenario: "user-input",
       generation: 8,
+      interactionMode: "plan",
       interactionType: "user-input",
       expectedRequestId: "codex:generation-8:user-input-rpc",
     },
   ] as const)(
     "scopes native $interactionType request IDs to Execution Generation $generation",
-    async ({ scenario, generation, interactionType, expectedRequestId }) => {
+    async ({ scenario, generation, interactionMode, interactionType, expectedRequestId }) => {
       await withFakeCodex(scenario, async (directory, _tracePath, environment) => {
         const messages: RunnerMessage[] = [];
         const interaction = waitForInteraction(
@@ -160,7 +162,7 @@ describe("Codex app-server runtime", () => {
           (message) => message.interactionType === interactionType,
         );
         const run = startProviderHostRun(
-          codexInput(directory, { generation, interactionMode: "plan" }),
+          codexInput(directory, { generation, interactionMode }),
           null,
           (message) => messages.push(message),
           { environment },
@@ -372,7 +374,10 @@ describe("Codex app-server runtime", () => {
       await expect(run.result).rejects.toThrow(
         "Codex app-server native Session operation requires a Provider Cursor.",
       );
-      expect(readFileSync(tracePath, "utf8")).toBe("initialize\ninitialized\n");
+      const trace = readFileSync(tracePath, "utf8");
+      expect(trace).toContain("initialize\n");
+      expect(trace).not.toContain("thread/start\n");
+      expect(trace).not.toContain("thread/compact/start\n");
     });
   });
 
@@ -699,10 +704,10 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
   } else if (message.method === "thread/resume") {
     if (scenario === "resume-rebuild") send({ id: message.id, error: { code: -2, message: "missing thread: native-resume-secret" } });
     else if (scenario === "resume-auth-failure") send({ id: message.id, error: { code: 401, message: "Unauthorized: invalid API key" } });
-    else send({ id: message.id, result: { thread: { id: message.params.threadId } } });
+    else send({ id: message.id, result: { thread: { id: message.params.threadId }, model: "gpt-test" } });
   } else if (message.method === "thread/start") {
     if (scenario === "resume" || scenario === "resume-auth-failure") send({ id: message.id, error: { code: -1, message: "unexpected thread/start" } });
-    else send({ id: message.id, result: { thread: { id: "thread-new" } } });
+    else send({ id: message.id, result: { thread: { id: "thread-new" }, model: "gpt-test" } });
   } else if (message.method === "thread/compact/start") {
     if (scenario !== "compact" || message.params?.threadId !== "thread-resume") process.exit(4);
     send({ id: message.id, result: {} });
@@ -718,6 +723,9 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
     send({ method: "item/completed", params: { threadId: expectedReviewThread, turnId: "turn-review-1", item: { id: "review-exit-1", type: "exitedReviewMode", review: "Working tree is clean." } } });
     send({ method: "turn/completed", params: { threadId: expectedReviewThread, turn: { id: "turn-review-1", items: [], status: "completed", error: null } } });
   } else if (message.method === "turn/start") {
+    const expectedCollaborationMode = scenario === "user-input" ? "plan" : "default";
+    if (message.params?.collaborationMode?.mode !== expectedCollaborationMode) process.exit(6);
+    if (message.params?.collaborationMode?.settings?.model !== "gpt-test") process.exit(7);
     if (scenario === "resume-rebuild") {
       const prompt = message.params?.input?.[0]?.text ?? "";
 			if (!prompt.includes("<synara_resume_snapshot_json>") || !prompt.includes("Focused tests passed") || !prompt.includes("<current_user>\\ncontinue\\n</current_user>")) process.exit(3);

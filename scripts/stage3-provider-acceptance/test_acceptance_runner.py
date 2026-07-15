@@ -54,6 +54,7 @@ def runner_options(*, restart_control_plane: bool = True) -> acceptance.RunnerOp
         docker_allow_network_interruption=False,
         kubernetes_allow_node_drain=False,
         failure_only=False,
+        real_provider_cases=(),
     )
 
 
@@ -843,6 +844,68 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
             ],
         )
 
+    def test_real_provider_cases_are_canonical_and_run_before_restart(self) -> None:
+        suite = CaseOrderSuite(
+            FakeDriver(acceptance.EXECUTION_PINNED_WORKER),
+            dataclasses.replace(
+                runner_options(),
+                suite="real-provider-smoke",
+                real_provider_cases=("approval", "user-input"),
+            ),
+        )
+
+        suite.run()
+
+        self.assertEqual(
+            suite.case_order,
+            [
+                "environment.target-prepare",
+                "environment.control-plane-start",
+                "identity.dev-login",
+                "runtime.target-provision",
+                "resources.real-provider-project-session",
+                "real-provider.turn-1-start",
+                "runtime.real-provider-worker-discovery",
+                "real-provider.turn-1",
+                "real-provider.approval-resolution",
+                "real-provider.user-input-resolution",
+                "recovery.control-plane-restart",
+                "real-provider.turn-2-continuity",
+            ],
+        )
+
+    def test_real_provider_advanced_cases_run_after_restart_continuity(self) -> None:
+        suite = CaseOrderSuite(
+            FakeDriver(acceptance.EXECUTION_PINNED_WORKER),
+            dataclasses.replace(
+                runner_options(),
+                suite="real-provider-smoke",
+                real_provider_cases=("review", "compact", "rollback", "fork"),
+            ),
+        )
+
+        suite.run()
+
+        self.assertEqual(
+            suite.case_order,
+            [
+                "environment.target-prepare",
+                "environment.control-plane-start",
+                "identity.dev-login",
+                "runtime.target-provision",
+                "resources.real-provider-project-session",
+                "real-provider.turn-1-start",
+                "runtime.real-provider-worker-discovery",
+                "real-provider.turn-1",
+                "recovery.control-plane-restart",
+                "real-provider.turn-2-continuity",
+                "real-provider.review",
+                "real-provider.compact-boundary",
+                "real-provider.rollback-emulation",
+                "real-provider.fork-emulation",
+            ],
+        )
+
     def test_real_provider_marker_and_native_resume_evidence_pass(self) -> None:
         suite = BarrierSuite(acceptance.EXECUTION_PINNED_WORKER)
         marker = "SYNARA_REAL_PROVIDER_SMOKE_CODEX_0123456789ABCDEF"
@@ -1141,6 +1204,26 @@ class RunnerOptionsTest(unittest.TestCase):
         self.assertEqual(options.provider, "claudeAgent")
         self.assertEqual(options.runner_command, ("node", "/tmp/provider-host.mjs"))
         self.assertEqual(options.failure_cases, ())
+        self.assertEqual(options.real_provider_cases, ())
+
+    def test_real_provider_matrix_expands_in_canonical_order(self) -> None:
+        options = acceptance.parse_args(
+            [
+                "--suite",
+                "real-provider-smoke",
+                "--runner-command-json",
+                '["node","/tmp/provider-host.mjs"]',
+                "--real-provider-case",
+                "user-input",
+                "--real-provider-matrix",
+            ]
+        )
+
+        self.assertEqual(options.real_provider_cases, acceptance.REAL_PROVIDER_CASES)
+
+    def test_fixture_suite_rejects_real_provider_cases(self) -> None:
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            acceptance.parse_args(["--real-provider-case", "approval"])
 
     def test_failure_matrix_expands_target_cases_without_duplicates(self) -> None:
         options = acceptance.parse_args(

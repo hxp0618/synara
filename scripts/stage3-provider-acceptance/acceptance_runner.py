@@ -62,13 +62,52 @@ SSH_CREDENTIAL_LIFECYCLE = (
 WORKER_PROXY_ALLOWED_PATH_PREFIXES = ("/v1/workers/", "/v1/artifact-content/")
 WORKER_PROXY_MAX_REQUEST_BYTES = 64 << 20
 CASE_STATUSES = frozenset({"pass", "unsupported", "skipped", "fail"})
-TERMINAL_EVENT_TYPES = frozenset({"execution.completed", "execution.failed", "execution.cancelled"})
+TERMINAL_EVENT_TYPES = frozenset(
+    {"execution.completed", "execution.failed", "execution.cancelled", "execution.interrupted"}
+)
 JSON_REPORT_NAME = "acceptance-report.json"
 MARKDOWN_REPORT_NAME = "acceptance-report.md"
 PROVIDERS = ("codex", "claudeAgent", "cursor", "gemini", "grok", "kilo", "opencode", "pi")
 FIXTURE_SUPPORTED_PROVIDERS = frozenset({"codex", "claudeAgent"})
 REAL_PROVIDER_SMOKE_PROVIDERS = frozenset({"codex", "claudeAgent"})
 SUITES = ("fixture", "real-provider-smoke")
+REAL_PROVIDER_PRE_RESTART_CASES = ("approval", "user-input", "steer", "interrupt")
+REAL_PROVIDER_POST_RESTART_CASES = ("review", "compact", "rollback", "fork")
+REAL_PROVIDER_CASES = REAL_PROVIDER_PRE_RESTART_CASES + REAL_PROVIDER_POST_RESTART_CASES
+REAL_PROVIDER_CASE_METADATA: Mapping[str, Mapping[str, str]] = {
+    "approval": {
+        "id": "real-provider.approval-resolution",
+        "name": "Resolve a real Provider tool Approval through the user API",
+    },
+    "user-input": {
+        "id": "real-provider.user-input-resolution",
+        "name": "Resolve real Provider structured user input through the user API",
+    },
+    "steer": {
+        "id": "real-provider.steer-active-turn",
+        "name": "Steer a real Provider Turn while Provider work is active",
+    },
+    "interrupt": {
+        "id": "real-provider.interrupt-active-turn",
+        "name": "Interrupt a real Provider Turn and verify immediate recovery",
+    },
+    "review": {
+        "id": "real-provider.review",
+        "name": "Run the real Provider Review operation through the queued Execution path",
+    },
+    "compact": {
+        "id": "real-provider.compact-boundary",
+        "name": "Verify native Compact or the explicit Provider unsupported boundary",
+    },
+    "rollback": {
+        "id": "real-provider.rollback-emulation",
+        "name": "Rollback logical Session history without claiming a Worker",
+    },
+    "fork": {
+        "id": "real-provider.fork-emulation",
+        "name": "Fork logical Session history and continue through authoritative reconstruction",
+    },
+}
 FAILURE_CASES = (
     "provider-malformed",
     "provider-oversized",
@@ -402,6 +441,7 @@ class RunnerOptions:
     docker_allow_network_interruption: bool
     kubernetes_allow_node_drain: bool
     failure_only: bool
+    real_provider_cases: tuple[str, ...]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -446,6 +486,8 @@ class ScenarioState:
     replacement_worker_id: str | None = None
     pending_approval: dict[str, Any] | None = None
     pending_real_turn_id: str | None = None
+    last_real_marker: str | None = None
+    rollback_anchor_turn_id: str | None = None
 
 
 class APIClient:
@@ -4613,12 +4655,27 @@ class AcceptanceSuite:
             self._complete_first_real_provider_turn,
             requires=("runtime.real-provider-worker-discovery",),
         )
+        recovery_requirement = "real-provider.turn-1"
+        for real_provider_case in self.options.real_provider_cases:
+            if real_provider_case not in REAL_PROVIDER_PRE_RESTART_CASES:
+                continue
+            metadata = REAL_PROVIDER_CASE_METADATA[real_provider_case]
+            case_id = metadata["id"]
+            self._case(
+                case_id,
+                metadata["name"],
+                lambda real_provider_case=real_provider_case: self._execute_real_provider_case(
+                    real_provider_case
+                ),
+                requires=(recovery_requirement,),
+            )
+            recovery_requirement = case_id
         if self.options.restart_control_plane:
             self._case(
                 "recovery.control-plane-restart",
                 "Restart Control Plane with persisted real Provider state",
                 self._restart_control_plane,
-                requires=("real-provider.turn-1",),
+                requires=(recovery_requirement,),
             )
         else:
             self._fail_case(
@@ -4635,6 +4692,21 @@ class AcceptanceSuite:
             self._real_provider_second_turn_continuity,
             requires=("recovery.control-plane-restart",),
         )
+        advanced_requirement = "real-provider.turn-2-continuity"
+        for real_provider_case in self.options.real_provider_cases:
+            if real_provider_case not in REAL_PROVIDER_POST_RESTART_CASES:
+                continue
+            metadata = REAL_PROVIDER_CASE_METADATA[real_provider_case]
+            case_id = metadata["id"]
+            self._case(
+                case_id,
+                metadata["name"],
+                lambda real_provider_case=real_provider_case: self._execute_real_provider_case(
+                    real_provider_case
+                ),
+                requires=(advanced_requirement,),
+            )
+            advanced_requirement = case_id
 
     def _run_failure_only(self) -> None:
         if self.driver.lifecycle.execution_pinned:
@@ -5249,7 +5321,437 @@ class AcceptanceSuite:
         self.state.first_worker_id = worker_id
         self.state.first_generation = generation
         self.state.pending_real_turn_id = None
+        self.state.last_real_marker = self._real_provider_marker()
         return evidence
+
+    def _execute_real_provider_case(self, real_provider_case: str) -> Mapping[str, Any]:
+        if real_provider_case == "approval":
+            return self._real_provider_approval_resolution()
+        if real_provider_case == "user-input":
+            return self._real_provider_user_input_resolution()
+        if real_provider_case == "steer":
+            return self._real_provider_steer_active_turn()
+        if real_provider_case == "interrupt":
+            return self._real_provider_interrupt_active_turn()
+        if real_provider_case == "review":
+            return self._real_provider_review()
+        if real_provider_case == "compact":
+            return self._real_provider_compact_boundary()
+        if real_provider_case == "rollback":
+            return self._real_provider_rollback_emulation()
+        if real_provider_case == "fork":
+            return self._real_provider_fork_emulation()
+        raise AcceptanceError(
+            "runner.real_provider_case_unknown",
+            f"Unknown real Provider acceptance case {real_provider_case}.",
+            {"case": real_provider_case},
+        )
+
+    def _real_provider_approval_interaction(
+        self,
+        turn_id: str,
+    ) -> tuple[dict[str, Any], str, str, dict[str, Any], str]:
+        interaction = self._wait_for_interaction(turn_id, "approval")
+        execution_id, request_id = self._interaction_identity(
+            interaction,
+            "real Provider Approval interaction",
+        )
+        interaction_payload = json_object(
+            interaction.get("payload"),
+            "real Provider Approval interaction payload",
+        )
+        command = interaction_payload.get("command")
+        if interaction_payload.get("requestKind") != "command" or not isinstance(command, str) or not command:
+            raise AcceptanceError(
+                "runner.real_provider_approval_payload_invalid",
+                "The real Provider Approval interaction did not describe a command request.",
+                {
+                    "turnId": turn_id,
+                    "interactionId": interaction.get("id"),
+                    "requestKind": interaction_payload.get("requestKind"),
+                },
+            )
+        return interaction, execution_id, request_id, interaction_payload, command
+
+    def _real_provider_approval_resolution(self) -> Mapping[str, Any]:
+        marker = self._real_provider_marker("approval")
+        turn = self._create_turn(
+            "Use the Bash or shell tool exactly once to run this command: "
+            "printf 'SYNARA_REAL_PROVIDER_APPROVAL_TOOL_OK\\n' > .synara-real-provider-approval.txt. "
+            "Wait for the tool to finish, then reply with exactly "
+            f"{marker} and no other text.",
+            runtime_mode="approval-required",
+        )
+        turn_id = self._turn_id(turn, "real Provider Approval Turn")
+        interaction, execution_id, request_id, interaction_payload, command = (
+            self._real_provider_approval_interaction(turn_id)
+        )
+        resolved = json_object(
+            self.api.request(
+                "POST",
+                f"/v1/executions/{execution_id}/approvals/{urllib.parse.quote(request_id, safe='')}/resolve",
+                {"decision": "accept"},
+            ),
+            "real Provider Approval resolution",
+        )
+        terminal, events = self._wait_for_turn_terminal(turn_id, "execution.completed")
+        event_types = [str(event.get("eventType")) for event in events]
+        for required_event_type in ("request.resolved", "item.started", "item.completed"):
+            if required_event_type not in event_types:
+                raise AcceptanceError(
+                    "runner.real_provider_approval_events_missing",
+                    "The real Provider Approval Turn omitted a required durable or tool event.",
+                    {
+                        "turnId": turn_id,
+                        "missingEventType": required_event_type,
+                        "eventTypes": event_types,
+                    },
+                )
+        evidence = self._real_provider_turn_evidence(
+            turn_id,
+            terminal,
+            events,
+            marker,
+            expected_resume_strategy="native-cursor",
+            expected_resume_reason="cursor_usable",
+        )
+        self.state.last_real_marker = marker
+        return {
+            **evidence,
+            "interactionId": interaction.get("id"),
+            "requestId": request_id,
+            "requestKind": interaction_payload.get("requestKind"),
+            "commandSummary": self.redactor.text(command[:256]),
+            "resolutionStatus": resolved.get("status"),
+            "deliveryStatus": resolved.get("deliveryStatus"),
+        }
+
+    def _real_provider_user_input_resolution(self) -> Mapping[str, Any]:
+        marker = self._real_provider_marker("user-input")
+        turn = self._create_turn(
+            "Before answering, use the Provider's structured user-input or AskUserQuestion tool to ask exactly "
+            "one question with header 'Environment', question 'Which environment should this acceptance use?', "
+            "and options 'Staging' and 'Production'. Do not call ExitPlanMode. After receiving the answer, reply "
+            f"with exactly {marker} and no other text.",
+            runtime_mode="approval-required",
+            interaction_mode="plan",
+        )
+        turn_id = self._turn_id(turn, "real Provider user-input Turn")
+        interaction = self._wait_for_interaction(turn_id, "user-input")
+        execution_id, request_id = self._interaction_identity(
+            interaction,
+            "real Provider user-input interaction",
+        )
+        interaction_payload = json_object(
+            interaction.get("payload"),
+            "real Provider user-input interaction payload",
+        )
+        questions = interaction_payload.get("questions")
+        if not isinstance(questions, list) or len(questions) != 1 or not isinstance(questions[0], dict):
+            raise AcceptanceError(
+                "runner.real_provider_user_input_questions_invalid",
+                "The real Provider did not request exactly one structured question.",
+                {
+                    "turnId": turn_id,
+                    "interactionId": interaction.get("id"),
+                    "questionCount": len(questions) if isinstance(questions, list) else None,
+                },
+            )
+        question = questions[0]
+        question_id = question.get("id")
+        if not isinstance(question_id, str) or not question_id:
+            raise AcceptanceError(
+                "runner.real_provider_user_input_question_id_missing",
+                "The real Provider structured question omitted its stable ID.",
+                {"turnId": turn_id, "interactionId": interaction.get("id")},
+            )
+        resolved = json_object(
+            self.api.request(
+                "POST",
+                f"/v1/executions/{execution_id}/user-input/{urllib.parse.quote(request_id, safe='')}/resolve",
+                {"answers": {question_id: "Staging"}},
+            ),
+            "real Provider user-input resolution",
+        )
+        terminal, events = self._wait_for_turn_terminal(turn_id, "execution.completed")
+        event_types = [str(event.get("eventType")) for event in events]
+        if "user-input.resolved" not in event_types:
+            raise AcceptanceError(
+                "runner.real_provider_user_input_event_missing",
+                "The real Provider user-input Turn completed without user-input.resolved.",
+                {"turnId": turn_id, "eventTypes": event_types},
+            )
+        evidence = self._real_provider_turn_evidence(
+            turn_id,
+            terminal,
+            events,
+            marker,
+            expected_resume_strategy="native-cursor",
+            expected_resume_reason="cursor_usable",
+        )
+        self.state.last_real_marker = marker
+        return {
+            **evidence,
+            "interactionId": interaction.get("id"),
+            "requestId": request_id,
+            "question": {
+                "id": question_id,
+                "header": question.get("header"),
+                "question": question.get("question"),
+                "optionCount": len(question.get("options"))
+                if isinstance(question.get("options"), list)
+                else None,
+            },
+            "answer": "Staging",
+            "resolutionStatus": resolved.get("status"),
+            "deliveryStatus": resolved.get("deliveryStatus"),
+        }
+
+    def _real_provider_steer_active_turn(self) -> Mapping[str, Any]:
+        original_marker = self._real_provider_marker("steer-original")
+        steered_marker = self._real_provider_marker("steer")
+        if self.options.provider == "claudeAgent":
+            return self._real_claude_provider_steer_active_turn(original_marker, steered_marker)
+        turn = self._create_turn(
+            "Use the Bash or shell tool exactly once to run this command: "
+            "printf 'SYNARA_REAL_PROVIDER_STEER_TOOL_OK\\n' > .synara-real-provider-steer.txt. "
+            "After it succeeds, reply with exactly "
+            f"{original_marker} and no other text.",
+            runtime_mode="approval-required",
+        )
+        turn_id = self._turn_id(turn, "real Provider Steer Turn")
+        interaction, execution_id, request_id, interaction_payload, command = (
+            self._real_provider_approval_interaction(turn_id)
+        )
+        before_sequence = self.state.last_sequence
+        steer = json_object(
+            self.api.request(
+                "POST",
+                f"/v1/sessions/{self._required('session_id')}/turns/active/steer",
+                {
+                    "inputText": (
+                        "Change the final answer for this active Turn. After the approved command finishes, "
+                        f"reply with exactly {steered_marker} and no other text."
+                    )
+                },
+                expected=(200, 201, 202),
+            ),
+            "real Provider Steer command",
+        )
+        resolved = json_object(
+            self.api.request(
+                "POST",
+                f"/v1/executions/{execution_id}/approvals/{urllib.parse.quote(request_id, safe='')}/resolve",
+                {"decision": "accept"},
+            ),
+            "real Provider Steer Approval resolution",
+        )
+        terminal, events = self._wait_for_turn_terminal(turn_id, "execution.completed")
+        event_types = [str(event.get("eventType")) for event in events]
+        for required_event_type in ("turn.steer-requested", "turn.steered", "request.resolved"):
+            if required_event_type not in event_types:
+                raise AcceptanceError(
+                    "runner.real_provider_steer_events_missing",
+                    "The real Provider Steer Turn omitted a required control or interaction event.",
+                    {
+                        "turnId": turn_id,
+                        "missingEventType": required_event_type,
+                        "eventTypes": event_types,
+                    },
+                )
+        evidence = self._real_provider_turn_evidence(
+            turn_id,
+            terminal,
+            events,
+            steered_marker,
+            expected_resume_strategy="native-cursor",
+            expected_resume_reason="cursor_usable",
+        )
+        self.state.last_real_marker = steered_marker
+        return {
+            **evidence,
+            "originalMarkerRejected": original_marker != steered_marker,
+            "interactionId": interaction.get("id"),
+            "requestId": request_id,
+            "requestKind": interaction_payload.get("requestKind"),
+            "commandSummary": self.redactor.text(command[:256]),
+            "approvalStatus": resolved.get("status"),
+            "steerControlCommand": {
+                "id": steer.get("id"),
+                "commandType": steer.get("commandType"),
+                "statusAtRequest": steer.get("status"),
+            },
+            "requestedAfterSequence": before_sequence,
+        }
+
+    def _real_claude_provider_steer_active_turn(
+        self,
+        original_marker: str,
+        steered_marker: str,
+    ) -> Mapping[str, Any]:
+        turn = self._create_turn(
+            "Use the Bash tool exactly once to run this command: "
+            "sleep 8 && printf 'SYNARA_REAL_PROVIDER_STEER_TOOL_OK\\n' > "
+            ".synara-real-provider-steer.txt. After it succeeds, reply with exactly "
+            f"{original_marker} and no other text.",
+            runtime_mode="full-access",
+        )
+        turn_id = self._turn_id(turn, "real Claude Provider Steer Turn")
+        created = self._wait_for_turn_created(turn_id)
+        execution_id = self._event_execution_id(created)
+        started = self._wait_for_execution_event(
+            execution_id,
+            "item.started",
+            after_sequence=int(created.get("sequence") or 0),
+        )
+        before_sequence = int(started.get("sequence") or self.state.last_sequence)
+        steer = json_object(
+            self.api.request(
+                "POST",
+                f"/v1/sessions/{self._required('session_id')}/turns/active/steer",
+                {
+                    "inputText": (
+                        "Change the final answer for this active Turn. After the running command finishes, "
+                        f"reply with exactly {steered_marker} and no other text."
+                    )
+                },
+                expected=(200, 201, 202),
+            ),
+            "real Claude Provider Steer command",
+        )
+        terminal, events = self._wait_for_turn_terminal(turn_id, "execution.completed")
+        event_types = [str(event.get("eventType")) for event in events]
+        for required_event_type in (
+            "item.started",
+            "item.completed",
+            "turn.steer-requested",
+            "turn.steered",
+        ):
+            if required_event_type not in event_types:
+                raise AcceptanceError(
+                    "runner.real_provider_steer_events_missing",
+                    "The real Claude Provider Steer Turn omitted a required control or tool event.",
+                    {
+                        "turnId": turn_id,
+                        "missingEventType": required_event_type,
+                        "eventTypes": event_types,
+                    },
+                )
+        evidence = self._real_provider_turn_evidence(
+            turn_id,
+            terminal,
+            events,
+            steered_marker,
+            expected_resume_strategy="native-cursor",
+            expected_resume_reason="cursor_usable",
+        )
+        self.state.last_real_marker = steered_marker
+        return {
+            **evidence,
+            "originalMarkerRejected": original_marker != steered_marker,
+            "activeWorkBarrier": {
+                "eventId": started.get("eventId"),
+                "eventType": started.get("eventType"),
+                "sequence": started.get("sequence"),
+            },
+            "steerControlCommand": {
+                "id": steer.get("id"),
+                "commandType": steer.get("commandType"),
+                "statusAtRequest": steer.get("status"),
+            },
+            "requestedAfterSequence": before_sequence,
+        }
+
+    def _real_provider_interrupt_active_turn(self) -> Mapping[str, Any]:
+        turn = self._create_turn(
+            "Use the Bash or shell tool exactly once to run this command: "
+            "printf 'SYNARA_REAL_PROVIDER_INTERRUPT_TOOL_SHOULD_NOT_RUN\\n' > "
+            ".synara-real-provider-interrupt.txt. Wait for approval before doing anything else.",
+            runtime_mode="approval-required",
+        )
+        turn_id = self._turn_id(turn, "real Provider Interrupt Turn")
+        interaction, execution_id, request_id, interaction_payload, command = (
+            self._real_provider_approval_interaction(turn_id)
+        )
+        interrupt = json_object(
+            self.api.request(
+                "POST",
+                f"/v1/sessions/{self._required('session_id')}/turns/active/interrupt",
+                expected=(200, 201, 202),
+            ),
+            "real Provider Interrupt command",
+        )
+        terminal, events = self._wait_for_turn_terminal(turn_id, "execution.interrupted")
+        event_types = [str(event.get("eventType")) for event in events]
+        for required_event_type in ("request.opened", "turn.interrupt-requested", "execution.interrupted"):
+            if required_event_type not in event_types:
+                raise AcceptanceError(
+                    "runner.real_provider_interrupt_events_missing",
+                    "The real Provider Interrupt Turn omitted a required interaction or control event.",
+                    {
+                        "turnId": turn_id,
+                        "missingEventType": required_event_type,
+                        "eventTypes": event_types,
+                    },
+                )
+        pending = json_object(
+            self.api.request("GET", f"/v1/sessions/{self._required('session_id')}/interactions"),
+            "post-interrupt pending interactions",
+        )
+        pending_items = pending.get("items")
+        if not isinstance(pending_items, list):
+            raise AcceptanceError(
+                "runner.response_shape_invalid",
+                "post-interrupt pending interactions.items was not an array.",
+            )
+        if any(
+            isinstance(item, dict)
+            and (item.get("id") == interaction.get("id") or item.get("requestId") == request_id)
+            for item in pending_items
+        ):
+            raise AcceptanceError(
+                "runner.real_provider_interrupt_interaction_stale",
+                "The interrupted real Provider Turn retained its stale Approval interaction.",
+                {"turnId": turn_id, "interactionId": interaction.get("id")},
+            )
+
+        recovery_marker = self._real_provider_marker("interrupt-recovery")
+        recovery_turn = self._create_turn(
+            f"Reply with exactly {recovery_marker} and no other text."
+        )
+        recovery_turn_id = self._turn_id(recovery_turn, "post-interrupt recovery Turn")
+        recovery_terminal, recovery_events = self._wait_for_turn_terminal(
+            recovery_turn_id,
+            "execution.completed",
+        )
+        recovery_evidence = self._real_provider_turn_evidence(
+            recovery_turn_id,
+            recovery_terminal,
+            recovery_events,
+            recovery_marker,
+            expected_resume_strategy="native-cursor",
+            expected_resume_reason="cursor_usable",
+        )
+        self.state.last_real_marker = recovery_marker
+        worker_id, generation = self._event_worker_identity(terminal)
+        return {
+            "turnId": turn_id,
+            "executionId": execution_id,
+            "workerId": worker_id,
+            "generation": generation,
+            "interactionId": interaction.get("id"),
+            "requestId": request_id,
+            "requestKind": interaction_payload.get("requestKind"),
+            "commandSummary": self.redactor.text(command[:256]),
+            "interruptControlCommand": {
+                "id": interrupt.get("id"),
+                "commandType": interrupt.get("commandType"),
+                "statusAtRequest": interrupt.get("status"),
+            },
+            "interruptedSequenceRange": self._sequence_range(events),
+            "staleInteractionRemoved": True,
+            "recovery": recovery_evidence,
+        }
 
     def _real_provider_second_turn_continuity(self) -> Mapping[str, Any]:
         if self.state.pending_real_turn_id is not None:
@@ -5276,7 +5778,7 @@ class AcceptanceSuite:
             turn_id,
             terminal,
             turn_events,
-            self._real_provider_marker(),
+            self._last_real_marker(),
             expected_resume_strategy="native-cursor",
             expected_resume_reason="cursor_usable",
         )
@@ -5308,15 +5810,459 @@ class AcceptanceSuite:
                 "continuityAssertion": "native Provider cursor restored the immediately previous answer",
             }
         )
+        self.state.rollback_anchor_turn_id = turn_id
         return evidence
 
-    def _real_provider_marker(self) -> str:
+    def _real_provider_review(self) -> Mapping[str, Any]:
+        session = self._current_session()
+        expected_sequence = self._session_last_event_sequence(session)
+        operation = json_object(
+            self.api.request(
+                "POST",
+                f"/v1/sessions/{self._required('session_id')}/reviews",
+                {
+                    "expectedLastEventSequence": expected_sequence,
+                    "target": {"type": "uncommittedChanges"},
+                    "runtimeMode": "approval-required",
+                },
+                expected=(202,),
+            ),
+            "real Provider Review operation",
+        )
+        turn_id, execution_id, control_command = self._queued_operation_identity(
+            operation,
+            operation_type="review",
+            turn_kind="review",
+            command_type="StartReview",
+        )
+        terminal, events = self._wait_for_turn_terminal(turn_id, "execution.completed")
+        if terminal.get("executionId") != execution_id:
+            raise AcceptanceError(
+                "runner.real_provider_operation_execution_mismatch",
+                "The real Provider Review completed a different Execution.",
+                {
+                    "queuedExecutionId": execution_id,
+                    "terminalExecutionId": terminal.get("executionId"),
+                },
+            )
+        completed_item_types = {
+            payload.get("itemType")
+            for event in events
+            if event.get("eventType") == "item.completed"
+            and isinstance((payload := event.get("payload")), dict)
+        }
+        required_item_types = {"review_entered", "review_exited"}
+        if not required_item_types.issubset(completed_item_types):
+            raise AcceptanceError(
+                "runner.real_provider_review_boundary_missing",
+                "The real Provider Review omitted its entered or exited boundary.",
+                {
+                    "turnId": turn_id,
+                    "completedItemTypes": sorted(str(value) for value in completed_item_types),
+                },
+            )
+        semantic = self._single_execution_event(events, "session.review.completed")
+        semantic_payload = json_object(semantic.get("payload"), "Review semantic payload")
+        expected_support_mode = "native" if self.options.provider == "codex" else "emulated"
+        if semantic_payload.get("supportMode") != expected_support_mode:
+            raise AcceptanceError(
+                "runner.real_provider_review_support_mode_mismatch",
+                "The real Provider Review persisted the wrong support mode.",
+                {
+                    "provider": self.options.provider,
+                    "expectedSupportMode": expected_support_mode,
+                    "actualSupportMode": semantic_payload.get("supportMode"),
+                },
+            )
+        assistant = self._assistant_text_summary(events, "real Provider Review")
+        worker_id, generation = self._event_worker_identity(terminal)
+        return {
+            "turnId": turn_id,
+            "executionId": execution_id,
+            "workerId": worker_id,
+            "generation": generation,
+            "supportMode": expected_support_mode,
+            "target": {"type": "uncommittedChanges"},
+            "controlCommand": {
+                "id": control_command.get("id"),
+                "commandType": control_command.get("commandType"),
+                "statusAtRequest": control_command.get("status"),
+            },
+            "assistant": assistant,
+            "eventTypes": [str(event.get("eventType")) for event in events],
+            "sequenceRange": self._sequence_range(events),
+            "semanticEvent": self._event_summary(semantic),
+        }
+
+    def _real_provider_compact_boundary(self) -> Mapping[str, Any]:
+        session = self._current_session()
+        expected_sequence = self._session_last_event_sequence(session)
+        path = f"/v1/sessions/{self._required('session_id')}/compact"
+        if self.options.provider == "claudeAgent":
+            try:
+                self.api.request(
+                    "POST",
+                    path,
+                    {"expectedLastEventSequence": expected_sequence},
+                    expected=(202,),
+                )
+            except HTTPFailure as error:
+                status = error.evidence.get("status")
+                if error.code != "capability_unsupported" or status != 409:
+                    raise
+                after = self._current_session()
+                actual_sequence = self._session_last_event_sequence(after)
+                if actual_sequence != expected_sequence:
+                    raise AcceptanceError(
+                        "runner.real_provider_compact_unsupported_mutated",
+                        "The explicitly unsupported Claude Compact request mutated Session history.",
+                        {
+                            "beforeSequence": expected_sequence,
+                            "afterSequence": actual_sequence,
+                        },
+                    )
+                raise AcceptanceUnsupported(
+                    "capability_unsupported",
+                    "Claude Agent SDK Compact is explicitly unsupported.",
+                    {
+                        "provider": self.options.provider,
+                        "supportMode": "unsupported",
+                        "httpStatus": status,
+                        "sessionSequenceUnchanged": True,
+                        "lastEventSequence": actual_sequence,
+                    },
+                ) from None
+            raise AcceptanceError(
+                "runner.real_provider_compact_unexpectedly_supported",
+                "Claude Compact was accepted even though the Provider capability is explicitly unsupported.",
+                {"provider": self.options.provider},
+            )
+
+        operation = json_object(
+            self.api.request(
+                "POST",
+                path,
+                {"expectedLastEventSequence": expected_sequence},
+                expected=(202,),
+            ),
+            "real Provider Compact operation",
+        )
+        turn_id, execution_id, control_command = self._queued_operation_identity(
+            operation,
+            operation_type="compact",
+            turn_kind="compact",
+            command_type="CompactSession",
+        )
+        terminal, events = self._wait_for_turn_terminal(turn_id, "execution.completed")
+        compact_items = [
+            event
+            for event in events
+            if event.get("eventType") == "item.completed"
+            and isinstance(event.get("payload"), dict)
+            and event["payload"].get("itemType") == "context_compaction"
+        ]
+        if len(compact_items) != 1:
+            raise AcceptanceError(
+                "runner.real_provider_compact_boundary_missing",
+                "Codex Compact did not persist exactly one completed context-compaction boundary.",
+                {"turnId": turn_id, "boundaryCount": len(compact_items)},
+            )
+        semantic = self._single_execution_event(events, "thread.state.changed")
+        semantic_payload = json_object(semantic.get("payload"), "Compact semantic payload")
+        if semantic_payload.get("state") != "compacted" or semantic_payload.get("supportMode") != "native":
+            raise AcceptanceError(
+                "runner.real_provider_compact_semantic_invalid",
+                "Codex Compact persisted an invalid semantic terminal.",
+                {
+                    "state": semantic_payload.get("state"),
+                    "supportMode": semantic_payload.get("supportMode"),
+                },
+            )
+        worker_id, generation = self._event_worker_identity(terminal)
+        return {
+            "turnId": turn_id,
+            "executionId": execution_id,
+            "workerId": worker_id,
+            "generation": generation,
+            "supportMode": "native",
+            "controlCommand": {
+                "id": control_command.get("id"),
+                "commandType": control_command.get("commandType"),
+                "statusAtRequest": control_command.get("status"),
+            },
+            "boundaryEvent": self._event_summary(compact_items[0]),
+            "semanticEvent": self._event_summary(semantic),
+            "eventTypes": [str(event.get("eventType")) for event in events],
+            "sequenceRange": self._sequence_range(events),
+        }
+
+    def _real_provider_rollback_emulation(self) -> Mapping[str, Any]:
+        session_id = self._required("session_id")
+        anchor_turn_id = self._required("rollback_anchor_turn_id")
+        session = self._current_session()
+        expected_sequence = self._session_last_event_sequence(session)
+        result = json_object(
+            self.api.request(
+                "POST",
+                f"/v1/sessions/{session_id}/rollback",
+                {
+                    "expectedLastEventSequence": expected_sequence,
+                    "fromTurnId": anchor_turn_id,
+                },
+            ),
+            "real Provider Rollback emulation",
+        )
+        if (
+            result.get("sessionId") != session_id
+            or result.get("fromTurnId") != anchor_turn_id
+            or result.get("supportMode") != "emulated"
+            or result.get("workspaceDisposition") != "unchanged"
+            or result.get("externalSideEffectsReverted") is not False
+            or not isinstance(result.get("removedTurnCount"), int)
+            or int(result["removedTurnCount"]) < 1
+        ):
+            raise AcceptanceError(
+                "runner.real_provider_rollback_result_invalid",
+                "The Control Plane Rollback result omitted its required emulation boundary.",
+                {"result": result},
+            )
+        event_sequence = result.get("eventSequence")
+        if event_sequence != expected_sequence + 1:
+            raise AcceptanceError(
+                "runner.real_provider_rollback_sequence_invalid",
+                "The emulated Rollback did not append exactly one authoritative Session Event.",
+                {"beforeSequence": expected_sequence, "eventSequence": event_sequence},
+            )
+        events = self._all_events()
+        rollback_event = next(
+            (
+                event
+                for event in events
+                if event.get("sequence") == event_sequence
+                and event.get("eventType") == "session.history.rolled-back"
+            ),
+            None,
+        )
+        if rollback_event is None or any(
+            rollback_event.get(key) is not None for key in ("executionId", "workerId", "generation")
+        ):
+            raise AcceptanceError(
+                "runner.real_provider_rollback_event_invalid",
+                "Rollback was not persisted as a Worker-free logical history event.",
+                {"eventSequence": event_sequence},
+            )
+        return {
+            "sessionId": session_id,
+            "fromTurnId": anchor_turn_id,
+            "fromSequence": result.get("fromSequence"),
+            "removedTurnCount": result.get("removedTurnCount"),
+            "supportMode": "emulated",
+            "workspaceDisposition": "unchanged",
+            "externalSideEffectsReverted": False,
+            "workerClaimed": False,
+            "event": self._event_summary(rollback_event),
+            "sessionSequenceRange": self._sequence_range(events),
+        }
+
+    def _real_provider_fork_emulation(self) -> Mapping[str, Any]:
+        source_session_id = self._required("session_id")
+        source_marker = self._real_provider_marker("fork-source")
+        anchor_turn = self._create_turn(
+            f"Reply with exactly {source_marker} and no other text."
+        )
+        anchor_turn_id = self._turn_id(anchor_turn, "pre-Fork marker Turn")
+        anchor_terminal, anchor_events = self._wait_for_turn_terminal(
+            anchor_turn_id,
+            "execution.completed",
+        )
+        rollback_selected = "rollback" in self.options.real_provider_cases
+        anchor_evidence = self._real_provider_turn_evidence(
+            anchor_turn_id,
+            anchor_terminal,
+            anchor_events,
+            source_marker,
+            expected_resume_strategy=(
+                "authoritative-history" if rollback_selected else "native-cursor"
+            ),
+            expected_resume_reason="cursor_absent" if rollback_selected else "cursor_usable",
+        )
+        self.state.last_real_marker = source_marker
+        source = self._current_session()
+        expected_sequence = self._session_last_event_sequence(source)
+        result = json_object(
+            self.api.request(
+                "POST",
+                f"/v1/sessions/{source_session_id}/fork",
+                {
+                    "expectedLastEventSequence": expected_sequence,
+                    "title": "Stage 3 real Provider acceptance fork",
+                },
+                expected=(201,),
+            ),
+            "real Provider Fork emulation",
+        )
+        forked = json_object(result.get("session"), "forked Session")
+        forked_session_id = forked.get("id")
+        if (
+            not isinstance(forked_session_id, str)
+            or not forked_session_id
+            or forked_session_id == source_session_id
+            or result.get("sourceSessionId") != source_session_id
+            or result.get("sourceEventSequence") != expected_sequence
+            or result.get("supportMode") != "emulated"
+            or forked.get("forkSourceSessionId") != source_session_id
+            or forked.get("forkStrategy") != "emulated"
+        ):
+            raise AcceptanceError(
+                "runner.real_provider_fork_result_invalid",
+                "The Control Plane Fork result omitted its logical lineage boundary.",
+                {"result": result},
+            )
+        self.state.session_id = forked_session_id
+        turn = self._create_turn(
+            "Repeat your immediately previous answer exactly. Output no additional text."
+        )
+        turn_id = self._turn_id(turn, "fork continuity Turn")
+        terminal, events = self._wait_for_turn_terminal(turn_id, "execution.completed")
+        continuity = self._real_provider_turn_evidence(
+            turn_id,
+            terminal,
+            events,
+            self._last_real_marker(),
+            expected_resume_strategy="authoritative-history",
+            expected_resume_reason="cursor_absent",
+        )
+        return {
+            "sourceSessionId": source_session_id,
+            "sourceEventSequence": expected_sequence,
+            "forkedSessionId": forked_session_id,
+            "forkSourceTurnId": forked.get("forkSourceTurnId"),
+            "supportMode": "emulated",
+            "providerCursorCopied": False,
+            "sourceAnchor": anchor_evidence,
+            "continuity": continuity,
+        }
+
+    def _current_session(self, session_id: str | None = None) -> dict[str, Any]:
+        resolved_session_id = session_id or self._required("session_id")
+        return json_object(
+            self.api.request("GET", f"/v1/sessions/{resolved_session_id}"),
+            "Agent Session",
+        )
+
+    @staticmethod
+    def _session_last_event_sequence(session: Mapping[str, Any]) -> int:
+        sequence = session.get("lastEventSequence")
+        if not isinstance(sequence, int) or sequence < 0:
+            raise AcceptanceError(
+                "runner.session_sequence_missing",
+                "Agent Session omitted lastEventSequence.",
+            )
+        return sequence
+
+    @staticmethod
+    def _queued_operation_identity(
+        operation: Mapping[str, Any],
+        *,
+        operation_type: str,
+        turn_kind: str,
+        command_type: str,
+    ) -> tuple[str, str, dict[str, Any]]:
+        turn = json_object(operation.get("turn"), f"queued {operation_type} Turn")
+        control_command = json_object(
+            operation.get("controlCommand"),
+            f"queued {operation_type} Control Command",
+        )
+        turn_id = turn.get("id")
+        execution_id = operation.get("executionId")
+        if (
+            operation.get("type") != operation_type
+            or turn.get("turnKind") != turn_kind
+            or not isinstance(turn_id, str)
+            or not turn_id
+            or not isinstance(execution_id, str)
+            or not execution_id
+            or control_command.get("commandType") != command_type
+            or control_command.get("status") != "pending"
+        ):
+            raise AcceptanceError(
+                "runner.real_provider_operation_queue_invalid",
+                f"The queued {operation_type} operation returned an invalid identity.",
+                {"operation": operation},
+            )
+        return turn_id, execution_id, control_command
+
+    @staticmethod
+    def _single_execution_event(
+        events: Sequence[Mapping[str, Any]],
+        event_type: str,
+    ) -> Mapping[str, Any]:
+        matching = [event for event in events if event.get("eventType") == event_type]
+        if len(matching) != 1:
+            raise AcceptanceError(
+                "runner.real_provider_semantic_event_invalid",
+                f"Expected exactly one {event_type} event.",
+                {"eventType": event_type, "count": len(matching)},
+            )
+        return matching[0]
+
+    @staticmethod
+    def _assistant_text_summary(
+        events: Sequence[Mapping[str, Any]],
+        description: str,
+    ) -> dict[str, Any]:
+        deltas: list[str] = []
+        sequences: list[int] = []
+        for event in events:
+            if event.get("eventType") != "content.delta":
+                continue
+            payload = event.get("payload")
+            if not isinstance(payload, dict) or payload.get("streamKind") != "assistant_text":
+                continue
+            if event.get("eventVersion") != 2 or not isinstance(payload.get("delta"), str):
+                raise AcceptanceError(
+                    "runner.real_provider_assistant_delta_invalid",
+                    f"The {description} emitted an invalid assistant Runtime Event.",
+                    {"event": AcceptanceSuite._event_summary(event)},
+                )
+            deltas.append(str(payload["delta"]))
+            if isinstance(event.get("sequence"), int):
+                sequences.append(int(event["sequence"]))
+        text = "".join(deltas)
+        if not text.strip():
+            raise AcceptanceError(
+                "runner.real_provider_assistant_text_missing",
+                f"The {description} completed without canonical assistant text.",
+            )
+        return {
+            "deltaCount": len(deltas),
+            "textBytes": len(text.encode("utf-8")),
+            "textSha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+            "sequenceRange": {
+                "first": min(sequences) if sequences else None,
+                "last": max(sequences) if sequences else None,
+            },
+        }
+
+    def _real_provider_marker(self, case: str = "continuity") -> str:
         session_id = self._required("session_id")
         provider = re.sub(r"[^A-Za-z0-9]+", "_", self.options.provider).strip("_").upper()
         digest = hashlib.sha256(
-            f"synara-real-provider-smoke-v1\0{session_id}\0{self.options.provider}".encode("utf-8")
+            f"synara-real-provider-smoke-v1\0{session_id}\0{self.options.provider}\0{case}".encode(
+                "utf-8"
+            )
         ).hexdigest()[:16].upper()
-        return f"SYNARA_REAL_PROVIDER_SMOKE_{provider}_{digest}"
+        label = re.sub(r"[^A-Za-z0-9]+", "_", case).strip("_").upper()
+        return f"SYNARA_REAL_PROVIDER_{label}_{provider}_{digest}"
+
+    def _last_real_marker(self) -> str:
+        marker = self.state.last_real_marker
+        if not isinstance(marker, str) or not marker:
+            raise AcceptanceError(
+                "runner.real_provider_marker_missing",
+                "The latest real Provider marker was unavailable before continuity verification.",
+            )
+        return marker
 
     def _pending_real_turn_id(self) -> str:
         turn_id = self.state.pending_real_turn_id
@@ -6366,17 +7312,54 @@ class AcceptanceSuite:
             "turnSequenceRange": self._sequence_range(turn_events),
         }
 
-    def _create_turn(self, input_text: str) -> dict[str, Any]:
+    def _create_turn(
+        self,
+        input_text: str,
+        *,
+        runtime_mode: str = "full-access",
+        interaction_mode: str = "default",
+    ) -> dict[str, Any]:
         session_id = self._required("session_id")
         return json_object(
             self.api.request(
                 "POST",
                 f"/v1/sessions/{session_id}/turns",
-                {"inputText": input_text, "runtimeMode": "full-access", "interactionMode": "default"},
+                {
+                    "inputText": input_text,
+                    "runtimeMode": runtime_mode,
+                    "interactionMode": interaction_mode,
+                },
                 expected=(201,),
             ),
             "turn",
         )
+
+    @staticmethod
+    def _turn_id(turn: Mapping[str, Any], description: str) -> str:
+        turn_id = turn.get("id")
+        if not isinstance(turn_id, str) or not turn_id:
+            raise AcceptanceError(
+                "runner.turn_id_missing",
+                f"The {description} did not return an ID.",
+            )
+        return turn_id
+
+    @staticmethod
+    def _interaction_identity(interaction: Mapping[str, Any], description: str) -> tuple[str, str]:
+        execution_id = interaction.get("executionId")
+        request_id = interaction.get("requestId")
+        if (
+            not isinstance(execution_id, str)
+            or not execution_id
+            or not isinstance(request_id, str)
+            or not request_id
+        ):
+            raise AcceptanceError(
+                "runner.interaction_identity_missing",
+                f"The {description} omitted its Execution or Request ID.",
+                {"interactionId": interaction.get("id")},
+            )
+        return execution_id, request_id
 
     def _wait_for_turn_created(self, turn_id: str) -> dict[str, Any]:
         def created_probe() -> dict[str, Any] | None:
@@ -6704,6 +7687,18 @@ def markdown_from_report(report: Mapping[str, Any]) -> str:
     ]
     configuration = report.get("configuration")
     failure_matrix = configuration.get("failureMatrix") if isinstance(configuration, dict) else None
+    real_provider = configuration.get("realProvider") if isinstance(configuration, dict) else None
+    if isinstance(real_provider, dict) and real_provider.get("requestedCases"):
+        lines.extend(
+            [
+                "",
+                "## Requested real Provider cases",
+                "",
+                "```json",
+                json.dumps(real_provider, indent=2, sort_keys=True, ensure_ascii=False),
+                "```",
+            ]
+        )
     if isinstance(failure_matrix, dict) and failure_matrix.get("requestedCases"):
         lines.extend(
             [
@@ -6886,6 +7881,18 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
         help="Overall timeout in seconds (default: Local 180, SSH/Docker 900, Kubernetes 1200)",
     )
     parser.add_argument("--runner-command-json", help="Provider Host command as a JSON string array")
+    parser.add_argument(
+        "--real-provider-case",
+        action="append",
+        choices=REAL_PROVIDER_CASES,
+        default=[],
+        help="Add a real Provider product-path case to real-provider-smoke; repeat to select multiple cases",
+    )
+    parser.add_argument(
+        "--real-provider-matrix",
+        action="store_true",
+        help="Run every implemented real Provider product-path case after the two-Turn smoke baseline",
+    )
     parser.add_argument("--skip-build", action="store_true")
     parser.add_argument("--control-plane-binary", type=pathlib.Path)
     parser.add_argument("--keep", action="store_true", help="Keep SQLite, workspace, cache, and built binary")
@@ -7046,6 +8053,13 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
         requested_failure_cases.extend(TARGET_FAILURE_CASES[parsed.target])
     requested_failure_case_set = set(requested_failure_cases)
     failure_cases = tuple(case for case in FAILURE_CASES if case in requested_failure_case_set)
+    requested_real_provider_cases = list(parsed.real_provider_case)
+    if parsed.real_provider_matrix:
+        requested_real_provider_cases.extend(REAL_PROVIDER_CASES)
+    requested_real_provider_case_set = set(requested_real_provider_cases)
+    real_provider_cases = tuple(
+        case for case in REAL_PROVIDER_CASES if case in requested_real_provider_case_set
+    )
     if parsed.failure_only and not failure_cases:
         parser.error("--failure-only requires --failure-matrix or at least one --failure-case")
     if parsed.suite == "real-provider-smoke":
@@ -7055,6 +8069,10 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
             parser.error(
                 "--suite real-provider-smoke cannot be combined with fixture failure/canary options"
             )
+    elif real_provider_cases:
+        parser.error(
+            "--real-provider-case and --real-provider-matrix require --suite real-provider-smoke"
+        )
     return RunnerOptions(
         target=parsed.target,
         provider=parsed.provider,
@@ -7092,6 +8110,7 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
         docker_allow_network_interruption=parsed.docker_allow_network_interruption,
         kubernetes_allow_node_drain=parsed.kubernetes_allow_node_drain,
         failure_only=parsed.failure_only,
+        real_provider_cases=real_provider_cases,
     )
 
 
@@ -7217,6 +8236,15 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "networkOutageSeconds": options.network_outage_seconds,
                 "realProviderReleaseGate": False,
                 "boundary": evidence_boundary,
+            },
+            "realProvider": {
+                "requestedCases": list(options.real_provider_cases),
+                "ambientAuthentication": real_provider_smoke,
+                "boundary": (
+                    "selected real Provider cases run after the two-Turn baseline and before Control Plane restart"
+                    if options.real_provider_cases
+                    else "two-Turn marker and native-cursor continuity baseline"
+                ),
             },
             "runnerCommand": {
                 "executable": pathlib.Path(options.runner_command[0]).name,

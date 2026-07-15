@@ -150,11 +150,14 @@ class ClaudeAgentSdkRuntime {
   private readonly queryFactory: ClaudeQueryFactory;
   private readonly pendingApprovals = new Map<string, PendingApproval>();
   private readonly pendingUserInputs = new Map<string, PendingUserInput>();
+  private readonly cancelledApprovalRequestIds = new Set<string>();
+  private readonly cancelledUserInputRequestIds = new Set<string>();
   private activeQuery: ClaudeQueryRuntime | undefined;
   private activePromptStream: PromptStream | undefined;
   private resumeCursor: string | undefined;
   private forceCloseTimer: NodeJS.Timeout | undefined;
   private requestSequence = 0;
+  private pendingSteerResults = 0;
   private interruptRequested = false;
   private settled = false;
 
@@ -470,10 +473,15 @@ class ClaudeAgentSdkRuntime {
       };
       this.pendingApprovals.set(requestId, pending);
       pending.cleanup = registerAbort(callbackOptions.signal, () => {
-        this.pendingApprovals.delete(requestId);
+        if (this.pendingApprovals.delete(requestId)) {
+          this.cancelledApprovalRequestIds.add(requestId);
+        }
         resolve({ behavior: "deny", message: "Tool execution was cancelled." });
       });
-      if (!this.pendingApprovals.has(requestId)) return;
+      if (!this.pendingApprovals.has(requestId)) {
+        this.cancelledApprovalRequestIds.delete(requestId);
+        return;
+      }
       this.options.emit({
         type: "interaction",
         interactionType: "approval",
@@ -506,10 +514,15 @@ class ClaudeAgentSdkRuntime {
       };
       this.pendingUserInputs.set(requestId, pending);
       pending.cleanup = registerAbort(callbackOptions.signal, () => {
-        this.pendingUserInputs.delete(requestId);
+        if (this.pendingUserInputs.delete(requestId)) {
+          this.cancelledUserInputRequestIds.add(requestId);
+        }
         resolve({ behavior: "deny", message: "User input was cancelled." });
       });
-      if (!this.pendingUserInputs.has(requestId)) return;
+      if (!this.pendingUserInputs.has(requestId)) {
+        this.cancelledUserInputRequestIds.delete(requestId);
+        return;
+      }
       this.options.emit({
         type: "interaction",
         interactionType: "user-input",
@@ -526,7 +539,10 @@ class ClaudeAgentSdkRuntime {
   private resolveApproval(payload: Record<string, unknown>): void {
     const requestId = requiredString(payload.requestId, "ResolveApproval requestId");
     const pending = this.pendingApprovals.get(requestId);
-    if (!pending) throw new Error(`Unknown pending Claude approval request: ${requestId}`);
+    if (!pending) {
+      if (this.cancelledApprovalRequestIds.delete(requestId)) return;
+      throw new Error(`Unknown pending Claude approval request: ${requestId}`);
+    }
     const resolution = asRecord(payload.resolution);
     const decision = readString(resolution, "decision");
     if (decision !== "accept" && decision !== "decline") {
@@ -544,7 +560,10 @@ class ClaudeAgentSdkRuntime {
   private resolveUserInput(payload: Record<string, unknown>): void {
     const requestId = requiredString(payload.requestId, "ResolveUserInput requestId");
     const pending = this.pendingUserInputs.get(requestId);
-    if (!pending) throw new Error(`Unknown pending Claude user-input request: ${requestId}`);
+    if (!pending) {
+      if (this.cancelledUserInputRequestIds.delete(requestId)) return;
+      throw new Error(`Unknown pending Claude user-input request: ${requestId}`);
+    }
     const resolution = asRecord(payload.resolution);
     const answers = asRecord(resolution?.answers);
     if (!answers) throw new Error("Claude user-input resolution must include an answers object.");
@@ -564,6 +583,7 @@ class ClaudeAgentSdkRuntime {
     if (this.settled || this.interruptRequested || !this.activePromptStream) {
       throw new Error("Claude Agent SDK does not have an active steerable Query.");
     }
+    this.pendingSteerResults += 1;
     this.activePromptStream.push(inputText);
   }
 
@@ -648,9 +668,39 @@ class ClaudeAgentSdkRuntime {
         payload: { provider: "claudeAgent", ...numericFields(usage) },
       });
     }
-    if (readString(record, "subtype") !== "success" || record.is_error === true) {
+    const subtype = readString(record, "subtype");
+    const explicitErrors = Array.isArray(record.errors)
+      ? record.errors.filter(
+          (value): value is string => typeof value === "string" && Boolean(value),
+        )
+      : [];
+    const reviewTextAvailable =
+      state.outputText.some((value) => Boolean(value.trim())) ||
+      Boolean(readString(record, "result"));
+    const toleratedReviewError =
+      this.options.operation?.commandType === "StartReview" &&
+      subtype === "success" &&
+      record.is_error === true &&
+      explicitErrors.length === 0 &&
+      reviewTextAvailable;
+    if (subtype !== "success" || (record.is_error === true && !toleratedReviewError)) {
       this.failOpenTools(state);
       throw new Error(resultErrorMessage(record));
+    }
+    if (toleratedReviewError) {
+      this.options.emit({
+        type: "event",
+        eventType: "runtime.provider.warning",
+        payload: {
+          provider: "claudeAgent",
+          message:
+            "Claude Agent SDK marked a successful read-only Review with text as an error; Synara accepted the review because no explicit errors were reported.",
+        },
+      });
+    }
+    if (this.pendingSteerResults > 0) {
+      this.pendingSteerResults -= 1;
+      return undefined;
     }
     if (state.tools.size > 0) {
       this.failOpenTools(state);
@@ -1062,7 +1112,12 @@ class ClaudeAgentSdkRuntime {
     const base = this.safeString(nativeId, 200) ?? String(++this.requestSequence);
     const generation = this.options.input.execution.generation;
     let requestId = providerInteractionRequestId("claude", generation, kind, base);
-    while (this.pendingApprovals.has(requestId) || this.pendingUserInputs.has(requestId)) {
+    while (
+      this.pendingApprovals.has(requestId) ||
+      this.pendingUserInputs.has(requestId) ||
+      this.cancelledApprovalRequestIds.has(requestId) ||
+      this.cancelledUserInputRequestIds.has(requestId)
+    ) {
       requestId = providerInteractionRequestId(
         "claude",
         generation,
@@ -1075,12 +1130,14 @@ class ClaudeAgentSdkRuntime {
   }
 
   private cancelPendingInteractions(): void {
-    for (const pending of this.pendingApprovals.values()) {
+    for (const [requestId, pending] of this.pendingApprovals) {
+      this.cancelledApprovalRequestIds.add(requestId);
       pending.cleanup();
       pending.resolve({ behavior: "deny", message: "Tool execution was cancelled." });
     }
     this.pendingApprovals.clear();
-    for (const pending of this.pendingUserInputs.values()) {
+    for (const [requestId, pending] of this.pendingUserInputs) {
+      this.cancelledUserInputRequestIds.add(requestId);
       pending.cleanup();
       pending.resolve({ behavior: "deny", message: "User input was cancelled." });
     }
