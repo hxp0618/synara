@@ -197,7 +197,7 @@ curl --fail-with-body --no-buffer \
 
 - `synara_outbox_pending`
 - `synara_outbox_oldest_pending_seconds`
-- `synara_outbox_retry`
+- `synara_outbox_retrying`
 - `synara_outbox_dead_letter`
 
 处置：
@@ -297,9 +297,11 @@ KIND_BIN=/path/to/kind deploy/kubernetes/kind-acceptance.sh
 ## 12. 相关资料
 
 - `docs/release-checklists/stage-2-control-plane.md`
+- `docs/reports/stage-2-production-acceptance-b507b0c3.md`（当前固定 PASS 证据）
 - `docs/reports/stage-2-production-acceptance.md`
 - `docs/reports/stage-2-production-acceptance-1a53c93a.md`
 - `docs/reports/stage-2-production-acceptance-acf63b43.md`
+- `docs/reports/stage-2-production-acceptance-0c42b0ec.md`
 - `deploy/saas/README.md`
 - `deploy/kubernetes/README.md`
 - `deploy/kubernetes/monitoring/prometheus-rules.yaml`

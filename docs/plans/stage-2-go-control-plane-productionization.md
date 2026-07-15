@@ -19,10 +19,10 @@
 - **计划基线提交**：`05c3c5da`
 - **工作区状态**：以执行时的 Git 状态为准，不再假设计划基线中的未提交文件仍存在
 - **当前 Schema**：forward-only migration 已连续到 `000031_session_execution_cursor_lineage.sql`
-- **验收证据边界**：最新完整 Stage 2 部署验收固定在 `0c42b0ec`、Migration `000031`；
-  Single-node、Multi-replica、Failure 与 disposable Kind 证据见
-  `docs/reports/stage-2-production-acceptance-0c42b0ec.md`
-- **依赖**：SaaS Tenant/Organization/User 领域模型、Worker Protocol v1、Runtime Event v1
+- **验收证据边界**：最新固定 Stage 2 证据记录为 `b507b0c3`、Migration `000031`，Result 为 `PASS`，见
+  `docs/reports/stage-2-production-acceptance-b507b0c3.md`
+- **依赖**：SaaS Tenant/Organization/User 领域模型；managed path 使用 Worker Protocol v2 与 Runtime
+  Event v2，v1 仅保留给显式 legacy compatibility path 和既有 Event Replay
 - **目标结果**：Go Control Plane 达到可供前端长期依赖、支持多副本部署和可靠恢复的生产基线
 
 ## 2. 阶段目标
@@ -80,8 +80,9 @@
 000031 Session Cursor state/lineage quarantine and one active Execution per Session
 ```
 
-这些 Migration 属于同一生产 Schema 链，已在 `acf63b43` 首次固定，并在 `0c42b0ec` 的 PostgreSQL、
-Compose 和 Kind 部署验收中重新验证；历史报告仍保留，但当前证据以最新 `000031` 报告为准。
+这些 Migration 属于同一生产 Schema 链，已在 `acf63b43` 首次固定，并在 `0c42b0ec` 与 `b507b0c3`
+的 PostgreSQL、Compose 和 Kind 部署验收中重新验证；历史报告仍保留，当前固定证据以
+`docs/reports/stage-2-production-acceptance-b507b0c3.md` 为准。
 
 ### 3.3 已有前端接入
 
@@ -283,7 +284,8 @@ archived -> retained/deleted
 - 并发 Turn/Create/Worker Event 不产生重复 Sequence。
 - 重复 `eventId` 幂等。
 - 相同 Sequence 不同 Event ID 必须失败。
-- Event Payload 通过 Runtime Event v1 验证。
+- Managed path 的 Event Payload 通过 Runtime Event v2 验证；Runtime Event v1 只用于显式 legacy
+  Provider Host v1 compatibility path 和既有记录回放。
 - 超大 Payload 被拒绝并改用 Artifact Reference。
 
 ### B 验收
@@ -462,7 +464,7 @@ process-local-wakeup-only
 
 ### E 验收
 
-- MinIO 与真实 S3 兼容测试通过。
+- 仓库内 MinIO 与 S3-compatible 路径测试通过；真实 AWS S3 需在获得可写 Bucket 授权后单独验收。
 - 越权 Object Key、伪造 Hash、超限上传均失败。
 - Control Plane 重启后 Pending Upload 可以安全继续或过期清理。
 - Artifact Payload 不经由 WebSocket Event 内联传输。
@@ -766,7 +768,7 @@ errorCode
 - 接入 Metrics 和 Graceful Shutdown。
 - 添加 PostgreSQL 并发测试。
 
-### 当前执行进度（2026-07-14 文档同步）
+### 当前执行进度（2026-07-15 文档同步）
 
 - [x] Step 0 Drift Audit：已完成，结果记录在
       `docs/plans/stage-2-drift-audit.md`；初次审计把工作流 A-F、H-I 标为 `partial`、G 标为 `missing`，
@@ -793,7 +795,7 @@ errorCode
       Execution Cancel 和 Approval/User Input Resolve 的事务型 `Idempotency-Key`，同 Key 冲突返回稳定
       `409`，跨 PostgreSQL 连接池并发只执行一次副作用。
 - [x] Session 状态机已补齐 active/suspended/archived；Execution 已补齐用户 Cancel、
-      waiting-for-approval、Cancel/Complete 终态竞争、Worker Protocol Version、Drain 和重新注册 Token
+      waiting-for-approval、Cancel/Complete 终态竞争、Worker Protocol v2、Drain 和重新注册 Token
       Rotation 语义。
 - [x] Approval/User Input 请求与 Runtime Event 原子持久化；Resolve 校验 Lease/Generation、拒绝过期
       Lease 并生成可回放 resolved Event。Provider Runner 双向投递明确进入 Stage 3。
@@ -828,7 +830,11 @@ errorCode
       disposable Stage 2 Kind；报告固定 Commit、Migration Version、前后端 Proxy、故障与清理证据，见
       `docs/reports/stage-2-production-acceptance-acf63b43.md`。
 - [x] `0c42b0ec` / Migration `000031` 在 Session/Execution Capability Projection 变更后再次通过四套
-      部署验收，当前固定报告见 `docs/reports/stage-2-production-acceptance-0c42b0ec.md`。
+      部署验收，该历史固定报告见 `docs/reports/stage-2-production-acceptance-0c42b0ec.md`。
+- [x] `b507b0c3` / Migration `000031` 已固定 31 个 forward-only DDL、32 files/398 tests TypeScript
+      验证、Go/Race/PostgreSQL 17、隔离 SQLite UI、四个 production build、浏览器 SSE 停止/重启恢复、
+      四套部署验收与精确清理；当前 PASS 报告见
+      `docs/reports/stage-2-production-acceptance-b507b0c3.md`。
 
 ### Step 2：多副本正确性
 
@@ -1012,7 +1018,7 @@ bun run test
 - [x] Tenant Context 在 Web 应用级统一管理。
 - [x] Project、Session、Turn 创建具备幂等语义。
 - [x] Execution 状态机和并发终态已冻结并测试。
-- [x] Worker Protocol Version、Drain 和 Token Rotation 有明确实现。
+- [x] Managed Worker Protocol v2、Drain 和 Token Rotation 有明确实现；v1 仅为 legacy contract。
 - [x] 多 Control Plane 副本不依赖进程内权威状态。
 - [x] SSE 能跨副本、跨重启从 PostgreSQL Sequence 恢复。
 - [x] Artifact Complete 由 Control Plane 独立验证 Object 内容。
@@ -1021,7 +1027,8 @@ bun run test
 - [x] 未配置 Control Plane 时本地模式保持可用。
 - [x] `1a53c93a` / Migration `000028` 基线的 Single-node Compose Acceptance 通过。
 - [x] `1a53c93a` / Migration `000028` 基线的 Enterprise 双副本 Acceptance 通过。
-- [x] `0c42b0ec` / Migration `000031` 的 Single-node、Multi-replica、Failure 和 Kind 部署验收已固定。
+- [x] `b507b0c3` / Migration `000031` 是当前 PASS 证据记录；Go/Race/PostgreSQL 17、隔离 SQLite UI、
+      Single-node、Multi-replica、Failure、Kind 与浏览器 SSE recovery 均已记录。
 - [x] 生产 Runbook 和告警规则完成。
 - [x] 未引入 Credential、Token、Prompt 的日志泄漏。
 

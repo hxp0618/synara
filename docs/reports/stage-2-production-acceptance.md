@@ -1,9 +1,9 @@
 # Stage 2 Production Acceptance Report
 
 > Historical evidence only: this report is fixed to the commits named below and its 16-Migration Kind baseline.
-> It does not prove the current repository state. The current complete Stage 2 deployment baseline is
-> `docs/reports/stage-2-production-acceptance-acf63b43.md`, fixed to Migration `000031`; the intermediate
-> `docs/reports/stage-2-production-acceptance-1a53c93a.md` report remains fixed to `000028`.
+> It does not prove the current repository state. The current fixed Stage 2 evidence record is
+> `docs/reports/stage-2-production-acceptance-b507b0c3.md`, fixed to Migration `000031` with Result `PASS`. The
+> intermediate `docs/reports/stage-2-production-acceptance-1a53c93a.md` report remains fixed to `000028`.
 
 - Date: 2026-07-13
 - Branch: `codex/saas-tenancy-user`
@@ -92,7 +92,9 @@ Verified:
 - Multi-replica Compose Acceptance covers cross-replica Login revocation, Turn/Claim concurrency, SSE catch-up,
   migration locking, replica loss and global SSE connection leases.
 - Focused Web tests cover Control Plane Context, authoritative Projection and local recap isolation.
-- Go tests cover Runtime Event v1 version/object/65,536-byte boundaries and Artifact fallback.
+- At this historical baseline, Go tests covered Runtime Event v1 version/object/65,536-byte boundaries and Artifact
+  fallback. The current managed path uses Runtime Event v2; v1 is retained only for the explicit legacy
+  compatibility path and existing-row replay.
 
 Final verification after the browser route fix:
 
