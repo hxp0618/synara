@@ -45,6 +45,7 @@ export type ClaudeQueryFactory = (input: {
 type ClaudeRunOptions = {
   input: RunnerInput;
   environment: NodeJS.ProcessEnv;
+  usesAmbientAuthentication: boolean;
   redact: TerminalRedactor;
   emit: (message: RunnerMessage) => void;
   authoritativePrompt: string;
@@ -330,7 +331,7 @@ class ClaudeAgentSdkRuntime {
     return {
       ...this.options.environment,
       CLAUDE_AGENT_SDK_CLIENT_APP: "synara-provider-host/0.2.0",
-      ...(this.options.input.runtimeOutputDirectory
+      ...(!this.options.usesAmbientAuthentication && this.options.input.runtimeOutputDirectory
         ? {
             CLAUDE_CONFIG_DIR: this.options.input.runtimeOutputDirectory,
             ...(process.platform === "win32"

@@ -9,7 +9,7 @@ import type { ClaudeQueryFactory, ClaudeQueryRuntime } from "./claudeAgentSdkRun
 import { startProviderHostRun, type RunnerInput, type RunnerMessage } from "./providerHost";
 
 describe("Claude Agent SDK runtime", () => {
-  it("binds the agentd-created Runtime Output Root into the Claude environment", async () => {
+  it("binds the agentd-created Runtime Output Root for controlled Claude credentials", async () => {
     const runtimeOutputDirectory = "/tmp/synara-claude-runtime-output";
     const queryFactory: ClaudeQueryFactory = ({ options }) =>
       fakeQuery(
@@ -28,9 +28,33 @@ describe("Claude Agent SDK runtime", () => {
 
     const run = startProviderHostRun(
       claudeInput({ inputText: "use controlled output", runtimeOutputDirectory }),
-      null,
+      { payload: { apiKey: "provider-secret" } },
       () => {},
       { claudeQueryFactory: queryFactory },
+    );
+
+    await expect(run.result).resolves.toMatchObject({ output: { text: "done" } });
+  });
+
+  it("preserves the user Claude config path for ambient OAuth authentication", async () => {
+    const runtimeOutputDirectory = "/tmp/synara-claude-runtime-output";
+    const queryFactory: ClaudeQueryFactory = ({ options }) =>
+      fakeQuery(
+        (async function* () {
+          const environment = requiredOptions(options).env;
+          expect(environment?.HOME).toBe("/home/worker");
+          expect(environment?.CLAUDE_CONFIG_DIR).toBeUndefined();
+          expect(environment?.CLAUDE_SECURESTORAGE_CONFIG_DIR).toBeUndefined();
+          yield sdkMessage(systemInit("session-ambient-oauth", "claude-test"));
+          yield sdkMessage(successResult("session-ambient-oauth", "done", {}));
+        })(),
+      );
+
+    const run = startProviderHostRun(
+      claudeInput({ inputText: "use ambient OAuth", runtimeOutputDirectory }),
+      null,
+      () => {},
+      { claudeQueryFactory: queryFactory, environment: { HOME: "/home/worker" } },
     );
 
     await expect(run.result).resolves.toMatchObject({ output: { text: "done" } });

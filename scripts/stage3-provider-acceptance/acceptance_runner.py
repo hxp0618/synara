@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Stage 3 Provider Runtime fixture acceptance runner.
+"""Stage 3 Provider Runtime acceptance runner.
 
 Target drivers exercise production Control Plane, Worker, and agentd paths.
 The runner never registers, heartbeats, or claims a Worker on behalf of
@@ -67,6 +67,8 @@ JSON_REPORT_NAME = "acceptance-report.json"
 MARKDOWN_REPORT_NAME = "acceptance-report.md"
 PROVIDERS = ("codex", "claudeAgent", "cursor", "gemini", "grok", "kilo", "opencode", "pi")
 FIXTURE_SUPPORTED_PROVIDERS = frozenset({"codex", "claudeAgent"})
+REAL_PROVIDER_SMOKE_PROVIDERS = frozenset({"codex", "claudeAgent"})
+SUITES = ("fixture", "real-provider-smoke")
 FAILURE_CASES = (
     "provider-malformed",
     "provider-oversized",
@@ -366,6 +368,7 @@ class HTTPFailure(AcceptanceError):
 class RunnerOptions:
     target: str
     provider: str
+    suite: str
     output_dir: pathlib.Path
     timeout_seconds: float
     runner_command: tuple[str, ...]
@@ -442,6 +445,7 @@ class ScenarioState:
     worker_replaced: bool = False
     replacement_worker_id: str | None = None
     pending_approval: dict[str, Any] | None = None
+    pending_real_turn_id: str | None = None
 
 
 class APIClient:
@@ -4438,6 +4442,9 @@ class AcceptanceSuite:
             self._dev_login,
             requires=("environment.control-plane-start",),
         )
+        if self.options.suite == "real-provider-smoke":
+            self._run_real_provider_smoke()
+            return self.cases
         if self.options.failure_only:
             self._run_failure_only()
             return self.cases
@@ -4574,6 +4581,60 @@ class AcceptanceSuite:
             requires=second_requires,
         )
         return self.cases
+
+    def _run_real_provider_smoke(self) -> None:
+        self._case(
+            "runtime.target-provision",
+            "Provision the exact Target for the real Provider",
+            self._provision_target,
+            requires=("identity.dev-login",),
+        )
+        self._case(
+            "resources.real-provider-project-session",
+            "Create an ambient-auth real Provider Project and Session",
+            self._create_resources,
+            requires=("runtime.target-provision",),
+        )
+        self._case(
+            "real-provider.turn-1-start",
+            "Start the first real Provider Turn",
+            self._start_real_provider_turn,
+            requires=("resources.real-provider-project-session",),
+        )
+        self._case(
+            "runtime.real-provider-worker-discovery",
+            "Discover the compatible real Provider Worker manifest",
+            self._discover_real_provider_worker,
+            requires=("real-provider.turn-1-start",),
+        )
+        self._case(
+            "real-provider.turn-1",
+            "Complete the first real Provider Turn with the exact marker",
+            self._complete_first_real_provider_turn,
+            requires=("runtime.real-provider-worker-discovery",),
+        )
+        if self.options.restart_control_plane:
+            self._case(
+                "recovery.control-plane-restart",
+                "Restart Control Plane with persisted real Provider state",
+                self._restart_control_plane,
+                requires=("real-provider.turn-1",),
+            )
+        else:
+            self._fail_case(
+                "recovery.control-plane-restart",
+                "Restart Control Plane with persisted real Provider state",
+                "runner.restart_disabled",
+                "Control Plane restart was disabled by the caller.",
+                {"requiredInputs": ["omit --no-restart-control-plane"]},
+            )
+            self._failed_cases.add("recovery.control-plane-restart")
+        self._case(
+            "real-provider.turn-2-continuity",
+            "Run a second post-restart real Provider Turn and verify continuity",
+            self._real_provider_second_turn_continuity,
+            requires=("recovery.control-plane-restart",),
+        )
 
     def _run_failure_only(self) -> None:
         if self.driver.lifecycle.execution_pinned:
@@ -4881,9 +4942,21 @@ class AcceptanceSuite:
         if self.driver.lifecycle.execution_pinned:
             readiness_barrier = self._begin_approval_readiness_barrier()
         discovered = self._wait_compatible_manifest(target_id)
-        manifest = discovered["manifest"]
-        provider = discovered["provider"]
-        evidence: dict[str, Any] = {
+        evidence = self._worker_manifest_evidence(discovered)
+        if readiness_barrier is not None:
+            evidence["readinessBarrier"] = dict(readiness_barrier)
+            execution_id = readiness_barrier.get("executionId")
+            if isinstance(execution_id, str) and execution_id:
+                target_evidence = self.driver.observe_execution(target_id, execution_id)
+                if target_evidence:
+                    evidence["targetExecution"] = dict(target_evidence)
+        return evidence
+
+    @staticmethod
+    def _worker_manifest_evidence(discovered: Mapping[str, Any]) -> dict[str, Any]:
+        manifest = json_object(discovered.get("manifest"), "Worker manifest discovery")
+        provider = json_object(discovered.get("provider"), "Worker Provider discovery")
+        return {
             "manifestId": manifest.get("manifestId"),
             "workerStatusCounts": manifest.get("workerStatusCounts"),
             "workerProtocol": manifest.get("workerProtocol"),
@@ -4897,14 +4970,6 @@ class AcceptanceSuite:
                 "releasePolicy": provider.get("releasePolicy"),
             },
         }
-        if readiness_barrier is not None:
-            evidence["readinessBarrier"] = dict(readiness_barrier)
-            execution_id = readiness_barrier.get("executionId")
-            if isinstance(execution_id, str) and execution_id:
-                target_evidence = self.driver.observe_execution(target_id, execution_id)
-                if target_evidence:
-                    evidence["targetExecution"] = dict(target_evidence)
-        return evidence
 
     def _begin_approval_readiness_barrier(self) -> Mapping[str, Any]:
         if self.state.pending_approval is not None:
@@ -5005,25 +5070,29 @@ class AcceptanceSuite:
         tenant_id = self._required("tenant_id")
         organization_id = self._required("organization_id")
         target_id = self._required("target_id")
-        credential = json_object(
-            self.api.request(
-                "POST",
-                f"/v1/tenants/{tenant_id}/credentials",
-                {
-                    "organizationId": organization_id,
-                    "name": "Stage 3 Provider Acceptance Fixture",
-                    "purpose": "provider",
-                    "provider": self.options.provider,
-                    "credentialType": "acceptance_fixture",
-                    "payload": {"acceptanceToken": FIXTURE_CREDENTIAL_SENTINEL},
-                },
-                expected=(201,),
-            ),
-            "credential",
-        )
-        credential_id = credential.get("id")
-        if not isinstance(credential_id, str):
-            raise AcceptanceError("runner.credential_id_missing", "Credential API did not return an ID.")
+        real_provider_smoke = self.options.suite == "real-provider-smoke"
+        credential: dict[str, Any] | None = None
+        credential_id: str | None = None
+        if not real_provider_smoke:
+            credential = json_object(
+                self.api.request(
+                    "POST",
+                    f"/v1/tenants/{tenant_id}/credentials",
+                    {
+                        "organizationId": organization_id,
+                        "name": "Stage 3 Provider Acceptance Fixture",
+                        "purpose": "provider",
+                        "provider": self.options.provider,
+                        "credentialType": "acceptance_fixture",
+                        "payload": {"acceptanceToken": FIXTURE_CREDENTIAL_SENTINEL},
+                    },
+                    expected=(201,),
+                ),
+                "credential",
+            )
+            credential_id = credential.get("id")
+            if not isinstance(credential_id, str):
+                raise AcceptanceError("runner.credential_id_missing", "Credential API did not return an ID.")
         project = json_object(
             self.api.request(
                 "POST",
@@ -5047,18 +5116,28 @@ class AcceptanceSuite:
         project_id = project.get("id")
         if not isinstance(project_id, str):
             raise AcceptanceError("runner.project_id_missing", "Project API did not return an ID.")
+        session_input: dict[str, Any] = {
+            "title": (
+                "Stage 3 Real Provider Smoke"
+                if real_provider_smoke
+                else "Stage 3 Provider Acceptance"
+            ),
+            "visibility": "project",
+            "provider": self.options.provider,
+            "executionTargetId": target_id,
+        }
+        if credential_id is not None:
+            session_input.update(
+                {
+                    "model": "stage3-acceptance-fixture",
+                    "providerCredentialId": credential_id,
+                }
+            )
         session = json_object(
             self.api.request(
                 "POST",
                 f"/v1/projects/{project_id}/sessions",
-                {
-                    "title": "Stage 3 Provider Acceptance",
-                    "visibility": "project",
-                    "provider": self.options.provider,
-                    "model": "stage3-acceptance-fixture",
-                    "providerCredentialId": credential_id,
-                    "executionTargetId": target_id,
-                },
+                session_input,
                 expected=(201,),
             ),
             "session",
@@ -5066,7 +5145,10 @@ class AcceptanceSuite:
         session_id = session.get("id")
         if not isinstance(session_id, str):
             raise AcceptanceError("runner.session_id_missing", "Session API did not return an ID.")
-        if session.get("executionTargetId") != target_id or session.get("providerCredentialId") != credential_id:
+        if (
+            session.get("executionTargetId") != target_id
+            or session.get("providerCredentialId") != credential_id
+        ):
             raise AcceptanceError(
                 "runner.session_binding_mismatch",
                 "Session did not retain the requested Target and Credential bindings.",
@@ -5080,13 +5162,20 @@ class AcceptanceSuite:
         self.state.session_id = session_id
         self.state.last_sequence = int(session.get("lastEventSequence") or 0)
         return {
-            "credential": {
-                "id": credential_id,
-                "provider": credential.get("provider"),
-                "credentialType": credential.get("credentialType"),
-                "version": credential.get("version"),
-                "organizationId": credential.get("organizationId"),
-            },
+            "credential": (
+                {
+                    "id": credential_id,
+                    "provider": credential.get("provider"),
+                    "credentialType": credential.get("credentialType"),
+                    "version": credential.get("version"),
+                    "organizationId": credential.get("organizationId"),
+                }
+                if credential is not None
+                else {
+                    "delivery": "ambient-auth",
+                    "providerCredentialId": session.get("providerCredentialId"),
+                }
+            ),
             "project": {
                 "id": project_id,
                 "organizationId": project.get("organizationId"),
@@ -5099,6 +5188,286 @@ class AcceptanceSuite:
                 "providerCredentialId": session.get("providerCredentialId"),
                 "lastEventSequence": session.get("lastEventSequence"),
             },
+        }
+
+    def _start_real_provider_turn(self) -> Mapping[str, Any]:
+        if self.state.pending_real_turn_id is not None:
+            raise AcceptanceError(
+                "runner.real_provider_turn_already_started",
+                "The first real Provider smoke Turn was already started.",
+                {"turnId": self.state.pending_real_turn_id},
+            )
+        marker = self._real_provider_marker()
+        turn = self._create_turn(
+            "This is an automated Synara runtime acceptance check. "
+            f"Reply with exactly {marker} and no other text."
+        )
+        turn_id = turn.get("id")
+        if not isinstance(turn_id, str) or not turn_id:
+            raise AcceptanceError(
+                "runner.turn_id_missing",
+                "The first real Provider smoke Turn did not return an ID.",
+            )
+        self.state.pending_real_turn_id = turn_id
+        return {
+            "turnId": turn_id,
+            "expectedMarker": marker,
+            "responseContract": "exact marker with optional surrounding whitespace only",
+        }
+
+    def _discover_real_provider_worker(self) -> Mapping[str, Any]:
+        turn_id = self._pending_real_turn_id()
+        created = self._wait_for_turn_created(turn_id)
+        execution_id = self._event_execution_id(created)
+        target_id = self._required("target_id")
+        discovered = self._wait_compatible_manifest(target_id)
+        evidence = self._worker_manifest_evidence(discovered)
+        evidence.update(
+            {
+                "turnId": turn_id,
+                "executionId": execution_id,
+                "turnCreatedEvent": self._event_summary(created),
+            }
+        )
+        target_evidence = self.driver.observe_execution(target_id, execution_id)
+        if target_evidence:
+            evidence["targetExecution"] = dict(target_evidence)
+        return evidence
+
+    def _complete_first_real_provider_turn(self) -> Mapping[str, Any]:
+        turn_id = self._pending_real_turn_id()
+        terminal, events = self._wait_for_turn_terminal(turn_id, "execution.completed")
+        evidence = self._real_provider_turn_evidence(
+            turn_id,
+            terminal,
+            events,
+            self._real_provider_marker(),
+            expected_resume_strategy="authoritative-history",
+            expected_resume_reason="cursor_absent",
+        )
+        worker_id, generation = self._event_worker_identity(terminal)
+        self.state.first_worker_id = worker_id
+        self.state.first_generation = generation
+        self.state.pending_real_turn_id = None
+        return evidence
+
+    def _real_provider_second_turn_continuity(self) -> Mapping[str, Any]:
+        if self.state.pending_real_turn_id is not None:
+            raise AcceptanceError(
+                "runner.real_provider_turn_pending",
+                "The first real Provider smoke Turn was still pending before continuity verification.",
+                {"turnId": self.state.pending_real_turn_id},
+            )
+        before = self.state.pre_restart_sequence
+        if before is None:
+            events = self._all_events()
+            before = int(events[-1]["sequence"]) if events else 0
+        turn = self._create_turn(
+            "Repeat your immediately previous answer exactly. Output no additional text."
+        )
+        turn_id = turn.get("id")
+        if not isinstance(turn_id, str) or not turn_id:
+            raise AcceptanceError(
+                "runner.turn_id_missing",
+                "The second real Provider smoke Turn did not return an ID.",
+            )
+        terminal, turn_events = self._wait_for_turn_terminal(turn_id, "execution.completed")
+        evidence = self._real_provider_turn_evidence(
+            turn_id,
+            terminal,
+            turn_events,
+            self._real_provider_marker(),
+            expected_resume_strategy="native-cursor",
+            expected_resume_reason="cursor_usable",
+        )
+        all_events = self._all_events()
+        sequences = [int(event["sequence"]) for event in all_events]
+        expected_sequences = list(range(1, sequences[-1] + 1)) if sequences else []
+        if sequences != expected_sequences:
+            raise AcceptanceError(
+                "runner.session_sequence_discontinuous",
+                "Session Event Sequence was not contiguous across the real Provider Control Plane restart.",
+                {"sequences": sequences},
+            )
+        if int(terminal["sequence"]) <= before:
+            raise AcceptanceError(
+                "runner.session_sequence_not_advanced",
+                "The second real Provider Turn did not advance Session Event Sequence.",
+                {"before": before, "after": terminal.get("sequence")},
+            )
+        worker_id, generation = self._event_worker_identity(terminal)
+        evidence.update(
+            {
+                "preRestartSequence": before,
+                "terminalSequence": terminal.get("sequence"),
+                "sessionSequenceRange": self._sequence_range(all_events),
+                "preRestartWorkerId": self.state.first_worker_id,
+                "workerIdChangedAfterRestart": worker_id != self.state.first_worker_id,
+                "firstGeneration": self.state.first_generation,
+                "generation": generation,
+                "continuityAssertion": "native Provider cursor restored the immediately previous answer",
+            }
+        )
+        return evidence
+
+    def _real_provider_marker(self) -> str:
+        session_id = self._required("session_id")
+        provider = re.sub(r"[^A-Za-z0-9]+", "_", self.options.provider).strip("_").upper()
+        digest = hashlib.sha256(
+            f"synara-real-provider-smoke-v1\0{session_id}\0{self.options.provider}".encode("utf-8")
+        ).hexdigest()[:16].upper()
+        return f"SYNARA_REAL_PROVIDER_SMOKE_{provider}_{digest}"
+
+    def _pending_real_turn_id(self) -> str:
+        turn_id = self.state.pending_real_turn_id
+        if not isinstance(turn_id, str) or not turn_id:
+            raise AcceptanceError(
+                "runner.real_provider_turn_missing",
+                "The first real Provider smoke Turn was not available.",
+            )
+        return turn_id
+
+    def _real_provider_turn_evidence(
+        self,
+        turn_id: str,
+        terminal: Mapping[str, Any],
+        events: Sequence[Mapping[str, Any]],
+        expected_marker: str,
+        *,
+        expected_resume_strategy: str,
+        expected_resume_reason: str,
+    ) -> dict[str, Any]:
+        event_types = [str(event.get("eventType")) for event in events]
+        required_types = {
+            "turn.created",
+            "execution.leased",
+            "execution.started",
+            "content.delta",
+            "execution.completed",
+        }
+        missing = sorted(required_types.difference(event_types))
+        if missing:
+            raise AcceptanceError(
+                "runner.real_provider_events_missing",
+                "The real Provider Turn omitted required product-path Runtime Events.",
+                {"turnId": turn_id, "missingEventTypes": missing, "eventTypes": event_types},
+            )
+        legacy_output = [
+            self._event_summary(event)
+            for event in events
+            if event.get("eventType") == "runtime.output.delta"
+        ]
+        if legacy_output:
+            raise AcceptanceError(
+                "runner.real_provider_legacy_runtime_event",
+                "The real Provider Turn emitted legacy assistant output instead of Runtime Event v2.",
+                {"turnId": turn_id, "events": legacy_output},
+            )
+
+        assistant_deltas: list[str] = []
+        assistant_sequences: list[int] = []
+        for event in events:
+            if event.get("eventType") != "content.delta":
+                continue
+            payload = json_object(event.get("payload"), "real Provider content.delta payload")
+            if payload.get("streamKind") != "assistant_text":
+                continue
+            if event.get("eventVersion") != 2:
+                raise AcceptanceError(
+                    "runner.real_provider_runtime_event_version_invalid",
+                    "The real Provider assistant output was not persisted as Runtime Event version 2.",
+                    {"turnId": turn_id, "event": self._event_summary(event)},
+                )
+            delta = payload.get("delta")
+            if not isinstance(delta, str):
+                raise AcceptanceError(
+                    "runner.real_provider_assistant_delta_invalid",
+                    "The real Provider assistant content.delta omitted its text delta.",
+                    {"turnId": turn_id, "event": self._event_summary(event)},
+                )
+            assistant_deltas.append(delta)
+            sequence = event.get("sequence")
+            if isinstance(sequence, int):
+                assistant_sequences.append(sequence)
+        if not assistant_deltas:
+            raise AcceptanceError(
+                "runner.real_provider_assistant_text_missing",
+                "The real Provider Turn completed without canonical assistant text.",
+                {"turnId": turn_id, "eventTypes": event_types},
+            )
+        assistant_text = "".join(assistant_deltas)
+        normalized_text = assistant_text.strip()
+        if normalized_text != expected_marker:
+            raise AcceptanceError(
+                "runner.real_provider_marker_mismatch",
+                "The real Provider assistant response did not match the expected marker.",
+                {
+                    "turnId": turn_id,
+                    "expectedMarker": expected_marker,
+                    "assistantTextLength": len(assistant_text),
+                    "assistantTextSha256": hashlib.sha256(assistant_text.encode("utf-8")).hexdigest(),
+                    "assistantTextPreview": self.redactor.text(normalized_text[:256]),
+                },
+            )
+
+        leased_events = [event for event in events if event.get("eventType") == "execution.leased"]
+        if len(leased_events) != 1:
+            raise AcceptanceError(
+                "runner.real_provider_resume_decision_missing",
+                "The real Provider Turn did not contain exactly one Provider resume decision.",
+                {"turnId": turn_id, "executionLeasedEvents": len(leased_events)},
+            )
+        leased_payload = json_object(leased_events[0].get("payload"), "execution.leased payload")
+        provider_resume = json_object(leased_payload.get("providerResume"), "Provider resume decision")
+        expected_resume = {
+            "requestedStrategy": "native-cursor",
+            "selectedStrategy": expected_resume_strategy,
+            "reasonCode": expected_resume_reason,
+        }
+        actual_resume = {key: provider_resume.get(key) for key in expected_resume}
+        if actual_resume != expected_resume:
+            raise AcceptanceError(
+                "runner.real_provider_resume_decision_mismatch",
+                "The real Provider Turn used an unexpected resume strategy.",
+                {"turnId": turn_id, "expected": expected_resume, "actual": actual_resume},
+            )
+
+        terminal_payload = terminal.get("payload")
+        terminal_output_matches: bool | None = None
+        if isinstance(terminal_payload, dict) and isinstance(terminal_payload.get("output"), dict):
+            output_text = terminal_payload["output"].get("text")
+            if isinstance(output_text, str):
+                terminal_output_matches = output_text.strip() == expected_marker
+                if not terminal_output_matches:
+                    raise AcceptanceError(
+                        "runner.real_provider_terminal_output_mismatch",
+                        "The real Provider terminal output disagreed with canonical assistant Runtime Events.",
+                        {
+                            "turnId": turn_id,
+                            "outputTextLength": len(output_text),
+                            "outputTextSha256": hashlib.sha256(output_text.encode("utf-8")).hexdigest(),
+                        },
+                    )
+
+        worker_id, generation = self._event_worker_identity(terminal)
+        return {
+            "turnId": turn_id,
+            "executionId": terminal.get("executionId"),
+            "workerId": worker_id,
+            "generation": generation,
+            "expectedMarker": expected_marker,
+            "markerMatched": True,
+            "assistantDeltaCount": len(assistant_deltas),
+            "assistantTextBytes": len(assistant_text.encode("utf-8")),
+            "assistantTextSha256": hashlib.sha256(assistant_text.encode("utf-8")).hexdigest(),
+            "assistantSequenceRange": {
+                "first": min(assistant_sequences) if assistant_sequences else None,
+                "last": max(assistant_sequences) if assistant_sequences else None,
+            },
+            "terminalOutputMatched": terminal_output_matches,
+            "providerResume": actual_resume,
+            "eventTypes": event_types,
+            "sequenceRange": self._sequence_range(events),
         }
 
     def _text_tool_usage_artifact(self) -> Mapping[str, Any]:
@@ -6009,6 +6378,20 @@ class AcceptanceSuite:
             "turn",
         )
 
+    def _wait_for_turn_created(self, turn_id: str) -> dict[str, Any]:
+        def created_probe() -> dict[str, Any] | None:
+            for event in self._all_events():
+                if event.get("eventType") != "turn.created" or self._event_turn_id(event) != turn_id:
+                    continue
+                self._event_execution_id(event)
+                sequence = event.get("sequence")
+                if isinstance(sequence, int):
+                    self.state.last_sequence = max(self.state.last_sequence, sequence)
+                return event
+            return None
+
+        return self.api.wait_until(f"turn.created for Turn {turn_id}", created_probe)
+
     def _wait_for_turn_terminal(
         self,
         turn_id: str,
@@ -6026,17 +6409,7 @@ class AcceptanceSuite:
             )
             if created is None:
                 return None
-            execution_id = created.get("executionId")
-            if not isinstance(execution_id, str):
-                created_payload = created.get("payload")
-                if isinstance(created_payload, dict):
-                    execution_id = created_payload.get("executionId")
-            if not isinstance(execution_id, str) or not execution_id:
-                raise AcceptanceError(
-                    "runner.turn_execution_id_missing",
-                    "turn.created did not identify its Execution.",
-                    {"turnId": turn_id, "event": self._event_summary(created)},
-                )
+            execution_id = self._event_execution_id(created)
             matching = [event for event in events if event.get("executionId") == execution_id]
             terminals = [event for event in matching if event.get("eventType") in TERMINAL_EVENT_TYPES]
             if not terminals:
@@ -6194,6 +6567,21 @@ class AcceptanceSuite:
         return None
 
     @staticmethod
+    def _event_execution_id(event: Mapping[str, Any]) -> str:
+        execution_id = event.get("executionId")
+        if not isinstance(execution_id, str):
+            payload = event.get("payload")
+            if isinstance(payload, dict):
+                execution_id = payload.get("executionId")
+        if not isinstance(execution_id, str) or not execution_id:
+            raise AcceptanceError(
+                "runner.turn_execution_id_missing",
+                "turn.created did not identify its Execution.",
+                {"event": AcceptanceSuite._event_summary(event)},
+            )
+        return execution_id
+
+    @staticmethod
     def _event_worker_identity(event: Mapping[str, Any]) -> tuple[str, int]:
         worker_id = event.get("workerId")
         generation = event.get("generation")
@@ -6279,11 +6667,17 @@ def explicit_unsupported_case(
 
 
 def markdown_from_report(report: Mapping[str, Any]) -> str:
+    real_provider_smoke = report.get("mode") == "real-provider-smoke"
     lines = [
-        "# Stage 3 Provider Fixture Acceptance",
+        (
+            "# Stage 3 Real Provider Smoke Acceptance"
+            if real_provider_smoke
+            else "# Stage 3 Provider Fixture Acceptance"
+        ),
         "",
         f"- Schema: `{report['schemaVersion']}`",
         f"- Run: `{report['runId']}`",
+        f"- Mode: `{report.get('mode', 'fixture')}`",
         f"- Target: `{report['target']}`",
         f"- Provider: `{report['provider']}`",
         f"- Status: **{report['status']}**",
@@ -6294,9 +6688,18 @@ def markdown_from_report(report: Mapping[str, Any]) -> str:
         "## Evidence boundary",
         "",
         (
-            "This report uses the deterministic Provider Host fixture through the real Control Plane, agentd, "
-            "Worker Protocol, and selected Target lifecycle. It is not a real Codex App Server or Claude Agent "
-            "SDK release gate."
+            (
+                "This report runs a real Codex App Server or Claude Agent SDK Provider through the real Control "
+                "Plane, selected Target, agentd, Worker Protocol, Provider Host, Control Plane restart, and a "
+                "native-cursor second Turn. It is a narrow two-Turn smoke, not the complete Local or four-Target "
+                "Release Gate."
+            )
+            if real_provider_smoke
+            else (
+                "This report uses the deterministic Provider Host fixture through the real Control Plane, "
+                "agentd, Worker Protocol, and selected Target lifecycle. It is not a real Codex App Server or "
+                "Claude Agent SDK release gate."
+            )
         ),
     ]
     configuration = report.get("configuration")
@@ -6470,6 +6873,12 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--target", default="local", choices=("local", "docker", "ssh", "kubernetes"))
     parser.add_argument("--provider", default="codex", choices=PROVIDERS)
+    parser.add_argument(
+        "--suite",
+        default="fixture",
+        choices=SUITES,
+        help="Acceptance suite: deterministic fixture or a real Codex/Claude two-Turn smoke",
+    )
     parser.add_argument("--output-dir", type=pathlib.Path)
     parser.add_argument(
         "--timeout",
@@ -6639,9 +7048,17 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
     failure_cases = tuple(case for case in FAILURE_CASES if case in requested_failure_case_set)
     if parsed.failure_only and not failure_cases:
         parser.error("--failure-only requires --failure-matrix or at least one --failure-case")
+    if parsed.suite == "real-provider-smoke":
+        if parsed.runner_command_json is None:
+            parser.error("--suite real-provider-smoke requires an explicit --runner-command-json")
+        if failure_cases or parsed.failure_only:
+            parser.error(
+                "--suite real-provider-smoke cannot be combined with fixture failure/canary options"
+            )
     return RunnerOptions(
         target=parsed.target,
         provider=parsed.provider,
+        suite=parsed.suite,
         output_dir=output_dir.resolve(),
         timeout_seconds=timeout_seconds,
         runner_command=runner_command,
@@ -6687,6 +7104,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     started_at = utc_now()
     started = time.monotonic()
     run_id = f"stage3-provider-acceptance-{uuid.uuid4()}"
+    supported_providers = (
+        REAL_PROVIDER_SMOKE_PROVIDERS
+        if options.suite == "real-provider-smoke"
+        else FIXTURE_SUPPORTED_PROVIDERS
+    )
     if options.target in {"local", "ssh", "docker", "kubernetes"} and os.name != "posix":
         cases = [
             explicit_unsupported_case(
@@ -6698,15 +7120,24 @@ def main(argv: Sequence[str] | None = None) -> int:
                 {"osName": os.name},
             )
         ]
-    elif options.provider not in FIXTURE_SUPPORTED_PROVIDERS:
+    elif options.provider not in supported_providers:
+        real_provider_smoke = options.suite == "real-provider-smoke"
         cases = [
             explicit_unsupported_case(
                 "provider.explicit-unsupported",
                 started_at,
                 started,
-                "runner.fixture_provider_unsupported",
-                f"The deterministic fixture does not implement Provider {options.provider}.",
-                {"fixtureSupportedProviders": sorted(FIXTURE_SUPPORTED_PROVIDERS)},
+                (
+                    "runner.real_provider_smoke_provider_unsupported"
+                    if real_provider_smoke
+                    else "runner.fixture_provider_unsupported"
+                ),
+                (
+                    f"The real Provider smoke does not support Provider {options.provider}."
+                    if real_provider_smoke
+                    else f"The deterministic fixture does not implement Provider {options.provider}."
+                ),
+                {"suite": options.suite, "supportedProviders": sorted(supported_providers)},
             )
         ]
     elif options.target in {"local", "ssh", "docker", "kubernetes"}:
@@ -6748,18 +7179,34 @@ def main(argv: Sequence[str] | None = None) -> int:
                 cleanup_evidence if isinstance(cleanup_evidence, Mapping) else None
             )
         cases = suite.cases
+    real_provider_smoke = options.suite == "real-provider-smoke"
+    mode = (
+        "real-provider-smoke"
+        if real_provider_smoke
+        else "fixture+failure-matrix"
+        if options.failure_cases
+        else "fixture"
+    )
+    evidence_boundary = (
+        "real Codex/Claude through the real Control Plane, selected Target, agentd, Worker Protocol, Provider "
+        "Host, Control Plane restart, and native-cursor second Turn; narrow smoke only, not a complete Local or "
+        "four-Target Release Gate"
+        if real_provider_smoke
+        else "deterministic Provider Host fixture over real Control Plane, agentd, Worker Protocol, and Target paths"
+    )
     report: dict[str, Any] = {
         "schemaVersion": SCHEMA_VERSION,
         "runId": run_id,
         "target": options.target,
         "provider": options.provider,
-        "mode": "fixture+failure-matrix" if options.failure_cases else "fixture",
+        "mode": mode,
         "source": repository_metadata(repo_root),
         "startedAt": started_at,
         "finishedAt": utc_now(),
         "durationMs": elapsed_ms(started),
         "status": aggregate_status(cases),
         "configuration": {
+            "suite": options.suite,
             "timeoutSeconds": options.timeout_seconds,
             "restartControlPlane": options.restart_control_plane,
             "skipBuild": options.skip_build,
@@ -6769,9 +7216,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "failureOnly": options.failure_only,
                 "networkOutageSeconds": options.network_outage_seconds,
                 "realProviderReleaseGate": False,
-                "boundary": (
-                    "deterministic Provider Host fixture over real Control Plane, agentd, Worker Protocol, and Target paths"
-                ),
+                "boundary": evidence_boundary,
             },
             "runnerCommand": {
                 "executable": pathlib.Path(options.runner_command[0]).name,
@@ -6843,7 +7288,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     report["finishedAt"] = utc_now()
     report["durationMs"] = elapsed_ms(started)
     json_path, markdown_path = write_reports(report, options.output_dir, redactor)
-    print(f"Stage 3 Provider fixture acceptance: {report['status']}")
+    print(f"Stage 3 Provider {mode} acceptance: {report['status']}")
     print(f"JSON: {json_path}")
     print(f"Markdown: {markdown_path}")
     return 0 if report["status"] == "pass" else 1

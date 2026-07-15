@@ -349,6 +349,7 @@ export function startProviderHostRun(
     return startClaudeAgentSdkRun({
       input,
       environment,
+      usesAmbientAuthentication: credential === null,
       redact,
       emit,
       authoritativePrompt: prompt,

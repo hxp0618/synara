@@ -25,6 +25,37 @@ JSON, Markdown, and redacted logs are written under `.tmp/stage3-provider-accept
 `--output-dir` for an explicit destination. `--keep` additionally preserves the isolated SQLite, Artifact,
 Workspace, Git cache, and built Control Plane state beneath that destination.
 
+## Real Provider two-Turn smoke
+
+`--suite real-provider-smoke` replaces the fixture flow with a narrow real Codex or Claude Agent check through
+the same Control Plane, Target, agentd, Worker Protocol, and Provider Host product path. It starts one Turn with
+an exact generated marker, discovers the compatible Worker Manifest, validates canonical Runtime Event v2
+assistant output, restarts the Control Plane, then requires the second Turn to repeat the marker through a
+`native-cursor / cursor_usable` resume decision. The suite requires an explicit built Provider Host command and
+does not accept fixture failure/canary flags.
+
+Build the Host with the repository's required Node.js 24 runtime, then run Codex or Claude Agent:
+
+```sh
+bun run --cwd apps/provider-host build
+
+python3 scripts/stage3-provider-acceptance/acceptance_runner.py \
+  --suite real-provider-smoke \
+  --target local \
+  --provider codex \
+  --runner-command-json '["/absolute/path/to/node","/absolute/path/to/apps/provider-host/dist/index.mjs"]' \
+  --timeout 600
+```
+
+The real smoke intentionally creates no Provider Credential and therefore uses the local user's existing Codex
+or Claude login. Credential-backed Claude runs keep the execution-local `CLAUDE_CONFIG_DIR` isolation; ambient
+OAuth runs preserve the user's normal Claude configuration lookup so the Host does not silently discard a valid
+login. Remote Targets still need an explicitly provisioned authentication path.
+
+A pass proves only two real Provider Turns, Control Plane restart, native Cursor continuity, exact cleanup, and
+the report Secret scan for the selected Target. It does not replace Approval/User Input, Artifact/large Terminal,
+failure matrix, immutable Worker image, four-Target, or soak Release Gates.
+
 Every run ends with `security.output-secret-scan`. It scans generated JSON, Markdown, text metadata, and logs for
 all runtime Secrets known to the redactor plus high-confidence private-key, AWS, GitHub, and OpenAI-style key
 patterns. The report records only file, pattern name, and byte offset; it never echoes matched material. Binary

@@ -20,6 +20,7 @@ def runner_options(*, restart_control_plane: bool = True) -> acceptance.RunnerOp
     return acceptance.RunnerOptions(
         target="fake",
         provider="codex",
+        suite="fixture",
         output_dir=pathlib.Path(tempfile.gettempdir()) / "synara-stage3-acceptance-runner-tests",
         timeout_seconds=30.0,
         runner_command=("fixture",),
@@ -54,6 +55,52 @@ def runner_options(*, restart_control_plane: bool = True) -> acceptance.RunnerOp
         kubernetes_allow_node_drain=False,
         failure_only=False,
     )
+
+
+def real_provider_turn_events(
+    assistant_text: str,
+    *,
+    terminal_text: str | None = None,
+    selected_strategy: str,
+    reason_code: str,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    terminal = {
+        "sequence": 5,
+        "eventType": "execution.completed",
+        "executionId": "execution-1",
+        "workerId": "worker-1",
+        "generation": 1,
+        **({"payload": {"output": {"text": terminal_text}}} if terminal_text is not None else {}),
+    }
+    return terminal, [
+        {
+            "sequence": 1,
+            "eventType": "turn.created",
+            "executionId": "execution-1",
+            "payload": {"turnId": "turn-1", "executionId": "execution-1"},
+        },
+        {
+            "sequence": 2,
+            "eventType": "execution.leased",
+            "executionId": "execution-1",
+            "payload": {
+                "providerResume": {
+                    "requestedStrategy": "native-cursor",
+                    "selectedStrategy": selected_strategy,
+                    "reasonCode": reason_code,
+                }
+            },
+        },
+        {"sequence": 3, "eventType": "execution.started", "executionId": "execution-1"},
+        {
+            "sequence": 4,
+            "eventVersion": 2,
+            "eventType": "content.delta",
+            "executionId": "execution-1",
+            "payload": {"streamKind": "assistant_text", "delta": assistant_text},
+        },
+        terminal,
+    ]
 
 
 class FakeAPI:
@@ -772,6 +819,73 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
             ],
         )
 
+    def test_real_provider_smoke_uses_two_turn_restart_case_order(self) -> None:
+        suite = CaseOrderSuite(
+            FakeDriver(acceptance.EXECUTION_PINNED_WORKER),
+            dataclasses.replace(runner_options(), suite="real-provider-smoke"),
+        )
+
+        suite.run()
+
+        self.assertEqual(
+            suite.case_order,
+            [
+                "environment.target-prepare",
+                "environment.control-plane-start",
+                "identity.dev-login",
+                "runtime.target-provision",
+                "resources.real-provider-project-session",
+                "real-provider.turn-1-start",
+                "runtime.real-provider-worker-discovery",
+                "real-provider.turn-1",
+                "recovery.control-plane-restart",
+                "real-provider.turn-2-continuity",
+            ],
+        )
+
+    def test_real_provider_marker_and_native_resume_evidence_pass(self) -> None:
+        suite = BarrierSuite(acceptance.EXECUTION_PINNED_WORKER)
+        marker = "SYNARA_REAL_PROVIDER_SMOKE_CODEX_0123456789ABCDEF"
+        terminal, events = real_provider_turn_events(
+            marker + "\n",
+            terminal_text=marker,
+            selected_strategy="native-cursor",
+            reason_code="cursor_usable",
+        )
+
+        evidence = suite._real_provider_turn_evidence(
+            "turn-1",
+            terminal,
+            events,
+            marker,
+            expected_resume_strategy="native-cursor",
+            expected_resume_reason="cursor_usable",
+        )
+
+        self.assertTrue(evidence["markerMatched"])
+        self.assertTrue(evidence["terminalOutputMatched"])
+        self.assertEqual(evidence["providerResume"]["selectedStrategy"], "native-cursor")
+
+    def test_real_provider_marker_mismatch_fails_closed(self) -> None:
+        suite = BarrierSuite(acceptance.EXECUTION_PINNED_WORKER)
+        terminal, events = real_provider_turn_events(
+            "wrong marker",
+            selected_strategy="authoritative-history",
+            reason_code="cursor_absent",
+        )
+
+        with self.assertRaises(acceptance.AcceptanceError) as raised:
+            suite._real_provider_turn_evidence(
+                "turn-1",
+                terminal,
+                events,
+                "expected marker",
+                expected_resume_strategy="authoritative-history",
+                expected_resume_reason="cursor_absent",
+            )
+
+        self.assertEqual(raised.exception.code, "runner.real_provider_marker_mismatch")
+
     def test_execution_pinned_worker_provisions_resources_before_barrier(self) -> None:
         suite = CaseOrderSuite(FakeDriver(acceptance.EXECUTION_PINNED_WORKER))
 
@@ -995,6 +1109,39 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
 
 
 class RunnerOptionsTest(unittest.TestCase):
+    def test_real_provider_smoke_requires_explicit_runner_command(self) -> None:
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            acceptance.parse_args(["--suite", "real-provider-smoke"])
+
+    def test_real_provider_smoke_rejects_fixture_failure_matrix(self) -> None:
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            acceptance.parse_args(
+                [
+                    "--suite",
+                    "real-provider-smoke",
+                    "--runner-command-json",
+                    '["node","/tmp/provider-host.mjs"]',
+                    "--failure-matrix",
+                ]
+            )
+
+    def test_real_provider_smoke_parses_explicit_runner_command(self) -> None:
+        options = acceptance.parse_args(
+            [
+                "--suite",
+                "real-provider-smoke",
+                "--provider",
+                "claudeAgent",
+                "--runner-command-json",
+                '["node","/tmp/provider-host.mjs"]',
+            ]
+        )
+
+        self.assertEqual(options.suite, "real-provider-smoke")
+        self.assertEqual(options.provider, "claudeAgent")
+        self.assertEqual(options.runner_command, ("node", "/tmp/provider-host.mjs"))
+        self.assertEqual(options.failure_cases, ())
+
     def test_failure_matrix_expands_target_cases_without_duplicates(self) -> None:
         options = acceptance.parse_args(
             [
