@@ -153,7 +153,8 @@ export class ControlPlaneProjectionRuntime {
 
   async #runCatchUp(sessionId: string, generation: number): Promise<void> {
     if (!this.#sessions.has(sessionId) || this.#disposed) return;
-    this.#setStreamStatus(sessionId, "catching-up");
+    const reconnecting = this.#projections.get(sessionId)?.streamStatus === "reconnecting";
+    if (!reconnecting) this.#setStreamStatus(sessionId, "catching-up");
     try {
       while (generation === this.#generation && !this.#disposed) {
         const projection = this.#projections.get(sessionId);
@@ -189,15 +190,21 @@ export class ControlPlaneProjectionRuntime {
         }
       }
       if (generation === this.#generation && !this.#disposed) {
-        this.#setStreamStatus(
-          sessionId,
-          (this.#watchCounts.get(sessionId) ?? 0) > 0 ? "connecting" : "idle",
-        );
+        const watched = (this.#watchCounts.get(sessionId) ?? 0) > 0;
+        const currentStatus = this.#projections.get(sessionId)?.streamStatus;
+        const nextStatus =
+          watched && (currentStatus === "reconnecting" || currentStatus === "live")
+            ? currentStatus
+            : watched
+              ? "connecting"
+              : "idle";
+        this.#setStreamStatus(sessionId, nextStatus);
       }
     } catch {
       if (generation !== this.#generation || this.#disposed) return;
-      this.#setStreamStatus(sessionId, "error");
-      if ((this.#watchCounts.get(sessionId) ?? 0) > 0) this.#scheduleReconnect(sessionId);
+      const watched = (this.#watchCounts.get(sessionId) ?? 0) > 0;
+      this.#setStreamStatus(sessionId, watched ? "reconnecting" : "error");
+      if (watched) this.#scheduleReconnect(sessionId);
       throw new Error(`Failed to catch up Session Events for ${sessionId}.`);
     }
   }
@@ -227,7 +234,9 @@ export class ControlPlaneProjectionRuntime {
     }
     const projection = this.#projections.get(sessionId);
     if (!projection) return;
-    this.#setStreamStatus(sessionId, "connecting");
+    if (projection.streamStatus !== "reconnecting") {
+      this.#setStreamStatus(sessionId, "connecting");
+    }
     try {
       const close = this.#client.subscribeSessionEvents(sessionId, projection.lastAppliedSequence, {
         onOpen: () => {

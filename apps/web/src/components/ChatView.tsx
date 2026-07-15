@@ -513,6 +513,7 @@ import { resolveRuntimeModelDescriptor } from "./chat/runtimeModelCapabilities";
 import { ProjectPicker } from "./chat/ProjectPicker";
 import { FolderClosed } from "./FolderClosed";
 import { ControlPlaneProviderCapabilityBanner } from "./chat/ControlPlaneProviderCapabilityBanner";
+import { ControlPlaneSessionStreamBanner } from "./chat/ControlPlaneSessionStreamBanner";
 import { ProviderHealthBanner } from "./chat/ProviderHealthBanner";
 import { ThreadErrorBanner } from "./chat/ThreadErrorBanner";
 import {
@@ -10873,6 +10874,10 @@ export default function ChatView({
     isHomeChat: isChatProject,
     isEmpty: timelineEntries.length === 0,
   });
+  const activeControlPlaneStreamStatus =
+    controlPlane.isAuthoritative && isServerThread
+      ? (controlPlane.streamStatusBySessionId[activeThread.id] ?? null)
+      : null;
 
   const handleRenameActiveThread = async (newTitle: string) => {
     const outcome = await dispatchThreadRename({
@@ -11831,6 +11836,7 @@ export default function ChatView({
       <ControlPlaneProviderCapabilityBanner
         decision={controlPlane.isAuthoritative ? activeComposerDispatchDecision : null}
       />
+      <ControlPlaneSessionStreamBanner status={activeControlPlaneStreamStatus} />
       <ThreadErrorBanner error={activeThread.error} onDismiss={dismissActiveThreadError} />
       <RateLimitBanner
         rateLimitStatus={visibleActiveRateLimitStatus}

@@ -152,6 +152,98 @@ describe("ControlPlaneProjectionRuntime", () => {
     runtime.dispose();
   });
 
+  it("keeps watched catch-up failures reconnecting until the live stream opens", async () => {
+    let handlers:
+      | {
+          onEvent: (event: ControlPlaneSessionEvent) => void;
+          onOpen?: () => void;
+          onError?: () => void;
+        }
+      | undefined;
+    let catchUpAttempt = 0;
+    const listSessionEvents = vi.fn(
+      async (
+        _sessionId: string,
+        _afterSequence: number,
+        _limit: number,
+      ): Promise<ControlPlaneSessionEventPage> => {
+        catchUpAttempt += 1;
+        if (catchUpAttempt === 1) throw new Error("Control Plane unavailable");
+        return { items: [event(1, "turn.created"), event(2)], lastSequence: 2 };
+      },
+    );
+    const subscribeSessionEvents = vi.fn(
+      (_sessionId: string, _afterSequence: number, nextHandlers: NonNullable<typeof handlers>) => {
+        handlers = nextHandlers;
+        return () => undefined;
+      },
+    );
+    const runtime = new ControlPlaneProjectionRuntime({
+      client: { listSessionEvents, subscribeSessionEvents },
+      onChange: () => undefined,
+      reconnectDelayMs: 0,
+    });
+    runtime.setScope("tenant-1:organization-1", [session]);
+
+    runtime.watch(session.id);
+    await vi.waitFor(() => expect(subscribeSessionEvents).toHaveBeenCalledTimes(1));
+    expect(listSessionEvents).toHaveBeenCalledTimes(2);
+    expect(runtime.projections.get(session.id)?.streamStatus).toBe("reconnecting");
+
+    handlers?.onOpen?.();
+    expect(runtime.projections.get(session.id)?.streamStatus).toBe("live");
+
+    runtime.dispose();
+  });
+
+  it("does not let an in-flight catch-up hide a concurrent stream failure", async () => {
+    let handlers:
+      | {
+          onEvent: (event: ControlPlaneSessionEvent) => void;
+          onOpen?: () => void;
+          onError?: () => void;
+        }
+      | undefined;
+    let resolveCatchUp: (page: ControlPlaneSessionEventPage) => void = () => undefined;
+    const pendingCatchUp = new Promise<ControlPlaneSessionEventPage>((resolve) => {
+      resolveCatchUp = resolve;
+    });
+    let catchUpAttempt = 0;
+    const listSessionEvents = vi.fn(
+      async (): Promise<ControlPlaneSessionEventPage> => {
+        catchUpAttempt += 1;
+        if (catchUpAttempt === 1) {
+          return { items: [event(1, "turn.created"), event(2)], lastSequence: 2 };
+        }
+        return pendingCatchUp;
+      },
+    );
+    const subscribeSessionEvents = vi.fn(
+      (_sessionId: string, _afterSequence: number, nextHandlers: NonNullable<typeof handlers>) => {
+        handlers = nextHandlers;
+        return () => undefined;
+      },
+    );
+    const runtime = new ControlPlaneProjectionRuntime({
+      client: { listSessionEvents, subscribeSessionEvents },
+      onChange: () => undefined,
+      reconnectDelayMs: 60_000,
+    });
+    runtime.setScope("tenant-1:organization-1", [session]);
+    runtime.watch(session.id);
+    await vi.waitFor(() => expect(subscribeSessionEvents).toHaveBeenCalledTimes(1));
+    handlers?.onOpen?.();
+
+    const catchUp = runtime.catchUp(session.id);
+    await vi.waitFor(() => expect(listSessionEvents).toHaveBeenCalledTimes(2));
+    handlers?.onError?.();
+    resolveCatchUp({ items: [], lastSequence: 2 });
+    await catchUp;
+
+    expect(runtime.projections.get(session.id)?.streamStatus).toBe("reconnecting");
+    runtime.dispose();
+  });
+
   it("keeps a single reconnect loop when using the real SSE client", async () => {
     vi.useFakeTimers();
     vi.stubGlobal("window", { location: new URL("https://synara.example/settings") });
@@ -195,6 +287,9 @@ describe("ControlPlaneProjectionRuntime", () => {
     expect(FakeEventSource.instances[1]!.url).toBe(
       "https://synara.example/v1/sessions/session-1/events/stream?afterSequence=3",
     );
+    expect(runtime.projections.get(session.id)?.streamStatus).toBe("reconnecting");
+    FakeEventSource.instances[1]!.onopen?.();
+    expect(runtime.projections.get(session.id)?.streamStatus).toBe("live");
 
     runtime.dispose();
     expect(FakeEventSource.instances[1]!.close).toHaveBeenCalledTimes(1);
