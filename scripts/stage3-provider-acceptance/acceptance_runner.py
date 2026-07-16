@@ -87,6 +87,7 @@ MARKDOWN_REPORT_NAME = "acceptance-report.md"
 PROVIDERS = ("codex", "claudeAgent", "cursor", "gemini", "grok", "kilo", "opencode", "pi")
 FIXTURE_SUPPORTED_PROVIDERS = frozenset({"codex", "claudeAgent"})
 REAL_PROVIDER_SMOKE_PROVIDERS = frozenset({"codex", "claudeAgent"})
+REAL_PROVIDER_CREDENTIAL_FIELDS = ("apiKey", "authToken")
 SUITES = ("fixture", "real-provider-smoke")
 REAL_PROVIDER_PRE_RESTART_CASES = (
     "approval",
@@ -695,6 +696,9 @@ class RunnerOptions:
     failure_only: bool
     real_provider_cases: tuple[str, ...]
     real_provider_failure_cases: tuple[str, ...]
+    real_provider_credential_env: str | None
+    real_provider_credential_field: str
+    real_provider_base_url_env: str | None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -5768,6 +5772,12 @@ class AcceptanceSuite:
             credential_id = credential.get("id")
             if not isinstance(credential_id, str):
                 raise AcceptanceError("runner.credential_id_missing", "Credential API did not return an ID.")
+        elif self.options.real_provider_credential_env is not None:
+            credential = self._create_real_provider_credential(
+                title="Stage 3 Real Provider Acceptance",
+                payload=self._real_provider_product_credential_payload(),
+            )
+            credential_id = self._string_id(credential, "real Provider product Credential")
         project = json_object(
             self.api.request(
                 "POST",
@@ -5802,12 +5812,9 @@ class AcceptanceSuite:
             "executionTargetId": target_id,
         }
         if credential_id is not None:
-            session_input.update(
-                {
-                    "model": "stage3-acceptance-fixture",
-                    "providerCredentialId": credential_id,
-                }
-            )
+            session_input["providerCredentialId"] = credential_id
+            if not real_provider_smoke:
+                session_input["model"] = "stage3-acceptance-fixture"
         session = json_object(
             self.api.request(
                 "POST",
@@ -5844,6 +5851,17 @@ class AcceptanceSuite:
                     "credentialType": credential.get("credentialType"),
                     "version": credential.get("version"),
                     "organizationId": credential.get("organizationId"),
+                    **(
+                        {
+                            "delivery": "control-plane-provider-credential",
+                            "source": "operator-environment",
+                            "credentialField": self.options.real_provider_credential_field,
+                            "baseUrlConfigured": self.options.real_provider_base_url_env is not None,
+                            "environmentVariableNamePersisted": False,
+                        }
+                        if real_provider_smoke
+                        else {"delivery": "acceptance-fixture"}
+                    ),
                 }
                 if credential is not None
                 else {
@@ -5864,6 +5882,66 @@ class AcceptanceSuite:
                 "lastEventSequence": session.get("lastEventSequence"),
             },
         }
+
+    def _real_provider_product_credential_payload(self) -> dict[str, Any]:
+        environment_name = self.options.real_provider_credential_env
+        if environment_name is None:
+            raise AcceptanceError(
+                "runner.real_provider_credential_not_configured",
+                "The real Provider product Credential source was not configured.",
+                {"provider": self.options.provider, "target": self.driver.name},
+            )
+        try:
+            secret = read_environment_value(
+                environment_name,
+                "real Provider Credential",
+                maximum_length=64 << 10,
+                forbidden_characters="\r\n\x00",
+            )
+        except EnvironmentValueError as error:
+            raise AcceptanceError(
+                (
+                    "runner.real_provider_credential_env_missing"
+                    if error.reason == "missing"
+                    else "runner.real_provider_credential_env_invalid"
+                ),
+                str(error),
+                {
+                    "provider": self.options.provider,
+                    "target": self.driver.name,
+                    "environmentVariableNamePersisted": False,
+                },
+            ) from None
+        self.redactor.add(secret, "[REDACTED_REAL_PROVIDER_CREDENTIAL]")
+        payload: dict[str, Any] = {
+            self.options.real_provider_credential_field: secret,
+        }
+        base_url_environment = self.options.real_provider_base_url_env
+        if base_url_environment is not None:
+            try:
+                base_url = read_environment_value(
+                    base_url_environment,
+                    "real Provider Base URL",
+                    maximum_length=2048,
+                    forbidden_characters="\r\n\t\x00",
+                ).strip()
+            except EnvironmentValueError as error:
+                raise AcceptanceError(
+                    (
+                        "runner.real_provider_base_url_env_missing"
+                        if error.reason == "missing"
+                        else "runner.real_provider_base_url_env_invalid"
+                    ),
+                    str(error),
+                    {
+                        "provider": self.options.provider,
+                        "target": self.driver.name,
+                        "environmentVariableNamePersisted": False,
+                    },
+                ) from None
+            self.redactor.add(base_url, "[REDACTED_REAL_PROVIDER_BASE_URL]")
+            payload["baseUrl"] = base_url
+        return payload
 
     def _start_real_provider_turn(self) -> Mapping[str, Any]:
         if self.state.pending_real_turn_id is not None:
@@ -6186,7 +6264,7 @@ class AcceptanceSuite:
             **evidence,
             "sessionId": session_id,
             "newExecutionAfterFailure": True,
-            "ambientAuthentication": True,
+            "ambientAuthentication": self.state.credential_id is None,
         }
 
     def _create_real_provider_credential(
@@ -6211,7 +6289,7 @@ class AcceptanceSuite:
                 },
                 expected=(201,),
             ),
-            "real Provider failure Credential",
+            "real Provider Credential",
         )
 
     def _create_real_provider_session(
@@ -6222,6 +6300,7 @@ class AcceptanceSuite:
     ) -> dict[str, Any]:
         project_id = self._required("project_id")
         target_id = self._required("target_id")
+        credential_id = credential_id or self.state.credential_id
         session_input: dict[str, Any] = {
             "title": title,
             "visibility": "project",
@@ -9667,6 +9746,42 @@ def parse_runner_command(raw: str | None, repo_root: pathlib.Path, target: str) 
     return tuple(decoded)
 
 
+def parse_environment_variable_name(raw: str | None, option: str) -> str | None:
+    if raw is None:
+        return None
+    value = raw.strip()
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", value):
+        raise ValueError(f"{option} must be a valid environment variable name")
+    return value
+
+
+class EnvironmentValueError(ValueError):
+    def __init__(self, reason: str, message: str) -> None:
+        self.reason = reason
+        super().__init__(message)
+
+
+def read_environment_value(
+    environment_name: str,
+    description: str,
+    *,
+    maximum_length: int,
+    forbidden_characters: str,
+) -> str:
+    value = os.environ.get(environment_name)
+    if value is None or not value.strip():
+        raise EnvironmentValueError(
+            "missing",
+            f"The configured {description} environment variable was missing or empty.",
+        )
+    if len(value) > maximum_length or any(character in value for character in forbidden_characters):
+        raise EnvironmentValueError(
+            "invalid",
+            f"The configured {description} environment value was invalid.",
+        )
+    return value
+
+
 def parse_args(argv: Sequence[str]) -> RunnerOptions:
     repo_root = pathlib.Path(__file__).resolve().parents[2]
     parser = argparse.ArgumentParser(description=__doc__)
@@ -9685,6 +9800,20 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
         help="Overall timeout in seconds (default: Local 180, SSH/Docker 900, Kubernetes 1200)",
     )
     parser.add_argument("--runner-command-json", help="Provider Host command as a JSON string array")
+    parser.add_argument(
+        "--real-provider-credential-env",
+        help="Environment variable containing the real Provider secret; the name and value are not persisted",
+    )
+    parser.add_argument(
+        "--real-provider-credential-field",
+        choices=REAL_PROVIDER_CREDENTIAL_FIELDS,
+        default="apiKey",
+        help="Credential payload field populated from --real-provider-credential-env",
+    )
+    parser.add_argument(
+        "--real-provider-base-url-env",
+        help="Optional environment variable containing the controlled Provider Base URL",
+    )
     parser.add_argument(
         "--real-provider-case",
         action="append",
@@ -9863,6 +9992,17 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
         runner_command = parse_runner_command(parsed.runner_command_json, repo_root, parsed.target)
     except ValueError as error:
         parser.error(str(error))
+    try:
+        real_provider_credential_env = parse_environment_variable_name(
+            parsed.real_provider_credential_env,
+            "--real-provider-credential-env",
+        )
+        real_provider_base_url_env = parse_environment_variable_name(
+            parsed.real_provider_base_url_env,
+            "--real-provider-base-url-env",
+        )
+    except ValueError as error:
+        parser.error(str(error))
     run_id = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:8]
     output_dir = parsed.output_dir or repo_root / ".tmp" / "stage3-provider-acceptance-results" / run_id
     kubernetes_kubeconfig = parsed.kubernetes_kubeconfig.expanduser().resolve() if parsed.kubernetes_kubeconfig else None
@@ -9900,10 +10040,39 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
             parser.error(
                 "real Provider product-path cases and failure cases require separate canonical runs"
             )
+        if parsed.target != "local" and real_provider_credential_env is None:
+            parser.error(
+                "remote real Provider acceptance requires --real-provider-credential-env"
+            )
+        if real_provider_base_url_env is not None and real_provider_credential_env is None:
+            parser.error(
+                "--real-provider-base-url-env requires --real-provider-credential-env"
+            )
+        if parsed.real_provider_credential_field == "authToken" and parsed.provider != "claudeAgent":
+            parser.error("--real-provider-credential-field authToken is supported only for claudeAgent")
     elif real_provider_cases or real_provider_failure_cases:
         parser.error(
             "real Provider case options require --suite real-provider-smoke"
         )
+    elif real_provider_credential_env is not None or real_provider_base_url_env is not None:
+        parser.error("real Provider Credential options require --suite real-provider-smoke")
+    try:
+        if real_provider_credential_env is not None:
+            read_environment_value(
+                real_provider_credential_env,
+                "real Provider Credential",
+                maximum_length=64 << 10,
+                forbidden_characters="\r\n\x00",
+            )
+        if real_provider_base_url_env is not None:
+            read_environment_value(
+                real_provider_base_url_env,
+                "real Provider Base URL",
+                maximum_length=2048,
+                forbidden_characters="\r\n\t\x00",
+            )
+    except ValueError as error:
+        parser.error(str(error))
     return RunnerOptions(
         target=parsed.target,
         provider=parsed.provider,
@@ -9943,6 +10112,9 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
         failure_only=parsed.failure_only,
         real_provider_cases=real_provider_cases,
         real_provider_failure_cases=real_provider_failure_cases,
+        real_provider_credential_env=real_provider_credential_env,
+        real_provider_credential_field=parsed.real_provider_credential_field,
+        real_provider_base_url_env=real_provider_base_url_env,
     )
 
 
@@ -9951,6 +10123,26 @@ def main(argv: Sequence[str] | None = None) -> int:
     repo_root = pathlib.Path(__file__).resolve().parents[2]
     options.output_dir.mkdir(parents=True, exist_ok=True)
     redactor = SecretRedactor()
+    if options.real_provider_credential_env is not None:
+        redactor.add(
+            read_environment_value(
+                options.real_provider_credential_env,
+                "real Provider Credential",
+                maximum_length=64 << 10,
+                forbidden_characters="\r\n\x00",
+            ),
+            "[REDACTED_REAL_PROVIDER_CREDENTIAL]",
+        )
+    if options.real_provider_base_url_env is not None:
+        redactor.add(
+            read_environment_value(
+                options.real_provider_base_url_env,
+                "real Provider Base URL",
+                maximum_length=2048,
+                forbidden_characters="\r\n\t\x00",
+            ).strip(),
+            "[REDACTED_REAL_PROVIDER_BASE_URL]",
+        )
     deadline = Deadline(options.timeout_seconds)
     started_at = utc_now()
     started = time.monotonic()
@@ -10078,7 +10270,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             "realProvider": {
                 "requestedCases": list(options.real_provider_cases),
                 "requestedFailureCases": list(options.real_provider_failure_cases),
-                "ambientAuthentication": real_provider_smoke,
+                "ambientAuthentication": (
+                    real_provider_smoke and options.real_provider_credential_env is None
+                ),
+                "controlledProductCredential": options.real_provider_credential_env is not None,
+                "controlledProductCredentialField": (
+                    options.real_provider_credential_field
+                    if options.real_provider_credential_env is not None
+                    else None
+                ),
+                "productCredentialEnvironmentNamePersisted": False,
+                "controlledBaseUrl": options.real_provider_base_url_env is not None,
                 "controlledFaultCredentials": bool(options.real_provider_failure_cases),
                 "cursorMaximumAge": (
                     REAL_PROVIDER_CURSOR_MAX_AGE

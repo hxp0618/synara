@@ -6,6 +6,7 @@ import dataclasses
 import hashlib
 import io
 import json
+import os
 import pathlib
 import subprocess
 import tarfile
@@ -60,6 +61,9 @@ def runner_options(*, restart_control_plane: bool = True) -> acceptance.RunnerOp
         failure_only=False,
         real_provider_cases=(),
         real_provider_failure_cases=(),
+        real_provider_credential_env=None,
+        real_provider_credential_field="apiKey",
+        real_provider_base_url_env=None,
     )
 
 
@@ -1992,6 +1996,28 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
         self.assertTrue(evidence["generationFenced"])
         self.assertEqual(evidence["resolution"]["executionId"], "execution-1")
 
+    def test_real_provider_recovery_reports_controlled_product_credential(self) -> None:
+        suite = BarrierSuite(acceptance.STANDING_WORKER)
+        suite.state.credential_id = "credential-1"
+        suite._create_real_provider_session = mock.Mock(  # type: ignore[method-assign]
+            return_value={"id": "session-recovery"}
+        )
+        suite._create_turn = mock.Mock(return_value={"id": "turn-recovery"})  # type: ignore[method-assign]
+        terminal = {"sequence": 1, "eventType": "execution.completed"}
+        suite._wait_for_turn_terminal = mock.Mock(  # type: ignore[method-assign]
+            return_value=(terminal, [terminal])
+        )
+        suite._real_provider_turn_evidence = mock.Mock(  # type: ignore[method-assign]
+            return_value={"markerMatched": True}
+        )
+
+        evidence = suite._real_provider_recovery_turn("provider-host-crash-retry")
+
+        self.assertFalse(evidence["ambientAuthentication"])
+        suite._create_real_provider_session.assert_called_once_with(
+            title="Stage 3 Real Provider provider-host-crash-retry Recovery"
+        )
+
     def test_standing_restart_waits_for_online_worker(self) -> None:
         suite = BarrierSuite(acceptance.STANDING_WORKER)
 
@@ -1999,6 +2025,133 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
 
         self.assertEqual(suite.post_restart_waits, 1)
         self.assertEqual(evidence["postRestartManifestId"], "manifest-after-restart")
+
+    def test_real_provider_resources_bind_controlled_environment_credential(self) -> None:
+        secret = "stage3-real-provider-product-secret"
+        base_url = "https://provider.example.test/v1"
+        options = dataclasses.replace(
+            runner_options(),
+            target="docker",
+            provider="codex",
+            suite="real-provider-smoke",
+            real_provider_credential_env="SYNARA_ACCEPTANCE_PROVIDER_KEY",
+            real_provider_base_url_env="SYNARA_ACCEPTANCE_PROVIDER_BASE_URL",
+        )
+        driver = FakeDriver(acceptance.STANDING_MANAGED_WORKER, name="docker")
+
+        class ResourceAPI(FakeAPI):
+            def request(
+                self,
+                method: str,
+                path: str,
+                payload: Mapping[str, Any] | None = None,
+                expected: Sequence[int] = (200,),
+                *,
+                maximum_timeout: float = 10.0,
+            ) -> Any:
+                del expected, maximum_timeout
+                self.requests.append((method, path, payload))
+                if path.endswith("/credentials"):
+                    return {
+                        "id": "credential-1",
+                        "organizationId": "organization-id",
+                        "provider": "codex",
+                        "credentialType": "api_key",
+                        "version": 1,
+                    }
+                if path.endswith("/projects"):
+                    return {
+                        "id": "project-1",
+                        "organizationId": "organization-id",
+                        "repositoryUrl": None,
+                    }
+                if path.endswith("/sessions"):
+                    assert payload is not None
+                    return {
+                        "id": "session-1",
+                        "provider": payload.get("provider"),
+                        "executionTargetId": payload.get("executionTargetId"),
+                        "providerCredentialId": payload.get("providerCredentialId"),
+                        "lastEventSequence": 1,
+                    }
+                raise AssertionError(f"unexpected resource request: {method} {path}")
+
+        api = ResourceAPI()
+        driver.api = api
+        redactor = acceptance.SecretRedactor()
+        suite = acceptance.AcceptanceSuite(
+            options,
+            driver,
+            acceptance.Deadline(30.0),
+            redactor,
+        )
+        suite.state.tenant_id = "tenant-id"
+        suite.state.organization_id = "organization-id"
+        suite.state.target_id = "target-id"
+
+        with mock.patch.dict(
+            os.environ,
+            {
+                "SYNARA_ACCEPTANCE_PROVIDER_KEY": secret,
+                "SYNARA_ACCEPTANCE_PROVIDER_BASE_URL": base_url,
+            },
+        ):
+            evidence = suite._create_resources()
+
+        credential_request = next(request for request in api.requests if request[1].endswith("/credentials"))
+        session_request = next(request for request in api.requests if request[1].endswith("/sessions"))
+        self.assertEqual(
+            credential_request[2],
+            {
+                "organizationId": "organization-id",
+                "name": "Stage 3 Real Provider Acceptance",
+                "purpose": "provider",
+                "provider": "codex",
+                "credentialType": "api_key",
+                "payload": {"apiKey": secret, "baseUrl": base_url},
+            },
+        )
+        self.assertEqual(session_request[2]["providerCredentialId"], "credential-1")  # type: ignore[index]
+        self.assertNotIn("model", session_request[2])  # type: ignore[operator]
+        self.assertEqual(evidence["credential"]["source"], "operator-environment")
+        self.assertFalse(evidence["credential"]["environmentVariableNamePersisted"])
+        self.assertNotIn(secret, json.dumps(evidence))
+        self.assertNotIn(base_url, json.dumps(evidence))
+        self.assertEqual(redactor.text(secret), "[REDACTED_REAL_PROVIDER_CREDENTIAL]")
+        self.assertEqual(redactor.text(base_url), "[REDACTED_REAL_PROVIDER_BASE_URL]")
+
+    def test_real_provider_resources_fail_closed_when_credential_env_is_missing(self) -> None:
+        options = dataclasses.replace(
+            runner_options(),
+            target="docker",
+            suite="real-provider-smoke",
+            real_provider_credential_env="SYNARA_ACCEPTANCE_MISSING_KEY",
+        )
+        driver = FakeDriver(acceptance.STANDING_MANAGED_WORKER, name="docker")
+        suite = acceptance.AcceptanceSuite(
+            options,
+            driver,
+            acceptance.Deadline(30.0),
+            acceptance.SecretRedactor(),
+        )
+        suite.state.tenant_id = "tenant-id"
+        suite.state.organization_id = "organization-id"
+        suite.state.target_id = "target-id"
+
+        with mock.patch.dict(os.environ, {"SYNARA_ACCEPTANCE_MISSING_KEY": ""}):
+            with self.assertRaises(acceptance.AcceptanceError) as caught:
+                suite._create_resources()
+
+        self.assertEqual(caught.exception.code, "runner.real_provider_credential_env_missing")
+        self.assertFalse(caught.exception.evidence["environmentVariableNamePersisted"])
+        self.assertEqual(driver.api.requests, [])
+
+        with mock.patch.dict(os.environ, {"SYNARA_ACCEPTANCE_MISSING_KEY": "unsafe\nvalue"}):
+            with self.assertRaises(acceptance.AcceptanceError) as invalid:
+                suite._create_resources()
+
+        self.assertEqual(invalid.exception.code, "runner.real_provider_credential_env_invalid")
+        self.assertEqual(driver.api.requests, [])
 
 
 class RunnerOptionsTest(unittest.TestCase):
@@ -2036,6 +2189,82 @@ class RunnerOptionsTest(unittest.TestCase):
         self.assertEqual(options.failure_cases, ())
         self.assertEqual(options.real_provider_cases, ())
         self.assertEqual(options.real_provider_failure_cases, ())
+        self.assertIsNone(options.real_provider_credential_env)
+        self.assertEqual(options.real_provider_credential_field, "apiKey")
+        self.assertIsNone(options.real_provider_base_url_env)
+
+    def test_remote_real_provider_requires_controlled_credential_source(self) -> None:
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            acceptance.parse_args(
+                [
+                    "--suite",
+                    "real-provider-smoke",
+                    "--target",
+                    "docker",
+                    "--runner-command-json",
+                    '["node","/opt/synara/provider-host/index.mjs"]',
+                ]
+            )
+
+    def test_remote_real_provider_parses_controlled_credential_source(self) -> None:
+        with mock.patch.dict(
+            os.environ,
+            {
+                "SYNARA_ACCEPTANCE_CLAUDE_KEY": "controlled-claude-key",
+                "SYNARA_ACCEPTANCE_CLAUDE_BASE_URL": "https://claude.example.test",
+            },
+        ):
+            options = acceptance.parse_args(
+                [
+                    "--suite",
+                    "real-provider-smoke",
+                    "--target",
+                    "docker",
+                    "--provider",
+                    "claudeAgent",
+                    "--runner-command-json",
+                    '["node","/opt/synara/provider-host/index.mjs"]',
+                    "--real-provider-credential-env",
+                    "SYNARA_ACCEPTANCE_CLAUDE_KEY",
+                    "--real-provider-base-url-env",
+                    "SYNARA_ACCEPTANCE_CLAUDE_BASE_URL",
+                ]
+            )
+
+        self.assertEqual(options.real_provider_credential_env, "SYNARA_ACCEPTANCE_CLAUDE_KEY")
+        self.assertEqual(options.real_provider_credential_field, "apiKey")
+        self.assertEqual(
+            options.real_provider_base_url_env,
+            "SYNARA_ACCEPTANCE_CLAUDE_BASE_URL",
+        )
+
+    def test_real_provider_credential_options_reject_unsafe_names_and_fields(self) -> None:
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            acceptance.parse_args(
+                [
+                    "--suite",
+                    "real-provider-smoke",
+                    "--runner-command-json",
+                    '["node","/tmp/provider-host.mjs"]',
+                    "--real-provider-credential-env",
+                    "../../secret",
+                ]
+            )
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            acceptance.parse_args(
+                [
+                    "--suite",
+                    "real-provider-smoke",
+                    "--provider",
+                    "codex",
+                    "--runner-command-json",
+                    '["node","/tmp/provider-host.mjs"]',
+                    "--real-provider-credential-env",
+                    "SYNARA_ACCEPTANCE_CODEX_KEY",
+                    "--real-provider-credential-field",
+                    "authToken",
+                ]
+            )
 
     def test_real_provider_matrix_expands_in_canonical_order(self) -> None:
         options = acceptance.parse_args(

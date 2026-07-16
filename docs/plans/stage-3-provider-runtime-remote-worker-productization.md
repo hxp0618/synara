@@ -870,6 +870,13 @@ Provider Credential 与 Workspace Credential 分离：
   deterministic Local/Docker/Kubernetes report output scans 已通过。真实 Provider 四 Target 的
   stdout/stderr、Crash dump、Artifact/集中日志 Secret canary 与 Windows FD transport 仍未关闭，因此
   G 保持 `partial`。
+- 共享 Acceptance Runner 的真实 SSH/Docker/Kubernetes 路径现要求显式指定 operator-owned 环境变量，
+  并在构建 Worker Image 或启动任何子进程前验证值、注册 Secret/Base URL 脱敏。Runner 只把值提交给
+  本次隔离 Control Plane 创建加密 Provider Credential，Session 仅绑定 Credential ID；Worker 仍通过
+  匿名 FD 3 获取解析后的 allowlist payload。命令行、Target 配置、Image、报告和持久化 evidence 均不记录
+  环境变量名或 Secret。缺失、空值、控制字符和不安全变量名会在 CLI preflight 阶段 fail closed；Claude
+  的 `authToken` 与可选 Base URL 也走同一受控路径。该实现尚未生成真实 Docker Provider 报告，因此不
+  改变 G 的 `partial` 状态。
 
 ## 13. 工作流 H：Remote Workspace 与 Git 生命周期
 
@@ -1420,6 +1427,11 @@ Provider × Capability × Execution Target
   `docs/reports/stage-3-real-provider-local-failure-matrix-61e38f4f.md`，总体证据见
   `docs/reports/stage-3-provider-runtime-acceptance-fb9e25ec.md`；dirty-worktree/fixture 汇总保留在
   `docs/reports/stage-3-provider-runtime-acceptance-2026-07-15.md`。
+- Runner 已补齐真实远程 Provider 的受控认证入口：SSH/Docker/Kubernetes 不再允许依赖宿主机 ambient
+  登录，缺少显式 Credential source 时会在 Image build 前拒绝；Docker Worker 使用 Image 内的
+  `/usr/local/bin/provider-host`，Credential 仍由 Control Plane 经 agentd FD 3 交付。当前只证明入口、
+  fail-closed 和脱敏实现，不构成真实 Docker Codex/Claude product matrix 证据；远程 401/429 endpoint
+  与 scoped Provider Host crash 注入也仍未实现，因此四 Target Gate 保持 open。
 
 ## 18. 实施顺序
 

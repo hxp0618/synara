@@ -47,10 +47,36 @@ python3 scripts/stage3-provider-acceptance/acceptance_runner.py \
   --timeout 600
 ```
 
-The real smoke intentionally creates no Provider Credential and therefore uses the local user's existing Codex
-or Claude login. Credential-backed Claude runs keep the execution-local `CLAUDE_CONFIG_DIR` isolation; ambient
-OAuth runs preserve the user's normal Claude configuration lookup so the Host does not silently discard a valid
-login. Remote Targets still need an explicitly provisioned authentication path.
+Without controlled Credential options, the Local real smoke creates no Provider Credential and uses the local
+user's existing Codex or Claude login. Credential-backed Claude runs keep the execution-local `CLAUDE_CONFIG_DIR`
+isolation; ambient OAuth runs preserve the user's normal Claude configuration lookup so the Host does not silently
+discard a valid login.
+
+Remote Targets require an explicit controlled Provider Credential. Put the secret in an operator-owned environment
+variable, pass only its variable name, and use the Provider Host installed in the Worker image:
+
+```sh
+# Set SYNARA_ACCEPTANCE_CODEX_KEY out of band; do not put its value in this command.
+python3 scripts/stage3-provider-acceptance/acceptance_runner.py \
+  --suite real-provider-smoke \
+  --target docker \
+  --provider codex \
+  --runner-command-json '["/usr/local/bin/provider-host"]' \
+  --real-provider-credential-env SYNARA_ACCEPTANCE_CODEX_KEY \
+  --real-provider-matrix \
+  --timeout 1800
+```
+
+The Runner reads the value only when creating the isolated Control Plane Credential, registers it with the output
+redactor before the API call, binds the Credential ID to the real Provider Session, and never persists the variable
+name or secret in reports. Agentd delivers the resolved Credential only through the existing anonymous FD 3 path;
+it is not placed in Docker Target configuration, image environment, labels, or command arguments. The isolated
+Control Plane state, Worker container, volume, network and auto-built image are removed during normal cleanup.
+
+Use `--real-provider-credential-field authToken` only for a Claude token that intentionally uses that payload field.
+`apiKey` is the default for Codex and Claude. An optional controlled endpoint can be supplied with
+`--real-provider-base-url-env`; its value is also redacted. Remote real-Provider runs fail during CLI validation when
+the Credential source is omitted, so an unauthenticated container failure cannot be mistaken for release evidence.
 
 `--real-provider-case generated-file-checkpoint` first requires a Provider-native file mutation (`apply_patch` for
 Codex, `Write` for Claude) to create a 43-byte standalone file, then uses one exact shell command to write a
