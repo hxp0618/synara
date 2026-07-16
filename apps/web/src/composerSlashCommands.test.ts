@@ -24,6 +24,7 @@ describe("composerSlashCommands", () => {
     expect(isBuiltInComposerSlashCommand("fast")).toBe(true);
     expect(isBuiltInComposerSlashCommand("automation")).toBe(true);
     expect(isBuiltInComposerSlashCommand("export")).toBe(true);
+    expect(isBuiltInComposerSlashCommand("feedback")).toBe(true);
     expect(isBuiltInComposerSlashCommand("unknown")).toBe(false);
   });
 
@@ -33,6 +34,7 @@ describe("composerSlashCommands", () => {
     expect(filterComposerSlashCommands("auto").map((entry) => entry.command)).toEqual([
       "automation",
     ]);
+    expect(filterComposerSlashCommands("feed").map((entry) => entry.command)).toEqual(["feedback"]);
   });
 
   it("ranks slash command name matches before description-only matches", () => {
@@ -59,6 +61,10 @@ describe("composerSlashCommands", () => {
     expect(parseComposerSlashInvocation("/automation every 6h check the page")).toEqual({
       command: "automation",
       args: "every 6h check the page",
+    });
+    expect(parseComposerSlashInvocation("/feedback")).toEqual({
+      command: "feedback",
+      args: "",
     });
     expect(parseComposerSlashInvocation("review")).toBeNull();
   });
@@ -269,7 +275,23 @@ describe("composerSlashCommands", () => {
     expect(shouldHideProviderNativeCommandFromComposerMenu("gemini", "automation")).toBe(true);
   });
 
-  it("only exposes the app-level /side and /export commands for claude", () => {
+  it("keeps Feedback Synara ahead of provider-native /feedback", () => {
+    const availableCommands = getAvailableComposerSlashCommands({
+      provider: "claudeAgent",
+      supportsFastSlashCommand: true,
+      canOfferCompactCommand: true,
+      canOfferReviewCommand: true,
+      canOfferForkCommand: true,
+      canOfferSideCommand: true,
+      canOfferExportCommand: true,
+      providerNativeCommandNames: ["feedback"],
+    });
+
+    expect(availableCommands).toContain("feedback");
+    expect(shouldHideProviderNativeCommandFromComposerMenu("claudeAgent", "feedback")).toBe(true);
+  });
+
+  it("only exposes Synara-owned app commands for claude", () => {
     expect(
       getAvailableComposerSlashCommands({
         provider: "claudeAgent",
@@ -281,7 +303,7 @@ describe("composerSlashCommands", () => {
         canOfferSideCommand: true,
         canOfferExportCommand: true,
       }),
-    ).toEqual(["side", "export", "automation"]);
+    ).toEqual(["side", "export", "feedback", "automation"]);
   });
 
   it("uses cross-provider app advanced commands for Claude in SaaS routing mode", () => {
@@ -441,6 +463,7 @@ describe("composerSlashCommands", () => {
       "status",
       "subagents",
       "export",
+      "feedback",
       "automation",
     ]);
   });

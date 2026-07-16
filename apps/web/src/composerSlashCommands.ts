@@ -76,6 +76,7 @@ function shouldKeepBuiltInSlashCommandDespiteNativeCollision(
   return (
     command === "automation" ||
     command === "export" ||
+    command === "feedback" ||
     (provider === "codex" && command === "review")
   );
 }
@@ -90,6 +91,7 @@ export function shouldHideProviderNativeCommandFromComposerMenu(
   return (
     normalizedCommand === "automation" ||
     (normalizedCommand === "export" && appCommandIsAvailable) ||
+    (normalizedCommand === "feedback" && appCommandIsAvailable) ||
     (provider === "codex" && normalizedCommand === "review")
   );
 }
@@ -176,6 +178,12 @@ const COMPOSER_SLASH_COMMAND_DEFINITIONS: Record<
     command: "export",
     label: "/export",
     description: "Download this thread as a ZIP archive (thread.json + transcript.md)",
+    source: "app",
+  },
+  feedback: {
+    command: "feedback",
+    label: "/feedback",
+    description: "Send feedback to the Synara team",
     source: "app",
   },
   automation: {
@@ -403,6 +411,7 @@ export function getAvailableComposerSlashCommands(input: {
           "status",
           "subagents",
           ...(input.canOfferExportCommand ? (["export"] as const) : []),
+          "feedback",
           "automation",
         ]
       : [
@@ -412,6 +421,7 @@ export function getAvailableComposerSlashCommands(input: {
           // happens in the app rather than being forwarded to Claude's native /export.
           ...(input.canOfferSideCommand ? (["side"] as const) : []),
           ...(input.canOfferExportCommand ? (["export"] as const) : []),
+          "feedback",
           "automation",
         ];
   return availableCommands.filter((command) => !collidingNativeCommandNames.has(command));

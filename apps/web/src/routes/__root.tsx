@@ -27,6 +27,7 @@ import { AppSnapCoordinator } from "../components/AppSnapCoordinator";
 import { AppSnapWelcomeDialog } from "../components/AppSnapWelcomeDialog";
 import { ControlPlaneGate } from "../components/ControlPlaneGate";
 import { useControlPlane } from "../controlPlaneContext";
+import { FeedbackDialog } from "../components/FeedbackDialog";
 import { SETTINGS_TARGETS } from "../settingsNavigation";
 import ShortcutsDialog from "../components/ShortcutsDialog";
 import WhatsNewDialog from "../components/WhatsNewDialog";
@@ -39,6 +40,8 @@ import { useGitProgressToastPreview } from "../components/useGitProgressToastPre
 import { resolveAndPersistPreferredEditor } from "../editorPreferences";
 import { useFeatureFlags } from "../featureFlags";
 import { useFocusedChatContext } from "../focusedChatContext";
+import { useFeedbackDialogStore } from "../feedbackDialogStore";
+import type { FeedbackThreadContext } from "../feedback";
 import { isTerminalFocused } from "../lib/terminalFocus";
 import {
   serverConfigQueryOptions,
@@ -188,6 +191,7 @@ function RootRouteView() {
         {controlPlane.isAuthoritative ? <ControlPlaneSessionRouteCoordinator /> : <EventRouter />}
         <ProviderStatusRefreshCoordinator />
         <GlobalShortcutsDialog />
+        <GlobalFeedbackDialog />
         <GlobalWhatsNewSurface />
         <TaskCompletionNotifications />
         <AppSnapWelcomeDialog />
@@ -594,6 +598,34 @@ function GlobalShortcutsDialog() {
       }}
     />
   );
+}
+
+function GlobalFeedbackDialog() {
+  const { activeProject, activeThread } = useFocusedChatContext();
+  const isOpen = useFeedbackDialogStore((state) => state.isOpen);
+  const requestedContext = useFeedbackDialogStore((state) => state.context);
+  const setOpen = useFeedbackDialogStore((state) => state.setOpen);
+  const context = useMemo<FeedbackThreadContext>(
+    () =>
+      requestedContext ?? {
+        provider: activeThread?.modelSelection.provider ?? null,
+        model: activeThread?.modelSelection.model ?? null,
+        projectKind: activeProject?.kind ?? null,
+        environmentMode: activeThread?.envMode ?? null,
+        runtimeMode: activeThread?.runtimeMode ?? null,
+        interactionMode: activeThread?.interactionMode ?? null,
+        sessionStatus: activeThread?.session?.status ?? null,
+        latestTurnState: activeThread?.latestTurn?.state ?? null,
+        messageCount: activeThread?.messages.length ?? 0,
+        activityCount: activeThread?.activities.length ?? 0,
+        hasPendingApproval: activeThread?.hasPendingApprovals === true,
+        hasPendingUserInput: activeThread?.hasPendingUserInput === true,
+        hasThreadError: Boolean(activeThread?.error),
+      },
+    [activeProject?.kind, activeThread, requestedContext],
+  );
+
+  return <FeedbackDialog open={isOpen} context={context} onOpenChange={setOpen} />;
 }
 
 function GlobalWhatsNewSurface() {
