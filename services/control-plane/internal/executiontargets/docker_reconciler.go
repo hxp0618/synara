@@ -205,7 +205,7 @@ func (r *DockerPoolReconciler) reconcileTarget(ctx context.Context, target persi
 	}
 	sort.Slice(containers, func(i, j int) bool { return containers[i].Name < containers[j].Name })
 	current := make(map[int]dockerContainer, len(specs))
-	deferred := make(map[int]struct{}, len(specs))
+	deferred := make(map[int]dockerContainer, len(specs))
 	busyStale := make([]dockerContainer, 0)
 	changed := false
 	for _, container := range containers {
@@ -238,7 +238,7 @@ func (r *DockerPoolReconciler) reconcileTarget(ctx context.Context, target persi
 				continue
 			}
 			if dockerReleaseClassMatches(container.Labels, specs[index].Labels) {
-				deferred[index] = struct{}{}
+				deferred[index] = container
 				reserved = true
 				break
 			}
@@ -254,7 +254,7 @@ func (r *DockerPoolReconciler) reconcileTarget(ctx context.Context, target persi
 				continue
 			}
 			if _, alreadyReserved := deferred[index]; !alreadyReserved {
-				deferred[index] = struct{}{}
+				deferred[index] = container
 			}
 			break
 		}
@@ -300,6 +300,10 @@ func (r *DockerPoolReconciler) reconcileTarget(ctx context.Context, target persi
 	running := 0
 	for index := range specs {
 		if container, found := current[index]; found && container.State == "running" {
+			running++
+			continue
+		}
+		if container, found := deferred[index]; found && container.State == "running" {
 			running++
 		}
 	}

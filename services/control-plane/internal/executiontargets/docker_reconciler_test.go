@@ -189,8 +189,8 @@ func TestDockerPoolReconcilerDefersBusyConfigReplacementWithoutNameConflict(t *t
 	if err := fixture.db.Where("id = ?", fixture.targetID).Take(&target).Error; err != nil {
 		t.Fatal(err)
 	}
-	if target.Status != "offline" {
-		t.Fatalf("target with only a deferred stale Worker remained %q", target.Status)
+	if target.Status != "active" {
+		t.Fatalf("running busy Worker did not keep its Target active: %q", target.Status)
 	}
 
 	delete(busy, workerName)
@@ -313,6 +313,13 @@ func TestDockerPoolReconcilerBusyPromotedWorkerDoesNotReserveCanarySlot(t *testi
 	canaryName := fmt.Sprintf("synara-agentd-%s-canary-0", fixture.targetID)
 	if canary := engine.containers[canaryName]; canary.ID == "" {
 		t.Fatalf("busy promoted Worker reserved the canary slot: containers=%#v", engine.containers)
+	}
+	var target persistence.ExecutionTarget
+	if err := fixture.db.Where("id = ?", fixture.targetID).Take(&target).Error; err != nil {
+		t.Fatal(err)
+	}
+	if target.Status != "active" {
+		t.Fatalf("busy promoted Worker made the canary Target unavailable: %q", target.Status)
 	}
 }
 
