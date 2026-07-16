@@ -52,6 +52,13 @@ or Claude login. Credential-backed Claude runs keep the execution-local `CLAUDE_
 OAuth runs preserve the user's normal Claude configuration lookup so the Host does not silently discard a valid
 login. Remote Targets still need an explicitly provisioned authentication path.
 
+`--real-provider-case generated-file-checkpoint` writes one deterministic `1 MiB + 257 B` Workspace file and
+requires `workspace.dirty -> checkpoint.created -> workspace_snapshot artifact.ready -> checkpoint.ready` before
+Execution completion. The Runner downloads the authenticated Ready Artifact, rejects unsafe Tar members, and
+verifies the exact relative path, size, SHA-256, duplicate-Ready boundary, and absence of physical paths in Session
+Events. This proves real Provider Workspace capture through a Checkpoint Artifact; it does not claim a standalone
+Provider `generated_file` ArtifactCandidate or a large Diff gate.
+
 `--real-provider-case terminal-large` adds the large-Terminal capability boundary before Control Plane restart.
 The deterministic fixture still requires the exact `2 MiB + 257 B` stream, a 32 KiB preview, and
 `1 MiB / 1 MiB / 257 B` Ready Artifacts. Real Codex `0.144.x` is explicit `unsupported`: Unified Exec retains only

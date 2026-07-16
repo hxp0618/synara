@@ -3,10 +3,12 @@ from __future__ import annotations
 import contextlib
 import base64
 import dataclasses
+import hashlib
 import io
 import json
 import pathlib
 import subprocess
+import tarfile
 import tempfile
 import unittest
 from collections.abc import Callable, Mapping, Sequence
@@ -668,6 +670,233 @@ class RealProviderTerminalLargeSuite(TerminalLargeSuite):
         return {"id": "turn-terminal-large"}
 
 
+def generated_file_snapshot_bytes(
+    member_name: str = acceptance.GENERATED_FILE_RELATIVE_PATH,
+    *,
+    include_approval_sentinel: bool = False,
+    include_steer_sentinel: bool = False,
+) -> bytes:
+    content = acceptance.generated_file_bytes()
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w") as archive:
+        member = tarfile.TarInfo(member_name)
+        member.size = len(content)
+        member.mode = 0o644
+        member.mtime = 0
+        archive.addfile(member, io.BytesIO(content))
+        if include_approval_sentinel:
+            approval = tarfile.TarInfo(acceptance.REAL_PROVIDER_APPROVAL_RELATIVE_PATH)
+            approval.size = len(acceptance.REAL_PROVIDER_APPROVAL_CONTENT)
+            approval.mode = 0o644
+            approval.mtime = 0
+            archive.addfile(approval, io.BytesIO(acceptance.REAL_PROVIDER_APPROVAL_CONTENT))
+        if include_steer_sentinel:
+            steer = tarfile.TarInfo(acceptance.REAL_PROVIDER_STEER_RELATIVE_PATH)
+            steer.size = len(acceptance.REAL_PROVIDER_STEER_CONTENT)
+            steer.mode = 0o644
+            steer.mtime = 0
+            archive.addfile(steer, io.BytesIO(acceptance.REAL_PROVIDER_STEER_CONTENT))
+    return buffer.getvalue()
+
+
+class GeneratedFileAPI(FakeAPI):
+    def __init__(self, artifact: Mapping[str, Any], snapshot: bytes) -> None:
+        super().__init__()
+        self.artifact = dict(artifact)
+        self.snapshot = snapshot
+        self.list_calls = 0
+
+    def request(
+        self,
+        method: str,
+        path: str,
+        payload: Mapping[str, Any] | None = None,
+        expected: Sequence[int] = (200,),
+        *,
+        maximum_timeout: float = 10.0,
+    ) -> Any:
+        del payload, expected, maximum_timeout
+        if method == "GET" and path == "/v1/sessions/session-id/artifacts":
+            self.list_calls += 1
+            prior = {
+                "id": "00000000-0000-4000-8000-000000000099",
+                "kind": "workspace_snapshot",
+                "status": "ready",
+            }
+            return {"items": [prior] if self.list_calls == 1 else [prior, self.artifact]}
+        if method == "POST" and path == f"/v1/artifacts/{self.artifact['id']}/download":
+            return {"artifact": self.artifact, "url": "/downloads/generated-file-snapshot"}
+        return super().request(method, path)
+
+    def download_bytes(
+        self,
+        url: str,
+        *,
+        maximum_bytes: int,
+        maximum_timeout: float = 30.0,
+    ) -> bytes:
+        del maximum_timeout
+        if url != "/downloads/generated-file-snapshot":
+            raise AssertionError(f"unexpected download URL: {url}")
+        if len(self.snapshot) > maximum_bytes:
+            raise AssertionError("fake generated-file snapshot exceeded the caller limit")
+        return self.snapshot
+
+
+class RealProviderGeneratedFileSuite(acceptance.AcceptanceSuite):
+    def __init__(
+        self,
+        *,
+        duplicate_ready: bool = False,
+        snapshot_member_name: str = acceptance.GENERATED_FILE_RELATIVE_PATH,
+        corrupt_sha256: bool = False,
+    ) -> None:
+        snapshot = generated_file_snapshot_bytes(snapshot_member_name)
+        snapshot_sha256 = "0" * 64 if corrupt_sha256 else hashlib.sha256(snapshot).hexdigest()
+        artifact_id = "00000000-0000-4000-8000-000000000101"
+        artifact = {
+            "id": artifact_id,
+            "executionId": "execution-generated-file",
+            "kind": "workspace_snapshot",
+            "status": "ready",
+            "originalName": "workspace-execution-generated-file-generation-1.tar",
+            "contentType": "application/x-tar",
+            "sizeBytes": len(snapshot),
+            "sha256": snapshot_sha256,
+        }
+        driver = FakeDriver(acceptance.STANDING_WORKER)
+        driver.api = GeneratedFileAPI(artifact, snapshot)
+        super().__init__(
+            dataclasses.replace(
+                runner_options(),
+                suite="real-provider-smoke",
+                real_provider_cases=("generated-file-checkpoint",),
+            ),
+            driver,
+            acceptance.Deadline(30.0),
+            acceptance.SecretRedactor(),
+        )
+        self.state.session_id = "session-id"
+        marker = self._real_provider_marker("generated-file-checkpoint")
+        artifact_ready_events = [
+            {
+                "eventType": "artifact.ready",
+                "executionId": "execution-generated-file",
+                "workerId": "worker-1",
+                "generation": 1,
+                "payload": {
+                    "artifactId": artifact_id,
+                    "kind": "workspace_snapshot",
+                    "contentType": "application/x-tar",
+                    "sizeBytes": len(snapshot),
+                },
+            }
+        ]
+        if duplicate_ready:
+            artifact_ready_events.append(dict(artifact_ready_events[0]))
+        self.events: list[dict[str, Any]] = [
+            {
+                "eventType": "turn.created",
+                "executionId": "execution-generated-file",
+                "payload": {
+                    "turnId": "turn-generated-file",
+                    "executionId": "execution-generated-file",
+                },
+            },
+            {
+                "eventType": "execution.leased",
+                "executionId": "execution-generated-file",
+                "payload": {
+                    "providerResume": {
+                        "requestedStrategy": "native-cursor",
+                        "selectedStrategy": "native-cursor",
+                        "reasonCode": "cursor_usable",
+                    }
+                },
+            },
+            {
+                "eventType": "execution.started",
+                "executionId": "execution-generated-file",
+            },
+            {
+                "eventVersion": 2,
+                "eventType": "content.delta",
+                "executionId": "execution-generated-file",
+                "payload": {"streamKind": "assistant_text", "delta": marker},
+            },
+            {
+                "eventType": "workspace.dirty",
+                "executionId": "execution-generated-file",
+                "workerId": "worker-1",
+                "generation": 1,
+                "payload": {"turnId": "turn-generated-file", "workspaceId": "workspace-1"},
+            },
+            {
+                "eventType": "checkpoint.created",
+                "executionId": "execution-generated-file",
+                "workerId": "worker-1",
+                "generation": 1,
+                "payload": {
+                    "checkpointId": "checkpoint-generated-file",
+                    "strategy": "snapshot",
+                    "turnId": "turn-generated-file",
+                    "workspaceId": "workspace-1",
+                },
+            },
+            *artifact_ready_events,
+            {
+                "eventType": "checkpoint.ready",
+                "executionId": "execution-generated-file",
+                "workerId": "worker-1",
+                "generation": 1,
+                "payload": {
+                    "artifactId": artifact_id,
+                    "checkpointId": "checkpoint-generated-file",
+                    "sha256": snapshot_sha256,
+                    "strategy": "snapshot",
+                    "turnId": "turn-generated-file",
+                    "workspaceId": "workspace-1",
+                },
+            },
+        ]
+        self.execution_terminal = {
+            "eventType": "execution.completed",
+            "executionId": "execution-generated-file",
+            "workerId": "worker-1",
+            "generation": 1,
+            "payload": {"output": {"text": marker}},
+        }
+        self.events.append(self.execution_terminal)
+        for sequence, event in enumerate(self.events, start=1):
+            event["sequence"] = sequence
+        self.created_input: str | None = None
+
+    def _create_turn(
+        self,
+        input_text: str,
+        *,
+        runtime_mode: str = "full-access",
+        interaction_mode: str = "default",
+    ) -> dict[str, Any]:
+        if runtime_mode != "full-access" or interaction_mode != "default":
+            raise AssertionError("unexpected generated-file Turn mode")
+        command = acceptance.generated_file_node_command()
+        marker = self._real_provider_marker("generated-file-checkpoint")
+        if input_text.count(command) != 1 or input_text.count(marker) != 1:
+            raise AssertionError("generated-file prompt omitted its command or marker")
+        self.created_input = input_text
+        return {"id": "turn-generated-file"}
+
+    def _wait_for_turn_terminal(
+        self,
+        turn_id: str,
+        expected_event_type: str,
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        if turn_id != "turn-generated-file" or expected_event_type != "execution.completed":
+            raise AssertionError("unexpected generated-file wait")
+        return self.execution_terminal, self.events
+
+
 class APIClientTimeoutTest(unittest.TestCase):
     def test_request_keeps_short_default_and_allows_explicit_long_operation_timeout(self) -> None:
         timeouts: list[float] = []
@@ -772,6 +1001,82 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
             [1 << 20, 1 << 20, 257],
         )
         self.assertFalse(evidence["runtimePhysicalPathLeak"])
+
+    def test_generated_file_node_command_writes_exact_workspace_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            completed = subprocess.run(
+                ["bash", "-c", acceptance.generated_file_node_command()],
+                cwd=directory,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=True,
+            )
+            generated = pathlib.Path(directory, acceptance.GENERATED_FILE_RELATIVE_PATH).read_bytes()
+
+        self.assertEqual(completed.stdout, b"")
+        self.assertEqual(completed.stderr, b"")
+        self.assertEqual(generated, acceptance.generated_file_bytes())
+        self.assertEqual(len(generated), (1 << 20) + 257)
+
+    def test_real_provider_generated_file_checkpoint_validates_ready_snapshot_content(self) -> None:
+        suite = RealProviderGeneratedFileSuite()
+
+        evidence = suite._real_provider_generated_file_checkpoint()
+
+        self.assertEqual(evidence["command"]["relativePath"], acceptance.GENERATED_FILE_RELATIVE_PATH)
+        self.assertEqual(evidence["command"]["totalBytes"], (1 << 20) + 257)
+        self.assertEqual(evidence["checkpoint"]["strategy"], "snapshot")
+        self.assertEqual(
+            evidence["checkpoint"]["snapshot"]["file"],
+            {
+                "path": acceptance.GENERATED_FILE_RELATIVE_PATH,
+                "sizeBytes": (1 << 20) + 257,
+                "sha256": hashlib.sha256(acceptance.generated_file_bytes()).hexdigest(),
+            },
+        )
+        self.assertFalse(evidence["checkpoint"]["runtimePhysicalPathLeak"])
+        self.assertFalse(evidence["checkpoint"]["duplicateReadyArtifact"])
+        self.assertEqual(evidence["checkpoint"]["standaloneGeneratedFileArtifacts"], [])
+        self.assertTrue(evidence["providerTurn"]["markerMatched"])
+        self.assertEqual(evidence["providerTurn"]["markerMatchMode"], "contains-once")
+        self.assertIsNotNone(suite.created_input)
+
+    def test_real_provider_generated_file_checkpoint_rejects_duplicate_ready_artifact(self) -> None:
+        with self.assertRaises(acceptance.AcceptanceError) as caught:
+            RealProviderGeneratedFileSuite(duplicate_ready=True)._real_provider_generated_file_checkpoint()
+
+        self.assertEqual(caught.exception.code, "runner.generated_file_checkpoint_event_invalid")
+
+    def test_generated_file_snapshot_preserves_known_approval_sentinel(self) -> None:
+        evidence = acceptance.generated_file_snapshot_evidence(
+            generated_file_snapshot_bytes(
+                include_approval_sentinel=True,
+                include_steer_sentinel=True,
+            )
+        )
+
+        self.assertEqual(evidence["regularFileCount"], 3)
+        self.assertEqual(
+            evidence["preservedKnownFiles"],
+            [
+                acceptance.REAL_PROVIDER_APPROVAL_RELATIVE_PATH,
+                acceptance.REAL_PROVIDER_STEER_RELATIVE_PATH,
+            ],
+        )
+
+    def test_real_provider_generated_file_checkpoint_rejects_unsafe_snapshot_member(self) -> None:
+        with self.assertRaises(acceptance.AcceptanceError) as caught:
+            RealProviderGeneratedFileSuite(
+                snapshot_member_name="../generated-file.txt"
+            )._real_provider_generated_file_checkpoint()
+
+        self.assertEqual(caught.exception.code, "runner.generated_file_snapshot_unsafe")
+
+    def test_real_provider_generated_file_checkpoint_rejects_download_hash_mismatch(self) -> None:
+        with self.assertRaises(acceptance.AcceptanceError) as caught:
+            RealProviderGeneratedFileSuite(corrupt_sha256=True)._real_provider_generated_file_checkpoint()
+
+        self.assertEqual(caught.exception.code, "runner.generated_file_checkpoint_download_mismatch")
 
     def test_terminal_large_node_command_emits_exact_fixture_bytes_without_newline(self) -> None:
         completed = subprocess.run(
@@ -1012,7 +1317,12 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
             dataclasses.replace(
                 runner_options(),
                 suite="real-provider-smoke",
-                real_provider_cases=("approval", "user-input", "terminal-large"),
+                real_provider_cases=(
+                    "approval",
+                    "user-input",
+                    "generated-file-checkpoint",
+                    "terminal-large",
+                ),
             ),
         )
 
@@ -1031,6 +1341,7 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
                 "real-provider.turn-1",
                 "real-provider.approval-resolution",
                 "real-provider.user-input-resolution",
+                "real-provider.generated-file-checkpoint",
                 "real-provider.terminal-large-log",
                 "recovery.control-plane-restart",
                 "real-provider.turn-2-continuity",
@@ -1065,6 +1376,7 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
                 runner_options(),
                 suite="real-provider-smoke",
                 real_provider_cases=(
+                    "generated-file-checkpoint",
                     "terminal-large",
                     "review",
                     "compact",
@@ -1087,6 +1399,7 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
                 "real-provider.turn-1-start",
                 "runtime.real-provider-worker-discovery",
                 "real-provider.turn-1",
+                "real-provider.generated-file-checkpoint",
                 "real-provider.terminal-large-log",
                 "recovery.control-plane-restart",
                 "real-provider.turn-2-continuity",
@@ -1139,6 +1452,18 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
             )
 
         self.assertEqual(raised.exception.code, "runner.real_provider_marker_mismatch")
+
+    def test_real_provider_generated_file_dispatches_to_canonical_handler(self) -> None:
+        suite = BarrierSuite(acceptance.EXECUTION_PINNED_WORKER)
+        expected = {"checkpoint": {"strategy": "snapshot"}}
+        suite._real_provider_generated_file_checkpoint = mock.Mock(  # type: ignore[method-assign]
+            return_value=expected
+        )
+
+        actual = suite._execute_real_provider_case("generated-file-checkpoint")
+
+        self.assertEqual(actual, expected)
+        suite._real_provider_generated_file_checkpoint.assert_called_once_with()
 
     def test_real_provider_terminal_large_dispatches_to_canonical_handler(self) -> None:
         suite = BarrierSuite(acceptance.EXECUTION_PINNED_WORKER)
@@ -1427,6 +1752,7 @@ class RunnerOptionsTest(unittest.TestCase):
                 "user-input",
                 "steer",
                 "interrupt",
+                "generated-file-checkpoint",
                 "terminal-large",
                 "review",
                 "compact",

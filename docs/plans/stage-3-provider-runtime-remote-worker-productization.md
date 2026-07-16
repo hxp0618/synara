@@ -1021,6 +1021,15 @@ durable Approval 与跨 Turn Cursor 语义，因此记录为 Explicit Unsupporte
 受控 Provider Credential 将 `CLAUDE_CONFIG_DIR` 绑定到 Runtime Output Root。Generated File、大 Diff、
 真实 Codex/Claude lossless 大日志和跨 Target Release Acceptance 仍待完成。
 
+2026-07-16 当前工作区新增第 10 个 canonical case `generated-file-checkpoint`。真实 Codex 与 Claude Local
+均写入精确 `1 MiB + 257 B` Workspace 文件，并在 Execution 完成前形成
+`workspace.dirty -> checkpoint.created -> workspace_snapshot artifact.ready -> checkpoint.ready`。Runner 经
+用户 Artifact 下载授权读取 Ready Snapshot，拒绝 Absolute/Traversal/Symlink/非 Regular Tar Member，并校验
+目标文件的相对路径、Size/SHA-256、已知 Runner 哨兵内容、Artifact Metadata、生命周期顺序、无重复 Ready
+和无物理路径泄漏。
+该证据关闭真实 Local Workspace Generated File 的 Checkpoint 捕获路径；standalone Provider
+`generated_file` ArtifactCandidate、大 Diff、跨 Target 与 Retention 并发仍保持开放。
+
 ## 15. 工作流 J：Worker Drain、升级与版本隔离
 
 ### J1. Worker 生命周期
@@ -1318,6 +1327,12 @@ Provider × Capability × Execution Target
   `tool-results` 约束到 execution-scoped Runtime Output Root；受控 Credential 路径仍复用完整严格断言。
   不读取或复制用户 ambient Credential，也不放宽路径 containment。该边界不关闭真实 lossless 大输出、
   故障、SSH/Docker/Kubernetes 或 soak Gate。
+- 第 10 个 canonical case `generated-file-checkpoint` 在真实 Codex/Claude Local 完整 matrix 中均通过。
+  两者都把精确 `1 MiB + 257 B` 文件封装为 Ready `workspace_snapshot` Checkpoint Artifact；Runner 通过用户
+  下载授权重新读取 Snapshot，并验证 Tar 安全、目标相对文件、已知 Runner 哨兵、固定内容 SHA、事件顺序、无重复 Ready、
+  cleanup 与零 Secret finding。Codex 为 `21 pass + 1 unsupported`，Claude 为
+  `20 pass + 2 unsupported`。它证明 Workspace Checkpoint 捕获，不把 standalone `generated_file`
+  ArtifactCandidate、大 Diff、SSH/Docker/Kubernetes 或 Retention 并发伪装为已完成。
 - 首次 Claude 产品路径运行暴露 ambient OAuth 被 Execution-local `CLAUDE_CONFIG_DIR` 隔离掉的问题；
   Provider Host 现仅在受控 Credential 路径使用 Runtime Output Root 作为 Claude Config，ambient OAuth
   保留用户配置查找路径，并由单测和真实 clean-commit smoke 保护。
@@ -1405,7 +1420,8 @@ Provider × Capability × Execution Target
 - 当前进度：deterministic Local/Docker core、Local Provider fault、Docker network、Kubernetes
   Network/Drain/Eviction/Image Canary 已通过实现期运行；SSH 13/13 与 Kubernetes 13/13 core 仍是
   2026-07-14 历史 fixture 证据。真实 Codex/Claude 已在 clean commit `fb9e25ec` 通过 Local 产品路径
-  两轮 restart/native-Cursor smoke；完整 Local、SSH、Docker、Kubernetes Gate 与 soak 尚未完成。
+  两轮 restart/native-Cursor smoke，当前完整 Local matrix 也通过 Generated File Workspace Checkpoint 捕获；
+  standalone Artifact、大 Diff、完整 Local、SSH、Docker、Kubernetes Gate 与 soak 尚未完成。
 
 ### Step 8：文档、Runbook 与发布门禁
 

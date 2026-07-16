@@ -17,6 +17,7 @@ import hashlib
 import http.client
 import http.cookiejar
 import http.server
+import io
 import ipaddress
 import json
 import os
@@ -31,6 +32,7 @@ import sys
 import tempfile
 import threading
 import time
+import tarfile
 import traceback
 import urllib.error
 import urllib.parse
@@ -43,6 +45,13 @@ from typing import Any, Protocol, TypeVar
 SCHEMA_VERSION = "synara.provider-acceptance.v1"
 FIXTURE_CREDENTIAL_SENTINEL = "stage3-provider-acceptance-credential-v1"
 FIXTURE_ARTIFACT_RELATIVE_PATH = ".synara-stage3-acceptance/artifact.txt"
+GENERATED_FILE_RELATIVE_PATH = ".synara-stage3-acceptance/generated-file.txt"
+GENERATED_FILE_TOTAL_BYTES = (1 << 20) + 257
+GENERATED_FILE_SNAPSHOT_MAX_BYTES = 4 << 20
+REAL_PROVIDER_APPROVAL_RELATIVE_PATH = ".synara-real-provider-approval.txt"
+REAL_PROVIDER_APPROVAL_CONTENT = b"SYNARA_REAL_PROVIDER_APPROVAL_TOOL_OK\n"
+REAL_PROVIDER_STEER_RELATIVE_PATH = ".synara-real-provider-steer.txt"
+REAL_PROVIDER_STEER_CONTENT = b"SYNARA_REAL_PROVIDER_STEER_TOOL_OK\n"
 TERMINAL_LARGE_TOTAL_BYTES = 2 * (1 << 20) + 257
 TERMINAL_LARGE_CHUNK_BYTES = 63 << 10
 TERMINAL_LOG_PREVIEW_BYTES = 32 << 10
@@ -76,11 +85,16 @@ REAL_PROVIDER_PRE_RESTART_CASES = (
     "user-input",
     "steer",
     "interrupt",
+    "generated-file-checkpoint",
     "terminal-large",
 )
 REAL_PROVIDER_POST_RESTART_CASES = ("review", "compact", "rollback", "fork")
 REAL_PROVIDER_CASES = REAL_PROVIDER_PRE_RESTART_CASES + REAL_PROVIDER_POST_RESTART_CASES
 REAL_PROVIDER_CASE_METADATA: Mapping[str, Mapping[str, str]] = {
+    "generated-file-checkpoint": {
+        "id": "real-provider.generated-file-checkpoint",
+        "name": "Capture a real Provider generated file in a ready Workspace Checkpoint Artifact",
+    },
     "approval": {
         "id": "real-provider.approval-resolution",
         "name": "Resolve a real Provider tool Approval through the user API",
@@ -239,6 +253,156 @@ def terminal_large_node_command() -> str:
         "for(let i=0;i<n;i++)b[i]=p[i%p.length];"
         "process.stdout.write(b)'"
     )
+
+
+def generated_file_bytes() -> bytes:
+    return terminal_large_bytes(0, GENERATED_FILE_TOTAL_BYTES)
+
+
+def generated_file_node_command() -> str:
+    pattern = TERMINAL_LARGE_PATTERN.decode("ascii")
+    return (
+        "node -e '"
+        'const f=require("node:fs");'
+        f'const p="{GENERATED_FILE_RELATIVE_PATH}";'
+        'f.mkdirSync(".synara-stage3-acceptance",{recursive:true});'
+        f'const s=Buffer.from("{pattern}");'
+        f"const n={GENERATED_FILE_TOTAL_BYTES};"
+        "const b=Buffer.allocUnsafe(n);"
+        "for(let i=0;i<n;i++)b[i]=s[i%s.length];"
+        "f.writeFileSync(p,b)'"
+    )
+
+
+def generated_file_snapshot_evidence(snapshot: bytes) -> dict[str, Any]:
+    if len(snapshot) > GENERATED_FILE_SNAPSHOT_MAX_BYTES:
+        raise AcceptanceError(
+            "runner.generated_file_snapshot_oversized",
+            "The generated-file Workspace Snapshot exceeded the acceptance download limit.",
+            {"snapshotBytes": len(snapshot), "maximumBytes": GENERATED_FILE_SNAPSHOT_MAX_BYTES},
+        )
+    try:
+        archive = tarfile.open(fileobj=io.BytesIO(snapshot), mode="r:*")
+    except (tarfile.TarError, OSError):
+        raise AcceptanceError(
+            "runner.generated_file_snapshot_invalid",
+            "The generated-file Workspace Snapshot was not a valid Tar archive.",
+        ) from None
+
+    with archive:
+        members = archive.getmembers()
+        regular_members: list[tarfile.TarInfo] = []
+        normalized_names: set[str] = set()
+        allowed_directory_names = {
+            pathlib.PurePosixPath(GENERATED_FILE_RELATIVE_PATH).parent.as_posix(),
+        }
+        for member in members:
+            path = pathlib.PurePosixPath(member.name)
+            normalized = path.as_posix()
+            if (
+                path.is_absolute()
+                or "\\" in member.name
+                or re.match(r"^[A-Za-z]:", member.name) is not None
+                or ".." in path.parts
+                or normalized in {"", "."}
+                or normalized in normalized_names
+                or member.issym()
+                or member.islnk()
+                or not (member.isfile() or member.isdir())
+                or (member.isdir() and normalized not in allowed_directory_names)
+            ):
+                raise AcceptanceError(
+                    "runner.generated_file_snapshot_unsafe",
+                    "The generated-file Workspace Snapshot contained an unsafe or duplicate member.",
+                    {"memberName": member.name, "memberType": member.type.decode("ascii", errors="replace")},
+                )
+            normalized_names.add(normalized)
+            if member.isfile():
+                regular_members.append(member)
+
+        regular_by_name = {
+            pathlib.PurePosixPath(member.name).as_posix(): member for member in regular_members
+        }
+        known_runner_files = {
+            REAL_PROVIDER_APPROVAL_RELATIVE_PATH: REAL_PROVIDER_APPROVAL_CONTENT,
+            REAL_PROVIDER_STEER_RELATIVE_PATH: REAL_PROVIDER_STEER_CONTENT,
+        }
+        allowed_regular_files = {GENERATED_FILE_RELATIVE_PATH, *known_runner_files}
+        unexpected_regular_files = sorted(set(regular_by_name).difference(allowed_regular_files))
+        if GENERATED_FILE_RELATIVE_PATH not in regular_by_name or unexpected_regular_files:
+            raise AcceptanceError(
+                "runner.generated_file_snapshot_shape_invalid",
+                "The generated-file Workspace Snapshot omitted its payload or contained an unexpected file.",
+                {
+                    "memberCount": len(members),
+                    "regularFileCount": len(regular_members),
+                    "regularFileNames": sorted(regular_by_name),
+                    "unexpectedRegularFileNames": unexpected_regular_files,
+                },
+            )
+        member = regular_by_name[GENERATED_FILE_RELATIVE_PATH]
+        if member.size != GENERATED_FILE_TOTAL_BYTES:
+            raise AcceptanceError(
+                "runner.generated_file_snapshot_member_invalid",
+                "The Workspace Snapshot generated file had the wrong size.",
+                {
+                    "actualBytes": member.size,
+                    "expectedBytes": GENERATED_FILE_TOTAL_BYTES,
+                },
+            )
+        reader = archive.extractfile(member)
+        if reader is None:
+            raise AcceptanceError(
+                "runner.generated_file_snapshot_content_missing",
+                "The generated file could not be read from the Workspace Snapshot.",
+            )
+        content = reader.read(GENERATED_FILE_TOTAL_BYTES + 1)
+
+        preserved_known_files: list[str] = []
+        for known_path, expected_content in known_runner_files.items():
+            known_member = regular_by_name.get(known_path)
+            if known_member is None:
+                continue
+            known_reader = archive.extractfile(known_member)
+            actual_content = (
+                known_reader.read(len(expected_content) + 1) if known_reader is not None else b""
+            )
+            if actual_content != expected_content:
+                raise AcceptanceError(
+                    "runner.generated_file_snapshot_prior_file_invalid",
+                    "The generated-file Snapshot did not preserve a known runner sentinel exactly.",
+                    {
+                        "path": known_path,
+                        "actualBytes": len(actual_content),
+                        "expectedBytes": len(expected_content),
+                    },
+                )
+            preserved_known_files.append(known_path)
+
+    expected = generated_file_bytes()
+    if content != expected:
+        raise AcceptanceError(
+            "runner.generated_file_snapshot_content_mismatch",
+            "The generated file content did not match the deterministic acceptance payload.",
+            {
+                "actualBytes": len(content),
+                "expectedBytes": len(expected),
+                "actualSha256": hashlib.sha256(content).hexdigest(),
+                "expectedSha256": hashlib.sha256(expected).hexdigest(),
+            },
+        )
+    return {
+        "archiveBytes": len(snapshot),
+        "archiveSha256": hashlib.sha256(snapshot).hexdigest(),
+        "memberCount": len(members),
+        "regularFileCount": len(regular_members),
+        "preservedKnownFiles": preserved_known_files,
+        "file": {
+            "path": GENERATED_FILE_RELATIVE_PATH,
+            "sizeBytes": len(content),
+            "sha256": hashlib.sha256(content).hexdigest(),
+        },
+    }
 
 
 def contains_runtime_physical_path(value: Any) -> bool:
@@ -568,6 +732,105 @@ class APIClient:
                 f"{method} {path} returned invalid JSON.",
                 {"method": method, "path": path, "bodyExcerpt": self.redactor.text(body[:1000])},
             ) from None
+
+    def download_bytes(
+        self,
+        url: str,
+        *,
+        maximum_bytes: int,
+        maximum_timeout: float = 30.0,
+    ) -> bytes:
+        if maximum_bytes <= 0:
+            raise ValueError("maximum_bytes must be positive")
+        parsed = urllib.parse.urlsplit(url)
+        if parsed.scheme:
+            if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+                raise AcceptanceError(
+                    "runner.artifact_download_url_invalid",
+                    "The Artifact download grant returned an unsupported URL.",
+                )
+            request_url = url
+        elif url.startswith("/"):
+            request_url = self.base_url + url
+        else:
+            raise AcceptanceError(
+                "runner.artifact_download_url_invalid",
+                "The Artifact download grant returned an invalid relative URL.",
+            )
+        for values in urllib.parse.parse_qs(parsed.query).values():
+            for value in values:
+                self.redactor.add(value, "[REDACTED_ARTIFACT_URL_VALUE]")
+        request = urllib.request.Request(
+            request_url,
+            headers={
+                "Accept": "application/octet-stream",
+                "X-Request-ID": f"stage3-acceptance-{uuid.uuid4()}",
+            },
+            method="GET",
+        )
+        safe_path = parsed.path or "/"
+        try:
+            with self.opener.open(
+                request,
+                timeout=self.deadline.request_timeout(maximum=maximum_timeout),
+            ) as response:
+                status = int(response.status)
+                content_length = response.headers.get("Content-Length")
+                if content_length is not None:
+                    try:
+                        declared_length = int(content_length)
+                    except ValueError:
+                        raise AcceptanceError(
+                            "runner.artifact_download_length_invalid",
+                            "The Artifact download returned an invalid Content-Length.",
+                            {"path": safe_path},
+                        ) from None
+                    if declared_length < 0 or declared_length > maximum_bytes:
+                        raise AcceptanceError(
+                            "runner.artifact_download_oversized",
+                            "The Artifact download exceeded the acceptance size limit.",
+                            {
+                                "path": safe_path,
+                                "declaredBytes": declared_length,
+                                "maximumBytes": maximum_bytes,
+                            },
+                        )
+                body = response.read(maximum_bytes + 1)
+        except urllib.error.HTTPError as error:
+            raise AcceptanceError(
+                "runner.artifact_download_failed",
+                f"GET {safe_path} returned HTTP {int(error.code)}.",
+                {"path": safe_path, "status": int(error.code)},
+            ) from None
+        except AcceptanceError:
+            raise
+        except (urllib.error.URLError, TimeoutError, OSError) as error:
+            raise AcceptanceError(
+                "runner.artifact_download_transport_failed",
+                f"GET {safe_path} failed: {self.redactor.text(str(error))}",
+                {"path": safe_path},
+            ) from None
+        if status != 200:
+            raise AcceptanceError(
+                "runner.artifact_download_failed",
+                f"GET {safe_path} returned HTTP {status}.",
+                {"path": safe_path, "status": status},
+            )
+        if len(body) > maximum_bytes:
+            raise AcceptanceError(
+                "runner.artifact_download_oversized",
+                "The Artifact download exceeded the acceptance size limit.",
+                {"path": safe_path, "maximumBytes": maximum_bytes},
+            )
+        if content_length is not None and len(body) != int(content_length):
+            raise AcceptanceError(
+                "runner.artifact_download_incomplete",
+                "The Artifact download body did not match Content-Length.",
+                {"path": safe_path, "declaredBytes": int(content_length), "actualBytes": len(body)},
+            )
+        for cookie in self.cookies:
+            self.redactor.add(cookie.value, "[REDACTED_SESSION_COOKIE]")
+        return body
 
     def wait_until(
         self,
@@ -5345,6 +5608,8 @@ class AcceptanceSuite:
         return evidence
 
     def _execute_real_provider_case(self, real_provider_case: str) -> Mapping[str, Any]:
+        if real_provider_case == "generated-file-checkpoint":
+            return self._real_provider_generated_file_checkpoint()
         if real_provider_case == "approval":
             return self._real_provider_approval_resolution()
         if real_provider_case == "user-input":
@@ -5368,6 +5633,273 @@ class AcceptanceSuite:
             f"Unknown real Provider acceptance case {real_provider_case}.",
             {"case": real_provider_case},
         )
+
+    def _real_provider_generated_file_checkpoint(self) -> Mapping[str, Any]:
+        before_artifacts = json_items(
+            self.api.request("GET", f"/v1/sessions/{self._required('session_id')}/artifacts"),
+            "pre-generated-file artifacts",
+        )
+        previous_artifact_ids = {
+            str(item["id"])
+            for item in before_artifacts
+            if isinstance(item.get("id"), str) and item.get("id")
+        }
+        marker = self._real_provider_marker("generated-file-checkpoint")
+        command = generated_file_node_command()
+        turn = self._create_turn(
+            "Use the Bash or shell tool exactly once. Run this exact command as the sole shell command:\n"
+            f"{command}\n"
+            "Do not add redirections, pipes, wrappers, or any other terminal command. Do not read the file "
+            "back or print its contents. After the command succeeds, reply with exactly "
+            f"{marker} and no other text."
+        )
+        turn_id = self._turn_id(turn, "real Provider generated-file Turn")
+        terminal, events = self._wait_for_turn_terminal(turn_id, "execution.completed")
+        provider_evidence = self._real_provider_turn_evidence(
+            turn_id,
+            terminal,
+            events,
+            marker,
+            expected_resume_strategy="native-cursor",
+            expected_resume_reason="cursor_usable",
+            marker_match_mode="contains-once",
+        )
+        checkpoint_evidence = self._validate_generated_file_checkpoint(
+            turn_id,
+            terminal,
+            events,
+            previous_artifact_ids,
+        )
+        self.state.last_real_marker = marker
+        return {
+            "command": {
+                "runtime": "node",
+                "relativePath": GENERATED_FILE_RELATIVE_PATH,
+                "totalBytes": GENERATED_FILE_TOTAL_BYTES,
+                "commandSha256": hashlib.sha256(command.encode("utf-8")).hexdigest(),
+            },
+            "checkpoint": checkpoint_evidence,
+            "providerTurn": provider_evidence,
+        }
+
+    def _validate_generated_file_checkpoint(
+        self,
+        turn_id: str,
+        execution_terminal: Mapping[str, Any],
+        events: Sequence[Mapping[str, Any]],
+        previous_artifact_ids: set[str],
+    ) -> Mapping[str, Any]:
+        execution_id = execution_terminal.get("executionId")
+        if not isinstance(execution_id, str) or not execution_id:
+            raise AcceptanceError(
+                "runner.generated_file_execution_id_missing",
+                "The generated-file Turn omitted its Execution ID.",
+            )
+
+        def single_event(event_type: str) -> Mapping[str, Any]:
+            matching = [
+                event
+                for event in events
+                if event.get("eventType") == event_type and event.get("executionId") == execution_id
+            ]
+            if len(matching) != 1:
+                raise AcceptanceError(
+                    "runner.generated_file_checkpoint_event_invalid",
+                    f"Expected exactly one {event_type} event for the generated-file Execution.",
+                    {"eventType": event_type, "count": len(matching), "executionId": execution_id},
+                )
+            return matching[0]
+
+        dirty = single_event("workspace.dirty")
+        checkpoint_created = single_event("checkpoint.created")
+        checkpoint_ready = single_event("checkpoint.ready")
+        snapshot_ready_events = [
+            event
+            for event in events
+            if event.get("eventType") == "artifact.ready"
+            and event.get("executionId") == execution_id
+            and isinstance(event.get("payload"), dict)
+            and event["payload"].get("kind") == "workspace_snapshot"
+        ]
+        if len(snapshot_ready_events) != 1:
+            raise AcceptanceError(
+                "runner.generated_file_checkpoint_event_invalid",
+                "Expected exactly one workspace_snapshot artifact.ready event for the generated-file Execution.",
+                {
+                    "eventType": "artifact.ready",
+                    "artifactKind": "workspace_snapshot",
+                    "count": len(snapshot_ready_events),
+                    "executionId": execution_id,
+                },
+            )
+        artifact_ready = snapshot_ready_events[0]
+        dirty_payload = json_object(dirty.get("payload"), "generated-file workspace.dirty payload")
+        created_payload = json_object(
+            checkpoint_created.get("payload"),
+            "generated-file checkpoint.created payload",
+        )
+        artifact_payload = json_object(
+            artifact_ready.get("payload"),
+            "generated-file artifact.ready payload",
+        )
+        ready_payload = json_object(
+            checkpoint_ready.get("payload"),
+            "generated-file checkpoint.ready payload",
+        )
+        checkpoint_id = created_payload.get("checkpointId")
+        artifact_id = ready_payload.get("artifactId")
+        workspace_id = created_payload.get("workspaceId")
+        checkpoint_sha256 = ready_payload.get("sha256")
+        if (
+            dirty_payload.get("turnId") != turn_id
+            or created_payload.get("turnId") != turn_id
+            or ready_payload.get("turnId") != turn_id
+            or not isinstance(checkpoint_id, str)
+            or not checkpoint_id
+            or ready_payload.get("checkpointId") != checkpoint_id
+            or not isinstance(workspace_id, str)
+            or not workspace_id
+            or ready_payload.get("workspaceId") != workspace_id
+            or created_payload.get("strategy") != "snapshot"
+            or ready_payload.get("strategy") != "snapshot"
+            or not isinstance(artifact_id, str)
+            or not artifact_id
+            or artifact_id in previous_artifact_ids
+            or artifact_payload.get("artifactId") != artifact_id
+            or artifact_payload.get("kind") != "workspace_snapshot"
+            or artifact_payload.get("contentType") != "application/x-tar"
+            or not isinstance(artifact_payload.get("sizeBytes"), int)
+            or int(artifact_payload["sizeBytes"]) <= GENERATED_FILE_TOTAL_BYTES
+            or not isinstance(checkpoint_sha256, str)
+            or re.fullmatch(r"[0-9a-f]{64}", checkpoint_sha256) is None
+        ):
+            raise AcceptanceError(
+                "runner.generated_file_checkpoint_boundary_invalid",
+                "The generated-file Checkpoint events did not form one ready Snapshot boundary.",
+                {
+                    "turnId": turn_id,
+                    "dirty": dirty_payload,
+                    "checkpointCreated": created_payload,
+                    "artifactReady": artifact_payload,
+                    "checkpointReady": ready_payload,
+                },
+            )
+        ordered_events = [dirty, checkpoint_created, artifact_ready, checkpoint_ready, execution_terminal]
+        sequences = [event.get("sequence") for event in ordered_events]
+        if (
+            not all(isinstance(sequence, int) for sequence in sequences)
+            or sequences != sorted(sequences)
+            or len(set(sequences)) != len(sequences)
+        ):
+            raise AcceptanceError(
+                "runner.generated_file_checkpoint_order_invalid",
+                "The generated-file Checkpoint lifecycle was not ordered before Execution completion.",
+                {"sequences": sequences},
+            )
+        if any(
+            contains_runtime_physical_path(event.get("payload"))
+            for event in (dirty, checkpoint_created, artifact_ready, checkpoint_ready)
+        ):
+            raise AcceptanceError(
+                "runner.generated_file_checkpoint_path_leaked",
+                "A generated-file Checkpoint Event exposed a physical Workspace or Artifact path.",
+            )
+
+        artifacts = json_items(
+            self.api.request("GET", f"/v1/sessions/{self._required('session_id')}/artifacts"),
+            "generated-file artifacts",
+        )
+        artifact = next((item for item in artifacts if item.get("id") == artifact_id), None)
+        expected_artifact = {
+            "kind": "workspace_snapshot",
+            "status": "ready",
+            "contentType": "application/x-tar",
+            "sizeBytes": artifact_payload.get("sizeBytes"),
+            "sha256": checkpoint_sha256,
+            "executionId": execution_id,
+        }
+        if artifact is None or {key: artifact.get(key) for key in expected_artifact} != expected_artifact:
+            raise AcceptanceError(
+                "runner.generated_file_checkpoint_artifact_invalid",
+                "The generated-file Checkpoint Artifact metadata did not match its ready Events.",
+                {
+                    "artifactId": artifact_id,
+                    "expected": expected_artifact,
+                    "actual": self._artifact_summary(artifact) if artifact is not None else None,
+                },
+            )
+        original_name = artifact.get("originalName")
+        if (
+            not isinstance(original_name, str)
+            or not original_name.startswith("workspace-")
+            or not original_name.endswith(".tar")
+        ):
+            raise AcceptanceError(
+                "runner.generated_file_checkpoint_artifact_name_invalid",
+                "The generated-file Workspace Snapshot used an invalid logical Artifact name.",
+                {"artifactId": artifact_id, "originalName": original_name},
+            )
+        grant = json_object(
+            self.api.request("POST", f"/v1/artifacts/{artifact_id}/download"),
+            "generated-file Artifact download grant",
+        )
+        grant_artifact = json_object(
+            grant.get("artifact"),
+            "generated-file Artifact download grant.artifact",
+        )
+        download_url = grant.get("url")
+        if grant_artifact.get("id") != artifact_id or not isinstance(download_url, str) or not download_url:
+            raise AcceptanceError(
+                "runner.generated_file_checkpoint_download_grant_invalid",
+                "The generated-file Workspace Snapshot download grant was invalid.",
+                {"artifactId": artifact_id},
+            )
+        snapshot = self.api.download_bytes(
+            download_url,
+            maximum_bytes=GENERATED_FILE_SNAPSHOT_MAX_BYTES,
+        )
+        snapshot_sha256 = hashlib.sha256(snapshot).hexdigest()
+        if len(snapshot) != artifact.get("sizeBytes") or snapshot_sha256 != checkpoint_sha256:
+            raise AcceptanceError(
+                "runner.generated_file_checkpoint_download_mismatch",
+                "The downloaded Workspace Snapshot did not match its ready Artifact metadata.",
+                {
+                    "artifactId": artifact_id,
+                    "actualBytes": len(snapshot),
+                    "expectedBytes": artifact.get("sizeBytes"),
+                    "actualSha256": snapshot_sha256,
+                    "expectedSha256": checkpoint_sha256,
+                },
+            )
+        snapshot_evidence = generated_file_snapshot_evidence(snapshot)
+        standalone_generated_artifacts = [
+            self._artifact_summary(item)
+            for item in artifacts
+            if item.get("kind") == "generated_file" and item.get("executionId") == execution_id
+        ]
+        return {
+            "turnId": turn_id,
+            "executionId": execution_id,
+            "workspaceId": workspace_id,
+            "checkpointId": checkpoint_id,
+            "strategy": "snapshot",
+            "artifact": self._artifact_summary(artifact),
+            "snapshot": snapshot_evidence,
+            "sequenceRange": {
+                "workspaceDirty": dirty.get("sequence"),
+                "checkpointCreated": checkpoint_created.get("sequence"),
+                "artifactReady": artifact_ready.get("sequence"),
+                "checkpointReady": checkpoint_ready.get("sequence"),
+                "executionCompleted": execution_terminal.get("sequence"),
+            },
+            "runtimePhysicalPathLeak": False,
+            "duplicateReadyArtifact": False,
+            "standaloneGeneratedFileArtifacts": standalone_generated_artifacts,
+            "releaseBoundary": (
+                "generated file is proven inside a ready workspace_snapshot Checkpoint Artifact; "
+                "standalone Provider generated_file ArtifactCandidate and large Diff remain separate gates"
+            ),
+        }
 
     def _real_provider_approval_interaction(
         self,
@@ -5397,9 +5929,13 @@ class AcceptanceSuite:
 
     def _real_provider_approval_resolution(self) -> Mapping[str, Any]:
         marker = self._real_provider_marker("approval")
+        approval_text = REAL_PROVIDER_APPROVAL_CONTENT.decode("ascii").rstrip("\n")
+        approval_command = (
+            f"printf '{approval_text}\\n' > {REAL_PROVIDER_APPROVAL_RELATIVE_PATH}"
+        )
         turn = self._create_turn(
             "Use the Bash or shell tool exactly once to run this command: "
-            "printf 'SYNARA_REAL_PROVIDER_APPROVAL_TOOL_OK\\n' > .synara-real-provider-approval.txt. "
+            f"{approval_command}. "
             "Wait for the tool to finish, then reply with exactly "
             f"{marker} and no other text.",
             runtime_mode="approval-required",
@@ -5534,9 +6070,11 @@ class AcceptanceSuite:
         steered_marker = self._real_provider_marker("steer")
         if self.options.provider == "claudeAgent":
             return self._real_claude_provider_steer_active_turn(original_marker, steered_marker)
+        steer_text = REAL_PROVIDER_STEER_CONTENT.decode("ascii").rstrip("\n")
+        steer_command = f"printf '{steer_text}\\n' > {REAL_PROVIDER_STEER_RELATIVE_PATH}"
         turn = self._create_turn(
             "Use the Bash or shell tool exactly once to run this command: "
-            "printf 'SYNARA_REAL_PROVIDER_STEER_TOOL_OK\\n' > .synara-real-provider-steer.txt. "
+            f"{steer_command}. "
             "After it succeeds, reply with exactly "
             f"{original_marker} and no other text.",
             runtime_mode="approval-required",
@@ -5611,10 +6149,13 @@ class AcceptanceSuite:
         original_marker: str,
         steered_marker: str,
     ) -> Mapping[str, Any]:
+        steer_text = REAL_PROVIDER_STEER_CONTENT.decode("ascii").rstrip("\n")
+        steer_command = (
+            f"sleep 8 && printf '{steer_text}\\n' > {REAL_PROVIDER_STEER_RELATIVE_PATH}"
+        )
         turn = self._create_turn(
             "Use the Bash tool exactly once to run this command: "
-            "sleep 8 && printf 'SYNARA_REAL_PROVIDER_STEER_TOOL_OK\\n' > "
-            ".synara-real-provider-steer.txt. After it succeeds, reply with exactly "
+            f"{steer_command}. After it succeeds, reply with exactly "
             f"{original_marker} and no other text.",
             runtime_mode="full-access",
         )

@@ -111,9 +111,15 @@ Acceptance Fixture used by Codex and Claude.
   真实 Codex `0.144.x` 明确记录为 Explicit Unsupported：默认 `unified_exec` 只保留 1 MiB Head/Tail，且
   不能为单个 Turn 禁用它而破坏 durable Approval 与跨 Turn Cursor 语义。Claude ambient OAuth 同一 case
   也为 Explicit Unsupported，继续要求 controlled Credential 才能安全绑定 Runtime Output Root；不读取或
-  复制 ambient Credential，不接受 root 外路径。两个边界均不会被伪装为 lossless pass。本轮 Local matrix
-  为 Codex `20 pass + 1 unsupported`、Claude `19 pass + 2 unsupported`（另一个为 Compact），两份 cleanup
-  和 Secret scan 均通过；报告来自最终提交前工作区，不替代 clean-commit 或跨 Target Gate。
+  复制 ambient Credential，不接受 root 外路径。两个边界均不会被伪装为 lossless pass；报告来自最终
+  提交前工作区，不替代 clean-commit 或跨 Target Gate。
+- 第 10 个 canonical case `generated-file-checkpoint` 的真实 Codex/Claude Local 完整 matrix 均通过：精确
+  `1 MiB + 257 B` 文件在 Execution 完成前形成 Dirty/Created/Artifact Ready/Checkpoint Ready 顺序；Runner
+  通过用户下载授权重新读取 `workspace_snapshot`，验证安全 Tar、目标相对文件、已知 Runner 哨兵、
+  Size/SHA-256、无重复 Ready 与无物理路径泄漏。Codex 为 `21 pass + 1 unsupported`，Claude 为
+  `20 pass + 2 unsupported`（Compact 与 lossless Terminal）；两份 cleanup 和 Secret scan 均通过。该证据
+  只关闭 Local Workspace Checkpoint 捕获，standalone `generated_file` ArtifactCandidate、大 Diff、
+  Retention 并发和跨 Target Gate 仍保持开放。
 - 首次真实 Claude 产品路径运行发现 Execution-local `CLAUDE_CONFIG_DIR` 会让已登录的 ambient OAuth
   不可见。Provider Host 已区分 controlled Credential 与 ambient authentication：前者保留 Runtime Output
   Root 隔离，后者保留用户 Claude 配置查找路径；Provider Host 全量测试与真实 clean-commit smoke 均通过。
@@ -221,14 +227,15 @@ local no-new-DDL statements do not redefine the repository-wide migration bounda
 
 1. Completed: add shared Capability and Provider Host Protocol 2.1 contracts plus contract fixtures.
 2. Completed: implement Host Describe/Handshake, persisted compatibility gating and the bounded v1 path.
-3. In progress: Codex App Server and Claude Agent SDK multi-Turn, native Interrupt/Steer, Approval, Plan Mode Input and history fallback are implemented. Runtime Event v2 is canonical end to end. Cursor Envelope v2, per-Execution Provider snapshots, Cursor quarantine/lineage, the bounded expiry policy, audited Claim selection, safe Provider-native invalid/expired fallback, one active Execution per Session and pre-Claim Interrupt cancellation are implemented. Clean commit `0b3f9214` passes the implemented real Codex/Claude Local control/capability matrix: Codex 20 pass, Claude 19 pass plus one explicit unsupported Compact boundary. Continue with real Provider generated-file, large Diff/Terminal, Artifact/Checkpoint and failure matrices, then SSH, Docker and Kubernetes acceptance.
+3. In progress: Codex App Server and Claude Agent SDK multi-Turn, native Interrupt/Steer, Approval, Plan Mode Input and history fallback are implemented. Runtime Event v2 is canonical end to end. Cursor Envelope v2, per-Execution Provider snapshots, Cursor quarantine/lineage, the bounded expiry policy, audited Claim selection, safe Provider-native invalid/expired fallback, one active Execution per Session and pre-Claim Interrupt cancellation are implemented. The current-worktree ten-case Local matrix passes with Codex at 21 pass plus one explicit lossless-Terminal boundary and Claude at 20 pass plus Compact/lossless-Terminal boundaries. Continue with standalone generated-file ArtifactCandidate, large Diff and real Provider failure matrices, then SSH, Docker and Kubernetes acceptance.
 4. In progress: Workspace/Git/Checkpoint DDL, public/private HTTPS Clone/Fetch, Git Credential, state reporting, cross-process locked cache plus private relative worktree generations, Git-reference/Patch/Snapshot capture/restore, interrupted staging/backup reconciliation, physical cleanup and Checkpoint/Artifact retention are implemented; add SSH Credential delivery and real multi-Worker/Target acceptance.
 5. In progress: Worker Manifest and graceful Drain are implemented; add reproducible image evidence, canary/rollback and upgrade isolation.
 6. In progress: the deterministic shared Runner covers Local, Docker, SSH and Kubernetes and emits JSON/Markdown
    evidence. The SSH Driver's deterministic Codex fixture passed the 13-case live suite on 2026-07-14; clean commit
    `2763ebd3` passed the 13-case Kubernetes core suite. Current dirty-worktree failure-only runs also pass Local
    Provider faults, Docker network interruption and Kubernetes Network/Drain/Eviction/Image Canary. Re-run the
-   implemented real Codex/Claude Local control/capability matrix now passes on clean commit `0b3f9214`. Complete the
-   generated-file, large Diff/Terminal, Artifact/Checkpoint and failure matrices, then run both adapters across SSH,
+   implemented real Codex/Claude Local control/capability matrix passes on clean commit `0b3f9214`; the current
+   ten-case matrix also passes generated-file Workspace Checkpoint capture. Complete standalone generated-file
+   Artifact, large Diff and real Provider failure matrices, then run both adapters across SSH,
    Docker and Kubernetes plus long-session and registry-pushed rollout before promoting any Local-only Provider or
    claiming the four-Target release gate.
