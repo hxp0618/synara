@@ -1,13 +1,14 @@
 # Stage 3 Drift Audit
 
-Baseline: `codex/saas-tenancy-user` after clean commit `90fae52c`, including the Provider Cursor expiry policy,
-audited Resume selection, safe Provider-native fallback, replay-stable fallback Event identity, standalone
-Provider-native generated-file capture and Artifact-backed Large Diff projection. The immutable
-Kubernetes deterministic Provider fixture report remains tied to `2763ebd3` and was recorded on 2026-07-14.
-The latest clean-commit real Local matrix is summarized in
-`docs/reports/stage-3-real-provider-local-large-diff-matrix-90fae52c.md`; the standalone generated-file predecessor
-remains in `docs/reports/stage-3-real-provider-local-standalone-generated-file-matrix-be919393.md`. The earlier
-two-Turn smoke, dirty-worktree and deterministic fixture evidence remains in
+Baseline: `codex/saas-tenancy-user` after clean commit `253052aa`, including the consolidated real Codex/Claude
+Local product and controlled-failure release gate, terminal-aware Interaction waits, the Provider Cursor expiry
+policy, audited Resume selection, standalone Provider-native generated-file capture and Artifact-backed Large Diff
+projection. The immutable Kubernetes deterministic Provider fixture report remains tied to `2763ebd3` and was
+recorded on 2026-07-14. The latest clean-commit real Local release evidence is summarized in
+`docs/reports/stage-3-real-provider-local-release-gate-253052aa.md`; the standalone generated-file and Large Diff
+predecessors remain in `docs/reports/stage-3-real-provider-local-standalone-generated-file-matrix-be919393.md` and
+`docs/reports/stage-3-real-provider-local-large-diff-matrix-90fae52c.md`. The earlier two-Turn smoke,
+dirty-worktree and deterministic fixture evidence remains in
 `docs/reports/stage-3-provider-runtime-acceptance-fb9e25ec.md` and
 `docs/reports/stage-3-provider-runtime-acceptance-2026-07-15.md`; none closes the four-Target release gate.
 
@@ -46,7 +47,7 @@ Acceptance Fixture used by Codex and Claude.
 | I. Terminal/log/generated file/checkpoint     | partial              | Artifact path containment, server-side size/hash verification and retry-safe Checkpoint Artifact identity are implemented. Ordinary `generated_file`, `terminal_log` and `diff` uploads negotiate a header-based v1 idempotency feature, derive a content-bound deterministic Execution/Generation Artifact ID, reuse stable Create/Complete request IDs, refresh pending grants and recover a Ready Artifact after ambiguous responses. Before Provider start, agentd binds the Workspace and Runtime Output roots to anchored descriptors, rejects traversal/symlinks/non-regular files, and retains the opened descriptor through Secret Guard, hashing, upload and Ready verification. Migrations `000020`, `000024` and `000025` enforce Checkpoint scope and binding; forward migration `000041` adds only the `diff` Artifact kind. Agentd automatically creates Git-reference/Patch/Snapshot Checkpoints, including an empty Snapshot after the last non-Git file is deleted. Clean commit `be919393` proves the generated-file boundary, and clean commit `90fae52c` proves Ready downloadable Large Diff Artifacts for Codex and Claude, Artifact-backed `turn.diff.updated`, canonical-path alias handling, restart/Cursor continuity, cleanup and zero Secret findings. `workspace-checkpoint-unconfirmed` remains an explicit error Activity. Lossless real large-log acceptance, cross-Target and Retention concurrency remain.                                                                                                                                                                                                                                      |
 | J. Worker drain/upgrade/version isolation     | partial              | Migration `000017` stores immutable Worker/Image/Provider manifests and Claim compatibility. Migration `000034` separates terminal operator revocation from compatibility, fences Token/Heartbeat/Claim/Lease and records immutable logical-identity tombstones. Migration `000037` adds immutable target-scoped Release Revisions, a strict-CAS promoted/canary Policy, transition history and release-pinned Worker plus unleased Execution selection. Agentd Drain retains the Workspace lock, stops new Claim, renews through the bounded deadline, flushes terminal/Checkpoint state and reports conservative data-loss risk before Release. Worker images remain digest/lock/SBOM/version validated. A clean registry-pushed multi-arch reproduction, deliberate process-group escape, Windows FD3 transport and real multi-node canary/rollback/eviction evidence remain.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | K. Web authority switch                       | partial              | SaaS Project/Session/Turn/Event is Control Plane authoritative and local mode remains isolated. Tenant switching clears the old Tenant query/subscription/draft scope, and SaaS Provider/advanced-operation handlers fail closed through Control Plane capability and Session projections without calling local Native API paths. Strict-CAS model-switch still reuses `000030`/`000031` state and adds no DDL for that local operation. Credential scope/binding administration uses `000033`, `000035`, `000036`, `000038` and `000039`; Worker management and release rollout use `000034`, `000037` and `000040`. Artifact Ready plus explicit refresh/reconnect/Server-restart and no-Control-Plane local-mode evidence remains.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
-| L. Unified acceptance suite                   | partial              | A shared Runner emits machine-readable JSON, Markdown and redacted logs, drives Local, Docker, SSH and Kubernetes through user APIs and real Control Plane/agentd product paths, and models both standing and execution-pinned Worker allocation plus capability-declared managed replacement. On 2026-07-14 the deterministic Codex fixture passed all 13 SSH cases on an isolated disposable OrbStack Ubuntu 24.04 VM. Clean commit `2763ebd3` then passed all 13 Kubernetes cases on an owned disposable Kind cluster. Current dirty-worktree failure-only runs pass Local malformed/oversized/crash, Docker network interruption and Kubernetes worker-network/drain/eviction/image-canary. Clean commit `90fae52c` passes the combined eleven-case real Local capability/Artifact matrix; clean commit `61e38f4f` separately passes Codex and Claude real Local `16/16` failure matrices with 401/429, scoped Host crash, Cursor expiry, exact cleanup and zero Secret findings. This proves the implemented Local slices but does not replace one consolidated Local or a real four-Target release. Registry-pushed immutable rollout, long-session and cross-Target real Providers remain.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| L. Unified acceptance suite                   | partial              | A shared Runner emits machine-readable JSON, Markdown and redacted logs, drives Local, Docker, SSH and Kubernetes through user APIs and real Control Plane/agentd product paths, and models both standing and execution-pinned Worker allocation plus capability-declared managed replacement. On 2026-07-14 the deterministic Codex fixture passed all 13 SSH cases on an isolated disposable OrbStack Ubuntu 24.04 VM. Clean commit `2763ebd3` then passed all 13 Kubernetes cases on an owned disposable Kind cluster. Current dirty-worktree failure-only runs pass Local malformed/oversized/crash, Docker network interruption and Kubernetes worker-network/drain/eviction/image-canary. Clean commit `253052aa` rebuilds Provider Host with Node.js 24.13.1 and passes the consolidated real Local release unit: Codex product `22 pass + 1 unsupported`, Codex failure `16/16`, Claude product `21 pass + 2 unsupported`, Claude failure `16/16`, all on one clean SHA and Capability Catalog hash with exact cleanup and zero Secret findings. Terminal-aware Interaction waits fail immediately when a Provider terminates without the required request. Registry-pushed immutable rollout, long-session and real SSH/Docker/Kubernetes Providers remain.                                                                                                                                                                                                                                                                                                                                                                                                               |
 
 ### 2026-07-15 Advanced Session operation evidence update
 
@@ -92,8 +93,9 @@ Acceptance Fixture used by Codex and Claude.
   清理本次 Container、Volume、Network 与自动构建 Image。该证据来自未提交工作区；最终 Commit 后需
   重新生成报告，更新后的 Suite 也尚未在 SSH/Kubernetes 重跑。
 - Workflow I/L 仍为 `partial`：standalone Generated File 与 Large Diff 均已有 clean Local Codex/Claude
-  完整矩阵证据；clean commit `61e38f4f` 也已关闭独立真实 Local Provider 故障矩阵。真实 Codex/Claude
-  lossless 大日志、长 Session、consolidated Local 与四 Target Release Gate 尚未关闭。
+  完整矩阵证据；clean commit `253052aa` 也已将 product/capability 与 failure 四份报告聚合为真实
+  consolidated Local release gate。真实 Codex/Claude lossless 大日志、长 Session 与 SSH/Docker/Kubernetes
+  Release Gate 尚未关闭。
 
 ### 2026-07-16 Release documentation and real Local adapter smoke update
 
@@ -147,6 +149,13 @@ Acceptance Fixture used by Codex and Claude.
   Secret scan 均通过。Codex controlled Credential 使用 execution-local `CODEX_HOME`；Claude 对稳定 SDK
   `api_retry` 结束隐藏的 401/429 重试。详见
   `docs/reports/stage-3-real-provider-local-failure-matrix-61e38f4f.md`。
+- Clean commit `253052aa` 新增并通过 consolidated Local release gate。聚合器要求完全 clean worktree，使用
+  Node.js `24.13.1` 从当前 checkout 重建 Provider Host，并分别运行 Codex/Claude product 与 failure 四份
+  报告；最终为 Codex `22 pass + 1 unsupported`、`16/16`，Claude `21 pass + 2 unsupported`、`16/16`。
+  四份报告共享同一 Git SHA 与 Capability Catalog hash，无 fail/skipped，只有冻结的 Explicit Unsupported，
+  cleanup 和 output Secret scan 全部通过。首次聚合尝试发现 Codex Approval Turn 未调用工具却终止；
+  Runner 现对 terminal-without-interaction 立即返回 `runner.interaction_missing_after_terminal`，不自动重试或
+  放宽断言。详见 `docs/reports/stage-3-real-provider-local-release-gate-253052aa.md`。
 - 首次真实 Claude 产品路径运行发现 Execution-local `CLAUDE_CONFIG_DIR` 会让已登录的 ambient OAuth
   不可见。Provider Host 已区分 controlled Credential 与 ambient authentication：前者保留 Runtime Output
   Root 隔离，后者保留用户 Claude 配置查找路径；Provider Host 全量测试与真实 clean-commit smoke 均通过。
@@ -155,7 +164,7 @@ Acceptance Fixture used by Codex and Claude.
   canary；所有运行的 cleanup 与 output Secret scan 均通过。Kind image canary 使用同内容 alias，不是
   `000037` immutable Release Revision rollout，也不替代真实 Provider gate。
 - 2026-07-14 的 SSH 13/13 和 clean commit `2763ebd3` Kubernetes 13/13 仍只作为历史 fixture 证据；真实
-  Codex/Claude 仍需完成完整 Local Release Suite 与 SSH/Docker/Kubernetes Release Acceptance。
+  Codex/Claude consolidated Local 已在 `253052aa` 关闭，SSH/Docker/Kubernetes Release Acceptance 仍待完成。
 - 新增 Stage 3 发布检查单、Worker Release rollout Runbook 和当前验收报告：
   `docs/release-checklists/stage-3-provider-runtime-remote-worker.md`、
   `docs/runbooks/worker-release-rollout.md`、
@@ -257,7 +266,7 @@ local no-new-DDL statements do not redefine the repository-wide migration bounda
 
 1. Completed: add shared Capability and Provider Host Protocol 2.1 contracts plus contract fixtures.
 2. Completed: implement Host Describe/Handshake, persisted compatibility gating and the bounded v1 path.
-3. In progress: Codex App Server and Claude Agent SDK multi-Turn, native Interrupt/Steer, Approval, Plan Mode Input and history fallback are implemented. Runtime Event v2 is canonical end to end. Cursor Envelope v2, per-Execution Provider snapshots, Cursor quarantine/lineage, the bounded expiry policy, audited Claim selection, safe Provider-native invalid/expired fallback, one active Execution per Session and pre-Claim Interrupt cancellation are implemented. Clean commit `90fae52c` passes the combined eleven-case Local matrix with Codex at 22 pass plus one explicit lossless-Terminal boundary and Claude at 21 pass plus Compact/lossless-Terminal boundaries; both prove standalone `generated_file`, an independent Workspace Checkpoint and Artifact-backed Large Diff. Clean commit `61e38f4f` separately passes both real Local 16-case failure matrices. Continue with consolidated Local, SSH, Docker and Kubernetes acceptance.
+3. In progress: Codex App Server and Claude Agent SDK multi-Turn, native Interrupt/Steer, Approval, Plan Mode Input and history fallback are implemented. Runtime Event v2 is canonical end to end. Cursor Envelope v2, per-Execution Provider snapshots, Cursor quarantine/lineage, the bounded expiry policy, audited Claim selection, safe Provider-native invalid/expired fallback, one active Execution per Session and pre-Claim Interrupt cancellation are implemented. Clean commit `253052aa` passes the consolidated real Local product/failure release gate with the frozen Compact/lossless-Terminal boundaries, standalone `generated_file`, Workspace Checkpoint, Artifact-backed Large Diff, real 401/429, scoped Host crash and Cursor-expiry recovery. Continue with SSH, Docker and Kubernetes acceptance.
 4. In progress: Workspace/Git/Checkpoint DDL, public/private HTTPS Clone/Fetch, Git Credential, state reporting, cross-process locked cache plus private relative worktree generations, Git-reference/Patch/Snapshot capture/restore, interrupted staging/backup reconciliation, physical cleanup and Checkpoint/Artifact retention are implemented; add SSH Credential delivery and real multi-Worker/Target acceptance.
 5. In progress: Worker Manifest and graceful Drain are implemented; add reproducible image evidence, canary/rollback and upgrade isolation.
 6. In progress: the deterministic shared Runner covers Local, Docker, SSH and Kubernetes and emits JSON/Markdown
@@ -266,6 +275,6 @@ local no-new-DDL statements do not redefine the repository-wide migration bounda
    Provider faults, Docker network interruption and Kubernetes Network/Drain/Eviction/Image Canary. Re-run the
    implemented real Codex/Claude Local control/capability matrix passes on clean commit `0b3f9214`; clean commit
    `be919393` also passes the ten-case matrix, standalone generated-file Artifact and Workspace Checkpoint capture.
-   Clean commit `61e38f4f` completes both independent real Local failure matrices. Run both adapters through one
-   consolidated Local release suite and across SSH, Docker and Kubernetes, then complete long-session and
-   registry-pushed rollout before promoting any Local-only Provider or claiming the four-Target release gate.
+   Clean commit `253052aa` completes the consolidated real Local release suite across both adapters. Run both
+   adapters across SSH, Docker and Kubernetes, then complete long-session and registry-pushed rollout before
+   promoting any Local-only Provider or claiming the four-Target release gate.
