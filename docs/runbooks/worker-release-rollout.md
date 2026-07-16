@@ -4,7 +4,8 @@
 它不是“rollout 已通过生产发布门禁”的声明。真实 Codex/Claude 四 Target gate、registry-pushed
 multi-arch 镜像、多节点生产 Kubernetes 和 soak 尚未完成前，只能在明确授权的验收环境使用。
 
-发布门禁见 `docs/release-checklists/stage-3-provider-runtime-remote-worker.md`，当前证据见
+发布门禁见 `docs/release-checklists/stage-3-provider-runtime-remote-worker.md`；deterministic managed Docker
+rollout 证据见 `docs/reports/stage-3-worker-release-rollout-ac1e3e85.md`，总体 Provider runtime 证据见
 `docs/reports/stage-3-provider-runtime-acceptance-2026-07-15.md`。
 
 ## 1. 核心不变量

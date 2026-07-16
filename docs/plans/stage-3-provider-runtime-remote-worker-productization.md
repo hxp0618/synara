@@ -19,14 +19,16 @@
 - **预计工作量**：XL
 - **风险**：HIGH
 - **计划基线分支**：`codex/saas-tenancy-user`
-- **最近稳定检查点**：`253052aa`（同一 clean SHA 的真实 Codex/Claude consolidated Local product 与
-  failure 四矩阵已通过；正式证据见
-  `docs/reports/stage-3-real-provider-local-release-gate-253052aa.md`。Kubernetes deterministic fixture
-  13/13 的历史 clean checkpoint 仍为 `2763ebd3`）
+- **最近稳定检查点**：`ac1e3e85`（同一 clean SHA 的两个不同 Registry Digest 已通过 managed Docker
+  immutable Revision、canary、promote、rollback 与 active-Execution fencing 14/14；正式证据见
+  `docs/reports/stage-3-worker-release-rollout-ac1e3e85.md`。真实 Codex/Claude consolidated Local product 与
+  failure 四矩阵的 clean checkpoint 仍为 `253052aa`，Kubernetes deterministic fixture 13/13 的历史 clean
+  checkpoint 仍为 `2763ebd3`）
 - **工作区状态**：Stage 3 持续执行中，执行时以当前分支和已验证证据为准
 - **发布文档**：
   `docs/release-checklists/stage-3-provider-runtime-remote-worker.md`、
   `docs/runbooks/worker-release-rollout.md`、
+  `docs/reports/stage-3-worker-release-rollout-ac1e3e85.md`、
   `docs/reports/stage-3-real-provider-local-release-gate-253052aa.md`、
   `docs/reports/stage-3-real-provider-local-standalone-generated-file-matrix-be919393.md`
 - **依赖**：Stage 2 的 Control Plane Session/Execution 权威、Worker Lease/Fencing、Artifact、SSE
@@ -1182,11 +1184,18 @@ Manifest 不包含 Credential、路径中的用户信息或高基数 Secret。
   dependency graph 不包含该 package，`govulncheck v1.6.0` 报告实际受影响漏洞为 `0`，因此没有新增 waiver。
   Checked-in signing policy 已实现 `ephemeral-key`、`keyless` 与 `kms-key`；生产模式拒绝非 TLS Registry、
   强制 tlog，并隔离 OIDC token 或只按允许的环境变量名传递 KMS Credential。Registry
-  release/supply-chain tests 合计 `40/40`，全部 release-gate tests `90/90`，Stage 3 Python `193/193`。
+  release/supply-chain tests 合计 `40/40`，全部 release-gate tests `105/105`，Stage 3 Python `208/208`。
   完整证据见 `docs/reports/stage-3-worker-registry-signing-policy-7659dd5f.md`。
-- 该结果仍没有证明真实生产 KMS/keyless signing identity、transparency log/admission policy、生产 Registry
-  Credential/retention、真实 Codex/Claude rollout、Busy Worker 长任务、生产多节点 Drain/PDB/Eviction 或
-  rollback under load；rollout/reconciler 最终评审和真实 Gate 完成前，J 保持 `partial`。
+- Clean commit `ac1e3e85` 进一步从同一 clean SHA 构建并推送 baseline/candidate 两个不同 Registry Digest，
+  通过正式 API 创建 immutable Revision，完成 `1 promote -> 2 canary -> 3 promote -> 4 rollback`。Gate
+  验证 stale CAS 与 active-canary Execution 的 promote/rollback 均返回 `409`，三个 Execution 的
+  Container/Manifest/Revision/Channel/Digest 完全一致，Session Event 为连续 `1..26` 且无双执行或重复终态；
+  `2` 条 Revision Audit、`4` 条 Policy Audit 与 `6` 条已发布 Outbox 完整，精确 cleanup 和 Secret scan
+  通过。完整证据见 `docs/reports/stage-3-worker-release-rollout-ac1e3e85.md`。
+- 该结果关闭 deterministic managed Docker immutable rollout mechanics，但仍没有证明真实生产 KMS/keyless
+  signing identity、transparency log/admission policy、生产 Registry Credential/retention、真实 Codex/Claude
+  remote rollout、Busy Worker 长任务、生产多节点 Drain/PDB/Eviction 或 rollback under load；J 保持
+  `partial`。
 
 ## 16. 工作流 K：Web 主流程权威切换
 
@@ -1503,7 +1512,7 @@ Provider × Capability × Execution Target
   npm，bundled undici 为 `6.27.0`；同层删除 npm 产生的 `/tmp/node-compile-cache`，避免 cached/no-cache
   rootfs 漂移。Trivy DB 下载仅对明确的瞬时网络错误执行一次有界重试，扫描 finding、过期 DB、无效报告和
   第二次下载失败继续立即 fail closed。当前 Registry release/supply-chain tests `40/40`，全部
-  release-gate tests `90/90`，Stage 3 Python `193/193`。
+  release-gate tests `105/105`，Stage 3 Python `208/208`。
 - clean commit `7659dd5f` 已完成正式 cached/no-cache 双架构 Registry gate：OCI index digest 分别为
   `sha256:912223cb...`、`sha256:630bff03...`，`linux/amd64` 共同 manifest 为
   `sha256:2d0b9d8a...`，`linux/arm64` 共同 manifest 为 `sha256:7fd11ce0...`；两平台 SPDX/SLSA、non-root
@@ -1513,6 +1522,13 @@ Provider × Capability × Execution Target
   `docs/reports/stage-3-worker-registry-signing-policy-7659dd5f.md`。该结果关闭 production signing
   implementation path 与 disposable Registry supply-chain mechanics slice；真实生产 identity/tlog/admission、Registry
   Credential/retention、四 Target rollout 与 soak 仍保持 open。
+- 新增 `docker_worker_release_rollout_gate.py`，从 clean commit `ac1e3e85` 构建并推送两个不同版本和
+  Registry Digest，经正式 API 完成 immutable Revision、initial promote、canary、candidate promote 与
+  baseline rollback。Gate 同时验证 stale CAS、active Approval Execution fencing、Container/Manifest/Execution
+  release pin、Transition/Audit/Outbox/Event 顺序、无双执行/重复终态、精确 Docker cleanup 与零 Secret
+  finding，正式运行 `14/14`。该结果只关闭 deterministic managed Docker mechanics；生产 Registry、真实
+  Provider Credential、Kubernetes 多节点、load 与 soak 仍保持 open。完整证据见
+  `docs/reports/stage-3-worker-release-rollout-ac1e3e85.md`。
 
 ## 18. 实施顺序
 
@@ -1557,9 +1573,10 @@ Provider × Capability × Execution Target
 - 完成可重复 Worker Image、灰度、隔离和回滚。
 - 当前进度：`000034`/`000037`、Worker/Releases API、Web 运维入口和 rollout Runbook 已形成；clean-SHA
   双架构 Registry reproducibility、ephemeral signing、SBOM、`HIGH/CRITICAL=0`、Secret=0、EOSL/DB freshness
-  已通过，checked-in keyless/KMS 生产签名路径已实现，Registry release/supply-chain tests 为 `40/40`。
-  真实生产 signing identity/tlog/admission、真实
-  canary/rollback、Busy Worker 长任务和生产多节点证据仍是完成门禁。
+  已通过，checked-in keyless/KMS 生产签名路径已实现；clean-SHA managed Docker immutable Revision
+  canary/promote/rollback mechanics 14/14 已通过，全部 release-gate tests 为 `105/105`。
+  真实生产 signing identity/tlog/admission、生产 Registry Credential/retention、真实 Provider remote
+  rollout、Busy Worker 长任务和生产多节点证据仍是完成门禁。
 
 ### Step 6：Web 主流程切换
 
