@@ -212,14 +212,15 @@ ARG AGENTD_BUILD_IMAGE
 ARG WORKER_RUNTIME_IMAGE
 
 COPY deploy/worker/apk-packages.lock /opt/synara/worker-apk-packages.lock
-RUN xargs apk add --no-cache < /opt/synara/worker-apk-packages.lock
+RUN xargs apk add --no-cache < /opt/synara/worker-apk-packages.lock \
+  && rm -f /var/log/apk.log
 
 COPY --from=worker-provider-tools /opt/synara/provider-tools /opt/synara/provider-tools
-COPY --from=worker-provider-tools /tmp/provider-tools.raw.spdx.json /tmp/provider-tools.raw.spdx.json
 COPY bun.lock /opt/synara/provider-host/bun.lock
 COPY apps/provider-host/package.json /opt/synara/provider-host/package.json
 COPY deploy/worker/worker-image-manifest.mjs /opt/synara/build/worker-image-manifest.mjs
-RUN node /opt/synara/build/worker-image-manifest.mjs \
+RUN --mount=from=worker-provider-tools,source=/tmp/provider-tools.raw.spdx.json,target=/tmp/provider-tools.raw.spdx.json,ro \
+  node /opt/synara/build/worker-image-manifest.mjs \
     --version "${SYNARA_VERSION}" \
     --git-sha "${SYNARA_GIT_SHA}" \
     --source-date-epoch "${SOURCE_DATE_EPOCH}" \
@@ -234,7 +235,7 @@ RUN node /opt/synara/build/worker-image-manifest.mjs \
     --raw-provider-tools-sbom /tmp/provider-tools.raw.spdx.json \
     --provider-tools-sbom-output /opt/synara/provider-tools.spdx.json \
     --manifest-output /opt/synara/worker-image-manifest.json \
-  && rm -rf /opt/synara/build /tmp/provider-tools.raw.spdx.json
+  && rm -rf /opt/synara/build
 
 RUN addgroup -g 10001 -S synara-worker && \
   adduser -u 10001 -S -D -h /home/synara -s /bin/bash -G synara-worker synara-worker && \

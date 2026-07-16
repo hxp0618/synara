@@ -228,7 +228,7 @@ fi
 
 output=(--load)
 if [[ "$output_mode" == "push" ]]; then
-  output=(--push)
+  output=(--output "type=image,push=true,rewrite-timestamp=true")
 fi
 build_command=(
   docker buildx build

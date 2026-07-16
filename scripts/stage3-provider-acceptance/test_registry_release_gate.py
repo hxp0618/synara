@@ -305,6 +305,16 @@ class InputValidationTest(unittest.TestCase):
             "docker.io/docker/buildkit-syft-scanner@sha256:"
             "79e7b013cbec16bbb436f312819a49a4a57752b2270c1a9332ae1a10fcc82a68",
         )
+        build_script = (REPO_ROOT / "deploy/worker/build.sh").read_text(encoding="utf-8")
+        dockerfile = (REPO_ROOT / "Dockerfile").read_text(encoding="utf-8")
+        self.assertIn("type=image,push=true,rewrite-timestamp=true", build_script)
+        self.assertIn("--sbom=generator=$sbom_generator", build_script)
+        self.assertIn("rm -f /var/log/apk.log", dockerfile)
+        self.assertIn("--mount=from=worker-provider-tools", dockerfile)
+        self.assertNotIn(
+            "COPY --from=worker-provider-tools /tmp/provider-tools.raw.spdx.json",
+            dockerfile,
+        )
 
         with tempfile.TemporaryDirectory() as directory:
             repo_root = pathlib.Path(directory)

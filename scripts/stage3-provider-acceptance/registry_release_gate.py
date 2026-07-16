@@ -1252,6 +1252,7 @@ def configuration_evidence(options: RegistryReleaseGateOptions) -> dict[str, Any
         "independentNoCacheBuild": True,
         "buildKitSBOM": True,
         "buildKitProvenance": "mode=max",
+        "sourceDateEpochLayerRewrite": True,
         "goProxyOverride": options.go_proxy is not None,
         "remoteImagesRetainedAsReleaseEvidence": True,
         "remoteBroadCleanupUsed": False,

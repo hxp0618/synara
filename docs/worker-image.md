@@ -39,6 +39,9 @@ The Worker build fails closed unless all of these inputs are immutable:
 - `deploy/worker/buildkit-sbom-generator.lock` pins the BuildKit Syft scanner image used for outer SPDX
   attestations; release builds never resolve the mutable `stable-1` tag.
 - `SOURCE_DATE_EPOCH` fixes the embedded SPDX creation time to the source commit time.
+- Registry exports rewrite every generated layer timestamp to `SOURCE_DATE_EPOCH`; the build removes
+  timestamp-bearing APK logs in the producing layer and consumes the raw npm SBOM through a read-only BuildKit
+  mount so neither transient file enters the final layer history.
 
 The tracked Provider runtime versions are intentionally separate:
 
@@ -130,7 +133,9 @@ If the default Go module proxy is unavailable, append the public credential-free
 `--go-proxy https://goproxy.cn,direct`.
 
 The gate pushes two uniquely tagged builds from the same Git SHA: one normal cached build and one independent
-`--no-cache` build. It requires both builds to reproduce the same platform manifest digests and validates:
+`--no-cache` build. The Registry exporter rewrites layer timestamps to `SOURCE_DATE_EPOCH`; transient APK logs and
+the pre-normalized npm SBOM are excluded from final layers. The gate requires both builds to reproduce the same
+platform manifest digests and validates:
 
 - the Registry-returned OCI index digest and exactly one `linux/amd64` plus one `linux/arm64` image manifest;
 - one attached attestation manifest per platform containing both SPDX and SLSA provenance predicates;
