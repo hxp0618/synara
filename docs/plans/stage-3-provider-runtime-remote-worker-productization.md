@@ -1172,17 +1172,19 @@ Manifest 不包含 Credential、路径中的用户信息或高基数 Secret。
   docker config 提供最小 auth。运维边界已记录在
   `docs/runbooks/worker-release-rollout.md`。
 - 当前 deterministic Docker/Kubernetes tests 与 failure-only image-canary 只证明 release shape、Target
-  isolation、replacement 和恢复编排。clean commit `71ef4b5e` 已从同一源码执行 cached 与 independent
+  isolation、replacement 和恢复编排。clean commit `7659dd5f` 已从同一源码执行 cached 与 independent
   no-cache 两次 `linux/amd64,linux/arm64` Registry push；两次构建分别返回 OCI index
-  `sha256:1a824e40...`、`sha256:ed27ae93...`，共同 `linux/amd64` manifest 为
-  `sha256:e9b07271...`，共同 `linux/arm64` manifest 为 `sha256:884d49bf...`。两个平台的 SPDX/SLSA、
+  `sha256:912223cb...`、`sha256:630bff03...`，共同 `linux/amd64` manifest 为
+  `sha256:2d0b9d8a...`，共同 `linux/arm64` manifest 为 `sha256:7fd11ce0...`。两个平台的 SPDX/SLSA、
   non-root config、嵌入 Manifest/SBOM/lockfile/runtime、ephemeral exact-digest Cosign 验证、
   `HIGH=0`、`CRITICAL=0`、Secret=0、非 EOSL、Trivy DB freshness 与精确 cleanup 均通过。
 - `GO-2026-5932` 继续作为 `UNKNOWN` finding 保留；官方记录只影响未维护的 `x/crypto/openpgp`，agentd
   dependency graph 不包含该 package，`govulncheck v1.6.0` 报告实际受影响漏洞为 `0`，因此没有新增 waiver。
-  Registry release/supply-chain tests 合计 `31/31`，全部 release-gate tests `81/81`，Stage 3 Python
-  `184/184`。完整证据见 `docs/reports/stage-3-worker-registry-supply-chain-71ef4b5e.md`。
-- 该结果仍没有证明生产 KMS/keyless signing identity、transparency log/admission policy、生产 Registry
+  Checked-in signing policy 已实现 `ephemeral-key`、`keyless` 与 `kms-key`；生产模式拒绝非 TLS Registry、
+  强制 tlog，并隔离 OIDC token 或只按允许的环境变量名传递 KMS Credential。Registry
+  release/supply-chain tests 合计 `40/40`，全部 release-gate tests `90/90`，Stage 3 Python `193/193`。
+  完整证据见 `docs/reports/stage-3-worker-registry-signing-policy-7659dd5f.md`。
+- 该结果仍没有证明真实生产 KMS/keyless signing identity、transparency log/admission policy、生产 Registry
   Credential/retention、真实 Codex/Claude rollout、Busy Worker 长任务、生产多节点 Drain/PDB/Eviction 或
   rollback under load；rollout/reconciler 最终评审和真实 Gate 完成前，J 保持 `partial`。
 
@@ -1492,20 +1494,24 @@ Provider × Capability × Execution Target
   Provider Host 与 Provider tools mtime 同步归一，避免旧 Commit cache 改变当前发布 digest。可选
   `--go-proxy` 只允许 credential-free HTTPS/direct/off，输出经过 redaction 与
   Secret scan，本地只清理本次 inspection container/image/state，禁止 prune，远端 image 保留为发布证据。
-  supply-chain v2 进一步以 checked-in digest 固定 Cosign `v3.1.1` 与 Trivy `0.72.0`，使用隔离 ephemeral key
-  对两个 OCI index 的 exact digest 与 Git SHA/Version/Run ID/Slot annotations 签名并验证，同时按 checked-in
-  policy 阻断 `HIGH,CRITICAL`、Secret、EOSL 和过期漏洞数据库。Worker 用锁定 npm `12.0.1` 替换基础镜像旧
+  supply-chain v2 进一步以 checked-in digest 固定 Cosign `v3.1.1` 与 Trivy `0.72.0`。Checked-in signing
+  policy 支持隔离 `ephemeral-key`、OIDC `keyless` 与 AWS/GCP/Azure/Vault `kms-key`；生产模式拒绝非 TLS
+  Registry、强制 transparency log、验证 certificate identity/issuer 或 KMS reference，并确保 Secret 值不
+  进入 Docker 参数或报告。Gate 对两个 OCI index 的 exact digest 与 Git SHA/Version/Run ID/Slot annotations
+  签名并验证，同时按 checked-in policy 阻断 `HIGH,CRITICAL`、Secret、EOSL 和过期漏洞数据库。Worker 用锁定
+  npm `12.0.1` 替换基础镜像旧
   npm，bundled undici 为 `6.27.0`；同层删除 npm 产生的 `/tmp/node-compile-cache`，避免 cached/no-cache
-  rootfs 漂移。当前 Registry release/supply-chain tests `31/31`，全部 release-gate tests `81/81`，Stage 3
-  Python `184/184`。
-- clean commit `71ef4b5e` 已完成正式 cached/no-cache 双架构 Registry gate：OCI index digest 分别为
-  `sha256:1a824e40...`、`sha256:ed27ae93...`，`linux/amd64` 共同 manifest 为
-  `sha256:e9b07271...`，`linux/arm64` 共同 manifest 为 `sha256:884d49bf...`；两平台 SPDX/SLSA、non-root
+  rootfs 漂移。Trivy DB 下载仅对明确的瞬时网络错误执行一次有界重试，扫描 finding、过期 DB、无效报告和
+  第二次下载失败继续立即 fail closed。当前 Registry release/supply-chain tests `40/40`，全部
+  release-gate tests `90/90`，Stage 3 Python `193/193`。
+- clean commit `7659dd5f` 已完成正式 cached/no-cache 双架构 Registry gate：OCI index digest 分别为
+  `sha256:912223cb...`、`sha256:630bff03...`，`linux/amd64` 共同 manifest 为
+  `sha256:2d0b9d8a...`，`linux/arm64` 共同 manifest 为 `sha256:7fd11ce0...`；两平台 SPDX/SLSA、non-root
   config、嵌入 Manifest/SBOM/lockfile/runtime、ephemeral exact-digest signature、`HIGH/CRITICAL=0`、Secret=0、
   非 EOSL、DB freshness、精确 cleanup 与输出 Secret scan 均通过。`GO-2026-5932` 作为未豁免的不可达
   `UNKNOWN` finding 保留，`govulncheck` 报告受影响漏洞为 `0`。完整证据见
-  `docs/reports/stage-3-worker-registry-supply-chain-71ef4b5e.md`。该结果关闭 disposable Registry 的
-  reproducibility 与 supply-chain mechanics slice；生产 signing identity/tlog/admission、Registry
+  `docs/reports/stage-3-worker-registry-signing-policy-7659dd5f.md`。该结果关闭 production signing
+  implementation path 与 disposable Registry supply-chain mechanics slice；真实生产 identity/tlog/admission、Registry
   Credential/retention、四 Target rollout 与 soak 仍保持 open。
 
 ## 18. 实施顺序
@@ -1551,7 +1557,8 @@ Provider × Capability × Execution Target
 - 完成可重复 Worker Image、灰度、隔离和回滚。
 - 当前进度：`000034`/`000037`、Worker/Releases API、Web 运维入口和 rollout Runbook 已形成；clean-SHA
   双架构 Registry reproducibility、ephemeral signing、SBOM、`HIGH/CRITICAL=0`、Secret=0、EOSL/DB freshness
-  已通过，Registry release/supply-chain tests 为 `31/31`。生产 signing identity/tlog/admission、真实
+  已通过，checked-in keyless/KMS 生产签名路径已实现，Registry release/supply-chain tests 为 `40/40`。
+  真实生产 signing identity/tlog/admission、真实
   canary/rollback、Busy Worker 长任务和生产多节点证据仍是完成门禁。
 
 ### Step 6：Web 主流程切换

@@ -46,6 +46,20 @@ multi-arch 镜像、多节点生产 Kubernetes 和 soak 尚未完成前，只能
    粘贴到命令行历史、工单或聊天。
 8. 对本次发布创建唯一 Idempotency Key，并为每个不同操作使用不同值。
 
+### 3.1 生产签名策略
+
+`deploy/worker/signing-policy.json` 必须与发布 Commit 一起评审和提交。`ephemeral-key` 只用于 disposable
+mechanics gate，不能作为生产批准。生产发布选择以下一种模式：
+
+- `keyless`：配置短期 OIDC token 的环境变量名，以及获批的 certificate identity/regexp 和 OIDC
+  issuer/regexp。Regexp 必须首尾锚定并兼容 RE2；token 值不得进入命令行、报告或聊天。
+- `kms-key`：配置获批的 AWS/GCP/Azure/Vault KMS URI，以及最小 credential 环境变量名集合；值只注入
+  gate 进程，不写入 Docker 参数或报告。
+
+两种生产模式都要求 TLS Registry、transparency-log upload/verification 和 Registry auth 外部安全配置；
+传入 `--insecure-registry` 必须失败。保存报告中的 signing-policy SHA、非 Secret identity/KMS reference、
+tlog 结论和 Secret-state cleanup，不保存 token、KMS Credential 或完整 Registry auth。
+
 示例环境变量只保存非 Secret 标识：
 
 ```bash
@@ -329,7 +343,9 @@ Revocation 会写 immutable Worker 状态与 logical identity tombstone，阻止
 - 真实 Codex/Claude 尚未在 Local、SSH、Docker、Kubernetes 完成同 Commit 的统一 Release Gate。
 - 当前 deterministic Kubernetes image-canary 不等于 registry-pushed immutable Revision rollout。
 - 多节点生产 Kubernetes 的 Drain、PDB、云厂商 Eviction、CNI enforcement 和升级压力尚未证明。
-- Disposable Registry 上的 multi-arch reproducibility、ephemeral exact-digest signing、SBOM、
-  `HIGH/CRITICAL=0`、Secret=0、EOSL 与 DB freshness 已由 clean commit `71ef4b5e` 证明；生产 KMS/keyless
-  identity、transparency log/admission policy、Registry Credential/retention 和长时间 soak 尚未完成。
+- Clean commit `7659dd5f` 已证明 disposable Registry 上的 multi-arch reproducibility、默认 ephemeral
+  exact-digest signing、SBOM、`HIGH/CRITICAL=0`、Secret=0、EOSL 与 DB freshness，并验证 checked-in policy
+  可安全选择 keyless/KMS 路径；真实生产 signer identity、transparency-log entry/admission policy、Registry
+  Credential/retention 和长时间 soak 尚未完成。证据见
+  `docs/reports/stage-3-worker-registry-signing-policy-7659dd5f.md`。
 - rollout/reconciler 在最终代码评审和门禁完成前不得标记为 production-approved。

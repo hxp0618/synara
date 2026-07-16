@@ -139,6 +139,53 @@ If the default Go module proxy is unavailable, append the public credential-free
 `--go-proxy https://goproxy.cn,direct`.
 For a disposable local HTTP Registry only, add `--insecure-registry`; production Registry runs must use TLS.
 
+### Signing policy
+
+The gate reads `deploy/worker/signing-policy.json` from the clean checkout. The checked-in default is
+`ephemeral-key`, which proves exact-digest signing mechanics without claiming a production identity or transparency
+log. Production releases must commit either `keyless` or `kms-key`; both modes reject `--insecure-registry` and
+require transparency-log upload and verification.
+
+Keyless example using exact certificate identity and issuer:
+
+```json
+{
+  "schemaVersion": 1,
+  "mode": "keyless",
+  "requireTransparencyLog": true,
+  "keyReference": null,
+  "credentialEnvironment": [],
+  "identityTokenEnvironment": "SYNARA_COSIGN_IDENTITY_TOKEN",
+  "certificateIdentity": "https://github.com/example/synara/.github/workflows/release.yml@refs/tags/v1",
+  "certificateIdentityRegexp": null,
+  "certificateOidcIssuer": "https://token.actions.githubusercontent.com",
+  "certificateOidcIssuerRegexp": null
+}
+```
+
+KMS example:
+
+```json
+{
+  "schemaVersion": 1,
+  "mode": "kms-key",
+  "requireTransparencyLog": true,
+  "keyReference": "awskms:///arn:aws:kms:us-east-1:123456789012:key/example",
+  "credentialEnvironment": ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"],
+  "identityTokenEnvironment": null,
+  "certificateIdentity": null,
+  "certificateIdentityRegexp": null,
+  "certificateOidcIssuer": null,
+  "certificateOidcIssuerRegexp": null
+}
+```
+
+Use either an exact certificate field or its regexp alternative for identity and issuer, never both. Regexps must
+be anchored and Cosign RE2-compatible. Environment names are policy input; their values must be injected only into
+the gate process and never written to JSON, shell arguments, CI logs, or Docker configuration. The keyless token is
+stored in a gate-owned `0600` file for Cosign and deleted in `finally`; KMS values are passed only through the named
+container environment. Reports retain only non-Secret identity, policy SHA, tlog conclusion, and cleanup evidence.
+
 The gate pushes two uniquely tagged builds from the same Git SHA: one normal cached build and one independent
 `--no-cache` build. The Registry exporter rewrites layer timestamps to `SOURCE_DATE_EPOCH`; transient APK logs and
 the pre-normalized npm SBOM are excluded from final layers. The gate requires both builds to reproduce the same
@@ -152,17 +199,19 @@ platform manifest digests and validates:
   agentd binary evidence for both platforms;
 - digest-pinned Cosign and Trivy containers from `deploy/worker/supply-chain-tools.lock` with runtime versions
   matching their checked-in tags;
-- an isolated ephemeral Cosign key that signs both OCI index digests and verifies exact Git SHA, version, run ID,
-  slot, Registry identity, and manifest digest claims before the private key is removed;
+- the checked-in Cosign signing policy, which signs both OCI index digests and verifies exact Git SHA, version,
+  run ID, slot, Registry identity, and manifest digest claims; disposable mode removes its private key, while
+  production keyless/KMS modes additionally require TLS, approved identity/KMS input, and transparency-log evidence;
 - both platform manifests scanned by Trivy for vulnerabilities and Secret-like material under
   `deploy/worker/vulnerability-policy.json`, including vulnerability-database freshness and OS end-of-life checks;
 - exact local inspection cleanup, report redaction, and an empty output Secret scan without Docker-wide prune.
 
 The JSON and Markdown reports are written to the requested empty output directory. The gate intentionally retains
 the two remote image tags and their signatures as release evidence; apply the Registry retention policy only after
-their digests, attestations, signatures, scan summaries, and tool/database identities are archived. Ephemeral-key
-signing proves the cryptographic Registry path and exact source claims, but it does not satisfy a production
-KMS/keyless identity or transparency-log policy. A pass also does not prove production Registry Credential and
+their digests, attestations, signatures, scan summaries, and tool/database identities are archived. A default
+ephemeral-key pass proves the cryptographic Registry path and exact source claims, but it does not satisfy a
+production KMS/keyless identity or transparency-log policy. A production-mode pass must also archive its
+certificate/KMS identity and transparency-log conclusion. Neither mode alone proves production Registry Credential and
 retention, real Provider rollout across all four Targets, multi-node canary/rollback, or soak.
 
 ## Runtime and storage
