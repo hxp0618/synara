@@ -238,7 +238,8 @@ RUN set -eu; \
   ln -sf /opt/synara/provider-tools/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx; \
   ln -sf /opt/synara/provider-tools/node_modules/npm/node_modules/node-gyp/bin/node-gyp.js \
     /usr/local/bin/node-gyp; \
-  test "$(npm --version)" = "$expected_npm"
+  test "$(npm --version)" = "$expected_npm"; \
+  rm -rf /tmp/node-compile-cache
 COPY bun.lock /opt/synara/provider-host/bun.lock
 COPY apps/provider-host/package.json /opt/synara/provider-host/package.json
 COPY deploy/worker/worker-image-manifest.mjs /opt/synara/build/worker-image-manifest.mjs

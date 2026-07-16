@@ -448,6 +448,7 @@ class InputValidationTest(unittest.TestCase):
             dockerfile,
         )
         self.assertIn('test "$(npm --version)" = "$expected_npm"', dockerfile)
+        self.assertIn("rm -rf /tmp/node-compile-cache", dockerfile)
 
     def test_worker_build_script_rejects_non_https_proxy_before_docker(self) -> None:
         completed = subprocess.run(
