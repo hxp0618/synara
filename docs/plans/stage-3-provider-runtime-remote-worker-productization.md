@@ -1482,7 +1482,9 @@ Provider × Capability × Execution Target
   双平台 manifest、SPDX/SLSA attestation、non-root image config、嵌入 Manifest/SBOM/三类 lockfile 和
   Provider Host/agentd hash。BuildKit Syft scanner 也由 checked-in digest lock 固定，不再解析可变
   `stable-1` tag；Registry exporter 把 layer timestamp 重写为 `SOURCE_DATE_EPOCH`，同层删除带运行时间的
-  APK log，并以只读 BuildKit mount 消费 raw npm SBOM，避免 transient 时间数据进入最终 layer。可选
+  APK log，并以只读 BuildKit mount 消费 raw npm SBOM，避免 transient 时间数据进入最终 layer；
+  `/opt/synara/.build-revision` 把 clean Git SHA 纳入 Worker rootfs cache identity，跨 stage 的 agentd、
+  Provider Host 与 Provider tools mtime 同步归一，避免旧 Commit cache 改变当前发布 digest。可选
   `--go-proxy` 只允许 credential-free HTTPS/direct/off，输出经过 redaction 与
   Secret scan，本地只清理本次 inspection container/image/state，禁止 prune，远端 image 保留为发布证据。
   当前 Registry gate tests `18/18`，全部 release-gate tests 合计 `68/68`，Stage 3 Python `171/171`；

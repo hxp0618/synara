@@ -50,6 +50,7 @@ EMBEDDED_PATHS = {
     "providerHost": "/opt/synara/provider-host/index.mjs",
     "agentd": "/usr/local/bin/synara-agentd",
     "providerHostWrapper": "/usr/local/bin/provider-host",
+    "buildRevision": "/opt/synara/.build-revision",
 }
 LOCAL_LOCK_PATHS = {
     "provider-tools-npm": pathlib.Path("deploy/worker/provider-tools/package-lock.json"),
@@ -987,10 +988,11 @@ def validate_embedded_artifacts(
         )
     wrapper = files["providerHostWrapper"].read_text(encoding="utf-8")
     expected_wrapper = '#!/bin/sh\nexec node /opt/synara/provider-host/index.mjs "$@"\n'
-    if wrapper != expected_wrapper:
+    build_revision = files["buildRevision"].read_text(encoding="utf-8")
+    if wrapper != expected_wrapper or build_revision != f"{git_sha}\n":
         raise ReleaseGateError(
             "release.registry_embedded_runtime_invalid",
-            "Worker Registry image Provider Host wrapper was not the canonical executable.",
+            "Worker Registry image runtime wrapper or release cache identity was invalid.",
             {"platform": platform},
         )
     return {
@@ -999,6 +1001,7 @@ def validate_embedded_artifacts(
         "lockfileSha256": lock_hashes,
         "providerHostSha256": common.file_sha256(files["providerHost"]),
         "agentdSha256": common.file_sha256(files["agentd"]),
+        "buildRevisionSha256": common.file_sha256(files["buildRevision"]),
         "providerRuntimes": expected_runtimes,
     }
 

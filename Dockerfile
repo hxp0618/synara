@@ -153,6 +153,7 @@ CMD ["node", "/app/apps/server/dist/index.mjs"]
 FROM ${AGENTD_BUILD_IMAGE} AS agentd-build
 
 ARG GOPROXY=https://proxy.golang.org,direct
+ARG SOURCE_DATE_EPOCH=0
 ENV GOPROXY=${GOPROXY}
 
 WORKDIR /src
@@ -161,9 +162,12 @@ RUN --mount=type=cache,target=/go/pkg/mod go mod download
 COPY services/control-plane .
 RUN --mount=type=cache,target=/go/pkg/mod \
   --mount=type=cache,target=/root/.cache/go-build \
-  CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/synara-agentd ./cmd/agentd
+  CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/synara-agentd ./cmd/agentd \
+  && touch -d "@${SOURCE_DATE_EPOCH}" /out/synara-agentd
 
 FROM ${BUN_IMAGE} AS provider-host-build
+
+ARG SOURCE_DATE_EPOCH=0
 
 WORKDIR /src
 COPY package.json bun.lock bunfig.toml ./
@@ -181,7 +185,8 @@ RUN --mount=type=cache,target=/root/.bun/install/cache \
   bun install --frozen-lockfile --filter @synara/provider-host
 COPY apps/provider-host/src ./apps/provider-host/src
 COPY packages/contracts/src ./packages/contracts/src
-RUN bun build apps/provider-host/src/index.ts --target=node --outfile=/out/provider-host.mjs
+RUN bun build apps/provider-host/src/index.ts --target=node --outfile=/out/provider-host.mjs \
+  && touch -d "@${SOURCE_DATE_EPOCH}" /out/provider-host.mjs
 
 FROM provider-host-build AS provider-host-fixture-build
 
@@ -194,12 +199,16 @@ RUN bun build scripts/stage3-provider-acceptance/provider-host-fixture.ts \
 
 FROM ${WORKER_RUNTIME_IMAGE} AS worker-provider-tools
 
+ARG SOURCE_DATE_EPOCH=0
+
 WORKDIR /opt/synara/provider-tools
 COPY deploy/worker/provider-tools/package.json deploy/worker/provider-tools/package-lock.json ./
 RUN npm ci --omit=dev --ignore-scripts --no-audit --no-fund \
   && node node_modules/@anthropic-ai/claude-code/install.cjs \
   && npm sbom --omit=dev --sbom-format spdx > /tmp/provider-tools.raw.spdx.json \
-  && npm cache clean --force
+  && npm cache clean --force \
+  && find /opt/synara/provider-tools -exec touch -h -d "@${SOURCE_DATE_EPOCH}" {} + \
+  && touch -d "@${SOURCE_DATE_EPOCH}" /tmp/provider-tools.raw.spdx.json
 
 FROM ${WORKER_RUNTIME_IMAGE} AS worker-runtime-base
 
@@ -210,6 +219,10 @@ ARG SOURCE_DATE_EPOCH=0
 ARG BUN_IMAGE
 ARG AGENTD_BUILD_IMAGE
 ARG WORKER_RUNTIME_IMAGE
+
+RUN mkdir -p /opt/synara \
+  && printf '%s\n' "${SYNARA_GIT_SHA}" > /opt/synara/.build-revision \
+  && touch -d "@${SOURCE_DATE_EPOCH}" /opt /opt/synara /opt/synara/.build-revision
 
 COPY deploy/worker/apk-packages.lock /opt/synara/worker-apk-packages.lock
 RUN xargs apk add --no-cache < /opt/synara/worker-apk-packages.lock \
@@ -239,7 +252,8 @@ RUN --mount=from=worker-provider-tools,source=/tmp/provider-tools.raw.spdx.json,
 
 RUN addgroup -g 10001 -S synara-worker && \
   adduser -u 10001 -S -D -h /home/synara -s /bin/bash -G synara-worker synara-worker && \
-  mkdir -p /data/workspaces && chown -R 10001:10001 /data /home/synara
+  mkdir -p /data/workspaces && chown -R 10001:10001 /data /home/synara && \
+  find /data /home/synara -exec touch -h -d "@${SOURCE_DATE_EPOCH}" {} +
 
 FROM worker-runtime-base AS worker
 

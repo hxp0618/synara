@@ -184,7 +184,8 @@ Acceptance Fixture used by Codex and Claude.
   digest，避免 release build 重新解析 mutable `stable-1` tag；Gate 报告同时记录该 scanner reference。
 - Registry exporter 使用 `rewrite-timestamp=true` 将生成 layer 统一到 `SOURCE_DATE_EPOCH`；APK install 在
   同层删除含运行时间的 `/var/log/apk.log`，raw npm SBOM 通过只读 BuildKit mount 输入 normalization，不再
-  以 transient COPY layer 留在最终 Image history。
+  以 transient COPY layer 留在最终 Image history。Worker rootfs 以 clean Git SHA build-revision marker
+  隔离跨 Commit cache，agentd、Provider Host 与 Provider tools 的跨 stage mtime 也固定到同一 epoch。
 - Registry gate tests `18/18` 与 Stage 3 Python `171/171` 已通过，覆盖 CLI/input、双平台 OCI index、
   attestation missing/duplicate、危险 Image environment、嵌入 Manifest/SBOM/lockfile、cached/no-cache
   platform digest consensus、aggregate pass/fail、精确 cleanup 和输出 Secret scan。

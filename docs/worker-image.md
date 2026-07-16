@@ -41,7 +41,9 @@ The Worker build fails closed unless all of these inputs are immutable:
 - `SOURCE_DATE_EPOCH` fixes the embedded SPDX creation time to the source commit time.
 - Registry exports rewrite every generated layer timestamp to `SOURCE_DATE_EPOCH`; the build removes
   timestamp-bearing APK logs in the producing layer and consumes the raw npm SBOM through a read-only BuildKit
-  mount so neither transient file enters the final layer history.
+  mount so neither transient file enters the final layer history. `/opt/synara/.build-revision` carries the clean
+  Git SHA into the Worker rootfs cache key, and copied agentd/Provider Host/Provider tool mtimes are normalized to
+  prevent an older unrelated cache entry from changing a release digest.
 
 The tracked Provider runtime versions are intentionally separate:
 
@@ -69,6 +71,7 @@ Every official Worker image contains:
 /opt/synara/provider-tools/package-lock.json
 /opt/synara/provider-host/bun.lock
 /opt/synara/worker-apk-packages.lock
+/opt/synara/.build-revision
 ```
 
 The version manifest records schema version, source version and full Git SHA, target OS/architecture, immutable

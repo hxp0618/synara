@@ -229,6 +229,7 @@ def write_embedded_fixture(
     )
     paths["providerHost"].write_bytes(b"provider-host-bundle")
     paths["agentd"].write_bytes(b"agentd-binary")
+    paths["buildRevision"].write_text(f"{GIT_SHA}\n", encoding="utf-8")
     paths["providerHostWrapper"].write_text(
         '#!/bin/sh\nexec node /opt/synara/provider-host/index.mjs "$@"\n',
         encoding="utf-8",
@@ -311,6 +312,9 @@ class InputValidationTest(unittest.TestCase):
         self.assertIn("--sbom=generator=$sbom_generator", build_script)
         self.assertIn("rm -f /var/log/apk.log", dockerfile)
         self.assertIn("--mount=from=worker-provider-tools", dockerfile)
+        self.assertIn('/opt/synara/.build-revision', dockerfile)
+        self.assertIn('touch -d "@${SOURCE_DATE_EPOCH}" /out/synara-agentd', dockerfile)
+        self.assertIn('touch -d "@${SOURCE_DATE_EPOCH}" /out/provider-host.mjs', dockerfile)
         self.assertNotIn(
             "COPY --from=worker-provider-tools /tmp/provider-tools.raw.spdx.json",
             dockerfile,
