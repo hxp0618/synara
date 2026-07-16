@@ -26,6 +26,7 @@ import (
 	"github.com/synara-ai/synara/services/control-plane/internal/audit"
 	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
 	"github.com/synara-ai/synara/services/control-plane/internal/problem"
+	"github.com/synara-ai/synara/services/control-plane/internal/workertiming"
 )
 
 const (
@@ -35,12 +36,13 @@ const (
 	dockerIndexLabel           = "synara.io/worker-index"
 	dockerReleaseRevisionLabel = "synara.io/worker-release-revision-id"
 	dockerReleaseChannelLabel  = "synara.io/worker-release-channel"
-	dockerContainerSpecVersion = 4
+	dockerContainerSpecVersion = 5
 )
 
 type DockerPoolReconcilerConfig struct {
 	RegistrationToken     string
 	PublicControlPlaneURL string
+	WorkerLeaseTTL        time.Duration
 	Interval              time.Duration
 	Observer              BackgroundObserver
 	ResolveImagePull      ImagePullCredentialResolver
@@ -457,6 +459,7 @@ func (r *DockerPoolReconciler) desiredSpecs(
 		"SYNARA_AGENTD_CAPABILITIES_JSON=" + string(capabilities),
 		"SYNARA_AGENTD_RUNNER_COMMAND_JSON=" + string(runner),
 		"SYNARA_AGENTD_PROVIDER_HOST_PROTOCOL=v2",
+		"SYNARA_AGENTD_LEASE_RENEW_INTERVAL=" + workertiming.LeaseRenewInterval(r.config.WorkerLeaseTTL).String(),
 		"SYNARA_AGENTD_DRAIN_TIMEOUT=20s",
 		"SYNARA_AGENTD_WORKSPACE_ROOT=" + configuration.WorkspaceRoot,
 		"SYNARA_AGENTD_GIT_CACHE_ROOT=" + configuration.GitCacheRoot,
@@ -480,7 +483,8 @@ func (r *DockerPoolReconciler) desiredSpecs(
 		Capabilities  json.RawMessage
 		TokenHash     [32]byte
 		ReleasePlan   *managedReleasePlan
-	}{dockerContainerSpecVersion, configuration, capabilities, sha256.Sum256([]byte(r.config.RegistrationToken)), releasePlan})
+		LeaseRenew    time.Duration
+	}{dockerContainerSpecVersion, configuration, capabilities, sha256.Sum256([]byte(r.config.RegistrationToken)), releasePlan, workertiming.LeaseRenewInterval(r.config.WorkerLeaseTTL)})
 	if err != nil {
 		return nil, "", err
 	}

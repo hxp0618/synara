@@ -123,6 +123,7 @@ func TestKubernetesReconcilerAppliesSecurityFoundationAndExecutionPods(t *testin
 		!bytes.Contains(environment, []byte("secretKeyRef")) ||
 		!bytes.Contains(environment, []byte("SYNARA_AGENTD_ASSIGNED_EXECUTION_ID")) ||
 		!bytes.Contains(environment, []byte("SYNARA_AGENTD_PROVIDER_HOST_PROTOCOL")) ||
+		!bytes.Contains(environment, []byte(`"name":"SYNARA_AGENTD_LEASE_RENEW_INTERVAL","value":"2s"`)) ||
 		!bytes.Contains(environment, []byte("SYNARA_AGENTD_DRAIN_TIMEOUT")) {
 		t.Fatalf("Kubernetes Pod secret/assignment environment is invalid: %s", environment)
 	}
@@ -656,6 +657,7 @@ func newKubernetesReconcileFixture(t *testing.T, gitCachePersistentVolumeClaims 
 	}
 	reconciler := NewKubernetesReconciler(targetService, KubernetesReconcilerConfig{
 		RegistrationToken: "kubernetes-registration-secret", PublicControlPlaneURL: "http://control-plane.test:3780",
+		WorkerLeaseTTL: 6 * time.Second,
 	}, slog.Default())
 	return kubernetesReconcileFixture{
 		db: store.DB(), reconciler: reconciler, tenantID: domain.TenantID, organizationID: domain.OrganizationID,

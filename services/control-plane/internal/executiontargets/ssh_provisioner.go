@@ -26,12 +26,14 @@ import (
 	"github.com/synara-ai/synara/services/control-plane/internal/identity"
 	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
 	"github.com/synara-ai/synara/services/control-plane/internal/problem"
+	"github.com/synara-ai/synara/services/control-plane/internal/workertiming"
 )
 
 type SSHProvisioningConfig struct {
 	AgentdBinaryPath      string
 	RegistrationToken     string
 	PublicControlPlaneURL string
+	WorkerLeaseTTL        time.Duration
 	Timeout               time.Duration
 }
 
@@ -413,6 +415,7 @@ func (p *SSHProvisioner) environmentFile(
 		{"SYNARA_AGENTD_CAPABILITIES_JSON", string(capabilities)},
 		{"SYNARA_AGENTD_RUNNER_COMMAND_JSON", string(runnerCommand)},
 		{"SYNARA_AGENTD_PROVIDER_HOST_PROTOCOL", "v2"},
+		{"SYNARA_AGENTD_LEASE_RENEW_INTERVAL", workertiming.LeaseRenewInterval(p.config.WorkerLeaseTTL).String()},
 		{"SYNARA_AGENTD_DRAIN_TIMEOUT", "20s"},
 		{"SYNARA_AGENTD_WORKSPACE_ROOT", paths.workspaceRoot},
 		{"SYNARA_AGENTD_GIT_CACHE_ROOT", paths.gitCacheRoot},

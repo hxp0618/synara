@@ -166,11 +166,13 @@ func main() {
 	executionTargetService := executiontargets.NewService(db, cfg.Platform, cursorCipher)
 	sshProvisioner := executiontargets.NewSSHProvisioner(executionTargetService, executiontargets.SSHProvisioningConfig{
 		AgentdBinaryPath: cfg.AgentdBinaryPath, RegistrationToken: cfg.WorkerRegistrationToken,
-		PublicControlPlaneURL: cfg.PublicControlPlaneURL, Timeout: cfg.SSHProvisionTimeout,
+		PublicControlPlaneURL: cfg.PublicControlPlaneURL, WorkerLeaseTTL: cfg.WorkerLeaseTTL,
+		Timeout: cfg.SSHProvisionTimeout,
 	})
 	dockerReconciler := executiontargets.NewDockerPoolReconciler(executionTargetService, executiontargets.DockerPoolReconcilerConfig{
 		RegistrationToken: cfg.WorkerRegistrationToken, PublicControlPlaneURL: cfg.PublicControlPlaneURL,
-		Interval: cfg.DockerReconcileInterval, Observer: metrics, ResolveImagePull: resolveImagePull,
+		WorkerLeaseTTL: cfg.WorkerLeaseTTL, Interval: cfg.DockerReconcileInterval,
+		Observer: metrics, ResolveImagePull: resolveImagePull,
 	}, logger)
 	sessionService := sessions.NewService(
 		db, projectService, executionTargetService,
@@ -185,7 +187,8 @@ func main() {
 	tenancyService := tenancy.NewService(db, executionService)
 	kubernetesReconciler := executiontargets.NewKubernetesReconciler(executionTargetService, executiontargets.KubernetesReconcilerConfig{
 		RegistrationToken: cfg.WorkerRegistrationToken, PublicControlPlaneURL: cfg.PublicControlPlaneURL,
-		Interval: cfg.KubernetesReconcileInterval, RecoverExpired: executionService.RecoverExpired,
+		WorkerLeaseTTL: cfg.WorkerLeaseTTL, Interval: cfg.KubernetesReconcileInterval,
+		RecoverExpired:                     executionService.RecoverExpired,
 		ReconcileEphemeralWorkspaceCleanup: executionService.ReconcileEphemeralWorkspaceCleanup,
 		Observer:                           metrics, ResolveImagePull: resolveImagePull,
 	}, logger)

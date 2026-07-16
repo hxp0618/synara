@@ -14,6 +14,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/synara-ai/synara/services/control-plane/internal/platform"
+	"github.com/synara-ai/synara/services/control-plane/internal/workertiming"
 )
 
 type LocalSupervisorInput struct {
@@ -74,10 +75,7 @@ func NewLocalSupervisor(input LocalSupervisorInput, logger *slog.Logger) (*Local
 	if restartBackoff <= 0 {
 		restartBackoff = time.Second
 	}
-	leaseRenewInterval := input.WorkerLeaseTTL / 3
-	if leaseRenewInterval < time.Second {
-		leaseRenewInterval = time.Second
-	}
+	leaseRenewInterval := workertiming.LeaseRenewInterval(input.WorkerLeaseTTL)
 	heartbeatInterval := input.HeartbeatTimeout / 3
 	if heartbeatInterval < time.Second {
 		heartbeatInterval = time.Second

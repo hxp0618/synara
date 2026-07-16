@@ -28,6 +28,7 @@ import (
 	"github.com/synara-ai/synara/services/control-plane/internal/audit"
 	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
 	"github.com/synara-ai/synara/services/control-plane/internal/problem"
+	"github.com/synara-ai/synara/services/control-plane/internal/workertiming"
 )
 
 const (
@@ -43,6 +44,7 @@ const (
 type KubernetesReconcilerConfig struct {
 	RegistrationToken                  string
 	PublicControlPlaneURL              string
+	WorkerLeaseTTL                     time.Duration
 	Interval                           time.Duration
 	RecoverExpired                     func(context.Context, int) error
 	ReconcileEphemeralWorkspaceCleanup func(context.Context, uuid.UUID, []string, time.Time) (int, error)
@@ -484,7 +486,8 @@ func (r *KubernetesReconciler) foundationHash(
 		Configuration kubernetesTargetConfiguration
 		Capabilities  json.RawMessage
 		TokenHash     [32]byte
-	}{configuration, capabilities, sha256.Sum256([]byte(r.config.RegistrationToken))})
+		LeaseRenew    time.Duration
+	}{configuration, capabilities, sha256.Sum256([]byte(r.config.RegistrationToken)), workertiming.LeaseRenewInterval(r.config.WorkerLeaseTTL)})
 	if err != nil {
 		return "", err
 	}
@@ -636,6 +639,7 @@ func (r *KubernetesReconciler) executionPod(
 		map[string]any{"name": "SYNARA_AGENTD_CAPABILITIES_JSON", "value": string(capabilities)},
 		map[string]any{"name": "SYNARA_AGENTD_RUNNER_COMMAND_JSON", "value": string(runner)},
 		map[string]any{"name": "SYNARA_AGENTD_PROVIDER_HOST_PROTOCOL", "value": "v2"},
+		map[string]any{"name": "SYNARA_AGENTD_LEASE_RENEW_INTERVAL", "value": workertiming.LeaseRenewInterval(r.config.WorkerLeaseTTL).String()},
 		map[string]any{"name": "SYNARA_AGENTD_DRAIN_TIMEOUT", "value": "20s"},
 		map[string]any{"name": "SYNARA_AGENTD_WORKSPACE_ROOT", "value": "/data/workspaces"},
 		map[string]any{"name": "SYNARA_AGENTD_GIT_CACHE_ROOT", "value": gitCacheRoot},

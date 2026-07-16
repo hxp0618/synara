@@ -63,6 +63,7 @@ func TestSSHProvisionerInstallsUpgradesAndRevokesWithoutLeakingSecrets(t *testin
 	if !bytes.Contains(environment, []byte("worker-registration-secret")) ||
 		!bytes.Contains(environment, []byte(`SYNARA_AGENTD_RUNNER_COMMAND_JSON="[\"provider-host\",\"run\",\"--jsonl\"]"`)) ||
 		!bytes.Contains(environment, []byte(`SYNARA_AGENTD_PROVIDER_HOST_PROTOCOL="v2"`)) ||
+		!bytes.Contains(environment, []byte(`SYNARA_AGENTD_LEASE_RENEW_INTERVAL="2s"`)) ||
 		!bytes.Contains(environment, []byte(`SYNARA_AGENTD_DRAIN_TIMEOUT="20s"`)) ||
 		!bytes.Contains(environment, []byte(`SYNARA_AGENTD_WORKSPACE_ROOT="`+expectedWorkspaceRoot+`"`)) ||
 		!bytes.Contains(environment, []byte(`SYNARA_AGENTD_GIT_CACHE_ROOT="`+expectedGitCacheRoot+`"`)) {
@@ -316,7 +317,8 @@ func newSSHProvisionFixture(t *testing.T, controlPlaneURL string) sshProvisionFi
 		t.Fatal(err)
 	}
 	provisioner := NewSSHProvisioner(targetService, SSHProvisioningConfig{
-		AgentdBinaryPath: binaryPath, RegistrationToken: "worker-registration-secret", Timeout: time.Second,
+		AgentdBinaryPath: binaryPath, RegistrationToken: "worker-registration-secret",
+		WorkerLeaseTTL: 6 * time.Second, Timeout: time.Second,
 	})
 	return sshProvisionFixture{
 		db: store.DB(), provisioner: provisioner, principal: principal,

@@ -245,6 +245,9 @@ func TestDockerPoolReconcilerMaterializesPromotedAndCanaryReleaseImagesWithPullC
 	for _, spec := range engine.createdSpecs {
 		channel := spec.Labels[dockerReleaseChannelLabel]
 		channels[channel]++
+		if !strings.Contains(strings.Join(spec.Environment, "\n"), "SYNARA_AGENTD_LEASE_RENEW_INTERVAL=2s") {
+			t.Fatalf("managed Docker Worker omitted the authoritative lease renewal interval: %#v", spec.Environment)
+		}
 		if channel == "promoted" && spec.Image != "ghcr.io/synara/worker@"+promotedDigest {
 			t.Fatalf("promoted image = %q", spec.Image)
 		}
@@ -448,6 +451,7 @@ func newDockerReconcileFixture(t *testing.T, desiredWorkers int) dockerReconcile
 	}
 	reconciler := NewDockerPoolReconciler(targetService, DockerPoolReconcilerConfig{
 		RegistrationToken: "docker-registration-secret", PublicControlPlaneURL: "http://control-plane:3780",
+		WorkerLeaseTTL: 6 * time.Second,
 	}, slog.Default())
 	return dockerReconcileFixture{
 		db: store.DB(), targets: targetService, reconciler: reconciler,
