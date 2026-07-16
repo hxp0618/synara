@@ -127,17 +127,17 @@ bun run --cwd apps/web test \
 
 当前仓库已有的实现期证据不能替代下列发布勾选项：
 
-| 证据                                                | 当前结论                         | 发布边界                                                             |
-| --------------------------------------------------- | -------------------------------- | -------------------------------------------------------------------- |
-| 真实 Codex/Claude Local two-Turn product-path smoke | clean commit `fb9e25ec` 各 12/12 | 经过 Control Plane/LocalSupervisor/agentd，但不是完整 Local Gate     |
-| 真实 Codex/Claude Generated File Checkpoint         | 当前工作区 matrix pass           | Ready Snapshot 已验；standalone Artifact 与大 Diff 仍开放            |
-| 真实 Codex `0.144.x` `terminal-large`               | Explicit Unsupported             | Unified Exec 仅保留 1 MiB Head/Tail；不得牺牲 durable Approval       |
-| Claude ambient OAuth `terminal-large`               | Explicit Unsupported             | 需 controlled Credential 绑定 Runtime Output Root                    |
-| deterministic Local/Docker core suite               | 已通过                           | 证明共享 Control Plane/agentd/Host orchestration，不证明真实 Adapter |
-| deterministic Provider fault matrix                 | malformed/oversized/crash 已通过 | 不是真实 Provider failure 分类                                       |
-| deterministic Docker/Kubernetes failure matrix      | 已通过实现期运行                 | 不等于生产网络、真实 CNI 或正式 rollout                              |
-| SSH fixture                                         | 2026-07-14 disposable VM 13/13   | 不是当前 Commit 的真实 Provider gate                                 |
-| Kubernetes fixture                                  | clean commit `2763ebd3` 13/13    | 不是当前 Commit 的真实 Provider gate                                 |
+| 证据                                                | 当前结论                            | 发布边界                                                             |
+| --------------------------------------------------- | ----------------------------------- | -------------------------------------------------------------------- |
+| 真实 Codex/Claude Local two-Turn product-path smoke | clean commit `fb9e25ec` 各 12/12    | 经过 Control Plane/LocalSupervisor/agentd，但不是完整 Local Gate     |
+| 真实 Codex/Claude Generated File Checkpoint         | clean commit `f1b1aa53` matrix pass | Ready Snapshot 已验；standalone Artifact 与大 Diff 仍开放            |
+| 真实 Codex `0.144.x` `terminal-large`               | Explicit Unsupported                | Unified Exec 仅保留 1 MiB Head/Tail；不得牺牲 durable Approval       |
+| Claude ambient OAuth `terminal-large`               | Explicit Unsupported                | 需 controlled Credential 绑定 Runtime Output Root                    |
+| deterministic Local/Docker core suite               | 已通过                              | 证明共享 Control Plane/agentd/Host orchestration，不证明真实 Adapter |
+| deterministic Provider fault matrix                 | malformed/oversized/crash 已通过    | 不是真实 Provider failure 分类                                       |
+| deterministic Docker/Kubernetes failure matrix      | 已通过实现期运行                    | 不等于生产网络、真实 CNI 或正式 rollout                              |
+| SSH fixture                                         | 2026-07-14 disposable VM 13/13      | 不是当前 Commit 的真实 Provider gate                                 |
+| Kubernetes fixture                                  | clean commit `2763ebd3` 13/13       | 不是当前 Commit 的真实 Provider gate                                 |
 
 真实 Provider × Target gate：
 

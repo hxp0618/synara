@@ -1014,21 +1014,22 @@ terminal.failed
 `2 MiB + 257 B` Terminal Stream；agentd 在真实 Local 与 Docker 产品路径中均只持久化前 32 KiB 安全
 Preview，并生成 `1 MiB / 1 MiB / 257 B` 三个 Ready `terminal_log` Artifact。Acceptance 已校验连续
 Offset、固定 SHA-256、Completion Total/Exit Code、无重复 `artifact.ready` 以及 Session Event 中不存在
-Runtime Output 物理路径。2026-07-16 当前工作区将真实 `terminal-large` 纳入 canonical matrix，但没有把
+Runtime Output 物理路径。2026-07-16 clean commit `f1b1aa53` 将真实 `terminal-large` 纳入 canonical matrix，但没有把
 Provider 截断伪装为通过：Codex `0.144.x` 默认 `unified_exec` 只保留 1 MiB Head/Tail，且禁用它会破坏
 durable Approval 与跨 Turn Cursor 语义，因此记录为 Explicit Unsupported。Claude ambient OAuth 的 SDK
 保留文件位于 agentd Runtime Output Root 外，也记录为 Explicit Unsupported；其严格真实大日志路径仍要求
 受控 Provider Credential 将 `CLAUDE_CONFIG_DIR` 绑定到 Runtime Output Root。Generated File、大 Diff、
 真实 Codex/Claude lossless 大日志和跨 Target Release Acceptance 仍待完成。
 
-2026-07-16 当前工作区新增第 10 个 canonical case `generated-file-checkpoint`。真实 Codex 与 Claude Local
+2026-07-16 clean commit `f1b1aa53` 新增第 10 个 canonical case `generated-file-checkpoint`。真实 Codex 与 Claude Local
 均写入精确 `1 MiB + 257 B` Workspace 文件，并在 Execution 完成前形成
 `workspace.dirty -> checkpoint.created -> workspace_snapshot artifact.ready -> checkpoint.ready`。Runner 经
 用户 Artifact 下载授权读取 Ready Snapshot，拒绝 Absolute/Traversal/Symlink/非 Regular Tar Member，并校验
 目标文件的相对路径、Size/SHA-256、已知 Runner 哨兵内容、Artifact Metadata、生命周期顺序、无重复 Ready
 和无物理路径泄漏。
 该证据关闭真实 Local Workspace Generated File 的 Checkpoint 捕获路径；standalone Provider
-`generated_file` ArtifactCandidate、大 Diff、跨 Target 与 Retention 并发仍保持开放。
+`generated_file` ArtifactCandidate、大 Diff、跨 Target 与 Retention 并发仍保持开放。详见
+`docs/reports/stage-3-real-provider-local-generated-file-matrix-f1b1aa53.md`。
 
 ## 15. 工作流 J：Worker Drain、升级与版本隔离
 
@@ -1320,7 +1321,7 @@ Provider × Capability × Execution Target
   `authoritative-history / cursor_absent` 精确复现 source marker。详见
   `docs/reports/stage-3-real-provider-local-control-matrix-0b3f9214.md`。该证据关闭已实现能力的 Local matrix，
   仍不替代真实 Provider 四 Target、故障、大输出和 soak Release Gate。
-- 2026-07-16 当前工作区新增第 9 个 canonical case `terminal-large`。Deterministic Fixture 对 32 KiB Preview、
+- Clean commit `f1b1aa53` 纳入第 9 个 canonical case `terminal-large`。Deterministic Fixture 对 32 KiB Preview、
   `1 MiB / 1 MiB / 257 B` 三段 Ready Artifact、固定 Size/SHA-256 与路径隔离保持严格断言。真实 Codex
   `0.144.x` 因 `unified_exec` 仅保留 1 MiB Head/Tail 而明确 Unsupported；不通过禁用执行路径来牺牲
   durable Approval。Claude ambient OAuth 也明确 Unsupported，因为不能同时保留用户登录查找路径并把 SDK
@@ -1332,7 +1333,8 @@ Provider × Capability × Execution Target
   下载授权重新读取 Snapshot，并验证 Tar 安全、目标相对文件、已知 Runner 哨兵、固定内容 SHA、事件顺序、无重复 Ready、
   cleanup 与零 Secret finding。Codex 为 `21 pass + 1 unsupported`，Claude 为
   `20 pass + 2 unsupported`。它证明 Workspace Checkpoint 捕获，不把 standalone `generated_file`
-  ArtifactCandidate、大 Diff、SSH/Docker/Kubernetes 或 Retention 并发伪装为已完成。
+  ArtifactCandidate、大 Diff、SSH/Docker/Kubernetes 或 Retention 并发伪装为已完成。详见
+  `docs/reports/stage-3-real-provider-local-generated-file-matrix-f1b1aa53.md`。
 - 首次 Claude 产品路径运行暴露 ambient OAuth 被 Execution-local `CLAUDE_CONFIG_DIR` 隔离掉的问题；
   Provider Host 现仅在受控 Credential 路径使用 Runtime Output Root 作为 Claude Config，ambient OAuth
   保留用户配置查找路径，并由单测和真实 clean-commit smoke 保护。
@@ -1420,7 +1422,8 @@ Provider × Capability × Execution Target
 - 当前进度：deterministic Local/Docker core、Local Provider fault、Docker network、Kubernetes
   Network/Drain/Eviction/Image Canary 已通过实现期运行；SSH 13/13 与 Kubernetes 13/13 core 仍是
   2026-07-14 历史 fixture 证据。真实 Codex/Claude 已在 clean commit `fb9e25ec` 通过 Local 产品路径
-  两轮 restart/native-Cursor smoke，当前完整 Local matrix 也通过 Generated File Workspace Checkpoint 捕获；
+  两轮 restart/native-Cursor smoke，clean commit `f1b1aa53` 的完整 Local matrix 也通过 Generated File
+  Workspace Checkpoint 捕获；
   standalone Artifact、大 Diff、完整 Local、SSH、Docker、Kubernetes Gate 与 soak 尚未完成。
 
 ### Step 8：文档、Runbook 与发布门禁
