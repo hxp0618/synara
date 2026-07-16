@@ -188,6 +188,21 @@ class ParseArgsTest(unittest.TestCase):
 
         self.assertEqual(caught.exception.code, 2)
 
+        with mock.patch.dict(os.environ, {"SHARED": "https://shared.example.test", "CLAUDE_KEY": "claude-secret"}):
+            with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as caught:
+                gate.parse_args(
+                    [
+                        "--codex-credential-env",
+                        "SHARED",
+                        "--codex-base-url-env",
+                        "SHARED",
+                        "--claude-credential-env",
+                        "CLAUDE_KEY",
+                    ]
+                )
+
+        self.assertEqual(caught.exception.code, 2)
+
 
 class ChildCommandTest(unittest.TestCase):
     def test_keeps_four_matrix_boundaries_and_never_places_values_in_arguments(self) -> None:
@@ -245,6 +260,10 @@ class ChildCommandTest(unittest.TestCase):
         self.assertNotIn("CODEX_KEY", claude)
         self.assertNotIn("DATABASE_URL", codex)
         self.assertNotIn("DATABASE_URL", claude)
+        self.assertEqual(codex["DOCKER_HOST"], "unix:///var/run/docker.sock")
+        self.assertEqual(claude["DOCKER_HOST"], "unix:///var/run/docker.sock")
+        self.assertNotIn("DOCKER_CONTEXT", codex)
+        self.assertNotIn("DOCKER_CONTEXT", claude)
 
 
 class ChildReportValidationTest(unittest.TestCase):
@@ -351,7 +370,7 @@ class GateWorkerImageLifecycleTest(unittest.TestCase):
             with (
                 mock.patch.object(gate.subprocess, "run", return_value=completed) as run,
                 mock.patch.object(
-                    gate,
+                    gate.remote,
                     "inspect_gate_worker_image",
                     return_value=(WORKER_IMAGE_ID, labels),
                 ),
@@ -375,12 +394,12 @@ class GateWorkerImageLifecycleTest(unittest.TestCase):
 
         with (
             mock.patch.object(
-                gate,
+                gate.remote,
                 "inspect_gate_worker_image",
                 return_value=(WORKER_IMAGE_ID, labels),
             ),
             mock.patch.object(
-                gate,
+                gate.remote,
                 "docker_completed",
                 side_effect=[removed, absent],
             ) as docker,
@@ -404,11 +423,11 @@ class GateWorkerImageLifecycleTest(unittest.TestCase):
 
         with (
             mock.patch.object(
-                gate,
+                gate.remote,
                 "inspect_gate_worker_image",
                 return_value=(WORKER_IMAGE_ID, labels),
             ),
-            mock.patch.object(gate, "docker_completed") as docker,
+            mock.patch.object(gate.remote, "docker_completed") as docker,
         ):
             evidence, error = gate.cleanup_gate_worker_image(
                 options,
@@ -574,6 +593,7 @@ class AggregateMainTest(unittest.TestCase):
         self.assertEqual(len(shared_image_names), 1)
         self.assertTrue(all("--docker-skip-worker-build" in command for command in child_commands))
         self.assertEqual(report["status"], "pass")
+        self.assertEqual(report["runtime"]["docker"]["serverVersion"], "29.4.0")
         self.assertEqual(report["coverage"]["completedRuns"], 4)
         self.assertEqual(report["workerImage"]["id"], WORKER_IMAGE_ID)
         self.assertTrue(report["workerImage"]["sharedAcrossRuns"])

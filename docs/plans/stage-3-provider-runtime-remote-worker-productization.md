@@ -1437,7 +1437,7 @@ Provider × Capability × Execution Target
   请求完成可达性证明，避免把完整 endpoint 持久化到 probe Pod Spec。Crash 共用 Linux `/proc` 扫描器：
   Docker 限定精确容器，Kubernetes 先要求 Target 下唯一 Running execution Pod，再在其 `agentd` 容器内只
   遍历 PID 1 后代；两者均只允许唯一 `--protocol-v2` 进程并发送 `SIGKILL`，候选为 0/多个、Pod 多义或
-  返回结构异常时 fail closed。当前工作区已通过 Runner `92/92`、全套 Python `128/128`、真实 Linux 容器
+  返回结构异常时 fail closed。当前工作区已通过 Runner `92/92`、全套 Python `136/136`、真实 Linux 容器
   crash 探针、既有 Docker endpoint 探针与 deterministic Docker `16/16`，以及 Codex/Claude Local 401/429
   focused matrix 各 `14/14`；但仍缺受控 Provider 凭据下的真实 Docker/Kubernetes product/failure 报告，
   SSH 同类 fault transport 也未实现，因此四 Target Gate 保持 open。
@@ -1448,8 +1448,16 @@ Provider × Capability × Execution Target
   只清理各自 container/volume/network/state 并证明没有删除共享 Image。聚合器要求同一 Capability Catalog
   hash、与 Gate build 完全一致的 Worker Image ID、完整 case、exact child cleanup、空 Secret scan，且
   child/aggregate 均不持久化 operator 环境变量名或值；Gate 在包括 child 失败的 `finally` 路径校验 Image
-  ownership + ID 后自行删除。当前 release-gate tests `32/32` 与缺 Credential/preflight 泄漏负例已通过；
+  ownership + ID 后自行删除。当前 Local+Docker release-gate tests `32/32` 与缺 Credential/preflight 泄漏负例已通过；
   尚未执行 clean-SHA 真实 Docker 四矩阵，因此仍不构成发布证据。
+- 受控远程 Gate 现进一步抽取 `controlled_remote_release_gate.py`，统一 Credential environment isolation、
+  单次 Gate-owned Worker Image build、四 child 聚合、Catalog/Image consensus、Secret scan 与 ownership cleanup；
+  `docker_release_gate.py` 保留原 CLI/Schema 的薄适配层。新增 `kubernetes_release_gate.py` 让四个 child 各自
+  创建并删除 disposable Kind cluster，复用同一 host Worker Image 且验证嵌套
+  `kubernetes.containerEngine` Image ID、`ownedClusterRemoved=true`、`ownedWorkerImageRemoved=false` 与
+  isolated state cleanup。当前 Local/Docker/Kubernetes release-gate tests 合计 `40/40`，Stage 3 Python
+  `136/136`，两类远程 Gate 的缺 Credential/dirty-worktree 脱敏负例通过；本机当前缺少 `kind` 可执行文件，且
+  任务环境没有专用 Provider Credential，因此尚未执行 clean-SHA Kubernetes 四矩阵，Gate 保持 open。
 
 ## 18. 实施顺序
 

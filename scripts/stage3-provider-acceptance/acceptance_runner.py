@@ -2828,7 +2828,7 @@ class DockerDriver(ManagedWorkerDriver):
             "ownedNetworkRemoved": self.owns_network and not self.options.keep,
             "workerImage": self.image,
             "ownedImageRemoved": self.owns_image and not self.options.keep,
-            "stateRemoved": self._temporary_state,
+            "stateRemoved": self._temporary_state and not self.state_dir.exists(),
             "broadCleanupUsed": False,
         }
 
@@ -4932,6 +4932,7 @@ class KubernetesDriver(ManagedWorkerDriver):
             "ownedWorkerImageRemoved": self.owns_image and not self.options.keep,
             "canaryImage": self.canary_image if self.canary_image_prepared else None,
             "ownedCanaryImageRemoved": self.canary_image_prepared and not self.options.keep,
+            "stateRemoved": self._temporary_state and not self.state_dir.exists(),
             "broadCleanupUsed": False,
         }
 

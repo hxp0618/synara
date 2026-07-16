@@ -246,6 +246,30 @@ paths, the gate verifies the image ownership labels and ID before removing it wi
 records that cleanup evidence in `docker-release-gate.json` and `docker-release-gate.md`. Until a clean run with real
 controlled Credentials exists, this command is an implemented gate rather than Docker release evidence.
 
+## Consolidated real Provider Kubernetes release gate
+
+`kubernetes_release_gate.py` uses the same controlled-remote gate engine, shared clean-SHA Worker image and four
+isolated child boundaries as the Docker gate. Each child creates and removes its own disposable Kind cluster, loads
+the shared image without rebuilding it, and runs one Codex/Claude product or failure matrix:
+
+```sh
+python3 scripts/stage3-provider-acceptance/kubernetes_release_gate.py \
+  --codex-credential-env SYNARA_ACCEPTANCE_CODEX_KEY \
+  --claude-credential-env SYNARA_ACCEPTANCE_CLAUDE_KEY \
+  --claude-credential-field apiKey \
+  --kind-bin /absolute/path/to/kind \
+  --product-timeout 3600 \
+  --failure-timeout 1200
+```
+
+The Credential and optional Base URL environment rules are identical to the Docker gate. Preflight also requires a
+working Docker Engine, Kind executable and kubectl client before the shared image is built. A child pass must prove
+the owned cluster and isolated state were removed while `ownedWorkerImageRemoved=false`; the aggregate then verifies
+all four nested `kubernetes.containerEngine` image IDs, Secret scans and Catalog hashes before ownership-checking and
+removing the shared host image itself. It emits `kubernetes-release-gate.json` and
+`kubernetes-release-gate.md`. The implementation and preflight negative tests are not real Kubernetes Provider
+release evidence until dedicated Credentials and a usable Kind binary are supplied and the clean-SHA command passes.
+
 ## Deterministic failure and canary matrix
 
 The fault matrix is opt-in so the default core suite remains stable and fast:

@@ -30,6 +30,8 @@ class ChildReportPolicy:
     expected_worker_image_build: str | None = None
     expected_worker_image_name: str | None = None
     expected_skip_worker_build: bool | None = None
+    worker_image_evidence_path: tuple[str, ...] = ("docker",)
+    worker_image_configuration_key: str | None = None
 
 
 class ReleaseGateError(Exception):
@@ -285,24 +287,32 @@ def validate_child_report(
         )
 
     if policy.expected_worker_image_build is not None:
-        worker_image_id = child_worker_image_id(report)
-        target_prepare = by_id.get("environment.target-prepare")
-        target_evidence = target_prepare.get("evidence") if isinstance(target_prepare, dict) else None
-        docker_evidence = target_evidence.get("docker") if isinstance(target_evidence, dict) else None
-        docker_configuration = configuration.get("docker") if isinstance(configuration, dict) else None
+        worker_image_evidence = child_worker_image_evidence(
+            report,
+            evidence_path=policy.worker_image_evidence_path,
+        )
+        worker_image_id = (
+            worker_image_evidence.get("workerImageId")
+            if isinstance(worker_image_evidence, dict)
+            else None
+        )
+        configuration_key = policy.worker_image_configuration_key or policy.target
+        worker_image_configuration = (
+            configuration.get(configuration_key) if isinstance(configuration, dict) else None
+        )
         if (
             not isinstance(worker_image_id, str)
             or re.fullmatch(r"sha256:[0-9a-f]{64}", worker_image_id) is None
-            or not isinstance(docker_evidence, dict)
-            or docker_evidence.get("build") != policy.expected_worker_image_build
-            or docker_evidence.get("workerImage") != policy.expected_worker_image_name
-            or not isinstance(docker_configuration, dict)
-            or docker_configuration.get("workerImage") != policy.expected_worker_image_name
-            or docker_configuration.get("skipWorkerBuild") is not policy.expected_skip_worker_build
+            or not isinstance(worker_image_evidence, dict)
+            or worker_image_evidence.get("build") != policy.expected_worker_image_build
+            or worker_image_evidence.get("workerImage") != policy.expected_worker_image_name
+            or not isinstance(worker_image_configuration, dict)
+            or worker_image_configuration.get("workerImage") != policy.expected_worker_image_name
+            or worker_image_configuration.get("skipWorkerBuild") is not policy.expected_skip_worker_build
         ):
             fail(
                 "release.child_worker_image_invalid",
-                "Docker child report did not use the expected shared Worker acceptance image.",
+                "Remote child report did not use the expected shared Worker acceptance image.",
                 {
                     "expectedBuild": policy.expected_worker_image_build,
                     "expectedSkipWorkerBuild": policy.expected_skip_worker_build,
@@ -327,7 +337,11 @@ def case_counts(report: Mapping[str, Any]) -> dict[str, int]:
     return result
 
 
-def child_worker_image_id(report: Mapping[str, Any]) -> str | None:
+def child_worker_image_evidence(
+    report: Mapping[str, Any],
+    *,
+    evidence_path: Sequence[str] = ("docker",),
+) -> Mapping[str, Any] | None:
     cases = report.get("cases")
     if not isinstance(cases, list):
         return None
@@ -340,8 +354,19 @@ def child_worker_image_id(report: Mapping[str, Any]) -> str | None:
         None,
     )
     evidence = target_prepare.get("evidence") if isinstance(target_prepare, dict) else None
-    docker = evidence.get("docker") if isinstance(evidence, dict) else None
-    value = docker.get("workerImageId") if isinstance(docker, dict) else None
+    current: Any = evidence
+    for key in evidence_path:
+        current = current.get(key) if isinstance(current, dict) else None
+    return current if isinstance(current, dict) else None
+
+
+def child_worker_image_id(
+    report: Mapping[str, Any],
+    *,
+    evidence_path: Sequence[str] = ("docker",),
+) -> str | None:
+    worker_image = child_worker_image_evidence(report, evidence_path=evidence_path)
+    value = worker_image.get("workerImageId") if isinstance(worker_image, dict) else None
     return value if isinstance(value, str) else None
 
 
@@ -420,6 +445,10 @@ def run_child_report(
             ).as_report_error(provider=provider, matrix=matrix)
         )
     cases = decoded.get("cases") if isinstance(decoded.get("cases"), list) else []
+    worker_image_id = child_worker_image_id(
+        decoded,
+        evidence_path=policy.worker_image_evidence_path,
+    )
     record.update(
         {
             "status": "pass" if not errors else "fail",
@@ -436,7 +465,7 @@ def run_child_report(
             "source": decoded.get("source"),
             **(
                 {"workerImageId": worker_image_id}
-                if (worker_image_id := child_worker_image_id(decoded)) is not None
+                if worker_image_id is not None
                 else {}
             ),
         }
