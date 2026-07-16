@@ -1480,7 +1480,8 @@ Provider × Capability × Execution Target
 - 新增 `registry_release_gate.py`，要求 clean worktree、现有 `docker-container` Buildx builder 和
   `linux/amd64,linux/arm64` 能力；对同一 Git SHA 分别执行 cached/no-cache push，并聚合 Registry digest、
   双平台 manifest、SPDX/SLSA attestation、non-root image config、嵌入 Manifest/SBOM/三类 lockfile 和
-  Provider Host/agentd hash。可选 `--go-proxy` 只允许 credential-free HTTPS/direct/off，输出经过 redaction 与
+  Provider Host/agentd hash。BuildKit Syft scanner 也由 checked-in digest lock 固定，不再解析可变
+  `stable-1` tag。可选 `--go-proxy` 只允许 credential-free HTTPS/direct/off，输出经过 redaction 与
   Secret scan，本地只清理本次 inspection container/image/state，禁止 prune，远端 image 保留为发布证据。
   当前 Registry gate tests `18/18`，全部 release-gate tests 合计 `68/68`，Stage 3 Python `171/171`；
   尚待在 clean implementation SHA 上完成真实双架构 Registry 运行并记录 digest，因此签名、生产 retention、

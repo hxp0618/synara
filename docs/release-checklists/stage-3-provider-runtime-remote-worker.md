@@ -72,6 +72,7 @@ python3 scripts/stage3-provider-acceptance/registry_release_gate.py \
 - [ ] Worker Image 已推送到目标 Registry，并记录 registry-returned Digest。
 - [ ] 至少生成目标平台所需的 `linux/amd64`、`linux/arm64` manifest list；若只发布单架构，已记录审批。
 - [ ] Base Image、Node.js、Codex CLI、Claude Agent SDK 和系统包均由锁文件或 Digest 固定。
+- [ ] BuildKit SBOM generator 与 Dockerfile frontend 均使用 checked-in immutable Digest，不解析 mutable tag。
 - [ ] Worker Manifest 中的 Git SHA、OS/Arch、Image Digest、Protocol、Provider Runtime 和 Capability Hash 可追溯。
 - [ ] SBOM、依赖漏洞扫描和镜像签名/来源验证完成。
 - [ ] Worker 使用非 Root 用户，Workspace、Git Cache 和 Runtime Output Root 权限正确。

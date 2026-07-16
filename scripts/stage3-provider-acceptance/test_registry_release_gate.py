@@ -286,7 +286,7 @@ class InputValidationTest(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 gate.normalize_go_proxy(value)
 
-    def test_build_command_keeps_proxy_and_no_cache_explicit(self) -> None:
+    def test_build_inputs_keep_proxy_no_cache_and_pinned_sbom_generator(self) -> None:
         command = gate.build_command(
             options(pathlib.Path("/tmp/output")),
             image="localhost:55091/synara/worker:tag",
@@ -300,6 +300,68 @@ class InputValidationTest(unittest.TestCase):
         self.assertIn("--push", command)
         self.assertIn("--no-cache", command)
         self.assertEqual(command[command.index("--go-proxy") + 1], "https://goproxy.cn,direct")
+        self.assertEqual(
+            gate.locked_sbom_generator(REPO_ROOT),
+            "docker.io/docker/buildkit-syft-scanner@sha256:"
+            "79e7b013cbec16bbb436f312819a49a4a57752b2270c1a9332ae1a10fcc82a68",
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            repo_root = pathlib.Path(directory)
+            lock_path = repo_root / gate.SBOM_GENERATOR_LOCK_PATH
+            lock_path.parent.mkdir(parents=True)
+            lock_path.write_text("docker.io/docker/buildkit-syft-scanner:stable-1\n")
+            with self.assertRaises(gate.ReleaseGateError) as caught:
+                gate.locked_sbom_generator(repo_root)
+        self.assertEqual(caught.exception.code, "release.registry_source_metadata_invalid")
+
+        generator = gate.locked_sbom_generator(REPO_ROOT)
+        generator_digest = generator.rsplit("@sha256:", 1)[-1]
+        build_digest = "sha256:" + "8" * 64
+        metadata = {
+            "containerimage.digest": build_digest,
+            "containerimage.descriptor": {
+                "mediaType": gate.OCI_INDEX_MEDIA_TYPE,
+                "digest": build_digest,
+                "size": 123,
+            },
+            **{
+                f"buildx.build.provenance/{platform}": {
+                    "materials": [
+                        {
+                            "uri": "pkg:docker/docker/buildkit-syft-scanner"
+                            f"?digest=sha256:{generator_digest}",
+                            "digest": {"sha256": generator_digest},
+                        }
+                    ]
+                }
+                for platform in gate.REQUIRED_PLATFORMS
+            },
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            metadata_path = pathlib.Path(directory) / "metadata.json"
+            metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+            evidence = gate._load_build_metadata(
+                metadata_path,
+                slot="cached",
+                expected_sbom_generator=generator,
+            )
+            self.assertEqual(evidence["sbomGenerator"], generator)
+
+            metadata["buildx.build.provenance/linux/arm64"]["materials"][0]["digest"] = {
+                "sha256": "0" * 64
+            }
+            metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+            with self.assertRaises(gate.ReleaseGateError) as metadata_error:
+                gate._load_build_metadata(
+                    metadata_path,
+                    slot="no-cache",
+                    expected_sbom_generator=generator,
+                )
+            self.assertEqual(
+                metadata_error.exception.code,
+                "release.registry_build_metadata_invalid",
+            )
 
     def test_worker_build_script_rejects_non_https_proxy_before_docker(self) -> None:
         completed = subprocess.run(

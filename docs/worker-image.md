@@ -36,6 +36,8 @@ The Worker build fails closed unless all of these inputs are immutable:
 - `deploy/worker/provider-tools/package-lock.json` pins npm integrity hashes for Codex CLI and Claude Code CLI.
 - `bun.lock` pins the Provider Host and Claude Agent SDK graph.
 - `deploy/worker/apk-packages.lock` pins the complete Alpine package closure installed over the runtime base.
+- `deploy/worker/buildkit-sbom-generator.lock` pins the BuildKit Syft scanner image used for outer SPDX
+  attestations; release builds never resolve the mutable `stable-1` tag.
 - `SOURCE_DATE_EPOCH` fixes the embedded SPDX creation time to the source commit time.
 
 The tracked Provider runtime versions are intentionally separate:

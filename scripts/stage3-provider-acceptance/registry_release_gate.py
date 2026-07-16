@@ -56,6 +56,7 @@ LOCAL_LOCK_PATHS = {
     "provider-host-bun": pathlib.Path("bun.lock"),
     "worker-apk": pathlib.Path("deploy/worker/apk-packages.lock"),
 }
+SBOM_GENERATOR_LOCK_PATH = pathlib.Path("deploy/worker/buildkit-sbom-generator.lock")
 EMBEDDED_LOCK_PATHS = {
     "provider-tools-npm": EMBEDDED_PATHS["providerToolsLock"],
     "provider-host-bun": EMBEDDED_PATHS["providerHostLock"],
@@ -297,6 +298,35 @@ def source_metadata(repo_root: pathlib.Path, git_sha: str) -> tuple[str, str]:
     return version.strip(), epoch
 
 
+def locked_sbom_generator(repo_root: pathlib.Path) -> str:
+    try:
+        reference = (repo_root / SBOM_GENERATOR_LOCK_PATH).read_text(encoding="utf-8").strip()
+    except OSError:
+        raise ReleaseGateError(
+            "release.registry_source_metadata_invalid",
+            "Worker Registry gate could not read the BuildKit SBOM generator lock.",
+        ) from None
+    if "@" not in reference:
+        raise ReleaseGateError(
+            "release.registry_source_metadata_invalid",
+            "Worker Registry BuildKit SBOM generator was not digest-pinned.",
+        )
+    repository, digest = reference.rsplit("@", 1)
+    try:
+        normalize_image_repository(repository)
+    except ValueError:
+        raise ReleaseGateError(
+            "release.registry_source_metadata_invalid",
+            "Worker Registry BuildKit SBOM generator reference was invalid.",
+        ) from None
+    if re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None:
+        raise ReleaseGateError(
+            "release.registry_source_metadata_invalid",
+            "Worker Registry BuildKit SBOM generator was not digest-pinned.",
+        )
+    return reference
+
+
 def expected_created_at(source_date_epoch: str) -> str:
     return dt.datetime.fromtimestamp(int(source_date_epoch), tz=dt.timezone.utc).strftime(
         "%Y-%m-%dT%H:%M:%SZ"
@@ -377,7 +407,12 @@ def _run_build(
         )
 
 
-def _load_build_metadata(path: pathlib.Path, *, slot: str) -> dict[str, Any]:
+def _load_build_metadata(
+    path: pathlib.Path,
+    *,
+    slot: str,
+    expected_sbom_generator: str,
+) -> dict[str, Any]:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
@@ -388,6 +423,9 @@ def _load_build_metadata(path: pathlib.Path, *, slot: str) -> dict[str, Any]:
         ) from None
     descriptor = payload.get("containerimage.descriptor") if isinstance(payload, dict) else None
     digest = payload.get("containerimage.digest") if isinstance(payload, dict) else None
+    expected_generator_digest = expected_sbom_generator.rsplit("@", 1)[-1].removeprefix(
+        "sha256:"
+    )
     if (
         not isinstance(descriptor, dict)
         or descriptor.get("mediaType") != OCI_INDEX_MEDIA_TYPE
@@ -400,7 +438,38 @@ def _load_build_metadata(path: pathlib.Path, *, slot: str) -> dict[str, Any]:
             "A Worker Registry build did not return one immutable OCI index digest.",
             {"slot": slot},
         )
-    return {"digest": digest, "descriptorSize": descriptor.get("size")}
+    for platform in REQUIRED_PLATFORMS:
+        provenance = payload.get(f"buildx.build.provenance/{platform}")
+        materials = provenance.get("materials") if isinstance(provenance, dict) else None
+        material_items = materials if isinstance(materials, list) else []
+        scanner_materials = [
+            material
+            for material in material_items
+            if isinstance(material, dict)
+            and isinstance(material.get("uri"), str)
+            and material["uri"].startswith("pkg:docker/docker/buildkit-syft-scanner")
+        ]
+        scanner_digest = (
+            scanner_materials[0].get("digest")
+            if len(scanner_materials) == 1
+            else None
+        )
+        if (
+            not isinstance(materials, list)
+            or len(scanner_materials) != 1
+            or not isinstance(scanner_digest, dict)
+            or scanner_digest.get("sha256") != expected_generator_digest
+        ):
+            raise ReleaseGateError(
+                "release.registry_build_metadata_invalid",
+                "A Worker Registry build did not use the locked BuildKit SBOM generator.",
+                {"slot": slot, "platform": platform},
+            )
+    return {
+        "digest": digest,
+        "descriptorSize": descriptor.get("size"),
+        "sbomGenerator": expected_sbom_generator,
+    }
 
 
 def _json_tool_output(
@@ -1021,7 +1090,11 @@ def build_and_inspect(
         no_cache=no_cache,
     )
     _run_build(options, command, slot=slot)
-    metadata = _load_build_metadata(metadata_path, slot=slot)
+    metadata = _load_build_metadata(
+        metadata_path,
+        slot=slot,
+        expected_sbom_generator=locked_sbom_generator(options.repo_root),
+    )
     registry = inspect_registry_image(
         options,
         image=image,
@@ -1048,6 +1121,7 @@ def build_and_inspect(
         "noCache": no_cache,
         "registryDigest": metadata["digest"],
         "descriptorSize": metadata["descriptorSize"],
+        "sbomGenerator": metadata["sbomGenerator"],
         **registry,
         "embedded": embedded,
     }
@@ -1217,6 +1291,7 @@ def run_registry_release_gate(
             {
                 "version": version,
                 "sourceDateEpoch": source_date_epoch,
+                "buildKitSBOMGenerator": locked_sbom_generator(options.repo_root),
             }
         )
     except (OSError, subprocess.SubprocessError, ReleaseGateError) as raw_error:

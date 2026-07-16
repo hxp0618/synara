@@ -180,6 +180,8 @@ Acceptance Fixture used by Codex and Claude.
 - `deploy/worker/build.sh` 新增可选 credential-free `--go-proxy`，只接受 HTTPS、`direct` 或 `off`，拒绝
   userinfo、query、fragment、空白和控制字符。该值只用于 Go build stage；Credential 不进入参数、报告或
   Image runtime environment。
+- `deploy/worker/buildkit-sbom-generator.lock` 将 BuildKit Syft scanner 固定到 provenance 已记录的 immutable
+  digest，避免 release build 重新解析 mutable `stable-1` tag；Gate 报告同时记录该 scanner reference。
 - Registry gate tests `18/18` 与 Stage 3 Python `171/171` 已通过，覆盖 CLI/input、双平台 OCI index、
   attestation missing/duplicate、危险 Image environment、嵌入 Manifest/SBOM/lockfile、cached/no-cache
   platform digest consensus、aggregate pass/fail、精确 cleanup 和输出 Secret scan。

@@ -3,6 +3,7 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+sbom_generator_lock="$repo_root/deploy/worker/buildkit-sbom-generator.lock"
 target="worker"
 image=""
 version=""
@@ -199,6 +200,15 @@ fi
 mkdir -p "$(dirname "$metadata_file")"
 
 if [[ "$output_mode" == "push" ]]; then
+  if [[ ! -f "$sbom_generator_lock" ]]; then
+    echo "Missing BuildKit SBOM generator lock: $sbom_generator_lock" >&2
+    exit 1
+  fi
+  IFS= read -r sbom_generator <"$sbom_generator_lock"
+  if [[ ! "$sbom_generator" =~ ^[a-z0-9][a-z0-9._:/-]*[a-z0-9]@sha256:[0-9a-f]{64}$ ]]; then
+    echo "BuildKit SBOM generator lock must contain one digest-pinned image reference" >&2
+    exit 1
+  fi
   if [[ -z "$builder" ]]; then
     builder="synara-worker-builder"
   fi
@@ -239,7 +249,7 @@ if [[ -n "$builder" ]]; then
   build_command+=(--builder "$builder")
 fi
 if [[ "$output_mode" == "push" ]]; then
-  build_command+=(--sbom=true --provenance=mode=max)
+  build_command+=("--sbom=generator=$sbom_generator" --provenance=mode=max)
 else
   # Docker's local image store cannot retain attestations. The image still
   # contains the normalized SPDX document and strict Worker Image Manifest.
