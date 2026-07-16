@@ -12,6 +12,7 @@ platforms=""
 metadata_file=""
 output_mode="load"
 builder="${SYNARA_WORKER_BUILDER:-}"
+go_proxy="${SYNARA_WORKER_GOPROXY:-}"
 allow_dirty=0
 no_cache=0
 label_values=()
@@ -30,6 +31,7 @@ Options:
   --platform PLATFORM[,PLATFORM]
   --metadata-file PATH
   --builder NAME
+  --go-proxy URLS            Optional public GOPROXY list; credentials are rejected.
   --label KEY=VALUE          May be repeated.
   --load                     Load one platform into the local Docker Engine (default).
   --push                     Push the image and its attestations.
@@ -71,6 +73,10 @@ while (($# > 0)); do
       ;;
     --builder)
       builder="${2:?--builder requires a value}"
+      shift 2
+      ;;
+    --go-proxy)
+      go_proxy="${2:?--go-proxy requires a value}"
       shift 2
       ;;
     --label)
@@ -125,6 +131,21 @@ fi
 
 if [[ -z "$version" ]]; then
   version="$(node -e 'const fs=require("node:fs"); const value=JSON.parse(fs.readFileSync(process.argv[1],"utf8")).version; if(!value) process.exit(1); process.stdout.write(value)' "$repo_root/apps/server/package.json")"
+fi
+
+if [[ -n "$go_proxy" ]]; then
+  if [[ "$go_proxy" =~ [[:space:][:cntrl:]] || "$go_proxy" == *"@"* || "$go_proxy" == *"?"* || "$go_proxy" == *"#"* ]]; then
+    echo "--go-proxy must be a public credential-free GOPROXY list without whitespace, userinfo, query, or fragment data" >&2
+    exit 2
+  fi
+  go_proxy_url_pattern="^https://[A-Za-z0-9.-]+(:[0-9]+)?(/[A-Za-z0-9._~!$&'()*+,;=:%/-]*)?$"
+  IFS=',' read -r -a go_proxy_entries <<<"$go_proxy"
+  for go_proxy_entry in "${go_proxy_entries[@]}"; do
+    if [[ "$go_proxy_entry" != "direct" && "$go_proxy_entry" != "off" && ! "$go_proxy_entry" =~ $go_proxy_url_pattern ]]; then
+      echo "--go-proxy entries must use https://, direct, or off" >&2
+      exit 2
+    fi
+  done
 fi
 if [[ -z "$version" ]]; then
   echo "Worker version is empty" >&2
@@ -211,6 +232,9 @@ build_command=(
   --label "org.opencontainers.image.revision=$git_sha"
   --metadata-file "$metadata_file"
 )
+if [[ -n "$go_proxy" ]]; then
+  build_command+=(--build-arg "GOPROXY=$go_proxy")
+fi
 if [[ -n "$builder" ]]; then
   build_command+=(--builder "$builder")
 fi

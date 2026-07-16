@@ -42,7 +42,7 @@ bootstrap; the server profiles retain PostgreSQL migrations, execution leases, g
 ordered SSE event recovery.
 
 The forward-only Control Plane schema chain currently ends at
-[`000031_session_execution_cursor_lineage.sql`](./services/control-plane/migrations/000031_session_execution_cursor_lineage.sql);
+[`000041_diff_artifact_kind.sql`](./services/control-plane/migrations/000041_diff_artifact_kind.sql);
 the migration inventory and semantics are maintained in the
 [`services/control-plane` README](./services/control-plane/README.md#persistence).
 
@@ -54,6 +54,11 @@ the migration inventory and semantics are maintained in the
 Artifact metadata, Local/MinIO/S3 payload lifecycle, verified upload/download, reentrant Personal
 Local-to-object-storage migration, Kubernetes reconciliation, and enterprise OIDC/SAML/SCIM foundations
 are available. Productionization and the Web main-flow authority cutover remain in progress.
+
+Stage 3 Worker releases use a clean-worktree Registry gate that performs cached and no-cache
+`linux/amd64` + `linux/arm64` pushes, validates Registry-returned OCI digests, BuildKit SPDX/SLSA
+attestations, non-root image configuration, and the embedded Manifest/SBOM/lockfiles. See
+[`docs/worker-image.md`](./docs/worker-image.md#registry-release-gate) for the command and evidence boundary.
 
 ## Privacy
 

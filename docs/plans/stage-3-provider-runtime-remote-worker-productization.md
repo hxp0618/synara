@@ -1172,7 +1172,12 @@ Manifest 不包含 Credential、路径中的用户信息或高基数 Secret。
   docker config 提供最小 auth。运维边界已记录在
   `docs/runbooks/worker-release-rollout.md`。
 - 当前 deterministic Docker/Kubernetes tests 与 failure-only image-canary 只证明 release shape、Target
-  isolation、replacement 和恢复编排。它们没有证明 registry-pushed immutable multi-arch Revision、真实
+  isolation、replacement 和恢复编排。新增 `registry_release_gate.py` 从完全 clean SHA 执行 cached 与
+  independent no-cache 两次 `linux/amd64,linux/arm64` Registry push，校验 Registry-returned OCI index、
+  per-platform manifest digest、SPDX/SLSA attestation、non-root config，以及 Image 内 Manifest/SBOM/lockfile
+  与当前源码一致性；精确清理本地 inspection container/image/state，不执行广域 prune，并保留远端 tag 作为
+  发布证据。当前 Registry gate tests `18/18`、Stage 3 Python `171/171` 已通过；真实 clean-SHA Registry
+  运行尚待记录。它们仍没有证明镜像签名策略、生产 Registry retention、真实
   Codex/Claude rollout、Busy Worker 长任务、生产多节点 Drain/PDB/Eviction 或 rollback under load；
   rollout/reconciler 最终评审和真实 Gate 完成前，J 保持 `partial`。
 
@@ -1440,7 +1445,7 @@ Provider × Capability × Execution Target
   Crash 共用 Linux `/proc` 扫描器：Docker 限定精确容器，Kubernetes 先要求 Target 下唯一 Running execution
   Pod，再在其 `agentd` 容器内遍历 PID 1 后代；SSH 以 owned disposable machine 中 systemd service MainPID
   为 agentd root。三者均只允许唯一 `--protocol-v2` 后代并发送 `SIGKILL`，候选为 0/多个、Pod 多义或返回
-  结构异常时 fail closed。当前工作区已通过 Runner `99/99`、全套 Python `153/153`、真实 Linux 容器 crash
+  结构异常时 fail closed。当前工作区已通过 Runner `99/99`、全套 Python `171/171`、真实 Linux 容器 crash
   探针、SSH token-scoped proxy focused tests、既有 Docker endpoint 探针与 deterministic Docker `16/16`；
   当前 dirty-worktree disposable OrbStack SSH fixture 也通过 `16/16`、精确 machine/key cleanup 与零 Secret
   finding。SSH real-provider runtime 预检进一步从当前源码构建并上传 Host bundle，按 checked-in npm lock
@@ -1462,7 +1467,7 @@ Provider × Capability × Execution Target
   创建并删除 disposable Kind cluster，复用同一 host Worker Image 且验证嵌套
   `kubernetes.containerEngine` Image ID、`ownedClusterRemoved=true`、`ownedWorkerImageRemoved=false` 与
   isolated state cleanup。当前 Local/Docker/Kubernetes release-gate tests 合计 `40/40`，Stage 3 Python
-  `153/153`，SSH/Docker/Kubernetes Gate 的缺 Credential/dirty-worktree 脱敏负例通过。当前机器的 Kind `v0.32.0`、
+  `171/171`，SSH/Docker/Kubernetes Gate 的缺 Credential/dirty-worktree 脱敏负例通过。当前机器的 Kind `v0.32.0`、
   kubectl `v1.33.9` 与 Docker `29.4.0` runtime preflight 已通过；任务环境仍没有专用 Provider Credential，
   因此尚未执行 clean-SHA Kubernetes 四矩阵，Gate 保持 open。
 - 新增 `ssh_release_gate.py`，四个 child 各自 cross-build agentd/real Provider Host、创建唯一 disposable
@@ -1472,6 +1477,14 @@ Provider × Capability × Execution Target
   fixture runtime、复用 machine 或任一 runtime/cleanup mismatch 均 fail closed。当前 SSH gate tests `10/10`，
   Local/SSH/Docker/Kubernetes release-gate tests 合计 `50/50`；尚缺专用 Provider Credential 下的 clean-SHA
   四 child 报告，因此真实 SSH Gate 保持 open。
+- 新增 `registry_release_gate.py`，要求 clean worktree、现有 `docker-container` Buildx builder 和
+  `linux/amd64,linux/arm64` 能力；对同一 Git SHA 分别执行 cached/no-cache push，并聚合 Registry digest、
+  双平台 manifest、SPDX/SLSA attestation、non-root image config、嵌入 Manifest/SBOM/三类 lockfile 和
+  Provider Host/agentd hash。可选 `--go-proxy` 只允许 credential-free HTTPS/direct/off，输出经过 redaction 与
+  Secret scan，本地只清理本次 inspection container/image/state，禁止 prune，远端 image 保留为发布证据。
+  当前 Registry gate tests `18/18`，全部 release-gate tests 合计 `68/68`，Stage 3 Python `171/171`；
+  尚待在 clean implementation SHA 上完成真实双架构 Registry 运行并记录 digest，因此签名、生产 retention、
+  四 Target rollout 与 soak 仍保持 open。
 
 ## 18. 实施顺序
 
@@ -1515,7 +1528,8 @@ Provider × Capability × Execution Target
 - 增加 Worker/Host/CLI Manifest。
 - 完成可重复 Worker Image、灰度、隔离和回滚。
 - 当前进度：`000034`/`000037`、Worker/Releases API、Web 运维入口和 rollout Runbook 已形成；真实
-  registry-pushed multi-arch canary/rollback、Busy Worker 长任务和生产多节点证据仍是完成门禁。
+  Registry gate 已实现并由 `18/18` 单测覆盖，clean-SHA 双架构实测、image signing、真实 canary/rollback、
+  Busy Worker 长任务和生产多节点证据仍是完成门禁。
 
 ### Step 6：Web 主流程切换
 

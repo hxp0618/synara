@@ -110,6 +110,39 @@ provenance describes the outer build environment and can differ in attestation m
 inputs are established by the embedded manifest, normalized SBOM, lock hashes, binaries, and installed package
 set.
 
+## Registry release gate
+
+Run the consolidated Registry gate only from a clean, committed checkout. The selected Buildx builder must use
+the `docker-container` driver and expose both `linux/amd64` and `linux/arm64`. Docker/Buildx Registry
+authentication, when required, must already be configured outside the command; credentials are rejected in the
+repository and GOPROXY arguments and are never written to the report.
+
+```bash
+python3 scripts/stage3-provider-acceptance/registry_release_gate.py \
+  --image-repository registry.example.com/synara/worker \
+  --builder synara-worker-release \
+  --output-dir /tmp/synara-worker-registry-release
+```
+
+If the default Go module proxy is unavailable, append the public credential-free override
+`--go-proxy https://goproxy.cn,direct`.
+
+The gate pushes two uniquely tagged builds from the same Git SHA: one normal cached build and one independent
+`--no-cache` build. It requires both builds to reproduce the same platform manifest digests and validates:
+
+- the Registry-returned OCI index digest and exactly one `linux/amd64` plus one `linux/arm64` image manifest;
+- one attached attestation manifest per platform containing both SPDX and SLSA provenance predicates;
+- non-root UID/GID, entrypoint, working directory, source labels, fixed creation time, and no credential-like
+  environment names;
+- embedded Worker Manifest, normalized SPDX, checked-in npm/Bun/APK locks, Provider Host wrapper/bundle, and
+  agentd binary evidence for both platforms;
+- exact local inspection cleanup, report redaction, and an empty output Secret scan without Docker-wide prune.
+
+The JSON and Markdown reports are written to the requested empty output directory. The gate intentionally retains
+the two remote image tags as release evidence; apply the Registry retention policy only after their digests and
+attestations are archived. A pass does not prove image signing policy, production Registry retention, real
+Provider rollout across all four Targets, multi-node canary/rollback, or soak.
+
 ## Runtime and storage
 
 Docker and Kubernetes Execution Target configuration should use the official Worker image, not the older

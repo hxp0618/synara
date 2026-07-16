@@ -59,6 +59,16 @@ ORDER BY version;
 
 ## 3. Worker 构建与供应链
 
+Clean-SHA Registry 验证入口（输出目录必须为空或不存在，Registry Credential 由 Docker/Buildx 外部安全
+配置，禁止写入参数）：
+
+```bash
+python3 scripts/stage3-provider-acceptance/registry_release_gate.py \
+  --image-repository registry.example.com/synara/worker \
+  --builder synara-worker-release \
+  --output-dir /tmp/synara-worker-registry-release
+```
+
 - [ ] Worker Image 已推送到目标 Registry，并记录 registry-returned Digest。
 - [ ] 至少生成目标平台所需的 `linux/amd64`、`linux/arm64` manifest list；若只发布单架构，已记录审批。
 - [ ] Base Image、Node.js、Codex CLI、Claude Agent SDK 和系统包均由锁文件或 Digest 固定。
@@ -150,6 +160,7 @@ bun run --cwd apps/web test \
 | SSH consolidated release gate                       | 独立引擎与 10 项 SSH gate tests 已通过 | 四个 disposable VM child 尚待真实 Credential 执行                                    |
 | Docker consolidated release gate                    | Local+Docker 32 项 gate tests 已通过   | 单次 Gate-owned Image + 四份同 SHA/Catalog/Image 报告尚待真实 Credential 执行        |
 | Kubernetes consolidated release gate                | 公共引擎与 8 项 K8s gate tests 已通过  | 四个 disposable Kind child 尚待真实 Credential 执行                                  |
+| Worker Registry release gate                         | Registry gate tests `18/18` 已通过     | clean-SHA 双架构 push/digest evidence、签名与生产 retention 尚待记录                  |
 | SSH fixture                                         | 2026-07-14 disposable VM 13/13         | 不是当前 Commit 的真实 Provider gate                                                 |
 | Kubernetes fixture                                  | clean commit `2763ebd3` 13/13          | 不是当前 Commit 的真实 Provider gate                                                 |
 
