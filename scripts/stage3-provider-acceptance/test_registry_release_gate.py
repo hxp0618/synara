@@ -388,6 +388,7 @@ class InputValidationTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             metadata_path = pathlib.Path(directory) / "metadata.json"
             metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
             evidence = gate._load_build_metadata(
                 metadata_path,
                 slot="cached",
@@ -409,6 +410,44 @@ class InputValidationTest(unittest.TestCase):
                 metadata_error.exception.code,
                 "release.registry_build_metadata_invalid",
             )
+
+    def test_worker_runtime_replaces_base_npm_with_locked_high_free_copy(self) -> None:
+        package_path = REPO_ROOT / "deploy/worker/provider-tools/package.json"
+        lock_path = REPO_ROOT / "deploy/worker/provider-tools/package-lock.json"
+        package = json.loads(package_path.read_text(encoding="utf-8"))
+        lock_text = lock_path.read_text(encoding="utf-8")
+        lock = json.loads(lock_text)
+        packages = lock["packages"]
+
+        expected_npm = package["dependencies"]["npm"]
+        self.assertEqual(expected_npm, "12.0.1")
+        self.assertEqual(packages[""]["dependencies"]["npm"], expected_npm)
+        self.assertEqual(packages["node_modules/npm"]["version"], expected_npm)
+        self.assertEqual(
+            packages["node_modules/npm"]["resolved"],
+            "https://registry.npmjs.org/npm/-/npm-12.0.1.tgz",
+        )
+        self.assertEqual(
+            packages["node_modules/npm/node_modules/undici"]["version"],
+            "6.27.0",
+        )
+        self.assertNotIn("registry.npmmirror.com", lock_text)
+
+        dockerfile = (REPO_ROOT / "Dockerfile").read_text(encoding="utf-8")
+        self.assertIn("rm -rf /usr/local/lib/node_modules/npm", dockerfile)
+        self.assertIn(
+            "node_modules/npm/bin/npm-cli.js /usr/local/bin/npm",
+            dockerfile,
+        )
+        self.assertIn(
+            "node_modules/npm/bin/npx-cli.js /usr/local/bin/npx",
+            dockerfile,
+        )
+        self.assertIn(
+            "node_modules/npm/node_modules/node-gyp/bin/node-gyp.js",
+            dockerfile,
+        )
+        self.assertIn('test "$(npm --version)" = "$expected_npm"', dockerfile)
 
     def test_worker_build_script_rejects_non_https_proxy_before_docker(self) -> None:
         completed = subprocess.run(

@@ -229,6 +229,16 @@ RUN xargs apk add --no-cache < /opt/synara/worker-apk-packages.lock \
   && rm -f /var/log/apk.log
 
 COPY --from=worker-provider-tools /opt/synara/provider-tools /opt/synara/provider-tools
+RUN set -eu; \
+  expected_npm="$(node -p "require('/opt/synara/provider-tools/package.json').dependencies.npm")"; \
+  actual_npm="$(node -p "require('/opt/synara/provider-tools/node_modules/npm/package.json').version")"; \
+  test "$actual_npm" = "$expected_npm"; \
+  rm -rf /usr/local/lib/node_modules/npm; \
+  ln -sf /opt/synara/provider-tools/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm; \
+  ln -sf /opt/synara/provider-tools/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx; \
+  ln -sf /opt/synara/provider-tools/node_modules/npm/node_modules/node-gyp/bin/node-gyp.js \
+    /usr/local/bin/node-gyp; \
+  test "$(npm --version)" = "$expected_npm"
 COPY bun.lock /opt/synara/provider-host/bun.lock
 COPY apps/provider-host/package.json /opt/synara/provider-host/package.json
 COPY deploy/worker/worker-image-manifest.mjs /opt/synara/build/worker-image-manifest.mjs

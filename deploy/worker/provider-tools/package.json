@@ -5,7 +5,8 @@
   "description": "Locked Provider CLI inputs for the Synara Worker image.",
   "dependencies": {
     "@anthropic-ai/claude-code": "2.1.197",
-    "@openai/codex": "0.144.1"
+    "@openai/codex": "0.144.1",
+    "npm": "12.0.1"
   },
   "engines": {
     "node": ">=24"

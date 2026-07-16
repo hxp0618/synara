@@ -85,7 +85,10 @@ class ConfigurationTest(unittest.TestCase):
 
         self.assertIn(":v3.1.1@sha256:", configuration.tools.cosign)
         self.assertIn(":0.72.0@sha256:", configuration.tools.trivy)
-        self.assertEqual(configuration.vulnerability_policy.blocked_severities, ("CRITICAL",))
+        self.assertEqual(
+            configuration.vulnerability_policy.blocked_severities,
+            ("HIGH", "CRITICAL"),
+        )
         self.assertFalse(configuration.vulnerability_policy.ignore_unfixed)
         self.assertEqual(configuration.vulnerability_policy.exceptions, ())
 
@@ -221,6 +224,7 @@ class VulnerabilityPolicyTest(unittest.TestCase):
         self.assertEqual(evidence["vulnerabilities"]["bySeverity"]["HIGH"], 1)
         self.assertEqual(evidence["reviewFindingCount"], 1)
         self.assertEqual(evidence["reviewFindings"][0]["vulnerabilityId"], "CVE-2026-12345")
+        self.assertEqual(evidence["reviewFindings"][0]["target"], "alpine")
         self.assertEqual(evidence["blockedFindings"], [])
 
     def test_blocks_critical_eol_and_secret_findings_without_persisting_secret_value(self) -> None:

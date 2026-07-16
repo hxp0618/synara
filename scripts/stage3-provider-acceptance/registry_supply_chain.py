@@ -641,6 +641,9 @@ def _safe_vulnerability(vulnerability: Mapping[str, Any]) -> dict[str, Any]:
         "severity": vulnerability.get("Severity"),
         "status": vulnerability.get("Status"),
         "primaryUrl": vulnerability.get("PrimaryURL"),
+        "target": vulnerability.get("_Target"),
+        "class": vulnerability.get("_Class"),
+        "type": vulnerability.get("_Type"),
     }
 
 
@@ -679,7 +682,12 @@ def evaluate_trivy_report(
             {"platform": platform},
         )
     vulnerabilities = [
-        vulnerability
+        {
+            **vulnerability,
+            "_Target": result.get("Target"),
+            "_Class": result.get("Class"),
+            "_Type": result.get("Type"),
+        }
         for result in results
         for vulnerability in (result.get("Vulnerabilities") or [])
         if isinstance(vulnerability, dict)
