@@ -4,7 +4,7 @@
 未满足项必须保持未勾选，不能用 deterministic fixture、单一 Target 或静态代码检查替代真实发布证据。
 
 当前实现期证据汇总见
-`docs/reports/stage-3-provider-runtime-acceptance-fb9e25ec.md`。该报告明确保持
+`docs/reports/stage-3-real-provider-local-standalone-generated-file-matrix-be919393.md`。该报告明确保持
 `PARTIAL / RELEASE GATE OPEN`，不能直接作为目标环境发布批准。
 
 ## 1. 发布身份与证据边界
@@ -130,7 +130,7 @@ bun run --cwd apps/web test \
 | 证据                                                | 当前结论                            | 发布边界                                                             |
 | --------------------------------------------------- | ----------------------------------- | -------------------------------------------------------------------- |
 | 真实 Codex/Claude Local two-Turn product-path smoke | clean commit `fb9e25ec` 各 12/12    | 经过 Control Plane/LocalSupervisor/agentd，但不是完整 Local Gate     |
-| 真实 Codex/Claude Generated File Checkpoint         | clean commit `f1b1aa53` matrix pass | Ready Snapshot 已验；standalone Artifact 与大 Diff 仍开放            |
+| 真实 Codex/Claude Generated File + Checkpoint       | clean commit `be919393` matrix pass | standalone Ready Artifact 与 Snapshot 已验；大 Diff 仍开放           |
 | 真实 Codex `0.144.x` `terminal-large`               | Explicit Unsupported                | Unified Exec 仅保留 1 MiB Head/Tail；不得牺牲 durable Approval       |
 | Claude ambient OAuth `terminal-large`               | Explicit Unsupported                | 需 controlled Credential 绑定 Runtime Output Root                    |
 | deterministic Local/Docker core suite               | 已通过                              | 证明共享 Control Plane/agentd/Host orchestration，不证明真实 Adapter |

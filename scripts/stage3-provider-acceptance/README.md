@@ -62,6 +62,11 @@ unsafe or duplicate Snapshot members, and confirms that Session Events expose no
 are not inferred by parsing commands or scanning the Workspace; without a Provider-native exact path they remain
 durable only through the Checkpoint. The large Diff gate remains separate.
 
+The latest clean-worktree Codex and Claude Local matrices for this boundary are recorded in
+`docs/reports/stage-3-real-provider-local-standalone-generated-file-matrix-be919393.md`. That evidence closes the
+implemented Local standalone `generated_file` plus Workspace Checkpoint path only; it does not close large Diff,
+real Provider failure, cross-Target, Retention or soak release gates.
+
 `--real-provider-case terminal-large` adds the large-Terminal capability boundary before Control Plane restart.
 The deterministic fixture still requires the exact `2 MiB + 257 B` stream, a 32 KiB preview, and
 `1 MiB / 1 MiB / 257 B` Ready Artifacts. Real Codex `0.144.x` is explicit `unsupported`: Unified Exec retains only

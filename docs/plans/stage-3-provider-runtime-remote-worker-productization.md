@@ -19,14 +19,15 @@
 - **预计工作量**：XL
 - **风险**：HIGH
 - **计划基线分支**：`codex/saas-tenancy-user`
-- **最近稳定检查点**：`fb9e25ec`（真实 Codex/Claude Local 产品路径两轮 restart/native-Cursor smoke
-  12/12；正式证据见 `docs/reports/stage-3-provider-runtime-acceptance-fb9e25ec.md`。Kubernetes
+- **最近稳定检查点**：`be919393`（真实 Codex/Claude clean-worktree Local 完整 matrix 已验证 standalone
+  `generated_file` Artifact 与 Workspace Checkpoint；正式证据见
+  `docs/reports/stage-3-real-provider-local-standalone-generated-file-matrix-be919393.md`。Kubernetes
   deterministic fixture 13/13 的历史 clean checkpoint 仍为 `2763ebd3`）
 - **工作区状态**：Stage 3 持续执行中，执行时以当前分支和已验证证据为准
 - **发布文档**：
   `docs/release-checklists/stage-3-provider-runtime-remote-worker.md`、
   `docs/runbooks/worker-release-rollout.md`、
-  `docs/reports/stage-3-provider-runtime-acceptance-fb9e25ec.md`
+  `docs/reports/stage-3-real-provider-local-standalone-generated-file-matrix-be919393.md`
 - **依赖**：Stage 2 的 Control Plane Session/Execution 权威、Worker Lease/Fencing、Artifact、SSE
 - **目标结果**：所有正式支持的 Provider 可以通过统一 Provider Host 和 Worker Contract，稳定运行在
   Local、SSH、Docker、Kubernetes Execution Target，并能跨 Worker/Pod 恢复后续 Turn
@@ -1031,6 +1032,16 @@ durable Approval 与跨 Turn Cursor 语义，因此记录为 Explicit Unsupporte
 `generated_file` ArtifactCandidate、大 Diff、跨 Target 与 Retention 并发仍保持开放。详见
 `docs/reports/stage-3-real-provider-local-generated-file-matrix-f1b1aa53.md`。
 
+2026-07-16 clean commit `be919393` 在同一个 canonical case 中增加独立的 standalone 文件边界。Codex 只从
+成功完成的原生 `fileChange` item 收集精确路径，Claude 只从成功的 `PostToolUse`
+`Write/Edit/MultiEdit/NotebookEdit` 收集精确路径；不解析 shell、不扫描 Workspace、不把 Checkpoint
+Snapshot 冒充 standalone Artifact。两条真实 Local matrix 均在 `workspace.dirty` 前产生唯一 Ready
+`generated_file`，经用户下载授权重新读取后验证精确 `43 B`、SHA-256、Metadata 和无物理路径泄漏；随后
+同一 Execution 的大文件仍按既有 Checkpoint 顺序完成。Codex 为 `21 pass + 1 unsupported`，Claude 为
+`20 pass + 2 unsupported`。该证据关闭已实现的 Local standalone Generated File ArtifactCandidate；大
+Diff、跨 Target、Retention 并发和真实 Provider failure matrix 仍保持开放。详见
+`docs/reports/stage-3-real-provider-local-standalone-generated-file-matrix-be919393.md`。
+
 ## 15. 工作流 J：Worker Drain、升级与版本隔离
 
 ### J1. Worker 生命周期
@@ -1335,6 +1346,13 @@ Provider × Capability × Execution Target
   `20 pass + 2 unsupported`。它证明 Workspace Checkpoint 捕获，不把 standalone `generated_file`
   ArtifactCandidate、大 Diff、SSH/Docker/Kubernetes 或 Retention 并发伪装为已完成。详见
   `docs/reports/stage-3-real-provider-local-generated-file-matrix-f1b1aa53.md`。
+- Clean commit `be919393` 将第 10 个 case 扩展为两个独立 Artifact 边界。Provider-native 精确路径先形成
+  唯一 Ready `generated_file`，Runner 通过用户授权下载并验证 `43 B` 固定 payload；随后 shell 创建的大
+  文件只通过 `workspace_snapshot` Checkpoint 持久化。Codex/Claude 均满足 standalone Ready 在
+  `workspace.dirty` 前、Checkpoint Ready 在 Execution 完成前，且无重复 Ready、Tar 风险、物理路径或
+  Secret 泄漏。该 clean-SHA matrix 关闭 Local standalone Generated File gate，但不关闭大 Diff、真实
+  failure、SSH/Docker/Kubernetes 或 soak gate。详见
+  `docs/reports/stage-3-real-provider-local-standalone-generated-file-matrix-be919393.md`。
 - 首次 Claude 产品路径运行暴露 ambient OAuth 被 Execution-local `CLAUDE_CONFIG_DIR` 隔离掉的问题；
   Provider Host 现仅在受控 Credential 路径使用 Runtime Output Root 作为 Claude Config，ambient OAuth
   保留用户配置查找路径，并由单测和真实 clean-commit smoke 保护。
@@ -1422,9 +1440,9 @@ Provider × Capability × Execution Target
 - 当前进度：deterministic Local/Docker core、Local Provider fault、Docker network、Kubernetes
   Network/Drain/Eviction/Image Canary 已通过实现期运行；SSH 13/13 与 Kubernetes 13/13 core 仍是
   2026-07-14 历史 fixture 证据。真实 Codex/Claude 已在 clean commit `fb9e25ec` 通过 Local 产品路径
-  两轮 restart/native-Cursor smoke，clean commit `f1b1aa53` 的完整 Local matrix 也通过 Generated File
-  Workspace Checkpoint 捕获；
-  standalone Artifact、大 Diff、完整 Local、SSH、Docker、Kubernetes Gate 与 soak 尚未完成。
+  两轮 restart/native-Cursor smoke，clean commit `be919393` 的完整 Local matrix 也通过 standalone
+  Generated File Artifact 与 Workspace Checkpoint 捕获；
+  大 Diff、真实 Provider failure、完整 Local、SSH、Docker、Kubernetes Gate 与 soak 尚未完成。
 
 ### Step 8：文档、Runbook 与发布门禁
 
