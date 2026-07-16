@@ -599,6 +599,8 @@ class DockerWorkerReleaseRolloutDriver(acceptance.DockerDriver):
             return []
         inspected = self._docker_completed(["inspect", *ids])
         if inspected.returncode != 0:
+            if docker_container_missing(inspected.stdout):
+                return []
             raise acceptance.AcceptanceError(
                 "runner.docker_inspect_invalid",
                 "Managed Docker Worker containers could not be inspected.",
@@ -1581,6 +1583,11 @@ def container_pool_running(containers: Sequence[Mapping[str, Any]]) -> bool:
         and container["State"].get("Running") is True
         for container in containers
     )
+
+
+def docker_container_missing(output: str) -> bool:
+    normalized = output.lower()
+    return "no such object" in normalized or "no such container" in normalized
 
 
 def release_image_evidence(image: ReleaseImage) -> dict[str, Any]:

@@ -204,6 +204,11 @@ class IdentityHelperTest(unittest.TestCase):
             )
         )
 
+    def test_treats_reconciler_delete_between_list_and_inspect_as_pending(self) -> None:
+        self.assertTrue(gate.docker_container_missing("Error: No such object: abc"))
+        self.assertTrue(gate.docker_container_missing("No such container: abc"))
+        self.assertFalse(gate.docker_container_missing("permission denied"))
+
 
 class ExecutionReleaseValidationTest(unittest.TestCase):
     def test_requires_matching_created_leased_and_single_terminal_events(self) -> None:
