@@ -33,7 +33,9 @@ Provider, Git, or cloud credentials.
 The Worker build fails closed unless all of these inputs are immutable:
 
 - `agentd-build`, `provider-host-build`, and `worker-runtime` base images use full `sha256` digests.
-- `deploy/worker/provider-tools/package-lock.json` pins npm integrity hashes for Codex CLI and Claude Code CLI.
+- `deploy/worker/provider-tools/package-lock.json` pins npm integrity hashes for Codex CLI, Claude Code CLI, and
+  npm `12.0.1`. The final Worker removes the older npm bundled in the Node base image and points npm, npx, and
+  node-gyp at the locked tree; npm's transient `/tmp/node-compile-cache` is removed in the producing layer.
 - `bun.lock` pins the Provider Host and Claude Agent SDK graph.
 - `deploy/worker/apk-packages.lock` pins the complete Alpine package closure installed over the runtime base.
 - `deploy/worker/buildkit-sbom-generator.lock` pins the BuildKit Syft scanner image used for outer SPDX

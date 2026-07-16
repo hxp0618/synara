@@ -36,13 +36,15 @@ multi-arch 镜像、多节点生产 Kubernetes 和 soak 尚未完成前，只能
 ## 3. 预检
 
 1. 完成 PostgreSQL 备份，并确认 `/ready=200`。
-2. 确认当前镜像 embedded migration 与数据库 Checksum 一致；本实现边界为 `000040`。
+2. 确认当前镜像 embedded migration 与数据库 Checksum 一致；本实现边界为 `000041`。
 3. 记录 Tenant、Execution Target、Worker Manifest、Image Digest、Commit SHA 和当前 Policy Version。
-4. 只使用 Registry 返回的 immutable Digest；不要把可变 tag 当 Revision 身份。
-5. 确认操作人具有 `worker.manage`；Registry Binding 还需要 `credentials.manage`。
-6. 准备受保护的登录 Cookie Jar。不要把 Cookie、Token、Credential Payload 或完整 Registry auth
+4. 从同一 clean SHA 运行 Registry supply-chain gate，确认双平台 manifest 可重复、`HIGH/CRITICAL=0`、
+   Secret=0、非 EOSL、漏洞数据库未过期，并人工评审所有 `UNKNOWN` finding。
+5. 只使用 Registry 返回的 immutable Digest；不要把可变 tag 当 Revision 身份。
+6. 确认操作人具有 `worker.manage`；Registry Binding 还需要 `credentials.manage`。
+7. 准备受保护的登录 Cookie Jar。不要把 Cookie、Token、Credential Payload 或完整 Registry auth
    粘贴到命令行历史、工单或聊天。
-7. 对本次发布创建唯一 Idempotency Key，并为每个不同操作使用不同值。
+8. 对本次发布创建唯一 Idempotency Key，并为每个不同操作使用不同值。
 
 示例环境变量只保存非 Secret 标识：
 
@@ -316,6 +318,8 @@ Revocation 会写 immutable Worker 状态与 logical identity tombstone，阻止
 
 - 保存 Release Overview、Worker release fields、Execution pin、Audit/Outbox topic、错误码和时间线。
 - 报告只引用非 Secret ID、Digest、Version、状态和计数。
+- 保存 Registry-returned index/platform Digest、SBOM/SLSA identity、签名 identity/tlog policy、漏洞策略/DB
+  identity、原始报告 SHA-256，以及所有非阻断 finding 的人工评审结论。
 - 确认临时 Docker/Kind/SSH 资源使用精确 owner/Target 标识清理；禁止 prune 或广域 label 删除。
 - 对报告、JSON、Markdown 和日志运行 Secret scan。
 - 在 Release/PR 中链接本 Runbook、发布检查单、Acceptance Report 和已知限制。
@@ -325,5 +329,7 @@ Revocation 会写 immutable Worker 状态与 logical identity tombstone，阻止
 - 真实 Codex/Claude 尚未在 Local、SSH、Docker、Kubernetes 完成同 Commit 的统一 Release Gate。
 - 当前 deterministic Kubernetes image-canary 不等于 registry-pushed immutable Revision rollout。
 - 多节点生产 Kubernetes 的 Drain、PDB、云厂商 Eviction、CNI enforcement 和升级压力尚未证明。
-- registry-pushed multi-arch reproducibility、签名/SBOM供应链证据和长时间 soak 尚未完成。
+- Disposable Registry 上的 multi-arch reproducibility、ephemeral exact-digest signing、SBOM、
+  `HIGH/CRITICAL=0`、Secret=0、EOSL 与 DB freshness 已由 clean commit `71ef4b5e` 证明；生产 KMS/keyless
+  identity、transparency log/admission policy、Registry Credential/retention 和长时间 soak 尚未完成。
 - rollout/reconciler 在最终代码评审和门禁完成前不得标记为 production-approved。

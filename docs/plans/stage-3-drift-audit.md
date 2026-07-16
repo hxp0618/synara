@@ -49,6 +49,11 @@ Acceptance Fixture used by Codex and Claude.
 | K. Web authority switch                       | partial              | SaaS Project/Session/Turn/Event is Control Plane authoritative and local mode remains isolated. Tenant switching clears the old Tenant query/subscription/draft scope, and SaaS Provider/advanced-operation handlers fail closed through Control Plane capability and Session projections without calling local Native API paths. Strict-CAS model-switch still reuses `000030`/`000031` state and adds no DDL for that local operation. Credential scope/binding administration uses `000033`, `000035`, `000036`, `000038` and `000039`; Worker management and release rollout use `000034`, `000037` and `000040`. Artifact Ready plus explicit refresh/reconnect/Server-restart and no-Control-Plane local-mode evidence remains.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | L. Unified acceptance suite                   | partial              | A shared Runner emits machine-readable JSON, Markdown and redacted logs, drives Local, Docker, SSH and Kubernetes through user APIs and real Control Plane/agentd product paths, and models both standing and execution-pinned Worker allocation plus capability-declared managed replacement. On 2026-07-14 the deterministic Codex fixture passed all 13 SSH cases on an isolated disposable OrbStack Ubuntu 24.04 VM; the current dirty-worktree disposable SSH regression passes all 16 cases with exact machine/key cleanup and zero Secret findings. A separate disposable SSH real-runtime preflight builds the Host from the checkout, installs locked Codex `0.144.1` and Claude Code `2.1.197`, verifies remote CLI versions and Host SHA, then removes the exact machine/key without Credential or private-key findings. Clean commit `2763ebd3` passed all 13 Kubernetes cases on an owned disposable Kind cluster. Current dirty-worktree failure-only runs pass Local malformed/oversized/crash, Docker network interruption and Kubernetes worker-network/drain/eviction/image-canary. Clean commit `253052aa` rebuilds Provider Host with Node.js 24.13.1 and passes the consolidated real Local release unit: Codex product `22 pass + 1 unsupported`, Codex failure `16/16`, Claude product `21 pass + 2 unsupported`, Claude failure `16/16`, all on one clean SHA and Capability Catalog hash with exact cleanup and zero Secret findings. Terminal-aware Interaction waits fail immediately when a Provider terminates without the required request. The current implementation adds pre-build controlled Credentials; SSH token-scoped routing over the existing reverse relay plus systemd-MainPID Host crash; Docker/Kubernetes host-gateway 401/429 and exact container/execution-Pod Host crash; and target-specific consolidated validators. Shared Linux process scanning requires one protocol-v2 agentd descendant and fails closed on ambiguous machines, containers, Pods or processes; Runner `99/99`, all Python `171/171` and a real disposable Linux container probe pass. `controlled_remote_release_gate.py` centralizes Credential isolation and shared-image validation for Docker/Kubernetes. `ssh_release_gate.py` independently requires four unique disposable machines, reproducible agentd/Host digests, locked Codex/Claude versions, product install/revoke, exact machine/key/state cleanup and empty Secret scans. `registry_release_gate.py` adds clean-SHA cached/no-cache dual-platform Registry, attestation and embedded supply-chain validation. All release-gate tests pass `68/68`; clean commit `dc43a4d6` has a recorded cached/no-cache dual-platform Registry report with reproducible platform digests, SPDX/SLSA, exact cleanup and zero Secret findings. Local Kind `v0.32.0` plus Docker/kubectl preflight passes, but no real SSH/Docker/Kubernetes aggregate report exists yet. Image signing, production Registry retention, long-session and real SSH/Docker/Kubernetes Providers remain. |
 
+> 2026-07-17 status correction: the earlier J/L summary-table wording that still lists clean Registry
+> reproducibility, image-signing mechanics, or vulnerability-policy evidence as wholly missing is superseded by the
+> `71ef4b5e` supply-chain update below. Production signing identity/tlog/admission, Registry Credential/retention,
+> real four-Target rollout, canary/rollback, and soak remain open.
+
 ### 2026-07-15 Advanced Session operation evidence update
 
 - Workflow A/B/C/K 的 Compact、Review、Rollback、Fork 主阻断已解除。Migration `000032`、Control Plane
@@ -185,18 +190,26 @@ Acceptance Fixture used by Codex and Claude.
 - Registry exporter 使用 `rewrite-timestamp=true` 将生成 layer 统一到 `SOURCE_DATE_EPOCH`；APK install 在
   同层删除含运行时间的 `/var/log/apk.log`，raw npm SBOM 通过只读 BuildKit mount 输入 normalization，不再
   以 transient COPY layer 留在最终 Image history。Worker rootfs 以 clean Git SHA build-revision marker
-  隔离跨 Commit cache，agentd、Provider Host 与 Provider tools 的跨 stage mtime 也固定到同一 epoch。
-- Registry gate tests `18/18` 与 Stage 3 Python `171/171` 已通过，覆盖 CLI/input、双平台 OCI index、
-  attestation missing/duplicate、危险 Image environment、嵌入 Manifest/SBOM/lockfile、cached/no-cache
-  platform digest consensus、aggregate pass/fail、精确 cleanup 和输出 Secret scan。
-- clean commit `dc43a4d6` 的正式 gate 已通过。cached/no-cache OCI index digest 分别为
-  `sha256:5b5f7f48...`、`sha256:17eff0eb...`；两次构建的 `linux/amd64` manifest 均为
-  `sha256:452f18ab...`，`linux/arm64` manifest 均为 `sha256:05c6821b...`。两平台 SPDX/SLSA、non-root
-  config、嵌入 Manifest/SBOM/三类 lockfile、Provider Host/agentd/build-revision、精确 cleanup 与输出 Secret
-  scan 均通过，完整证据见 `docs/reports/stage-3-worker-registry-release-gate-dc43a4d6.md`。
-- 该证据关闭 disposable Registry 上的 clean-SHA multi-arch reproducibility slice；image signing、漏洞策略、
-  生产 Registry retention/Credential、四 Target Provider rollout、canary/rollback 与 soak 尚未完成，Workflow
-  J/L 继续保持 `partial`。本切片没有 DDL 变更，migration boundary 仍为 `000041`。
+  隔离跨 Commit cache，agentd、Provider Host 与 Provider tools 的跨 stage mtime 也固定到同一 epoch。锁定
+  npm `12.0.1` 替换基础镜像旧 npm 后，同层删除 npm 产生的 `/tmp/node-compile-cache`，避免 cached/no-cache
+  rootfs 漂移。
+- 新增 digest-pinned Cosign `v3.1.1`、Trivy `0.72.0` 与 checked-in vulnerability policy。Gate 使用隔离
+  ephemeral key 对两个 OCI index 的 exact digest 与 Git SHA/Version/Run ID/Slot annotations 签名并验证，
+  同时阻断 `HIGH,CRITICAL`、Secret、EOSL 与超过 24 小时的 Trivy DB；私钥和隔离 state 必须精确删除。
+- Registry release/supply-chain tests `31/31`、全部 release-gate tests `81/81` 与 Stage 3 Python `184/184`
+  已通过，覆盖 CLI/input、双平台 OCI index、attestation、签名 identity、漏洞/Secret/EOSL/DB freshness、
+  embedded evidence、cached/no-cache consensus、精确 cleanup 和输出 Secret scan。
+- clean commit `71ef4b5e` 的正式 gate 已通过。cached/no-cache OCI index digest 分别为
+  `sha256:1a824e40...`、`sha256:ed27ae93...`；两次构建的 `linux/amd64` manifest 均为
+  `sha256:e9b07271...`，`linux/arm64` manifest 均为 `sha256:884d49bf...`。两平台 SPDX/SLSA、non-root
+  config、嵌入 Manifest/SBOM/lockfile/runtime、ephemeral exact-digest signature、`HIGH/CRITICAL=0`、Secret=0、
+  非 EOSL、DB freshness、精确 cleanup 与输出 Secret scan 均通过。`GO-2026-5932` 作为未豁免的不可达
+  `UNKNOWN` finding 保留；agentd 不导入 `x/crypto/openpgp`，`govulncheck v1.6.0` 报告受影响漏洞为 `0`。
+  完整证据见 `docs/reports/stage-3-worker-registry-supply-chain-71ef4b5e.md`。
+- 该证据关闭 disposable Registry 上的 clean-SHA multi-arch reproducibility、ephemeral signing mechanics
+  与 vulnerability-policy slice；生产 KMS/keyless identity、transparency log/admission policy、Registry
+  retention/Credential、四 Target Provider rollout、canary/rollback 与 soak 尚未完成，Workflow J/L 继续
+  保持 `partial`。本切片没有 DDL 变更，migration boundary 仍为 `000041`。
 
 ## Frozen version boundary
 
@@ -295,7 +308,8 @@ local no-new-DDL statements do not redefine the repository-wide migration bounda
 2. Completed: implement Host Describe/Handshake, persisted compatibility gating and the bounded v1 path.
 3. In progress: Codex App Server and Claude Agent SDK multi-Turn, native Interrupt/Steer, Approval, Plan Mode Input and history fallback are implemented. Runtime Event v2 is canonical end to end. Cursor Envelope v2, per-Execution Provider snapshots, Cursor quarantine/lineage, the bounded expiry policy, audited Claim selection, safe Provider-native invalid/expired fallback, one active Execution per Session and pre-Claim Interrupt cancellation are implemented. Clean commit `253052aa` passes the consolidated real Local product/failure release gate with the frozen Compact/lossless-Terminal boundaries, standalone `generated_file`, Workspace Checkpoint, Artifact-backed Large Diff, real 401/429, scoped Host crash and Cursor-expiry recovery. Continue with SSH, Docker and Kubernetes acceptance.
 4. In progress: Workspace/Git/Checkpoint DDL, public/private HTTPS Clone/Fetch, Git Credential, state reporting, cross-process locked cache plus private relative worktree generations, Git-reference/Patch/Snapshot capture/restore, interrupted staging/backup reconciliation, physical cleanup and Checkpoint/Artifact retention are implemented; add SSH Credential delivery and real multi-Worker/Target acceptance.
-5. In progress: Worker Manifest and graceful Drain are implemented; add reproducible image evidence, canary/rollback and upgrade isolation.
+5. In progress: Worker Manifest, graceful Drain and disposable Registry reproducibility/supply-chain evidence are
+   implemented; add production signing/Registry policy, canary/rollback and upgrade isolation.
 6. In progress: the deterministic shared Runner covers Local, Docker, SSH and Kubernetes and emits JSON/Markdown
    evidence. The SSH Driver's deterministic Codex fixture passed the 13-case live suite on 2026-07-14; clean commit
    `2763ebd3` passed the 13-case Kubernetes core suite. Current dirty-worktree failure-only runs also pass Local
@@ -303,5 +317,5 @@ local no-new-DDL statements do not redefine the repository-wide migration bounda
    implemented real Codex/Claude Local control/capability matrix passes on clean commit `0b3f9214`; clean commit
    `be919393` also passes the ten-case matrix, standalone generated-file Artifact and Workspace Checkpoint capture.
    Clean commit `253052aa` completes the consolidated real Local release suite across both adapters. Run both
-   adapters across SSH, Docker and Kubernetes, then complete long-session and registry-pushed rollout before
+   adapters across SSH, Docker and Kubernetes, then complete long-session and production Registry rollout before
    promoting any Local-only Provider or claiming the four-Target release gate.
