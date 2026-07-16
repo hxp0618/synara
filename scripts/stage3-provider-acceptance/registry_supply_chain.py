@@ -25,6 +25,16 @@ VULNERABILITY_POLICY_PATH = pathlib.Path("deploy/worker/vulnerability-policy.jso
 REQUIRED_TOOLS = ("cosign", "trivy")
 SUPPORTED_SIGNING_MODES = ("ephemeral-key", "keyless", "kms-key")
 SUPPORTED_SEVERITIES = ("UNKNOWN", "LOW", "MEDIUM", "HIGH", "CRITICAL")
+TRIVY_DATABASE_DOWNLOAD_RETRY_DELAY_SECONDS = 1.0
+TRIVY_DATABASE_DOWNLOAD_RETRY_MARKERS = (
+    "unexpected eof",
+    "connection reset by peer",
+    "i/o timeout",
+    "tls handshake timeout",
+    "temporary failure in name resolution",
+    "502 bad gateway",
+    "503 service unavailable",
+)
 COSIGN_CLAIM_TYPE = "https://sigstore.dev/cosign/sign/v1"
 IMMUTABLE_IMAGE_PATTERN = re.compile(
     r"[A-Za-z0-9][A-Za-z0-9._:-]*(?:/[A-Za-z0-9][A-Za-z0-9._:-]*)+"
@@ -629,6 +639,51 @@ def _run_tool(
             {"tool": tool, "returnCode": completed.returncode, "outputExcerpt": output},
         )
     return completed
+
+
+def _retryable_trivy_database_download(error: common.ReleaseGateError) -> bool:
+    output = error.evidence.get("outputExcerpt")
+    if (
+        error.code != "release.registry_supply_chain_command_failed"
+        or error.evidence.get("tool") != "trivy"
+        or not isinstance(output, str)
+    ):
+        return False
+    normalized = output.lower()
+    return "failed to download vulnerability db" in normalized and any(
+        marker in normalized for marker in TRIVY_DATABASE_DOWNLOAD_RETRY_MARKERS
+    )
+
+
+def _run_trivy_scan(
+    options: SupplyChainOptions,
+    configuration: SupplyChainConfiguration,
+    *,
+    arguments: Sequence[str],
+    report_path: pathlib.Path,
+    deadline: float,
+    redactor: acceptance.SecretRedactor,
+) -> int:
+    for attempt in range(2):
+        try:
+            _run_tool(
+                options,
+                image=configuration.tools.trivy,
+                arguments=arguments,
+                tool="trivy",
+                deadline=deadline,
+                redactor=redactor,
+                maximum_timeout=1200.0,
+            )
+            return attempt
+        except common.ReleaseGateError as error:
+            if attempt > 0 or not _retryable_trivy_database_download(error):
+                raise
+            report_path.unlink(missing_ok=True)
+            if deadline - time.monotonic() <= TRIVY_DATABASE_DOWNLOAD_RETRY_DELAY_SECONDS:
+                raise
+            time.sleep(TRIVY_DATABASE_DOWNLOAD_RETRY_DELAY_SECONDS)
+    raise AssertionError("unreachable")
 
 
 def _load_json_file(path: pathlib.Path, *, code: str, message: str) -> Any:
@@ -1438,6 +1493,7 @@ def _scan_platforms(
     scans: list[dict[str, Any]] = []
     errors: list[dict[str, Any]] = []
     used_exceptions: set[tuple[str, str, str]] = set()
+    transient_database_download_retries = 0
     now = dt.datetime.now(tz=dt.timezone.utc)
     for platform in ("linux/amd64", "linux/arm64"):
         digest = platform_digests.get(platform)
@@ -1475,14 +1531,13 @@ def _scan_platforms(
         if policy.ignore_unfixed:
             arguments.append("--ignore-unfixed")
         arguments.append(reference)
-        _run_tool(
+        transient_database_download_retries += _run_trivy_scan(
             options,
-            image=configuration.tools.trivy,
+            configuration,
             arguments=arguments,
-            tool="trivy",
+            report_path=report_path,
             deadline=deadline,
             redactor=redactor,
-            maximum_timeout=1200.0,
         )
         payload = _load_json_file(
             report_path,
@@ -1554,6 +1609,7 @@ def _scan_platforms(
             "database": database,
             "scans": scans,
             "staleExceptionCount": len(stale_exceptions),
+            "transientDatabaseDownloadRetries": transient_database_download_retries,
         },
         errors,
     )

@@ -364,6 +364,69 @@ class CommandBoundaryTest(unittest.TestCase):
         self.assertIn("no-new-privileges", command)
         self.assertIn("ALL", command)
 
+    def test_retries_only_transient_trivy_database_download_failures(self) -> None:
+        transient = supply.common.ReleaseGateError(
+            "release.registry_supply_chain_command_failed",
+            "Trivy failed.",
+            {
+                "tool": "trivy",
+                "returnCode": 1,
+                "outputExcerpt": (
+                    "failed to download vulnerability DB: OCI artifact error: unexpected EOF"
+                ),
+            },
+        )
+        policy_failure = supply.common.ReleaseGateError(
+            "release.registry_supply_chain_command_failed",
+            "Trivy failed.",
+            {"tool": "trivy", "returnCode": 1, "outputExcerpt": "policy failure"},
+        )
+        completed = subprocess.CompletedProcess(["docker"], 0, stdout="", stderr="")
+
+        with tempfile.TemporaryDirectory() as directory:
+            state_dir = pathlib.Path(directory) / "state"
+            state_dir.mkdir()
+            report_path = state_dir / "trivy-linux-amd64.json"
+            report_path.write_text("partial", encoding="utf-8")
+            options = supply_options(state_dir)
+            configuration = supply.load_configuration(REPO_ROOT)
+            redactor = acceptance.SecretRedactor()
+            with (
+                mock.patch.object(
+                    supply,
+                    "_run_tool",
+                    side_effect=[transient, completed],
+                ) as run,
+                mock.patch.object(supply.time, "sleep") as sleep,
+            ):
+                retries = supply._run_trivy_scan(
+                    options,
+                    configuration,
+                    arguments=["image", REFERENCE],
+                    report_path=report_path,
+                    deadline=supply.time.monotonic() + 60,
+                    redactor=redactor,
+                )
+
+            self.assertEqual(retries, 1)
+            self.assertEqual(run.call_count, 2)
+            sleep.assert_called_once_with(supply.TRIVY_DATABASE_DOWNLOAD_RETRY_DELAY_SECONDS)
+            self.assertFalse(report_path.exists())
+
+            with mock.patch.object(supply, "_run_tool", side_effect=policy_failure) as run:
+                with self.assertRaises(supply.common.ReleaseGateError) as caught:
+                    supply._run_trivy_scan(
+                        options,
+                        configuration,
+                        arguments=["image", REFERENCE],
+                        report_path=report_path,
+                        deadline=supply.time.monotonic() + 60,
+                        redactor=redactor,
+                    )
+
+            self.assertIs(caught.exception, policy_failure)
+            self.assertEqual(run.call_count, 1)
+
 
 class SignatureVerificationTest(unittest.TestCase):
     def verification_payload(self, *, digest: str = DIGEST) -> list[dict[str, Any]]:
