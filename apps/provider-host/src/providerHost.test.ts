@@ -140,6 +140,32 @@ describe("provider credential isolation", () => {
     });
   });
 
+  it("fails closed when controlled Codex auth lacks an isolated home or uses an unsafe base URL", () => {
+    const input = {
+      execution: { id: "execution-1" },
+      workload: { provider: "codex", inputText: "continue" },
+      workspaceDirectory: "/tmp/workspace",
+    };
+    expect(() =>
+      startProviderHostRun(input, { payload: { apiKey: "provider-secret" } }, () => {}, {
+        environment: { PATH: "/bin" },
+      }),
+    ).toThrow("isolated CODEX_HOME");
+    expect(() =>
+      startProviderHostRun(
+        { ...input, runtimeOutputDirectory: "/tmp/runtime-output" },
+        {
+          payload: {
+            apiKey: "provider-secret",
+            baseUrl: "https://user:password@example.test/v1",
+          },
+        },
+        () => {},
+        { environment: { PATH: "/bin" } },
+      ),
+    ).toThrow("without userinfo");
+  });
+
   it("rejects generic environment injection", () => {
     expect(() =>
       providerEnvironment({}, "claudeAgent", {

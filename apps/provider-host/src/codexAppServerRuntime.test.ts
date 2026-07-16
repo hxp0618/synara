@@ -8,6 +8,30 @@ import { startProviderHostRun, type RunnerMessage } from "./providerHost";
 const CONTROLLED_PROVIDER_PROXY = "http://provider-user:provider-password@proxy.example.test:8080";
 
 describe("Codex app-server runtime", () => {
+  it("isolates controlled Credential authentication from ambient CODEX_HOME", async () => {
+    await withFakeCodex("credential-environment", async (directory, _tracePath, environment) => {
+      const run = startProviderHostRun(
+        codexInput(directory, { runtimeOutputDirectory: directory }),
+        {
+          payload: {
+            apiKey: "provider-secret",
+            baseUrl: "http://provider-fault.example.test/v1",
+          },
+        },
+        () => {},
+        { environment },
+      );
+
+      await expect(run.result).resolves.toMatchObject({ output: { text: "credential isolated" } });
+      const config = readFileSync(join(directory, "codex-home", "config.toml"), "utf8");
+      expect(config).toContain('model_provider = "synara_controlled"');
+      expect(config).toContain('base_url = "http://provider-fault.example.test/v1"');
+      expect(config).toContain('env_key = "OPENAI_API_KEY"');
+      expect(config).toContain("requires_openai_auth = false");
+      expect(config).not.toContain("provider-secret");
+    });
+  });
+
   it("stores an oversized native Turn Diff as a Runtime Output ArtifactCandidate", async () => {
     await withFakeCodex("large-diff", async (directory, _tracePath, environment) => {
       const messages: RunnerMessage[] = [];
@@ -653,7 +677,8 @@ async function withFakeCodex(
     | "large-diff"
     | "compact"
     | "review"
-    | "review-fresh",
+    | "review-fresh"
+    | "credential-environment",
   run: (directory: string, tracePath: string, environment: NodeJS.ProcessEnv) => Promise<void>,
 ): Promise<void> {
   const directory = mkdtempSync(join(tmpdir(), "synara-codex-app-server-"));
@@ -713,7 +738,8 @@ function fakeCodexSource(
     | "large-diff"
     | "compact"
     | "review"
-    | "review-fresh",
+    | "review-fresh"
+    | "credential-environment",
   tracePath: string,
   directory: string,
 ): string {
@@ -728,6 +754,13 @@ const requiredEnvironment = ${JSON.stringify({
     LANG: "C.UTF-8",
     TERM: "xterm-256color",
     HTTP_PROXY: CONTROLLED_PROVIDER_PROXY,
+    ...(scenario === "credential-environment"
+      ? {
+          OPENAI_API_KEY: "provider-secret",
+          OPENAI_BASE_URL: "http://provider-fault.example.test/v1",
+          CODEX_HOME: join(directory, "codex-home"),
+        }
+      : {}),
   })};
 for (const [name, value] of Object.entries(requiredEnvironment)) {
   if (process.env[name] !== value) {
@@ -744,6 +777,8 @@ for (const name of ${JSON.stringify([
     "SYNARA_LEASE_TOKEN",
     "SYNARA_CONTROL_PLANE_URL",
     "OPENAI_API_KEY",
+    "OPENAI_BASE_URL",
+    "CODEX_HOME",
     "ANTHROPIC_API_KEY",
     "AWS_ACCESS_KEY_ID",
     "AWS_SECRET_ACCESS_KEY",
@@ -758,6 +793,7 @@ for (const name of ${JSON.stringify([
     "SSH_AUTH_SOCK",
     "NODE_OPTIONS",
   ])}) {
+  if (scenario === "credential-environment" && ["OPENAI_API_KEY", "OPENAI_BASE_URL", "CODEX_HOME"].includes(name)) continue;
   if (process.env[name] !== undefined) {
     process.stderr.write("ambient secret leaked to Codex child: " + name + "\\n");
     process.exit(92);
@@ -840,6 +876,8 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
       const diff = ["diff --git a/large.txt b/large.txt", "--- a/large.txt", "+++ b/large.txt", "@@ -1,1 +1,5000 @@", "-before", ...Array.from({ length: 5000 }, (_, index) => "+after-" + index + "-" + "x".repeat(16)), ""].join("\\n");
       send({ method: "turn/diff/updated", params: { threadId: "thread-new", turnId: "turn-1", diff } });
       complete("large diff ready");
+    } else if (scenario === "credential-environment") {
+      complete("credential isolated");
     }
   } else if (message.method === "turn/steer") {
     if (message.params?.expectedTurnId !== "turn-1" || message.params?.input?.[0]?.text !== "focus on the failing test") process.exit(2);

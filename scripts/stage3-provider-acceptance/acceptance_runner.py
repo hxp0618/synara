@@ -99,6 +99,14 @@ REAL_PROVIDER_PRE_RESTART_CASES = (
 )
 REAL_PROVIDER_POST_RESTART_CASES = ("review", "compact", "rollback", "fork")
 REAL_PROVIDER_CASES = REAL_PROVIDER_PRE_RESTART_CASES + REAL_PROVIDER_POST_RESTART_CASES
+REAL_PROVIDER_FAILURE_CASES = (
+    "authentication",
+    "rate-limit-retry",
+    "provider-host-crash-retry",
+    "cursor-expiry",
+)
+REAL_PROVIDER_CURSOR_MAX_AGE = "1s"
+REAL_PROVIDER_CURSOR_EXPIRY_WAIT_SECONDS = 1.25
 REAL_PROVIDER_CASE_METADATA: Mapping[str, Mapping[str, str]] = {
     "generated-file-checkpoint": {
         "id": "real-provider.generated-file-checkpoint",
@@ -143,6 +151,24 @@ REAL_PROVIDER_CASE_METADATA: Mapping[str, Mapping[str, str]] = {
     "fork": {
         "id": "real-provider.fork-emulation",
         "name": "Fork logical Session history and continue through authoritative reconstruction",
+    },
+}
+REAL_PROVIDER_FAILURE_CASE_METADATA: Mapping[str, Mapping[str, str]] = {
+    "authentication": {
+        "id": "real-provider.failure-authentication",
+        "name": "Classify a real Provider HTTP authentication failure without leaking its Credential",
+    },
+    "rate-limit-retry": {
+        "id": "real-provider.failure-rate-limit-retry",
+        "name": "Classify real Provider HTTP rate limiting and recover through a new Execution",
+    },
+    "provider-host-crash-retry": {
+        "id": "real-provider.failure-host-crash-retry",
+        "name": "Kill the scoped real Provider Host mid-Turn and recover through a new Execution",
+    },
+    "cursor-expiry": {
+        "id": "real-provider.failure-cursor-expiry",
+        "name": "Expire the authenticated Provider Cursor before restart continuity",
     },
 }
 FAILURE_CASES = (
@@ -668,6 +694,7 @@ class RunnerOptions:
     kubernetes_allow_node_drain: bool
     failure_only: bool
     real_provider_cases: tuple[str, ...]
+    real_provider_failure_cases: tuple[str, ...]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1154,6 +1181,162 @@ class _WorkerOnlyProxy:
         }
 
 
+class _ProviderFaultServer:
+    """Return bounded Provider-shaped HTTP failures without retaining request bodies or Secrets."""
+
+    def __init__(self, provider: str, fault: str) -> None:
+        if fault not in {"authentication", "rate-limit"}:
+            raise ValueError(f"unsupported Provider HTTP fault: {fault}")
+        self.provider = provider
+        self.fault = fault
+        self._requests: list[dict[str, Any]] = []
+        self._lock = threading.Lock()
+        fault_server = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.0"
+            server_version = "SynaraStage3ProviderFault/1"
+            sys_version = ""
+
+            def do_GET(self) -> None:
+                self._respond()
+
+            def do_POST(self) -> None:
+                self._respond()
+
+            def do_PUT(self) -> None:
+                self._respond()
+
+            def do_PATCH(self) -> None:
+                self._respond()
+
+            def do_DELETE(self) -> None:
+                self._respond()
+
+            def do_OPTIONS(self) -> None:
+                self._respond()
+
+            def do_HEAD(self) -> None:
+                self._respond()
+
+            def log_message(self, _format: str, *_args: Any) -> None:
+                return None
+
+            def _respond(self) -> None:
+                parsed = urllib.parse.urlsplit(self.path)
+                credential_headers = sorted(
+                    name.lower()
+                    for name in ("Authorization", "X-Api-Key")
+                    if self.headers.get(name)
+                )
+                try:
+                    content_length = max(0, int(self.headers.get("Content-Length", "0")))
+                except ValueError:
+                    content_length = 0
+                with fault_server._lock:
+                    fault_server._requests.append(
+                        {
+                            "method": self.command,
+                            "path": parsed.path[:500],
+                            "contentLength": min(content_length, 16 << 20),
+                            "credentialHeaderNames": credential_headers,
+                        }
+                    )
+                status, payload = fault_server._response()
+                encoded = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+                try:
+                    self.send_response(status)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(encoded)))
+                    self.send_header("Connection", "close")
+                    self.send_header("X-Request-ID", f"stage3-provider-fault-{fault_server.fault}")
+                    if status == 429:
+                        self.send_header("Retry-After", "0")
+                    self.end_headers()
+                    if self.command != "HEAD":
+                        self.wfile.write(encoded)
+                except OSError:
+                    return None
+
+        try:
+            self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        except OSError as error:
+            raise AcceptanceError(
+                "runner.provider_fault_server_start_failed",
+                f"Provider fault server could not bind: {error}",
+            ) from None
+        self.server.daemon_threads = True
+        self.port = int(self.server.server_address[1])
+        self.thread = threading.Thread(
+            target=self.server.serve_forever,
+            kwargs={"poll_interval": 0.1},
+            name=f"stage3-provider-{fault}-fault",
+            daemon=True,
+        )
+
+    @property
+    def endpoint(self) -> str:
+        return f"http://127.0.0.1:{self.port}"
+
+    @property
+    def credential_base_url(self) -> str:
+        return f"{self.endpoint}/v1" if self.provider == "codex" else self.endpoint
+
+    def start(self) -> None:
+        self.thread.start()
+
+    def stop(self) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=5.0)
+        if self.thread.is_alive():
+            raise AcceptanceError(
+                "runner.provider_fault_server_stop_failed",
+                "Provider fault server did not stop within five seconds.",
+            )
+
+    def evidence(self) -> Mapping[str, Any]:
+        with self._lock:
+            requests = tuple(dict(request) for request in self._requests)
+        credential_headers = sorted(
+            {
+                str(header)
+                for request in requests
+                for header in request.get("credentialHeaderNames", [])
+            }
+        )
+        return {
+            "fault": self.fault,
+            "responseStatus": 401 if self.fault == "authentication" else 429,
+            "requestCount": len(requests),
+            "methods": sorted({str(request.get("method")) for request in requests}),
+            "paths": sorted({str(request.get("path")) for request in requests})[:20],
+            "credentialHeaderNames": credential_headers,
+            "requestBodiesRetained": False,
+            "credentialValuesRetained": False,
+        }
+
+    def _response(self) -> tuple[int, Mapping[str, Any]]:
+        if self.fault == "authentication":
+            status = 401
+            error_type = "authentication_error"
+            error_code = "invalid_api_key"
+            message = "Authentication required: invalid API key for the Stage 3 Provider fault matrix."
+        else:
+            status = 429
+            error_type = "rate_limit_error"
+            error_code = "rate_limit_exceeded"
+            message = "Rate limit exceeded for the Stage 3 Provider fault matrix."
+        if self.provider == "claudeAgent":
+            return status, {
+                "type": "error",
+                "error": {"type": error_type, "message": message},
+            }
+        return status, {
+            "error": {"type": error_type, "code": error_code, "message": message},
+        }
+
+
 class LocalDriver:
     name = "local"
     lifecycle = STANDING_WORKER
@@ -1446,6 +1629,87 @@ class LocalDriver:
             {"target": self.name},
         )
 
+    def crash_provider_host(self) -> Mapping[str, Any]:
+        if self.name != "local" or os.name != "posix":
+            raise AcceptanceUnsupported(
+                "runner.real_provider_host_crash_unsupported",
+                "Scoped real Provider Host crash injection is currently implemented only for the Local POSIX Target.",
+                {"target": self.name, "requiredTarget": "local"},
+            )
+        process = self.process
+        if process is None or process.poll() is not None:
+            raise AcceptanceError(
+                "runner.control_plane_not_running",
+                "Control Plane was not running during Provider Host crash injection.",
+            )
+        try:
+            completed = subprocess.run(
+                ["ps", "-axo", "pid=,ppid=,command="],
+                cwd=self.repo_root,
+                env=self._tool_environment(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                timeout=10.0,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise AcceptanceError(
+                "runner.provider_host_process_scan_failed",
+                f"Provider Host process tree could not be inspected: {self.redactor.text(str(error))}",
+            ) from None
+        if completed.returncode != 0:
+            raise AcceptanceError(
+                "runner.provider_host_process_scan_failed",
+                f"Process tree inspection exited with status {completed.returncode}.",
+            )
+        processes: dict[int, tuple[int, str]] = {}
+        for line in completed.stdout.splitlines():
+            match = re.match(r"\s*(\d+)\s+(\d+)\s+(.*)$", line)
+            if match is None:
+                continue
+            processes[int(match.group(1))] = (int(match.group(2)), match.group(3))
+        descendants = {process.pid}
+        changed = True
+        while changed:
+            changed = False
+            for pid, (parent_pid, _command) in processes.items():
+                if pid not in descendants and parent_pid in descendants:
+                    descendants.add(pid)
+                    changed = True
+        candidates = sorted(
+            pid
+            for pid in descendants
+            if pid != process.pid and "--protocol-v2" in processes.get(pid, (0, ""))[1]
+        )
+        if len(candidates) != 1:
+            raise AcceptanceError(
+                "runner.provider_host_process_ambiguous",
+                "Expected exactly one scoped Provider Host process during crash injection.",
+                {
+                    "controlPlanePid": process.pid,
+                    "candidateCount": len(candidates),
+                    "descendantCount": max(0, len(descendants) - 1),
+                },
+            )
+        provider_host_pid = candidates[0]
+        try:
+            os.kill(provider_host_pid, signal.SIGKILL)
+        except ProcessLookupError:
+            raise AcceptanceError(
+                "runner.provider_host_process_disappeared",
+                "The scoped Provider Host exited before crash injection completed.",
+                {"providerHostPid": provider_host_pid},
+            ) from None
+        return {
+            "target": self.name,
+            "controlPlanePid": process.pid,
+            "providerHostPid": provider_host_pid,
+            "signal": signal.Signals(signal.SIGKILL).name,
+            "scopedToControlPlaneDescendants": True,
+            "broadProcessMatchUsed": False,
+        }
+
     def _control_plane_environment(self) -> dict[str, str]:
         environment = self._tool_environment()
         environment.update(
@@ -1478,6 +1742,8 @@ class LocalDriver:
                 "SYNARA_RETENTION_SWEEP_INTERVAL": "24h",
             }
         )
+        if "cursor-expiry" in self.options.real_provider_failure_cases:
+            environment["SYNARA_PROVIDER_CURSOR_MAX_AGE"] = REAL_PROVIDER_CURSOR_MAX_AGE
         return environment
 
 
@@ -4995,6 +5261,18 @@ class AcceptanceSuite:
                 requires=(recovery_requirement,),
             )
             recovery_requirement = case_id
+        for failure_case in self.options.real_provider_failure_cases:
+            metadata = REAL_PROVIDER_FAILURE_CASE_METADATA[failure_case]
+            case_id = metadata["id"]
+            self._case(
+                case_id,
+                metadata["name"],
+                lambda failure_case=failure_case: self._execute_real_provider_failure_case(
+                    failure_case
+                ),
+                requires=(recovery_requirement,),
+            )
+            recovery_requirement = case_id
         if self.options.restart_control_plane:
             self._case(
                 "recovery.control-plane-restart",
@@ -5677,6 +5955,310 @@ class AcceptanceSuite:
             f"Unknown real Provider acceptance case {real_provider_case}.",
             {"case": real_provider_case},
         )
+
+    def _execute_real_provider_failure_case(self, failure_case: str) -> Mapping[str, Any]:
+        if failure_case == "authentication":
+            return self._real_provider_http_failure(
+                failure_case,
+                fault="authentication",
+                expected_failure_code="authentication_required",
+            )
+        if failure_case == "rate-limit-retry":
+            return self._real_provider_http_failure(
+                failure_case,
+                fault="rate-limit",
+                expected_failure_code="provider_rate_limited",
+            )
+        if failure_case == "provider-host-crash-retry":
+            return self._real_provider_host_crash_retry()
+        if failure_case == "cursor-expiry":
+            return self._real_provider_cursor_expiry_barrier()
+        raise AcceptanceError(
+            "runner.real_provider_failure_case_unknown",
+            f"Unknown real Provider failure acceptance case {failure_case}.",
+            {"case": failure_case},
+        )
+
+    def _real_provider_http_failure(
+        self,
+        failure_case: str,
+        *,
+        fault: str,
+        expected_failure_code: str,
+    ) -> Mapping[str, Any]:
+        if self.driver.name != "local":
+            raise AcceptanceUnsupported(
+                "runner.real_provider_http_fault_target_unsupported",
+                "The runner-owned Provider HTTP fault endpoint is currently reachable only from the Local Target.",
+                {
+                    "target": self.driver.name,
+                    "failureCase": failure_case,
+                    "requiredTarget": "local",
+                },
+            )
+        fault_server = _ProviderFaultServer(self.options.provider, fault)
+        fault_secret = f"stage3-provider-fault-{uuid.uuid4()}"
+        self.redactor.add(fault_secret, "[REDACTED_PROVIDER_FAULT_CREDENTIAL]")
+        self.redactor.add(fault_server.endpoint, "[REDACTED_PROVIDER_FAULT_ENDPOINT]")
+        fault_server.start()
+        try:
+            credential = self._create_real_provider_credential(
+                title=f"Stage 3 Real Provider {failure_case}",
+                payload={
+                    "apiKey": fault_secret,
+                    "baseUrl": fault_server.credential_base_url,
+                },
+            )
+            credential_id = self._string_id(credential, "real Provider failure Credential")
+            session = self._create_real_provider_session(
+                title=f"Stage 3 Real Provider {failure_case}",
+                credential_id=credential_id,
+            )
+            session_id = self._string_id(session, "real Provider failure Session")
+            turn = self._create_turn(
+                "This request is an automated Provider error-classification acceptance check. "
+                "Reply with exactly SYNARA_PROVIDER_FAULT_SHOULD_NOT_COMPLETE and no other text.",
+                session_id=session_id,
+            )
+            turn_id = self._turn_id(turn, "real Provider HTTP failure Turn")
+            terminal, events = self._wait_for_turn_terminal(
+                turn_id,
+                "execution.failed",
+                session_id=session_id,
+            )
+        finally:
+            fault_server.stop()
+        fault_evidence = fault_server.evidence()
+        if int(fault_evidence.get("requestCount") or 0) < 1:
+            raise AcceptanceError(
+                "runner.real_provider_http_fault_not_observed",
+                "The real Provider failed without reaching the runner-owned HTTP fault endpoint.",
+                {"failureCase": failure_case, "provider": self.options.provider},
+            )
+        if not fault_evidence.get("credentialHeaderNames"):
+            raise AcceptanceError(
+                "runner.real_provider_http_credential_header_missing",
+                "The real Provider request did not carry a Credential header to the controlled endpoint.",
+                {"failureCase": failure_case, "provider": self.options.provider},
+            )
+        payload = json_object(terminal.get("payload"), "real Provider execution.failed payload")
+        actual_failure_code = payload.get("failureCode")
+        if actual_failure_code != expected_failure_code:
+            raise AcceptanceError(
+                "runner.real_provider_failure_code_mismatch",
+                "The real Provider HTTP failure did not preserve the expected stable failure code.",
+                {
+                    "failureCase": failure_case,
+                    "expectedFailureCode": expected_failure_code,
+                    "actualFailureCode": actual_failure_code,
+                    "faultServer": fault_evidence,
+                },
+            )
+        encoded_events = json.dumps(events, separators=(",", ":"), ensure_ascii=False)
+        if fault_secret in encoded_events or fault_server.endpoint in encoded_events:
+            raise AcceptanceError(
+                "runner.real_provider_failure_secret_leak",
+                "The real Provider failure events exposed controlled Credential or endpoint material.",
+                {"failureCase": failure_case},
+            )
+        recovery = self._real_provider_recovery_turn(failure_case)
+        return {
+            "failureCase": failure_case,
+            "faultTurnId": turn_id,
+            "faultExecutionId": terminal.get("executionId"),
+            "failureCode": actual_failure_code,
+            "faultSequenceRange": self._sequence_range(events),
+            "controlledCredential": {
+                "id": credential_id,
+                "provider": credential.get("provider"),
+                "credentialType": credential.get("credentialType"),
+                "version": credential.get("version"),
+                "payloadPersistedInReport": False,
+            },
+            "faultServer": fault_evidence,
+            "singleTerminal": True,
+            "credentialLeak": False,
+            "recovery": recovery,
+        }
+
+    def _real_provider_host_crash_retry(self) -> Mapping[str, Any]:
+        crash = getattr(self.driver, "crash_provider_host", None)
+        if not callable(crash):
+            raise AcceptanceUnsupported(
+                "runner.real_provider_host_crash_unsupported",
+                "The selected Target does not implement scoped real Provider Host crash injection.",
+                {"target": self.driver.name},
+            )
+        session = self._create_real_provider_session(
+            title="Stage 3 Real Provider Host Crash",
+        )
+        session_id = self._string_id(session, "real Provider crash Session")
+        turn = self._create_turn(
+            "Immediately invoke the Bash or shell tool exactly once with the command `sleep 120`. "
+            "Do not wait before invoking the tool, do not answer in text, and do nothing else while the command "
+            "is running. This is an automated process-crash acceptance barrier.",
+            runtime_mode="full-access",
+            session_id=session_id,
+        )
+        turn_id = self._turn_id(turn, "real Provider Host crash Turn")
+        created = self._wait_for_turn_created(turn_id, session_id=session_id)
+        execution_id = self._event_execution_id(created)
+        started = self._wait_for_execution_event(
+            execution_id,
+            "item.started",
+            after_sequence=int(created.get("sequence") or 0),
+            session_id=session_id,
+        )
+        crash_evidence = dict(crash())
+        terminal, events = self._wait_for_turn_terminal(
+            turn_id,
+            "execution.failed",
+            session_id=session_id,
+        )
+        payload = json_object(terminal.get("payload"), "real Provider crash execution.failed payload")
+        if payload.get("failureCode") != "provider_unavailable":
+            raise AcceptanceError(
+                "runner.real_provider_failure_code_mismatch",
+                "The scoped real Provider Host crash did not persist provider_unavailable.",
+                {
+                    "failureCase": "provider-host-crash-retry",
+                    "actualFailureCode": payload.get("failureCode"),
+                },
+            )
+        recovery = self._real_provider_recovery_turn("provider-host-crash-retry")
+        return {
+            "failureCase": "provider-host-crash-retry",
+            "faultTurnId": turn_id,
+            "faultExecutionId": execution_id,
+            "failureCode": payload.get("failureCode"),
+            "activeWorkBarrier": {
+                "eventId": started.get("eventId"),
+                "eventType": started.get("eventType"),
+                "sequence": started.get("sequence"),
+            },
+            "crash": crash_evidence,
+            "faultSequenceRange": self._sequence_range(events),
+            "singleTerminal": True,
+            "recovery": recovery,
+        }
+
+    def _real_provider_cursor_expiry_barrier(self) -> Mapping[str, Any]:
+        if "cursor-expiry" not in self.options.real_provider_failure_cases:
+            raise AcceptanceError(
+                "runner.real_provider_cursor_expiry_not_configured",
+                "Cursor expiry barrier requires the canonical short maximum-age configuration.",
+            )
+        started = time.monotonic()
+        self.deadline.sleep(REAL_PROVIDER_CURSOR_EXPIRY_WAIT_SECONDS)
+        return {
+            "configuredMaximumAge": REAL_PROVIDER_CURSOR_MAX_AGE,
+            "waitedMs": elapsed_ms(started),
+            "expectedPostRestartStrategy": "authoritative-history",
+            "expectedPostRestartReason": "cursor_expired",
+            "cursorBytesMutatedByRunner": False,
+        }
+
+    def _real_provider_recovery_turn(self, failure_case: str) -> Mapping[str, Any]:
+        session = self._create_real_provider_session(
+            title=f"Stage 3 Real Provider {failure_case} Recovery",
+        )
+        session_id = self._string_id(session, "real Provider recovery Session")
+        marker = self._real_provider_marker(f"{failure_case}-recovery", session_id=session_id)
+        turn = self._create_turn(
+            f"Reply with exactly {marker} and no other text.",
+            session_id=session_id,
+        )
+        turn_id = self._turn_id(turn, "real Provider failure recovery Turn")
+        terminal, events = self._wait_for_turn_terminal(
+            turn_id,
+            "execution.completed",
+            session_id=session_id,
+        )
+        evidence = self._real_provider_turn_evidence(
+            turn_id,
+            terminal,
+            events,
+            marker,
+            expected_resume_strategy="authoritative-history",
+            expected_resume_reason="cursor_absent",
+        )
+        return {
+            **evidence,
+            "sessionId": session_id,
+            "newExecutionAfterFailure": True,
+            "ambientAuthentication": True,
+        }
+
+    def _create_real_provider_credential(
+        self,
+        *,
+        title: str,
+        payload: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        tenant_id = self._required("tenant_id")
+        organization_id = self._required("organization_id")
+        return json_object(
+            self.api.request(
+                "POST",
+                f"/v1/tenants/{tenant_id}/credentials",
+                {
+                    "organizationId": organization_id,
+                    "name": title,
+                    "purpose": "provider",
+                    "provider": self.options.provider,
+                    "credentialType": "api_key",
+                    "payload": dict(payload),
+                },
+                expected=(201,),
+            ),
+            "real Provider failure Credential",
+        )
+
+    def _create_real_provider_session(
+        self,
+        *,
+        title: str,
+        credential_id: str | None = None,
+    ) -> dict[str, Any]:
+        project_id = self._required("project_id")
+        target_id = self._required("target_id")
+        session_input: dict[str, Any] = {
+            "title": title,
+            "visibility": "project",
+            "provider": self.options.provider,
+            "executionTargetId": target_id,
+        }
+        if credential_id is not None:
+            session_input["providerCredentialId"] = credential_id
+        session = json_object(
+            self.api.request(
+                "POST",
+                f"/v1/projects/{project_id}/sessions",
+                session_input,
+                expected=(201,),
+            ),
+            "real Provider failure Session",
+        )
+        if (
+            session.get("executionTargetId") != target_id
+            or session.get("providerCredentialId") != credential_id
+        ):
+            raise AcceptanceError(
+                "runner.session_binding_mismatch",
+                "Real Provider failure Session did not retain its Target and Credential bindings.",
+                {
+                    "executionTargetId": session.get("executionTargetId"),
+                    "providerCredentialId": session.get("providerCredentialId"),
+                },
+            )
+        return session
+
+    @staticmethod
+    def _string_id(value: Mapping[str, Any], description: str) -> str:
+        identifier = value.get("id")
+        if not isinstance(identifier, str) or not identifier:
+            raise AcceptanceError("runner.resource_id_missing", f"The {description} omitted its ID.")
+        return identifier
 
     def _real_provider_large_diff_artifact(self) -> Mapping[str, Any]:
         seed_marker = self._real_provider_marker("large-diff-seed")
@@ -6367,8 +6949,10 @@ class AcceptanceSuite:
     def _real_provider_approval_interaction(
         self,
         turn_id: str,
+        *,
+        session_id: str | None = None,
     ) -> tuple[dict[str, Any], str, str, dict[str, Any], str]:
-        interaction = self._wait_for_interaction(turn_id, "approval")
+        interaction = self._wait_for_interaction(turn_id, "approval", session_id=session_id)
         execution_id, request_id = self._interaction_identity(
             interaction,
             "real Provider Approval interaction",
@@ -6868,13 +7452,16 @@ class AcceptanceSuite:
                 "The second real Provider smoke Turn did not return an ID.",
             )
         terminal, turn_events = self._wait_for_turn_terminal(turn_id, "execution.completed")
+        cursor_expiry_selected = "cursor-expiry" in self.options.real_provider_failure_cases
         evidence = self._real_provider_turn_evidence(
             turn_id,
             terminal,
             turn_events,
             self._last_real_marker(),
-            expected_resume_strategy="native-cursor",
-            expected_resume_reason="cursor_usable",
+            expected_resume_strategy=(
+                "authoritative-history" if cursor_expiry_selected else "native-cursor"
+            ),
+            expected_resume_reason="cursor_expired" if cursor_expiry_selected else "cursor_usable",
         )
         all_events = self._all_events()
         sequences = [int(event["sequence"]) for event in all_events]
@@ -6901,7 +7488,12 @@ class AcceptanceSuite:
                 "workerIdChangedAfterRestart": worker_id != self.state.first_worker_id,
                 "firstGeneration": self.state.first_generation,
                 "generation": generation,
-                "continuityAssertion": "native Provider cursor restored the immediately previous answer",
+                "continuityAssertion": (
+                    "expired Provider cursor was quarantined and authoritative history restored the immediately "
+                    "previous answer"
+                    if cursor_expiry_selected
+                    else "native Provider cursor restored the immediately previous answer"
+                ),
             }
         )
         self.state.rollback_anchor_turn_id = turn_id
@@ -7338,8 +7930,13 @@ class AcceptanceSuite:
             },
         }
 
-    def _real_provider_marker(self, case: str = "continuity") -> str:
-        session_id = self._required("session_id")
+    def _real_provider_marker(
+        self,
+        case: str = "continuity",
+        *,
+        session_id: str | None = None,
+    ) -> str:
+        session_id = session_id or self._required("session_id")
         provider = re.sub(r"[^A-Za-z0-9]+", "_", self.options.provider).strip("_").upper()
         digest = hashlib.sha256(
             f"synara-real-provider-smoke-v1\0{session_id}\0{self.options.provider}\0{case}".encode(
@@ -8435,8 +9032,9 @@ class AcceptanceSuite:
         *,
         runtime_mode: str = "full-access",
         interaction_mode: str = "default",
+        session_id: str | None = None,
     ) -> dict[str, Any]:
-        session_id = self._required("session_id")
+        session_id = session_id or self._required("session_id")
         return json_object(
             self.api.request(
                 "POST",
@@ -8478,14 +9076,26 @@ class AcceptanceSuite:
             )
         return execution_id, request_id
 
-    def _wait_for_turn_created(self, turn_id: str) -> dict[str, Any]:
+    def _wait_for_turn_created(
+        self,
+        turn_id: str,
+        *,
+        session_id: str | None = None,
+    ) -> dict[str, Any]:
+        resolved_session_id = session_id or self._required("session_id")
+
         def created_probe() -> dict[str, Any] | None:
-            for event in self._all_events():
+            events = (
+                self._all_events(session_id=resolved_session_id)
+                if session_id is not None
+                else self._all_events()
+            )
+            for event in events:
                 if event.get("eventType") != "turn.created" or self._event_turn_id(event) != turn_id:
                     continue
                 self._event_execution_id(event)
                 sequence = event.get("sequence")
-                if isinstance(sequence, int):
+                if isinstance(sequence, int) and resolved_session_id == self.state.session_id:
                     self.state.last_sequence = max(self.state.last_sequence, sequence)
                 return event
             return None
@@ -8496,9 +9106,17 @@ class AcceptanceSuite:
         self,
         turn_id: str,
         expected_event_type: str,
+        *,
+        session_id: str | None = None,
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        resolved_session_id = session_id or self._required("session_id")
+
         def terminal_probe() -> tuple[dict[str, Any], list[dict[str, Any]]] | None:
-            events = self._all_events()
+            events = (
+                self._all_events(session_id=resolved_session_id)
+                if session_id is not None
+                else self._all_events()
+            )
             created = next(
                 (
                     event
@@ -8535,13 +9153,20 @@ class AcceptanceSuite:
                         "eventTypes": [event.get("eventType") for event in matching],
                     },
                 )
-            self.state.last_sequence = max(self.state.last_sequence, int(terminal["sequence"]))
+            if resolved_session_id == self.state.session_id:
+                self.state.last_sequence = max(self.state.last_sequence, int(terminal["sequence"]))
             return terminal, matching
 
         return self.api.wait_until(f"Turn {turn_id} terminal event", terminal_probe)
 
-    def _wait_for_interaction(self, turn_id: str, kind: str) -> dict[str, Any]:
-        session_id = self._required("session_id")
+    def _wait_for_interaction(
+        self,
+        turn_id: str,
+        kind: str,
+        *,
+        session_id: str | None = None,
+    ) -> dict[str, Any]:
+        session_id = session_id or self._required("session_id")
 
         def interaction_probe() -> dict[str, Any] | None:
             snapshot = json_object(
@@ -8600,21 +9225,30 @@ class AcceptanceSuite:
         event_type: str,
         *,
         after_sequence: int,
+        session_id: str | None = None,
     ) -> dict[str, Any]:
+        resolved_session_id = session_id or self._required("session_id")
+
         def event_probe() -> dict[str, Any] | None:
-            for event in self._all_events():
+            events = (
+                self._all_events(session_id=resolved_session_id)
+                if session_id is not None
+                else self._all_events()
+            )
+            for event in events:
                 sequence = int(event.get("sequence") or 0)
                 if sequence <= after_sequence:
                     continue
                 if event.get("executionId") == execution_id and event.get("eventType") == event_type:
-                    self.state.last_sequence = max(self.state.last_sequence, sequence)
+                    if resolved_session_id == self.state.session_id:
+                        self.state.last_sequence = max(self.state.last_sequence, sequence)
                     return event
             return None
 
         return self.api.wait_until(f"{event_type} for Execution {execution_id}", event_probe)
 
-    def _all_events(self) -> list[dict[str, Any]]:
-        session_id = self._required("session_id")
+    def _all_events(self, *, session_id: str | None = None) -> list[dict[str, Any]]:
+        session_id = session_id or self._required("session_id")
         events: list[dict[str, Any]] = []
         after = 0
         while True:
@@ -8768,6 +9402,14 @@ def explicit_unsupported_case(
 
 def markdown_from_report(report: Mapping[str, Any]) -> str:
     real_provider_smoke = report.get("mode") == "real-provider-smoke"
+    configuration = report.get("configuration")
+    failure_matrix = configuration.get("failureMatrix") if isinstance(configuration, dict) else None
+    real_provider = configuration.get("realProvider") if isinstance(configuration, dict) else None
+    real_provider_boundary = (
+        real_provider.get("boundary")
+        if isinstance(real_provider, dict) and isinstance(real_provider.get("boundary"), str)
+        else None
+    )
     lines = [
         (
             "# Stage 3 Real Provider Smoke Acceptance"
@@ -8788,12 +9430,11 @@ def markdown_from_report(report: Mapping[str, Any]) -> str:
         "## Evidence boundary",
         "",
         (
-            (
-                "This report runs a real Codex App Server or Claude Agent SDK Provider through the real Control "
-                "Plane, selected Target, agentd, Worker Protocol, Provider Host, Control Plane restart, and a "
-                "native-cursor second Turn. It is a narrow two-Turn smoke, not the complete Local or four-Target "
-                "Release Gate."
-            )
+            real_provider_boundary
+            or "This report runs a real Codex App Server or Claude Agent SDK Provider through the real Control "
+            "Plane, selected Target, agentd, Worker Protocol, Provider Host, Control Plane restart, and a "
+            "native-cursor second Turn. It is a narrow two-Turn smoke, not the complete Local or four-Target "
+            "Release Gate."
             if real_provider_smoke
             else (
                 "This report uses the deterministic Provider Host fixture through the real Control Plane, "
@@ -8802,10 +9443,9 @@ def markdown_from_report(report: Mapping[str, Any]) -> str:
             )
         ),
     ]
-    configuration = report.get("configuration")
-    failure_matrix = configuration.get("failureMatrix") if isinstance(configuration, dict) else None
-    real_provider = configuration.get("realProvider") if isinstance(configuration, dict) else None
-    if isinstance(real_provider, dict) and real_provider.get("requestedCases"):
+    if isinstance(real_provider, dict) and (
+        real_provider.get("requestedCases") or real_provider.get("requestedFailureCases")
+    ):
         lines.extend(
             [
                 "",
@@ -9010,6 +9650,18 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
         action="store_true",
         help="Run every implemented real Provider product-path case in its canonical restart position",
     )
+    parser.add_argument(
+        "--real-provider-failure-case",
+        action="append",
+        choices=REAL_PROVIDER_FAILURE_CASES,
+        default=[],
+        help="Add a real Provider failure/recovery case; repeat to select multiple cases",
+    )
+    parser.add_argument(
+        "--real-provider-failure-matrix",
+        action="store_true",
+        help="Run the complete real Provider Local authentication/rate-limit/crash/Cursor-expiry matrix",
+    )
     parser.add_argument("--skip-build", action="store_true")
     parser.add_argument("--control-plane-binary", type=pathlib.Path)
     parser.add_argument("--keep", action="store_true", help="Keep SQLite, workspace, cache, and built binary")
@@ -9081,6 +9733,8 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
         if parsed.target == "kubernetes"
         else 900.0
         if parsed.target in {"docker", "ssh"}
+        else 420.0
+        if parsed.real_provider_failure_case or parsed.real_provider_failure_matrix
         else 180.0
     )
     timeout_seconds = parsed.timeout if parsed.timeout is not None else default_timeout
@@ -9177,6 +9831,15 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
     real_provider_cases = tuple(
         case for case in REAL_PROVIDER_CASES if case in requested_real_provider_case_set
     )
+    requested_real_provider_failure_cases = list(parsed.real_provider_failure_case)
+    if parsed.real_provider_failure_matrix:
+        requested_real_provider_failure_cases.extend(REAL_PROVIDER_FAILURE_CASES)
+    requested_real_provider_failure_case_set = set(requested_real_provider_failure_cases)
+    real_provider_failure_cases = tuple(
+        case
+        for case in REAL_PROVIDER_FAILURE_CASES
+        if case in requested_real_provider_failure_case_set
+    )
     if parsed.failure_only and not failure_cases:
         parser.error("--failure-only requires --failure-matrix or at least one --failure-case")
     if parsed.suite == "real-provider-smoke":
@@ -9186,9 +9849,13 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
             parser.error(
                 "--suite real-provider-smoke cannot be combined with fixture failure/canary options"
             )
-    elif real_provider_cases:
+        if real_provider_cases and real_provider_failure_cases:
+            parser.error(
+                "real Provider product-path cases and failure cases require separate canonical runs"
+            )
+    elif real_provider_cases or real_provider_failure_cases:
         parser.error(
-            "--real-provider-case and --real-provider-matrix require --suite real-provider-smoke"
+            "real Provider case options require --suite real-provider-smoke"
         )
     return RunnerOptions(
         target=parsed.target,
@@ -9228,6 +9895,7 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
         kubernetes_allow_node_drain=parsed.kubernetes_allow_node_drain,
         failure_only=parsed.failure_only,
         real_provider_cases=real_provider_cases,
+        real_provider_failure_cases=real_provider_failure_cases,
     )
 
 
@@ -9324,9 +9992,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         else "fixture"
     )
     evidence_boundary = (
-        "real Codex/Claude through the real Control Plane, selected Target, agentd, Worker Protocol, Provider "
-        "Host, Control Plane restart, and native-cursor second Turn; narrow smoke only, not a complete Local or "
-        "four-Target Release Gate"
+        (
+            "real Codex/Claude through the real Control Plane, Local agentd, Worker Protocol and Provider Host; "
+            "runner-owned 401/429 endpoints, scoped Host crash, new-Execution recovery and audited Cursor-expiry "
+            "history reconstruction; Local failure evidence only, not a four-Target Release Gate"
+            if options.real_provider_failure_cases
+            else "real Codex/Claude through the real Control Plane, selected Target, agentd, Worker Protocol, "
+            "Provider Host, Control Plane restart, and native-cursor second Turn; narrow smoke only, not a "
+            "complete Local or four-Target Release Gate"
+        )
         if real_provider_smoke
         else "deterministic Provider Host fixture over real Control Plane, agentd, Worker Protocol, and Target paths"
     )
@@ -9356,9 +10030,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             },
             "realProvider": {
                 "requestedCases": list(options.real_provider_cases),
+                "requestedFailureCases": list(options.real_provider_failure_cases),
                 "ambientAuthentication": real_provider_smoke,
+                "controlledFaultCredentials": bool(options.real_provider_failure_cases),
+                "cursorMaximumAge": (
+                    REAL_PROVIDER_CURSOR_MAX_AGE
+                    if "cursor-expiry" in options.real_provider_failure_cases
+                    else None
+                ),
                 "boundary": (
-                    "selected real Provider cases run in canonical pre/post-restart positions around the "
+                    evidence_boundary
+                    if options.real_provider_failure_cases
+                    else "selected real Provider cases run in canonical pre/post-restart positions around the "
                     "two-Turn continuity baseline"
                     if options.real_provider_cases
                     else "two-Turn marker and native-cursor continuity baseline"

@@ -675,6 +675,14 @@ class ClaudeAgentSdkRuntime {
       this.resumeCursor = sessionId;
     }
     const type = readString(record, "type");
+    if (type === "system" && readString(record, "subtype") === "api_retry") {
+      const failureMessage = claudeApiRetryFailureMessage(record);
+      if (failureMessage) {
+        this.failOpenTools(state);
+        throw new Error(failureMessage);
+      }
+      return undefined;
+    }
     if (type === "system" && readString(record, "subtype") === "init") {
       const model = readString(record, "model");
       if (model) state.model = model;
@@ -1608,8 +1616,47 @@ function resultErrorMessage(result: Record<string, unknown>): string {
     const errors = result.errors.filter((value): value is string => typeof value === "string");
     if (errors.length > 0) return errors.join("\n");
   }
+  const apiErrorStatus = finiteHttpStatus(result.api_error_status);
+  const providerFailure = claudeProviderFailureMessage(apiErrorStatus, readString(result, "error"));
+  if (providerFailure) return providerFailure;
+  if (apiErrorStatus !== undefined) {
+    return `Claude Agent SDK API request failed with HTTP ${apiErrorStatus}.`;
+  }
   const subtype = readString(result, "subtype") ?? "error_during_execution";
+  if (subtype === "success" && result.is_error === true) {
+    return "Claude Agent SDK returned an unsuccessful result without error details.";
+  }
   return `Claude Agent SDK returned ${subtype}.`;
+}
+
+function claudeApiRetryFailureMessage(message: Record<string, unknown>): string | undefined {
+  return claudeProviderFailureMessage(
+    finiteHttpStatus(message.error_status),
+    readString(message, "error"),
+  );
+}
+
+function claudeProviderFailureMessage(
+  status: number | undefined,
+  errorKind: string | undefined,
+): string | undefined {
+  if (
+    status === 401 ||
+    errorKind === "authentication_failed" ||
+    errorKind === "oauth_org_not_allowed"
+  ) {
+    return `Claude Agent SDK authentication failed${status ? ` with HTTP ${status}` : ""}.`;
+  }
+  if (status === 429 || errorKind === "rate_limit") {
+    return `Claude Agent SDK rate limit exceeded${status ? ` with HTTP ${status}` : ""}.`;
+  }
+  return undefined;
+}
+
+function finiteHttpStatus(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isInteger(value) && value >= 100 && value <= 599
+    ? value
+    : undefined;
 }
 
 function numericFields(value: Record<string, unknown>): Record<string, number> {

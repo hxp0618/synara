@@ -1,5 +1,5 @@
-import { readFileSync } from "node:fs";
-import { isAbsolute } from "node:path";
+import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { isAbsolute, join } from "node:path";
 
 import { startClaudeAgentSdkRun, type ClaudeQueryFactory } from "./claudeAgentSdkRuntime";
 import { startCodexAppServerRun } from "./codexAppServerRuntime";
@@ -334,6 +334,18 @@ export function startProviderHostRun(
     normalizedProvider,
     credential,
   );
+  if (normalizedProvider === "codex" && credential) {
+    const runtimeOutputDirectory = optionalString(
+      input.runtimeOutputDirectory,
+      "Codex Credential runtimeOutputDirectory",
+    );
+    if (!runtimeOutputDirectory) {
+      throw new Error(
+        "Codex Credential requires an agentd-owned runtimeOutputDirectory for isolated CODEX_HOME.",
+      );
+    }
+    environment.CODEX_HOME = writeControlledCodexConfig(runtimeOutputDirectory, environment);
+  }
   const hasDurableHistory = hasAuthoritativeResumeData(input.workload);
   const prompt = hasDurableHistory ? reconstructedPrompt(input) : input.workload.inputText;
   const interactive = options.interactive ?? true;
@@ -362,6 +374,58 @@ export function startProviderHostRun(
     });
   }
   throw new Error(`Unsupported provider ${input.workload.provider}`);
+}
+
+function writeControlledCodexConfig(
+  runtimeOutputDirectory: string,
+  environment: NodeJS.ProcessEnv,
+): string {
+  const apiKey = requiredString(environment.OPENAI_API_KEY, "Codex Credential apiKey");
+  const baseUrl = controlledCodexBaseUrl(environment.OPENAI_BASE_URL);
+  const codexHome = join(runtimeOutputDirectory, "codex-home");
+  mkdirSync(codexHome, { recursive: true, mode: 0o700 });
+  chmodSync(codexHome, 0o700);
+  const config = [
+    'model_provider = "synara_controlled"',
+    "",
+    "[model_providers.synara_controlled]",
+    'name = "Synara controlled Credential"',
+    `base_url = ${JSON.stringify(baseUrl)}`,
+    'env_key = "OPENAI_API_KEY"',
+    'wire_api = "responses"',
+    "requires_openai_auth = false",
+    "",
+  ].join("\n");
+  const temporaryPath = join(codexHome, "config.toml.tmp");
+  const configPath = join(codexHome, "config.toml");
+  writeFileSync(temporaryPath, config, { encoding: "utf8", mode: 0o600 });
+  chmodSync(temporaryPath, 0o600);
+  renameSync(temporaryPath, configPath);
+  chmodSync(configPath, 0o600);
+  environment.OPENAI_API_KEY = apiKey;
+  return codexHome;
+}
+
+function controlledCodexBaseUrl(value: string | undefined): string {
+  const candidate = value?.trim() || "https://api.openai.com/v1";
+  if (candidate.length > 2_048 || /[\r\n\0]/u.test(candidate)) {
+    throw new Error("Codex Credential baseUrl is invalid");
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(candidate);
+  } catch {
+    throw new Error("Codex Credential baseUrl must be an absolute HTTP(S) URL");
+  }
+  if (
+    (parsed.protocol !== "https:" && parsed.protocol !== "http:") ||
+    parsed.username ||
+    parsed.password ||
+    parsed.hash
+  ) {
+    throw new Error("Codex Credential baseUrl must use HTTP(S) without userinfo or a fragment");
+  }
+  return candidate.replace(/\/+$/u, "");
 }
 
 export function hasAuthoritativeResumeData(workload: RunnerInput["workload"]): boolean {

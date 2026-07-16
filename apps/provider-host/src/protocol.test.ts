@@ -424,6 +424,67 @@ describe("Provider Host Protocol v2", () => {
     });
   });
 
+  it.each([
+    {
+      message: "HTTP 429 Too Many Requests: rate_limit_error",
+      code: "provider_rate_limited",
+      retryable: true,
+      requiresNewExecution: true,
+      requiresUserAction: false,
+    },
+    {
+      message: "Status code 401 Unauthorized: invalid API key",
+      code: "authentication_required",
+      retryable: false,
+      requiresNewExecution: false,
+      requiresUserAction: true,
+    },
+    {
+      message: "Provider Credential payload is invalid",
+      code: "credential_invalid",
+      retryable: false,
+      requiresNewExecution: false,
+      requiresUserAction: true,
+    },
+    {
+      message: "Authoritative history reconstruction failed",
+      code: "provider_unavailable",
+      retryable: true,
+      requiresNewExecution: true,
+      requiresUserAction: false,
+    },
+  ])(
+    "classifies real Provider failure text without treating authoritative as authentication: $code",
+    async ({ message, code, retryable, requiresNewExecution, requiresUserAction }) => {
+      const handle = createProviderHostProtocolHandler({
+        credential: null,
+        emit: () => {},
+        descriptorForProvider: enabledDescriptorForProvider,
+        startRun: () => ({
+          result: Promise.reject(new Error(message)),
+          interrupt: () => {},
+        }),
+      });
+      await handle(
+        command("StartSession", { runnerInput: remoteRunnerInput() }, `session-${code}`),
+      );
+
+      const result = await handle(command("SendTurn", { inputText: "fail" }, `send-${code}`));
+
+      expect(result.at(-1)).toMatchObject({
+        messageType: "Error",
+        error: {
+          code,
+          retryable,
+          requiresNewExecution,
+          requiresUserAction,
+          canReconstructFromHistory: code !== "credential_invalid",
+          canMoveWorker: code !== "credential_invalid",
+        },
+      });
+    },
+  );
+
   it("runs native CompactSession as the sole active primary operation and exposes its boundary", async () => {
     let completeRun: ((message: Extract<RunnerMessage, { type: "result" }>) => void) | undefined;
     let operation: unknown;

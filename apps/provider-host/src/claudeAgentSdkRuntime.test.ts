@@ -999,6 +999,75 @@ describe("Claude Agent SDK runtime", () => {
     );
   });
 
+  it.each([
+    {
+      errorStatus: 401,
+      error: "authentication_failed",
+      expected: "authentication failed with HTTP 401",
+    },
+    {
+      errorStatus: 429,
+      error: "rate_limit",
+      expected: "rate limit exceeded with HTTP 429",
+    },
+  ])("fails fast on a stable SDK API retry: $error", async ({ errorStatus, error, expected }) => {
+    let continuedAfterRetry = false;
+    const queryFactory: ClaudeQueryFactory = ({ prompt }) =>
+      fakeQuery(
+        (async function* () {
+          await promptText(prompt);
+          yield sdkMessage({
+            type: "system",
+            subtype: "api_retry",
+            attempt: 1,
+            max_retries: 10,
+            retry_delay_ms: 500,
+            error_status: errorStatus,
+            error,
+            uuid: "retry-1",
+            session_id: "session-api-retry",
+          });
+          continuedAfterRetry = true;
+          yield sdkMessage(successResult("session-api-retry", "must not complete", {}));
+        })(),
+      );
+    const run = startProviderHostRun(
+      claudeInput({ inputText: "fail without hidden retries" }),
+      null,
+      () => {},
+      { claudeQueryFactory: queryFactory },
+    );
+
+    await expect(run.result).rejects.toThrow(expected);
+    expect(continuedAfterRetry).toBe(false);
+  });
+
+  it("classifies a contradictory SDK success result from its API error status", async () => {
+    const queryFactory: ClaudeQueryFactory = () =>
+      fakeQuery(
+        (async function* () {
+          yield sdkMessage({
+            type: "result",
+            subtype: "success",
+            is_error: true,
+            api_error_status: 401,
+            errors: [],
+            result: "",
+            usage: {},
+            session_id: "session-api-error-result",
+          });
+        })(),
+      );
+    const run = startProviderHostRun(
+      claudeInput({ inputText: "surface terminal auth failure" }),
+      null,
+      () => {},
+      { claudeQueryFactory: queryFactory },
+    );
+
+    await expect(run.result).rejects.toThrow("authentication failed with HTTP 401");
+  });
+
   it("uses native query interrupt and rejects the active turn", async () => {
     let releaseInterrupt!: () => void;
     const interrupted = new Promise<void>((resolve) => {

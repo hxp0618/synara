@@ -11,6 +11,8 @@ import subprocess
 import tarfile
 import tempfile
 import unittest
+import urllib.error
+import urllib.request
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 from unittest import mock
@@ -57,6 +59,7 @@ def runner_options(*, restart_control_plane: bool = True) -> acceptance.RunnerOp
         kubernetes_allow_node_drain=False,
         failure_only=False,
         real_provider_cases=(),
+        real_provider_failure_cases=(),
     )
 
 
@@ -964,6 +967,37 @@ class RealProviderGeneratedFileSuite(acceptance.AcceptanceSuite):
         return self.execution_terminal, self.events
 
 
+class ProviderFaultServerTest(unittest.TestCase):
+    def test_rate_limit_endpoint_records_only_bounded_request_metadata(self) -> None:
+        server = acceptance._ProviderFaultServer("codex", "rate-limit")
+        credential = "provider-fault-secret-value"
+        server.start()
+        try:
+            request = urllib.request.Request(
+                f"{server.credential_base_url}/responses?stream=true",
+                data=b'{"model":"test"}',
+                headers={
+                    "Authorization": f"Bearer {credential}",
+                    "Content-Type": "application/json",
+                },
+                method="POST",
+            )
+            with self.assertRaises(urllib.error.HTTPError) as raised:
+                urllib.request.urlopen(request, timeout=2.0)
+            body = raised.exception.read().decode("utf-8")
+            raised.exception.close()
+        finally:
+            server.stop()
+
+        evidence = server.evidence()
+        self.assertEqual(raised.exception.code, 429)
+        self.assertIn("rate_limit_error", body)
+        self.assertEqual(evidence["requestCount"], 1)
+        self.assertEqual(evidence["credentialHeaderNames"], ["authorization"])
+        self.assertFalse(evidence["requestBodiesRetained"])
+        self.assertNotIn(credential, json.dumps(evidence))
+
+
 class APIClientTimeoutTest(unittest.TestCase):
     def test_request_keeps_short_default_and_allows_explicit_long_operation_timeout(self) -> None:
         timeouts: list[float] = []
@@ -1548,6 +1582,38 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
             ],
         )
 
+    def test_real_provider_failure_matrix_runs_before_restart_and_expiry_continuity(self) -> None:
+        suite = CaseOrderSuite(
+            FakeDriver(acceptance.STANDING_WORKER, name="local"),
+            dataclasses.replace(
+                runner_options(),
+                suite="real-provider-smoke",
+                real_provider_failure_cases=acceptance.REAL_PROVIDER_FAILURE_CASES,
+            ),
+        )
+
+        suite.run()
+
+        self.assertEqual(
+            suite.case_order,
+            [
+                "environment.target-prepare",
+                "environment.control-plane-start",
+                "identity.dev-login",
+                "runtime.target-provision",
+                "resources.real-provider-project-session",
+                "real-provider.turn-1-start",
+                "runtime.real-provider-worker-discovery",
+                "real-provider.turn-1",
+                "real-provider.failure-authentication",
+                "real-provider.failure-rate-limit-retry",
+                "real-provider.failure-host-crash-retry",
+                "real-provider.failure-cursor-expiry",
+                "recovery.control-plane-restart",
+                "real-provider.turn-2-continuity",
+            ],
+        )
+
     def test_real_provider_marker_and_native_resume_evidence_pass(self) -> None:
         suite = BarrierSuite(acceptance.EXECUTION_PINNED_WORKER)
         marker = "SYNARA_REAL_PROVIDER_SMOKE_CODEX_0123456789ABCDEF"
@@ -1570,6 +1636,46 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
         self.assertTrue(evidence["markerMatched"])
         self.assertTrue(evidence["terminalOutputMatched"])
         self.assertEqual(evidence["providerResume"]["selectedStrategy"], "native-cursor")
+
+    def test_real_provider_cursor_expiry_continuity_requires_authoritative_history(self) -> None:
+        suite = BarrierSuite(acceptance.STANDING_WORKER)
+        suite.options = dataclasses.replace(
+            suite.options,
+            suite="real-provider-smoke",
+            real_provider_failure_cases=("cursor-expiry",),
+        )
+        suite.state.pre_restart_sequence = 1
+        suite.state.last_real_marker = "SYNARA_REAL_PROVIDER_CONTINUITY_CODEX_EXPIRED"
+        suite.state.first_worker_id = "worker-1"
+        suite.state.first_generation = 1
+        terminal = {
+            "sequence": 2,
+            "eventType": "execution.completed",
+            "executionId": "execution-2",
+            "workerId": "worker-1",
+            "generation": 1,
+        }
+        turn_events = [{"sequence": 2, "eventType": "execution.completed"}]
+        suite._wait_for_turn_terminal = mock.Mock(return_value=(terminal, turn_events))  # type: ignore[method-assign]
+        suite._real_provider_turn_evidence = mock.Mock(return_value={})  # type: ignore[method-assign]
+        suite._all_events = mock.Mock(  # type: ignore[method-assign]
+            return_value=[
+                {"sequence": 1, "eventType": "execution.completed"},
+                terminal,
+            ]
+        )
+
+        evidence = suite._real_provider_second_turn_continuity()
+
+        suite._real_provider_turn_evidence.assert_called_once_with(
+            "turn-1",
+            terminal,
+            turn_events,
+            "SYNARA_REAL_PROVIDER_CONTINUITY_CODEX_EXPIRED",
+            expected_resume_strategy="authoritative-history",
+            expected_resume_reason="cursor_expired",
+        )
+        self.assertIn("authoritative history", evidence["continuityAssertion"])
 
     def test_real_provider_marker_mismatch_fails_closed(self) -> None:
         suite = BarrierSuite(acceptance.EXECUTION_PINNED_WORKER)
@@ -1879,6 +1985,7 @@ class RunnerOptionsTest(unittest.TestCase):
         self.assertEqual(options.runner_command, ("node", "/tmp/provider-host.mjs"))
         self.assertEqual(options.failure_cases, ())
         self.assertEqual(options.real_provider_cases, ())
+        self.assertEqual(options.real_provider_failure_cases, ())
 
     def test_real_provider_matrix_expands_in_canonical_order(self) -> None:
         options = acceptance.parse_args(
@@ -1910,6 +2017,48 @@ class RunnerOptionsTest(unittest.TestCase):
             ),
         )
         self.assertEqual(options.real_provider_cases, acceptance.REAL_PROVIDER_CASES)
+
+    def test_real_provider_failure_matrix_expands_in_canonical_order(self) -> None:
+        options = acceptance.parse_args(
+            [
+                "--suite",
+                "real-provider-smoke",
+                "--runner-command-json",
+                '["node","/tmp/provider-host.mjs"]',
+                "--real-provider-failure-case",
+                "rate-limit-retry",
+                "--real-provider-failure-matrix",
+            ]
+        )
+
+        self.assertEqual(
+            acceptance.REAL_PROVIDER_FAILURE_CASES,
+            (
+                "authentication",
+                "rate-limit-retry",
+                "provider-host-crash-retry",
+                "cursor-expiry",
+            ),
+        )
+        self.assertEqual(
+            options.real_provider_failure_cases,
+            acceptance.REAL_PROVIDER_FAILURE_CASES,
+        )
+        self.assertEqual(options.timeout_seconds, 420.0)
+
+    def test_real_provider_failure_matrix_requires_a_separate_canonical_run(self) -> None:
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            acceptance.parse_args(
+                [
+                    "--suite",
+                    "real-provider-smoke",
+                    "--runner-command-json",
+                    '["node","/tmp/provider-host.mjs"]',
+                    "--real-provider-case",
+                    "approval",
+                    "--real-provider-failure-matrix",
+                ]
+            )
 
     def test_fixture_suite_rejects_real_provider_cases(self) -> None:
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):

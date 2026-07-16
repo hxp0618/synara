@@ -1005,19 +1005,54 @@ function classifyProviderHostError(error: unknown): ProviderHostError {
   if (normalized.includes("invalid jsonl") || normalized.includes("result message")) {
     return errorDetail("protocol_violation", message, false, true, false, true, true);
   }
+  if (isProviderRateLimitError(normalized)) {
+    return errorDetail("provider_rate_limited", message, true, true, false, true, true);
+  }
+  if (isProviderAuthenticationError(normalized)) {
+    return errorDetail("authentication_required", message, false, false, true, true, true);
+  }
   if (normalized.includes("credential")) {
     return errorDetail("credential_invalid", message, false, false, true, false, false);
   }
   if (normalized.includes("enoent") || normalized.includes("not found")) {
     return errorDetail("provider_not_installed", message, false, false, true, true, true);
   }
-  if (normalized.includes("rate limit") || normalized.includes("rate-limit")) {
-    return errorDetail("provider_rate_limited", message, true, true, false, true, true);
-  }
-  if (normalized.includes("auth") || normalized.includes("login")) {
-    return errorDetail("authentication_required", message, false, false, true, true, true);
-  }
   return errorDetail("provider_unavailable", message, true, true, false, true, true);
+}
+
+function isProviderRateLimitError(normalized: string): boolean {
+  return [
+    "rate limit",
+    "rate-limit",
+    "rate_limit",
+    "ratelimit",
+    "too many requests",
+    "resource exhausted",
+    "resource_exhausted",
+    "quota exceeded",
+    "usage limit",
+    "http 429",
+    "status 429",
+    "status code 429",
+  ].some((marker) => normalized.includes(marker));
+}
+
+function isProviderAuthenticationError(normalized: string): boolean {
+  return [
+    "authentication",
+    "authentication_error",
+    "authentication required",
+    "unauthorized",
+    "invalid api key",
+    "invalid_api_key",
+    "not logged in",
+    "login required",
+    "please login",
+    "please log in",
+    "http 401",
+    "status 401",
+    "status code 401",
+  ].some((marker) => normalized.includes(marker));
 }
 
 function errorDetail(
