@@ -1487,9 +1487,13 @@ Provider × Capability × Execution Target
   Provider Host 与 Provider tools mtime 同步归一，避免旧 Commit cache 改变当前发布 digest。可选
   `--go-proxy` 只允许 credential-free HTTPS/direct/off，输出经过 redaction 与
   Secret scan，本地只清理本次 inspection container/image/state，禁止 prune，远端 image 保留为发布证据。
-  当前 Registry gate tests `18/18`，全部 release-gate tests 合计 `68/68`，Stage 3 Python `171/171`；
-  尚待在 clean implementation SHA 上完成真实双架构 Registry 运行并记录 digest，因此签名、生产 retention、
-  四 Target rollout 与 soak 仍保持 open。
+  当前 Registry gate tests `18/18`，全部 release-gate tests 合计 `68/68`，Stage 3 Python `171/171`。
+  clean commit `dc43a4d6` 已完成 cached/no-cache 双架构 Registry push：两次 OCI index digest 分别为
+  `sha256:5b5f7f48...`、`sha256:17eff0eb...`，`linux/amd64` 共同 manifest 为
+  `sha256:452f18ab...`，`linux/arm64` 共同 manifest 为 `sha256:05c6821b...`；两平台 SPDX/SLSA、non-root
+  config、嵌入 Manifest/SBOM/lockfile/runtime、精确 cleanup 与输出 Secret scan 均通过。完整证据见
+  `docs/reports/stage-3-worker-registry-release-gate-dc43a4d6.md`。该结果关闭 clean-SHA Registry
+  reproducibility slice；image signing、生产 Registry retention、四 Target rollout 与 soak 仍保持 open。
 
 ## 18. 实施顺序
 

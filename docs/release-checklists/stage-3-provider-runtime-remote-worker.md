@@ -69,12 +69,16 @@ python3 scripts/stage3-provider-acceptance/registry_release_gate.py \
   --output-dir /tmp/synara-worker-registry-release
 ```
 
+Clean-SHA disposable Registry reproducibility slice 已在 commit `dc43a4d6` 通过，证据见
+`docs/reports/stage-3-worker-registry-release-gate-dc43a4d6.md`。以下已勾选项仅表示该技术断言已有
+clean-commit 证据；生产 Registry、签名、Credential、retention 与 rollout 仍按未勾选项验收。
+
 - [ ] Worker Image 已推送到目标 Registry，并记录 registry-returned Digest。
-- [ ] 至少生成目标平台所需的 `linux/amd64`、`linux/arm64` manifest list；若只发布单架构，已记录审批。
-- [ ] Base Image、Node.js、Codex CLI、Claude Agent SDK 和系统包均由锁文件或 Digest 固定。
-- [ ] BuildKit SBOM generator 与 Dockerfile frontend 均使用 checked-in immutable Digest，不解析 mutable tag。
-- [ ] Registry export 使用 `SOURCE_DATE_EPOCH` layer rewrite，且 transient APK log/raw SBOM 未进入最终 layer。
-- [ ] Worker build-revision cache identity 等于发布 Git SHA，跨 stage runtime artifacts 的 mtime 已归一。
+- [x] 至少生成目标平台所需的 `linux/amd64`、`linux/arm64` manifest list；若只发布单架构，已记录审批。
+- [x] Base Image、Node.js、Codex CLI、Claude Agent SDK 和系统包均由锁文件或 Digest 固定。
+- [x] BuildKit SBOM generator 与 Dockerfile frontend 均使用 checked-in immutable Digest，不解析 mutable tag。
+- [x] Registry export 使用 `SOURCE_DATE_EPOCH` layer rewrite，且 transient APK log/raw SBOM 未进入最终 layer。
+- [x] Worker build-revision cache identity 等于发布 Git SHA，跨 stage runtime artifacts 的 mtime 已归一。
 - [ ] Worker Manifest 中的 Git SHA、OS/Arch、Image Digest、Protocol、Provider Runtime 和 Capability Hash 可追溯。
 - [ ] SBOM、依赖漏洞扫描和镜像签名/来源验证完成。
 - [ ] Worker 使用非 Root 用户，Workspace、Git Cache 和 Runtime Output Root 权限正确。
@@ -144,28 +148,28 @@ bun run --cwd apps/web test \
 
 当前仓库已有的实现期证据不能替代下列发布勾选项：
 
-| 证据                                                | 当前结论                               | 发布边界                                                                             |
-| --------------------------------------------------- | -------------------------------------- | ------------------------------------------------------------------------------------ |
-| 真实 Codex/Claude Local two-Turn product-path smoke | clean commit `fb9e25ec` 各 12/12       | 经过 Control Plane/LocalSupervisor/agentd，但不是完整 Local Gate                     |
-| 真实 Codex/Claude Generated File + Checkpoint       | clean commit `be919393` matrix pass    | standalone Ready Artifact 与 Snapshot 已验；Diff 由下一行独立跟踪                    |
-| 真实 Codex/Claude Local Large Diff                  | clean commit `90fae52c` matrix pass    | Ready `diff`/下载/顺序/restart/cleanup/Secret scan 已验                              |
-| 真实 Codex/Claude Local failure matrix              | clean commit `61e38f4f` 各 `16/16`     | 401/429、scoped Host crash、Cursor expiry/restart 与新 Execution 已验                |
-| 真实 Codex/Claude consolidated Local release gate   | clean commit `253052aa` aggregate pass | 四份 product/failure 报告同 SHA/hash，无 fail/skipped，cleanup/Secret scan 已验      |
-| 真实 Codex `0.144.x` `terminal-large`               | Explicit Unsupported                   | Unified Exec 仅保留 1 MiB Head/Tail；不得牺牲 durable Approval                       |
-| Claude ambient OAuth `terminal-large`               | Explicit Unsupported                   | 需 controlled Credential 绑定 Runtime Output Root                                    |
-| deterministic Local/Docker core suite               | 已通过                                 | 证明共享 Control Plane/agentd/Host orchestration，不证明真实 Adapter                 |
-| deterministic Provider fault matrix                 | malformed/oversized/crash 已通过       | 不是真实 Provider failure 分类                                                       |
-| deterministic Docker/Kubernetes failure matrix      | 已通过实现期运行                       | 不等于生产网络、真实 CNI 或正式 rollout                                              |
-| SSH real Provider runtime provisioning              | disposable VM preflight 已通过         | Host SHA + Codex 0.144.1 + Claude 2.1.197 已验；尚无真实 Credential 报告             |
-| SSH real Provider fault-injection transport         | Runner 99/99 + SSH fixture 16/16       | token-scoped reverse relay 与 systemd MainPID crash 已实现；尚无真实 Credential 报告 |
-| Docker real Provider fault-injection transport      | 实现期容器探针与 Docker 16/16 已通过   | 401/429/精确 Host crash 已实现；尚无真实 Provider Credential 报告                    |
-| Kubernetes real Provider fault-injection transport  | Runner 99/99 + Linux 容器探针通过      | host-gateway 401/429 与精确 Pod crash 已实现；尚无真实 Provider Credential 报告      |
-| SSH consolidated release gate                       | 独立引擎与 10 项 SSH gate tests 已通过 | 四个 disposable VM child 尚待真实 Credential 执行                                    |
-| Docker consolidated release gate                    | Local+Docker 32 项 gate tests 已通过   | 单次 Gate-owned Image + 四份同 SHA/Catalog/Image 报告尚待真实 Credential 执行        |
-| Kubernetes consolidated release gate                | 公共引擎与 8 项 K8s gate tests 已通过  | 四个 disposable Kind child 尚待真实 Credential 执行                                  |
-| Worker Registry release gate                         | Registry gate tests `18/18` 已通过     | clean-SHA 双架构 push/digest evidence、签名与生产 retention 尚待记录                  |
-| SSH fixture                                         | 2026-07-14 disposable VM 13/13         | 不是当前 Commit 的真实 Provider gate                                                 |
-| Kubernetes fixture                                  | clean commit `2763ebd3` 13/13          | 不是当前 Commit 的真实 Provider gate                                                 |
+| 证据                                                | 当前结论                                   | 发布边界                                                                             |
+| --------------------------------------------------- | ------------------------------------------ | ------------------------------------------------------------------------------------ |
+| 真实 Codex/Claude Local two-Turn product-path smoke | clean commit `fb9e25ec` 各 12/12           | 经过 Control Plane/LocalSupervisor/agentd，但不是完整 Local Gate                     |
+| 真实 Codex/Claude Generated File + Checkpoint       | clean commit `be919393` matrix pass        | standalone Ready Artifact 与 Snapshot 已验；Diff 由下一行独立跟踪                    |
+| 真实 Codex/Claude Local Large Diff                  | clean commit `90fae52c` matrix pass        | Ready `diff`/下载/顺序/restart/cleanup/Secret scan 已验                              |
+| 真实 Codex/Claude Local failure matrix              | clean commit `61e38f4f` 各 `16/16`         | 401/429、scoped Host crash、Cursor expiry/restart 与新 Execution 已验                |
+| 真实 Codex/Claude consolidated Local release gate   | clean commit `253052aa` aggregate pass     | 四份 product/failure 报告同 SHA/hash，无 fail/skipped，cleanup/Secret scan 已验      |
+| 真实 Codex `0.144.x` `terminal-large`               | Explicit Unsupported                       | Unified Exec 仅保留 1 MiB Head/Tail；不得牺牲 durable Approval                       |
+| Claude ambient OAuth `terminal-large`               | Explicit Unsupported                       | 需 controlled Credential 绑定 Runtime Output Root                                    |
+| deterministic Local/Docker core suite               | 已通过                                     | 证明共享 Control Plane/agentd/Host orchestration，不证明真实 Adapter                 |
+| deterministic Provider fault matrix                 | malformed/oversized/crash 已通过           | 不是真实 Provider failure 分类                                                       |
+| deterministic Docker/Kubernetes failure matrix      | 已通过实现期运行                           | 不等于生产网络、真实 CNI 或正式 rollout                                              |
+| SSH real Provider runtime provisioning              | disposable VM preflight 已通过             | Host SHA + Codex 0.144.1 + Claude 2.1.197 已验；尚无真实 Credential 报告             |
+| SSH real Provider fault-injection transport         | Runner 99/99 + SSH fixture 16/16           | token-scoped reverse relay 与 systemd MainPID crash 已实现；尚无真实 Credential 报告 |
+| Docker real Provider fault-injection transport      | 实现期容器探针与 Docker 16/16 已通过       | 401/429/精确 Host crash 已实现；尚无真实 Provider Credential 报告                    |
+| Kubernetes real Provider fault-injection transport  | Runner 99/99 + Linux 容器探针通过          | host-gateway 401/429 与精确 Pod crash 已实现；尚无真实 Provider Credential 报告      |
+| SSH consolidated release gate                       | 独立引擎与 10 项 SSH gate tests 已通过     | 四个 disposable VM child 尚待真实 Credential 执行                                    |
+| Docker consolidated release gate                    | Local+Docker 32 项 gate tests 已通过       | 单次 Gate-owned Image + 四份同 SHA/Catalog/Image 报告尚待真实 Credential 执行        |
+| Kubernetes consolidated release gate                | 公共引擎与 8 项 K8s gate tests 已通过      | 四个 disposable Kind child 尚待真实 Credential 执行                                  |
+| Worker Registry release gate                        | clean commit `dc43a4d6` gate/report 已通过 | 签名、漏洞策略、生产 Registry Credential/retention 与 rollout 尚待记录               |
+| SSH fixture                                         | 2026-07-14 disposable VM 13/13             | 不是当前 Commit 的真实 Provider gate                                                 |
+| Kubernetes fixture                                  | clean commit `2763ebd3` 13/13              | 不是当前 Commit 的真实 Provider gate                                                 |
 
 真实 Provider × Target gate：
 
