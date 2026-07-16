@@ -21,6 +21,9 @@ from unittest import mock
 import acceptance_runner as acceptance
 
 
+REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
+
+
 def runner_options(*, restart_control_plane: bool = True) -> acceptance.RunnerOptions:
     return acceptance.RunnerOptions(
         target="fake",
@@ -3107,6 +3110,130 @@ class SSHDriverTest(unittest.TestCase):
         self.assertIn("relay-wait", events)
         self.assertFalse(driver.known_hosts_path.exists())
 
+    def test_provider_fault_server_uses_owned_reverse_relay_and_request_proof(self) -> None:
+        class RelayProcess:
+            pid = 4321
+            returncode: int | None = None
+
+            @staticmethod
+            def poll() -> None:
+                return None
+
+        driver = acceptance.SSHDriver(
+            pathlib.Path.cwd(),
+            dataclasses.replace(runner_options(), target="ssh"),
+            acceptance.Deadline(30.0),
+            acceptance.SecretRedactor(),
+        )
+        self.addCleanup(driver._release_state)
+        worker_proxy = acceptance._WorkerOnlyProxy(9)
+        worker_proxy.start()
+        self.addCleanup(worker_proxy.stop)
+        driver.worker_proxy = worker_proxy
+        driver.worker_proxy_relay_process = RelayProcess()  # type: ignore[assignment]
+        driver.worker_proxy_relay_port = 41235
+        server = driver.create_provider_fault_server("claudeAgent", "authentication")
+        server.start()
+        try:
+            evidence = driver.probe_provider_fault_server(server)
+            with self.assertRaises(acceptance.AcceptanceError) as duplicate:
+                worker_proxy.register_provider_fault_route(server.route_prefix, server.port)
+            request = urllib.request.Request(
+                f"http://127.0.0.1:{worker_proxy.port}{server.route_prefix}/v1/messages",
+                data=b'{}',
+                headers={"Content-Type": "application/json", "X-Api-Key": "fault-secret"},
+                method="POST",
+            )
+            with self.assertRaises(urllib.error.HTTPError) as raised:
+                urllib.request.urlopen(request, timeout=2.0)
+            raised.exception.close()
+            fault_evidence = server.evidence()
+        finally:
+            server.stop()
+
+        self.assertTrue(server.endpoint.startswith("http://127.0.0.1:41235/"))
+        self.assertEqual(duplicate.exception.code, "runner.provider_fault_route_duplicate")
+        self.assertEqual(raised.exception.code, 401)
+        self.assertEqual(fault_evidence["advertisedPort"], 41235)
+        self.assertEqual(fault_evidence["requestCount"], 1)
+        self.assertEqual(fault_evidence["paths"], ["/v1/messages"])
+        self.assertEqual(fault_evidence["credentialHeaderNames"], ["x-api-key"])
+        self.assertEqual(evidence["transport"], "reverse-ssh-loopback")
+        self.assertEqual(evidence["validationMode"], "controlled-provider-request")
+        self.assertFalse(evidence["probedFromWorker"])
+        self.assertFalse(evidence["endpointPersisted"])
+        self.assertNotIn(server.route_token, json.dumps(evidence))
+        self.assertIsNone(worker_proxy.provider_fault_upstream_port(server.route_prefix))
+
+        completed = acceptance.finalize_provider_fault_reachability(
+            evidence,
+            {"requestCount": 1},
+        )
+        self.assertTrue(completed["probedFromWorker"])
+
+    def test_host_crash_kills_one_protocol_v2_descendant_of_systemd_agentd(self) -> None:
+        driver = acceptance.SSHDriver(
+            pathlib.Path.cwd(),
+            dataclasses.replace(runner_options(), target="ssh"),
+            acceptance.Deadline(30.0),
+            acceptance.SecretRedactor(),
+        )
+        self.addCleanup(driver._release_state)
+        driver.machine_created = True
+        driver.machine_name = "synara-stage3-owned"
+        driver.service_name = "synara-agentd-target-id.service"
+        driver._require_service_active = mock.Mock(  # type: ignore[method-assign]
+            return_value={"mainPid": 321}
+        )
+        driver._remote_command = mock.Mock(  # type: ignore[method-assign]
+            return_value=json.dumps(
+                {
+                    "rootPid": 321,
+                    "candidateCount": 1,
+                    "descendantCount": 4,
+                    "providerHostPid": 654,
+                    "killed": True,
+                }
+            )
+        )
+
+        evidence = driver.crash_provider_host()
+
+        command = driver._remote_command.call_args.args[0]
+        self.assertEqual(command[:2], ["node", "-e"])
+        self.assertNotIn("--protocol-v2", command[2])
+        self.assertEqual(command[-1], "321")
+        self.assertEqual(evidence["providerHostPid"], 654)
+        self.assertTrue(evidence["scopedToDisposableMachine"])
+        self.assertTrue(evidence["scopedToSystemdService"])
+        self.assertTrue(evidence["scopedToAgentdDescendants"])
+        self.assertFalse(evidence["broadProcessMatchUsed"])
+
+    def test_host_crash_fails_closed_on_ambiguous_systemd_descendants(self) -> None:
+        driver = acceptance.SSHDriver(
+            pathlib.Path.cwd(),
+            dataclasses.replace(runner_options(), target="ssh"),
+            acceptance.Deadline(30.0),
+            acceptance.SecretRedactor(),
+        )
+        self.addCleanup(driver._release_state)
+        driver.machine_created = True
+        driver.service_name = "synara-agentd-target-id.service"
+        driver._require_service_active = mock.Mock(  # type: ignore[method-assign]
+            return_value={"mainPid": 321}
+        )
+        driver._remote_command = mock.Mock(  # type: ignore[method-assign]
+            return_value=json.dumps(
+                {"rootPid": 321, "candidateCount": 2, "descendantCount": 5}
+            )
+        )
+
+        with self.assertRaises(acceptance.AcceptanceError) as caught:
+            driver.crash_provider_host()
+
+        self.assertEqual(caught.exception.code, "runner.provider_host_process_ambiguous")
+        self.assertEqual(caught.exception.evidence["candidateCount"], 2)
+
     def test_generated_key_evidence_describes_local_deletion_and_encrypted_lifecycle(self) -> None:
         class KeyEvidenceDriver(acceptance.SSHDriver):
             def _local_command(
@@ -3159,6 +3286,114 @@ class SSHDriverTest(unittest.TestCase):
         restart_index = script_lines.index("systemctl restart ssh")
         self.assertLess(run_sshd_index, validate_index)
         self.assertLess(validate_index, restart_index)
+
+    def test_real_provider_setup_installs_locked_host_and_provider_tools(self) -> None:
+        driver = acceptance.SSHDriver(
+            pathlib.Path.cwd(),
+            dataclasses.replace(
+                runner_options(),
+                target="ssh",
+                suite="real-provider-smoke",
+                runner_command=(acceptance.SSH_PROVIDER_HOST_COMMAND_PATH,),
+            ),
+            acceptance.Deadline(30.0),
+            acceptance.SecretRedactor(),
+        )
+        self.addCleanup(driver._release_state)
+
+        script = driver._machine_setup_script()
+
+        self.assertIn(acceptance.SSH_REMOTE_PROVIDER_HOST_PATH, script)
+        self.assertIn(acceptance.SSH_REMOTE_PROVIDER_TOOLS_ROOT, script)
+        self.assertIn("npm ci --omit=dev --ignore-scripts --no-audit --no-fund", script)
+        self.assertIn("node node_modules/@anthropic-ai/claude-code/install.cjs", script)
+        self.assertIn(acceptance.SSH_PROVIDER_HOST_COMMAND_PATH, script)
+        self.assertIn("node_modules/.bin/codex", script)
+        self.assertIn("node_modules/.bin/claude", script)
+        self.assertNotIn(acceptance.SSH_REMOTE_FIXTURE_PATH, script)
+
+    def test_real_provider_artifacts_build_host_instead_of_fixture(self) -> None:
+        calls: list[list[str]] = []
+
+        class BuildDriver(acceptance.SSHDriver):
+            def _local_command(
+                self,
+                arguments: Sequence[str],
+                *,
+                cwd: pathlib.Path,
+                environment: Mapping[str, str],
+                log_path: pathlib.Path,
+                maximum_timeout: float,
+                error_code: str,
+                description: str,
+            ) -> None:
+                del cwd, environment, log_path, maximum_timeout, error_code, description
+                calls.append(list(arguments))
+                if arguments[0] == "go":
+                    output_path = pathlib.Path(arguments[arguments.index("-o") + 1])
+                else:
+                    output_path = pathlib.Path(arguments[arguments.index("--outfile") + 1])
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                output_path.write_bytes(b"runtime-binary")
+
+        driver = BuildDriver(
+            REPO_ROOT,
+            dataclasses.replace(
+                runner_options(),
+                target="ssh",
+                suite="real-provider-smoke",
+                runner_command=(acceptance.SSH_PROVIDER_HOST_COMMAND_PATH,),
+            ),
+            acceptance.Deadline(30.0),
+            acceptance.SecretRedactor(),
+        )
+        self.addCleanup(driver._release_state)
+
+        evidence = driver._prepare_ssh_artifacts()
+
+        bun_command = next(command for command in calls if command[0] == "bun")
+        self.assertIn(str(REPO_ROOT / "apps/provider-host/src/index.ts"), bun_command)
+        self.assertNotIn("provider-host-fixture.ts", " ".join(bun_command))
+        self.assertIn("providerHost", evidence)
+        self.assertNotIn("providerHostFixture", evidence)
+        self.assertEqual(evidence["providerHost"]["runtime"], "real-provider")
+        self.assertIn("providerTools", evidence)
+
+    def test_real_provider_runtime_verifies_locked_versions_and_bundle_digest(self) -> None:
+        driver = acceptance.SSHDriver(
+            REPO_ROOT,
+            dataclasses.replace(
+                runner_options(),
+                target="ssh",
+                suite="real-provider-smoke",
+                runner_command=(acceptance.SSH_PROVIDER_HOST_COMMAND_PATH,),
+            ),
+            acceptance.Deadline(30.0),
+            acceptance.SecretRedactor(),
+        )
+        self.addCleanup(driver._release_state)
+        driver.provider_host_bundle_path.parent.mkdir(parents=True, exist_ok=True)
+        driver.provider_host_bundle_path.write_bytes(b"provider-host-bundle")
+        expected_sha = hashlib.sha256(b"provider-host-bundle").hexdigest()
+
+        def remote(command: Sequence[str], **_kwargs: Any) -> str:
+            executable = command[0]
+            if executable.endswith("/codex"):
+                return "codex-cli 0.144.1\n"
+            if executable.endswith("/claude"):
+                return "2.1.197 (Claude Code)\n"
+            if executable == "sha256sum":
+                return f"{expected_sha}  {acceptance.SSH_REMOTE_PROVIDER_HOST_PATH}\n"
+            raise AssertionError(command)
+
+        driver._remote_command = mock.Mock(side_effect=remote)  # type: ignore[method-assign]
+
+        evidence = driver._inspect_ssh_provider_runtime()
+
+        self.assertEqual(evidence["kind"], "real-provider")
+        self.assertEqual(evidence["providerHost"]["sha256"], expected_sha)
+        self.assertEqual(evidence["providerTools"]["codex"]["version"], "0.144.1")
+        self.assertEqual(evidence["providerTools"]["claudeAgent"]["version"], "2.1.197")
 
 
 class KubernetesDriverObservationTest(unittest.TestCase):

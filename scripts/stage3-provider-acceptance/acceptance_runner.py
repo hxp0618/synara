@@ -68,6 +68,9 @@ TERMINAL_LARGE_PATTERN = b"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQ
 DOCKER_VOLUME_SENTINEL_PATH = "/data/.synara-stage3-provider-acceptance-volume"
 DOCKER_VOLUME_SENTINEL_VALUE = "synara-stage3-named-volume-continuity-v1"
 SSH_REMOTE_FIXTURE_PATH = "/opt/synara/acceptance/provider-host-fixture.mjs"
+SSH_REMOTE_PROVIDER_HOST_PATH = "/opt/synara/provider-host/index.mjs"
+SSH_PROVIDER_HOST_COMMAND_PATH = "/usr/local/bin/provider-host"
+SSH_REMOTE_PROVIDER_TOOLS_ROOT = "/opt/synara/provider-tools"
 SSH_SERVICE_USER = "synara"
 SSH_RELAY_LOOPBACK_HOST = "127.0.0.1"
 SSH_RELAY_TRANSPORT = "runner-owned reverse SSH relay to the local Worker-only proxy"
@@ -106,7 +109,8 @@ REAL_PROVIDER_FAILURE_CASES = (
     "provider-host-crash-retry",
     "cursor-expiry",
 )
-REAL_PROVIDER_HTTP_FAULT_TARGETS = ("local", "docker", "kubernetes")
+REAL_PROVIDER_HTTP_FAULT_TARGETS = ("local", "ssh", "docker", "kubernetes")
+REAL_PROVIDER_HOST_CRASH_TARGETS = ("local", "ssh", "docker", "kubernetes")
 REAL_PROVIDER_CURSOR_MAX_AGE = "1s"
 REAL_PROVIDER_CURSOR_EXPIRY_WAIT_SECONDS = 1.25
 REAL_PROVIDER_CASE_METADATA: Mapping[str, Mapping[str, str]] = {
@@ -982,6 +986,8 @@ class _WorkerOnlyProxy:
     """Expose only the Worker API surface while the full Control Plane stays on loopback."""
 
     def __init__(self, upstream_port: int) -> None:
+        self._provider_fault_routes: dict[str, int] = {}
+        self._provider_fault_routes_lock = threading.Lock()
         proxy = self
 
         class Handler(http.server.BaseHTTPRequestHandler):
@@ -1038,6 +1044,7 @@ class _WorkerOnlyProxy:
                 parsed = urllib.parse.urlsplit(self.path)
                 path = parsed.path
                 segments = path.split("/")
+                provider_fault_upstream_port = proxy.provider_fault_upstream_port(path)
                 if (
                     parsed.scheme
                     or parsed.netloc
@@ -1046,7 +1053,10 @@ class _WorkerOnlyProxy:
                     or "\\" in path
                     or "//" in path
                     or any(segment in {".", ".."} for segment in segments)
-                    or not any(path.startswith(prefix) for prefix in WORKER_PROXY_ALLOWED_PATH_PREFIXES)
+                    or (
+                        provider_fault_upstream_port is None
+                        and not any(path.startswith(prefix) for prefix in WORKER_PROXY_ALLOWED_PATH_PREFIXES)
+                    )
                 ):
                     self._json_error(404, "route_not_exposed")
                     return
@@ -1070,20 +1080,33 @@ class _WorkerOnlyProxy:
                     self._json_error(400, "request_body_incomplete")
                     return
 
+                allowed_request_headers = {
+                    "accept",
+                    "authorization",
+                    "content-type",
+                    "idempotency-key",
+                    "user-agent",
+                    "x-request-id",
+                }
+                if provider_fault_upstream_port is not None:
+                    allowed_request_headers.update(
+                        {
+                            "anthropic-beta",
+                            "anthropic-version",
+                            "openai-beta",
+                            "x-api-key",
+                        }
+                    )
                 headers = {
                     name: value
                     for name, value in self.headers.items()
-                    if name.lower()
-                    in {
-                        "accept",
-                        "authorization",
-                        "content-type",
-                        "idempotency-key",
-                        "user-agent",
-                        "x-request-id",
-                    }
+                    if name.lower() in allowed_request_headers
                 }
-                upstream = http.client.HTTPConnection("127.0.0.1", proxy.upstream_port, timeout=30.0)
+                upstream = http.client.HTTPConnection(
+                    "127.0.0.1",
+                    provider_fault_upstream_port or proxy.upstream_port,
+                    timeout=30.0,
+                )
                 response_started = False
                 try:
                     upstream.request(self.command, self.path, body=body, headers=headers)
@@ -1098,6 +1121,8 @@ class _WorkerOnlyProxy:
                         "etag",
                         "last-modified",
                     }
+                    if provider_fault_upstream_port is not None:
+                        allowed_response_headers.update({"retry-after", "x-request-id"})
                     for name, value in response.getheaders():
                         if name.lower() in allowed_response_headers:
                             self.send_header(name, value)
@@ -1110,7 +1135,12 @@ class _WorkerOnlyProxy:
                         self.wfile.write(chunk)
                 except (OSError, http.client.HTTPException):
                     if not response_started and not self.wfile.closed:
-                        self._json_error(502, "control_plane_unavailable")
+                        self._json_error(
+                            502,
+                            "provider_fault_unavailable"
+                            if provider_fault_upstream_port is not None
+                            else "control_plane_unavailable",
+                        )
                 finally:
                     upstream.close()
 
@@ -1160,6 +1190,38 @@ class _WorkerOnlyProxy:
                 "runner.worker_proxy_stop_failed",
                 "Worker-only proxy did not stop within five seconds.",
             )
+
+    def register_provider_fault_route(self, route_prefix: str, upstream_port: int) -> None:
+        if re.fullmatch(r"/[0-9a-f]{32}", route_prefix) is None:
+            raise AcceptanceError(
+                "runner.provider_fault_route_invalid",
+                "Provider fault route registration received an invalid route prefix.",
+            )
+        if not (1 <= upstream_port <= 65535):
+            raise AcceptanceError(
+                "runner.provider_fault_route_invalid",
+                "Provider fault route registration received an invalid upstream port.",
+            )
+        with self._provider_fault_routes_lock:
+            if route_prefix in self._provider_fault_routes:
+                raise AcceptanceError(
+                    "runner.provider_fault_route_duplicate",
+                    "Provider fault route registration collided with an active route.",
+                )
+            self._provider_fault_routes[route_prefix] = upstream_port
+
+    def unregister_provider_fault_route(self, route_prefix: str, upstream_port: int) -> None:
+        with self._provider_fault_routes_lock:
+            if self._provider_fault_routes.get(route_prefix) == upstream_port:
+                del self._provider_fault_routes[route_prefix]
+
+    def provider_fault_upstream_port(self, path: str) -> int | None:
+        with self._provider_fault_routes_lock:
+            routes = tuple(self._provider_fault_routes.items())
+        for route_prefix, upstream_port in routes:
+            if path == route_prefix or path.startswith(route_prefix + "/"):
+                return upstream_port
+        return None
 
     def interrupt_transport(self) -> None:
         self._transport_interrupted.set()
@@ -1303,6 +1365,7 @@ class _ProviderFaultServer:
             ) from None
         self.server.daemon_threads = True
         self.port = int(self.server.server_address[1])
+        self.advertised_port = self.port
         self.thread = threading.Thread(
             target=self.server.serve_forever,
             kwargs={"poll_interval": 0.1},
@@ -1312,7 +1375,7 @@ class _ProviderFaultServer:
 
     @property
     def endpoint(self) -> str:
-        return f"http://{self.advertised_host}:{self.port}{self.route_prefix}"
+        return f"http://{self.advertised_host}:{self.advertised_port}{self.route_prefix}"
 
     @property
     def credential_base_url(self) -> str:
@@ -1347,6 +1410,7 @@ class _ProviderFaultServer:
             "listenAddress": self.listen_host,
             "advertisedHost": self.advertised_host,
             "port": self.port,
+            "advertisedPort": self.advertised_port,
             "routeTokenPersisted": False,
             "unscopedRequestCount": unscoped_request_count,
             "responseStatus": 401 if self.fault == "authentication" else 429,
@@ -1377,6 +1441,50 @@ class _ProviderFaultServer:
         return status, {
             "error": {"type": error_type, "code": error_code, "message": message},
         }
+
+
+class _SSHProviderFaultServer(_ProviderFaultServer):
+    def __init__(self, driver: "SSHDriver", provider: str, fault: str) -> None:
+        super().__init__(provider, fault)
+        self.driver = driver
+        self.route_registered = False
+
+    def start(self) -> None:
+        self.driver._ensure_worker_proxy_relay()
+        worker_proxy = self.driver.worker_proxy
+        if worker_proxy is None:
+            raise AcceptanceError(
+                "runner.ssh_provider_fault_relay_unavailable",
+                "The SSH Worker-only proxy was unavailable for Provider fault routing.",
+            )
+        self.advertised_port = self.driver.worker_proxy_relay_port
+        super().start()
+        try:
+            worker_proxy.register_provider_fault_route(self.route_prefix, self.port)
+        except Exception:
+            super().stop()
+            raise
+        self.route_registered = True
+
+    def stop(self) -> None:
+        errors: list[str] = []
+        worker_proxy = self.driver.worker_proxy
+        if self.route_registered and worker_proxy is not None:
+            try:
+                worker_proxy.unregister_provider_fault_route(self.route_prefix, self.port)
+            except Exception as error:
+                errors.append(self.driver.redactor.text(str(error)))
+        self.route_registered = False
+        try:
+            super().stop()
+        except Exception as error:
+            errors.append(self.driver.redactor.text(str(error)))
+        if errors:
+            raise AcceptanceError(
+                "runner.ssh_provider_fault_cleanup_failed",
+                "The SSH Provider fault endpoint could not be cleaned completely.",
+                {"errors": errors},
+            )
 
 
 def provider_host_crash_script() -> str:
@@ -1828,8 +1936,8 @@ class LocalDriver:
         if self.name != "local" or os.name != "posix":
             raise AcceptanceUnsupported(
                 "runner.real_provider_host_crash_unsupported",
-                "Scoped real Provider Host crash injection is currently implemented only for the Local POSIX Target.",
-                {"target": self.name, "requiredTarget": "local"},
+                "The selected Target does not implement scoped real Provider Host crash injection.",
+                {"target": self.name, "requiredTargets": list(REAL_PROVIDER_HOST_CRASH_TARGETS)},
             )
         process = self.process
         if process is None or process.poll() is not None:
@@ -3029,6 +3137,13 @@ class SSHDriver(ManagedWorkerDriver):
             f"synara-agentd-linux-{options.ssh_machine_arch}"
         )
         self.fixture_bundle_path = self.state_dir / "bin" / "provider-host-fixture.mjs"
+        self.provider_host_bundle_path = self.state_dir / "bin" / "provider-host.mjs"
+        self.provider_tools_package_path = (
+            self.repo_root / "deploy" / "worker" / "provider-tools" / "package.json"
+        )
+        self.provider_tools_lock_path = (
+            self.repo_root / "deploy" / "worker" / "provider-tools" / "package-lock.json"
+        )
         self.worker_proxy_relay_process: subprocess.Popen[str] | None = None
         self.worker_proxy_relay_log_handle: Any | None = None
         self.worker_proxy_relay_log_path = self.logs_dir / "ssh-worker-proxy-relay.log"
@@ -3037,6 +3152,62 @@ class SSHDriver(ManagedWorkerDriver):
     @property
     def worker_proxy_host(self) -> str:
         return SSH_RELAY_LOOPBACK_HOST
+
+    def create_provider_fault_server(self, provider: str, fault: str) -> _ProviderFaultServer:
+        return _SSHProviderFaultServer(self, provider, fault)
+
+    def probe_provider_fault_server(
+        self,
+        server: _ProviderFaultServer,
+    ) -> Mapping[str, Any]:
+        process = self.worker_proxy_relay_process
+        if (
+            not isinstance(server, _SSHProviderFaultServer)
+            or not server.route_registered
+            or self.worker_proxy is None
+            or not self.worker_proxy.thread.is_alive()
+            or process is None
+            or process.poll() is not None
+        ):
+            raise AcceptanceError(
+                "runner.ssh_provider_fault_relay_unavailable",
+                "The SSH Provider fault reverse relay was unavailable.",
+            )
+        return {
+            "target": self.name,
+            "transport": "reverse-ssh-loopback",
+            "vmListenHost": SSH_RELAY_LOOPBACK_HOST,
+            "vmListenPort": self.worker_proxy_relay_port,
+            "validationMode": "controlled-provider-request",
+            "probedFromWorker": False,
+            "endpointPersisted": False,
+            "readsUserSSHConfiguration": False,
+        }
+
+    def crash_provider_host(self) -> Mapping[str, Any]:
+        service_name = self.service_name
+        if not service_name or not self.machine_created:
+            raise AcceptanceError(
+                "runner.ssh_service_missing",
+                "The managed SSH service was unavailable during Provider Host crash injection.",
+            )
+        service = self._require_service_active(service_name)
+        main_pid = int(service["mainPid"])
+        output = self._remote_command(
+            ["node", "-e", provider_host_crash_script(), str(main_pid)],
+            maximum_timeout=15.0,
+        )
+        return provider_host_crash_evidence(
+            output,
+            target=self.name,
+            scope={
+                "machineName": self.machine_name,
+                "serviceName": service_name,
+                "systemdMainPid": main_pid,
+                "scopedToDisposableMachine": True,
+                "scopedToSystemdService": True,
+            },
+        )
 
     def prepare(self) -> Mapping[str, Any]:
         control_plane = super().prepare()
@@ -3570,34 +3741,73 @@ class SSHDriver(ManagedWorkerDriver):
             description="Linux synara-agentd cross-build",
         )
         agentd_duration = elapsed_ms(agentd_started)
-        fixture_started = time.monotonic()
+        real_provider_runtime = self.options.suite == "real-provider-smoke"
+        provider_host_bundle_path = (
+            self.provider_host_bundle_path if real_provider_runtime else self.fixture_bundle_path
+        )
+        provider_host_source = (
+            self.repo_root / "apps" / "provider-host" / "src" / "index.ts"
+            if real_provider_runtime
+            else self.repo_root
+            / "scripts"
+            / "stage3-provider-acceptance"
+            / "provider-host-fixture.ts"
+        )
+        provider_host_started = time.monotonic()
         self._local_command(
             [
                 "bun",
                 "build",
-                str(
-                    self.repo_root
-                    / "scripts"
-                    / "stage3-provider-acceptance"
-                    / "provider-host-fixture.ts"
-                ),
+                str(provider_host_source),
                 "--target=node",
                 "--outfile",
-                str(self.fixture_bundle_path),
+                str(provider_host_bundle_path),
             ],
             cwd=self.repo_root,
             environment=self._tool_environment(),
-            log_path=self.logs_dir / "ssh-provider-host-fixture-build.log",
+            log_path=self.logs_dir
+            / (
+                "ssh-provider-host-build.log"
+                if real_provider_runtime
+                else "ssh-provider-host-fixture-build.log"
+            ),
             maximum_timeout=max(60.0, self.deadline.remaining()),
-            error_code="runner.ssh_fixture_build_failed",
-            description="Provider Host fixture build",
+            error_code=(
+                "runner.ssh_provider_host_build_failed"
+                if real_provider_runtime
+                else "runner.ssh_fixture_build_failed"
+            ),
+            description=(
+                "real Provider Host build"
+                if real_provider_runtime
+                else "Provider Host fixture build"
+            ),
         )
-        fixture_duration = elapsed_ms(fixture_started)
-        if not self.agentd_binary_path.is_file() or not self.fixture_bundle_path.is_file():
+        provider_host_duration = elapsed_ms(provider_host_started)
+        if not self.agentd_binary_path.is_file() or not provider_host_bundle_path.is_file():
             raise AcceptanceError(
                 "runner.ssh_artifact_missing",
                 "SSH acceptance build did not produce the required runtime artifacts.",
             )
+        if real_provider_runtime and (
+            not self.provider_tools_package_path.is_file()
+            or not self.provider_tools_lock_path.is_file()
+        ):
+            raise AcceptanceError(
+                "runner.ssh_provider_tools_lock_missing",
+                "SSH real Provider runtime omitted its locked Provider tools package inputs.",
+            )
+        provider_host_evidence = {
+            "path": str(provider_host_bundle_path),
+            "remotePath": (
+                SSH_REMOTE_PROVIDER_HOST_PATH
+                if real_provider_runtime
+                else SSH_REMOTE_FIXTURE_PATH
+            ),
+            "sha256": hashlib.sha256(provider_host_bundle_path.read_bytes()).hexdigest(),
+            "durationMs": provider_host_duration,
+            "runtime": "real-provider" if real_provider_runtime else "deterministic-fixture",
+        }
         return {
             "agentd": {
                 "path": str(self.agentd_binary_path),
@@ -3606,12 +3816,26 @@ class SSHDriver(ManagedWorkerDriver):
                 "sha256": hashlib.sha256(self.agentd_binary_path.read_bytes()).hexdigest(),
                 "durationMs": agentd_duration,
             },
-            "providerHostFixture": {
-                "path": str(self.fixture_bundle_path),
-                "remotePath": SSH_REMOTE_FIXTURE_PATH,
-                "sha256": hashlib.sha256(self.fixture_bundle_path.read_bytes()).hexdigest(),
-                "durationMs": fixture_duration,
-            },
+            (
+                "providerHost"
+                if real_provider_runtime
+                else "providerHostFixture"
+            ): provider_host_evidence,
+            **(
+                {
+                    "providerTools": {
+                        "packageSha256": hashlib.sha256(
+                            self.provider_tools_package_path.read_bytes()
+                        ).hexdigest(),
+                        "lockSha256": hashlib.sha256(
+                            self.provider_tools_lock_path.read_bytes()
+                        ).hexdigest(),
+                        "remoteRoot": SSH_REMOTE_PROVIDER_TOOLS_ROOT,
+                    }
+                }
+                if real_provider_runtime
+                else {}
+            ),
         }
 
     def _local_command(
@@ -3745,11 +3969,19 @@ class SSHDriver(ManagedWorkerDriver):
             f"{stage}/{self.client_public_key_path.name}",
             "0600",
         )
-        self._remote_upload(
-            self.fixture_bundle_path,
-            f"{stage}/{self.fixture_bundle_path.name}",
-            "0600",
-        )
+        if self.options.suite == "real-provider-smoke":
+            for source in (
+                self.provider_host_bundle_path,
+                self.provider_tools_package_path,
+                self.provider_tools_lock_path,
+            ):
+                self._remote_upload(source, f"{stage}/{source.name}", "0600")
+        else:
+            self._remote_upload(
+                self.fixture_bundle_path,
+                f"{stage}/{self.fixture_bundle_path.name}",
+                "0600",
+            )
         self._remote_command(
             ["sh", "-ceu", self._machine_setup_script()],
             log_path=self.logs_dir / "ssh-machine-setup.log",
@@ -3798,6 +4030,11 @@ class SSHDriver(ManagedWorkerDriver):
                 "The disposable SSH endpoint did not return an SSH protocol banner.",
                 {"machineAddress": self.machine_ip, "port": 22},
             )
+        provider_runtime = (
+            self._inspect_ssh_provider_runtime()
+            if self.options.suite == "real-provider-smoke"
+            else {"kind": "deterministic-fixture"}
+        )
         return {
             "machineName": self.machine_name,
             "ownedMachine": True,
@@ -3810,9 +4047,74 @@ class SSHDriver(ManagedWorkerDriver):
                 "vmListenHost": SSH_RELAY_LOOPBACK_HOST,
             },
             "nodeVersion": self.options.ssh_node_version,
+            "providerRuntime": provider_runtime,
             "sshd": "active",
             "initSystem": "systemd",
             "hostKeyFingerprint": self._host_key_fingerprint(self.host_key),
+        }
+
+    def _inspect_ssh_provider_runtime(self) -> Mapping[str, Any]:
+        try:
+            package = json.loads(self.provider_tools_package_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise AcceptanceError(
+                "runner.ssh_provider_tools_lock_invalid",
+                f"SSH Provider tools package metadata was invalid: {error}",
+            ) from None
+        dependencies = package.get("dependencies") if isinstance(package, dict) else None
+        codex_version = dependencies.get("@openai/codex") if isinstance(dependencies, dict) else None
+        claude_version = (
+            dependencies.get("@anthropic-ai/claude-code")
+            if isinstance(dependencies, dict)
+            else None
+        )
+        if not isinstance(codex_version, str) or not isinstance(claude_version, str):
+            raise AcceptanceError(
+                "runner.ssh_provider_tools_lock_invalid",
+                "SSH Provider tools package metadata omitted locked Codex or Claude versions.",
+            )
+        codex_output = self._remote_command(
+            [f"{SSH_REMOTE_PROVIDER_TOOLS_ROOT}/node_modules/.bin/codex", "--version"]
+        ).strip()
+        claude_output = self._remote_command(
+            [f"{SSH_REMOTE_PROVIDER_TOOLS_ROOT}/node_modules/.bin/claude", "--version"]
+        ).strip()
+        if codex_version not in codex_output or claude_version not in claude_output:
+            raise AcceptanceError(
+                "runner.ssh_provider_tools_version_mismatch",
+                "SSH Provider CLI versions did not match the locked package inputs.",
+                {
+                    "expectedCodexVersion": codex_version,
+                    "expectedClaudeVersion": claude_version,
+                },
+            )
+        provider_host_sha = self._remote_command(
+            ["sha256sum", SSH_REMOTE_PROVIDER_HOST_PATH]
+        ).split(maxsplit=1)[0]
+        expected_provider_host_sha = hashlib.sha256(
+            self.provider_host_bundle_path.read_bytes()
+        ).hexdigest()
+        if provider_host_sha != expected_provider_host_sha:
+            raise AcceptanceError(
+                "runner.ssh_provider_host_digest_mismatch",
+                "SSH Provider Host bundle digest did not match the local build.",
+            )
+        return {
+            "kind": "real-provider",
+            "providerHost": {
+                "command": SSH_PROVIDER_HOST_COMMAND_PATH,
+                "remotePath": SSH_REMOTE_PROVIDER_HOST_PATH,
+                "sha256": provider_host_sha,
+            },
+            "providerTools": {
+                "remoteRoot": SSH_REMOTE_PROVIDER_TOOLS_ROOT,
+                "lockedInstall": True,
+                "codex": {"version": codex_version, "versionOutput": codex_output[:500]},
+                "claudeAgent": {
+                    "version": claude_version,
+                    "versionOutput": claude_output[:500],
+                },
+            },
         }
 
     def _machine_setup_script(self) -> str:
@@ -3820,6 +4122,31 @@ class SSHDriver(ManagedWorkerDriver):
         version = self.options.ssh_node_version
         archive = f"node-v{version}-linux-{node_arch}.tar.xz"
         stage = "/tmp/synara-stage3-acceptance"
+        if self.options.suite == "real-provider-smoke":
+            runtime_install = [
+                f"install -d -m 0755 {pathlib.PurePosixPath(SSH_REMOTE_PROVIDER_HOST_PATH).parent}",
+                f"install -d -m 0755 {SSH_REMOTE_PROVIDER_TOOLS_ROOT}",
+                f"install -m 0644 {stage}/{self.provider_host_bundle_path.name} {SSH_REMOTE_PROVIDER_HOST_PATH}",
+                f"install -m 0644 {stage}/{self.provider_tools_package_path.name} {SSH_REMOTE_PROVIDER_TOOLS_ROOT}/package.json",
+                f"install -m 0644 {stage}/{self.provider_tools_lock_path.name} {SSH_REMOTE_PROVIDER_TOOLS_ROOT}/package-lock.json",
+                f"cd {SSH_REMOTE_PROVIDER_TOOLS_ROOT}",
+                "npm ci --omit=dev --ignore-scripts --no-audit --no-fund",
+                "node node_modules/@anthropic-ai/claude-code/install.cjs",
+                "npm cache clean --force",
+                f"cat > {SSH_PROVIDER_HOST_COMMAND_PATH} <<'EOF'",
+                "#!/bin/sh",
+                f"export PATH={SSH_REMOTE_PROVIDER_TOOLS_ROOT}/node_modules/.bin:$PATH",
+                f'exec node {SSH_REMOTE_PROVIDER_HOST_PATH} "$@"',
+                "EOF",
+                f"chmod 0755 {SSH_PROVIDER_HOST_COMMAND_PATH}",
+                f"test -x {SSH_REMOTE_PROVIDER_TOOLS_ROOT}/node_modules/.bin/codex",
+                f"test -x {SSH_REMOTE_PROVIDER_TOOLS_ROOT}/node_modules/.bin/claude",
+            ]
+        else:
+            runtime_install = [
+                f"install -d -m 0755 {pathlib.PurePosixPath(SSH_REMOTE_FIXTURE_PATH).parent}",
+                f"install -m 0644 {stage}/{self.fixture_bundle_path.name} {SSH_REMOTE_FIXTURE_PATH}",
+            ]
         return "\n".join(
             [
                 "export DEBIAN_FRONTEND=noninteractive",
@@ -3828,8 +4155,6 @@ class SSHDriver(ManagedWorkerDriver):
                 f"id -u {SSH_SERVICE_USER} >/dev/null",
                 "install -d -m 0700 /root/.ssh",
                 f"install -m 0600 {stage}/{self.client_public_key_path.name} /root/.ssh/authorized_keys",
-                f"install -d -m 0755 {pathlib.PurePosixPath(SSH_REMOTE_FIXTURE_PATH).parent}",
-                f"install -m 0644 {stage}/{self.fixture_bundle_path.name} {SSH_REMOTE_FIXTURE_PATH}",
                 "workdir=$(mktemp -d /tmp/synara-node.XXXXXX)",
                 "trap 'rm -rf \"$workdir\"' EXIT",
                 "cd \"$workdir\"",
@@ -3837,6 +4162,8 @@ class SSHDriver(ManagedWorkerDriver):
                 f"curl -fsSLO https://nodejs.org/dist/v{version}/SHASUMS256.txt",
                 f"grep '  {archive}$' SHASUMS256.txt | sha256sum -c -",
                 f"tar -xJf {archive} -C /usr/local --strip-components=1",
+                f"test \"$(node --version)\" = v{version}",
+                *runtime_install,
                 "cat > /etc/ssh/sshd_config.d/99-synara-stage3-acceptance.conf <<'EOF'",
                 "PasswordAuthentication no",
                 "KbdInteractiveAuthentication no",
@@ -3850,7 +4177,6 @@ class SSHDriver(ManagedWorkerDriver):
                 "test \"$(cat /proc/1/comm)\" = systemd",
                 "systemctl is-active --quiet ssh",
                 "systemctl is-enabled --quiet ssh",
-                f"test \"$(node --version)\" = v{version}",
                 f"rm -rf {stage}",
             ]
         )
@@ -6484,10 +6810,12 @@ class AcceptanceSuite:
         fault_server = create_fault_server(self.options.provider, fault)
         fault_secret = f"stage3-provider-fault-{uuid.uuid4()}"
         self.redactor.add(fault_secret, "[REDACTED_PROVIDER_FAULT_CREDENTIAL]")
-        self.redactor.add(fault_server.endpoint, "[REDACTED_PROVIDER_FAULT_ENDPOINT]")
         self.redactor.add(fault_server.route_token, "[REDACTED_PROVIDER_FAULT_ROUTE]")
-        fault_server.start()
+        fault_server_started = False
         try:
+            fault_server.start()
+            fault_server_started = True
+            self.redactor.add(fault_server.endpoint, "[REDACTED_PROVIDER_FAULT_ENDPOINT]")
             reachability = dict(probe_fault_server(fault_server))
             credential = self._create_real_provider_credential(
                 title=f"Stage 3 Real Provider {failure_case}",
@@ -6514,7 +6842,8 @@ class AcceptanceSuite:
                 session_id=session_id,
             )
         finally:
-            fault_server.stop()
+            if fault_server_started:
+                fault_server.stop()
         fault_evidence = fault_server.evidence()
         if int(fault_evidence.get("requestCount") or 0) < 1:
             raise AcceptanceError(
@@ -10730,7 +11059,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "localPrivateKeyPlaintextDeletedAfterProvision": True,
                 "controlPlaneCredentialLifecycle": SSH_CREDENTIAL_LIFECYCLE,
                 "readsUserSSHConfiguration": False,
-                "runtimeBuild": "cross-built-per-run",
+                "runtimeBuild": (
+                    "real-provider-host-plus-locked-tools-per-run"
+                    if real_provider_smoke
+                    else "deterministic-fixture-cross-built-per-run"
+                ),
                 "cleanupSemantics": (
                     "ssh/revoke removes the systemd unit, environment, and agentd binary; deletion of the owned "
                     "OrbStack machine is infrastructure cleanup and does not prove product-level Workspace purge"

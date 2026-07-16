@@ -67,6 +67,24 @@ python3 scripts/stage3-provider-acceptance/acceptance_runner.py \
   --timeout 1800
 ```
 
+For SSH, use the owned disposable OrbStack target and the real Host command installed by the Runner:
+
+```sh
+python3 scripts/stage3-provider-acceptance/acceptance_runner.py \
+  --suite real-provider-smoke \
+  --target ssh \
+  --provider codex \
+  --runner-command-json '["/usr/local/bin/provider-host"]' \
+  --real-provider-credential-env SYNARA_ACCEPTANCE_CODEX_KEY \
+  --real-provider-matrix \
+  --timeout 3600
+```
+
+The SSH real-provider path cross-builds `synara-agentd` and the Provider Host bundle from the current checkout,
+installs the exact Codex and Claude Code versions from `deploy/worker/provider-tools/package-lock.json`, verifies the
+remote CLI versions and Host SHA, and then provisions through the product SSH install API. The deterministic SSH
+suite continues to upload only `provider-host-fixture.mjs`; fixture and real runtime artifacts are never confused.
+
 The Runner reads the value only when creating the isolated Control Plane Credential, registers it with the output
 redactor before the API call, binds the Credential ID to the real Provider Session, and never persists the variable
 name or secret in reports. Agentd delivers the resolved Credential only through the existing anonymous FD 3 path;
@@ -166,22 +184,32 @@ that is registered with output redaction and omitted from report paths. Local bi
 ephemeral host port, advertises the configured `--docker-control-plane-host`, and probes the endpoint from the exact
 managed Worker container before creating the fault Session. Kubernetes uses the same configured host-gateway as its
 Worker-only Control Plane proxy; the actual controlled Provider request from the execution-pinned Pod proves
-reachability, so the unguessable endpoint is never persisted in a probe Pod specification. Docker Host crash
-injection executes inside the exact managed container. Kubernetes first requires exactly one Running Pod for the
-Target, then executes inside its `agentd` container. Both walk only PID 1 descendants, require exactly one
-`--protocol-v2` process, and fail closed instead of using a host-wide or Namespace-wide process match. Codex
-controlled credentials use an execution-local `CODEX_HOME`; Claude controlled credentials use the existing
-execution-local `CLAUDE_CONFIG_DIR`. Cursor expiry does not edit SQLite or Cursor bytes. `--keep` can preserve
-isolated state for diagnosis, but that binary state is local-only evidence and must not be committed.
+reachability, so the unguessable endpoint is never persisted in a probe Pod specification. SSH reuses its already
+established pinned-Host-Key Worker-only reverse relay: the local proxy temporarily registers only the exact random
+fault route, forwards Provider Credential/version headers and 429 response metadata only for that route, and removes
+the mapping when the fault server stops. It does not retain the one-time SSH private key or open a second tunnel
+after provisioning. Docker Host crash injection executes inside the exact managed container. Kubernetes first
+requires exactly one Running Pod for the Target, then executes inside its `agentd` container. SSH uses the managed
+systemd service MainPID as its agentd root inside the owned disposable machine. All three walk only scoped agentd
+descendants, require exactly one `--protocol-v2` process, and fail closed instead of using a host-wide, machine-wide,
+or Namespace-wide process match. Codex controlled credentials use an execution-local `CODEX_HOME`; Claude controlled
+credentials use the existing execution-local `CLAUDE_CONFIG_DIR`. Cursor expiry does not edit SQLite or Cursor
+bytes. `--keep` can preserve isolated state for diagnosis, but that binary state is local-only evidence and must not
+be committed.
 
 The latest clean-worktree Node.js 24.13.1 Codex and Claude Local results are recorded in
 `docs/reports/stage-3-real-provider-local-failure-matrix-61e38f4f.md`. Both pass all 16 cases, exact cleanup and the
 output Secret scan. Docker 401/429 reachability and scoped Host crash have implementation-time unit, real container
-and deterministic Target regression coverage. Kubernetes now has host-gateway 401/429 transport, actual-request
-reachability accounting, unique execution-Pod selection and shared Linux `/proc` Host-crash coverage. No real
-Docker or Kubernetes Codex/Claude failure report exists without an operator-provided controlled product Credential.
-The clean evidence therefore still closes only the Local failure slice; SSH/Docker/Kubernetes release, concurrency
-and soak gates remain open.
+and deterministic Target regression coverage. SSH now has token-scoped reverse-relay routing, actual-request
+reachability accounting and systemd-MainPID-scoped Host crash unit coverage; a current dirty-worktree disposable
+OrbStack fixture passes all 16 deterministic cases with exact machine/key cleanup and no Secret findings. A separate
+no-Provider-call runtime preflight builds the real Host bundle from the checkout, installs the checked-in locked
+Codex `0.144.1` and Claude Code `2.1.197` packages in a disposable Ubuntu 24.04 machine, verifies CLI versions and
+the remote Host SHA, then removes the exact machine and local key material. Kubernetes has host-gateway 401/429
+transport, actual-request reachability accounting, unique execution-Pod selection and shared Linux `/proc`
+Host-crash coverage. No real SSH, Docker or Kubernetes Codex/Claude failure report exists without an
+operator-provided controlled product Credential. The clean evidence therefore still closes only the Local failure
+slice; SSH/Docker/Kubernetes release, concurrency and soak gates remain open.
 
 ## Consolidated real Provider Local release gate
 

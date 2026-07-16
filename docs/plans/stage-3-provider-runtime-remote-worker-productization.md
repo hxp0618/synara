@@ -1431,16 +1431,22 @@ Provider × Capability × Execution Target
   登录，缺少显式 Credential source 时会在 Image build 前拒绝；Docker Worker 使用 Image 内的
   `/usr/local/bin/provider-host`，Credential 仍由 Control Plane 经 agentd FD 3 交付。当前只证明入口、
   fail-closed 和脱敏实现，不构成真实 Docker Codex/Claude product matrix 证据。
-- Docker/Kubernetes 真实 Provider failure 路径已补齐受控 401/429 endpoint 与 scoped Host crash 注入。
+- SSH/Docker/Kubernetes 真实 Provider failure 路径已补齐受控 401/429 endpoint 与 scoped Host crash 注入。
   Endpoint 使用每次运行随机 route token 和临时宿主机端口；Docker 从精确 managed Worker 容器主动探测，
   Kubernetes 复用 Worker Control Plane 的 host-gateway，并以 execution-pinned Pod 发出的实际受控 Provider
-  请求完成可达性证明，避免把完整 endpoint 持久化到 probe Pod Spec。Crash 共用 Linux `/proc` 扫描器：
-  Docker 限定精确容器，Kubernetes 先要求 Target 下唯一 Running execution Pod，再在其 `agentd` 容器内只
-  遍历 PID 1 后代；两者均只允许唯一 `--protocol-v2` 进程并发送 `SIGKILL`，候选为 0/多个、Pod 多义或
-  返回结构异常时 fail closed。当前工作区已通过 Runner `92/92`、全套 Python `136/136`、真实 Linux 容器
-  crash 探针、既有 Docker endpoint 探针与 deterministic Docker `16/16`，以及 Codex/Claude Local 401/429
-  focused matrix 各 `14/14`；但仍缺受控 Provider 凭据下的真实 Docker/Kubernetes product/failure 报告，
-  SSH 同类 fault transport 也未实现，因此四 Target Gate 保持 open。
+  请求完成可达性证明，避免把完整 endpoint 持久化到 probe Pod Spec。SSH 不保留 provision 后已删除的一次性
+  私钥，也不创建第二条隧道；它在既有 pinned-Host-Key Worker-only reverse relay 上临时注册精确 route-token
+  upstream，仅该路由允许 Provider `x-api-key`/版本头与 429 响应头，并以实际 Provider 请求证明可达性后注销。
+  Crash 共用 Linux `/proc` 扫描器：Docker 限定精确容器，Kubernetes 先要求 Target 下唯一 Running execution
+  Pod，再在其 `agentd` 容器内遍历 PID 1 后代；SSH 以 owned disposable machine 中 systemd service MainPID
+  为 agentd root。三者均只允许唯一 `--protocol-v2` 后代并发送 `SIGKILL`，候选为 0/多个、Pod 多义或返回
+  结构异常时 fail closed。当前工作区已通过 Runner `98/98`、全套 Python `142/142`、真实 Linux 容器 crash
+  探针、SSH token-scoped proxy focused tests、既有 Docker endpoint 探针与 deterministic Docker `16/16`；
+  当前 dirty-worktree disposable OrbStack SSH fixture 也通过 `16/16`、精确 machine/key cleanup 与零 Secret
+  finding。SSH real-provider runtime 预检进一步从当前源码构建并上传 Host bundle，按 checked-in npm lock
+  在 disposable Ubuntu 24.04 安装并验证 Codex `0.144.1`、Claude Code `2.1.197`、Host SHA 与
+  `/usr/local/bin/provider-host`，随后删除 machine/key 且未发现 Credential/private-key material。但仍缺受控
+  Provider 凭据下的真实 SSH/Docker/Kubernetes product/failure 报告，因此四 Target Gate 保持 open。
 - Consolidated release gate 已抽取 target-aware 公共验证器，Local 既有 CLI/Schema 与冻结 Unsupported 边界
   保持兼容；新增 `docker_release_gate.py` 在完全 clean SHA 上串行运行 Codex/Claude product + failure 四份
   child report。每个 child 仅继承工具白名单与当前 Provider Credential；Gate 从 clean SHA 单次构建带唯一
@@ -1456,8 +1462,9 @@ Provider × Capability × Execution Target
   创建并删除 disposable Kind cluster，复用同一 host Worker Image 且验证嵌套
   `kubernetes.containerEngine` Image ID、`ownedClusterRemoved=true`、`ownedWorkerImageRemoved=false` 与
   isolated state cleanup。当前 Local/Docker/Kubernetes release-gate tests 合计 `40/40`，Stage 3 Python
-  `136/136`，两类远程 Gate 的缺 Credential/dirty-worktree 脱敏负例通过；本机当前缺少 `kind` 可执行文件，且
-  任务环境没有专用 Provider Credential，因此尚未执行 clean-SHA Kubernetes 四矩阵，Gate 保持 open。
+  `142/142`，两类远程 Gate 的缺 Credential/dirty-worktree 脱敏负例通过。当前机器的 Kind `v0.32.0`、
+  kubectl `v1.33.9` 与 Docker `29.4.0` runtime preflight 已通过；任务环境仍没有专用 Provider Credential，
+  因此尚未执行 clean-SHA Kubernetes 四矩阵，Gate 保持 open。
 
 ## 18. 实施顺序
 
