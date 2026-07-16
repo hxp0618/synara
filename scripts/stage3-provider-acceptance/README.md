@@ -64,8 +64,17 @@ durable only through the Checkpoint. The large Diff gate remains separate.
 
 The latest clean-worktree Codex and Claude Local matrices for this boundary are recorded in
 `docs/reports/stage-3-real-provider-local-standalone-generated-file-matrix-be919393.md`. That evidence closes the
-implemented Local standalone `generated_file` plus Workspace Checkpoint path only; it does not close large Diff,
-real Provider failure, cross-Target, Retention or soak release gates.
+implemented Local standalone `generated_file` plus Workspace Checkpoint path only; Large Diff is independently
+covered by the case below.
+
+`--real-provider-case large-diff` creates a deterministic 5,000-line seed file, then requires Codex or Claude to
+mutate it through a native file-change path. Provider Host keeps a bounded Diff inline and stages a larger UTF-8
+Diff beneath the agentd-owned Runtime Output Root. The Runner requires exactly one Ready `diff` Artifact and one
+Artifact-backed `turn.diff.updated`, downloads the payload through the user API, and verifies Size/SHA-256,
+file/addition/deletion counts, Ready/reference/completion order, no inline large payload, and no physical path leak.
+Claude reads only one bounded line before Write so the SDK satisfies its read-before-write rule without loading the
+5,000-line file into context. The latest clean-worktree matrix is recorded in
+`docs/reports/stage-3-real-provider-local-large-diff-matrix-90fae52c.md`.
 
 `--real-provider-case terminal-large` adds the large-Terminal capability boundary before Control Plane restart.
 The deterministic fixture still requires the exact `2 MiB + 257 B` stream, a 32 KiB preview, and

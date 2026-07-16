@@ -1042,15 +1042,16 @@ Snapshot 冒充 standalone Artifact。两条真实 Local matrix 均在 `workspac
 Diff、跨 Target、Retention 并发和真实 Provider failure matrix 仍保持开放。详见
 `docs/reports/stage-3-real-provider-local-standalone-generated-file-matrix-be919393.md`。
 
-2026-07-16 当前工作树把 canonical matrix 扩展为第 11 个 `large-diff` case。Codex 原生
-`turn/diff/updated` 删除 5,000 行，生成 `320,258 B` Ready `diff` Artifact；Claude Agent SDK 通过
-canonical Workspace realpath alias、原生 `Read(offset=1, limit=1)` 与 `Write` 完整替换，连续两次生成
-`320,201 B` Ready `diff` Artifact。三次运行均经用户授权下载并复核 Size/SHA-256、UTF-8、相对文件标记、
+2026-07-16 clean commit `90fae52c` 把 canonical matrix 扩展为第 11 个 `large-diff` case。Codex 为
+`22 pass + 1 unsupported`，原生 `turn/diff/updated` 删除 5,000 行并生成 `320,258 B` Ready `diff`；
+Claude 为 `21 pass + 2 unsupported`，通过 canonical Workspace realpath alias、原生
+`Read(offset=1, limit=1)` 与 `Write` 完整替换并生成 `320,201 B` Ready `diff`。两份 clean-worktree
+报告均经用户授权下载复核 Size/SHA-256、UTF-8、相对文件标记、
 `artifact.ready -> turn.diff.updated -> execution.completed` 严格顺序、无 inline 大 Payload、无 Runtime
-Output 物理路径和零 Secret finding；Codex 删除最后一个文件后还验证空 Snapshot Checkpoint 与后续
-Control Plane restart/Cursor 连续性。该 dirty-worktree 证据关闭实现层面的真实 Local Large Diff 路径，
-但最终 clean SHA 的 Codex/Claude 11-case 统一矩阵、跨 Target、Retention 并发和真实 Provider failure
-matrix 仍保持开放。
+Output 物理路径、Control Plane restart/Cursor 连续性、精确 cleanup 和零 Secret finding。先前隔离运行与
+agentd 回归还覆盖删除最后一个非 Git 文件后的空 Snapshot Checkpoint。该证据关闭实现层面的真实 Local
+Large Diff 路径；跨 Target、Retention 并发和真实 Provider failure matrix 仍保持开放。详见
+`docs/reports/stage-3-real-provider-local-large-diff-matrix-90fae52c.md`。
 
 ## 15. 工作流 J：Worker Drain、升级与版本隔离
 
@@ -1363,10 +1364,11 @@ Provider × Capability × Execution Target
   Secret 泄漏。该 clean-SHA matrix 关闭 Local standalone Generated File gate，但不关闭大 Diff、真实
   failure、SSH/Docker/Kubernetes 或 soak gate。详见
   `docs/reports/stage-3-real-provider-local-standalone-generated-file-matrix-be919393.md`。
-- 当前工作树新增第 11 个 `large-diff` case。Codex 下载验证 `320,258 B / 5,000 deletions`，Claude 两次
-  连续下载验证 `320,201 B / 1 addition / 5,000 deletions`；三次均确认唯一 Ready `diff`、Artifact 引用
-  顺序、无 inline 大 Payload、无物理路径和零 Secret finding。Codex 还覆盖删除最后文件后的空 Snapshot
-  Checkpoint；Claude 覆盖配置路径与 canonical realpath 不同的 SDK 响应。最终 clean SHA 统一矩阵仍待重跑。
+- Clean commit `90fae52c` 的第 11 个 `large-diff` case 在完整真实 Local matrix 中通过。Codex 下载验证
+  `320,258 B / 5,000 deletions`，Claude 下载验证 `320,201 B / 1 addition / 5,000 deletions`；两者均确认
+  唯一 Ready `diff`、Artifact 引用顺序、无 inline 大 Payload、无物理路径、restart/Cursor continuity、
+  cleanup 和零 Secret finding。Claude 同时覆盖配置路径与 canonical realpath 不同的 SDK 响应。详见
+  `docs/reports/stage-3-real-provider-local-large-diff-matrix-90fae52c.md`。
 - 首次 Claude 产品路径运行暴露 ambient OAuth 被 Execution-local `CLAUDE_CONFIG_DIR` 隔离掉的问题；
   Provider Host 现仅在受控 Credential 路径使用 Runtime Output Root 作为 Claude Config，ambient OAuth
   保留用户配置查找路径，并由单测和真实 clean-commit smoke 保护。
@@ -1455,9 +1457,9 @@ Provider × Capability × Execution Target
   Network/Drain/Eviction/Image Canary 已通过实现期运行；SSH 13/13 与 Kubernetes 13/13 core 仍是
   2026-07-14 历史 fixture 证据。真实 Codex/Claude 已在 clean commit `fb9e25ec` 通过 Local 产品路径
   两轮 restart/native-Cursor smoke，clean commit `be919393` 的完整 Local matrix 也通过 standalone
-  Generated File Artifact 与 Workspace Checkpoint 捕获；当前工作树的真实 Codex/Claude Large Diff
-  独立运行也通过。最终 clean SHA 11-case matrix、真实 Provider failure、完整 Local、SSH、Docker、
-  Kubernetes Gate 与 soak 尚未完成。
+  Generated File Artifact 与 Workspace Checkpoint 捕获；clean commit `90fae52c` 的 Codex/Claude 11-case
+  matrix 也通过真实 Local Large Diff。真实 Provider failure、完整 Local、SSH、Docker、Kubernetes Gate
+  与 soak 尚未完成。
 
 ### Step 8：文档、Runbook 与发布门禁
 
