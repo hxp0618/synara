@@ -600,6 +600,74 @@ class TerminalLargeSuite(acceptance.AcceptanceSuite):
         return self.execution_terminal, self.events
 
 
+class RealProviderTerminalLargeSuite(TerminalLargeSuite):
+    def __init__(self) -> None:
+        super().__init__()
+        self.options = dataclasses.replace(
+            self.options,
+            suite="real-provider-smoke",
+            provider="claudeAgent",
+        )
+        self.state.credential_id = "controlled-provider-credential-id"
+        marker = self._real_provider_marker("terminal-large")
+        self.assistant_text = f"Running the requested command once.{marker}"
+        execution_terminal = self.events.pop()
+        execution_terminal["payload"] = {"output": {"text": self.assistant_text}}
+        self.events = [
+            {
+                "eventType": "turn.created",
+                "executionId": "execution-terminal-large",
+                "payload": {
+                    "turnId": "turn-terminal-large",
+                    "executionId": "execution-terminal-large",
+                },
+            },
+            {
+                "eventType": "execution.leased",
+                "executionId": "execution-terminal-large",
+                "payload": {
+                    "providerResume": {
+                        "requestedStrategy": "native-cursor",
+                        "selectedStrategy": "native-cursor",
+                        "reasonCode": "cursor_usable",
+                    }
+                },
+            },
+            {
+                "eventType": "execution.started",
+                "executionId": "execution-terminal-large",
+            },
+            *self.events,
+            {
+                "eventVersion": 2,
+                "eventType": "content.delta",
+                "executionId": "execution-terminal-large",
+                "payload": {"streamKind": "assistant_text", "delta": self.assistant_text},
+            },
+            execution_terminal,
+        ]
+        for sequence, event in enumerate(self.events, start=1):
+            event["sequence"] = sequence
+        self.execution_terminal = execution_terminal
+        self.created_input: str | None = None
+
+    def _create_turn(
+        self,
+        input_text: str,
+        *,
+        runtime_mode: str = "full-access",
+        interaction_mode: str = "default",
+    ) -> dict[str, Any]:
+        if runtime_mode != "full-access" or interaction_mode != "default":
+            raise AssertionError("unexpected real Provider terminal-large Turn mode")
+        command = acceptance.terminal_large_node_command()
+        marker = self._real_provider_marker("terminal-large")
+        if input_text.count(command) != 1 or input_text.count(marker) != 1:
+            raise AssertionError("real Provider terminal-large prompt omitted its command or marker")
+        self.created_input = input_text
+        return {"id": "turn-terminal-large"}
+
+
 class APIClientTimeoutTest(unittest.TestCase):
     def test_request_keeps_short_default_and_allows_explicit_long_operation_timeout(self) -> None:
         timeouts: list[float] = []
@@ -704,6 +772,100 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
             [1 << 20, 1 << 20, 257],
         )
         self.assertFalse(evidence["runtimePhysicalPathLeak"])
+
+    def test_terminal_large_node_command_emits_exact_fixture_bytes_without_newline(self) -> None:
+        completed = subprocess.run(
+            ["bash", "-c", acceptance.terminal_large_node_command()],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=True,
+        )
+
+        self.assertEqual(len(completed.stdout), acceptance.TERMINAL_LARGE_TOTAL_BYTES)
+        self.assertEqual(
+            completed.stdout,
+            acceptance.terminal_large_bytes(0, acceptance.TERMINAL_LARGE_TOTAL_BYTES),
+        )
+        self.assertNotEqual(completed.stdout[-1:], b"\n")
+
+    def test_controlled_claude_terminal_large_reuses_strict_terminal_and_turn_evidence(self) -> None:
+        suite = RealProviderTerminalLargeSuite()
+
+        evidence = suite._real_provider_terminal_large_log()
+
+        marker = suite._real_provider_marker("terminal-large")
+        self.assertEqual(evidence["command"]["runtime"], "node")
+        self.assertEqual(evidence["terminal"]["completion"]["totalBytes"], 2 * (1 << 20) + 257)
+        self.assertEqual(evidence["terminal"]["completion"]["segmentCount"], 3)
+        self.assertFalse(evidence["terminal"]["runtimePhysicalPathLeak"])
+        self.assertTrue(evidence["providerTurn"]["markerMatched"])
+        self.assertEqual(evidence["providerTurn"]["markerMatchMode"], "contains-once")
+        self.assertEqual(
+            evidence["providerTurn"]["providerResume"]["selectedStrategy"],
+            "native-cursor",
+        )
+        self.assertEqual(suite.state.last_real_marker, marker)
+        self.assertIsNotNone(suite.created_input)
+        self.assertIn(acceptance.terminal_large_node_command(), suite.created_input or "")
+
+    def test_codex_terminal_large_reports_lossless_output_unsupported(self) -> None:
+        suite = RealProviderTerminalLargeSuite()
+        suite.options = dataclasses.replace(suite.options, provider="codex")
+
+        with self.assertRaises(acceptance.AcceptanceUnsupported) as caught:
+            suite._real_provider_terminal_large_log()
+
+        self.assertEqual(
+            caught.exception.code,
+            "runner.real_provider_terminal_large_lossless_output_unsupported",
+        )
+        self.assertEqual(
+            caught.exception.evidence,
+            {
+                "provider": "codex",
+                "supportMode": "unsupported",
+                "providerBoundary": "unified-exec-1MiB-head-tail",
+                "requestedBytes": 2 * (1 << 20) + 257,
+                "retainedBytes": 1 << 20,
+                "lossless": False,
+                "compatibleProviderVersionRange": "0.144.x",
+            },
+        )
+        self.assertIsNone(suite.created_input)
+
+    def test_claude_ambient_terminal_large_requires_controlled_credential(self) -> None:
+        suite = RealProviderTerminalLargeSuite()
+        suite.state.credential_id = None
+
+        with self.assertRaises(acceptance.AcceptanceUnsupported) as caught:
+            suite._real_provider_terminal_large_log()
+
+        self.assertEqual(
+            caught.exception.code,
+            "runner.real_provider_terminal_large_controlled_credential_required",
+        )
+        self.assertEqual(caught.exception.evidence["authentication"], "ambient-auth")
+        self.assertFalse(caught.exception.evidence["lossless"])
+        self.assertIsNone(suite.created_input)
+
+    def test_runtime_path_detection_allows_absolute_command_executables(self) -> None:
+        self.assertFalse(
+            acceptance.contains_runtime_physical_path(
+                {
+                    "data": {
+                        "terminal": {
+                            "commandSummary": "/bin/zsh -lc 'node -e test'",
+                            "cwdLabel": ".",
+                        }
+                    }
+                }
+            )
+        )
+        self.assertTrue(
+            acceptance.contains_runtime_physical_path(
+                {"runtimeOutputDirectory": "/tmp/.synara-runtime/execution"}
+            )
+        )
 
     def test_terminal_large_case_rejects_runtime_output_path_leak(self) -> None:
         with self.assertRaises(acceptance.AcceptanceError) as caught:
@@ -850,7 +1012,7 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
             dataclasses.replace(
                 runner_options(),
                 suite="real-provider-smoke",
-                real_provider_cases=("approval", "user-input"),
+                real_provider_cases=("approval", "user-input", "terminal-large"),
             ),
         )
 
@@ -869,6 +1031,28 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
                 "real-provider.turn-1",
                 "real-provider.approval-resolution",
                 "real-provider.user-input-resolution",
+                "real-provider.terminal-large-log",
+                "recovery.control-plane-restart",
+                "real-provider.turn-2-continuity",
+            ],
+        )
+
+    def test_real_provider_terminal_large_selected_alone_precedes_restart_continuity(self) -> None:
+        suite = CaseOrderSuite(
+            FakeDriver(acceptance.EXECUTION_PINNED_WORKER),
+            dataclasses.replace(
+                runner_options(),
+                suite="real-provider-smoke",
+                real_provider_cases=("terminal-large",),
+            ),
+        )
+
+        suite.run()
+
+        self.assertEqual(
+            suite.case_order[-3:],
+            [
+                "real-provider.terminal-large-log",
                 "recovery.control-plane-restart",
                 "real-provider.turn-2-continuity",
             ],
@@ -880,7 +1064,13 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
             dataclasses.replace(
                 runner_options(),
                 suite="real-provider-smoke",
-                real_provider_cases=("review", "compact", "rollback", "fork"),
+                real_provider_cases=(
+                    "terminal-large",
+                    "review",
+                    "compact",
+                    "rollback",
+                    "fork",
+                ),
             ),
         )
 
@@ -897,6 +1087,7 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
                 "real-provider.turn-1-start",
                 "runtime.real-provider-worker-discovery",
                 "real-provider.turn-1",
+                "real-provider.terminal-large-log",
                 "recovery.control-plane-restart",
                 "real-provider.turn-2-continuity",
                 "real-provider.review",
@@ -948,6 +1139,16 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
             )
 
         self.assertEqual(raised.exception.code, "runner.real_provider_marker_mismatch")
+
+    def test_real_provider_terminal_large_dispatches_to_canonical_handler(self) -> None:
+        suite = BarrierSuite(acceptance.EXECUTION_PINNED_WORKER)
+        expected = {"terminal": {"completion": {"totalBytes": 2 * (1 << 20) + 257}}}
+        suite._real_provider_terminal_large_log = mock.Mock(return_value=expected)  # type: ignore[method-assign]
+
+        actual = suite._execute_real_provider_case("terminal-large")
+
+        self.assertEqual(actual, expected)
+        suite._real_provider_terminal_large_log.assert_called_once_with()
 
     def test_execution_pinned_worker_provisions_resources_before_barrier(self) -> None:
         suite = CaseOrderSuite(FakeDriver(acceptance.EXECUTION_PINNED_WORKER))
@@ -1219,6 +1420,20 @@ class RunnerOptionsTest(unittest.TestCase):
             ]
         )
 
+        self.assertEqual(
+            acceptance.REAL_PROVIDER_CASES,
+            (
+                "approval",
+                "user-input",
+                "steer",
+                "interrupt",
+                "terminal-large",
+                "review",
+                "compact",
+                "rollback",
+                "fork",
+            ),
+        )
         self.assertEqual(options.real_provider_cases, acceptance.REAL_PROVIDER_CASES)
 
     def test_fixture_suite_rejects_real_provider_cases(self) -> None:

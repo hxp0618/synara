@@ -71,7 +71,13 @@ PROVIDERS = ("codex", "claudeAgent", "cursor", "gemini", "grok", "kilo", "openco
 FIXTURE_SUPPORTED_PROVIDERS = frozenset({"codex", "claudeAgent"})
 REAL_PROVIDER_SMOKE_PROVIDERS = frozenset({"codex", "claudeAgent"})
 SUITES = ("fixture", "real-provider-smoke")
-REAL_PROVIDER_PRE_RESTART_CASES = ("approval", "user-input", "steer", "interrupt")
+REAL_PROVIDER_PRE_RESTART_CASES = (
+    "approval",
+    "user-input",
+    "steer",
+    "interrupt",
+    "terminal-large",
+)
 REAL_PROVIDER_POST_RESTART_CASES = ("review", "compact", "rollback", "fork")
 REAL_PROVIDER_CASES = REAL_PROVIDER_PRE_RESTART_CASES + REAL_PROVIDER_POST_RESTART_CASES
 REAL_PROVIDER_CASE_METADATA: Mapping[str, Mapping[str, str]] = {
@@ -90,6 +96,10 @@ REAL_PROVIDER_CASE_METADATA: Mapping[str, Mapping[str, str]] = {
     "interrupt": {
         "id": "real-provider.interrupt-active-turn",
         "name": "Interrupt a real Provider Turn and verify immediate recovery",
+    },
+    "terminal-large": {
+        "id": "real-provider.terminal-large-log",
+        "name": "Persist a real Provider large Terminal stream as preview and segmented Artifacts",
     },
     "review": {
         "id": "real-provider.review",
@@ -219,6 +229,18 @@ def terminal_large_expected_segments() -> list[dict[str, Any]]:
     return segments
 
 
+def terminal_large_node_command() -> str:
+    pattern = TERMINAL_LARGE_PATTERN.decode("ascii")
+    return (
+        "node -e '"
+        f'const p=Buffer.from("{pattern}");'
+        f"const n={TERMINAL_LARGE_TOTAL_BYTES};"
+        "const b=Buffer.allocUnsafe(n);"
+        "for(let i=0;i<n;i++)b[i]=p[i%p.length];"
+        "process.stdout.write(b)'"
+    )
+
+
 def contains_runtime_physical_path(value: Any) -> bool:
     if isinstance(value, Mapping):
         for key, child in value.items():
@@ -246,9 +268,7 @@ def contains_runtime_physical_path(value: Any) -> bool:
         return False
     normalized = value.strip()
     return (
-        normalized.startswith(("/", "\\\\"))
-        or re.match(r"^[A-Za-z]:[\\\\/]", normalized) is not None
-        or "runtime-output" in normalized.casefold()
+        "runtime-output" in normalized.casefold()
         or ".synara-runtime" in normalized.casefold()
     )
 
@@ -5333,6 +5353,8 @@ class AcceptanceSuite:
             return self._real_provider_steer_active_turn()
         if real_provider_case == "interrupt":
             return self._real_provider_interrupt_active_turn()
+        if real_provider_case == "terminal-large":
+            return self._real_provider_terminal_large_log()
         if real_provider_case == "review":
             return self._real_provider_review()
         if real_provider_case == "compact":
@@ -5753,6 +5775,71 @@ class AcceptanceSuite:
             "recovery": recovery_evidence,
         }
 
+    def _real_provider_terminal_large_log(self) -> Mapping[str, Any]:
+        if self.options.provider == "codex":
+            raise AcceptanceUnsupported(
+                "runner.real_provider_terminal_large_lossless_output_unsupported",
+                "Codex 0.144.x Unified Exec does not expose a lossless stream for output larger than 1 MiB.",
+                {
+                    "provider": self.options.provider,
+                    "supportMode": "unsupported",
+                    "providerBoundary": "unified-exec-1MiB-head-tail",
+                    "requestedBytes": TERMINAL_LARGE_TOTAL_BYTES,
+                    "retainedBytes": 1 << 20,
+                    "lossless": False,
+                    "compatibleProviderVersionRange": "0.144.x",
+                },
+            )
+        if self.options.provider == "claudeAgent" and self.state.credential_id is None:
+            raise AcceptanceUnsupported(
+                "runner.real_provider_terminal_large_controlled_credential_required",
+                "Claude ambient authentication cannot bind CLAUDE_CONFIG_DIR to the controlled Runtime Output Root.",
+                {
+                    "provider": self.options.provider,
+                    "authentication": "ambient-auth",
+                    "supportMode": "unsupported",
+                    "requiredAuthentication": "controlled-provider-credential",
+                    "requestedBytes": TERMINAL_LARGE_TOTAL_BYTES,
+                    "lossless": False,
+                    "securityBoundary": (
+                        "Provider-retained output paths remain rejected unless they are inside the "
+                        "agentd-owned Runtime Output Root"
+                    ),
+                },
+            )
+        marker = self._real_provider_marker("terminal-large")
+        command = terminal_large_node_command()
+        turn = self._create_turn(
+            "Use the Bash or shell tool exactly once. Run this exact command as the sole shell command:\n"
+            f"{command}\n"
+            "Do not add redirections, pipes, wrappers, or any other terminal command. Leave stdout "
+            "unmodified and do not append a newline. After the command succeeds, reply with exactly "
+            f"{marker} and no other text."
+        )
+        turn_id = self._turn_id(turn, "real Provider large Terminal Turn")
+        terminal, events = self._wait_for_turn_terminal(turn_id, "execution.completed")
+        terminal_evidence = self._validate_terminal_large_log(turn_id, terminal, events)
+        provider_evidence = self._real_provider_turn_evidence(
+            turn_id,
+            terminal,
+            events,
+            marker,
+            expected_resume_strategy="native-cursor",
+            expected_resume_reason="cursor_usable",
+            marker_match_mode="contains-once",
+        )
+        self.state.last_real_marker = marker
+        return {
+            "command": {
+                "runtime": "node",
+                "totalBytes": TERMINAL_LARGE_TOTAL_BYTES,
+                "patternBytes": len(TERMINAL_LARGE_PATTERN),
+                "commandSha256": hashlib.sha256(command.encode("utf-8")).hexdigest(),
+            },
+            "terminal": terminal_evidence,
+            "providerTurn": provider_evidence,
+        }
+
     def _real_provider_second_turn_continuity(self) -> Mapping[str, Any]:
         if self.state.pending_real_turn_id is not None:
             raise AcceptanceError(
@@ -5765,7 +5852,8 @@ class AcceptanceSuite:
             events = self._all_events()
             before = int(events[-1]["sequence"]) if events else 0
         turn = self._create_turn(
-            "Repeat your immediately previous answer exactly. Output no additional text."
+            "Repeat only the unique SYNARA marker from your immediately previous answer. "
+            "Output no additional text."
         )
         turn_id = turn.get("id")
         if not isinstance(turn_id, str) or not turn_id:
@@ -6282,7 +6370,10 @@ class AcceptanceSuite:
         *,
         expected_resume_strategy: str,
         expected_resume_reason: str,
+        marker_match_mode: str = "exact",
     ) -> dict[str, Any]:
+        if marker_match_mode not in {"exact", "contains-once"}:
+            raise ValueError(f"unsupported marker match mode: {marker_match_mode}")
         event_types = [str(event.get("eventType")) for event in events]
         required_types = {
             "turn.created",
@@ -6343,7 +6434,12 @@ class AcceptanceSuite:
             )
         assistant_text = "".join(assistant_deltas)
         normalized_text = assistant_text.strip()
-        if normalized_text != expected_marker:
+        marker_matches = (
+            normalized_text == expected_marker
+            if marker_match_mode == "exact"
+            else normalized_text.count(expected_marker) == 1
+        )
+        if not marker_matches:
             raise AcceptanceError(
                 "runner.real_provider_marker_mismatch",
                 "The real Provider assistant response did not match the expected marker.",
@@ -6383,7 +6479,12 @@ class AcceptanceSuite:
         if isinstance(terminal_payload, dict) and isinstance(terminal_payload.get("output"), dict):
             output_text = terminal_payload["output"].get("text")
             if isinstance(output_text, str):
-                terminal_output_matches = output_text.strip() == expected_marker
+                normalized_output = output_text.strip()
+                terminal_output_matches = (
+                    normalized_output == expected_marker
+                    if marker_match_mode == "exact"
+                    else normalized_output.count(expected_marker) == 1
+                )
                 if not terminal_output_matches:
                     raise AcceptanceError(
                         "runner.real_provider_terminal_output_mismatch",
@@ -6403,6 +6504,7 @@ class AcceptanceSuite:
             "generation": generation,
             "expectedMarker": expected_marker,
             "markerMatched": True,
+            "markerMatchMode": marker_match_mode,
             "assistantDeltaCount": len(assistant_deltas),
             "assistantTextBytes": len(assistant_text.encode("utf-8")),
             "assistantTextSha256": hashlib.sha256(assistant_text.encode("utf-8")).hexdigest(),
@@ -6492,9 +6594,18 @@ class AcceptanceSuite:
 
     def _terminal_large_log(self) -> Mapping[str, Any]:
         turn = self._create_turn("[terminal-large]")
+        turn_id = self._turn_id(turn, "large Terminal fixture Turn")
         execution_terminal, events = self._wait_for_turn_terminal(
-            str(turn["id"]), "execution.completed"
+            turn_id, "execution.completed"
         )
+        return self._validate_terminal_large_log(turn_id, execution_terminal, events)
+
+    def _validate_terminal_large_log(
+        self,
+        turn_id: str,
+        execution_terminal: Mapping[str, Any],
+        events: Sequence[Mapping[str, Any]],
+    ) -> Mapping[str, Any]:
         expected_segments = terminal_large_expected_segments()
         lifecycle = [
             (event, terminal)
@@ -6757,7 +6868,7 @@ class AcceptanceSuite:
             )
 
         return {
-            "turnId": turn.get("id"),
+            "turnId": turn_id,
             "executionId": execution_id,
             "terminalId": terminal_id,
             "sequenceRange": self._sequence_range(events),
@@ -7891,7 +8002,7 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
     parser.add_argument(
         "--real-provider-matrix",
         action="store_true",
-        help="Run every implemented real Provider product-path case after the two-Turn smoke baseline",
+        help="Run every implemented real Provider product-path case in its canonical restart position",
     )
     parser.add_argument("--skip-build", action="store_true")
     parser.add_argument("--control-plane-binary", type=pathlib.Path)
@@ -8241,7 +8352,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "requestedCases": list(options.real_provider_cases),
                 "ambientAuthentication": real_provider_smoke,
                 "boundary": (
-                    "selected real Provider cases run after the two-Turn baseline and before Control Plane restart"
+                    "selected real Provider cases run in canonical pre/post-restart positions around the "
+                    "two-Turn continuity baseline"
                     if options.real_provider_cases
                     else "two-Turn marker and native-cursor continuity baseline"
                 ),

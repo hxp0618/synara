@@ -88,8 +88,8 @@ Acceptance Fixture used by Codex and Claude.
   Docker 运行还通过 Managed Replacement、Workspace 连续性、Control Plane Restart 和后续 Turn，并精确
   清理本次 Container、Volume、Network 与自动构建 Image。该证据来自未提交工作区；最终 Commit 后需
   重新生成报告，更新后的 Suite 也尚未在 SSH/Kubernetes 重跑。
-- Workflow I/L 仍为 `partial`：Generated File、大 Diff、真实 Codex/Claude 大日志、长 Session、真实
-  Provider 故障矩阵以及四 Target Release Gate 尚未关闭。
+- Workflow I/L 仍为 `partial`：Generated File、大 Diff、真实 Codex/Claude lossless 大日志、长 Session、
+  真实 Provider 故障矩阵以及四 Target Release Gate 尚未关闭。
 
 ### 2026-07-16 Release documentation and real Local adapter smoke update
 
@@ -106,6 +106,14 @@ Acceptance Fixture used by Codex and Claude.
   为 Worker-free Control Plane emulation。两份报告均记录 `worktreeDirty=false`、精确 cleanup 和零 Secret
   finding。详见 `docs/reports/stage-3-real-provider-local-control-matrix-0b3f9214.md`；该结果关闭已实现能力的
   Local control/capability matrix，但不关闭真实 Provider 大输出、故障、四 Target 或 soak Release Gate。
+- 2026-07-16 当前工作区将 canonical matrix 扩展到第 9 个 `terminal-large` case。Deterministic Fixture
+  继续严格校验精确 `2 MiB + 257 B`、32 KiB Preview、三个 Ready Artifact、Size/SHA-256 和物理路径隔离。
+  真实 Codex `0.144.x` 明确记录为 Explicit Unsupported：默认 `unified_exec` 只保留 1 MiB Head/Tail，且
+  不能为单个 Turn 禁用它而破坏 durable Approval 与跨 Turn Cursor 语义。Claude ambient OAuth 同一 case
+  也为 Explicit Unsupported，继续要求 controlled Credential 才能安全绑定 Runtime Output Root；不读取或
+  复制 ambient Credential，不接受 root 外路径。两个边界均不会被伪装为 lossless pass。本轮 Local matrix
+  为 Codex `20 pass + 1 unsupported`、Claude `19 pass + 2 unsupported`（另一个为 Compact），两份 cleanup
+  和 Secret scan 均通过；报告来自最终提交前工作区，不替代 clean-commit 或跨 Target Gate。
 - 首次真实 Claude 产品路径运行发现 Execution-local `CLAUDE_CONFIG_DIR` 会让已登录的 ambient OAuth
   不可见。Provider Host 已区分 controlled Credential 与 ambient authentication：前者保留 Runtime Output
   Root 隔离，后者保留用户 Claude 配置查找路径；Provider Host 全量测试与真实 clean-commit smoke 均通过。

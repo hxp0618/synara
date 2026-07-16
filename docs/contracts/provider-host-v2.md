@@ -54,11 +54,21 @@ it resolves the relative candidate below the already bound Root descriptor, reje
 symlinks and non-regular files, verifies the reported size, and streams the opened descriptor through the Terminal
 collector. The candidate path and physical root never enter the durable Event payload or Artifact logical name.
 
-Claude binds `CLAUDE_CONFIG_DIR` to this agentd-owned root so SDK `persistedOutputPath`, `rawOutputPath`, and
-background `output_file` values can be recovered without granting arbitrary host-file reads. A contained file
-replaces the duplicate inline/summary copy; an absent root or escaping path keeps only the bounded inline/summary
-and emits a path-free warning. Agentd classifies unsafe control data or invalid UTF-8 as binary, stores it only in
-Artifact payload, emits at most the bounded safe preview, and preserves the same Terminal lifecycle completion.
+Codex `0.144.x` Unified Exec retains a fixed 1 MiB head/tail transcript for larger commands and does not expose a
+contained lossless file reference. Provider Host keeps the default execution path because disabling Unified Exec
+changes native durable Approval behavior, and the app-server cursor is reused across Turns. The real
+`terminal-large` capability is therefore explicitly unsupported for this version range; the Host must not hide the
+boundary by dropping the middle of the stream or by changing execution policy for one Turn. A later Codex range
+may enable the capability only after it provides lossless deltas or an agentd-contained retained file without
+regressing Approval and resume semantics.
+
+For a controlled Claude Provider Credential, the Host binds `CLAUDE_CONFIG_DIR` to this agentd-owned root so SDK
+`persistedOutputPath`, `rawOutputPath`, and background `output_file` values can be recovered without granting
+arbitrary host-file reads. Ambient OAuth preserves the user's normal configuration lookup and therefore cannot
+claim this retained-output boundary. A contained file replaces the duplicate inline/summary copy; an absent root
+or escaping path keeps only the bounded inline/summary and emits a path-free warning. Agentd classifies unsafe
+control data or invalid UTF-8 as binary, stores it only in Artifact payload, emits at most the bounded safe
+preview, and preserves the same Terminal lifecycle completion.
 
 Agentd owns the Host process and its managed process scope. Windows starts the Host suspended, assigns it to a
 kill-on-close Job Object, then resumes it. Unix starts an isolated process group and terminates descendants that

@@ -52,9 +52,18 @@ or Claude login. Credential-backed Claude runs keep the execution-local `CLAUDE_
 OAuth runs preserve the user's normal Claude configuration lookup so the Host does not silently discard a valid
 login. Remote Targets still need an explicitly provisioned authentication path.
 
-A pass proves only two real Provider Turns, Control Plane restart, native Cursor continuity, exact cleanup, and
-the report Secret scan for the selected Target. It does not replace Approval/User Input, Artifact/large Terminal,
-failure matrix, immutable Worker image, four-Target, or soak Release Gates.
+`--real-provider-case terminal-large` adds the large-Terminal capability boundary before Control Plane restart.
+The deterministic fixture still requires the exact `2 MiB + 257 B` stream, a 32 KiB preview, and
+`1 MiB / 1 MiB / 257 B` Ready Artifacts. Real Codex `0.144.x` is explicit `unsupported`: Unified Exec retains only
+a 1 MiB head/tail transcript, and the Runner does not disable it because that changes native durable Approval
+semantics. Claude ambient OAuth is also explicit `unsupported`: lossless SDK retained output requires a controlled
+Provider Credential so `CLAUDE_CONFIG_DIR` can be bound to the agentd-owned Runtime Output Root. The strict real
+Provider assertion remains available for that controlled Claude path. The Runner never accepts a retained path
+outside the root or reads the user's ambient credential files to manufacture a pass.
+
+A base smoke pass without selected cases proves only two real Provider Turns, Control Plane restart, native Cursor
+continuity, exact cleanup, and the report Secret scan for the selected Target. It does not replace Approval/User
+Input, Artifact/large Terminal, failure matrix, immutable Worker image, four-Target, or soak Release Gates.
 
 Every run ends with `security.output-secret-scan`. It scans generated JSON, Markdown, text metadata, and logs for
 all runtime Secrets known to the redactor plus high-confidence private-key, AWS, GitHub, and OpenAI-style key

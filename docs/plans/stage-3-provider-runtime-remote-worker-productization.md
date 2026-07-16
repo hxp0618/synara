@@ -1014,7 +1014,12 @@ terminal.failed
 `2 MiB + 257 B` Terminal Stream；agentd 在真实 Local 与 Docker 产品路径中均只持久化前 32 KiB 安全
 Preview，并生成 `1 MiB / 1 MiB / 257 B` 三个 Ready `terminal_log` Artifact。Acceptance 已校验连续
 Offset、固定 SHA-256、Completion Total/Exit Code、无重复 `artifact.ready` 以及 Session Event 中不存在
-Runtime Output 物理路径。Generated File、大 Diff 和真实 Codex/Claude 大日志仍待 Release Acceptance。
+Runtime Output 物理路径。2026-07-16 当前工作区将真实 `terminal-large` 纳入 canonical matrix，但没有把
+Provider 截断伪装为通过：Codex `0.144.x` 默认 `unified_exec` 只保留 1 MiB Head/Tail，且禁用它会破坏
+durable Approval 与跨 Turn Cursor 语义，因此记录为 Explicit Unsupported。Claude ambient OAuth 的 SDK
+保留文件位于 agentd Runtime Output Root 外，也记录为 Explicit Unsupported；其严格真实大日志路径仍要求
+受控 Provider Credential 将 `CLAUDE_CONFIG_DIR` 绑定到 Runtime Output Root。Generated File、大 Diff、
+真实 Codex/Claude lossless 大日志和跨 Target Release Acceptance 仍待完成。
 
 ## 15. 工作流 J：Worker Drain、升级与版本隔离
 
@@ -1306,6 +1311,13 @@ Provider × Capability × Execution Target
   `authoritative-history / cursor_absent` 精确复现 source marker。详见
   `docs/reports/stage-3-real-provider-local-control-matrix-0b3f9214.md`。该证据关闭已实现能力的 Local matrix，
   仍不替代真实 Provider 四 Target、故障、大输出和 soak Release Gate。
+- 2026-07-16 当前工作区新增第 9 个 canonical case `terminal-large`。Deterministic Fixture 对 32 KiB Preview、
+  `1 MiB / 1 MiB / 257 B` 三段 Ready Artifact、固定 Size/SHA-256 与路径隔离保持严格断言。真实 Codex
+  `0.144.x` 因 `unified_exec` 仅保留 1 MiB Head/Tail 而明确 Unsupported；不通过禁用执行路径来牺牲
+  durable Approval。Claude ambient OAuth 也明确 Unsupported，因为不能同时保留用户登录查找路径并把 SDK
+  `tool-results` 约束到 execution-scoped Runtime Output Root；受控 Credential 路径仍复用完整严格断言。
+  不读取或复制用户 ambient Credential，也不放宽路径 containment。该边界不关闭真实 lossless 大输出、
+  故障、SSH/Docker/Kubernetes 或 soak Gate。
 - 首次 Claude 产品路径运行暴露 ambient OAuth 被 Execution-local `CLAUDE_CONFIG_DIR` 隔离掉的问题；
   Provider Host 现仅在受控 Credential 路径使用 Runtime Output Root 作为 Claude Config，ambient OAuth
   保留用户配置查找路径，并由单测和真实 clean-commit smoke 保护。
