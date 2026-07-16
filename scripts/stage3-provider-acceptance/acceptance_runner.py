@@ -45,6 +45,11 @@ from typing import Any, Protocol, TypeVar
 SCHEMA_VERSION = "synara.provider-acceptance.v1"
 FIXTURE_CREDENTIAL_SENTINEL = "stage3-provider-acceptance-credential-v1"
 FIXTURE_ARTIFACT_RELATIVE_PATH = ".synara-stage3-acceptance/artifact.txt"
+STANDALONE_GENERATED_FILE_RELATIVE_PATH = (
+    ".synara-stage3-standalone-generated-file.txt"
+)
+STANDALONE_GENERATED_FILE_CONTENT = b"SYNARA_STAGE3_STANDALONE_GENERATED_FILE_V1\n"
+STANDALONE_GENERATED_FILE_DOWNLOAD_MAX_BYTES = len(STANDALONE_GENERATED_FILE_CONTENT) + 1
 GENERATED_FILE_RELATIVE_PATH = ".synara-stage3-acceptance/generated-file.txt"
 GENERATED_FILE_TOTAL_BYTES = (1 << 20) + 257
 GENERATED_FILE_SNAPSHOT_MAX_BYTES = 4 << 20
@@ -93,7 +98,7 @@ REAL_PROVIDER_CASES = REAL_PROVIDER_PRE_RESTART_CASES + REAL_PROVIDER_POST_RESTA
 REAL_PROVIDER_CASE_METADATA: Mapping[str, Mapping[str, str]] = {
     "generated-file-checkpoint": {
         "id": "real-provider.generated-file-checkpoint",
-        "name": "Capture a real Provider generated file in a ready Workspace Checkpoint Artifact",
+        "name": "Capture a real Provider generated file as a standalone Artifact and ready Workspace Checkpoint",
     },
     "approval": {
         "id": "real-provider.approval-resolution",
@@ -324,12 +329,18 @@ def generated_file_snapshot_evidence(snapshot: bytes) -> dict[str, Any]:
             pathlib.PurePosixPath(member.name).as_posix(): member for member in regular_members
         }
         known_runner_files = {
+            STANDALONE_GENERATED_FILE_RELATIVE_PATH: STANDALONE_GENERATED_FILE_CONTENT,
             REAL_PROVIDER_APPROVAL_RELATIVE_PATH: REAL_PROVIDER_APPROVAL_CONTENT,
             REAL_PROVIDER_STEER_RELATIVE_PATH: REAL_PROVIDER_STEER_CONTENT,
         }
         allowed_regular_files = {GENERATED_FILE_RELATIVE_PATH, *known_runner_files}
+        required_regular_files = {
+            GENERATED_FILE_RELATIVE_PATH,
+            STANDALONE_GENERATED_FILE_RELATIVE_PATH,
+        }
         unexpected_regular_files = sorted(set(regular_by_name).difference(allowed_regular_files))
-        if GENERATED_FILE_RELATIVE_PATH not in regular_by_name or unexpected_regular_files:
+        missing_regular_files = sorted(required_regular_files.difference(regular_by_name))
+        if missing_regular_files or unexpected_regular_files:
             raise AcceptanceError(
                 "runner.generated_file_snapshot_shape_invalid",
                 "The generated-file Workspace Snapshot omitted its payload or contained an unexpected file.",
@@ -337,6 +348,7 @@ def generated_file_snapshot_evidence(snapshot: bytes) -> dict[str, Any]:
                     "memberCount": len(members),
                     "regularFileCount": len(regular_members),
                     "regularFileNames": sorted(regular_by_name),
+                    "missingRegularFileNames": missing_regular_files,
                     "unexpectedRegularFileNames": unexpected_regular_files,
                 },
             )
@@ -5646,8 +5658,18 @@ class AcceptanceSuite:
         }
         marker = self._real_provider_marker("generated-file-checkpoint")
         command = generated_file_node_command()
+        native_file_tool = (
+            "the native apply_patch file-change tool"
+            if self.options.provider == "codex"
+            else "the native Write tool"
+        )
+        standalone_text = STANDALONE_GENERATED_FILE_CONTENT.decode("ascii").rstrip("\n")
         turn = self._create_turn(
-            "Use the Bash or shell tool exactly once. Run this exact command as the sole shell command:\n"
+            f"First use {native_file_tool} exactly once, never Bash or shell, to create "
+            f"{STANDALONE_GENERATED_FILE_RELATIVE_PATH} with exactly this UTF-8 line and one trailing newline:\n"
+            f"{standalone_text}\n"
+            "Do not read that file back. After the native file tool succeeds, use the Bash or shell tool "
+            "exactly once. Run this exact command as the sole shell command:\n"
             f"{command}\n"
             "Do not add redirections, pipes, wrappers, or any other terminal command. Do not read the file "
             "back or print its contents. After the command succeeds, reply with exactly "
@@ -5677,6 +5699,12 @@ class AcceptanceSuite:
                 "relativePath": GENERATED_FILE_RELATIVE_PATH,
                 "totalBytes": GENERATED_FILE_TOTAL_BYTES,
                 "commandSha256": hashlib.sha256(command.encode("utf-8")).hexdigest(),
+            },
+            "standaloneFile": {
+                "providerTool": native_file_tool,
+                "relativePath": STANDALONE_GENERATED_FILE_RELATIVE_PATH,
+                "sizeBytes": len(STANDALONE_GENERATED_FILE_CONTENT),
+                "sha256": hashlib.sha256(STANDALONE_GENERATED_FILE_CONTENT).hexdigest(),
             },
             "checkpoint": checkpoint_evidence,
             "providerTurn": provider_evidence,
@@ -5713,6 +5741,26 @@ class AcceptanceSuite:
         dirty = single_event("workspace.dirty")
         checkpoint_created = single_event("checkpoint.created")
         checkpoint_ready = single_event("checkpoint.ready")
+        generated_ready_events = [
+            event
+            for event in events
+            if event.get("eventType") == "artifact.ready"
+            and event.get("executionId") == execution_id
+            and isinstance(event.get("payload"), dict)
+            and event["payload"].get("kind") == "generated_file"
+        ]
+        if len(generated_ready_events) != 1:
+            raise AcceptanceError(
+                "runner.generated_file_artifact_event_invalid",
+                "Expected exactly one standalone generated_file artifact.ready event for the generated-file Execution.",
+                {
+                    "eventType": "artifact.ready",
+                    "artifactKind": "generated_file",
+                    "count": len(generated_ready_events),
+                    "executionId": execution_id,
+                },
+            )
+        generated_ready = generated_ready_events[0]
         snapshot_ready_events = [
             event
             for event in events
@@ -5738,6 +5786,10 @@ class AcceptanceSuite:
             checkpoint_created.get("payload"),
             "generated-file checkpoint.created payload",
         )
+        generated_payload = json_object(
+            generated_ready.get("payload"),
+            "generated-file standalone artifact.ready payload",
+        )
         artifact_payload = json_object(
             artifact_ready.get("payload"),
             "generated-file artifact.ready payload",
@@ -5747,6 +5799,7 @@ class AcceptanceSuite:
             "generated-file checkpoint.ready payload",
         )
         checkpoint_id = created_payload.get("checkpointId")
+        generated_artifact_id = generated_payload.get("artifactId")
         artifact_id = ready_payload.get("artifactId")
         workspace_id = created_payload.get("workspaceId")
         checkpoint_sha256 = ready_payload.get("sha256")
@@ -5760,11 +5813,18 @@ class AcceptanceSuite:
             or not isinstance(workspace_id, str)
             or not workspace_id
             or ready_payload.get("workspaceId") != workspace_id
+            or not isinstance(generated_artifact_id, str)
+            or not generated_artifact_id
+            or generated_artifact_id in previous_artifact_ids
+            or generated_payload.get("kind") != "generated_file"
+            or generated_payload.get("contentType") != "application/octet-stream"
+            or generated_payload.get("sizeBytes") != len(STANDALONE_GENERATED_FILE_CONTENT)
             or created_payload.get("strategy") != "snapshot"
             or ready_payload.get("strategy") != "snapshot"
             or not isinstance(artifact_id, str)
             or not artifact_id
             or artifact_id in previous_artifact_ids
+            or artifact_id == generated_artifact_id
             or artifact_payload.get("artifactId") != artifact_id
             or artifact_payload.get("kind") != "workspace_snapshot"
             or artifact_payload.get("contentType") != "application/x-tar"
@@ -5779,12 +5839,20 @@ class AcceptanceSuite:
                 {
                     "turnId": turn_id,
                     "dirty": dirty_payload,
+                    "generatedArtifactReady": generated_payload,
                     "checkpointCreated": created_payload,
                     "artifactReady": artifact_payload,
                     "checkpointReady": ready_payload,
                 },
             )
-        ordered_events = [dirty, checkpoint_created, artifact_ready, checkpoint_ready, execution_terminal]
+        ordered_events = [
+            generated_ready,
+            dirty,
+            checkpoint_created,
+            artifact_ready,
+            checkpoint_ready,
+            execution_terminal,
+        ]
         sequences = [event.get("sequence") for event in ordered_events]
         if (
             not all(isinstance(sequence, int) for sequence in sequences)
@@ -5798,7 +5866,13 @@ class AcceptanceSuite:
             )
         if any(
             contains_runtime_physical_path(event.get("payload"))
-            for event in (dirty, checkpoint_created, artifact_ready, checkpoint_ready)
+            for event in (
+                generated_ready,
+                dirty,
+                checkpoint_created,
+                artifact_ready,
+                checkpoint_ready,
+            )
         ):
             raise AcceptanceError(
                 "runner.generated_file_checkpoint_path_leaked",
@@ -5809,6 +5883,82 @@ class AcceptanceSuite:
             self.api.request("GET", f"/v1/sessions/{self._required('session_id')}/artifacts"),
             "generated-file artifacts",
         )
+        generated_artifacts = [
+            item
+            for item in artifacts
+            if item.get("kind") == "generated_file" and item.get("executionId") == execution_id
+        ]
+        expected_generated_sha256 = hashlib.sha256(STANDALONE_GENERATED_FILE_CONTENT).hexdigest()
+        expected_generated_artifact = {
+            "id": generated_artifact_id,
+            "kind": "generated_file",
+            "status": "ready",
+            "originalName": pathlib.PurePosixPath(
+                STANDALONE_GENERATED_FILE_RELATIVE_PATH
+            ).name,
+            "contentType": "application/octet-stream",
+            "sizeBytes": len(STANDALONE_GENERATED_FILE_CONTENT),
+            "sha256": expected_generated_sha256,
+            "executionId": execution_id,
+        }
+        if (
+            len(generated_artifacts) != 1
+            or {
+                key: generated_artifacts[0].get(key)
+                for key in expected_generated_artifact
+            }
+            != expected_generated_artifact
+            or contains_runtime_physical_path(generated_artifacts[0])
+        ):
+            raise AcceptanceError(
+                "runner.generated_file_artifact_invalid",
+                "The standalone generated_file Artifact metadata did not match its ready Event and Workspace payload.",
+                {
+                    "expected": expected_generated_artifact,
+                    "actual": [self._artifact_summary(item) for item in generated_artifacts],
+                },
+            )
+        generated_artifact = generated_artifacts[0]
+        generated_grant = json_object(
+            self.api.request("POST", f"/v1/artifacts/{generated_artifact_id}/download"),
+            "standalone generated-file Artifact download grant",
+        )
+        generated_grant_artifact = json_object(
+            generated_grant.get("artifact"),
+            "standalone generated-file Artifact download grant.artifact",
+        )
+        generated_download_url = generated_grant.get("url")
+        if (
+            generated_grant_artifact.get("id") != generated_artifact_id
+            or not isinstance(generated_download_url, str)
+            or not generated_download_url
+        ):
+            raise AcceptanceError(
+                "runner.generated_file_artifact_download_grant_invalid",
+                "The standalone generated_file Artifact download grant was invalid.",
+                {"artifactId": generated_artifact_id},
+            )
+        generated_content = self.api.download_bytes(
+            generated_download_url,
+            maximum_bytes=STANDALONE_GENERATED_FILE_DOWNLOAD_MAX_BYTES,
+        )
+        generated_sha256 = hashlib.sha256(generated_content).hexdigest()
+        if (
+            generated_content != STANDALONE_GENERATED_FILE_CONTENT
+            or len(generated_content) != generated_artifact.get("sizeBytes")
+            or generated_sha256 != generated_artifact.get("sha256")
+        ):
+            raise AcceptanceError(
+                "runner.generated_file_artifact_download_mismatch",
+                "The downloaded standalone generated_file Artifact did not match its ready metadata or deterministic payload.",
+                {
+                    "artifactId": generated_artifact_id,
+                    "actualBytes": len(generated_content),
+                    "expectedBytes": generated_artifact.get("sizeBytes"),
+                    "actualSha256": generated_sha256,
+                    "expectedSha256": generated_artifact.get("sha256"),
+                },
+            )
         artifact = next((item for item in artifacts if item.get("id") == artifact_id), None)
         expected_artifact = {
             "kind": "workspace_snapshot",
@@ -5872,20 +6022,23 @@ class AcceptanceSuite:
                 },
             )
         snapshot_evidence = generated_file_snapshot_evidence(snapshot)
-        standalone_generated_artifacts = [
-            self._artifact_summary(item)
-            for item in artifacts
-            if item.get("kind") == "generated_file" and item.get("executionId") == execution_id
-        ]
         return {
             "turnId": turn_id,
             "executionId": execution_id,
             "workspaceId": workspace_id,
             "checkpointId": checkpoint_id,
             "strategy": "snapshot",
+            "generatedFileArtifact": {
+                "artifact": self._artifact_summary(generated_artifact),
+                "download": {
+                    "sizeBytes": len(generated_content),
+                    "sha256": generated_sha256,
+                },
+            },
             "artifact": self._artifact_summary(artifact),
             "snapshot": snapshot_evidence,
             "sequenceRange": {
+                "generatedArtifactReady": generated_ready.get("sequence"),
                 "workspaceDirty": dirty.get("sequence"),
                 "checkpointCreated": checkpoint_created.get("sequence"),
                 "artifactReady": artifact_ready.get("sequence"),
@@ -5894,10 +6047,9 @@ class AcceptanceSuite:
             },
             "runtimePhysicalPathLeak": False,
             "duplicateReadyArtifact": False,
-            "standaloneGeneratedFileArtifacts": standalone_generated_artifacts,
             "releaseBoundary": (
-                "generated file is proven inside a ready workspace_snapshot Checkpoint Artifact; "
-                "standalone Provider generated_file ArtifactCandidate and large Diff remain separate gates"
+                "standalone Provider generated_file ArtifactCandidate and ready workspace_snapshot "
+                "Checkpoint are both proven; large Diff remains a separate gate"
             ),
         }
 

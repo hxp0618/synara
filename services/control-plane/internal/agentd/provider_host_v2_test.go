@@ -258,6 +258,34 @@ func TestRunnerMessageFromProviderHostAcceptsBoundRuntimeOutputArtifactCandidate
 	}
 }
 
+func TestRunnerMessageFromProviderHostAcceptsWorkspaceGeneratedFileArtifactCandidate(t *testing.T) {
+	message := providerHostMessage{
+		RequestID: "request-1", ProtocolVersion: providerHostProtocolVersion{Major: 2, Minor: 1},
+		ExecutionID: uuid.NewString(), Generation: 2, CommandID: "send:generated-file",
+		OccurredAt: time.Now().UTC().Format(time.RFC3339Nano), MessageType: "ArtifactCandidate",
+		Payload: map[string]any{
+			"artifact": map[string]any{
+				"path": ".synara-stage3-acceptance/generated-file.txt", "kind": "generated_file",
+				"contentType": "application/octet-stream", "sourceRoot": "workspace",
+			},
+		},
+	}
+	runnerMessage, err := runnerMessageFromProviderHost(message, executions.RuntimeEventVersionV2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runnerMessage.Type != "artifact" || runnerMessage.Artifact == nil {
+		t.Fatalf("unexpected Runner message: %#v", runnerMessage)
+	}
+	artifact := runnerMessage.Artifact
+	if artifact.Path != ".synara-stage3-acceptance/generated-file.txt" ||
+		artifact.SourceRoot != "workspace" || artifact.Kind != "generated_file" ||
+		artifact.ContentType != "application/octet-stream" || artifact.TerminalID != "" ||
+		artifact.Encoding != "" || artifact.ReportedSize != nil {
+		t.Fatalf("unexpected Workspace ArtifactCandidate: %#v", artifact)
+	}
+}
+
 func TestRunnerMessageFromProviderHostRejectsUnsafeRuntimeOutputArtifactCandidate(t *testing.T) {
 	base := map[string]any{
 		"path": "projects/session/tool-results/command.log", "kind": "terminal_log",

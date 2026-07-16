@@ -52,12 +52,15 @@ or Claude login. Credential-backed Claude runs keep the execution-local `CLAUDE_
 OAuth runs preserve the user's normal Claude configuration lookup so the Host does not silently discard a valid
 login. Remote Targets still need an explicitly provisioned authentication path.
 
-`--real-provider-case generated-file-checkpoint` writes one deterministic `1 MiB + 257 B` Workspace file and
-requires `workspace.dirty -> checkpoint.created -> workspace_snapshot artifact.ready -> checkpoint.ready` before
-Execution completion. The Runner downloads the authenticated Ready Artifact, rejects unsafe Tar members, and
-verifies the exact relative path, size, SHA-256, duplicate-Ready boundary, and absence of physical paths in Session
-Events. This proves real Provider Workspace capture through a Checkpoint Artifact; it does not claim a standalone
-Provider `generated_file` ArtifactCandidate or a large Diff gate.
+`--real-provider-case generated-file-checkpoint` first requires a Provider-native file mutation (`apply_patch` for
+Codex, `Write` for Claude) to create a 43-byte standalone file, then uses one exact shell command to write a
+deterministic `1 MiB + 257 B` Workspace file. The first path must produce one downloadable Ready `generated_file`
+Artifact before `workspace.dirty`; the second must produce
+`workspace.dirty -> checkpoint.created -> workspace_snapshot artifact.ready -> checkpoint.ready` before Execution
+completion. The Runner downloads both authenticated Artifacts, verifies exact Size/SHA-256 and metadata, rejects
+unsafe or duplicate Snapshot members, and confirms that Session Events expose no physical paths. Shell output paths
+are not inferred by parsing commands or scanning the Workspace; without a Provider-native exact path they remain
+durable only through the Checkpoint. The large Diff gate remains separate.
 
 `--real-provider-case terminal-large` adds the large-Terminal capability boundary before Control Plane restart.
 The deterministic fixture still requires the exact `2 MiB + 257 B` stream, a 32 KiB preview, and

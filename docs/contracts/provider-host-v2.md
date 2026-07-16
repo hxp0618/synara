@@ -54,6 +54,20 @@ it resolves the relative candidate below the already bound Root descriptor, reje
 symlinks and non-regular files, verifies the reported size, and streams the opened descriptor through the Terminal
 collector. The candidate path and physical root never enter the durable Event payload or Artifact logical name.
 
+Workspace generated files use a separate `ArtifactCandidate` with a Workspace-relative `path`,
+`sourceRoot=workspace`, `kind=generated_file`, and a conservative `application/octet-stream` Content-Type. The Host
+emits one only after the Provider reports an exact successful native file mutation: a completed Codex `fileChange`
+item, or a Claude `PostToolUse` callback for `Write`, `Edit`, `MultiEdit`, or `NotebookEdit`. Paths are bounded,
+deduplicated, normalized across configured/canonical Workspace aliases, and filtered for VCS metadata, missing
+files, symlinks, directories, and other non-regular entries before emission. Agentd still performs the authoritative
+anchored open, Secret Guard, Size/SHA-256 calculation, upload, and Ready confirmation.
+
+The Host never parses shell text to guess output paths, scans the Workspace to infer generated files, or relabels a
+Workspace Checkpoint as a standalone file. A shell-created file therefore remains durable through the Workspace
+Checkpoint unless the Provider also supplies an exact native file-change path. This intentionally preserves a
+predictable security boundary instead of making root-level or Provider-specific filesystem watching look recursive
+when it is not.
+
 Codex `0.144.x` Unified Exec retains a fixed 1 MiB head/tail transcript for larger commands and does not expose a
 contained lossless file reference. Provider Host keeps the default execution path because disabling Unified Exec
 changes native durable Approval behavior, and the app-server cursor is reused across Turns. The real

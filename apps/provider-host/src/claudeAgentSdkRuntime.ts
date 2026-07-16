@@ -31,6 +31,7 @@ import {
   terminalResultText,
   type TerminalRedactor,
 } from "./terminalEvents";
+import { WorkspaceGeneratedFileCollector } from "./workspaceGeneratedFiles";
 
 export type ClaudeQueryRuntime = AsyncIterable<SDKMessage> & {
   interrupt: () => Promise<unknown>;
@@ -61,6 +62,7 @@ type AttemptState = {
   sawPartialText: boolean;
   hadTurnActivity: boolean;
   tools: Map<string, AttemptTool>;
+  generatedFiles: WorkspaceGeneratedFileCollector;
 };
 
 type AttemptTool = {
@@ -261,6 +263,11 @@ class ClaudeAgentSdkRuntime {
       sawPartialText: false,
       hadTurnActivity: false,
       tools: new Map(),
+      generatedFiles: new WorkspaceGeneratedFileCollector({
+        workspaceDirectory: this.options.input.workspaceDirectory,
+        provider: "claudeAgent",
+        emit: this.options.emit,
+      }),
     };
     const promptStream = createPromptStream(prompt);
     let runtime: ClaudeQueryRuntime | undefined;
@@ -275,7 +282,10 @@ class ClaudeAgentSdkRuntime {
 
       for await (const message of runtime) {
         const terminal = this.handleMessage(message, state);
-        if (terminal) return terminal;
+        if (terminal) {
+          await state.generatedFiles.flush();
+          return terminal;
+        }
       }
       if (this.interruptRequested) throw new ProviderInterruptedError();
       throw new Error("Claude Agent SDK ended before emitting a terminal result.");
@@ -324,6 +334,7 @@ class ClaudeAgentSdkRuntime {
       includePartialMessages: true,
       hooks: {
         PreToolUse: [{ hooks: [this.createPreToolUseHook(state)] }],
+        PostToolUse: [{ hooks: [this.createPostToolUseHook(state)] }],
       },
       ...(this.options.interactive ? { canUseTool: this.createCanUseTool(state) } : {}),
       env: this.queryEnvironment(),
@@ -403,6 +414,18 @@ class ClaudeAgentSdkRuntime {
           ...(decision === "allow" ? { updatedInput: toolInput } : {}),
         },
       };
+    };
+  }
+
+  private createPostToolUseHook(state: AttemptState): HookCallback {
+    return async (input) => {
+      if (input.hook_event_name !== "PostToolUse") return { continue: true };
+      state.hadTurnActivity = true;
+      const toolInput = asRecord(input.tool_input) ?? {};
+      for (const path of claudeGeneratedFilePaths(input.tool_name, toolInput)) {
+        state.generatedFiles.observe(path);
+      }
+      return { continue: true };
     };
   }
 
@@ -1254,6 +1277,22 @@ function answerText(value: unknown): string {
     return value.filter((entry): entry is string => typeof entry === "string").join(", ");
   }
   return "";
+}
+
+function claudeGeneratedFilePaths(
+  toolName: string,
+  toolInput: Record<string, unknown>,
+): ReadonlyArray<unknown> {
+  switch (toolName.trim().toLowerCase()) {
+    case "write":
+    case "edit":
+    case "multiedit":
+      return [toolInput.file_path];
+    case "notebookedit":
+      return [toolInput.notebook_path];
+    default:
+      return [];
+  }
 }
 
 function classifyRequestKind(toolName: string): string {

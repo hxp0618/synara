@@ -23,6 +23,7 @@ import {
   type TerminalOutputStream,
   type TerminalRedactor,
 } from "./terminalEvents";
+import { WorkspaceGeneratedFileCollector } from "./workspaceGeneratedFiles";
 
 type JsonRpcId = string | number;
 
@@ -88,6 +89,7 @@ class CodexAppServerRuntime {
   private readonly pendingApprovals = new Map<string, PendingInteraction>();
   private readonly pendingUserInputs = new Map<string, PendingInteraction>();
   private readonly commandTerminals = new Map<string, CodexTerminalState>();
+  private readonly generatedFiles: WorkspaceGeneratedFileCollector;
   private readonly outputText: string[] = [];
   private readonly turnCompletion: Promise<Record<string, unknown>>;
   private resolveTurn!: (turn: Record<string, unknown>) => void;
@@ -105,6 +107,11 @@ class CodexAppServerRuntime {
   private forceKillTimer: NodeJS.Timeout | undefined;
 
   constructor(private readonly options: CodexRunOptions) {
+    this.generatedFiles = new WorkspaceGeneratedFileCollector({
+      workspaceDirectory: options.input.workspaceDirectory,
+      provider: "codex",
+      emit: options.emit,
+    });
     this.child = spawn("codex", ["app-server"], {
       cwd: options.input.workspaceDirectory,
       env: options.environment,
@@ -180,6 +187,7 @@ class CodexAppServerRuntime {
       if (this.interruptRequested) this.requestNativeInterrupt();
 
       const completedTurn = await this.turnCompletion;
+      await this.generatedFiles.flush();
       if (this.outputText.length === 0) {
         const finalText = finalAgentText(completedTurn);
         if (finalText) this.outputText.push(this.options.redact(finalText));
@@ -553,6 +561,14 @@ class CodexAppServerRuntime {
         }
         if (
           notification.method === "item/completed" &&
+          itemType === "fileChange" &&
+          !failed &&
+          !declined
+        ) {
+          this.observeFileChanges(item);
+        }
+        if (
+          notification.method === "item/completed" &&
           this.options.operation?.commandType === "StartReview" &&
           itemType === "exitedReviewMode" &&
           this.outputText.length === 0
@@ -721,6 +737,23 @@ class CodexAppServerRuntime {
     };
     if (itemId) this.commandTerminals.set(itemId, terminal);
     return terminal;
+  }
+
+  private observeFileChanges(item: Record<string, unknown> | undefined): void {
+    if (!Array.isArray(item?.changes)) return;
+    for (const value of item.changes) {
+      const change = asRecord(value);
+      const path = readString(change, "path");
+      const kind = asRecord(change?.kind);
+      const changeType = readString(kind, "type");
+      if (changeType === "delete") {
+        this.generatedFiles.remove(path);
+        continue;
+      }
+      this.generatedFiles.observe(path);
+      const movePath = readString(kind, "move_path");
+      if (movePath) this.generatedFiles.observe(movePath);
+    }
   }
 
   private handleResponse(response: JsonRpcResponse): void {

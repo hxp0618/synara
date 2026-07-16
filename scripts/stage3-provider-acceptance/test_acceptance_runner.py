@@ -684,6 +684,11 @@ def generated_file_snapshot_bytes(
         member.mode = 0o644
         member.mtime = 0
         archive.addfile(member, io.BytesIO(content))
+        standalone = tarfile.TarInfo(acceptance.STANDALONE_GENERATED_FILE_RELATIVE_PATH)
+        standalone.size = len(acceptance.STANDALONE_GENERATED_FILE_CONTENT)
+        standalone.mode = 0o644
+        standalone.mtime = 0
+        archive.addfile(standalone, io.BytesIO(acceptance.STANDALONE_GENERATED_FILE_CONTENT))
         if include_approval_sentinel:
             approval = tarfile.TarInfo(acceptance.REAL_PROVIDER_APPROVAL_RELATIVE_PATH)
             approval.size = len(acceptance.REAL_PROVIDER_APPROVAL_CONTENT)
@@ -700,10 +705,14 @@ def generated_file_snapshot_bytes(
 
 
 class GeneratedFileAPI(FakeAPI):
-    def __init__(self, artifact: Mapping[str, Any], snapshot: bytes) -> None:
+    def __init__(
+        self,
+        artifacts: Sequence[Mapping[str, Any]],
+        payloads: Mapping[str, bytes],
+    ) -> None:
         super().__init__()
-        self.artifact = dict(artifact)
-        self.snapshot = snapshot
+        self.artifacts = [dict(artifact) for artifact in artifacts]
+        self.payloads = dict(payloads)
         self.list_calls = 0
 
     def request(
@@ -723,9 +732,15 @@ class GeneratedFileAPI(FakeAPI):
                 "kind": "workspace_snapshot",
                 "status": "ready",
             }
-            return {"items": [prior] if self.list_calls == 1 else [prior, self.artifact]}
-        if method == "POST" and path == f"/v1/artifacts/{self.artifact['id']}/download":
-            return {"artifact": self.artifact, "url": "/downloads/generated-file-snapshot"}
+            return {"items": [prior] if self.list_calls == 1 else [prior, *self.artifacts]}
+        if method == "POST" and path.startswith("/v1/artifacts/") and path.endswith("/download"):
+            artifact_id = path.removeprefix("/v1/artifacts/").removesuffix("/download")
+            artifact = next(
+                (item for item in self.artifacts if item.get("id") == artifact_id),
+                None,
+            )
+            if artifact is not None:
+                return {"artifact": artifact, "url": f"/downloads/{artifact_id}"}
         return super().request(method, path)
 
     def download_bytes(
@@ -736,11 +751,15 @@ class GeneratedFileAPI(FakeAPI):
         maximum_timeout: float = 30.0,
     ) -> bytes:
         del maximum_timeout
-        if url != "/downloads/generated-file-snapshot":
+        if not url.startswith("/downloads/"):
             raise AssertionError(f"unexpected download URL: {url}")
-        if len(self.snapshot) > maximum_bytes:
-            raise AssertionError("fake generated-file snapshot exceeded the caller limit")
-        return self.snapshot
+        artifact_id = url.removeprefix("/downloads/")
+        payload = self.payloads.get(artifact_id)
+        if payload is None:
+            raise AssertionError(f"missing fake Artifact payload: {artifact_id}")
+        if len(payload) > maximum_bytes:
+            raise AssertionError("fake generated-file Artifact exceeded the caller limit")
+        return payload
 
 
 class RealProviderGeneratedFileSuite(acceptance.AcceptanceSuite):
@@ -748,11 +767,27 @@ class RealProviderGeneratedFileSuite(acceptance.AcceptanceSuite):
         self,
         *,
         duplicate_ready: bool = False,
+        duplicate_generated_ready: bool = False,
         snapshot_member_name: str = acceptance.GENERATED_FILE_RELATIVE_PATH,
         corrupt_sha256: bool = False,
+        corrupt_generated_file: bool = False,
     ) -> None:
         snapshot = generated_file_snapshot_bytes(snapshot_member_name)
         snapshot_sha256 = "0" * 64 if corrupt_sha256 else hashlib.sha256(snapshot).hexdigest()
+        generated_content = acceptance.STANDALONE_GENERATED_FILE_CONTENT
+        generated_artifact_id = "00000000-0000-4000-8000-000000000100"
+        generated_artifact = {
+            "id": generated_artifact_id,
+            "executionId": "execution-generated-file",
+            "kind": "generated_file",
+            "status": "ready",
+            "originalName": pathlib.PurePosixPath(
+                acceptance.STANDALONE_GENERATED_FILE_RELATIVE_PATH
+            ).name,
+            "contentType": "application/octet-stream",
+            "sizeBytes": len(generated_content),
+            "sha256": hashlib.sha256(generated_content).hexdigest(),
+        }
         artifact_id = "00000000-0000-4000-8000-000000000101"
         artifact = {
             "id": artifact_id,
@@ -765,7 +800,15 @@ class RealProviderGeneratedFileSuite(acceptance.AcceptanceSuite):
             "sha256": snapshot_sha256,
         }
         driver = FakeDriver(acceptance.STANDING_WORKER)
-        driver.api = GeneratedFileAPI(artifact, snapshot)
+        driver.api = GeneratedFileAPI(
+            [generated_artifact, artifact],
+            {
+                generated_artifact_id: (
+                    b"X" + generated_content[1:] if corrupt_generated_file else generated_content
+                ),
+                artifact_id: snapshot,
+            },
+        )
         super().__init__(
             dataclasses.replace(
                 runner_options(),
@@ -778,6 +821,22 @@ class RealProviderGeneratedFileSuite(acceptance.AcceptanceSuite):
         )
         self.state.session_id = "session-id"
         marker = self._real_provider_marker("generated-file-checkpoint")
+        generated_ready_events = [
+            {
+                "eventType": "artifact.ready",
+                "executionId": "execution-generated-file",
+                "workerId": "worker-1",
+                "generation": 1,
+                "payload": {
+                    "artifactId": generated_artifact_id,
+                    "kind": "generated_file",
+                    "contentType": "application/octet-stream",
+                    "sizeBytes": len(generated_content),
+                },
+            }
+        ]
+        if duplicate_generated_ready:
+            generated_ready_events.append(dict(generated_ready_events[0]))
         artifact_ready_events = [
             {
                 "eventType": "artifact.ready",
@@ -824,6 +883,7 @@ class RealProviderGeneratedFileSuite(acceptance.AcceptanceSuite):
                 "executionId": "execution-generated-file",
                 "payload": {"streamKind": "assistant_text", "delta": marker},
             },
+            *generated_ready_events,
             {
                 "eventType": "workspace.dirty",
                 "executionId": "execution-generated-file",
@@ -882,7 +942,14 @@ class RealProviderGeneratedFileSuite(acceptance.AcceptanceSuite):
             raise AssertionError("unexpected generated-file Turn mode")
         command = acceptance.generated_file_node_command()
         marker = self._real_provider_marker("generated-file-checkpoint")
-        if input_text.count(command) != 1 or input_text.count(marker) != 1:
+        standalone_text = acceptance.STANDALONE_GENERATED_FILE_CONTENT.decode("ascii").rstrip("\n")
+        if (
+            input_text.count(command) != 1
+            or input_text.count(marker) != 1
+            or input_text.count(acceptance.STANDALONE_GENERATED_FILE_RELATIVE_PATH) != 1
+            or input_text.count(standalone_text) != 1
+            or "native apply_patch file-change tool" not in input_text
+        ):
             raise AssertionError("generated-file prompt omitted its command or marker")
         self.created_input = input_text
         return {"id": "turn-generated-file"}
@@ -1025,6 +1092,10 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
 
         self.assertEqual(evidence["command"]["relativePath"], acceptance.GENERATED_FILE_RELATIVE_PATH)
         self.assertEqual(evidence["command"]["totalBytes"], (1 << 20) + 257)
+        self.assertEqual(
+            evidence["standaloneFile"]["relativePath"],
+            acceptance.STANDALONE_GENERATED_FILE_RELATIVE_PATH,
+        )
         self.assertEqual(evidence["checkpoint"]["strategy"], "snapshot")
         self.assertEqual(
             evidence["checkpoint"]["snapshot"]["file"],
@@ -1036,7 +1107,35 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
         )
         self.assertFalse(evidence["checkpoint"]["runtimePhysicalPathLeak"])
         self.assertFalse(evidence["checkpoint"]["duplicateReadyArtifact"])
-        self.assertEqual(evidence["checkpoint"]["standaloneGeneratedFileArtifacts"], [])
+        self.assertEqual(
+            evidence["checkpoint"]["generatedFileArtifact"]["artifact"],
+            {
+                "id": "00000000-0000-4000-8000-000000000100",
+                "kind": "generated_file",
+                "status": "ready",
+                "originalName": pathlib.PurePosixPath(
+                    acceptance.STANDALONE_GENERATED_FILE_RELATIVE_PATH
+                ).name,
+                "contentType": "application/octet-stream",
+                "sizeBytes": len(acceptance.STANDALONE_GENERATED_FILE_CONTENT),
+                "sha256": hashlib.sha256(
+                    acceptance.STANDALONE_GENERATED_FILE_CONTENT
+                ).hexdigest(),
+            },
+        )
+        self.assertEqual(
+            evidence["checkpoint"]["generatedFileArtifact"]["download"],
+            {
+                "sizeBytes": len(acceptance.STANDALONE_GENERATED_FILE_CONTENT),
+                "sha256": hashlib.sha256(
+                    acceptance.STANDALONE_GENERATED_FILE_CONTENT
+                ).hexdigest(),
+            },
+        )
+        self.assertLess(
+            evidence["checkpoint"]["sequenceRange"]["generatedArtifactReady"],
+            evidence["checkpoint"]["sequenceRange"]["workspaceDirty"],
+        )
         self.assertTrue(evidence["providerTurn"]["markerMatched"])
         self.assertEqual(evidence["providerTurn"]["markerMatchMode"], "contains-once")
         self.assertIsNotNone(suite.created_input)
@@ -1047,6 +1146,26 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
 
         self.assertEqual(caught.exception.code, "runner.generated_file_checkpoint_event_invalid")
 
+    def test_real_provider_generated_file_checkpoint_rejects_duplicate_standalone_ready_artifact(
+        self,
+    ) -> None:
+        with self.assertRaises(acceptance.AcceptanceError) as caught:
+            RealProviderGeneratedFileSuite(
+                duplicate_generated_ready=True
+            )._real_provider_generated_file_checkpoint()
+
+        self.assertEqual(caught.exception.code, "runner.generated_file_artifact_event_invalid")
+
+    def test_real_provider_generated_file_checkpoint_rejects_standalone_download_mismatch(
+        self,
+    ) -> None:
+        with self.assertRaises(acceptance.AcceptanceError) as caught:
+            RealProviderGeneratedFileSuite(
+                corrupt_generated_file=True
+            )._real_provider_generated_file_checkpoint()
+
+        self.assertEqual(caught.exception.code, "runner.generated_file_artifact_download_mismatch")
+
     def test_generated_file_snapshot_preserves_known_approval_sentinel(self) -> None:
         evidence = acceptance.generated_file_snapshot_evidence(
             generated_file_snapshot_bytes(
@@ -1055,10 +1174,11 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
             )
         )
 
-        self.assertEqual(evidence["regularFileCount"], 3)
+        self.assertEqual(evidence["regularFileCount"], 4)
         self.assertEqual(
             evidence["preservedKnownFiles"],
             [
+                acceptance.STANDALONE_GENERATED_FILE_RELATIVE_PATH,
                 acceptance.REAL_PROVIDER_APPROVAL_RELATIVE_PATH,
                 acceptance.REAL_PROVIDER_STEER_RELATIVE_PATH,
             ],
