@@ -196,6 +196,14 @@ class IdentityHelperTest(unittest.TestCase):
         self.assertEqual(counts[("promoted", BASELINE_REVISION, BASELINE_DIGEST)], 1)
         self.assertEqual(counts[("canary", CANDIDATE_REVISION, CANDIDATE_DIGEST)], 2)
 
+    def test_treats_stopped_transition_container_as_pending(self) -> None:
+        self.assertTrue(gate.container_pool_running([{"State": {"Running": True}}]))
+        self.assertFalse(
+            gate.container_pool_running(
+                [{"State": {"Running": True}}, {"State": {"Running": False}}]
+            )
+        )
+
 
 class ExecutionReleaseValidationTest(unittest.TestCase):
     def test_requires_matching_created_leased_and_single_terminal_events(self) -> None:

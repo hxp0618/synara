@@ -552,7 +552,7 @@ class DockerWorkerReleaseRolloutDriver(acceptance.DockerDriver):
 
         def probe() -> Mapping[str, Any] | None:
             containers = self._managed_containers(target_id)
-            if len(containers) != expected_count:
+            if len(containers) != expected_count or not container_pool_running(containers):
                 return None
             summaries = [self._container_summary(target_id, container) for container in containers]
             actual = container_pool_counts(summaries)
@@ -1573,6 +1573,14 @@ def container_pool_counts(
         key = (item.get("channel"), item.get("revisionId"), item.get("digest"))
         counts[key] = counts.get(key, 0) + 1
     return counts
+
+
+def container_pool_running(containers: Sequence[Mapping[str, Any]]) -> bool:
+    return all(
+        isinstance(container.get("State"), dict)
+        and container["State"].get("Running") is True
+        for container in containers
+    )
 
 
 def release_image_evidence(image: ReleaseImage) -> dict[str, Any]:
