@@ -159,6 +159,11 @@ exact state cleanup, and an empty child output Secret scan. An explicitly unsupp
 new Provider version, but no new unsupported case is accepted silently. The aggregate stores only child report
 paths, hashes, counts and bounded metadata; it does not retain child process output or credentials.
 
+Interaction waits are terminal-aware. If a Provider completes, fails, cancels, or interrupts a Turn without
+emitting the required Approval or User Input interaction, the child report fails immediately with
+`runner.interaction_missing_after_terminal`. The consolidated gate does not retry that Provider behavior or turn
+the missing interaction into an unsupported result.
+
 ## Deterministic failure and canary matrix
 
 The fault matrix is opt-in so the default core suite remains stable and fast:

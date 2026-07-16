@@ -9112,37 +9112,13 @@ class AcceptanceSuite:
         resolved_session_id = session_id or self._required("session_id")
 
         def terminal_probe() -> tuple[dict[str, Any], list[dict[str, Any]]] | None:
-            events = (
-                self._all_events(session_id=resolved_session_id)
-                if session_id is not None
-                else self._all_events()
+            snapshot = self._turn_terminal_snapshot(
+                turn_id,
+                session_id=resolved_session_id if session_id is not None else None,
             )
-            created = next(
-                (
-                    event
-                    for event in events
-                    if event.get("eventType") == "turn.created" and self._event_turn_id(event) == turn_id
-                ),
-                None,
-            )
-            if created is None:
+            if snapshot is None:
                 return None
-            execution_id = self._event_execution_id(created)
-            matching = [event for event in events if event.get("executionId") == execution_id]
-            terminals = [event for event in matching if event.get("eventType") in TERMINAL_EVENT_TYPES]
-            if not terminals:
-                return None
-            if len(terminals) != 1:
-                raise AcceptanceError(
-                    "runner.turn_terminal_duplicate",
-                    "Turn emitted more than one terminal event.",
-                    {
-                        "turnId": turn_id,
-                        "executionId": execution_id,
-                        "terminals": [self._event_summary(event) for event in terminals],
-                    },
-                )
-            terminal = terminals[0]
+            terminal, matching = snapshot
             if terminal.get("eventType") != expected_event_type:
                 raise AcceptanceError(
                     "runner.turn_terminal_mismatch",
@@ -9158,6 +9134,65 @@ class AcceptanceSuite:
             return terminal, matching
 
         return self.api.wait_until(f"Turn {turn_id} terminal event", terminal_probe)
+
+    def _turn_terminal_snapshot(
+        self,
+        turn_id: str,
+        *,
+        session_id: str | None = None,
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]] | None:
+        events = self._all_events(session_id=session_id) if session_id is not None else self._all_events()
+        created = next(
+            (
+                event
+                for event in events
+                if event.get("eventType") == "turn.created" and self._event_turn_id(event) == turn_id
+            ),
+            None,
+        )
+        if created is None:
+            return None
+        execution_id = self._event_execution_id(created)
+        matching = [event for event in events if event.get("executionId") == execution_id]
+        terminals = [event for event in matching if event.get("eventType") in TERMINAL_EVENT_TYPES]
+        if not terminals:
+            return None
+        if len(terminals) != 1:
+            raise AcceptanceError(
+                "runner.turn_terminal_duplicate",
+                "Turn emitted more than one terminal event.",
+                {
+                    "turnId": turn_id,
+                    "executionId": execution_id,
+                    "terminals": [self._event_summary(event) for event in terminals],
+                },
+            )
+        return terminals[0], matching
+
+    def _raise_if_turn_terminated_without_interaction(
+        self,
+        turn_id: str,
+        kind: str,
+        *,
+        session_id: str,
+    ) -> None:
+        snapshot = self._turn_terminal_snapshot(
+            turn_id,
+            session_id=session_id if session_id != self.state.session_id else None,
+        )
+        if snapshot is None:
+            return
+        terminal, matching = snapshot
+        raise AcceptanceError(
+            "runner.interaction_missing_after_terminal",
+            f"Turn terminated before producing the required {kind} interaction.",
+            {
+                "turnId": turn_id,
+                "expectedInteractionKind": kind,
+                "terminal": self._event_summary(terminal),
+                "eventTypes": [event.get("eventType") for event in matching],
+            },
+        )
 
     def _wait_for_interaction(
         self,
@@ -9182,6 +9217,11 @@ class AcceptanceSuite:
             for item in items:
                 if isinstance(item, dict) and item.get("turnId") == turn_id and item.get("kind") == kind:
                     return item
+            self._raise_if_turn_terminated_without_interaction(
+                turn_id,
+                kind,
+                session_id=session_id,
+            )
             return None
 
         return self.api.wait_until(f"{kind} interaction for Turn {turn_id}", interaction_probe)
@@ -9205,16 +9245,23 @@ class AcceptanceSuite:
                     "runner.response_shape_invalid",
                     "pending interactions.items was not an array.",
                 )
-            if any(isinstance(item, dict) and item.get("id") == previous_interaction_id for item in items):
-                return None
-            for item in items:
-                if (
-                    isinstance(item, dict)
-                    and item.get("turnId") == turn_id
-                    and item.get("kind") == kind
-                    and item.get("id") != previous_interaction_id
-                ):
-                    return item
+            previous_pending = any(
+                isinstance(item, dict) and item.get("id") == previous_interaction_id for item in items
+            )
+            if not previous_pending:
+                for item in items:
+                    if (
+                        isinstance(item, dict)
+                        and item.get("turnId") == turn_id
+                        and item.get("kind") == kind
+                        and item.get("id") != previous_interaction_id
+                    ):
+                        return item
+            self._raise_if_turn_terminated_without_interaction(
+                turn_id,
+                kind,
+                session_id=session_id,
+            )
             return None
 
         return self.api.wait_until(f"replacement {kind} interaction for Turn {turn_id}", interaction_probe)

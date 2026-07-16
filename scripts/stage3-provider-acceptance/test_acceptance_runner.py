@@ -1436,6 +1436,56 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
         self.assertEqual(initial["id"], "interaction-1")
         self.assertEqual(replacement["id"], "interaction-2")
 
+    def test_interaction_wait_fails_when_turn_terminates_without_request(self) -> None:
+        suite = BarrierSuite(acceptance.EXECUTION_PINNED_WORKER)
+
+        class InteractionAPI(FakeAPI):
+            def request(
+                self,
+                method: str,
+                path: str,
+                payload: Mapping[str, Any] | None = None,
+                expected: Sequence[int] = (200,),
+                *,
+                maximum_timeout: float = 10.0,
+            ) -> Any:
+                del method, path, payload, expected, maximum_timeout
+                return {"items": []}
+
+            def wait_until(
+                self,
+                _description: str,
+                probe: Callable[[], Any | None],
+                interval: float = 0.25,
+            ) -> Any:
+                del interval
+                return probe()
+
+        suite.fake_driver.api = InteractionAPI()  # type: ignore[assignment]
+        suite._all_events = mock.Mock(  # type: ignore[method-assign]
+            return_value=[
+                {
+                    "sequence": 1,
+                    "eventType": "turn.created",
+                    "executionId": "execution-1",
+                    "payload": {"turnId": "turn-1"},
+                },
+                {
+                    "sequence": 2,
+                    "eventType": "execution.completed",
+                    "executionId": "execution-1",
+                    "payload": {"turnId": "turn-1"},
+                },
+            ]
+        )
+
+        with self.assertRaises(acceptance.AcceptanceError) as caught:
+            acceptance.AcceptanceSuite._wait_for_interaction(suite, "turn-1", "approval")
+
+        self.assertEqual(caught.exception.code, "runner.interaction_missing_after_terminal")
+        self.assertEqual(caught.exception.evidence["expectedInteractionKind"], "approval")
+        self.assertEqual(caught.exception.evidence["terminal"]["eventType"], "execution.completed")
+
     def test_standing_worker_preserves_existing_case_order(self) -> None:
         suite = CaseOrderSuite(FakeDriver(acceptance.STANDING_WORKER))
 
