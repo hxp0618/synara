@@ -1438,6 +1438,15 @@ Provider × Capability × Execution Target
   Runner 88 tests、真实容器 endpoint/crash 探针、deterministic Docker `16/16`，以及 Codex/Claude Local
   401/429 focused matrix 各 `14/14`；但仍缺受控 Provider 凭据下的真实 Docker product/failure 报告，
   SSH/Kubernetes 同类 fault transport 也未实现，因此四 Target Gate 保持 open。
+- Consolidated release gate 已抽取 target-aware 公共验证器，Local 既有 CLI/Schema 与冻结 Unsupported 边界
+  保持兼容；新增 `docker_release_gate.py` 在完全 clean SHA 上串行运行 Codex/Claude product + failure 四份
+  child report。每个 child 仅继承工具白名单与当前 Provider Credential；Gate 从 clean SHA 单次构建带唯一
+  ownership label 的 `worker-acceptance` Image，四个 child 通过 `--docker-skip-worker-build` 复用同一 tag，
+  只清理各自 container/volume/network/state 并证明没有删除共享 Image。聚合器要求同一 Capability Catalog
+  hash、与 Gate build 完全一致的 Worker Image ID、完整 case、exact child cleanup、空 Secret scan，且
+  child/aggregate 均不持久化 operator 环境变量名或值；Gate 在包括 child 失败的 `finally` 路径校验 Image
+  ownership + ID 后自行删除。当前 release-gate tests `32/32` 与缺 Credential/preflight 泄漏负例已通过；
+  尚未执行 clean-SHA 真实 Docker 四矩阵，因此仍不构成发布证据。
 
 ## 18. 实施顺序
 

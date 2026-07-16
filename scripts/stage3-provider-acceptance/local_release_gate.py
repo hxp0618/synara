@@ -12,7 +12,6 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import datetime as dt
-import hashlib
 import json
 import pathlib
 import re
@@ -24,13 +23,14 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 import acceptance_runner as acceptance
+import release_gate_common as common
 
 
 SCHEMA_VERSION = "synara.provider-local-release-gate.v1"
 JSON_REPORT_NAME = "local-release-gate.json"
 MARKDOWN_REPORT_NAME = "local-release-gate.md"
-PROVIDERS = ("codex", "claudeAgent")
-MATRICES = ("product", "failure")
+PROVIDERS = common.PROVIDERS
+MATRICES = common.MATRICES
 NODE_MINIMUM = (24, 13, 1)
 NODE_MAXIMUM_EXCLUSIVE = (25, 0, 0)
 EXPECTED_UNSUPPORTED: Mapping[tuple[str, str], frozenset[str]] = {
@@ -41,6 +41,15 @@ EXPECTED_UNSUPPORTED: Mapping[tuple[str, str], frozenset[str]] = {
     ("codex", "failure"): frozenset(),
     ("claudeAgent", "failure"): frozenset(),
 }
+LOCAL_CHILD_POLICY = common.ChildReportPolicy(
+    target="local",
+    runner_executable="node",
+    expected_unsupported=EXPECTED_UNSUPPORTED,
+    authentication="ambient",
+    credential_fields={provider: None for provider in PROVIDERS},
+    controlled_base_urls={provider: False for provider in PROVIDERS},
+    cleanup_true_fields=("controlPlaneStopped", "stateRemoved"),
+)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -52,31 +61,7 @@ class ReleaseGateOptions:
     failure_timeout_seconds: float
 
 
-class ReleaseGateError(Exception):
-    def __init__(
-        self,
-        code: str,
-        message: str,
-        evidence: Mapping[str, Any] | None = None,
-    ) -> None:
-        super().__init__(message)
-        self.code = code
-        self.message = message
-        self.evidence = dict(evidence or {})
-
-    def as_report_error(
-        self,
-        *,
-        provider: str | None = None,
-        matrix: str | None = None,
-    ) -> dict[str, Any]:
-        return {
-            "code": self.code,
-            "message": self.message,
-            **({"provider": provider} if provider else {}),
-            **({"matrix": matrix} if matrix else {}),
-            **({"evidence": self.evidence} if self.evidence else {}),
-        }
+ReleaseGateError = common.ReleaseGateError
 
 
 def parse_args(argv: Sequence[str]) -> ReleaseGateOptions:
@@ -190,26 +175,7 @@ def inspect_node_runtime(node_path: str) -> dict[str, Any]:
 
 
 def repository_state(repo_root: pathlib.Path) -> dict[str, Any]:
-    sha = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=repo_root,
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
-    status = subprocess.run(
-        ["git", "status", "--porcelain", "--untracked-files=all"],
-        cwd=repo_root,
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout
-    if status.strip():
-        raise ReleaseGateError(
-            "release.worktree_dirty",
-            "The consolidated Local release gate requires a clean worktree with no untracked files.",
-        )
-    return {"gitSha": sha, "worktreeDirty": False}
+    return common.repository_state(repo_root)
 
 
 def build_provider_host(options: ReleaseGateOptions) -> dict[str, Any]:
@@ -271,13 +237,7 @@ def child_command(
 
 
 def expected_case_ids(matrix: str) -> frozenset[str]:
-    if matrix == "product":
-        return frozenset(
-            metadata["id"] for metadata in acceptance.REAL_PROVIDER_CASE_METADATA.values()
-        )
-    return frozenset(
-        metadata["id"] for metadata in acceptance.REAL_PROVIDER_FAILURE_CASE_METADATA.values()
-    )
+    return common.expected_case_ids(matrix)
 
 
 def validate_child_report(
@@ -287,181 +247,20 @@ def validate_child_report(
     matrix: str,
     expected_git_sha: str,
 ) -> list[dict[str, Any]]:
-    errors: list[dict[str, Any]] = []
-
-    def fail(code: str, message: str, evidence: Mapping[str, Any] | None = None) -> None:
-        errors.append(
-            {
-                "code": code,
-                "message": message,
-                "provider": provider,
-                "matrix": matrix,
-                **({"evidence": dict(evidence)} if evidence else {}),
-            }
-        )
-
-    if report.get("schemaVersion") != acceptance.SCHEMA_VERSION:
-        fail("release.child_schema_invalid", "Child report schema is not the Provider acceptance schema.")
-    if report.get("provider") != provider or report.get("target") != "local":
-        fail(
-            "release.child_identity_mismatch",
-            "Child report Provider or Target does not match the requested Local run.",
-        )
-    if report.get("mode") != "real-provider-smoke" or report.get("status") != "pass":
-        fail(
-            "release.child_status_invalid",
-            "Child report is not a passing real Provider smoke report.",
-            {"status": report.get("status"), "mode": report.get("mode")},
-        )
-
-    source = report.get("source")
-    if not isinstance(source, dict):
-        fail("release.child_source_missing", "Child report omitted source metadata.")
-    else:
-        if source.get("gitSha") != expected_git_sha or source.get("worktreeDirty") is not False:
-            fail(
-                "release.child_source_mismatch",
-                "Child report did not use the expected clean Git SHA.",
-                {"gitSha": source.get("gitSha"), "worktreeDirty": source.get("worktreeDirty")},
-            )
-        catalog_hash = source.get("providerCapabilityCatalogSha256")
-        if not isinstance(catalog_hash, str) or re.fullmatch(r"[0-9a-f]{64}", catalog_hash) is None:
-            fail(
-                "release.child_catalog_hash_invalid",
-                "Child report omitted a valid Provider Capability Catalog hash.",
-            )
-
-    configuration = report.get("configuration")
-    real_provider = configuration.get("realProvider") if isinstance(configuration, dict) else None
-    if not isinstance(configuration, dict) or not isinstance(real_provider, dict):
-        fail("release.child_configuration_missing", "Child report omitted real Provider configuration.")
-    else:
-        if configuration.get("restartControlPlane") is not True or configuration.get("keepState") is not False:
-            fail(
-                "release.child_lifecycle_invalid",
-                "Child report must restart the Control Plane and remove its isolated state.",
-            )
-        runner = configuration.get("runnerCommand")
-        if not isinstance(runner, dict) or runner.get("executable") != "node":
-            fail(
-                "release.child_runner_invalid",
-                "Child report did not use the required direct Node Provider Host command.",
-            )
-        expected_product = list(acceptance.REAL_PROVIDER_CASES) if matrix == "product" else []
-        expected_failure = list(acceptance.REAL_PROVIDER_FAILURE_CASES) if matrix == "failure" else []
-        if real_provider.get("requestedCases") != expected_product:
-            fail(
-                "release.child_product_coverage_invalid",
-                "Child report did not request the canonical product/capability matrix.",
-            )
-        if real_provider.get("requestedFailureCases", []) != expected_failure:
-            fail(
-                "release.child_failure_coverage_invalid",
-                "Child report did not request the canonical real Provider failure matrix.",
-            )
-        if real_provider.get("ambientAuthentication") is not True:
-            fail(
-                "release.child_auth_boundary_invalid",
-                "Child report did not preserve ambient authentication for the baseline real Provider path.",
-            )
-        if matrix == "failure" and real_provider.get("controlledFaultCredentials") is not True:
-            fail(
-                "release.child_fault_credential_boundary_invalid",
-                "Failure child report did not use controlled fault Credentials.",
-            )
-        if matrix == "failure" and real_provider.get("cursorMaximumAge") != acceptance.REAL_PROVIDER_CURSOR_MAX_AGE:
-            fail(
-                "release.child_cursor_policy_invalid",
-                "Failure child report did not use the canonical Cursor expiry policy.",
-            )
-
-    cases = report.get("cases")
-    if not isinstance(cases, list) or not all(isinstance(case, dict) for case in cases):
-        fail("release.child_cases_invalid", "Child report cases are missing or malformed.")
-        return errors
-    case_ids = [str(case.get("id")) for case in cases]
-    duplicate_ids = sorted({case_id for case_id in case_ids if case_ids.count(case_id) > 1})
-    if duplicate_ids:
-        fail(
-            "release.child_case_duplicate",
-            "Child report contains duplicate case IDs.",
-            {"caseIds": duplicate_ids},
-        )
-    by_id = {str(case.get("id")): case for case in cases}
-    missing = sorted(expected_case_ids(matrix).difference(by_id))
-    if missing:
-        fail(
-            "release.child_cases_missing",
-            "Child report omitted required matrix cases.",
-            {"missingCaseIds": missing},
-        )
-
-    allowed_unsupported = EXPECTED_UNSUPPORTED[(provider, matrix)]
-    for case_id, case in by_id.items():
-        status = case.get("status")
-        if status not in acceptance.CASE_STATUSES:
-            fail(
-                "release.child_case_status_invalid",
-                "Child report contains an unknown case status.",
-                {"caseId": case_id, "status": status},
-            )
-            continue
-        if status in {"fail", "skipped"}:
-            fail(
-                "release.child_case_not_complete",
-                "Child report contains a failed or skipped case.",
-                {"caseId": case_id, "status": status},
-            )
-        if status == "unsupported" and case_id not in allowed_unsupported:
-            fail(
-                "release.child_unsupported_unexpected",
-                "Child report contains an unsupported case outside the frozen Local boundary.",
-                {"caseId": case_id},
-            )
-
-    cleanup = by_id.get("environment.cleanup")
-    cleanup_evidence = cleanup.get("evidence") if isinstance(cleanup, dict) else None
-    if (
-        not isinstance(cleanup, dict)
-        or cleanup.get("status") != "pass"
-        or not isinstance(cleanup_evidence, dict)
-        or cleanup_evidence.get("controlPlaneStopped") is not True
-        or cleanup_evidence.get("stateRemoved") is not True
-    ):
-        fail(
-            "release.child_cleanup_invalid",
-            "Child report did not prove exact Local Control Plane and state cleanup.",
-        )
-
-    secret_scan = by_id.get("security.output-secret-scan")
-    secret_evidence = secret_scan.get("evidence") if isinstance(secret_scan, dict) else None
-    if (
-        not isinstance(secret_scan, dict)
-        or secret_scan.get("status") != "pass"
-        or not isinstance(secret_evidence, dict)
-        or secret_evidence.get("findings") != []
-    ):
-        fail(
-            "release.child_secret_scan_invalid",
-            "Child report did not prove an empty output Secret scan.",
-        )
-    return errors
-
+    return common.validate_child_report(
+        report,
+        provider=provider,
+        matrix=matrix,
+        expected_git_sha=expected_git_sha,
+        policy=LOCAL_CHILD_POLICY,
+    )
 
 def file_sha256(path: pathlib.Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as source:
-        while chunk := source.read(1 << 20):
-            digest.update(chunk)
-    return digest.hexdigest()
+    return common.file_sha256(path)
 
 
 def case_counts(report: Mapping[str, Any]) -> dict[str, int]:
-    result = {status: 0 for status in sorted(acceptance.CASE_STATUSES)}
-    for case in report.get("cases", []):
-        if isinstance(case, dict) and case.get("status") in result:
-            result[str(case["status"])] += 1
-    return result
+    return common.case_counts(report)
 
 
 def run_child(
@@ -472,102 +271,18 @@ def run_child(
     expected_git_sha: str,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     child_dir = options.output_dir / provider / matrix
-    command = child_command(options, provider, matrix, child_dir)
-    started = time.monotonic()
-    completed = subprocess.run(command, cwd=options.repo_root, check=False)
-    duration_ms = round((time.monotonic() - started) * 1000)
-    json_path = child_dir / acceptance.JSON_REPORT_NAME
-    markdown_path = child_dir / acceptance.MARKDOWN_REPORT_NAME
-    errors: list[dict[str, Any]] = []
-    record: dict[str, Any] = {
-        "provider": provider,
-        "matrix": matrix,
-        "processReturnCode": completed.returncode,
-        "durationMs": duration_ms,
-        "reportPath": str(json_path.relative_to(options.output_dir)),
-        "markdownPath": str(markdown_path.relative_to(options.output_dir)),
-    }
-    if not json_path.is_file() or not markdown_path.is_file():
-        error = ReleaseGateError(
-            "release.child_report_missing",
-            "Child acceptance run did not produce both JSON and Markdown reports.",
-            {"returnCode": completed.returncode},
-        ).as_report_error(provider=provider, matrix=matrix)
-        errors.append(error)
-        record["status"] = "fail"
-        return record, errors
-    try:
-        decoded = json.loads(json_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        error = ReleaseGateError(
-            "release.child_report_invalid_json",
-            "Child acceptance JSON report could not be decoded.",
-        ).as_report_error(provider=provider, matrix=matrix)
-        errors.append(error)
-        record["status"] = "fail"
-        return record, errors
-    if not isinstance(decoded, dict):
-        error = ReleaseGateError(
-            "release.child_report_invalid_shape",
-            "Child acceptance JSON report must be an object.",
-        ).as_report_error(provider=provider, matrix=matrix)
-        errors.append(error)
-        record["status"] = "fail"
-        return record, errors
-
-    errors.extend(
-        validate_child_report(
-            decoded,
-            provider=provider,
-            matrix=matrix,
-            expected_git_sha=expected_git_sha,
-        )
+    return common.run_child_report(
+        repo_root=options.repo_root,
+        output_dir=options.output_dir,
+        provider=provider,
+        matrix=matrix,
+        expected_git_sha=expected_git_sha,
+        command=child_command(options, provider, matrix, child_dir),
+        policy=LOCAL_CHILD_POLICY,
     )
-    if completed.returncode != 0:
-        errors.append(
-            ReleaseGateError(
-                "release.child_process_failed",
-                "Child acceptance process returned a non-zero status.",
-                {"returnCode": completed.returncode},
-            ).as_report_error(provider=provider, matrix=matrix)
-        )
-    cases = decoded.get("cases") if isinstance(decoded.get("cases"), list) else []
-    record.update(
-        {
-            "status": "pass" if not errors else "fail",
-            "childRunId": decoded.get("runId"),
-            "childDurationMs": decoded.get("durationMs"),
-            "caseCounts": case_counts(decoded),
-            "unsupportedCaseIds": sorted(
-                str(case.get("id"))
-                for case in cases
-                if isinstance(case, dict) and case.get("status") == "unsupported"
-            ),
-            "reportSha256": file_sha256(json_path),
-            "markdownSha256": file_sha256(markdown_path),
-            "source": decoded.get("source"),
-        }
-    )
-    return record, errors
-
 
 def catalog_consensus_errors(runs: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
-    hashes = {
-        source.get("providerCapabilityCatalogSha256")
-        for run in runs
-        if isinstance((source := run.get("source")), dict)
-        and isinstance(source.get("providerCapabilityCatalogSha256"), str)
-    }
-    if len(hashes) == 1:
-        return []
-    return [
-        {
-            "code": "release.catalog_hash_mismatch",
-            "message": "Child reports do not share one Provider Capability Catalog hash.",
-            "evidence": {"distinctHashCount": len(hashes)},
-        }
-    ]
-
+    return common.catalog_consensus_errors(runs)
 
 def markdown_from_report(report: Mapping[str, Any]) -> str:
     lines = [

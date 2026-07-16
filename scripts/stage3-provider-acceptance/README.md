@@ -210,6 +210,37 @@ emitting the required Approval or User Input interaction, the child report fails
 `runner.interaction_missing_after_terminal`. The consolidated gate does not retry that Provider behavior or turn
 the missing interaction into an unsupported result.
 
+## Consolidated real Provider Docker release gate
+
+`docker_release_gate.py` uses the same shared clean-SHA child-report validator while keeping Docker-specific
+Credential, Worker image and cleanup requirements explicit. Set both product Credentials out of band and pass only
+their environment-variable names:
+
+```sh
+python3 scripts/stage3-provider-acceptance/docker_release_gate.py \
+  --codex-credential-env SYNARA_ACCEPTANCE_CODEX_KEY \
+  --claude-credential-env SYNARA_ACCEPTANCE_CLAUDE_KEY \
+  --claude-credential-field apiKey \
+  --product-timeout 2400 \
+  --failure-timeout 900
+```
+
+Use `--claude-credential-field authToken` only when the controlled Claude secret intentionally maps to
+`ANTHROPIC_AUTH_TOKEN`. Optional Codex/Claude Base URLs are supplied through `--codex-base-url-env` and
+`--claude-base-url-env`; their values and all Credential values are registered with the aggregate redactor.
+
+The gate fails before any build when either source is missing or invalid, and fails on a dirty/untracked worktree.
+Each child receives only the tool environment allowlist plus that child Provider's Credential/Base URL; Codex and
+Claude secrets are never co-inherited. After clean-SHA preflight, the gate builds one uniquely labeled official
+`worker-acceptance` image and passes the same tag to all four children with `--docker-skip-worker-build`. Each child
+must remove its exact container/volume/network/state resources, prove `ownedImageRemoved=false`, and leave the shared
+image to the gate. A pass requires all four reports to reference the gate-built image ID and one Capability Catalog
+hash, canonical product and failure coverage, controlled rather than ambient authentication, empty child and
+aggregate Secret scans, and no persisted operator environment-variable names. In `finally`, including child failure
+paths, the gate verifies the image ownership labels and ID before removing it without broad cleanup. The aggregate
+records that cleanup evidence in `docker-release-gate.json` and `docker-release-gate.md`. Until a clean run with real
+controlled Credentials exists, this command is an implemented gate rather than Docker release evidence.
+
 ## Deterministic failure and canary matrix
 
 The fault matrix is opt-in so the default core suite remains stable and fast:
