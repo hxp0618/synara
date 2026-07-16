@@ -208,6 +208,16 @@ bun run --cwd apps/web test \
 
 ## 8. Canary、Promote 与 Rollback
 
+Clean-SHA managed Docker mechanics gate（使用 loopback disposable Registry，不代替生产 Registry/TLS/auth、
+真实 Provider 或 Kubernetes 多节点证据）：
+
+```bash
+python3 scripts/stage3-provider-acceptance/docker_worker_release_rollout_gate.py \
+  --go-proxy https://goproxy.cn,direct \
+  --output-dir /tmp/synara-docker-worker-release-rollout \
+  --timeout 3600
+```
+
 - [ ] 已按 `docs/runbooks/worker-release-rollout.md` 完成预检。
 - [ ] 初始 promoted Revision 绑定已验证的 Worker Manifest 与不可变 Image Digest。
 - [ ] Canary 使用更新的 Revision、`expectedPolicyVersion` 和非空原因，比例在 `1..100`。

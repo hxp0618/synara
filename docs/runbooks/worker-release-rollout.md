@@ -46,6 +46,20 @@ multi-arch 镜像、多节点生产 Kubernetes 和 soak 尚未完成前，只能
    粘贴到命令行历史、工单或聊天。
 8. 对本次发布创建唯一 Idempotency Key，并为每个不同操作使用不同值。
 
+在生产操作前，可从同一 clean commit 运行 deterministic managed Docker mechanics gate：
+
+```bash
+python3 scripts/stage3-provider-acceptance/docker_worker_release_rollout_gate.py \
+  --go-proxy https://goproxy.cn,direct \
+  --output-dir /tmp/synara-docker-worker-release-rollout \
+  --timeout 3600
+```
+
+该命令使用 loopback-only disposable Registry、两个不同 Registry Digest、两 Worker 主 Target 和一个
+candidate observer，验证 Revision、CAS Policy、canary/promote/rollback、活动 Execution 阻断、Audit、
+Outbox、Event Sequence 与精确 cleanup。它不使用生产 Registry Credential/TLS，也不执行真实 Provider、
+Kubernetes 多节点、load 或 soak，因此不能替代下面的生产预检与观察窗口。
+
 ### 3.1 生产签名策略
 
 `deploy/worker/signing-policy.json` 必须与发布 Commit 一起评审和提交。`ephemeral-key` 只用于 disposable

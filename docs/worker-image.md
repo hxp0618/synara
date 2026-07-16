@@ -214,6 +214,30 @@ production KMS/keyless identity or transparency-log policy. A production-mode pa
 certificate/KMS identity and transparency-log conclusion. Neither mode alone proves production Registry Credential and
 retention, real Provider rollout across all four Targets, multi-node canary/rollback, or soak.
 
+## Docker Release Revision rollout gate
+
+After the supply-chain boundary is green, use the clean-SHA Docker rollout gate to prove that Registry-returned
+digests survive the product Release Revision, managed Worker pool, and Execution scheduling paths:
+
+```bash
+python3 scripts/stage3-provider-acceptance/docker_worker_release_rollout_gate.py \
+  --go-proxy https://goproxy.cn,direct \
+  --output-dir /tmp/synara-docker-worker-release-rollout \
+  --timeout 3600
+```
+
+This command owns a loopback-only disposable Registry. It builds two single-platform Worker acceptance images from
+one clean Git SHA with different controlled build versions, creates a two-Worker main Docker Target and a separate
+candidate observer, and drives immutable Revision creation, initial promote, canary, active-Execution fencing,
+promote, and rollback through the user API. A pass requires the Registry digest, Worker Manifest, Docker container
+labels/environment, and `turn.created` / `execution.leased` release pins to agree at every stage. It also requires
+strict-CAS rejection, immutable Transition/Audit/Outbox history, one terminal per Execution, exact cleanup, and an
+empty output Secret scan.
+
+The local Registry intentionally has no TLS or Registry Credential. Its result closes only deterministic managed
+Docker rollout mechanics; production Registry auth/retention, keyless or KMS identity, Kubernetes multi-node
+rollout, real Provider credentials, load, and soak remain separate gates.
+
 ## Runtime and storage
 
 Docker and Kubernetes Execution Target configuration should use the official Worker image, not the older

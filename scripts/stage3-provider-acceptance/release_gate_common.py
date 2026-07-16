@@ -61,6 +61,31 @@ class ReleaseGateError(Exception):
         }
 
 
+def normalize_go_proxy(value: str | None) -> str | None:
+    if value is None:
+        return None
+    proxy = value.strip()
+    if (
+        not proxy
+        or len(proxy) > 2048
+        or any(character.isspace() or ord(character) < 32 for character in proxy)
+        or any(character in proxy for character in "@?#")
+    ):
+        raise ValueError(
+            "--go-proxy must be a public credential-free GOPROXY list without whitespace, "
+            "userinfo, query, or fragment data"
+        )
+    pattern = re.compile(
+        r"https://[A-Za-z0-9.-]+(?::[0-9]+)?(?:/[A-Za-z0-9._~!$&'()*+,;=:@%/-]*)?"
+    )
+    if any(
+        entry not in {"direct", "off"} and pattern.fullmatch(entry) is None
+        for entry in proxy.split(",")
+    ):
+        raise ValueError("--go-proxy entries must use https://, direct, or off")
+    return proxy
+
+
 def repository_state(repo_root: pathlib.Path) -> dict[str, Any]:
     sha = subprocess.run(
         ["git", "rev-parse", "HEAD"],

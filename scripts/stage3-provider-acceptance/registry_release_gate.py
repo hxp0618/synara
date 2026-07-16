@@ -170,25 +170,7 @@ def normalize_executable(value: str, flag: str) -> str:
     return executable
 
 
-def normalize_go_proxy(value: str | None) -> str | None:
-    if value is None:
-        return None
-    proxy = value.strip()
-    if (
-        not proxy
-        or len(proxy) > 2048
-        or any(character.isspace() or ord(character) < 32 for character in proxy)
-        or any(character in proxy for character in "@?#")
-    ):
-        raise ValueError(
-            "--go-proxy must be a public credential-free GOPROXY list without whitespace, userinfo, query, or fragment data"
-        )
-    for entry in proxy.split(","):
-        if entry in {"direct", "off"}:
-            continue
-        if re.fullmatch(r"https://[A-Za-z0-9.-]+(?::[0-9]+)?(?:/[A-Za-z0-9._~!$&'()*+,;=:@%/-]*)?", entry) is None:
-            raise ValueError("--go-proxy entries must use https://, direct, or off")
-    return proxy
+normalize_go_proxy = common.normalize_go_proxy
 
 
 def _tool_completed(

@@ -323,6 +323,42 @@ child intentionally rebuilds and verifies the same runtime from the clean checko
 isolated machines. The implementation and unit/runtime preflight evidence are not a real SSH Provider release pass
 until dedicated Credentials are configured and all four clean-SHA children complete.
 
+## Docker immutable Worker Release rollout gate
+
+`docker_worker_release_rollout_gate.py` is the product Release Revision gate for the managed Docker pool. It does
+not require a real Provider API key: the deterministic Provider Host fixture is used only to hold and complete an
+Approval Execution while the gate exercises the real Control Plane, agentd, Docker reconciler, Worker Manifest,
+Revision, Policy, Audit, Outbox, and Session Event paths.
+
+Run it only from a clean committed checkout:
+
+```sh
+python3 scripts/stage3-provider-acceptance/docker_worker_release_rollout_gate.py \
+  --go-proxy https://goproxy.cn,direct \
+  --output-dir /tmp/synara-docker-worker-release-rollout \
+  --timeout 3600
+```
+
+The gate starts a dedicated loopback-only Registry and builds two single-platform `worker-acceptance` images from
+the same Git SHA with distinct controlled versions and Registry-returned digests. A two-Worker main Target observes
+the baseline image; a separate one-Worker observer Target makes the candidate Manifest available without first
+running it on the main Target. The gate then verifies:
+
+- two immutable Target-scoped Revisions and duplicate-Manifest rejection;
+- initial promote, a `100%` Execution-selection canary that still preserves one promoted and one canary Worker,
+  stale CAS rejection, and matching container/Manifest/Execution Revision plus Channel evidence;
+- a waiting Approval Execution blocks both candidate promote and rollback with
+  `worker_release_active_executions`, then promotion succeeds only after the Execution reaches one terminal event;
+- new promoted Executions cannot be claimed by the retired baseline pool, and a later rollback creates only
+  baseline/promoted Workers and Executions while the candidate observer remains independently online;
+- exactly four immutable Transitions, six matching Audit entries, six matching Outbox messages, contiguous Session
+  Sequence, no double Execution, no duplicate terminal, an empty output Secret scan, and exact resource cleanup.
+
+The Registry uses loopback HTTP and no Registry Credential, so this gate is deterministic rollout evidence rather
+than production Registry/TLS/auth evidence. It does not close real Codex/Claude Docker credentials, Kubernetes
+multi-node rollout, load, or soak. Cleanup stops the isolated Control Plane before removing only the two Target
+pools, Registry container, three named volumes, network, and two owner-labeled Worker images; it never runs prune.
+
 ## Deterministic failure and canary matrix
 
 The fault matrix is opt-in so the default core suite remains stable and fast:
