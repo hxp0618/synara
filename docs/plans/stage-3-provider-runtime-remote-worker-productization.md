@@ -1440,7 +1440,7 @@ Provider × Capability × Execution Target
   Crash 共用 Linux `/proc` 扫描器：Docker 限定精确容器，Kubernetes 先要求 Target 下唯一 Running execution
   Pod，再在其 `agentd` 容器内遍历 PID 1 后代；SSH 以 owned disposable machine 中 systemd service MainPID
   为 agentd root。三者均只允许唯一 `--protocol-v2` 后代并发送 `SIGKILL`，候选为 0/多个、Pod 多义或返回
-  结构异常时 fail closed。当前工作区已通过 Runner `98/98`、全套 Python `142/142`、真实 Linux 容器 crash
+  结构异常时 fail closed。当前工作区已通过 Runner `99/99`、全套 Python `153/153`、真实 Linux 容器 crash
   探针、SSH token-scoped proxy focused tests、既有 Docker endpoint 探针与 deterministic Docker `16/16`；
   当前 dirty-worktree disposable OrbStack SSH fixture 也通过 `16/16`、精确 machine/key cleanup 与零 Secret
   finding。SSH real-provider runtime 预检进一步从当前源码构建并上传 Host bundle，按 checked-in npm lock
@@ -1462,9 +1462,16 @@ Provider × Capability × Execution Target
   创建并删除 disposable Kind cluster，复用同一 host Worker Image 且验证嵌套
   `kubernetes.containerEngine` Image ID、`ownedClusterRemoved=true`、`ownedWorkerImageRemoved=false` 与
   isolated state cleanup。当前 Local/Docker/Kubernetes release-gate tests 合计 `40/40`，Stage 3 Python
-  `142/142`，两类远程 Gate 的缺 Credential/dirty-worktree 脱敏负例通过。当前机器的 Kind `v0.32.0`、
+  `153/153`，SSH/Docker/Kubernetes Gate 的缺 Credential/dirty-worktree 脱敏负例通过。当前机器的 Kind `v0.32.0`、
   kubectl `v1.33.9` 与 Docker `29.4.0` runtime preflight 已通过；任务环境仍没有专用 Provider Credential，
   因此尚未执行 clean-SHA Kubernetes 四矩阵，Gate 保持 open。
+- 新增 `ssh_release_gate.py`，四个 child 各自 cross-build agentd/real Provider Host、创建唯一 disposable
+  OrbStack machine/SSH key、安装 checked-in lock 固定的 Codex/Claude runtime，并经产品 SSH install/revoke
+  路径运行 product/failure matrix。聚合器要求同一 clean SHA/Catalog、同一 agentd/Host digest 与 CLI version、
+  四个不同 machine、完整 case、`machine/key/state` exact cleanup、空 Secret scan 和无 operator 环境变量名；
+  fixture runtime、复用 machine 或任一 runtime/cleanup mismatch 均 fail closed。当前 SSH gate tests `10/10`，
+  Local/SSH/Docker/Kubernetes release-gate tests 合计 `50/50`；尚缺专用 Provider Credential 下的 clean-SHA
+  四 child 报告，因此真实 SSH Gate 保持 open。
 
 ## 18. 实施顺序
 

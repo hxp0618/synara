@@ -298,6 +298,31 @@ removing the shared host image itself. It emits `kubernetes-release-gate.json` a
 `kubernetes-release-gate.md`. The implementation and preflight negative tests are not real Kubernetes Provider
 release evidence until dedicated Credentials and a usable Kind binary are supplied and the clean-SHA command passes.
 
+## Consolidated real Provider SSH release gate
+
+`ssh_release_gate.py` runs the same Codex/Claude product and failure matrices in four independent child processes.
+Each child builds the current `synara-agentd` and real Provider Host, creates a unique owned OrbStack machine and
+one-time SSH key, installs the exact locked Codex/Claude tools, provisions through the product SSH API, and removes
+its machine, key and isolated state during cleanup:
+
+```sh
+python3 scripts/stage3-provider-acceptance/ssh_release_gate.py \
+  --codex-credential-env SYNARA_ACCEPTANCE_CODEX_KEY \
+  --claude-credential-env SYNARA_ACCEPTANCE_CLAUDE_KEY \
+  --claude-credential-field apiKey \
+  --ssh-orbctl-bin /usr/local/bin/orbctl \
+  --product-timeout 3600 \
+  --failure-timeout 2400
+```
+
+Preflight requires a clean SHA plus OrbStack, Go, Bun, OpenSSH and `ssh-keygen`. The aggregate rejects reused machine
+names, fixture runtimes, unlocked/mismatched Provider versions, different agentd or Host digests, incomplete product
+revoke/machine/key/state cleanup, non-canonical cases, Credential environment-name persistence or any Secret finding.
+It emits `ssh-release-gate.json` and `ssh-release-gate.md`. Unlike Docker/Kubernetes, there is no shared image: each
+child intentionally rebuilds and verifies the same runtime from the clean checkout to prove reproducibility across
+isolated machines. The implementation and unit/runtime preflight evidence are not a real SSH Provider release pass
+until dedicated Credentials are configured and all four clean-SHA children complete.
+
 ## Deterministic failure and canary matrix
 
 The fault matrix is opt-in so the default core suite remains stable and fast:

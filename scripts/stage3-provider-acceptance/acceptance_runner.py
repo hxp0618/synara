@@ -3510,6 +3510,7 @@ class SSHDriver(ManagedWorkerDriver):
             "productRevokeRequested": bool(self.target_id and self.tenant_id),
             "machineLifecycleCompleted": self.options.keep or not self.machine_created,
             "localKeyMaterialRemoved": not self.credentials_dir.exists(),
+            "stateRemoved": self._temporary_state and not self.state_dir.exists(),
             "broadCleanupUsed": False,
         }
 

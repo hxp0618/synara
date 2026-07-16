@@ -457,23 +457,31 @@ def cleanup_gate_worker_image(
     return evidence, None
 
 
-def child_environment(options: Any, provider: str) -> dict[str, str]:
-    environment = docker_environment(options)
+def controlled_child_environment(
+    options: Any,
+    provider: str,
+    environment: Mapping[str, str],
+) -> dict[str, str]:
+    controlled_environment = dict(environment)
     source = credential_source(options, provider)
-    environment[source.environment_name] = acceptance.read_environment_value(
+    controlled_environment[source.environment_name] = acceptance.read_environment_value(
         source.environment_name,
         f"{provider} real Provider Credential",
         maximum_length=64 << 10,
         forbidden_characters="\r\n\x00",
     )
     if source.base_url_environment_name is not None:
-        environment[source.base_url_environment_name] = acceptance.read_environment_value(
+        controlled_environment[source.base_url_environment_name] = acceptance.read_environment_value(
             source.base_url_environment_name,
             f"{provider} real Provider Base URL",
             maximum_length=2048,
             forbidden_characters="\r\n\t\x00",
         )
-    return environment
+    return controlled_environment
+
+
+def child_environment(options: Any, provider: str) -> dict[str, str]:
+    return controlled_child_environment(options, provider, docker_environment(options))
 
 
 def credential_redactor(options: Any) -> acceptance.SecretRedactor:

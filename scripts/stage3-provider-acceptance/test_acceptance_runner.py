@@ -3001,6 +3001,22 @@ class SSHDriverTest(unittest.TestCase):
         self.assertEqual(delete, "orbctl:delete --force synara-stage3-owned")
         self.assertNotIn("--all", delete)
 
+    def test_cleanup_reports_actual_isolated_state_removal(self) -> None:
+        driver = acceptance.SSHDriver(
+            pathlib.Path.cwd(),
+            dataclasses.replace(runner_options(), target="ssh"),
+            acceptance.Deadline(30.0),
+            acceptance.SecretRedactor(),
+        )
+        state_dir = driver.state_dir
+
+        evidence = driver.cleanup()
+
+        self.assertTrue(evidence["stateRemoved"])
+        self.assertFalse(state_dir.exists())
+        self.assertTrue(evidence["machineRemoved"])
+        self.assertTrue(evidence["localKeyMaterialRemoved"])
+
     def test_failed_machine_create_still_triggers_exact_cleanup_without_remote_mutation(self) -> None:
         events: list[str] = []
 
