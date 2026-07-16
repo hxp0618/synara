@@ -6690,9 +6690,11 @@ class AcceptanceSuite:
 
     def _real_provider_interrupt_active_turn(self) -> Mapping[str, Any]:
         turn = self._create_turn(
-            "Use the Bash or shell tool exactly once to run this command: "
+            "Immediately invoke the Bash or shell tool exactly once with this command: "
             "printf 'SYNARA_REAL_PROVIDER_INTERRUPT_TOOL_SHOULD_NOT_RUN\\n' > "
-            ".synara-real-provider-interrupt.txt. Wait for approval before doing anything else.",
+            ".synara-real-provider-interrupt.txt. The runtime will pause that invocation for approval; "
+            "do not wait before invoking the tool, do not answer in text, and do nothing else after the "
+            "approval request appears.",
             runtime_mode="approval-required",
         )
         turn_id = self._turn_id(turn, "real Provider Interrupt Turn")
