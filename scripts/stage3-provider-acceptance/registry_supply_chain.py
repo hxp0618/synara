@@ -632,6 +632,18 @@ def _exception_matches(
     )
 
 
+def _safe_vulnerability(vulnerability: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "vulnerabilityId": vulnerability.get("VulnerabilityID"),
+        "package": vulnerability.get("PkgName"),
+        "installedVersion": vulnerability.get("InstalledVersion"),
+        "fixedVersion": vulnerability.get("FixedVersion"),
+        "severity": vulnerability.get("Severity"),
+        "status": vulnerability.get("Status"),
+        "primaryUrl": vulnerability.get("PrimaryURL"),
+    }
+
+
 def evaluate_trivy_report(
     payload: Any,
     *,
@@ -696,15 +708,7 @@ def evaluate_trivy_report(
             if _exception_matches(exception, vulnerability, platform=platform)
         ]
         active = [exception for exception in matching if exception.expires_at > now]
-        finding = {
-            "vulnerabilityId": vulnerability.get("VulnerabilityID"),
-            "package": vulnerability.get("PkgName"),
-            "installedVersion": vulnerability.get("InstalledVersion"),
-            "fixedVersion": vulnerability.get("FixedVersion"),
-            "severity": severity,
-            "status": vulnerability.get("Status"),
-            "primaryUrl": vulnerability.get("PrimaryURL"),
-        }
+        finding = _safe_vulnerability(vulnerability)
         if active:
             exception = active[0]
             used_exceptions.add(exception.identity)
@@ -784,6 +788,23 @@ def evaluate_trivy_report(
         "artifactId": metadata.get("ImageID") if isinstance(metadata, dict) else None,
         "os": os_metadata,
         "vulnerabilities": _vulnerability_summary(vulnerabilities),
+        "reviewFindings": sorted(
+            (
+                _safe_vulnerability(vulnerability)
+                for vulnerability in vulnerabilities
+                if vulnerability.get("Severity") in {"UNKNOWN", "HIGH", "CRITICAL"}
+            ),
+            key=lambda finding: (
+                str(finding.get("severity")),
+                str(finding.get("vulnerabilityId")),
+                str(finding.get("package")),
+            ),
+        ),
+        "reviewFindingCount": sum(
+            1
+            for vulnerability in vulnerabilities
+            if vulnerability.get("Severity") in {"UNKNOWN", "HIGH", "CRITICAL"}
+        ),
         "blockedFindings": blocked,
         "waivedFindings": waived,
         "secretFindingCount": len(secret_findings),

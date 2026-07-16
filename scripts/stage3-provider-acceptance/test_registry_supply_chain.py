@@ -219,6 +219,8 @@ class VulnerabilityPolicyTest(unittest.TestCase):
         self.assertEqual(errors, [])
         self.assertEqual(used, set())
         self.assertEqual(evidence["vulnerabilities"]["bySeverity"]["HIGH"], 1)
+        self.assertEqual(evidence["reviewFindingCount"], 1)
+        self.assertEqual(evidence["reviewFindings"][0]["vulnerabilityId"], "CVE-2026-12345")
         self.assertEqual(evidence["blockedFindings"], [])
 
     def test_blocks_critical_eol_and_secret_findings_without_persisting_secret_value(self) -> None:

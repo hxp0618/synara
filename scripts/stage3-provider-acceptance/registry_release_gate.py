@@ -1233,8 +1233,8 @@ def markdown_from_report(report: Mapping[str, Any]) -> str:
             lines.extend(
                 [
                     "",
-                    "| Platform | Vulnerabilities | Critical | Secrets | EOSL |",
-                    "| --- | --- | --- | --- | --- |",
+                    "| Platform | Vulnerabilities | Critical | High | Unknown | Secrets | EOSL |",
+                    "| --- | --- | --- | --- | --- | --- | --- |",
                 ]
             )
             for scan in scans:
@@ -1243,11 +1243,14 @@ def markdown_from_report(report: Mapping[str, Any]) -> str:
                 summary = scan.get("vulnerabilities")
                 by_severity = summary.get("bySeverity") if isinstance(summary, dict) else None
                 os_metadata = scan.get("os")
+                eol = os_metadata.get("EOSL", False) if isinstance(os_metadata, dict) else None
                 lines.append(
                     f"| `{scan.get('platform', '')}` | `{summary.get('total', '') if isinstance(summary, dict) else ''}` | "
                     f"`{by_severity.get('CRITICAL', '') if isinstance(by_severity, dict) else ''}` | "
+                    f"`{by_severity.get('HIGH', '') if isinstance(by_severity, dict) else ''}` | "
+                    f"`{by_severity.get('UNKNOWN', '') if isinstance(by_severity, dict) else ''}` | "
                     f"`{scan.get('secretFindingCount', '')}` | "
-                    f"`{os_metadata.get('EOSL', '') if isinstance(os_metadata, dict) else ''}` |"
+                    f"`{eol if eol is not None else ''}` |"
                 )
     errors = report.get("errors")
     if isinstance(errors, list) and errors:
