@@ -281,8 +281,37 @@ func TestRunnerMessageFromProviderHostAcceptsWorkspaceGeneratedFileArtifactCandi
 	if artifact.Path != ".synara-stage3-acceptance/generated-file.txt" ||
 		artifact.SourceRoot != "workspace" || artifact.Kind != "generated_file" ||
 		artifact.ContentType != "application/octet-stream" || artifact.TerminalID != "" ||
-		artifact.Encoding != "" || artifact.ReportedSize != nil {
+		artifact.Encoding != "" || artifact.ReportedSize != nil || artifact.FileCount != nil ||
+		artifact.Additions != nil || artifact.Deletions != nil {
 		t.Fatalf("unexpected Workspace ArtifactCandidate: %#v", artifact)
+	}
+}
+
+func TestRunnerMessageFromProviderHostAcceptsBoundDiffArtifactCandidate(t *testing.T) {
+	message := providerHostMessage{
+		RequestID: "request-1", ProtocolVersion: providerHostProtocolVersion{Major: 2, Minor: 1},
+		ExecutionID: uuid.NewString(), Generation: 2, CommandID: "send:large-diff",
+		OccurredAt: time.Now().UTC().Format(time.RFC3339Nano), MessageType: "ArtifactCandidate",
+		Payload: map[string]any{
+			"artifact": map[string]any{
+				"path": "provider-diffs/large.diff", "kind": "diff", "originalName": "turn.diff",
+				"contentType": "text/x-diff; charset=utf-8", "sourceRoot": "runtime-output",
+				"encoding": "utf-8", "reportedSize": float64(131_072), "fileCount": float64(2),
+				"additions": float64(120), "deletions": float64(40),
+			},
+		},
+	}
+	runnerMessage, err := runnerMessageFromProviderHost(message, executions.RuntimeEventVersionV2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifact := runnerMessage.Artifact
+	if runnerMessage.Type != "artifact" || artifact == nil || artifact.Kind != "diff" ||
+		artifact.SourceRoot != "runtime-output" || artifact.Encoding != "utf-8" || artifact.TerminalID != "" ||
+		artifact.ReportedSize == nil || *artifact.ReportedSize != 131_072 || artifact.FileCount == nil ||
+		*artifact.FileCount != 2 || artifact.Additions == nil || *artifact.Additions != 120 ||
+		artifact.Deletions == nil || *artifact.Deletions != 40 {
+		t.Fatalf("unexpected Diff ArtifactCandidate: %#v", artifact)
 	}
 }
 
@@ -1191,6 +1220,7 @@ func TestProviderHostV2HelperProcess(t *testing.T) {
 	scanner := bufio.NewScanner(os.Stdin)
 	encoder := json.NewEncoder(os.Stdout)
 	var pendingSend *providerHostCommand
+	runtimeOutputDirectory := ""
 	for scanner.Scan() {
 		var command providerHostCommand
 		if err := json.Unmarshal(scanner.Bytes(), &command); err != nil {
@@ -1284,6 +1314,9 @@ func TestProviderHostV2HelperProcess(t *testing.T) {
 				fmt.Fprintln(os.Stderr, "Runtime Event negotiation was not carried into the session command")
 				os.Exit(2)
 			}
+			if runnerInput, ok := command.Payload["runnerInput"].(map[string]any); ok {
+				runtimeOutputDirectory, _ = runnerInput["runtimeOutputDirectory"].(string)
+			}
 			emitProviderHostTestMessage(encoder, command, "Result", map[string]any{"started": true}, nil)
 		case "SendTurn":
 			if version, ok := integerField(command.Payload, "runtimeEventVersion"); !ok || version != 2 {
@@ -1311,6 +1344,13 @@ func TestProviderHostV2HelperProcess(t *testing.T) {
 				copy := command
 				pendingSend = &copy
 				emitProviderHostTestMessage(encoder, command, "Progress", map[string]any{"ready": true}, nil)
+				continue
+			}
+			if strings.HasPrefix(mode, "diff-artifact") {
+				if err := emitProviderHostTestDiffArtifact(encoder, command, mode, runtimeOutputDirectory); err != nil {
+					fmt.Fprintln(os.Stderr, err)
+					os.Exit(2)
+				}
 				continue
 			}
 			eventPayload := map[string]any{
@@ -1400,6 +1440,69 @@ func TestProviderHostV2HelperProcess(t *testing.T) {
 		os.Exit(2)
 	}
 	os.Exit(0)
+}
+
+const (
+	providerHostTestDiffFileCount = 1
+	providerHostTestDiffAdditions = 5001
+	providerHostTestDiffDeletions = 1
+)
+
+func emitProviderHostTestDiffArtifact(
+	encoder *json.Encoder,
+	command providerHostCommand,
+	mode,
+	runtimeOutputDirectory string,
+) error {
+	if strings.TrimSpace(runtimeOutputDirectory) == "" {
+		return errors.New("Runtime Output directory was not delivered to Provider Host")
+	}
+	relativePath := filepath.Join("provider-diffs", "large.diff")
+	absolutePath := filepath.Join(runtimeOutputDirectory, relativePath)
+	if err := os.MkdirAll(filepath.Dir(absolutePath), 0o700); err != nil {
+		return fmt.Errorf("create Provider Host Diff directory: %w", err)
+	}
+	var reportedSize int64
+	if mode == "diff-artifact-symlink" {
+		if err := os.Symlink(os.Args[0], absolutePath); err != nil {
+			return fmt.Errorf("create Provider Host Diff symlink: %w", err)
+		}
+		info, err := os.Stat(absolutePath)
+		if err != nil {
+			return fmt.Errorf("stat Provider Host Diff symlink target: %w", err)
+		}
+		reportedSize = info.Size()
+	} else {
+		var payload strings.Builder
+		payload.WriteString("diff --git a/large.txt b/large.txt\n--- a/large.txt\n+++ b/large.txt\n@@ -1 +1,5001 @@\n-old value\n")
+		for index := 0; index < providerHostTestDiffAdditions-1; index++ {
+			fmt.Fprintf(&payload, "+generated line %04d\n", index)
+		}
+		if mode == "diff-artifact-secret" {
+			payload.WriteString("+provider credential: provider-secret\n")
+		} else {
+			payload.WriteString("+safe final value\n")
+		}
+		content := []byte(payload.String())
+		if err := os.WriteFile(absolutePath, content, 0o600); err != nil {
+			return fmt.Errorf("write Provider Host Diff: %w", err)
+		}
+		reportedSize = int64(len(content))
+	}
+	emitProviderHostTestMessage(encoder, command, "ArtifactCandidate", map[string]any{
+		"artifact": map[string]any{
+			"path": relativePath, "kind": "diff", "originalName": "turn.diff",
+			"contentType": "text/x-diff; charset=utf-8", "sourceRoot": "runtime-output",
+			"encoding": "utf-8", "reportedSize": reportedSize,
+			"fileCount": providerHostTestDiffFileCount,
+			"additions": providerHostTestDiffAdditions,
+			"deletions": providerHostTestDiffDeletions,
+		},
+	}, nil)
+	emitProviderHostTestMessage(encoder, command, "Result", map[string]any{
+		"output": map[string]any{"text": "done"}, "providerResumeCursor": "cursor-next",
+	}, nil)
+	return nil
 }
 
 func emitProviderHostTestMessage(

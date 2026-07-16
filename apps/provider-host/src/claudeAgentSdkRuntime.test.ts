@@ -3,7 +3,7 @@ import type {
   SDKMessage,
   SDKUserMessage,
 } from "@anthropic-ai/claude-agent-sdk";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -12,6 +12,167 @@ import type { ClaudeQueryFactory, ClaudeQueryRuntime } from "./claudeAgentSdkRun
 import { startProviderHostRun, type RunnerInput, type RunnerMessage } from "./providerHost";
 
 describe("Claude Agent SDK runtime", () => {
+  it("stores an oversized native tool Diff as a Runtime Output ArtifactCandidate", async () => {
+    const testDirectory = mkdtempSync(join(tmpdir(), "synara-claude-large-diff-"));
+    const canonicalWorkspaceDirectory = join(testDirectory, "workspace");
+    const workspaceDirectory = join(testDirectory, "workspace-alias");
+    mkdirSync(canonicalWorkspaceDirectory);
+    symlinkSync(
+      canonicalWorkspaceDirectory,
+      workspaceDirectory,
+      process.platform === "win32" ? "junction" : "dir",
+    );
+    writeFileSync(join(canonicalWorkspaceDirectory, "large.txt"), "after\n");
+    writeFileSync(join(canonicalWorkspaceDirectory, "omitted-large.txt"), "after\n");
+    writeFileSync(join(canonicalWorkspaceDirectory, "omitted-edit.txt"), "after-edit\n");
+    const messages: RunnerMessage[] = [];
+    try {
+      const patch = [
+        "diff --git a/large.txt b/large.txt",
+        "--- a/large.txt",
+        "+++ b/large.txt",
+        "@@ -1,1 +1,5000 @@",
+        "-before",
+        ...Array.from({ length: 5_000 }, (_, index) => `+after-${index}-${"x".repeat(16)}`),
+        "",
+      ].join("\n");
+      const omittedPatchBefore = Array.from(
+        { length: 5_000 },
+        (_, index) => `before-${index}-${"y".repeat(16)}`,
+      ).join("\n");
+      const omittedPatch = [
+        "diff --git a/omitted-large.txt b/omitted-large.txt",
+        "--- a/omitted-large.txt",
+        "+++ b/omitted-large.txt",
+        "@@ -1,5000 +1,1 @@",
+        ...omittedPatchBefore.split("\n").map((line) => `-${line}`),
+        "+after",
+        "",
+      ].join("\n");
+      const editPatch = [
+        "diff --git a/omitted-edit.txt b/omitted-edit.txt",
+        "--- a/omitted-edit.txt",
+        "+++ b/omitted-edit.txt",
+        "@@ -1,1 +1,1 @@",
+        "-before-edit",
+        "+after-edit",
+        "",
+      ].join("\n");
+      const queryFactory: ClaudeQueryFactory = ({ options }) =>
+        fakeQuery(
+          (async function* () {
+            const postToolUse = requiredOptions(options).hooks?.PostToolUse?.[0]?.hooks[0];
+            await postToolUse?.(
+              {
+                hook_event_name: "PostToolUse",
+                tool_name: "Write",
+                tool_input: {
+                  file_path: join(workspaceDirectory, "large.txt"),
+                  content: "after\n",
+                },
+                tool_response: {
+                  type: "update",
+                  filePath: join(canonicalWorkspaceDirectory, "large.txt"),
+                  content: "after\n",
+                  originalFile: "before\n",
+                  structuredPatch: [],
+                  gitDiff: {
+                    filename: "large.txt",
+                    status: "modified",
+                    additions: 5_000,
+                    deletions: 1,
+                    changes: 5_001,
+                    patch,
+                  },
+                },
+                tool_use_id: "write-large-diff",
+              } as never,
+              undefined,
+              { signal: new AbortController().signal },
+            );
+            await postToolUse?.(
+              {
+                hook_event_name: "PostToolUse",
+                tool_name: "Write",
+                tool_input: {
+                  file_path: join(workspaceDirectory, "omitted-large.txt"),
+                  content: "after\n",
+                },
+                tool_response: {
+                  type: "update",
+                  filePath: join(canonicalWorkspaceDirectory, "omitted-large.txt"),
+                  content: "after\n",
+                  originalFile: `${omittedPatchBefore}\n`,
+                  structuredPatch: [],
+                },
+                tool_use_id: "write-omitted-large-diff",
+              } as never,
+              undefined,
+              { signal: new AbortController().signal },
+            );
+            await postToolUse?.(
+              {
+                hook_event_name: "PostToolUse",
+                tool_name: "Edit",
+                tool_input: {
+                  file_path: join(workspaceDirectory, "omitted-edit.txt"),
+                  old_string: "before-edit",
+                  new_string: "after-edit",
+                },
+                tool_response: {
+                  filePath: join(canonicalWorkspaceDirectory, "omitted-edit.txt"),
+                  oldString: "before-edit",
+                  newString: "after-edit",
+                  originalFile: "before-edit\n",
+                  structuredPatch: [],
+                  replaceAll: false,
+                },
+                tool_use_id: "edit-omitted-diff",
+              } as never,
+              undefined,
+              { signal: new AbortController().signal },
+            );
+            yield sdkMessage(systemInit("session-large-diff", "claude-test"));
+            yield sdkMessage(successResult("session-large-diff", "done", {}));
+          })(),
+        );
+
+      const run = startProviderHostRun(
+        claudeInput({
+          inputText: "produce a large diff",
+          workspaceDirectory,
+          runtimeOutputDirectory: workspaceDirectory,
+        }),
+        null,
+        (message) => messages.push(message),
+        { claudeQueryFactory: queryFactory },
+      );
+
+      await expect(run.result).resolves.toMatchObject({ output: { text: "done" } });
+      const diffArtifact = messages.find(
+        (message) => message.type === "artifact" && message.artifact.kind === "diff",
+      );
+      expect(diffArtifact).toMatchObject({
+        type: "artifact",
+        artifact: {
+          kind: "diff",
+          sourceRoot: "runtime-output",
+          contentType: "text/x-diff; charset=utf-8",
+          fileCount: 3,
+          additions: 5_002,
+          deletions: 5_002,
+        },
+      });
+      if (diffArtifact?.type !== "artifact") throw new Error("Expected a Diff ArtifactCandidate.");
+      expect(readFileSync(join(workspaceDirectory, diffArtifact.artifact.path), "utf8")).toBe(
+        `${patch}\n${omittedPatch}\n${editPatch}`,
+      );
+      expect(JSON.stringify(messages)).not.toContain(workspaceDirectory);
+    } finally {
+      rmSync(testDirectory, { recursive: true, force: true });
+    }
+  });
+
   it("emits one standalone generated-file candidate from a successful native Write tool", async () => {
     const workspaceDirectory = mkdtempSync(join(tmpdir(), "synara-claude-generated-file-"));
     const generatedDirectory = join(workspaceDirectory, ".synara-stage3-acceptance");

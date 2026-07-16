@@ -83,6 +83,61 @@ describe("ProviderRuntimeEvent", () => {
     expect(parsed.payload.planMarkdown).toBe("# Ship it");
   });
 
+  it("decodes a large Turn Diff Artifact reference", () => {
+    const parsed = decodeRuntimeEvent({
+      type: "turn.diff.updated",
+      ...eventBase,
+      payload: {
+        artifact: {
+          artifactId: "artifact-diff-1",
+          contentType: "text/x-diff; charset=utf-8",
+          sizeBytes: 131_072,
+          sha256: "a".repeat(64),
+          fileCount: 2,
+          additions: 120,
+          deletions: 40,
+        },
+      },
+    });
+
+    expect(parsed.type).toBe("turn.diff.updated");
+    if (
+      parsed.type !== "turn.diff.updated" ||
+      !("artifact" in parsed.payload) ||
+      parsed.payload.artifact === undefined
+    ) {
+      throw new Error("expected an Artifact-backed turn.diff.updated");
+    }
+    expect(parsed.payload.artifact.fileCount).toBe(2);
+  });
+
+  it("rejects mixed or non-canonical Turn Diff Artifact payloads", () => {
+    const artifact = {
+      artifactId: "artifact-diff-1",
+      contentType: "text/x-diff; charset=utf-8",
+      sizeBytes: 131_072,
+      sha256: "a".repeat(64),
+      fileCount: 2,
+      additions: 120,
+      deletions: 40,
+    } as const;
+
+    expect(() =>
+      decodeRuntimeEvent({
+        type: "turn.diff.updated",
+        ...eventBase,
+        payload: { unifiedDiff: "patch", artifact },
+      }),
+    ).toThrow();
+    expect(() =>
+      decodeRuntimeEvent({
+        type: "turn.diff.updated",
+        ...eventBase,
+        payload: { artifact: { ...artifact, contentType: "text/plain" } },
+      }),
+    ).toThrow();
+  });
+
   it("decodes user-input.requested with structured questions", () => {
     const parsed = decodeRuntimeEvent({
       type: "user-input.requested",

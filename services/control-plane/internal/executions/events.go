@@ -213,7 +213,16 @@ func IsCanonicalRuntimeEventV2Payload(eventType string, payload map[string]any) 
 	case "turn.proposed.completed":
 		return requiredTrimmedString(payload, "planMarkdown")
 	case "turn.diff.updated":
-		return requiredString(payload, "unifiedDiff")
+		if _, inline := payload["unifiedDiff"]; inline {
+			_, artifact := payload["artifact"]
+			return !artifact && requiredString(payload, "unifiedDiff")
+		}
+		artifact, ok := objectField(payload, "artifact")
+		return ok && requiredTrimmedString(artifact, "artifactId") &&
+			requiredEnum(artifact, "contentType", "text/x-diff; charset=utf-8") &&
+			requiredNonNegativeInteger(artifact, "sizeBytes") &&
+			requiredLowerSHA256(artifact, "sha256") && requiredNonNegativeInteger(artifact, "fileCount") &&
+			requiredNonNegativeInteger(artifact, "additions") && requiredNonNegativeInteger(artifact, "deletions")
 	case "item.started", "item.updated", "item.completed":
 		return validItemLifecycle(payload)
 	case "content.delta":
@@ -607,6 +616,19 @@ func requiredNonNegativeSafeInteger(value map[string]any, key string) bool {
 	}
 	number := numberValue(decoded)
 	return number >= 0 && number <= 9_007_199_254_740_991
+}
+
+func requiredLowerSHA256(value map[string]any, key string) bool {
+	encoded, ok := value[key].(string)
+	if !ok || len(encoded) != 64 {
+		return false
+	}
+	for _, character := range encoded {
+		if (character < '0' || character > '9') && (character < 'a' || character > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 func optionalNumber(value map[string]any, key string) bool {

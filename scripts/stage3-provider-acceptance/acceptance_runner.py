@@ -53,6 +53,9 @@ STANDALONE_GENERATED_FILE_DOWNLOAD_MAX_BYTES = len(STANDALONE_GENERATED_FILE_CON
 GENERATED_FILE_RELATIVE_PATH = ".synara-stage3-acceptance/generated-file.txt"
 GENERATED_FILE_TOTAL_BYTES = (1 << 20) + 257
 GENERATED_FILE_SNAPSHOT_MAX_BYTES = 4 << 20
+LARGE_DIFF_RELATIVE_PATH = ".synara-stage3-large-diff.txt"
+LARGE_DIFF_LINE_COUNT = 5_000
+LARGE_DIFF_DOWNLOAD_MAX_BYTES = 4 << 20
 REAL_PROVIDER_APPROVAL_RELATIVE_PATH = ".synara-real-provider-approval.txt"
 REAL_PROVIDER_APPROVAL_CONTENT = b"SYNARA_REAL_PROVIDER_APPROVAL_TOOL_OK\n"
 REAL_PROVIDER_STEER_RELATIVE_PATH = ".synara-real-provider-steer.txt"
@@ -91,6 +94,7 @@ REAL_PROVIDER_PRE_RESTART_CASES = (
     "steer",
     "interrupt",
     "generated-file-checkpoint",
+    "large-diff",
     "terminal-large",
 )
 REAL_PROVIDER_POST_RESTART_CASES = ("review", "compact", "rollback", "fork")
@@ -99,6 +103,10 @@ REAL_PROVIDER_CASE_METADATA: Mapping[str, Mapping[str, str]] = {
     "generated-file-checkpoint": {
         "id": "real-provider.generated-file-checkpoint",
         "name": "Capture a real Provider generated file as a standalone Artifact and ready Workspace Checkpoint",
+    },
+    "large-diff": {
+        "id": "real-provider.large-diff-artifact",
+        "name": "Persist a real Provider large Turn Diff as a Ready Artifact reference",
     },
     "approval": {
         "id": "real-provider.approval-resolution",
@@ -276,6 +284,28 @@ def generated_file_node_command() -> str:
         "const b=Buffer.allocUnsafe(n);"
         "for(let i=0;i<n;i++)b[i]=s[i%s.length];"
         "f.writeFileSync(p,b)'"
+    )
+
+
+def large_diff_seed_bytes() -> bytes:
+    return (
+        "".join(
+            f"SYNARA_STAGE3_LARGE_DIFF_BEFORE_{index:05d}_{'x' * 24}\n"
+            for index in range(LARGE_DIFF_LINE_COUNT)
+        )
+    ).encode("ascii")
+
+
+def large_diff_seed_node_command() -> str:
+    return (
+        "node -e '"
+        'const f=require("node:fs");'
+        f'const p="{LARGE_DIFF_RELATIVE_PATH}";'
+        f"const n={LARGE_DIFF_LINE_COUNT};"
+        'const l=[];for(let i=0;i<n;i++)l.push("SYNARA_STAGE3_LARGE_DIFF_BEFORE_"+'
+        'String(i).padStart(5,"0")+"_"+"x".repeat(24));'
+        'f.writeFileSync(p,l.join("\\n")+"\\n")'
+        "'"
     )
 
 
@@ -5622,6 +5652,8 @@ class AcceptanceSuite:
     def _execute_real_provider_case(self, real_provider_case: str) -> Mapping[str, Any]:
         if real_provider_case == "generated-file-checkpoint":
             return self._real_provider_generated_file_checkpoint()
+        if real_provider_case == "large-diff":
+            return self._real_provider_large_diff_artifact()
         if real_provider_case == "approval":
             return self._real_provider_approval_resolution()
         if real_provider_case == "user-input":
@@ -5645,6 +5677,285 @@ class AcceptanceSuite:
             f"Unknown real Provider acceptance case {real_provider_case}.",
             {"case": real_provider_case},
         )
+
+    def _real_provider_large_diff_artifact(self) -> Mapping[str, Any]:
+        seed_marker = self._real_provider_marker("large-diff-seed")
+        seed_command = large_diff_seed_node_command()
+        seed_turn = self._create_turn(
+            "Use the Bash or shell tool exactly once. Run this exact command as the sole shell command:\n"
+            f"{seed_command}\n"
+            "Do not add redirections, pipes, wrappers, or any other terminal command. Do not read the file "
+            "back or print its contents. After the command succeeds, reply with exactly "
+            f"{seed_marker} and no other text."
+        )
+        seed_turn_id = self._turn_id(seed_turn, "real Provider large-Diff seed Turn")
+        seed_terminal, seed_events = self._wait_for_turn_terminal(
+            seed_turn_id, "execution.completed"
+        )
+        seed_evidence = self._real_provider_turn_evidence(
+            seed_turn_id,
+            seed_terminal,
+            seed_events,
+            seed_marker,
+            expected_resume_strategy="native-cursor",
+            expected_resume_reason="cursor_usable",
+            marker_match_mode="contains-once",
+        )
+
+        before_artifacts = json_items(
+            self.api.request(
+                "GET", f"/v1/sessions/{self._required('session_id')}/artifacts"
+            ),
+            "pre-large-Diff artifacts",
+        )
+        previous_artifact_ids = {
+            str(item["id"])
+            for item in before_artifacts
+            if isinstance(item.get("id"), str) and item.get("id")
+        }
+        marker = self._real_provider_marker("large-diff")
+        if self.options.provider == "codex":
+            mutation = (
+                "Use the native apply_patch file-change tool exactly once, never Bash or shell, to delete "
+                f"{LARGE_DIFF_RELATIVE_PATH}. Do not read the file first."
+            )
+        else:
+            mutation = (
+                "Use the native Read tool exactly once on "
+                f"{LARGE_DIFF_RELATIVE_PATH} with offset 1 and limit 1. Do not print the line or read "
+                "any other part of the file. Then use the native Write tool exactly once, never Bash or "
+                f"shell, to replace {LARGE_DIFF_RELATIVE_PATH} with exactly this UTF-8 line and one "
+                "trailing newline:\nSYNARA_STAGE3_LARGE_DIFF_AFTER_V1\n"
+            )
+        turn = self._create_turn(
+            f"{mutation} After the native file tool succeeds, reply with exactly {marker} and no other text."
+        )
+        turn_id = self._turn_id(turn, "real Provider large-Diff Turn")
+        terminal, events = self._wait_for_turn_terminal(turn_id, "execution.completed")
+        provider_evidence = self._real_provider_turn_evidence(
+            turn_id,
+            terminal,
+            events,
+            marker,
+            expected_resume_strategy="native-cursor",
+            expected_resume_reason="cursor_usable",
+            marker_match_mode="contains-once",
+        )
+        artifact_evidence = self._validate_large_diff_artifact(
+            terminal, events, previous_artifact_ids
+        )
+        self.state.last_real_marker = marker
+        return {
+            "seed": {
+                "turnId": seed_turn_id,
+                "relativePath": LARGE_DIFF_RELATIVE_PATH,
+                "sizeBytes": len(large_diff_seed_bytes()),
+                "sha256": hashlib.sha256(large_diff_seed_bytes()).hexdigest(),
+                "commandSha256": hashlib.sha256(seed_command.encode("utf-8")).hexdigest(),
+                "providerTurn": seed_evidence,
+            },
+            "diff": artifact_evidence,
+            "providerTurn": provider_evidence,
+        }
+
+    def _validate_large_diff_artifact(
+        self,
+        execution_terminal: Mapping[str, Any],
+        events: Sequence[Mapping[str, Any]],
+        previous_artifact_ids: set[str],
+    ) -> Mapping[str, Any]:
+        execution_id = execution_terminal.get("executionId")
+        if not isinstance(execution_id, str) or not execution_id:
+            raise AcceptanceError(
+                "runner.large_diff_execution_id_missing",
+                "The large-Diff Turn omitted its Execution ID.",
+            )
+        ready_events = [
+            event
+            for event in events
+            if event.get("eventType") == "artifact.ready"
+            and event.get("executionId") == execution_id
+            and isinstance(event.get("payload"), dict)
+            and event["payload"].get("kind") == "diff"
+        ]
+        reference_events = [
+            event
+            for event in events
+            if event.get("eventType") == "turn.diff.updated"
+            and event.get("executionId") == execution_id
+            and isinstance(event.get("payload"), dict)
+            and isinstance(event["payload"].get("artifact"), dict)
+        ]
+        if len(ready_events) != 1 or len(reference_events) != 1:
+            completed_tools = [
+                event["payload"].get("title")
+                for event in events
+                if event.get("eventType") == "item.completed"
+                and event.get("executionId") == execution_id
+                and isinstance(event.get("payload"), dict)
+                and isinstance(event["payload"].get("title"), str)
+            ]
+            provider_warnings = [
+                event["payload"].get("message")
+                for event in events
+                if event.get("eventType") == "runtime.warning"
+                and event.get("executionId") == execution_id
+                and isinstance(event.get("payload"), dict)
+                and isinstance(event["payload"].get("message"), str)
+            ]
+            inline_diff_bytes = [
+                len(event["payload"]["unifiedDiff"].encode("utf-8"))
+                for event in events
+                if event.get("eventType") == "turn.diff.updated"
+                and event.get("executionId") == execution_id
+                and isinstance(event.get("payload"), dict)
+                and isinstance(event["payload"].get("unifiedDiff"), str)
+            ]
+            ready_artifact_kinds = [
+                event["payload"].get("kind")
+                for event in events
+                if event.get("eventType") == "artifact.ready"
+                and event.get("executionId") == execution_id
+                and isinstance(event.get("payload"), dict)
+                and isinstance(event["payload"].get("kind"), str)
+            ]
+            raise AcceptanceError(
+                "runner.large_diff_event_boundary_invalid",
+                "Expected one Diff artifact.ready and one Artifact-backed turn.diff.updated Event.",
+                {
+                    "executionId": execution_id,
+                    "readyCount": len(ready_events),
+                    "referenceCount": len(reference_events),
+                    "completedTools": completed_tools,
+                    "providerWarnings": provider_warnings[-4:],
+                    "inlineDiffBytes": inline_diff_bytes,
+                    "readyArtifactKinds": ready_artifact_kinds,
+                },
+            )
+        ready = ready_events[0]
+        reference = reference_events[0]
+        ready_payload = json_object(ready.get("payload"), "large-Diff artifact.ready payload")
+        reference_payload = json_object(
+            reference.get("payload"), "large-Diff turn.diff.updated payload"
+        )
+        artifact_reference = json_object(
+            reference_payload.get("artifact"), "large-Diff Artifact reference"
+        )
+        artifact_id = ready_payload.get("artifactId")
+        sequences = [
+            ready.get("sequence"),
+            reference.get("sequence"),
+            execution_terminal.get("sequence"),
+        ]
+        if (
+            not isinstance(artifact_id, str)
+            or not artifact_id
+            or artifact_id in previous_artifact_ids
+            or artifact_reference.get("artifactId") != artifact_id
+            or ready_payload.get("contentType") != "text/x-diff; charset=utf-8"
+            or artifact_reference.get("contentType") != ready_payload.get("contentType")
+            or not all(isinstance(sequence, int) for sequence in sequences)
+            or sequences != sorted(sequences)
+            or len(set(sequences)) != len(sequences)
+            or "unifiedDiff" in reference_payload
+            or contains_runtime_physical_path(ready_payload)
+            or contains_runtime_physical_path(reference_payload)
+        ):
+            raise AcceptanceError(
+                "runner.large_diff_reference_invalid",
+                "The large-Diff Artifact reference did not form one ordered Ready boundary.",
+                {
+                    "artifactReady": ready_payload,
+                    "diffReference": reference_payload,
+                    "sequences": sequences,
+                },
+            )
+
+        artifacts = json_items(
+            self.api.request(
+                "GET", f"/v1/sessions/{self._required('session_id')}/artifacts"
+            ),
+            "large-Diff artifacts",
+        )
+        matching = [
+            item
+            for item in artifacts
+            if item.get("id") == artifact_id
+            and item.get("kind") == "diff"
+            and item.get("executionId") == execution_id
+        ]
+        if len(matching) != 1:
+            raise AcceptanceError(
+                "runner.large_diff_artifact_invalid",
+                "The Ready Diff Artifact was missing or ambiguous.",
+                {"artifactId": artifact_id, "count": len(matching)},
+            )
+        artifact = matching[0]
+        grant = json_object(
+            self.api.request("POST", f"/v1/artifacts/{artifact_id}/download"),
+            "large-Diff Artifact download grant",
+        )
+        url = grant.get("url")
+        if not isinstance(url, str) or not url:
+            raise AcceptanceError(
+                "runner.large_diff_download_grant_invalid",
+                "The large-Diff Artifact download grant was invalid.",
+            )
+        content = self.api.download_bytes(url, maximum_bytes=LARGE_DIFF_DOWNLOAD_MAX_BYTES)
+        digest = hashlib.sha256(content).hexdigest()
+        try:
+            text = content.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise AcceptanceError(
+                "runner.large_diff_encoding_invalid",
+                "The large-Diff Artifact was not valid UTF-8.",
+            ) from error
+        expected_first = "SYNARA_STAGE3_LARGE_DIFF_BEFORE_00000_"
+        expected_last = f"SYNARA_STAGE3_LARGE_DIFF_BEFORE_{LARGE_DIFF_LINE_COUNT - 1:05d}_"
+        if (
+            artifact.get("status") != "ready"
+            or artifact.get("originalName") != "turn.diff"
+            or artifact.get("contentType") != "text/x-diff; charset=utf-8"
+            or len(content) <= 64 << 10
+            or len(content) != artifact.get("sizeBytes")
+            or digest != artifact.get("sha256")
+            or artifact_reference.get("sizeBytes") != len(content)
+            or artifact_reference.get("sha256") != digest
+            or artifact_reference.get("fileCount") != 1
+            or not isinstance(artifact_reference.get("additions"), int)
+            or not isinstance(artifact_reference.get("deletions"), int)
+            or int(artifact_reference["deletions"]) < LARGE_DIFF_LINE_COUNT
+            or LARGE_DIFF_RELATIVE_PATH not in text
+            or expected_first not in text
+            or expected_last not in text
+            or contains_runtime_physical_path(artifact)
+        ):
+            raise AcceptanceError(
+                "runner.large_diff_download_mismatch",
+                "The downloaded large-Diff Artifact did not match its Ready reference or deterministic seed.",
+                {
+                    "artifact": self._artifact_summary(artifact),
+                    "reference": artifact_reference,
+                    "actualBytes": len(content),
+                    "actualSha256": digest,
+                },
+            )
+        return {
+            "artifact": self._artifact_summary(artifact),
+            "download": {"sizeBytes": len(content), "sha256": digest},
+            "summary": {
+                "fileCount": artifact_reference.get("fileCount"),
+                "additions": artifact_reference.get("additions"),
+                "deletions": artifact_reference.get("deletions"),
+            },
+            "sequenceRange": {
+                "artifactReady": ready.get("sequence"),
+                "diffReference": reference.get("sequence"),
+                "executionCompleted": execution_terminal.get("sequence"),
+            },
+            "inlinePayloadPersisted": False,
+            "runtimePhysicalPathLeak": False,
+        }
 
     def _real_provider_generated_file_checkpoint(self) -> Mapping[str, Any]:
         before_artifacts = json_items(

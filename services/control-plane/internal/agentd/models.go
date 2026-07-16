@@ -48,6 +48,9 @@ type RunnerArtifact struct {
 	TerminalID   string `json:"terminalId,omitempty"`
 	Encoding     string `json:"encoding,omitempty"`
 	ReportedSize *int64 `json:"reportedSize,omitempty"`
+	FileCount    *int64 `json:"fileCount,omitempty"`
+	Additions    *int64 `json:"additions,omitempty"`
+	Deletions    *int64 `json:"deletions,omitempty"`
 }
 
 type WorkspaceCheckpointCandidate struct {

@@ -1381,13 +1381,28 @@ func runnerMessageFromProviderHost(message providerHostMessage, negotiatedRuntim
 			}
 			artifact.ReportedSize = &reportedSize
 		}
+		for key, target := range map[string]**int64{
+			"fileCount": &artifact.FileCount,
+			"additions": &artifact.Additions,
+			"deletions": &artifact.Deletions,
+		} {
+			if _, found := artifactPayload[key]; !found {
+				continue
+			}
+			value, ok := nonNegativeInt64MapField(artifactPayload, key)
+			if !ok {
+				return RunnerMessage{}, protocolFailure("Provider Host Diff ArtifactCandidate summary is invalid")
+			}
+			*target = &value
+		}
 		artifact.SourceRoot = strings.TrimSpace(artifact.SourceRoot)
 		if artifact.SourceRoot == "" {
 			artifact.SourceRoot = "workspace"
 		}
 		switch artifact.SourceRoot {
 		case "workspace":
-			if strings.TrimSpace(artifact.TerminalID) != "" || strings.TrimSpace(artifact.Encoding) != "" || artifact.ReportedSize != nil {
+			if strings.TrimSpace(artifact.TerminalID) != "" || strings.TrimSpace(artifact.Encoding) != "" ||
+				artifact.ReportedSize != nil || artifact.FileCount != nil || artifact.Additions != nil || artifact.Deletions != nil {
 				return RunnerMessage{}, protocolFailure("Provider Host Workspace ArtifactCandidate contains Runtime Output metadata")
 			}
 		case "runtime-output":
@@ -1395,8 +1410,13 @@ func runnerMessageFromProviderHost(message providerHostMessage, negotiatedRuntim
 			if filepath.IsAbs(cleanPath) || !pathContainedRelative(cleanPath) {
 				return RunnerMessage{}, protocolFailure("Provider Host Runtime Output path must be relative to its bound root")
 			}
-			if artifact.Kind != "terminal_log" || strings.TrimSpace(artifact.TerminalID) == "" ||
-				(artifact.Encoding != "utf-8" && artifact.Encoding != "binary") {
+			validTerminal := artifact.Kind == "terminal_log" && strings.TrimSpace(artifact.TerminalID) != "" &&
+				(artifact.Encoding == "utf-8" || artifact.Encoding == "binary") && artifact.FileCount == nil &&
+				artifact.Additions == nil && artifact.Deletions == nil
+			validDiff := artifact.Kind == "diff" && strings.TrimSpace(artifact.TerminalID) == "" &&
+				artifact.Encoding == "utf-8" && artifact.ReportedSize != nil && artifact.FileCount != nil &&
+				artifact.Additions != nil && artifact.Deletions != nil
+			if !validTerminal && !validDiff {
 				return RunnerMessage{}, protocolFailure("Provider Host Runtime Output ArtifactCandidate is invalid")
 			}
 			artifact.Path = cleanPath

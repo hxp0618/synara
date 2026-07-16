@@ -100,7 +100,7 @@ Credential stores are not inherited.
 
 ## Idempotent Worker Artifact upload
 
-For non-Checkpoint `generated_file` and `terminal_log` candidates, agentd sends the opaque bounded key in
+For non-Checkpoint `generated_file`, `terminal_log`, and `diff` candidates, agentd sends the opaque bounded key in
 `X-Synara-Artifact-Idempotency-Key` on `POST /v1/workers/executions/{executionId}/artifacts`. It is intentionally a
 header rather than a new JSON field, so an older strict v2 Control Plane can ignore it instead of rejecting the
 request body. The key is scoped by the current Execution and Generation and is derived from stable candidate
@@ -117,11 +117,12 @@ same deterministic Artifact ID, refreshes a pending upload grant, or returns the
 upload. Reusing a key with different ownership or Artifact metadata is a conflict. Checkpoint Artifacts continue to
 derive their identity from `checkpointId` and do not use this field.
 
-Artifact resolution rejects traversal, non-regular files, and any symlink component below the Execution Workspace.
-Before Provider start, agentd binds the Workspace root to an anchored Root descriptor; each candidate is then
-opened beneath that descriptor and the same regular-file descriptor is reused through hashing and upload retries.
-Replacing the Workspace root path or any checked parent cannot redirect the source. MIME normalization happens
-before identity derivation, and pre-hash/Ready verification stops when the Execution context is cancelled.
+Artifact resolution rejects traversal, non-regular files, and any symlink component below the candidate's bound
+root. Before Provider start, agentd binds both the Workspace and private Runtime Output roots to anchored Root
+descriptors; each candidate is opened beneath the declared root and the same regular-file descriptor is reused
+through hashing and upload retries. Replacing a root path or checked parent cannot redirect the source. MIME
+normalization happens before identity derivation, and pre-hash/Ready verification stops when the Execution context
+is cancelled.
 
 ### Controlled Runtime Output Root
 
@@ -135,6 +136,14 @@ Provider Host Protocol v2 may return a `terminal_log` `ArtifactCandidate` with
 accepts that shape only for a Terminal that already emitted `terminal.started`; Workspace candidates continue to
 default to `sourceRoot=workspace` and cannot carry Runtime Output metadata. Unknown roots, absolute or traversal
 paths, invalid encodings, missing Terminal correlation, and size mismatches are protocol failures.
+
+It may also return a `diff` candidate with `sourceRoot=runtime-output`, `encoding=utf-8`, exact `reportedSize`, and
+the complete `fileCount`/`additions`/`deletions` summary. Agentd accepts only the canonical
+`text/x-diff; charset=utf-8` Content-Type, opens the file beneath the already bound root, passes it through Secret
+Guard, and uploads it with ordinary Artifact idempotency. The completed Artifact must be Ready, kind `diff`, and
+its Content-Type, size and SHA-256 must match the local guarded bytes. Agentd then appends a stable
+`turn.diff.updated` Runtime Event containing only the Artifact reference and summary. Missing or mismatched Ready
+metadata fails the Execution; an inline Diff and Artifact reference are never persisted together.
 
 The Runtime Output Root is bound before the Provider starts and opened with the same no-symlink, regular-file
 descriptor rules as Workspace Artifacts. Provider Host never reads the path itself. Agentd streams the bound file

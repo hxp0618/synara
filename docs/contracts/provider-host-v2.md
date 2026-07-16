@@ -54,6 +54,22 @@ it resolves the relative candidate below the already bound Root descriptor, reje
 symlinks and non-regular files, verifies the reported size, and streams the opened descriptor through the Terminal
 collector. The candidate path and physical root never enter the durable Event payload or Artifact logical name.
 
+Turn Diffs use the same private root but a distinct `kind=diff` candidate. A Diff of at most 48 KiB remains a
+canonical inline `turn.diff.updated` Event. A larger UTF-8 unified Diff, up to 16 MiB, is written by the Host under
+the fixed `provider-diffs/` namespace and emitted with `sourceRoot=runtime-output`, `encoding=utf-8`, exact
+`reportedSize`, and non-negative `fileCount`, `additions`, and `deletions`. The Host sends only the root-relative
+path; agentd performs the anchored no-symlink open, verifies the reported size, applies Secret Guard, uploads one
+`diff` Artifact, verifies the Ready metadata against the uploaded bytes, and only then persists an Artifact-backed
+`turn.diff.updated`. Diffs above the standalone limit emit a bounded warning and remain recoverable through the
+Workspace Checkpoint instead of entering an oversized protocol frame.
+
+Codex supplies the latest native `turn/diff/updated` snapshot. Claude uses successful native file-tool
+`PostToolUse` data: SDK `gitDiff.patch`, structured patch hunks, or a complete-file fallback derived from
+`originalFile` plus `content`/`oldString`/`newString`. Claude paths are resolved through the same configured and
+canonical Workspace alias boundary as generated files, so a canonical SDK response path cannot be mistaken for an
+escape while symlinks and outside paths remain rejected. Missing native Diff material produces only a path-free,
+content-free diagnostic summary; Provider Host never scans the Workspace to reconstruct it.
+
 Workspace generated files use a separate `ArtifactCandidate` with a Workspace-relative `path`,
 `sourceRoot=workspace`, `kind=generated_file`, and a conservative `application/octet-stream` Content-Type. The Host
 emits one only after the Provider reports an exact successful native file mutation: a completed Codex `fileChange`

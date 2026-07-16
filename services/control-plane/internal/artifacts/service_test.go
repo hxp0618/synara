@@ -32,6 +32,17 @@ import (
 	"github.com/synara-ai/synara/services/control-plane/migrations"
 )
 
+func TestNormalizeCreateAcceptsDiffArtifactKind(t *testing.T) {
+	service := &Service{}
+	input, err := service.normalizeCreate(CreateInput{Kind: " DIFF ", OriginalName: pointerString("turn.diff")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if input.Kind != "diff" || input.OriginalName == nil || *input.OriginalName != "turn.diff" {
+		t.Fatalf("normalized Diff Artifact = %#v", input)
+	}
+}
+
 func TestLocalArtifactLifecycleAndTenantIsolation(t *testing.T) {
 	fixture := newArtifactFixture(t)
 	payload := []byte("artifact payload\n")

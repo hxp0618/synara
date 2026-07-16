@@ -185,6 +185,7 @@ func TestDaemonPreparesManagedWorkspaceBeforeStartingProvider(t *testing.T) {
 		order         []string
 		ready         executions.WorkspaceReadyInput
 		dirty         executions.WorkspaceDirtyInput
+		checkpoint    executions.CreateWorkspaceCheckpointInput
 		requestBodies []string
 	}
 	var server *httptest.Server
@@ -236,6 +237,7 @@ func TestDaemonPreparesManagedWorkspaceBeforeStartingProvider(t *testing.T) {
 				return
 			}
 			state.Lock()
+			state.checkpoint = input
 			state.order = append(state.order, "checkpoint.create")
 			state.Unlock()
 			response.Header().Set("Content-Type", "application/json")
@@ -314,7 +316,7 @@ func TestDaemonPreparesManagedWorkspaceBeforeStartingProvider(t *testing.T) {
 				state.Lock()
 				state.order = append(state.order, "workspace.inspect")
 				state.Unlock()
-				return WorkspaceInspection{Dirty: true, CurrentBranch: branch, HeadCommit: headCommit}, nil
+				return WorkspaceInspection{Dirty: false}, nil
 			},
 		},
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -350,9 +352,11 @@ func TestDaemonPreparesManagedWorkspaceBeforeStartingProvider(t *testing.T) {
 		state.ready.CurrentBranch == nil || *state.ready.CurrentBranch != *branch {
 		t.Fatalf("Workspace metadata was not reported: %#v", state.ready)
 	}
-	if state.dirty.CurrentBranch == nil || *state.dirty.CurrentBranch != *branch ||
-		state.dirty.HeadCommit == nil || *state.dirty.HeadCommit != *headCommit {
-		t.Fatalf("dirty Workspace metadata was not reported: %#v", state.dirty)
+	if state.dirty.CurrentBranch != nil || state.dirty.HeadCommit != nil {
+		t.Fatalf("empty non-Git Workspace reported Git metadata: %#v", state.dirty)
+	}
+	if state.checkpoint.Strategy != "snapshot" {
+		t.Fatalf("empty non-Git Workspace did not use a Snapshot Checkpoint: %#v", state.checkpoint)
 	}
 	if strings.Contains(strings.Join(state.requestBodies, "\n"), "git-secret-token") {
 		t.Fatal("Git Credential leaked into an agentd request after resolution")

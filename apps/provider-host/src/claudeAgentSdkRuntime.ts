@@ -31,6 +31,7 @@ import {
   terminalResultText,
   type TerminalRedactor,
 } from "./terminalEvents";
+import { TurnDiffCollector } from "./turnDiffs";
 import { WorkspaceGeneratedFileCollector } from "./workspaceGeneratedFiles";
 
 export type ClaudeQueryRuntime = AsyncIterable<SDKMessage> & {
@@ -63,6 +64,7 @@ type AttemptState = {
   hadTurnActivity: boolean;
   tools: Map<string, AttemptTool>;
   generatedFiles: WorkspaceGeneratedFileCollector;
+  turnDiffs: TurnDiffCollector;
 };
 
 type AttemptTool = {
@@ -268,6 +270,11 @@ class ClaudeAgentSdkRuntime {
         provider: "claudeAgent",
         emit: this.options.emit,
       }),
+      turnDiffs: new TurnDiffCollector({
+        runtimeOutputDirectory: this.options.input.runtimeOutputDirectory,
+        provider: "claudeAgent",
+        emit: this.options.emit,
+      }),
     };
     const promptStream = createPromptStream(prompt);
     let runtime: ClaudeQueryRuntime | undefined;
@@ -284,6 +291,7 @@ class ClaudeAgentSdkRuntime {
         const terminal = this.handleMessage(message, state);
         if (terminal) {
           await state.generatedFiles.flush();
+          await state.turnDiffs.flush();
           return terminal;
         }
       }
@@ -424,6 +432,25 @@ class ClaudeAgentSdkRuntime {
       const toolInput = asRecord(input.tool_input) ?? {};
       for (const path of claudeGeneratedFilePaths(input.tool_name, toolInput)) {
         state.generatedFiles.observe(path);
+      }
+      const diffs = claudeGeneratedFileDiffs(
+        input.tool_name,
+        toolInput,
+        input.tool_response,
+        (candidate) => state.generatedFiles.resolveRelativePath(candidate),
+      );
+      for (const diff of diffs) {
+        state.turnDiffs.observePatch(diff.path, diff.unifiedDiff);
+      }
+      if (diffs.length === 0 && isClaudeFileChangeTool(input.tool_name)) {
+        this.options.emit({
+          type: "event",
+          eventType: "runtime.provider.warning",
+          payload: {
+            provider: "claudeAgent",
+            message: claudeMissingDiffDiagnostic(input.tool_name, toolInput, input.tool_response),
+          },
+        });
       }
       return { continue: true };
     };
@@ -1293,6 +1320,210 @@ function claudeGeneratedFilePaths(
     default:
       return [];
   }
+}
+
+function claudeGeneratedFileDiffs(
+  toolName: string,
+  toolInput: Record<string, unknown>,
+  toolResponse: unknown,
+  resolveRelativePath: (candidate: unknown) => string | undefined,
+): ReadonlyArray<{ path: string; unifiedDiff: string }> {
+  const normalizedTool = toolName.trim().toLowerCase();
+  if (normalizedTool !== "write" && normalizedTool !== "edit" && normalizedTool !== "multiedit") {
+    return [];
+  }
+  const responses = Array.isArray(toolResponse) ? toolResponse : [toolResponse];
+  return responses.flatMap((value) => {
+    const response = asRecord(value);
+    if (!response) return [];
+    const candidatePath =
+      readString(response, "filePath") ?? readString(response, "filename") ?? toolInput.file_path;
+    const path = resolveRelativePath(candidatePath);
+    if (!path) return [];
+    const gitDiff = asRecord(response.gitDiff);
+    const gitPatch = readString(gitDiff, "patch");
+    if (gitPatch) {
+      return [{ path, unifiedDiff: withUnifiedDiffHeader(path, gitPatch, response) }];
+    }
+    const structuredPatch = Array.isArray(response.structuredPatch) ? response.structuredPatch : [];
+    const hunks = structuredPatch.flatMap((entry) => {
+      const hunk = asRecord(entry);
+      const lines = Array.isArray(hunk?.lines)
+        ? hunk.lines.filter((line): line is string => typeof line === "string")
+        : [];
+      const oldStart = nonNegativeIntegerField(hunk, "oldStart");
+      const oldLines = nonNegativeIntegerField(hunk, "oldLines");
+      const newStart = nonNegativeIntegerField(hunk, "newStart");
+      const newLines = nonNegativeIntegerField(hunk, "newLines");
+      if (
+        lines.length === 0 ||
+        oldStart === undefined ||
+        oldLines === undefined ||
+        newStart === undefined ||
+        newLines === undefined
+      ) {
+        return [];
+      }
+      return [`@@ -${oldStart},${oldLines} +${newStart},${newLines} @@\n${lines.join("\n")}`];
+    });
+    if (hunks.length > 0) {
+      return [{ path, unifiedDiff: withUnifiedDiffHeader(path, hunks.join("\n"), response) }];
+    }
+    const fileContent = claudeFileContentFallback(normalizedTool, toolInput, response);
+    if (fileContent) {
+      const unifiedDiff = fullFileWriteDiff(path, fileContent.originalFile, fileContent.content);
+      return unifiedDiff ? [{ path, unifiedDiff }] : [];
+    }
+    return [];
+  });
+}
+
+function isClaudeFileChangeTool(toolName: string): boolean {
+  const normalized = toolName.trim().toLowerCase();
+  return normalized === "write" || normalized === "edit" || normalized === "multiedit";
+}
+
+function claudeMissingDiffDiagnostic(
+  toolName: string,
+  toolInput: Record<string, unknown>,
+  toolResponse: unknown,
+): string {
+  const responses = Array.isArray(toolResponse) ? toolResponse : [toolResponse];
+  let objectResponses = 0;
+  let gitPatchBytes = 0;
+  let structuredPatchEntries = 0;
+  let structuredPatchLines = 0;
+  let originalFile = "missing";
+  let content = "missing";
+  for (const value of responses) {
+    const response = asRecord(value);
+    if (!response) continue;
+    objectResponses += 1;
+    const patch = readString(asRecord(response.gitDiff), "patch");
+    if (patch) gitPatchBytes += Buffer.byteLength(patch);
+    if (Array.isArray(response.structuredPatch)) {
+      structuredPatchEntries += response.structuredPatch.length;
+      for (const entry of response.structuredPatch) {
+        const lines = asRecord(entry)?.lines;
+        if (Array.isArray(lines)) structuredPatchLines += lines.length;
+      }
+    }
+    if (response.originalFile === null) {
+      originalFile = "null";
+    } else if (typeof response.originalFile === "string") {
+      originalFile = `string:${Buffer.byteLength(response.originalFile)}`;
+    }
+    if (typeof response.content === "string") {
+      content = `string:${Buffer.byteLength(response.content)}`;
+    }
+  }
+  const inputContent =
+    typeof toolInput.content === "string"
+      ? `string:${Buffer.byteLength(toolInput.content)}`
+      : "missing";
+  return (
+    `Claude ${toolName.trim() || "file tool"} completed without a usable native Diff ` +
+    `(responses=${responses.length}, objects=${objectResponses}, gitPatchBytes=${gitPatchBytes}, ` +
+    `structuredPatchEntries=${structuredPatchEntries}, structuredPatchLines=${structuredPatchLines}, ` +
+    `originalFile=${originalFile}, content=${content}, inputContent=${inputContent}).`
+  );
+}
+
+function claudeFileContentFallback(
+  normalizedTool: string,
+  toolInput: Record<string, unknown>,
+  response: Record<string, unknown>,
+): { originalFile: string | null; content: string } | undefined {
+  const originalFile = response.originalFile;
+  if (typeof originalFile !== "string" && originalFile !== null) return undefined;
+  if (normalizedTool === "write") {
+    const content = readString(response, "content") ?? readString(toolInput, "content");
+    return content === undefined ? undefined : { originalFile, content };
+  }
+  if (normalizedTool !== "edit" || typeof originalFile !== "string") return undefined;
+  const oldString = readString(response, "oldString") ?? readString(toolInput, "old_string");
+  const newString = readString(response, "newString") ?? readString(toolInput, "new_string");
+  if (oldString === undefined || oldString === "" || newString === undefined) return undefined;
+  const replaceAll = response.replaceAll === true || toolInput.replace_all === true;
+  if (!originalFile.includes(oldString)) return undefined;
+  const content = replaceAll
+    ? originalFile.split(oldString).join(newString)
+    : originalFile.replace(oldString, newString);
+  return { originalFile, content };
+}
+
+function fullFileWriteDiff(
+  path: string,
+  originalFile: string | null,
+  content: string,
+): string | undefined {
+  const before = originalFile ?? "";
+  if (before === content) return undefined;
+  const posixPath = path.replaceAll("\\", "/");
+  const oldText = diffTextLines(before);
+  const newText = diffTextLines(content);
+  const lines = [
+    `diff --git a/${posixPath} b/${posixPath}`,
+    `--- ${originalFile === null ? "/dev/null" : `a/${posixPath}`}`,
+    `+++ b/${posixPath}`,
+    `@@ -${diffRange(oldText.lines.length)} +${diffRange(newText.lines.length)} @@`,
+  ];
+  appendDiffLines(lines, "-", oldText);
+  appendDiffLines(lines, "+", newText);
+  lines.push("");
+  return lines.join("\n");
+}
+
+function diffTextLines(value: string): { lines: string[]; hasFinalNewline: boolean } {
+  if (value === "") return { lines: [], hasFinalNewline: true };
+  const hasFinalNewline = value.endsWith("\n");
+  return {
+    lines: (hasFinalNewline ? value.slice(0, -1) : value).split("\n"),
+    hasFinalNewline,
+  };
+}
+
+function diffRange(lineCount: number): string {
+  return lineCount === 0 ? "0,0" : `1,${lineCount}`;
+}
+
+function appendDiffLines(
+  output: string[],
+  prefix: "+" | "-",
+  text: { lines: string[]; hasFinalNewline: boolean },
+): void {
+  for (const line of text.lines) output.push(`${prefix}${line}`);
+  if (text.lines.length > 0 && !text.hasFinalNewline) {
+    output.push("\\ No newline at end of file");
+  }
+}
+
+function withUnifiedDiffHeader(
+  path: string,
+  patch: string,
+  response: Record<string, unknown>,
+): string {
+  if (patch.startsWith("diff --git ")) return patch.endsWith("\n") ? patch : `${patch}\n`;
+  const posixPath = path.replaceAll("\\", "/");
+  const originalFile = response.originalFile;
+  const oldPath = originalFile === null ? "/dev/null" : `a/${posixPath}`;
+  return [
+    `diff --git a/${posixPath} b/${posixPath}`,
+    `--- ${oldPath}`,
+    `+++ b/${posixPath}`,
+    patch,
+    "",
+  ].join("\n");
+}
+
+function nonNegativeIntegerField(
+  value: Record<string, unknown> | undefined,
+  key: string,
+): number | undefined {
+  const candidate = value?.[key];
+  return typeof candidate === "number" && Number.isSafeInteger(candidate) && candidate >= 0
+    ? candidate
+    : undefined;
 }
 
 function classifyRequestKind(toolName: string): string {

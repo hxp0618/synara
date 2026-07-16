@@ -104,6 +104,15 @@
   "allOf": [
     {
       "if": {
+        "properties": { "eventType": { "const": "turn.diff.updated" } },
+        "required": ["eventType"]
+      },
+      "then": {
+        "properties": { "payload": { "$ref": "#/$defs/turnDiffUpdatedPayload" } }
+      }
+    },
+    {
+      "if": {
         "properties": { "eventType": { "const": "content.delta" } },
         "required": ["eventType"]
       },
@@ -127,6 +136,45 @@
   ],
   "$defs": {
     "nonNegativeInteger": { "type": "integer", "minimum": 0 },
+    "turnDiffArtifactReference": {
+      "type": "object",
+      "required": [
+        "artifactId",
+        "contentType",
+        "sizeBytes",
+        "sha256",
+        "fileCount",
+        "additions",
+        "deletions"
+      ],
+      "properties": {
+        "artifactId": { "type": "string", "minLength": 1 },
+        "contentType": { "const": "text/x-diff; charset=utf-8" },
+        "sizeBytes": { "$ref": "#/$defs/nonNegativeInteger" },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "fileCount": { "$ref": "#/$defs/nonNegativeInteger" },
+        "additions": { "$ref": "#/$defs/nonNegativeInteger" },
+        "deletions": { "$ref": "#/$defs/nonNegativeInteger" }
+      }
+    },
+    "turnDiffUpdatedPayload": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["unifiedDiff"],
+          "not": { "required": ["artifact"] },
+          "properties": { "unifiedDiff": { "type": "string" } }
+        },
+        {
+          "type": "object",
+          "required": ["artifact"],
+          "not": { "required": ["unifiedDiff"] },
+          "properties": {
+            "artifact": { "$ref": "#/$defs/turnDiffArtifactReference" }
+          }
+        }
+      ]
+    },
     "terminalEncoding": { "enum": ["utf-8", "binary"] },
     "strictBase64": {
       "type": "string",

@@ -3176,6 +3176,7 @@ const make = Effect.gen(function* () {
       if (event.type === "turn.diff.updated") {
         const turnId = toTurnId(event.turnId);
         if (turnId && (yield* isGitRepoForThread(thread.id))) {
+          const inlineDiff = "unifiedDiff" in event.payload ? event.payload.unifiedDiff : undefined;
           const existingCheckpoint = thread.checkpoints.find((c) => c.turnId === turnId);
           const placeholderKey = providerTurnKey(thread.id, turnId);
           const trackedPlaceholder = (yield* Ref.get(providerDiffPlaceholdersRef)).get(
@@ -3201,8 +3202,8 @@ const make = Effect.gen(function* () {
               0,
             );
             const files =
-              (canParseLiveDiffPatch
-                ? parseProviderTurnDiffFiles(event.payload.unifiedDiff)
+              (canParseLiveDiffPatch && inlineDiff !== undefined
+                ? parseProviderTurnDiffFiles(inlineDiff)
                 : null) ??
               trackedPlaceholder?.files ??
               existingCheckpoint?.files ??

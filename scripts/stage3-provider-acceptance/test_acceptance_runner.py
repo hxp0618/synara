@@ -1085,6 +1085,24 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
         self.assertEqual(generated, acceptance.generated_file_bytes())
         self.assertEqual(len(generated), (1 << 20) + 257)
 
+    def test_large_diff_seed_command_writes_exact_workspace_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            completed = subprocess.run(
+                ["bash", "-c", acceptance.large_diff_seed_node_command()],
+                cwd=directory,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=True,
+            )
+            generated = pathlib.Path(
+                directory, acceptance.LARGE_DIFF_RELATIVE_PATH
+            ).read_bytes()
+
+        self.assertEqual(completed.stdout, b"")
+        self.assertEqual(completed.stderr, b"")
+        self.assertEqual(generated, acceptance.large_diff_seed_bytes())
+        self.assertGreater(len(generated), 64 << 10)
+
     def test_real_provider_generated_file_checkpoint_validates_ready_snapshot_content(self) -> None:
         suite = RealProviderGeneratedFileSuite()
 
@@ -1585,6 +1603,16 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
         self.assertEqual(actual, expected)
         suite._real_provider_generated_file_checkpoint.assert_called_once_with()
 
+    def test_real_provider_large_diff_dispatches_to_canonical_handler(self) -> None:
+        suite = BarrierSuite(acceptance.EXECUTION_PINNED_WORKER)
+        expected = {"diff": {"artifact": {"kind": "diff"}}}
+        suite._real_provider_large_diff_artifact = mock.Mock(return_value=expected)  # type: ignore[method-assign]
+
+        actual = suite._execute_real_provider_case("large-diff")
+
+        self.assertEqual(actual, expected)
+        suite._real_provider_large_diff_artifact.assert_called_once_with()
+
     def test_real_provider_terminal_large_dispatches_to_canonical_handler(self) -> None:
         suite = BarrierSuite(acceptance.EXECUTION_PINNED_WORKER)
         expected = {"terminal": {"completion": {"totalBytes": 2 * (1 << 20) + 257}}}
@@ -1873,6 +1901,7 @@ class RunnerOptionsTest(unittest.TestCase):
                 "steer",
                 "interrupt",
                 "generated-file-checkpoint",
+                "large-diff",
                 "terminal-large",
                 "review",
                 "compact",

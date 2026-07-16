@@ -20,7 +20,7 @@
 
 ## 2. 数据库与 DDL
 
-当前工作树的 checked-in forward migration boundary 是 `000040`：
+当前工作树的 checked-in forward migration boundary 是 `000041`：
 
 | Migration | 发布不变量                                                                              |
 | --------- | --------------------------------------------------------------------------------------- |
@@ -33,6 +33,7 @@
 | `000038`  | disabled Binding 历史也可用的复合外键 lookup indexes                                    |
 | `000039`  | 每个 Execution Target 最多一个 active `worker_image_pull` Binding，歧义升级 fail closed |
 | `000040`  | Worker Release Transition 必须与当前 Policy 的版本和 promoted/canary 状态完全一致       |
+| `000041`  | `artifacts_kind_check` forward 扩展 `diff`，历史 Artifact kind 与 migration 保持不变    |
 
 - [ ] PostgreSQL 备份完成，并在隔离环境验证可恢复。
 - [ ] `/ready.checks.schema.expectedVersion` 与当前镜像内 migration boundary 一致。
@@ -43,6 +44,7 @@
 - [ ] `000038` 的四个 Credential Binding 外键索引在 PostgreSQL 和 SQLite 均存在。
 - [ ] `000039` 在重复 active Target Binding 上拒绝升级，修复歧义后可重试且新唯一索引生效。
 - [ ] `000040` 在 Policy/最新 Transition 不一致时拒绝升级，并阻止写入不匹配的 Transition。
+- [ ] `000041` 升级前拒绝 `diff`、升级后保留全部既有 kind 并接受 `diff`，未知 kind 继续被拒绝。
 - [ ] PostgreSQL 不依赖 Runtime `AutoMigrate`；历史 migration 文件没有被修改。
 - [ ] 回滚方案确认旧镜像可以读取已应用的新 schema，或已有经过评审的 forward fix；不得仅回滚 Deployment。
 
@@ -109,6 +111,7 @@ bun run --cwd packages/contracts test src/providerHost.test.ts src/providerRunti
 bun run --cwd apps/provider-host test \
   src/protocol.test.ts \
   src/runtimeEventV2.test.ts \
+  src/turnDiffs.test.ts \
   src/codexAppServerRuntime.test.ts \
   src/claudeAgentSdkRuntime.test.ts
 bun run --cwd apps/web test \
@@ -130,7 +133,8 @@ bun run --cwd apps/web test \
 | 证据                                                | 当前结论                            | 发布边界                                                             |
 | --------------------------------------------------- | ----------------------------------- | -------------------------------------------------------------------- |
 | 真实 Codex/Claude Local two-Turn product-path smoke | clean commit `fb9e25ec` 各 12/12    | 经过 Control Plane/LocalSupervisor/agentd，但不是完整 Local Gate     |
-| 真实 Codex/Claude Generated File + Checkpoint       | clean commit `be919393` matrix pass | standalone Ready Artifact 与 Snapshot 已验；大 Diff 仍开放           |
+| 真实 Codex/Claude Generated File + Checkpoint       | clean commit `be919393` matrix pass | standalone Ready Artifact 与 Snapshot 已验；Diff 由下一行独立跟踪    |
+| 真实 Codex/Claude Local Large Diff                  | 2026-07-16 dirty runs passed        | Ready `diff`/下载/顺序已验；仍需最终 clean SHA 统一矩阵              |
 | 真实 Codex `0.144.x` `terminal-large`               | Explicit Unsupported                | Unified Exec 仅保留 1 MiB Head/Tail；不得牺牲 durable Approval       |
 | Claude ambient OAuth `terminal-large`               | Explicit Unsupported                | 需 controlled Credential 绑定 Runtime Output Root                    |
 | deterministic Local/Docker core suite               | 已通过                              | 证明共享 Control Plane/agentd/Host orchestration，不证明真实 Adapter |

@@ -30,6 +30,8 @@ const (
 	drainCheckpointRenewRequestIDPrefix    = "drain-checkpoint-renew-"
 )
 
+var turnDiffArtifactEventNamespace = uuid.MustParse("c77821ff-66e7-5bd8-9618-e453ff4625f0")
+
 type workspaceCleanupClaimSchedule struct {
 	executionsSinceProbe int
 	lastProbe            time.Time
@@ -712,17 +714,79 @@ func (d *Daemon) runExecution(
 				return sanitizeErr
 			}
 			if message.Artifact.SourceRoot == "runtime-output" {
-				source, _, err := runtimeOutputRoot.open(message.Artifact.Path)
+				source, relativePath, err := runtimeOutputRoot.open(message.Artifact.Path)
 				if err != nil {
 					return err
 				}
 				defer source.Close()
-				return terminalLogs.HandleArtifactSource(
-					messageContext,
-					*message.Artifact,
-					source,
-					message.OccurredAt,
+				if message.Artifact.Kind == "terminal_log" {
+					return terminalLogs.HandleArtifactSource(
+						messageContext,
+						*message.Artifact,
+						source,
+						message.OccurredAt,
+					)
+				}
+				if message.Artifact.Kind != "diff" {
+					return protocolFailure("Runner Runtime Output Artifact kind is unsupported")
+				}
+				info, err := source.rewind()
+				if err != nil {
+					return fmt.Errorf("rewind Diff Artifact source: %w", err)
+				}
+				if message.Artifact.ReportedSize == nil || *message.Artifact.ReportedSize != info.Size() {
+					return protocolFailure("Provider Host Diff reportedSize does not match the bound file")
+				}
+				if strings.TrimSpace(message.Artifact.OriginalName) == "" {
+					message.Artifact.OriginalName = filepath.Base(relativePath)
+				}
+				if err := executionGuard.RequireSafeStructuralString(message.Artifact.OriginalName); err != nil {
+					return err
+				}
+				normalizedContentType, err := normalizeRunnerArtifactContentType(message.Artifact.ContentType)
+				if err != nil {
+					return err
+				}
+				if normalizedContentType != "text/x-diff; charset=utf-8" {
+					return protocolFailure("Provider Host Diff Artifact Content-Type is invalid")
+				}
+				message.Artifact.ContentType = normalizedContentType
+				safeSource, cleanupSafeSource, err := guardedArtifactUploadSource(
+					messageContext, executionGuard, normalizedContentType, source,
 				)
+				if err != nil {
+					return err
+				}
+				defer cleanupSafeSource()
+				completed, err := d.client.uploadArtifactSource(
+					messageContext,
+					execution.ID,
+					lease,
+					*message.Artifact,
+					safeSource,
+				)
+				if err != nil {
+					return err
+				}
+				if completed.Status != "ready" || completed.ID == uuid.Nil || completed.Kind != "diff" ||
+					completed.ContentType == nil || completed.SizeBytes == nil || completed.SHA256 == nil ||
+					message.Artifact.FileCount == nil || message.Artifact.Additions == nil || message.Artifact.Deletions == nil {
+					return errors.New("ready Diff Artifact is missing reference metadata")
+				}
+				if err := verifyReadyArtifactSource(messageContext, safeSource, normalizedContentType, completed); err != nil {
+					return fmt.Errorf("verify ready Diff Artifact: %w", err)
+				}
+				eventID := uuid.NewSHA1(turnDiffArtifactEventNamespace, completed.ID[:])
+				return d.client.AppendEvent(messageContext, execution.ID, lease, RunnerMessage{
+					Type: "event", EventID: &eventID, EventVersion: executions.RuntimeEventVersionV2,
+					EventType: "turn.diff.updated", OccurredAt: message.OccurredAt,
+					Payload: map[string]any{"artifact": map[string]any{
+						"artifactId": completed.ID.String(), "contentType": *completed.ContentType,
+						"sizeBytes": *completed.SizeBytes, "sha256": *completed.SHA256,
+						"fileCount": *message.Artifact.FileCount, "additions": *message.Artifact.Additions,
+						"deletions": *message.Artifact.Deletions,
+					}},
+				})
 			}
 			if message.Artifact.SourceRoot != "" && message.Artifact.SourceRoot != "workspace" {
 				return protocolFailure("Runner Artifact sourceRoot is unsupported")
@@ -923,7 +987,7 @@ func (d *Daemon) persistManagedWorkspaceState(
 		}
 		return false, nil
 	}
-	if inspection.Dirty {
+	if candidate.Strategy != "git-reference" {
 		if err := d.client.MarkWorkspaceDirty(ctx, execution.ID, lease, inspection); err != nil {
 			if candidate.Cleanup != nil {
 				candidate.Cleanup()

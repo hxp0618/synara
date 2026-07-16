@@ -1396,7 +1396,10 @@ describe("ClaudeAdapterLive", () => {
       assert.equal(diffUpdated?.type, "turn.diff.updated");
       if (diffUpdated?.type === "turn.diff.updated") {
         assert.equal(String(diffUpdated.turnId), String(turn.turnId));
-        assert.equal(diffUpdated.payload.unifiedDiff, "");
+        assert.equal("unifiedDiff" in diffUpdated.payload, true);
+        if ("unifiedDiff" in diffUpdated.payload) {
+          assert.equal(diffUpdated.payload.unifiedDiff, "");
+        }
       }
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),

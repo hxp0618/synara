@@ -55,6 +55,7 @@ follows:
 | `runtime.provider.activity`           | `item.started`, `item.updated`, or `item.completed` |
 | `runtime.usage`                       | `thread.token-usage.updated`                        |
 | `runtime.provider.warning`            | `runtime.warning`                                   |
+| Ready large-Diff `ArtifactCandidate`  | `turn.diff.updated` with one Artifact reference     |
 | Approval `InteractionRequest`         | `request.opened`                                    |
 | Structured input `InteractionRequest` | `user-input.requested`                              |
 | Approval resolution                   | `request.resolved`                                  |
@@ -94,6 +95,40 @@ Terminal activity reuses the frozen canonical event vocabulary; it does not add 
 Completion data may additionally include integer `exitCode`, `signal`, and `failureKind` (`exit`, `signal`,
 `timeout`, `oom`, or `provider_error`). `previewBytes` cannot exceed `totalBytes`. A started or completed event may
 also contain bounded, redacted `commandSummary` and Workspace-relative `cwdLabel` values.
+
+## Turn Diff projection
+
+`turn.diff.updated` has exactly one of two payload shapes:
+
+```json
+{ "unifiedDiff": "diff --git ..." }
+```
+
+or, after agentd has uploaded and verified a large Diff:
+
+```json
+{
+  "artifact": {
+    "artifactId": "4bc55f48-9ddb-4e52-8152-ebef78a2dd3f",
+    "contentType": "text/x-diff; charset=utf-8",
+    "sizeBytes": 131072,
+    "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "fileCount": 2,
+    "additions": 120,
+    "deletions": 40
+  }
+}
+```
+
+The inline and Artifact fields are mutually exclusive. The Artifact ID references one Ready `diff` Artifact owned
+by the same Execution; `sizeBytes`, lowercase SHA-256 and Content-Type must match the verified payload. File and
+line counts are non-negative Provider summaries and never replace the payload integrity fields. Physical Runtime
+Output paths, original Provider responses and Diff bytes do not enter the Session Event.
+
+Provider Host keeps only bounded Diffs inline. It stages a larger supported Diff beneath the agentd-owned Runtime
+Output Root, emits an internal `ArtifactCandidate`, and agentd performs the anchored no-symlink open, Secret Guard,
+upload and Ready verification before appending this reference Event. The Control Plane-generated `artifact.ready`
+Event therefore precedes the Artifact-backed `turn.diff.updated`, and both precede Execution completion.
 
 ## Validation and unknown events
 

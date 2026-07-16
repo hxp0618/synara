@@ -119,6 +119,22 @@ func TestValidateRuntimeEventContractChecksCanonicalPayloadShape(t *testing.T) {
 		{name: "item lifecycle invalid item type", eventType: "item.started", payload: map[string]any{"itemType": "shell"}},
 		{name: "usage", eventType: "thread.token-usage.updated", payload: map[string]any{"usage": map[string]any{"usedTokens": float64(42), "usedPercent": 10.5}}, valid: true},
 		{name: "usage negative", eventType: "thread.token-usage.updated", payload: map[string]any{"usage": map[string]any{"usedTokens": -1}}},
+		{name: "inline turn diff", eventType: "turn.diff.updated", payload: map[string]any{"unifiedDiff": "diff --git a/a b/a"}, valid: true},
+		{name: "artifact turn diff", eventType: "turn.diff.updated", payload: map[string]any{"artifact": map[string]any{
+			"artifactId": "artifact-diff-1", "contentType": "text/x-diff; charset=utf-8", "sizeBytes": 131072,
+			"sha256": strings.Repeat("a", 64), "fileCount": 2, "additions": 120, "deletions": 40,
+		}}, valid: true},
+		{name: "turn diff cannot mix inline and artifact", eventType: "turn.diff.updated", payload: map[string]any{
+			"unifiedDiff": "patch", "artifact": map[string]any{"artifactId": "artifact-diff-1"},
+		}},
+		{name: "artifact turn diff requires lowercase sha", eventType: "turn.diff.updated", payload: map[string]any{"artifact": map[string]any{
+			"artifactId": "artifact-diff-1", "contentType": "text/x-diff", "sizeBytes": 1,
+			"sha256": strings.Repeat("A", 64), "fileCount": 1, "additions": 1, "deletions": 0,
+		}}},
+		{name: "artifact turn diff requires canonical content type", eventType: "turn.diff.updated", payload: map[string]any{"artifact": map[string]any{
+			"artifactId": "artifact-diff-1", "contentType": "text/plain", "sizeBytes": 1,
+			"sha256": strings.Repeat("a", 64), "fileCount": 1, "additions": 1, "deletions": 0,
+		}}},
 		{name: "approval requested", eventType: "request.opened", payload: map[string]any{"requestId": "approval-1", "requestType": "command_execution_approval", "detail": "Run command"}, valid: true},
 		{name: "approval missing request type", eventType: "request.opened", payload: map[string]any{"requestId": "approval-1"}},
 		{name: "user input", eventType: "user-input.requested", payload: map[string]any{"requestId": "input-1", "questions": []any{map[string]any{"id": "q1", "header": "Choice", "question": "Pick one", "options": []any{map[string]any{"label": "A", "description": "Option A"}}}}}, valid: true},

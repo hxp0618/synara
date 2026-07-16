@@ -409,6 +409,7 @@ export type ControlPlaneArtifactKind =
   | "attachment"
   | "generated_file"
   | "terminal_log"
+  | "diff"
   | "workspace_snapshot"
   | "checkpoint";
 

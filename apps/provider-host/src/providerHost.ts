@@ -70,6 +70,9 @@ export type RunnerMessage =
         terminalId?: string;
         encoding?: "utf-8" | "binary";
         reportedSize?: number;
+        fileCount?: number;
+        additions?: number;
+        deletions?: number;
       };
     }
   | {

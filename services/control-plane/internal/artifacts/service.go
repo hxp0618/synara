@@ -31,7 +31,7 @@ import (
 )
 
 var allowedKinds = map[string]struct{}{
-	"attachment": {}, "generated_file": {}, "terminal_log": {},
+	"attachment": {}, "generated_file": {}, "terminal_log": {}, "diff": {},
 	"workspace_snapshot": {}, "checkpoint": {},
 }
 
@@ -1063,7 +1063,7 @@ func (s *Service) requireExecution(ctx context.Context, tenantID, sessionID, exe
 func (s *Service) normalizeCreate(input CreateInput) (CreateInput, error) {
 	input.Kind = strings.ToLower(strings.TrimSpace(input.Kind))
 	if _, ok := allowedKinds[input.Kind]; !ok {
-		return CreateInput{}, problem.New(400, "invalid_artifact_kind", "Artifact kind must be attachment, generated_file, terminal_log, workspace_snapshot, or checkpoint.")
+		return CreateInput{}, problem.New(400, "invalid_artifact_kind", "Artifact kind must be attachment, generated_file, terminal_log, diff, workspace_snapshot, or checkpoint.")
 	}
 	if input.OriginalName != nil {
 		name := strings.TrimSpace(*input.OriginalName)

@@ -408,9 +408,30 @@ const TurnProposedCompletedPayload = Schema.Struct({
 });
 export type TurnProposedCompletedPayload = typeof TurnProposedCompletedPayload.Type;
 
-const TurnDiffUpdatedPayload = Schema.Struct({
+const InlineTurnDiffUpdatedPayload = Schema.Struct({
   unifiedDiff: Schema.String,
+  artifact: Schema.optional(Schema.Never),
 });
+const TurnDiffArtifactReference = Schema.Struct({
+  artifactId: TrimmedNonEmptyStringSchema,
+  contentType: Schema.Literal("text/x-diff; charset=utf-8"),
+  sizeBytes: NonNegativeInt,
+  sha256: Schema.String.check(Schema.isPattern(/^[0-9a-f]{64}$/u)),
+  fileCount: NonNegativeInt,
+  additions: NonNegativeInt,
+  deletions: NonNegativeInt,
+});
+export type TurnDiffArtifactReference = typeof TurnDiffArtifactReference.Type;
+
+const ArtifactTurnDiffUpdatedPayload = Schema.Struct({
+  artifact: TurnDiffArtifactReference,
+  unifiedDiff: Schema.optional(Schema.Never),
+});
+
+const TurnDiffUpdatedPayload = Schema.Union([
+  InlineTurnDiffUpdatedPayload,
+  ArtifactTurnDiffUpdatedPayload,
+]);
 export type TurnDiffUpdatedPayload = typeof TurnDiffUpdatedPayload.Type;
 
 const NonCommandCanonicalItemType = Schema.Literals([

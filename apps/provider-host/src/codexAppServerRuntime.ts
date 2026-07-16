@@ -23,6 +23,7 @@ import {
   type TerminalOutputStream,
   type TerminalRedactor,
 } from "./terminalEvents";
+import { TurnDiffCollector } from "./turnDiffs";
 import { WorkspaceGeneratedFileCollector } from "./workspaceGeneratedFiles";
 
 type JsonRpcId = string | number;
@@ -90,6 +91,7 @@ class CodexAppServerRuntime {
   private readonly pendingUserInputs = new Map<string, PendingInteraction>();
   private readonly commandTerminals = new Map<string, CodexTerminalState>();
   private readonly generatedFiles: WorkspaceGeneratedFileCollector;
+  private readonly turnDiffs: TurnDiffCollector;
   private readonly outputText: string[] = [];
   private readonly turnCompletion: Promise<Record<string, unknown>>;
   private resolveTurn!: (turn: Record<string, unknown>) => void;
@@ -109,6 +111,11 @@ class CodexAppServerRuntime {
   constructor(private readonly options: CodexRunOptions) {
     this.generatedFiles = new WorkspaceGeneratedFileCollector({
       workspaceDirectory: options.input.workspaceDirectory,
+      provider: "codex",
+      emit: options.emit,
+    });
+    this.turnDiffs = new TurnDiffCollector({
+      runtimeOutputDirectory: options.input.runtimeOutputDirectory,
       provider: "codex",
       emit: options.emit,
     });
@@ -188,6 +195,7 @@ class CodexAppServerRuntime {
 
       const completedTurn = await this.turnCompletion;
       await this.generatedFiles.flush();
+      await this.turnDiffs.flush();
       if (this.outputText.length === 0) {
         const finalText = finalAgentText(completedTurn);
         if (finalText) this.outputText.push(this.options.redact(finalText));
@@ -599,6 +607,9 @@ class CodexAppServerRuntime {
       }
       case "turn/diff/updated":
       case "turn/plan/updated": {
+        if (notification.method === "turn/diff/updated") {
+          this.turnDiffs.observeSnapshot(params.diff);
+        }
         this.options.emit({
           type: "event",
           eventType: "runtime.provider.activity",

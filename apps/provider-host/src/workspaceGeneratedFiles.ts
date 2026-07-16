@@ -37,7 +37,7 @@ export class WorkspaceGeneratedFileCollector {
   }
 
   observe(candidate: unknown): void {
-    const relativePath = this.relativePath(candidate);
+    const relativePath = this.resolveRelativePath(candidate);
     if (!relativePath || this.candidates.has(relativePath)) return;
     if (this.candidates.size >= MAX_TRACKED_GENERATED_FILES) {
       this.overflowed = true;
@@ -47,7 +47,7 @@ export class WorkspaceGeneratedFileCollector {
   }
 
   remove(candidate: unknown): void {
-    const relativePath = this.relativePath(candidate);
+    const relativePath = this.resolveRelativePath(candidate);
     if (relativePath) this.candidates.delete(relativePath);
   }
 
@@ -89,12 +89,22 @@ export class WorkspaceGeneratedFileCollector {
     }
   }
 
-  private relativePath(candidate: unknown): string | undefined {
+  resolveRelativePath(candidate: unknown): string | undefined {
     for (const workspaceDirectory of this.workspaceDirectoryAliases) {
       const relativePath = workspaceGeneratedFileRelativePath(workspaceDirectory, candidate);
       if (relativePath) return relativePath;
     }
-    return undefined;
+    if (typeof candidate !== "string") return undefined;
+    try {
+      const configuredDirectory = this.workspaceDirectoryAliases[0] ?? this.workspaceDirectory;
+      const absoluteCandidate = isAbsolute(candidate)
+        ? candidate
+        : resolve(configuredDirectory, candidate);
+      const canonicalCandidate = realpathSync(absoluteCandidate);
+      return workspaceGeneratedFileRelativePath(this.workspaceDirectory, canonicalCandidate);
+    } catch {
+      return undefined;
+    }
   }
 }
 

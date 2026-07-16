@@ -1,7 +1,11 @@
 # Artifact v1 contract
 
-Artifact is the tenant-scoped authority for attachments, generated files, terminal logs, workspace
+Artifact is the tenant-scoped authority for attachments, generated files, terminal logs, large Diffs, workspace
 snapshots, and checkpoints. Payload bytes never live in Session Event JSON or provider resume state.
+
+PostgreSQL migration `000041_diff_artifact_kind.sql` adds the `diff` kind through a forward-only replacement of the
+existing `artifacts_kind_check`; historical migrations remain immutable. SQLite continues to use the same Service
+kind validation boundary and its metadata-store safety mirror.
 
 ## Ownership and object keys
 
@@ -42,15 +46,15 @@ before returning the first grant. Pending replay rotates the Local token or re-s
 key. Ready replay returns metadata without another PUT and first revalidates Lease/Generation plus
 Size/SHA-256/Content-Type. UploadGrant secrets are not persisted as long-lived Worker receipts.
 
-Ordinary Worker `generated_file` and `terminal_log` uploads use the same response-loss safety without borrowing
+Ordinary Worker `generated_file`, `terminal_log`, and `diff` uploads use the same response-loss safety without borrowing
 Checkpoint identity. Agentd hashes the regular-file payload before Create and derives an opaque idempotency key
-from Execution, Generation, Workspace-relative candidate path, Artifact metadata, size and SHA-256. The Control
+from Execution, Generation, root-relative candidate path, Artifact metadata, size and SHA-256. The Control
 Plane derives one deterministic Artifact ID from Execution, Generation and that key. A pending Create replay
 refreshes the upload grant, while a ready replay returns the same Artifact without another PUT. Reusing the key
-with different ownership or metadata fails closed. Agentd resolves every path component below an anchored
-Workspace Root descriptor bound before Provider start, rejects symlinks and non-regular files, then retains the
-safely opened file descriptor through pre-hash, retry, PUT and Ready replay verification. Replacing the Workspace
-root path or a checked parent directory therefore cannot redirect the upload outside the bound Workspace.
+with different ownership or metadata fails closed. Agentd resolves every path component below the declared
+anchored Workspace or Runtime Output Root descriptor bound before Provider start, rejects symlinks and non-regular
+files, then retains the safely opened file descriptor through pre-hash, retry, PUT and Ready replay verification.
+Replacing a root path or checked parent directory therefore cannot redirect the upload outside the bound root.
 Content-Type is normalized before identity derivation and confirmation, and pre-hash plus Checkpoint archive copies
 honor Execution/Drain cancellation. Snapshot traversal checks the cancellation context for directories as well as
 files. Agentd refuses to Complete if the bytes uploaded no longer match the precomputed identity.
@@ -64,6 +68,13 @@ It then reads the bound descriptor from byte zero, emits at most a 32 KiB safe U
 stream as fixed 1 MiB Artifact segments. Invalid UTF-8, NUL, ANSI/control, and bidirectional-control content receive
 no Session Event preview and are stored as binary Artifact payload. The physical Runtime Output path is removed
 after the Execution and never becomes an object key, original name, Event field, or resume-state value.
+
+A large Turn Diff uses kind `diff`, original name `turn.diff`, and canonical
+`text/x-diff; charset=utf-8`. Provider Host stages it only beneath the Runtime Output Root and supplies exact size
+plus file/addition/deletion counts. Agentd performs the anchored open and text Secret Guard before upload, then
+requires the Ready Artifact metadata to match the guarded bytes. Only after that confirmation does it append an
+Artifact-backed `turn.diff.updated`; the Event contains Artifact ID, size, SHA-256, Content-Type and summary, never
+the physical path or Diff bytes. An invalid candidate or incomplete/mismatched Ready response fails closed.
 
 A Patch Checkpoint uses kind `checkpoint` and a deterministic tar containing `tracked.patch`, authoritative raw
 tracked upserts under `tracked/`, and the included regular files under `untracked/`. The PostgreSQL Checkpoint
