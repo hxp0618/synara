@@ -547,14 +547,21 @@ class DockerWorkerReleaseRolloutDriver(acceptance.DockerDriver):
         self,
         target_id: str,
         expected_classes: Sequence[Mapping[str, Any]],
+        *,
+        excluded_container_ids: Sequence[str] = (),
     ) -> Mapping[str, Any]:
         expected_count = sum(int(item["count"]) for item in expected_classes)
+        excluded = set(excluded_container_ids)
 
         def probe() -> Mapping[str, Any] | None:
             containers = self._managed_containers(target_id)
             if len(containers) != expected_count or not container_pool_running(containers):
                 return None
             summaries = [self._container_summary(target_id, container) for container in containers]
+            if excluded.intersection(
+                str(summary.get("id") or "") for summary in summaries
+            ):
+                return None
             actual = container_pool_counts(summaries)
             expected = {
                 (
@@ -910,6 +917,7 @@ class WorkerReleaseRolloutSuite(acceptance.AcceptanceSuite):
         super().__init__(options, driver, deadline, redactor)
         self.manifests: dict[str, dict[str, Any]] = {}
         self.revisions: dict[str, dict[str, Any]] = {}
+        self.busy_baseline: dict[str, Any] | None = None
 
     def run(self) -> list[dict[str, Any]]:
         self._case(
@@ -954,10 +962,16 @@ class WorkerReleaseRolloutSuite(acceptance.AcceptanceSuite):
             requires=("release.initial-promote",),
         )
         self._case(
-            "release.canary",
-            "Start the candidate canary and reject a stale policy version",
-            self._start_canary,
+            "release.baseline-active",
+            "Hold a baseline Approval Execution and bind its active Lease to one exact Worker container",
+            self._begin_busy_baseline,
             requires=("resources.credential-project-session",),
+        )
+        self._case(
+            "release.canary",
+            "Start canary without replacing the busy baseline Worker and fence promotion until terminal",
+            self._start_canary,
+            requires=("release.baseline-active",),
         )
         self._case(
             "release.canary-active-fence",
@@ -1139,7 +1153,48 @@ class WorkerReleaseRolloutSuite(acceptance.AcceptanceSuite):
         )
         return {"policy": policy_evidence(policy), "pool": pool, "manifest": manifest_evidence(manifest)}
 
+    def _begin_busy_baseline(self) -> Mapping[str, Any]:
+        barrier = self._begin_approval_readiness_barrier()
+        turn_id = required_string(barrier, "turnId", "baseline Approval barrier")
+        execution = self._wait_execution_release(
+            turn_id,
+            revision_id=self.revisions["baseline"]["id"],
+            channel="promoted",
+            manifest_id=self.manifests["baseline"]["manifestId"],
+            terminal=False,
+        )
+        worker = self._wait_managed_worker(
+            execution,
+            revision_id=self.revisions["baseline"]["id"],
+            channel="promoted",
+            manifest_id=self.manifests["baseline"]["manifestId"],
+        )
+        pool = self.driver.wait_container_pool(
+            self._required("target_id"),
+            [pool_class("promoted", self.revisions["baseline"]["id"], self.driver.images["baseline"], 2)],
+        )
+        container = pool_container_for_worker(pool, worker)
+        evidence = {
+            "barrier": barrier,
+            "execution": execution,
+            "worker": worker,
+            "container": container,
+            "pool": pool,
+        }
+        self.busy_baseline = evidence
+        return evidence
+
     def _start_canary(self) -> Mapping[str, Any]:
+        busy = self.busy_baseline
+        if busy is None:
+            raise acceptance.AcceptanceError(
+                "runner.worker_release_busy_baseline_missing",
+                "The baseline Approval Execution was not active before canary rollout.",
+            )
+        busy_worker = acceptance.json_object(busy.get("worker"), "busy baseline Worker")
+        busy_container = acceptance.json_object(
+            busy.get("container"), "busy baseline Worker container"
+        )
         policy = self._policy_change(
             "canary",
             "candidate",
@@ -1173,6 +1228,8 @@ class WorkerReleaseRolloutSuite(acceptance.AcceptanceSuite):
             expected_online=1,
             manifest_id=self.manifests["candidate"]["manifestId"],
         )
+        busy_after = pool_container_for_worker(pool, busy_worker)
+        preservation = validate_busy_container_preserved(busy_container, busy_after)
         stale = expect_problem(
             self.api,
             "POST",
@@ -1185,13 +1242,89 @@ class WorkerReleaseRolloutSuite(acceptance.AcceptanceSuite):
             {"expectedPolicyVersion": 1, "reason": "stale CAS must fail"},
             "worker_release_policy_version_conflict",
         )
+        promote_conflict = expect_problem(
+            self.api,
+            "POST",
+            release_action_path(
+                self._required("tenant_id"),
+                self._required("target_id"),
+                self.revisions["candidate"]["id"],
+                "promote",
+            ),
+            {
+                "expectedPolicyVersion": 2,
+                "reason": "busy baseline blocks retirement during promotion",
+            },
+            "worker_release_active_executions",
+        )
+        validate_active_execution_conflict(
+            promote_conflict,
+            revision_id=self.revisions["baseline"]["id"],
+            channel="promoted",
+        )
+        resolution = self._approval_resolution()
+        terminal = self._wait_execution_release(
+            required_string(busy["barrier"], "turnId", "baseline Approval barrier"),
+            revision_id=self.revisions["baseline"]["id"],
+            channel="promoted",
+            manifest_id=self.manifests["baseline"]["manifestId"],
+            terminal=True,
+        )
+        converged_pool = self.driver.wait_container_pool(
+            self._required("target_id"),
+            [
+                pool_class("promoted", self.revisions["baseline"]["id"], self.driver.images["baseline"], 1),
+                pool_class("canary", self.revisions["candidate"]["id"], self.driver.images["candidate"], 1),
+            ],
+            excluded_container_ids=(required_string(busy_container, "id", "busy container"),),
+        )
+        self.busy_baseline = None
         return {
             "policy": policy_evidence(policy),
             "pool": pool,
             "baselineManifest": manifest_evidence(baseline_manifest),
             "candidateManifest": manifest_evidence(candidate_manifest),
+            "busyBaselinePreserved": preservation,
             "stalePolicy": stale,
+            "promoteConflict": promote_conflict,
+            "resolution": resolution,
+            "terminal": terminal,
+            "postTerminalPool": converged_pool,
         }
+
+    def _wait_managed_worker(
+        self,
+        execution: Mapping[str, Any],
+        *,
+        revision_id: str,
+        channel: str,
+        manifest_id: str,
+    ) -> dict[str, Any]:
+        tenant_id = self._required("tenant_id")
+        target_id = self._required("target_id")
+
+        def probe() -> dict[str, Any] | None:
+            workers = acceptance.json_items(
+                self.api.request("GET", f"/v1/tenants/{tenant_id}/workers"),
+                "managed Workers",
+            )
+            try:
+                return validate_managed_worker_binding(
+                    workers,
+                    execution=execution,
+                    target_id=target_id,
+                    revision_id=revision_id,
+                    channel=channel,
+                    manifest_id=manifest_id,
+                )
+            except PendingReleaseEvidence:
+                return None
+
+        return self.api.wait_until(
+            f"managed Worker binding for Execution {execution.get('executionId')}",
+            probe,
+            interval=0.2,
+        )
 
     def _canary_active_fence(self) -> Mapping[str, Any]:
         barrier = self._begin_approval_readiness_barrier()
@@ -1475,10 +1608,10 @@ class WorkerReleaseRolloutSuite(acceptance.AcceptanceSuite):
         events = self._all_events()
         turns = [event for event in events if event.get("eventType") == "turn.created"]
         execution_ids = [acceptance.AcceptanceSuite._event_execution_id(event) for event in turns]
-        if len(execution_ids) != 3 or len(set(execution_ids)) != 3:
+        if len(execution_ids) != 4 or len(set(execution_ids)) != 4:
             raise acceptance.AcceptanceError(
                 "runner.worker_release_execution_count_invalid",
-                "The rollout Session did not retain exactly three distinct Executions.",
+                "The rollout Session did not retain exactly four distinct Executions.",
                 {"executionCount": len(execution_ids), "distinctCount": len(set(execution_ids))},
             )
         terminal_counts = {
@@ -1637,6 +1770,122 @@ def policy_evidence(policy: Mapping[str, Any]) -> dict[str, Any]:
             "updatedAt",
         )
     }
+
+
+def validate_managed_worker_binding(
+    workers: Sequence[Mapping[str, Any]],
+    *,
+    execution: Mapping[str, Any],
+    target_id: str,
+    revision_id: str,
+    channel: str,
+    manifest_id: str,
+) -> dict[str, Any]:
+    worker_id = execution.get("workerId")
+    if not isinstance(worker_id, str) or not worker_id:
+        raise acceptance.AcceptanceError(
+            "runner.worker_release_execution_worker_missing",
+            "The release-pinned Execution omitted its Worker ID.",
+        )
+    matches = [worker for worker in workers if worker.get("id") == worker_id]
+    if not matches:
+        raise PendingReleaseEvidence()
+    if len(matches) != 1:
+        raise acceptance.AcceptanceError(
+            "runner.worker_release_worker_identity_ambiguous",
+            "The managed Worker API returned duplicate rows for one release-pinned Execution.",
+            {"workerId": worker_id, "matchCount": len(matches)},
+        )
+    worker = matches[0]
+    actual = {
+        "executionTargetId": worker.get("executionTargetId"),
+        "currentManifestId": worker.get("currentManifestId"),
+        "workerReleaseRevisionId": worker.get("workerReleaseRevisionId"),
+        "workerReleaseChannel": worker.get("workerReleaseChannel"),
+        "workerReleaseStatus": worker.get("workerReleaseStatus"),
+        "administrativeStatus": worker.get("administrativeStatus"),
+        "status": worker.get("status"),
+    }
+    expected = {
+        "executionTargetId": target_id,
+        "currentManifestId": manifest_id,
+        "workerReleaseRevisionId": revision_id,
+        "workerReleaseChannel": channel,
+        "workerReleaseStatus": "active",
+        "administrativeStatus": "active",
+        "status": "online",
+    }
+    pod_name = worker.get("podName")
+    if actual != expected or not isinstance(pod_name, str) or not pod_name:
+        raise acceptance.AcceptanceError(
+            "runner.worker_release_worker_binding_mismatch",
+            "The active Execution Worker did not retain its exact Manifest, Revision, Channel, and container identity.",
+            {"workerId": worker_id, "expected": expected, "actual": actual},
+        )
+    return {
+        "id": worker_id,
+        "podName": pod_name,
+        **actual,
+    }
+
+
+def pool_container_for_worker(
+    pool: Mapping[str, Any], worker: Mapping[str, Any]
+) -> dict[str, Any]:
+    pod_name = worker.get("podName")
+    containers = pool.get("containers")
+    if not isinstance(pod_name, str) or not pod_name or not isinstance(containers, list):
+        raise acceptance.AcceptanceError(
+            "runner.worker_release_pool_identity_invalid",
+            "Busy Worker container evidence was malformed.",
+        )
+    matches = [
+        container
+        for container in containers
+        if isinstance(container, dict) and container.get("name") == pod_name
+    ]
+    if len(matches) != 1:
+        raise acceptance.AcceptanceError(
+            "runner.worker_release_busy_container_missing",
+            "The active Execution Worker did not map to exactly one managed Docker container.",
+            {"podName": pod_name, "matchCount": len(matches)},
+        )
+    return dict(matches[0])
+
+
+def validate_busy_container_preserved(
+    before: Mapping[str, Any], after: Mapping[str, Any]
+) -> dict[str, Any]:
+    expected = {
+        key: before.get(key)
+        for key in ("id", "name", "imageId", "digest", "revisionId", "channel", "volume")
+    }
+    actual = {key: after.get(key) for key in expected}
+    if not isinstance(expected["id"], str) or not expected["id"] or actual != expected:
+        raise acceptance.AcceptanceError(
+            "runner.worker_release_busy_container_replaced",
+            "Canary rollout replaced or rebound the Worker that still held an active Execution Lease.",
+            {"expected": expected, "actual": actual},
+        )
+    return {**actual, "preservedWhileBusy": True}
+
+
+def validate_active_execution_conflict(
+    conflict: Mapping[str, Any], *, revision_id: str, channel: str
+) -> None:
+    details = conflict.get("details")
+    if (
+        not isinstance(details, dict)
+        or details.get("releaseRevisionId") != revision_id
+        or details.get("releaseChannel") != channel
+        or not isinstance(details.get("activeExecutions"), int)
+        or details["activeExecutions"] < 1
+    ):
+        raise acceptance.AcceptanceError(
+            "runner.worker_release_active_execution_conflict_mismatch",
+            "Worker Release promotion did not identify the exact busy release being retired.",
+            {"expectedRevisionId": revision_id, "expectedChannel": channel},
+        )
 
 
 def validate_revision(
@@ -1971,7 +2220,8 @@ def markdown_from_report(report: Mapping[str, Any]) -> str:
         "## Evidence boundary",
         "",
         "This gate proves the product Docker Target path for two registry-pushed immutable Worker images: "
-        "Revision creation, initial promotion, canary, active-Execution fencing, promotion, rollback, exact "
+        "Revision creation, initial promotion, Busy Worker preservation, canary, active-Execution fencing, "
+        "promotion, rollback, exact "
         "container/manifest/Execution release pins, audit/Outbox history, Secret scan, and exact cleanup. It does "
         "not replace production Registry Credential/TLS, real Provider Credentials, Kubernetes multi-node rollout, "
         "load, or soak evidence.",

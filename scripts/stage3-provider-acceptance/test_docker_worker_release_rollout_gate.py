@@ -16,6 +16,7 @@ CANDIDATE_REVISION = "22222222-2222-4222-8222-222222222222"
 BASELINE_MANIFEST = "33333333-3333-4333-8333-333333333333"
 CANDIDATE_MANIFEST = "44444444-4444-4444-8444-444444444444"
 TARGET_ID = "55555555-5555-4555-8555-555555555555"
+WORKER_ID = "66666666-6666-4666-8666-666666666666"
 BASELINE_DIGEST = "sha256:" + "a" * 64
 CANDIDATE_DIGEST = "sha256:" + "b" * 64
 
@@ -259,6 +260,98 @@ class ExecutionReleaseValidationTest(unittest.TestCase):
                 manifest_id=CANDIDATE_MANIFEST,
                 terminal_required=True,
             )
+
+
+class BusyWorkerValidationTest(unittest.TestCase):
+    def test_maps_execution_worker_to_exact_release_container_and_preserves_identity(self) -> None:
+        execution = {"workerId": WORKER_ID, "executionId": "execution-1"}
+        worker = gate.validate_managed_worker_binding(
+            [
+                {
+                    "id": WORKER_ID,
+                    "podName": "synara-agentd-target-promoted-0",
+                    "executionTargetId": TARGET_ID,
+                    "currentManifestId": BASELINE_MANIFEST,
+                    "workerReleaseRevisionId": BASELINE_REVISION,
+                    "workerReleaseChannel": "promoted",
+                    "workerReleaseStatus": "active",
+                    "administrativeStatus": "active",
+                    "status": "online",
+                }
+            ],
+            execution=execution,
+            target_id=TARGET_ID,
+            revision_id=BASELINE_REVISION,
+            channel="promoted",
+            manifest_id=BASELINE_MANIFEST,
+        )
+        container = {
+            "id": "container123",
+            "name": worker["podName"],
+            "imageId": "sha256:image",
+            "digest": BASELINE_DIGEST,
+            "revisionId": BASELINE_REVISION,
+            "channel": "promoted",
+            "volume": "rollout-volume",
+        }
+        selected = gate.pool_container_for_worker({"containers": [container]}, worker)
+        evidence = gate.validate_busy_container_preserved(container, selected)
+
+        self.assertEqual(selected["id"], "container123")
+        self.assertTrue(evidence["preservedWhileBusy"])
+
+    def test_rejects_worker_binding_replacement_and_wrong_conflict_release(self) -> None:
+        with self.assertRaises(acceptance.AcceptanceError):
+            gate.validate_managed_worker_binding(
+                [
+                    {
+                        "id": WORKER_ID,
+                        "podName": "worker",
+                        "executionTargetId": TARGET_ID,
+                        "currentManifestId": BASELINE_MANIFEST,
+                        "workerReleaseRevisionId": CANDIDATE_REVISION,
+                        "workerReleaseChannel": "canary",
+                        "workerReleaseStatus": "active",
+                        "administrativeStatus": "active",
+                        "status": "online",
+                    }
+                ],
+                execution={"workerId": WORKER_ID},
+                target_id=TARGET_ID,
+                revision_id=BASELINE_REVISION,
+                channel="promoted",
+                manifest_id=BASELINE_MANIFEST,
+            )
+        with self.assertRaises(acceptance.AcceptanceError):
+            gate.validate_busy_container_preserved(
+                {"id": "before", "name": "worker"},
+                {"id": "after", "name": "worker"},
+            )
+        with self.assertRaises(acceptance.AcceptanceError):
+            gate.validate_active_execution_conflict(
+                {
+                    "details": {
+                        "releaseRevisionId": CANDIDATE_REVISION,
+                        "releaseChannel": "canary",
+                        "activeExecutions": 1,
+                    }
+                },
+                revision_id=BASELINE_REVISION,
+                channel="promoted",
+            )
+
+    def test_accepts_exact_busy_release_conflict(self) -> None:
+        gate.validate_active_execution_conflict(
+            {
+                "details": {
+                    "releaseRevisionId": BASELINE_REVISION,
+                    "releaseChannel": "promoted",
+                    "activeExecutions": 1,
+                }
+            },
+            revision_id=BASELINE_REVISION,
+            channel="promoted",
+        )
 
 
 class OverviewValidationTest(unittest.TestCase):
