@@ -280,6 +280,7 @@ describe("composerSlashCommands", () => {
       provider: "claudeAgent",
       supportsFastSlashCommand: true,
       canOfferCompactCommand: true,
+      canOfferPlanCommand: true,
       canOfferReviewCommand: true,
       canOfferForkCommand: true,
       canOfferSideCommand: true,
@@ -330,6 +331,7 @@ describe("composerSlashCommands", () => {
       "status",
       "subagents",
       "export",
+      "feedback",
       "automation",
     ]);
   });

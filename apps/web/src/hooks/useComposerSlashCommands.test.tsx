@@ -98,6 +98,7 @@ function makeInput(overrides: Partial<SlashCommandInput> = {}): SlashCommandInpu
     selectedProvider: "codex",
     currentProviderModelOptions: undefined,
     selectedModelSelection: activeThread.modelSelection,
+    environmentMode: null,
     runtimeMode: activeThread.runtimeMode,
     interactionMode: activeThread.interactionMode,
     threadId: activeThread.id,
