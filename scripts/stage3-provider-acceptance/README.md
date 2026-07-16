@@ -132,6 +132,33 @@ The latest clean-worktree Node.js 24.13.1 Codex and Claude Local results are rec
 output Secret scan. This closes the implemented Local failure slice only; SSH/Docker/Kubernetes, consolidated
 Local release, concurrency and soak gates remain open.
 
+## Consolidated real Provider Local release gate
+
+`local_release_gate.py` keeps the product/capability and controlled-failure evidence in four independent child
+reports, then validates them as one release unit:
+
+```text
+Codex product matrix   + Codex failure matrix
+Claude product matrix  + Claude failure matrix
+```
+
+The gate requires a completely clean worktree, including no untracked files. It probes direct Node
+`>=24.13.1 <25.0.0`, rebuilds `apps/provider-host/dist/index.mjs` from the current checkout, executes every child
+against LocalSupervisor and emits `local-release-gate.json` plus `local-release-gate.md`:
+
+```sh
+python3 scripts/stage3-provider-acceptance/local_release_gate.py \
+  --runner-command-json '["/absolute/path/to/node-24.13.1","/absolute/path/to/apps/provider-host/dist/index.mjs"]' \
+  --product-timeout 1800 \
+  --failure-timeout 420
+```
+
+A consolidated pass requires all four reports to share the same clean Git SHA and Capability Catalog hash, all
+canonical cases to be present, no failed/skipped cases, only the frozen Local explicit-unsupported boundaries,
+exact state cleanup, and an empty child output Secret scan. An explicitly unsupported case may become `pass` in a
+new Provider version, but no new unsupported case is accepted silently. The aggregate stores only child report
+paths, hashes, counts and bounded metadata; it does not retain child process output or credentials.
+
 ## Deterministic failure and canary matrix
 
 The fault matrix is opt-in so the default core suite remains stable and fast:
