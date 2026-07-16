@@ -10,6 +10,7 @@ import re
 import secrets
 import subprocess
 import time
+import urllib.parse
 from collections.abc import Mapping, Sequence
 from typing import Any
 
@@ -19,8 +20,10 @@ import release_gate_common as common
 
 
 TOOLS_LOCK_PATH = pathlib.Path("deploy/worker/supply-chain-tools.lock")
+SIGNING_POLICY_PATH = pathlib.Path("deploy/worker/signing-policy.json")
 VULNERABILITY_POLICY_PATH = pathlib.Path("deploy/worker/vulnerability-policy.json")
 REQUIRED_TOOLS = ("cosign", "trivy")
+SUPPORTED_SIGNING_MODES = ("ephemeral-key", "keyless", "kms-key")
 SUPPORTED_SEVERITIES = ("UNKNOWN", "LOW", "MEDIUM", "HIGH", "CRITICAL")
 COSIGN_CLAIM_TYPE = "https://sigstore.dev/cosign/sign/v1"
 IMMUTABLE_IMAGE_PATTERN = re.compile(
@@ -30,6 +33,10 @@ IMMUTABLE_IMAGE_PATTERN = re.compile(
 VULNERABILITY_ID_PATTERN = re.compile(
     r"(?:CVE-[0-9]{4}-[0-9]{4,}|GHSA-[0-9a-z]{4}-[0-9a-z]{4}-[0-9a-z]{4})",
     re.IGNORECASE,
+)
+ENVIRONMENT_NAME_PATTERN = re.compile(r"[A-Z][A-Z0-9_]{0,127}")
+KMS_KEY_REFERENCE_PATTERN = re.compile(
+    r"(?:awskms|gcpkms|azurekms|hashivault)://[^\s@?#]{1,2048}"
 )
 
 
@@ -45,6 +52,45 @@ class ToolImages:
             "trivy": self.trivy,
             "lockSha256": self.lock_sha256,
         }
+
+
+@dataclasses.dataclass(frozen=True)
+class SigningPolicy:
+    mode: str
+    require_transparency_log: bool
+    key_reference: str | None
+    credential_environment: tuple[str, ...]
+    identity_token_environment: str | None
+    certificate_identity: str | None
+    certificate_identity_regexp: str | None
+    certificate_oidc_issuer: str | None
+    certificate_oidc_issuer_regexp: str | None
+    sha256: str
+
+    @property
+    def production_policy(self) -> bool:
+        return self.mode in {"keyless", "kms-key"}
+
+    def as_report(self) -> dict[str, Any]:
+        report: dict[str, Any] = {
+            "path": str(SIGNING_POLICY_PATH),
+            "sha256": self.sha256,
+            "mode": self.mode,
+            "requireTransparencyLog": self.require_transparency_log,
+            "productionPolicy": self.production_policy,
+        }
+        if self.key_reference is not None:
+            report["keyReference"] = self.key_reference
+            report["credentialEnvironmentCount"] = len(self.credential_environment)
+        if self.certificate_identity is not None:
+            report["certificateIdentity"] = self.certificate_identity
+        if self.certificate_identity_regexp is not None:
+            report["certificateIdentityRegexp"] = self.certificate_identity_regexp
+        if self.certificate_oidc_issuer is not None:
+            report["certificateOidcIssuer"] = self.certificate_oidc_issuer
+        if self.certificate_oidc_issuer_regexp is not None:
+            report["certificateOidcIssuerRegexp"] = self.certificate_oidc_issuer_regexp
+        return report
 
 
 @dataclasses.dataclass(frozen=True)
@@ -85,11 +131,13 @@ class VulnerabilityPolicy:
 @dataclasses.dataclass(frozen=True)
 class SupplyChainConfiguration:
     tools: ToolImages
+    signing_policy: SigningPolicy
     vulnerability_policy: VulnerabilityPolicy
 
     def source_evidence(self) -> dict[str, Any]:
         return {
             "tools": self.tools.as_report(),
+            "signingPolicy": self.signing_policy.as_report(),
             "vulnerabilityPolicy": self.vulnerability_policy.as_report(),
         }
 
@@ -191,6 +239,193 @@ def load_tool_images(repo_root: pathlib.Path) -> ToolImages:
         cosign=values["cosign"],
         trivy=values["trivy"],
         lock_sha256=_sha256(raw),
+    )
+
+
+def _optional_policy_text(value: Any, *, field: str, maximum_length: int = 2048) -> str | None:
+    if value is None:
+        return None
+    if (
+        not isinstance(value, str)
+        or not value.strip()
+        or len(value) > maximum_length
+        or any(ord(character) < 32 for character in value)
+    ):
+        raise common.ReleaseGateError(
+            "release.registry_signing_policy_invalid",
+            "Worker Registry signing policy contained an invalid text value.",
+            {"field": field},
+        )
+    return value.strip()
+
+
+def _validate_policy_regexp(value: str | None, *, field: str) -> None:
+    if value is None:
+        return
+    if (
+        not value.startswith("^")
+        or not value.endswith("$")
+        or re.search(r"\(\?(?:[=!]|<[=!]|P<)|\\[1-9]", value) is not None
+    ):
+        raise common.ReleaseGateError(
+            "release.registry_signing_policy_invalid",
+            "Worker Registry signing policy used an unanchored or unsupported Cosign RE2 regexp.",
+            {"field": field},
+        )
+    try:
+        re.compile(value)
+    except re.error:
+        raise common.ReleaseGateError(
+            "release.registry_signing_policy_invalid",
+            "Worker Registry signing policy contained an invalid regexp.",
+            {"field": field},
+        ) from None
+
+
+def _validate_exact_issuer(value: str | None) -> None:
+    if value is None:
+        return
+    try:
+        parsed = urllib.parse.urlsplit(value)
+        hostname = parsed.hostname
+    except ValueError:
+        parsed = None
+        hostname = None
+    if (
+        parsed is None
+        or parsed.scheme != "https"
+        or not hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise common.ReleaseGateError(
+            "release.registry_signing_policy_invalid",
+            "Worker Registry keyless OIDC issuer must be a credential-free HTTPS URL.",
+            {"field": "certificateOidcIssuer"},
+        )
+
+
+def load_signing_policy(repo_root: pathlib.Path) -> SigningPolicy:
+    raw = _read_bytes(repo_root, SIGNING_POLICY_PATH, label="signing policy")
+    try:
+        payload = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise common.ReleaseGateError(
+            "release.registry_signing_policy_invalid",
+            "Worker Registry signing policy was not valid JSON.",
+        ) from None
+    expected_keys = {
+        "schemaVersion",
+        "mode",
+        "requireTransparencyLog",
+        "keyReference",
+        "credentialEnvironment",
+        "identityTokenEnvironment",
+        "certificateIdentity",
+        "certificateIdentityRegexp",
+        "certificateOidcIssuer",
+        "certificateOidcIssuerRegexp",
+    }
+    if not isinstance(payload, dict) or set(payload) != expected_keys or payload.get("schemaVersion") != 1:
+        raise common.ReleaseGateError(
+            "release.registry_signing_policy_invalid",
+            "Worker Registry signing policy schema was invalid.",
+        )
+    mode = payload.get("mode")
+    require_tlog = payload.get("requireTransparencyLog")
+    raw_environment = payload.get("credentialEnvironment")
+    if (
+        mode not in SUPPORTED_SIGNING_MODES
+        or not isinstance(require_tlog, bool)
+        or not isinstance(raw_environment, list)
+        or not all(
+            isinstance(name, str) and ENVIRONMENT_NAME_PATTERN.fullmatch(name) is not None
+            for name in raw_environment
+        )
+        or len(set(raw_environment)) != len(raw_environment)
+    ):
+        raise common.ReleaseGateError(
+            "release.registry_signing_policy_invalid",
+            "Worker Registry signing policy values were invalid.",
+        )
+    key_reference = _optional_policy_text(payload.get("keyReference"), field="keyReference")
+    token_environment = _optional_policy_text(
+        payload.get("identityTokenEnvironment"),
+        field="identityTokenEnvironment",
+        maximum_length=128,
+    )
+    certificate_identity = _optional_policy_text(
+        payload.get("certificateIdentity"), field="certificateIdentity"
+    )
+    certificate_identity_regexp = _optional_policy_text(
+        payload.get("certificateIdentityRegexp"), field="certificateIdentityRegexp"
+    )
+    certificate_issuer = _optional_policy_text(
+        payload.get("certificateOidcIssuer"), field="certificateOidcIssuer"
+    )
+    certificate_issuer_regexp = _optional_policy_text(
+        payload.get("certificateOidcIssuerRegexp"), field="certificateOidcIssuerRegexp"
+    )
+    _validate_policy_regexp(certificate_identity_regexp, field="certificateIdentityRegexp")
+    _validate_policy_regexp(certificate_issuer_regexp, field="certificateOidcIssuerRegexp")
+    _validate_exact_issuer(certificate_issuer)
+
+    if mode == "ephemeral-key":
+        valid = (
+            not require_tlog
+            and key_reference is None
+            and not raw_environment
+            and token_environment is None
+            and certificate_identity is None
+            and certificate_identity_regexp is None
+            and certificate_issuer is None
+            and certificate_issuer_regexp is None
+        )
+    elif mode == "kms-key":
+        valid = (
+            require_tlog
+            and key_reference is not None
+            and KMS_KEY_REFERENCE_PATTERN.fullmatch(key_reference) is not None
+            and token_environment is None
+            and certificate_identity is None
+            and certificate_identity_regexp is None
+            and certificate_issuer is None
+            and certificate_issuer_regexp is None
+        )
+    else:
+        valid = (
+            require_tlog
+            and key_reference is None
+            and not raw_environment
+            and token_environment is not None
+            and ENVIRONMENT_NAME_PATTERN.fullmatch(token_environment) is not None
+            and "TOKEN" in token_environment
+            and (certificate_identity is None) != (certificate_identity_regexp is None)
+            and (certificate_issuer is None) != (certificate_issuer_regexp is None)
+            and (
+                certificate_issuer_regexp is None
+                or certificate_issuer_regexp.startswith("^https://")
+            )
+        )
+    if not valid:
+        raise common.ReleaseGateError(
+            "release.registry_signing_policy_invalid",
+            "Worker Registry signing policy fields did not match its selected mode.",
+            {"mode": mode},
+        )
+    return SigningPolicy(
+        mode=str(mode),
+        require_transparency_log=require_tlog,
+        key_reference=key_reference,
+        credential_environment=tuple(raw_environment),
+        identity_token_environment=token_environment,
+        certificate_identity=certificate_identity,
+        certificate_identity_regexp=certificate_identity_regexp,
+        certificate_oidc_issuer=certificate_issuer,
+        certificate_oidc_issuer_regexp=certificate_issuer_regexp,
+        sha256=_sha256(raw),
     )
 
 
@@ -298,6 +533,7 @@ def load_vulnerability_policy(repo_root: pathlib.Path) -> VulnerabilityPolicy:
 def load_configuration(repo_root: pathlib.Path) -> SupplyChainConfiguration:
     return SupplyChainConfiguration(
         tools=load_tool_images(repo_root),
+        signing_policy=load_signing_policy(repo_root),
         vulnerability_policy=load_vulnerability_policy(repo_root),
     )
 
@@ -446,7 +682,106 @@ def validate_cosign_verification(
     }
 
 
-def _sign_and_verify(
+def _signature_subjects(
+    options: SupplyChainOptions,
+    *,
+    builds: Sequence[Mapping[str, Any]],
+    git_sha: str,
+    version: str,
+    run_id: str,
+) -> list[dict[str, Any]]:
+    subjects: list[dict[str, Any]] = []
+    for build in builds:
+        slot = build.get("slot")
+        digest = build.get("registryDigest")
+        if not isinstance(slot, str) or re.fullmatch(r"sha256:[0-9a-f]{64}", str(digest)) is None:
+            raise common.ReleaseGateError(
+                "release.registry_signature_input_invalid",
+                "Worker Registry signature input omitted a valid slot or registry digest.",
+            )
+        reference = f"{options.image_repository}@{digest}"
+        annotations = {
+            "synara.git-sha": git_sha,
+            "synara.run-id": run_id,
+            "synara.slot": slot,
+            "synara.version": version,
+        }
+        subjects.append(
+            {
+                "slot": slot,
+                "digest": str(digest),
+                "reference": reference,
+                "annotations": annotations,
+                "annotationArguments": [
+                    value
+                    for key, item in annotations.items()
+                    for value in ("-a", f"{key}={item}")
+                ],
+            }
+        )
+    return subjects
+
+
+def _verification_evidence(
+    completed: subprocess.CompletedProcess[str],
+    *,
+    subject: Mapping[str, Any],
+) -> dict[str, Any]:
+    try:
+        payload = json.loads(completed.stdout)
+    except json.JSONDecodeError:
+        raise common.ReleaseGateError(
+            "release.registry_signature_verification_invalid",
+            "Cosign verification output was not valid JSON.",
+            {"slot": subject.get("slot")},
+        ) from None
+    return {
+        "slot": subject["slot"],
+        "reference": subject["reference"],
+        "digest": subject["digest"],
+        **validate_cosign_verification(
+            payload,
+            reference=str(subject["reference"]),
+            digest=str(subject["digest"]),
+            annotations=subject["annotations"],
+        ),
+    }
+
+
+def _require_production_registry(options: SupplyChainOptions) -> None:
+    if options.insecure_registry:
+        raise common.ReleaseGateError(
+            "release.registry_production_signing_insecure_registry",
+            "Production Worker Registry signing requires a TLS Registry.",
+        )
+
+
+def _read_signing_environment(
+    names: Sequence[str],
+    *,
+    redactor: acceptance.SecretRedactor,
+) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for name in names:
+        try:
+            value = acceptance.read_environment_value(
+                name,
+                "Cosign KMS credential",
+                maximum_length=64 << 10,
+                forbidden_characters="\r\n\x00",
+            )
+        except acceptance.EnvironmentValueError as error:
+            raise common.ReleaseGateError(
+                "release.registry_signing_credential_invalid",
+                "A configured Cosign KMS credential environment value was unavailable or invalid.",
+                {"reason": error.reason},
+            ) from None
+        redactor.add(value, "[REDACTED_COSIGN_KMS_CREDENTIAL]")
+        values[name] = value
+    return values
+
+
+def _sign_and_verify_ephemeral(
     options: SupplyChainOptions,
     configuration: SupplyChainConfiguration,
     *,
@@ -501,27 +836,14 @@ def _sign_and_verify(
                 "Cosign did not create the isolated ephemeral key pair.",
             )
         public_key_sha256 = _sha256(public_key.read_bytes())
-        for build in builds:
-            slot = build.get("slot")
-            digest = build.get("registryDigest")
-            if not isinstance(slot, str) or re.fullmatch(r"sha256:[0-9a-f]{64}", str(digest)) is None:
-                raise common.ReleaseGateError(
-                    "release.registry_signature_input_invalid",
-                    "Worker Registry signature input omitted a valid slot or registry digest.",
-                )
-            reference = f"{options.image_repository}@{digest}"
-            annotations = {
-                "synara.git-sha": git_sha,
-                "synara.run-id": run_id,
-                "synara.slot": slot,
-                "synara.version": version,
-            }
+        for subject in _signature_subjects(
+            options,
+            builds=builds,
+            git_sha=git_sha,
+            version=version,
+            run_id=run_id,
+        ):
             insecure_arguments = ["--allow-insecure-registry"] if options.insecure_registry else []
-            annotation_arguments = [
-                value
-                for key, item in annotations.items()
-                for value in ("-a", f"{key}={item}")
-            ]
             _run_tool(
                 options,
                 image=configuration.tools.cosign,
@@ -533,8 +855,8 @@ def _sign_and_verify(
                     *insecure_arguments,
                     "--key",
                     str(key_prefix.with_suffix(".key")),
-                    *annotation_arguments,
-                    reference,
+                    *subject["annotationArguments"],
+                    subject["reference"],
                 ],
                 tool="cosign",
                 deadline=deadline,
@@ -550,36 +872,16 @@ def _sign_and_verify(
                     "--insecure-ignore-tlog=true",
                     "--key",
                     str(key_prefix.with_suffix(".pub")),
-                    *annotation_arguments,
+                    *subject["annotationArguments"],
                     "--output",
                     "json",
-                    reference,
+                    subject["reference"],
                 ],
                 tool="cosign",
                 deadline=deadline,
                 redactor=redactor,
             )
-            try:
-                verification_payload = json.loads(verification.stdout)
-            except json.JSONDecodeError:
-                raise common.ReleaseGateError(
-                    "release.registry_signature_verification_invalid",
-                    "Cosign verification output was not valid JSON.",
-                    {"slot": slot},
-                ) from None
-            signatures.append(
-                {
-                    "slot": slot,
-                    "reference": reference,
-                    "digest": digest,
-                    **validate_cosign_verification(
-                        verification_payload,
-                        reference=reference,
-                        digest=str(digest),
-                        annotations=annotations,
-                    ),
-                }
-            )
+            signatures.append(_verification_evidence(verification, subject=subject))
     finally:
         private_key.unlink(missing_ok=True)
     private_key_removed = not private_key.exists()
@@ -592,10 +894,264 @@ def _sign_and_verify(
         "mode": "ephemeral-key",
         "transparencyLog": False,
         "productionSigningPolicySatisfied": False,
+        "policySha256": configuration.signing_policy.sha256,
         "publicKeySha256": public_key_sha256,
         "signatures": signatures,
         "privateKeyRemoved": private_key_removed,
     }
+
+
+def _keyless_verification_arguments(policy: SigningPolicy) -> list[str]:
+    identity_arguments = (
+        ["--certificate-identity", policy.certificate_identity]
+        if policy.certificate_identity is not None
+        else ["--certificate-identity-regexp", policy.certificate_identity_regexp]
+    )
+    issuer_arguments = (
+        ["--certificate-oidc-issuer", policy.certificate_oidc_issuer]
+        if policy.certificate_oidc_issuer is not None
+        else ["--certificate-oidc-issuer-regexp", policy.certificate_oidc_issuer_regexp]
+    )
+    return [str(value) for value in (*identity_arguments, *issuer_arguments)]
+
+
+def _sign_and_verify_keyless(
+    options: SupplyChainOptions,
+    configuration: SupplyChainConfiguration,
+    *,
+    builds: Sequence[Mapping[str, Any]],
+    git_sha: str,
+    version: str,
+    run_id: str,
+    deadline: float,
+    redactor: acceptance.SecretRedactor,
+) -> dict[str, Any]:
+    _require_production_registry(options)
+    policy = configuration.signing_policy
+    token_environment = policy.identity_token_environment
+    if token_environment is None:
+        raise common.ReleaseGateError(
+            "release.registry_signing_policy_invalid",
+            "Worker Registry keyless signing policy omitted its identity token environment.",
+        )
+    try:
+        identity_token = acceptance.read_environment_value(
+            token_environment,
+            "Cosign keyless identity token",
+            maximum_length=1 << 20,
+            forbidden_characters="\r\n\x00",
+        )
+    except acceptance.EnvironmentValueError as error:
+        raise common.ReleaseGateError(
+            "release.registry_signing_credential_invalid",
+            "The configured Cosign keyless identity token was unavailable or invalid.",
+            {"reason": error.reason},
+        ) from None
+    redactor.add(identity_token, "[REDACTED_COSIGN_IDENTITY_TOKEN]")
+    token_relative = pathlib.Path("cosign/identity-token")
+    token_path = options.state_dir / token_relative
+    token_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        token_path.write_text(identity_token, encoding="utf-8")
+        token_path.chmod(0o600)
+    except OSError:
+        token_path.unlink(missing_ok=True)
+        raise common.ReleaseGateError(
+            "release.registry_signing_credential_invalid",
+            "Worker Registry gate could not create isolated keyless identity-token state.",
+        ) from None
+    signatures: list[dict[str, Any]] = []
+    try:
+        for subject in _signature_subjects(
+            options,
+            builds=builds,
+            git_sha=git_sha,
+            version=version,
+            run_id=run_id,
+        ):
+            _run_tool(
+                options,
+                image=configuration.tools.cosign,
+                arguments=[
+                    "sign",
+                    "--yes",
+                    "--tlog-upload=true",
+                    "--identity-token",
+                    str(token_relative),
+                    *subject["annotationArguments"],
+                    subject["reference"],
+                ],
+                tool="cosign",
+                deadline=deadline,
+                redactor=redactor,
+            )
+            verification = _run_tool(
+                options,
+                image=configuration.tools.cosign,
+                arguments=[
+                    "verify",
+                    *_keyless_verification_arguments(policy),
+                    *subject["annotationArguments"],
+                    "--output",
+                    "json",
+                    subject["reference"],
+                ],
+                tool="cosign",
+                deadline=deadline,
+                redactor=redactor,
+            )
+            signatures.append(_verification_evidence(verification, subject=subject))
+    finally:
+        token_path.unlink(missing_ok=True)
+    token_removed = not token_path.exists()
+    if not token_removed:
+        raise common.ReleaseGateError(
+            "release.registry_signature_key_cleanup_failed",
+            "Worker Registry supply-chain gate did not remove its keyless identity token.",
+        )
+    return {
+        "mode": "keyless",
+        "transparencyLog": True,
+        "transparencyLogVerified": True,
+        "productionSigningPolicySatisfied": True,
+        "policySha256": policy.sha256,
+        **{
+            key: value
+            for key, value in policy.as_report().items()
+            if key.startswith("certificate")
+        },
+        "signatures": signatures,
+        "identityTokenRemoved": token_removed,
+    }
+
+
+def _sign_and_verify_kms(
+    options: SupplyChainOptions,
+    configuration: SupplyChainConfiguration,
+    *,
+    builds: Sequence[Mapping[str, Any]],
+    git_sha: str,
+    version: str,
+    run_id: str,
+    deadline: float,
+    redactor: acceptance.SecretRedactor,
+) -> dict[str, Any]:
+    _require_production_registry(options)
+    policy = configuration.signing_policy
+    key_reference = policy.key_reference
+    if key_reference is None:
+        raise common.ReleaseGateError(
+            "release.registry_signing_policy_invalid",
+            "Worker Registry KMS signing policy omitted its key reference.",
+        )
+    secret_environment = _read_signing_environment(
+        policy.credential_environment,
+        redactor=redactor,
+    )
+    signatures: list[dict[str, Any]] = []
+    for subject in _signature_subjects(
+        options,
+        builds=builds,
+        git_sha=git_sha,
+        version=version,
+        run_id=run_id,
+    ):
+        _run_tool(
+            options,
+            image=configuration.tools.cosign,
+            arguments=[
+                "sign",
+                "--yes",
+                "--tlog-upload=true",
+                "--key",
+                key_reference,
+                *subject["annotationArguments"],
+                subject["reference"],
+            ],
+            tool="cosign",
+            deadline=deadline,
+            redactor=redactor,
+            secret_environment=secret_environment,
+        )
+        verification = _run_tool(
+            options,
+            image=configuration.tools.cosign,
+            arguments=[
+                "verify",
+                "--key",
+                key_reference,
+                *subject["annotationArguments"],
+                "--output",
+                "json",
+                subject["reference"],
+            ],
+            tool="cosign",
+            deadline=deadline,
+            redactor=redactor,
+            secret_environment=secret_environment,
+        )
+        signatures.append(_verification_evidence(verification, subject=subject))
+    return {
+        "mode": "kms-key",
+        "transparencyLog": True,
+        "transparencyLogVerified": True,
+        "productionSigningPolicySatisfied": True,
+        "policySha256": policy.sha256,
+        "keyReference": key_reference,
+        "credentialEnvironmentCount": len(policy.credential_environment),
+        "signatures": signatures,
+    }
+
+
+def _sign_and_verify(
+    options: SupplyChainOptions,
+    configuration: SupplyChainConfiguration,
+    *,
+    builds: Sequence[Mapping[str, Any]],
+    git_sha: str,
+    version: str,
+    run_id: str,
+    deadline: float,
+    redactor: acceptance.SecretRedactor,
+) -> dict[str, Any]:
+    policy = configuration.signing_policy
+    if policy.mode == "ephemeral-key":
+        return _sign_and_verify_ephemeral(
+            options,
+            configuration,
+            builds=builds,
+            git_sha=git_sha,
+            version=version,
+            run_id=run_id,
+            deadline=deadline,
+            redactor=redactor,
+        )
+    if policy.mode == "keyless":
+        return _sign_and_verify_keyless(
+            options,
+            configuration,
+            builds=builds,
+            git_sha=git_sha,
+            version=version,
+            run_id=run_id,
+            deadline=deadline,
+            redactor=redactor,
+        )
+    if policy.mode == "kms-key":
+        return _sign_and_verify_kms(
+            options,
+            configuration,
+            builds=builds,
+            git_sha=git_sha,
+            version=version,
+            run_id=run_id,
+            deadline=deadline,
+            redactor=redactor,
+        )
+    raise common.ReleaseGateError(
+        "release.registry_signing_policy_invalid",
+        "Worker Registry signing policy selected an unsupported mode.",
+    )
 
 
 def _vulnerability_summary(vulnerabilities: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
@@ -1102,15 +1658,21 @@ def verify_supply_chain(
         except common.ReleaseGateError as error:
             errors.append(error.as_report_error())
     private_key = options.state_dir / "cosign" / "ephemeral.key"
+    identity_token = options.state_dir / "cosign" / "identity-token"
     private_key.unlink(missing_ok=True)
+    identity_token.unlink(missing_ok=True)
     private_key_removed = not private_key.exists()
+    identity_token_removed = not identity_token.exists()
+    signing_secret_state_removed = private_key_removed and identity_token_removed
     if signing:
         signing["privateKeyRemoved"] = private_key_removed
-    if not private_key_removed:
+        signing["identityTokenRemoved"] = identity_token_removed
+        signing["secretStateRemoved"] = signing_secret_state_removed
+    if not signing_secret_state_removed:
         errors.append(
             {
                 "code": "release.registry_signature_key_cleanup_failed",
-                "message": "Worker Registry supply-chain gate did not remove its ephemeral private key.",
+                "message": "Worker Registry supply-chain gate did not remove isolated signing Secret state.",
             }
         )
     return {
@@ -1121,6 +1683,8 @@ def verify_supply_chain(
         "vulnerability": vulnerability,
         "cleanup": {
             "ephemeralPrivateKeyRemoved": private_key_removed,
+            "identityTokenRemoved": identity_token_removed,
+            "signingSecretStateRemoved": signing_secret_state_removed,
             "broadCleanupUsed": False,
         },
         "durationMs": acceptance.elapsed_ms(started),

@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "mode": "ephemeral-key",
+  "requireTransparencyLog": false,
+  "keyReference": null,
+  "credentialEnvironment": [],
+  "identityTokenEnvironment": null,
+  "certificateIdentity": null,
+  "certificateIdentityRegexp": null,
+  "certificateOidcIssuer": null,
+  "certificateOidcIssuerRegexp": null
+}

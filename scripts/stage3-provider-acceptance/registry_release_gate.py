@@ -1264,6 +1264,11 @@ def markdown_from_report(report: Mapping[str, Any]) -> str:
                 "```",
             ]
         )
+    production_signing = (
+        isinstance(supply_chain_report, dict)
+        and isinstance(supply_chain_report.get("signing"), dict)
+        and supply_chain_report["signing"].get("productionSigningPolicySatisfied") is True
+    )
     lines.extend(
         [
             "",
@@ -1271,8 +1276,18 @@ def markdown_from_report(report: Mapping[str, Any]) -> str:
             "",
             "A pass closes clean-SHA registry push, required multi-arch shape, reproducible platform content,",
             "embedded supply-chain inputs, BuildKit SBOM/provenance attachment, digest signing mechanics, and the",
-            "checked-in vulnerability policy. Ephemeral signing does not prove production KMS/keyless identity,",
-            "transparency-log policy, production Registry retention, real Provider four-Target rollout, or soak.",
+            "checked-in vulnerability policy.",
+            *(
+                [
+                    "This run also enforced the checked-in production KMS/keyless identity and transparency-log",
+                    "policy. Production Registry retention, real Provider four-Target rollout, and soak remain open.",
+                ]
+                if production_signing
+                else [
+                    "Ephemeral signing does not prove production KMS/keyless identity or transparency-log policy.",
+                    "Production Registry retention, real Provider four-Target rollout, and soak remain open.",
+                ]
+            ),
         ]
     )
     return "\n".join(lines) + "\n"
@@ -1306,8 +1321,8 @@ def configuration_evidence(options: RegistryReleaseGateOptions) -> dict[str, Any
         "buildKitProvenance": "mode=max",
         "sourceDateEpochLayerRewrite": True,
         "supplyChainRequired": True,
-        "ephemeralDigestSigning": True,
-        "productionSigningPolicySatisfied": False,
+        "signingPolicyRequired": True,
+        "signingPolicy": str(supply_chain.SIGNING_POLICY_PATH),
         "vulnerabilityPolicy": str(supply_chain.VULNERABILITY_POLICY_PATH),
         "insecureRegistry": options.insecure_registry,
         "goProxyOverride": options.go_proxy is not None,

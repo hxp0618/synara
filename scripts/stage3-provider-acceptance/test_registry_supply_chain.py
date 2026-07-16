@@ -21,6 +21,90 @@ REFERENCE = f"localhost:55091/synara/worker@{DIGEST}"
 NOW = dt.datetime(2026, 7, 17, tzinfo=dt.timezone.utc)
 
 
+def signing_policy(
+    *,
+    mode: str = "ephemeral-key",
+    require_transparency_log: bool = False,
+    key_reference: str | None = None,
+    credential_environment: tuple[str, ...] = (),
+    identity_token_environment: str | None = None,
+    certificate_identity: str | None = None,
+    certificate_identity_regexp: str | None = None,
+    certificate_oidc_issuer: str | None = None,
+    certificate_oidc_issuer_regexp: str | None = None,
+) -> supply.SigningPolicy:
+    return supply.SigningPolicy(
+        mode=mode,
+        require_transparency_log=require_transparency_log,
+        key_reference=key_reference,
+        credential_environment=credential_environment,
+        identity_token_environment=identity_token_environment,
+        certificate_identity=certificate_identity,
+        certificate_identity_regexp=certificate_identity_regexp,
+        certificate_oidc_issuer=certificate_oidc_issuer,
+        certificate_oidc_issuer_regexp=certificate_oidc_issuer_regexp,
+        sha256="c" * 64,
+    )
+
+
+def signing_payload(**overrides: Any) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "schemaVersion": 1,
+        "mode": "ephemeral-key",
+        "requireTransparencyLog": False,
+        "keyReference": None,
+        "credentialEnvironment": [],
+        "identityTokenEnvironment": None,
+        "certificateIdentity": None,
+        "certificateIdentityRegexp": None,
+        "certificateOidcIssuer": None,
+        "certificateOidcIssuerRegexp": None,
+    }
+    payload.update(overrides)
+    return payload
+
+
+def verification_payload(
+    *,
+    reference: str = REFERENCE,
+    digest: str = DIGEST,
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "critical": {
+                "identity": {"docker-reference": reference},
+                "image": {"docker-manifest-digest": digest},
+                "type": supply.COSIGN_CLAIM_TYPE,
+            },
+            "optional": {
+                "synara.git-sha": "a" * 40,
+                "synara.run-id": "run-1",
+                "synara.slot": "cached",
+                "synara.version": "0.5.4",
+            },
+        }
+    ]
+
+
+def configuration_with(policy: supply.SigningPolicy) -> supply.SupplyChainConfiguration:
+    return dataclasses.replace(supply.load_configuration(REPO_ROOT), signing_policy=policy)
+
+
+def supply_options(
+    state_dir: pathlib.Path,
+    *,
+    insecure_registry: bool = False,
+) -> supply.SupplyChainOptions:
+    return supply.SupplyChainOptions(
+        repo_root=REPO_ROOT,
+        state_dir=state_dir,
+        image_repository="registry.example.test/synara/worker",
+        docker_bin="docker",
+        timeout_seconds=60.0,
+        insecure_registry=insecure_registry,
+    )
+
+
 def policy(
     *,
     exceptions: tuple[supply.VulnerabilityException, ...] = (),
@@ -85,6 +169,9 @@ class ConfigurationTest(unittest.TestCase):
 
         self.assertIn(":v3.1.1@sha256:", configuration.tools.cosign)
         self.assertIn(":0.72.0@sha256:", configuration.tools.trivy)
+        self.assertEqual(configuration.signing_policy.mode, "ephemeral-key")
+        self.assertFalse(configuration.signing_policy.production_policy)
+        self.assertFalse(configuration.signing_policy.require_transparency_log)
         self.assertEqual(
             configuration.vulnerability_policy.blocked_severities,
             ("HIGH", "CRITICAL"),
@@ -106,6 +193,121 @@ class ConfigurationTest(unittest.TestCase):
                 supply.load_tool_images(repo_root)
 
         self.assertEqual(caught.exception.code, "release.registry_supply_chain_source_invalid")
+
+    def test_accepts_keyless_and_kms_production_signing_policies(self) -> None:
+        policies = [
+            signing_payload(
+                mode="keyless",
+                requireTransparencyLog=True,
+                identityTokenEnvironment="SYNARA_COSIGN_IDENTITY_TOKEN",
+                certificateIdentity="https://github.com/example/synara/.github/workflows/release.yml@refs/tags/v1",
+                certificateOidcIssuer="https://token.actions.githubusercontent.com",
+            ),
+            signing_payload(
+                mode="keyless",
+                requireTransparencyLog=True,
+                identityTokenEnvironment="SYNARA_COSIGN_IDENTITY_TOKEN",
+                certificateIdentityRegexp=r"^https://github\.com/example/synara/.*$",
+                certificateOidcIssuerRegexp=r"^https://token\.actions\.githubusercontent\.com$",
+            ),
+            signing_payload(
+                mode="kms-key",
+                requireTransparencyLog=True,
+                keyReference="awskms:///arn:aws:kms:us-east-1:123456789012:key/key-id",
+                credentialEnvironment=["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"],
+            ),
+        ]
+        for payload in policies:
+            with self.subTest(mode=payload["mode"]), tempfile.TemporaryDirectory() as directory:
+                repo_root = pathlib.Path(directory)
+                policy_path = repo_root / supply.SIGNING_POLICY_PATH
+                policy_path.parent.mkdir(parents=True)
+                policy_path.write_text(json.dumps(payload), encoding="utf-8")
+                policy = supply.load_signing_policy(repo_root)
+
+                self.assertTrue(policy.production_policy)
+                self.assertTrue(policy.require_transparency_log)
+                report = policy.as_report()
+                self.assertNotIn("identityTokenEnvironment", report)
+                self.assertNotIn("credentialEnvironment", report)
+
+    def test_rejects_signing_policy_mode_mismatches_and_unsafe_values(self) -> None:
+        invalid = [
+            signing_payload(requireTransparencyLog=True),
+            signing_payload(
+                mode="keyless",
+                requireTransparencyLog=False,
+                identityTokenEnvironment="SYNARA_COSIGN_IDENTITY_TOKEN",
+                certificateIdentity="release@example.test",
+                certificateOidcIssuer="https://issuer.example.test",
+            ),
+            signing_payload(
+                mode="keyless",
+                requireTransparencyLog=True,
+                identityTokenEnvironment="lowercase-token",
+                certificateIdentity="release@example.test",
+                certificateOidcIssuer="https://issuer.example.test",
+            ),
+            signing_payload(
+                mode="keyless",
+                requireTransparencyLog=True,
+                identityTokenEnvironment="SYNARA_COSIGN_IDENTITY",
+                certificateIdentity="release@example.test",
+                certificateOidcIssuer="https://issuer.example.test",
+            ),
+            signing_payload(
+                mode="keyless",
+                requireTransparencyLog=True,
+                identityTokenEnvironment="SYNARA_COSIGN_IDENTITY_TOKEN",
+                certificateIdentity="release@example.test",
+                certificateIdentityRegexp=".*",
+                certificateOidcIssuer="https://issuer.example.test",
+            ),
+            signing_payload(
+                mode="keyless",
+                requireTransparencyLog=True,
+                identityTokenEnvironment="SYNARA_COSIGN_IDENTITY_TOKEN",
+                certificateIdentityRegexp=r"https://github\.com/example/.*",
+                certificateOidcIssuer="https://issuer.example.test",
+            ),
+            signing_payload(
+                mode="keyless",
+                requireTransparencyLog=True,
+                identityTokenEnvironment="SYNARA_COSIGN_IDENTITY_TOKEN",
+                certificateIdentityRegexp=r"(?=unsafe)",
+                certificateOidcIssuer="https://issuer.example.test",
+            ),
+            signing_payload(
+                mode="keyless",
+                requireTransparencyLog=True,
+                identityTokenEnvironment="SYNARA_COSIGN_IDENTITY_TOKEN",
+                certificateIdentity="release@example.test",
+                certificateOidcIssuer="http://issuer.example.test",
+            ),
+            signing_payload(
+                mode="keyless",
+                requireTransparencyLog=True,
+                identityTokenEnvironment="SYNARA_COSIGN_IDENTITY_TOKEN",
+                certificateIdentity="release@example.test",
+                certificateOidcIssuerRegexp=r"^http://issuer\.example\.test$",
+            ),
+            signing_payload(
+                mode="kms-key",
+                requireTransparencyLog=True,
+                keyReference="https://kms.example.test/key",
+            ),
+            {**signing_payload(), "unexpected": True},
+        ]
+        for payload in invalid:
+            with self.subTest(payload=payload), tempfile.TemporaryDirectory() as directory:
+                repo_root = pathlib.Path(directory)
+                policy_path = repo_root / supply.SIGNING_POLICY_PATH
+                policy_path.parent.mkdir(parents=True)
+                policy_path.write_text(json.dumps(payload), encoding="utf-8")
+                with self.assertRaises(supply.common.ReleaseGateError) as caught:
+                    supply.load_signing_policy(repo_root)
+
+                self.assertEqual(caught.exception.code, "release.registry_signing_policy_invalid")
 
     def test_rejects_unknown_policy_fields_and_duplicate_exceptions(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -207,6 +409,188 @@ class SignatureVerificationTest(unittest.TestCase):
             )
 
         self.assertEqual(caught.exception.code, "release.registry_signature_verification_invalid")
+
+
+class ProductionSigningTest(unittest.TestCase):
+    def test_keyless_signing_keeps_token_out_of_arguments_and_requires_identity_and_tlog(self) -> None:
+        token = "header.payload.signature"
+        policy = signing_policy(
+            mode="keyless",
+            require_transparency_log=True,
+            identity_token_environment="SYNARA_TEST_COSIGN_IDENTITY_TOKEN",
+            certificate_identity="https://github.com/example/synara/.github/workflows/release.yml@refs/tags/v1",
+            certificate_oidc_issuer="https://token.actions.githubusercontent.com",
+        )
+        builds = [{"slot": "cached", "registryDigest": DIGEST}]
+        reference = f"registry.example.test/synara/worker@{DIGEST}"
+        calls: list[dict[str, Any]] = []
+        with tempfile.TemporaryDirectory() as directory:
+            state_dir = pathlib.Path(directory) / "state"
+
+            def run_tool(_options: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+                calls.append(kwargs)
+                arguments = kwargs["arguments"]
+                self.assertNotIn(token, arguments)
+                if arguments[0] == "sign":
+                    token_relative = pathlib.Path(arguments[arguments.index("--identity-token") + 1])
+                    token_path = state_dir / token_relative
+                    self.assertEqual(token_path.read_text(encoding="utf-8"), token)
+                    self.assertEqual(token_path.stat().st_mode & 0o777, 0o600)
+                stdout = json.dumps(verification_payload(reference=reference)) if arguments[0] == "verify" else ""
+                return subprocess.CompletedProcess(arguments, 0, stdout=stdout, stderr="")
+
+            with mock.patch.dict(
+                supply.os.environ,
+                {"SYNARA_TEST_COSIGN_IDENTITY_TOKEN": token},
+            ), mock.patch.object(supply, "_run_tool", side_effect=run_tool):
+                result = supply._sign_and_verify(
+                    supply_options(state_dir),
+                    configuration_with(policy),
+                    builds=builds,
+                    git_sha="a" * 40,
+                    version="0.5.4",
+                    run_id="run-1",
+                    deadline=supply.time.monotonic() + 60,
+                    redactor=acceptance.SecretRedactor(),
+                )
+
+            self.assertFalse((state_dir / "cosign/identity-token").exists())
+
+        sign_arguments = calls[0]["arguments"]
+        verify_arguments = calls[1]["arguments"]
+        self.assertIn("--tlog-upload=true", sign_arguments)
+        self.assertIn("--certificate-identity", verify_arguments)
+        self.assertIn("--certificate-oidc-issuer", verify_arguments)
+        self.assertNotIn("--insecure-ignore-tlog=true", verify_arguments)
+        self.assertEqual(result["mode"], "keyless")
+        self.assertTrue(result["productionSigningPolicySatisfied"])
+        self.assertTrue(result["identityTokenRemoved"])
+
+    def test_kms_signing_passes_only_named_environment_and_verifies_tlog(self) -> None:
+        credential = "kms-secret-value"
+        key_reference = "awskms:///arn:aws:kms:us-east-1:123456789012:key/key-id"
+        policy = signing_policy(
+            mode="kms-key",
+            require_transparency_log=True,
+            key_reference=key_reference,
+            credential_environment=("SYNARA_TEST_KMS_CREDENTIAL",),
+        )
+        reference = f"registry.example.test/synara/worker@{DIGEST}"
+        calls: list[dict[str, Any]] = []
+
+        def run_tool(_options: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+            calls.append(kwargs)
+            arguments = kwargs["arguments"]
+            self.assertNotIn(credential, arguments)
+            self.assertEqual(kwargs["secret_environment"], {"SYNARA_TEST_KMS_CREDENTIAL": credential})
+            stdout = json.dumps(verification_payload(reference=reference)) if arguments[0] == "verify" else ""
+            return subprocess.CompletedProcess(arguments, 0, stdout=stdout, stderr="")
+
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(
+            supply.os.environ,
+            {"SYNARA_TEST_KMS_CREDENTIAL": credential},
+        ), mock.patch.object(supply, "_run_tool", side_effect=run_tool):
+            result = supply._sign_and_verify(
+                supply_options(pathlib.Path(directory) / "state"),
+                configuration_with(policy),
+                builds=[{"slot": "cached", "registryDigest": DIGEST}],
+                git_sha="a" * 40,
+                version="0.5.4",
+                run_id="run-1",
+                deadline=supply.time.monotonic() + 60,
+                redactor=acceptance.SecretRedactor(),
+            )
+
+        self.assertIn("--tlog-upload=true", calls[0]["arguments"])
+        self.assertEqual(calls[0]["arguments"][calls[0]["arguments"].index("--key") + 1], key_reference)
+        self.assertNotIn("--insecure-ignore-tlog=true", calls[1]["arguments"])
+        self.assertEqual(result["mode"], "kms-key")
+        self.assertTrue(result["productionSigningPolicySatisfied"])
+        self.assertEqual(result["credentialEnvironmentCount"], 1)
+
+    def test_keyless_identity_token_is_removed_when_cosign_fails(self) -> None:
+        token = "header.payload.signature"
+        policy = signing_policy(
+            mode="keyless",
+            require_transparency_log=True,
+            identity_token_environment="SYNARA_TEST_COSIGN_IDENTITY_TOKEN",
+            certificate_identity="release@example.test",
+            certificate_oidc_issuer="https://issuer.example.test",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            state_dir = pathlib.Path(directory) / "state"
+            with mock.patch.dict(
+                supply.os.environ,
+                {"SYNARA_TEST_COSIGN_IDENTITY_TOKEN": token},
+            ), mock.patch.object(
+                supply,
+                "_run_tool",
+                side_effect=supply.common.ReleaseGateError(
+                    "release.registry_supply_chain_command_failed",
+                    "Cosign failed.",
+                ),
+            ), self.assertRaises(supply.common.ReleaseGateError):
+                supply._sign_and_verify(
+                    supply_options(state_dir),
+                    configuration_with(policy),
+                    builds=[{"slot": "cached", "registryDigest": DIGEST}],
+                    git_sha="a" * 40,
+                    version="0.5.4",
+                    run_id="run-1",
+                    deadline=supply.time.monotonic() + 60,
+                    redactor=acceptance.SecretRedactor(),
+                )
+
+            self.assertFalse((state_dir / "cosign/identity-token").exists())
+
+    def test_production_signing_rejects_insecure_registry_and_missing_credentials(self) -> None:
+        keyless = signing_policy(
+            mode="keyless",
+            require_transparency_log=True,
+            identity_token_environment="SYNARA_TEST_COSIGN_IDENTITY_TOKEN",
+            certificate_identity="release@example.test",
+            certificate_oidc_issuer="https://issuer.example.test",
+        )
+        with tempfile.TemporaryDirectory() as directory, self.assertRaises(
+            supply.common.ReleaseGateError
+        ) as insecure:
+            supply._sign_and_verify(
+                supply_options(pathlib.Path(directory) / "state", insecure_registry=True),
+                configuration_with(keyless),
+                builds=[{"slot": "cached", "registryDigest": DIGEST}],
+                git_sha="a" * 40,
+                version="0.5.4",
+                run_id="run-1",
+                deadline=supply.time.monotonic() + 60,
+                redactor=acceptance.SecretRedactor(),
+            )
+        self.assertEqual(
+            insecure.exception.code,
+            "release.registry_production_signing_insecure_registry",
+        )
+
+        kms = signing_policy(
+            mode="kms-key",
+            require_transparency_log=True,
+            key_reference="awskms:///arn:aws:kms:us-east-1:123456789012:key/key-id",
+            credential_environment=("SYNARA_TEST_MISSING_KMS_CREDENTIAL",),
+        )
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(
+            supply.os.environ,
+            {},
+            clear=True,
+        ), self.assertRaises(supply.common.ReleaseGateError) as missing:
+            supply._sign_and_verify(
+                supply_options(pathlib.Path(directory) / "state"),
+                configuration_with(kms),
+                builds=[{"slot": "cached", "registryDigest": DIGEST}],
+                git_sha="a" * 40,
+                version="0.5.4",
+                run_id="run-1",
+                deadline=supply.time.monotonic() + 60,
+                redactor=acceptance.SecretRedactor(),
+            )
+        self.assertEqual(missing.exception.code, "release.registry_signing_credential_invalid")
 
 
 class VulnerabilityPolicyTest(unittest.TestCase):

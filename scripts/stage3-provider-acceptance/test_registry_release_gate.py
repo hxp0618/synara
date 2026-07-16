@@ -284,6 +284,14 @@ def sample_supply_chain() -> dict[str, Any]:
 
 
 class InputValidationTest(unittest.TestCase):
+    def test_configuration_requires_checked_in_signing_and_vulnerability_policies(self) -> None:
+        evidence = gate.configuration_evidence(options(pathlib.Path("/tmp/output")))
+
+        self.assertTrue(evidence["signingPolicyRequired"])
+        self.assertEqual(evidence["signingPolicy"], "deploy/worker/signing-policy.json")
+        self.assertEqual(evidence["vulnerabilityPolicy"], "deploy/worker/vulnerability-policy.json")
+        self.assertNotIn("ephemeralDigestSigning", evidence)
+
     def test_accepts_registry_port_nested_repository_and_public_go_proxy(self) -> None:
         self.assertEqual(
             gate.normalize_image_repository("localhost:55091/synara/worker-image"),
@@ -663,6 +671,29 @@ class ReproducibilityTest(unittest.TestCase):
 
 
 class AggregateGateTest(unittest.TestCase):
+    def test_markdown_distinguishes_production_signing_from_ephemeral_mechanics(self) -> None:
+        supply_chain_report = sample_supply_chain()
+        supply_chain_report["signing"] = {
+            **supply_chain_report["signing"],
+            "mode": "keyless",
+            "productionSigningPolicySatisfied": True,
+        }
+        markdown = gate.markdown_from_report(
+            {
+                "schemaVersion": gate.SCHEMA_VERSION,
+                "runId": "run-1",
+                "status": "pass",
+                "source": {"gitSha": GIT_SHA, "version": VERSION},
+                "durationMs": 1,
+                "builds": [],
+                "supplyChain": supply_chain_report,
+                "errors": [],
+            }
+        )
+
+        self.assertIn("also enforced the checked-in production KMS/keyless identity", markdown)
+        self.assertNotIn("Ephemeral signing does not prove", markdown)
+
     def test_emits_pass_report_for_cached_and_no_cache_consensus(self) -> None:
         sha = subprocess.run(
             ["git", "rev-parse", "HEAD"],
