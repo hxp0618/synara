@@ -45,8 +45,10 @@ def options(
         image_repository="localhost:55091/synara/worker",
         builder="synara-stage3-registry-builder",
         build_timeout_seconds=7200.0,
+        supply_chain_timeout_seconds=1800.0,
         docker_bin="docker",
         go_proxy="https://goproxy.cn,direct",
+        insecure_registry=True,
     )
 
 
@@ -247,6 +249,37 @@ def sample_build(slot: str, no_cache: bool) -> dict[str, Any]:
             platform: {"providerHostSha256": "f" * 64}
             for platform in gate.REQUIRED_PLATFORMS
         },
+    }
+
+
+def sample_supply_chain() -> dict[str, Any]:
+    return {
+        "status": "pass",
+        "mode": "registry-supply-chain",
+        "tools": {"versions": {"cosign": "v3.1.1", "trivy": "0.72.0"}},
+        "signing": {
+            "mode": "ephemeral-key",
+            "productionSigningPolicySatisfied": False,
+            "signatures": [{"slot": "cached"}, {"slot": "no-cache"}],
+        },
+        "vulnerability": {
+            "scans": [
+                {
+                    "platform": platform,
+                    "vulnerabilities": {
+                        "total": 0,
+                        "bySeverity": {
+                            severity: 0 for severity in gate.supply_chain.SUPPORTED_SEVERITIES
+                        },
+                    },
+                    "secretFindingCount": 0,
+                    "os": {"EOSL": False},
+                }
+                for platform in gate.REQUIRED_PLATFORMS
+            ]
+        },
+        "cleanup": {"ephemeralPrivateKeyRemoved": True, "broadCleanupUsed": False},
+        "errors": [],
     }
 
 
@@ -611,13 +644,55 @@ class AggregateGateTest(unittest.TestCase):
                     repository_state=lambda _root: {"gitSha": sha, "worktreeDirty": False},
                     runtime_inspector=lambda _options: {"builder": gate_options.builder},
                     build_runner=build_runner,
+                    supply_chain_runner=lambda *_args, **_kwargs: sample_supply_chain(),
                 )
             report = json.loads((output_dir / gate.JSON_REPORT_NAME).read_text(encoding="utf-8"))
 
         self.assertEqual(exit_code, 0)
         self.assertEqual(report["status"], "pass")
         self.assertEqual(len(report["builds"]), 2)
+        self.assertEqual(report["supplyChain"]["status"], "pass")
         self.assertEqual(report["security"]["outputSecretScan"]["findings"], [])
+
+    def test_emits_fail_report_when_supply_chain_policy_fails(self) -> None:
+        sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=REPO_ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        with tempfile.TemporaryDirectory() as directory:
+            output_dir = pathlib.Path(directory) / "gate"
+            gate_options = options(output_dir)
+
+            def build_runner(_options: Any, **kwargs: Any) -> dict[str, Any]:
+                return sample_build(kwargs["slot"], kwargs["no_cache"])
+
+            supply_chain_report = sample_supply_chain()
+            supply_chain_report["status"] = "fail"
+            supply_chain_report["errors"] = [
+                {
+                    "code": "release.registry_vulnerability_policy_blocked",
+                    "message": "critical vulnerability",
+                }
+            ]
+            with contextlib.redirect_stdout(io.StringIO()):
+                exit_code = gate.run_registry_release_gate(
+                    gate_options,
+                    repository_state=lambda _root: {"gitSha": sha, "worktreeDirty": False},
+                    runtime_inspector=lambda _options: {"builder": gate_options.builder},
+                    build_runner=build_runner,
+                    supply_chain_runner=lambda *_args, **_kwargs: supply_chain_report,
+                )
+            report = json.loads((output_dir / gate.JSON_REPORT_NAME).read_text(encoding="utf-8"))
+
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(report["status"], "fail")
+        self.assertEqual(
+            {error["code"] for error in report["errors"]},
+            {"release.registry_vulnerability_policy_blocked"},
+        )
 
     def test_emits_fail_report_when_no_cache_build_fails(self) -> None:
         sha = subprocess.run(

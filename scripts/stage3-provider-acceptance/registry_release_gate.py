@@ -21,9 +21,10 @@ from typing import Any
 import acceptance_runner as acceptance
 import controlled_remote_release_gate as remote
 import release_gate_common as common
+import registry_supply_chain as supply_chain
 
 
-SCHEMA_VERSION = "synara.worker-registry-release-gate.v1"
+SCHEMA_VERSION = "synara.worker-registry-release-gate.v2"
 JSON_REPORT_NAME = "worker-registry-release-gate.json"
 MARKDOWN_REPORT_NAME = "worker-registry-release-gate.md"
 REQUIRED_PLATFORMS = ("linux/amd64", "linux/arm64")
@@ -78,8 +79,10 @@ class RegistryReleaseGateOptions:
     image_repository: str
     builder: str
     build_timeout_seconds: float
+    supply_chain_timeout_seconds: float
     docker_bin: str
     go_proxy: str | None
+    insecure_registry: bool
 
 
 def parse_args(argv: Sequence[str]) -> RegistryReleaseGateOptions:
@@ -88,12 +91,16 @@ def parse_args(argv: Sequence[str]) -> RegistryReleaseGateOptions:
     parser.add_argument("--image-repository", required=True)
     parser.add_argument("--builder", required=True)
     parser.add_argument("--build-timeout", type=float, default=7200.0)
+    parser.add_argument("--supply-chain-timeout", type=float, default=1800.0)
     parser.add_argument("--docker-bin", default="docker")
     parser.add_argument("--go-proxy")
+    parser.add_argument("--insecure-registry", action="store_true")
     parser.add_argument("--output-dir", type=pathlib.Path)
     parsed = parser.parse_args(argv)
     if parsed.build_timeout <= 0:
         parser.error("--build-timeout must be positive")
+    if parsed.supply_chain_timeout <= 0:
+        parser.error("--supply-chain-timeout must be positive")
     try:
         image_repository = normalize_image_repository(parsed.image_repository)
         builder = normalize_builder_name(parsed.builder)
@@ -108,8 +115,10 @@ def parse_args(argv: Sequence[str]) -> RegistryReleaseGateOptions:
         image_repository=image_repository,
         builder=builder,
         build_timeout_seconds=parsed.build_timeout,
+        supply_chain_timeout_seconds=parsed.supply_chain_timeout,
         docker_bin=docker_bin,
         go_proxy=go_proxy,
+        insecure_registry=parsed.insecure_registry,
     )
 
 
@@ -1204,6 +1213,42 @@ def markdown_from_report(report: Mapping[str, Any]) -> str:
             f"`{build.get('registryDigest', '')}` | `{digests.get('linux/amd64', '')}` | "
             f"`{digests.get('linux/arm64', '')}` |"
         )
+    supply_chain_report = report.get("supplyChain")
+    if isinstance(supply_chain_report, dict) and supply_chain_report:
+        signing = supply_chain_report.get("signing")
+        vulnerability = supply_chain_report.get("vulnerability")
+        scans = vulnerability.get("scans") if isinstance(vulnerability, dict) else None
+        lines.extend(
+            [
+                "",
+                "## Supply chain",
+                "",
+                f"- Status: `{supply_chain_report.get('status', '')}`",
+                f"- Signing mode: `{signing.get('mode', '') if isinstance(signing, dict) else ''}`",
+                f"- Production signing policy satisfied: "
+                f"`{signing.get('productionSigningPolicySatisfied', False) if isinstance(signing, dict) else False}`",
+            ]
+        )
+        if isinstance(scans, list):
+            lines.extend(
+                [
+                    "",
+                    "| Platform | Vulnerabilities | Critical | Secrets | EOSL |",
+                    "| --- | --- | --- | --- | --- |",
+                ]
+            )
+            for scan in scans:
+                if not isinstance(scan, dict):
+                    continue
+                summary = scan.get("vulnerabilities")
+                by_severity = summary.get("bySeverity") if isinstance(summary, dict) else None
+                os_metadata = scan.get("os")
+                lines.append(
+                    f"| `{scan.get('platform', '')}` | `{summary.get('total', '') if isinstance(summary, dict) else ''}` | "
+                    f"`{by_severity.get('CRITICAL', '') if isinstance(by_severity, dict) else ''}` | "
+                    f"`{scan.get('secretFindingCount', '')}` | "
+                    f"`{os_metadata.get('EOSL', '') if isinstance(os_metadata, dict) else ''}` |"
+                )
     errors = report.get("errors")
     if isinstance(errors, list) and errors:
         lines.extend(
@@ -1222,8 +1267,9 @@ def markdown_from_report(report: Mapping[str, Any]) -> str:
             "## Evidence boundary",
             "",
             "A pass closes clean-SHA registry push, required multi-arch shape, reproducible platform content,",
-            "embedded supply-chain inputs, and BuildKit SBOM/provenance attachment. It does not prove image",
-            "signature policy, production Registry retention, real Provider four-Target rollout, or soak.",
+            "embedded supply-chain inputs, BuildKit SBOM/provenance attachment, digest signing mechanics, and the",
+            "checked-in vulnerability policy. Ephemeral signing does not prove production KMS/keyless identity,",
+            "transparency-log policy, production Registry retention, real Provider four-Target rollout, or soak.",
         ]
     )
     return "\n".join(lines) + "\n"
@@ -1256,6 +1302,11 @@ def configuration_evidence(options: RegistryReleaseGateOptions) -> dict[str, Any
         "buildKitSBOM": True,
         "buildKitProvenance": "mode=max",
         "sourceDateEpochLayerRewrite": True,
+        "supplyChainRequired": True,
+        "ephemeralDigestSigning": True,
+        "productionSigningPolicySatisfied": False,
+        "vulnerabilityPolicy": str(supply_chain.VULNERABILITY_POLICY_PATH),
+        "insecureRegistry": options.insecure_registry,
         "goProxyOverride": options.go_proxy is not None,
         "remoteImagesRetainedAsReleaseEvidence": True,
         "remoteBroadCleanupUsed": False,
@@ -1268,6 +1319,7 @@ def run_registry_release_gate(
     repository_state: Any = common.repository_state,
     runtime_inspector: Any = inspect_runtime,
     build_runner: Any = build_and_inspect,
+    supply_chain_runner: Any = supply_chain.verify_supply_chain,
 ) -> int:
     if options.output_dir.exists() and (
         not options.output_dir.is_dir() or any(options.output_dir.iterdir())
@@ -1284,18 +1336,22 @@ def run_registry_release_gate(
     source: dict[str, Any] = {}
     runtime: dict[str, Any] = {}
     builds: list[dict[str, Any]] = []
+    supply_chain_report: dict[str, Any] = {}
     errors: list[dict[str, Any]] = []
     version: str | None = None
     source_date_epoch: str | None = None
+    supply_chain_configuration: supply_chain.SupplyChainConfiguration | None = None
     try:
         source = dict(repository_state(options.repo_root))
         runtime = dict(runtime_inspector(options))
         version, source_date_epoch = source_metadata(options.repo_root, str(source["gitSha"]))
+        supply_chain_configuration = supply_chain.load_configuration(options.repo_root)
         source.update(
             {
                 "version": version,
                 "sourceDateEpoch": source_date_epoch,
                 "buildKitSBOMGenerator": locked_sbom_generator(options.repo_root),
+                "supplyChain": supply_chain_configuration.source_evidence(),
             }
         )
     except (OSError, subprocess.SubprocessError, ReleaseGateError) as raw_error:
@@ -1339,9 +1395,62 @@ def run_registry_release_gate(
                 errors.append(error.as_report_error())
                 break
         errors.extend(reproducibility_errors(builds))
+        if not errors and supply_chain_configuration is not None:
+            try:
+                raw_supply_chain_report = supply_chain_runner(
+                    supply_chain.SupplyChainOptions(
+                        repo_root=options.repo_root,
+                        state_dir=state_dir / "supply-chain",
+                        image_repository=options.image_repository,
+                        docker_bin=options.docker_bin,
+                        timeout_seconds=options.supply_chain_timeout_seconds,
+                        insecure_registry=options.insecure_registry,
+                    ),
+                    supply_chain_configuration,
+                    builds=builds,
+                    git_sha=str(source["gitSha"]),
+                    version=version,
+                    run_id=run_id,
+                    redactor=redactor,
+                )
+                if not isinstance(raw_supply_chain_report, dict):
+                    raise ReleaseGateError(
+                        "release.registry_supply_chain_report_invalid",
+                        "Worker Registry supply-chain verifier returned an invalid report.",
+                    )
+                supply_chain_report = dict(raw_supply_chain_report)
+                supply_chain_errors = supply_chain_report.get("errors")
+                if not isinstance(supply_chain_errors, list) or not all(
+                    isinstance(error, dict) for error in supply_chain_errors
+                ):
+                    raise ReleaseGateError(
+                        "release.registry_supply_chain_report_invalid",
+                        "Worker Registry supply-chain verifier returned invalid errors.",
+                    )
+                errors.extend(supply_chain_errors)
+                if supply_chain_report.get("status") != "pass" and not supply_chain_errors:
+                    errors.append(
+                        {
+                            "code": "release.registry_supply_chain_status_invalid",
+                            "message": "Worker Registry supply-chain verifier did not pass.",
+                        }
+                    )
+            except (OSError, subprocess.SubprocessError, ReleaseGateError) as raw_error:
+                error = (
+                    raw_error
+                    if isinstance(raw_error, ReleaseGateError)
+                    else ReleaseGateError(
+                        "release.registry_supply_chain_failed",
+                        "Worker Registry supply-chain verification failed.",
+                    )
+                )
+                errors.append(error.as_report_error())
 
     shutil.rmtree(state_dir, ignore_errors=True)
     state_removed = not state_dir.exists()
+    supply_chain_cleanup = supply_chain_report.get("cleanup")
+    if isinstance(supply_chain_cleanup, dict):
+        supply_chain_cleanup["isolatedStateRemoved"] = state_removed
     if not state_removed:
         errors.append(
             {
@@ -1349,7 +1458,13 @@ def run_registry_release_gate(
                 "message": "Worker Registry release gate isolated local state was not removed.",
             }
         )
-    status = "pass" if not errors and len(builds) == 2 else "fail"
+    status = (
+        "pass"
+        if not errors
+        and len(builds) == 2
+        and supply_chain_report.get("status") == "pass"
+        else "fail"
+    )
     report = {
         "schemaVersion": SCHEMA_VERSION,
         "runId": run_id,
@@ -1367,6 +1482,7 @@ def run_registry_release_gate(
             "broadCleanupUsed": False,
         },
         "builds": builds,
+        "supplyChain": supply_chain_report,
         "errors": errors,
     }
     json_path, markdown_path = write_report(report, options.output_dir, redactor)

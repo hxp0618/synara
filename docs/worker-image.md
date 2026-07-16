@@ -129,11 +129,13 @@ repository and GOPROXY arguments and are never written to the report.
 python3 scripts/stage3-provider-acceptance/registry_release_gate.py \
   --image-repository registry.example.com/synara/worker \
   --builder synara-worker-release \
+  --supply-chain-timeout 1800 \
   --output-dir /tmp/synara-worker-registry-release
 ```
 
 If the default Go module proxy is unavailable, append the public credential-free override
 `--go-proxy https://goproxy.cn,direct`.
+For a disposable local HTTP Registry only, add `--insecure-registry`; production Registry runs must use TLS.
 
 The gate pushes two uniquely tagged builds from the same Git SHA: one normal cached build and one independent
 `--no-cache` build. The Registry exporter rewrites layer timestamps to `SOURCE_DATE_EPOCH`; transient APK logs and
@@ -146,12 +148,20 @@ platform manifest digests and validates:
   environment names;
 - embedded Worker Manifest, normalized SPDX, checked-in npm/Bun/APK locks, Provider Host wrapper/bundle, and
   agentd binary evidence for both platforms;
+- digest-pinned Cosign and Trivy containers from `deploy/worker/supply-chain-tools.lock` with runtime versions
+  matching their checked-in tags;
+- an isolated ephemeral Cosign key that signs both OCI index digests and verifies exact Git SHA, version, run ID,
+  slot, Registry identity, and manifest digest claims before the private key is removed;
+- both platform manifests scanned by Trivy for vulnerabilities and Secret-like material under
+  `deploy/worker/vulnerability-policy.json`, including vulnerability-database freshness and OS end-of-life checks;
 - exact local inspection cleanup, report redaction, and an empty output Secret scan without Docker-wide prune.
 
 The JSON and Markdown reports are written to the requested empty output directory. The gate intentionally retains
-the two remote image tags as release evidence; apply the Registry retention policy only after their digests and
-attestations are archived. A pass does not prove image signing policy, production Registry retention, real
-Provider rollout across all four Targets, multi-node canary/rollback, or soak.
+the two remote image tags and their signatures as release evidence; apply the Registry retention policy only after
+their digests, attestations, signatures, scan summaries, and tool/database identities are archived. Ephemeral-key
+signing proves the cryptographic Registry path and exact source claims, but it does not satisfy a production
+KMS/keyless identity or transparency-log policy. A pass also does not prove production Registry Credential and
+retention, real Provider rollout across all four Targets, multi-node canary/rollback, or soak.
 
 ## Runtime and storage
 
