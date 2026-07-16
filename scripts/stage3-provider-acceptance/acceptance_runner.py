@@ -106,7 +106,7 @@ REAL_PROVIDER_FAILURE_CASES = (
     "provider-host-crash-retry",
     "cursor-expiry",
 )
-REAL_PROVIDER_HTTP_FAULT_TARGETS = ("local", "docker")
+REAL_PROVIDER_HTTP_FAULT_TARGETS = ("local", "docker", "kubernetes")
 REAL_PROVIDER_CURSOR_MAX_AGE = "1s"
 REAL_PROVIDER_CURSOR_EXPIRY_WAIT_SECONDS = 1.25
 REAL_PROVIDER_CASE_METADATA: Mapping[str, Mapping[str, str]] = {
@@ -1379,6 +1379,134 @@ class _ProviderFaultServer:
         }
 
 
+def provider_host_crash_script() -> str:
+    """Kill one protocol-v2 Provider Host under an explicitly scoped agentd root PID."""
+
+    return (
+        "const fs=require('node:fs');"
+        "const needle=['--protocol','-v2'].join('');"
+        "const rootPid=Number(process.argv[1]);"
+        "const processes=new Map();"
+        "for(const entry of fs.readdirSync('/proc',{withFileTypes:true})){"
+        "if(!entry.isDirectory()||!/^[0-9]+$/.test(entry.name))continue;"
+        "const pid=Number(entry.name);"
+        "try{"
+        "const stat=fs.readFileSync('/proc/'+pid+'/stat','utf8');"
+        "const close=stat.lastIndexOf(')');"
+        "const fields=stat.slice(close+2).trim().split(/\\s+/);"
+        "const ppid=Number(fields[1]);"
+        "const command=fs.readFileSync('/proc/'+pid+'/cmdline').toString('utf8').replace(/\\0/g,' ');"
+        "processes.set(pid,{ppid,command});"
+        "}catch{}"
+        "}"
+        "const descendants=new Set(Number.isInteger(rootPid)&&rootPid>0?[rootPid]:[]);"
+        "let changed=true;"
+        "while(changed){changed=false;for(const [pid,value] of processes){"
+        "if(!descendants.has(pid)&&descendants.has(value.ppid)){descendants.add(pid);changed=true;}"
+        "}}"
+        "const candidates=[];"
+        "for(const [pid,value] of processes){"
+        "if(pid!==rootPid&&descendants.has(pid)&&value.command.includes(needle))candidates.push(pid);"
+        "}"
+        "candidates.sort((left,right)=>left-right);"
+        "const result={rootPid,candidateCount:candidates.length,"
+        "descendantCount:Math.max(0,descendants.size-1)};"
+        "if(candidates.length===1){"
+        "result.providerHostPid=candidates[0];"
+        "try{process.kill(candidates[0],'SIGKILL');result.killed=true;}"
+        "catch(error){result.killed=false;result.killError=error&&error.code?String(error.code):'unknown';}"
+        "}"
+        "process.stdout.write(JSON.stringify(result));"
+    )
+
+
+def provider_host_crash_evidence(
+    output: str,
+    *,
+    target: str,
+    scope: Mapping[str, Any],
+) -> dict[str, Any]:
+    try:
+        result = json.loads(output)
+    except json.JSONDecodeError:
+        raise AcceptanceError(
+            "runner.provider_host_process_scan_failed",
+            f"{target.title()} Provider Host process scan returned invalid JSON.",
+        ) from None
+    if not isinstance(result, dict):
+        raise AcceptanceError(
+            "runner.provider_host_process_scan_failed",
+            f"{target.title()} Provider Host process scan returned an invalid payload.",
+        )
+    root_pid = result.get("rootPid")
+    candidate_count = result.get("candidateCount")
+    descendant_count = result.get("descendantCount")
+    if (
+        type(root_pid) is not int
+        or root_pid < 1
+        or type(candidate_count) is not int
+        or candidate_count < 0
+        or type(descendant_count) is not int
+        or descendant_count < 0
+    ):
+        raise AcceptanceError(
+            "runner.provider_host_process_scan_failed",
+            f"{target.title()} Provider Host process scan returned invalid process counts.",
+        )
+    if candidate_count != 1:
+        raise AcceptanceError(
+            "runner.provider_host_process_ambiguous",
+            f"Expected exactly one Provider Host process in the scoped {target} Worker runtime.",
+            {
+                "target": target,
+                "candidateCount": candidate_count,
+                "descendantCount": descendant_count,
+                **scope,
+            },
+        )
+    provider_host_pid = result.get("providerHostPid")
+    if type(provider_host_pid) is not int or provider_host_pid < 2 or result.get("killed") is not True:
+        raise AcceptanceError(
+            "runner.provider_host_process_disappeared",
+            f"The scoped {target} Provider Host exited before crash injection completed.",
+            {
+                "target": target,
+                "providerHostPid": provider_host_pid,
+                "killError": result.get("killError"),
+                **scope,
+            },
+        )
+    return {
+        "target": target,
+        "agentdRootPid": root_pid,
+        "providerHostPid": provider_host_pid,
+        "signal": signal.Signals(signal.SIGKILL).name,
+        "scopedToAgentdDescendants": True,
+        "broadProcessMatchUsed": False,
+        **scope,
+    }
+
+
+def finalize_provider_fault_reachability(
+    reachability: Mapping[str, Any],
+    fault_evidence: Mapping[str, Any],
+) -> dict[str, Any]:
+    result = dict(reachability)
+    if result.get("validationMode") != "controlled-provider-request":
+        return result
+    request_count = fault_evidence.get("requestCount")
+    if type(request_count) is not int or request_count < 1:
+        raise AcceptanceError(
+            "runner.provider_fault_reachability_unproven",
+            "The execution-pinned Provider request did not prove fault endpoint reachability.",
+        )
+    return {
+        **result,
+        "probedFromWorker": True,
+        "observedProviderRequestCount": request_count,
+    }
+
+
 class LocalDriver:
     name = "local"
     lifecycle = STANDING_WORKER
@@ -2550,100 +2678,18 @@ class DockerDriver(ManagedWorkerDriver):
 
     def crash_provider_host(self) -> Mapping[str, Any]:
         container_id = self._required_managed_container_id("Provider Host crash injection")
-        script = (
-            "const fs=require('node:fs');"
-            "const needle=['--protocol','-v2'].join('');"
-            "const processes=new Map();"
-            "for(const entry of fs.readdirSync('/proc',{withFileTypes:true})){"
-            "if(!entry.isDirectory()||!/^[0-9]+$/.test(entry.name))continue;"
-            "const pid=Number(entry.name);"
-            "try{"
-            "const stat=fs.readFileSync('/proc/'+pid+'/stat','utf8');"
-            "const close=stat.lastIndexOf(')');"
-            "const fields=stat.slice(close+2).trim().split(/\\s+/);"
-            "const ppid=Number(fields[1]);"
-            "const command=fs.readFileSync('/proc/'+pid+'/cmdline').toString('utf8').replace(/\\0/g,' ');"
-            "processes.set(pid,{ppid,command});"
-            "}catch{}"
-            "}"
-            "const descendants=new Set([1]);"
-            "let changed=true;"
-            "while(changed){changed=false;for(const [pid,value] of processes){"
-            "if(!descendants.has(pid)&&descendants.has(value.ppid)){descendants.add(pid);changed=true;}"
-            "}}"
-            "const candidates=[];"
-            "for(const [pid,value] of processes){"
-            "if(pid!==1&&descendants.has(pid)&&value.command.includes(needle))candidates.push(pid);"
-            "}"
-            "candidates.sort((left,right)=>left-right);"
-            "const result={candidateCount:candidates.length,descendantCount:Math.max(0,descendants.size-1)};"
-            "if(candidates.length===1){"
-            "result.providerHostPid=candidates[0];"
-            "try{process.kill(candidates[0],'SIGKILL');result.killed=true;}"
-            "catch(error){result.killed=false;result.killError=error&&error.code?String(error.code):'unknown';}"
-            "}"
-            "process.stdout.write(JSON.stringify(result));"
-        )
         output = self._docker_command(
-            ["exec", container_id, "node", "-e", script],
+            ["exec", container_id, "node", "-e", provider_host_crash_script(), "1"],
             maximum_timeout=15.0,
         )
-        try:
-            result = json.loads(output)
-        except json.JSONDecodeError:
-            raise AcceptanceError(
-                "runner.provider_host_process_scan_failed",
-                "Docker Provider Host process scan returned invalid JSON.",
-            ) from None
-        if not isinstance(result, dict):
-            raise AcceptanceError(
-                "runner.provider_host_process_scan_failed",
-                "Docker Provider Host process scan returned an invalid payload.",
-            )
-        candidate_count = result.get("candidateCount")
-        descendant_count = result.get("descendantCount")
-        if (
-            type(candidate_count) is not int
-            or candidate_count < 0
-            or type(descendant_count) is not int
-            or descendant_count < 0
-        ):
-            raise AcceptanceError(
-                "runner.provider_host_process_scan_failed",
-                "Docker Provider Host process scan returned invalid process counts.",
-            )
-        if candidate_count != 1:
-            raise AcceptanceError(
-                "runner.provider_host_process_ambiguous",
-                "Expected exactly one Provider Host process inside the managed Docker Worker.",
-                {
-                    "target": self.name,
-                    "containerId": container_id[:12],
-                    "candidateCount": candidate_count,
-                    "descendantCount": descendant_count,
-                },
-            )
-        provider_host_pid = result.get("providerHostPid")
-        if type(provider_host_pid) is not int or provider_host_pid < 2 or result.get("killed") is not True:
-            raise AcceptanceError(
-                "runner.provider_host_process_disappeared",
-                "The scoped Docker Provider Host exited before crash injection completed.",
-                {
-                    "target": self.name,
-                    "containerId": container_id[:12],
-                    "providerHostPid": provider_host_pid,
-                    "killError": result.get("killError"),
-                },
-            )
-        return {
-            "target": self.name,
-            "containerId": container_id[:12],
-            "providerHostPid": provider_host_pid,
-            "signal": signal.Signals(signal.SIGKILL).name,
-            "scopedToManagedContainer": True,
-            "scopedToAgentdDescendants": True,
-            "broadProcessMatchUsed": False,
-        }
+        return provider_host_crash_evidence(
+            output,
+            target=self.name,
+            scope={
+                "containerId": container_id[:12],
+                "scopedToManagedContainer": True,
+            },
+        )
 
     def collect_failure_diagnostics(self, case_id: str) -> Mapping[str, Any]:
         evidence = dict(super().collect_failure_diagnostics(case_id))
@@ -4112,6 +4158,144 @@ class KubernetesDriver(ManagedWorkerDriver):
     @property
     def worker_proxy_host(self) -> str:
         return self.options.kubernetes_control_plane_host
+
+    def create_provider_fault_server(self, provider: str, fault: str) -> _ProviderFaultServer:
+        return _ProviderFaultServer(
+            provider,
+            fault,
+            listen_host="0.0.0.0",
+            advertised_host=self.worker_proxy_host,
+        )
+
+    def probe_provider_fault_server(
+        self,
+        server: _ProviderFaultServer,
+    ) -> Mapping[str, Any]:
+        return {
+            "target": self.name,
+            "transport": "host-gateway",
+            "advertisedHost": self.worker_proxy_host,
+            "expectedStatus": 401 if server.fault == "authentication" else 429,
+            "validationMode": "controlled-provider-request",
+            "probedFromWorker": False,
+            "endpointPersisted": False,
+        }
+
+    def crash_provider_host(self) -> Mapping[str, Any]:
+        pod = self._required_active_target_pod("Provider Host crash injection")
+        output = self._kubectl_command(
+            [
+                "-n",
+                str(pod["namespace"]),
+                "exec",
+                str(pod["name"]),
+                "-c",
+                "agentd",
+                "--",
+                "node",
+                "-e",
+                provider_host_crash_script(),
+                "1",
+            ],
+            cleanup_timeout=15.0,
+        )
+        return provider_host_crash_evidence(
+            output,
+            target=self.name,
+            scope={
+                "namespace": pod["namespace"],
+                "podName": pod["name"],
+                "podUid": pod["uid"],
+                "executionId": pod["executionId"],
+                "scopedToExecutionPod": True,
+            },
+        )
+
+    def _required_active_target_pod(self, operation: str) -> dict[str, str]:
+        target_id = self.target_id
+        if target_id is None:
+            raise AcceptanceError(
+                "runner.kubernetes_target_id_missing",
+                f"Kubernetes {operation} was requested before Target provisioning.",
+            )
+        runtime = self._target_runtime(target_id)
+        namespace = runtime["namespace"]
+        try:
+            payload = json.loads(
+                self._kubectl_command(
+                    [
+                        "-n",
+                        namespace,
+                        "get",
+                        "pods",
+                        "-l",
+                        f"synara.io/execution-target-id={target_id}",
+                        "-o",
+                        "json",
+                    ]
+                )
+            )
+        except json.JSONDecodeError:
+            raise AcceptanceError(
+                "runner.kubernetes_pods_invalid",
+                f"Kubernetes Pod inventory was invalid during {operation}.",
+            ) from None
+        items = payload.get("items") if isinstance(payload, dict) else None
+        if not isinstance(items, list) or not all(isinstance(item, dict) for item in items):
+            raise AcceptanceError(
+                "runner.kubernetes_pods_invalid",
+                f"Kubernetes Pod inventory was malformed during {operation}.",
+            )
+        running = [
+            item
+            for item in items
+            if isinstance(item.get("metadata"), dict)
+            and item["metadata"].get("deletionTimestamp") is None
+            and isinstance(item.get("status"), dict)
+            and item["status"].get("phase") == "Running"
+        ]
+        if len(running) != 1:
+            raise AcceptanceError(
+                "runner.kubernetes_active_pod_ambiguous",
+                f"Expected exactly one running execution-pinned Pod during {operation}.",
+                {
+                    "targetId": target_id,
+                    "namespace": namespace,
+                    "runningPodCount": len(running),
+                    "totalPodCount": len(items),
+                },
+            )
+        pod = running[0]
+        metadata = json_object(pod.get("metadata"), "Kubernetes active Pod metadata")
+        labels = json_object(metadata.get("labels"), "Kubernetes active Pod labels")
+        spec = json_object(pod.get("spec"), "Kubernetes active Pod spec")
+        containers = spec.get("containers")
+        name = metadata.get("name")
+        uid = metadata.get("uid")
+        execution_id = labels.get("synara.io/execution-id")
+        if (
+            not isinstance(name, str)
+            or not name
+            or not isinstance(uid, str)
+            or not uid
+            or not isinstance(execution_id, str)
+            or not execution_id
+            or not isinstance(containers, list)
+            or len(containers) != 1
+            or not isinstance(containers[0], dict)
+            or containers[0].get("name") != "agentd"
+        ):
+            raise AcceptanceError(
+                "runner.kubernetes_pod_contract_mismatch",
+                f"The active Kubernetes Pod omitted its scoped identity during {operation}.",
+                {"targetId": target_id, "namespace": namespace},
+            )
+        return {
+            "namespace": namespace,
+            "name": name,
+            "uid": uid,
+            "executionId": execution_id,
+        }
 
     def prepare(self) -> Mapping[str, Any]:
         control_plane = super().prepare()
@@ -6343,6 +6527,7 @@ class AcceptanceSuite:
                 "The real Provider request did not carry a Credential header to the controlled endpoint.",
                 {"failureCase": failure_case, "provider": self.options.provider},
             )
+        reachability = finalize_provider_fault_reachability(reachability, fault_evidence)
         payload = json_object(terminal.get("payload"), "real Provider execution.failed payload")
         actual_failure_code = payload.get("failureCode")
         if actual_failure_code != expected_failure_code:

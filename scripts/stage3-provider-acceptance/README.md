@@ -164,19 +164,24 @@ boundary. The canonical failure cases are:
 The fault server never retains request bodies or Credential values. Every run uses an unguessable route prefix
 that is registered with output redaction and omitted from report paths. Local binds only loopback. Docker binds an
 ephemeral host port, advertises the configured `--docker-control-plane-host`, and probes the endpoint from the exact
-managed Worker container before creating the fault Session. Docker Host crash injection executes inside that same
-container, walks only PID 1 descendants, requires exactly one `--protocol-v2` process, and fails closed instead of
-using a host-wide process match. Codex controlled credentials use an execution-local `CODEX_HOME`; Claude
-controlled credentials use the existing execution-local `CLAUDE_CONFIG_DIR`. Cursor expiry does not edit SQLite or
-Cursor bytes. `--keep` can preserve isolated state for diagnosis, but that binary state is local-only evidence and
-must not be committed.
+managed Worker container before creating the fault Session. Kubernetes uses the same configured host-gateway as its
+Worker-only Control Plane proxy; the actual controlled Provider request from the execution-pinned Pod proves
+reachability, so the unguessable endpoint is never persisted in a probe Pod specification. Docker Host crash
+injection executes inside the exact managed container. Kubernetes first requires exactly one Running Pod for the
+Target, then executes inside its `agentd` container. Both walk only PID 1 descendants, require exactly one
+`--protocol-v2` process, and fail closed instead of using a host-wide or Namespace-wide process match. Codex
+controlled credentials use an execution-local `CODEX_HOME`; Claude controlled credentials use the existing
+execution-local `CLAUDE_CONFIG_DIR`. Cursor expiry does not edit SQLite or Cursor bytes. `--keep` can preserve
+isolated state for diagnosis, but that binary state is local-only evidence and must not be committed.
 
 The latest clean-worktree Node.js 24.13.1 Codex and Claude Local results are recorded in
 `docs/reports/stage-3-real-provider-local-failure-matrix-61e38f4f.md`. Both pass all 16 cases, exact cleanup and the
-output Secret scan. Docker 401/429 reachability and scoped Host crash now have implementation-time unit, real
-container and deterministic Target regression coverage, but no real Docker Codex/Claude failure report exists
-without an operator-provided controlled product Credential. The clean evidence therefore still closes only the
-Local failure slice; SSH/Docker/Kubernetes release, concurrency and soak gates remain open.
+output Secret scan. Docker 401/429 reachability and scoped Host crash have implementation-time unit, real container
+and deterministic Target regression coverage. Kubernetes now has host-gateway 401/429 transport, actual-request
+reachability accounting, unique execution-Pod selection and shared Linux `/proc` Host-crash coverage. No real
+Docker or Kubernetes Codex/Claude failure report exists without an operator-provided controlled product Credential.
+The clean evidence therefore still closes only the Local failure slice; SSH/Docker/Kubernetes release, concurrency
+and soak gates remain open.
 
 ## Consolidated real Provider Local release gate
 

@@ -1064,6 +1064,7 @@ class DockerDriverRealProviderFaultTest(unittest.TestCase):
         driver._docker_command = mock.Mock(  # type: ignore[method-assign]
             return_value=json.dumps(
                 {
+                    "rootPid": 1,
                     "candidateCount": 1,
                     "descendantCount": 4,
                     "providerHostPid": 42,
@@ -1077,6 +1078,7 @@ class DockerDriverRealProviderFaultTest(unittest.TestCase):
         arguments = driver._docker_command.call_args.args[0]
         self.assertEqual(arguments[:4], ["exec", "abcdef1234567890", "node", "-e"])
         self.assertNotIn("--protocol-v2", arguments[4])
+        self.assertEqual(arguments[-1], "1")
         self.assertEqual(evidence["providerHostPid"], 42)
         self.assertTrue(evidence["scopedToManagedContainer"])
         self.assertTrue(evidence["scopedToAgentdDescendants"])
@@ -1086,7 +1088,7 @@ class DockerDriverRealProviderFaultTest(unittest.TestCase):
         driver = self._driver()
         driver._wait_container = mock.Mock(return_value={"Id": "abcdef1234567890"})  # type: ignore[method-assign]
         driver._docker_command = mock.Mock(  # type: ignore[method-assign]
-            return_value=json.dumps({"candidateCount": 2, "descendantCount": 5})
+            return_value=json.dumps({"rootPid": 1, "candidateCount": 2, "descendantCount": 5})
         )
 
         with self.assertRaises(acceptance.AcceptanceError) as caught:
@@ -1099,13 +1101,156 @@ class DockerDriverRealProviderFaultTest(unittest.TestCase):
         driver = self._driver()
         driver._wait_container = mock.Mock(return_value={"Id": "abcdef1234567890"})  # type: ignore[method-assign]
         driver._docker_command = mock.Mock(  # type: ignore[method-assign]
-            return_value=json.dumps({"candidateCount": "one", "descendantCount": 4})
+            return_value=json.dumps(
+                {"rootPid": 1, "candidateCount": "one", "descendantCount": 4}
+            )
         )
 
         with self.assertRaises(acceptance.AcceptanceError) as caught:
             driver.crash_provider_host()
 
         self.assertEqual(caught.exception.code, "runner.provider_host_process_scan_failed")
+
+
+class KubernetesDriverRealProviderFaultTest(unittest.TestCase):
+    @staticmethod
+    def _driver() -> acceptance.KubernetesDriver:
+        driver = object.__new__(acceptance.KubernetesDriver)
+        driver.options = runner_options()
+        driver.redactor = acceptance.SecretRedactor()
+        driver.target_id = "target-id"
+        driver.target_namespace = "synara-stage3-worker-test"
+        driver.worker_service_account = "synara-worker-test"
+        driver.image = "synara-worker:test"
+        driver.target_runtimes = {
+            "target-id": {
+                "namespace": driver.target_namespace,
+                "serviceAccount": driver.worker_service_account,
+                "image": driver.image,
+            }
+        }
+        return driver
+
+    @staticmethod
+    def _running_pod() -> dict[str, Any]:
+        return {
+            "metadata": {
+                "name": "synara-agentd-execution",
+                "uid": "pod-uid",
+                "labels": {
+                    "synara.io/execution-target-id": "target-id",
+                    "synara.io/execution-id": "execution-id",
+                },
+            },
+            "spec": {"containers": [{"name": "agentd"}]},
+            "status": {"phase": "Running"},
+        }
+
+    def test_fault_server_uses_kubernetes_host_gateway_without_persisting_endpoint(self) -> None:
+        driver = self._driver()
+        server = driver.create_provider_fault_server("claudeAgent", "rate-limit")
+        server.start()
+        try:
+            evidence = driver.probe_provider_fault_server(server)
+        finally:
+            server.stop()
+
+        self.assertEqual(server.listen_host, "0.0.0.0")
+        self.assertEqual(server.advertised_host, "host.docker.internal")
+        self.assertEqual(evidence["validationMode"], "controlled-provider-request")
+        self.assertFalse(evidence["probedFromWorker"])
+        self.assertFalse(evidence["endpointPersisted"])
+        self.assertNotIn(server.route_token, json.dumps(evidence))
+
+        completed = acceptance.finalize_provider_fault_reachability(
+            evidence,
+            {"requestCount": 1},
+        )
+        self.assertTrue(completed["probedFromWorker"])
+        self.assertEqual(completed["observedProviderRequestCount"], 1)
+
+    def test_fault_server_reachability_requires_an_observed_provider_request(self) -> None:
+        driver = self._driver()
+        server = driver.create_provider_fault_server("codex", "authentication")
+        reachability = driver.probe_provider_fault_server(server)
+
+        with self.assertRaises(acceptance.AcceptanceError) as caught:
+            acceptance.finalize_provider_fault_reachability(
+                reachability,
+                {"requestCount": 0},
+            )
+
+        server.server.server_close()
+        self.assertEqual(caught.exception.code, "runner.provider_fault_reachability_unproven")
+
+    def test_host_crash_kills_one_agentd_descendant_inside_exact_execution_pod(self) -> None:
+        driver = self._driver()
+        driver._kubectl_command = mock.Mock(  # type: ignore[method-assign]
+            side_effect=[
+                json.dumps({"items": [self._running_pod()]}),
+                json.dumps(
+                    {
+                        "rootPid": 1,
+                        "candidateCount": 1,
+                        "descendantCount": 4,
+                        "providerHostPid": 52,
+                        "killed": True,
+                    }
+                ),
+            ]
+        )
+
+        evidence = driver.crash_provider_host()
+
+        inventory_arguments = driver._kubectl_command.call_args_list[0].args[0]
+        crash_arguments = driver._kubectl_command.call_args_list[1].args[0]
+        self.assertEqual(
+            inventory_arguments,
+            [
+                "-n",
+                "synara-stage3-worker-test",
+                "get",
+                "pods",
+                "-l",
+                "synara.io/execution-target-id=target-id",
+                "-o",
+                "json",
+            ],
+        )
+        self.assertEqual(
+            crash_arguments[:8],
+            [
+                "-n",
+                "synara-stage3-worker-test",
+                "exec",
+                "synara-agentd-execution",
+                "-c",
+                "agentd",
+                "--",
+                "node",
+            ],
+        )
+        self.assertNotIn("--protocol-v2", crash_arguments[-2])
+        self.assertEqual(crash_arguments[-1], "1")
+        self.assertEqual(evidence["providerHostPid"], 52)
+        self.assertEqual(evidence["podUid"], "pod-uid")
+        self.assertEqual(evidence["executionId"], "execution-id")
+        self.assertTrue(evidence["scopedToExecutionPod"])
+        self.assertTrue(evidence["scopedToAgentdDescendants"])
+        self.assertFalse(evidence["broadProcessMatchUsed"])
+
+    def test_host_crash_fails_closed_when_multiple_target_pods_are_running(self) -> None:
+        driver = self._driver()
+        driver._kubectl_command = mock.Mock(  # type: ignore[method-assign]
+            return_value=json.dumps({"items": [self._running_pod(), self._running_pod()]})
+        )
+
+        with self.assertRaises(acceptance.AcceptanceError) as caught:
+            driver.crash_provider_host()
+
+        self.assertEqual(caught.exception.code, "runner.kubernetes_active_pod_ambiguous")
+        self.assertEqual(caught.exception.evidence["runningPodCount"], 2)
+        self.assertEqual(driver._kubectl_command.call_count, 1)
 
 
 class APIClientTimeoutTest(unittest.TestCase):
