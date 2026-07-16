@@ -977,6 +977,12 @@ class ProviderFaultServerTest(unittest.TestCase):
         credential = "provider-fault-secret-value"
         server.start()
         try:
+            with self.assertRaises(urllib.error.HTTPError) as unscoped:
+                urllib.request.urlopen(
+                    f"http://127.0.0.1:{server.port}/not-the-owned-route",
+                    timeout=2.0,
+                )
+            unscoped.exception.close()
             request = urllib.request.Request(
                 f"{server.credential_base_url}/responses?stream=true",
                 data=b'{"model":"test"}',
@@ -997,9 +1003,109 @@ class ProviderFaultServerTest(unittest.TestCase):
         self.assertEqual(raised.exception.code, 429)
         self.assertIn("rate_limit_error", body)
         self.assertEqual(evidence["requestCount"], 1)
+        self.assertEqual(evidence["paths"], ["/v1/responses"])
         self.assertEqual(evidence["credentialHeaderNames"], ["authorization"])
+        self.assertEqual(evidence["unscopedRequestCount"], 1)
+        self.assertFalse(evidence["routeTokenPersisted"])
         self.assertFalse(evidence["requestBodiesRetained"])
         self.assertNotIn(credential, json.dumps(evidence))
+        self.assertNotIn(server.route_token, json.dumps(evidence))
+
+
+class DockerDriverRealProviderFaultTest(unittest.TestCase):
+    @staticmethod
+    def _driver() -> acceptance.DockerDriver:
+        driver = object.__new__(acceptance.DockerDriver)
+        driver.options = runner_options()
+        driver.redactor = acceptance.SecretRedactor()
+        driver.target_id = "target-id"
+        return driver
+
+    def test_fault_server_uses_host_gateway_and_unscoped_bind(self) -> None:
+        driver = self._driver()
+        server = driver.create_provider_fault_server("codex", "authentication")
+        server.start()
+        try:
+            self.assertEqual(server.listen_host, "0.0.0.0")
+            self.assertEqual(server.advertised_host, "host.docker.internal")
+            self.assertTrue(server.endpoint.startswith("http://host.docker.internal:"))
+            self.assertIn(server.route_token, server.endpoint)
+        finally:
+            server.stop()
+
+    def test_fault_server_probe_runs_inside_exact_managed_container(self) -> None:
+        driver = self._driver()
+        driver._wait_container = mock.Mock(return_value={"Id": "abcdef1234567890"})  # type: ignore[method-assign]
+        driver._docker_command = mock.Mock(return_value="")  # type: ignore[method-assign]
+        server = acceptance._ProviderFaultServer(
+            "claudeAgent",
+            "rate-limit",
+            listen_host="0.0.0.0",
+            advertised_host="host.docker.internal",
+        )
+        server.start()
+        try:
+            evidence = driver.probe_provider_fault_server(server)
+        finally:
+            server.stop()
+
+        arguments = driver._docker_command.call_args.args[0]
+        self.assertEqual(arguments[:3], ["exec", "abcdef1234567890", "node"])
+        self.assertEqual(arguments[-2], "429")
+        self.assertEqual(arguments[-1], server.credential_base_url)
+        self.assertTrue(evidence["probedFromWorker"])
+        self.assertEqual(evidence["containerId"], "abcdef123456")
+        self.assertFalse(evidence["endpointPersisted"])
+        self.assertNotIn(server.route_token, json.dumps(evidence))
+
+    def test_host_crash_kills_one_agentd_descendant_inside_exact_container(self) -> None:
+        driver = self._driver()
+        driver._wait_container = mock.Mock(return_value={"Id": "abcdef1234567890"})  # type: ignore[method-assign]
+        driver._docker_command = mock.Mock(  # type: ignore[method-assign]
+            return_value=json.dumps(
+                {
+                    "candidateCount": 1,
+                    "descendantCount": 4,
+                    "providerHostPid": 42,
+                    "killed": True,
+                }
+            )
+        )
+
+        evidence = driver.crash_provider_host()
+
+        arguments = driver._docker_command.call_args.args[0]
+        self.assertEqual(arguments[:4], ["exec", "abcdef1234567890", "node", "-e"])
+        self.assertNotIn("--protocol-v2", arguments[4])
+        self.assertEqual(evidence["providerHostPid"], 42)
+        self.assertTrue(evidence["scopedToManagedContainer"])
+        self.assertTrue(evidence["scopedToAgentdDescendants"])
+        self.assertFalse(evidence["broadProcessMatchUsed"])
+
+    def test_host_crash_fails_closed_on_ambiguous_container_processes(self) -> None:
+        driver = self._driver()
+        driver._wait_container = mock.Mock(return_value={"Id": "abcdef1234567890"})  # type: ignore[method-assign]
+        driver._docker_command = mock.Mock(  # type: ignore[method-assign]
+            return_value=json.dumps({"candidateCount": 2, "descendantCount": 5})
+        )
+
+        with self.assertRaises(acceptance.AcceptanceError) as caught:
+            driver.crash_provider_host()
+
+        self.assertEqual(caught.exception.code, "runner.provider_host_process_ambiguous")
+        self.assertEqual(caught.exception.evidence["candidateCount"], 2)
+
+    def test_host_crash_rejects_invalid_process_scan_payload(self) -> None:
+        driver = self._driver()
+        driver._wait_container = mock.Mock(return_value={"Id": "abcdef1234567890"})  # type: ignore[method-assign]
+        driver._docker_command = mock.Mock(  # type: ignore[method-assign]
+            return_value=json.dumps({"candidateCount": "one", "descendantCount": 4})
+        )
+
+        with self.assertRaises(acceptance.AcceptanceError) as caught:
+            driver.crash_provider_host()
+
+        self.assertEqual(caught.exception.code, "runner.provider_host_process_scan_failed")
 
 
 class APIClientTimeoutTest(unittest.TestCase):

@@ -1430,8 +1430,14 @@ Provider × Capability × Execution Target
 - Runner 已补齐真实远程 Provider 的受控认证入口：SSH/Docker/Kubernetes 不再允许依赖宿主机 ambient
   登录，缺少显式 Credential source 时会在 Image build 前拒绝；Docker Worker 使用 Image 内的
   `/usr/local/bin/provider-host`，Credential 仍由 Control Plane 经 agentd FD 3 交付。当前只证明入口、
-  fail-closed 和脱敏实现，不构成真实 Docker Codex/Claude product matrix 证据；远程 401/429 endpoint
-  与 scoped Provider Host crash 注入也仍未实现，因此四 Target Gate 保持 open。
+  fail-closed 和脱敏实现，不构成真实 Docker Codex/Claude product matrix 证据。
+- Docker 真实 Provider failure 路径已补齐受控 401/429 endpoint 与 scoped Host crash 注入。Endpoint 使用
+  每次运行随机 route token，绑定临时宿主机端口，经 `host.docker.internal` 从精确 managed Worker 容器
+  探测；报告不保留 token、Credential 或完整 URL。Crash 注入只在该容器内遍历 PID 1 后代，要求唯一
+  `--protocol-v2` 进程后发送 `SIGKILL`，候选为 0/多个或返回结构异常时 fail closed。当前工作区已通过
+  Runner 88 tests、真实容器 endpoint/crash 探针、deterministic Docker `16/16`，以及 Codex/Claude Local
+  401/429 focused matrix 各 `14/14`；但仍缺受控 Provider 凭据下的真实 Docker product/failure 报告，
+  SSH/Kubernetes 同类 fault transport 也未实现，因此四 Target Gate 保持 open。
 
 ## 18. 实施顺序
 

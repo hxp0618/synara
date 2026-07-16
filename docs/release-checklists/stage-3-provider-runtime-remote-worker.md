@@ -143,6 +143,7 @@ bun run --cwd apps/web test \
 | deterministic Local/Docker core suite               | 已通过                                 | 证明共享 Control Plane/agentd/Host orchestration，不证明真实 Adapter            |
 | deterministic Provider fault matrix                 | malformed/oversized/crash 已通过       | 不是真实 Provider failure 分类                                                  |
 | deterministic Docker/Kubernetes failure matrix      | 已通过实现期运行                       | 不等于生产网络、真实 CNI 或正式 rollout                                         |
+| Docker real Provider fault-injection transport      | 实现期容器探针与 Docker 16/16 已通过   | 401/429/精确 Host crash 已实现；尚无真实 Provider Credential 报告               |
 | SSH fixture                                         | 2026-07-14 disposable VM 13/13         | 不是当前 Commit 的真实 Provider gate                                            |
 | Kubernetes fixture                                  | clean commit `2763ebd3` 13/13          | 不是当前 Commit 的真实 Provider gate                                            |
 

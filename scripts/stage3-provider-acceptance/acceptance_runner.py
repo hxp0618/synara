@@ -106,6 +106,7 @@ REAL_PROVIDER_FAILURE_CASES = (
     "provider-host-crash-retry",
     "cursor-expiry",
 )
+REAL_PROVIDER_HTTP_FAULT_TARGETS = ("local", "docker")
 REAL_PROVIDER_CURSOR_MAX_AGE = "1s"
 REAL_PROVIDER_CURSOR_EXPIRY_WAIT_SECONDS = 1.25
 REAL_PROVIDER_CASE_METADATA: Mapping[str, Mapping[str, str]] = {
@@ -1188,12 +1189,29 @@ class _WorkerOnlyProxy:
 class _ProviderFaultServer:
     """Return bounded Provider-shaped HTTP failures without retaining request bodies or Secrets."""
 
-    def __init__(self, provider: str, fault: str) -> None:
+    def __init__(
+        self,
+        provider: str,
+        fault: str,
+        *,
+        listen_host: str = "127.0.0.1",
+        advertised_host: str | None = None,
+    ) -> None:
         if fault not in {"authentication", "rate-limit"}:
             raise ValueError(f"unsupported Provider HTTP fault: {fault}")
+        advertised_host = advertised_host or listen_host
+        if listen_host not in {"127.0.0.1", "0.0.0.0"}:
+            raise ValueError("Provider fault server listen host must be loopback or all IPv4 interfaces")
+        if re.fullmatch(r"[A-Za-z0-9._-]+", advertised_host) is None:
+            raise ValueError("Provider fault server advertised host is invalid")
         self.provider = provider
         self.fault = fault
+        self.listen_host = listen_host
+        self.advertised_host = advertised_host
+        self.route_token = uuid.uuid4().hex
+        self.route_prefix = f"/{self.route_token}"
         self._requests: list[dict[str, Any]] = []
+        self._unscoped_request_count = 0
         self._lock = threading.Lock()
         fault_server = self
 
@@ -1228,6 +1246,17 @@ class _ProviderFaultServer:
 
             def _respond(self) -> None:
                 parsed = urllib.parse.urlsplit(self.path)
+                if not (
+                    parsed.path == fault_server.route_prefix
+                    or parsed.path.startswith(fault_server.route_prefix + "/")
+                ):
+                    with fault_server._lock:
+                        fault_server._unscoped_request_count += 1
+                    self._write_response(
+                        404,
+                        {"error": {"type": "not_found", "message": "Not found."}},
+                    )
+                    return
                 credential_headers = sorted(
                     name.lower()
                     for name in ("Authorization", "X-Api-Key")
@@ -1241,12 +1270,15 @@ class _ProviderFaultServer:
                     fault_server._requests.append(
                         {
                             "method": self.command,
-                            "path": parsed.path[:500],
+                            "path": (parsed.path[len(fault_server.route_prefix) :] or "/")[:500],
                             "contentLength": min(content_length, 16 << 20),
                             "credentialHeaderNames": credential_headers,
                         }
                     )
                 status, payload = fault_server._response()
+                self._write_response(status, payload)
+
+            def _write_response(self, status: int, payload: Mapping[str, Any]) -> None:
                 encoded = json.dumps(payload, separators=(",", ":")).encode("utf-8")
                 try:
                     self.send_response(status)
@@ -1263,7 +1295,7 @@ class _ProviderFaultServer:
                     return None
 
         try:
-            self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+            self.server = http.server.ThreadingHTTPServer((self.listen_host, 0), Handler)
         except OSError as error:
             raise AcceptanceError(
                 "runner.provider_fault_server_start_failed",
@@ -1280,7 +1312,7 @@ class _ProviderFaultServer:
 
     @property
     def endpoint(self) -> str:
-        return f"http://127.0.0.1:{self.port}"
+        return f"http://{self.advertised_host}:{self.port}{self.route_prefix}"
 
     @property
     def credential_base_url(self) -> str:
@@ -1302,6 +1334,7 @@ class _ProviderFaultServer:
     def evidence(self) -> Mapping[str, Any]:
         with self._lock:
             requests = tuple(dict(request) for request in self._requests)
+            unscoped_request_count = self._unscoped_request_count
         credential_headers = sorted(
             {
                 str(header)
@@ -1311,6 +1344,11 @@ class _ProviderFaultServer:
         )
         return {
             "fault": self.fault,
+            "listenAddress": self.listen_host,
+            "advertisedHost": self.advertised_host,
+            "port": self.port,
+            "routeTokenPersisted": False,
+            "unscopedRequestCount": unscoped_request_count,
             "responseStatus": 401 if self.fault == "authentication" else 429,
             "requestCount": len(requests),
             "methods": sorted({str(request.get("method")) for request in requests}),
@@ -1632,6 +1670,31 @@ class LocalDriver:
             f"The {self.name} TargetDriver does not support pending interaction runtime recovery.",
             {"target": self.name},
         )
+
+    def create_provider_fault_server(self, provider: str, fault: str) -> _ProviderFaultServer:
+        if self.name != "local":
+            raise AcceptanceUnsupported(
+                "runner.real_provider_http_fault_target_unsupported",
+                "The selected Target does not implement a scoped Provider HTTP fault endpoint.",
+                {"target": self.name, "requiredTargets": list(REAL_PROVIDER_HTTP_FAULT_TARGETS)},
+            )
+        return _ProviderFaultServer(provider, fault)
+
+    def probe_provider_fault_server(
+        self,
+        _server: _ProviderFaultServer,
+    ) -> Mapping[str, Any]:
+        if self.name != "local":
+            raise AcceptanceUnsupported(
+                "runner.real_provider_http_fault_target_unsupported",
+                "The selected Target does not implement Provider fault endpoint reachability validation.",
+                {"target": self.name, "requiredTargets": list(REAL_PROVIDER_HTTP_FAULT_TARGETS)},
+            )
+        return {
+            "target": self.name,
+            "transport": "host-loopback",
+            "probedFromWorker": False,
+        }
 
     def crash_provider_host(self) -> Mapping[str, Any]:
         if self.name != "local" or os.name != "posix":
@@ -2203,6 +2266,66 @@ class DockerDriver(ManagedWorkerDriver):
     def worker_proxy_host(self) -> str:
         return self.options.docker_control_plane_host
 
+    def create_provider_fault_server(self, provider: str, fault: str) -> _ProviderFaultServer:
+        return _ProviderFaultServer(
+            provider,
+            fault,
+            listen_host="0.0.0.0",
+            advertised_host=self.worker_proxy_host,
+        )
+
+    def _required_managed_container_id(self, operation: str) -> str:
+        target_id = self.target_id
+        if target_id is None:
+            raise AcceptanceError(
+                "runner.docker_target_id_missing",
+                f"Docker {operation} was requested before Target provisioning.",
+            )
+        snapshot = self._wait_container(target_id)
+        container_id = str(snapshot.get("Id") or "")
+        if not container_id:
+            raise AcceptanceError(
+                "runner.docker_container_id_missing",
+                f"Managed Docker Worker inspect omitted its container ID during {operation}.",
+            )
+        return container_id
+
+    def probe_provider_fault_server(
+        self,
+        server: _ProviderFaultServer,
+    ) -> Mapping[str, Any]:
+        container_id = self._required_managed_container_id(
+            "Provider fault endpoint reachability validation"
+        )
+        expected_status = 401 if server.fault == "authentication" else 429
+        script = (
+            "const expected=Number(process.argv[1]);"
+            "fetch(process.argv[2],{method:'HEAD'}).then((response)=>{"
+            "if(response.status!==expected){process.exitCode=2;}"
+            "}).catch(()=>{process.exitCode=3;});"
+        )
+        self._docker_command(
+            [
+                "exec",
+                container_id,
+                "node",
+                "-e",
+                script,
+                str(expected_status),
+                server.credential_base_url,
+            ],
+            maximum_timeout=15.0,
+        )
+        return {
+            "target": self.name,
+            "transport": "host-gateway",
+            "advertisedHost": self.worker_proxy_host,
+            "containerId": container_id[:12],
+            "expectedStatus": expected_status,
+            "probedFromWorker": True,
+            "endpointPersisted": False,
+        }
+
     def prepare(self) -> Mapping[str, Any]:
         control_plane = super().prepare()
         image_evidence = self._prepare_worker_image(
@@ -2424,6 +2547,103 @@ class DockerDriver(ManagedWorkerDriver):
                     "requiredInputs": ["--docker-allow-network-interruption"],
                 },
             )
+
+    def crash_provider_host(self) -> Mapping[str, Any]:
+        container_id = self._required_managed_container_id("Provider Host crash injection")
+        script = (
+            "const fs=require('node:fs');"
+            "const needle=['--protocol','-v2'].join('');"
+            "const processes=new Map();"
+            "for(const entry of fs.readdirSync('/proc',{withFileTypes:true})){"
+            "if(!entry.isDirectory()||!/^[0-9]+$/.test(entry.name))continue;"
+            "const pid=Number(entry.name);"
+            "try{"
+            "const stat=fs.readFileSync('/proc/'+pid+'/stat','utf8');"
+            "const close=stat.lastIndexOf(')');"
+            "const fields=stat.slice(close+2).trim().split(/\\s+/);"
+            "const ppid=Number(fields[1]);"
+            "const command=fs.readFileSync('/proc/'+pid+'/cmdline').toString('utf8').replace(/\\0/g,' ');"
+            "processes.set(pid,{ppid,command});"
+            "}catch{}"
+            "}"
+            "const descendants=new Set([1]);"
+            "let changed=true;"
+            "while(changed){changed=false;for(const [pid,value] of processes){"
+            "if(!descendants.has(pid)&&descendants.has(value.ppid)){descendants.add(pid);changed=true;}"
+            "}}"
+            "const candidates=[];"
+            "for(const [pid,value] of processes){"
+            "if(pid!==1&&descendants.has(pid)&&value.command.includes(needle))candidates.push(pid);"
+            "}"
+            "candidates.sort((left,right)=>left-right);"
+            "const result={candidateCount:candidates.length,descendantCount:Math.max(0,descendants.size-1)};"
+            "if(candidates.length===1){"
+            "result.providerHostPid=candidates[0];"
+            "try{process.kill(candidates[0],'SIGKILL');result.killed=true;}"
+            "catch(error){result.killed=false;result.killError=error&&error.code?String(error.code):'unknown';}"
+            "}"
+            "process.stdout.write(JSON.stringify(result));"
+        )
+        output = self._docker_command(
+            ["exec", container_id, "node", "-e", script],
+            maximum_timeout=15.0,
+        )
+        try:
+            result = json.loads(output)
+        except json.JSONDecodeError:
+            raise AcceptanceError(
+                "runner.provider_host_process_scan_failed",
+                "Docker Provider Host process scan returned invalid JSON.",
+            ) from None
+        if not isinstance(result, dict):
+            raise AcceptanceError(
+                "runner.provider_host_process_scan_failed",
+                "Docker Provider Host process scan returned an invalid payload.",
+            )
+        candidate_count = result.get("candidateCount")
+        descendant_count = result.get("descendantCount")
+        if (
+            type(candidate_count) is not int
+            or candidate_count < 0
+            or type(descendant_count) is not int
+            or descendant_count < 0
+        ):
+            raise AcceptanceError(
+                "runner.provider_host_process_scan_failed",
+                "Docker Provider Host process scan returned invalid process counts.",
+            )
+        if candidate_count != 1:
+            raise AcceptanceError(
+                "runner.provider_host_process_ambiguous",
+                "Expected exactly one Provider Host process inside the managed Docker Worker.",
+                {
+                    "target": self.name,
+                    "containerId": container_id[:12],
+                    "candidateCount": candidate_count,
+                    "descendantCount": descendant_count,
+                },
+            )
+        provider_host_pid = result.get("providerHostPid")
+        if type(provider_host_pid) is not int or provider_host_pid < 2 or result.get("killed") is not True:
+            raise AcceptanceError(
+                "runner.provider_host_process_disappeared",
+                "The scoped Docker Provider Host exited before crash injection completed.",
+                {
+                    "target": self.name,
+                    "containerId": container_id[:12],
+                    "providerHostPid": provider_host_pid,
+                    "killError": result.get("killError"),
+                },
+            )
+        return {
+            "target": self.name,
+            "containerId": container_id[:12],
+            "providerHostPid": provider_host_pid,
+            "signal": signal.Signals(signal.SIGKILL).name,
+            "scopedToManagedContainer": True,
+            "scopedToAgentdDescendants": True,
+            "broadProcessMatchUsed": False,
+        }
 
     def collect_failure_diagnostics(self, case_id: str) -> Mapping[str, Any]:
         evidence = dict(super().collect_failure_diagnostics(case_id))
@@ -6064,22 +6284,26 @@ class AcceptanceSuite:
         fault: str,
         expected_failure_code: str,
     ) -> Mapping[str, Any]:
-        if self.driver.name != "local":
+        create_fault_server = getattr(self.driver, "create_provider_fault_server", None)
+        probe_fault_server = getattr(self.driver, "probe_provider_fault_server", None)
+        if not callable(create_fault_server) or not callable(probe_fault_server):
             raise AcceptanceUnsupported(
                 "runner.real_provider_http_fault_target_unsupported",
-                "The runner-owned Provider HTTP fault endpoint is currently reachable only from the Local Target.",
+                "The selected Target does not implement a scoped Provider HTTP fault endpoint.",
                 {
                     "target": self.driver.name,
                     "failureCase": failure_case,
-                    "requiredTarget": "local",
+                    "requiredTargets": list(REAL_PROVIDER_HTTP_FAULT_TARGETS),
                 },
             )
-        fault_server = _ProviderFaultServer(self.options.provider, fault)
+        fault_server = create_fault_server(self.options.provider, fault)
         fault_secret = f"stage3-provider-fault-{uuid.uuid4()}"
         self.redactor.add(fault_secret, "[REDACTED_PROVIDER_FAULT_CREDENTIAL]")
         self.redactor.add(fault_server.endpoint, "[REDACTED_PROVIDER_FAULT_ENDPOINT]")
+        self.redactor.add(fault_server.route_token, "[REDACTED_PROVIDER_FAULT_ROUTE]")
         fault_server.start()
         try:
+            reachability = dict(probe_fault_server(fault_server))
             credential = self._create_real_provider_credential(
                 title=f"Stage 3 Real Provider {failure_case}",
                 payload={
@@ -6133,7 +6357,11 @@ class AcceptanceSuite:
                 },
             )
         encoded_events = json.dumps(events, separators=(",", ":"), ensure_ascii=False)
-        if fault_secret in encoded_events or fault_server.endpoint in encoded_events:
+        if (
+            fault_secret in encoded_events
+            or fault_server.endpoint in encoded_events
+            or fault_server.route_token in encoded_events
+        ):
             raise AcceptanceError(
                 "runner.real_provider_failure_secret_leak",
                 "The real Provider failure events exposed controlled Credential or endpoint material.",
@@ -6153,7 +6381,7 @@ class AcceptanceSuite:
                 "version": credential.get("version"),
                 "payloadPersistedInReport": False,
             },
-            "faultServer": fault_evidence,
+            "faultServer": {**fault_evidence, "reachability": reachability},
             "singleTerminal": True,
             "credentialLeak": False,
             "recovery": recovery,

@@ -136,27 +136,47 @@ python3 scripts/stage3-provider-acceptance/acceptance_runner.py \
   --timeout 420
 ```
 
+Docker uses the same cases with a controlled product Credential for the baseline and recovery Turns. Set the
+secret out of band and pass only its environment-variable name:
+
+```sh
+python3 scripts/stage3-provider-acceptance/acceptance_runner.py \
+  --suite real-provider-smoke \
+  --target docker \
+  --provider codex \
+  --runner-command-json '["/usr/local/bin/provider-host"]' \
+  --real-provider-credential-env SYNARA_ACCEPTANCE_CODEX_KEY \
+  --real-provider-failure-matrix \
+  --timeout 1800
+```
+
 Use repeated `--real-provider-failure-case` flags for focused iteration. Product-path `--real-provider-case`
 options and failure options cannot be combined in one run; each report therefore has one unambiguous evidence
 boundary. The canonical failure cases are:
 
-| Case                        | Product-path assertion                                                                                |
-| --------------------------- | ----------------------------------------------------------------------------------------------------- |
-| `authentication`            | loopback Provider HTTP 401, stable `authentication_required`, no Credential leak, new Execution works |
-| `rate-limit-retry`          | loopback Provider HTTP 429, stable `provider_rate_limited`, new Execution recovery                    |
-| `provider-host-crash-retry` | kill only the active isolated `--protocol-v2` descendant after `item.started`, then recover           |
-| `cursor-expiry`             | expire the authenticated Cursor through policy, restart, and select `authoritative-history`           |
+| Case                        | Product-path assertion                                                                             |
+| --------------------------- | -------------------------------------------------------------------------------------------------- |
+| `authentication`            | controlled Provider HTTP 401, stable `authentication_required`, no Credential leak, recovery works |
+| `rate-limit-retry`          | controlled Provider HTTP 429, stable `provider_rate_limited`, new Execution recovery               |
+| `provider-host-crash-retry` | kill only the active Target-scoped `--protocol-v2` descendant after `item.started`, then recover   |
+| `cursor-expiry`             | expire the authenticated Cursor through policy, restart, and select `authoritative-history`        |
 
-The fault server never retains request bodies or Credential values. It reports only bounded method/path/header
-name/count evidence. Codex controlled credentials use an execution-local `CODEX_HOME`; Claude controlled
-credentials use the existing execution-local `CLAUDE_CONFIG_DIR`. Cursor expiry does not edit SQLite or Cursor
-bytes. `--keep` can preserve isolated state for diagnosis, but that binary state is local-only evidence and must
-not be committed.
+The fault server never retains request bodies or Credential values. Every run uses an unguessable route prefix
+that is registered with output redaction and omitted from report paths. Local binds only loopback. Docker binds an
+ephemeral host port, advertises the configured `--docker-control-plane-host`, and probes the endpoint from the exact
+managed Worker container before creating the fault Session. Docker Host crash injection executes inside that same
+container, walks only PID 1 descendants, requires exactly one `--protocol-v2` process, and fails closed instead of
+using a host-wide process match. Codex controlled credentials use an execution-local `CODEX_HOME`; Claude
+controlled credentials use the existing execution-local `CLAUDE_CONFIG_DIR`. Cursor expiry does not edit SQLite or
+Cursor bytes. `--keep` can preserve isolated state for diagnosis, but that binary state is local-only evidence and
+must not be committed.
 
 The latest clean-worktree Node.js 24.13.1 Codex and Claude Local results are recorded in
 `docs/reports/stage-3-real-provider-local-failure-matrix-61e38f4f.md`. Both pass all 16 cases, exact cleanup and the
-output Secret scan. This closes the implemented Local failure slice only; SSH/Docker/Kubernetes, consolidated
-Local release, concurrency and soak gates remain open.
+output Secret scan. Docker 401/429 reachability and scoped Host crash now have implementation-time unit, real
+container and deterministic Target regression coverage, but no real Docker Codex/Claude failure report exists
+without an operator-provided controlled product Credential. The clean evidence therefore still closes only the
+Local failure slice; SSH/Docker/Kubernetes release, concurrency and soak gates remain open.
 
 ## Consolidated real Provider Local release gate
 
