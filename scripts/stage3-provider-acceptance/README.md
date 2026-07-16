@@ -95,6 +95,43 @@ patterns. The report records only file, pattern name, and byte offset; it never 
 SQLite and Artifact payloads are deliberately excluded from this output scan and remain covered by their own
 storage/SecretGuard acceptance.
 
+## Real Provider failure and recovery matrix
+
+Real Provider failures use a separate canonical run so the stable product/capability matrix is not polluted by
+controlled 401/429 credentials, a deliberate Host kill, or a one-second Cursor policy:
+
+```sh
+python3 scripts/stage3-provider-acceptance/acceptance_runner.py \
+  --suite real-provider-smoke \
+  --target local \
+  --provider codex \
+  --runner-command-json '["/absolute/path/to/node-24.13.1","/absolute/path/to/apps/provider-host/dist/index.mjs"]' \
+  --real-provider-failure-matrix \
+  --timeout 420
+```
+
+Use repeated `--real-provider-failure-case` flags for focused iteration. Product-path `--real-provider-case`
+options and failure options cannot be combined in one run; each report therefore has one unambiguous evidence
+boundary. The canonical failure cases are:
+
+| Case                        | Product-path assertion                                                                                |
+| --------------------------- | ----------------------------------------------------------------------------------------------------- |
+| `authentication`            | loopback Provider HTTP 401, stable `authentication_required`, no Credential leak, new Execution works |
+| `rate-limit-retry`          | loopback Provider HTTP 429, stable `provider_rate_limited`, new Execution recovery                    |
+| `provider-host-crash-retry` | kill only the active isolated `--protocol-v2` descendant after `item.started`, then recover           |
+| `cursor-expiry`             | expire the authenticated Cursor through policy, restart, and select `authoritative-history`           |
+
+The fault server never retains request bodies or Credential values. It reports only bounded method/path/header
+name/count evidence. Codex controlled credentials use an execution-local `CODEX_HOME`; Claude controlled
+credentials use the existing execution-local `CLAUDE_CONFIG_DIR`. Cursor expiry does not edit SQLite or Cursor
+bytes. `--keep` can preserve isolated state for diagnosis, but that binary state is local-only evidence and must
+not be committed.
+
+The latest clean-worktree Node.js 24.13.1 Codex and Claude Local results are recorded in
+`docs/reports/stage-3-real-provider-local-failure-matrix-61e38f4f.md`. Both pass all 16 cases, exact cleanup and the
+output Secret scan. This closes the implemented Local failure slice only; SSH/Docker/Kubernetes, consolidated
+Local release, concurrency and soak gates remain open.
+
 ## Deterministic failure and canary matrix
 
 The fault matrix is opt-in so the default core suite remains stable and fast:

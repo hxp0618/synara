@@ -1039,7 +1039,7 @@ Snapshot 冒充 standalone Artifact。两条真实 Local matrix 均在 `workspac
 `generated_file`，经用户下载授权重新读取后验证精确 `43 B`、SHA-256、Metadata 和无物理路径泄漏；随后
 同一 Execution 的大文件仍按既有 Checkpoint 顺序完成。Codex 为 `21 pass + 1 unsupported`，Claude 为
 `20 pass + 2 unsupported`。该证据关闭已实现的 Local standalone Generated File ArtifactCandidate；大
-Diff、跨 Target、Retention 并发和真实 Provider failure matrix 仍保持开放。详见
+Diff、跨 Target 与 Retention 并发仍保持开放。详见
 `docs/reports/stage-3-real-provider-local-standalone-generated-file-matrix-be919393.md`。
 
 2026-07-16 clean commit `90fae52c` 把 canonical matrix 扩展为第 11 个 `large-diff` case。Codex 为
@@ -1050,8 +1050,18 @@ Claude 为 `21 pass + 2 unsupported`，通过 canonical Workspace realpath alias
 `artifact.ready -> turn.diff.updated -> execution.completed` 严格顺序、无 inline 大 Payload、无 Runtime
 Output 物理路径、Control Plane restart/Cursor 连续性、精确 cleanup 和零 Secret finding。先前隔离运行与
 agentd 回归还覆盖删除最后一个非 Git 文件后的空 Snapshot Checkpoint。该证据关闭实现层面的真实 Local
-Large Diff 路径；跨 Target、Retention 并发和真实 Provider failure matrix 仍保持开放。详见
+Large Diff 路径；跨 Target 与 Retention 并发仍保持开放。详见
 `docs/reports/stage-3-real-provider-local-large-diff-matrix-90fae52c.md`。
+
+2026-07-16 clean commit `61e38f4f` 新增独立真实 Provider failure matrix。Codex 与 Claude Agent 均以
+Node.js `24.13.1` 通过 `16/16`：Runner-owned loopback 401/429 分别稳定映射
+`authentication_required` / `provider_rate_limited`，每个故障后均由新 Execution 恢复；Host crash 只在
+隔离 Control Plane 子树内等待真实 `item.started` 后 `SIGKILL` 唯一 `--protocol-v2` 进程；Cursor 通过
+`SYNARA_PROVIDER_CURSOR_MAX_AGE=1s` 自然过期，restart 后租约选择
+`authoritative-history / cursor_expired` 并精确恢复上一轮 marker。Codex controlled Credential 使用
+execution-local `CODEX_HOME`，Claude 对稳定 401/429 SDK `api_retry` 结束隐藏重试；两份 cleanup 和 Secret
+scan 均通过。该证据关闭实现层面的真实 Local failure slice，不关闭跨 Target、并发或 soak。详见
+`docs/reports/stage-3-real-provider-local-failure-matrix-61e38f4f.md`。
 
 ## 15. 工作流 J：Worker Drain、升级与版本隔离
 
@@ -1393,8 +1403,10 @@ Provider × Capability × Execution Target
   replacement、Workspace 连续性、Control Plane 重启、第二 Turn、revoke 与精确 VM 清理；另行对报告和
   日志执行的 Secret Scan 未发现 Private Key 模式。该结果不等于真实 Codex/Claude Adapter Release
   Acceptance；真实 Codex/Claude 各 Target、registry-pushed multi-arch rollout、长 Session、生产多节点
-  Kubernetes 和真实 Provider 故障矩阵仍待执行，不得声称四 Target 统一发布门禁已完成。当前证据汇总见
-  `docs/reports/stage-3-provider-runtime-acceptance-fb9e25ec.md`；早期 dirty-worktree/fixture 汇总保留在
+  Kubernetes 仍待执行；clean commit `61e38f4f` 只关闭真实 Local failure slice，不得声称四 Target 统一
+  发布门禁已完成。当前 failure 证据见
+  `docs/reports/stage-3-real-provider-local-failure-matrix-61e38f4f.md`，较早总体证据见
+  `docs/reports/stage-3-provider-runtime-acceptance-fb9e25ec.md`；dirty-worktree/fixture 汇总保留在
   `docs/reports/stage-3-provider-runtime-acceptance-2026-07-15.md`。
 
 ## 18. 实施顺序
@@ -1458,8 +1470,9 @@ Provider × Capability × Execution Target
   2026-07-14 历史 fixture 证据。真实 Codex/Claude 已在 clean commit `fb9e25ec` 通过 Local 产品路径
   两轮 restart/native-Cursor smoke，clean commit `be919393` 的完整 Local matrix 也通过 standalone
   Generated File Artifact 与 Workspace Checkpoint 捕获；clean commit `90fae52c` 的 Codex/Claude 11-case
-  matrix 也通过真实 Local Large Diff。真实 Provider failure、完整 Local、SSH、Docker、Kubernetes Gate
-  与 soak 尚未完成。
+  matrix 也通过真实 Local Large Diff；clean commit `61e38f4f` 的两份独立 failure matrix 各通过
+  `16/16` 真实 401/429、scoped Host crash 和 Cursor expiry/restart。完整 consolidated Local、SSH、Docker、
+  Kubernetes Gate 与 soak 尚未完成。
 
 ### Step 8：文档、Runbook 与发布门禁
 
@@ -1647,8 +1660,8 @@ bun run test
 - [ ] Start/Resume/Send/Steer/Interrupt/Compact/Rollback/Fork/Review 语义冻结并测试。
 - [ ] Approval、Structured User Input 和 Plan Mode 可以跨页面刷新、Control Plane 重启恢复。
 - [ ] Runtime Event 版本和未知事件策略完成。
-- [ ] Provider Resume Cursor 失效时可以按策略从权威历史继续。（策略、数据库与 Host 契约测试已完成；
-      真实 Codex/Claude 跨 Target Live Acceptance 仍未完成。）
+- [ ] Provider Resume Cursor 失效时可以按策略从权威历史继续。（策略、数据库与 Host 契约测试已完成，
+      clean commit `61e38f4f` 已通过真实 Codex/Claude Local expiry/restart；跨 Target Live Acceptance 仍未完成。）
 - [ ] Worker/Pod 替换后可继续后续 Turn，Event Sequence 连续。
 - [ ] Worker、Lease、Provider、Git Credential 没有非预期日志或 Artifact 泄漏。
 - [ ] Remote Workspace Clone/Fetch/Worktree/Checkpoint/Cleanup 生命周期完成。
