@@ -527,7 +527,10 @@ the main Target. It verifies:
 - exact Pod image, runtime image ID, Worker Manifest, Release Revision, Channel, digest, Generation, and Node;
 - `1 promote -> 2 canary -> 3 promote -> 4 rollback` strict-CAS history;
 - one busy baseline Pod remains unchanged while a `100%` candidate canary Pod overlaps it;
+- exact candidate Pod deletion preserves the immutable Release and advances only Generation `1 -> 2`;
 - stale CAS rejection plus active baseline/candidate Execution fencing for promote and rollback;
+- six bounded load waves across candidate promotion and baseline rollback, with four Sessions, two Providers, a
+  maximum of two active Pods, exact quota rejection/retry, and one Worker identity per execution-pinned Pod;
 - four release-pinned Approval Executions, six distinct seed/release Executions, one terminal per Execution,
   contiguous Session Event sequences, exact Audit/Outbox history, and an empty output Secret scan;
 - deletion of the owned Kind cluster, Registry container/storage, both Worker images, and isolated state without
@@ -535,8 +538,12 @@ the main Target. It verifies:
 
 The Registry is disposable loopback HTTP without authentication. This gate is deterministic Kubernetes rollout
 mechanics evidence, not production Registry TLS/auth/retention, real Provider, cloud CNI/Eviction, production KMS,
-admission-policy, SLA, or production-duration soak evidence. Clean commit `d1f3b68a` passed `15/15`; the formal
-boundary and hashes are in `docs/reports/stage-3-kubernetes-kind-registry-rollout-d1f3b68a.md`.
+admission-policy, SLA, or production-duration soak evidence. The gate uses an explicit `12s` Lease TTL and `24s`
+heartbeat timeout so local Kind-to-host jitter is not confused with the separate short-Lease network failure matrix.
+Clean commit `39b9b328` passed `15/15` with `24/24` load Executions, `12/12` quota rejection/retry, and `18/18`
+overlap observations; the formal boundary and hashes are in
+`docs/reports/stage-3-kubernetes-kind-rollout-recovery-load-39b9b328.md`. The earlier no-load registry rollout
+checkpoint remains in `docs/reports/stage-3-kubernetes-kind-registry-rollout-d1f3b68a.md`.
 
 ## Docker immutable Worker Release rollout gate
 

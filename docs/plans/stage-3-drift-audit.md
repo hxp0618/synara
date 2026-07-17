@@ -1,6 +1,15 @@
 # Stage 3 Drift Audit
 
-Baseline: `codex/saas-tenancy-user` after clean commit `1e826324`, adding the operator-approved reusable `orbstack`
+Current baseline: `codex/saas-tenancy-user` after clean commit `39b9b328`. The owned disposable
+one-control-plane/two-Worker Kind Worker Release gate now combines registry-pushed immutable rollout, exact candidate
+Pod-loss recovery, transition fencing, and bounded load in one clean-SHA report: `15/15` cases, Generation `1 -> 2`
+only for the deleted candidate Pod, `24/24` execution-pinned load Executions, `12/12` quota rejection/retry,
+`18/18` overlap, `24/24` release-pin/Worker-binding/resource-profile checks, paginated `2097`-entry Audit history,
+six published Outbox messages, exact cleanup, and zero Secret findings. The two concurrent Pods were observed across
+the two schedulable Worker Nodes. See
+`docs/reports/stage-3-kubernetes-kind-rollout-recovery-load-39b9b328.md`.
+
+Earlier evidence chain: `codex/saas-tenancy-user` after clean commit `1e826324`, adding the operator-approved reusable `orbstack`
 Kubernetes deterministic fixture/failure gate `19/19`, shared local image transport, exact Pod Eviction and cleanup
 on top of clean commit `41683366`'s deterministic managed Docker immutable Worker Release candidate container-loss
 recovery under baseline/canary overlap, `25` release-pinned load waves
@@ -130,6 +139,18 @@ Acceptance Fixture used by Codex and Claude.
 > the other Worker while the source remains cordoned. Separate direct Eviction, Canary, restart, cleanup and Secret
 > scan also pass. This does not close real Provider, production multi-node/cloud CNI, immutable registry rollout or
 > production load/soak. See `docs/reports/stage-3-kubernetes-kind-pdb-multinode-aa1d0225.md`.
+
+> 2026-07-18 Kubernetes rollout recovery/load correction: clean commit `39b9b328` supersedes J/L wording that still
+> lists deterministic multi-node immutable rollout under bounded load as missing. The `15/15` owned-Kind gate pulls
+> two distinct Registry digests, performs strict `promote -> 100% canary -> promote -> rollback`, deletes only the
+> candidate Pod, preserves the immutable Release while advancing Generation exactly `1 -> 2`, and blocks unsafe
+> promote/rollback throughout recovery. Six waves complete `24/24` load Executions with `12/12` quota
+> rejection/retry, `18/18` overlap, `24/24` pin/binding/resource checks, no double execution or duplicate terminal,
+> Audit `2097` entries/`11` pages, six published Outbox messages, exact cleanup, and zero Secret findings. Stage 3
+> Python is `296/296`; focused `agentd` and `workerreleases` Go tests pass. This remains deterministic fixture
+> evidence: real SSH/Docker/Kubernetes Provider aggregates, numeric production SLA/soak, production Registry, and
+> concrete KMS signer identity/tlog/admission remain open. See
+> `docs/reports/stage-3-kubernetes-kind-rollout-recovery-load-39b9b328.md`.
 
 ### 2026-07-15 Advanced Session operation evidence update
 

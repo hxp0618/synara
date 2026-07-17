@@ -7,8 +7,10 @@ multi-arch 镜像、多节点生产 Kubernetes 和 soak 尚未完成前，只能
 发布门禁见 `docs/release-checklists/stage-3-provider-runtime-remote-worker.md`；最新 deterministic managed
 Docker rollout/failure/load 证据见 `docs/reports/stage-3-worker-release-rollout-load-41683366.md`，前序 Busy
 Worker rollout 证据保留在 `docs/reports/stage-3-worker-release-rollout-d3af9380.md`，总体 Provider runtime
-证据见 `docs/reports/stage-3-provider-runtime-acceptance-2026-07-15.md`。deterministic Kubernetes
-registry-pushed rollout 证据见 `docs/reports/stage-3-kubernetes-kind-registry-rollout-d1f3b68a.md`。
+证据见 `docs/reports/stage-3-provider-runtime-acceptance-2026-07-15.md`。最新 deterministic Kubernetes
+registry-pushed recovery/load 证据见
+`docs/reports/stage-3-kubernetes-kind-rollout-recovery-load-39b9b328.md`，前序无负载 rollout checkpoint 保留在
+`docs/reports/stage-3-kubernetes-kind-registry-rollout-d1f3b68a.md`。
 
 ## 1. 核心不变量
 
@@ -20,7 +22,8 @@ registry-pushed rollout 证据见 `docs/reports/stage-3-kubernetes-kind-registry
   desired capacity，但不得错误占用另一 canary/promoted slot。只有 Execution 到达安全终态并释放 Lease 后
   才允许替换。
 - managed Local、SSH、Docker 和 Kubernetes agentd 的 Lease renewal interval 从 Control Plane Worker Lease
-  TTL 派生，约为 TTL 的三分之一；不得依赖可能长于权威 TTL 的固定默认值。
+  TTL 派生，约为 TTL 的三分之一；单次 renew 请求 timeout 不得长于 renew interval，也不得依赖可能长于
+  权威 TTL 的固定默认值。
 - Canary、Promote、Rollback 都写 immutable Transition、Audit 和 Outbox 记录。
 - 每个 Target 最多一个 active `worker_image_pull` Binding；`000039` 在历史歧义未清理时拒绝升级。
 - `000040` 要求最新 immutable Transition 与当前 Policy 的 Tenant、Target、Version、promoted、canary
@@ -83,7 +86,8 @@ python3 scripts/stage3-provider-acceptance/kubernetes_worker_release_rollout_gat
 
 该命令创建 one-control-plane/two-Worker disposable Kind、runner-owned loopback Registry 和 containerd exact
 authority mirror，真实拉取同一 repository 下两个不同 immutable digest；随后通过正式 API 完成
-`promote -> canary -> promote -> rollback`，验证 Pod/Worker/Manifest/Execution 的 Revision、Channel、Digest、
+`promote -> canary -> promote -> rollback`，验证 candidate Pod-loss Generation `1 -> 2`、busy baseline 保持、
+六波四 Session bounded load、quota rejection/retry、execution-pinned Worker identity、Pod resource profile、
 活动 Execution 阻断、Audit、Outbox、Event Sequence、Secret scan 与精确 cleanup。它仍不使用生产 Registry
 Credential/TLS、生产 KMS/tlog/admission、真实 Provider 或生产负载/SLA，因此不能替代生产发布观察窗口。
 
