@@ -3076,12 +3076,32 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
                 },
                 {
                     "sequence": 2,
+                    "eventType": "runtime.warning",
+                    "executionId": "execution-1",
+                    "payload": {
+                        "message": "Provider warning contained diagnostic-secret",
+                        "detail": {"reasonCode": "session_resume_invalid"},
+                    },
+                },
+                {
+                    "sequence": 3,
+                    "eventType": "item.completed",
+                    "executionId": "execution-1",
+                    "payload": {
+                        "itemType": "command_execution",
+                        "status": "completed",
+                        "title": "command diagnostic-secret",
+                    },
+                },
+                {
+                    "sequence": 4,
                     "eventType": "execution.completed",
                     "executionId": "execution-1",
                     "payload": {"turnId": "turn-1"},
                 },
             ]
         )
+        suite.redactor.add("diagnostic-secret")
 
         with self.assertRaises(acceptance.AcceptanceError) as caught:
             acceptance.AcceptanceSuite._wait_for_interaction(suite, "turn-1", "approval")
@@ -3089,6 +3109,57 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
         self.assertEqual(caught.exception.code, "runner.interaction_missing_after_terminal")
         self.assertEqual(caught.exception.evidence["expectedInteractionKind"], "approval")
         self.assertEqual(caught.exception.evidence["terminal"]["eventType"], "execution.completed")
+        self.assertEqual(
+            caught.exception.evidence["runtimeWarnings"][0]["detail"]["reasonCode"],
+            "session_resume_invalid",
+        )
+        self.assertNotIn(
+            "diagnostic-secret",
+            json.dumps(caught.exception.evidence, separators=(",", ":")),
+        )
+        self.assertEqual(
+            caught.exception.evidence["providerItems"][0]["itemType"],
+            "command_execution",
+        )
+
+    def test_terminal_mismatch_includes_redacted_failure_classification(self) -> None:
+        suite = BarrierSuite(acceptance.EXECUTION_PINNED_WORKER)
+        suite.redactor.add("diagnostic-secret")
+        suite._all_events = mock.Mock(  # type: ignore[method-assign]
+            return_value=[
+                {
+                    "sequence": 1,
+                    "eventType": "turn.created",
+                    "executionId": "execution-1",
+                    "payload": {"turnId": "turn-1"},
+                },
+                {
+                    "sequence": 2,
+                    "eventType": "execution.failed",
+                    "executionId": "execution-1",
+                    "workerId": "worker-1",
+                    "generation": 1,
+                    "payload": {
+                        "turnId": "turn-1",
+                        "failureCode": "provider_unavailable",
+                        "failureMessage": "Provider stream failed diagnostic-secret",
+                    },
+                },
+            ]
+        )
+
+        with self.assertRaises(acceptance.AcceptanceError) as caught:
+            acceptance.AcceptanceSuite._wait_for_turn_terminal(
+                suite,
+                "turn-1",
+                "execution.completed",
+            )
+
+        self.assertEqual(caught.exception.code, "runner.turn_terminal_mismatch")
+        failure = caught.exception.evidence["terminal"]["failure"]
+        self.assertEqual(failure["code"], "provider_unavailable")
+        self.assertIn("[REDACTED]", failure["message"]["preview"])
+        self.assertNotIn("diagnostic-secret", json.dumps(caught.exception.evidence))
 
     def test_standing_worker_preserves_existing_case_order(self) -> None:
         suite = CaseOrderSuite(FakeDriver(acceptance.STANDING_WORKER))

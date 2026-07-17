@@ -13663,8 +13663,9 @@ class AcceptanceSuite:
                     f"Turn terminated as {terminal.get('eventType')} instead of {expected_event_type}.",
                     {
                         "turnId": turn_id,
-                        "terminal": self._event_summary(terminal),
+                        "terminal": self._terminal_event_summary(terminal),
                         "eventTypes": [event.get("eventType") for event in matching],
+                        "runtimeWarnings": self._runtime_warning_summaries(matching),
                     },
                 )
             if resolved_session_id == self.state.session_id:
@@ -13727,8 +13728,10 @@ class AcceptanceSuite:
             {
                 "turnId": turn_id,
                 "expectedInteractionKind": kind,
-                "terminal": self._event_summary(terminal),
+                "terminal": self._terminal_event_summary(terminal),
                 "eventTypes": [event.get("eventType") for event in matching],
+                "runtimeWarnings": self._runtime_warning_summaries(matching),
+                "providerItems": self._provider_item_summaries(matching),
             },
         )
 
@@ -13944,6 +13947,90 @@ class AcceptanceSuite:
             key: event.get(key)
             for key in ("eventId", "sequence", "eventType", "executionId", "workerId", "generation")
         }
+
+    def _redacted_message_summary(self, value: Any) -> dict[str, Any] | None:
+        if not isinstance(value, str) or not value:
+            return None
+        redacted = self.redactor.text(value)
+        encoded = redacted.encode("utf-8")
+        return {
+            "bytes": len(encoded),
+            "sha256": hashlib.sha256(encoded).hexdigest(),
+            "preview": redacted[:512],
+        }
+
+    def _terminal_event_summary(self, event: Mapping[str, Any]) -> dict[str, Any]:
+        summary = self._event_summary(event)
+        if event.get("eventType") != "execution.failed":
+            return summary
+        payload = event.get("payload")
+        if not isinstance(payload, dict):
+            return summary
+        failure: dict[str, Any] = {}
+        failure_code = payload.get("failureCode")
+        if isinstance(failure_code, str) and failure_code:
+            failure["code"] = failure_code
+        message = self._redacted_message_summary(payload.get("failureMessage"))
+        if message is not None:
+            failure["message"] = message
+        if failure:
+            summary["failure"] = failure
+        return summary
+
+    def _runtime_warning_summaries(
+        self,
+        events: Sequence[Mapping[str, Any]],
+    ) -> list[dict[str, Any]]:
+        summaries: list[dict[str, Any]] = []
+        for event in events:
+            if event.get("eventType") != "runtime.warning":
+                continue
+            payload = event.get("payload")
+            if not isinstance(payload, dict):
+                continue
+            summary = self._event_summary(event)
+            message = self._redacted_message_summary(payload.get("message"))
+            if message is not None:
+                summary["message"] = message
+            detail = payload.get("detail")
+            if isinstance(detail, dict):
+                safe_detail = {
+                    key: detail.get(key)
+                    for key in (
+                        "sourceEventType",
+                        "reasonCode",
+                        "attemptedStrategy",
+                        "selectedStrategy",
+                        "outcome",
+                    )
+                    if isinstance(detail.get(key), (str, bool, int, float))
+                }
+                if safe_detail:
+                    summary["detail"] = safe_detail
+            summaries.append(summary)
+        return summaries[-4:]
+
+    def _provider_item_summaries(
+        self,
+        events: Sequence[Mapping[str, Any]],
+    ) -> list[dict[str, Any]]:
+        summaries: list[dict[str, Any]] = []
+        for event in events:
+            if event.get("eventType") not in {"item.started", "item.updated", "item.completed"}:
+                continue
+            payload = event.get("payload")
+            if not isinstance(payload, dict):
+                continue
+            summary = self._event_summary(event)
+            for key in ("itemType", "status"):
+                value = payload.get(key)
+                if isinstance(value, str) and value:
+                    summary[key] = value
+            title = self._redacted_message_summary(payload.get("title"))
+            if title is not None:
+                summary["title"] = title
+            summaries.append(summary)
+        return summaries[-8:]
 
     @staticmethod
     def _sequence_range(events: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
