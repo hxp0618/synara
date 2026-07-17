@@ -1607,6 +1607,24 @@ Provider × Capability × Execution Target
   under load，不关闭真实 Provider、multi-host/Kubernetes multi-node、Provider process/rollout failure、生产 SLA
   或 production-duration load/soak。完整证据见
   `docs/reports/stage-3-docker-fixture-load-failure-7684c6d8.md`。
+- Clean commit `cfecba63` 在同一 `fixture-load-failure` suite 中加入第三个 barrier：Runner 继续通过
+  `agent_executions.worker_id -> worker_instances.pod_name` 锁定 exact busy container，再以 agentd PID 1 为根
+  扫描 `/proc` descendants，只向唯一 `--protocol-v2` Provider Host 发送 `SIGKILL`，不使用 broad process
+  match。为保持正确终态语义，Control Plane `Fail` 允许 `waiting-for-approval -> failed`，并在同一事务中将该
+  Generation 的 pending Interaction expired/superseded、释放 Lease、写入唯一
+  `execution.failed(provider_unavailable)`；不再错误等待 Lease expiry 或进入 `execution.recovering`。
+- Canonical report `12/12`：受影响 Execution Generation 1 只有一个 failed terminal，新的 Execution ID 在同一
+  logical Worker 上于 `2,335 ms` 内重新入场，Peer Session 的 Event/Interaction/Worker/Generation 保持不变，
+  无 pending Interaction 或 duplicate terminal。随后同四 Session 的 25 波次仍完成 `100/100` Execution、
+  `50/50` quota rejection/slot reuse、`75/75` overlap、Artifact Ready `200`、Checkpoint Ready `100`。Runner unit
+  `135/135`、Stage 3 Python `247/247`、focused Go（含 `executiontargets`）、`bun fmt`、`bun lint`（0 errors /
+  238 existing warnings）和 `bun typecheck`（9/9）均通过；10 files / 2,810,588 bytes Secret scan finding 为零，
+  精确 cleanup 后 owner 资源零残留。完整证据见
+  `docs/reports/stage-3-docker-fixture-load-failure-cfecba63.md`。
+- 该新增证据只关闭 deterministic single-host fixture Provider Host process crash classification and recovery
+  under load；不关闭真实 Provider process failure、multi-host/Kubernetes multi-node、release rollout failure、
+  生产 SLA 或 production-duration load/soak。Workflow L 保持 `partial`，migration boundary 仍为
+  `000041_diff_artifact_kind.sql`。
 
 ## 18. 实施顺序
 
