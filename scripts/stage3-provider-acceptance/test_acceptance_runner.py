@@ -2530,6 +2530,28 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
         self.assertFalse(evidence["doubleExecution"])
         self.assertFalse(evidence["duplicateTerminal"])
 
+    def test_fixture_load_allows_one_explicit_rollout_segment_with_hooks(self) -> None:
+        suite = FixtureLoadSuite(wave_count=2)
+        active: list[str] = []
+        terminal: list[str] = []
+
+        evidence = suite._fixture_load_admission_waves(
+            wave_start=1,
+            wave_count=1,
+            active_validator=lambda load_turn: active.append(
+                str(load_turn["active"]["executionId"])
+            ),
+            terminal_validator=lambda _load_turn, completed: terminal.append(
+                str(completed["executionId"])
+            ),
+        )
+
+        self.assertEqual(evidence["firstWave"], 2)
+        self.assertEqual(evidence["lastWave"], 2)
+        self.assertEqual(evidence["executionsCompleted"], 4)
+        self.assertEqual(len(active), 4)
+        self.assertEqual(terminal, active)
+
     def test_fixture_load_failure_targets_one_worker_and_reuses_sessions_after_recovery(self) -> None:
         suite = FixtureLoadFailureSuite(wave_count=2)
 

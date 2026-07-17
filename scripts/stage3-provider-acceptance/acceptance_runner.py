@@ -11347,13 +11347,15 @@ class AcceptanceSuite:
             Callable[[Mapping[str, Any], Mapping[str, Any]], None] | None
         ) = None,
     ) -> Mapping[str, Any]:
+        segmented = wave_count is not None
         wave_count = self.options.load_waves if wave_count is None else wave_count
-        if not FIXTURE_LOAD_MIN_WAVES <= wave_count <= FIXTURE_LOAD_MAX_WAVES:
+        minimum_waves = 1 if segmented else FIXTURE_LOAD_MIN_WAVES
+        if not minimum_waves <= wave_count <= FIXTURE_LOAD_MAX_WAVES:
             raise AcceptanceError(
                 "runner.load_waves_invalid",
                 "The fixture load wave count was outside the accepted range.",
                 {
-                    "minimum": FIXTURE_LOAD_MIN_WAVES,
+                    "minimum": minimum_waves,
                     "maximum": FIXTURE_LOAD_MAX_WAVES,
                     "actual": wave_count,
                 },
