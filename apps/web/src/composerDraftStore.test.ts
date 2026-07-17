@@ -2260,6 +2260,24 @@ describe("composerDraftStore modelSelection", () => {
     expect(state.stickyActiveProvider).toBe("grok");
   });
 
+  it("stores Antigravity base models and effort options separately", () => {
+    const store = useComposerDraftStore.getState();
+    const selection = modelSelection("antigravity", "Gemini 3.5 Flash", {
+      reasoningEffort: "high",
+    });
+
+    store.setModelSelection(threadId, selection);
+    store.setStickyModelSelection(selection);
+
+    const state = useComposerDraftStore.getState();
+    expect(state.draftsByThreadId[threadId]?.modelSelectionByProvider.antigravity).toEqual(
+      selection,
+    );
+    expect(state.draftsByThreadId[threadId]?.activeProvider).toBe("antigravity");
+    expect(state.stickyModelSelectionByProvider.antigravity).toEqual(selection);
+    expect(state.stickyActiveProvider).toBe("antigravity");
+  });
+
   it("replaces only the targeted provider options on the current model selection", () => {
     const store = useComposerDraftStore.getState();
 
@@ -2451,7 +2469,7 @@ describe("composerDraftStore modelSelection", () => {
         codex: [],
         claudeAgent: [],
         cursor: [],
-        gemini: [],
+        antigravity: [],
         grok: [],
         droid: [],
         kilo: [],
@@ -2479,7 +2497,7 @@ describe("composerDraftStore modelSelection", () => {
         codex: [],
         claudeAgent: [],
         cursor: [],
-        gemini: [],
+        antigravity: [],
         grok: [],
         droid: [],
         kilo: [],
@@ -2610,7 +2628,7 @@ describe("composerDraftStore modelSelection", () => {
         codex: [],
         claudeAgent: [],
         cursor: [],
-        gemini: [],
+        antigravity: [],
         grok: [],
         droid: [],
         kilo: [],
@@ -2643,7 +2661,7 @@ describe("composerDraftStore modelSelection", () => {
         codex: [],
         claudeAgent: [],
         cursor: [],
-        gemini: [],
+        antigravity: [],
         grok: [],
         droid: [],
         kilo: [],

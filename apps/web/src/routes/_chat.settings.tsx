@@ -174,7 +174,9 @@ import { formatWorktreePathForDisplay } from "../worktreeCleanup";
 import { sameProviderOrder } from "../providerOrdering";
 import {
   getVisibleProviderUpdateStatuses,
+  shouldOfferProviderUpdateAction,
   shouldShowProviderUpdateStatus,
+  withProviderUpdateTimeout,
 } from "../providerUpdates";
 
 // ── Settings taxonomy ──────────────────────────────────────────────────────
@@ -226,7 +228,7 @@ const PROVIDER_SELECT_OPTIONS = [
   "codex",
   "claudeAgent",
   "cursor",
-  "gemini",
+  "antigravity",
   "grok",
   "droid",
   "opencode",
@@ -291,7 +293,7 @@ type InstallBinarySettingsKey =
   | "claudeBinaryPath"
   | "codexBinaryPath"
   | "cursorBinaryPath"
-  | "geminiBinaryPath"
+  | "antigravityBinaryPath"
   | "grokBinaryPath"
   | "droidBinaryPath"
   | "kiloBinaryPath"
@@ -330,7 +332,7 @@ const PROVIDER_VISIBILITY_OPTIONS: ReadonlyArray<{ provider: ProviderKind; title
   { provider: "codex", title: PROVIDER_DISPLAY_NAMES.codex },
   { provider: "claudeAgent", title: PROVIDER_DISPLAY_NAMES.claudeAgent },
   { provider: "cursor", title: PROVIDER_DISPLAY_NAMES.cursor },
-  { provider: "gemini", title: PROVIDER_DISPLAY_NAMES.gemini },
+  { provider: "antigravity", title: PROVIDER_DISPLAY_NAMES.antigravity },
   { provider: "grok", title: PROVIDER_DISPLAY_NAMES.grok },
   { provider: "droid", title: PROVIDER_DISPLAY_NAMES.droid },
   { provider: "kilo", title: PROVIDER_DISPLAY_NAMES.kilo },
@@ -458,21 +460,18 @@ const INSTALL_PROVIDER_SETTINGS: readonly InstallProviderSettings[] = [
     apiEndpointDescription: "Optional Cursor API endpoint override passed to `cursor-agent -e`.",
   },
   {
-    provider: "gemini",
-    title: "Gemini",
+    provider: "antigravity",
+    title: "Antigravity",
     docs: [
-      { label: "Install", href: "https://google-gemini.github.io/gemini-cli/docs/get-started/" },
-      { label: "Update", href: "https://github.com/google-gemini/gemini-cli" },
-      {
-        label: "Config",
-        href: "https://google-gemini.github.io/gemini-cli/docs/get-started/configuration.html",
-      },
+      { label: "Install", href: "https://antigravity.google/docs/cli-using" },
+      { label: "Reference", href: "https://antigravity.google/docs/cli-reference" },
+      { label: "Hooks", href: "https://antigravity.google/docs/hooks" },
     ],
-    binaryPathKey: "geminiBinaryPath",
-    binaryPlaceholder: "Gemini binary path",
+    binaryPathKey: "antigravityBinaryPath",
+    binaryPlaceholder: "Antigravity CLI binary path",
     binaryDescription: (
       <>
-        Leave blank to use <code>gemini</code> from your PATH.
+        Leave blank to use <code>agy</code> from your PATH.
       </>
     ),
   },
@@ -745,7 +744,7 @@ function SettingsRouteView() {
     codex: Boolean(settings.codexBinaryPath || settings.codexHomePath),
     claudeAgent: Boolean(settings.claudeBinaryPath),
     cursor: Boolean(settings.cursorBinaryPath || settings.cursorApiEndpoint),
-    gemini: Boolean(settings.geminiBinaryPath),
+    antigravity: Boolean(settings.antigravityBinaryPath),
     grok: Boolean(settings.grokBinaryPath),
     droid: Boolean(settings.droidBinaryPath),
     kilo: Boolean(settings.kiloBinaryPath || settings.kiloServerUrl || settings.kiloServerPassword),
@@ -768,7 +767,7 @@ function SettingsRouteView() {
     codex: "",
     claudeAgent: "",
     cursor: "",
-    gemini: "",
+    antigravity: "",
     grok: "",
     droid: "",
     kilo: "",
@@ -847,7 +846,7 @@ function SettingsRouteView() {
   const claudeBinaryPath = settings.claudeBinaryPath;
   const cursorBinaryPath = settings.cursorBinaryPath;
   const cursorApiEndpoint = settings.cursorApiEndpoint;
-  const geminiBinaryPath = settings.geminiBinaryPath;
+  const antigravityBinaryPath = settings.antigravityBinaryPath;
   const grokBinaryPath = settings.grokBinaryPath;
   const droidBinaryPath = settings.droidBinaryPath;
   const kiloBinaryPath = settings.kiloBinaryPath;
@@ -1040,7 +1039,7 @@ function SettingsRouteView() {
     settings.claudeBinaryPath !== defaults.claudeBinaryPath ||
     settings.cursorBinaryPath !== defaults.cursorBinaryPath ||
     settings.cursorApiEndpoint !== defaults.cursorApiEndpoint ||
-    settings.geminiBinaryPath !== defaults.geminiBinaryPath ||
+    settings.antigravityBinaryPath !== defaults.antigravityBinaryPath ||
     settings.grokBinaryPath !== defaults.grokBinaryPath ||
     settings.droidBinaryPath !== defaults.droidBinaryPath ||
     settings.kiloBinaryPath !== defaults.kiloBinaryPath ||
@@ -1108,7 +1107,7 @@ function SettingsRouteView() {
     ...(settings.customCodexModels.length > 0 ||
     settings.customClaudeModels.length > 0 ||
     settings.customCursorModels.length > 0 ||
-    settings.customGeminiModels.length > 0 ||
+    settings.customAntigravityModels.length > 0 ||
     settings.customGrokModels.length > 0 ||
     settings.customDroidModels.length > 0 ||
     settings.customKiloModels.length > 0 ||
@@ -1237,7 +1236,10 @@ function SettingsRouteView() {
       }
       setUpdatingProviders((current) => new Set(current).add(provider));
       try {
-        const result = await ensureNativeApi().server.updateProvider({ provider });
+        const result = await withProviderUpdateTimeout({
+          provider,
+          request: ensureNativeApi().server.updateProvider({ provider }),
+        });
         const refreshedProvider = result.providers.find((status) => status.provider === provider);
         const failureMessage = providerUpdateFailureMessage(refreshedProvider);
         if (failureMessage) {
@@ -1295,7 +1297,7 @@ function SettingsRouteView() {
       codex: false,
       claudeAgent: false,
       cursor: false,
-      gemini: false,
+      antigravity: false,
       grok: false,
       droid: false,
       kilo: false,
@@ -1307,7 +1309,7 @@ function SettingsRouteView() {
       codex: "",
       claudeAgent: "",
       cursor: "",
-      gemini: "",
+      antigravity: "",
       grok: "",
       droid: "",
       kilo: "",
@@ -2769,7 +2771,7 @@ function SettingsRouteView() {
                     customCodexModels: defaults.customCodexModels,
                     customClaudeModels: defaults.customClaudeModels,
                     customCursorModels: defaults.customCursorModels,
-                    customGeminiModels: defaults.customGeminiModels,
+                    customAntigravityModels: defaults.customAntigravityModels,
                     customGrokModels: defaults.customGrokModels,
                     customKiloModels: defaults.customKiloModels,
                     customOpenCodeModels: defaults.customOpenCodeModels,
@@ -2791,7 +2793,7 @@ function SettingsRouteView() {
                     value !== "codex" &&
                     value !== "claudeAgent" &&
                     value !== "cursor" &&
-                    value !== "gemini" &&
+                    value !== "antigravity" &&
                     value !== "grok" &&
                     value !== "droid" &&
                     value !== "kilo" &&
@@ -3073,7 +3075,7 @@ function SettingsRouteView() {
                     codexHomePath: defaults.codexHomePath,
                     cursorBinaryPath: defaults.cursorBinaryPath,
                     cursorApiEndpoint: defaults.cursorApiEndpoint,
-                    geminiBinaryPath: defaults.geminiBinaryPath,
+                    antigravityBinaryPath: defaults.antigravityBinaryPath,
                     grokBinaryPath: defaults.grokBinaryPath,
                     droidBinaryPath: defaults.droidBinaryPath,
                     kiloBinaryPath: defaults.kiloBinaryPath,
@@ -3090,7 +3092,7 @@ function SettingsRouteView() {
                     codex: false,
                     claudeAgent: false,
                     cursor: false,
-                    gemini: false,
+                    antigravity: false,
                     grok: false,
                     droid: false,
                     kilo: false,
@@ -3115,8 +3117,8 @@ function SettingsRouteView() {
                       : providerSettings.provider === "cursor"
                         ? settings.cursorBinaryPath !== defaults.cursorBinaryPath ||
                           settings.cursorApiEndpoint !== defaults.cursorApiEndpoint
-                        : providerSettings.provider === "gemini"
-                          ? settings.geminiBinaryPath !== defaults.geminiBinaryPath
+                        : providerSettings.provider === "antigravity"
+                          ? settings.antigravityBinaryPath !== defaults.antigravityBinaryPath
                           : providerSettings.provider === "grok"
                             ? settings.grokBinaryPath !== defaults.grokBinaryPath
                             : providerSettings.provider === "droid"
@@ -3139,8 +3141,8 @@ function SettingsRouteView() {
                     ? claudeBinaryPath
                     : providerSettings.binaryPathKey === "cursorBinaryPath"
                       ? cursorBinaryPath
-                      : providerSettings.binaryPathKey === "geminiBinaryPath"
-                        ? geminiBinaryPath
+                      : providerSettings.binaryPathKey === "antigravityBinaryPath"
+                        ? antigravityBinaryPath
                         : providerSettings.binaryPathKey === "grokBinaryPath"
                           ? grokBinaryPath
                           : providerSettings.binaryPathKey === "droidBinaryPath"
@@ -3179,15 +3181,11 @@ function SettingsRouteView() {
                   providerUpdateState === "queued" ||
                   providerUpdateState === "running" ||
                   updatingProviders.has(providerSettings.provider);
-                const canUpdateProvider =
-                  showProviderUpdateStatus &&
-                  updateAdvisory?.status === "behind_latest" &&
-                  updateAdvisory.canUpdate &&
-                  !isProviderUpdateActive;
-                const shouldShowProviderUpdateButton =
-                  showProviderUpdateStatus &&
-                  updateAdvisory?.status === "behind_latest" &&
-                  updateAdvisory.canUpdate;
+                const shouldShowProviderUpdateButton = providerStatus
+                  ? shouldOfferProviderUpdateAction(providerStatus) &&
+                    (showProviderUpdateStatus || updateAdvisory?.status === "unknown")
+                  : false;
+                const canUpdateProvider = shouldShowProviderUpdateButton && !isProviderUpdateActive;
 
                 return (
                   <Collapsible
@@ -3246,7 +3244,7 @@ function SettingsRouteView() {
                             variant="outline"
                             disabled={!canUpdateProvider}
                             title={
-                              updateAdvisory.updateCommand
+                              updateAdvisory?.updateCommand
                                 ? `Run ${updateAdvisory.updateCommand}`
                                 : undefined
                             }
@@ -3304,8 +3302,8 @@ function SettingsRouteView() {
                                       ? { claudeBinaryPath: nextValue }
                                       : providerSettings.binaryPathKey === "cursorBinaryPath"
                                         ? { cursorBinaryPath: nextValue }
-                                        : providerSettings.binaryPathKey === "geminiBinaryPath"
-                                          ? { geminiBinaryPath: nextValue }
+                                        : providerSettings.binaryPathKey === "antigravityBinaryPath"
+                                          ? { antigravityBinaryPath: nextValue }
                                           : providerSettings.binaryPathKey === "grokBinaryPath"
                                             ? { grokBinaryPath: nextValue }
                                             : providerSettings.binaryPathKey === "droidBinaryPath"
