@@ -379,7 +379,9 @@ Revocation 会写 immutable Worker 状态与 logical identity tombstone，阻止
   aggregate gate 仍只管理 disposable OrbStack machine，外部目标适配和两个目标上的 clean-SHA 真实
   Provider 报告尚未完成。SSH 认证信息必须保留在 operator-owned Secret source，不得写入仓库、报告或聊天。
 - 当前 deterministic Kubernetes image-canary 不等于 registry-pushed immutable Revision rollout。
-- 多节点生产 Kubernetes 的 Drain、PDB、云厂商 Eviction、CNI enforcement 和升级压力尚未证明。
+- Clean commit `aa1d0225` 已证明 deterministic three-node owned Kind 的 PDB-blocked Drain、源 Node cordon
+  期间跨 Worker replacement、普通 Drain 与独立 Eviction；多节点生产 Kubernetes 的云厂商 Eviction、CNI
+  enforcement、registry-pushed rollout、真实 Provider 和升级/负载压力仍未证明。
 - Clean commit `7659dd5f` 已证明 disposable Registry 上的 multi-arch reproducibility、默认 ephemeral
   exact-digest signing、SBOM、`HIGH/CRITICAL=0`、Secret=0、EOSL 与 DB freshness，并验证 checked-in policy
   可安全选择 keyless/KMS 路径；生产方向已选择 KMS，但真实 signer identity、KMS reference、

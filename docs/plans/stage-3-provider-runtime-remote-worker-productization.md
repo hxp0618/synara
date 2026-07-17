@@ -19,9 +19,11 @@
 - **预计工作量**：XL
 - **风险**：HIGH
 - **计划基线分支**：`codex/saas-tenancy-user`
-- **最近稳定检查点**：`fc9b2bf6`（owned disposable Kind 上的 clean-SHA deterministic Kubernetes matrix
-  `23/23` 全通过，补齐 exact Node cordon/drain/uncordon、Generation `1 -> 2` fencing、Eviction、Canary、restart、
-  exact cluster/image/state cleanup 与零 Secret finding。正式证据见
+- **最近稳定检查点**：`aa1d0225`（one-control-plane/two-Worker owned disposable Kind 上的 clean-SHA
+  deterministic Kubernetes matrix `24/24` 全通过。准备阶段强制 `3/3` Node Ready、两个 Worker 可调度；普通
+  Drain、PDB-blocked Drain 后跨 Worker reschedule、独立 `policy/v1` Eviction 均验证 Generation `1 -> 2`、单终态
+  与 uncordon，Canary、restart、exact cluster/image/state cleanup 和零 Secret finding 同时通过。正式证据见
+  `docs/reports/stage-3-kubernetes-kind-pdb-multinode-aa1d0225.md`。前序 single-node checkpoint `fc9b2bf6` 见
   `docs/reports/stage-3-kubernetes-kind-drain-fixture-fc9b2bf6.md`。此前 `6b71703f` 在 operator-approved reusable
   `orbstack` Kubernetes context 上的 clean-SHA
   deterministic fixture/failure gate 已通过 `22` 个 case，Node Drain 因未授权为一个显式 unsupported：Pending
@@ -46,6 +48,7 @@
 - **发布文档**：
   `docs/release-checklists/stage-3-provider-runtime-remote-worker.md`、
   `docs/runbooks/worker-release-rollout.md`、
+  `docs/reports/stage-3-kubernetes-kind-pdb-multinode-aa1d0225.md`、
   `docs/reports/stage-3-kubernetes-kind-drain-fixture-fc9b2bf6.md`、
   `docs/reports/stage-3-kubernetes-orbstack-fixture-6b71703f.md`、
   `docs/reports/stage-3-real-provider-kubernetes-third-party-gate-6b71703f.md`、
@@ -83,9 +86,11 @@
   通过本机安全凭据来源执行，聊天中的认证值不能进入命令、日志或报告。
 - 本机可用的 Kubernetes 验收 context 为 `orbstack`。运行真实 gate 时必须显式记录并校验所选 context，
   只创建带唯一 owner 标识的资源并精确清理，不切换或修改其他 context。
-- `fc9b2bf6` 已在 Runner-owned disposable Kind 上关闭 deterministic Node Drain：exact selector、graceful Pod
-  DELETE、uncordon、Generation `1 -> 2`、单终态和精确 cluster/image cleanup 全部通过。该证据不关闭 PDB、
-  multi-node、真实 Provider 或 production rollout。
+- `aa1d0225` 已在 one-control-plane/two-Worker Runner-owned Kind 上关闭 deterministic PDB/multi-node Drain：
+  准备阶段 `3/3` Node Ready、两个 Worker 可调度；PDB 先以 `disruptionsAllowed=0` 阻止 Eviction-backed drain，
+  删除精确 PDB 后 replacement Pod 在源 Node 仍 cordon 时调度到另一 Worker。普通 Drain、独立 Eviction、
+  Generation `1 -> 2`、单终态和精确 cleanup 也通过。该证据不关闭真实 Provider、production multi-node、
+  cloud Eviction/CNI、immutable registry rollout 或 production load/soak。
 - 生产并发不冻结为单一数字；由 Tenant quota、Worker 数/每 Worker slot、CPU/内存 requests/limits 和实际
   资源档位共同控制。每次 load/soak 报告必须记录该资源档位、达到的有效并发和 admission/retry 结果；
   延迟、错误率与持续时间的数值 SLA 尚未给出，因此生产 SLA gate 继续保持 open。
@@ -1577,7 +1582,7 @@ Provider × Capability × Execution Target
   创建并删除 disposable Kind cluster，复用同一 host Worker Image 且验证嵌套
   `kubernetes.containerEngine` Image ID、`ownedClusterRemoved=true`、`ownedWorkerImageRemoved=false` 与
   isolated state cleanup。当前 Local/Docker/Kubernetes release-gate tests 合计 `40/40`；新增 endpoint override
-  与脱敏失败摘要后 Acceptance Runner 为 `156/156`，Stage 3 Python 为 `278/278`。当前机器的 Kind `v0.32.0`、kubectl `v1.33.9` 与 Docker
+  与脱敏失败摘要后 Acceptance Runner 为 `159/159`，Stage 3 Python 为 `281/281`。当前机器的 Kind `v0.32.0`、kubectl `v1.33.9` 与 Docker
   `29.4.0` runtime preflight 已通过。clean SHA `6b71703f` 已使用 operator-owned 第三方 Credential/Base URL
   执行 Kubernetes 四矩阵：Codex failure `16/16` 通过；Codex product 因没有 approval interaction 失败；Claude
   product/failure 均在首个真实 Turn 以 `provider_unavailable` 失败，clean SHA `8883e037` 的 Local 重现确认
@@ -1587,6 +1592,12 @@ Provider × Capability × Execution Target
   与 `policy/v1` Eviction 分别验证 Generation recovery，Canary/baseline continuity、Control Plane restart、
   Secret scan 与 exact cluster/image/state cleanup 均通过。该新增证据只关闭 deterministic single-node Drain，
   不关闭 PDB、多节点或真实 Provider。
+- clean SHA `aa1d0225` 再将 owned Kind 扩为 one-control-plane/two-Worker，并在进入矩阵前等待 `3/3` Node Ready、
+  两个 Worker 可调度。完整 deterministic Kubernetes `24/24` 通过；精确 PDB 以
+  `disruptionsAllowed=0` 阻止首轮 drain，删除 PDB 后 replacement Pod 在源 Node 仍 cordon 时跨 Worker 调度，
+  同时保留普通 Drain 与独立 `policy/v1` Eviction 的 Generation `1 -> 2`、单终态、Canary/restart/cleanup/Secret
+  scan 断言。该证据关闭 deterministic owned-Kind PDB/multi-node mechanics，不关闭真实 Provider 或 production
+  multi-node/cloud CNI/immutable rollout/load。
 - `ssh_release_gate.py` 的四个 child 各自 cross-build agentd/real Provider Host，并可选择唯一 disposable
   OrbStack machine/SSH key，或同一获批 external host 上四个串行且互异的 ownership installation。两种模式都
   经产品 SSH install/revoke 路径运行 product/failure matrix；聚合器要求同一 clean SHA/Catalog、agentd/Host
@@ -1594,7 +1605,7 @@ Provider × Capability × Execution Target
   Credential/source 元数据。external 模式要求四次共享同一 pinned Host Key，并额外强制 host/identity source
   preserved、`externalHostRestarted=false` 和 owned runtime removed；disposable 模式反而要求每台独立 machine
   使用不同 Host Key。fixture、复用 installation/Host Key 或任一 runtime/cleanup mismatch 均 fail closed。当前
-  Acceptance Runner `156/156`、SSH Gate `15/15`、Stage 3 Python `278/278` 与 Control Plane `go test ./...` 均通过；
+  Acceptance Runner `159/159`、SSH Gate `15/15`、Stage 3 Python `281/281` 与 Control Plane `go test ./...` 均通过；
   尚缺安全本机 SSH identity 与专用 Provider Credential 下的 clean-SHA 四 child 报告，因此真实 SSH Gate 保持
   open。
 - 新增 `registry_release_gate.py`，要求 clean worktree、现有 `docker-container` Buildx builder 和
@@ -1791,8 +1802,9 @@ Provider × Capability × Execution Target
 - 执行 Crash/Network/Upgrade/Approval 故障测试。
 - 生成兼容矩阵和 Acceptance Report。
 - 当前进度：deterministic Local/Docker core、Local Provider fault、Docker network、Kubernetes
-  Network/Drain/Eviction/Image Canary 已通过实现期运行；SSH 13/13 与 Kubernetes 13/13 core 仍是
-  2026-07-14 历史 fixture 证据。真实 Codex/Claude 已在 clean commit `fb9e25ec` 通过 Local 产品路径
+  Network/Drain/PDB multi-node Drain/Eviction/Image Canary 已通过实现期运行；SSH 13/13 仍是 2026-07-14
+  历史 fixture 证据，旧 Kubernetes 13/13 已由 `aa1d0225` 的完整 `24/24` 取代。真实 Codex/Claude 已在 clean
+  commit `fb9e25ec` 通过 Local 产品路径
   两轮 restart/native-Cursor smoke，clean commit `be919393` 的完整 Local matrix 也通过 standalone
   Generated File Artifact 与 Workspace Checkpoint 捕获；clean commit `90fae52c` 的 Codex/Claude 11-case
   matrix 也通过真实 Local Large Diff；clean commit `61e38f4f` 的两份独立 failure matrix 各通过
@@ -1809,8 +1821,11 @@ Provider × Capability × Execution Target
   same logical Worker replacement、incarnation fencing 与 named-volume continuity；clean commit `cfecba63` 加入
   fixture Provider Host crash classification/new-Execution recovery；clean commit `41683366` 再关闭 deterministic
   immutable release-rollout container loss、`25` 波 release-pinned load、Audit pagination 与 Outbox topic filter。
+  clean commit `aa1d0225` 进一步在 one-control-plane/two-Worker owned Kind 上通过完整 `24/24` deterministic
+  matrix，证明 PDB 阻断、源 Node cordon 期间跨 Worker replacement、普通 Drain、独立 Eviction、Canary、restart
+  与 exact cleanup；这不等于 production multi-node/cloud CNI/registry rollout。
   SSH、Docker、Kubernetes 真实 Provider Gate、真实 Provider 并发/Retention/load/failure、已授权外部 SSH
-  target/本机 `orbstack` context 的 clean-SHA 运行、multi-host/Kubernetes multi-node、按资源档位验证的生产
+  target/本机 `orbstack` context 的 clean-SHA 运行、multi-host/production Kubernetes multi-node、按资源档位验证的生产
   SLA 与 production-duration soak 尚未完成。
 
 ### Step 8：文档、Runbook 与发布门禁
