@@ -50,6 +50,27 @@ long-Session, repeated Control Plane/Worker reconnect, event pagination and term
 also deterministic repeated Tool/Usage/Checkpoint evidence, but not real Provider, multi-node,
 Retention-concurrency, load or production-duration soak evidence.
 
+## Deterministic multi-Provider concurrency
+
+`--suite fixture-concurrency` provisions one managed Docker Target with two agentd Workers and enables the Codex and
+Claude fixtures on both. It creates two bound Sessions, caps the Tenant at two concurrent Executions, then holds one
+Approval open in each Session at the same observation point. The case requires two distinct Executions on two
+distinct Workers, both interactions pending before either is resolved, and verifies that resolving the secondary
+Provider does not disturb the primary barrier. This is a deterministic Control Plane/Worker scheduling and Session
+isolation gate; it is not real Codex/Claude, load, remote Target, or production concurrency evidence.
+
+```sh
+python3 scripts/stage3-provider-acceptance/acceptance_runner.py \
+  --suite fixture-concurrency \
+  --target docker \
+  --provider codex \
+  --timeout 900
+```
+
+The primary Provider may be `codex` or `claudeAgent`; the suite automatically creates the other Provider as the
+secondary Session. Other Targets and fixture failure/canary options are rejected so a passing report always carries
+the same two-Worker overlap meaning.
+
 ## Real Provider two-Turn smoke
 
 `--suite real-provider-smoke` replaces the fixture flow with a narrow real Codex or Claude Agent check through

@@ -306,6 +306,208 @@ class FixtureSoakSuite(acceptance.AcceptanceSuite):
         }
 
 
+class FixtureConcurrencyAPI(FakeAPI):
+    def request(
+        self,
+        method: str,
+        path: str,
+        payload: Mapping[str, Any] | None = None,
+        expected: Sequence[int] = (200,),
+        *,
+        maximum_timeout: float = 10.0,
+    ) -> Any:
+        if method == "PUT" and path.endswith("/quota"):
+            self.requests.append((method, path, payload))
+            return {
+                "tenantId": "tenant-id",
+                "maxConcurrentExecutions": acceptance.FIXTURE_CONCURRENCY_WORKERS,
+                "maxArtifactBytes": None,
+            }
+        return super().request(
+            method,
+            path,
+            payload,
+            expected,
+            maximum_timeout=maximum_timeout,
+        )
+
+
+class FixtureConcurrencySuite(acceptance.AcceptanceSuite):
+    def __init__(
+        self,
+        *,
+        duplicate_worker: bool = False,
+        primary_provider: str = "codex",
+    ) -> None:
+        driver = FakeDriver(acceptance.STANDING_WORKER, name="docker")
+        driver.api = FixtureConcurrencyAPI()
+        super().__init__(
+            dataclasses.replace(
+                runner_options(),
+                target="docker",
+                provider=primary_provider,
+                suite="fixture-concurrency",
+                restart_control_plane=False,
+            ),
+            driver,
+            acceptance.Deadline(30.0),
+            acceptance.SecretRedactor(),
+        )
+        self.state.tenant_id = "tenant-id"
+        self.state.organization_id = "organization-id"
+        self.state.target_id = "target-id"
+        self.state.project_id = "project-id"
+        self.state.session_id = f"session-{primary_provider}"
+        self.state.credential_id = f"credential-{primary_provider}"
+        self.duplicate_worker = duplicate_worker
+        self.events: dict[str, list[dict[str, Any]]] = {
+            f"session-{primary_provider}": []
+        }
+        self.turn_sessions: dict[str, str] = {}
+        self.pending: dict[str, dict[str, Any]] = {}
+
+    def _create_fixture_credential(self, provider: str, title: str) -> dict[str, Any]:
+        del title
+        return {
+            "id": f"credential-{provider}",
+            "provider": provider,
+            "credentialType": "acceptance_fixture",
+        }
+
+    def _create_project_session(
+        self,
+        *,
+        provider: str,
+        title: str,
+        credential_id: str | None,
+        model: str | None = None,
+        description: str,
+    ) -> dict[str, Any]:
+        del title, model, description
+        session_id = f"session-{provider}"
+        self.events[session_id] = []
+        return {
+            "id": session_id,
+            "provider": provider,
+            "executionTargetId": "target-id",
+            "providerCredentialId": credential_id,
+        }
+
+    def _create_turn(
+        self,
+        input_text: str,
+        *,
+        runtime_mode: str = "full-access",
+        interaction_mode: str = "default",
+        session_id: str | None = None,
+    ) -> dict[str, Any]:
+        del input_text, runtime_mode, interaction_mode
+        resolved_session = session_id or self.state.session_id
+        if resolved_session is None:
+            raise AssertionError("missing fake Session")
+        turn_id = f"turn-{len(self.turn_sessions) + 1}"
+        execution_id = f"execution-{len(self.turn_sessions) + 1}"
+        self.turn_sessions[turn_id] = resolved_session
+        events = self.events[resolved_session]
+        events.append(
+            {
+                "sequence": len(events) + 1,
+                "eventType": "turn.created",
+                "executionId": execution_id,
+                "payload": {"turnId": turn_id, "executionId": execution_id},
+            }
+        )
+        return {"id": turn_id}
+
+    def _wait_for_interaction(
+        self,
+        turn_id: str,
+        kind: str,
+        *,
+        session_id: str | None = None,
+    ) -> dict[str, Any]:
+        resolved_session = session_id or self.turn_sessions[turn_id]
+        events = self.events[resolved_session]
+        execution_id = str(events[0]["executionId"])
+        worker_number = (
+            1
+            if self.duplicate_worker or resolved_session == self.state.session_id
+            else 2
+        )
+        worker_id = f"worker-{worker_number}"
+        for event_type in (
+            "execution.leased",
+            "workspace.ready",
+            "execution.started",
+            "request.opened",
+        ):
+            events.append(
+                {
+                    "sequence": len(events) + 1,
+                    "eventType": event_type,
+                    "executionId": execution_id,
+                    "workerId": worker_id,
+                    "generation": 1,
+                }
+            )
+        interaction = {
+            "id": f"interaction-{execution_id}",
+            "turnId": turn_id,
+            "kind": kind,
+            "executionId": execution_id,
+            "requestId": f"request-{execution_id}",
+        }
+        self.pending[str(interaction["id"])] = interaction
+        return interaction
+
+    def _all_events(self, *, session_id: str | None = None) -> list[dict[str, Any]]:
+        resolved_session = session_id or self.state.session_id
+        if resolved_session is None:
+            raise AssertionError("missing fake Session")
+        return list(self.events[resolved_session])
+
+    def _interaction_pending(
+        self,
+        session_id: str,
+        interaction: Mapping[str, Any],
+    ) -> bool:
+        del session_id
+        return str(interaction.get("id")) in self.pending
+
+    def _resolve_approval_turn(
+        self,
+        turn: Mapping[str, Any],
+        interaction: Mapping[str, Any],
+        *,
+        session_id: str,
+    ) -> dict[str, Any]:
+        interaction_id = str(interaction["id"])
+        if interaction_id not in self.pending:
+            raise AssertionError("fake interaction was not pending")
+        del self.pending[interaction_id]
+        events = self.events[session_id]
+        execution_id = str(interaction["executionId"])
+        for event_type in ("request.resolved", "execution.completed"):
+            events.append(
+                {
+                    "sequence": len(events) + 1,
+                    "eventType": event_type,
+                    "executionId": execution_id,
+                    "workerId": events[-1]["workerId"],
+                    "generation": 1,
+                }
+            )
+        return {
+            "turnId": turn["id"],
+            "executionId": execution_id,
+            "requestId": interaction["requestId"],
+            "interactionId": interaction_id,
+            "resolutionStatus": "resolved",
+            "deliveryStatus": "delivered",
+            "sequenceRange": self._sequence_range(events),
+        }
+
+
 class BarrierSuite(acceptance.AcceptanceSuite):
     def __init__(self, lifecycle: acceptance.TargetLifecycle) -> None:
         self.fake_driver = FakeDriver(lifecycle)
@@ -1380,6 +1582,25 @@ class APIClientTimeoutTest(unittest.TestCase):
 
 
 class ManagedWorkerImageTest(unittest.TestCase):
+    def test_fixture_concurrency_requests_two_managed_docker_workers(self) -> None:
+        driver = acceptance.DockerDriver(
+            REPO_ROOT,
+            dataclasses.replace(
+                runner_options(),
+                target="docker",
+                suite="fixture-concurrency",
+            ),
+            acceptance.Deadline(30.0),
+            acceptance.SecretRedactor(),
+        )
+        try:
+            self.assertEqual(
+                driver.desired_workers,
+                acceptance.FIXTURE_CONCURRENCY_WORKERS,
+            )
+        finally:
+            driver._release_state()
+
     def test_worker_smoke_preserves_image_path_with_non_login_shell(self) -> None:
         driver = object.__new__(acceptance.ManagedWorkerDriver)
         driver.logs_dir = pathlib.Path(tempfile.gettempdir()) / "synara-stage3-worker-smoke-test"
@@ -1406,6 +1627,32 @@ class ManagedWorkerImageTest(unittest.TestCase):
 
 
 class AcceptanceSuiteLifecycleTest(unittest.TestCase):
+    def test_fixture_concurrency_requires_two_sessions_executions_and_workers(self) -> None:
+        evidence = FixtureConcurrencySuite()._fixture_multi_provider_concurrency()
+
+        self.assertEqual(evidence["providers"], ["codex", "claudeAgent"])
+        self.assertEqual(evidence["distinctSessionCount"], 2)
+        self.assertEqual(evidence["distinctExecutionCount"], 2)
+        self.assertEqual(evidence["distinctWorkerCount"], 2)
+        self.assertTrue(evidence["simultaneousPendingApprovals"])
+        self.assertTrue(evidence["primaryRemainedPendingAfterSecondaryResolution"])
+
+    def test_fixture_concurrency_rejects_one_worker_for_two_active_executions(self) -> None:
+        suite = FixtureConcurrencySuite(duplicate_worker=True)
+
+        with self.assertRaises(acceptance.AcceptanceError) as caught:
+            suite._fixture_multi_provider_concurrency()
+
+        self.assertEqual(caught.exception.code, "runner.concurrency_worker_reused")
+
+    def test_fixture_concurrency_accepts_claude_as_primary_provider(self) -> None:
+        evidence = FixtureConcurrencySuite(
+            primary_provider="claudeAgent"
+        )._fixture_multi_provider_concurrency()
+
+        self.assertEqual(evidence["providers"], ["claudeAgent", "codex"])
+        self.assertEqual(evidence["distinctWorkerCount"], 2)
+
     def test_fixture_soak_validates_unique_executions_and_restart_history(self) -> None:
         suite = FixtureSoakSuite()
 
@@ -1900,6 +2147,32 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
         self.assertEqual(
             suite.case_order[-2:],
             ["fixture.second-turn-continuity", "soak.multi-turn-restart-continuity"],
+        )
+
+    def test_fixture_concurrency_uses_dedicated_two_worker_case_order(self) -> None:
+        suite = CaseOrderSuite(
+            FakeDriver(acceptance.STANDING_MANAGED_WORKER, name="docker"),
+            dataclasses.replace(
+                runner_options(),
+                target="docker",
+                suite="fixture-concurrency",
+                restart_control_plane=False,
+            ),
+        )
+
+        suite.run()
+
+        self.assertEqual(
+            suite.case_order,
+            [
+                "environment.target-prepare",
+                "environment.control-plane-start",
+                "identity.dev-login",
+                "runtime.target-provision",
+                "runtime.concurrent-worker-discovery",
+                "resources.credential-project-session",
+                "concurrency.multi-provider-multi-session",
+            ],
         )
 
     def test_real_provider_smoke_uses_two_turn_restart_case_order(self) -> None:
@@ -2573,6 +2846,33 @@ class RunnerOptionsTest(unittest.TestCase):
             ["--suite", "fixture-soak", "--soak-turns", "20", "--soak-restart-every", "20"],
             ["--suite", "fixture-soak", "--no-restart-control-plane"],
             ["--suite", "fixture-soak", "--failure-only", "--failure-case", "provider-crash"],
+        )
+        for arguments in invalid_arguments:
+            with self.subTest(arguments=arguments):
+                with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                    acceptance.parse_args(arguments)
+
+    def test_fixture_concurrency_uses_canonical_docker_shape(self) -> None:
+        options = acceptance.parse_args(
+            ["--suite", "fixture-concurrency", "--target", "docker"]
+        )
+
+        self.assertEqual(options.suite, "fixture-concurrency")
+        self.assertEqual(options.target, "docker")
+        self.assertFalse(options.restart_control_plane)
+        self.assertEqual(options.timeout_seconds, 900.0)
+
+    def test_fixture_concurrency_rejects_other_targets_and_failure_matrix(self) -> None:
+        invalid_arguments = (
+            ["--suite", "fixture-concurrency"],
+            [
+                "--suite",
+                "fixture-concurrency",
+                "--target",
+                "docker",
+                "--failure-case",
+                "provider-crash",
+            ],
         )
         for arguments in invalid_arguments:
             with self.subTest(arguments=arguments):

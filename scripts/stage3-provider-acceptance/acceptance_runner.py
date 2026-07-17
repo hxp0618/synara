@@ -108,7 +108,9 @@ PROVIDERS = ("codex", "claudeAgent", "cursor", "gemini", "grok", "kilo", "openco
 FIXTURE_SUPPORTED_PROVIDERS = frozenset({"codex", "claudeAgent"})
 REAL_PROVIDER_SMOKE_PROVIDERS = frozenset({"codex", "claudeAgent"})
 REAL_PROVIDER_CREDENTIAL_FIELDS = ("apiKey", "authToken")
-SUITES = ("fixture", "fixture-soak", "real-provider-smoke")
+FIXTURE_CONCURRENCY_PROVIDERS = ("codex", "claudeAgent")
+FIXTURE_CONCURRENCY_WORKERS = 2
+SUITES = ("fixture", "fixture-soak", "fixture-concurrency", "real-provider-smoke")
 REAL_PROVIDER_PRE_RESTART_CASES = (
     "approval",
     "user-input",
@@ -574,6 +576,12 @@ def json_items(value: Any, label: str) -> list[dict[str, Any]]:
     if not isinstance(raw_items, list) or not all(isinstance(item, dict) for item in raw_items):
         raise AcceptanceError("runner.response_shape_invalid", f"{label}.items was not an object array.")
     return raw_items
+
+
+def json_object_array(value: Any, label: str) -> list[dict[str, Any]]:
+    if not isinstance(value, list) or not all(isinstance(item, dict) for item in value):
+        raise AcceptanceError("runner.response_shape_invalid", f"{label} was not an object array.")
+    return value
 
 
 class Deadline:
@@ -2514,8 +2522,10 @@ class DockerDriver(ManagedWorkerDriver):
         self.owns_image = not options.docker_skip_worker_build
         self.head_sha = self._head_sha()
         self.image = options.docker_worker_image or f"synara-stage3-provider-acceptance:{self.head_sha}-{suffix}"
+        self.desired_workers = (
+            FIXTURE_CONCURRENCY_WORKERS if options.suite == "fixture-concurrency" else 1
+        )
         self.target_id: str | None = None
-        self.container_name: str | None = None
 
     @property
     def worker_proxy_host(self) -> str:
@@ -2631,6 +2641,11 @@ class DockerDriver(ManagedWorkerDriver):
         organization_id: str,
         provider: str,
     ) -> Mapping[str, Any]:
+        enabled_providers = (
+            list(FIXTURE_CONCURRENCY_PROVIDERS)
+            if self.options.suite == "fixture-concurrency"
+            else [provider]
+        )
         target = json_object(
             self.api.request(
                 "POST",
@@ -2646,7 +2661,7 @@ class DockerDriver(ManagedWorkerDriver):
                         "controlPlaneUrl": self._worker_proxy_url(),
                         "allowInsecureControlPlane": True,
                         "runnerCommand": list(self.options.runner_command),
-                        "desiredWorkers": 1,
+                        "desiredWorkers": self.desired_workers,
                         "workspaceVolume": self.volume_name,
                         "workspaceMount": "/data",
                         "workspaceRoot": "/data/workspaces",
@@ -2658,7 +2673,7 @@ class DockerDriver(ManagedWorkerDriver):
                     },
                     "capabilities": {
                         "workspaceModes": ["local", "worktree"],
-                        "providerPolicy": {"experimentalProviders": [provider]},
+                        "providerPolicy": {"experimentalProviders": enabled_providers},
                     },
                 },
                 expected=(201,),
@@ -2669,9 +2684,17 @@ class DockerDriver(ManagedWorkerDriver):
         if not isinstance(target_id, str) or not target_id:
             raise AcceptanceError("runner.docker_target_id_missing", "Docker Target creation did not return an ID.")
         self.target_id = target_id
-        self.container_name = f"synara-agentd-{target_id}-0"
-        snapshot = self._wait_container(target_id)
-        evidence = self._validate_container(snapshot)
+        snapshots = self._wait_containers(target_id, self.desired_workers)
+        validated = [self._validate_container(snapshot) for snapshot in snapshots]
+        evidence: Mapping[str, Any]
+        if self.desired_workers == 1:
+            evidence = validated[0]
+        else:
+            evidence = {
+                "desiredWorkers": self.desired_workers,
+                "runningWorkers": len(validated),
+                "containers": validated,
+            }
         return {**target, "driverEvidence": evidence}
 
     def replace_worker(
@@ -3027,8 +3050,7 @@ class DockerDriver(ManagedWorkerDriver):
             ]
         )
 
-
-    def _container_snapshot(self, target_id: str) -> dict[str, Any] | None:
+    def _container_snapshots(self, target_id: str) -> list[dict[str, Any]]:
         output = self._docker_command(
             [
                 "ps",
@@ -3041,23 +3063,17 @@ class DockerDriver(ManagedWorkerDriver):
         )
         container_ids = [line.strip() for line in output.splitlines() if line.strip()]
         if not container_ids:
-            return None
-        if len(container_ids) != 1:
-            raise AcceptanceError(
-                "runner.docker_container_count_invalid",
-                "Expected exactly one managed Docker Worker container.",
-                {"targetId": target_id, "containerCount": len(container_ids)},
-            )
-        completed = self._docker_completed(["inspect", container_ids[0]])
+            return []
+        completed = self._docker_completed(["inspect", *container_ids])
         output = self.redactor.text(completed.stdout)
         if completed.returncode != 0:
             if "no such object" in output.lower() or "no such container" in output.lower():
-                return None
+                return []
             raise AcceptanceError(
                 "runner.docker_command_failed",
                 f"Docker inspect exited with status {completed.returncode}.",
                 {
-                    "command": ["docker", "inspect", container_ids[0]],
+                    "command": ["docker", "inspect", *container_ids],
                     "exitCode": completed.returncode,
                     "outputExcerpt": output[-1000:],
                 },
@@ -3070,19 +3086,47 @@ class DockerDriver(ManagedWorkerDriver):
                 "Docker inspect returned invalid JSON.",
                 {"message": str(error)},
             ) from None
-        if not isinstance(inspected, list) or len(inspected) != 1 or not isinstance(inspected[0], dict):
+        if (
+            not isinstance(inspected, list)
+            or len(inspected) != len(container_ids)
+            or not all(isinstance(item, dict) for item in inspected)
+        ):
             raise AcceptanceError("runner.docker_inspect_invalid", "Docker inspect returned an invalid payload.")
-        return inspected[0]
+        return sorted(
+            inspected,
+            key=lambda item: str(item.get("Name") or ""),
+        )
+
+    def _container_snapshot(self, target_id: str) -> dict[str, Any] | None:
+        snapshots = self._container_snapshots(target_id)
+        if not snapshots:
+            return None
+        if len(snapshots) != 1:
+            raise AcceptanceError(
+                "runner.docker_container_count_invalid",
+                "Expected exactly one managed Docker Worker container for this operation.",
+                {"targetId": target_id, "containerCount": len(snapshots)},
+            )
+        return snapshots[0]
+
+    def _wait_containers(self, target_id: str, expected_count: int) -> list[dict[str, Any]]:
+        def probe() -> list[dict[str, Any]] | None:
+            snapshots = self._container_snapshots(target_id)
+            if len(snapshots) != expected_count:
+                return None
+            for snapshot in snapshots:
+                state = snapshot.get("State")
+                if not isinstance(state, dict) or state.get("Running") is not True:
+                    return None
+            return snapshots
+
+        return self.api.wait_until(
+            f"{expected_count} running managed Docker Worker containers",
+            probe,
+        )
 
     def _wait_container(self, target_id: str) -> dict[str, Any]:
-        def probe() -> dict[str, Any] | None:
-            snapshot = self._container_snapshot(target_id)
-            if snapshot is None:
-                return None
-            state = snapshot.get("State")
-            return snapshot if isinstance(state, dict) and state.get("Running") is True else None
-
-        return self.api.wait_until("a running managed Docker Worker container", probe)
+        return self._wait_containers(target_id, 1)[0]
 
     def _validate_container(self, snapshot: Mapping[str, Any]) -> Mapping[str, Any]:
         config = json_object(snapshot.get("Config"), "docker inspect Config")
@@ -5833,6 +5877,9 @@ class AcceptanceSuite:
         if self.options.suite == "real-provider-smoke":
             self._run_real_provider_smoke()
             return self.cases
+        if self.options.suite == "fixture-concurrency":
+            self._run_fixture_concurrency()
+            return self.cases
         if self.options.failure_only:
             self._run_failure_only()
             return self.cases
@@ -5976,6 +6023,32 @@ class AcceptanceSuite:
                 requires=("fixture.second-turn-continuity",),
             )
         return self.cases
+
+    def _run_fixture_concurrency(self) -> None:
+        self._case(
+            "runtime.target-provision",
+            "Provision a two-Worker managed Docker Target",
+            self._provision_target,
+            requires=("identity.dev-login",),
+        )
+        self._case(
+            "runtime.concurrent-worker-discovery",
+            "Discover two compatible Workers exposing both fixture Providers",
+            self._discover_concurrency_workers,
+            requires=("runtime.target-provision",),
+        )
+        self._case(
+            "resources.credential-project-session",
+            "Create the primary bound Credential, empty Repository Project, and Session",
+            self._create_resources,
+            requires=("runtime.concurrent-worker-discovery",),
+        )
+        self._case(
+            "concurrency.multi-provider-multi-session",
+            "Run overlapping Codex and Claude fixture Executions on distinct Workers",
+            self._fixture_multi_provider_concurrency,
+            requires=("resources.credential-project-session",),
+        )
 
     def _run_real_provider_smoke(self) -> None:
         self._case(
@@ -6437,7 +6510,28 @@ class AcceptanceSuite:
         }
 
     def _wait_compatible_manifest(self, target_id: str) -> dict[str, Any]:
+        discovered = self._wait_compatible_manifest_for_providers(
+            target_id,
+            (self.options.provider,),
+            minimum_online=1,
+        )
+        providers = json_object_array(discovered.get("providers"), "Worker Provider discovery")
+        return {
+            "manifest": json_object(discovered.get("manifest"), "Worker manifest discovery"),
+            "provider": providers[0],
+        }
+
+    def _wait_compatible_manifest_for_providers(
+        self,
+        target_id: str,
+        providers: Sequence[str],
+        *,
+        minimum_online: int,
+    ) -> dict[str, Any]:
         tenant_id = self._required("tenant_id")
+        requested_providers = tuple(dict.fromkeys(providers))
+        if not requested_providers or minimum_online <= 0:
+            raise ValueError("Worker manifest discovery requires Providers and a positive online count")
 
         def manifest_probe() -> dict[str, Any] | None:
             manifests = json_items(
@@ -6448,7 +6542,10 @@ class AcceptanceSuite:
                 counts = manifest.get("workerStatusCounts")
                 if manifest.get("executionTargetId") != target_id or not isinstance(counts, dict):
                     continue
-                if not isinstance(counts.get("online"), int) or counts["online"] < 1:
+                if (
+                    not isinstance(counts.get("online"), int)
+                    or counts["online"] < minimum_online
+                ):
                     continue
                 worker_protocol = manifest.get("workerProtocol")
                 runtime_event = manifest.get("runtimeEvent")
@@ -6463,39 +6560,80 @@ class AcceptanceSuite:
                         "The real Worker manifest did not include Worker Protocol and Runtime Event version 2.",
                         {"manifestId": manifest.get("manifestId")},
                     )
-                providers = manifest.get("providers")
-                if not isinstance(providers, list):
+                manifest_providers = manifest.get("providers")
+                if not isinstance(manifest_providers, list):
                     continue
-                provider = next(
-                    (
-                        item
-                        for item in providers
-                        if isinstance(item, dict)
-                        and str(item.get("provider", "")).lower() == self.options.provider.lower()
-                    ),
-                    None,
-                )
-                if provider is None:
-                    continue
-                runtime = provider.get("runtime")
-                release = provider.get("releasePolicy")
-                if (
-                    provider.get("compatibilityStatus") != "compatible"
-                    or not isinstance(runtime, dict)
-                    or runtime.get("available") is not True
-                    or runtime.get("compatible") is not True
-                    or not isinstance(release, dict)
-                    or release.get("enabled") is not True
-                ):
-                    raise AcceptanceError(
-                        "runner.provider_manifest_incompatible",
-                        "The real Worker manifest did not expose a compatible enabled Provider.",
-                        {"provider": self.redactor.value(provider), "manifestId": manifest.get("manifestId")},
+                discovered_providers: list[dict[str, Any]] = []
+                for requested_provider in requested_providers:
+                    provider = next(
+                        (
+                            item
+                            for item in manifest_providers
+                            if isinstance(item, dict)
+                            and str(item.get("provider", "")).lower()
+                            == requested_provider.lower()
+                        ),
+                        None,
                     )
-                return {"manifest": manifest, "provider": provider}
+                    if provider is None:
+                        break
+                    runtime = provider.get("runtime")
+                    release = provider.get("releasePolicy")
+                    if (
+                        provider.get("compatibilityStatus") != "compatible"
+                        or not isinstance(runtime, dict)
+                        or runtime.get("available") is not True
+                        or runtime.get("compatible") is not True
+                        or not isinstance(release, dict)
+                        or release.get("enabled") is not True
+                    ):
+                        raise AcceptanceError(
+                            "runner.provider_manifest_incompatible",
+                            "The real Worker manifest did not expose every requested compatible enabled Provider.",
+                            {
+                                "requestedProvider": requested_provider,
+                                "provider": self.redactor.value(provider),
+                                "manifestId": manifest.get("manifestId"),
+                            },
+                        )
+                    discovered_providers.append(provider)
+                if len(discovered_providers) == len(requested_providers):
+                    return {"manifest": manifest, "providers": discovered_providers}
             return None
 
-        return self.api.wait_until("an online compatible Worker manifest", manifest_probe)
+        return self.api.wait_until(
+            f"an online Worker manifest with {minimum_online} Workers and Providers "
+            + ", ".join(requested_providers),
+            manifest_probe,
+        )
+
+    def _discover_concurrency_workers(self) -> Mapping[str, Any]:
+        discovered = self._wait_compatible_manifest_for_providers(
+            self._required("target_id"),
+            FIXTURE_CONCURRENCY_PROVIDERS,
+            minimum_online=FIXTURE_CONCURRENCY_WORKERS,
+        )
+        manifest = json_object(discovered.get("manifest"), "concurrency Worker manifest")
+        providers = json_object_array(
+            discovered.get("providers"),
+            "concurrency Worker Providers",
+        )
+        return {
+            "manifestId": manifest.get("manifestId"),
+            "workerStatusCounts": manifest.get("workerStatusCounts"),
+            "workerProtocol": manifest.get("workerProtocol"),
+            "runtimeEvent": manifest.get("runtimeEvent"),
+            "providers": [
+                {
+                    "provider": provider.get("provider"),
+                    "supportTier": provider.get("supportTier"),
+                    "compatibilityStatus": provider.get("compatibilityStatus"),
+                    "runtime": provider.get("runtime"),
+                    "releasePolicy": provider.get("releasePolicy"),
+                }
+                for provider in providers
+            ],
+        }
 
     @staticmethod
     def _version_range_contains(value: Mapping[str, Any], version: int) -> bool:
@@ -6506,30 +6644,16 @@ class AcceptanceSuite:
     def _create_resources(self) -> Mapping[str, Any]:
         tenant_id = self._required("tenant_id")
         organization_id = self._required("organization_id")
-        target_id = self._required("target_id")
+        self._required("target_id")
         real_provider_smoke = self.options.suite == "real-provider-smoke"
         credential: dict[str, Any] | None = None
         credential_id: str | None = None
         if not real_provider_smoke:
-            credential = json_object(
-                self.api.request(
-                    "POST",
-                    f"/v1/tenants/{tenant_id}/credentials",
-                    {
-                        "organizationId": organization_id,
-                        "name": "Stage 3 Provider Acceptance Fixture",
-                        "purpose": "provider",
-                        "provider": self.options.provider,
-                        "credentialType": "acceptance_fixture",
-                        "payload": {"acceptanceToken": FIXTURE_CREDENTIAL_SENTINEL},
-                    },
-                    expected=(201,),
-                ),
-                "credential",
+            credential = self._create_fixture_credential(
+                self.options.provider,
+                "Stage 3 Provider Acceptance Fixture",
             )
-            credential_id = credential.get("id")
-            if not isinstance(credential_id, str):
-                raise AcceptanceError("runner.credential_id_missing", "Credential API did not return an ID.")
+            credential_id = self._string_id(credential, "fixture Credential")
         elif self.options.real_provider_credential_env is not None:
             credential = self._create_real_provider_credential(
                 title="Stage 3 Real Provider Acceptance",
@@ -6559,46 +6683,22 @@ class AcceptanceSuite:
         project_id = project.get("id")
         if not isinstance(project_id, str):
             raise AcceptanceError("runner.project_id_missing", "Project API did not return an ID.")
-        session_input: dict[str, Any] = {
-            "title": (
+        self.state.project_id = project_id
+        session = self._create_project_session(
+            provider=self.options.provider,
+            title=(
                 "Stage 3 Real Provider Smoke"
                 if real_provider_smoke
                 else "Stage 3 Provider Acceptance"
             ),
-            "visibility": "project",
-            "provider": self.options.provider,
-            "executionTargetId": target_id,
-        }
-        if credential_id is not None:
-            session_input["providerCredentialId"] = credential_id
-            if not real_provider_smoke:
-                session_input["model"] = "stage3-acceptance-fixture"
-        session = json_object(
-            self.api.request(
-                "POST",
-                f"/v1/projects/{project_id}/sessions",
-                session_input,
-                expected=(201,),
-            ),
-            "session",
+            credential_id=credential_id,
+            model=("stage3-acceptance-fixture" if not real_provider_smoke else None),
+            description="session",
         )
         session_id = session.get("id")
         if not isinstance(session_id, str):
             raise AcceptanceError("runner.session_id_missing", "Session API did not return an ID.")
-        if (
-            session.get("executionTargetId") != target_id
-            or session.get("providerCredentialId") != credential_id
-        ):
-            raise AcceptanceError(
-                "runner.session_binding_mismatch",
-                "Session did not retain the requested Target and Credential bindings.",
-                {
-                    "executionTargetId": session.get("executionTargetId"),
-                    "providerCredentialId": session.get("providerCredentialId"),
-                },
-            )
         self.state.credential_id = credential_id
-        self.state.project_id = project_id
         self.state.session_id = session_id
         self.state.last_sequence = int(session.get("lastEventSequence") or 0)
         return {
@@ -6640,6 +6740,89 @@ class AcceptanceSuite:
                 "lastEventSequence": session.get("lastEventSequence"),
             },
         }
+
+    def _create_fixture_credential(self, provider: str, title: str) -> dict[str, Any]:
+        tenant_id = self._required("tenant_id")
+        organization_id = self._required("organization_id")
+        credential = json_object(
+            self.api.request(
+                "POST",
+                f"/v1/tenants/{tenant_id}/credentials",
+                {
+                    "organizationId": organization_id,
+                    "name": title,
+                    "purpose": "provider",
+                    "provider": provider,
+                    "credentialType": "acceptance_fixture",
+                    "payload": {"acceptanceToken": FIXTURE_CREDENTIAL_SENTINEL},
+                },
+                expected=(201,),
+            ),
+            "fixture Credential",
+        )
+        if (
+            str(credential.get("provider") or "").lower() != provider.lower()
+            or credential.get("credentialType") != "acceptance_fixture"
+        ):
+            raise AcceptanceError(
+                "runner.credential_binding_mismatch",
+                "Fixture Credential did not retain the requested Provider and type.",
+                {
+                    "requestedProvider": provider,
+                    "provider": credential.get("provider"),
+                    "credentialType": credential.get("credentialType"),
+                },
+            )
+        self._string_id(credential, "fixture Credential")
+        return credential
+
+    def _create_project_session(
+        self,
+        *,
+        provider: str,
+        title: str,
+        credential_id: str | None,
+        model: str | None = None,
+        description: str,
+    ) -> dict[str, Any]:
+        project_id = self._required("project_id")
+        target_id = self._required("target_id")
+        session_input: dict[str, Any] = {
+            "title": title,
+            "visibility": "project",
+            "provider": provider,
+            "executionTargetId": target_id,
+        }
+        if credential_id is not None:
+            session_input["providerCredentialId"] = credential_id
+        if model is not None:
+            session_input["model"] = model
+        session = json_object(
+            self.api.request(
+                "POST",
+                f"/v1/projects/{project_id}/sessions",
+                session_input,
+                expected=(201,),
+            ),
+            description,
+        )
+        if (
+            str(session.get("provider") or "").lower() != provider.lower()
+            or session.get("executionTargetId") != target_id
+            or session.get("providerCredentialId") != credential_id
+        ):
+            raise AcceptanceError(
+                "runner.session_binding_mismatch",
+                f"The {description} did not retain the requested Provider, Target, and Credential bindings.",
+                {
+                    "requestedProvider": provider,
+                    "provider": session.get("provider"),
+                    "executionTargetId": session.get("executionTargetId"),
+                    "providerCredentialId": session.get("providerCredentialId"),
+                },
+            )
+        self._string_id(session, description)
+        return session
 
     def _real_provider_product_credential_payload(self) -> dict[str, Any]:
         environment_name = self.options.real_provider_credential_env
@@ -7068,39 +7251,13 @@ class AcceptanceSuite:
         title: str,
         credential_id: str | None = None,
     ) -> dict[str, Any]:
-        project_id = self._required("project_id")
-        target_id = self._required("target_id")
         credential_id = credential_id or self.state.credential_id
-        session_input: dict[str, Any] = {
-            "title": title,
-            "visibility": "project",
-            "provider": self.options.provider,
-            "executionTargetId": target_id,
-        }
-        if credential_id is not None:
-            session_input["providerCredentialId"] = credential_id
-        session = json_object(
-            self.api.request(
-                "POST",
-                f"/v1/projects/{project_id}/sessions",
-                session_input,
-                expected=(201,),
-            ),
-            "real Provider failure Session",
+        return self._create_project_session(
+            provider=self.options.provider,
+            title=title,
+            credential_id=credential_id,
+            description="real Provider failure Session",
         )
-        if (
-            session.get("executionTargetId") != target_id
-            or session.get("providerCredentialId") != credential_id
-        ):
-            raise AcceptanceError(
-                "runner.session_binding_mismatch",
-                "Real Provider failure Session did not retain its Target and Credential bindings.",
-                {
-                    "executionTargetId": session.get("executionTargetId"),
-                    "providerCredentialId": session.get("providerCredentialId"),
-                },
-            )
-        return session
 
     @staticmethod
     def _string_id(value: Mapping[str, Any], description: str) -> str:
@@ -9335,15 +9492,240 @@ class AcceptanceSuite:
             "runtimePhysicalPathLeak": False,
         }
 
-    def _approval_resolution(self) -> Mapping[str, Any]:
-        pending = self.state.pending_approval
-        if pending is None:
-            turn = self._create_turn("[approval]")
-            interaction = self._wait_for_interaction(str(turn["id"]), "approval")
-        else:
-            turn = json_object(pending.get("turn"), "pending approval turn")
-            interaction = json_object(pending.get("interaction"), "pending approval interaction")
-            self.state.pending_approval = None
+    def _fixture_multi_provider_concurrency(self) -> Mapping[str, Any]:
+        tenant_id = self._required("tenant_id")
+        primary_session_id = self._required("session_id")
+        primary_provider = self.options.provider
+        secondary_provider = next(
+            provider
+            for provider in FIXTURE_CONCURRENCY_PROVIDERS
+            if provider != primary_provider
+        )
+        quota = json_object(
+            self.api.request(
+                "PUT",
+                f"/v1/tenants/{tenant_id}/quota",
+                {
+                    "maxConcurrentExecutions": FIXTURE_CONCURRENCY_WORKERS,
+                    "maxArtifactBytes": None,
+                },
+            ),
+            "concurrency quota",
+        )
+        if quota.get("maxConcurrentExecutions") != FIXTURE_CONCURRENCY_WORKERS:
+            raise AcceptanceError(
+                "runner.concurrency_quota_mismatch",
+                "The Tenant did not retain the requested concurrent Execution quota.",
+                {
+                    "expected": FIXTURE_CONCURRENCY_WORKERS,
+                    "actual": quota.get("maxConcurrentExecutions"),
+                },
+            )
+
+        secondary_credential = self._create_fixture_credential(
+            secondary_provider,
+            "Stage 3 Provider Concurrency Fixture",
+        )
+        secondary_session = self._create_project_session(
+            provider=secondary_provider,
+            title="Stage 3 Provider Concurrency Secondary",
+            credential_id=self._string_id(secondary_credential, "secondary fixture Credential"),
+            model="stage3-acceptance-fixture",
+            description="secondary concurrency Session",
+        )
+        secondary_session_id = self._string_id(
+            secondary_session,
+            "secondary concurrency Session",
+        )
+        if secondary_session_id == primary_session_id:
+            raise AcceptanceError(
+                "runner.concurrency_session_reused",
+                "The concurrency gate reused one Session for both Providers.",
+            )
+
+        primary_turn = self._create_turn("[approval]", session_id=primary_session_id)
+        primary_turn_id = self._turn_id(primary_turn, "primary concurrency Turn")
+        primary_interaction = self._wait_for_interaction(
+            primary_turn_id,
+            "approval",
+            session_id=primary_session_id,
+        )
+        secondary_turn = self._create_turn("[approval]", session_id=secondary_session_id)
+        secondary_turn_id = self._turn_id(secondary_turn, "secondary concurrency Turn")
+        secondary_interaction = self._wait_for_interaction(
+            secondary_turn_id,
+            "approval",
+            session_id=secondary_session_id,
+        )
+
+        primary_active = self._active_approval_evidence(
+            primary_turn_id,
+            primary_interaction,
+            session_id=primary_session_id,
+            provider=primary_provider,
+        )
+        secondary_active = self._active_approval_evidence(
+            secondary_turn_id,
+            secondary_interaction,
+            session_id=secondary_session_id,
+            provider=secondary_provider,
+        )
+        execution_ids = {str(primary_active["executionId"]), str(secondary_active["executionId"])}
+        worker_ids = {str(primary_active["workerId"]), str(secondary_active["workerId"])}
+        if len(execution_ids) != 2:
+            raise AcceptanceError(
+                "runner.concurrency_execution_reused",
+                "The two concurrent Sessions reused one Execution.",
+                {"executionIds": sorted(execution_ids)},
+            )
+        if len(worker_ids) != FIXTURE_CONCURRENCY_WORKERS:
+            raise AcceptanceError(
+                "runner.concurrency_worker_reused",
+                "The two active Executions did not overlap on distinct Workers.",
+                {"workerIds": sorted(worker_ids)},
+            )
+        if not self._interaction_pending(primary_session_id, primary_interaction) or not self._interaction_pending(
+            secondary_session_id,
+            secondary_interaction,
+        ):
+            raise AcceptanceError(
+                "runner.concurrency_overlap_missing",
+                "Both Provider approval barriers were not pending at the same observation point.",
+            )
+
+        secondary_resolution = self._resolve_approval_turn(
+            secondary_turn,
+            secondary_interaction,
+            session_id=secondary_session_id,
+        )
+        if not self._interaction_pending(primary_session_id, primary_interaction):
+            raise AcceptanceError(
+                "runner.concurrency_isolation_lost",
+                "Resolving the secondary Provider interaction changed the primary pending interaction.",
+            )
+        primary_resolution = self._resolve_approval_turn(
+            primary_turn,
+            primary_interaction,
+            session_id=primary_session_id,
+        )
+        return {
+            "maxConcurrentExecutions": quota.get("maxConcurrentExecutions"),
+            "providers": [primary_provider, secondary_provider],
+            "distinctSessionCount": 2,
+            "distinctExecutionCount": len(execution_ids),
+            "distinctWorkerCount": len(worker_ids),
+            "simultaneousPendingApprovals": True,
+            "primaryRemainedPendingAfterSecondaryResolution": True,
+            "doubleExecution": False,
+            "duplicateTerminal": False,
+            "active": [primary_active, secondary_active],
+            "resolved": [primary_resolution, secondary_resolution],
+        }
+
+    def _active_approval_evidence(
+        self,
+        turn_id: str,
+        interaction: Mapping[str, Any],
+        *,
+        session_id: str,
+        provider: str,
+    ) -> dict[str, Any]:
+        execution_id, request_id = self._interaction_identity(
+            interaction,
+            f"{provider} concurrency approval",
+        )
+        if interaction.get("turnId") != turn_id or interaction.get("kind") != "approval":
+            raise AcceptanceError(
+                "runner.concurrency_interaction_invalid",
+                "The concurrency interaction did not retain its Turn and approval kind.",
+                {
+                    "provider": provider,
+                    "turnId": turn_id,
+                    "interactionTurnId": interaction.get("turnId"),
+                    "kind": interaction.get("kind"),
+                },
+            )
+        events = self._all_events(session_id=session_id)
+        matching = [event for event in events if event.get("executionId") == execution_id]
+        event_types = {str(event.get("eventType") or "") for event in matching}
+        event_type_counts = {
+            event_type: sum(1 for event in matching if event.get("eventType") == event_type)
+            for event_type in event_types
+        }
+        required = {
+            "turn.created",
+            "execution.leased",
+            "workspace.ready",
+            "execution.started",
+            "request.opened",
+        }
+        terminals = [event for event in matching if event.get("eventType") in TERMINAL_EVENT_TYPES]
+        started = [event for event in matching if event.get("eventType") == "execution.started"]
+        invalid_counts = {
+            event_type: event_type_counts.get(event_type, 0)
+            for event_type in required
+            if event_type_counts.get(event_type, 0) != 1
+        }
+        if invalid_counts or terminals:
+            raise AcceptanceError(
+                "runner.concurrency_active_execution_invalid",
+                "A concurrency barrier was not one live, non-terminal Execution.",
+                {
+                    "provider": provider,
+                    "executionId": execution_id,
+                    "invalidEventTypeCounts": dict(sorted(invalid_counts.items())),
+                    "terminalCount": len(terminals),
+                },
+            )
+        worker_id, generation = self._event_worker_identity(started[0])
+        return {
+            "provider": provider,
+            "sessionId": session_id,
+            "turnId": turn_id,
+            "executionId": execution_id,
+            "workerId": worker_id,
+            "generation": generation,
+            "requestId": request_id,
+            "interactionId": interaction.get("id"),
+            "sequenceRange": self._sequence_range(matching),
+            "eventTypes": sorted(event_types),
+            "eventTypeCounts": dict(sorted(event_type_counts.items())),
+            "terminalBeforeResolution": False,
+        }
+
+    def _interaction_pending(
+        self,
+        session_id: str,
+        interaction: Mapping[str, Any],
+    ) -> bool:
+        interaction_id = interaction.get("id")
+        if not isinstance(interaction_id, str) or not interaction_id:
+            raise AcceptanceError(
+                "runner.interaction_identity_missing",
+                "The pending interaction omitted its ID.",
+            )
+        snapshot = json_object(
+            self.api.request("GET", f"/v1/sessions/{session_id}/interactions"),
+            "pending concurrency interactions",
+        )
+        items = snapshot.get("items")
+        if not isinstance(items, list):
+            raise AcceptanceError(
+                "runner.response_shape_invalid",
+                "pending concurrency interactions.items was not an array.",
+            )
+        return any(
+            isinstance(item, dict) and item.get("id") == interaction_id
+            for item in items
+        )
+
+    def _resolve_approval_turn(
+        self,
+        turn: Mapping[str, Any],
+        interaction: Mapping[str, Any],
+        *,
+        session_id: str,
+    ) -> dict[str, Any]:
         execution_id = interaction.get("executionId")
         request_id = interaction.get("requestId")
         if not isinstance(execution_id, str) or not execution_id or not isinstance(request_id, str) or not request_id:
@@ -9360,25 +9742,65 @@ class AcceptanceSuite:
             ),
             "approval resolution",
         )
-        terminal, events = self._wait_for_turn_terminal(str(turn["id"]), "execution.completed")
+        turn_id = self._turn_id(turn, "approval Turn")
+        if session_id == self.state.session_id:
+            terminal, events = self._wait_for_turn_terminal(
+                turn_id,
+                "execution.completed",
+            )
+        else:
+            terminal, events = self._wait_for_turn_terminal(
+                turn_id,
+                "execution.completed",
+                session_id=session_id,
+            )
         if not any(event.get("eventType") == "request.resolved" for event in events):
             raise AcceptanceError(
                 "runner.approval_resolution_event_missing",
                 "Approval completed without a request.resolved event.",
                 {"eventTypes": [event.get("eventType") for event in events]},
             )
-        target_evidence = self.driver.observe_terminal_execution(
-            self._required("target_id"),
-            execution_id,
-        )
+        terminal_execution_id = self._event_execution_id(terminal)
+        if terminal_execution_id != execution_id:
+            raise AcceptanceError(
+                "runner.approval_terminal_execution_mismatch",
+                "Approval resolution completed a different Execution.",
+                {
+                    "expectedExecutionId": execution_id,
+                    "terminalExecutionId": terminal_execution_id,
+                },
+            )
         return {
-            "turnId": turn.get("id"),
-            "executionId": terminal.get("executionId"),
+            "turnId": turn_id,
+            "executionId": terminal_execution_id,
             "requestId": request_id,
             "interactionId": interaction.get("id"),
             "resolutionStatus": resolved.get("status"),
             "deliveryStatus": resolved.get("deliveryStatus"),
             "sequenceRange": self._sequence_range(events),
+        }
+
+    def _approval_resolution(self) -> Mapping[str, Any]:
+        pending = self.state.pending_approval
+        if pending is None:
+            turn = self._create_turn("[approval]")
+            interaction = self._wait_for_interaction(str(turn["id"]), "approval")
+        else:
+            turn = json_object(pending.get("turn"), "pending approval turn")
+            interaction = json_object(pending.get("interaction"), "pending approval interaction")
+            self.state.pending_approval = None
+        result = self._resolve_approval_turn(
+            turn,
+            interaction,
+            session_id=self._required("session_id"),
+        )
+        execution_id = str(result["executionId"])
+        target_evidence = self.driver.observe_terminal_execution(
+            self._required("target_id"),
+            execution_id,
+        )
+        return {
+            **result,
             "targetTerminal": dict(target_evidence) if target_evidence else None,
         }
 
@@ -10438,10 +10860,12 @@ def explicit_unsupported_case(
 def markdown_from_report(report: Mapping[str, Any]) -> str:
     real_provider_smoke = report.get("mode") == "real-provider-smoke"
     fixture_soak = report.get("mode") == "fixture-soak"
+    fixture_concurrency = report.get("mode") == "fixture-concurrency"
     configuration = report.get("configuration")
     failure_matrix = configuration.get("failureMatrix") if isinstance(configuration, dict) else None
     real_provider = configuration.get("realProvider") if isinstance(configuration, dict) else None
     soak = configuration.get("soak") if isinstance(configuration, dict) else None
+    concurrency = configuration.get("concurrency") if isinstance(configuration, dict) else None
     real_provider_boundary = (
         real_provider.get("boundary")
         if isinstance(real_provider, dict) and isinstance(real_provider.get("boundary"), str)
@@ -10451,6 +10875,8 @@ def markdown_from_report(report: Mapping[str, Any]) -> str:
         (
             "# Stage 3 Real Provider Smoke Acceptance"
             if real_provider_smoke
+            else "# Stage 3 Provider Fixture Concurrency Acceptance"
+            if fixture_concurrency
             else "# Stage 3 Provider Fixture Soak Acceptance"
             if fixture_soak
             else "# Stage 3 Provider Fixture Acceptance"
@@ -10475,6 +10901,10 @@ def markdown_from_report(report: Mapping[str, Any]) -> str:
             "native-cursor second Turn. It is a narrow two-Turn smoke, not the complete Local or four-Target "
             "Release Gate."
             if real_provider_smoke
+            else str(concurrency.get("boundary"))
+            if fixture_concurrency
+            and isinstance(concurrency, dict)
+            and isinstance(concurrency.get("boundary"), str)
             else str(soak.get("boundary"))
             if fixture_soak and isinstance(soak, dict) and isinstance(soak.get("boundary"), str)
             else (
@@ -10492,6 +10922,17 @@ def markdown_from_report(report: Mapping[str, Any]) -> str:
                 "",
                 "```json",
                 json.dumps(soak, indent=2, sort_keys=True, ensure_ascii=False),
+                "```",
+            ]
+        )
+    if fixture_concurrency and isinstance(concurrency, dict):
+        lines.extend(
+            [
+                "",
+                "## Requested fixture concurrency",
+                "",
+                "```json",
+                json.dumps(concurrency, indent=2, sort_keys=True, ensure_ascii=False),
                 "```",
             ]
         )
@@ -10717,7 +11158,10 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
         "--suite",
         default="fixture",
         choices=SUITES,
-        help="Acceptance suite: deterministic fixture, deterministic long-session soak, or real Provider smoke",
+        help=(
+            "Acceptance suite: deterministic fixture, deterministic long-session soak, managed Docker "
+            "multi-Provider concurrency, or real Provider smoke"
+        ),
     )
     parser.add_argument("--output-dir", type=pathlib.Path)
     parser.add_argument(
@@ -10986,6 +11430,13 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
     )
     if parsed.failure_only and not failure_cases:
         parser.error("--failure-only requires --failure-matrix or at least one --failure-case")
+    if parsed.suite == "fixture-concurrency":
+        if parsed.target != "docker":
+            parser.error("--suite fixture-concurrency currently requires --target docker")
+        if failure_cases or parsed.failure_only:
+            parser.error(
+                "--suite fixture-concurrency cannot be combined with fixture failure/canary options"
+            )
     if parsed.suite == "real-provider-smoke":
         if parsed.runner_command_json is None:
             parser.error("--suite real-provider-smoke requires an explicit --runner-command-json")
@@ -11040,7 +11491,9 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
         skip_build=parsed.skip_build,
         control_plane_binary=parsed.control_plane_binary.resolve() if parsed.control_plane_binary else None,
         keep=parsed.keep,
-        restart_control_plane=not parsed.no_restart_control_plane,
+        restart_control_plane=(
+            not parsed.no_restart_control_plane and parsed.suite != "fixture-concurrency"
+        ),
         soak_turns=soak_turns,
         soak_restart_every=soak_restart_every,
         ssh_orbctl_bin=parsed.ssh_orbctl_bin.strip(),
@@ -11182,9 +11635,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         cases = suite.cases
     real_provider_smoke = options.suite == "real-provider-smoke"
+    fixture_concurrency = options.suite == "fixture-concurrency"
     mode = (
         "real-provider-smoke"
         if real_provider_smoke
+        else "fixture-concurrency"
+        if fixture_concurrency
         else "fixture-soak"
         if options.suite == "fixture-soak"
         else "fixture+failure-matrix"
@@ -11202,7 +11658,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             "complete Local or four-Target Release Gate"
         )
         if real_provider_smoke
-        else "deterministic Provider Host fixture over real Control Plane, agentd, Worker Protocol, and Target paths"
+        else (
+            "deterministic Codex and Claude Provider Host fixtures over one real Control Plane and two managed "
+            "Docker agentd Workers; simultaneous pending Approval barriers prove multi-Session execution overlap, "
+            "not real Provider, load, remote Target, or production concurrency"
+            if fixture_concurrency
+            else "deterministic Provider Host fixture over real Control Plane, agentd, Worker Protocol, and Target paths"
+        )
     )
     report: dict[str, Any] = {
         "schemaVersion": SCHEMA_VERSION,
@@ -11229,6 +11691,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                     if options.suite == "fixture-soak"
                     else None
                 ),
+            },
+            "concurrency": {
+                "workers": FIXTURE_CONCURRENCY_WORKERS if fixture_concurrency else 0,
+                "sessions": 2 if fixture_concurrency else 0,
+                "providers": list(FIXTURE_CONCURRENCY_PROVIDERS) if fixture_concurrency else [],
+                "barrier": "simultaneous-pending-approval" if fixture_concurrency else None,
+                "boundary": evidence_boundary if fixture_concurrency else None,
             },
             "skipBuild": options.skip_build,
             "keepState": options.keep,
@@ -11308,6 +11777,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "networkMode": options.docker_network_mode or "isolated-per-run",
                 "memoryBytes": options.docker_memory_bytes,
                 "nanoCpus": options.docker_nano_cpus,
+                "desiredWorkers": (
+                    FIXTURE_CONCURRENCY_WORKERS if fixture_concurrency else 1
+                ),
                 "allowOperatorNetworkInterruption": options.docker_allow_network_interruption,
             }
             if options.target == "docker"
