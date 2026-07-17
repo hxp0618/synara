@@ -63,6 +63,8 @@ def runner_options(*, restart_control_plane: bool = True) -> acceptance.RunnerOp
         docker_nano_cpus=1_000_000_000,
         kubernetes_context=None,
         kubernetes_kubeconfig=None,
+        kubernetes_api_server=None,
+        kubernetes_tls_server_name=None,
         kubernetes_allow_nondisposable=False,
         kubernetes_shared_local_image_store=False,
         kubernetes_worker_image=None,
@@ -4483,6 +4485,56 @@ class RunnerOptionsTest(unittest.TestCase):
         self.assertEqual(options.kubernetes_worker_image, "synara-worker:test")
         self.assertTrue(options.kubernetes_skip_worker_build)
 
+    def test_kubernetes_reused_context_accepts_explicit_api_route(self) -> None:
+        options = acceptance.parse_args(
+            [
+                "--target",
+                "kubernetes",
+                "--kubernetes-context",
+                "orbstack",
+                "--kubernetes-api-server",
+                "https://127.0.0.1:26443/",
+                "--kubernetes-tls-server-name",
+                "k8s.orb.local",
+            ]
+        )
+
+        self.assertEqual(options.kubernetes_api_server, "https://127.0.0.1:26443")
+        self.assertEqual(options.kubernetes_tls_server_name, "k8s.orb.local")
+
+    def test_kubernetes_api_route_requires_reused_context_and_safe_https_origin(self) -> None:
+        invalid_arguments = (
+            ["--target", "kubernetes", "--kubernetes-api-server", "https://127.0.0.1:26443"],
+            [
+                "--target",
+                "kubernetes",
+                "--kubernetes-context",
+                "orbstack",
+                "--kubernetes-tls-server-name",
+                "k8s.orb.local",
+            ],
+            [
+                "--target",
+                "kubernetes",
+                "--kubernetes-context",
+                "orbstack",
+                "--kubernetes-api-server",
+                "http://127.0.0.1:26443",
+            ],
+            [
+                "--target",
+                "kubernetes",
+                "--kubernetes-context",
+                "orbstack",
+                "--kubernetes-api-server",
+                "https://user@example.test/path",
+            ],
+        )
+        for arguments in invalid_arguments:
+            with self.subTest(arguments=arguments):
+                with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                    acceptance.parse_args(arguments)
+
     def test_kubernetes_existing_image_requires_skip_build(self) -> None:
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             acceptance.parse_args(
@@ -5687,6 +5739,94 @@ class SSHDriverTest(unittest.TestCase):
 
 
 class KubernetesDriverObservationTest(unittest.TestCase):
+    def test_cluster_access_uses_explicit_api_server_for_control_plane_target(self) -> None:
+        options = dataclasses.replace(
+            runner_options(),
+            target="kubernetes",
+            kubernetes_context="orbstack",
+            kubernetes_api_server="https://127.0.0.1:26443",
+            kubernetes_tls_server_name="k8s.orb.local",
+            kubernetes_allow_nondisposable=True,
+        )
+        driver = acceptance.KubernetesDriver(
+            pathlib.Path.cwd(),
+            options,
+            acceptance.Deadline(30.0),
+            acceptance.SecretRedactor(),
+        )
+        self.addCleanup(driver._release_state)
+        config = json.dumps(
+            {
+                "clusters": [
+                    {
+                        "cluster": {
+                            "server": "https://unhealthy-route.example.test:26443",
+                            "certificate-authority-data": base64.b64encode(b"fixture-ca").decode(),
+                        }
+                    }
+                ]
+            }
+        )
+
+        with (
+            mock.patch.object(
+                driver,
+                "_kubectl_command",
+                side_effect=["", config],
+            ),
+            mock.patch.object(
+                driver,
+                "_kubectl_completed",
+                return_value=subprocess.CompletedProcess(["kubectl"], 0, stdout="fixture-token\n"),
+            ),
+        ):
+            evidence = driver._prepare_cluster_access()
+
+        self.assertEqual(driver.api_server, "https://127.0.0.1:26443")
+        self.assertEqual(driver.ca_certificate, "fixture-ca")
+        self.assertEqual(evidence["apiServerHost"], "127.0.0.1:26443")
+
+    def test_kubectl_uses_explicit_api_route_without_mutating_kubeconfig(self) -> None:
+        options = dataclasses.replace(
+            runner_options(),
+            target="kubernetes",
+            kubernetes_context="orbstack",
+            kubernetes_api_server="https://127.0.0.1:26443",
+            kubernetes_tls_server_name="k8s.orb.local",
+            kubernetes_allow_nondisposable=True,
+        )
+        driver = acceptance.KubernetesDriver(
+            pathlib.Path.cwd(),
+            options,
+            acceptance.Deadline(30.0),
+            acceptance.SecretRedactor(),
+        )
+        self.addCleanup(driver._release_state)
+
+        with mock.patch.object(
+            acceptance.subprocess,
+            "run",
+            return_value=subprocess.CompletedProcess(["kubectl"], 0, stdout="ok"),
+        ) as run:
+            completed = driver._kubectl_completed(["version", "-o", "json"])
+
+        self.assertEqual(completed.stdout, "ok")
+        self.assertEqual(
+            run.call_args.args[0],
+            [
+                "kubectl",
+                "--context",
+                "orbstack",
+                "--server",
+                "https://127.0.0.1:26443",
+                "--tls-server-name",
+                "k8s.orb.local",
+                "version",
+                "-o",
+                "json",
+            ],
+        )
+
     def test_cleanup_retries_only_transient_idempotent_kubectl_operations(self) -> None:
         options = dataclasses.replace(
             runner_options(),

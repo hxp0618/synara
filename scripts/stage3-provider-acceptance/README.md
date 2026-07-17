@@ -620,6 +620,23 @@ python3 scripts/stage3-provider-acceptance/acceptance_runner.py \
   --timeout 1800
 ```
 
+If the reusable Context's generated hostname route is unhealthy while its loopback listener remains reachable,
+override only the API origin and preserve certificate verification with the Context's TLS server name. The Runner
+applies these as per-process `kubectl` flags and does not modify the operator kubeconfig:
+
+```sh
+python3 scripts/stage3-provider-acceptance/acceptance_runner.py \
+  --target kubernetes \
+  --provider codex \
+  --kubernetes-context orbstack \
+  --kubernetes-api-server https://127.0.0.1:26443 \
+  --kubernetes-tls-server-name k8s.orb.local \
+  --kubernetes-allow-nondisposable \
+  --kubernetes-shared-local-image-store \
+  --failure-matrix \
+  --timeout 1800
+```
+
 Do not use `--kubernetes-shared-local-image-store` for a remote cluster or a Context whose nodes do not consume the
 same local Docker images. The flag cannot be combined with `--kubernetes-worker-image` or
 `--kubernetes-skip-worker-build`; remote/repository-backed images remain operator-provided and are never deleted by

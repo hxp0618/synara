@@ -756,6 +756,8 @@ class RunnerOptions:
     docker_nano_cpus: int
     kubernetes_context: str | None
     kubernetes_kubeconfig: pathlib.Path | None
+    kubernetes_api_server: str | None
+    kubernetes_tls_server_name: str | None
     kubernetes_allow_nondisposable: bool
     kubernetes_shared_local_image_store: bool
     kubernetes_worker_image: str | None
@@ -5916,6 +5918,8 @@ class KubernetesDriver(ManagedWorkerDriver):
             if self.owns_cluster
             else None
         )
+        self.api_server_override = options.kubernetes_api_server
+        self.tls_server_name_override = options.kubernetes_tls_server_name
         self.owns_image = not options.kubernetes_skip_worker_build
         head_sha = self._head_sha()
         self.image = options.kubernetes_worker_image or (
@@ -6874,7 +6878,7 @@ class KubernetesDriver(ManagedWorkerDriver):
         if not isinstance(clusters, list) or len(clusters) != 1 or not isinstance(clusters[0], dict):
             raise AcceptanceError("runner.kubernetes_config_invalid", "Kubernetes kubeconfig omitted the active cluster.")
         cluster = json_object(clusters[0].get("cluster"), "Kubernetes cluster configuration")
-        api_server = cluster.get("server")
+        api_server = self.api_server_override or cluster.get("server")
         if not isinstance(api_server, str) or not api_server.startswith("https://"):
             raise AcceptanceError("runner.kubernetes_config_invalid", "Kubernetes API server must use HTTPS.")
         ca_data = cluster.get("certificate-authority-data")
@@ -7027,9 +7031,15 @@ class KubernetesDriver(ManagedWorkerDriver):
         cleanup_timeout: float | None = None,
     ) -> subprocess.CompletedProcess[str]:
         timeout = cleanup_timeout or self.deadline.request_timeout(maximum=30.0)
+        command = ["kubectl", "--context", self.context]
+        if self.api_server_override is not None:
+            command.extend(["--server", self.api_server_override])
+        if self.tls_server_name_override is not None:
+            command.extend(["--tls-server-name", self.tls_server_name_override])
+        command.extend(arguments)
         try:
             return subprocess.run(
-                ["kubectl", "--context", self.context, *arguments],
+                command,
                 cwd=self.repo_root,
                 env=self._kubernetes_environment(),
                 input=input_text,
@@ -14297,6 +14307,29 @@ def parse_environment_variable_name(raw: str | None, option: str) -> str | None:
     return value
 
 
+def parse_https_origin(raw: str | None, option: str) -> str | None:
+    if raw is None:
+        return None
+    value = raw.strip()
+    parsed = urllib.parse.urlsplit(value)
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path not in {"", "/"}
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError(f"{option} must be a credential-free HTTPS origin")
+    try:
+        port = parsed.port
+    except ValueError:
+        raise ValueError(f"{option} contains an invalid port") from None
+    host = f"[{parsed.hostname}]" if ":" in parsed.hostname else parsed.hostname
+    return f"https://{host}{f':{port}' if port is not None else ''}"
+
+
 def resolve_repository_external_file(
     raw: pathlib.Path,
     repo_root: pathlib.Path,
@@ -14453,6 +14486,14 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
     parser.add_argument("--docker-nano-cpus", type=int, default=1_000_000_000)
     parser.add_argument("--kubernetes-context", help="Explicit reusable Kubernetes context; defaults to an owned Kind cluster")
     parser.add_argument("--kubernetes-kubeconfig", type=pathlib.Path)
+    parser.add_argument(
+        "--kubernetes-api-server",
+        help="Override the reused Context API server with a credential-free HTTPS origin",
+    )
+    parser.add_argument(
+        "--kubernetes-tls-server-name",
+        help="TLS certificate server name used with --kubernetes-api-server",
+    )
     parser.add_argument("--kubernetes-allow-nondisposable", action="store_true")
     parser.add_argument(
         "--kubernetes-shared-local-image-store",
@@ -14592,6 +14633,10 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
         )
     if parsed.kubernetes_kubeconfig is not None and not parsed.kubernetes_context:
         parser.error("--kubernetes-kubeconfig requires --kubernetes-context")
+    if parsed.kubernetes_api_server is not None and not parsed.kubernetes_context:
+        parser.error("--kubernetes-api-server requires --kubernetes-context")
+    if parsed.kubernetes_tls_server_name is not None and parsed.kubernetes_api_server is None:
+        parser.error("--kubernetes-tls-server-name requires --kubernetes-api-server")
     if parsed.kubernetes_shared_local_image_store:
         if not parsed.kubernetes_context:
             parser.error("--kubernetes-shared-local-image-store requires --kubernetes-context")
@@ -14706,6 +14751,24 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
     kubernetes_context = parsed.kubernetes_context.strip() if parsed.kubernetes_context else None
     if kubernetes_context is not None and any(character in kubernetes_context for character in "\r\n\t\x00"):
         parser.error("--kubernetes-context contains invalid characters")
+    try:
+        kubernetes_api_server = parse_https_origin(
+            parsed.kubernetes_api_server,
+            "--kubernetes-api-server",
+        )
+    except ValueError as error:
+        parser.error(str(error))
+    kubernetes_tls_server_name = (
+        parsed.kubernetes_tls_server_name.strip()
+        if parsed.kubernetes_tls_server_name is not None
+        else None
+    )
+    if kubernetes_tls_server_name is not None and (
+        not kubernetes_tls_server_name
+        or len(kubernetes_tls_server_name) > 253
+        or any(character in kubernetes_tls_server_name for character in "\r\n\t\x00 /@:")
+    ):
+        parser.error("--kubernetes-tls-server-name must be one DNS name without scheme or port")
     kind_cluster_name = parsed.kind_cluster_name.strip() if parsed.kind_cluster_name else None
     if kind_cluster_name is not None and (
         not kind_cluster_name
@@ -14866,6 +14929,8 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
         docker_nano_cpus=parsed.docker_nano_cpus,
         kubernetes_context=kubernetes_context,
         kubernetes_kubeconfig=kubernetes_kubeconfig,
+        kubernetes_api_server=kubernetes_api_server,
+        kubernetes_tls_server_name=kubernetes_tls_server_name,
         kubernetes_allow_nondisposable=parsed.kubernetes_allow_nondisposable,
         kubernetes_shared_local_image_store=parsed.kubernetes_shared_local_image_store,
         kubernetes_worker_image=parsed.kubernetes_worker_image,
@@ -15273,6 +15338,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             "kubernetes": {
                 "context": options.kubernetes_context or "owned-kind-cluster",
                 "kubeconfig": str(options.kubernetes_kubeconfig) if options.kubernetes_kubeconfig else None,
+                "apiServerOverride": options.kubernetes_api_server,
+                "tlsServerNameOverride": options.kubernetes_tls_server_name,
                 "allowNondisposable": options.kubernetes_allow_nondisposable,
                 "sharedLocalImageStore": options.kubernetes_shared_local_image_store,
                 "workerImage": options.kubernetes_worker_image,
