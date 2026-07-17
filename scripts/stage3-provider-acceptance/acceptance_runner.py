@@ -85,13 +85,30 @@ CASE_STATUSES = frozenset({"pass", "unsupported", "skipped", "fail"})
 TERMINAL_EVENT_TYPES = frozenset(
     {"execution.completed", "execution.failed", "execution.cancelled", "execution.interrupted"}
 )
+FIXTURE_SOAK_REQUIRED_EVENT_TYPES = frozenset(
+    {
+        "turn.created",
+        "execution.leased",
+        "workspace.ready",
+        "execution.started",
+        "content.delta",
+        "item.started",
+        "item.completed",
+        "thread.token-usage.updated",
+        "workspace.dirty",
+        "checkpoint.created",
+        "artifact.ready",
+        "checkpoint.ready",
+        "execution.completed",
+    }
+)
 JSON_REPORT_NAME = "acceptance-report.json"
 MARKDOWN_REPORT_NAME = "acceptance-report.md"
 PROVIDERS = ("codex", "claudeAgent", "cursor", "gemini", "grok", "kilo", "opencode", "pi")
 FIXTURE_SUPPORTED_PROVIDERS = frozenset({"codex", "claudeAgent"})
 REAL_PROVIDER_SMOKE_PROVIDERS = frozenset({"codex", "claudeAgent"})
 REAL_PROVIDER_CREDENTIAL_FIELDS = ("apiKey", "authToken")
-SUITES = ("fixture", "real-provider-smoke")
+SUITES = ("fixture", "fixture-soak", "real-provider-smoke")
 REAL_PROVIDER_PRE_RESTART_CASES = (
     "approval",
     "user-input",
@@ -673,6 +690,8 @@ class RunnerOptions:
     control_plane_binary: pathlib.Path | None
     keep: bool
     restart_control_plane: bool
+    soak_turns: int
+    soak_restart_every: int
     ssh_orbctl_bin: str
     ssh_machine_name: str | None
     ssh_machine_arch: str
@@ -5949,6 +5968,13 @@ class AcceptanceSuite:
             self._second_turn_continuity,
             requires=second_requires,
         )
+        if self.options.suite == "fixture-soak":
+            self._case(
+                "soak.multi-turn-restart-continuity",
+                "Run a deterministic long Session with repeated Control Plane restarts",
+                self._fixture_long_session_soak,
+                requires=("fixture.second-turn-continuity",),
+            )
         return self.cases
 
     def _run_real_provider_smoke(self) -> None:
@@ -9849,6 +9875,145 @@ class AcceptanceSuite:
             "turnSequenceRange": self._sequence_range(turn_events),
         }
 
+    def _fixture_long_session_soak(self) -> Mapping[str, Any]:
+        turn_count = self.options.soak_turns
+        restart_every = self.options.soak_restart_every
+        if turn_count <= 0:
+            raise AcceptanceError(
+                "runner.soak_turns_invalid",
+                "The fixture soak requires at least one configured Turn.",
+                {"soakTurns": turn_count},
+            )
+
+        before_events = self._all_events()
+        before_sequence = int(before_events[-1]["sequence"]) if before_events else 0
+        turn_evidence: list[dict[str, Any]] = []
+        restart_evidence: list[dict[str, Any]] = []
+        execution_ids: set[str] = set()
+        worker_ids: set[str] = set()
+
+        for turn_index in range(1, turn_count + 1):
+            turn = self._create_turn(f"[text] [tool] [usage] fixture-soak-turn-{turn_index}")
+            turn_id = self._turn_id(turn, f"fixture soak Turn {turn_index}")
+            terminal, events = self._wait_for_turn_terminal(turn_id, "execution.completed")
+            execution_id = self._event_execution_id(terminal)
+            if execution_id in execution_ids:
+                raise AcceptanceError(
+                    "runner.soak_execution_reused",
+                    "The fixture soak reused one Execution for multiple Turns.",
+                    {"turnIndex": turn_index, "turnId": turn_id, "executionId": execution_id},
+                )
+            execution_ids.add(execution_id)
+            worker_id, generation = self._event_worker_identity(terminal)
+            worker_ids.add(worker_id)
+            event_types = {str(event.get("eventType") or "") for event in events}
+            missing_event_types = sorted(FIXTURE_SOAK_REQUIRED_EVENT_TYPES - event_types)
+            if missing_event_types:
+                raise AcceptanceError(
+                    "runner.soak_turn_evidence_missing",
+                    "A fixture soak Turn omitted required text, tool, usage, Workspace or Checkpoint evidence.",
+                    {
+                        "turnIndex": turn_index,
+                        "turnId": turn_id,
+                        "executionId": execution_id,
+                        "missingEventTypes": missing_event_types,
+                    },
+                )
+            turn_evidence.append(
+                {
+                    "turnIndex": turn_index,
+                    "turnId": turn_id,
+                    "executionId": execution_id,
+                    "workerId": worker_id,
+                    "generation": generation,
+                    "terminalSequence": terminal.get("sequence"),
+                    "sequenceRange": self._sequence_range(events),
+                    "eventTypes": sorted(event_types),
+                }
+            )
+
+            if restart_every > 0 and turn_index % restart_every == 0 and turn_index < turn_count:
+                restarted = self._restart_control_plane()
+                restart_evidence.append(
+                    {
+                        "afterTurn": turn_index,
+                        "processGeneration": restarted.get("processGeneration"),
+                        "previousPid": restarted.get("previousPid"),
+                        "preRestartSequence": restarted.get("preRestartSequence"),
+                    }
+                )
+
+        all_events = self._all_events()
+        terminal_counts = {execution_id: 0 for execution_id in execution_ids}
+        created_turn_ids: set[str] = set()
+        event_type_counts: dict[str, int] = {}
+        for event in all_events:
+            event_type = str(event.get("eventType") or "")
+            event_type_counts[event_type] = event_type_counts.get(event_type, 0) + 1
+            execution_id = event.get("executionId")
+            if execution_id in terminal_counts and event_type in TERMINAL_EVENT_TYPES:
+                terminal_counts[str(execution_id)] += 1
+            turn_id = self._event_turn_id(event)
+            if event_type == "turn.created" and isinstance(turn_id, str):
+                created_turn_ids.add(turn_id)
+
+        invalid_terminal_counts = {
+            execution_id: count for execution_id, count in terminal_counts.items() if count != 1
+        }
+        expected_turn_ids = {str(item["turnId"]) for item in turn_evidence}
+        missing_turns = sorted(expected_turn_ids - created_turn_ids)
+        if invalid_terminal_counts or missing_turns:
+            raise AcceptanceError(
+                "runner.soak_history_invalid",
+                "The fixture soak history did not preserve one created Turn and one terminal per Execution.",
+                {
+                    "invalidTerminalCounts": invalid_terminal_counts,
+                    "missingTurnIds": missing_turns,
+                },
+            )
+
+        pagination_required = turn_count >= 100
+        pagination_exercised = len(all_events) > 500
+        if pagination_required and not pagination_exercised:
+            raise AcceptanceError(
+                "runner.soak_event_pagination_not_exercised",
+                "The canonical fixture soak did not cross the 500-event pagination boundary.",
+                {"soakTurns": turn_count, "eventCount": len(all_events)},
+            )
+
+        encoded_identity = json.dumps(
+            turn_evidence,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        sample_size = min(3, len(turn_evidence))
+        return {
+            "turnsRequested": turn_count,
+            "turnsCompleted": len(turn_evidence),
+            "distinctExecutionCount": len(execution_ids),
+            "distinctWorkerCount": len(worker_ids),
+            "controlPlaneRestartEvery": restart_every,
+            "controlPlaneRestartCount": len(restart_evidence),
+            "controlPlaneRestarts": restart_evidence,
+            "sequenceBeforeSoak": before_sequence,
+            "sessionSequenceRange": self._sequence_range(all_events),
+            "eventsAdded": max(0, len(all_events) - len(before_events)),
+            "eventTypeCounts": dict(sorted(event_type_counts.items())),
+            "eventPagination": {
+                "pageSize": 500,
+                "required": pagination_required,
+                "exercised": pagination_exercised,
+            },
+            "doubleExecution": False,
+            "duplicateTerminal": False,
+            "identitySha256": hashlib.sha256(encoded_identity).hexdigest(),
+            "turnSamples": {
+                "first": turn_evidence[:sample_size],
+                "last": turn_evidence[-sample_size:],
+            },
+        }
+
     def _create_turn(
         self,
         input_text: str,
@@ -10272,9 +10437,11 @@ def explicit_unsupported_case(
 
 def markdown_from_report(report: Mapping[str, Any]) -> str:
     real_provider_smoke = report.get("mode") == "real-provider-smoke"
+    fixture_soak = report.get("mode") == "fixture-soak"
     configuration = report.get("configuration")
     failure_matrix = configuration.get("failureMatrix") if isinstance(configuration, dict) else None
     real_provider = configuration.get("realProvider") if isinstance(configuration, dict) else None
+    soak = configuration.get("soak") if isinstance(configuration, dict) else None
     real_provider_boundary = (
         real_provider.get("boundary")
         if isinstance(real_provider, dict) and isinstance(real_provider.get("boundary"), str)
@@ -10284,6 +10451,8 @@ def markdown_from_report(report: Mapping[str, Any]) -> str:
         (
             "# Stage 3 Real Provider Smoke Acceptance"
             if real_provider_smoke
+            else "# Stage 3 Provider Fixture Soak Acceptance"
+            if fixture_soak
             else "# Stage 3 Provider Fixture Acceptance"
         ),
         "",
@@ -10306,6 +10475,8 @@ def markdown_from_report(report: Mapping[str, Any]) -> str:
             "native-cursor second Turn. It is a narrow two-Turn smoke, not the complete Local or four-Target "
             "Release Gate."
             if real_provider_smoke
+            else str(soak.get("boundary"))
+            if fixture_soak and isinstance(soak, dict) and isinstance(soak.get("boundary"), str)
             else (
                 "This report uses the deterministic Provider Host fixture through the real Control Plane, "
                 "agentd, Worker Protocol, and selected Target lifecycle. It is not a real Codex App Server or "
@@ -10313,6 +10484,17 @@ def markdown_from_report(report: Mapping[str, Any]) -> str:
             )
         ),
     ]
+    if fixture_soak and isinstance(soak, dict):
+        lines.extend(
+            [
+                "",
+                "## Requested fixture soak",
+                "",
+                "```json",
+                json.dumps(soak, indent=2, sort_keys=True, ensure_ascii=False),
+                "```",
+            ]
+        )
     if isinstance(real_provider, dict) and (
         real_provider.get("requestedCases") or real_provider.get("requestedFailureCases")
     ):
@@ -10535,7 +10717,7 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
         "--suite",
         default="fixture",
         choices=SUITES,
-        help="Acceptance suite: deterministic fixture or a real Codex/Claude two-Turn smoke",
+        help="Acceptance suite: deterministic fixture, deterministic long-session soak, or real Provider smoke",
     )
     parser.add_argument("--output-dir", type=pathlib.Path)
     parser.add_argument(
@@ -10647,12 +10829,30 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
         action="store_true",
         help="Run the second Turn without restarting the Control Plane",
     )
+    parser.add_argument(
+        "--soak-turns",
+        type=int,
+        help="Additional fixture-soak Turns (default: 100; allowed: 10..1000)",
+    )
+    parser.add_argument(
+        "--soak-restart-every",
+        type=int,
+        help="Restart the Control Plane after each N completed soak Turns (default: 10; 0 disables)",
+    )
     parsed = parser.parse_args(argv)
+    soak_turns = parsed.soak_turns if parsed.soak_turns is not None else 100 if parsed.suite == "fixture-soak" else 0
+    soak_restart_every = (
+        parsed.soak_restart_every
+        if parsed.soak_restart_every is not None
+        else 10
+        if parsed.suite == "fixture-soak"
+        else 0
+    )
     default_timeout = (
         1200.0
         if parsed.target == "kubernetes"
         else 900.0
-        if parsed.target in {"docker", "ssh"}
+        if parsed.target in {"docker", "ssh"} or parsed.suite == "fixture-soak"
         else 420.0
         if parsed.real_provider_failure_case or parsed.real_provider_failure_matrix
         else 180.0
@@ -10660,6 +10860,19 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
     timeout_seconds = parsed.timeout if parsed.timeout is not None else default_timeout
     if timeout_seconds <= 0:
         parser.error("--timeout must be positive")
+    if parsed.suite != "fixture-soak" and (
+        parsed.soak_turns is not None or parsed.soak_restart_every is not None
+    ):
+        parser.error("--soak-turns and --soak-restart-every require --suite fixture-soak")
+    if parsed.suite == "fixture-soak":
+        if not 10 <= soak_turns <= 1000:
+            parser.error("--soak-turns must be between 10 and 1000")
+        if soak_restart_every < 0 or soak_restart_every >= soak_turns:
+            parser.error("--soak-restart-every must be 0 or less than --soak-turns")
+        if parsed.no_restart_control_plane:
+            parser.error("--suite fixture-soak requires Control Plane restart continuity")
+        if parsed.failure_only:
+            parser.error("--suite fixture-soak cannot be combined with --failure-only")
     if parsed.control_plane_binary is not None and not parsed.skip_build:
         parser.error("--control-plane-binary requires --skip-build to prevent overwriting the configured binary")
     if parsed.skip_build and parsed.control_plane_binary is None:
@@ -10828,6 +11041,8 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
         control_plane_binary=parsed.control_plane_binary.resolve() if parsed.control_plane_binary else None,
         keep=parsed.keep,
         restart_control_plane=not parsed.no_restart_control_plane,
+        soak_turns=soak_turns,
+        soak_restart_every=soak_restart_every,
         ssh_orbctl_bin=parsed.ssh_orbctl_bin.strip(),
         ssh_machine_name=ssh_machine_name,
         ssh_machine_arch=parsed.ssh_machine_arch,
@@ -10970,6 +11185,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     mode = (
         "real-provider-smoke"
         if real_provider_smoke
+        else "fixture-soak"
+        if options.suite == "fixture-soak"
         else "fixture+failure-matrix"
         if options.failure_cases
         else "fixture"
@@ -11002,6 +11219,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             "suite": options.suite,
             "timeoutSeconds": options.timeout_seconds,
             "restartControlPlane": options.restart_control_plane,
+            "soak": {
+                "turns": options.soak_turns,
+                "restartEvery": options.soak_restart_every,
+                "boundary": (
+                    "deterministic long-session, repeated Control Plane restart, event pagination and terminal "
+                    "integrity, plus repeated Tool/Usage/Checkpoint mechanics only; not real Provider, multi-node, "
+                    "retention-concurrency or production soak evidence"
+                    if options.suite == "fixture-soak"
+                    else None
+                ),
+            },
             "skipBuild": options.skip_build,
             "keepState": options.keep,
             "failureMatrix": {

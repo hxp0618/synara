@@ -36,6 +36,8 @@ def runner_options(*, restart_control_plane: bool = True) -> acceptance.RunnerOp
         control_plane_binary=pathlib.Path("/tmp/fake-control-plane"),
         keep=False,
         restart_control_plane=restart_control_plane,
+        soak_turns=0,
+        soak_restart_every=0,
         ssh_orbctl_bin="orbctl",
         ssh_machine_name=None,
         ssh_machine_arch="arm64",
@@ -217,6 +219,91 @@ class CaseOrderSuite(acceptance.AcceptanceSuite):
     ) -> None:
         del name, operation, requires
         self.case_order.append(case_id)
+
+
+class FixtureSoakSuite(acceptance.AcceptanceSuite):
+    def __init__(self, *, turn_count: int = 3, duplicate_execution: bool = False) -> None:
+        driver = FakeDriver(acceptance.STANDING_WORKER)
+        super().__init__(
+            dataclasses.replace(
+                runner_options(),
+                suite="fixture-soak",
+                soak_turns=turn_count,
+                soak_restart_every=2 if turn_count > 2 else 0,
+            ),
+            driver,
+            acceptance.Deadline(30.0),
+            acceptance.SecretRedactor(),
+        )
+        self.state.session_id = "session-id"
+        self.state.target_id = "target-id"
+        self.events: list[dict[str, Any]] = [
+            {"sequence": 1, "eventType": "session.created"}
+        ]
+        self.executions: dict[str, str] = {}
+        self.turn_start_indexes: dict[str, int] = {}
+        self.duplicate_execution = duplicate_execution
+        self.restart_calls = 0
+
+    def _create_turn(self, input_text: str) -> dict[str, Any]:
+        del input_text
+        turn_number = len(self.executions) + 1
+        turn_id = f"turn-{turn_number}"
+        execution_id = "execution-1" if self.duplicate_execution else f"execution-{turn_number}"
+        self.executions[turn_id] = execution_id
+        self.turn_start_indexes[turn_id] = len(self.events)
+        self.events.append(
+            {
+                "sequence": len(self.events) + 1,
+                "eventType": "turn.created",
+                "executionId": execution_id,
+                "payload": {"turnId": turn_id, "executionId": execution_id},
+            }
+        )
+        return {"id": turn_id}
+
+    def _wait_for_turn_terminal(
+        self,
+        turn_id: str,
+        expected_event_type: str,
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        execution_id = self.executions[turn_id]
+        ordered_event_types = [
+            "execution.leased",
+            "workspace.ready",
+            "execution.started",
+            "content.delta",
+            "item.started",
+            "item.completed",
+            "thread.token-usage.updated",
+            "workspace.dirty",
+            "checkpoint.created",
+            "artifact.ready",
+            "checkpoint.ready",
+            expected_event_type,
+        ]
+        for event_type in ordered_event_types:
+            self.events.append(
+                {
+                    "sequence": len(self.events) + 1,
+                    "eventType": event_type,
+                    "executionId": execution_id,
+                    "workerId": "worker-1",
+                    "generation": 1,
+                }
+            )
+        return self.events[-1], self.events[self.turn_start_indexes[turn_id] :]
+
+    def _all_events(self) -> list[dict[str, Any]]:
+        return list(self.events)
+
+    def _restart_control_plane(self) -> Mapping[str, Any]:
+        self.restart_calls += 1
+        return {
+            "processGeneration": self.restart_calls + 1,
+            "previousPid": 100 + self.restart_calls,
+            "preRestartSequence": len(self.events),
+        }
 
 
 class BarrierSuite(acceptance.AcceptanceSuite):
@@ -1319,6 +1406,36 @@ class ManagedWorkerImageTest(unittest.TestCase):
 
 
 class AcceptanceSuiteLifecycleTest(unittest.TestCase):
+    def test_fixture_soak_validates_unique_executions_and_restart_history(self) -> None:
+        suite = FixtureSoakSuite()
+
+        evidence = suite._fixture_long_session_soak()
+
+        self.assertEqual(evidence["turnsCompleted"], 3)
+        self.assertEqual(evidence["distinctExecutionCount"], 3)
+        self.assertEqual(evidence["controlPlaneRestartCount"], 1)
+        self.assertEqual(evidence["sessionSequenceRange"], {"first": 1, "last": 40, "count": 40})
+        self.assertFalse(evidence["eventPagination"]["required"])
+        self.assertFalse(evidence["doubleExecution"])
+        self.assertFalse(evidence["duplicateTerminal"])
+
+    def test_fixture_soak_rejects_execution_reuse(self) -> None:
+        suite = FixtureSoakSuite(duplicate_execution=True)
+
+        with self.assertRaises(acceptance.AcceptanceError) as caught:
+            suite._fixture_long_session_soak()
+
+        self.assertEqual(caught.exception.code, "runner.soak_execution_reused")
+
+    def test_fixture_soak_crosses_pagination_for_canonical_turn_count(self) -> None:
+        suite = FixtureSoakSuite(turn_count=100)
+
+        evidence = suite._fixture_long_session_soak()
+
+        self.assertTrue(evidence["eventPagination"]["required"])
+        self.assertTrue(evidence["eventPagination"]["exercised"])
+        self.assertGreater(evidence["sessionSequenceRange"]["count"], 500)
+
     def test_terminal_large_pattern_has_stable_segment_hashes(self) -> None:
         self.assertEqual(
             acceptance.terminal_large_expected_segments(),
@@ -1765,6 +1882,24 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
                 "recovery.control-plane-restart",
                 "fixture.second-turn-continuity",
             ],
+        )
+
+    def test_fixture_soak_appends_long_session_case_after_restart_continuity(self) -> None:
+        suite = CaseOrderSuite(
+            FakeDriver(acceptance.STANDING_WORKER),
+            dataclasses.replace(
+                runner_options(),
+                suite="fixture-soak",
+                soak_turns=10,
+                soak_restart_every=5,
+            ),
+        )
+
+        suite.run()
+
+        self.assertEqual(
+            suite.case_order[-2:],
+            ["fixture.second-turn-continuity", "soak.multi-turn-restart-continuity"],
         )
 
     def test_real_provider_smoke_uses_two_turn_restart_case_order(self) -> None:
@@ -2409,6 +2544,41 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
 
 
 class RunnerOptionsTest(unittest.TestCase):
+    def test_fixture_soak_uses_canonical_defaults(self) -> None:
+        options = acceptance.parse_args(["--suite", "fixture-soak"])
+
+        self.assertEqual(options.soak_turns, 100)
+        self.assertEqual(options.soak_restart_every, 10)
+        self.assertTrue(options.restart_control_plane)
+
+    def test_fixture_soak_parses_explicit_bounds(self) -> None:
+        options = acceptance.parse_args(
+            [
+                "--suite",
+                "fixture-soak",
+                "--soak-turns",
+                "40",
+                "--soak-restart-every",
+                "8",
+            ]
+        )
+
+        self.assertEqual(options.soak_turns, 40)
+        self.assertEqual(options.soak_restart_every, 8)
+
+    def test_fixture_soak_rejects_noncanonical_combinations(self) -> None:
+        invalid_arguments = (
+            ["--soak-turns", "10"],
+            ["--suite", "fixture-soak", "--soak-turns", "9"],
+            ["--suite", "fixture-soak", "--soak-turns", "20", "--soak-restart-every", "20"],
+            ["--suite", "fixture-soak", "--no-restart-control-plane"],
+            ["--suite", "fixture-soak", "--failure-only", "--failure-case", "provider-crash"],
+        )
+        for arguments in invalid_arguments:
+            with self.subTest(arguments=arguments):
+                with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                    acceptance.parse_args(arguments)
+
     def test_real_provider_smoke_requires_explicit_runner_command(self) -> None:
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             acceptance.parse_args(["--suite", "real-provider-smoke"])

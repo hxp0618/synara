@@ -25,6 +25,31 @@ JSON, Markdown, and redacted logs are written under `.tmp/stage3-provider-accept
 `--output-dir` for an explicit destination. `--keep` additionally preserves the isolated SQLite, Artifact,
 Workspace, Git cache, and built Control Plane state beneath that destination.
 
+## Deterministic long-session soak
+
+`--suite fixture-soak` reuses the same Control Plane, Target driver, agentd, Provider Host fixture, cleanup and
+Secret-scan paths as the core suite. After the normal restart/second-Turn baseline, it runs `100` additional Turns by
+default and restarts the Control Plane after every `10` completed Turns. The final case requires one distinct
+Execution and exactly one terminal per Turn, a contiguous Session Event Sequence, and more than `500` Events so the
+user API pagination path is exercised. Every soak Turn also requires text, Tool activity, Usage, Workspace dirty,
+Artifact and ready Checkpoint evidence instead of counting an empty no-op Turn as progress.
+
+```sh
+python3 scripts/stage3-provider-acceptance/acceptance_runner.py \
+  --suite fixture-soak \
+  --target local \
+  --provider codex \
+  --soak-turns 100 \
+  --soak-restart-every 10 \
+  --timeout 900
+```
+
+Use `--soak-restart-every 0` to keep the required baseline restart but disable additional restarts. The accepted
+Turn range is `10..1000`; the restart interval must be smaller than the Turn count. This gate proves deterministic
+long-Session, repeated Control Plane/Worker reconnect, event pagination and terminal integrity mechanics only. It is
+also deterministic repeated Tool/Usage/Checkpoint evidence, but not real Provider, multi-node,
+Retention-concurrency, load or production-duration soak evidence.
+
 ## Real Provider two-Turn smoke
 
 `--suite real-provider-smoke` replaces the fixture flow with a narrow real Codex or Claude Agent check through
