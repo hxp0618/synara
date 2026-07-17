@@ -542,13 +542,19 @@ func (s *Service) Fail(
 		if err != nil {
 			return Execution{}, err
 		}
-		if execution.Status == "waiting-for-approval" {
-			return Execution{}, problem.New(409, "execution_interaction_pending", "The execution is waiting for approval or user input.")
-		}
 		if err := s.storeProviderCursor(ctx, tx, execution, input.ProviderResumeCursor, true); err != nil {
 			return Execution{}, err
 		}
 		now := s.now()
+		if err := s.supersedeInteractionGenerationWithReason(
+			ctx,
+			tx,
+			execution,
+			lease,
+			"The Execution failed before its interaction could be resolved or delivered.",
+		); err != nil {
+			return Execution{}, err
+		}
 		if err := tx.WithContext(ctx).Delete(&lease).Error; err != nil {
 			return Execution{}, problem.Wrap(500, "lease_release_failed", "Failed to release the failed execution lease.", err)
 		}
@@ -557,7 +563,7 @@ func (s *Service) Fail(
 		execution.FailureCode = &input.FailureCode
 		execution.FailureMessage = &input.FailureMessage
 		failUpdate := tx.WithContext(ctx).Model(&persistence.AgentExecution{}).
-			Where("id = ? AND tenant_id = ? AND worker_id = ? AND generation = ? AND status IN ?", execution.ID, execution.TenantID, worker.ID, input.Generation, []string{"leased", "running"}).
+			Where("id = ? AND tenant_id = ? AND worker_id = ? AND generation = ? AND status IN ?", execution.ID, execution.TenantID, worker.ID, input.Generation, []string{"leased", "running", "waiting-for-approval"}).
 			Updates(map[string]any{
 				"status": "failed", "finished_at": now, "failure_code": input.FailureCode,
 				"failure_message": input.FailureMessage,

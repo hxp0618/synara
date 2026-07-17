@@ -512,14 +512,14 @@ func (s *Service) supersedeInteractionGenerationWithReason(
 		Updates(map[string]any{
 			"status": "expired", "delivery_status": "superseded", "delivery_error": reason,
 		}).Error; err != nil {
-		return problem.Wrap(500, "interaction_expiry_failed", "Pending interactions could not be expired during Worker recovery.", err)
+		return problem.Wrap(500, "interaction_expiry_failed", "Pending interactions could not be expired while terminalizing or replacing the Execution generation.", err)
 	}
 	if err := tx.WithContext(ctx).Model(&persistence.ExecutionInteraction{}).
 		Where("tenant_id = ? AND execution_id = ? AND delivery_worker_id = ? AND delivery_generation = ? AND status = ? AND delivery_status IN ?",
 			execution.TenantID, execution.ID, lease.WorkerID, lease.Generation, "resolved",
 			[]string{"pending", "delivered", "failed"}).
 		Updates(map[string]any{"delivery_status": "superseded", "delivery_error": reason}).Error; err != nil {
-		return problem.Wrap(500, "interaction_delivery_supersede_failed", "Interaction resolution delivery could not be superseded during Worker recovery.", err)
+		return problem.Wrap(500, "interaction_delivery_supersede_failed", "Interaction resolution delivery could not be superseded while terminalizing or replacing the Execution generation.", err)
 	}
 	return nil
 }

@@ -105,13 +105,16 @@ Execution slots occupied and the other two Sessions rejected without side effect
 Execution through `agent_executions.worker_id -> worker_instances.pod_name` to one exact managed container. The first
 barrier disconnects only that container from the runner-owned Docker network. The second barrier removes the exact
 other busy container and requires the Docker reconciler to recreate the same logical Worker name with a changed
-container ID and instance UID, an advanced Worker incarnation and preserved named-volume sentinel.
+container ID and instance UID, an advanced Worker incarnation and preserved named-volume sentinel. The third barrier
+kills exactly one Provider Host descendant inside the selected busy Worker container; that Execution must fail once
+as `provider_unavailable`, while a new Execution on the freed logical Worker proves automatic Host recovery.
 
-For both faults, the peer Session must retain byte-for-byte identical Events and pending Interaction identity while
+For all faults, the peer Session must retain byte-for-byte identical Events and pending Interaction identity while
 the selected Execution emits `execution.recovering`, advances exactly one Generation, replaces its Request and
-Interaction, and reaches one terminal path. The peer then completes on its original Worker/Generation. The same four
-Sessions immediately continue through the bounded load/admission waves above, including quota rejection, slot reuse,
-generated Artifacts and ready Checkpoints.
+Interaction, and reaches one terminal path for Worker transport/loss faults. Provider Host process crash instead
+retains the failed Generation 1 terminal and recovers through a distinct new Execution. The peer then completes on
+its original Worker/Generation. The same four Sessions immediately continue through the bounded load/admission waves
+above, including quota rejection, slot reuse, generated Artifacts and ready Checkpoints.
 
 ```sh
 python3 scripts/stage3-provider-acceptance/acceptance_runner.py \
@@ -122,9 +125,9 @@ python3 scripts/stage3-provider-acceptance/acceptance_runner.py \
   --timeout 900
 ```
 
-This gate proves deterministic single-host network/container-loss targeting, managed replacement, peer isolation and
-post-recovery load mechanics. It does not replace real Provider, multi-host, Kubernetes multi-node, rollout failure,
-production SLA or production-duration soak evidence.
+This gate proves deterministic single-host network/container-loss/Provider-process targeting, managed replacement,
+peer isolation and post-recovery load mechanics. It does not replace real Provider, multi-host, Kubernetes
+multi-node, rollout failure, production SLA or production-duration soak evidence.
 
 ## Deterministic Retention/Cleanup concurrency
 

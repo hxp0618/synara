@@ -2098,6 +2098,129 @@ func TestApprovalAndUserInputPersistResolveReplayAndResumeExecution(t *testing.T
 	}
 }
 
+func TestExecutionFailureExpiresPendingInteraction(t *testing.T) {
+	db := integrationDB(t)
+	fixture := seedExecutionFixture(t, db)
+	service := integrationService(t, db)
+	worker := registerTestWorker(t, service, fixture.TargetID, fixture.TargetKind, "worker-fail-pending-interaction")
+	cleanupWorkers(t, db, worker.ID)
+
+	claim, err := service.Claim(context.Background(), worker, ClaimExecutionInput{
+		ExecutionTargetID: fixture.TargetID, TargetKind: fixture.TargetKind, ExecutionID: &fixture.ExecutionID,
+	}, "fail-pending-interaction-claim")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claim.Value.Lease == nil {
+		t.Fatal("pending-interaction failure execution was not leased")
+	}
+	leaseInput := LeaseInput{
+		TenantID: fixture.TenantID, Generation: claim.Value.Lease.Generation, LeaseToken: claim.Value.Lease.LeaseToken,
+	}
+	if _, err := service.Start(
+		context.Background(), worker, fixture.ExecutionID, leaseInput, "fail-pending-interaction-start",
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	requestID := "approval-" + uuid.NewString()
+	if _, err := service.AppendRuntimeEvent(context.Background(), worker, fixture.ExecutionID, RuntimeEventInput{
+		LeaseInput: leaseInput, EventID: uuid.New(), EventVersion: RuntimeEventVersionV2, EventType: "request.opened",
+		Payload: map[string]any{
+			"requestId": requestID, "requestType": "exec_command_approval", "detail": "Run command",
+		}, OccurredAt: time.Now().UTC(),
+	}, "fail-pending-interaction-requested"); err != nil {
+		t.Fatal(err)
+	}
+	assertExecutionStatus(t, db, fixture, "waiting-for-approval")
+
+	failed, err := service.Fail(context.Background(), worker, fixture.ExecutionID, FailExecutionInput{
+		LeaseInput: leaseInput, FailureCode: "provider_unavailable", FailureMessage: "Provider Host failed: signal: killed",
+	}, "fail-pending-interaction")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if failed.Replayed || failed.Value.Status != "failed" || failed.Value.FailureCode == nil ||
+		*failed.Value.FailureCode != "provider_unavailable" {
+		t.Fatalf("unexpected pending-interaction failure result: %#v", failed)
+	}
+	replayed, err := service.Fail(context.Background(), worker, fixture.ExecutionID, FailExecutionInput{
+		LeaseInput: leaseInput, FailureCode: "provider_unavailable", FailureMessage: "Provider Host failed: signal: killed",
+	}, "fail-pending-interaction")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !replayed.Replayed || replayed.Value.ID != fixture.ExecutionID || replayed.Value.Status != "failed" {
+		t.Fatalf("unexpected pending-interaction failure replay: %#v", replayed)
+	}
+
+	var interaction persistence.ExecutionInteraction
+	if err := db.Where(
+		"tenant_id = ? AND execution_id = ? AND request_id = ?", fixture.TenantID, fixture.ExecutionID, requestID,
+	).Take(&interaction).Error; err != nil {
+		t.Fatal(err)
+	}
+	if interaction.Status != "expired" || interaction.DeliveryStatus != "superseded" ||
+		interaction.DeliveryError == nil ||
+		*interaction.DeliveryError != "The Execution failed before its interaction could be resolved or delivered." {
+		t.Fatalf("failed Execution did not supersede its pending interaction: %#v", interaction)
+	}
+
+	principal := identity.Principal{UserID: fixture.UserID, ActiveTenantID: &fixture.TenantID}
+	pending, err := service.ListPendingInteractions(context.Background(), principal, fixture.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending.Items) != 0 {
+		t.Fatalf("failed Execution retained pending interactions: %#v", pending.Items)
+	}
+	_, err = service.ResolveApproval(
+		context.Background(), principal, fixture.ExecutionID, requestID,
+		ResolveApprovalInput{Decision: "accept"}, "resolve-after-execution-failure", "resolve-after-execution-failure", "127.0.0.1",
+	)
+	var apiError *problem.Error
+	if !errors.As(err, &apiError) || apiError.Code != "interaction_expired" {
+		t.Fatalf("resolving an interaction after Execution failure returned %v", err)
+	}
+
+	var execution persistence.AgentExecution
+	if err := db.Where("tenant_id = ? AND id = ?", fixture.TenantID, fixture.ExecutionID).Take(&execution).Error; err != nil {
+		t.Fatal(err)
+	}
+	if execution.Status != "failed" || execution.FailureCode == nil || *execution.FailureCode != "provider_unavailable" ||
+		execution.FinishedAt == nil {
+		t.Fatalf("pending-interaction failure did not terminalize the Execution: %#v", execution)
+	}
+	var turn persistence.AgentTurn
+	if err := db.Where("tenant_id = ? AND id = ?", fixture.TenantID, fixture.TurnID).Take(&turn).Error; err != nil {
+		t.Fatal(err)
+	}
+	if turn.Status != "failed" || turn.CompletedAt == nil {
+		t.Fatalf("pending-interaction failure did not terminalize the Turn: %#v", turn)
+	}
+	var leaseCount int64
+	if err := db.Model(&persistence.WorkerLease{}).Where(
+		"tenant_id = ? AND execution_id = ?", fixture.TenantID, fixture.ExecutionID,
+	).Count(&leaseCount).Error; err != nil {
+		t.Fatal(err)
+	}
+	if leaseCount != 0 {
+		t.Fatalf("pending-interaction failure retained %d execution leases", leaseCount)
+	}
+	var terminalEvents []persistence.SessionEvent
+	if err := db.Where(
+		"tenant_id = ? AND execution_id = ? AND event_type IN ?",
+		fixture.TenantID, fixture.ExecutionID, []string{"execution.completed", "execution.failed", "execution.cancelled", "execution.interrupted", "execution.recovering"},
+	).Order("sequence").Find(&terminalEvents).Error; err != nil {
+		t.Fatal(err)
+	}
+	if len(terminalEvents) != 1 || terminalEvents[0].EventType != "execution.failed" ||
+		terminalEvents[0].Generation == nil || *terminalEvents[0].Generation != leaseInput.Generation ||
+		terminalEvents[0].Payload["failureCode"] != "provider_unavailable" {
+		t.Fatalf("pending-interaction failure Events = %#v, want one fenced execution.failed", terminalEvents)
+	}
+}
+
 func TestPendingSessionInteractionSnapshotSurvivesServiceRestartAndEnforcesApprovalPermission(t *testing.T) {
 	db := integrationDB(t)
 	fixture := seedExecutionFixture(t, db)

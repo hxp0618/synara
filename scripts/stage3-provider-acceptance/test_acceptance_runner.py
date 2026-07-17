@@ -749,6 +749,30 @@ class FixtureLoadFailureSuite(FixtureLoadSuite):
         self.pending_generations.pop(interaction_id)
         del self.pending[interaction_id]
         events = self.events[session_id]
+        if fault == "provider-host-process-crash":
+            events.append(
+                {
+                    "sequence": len(events) + 1,
+                    "eventType": "execution.failed",
+                    "executionId": execution_id,
+                    "workerId": worker_id,
+                    "generation": 1,
+                    "payload": {"failureCode": "provider_unavailable"},
+                }
+            )
+            return {
+                "fault": fault,
+                "executionId": execution_id,
+                "executionGeneration": 1,
+                "workerId": worker_id,
+                "containerId": "container-1",
+                "containerName": f"container-{worker_id}",
+                "exactExecutionWorkerMatch": True,
+                "scopedToManagedContainer": True,
+                "scopedToAgentdDescendants": True,
+                "broadProcessMatchUsed": False,
+                "providerHostPid": 42,
+            }
         events.append(
             {
                 "sequence": len(events) + 1,
@@ -801,7 +825,7 @@ class FixtureLoadFailureSuite(FixtureLoadSuite):
         }
         if fault == "worker-network":
             evidence["restored"] = True
-        else:
+        elif fault == "worker-container-loss":
             evidence.update(
                 {
                     "removedContainerId": "container-old",
@@ -1874,6 +1898,51 @@ class DockerDriverRealProviderFaultTest(unittest.TestCase):
         self.assertEqual(evidence["workerIndex"], 1)
         self.assertTrue(evidence["exactExecutionWorkerMatch"])
 
+    def test_provider_host_crash_targets_exact_execution_worker_container(self) -> None:
+        driver = self._driver()
+        driver._execution_worker_container = mock.Mock(  # type: ignore[method-assign]
+            return_value=(
+                {"Id": "abcdef1234567890", "Name": "/synara-worker-1"},
+                {
+                    "id": "worker-2",
+                    "generation": 1,
+                    "incarnation": 3,
+                    "instanceUid": "instance-2",
+                    "status": "online",
+                    "podName": "synara-worker-1",
+                },
+                "1",
+            )
+        )
+        driver._docker_command = mock.Mock(  # type: ignore[method-assign]
+            return_value=json.dumps(
+                {
+                    "rootPid": 1,
+                    "candidateCount": 1,
+                    "descendantCount": 4,
+                    "providerHostPid": 42,
+                    "killed": True,
+                }
+            )
+        )
+
+        evidence = driver.inject_failure(
+            "provider-host-process-crash",
+            "target-id",
+            "execution-2",
+        )
+
+        arguments = driver._docker_command.call_args.args[0]
+        self.assertEqual(arguments[:4], ["exec", "abcdef1234567890", "node", "-e"])
+        self.assertEqual(evidence["executionId"], "execution-2")
+        self.assertEqual(evidence["workerId"], "worker-2")
+        self.assertEqual(evidence["workerIndex"], 1)
+        self.assertEqual(evidence["providerHostPid"], 42)
+        self.assertTrue(evidence["exactExecutionWorkerMatch"])
+        self.assertTrue(evidence["scopedToManagedContainer"])
+        self.assertTrue(evidence["scopedToAgentdDescendants"])
+        self.assertFalse(evidence["broadProcessMatchUsed"])
+
     def test_worker_container_loss_waits_for_same_logical_worker_replacement(self) -> None:
         driver = self._driver()
         driver.options = dataclasses.replace(
@@ -2474,6 +2543,10 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
             session_offset=2,
             affected_index=1,
         )
+        provider_crash = suite._fixture_load_provider_host_crash_isolation(
+            session_offset=1,
+            affected_index=0,
+        )
         load = suite._fixture_load_admission_waves()
 
         self.assertTrue(network_failure["peerSessionEventsUnchanged"])
@@ -2496,6 +2569,19 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
             container_failure["recovery"]["targetRecovery"]["workerIncarnationAdvanced"]
         )
         self.assertEqual(container_failure["recovery"]["replacementGeneration"], 2)
+        self.assertEqual(provider_crash["failureTerminal"]["failureCode"], "provider_unavailable")
+        self.assertTrue(provider_crash["newExecutionRecovery"])
+        self.assertNotEqual(
+            provider_crash["affected"]["executionId"],
+            provider_crash["retry"]["executionId"],
+        )
+        self.assertEqual(
+            provider_crash["affected"]["workerId"],
+            provider_crash["retry"]["workerId"],
+        )
+        self.assertTrue(provider_crash["peerSessionEventsUnchanged"])
+        self.assertEqual(provider_crash["failedTerminalCount"], 1)
+        self.assertEqual(provider_crash["completedTerminalCount"], 2)
         self.assertEqual(load["wavesCompleted"], 2)
         self.assertEqual(load["executionsCompleted"], 8)
         self.assertEqual(len(suite.events), acceptance.FIXTURE_LOAD_SESSIONS)
@@ -3090,6 +3176,7 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
                 "resources.credential-project-session",
                 "load.targeted-worker-network-recovery",
                 "load.targeted-worker-container-loss-recovery",
+                "load.targeted-provider-host-process-crash",
                 "load.post-failure-admission-waves",
             ],
         )
@@ -3812,7 +3899,11 @@ class MarkdownReportTest(unittest.TestCase):
                     "boundary": "targeted deterministic failure and bounded load only",
                 },
                 "loadFailure": {
-                    "faults": ["worker-network", "worker-container-loss"],
+                    "faults": [
+                        "worker-network",
+                        "worker-container-loss",
+                        "provider-host-process-crash",
+                    ],
                     "targeting": "execution to exact container",
                 },
                 "failureMatrix": {"requestedCases": []},
@@ -3826,6 +3917,7 @@ class MarkdownReportTest(unittest.TestCase):
         self.assertIn("# Stage 3 Provider Fixture Load Failure Acceptance", rendered)
         self.assertIn("## Requested fixture load failure", rendered)
         self.assertIn('"worker-container-loss"', rendered)
+        self.assertIn('"provider-host-process-crash"', rendered)
         self.assertIn("## Requested fixture load", rendered)
 
 

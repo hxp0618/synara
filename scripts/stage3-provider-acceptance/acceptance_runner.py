@@ -117,7 +117,11 @@ FIXTURE_LOAD_MIN_WAVES = 2
 FIXTURE_LOAD_MAX_WAVES = 100
 FIXTURE_LOAD_SUITES = frozenset({"fixture-load", "fixture-load-failure"})
 FIXTURE_PARALLEL_DOCKER_SUITES = FIXTURE_LOAD_SUITES | {"fixture-concurrency"}
-FIXTURE_LOAD_FAILURE_CASES = ("worker-network", "worker-container-loss")
+FIXTURE_LOAD_GENERATION_RECOVERY_CASES = ("worker-network", "worker-container-loss")
+FIXTURE_LOAD_FAILURE_CASES = (
+    *FIXTURE_LOAD_GENERATION_RECOVERY_CASES,
+    "provider-host-process-crash",
+)
 FIXTURE_RETENTION_SWEEP_INTERVAL = "250ms"
 FIXTURE_RETENTION_DAYS = 1
 FIXTURE_RETENTION_AGE_DAYS = 2
@@ -3484,6 +3488,37 @@ class DockerDriver(ManagedWorkerDriver):
         target_id: str,
         execution_id: str,
     ) -> Mapping[str, Any]:
+        if fault == "provider-host-process-crash":
+            snapshot, worker, worker_index = self._execution_worker_container(
+                target_id,
+                execution_id,
+            )
+            container_id = str(snapshot.get("Id") or "")
+            container_name = str(snapshot.get("Name") or "").lstrip("/")
+            if not container_id or not container_name:
+                raise AcceptanceError(
+                    "runner.docker_container_identity_missing",
+                    "The managed Docker Worker omitted its container identity before Provider Host crash.",
+                )
+            evidence = self._crash_provider_host_in_container(
+                container_id,
+                {
+                    "containerId": container_id[:12],
+                    "containerName": container_name,
+                    "scopedToManagedContainer": True,
+                },
+            )
+            return {
+                "fault": fault,
+                "executionId": execution_id,
+                "executionGeneration": worker.get("generation"),
+                "workerId": worker.get("id"),
+                "workerIncarnation": worker.get("incarnation"),
+                "workerPodName": worker.get("podName"),
+                "workerIndex": int(worker_index),
+                "exactExecutionWorkerMatch": container_name == worker.get("podName"),
+                **evidence,
+            }
         if fault == "worker-container-loss":
             return self._inject_worker_container_loss(target_id, execution_id)
         if fault != "worker-network":
@@ -3545,6 +3580,8 @@ class DockerDriver(ManagedWorkerDriver):
         }
 
     def validate_failure(self, fault: str) -> None:
+        if fault == "provider-host-process-crash":
+            return
         if fault == "worker-container-loss":
             return
         if fault != "worker-network":
@@ -3559,8 +3596,11 @@ class DockerDriver(ManagedWorkerDriver):
                 },
             )
 
-    def crash_provider_host(self) -> Mapping[str, Any]:
-        container_id = self._required_managed_container_id("Provider Host crash injection")
+    def _crash_provider_host_in_container(
+        self,
+        container_id: str,
+        scope: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
         output = self._docker_command(
             ["exec", container_id, "node", "-e", provider_host_crash_script(), "1"],
             maximum_timeout=15.0,
@@ -3568,7 +3608,14 @@ class DockerDriver(ManagedWorkerDriver):
         return provider_host_crash_evidence(
             output,
             target=self.name,
-            scope={
+            scope=scope,
+        )
+
+    def crash_provider_host(self) -> Mapping[str, Any]:
+        container_id = self._required_managed_container_id("Provider Host crash injection")
+        return self._crash_provider_host_in_container(
+            container_id,
+            {
                 "containerId": container_id[:12],
                 "scopedToManagedContainer": True,
             },
@@ -6845,10 +6892,19 @@ class AcceptanceSuite:
             requires=("load.targeted-worker-network-recovery",),
         )
         self._case(
+            "load.targeted-provider-host-process-crash",
+            "Crash one exact busy Provider Host while its peer Session remains unchanged",
+            lambda: self._fixture_load_provider_host_crash_isolation(
+                session_offset=1,
+                affected_index=0,
+            ),
+            requires=("load.targeted-worker-container-loss-recovery",),
+        )
+        self._case(
             "load.post-failure-admission-waves",
             "Run bounded post-recovery load with quota rejection, slot reuse, Artifacts, and Checkpoints",
             self._fixture_load_admission_waves,
-            requires=("load.targeted-worker-container-loss-recovery",),
+            requires=("load.targeted-provider-host-process-crash",),
         )
 
     def _run_fixture_retention_concurrency(self) -> None:
@@ -10917,7 +10973,7 @@ class AcceptanceSuite:
         session_offset: int,
         affected_index: int,
     ) -> Mapping[str, Any]:
-        if failure_case not in FIXTURE_LOAD_FAILURE_CASES:
+        if failure_case not in FIXTURE_LOAD_GENERATION_RECOVERY_CASES:
             raise AcceptanceError(
                 "runner.load_failure_case_invalid",
                 "The fixture load failure case was not canonical.",
@@ -11082,6 +11138,201 @@ class AcceptanceSuite:
             "peerWorkerAndGenerationUnchanged": True,
             "targetedGenerationFenced": True,
             "terminalCount": 2,
+            "duplicateTerminal": False,
+            "pendingInteractionCount": 0,
+        }
+
+    def _fixture_load_provider_host_crash_isolation(
+        self,
+        *,
+        session_offset: int,
+        affected_index: int,
+    ) -> Mapping[str, Any]:
+        failure_case = "provider-host-process-crash"
+        if affected_index not in {0, 1}:
+            raise AcceptanceError(
+                "runner.load_failure_affected_index_invalid",
+                "The fixture load failure affected index must select one active Execution.",
+                {"affectedIndex": affected_index},
+            )
+        inject = getattr(self.driver, "inject_failure", None)
+        if not callable(inject):
+            raise AcceptanceUnsupported(
+                "runner.load_failure_injection_unsupported",
+                "The selected Target cannot inject the exact Provider Host process crash.",
+                {"target": self.driver.name},
+            )
+        preflight = getattr(self.driver, "validate_failure", None)
+        if callable(preflight):
+            preflight(failure_case)
+        quota = self._set_fixture_execution_quota(
+            FIXTURE_CONCURRENCY_WORKERS,
+            "load Provider Host crash",
+            "runner.load_failure_quota_mismatch",
+        )
+        sessions = self._fixture_load_sessions()
+        offset = session_offset % len(sessions)
+        ordered = sessions[offset:] + sessions[:offset]
+        active = [
+            self._start_fixture_load_failure_turn(ordered[0], failure_case, 1),
+            self._start_fixture_load_failure_turn(ordered[1], failure_case, 2),
+        ]
+        overlap = self._fixture_load_overlap(active, 0, "pre-provider-host-process-crash")
+        quota_rejections = [
+            self._assert_fixture_load_quota_rejected(session, 0, position)
+            for position, session in enumerate(ordered[2:], start=3)
+        ]
+        affected = active[affected_index]
+        unaffected = active[1 - affected_index]
+        affected_active = json_object(affected.get("active"), "affected Provider Host crash Execution")
+        unaffected_active = json_object(unaffected.get("active"), "unaffected Provider Host crash Execution")
+        unaffected_session_id = str(unaffected["sessionId"])
+        unaffected_events = self._all_events(session_id=unaffected_session_id)
+        unaffected_pending = self._pending_interactions(unaffected_session_id)
+        crash = dict(
+            inject(
+                failure_case,
+                self._required("target_id"),
+                str(affected_active["executionId"]),
+            )
+        )
+        if (
+            crash.get("fault") != failure_case
+            or crash.get("executionId") != affected_active.get("executionId")
+            or crash.get("workerId") != affected_active.get("workerId")
+            or crash.get("executionGeneration") != affected_active.get("generation")
+            or crash.get("exactExecutionWorkerMatch") is not True
+            or crash.get("scopedToManagedContainer") is not True
+            or crash.get("scopedToAgentdDescendants") is not True
+            or crash.get("broadProcessMatchUsed") is not False
+        ):
+            raise AcceptanceError(
+                "runner.load_provider_host_crash_target_invalid",
+                "The Provider Host crash did not remain scoped to the exact active Execution Worker.",
+                {"affected": affected_active, "crash": crash},
+            )
+        affected_turn = json_object(affected.get("turn"), "affected Provider Host crash Turn")
+        affected_turn_id = self._turn_id(affected_turn, "affected Provider Host crash Turn")
+        terminal, events = self._wait_for_turn_terminal(
+            affected_turn_id,
+            "execution.failed",
+            session_id=str(affected["sessionId"]),
+        )
+        payload = json_object(terminal.get("payload"), "Provider Host crash execution.failed payload")
+        terminal_worker_id, terminal_generation = self._event_worker_identity(terminal)
+        terminal_count = sum(
+            1 for event in events if event.get("eventType") in TERMINAL_EVENT_TYPES
+        )
+        if (
+            payload.get("failureCode") != "provider_unavailable"
+            or terminal.get("executionId") != affected_active.get("executionId")
+            or terminal_worker_id != affected_active.get("workerId")
+            or terminal_generation != affected_active.get("generation")
+            or terminal_count != 1
+            or any(event.get("eventType") == "execution.recovering" for event in events)
+        ):
+            raise AcceptanceError(
+                "runner.load_provider_host_crash_terminal_invalid",
+                "The exact Provider Host crash did not produce one fenced provider_unavailable terminal.",
+                {
+                    "affected": affected_active,
+                    "terminal": self._event_summary(terminal),
+                    "failureCode": payload.get("failureCode"),
+                    "terminalCount": terminal_count,
+                    "eventTypes": [event.get("eventType") for event in events],
+                },
+            )
+        if self._pending_interactions(str(affected["sessionId"])):
+            raise AcceptanceError(
+                "runner.load_provider_host_crash_interaction_leaked",
+                "The failed Provider Host Generation left a pending interaction behind.",
+                {"sessionId": affected["sessionId"]},
+            )
+        self._assert_fixture_load_session_unchanged(
+            unaffected,
+            unaffected_events,
+            unaffected_pending,
+            "after-provider-host-crash-terminal",
+        )
+        retry_started = time.monotonic()
+        retry = self._start_fixture_load_turn(
+            ordered[affected_index],
+            0,
+            5,
+        )
+        retry_active = json_object(retry.get("active"), "Provider Host crash retry Execution")
+        if (
+            retry_active.get("executionId") == affected_active.get("executionId")
+            or retry_active.get("workerId") != affected_active.get("workerId")
+        ):
+            raise AcceptanceError(
+                "runner.load_provider_host_crash_retry_invalid",
+                "Provider Host crash recovery did not use a new Execution on the freed logical Worker.",
+                {"failed": affected_active, "retry": retry_active},
+            )
+        retry_overlap = self._fixture_load_overlap(
+            [unaffected, retry],
+            0,
+            "provider-host-crash-retry",
+        )
+        retry_terminal = self._complete_fixture_load_turn(retry)
+        self._assert_fixture_load_session_unchanged(
+            unaffected,
+            unaffected_events,
+            unaffected_pending,
+            "after-provider-host-crash-retry-terminal",
+        )
+        peer_terminal = self._complete_fixture_failure_turn(
+            unaffected,
+            expected_worker_id=str(unaffected_active["workerId"]),
+            expected_generation=int(unaffected_active["generation"]),
+            expected_request_count=1,
+        )
+        leaked = {
+            str(session["sessionId"]): self._pending_interactions(str(session["sessionId"]))
+            for session in sessions
+        }
+        leaked = {session_id: items for session_id, items in leaked.items() if items}
+        if leaked:
+            raise AcceptanceError(
+                "runner.load_failure_interaction_leaked",
+                "The Provider Host crash recovery left pending interactions behind.",
+                {
+                    "sessions": {
+                        session_id: [item.get("id") for item in items]
+                        for session_id, items in leaked.items()
+                    }
+                },
+            )
+        return {
+            "failureCase": failure_case,
+            "maxConcurrentExecutions": quota.get("maxConcurrentExecutions"),
+            "workers": FIXTURE_CONCURRENCY_WORKERS,
+            "sessions": FIXTURE_LOAD_SESSIONS,
+            "providers": list(FIXTURE_CONCURRENCY_PROVIDERS),
+            "sessionOrder": [str(session["sessionId"]) for session in ordered],
+            "affectedIndex": affected_index,
+            "overlap": overlap,
+            "quotaRejections": quota_rejections,
+            "affected": affected_active,
+            "unaffected": unaffected_active,
+            "crash": crash,
+            "failureTerminal": {
+                "event": self._event_summary(terminal),
+                "failureCode": payload.get("failureCode"),
+                "sequenceRange": self._sequence_range(events),
+            },
+            "retry": retry_active,
+            "retryOverlap": retry_overlap,
+            "retryTerminal": retry_terminal,
+            "peerTerminal": peer_terminal,
+            "recoveryAdmissionMs": elapsed_ms(retry_started),
+            "peerSessionEventsUnchanged": True,
+            "peerInteractionIdentityUnchanged": True,
+            "peerWorkerAndGenerationUnchanged": True,
+            "newExecutionRecovery": True,
+            "failedTerminalCount": 1,
+            "completedTerminalCount": 2,
             "duplicateTerminal": False,
             "pendingInteractionCount": 0,
         }
@@ -13902,10 +14153,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             else (
                 "deterministic Codex and Claude Provider Host fixtures over one real Control Plane and two managed "
                 "Docker agentd Workers; four Sessions prove exact Execution-to-Worker-to-container network and "
-                "container-loss targeting, managed replacement, peer-Session isolation, one-step Generation "
-                "fencing, unique terminal paths, then bounded quota rejection, slot reuse and durable "
-                "Artifact/Checkpoint completion; deterministic single-host mechanics only, not real Provider, "
-                "multi-host, multi-node, rollout failure, SLA, or production-duration load"
+                "container-loss targeting, managed replacement, exact Provider Host process crash classification, "
+                "peer-Session isolation, Generation fencing or new-Execution recovery, unique terminal paths, then "
+                "bounded quota rejection, slot reuse and durable Artifact/Checkpoint completion; deterministic "
+                "single-host mechanics only, not real Provider, multi-host, multi-node, rollout failure, SLA, or "
+                "production-duration load"
                 if fixture_load_failure
                 else (
                 "deterministic Codex and Claude Provider Host fixtures over one real Control Plane and two managed "
