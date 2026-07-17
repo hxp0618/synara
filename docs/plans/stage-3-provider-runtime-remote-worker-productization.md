@@ -19,16 +19,17 @@
 - **预计工作量**：XL
 - **风险**：HIGH
 - **计划基线分支**：`codex/saas-tenancy-user`
-- **最近稳定检查点**：`6e866a30`（clean-SHA deterministic Local fixture soak 已通过额外 `100/100` Turn、
-  `9` 次额外 Control Plane restart、Session Event `1..1371` 与 500-event pagination；正式证据见
-  `docs/reports/stage-3-local-fixture-soak-6e866a30.md`。managed Docker immutable rollout 最新证据仍为
-  `docs/reports/stage-3-worker-release-rollout-d3af9380.md`。真实 Codex/Claude consolidated Local product 与
-  failure 四矩阵的 clean checkpoint 仍为 `253052aa`，Kubernetes deterministic fixture 13/13 的历史 clean
-  checkpoint 仍为 `2763ebd3`）
+- **最近稳定检查点**：`eeb7a2f1`（clean-SHA managed Docker `fixture-concurrency` 9/9 已通过同一
+  Control Plane 下 Codex/Claude 两个 Session、两个 Execution、两个 Worker 的同时 pending Approval 与
+  隔离终态；正式证据见 `docs/reports/stage-3-docker-fixture-concurrency-eeb7a2f1.md`。deterministic Local
+  `100/100` Turn soak 的 clean checkpoint 仍为 `6e866a30`，managed Docker immutable rollout 为
+  `d3af9380`。真实 Codex/Claude consolidated Local product/failure 四矩阵的 clean checkpoint 仍为
+  `253052aa`，Kubernetes deterministic fixture 13/13 的历史 clean checkpoint 仍为 `2763ebd3`）
 - **工作区状态**：Stage 3 持续执行中，执行时以当前分支和已验证证据为准
 - **发布文档**：
   `docs/release-checklists/stage-3-provider-runtime-remote-worker.md`、
   `docs/runbooks/worker-release-rollout.md`、
+  `docs/reports/stage-3-docker-fixture-concurrency-eeb7a2f1.md`、
   `docs/reports/stage-3-local-fixture-soak-6e866a30.md`、
   `docs/reports/stage-3-worker-release-rollout-d3af9380.md`、
   `docs/reports/stage-3-real-provider-local-release-gate-253052aa.md`、
@@ -1542,6 +1543,15 @@ Provider × Capability × Execution Target
   14 files / 1,542,440 bytes Secret scan 为零。该结果关闭 deterministic Local long-Session/restart/pagination/
   repeated-Checkpoint mechanics，不关闭真实 Provider、multi-Provider、Retention concurrency、remote Target、
   load 或 production-duration soak。完整证据见 `docs/reports/stage-3-local-fixture-soak-6e866a30.md`。
+- 新增 `fixture-concurrency`，复用同一 Docker Driver、Provider fixture、报告、Secret scan 与精确 cleanup；
+  固定创建一个 managed Docker Target 和两个 agentd Worker，并在 Tenant 并发配额 `2` 下创建 Codex/Claude
+  两个绑定 Session。Clean commit `eeb7a2f1` 的 canonical run 以两个同时 pending Approval 为观察屏障，
+  验证两个唯一 Execution 被两个不同 Worker 持有；先解决 Claude 后 Codex 仍 pending，随后两边均只有一个
+  `execution.completed`，`doubleExecution=false`、`duplicateTerminal=false`。9/9 report cases、Runner unit
+  `113/113` 与 Stage 3 Python `225/225` 通过；cleanup owner 资源零残留，10 files / 88,040 bytes Secret scan
+  finding 为零。该结果只关闭 deterministic managed Docker multi-Provider/multi-Session overlap mechanics，
+  不关闭真实 Provider、remote Target、load、Retention concurrency 或 production concurrency。完整证据见
+  `docs/reports/stage-3-docker-fixture-concurrency-eeb7a2f1.md`。
 
 ## 18. 实施顺序
 
@@ -1612,9 +1622,10 @@ Provider × Capability × Execution Target
   matrix 也通过真实 Local Large Diff；clean commit `61e38f4f` 的两份独立 failure matrix 各通过
   `16/16` 真实 401/429、scoped Host crash 和 Cursor expiry/restart。clean commit `253052aa` 已将四份
   product/failure 报告聚合为同一 clean-SHA Local release gate 并通过；clean commit `6e866a30` 进一步通过
-  deterministic Local `100` Turn、重复 restart、Event pagination 与 repeated Checkpoint mechanics。SSH、
-  Docker、Kubernetes 真实 Provider Gate、multi-Provider/Retention concurrency 和 production-duration soak
-  尚未完成。
+  deterministic Local `100` Turn、重复 restart、Event pagination 与 repeated Checkpoint mechanics；clean
+  commit `eeb7a2f1` 通过 managed Docker 双 Worker、Codex/Claude 双 Session 的 deterministic simultaneous
+  Approval overlap 与隔离终态。SSH、Docker、Kubernetes 真实 Provider Gate、真实 Provider 并发、Retention
+  concurrency、load 和 production-duration soak 尚未完成。
 
 ### Step 8：文档、Runbook 与发布门禁
 
