@@ -586,6 +586,10 @@ Worker containers/Pods, and never runs prune or broad label-only deletion. On fa
 redacted Control Plane log paths plus a bounded container/Pod status summary; it does not dump SQLite, Credential
 payloads, Workspace contents, or Kubernetes Secrets.
 
+Kubernetes cleanup retries only idempotent ownership `get` and exact `delete --ignore-not-found` operations, at most
+three attempts with bounded backoff, for transport failures such as `unexpected EOF` and API request timeouts.
+Authorization failures, ownership mismatches, malformed responses, and other non-transient errors fail immediately.
+
 Run the Docker fixture suite against the current checkout:
 
 ```sh

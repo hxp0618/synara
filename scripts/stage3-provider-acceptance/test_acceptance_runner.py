@@ -5177,6 +5177,110 @@ class SSHDriverTest(unittest.TestCase):
 
 
 class KubernetesDriverObservationTest(unittest.TestCase):
+    def test_cleanup_retries_only_transient_idempotent_kubectl_operations(self) -> None:
+        options = dataclasses.replace(
+            runner_options(),
+            target="kubernetes",
+            kubernetes_context="orbstack",
+            kubernetes_allow_nondisposable=True,
+            kubernetes_shared_local_image_store=True,
+        )
+        driver = acceptance.KubernetesDriver(
+            pathlib.Path.cwd(),
+            options,
+            acceptance.Deadline(30.0),
+            acceptance.SecretRedactor(),
+        )
+        self.addCleanup(driver._release_state)
+        owned_resource = json.dumps(
+            {
+                "metadata": {
+                    "labels": {
+                        "synara.io/stage3-provider-acceptance-owner": driver.resource_owner,
+                    }
+                }
+            }
+        )
+
+        with (
+            mock.patch.object(
+                driver,
+                "_kubectl_completed",
+                side_effect=[
+                    subprocess.CompletedProcess(
+                        ["kubectl"],
+                        1,
+                        stdout="Unable to connect to the server: unexpected EOF",
+                    ),
+                    subprocess.CompletedProcess(["kubectl"], 0, stdout=owned_resource),
+                ],
+            ) as ownership_command,
+            mock.patch.object(acceptance.time, "sleep") as sleep,
+        ):
+            self.assertTrue(driver._kubernetes_resource_is_owned("namespace", "owned"))
+
+        self.assertEqual(ownership_command.call_count, 2)
+        sleep.assert_called_once_with(1.0)
+
+        with (
+            mock.patch.object(
+                driver,
+                "_kubectl_completed",
+                side_effect=[
+                    subprocess.CompletedProcess(
+                        ["kubectl"],
+                        1,
+                        stdout="context deadline exceeded while awaiting headers",
+                    ),
+                    subprocess.CompletedProcess(["kubectl"], 0, stdout="namespace/owned deleted"),
+                ],
+            ) as delete_command,
+            mock.patch.object(acceptance.time, "sleep") as sleep,
+        ):
+            output = driver._kubectl_cleanup_command(
+                ["delete", "namespace", "owned", "--ignore-not-found"],
+                cleanup_timeout=20.0,
+            )
+
+        self.assertEqual(output, "namespace/owned deleted")
+        self.assertEqual(delete_command.call_count, 2)
+        sleep.assert_called_once_with(1.0)
+
+    def test_cleanup_does_not_retry_nontransient_authorization_failure(self) -> None:
+        options = dataclasses.replace(
+            runner_options(),
+            target="kubernetes",
+            kubernetes_context="orbstack",
+            kubernetes_allow_nondisposable=True,
+            kubernetes_shared_local_image_store=True,
+        )
+        driver = acceptance.KubernetesDriver(
+            pathlib.Path.cwd(),
+            options,
+            acceptance.Deadline(30.0),
+            acceptance.SecretRedactor(),
+        )
+        self.addCleanup(driver._release_state)
+
+        with (
+            mock.patch.object(
+                driver,
+                "_kubectl_completed",
+                return_value=subprocess.CompletedProcess(
+                    ["kubectl"],
+                    1,
+                    stdout="Error from server (Forbidden): access denied",
+                ),
+            ) as command,
+            mock.patch.object(acceptance.time, "sleep") as sleep,
+            self.assertRaises(acceptance.AcceptanceError) as caught,
+        ):
+            driver._kubernetes_resource_is_owned("namespace", "not-owned")
+
+        self.assertEqual(caught.exception.code, "runner.kubernetes_ownership_check_failed")
+        command.assert_called_once()
+        sleep.assert_not_called()
+
     def test_shared_local_image_store_builds_without_kind_load_and_uses_never(self) -> None:
         options = dataclasses.replace(
             runner_options(),

@@ -125,6 +125,8 @@ FIXTURE_LOAD_FAILURE_CASES = (
 FIXTURE_RETENTION_SWEEP_INTERVAL = "250ms"
 FIXTURE_RETENTION_DAYS = 1
 FIXTURE_RETENTION_AGE_DAYS = 2
+KUBERNETES_CLEANUP_MAX_ATTEMPTS = 3
+KUBERNETES_CLEANUP_RETRY_DELAYS_SECONDS = (1.0, 2.0)
 SUITES = (
     "fixture",
     "fixture-soak",
@@ -6524,11 +6526,84 @@ class KubernetesDriver(ManagedWorkerDriver):
             )
         return output
 
+    @staticmethod
+    def _kubectl_cleanup_failure_is_transient(output: str) -> bool:
+        normalized = output.lower()
+        return any(
+            marker in normalized
+            for marker in (
+                "unexpected eof",
+                "context deadline exceeded",
+                "client.timeout exceeded",
+                "request canceled",
+                "connection reset by peer",
+                "connection refused",
+                "i/o timeout",
+                "tls handshake timeout",
+                "server is currently unable to handle the request",
+                "server was unable to return a response in the time allotted",
+                "service unavailable",
+            )
+        )
+
+    def _kubectl_cleanup_completed(
+        self,
+        arguments: Sequence[str],
+        *,
+        cleanup_timeout: float,
+    ) -> subprocess.CompletedProcess[str]:
+        last_completed: subprocess.CompletedProcess[str] | None = None
+        last_error: AcceptanceError | None = None
+        for attempt in range(KUBERNETES_CLEANUP_MAX_ATTEMPTS):
+            try:
+                completed = self._kubectl_completed(
+                    arguments,
+                    cleanup_timeout=cleanup_timeout,
+                )
+            except AcceptanceError as error:
+                last_error = error
+            else:
+                last_completed = completed
+                output = self.redactor.text(completed.stdout)
+                if completed.returncode == 0 or not self._kubectl_cleanup_failure_is_transient(output):
+                    return completed
+            if attempt + 1 < KUBERNETES_CLEANUP_MAX_ATTEMPTS:
+                time.sleep(KUBERNETES_CLEANUP_RETRY_DELAYS_SECONDS[attempt])
+        if last_completed is not None:
+            return last_completed
+        if last_error is not None:
+            raise last_error
+        raise AssertionError("Kubernetes cleanup retry loop produced no result")
+
+    def _kubectl_cleanup_command(
+        self,
+        arguments: Sequence[str],
+        *,
+        cleanup_timeout: float,
+    ) -> str:
+        completed = self._kubectl_cleanup_completed(
+            arguments,
+            cleanup_timeout=cleanup_timeout,
+        )
+        output = self.redactor.text(completed.stdout)
+        if completed.returncode != 0 and "not found" not in output.lower() and "notfound" not in output.lower():
+            raise AcceptanceError(
+                "runner.kubernetes_cleanup_command_failed",
+                f"kubectl cleanup exited with status {completed.returncode}.",
+                {
+                    "command": ["kubectl", *arguments[:3]],
+                    "exitCode": completed.returncode,
+                    "maximumAttempts": KUBERNETES_CLEANUP_MAX_ATTEMPTS,
+                    "outputExcerpt": output[-1000:],
+                },
+            )
+        return output
+
     def _delete_cluster_resources(self) -> None:
         for namespace in sorted(self.owned_namespaces):
             if not self._kubernetes_resource_is_owned("namespace", namespace):
                 continue
-            self._kubectl_command(
+            self._kubectl_cleanup_command(
                 [
                     "delete",
                     "namespace",
@@ -6542,15 +6617,15 @@ class KubernetesDriver(ManagedWorkerDriver):
         for resource in ("clusterrolebinding", "clusterrole"):
             if not self._kubernetes_resource_is_owned(resource, self.bootstrap_role):
                 continue
-            self._kubectl_command(
+            self._kubectl_cleanup_command(
                 ["delete", resource, self.bootstrap_role, "--ignore-not-found"],
                 cleanup_timeout=20.0,
             )
 
     def _kubernetes_resource_is_owned(self, resource: str, name: str) -> bool:
-        completed = self._kubectl_completed(
+        completed = self._kubectl_cleanup_completed(
             ["get", resource, name, "-o", "json"],
-            cleanup_timeout=8.0,
+            cleanup_timeout=20.0,
         )
         output = self.redactor.text(completed.stdout).strip()
         if completed.returncode != 0:
