@@ -7,7 +7,8 @@ multi-arch 镜像、多节点生产 Kubernetes 和 soak 尚未完成前，只能
 发布门禁见 `docs/release-checklists/stage-3-provider-runtime-remote-worker.md`；最新 deterministic managed
 Docker rollout/failure/load 证据见 `docs/reports/stage-3-worker-release-rollout-load-41683366.md`，前序 Busy
 Worker rollout 证据保留在 `docs/reports/stage-3-worker-release-rollout-d3af9380.md`，总体 Provider runtime
-证据见 `docs/reports/stage-3-provider-runtime-acceptance-2026-07-15.md`。
+证据见 `docs/reports/stage-3-provider-runtime-acceptance-2026-07-15.md`。deterministic Kubernetes
+registry-pushed rollout 证据见 `docs/reports/stage-3-kubernetes-kind-registry-rollout-d1f3b68a.md`。
 
 ## 1. 核心不变量
 

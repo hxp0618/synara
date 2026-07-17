@@ -535,7 +535,8 @@ the main Target. It verifies:
 
 The Registry is disposable loopback HTTP without authentication. This gate is deterministic Kubernetes rollout
 mechanics evidence, not production Registry TLS/auth/retention, real Provider, cloud CNI/Eviction, production KMS,
-admission-policy, SLA, or production-duration soak evidence.
+admission-policy, SLA, or production-duration soak evidence. Clean commit `d1f3b68a` passed `15/15`; the formal
+boundary and hashes are in `docs/reports/stage-3-kubernetes-kind-registry-rollout-d1f3b68a.md`.
 
 ## Docker immutable Worker Release rollout gate
 

@@ -19,7 +19,16 @@
 - **预计工作量**：XL
 - **风险**：HIGH
 - **计划基线分支**：`codex/saas-tenancy-user`
-- **最近稳定检查点**：`aa1d0225`（one-control-plane/two-Worker owned disposable Kind 上的 clean-SHA
+- **最近稳定检查点**：`d1f3b68a`（one-control-plane/two-Worker owned disposable Kind 上的 clean-SHA
+  registry-pushed immutable Worker Release gate `15/15` 全通过。Runner-owned loopback Registry 向同一
+  repository 推送 baseline/candidate 两个不同 digest，Kind 通过 run-specific containerd mirror 与
+  `imagePullPolicy=Always` 真实拉取；正式 API 完成 `1 promote -> 2 canary -> 3 promote -> 4 rollback`，busy
+  baseline 与 candidate canary 同时 pending 时精确阻断 unsafe promote/rollback。六 Session/六 Execution 均为
+  Sequence `1..12`、单终态，四个 release-pinned Execution 的 Pod/Worker/Manifest/Revision/Channel/digest 一致；
+  Audit `553` 条/`3` 页、六条 published Outbox、零 Secret finding 和 cluster/Registry/images/state exact cleanup
+  同时通过。两个 overlap Pod 本次调度到同一 Worker，因此不声称跨 Node rollout distribution。正式证据见
+  `docs/reports/stage-3-kubernetes-kind-registry-rollout-d1f3b68a.md`。前序 `aa1d0225` 为 one-control-plane/two-Worker
+  owned disposable Kind 上的 clean-SHA
   deterministic Kubernetes matrix `24/24` 全通过。准备阶段强制 `3/3` Node Ready、两个 Worker 可调度；普通
   Drain、PDB-blocked Drain 后跨 Worker reschedule、独立 `policy/v1` Eviction 均验证 Generation `1 -> 2`、单终态
   与 uncordon，Canary、restart、exact cluster/image/state cleanup 和零 Secret finding 同时通过。正式证据见
@@ -48,6 +57,7 @@
 - **发布文档**：
   `docs/release-checklists/stage-3-provider-runtime-remote-worker.md`、
   `docs/runbooks/worker-release-rollout.md`、
+  `docs/reports/stage-3-kubernetes-kind-registry-rollout-d1f3b68a.md`、
   `docs/reports/stage-3-kubernetes-kind-pdb-multinode-aa1d0225.md`、
   `docs/reports/stage-3-kubernetes-kind-drain-fixture-fc9b2bf6.md`、
   `docs/reports/stage-3-kubernetes-orbstack-fixture-6b71703f.md`、
@@ -1275,8 +1285,16 @@ Manifest 不包含 Credential、路径中的用户信息或高基数 Secret。
   波/`48` Execution 全部完成，共 `50/50` quota rejection/retry、`75/75` overlap、`100/100` active/terminal
   release pin 与 Worker binding。Audit cursor 分页和 Outbox `topicPrefix` 过滤保证发布历史在负载下仍可见。
   完整证据见 `docs/reports/stage-3-worker-release-rollout-load-41683366.md`。
-- 这些结果关闭 deterministic managed Docker immutable rollout、Busy Worker completion/fencing、container-loss
-  recovery under bounded rollout load 与 load-safe history mechanics，但仍没有证明真实生产 KMS identity/tlog/
+- Clean commit `d1f3b68a` 在 one-control-plane/two-Worker owned Kind 上从同一 repository 真实拉取两个
+  Registry digest，完成 `promote -> 100% canary -> promote -> rollback`。Busy baseline 与 candidate canary
+  两个 execution-pinned Pod 同时 pending，Pod/Worker/Manifest/Revision/Channel/digest 完全一致；stale CAS、
+  active baseline promote 和 active candidate rollback 均精确 fail closed。六 Session 均为 Event `1..12`、
+  单终态；Audit/Outbox、Secret scan 和 cluster/Registry/images/state exact cleanup 通过。两个 overlap Pod
+  本次均调度到同一 Worker，不声称 cross-Node rollout distribution。完整证据见
+  `docs/reports/stage-3-kubernetes-kind-registry-rollout-d1f3b68a.md`。
+- 这些结果关闭 deterministic managed Docker 与 disposable Kind registry-pushed immutable rollout、Busy Worker/
+  Pod completion/fencing、Docker container-loss recovery under bounded rollout load 与 load-safe history mechanics，
+  但仍没有证明真实生产 KMS identity/tlog/
   admission、生产 Registry Credential/retention、真实 Codex/Claude remote rollout、生产多节点
   Drain/PDB/Eviction 或 production-duration SLA/soak；J 保持 `partial`。
 
@@ -1524,6 +1542,12 @@ Provider × Capability × Execution Target
   name 的临时 `0600` kubeconfig，运行后已删除。见
   `docs/reports/stage-3-kubernetes-orbstack-fixture-1e826324.md`。该证据仍是 deterministic fixture，不替代
   真实 Codex/Claude Kubernetes Release Gate、Node Drain/PDB、多节点或 registry-pushed immutable rollout。
+- Clean commit `d1f3b68a` 已补齐 deterministic registry-pushed immutable Kubernetes Revision mechanics：同一
+  repository 两个不同 digest 由 owned three-node Kind 通过 containerd mirror 与 `Always` 策略真实拉取，
+  正式 API 完成 baseline promote、`100%` candidate canary、candidate promote 与 baseline rollback；四个
+  release-pinned Execution、Audit/Outbox、Secret scan 和 exact cleanup 全部通过。两个 overlap Pod 本次均调度
+  到同一 Worker，因此仍不替代 production scheduler distribution、真实 Provider Release Gate 或 rollout under
+  load。见 `docs/reports/stage-3-kubernetes-kind-registry-rollout-d1f3b68a.md`。
 - 默认运行的是 deterministic Provider Host Protocol 2.1 fixture。它能证明共享 Contract、
   Control Plane-to-Worker-to-Host 通路和 Local/SSH/Docker/Kubernetes 恢复编排，**不等于**使用真实
   Codex App Server 或 Claude Agent SDK 的 Release Acceptance。
@@ -1582,7 +1606,8 @@ Provider × Capability × Execution Target
   创建并删除 disposable Kind cluster，复用同一 host Worker Image 且验证嵌套
   `kubernetes.containerEngine` Image ID、`ownedClusterRemoved=true`、`ownedWorkerImageRemoved=false` 与
   isolated state cleanup。当前 Local/Docker/Kubernetes release-gate tests 合计 `40/40`；新增 endpoint override
-  与脱敏失败摘要后 Acceptance Runner 为 `159/159`，Stage 3 Python 为 `281/281`。当前机器的 Kind `v0.32.0`、kubectl `v1.33.9` 与 Docker
+  与脱敏失败摘要后 Acceptance Runner 为 `159/159`；新增 Kubernetes rollout gate tests 后 Stage 3 Python 为
+  `289/289`。当前机器的 Kind `v0.32.0`、kubectl `v1.33.9` 与 Docker
   `29.4.0` runtime preflight 已通过。clean SHA `6b71703f` 已使用 operator-owned 第三方 Credential/Base URL
   执行 Kubernetes 四矩阵：Codex failure `16/16` 通过；Codex product 因没有 approval interaction 失败；Claude
   product/failure 均在首个真实 Turn 以 `provider_unavailable` 失败，clean SHA `8883e037` 的 Local 重现确认
@@ -1605,7 +1630,7 @@ Provider × Capability × Execution Target
   Credential/source 元数据。external 模式要求四次共享同一 pinned Host Key，并额外强制 host/identity source
   preserved、`externalHostRestarted=false` 和 owned runtime removed；disposable 模式反而要求每台独立 machine
   使用不同 Host Key。fixture、复用 installation/Host Key 或任一 runtime/cleanup mismatch 均 fail closed。当前
-  Acceptance Runner `159/159`、SSH Gate `15/15`、Stage 3 Python `281/281` 与 Control Plane `go test ./...` 均通过；
+  Acceptance Runner `159/159`、SSH Gate `15/15`、Stage 3 Python `289/289` 与 Control Plane `go test ./...` 均通过；
   尚缺安全本机 SSH identity 与专用 Provider Credential 下的 clean-SHA 四 child 报告，因此真实 SSH Gate 保持
   open。
 - 新增 `registry_release_gate.py`，要求 clean worktree、现有 `docker-container` Buildx builder 和
