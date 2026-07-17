@@ -739,6 +739,7 @@ class RunnerOptions:
     kubernetes_context: str | None
     kubernetes_kubeconfig: pathlib.Path | None
     kubernetes_allow_nondisposable: bool
+    kubernetes_shared_local_image_store: bool
     kubernetes_worker_image: str | None
     kubernetes_skip_worker_build: bool
     kubernetes_control_plane_host: str
@@ -5329,6 +5330,14 @@ class KubernetesDriver(ManagedWorkerDriver):
     def worker_proxy_host(self) -> str:
         return self.options.kubernetes_control_plane_host
 
+    @property
+    def uses_local_image_store(self) -> bool:
+        return self.context.startswith("kind-") or self.options.kubernetes_shared_local_image_store
+
+    @property
+    def image_pull_policy(self) -> str:
+        return "Never" if self.uses_local_image_store else "IfNotPresent"
+
     def create_provider_fault_server(self, provider: str, fault: str) -> _ProviderFaultServer:
         return _ProviderFaultServer(
             provider,
@@ -5482,12 +5491,23 @@ class KubernetesDriver(ManagedWorkerDriver):
                 log_path=self.logs_dir / "kubernetes-kind-load-image.log",
                 maximum_timeout=max(60.0, self.deadline.remaining()),
             )
+            image_transport = "kind-load"
+        elif self.options.kubernetes_shared_local_image_store:
+            image_transport = "shared-local-container-engine"
         elif not self.options.kubernetes_skip_worker_build:
             raise AcceptanceError(
                 "runner.kubernetes_image_load_unsupported",
-                "A locally built Kubernetes Worker image can only be loaded into a Kind context.",
-                {"context": self.context, "requiredInputs": ["--kubernetes-skip-worker-build"]},
+                "A locally built Kubernetes Worker image requires Kind or an explicitly shared local image store.",
+                {
+                    "context": self.context,
+                    "requiredInputs": [
+                        "--kubernetes-shared-local-image-store",
+                        "or --kubernetes-skip-worker-build",
+                    ],
+                },
             )
+        else:
+            image_transport = "operator-provided-image"
         access_evidence = self._prepare_cluster_access()
         return {
             "controlPlane": control_plane,
@@ -5495,37 +5515,45 @@ class KubernetesDriver(ManagedWorkerDriver):
                 **cluster_evidence,
                 **access_evidence,
                 "resourceOwner": self.resource_owner,
-                "containerEngine": image_evidence,
+                "containerEngine": {
+                    **image_evidence,
+                    "clusterImageTransport": image_transport,
+                    "imagePullPolicy": self.image_pull_policy,
+                },
             },
         }
 
     def _prepare_canary_image(self) -> Mapping[str, Any]:
         if self.canary_image_prepared:
             return {"image": self.canary_image, "prepared": True}
-        if not self.context.startswith("kind-"):
+        if not self.uses_local_image_store:
             raise AcceptanceUnsupported(
                 "runner.kubernetes_canary_registry_required",
-                "A non-Kind canary requires a caller-published immutable image; the fixture only creates local aliases.",
+                "A Kubernetes canary requires a local image store or a caller-published immutable image.",
                 {
                     "context": self.context,
-                    "requiredInputs": ["published immutable canary image and product release revision"],
+                    "requiredInputs": [
+                        "--kubernetes-shared-local-image-store",
+                        "or published immutable canary image and product release revision",
+                    ],
                 },
             )
         self._docker_command(
             ["image", "tag", self.image, self.canary_image],
             log_path=self.logs_dir / "kubernetes-canary-tag.log",
         )
-        self._kind_command(
-            [
-                "load",
-                "docker-image",
-                "--name",
-                self.context.removeprefix("kind-"),
-                self.canary_image,
-            ],
-            log_path=self.logs_dir / "kubernetes-kind-load-canary-image.log",
-            maximum_timeout=max(60.0, self.deadline.remaining()),
-        )
+        if self.context.startswith("kind-"):
+            self._kind_command(
+                [
+                    "load",
+                    "docker-image",
+                    "--name",
+                    self.context.removeprefix("kind-"),
+                    self.canary_image,
+                ],
+                log_path=self.logs_dir / "kubernetes-kind-load-canary-image.log",
+                maximum_timeout=max(60.0, self.deadline.remaining()),
+            )
         self.canary_image_prepared = True
         image_id = self._docker_command(
             ["image", "inspect", "--format", "{{.Id}}", self.canary_image]
@@ -5535,6 +5563,9 @@ class KubernetesDriver(ManagedWorkerDriver):
             "sourceImage": self.image,
             "imageId": image_id,
             "prepared": True,
+            "clusterImageTransport": (
+                "kind-load" if self.context.startswith("kind-") else "shared-local-container-engine"
+            ),
             "ownership": "runner-owned alias; source image is never deleted unless it was built by this run",
         }
 
@@ -5574,7 +5605,7 @@ class KubernetesDriver(ManagedWorkerDriver):
                 "namespace": self.target_namespace,
                 "workerAllocation": self.lifecycle.worker_allocation,
                 "image": self.image,
-                "imagePullPolicy": "Never" if self.context.startswith("kind-") else "IfNotPresent",
+                "imagePullPolicy": self.image_pull_policy,
                 "networkPolicyImplementation": "cluster-dependent",
                 "resourceOwner": self.resource_owner,
             },
@@ -5617,7 +5648,7 @@ class KubernetesDriver(ManagedWorkerDriver):
                 "namespace": self.canary_namespace,
                 "image": self.canary_image,
                 "sourceImage": self.image,
-                "imagePullPolicy": "Never" if self.context.startswith("kind-") else "IfNotPresent",
+                "imagePullPolicy": self.image_pull_policy,
                 "resourceOwner": self.resource_owner,
                 "imagePreparation": image_evidence,
             },
@@ -5655,7 +5686,7 @@ class KubernetesDriver(ManagedWorkerDriver):
                         "manageNamespace": True,
                         "serviceAccountName": service_account,
                         "image": image,
-                        "imagePullPolicy": "Never" if self.context.startswith("kind-") else "IfNotPresent",
+                        "imagePullPolicy": self.image_pull_policy,
                         "controlPlaneUrl": self._worker_proxy_url(),
                         "allowInsecureControlPlane": True,
                         "runnerCommand": list(self.options.runner_command),
@@ -13703,6 +13734,14 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
     parser.add_argument("--kubernetes-kubeconfig", type=pathlib.Path)
     parser.add_argument("--kubernetes-allow-nondisposable", action="store_true")
     parser.add_argument(
+        "--kubernetes-shared-local-image-store",
+        action="store_true",
+        help=(
+            "Allow a reused non-Kind context to consume and clean the runner-built local Docker image with "
+            "imagePullPolicy=Never"
+        ),
+    )
+    parser.add_argument(
         "--kubernetes-worker-image",
         help="Existing worker-acceptance image used with --kubernetes-skip-worker-build",
     )
@@ -13832,6 +13871,17 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
         )
     if parsed.kubernetes_kubeconfig is not None and not parsed.kubernetes_context:
         parser.error("--kubernetes-kubeconfig requires --kubernetes-context")
+    if parsed.kubernetes_shared_local_image_store:
+        if not parsed.kubernetes_context:
+            parser.error("--kubernetes-shared-local-image-store requires --kubernetes-context")
+        if not parsed.kubernetes_allow_nondisposable:
+            parser.error(
+                "--kubernetes-shared-local-image-store requires --kubernetes-allow-nondisposable"
+            )
+        if parsed.kubernetes_skip_worker_build or parsed.kubernetes_worker_image:
+            parser.error(
+                "--kubernetes-shared-local-image-store cannot be combined with an operator-provided Worker image"
+            )
     if parsed.kind_cluster_name and parsed.kubernetes_context:
         parser.error("--kind-cluster-name cannot be combined with --kubernetes-context")
     if parsed.docker_memory_bytes < 64 << 20:
@@ -14027,6 +14077,7 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
         kubernetes_context=kubernetes_context,
         kubernetes_kubeconfig=kubernetes_kubeconfig,
         kubernetes_allow_nondisposable=parsed.kubernetes_allow_nondisposable,
+        kubernetes_shared_local_image_store=parsed.kubernetes_shared_local_image_store,
         kubernetes_worker_image=parsed.kubernetes_worker_image,
         kubernetes_skip_worker_build=parsed.kubernetes_skip_worker_build,
         kubernetes_control_plane_host=parsed.kubernetes_control_plane_host.strip(),
@@ -14401,6 +14452,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "context": options.kubernetes_context or "owned-kind-cluster",
                 "kubeconfig": str(options.kubernetes_kubeconfig) if options.kubernetes_kubeconfig else None,
                 "allowNondisposable": options.kubernetes_allow_nondisposable,
+                "sharedLocalImageStore": options.kubernetes_shared_local_image_store,
                 "workerImage": options.kubernetes_worker_image,
                 "skipWorkerBuild": options.kubernetes_skip_worker_build,
                 "controlPlaneHost": options.kubernetes_control_plane_host,

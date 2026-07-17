@@ -554,11 +554,31 @@ the existing `--kubernetes-allow-nondisposable` gate and the separate
 `--kubernetes-allow-node-drain` authorization. The runner always attempts `uncordon` in `finally`. Eviction stays
 scoped to the unique acceptance Namespace and Pod UID and does not require Node mutation.
 
-The image canary creates a runner-owned local image alias and loads it into Kind, then creates a second Target via
-the real user API. It proves Target isolation, image selection, Worker Manifest discovery, Approval round-trip,
-and baseline continuity. Because the alias points to the same deterministic fixture image, it does **not** prove
-an immutable-digest promotion/rollback implementation or a real Codex/Claude upgrade. Non-Kind clusters are
-reported as explicit unsupported until a product release revision API and caller-published immutable image exist.
+Reusable local contexts that share the host Docker image store, such as OrbStack, require a second explicit image
+authorization. The runner then builds its uniquely tagged Worker image, configures `imagePullPolicy=Never`, records
+the shared-container-engine transport, and removes only that exact image during cleanup:
+
+```sh
+python3 scripts/stage3-provider-acceptance/acceptance_runner.py \
+  --target kubernetes \
+  --provider codex \
+  --kubernetes-context orbstack \
+  --kubernetes-allow-nondisposable \
+  --kubernetes-shared-local-image-store \
+  --timeout 1800
+```
+
+Do not use `--kubernetes-shared-local-image-store` for a remote cluster or a Context whose nodes do not consume the
+same local Docker images. The flag cannot be combined with `--kubernetes-worker-image` or
+`--kubernetes-skip-worker-build`; remote/repository-backed images remain operator-provided and are never deleted by
+the Runner.
+
+The image canary creates a runner-owned local image alias, loads it into Kind or exposes it through the explicitly
+authorized shared local image store, then creates a second Target via the real user API. It proves Target isolation,
+image selection, Worker Manifest discovery, Approval round-trip, and baseline continuity. Because the alias points
+to the same deterministic fixture image, it does **not** prove an immutable-digest promotion/rollback implementation
+or a real Codex/Claude upgrade. Other non-Kind clusters are reported as explicit unsupported until a product release
+revision API and caller-published immutable image exist.
 
 All Docker networks/volumes and Kubernetes bootstrap/Target Namespaces receive a unique acceptance owner label.
 Cleanup verifies that label before deleting reusable-cluster or Docker resources, uses exact Target labels for

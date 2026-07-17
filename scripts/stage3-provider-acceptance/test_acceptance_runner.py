@@ -56,6 +56,7 @@ def runner_options(*, restart_control_plane: bool = True) -> acceptance.RunnerOp
         kubernetes_context=None,
         kubernetes_kubeconfig=None,
         kubernetes_allow_nondisposable=False,
+        kubernetes_shared_local_image_store=False,
         kubernetes_worker_image=None,
         kubernetes_skip_worker_build=False,
         kubernetes_control_plane_host="host.docker.internal",
@@ -4397,6 +4398,47 @@ class RunnerOptionsTest(unittest.TestCase):
                 ["--target", "kubernetes", "--kubernetes-worker-image", "operator-owned:image"]
             )
 
+    def test_kubernetes_shared_local_image_store_requires_explicit_reused_context_authorization(
+        self,
+    ) -> None:
+        options = acceptance.parse_args(
+            [
+                "--target",
+                "kubernetes",
+                "--kubernetes-context",
+                "orbstack",
+                "--kubernetes-allow-nondisposable",
+                "--kubernetes-shared-local-image-store",
+            ]
+        )
+
+        self.assertTrue(options.kubernetes_shared_local_image_store)
+        invalid_arguments = (
+            ["--target", "kubernetes", "--kubernetes-shared-local-image-store"],
+            [
+                "--target",
+                "kubernetes",
+                "--kubernetes-context",
+                "orbstack",
+                "--kubernetes-shared-local-image-store",
+            ],
+            [
+                "--target",
+                "kubernetes",
+                "--kubernetes-context",
+                "orbstack",
+                "--kubernetes-allow-nondisposable",
+                "--kubernetes-shared-local-image-store",
+                "--kubernetes-worker-image",
+                "operator-owned:image",
+                "--kubernetes-skip-worker-build",
+            ],
+        )
+        for arguments in invalid_arguments:
+            with self.subTest(arguments=arguments):
+                with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                    acceptance.parse_args(arguments)
+
 
 class OutputSecretScanTest(unittest.TestCase):
     def test_scan_fails_closed_without_echoing_secret_material(self) -> None:
@@ -5135,6 +5177,88 @@ class SSHDriverTest(unittest.TestCase):
 
 
 class KubernetesDriverObservationTest(unittest.TestCase):
+    def test_shared_local_image_store_builds_without_kind_load_and_uses_never(self) -> None:
+        options = dataclasses.replace(
+            runner_options(),
+            target="kubernetes",
+            kubernetes_context="orbstack",
+            kubernetes_allow_nondisposable=True,
+            kubernetes_shared_local_image_store=True,
+        )
+
+        class SharedStoreDriver(acceptance.KubernetesDriver):
+            def _prepare_cluster(self) -> Mapping[str, Any]:
+                return {"context": self.context, "ownedCluster": False}
+
+            def _prepare_worker_image(
+                self,
+                image: str,
+                *,
+                skip_build: bool,
+                log_prefix: str,
+            ) -> Mapping[str, Any]:
+                self.prepared_image = (image, skip_build, log_prefix)
+                return {"workerImage": image, "workerImageId": "sha256:image"}
+
+            def _prepare_cluster_access(self) -> Mapping[str, Any]:
+                return {"bootstrapNamespace": self.bootstrap_namespace}
+
+            def _kind_command(self, *_args: Any, **_kwargs: Any) -> str:
+                raise AssertionError("shared local image stores must not invoke Kind image loading")
+
+        driver = SharedStoreDriver(
+            pathlib.Path.cwd(),
+            options,
+            acceptance.Deadline(30.0),
+            acceptance.SecretRedactor(),
+        )
+        self.addCleanup(driver._release_state)
+
+        with mock.patch.object(acceptance.ManagedWorkerDriver, "prepare", return_value={}):
+            evidence = driver.prepare()
+
+        self.assertEqual(driver.prepared_image, (driver.image, False, "kubernetes"))
+        self.assertEqual(driver.image_pull_policy, "Never")
+        self.assertEqual(
+            evidence["kubernetes"]["containerEngine"]["clusterImageTransport"],
+            "shared-local-container-engine",
+        )
+
+    def test_shared_local_image_store_prepares_canary_without_kind_load(self) -> None:
+        options = dataclasses.replace(
+            runner_options(),
+            target="kubernetes",
+            kubernetes_context="orbstack",
+            kubernetes_allow_nondisposable=True,
+            kubernetes_shared_local_image_store=True,
+        )
+
+        class SharedStoreDriver(acceptance.KubernetesDriver):
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                super().__init__(*args, **kwargs)
+                self.docker_commands: list[list[str]] = []
+
+            def _docker_command(self, arguments: Sequence[str], **_kwargs: Any) -> str:
+                self.docker_commands.append(list(arguments))
+                return "sha256:canary" if arguments[:2] == ["image", "inspect"] else ""
+
+            def _kind_command(self, *_args: Any, **_kwargs: Any) -> str:
+                raise AssertionError("shared local image stores must not invoke Kind image loading")
+
+        driver = SharedStoreDriver(
+            pathlib.Path.cwd(),
+            options,
+            acceptance.Deadline(30.0),
+            acceptance.SecretRedactor(),
+        )
+        self.addCleanup(driver._release_state)
+
+        evidence = driver._prepare_canary_image()
+
+        self.assertEqual(driver.docker_commands[0][:2], ["image", "tag"])
+        self.assertEqual(evidence["clusterImageTransport"], "shared-local-container-engine")
+        self.assertEqual(evidence["imageId"], "sha256:canary")
+
     def test_wait_execution_pod_ignores_terminating_runtime_during_replacement(self) -> None:
         options = dataclasses.replace(
             runner_options(),
