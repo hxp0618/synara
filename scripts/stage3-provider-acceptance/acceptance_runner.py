@@ -6276,6 +6276,7 @@ class KubernetesDriver(ManagedWorkerDriver):
         namespace: str,
         service_account: str,
         image: str,
+        max_active_pods: int = 1,
     ) -> dict[str, Any]:
         if not self.api_server or not self.ca_certificate or not self.kubernetes_token:
             raise AcceptanceError(
@@ -6302,7 +6303,7 @@ class KubernetesDriver(ManagedWorkerDriver):
                         "controlPlaneUrl": self._worker_proxy_url(),
                         "allowInsecureControlPlane": True,
                         "runnerCommand": list(self.options.runner_command),
-                        "maxActivePods": 1,
+                        "maxActivePods": max_active_pods,
                         "egressCidrs": ["0.0.0.0/0"],
                         "cpuRequest": "100m",
                         "cpuLimit": "1",
@@ -6833,9 +6834,43 @@ class KubernetesDriver(ManagedWorkerDriver):
 
     def observe_execution(self, target_id: str, execution_id: str) -> Mapping[str, Any]:
         runtime = self._target_runtime(target_id)
+        return self._observe_execution_pod_contract(
+            target_id,
+            execution_id,
+            expected_image=runtime["image"],
+            expected_release_revision_id=None,
+            expected_release_channel=None,
+        )
+
+    def observe_release_execution(
+        self,
+        target_id: str,
+        execution_id: str,
+        *,
+        expected_image: str,
+        expected_release_revision_id: str,
+        expected_release_channel: str,
+    ) -> Mapping[str, Any]:
+        return self._observe_execution_pod_contract(
+            target_id,
+            execution_id,
+            expected_image=expected_image,
+            expected_release_revision_id=expected_release_revision_id,
+            expected_release_channel=expected_release_channel,
+        )
+
+    def _observe_execution_pod_contract(
+        self,
+        target_id: str,
+        execution_id: str,
+        *,
+        expected_image: str,
+        expected_release_revision_id: str | None,
+        expected_release_channel: str | None,
+    ) -> Mapping[str, Any]:
+        runtime = self._target_runtime(target_id)
         expected_namespace = runtime["namespace"]
         expected_service_account = runtime["serviceAccount"]
-        expected_image = runtime["image"]
         pod = self._wait_execution_pod(target_id, execution_id)
         metadata = json_object(pod.get("metadata"), "Kubernetes Pod metadata")
         spec = json_object(pod.get("spec"), "Kubernetes Pod spec")
@@ -6865,12 +6900,28 @@ class KubernetesDriver(ManagedWorkerDriver):
             "synara.io/managed": "true",
             "synara.io/execution-target-id": target_id,
             "synara.io/execution-id": execution_id,
+            "synara.io/worker-release-revision-id": expected_release_revision_id,
+            "synara.io/worker-release-channel": expected_release_channel,
         }
         actual_labels = {key: labels.get(key) for key in expected_labels}
         assigned_execution = json_object(
             environment.get("SYNARA_AGENTD_ASSIGNED_EXECUTION_ID"),
             "assigned execution environment",
         ).get("value")
+        expected_digest_match = re.search(r"@(sha256:[0-9a-f]{64})$", expected_image)
+        expected_digest = expected_digest_match.group(1) if expected_digest_match is not None else None
+        digest_environment = environment.get("SYNARA_AGENTD_IMAGE_DIGEST")
+        actual_digest = digest_environment.get("value") if isinstance(digest_environment, dict) else None
+        container_statuses = status.get("containerStatuses")
+        container_image_id: str | None = None
+        if isinstance(container_statuses, list):
+            matching_statuses = [
+                item
+                for item in container_statuses
+                if isinstance(item, dict) and item.get("name") == "agentd"
+            ]
+            if len(matching_statuses) == 1 and isinstance(matching_statuses[0].get("imageID"), str):
+                container_image_id = str(matching_statuses[0]["imageID"])
         expected_security = {
             "allowPrivilegeEscalation": False,
             "readOnlyRootFilesystem": True,
@@ -6884,8 +6935,16 @@ class KubernetesDriver(ManagedWorkerDriver):
             or labels.get("synara.io/generation") in (None, "")
             or container.get("name") != "agentd"
             or container.get("image") != expected_image
-            or container.get("imagePullPolicy") not in {"Never", "IfNotPresent"}
+            or container.get("imagePullPolicy") != self.image_pull_policy
             or assigned_execution != execution_id
+            or actual_digest != expected_digest
+            or (
+                expected_digest is not None
+                and (
+                    container_image_id is None
+                    or not container_image_id.endswith("@" + expected_digest)
+                )
+            )
             or secret_ref.get("key") != "registration-token"
             or actual_security != expected_security
             or capabilities.get("drop") != ["ALL"]
@@ -6901,6 +6960,12 @@ class KubernetesDriver(ManagedWorkerDriver):
                 {
                     "labels": actual_labels,
                     "assignedExecutionId": assigned_execution,
+                    "expectedImage": expected_image,
+                    "actualImage": container.get("image"),
+                    "expectedImageDigest": expected_digest,
+                    "actualImageDigest": actual_digest,
+                    "containerImageId": container_image_id,
+                    "imagePullPolicy": container.get("imagePullPolicy"),
                     "containerSecurity": actual_security,
                     "serviceAccountName": spec.get("serviceAccountName"),
                 },
@@ -6928,6 +6993,12 @@ class KubernetesDriver(ManagedWorkerDriver):
             "phase": status.get("phase"),
             "generation": labels.get("synara.io/generation"),
             "image": container.get("image"),
+            "imageDigest": actual_digest,
+            "containerImageId": container_image_id,
+            "imagePullPolicy": container.get("imagePullPolicy"),
+            "workerReleaseRevisionId": labels.get("synara.io/worker-release-revision-id"),
+            "workerReleaseChannel": labels.get("synara.io/worker-release-channel"),
+            "nodeName": spec.get("nodeName"),
             "serviceAccountName": spec.get("serviceAccountName"),
             "security": actual_security,
             "volumes": volume_names,
@@ -7057,6 +7128,21 @@ class KubernetesDriver(ManagedWorkerDriver):
             "broadCleanupUsed": False,
         }
 
+    def _kind_cluster_configuration(self) -> Mapping[str, Any] | None:
+        if not self.options.kind_worker_nodes:
+            return None
+        return {
+            "kind": "Cluster",
+            "apiVersion": "kind.x-k8s.io/v1alpha4",
+            "nodes": [
+                {"role": "control-plane"},
+                *(
+                    {"role": "worker"}
+                    for _ in range(self.options.kind_worker_nodes)
+                ),
+            ],
+        }
+
     def _prepare_cluster(self) -> Mapping[str, Any]:
         if self.owns_cluster:
             if self.kubeconfig is None:
@@ -7074,21 +7160,12 @@ class KubernetesDriver(ManagedWorkerDriver):
                 "--wait",
                 "180s",
             ]
-            if self.options.kind_worker_nodes:
+            cluster_configuration = self._kind_cluster_configuration()
+            if cluster_configuration is not None:
                 config_path = self.state_dir / "kind-cluster.json"
                 config_path.write_text(
                     json.dumps(
-                        {
-                            "kind": "Cluster",
-                            "apiVersion": "kind.x-k8s.io/v1alpha4",
-                            "nodes": [
-                                {"role": "control-plane"},
-                                *(
-                                    {"role": "worker"}
-                                    for _ in range(self.options.kind_worker_nodes)
-                                ),
-                            ],
-                        },
+                        cluster_configuration,
                         separators=(",", ":"),
                     )
                     + "\n",

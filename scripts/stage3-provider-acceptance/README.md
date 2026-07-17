@@ -504,6 +504,39 @@ child intentionally rebuilds and verifies the same runtime from the clean checko
 unit/runtime preflight evidence are not a real SSH Provider release pass until dedicated Credentials and a usable
 repository-external identity are configured and all four clean-SHA children complete.
 
+## Kubernetes immutable Worker Release rollout gate
+
+`kubernetes_worker_release_rollout_gate.py` exercises the product Worker Release API and execution-pinned
+Kubernetes reconciler without requiring a real Provider API key. Run it only from a clean committed checkout:
+
+```sh
+python3 scripts/stage3-provider-acceptance/kubernetes_worker_release_rollout_gate.py \
+  --go-proxy https://goproxy.cn,direct \
+  --kind-worker-nodes 2 \
+  --output-dir /tmp/synara-kubernetes-worker-release-rollout \
+  --timeout 3600
+```
+
+The gate starts a runner-owned loopback Registry, pushes baseline and candidate images from the same source SHA to
+one repository, and creates a one-control-plane/two-Worker Kind cluster whose containerd mirror resolves only that
+run's `localhost:<port>` authority through the owned Registry container. The main Target permits two simultaneous
+execution-pinned Pods; a separate observer Target materializes the candidate Manifest before it is registered on
+the main Target. It verifies:
+
+- Registry-returned distinct immutable digests and real `imagePullPolicy=Always` pulls inside Kind;
+- exact Pod image, runtime image ID, Worker Manifest, Release Revision, Channel, digest, Generation, and Node;
+- `1 promote -> 2 canary -> 3 promote -> 4 rollback` strict-CAS history;
+- one busy baseline Pod remains unchanged while a `100%` candidate canary Pod overlaps it;
+- stale CAS rejection plus active baseline/candidate Execution fencing for promote and rollback;
+- four release-pinned Approval Executions, six distinct seed/release Executions, one terminal per Execution,
+  contiguous Session Event sequences, exact Audit/Outbox history, and an empty output Secret scan;
+- deletion of the owned Kind cluster, Registry container/storage, both Worker images, and isolated state without
+  prune or broad cleanup.
+
+The Registry is disposable loopback HTTP without authentication. This gate is deterministic Kubernetes rollout
+mechanics evidence, not production Registry TLS/auth/retention, real Provider, cloud CNI/Eviction, production KMS,
+admission-policy, SLA, or production-duration soak evidence.
+
 ## Docker immutable Worker Release rollout gate
 
 `docker_worker_release_rollout_gate.py` is the product Release Revision gate for the managed Docker pool. It does
