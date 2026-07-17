@@ -8,6 +8,8 @@ import io
 import json
 import os
 import pathlib
+import shutil
+import sqlite3
 import subprocess
 import tarfile
 import tempfile
@@ -1581,6 +1583,223 @@ class APIClientTimeoutTest(unittest.TestCase):
         self.assertAlmostEqual(timeouts[1], 25.0, delta=0.1)
 
 
+class LocalRetentionHarnessTest(unittest.TestCase):
+    def test_local_driver_uses_short_sweep_only_for_retention_concurrency(self) -> None:
+        drivers = [
+            acceptance.LocalDriver(
+                REPO_ROOT,
+                dataclasses.replace(
+                    runner_options(),
+                    target="local",
+                    suite=suite,
+                ),
+                acceptance.Deadline(30.0),
+                acceptance.SecretRedactor(),
+            )
+            for suite in ("fixture", "fixture-retention-concurrency")
+        ]
+        try:
+            self.assertEqual(
+                drivers[0]._control_plane_environment()["SYNARA_RETENTION_SWEEP_INTERVAL"],
+                "24h",
+            )
+            self.assertEqual(
+                drivers[1]._control_plane_environment()["SYNARA_RETENTION_SWEEP_INTERVAL"],
+                acceptance.FIXTURE_RETENTION_SWEEP_INTERVAL,
+            )
+        finally:
+            for driver in drivers:
+                driver._release_state()
+
+    def test_harness_stages_and_validates_active_then_terminal_cleanup(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_state:
+            state_dir = pathlib.Path(raw_state)
+            database_path = state_dir / "metadata.sqlite"
+            tenant_id = "tenant-id"
+            organization_id = "organization-id"
+            project_id = "project-id"
+            session_id = "session-id"
+            target_id = "target-id"
+            workspace_id = "workspace-id"
+            materialization_id = "materialization-id"
+            incarnation_id = "incarnation-id"
+            checkpoint_id = "checkpoint-id"
+            checkpoint_artifact_id = "checkpoint-artifact-id"
+            generated_artifact_id = "generated-artifact-id"
+            generated_execution_id = "generated-execution-id"
+            active_execution_id = "active-execution-id"
+            interaction_id = "interaction-id"
+            generated_key = f"{tenant_id}/generated.txt"
+            checkpoint_key = f"{tenant_id}/checkpoint.tar"
+            generated_path = state_dir / "artifacts" / generated_key
+            checkpoint_path = state_dir / "artifacts" / checkpoint_key
+            generated_path.parent.mkdir(parents=True)
+            generated_path.write_text("generated", encoding="utf-8")
+            checkpoint_path.write_text("checkpoint", encoding="utf-8")
+            workspace_path = state_dir.joinpath(
+                "workspaces",
+                "v3",
+                target_id,
+                tenant_id,
+                project_id,
+                session_id,
+                workspace_id,
+                incarnation_id,
+            )
+            workspace_path.mkdir(parents=True)
+            (workspace_path / "manifest.json").write_text("{}\n", encoding="utf-8")
+            now = acceptance.dt.datetime.now(acceptance.dt.timezone.utc)
+            timestamp = now.isoformat(sep=" ", timespec="microseconds")
+            with sqlite3.connect(database_path) as connection:
+                connection.executescript(
+                    """
+                    CREATE TABLE agent_sessions (
+                        tenant_id TEXT, id TEXT, status TEXT, updated_at TEXT, archived_at TEXT
+                    );
+                    CREATE TABLE remote_workspaces (
+                        tenant_id TEXT, organization_id TEXT, project_id TEXT, session_id TEXT,
+                        execution_target_id TEXT, id TEXT, state TEXT, current_checkpoint_id TEXT,
+                        current_materialization_id TEXT, retention_until TEXT, updated_at TEXT, cleaned_at TEXT
+                    );
+                    CREATE TABLE workspace_materializations (
+                        tenant_id TEXT, id TEXT, workspace_id TEXT, incarnation_id TEXT, layout_version INTEGER,
+                        state TEXT, cleanup_reason TEXT, cleanup_requested_at TEXT, updated_at TEXT, cleaned_at TEXT
+                    );
+                    CREATE TABLE workspace_checkpoints (
+                        tenant_id TEXT, id TEXT, artifact_id TEXT, status TEXT
+                    );
+                    CREATE TABLE artifacts (
+                        tenant_id TEXT, id TEXT, session_id TEXT, execution_id TEXT, kind TEXT,
+                        original_name TEXT, object_key TEXT, workspace_checkpoint_id TEXT,
+                        status TEXT, ready_at TEXT, expires_at TEXT, deleted_at TEXT
+                    );
+                    CREATE TABLE agent_executions (
+                        tenant_id TEXT, id TEXT, status TEXT, workspace_materialization_id TEXT
+                    );
+                    CREATE TABLE execution_interactions (
+                        tenant_id TEXT, id TEXT, status TEXT
+                    );
+                    CREATE TABLE worker_leases (
+                        tenant_id TEXT, execution_id TEXT
+                    );
+                    CREATE TABLE workspace_cleanup_commands (
+                        tenant_id TEXT, materialization_id TEXT, id TEXT, status TEXT, reason TEXT,
+                        dispatch_generation INTEGER, delivery_attempts INTEGER,
+                        acknowledged_at TEXT, created_at TEXT
+                    );
+                    """
+                )
+                connection.execute(
+                    "INSERT INTO agent_sessions VALUES (?, ?, 'active', ?, NULL)",
+                    (tenant_id, session_id, timestamp),
+                )
+                connection.execute(
+                    "INSERT INTO remote_workspaces VALUES (?, ?, ?, ?, ?, ?, 'ready', ?, ?, NULL, ?, NULL)",
+                    (
+                        tenant_id,
+                        organization_id,
+                        project_id,
+                        session_id,
+                        target_id,
+                        workspace_id,
+                        checkpoint_id,
+                        materialization_id,
+                        timestamp,
+                    ),
+                )
+                connection.execute(
+                    "INSERT INTO workspace_materializations VALUES (?, ?, ?, ?, 3, 'active', NULL, NULL, ?, NULL)",
+                    (tenant_id, materialization_id, workspace_id, incarnation_id, timestamp),
+                )
+                connection.execute(
+                    "INSERT INTO workspace_checkpoints VALUES (?, ?, ?, 'ready')",
+                    (tenant_id, checkpoint_id, checkpoint_artifact_id),
+                )
+                connection.execute(
+                    "INSERT INTO artifacts VALUES (?, ?, ?, ?, 'generated_file', 'artifact.txt', ?, NULL, 'ready', ?, NULL, NULL)",
+                    (
+                        tenant_id,
+                        generated_artifact_id,
+                        session_id,
+                        generated_execution_id,
+                        generated_key,
+                        timestamp,
+                    ),
+                )
+                connection.execute(
+                    "INSERT INTO artifacts VALUES (?, ?, ?, ?, 'workspace_snapshot', 'checkpoint.tar', ?, ?, 'ready', ?, NULL, NULL)",
+                    (
+                        tenant_id,
+                        checkpoint_artifact_id,
+                        session_id,
+                        generated_execution_id,
+                        checkpoint_key,
+                        checkpoint_id,
+                        timestamp,
+                    ),
+                )
+                connection.execute(
+                    "INSERT INTO agent_executions VALUES (?, ?, 'waiting-for-approval', ?)",
+                    (tenant_id, active_execution_id, materialization_id),
+                )
+                connection.execute(
+                    "INSERT INTO execution_interactions VALUES (?, ?, 'pending')",
+                    (tenant_id, interaction_id),
+                )
+                connection.execute(
+                    "INSERT INTO worker_leases VALUES (?, ?)",
+                    (tenant_id, active_execution_id),
+                )
+
+            harness = acceptance.LocalRetentionHarness(state_dir)
+            seed = harness.load_seed(session_id)
+            self.assertEqual(seed.evidence()["workspaceId"], workspace_id)
+            expired_at = now - acceptance.dt.timedelta(days=2)
+            harness.stage_active_retention(seed, expired_at)
+            generated_path.unlink()
+            with sqlite3.connect(database_path) as connection:
+                connection.execute(
+                    "UPDATE artifacts SET status = 'deleted', deleted_at = ? WHERE id = ?",
+                    (timestamp, generated_artifact_id),
+                )
+            active = harness.snapshot(seed, active_execution_id, interaction_id)
+            acceptance.AcceptanceSuite._validate_retention_active_snapshot(seed, active)
+
+            harness.age_session(seed, expired_at)
+            shutil.rmtree(workspace_path)
+            with sqlite3.connect(database_path) as connection:
+                connection.execute(
+                    "UPDATE agent_sessions SET status = 'archived', archived_at = ? WHERE id = ?",
+                    (timestamp, session_id),
+                )
+                connection.execute(
+                    "UPDATE agent_executions SET status = 'completed' WHERE id = ?",
+                    (active_execution_id,),
+                )
+                connection.execute(
+                    "UPDATE execution_interactions SET status = 'resolved' WHERE id = ?",
+                    (interaction_id,),
+                )
+                connection.execute(
+                    "DELETE FROM worker_leases WHERE execution_id = ?",
+                    (active_execution_id,),
+                )
+                connection.execute(
+                    "UPDATE remote_workspaces SET state = 'cleaned', cleaned_at = ? WHERE id = ?",
+                    (timestamp, workspace_id),
+                )
+                connection.execute(
+                    "UPDATE workspace_materializations SET state = 'cleaned', cleaned_at = ? WHERE id = ?",
+                    (timestamp, materialization_id),
+                )
+                connection.execute(
+                    "INSERT INTO workspace_cleanup_commands VALUES (?, ?, 'cleanup-id', 'acknowledged', 'retention-session-archive', 1, 1, ?, ?)",
+                    (tenant_id, materialization_id, timestamp, timestamp),
+                )
+            terminal = harness.snapshot(seed, active_execution_id, interaction_id)
+            acceptance.AcceptanceSuite._validate_retention_terminal_snapshot(seed, terminal)
+
+
 class ManagedWorkerImageTest(unittest.TestCase):
     def test_fixture_concurrency_requests_two_managed_docker_workers(self) -> None:
         driver = acceptance.DockerDriver(
@@ -2172,6 +2391,32 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
                 "runtime.concurrent-worker-discovery",
                 "resources.credential-project-session",
                 "concurrency.multi-provider-multi-session",
+            ],
+        )
+
+    def test_fixture_retention_concurrency_uses_local_fencing_case_order(self) -> None:
+        suite = CaseOrderSuite(
+            FakeDriver(acceptance.STANDING_WORKER, name="local"),
+            dataclasses.replace(
+                runner_options(),
+                target="local",
+                suite="fixture-retention-concurrency",
+                restart_control_plane=False,
+            ),
+        )
+
+        suite.run()
+
+        self.assertEqual(
+            suite.case_order,
+            [
+                "environment.target-prepare",
+                "environment.control-plane-start",
+                "identity.dev-login",
+                "runtime.worker-discovery",
+                "resources.credential-project-session",
+                "retention.seed-artifact-checkpoint",
+                "retention.active-execution-cleanup-fencing",
             ],
         )
 
@@ -2870,6 +3115,33 @@ class RunnerOptionsTest(unittest.TestCase):
                 "fixture-concurrency",
                 "--target",
                 "docker",
+                "--failure-case",
+                "provider-crash",
+            ],
+        )
+        for arguments in invalid_arguments:
+            with self.subTest(arguments=arguments):
+                with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                    acceptance.parse_args(arguments)
+
+    def test_fixture_retention_concurrency_uses_canonical_local_shape(self) -> None:
+        options = acceptance.parse_args(
+            ["--suite", "fixture-retention-concurrency", "--target", "local"]
+        )
+
+        self.assertEqual(options.suite, "fixture-retention-concurrency")
+        self.assertEqual(options.target, "local")
+        self.assertFalse(options.restart_control_plane)
+        self.assertEqual(options.timeout_seconds, 180.0)
+
+    def test_fixture_retention_concurrency_rejects_other_targets_and_failure_matrix(self) -> None:
+        invalid_arguments = (
+            ["--suite", "fixture-retention-concurrency", "--target", "docker"],
+            [
+                "--suite",
+                "fixture-retention-concurrency",
+                "--target",
+                "local",
                 "--failure-case",
                 "provider-crash",
             ],

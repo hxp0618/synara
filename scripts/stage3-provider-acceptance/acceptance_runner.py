@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import contextlib
 import dataclasses
 import datetime as dt
 import hashlib
@@ -110,7 +111,16 @@ REAL_PROVIDER_SMOKE_PROVIDERS = frozenset({"codex", "claudeAgent"})
 REAL_PROVIDER_CREDENTIAL_FIELDS = ("apiKey", "authToken")
 FIXTURE_CONCURRENCY_PROVIDERS = ("codex", "claudeAgent")
 FIXTURE_CONCURRENCY_WORKERS = 2
-SUITES = ("fixture", "fixture-soak", "fixture-concurrency", "real-provider-smoke")
+FIXTURE_RETENTION_SWEEP_INTERVAL = "250ms"
+FIXTURE_RETENTION_DAYS = 1
+FIXTURE_RETENTION_AGE_DAYS = 2
+SUITES = (
+    "fixture",
+    "fixture-soak",
+    "fixture-concurrency",
+    "fixture-retention-concurrency",
+    "real-provider-smoke",
+)
 REAL_PROVIDER_PRE_RESTART_CASES = (
     "approval",
     "user-input",
@@ -777,6 +787,502 @@ class ScenarioState:
     pending_real_turn_id: str | None = None
     last_real_marker: str | None = None
     rollback_anchor_turn_id: str | None = None
+
+
+@dataclasses.dataclass(frozen=True)
+class LocalRetentionSeed:
+    tenant_id: str
+    organization_id: str
+    project_id: str
+    session_id: str
+    target_id: str
+    workspace_id: str
+    materialization_id: str
+    incarnation_id: str
+    layout_version: int
+    current_checkpoint_id: str
+    checkpoint_artifact_id: str
+    generated_artifact_id: str
+    generated_artifact_execution_id: str
+    generated_object_path: pathlib.Path
+    checkpoint_object_path: pathlib.Path
+    workspace_generation_path: pathlib.Path
+
+    def evidence(self) -> dict[str, Any]:
+        return {
+            "tenantId": self.tenant_id,
+            "organizationId": self.organization_id,
+            "projectId": self.project_id,
+            "sessionId": self.session_id,
+            "executionTargetId": self.target_id,
+            "workspaceId": self.workspace_id,
+            "materializationId": self.materialization_id,
+            "incarnationId": self.incarnation_id,
+            "layoutVersion": self.layout_version,
+            "currentCheckpointId": self.current_checkpoint_id,
+            "checkpointArtifactId": self.checkpoint_artifact_id,
+            "generatedArtifactId": self.generated_artifact_id,
+            "generatedArtifactExecutionId": self.generated_artifact_execution_id,
+            "physicalPathsPersisted": False,
+        }
+
+
+class LocalRetentionHarness:
+    def __init__(self, state_dir: pathlib.Path) -> None:
+        self.state_dir = state_dir
+        self.database_path = state_dir / "metadata.sqlite"
+        self.artifact_root = state_dir / "artifacts"
+        self.workspace_root = state_dir / "workspaces"
+
+    def _connect(self) -> sqlite3.Connection:
+        if not self.database_path.is_file():
+            raise AcceptanceError(
+                "runner.retention_database_missing",
+                "The isolated Local metadata database was unavailable for retention staging.",
+            )
+        connection = sqlite3.connect(self.database_path, timeout=5.0)
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA busy_timeout = 5000")
+        return connection
+
+    @staticmethod
+    def _required_text(row: sqlite3.Row, key: str, label: str) -> str:
+        value = row[key]
+        if not isinstance(value, str) or not value:
+            raise AcceptanceError(
+                "runner.retention_seed_invalid",
+                f"The retention {label} omitted {key}.",
+            )
+        return value
+
+    @staticmethod
+    def _single_row(
+        rows: Sequence[sqlite3.Row],
+        label: str,
+    ) -> sqlite3.Row:
+        if len(rows) != 1:
+            raise AcceptanceError(
+                "runner.retention_seed_ambiguous",
+                f"Expected exactly one {label} for the retention fixture.",
+                {"count": len(rows)},
+            )
+        return rows[0]
+
+    @staticmethod
+    def _scoped_local_path(root: pathlib.Path, object_key: str, label: str) -> pathlib.Path:
+        pure = pathlib.PurePosixPath(object_key)
+        if pure.is_absolute() or object_key != pure.as_posix() or ".." in pure.parts:
+            raise AcceptanceError(
+                "runner.retention_object_key_invalid",
+                f"The retention {label} object key was unsafe.",
+            )
+        resolved_root = root.resolve()
+        resolved = (resolved_root / pathlib.Path(*pure.parts)).resolve()
+        if resolved == resolved_root or resolved_root not in resolved.parents:
+            raise AcceptanceError(
+                "runner.retention_object_key_invalid",
+                f"The retention {label} object key escaped the isolated store.",
+            )
+        return resolved
+
+    def load_seed(self, session_id: str) -> LocalRetentionSeed:
+        try:
+            with contextlib.closing(self._connect()) as connection:
+                scope_rows = connection.execute(
+                    """
+                    SELECT
+                        workspace.tenant_id,
+                        workspace.organization_id,
+                        workspace.project_id,
+                        workspace.session_id,
+                        workspace.execution_target_id,
+                        workspace.id AS workspace_id,
+                        materialization.id AS materialization_id,
+                        materialization.incarnation_id,
+                        materialization.layout_version,
+                        checkpoint.id AS checkpoint_id,
+                        checkpoint.artifact_id AS checkpoint_artifact_id
+                    FROM remote_workspaces AS workspace
+                    JOIN workspace_materializations AS materialization
+                      ON materialization.tenant_id = workspace.tenant_id
+                     AND materialization.id = workspace.current_materialization_id
+                    JOIN workspace_checkpoints AS checkpoint
+                      ON checkpoint.tenant_id = workspace.tenant_id
+                     AND checkpoint.id = workspace.current_checkpoint_id
+                    WHERE workspace.session_id = ?
+                    """,
+                    (session_id,),
+                ).fetchall()
+                scope = self._single_row(scope_rows, "current Workspace materialization and Checkpoint")
+                generated_rows = connection.execute(
+                    """
+                    SELECT id, execution_id, object_key
+                    FROM artifacts
+                    WHERE session_id = ?
+                      AND kind = 'generated_file'
+                      AND original_name = 'artifact.txt'
+                      AND status = 'ready'
+                      AND deleted_at IS NULL
+                    ORDER BY ready_at, id
+                    """,
+                    (session_id,),
+                ).fetchall()
+                generated = self._single_row(generated_rows, "ready fixture generated Artifact")
+                checkpoint_artifact_id = self._required_text(
+                    scope,
+                    "checkpoint_artifact_id",
+                    "current Checkpoint",
+                )
+                checkpoint_rows = connection.execute(
+                    """
+                    SELECT id, object_key
+                    FROM artifacts
+                    WHERE id = ?
+                      AND workspace_checkpoint_id = ?
+                      AND status = 'ready'
+                      AND deleted_at IS NULL
+                    """,
+                    (checkpoint_artifact_id, self._required_text(scope, "checkpoint_id", "current Checkpoint")),
+                ).fetchall()
+                checkpoint_artifact = self._single_row(
+                    checkpoint_rows,
+                    "ready current Checkpoint Artifact",
+                )
+        except sqlite3.Error as error:
+            raise AcceptanceError(
+                "runner.retention_seed_load_failed",
+                f"The isolated retention seed could not be loaded: {error}",
+            ) from None
+
+        layout_version = scope["layout_version"]
+        if type(layout_version) is not int or layout_version != 3:
+            raise AcceptanceError(
+                "runner.retention_layout_invalid",
+                "The retention fixture requires the current Workspace layout version 3.",
+                {"layoutVersion": layout_version},
+            )
+        tenant_id = self._required_text(scope, "tenant_id", "Workspace")
+        project_id = self._required_text(scope, "project_id", "Workspace")
+        target_id = self._required_text(scope, "execution_target_id", "Workspace")
+        workspace_id = self._required_text(scope, "workspace_id", "Workspace")
+        incarnation_id = self._required_text(scope, "incarnation_id", "materialization")
+        generated_object_path = self._scoped_local_path(
+            self.artifact_root,
+            self._required_text(generated, "object_key", "generated Artifact"),
+            "generated Artifact",
+        )
+        checkpoint_object_path = self._scoped_local_path(
+            self.artifact_root,
+            self._required_text(checkpoint_artifact, "object_key", "Checkpoint Artifact"),
+            "Checkpoint Artifact",
+        )
+        workspace_generation_path = self.workspace_root.joinpath(
+            "v3",
+            target_id,
+            tenant_id,
+            project_id,
+            session_id,
+            workspace_id,
+            incarnation_id,
+        )
+        for label, path in (
+            ("generated Artifact payload", generated_object_path),
+            ("Checkpoint Artifact payload", checkpoint_object_path),
+            ("Workspace generation", workspace_generation_path),
+        ):
+            if not path.exists():
+                raise AcceptanceError(
+                    "runner.retention_seed_payload_missing",
+                    f"The retention seed {label} was unavailable before staging.",
+                )
+        return LocalRetentionSeed(
+            tenant_id=tenant_id,
+            organization_id=self._required_text(scope, "organization_id", "Workspace"),
+            project_id=project_id,
+            session_id=self._required_text(scope, "session_id", "Workspace"),
+            target_id=target_id,
+            workspace_id=workspace_id,
+            materialization_id=self._required_text(scope, "materialization_id", "materialization"),
+            incarnation_id=incarnation_id,
+            layout_version=layout_version,
+            current_checkpoint_id=self._required_text(scope, "checkpoint_id", "current Checkpoint"),
+            checkpoint_artifact_id=checkpoint_artifact_id,
+            generated_artifact_id=self._required_text(generated, "id", "generated Artifact"),
+            generated_artifact_execution_id=self._required_text(
+                generated,
+                "execution_id",
+                "generated Artifact",
+            ),
+            generated_object_path=generated_object_path,
+            checkpoint_object_path=checkpoint_object_path,
+            workspace_generation_path=workspace_generation_path,
+        )
+
+    @staticmethod
+    def _database_time(value: dt.datetime) -> str:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("retention staging time must be timezone-aware")
+        return value.astimezone(dt.timezone.utc).isoformat(sep=" ", timespec="microseconds")
+
+    @staticmethod
+    def _expect_update(cursor: sqlite3.Cursor, label: str) -> None:
+        if cursor.rowcount != 1:
+            raise AcceptanceError(
+                "runner.retention_stage_scope_changed",
+                f"Retention staging did not update exactly one {label}.",
+                {"rowsAffected": cursor.rowcount},
+            )
+
+    def stage_active_retention(self, seed: LocalRetentionSeed, expired_at: dt.datetime) -> None:
+        value = self._database_time(expired_at)
+        try:
+            with contextlib.closing(self._connect()) as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                self._expect_update(
+                    connection.execute(
+                        "UPDATE agent_sessions SET updated_at = ? WHERE tenant_id = ? AND id = ? AND status = 'active'",
+                        (value, seed.tenant_id, seed.session_id),
+                    ),
+                    "active Session",
+                )
+                self._expect_update(
+                    connection.execute(
+                        "UPDATE artifacts SET expires_at = ? WHERE tenant_id = ? AND id = ? AND status = 'ready' AND deleted_at IS NULL",
+                        (value, seed.tenant_id, seed.generated_artifact_id),
+                    ),
+                    "ready generated Artifact",
+                )
+                self._expect_update(
+                    connection.execute(
+                        """
+                        UPDATE workspace_materializations
+                        SET cleanup_reason = 'retention-session-archive', cleanup_requested_at = ?, updated_at = ?
+                        WHERE tenant_id = ? AND id = ? AND incarnation_id = ? AND state = 'active'
+                        """,
+                        (
+                            value,
+                            value,
+                            seed.tenant_id,
+                            seed.materialization_id,
+                            seed.incarnation_id,
+                        ),
+                    ),
+                    "active Workspace materialization",
+                )
+                self._expect_update(
+                    connection.execute(
+                        "UPDATE remote_workspaces SET retention_until = ?, updated_at = ? WHERE tenant_id = ? AND id = ?",
+                        (value, value, seed.tenant_id, seed.workspace_id),
+                    ),
+                    "logical Workspace",
+                )
+                connection.commit()
+        except sqlite3.Error as error:
+            raise AcceptanceError(
+                "runner.retention_stage_failed",
+                f"The isolated retention concurrency rows could not be staged: {error}",
+            ) from None
+
+    def age_session(self, seed: LocalRetentionSeed, expired_at: dt.datetime) -> None:
+        value = self._database_time(expired_at)
+        try:
+            with contextlib.closing(self._connect()) as connection:
+                self._expect_update(
+                    connection.execute(
+                        "UPDATE agent_sessions SET updated_at = ? WHERE tenant_id = ? AND id = ? AND status = 'active'",
+                        (value, seed.tenant_id, seed.session_id),
+                    ),
+                    "post-terminal active Session",
+                )
+                connection.commit()
+        except sqlite3.Error as error:
+            raise AcceptanceError(
+                "runner.retention_session_age_failed",
+                f"The post-terminal Session could not be aged for retention: {error}",
+            ) from None
+
+    def snapshot(
+        self,
+        seed: LocalRetentionSeed,
+        active_execution_id: str,
+        interaction_id: str,
+    ) -> dict[str, Any]:
+        try:
+            with contextlib.closing(self._connect()) as connection:
+                session = connection.execute(
+                    "SELECT status, archived_at FROM agent_sessions WHERE tenant_id = ? AND id = ?",
+                    (seed.tenant_id, seed.session_id),
+                ).fetchone()
+                execution = connection.execute(
+                    "SELECT status FROM agent_executions WHERE tenant_id = ? AND id = ?",
+                    (seed.tenant_id, active_execution_id),
+                ).fetchone()
+                interaction = connection.execute(
+                    "SELECT status FROM execution_interactions WHERE tenant_id = ? AND id = ?",
+                    (seed.tenant_id, interaction_id),
+                ).fetchone()
+                workspace = connection.execute(
+                    "SELECT state, current_checkpoint_id, current_materialization_id, cleaned_at FROM remote_workspaces WHERE tenant_id = ? AND id = ?",
+                    (seed.tenant_id, seed.workspace_id),
+                ).fetchone()
+                materialization = connection.execute(
+                    "SELECT state, cleanup_reason, cleanup_requested_at, cleaned_at FROM workspace_materializations WHERE tenant_id = ? AND id = ? AND incarnation_id = ?",
+                    (seed.tenant_id, seed.materialization_id, seed.incarnation_id),
+                ).fetchone()
+                generated = connection.execute(
+                    "SELECT status, deleted_at FROM artifacts WHERE tenant_id = ? AND id = ?",
+                    (seed.tenant_id, seed.generated_artifact_id),
+                ).fetchone()
+                seed_checkpoint = connection.execute(
+                    "SELECT status, artifact_id FROM workspace_checkpoints WHERE tenant_id = ? AND id = ?",
+                    (seed.tenant_id, seed.current_checkpoint_id),
+                ).fetchone()
+                seed_checkpoint_artifact = connection.execute(
+                    "SELECT status, deleted_at FROM artifacts WHERE tenant_id = ? AND id = ?",
+                    (seed.tenant_id, seed.checkpoint_artifact_id),
+                ).fetchone()
+                current_checkpoint = connection.execute(
+                    "SELECT id, status, artifact_id FROM workspace_checkpoints WHERE tenant_id = ? AND id = ?",
+                    (seed.tenant_id, workspace["current_checkpoint_id"] if workspace is not None else None),
+                ).fetchone()
+                current_checkpoint_artifact = connection.execute(
+                    "SELECT id, status, deleted_at, object_key FROM artifacts WHERE tenant_id = ? AND id = ?",
+                    (
+                        seed.tenant_id,
+                        current_checkpoint["artifact_id"] if current_checkpoint is not None else None,
+                    ),
+                ).fetchone()
+                lease_count = int(
+                    connection.execute(
+                        "SELECT COUNT(*) FROM worker_leases WHERE tenant_id = ? AND execution_id = ?",
+                        (seed.tenant_id, active_execution_id),
+                    ).fetchone()[0]
+                )
+                active_execution_count = int(
+                    connection.execute(
+                        """
+                        SELECT COUNT(*)
+                        FROM agent_executions
+                        WHERE tenant_id = ?
+                          AND workspace_materialization_id = ?
+                          AND status NOT IN ('completed', 'failed', 'cancelled', 'interrupted')
+                        """,
+                        (seed.tenant_id, seed.materialization_id),
+                    ).fetchone()[0]
+                )
+                cleanup_rows = connection.execute(
+                    """
+                    SELECT id, status, reason, dispatch_generation, delivery_attempts, acknowledged_at
+                    FROM workspace_cleanup_commands
+                    WHERE tenant_id = ? AND materialization_id = ?
+                    ORDER BY created_at, id
+                    """,
+                    (seed.tenant_id, seed.materialization_id),
+                ).fetchall()
+        except sqlite3.Error as error:
+            raise AcceptanceError(
+                "runner.retention_snapshot_failed",
+                f"The isolated retention state could not be observed: {error}",
+            ) from None
+        required = {
+            "session": session,
+            "execution": execution,
+            "interaction": interaction,
+            "workspace": workspace,
+            "materialization": materialization,
+            "generatedArtifact": generated,
+            "seedCheckpoint": seed_checkpoint,
+            "seedCheckpointArtifact": seed_checkpoint_artifact,
+            "currentCheckpoint": current_checkpoint,
+            "currentCheckpointArtifact": current_checkpoint_artifact,
+        }
+        missing = sorted(label for label, row in required.items() if row is None)
+        if missing:
+            raise AcceptanceError(
+                "runner.retention_snapshot_incomplete",
+                "The isolated retention state lost required rows.",
+                {"missing": missing},
+            )
+        return {
+            "session": {
+                "id": seed.session_id,
+                "status": session["status"],
+                "archived": session["archived_at"] is not None,
+            },
+            "execution": {
+                "id": active_execution_id,
+                "status": execution["status"],
+                "leaseCount": lease_count,
+            },
+            "interaction": {
+                "id": interaction_id,
+                "status": interaction["status"],
+            },
+            "workspace": {
+                "id": seed.workspace_id,
+                "state": workspace["state"],
+                "currentCheckpointId": workspace["current_checkpoint_id"],
+                "currentMaterializationId": workspace["current_materialization_id"],
+                "cleaned": workspace["cleaned_at"] is not None,
+                "generationPresent": seed.workspace_generation_path.exists(),
+            },
+            "materialization": {
+                "id": seed.materialization_id,
+                "state": materialization["state"],
+                "cleanupReason": materialization["cleanup_reason"],
+                "cleanupRequested": materialization["cleanup_requested_at"] is not None,
+                "cleaned": materialization["cleaned_at"] is not None,
+                "activeExecutionCount": active_execution_count,
+            },
+            "generatedArtifact": {
+                "id": seed.generated_artifact_id,
+                "status": generated["status"],
+                "deleted": generated["deleted_at"] is not None,
+                "payloadPresent": seed.generated_object_path.is_file(),
+            },
+            "seedCheckpoint": {
+                "id": seed.current_checkpoint_id,
+                "status": seed_checkpoint["status"],
+                "artifactId": seed_checkpoint["artifact_id"],
+            },
+            "seedCheckpointArtifact": {
+                "id": seed.checkpoint_artifact_id,
+                "status": seed_checkpoint_artifact["status"],
+                "deleted": seed_checkpoint_artifact["deleted_at"] is not None,
+                "payloadPresent": seed.checkpoint_object_path.is_file(),
+            },
+            "currentCheckpoint": {
+                "id": current_checkpoint["id"],
+                "status": current_checkpoint["status"],
+                "artifactId": current_checkpoint["artifact_id"],
+            },
+            "currentCheckpointArtifact": {
+                "id": current_checkpoint_artifact["id"],
+                "status": current_checkpoint_artifact["status"],
+                "deleted": current_checkpoint_artifact["deleted_at"] is not None,
+                "payloadPresent": self._scoped_local_path(
+                    self.artifact_root,
+                    self._required_text(
+                        current_checkpoint_artifact,
+                        "object_key",
+                        "current Checkpoint Artifact",
+                    ),
+                    "current Checkpoint Artifact",
+                ).is_file(),
+            },
+            "cleanupCommands": [
+                {
+                    "id": row["id"],
+                    "status": row["status"],
+                    "reason": row["reason"],
+                    "dispatchGeneration": row["dispatch_generation"],
+                    "deliveryAttempts": row["delivery_attempts"],
+                    "acknowledged": row["acknowledged_at"] is not None,
+                }
+                for row in cleanup_rows
+            ],
+            "physicalPathsPersisted": False,
+        }
 
 
 class APIClient:
@@ -2069,7 +2575,11 @@ class LocalDriver:
                 "SYNARA_WORKER_HEARTBEAT_TIMEOUT": "18s",
                 "SYNARA_OUTBOX_POLL_INTERVAL": "100ms",
                 "SYNARA_OUTBOX_CLAIM_TTL": "5s",
-                "SYNARA_RETENTION_SWEEP_INTERVAL": "24h",
+                "SYNARA_RETENTION_SWEEP_INTERVAL": (
+                    FIXTURE_RETENTION_SWEEP_INTERVAL
+                    if self.options.suite == "fixture-retention-concurrency"
+                    else "24h"
+                ),
             }
         )
         if "cursor-expiry" in self.options.real_provider_failure_cases:
@@ -5880,6 +6390,9 @@ class AcceptanceSuite:
         if self.options.suite == "fixture-concurrency":
             self._run_fixture_concurrency()
             return self.cases
+        if self.options.suite == "fixture-retention-concurrency":
+            self._run_fixture_retention_concurrency()
+            return self.cases
         if self.options.failure_only:
             self._run_failure_only()
             return self.cases
@@ -6048,6 +6561,32 @@ class AcceptanceSuite:
             "Run overlapping Codex and Claude fixture Executions on distinct Workers",
             self._fixture_multi_provider_concurrency,
             requires=("resources.credential-project-session",),
+        )
+
+    def _run_fixture_retention_concurrency(self) -> None:
+        self._case(
+            "runtime.worker-discovery",
+            "Provision the Local Target and discover its real compatible Worker manifest",
+            self._provision_standing_target_and_discover_worker,
+            requires=("identity.dev-login",),
+        )
+        self._case(
+            "resources.credential-project-session",
+            "Create a bound Credential, empty Repository Project, and Session",
+            self._create_resources,
+            requires=("runtime.worker-discovery",),
+        )
+        self._case(
+            "retention.seed-artifact-checkpoint",
+            "Create a terminal Artifact and current ready Workspace Checkpoint",
+            self._text_tool_usage_artifact,
+            requires=("resources.credential-project-session",),
+        )
+        self._case(
+            "retention.active-execution-cleanup-fencing",
+            "Run retention while an Approval Execution is active, then complete exact Workspace cleanup",
+            self._fixture_retention_concurrency,
+            requires=("retention.seed-artifact-checkpoint",),
         )
 
     def _run_real_provider_smoke(self) -> None:
@@ -9492,6 +10031,316 @@ class AcceptanceSuite:
             "runtimePhysicalPathLeak": False,
         }
 
+    def _fixture_retention_concurrency(self) -> Mapping[str, Any]:
+        if not isinstance(self.driver, LocalDriver) or self.driver.name != "local":
+            raise AcceptanceError(
+                "runner.retention_target_invalid",
+                "The deterministic retention concurrency suite requires the isolated Local driver.",
+            )
+        session_id = self._required("session_id")
+        tenant_id = self._required("tenant_id")
+        harness = LocalRetentionHarness(self.driver.state_dir)
+        seed = harness.load_seed(session_id)
+        if seed.tenant_id != tenant_id or seed.target_id != self._required("target_id"):
+            raise AcceptanceError(
+                "runner.retention_seed_scope_mismatch",
+                "The retention seed did not remain inside the active Tenant and Target.",
+                {"seed": seed.evidence()},
+            )
+
+        approval_turn = self._create_turn("[approval]")
+        turn_id = self._turn_id(approval_turn, "retention concurrency Approval Turn")
+        interaction = self._wait_for_interaction(turn_id, "approval")
+        interaction_id = interaction.get("id")
+        if not isinstance(interaction_id, str) or not interaction_id:
+            raise AcceptanceError(
+                "runner.retention_interaction_id_missing",
+                "The retention Approval interaction omitted its ID.",
+            )
+        active = self._active_approval_evidence(
+            turn_id,
+            interaction,
+            session_id=session_id,
+            provider=self.options.provider,
+        )
+        active_execution_id = str(active["executionId"])
+
+        policy = json_object(
+            self.api.request(
+                "PUT",
+                f"/v1/tenants/{tenant_id}/retention-policy",
+                {
+                    "sessionArchiveAfterDays": FIXTURE_RETENTION_DAYS,
+                    "artifactDeleteAfterDays": FIXTURE_RETENTION_DAYS,
+                    "workspaceCleanupAfterDays": FIXTURE_RETENTION_DAYS,
+                },
+            ),
+            "retention policy",
+        )
+        expected_policy = {
+            "sessionArchiveAfterDays": FIXTURE_RETENTION_DAYS,
+            "artifactDeleteAfterDays": FIXTURE_RETENTION_DAYS,
+            "workspaceCleanupAfterDays": FIXTURE_RETENTION_DAYS,
+        }
+        actual_policy = {key: policy.get(key) for key in expected_policy}
+        if actual_policy != expected_policy:
+            raise AcceptanceError(
+                "runner.retention_policy_mismatch",
+                "The Tenant did not retain the deterministic retention policy.",
+                {"expected": expected_policy, "actual": actual_policy},
+            )
+
+        expired_at = dt.datetime.now(dt.timezone.utc) - dt.timedelta(
+            days=FIXTURE_RETENTION_AGE_DAYS
+        )
+        harness.stage_active_retention(seed, expired_at)
+        active_started = time.monotonic()
+
+        def active_retention_probe() -> dict[str, Any] | None:
+            snapshot = harness.snapshot(
+                seed,
+                active_execution_id,
+                interaction_id,
+            )
+            generated = json_object(
+                snapshot.get("generatedArtifact"),
+                "active retention generated Artifact",
+            )
+            if generated.get("status") != "deleted" or generated.get("payloadPresent") is not False:
+                return None
+            return snapshot
+
+        active_snapshot = self.api.wait_until(
+            "retention sweep while the Approval Execution remains active",
+            active_retention_probe,
+            interval=0.1,
+        )
+        self._validate_retention_active_snapshot(seed, active_snapshot)
+        if not self._interaction_pending(session_id, interaction):
+            raise AcceptanceError(
+                "runner.retention_interaction_lost",
+                "The retention sweep removed the active Approval interaction.",
+            )
+
+        resolution = self._resolve_approval_turn(
+            approval_turn,
+            interaction,
+            session_id=session_id,
+        )
+        harness.age_session(seed, expired_at)
+        terminal_started = time.monotonic()
+
+        def terminal_retention_probe() -> dict[str, Any] | None:
+            snapshot = harness.snapshot(
+                seed,
+                active_execution_id,
+                interaction_id,
+            )
+            session = json_object(snapshot.get("session"), "terminal retention Session")
+            workspace = json_object(snapshot.get("workspace"), "terminal retention Workspace")
+            materialization = json_object(
+                snapshot.get("materialization"),
+                "terminal retention materialization",
+            )
+            commands = snapshot.get("cleanupCommands")
+            if (
+                session.get("status") != "archived"
+                or workspace.get("state") != "cleaned"
+                or materialization.get("state") != "cleaned"
+                or not isinstance(commands, list)
+                or len(commands) != 1
+                or not isinstance(commands[0], dict)
+                or commands[0].get("status") != "acknowledged"
+            ):
+                return None
+            return snapshot
+
+        terminal_snapshot = self.api.wait_until(
+            "post-terminal Session archive and physical Workspace cleanup",
+            terminal_retention_probe,
+            interval=0.1,
+        )
+        self._validate_retention_terminal_snapshot(seed, terminal_snapshot)
+        return {
+            "policy": actual_policy,
+            "clockSetup": {
+                "agedDays": FIXTURE_RETENTION_AGE_DAYS,
+                "scope": "runner-owned isolated SQLite rows only",
+                "productionClockChanged": False,
+            },
+            "seed": seed.evidence(),
+            "activeApproval": active,
+            "duringActiveExecution": {
+                "sweepObservedMs": elapsed_ms(active_started),
+                "interactionRemainedPending": True,
+                **active_snapshot,
+            },
+            "resolution": resolution,
+            "afterTerminal": {
+                "cleanupObservedMs": elapsed_ms(terminal_started),
+                **terminal_snapshot,
+            },
+            "sessionArchiveFencedWhileActive": True,
+            "workspaceCleanupFencedWhileActive": True,
+            "unreferencedArtifactDeletedDuringExecution": True,
+            "seedCheckpointRetained": True,
+            "postTerminalCurrentCheckpointReady": True,
+            "singleTerminal": True,
+            "physicalPathsPersisted": False,
+        }
+
+    @staticmethod
+    def _validate_retention_active_snapshot(
+        seed: LocalRetentionSeed,
+        snapshot: Mapping[str, Any],
+    ) -> None:
+        session = json_object(snapshot.get("session"), "active retention Session")
+        execution = json_object(snapshot.get("execution"), "active retention Execution")
+        interaction = json_object(snapshot.get("interaction"), "active retention interaction")
+        workspace = json_object(snapshot.get("workspace"), "active retention Workspace")
+        materialization = json_object(
+            snapshot.get("materialization"),
+            "active retention materialization",
+        )
+        generated = json_object(
+            snapshot.get("generatedArtifact"),
+            "active retention generated Artifact",
+        )
+        seed_checkpoint = json_object(
+            snapshot.get("seedCheckpoint"),
+            "active retention seed Checkpoint",
+        )
+        seed_checkpoint_artifact = json_object(
+            snapshot.get("seedCheckpointArtifact"),
+            "active retention seed Checkpoint Artifact",
+        )
+        current_checkpoint = json_object(
+            snapshot.get("currentCheckpoint"),
+            "active retention current Checkpoint",
+        )
+        current_checkpoint_artifact = json_object(
+            snapshot.get("currentCheckpointArtifact"),
+            "active retention current Checkpoint Artifact",
+        )
+        commands = snapshot.get("cleanupCommands")
+        valid = (
+            session.get("status") == "active"
+            and session.get("archived") is False
+            and execution.get("status") == "waiting-for-approval"
+            and execution.get("leaseCount") == 1
+            and interaction.get("status") == "pending"
+            and workspace.get("state") != "cleaned"
+            and workspace.get("currentCheckpointId") == seed.current_checkpoint_id
+            and workspace.get("currentMaterializationId") == seed.materialization_id
+            and workspace.get("cleaned") is False
+            and workspace.get("generationPresent") is True
+            and materialization.get("state") == "active"
+            and materialization.get("cleanupReason") == "retention-session-archive"
+            and materialization.get("cleanupRequested") is True
+            and materialization.get("cleaned") is False
+            and materialization.get("activeExecutionCount") == 1
+            and generated.get("status") == "deleted"
+            and generated.get("deleted") is True
+            and generated.get("payloadPresent") is False
+            and seed_checkpoint.get("status") == "ready"
+            and seed_checkpoint.get("artifactId") == seed.checkpoint_artifact_id
+            and seed_checkpoint_artifact.get("status") == "ready"
+            and seed_checkpoint_artifact.get("deleted") is False
+            and seed_checkpoint_artifact.get("payloadPresent") is True
+            and current_checkpoint.get("id") == seed.current_checkpoint_id
+            and current_checkpoint.get("status") == "ready"
+            and current_checkpoint.get("artifactId") == seed.checkpoint_artifact_id
+            and current_checkpoint_artifact.get("id") == seed.checkpoint_artifact_id
+            and current_checkpoint_artifact.get("status") == "ready"
+            and current_checkpoint_artifact.get("deleted") is False
+            and current_checkpoint_artifact.get("payloadPresent") is True
+            and commands == []
+        )
+        if not valid:
+            raise AcceptanceError(
+                "runner.retention_active_fencing_invalid",
+                "Retention did not preserve the active Session, Lease, Checkpoint, and Workspace cleanup fence.",
+                {"snapshot": dict(snapshot)},
+            )
+
+    @staticmethod
+    def _validate_retention_terminal_snapshot(
+        seed: LocalRetentionSeed,
+        snapshot: Mapping[str, Any],
+    ) -> None:
+        session = json_object(snapshot.get("session"), "terminal retention Session")
+        execution = json_object(snapshot.get("execution"), "terminal retention Execution")
+        interaction = json_object(snapshot.get("interaction"), "terminal retention interaction")
+        workspace = json_object(snapshot.get("workspace"), "terminal retention Workspace")
+        materialization = json_object(
+            snapshot.get("materialization"),
+            "terminal retention materialization",
+        )
+        generated = json_object(
+            snapshot.get("generatedArtifact"),
+            "terminal retention generated Artifact",
+        )
+        seed_checkpoint = json_object(
+            snapshot.get("seedCheckpoint"),
+            "terminal retention seed Checkpoint",
+        )
+        seed_checkpoint_artifact = json_object(
+            snapshot.get("seedCheckpointArtifact"),
+            "terminal retention seed Checkpoint Artifact",
+        )
+        current_checkpoint = json_object(
+            snapshot.get("currentCheckpoint"),
+            "terminal retention current Checkpoint",
+        )
+        current_checkpoint_artifact = json_object(
+            snapshot.get("currentCheckpointArtifact"),
+            "terminal retention current Checkpoint Artifact",
+        )
+        commands = snapshot.get("cleanupCommands")
+        command = commands[0] if isinstance(commands, list) and len(commands) == 1 else None
+        valid = (
+            session.get("status") == "archived"
+            and session.get("archived") is True
+            and execution.get("status") == "completed"
+            and execution.get("leaseCount") == 0
+            and interaction.get("status") == "resolved"
+            and workspace.get("state") == "cleaned"
+            and workspace.get("currentCheckpointId") == current_checkpoint.get("id")
+            and workspace.get("currentMaterializationId") == seed.materialization_id
+            and workspace.get("cleaned") is True
+            and workspace.get("generationPresent") is False
+            and materialization.get("state") == "cleaned"
+            and materialization.get("cleanupReason") == "retention-session-archive"
+            and materialization.get("cleaned") is True
+            and materialization.get("activeExecutionCount") == 0
+            and generated.get("status") == "deleted"
+            and generated.get("deleted") is True
+            and generated.get("payloadPresent") is False
+            and seed_checkpoint.get("status") == "ready"
+            and seed_checkpoint.get("artifactId") == seed.checkpoint_artifact_id
+            and seed_checkpoint_artifact.get("status") == "ready"
+            and seed_checkpoint_artifact.get("deleted") is False
+            and seed_checkpoint_artifact.get("payloadPresent") is True
+            and isinstance(current_checkpoint.get("id"), str)
+            and current_checkpoint.get("status") == "ready"
+            and current_checkpoint.get("artifactId") == current_checkpoint_artifact.get("id")
+            and current_checkpoint_artifact.get("status") == "ready"
+            and current_checkpoint_artifact.get("deleted") is False
+            and current_checkpoint_artifact.get("payloadPresent") is True
+            and isinstance(command, dict)
+            and command.get("status") == "acknowledged"
+            and command.get("reason") == "retention-session-archive"
+            and command.get("dispatchGeneration") == 1
+            and command.get("deliveryAttempts") == 1
+            and command.get("acknowledged") is True
+        )
+        if not valid:
+            raise AcceptanceError(
+                "runner.retention_terminal_cleanup_invalid",
+                "Post-terminal retention did not archive the Session and acknowledge exactly one physical Workspace cleanup.",
+                {"snapshot": dict(snapshot)},
+            )
+
     def _fixture_multi_provider_concurrency(self) -> Mapping[str, Any]:
         tenant_id = self._required("tenant_id")
         primary_session_id = self._required("session_id")
@@ -10861,11 +11710,15 @@ def markdown_from_report(report: Mapping[str, Any]) -> str:
     real_provider_smoke = report.get("mode") == "real-provider-smoke"
     fixture_soak = report.get("mode") == "fixture-soak"
     fixture_concurrency = report.get("mode") == "fixture-concurrency"
+    fixture_retention_concurrency = report.get("mode") == "fixture-retention-concurrency"
     configuration = report.get("configuration")
     failure_matrix = configuration.get("failureMatrix") if isinstance(configuration, dict) else None
     real_provider = configuration.get("realProvider") if isinstance(configuration, dict) else None
     soak = configuration.get("soak") if isinstance(configuration, dict) else None
     concurrency = configuration.get("concurrency") if isinstance(configuration, dict) else None
+    retention_concurrency = (
+        configuration.get("retentionConcurrency") if isinstance(configuration, dict) else None
+    )
     real_provider_boundary = (
         real_provider.get("boundary")
         if isinstance(real_provider, dict) and isinstance(real_provider.get("boundary"), str)
@@ -10875,6 +11728,8 @@ def markdown_from_report(report: Mapping[str, Any]) -> str:
         (
             "# Stage 3 Real Provider Smoke Acceptance"
             if real_provider_smoke
+            else "# Stage 3 Provider Fixture Retention Concurrency Acceptance"
+            if fixture_retention_concurrency
             else "# Stage 3 Provider Fixture Concurrency Acceptance"
             if fixture_concurrency
             else "# Stage 3 Provider Fixture Soak Acceptance"
@@ -10901,6 +11756,10 @@ def markdown_from_report(report: Mapping[str, Any]) -> str:
             "native-cursor second Turn. It is a narrow two-Turn smoke, not the complete Local or four-Target "
             "Release Gate."
             if real_provider_smoke
+            else str(retention_concurrency.get("boundary"))
+            if fixture_retention_concurrency
+            and isinstance(retention_concurrency, dict)
+            and isinstance(retention_concurrency.get("boundary"), str)
             else str(concurrency.get("boundary"))
             if fixture_concurrency
             and isinstance(concurrency, dict)
@@ -10933,6 +11792,17 @@ def markdown_from_report(report: Mapping[str, Any]) -> str:
                 "",
                 "```json",
                 json.dumps(concurrency, indent=2, sort_keys=True, ensure_ascii=False),
+                "```",
+            ]
+        )
+    if fixture_retention_concurrency and isinstance(retention_concurrency, dict):
+        lines.extend(
+            [
+                "",
+                "## Requested fixture retention concurrency",
+                "",
+                "```json",
+                json.dumps(retention_concurrency, indent=2, sort_keys=True, ensure_ascii=False),
                 "```",
             ]
         )
@@ -11160,7 +12030,7 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
         choices=SUITES,
         help=(
             "Acceptance suite: deterministic fixture, deterministic long-session soak, managed Docker "
-            "multi-Provider concurrency, or real Provider smoke"
+            "multi-Provider concurrency, Local retention concurrency, or real Provider smoke"
         ),
     )
     parser.add_argument("--output-dir", type=pathlib.Path)
@@ -11437,6 +12307,13 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
             parser.error(
                 "--suite fixture-concurrency cannot be combined with fixture failure/canary options"
             )
+    if parsed.suite == "fixture-retention-concurrency":
+        if parsed.target != "local":
+            parser.error("--suite fixture-retention-concurrency requires --target local")
+        if failure_cases or parsed.failure_only:
+            parser.error(
+                "--suite fixture-retention-concurrency cannot be combined with fixture failure/canary options"
+            )
     if parsed.suite == "real-provider-smoke":
         if parsed.runner_command_json is None:
             parser.error("--suite real-provider-smoke requires an explicit --runner-command-json")
@@ -11492,7 +12369,8 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
         control_plane_binary=parsed.control_plane_binary.resolve() if parsed.control_plane_binary else None,
         keep=parsed.keep,
         restart_control_plane=(
-            not parsed.no_restart_control_plane and parsed.suite != "fixture-concurrency"
+            not parsed.no_restart_control_plane
+            and parsed.suite not in {"fixture-concurrency", "fixture-retention-concurrency"}
         ),
         soak_turns=soak_turns,
         soak_restart_every=soak_restart_every,
@@ -11636,9 +12514,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         cases = suite.cases
     real_provider_smoke = options.suite == "real-provider-smoke"
     fixture_concurrency = options.suite == "fixture-concurrency"
+    fixture_retention_concurrency = options.suite == "fixture-retention-concurrency"
     mode = (
         "real-provider-smoke"
         if real_provider_smoke
+        else "fixture-retention-concurrency"
+        if fixture_retention_concurrency
         else "fixture-concurrency"
         if fixture_concurrency
         else "fixture-soak"
@@ -11659,11 +12540,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         if real_provider_smoke
         else (
-            "deterministic Codex and Claude Provider Host fixtures over one real Control Plane and two managed "
-            "Docker agentd Workers; simultaneous pending Approval barriers prove multi-Session execution overlap, "
-            "not real Provider, load, remote Target, or production concurrency"
-            if fixture_concurrency
-            else "deterministic Provider Host fixture over real Control Plane, agentd, Worker Protocol, and Target paths"
+            "deterministic Provider Host fixture over the real Local Control Plane, Local agentd and background "
+            "retention sweeper; runner-scoped metadata aging proves active Execution fencing, concurrent deletion "
+            "of an unreferenced Artifact, protected seed/current Checkpoint lineages and post-terminal physical "
+            "Workspace cleanup only, not real Provider, remote Target, load or production-duration retention"
+            if fixture_retention_concurrency
+            else (
+                "deterministic Codex and Claude Provider Host fixtures over one real Control Plane and two managed "
+                "Docker agentd Workers; simultaneous pending Approval barriers prove multi-Session execution "
+                "overlap, not real Provider, load, remote Target, or production concurrency"
+                if fixture_concurrency
+                else "deterministic Provider Host fixture over real Control Plane, agentd, Worker Protocol, and Target paths"
+            )
         )
     )
     report: dict[str, Any] = {
@@ -11698,6 +12586,32 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "providers": list(FIXTURE_CONCURRENCY_PROVIDERS) if fixture_concurrency else [],
                 "barrier": "simultaneous-pending-approval" if fixture_concurrency else None,
                 "boundary": evidence_boundary if fixture_concurrency else None,
+            },
+            "retentionConcurrency": {
+                "target": "local" if fixture_retention_concurrency else None,
+                "sweepInterval": (
+                    FIXTURE_RETENTION_SWEEP_INTERVAL
+                    if fixture_retention_concurrency
+                    else None
+                ),
+                "sessionArchiveAfterDays": (
+                    FIXTURE_RETENTION_DAYS if fixture_retention_concurrency else None
+                ),
+                "artifactDeleteAfterDays": (
+                    FIXTURE_RETENTION_DAYS if fixture_retention_concurrency else None
+                ),
+                "workspaceCleanupAfterDays": (
+                    FIXTURE_RETENTION_DAYS if fixture_retention_concurrency else None
+                ),
+                "agedDays": (
+                    FIXTURE_RETENTION_AGE_DAYS if fixture_retention_concurrency else None
+                ),
+                "barrier": (
+                    "pending-approval-active-execution"
+                    if fixture_retention_concurrency
+                    else None
+                ),
+                "boundary": evidence_boundary if fixture_retention_concurrency else None,
             },
             "skipBuild": options.skip_build,
             "keepState": options.keep,

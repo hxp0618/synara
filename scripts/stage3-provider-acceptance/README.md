@@ -71,6 +71,29 @@ The primary Provider may be `codex` or `claudeAgent`; the suite automatically cr
 secondary Session. Other Targets and fixture failure/canary options are rejected so a passing report always carries
 the same two-Worker overlap meaning.
 
+## Deterministic Retention/Cleanup concurrency
+
+`--suite fixture-retention-concurrency` runs only on the isolated Local Target. It first creates a terminal generated
+Artifact and a current ready Workspace Checkpoint, then holds a second fixture Turn at a pending Approval. The
+runner applies the real Tenant retention policy and ages only the runner-owned SQLite rows so the real background
+sweeper runs immediately instead of waiting days. While the Execution is active, the suite requires the Session,
+Lease, Approval, current Checkpoint and physical Workspace generation to remain available, requires zero Workspace
+cleanup commands, and allows only the unreferenced prior Artifact to be deleted. After resolving Approval, it
+requires Session archival and one agentd-acknowledged physical Workspace cleanup while the current Checkpoint
+Artifact remains ready. This is a deterministic Local state-machine gate, not real Provider, remote Target, load or
+production-duration retention evidence.
+
+```sh
+python3 scripts/stage3-provider-acceptance/acceptance_runner.py \
+  --suite fixture-retention-concurrency \
+  --target local \
+  --provider codex \
+  --timeout 180
+```
+
+The suite uses a `250ms` retention sweep interval and records that production time was not changed. Other Targets
+and fixture failure/canary options are rejected so the report always has the same isolated Local cleanup meaning.
+
 ## Real Provider two-Turn smoke
 
 `--suite real-provider-smoke` replaces the fixture flow with a narrow real Codex or Claude Agent check through
