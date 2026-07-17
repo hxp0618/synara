@@ -116,6 +116,13 @@ Acceptance Fixture used by Codex and Claude.
 > unsupported capability was accepted. See
 > `docs/reports/stage-3-real-provider-kubernetes-third-party-gate-6b71703f.md`.
 
+> 2026-07-18 owned-Kind Drain correction: clean commit `fc9b2bf6` passes the complete deterministic Kubernetes
+> `23/23` matrix on a runner-owned disposable Kind cluster. Exact Node cordon/drain/uncordon, graceful Pod DELETE,
+> Generation `1 -> 2` fencing, `policy/v1` Eviction, Canary, restart, exact cluster/image/state cleanup and Secret
+> scan are proven. This closes deterministic single-node Drain only; PDB, multi-node, immutable registry rollout and
+> real Provider gates remain open. See
+> `docs/reports/stage-3-kubernetes-kind-drain-fixture-fc9b2bf6.md`.
+
 ### 2026-07-15 Advanced Session operation evidence update
 
 - Workflow A/B/C/K 的 Compact、Review、Rollback、Fork 主阻断已解除。Migration `000032`、Control Plane

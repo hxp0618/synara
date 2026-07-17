@@ -19,7 +19,11 @@
 - **预计工作量**：XL
 - **风险**：HIGH
 - **计划基线分支**：`codex/saas-tenancy-user`
-- **最近稳定检查点**：`6b71703f`（operator-approved reusable `orbstack` Kubernetes context 上的 clean-SHA
+- **最近稳定检查点**：`fc9b2bf6`（owned disposable Kind 上的 clean-SHA deterministic Kubernetes matrix
+  `23/23` 全通过，补齐 exact Node cordon/drain/uncordon、Generation `1 -> 2` fencing、Eviction、Canary、restart、
+  exact cluster/image/state cleanup 与零 Secret finding。正式证据见
+  `docs/reports/stage-3-kubernetes-kind-drain-fixture-fc9b2bf6.md`。此前 `6b71703f` 在 operator-approved reusable
+  `orbstack` Kubernetes context 上的 clean-SHA
   deterministic fixture/failure gate 已通过 `22` 个 case，Node Drain 因未授权为一个显式 unsupported：Pending
   Approval Pod loss、Worker-only network、精确 `policy/v1` Eviction、shared-local-image Canary、Control Plane
   restart、exact Namespace/RBAC/主镜像/Canary 镜像 cleanup 与零 Secret finding。Runner 通过 per-process API
@@ -42,6 +46,7 @@
 - **发布文档**：
   `docs/release-checklists/stage-3-provider-runtime-remote-worker.md`、
   `docs/runbooks/worker-release-rollout.md`、
+  `docs/reports/stage-3-kubernetes-kind-drain-fixture-fc9b2bf6.md`、
   `docs/reports/stage-3-kubernetes-orbstack-fixture-6b71703f.md`、
   `docs/reports/stage-3-real-provider-kubernetes-third-party-gate-6b71703f.md`、
   `docs/reports/stage-3-kubernetes-orbstack-fixture-1e826324.md`、
@@ -78,6 +83,9 @@
   通过本机安全凭据来源执行，聊天中的认证值不能进入命令、日志或报告。
 - 本机可用的 Kubernetes 验收 context 为 `orbstack`。运行真实 gate 时必须显式记录并校验所选 context，
   只创建带唯一 owner 标识的资源并精确清理，不切换或修改其他 context。
+- `fc9b2bf6` 已在 Runner-owned disposable Kind 上关闭 deterministic Node Drain：exact selector、graceful Pod
+  DELETE、uncordon、Generation `1 -> 2`、单终态和精确 cluster/image cleanup 全部通过。该证据不关闭 PDB、
+  multi-node、真实 Provider 或 production rollout。
 - 生产并发不冻结为单一数字；由 Tenant quota、Worker 数/每 Worker slot、CPU/内存 requests/limits 和实际
   资源档位共同控制。每次 load/soak 报告必须记录该资源档位、达到的有效并发和 admission/retry 结果；
   延迟、错误率与持续时间的数值 SLA 尚未给出，因此生产 SLA gate 继续保持 open。
@@ -1575,6 +1583,10 @@ Provider × Capability × Execution Target
   product/failure 均在首个真实 Turn 以 `provider_unavailable` 失败，clean SHA `8883e037` 的 Local 重现确认
   第三方 Claude API 返回 HTTP `502`。四个 Kind cluster、共享 Image 与 child state 均精确清理，聚合扫描
   `37` 个文件/`5,511,658` bytes 为零 finding。Gate 保持 open，不能降级为成功。
+- clean SHA `fc9b2bf6` 随后在 owned disposable Kind 上通过完整 deterministic Kubernetes `23/23`；Node Drain
+  与 `policy/v1` Eviction 分别验证 Generation recovery，Canary/baseline continuity、Control Plane restart、
+  Secret scan 与 exact cluster/image/state cleanup 均通过。该新增证据只关闭 deterministic single-node Drain，
+  不关闭 PDB、多节点或真实 Provider。
 - `ssh_release_gate.py` 的四个 child 各自 cross-build agentd/real Provider Host，并可选择唯一 disposable
   OrbStack machine/SSH key，或同一获批 external host 上四个串行且互异的 ownership installation。两种模式都
   经产品 SSH install/revoke 路径运行 product/failure matrix；聚合器要求同一 clean SHA/Catalog、agentd/Host
