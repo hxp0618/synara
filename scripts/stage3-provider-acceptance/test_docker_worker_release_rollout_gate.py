@@ -552,6 +552,30 @@ class OverviewValidationTest(unittest.TestCase):
 
 
 class DurableSideEffectValidationTest(unittest.TestCase):
+    class PagedAuditAPI:
+        def __init__(self) -> None:
+            self.paths: list[str] = []
+
+        def request(self, method: str, path: str) -> object:
+            self.paths.append(path)
+            if len(self.paths) == 1:
+                return {
+                    "items": [
+                        {
+                            "eventId": "noise-event",
+                            "action": "execution.completed",
+                        }
+                    ],
+                    "nextCursor": "cursor+/=",
+                }
+            return {
+                "items": [
+                    {**item, "eventId": f"release-event-{index}"}
+                    for index, item in enumerate(sample_audit(), start=1)
+                ],
+                "nextCursor": None,
+            }
+
     def test_accepts_exact_audit_and_outbox_sets(self) -> None:
         audit = gate.validate_release_audit(
             sample_audit(), target_id=TARGET_ID, revision_ids={BASELINE_REVISION, CANDIDATE_REVISION}
@@ -563,6 +587,20 @@ class DurableSideEffectValidationTest(unittest.TestCase):
         self.assertEqual(audit["revisionEntryCount"], 2)
         self.assertEqual(audit["policyEntryCount"], 4)
         self.assertEqual(outbox["messageCount"], 6)
+
+    def test_paginates_past_load_audits_to_release_history(self) -> None:
+        api = self.PagedAuditAPI()
+
+        items, pagination = gate.load_all_audit_logs(api, TARGET_ID)
+        audit = gate.validate_release_audit(
+            items,
+            target_id=TARGET_ID,
+            revision_ids={BASELINE_REVISION, CANDIDATE_REVISION},
+        )
+
+        self.assertEqual(pagination, {"pageCount": 2, "entryCount": 7})
+        self.assertEqual(audit["revisionEntryCount"], 2)
+        self.assertIn("cursor=cursor%2B%2F%3D", api.paths[1])
 
     def test_rejects_extra_audit_or_dead_lettered_outbox(self) -> None:
         audits = sample_audit()

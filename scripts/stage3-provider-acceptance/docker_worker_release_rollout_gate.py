@@ -15,6 +15,7 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 from collections.abc import Callable, Mapping, Sequence
@@ -1981,16 +1982,7 @@ class WorkerReleaseRolloutSuite(acceptance.AcceptanceSuite):
             baseline_digest=self.driver.images["baseline"].digest,
             candidate_digest=self.driver.images["candidate"].digest,
         )
-        audit_page = acceptance.json_object(
-            self.api.request("GET", f"/v1/tenants/{tenant_id}/audit-logs?limit=200"),
-            "Worker Release audit page",
-        )
-        audits = audit_page.get("items")
-        if not isinstance(audits, list) or not all(isinstance(item, dict) for item in audits):
-            raise acceptance.AcceptanceError(
-                "runner.worker_release_audit_invalid",
-                "Worker Release audit API returned an invalid item list.",
-            )
+        audits, audit_pagination = load_all_audit_logs(self.api, tenant_id)
         audit = validate_release_audit(
             audits,
             target_id=target_id,
@@ -2085,7 +2077,7 @@ class WorkerReleaseRolloutSuite(acceptance.AcceptanceSuite):
             )
         return {
             "overview": history,
-            "audit": audit,
+            "audit": {**audit, "pagination": audit_pagination},
             "outbox": outbox,
             "sessionEvents": {
                 "sequenceRanges": sequence_ranges,
@@ -2740,6 +2732,67 @@ def validate_release_overview(
         "transitionVersions": sorted(transition_by_version),
         "transitionActions": [transition_by_version[index]["action"] for index in range(1, 5)],
     }
+
+
+def load_all_audit_logs(
+    api: Any,
+    tenant_id: str,
+    *,
+    page_limit: int = 200,
+    maximum_pages: int = 100,
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    items: list[dict[str, Any]] = []
+    seen_event_ids: set[str] = set()
+    seen_cursors: set[str] = set()
+    cursor: str | None = None
+    page_count = 0
+    while page_count < maximum_pages:
+        path = f"/v1/tenants/{tenant_id}/audit-logs?limit={page_limit}"
+        if cursor is not None:
+            path += "&cursor=" + urllib.parse.quote(cursor, safe="")
+        page = acceptance.json_object(
+            api.request("GET", path),
+            "Worker Release audit page",
+        )
+        raw_items = page.get("items")
+        if not isinstance(raw_items, list) or not all(
+            isinstance(item, dict) for item in raw_items
+        ):
+            raise acceptance.AcceptanceError(
+                "runner.worker_release_audit_invalid",
+                "Worker Release audit API returned an invalid item list.",
+            )
+        for item in raw_items:
+            event_id = item.get("eventId")
+            if not isinstance(event_id, str) or not event_id or event_id in seen_event_ids:
+                raise acceptance.AcceptanceError(
+                    "runner.worker_release_audit_pagination_invalid",
+                    "Worker Release audit pagination omitted or repeated an Event identity.",
+                    {"eventId": event_id, "page": page_count + 1},
+                )
+            seen_event_ids.add(event_id)
+            items.append(dict(item))
+        page_count += 1
+        next_cursor = page.get("nextCursor")
+        if next_cursor is None:
+            return items, {"pageCount": page_count, "entryCount": len(items)}
+        if (
+            not isinstance(next_cursor, str)
+            or not next_cursor
+            or next_cursor in seen_cursors
+        ):
+            raise acceptance.AcceptanceError(
+                "runner.worker_release_audit_pagination_invalid",
+                "Worker Release audit pagination returned an invalid or repeated cursor.",
+                {"page": page_count},
+            )
+        seen_cursors.add(next_cursor)
+        cursor = next_cursor
+    raise acceptance.AcceptanceError(
+        "runner.worker_release_audit_pagination_exhausted",
+        "Worker Release audit pagination exceeded its bounded page count.",
+        {"maximumPages": maximum_pages, "entryCount": len(items)},
+    )
 
 
 def validate_release_audit(
