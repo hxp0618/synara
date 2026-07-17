@@ -125,6 +125,20 @@ FIXTURE_LOAD_MIN_WAVES = 2
 FIXTURE_LOAD_MAX_WAVES = 100
 FIXTURE_LOAD_SUITES = frozenset({"fixture-load", "fixture-load-failure"})
 FIXTURE_PARALLEL_DOCKER_SUITES = FIXTURE_LOAD_SUITES | {"fixture-concurrency"}
+KUBERNETES_ACCEPTANCE_RESOURCE_CONFIGURATION: Mapping[str, str] = {
+    "cpuRequest": "100m",
+    "cpuLimit": "1",
+    "memoryRequest": "128Mi",
+    "memoryLimit": "1Gi",
+    "ephemeralStorageRequest": "128Mi",
+    "ephemeralStorageLimit": "2Gi",
+    "workspaceSizeLimit": "1Gi",
+    "quotaCpuRequests": "1",
+    "quotaCpuLimits": "2",
+    "quotaMemoryRequests": "1Gi",
+    "quotaMemoryLimits": "2Gi",
+    "quotaEphemeralStorage": "4Gi",
+}
 FIXTURE_LOAD_GENERATION_RECOVERY_CASES = ("worker-network", "worker-container-loss")
 FIXTURE_LOAD_FAILURE_CASES = (
     *FIXTURE_LOAD_GENERATION_RECOVERY_CASES,
@@ -6277,11 +6291,26 @@ class KubernetesDriver(ManagedWorkerDriver):
         service_account: str,
         image: str,
         max_active_pods: int = 1,
+        experimental_providers: Sequence[str] | None = None,
     ) -> dict[str, Any]:
         if not self.api_server or not self.ca_certificate or not self.kubernetes_token:
             raise AcceptanceError(
                 "runner.kubernetes_access_unavailable",
                 "Kubernetes API access was unavailable while provisioning the Target.",
+            )
+        enabled_providers = list(
+            dict.fromkeys(experimental_providers or (provider,))
+        )
+        if provider not in enabled_providers or any(
+            enabled_provider not in PROVIDERS for enabled_provider in enabled_providers
+        ):
+            raise AcceptanceError(
+                "runner.kubernetes_provider_policy_invalid",
+                "The Kubernetes Target Provider policy omitted its primary Provider or contained an unsupported Provider.",
+                {
+                    "provider": provider,
+                    "experimentalProviders": enabled_providers,
+                },
             )
         return json_object(
             self.api.request(
@@ -6305,22 +6334,13 @@ class KubernetesDriver(ManagedWorkerDriver):
                         "runnerCommand": list(self.options.runner_command),
                         "maxActivePods": max_active_pods,
                         "egressCidrs": ["0.0.0.0/0"],
-                        "cpuRequest": "100m",
-                        "cpuLimit": "1",
-                        "memoryRequest": "128Mi",
-                        "memoryLimit": "1Gi",
-                        "ephemeralStorageRequest": "128Mi",
-                        "ephemeralStorageLimit": "2Gi",
-                        "workspaceSizeLimit": "1Gi",
-                        "quotaCpuRequests": "1",
-                        "quotaCpuLimits": "2",
-                        "quotaMemoryRequests": "1Gi",
-                        "quotaMemoryLimits": "2Gi",
-                        "quotaEphemeralStorage": "4Gi",
+                        **dict(KUBERNETES_ACCEPTANCE_RESOURCE_CONFIGURATION),
                     },
                     "capabilities": {
                         "workspaceModes": ["local", "worktree"],
-                        "providerPolicy": {"experimentalProviders": [provider]},
+                        "providerPolicy": {
+                            "experimentalProviders": enabled_providers
+                        },
                     },
                 },
                 expected=(201,),
@@ -12575,6 +12595,7 @@ class AcceptanceSuite:
         *,
         wave_start: int = 0,
         wave_count: int | None = None,
+        expected_distinct_workers: int = FIXTURE_CONCURRENCY_WORKERS,
         active_validator: Callable[[Mapping[str, Any]], None] | None = None,
         terminal_validator: (
             Callable[[Mapping[str, Any], Mapping[str, Any]], None] | None
@@ -12741,7 +12762,7 @@ class AcceptanceSuite:
             len(execution_ids) != expected_executions
             or quota_rejections != expected_rejections
             or overlap_observations != expected_overlaps
-            or len(worker_ids) != FIXTURE_CONCURRENCY_WORKERS
+            or len(worker_ids) != expected_distinct_workers
             or any(count != wave_count for count in session_execution_counts.values())
             or any(count != expected_executions // 2 for count in provider_execution_counts.values())
         ):
@@ -12755,6 +12776,7 @@ class AcceptanceSuite:
                     "quotaRejections": quota_rejections,
                     "expectedOverlapObservations": expected_overlaps,
                     "overlapObservations": overlap_observations,
+                    "expectedDistinctWorkerCount": expected_distinct_workers,
                     "workerIds": sorted(worker_ids),
                     "providerExecutionCounts": dict(sorted(provider_execution_counts.items())),
                     "sessionExecutionCounts": dict(sorted(session_execution_counts.items())),
@@ -12773,6 +12795,7 @@ class AcceptanceSuite:
             "lastWave": wave_start + wave_count,
             "executionsCompleted": len(execution_ids),
             "distinctExecutionCount": len(execution_ids),
+            "expectedDistinctWorkerCount": expected_distinct_workers,
             "distinctWorkerCount": len(worker_ids),
             "quotaRejections": quota_rejections,
             "admissionRetriesSucceeded": len(admission_recovery_ms),
@@ -13387,6 +13410,12 @@ class AcceptanceSuite:
         *,
         session_id: str,
         recover: Callable[[str, str], Mapping[str, Any]],
+        recovering_validator: (
+            Callable[[Mapping[str, Any], Mapping[str, Any]], None] | None
+        ) = None,
+        observe_replacement: (
+            Callable[[str, str], Mapping[str, Any]] | None
+        ) = None,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         turn = json_object(pending.get("turn"), "pending approval turn")
         interaction = json_object(pending.get("interaction"), "pending approval interaction")
@@ -13444,6 +13473,8 @@ class AcceptanceSuite:
                     "recoveryGeneration": recovery_generation,
                 },
             )
+        if recovering_validator is not None:
+            recovering_validator(target_evidence, recovery_event)
         replacement = self._wait_for_replacement_interaction(
             turn_id,
             "approval",
@@ -13505,7 +13536,8 @@ class AcceptanceSuite:
                     "replacementWorkerId": replacement_worker_id,
                 },
             )
-        target_runtime = self.driver.observe_execution(
+        observer = observe_replacement or self.driver.observe_execution
+        target_runtime = observer(
             self._required("target_id"),
             replacement_execution_id,
         )
@@ -15452,9 +15484,16 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
             parser.error(
                 "--suite fixture-concurrency cannot be combined with fixture failure/canary options"
             )
-    if parsed.suite in FIXTURE_LOAD_SUITES:
+    if parsed.suite == "fixture-load":
         if parsed.target != "docker":
-            parser.error(f"--suite {parsed.suite} currently requires --target docker")
+            parser.error("--suite fixture-load currently requires --target docker")
+        if failure_cases or parsed.failure_only:
+            parser.error(
+                "--suite fixture-load cannot be combined with fixture failure/canary options"
+            )
+    if parsed.suite == "fixture-load-failure":
+        if parsed.target != "docker":
+            parser.error("--suite fixture-load-failure currently requires --target docker")
         if failure_cases or parsed.failure_only:
             parser.error(
                 f"--suite {parsed.suite} cannot be combined with fixture failure/canary options"

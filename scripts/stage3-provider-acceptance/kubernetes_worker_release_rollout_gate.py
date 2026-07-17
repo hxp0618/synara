@@ -24,10 +24,13 @@ import release_gate_common as release_gate
 import worker_release_rollout_common as rollout
 
 
-SCHEMA_VERSION = "synara.kubernetes-worker-release-rollout-gate.v1"
+SCHEMA_VERSION = "synara.kubernetes-worker-release-rollout-gate.v2"
 JSON_REPORT_NAME = "kubernetes-worker-release-rollout-gate.json"
 MARKDOWN_REPORT_NAME = "kubernetes-worker-release-rollout-gate.md"
 DEFAULT_REGISTRY_IMAGE = "registry:2.8.3"
+DEFAULT_LOAD_WAVES = 6
+ROLLOUT_WORKER_LEASE_TTL = "12s"
+ROLLOUT_WORKER_HEARTBEAT_TIMEOUT = "24s"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -42,6 +45,7 @@ class GateOptions:
     kind_bin: str
     kind_node_image: str
     kind_worker_nodes: int
+    load_waves: int
     registry_image: str
     go_proxy: str | None
 
@@ -62,6 +66,7 @@ def parse_args(argv: Sequence[str]) -> GateOptions:
     parser.add_argument("--kind-bin", default="kind")
     parser.add_argument("--kind-node-image", default="kindest/node:v1.33.1")
     parser.add_argument("--kind-worker-nodes", type=int, default=2)
+    parser.add_argument("--load-waves", type=int, default=DEFAULT_LOAD_WAVES)
     parser.add_argument("--registry-image", default=DEFAULT_REGISTRY_IMAGE)
     parser.add_argument("--go-proxy")
     parsed = parser.parse_args(argv)
@@ -73,6 +78,11 @@ def parse_args(argv: Sequence[str]) -> GateOptions:
         parser.error("--skip-build requires --control-plane-binary")
     if parsed.kind_worker_nodes < 2 or parsed.kind_worker_nodes > 8:
         parser.error("--kind-worker-nodes must be between 2 and 8")
+    if not 2 <= parsed.load_waves <= acceptance.FIXTURE_LOAD_MAX_WAVES:
+        parser.error(
+            "--load-waves must be between 2 and "
+            f"{acceptance.FIXTURE_LOAD_MAX_WAVES}"
+        )
     docker_socket_path = parsed.docker_socket_path.expanduser().resolve()
     if not docker_socket_path.is_absolute():
         parser.error("--docker-socket-path must be absolute")
@@ -122,6 +132,7 @@ def parse_args(argv: Sequence[str]) -> GateOptions:
         kind_bin=kind_bin,
         kind_node_image=kind_node_image,
         kind_worker_nodes=parsed.kind_worker_nodes,
+        load_waves=parsed.load_waves,
         registry_image=registry_image,
         go_proxy=go_proxy,
     )
@@ -157,7 +168,10 @@ def runner_options(options: GateOptions) -> acceptance.RunnerOptions:
         arguments.extend(
             ["--skip-build", "--control-plane-binary", str(options.control_plane_binary)]
         )
-    return acceptance.parse_args(arguments)
+    return dataclasses.replace(
+        acceptance.parse_args(arguments),
+        load_waves=options.load_waves,
+    )
 
 
 class KubernetesWorkerReleaseRolloutDriver(acceptance.KubernetesDriver):
@@ -187,6 +201,16 @@ class KubernetesWorkerReleaseRolloutDriver(acceptance.KubernetesDriver):
     @property
     def image_pull_policy(self) -> str:
         return "Always"
+
+    def _control_plane_environment(self) -> dict[str, str]:
+        environment = super()._control_plane_environment()
+        environment.update(
+            {
+                "SYNARA_WORKER_LEASE_TTL": ROLLOUT_WORKER_LEASE_TTL,
+                "SYNARA_WORKER_HEARTBEAT_TIMEOUT": ROLLOUT_WORKER_HEARTBEAT_TIMEOUT,
+            }
+        )
+        return environment
 
     def prepare(self) -> Mapping[str, Any]:
         control_plane = acceptance.LocalDriver.prepare(self)
@@ -235,7 +259,13 @@ class KubernetesWorkerReleaseRolloutDriver(acceptance.KubernetesDriver):
         self._connect_registry_to_kind_network()
         access_evidence = self._prepare_cluster_access()
         return {
-            "controlPlane": control_plane,
+            "controlPlane": {
+                **dict(control_plane),
+                "workerTiming": {
+                    "leaseTtl": ROLLOUT_WORKER_LEASE_TTL,
+                    "heartbeatTimeout": ROLLOUT_WORKER_HEARTBEAT_TIMEOUT,
+                },
+            },
             "docker": {
                 "serverVersion": server_version,
                 "platform": platform,
@@ -357,6 +387,7 @@ class KubernetesWorkerReleaseRolloutDriver(acceptance.KubernetesDriver):
             service_account=self.worker_service_account,
             image=baseline.exact_reference,
             max_active_pods=2,
+            experimental_providers=acceptance.FIXTURE_CONCURRENCY_PROVIDERS,
         )
         observer = self._create_kubernetes_target(
             tenant_id,
@@ -367,6 +398,7 @@ class KubernetesWorkerReleaseRolloutDriver(acceptance.KubernetesDriver):
             service_account=self.canary_service_account,
             image=candidate.exact_reference,
             max_active_pods=1,
+            experimental_providers=acceptance.FIXTURE_CONCURRENCY_PROVIDERS,
         )
         main_id = rollout.required_string(main, "id", "main Kubernetes Target")
         observer_id = rollout.required_string(observer, "id", "observer Kubernetes Target")
@@ -393,7 +425,168 @@ class KubernetesWorkerReleaseRolloutDriver(acceptance.KubernetesDriver):
             "observerNamespace": self.canary_namespace,
             "mainMaxActivePods": 2,
             "observerMaxActivePods": 1,
+            "mainExperimentalProviders": list(
+                acceptance.FIXTURE_CONCURRENCY_PROVIDERS
+            ),
+            "observerExperimentalProviders": list(
+                acceptance.FIXTURE_CONCURRENCY_PROVIDERS
+            ),
+            "resourceProfile": dict(
+                acceptance.KUBERNETES_ACCEPTANCE_RESOURCE_CONFIGURATION
+            ),
         }
+
+    def observe_release_resource_profile(
+        self,
+        target_id: str,
+        execution_id: str,
+        *,
+        max_active_pods: int,
+    ) -> Mapping[str, Any]:
+        pod = self._wait_execution_pod(target_id, execution_id)
+        quota = self._wait_target_resource_quota(target_id)
+        return validate_kubernetes_resource_profile(
+            pod,
+            quota,
+            max_active_pods=max_active_pods,
+            configuration=acceptance.KUBERNETES_ACCEPTANCE_RESOURCE_CONFIGURATION,
+        )
+
+    def observe_active_pod_capacity(
+        self,
+        target_id: str,
+        *,
+        expected_active_pods: int,
+        max_active_pods: int,
+    ) -> Mapping[str, Any]:
+        if expected_active_pods < 0 or expected_active_pods > max_active_pods:
+            raise acceptance.AcceptanceError(
+                "runner.kubernetes_rollout_active_pod_expectation_invalid",
+                "The requested active Pod observation exceeded the Target capacity.",
+                {
+                    "expectedActivePods": expected_active_pods,
+                    "maxActivePods": max_active_pods,
+                },
+            )
+        quota = self._wait_target_resource_quota(target_id)
+
+        def probe() -> Mapping[str, Any] | None:
+            active = self._active_target_pods(target_id)
+            if len(active) > max_active_pods:
+                raise acceptance.AcceptanceError(
+                    "runner.kubernetes_rollout_active_pod_capacity_exceeded",
+                    "The Kubernetes Target exceeded its configured maxActivePods boundary.",
+                    {
+                        "targetId": target_id,
+                        "activePodCount": len(active),
+                        "maxActivePods": max_active_pods,
+                    },
+                )
+            if len(active) != expected_active_pods:
+                return None
+            profiles = [
+                validate_kubernetes_resource_profile(
+                    pod,
+                    quota,
+                    max_active_pods=max_active_pods,
+                    configuration=acceptance.KUBERNETES_ACCEPTANCE_RESOURCE_CONFIGURATION,
+                )
+                for pod in active
+            ]
+            execution_ids = {
+                str(profile.get("executionId")) for profile in profiles
+            }
+            pod_uids = {str(profile.get("podUid")) for profile in profiles}
+            if (
+                len(execution_ids) != expected_active_pods
+                or len(pod_uids) != expected_active_pods
+            ):
+                raise acceptance.AcceptanceError(
+                    "runner.kubernetes_rollout_active_pod_identity_reused",
+                    "The active Kubernetes capacity observation reused an Execution or Pod identity.",
+                    {
+                        "executionIds": sorted(execution_ids),
+                        "podUids": sorted(pod_uids),
+                    },
+                )
+            return {
+                "targetId": target_id,
+                "activePodCount": len(active),
+                "maxActivePods": max_active_pods,
+                "pods": profiles,
+                "quota": profiles[0]["quota"] if profiles else quota,
+            }
+
+        return self.api.wait_until(
+            f"{expected_active_pods} active resource-profiled Kubernetes Pods",
+            probe,
+            interval=0.2,
+        )
+
+    def _wait_target_resource_quota(self, target_id: str) -> dict[str, Any]:
+        runtime = self._target_runtime(target_id)
+        quota_name = f"synara-agentd-{target_id.replace('-', '')[:12]}"
+
+        def probe() -> dict[str, Any] | None:
+            completed = self._kubectl_completed(
+                [
+                    "-n",
+                    runtime["namespace"],
+                    "get",
+                    "resourcequota",
+                    quota_name,
+                    "-o",
+                    "json",
+                ],
+                cleanup_timeout=8.0,
+            )
+            if completed.returncode != 0:
+                return None
+            try:
+                payload = json.loads(completed.stdout)
+            except json.JSONDecodeError:
+                return None
+            return payload if isinstance(payload, dict) else None
+
+        return self.api.wait_until(
+            f"Kubernetes ResourceQuota {quota_name}", probe, interval=0.2
+        )
+
+    def _active_target_pods(self, target_id: str) -> list[dict[str, Any]]:
+        runtime = self._target_runtime(target_id)
+        output = self._kubectl_command(
+            [
+                "-n",
+                runtime["namespace"],
+                "get",
+                "pods",
+                "-l",
+                f"synara.io/execution-target-id={target_id}",
+                "-o",
+                "json",
+            ]
+        )
+        try:
+            payload = json.loads(output)
+        except json.JSONDecodeError:
+            raise acceptance.AcceptanceError(
+                "runner.kubernetes_rollout_pod_inventory_invalid",
+                "The Kubernetes rollout Pod inventory was invalid JSON.",
+            ) from None
+        items = payload.get("items") if isinstance(payload, dict) else None
+        if not isinstance(items, list) or not all(isinstance(item, dict) for item in items):
+            raise acceptance.AcceptanceError(
+                "runner.kubernetes_rollout_pod_inventory_invalid",
+                "The Kubernetes rollout Pod inventory omitted its item list.",
+            )
+        return [
+            item
+            for item in items
+            if isinstance(item.get("metadata"), dict)
+            and item["metadata"].get("deletionTimestamp") is None
+            and isinstance(item.get("status"), dict)
+            and item["status"].get("phase") == "Running"
+        ]
 
     def cleanup(self) -> Mapping[str, Any]:
         errors: list[str] = []
@@ -525,6 +718,216 @@ class KubernetesWorkerReleaseRolloutDriver(acceptance.KubernetesDriver):
             )
 
 
+def validate_kubernetes_resource_profile(
+    pod: Mapping[str, Any],
+    quota: Mapping[str, Any],
+    *,
+    max_active_pods: int,
+    configuration: Mapping[str, str],
+) -> dict[str, Any]:
+    metadata = acceptance.json_object(pod.get("metadata"), "resource-profiled Pod metadata")
+    labels = acceptance.json_object(metadata.get("labels"), "resource-profiled Pod labels")
+    spec = acceptance.json_object(pod.get("spec"), "resource-profiled Pod spec")
+    containers = spec.get("containers")
+    if not isinstance(containers, list) or len(containers) != 1 or not isinstance(containers[0], dict):
+        raise acceptance.AcceptanceError(
+            "runner.kubernetes_rollout_resource_profile_invalid",
+            "The resource-profiled Pod did not contain exactly one Worker container.",
+        )
+    container = containers[0]
+    resources = acceptance.json_object(
+        container.get("resources"), "resource-profiled container resources"
+    )
+    requests = acceptance.json_object(resources.get("requests"), "container resource requests")
+    limits = acceptance.json_object(resources.get("limits"), "container resource limits")
+    expected_requests = {
+        "cpu": configuration.get("cpuRequest"),
+        "memory": configuration.get("memoryRequest"),
+        "ephemeral-storage": configuration.get("ephemeralStorageRequest"),
+    }
+    expected_limits = {
+        "cpu": configuration.get("cpuLimit"),
+        "memory": configuration.get("memoryLimit"),
+        "ephemeral-storage": configuration.get("ephemeralStorageLimit"),
+    }
+    actual_requests = {key: requests.get(key) for key in expected_requests}
+    actual_limits = {key: limits.get(key) for key in expected_limits}
+    volumes = spec.get("volumes")
+    workspace_size_limit: Any = None
+    if isinstance(volumes, list):
+        for volume in volumes:
+            if not isinstance(volume, Mapping) or volume.get("name") != "workspace":
+                continue
+            empty_dir = volume.get("emptyDir")
+            if isinstance(empty_dir, Mapping):
+                workspace_size_limit = empty_dir.get("sizeLimit")
+            break
+    quota_metadata = acceptance.json_object(quota.get("metadata"), "ResourceQuota metadata")
+    quota_spec = acceptance.json_object(quota.get("spec"), "ResourceQuota spec")
+    quota_hard = acceptance.json_object(quota_spec.get("hard"), "ResourceQuota hard limits")
+    expected_quota = {
+        "pods": str(max_active_pods),
+        "requests.cpu": configuration.get("quotaCpuRequests"),
+        "limits.cpu": configuration.get("quotaCpuLimits"),
+        "requests.memory": configuration.get("quotaMemoryRequests"),
+        "limits.memory": configuration.get("quotaMemoryLimits"),
+        "requests.ephemeral-storage": configuration.get("quotaEphemeralStorage"),
+    }
+    actual_quota = {key: quota_hard.get(key) for key in expected_quota}
+    execution_id = labels.get("synara.io/execution-id")
+    pod_uid = metadata.get("uid")
+    generation = labels.get("synara.io/generation")
+    quota_name = quota_metadata.get("name")
+    if (
+        actual_requests != expected_requests
+        or actual_limits != expected_limits
+        or workspace_size_limit != configuration.get("workspaceSizeLimit")
+        or actual_quota != expected_quota
+        or not isinstance(execution_id, str)
+        or not execution_id
+        or not isinstance(pod_uid, str)
+        or not pod_uid
+        or not isinstance(generation, str)
+        or not generation
+        or not isinstance(quota_name, str)
+        or not quota_name
+    ):
+        raise acceptance.AcceptanceError(
+            "runner.kubernetes_rollout_resource_profile_invalid",
+            "The Kubernetes Pod or ResourceQuota drifted from the bounded rollout resource profile.",
+            {
+                "expectedRequests": expected_requests,
+                "actualRequests": actual_requests,
+                "expectedLimits": expected_limits,
+                "actualLimits": actual_limits,
+                "expectedWorkspaceSizeLimit": configuration.get("workspaceSizeLimit"),
+                "actualWorkspaceSizeLimit": workspace_size_limit,
+                "expectedQuota": expected_quota,
+                "actualQuota": actual_quota,
+            },
+        )
+    quota_status = quota.get("status")
+    used = quota_status.get("used") if isinstance(quota_status, Mapping) else None
+    return {
+        "executionId": execution_id,
+        "podName": metadata.get("name"),
+        "podUid": pod_uid,
+        "generation": generation,
+        "nodeName": spec.get("nodeName"),
+        "requests": expected_requests,
+        "limits": expected_limits,
+        "workspaceSizeLimit": workspace_size_limit,
+        "quota": {
+            "name": quota_name,
+            "hard": expected_quota,
+            "used": dict(used) if isinstance(used, Mapping) else None,
+        },
+    }
+
+
+def validate_release_pod_recovery(
+    before_pod: Mapping[str, Any],
+    after_pod: Mapping[str, Any],
+    *,
+    before_release: Mapping[str, Any],
+    after_release: Mapping[str, Any],
+    recovery: Mapping[str, Any],
+    revision_id: str,
+    channel: str,
+    manifest_id: str,
+    image: rollout.ReleaseImage,
+) -> dict[str, Any]:
+    stable_pod_keys = (
+        "image",
+        "imageDigest",
+        "containerImageId",
+        "imagePullPolicy",
+        "workerReleaseRevisionId",
+        "workerReleaseChannel",
+        "serviceAccountName",
+    )
+    stable_release_keys = (
+        "executionId",
+        "workerManifestId",
+        "workerReleaseRevisionId",
+        "workerReleaseChannel",
+    )
+    expected_release = {
+        "executionId": before_release.get("executionId"),
+        "workerManifestId": manifest_id,
+        "workerReleaseRevisionId": revision_id,
+        "workerReleaseChannel": channel,
+    }
+    target_recovery = recovery.get("targetRecovery")
+    target_runtime = recovery.get("targetRuntime")
+    before_uid = before_pod.get("podUid")
+    after_uid = after_pod.get("podUid")
+    try:
+        before_generation = int(str(before_pod.get("generation")))
+        after_generation = int(str(after_pod.get("generation")))
+    except (TypeError, ValueError):
+        before_generation = -1
+        after_generation = -1
+    valid = (
+        {key: before_release.get(key) for key in stable_release_keys} == expected_release
+        and {key: after_release.get(key) for key in stable_release_keys} == expected_release
+        and {key: before_pod.get(key) for key in stable_pod_keys}
+        == {key: after_pod.get(key) for key in stable_pod_keys}
+        and before_pod.get("image") == image.exact_reference
+        and before_pod.get("imageDigest") == image.digest
+        and before_pod.get("workerReleaseRevisionId") == revision_id
+        and before_pod.get("workerReleaseChannel") == channel
+        and isinstance(before_uid, str)
+        and bool(before_uid)
+        and isinstance(after_uid, str)
+        and bool(after_uid)
+        and before_uid != after_uid
+        and recovery.get("staleExecutionId") == expected_release["executionId"]
+        and recovery.get("replacementExecutionId") == expected_release["executionId"]
+        and recovery.get("staleGeneration") == before_generation
+        and recovery.get("replacementGeneration") == after_generation
+        and after_generation == before_generation + 1
+        and isinstance(target_recovery, Mapping)
+        and target_recovery.get("recoveryMode") == "delete-pod"
+        and target_recovery.get("deletedPodUid") == before_uid
+        and str(target_recovery.get("deletedPodGeneration")) == str(before_generation)
+        and isinstance(target_runtime, Mapping)
+        and target_runtime.get("podUid") == after_uid
+        and str(target_runtime.get("generation")) == str(after_generation)
+    )
+    if not valid:
+        raise acceptance.AcceptanceError(
+            "runner.kubernetes_rollout_candidate_recovery_invalid",
+            "Candidate Pod loss did not preserve the immutable Release while advancing exactly one Generation.",
+            {
+                "beforePod": dict(before_pod),
+                "afterPod": dict(after_pod),
+                "beforeRelease": dict(before_release),
+                "afterRelease": dict(after_release),
+                "recovery": dict(recovery),
+                "expectedRelease": expected_release,
+            },
+        )
+    return {
+        "executionId": expected_release["executionId"],
+        "revisionId": revision_id,
+        "channel": channel,
+        "manifestId": manifest_id,
+        "registryDigest": image.digest,
+        "generation": {"before": before_generation, "after": after_generation},
+        "podUid": {"before": before_uid, "after": after_uid},
+        "nodeName": {
+            "before": before_pod.get("nodeName"),
+            "after": after_pod.get("nodeName"),
+        },
+        "workerId": {
+            "before": recovery.get("staleWorkerId"),
+            "after": recovery.get("replacementWorkerId"),
+        },
+        "immutableReleasePreserved": True,
+    }
+
+
 class KubernetesWorkerReleaseRolloutSuite(rollout.WorkerReleaseAcceptanceSuite):
     driver: KubernetesWorkerReleaseRolloutDriver
     release_description_prefix = "Stage 3 Kubernetes rollout"
@@ -538,6 +941,7 @@ class KubernetesWorkerReleaseRolloutSuite(rollout.WorkerReleaseAcceptanceSuite):
     ) -> None:
         super().__init__(options, driver, deadline, redactor)
         self.sessions: dict[str, str] = {}
+        self.load_primary_session_id: str | None = None
         self.active_baseline: dict[str, Any] | None = None
         self.completed_release_executions: list[dict[str, Any]] = []
 
@@ -567,7 +971,7 @@ class KubernetesWorkerReleaseRolloutSuite(rollout.WorkerReleaseAcceptanceSuite):
         )
         self._case(
             "resources.credential-project-sessions",
-            "Create one fixture Credential, one Project, and isolated rollout Sessions",
+            "Create fixture Credentials, one Project, isolated rollout Sessions, and a bounded-load Session",
             self._create_rollout_resources,
             requires=("runtime.rollout-targets",),
         )
@@ -597,19 +1001,19 @@ class KubernetesWorkerReleaseRolloutSuite(rollout.WorkerReleaseAcceptanceSuite):
         )
         self._case(
             "release.canary-overlap",
-            "Run a 100% candidate canary beside the busy baseline and fence unsafe transitions",
+            "Delete and recover the candidate Pod during 100% canary overlap while fencing transitions",
             self._canary_overlap,
             requires=("release.baseline-active",),
         )
         self._case(
             "release.promote",
-            "Promote candidate and complete an exact candidate-digest Kubernetes Execution",
+            "Promote candidate and run its resource-profiled release-pinned load waves",
             self._promote_candidate,
             requires=("release.canary-overlap",),
         )
         self._case(
             "release.rollback",
-            "Roll back to baseline and complete an exact baseline-digest Kubernetes Execution",
+            "Roll back to baseline and run its resource-profiled release-pinned load waves",
             self._rollback_baseline,
             requires=("release.promote",),
         )
@@ -647,6 +1051,7 @@ class KubernetesWorkerReleaseRolloutSuite(rollout.WorkerReleaseAcceptanceSuite):
             "candidate-canary": self._required("target_id"),
             "candidate-promoted": self._required("target_id"),
             "baseline-rollback": self._required("target_id"),
+            "load-primary": self._required("target_id"),
         }
         summaries: dict[str, Mapping[str, Any]] = {
             "baseline-seed": {
@@ -668,7 +1073,10 @@ class KubernetesWorkerReleaseRolloutSuite(rollout.WorkerReleaseAcceptanceSuite):
             finally:
                 self.state.target_id = previous_target
             session_id = rollout.required_string(session, "id", f"{key} Session")
-            self.sessions[key] = session_id
+            if key == "load-primary":
+                self.load_primary_session_id = session_id
+            else:
+                self.sessions[key] = session_id
             summaries[key] = {
                 "id": session_id,
                 "executionTargetId": session.get("executionTargetId"),
@@ -743,6 +1151,22 @@ class KubernetesWorkerReleaseRolloutSuite(rollout.WorkerReleaseAcceptanceSuite):
                 "runner.worker_release_busy_baseline_missing",
                 "The baseline Kubernetes Execution was not active before canary rollout.",
             )
+        baseline_pending = acceptance.json_object(
+            baseline.get("pending"), "baseline pending Approval"
+        )
+        baseline_session_id = rollout.required_string(
+            baseline_pending, "sessionId", "baseline Session"
+        )
+        baseline_peer = {
+            "sessionId": baseline_session_id,
+            "provider": self.options.provider,
+            "turn": acceptance.json_object(
+                baseline_pending.get("turn"), "baseline Turn"
+            ),
+            "interaction": acceptance.json_object(
+                baseline_pending.get("interaction"), "baseline interaction"
+            ),
+        }
         policy = self._policy_change(
             "canary",
             "candidate",
@@ -775,6 +1199,11 @@ class KubernetesWorkerReleaseRolloutSuite(rollout.WorkerReleaseAcceptanceSuite):
                 "runner.kubernetes_rollout_pod_identity_reused",
                 "Baseline and candidate release Executions used the same Pod identity.",
             )
+        pre_recovery_capacity = self.driver.observe_active_pod_capacity(
+            self._required("target_id"),
+            expected_active_pods=2,
+            max_active_pods=2,
+        )
         stale = rollout.expect_problem(
             self.api,
             "POST",
@@ -787,47 +1216,209 @@ class KubernetesWorkerReleaseRolloutSuite(rollout.WorkerReleaseAcceptanceSuite):
             {"expectedPolicyVersion": 1, "reason": "stale Kubernetes CAS must fail"},
             "worker_release_policy_version_conflict",
         )
-        promote_conflict = rollout.expect_problem(
-            self.api,
-            "POST",
-            rollout.release_action_path(
-                self._required("tenant_id"),
-                self._required("target_id"),
-                self.revisions["candidate"]["id"],
-                "promote",
-            ),
+        baseline_events = self._all_events(session_id=baseline_session_id)
+        baseline_interactions = self._pending_interactions(baseline_session_id)
+        candidate_pending = acceptance.json_object(
+            candidate.get("pending"), "candidate pending Approval"
+        )
+        candidate_session_id = rollout.required_string(
+            candidate_pending, "sessionId", "candidate Session"
+        )
+        recovery_window: dict[str, Any] = {}
+
+        def validate_recovery_window(
+            target_evidence: Mapping[str, Any],
+            recovery_event: Mapping[str, Any],
+        ) -> None:
+            stale_interaction = acceptance.json_object(
+                candidate_pending.get("interaction"), "stale candidate interaction"
+            )
+            stale_interaction_id = rollout.required_string(
+                stale_interaction,
+                "id",
+                "stale candidate interaction",
+            )
+
+            def stale_interaction_retired() -> Mapping[str, Any] | None:
+                if self._interaction_pending(candidate_session_id, stale_interaction):
+                    return None
+                return {
+                    "interactionId": stale_interaction_id,
+                    "pending": False,
+                }
+
+            stale_retirement = self.api.wait_until(
+                "the deleted candidate Pod Approval interaction to retire",
+                stale_interaction_retired,
+            )
+            promote_conflict = rollout.expect_problem(
+                self.api,
+                "POST",
+                rollout.release_action_path(
+                    self._required("tenant_id"),
+                    self._required("target_id"),
+                    self.revisions["candidate"]["id"],
+                    "promote",
+                ),
+                {
+                    "expectedPolicyVersion": 2,
+                    "reason": "recovering candidate and busy baseline block promotion",
+                },
+                "worker_release_active_executions",
+            )
+            rollout.validate_active_execution_conflict(
+                promote_conflict,
+                revision_id=self.revisions["baseline"]["id"],
+                channel="promoted",
+            )
+            rollback_conflict = rollout.expect_problem(
+                self.api,
+                "POST",
+                rollout.release_action_path(
+                    self._required("tenant_id"),
+                    self._required("target_id"),
+                    self.revisions["baseline"]["id"],
+                    "rollback",
+                ),
+                {
+                    "expectedPolicyVersion": 2,
+                    "reason": "recovering candidate blocks rollback",
+                },
+                "worker_release_active_executions",
+            )
+            rollout.validate_active_execution_conflict(
+                rollback_conflict,
+                revision_id=self.revisions["candidate"]["id"],
+                channel="canary",
+            )
+            recovery_window.update(
+                {
+                    "targetRecovery": dict(target_evidence),
+                    "recoveryEvent": self._event_summary(recovery_event),
+                    "staleInteraction": stale_retirement,
+                    "promoteConflict": promote_conflict,
+                    "rollbackConflict": rollback_conflict,
+                }
+            )
+
+        candidate_release = acceptance.json_object(
+            candidate.get("release"), "candidate release Execution"
+        )
+        candidate_execution_id = rollout.required_string(
+            candidate_release, "executionId", "candidate Execution"
+        )
+        candidate_manifest_id = rollout.required_string(
+            self.manifests["candidate"], "manifestId", "candidate Manifest"
+        )
+        recovery, replacement = self._recover_pending_approval_context(
             {
-                "expectedPolicyVersion": 2,
-                "reason": "busy baseline Kubernetes Pod blocks promotion",
+                "turn": acceptance.json_object(
+                    candidate_pending.get("turn"), "candidate Turn"
+                ),
+                "interaction": acceptance.json_object(
+                    candidate_pending.get("interaction"), "candidate interaction"
+                ),
             },
-            "worker_release_active_executions",
-        )
-        rollout.validate_active_execution_conflict(
-            promote_conflict,
-            revision_id=self.revisions["baseline"]["id"],
-            channel="promoted",
-        )
-        rollback_conflict = rollout.expect_problem(
-            self.api,
-            "POST",
-            rollout.release_action_path(
-                self._required("tenant_id"),
-                self._required("target_id"),
-                self.revisions["baseline"]["id"],
-                "rollback",
+            session_id=candidate_session_id,
+            recover=self.driver.recover_pending_interaction,
+            recovering_validator=validate_recovery_window,
+            observe_replacement=lambda target_id, execution_id: (
+                self.driver.observe_release_execution(
+                    target_id,
+                    execution_id,
+                    expected_image=self.driver.images["candidate"].exact_reference,
+                    expected_release_revision_id=self.revisions["candidate"]["id"],
+                    expected_release_channel="canary",
+                )
             ),
-            {
-                "expectedPolicyVersion": 2,
-                "reason": "busy candidate Kubernetes Pod blocks rollback",
-            },
-            "worker_release_active_executions",
         )
-        rollout.validate_active_execution_conflict(
-            rollback_conflict,
+        candidate_after_release = self._wait_execution_release(
+            rollout.required_string(candidate_pending, "turnId", "candidate Turn"),
             revision_id=self.revisions["candidate"]["id"],
             channel="canary",
+            manifest_id=candidate_manifest_id,
+            terminal=False,
+            session_id=candidate_session_id,
         )
-        candidate_terminal = self._complete_release_execution(candidate)
+        candidate_after_pod = self.driver.observe_release_execution(
+            self._required("target_id"),
+            candidate_execution_id,
+            expected_image=self.driver.images["candidate"].exact_reference,
+            expected_release_revision_id=self.revisions["candidate"]["id"],
+            expected_release_channel="canary",
+        )
+        replacement_release = {
+            **dict(candidate_after_release),
+            "workerId": recovery.get("replacementWorkerId"),
+            "generation": recovery.get("replacementGeneration"),
+        }
+        candidate_after_worker = self._wait_managed_worker(
+            replacement_release,
+            revision_id=self.revisions["candidate"]["id"],
+            channel="canary",
+            manifest_id=candidate_manifest_id,
+        )
+        recovery_evidence = validate_release_pod_recovery(
+            acceptance.json_object(candidate.get("pod"), "candidate Pod before loss"),
+            candidate_after_pod,
+            before_release=candidate_release,
+            after_release=candidate_after_release,
+            recovery=recovery,
+            revision_id=self.revisions["candidate"]["id"],
+            channel="canary",
+            manifest_id=candidate_manifest_id,
+            image=self.driver.images["candidate"],
+        )
+        candidate_resource_profile = self.driver.observe_release_resource_profile(
+            self._required("target_id"),
+            candidate_execution_id,
+            max_active_pods=2,
+        )
+        self._assert_fixture_load_session_unchanged(
+            baseline_peer,
+            baseline_events,
+            baseline_interactions,
+            "after-kubernetes-candidate-pod-recovery",
+        )
+        baseline_after_recovery = self.driver.observe_release_execution(
+            self._required("target_id"),
+            rollout.required_string(
+                acceptance.json_object(baseline.get("release"), "baseline release"),
+                "executionId",
+                "baseline Execution",
+            ),
+            expected_image=self.driver.images["baseline"].exact_reference,
+            expected_release_revision_id=self.revisions["baseline"]["id"],
+            expected_release_channel="promoted",
+        )
+        post_recovery_preservation = self._validate_pod_preserved(
+            acceptance.json_object(baseline.get("pod"), "baseline Pod"),
+            baseline_after_recovery,
+        )
+        post_recovery_capacity = self.driver.observe_active_pod_capacity(
+            self._required("target_id"),
+            expected_active_pods=2,
+            max_active_pods=2,
+        )
+        recovered_pending = {
+            **dict(candidate_pending),
+            "interaction": replacement,
+            "requestId": replacement.get("requestId"),
+        }
+        recovered_candidate = {
+            **dict(candidate),
+            "pending": recovered_pending,
+            "release": candidate_after_release,
+            "pod": candidate_after_pod,
+            "worker": candidate_after_worker,
+        }
+        candidate_terminal = self._complete_release_execution(recovered_candidate)
+        self._assert_fixture_load_session_unchanged(
+            baseline_peer,
+            baseline_events,
+            baseline_interactions,
+            "after-kubernetes-candidate-terminal",
+        )
         baseline_terminal = self._complete_release_execution(baseline)
         self.active_baseline = None
         return {
@@ -836,12 +1427,101 @@ class KubernetesWorkerReleaseRolloutSuite(rollout.WorkerReleaseAcceptanceSuite):
             "baselinePreserved": preservation,
             "candidate": candidate,
             "stalePolicy": stale,
-            "promoteConflict": promote_conflict,
-            "rollbackConflict": rollback_conflict,
+            "preRecoveryCapacity": pre_recovery_capacity,
+            "recoveryWindow": recovery_window,
+            "recovery": recovery,
+            "replacement": recovery_evidence,
+            "candidateResourceProfile": candidate_resource_profile,
+            "candidateWorkerAfterRecovery": candidate_after_worker,
+            "baselinePreservedAfterRecovery": post_recovery_preservation,
+            "postRecoveryCapacity": post_recovery_capacity,
             "candidateTerminal": candidate_terminal,
             "baselineTerminal": baseline_terminal,
             "overlap": True,
         }
+
+    def _activate_load_primary_session(self) -> None:
+        if self._fixture_load_session_cache is not None:
+            return
+        session_id = self.load_primary_session_id
+        if not isinstance(session_id, str) or not session_id:
+            raise acceptance.AcceptanceError(
+                "runner.kubernetes_rollout_load_session_missing",
+                "The bounded Kubernetes rollout load Session was not created.",
+            )
+        self.state.session_id = session_id
+        self.state.last_sequence = 0
+
+    def _fixture_load_overlap(
+        self,
+        active_turns: Sequence[Mapping[str, Any]],
+        wave_index: int,
+        stage: str,
+    ) -> dict[str, Any]:
+        evidence = super()._fixture_load_overlap(active_turns, wave_index, stage)
+        capacity = self.driver.observe_active_pod_capacity(
+            self._required("target_id"),
+            expected_active_pods=acceptance.FIXTURE_CONCURRENCY_WORKERS,
+            max_active_pods=acceptance.FIXTURE_CONCURRENCY_WORKERS,
+        )
+        return {**evidence, "kubernetesCapacity": capacity}
+
+    def _release_load_waves(
+        self,
+        *,
+        slot: str,
+        channel: str,
+        wave_start: int,
+        wave_count: int,
+    ) -> Mapping[str, Any]:
+        self._activate_load_primary_session()
+        evidence = super()._release_load_waves(
+            slot=slot,
+            channel=channel,
+            wave_start=wave_start,
+            wave_count=wave_count,
+            require_runtime_evidence=True,
+            expected_distinct_workers=(
+                wave_count * acceptance.FIXTURE_LOAD_SESSIONS
+            ),
+        )
+        return {
+            **dict(evidence),
+            "podResourceProfileChecks": evidence.get("activeRuntimeChecks"),
+            "resourceProfile": dict(
+                acceptance.KUBERNETES_ACCEPTANCE_RESOURCE_CONFIGURATION
+            ),
+        }
+
+    def _release_load_active_runtime(
+        self,
+        *,
+        slot: str,
+        channel: str,
+        load_turn: Mapping[str, Any],
+        release: Mapping[str, Any],
+        worker: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        del load_turn, worker
+        revision_id = rollout.required_string(
+            self.revisions[slot], "id", f"{slot} Release Revision"
+        )
+        execution_id = rollout.required_string(
+            release, "executionId", "release load Execution"
+        )
+        pod = self.driver.observe_release_execution(
+            self._required("target_id"),
+            execution_id,
+            expected_image=self.driver.images[slot].exact_reference,
+            expected_release_revision_id=revision_id,
+            expected_release_channel=channel,
+        )
+        resources = self.driver.observe_release_resource_profile(
+            self._required("target_id"),
+            execution_id,
+            max_active_pods=acceptance.FIXTURE_CONCURRENCY_WORKERS,
+        )
+        return {"pod": pod, "resources": resources}
 
     def _promote_candidate(self) -> Mapping[str, Any]:
         policy = self._policy_change(
@@ -863,10 +1543,18 @@ class KubernetesWorkerReleaseRolloutSuite(rollout.WorkerReleaseAcceptanceSuite):
             channel="promoted",
         )
         terminal = self._complete_release_execution(execution)
+        candidate_waves = (self.options.load_waves + 1) // 2
+        load = self._release_load_waves(
+            slot="candidate",
+            channel="promoted",
+            wave_start=0,
+            wave_count=candidate_waves,
+        )
         return {
             "policy": rollout.policy_evidence(policy),
             "execution": execution,
             "terminal": terminal,
+            "load": load,
         }
 
     def _rollback_baseline(self) -> Mapping[str, Any]:
@@ -889,10 +1577,19 @@ class KubernetesWorkerReleaseRolloutSuite(rollout.WorkerReleaseAcceptanceSuite):
             channel="promoted",
         )
         terminal = self._complete_release_execution(execution)
+        candidate_waves = (self.options.load_waves + 1) // 2
+        baseline_waves = self.options.load_waves - candidate_waves
+        load = self._release_load_waves(
+            slot="baseline",
+            channel="promoted",
+            wave_start=candidate_waves,
+            wave_count=baseline_waves,
+        )
         return {
             "policy": rollout.policy_evidence(policy),
             "execution": execution,
             "terminal": terminal,
+            "load": load,
         }
 
     def _begin_release_execution(
@@ -1138,6 +1835,23 @@ class KubernetesWorkerReleaseRolloutSuite(rollout.WorkerReleaseAcceptanceSuite):
                 "The rollout did not complete exactly four release-pinned Executions.",
                 {"count": len(self.completed_release_executions)},
             )
+        expected_load_executions = (
+            self.options.load_waves * acceptance.FIXTURE_LOAD_SESSIONS
+        )
+        if (
+            len(self.release_load_execution_ids) != expected_load_executions
+            or sum(self.release_load_phase_counts.values()) != expected_load_executions
+            or any(count <= 0 for count in self.release_load_phase_counts.values())
+        ):
+            raise acceptance.AcceptanceError(
+                "runner.kubernetes_rollout_load_history_invalid",
+                "The Kubernetes rollout load history omitted or reused a release-pinned Execution.",
+                {
+                    "expectedExecutions": expected_load_executions,
+                    "distinctExecutionCount": len(self.release_load_execution_ids),
+                    "phaseCounts": dict(self.release_load_phase_counts),
+                },
+            )
         return {
             "overview": history,
             "audit": {**audit, "pagination": audit_pagination},
@@ -1148,6 +1862,12 @@ class KubernetesWorkerReleaseRolloutSuite(rollout.WorkerReleaseAcceptanceSuite):
                 "distinctExecutionCount": len(set(execution_ids)),
                 "terminalCounts": terminal_counts,
                 "releaseExecutions": self.completed_release_executions,
+                "loadExecutions": {
+                    "requestedWaves": self.options.load_waves,
+                    "expectedExecutionCount": expected_load_executions,
+                    "distinctExecutionCount": len(self.release_load_execution_ids),
+                    "phaseCounts": dict(self.release_load_phase_counts),
+                },
                 "duplicateTerminal": False,
                 "doubleExecution": False,
             },
@@ -1167,7 +1887,8 @@ def markdown_from_report(report: Mapping[str, Any]) -> str:
         "## Evidence boundary",
         "",
         "This gate proves registry-pushed exact-digest Worker Revision creation, baseline promotion, 100% canary, "
-        "busy-Execution fencing, candidate promotion, baseline rollback, Kubernetes Pod/Worker/Event release pins, "
+        "exact candidate Pod-loss recovery with Generation fencing, busy-Execution transition fencing, candidate "
+        "promotion, baseline rollback, bounded resource-profiled load, Kubernetes Pod/Worker/Event release pins, "
         "multi-node disposable Kind execution, Audit/Outbox history, Secret scan, and exact owned-resource cleanup. "
         "It does not replace production Registry TLS/auth/retention, production KMS/tlog/admission, real Provider "
         "credentials, cloud CNI/Eviction behavior, production SLA, or production-duration soak evidence.",
@@ -1334,11 +2055,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             "kindBinary": options.kind_bin,
             "kindNodeImage": options.kind_node_image,
             "kindWorkerNodes": options.kind_worker_nodes,
+            "loadWaves": options.load_waves,
+            "loadSessions": acceptance.FIXTURE_LOAD_SESSIONS,
+            "maxConcurrentExecutions": acceptance.FIXTURE_CONCURRENCY_WORKERS,
             "registryImage": options.registry_image,
             "registryAuthentication": False,
             "registryTLS": False,
             "mainMaxActivePods": 2,
             "observerMaxActivePods": 1,
+            "resourceProfile": dict(
+                acceptance.KUBERNETES_ACCEPTANCE_RESOURCE_CONFIGURATION
+            ),
             "canaryPercent": 100,
             "broadCleanupAllowed": False,
         },

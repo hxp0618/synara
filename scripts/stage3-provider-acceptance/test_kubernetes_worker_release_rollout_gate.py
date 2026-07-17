@@ -31,6 +31,7 @@ def gate_options(output_dir: pathlib.Path) -> gate.GateOptions:
         kind_bin="kind",
         kind_node_image="kindest/node:v1.33.1",
         kind_worker_nodes=2,
+        load_waves=gate.DEFAULT_LOAD_WAVES,
         registry_image=gate.DEFAULT_REGISTRY_IMAGE,
         go_proxy=None,
     )
@@ -53,6 +54,7 @@ class ParseArgsTest(unittest.TestCase):
         options = gate.parse_args([])
 
         self.assertEqual(options.kind_worker_nodes, 2)
+        self.assertEqual(options.load_waves, gate.DEFAULT_LOAD_WAVES)
         self.assertEqual(options.registry_image, gate.DEFAULT_REGISTRY_IMAGE)
         self.assertEqual(options.kind_node_image, "kindest/node:v1.33.1")
 
@@ -68,6 +70,8 @@ class ParseArgsTest(unittest.TestCase):
             runner = gate.runner_options(options)
 
         self.assertEqual(runner.target, "kubernetes")
+        self.assertEqual(runner.suite, "fixture")
+        self.assertEqual(runner.load_waves, gate.DEFAULT_LOAD_WAVES)
         self.assertEqual(runner.kind_worker_nodes, 2)
         self.assertTrue(runner.kubernetes_skip_worker_build)
         self.assertEqual(
@@ -104,6 +108,21 @@ class DriverConfigurationTest(unittest.TestCase):
         self.assertIn(f'http://{driver.registry_container_name}:5000', patches[0])
         self.assertEqual(driver.image_pull_policy, "Always")
 
+    def test_rollout_gate_uses_a_dedicated_non_failure_matrix_lease_window(self) -> None:
+        driver = self.build_driver()
+
+        environment = driver._control_plane_environment()
+
+        self.assertEqual(
+            environment["SYNARA_WORKER_LEASE_TTL"],
+            gate.ROLLOUT_WORKER_LEASE_TTL,
+        )
+        self.assertEqual(
+            environment["SYNARA_WORKER_HEARTBEAT_TIMEOUT"],
+            gate.ROLLOUT_WORKER_HEARTBEAT_TIMEOUT,
+        )
+        self.assertNotEqual(gate.ROLLOUT_WORKER_LEASE_TTL, "6s")
+
     def test_provision_targets_use_same_repository_and_distinct_digests(self) -> None:
         driver = self.build_driver()
         driver.images = {
@@ -134,10 +153,47 @@ class DriverConfigurationTest(unittest.TestCase):
 
         self.assertEqual(calls[0]["image"], driver.images["baseline"].exact_reference)
         self.assertEqual(calls[0]["max_active_pods"], 2)
+        self.assertEqual(
+            calls[0]["experimental_providers"],
+            acceptance.FIXTURE_CONCURRENCY_PROVIDERS,
+        )
         self.assertEqual(calls[1]["image"], driver.images["candidate"].exact_reference)
         self.assertEqual(calls[1]["max_active_pods"], 1)
+        self.assertEqual(
+            calls[1]["experimental_providers"],
+            acceptance.FIXTURE_CONCURRENCY_PROVIDERS,
+        )
         self.assertEqual(evidence["mainTarget"]["id"], "main-target")
         self.assertEqual(evidence["observerTarget"]["id"], "observer-target")
+
+
+class ReleaseLoadTopologyTest(unittest.TestCase):
+    def test_execution_pinned_load_requires_one_worker_identity_per_execution(self) -> None:
+        suite = object.__new__(gate.KubernetesWorkerReleaseRolloutSuite)
+        suite._fixture_load_session_cache = []
+        parent_evidence = {"activeRuntimeChecks": 12}
+
+        with mock.patch.object(
+            rollout.WorkerReleaseAcceptanceSuite,
+            "_release_load_waves",
+            return_value=parent_evidence,
+        ) as parent:
+            evidence = suite._release_load_waves(
+                slot="candidate",
+                channel="promoted",
+                wave_start=0,
+                wave_count=3,
+            )
+
+        parent.assert_called_once_with(
+            slot="candidate",
+            channel="promoted",
+            wave_start=0,
+            wave_count=3,
+            require_runtime_evidence=True,
+            expected_distinct_workers=12,
+        )
+        self.assertEqual(evidence["podResourceProfileChecks"], 12)
 
 
 class ReleasePodObservationTest(unittest.TestCase):
@@ -279,6 +335,171 @@ class PodPreservationTest(unittest.TestCase):
         changed["podUid"] = "replacement"
         with self.assertRaises(acceptance.AcceptanceError):
             gate.KubernetesWorkerReleaseRolloutSuite._validate_pod_preserved(pod, changed)
+
+
+class ResourceProfileTest(unittest.TestCase):
+    def test_pod_and_resource_quota_must_match_bounded_profile(self) -> None:
+        configuration = acceptance.KUBERNETES_ACCEPTANCE_RESOURCE_CONFIGURATION
+        pod = {
+            "metadata": {
+                "name": "pod",
+                "uid": "pod-uid",
+                "labels": {
+                    "synara.io/execution-id": "execution-id",
+                    "synara.io/generation": "1",
+                },
+            },
+            "spec": {
+                "nodeName": "worker-1",
+                "containers": [
+                    {
+                        "name": "agentd",
+                        "resources": {
+                            "requests": {
+                                "cpu": configuration["cpuRequest"],
+                                "memory": configuration["memoryRequest"],
+                                "ephemeral-storage": configuration[
+                                    "ephemeralStorageRequest"
+                                ],
+                            },
+                            "limits": {
+                                "cpu": configuration["cpuLimit"],
+                                "memory": configuration["memoryLimit"],
+                                "ephemeral-storage": configuration[
+                                    "ephemeralStorageLimit"
+                                ],
+                            },
+                        },
+                    }
+                ],
+                "volumes": [
+                    {
+                        "name": "workspace",
+                        "emptyDir": {
+                            "sizeLimit": configuration["workspaceSizeLimit"]
+                        },
+                    }
+                ],
+            },
+        }
+        quota = {
+            "metadata": {"name": "synara-agentd-target"},
+            "spec": {
+                "hard": {
+                    "pods": "2",
+                    "requests.cpu": configuration["quotaCpuRequests"],
+                    "limits.cpu": configuration["quotaCpuLimits"],
+                    "requests.memory": configuration["quotaMemoryRequests"],
+                    "limits.memory": configuration["quotaMemoryLimits"],
+                    "requests.ephemeral-storage": configuration[
+                        "quotaEphemeralStorage"
+                    ],
+                }
+            },
+            "status": {"used": {"pods": "1"}},
+        }
+
+        evidence = gate.validate_kubernetes_resource_profile(
+            pod,
+            quota,
+            max_active_pods=2,
+            configuration=configuration,
+        )
+
+        self.assertEqual(evidence["requests"]["cpu"], "100m")
+        self.assertEqual(evidence["quota"]["hard"]["pods"], "2")
+        drifted = dict(pod)
+        drifted_spec = dict(pod["spec"])
+        drifted_container = dict(pod["spec"]["containers"][0])
+        drifted_resources = dict(drifted_container["resources"])
+        drifted_requests = dict(drifted_resources["requests"])
+        drifted_requests["cpu"] = "50m"
+        drifted_resources["requests"] = drifted_requests
+        drifted_container["resources"] = drifted_resources
+        drifted_spec["containers"] = [drifted_container]
+        drifted["spec"] = drifted_spec
+        with self.assertRaises(acceptance.AcceptanceError):
+            gate.validate_kubernetes_resource_profile(
+                drifted,
+                quota,
+                max_active_pods=2,
+                configuration=configuration,
+            )
+
+
+class PodRecoveryTest(unittest.TestCase):
+    def test_candidate_recovery_preserves_release_and_advances_generation(self) -> None:
+        image = release_image("candidate", DIGEST_B, IMAGE_ID_B)
+        before_pod = {
+            "podName": "candidate-1",
+            "podUid": "candidate-uid-1",
+            "generation": "1",
+            "image": image.exact_reference,
+            "imageDigest": image.digest,
+            "containerImageId": f"docker-pullable://repository@{image.digest}",
+            "imagePullPolicy": "Always",
+            "workerReleaseRevisionId": "candidate-revision",
+            "workerReleaseChannel": "canary",
+            "serviceAccountName": "worker",
+            "nodeName": "worker-1",
+        }
+        after_pod = {
+            **before_pod,
+            "podName": "candidate-2",
+            "podUid": "candidate-uid-2",
+            "generation": "2",
+            "nodeName": "worker-2",
+        }
+        release = {
+            "executionId": "candidate-execution",
+            "workerManifestId": "candidate-manifest",
+            "workerReleaseRevisionId": "candidate-revision",
+            "workerReleaseChannel": "canary",
+        }
+        recovery = {
+            "staleExecutionId": "candidate-execution",
+            "replacementExecutionId": "candidate-execution",
+            "staleWorkerId": "worker-id-1",
+            "replacementWorkerId": "worker-id-2",
+            "staleGeneration": 1,
+            "replacementGeneration": 2,
+            "targetRecovery": {
+                "recoveryMode": "delete-pod",
+                "deletedPodUid": "candidate-uid-1",
+                "deletedPodGeneration": "1",
+            },
+            "targetRuntime": {
+                "podUid": "candidate-uid-2",
+                "generation": "2",
+            },
+        }
+
+        evidence = gate.validate_release_pod_recovery(
+            before_pod,
+            after_pod,
+            before_release=release,
+            after_release=release,
+            recovery=recovery,
+            revision_id="candidate-revision",
+            channel="canary",
+            manifest_id="candidate-manifest",
+            image=image,
+        )
+
+        self.assertEqual(evidence["generation"], {"before": 1, "after": 2})
+        self.assertTrue(evidence["immutableReleasePreserved"])
+        with self.assertRaises(acceptance.AcceptanceError):
+            gate.validate_release_pod_recovery(
+                before_pod,
+                {**after_pod, "imageDigest": DIGEST_A},
+                before_release=release,
+                after_release=release,
+                recovery=recovery,
+                revision_id="candidate-revision",
+                channel="canary",
+                manifest_id="candidate-manifest",
+                image=image,
+            )
 
 
 class CleanupTest(unittest.TestCase):

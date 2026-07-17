@@ -140,20 +140,95 @@ func TestWorkerReleaseRequiresCanaryBeforeSubsequentPromotion(t *testing.T) {
 }
 
 func TestInitialWorkerReleaseWaitsForActiveUnmanagedExecutions(t *testing.T) {
+	for _, status := range []string{"running", "recovering"} {
+		t.Run(status, func(t *testing.T) {
+			fixture := newReleaseFixture(t)
+			first := fixture.createRevision(t, fixture.firstManifestID, "initial", "initial-active-first")
+			executionID := fixture.seedQueuedExecution(t, first.ID, ChannelPromoted)
+			if err := fixture.db.Model(&persistence.AgentExecution{}).Where("id = ?", executionID).
+				Updates(map[string]any{
+					"status": status, "worker_release_revision_id": nil, "worker_release_channel": nil,
+				}).Error; err != nil {
+				t.Fatal(err)
+			}
+
+			_, err := fixture.service.Promote(
+				fixture.ctx, fixture.principal, fixture.tenantID, fixture.targetID, first.ID,
+				PolicyChangeInput{ExpectedPolicyVersion: 0, Reason: "do not strand unmanaged work"},
+				"initial-active-promote", "request-initial-active-promote", "127.0.0.1",
+			)
+			assertProblem(t, err, 409, "worker_release_active_executions")
+
+			if err := fixture.db.Model(&persistence.AgentExecution{}).Where("id = ?", executionID).
+				Update("status", "queued").Error; err != nil {
+				t.Fatal(err)
+			}
+			promoted := fixture.changePolicy(t, "promote", first.ID, PolicyChangeInput{
+				ExpectedPolicyVersion: 0, Reason: "unmanaged execution returned to the queue",
+			}, "initial-active-promote-after-drain")
+			assertPolicy(t, promoted, 1, first.ID, nil, 0)
+			fixture.assertExecutionRelease(t, executionID, first.ID, ChannelPromoted)
+		})
+	}
+}
+
+func TestWorkerReleasePromotionWaitsForActiveExecutionsOnTheOldChannel(t *testing.T) {
+	for _, status := range []string{"running", "recovering"} {
+		t.Run(status, func(t *testing.T) {
+			fixture := newReleaseFixture(t)
+			first := fixture.createRevision(t, fixture.firstManifestID, "initial", "active-release-first")
+			second := fixture.createRevision(t, fixture.secondManifestID, "next", "active-release-second")
+			fixture.changePolicy(t, "promote", first.ID, PolicyChangeInput{
+				ExpectedPolicyVersion: 0, Reason: "initial promotion",
+			}, "active-promote-first")
+			fixture.changePolicy(t, "canary", second.ID, PolicyChangeInput{
+				ExpectedPolicyVersion: 1, CanaryPercent: 100, Reason: "start canary",
+			}, "active-canary-second")
+			executionID := fixture.seedQueuedExecution(t, second.ID, ChannelCanary)
+			if err := fixture.db.Model(&persistence.AgentExecution{}).Where("id = ?", executionID).
+				Update("status", status).Error; err != nil {
+				t.Fatal(err)
+			}
+
+			_, err := fixture.service.Promote(
+				fixture.ctx, fixture.principal, fixture.tenantID, fixture.targetID, second.ID,
+				PolicyChangeInput{ExpectedPolicyVersion: 2, Reason: "do not strand the active canary"},
+				"active-promote-second", "request-active-promote-second", "127.0.0.1",
+			)
+			assertProblem(t, err, 409, "worker_release_active_executions")
+
+			if err := fixture.db.Model(&persistence.AgentExecution{}).Where("id = ?", executionID).
+				Update("status", "completed").Error; err != nil {
+				t.Fatal(err)
+			}
+			promoted := fixture.changePolicy(t, "promote", second.ID, PolicyChangeInput{
+				ExpectedPolicyVersion: 2, Reason: "canary execution finished",
+			}, "active-promote-second-after-drain")
+			assertPolicy(t, promoted, 3, second.ID, nil, 0)
+		})
+	}
+}
+
+func TestWorkerReleaseRollbackWaitsForRecoveringCanaryExecution(t *testing.T) {
 	fixture := newReleaseFixture(t)
-	first := fixture.createRevision(t, fixture.firstManifestID, "initial", "initial-active-first")
-	executionID := fixture.seedQueuedExecution(t, first.ID, ChannelPromoted)
+	first := fixture.createRevision(t, fixture.firstManifestID, "initial", "recovering-rollback-first")
+	second := fixture.createRevision(t, fixture.secondManifestID, "candidate", "recovering-rollback-second")
+	fixture.changePolicy(t, "promote", first.ID, PolicyChangeInput{
+		ExpectedPolicyVersion: 0, Reason: "initial promotion",
+	}, "recovering-rollback-promote")
+	fixture.changePolicy(t, "canary", second.ID, PolicyChangeInput{
+		ExpectedPolicyVersion: 1, CanaryPercent: 100, Reason: "start canary",
+	}, "recovering-rollback-canary")
+	executionID := fixture.seedQueuedExecution(t, second.ID, ChannelCanary)
 	if err := fixture.db.Model(&persistence.AgentExecution{}).Where("id = ?", executionID).
-		Updates(map[string]any{
-			"status": "running", "worker_release_revision_id": nil, "worker_release_channel": nil,
-		}).Error; err != nil {
+		Update("status", "recovering").Error; err != nil {
 		t.Fatal(err)
 	}
 
-	_, err := fixture.service.Promote(
+	_, err := fixture.service.Rollback(
 		fixture.ctx, fixture.principal, fixture.tenantID, fixture.targetID, first.ID,
-		PolicyChangeInput{ExpectedPolicyVersion: 0, Reason: "do not strand unmanaged work"},
-		"initial-active-promote", "request-initial-active-promote", "127.0.0.1",
+		PolicyChangeInput{ExpectedPolicyVersion: 2, Reason: "do not rewrite recovering canary work"},
+		"recovering-rollback-blocked", "request-recovering-rollback-blocked", "127.0.0.1",
 	)
 	assertProblem(t, err, 409, "worker_release_active_executions")
 
@@ -161,44 +236,11 @@ func TestInitialWorkerReleaseWaitsForActiveUnmanagedExecutions(t *testing.T) {
 		Update("status", "queued").Error; err != nil {
 		t.Fatal(err)
 	}
-	promoted := fixture.changePolicy(t, "promote", first.ID, PolicyChangeInput{
-		ExpectedPolicyVersion: 0, Reason: "unmanaged execution returned to the queue",
-	}, "initial-active-promote-after-drain")
-	assertPolicy(t, promoted, 1, first.ID, nil, 0)
+	rolledBack := fixture.changePolicy(t, "rollback", first.ID, PolicyChangeInput{
+		ExpectedPolicyVersion: 2, Reason: "queued canary can be reassigned",
+	}, "recovering-rollback-after-queue")
+	assertPolicy(t, rolledBack, 3, first.ID, nil, 0)
 	fixture.assertExecutionRelease(t, executionID, first.ID, ChannelPromoted)
-}
-
-func TestWorkerReleasePromotionWaitsForActiveExecutionsOnTheOldChannel(t *testing.T) {
-	fixture := newReleaseFixture(t)
-	first := fixture.createRevision(t, fixture.firstManifestID, "initial", "active-release-first")
-	second := fixture.createRevision(t, fixture.secondManifestID, "next", "active-release-second")
-	fixture.changePolicy(t, "promote", first.ID, PolicyChangeInput{
-		ExpectedPolicyVersion: 0, Reason: "initial promotion",
-	}, "active-promote-first")
-	fixture.changePolicy(t, "canary", second.ID, PolicyChangeInput{
-		ExpectedPolicyVersion: 1, CanaryPercent: 100, Reason: "start canary",
-	}, "active-canary-second")
-	executionID := fixture.seedQueuedExecution(t, second.ID, ChannelCanary)
-	if err := fixture.db.Model(&persistence.AgentExecution{}).Where("id = ?", executionID).
-		Update("status", "running").Error; err != nil {
-		t.Fatal(err)
-	}
-
-	_, err := fixture.service.Promote(
-		fixture.ctx, fixture.principal, fixture.tenantID, fixture.targetID, second.ID,
-		PolicyChangeInput{ExpectedPolicyVersion: 2, Reason: "do not strand the running canary"},
-		"active-promote-second", "request-active-promote-second", "127.0.0.1",
-	)
-	assertProblem(t, err, 409, "worker_release_active_executions")
-
-	if err := fixture.db.Model(&persistence.AgentExecution{}).Where("id = ?", executionID).
-		Update("status", "completed").Error; err != nil {
-		t.Fatal(err)
-	}
-	promoted := fixture.changePolicy(t, "promote", second.ID, PolicyChangeInput{
-		ExpectedPolicyVersion: 2, Reason: "canary execution finished",
-	}, "active-promote-second-after-drain")
-	assertPolicy(t, promoted, 3, second.ID, nil, 0)
 }
 
 func TestWorkerReleaseRollbackToPromotedRevisionAbortsCanary(t *testing.T) {

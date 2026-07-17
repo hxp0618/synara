@@ -25,6 +25,16 @@ type Service struct {
 	now        func() time.Time
 }
 
+// Queued executions can be reassigned atomically before they acquire runtime
+// lineage. Recovering executions cannot: they retain prior work and interaction
+// identity until their replacement Generation is ready.
+var releaseTransitionBlockingExecutionStatuses = []string{
+	"leased",
+	"running",
+	"waiting-for-approval",
+	"recovering",
+}
+
 func NewService(db *gorm.DB) *Service {
 	return &Service{
 		db: db, authorizer: authorization.NewAuthorizer(db),
@@ -511,7 +521,7 @@ func requireNoRetiredReleaseExecutions(
 		if err := tx.WithContext(ctx).Model(&persistence.AgentExecution{}).
 			Where(
 				"execution_target_id = ? AND worker_release_revision_id IS NULL AND worker_release_channel IS NULL AND status IN ?",
-				next.ExecutionTargetID, []string{"leased", "running", "waiting-for-approval"},
+				next.ExecutionTargetID, releaseTransitionBlockingExecutionStatuses,
 			).Count(&count).Error; err != nil {
 			return problem.Wrap(500, "worker_release_active_execution_probe_failed", "Failed to inspect active unmanaged Executions before the initial Worker release.", err)
 		}
@@ -552,7 +562,7 @@ func requireNoRetiredReleaseExecutions(
 			Where(
 				"execution_target_id = ? AND worker_release_revision_id = ? AND worker_release_channel = ? AND status IN ?",
 				next.ExecutionTargetID, pair.revisionID, pair.channel,
-				[]string{"leased", "running", "waiting-for-approval"},
+				releaseTransitionBlockingExecutionStatuses,
 			).Count(&count).Error; err != nil {
 			return problem.Wrap(500, "worker_release_active_execution_probe_failed", "Failed to inspect active Executions on the retiring Worker release.", err)
 		}

@@ -487,6 +487,30 @@ def validate_execution_release_events(
     }
 
 
+def validate_release_load_identity(
+    expected: Mapping[str, Any], release: Mapping[str, Any]
+) -> None:
+    expected_identity = {
+        key: expected.get(key) for key in ("executionId", "workerId", "generation")
+    }
+    actual_identity = {
+        key: release.get(key) for key in ("executionId", "workerId", "generation")
+    }
+    if (
+        not isinstance(expected_identity["executionId"], str)
+        or not expected_identity["executionId"]
+        or not isinstance(expected_identity["workerId"], str)
+        or not expected_identity["workerId"]
+        or not isinstance(expected_identity["generation"], int)
+        or actual_identity != expected_identity
+    ):
+        raise acceptance.AcceptanceError(
+            "runner.worker_release_load_identity_mismatch",
+            "A bounded load Execution did not retain its release-pinned Worker identity.",
+            {"expected": expected_identity, "actual": actual_identity},
+        )
+
+
 def validate_release_overview(
     overview: Mapping[str, Any],
     *,
@@ -725,6 +749,8 @@ class WorkerReleaseAcceptanceSuite(acceptance.AcceptanceSuite):
         super().__init__(options, driver, deadline, redactor)
         self.manifests: dict[str, dict[str, Any]] = {}
         self.revisions: dict[str, dict[str, Any]] = {}
+        self.release_load_execution_ids: set[str] = set()
+        self.release_load_phase_counts: dict[str, int] = {}
 
     def _wait_manifest(
         self,
@@ -928,3 +954,158 @@ class WorkerReleaseAcceptanceSuite(acceptance.AcceptanceSuite):
             ),
             f"Worker Release {action}",
         )
+
+    def _release_load_active_runtime(
+        self,
+        *,
+        slot: str,
+        channel: str,
+        load_turn: Mapping[str, Any],
+        release: Mapping[str, Any],
+        worker: Mapping[str, Any],
+    ) -> Mapping[str, Any] | None:
+        del slot, channel, load_turn, release, worker
+        return None
+
+    def _release_load_waves(
+        self,
+        *,
+        slot: str,
+        channel: str,
+        wave_start: int,
+        wave_count: int,
+        require_runtime_evidence: bool = False,
+        expected_distinct_workers: int = acceptance.FIXTURE_CONCURRENCY_WORKERS,
+    ) -> Mapping[str, Any]:
+        revision_id = required_string(
+            self.revisions[slot], "id", f"{slot} Release Revision"
+        )
+        manifest_id = required_string(
+            self.manifests[slot], "manifestId", f"{slot} Worker Manifest"
+        )
+        phase = f"{slot}-{channel}"
+        active_checks = 0
+        terminal_checks = 0
+        worker_binding_checks = 0
+        runtime_checks = 0
+        samples: list[dict[str, Any]] = []
+
+        def active_validator(load_turn: Mapping[str, Any]) -> None:
+            nonlocal active_checks, worker_binding_checks, runtime_checks
+            turn = acceptance.json_object(load_turn.get("turn"), "release load Turn")
+            active = acceptance.json_object(
+                load_turn.get("active"), "release load active Execution"
+            )
+            turn_id = self._turn_id(turn, "release load Turn")
+            release = self._wait_execution_release(
+                turn_id,
+                revision_id=revision_id,
+                channel=channel,
+                manifest_id=manifest_id,
+                terminal=False,
+                session_id=str(load_turn["sessionId"]),
+            )
+            validate_release_load_identity(active, release)
+            worker = self._wait_managed_worker(
+                release,
+                revision_id=revision_id,
+                channel=channel,
+                manifest_id=manifest_id,
+            )
+            runtime = self._release_load_active_runtime(
+                slot=slot,
+                channel=channel,
+                load_turn=load_turn,
+                release=release,
+                worker=worker,
+            )
+            active_checks += 1
+            worker_binding_checks += 1
+            if runtime is not None:
+                runtime_checks += 1
+            if len(samples) < 2:
+                sample: dict[str, Any] = {
+                    "stage": "active",
+                    "sessionId": load_turn.get("sessionId"),
+                    "execution": release,
+                    "worker": worker,
+                }
+                if runtime is not None:
+                    sample["runtime"] = dict(runtime)
+                samples.append(sample)
+
+        def terminal_validator(
+            load_turn: Mapping[str, Any], terminal: Mapping[str, Any]
+        ) -> None:
+            nonlocal terminal_checks
+            turn = acceptance.json_object(load_turn.get("turn"), "release load Turn")
+            turn_id = self._turn_id(turn, "release load Turn")
+            release = self._wait_execution_release(
+                turn_id,
+                revision_id=revision_id,
+                channel=channel,
+                manifest_id=manifest_id,
+                terminal=True,
+                session_id=str(load_turn["sessionId"]),
+            )
+            validate_release_load_identity(terminal, release)
+            execution_id = required_string(
+                release, "executionId", "release load Execution"
+            )
+            if execution_id in self.release_load_execution_ids:
+                raise acceptance.AcceptanceError(
+                    "runner.worker_release_load_execution_reused",
+                    "Worker Release load reused an Execution across rollout phases.",
+                    {"phase": phase, "executionId": execution_id},
+                )
+            self.release_load_execution_ids.add(execution_id)
+            terminal_checks += 1
+            if len(samples) < 4:
+                samples.append(
+                    {
+                        "stage": "terminal",
+                        "sessionId": load_turn.get("sessionId"),
+                        "execution": release,
+                    }
+                )
+
+        load = self._fixture_load_admission_waves(
+            wave_start=wave_start,
+            wave_count=wave_count,
+            expected_distinct_workers=expected_distinct_workers,
+            active_validator=active_validator,
+            terminal_validator=terminal_validator,
+        )
+        expected_executions = wave_count * acceptance.FIXTURE_LOAD_SESSIONS
+        if (
+            active_checks != expected_executions
+            or terminal_checks != expected_executions
+            or worker_binding_checks != expected_executions
+            or (require_runtime_evidence and runtime_checks != expected_executions)
+        ):
+            raise acceptance.AcceptanceError(
+                "runner.worker_release_load_pin_count_invalid",
+                "Worker Release load did not validate every active and terminal release pin.",
+                {
+                    "phase": phase,
+                    "expectedExecutions": expected_executions,
+                    "activeChecks": active_checks,
+                    "terminalChecks": terminal_checks,
+                    "workerBindingChecks": worker_binding_checks,
+                    "runtimeChecks": runtime_checks,
+                },
+            )
+        self.release_load_phase_counts[phase] = expected_executions
+        return {
+            **dict(load),
+            "phase": phase,
+            "revisionId": revision_id,
+            "channel": channel,
+            "manifestId": manifest_id,
+            "registryDigest": self.driver.images[slot].digest,
+            "activeReleasePinChecks": active_checks,
+            "terminalReleasePinChecks": terminal_checks,
+            "workerBindingChecks": worker_binding_checks,
+            "activeRuntimeChecks": runtime_checks,
+            "releasePinSamples": samples,
+        }

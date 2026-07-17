@@ -352,7 +352,10 @@ func (d *Daemon) renewWorkspaceCleanupLoop(
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			requestContext, requestCancel := context.WithTimeout(ctx, d.config.RequestTimeout)
+			requestContext, requestCancel := context.WithTimeout(
+				ctx,
+				executionLeaseRenewalRequestTimeout(d.config),
+			)
 			err := d.client.RenewWorkspaceCleanup(requestContext, claim)
 			requestCancel()
 			if err != nil {
@@ -1414,8 +1417,21 @@ func (d *Daemon) renewLeaseLoop(ctx context.Context, executionID uuid.UUID, leas
 			err := d.client.Renew(requestContext, executionID, lease)
 			requestCancel()
 			if err != nil {
+				renewErr := executionLeaseRenewalError(ctx, err)
+				if ctx.Err() != nil {
+					return
+				}
+				if renewErr == nil {
+					d.logger.Warn(
+						"execution Lease renewal failed; retrying",
+						"executionId", executionID,
+						"generation", lease.Generation,
+						"error", err,
+					)
+					continue
+				}
 				select {
-				case result <- fmt.Errorf("renew execution lease: %w", err):
+				case result <- renewErr:
 				default:
 				}
 				cancel()
@@ -1423,6 +1439,24 @@ func (d *Daemon) renewLeaseLoop(ctx context.Context, executionID uuid.UUID, leas
 			}
 		}
 	}
+}
+
+func executionLeaseRenewalRequestTimeout(config Config) time.Duration {
+	if config.RequestTimeout < config.LeaseRenewInterval {
+		return config.RequestTimeout
+	}
+	return config.LeaseRenewInterval
+}
+
+func executionLeaseRenewalError(ctx context.Context, err error) error {
+	if err == nil || ctx.Err() != nil {
+		return nil
+	}
+	var problem *controlPlaneProblem
+	if !errors.As(err, &problem) || problem.Status == http.StatusTooManyRequests || problem.Status >= http.StatusInternalServerError {
+		return nil
+	}
+	return fmt.Errorf("renew execution lease: %w", err)
 }
 
 func (d *Daemon) failExecution(ctx context.Context, executionID uuid.UUID, lease executions.Lease, cause error) error {

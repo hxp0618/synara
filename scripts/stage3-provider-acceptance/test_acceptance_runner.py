@@ -530,6 +530,7 @@ class FixtureLoadSuite(FixtureConcurrencySuite):
         wave_count: int = 2,
         enforce_quota: bool = True,
         duplicate_worker: bool = False,
+        execution_pinned_workers: bool = False,
     ) -> None:
         super().__init__(duplicate_worker=duplicate_worker)
         self.options = dataclasses.replace(
@@ -538,6 +539,7 @@ class FixtureLoadSuite(FixtureConcurrencySuite):
             load_waves=wave_count,
         )
         self.enforce_quota = enforce_quota
+        self.execution_pinned_workers = execution_pinned_workers
         self.pending_workers: dict[str, str] = {}
         self.pending_generations: dict[str, int] = {}
 
@@ -607,7 +609,9 @@ class FixtureLoadSuite(FixtureConcurrencySuite):
         events = self.events[resolved_session]
         execution_id = str(events[-1]["executionId"])
         used_workers = set(self.pending_workers.values())
-        if self.duplicate_worker:
+        if self.execution_pinned_workers:
+            worker_id = f"worker-{execution_id}"
+        elif self.duplicate_worker:
             worker_id = "worker-1"
         else:
             worker_id = next(
@@ -2564,6 +2568,16 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
         self.assertEqual(len(active), 4)
         self.assertEqual(terminal, active)
 
+    def test_fixture_load_accepts_execution_pinned_worker_identity_topology(self) -> None:
+        evidence = FixtureLoadSuite(
+            wave_count=2,
+            execution_pinned_workers=True,
+        )._fixture_load_admission_waves(expected_distinct_workers=8)
+
+        self.assertEqual(evidence["expectedDistinctWorkerCount"], 8)
+        self.assertEqual(evidence["distinctWorkerCount"], 8)
+        self.assertEqual(evidence["overlapObservations"], 6)
+
     def test_fixture_load_failure_targets_one_worker_and_reuses_sessions_after_recovery(self) -> None:
         suite = FixtureLoadFailureSuite(wave_count=2)
 
@@ -3746,6 +3760,32 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
             ],
         )
 
+    def test_pending_approval_recovery_supports_release_specific_validation_and_observation(
+        self,
+    ) -> None:
+        suite = PendingApprovalRecoverySuite()
+        suite._discover_worker()
+        pending = suite.state.pending_approval
+        assert pending is not None
+        recovery_windows: list[tuple[str, str]] = []
+
+        recovery, _replacement = suite._recover_pending_approval_context(
+            pending,
+            session_id="session-id",
+            recover=suite.fake_driver.recover_pending_interaction,
+            recovering_validator=lambda target, event: recovery_windows.append(
+                (str(target.get("recoveryMode")), str(event.get("eventType")))
+            ),
+            observe_replacement=lambda target_id, execution_id: {
+                "targetId": target_id,
+                "executionId": execution_id,
+                "podUid": "release-pod-uid-2",
+            },
+        )
+
+        self.assertEqual(recovery_windows, [("delete-pod", "execution.recovering")])
+        self.assertEqual(recovery["targetRuntime"]["podUid"], "release-pod-uid-2")
+
     def test_pending_approval_runtime_recovery_rejects_reused_request_identity(self) -> None:
         suite = PendingApprovalRecoverySuite(replacement_request_id="approval-request-1")
 
@@ -4106,6 +4146,19 @@ class RunnerOptionsTest(unittest.TestCase):
         self.assertEqual(options.load_waves, acceptance.FIXTURE_LOAD_DEFAULT_WAVES)
         self.assertFalse(options.restart_control_plane)
         self.assertEqual(options.timeout_seconds, 900.0)
+
+    def test_fixture_load_rejects_execution_pinned_kubernetes_shape(self) -> None:
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            acceptance.parse_args(
+                [
+                    "--suite",
+                    "fixture-load",
+                    "--target",
+                    "kubernetes",
+                    "--load-waves",
+                    "6",
+                ]
+            )
 
     def test_fixture_load_parses_bounds_and_rejects_noncanonical_combinations(self) -> None:
         options = acceptance.parse_args(
