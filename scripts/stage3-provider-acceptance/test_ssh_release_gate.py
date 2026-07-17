@@ -38,6 +38,32 @@ def ssh_options(output_dir: pathlib.Path) -> gate.SSHReleaseGateOptions:
         ssh_machine_arch="arm64",
         ssh_machine_image="ubuntu:24.04",
         ssh_node_version="24.13.1",
+        ssh_external_host=None,
+        ssh_external_port=22,
+        ssh_external_user=None,
+        ssh_external_identity_file=None,
+        ssh_external_host_key_file=None,
+        ssh_external_service_user=acceptance.SSH_SERVICE_USER,
+        ssh_external_use_sudo=False,
+        ssh_allow_external_host=False,
+    )
+
+
+def external_ssh_options(
+    output_dir: pathlib.Path,
+    identity: pathlib.Path = pathlib.Path("/tmp/synara-external-id"),
+    host_key: pathlib.Path = pathlib.Path("/tmp/synara-external-host-key"),
+) -> gate.SSHReleaseGateOptions:
+    return dataclasses.replace(
+        ssh_options(output_dir),
+        ssh_machine_arch="amd64",
+        ssh_external_host="192.0.2.10",
+        ssh_external_port=2222,
+        ssh_external_user="root",
+        ssh_external_identity_file=identity,
+        ssh_external_host_key_file=host_key,
+        ssh_external_service_user="root",
+        ssh_allow_external_host=True,
     )
 
 
@@ -78,6 +104,7 @@ def sample_child_report(
     target_provision["evidence"] = {
         "driverEvidence": {
             "machineName": machine_name,
+            "hostKeyFingerprint": "SHA256:fixture-host-key",
             "binarySha256": "c" * 64,
             "hostKeyMismatch": {
                 "rejected": True,
@@ -126,6 +153,7 @@ def sample_child_report(
                         "controlPlaneCredentialLifecycle": acceptance.SSH_CREDENTIAL_LIFECYCLE,
                         "machineName": machine_name,
                         "ownedMachine": True,
+                        "hostKeyFingerprint": "SHA256:fixture-host-key",
                         "machineImage": options.ssh_machine_image,
                         "machineArch": options.ssh_machine_arch,
                         "nodeVersion": options.ssh_node_version,
@@ -226,6 +254,103 @@ def sample_child_report(
     }
 
 
+def sample_external_child_report(
+    options: gate.SSHReleaseGateOptions,
+    provider: str,
+    matrix: str,
+    *,
+    owner: str = "0123456789abcdefabcd",
+    installation_id: str = "stage3-provider-acceptance-11111111-1111-4111-8111-111111111111",
+) -> dict[str, Any]:
+    report = sample_child_report(options, provider, matrix)
+    runtime_root = f"/opt/synara/acceptance/{owner}"
+    report["configuration"]["ssh"] = {
+        "runtime": "authorized-external-host",
+        "externalHostAuthorized": True,
+        "externalHostAddressPersisted": False,
+        "operatorIdentitySourcePersisted": False,
+        "operatorHostKeySourcePersisted": False,
+        "machineArch": options.ssh_machine_arch,
+        "nodeVersion": options.ssh_node_version,
+        "localPrivateKeyPlaintextDeletedAfterProvision": False,
+        "driverPrivateKeyReferenceClearedAfterProvision": True,
+        "operatorIdentitySourcePreserved": True,
+        "controlPlaneCredentialLifecycle": acceptance.SSH_EXTERNAL_CREDENTIAL_LIFECYCLE,
+        "readsUserSSHConfiguration": False,
+        "controlPlaneTransport": {
+            "mode": "reverse-ssh-loopback",
+            "vmListenHost": acceptance.SSH_RELAY_LOOPBACK_HOST,
+        },
+        "runtimeBuild": "real-provider-host-plus-locked-tools-per-run",
+    }
+    target_prepare = next(
+        case for case in report["cases"] if case["id"] == "environment.target-prepare"
+    )["evidence"]["ssh"]
+    target_prepare.update(
+        {
+            "runtime": "authorized-external-host",
+            "ownedMachine": False,
+            "externalHostAuthorized": True,
+            "externalHostAddressPersisted": False,
+            "installationId": installation_id,
+            "machineArch": options.ssh_machine_arch,
+            "nodeVersion": options.ssh_node_version,
+            "sshd": "active-not-restarted",
+            "operatorIdentitySourcePreserved": True,
+            "driverPrivateKeyReferenceClearedAfterProvision": True,
+            "controlPlaneCredentialLifecycle": acceptance.SSH_EXTERNAL_CREDENTIAL_LIFECYCLE,
+        }
+    )
+    target_prepare.pop("machineName", None)
+    target_prepare.pop("machineImage", None)
+    target_prepare.pop("localPrivateKeyPlaintextDeletedAfterProvision", None)
+    target_prepare["providerHost"]["remotePath"] = f"{runtime_root}/provider-host/index.mjs"
+    target_prepare["providerTools"]["remoteRoot"] = f"{runtime_root}/provider-tools"
+    target_prepare["providerRuntime"]["providerHost"].update(
+        {
+            "command": f"{runtime_root}/bin/provider-host",
+            "remotePath": f"{runtime_root}/provider-host/index.mjs",
+        }
+    )
+    target_prepare["providerRuntime"]["providerTools"]["remoteRoot"] = (
+        f"{runtime_root}/provider-tools"
+    )
+    target_provision = next(
+        case for case in report["cases"] if case["id"] == "runtime.target-provision"
+    )["evidence"]["driverEvidence"]
+    target_provision.update(
+        {
+            "runtime": "authorized-external-host",
+            "ownedMachine": False,
+            "installationId": installation_id,
+            "controlPlaneCredentialLifecycle": acceptance.SSH_EXTERNAL_CREDENTIAL_LIFECYCLE,
+        }
+    )
+    target_provision.pop("machineName", None)
+    cleanup = next(
+        case for case in report["cases"] if case["id"] == "environment.cleanup"
+    )["evidence"]
+    cleanup.clear()
+    cleanup.update(
+        {
+            "runtime": "authorized-external-host",
+            "installationId": installation_id,
+            "machineRemoved": False,
+            "machinePreservedByRequest": False,
+            "externalHostPreserved": True,
+            "externalHostRestarted": False,
+            "ownedRuntimeRemoved": True,
+            "operatorIdentitySourcePreserved": True,
+            "productRevokeRequested": True,
+            "machineLifecycleCompleted": True,
+            "localKeyMaterialRemoved": True,
+            "stateRemoved": True,
+            "broadCleanupUsed": False,
+        }
+    )
+    return report
+
+
 class ParseArgsTest(unittest.TestCase):
     def test_reads_only_controlled_environment_names_into_options(self) -> None:
         with tempfile.TemporaryDirectory() as directory, mock.patch.dict(
@@ -271,6 +396,53 @@ class ParseArgsTest(unittest.TestCase):
                 )
 
         self.assertEqual(caught.exception.code, 2)
+
+    def test_external_host_requires_explicit_authorization_and_keeps_sources_out_of_evidence(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            identity = root / "id_ed25519"
+            host_key = root / "host-key"
+            identity.write_text("private-key-placeholder\n", encoding="utf-8")
+            identity.chmod(0o600)
+            host_key.write_text("ssh-ed25519 Zml4dHVyZS1ob3N0LWtleQ==\n", encoding="utf-8")
+            with mock.patch.dict(
+                os.environ,
+                {"CODEX_KEY": "codex-secret", "CLAUDE_KEY": "claude-secret"},
+            ):
+                options = gate.parse_args(
+                    [
+                        "--codex-credential-env",
+                        "CODEX_KEY",
+                        "--claude-credential-env",
+                        "CLAUDE_KEY",
+                        "--ssh-external-host",
+                        "192.0.2.10",
+                        "--ssh-external-port",
+                        "2222",
+                        "--ssh-external-user",
+                        "root",
+                        "--ssh-external-identity-file",
+                        str(identity),
+                        "--ssh-external-host-key-file",
+                        str(host_key),
+                        "--ssh-external-service-user",
+                        "root",
+                        "--ssh-allow-external-host",
+                        "--ssh-machine-arch",
+                        "amd64",
+                    ]
+                )
+
+            evidence = gate.configuration_evidence(options)
+
+        self.assertTrue(gate.uses_external_host(options))
+        self.assertTrue(evidence["ssh"]["externalHostExplicitlyAuthorized"])
+        encoded = json.dumps(evidence)
+        self.assertNotIn("192.0.2.10", encoded)
+        self.assertNotIn(str(identity), encoded)
+        self.assertNotIn(str(host_key), encoded)
 
 
 class ChildCommandAndValidationTest(unittest.TestCase):
@@ -340,6 +512,42 @@ class ChildCommandAndValidationTest(unittest.TestCase):
                 self.assertEqual(errors, [])
                 self.assertEqual(runtime_errors, [])
                 self.assertEqual(runtime["providerHostSha256"], "d" * 64)
+
+    def test_external_child_command_and_report_preserve_host_without_persisting_sources(self) -> None:
+        options = external_ssh_options(pathlib.Path("/tmp/ssh-release"))
+        command = gate.child_command(
+            options,
+            "codex",
+            "product",
+            options.output_dir / "codex/product",
+        )
+        self.assertIn("--ssh-allow-external-host", command)
+        self.assertIn("--ssh-external-identity-file", command)
+        self.assertNotIn("--ssh-orbctl-bin", command)
+        policy = gate.child_policy(options)
+        report = sample_external_child_report(options, "codex", "product")
+
+        common_errors = common.validate_child_report(
+            report,
+            provider="codex",
+            matrix="product",
+            expected_git_sha="a" * 40,
+            policy=policy,
+        )
+        runtime_errors, runtime = gate.validate_ssh_child_runtime(
+            report,
+            provider="codex",
+            matrix="product",
+            options=options,
+            expected_versions=EXPECTED_VERSIONS,
+        )
+
+        self.assertEqual(common_errors, [])
+        self.assertEqual(runtime_errors, [])
+        assert runtime is not None
+        self.assertEqual(runtime["runtime"], "authorized-external-host")
+        self.assertIn("stage3-provider-acceptance-", runtime["runtimeIdentity"])
+        self.assertNotIn(str(options.ssh_external_identity_file), json.dumps(runtime))
 
     def test_rejects_fixture_runtime_or_incomplete_cleanup(self) -> None:
         options = ssh_options(pathlib.Path("/tmp/ssh-release"))
@@ -422,6 +630,28 @@ class RuntimeInspectionTest(unittest.TestCase):
         self.assertEqual(runtime["orbctl"]["existingMachineCount"], 0)
         self.assertEqual(runtime["remoteRuntime"]["providerToolVersions"], EXPECTED_VERSIONS)
 
+    def test_external_runtime_preflight_omits_orbstack_and_endpoint_metadata(self) -> None:
+        options = external_ssh_options(pathlib.Path("/tmp/ssh-release"))
+        responses = {
+            "go version": subprocess.CompletedProcess([], 0, "go version go1.26.5 darwin/arm64\n", ""),
+            "bun --version": subprocess.CompletedProcess([], 0, "1.3.14\n", ""),
+            "ssh -V": subprocess.CompletedProcess([], 0, "OpenSSH_10.2p1\n", ""),
+        }
+
+        def run(_options: Any, command: list[str]) -> subprocess.CompletedProcess[str]:
+            return responses[" ".join(command)]
+
+        with (
+            mock.patch.object(gate, "_run_metadata_command", side_effect=run) as command,
+            mock.patch.object(gate.shutil, "which", return_value="/usr/bin/ssh-keygen"),
+        ):
+            runtime = gate.inspect_ssh_runtime(options)
+
+        self.assertNotIn("orbctl", runtime)
+        self.assertTrue(runtime["externalHost"]["explicitlyAuthorized"])
+        self.assertFalse(runtime["externalHost"]["addressPersisted"])
+        self.assertEqual(command.call_count, 3)
+
     def test_missing_orbctl_is_a_stable_preflight_error(self) -> None:
         options = ssh_options(pathlib.Path("/tmp/ssh-release"))
 
@@ -461,7 +691,10 @@ class AggregateGateTest(unittest.TestCase):
                         "markdownSha256": "2" * 64,
                         "source": {"providerCapabilityCatalogSha256": "b" * 64},
                         "sshRuntime": {
+                            "runtime": "owned-disposable-orbstack",
+                            "runtimeIdentity": f"synara-stage3-{machine_index:012x}",
                             "machineName": f"synara-stage3-{machine_index:012x}",
+                            "hostKeyFingerprint": f"SHA256:fixture-host-key-{machine_index}",
                             "agentdSha256": "c" * 64,
                             "providerHostSha256": "d" * 64,
                             "codexVersion": EXPECTED_VERSIONS["codex"],
@@ -489,8 +722,9 @@ class AggregateGateTest(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertEqual(report["status"], "pass")
         self.assertEqual(report["coverage"]["completedRuns"], 4)
-        self.assertEqual(report["isolation"]["distinctMachineCount"], 4)
-        self.assertFalse(report["isolation"]["sharedSSHPrivateKey"])
+        self.assertEqual(report["isolation"]["distinctRuntimeIdentityCount"], 4)
+        self.assertTrue(report["isolation"]["generatedPrivateKeyPerRun"])
+        self.assertFalse(report["isolation"]["operatorIdentitySourceReusedAcrossRuns"])
         self.assertEqual(report["runtimeArtifacts"]["providerHostSha256"], "d" * 64)
         self.assertFalse(report["security"]["credentialEnvironmentNamesPersisted"])
 
@@ -498,7 +732,10 @@ class AggregateGateTest(unittest.TestCase):
         runs = [
             {
                 "sshRuntime": {
+                    "runtime": "owned-disposable-orbstack",
+                    "runtimeIdentity": "synara-stage3-0123456789ab",
                     "machineName": "synara-stage3-0123456789ab",
+                    "hostKeyFingerprint": "SHA256:fixture-host-key",
                     "agentdSha256": "c" * 64,
                     "providerHostSha256": "d" * 64,
                     "codexVersion": EXPECTED_VERSIONS["codex"],
@@ -511,6 +748,61 @@ class AggregateGateTest(unittest.TestCase):
         errors = gate._runtime_consensus_errors(runs)
 
         self.assertIn("release.ssh_machine_isolation_invalid", {error["code"] for error in errors})
+
+    def test_disposable_consensus_requires_one_distinct_host_key_per_machine(self) -> None:
+        runs = [
+            {
+                "sshRuntime": {
+                    "runtime": "owned-disposable-orbstack",
+                    "runtimeIdentity": f"synara-stage3-{index:012x}",
+                    "machineName": f"synara-stage3-{index:012x}",
+                    "hostKeyFingerprint": "SHA256:reused-host-key",
+                    "agentdSha256": "c" * 64,
+                    "providerHostSha256": "d" * 64,
+                    "codexVersion": EXPECTED_VERSIONS["codex"],
+                    "claudeVersion": EXPECTED_VERSIONS["claudeAgent"],
+                }
+            }
+            for index in range(4)
+        ]
+
+        errors = gate._runtime_consensus_errors(runs)
+
+        self.assertIn(
+            "release.ssh_host_key_isolation_invalid",
+            {error["code"] for error in errors},
+        )
+
+    def test_external_consensus_requires_distinct_installations_and_one_host_key(self) -> None:
+        runs = [
+            {
+                "sshRuntime": {
+                    "runtime": "authorized-external-host",
+                    "runtimeIdentity": f"stage3-provider-acceptance-00000000-0000-4000-8000-{index:012d}",
+                    "installationId": f"stage3-provider-acceptance-00000000-0000-4000-8000-{index:012d}",
+                    "hostKeyFingerprint": "SHA256:fixture-host-key",
+                    "agentdSha256": "c" * 64,
+                    "providerHostSha256": "d" * 64,
+                    "codexVersion": EXPECTED_VERSIONS["codex"],
+                    "claudeVersion": EXPECTED_VERSIONS["claudeAgent"],
+                }
+            }
+            for index in range(4)
+        ]
+
+        self.assertEqual(gate._runtime_consensus_errors(runs), [])
+        runs[0]["sshRuntime"]["hostKeyFingerprint"] = "SHA256:rotated-host-key"
+        errors = gate._runtime_consensus_errors(runs)
+        self.assertIn("release.ssh_host_key_mismatch", {error["code"] for error in errors})
+        runs[0]["sshRuntime"]["hostKeyFingerprint"] = "SHA256:fixture-host-key"
+        for run in runs:
+            run["sshRuntime"]["runtimeIdentity"] = "reused-installation"
+
+        errors = gate._runtime_consensus_errors(runs)
+        self.assertIn(
+            "release.ssh_installation_isolation_invalid",
+            {error["code"] for error in errors},
+        )
 
 
 if __name__ == "__main__":

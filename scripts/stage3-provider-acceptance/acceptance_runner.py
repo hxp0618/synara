@@ -24,10 +24,12 @@ import json
 import os
 import pathlib
 import re
+import shlex
 import shutil
 import signal
 import socket
 import sqlite3
+import stat
 import subprocess
 import sys
 import tempfile
@@ -79,6 +81,12 @@ SSH_CONTROL_PLANE_OPERATION_TIMEOUT = 180.0
 SSH_CREDENTIAL_LIFECYCLE = (
     "runner posts the one-time private key once during Target creation, deletes the local plaintext copy after "
     "provisioning, and relies on the Control Plane encrypted credential until ssh/revoke"
+)
+SSH_EXTERNAL_CREDENTIAL_LIFECYCLE = (
+    "runner reads one repository-external identity only for strict pinned-Host-Key transport and Target creation, "
+    "clears the active driver reference after provisioning, retains a run-scoped redaction copy until process exit "
+    "to scrub later evidence, preserves the operator source, and relies on the Control Plane encrypted credential "
+    "until ssh/revoke"
 )
 WORKER_PROXY_ALLOWED_PATH_PREFIXES = ("/v1/workers/", "/v1/artifact-content/")
 WORKER_PROXY_MAX_REQUEST_BYTES = 64 << 20
@@ -731,6 +739,14 @@ class RunnerOptions:
     ssh_machine_arch: str
     ssh_machine_image: str
     ssh_node_version: str
+    ssh_external_host: str | None
+    ssh_external_port: int
+    ssh_external_user: str | None
+    ssh_external_identity_file: pathlib.Path | None
+    ssh_external_host_key_file: pathlib.Path | None
+    ssh_external_service_user: str
+    ssh_external_use_sudo: bool
+    ssh_allow_external_host: bool
     docker_socket_path: pathlib.Path
     docker_worker_image: str | None
     docker_skip_worker_build: bool
@@ -3965,13 +3981,31 @@ class SSHDriver(ManagedWorkerDriver):
         super().__init__(repo_root, options, deadline, redactor)
         suffix = uuid.uuid4().hex[:12]
         self.target_name = f"stage3-ssh-{suffix}"
+        self.external_host = options.ssh_external_host is not None
+        self.owns_machine = not self.external_host
+        if options.ssh_external_host is not None:
+            self.redactor.add(
+                options.ssh_external_host,
+                "[REDACTED_SSH_EXTERNAL_HOST]",
+            )
+        if options.ssh_external_identity_file is not None:
+            self.redactor.add(
+                str(options.ssh_external_identity_file),
+                "[REDACTED_SSH_IDENTITY_SOURCE]",
+            )
+        if options.ssh_external_host_key_file is not None:
+            self.redactor.add(
+                str(options.ssh_external_host_key_file),
+                "[REDACTED_SSH_HOST_KEY_SOURCE]",
+            )
         self.machine_name = options.ssh_machine_name or f"synara-stage3-{suffix}"
         self.machine_create_attempted = False
         self.machine_created = False
+        self.external_runtime_created = False
         self.tenant_id: str | None = None
         self.target_id: str | None = None
         self.service_name: str | None = None
-        self.machine_ip = ""
+        self.machine_ip = options.ssh_external_host or ""
         self.host_key = ""
         self.client_private_key = ""
         self.client_public_key = ""
@@ -3979,6 +4013,35 @@ class SSHDriver(ManagedWorkerDriver):
         self.client_key_path = self.credentials_dir / "id_ed25519"
         self.client_public_key_path = self.credentials_dir / "id_ed25519.pub"
         self.known_hosts_path = self.credentials_dir / "known_hosts"
+        self.external_runtime_root = f"/opt/synara/acceptance/{self.resource_owner}"
+        self.external_stage_root = f"/tmp/synara-stage3-{self.resource_owner}"
+        self.remote_node_path = (
+            f"{self.external_runtime_root}/node/bin/node" if self.external_host else "node"
+        )
+        self.remote_provider_host_path = (
+            f"{self.external_runtime_root}/provider-host/index.mjs"
+            if self.external_host
+            else SSH_REMOTE_PROVIDER_HOST_PATH
+        )
+        self.remote_fixture_path = (
+            f"{self.external_runtime_root}/provider-host-fixture.mjs"
+            if self.external_host
+            else SSH_REMOTE_FIXTURE_PATH
+        )
+        self.remote_provider_tools_root = (
+            f"{self.external_runtime_root}/provider-tools"
+            if self.external_host
+            else SSH_REMOTE_PROVIDER_TOOLS_ROOT
+        )
+        self.remote_provider_host_command_path = (
+            f"{self.external_runtime_root}/bin/provider-host"
+            if self.external_host
+            else SSH_PROVIDER_HOST_COMMAND_PATH
+        )
+        self.external_managed_root = f"{self.external_runtime_root}/managed"
+        self.external_install_root = f"{self.external_managed_root}/install"
+        self.external_workspace_root = f"{self.external_managed_root}/workspaces"
+        self.external_git_cache_root = f"{self.external_managed_root}/git-cache"
         self.agentd_binary_path = self.state_dir / "bin" / (
             f"synara-agentd-linux-{options.ssh_machine_arch}"
         )
@@ -3994,6 +4057,33 @@ class SSHDriver(ManagedWorkerDriver):
         self.worker_proxy_relay_log_handle: Any | None = None
         self.worker_proxy_relay_log_path = self.logs_dir / "ssh-worker-proxy-relay.log"
         self.worker_proxy_relay_port = 0
+
+    @property
+    def credential_lifecycle(self) -> str:
+        return (
+            SSH_EXTERNAL_CREDENTIAL_LIFECYCLE
+            if self.external_host
+            else SSH_CREDENTIAL_LIFECYCLE
+        )
+
+    @property
+    def identity_path(self) -> pathlib.Path:
+        if self.external_host:
+            path = self.options.ssh_external_identity_file
+            if path is None:
+                raise AcceptanceError(
+                    "runner.ssh_external_identity_missing",
+                    "The authorized external SSH identity source was unavailable.",
+                )
+            return path
+        return self.client_key_path
+
+    def _runner_command(self) -> list[str]:
+        if not self.external_host:
+            return list(self.options.runner_command)
+        if self.options.suite == "real-provider-smoke":
+            return [self.remote_provider_host_command_path]
+        return [self.remote_node_path, self.remote_fixture_path, "--protocol-v2"]
 
     @property
     def worker_proxy_host(self) -> str:
@@ -4039,18 +4129,23 @@ class SSHDriver(ManagedWorkerDriver):
             )
         service = self._require_service_active(service_name)
         main_pid = int(service["mainPid"])
-        output = self._remote_command(
-            ["node", "-e", provider_host_crash_script(), str(main_pid)],
+        output = self._remote_root_command(
+            [self.remote_node_path, "-e", provider_host_crash_script(), str(main_pid)],
             maximum_timeout=15.0,
         )
         return provider_host_crash_evidence(
             output,
             target=self.name,
             scope={
-                "machineName": self.machine_name,
+                **(
+                    {"installationId": self.installation_id}
+                    if self.external_host
+                    else {"machineName": self.machine_name}
+                ),
                 "serviceName": service_name,
                 "systemdMainPid": main_pid,
-                "scopedToDisposableMachine": True,
+                "scopedToDisposableMachine": self.owns_machine,
+                "scopedToExternalHost": self.external_host,
                 "scopedToSystemdService": True,
             },
         )
@@ -4098,7 +4193,7 @@ class SSHDriver(ManagedWorkerDriver):
         if not self.machine_ip or not self.host_key or not self.client_private_key or not self.client_public_key:
             raise AcceptanceError(
                 "runner.ssh_runtime_unavailable",
-                "The disposable SSH runtime was unavailable while provisioning the Target.",
+                "The SSH runtime was unavailable while provisioning the Target.",
             )
         self.tenant_id = tenant_id
         negative_evidence: dict[str, Any] = {}
@@ -4142,6 +4237,7 @@ class SSHDriver(ManagedWorkerDriver):
             )
             target_id = self._target_id(target, "SSH execution target")
             self.target_id = target_id
+            self._assert_remote_target_absent(target_id)
             installed = json_object(
                 self.api.request(
                     "POST",
@@ -4166,19 +4262,32 @@ class SSHDriver(ManagedWorkerDriver):
                 )
             self.service_name = expected_service
             service = self._require_service_active(expected_service)
+            runtime_identity = {
+                "runtime": (
+                    "authorized-external-host"
+                    if self.external_host
+                    else "owned-disposable-orbstack"
+                ),
+                "ownedMachine": self.owns_machine,
+                "installationId": self.installation_id,
+            }
             return {
                 **target,
                 "driverEvidence": {
-                    "machineName": self.machine_name,
-                    "machineAddress": self.machine_ip,
+                    **runtime_identity,
+                    **({"machineName": self.machine_name, "machineAddress": self.machine_ip} if self.owns_machine else {}),
                     "hostKeyAlgorithm": self.host_key.split()[0],
                     "hostKeyFingerprint": self._host_key_fingerprint(self.host_key),
                     "hostKeyMismatch": negative_evidence,
                     "service": service,
                     "binarySha256": installed.get("binarySha256"),
-                    "credentialSource": "runner-generated one-time Ed25519 key",
+                    "credentialSource": (
+                        "repository-external operator identity"
+                        if self.external_host
+                        else "runner-generated one-time Ed25519 key"
+                    ),
                     "controlPlaneTransport": self._worker_proxy_relay_evidence(),
-                    "controlPlaneCredentialLifecycle": SSH_CREDENTIAL_LIFECYCLE,
+                    "controlPlaneCredentialLifecycle": self.credential_lifecycle,
                     "workerAllocation": self.lifecycle.worker_allocation,
                 },
             }
@@ -4196,17 +4305,20 @@ class SSHDriver(ManagedWorkerDriver):
             raise AcceptanceError("runner.ssh_service_missing", "The managed SSH systemd service was unavailable.")
         before_worker = self._worker_identity(target_id)
         before_service = self._require_service_active(service_name)
-        self._remote_command(
-            ["systemctl", "restart", "ssh"],
-            log_path=self.logs_dir / "ssh-sshd-restart.log",
-        )
-        sshd_state = self._remote_command(["systemctl", "is-active", "ssh"]).strip()
-        if sshd_state != "active":
-            raise AcceptanceError(
-                "runner.sshd_restart_failed",
-                "The disposable SSH daemon did not recover after restart.",
-                {"activeState": sshd_state},
+        sshd_restarted = False
+        if self.owns_machine:
+            self._remote_command(
+                ["systemctl", "restart", "ssh"],
+                log_path=self.logs_dir / "ssh-sshd-restart.log",
             )
+            sshd_state = self._remote_command(["systemctl", "is-active", "ssh"]).strip()
+            if sshd_state != "active":
+                raise AcceptanceError(
+                    "runner.sshd_restart_failed",
+                    "The disposable SSH daemon did not recover after restart.",
+                    {"activeState": sshd_state},
+                )
+            sshd_restarted = True
         self.api.request(
             "PATCH",
             f"/v1/tenants/{tenant_id}/execution-targets/{target_id}/provider-policy",
@@ -4255,8 +4367,13 @@ class SSHDriver(ManagedWorkerDriver):
             replacement_probe,
         )
         return {
-            "strategy": "pinned-Host-Key SSH upgrade with systemd restart",
-            "sshdRestarted": True,
+            "strategy": (
+                "pinned-Host-Key SSH upgrade of the scoped managed service"
+                if self.external_host
+                else "pinned-Host-Key SSH upgrade with systemd restart"
+            ),
+            "sshdRestarted": sshd_restarted,
+            "externalHostRestarted": False,
             "serviceName": service_name,
             "previousMainPid": before_service["mainPid"],
             "replacementMainPid": after_service["mainPid"],
@@ -4274,6 +4391,9 @@ class SSHDriver(ManagedWorkerDriver):
 
     def cleanup(self) -> Mapping[str, Any]:
         errors: list[str] = []
+        revoke_required = bool(self.target_id and self.tenant_id)
+        revoke_succeeded = not revoke_required
+        managed_cleanup_verified = not bool(self.target_id)
 
         def collect(operation: str, action: Callable[[], Any]) -> Any:
             try:
@@ -4285,7 +4405,7 @@ class SSHDriver(ManagedWorkerDriver):
         if self.machine_created and self.service_name:
             collect(
                 "capture SSH Worker journal",
-                lambda: self._remote_command(
+                lambda: self._remote_root_command(
                     ["journalctl", "--no-pager", "-u", self.service_name, "-n", "500"],
                     log_path=self.logs_dir / "ssh-agentd-journal.log",
                     cleanup_timeout=20.0,
@@ -4304,12 +4424,20 @@ class SSHDriver(ManagedWorkerDriver):
                 result.get("operation") != "revoke" or result.get("status") != "disabled"
             ):
                 errors.append("revoke managed SSH Target: API returned an invalid result")
-        if self.machine_created and self.target_id:
-            collect(
+            elif isinstance(result, dict):
+                revoke_succeeded = True
+        elif revoke_required:
+            errors.append("revoke managed SSH Target: Control Plane was unavailable")
+        if self.machine_created and self.target_id and revoke_succeeded:
+            verified = collect(
                 "verify revoked SSH Target files",
-                lambda: self._assert_remote_target_absent(self.target_id, cleanup_timeout=20.0),
+                lambda: (
+                    self._assert_remote_target_absent(self.target_id, cleanup_timeout=20.0),
+                    True,
+                )[1],
             )
-        if self.machine_created:
+            managed_cleanup_verified = verified is True
+        if self.machine_created and self.owns_machine:
             collect(
                 "remove disposable SSH authorization",
                 lambda: self._remote_command(
@@ -4317,9 +4445,16 @@ class SSHDriver(ManagedWorkerDriver):
                     cleanup_timeout=10.0,
                 ),
             )
+        if (
+            self.external_host
+            and self.external_runtime_created
+            and revoke_succeeded
+            and managed_cleanup_verified
+        ):
+            collect("remove owned external SSH runtime", self._remove_external_runtime)
         collect("stop Worker proxy relay", self._stop_worker_proxy_relay)
         collect("stop Control Plane", self.stop)
-        if self.machine_created and not self.options.keep:
+        if self.machine_created and self.owns_machine and not self.options.keep:
             completed = collect(
                 "delete disposable OrbStack machine",
                 lambda: self._orbctl_completed(
@@ -4350,11 +4485,29 @@ class SSHDriver(ManagedWorkerDriver):
         return {
             "target": self.name,
             "resourceOwner": self.resource_owner,
-            "machineName": self.machine_name,
-            "machineRemoved": not self.options.keep and not self.machine_created,
-            "machinePreservedByRequest": self.options.keep,
+            "runtime": (
+                "authorized-external-host"
+                if self.external_host
+                else "owned-disposable-orbstack"
+            ),
+            "installationId": self.installation_id,
+            **({"machineName": self.machine_name} if self.owns_machine else {}),
+            "machineRemoved": self.owns_machine and not self.options.keep and not self.machine_created,
+            "machinePreservedByRequest": self.owns_machine and self.options.keep,
+            "externalHostPreserved": self.external_host,
+            "externalHostRestarted": False,
+            "ownedRuntimeRemoved": not self.external_runtime_created,
+            "operatorIdentitySourcePreserved": (
+                self.external_host
+                and self.options.ssh_external_identity_file is not None
+                and self.options.ssh_external_identity_file.is_file()
+            ),
             "productRevokeRequested": bool(self.target_id and self.tenant_id),
-            "machineLifecycleCompleted": self.options.keep or not self.machine_created,
+            "machineLifecycleCompleted": (
+                not self.external_runtime_created
+                if self.external_host
+                else self.options.keep or not self.machine_created
+            ),
             "localKeyMaterialRemoved": not self.credentials_dir.exists(),
             "stateRemoved": self._temporary_state and not self.state_dir.exists(),
             "broadCleanupUsed": False,
@@ -4385,6 +4538,22 @@ class SSHDriver(ManagedWorkerDriver):
             "log": str(self.worker_proxy_relay_log_path),
         }
 
+    def _ssh_port(self) -> int:
+        return self.options.ssh_external_port if self.external_host else 22
+
+    def _ssh_user(self) -> str:
+        return self.options.ssh_external_user or "root"
+
+    def _known_hosts_token(self) -> str:
+        host = self.machine_ip
+        if self._ssh_port() != 22 or ":" in host:
+            return f"[{host}]:{self._ssh_port()}"
+        return host
+
+    def _ssh_destination(self) -> str:
+        host = f"[{self.machine_ip}]" if ":" in self.machine_ip else self.machine_ip
+        return f"{self._ssh_user()}@{host}"
+
     def _ensure_worker_proxy_relay(self) -> None:
         if self.worker_proxy is None or not self.worker_proxy.thread.is_alive():
             raise AcceptanceError(
@@ -4410,24 +4579,27 @@ class SSHDriver(ManagedWorkerDriver):
         if not self.machine_created or not self.machine_ip or not self.host_key:
             raise AcceptanceError(
                 "runner.ssh_worker_proxy_relay_unavailable",
-                "The disposable SSH runtime was unavailable while starting the reverse relay.",
+                "The SSH runtime was unavailable while starting the reverse relay.",
             )
         if self.worker_proxy is None or not self.worker_proxy.thread.is_alive():
             raise AcceptanceError(
                 "runner.worker_proxy_unavailable",
                 "Worker-only proxy was unavailable while starting the SSH relay.",
             )
-        if not self.client_key_path.is_file():
+        identity_path = self.identity_path
+        if not identity_path.is_file():
             raise AcceptanceError(
                 "runner.ssh_private_key_missing",
-                "The one-time SSH private key was unavailable while starting the reverse relay.",
-                {"path": str(self.client_key_path)},
+                "The authorized SSH identity was unavailable while starting the reverse relay.",
             )
         self.credentials_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         # OpenSSH canonicalizes the default port as the bare host token. The
         # bracketed ``[host]:port`` form is reserved for non-default ports and
         # would make strict checking reject this otherwise pinned key.
-        self.known_hosts_path.write_text(f"{self.machine_ip} {self.host_key}\n", encoding="utf-8")
+        self.known_hosts_path.write_text(
+            f"{self._known_hosts_token()} {self.host_key}\n",
+            encoding="utf-8",
+        )
         os.chmod(self.known_hosts_path, 0o600)
         attempts: list[dict[str, Any]] = []
         for _attempt in range(5):
@@ -4464,13 +4636,15 @@ class SSHDriver(ManagedWorkerDriver):
                 "ServerAliveCountMax=3",
                 "-o",
                 "ConnectTimeout=10",
+                "-p",
+                str(self._ssh_port()),
                 "-i",
-                str(self.client_key_path),
+                str(identity_path),
                 "-N",
                 "-T",
                 "-R",
                 f"{SSH_RELAY_LOOPBACK_HOST}:{relay_port}:127.0.0.1:{self.worker_proxy.port}",
-                f"root@{self.machine_ip}",
+                self._ssh_destination(),
             ]
             self._close_worker_proxy_relay_log_handle()
             self.worker_proxy_relay_log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -4499,7 +4673,7 @@ class SSHDriver(ManagedWorkerDriver):
             )
         raise AcceptanceError(
             "runner.ssh_worker_proxy_relay_failed",
-            "The runner-owned reverse SSH relay could not establish a VM loopback listener.",
+            "The runner-owned reverse SSH relay could not establish the remote loopback listener.",
             {"attempts": attempts, "log": str(self.worker_proxy_relay_log_path)},
         )
 
@@ -4647,9 +4821,9 @@ class SSHDriver(ManagedWorkerDriver):
         provider_host_evidence = {
             "path": str(provider_host_bundle_path),
             "remotePath": (
-                SSH_REMOTE_PROVIDER_HOST_PATH
+                self.remote_provider_host_path
                 if real_provider_runtime
-                else SSH_REMOTE_FIXTURE_PATH
+                else self.remote_fixture_path
             ),
             "sha256": hashlib.sha256(provider_host_bundle_path.read_bytes()).hexdigest(),
             "durationMs": provider_host_duration,
@@ -4677,7 +4851,7 @@ class SSHDriver(ManagedWorkerDriver):
                         "lockSha256": hashlib.sha256(
                             self.provider_tools_lock_path.read_bytes()
                         ).hexdigest(),
-                        "remoteRoot": SSH_REMOTE_PROVIDER_TOOLS_ROOT,
+                        "remoteRoot": self.remote_provider_tools_root,
                     }
                 }
                 if real_provider_runtime
@@ -4723,6 +4897,8 @@ class SSHDriver(ManagedWorkerDriver):
             )
 
     def _generate_client_key(self) -> Mapping[str, Any]:
+        if self.external_host:
+            return self._load_external_identity()
         self.credentials_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         os.chmod(self.credentials_dir, 0o700)
         self._local_command(
@@ -4764,7 +4940,60 @@ class SSHDriver(ManagedWorkerDriver):
             "controlPlaneCredentialLifecycle": SSH_CREDENTIAL_LIFECYCLE,
         }
 
+    def _load_external_identity(self) -> Mapping[str, Any]:
+        identity_path = self.identity_path
+        try:
+            mode = stat.S_IMODE(identity_path.stat().st_mode)
+            private_key = identity_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            raise AcceptanceError(
+                "runner.ssh_external_identity_unavailable",
+                "The repository-external SSH identity could not be read.",
+            ) from None
+        if mode & (stat.S_IRWXG | stat.S_IRWXO) or not private_key.strip() or len(private_key) > 1 << 20:
+            raise AcceptanceError(
+                "runner.ssh_external_identity_invalid",
+                "The repository-external SSH identity was empty, oversized, or had unsafe permissions.",
+            )
+        environment = self._tool_environment()
+        environment.update({"SSH_ASKPASS": "/bin/false", "SSH_ASKPASS_REQUIRE": "force"})
+        try:
+            completed = subprocess.run(
+                ["ssh-keygen", "-y", "-f", str(identity_path)],
+                cwd=self.repo_root,
+                env=environment,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                timeout=self.deadline.request_timeout(maximum=10.0),
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            completed = None
+        public_fields = completed.stdout.strip().split() if completed is not None else []
+        if completed is None or completed.returncode != 0 or len(public_fields) < 2:
+            raise AcceptanceError(
+                "runner.ssh_external_identity_invalid",
+                "The repository-external SSH identity must be a usable non-interactive private key.",
+            )
+        self.client_private_key = private_key
+        self.client_public_key = " ".join(public_fields[:2])
+        self.redactor.add(self.client_private_key, "[REDACTED_SSH_PRIVATE_KEY]")
+        for line in self.client_private_key.splitlines():
+            if len(line) >= 32 and not line.startswith("-----"):
+                self.redactor.add(line, "[REDACTED_SSH_PRIVATE_KEY_DATA]")
+        return {
+            "credentialSource": "repository-external operator identity",
+            "algorithm": public_fields[0],
+            "driverPrivateKeyReferenceClearedAfterProvision": True,
+            "operatorIdentitySourcePreserved": True,
+            "controlPlaneCredentialLifecycle": self.credential_lifecycle,
+        }
+
     def _prepare_machine(self) -> Mapping[str, Any]:
+        if self.external_host:
+            return self._prepare_external_host()
         listed = self._orbctl_command(["list", "--format", "json"])
         try:
             decoded = json.loads(listed)
@@ -4900,6 +5129,231 @@ class SSHDriver(ManagedWorkerDriver):
             "hostKeyFingerprint": self._host_key_fingerprint(self.host_key),
         }
 
+    def _prepare_external_host(self) -> Mapping[str, Any]:
+        self.host_key = self._load_external_host_key()
+        try:
+            with socket.create_connection(
+                (self.machine_ip, self._ssh_port()),
+                timeout=self.deadline.request_timeout(maximum=5.0),
+            ) as connection:
+                connection.settimeout(self.deadline.request_timeout(maximum=5.0))
+                banner = connection.recv(128)
+        except OSError:
+            raise AcceptanceError(
+                "runner.ssh_external_unreachable",
+                "The authorized external SSH endpoint was unreachable.",
+            ) from None
+        if not banner.startswith(b"SSH-"):
+            raise AcceptanceError(
+                "runner.sshd_banner_invalid",
+                "The authorized external endpoint did not return an SSH protocol banner.",
+            )
+        architecture = self._remote_command(["uname", "-m"]).strip()
+        normalized_architecture = {"aarch64": "arm64", "arm64": "arm64", "x86_64": "amd64"}.get(
+            architecture
+        )
+        if normalized_architecture != self.options.ssh_machine_arch:
+            raise AcceptanceError(
+                "runner.ssh_external_arch_mismatch",
+                "The external SSH host architecture did not match --ssh-machine-arch.",
+                {
+                    "expected": self.options.ssh_machine_arch,
+                    "actual": normalized_architecture or "unsupported",
+                },
+            )
+        if self.options.ssh_external_use_sudo:
+            self._remote_command(["sudo", "-n", "true"])
+        preflight_script = "\n".join(
+            [
+                "test \"$(cat /proc/1/comm)\" = systemd",
+                f"id -u {shlex.quote(self.options.ssh_external_service_user)} >/dev/null",
+                "for tool in sh curl tar xz sha256sum git systemctl install base64; do command -v \"$tool\" >/dev/null; done",
+                "systemctl is-active --quiet ssh || systemctl is-active --quiet sshd",
+                f"test ! -e {shlex.quote(self.external_runtime_root)}",
+                f"test ! -e {shlex.quote(self.external_stage_root)}",
+            ]
+        )
+        try:
+            self._remote_root_command(["sh", "-ceu", preflight_script])
+        except AcceptanceError as error:
+            raise AcceptanceError(
+                "runner.ssh_external_preflight_failed",
+                "The external SSH host failed the systemd, tool, service-user, or path-conflict preflight.",
+                {"causeCode": error.code},
+            ) from None
+        self.external_runtime_created = True
+        self._remote_command(["install", "-d", "-m", "0700", self.external_stage_root])
+        if self.options.suite == "real-provider-smoke":
+            sources = (
+                self.provider_host_bundle_path,
+                self.provider_tools_package_path,
+                self.provider_tools_lock_path,
+            )
+        else:
+            sources = (self.fixture_bundle_path,)
+        for source in sources:
+            self._remote_upload(source, f"{self.external_stage_root}/{source.name}", "0600")
+        self._remote_root_command(
+            ["sh", "-ceu", self._external_setup_script()],
+            log_path=self.logs_dir / "ssh-external-runtime-setup.log",
+            maximum_timeout=max(240.0, self.deadline.remaining()),
+        )
+        self.machine_created = True
+        provider_runtime = (
+            self._inspect_ssh_provider_runtime()
+            if self.options.suite == "real-provider-smoke"
+            else {"kind": "deterministic-fixture"}
+        )
+        return {
+            "runtime": "authorized-external-host",
+            "ownedMachine": False,
+            "externalHostAuthorized": self.options.ssh_allow_external_host,
+            "externalHostAddressPersisted": False,
+            "installationId": self.installation_id,
+            "machineArch": self.options.ssh_machine_arch,
+            "nodeVersion": self.options.ssh_node_version,
+            "providerRuntime": provider_runtime,
+            "sshd": "active-not-restarted",
+            "initSystem": "systemd",
+            "hostKeyFingerprint": self._host_key_fingerprint(self.host_key),
+            "credentialSource": "repository-external operator identity",
+            "operatorIdentitySourcePreserved": True,
+            "driverPrivateKeyReferenceClearedAfterProvision": True,
+            "controlPlaneCredentialLifecycle": self.credential_lifecycle,
+            "controlPlaneTransport": {
+                "mode": "reverse-ssh-loopback",
+                "description": SSH_RELAY_TRANSPORT,
+                "vmListenHost": SSH_RELAY_LOOPBACK_HOST,
+            },
+        }
+
+    def _load_external_host_key(self) -> str:
+        source = self.options.ssh_external_host_key_file
+        if source is None:
+            raise AcceptanceError(
+                "runner.ssh_external_host_key_missing",
+                "The external SSH Host Key source was unavailable.",
+            )
+        try:
+            lines = [
+                line.strip()
+                for line in source.read_text(encoding="utf-8").splitlines()
+                if line.strip() and not line.lstrip().startswith("#")
+            ]
+        except (OSError, UnicodeError):
+            lines = []
+        if len(lines) != 1:
+            raise AcceptanceError(
+                "runner.ssh_external_host_key_invalid",
+                "The external SSH Host Key source must contain exactly one pinned key.",
+            )
+        fields = lines[0].split()
+        key_types = ("ssh-ed25519", "ssh-rsa", "ecdsa-sha2-")
+        if len(fields) >= 2 and fields[0].startswith(key_types):
+            host_key = " ".join(fields[:2])
+        elif len(fields) >= 3 and fields[1].startswith(key_types):
+            host_tokens = fields[0].split(",")
+            if (
+                self._known_hosts_token() not in host_tokens
+                or any(token.startswith("|") or "*" in token or "?" in token for token in host_tokens)
+            ):
+                raise AcceptanceError(
+                    "runner.ssh_external_host_key_invalid",
+                    "The approved known-host source did not pin the explicit external endpoint.",
+                )
+            host_key = " ".join(fields[1:3])
+        else:
+            raise AcceptanceError(
+                "runner.ssh_external_host_key_invalid",
+                "The external SSH Host Key source contained an unsupported entry.",
+            )
+        self._host_key_fingerprint(host_key)
+        return host_key
+
+    def _external_setup_script(self) -> str:
+        node_arch = "x64" if self.options.ssh_machine_arch == "amd64" else "arm64"
+        version = self.options.ssh_node_version
+        archive = f"node-v{version}-linux-{node_arch}.tar.xz"
+        root = self.external_runtime_root
+        stage = self.external_stage_root
+        node_root = f"{root}/node"
+        build_home = f"{root}/build-home"
+        npm_cache = f"{root}/npm-cache"
+        provider_home = f"{root}/provider-home"
+        if self.options.suite == "real-provider-smoke":
+            runtime_install = [
+                f"install -d -m 0755 {shlex.quote(pathlib.PurePosixPath(self.remote_provider_host_path).parent.as_posix())}",
+                f"install -d -m 0755 {shlex.quote(self.remote_provider_tools_root)} {shlex.quote(pathlib.PurePosixPath(self.remote_provider_host_command_path).parent.as_posix())}",
+                f"install -m 0644 {shlex.quote(stage + '/' + self.provider_host_bundle_path.name)} {shlex.quote(self.remote_provider_host_path)}",
+                f"install -m 0644 {shlex.quote(stage + '/' + self.provider_tools_package_path.name)} {shlex.quote(self.remote_provider_tools_root + '/package.json')}",
+                f"install -m 0644 {shlex.quote(stage + '/' + self.provider_tools_lock_path.name)} {shlex.quote(self.remote_provider_tools_root + '/package-lock.json')}",
+                f"cd {shlex.quote(self.remote_provider_tools_root)}",
+                f"HOME={shlex.quote(build_home)} npm_config_cache={shlex.quote(npm_cache)} PATH={shlex.quote(node_root + '/bin')}:$PATH npm ci --omit=dev --ignore-scripts --no-audit --no-fund",
+                f"HOME={shlex.quote(build_home)} {shlex.quote(self.remote_node_path)} node_modules/@anthropic-ai/claude-code/install.cjs",
+                f"HOME={shlex.quote(build_home)} npm_config_cache={shlex.quote(npm_cache)} PATH={shlex.quote(node_root + '/bin')}:$PATH npm cache clean --force",
+                f"cat > {shlex.quote(self.remote_provider_host_command_path)} <<'EOF'",
+                "#!/bin/sh",
+                f"export HOME={provider_home}",
+                f"export XDG_CONFIG_HOME={provider_home}/.config",
+                f"export XDG_CACHE_HOME={provider_home}/.cache",
+                f"export XDG_STATE_HOME={provider_home}/.local/state",
+                f"export CODEX_HOME={provider_home}/.codex",
+                f"export CLAUDE_CONFIG_DIR={provider_home}/.claude",
+                f"export PATH={self.remote_provider_tools_root}/node_modules/.bin:{node_root}/bin:$PATH",
+                f'exec {self.remote_node_path} {self.remote_provider_host_path} "$@"',
+                "EOF",
+                f"chmod 0755 {shlex.quote(self.remote_provider_host_command_path)}",
+                f"test -x {shlex.quote(self.remote_provider_tools_root + '/node_modules/.bin/codex')}",
+                f"test -x {shlex.quote(self.remote_provider_tools_root + '/node_modules/.bin/claude')}",
+            ]
+        else:
+            runtime_install = [
+                f"install -m 0644 {shlex.quote(stage + '/' + self.fixture_bundle_path.name)} {shlex.quote(self.remote_fixture_path)}",
+            ]
+        return "\n".join(
+            [
+                f"test ! -e {shlex.quote(root)}",
+                f"install -d -m 0755 {shlex.quote(root)}",
+                f"printf '%s\\n' {shlex.quote(self.installation_id)} > {shlex.quote(root + '/.synara-owner')}",
+                f"chmod 0600 {shlex.quote(root + '/.synara-owner')}",
+                f"install -d -m 0700 {shlex.quote(build_home)} {shlex.quote(npm_cache)} {shlex.quote(provider_home)}",
+                f"chown -R {shlex.quote(self.options.ssh_external_service_user + ':')} {shlex.quote(provider_home)}",
+                f"workdir=$(mktemp -d {shlex.quote(stage + '/node.XXXXXX')})",
+                "trap 'rm -rf \"$workdir\"' EXIT",
+                "cd \"$workdir\"",
+                f"curl -fsSLO https://nodejs.org/dist/v{version}/{archive}",
+                f"curl -fsSLO https://nodejs.org/dist/v{version}/SHASUMS256.txt",
+                f"grep '  {archive}$' SHASUMS256.txt | sha256sum -c -",
+                f"install -d -m 0755 {shlex.quote(node_root)}",
+                f"tar -xJf {shlex.quote(archive)} -C {shlex.quote(node_root)} --strip-components=1",
+                f"test \"$({shlex.quote(self.remote_node_path)} --version)\" = v{version}",
+                *runtime_install,
+                f"rm -rf {shlex.quote(stage)}",
+            ]
+        )
+
+    def _remove_external_runtime(self) -> None:
+        if not self.external_host or not self.external_runtime_created:
+            return
+        root = self.external_runtime_root
+        stage = self.external_stage_root
+        marker = f"{root}/.synara-owner"
+        script = "\n".join(
+            [
+                f"if test -e {shlex.quote(root)}; then",
+                f"  test -f {shlex.quote(marker)}",
+                f"  test \"$(cat {shlex.quote(marker)})\" = {shlex.quote(self.installation_id)}",
+                f"  rm -rf -- {shlex.quote(root)}",
+                "fi",
+                f"rm -rf -- {shlex.quote(stage)}",
+                f"test ! -e {shlex.quote(root)}",
+                f"test ! -e {shlex.quote(stage)}",
+            ]
+        )
+        self._remote_root_command(["sh", "-ceu", script], cleanup_timeout=30.0)
+        self.external_runtime_created = False
+        self.machine_created = False
+
     def _inspect_ssh_provider_runtime(self) -> Mapping[str, Any]:
         try:
             package = json.loads(self.provider_tools_package_path.read_text(encoding="utf-8"))
@@ -4921,10 +5375,10 @@ class SSHDriver(ManagedWorkerDriver):
                 "SSH Provider tools package metadata omitted locked Codex or Claude versions.",
             )
         codex_output = self._remote_command(
-            [f"{SSH_REMOTE_PROVIDER_TOOLS_ROOT}/node_modules/.bin/codex", "--version"]
+            [f"{self.remote_provider_tools_root}/node_modules/.bin/codex", "--version"]
         ).strip()
         claude_output = self._remote_command(
-            [f"{SSH_REMOTE_PROVIDER_TOOLS_ROOT}/node_modules/.bin/claude", "--version"]
+            [f"{self.remote_provider_tools_root}/node_modules/.bin/claude", "--version"]
         ).strip()
         if codex_version not in codex_output or claude_version not in claude_output:
             raise AcceptanceError(
@@ -4936,7 +5390,7 @@ class SSHDriver(ManagedWorkerDriver):
                 },
             )
         provider_host_sha = self._remote_command(
-            ["sha256sum", SSH_REMOTE_PROVIDER_HOST_PATH]
+            ["sha256sum", self.remote_provider_host_path]
         ).split(maxsplit=1)[0]
         expected_provider_host_sha = hashlib.sha256(
             self.provider_host_bundle_path.read_bytes()
@@ -4949,12 +5403,12 @@ class SSHDriver(ManagedWorkerDriver):
         return {
             "kind": "real-provider",
             "providerHost": {
-                "command": SSH_PROVIDER_HOST_COMMAND_PATH,
-                "remotePath": SSH_REMOTE_PROVIDER_HOST_PATH,
+                "command": self.remote_provider_host_command_path,
+                "remotePath": self.remote_provider_host_path,
                 "sha256": provider_host_sha,
             },
             "providerTools": {
-                "remoteRoot": SSH_REMOTE_PROVIDER_TOOLS_ROOT,
+                "remoteRoot": self.remote_provider_tools_root,
                 "lockedInstall": True,
                 "codex": {"version": codex_version, "versionOutput": codex_output[:500]},
                 "claudeAgent": {
@@ -5046,15 +5500,32 @@ class SSHDriver(ManagedWorkerDriver):
                     "name": name,
                     "configuration": {
                         "host": self.machine_ip,
-                        "port": 22,
-                        "user": "root",
+                        "port": self._ssh_port(),
+                        "user": self._ssh_user(),
                         "privateKey": self.client_private_key,
                         "hostKey": host_key,
                         "controlPlaneUrl": self._worker_proxy_url(),
                         "allowInsecureControlPlane": True,
-                        "runnerCommand": list(self.options.runner_command),
-                        "serviceUser": SSH_SERVICE_USER,
-                        "useSudo": False,
+                        "runnerCommand": self._runner_command(),
+                        "serviceUser": (
+                            self.options.ssh_external_service_user
+                            if self.external_host
+                            else SSH_SERVICE_USER
+                        ),
+                        "useSudo": (
+                            self.options.ssh_external_use_sudo
+                            if self.external_host
+                            else False
+                        ),
+                        **(
+                            {
+                                "installRoot": self.external_install_root,
+                                "workspaceRoot": self.external_workspace_root,
+                                "gitCacheRoot": self.external_git_cache_root,
+                            }
+                            if self.external_host
+                            else {}
+                        ),
                     },
                     "capabilities": {
                         "workspaceModes": ["local", "worktree"],
@@ -5128,11 +5599,17 @@ class SSHDriver(ManagedWorkerDriver):
         cleanup_timeout: float | None = None,
     ) -> None:
         service_name = f"synara-agentd-{target_id}.service"
-        install_root = f"/opt/synara/targets/{target_id}"
+        install_root = (
+            self.external_install_root
+            if self.external_host
+            else f"/opt/synara/targets/{target_id}"
+        )
         temporary = f"/tmp/synara-agentd-{target_id}"
+        unit_path = f"/etc/systemd/system/{service_name}"
         script = "\n".join(
             [
                 f"if systemctl cat {service_name} >/dev/null 2>&1; then exit 1; fi",
+                f"test ! -e {unit_path}",
                 f"test ! -e {install_root}/synara-agentd",
                 f"test ! -e {install_root}/agentd.env",
                 f"test ! -e {temporary}",
@@ -5140,7 +5617,7 @@ class SSHDriver(ManagedWorkerDriver):
                 f"test ! -e {temporary}.service",
             ]
         )
-        self._remote_command(["sh", "-ceu", script], cleanup_timeout=cleanup_timeout)
+        self._remote_root_command(["sh", "-ceu", script], cleanup_timeout=cleanup_timeout)
 
     def _orbctl_completed(
         self,
@@ -5211,6 +5688,15 @@ class SSHDriver(ManagedWorkerDriver):
         cleanup_timeout: float | None = None,
         input_text: str | None = None,
     ) -> str:
+        if self.external_host:
+            del user
+            return self._external_ssh_command(
+                command,
+                log_path=log_path,
+                maximum_timeout=maximum_timeout,
+                cleanup_timeout=cleanup_timeout,
+                input_text=input_text,
+            )
         return self._orbctl_command(
             ["run", "--machine", self.machine_name, "--user", user, *command],
             log_path=log_path,
@@ -5218,6 +5704,117 @@ class SSHDriver(ManagedWorkerDriver):
             cleanup_timeout=cleanup_timeout,
             input_text=input_text,
         )
+
+    def _external_ssh_command(
+        self,
+        command: Sequence[str],
+        *,
+        log_path: pathlib.Path | None = None,
+        maximum_timeout: float | None = None,
+        cleanup_timeout: float | None = None,
+        input_text: str | None = None,
+    ) -> str:
+        if not command or not self.machine_ip or not self.host_key:
+            raise AcceptanceError(
+                "runner.ssh_external_command_invalid",
+                "The external SSH command boundary was incomplete.",
+            )
+        self._write_known_hosts_file()
+        timeout = cleanup_timeout
+        if timeout is None:
+            timeout = self.deadline.request_timeout(maximum=maximum_timeout or 30.0)
+        arguments = [
+            "ssh",
+            "-F",
+            "/dev/null",
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "IdentitiesOnly=yes",
+            "-o",
+            "IdentityAgent=none",
+            "-o",
+            "PreferredAuthentications=publickey",
+            "-o",
+            "PasswordAuthentication=no",
+            "-o",
+            "KbdInteractiveAuthentication=no",
+            "-o",
+            "StrictHostKeyChecking=yes",
+            "-o",
+            "GlobalKnownHostsFile=/dev/null",
+            "-o",
+            f"UserKnownHostsFile={self.known_hosts_path}",
+            "-o",
+            "UpdateHostKeys=no",
+            "-o",
+            "LogLevel=ERROR",
+            "-o",
+            "ConnectTimeout=10",
+            "-p",
+            str(self._ssh_port()),
+            "-i",
+            str(self.identity_path),
+            self._ssh_destination(),
+            shlex.join(list(command)),
+        ]
+        try:
+            completed = subprocess.run(
+                arguments,
+                cwd=self.repo_root,
+                env=self._tool_environment(),
+                input=input_text,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                timeout=timeout,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as error:
+            del error
+            raise AcceptanceError(
+                "runner.ssh_external_command_failed",
+                "The pinned external SSH command could not run.",
+            ) from None
+        output = self.redactor.text(completed.stdout)
+        if log_path is not None:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            log_path.write_text(output, encoding="utf-8")
+        if completed.returncode != 0:
+            raise AcceptanceError(
+                "runner.ssh_external_command_failed",
+                "The pinned external SSH command failed.",
+                {
+                    "remoteExecutable": pathlib.PurePosixPath(command[0]).name,
+                    "exitCode": completed.returncode,
+                    "log": str(log_path) if log_path else None,
+                    "outputExcerpt": output[-1000:],
+                },
+            )
+        return output
+
+    def _remote_root_command(
+        self,
+        command: Sequence[str],
+        **kwargs: Any,
+    ) -> str:
+        if not self.external_host or not self.options.ssh_external_use_sudo:
+            return self._remote_command(command, **kwargs)
+        return self._remote_command(["sudo", "-n", *command], **kwargs)
+
+    def _write_known_hosts_file(self) -> None:
+        if not self.host_key:
+            raise AcceptanceError(
+                "runner.ssh_host_key_invalid",
+                "A pinned SSH Host Key is required before opening external transport.",
+            )
+        self.credentials_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(self.credentials_dir, 0o700)
+        self.known_hosts_path.write_text(
+            f"{self._known_hosts_token()} {self.host_key}\n",
+            encoding="utf-8",
+        )
+        os.chmod(self.known_hosts_path, 0o600)
 
     def _remote_upload(self, source: pathlib.Path, destination: str, mode: str) -> None:
         if not source.is_file():
@@ -5255,6 +5852,8 @@ class SSHDriver(ManagedWorkerDriver):
 
     def _discard_local_private_key(self) -> None:
         self.client_private_key = ""
+        if self.external_host:
+            return
         try:
             self.client_key_path.unlink(missing_ok=True)
         except OSError as error:
@@ -13698,6 +14297,33 @@ def parse_environment_variable_name(raw: str | None, option: str) -> str | None:
     return value
 
 
+def resolve_repository_external_file(
+    raw: pathlib.Path,
+    repo_root: pathlib.Path,
+    option: str,
+    *,
+    private: bool,
+) -> pathlib.Path:
+    expanded = raw.expanduser()
+    if not expanded.is_absolute():
+        raise ValueError(f"{option} must be absolute")
+    repo_root_resolved = repo_root.resolve()
+    lexical = pathlib.Path(os.path.abspath(expanded))
+    resolved = expanded.resolve()
+    if (
+        lexical == repo_root_resolved
+        or repo_root_resolved in lexical.parents
+        or resolved == repo_root_resolved
+        or repo_root_resolved in resolved.parents
+    ):
+        raise ValueError(f"{option} must be outside the repository")
+    if not resolved.is_file():
+        raise ValueError(f"{option} must reference an existing regular file")
+    if private and stat.S_IMODE(resolved.stat().st_mode) & (stat.S_IRWXG | stat.S_IRWXO):
+        raise ValueError(f"{option} must not be accessible by group or other users")
+    return resolved
+
+
 class EnvironmentValueError(ValueError):
     def __init__(self, reason: str, message: str) -> None:
         self.reason = reason
@@ -13793,6 +14419,26 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
     parser.add_argument("--ssh-machine-arch", choices=("arm64", "amd64"), default="arm64")
     parser.add_argument("--ssh-machine-image", default="ubuntu:24.04")
     parser.add_argument("--ssh-node-version", default="24.13.1")
+    parser.add_argument("--ssh-external-host", help="Explicit non-disposable SSH host")
+    parser.add_argument("--ssh-external-port", type=int, default=22)
+    parser.add_argument("--ssh-external-user", help="SSH login user for --ssh-external-host")
+    parser.add_argument(
+        "--ssh-external-identity-file",
+        type=pathlib.Path,
+        help="Absolute repository-external OpenSSH private-key file",
+    )
+    parser.add_argument(
+        "--ssh-external-host-key-file",
+        type=pathlib.Path,
+        help="Absolute repository-external file containing exactly one pinned SSH Host Key",
+    )
+    parser.add_argument("--ssh-external-service-user", default=SSH_SERVICE_USER)
+    parser.add_argument("--ssh-external-use-sudo", action="store_true")
+    parser.add_argument(
+        "--ssh-allow-external-host",
+        action="store_true",
+        help="Authorize scoped installation and cleanup on the explicit non-disposable SSH host",
+    )
     parser.add_argument("--docker-socket-path", type=pathlib.Path, default=pathlib.Path("/var/run/docker.sock"))
     parser.add_argument("--docker-worker-image", help="Existing worker-acceptance image used with --docker-skip-worker-build")
     parser.add_argument("--docker-skip-worker-build", action="store_true")
@@ -13981,6 +14627,67 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
         parser.error("--ssh-machine-image must be a non-empty OrbStack distro reference")
     if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", parsed.ssh_node_version.strip()):
         parser.error("--ssh-node-version must be a three-component numeric version")
+    external_option_used = bool(
+        parsed.ssh_external_host
+        or parsed.ssh_external_user
+        or parsed.ssh_external_identity_file
+        or parsed.ssh_external_host_key_file
+        or parsed.ssh_allow_external_host
+        or parsed.ssh_external_use_sudo
+        or parsed.ssh_external_port != 22
+        or parsed.ssh_external_service_user != SSH_SERVICE_USER
+    )
+    if external_option_used and parsed.target != "ssh":
+        parser.error("SSH external-host options require --target ssh")
+    ssh_external_host = parsed.ssh_external_host.strip() if parsed.ssh_external_host else None
+    ssh_external_user = parsed.ssh_external_user.strip() if parsed.ssh_external_user else None
+    ssh_external_service_user = parsed.ssh_external_service_user.strip()
+    ssh_external_identity_file: pathlib.Path | None = None
+    ssh_external_host_key_file: pathlib.Path | None = None
+    if ssh_external_host is not None:
+        if not parsed.ssh_allow_external_host:
+            parser.error("--ssh-external-host requires --ssh-allow-external-host")
+        if parsed.ssh_machine_name is not None:
+            parser.error("--ssh-external-host cannot be combined with --ssh-machine-name")
+        if (
+            ssh_external_user is None
+            or parsed.ssh_external_identity_file is None
+            or parsed.ssh_external_host_key_file is None
+        ):
+            parser.error(
+                "--ssh-external-host requires --ssh-external-user, --ssh-external-identity-file, "
+                "and --ssh-external-host-key-file"
+            )
+        if (
+            len(ssh_external_host) > 253
+            or any(character in ssh_external_host for character in "\r\n\t\x00 /@")
+        ):
+            parser.error("--ssh-external-host must be one hostname or address")
+        if parsed.ssh_external_port < 1 or parsed.ssh_external_port > 65535:
+            parser.error("--ssh-external-port must be between 1 and 65535")
+        if not re.fullmatch(r"[a-z_][a-z0-9_-]*[$]?", ssh_external_user):
+            parser.error("--ssh-external-user must be a valid Unix user")
+        if not re.fullmatch(r"[a-z_][a-z0-9_-]*[$]?", ssh_external_service_user):
+            parser.error("--ssh-external-service-user must be a valid Unix user")
+        if ssh_external_user != "root" and not parsed.ssh_external_use_sudo:
+            parser.error("a non-root --ssh-external-user requires --ssh-external-use-sudo")
+        try:
+            ssh_external_identity_file = resolve_repository_external_file(
+                parsed.ssh_external_identity_file,
+                repo_root,
+                "--ssh-external-identity-file",
+                private=True,
+            )
+            ssh_external_host_key_file = resolve_repository_external_file(
+                parsed.ssh_external_host_key_file,
+                repo_root,
+                "--ssh-external-host-key-file",
+                private=False,
+            )
+        except ValueError as error:
+            parser.error(str(error))
+    elif external_option_used:
+        parser.error("SSH external-host options require --ssh-external-host")
     docker_socket_path = parsed.docker_socket_path.expanduser()
     if not docker_socket_path.is_absolute():
         parser.error("--docker-socket-path must be absolute")
@@ -14142,6 +14849,14 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
         ssh_machine_arch=parsed.ssh_machine_arch,
         ssh_machine_image=parsed.ssh_machine_image.strip(),
         ssh_node_version=parsed.ssh_node_version.strip(),
+        ssh_external_host=ssh_external_host,
+        ssh_external_port=parsed.ssh_external_port,
+        ssh_external_user=ssh_external_user,
+        ssh_external_identity_file=ssh_external_identity_file,
+        ssh_external_host_key_file=ssh_external_host_key_file,
+        ssh_external_service_user=ssh_external_service_user,
+        ssh_external_use_sudo=parsed.ssh_external_use_sudo,
+        ssh_allow_external_host=parsed.ssh_allow_external_host,
         docker_socket_path=docker_socket_path,
         docker_worker_image=parsed.docker_worker_image,
         docker_skip_worker_build=parsed.docker_skip_worker_build,
@@ -14479,20 +15194,49 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "argumentCount": len(options.runner_command) - 1,
             },
             "ssh": {
-                "runtime": "owned-disposable-orbstack",
-                "orbctlBinary": options.ssh_orbctl_bin,
-                "machineName": options.ssh_machine_name or "generated-per-run",
+                "runtime": (
+                    "authorized-external-host"
+                    if options.ssh_external_host is not None
+                    else "owned-disposable-orbstack"
+                ),
+                **(
+                    {
+                        "orbctlBinary": options.ssh_orbctl_bin,
+                        "machineName": options.ssh_machine_name or "generated-per-run",
+                        "machineImage": options.ssh_machine_image,
+                    }
+                    if options.ssh_external_host is None
+                    else {
+                        "externalHostAuthorized": options.ssh_allow_external_host,
+                        "externalHostAddressPersisted": False,
+                        "operatorIdentitySourcePersisted": False,
+                        "operatorHostKeySourcePersisted": False,
+                    }
+                ),
                 "machineArch": options.ssh_machine_arch,
-                "machineImage": options.ssh_machine_image,
                 "controlPlaneTransport": {
                     "mode": "reverse-ssh-loopback",
                     "description": SSH_RELAY_TRANSPORT,
                     "vmListenHost": SSH_RELAY_LOOPBACK_HOST,
                 },
                 "nodeVersion": options.ssh_node_version,
-                "credentialSource": "runner-generated one-time Ed25519 key",
-                "localPrivateKeyPlaintextDeletedAfterProvision": True,
-                "controlPlaneCredentialLifecycle": SSH_CREDENTIAL_LIFECYCLE,
+                "credentialSource": (
+                    "repository-external operator identity"
+                    if options.ssh_external_host is not None
+                    else "runner-generated one-time Ed25519 key"
+                ),
+                "localPrivateKeyPlaintextDeletedAfterProvision": (
+                    options.ssh_external_host is None
+                ),
+                "driverPrivateKeyReferenceClearedAfterProvision": (
+                    options.ssh_external_host is not None
+                ),
+                "operatorIdentitySourcePreserved": options.ssh_external_host is not None,
+                "controlPlaneCredentialLifecycle": (
+                    SSH_EXTERNAL_CREDENTIAL_LIFECYCLE
+                    if options.ssh_external_host is not None
+                    else SSH_CREDENTIAL_LIFECYCLE
+                ),
                 "readsUserSSHConfiguration": False,
                 "runtimeBuild": (
                     "real-provider-host-plus-locked-tools-per-run"
@@ -14500,8 +15244,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                     else "deterministic-fixture-cross-built-per-run"
                 ),
                 "cleanupSemantics": (
-                    "ssh/revoke removes the systemd unit, environment, and agentd binary; deletion of the owned "
-                    "OrbStack machine is infrastructure cleanup and does not prove product-level Workspace purge"
+                    "ssh/revoke removes only the target-scoped systemd unit, environment, and agentd binary; the "
+                    "Runner then removes only its ownership-marked external runtime and preserves the host"
+                    if options.ssh_external_host is not None
+                    else "ssh/revoke removes the systemd unit, environment, and agentd binary; deletion of the "
+                    "owned OrbStack machine is infrastructure cleanup and does not prove product-level Workspace purge"
                 ),
             }
             if options.target == "ssh"

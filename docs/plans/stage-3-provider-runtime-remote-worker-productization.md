@@ -62,9 +62,11 @@
   `apiKey`（Claude 可显式选择 `authToken`）和可选 `baseUrl`，分别映射到 Provider 官方环境变量。Secret
   值只从 operator-owned 环境变量读取并在任何构建、子进程或报告生成前注册到 redactor；聊天、命令参数、
   Target 配置和 evidence 均不得保存值或环境变量名。
-- 操作人已授权一个外部 SSH 验收目标，认证信息保持在仓库外；现有 `ssh_release_gate.py` 只拥有并清理
-  disposable OrbStack machine，接入外部目标前必须增加显式 external-host 模式、Host Key pinning、Secret
-  redaction 和非破坏性 cleanup，不能套用 disposable machine 删除语义。
+- 操作人已授权一个外部 SSH 验收目标，认证信息保持在仓库外。Runner 与 `ssh_release_gate.py` 已增加显式
+  external-host 模式：要求仓库外 owner-only identity、精确 Host Key、显式 non-disposable 授权和唯一 ownership
+  root；安装前拒绝既有 service/binary/storage 路径，升级不重启 sshd，cleanup 只走产品 revoke 加本次
+  ownership-marked runtime 的精确删除，绝不删除/重启主机或改写 `authorized_keys`。真实 clean-SHA 四矩阵仍需
+  通过本机安全凭据来源执行，聊天中的认证值不能进入命令、日志或报告。
 - 本机可用的 Kubernetes 验收 context 为 `orbstack`。运行真实 gate 时必须显式记录并校验所选 context，
   只创建带唯一 owner 标识的资源并精确清理，不切换或修改其他 context。
 - 生产并发不冻结为单一数字；由 Tenant quota、Worker 数/每 Worker slot、CPU/内存 requests/limits 和实际
@@ -1515,6 +1517,14 @@ Provider × Capability × Execution Target
   `docs/reports/stage-3-real-provider-local-failure-matrix-61e38f4f.md`，总体证据见
   `docs/reports/stage-3-provider-runtime-acceptance-fb9e25ec.md`；dirty-worktree/fixture 汇总保留在
   `docs/reports/stage-3-provider-runtime-acceptance-2026-07-15.md`。
+- SSH Driver 与 consolidated Gate 现同时支持显式 external-host：Host/user/port、owner-only 仓库外 identity、
+  单一 pinned Host Key source 和 non-disposable 授权缺一即 fail closed。每个 child 使用唯一 installation ID 与
+  `/opt/synara/acceptance/<owner>` marker；固定 Node、Provider tools、Provider HOME/XDG、Workspace 和 Git cache
+  均收敛到该 root。Control Plane `ssh/install` 在上传前拒绝已存在的 unit/install/workspace/cache/temp 路径；
+  external replacement 只调用产品 `ssh/upgrade`，不重启 sshd/host；cleanup 必须先 `ssh/revoke` 并验证 unit/binary
+  消失，随后才允许删除 marker 匹配的本次 runtime，且保留 operator identity source。Runner/aggregate evidence
+  不记录 host、identity/Host Key source path 或 Provider Credential 环境变量名。当前只完成实现与聚焦测试，尚未
+  使用安全的本机 key/Host Key source 对获批外部目标执行 clean-SHA 真实 Codex/Claude 四矩阵，因此 Gate 仍 open。
 - Runner 已补齐真实远程 Provider 的受控认证入口：SSH/Docker/Kubernetes 不再允许依赖宿主机 ambient
   登录，缺少显式 Credential source 时会在 Image build 前拒绝；Docker Worker 使用 Image 内的
   `/usr/local/bin/provider-host`，Credential 仍由 Control Plane 经 agentd FD 3 交付。当前只证明入口、
@@ -1553,13 +1563,16 @@ Provider × Capability × Execution Target
   `171/171`，SSH/Docker/Kubernetes Gate 的缺 Credential/dirty-worktree 脱敏负例通过。当前机器的 Kind `v0.32.0`、
   kubectl `v1.33.9` 与 Docker `29.4.0` runtime preflight 已通过；任务环境仍没有专用 Provider Credential，
   因此尚未执行 clean-SHA Kubernetes 四矩阵，Gate 保持 open。
-- 新增 `ssh_release_gate.py`，四个 child 各自 cross-build agentd/real Provider Host、创建唯一 disposable
-  OrbStack machine/SSH key、安装 checked-in lock 固定的 Codex/Claude runtime，并经产品 SSH install/revoke
-  路径运行 product/failure matrix。聚合器要求同一 clean SHA/Catalog、同一 agentd/Host digest 与 CLI version、
-  四个不同 machine、完整 case、`machine/key/state` exact cleanup、空 Secret scan 和无 operator 环境变量名；
-  fixture runtime、复用 machine 或任一 runtime/cleanup mismatch 均 fail closed。当前 SSH gate tests `10/10`，
-  Local/SSH/Docker/Kubernetes release-gate tests 合计 `50/50`；尚缺专用 Provider Credential 下的 clean-SHA
-  四 child 报告，因此真实 SSH Gate 保持 open。
+- `ssh_release_gate.py` 的四个 child 各自 cross-build agentd/real Provider Host，并可选择唯一 disposable
+  OrbStack machine/SSH key，或同一获批 external host 上四个串行且互异的 ownership installation。两种模式都
+  经产品 SSH install/revoke 路径运行 product/failure matrix；聚合器要求同一 clean SHA/Catalog、agentd/Host
+  digest 与 CLI version，以及四个不同 runtime identity、完整 case、exact cleanup、空 Secret scan 和无 operator
+  Credential/source 元数据。external 模式要求四次共享同一 pinned Host Key，并额外强制 host/identity source
+  preserved、`externalHostRestarted=false` 和 owned runtime removed；disposable 模式反而要求每台独立 machine
+  使用不同 Host Key。fixture、复用 installation/Host Key 或任一 runtime/cleanup mismatch 均 fail closed。当前
+  Acceptance Runner `151/151`、SSH Gate `15/15`、Stage 3 Python `273/273` 与 Control Plane `go test ./...` 均通过；
+  尚缺安全本机 SSH identity 与专用 Provider Credential 下的 clean-SHA 四 child 报告，因此真实 SSH Gate 保持
+  open。
 - 新增 `registry_release_gate.py`，要求 clean worktree、现有 `docker-container` Buildx builder 和
   `linux/amd64,linux/arm64` 能力；对同一 Git SHA 分别执行 cached/no-cache push，并聚合 Registry digest、
   双平台 manifest、SPDX/SLSA attestation、non-root image config、嵌入 Manifest/SBOM/三类 lockfile 和

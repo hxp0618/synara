@@ -156,6 +156,54 @@ func TestSSHProvisionerFailsClosedBeforeDialForUnsafeControlPlaneURL(t *testing.
 	}
 }
 
+func TestSSHProvisionerInstallRefusesExistingManagedPathsBeforeUpload(t *testing.T) {
+	fixture := newSSHProvisionFixture(t, "https://control-plane.example.com")
+	remote := &fakeSSHRemote{
+		uploads:   map[string][]byte{},
+		runErrors: []error{&sshRemoteCommandExitError{status: sshInstallConflictExitStatus}},
+	}
+	fixture.provisioner.dialer = &fakeSSHDialer{remote: remote}
+
+	_, err := fixture.provisioner.Install(
+		context.Background(), fixture.principal, fixture.tenantID, fixture.targetID,
+		"ssh-install-conflict", "127.0.0.1",
+	)
+	assertExecutionTargetProblemCode(t, err, "ssh_install_conflict")
+	if len(remote.uploads) != 0 {
+		t.Fatalf("conflicting SSH install uploaded %d artifacts", len(remote.uploads))
+	}
+	if len(remote.commands) != 1 ||
+		!commandsContainAll(
+			remote.commands,
+			"systemctl cat",
+			"systemctl show-environment",
+			"exit 73",
+			"/etc/systemd/system/synara-agentd-"+fixture.targetID.String()+".service",
+			"/opt/synara/test",
+			"/var/lib/synara/test/workspaces",
+		) {
+		t.Fatalf("SSH install conflict preflight was incomplete: %#v", remote.commands)
+	}
+}
+
+func TestSSHProvisionerInstallPreflightReportsRemoteFailureSeparatelyFromConflict(t *testing.T) {
+	fixture := newSSHProvisionFixture(t, "https://control-plane.example.com")
+	remote := &fakeSSHRemote{
+		uploads:   map[string][]byte{},
+		runErrors: []error{errors.New("SSH session lost")},
+	}
+	fixture.provisioner.dialer = &fakeSSHDialer{remote: remote}
+
+	_, err := fixture.provisioner.Install(
+		context.Background(), fixture.principal, fixture.tenantID, fixture.targetID,
+		"ssh-install-preflight-failed", "127.0.0.1",
+	)
+	assertExecutionTargetProblemCode(t, err, "ssh_install_preflight_failed")
+	if len(remote.uploads) != 0 {
+		t.Fatalf("failed SSH install preflight uploaded %d artifacts", len(remote.uploads))
+	}
+}
+
 func TestSSHProvisionerRejectsOverlappingWorkspaceAndGitCacheRoots(t *testing.T) {
 	provisioner := &SSHProvisioner{}
 	target := persistence.ExecutionTarget{ID: uuid.New()}
@@ -340,9 +388,10 @@ func (d *fakeSSHDialer) Dial(_ context.Context, input sshDialInput) (sshRemote, 
 }
 
 type fakeSSHRemote struct {
-	uploads  map[string][]byte
-	commands []string
-	closed   bool
+	uploads   map[string][]byte
+	commands  []string
+	runErrors []error
+	closed    bool
 }
 
 func (r *fakeSSHRemote) Upload(_ context.Context, path string, _ os.FileMode, source io.Reader) error {
@@ -356,6 +405,11 @@ func (r *fakeSSHRemote) Upload(_ context.Context, path string, _ os.FileMode, so
 
 func (r *fakeSSHRemote) Run(_ context.Context, command string) error {
 	r.commands = append(r.commands, command)
+	if len(r.runErrors) > 0 {
+		err := r.runErrors[0]
+		r.runErrors = r.runErrors[1:]
+		return err
+	}
 	return nil
 }
 

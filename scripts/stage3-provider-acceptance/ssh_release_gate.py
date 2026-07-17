@@ -47,6 +47,14 @@ class SSHReleaseGateOptions:
     ssh_machine_arch: str
     ssh_machine_image: str
     ssh_node_version: str
+    ssh_external_host: str | None
+    ssh_external_port: int
+    ssh_external_user: str | None
+    ssh_external_identity_file: pathlib.Path | None
+    ssh_external_host_key_file: pathlib.Path | None
+    ssh_external_service_user: str
+    ssh_external_use_sudo: bool
+    ssh_allow_external_host: bool
 
 
 def parse_args(argv: Sequence[str]) -> SSHReleaseGateOptions:
@@ -68,6 +76,14 @@ def parse_args(argv: Sequence[str]) -> SSHReleaseGateOptions:
     parser.add_argument("--ssh-machine-arch", choices=("arm64", "amd64"), default="arm64")
     parser.add_argument("--ssh-machine-image", default="ubuntu:24.04")
     parser.add_argument("--ssh-node-version", default="24.13.1")
+    parser.add_argument("--ssh-external-host")
+    parser.add_argument("--ssh-external-port", type=int, default=22)
+    parser.add_argument("--ssh-external-user")
+    parser.add_argument("--ssh-external-identity-file", type=pathlib.Path)
+    parser.add_argument("--ssh-external-host-key-file", type=pathlib.Path)
+    parser.add_argument("--ssh-external-service-user", default=acceptance.SSH_SERVICE_USER)
+    parser.add_argument("--ssh-external-use-sudo", action="store_true")
+    parser.add_argument("--ssh-allow-external-host", action="store_true")
     parsed = parser.parse_args(argv)
     if parsed.product_timeout <= 0 or parsed.failure_timeout <= 0:
         parser.error("matrix timeouts must be positive")
@@ -82,6 +98,58 @@ def parse_args(argv: Sequence[str]) -> SSHReleaseGateOptions:
         parser.error("--ssh-machine-image must be a non-empty OrbStack distro reference")
     if re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", node_version) is None:
         parser.error("--ssh-node-version must be a three-component numeric version")
+    external_host = parsed.ssh_external_host.strip() if parsed.ssh_external_host else None
+    external_user = parsed.ssh_external_user.strip() if parsed.ssh_external_user else None
+    external_service_user = parsed.ssh_external_service_user.strip()
+    external_identity_file: pathlib.Path | None = None
+    external_host_key_file: pathlib.Path | None = None
+    external_option_used = bool(
+        external_host
+        or external_user
+        or parsed.ssh_external_identity_file
+        or parsed.ssh_external_host_key_file
+        or parsed.ssh_allow_external_host
+        or parsed.ssh_external_use_sudo
+        or parsed.ssh_external_port != 22
+        or external_service_user != acceptance.SSH_SERVICE_USER
+    )
+    if external_host is not None:
+        if not parsed.ssh_allow_external_host:
+            parser.error("--ssh-external-host requires --ssh-allow-external-host")
+        if external_user is None or parsed.ssh_external_identity_file is None or parsed.ssh_external_host_key_file is None:
+            parser.error(
+                "--ssh-external-host requires --ssh-external-user, --ssh-external-identity-file, "
+                "and --ssh-external-host-key-file"
+            )
+        if len(external_host) > 253 or any(
+            character in external_host for character in "\r\n\t\x00 /@"
+        ):
+            parser.error("--ssh-external-host must be one hostname or address")
+        if parsed.ssh_external_port < 1 or parsed.ssh_external_port > 65535:
+            parser.error("--ssh-external-port must be between 1 and 65535")
+        if not re.fullmatch(r"[a-z_][a-z0-9_-]*[$]?", external_user):
+            parser.error("--ssh-external-user must be a valid Unix user")
+        if not re.fullmatch(r"[a-z_][a-z0-9_-]*[$]?", external_service_user):
+            parser.error("--ssh-external-service-user must be a valid Unix user")
+        if external_user != "root" and not parsed.ssh_external_use_sudo:
+            parser.error("a non-root --ssh-external-user requires --ssh-external-use-sudo")
+        try:
+            external_identity_file = acceptance.resolve_repository_external_file(
+                parsed.ssh_external_identity_file,
+                repo_root,
+                "--ssh-external-identity-file",
+                private=True,
+            )
+            external_host_key_file = acceptance.resolve_repository_external_file(
+                parsed.ssh_external_host_key_file,
+                repo_root,
+                "--ssh-external-host-key-file",
+                private=False,
+            )
+        except ValueError as error:
+            parser.error(str(error))
+    elif external_option_used:
+        parser.error("SSH external-host options require --ssh-external-host")
     try:
         codex_credential = remote.parse_credential_source(
             parsed.codex_credential_env,
@@ -109,11 +177,23 @@ def parse_args(argv: Sequence[str]) -> SSHReleaseGateOptions:
         ssh_machine_arch=parsed.ssh_machine_arch,
         ssh_machine_image=machine_image,
         ssh_node_version=node_version,
+        ssh_external_host=external_host,
+        ssh_external_port=parsed.ssh_external_port,
+        ssh_external_user=external_user,
+        ssh_external_identity_file=external_identity_file,
+        ssh_external_host_key_file=external_host_key_file,
+        ssh_external_service_user=external_service_user,
+        ssh_external_use_sudo=parsed.ssh_external_use_sudo,
+        ssh_allow_external_host=parsed.ssh_allow_external_host,
     )
 
 
 def credential_source(options: SSHReleaseGateOptions, provider: str) -> CredentialSource:
     return remote.credential_source(options, provider)
+
+
+def uses_external_host(options: SSHReleaseGateOptions) -> bool:
+    return options.ssh_external_host is not None
 
 
 def expected_provider_tool_versions(repo_root: pathlib.Path) -> dict[str, str]:
@@ -167,6 +247,31 @@ def expected_provider_tool_versions(repo_root: pathlib.Path) -> dict[str, str]:
 
 
 def child_policy(options: SSHReleaseGateOptions) -> common.ChildReportPolicy:
+    if uses_external_host(options):
+        cleanup_true_fields = (
+            "externalHostPreserved",
+            "ownedRuntimeRemoved",
+            "operatorIdentitySourcePreserved",
+            "productRevokeRequested",
+            "machineLifecycleCompleted",
+            "localKeyMaterialRemoved",
+            "stateRemoved",
+        )
+        cleanup_false_fields = (
+            "machineRemoved",
+            "machinePreservedByRequest",
+            "externalHostRestarted",
+            "broadCleanupUsed",
+        )
+    else:
+        cleanup_true_fields = (
+            "machineRemoved",
+            "productRevokeRequested",
+            "machineLifecycleCompleted",
+            "localKeyMaterialRemoved",
+            "stateRemoved",
+        )
+        cleanup_false_fields = ("machinePreservedByRequest", "broadCleanupUsed")
     return common.ChildReportPolicy(
         target="ssh",
         runner_executable="provider-host",
@@ -179,14 +284,8 @@ def child_policy(options: SSHReleaseGateOptions) -> common.ChildReportPolicy:
             provider: credential_source(options, provider).base_url_environment_name is not None
             for provider in common.PROVIDERS
         },
-        cleanup_true_fields=(
-            "machineRemoved",
-            "productRevokeRequested",
-            "machineLifecycleCompleted",
-            "localKeyMaterialRemoved",
-            "stateRemoved",
-        ),
-        cleanup_false_fields=("machinePreservedByRequest", "broadCleanupUsed"),
+        cleanup_true_fields=cleanup_true_fields,
+        cleanup_false_fields=cleanup_false_fields,
     )
 
 
@@ -223,15 +322,44 @@ def child_command(
         str(output_dir),
         "--timeout",
         str(timeout),
-        "--ssh-orbctl-bin",
-        options.ssh_orbctl_bin,
         "--ssh-machine-arch",
         options.ssh_machine_arch,
-        "--ssh-machine-image",
-        options.ssh_machine_image,
         "--ssh-node-version",
         options.ssh_node_version,
     ]
+    if uses_external_host(options):
+        assert options.ssh_external_host is not None
+        assert options.ssh_external_user is not None
+        assert options.ssh_external_identity_file is not None
+        assert options.ssh_external_host_key_file is not None
+        command.extend(
+            [
+                "--ssh-external-host",
+                options.ssh_external_host,
+                "--ssh-external-port",
+                str(options.ssh_external_port),
+                "--ssh-external-user",
+                options.ssh_external_user,
+                "--ssh-external-identity-file",
+                str(options.ssh_external_identity_file),
+                "--ssh-external-host-key-file",
+                str(options.ssh_external_host_key_file),
+                "--ssh-external-service-user",
+                options.ssh_external_service_user,
+                "--ssh-allow-external-host",
+            ]
+        )
+        if options.ssh_external_use_sudo:
+            command.append("--ssh-external-use-sudo")
+    else:
+        command.extend(
+            [
+                "--ssh-orbctl-bin",
+                options.ssh_orbctl_bin,
+                "--ssh-machine-image",
+                options.ssh_machine_image,
+            ]
+        )
     if source.base_url_environment_name is not None:
         command.extend(["--real-provider-base-url-env", source.base_url_environment_name])
     return command
@@ -271,13 +399,18 @@ def _run_metadata_command(
 
 
 def inspect_ssh_runtime(options: SSHReleaseGateOptions) -> dict[str, Any]:
-    commands = {
-        "orbctl": [options.ssh_orbctl_bin, "version"],
-        "inventory": [options.ssh_orbctl_bin, "list", "--format", "json"],
+    commands: dict[str, list[str]] = {
         "go": ["go", "version"],
         "bun": ["bun", "--version"],
         "ssh": ["ssh", "-V"],
     }
+    if not uses_external_host(options):
+        commands.update(
+            {
+                "orbctl": [options.ssh_orbctl_bin, "version"],
+                "inventory": [options.ssh_orbctl_bin, "list", "--format", "json"],
+            }
+        )
     results = {name: _run_metadata_command(options, command) for name, command in commands.items()}
     failed = {
         name: result.returncode
@@ -290,9 +423,33 @@ def inspect_ssh_runtime(options: SSHReleaseGateOptions) -> dict[str, Any]:
     if failed:
         raise ReleaseGateError(
             "release.ssh_runtime_unavailable",
-            "OrbStack, Go, Bun, OpenSSH, or ssh-keygen runtime metadata could not be inspected.",
+            "Required Go, Bun, OpenSSH, ssh-keygen, or disposable-host runtime metadata could not be inspected.",
             {"returnCodes": failed},
         )
+    versions = expected_provider_tool_versions(options.repo_root)
+    evidence: dict[str, Any] = {
+        "hostTools": {
+            "go": results["go"].stdout.strip()[:500],
+            "bun": results["bun"].stdout.strip()[:500],
+            "ssh": results["ssh"].stdout.strip()[:500],
+            "sshKeygenAvailable": True,
+        },
+        "remoteRuntime": {
+            "machineArch": options.ssh_machine_arch,
+            "machineImage": options.ssh_machine_image,
+            "nodeVersion": options.ssh_node_version,
+            "providerToolVersions": versions,
+        },
+    }
+    if uses_external_host(options):
+        evidence["externalHost"] = {
+            "explicitlyAuthorized": options.ssh_allow_external_host,
+            "addressPersisted": False,
+            "identitySourcePersisted": False,
+            "hostKeySourcePersisted": False,
+            "lifecycle": "operator-owned-nondisposable",
+        }
+        return evidence
     try:
         inventory_payload = json.loads(results["inventory"].stdout)
     except json.JSONDecodeError:
@@ -309,26 +466,12 @@ def inspect_ssh_runtime(options: SSHReleaseGateOptions) -> dict[str, Any]:
             "release.ssh_runtime_invalid",
             "OrbStack machine inventory was not valid JSON array evidence.",
         )
-    versions = expected_provider_tool_versions(options.repo_root)
-    return {
-        "orbctl": {
-            "binary": options.ssh_orbctl_bin,
-            "version": results["orbctl"].stdout.strip()[:500],
-            "existingMachineCount": len(machines),
-        },
-        "hostTools": {
-            "go": results["go"].stdout.strip()[:500],
-            "bun": results["bun"].stdout.strip()[:500],
-            "ssh": results["ssh"].stdout.strip()[:500],
-            "sshKeygenAvailable": True,
-        },
-        "remoteRuntime": {
-            "machineArch": options.ssh_machine_arch,
-            "machineImage": options.ssh_machine_image,
-            "nodeVersion": options.ssh_node_version,
-            "providerToolVersions": versions,
-        },
+    evidence["orbctl"] = {
+        "binary": options.ssh_orbctl_bin,
+        "version": results["orbctl"].stdout.strip()[:500],
+        "existingMachineCount": len(machines),
     }
+    return evidence
 
 
 def _case_evidence(report: Mapping[str, Any], case_id: str) -> Mapping[str, Any] | None:
@@ -356,6 +499,7 @@ def validate_ssh_child_runtime(
     expected_versions: Mapping[str, str],
 ) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
     errors: list[dict[str, Any]] = []
+    external = uses_external_host(options)
 
     def fail(message: str, evidence: Mapping[str, Any] | None = None) -> None:
         errors.append(
@@ -375,25 +519,46 @@ def validate_ssh_child_runtime(
         if isinstance(ssh_configuration, dict)
         else None
     )
-    if (
+    configuration_invalid = (
         not isinstance(ssh_configuration, dict)
-        or ssh_configuration.get("runtime") != "owned-disposable-orbstack"
-        or ssh_configuration.get("orbctlBinary") != options.ssh_orbctl_bin
-        or ssh_configuration.get("machineName") != "generated-per-run"
+        or ssh_configuration.get("runtime")
+        != ("authorized-external-host" if external else "owned-disposable-orbstack")
         or ssh_configuration.get("machineArch") != options.ssh_machine_arch
-        or ssh_configuration.get("machineImage") != options.ssh_machine_image
         or ssh_configuration.get("nodeVersion") != options.ssh_node_version
-        or ssh_configuration.get("localPrivateKeyPlaintextDeletedAfterProvision") is not True
-        or ssh_configuration.get("controlPlaneCredentialLifecycle")
-        != acceptance.SSH_CREDENTIAL_LIFECYCLE
         or ssh_configuration.get("readsUserSSHConfiguration") is not False
         or not isinstance(control_plane_transport, dict)
         or control_plane_transport.get("mode") != "reverse-ssh-loopback"
         or control_plane_transport.get("vmListenHost") != acceptance.SSH_RELAY_LOOPBACK_HOST
         or ssh_configuration.get("runtimeBuild")
         != "real-provider-host-plus-locked-tools-per-run"
-    ):
-        fail("SSH child configuration did not preserve the owned real-runtime boundary.")
+    )
+    if external:
+        configuration_invalid = configuration_invalid or (
+            not isinstance(ssh_configuration, dict)
+            or ssh_configuration.get("externalHostAuthorized") is not True
+            or ssh_configuration.get("externalHostAddressPersisted") is not False
+            or ssh_configuration.get("operatorIdentitySourcePersisted") is not False
+            or ssh_configuration.get("operatorHostKeySourcePersisted") is not False
+            or ssh_configuration.get("driverPrivateKeyReferenceClearedAfterProvision") is not True
+            or ssh_configuration.get("operatorIdentitySourcePreserved") is not True
+            or ssh_configuration.get("controlPlaneCredentialLifecycle")
+            != acceptance.SSH_EXTERNAL_CREDENTIAL_LIFECYCLE
+            or "orbctlBinary" in ssh_configuration
+            or "machineName" in ssh_configuration
+            or "machineImage" in ssh_configuration
+        )
+    else:
+        configuration_invalid = configuration_invalid or (
+            not isinstance(ssh_configuration, dict)
+            or ssh_configuration.get("orbctlBinary") != options.ssh_orbctl_bin
+            or ssh_configuration.get("machineName") != "generated-per-run"
+            or ssh_configuration.get("machineImage") != options.ssh_machine_image
+            or ssh_configuration.get("localPrivateKeyPlaintextDeletedAfterProvision") is not True
+            or ssh_configuration.get("controlPlaneCredentialLifecycle")
+            != acceptance.SSH_CREDENTIAL_LIFECYCLE
+        )
+    if configuration_invalid:
+        fail("SSH child configuration did not preserve the authorized runtime boundary.")
 
     target_prepare = _case_evidence(report, "environment.target-prepare")
     target_provision = _case_evidence(report, "runtime.target-provision")
@@ -404,6 +569,7 @@ def validate_ssh_child_runtime(
         return errors, None
 
     machine_name = ssh.get("machineName")
+    installation_id = ssh.get("installationId")
     agentd = ssh.get("agentd")
     provider_host = ssh.get("providerHost")
     provider_tools = ssh.get("providerTools")
@@ -427,6 +593,8 @@ def validate_ssh_child_runtime(
         if isinstance(target_provision, dict)
         else None
     )
+    driver = driver_evidence if isinstance(driver_evidence, dict) else {}
+    cleanup_evidence = cleanup if isinstance(cleanup, dict) else {}
     provision_transport = (
         driver_evidence.get("controlPlaneTransport")
         if isinstance(driver_evidence, dict)
@@ -438,23 +606,43 @@ def validate_ssh_child_runtime(
         else None
     )
     service = driver_evidence.get("service") if isinstance(driver_evidence, dict) else None
+    host_key_fingerprint = ssh.get("hostKeyFingerprint")
+    driver_host_key_fingerprint = (
+        driver_evidence.get("hostKeyFingerprint")
+        if isinstance(driver_evidence, dict)
+        else None
+    )
     expected_package_sha = common.file_sha256(
         options.repo_root / "deploy" / "worker" / "provider-tools" / "package.json"
     )
     expected_lock_sha = common.file_sha256(
         options.repo_root / "deploy" / "worker" / "provider-tools" / "package-lock.json"
     )
-    if (
-        not isinstance(machine_name, str)
-        or re.fullmatch(r"synara-stage3-[0-9a-f]{12}", machine_name) is None
-        or ssh.get("ownedMachine") is not True
-        or ssh.get("machineArch") != options.ssh_machine_arch
-        or ssh.get("machineImage") != options.ssh_machine_image
+    provider_tools_root = provider_tools.get("remoteRoot") if isinstance(provider_tools, dict) else None
+    if external:
+        root_match = (
+            re.fullmatch(r"(/opt/synara/acceptance/[0-9a-f]{20})/provider-tools", provider_tools_root)
+            if isinstance(provider_tools_root, str)
+            else None
+        )
+        runtime_root = root_match.group(1) if root_match is not None else None
+        expected_provider_host_path = (
+            f"{runtime_root}/provider-host/index.mjs" if runtime_root is not None else None
+        )
+        expected_provider_command = (
+            f"{runtime_root}/bin/provider-host" if runtime_root is not None else None
+        )
+    else:
+        runtime_root = None
+        expected_provider_host_path = acceptance.SSH_REMOTE_PROVIDER_HOST_PATH
+        expected_provider_command = acceptance.SSH_PROVIDER_HOST_COMMAND_PATH
+    common_invalid = (
+        ssh.get("machineArch") != options.ssh_machine_arch
         or ssh.get("nodeVersion") != options.ssh_node_version
-        or ssh.get("sshd") != "active"
         or ssh.get("initSystem") != "systemd"
-        or ssh.get("algorithm") != "ssh-ed25519"
-        or ssh.get("localPrivateKeyPlaintextDeletedAfterProvision") is not True
+        or not isinstance(host_key_fingerprint, str)
+        or not host_key_fingerprint.startswith("SHA256:")
+        or driver_host_key_fingerprint != host_key_fingerprint
         or not isinstance(agentd_sha, str)
         or re.fullmatch(r"[0-9a-f]{64}", agentd_sha) is None
         or not isinstance(agentd, dict)
@@ -463,30 +651,28 @@ def validate_ssh_child_runtime(
         or not isinstance(provider_host_sha, str)
         or re.fullmatch(r"[0-9a-f]{64}", provider_host_sha) is None
         or not isinstance(provider_host, dict)
-        or provider_host.get("remotePath") != acceptance.SSH_REMOTE_PROVIDER_HOST_PATH
+        or provider_host.get("remotePath") != expected_provider_host_path
         or provider_host.get("runtime") != "real-provider"
         or not isinstance(provider_tools, dict)
-        or provider_tools.get("remoteRoot") != acceptance.SSH_REMOTE_PROVIDER_TOOLS_ROOT
+        or provider_tools_root
+        != (runtime_root + "/provider-tools" if runtime_root is not None else acceptance.SSH_REMOTE_PROVIDER_TOOLS_ROOT)
         or provider_tools.get("packageSha256") != expected_package_sha
         or provider_tools.get("lockSha256") != expected_lock_sha
         or not isinstance(provider_runtime, dict)
         or provider_runtime.get("kind") != "real-provider"
         or not isinstance(runtime_host, dict)
-        or runtime_host.get("command") != acceptance.SSH_PROVIDER_HOST_COMMAND_PATH
-        or runtime_host.get("remotePath") != acceptance.SSH_REMOTE_PROVIDER_HOST_PATH
+        or runtime_host.get("command") != expected_provider_command
+        or runtime_host.get("remotePath") != expected_provider_host_path
         or runtime_host.get("sha256") != provider_host_sha
         or not isinstance(runtime_tools, dict)
         or runtime_tools.get("lockedInstall") is not True
-        or runtime_tools.get("remoteRoot") != acceptance.SSH_REMOTE_PROVIDER_TOOLS_ROOT
+        or runtime_tools.get("remoteRoot") != provider_tools_root
         or not isinstance(codex_runtime, dict)
         or codex_runtime.get("version") != expected_versions["codex"]
         or not isinstance(claude_runtime, dict)
         or claude_runtime.get("version") != expected_versions["claudeAgent"]
         or not isinstance(driver_evidence, dict)
-        or driver_evidence.get("machineName") != machine_name
         or driver_evidence.get("binarySha256") != agentd_sha
-        or driver_evidence.get("controlPlaneCredentialLifecycle")
-        != acceptance.SSH_CREDENTIAL_LIFECYCLE
         or not isinstance(host_key_mismatch, dict)
         or host_key_mismatch.get("rejected") is not True
         or host_key_mismatch.get("errorCode") != "ssh_connection_failed"
@@ -497,15 +683,58 @@ def validate_ssh_child_runtime(
         or provision_transport.get("mode") != "reverse-ssh-loopback"
         or provision_transport.get("readsUserSSHConfiguration") is not False
         or not isinstance(cleanup, dict)
-        or cleanup.get("machineName") != machine_name
-    ):
-        fail("SSH child runtime evidence did not prove the locked disposable runtime boundary.")
+    )
+    if external:
+        mode_invalid = (
+            runtime_root is None
+            or not isinstance(installation_id, str)
+            or re.fullmatch(r"stage3-provider-acceptance-[0-9a-f-]{36}", installation_id) is None
+            or ssh.get("runtime") != "authorized-external-host"
+            or ssh.get("ownedMachine") is not False
+            or ssh.get("externalHostAuthorized") is not True
+            or ssh.get("externalHostAddressPersisted") is not False
+            or ssh.get("sshd") != "active-not-restarted"
+            or ssh.get("operatorIdentitySourcePreserved") is not True
+            or ssh.get("driverPrivateKeyReferenceClearedAfterProvision") is not True
+            or ssh.get("controlPlaneCredentialLifecycle")
+            != acceptance.SSH_EXTERNAL_CREDENTIAL_LIFECYCLE
+            or driver.get("runtime") != "authorized-external-host"
+            or driver.get("ownedMachine") is not False
+            or driver.get("installationId") != installation_id
+            or driver.get("controlPlaneCredentialLifecycle")
+            != acceptance.SSH_EXTERNAL_CREDENTIAL_LIFECYCLE
+            or cleanup_evidence.get("runtime") != "authorized-external-host"
+            or cleanup_evidence.get("installationId") != installation_id
+            or "machineName" in ssh
+            or "machineAddress" in driver
+        )
+        runtime_identity = installation_id
+    else:
+        mode_invalid = (
+            not isinstance(machine_name, str)
+            or re.fullmatch(r"synara-stage3-[0-9a-f]{12}", machine_name) is None
+            or ssh.get("ownedMachine") is not True
+            or ssh.get("machineImage") != options.ssh_machine_image
+            or ssh.get("sshd") != "active"
+            or ssh.get("algorithm") != "ssh-ed25519"
+            or ssh.get("localPrivateKeyPlaintextDeletedAfterProvision") is not True
+            or driver.get("machineName") != machine_name
+            or driver.get("controlPlaneCredentialLifecycle")
+            != acceptance.SSH_CREDENTIAL_LIFECYCLE
+            or cleanup_evidence.get("machineName") != machine_name
+        )
+        runtime_identity = machine_name
+    if common_invalid or mode_invalid:
+        fail("SSH child runtime evidence did not prove the locked authorized runtime boundary.")
         return errors, None
 
     return (
         errors,
         {
-            "machineName": machine_name,
+            "runtime": "authorized-external-host" if external else "owned-disposable-orbstack",
+            "runtimeIdentity": runtime_identity,
+            **({"installationId": installation_id} if external else {"machineName": machine_name}),
+            "hostKeyFingerprint": host_key_fingerprint,
             "agentdSha256": agentd_sha,
             "providerHostSha256": provider_host_sha,
             "codexVersion": codex_runtime["version"],
@@ -575,11 +804,28 @@ def configuration_evidence(options: SSHReleaseGateOptions) -> dict[str, Any]:
             for provider in common.PROVIDERS
         },
         "ssh": {
-            "orbctlBinary": options.ssh_orbctl_bin,
             "machineArch": options.ssh_machine_arch,
-            "machineImage": options.ssh_machine_image,
             "nodeVersion": options.ssh_node_version,
-            "machineLifecycle": "owned-disposable-per-child",
+            "runtime": (
+                "authorized-external-host"
+                if uses_external_host(options)
+                else "owned-disposable-orbstack"
+            ),
+            **(
+                {
+                    "externalHostExplicitlyAuthorized": options.ssh_allow_external_host,
+                    "externalHostAddressPersisted": False,
+                    "identitySourcePersisted": False,
+                    "hostKeySourcePersisted": False,
+                    "machineLifecycle": "operator-owned-nondisposable",
+                }
+                if uses_external_host(options)
+                else {
+                    "orbctlBinary": options.ssh_orbctl_bin,
+                    "machineImage": options.ssh_machine_image,
+                    "machineLifecycle": "owned-disposable-per-child",
+                }
+            ),
             "runtimeBuild": "real-provider-host-plus-locked-tools-per-child",
         },
     }
@@ -612,24 +858,83 @@ def _runtime_consensus_errors(runs: Sequence[Mapping[str, Any]]) -> list[dict[st
                     "evidence": {"distinctValueCount": len(values), "runCount": len(runs)},
                 }
             )
-    machine_names = {
-        runtime.get("machineName")
+    runtimes = [
+        runtime
         for run in runs
         if isinstance((runtime := run.get("sshRuntime")), dict)
-        and isinstance(runtime.get("machineName"), str)
+    ]
+    runtime_modes = {
+        runtime.get("runtime")
+        for runtime in runtimes
+        if isinstance(runtime.get("runtime"), str)
     }
-    if len(machine_names) != len(runs) or len(runs) == 0:
+    host_key_fingerprints = {
+        runtime.get("hostKeyFingerprint")
+        for runtime in runtimes
+        if isinstance(runtime.get("hostKeyFingerprint"), str)
+    }
+    every_run_has_host_key = len(runtimes) == len(runs) and all(
+        isinstance(runtime.get("hostKeyFingerprint"), str) for runtime in runtimes
+    )
+    if runtime_modes == {"authorized-external-host"}:
+        if not every_run_has_host_key or len(host_key_fingerprints) != 1:
+            errors.append(
+                {
+                    "code": "release.ssh_host_key_mismatch",
+                    "message": "External SSH child reports did not share one pinned Host Key fingerprint.",
+                    "evidence": {
+                        "distinctValueCount": len(host_key_fingerprints),
+                        "runCount": len(runs),
+                    },
+                }
+            )
+    elif runtime_modes == {"owned-disposable-orbstack"}:
+        if not every_run_has_host_key or len(host_key_fingerprints) != len(runs):
+            errors.append(
+                {
+                    "code": "release.ssh_host_key_isolation_invalid",
+                    "message": "Disposable SSH child reports did not use one distinct Host Key per owned machine.",
+                    "evidence": {
+                        "distinctValueCount": len(host_key_fingerprints),
+                        "runCount": len(runs),
+                    },
+                }
+            )
+    runtime_identities = {
+        runtime.get("runtimeIdentity")
+        for run in runs
+        if isinstance((runtime := run.get("sshRuntime")), dict)
+        and isinstance(runtime.get("runtimeIdentity"), str)
+    }
+    if len(runtime_identities) != len(runs) or len(runs) == 0:
         errors.append(
             {
-                "code": "release.ssh_machine_isolation_invalid",
-                "message": "SSH child reports did not use one distinct disposable machine per matrix.",
-                "evidence": {"distinctMachineCount": len(machine_names), "runCount": len(runs)},
+                "code": (
+                    "release.ssh_installation_isolation_invalid"
+                    if runs and any(
+                        isinstance(run.get("sshRuntime"), dict)
+                        and run["sshRuntime"].get("runtime") == "authorized-external-host"
+                        for run in runs
+                    )
+                    else "release.ssh_machine_isolation_invalid"
+                ),
+                "message": "SSH child reports did not use one distinct owned installation boundary per matrix.",
+                "evidence": {
+                    "distinctRuntimeIdentityCount": len(runtime_identities),
+                    "runCount": len(runs),
+                },
             }
         )
     return errors
 
 
 def markdown_from_report(report: Mapping[str, Any]) -> str:
+    configuration = report.get("configuration")
+    ssh_configuration = configuration.get("ssh") if isinstance(configuration, dict) else None
+    external = (
+        isinstance(ssh_configuration, dict)
+        and ssh_configuration.get("runtime") == "authorized-external-host"
+    )
     lines = [
         "# Stage 3 Real Provider SSH Release Gate",
         "",
@@ -640,14 +945,30 @@ def markdown_from_report(report: Mapping[str, Any]) -> str:
         f"- Provider Host SHA: `{report.get('runtimeArtifacts', {}).get('providerHostSha256', '')}`",
         f"- Duration: `{report['durationMs']} ms`",
         "",
-        "Each child owns one disposable OrbStack VM, one generated SSH key, one Control Plane state boundary,",
-        "and one real Provider Host/tools installation. The aggregate passes only when all four children share",
-        "one clean SHA, Capability Catalog, agentd/Host digest and locked Provider versions, while using distinct",
-        "machines with exact cleanup and empty Secret scans.",
+        (
+            "Each child uses the explicitly authorized non-disposable host through one repository-external identity,"
+            if external
+            else "Each child owns one disposable OrbStack VM, one generated SSH key, one Control Plane state boundary,"
+        ),
+        (
+            "one pinned Host Key and one unique ownership-marked runtime. Product revoke and exact owned-runtime cleanup"
+            if external
+            else "and one real Provider Host/tools installation. The aggregate passes only when all four children share"
+        ),
+        (
+            "must preserve the host and identity source; all four children must share one clean SHA, runtime digest,"
+            if external
+            else "one clean SHA, Capability Catalog, agentd/Host digest and locked Provider versions, while using distinct"
+        ),
+        (
+            "locked Provider versions and Host Key fingerprint with empty Secret scans."
+            if external
+            else "machines with exact cleanup and empty Secret scans."
+        ),
         "",
         "## Child matrices",
         "",
-        "| Provider | Matrix | Status | Cases | Unsupported | Machine | Host SHA-256 | JSON SHA-256 |",
+        "| Provider | Matrix | Status | Cases | Unsupported | Runtime ID | Host SHA-256 | JSON SHA-256 |",
         "| --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
     for run in report.get("runs", []):
@@ -662,7 +983,7 @@ def markdown_from_report(report: Mapping[str, Any]) -> str:
         unsupported = ", ".join(run.get("unsupportedCaseIds", [])) or "none"
         lines.append(
             f"| `{run.get('provider', '')}` | `{run.get('matrix', '')}` | {run.get('status', '')} | "
-            f"{case_summary} | {unsupported} | `{runtime.get('machineName', '')}` | "
+            f"{case_summary} | {unsupported} | `{runtime.get('runtimeIdentity', '')}` | "
             f"`{runtime.get('providerHostSha256', '')}` | `{run.get('reportSha256', '')}` |"
         )
     errors = report.get("errors")
@@ -682,8 +1003,12 @@ def markdown_from_report(report: Mapping[str, Any]) -> str:
             "",
             "## Evidence boundary",
             "",
-            "A pass closes the implemented real Codex/Claude disposable-SSH product and controlled-failure slice.",
-            "It does not close Docker, Kubernetes, registry rollout, concurrency, production SSH hosts, or soak gates.",
+            (
+                "A pass closes the implemented real Codex/Claude authorized external-SSH product and controlled-failure slice."
+                if external
+                else "A pass closes the implemented real Codex/Claude disposable-SSH product and controlled-failure slice."
+            ),
+            "It does not close Docker, Kubernetes, registry rollout, concurrency, broad production SSH policy, or soak gates.",
         ]
     )
     return "\n".join(lines) + "\n"
@@ -719,6 +1044,18 @@ def run_ssh_release_gate(
         return 2
     options.output_dir.mkdir(parents=True, exist_ok=True)
     redactor = remote.credential_redactor(options)
+    if options.ssh_external_host is not None:
+        redactor.add(options.ssh_external_host, "[REDACTED_SSH_EXTERNAL_HOST]")
+    if options.ssh_external_identity_file is not None:
+        redactor.add(
+            str(options.ssh_external_identity_file),
+            "[REDACTED_SSH_IDENTITY_SOURCE]",
+        )
+    if options.ssh_external_host_key_file is not None:
+        redactor.add(
+            str(options.ssh_external_host_key_file),
+            "[REDACTED_SSH_HOST_KEY_SOURCE]",
+        )
     started_at = acceptance.utc_now()
     started = time.monotonic()
     run_id = f"stage3-provider-ssh-release-{uuid.uuid4()}"
@@ -832,13 +1169,19 @@ def run_ssh_release_gate(
             if isinstance((runtime_value := run.get("sshRuntime")), dict)
             and isinstance(runtime_value.get(field), str)
         }
-        for field in ("agentdSha256", "providerHostSha256", "codexVersion", "claudeVersion")
+        for field in (
+            "agentdSha256",
+            "providerHostSha256",
+            "codexVersion",
+            "claudeVersion",
+            "hostKeyFingerprint",
+        )
     }
-    machine_names = sorted(
-        runtime_value["machineName"]
+    runtime_identities = sorted(
+        runtime_value["runtimeIdentity"]
         for run in runs
         if isinstance((runtime_value := run.get("sshRuntime")), dict)
-        and isinstance(runtime_value.get("machineName"), str)
+        and isinstance(runtime_value.get("runtimeIdentity"), str)
     )
     report = {
         "schemaVersion": SCHEMA_VERSION,
@@ -858,11 +1201,18 @@ def run_ssh_release_gate(
             for field, values in runtime_fields.items()
         },
         "isolation": {
-            "ownedDisposableMachinePerRun": True,
-            "requiredMachineCount": required_runs,
-            "distinctMachineCount": len(set(machine_names)),
-            "machineNames": machine_names,
-            "sharedSSHPrivateKey": False,
+            "runtime": (
+                "authorized-external-host"
+                if uses_external_host(options)
+                else "owned-disposable-orbstack"
+            ),
+            "ownedDisposableMachinePerRun": not uses_external_host(options),
+            "externalHostPreserved": uses_external_host(options),
+            "requiredRuntimeIdentityCount": required_runs,
+            "distinctRuntimeIdentityCount": len(set(runtime_identities)),
+            "runtimeIdentities": runtime_identities,
+            "generatedPrivateKeyPerRun": not uses_external_host(options),
+            "operatorIdentitySourceReusedAcrossRuns": uses_external_host(options),
         },
         "startedAt": started_at,
         "finishedAt": acceptance.utc_now(),

@@ -212,6 +212,37 @@ installs the exact Codex and Claude Code versions from `deploy/worker/provider-t
 remote CLI versions and Host SHA, and then provisions through the product SSH install API. The deterministic SSH
 suite continues to upload only `provider-host-fixture.mjs`; fixture and real runtime artifacts are never confused.
 
+An operator-owned host requires a separate, explicit boundary. The identity and pinned Host Key files must be
+absolute, outside the repository, and the private key must be readable only by its owner. The command never accepts
+password authentication and never reads user SSH configuration:
+
+```sh
+python3 scripts/stage3-provider-acceptance/acceptance_runner.py \
+  --suite real-provider-smoke \
+  --target ssh \
+  --provider codex \
+  --runner-command-json '["/usr/local/bin/provider-host"]' \
+  --real-provider-credential-env SYNARA_ACCEPTANCE_CODEX_KEY \
+  --real-provider-matrix \
+  --ssh-external-host ssh.example.internal \
+  --ssh-external-port 22 \
+  --ssh-external-user synara-admin \
+  --ssh-external-identity-file /secure/synara/id_ed25519 \
+  --ssh-external-host-key-file /secure/synara/ssh-host-key.pub \
+  --ssh-external-service-user synara \
+  --ssh-external-use-sudo \
+  --ssh-allow-external-host \
+  --ssh-machine-arch amd64 \
+  --timeout 3600
+```
+
+External-host preflight requires systemd, an active SSH service, the selected service user, non-interactive sudo when
+requested, and the small host-tool set needed to unpack a pinned Node runtime. It refuses an existing ownership root
+or any target-scoped service/binary/storage path before upload. Provider tools, HOME/XDG state, Workspaces and cache
+stay under a unique ownership-marked root. Worker replacement upgrades only the Synara service; it never restarts
+sshd or the host. Cleanup uses product `ssh/revoke`, verifies the target unit/binary is absent, removes only the exact
+ownership-marked runtime, preserves the host and operator identity source, and keeps host/source paths out of reports.
+
 The Runner reads the value only when creating the isolated Control Plane Credential, registers it with the output
 redactor before the API call, binds the Credential ID to the real Provider Session, and never persists the variable
 name or secret in reports. Agentd delivers the resolved Credential only through the existing anonymous FD 3 path;
@@ -430,9 +461,8 @@ release evidence until dedicated Credentials and a usable Kind binary are suppli
 ## Consolidated real Provider SSH release gate
 
 `ssh_release_gate.py` runs the same Codex/Claude product and failure matrices in four independent child processes.
-Each child builds the current `synara-agentd` and real Provider Host, creates a unique owned OrbStack machine and
-one-time SSH key, installs the exact locked Codex/Claude tools, provisions through the product SSH API, and removes
-its machine, key and isolated state during cleanup:
+By default each child builds the current runtime, creates a unique owned OrbStack machine and one-time SSH key,
+provisions through the product SSH API, and removes its machine, key and isolated state during cleanup:
 
 ```sh
 python3 scripts/stage3-provider-acceptance/ssh_release_gate.py \
@@ -444,13 +474,35 @@ python3 scripts/stage3-provider-acceptance/ssh_release_gate.py \
   --failure-timeout 2400
 ```
 
-Preflight requires a clean SHA plus OrbStack, Go, Bun, OpenSSH and `ssh-keygen`. The aggregate rejects reused machine
-names, fixture runtimes, unlocked/mismatched Provider versions, different agentd or Host digests, incomplete product
-revoke/machine/key/state cleanup, non-canonical cases, Credential environment-name persistence or any Secret finding.
+The same aggregate can target one explicitly authorized, non-disposable host. Children run serially with distinct
+installation/ownership IDs while sharing only the operator-provided identity and pinned Host Key source:
+
+```sh
+python3 scripts/stage3-provider-acceptance/ssh_release_gate.py \
+  --codex-credential-env SYNARA_ACCEPTANCE_CODEX_KEY \
+  --claude-credential-env SYNARA_ACCEPTANCE_CLAUDE_KEY \
+  --claude-credential-field apiKey \
+  --ssh-external-host ssh.example.internal \
+  --ssh-external-user synara-admin \
+  --ssh-external-identity-file /secure/synara/id_ed25519 \
+  --ssh-external-host-key-file /secure/synara/ssh-host-key.pub \
+  --ssh-external-service-user synara \
+  --ssh-external-use-sudo \
+  --ssh-allow-external-host \
+  --ssh-machine-arch amd64 \
+  --product-timeout 3600 \
+  --failure-timeout 2400
+```
+
+Preflight requires a clean SHA plus Go, Bun, OpenSSH and `ssh-keygen`; disposable mode additionally requires OrbStack.
+The aggregate rejects reused runtime identities, fixture runtimes, unlocked/mismatched Provider versions, different
+agentd/Host digests, a changed pinned Host Key in external-host mode, reused Host Keys across disposable machines,
+incomplete product revoke/owned cleanup, non-canonical cases, persisted Credential/source metadata or any Secret
+finding.
 It emits `ssh-release-gate.json` and `ssh-release-gate.md`. Unlike Docker/Kubernetes, there is no shared image: each
-child intentionally rebuilds and verifies the same runtime from the clean checkout to prove reproducibility across
-isolated machines. The implementation and unit/runtime preflight evidence are not a real SSH Provider release pass
-until dedicated Credentials are configured and all four clean-SHA children complete.
+child intentionally rebuilds and verifies the same runtime from the clean checkout. The implementation and
+unit/runtime preflight evidence are not a real SSH Provider release pass until dedicated Credentials and a usable
+repository-external identity are configured and all four clean-SHA children complete.
 
 ## Docker immutable Worker Release rollout gate
 

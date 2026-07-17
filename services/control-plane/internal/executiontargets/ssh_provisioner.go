@@ -77,6 +77,22 @@ type sshRemote interface {
 	Close() error
 }
 
+const sshInstallConflictExitStatus = 73
+
+var errSSHInstallConflict = errors.New("SSH install target-scoped path conflict")
+
+type sshRemoteCommandExitError struct {
+	status int
+}
+
+func (e *sshRemoteCommandExitError) Error() string {
+	return fmt.Sprintf("SSH remote command exited with status %d", e.status)
+}
+
+func (e *sshRemoteCommandExitError) ExitStatus() int {
+	return e.status
+}
+
 type sshDialer interface {
 	Dial(context.Context, sshDialInput) (sshRemote, error)
 }
@@ -183,9 +199,28 @@ func (p *SSHProvisioner) apply(
 		return SSHProvisionResult{}, err
 	}
 	defer remote.Close()
-	defer cleanupSSHTemporaryFiles(remote, paths)
 	operationContext, cancel := context.WithTimeout(ctx, p.timeout())
 	defer cancel()
+	if operation == "install" {
+		if err := ensureSSHInstallPathsAvailable(operationContext, remote, paths); err != nil {
+			p.recordFailure(ctx, target, principal.UserID, operation, requestID, ipAddress)
+			if !errors.Is(err, errSSHInstallConflict) {
+				return SSHProvisionResult{}, problem.Wrap(
+					502,
+					"ssh_install_preflight_failed",
+					"SSH Worker installation preflight failed.",
+					err,
+				)
+			}
+			return SSHProvisionResult{}, problem.Wrap(
+				409,
+				"ssh_install_conflict",
+				"SSH Worker installation refused existing target-scoped paths.",
+				err,
+			)
+		}
+	}
+	defer cleanupSSHTemporaryFiles(remote, paths)
 	hash := sha256.New()
 	if err := remote.Upload(operationContext, paths.temporaryBinaryPath, 0o700, io.TeeReader(binary, hash)); err != nil {
 		p.recordFailure(ctx, target, principal.UserID, operation, requestID, ipAddress)
@@ -228,6 +263,34 @@ func (p *SSHProvisioner) apply(
 		TargetID: target.ID, Operation: operation, Status: "active", ServiceName: paths.serviceName,
 		BinarySHA256: hex.EncodeToString(hash.Sum(nil)),
 	}, nil
+}
+
+func ensureSSHInstallPathsAvailable(ctx context.Context, remote sshRemote, paths sshProvisionPaths) error {
+	pathChecks := []string{
+		"test -e " + shellQuote(paths.unitPath),
+		"test -e " + shellQuote(paths.installRoot),
+		"test -e " + shellQuote(paths.workspaceRoot),
+		"test -e " + shellQuote(paths.gitCacheRoot),
+		"test -e " + shellQuote(paths.temporaryBinaryPath),
+		"test -e " + shellQuote(paths.temporaryEnvPath),
+		"test -e " + shellQuote(paths.temporaryUnitPath),
+	}
+	script := strings.Join([]string{
+		"set -eu",
+		"command -v systemctl >/dev/null",
+		"systemctl show-environment >/dev/null",
+		"if systemctl cat " + shellQuote(paths.serviceName) + " >/dev/null 2>&1; then exit " + strconv.Itoa(sshInstallConflictExitStatus) + "; fi",
+		"if " + strings.Join(pathChecks, " || ") + "; then exit " + strconv.Itoa(sshInstallConflictExitStatus) + "; fi",
+	}, "\n")
+	err := remote.Run(ctx, paths.prefix+"sh -c "+shellQuote(script))
+	if err == nil {
+		return nil
+	}
+	var exitError interface{ ExitStatus() int }
+	if errors.As(err, &exitError) && exitError.ExitStatus() == sshInstallConflictExitStatus {
+		return fmt.Errorf("%w: %v", errSSHInstallConflict, err)
+	}
+	return err
 }
 
 type sshProvisionPaths struct {
@@ -625,6 +688,10 @@ func (r *realSSHRemote) Run(ctx context.Context, command string) error {
 		return ctx.Err()
 	case err := <-result:
 		if err != nil {
+			var exitError *ssh.ExitError
+			if errors.As(err, &exitError) {
+				return &sshRemoteCommandExitError{status: exitError.ExitStatus()}
+			}
 			return errors.New("SSH remote command failed")
 		}
 		return nil

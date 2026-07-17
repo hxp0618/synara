@@ -41,8 +41,9 @@ authentication remains outside the repository; the selected local Kubernetes con
 clean-SHA deterministic `19/19` fixture/failure report with exact cleanup, while its real-Provider gate remains open;
 production concurrency is governed by quota, Worker slots and CPU/memory resource profiles rather than one hard-coded
 number; and production signing will use `kms-key`, potentially through a self-hosted Vault `hashivault://...`
-reference. External-host integration, real-Provider remote reports, numeric latency/error/duration SLA, and concrete KMS
-identity/tlog/admission policy remain required evidence.
+reference. External-host Runner/Gate integration is implemented with repository-external identity, pinned Host Key,
+install conflict refusal and non-destructive cleanup; its clean-SHA real-Provider report, the remaining remote reports,
+numeric latency/error/duration SLA, and concrete KMS identity/tlog/admission policy remain required evidence.
 
 ## Release boundary
 
@@ -430,12 +431,14 @@ Acceptance Fixture used by Codex and Claude.
   network、两个 image slot 与 state，owner 资源零残留。完整证据见
   `docs/reports/stage-3-worker-release-rollout-load-41683366.md`。
 - 该证据关闭 deterministic single-host immutable release-rollout container-loss recovery under bounded load、
-  promote/rollback release pins 与 load-safe Audit/Outbox mechanics；真实 Provider、外部 SSH/获批 Kubernetes
-  context、multi-host/Kubernetes multi-node、生产 Registry/KMS identity/tlog/admission、生产 SLA 与
-  production-duration load/soak 仍 open。外部 SSH target 已授权且本地 `orbstack` context 已选定，但尚无对应
-  clean-SHA report；生产并发由 quota/Worker slot/CPU/内存资源档位控制，数值 latency/error/duration SLA 仍待
-  定义。Workflow J/L 保持 `partial`；本切片没有 DDL 变更，migration boundary 仍为
-  `000041_diff_artifact_kind.sql`。
+  promote/rollback release pins 与 load-safe Audit/Outbox mechanics；真实 Provider、外部 SSH、Kubernetes
+  real-Provider/multi-node、生产 Registry/KMS identity/tlog/admission、生产 SLA 与 production-duration load/soak
+  仍 open。获批外部 SSH target 已有 fail-closed/non-destructive Runner 与 Gate 实现，但尚无安全本机 identity 下的
+  clean-SHA 四矩阵报告；本地 `orbstack` context 已有 clean commit `1e826324` 的 deterministic `19/19` 报告，
+  不再列为“缺少获批 context 证据”，但它不替代真实 Provider Kubernetes Gate。生产并发由 quota/Worker
+  slot/CPU/内存资源档位控制，数值 latency/error/duration SLA 仍待定义。Workflow J/L 保持 `partial`；本切片
+  没有 DDL 变更，migration boundary 仍为 `000041_diff_artifact_kind.sql`。当前 Acceptance Runner `151/151`、
+  SSH Gate `15/15`、Stage 3 Python `273/273` 与 Control Plane `go test ./...` 均通过。
 
 ## Frozen version boundary
 

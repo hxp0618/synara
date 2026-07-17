@@ -46,6 +46,14 @@ def runner_options(*, restart_control_plane: bool = True) -> acceptance.RunnerOp
         ssh_machine_arch="arm64",
         ssh_machine_image="ubuntu:24.04",
         ssh_node_version="24.13.1",
+        ssh_external_host=None,
+        ssh_external_port=22,
+        ssh_external_user=None,
+        ssh_external_identity_file=None,
+        ssh_external_host_key_file=None,
+        ssh_external_service_user=acceptance.SSH_SERVICE_USER,
+        ssh_external_use_sudo=False,
+        ssh_allow_external_host=False,
         docker_socket_path=pathlib.Path("/var/run/docker.sock"),
         docker_worker_image=None,
         docker_skip_worker_build=False,
@@ -4356,6 +4364,89 @@ class RunnerOptionsTest(unittest.TestCase):
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             acceptance.parse_args(["--target", "ssh", "--ssh-machine-name", "../../user-host"])
 
+    def test_ssh_external_host_requires_explicit_authorization_and_repository_external_files(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source_root = pathlib.Path(directory)
+            identity = source_root / "id_ed25519"
+            host_key = source_root / "known-host.pub"
+            identity.write_text("private-key-placeholder\n", encoding="utf-8")
+            identity.chmod(0o600)
+            host_key.write_text("ssh-ed25519 Zml4dHVyZS1ob3N0LWtleQ==\n", encoding="utf-8")
+
+            options = acceptance.parse_args(
+                [
+                    "--target",
+                    "ssh",
+                    "--ssh-external-host",
+                    "192.0.2.10",
+                    "--ssh-external-port",
+                    "2222",
+                    "--ssh-external-user",
+                    "root",
+                    "--ssh-external-identity-file",
+                    str(identity),
+                    "--ssh-external-host-key-file",
+                    str(host_key),
+                    "--ssh-external-service-user",
+                    "root",
+                    "--ssh-allow-external-host",
+                    "--ssh-machine-arch",
+                    "amd64",
+                ]
+            )
+
+            self.assertEqual(options.ssh_external_host, "192.0.2.10")
+            self.assertEqual(options.ssh_external_port, 2222)
+            self.assertEqual(options.ssh_external_user, "root")
+            self.assertEqual(options.ssh_external_identity_file, identity.resolve())
+            self.assertEqual(options.ssh_external_host_key_file, host_key.resolve())
+            self.assertTrue(options.ssh_allow_external_host)
+
+            with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                acceptance.parse_args(
+                    [
+                        "--target",
+                        "ssh",
+                        "--ssh-external-host",
+                        "192.0.2.10",
+                        "--ssh-external-user",
+                        "root",
+                        "--ssh-external-identity-file",
+                        str(identity),
+                        "--ssh-external-host-key-file",
+                        str(host_key),
+                    ]
+                )
+
+    def test_ssh_external_host_rejects_repository_identity_source(self) -> None:
+        identity = REPO_ROOT / ".stage3-test-identity"
+        host_key = REPO_ROOT / ".stage3-test-host-key"
+        try:
+            identity.write_text("private-key-placeholder\n", encoding="utf-8")
+            identity.chmod(0o600)
+            host_key.write_text("ssh-ed25519 Zml4dHVyZS1ob3N0LWtleQ==\n", encoding="utf-8")
+            with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                acceptance.parse_args(
+                    [
+                        "--target",
+                        "ssh",
+                        "--ssh-external-host",
+                        "192.0.2.10",
+                        "--ssh-external-user",
+                        "root",
+                        "--ssh-external-identity-file",
+                        str(identity),
+                        "--ssh-external-host-key-file",
+                        str(host_key),
+                        "--ssh-allow-external-host",
+                    ]
+                )
+        finally:
+            identity.unlink(missing_ok=True)
+            host_key.unlink(missing_ok=True)
+
     def test_ssh_rejects_global_skip_build_without_separate_linux_runtime_inputs(self) -> None:
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             acceptance.parse_args(
@@ -4483,6 +4574,144 @@ class SSHDriverTest(unittest.TestCase):
     def _key(label: bytes) -> str:
         return "ssh-ed25519 " + base64.b64encode(label).decode("ascii")
 
+    @staticmethod
+    def _external_options(
+        identity: pathlib.Path,
+        host_key: pathlib.Path,
+    ) -> acceptance.RunnerOptions:
+        return dataclasses.replace(
+            runner_options(),
+            target="ssh",
+            ssh_machine_arch="amd64",
+            ssh_external_host="192.0.2.10",
+            ssh_external_port=2222,
+            ssh_external_user="root",
+            ssh_external_identity_file=identity,
+            ssh_external_host_key_file=host_key,
+            ssh_external_service_user="root",
+            ssh_allow_external_host=True,
+        )
+
+    def test_external_host_key_source_pins_exact_endpoint_and_rejects_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            identity = root / "id_ed25519"
+            host_key_source = root / "known-host"
+            identity.write_text("private-key-placeholder\n", encoding="utf-8")
+            identity.chmod(0o600)
+            host_key = self._key(b"trusted-external-host")
+            host_key_source.write_text(f"[192.0.2.10]:2222 {host_key}\n", encoding="utf-8")
+            redactor = acceptance.SecretRedactor()
+            driver = acceptance.SSHDriver(
+                pathlib.Path.cwd(),
+                self._external_options(identity, host_key_source),
+                acceptance.Deadline(30.0),
+                redactor,
+            )
+            self.addCleanup(driver._release_state)
+
+            self.assertEqual(driver._load_external_host_key(), host_key)
+
+            host_key_source.write_text(f"[192.0.2.11]:2222 {host_key}\n", encoding="utf-8")
+            with self.assertRaises(acceptance.AcceptanceError) as caught:
+                driver._load_external_host_key()
+            self.assertEqual(caught.exception.code, "runner.ssh_external_host_key_invalid")
+
+    def test_external_identity_is_loaded_without_copy_and_operator_source_is_preserved(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            identity = root / "id_ed25519"
+            host_key_source = root / "host-key"
+            subprocess.run(
+                ["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(identity)],
+                check=True,
+            )
+            identity.chmod(0o600)
+            host_key_source.write_text(self._key(b"trusted-external-host") + "\n", encoding="utf-8")
+            redactor = acceptance.SecretRedactor()
+            driver = acceptance.SSHDriver(
+                pathlib.Path.cwd(),
+                self._external_options(identity, host_key_source),
+                acceptance.Deadline(30.0),
+                redactor,
+            )
+            self.addCleanup(driver._release_state)
+
+            evidence = driver._load_external_identity()
+            self.assertTrue(driver.client_private_key.startswith("-----BEGIN OPENSSH PRIVATE KEY-----"))
+            self.assertTrue(driver.client_public_key.startswith("ssh-ed25519 "))
+            self.assertNotIn(str(identity), json.dumps(evidence))
+            driver._discard_local_private_key()
+
+            self.assertEqual(driver.client_private_key, "")
+            self.assertTrue(identity.is_file())
+            self.assertTrue(evidence["operatorIdentitySourcePreserved"])
+            self.assertTrue(evidence["driverPrivateKeyReferenceClearedAfterProvision"])
+            self.assertTrue(
+                any(value.startswith("-----BEGIN OPENSSH PRIVATE KEY-----") for value in redactor.secret_values())
+            )
+
+    def test_external_preflight_refuses_existing_runtime_before_upload(self) -> None:
+        events: list[str] = []
+
+        class Connection:
+            def __enter__(self) -> Connection:
+                return self
+
+            def __exit__(self, *_args: Any) -> None:
+                return None
+
+            def settimeout(self, _timeout: float) -> None:
+                return None
+
+            def recv(self, _size: int) -> bytes:
+                return b"SSH-2.0-fixture\r\n"
+
+        class ConflictDriver(acceptance.SSHDriver):
+            def _load_external_host_key(self) -> str:
+                return SSHDriverTest._key(b"trusted-external-host")
+
+            def _remote_command(self, command: Sequence[str], **kwargs: Any) -> str:
+                del kwargs
+                events.append("remote:" + " ".join(command))
+                if command == ["uname", "-m"]:
+                    return "x86_64\n"
+                raise AssertionError(command)
+
+            def _remote_root_command(self, command: Sequence[str], **kwargs: Any) -> str:
+                del kwargs
+                events.append("root:" + " ".join(command[:2]))
+                raise acceptance.AcceptanceError(
+                    "runner.ssh_external_command_failed",
+                    "owned runtime path exists",
+                )
+
+            def _remote_upload(self, source: pathlib.Path, destination: str, mode: str) -> None:
+                del source, destination, mode
+                events.append("unexpected-upload")
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            identity = root / "id_ed25519"
+            host_key_source = root / "host-key"
+            identity.write_text("private-key-placeholder\n", encoding="utf-8")
+            identity.chmod(0o600)
+            host_key_source.write_text(self._key(b"trusted-external-host") + "\n", encoding="utf-8")
+            driver = ConflictDriver(
+                pathlib.Path.cwd(),
+                self._external_options(identity, host_key_source),
+                acceptance.Deadline(30.0),
+                acceptance.SecretRedactor(),
+            )
+            self.addCleanup(driver._release_state)
+            with mock.patch.object(acceptance.socket, "create_connection", return_value=Connection()):
+                with self.assertRaises(acceptance.AcceptanceError) as caught:
+                    driver._prepare_external_host()
+
+        self.assertEqual(caught.exception.code, "runner.ssh_external_preflight_failed")
+        self.assertFalse(driver.external_runtime_created)
+        self.assertNotIn("unexpected-upload", events)
+
     def test_provision_uses_one_time_key_pinned_host_key_and_product_install(self) -> None:
         target_ids = [
             "11111111-1111-4111-8111-111111111111",
@@ -4554,7 +4783,7 @@ class SSHDriverTest(unittest.TestCase):
                 cleanup_timeout: float | None = None,
             ) -> None:
                 del cleanup_timeout
-                self.absent_target = target_id
+                self.absent_targets = [*getattr(self, "absent_targets", []), target_id]
 
             def _require_service_active(self, service_name: str) -> dict[str, Any]:
                 return {
@@ -4581,7 +4810,7 @@ class SSHDriverTest(unittest.TestCase):
         target = driver.provision_target("tenant-id", "organization-id", "codex")
 
         self.assertEqual(target["id"], target_ids[1])
-        self.assertEqual(driver.absent_target, target_ids[0])
+        self.assertEqual(driver.absent_targets, target_ids)
         self.assertEqual(driver.client_private_key, "")
         self.assertEqual(len(api.created), 2)
         negative_configuration = api.created[0]["configuration"]
@@ -4597,6 +4826,158 @@ class SSHDriverTest(unittest.TestCase):
             acceptance.SSH_CREDENTIAL_LIFECYCLE,
         )
         self.assertNotIn("one-time-private-secret", str(redactor.value(target)))
+
+    def test_external_target_configuration_uses_unique_scoped_paths_without_source_metadata(
+        self,
+    ) -> None:
+        class TargetAPI:
+            def __init__(self) -> None:
+                self.payload: Mapping[str, Any] | None = None
+
+            def request(
+                inner_self,
+                method: str,
+                path: str,
+                payload: Mapping[str, Any] | None = None,
+                expected: Sequence[int] = (200,),
+                *,
+                maximum_timeout: float = 10.0,
+            ) -> Any:
+                del method, path, expected, maximum_timeout
+                inner_self.payload = payload
+                return {"id": "target-id"}
+
+        class TargetDriver(acceptance.SSHDriver):
+            def _worker_proxy_url(self) -> str:
+                return "http://127.0.0.1:41234"
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            identity = root / "id_ed25519"
+            host_key_source = root / "host-key"
+            identity.write_text("private-key-placeholder\n", encoding="utf-8")
+            identity.chmod(0o600)
+            host_key_source.write_text(self._key(b"trusted-external-host") + "\n", encoding="utf-8")
+            driver = TargetDriver(
+                pathlib.Path.cwd(),
+                self._external_options(identity, host_key_source),
+                acceptance.Deadline(30.0),
+                acceptance.SecretRedactor(),
+            )
+            self.addCleanup(driver._release_state)
+            api = TargetAPI()
+            driver.api = api  # type: ignore[assignment]
+            driver.client_private_key = "private-key-secret"
+            driver.machine_ip = "192.0.2.10"
+
+            driver._create_ssh_target(
+                "tenant-id",
+                "organization-id",
+                "external-target",
+                self._key(b"trusted-external-host"),
+                "codex",
+            )
+
+        assert api.payload is not None
+        configuration = api.payload["configuration"]
+        self.assertEqual(configuration["port"], 2222)
+        self.assertEqual(configuration["user"], "root")
+        self.assertEqual(configuration["serviceUser"], "root")
+        self.assertEqual(configuration["runnerCommand"], [driver.remote_node_path, driver.remote_fixture_path, "--protocol-v2"])
+        self.assertEqual(configuration["installRoot"], driver.external_install_root)
+        self.assertEqual(configuration["workspaceRoot"], driver.external_workspace_root)
+        self.assertEqual(configuration["gitCacheRoot"], driver.external_git_cache_root)
+        encoded = json.dumps(api.payload)
+        self.assertNotIn(str(identity), encoded)
+        self.assertNotIn(str(host_key_source), encoded)
+
+    def test_external_replacement_never_restarts_sshd_or_host(self) -> None:
+        events: list[str] = []
+
+        class ReplacementAPI:
+            def request(
+                self,
+                method: str,
+                path: str,
+                payload: Mapping[str, Any] | None = None,
+                expected: Sequence[int] = (200,),
+                *,
+                maximum_timeout: float = 10.0,
+            ) -> Any:
+                del payload, expected, maximum_timeout
+                events.append(f"api:{method}:{path}")
+                if path.endswith("/provider-policy"):
+                    return {"status": "active"}
+                if path.endswith("/ssh/upgrade"):
+                    return {
+                        "targetId": "target-id",
+                        "operation": "upgrade",
+                        "status": "active",
+                        "serviceName": "synara-agentd-target-id.service",
+                    }
+                raise AssertionError(path)
+
+            def wait_until(
+                self,
+                description: str,
+                probe: Callable[[], Any],
+                interval: float = 0.25,
+            ) -> Any:
+                del description, interval
+                return probe()
+
+        class ReplacementDriver(acceptance.SSHDriver):
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                super().__init__(*args, **kwargs)
+                self.worker_calls = 0
+                self.service_calls = 0
+
+            def _worker_identity(self, target_id: str, *, required: bool = True) -> dict[str, Any] | None:
+                del target_id, required
+                self.worker_calls += 1
+                if self.worker_calls == 1:
+                    return {"id": "worker-id", "incarnation": 1, "instanceUid": "old", "status": "online"}
+                return {"id": "worker-id", "incarnation": 2, "instanceUid": "new", "status": "online"}
+
+            def _require_service_active(self, service_name: str) -> dict[str, Any]:
+                self.service_calls += 1
+                return {
+                    "serviceName": service_name,
+                    "activeState": "active",
+                    "subState": "running",
+                    "unitFileState": "enabled",
+                    "mainPid": 100 if self.service_calls == 1 else 200,
+                    "restartCount": 0,
+                }
+
+            def _remote_command(self, command: Sequence[str], **kwargs: Any) -> str:
+                del command, kwargs
+                raise AssertionError("external replacement must not restart sshd")
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            identity = root / "id_ed25519"
+            host_key_source = root / "host-key"
+            identity.write_text("private-key-placeholder\n", encoding="utf-8")
+            identity.chmod(0o600)
+            host_key_source.write_text(self._key(b"trusted-external-host") + "\n", encoding="utf-8")
+            driver = ReplacementDriver(
+                pathlib.Path.cwd(),
+                self._external_options(identity, host_key_source),
+                acceptance.Deadline(30.0),
+                acceptance.SecretRedactor(),
+            )
+            self.addCleanup(driver._release_state)
+            driver.api = ReplacementAPI()  # type: ignore[assignment]
+            driver.service_name = "synara-agentd-target-id.service"
+            driver.host_key = self._key(b"trusted-external-host")
+
+            evidence = driver.replace_worker("tenant-id", "target-id", "codex")
+
+        self.assertFalse(evidence["sshdRestarted"])
+        self.assertFalse(evidence["externalHostRestarted"])
+        self.assertTrue(evidence["instanceUidChanged"])
+        self.assertTrue(any(event.endswith("/ssh/upgrade") for event in events))
 
     def test_replace_restarts_sshd_and_systemd_then_waits_for_new_incarnation(self) -> None:
         events: list[str] = []
@@ -4764,6 +5145,135 @@ class SSHDriverTest(unittest.TestCase):
         self.assertLess(relay_stop_index, stop_index)
         self.assertEqual(delete, "orbctl:delete --force synara-stage3-owned")
         self.assertNotIn("--all", delete)
+
+    def test_external_cleanup_revokes_and_removes_only_owned_runtime_while_preserving_host_identity(
+        self,
+    ) -> None:
+        events: list[str] = []
+
+        class CleanupAPI:
+            def request(
+                self,
+                method: str,
+                path: str,
+                payload: Mapping[str, Any] | None = None,
+                expected: Sequence[int] = (200,),
+                *,
+                maximum_timeout: float = 10.0,
+            ) -> Any:
+                del payload, expected, maximum_timeout
+                events.append(f"api:{method}:{path}")
+                return {"operation": "revoke", "status": "disabled"}
+
+        class RunningProcess:
+            @staticmethod
+            def poll() -> None:
+                return None
+
+        class CleanupDriver(acceptance.SSHDriver):
+            def _remote_root_command(self, command: Sequence[str], **kwargs: Any) -> str:
+                del kwargs
+                events.append("root:" + " ".join(command[:2]))
+                return ""
+
+            def _assert_remote_target_absent(self, target_id: str, **kwargs: Any) -> None:
+                del kwargs
+                events.append(f"absent:{target_id}")
+
+            def _remove_external_runtime(self) -> None:
+                events.append("remove-owned-runtime")
+                self.external_runtime_created = False
+                self.machine_created = False
+
+            def _orbctl_completed(self, arguments: Sequence[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+                del arguments, kwargs
+                raise AssertionError("external cleanup must not invoke OrbStack")
+
+            def stop(self) -> None:
+                events.append("stop-control-plane")
+                self.process = None
+
+            def _stop_worker_proxy_relay(self) -> None:
+                events.append("stop-worker-proxy-relay")
+
+            def _stop_worker_proxy(self) -> None:
+                events.append("stop-worker-proxy")
+
+            def _release_state(self) -> None:
+                events.append("release-state")
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            identity = root / "id_ed25519"
+            host_key_source = root / "host-key"
+            identity.write_text("private-key-placeholder\n", encoding="utf-8")
+            identity.chmod(0o600)
+            host_key_source.write_text(self._key(b"trusted-external-host") + "\n", encoding="utf-8")
+            driver = CleanupDriver(
+                pathlib.Path.cwd(),
+                self._external_options(identity, host_key_source),
+                acceptance.Deadline(30.0),
+                acceptance.SecretRedactor(),
+            )
+            driver.api = CleanupAPI()  # type: ignore[assignment]
+            driver.process = RunningProcess()  # type: ignore[assignment]
+            driver.machine_created = True
+            driver.external_runtime_created = True
+            driver.tenant_id = "tenant-id"
+            driver.target_id = "target-id"
+            driver.service_name = "synara-agentd-target-id.service"
+
+            evidence = driver.cleanup()
+
+            self.assertTrue(identity.is_file())
+
+        revoke_index = next(index for index, event in enumerate(events) if event.endswith("/ssh/revoke"))
+        verify_index = events.index("absent:target-id")
+        runtime_index = events.index("remove-owned-runtime")
+        self.assertLess(revoke_index, verify_index)
+        self.assertLess(verify_index, runtime_index)
+        self.assertFalse(any("authorized_keys" in event for event in events))
+        self.assertTrue(evidence["externalHostPreserved"])
+        self.assertFalse(evidence["externalHostRestarted"])
+        self.assertTrue(evidence["ownedRuntimeRemoved"])
+        self.assertTrue(evidence["operatorIdentitySourcePreserved"])
+
+    def test_external_runtime_cleanup_requires_exact_ownership_marker(self) -> None:
+        scripts: list[str] = []
+
+        class OwnershipDriver(acceptance.SSHDriver):
+            def _remote_root_command(self, command: Sequence[str], **kwargs: Any) -> str:
+                del kwargs
+                scripts.append(command[-1])
+                return ""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            identity = root / "id_ed25519"
+            host_key_source = root / "host-key"
+            identity.write_text("private-key-placeholder\n", encoding="utf-8")
+            identity.chmod(0o600)
+            host_key_source.write_text(self._key(b"trusted-external-host") + "\n", encoding="utf-8")
+            driver = OwnershipDriver(
+                pathlib.Path.cwd(),
+                self._external_options(identity, host_key_source),
+                acceptance.Deadline(30.0),
+                acceptance.SecretRedactor(),
+            )
+            self.addCleanup(driver._release_state)
+            driver.external_runtime_created = True
+            driver.machine_created = True
+
+            driver._remove_external_runtime()
+
+        self.assertEqual(len(scripts), 1)
+        script = scripts[0]
+        self.assertIn(driver.external_runtime_root + "/.synara-owner", script)
+        self.assertIn(driver.installation_id, script)
+        self.assertIn("rm -rf -- " + driver.external_runtime_root, script)
+        self.assertIn("rm -rf -- " + driver.external_stage_root, script)
+        self.assertNotIn("rm -rf -- /opt/synara\n", script)
+        self.assertFalse(driver.external_runtime_created)
 
     def test_cleanup_reports_actual_isolated_state_removal(self) -> None:
         driver = acceptance.SSHDriver(

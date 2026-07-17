@@ -272,3 +272,8 @@ Managed SSH targets pin the remote host key and install a target-specific system
 configuration accepts separate `workspaceRoot` and `gitCacheRoot` paths. Kubernetes uses a Pod-local cache by
 default; configure `gitCachePersistentVolumeClaim` only with a cache volume that supports cross-Pod access and
 reliable filesystem locking.
+
+SSH `install` refuses any pre-existing target service, unit, install, workspace, cache, or temporary path before it
+uploads an artifact. Use `upgrade` only for an already managed target and `revoke` for product-owned service/binary
+cleanup; operator-owned external hosts must add their own explicit ownership boundary and must never be treated as
+disposable infrastructure.
