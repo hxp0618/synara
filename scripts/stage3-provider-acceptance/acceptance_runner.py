@@ -7123,8 +7123,24 @@ class KubernetesDriver(ManagedWorkerDriver):
             "requestedKindWorkerNodes": self.options.kind_worker_nodes if self.owns_cluster else None,
             "serverVersion": server.get("gitVersion"),
             "kubeconfig": str(self.kubeconfig) if self.kubeconfig is not None else "default",
-            "topology": self._cluster_topology_evidence(),
+            "topology": self._wait_cluster_topology_evidence(),
         }
+
+    def _wait_cluster_topology_evidence(self) -> Mapping[str, Any]:
+        if not self.owns_cluster:
+            return self._cluster_topology_evidence()
+        expected_node_count = self.options.kind_worker_nodes + 1
+        while True:
+            evidence = self._cluster_topology_evidence()
+            if (
+                evidence["nodeCount"] == expected_node_count
+                and evidence["readyNodeCount"] == expected_node_count
+                and evidence["controlPlaneNodeCount"] == 1
+                and evidence["workerNodeCount"] == self.options.kind_worker_nodes
+                and evidence["schedulableNodeCount"] >= self.options.kind_worker_nodes
+            ):
+                return evidence
+            self.deadline.sleep(0.2)
 
     def _cluster_node_summaries(self) -> list[dict[str, Any]]:
         try:

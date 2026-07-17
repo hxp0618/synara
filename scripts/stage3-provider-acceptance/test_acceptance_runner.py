@@ -5887,11 +5887,16 @@ class KubernetesDriverObservationTest(unittest.TestCase):
                 ]
             }
         )
+        initial_nodes_payload = json.loads(nodes)
+        for node in initial_nodes_payload["items"][1:]:
+            node["status"]["conditions"][0]["status"] = "False"
+        initial_nodes = json.dumps(initial_nodes_payload)
 
         class OwnedKindDriver(acceptance.KubernetesDriver):
             def __init__(self, *args: Any, **kwargs: Any) -> None:
                 super().__init__(*args, **kwargs)
                 self.kind_commands: list[list[str]] = []
+                self.node_reads = 0
 
             def _kind_command(self, arguments: Sequence[str], **_kwargs: Any) -> str:
                 self.kind_commands.append(list(arguments))
@@ -5903,7 +5908,8 @@ class KubernetesDriverObservationTest(unittest.TestCase):
                 if arguments[0] == "version":
                     return json.dumps({"serverVersion": {"gitVersion": "v1.33.1"}})
                 if list(arguments[:2]) == ["get", "nodes"]:
-                    return nodes
+                    self.node_reads += 1
+                    return initial_nodes if self.node_reads == 1 else nodes
                 raise AssertionError(arguments)
 
         driver = OwnedKindDriver(
@@ -5914,7 +5920,8 @@ class KubernetesDriverObservationTest(unittest.TestCase):
         )
         self.addCleanup(driver._release_state)
 
-        evidence = driver._prepare_cluster()
+        with mock.patch.object(driver.deadline, "sleep") as sleep:
+            evidence = driver._prepare_cluster()
 
         create = driver.kind_commands[0]
         config_path = pathlib.Path(create[create.index("--config") + 1])
@@ -5922,8 +5929,11 @@ class KubernetesDriverObservationTest(unittest.TestCase):
         self.assertEqual([node["role"] for node in config["nodes"]], ["control-plane", "worker", "worker"])
         self.assertEqual(evidence["requestedKindWorkerNodes"], 2)
         self.assertEqual(evidence["topology"]["nodeCount"], 3)
+        self.assertEqual(evidence["topology"]["readyNodeCount"], 3)
         self.assertEqual(evidence["topology"]["workerNodeCount"], 2)
         self.assertEqual(evidence["topology"]["schedulableNodeCount"], 2)
+        self.assertEqual(driver.node_reads, 2)
+        sleep.assert_called_once_with(0.2)
 
     def test_cluster_access_uses_explicit_api_server_for_control_plane_target(self) -> None:
         options = dataclasses.replace(
