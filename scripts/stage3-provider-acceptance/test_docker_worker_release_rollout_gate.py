@@ -275,6 +275,45 @@ class ExecutionReleaseValidationTest(unittest.TestCase):
                 terminal_required=True,
             )
 
+    def test_waits_on_the_explicit_non_primary_session(self) -> None:
+        class API:
+            @staticmethod
+            def wait_until(
+                _description: str,
+                probe: object,
+                *,
+                interval: float,
+            ) -> object:
+                self.assertEqual(interval, 0.2)
+                assert callable(probe)
+                return probe()
+
+        class Suite:
+            def __init__(self) -> None:
+                self.api = API()
+                self.state = acceptance.ScenarioState(session_id="primary-session")
+                self.requested_sessions: list[str | None] = []
+
+            def _all_events(
+                self, *, session_id: str | None = None
+            ) -> list[dict[str, object]]:
+                self.requested_sessions.append(session_id)
+                return sample_events()
+
+        suite = Suite()
+        evidence = gate.WorkerReleaseRolloutSuite._wait_execution_release(
+            suite,  # type: ignore[arg-type]
+            "turn-1",
+            revision_id=CANDIDATE_REVISION,
+            channel="canary",
+            manifest_id=CANDIDATE_MANIFEST,
+            terminal=True,
+            session_id="candidate-session",
+        )
+
+        self.assertEqual(evidence["executionId"], "execution-1")
+        self.assertEqual(suite.requested_sessions, ["candidate-session"])
+
 
 class BusyWorkerValidationTest(unittest.TestCase):
     def test_maps_execution_worker_to_exact_release_container_and_preserves_identity(self) -> None:

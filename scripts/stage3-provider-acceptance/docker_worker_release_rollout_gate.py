@@ -1389,6 +1389,7 @@ class WorkerReleaseRolloutSuite(acceptance.AcceptanceSuite):
             channel="canary",
             manifest_id=self.manifests["candidate"]["manifestId"],
             terminal=False,
+            session_id=str(candidate_turn["sessionId"]),
         )
         validate_release_load_identity(candidate_active, candidate_execution)
         candidate_worker = self._wait_managed_worker(
@@ -1452,6 +1453,7 @@ class WorkerReleaseRolloutSuite(acceptance.AcceptanceSuite):
             channel="canary",
             manifest_id=self.manifests["candidate"]["manifestId"],
             terminal=False,
+            session_id=str(candidate_turn["sessionId"]),
         )
         candidate_after_worker = self._wait_managed_worker(
             candidate_after_execution,
@@ -1582,6 +1584,7 @@ class WorkerReleaseRolloutSuite(acceptance.AcceptanceSuite):
             channel="canary",
             manifest_id=self.manifests["candidate"]["manifestId"],
             terminal=True,
+            session_id=str(candidate_turn["sessionId"]),
         )
         self._assert_fixture_load_session_unchanged(
             baseline_turn,
@@ -1703,6 +1706,7 @@ class WorkerReleaseRolloutSuite(acceptance.AcceptanceSuite):
                 channel=channel,
                 manifest_id=manifest_id,
                 terminal=False,
+                session_id=str(load_turn["sessionId"]),
             )
             validate_release_load_identity(active, release)
             worker = self._wait_managed_worker(
@@ -1737,6 +1741,7 @@ class WorkerReleaseRolloutSuite(acceptance.AcceptanceSuite):
                 channel=channel,
                 manifest_id=manifest_id,
                 terminal=True,
+                session_id=str(load_turn["sessionId"]),
             )
             validate_release_load_identity(terminal, release)
             execution_id = required_string(
@@ -1909,9 +1914,14 @@ class WorkerReleaseRolloutSuite(acceptance.AcceptanceSuite):
         channel: str,
         manifest_id: str,
         terminal: bool,
+        session_id: str | None = None,
     ) -> Mapping[str, Any]:
         def probe() -> Mapping[str, Any] | None:
-            events = self._all_events()
+            events = (
+                self._all_events()
+                if session_id is None or session_id == self.state.session_id
+                else self._all_events(session_id=session_id)
+            )
             try:
                 return validate_execution_release_events(
                     events,
