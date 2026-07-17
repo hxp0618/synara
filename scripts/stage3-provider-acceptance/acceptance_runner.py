@@ -117,6 +117,7 @@ FIXTURE_LOAD_MIN_WAVES = 2
 FIXTURE_LOAD_MAX_WAVES = 100
 FIXTURE_LOAD_SUITES = frozenset({"fixture-load", "fixture-load-failure"})
 FIXTURE_PARALLEL_DOCKER_SUITES = FIXTURE_LOAD_SUITES | {"fixture-concurrency"}
+FIXTURE_LOAD_FAILURE_CASES = ("worker-network", "worker-container-loss")
 FIXTURE_RETENTION_SWEEP_INTERVAL = "250ms"
 FIXTURE_RETENTION_DAYS = 1
 FIXTURE_RETENTION_AGE_DAYS = 2
@@ -3381,12 +3382,110 @@ class DockerDriver(ManagedWorkerDriver):
             )
         return snapshot, worker, worker_index
 
+    def _wait_replacement_execution_worker_container(
+        self,
+        target_id: str,
+        execution_id: str,
+        container_name: str,
+        previous_container_id: str,
+        previous_worker: Mapping[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        def replacement_probe() -> tuple[dict[str, Any], dict[str, Any]] | None:
+            matches = [
+                snapshot
+                for snapshot in self._container_snapshots(target_id)
+                if str(snapshot.get("Name") or "").lstrip("/") == container_name
+                and snapshot.get("Id") != previous_container_id
+                and isinstance(snapshot.get("State"), dict)
+                and json_object(snapshot.get("State"), "docker inspect State").get("Running") is True
+            ]
+            if len(matches) != 1:
+                return None
+            worker = self._execution_worker_identity(target_id, execution_id)
+            if (
+                worker.get("id") != previous_worker.get("id")
+                or int(worker.get("incarnation") or 0)
+                <= int(previous_worker.get("incarnation") or 0)
+                or worker.get("instanceUid") == previous_worker.get("instanceUid")
+                or worker.get("status") != "online"
+                or worker.get("podName") != container_name
+            ):
+                return None
+            return matches[0], worker
+
+        return self.api.wait_until(
+            f"replacement managed Docker Worker container {container_name}",
+            replacement_probe,
+        )
+
+    def _inject_worker_container_loss(
+        self,
+        target_id: str,
+        execution_id: str,
+    ) -> Mapping[str, Any]:
+        snapshot, before_worker, worker_index = self._execution_worker_container(
+            target_id,
+            execution_id,
+        )
+        container_id = str(snapshot.get("Id") or "")
+        container_name = str(snapshot.get("Name") or "").lstrip("/")
+        if not container_id or not container_name:
+            raise AcceptanceError(
+                "runner.docker_container_identity_missing",
+                "The managed Docker Worker omitted its container identity before exact loss injection.",
+            )
+        self._write_volume_sentinel(container_id)
+        started = time.monotonic()
+        self._docker_command(["rm", "-f", container_id], maximum_timeout=20.0)
+        replacement, after_worker = self._wait_replacement_execution_worker_container(
+            target_id,
+            execution_id,
+            container_name,
+            container_id,
+            before_worker,
+        )
+        replacement_container_id = str(replacement.get("Id") or "")
+        if not replacement_container_id:
+            raise AcceptanceError(
+                "runner.docker_replacement_container_id_missing",
+                "The replacement managed Docker Worker omitted its container ID.",
+            )
+        self._verify_volume_sentinel(replacement_container_id)
+        return {
+            "fault": "worker-container-loss",
+            "executionId": execution_id,
+            "executionGeneration": before_worker.get("generation"),
+            "workerId": before_worker.get("id"),
+            "workerPodName": before_worker.get("podName"),
+            "workerIndex": int(worker_index),
+            "removedContainerId": container_id[:12],
+            "replacementContainerId": replacement_container_id[:12],
+            "containerName": container_name,
+            "containerIdChanged": replacement_container_id != container_id,
+            "exactExecutionWorkerMatch": container_name == before_worker.get("podName"),
+            "workerIdStable": after_worker.get("id") == before_worker.get("id"),
+            "previousWorkerIncarnation": before_worker.get("incarnation"),
+            "replacementWorkerIncarnation": after_worker.get("incarnation"),
+            "workerIncarnationAdvanced": int(after_worker.get("incarnation") or 0)
+            > int(before_worker.get("incarnation") or 0),
+            "instanceUidChanged": after_worker.get("instanceUid") != before_worker.get("instanceUid"),
+            "namedVolumeContinuity": {
+                "sentinelPath": DOCKER_VOLUME_SENTINEL_PATH,
+                "preservedAcrossReplacement": True,
+                "semantics": "named-volume content continuity; not Workspace Checkpoint restore",
+            },
+            "durationMs": elapsed_ms(started),
+            "replacementReady": True,
+        }
+
     def inject_failure(
         self,
         fault: str,
         target_id: str,
         execution_id: str,
     ) -> Mapping[str, Any]:
+        if fault == "worker-container-loss":
+            return self._inject_worker_container_loss(target_id, execution_id)
         if fault != "worker-network":
             return super().inject_failure(fault, target_id, execution_id)
         if not self.owns_network and not self.options.docker_allow_network_interruption:
@@ -3446,6 +3545,8 @@ class DockerDriver(ManagedWorkerDriver):
         }
 
     def validate_failure(self, fault: str) -> None:
+        if fault == "worker-container-loss":
+            return
         if fault != "worker-network":
             return super().validate_failure(fault)
         if not self.owns_network and not self.options.docker_allow_network_interruption:
@@ -6726,14 +6827,28 @@ class AcceptanceSuite:
         self._case(
             "load.targeted-worker-network-recovery",
             "Interrupt one exact busy Worker while its peer Session remains unchanged",
-            self._fixture_load_failure_isolation,
+            lambda: self._fixture_load_failure_isolation(
+                "worker-network",
+                session_offset=0,
+                affected_index=0,
+            ),
             requires=("resources.credential-project-session",),
+        )
+        self._case(
+            "load.targeted-worker-container-loss-recovery",
+            "Remove one exact busy Worker container and verify managed replacement isolation",
+            lambda: self._fixture_load_failure_isolation(
+                "worker-container-loss",
+                session_offset=2,
+                affected_index=1,
+            ),
+            requires=("load.targeted-worker-network-recovery",),
         )
         self._case(
             "load.post-failure-admission-waves",
             "Run bounded post-recovery load with quota rejection, slot reuse, Artifacts, and Checkpoints",
             self._fixture_load_admission_waves,
-            requires=("load.targeted-worker-network-recovery",),
+            requires=("load.targeted-worker-container-loss-recovery",),
         )
 
     def _run_fixture_retention_concurrency(self) -> None:
@@ -10661,12 +10776,13 @@ class AcceptanceSuite:
     def _start_fixture_load_failure_turn(
         self,
         session: Mapping[str, Any],
+        failure_case: str,
         position: int,
     ) -> dict[str, Any]:
         session_id = str(session["sessionId"])
         provider = str(session["provider"])
         turn = self._create_turn(
-            f"[approval] fixture-load-failure-position-{position}",
+            f"[approval] fixture-load-{failure_case}-position-{position}",
             session_id=session_id,
         )
         turn_id = self._turn_id(turn, "fixture load failure Turn")
@@ -10794,7 +10910,25 @@ class AcceptanceSuite:
             "sequenceRange": self._sequence_range(events),
         }
 
-    def _fixture_load_failure_isolation(self) -> Mapping[str, Any]:
+    def _fixture_load_failure_isolation(
+        self,
+        failure_case: str,
+        *,
+        session_offset: int,
+        affected_index: int,
+    ) -> Mapping[str, Any]:
+        if failure_case not in FIXTURE_LOAD_FAILURE_CASES:
+            raise AcceptanceError(
+                "runner.load_failure_case_invalid",
+                "The fixture load failure case was not canonical.",
+                {"failureCase": failure_case},
+            )
+        if affected_index not in {0, 1}:
+            raise AcceptanceError(
+                "runner.load_failure_affected_index_invalid",
+                "The fixture load failure affected index must select one active Execution.",
+                {"affectedIndex": affected_index},
+            )
         inject = getattr(self.driver, "inject_failure", None)
         if not callable(inject):
             raise AcceptanceUnsupported(
@@ -10804,23 +10938,26 @@ class AcceptanceSuite:
             )
         preflight = getattr(self.driver, "validate_failure", None)
         if callable(preflight):
-            preflight("worker-network")
+            preflight(failure_case)
         quota = self._set_fixture_execution_quota(
             FIXTURE_CONCURRENCY_WORKERS,
             "load failure",
             "runner.load_failure_quota_mismatch",
         )
         sessions = self._fixture_load_sessions()
+        offset = session_offset % len(sessions)
+        ordered = sessions[offset:] + sessions[:offset]
         active = [
-            self._start_fixture_load_failure_turn(sessions[0], 1),
-            self._start_fixture_load_failure_turn(sessions[1], 2),
+            self._start_fixture_load_failure_turn(ordered[0], failure_case, 1),
+            self._start_fixture_load_failure_turn(ordered[1], failure_case, 2),
         ]
-        overlap = self._fixture_load_overlap(active, 0, "pre-fault")
+        overlap = self._fixture_load_overlap(active, 0, f"pre-{failure_case}")
         quota_rejections = [
             self._assert_fixture_load_quota_rejected(session, 0, position)
-            for position, session in enumerate(sessions[2:], start=3)
+            for position, session in enumerate(ordered[2:], start=3)
         ]
-        affected, unaffected = active
+        affected = active[affected_index]
+        unaffected = active[1 - affected_index]
         affected_active = json_object(affected.get("active"), "affected load Execution")
         unaffected_active = json_object(unaffected.get("active"), "unaffected load Execution")
         unaffected_session_id = str(unaffected["sessionId"])
@@ -10836,7 +10973,7 @@ class AcceptanceSuite:
             },
             session_id=str(affected["sessionId"]),
             recover=lambda target_id, execution_id: inject(
-                "worker-network",
+                failure_case,
                 target_id,
                 execution_id,
             ),
@@ -10846,18 +10983,43 @@ class AcceptanceSuite:
             "targeted load failure recovery",
         )
         if (
-            target_recovery.get("executionId") != affected_active.get("executionId")
+            target_recovery.get("fault") != failure_case
+            or target_recovery.get("executionId") != affected_active.get("executionId")
             or target_recovery.get("workerId") != affected_active.get("workerId")
             or target_recovery.get("executionGeneration") != affected_active.get("generation")
             or target_recovery.get("exactExecutionWorkerMatch") is not True
         ):
             raise AcceptanceError(
                 "runner.load_failure_target_mismatch",
-                "The Worker network interruption did not prove an exact Execution-to-container match.",
+                "The Worker failure injection did not prove an exact Execution-to-container match.",
                 {
                     "affected": affected_active,
                     "targetRecovery": target_recovery,
                 },
+            )
+        if failure_case == "worker-network" and target_recovery.get("restored") is not True:
+            raise AcceptanceError(
+                "runner.load_failure_network_not_restored",
+                "The exact Worker network interruption was not restored.",
+                {"targetRecovery": target_recovery},
+            )
+        if failure_case == "worker-container-loss" and not (
+            target_recovery.get("containerIdChanged") is True
+            and target_recovery.get("workerIdStable") is True
+            and target_recovery.get("workerIncarnationAdvanced") is True
+            and target_recovery.get("instanceUidChanged") is True
+            and target_recovery.get("replacementReady") is True
+            and isinstance(target_recovery.get("namedVolumeContinuity"), Mapping)
+            and json_object(
+                target_recovery.get("namedVolumeContinuity"),
+                "load container replacement volume continuity",
+            ).get("preservedAcrossReplacement")
+            is True
+        ):
+            raise AcceptanceError(
+                "runner.load_failure_container_replacement_invalid",
+                "The exact Worker container loss did not produce one healthy fenced replacement.",
+                {"targetRecovery": target_recovery},
             )
         self._assert_fixture_load_session_unchanged(
             unaffected,
@@ -10901,10 +11063,13 @@ class AcceptanceSuite:
                 },
             )
         return {
+            "failureCase": failure_case,
             "maxConcurrentExecutions": quota.get("maxConcurrentExecutions"),
             "workers": FIXTURE_CONCURRENCY_WORKERS,
             "sessions": FIXTURE_LOAD_SESSIONS,
             "providers": list(FIXTURE_CONCURRENCY_PROVIDERS),
+            "sessionOrder": [str(session["sessionId"]) for session in ordered],
+            "affectedIndex": affected_index,
             "overlap": overlap,
             "quotaRejections": quota_rejections,
             "affected": affected_active,
@@ -13736,10 +13901,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             if fixture_retention_concurrency
             else (
                 "deterministic Codex and Claude Provider Host fixtures over one real Control Plane and two managed "
-                "Docker agentd Workers; four Sessions prove exact Execution-to-Worker-to-container network fault "
-                "targeting, peer-Session isolation, one-step Generation fencing, unique terminal paths, then "
-                "bounded quota rejection, slot reuse and durable Artifact/Checkpoint completion; deterministic "
-                "single-host mechanics only, not real Provider, multi-host, multi-node, SLA, or production-duration load"
+                "Docker agentd Workers; four Sessions prove exact Execution-to-Worker-to-container network and "
+                "container-loss targeting, managed replacement, peer-Session isolation, one-step Generation "
+                "fencing, unique terminal paths, then bounded quota rejection, slot reuse and durable "
+                "Artifact/Checkpoint completion; deterministic single-host mechanics only, not real Provider, "
+                "multi-host, multi-node, rollout failure, SLA, or production-duration load"
                 if fixture_load_failure
                 else (
                 "deterministic Codex and Claude Provider Host fixtures over one real Control Plane and two managed "
@@ -13811,7 +13977,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "boundary": evidence_boundary if fixture_load_suite else None,
             },
             "loadFailure": {
-                "fault": "worker-network" if fixture_load_failure else None,
+                "faults": list(FIXTURE_LOAD_FAILURE_CASES) if fixture_load_failure else [],
                 "targeting": (
                     "agent_executions.worker_id -> worker_instances.pod_name -> exact managed container"
                     if fixture_load_failure
@@ -13822,6 +13988,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 ),
                 "activeSessions": 2 if fixture_load_failure else 0,
                 "quotaRejectedSessions": 2 if fixture_load_failure else 0,
+                "faultCases": len(FIXTURE_LOAD_FAILURE_CASES) if fixture_load_failure else 0,
                 "postRecoveryWaves": options.load_waves if fixture_load_failure else 0,
                 "boundary": evidence_boundary if fixture_load_failure else None,
             },

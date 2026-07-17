@@ -102,12 +102,16 @@ multi-node evidence, a production latency SLA, sustained production load or a pr
 
 `--suite fixture-load-failure` reuses the same two managed Docker Workers and four Codex/Claude Sessions. With both
 Execution slots occupied and the other two Sessions rejected without side effects, it resolves the selected
-Execution through `agent_executions.worker_id -> worker_instances.pod_name` to one exact managed container and
-disconnects only that container from the runner-owned Docker network. The peer Session must retain byte-for-byte
-identical Events and pending Interaction identity while the selected Execution emits `execution.recovering`, advances
-exactly one Generation, replaces its Request and Interaction, and reaches one terminal path. The peer then completes
-on its original Worker/Generation. The same four Sessions immediately continue through the bounded load/admission
-waves above, including quota rejection, slot reuse, generated Artifacts and ready Checkpoints.
+Execution through `agent_executions.worker_id -> worker_instances.pod_name` to one exact managed container. The first
+barrier disconnects only that container from the runner-owned Docker network. The second barrier removes the exact
+other busy container and requires the Docker reconciler to recreate the same logical Worker name with a changed
+container ID and instance UID, an advanced Worker incarnation and preserved named-volume sentinel.
+
+For both faults, the peer Session must retain byte-for-byte identical Events and pending Interaction identity while
+the selected Execution emits `execution.recovering`, advances exactly one Generation, replaces its Request and
+Interaction, and reaches one terminal path. The peer then completes on its original Worker/Generation. The same four
+Sessions immediately continue through the bounded load/admission waves above, including quota rejection, slot reuse,
+generated Artifacts and ready Checkpoints.
 
 ```sh
 python3 scripts/stage3-provider-acceptance/acceptance_runner.py \
@@ -118,9 +122,9 @@ python3 scripts/stage3-provider-acceptance/acceptance_runner.py \
   --timeout 900
 ```
 
-This gate proves deterministic single-host failure targeting, peer isolation and post-recovery load mechanics. It
-does not replace real Provider, multi-host, Kubernetes multi-node, production SLA or production-duration soak
-evidence.
+This gate proves deterministic single-host network/container-loss targeting, managed replacement, peer isolation and
+post-recovery load mechanics. It does not replace real Provider, multi-host, Kubernetes multi-node, rollout failure,
+production SLA or production-duration soak evidence.
 
 ## Deterministic Retention/Cleanup concurrency
 

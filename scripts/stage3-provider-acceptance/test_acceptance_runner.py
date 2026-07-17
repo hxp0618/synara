@@ -725,15 +725,15 @@ class FixtureLoadFailureSuite(FixtureLoadSuite):
         super().__init__(wave_count=wave_count)
         self.options = dataclasses.replace(self.options, suite="fixture-load-failure")
         self.driver.validate_failure = lambda fault: None  # type: ignore[attr-defined]
-        self.driver.inject_failure = self._inject_worker_network  # type: ignore[attr-defined]
+        self.driver.inject_failure = self._inject_worker_failure  # type: ignore[attr-defined]
 
-    def _inject_worker_network(
+    def _inject_worker_failure(
         self,
         fault: str,
         target_id: str,
         execution_id: str,
     ) -> Mapping[str, Any]:
-        if fault != "worker-network" or target_id != "target-id":
+        if fault not in acceptance.FIXTURE_LOAD_FAILURE_CASES or target_id != "target-id":
             raise AssertionError((fault, target_id))
         interaction_id, interaction = next(
             (
@@ -790,7 +790,7 @@ class FixtureLoadFailureSuite(FixtureLoadSuite):
         self.pending[replacement_id] = replacement
         self.pending_workers[replacement_id] = worker_id
         self.pending_generations[replacement_id] = 2
-        return {
+        evidence: dict[str, Any] = {
             "fault": fault,
             "executionId": execution_id,
             "executionGeneration": 1,
@@ -798,8 +798,27 @@ class FixtureLoadFailureSuite(FixtureLoadSuite):
             "containerId": "container-1",
             "containerName": f"container-{worker_id}",
             "exactExecutionWorkerMatch": True,
-            "restored": True,
         }
+        if fault == "worker-network":
+            evidence["restored"] = True
+        else:
+            evidence.update(
+                {
+                    "removedContainerId": "container-old",
+                    "replacementContainerId": "container-new",
+                    "containerIdChanged": True,
+                    "workerIdStable": True,
+                    "previousWorkerIncarnation": 1,
+                    "replacementWorkerIncarnation": 2,
+                    "workerIncarnationAdvanced": True,
+                    "instanceUidChanged": True,
+                    "replacementReady": True,
+                    "namedVolumeContinuity": {
+                        "preservedAcrossReplacement": True,
+                    },
+                }
+            )
+        return evidence
 
     def _wait_for_replacement_interaction(
         self,
@@ -1855,6 +1874,69 @@ class DockerDriverRealProviderFaultTest(unittest.TestCase):
         self.assertEqual(evidence["workerIndex"], 1)
         self.assertTrue(evidence["exactExecutionWorkerMatch"])
 
+    def test_worker_container_loss_waits_for_same_logical_worker_replacement(self) -> None:
+        driver = self._driver()
+        driver.options = dataclasses.replace(
+            runner_options(),
+            target="docker",
+            suite="fixture-load-failure",
+        )
+        driver.api = FakeAPI()  # type: ignore[assignment]
+        before_worker = {
+            "id": "worker-2",
+            "generation": 1,
+            "incarnation": 3,
+            "instanceUid": "instance-old",
+            "status": "online",
+            "podName": "synara-worker-1",
+        }
+        driver._execution_worker_container = mock.Mock(  # type: ignore[method-assign]
+            return_value=(
+                {"Id": "aaaaaaaaaaaaaaaa", "Name": "/synara-worker-1"},
+                before_worker,
+                "1",
+            )
+        )
+        driver._container_snapshots = mock.Mock(  # type: ignore[method-assign]
+            return_value=[
+                {
+                    "Id": "bbbbbbbbbbbbbbbb",
+                    "Name": "/synara-worker-1",
+                    "State": {"Running": True},
+                }
+            ]
+        )
+        driver._execution_worker_identity = mock.Mock(  # type: ignore[method-assign]
+            return_value={
+                **before_worker,
+                "incarnation": 4,
+                "instanceUid": "instance-new",
+            }
+        )
+        driver._write_volume_sentinel = mock.Mock()  # type: ignore[method-assign]
+        driver._verify_volume_sentinel = mock.Mock()  # type: ignore[method-assign]
+        driver._docker_command = mock.Mock(return_value="")  # type: ignore[method-assign]
+
+        evidence = driver.inject_failure(
+            "worker-container-loss",
+            "target-id",
+            "execution-2",
+        )
+
+        driver._docker_command.assert_called_once_with(
+            ["rm", "-f", "aaaaaaaaaaaaaaaa"],
+            maximum_timeout=20.0,
+        )
+        driver._write_volume_sentinel.assert_called_once_with("aaaaaaaaaaaaaaaa")
+        driver._verify_volume_sentinel.assert_called_once_with("bbbbbbbbbbbbbbbb")
+        self.assertEqual(evidence["removedContainerId"], "aaaaaaaaaaaa")
+        self.assertEqual(evidence["replacementContainerId"], "bbbbbbbbbbbb")
+        self.assertTrue(evidence["containerIdChanged"])
+        self.assertTrue(evidence["workerIdStable"])
+        self.assertTrue(evidence["workerIncarnationAdvanced"])
+        self.assertTrue(evidence["instanceUidChanged"])
+        self.assertTrue(evidence["namedVolumeContinuity"]["preservedAcrossReplacement"])
+
 
 class KubernetesDriverRealProviderFaultTest(unittest.TestCase):
     @staticmethod
@@ -2382,21 +2464,38 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
     def test_fixture_load_failure_targets_one_worker_and_reuses_sessions_after_recovery(self) -> None:
         suite = FixtureLoadFailureSuite(wave_count=2)
 
-        failure = suite._fixture_load_failure_isolation()
+        network_failure = suite._fixture_load_failure_isolation(
+            "worker-network",
+            session_offset=0,
+            affected_index=0,
+        )
+        container_failure = suite._fixture_load_failure_isolation(
+            "worker-container-loss",
+            session_offset=2,
+            affected_index=1,
+        )
         load = suite._fixture_load_admission_waves()
 
-        self.assertTrue(failure["peerSessionEventsUnchanged"])
-        self.assertTrue(failure["peerInteractionIdentityUnchanged"])
-        self.assertTrue(failure["peerWorkerAndGenerationUnchanged"])
-        self.assertTrue(failure["targetedGenerationFenced"])
-        self.assertEqual(failure["recovery"]["staleGeneration"], 1)
-        self.assertEqual(failure["recovery"]["replacementGeneration"], 2)
+        self.assertTrue(network_failure["peerSessionEventsUnchanged"])
+        self.assertTrue(network_failure["peerInteractionIdentityUnchanged"])
+        self.assertTrue(network_failure["peerWorkerAndGenerationUnchanged"])
+        self.assertTrue(network_failure["targetedGenerationFenced"])
+        self.assertEqual(network_failure["recovery"]["staleGeneration"], 1)
+        self.assertEqual(network_failure["recovery"]["replacementGeneration"], 2)
         self.assertEqual(
-            failure["recovery"]["targetRecovery"]["workerId"],
-            failure["affected"]["workerId"],
+            network_failure["recovery"]["targetRecovery"]["workerId"],
+            network_failure["affected"]["workerId"],
         )
-        self.assertEqual(failure["terminalCount"], 2)
-        self.assertEqual(failure["pendingInteractionCount"], 0)
+        self.assertEqual(network_failure["terminalCount"], 2)
+        self.assertEqual(network_failure["pendingInteractionCount"], 0)
+        self.assertEqual(container_failure["failureCase"], "worker-container-loss")
+        self.assertTrue(
+            container_failure["recovery"]["targetRecovery"]["containerIdChanged"]
+        )
+        self.assertTrue(
+            container_failure["recovery"]["targetRecovery"]["workerIncarnationAdvanced"]
+        )
+        self.assertEqual(container_failure["recovery"]["replacementGeneration"], 2)
         self.assertEqual(load["wavesCompleted"], 2)
         self.assertEqual(load["executionsCompleted"], 8)
         self.assertEqual(len(suite.events), acceptance.FIXTURE_LOAD_SESSIONS)
@@ -2990,6 +3089,7 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
                 "runtime.concurrent-worker-discovery",
                 "resources.credential-project-session",
                 "load.targeted-worker-network-recovery",
+                "load.targeted-worker-container-loss-recovery",
                 "load.post-failure-admission-waves",
             ],
         )
@@ -3712,7 +3812,7 @@ class MarkdownReportTest(unittest.TestCase):
                     "boundary": "targeted deterministic failure and bounded load only",
                 },
                 "loadFailure": {
-                    "fault": "worker-network",
+                    "faults": ["worker-network", "worker-container-loss"],
                     "targeting": "execution to exact container",
                 },
                 "failureMatrix": {"requestedCases": []},
@@ -3725,7 +3825,7 @@ class MarkdownReportTest(unittest.TestCase):
 
         self.assertIn("# Stage 3 Provider Fixture Load Failure Acceptance", rendered)
         self.assertIn("## Requested fixture load failure", rendered)
-        self.assertIn('"fault": "worker-network"', rendered)
+        self.assertIn('"worker-container-loss"', rendered)
         self.assertIn("## Requested fixture load", rendered)
 
 
