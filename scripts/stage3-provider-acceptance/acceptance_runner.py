@@ -105,7 +105,7 @@ FIXTURE_SOAK_REQUIRED_EVENT_TYPES = frozenset(
 )
 JSON_REPORT_NAME = "acceptance-report.json"
 MARKDOWN_REPORT_NAME = "acceptance-report.md"
-PROVIDERS = ("codex", "claudeAgent", "cursor", "gemini", "grok", "kilo", "opencode", "pi")
+PROVIDERS = ("codex", "claudeAgent", "cursor", "antigravity", "grok", "kilo", "opencode", "pi")
 FIXTURE_SUPPORTED_PROVIDERS = frozenset({"codex", "claudeAgent"})
 REAL_PROVIDER_SMOKE_PROVIDERS = frozenset({"codex", "claudeAgent"})
 REAL_PROVIDER_CREDENTIAL_FIELDS = ("apiKey", "authToken")

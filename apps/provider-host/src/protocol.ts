@@ -903,11 +903,12 @@ function readProvider(value: unknown): ProviderHostProviderKind {
   if (typeof value !== "string") throw new Error("provider is required");
   const normalized = value.trim().toLowerCase();
   if (normalized === "claude") return "claudeAgent";
+  if (normalized === "gemini") return "antigravity";
   if (
     normalized === "codex" ||
     normalized === "claudeagent" ||
     normalized === "cursor" ||
-    normalized === "gemini" ||
+    normalized === "antigravity" ||
     normalized === "grok" ||
     normalized === "kilo" ||
     normalized === "opencode" ||

@@ -29,6 +29,7 @@ import {
 } from "../Services/AntigravityAdapter.ts";
 import type { ProviderThreadSnapshot } from "../Services/ProviderAdapter.ts";
 import { appendFileAttachmentsPromptBlock } from "../attachmentProjection.ts";
+import { makeUtf8RuntimeContentDeltaPayload } from "../runtimeEventPayload.ts";
 
 const PROVIDER = "antigravity" as const;
 const DEFAULT_MODEL = "Gemini 3.5 Flash";
@@ -535,10 +536,19 @@ const makeAntigravityAdapter = Effect.gen(function* () {
       if (!pending) return;
       const content = typeof step.content === "string" ? step.content : "";
       if (content) {
+        const streamKind = resultStreamKind(pending.itemType);
         offer({
           ...base(context, { itemId: pending.itemId }),
           type: "content.delta",
-          payload: { streamKind: resultStreamKind(pending.itemType), delta: content },
+          payload:
+            streamKind === "command_output"
+              ? makeUtf8RuntimeContentDeltaPayload({
+                  streamKind,
+                  delta: content,
+                  terminalId: pending.itemId,
+                  byteOffset: 0,
+                })
+              : makeUtf8RuntimeContentDeltaPayload({ streamKind, delta: content }),
           raw: raw(step.type ?? "tool-result", step),
         } satisfies ProviderRuntimeEvent);
       }

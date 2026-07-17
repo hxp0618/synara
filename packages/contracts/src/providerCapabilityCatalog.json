@@ -161,12 +161,12 @@
       }
     },
     {
-      "provider": "gemini",
+      "provider": "antigravity",
       "supportTier": "local-only",
-      "adapterVersion": "gemini-local-only",
+      "adapterVersion": "antigravity-local-only",
       "runtimePolicy": {
         "kind": "local",
-        "name": "gemini",
+        "name": "antigravity",
         "versionSource": "build",
         "compatibleRange": { "minimumInclusive": "0.0.0" }
       },

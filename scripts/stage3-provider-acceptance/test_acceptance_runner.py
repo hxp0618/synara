@@ -3944,6 +3944,13 @@ class MarkdownReportTest(unittest.TestCase):
 
 
 class RunnerOptionsTest(unittest.TestCase):
+    def test_provider_choices_use_canonical_antigravity_name(self) -> None:
+        options = acceptance.parse_args(["--provider", "antigravity"])
+
+        self.assertEqual(options.provider, "antigravity")
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            acceptance.parse_args(["--provider", "gemini"])
+
     def test_fixture_soak_uses_canonical_defaults(self) -> None:
         options = acceptance.parse_args(["--suite", "fixture-soak"])
 

@@ -3,7 +3,7 @@
 package providercatalog
 
 const SchemaVersion = 1
-const SourceSHA256 = "8d47c4a08cdce16f0420c911737f92bf6b28ba49c6310e5601b7bd434f671f70"
+const SourceSHA256 = "742a7eef08fde2394438fb0a9ee008cf1d062576d3b884709c291ffc17e9bdeb"
 
 var generatedCapabilityIDs = []string{
 	"discovery",
@@ -40,7 +40,7 @@ var generatedProviderNames = []string{
 	"codex",
 	"claudeAgent",
 	"cursor",
-	"gemini",
+	"antigravity",
 	"grok",
 	"kilo",
 	"opencode",
@@ -180,12 +180,12 @@ var generatedProviders = []Provider{
 		},
 	},
 	{
-		Name:           "gemini",
+		Name:           "antigravity",
 		SupportTier:    "local-only",
-		AdapterVersion: "gemini-local-only",
+		AdapterVersion: "antigravity-local-only",
 		RuntimePolicy: RuntimePolicy{
 			Kind:          "local",
-			Name:          "gemini",
+			Name:          "antigravity",
 			VersionSource: "build",
 			CompatibleRange: CompatibleRange{
 				MinimumInclusive: "0.0.0",
@@ -405,10 +405,10 @@ var generatedProviderByName = func() map[string]Provider {
 }()
 
 var generatedCanonicalProviderNames = map[string]string{
+	"antigravity": "antigravity",
 	"claudeagent": "claudeAgent",
 	"codex":       "codex",
 	"cursor":      "cursor",
-	"gemini":      "gemini",
 	"grok":        "grok",
 	"kilo":        "kilo",
 	"opencode":    "opencode",

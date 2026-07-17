@@ -400,7 +400,7 @@ func assertManifestJSONKeys(t *testing.T, value map[string]json.RawMessage, expe
 }
 
 var workerManifestHTTPProviderNames = []string{
-	"codex", "claudeAgent", "cursor", "gemini", "grok", "kilo", "opencode", "pi",
+	"codex", "claudeAgent", "cursor", "antigravity", "grok", "kilo", "opencode", "pi",
 }
 
 var workerManifestHTTPCapabilityIDs = []string{

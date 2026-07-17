@@ -28,7 +28,7 @@ describe("Provider Host v2 contracts", () => {
       "codex",
       "claudeAgent",
       "cursor",
-      "gemini",
+      "antigravity",
       "grok",
       "kilo",
       "opencode",

@@ -2389,7 +2389,9 @@ export default function ChatView({
       cwd: providerModelDiscoveryCwd,
       enabled:
         localProviderDiscoveryEnabled &&
-        (selectedProvider === "antigravity" || lockedProvider === "antigravity" || isModelPickerOpen),
+        (selectedProvider === "antigravity" ||
+          lockedProvider === "antigravity" ||
+          isModelPickerOpen),
     }),
   );
   const grokDynamicModelsQuery = useQuery(

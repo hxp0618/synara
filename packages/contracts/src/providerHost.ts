@@ -23,7 +23,7 @@ export const PROVIDER_HOST_PROVIDER_KINDS = [
   "codex",
   "claudeAgent",
   "cursor",
-  "gemini",
+  "antigravity",
   "grok",
   "kilo",
   "opencode",

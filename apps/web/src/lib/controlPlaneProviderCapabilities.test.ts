@@ -45,7 +45,7 @@ describe("Control Plane Provider capability decisions", () => {
     ).toMatchObject({ allowed: true, temporary: false, status: "local" });
   });
 
-  it.each(["cursor", "gemini", "grok", "kilo", "opencode", "pi", "droid"] as const)(
+  it.each(["cursor", "antigravity", "grok", "kilo", "opencode", "pi", "droid"] as const)(
     "blocks static local-only provider %s in SaaS mode",
     (provider) => {
       expect(

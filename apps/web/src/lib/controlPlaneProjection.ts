@@ -54,7 +54,7 @@ const PROVIDERS = new Set<ProviderKind>([
   "codex",
   "claudeAgent",
   "cursor",
-  "gemini",
+  "antigravity",
   "grok",
   "droid",
   "kilo",
@@ -73,6 +73,7 @@ const TERMINAL_FAILURE_LABELS: Readonly<Record<string, string>> = {
 
 function providerKind(value: string): ProviderKind {
   if (value === "claude" || value === "claudeagent") return "claudeAgent";
+  if (value === "gemini") return "antigravity";
   if (PROVIDERS.has(value as ProviderKind)) return value as ProviderKind;
   throw new Error(`Control Plane Session uses unsupported Provider ${JSON.stringify(value)}.`);
 }

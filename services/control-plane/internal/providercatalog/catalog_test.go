@@ -87,6 +87,9 @@ func TestCatalogAPIReturnsCopiesAndCanonicalNames(t *testing.T) {
 	if canonical, valid := CanonicalName(" CLAUDEAGENT "); !valid || canonical != "claudeAgent" {
 		t.Fatalf("CanonicalName returned (%q, %t)", canonical, valid)
 	}
+	if canonical, valid := CanonicalName("gemini"); !valid || canonical != "antigravity" {
+		t.Fatalf("legacy Gemini alias returned (%q, %t)", canonical, valid)
+	}
 	if _, valid := CanonicalName("droid"); valid {
 		t.Fatal("Droid must remain outside the Provider Host catalog")
 	}

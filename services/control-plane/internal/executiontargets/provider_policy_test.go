@@ -49,7 +49,7 @@ func TestParseProviderPolicyNormalizesExperimentalProviders(t *testing.T) {
 }
 
 func TestParseProviderPolicyAcceptsOnlyStage3ProviderSet(t *testing.T) {
-	providers := []any{"codex", "claudeAgent", "cursor", "gemini", "grok", "kilo", "opencode", "pi"}
+	providers := []any{"codex", "claudeAgent", "cursor", "antigravity", "grok", "kilo", "opencode", "pi"}
 	policy, err := ParseProviderPolicy(map[string]any{
 		"providerPolicy": map[string]any{"experimentalProviders": providers},
 	})

@@ -80,6 +80,15 @@ describe("Control Plane Session projection", () => {
     },
   );
 
+  it("hydrates the persisted Gemini Provider alias as Antigravity", () => {
+    expect(
+      projectControlPlaneThreads(
+        [{ ...session, provider: "gemini" as ControlPlaneAgentSession["provider"] }],
+        new Map(),
+      )[0]?.modelSelection.provider,
+    ).toBe("antigravity");
+  });
+
   it("deduplicates Sequence values and reports gaps before applying later events", () => {
     const initial = createControlPlaneSessionProjection(session);
     const first = applyControlPlaneSessionEvent(

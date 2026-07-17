@@ -185,6 +185,31 @@ describe("Provider Host Protocol v2", () => {
     }
   });
 
+  it("normalizes the legacy Gemini Provider name to Antigravity before rejection", async () => {
+    let describedProvider: ProviderHostProviderKind | null = null;
+    const handle = createProviderHostProtocolHandler({
+      credential: null,
+      emit: () => {},
+      descriptorForProvider: (provider) => {
+        describedProvider = provider;
+        return providerHostDescriptor(provider, { environment: {} });
+      },
+    });
+
+    const result = await handle(
+      command("StartSession", {
+        runnerInput: {
+          execution: { id: "execution-1" },
+          workload: { provider: "gemini", inputText: "unused" },
+          workspaceDirectory: "/tmp/workspace",
+        },
+      }),
+    );
+
+    expect(describedProvider).toBe("antigravity");
+    expect(errorCode(result)).toBe("capability_unsupported");
+  });
+
   it.each(["StartSession", "ResumeSession"] as const)(
     "fails closed for %s when the Experimental Provider is disabled",
     async (commandType) => {

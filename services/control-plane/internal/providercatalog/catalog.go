@@ -48,6 +48,9 @@ func Lookup(name string) (Provider, bool) {
 
 func CanonicalName(value string) (string, bool) {
 	normalized := strings.ToLower(strings.TrimSpace(value))
+	if normalized == "gemini" {
+		return "antigravity", true
+	}
 	canonical, found := generatedCanonicalProviderNames[normalized]
 	return canonical, found
 }
