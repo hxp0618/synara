@@ -527,6 +527,7 @@ class FixtureLoadSuite(FixtureConcurrencySuite):
         )
         self.enforce_quota = enforce_quota
         self.pending_workers: dict[str, str] = {}
+        self.pending_generations: dict[str, int] = {}
 
     def _create_project_session(
         self,
@@ -616,6 +617,11 @@ class FixtureLoadSuite(FixtureConcurrencySuite):
             "artifact.ready",
             "request.opened",
         ):
+            payload = (
+                {"requestId": f"request-{execution_id}"}
+                if event_type == "request.opened"
+                else None
+            )
             events.append(
                 {
                     "sequence": len(events) + 1,
@@ -623,6 +629,7 @@ class FixtureLoadSuite(FixtureConcurrencySuite):
                     "executionId": execution_id,
                     "workerId": worker_id,
                     "generation": 1,
+                    **({"payload": payload} if payload is not None else {}),
                 }
             )
         interaction = {
@@ -635,6 +642,7 @@ class FixtureLoadSuite(FixtureConcurrencySuite):
         interaction_id = str(interaction["id"])
         self.pending[interaction_id] = interaction
         self.pending_workers[interaction_id] = worker_id
+        self.pending_generations[interaction_id] = 1
         return interaction
 
     def _all_events(self, *, session_id: str | None = None) -> list[dict[str, Any]]:
@@ -664,6 +672,7 @@ class FixtureLoadSuite(FixtureConcurrencySuite):
     ) -> dict[str, Any]:
         interaction_id = str(interaction["id"])
         worker_id = self.pending_workers.pop(interaction_id)
+        generation = self.pending_generations.pop(interaction_id)
         del self.pending[interaction_id]
         events = self.events[session_id]
         execution_id = str(interaction["executionId"])
@@ -680,7 +689,7 @@ class FixtureLoadSuite(FixtureConcurrencySuite):
                     "eventType": event_type,
                     "executionId": execution_id,
                     "workerId": worker_id,
-                    "generation": 1,
+                    "generation": generation,
                 }
             )
         events.append(
@@ -689,7 +698,7 @@ class FixtureLoadSuite(FixtureConcurrencySuite):
                 "eventType": "execution.completed",
                 "executionId": execution_id,
                 "workerId": worker_id,
-                "generation": 1,
+                "generation": generation,
                 "payload": {
                     "output": {
                         "credentialEvidence": {
@@ -709,6 +718,112 @@ class FixtureLoadSuite(FixtureConcurrencySuite):
             "deliveryStatus": "delivered",
             "sequenceRange": self._sequence_range(events),
         }
+
+
+class FixtureLoadFailureSuite(FixtureLoadSuite):
+    def __init__(self, *, wave_count: int = 2) -> None:
+        super().__init__(wave_count=wave_count)
+        self.options = dataclasses.replace(self.options, suite="fixture-load-failure")
+        self.driver.validate_failure = lambda fault: None  # type: ignore[attr-defined]
+        self.driver.inject_failure = self._inject_worker_network  # type: ignore[attr-defined]
+
+    def _inject_worker_network(
+        self,
+        fault: str,
+        target_id: str,
+        execution_id: str,
+    ) -> Mapping[str, Any]:
+        if fault != "worker-network" or target_id != "target-id":
+            raise AssertionError((fault, target_id))
+        interaction_id, interaction = next(
+            (
+                interaction_id,
+                interaction,
+            )
+            for interaction_id, interaction in self.pending.items()
+            if interaction.get("executionId") == execution_id
+        )
+        turn_id = str(interaction["turnId"])
+        session_id = self.turn_sessions[turn_id]
+        worker_id = self.pending_workers.pop(interaction_id)
+        self.pending_generations.pop(interaction_id)
+        del self.pending[interaction_id]
+        events = self.events[session_id]
+        events.append(
+            {
+                "sequence": len(events) + 1,
+                "eventType": "execution.recovering",
+                "executionId": execution_id,
+                "workerId": worker_id,
+                "generation": 1,
+            }
+        )
+        replacement_request_id = f"request-{execution_id}-generation-2"
+        for event_type in (
+            "execution.leased",
+            "workspace.ready",
+            "execution.started",
+            "request.opened",
+        ):
+            events.append(
+                {
+                    "sequence": len(events) + 1,
+                    "eventType": event_type,
+                    "executionId": execution_id,
+                    "workerId": worker_id,
+                    "generation": 2,
+                    **(
+                        {"payload": {"requestId": replacement_request_id}}
+                        if event_type == "request.opened"
+                        else {}
+                    ),
+                }
+            )
+        replacement = {
+            "id": f"interaction-{execution_id}-generation-2",
+            "turnId": turn_id,
+            "kind": "approval",
+            "executionId": execution_id,
+            "requestId": replacement_request_id,
+        }
+        replacement_id = str(replacement["id"])
+        self.pending[replacement_id] = replacement
+        self.pending_workers[replacement_id] = worker_id
+        self.pending_generations[replacement_id] = 2
+        return {
+            "fault": fault,
+            "executionId": execution_id,
+            "executionGeneration": 1,
+            "workerId": worker_id,
+            "containerId": "container-1",
+            "containerName": f"container-{worker_id}",
+            "exactExecutionWorkerMatch": True,
+            "restored": True,
+        }
+
+    def _wait_for_replacement_interaction(
+        self,
+        turn_id: str,
+        kind: str,
+        previous_interaction_id: str,
+        *,
+        session_id: str | None = None,
+    ) -> dict[str, Any]:
+        resolved_session_id = session_id or self.state.session_id
+        if resolved_session_id is None:
+            raise AssertionError("missing fake Session")
+        if previous_interaction_id in self.pending:
+            raise AssertionError("stale interaction remained pending")
+        matches = [
+            interaction
+            for interaction in self._pending_interactions(resolved_session_id)
+            if interaction.get("turnId") == turn_id
+            and interaction.get("kind") == kind
+            and interaction.get("id") != previous_interaction_id
+        ]
+        if len(matches) != 1:
+            raise AssertionError(matches)
+        return matches[0]
 
 
 class BarrierSuite(acceptance.AcceptanceSuite):
@@ -829,7 +944,10 @@ class PendingApprovalRecoverySuite(BarrierSuite):
         turn_id: str,
         kind: str,
         previous_interaction_id: str,
+        *,
+        session_id: str | None = None,
     ) -> dict[str, Any]:
+        del session_id
         if not self.recovered:
             raise AssertionError("pending interaction recovery did not run before replacement wait")
         if previous_interaction_id != "interaction-1":
@@ -843,16 +961,36 @@ class PendingApprovalRecoverySuite(BarrierSuite):
                 "eventType": "turn.created",
                 "executionId": "execution-1",
                 "payload": {"turnId": "turn-1", "executionId": "execution-1"},
-            }
+            },
+            {
+                "sequence": 2,
+                "eventType": "request.opened",
+                "executionId": "execution-1",
+                "workerId": "worker-1",
+                "generation": 1,
+                "payload": {"requestId": "approval-request-1"},
+            },
         ]
         if self.recovered:
-            events.append(
-                {
-                    "sequence": 2,
-                    "eventType": "execution.recovering",
-                    "executionId": "execution-1",
-                    "payload": {"turnId": "turn-1", "reason": "lease_expired"},
-                }
+            events.extend(
+                [
+                    {
+                        "sequence": 3,
+                        "eventType": "execution.recovering",
+                        "executionId": "execution-1",
+                        "workerId": "worker-1",
+                        "generation": 1,
+                        "payload": {"turnId": "turn-1", "reason": "lease_expired"},
+                    },
+                    {
+                        "sequence": 4,
+                        "eventType": "request.opened",
+                        "executionId": "execution-1",
+                        "workerId": "worker-2",
+                        "generation": 2,
+                        "payload": {"requestId": self.replacement_request_id},
+                    },
+                ]
             )
         return events
 
@@ -1528,6 +1666,50 @@ class DockerDriverRealProviderFaultTest(unittest.TestCase):
         finally:
             server.stop()
 
+    def test_execution_worker_identity_joins_execution_to_exact_worker_pod_name(self) -> None:
+        driver = self._driver()
+        with tempfile.TemporaryDirectory() as directory:
+            driver.state_dir = pathlib.Path(directory)
+            with sqlite3.connect(driver.state_dir / "metadata.sqlite") as connection:
+                connection.executescript(
+                    """
+                    CREATE TABLE agent_executions (
+                      id TEXT PRIMARY KEY,
+                      execution_target_id TEXT NOT NULL,
+                      worker_id TEXT,
+                      generation INTEGER NOT NULL
+                    );
+                    CREATE TABLE worker_instances (
+                      id TEXT PRIMARY KEY,
+                      execution_target_id TEXT NOT NULL,
+                      incarnation INTEGER NOT NULL,
+                      instance_uid TEXT NOT NULL,
+                      status TEXT NOT NULL,
+                      pod_name TEXT NOT NULL
+                    );
+                    INSERT INTO worker_instances VALUES (
+                      'worker-2', 'target-id', 3, 'instance-2', 'online', 'synara-worker-1'
+                    );
+                    INSERT INTO agent_executions VALUES (
+                      'execution-2', 'target-id', 'worker-2', 1
+                    );
+                    """
+                )
+
+            identity = driver._execution_worker_identity("target-id", "execution-2")
+
+        self.assertEqual(
+            identity,
+            {
+                "id": "worker-2",
+                "generation": 1,
+                "incarnation": 3,
+                "instanceUid": "instance-2",
+                "status": "online",
+                "podName": "synara-worker-1",
+            },
+        )
+
     def test_fault_server_probe_runs_inside_exact_managed_container(self) -> None:
         driver = self._driver()
         driver._wait_container = mock.Mock(return_value={"Id": "abcdef1234567890"})  # type: ignore[method-assign]
@@ -1605,6 +1787,73 @@ class DockerDriverRealProviderFaultTest(unittest.TestCase):
             driver.crash_provider_host()
 
         self.assertEqual(caught.exception.code, "runner.provider_host_process_scan_failed")
+
+    def test_worker_network_fault_disconnects_exact_execution_worker_container(self) -> None:
+        driver = self._driver()
+        driver.options = dataclasses.replace(
+            runner_options(),
+            target="docker",
+            suite="fixture-load-failure",
+        )
+        driver.network_name = "owned-network"
+        driver.owns_network = True
+        driver.desired_workers = 2
+        driver.deadline = mock.Mock()
+        driver._execution_worker_identity = mock.Mock(  # type: ignore[method-assign]
+            return_value={
+                "id": "worker-2",
+                "generation": 1,
+                "incarnation": 3,
+                "instanceUid": "instance-2",
+                "status": "online",
+                "podName": "synara-worker-1",
+            }
+        )
+        driver._wait_containers = mock.Mock(  # type: ignore[method-assign]
+            return_value=[
+                {
+                    "Id": "container-0-full",
+                    "Name": "/synara-worker-0",
+                    "Config": {
+                        "Labels": {
+                            "synara.io/managed": "true",
+                            "synara.io/execution-target-id": "target-id",
+                            "synara.io/worker-index": "0",
+                        }
+                    },
+                },
+                {
+                    "Id": "container-1-full",
+                    "Name": "/synara-worker-1",
+                    "Config": {
+                        "Labels": {
+                            "synara.io/managed": "true",
+                            "synara.io/execution-target-id": "target-id",
+                            "synara.io/worker-index": "1",
+                        }
+                    },
+                },
+            ]
+        )
+        driver._docker_command = mock.Mock(return_value="")  # type: ignore[method-assign]
+        driver._docker_completed = mock.Mock(  # type: ignore[method-assign]
+            return_value=subprocess.CompletedProcess([], 0, "", "")
+        )
+
+        evidence = driver.inject_failure("worker-network", "target-id", "execution-2")
+
+        driver._docker_command.assert_called_once_with(
+            ["network", "disconnect", "owned-network", "container-1-full"]
+        )
+        driver._docker_completed.assert_called_once_with(
+            ["network", "connect", "owned-network", "container-1-full"],
+            cleanup_timeout=15.0,
+        )
+        self.assertEqual(evidence["executionId"], "execution-2")
+        self.assertEqual(evidence["workerId"], "worker-2")
+        self.assertEqual(evidence["containerName"], "synara-worker-1")
+        self.assertEqual(evidence["workerIndex"], 1)
+        self.assertTrue(evidence["exactExecutionWorkerMatch"])
 
 
 class KubernetesDriverRealProviderFaultTest(unittest.TestCase):
@@ -2041,6 +2290,26 @@ class ManagedWorkerImageTest(unittest.TestCase):
         finally:
             driver._release_state()
 
+    def test_fixture_load_failure_reuses_two_managed_docker_workers(self) -> None:
+        driver = acceptance.DockerDriver(
+            REPO_ROOT,
+            dataclasses.replace(
+                runner_options(),
+                target="docker",
+                suite="fixture-load-failure",
+                load_waves=acceptance.FIXTURE_LOAD_DEFAULT_WAVES,
+            ),
+            acceptance.Deadline(30.0),
+            acceptance.SecretRedactor(),
+        )
+        try:
+            self.assertEqual(
+                driver.desired_workers,
+                acceptance.FIXTURE_CONCURRENCY_WORKERS,
+            )
+        finally:
+            driver._release_state()
+
     def test_worker_smoke_preserves_image_path_with_non_login_shell(self) -> None:
         driver = object.__new__(acceptance.ManagedWorkerDriver)
         driver.logs_dir = pathlib.Path(tempfile.gettempdir()) / "synara-stage3-worker-smoke-test"
@@ -2109,6 +2378,28 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
         self.assertEqual(evidence["eventTypeCounts"]["artifact.ready"], 16)
         self.assertFalse(evidence["doubleExecution"])
         self.assertFalse(evidence["duplicateTerminal"])
+
+    def test_fixture_load_failure_targets_one_worker_and_reuses_sessions_after_recovery(self) -> None:
+        suite = FixtureLoadFailureSuite(wave_count=2)
+
+        failure = suite._fixture_load_failure_isolation()
+        load = suite._fixture_load_admission_waves()
+
+        self.assertTrue(failure["peerSessionEventsUnchanged"])
+        self.assertTrue(failure["peerInteractionIdentityUnchanged"])
+        self.assertTrue(failure["peerWorkerAndGenerationUnchanged"])
+        self.assertTrue(failure["targetedGenerationFenced"])
+        self.assertEqual(failure["recovery"]["staleGeneration"], 1)
+        self.assertEqual(failure["recovery"]["replacementGeneration"], 2)
+        self.assertEqual(
+            failure["recovery"]["targetRecovery"]["workerId"],
+            failure["affected"]["workerId"],
+        )
+        self.assertEqual(failure["terminalCount"], 2)
+        self.assertEqual(failure["pendingInteractionCount"], 0)
+        self.assertEqual(load["wavesCompleted"], 2)
+        self.assertEqual(load["executionsCompleted"], 8)
+        self.assertEqual(len(suite.events), acceptance.FIXTURE_LOAD_SESSIONS)
 
     def test_fixture_load_rejects_missing_quota_enforcement(self) -> None:
         suite = FixtureLoadSuite(wave_count=2, enforce_quota=False)
@@ -2672,6 +2963,34 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
                 "runtime.concurrent-worker-discovery",
                 "resources.credential-project-session",
                 "load.multi-session-admission-waves",
+            ],
+        )
+
+    def test_fixture_load_failure_runs_targeted_recovery_before_post_failure_load(self) -> None:
+        suite = CaseOrderSuite(
+            FakeDriver(acceptance.STANDING_MANAGED_WORKER, name="docker"),
+            dataclasses.replace(
+                runner_options(),
+                target="docker",
+                suite="fixture-load-failure",
+                load_waves=acceptance.FIXTURE_LOAD_DEFAULT_WAVES,
+                restart_control_plane=False,
+            ),
+        )
+
+        suite.run()
+
+        self.assertEqual(
+            suite.case_order,
+            [
+                "environment.target-prepare",
+                "environment.control-plane-start",
+                "identity.dev-login",
+                "runtime.target-provision",
+                "runtime.concurrent-worker-discovery",
+                "resources.credential-project-session",
+                "load.targeted-worker-network-recovery",
+                "load.post-failure-admission-waves",
             ],
         )
 
@@ -3374,6 +3693,41 @@ class MarkdownReportTest(unittest.TestCase):
         self.assertIn("## Requested fixture load", rendered)
         self.assertIn('"waves": 25', rendered)
 
+    def test_fixture_load_failure_report_renders_targeting_and_post_recovery_load(self) -> None:
+        report = {
+            "schemaVersion": acceptance.SCHEMA_VERSION,
+            "runId": "run-load-failure",
+            "mode": "fixture-load-failure",
+            "target": "docker",
+            "provider": "codex",
+            "status": "pass",
+            "startedAt": "2026-07-17T00:00:00Z",
+            "finishedAt": "2026-07-17T00:01:00Z",
+            "durationMs": 60_000,
+            "configuration": {
+                "load": {
+                    "workers": 2,
+                    "sessions": 4,
+                    "waves": 25,
+                    "boundary": "targeted deterministic failure and bounded load only",
+                },
+                "loadFailure": {
+                    "fault": "worker-network",
+                    "targeting": "execution to exact container",
+                },
+                "failureMatrix": {"requestedCases": []},
+                "realProvider": {"requestedCases": [], "requestedFailureCases": []},
+            },
+            "cases": [],
+        }
+
+        rendered = acceptance.markdown_from_report(report)
+
+        self.assertIn("# Stage 3 Provider Fixture Load Failure Acceptance", rendered)
+        self.assertIn("## Requested fixture load failure", rendered)
+        self.assertIn('"fault": "worker-network"', rendered)
+        self.assertIn("## Requested fixture load", rendered)
+
 
 class RunnerOptionsTest(unittest.TestCase):
     def test_fixture_soak_uses_canonical_defaults(self) -> None:
@@ -3488,6 +3842,40 @@ class RunnerOptionsTest(unittest.TestCase):
                 "docker",
                 "--failure-case",
                 "provider-crash",
+            ],
+        )
+        for arguments in invalid_arguments:
+            with self.subTest(arguments=arguments):
+                with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                    acceptance.parse_args(arguments)
+
+    def test_fixture_load_failure_uses_canonical_docker_shape(self) -> None:
+        options = acceptance.parse_args(
+            [
+                "--suite",
+                "fixture-load-failure",
+                "--target",
+                "docker",
+                "--load-waves",
+                "8",
+            ]
+        )
+
+        self.assertEqual(options.suite, "fixture-load-failure")
+        self.assertEqual(options.target, "docker")
+        self.assertEqual(options.load_waves, 8)
+        self.assertFalse(options.restart_control_plane)
+        self.assertEqual(options.timeout_seconds, 900.0)
+
+        invalid_arguments = (
+            ["--suite", "fixture-load-failure"],
+            [
+                "--suite",
+                "fixture-load-failure",
+                "--target",
+                "docker",
+                "--failure-case",
+                "worker-network",
             ],
         )
         for arguments in invalid_arguments:

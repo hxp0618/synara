@@ -115,6 +115,8 @@ FIXTURE_LOAD_SESSIONS = 4
 FIXTURE_LOAD_DEFAULT_WAVES = 25
 FIXTURE_LOAD_MIN_WAVES = 2
 FIXTURE_LOAD_MAX_WAVES = 100
+FIXTURE_LOAD_SUITES = frozenset({"fixture-load", "fixture-load-failure"})
+FIXTURE_PARALLEL_DOCKER_SUITES = FIXTURE_LOAD_SUITES | {"fixture-concurrency"}
 FIXTURE_RETENTION_SWEEP_INTERVAL = "250ms"
 FIXTURE_RETENTION_DAYS = 1
 FIXTURE_RETENTION_AGE_DAYS = 2
@@ -123,6 +125,7 @@ SUITES = (
     "fixture-soak",
     "fixture-concurrency",
     "fixture-load",
+    "fixture-load-failure",
     "fixture-retention-concurrency",
     "real-provider-smoke",
 )
@@ -3016,6 +3019,54 @@ class ManagedWorkerDriver(LocalDriver):
             "podName": str(row[4]),
         }
 
+    def _execution_worker_identity(
+        self,
+        target_id: str,
+        execution_id: str,
+    ) -> dict[str, Any]:
+        database_path = self.state_dir / "metadata.sqlite"
+        try:
+            connection = sqlite3.connect(f"file:{database_path}?mode=ro", uri=True, timeout=2.0)
+            try:
+                row = connection.execute(
+                    """
+                    SELECT execution.worker_id,
+                           execution.generation,
+                           worker.incarnation,
+                           worker.instance_uid,
+                           worker.status,
+                           worker.pod_name
+                    FROM agent_executions AS execution
+                    JOIN worker_instances AS worker ON worker.id = execution.worker_id
+                    WHERE execution.id = ?
+                      AND execution.execution_target_id = ?
+                      AND worker.execution_target_id = ?
+                    """,
+                    (execution_id, target_id, target_id),
+                ).fetchone()
+            finally:
+                connection.close()
+        except sqlite3.Error as error:
+            raise AcceptanceError(
+                "runner.execution_worker_identity_query_failed",
+                f"Execution Worker identity could not be read from the isolated metadata store: {error}",
+                {"targetId": target_id, "executionId": execution_id},
+            ) from None
+        if row is None:
+            raise AcceptanceError(
+                "runner.execution_worker_identity_missing",
+                "The Execution did not retain an exact managed Worker identity.",
+                {"targetId": target_id, "executionId": execution_id},
+            )
+        return {
+            "id": str(row[0]),
+            "generation": int(row[1]),
+            "incarnation": int(row[2]),
+            "instanceUid": str(row[3]),
+            "status": str(row[4]),
+            "podName": str(row[5]),
+        }
+
 
 class DockerDriver(ManagedWorkerDriver):
     name = "docker"
@@ -3040,7 +3091,7 @@ class DockerDriver(ManagedWorkerDriver):
         self.image = options.docker_worker_image or f"synara-stage3-provider-acceptance:{self.head_sha}-{suffix}"
         self.desired_workers = (
             FIXTURE_CONCURRENCY_WORKERS
-            if options.suite in {"fixture-concurrency", "fixture-load"}
+            if options.suite in FIXTURE_PARALLEL_DOCKER_SUITES
             else 1
         )
         self.target_id: str | None = None
@@ -3161,7 +3212,7 @@ class DockerDriver(ManagedWorkerDriver):
     ) -> Mapping[str, Any]:
         enabled_providers = (
             list(FIXTURE_CONCURRENCY_PROVIDERS)
-            if self.options.suite in {"fixture-concurrency", "fixture-load"}
+            if self.options.suite in FIXTURE_PARALLEL_DOCKER_SUITES
             else [provider]
         )
         target = json_object(
@@ -3277,14 +3328,67 @@ class DockerDriver(ManagedWorkerDriver):
             "resources": resources,
         }
 
+    def _execution_worker_container(
+        self,
+        target_id: str,
+        execution_id: str,
+    ) -> tuple[dict[str, Any], dict[str, Any], str]:
+        worker = self._execution_worker_identity(target_id, execution_id)
+        pod_name = str(worker.get("podName") or "")
+        snapshots = self._wait_containers(target_id, self.desired_workers)
+        matches = [
+            snapshot
+            for snapshot in snapshots
+            if str(snapshot.get("Name") or "").lstrip("/") == pod_name
+        ]
+        if len(matches) != 1:
+            raise AcceptanceError(
+                "runner.docker_execution_worker_container_missing",
+                "The exact Execution Worker did not map to one managed Docker container.",
+                {
+                    "targetId": target_id,
+                    "executionId": execution_id,
+                    "workerId": worker.get("id"),
+                    "podName": pod_name,
+                    "candidateContainerNames": [
+                        str(snapshot.get("Name") or "").lstrip("/")
+                        for snapshot in snapshots
+                    ],
+                },
+            )
+        snapshot = matches[0]
+        config = json_object(snapshot.get("Config"), "docker inspect Config")
+        labels = json_object(config.get("Labels"), "docker inspect Config.Labels")
+        worker_index = labels.get("synara.io/worker-index")
+        if (
+            labels.get("synara.io/managed") != "true"
+            or labels.get("synara.io/execution-target-id") != target_id
+            or not isinstance(worker_index, str)
+            or re.fullmatch(r"[0-9]+", worker_index) is None
+        ):
+            raise AcceptanceError(
+                "runner.docker_execution_worker_container_contract_mismatch",
+                "The exact Execution Worker container omitted its managed Target labels.",
+                {
+                    "targetId": target_id,
+                    "executionId": execution_id,
+                    "workerId": worker.get("id"),
+                    "podName": pod_name,
+                    "managed": labels.get("synara.io/managed"),
+                    "labeledTargetId": labels.get("synara.io/execution-target-id"),
+                    "workerIndex": worker_index,
+                },
+            )
+        return snapshot, worker, worker_index
+
     def inject_failure(
         self,
         fault: str,
         target_id: str,
-        _execution_id: str,
+        execution_id: str,
     ) -> Mapping[str, Any]:
         if fault != "worker-network":
-            return super().inject_failure(fault, target_id, _execution_id)
+            return super().inject_failure(fault, target_id, execution_id)
         if not self.owns_network and not self.options.docker_allow_network_interruption:
             raise AcceptanceUnsupported(
                 "runner.docker_network_fault_not_authorized",
@@ -3294,14 +3398,17 @@ class DockerDriver(ManagedWorkerDriver):
                     "requiredInputs": ["--docker-allow-network-interruption"],
                 },
             )
-        snapshot = self._wait_container(target_id)
+        snapshot, before_worker, worker_index = self._execution_worker_container(
+            target_id,
+            execution_id,
+        )
         container_id = str(snapshot.get("Id") or "")
         if not container_id:
             raise AcceptanceError(
                 "runner.docker_container_id_missing",
                 "The managed Docker Worker omitted its container ID before network interruption.",
             )
-        before_worker = self._worker_identity(target_id)
+        container_name = str(snapshot.get("Name") or "").lstrip("/")
         started = time.monotonic()
         disconnected = False
         try:
@@ -3326,7 +3433,14 @@ class DockerDriver(ManagedWorkerDriver):
             "network": self.network_name,
             "networkOwnedByRunner": self.owns_network,
             "containerId": container_id[:12],
-            "workerId": before_worker.get("id") if before_worker else None,
+            "containerName": container_name,
+            "workerIndex": int(worker_index),
+            "executionId": execution_id,
+            "executionGeneration": before_worker.get("generation"),
+            "workerId": before_worker.get("id"),
+            "workerIncarnation": before_worker.get("incarnation"),
+            "workerPodName": before_worker.get("podName"),
+            "exactExecutionWorkerMatch": container_name == before_worker.get("podName"),
             "durationMs": elapsed_ms(started),
             "restored": True,
         }
@@ -6371,6 +6485,7 @@ class AcceptanceSuite:
         self.state = ScenarioState()
         self.cases: list[dict[str, Any]] = []
         self._failed_cases: set[str] = set()
+        self._fixture_load_session_cache: list[dict[str, Any]] | None = None
 
     @property
     def api(self) -> APIClient:
@@ -6400,6 +6515,9 @@ class AcceptanceSuite:
             return self.cases
         if self.options.suite == "fixture-load":
             self._run_fixture_load()
+            return self.cases
+        if self.options.suite == "fixture-load-failure":
+            self._run_fixture_load_failure()
             return self.cases
         if self.options.suite == "fixture-retention-concurrency":
             self._run_fixture_retention_concurrency()
@@ -6574,7 +6692,7 @@ class AcceptanceSuite:
             requires=("resources.credential-project-session",),
         )
 
-    def _run_fixture_load(self) -> None:
+    def _run_fixture_load_setup(self) -> None:
         self._case(
             "runtime.target-provision",
             "Provision a two-Worker managed Docker Target",
@@ -6593,11 +6711,29 @@ class AcceptanceSuite:
             self._create_resources,
             requires=("runtime.concurrent-worker-discovery",),
         )
+
+    def _run_fixture_load(self) -> None:
+        self._run_fixture_load_setup()
         self._case(
             "load.multi-session-admission-waves",
             "Run bounded multi-Session load with quota rejection, slot reuse, Artifacts, and Checkpoints",
             self._fixture_load_admission_waves,
             requires=("resources.credential-project-session",),
+        )
+
+    def _run_fixture_load_failure(self) -> None:
+        self._run_fixture_load_setup()
+        self._case(
+            "load.targeted-worker-network-recovery",
+            "Interrupt one exact busy Worker while its peer Session remains unchanged",
+            self._fixture_load_failure_isolation,
+            requires=("resources.credential-project-session",),
+        )
+        self._case(
+            "load.post-failure-admission-waves",
+            "Run bounded post-recovery load with quota rejection, slot reuse, Artifacts, and Checkpoints",
+            self._fixture_load_admission_waves,
+            requires=("load.targeted-worker-network-recovery",),
         )
 
     def _run_fixture_retention_concurrency(self) -> None:
@@ -10522,6 +10658,269 @@ class AcceptanceSuite:
             )
         return quota
 
+    def _start_fixture_load_failure_turn(
+        self,
+        session: Mapping[str, Any],
+        position: int,
+    ) -> dict[str, Any]:
+        session_id = str(session["sessionId"])
+        provider = str(session["provider"])
+        turn = self._create_turn(
+            f"[approval] fixture-load-failure-position-{position}",
+            session_id=session_id,
+        )
+        turn_id = self._turn_id(turn, "fixture load failure Turn")
+        interaction = self._wait_for_interaction(
+            turn_id,
+            "approval",
+            session_id=session_id,
+        )
+        active = self._active_approval_evidence(
+            turn_id,
+            interaction,
+            session_id=session_id,
+            provider=provider,
+        )
+        return {
+            "sessionId": session_id,
+            "provider": provider,
+            "turn": turn,
+            "interaction": interaction,
+            "active": active,
+        }
+
+    def _assert_fixture_load_session_unchanged(
+        self,
+        load_turn: Mapping[str, Any],
+        before_events: Sequence[Mapping[str, Any]],
+        before_pending: Sequence[Mapping[str, Any]],
+        stage: str,
+    ) -> None:
+        session_id = str(load_turn["sessionId"])
+        interaction = json_object(
+            load_turn.get("interaction"),
+            "load failure unaffected interaction",
+        )
+        after_events = self._all_events(session_id=session_id)
+        after_pending = self._pending_interactions(session_id)
+        if (
+            after_events != list(before_events)
+            or after_pending != list(before_pending)
+            or not self._interaction_pending(session_id, interaction)
+        ):
+            raise AcceptanceError(
+                "runner.load_failure_peer_session_mutated",
+                "The non-targeted load Session changed while its peer Worker recovered.",
+                {
+                    "stage": stage,
+                    "sessionId": session_id,
+                    "interactionId": interaction.get("id"),
+                    "beforeEventCount": len(before_events),
+                    "afterEventCount": len(after_events),
+                    "beforeInteractionCount": len(before_pending),
+                    "afterInteractionCount": len(after_pending),
+                },
+            )
+
+    def _complete_fixture_failure_turn(
+        self,
+        load_turn: Mapping[str, Any],
+        *,
+        expected_worker_id: str,
+        expected_generation: int,
+        expected_request_count: int,
+    ) -> dict[str, Any]:
+        session_id = str(load_turn["sessionId"])
+        turn = json_object(load_turn.get("turn"), "load failure Turn")
+        interaction = json_object(load_turn.get("interaction"), "load failure interaction")
+        resolution = self._resolve_approval_turn(
+            turn,
+            interaction,
+            session_id=session_id,
+        )
+        turn_id = self._turn_id(turn, "load failure Turn")
+        snapshot = self._turn_terminal_snapshot(turn_id, session_id=session_id)
+        if snapshot is None:
+            raise AcceptanceError(
+                "runner.load_failure_terminal_missing",
+                "A resolved load failure Turn had no terminal snapshot.",
+                {"sessionId": session_id, "turnId": turn_id},
+            )
+        terminal, events = snapshot
+        event_type_counts: dict[str, int] = {}
+        for event in events:
+            event_type = str(event.get("eventType") or "")
+            event_type_counts[event_type] = event_type_counts.get(event_type, 0) + 1
+        terminal_worker_id, terminal_generation = self._event_worker_identity(terminal)
+        invalid_terminal_types = [
+            event.get("eventType")
+            for event in events
+            if event.get("eventType") in TERMINAL_EVENT_TYPES
+            and event.get("eventType") != "execution.completed"
+        ]
+        if (
+            terminal.get("eventType") != "execution.completed"
+            or terminal_worker_id != expected_worker_id
+            or terminal_generation != expected_generation
+            or event_type_counts.get("request.opened", 0) != expected_request_count
+            or event_type_counts.get("request.resolved", 0) != 1
+            or event_type_counts.get("execution.completed", 0) != 1
+            or invalid_terminal_types
+        ):
+            raise AcceptanceError(
+                "runner.load_failure_terminal_invalid",
+                "A load failure Turn did not retain one Generation-fenced terminal path.",
+                {
+                    "sessionId": session_id,
+                    "turnId": turn_id,
+                    "expectedWorkerId": expected_worker_id,
+                    "terminalWorkerId": terminal_worker_id,
+                    "expectedGeneration": expected_generation,
+                    "terminalGeneration": terminal_generation,
+                    "expectedRequestCount": expected_request_count,
+                    "eventTypeCounts": dict(sorted(event_type_counts.items())),
+                    "invalidTerminalTypes": invalid_terminal_types,
+                },
+            )
+        return {
+            "sessionId": session_id,
+            "provider": load_turn.get("provider"),
+            "turnId": turn_id,
+            "executionId": terminal.get("executionId"),
+            "workerId": terminal_worker_id,
+            "generation": terminal_generation,
+            "resolution": resolution,
+            "eventTypeCounts": dict(sorted(event_type_counts.items())),
+            "sequenceRange": self._sequence_range(events),
+        }
+
+    def _fixture_load_failure_isolation(self) -> Mapping[str, Any]:
+        inject = getattr(self.driver, "inject_failure", None)
+        if not callable(inject):
+            raise AcceptanceUnsupported(
+                "runner.load_failure_injection_unsupported",
+                "The selected Target cannot inject the exact Worker network failure.",
+                {"target": self.driver.name},
+            )
+        preflight = getattr(self.driver, "validate_failure", None)
+        if callable(preflight):
+            preflight("worker-network")
+        quota = self._set_fixture_execution_quota(
+            FIXTURE_CONCURRENCY_WORKERS,
+            "load failure",
+            "runner.load_failure_quota_mismatch",
+        )
+        sessions = self._fixture_load_sessions()
+        active = [
+            self._start_fixture_load_failure_turn(sessions[0], 1),
+            self._start_fixture_load_failure_turn(sessions[1], 2),
+        ]
+        overlap = self._fixture_load_overlap(active, 0, "pre-fault")
+        quota_rejections = [
+            self._assert_fixture_load_quota_rejected(session, 0, position)
+            for position, session in enumerate(sessions[2:], start=3)
+        ]
+        affected, unaffected = active
+        affected_active = json_object(affected.get("active"), "affected load Execution")
+        unaffected_active = json_object(unaffected.get("active"), "unaffected load Execution")
+        unaffected_session_id = str(unaffected["sessionId"])
+        unaffected_events = self._all_events(session_id=unaffected_session_id)
+        unaffected_pending = self._pending_interactions(unaffected_session_id)
+        recovery, replacement = self._recover_pending_approval_context(
+            {
+                "turn": json_object(affected.get("turn"), "affected load Turn"),
+                "interaction": json_object(
+                    affected.get("interaction"),
+                    "affected load interaction",
+                ),
+            },
+            session_id=str(affected["sessionId"]),
+            recover=lambda target_id, execution_id: inject(
+                "worker-network",
+                target_id,
+                execution_id,
+            ),
+        )
+        target_recovery = json_object(
+            recovery.get("targetRecovery"),
+            "targeted load failure recovery",
+        )
+        if (
+            target_recovery.get("executionId") != affected_active.get("executionId")
+            or target_recovery.get("workerId") != affected_active.get("workerId")
+            or target_recovery.get("executionGeneration") != affected_active.get("generation")
+            or target_recovery.get("exactExecutionWorkerMatch") is not True
+        ):
+            raise AcceptanceError(
+                "runner.load_failure_target_mismatch",
+                "The Worker network interruption did not prove an exact Execution-to-container match.",
+                {
+                    "affected": affected_active,
+                    "targetRecovery": target_recovery,
+                },
+            )
+        self._assert_fixture_load_session_unchanged(
+            unaffected,
+            unaffected_events,
+            unaffected_pending,
+            "after-target-recovery",
+        )
+        recovered_affected = {**affected, "interaction": replacement}
+        affected_terminal = self._complete_fixture_failure_turn(
+            recovered_affected,
+            expected_worker_id=str(recovery["replacementWorkerId"]),
+            expected_generation=int(recovery["replacementGeneration"]),
+            expected_request_count=2,
+        )
+        self._assert_fixture_load_session_unchanged(
+            unaffected,
+            unaffected_events,
+            unaffected_pending,
+            "after-target-terminal",
+        )
+        unaffected_terminal = self._complete_fixture_failure_turn(
+            unaffected,
+            expected_worker_id=str(unaffected_active["workerId"]),
+            expected_generation=int(unaffected_active["generation"]),
+            expected_request_count=1,
+        )
+        leaked = {
+            str(session["sessionId"]): self._pending_interactions(str(session["sessionId"]))
+            for session in sessions
+        }
+        leaked = {session_id: items for session_id, items in leaked.items() if items}
+        if leaked:
+            raise AcceptanceError(
+                "runner.load_failure_interaction_leaked",
+                "The targeted Worker recovery left pending interactions behind.",
+                {
+                    "sessions": {
+                        session_id: [item.get("id") for item in items]
+                        for session_id, items in leaked.items()
+                    }
+                },
+            )
+        return {
+            "maxConcurrentExecutions": quota.get("maxConcurrentExecutions"),
+            "workers": FIXTURE_CONCURRENCY_WORKERS,
+            "sessions": FIXTURE_LOAD_SESSIONS,
+            "providers": list(FIXTURE_CONCURRENCY_PROVIDERS),
+            "overlap": overlap,
+            "quotaRejections": quota_rejections,
+            "affected": affected_active,
+            "unaffected": unaffected_active,
+            "recovery": recovery,
+            "affectedTerminal": affected_terminal,
+            "unaffectedTerminal": unaffected_terminal,
+            "peerSessionEventsUnchanged": True,
+            "peerInteractionIdentityUnchanged": True,
+            "peerWorkerAndGenerationUnchanged": True,
+            "targetedGenerationFenced": True,
+            "terminalCount": 2,
+            "duplicateTerminal": False,
+            "pendingInteractionCount": 0,
+        }
+
     def _fixture_load_admission_waves(self) -> Mapping[str, Any]:
         wave_count = self.options.load_waves
         if not FIXTURE_LOAD_MIN_WAVES <= wave_count <= FIXTURE_LOAD_MAX_WAVES:
@@ -10721,6 +11120,8 @@ class AcceptanceSuite:
         }
 
     def _fixture_load_sessions(self) -> list[dict[str, Any]]:
+        if self._fixture_load_session_cache is not None:
+            return [dict(session) for session in self._fixture_load_session_cache]
         primary_provider = self.options.provider
         if primary_provider not in FIXTURE_CONCURRENCY_PROVIDERS:
             raise AcceptanceError(
@@ -10779,7 +11180,8 @@ class AcceptanceSuite:
                 "The fixture load suite did not create four distinct Sessions.",
                 {"sessionIds": sorted(session_ids)},
             )
-        return sessions
+        self._fixture_load_session_cache = [dict(session) for session in sessions]
+        return [dict(session) for session in sessions]
 
     def _start_fixture_load_turn(
         self,
@@ -11264,16 +11666,39 @@ class AcceptanceSuite:
             )
         return self._recover_pending_approval_with(recover)
 
-    def _recover_pending_approval_with(
+    def _request_opened_identity(
         self,
-        recover: Callable[[str, str], Mapping[str, Any]],
-    ) -> Mapping[str, Any]:
-        pending = self.state.pending_approval
-        if pending is None:
+        events: Sequence[Mapping[str, Any]],
+        execution_id: str,
+        request_id: str,
+        description: str,
+    ) -> tuple[str, int]:
+        matches = []
+        for event in events:
+            if event.get("executionId") != execution_id or event.get("eventType") != "request.opened":
+                continue
+            payload = event.get("payload")
+            if isinstance(payload, Mapping) and payload.get("requestId") == request_id:
+                matches.append(event)
+        if len(matches) != 1:
             raise AcceptanceError(
-                "runner.pending_approval_missing",
-                "The pending Approval barrier was unavailable for runtime recovery.",
+                "runner.pending_interaction_request_event_invalid",
+                f"The {description} did not map to exactly one request.opened Event.",
+                {
+                    "executionId": execution_id,
+                    "requestId": request_id,
+                    "matchCount": len(matches),
+                },
             )
+        return self._event_worker_identity(matches[0])
+
+    def _recover_pending_approval_context(
+        self,
+        pending: Mapping[str, Any],
+        *,
+        session_id: str,
+        recover: Callable[[str, str], Mapping[str, Any]],
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
         turn = json_object(pending.get("turn"), "pending approval turn")
         interaction = json_object(pending.get("interaction"), "pending approval interaction")
         turn_id = turn.get("id")
@@ -11295,17 +11720,47 @@ class AcceptanceSuite:
                 "The pending Approval barrier omitted its Turn, Interaction, Execution, or Request identity.",
                 {"turn": turn, "interaction": interaction},
             )
+        primary_session = session_id == self.state.session_id
+        before_events = (
+            self._all_events()
+            if primary_session
+            else self._all_events(session_id=session_id)
+        )
+        stale_worker_id, stale_generation = self._request_opened_identity(
+            before_events,
+            execution_id,
+            request_id,
+            "pending Approval",
+        )
         before_sequence = max(
-            self.state.last_sequence,
-            max((int(event.get("sequence") or 0) for event in self._all_events()), default=0),
+            max((int(event.get("sequence") or 0) for event in before_events), default=0),
+            self.state.last_sequence if primary_session else 0,
         )
         target_evidence = recover(self._required("target_id"), execution_id)
         recovery_event = self._wait_for_execution_event(
             execution_id,
             "execution.recovering",
             after_sequence=before_sequence,
+            session_id=None if primary_session else session_id,
         )
-        replacement = self._wait_for_replacement_interaction(turn_id, "approval", previous_interaction_id)
+        recovery_worker_id, recovery_generation = self._event_worker_identity(recovery_event)
+        if recovery_worker_id != stale_worker_id or recovery_generation != stale_generation:
+            raise AcceptanceError(
+                "runner.pending_interaction_recovery_event_identity_invalid",
+                "The recovery Event did not fence the stale Worker Generation.",
+                {
+                    "staleWorkerId": stale_worker_id,
+                    "recoveryWorkerId": recovery_worker_id,
+                    "staleGeneration": stale_generation,
+                    "recoveryGeneration": recovery_generation,
+                },
+            )
+        replacement = self._wait_for_replacement_interaction(
+            turn_id,
+            "approval",
+            previous_interaction_id,
+            session_id=None if primary_session else session_id,
+        )
         replacement_execution_id = replacement.get("executionId")
         replacement_request_id = replacement.get("requestId")
         if (
@@ -11339,7 +11794,32 @@ class AcceptanceSuite:
                     "replacementExecutionId": replacement_execution_id,
                 },
             )
-        target_runtime = self.driver.observe_execution(self._required("target_id"), replacement_execution_id)
+        after_events = (
+            self._all_events()
+            if primary_session
+            else self._all_events(session_id=session_id)
+        )
+        replacement_worker_id, replacement_generation = self._request_opened_identity(
+            after_events,
+            replacement_execution_id,
+            replacement_request_id,
+            "replacement Approval",
+        )
+        if replacement_generation != stale_generation + 1:
+            raise AcceptanceError(
+                "runner.pending_interaction_generation_not_advanced",
+                "Pending Approval recovery did not advance exactly one Execution Generation.",
+                {
+                    "staleGeneration": stale_generation,
+                    "replacementGeneration": replacement_generation,
+                    "staleWorkerId": stale_worker_id,
+                    "replacementWorkerId": replacement_worker_id,
+                },
+            )
+        target_runtime = self.driver.observe_execution(
+            self._required("target_id"),
+            replacement_execution_id,
+        )
         deleted_uid = target_evidence.get("deletedPodUid") if isinstance(target_evidence, Mapping) else None
         replacement_uid = target_runtime.get("podUid") if isinstance(target_runtime, Mapping) else None
         if isinstance(deleted_uid, str) and isinstance(replacement_uid, str) and deleted_uid == replacement_uid:
@@ -11348,19 +11828,46 @@ class AcceptanceSuite:
                 "Pending Approval recovery reused the deleted execution-pinned runtime identity.",
                 {"deletedPodUid": deleted_uid, "replacementPodUid": replacement_uid},
             )
-        self.state.pending_approval = {"turn": turn, "interaction": replacement}
-        return {
-            "turnId": turn_id,
-            "staleInteractionId": previous_interaction_id,
-            "staleRequestId": request_id,
-            "staleExecutionId": execution_id,
-            "recoveryEvent": self._event_summary(recovery_event),
-            "replacementInteractionId": replacement.get("id"),
-            "replacementRequestId": replacement_request_id,
-            "replacementExecutionId": replacement_execution_id,
-            "targetRecovery": dict(target_evidence),
-            "targetRuntime": dict(target_runtime),
+        return (
+            {
+                "turnId": turn_id,
+                "staleInteractionId": previous_interaction_id,
+                "staleRequestId": request_id,
+                "staleExecutionId": execution_id,
+                "staleWorkerId": stale_worker_id,
+                "staleGeneration": stale_generation,
+                "recoveryEvent": self._event_summary(recovery_event),
+                "replacementInteractionId": replacement.get("id"),
+                "replacementRequestId": replacement_request_id,
+                "replacementExecutionId": replacement_execution_id,
+                "replacementWorkerId": replacement_worker_id,
+                "replacementGeneration": replacement_generation,
+                "targetRecovery": dict(target_evidence),
+                "targetRuntime": dict(target_runtime),
+            },
+            replacement,
+        )
+
+    def _recover_pending_approval_with(
+        self,
+        recover: Callable[[str, str], Mapping[str, Any]],
+    ) -> Mapping[str, Any]:
+        pending = self.state.pending_approval
+        if pending is None:
+            raise AcceptanceError(
+                "runner.pending_approval_missing",
+                "The pending Approval barrier was unavailable for runtime recovery.",
+            )
+        evidence, replacement = self._recover_pending_approval_context(
+            pending,
+            session_id=self._required("session_id"),
+            recover=recover,
+        )
+        self.state.pending_approval = {
+            "turn": json_object(pending.get("turn"), "pending approval turn"),
+            "interaction": replacement,
         }
+        return evidence
 
     def _user_input_resolution(self) -> Mapping[str, Any]:
         turn = self._create_turn("[user-input]")
@@ -12091,8 +12598,10 @@ class AcceptanceSuite:
         turn_id: str,
         kind: str,
         previous_interaction_id: str,
+        *,
+        session_id: str | None = None,
     ) -> dict[str, Any]:
-        session_id = self._required("session_id")
+        session_id = session_id or self._required("session_id")
 
         def interaction_probe() -> dict[str, Any] | None:
             snapshot = json_object(
@@ -12312,6 +12821,7 @@ def markdown_from_report(report: Mapping[str, Any]) -> str:
     fixture_soak = report.get("mode") == "fixture-soak"
     fixture_concurrency = report.get("mode") == "fixture-concurrency"
     fixture_load = report.get("mode") == "fixture-load"
+    fixture_load_failure = report.get("mode") == "fixture-load-failure"
     fixture_retention_concurrency = report.get("mode") == "fixture-retention-concurrency"
     configuration = report.get("configuration")
     failure_matrix = configuration.get("failureMatrix") if isinstance(configuration, dict) else None
@@ -12319,6 +12829,7 @@ def markdown_from_report(report: Mapping[str, Any]) -> str:
     soak = configuration.get("soak") if isinstance(configuration, dict) else None
     concurrency = configuration.get("concurrency") if isinstance(configuration, dict) else None
     load = configuration.get("load") if isinstance(configuration, dict) else None
+    load_failure = configuration.get("loadFailure") if isinstance(configuration, dict) else None
     retention_concurrency = (
         configuration.get("retentionConcurrency") if isinstance(configuration, dict) else None
     )
@@ -12333,6 +12844,8 @@ def markdown_from_report(report: Mapping[str, Any]) -> str:
             if real_provider_smoke
             else "# Stage 3 Provider Fixture Retention Concurrency Acceptance"
             if fixture_retention_concurrency
+            else "# Stage 3 Provider Fixture Load Failure Acceptance"
+            if fixture_load_failure
             else "# Stage 3 Provider Fixture Load Acceptance"
             if fixture_load
             else "# Stage 3 Provider Fixture Concurrency Acceptance"
@@ -12366,7 +12879,7 @@ def markdown_from_report(report: Mapping[str, Any]) -> str:
             and isinstance(retention_concurrency, dict)
             and isinstance(retention_concurrency.get("boundary"), str)
             else str(load.get("boundary"))
-            if fixture_load
+            if (fixture_load or fixture_load_failure)
             and isinstance(load, dict)
             and isinstance(load.get("boundary"), str)
             else str(concurrency.get("boundary"))
@@ -12404,7 +12917,18 @@ def markdown_from_report(report: Mapping[str, Any]) -> str:
                 "```",
             ]
         )
-    if fixture_load and isinstance(load, dict):
+    if fixture_load_failure and isinstance(load_failure, dict):
+        lines.extend(
+            [
+                "",
+                "## Requested fixture load failure",
+                "",
+                "```json",
+                json.dumps(load_failure, indent=2, sort_keys=True, ensure_ascii=False),
+                "```",
+            ]
+        )
+    if (fixture_load or fixture_load_failure) and isinstance(load, dict):
         lines.extend(
             [
                 "",
@@ -12650,8 +13174,8 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
         choices=SUITES,
         help=(
             "Acceptance suite: deterministic fixture, deterministic long-session soak, managed Docker "
-            "multi-Provider concurrency, bounded Docker load/admission, Local retention concurrency, or real "
-            "Provider smoke"
+            "multi-Provider concurrency, bounded Docker load/admission, targeted Docker failure under load, "
+            "Local retention concurrency, or real Provider smoke"
         ),
     )
     parser.add_argument("--output-dir", type=pathlib.Path)
@@ -12778,7 +13302,7 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
         "--load-waves",
         type=int,
         help=(
-            "Four-Session fixture-load waves (default: 25; allowed: "
+            "Four-Session load waves for fixture-load or fixture-load-failure (default: 25; allowed: "
             f"{FIXTURE_LOAD_MIN_WAVES}..{FIXTURE_LOAD_MAX_WAVES})"
         ),
     )
@@ -12795,7 +13319,7 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
         parsed.load_waves
         if parsed.load_waves is not None
         else FIXTURE_LOAD_DEFAULT_WAVES
-        if parsed.suite == "fixture-load"
+        if parsed.suite in FIXTURE_LOAD_SUITES
         else 0
     )
     default_timeout = (
@@ -12823,9 +13347,9 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
             parser.error("--suite fixture-soak requires Control Plane restart continuity")
         if parsed.failure_only:
             parser.error("--suite fixture-soak cannot be combined with --failure-only")
-    if parsed.suite != "fixture-load" and parsed.load_waves is not None:
-        parser.error("--load-waves requires --suite fixture-load")
-    if parsed.suite == "fixture-load" and not (
+    if parsed.suite not in FIXTURE_LOAD_SUITES and parsed.load_waves is not None:
+        parser.error("--load-waves requires --suite fixture-load or fixture-load-failure")
+    if parsed.suite in FIXTURE_LOAD_SUITES and not (
         FIXTURE_LOAD_MIN_WAVES <= load_waves <= FIXTURE_LOAD_MAX_WAVES
     ):
         parser.error(
@@ -12951,12 +13475,12 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
             parser.error(
                 "--suite fixture-concurrency cannot be combined with fixture failure/canary options"
             )
-    if parsed.suite == "fixture-load":
+    if parsed.suite in FIXTURE_LOAD_SUITES:
         if parsed.target != "docker":
-            parser.error("--suite fixture-load currently requires --target docker")
+            parser.error(f"--suite {parsed.suite} currently requires --target docker")
         if failure_cases or parsed.failure_only:
             parser.error(
-                "--suite fixture-load cannot be combined with fixture failure/canary options"
+                f"--suite {parsed.suite} cannot be combined with fixture failure/canary options"
             )
     if parsed.suite == "fixture-retention-concurrency":
         if parsed.target != "local":
@@ -13022,7 +13546,12 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
         restart_control_plane=(
             not parsed.no_restart_control_plane
             and parsed.suite
-            not in {"fixture-concurrency", "fixture-load", "fixture-retention-concurrency"}
+            not in {
+                "fixture-concurrency",
+                "fixture-load",
+                "fixture-load-failure",
+                "fixture-retention-concurrency",
+            }
         ),
         soak_turns=soak_turns,
         soak_restart_every=soak_restart_every,
@@ -13168,12 +13697,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     real_provider_smoke = options.suite == "real-provider-smoke"
     fixture_concurrency = options.suite == "fixture-concurrency"
     fixture_load = options.suite == "fixture-load"
+    fixture_load_failure = options.suite == "fixture-load-failure"
+    fixture_load_suite = options.suite in FIXTURE_LOAD_SUITES
     fixture_retention_concurrency = options.suite == "fixture-retention-concurrency"
     mode = (
         "real-provider-smoke"
         if real_provider_smoke
         else "fixture-retention-concurrency"
         if fixture_retention_concurrency
+        else "fixture-load-failure"
+        if fixture_load_failure
         else "fixture-load"
         if fixture_load
         else "fixture-concurrency"
@@ -13203,6 +13736,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             if fixture_retention_concurrency
             else (
                 "deterministic Codex and Claude Provider Host fixtures over one real Control Plane and two managed "
+                "Docker agentd Workers; four Sessions prove exact Execution-to-Worker-to-container network fault "
+                "targeting, peer-Session isolation, one-step Generation fencing, unique terminal paths, then "
+                "bounded quota rejection, slot reuse and durable Artifact/Checkpoint completion; deterministic "
+                "single-host mechanics only, not real Provider, multi-host, multi-node, SLA, or production-duration load"
+                if fixture_load_failure
+                else (
+                "deterministic Codex and Claude Provider Host fixtures over one real Control Plane and two managed "
                 "Docker agentd Workers; four Sessions run repeated quota rejection, immediate slot reuse, three "
                 "overlap observations per wave and durable Artifact/Checkpoint completion; bounded admission/load "
                 "mechanics only, not real Provider, production performance, multi-node, or production-duration load"
@@ -13213,6 +13753,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "overlap, not real Provider, load, remote Target, or production concurrency"
                     if fixture_concurrency
                     else "deterministic Provider Host fixture over real Control Plane, agentd, Worker Protocol, and Target paths"
+                )
                 )
             )
         )
@@ -13251,23 +13792,38 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "boundary": evidence_boundary if fixture_concurrency else None,
             },
             "load": {
-                "workers": FIXTURE_CONCURRENCY_WORKERS if fixture_load else 0,
-                "sessions": FIXTURE_LOAD_SESSIONS if fixture_load else 0,
-                "waves": options.load_waves if fixture_load else 0,
+                "workers": FIXTURE_CONCURRENCY_WORKERS if fixture_load_suite else 0,
+                "sessions": FIXTURE_LOAD_SESSIONS if fixture_load_suite else 0,
+                "waves": options.load_waves if fixture_load_suite else 0,
                 "plannedExecutions": (
-                    FIXTURE_LOAD_SESSIONS * options.load_waves if fixture_load else 0
+                    FIXTURE_LOAD_SESSIONS * options.load_waves if fixture_load_suite else 0
                 ),
                 "plannedQuotaRejections": (
                     (FIXTURE_LOAD_SESSIONS - FIXTURE_CONCURRENCY_WORKERS)
                     * options.load_waves
-                    if fixture_load
+                    if fixture_load_suite
                     else 0
                 ),
-                "providers": list(FIXTURE_CONCURRENCY_PROVIDERS) if fixture_load else [],
+                "providers": list(FIXTURE_CONCURRENCY_PROVIDERS) if fixture_load_suite else [],
                 "maxConcurrentExecutions": (
-                    FIXTURE_CONCURRENCY_WORKERS if fixture_load else None
+                    FIXTURE_CONCURRENCY_WORKERS if fixture_load_suite else None
                 ),
-                "boundary": evidence_boundary if fixture_load else None,
+                "boundary": evidence_boundary if fixture_load_suite else None,
+            },
+            "loadFailure": {
+                "fault": "worker-network" if fixture_load_failure else None,
+                "targeting": (
+                    "agent_executions.worker_id -> worker_instances.pod_name -> exact managed container"
+                    if fixture_load_failure
+                    else None
+                ),
+                "networkOutageSeconds": (
+                    options.network_outage_seconds if fixture_load_failure else 0
+                ),
+                "activeSessions": 2 if fixture_load_failure else 0,
+                "quotaRejectedSessions": 2 if fixture_load_failure else 0,
+                "postRecoveryWaves": options.load_waves if fixture_load_failure else 0,
+                "boundary": evidence_boundary if fixture_load_failure else None,
             },
             "retentionConcurrency": {
                 "target": "local" if fixture_retention_concurrency else None,
@@ -13374,7 +13930,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "memoryBytes": options.docker_memory_bytes,
                 "nanoCpus": options.docker_nano_cpus,
                 "desiredWorkers": (
-                    FIXTURE_CONCURRENCY_WORKERS if fixture_concurrency else 1
+                    FIXTURE_CONCURRENCY_WORKERS
+                    if fixture_concurrency or fixture_load_suite
+                    else 1
                 ),
                 "allowOperatorNetworkInterruption": options.docker_allow_network_interruption,
             }

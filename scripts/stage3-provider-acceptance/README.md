@@ -98,6 +98,30 @@ This gate proves deterministic bounded quota/admission, two-Worker overlap, repe
 Artifact/Checkpoint completion and unique terminal mechanics. It is not a real Codex/Claude performance result,
 multi-node evidence, a production latency SLA, sustained production load or a production-duration soak.
 
+## Deterministic targeted failure under load
+
+`--suite fixture-load-failure` reuses the same two managed Docker Workers and four Codex/Claude Sessions. With both
+Execution slots occupied and the other two Sessions rejected without side effects, it resolves the selected
+Execution through `agent_executions.worker_id -> worker_instances.pod_name` to one exact managed container and
+disconnects only that container from the runner-owned Docker network. The peer Session must retain byte-for-byte
+identical Events and pending Interaction identity while the selected Execution emits `execution.recovering`, advances
+exactly one Generation, replaces its Request and Interaction, and reaches one terminal path. The peer then completes
+on its original Worker/Generation. The same four Sessions immediately continue through the bounded load/admission
+waves above, including quota rejection, slot reuse, generated Artifacts and ready Checkpoints.
+
+```sh
+python3 scripts/stage3-provider-acceptance/acceptance_runner.py \
+  --suite fixture-load-failure \
+  --target docker \
+  --provider codex \
+  --load-waves 25 \
+  --timeout 900
+```
+
+This gate proves deterministic single-host failure targeting, peer isolation and post-recovery load mechanics. It
+does not replace real Provider, multi-host, Kubernetes multi-node, production SLA or production-duration soak
+evidence.
+
 ## Deterministic Retention/Cleanup concurrency
 
 `--suite fixture-retention-concurrency` runs only on the isolated Local Target. It first creates a terminal generated
