@@ -19,10 +19,12 @@
 - **预计工作量**：XL
 - **风险**：HIGH
 - **计划基线分支**：`codex/saas-tenancy-user`
-- **最近稳定检查点**：`e944b449`（clean-SHA managed Docker `fixture-load` 9/9 已通过四 Session、两个
-  Worker、25 波次下的 `100/100` 唯一 Execution、`50/50` 无副作用 quota rejection、`50/50` slot reuse 与
-  `75/75` simultaneous overlap；正式证据见 `docs/reports/stage-3-docker-fixture-load-e944b449.md`。Local
-  Retention/Cleanup 的 clean checkpoint 仍为 `c27914da`，managed Docker Provider concurrency 为 `eeb7a2f1`，
+- **最近稳定检查点**：`ab88798d`（clean-SHA managed Docker `fixture-load-failure` 10/10 已通过指定
+  Execution 到 Worker/container 的精确网络故障命中、Peer Session/Event/Interaction/Generation 不变、受影响
+  Execution Generation `1 -> 2` 与唯一终态；恢复后同四 Session 再通过 25 波次下的 `100/100` 唯一
+  Execution、`50/50` 无副作用 quota rejection/slot reuse 和 `75/75` overlap。正式证据见
+  `docs/reports/stage-3-docker-fixture-load-failure-ab88798d.md`。纯 load/admission 的 clean checkpoint 为
+  `e944b449`，Local Retention/Cleanup 为 `c27914da`，managed Docker Provider concurrency 为 `eeb7a2f1`，
   deterministic Local `100/100` Turn soak 为 `6e866a30`，managed Docker immutable rollout 为 `d3af9380`。
   真实 Codex/Claude consolidated Local product/failure 四矩阵的 clean checkpoint 仍为 `253052aa`，Kubernetes
   deterministic fixture 13/13 的历史 clean checkpoint 仍为 `2763ebd3`）
@@ -30,6 +32,7 @@
 - **发布文档**：
   `docs/release-checklists/stage-3-provider-runtime-remote-worker.md`、
   `docs/runbooks/worker-release-rollout.md`、
+  `docs/reports/stage-3-docker-fixture-load-failure-ab88798d.md`、
   `docs/reports/stage-3-docker-fixture-load-e944b449.md`、
   `docs/reports/stage-3-local-fixture-retention-concurrency-c27914da.md`、
   `docs/reports/stage-3-docker-fixture-concurrency-eeb7a2f1.md`、
@@ -1585,6 +1588,20 @@ Provider × Capability × Execution Target
   managed Docker load/admission mechanics，不关闭真实
   Provider、multi-host/Kubernetes multi-node、failure injection under load、生产 SLA 或 production-duration
   load/soak。完整证据见 `docs/reports/stage-3-docker-fixture-load-e944b449.md`。
+- 新增 `fixture-load-failure`，复用同一 managed Docker 双 Worker、四 Session、quota/load、Provider fixture、
+  report、Secret scan 与 cleanup 路径；通过 isolated metadata 中的
+  `agent_executions.worker_id -> worker_instances.pod_name` 将一个 active Execution 精确映射到带 Target/worker
+  index 标签的唯一容器，只中断该容器的 runner-owned network。Clean commit `ab88798d` 的 canonical run 在
+  两个 Session 同时 pending、另两个 Session 无副作用 quota rejection 时，证明 Peer Session 的 Event、
+  Interaction、Worker 与 Generation 不变；受影响 Execution 保持同一 ID，将 Request/Interaction 替换并从
+  Generation 1 精确前进到 2，两边各一个 terminal。随后同四 Session 完成 25 波次、`100/100` 唯一 Execution、
+  `50/50` quota rejection/slot reuse、`75/75` overlap、Artifact Ready `200` 与 Checkpoint Ready `100`。
+  正式 report `10/10`、Runner unit `133/133`、Stage 3 Python `245/245`、focused Go、`bun fmt`、`bun lint`
+  （0 errors / 238 existing warnings）和 `bun typecheck`（9/9）均通过；10 files / 2,687,660 bytes Secret scan
+  finding 为零，精确 cleanup 后 owner 资源零残留。该结果只关闭 deterministic single-host managed Docker
+  network failure targeting under load，不关闭真实 Provider、multi-host/Kubernetes multi-node、process/container
+  loss、生产 SLA 或 production-duration load/soak。完整证据见
+  `docs/reports/stage-3-docker-fixture-load-failure-ab88798d.md`。
 
 ## 18. 实施顺序
 
@@ -1663,8 +1680,10 @@ Provider × Capability × Execution Target
   Approval overlap 与隔离终态；clean commit `c27914da` 通过 deterministic Local active-Execution Retention
   fencing、并行无引用 Artifact 删除、Checkpoint lineage 保护与终态后物理 Workspace cleanup；clean commit
   `e944b449` 通过 managed Docker 四 Session、25 波次、100 Execution 的 deterministic bounded quota/admission、
-  slot reuse、双 Worker overlap 与 Artifact/Checkpoint completion mechanics。SSH、Docker、Kubernetes 真实
-  Provider Gate、真实 Provider 并发/Retention/load、multi-node、failure injection under load 和
+  slot reuse、双 Worker overlap 与 Artifact/Checkpoint completion mechanics；clean commit `ab88798d` 进一步
+  通过一个 exact Execution-to-Worker-to-container network fault、Peer Session 隔离、Generation 1 -> 2 fencing
+  与同四 Session 的完整 post-recovery load mechanics。SSH、Docker、Kubernetes 真实 Provider Gate、真实 Provider
+  并发/Retention/load/failure、multi-host/Kubernetes multi-node、process/container/rollout failure under load 和
   production-duration soak 尚未完成。
 
 ### Step 8：文档、Runbook 与发布门禁
