@@ -19,18 +19,18 @@
 - **预计工作量**：XL
 - **风险**：HIGH
 - **计划基线分支**：`codex/saas-tenancy-user`
-- **最近稳定检查点**：`c27914da`（clean-SHA Local `fixture-retention-concurrency` 9/9 已通过 active
-  Approval Execution 下的 Session/Workspace cleanup fencing、并行无引用 Artifact 删除、Checkpoint lineage
-  保护与终态后单次物理 cleanup；正式证据见
-  `docs/reports/stage-3-local-fixture-retention-concurrency-c27914da.md`。managed Docker Provider concurrency
-  的 clean checkpoint 仍为 `eeb7a2f1`，deterministic Local `100/100` Turn soak 为 `6e866a30`，managed
-  Docker immutable rollout 为 `d3af9380`。真实 Codex/Claude consolidated Local product/failure 四矩阵的
-  clean checkpoint 仍为 `253052aa`，Kubernetes deterministic fixture 13/13 的历史 clean checkpoint 仍为
-  `2763ebd3`）
+- **最近稳定检查点**：`e944b449`（clean-SHA managed Docker `fixture-load` 9/9 已通过四 Session、两个
+  Worker、25 波次下的 `100/100` 唯一 Execution、`50/50` 无副作用 quota rejection、`50/50` slot reuse 与
+  `75/75` simultaneous overlap；正式证据见 `docs/reports/stage-3-docker-fixture-load-e944b449.md`。Local
+  Retention/Cleanup 的 clean checkpoint 仍为 `c27914da`，managed Docker Provider concurrency 为 `eeb7a2f1`，
+  deterministic Local `100/100` Turn soak 为 `6e866a30`，managed Docker immutable rollout 为 `d3af9380`。
+  真实 Codex/Claude consolidated Local product/failure 四矩阵的 clean checkpoint 仍为 `253052aa`，Kubernetes
+  deterministic fixture 13/13 的历史 clean checkpoint 仍为 `2763ebd3`）
 - **工作区状态**：Stage 3 持续执行中，执行时以当前分支和已验证证据为准
 - **发布文档**：
   `docs/release-checklists/stage-3-provider-runtime-remote-worker.md`、
   `docs/runbooks/worker-release-rollout.md`、
+  `docs/reports/stage-3-docker-fixture-load-e944b449.md`、
   `docs/reports/stage-3-local-fixture-retention-concurrency-c27914da.md`、
   `docs/reports/stage-3-docker-fixture-concurrency-eeb7a2f1.md`、
   `docs/reports/stage-3-local-fixture-soak-6e866a30.md`、
@@ -1574,6 +1574,17 @@ Provider × Capability × Execution Target
   该结果只关闭 deterministic Local active-Execution/Retention/physical-cleanup mechanics，不关闭真实 Provider、
   remote Target、multi-node、load、生产时长或生产 Retention。完整证据见
   `docs/reports/stage-3-local-fixture-retention-concurrency-c27914da.md`。
+- 新增 `fixture-load`，泛化现有 managed Docker concurrency 路径，不新增第二套 Target Driver、Provider
+  fixture、资源 owner 或 cleanup。Clean commit `e944b449` 的 canonical run 固定两个 agentd Worker、四个
+  Codex/Claude Session、Tenant 并发配额 `2` 和 `25` 波次；每波四个 Approval Turn 都包含 Text、Tool、Usage、
+  Credential、generated Artifact 与 Ready Checkpoint。正式结果为 `100/100` 唯一 Execution、`50/50`
+  `execution_quota_exceeded` 且 Session Event/Interaction 无副作用、释放槽位后 `50/50` 重试成功、`75/75`
+  双 Worker overlap；Artifact Ready `200`、Checkpoint Ready `100`，无双执行/重复终态。Runner unit
+  `126/126`、Stage 3 Python `238/238` 与 quotas/sessions/executions/agentd focused Go tests 通过；精确 cleanup
+  owner 资源零残留，10 files / 2,513,498 bytes Secret scan finding 为零。该结果只关闭 deterministic bounded
+  managed Docker load/admission mechanics，不关闭真实
+  Provider、multi-host/Kubernetes multi-node、failure injection under load、生产 SLA 或 production-duration
+  load/soak。完整证据见 `docs/reports/stage-3-docker-fixture-load-e944b449.md`。
 
 ## 18. 实施顺序
 
@@ -1650,9 +1661,11 @@ Provider × Capability × Execution Target
   deterministic Local `100` Turn、重复 restart、Event pagination 与 repeated Checkpoint mechanics；clean
   commit `eeb7a2f1` 通过 managed Docker 双 Worker、Codex/Claude 双 Session 的 deterministic simultaneous
   Approval overlap 与隔离终态；clean commit `c27914da` 通过 deterministic Local active-Execution Retention
-  fencing、并行无引用 Artifact 删除、Checkpoint lineage 保护与终态后物理 Workspace cleanup。SSH、Docker、
-  Kubernetes 真实 Provider Gate、真实 Provider 并发/Retention、multi-node、load 和 production-duration soak
-  尚未完成。
+  fencing、并行无引用 Artifact 删除、Checkpoint lineage 保护与终态后物理 Workspace cleanup；clean commit
+  `e944b449` 通过 managed Docker 四 Session、25 波次、100 Execution 的 deterministic bounded quota/admission、
+  slot reuse、双 Worker overlap 与 Artifact/Checkpoint completion mechanics。SSH、Docker、Kubernetes 真实
+  Provider Gate、真实 Provider 并发/Retention/load、multi-node、failure injection under load 和
+  production-duration soak 尚未完成。
 
 ### Step 8：文档、Runbook 与发布门禁
 

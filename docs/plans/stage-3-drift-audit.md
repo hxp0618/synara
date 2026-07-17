@@ -1,8 +1,9 @@
 # Stage 3 Drift Audit
 
-Baseline: `codex/saas-tenancy-user` after clean commit `c27914da`, including the deterministic Local active-Execution
-Retention/Cleanup concurrency gate, the deterministic managed Docker two-Worker/two-Session Provider concurrency
-gate, the deterministic Local 100-Turn fixture soak and the earlier managed Docker Worker Release rollout gate. The
+Baseline: `codex/saas-tenancy-user` after clean commit `e944b449`, including the deterministic managed Docker
+four-Session bounded load/admission gate, the deterministic Local active-Execution Retention/Cleanup concurrency
+gate, the deterministic managed Docker two-Worker/two-Session Provider concurrency gate, the deterministic Local
+100-Turn fixture soak and the earlier managed Docker Worker Release rollout gate. The
 consolidated real Codex/Claude Local product and controlled-failure
 release gate remains tied to `253052aa`; terminal-aware Interaction waits, the Provider Cursor expiry policy,
 audited Resume selection, standalone Provider-native generated-file capture and Artifact-backed Large Diff
@@ -12,7 +13,8 @@ summarized in `docs/reports/stage-3-worker-release-rollout-d3af9380.md`; the rea
 `docs/reports/stage-3-real-provider-local-release-gate-253052aa.md`; deterministic Local long-Session evidence is in
 `docs/reports/stage-3-local-fixture-soak-6e866a30.md`; deterministic Docker Provider concurrency evidence is in
 `docs/reports/stage-3-docker-fixture-concurrency-eeb7a2f1.md`; deterministic Local Retention/Cleanup concurrency
-evidence is in `docs/reports/stage-3-local-fixture-retention-concurrency-c27914da.md`. The standalone generated-file and Large Diff
+evidence is in `docs/reports/stage-3-local-fixture-retention-concurrency-c27914da.md`; deterministic Docker bounded
+load/admission evidence is in `docs/reports/stage-3-docker-fixture-load-e944b449.md`. The standalone generated-file and Large Diff
 predecessors remain in `docs/reports/stage-3-real-provider-local-standalone-generated-file-matrix-be919393.md` and
 `docs/reports/stage-3-real-provider-local-large-diff-matrix-90fae52c.md`. The earlier two-Turn smoke,
 dirty-worktree and deterministic fixture evidence remains in
@@ -54,7 +56,7 @@ Acceptance Fixture used by Codex and Claude.
 | I. Terminal/log/generated file/checkpoint     | partial              | Artifact path containment, server-side size/hash verification and retry-safe Checkpoint Artifact identity are implemented. Ordinary `generated_file`, `terminal_log` and `diff` uploads negotiate a header-based v1 idempotency feature, derive a content-bound deterministic Execution/Generation Artifact ID, reuse stable Create/Complete request IDs, refresh pending grants and recover a Ready Artifact after ambiguous responses. Before Provider start, agentd binds the Workspace and Runtime Output roots to anchored descriptors, rejects traversal/symlinks/non-regular files, and retains the opened descriptor through Secret Guard, hashing, upload and Ready verification. Migrations `000020`, `000024` and `000025` enforce Checkpoint scope and binding; forward migration `000041` adds only the `diff` Artifact kind. Agentd automatically creates Git-reference/Patch/Snapshot Checkpoints, including an empty Snapshot after the last non-Git file is deleted. Clean commit `be919393` proves the generated-file boundary, clean commit `90fae52c` proves Ready downloadable Large Diff Artifacts for Codex and Claude, and clean commit `c27914da` proves concurrent deletion of one unreferenced generated Artifact without deleting protected seed/current Checkpoint Artifacts during an active Execution. `workspace-checkpoint-unconfirmed` remains an explicit error Activity. Lossless real large-log, cross-Target and production Retention acceptance remain.                                                                                                                                                                                     |
 | J. Worker drain/upgrade/version isolation     | partial              | Migrations `000017`, `000034`, `000037` and `000040` provide immutable Worker manifests, operator-revocation fencing, target-scoped Release Revisions, strict-CAS promoted/canary policy, transition history and release-pinned scheduling. Agentd Drain preserves the Workspace lock and reports conservative data-loss risk. Clean commit `7659dd5f` proves cached/no-cache multi-arch Registry reproducibility, SPDX/SLSA, embedded identity, default ephemeral exact-digest signing, `HIGH/CRITICAL=0`, Secret=0, EOSL/DB freshness and exact cleanup. Clean commit `d3af9380` proves deterministic managed Docker immutable Revision canary/promote/rollback, Busy baseline Worker preservation, Lease-TTL-derived renewal, stale-CAS and active-Execution fencing, release-pin consistency, durable history and exact cleanup. Checked-in keyless/KMS production signing paths are implemented; real production signer identity/tlog/admission, Registry Credential/retention, real Provider remote rollout, multi-node canary/rollback/eviction, load and soak evidence remain.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | K. Web authority switch                       | partial              | SaaS Project/Session/Turn/Event is Control Plane authoritative and local mode remains isolated. Tenant switching clears the old Tenant query/subscription/draft scope, and SaaS Provider/advanced-operation handlers fail closed through Control Plane capability and Session projections without calling local Native API paths. Strict-CAS model-switch still reuses `000030`/`000031` state and adds no DDL for that local operation. Credential scope/binding administration uses `000033`, `000035`, `000036`, `000038` and `000039`; Worker management and release rollout use `000034`, `000037` and `000040`. Artifact Ready plus explicit refresh/reconnect/Server-restart and no-Control-Plane local-mode evidence remains.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
-| L. Unified acceptance suite                   | partial              | The shared Runner and target-specific Local, SSH, Docker, Kubernetes and Registry gates emit machine-readable reports with source consensus, cleanup and Secret scanning. Clean commit `253052aa` passes the real Codex/Claude Local product/failure aggregate; remote gates have deterministic and preflight coverage but still lack operator-provided real Provider Credentials. Clean commit `7659dd5f` passes the dual-platform Registry signing-policy gate, clean commit `d3af9380` passes the deterministic managed Docker immutable rollout gate with Busy Worker fencing `15/15`, clean commit `6e866a30` passes deterministic Local `100/100` Turn long-Session/restart/pagination/repeated-Checkpoint mechanics, clean commit `eeb7a2f1` passes the deterministic managed Docker two-Worker/two-Provider/two-Session simultaneous Approval gate `9/9`, and clean commit `c27914da` passes the deterministic Local active-Execution Retention/Cleanup gate `9/9`. All release-gate tests remain `108/108`; Acceptance Runner unit tests are `118/118`, and Stage 3 Python is `230/230`. Real SSH/Docker/Kubernetes Provider aggregate reports, production signer identity/tlog/admission, multi-node rollout, real-Provider concurrency/Retention, load and production-duration soak remain open.                                                                                                                                                                                                                                                                                                                                                                        |
+| L. Unified acceptance suite                   | partial              | The shared Runner and target-specific Local, SSH, Docker, Kubernetes and Registry gates emit machine-readable reports with source consensus, cleanup and Secret scanning. Clean commit `253052aa` passes the real Codex/Claude Local product/failure aggregate; remote gates have deterministic and preflight coverage but still lack operator-provided real Provider Credentials. Clean commit `7659dd5f` passes the dual-platform Registry signing-policy gate, clean commit `d3af9380` passes the deterministic managed Docker immutable rollout gate with Busy Worker fencing `15/15`, clean commit `6e866a30` passes deterministic Local `100/100` Turn long-Session/restart/pagination/repeated-Checkpoint mechanics, clean commit `eeb7a2f1` passes the deterministic managed Docker two-Worker/two-Provider/two-Session simultaneous Approval gate `9/9`, clean commit `c27914da` passes the deterministic Local active-Execution Retention/Cleanup gate `9/9`, and clean commit `e944b449` passes the deterministic managed Docker four-Session `100`-Execution bounded load/admission gate `9/9`. All release-gate tests remain `108/108`; Acceptance Runner unit tests are `126/126`, and Stage 3 Python is `238/238`. Real SSH/Docker/Kubernetes Provider aggregate reports, production signer identity/tlog/admission, multi-node rollout, real-Provider concurrency/Retention/load, failure injection under load and production-duration soak remain open.                                                                                                                                                                                                           |
 
 > 2026-07-17 status correction: the earlier J/L summary-table wording that still lists clean Registry
 > reproducibility, image-signing mechanics, vulnerability-policy evidence, or the production signing implementation
@@ -63,7 +65,8 @@ Acceptance Fixture used by Codex and Claude.
 > canary/rollback, and production soak remain open. The deterministic managed Docker immutable rollout slice is
 > closed by `d3af9380`; the deterministic Local long-Session/restart/pagination slice is closed by `6e866a30`;
 > deterministic managed Docker multi-Provider/multi-Session overlap mechanics are closed by `eeb7a2f1`; deterministic
-> Local active-Execution Retention fencing and post-terminal physical cleanup mechanics are closed by `c27914da`.
+> Local active-Execution Retention fencing and post-terminal physical cleanup mechanics are closed by `c27914da`;
+> deterministic bounded managed Docker quota/admission and slot-reuse mechanics are closed by `e944b449`.
 
 ### 2026-07-15 Advanced Session operation evidence update
 
@@ -304,6 +307,26 @@ Acceptance Fixture used by Codex and Claude.
   Target、multi-node、load、生产时长与生产 Retention 仍 open，Workflow H/L 保持 `partial`。本切片没有 DDL
   变更，migration boundary 仍为 `000041_diff_artifact_kind.sql`。
 
+### 2026-07-17 Deterministic managed Docker bounded load/admission evidence update
+
+- `acceptance_runner.py` 新增 `fixture-load`，泛化现有 managed Docker concurrency 路径并复用两个 agentd
+  Worker、Codex/Claude fixture、Credential delivery、Project/Session API、报告、Secret scan 与精确 cleanup；没有
+  创建第二套 load Target Driver、Provider fixture 或资源 owner。
+- Clean commit `e944b449` 固定四个 Session、Tenant 并发配额 `2` 与 `25` 波次。每波四个 Approval Turn 都包含
+  Text、Tool、Usage、Credential、generated Artifact 与 Ready Checkpoint；三个观察点各要求两个 pending
+  Execution 位于不同 Worker。正式结果为 `100/100` 唯一 Execution、`50/50` quota rejection 精确返回
+  `execution_quota_exceeded` 且不改变 Session Event/Interaction、释放槽位后 `50/50` 重试成功、`75/75` overlap；
+  Codex/Claude 各 50、四 Session 各 25，Artifact Ready `200`、Checkpoint Ready `100`，无双执行/重复终态。
+- 正式 report `9/9` 通过；Runner unit `126/126`、Stage 3 Python `238/238`、原 Docker concurrency fixture
+  `9/9`、quotas/sessions/executions/agentd focused Go tests、`bun fmt`、`bun lint`（0 errors / 238 existing warnings）
+  与 `bun typecheck`（9/9）均通过。Cleanup 精确删除两个 Worker container、volume、network、Image 与 state，
+  owner 资源零残留；Secret scan 覆盖 10 files / 2,513,498 bytes，finding 为零。完整证据见
+  `docs/reports/stage-3-docker-fixture-load-e944b449.md`。
+- 该证据只关闭 deterministic bounded managed Docker load/admission、slot reuse、双 Worker overlap 与 durable
+  Artifact/Checkpoint terminal mechanics；真实 Provider、multi-host/Kubernetes multi-node、failure injection under
+  load、生产 SLA 与 production-duration load/soak 仍 open，Workflow L 保持 `partial`。本切片没有 DDL 变更，
+  migration boundary 仍为 `000041_diff_artifact_kind.sql`。
+
 ## Frozen version boundary
 
 - Worker Protocol remains independently versioned; the current managed version is `2`. Version 1 registration is
@@ -412,8 +435,9 @@ local no-new-DDL statements do not redefine the repository-wide migration bounda
    `be919393` also passes the ten-case matrix, standalone generated-file Artifact and Workspace Checkpoint capture.
    Clean commit `253052aa` completes the consolidated real Local release suite across both adapters; clean commit
    `6e866a30` closes deterministic Local long-Session/restart/pagination mechanics, clean commit `eeb7a2f1` closes
-   deterministic managed Docker two-Worker/two-Session overlap mechanics, and clean commit `c27914da` closes
-   deterministic Local active-Execution Retention fencing and post-terminal physical cleanup mechanics. Run both
-   real adapters across SSH, Docker and Kubernetes, then complete real Provider/remote Target Retention, sustained
-   load and production-duration soak before promoting any Local-only Provider or claiming the four-Target release
-   gate.
+   deterministic managed Docker two-Worker/two-Session overlap mechanics, clean commit `c27914da` closes deterministic
+   Local active-Execution Retention fencing and post-terminal physical cleanup mechanics, and clean commit `e944b449`
+   closes deterministic bounded Docker quota/admission and slot-reuse mechanics. Run both real adapters across SSH,
+   Docker and Kubernetes, then complete real Provider/remote Target Retention/load, multi-node and failure-injection
+   load evidence plus production-duration soak before promoting any Local-only Provider or claiming the four-Target
+   release gate.
