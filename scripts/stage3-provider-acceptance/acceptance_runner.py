@@ -235,6 +235,7 @@ FAILURE_CASES = (
     "provider-crash",
     "worker-network",
     "kubernetes-drain",
+    "kubernetes-pdb-drain",
     "kubernetes-eviction",
     "kubernetes-image-canary",
 )
@@ -251,6 +252,7 @@ TARGET_FAILURE_CASES: Mapping[str, tuple[str, ...]] = {
         *COMMON_PROVIDER_FAILURE_CASES,
         "worker-network",
         "kubernetes-drain",
+        "kubernetes-pdb-drain",
         "kubernetes-eviction",
         "kubernetes-image-canary",
     ),
@@ -275,6 +277,10 @@ FAILURE_CASE_METADATA: Mapping[str, Mapping[str, str]] = {
     "kubernetes-drain": {
         "id": "failure.kubernetes-node-drain",
         "name": "Drain the exact Kubernetes execution Pod and verify safe recovery",
+    },
+    "kubernetes-pdb-drain": {
+        "id": "failure.kubernetes-pdb-node-drain",
+        "name": "Honor an exact PodDisruptionBudget before multi-node drain recovery",
     },
     "kubernetes-eviction": {
         "id": "failure.kubernetes-pod-eviction",
@@ -766,6 +772,7 @@ class RunnerOptions:
     kind_bin: str
     kind_cluster_name: str | None
     kind_node_image: str
+    kind_worker_nodes: int
     failure_cases: tuple[str, ...]
     network_outage_seconds: float
     docker_allow_network_interruption: bool
@@ -6399,7 +6406,11 @@ class KubernetesDriver(ManagedWorkerDriver):
     ) -> Mapping[str, Any]:
         if fault == "worker-network":
             return super().inject_failure(fault, target_id, execution_id)
-        if fault not in {"kubernetes-drain", "kubernetes-eviction"}:
+        if fault not in {
+            "kubernetes-drain",
+            "kubernetes-pdb-drain",
+            "kubernetes-eviction",
+        }:
             raise AcceptanceUnsupported(
                 "runner.failure_case_unsupported",
                 f"The Kubernetes Target does not implement failure injection {fault}.",
@@ -6448,15 +6459,7 @@ class KubernetesDriver(ManagedWorkerDriver):
                 "uidPrecondition": True,
             }
 
-        if not self.owns_cluster and not self.options.kubernetes_allow_node_drain:
-            raise AcceptanceUnsupported(
-                "runner.kubernetes_node_drain_not_authorized",
-                "Node drain is disabled for an operator-owned Kubernetes context.",
-                {
-                    "context": self.context,
-                    "requiredInputs": ["--kubernetes-allow-node-drain"],
-                },
-            )
+        self._require_node_drain_authorization()
         node_name = spec.get("nodeName")
         if not isinstance(node_name, str) or not node_name:
             raise AcceptanceError(
@@ -6468,21 +6471,27 @@ class KubernetesDriver(ManagedWorkerDriver):
             f"synara.io/execution-target-id={target_id},"
             f"synara.io/execution-id={execution_id}"
         )
+        if fault == "kubernetes-pdb-drain":
+            return self._inject_pdb_drain(
+                target_id=target_id,
+                execution_id=execution_id,
+                namespace=namespace,
+                pod_name=name,
+                pod_uid=uid,
+                node_name=node_name,
+                selector=selector,
+                generation=labels.get("synara.io/generation"),
+            )
         self._kubectl_command(["cordon", node_name], cleanup_timeout=15.0)
         started = time.monotonic()
         try:
             self._kubectl_command(
-                [
-                    "drain",
+                self._node_drain_arguments(
                     node_name,
-                    f"--pod-selector={selector}",
-                    "--ignore-daemonsets",
-                    "--delete-emptydir-data",
-                    "--force",
-                    "--disable-eviction",
-                    "--grace-period=20",
-                    "--timeout=45s",
-                ],
+                    selector,
+                    disable_eviction=True,
+                    timeout="45s",
+                ),
                 cleanup_timeout=55.0,
             )
         finally:
@@ -6500,19 +6509,325 @@ class KubernetesDriver(ManagedWorkerDriver):
             "deleteMechanism": "kubectl drain with graceful Pod DELETE, not Eviction subresource",
         }
 
+    def _inject_pdb_drain(
+        self,
+        *,
+        target_id: str,
+        execution_id: str,
+        namespace: str,
+        pod_name: str,
+        pod_uid: str,
+        node_name: str,
+        selector: str,
+        generation: Any,
+    ) -> Mapping[str, Any]:
+        alternate_nodes = self._require_pdb_drain_nodes(source_node=node_name)
+        compact_execution_id = re.sub(r"[^a-z0-9]", "", execution_id.lower())[:16]
+        pdb_name = f"synara-drain-{compact_execution_id or uuid.uuid4().hex[:12]}"
+        match_labels = {
+            "synara.io/execution-target-id": target_id,
+            "synara.io/execution-id": execution_id,
+        }
+        manifest = {
+            "apiVersion": "policy/v1",
+            "kind": "PodDisruptionBudget",
+            "metadata": {
+                "name": pdb_name,
+                "namespace": namespace,
+                "labels": self._ownership_labels(),
+            },
+            "spec": {
+                "minAvailable": 1,
+                "selector": {"matchLabels": match_labels},
+            },
+        }
+        pdb_created = False
+        started = time.monotonic()
+        blocked_duration_ms = 0
+        pdb_evidence: Mapping[str, Any] = {}
+        replacement: Mapping[str, Any] = {}
+        self._kubectl_command(["cordon", node_name], cleanup_timeout=15.0)
+        try:
+            pdb_created = True
+            self._kubectl_command(
+                ["-n", namespace, "apply", "-f", "-"],
+                input_text=json.dumps(manifest, separators=(",", ":")),
+                cleanup_timeout=20.0,
+            )
+            pdb_evidence = self._wait_pdb_blocking(namespace, pdb_name)
+            blocked_started = time.monotonic()
+            blocked = self._kubectl_completed(
+                self._node_drain_arguments(
+                    node_name,
+                    selector,
+                    disable_eviction=False,
+                    timeout="8s",
+                ),
+                cleanup_timeout=15.0,
+            )
+            blocked_duration_ms = elapsed_ms(blocked_started)
+            blocked_output = self.redactor.text(blocked.stdout).lower()
+            if blocked.returncode == 0 or not any(
+                marker in blocked_output
+                for marker in ("disruption budget", "cannot evict pod")
+            ):
+                raise AcceptanceError(
+                    "runner.kubernetes_pdb_drain_not_blocked",
+                    "The exact PodDisruptionBudget did not block the first Node drain attempt.",
+                    {
+                        "node": node_name,
+                        "podName": pod_name,
+                        "pdbName": pdb_name,
+                        "exitCode": blocked.returncode,
+                    },
+                )
+            blocked_pod = self._wait_execution_pod(target_id, execution_id)
+            blocked_metadata = json_object(
+                blocked_pod.get("metadata"),
+                "Kubernetes PDB-blocked Pod metadata",
+            )
+            blocked_spec = json_object(
+                blocked_pod.get("spec"),
+                "Kubernetes PDB-blocked Pod spec",
+            )
+            if blocked_metadata.get("uid") != pod_uid or blocked_spec.get("nodeName") != node_name:
+                raise AcceptanceError(
+                    "runner.kubernetes_pdb_drain_pod_changed",
+                    "The PDB-blocked drain did not preserve the exact running Pod on its source Node.",
+                    {
+                        "expectedPodUid": pod_uid,
+                        "actualPodUid": blocked_metadata.get("uid"),
+                        "expectedNode": node_name,
+                        "actualNode": blocked_spec.get("nodeName"),
+                    },
+                )
+            self._kubectl_command(
+                ["-n", namespace, "delete", "poddisruptionbudget", pdb_name, "--wait=true"],
+                cleanup_timeout=20.0,
+            )
+            pdb_created = False
+            self._kubectl_command(
+                self._node_drain_arguments(
+                    node_name,
+                    selector,
+                    disable_eviction=True,
+                    timeout="45s",
+                ),
+                cleanup_timeout=55.0,
+            )
+            replacement = self._wait_replacement_execution_pod(
+                target_id,
+                execution_id,
+                stale_uid=pod_uid,
+                stale_node=node_name,
+            )
+        finally:
+            try:
+                if pdb_created:
+                    self._kubectl_command(
+                        [
+                            "-n",
+                            namespace,
+                            "delete",
+                            "poddisruptionbudget",
+                            pdb_name,
+                            "--ignore-not-found",
+                            "--wait=true",
+                        ],
+                        cleanup_timeout=20.0,
+                    )
+            finally:
+                self._kubectl_command(["uncordon", node_name], cleanup_timeout=15.0)
+        return {
+            "fault": "kubernetes-pdb-drain",
+            "node": node_name,
+            "selector": selector,
+            "deletedPodName": pod_name,
+            "deletedPodUid": pod_uid,
+            "deletedPodGeneration": generation,
+            "namespace": namespace,
+            "pdbName": pdb_name,
+            "pdb": pdb_evidence,
+            "pdbBlockedDrain": True,
+            "pdbRemovedBeforeDrain": True,
+            "blockedDurationMs": blocked_duration_ms,
+            "durationMs": elapsed_ms(started),
+            "uncordoned": True,
+            "alternateReadyNodeCount": len(alternate_nodes),
+            "replacementPodName": replacement.get("name"),
+            "replacementPodUid": replacement.get("uid"),
+            "replacementPodGeneration": replacement.get("generation"),
+            "replacementNode": replacement.get("node"),
+            "multiNodeRescheduled": replacement.get("node") != node_name,
+            "deleteMechanism": "PDB-blocked Eviction attempt followed by exact graceful Pod DELETE",
+        }
+
+    @staticmethod
+    def _node_drain_arguments(
+        node_name: str,
+        selector: str,
+        *,
+        disable_eviction: bool,
+        timeout: str,
+    ) -> list[str]:
+        arguments = [
+            "drain",
+            node_name,
+            f"--pod-selector={selector}",
+            "--ignore-daemonsets",
+            "--delete-emptydir-data",
+            "--force",
+        ]
+        if disable_eviction:
+            arguments.append("--disable-eviction")
+        arguments.extend(["--grace-period=20", f"--timeout={timeout}"])
+        return arguments
+
+    def _require_node_drain_authorization(self) -> None:
+        if self.owns_cluster or self.options.kubernetes_allow_node_drain:
+            return
+        raise AcceptanceUnsupported(
+            "runner.kubernetes_node_drain_not_authorized",
+            "Node drain is disabled for an operator-owned Kubernetes context.",
+            {
+                "context": self.context,
+                "requiredInputs": ["--kubernetes-allow-node-drain"],
+            },
+        )
+
+    def _require_pdb_drain_nodes(self, *, source_node: str | None = None) -> tuple[str, ...]:
+        schedulable_nodes = self._ready_schedulable_node_names()
+        candidates = tuple(
+            node for node in schedulable_nodes if source_node is None or node != source_node
+        )
+        if len(schedulable_nodes) >= 2 and candidates:
+            return candidates
+        evidence: dict[str, Any] = {
+            "schedulableNodeCount": len(schedulable_nodes),
+            "requiredInputs": (
+                ["--kind-worker-nodes", "2"]
+                if self.owns_cluster
+                else ["at least two Ready schedulable Nodes"]
+            ),
+        }
+        if source_node is not None:
+            evidence["sourceNode"] = source_node
+        raise AcceptanceUnsupported(
+            "runner.kubernetes_pdb_drain_requires_multi_node",
+            "PDB drain recovery requires at least two Ready schedulable Kubernetes Nodes.",
+            evidence,
+        )
+
+    def _wait_pdb_blocking(self, namespace: str, pdb_name: str) -> Mapping[str, Any]:
+        def pdb_probe() -> Mapping[str, Any] | None:
+            completed = self._kubectl_completed(
+                ["-n", namespace, "get", "poddisruptionbudget", pdb_name, "-o", "json"],
+                cleanup_timeout=5.0,
+            )
+            if completed.returncode != 0:
+                return None
+            try:
+                payload = json.loads(completed.stdout)
+                metadata = json_object(payload.get("metadata"), "PodDisruptionBudget metadata")
+                status = json_object(payload.get("status"), "PodDisruptionBudget status")
+            except (AcceptanceError, json.JSONDecodeError):
+                return None
+            generation = metadata.get("generation")
+            if (
+                not isinstance(generation, int)
+                or status.get("observedGeneration") != generation
+                or status.get("currentHealthy") != 1
+                or status.get("desiredHealthy") != 1
+                or status.get("disruptionsAllowed") != 0
+            ):
+                return None
+            return {
+                "minAvailable": 1,
+                "currentHealthy": status.get("currentHealthy"),
+                "desiredHealthy": status.get("desiredHealthy"),
+                "expectedPods": status.get("expectedPods"),
+                "disruptionsAllowed": status.get("disruptionsAllowed"),
+                "observedGeneration": status.get("observedGeneration"),
+            }
+
+        return self.api.wait_until(
+            f"PodDisruptionBudget {namespace}/{pdb_name} to block eviction",
+            pdb_probe,
+            interval=0.2,
+        )
+
+    def _wait_replacement_execution_pod(
+        self,
+        target_id: str,
+        execution_id: str,
+        *,
+        stale_uid: str,
+        stale_node: str,
+    ) -> Mapping[str, Any]:
+        while True:
+            candidates: list[dict[str, Any]] = []
+            for pod in self._execution_pods(target_id, execution_id):
+                metadata = pod.get("metadata")
+                status = pod.get("status")
+                if (
+                    isinstance(metadata, dict)
+                    and metadata.get("uid") != stale_uid
+                    and metadata.get("deletionTimestamp") is None
+                    and isinstance(status, dict)
+                    and status.get("phase") == "Running"
+                ):
+                    candidates.append(pod)
+            if len(candidates) > 1:
+                raise AcceptanceError(
+                    "runner.kubernetes_replacement_pod_ambiguous",
+                    "More than one running replacement Pod existed for the drained Execution.",
+                    {
+                        "targetId": target_id,
+                        "executionId": execution_id,
+                        "replacementPodCount": len(candidates),
+                    },
+                )
+            if len(candidates) == 1:
+                pod = candidates[0]
+                metadata = json_object(pod.get("metadata"), "Kubernetes replacement Pod metadata")
+                spec = json_object(pod.get("spec"), "Kubernetes replacement Pod spec")
+                labels = json_object(metadata.get("labels"), "Kubernetes replacement Pod labels")
+                name = metadata.get("name")
+                uid = metadata.get("uid")
+                node = spec.get("nodeName")
+                if (
+                    not isinstance(name, str)
+                    or not name
+                    or not isinstance(uid, str)
+                    or not uid
+                    or not isinstance(node, str)
+                    or not node
+                ):
+                    raise AcceptanceError(
+                        "runner.kubernetes_replacement_pod_invalid",
+                        "The drained Execution replacement Pod omitted its stable identity.",
+                    )
+                if node == stale_node:
+                    raise AcceptanceError(
+                        "runner.kubernetes_replacement_node_not_changed",
+                        "The replacement Pod scheduled onto the source Node while it was still cordoned.",
+                        {"sourceNode": stale_node, "replacementNode": node},
+                    )
+                return {
+                    "name": name,
+                    "uid": uid,
+                    "node": node,
+                    "generation": labels.get("synara.io/generation"),
+                }
+            self.deadline.sleep(0.2)
+
     def validate_failure(self, fault: str) -> None:
         if fault == "worker-network" or fault == "kubernetes-eviction":
             return
-        if fault == "kubernetes-drain":
-            if not self.owns_cluster and not self.options.kubernetes_allow_node_drain:
-                raise AcceptanceUnsupported(
-                    "runner.kubernetes_node_drain_not_authorized",
-                    "Node drain is disabled for an operator-owned Kubernetes context.",
-                    {
-                        "context": self.context,
-                        "requiredInputs": ["--kubernetes-allow-node-drain"],
-                    },
-                )
+        if fault in {"kubernetes-drain", "kubernetes-pdb-drain"}:
+            self._require_node_drain_authorization()
+            if fault == "kubernetes-pdb-drain":
+                self._require_pdb_drain_nodes()
             return
         return super().validate_failure(fault)
 
@@ -6747,19 +7062,41 @@ class KubernetesDriver(ManagedWorkerDriver):
             if self.kubeconfig is None:
                 raise AcceptanceError("runner.kubernetes_kubeconfig_missing", "Owned Kind cluster omitted kubeconfig.")
             self.kubeconfig.parent.mkdir(parents=True, exist_ok=True)
+            create_arguments = [
+                "create",
+                "cluster",
+                "--name",
+                self.cluster_name,
+                "--image",
+                self.options.kind_node_image,
+                "--kubeconfig",
+                str(self.kubeconfig),
+                "--wait",
+                "180s",
+            ]
+            if self.options.kind_worker_nodes:
+                config_path = self.state_dir / "kind-cluster.json"
+                config_path.write_text(
+                    json.dumps(
+                        {
+                            "kind": "Cluster",
+                            "apiVersion": "kind.x-k8s.io/v1alpha4",
+                            "nodes": [
+                                {"role": "control-plane"},
+                                *(
+                                    {"role": "worker"}
+                                    for _ in range(self.options.kind_worker_nodes)
+                                ),
+                            ],
+                        },
+                        separators=(",", ":"),
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+                create_arguments.extend(["--config", str(config_path)])
             self._kind_command(
-                [
-                    "create",
-                    "cluster",
-                    "--name",
-                    self.cluster_name,
-                    "--image",
-                    self.options.kind_node_image,
-                    "--kubeconfig",
-                    str(self.kubeconfig),
-                    "--wait",
-                    "180s",
-                ],
+                create_arguments,
                 log_path=self.logs_dir / "kubernetes-kind-create.log",
                 maximum_timeout=max(190.0, self.deadline.remaining()),
             )
@@ -6783,8 +7120,96 @@ class KubernetesDriver(ManagedWorkerDriver):
             "context": self.context,
             "ownedCluster": self.owns_cluster,
             "clusterName": self.cluster_name if self.context.startswith("kind-") else None,
+            "requestedKindWorkerNodes": self.options.kind_worker_nodes if self.owns_cluster else None,
             "serverVersion": server.get("gitVersion"),
             "kubeconfig": str(self.kubeconfig) if self.kubeconfig is not None else "default",
+            "topology": self._cluster_topology_evidence(),
+        }
+
+    def _cluster_node_summaries(self) -> list[dict[str, Any]]:
+        try:
+            payload = json.loads(self._kubectl_command(["get", "nodes", "-o", "json"]))
+        except json.JSONDecodeError:
+            raise AcceptanceError(
+                "runner.kubernetes_nodes_invalid",
+                "Kubernetes Node inventory was invalid JSON.",
+            ) from None
+        items = payload.get("items") if isinstance(payload, dict) else None
+        if not isinstance(items, list) or not all(isinstance(item, dict) for item in items):
+            raise AcceptanceError(
+                "runner.kubernetes_nodes_invalid",
+                "Kubernetes Node inventory was malformed.",
+            )
+        summaries: list[dict[str, Any]] = []
+        for item in items:
+            metadata = json_object(item.get("metadata"), "Kubernetes Node metadata")
+            spec = json_object(item.get("spec"), "Kubernetes Node spec")
+            status = json_object(item.get("status"), "Kubernetes Node status")
+            name = metadata.get("name")
+            labels = metadata.get("labels")
+            conditions = status.get("conditions")
+            taints = spec.get("taints", [])
+            if (
+                not isinstance(name, str)
+                or not name
+                or not isinstance(labels, dict)
+                or not isinstance(conditions, list)
+                or not all(isinstance(condition, dict) for condition in conditions)
+                or not isinstance(taints, list)
+                or not all(isinstance(taint, dict) for taint in taints)
+            ):
+                raise AcceptanceError(
+                    "runner.kubernetes_nodes_invalid",
+                    "A Kubernetes Node omitted its scheduling identity.",
+                )
+            ready = any(
+                condition.get("type") == "Ready" and condition.get("status") == "True"
+                for condition in conditions
+            )
+            blocking_taints = sorted(
+                str(taint.get("key"))
+                for taint in taints
+                if taint.get("effect") in {"NoSchedule", "NoExecute"}
+                and isinstance(taint.get("key"), str)
+            )
+            summaries.append(
+                {
+                    "name": name,
+                    "ready": ready,
+                    "unschedulable": spec.get("unschedulable") is True,
+                    "blockingTaints": blocking_taints,
+                    "controlPlane": any(
+                        key in labels
+                        for key in (
+                            "node-role.kubernetes.io/control-plane",
+                            "node-role.kubernetes.io/master",
+                        )
+                    ),
+                }
+            )
+        return summaries
+
+    def _ready_schedulable_node_names(self) -> tuple[str, ...]:
+        return tuple(
+            str(node["name"])
+            for node in self._cluster_node_summaries()
+            if node["ready"] and not node["unschedulable"] and not node["blockingTaints"]
+        )
+
+    def _cluster_topology_evidence(self) -> Mapping[str, Any]:
+        nodes = self._cluster_node_summaries()
+        ready = [node for node in nodes if node["ready"]]
+        schedulable = [
+            node
+            for node in ready
+            if not node["unschedulable"] and not node["blockingTaints"]
+        ]
+        return {
+            "nodeCount": len(nodes),
+            "readyNodeCount": len(ready),
+            "schedulableNodeCount": len(schedulable),
+            "controlPlaneNodeCount": sum(1 for node in nodes if node["controlPlane"]),
+            "workerNodeCount": sum(1 for node in nodes if not node["controlPlane"]),
         }
 
     def _prepare_cluster_access(self) -> Mapping[str, Any]:
@@ -14600,6 +15025,12 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
     parser.add_argument("--kind-cluster-name")
     parser.add_argument("--kind-node-image", default="kindest/node:v1.33.1")
     parser.add_argument(
+        "--kind-worker-nodes",
+        type=int,
+        default=0,
+        help="Worker Node count for an owned Kind cluster; use at least 2 for the PDB multi-node drain case",
+    )
+    parser.add_argument(
         "--kubernetes-allow-node-drain",
         action="store_true",
         help="Allow cordon/drain/uncordon of the exact Worker Node on a reused Kubernetes context",
@@ -14737,6 +15168,12 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
             )
     if parsed.kind_cluster_name and parsed.kubernetes_context:
         parser.error("--kind-cluster-name cannot be combined with --kubernetes-context")
+    if parsed.kind_worker_nodes and parsed.target != "kubernetes":
+        parser.error("--kind-worker-nodes requires --target kubernetes")
+    if parsed.kind_worker_nodes and parsed.kubernetes_context:
+        parser.error("--kind-worker-nodes cannot be combined with --kubernetes-context")
+    if parsed.kind_worker_nodes < 0 or parsed.kind_worker_nodes > 8:
+        parser.error("--kind-worker-nodes must be between 0 and 8")
     if parsed.docker_memory_bytes < 64 << 20:
         parser.error("--docker-memory-bytes must be at least 67108864")
     if parsed.docker_nano_cpus <= 0:
@@ -14888,6 +15325,15 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
         requested_failure_cases.extend(TARGET_FAILURE_CASES[parsed.target])
     requested_failure_case_set = set(requested_failure_cases)
     failure_cases = tuple(case for case in FAILURE_CASES if case in requested_failure_case_set)
+    if (
+        parsed.target == "kubernetes"
+        and parsed.kubernetes_context is None
+        and "kubernetes-pdb-drain" in failure_cases
+        and parsed.kind_worker_nodes < 2
+    ):
+        parser.error(
+            "owned Kind kubernetes-pdb-drain requires --kind-worker-nodes 2 or greater"
+        )
     requested_real_provider_cases = list(parsed.real_provider_case)
     if parsed.real_provider_matrix:
         requested_real_provider_cases.extend(REAL_PROVIDER_CASES)
@@ -15026,6 +15472,7 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
         kind_bin=parsed.kind_bin.strip(),
         kind_cluster_name=kind_cluster_name,
         kind_node_image=parsed.kind_node_image.strip(),
+        kind_worker_nodes=parsed.kind_worker_nodes,
         failure_cases=failure_cases,
         network_outage_seconds=parsed.network_outage_seconds,
         docker_allow_network_interruption=parsed.docker_allow_network_interruption,
@@ -15435,6 +15882,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "kindBinary": options.kind_bin,
                 "kindClusterName": options.kind_cluster_name,
                 "kindNodeImage": options.kind_node_image,
+                "kindWorkerNodes": options.kind_worker_nodes,
                 "allowOperatorNodeDrain": options.kubernetes_allow_node_drain,
             }
             if options.target == "kubernetes"

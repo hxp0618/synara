@@ -73,6 +73,7 @@ def runner_options(*, restart_control_plane: bool = True) -> acceptance.RunnerOp
         kind_bin="kind",
         kind_cluster_name=None,
         kind_node_image="kindest/node:v1.33.1",
+        kind_worker_nodes=0,
         failure_cases=(),
         network_outage_seconds=8.0,
         docker_allow_network_interruption=False,
@@ -4409,6 +4410,8 @@ class RunnerOptionsTest(unittest.TestCase):
                 "--failure-case",
                 "provider-crash",
                 "--failure-matrix",
+                "--kind-worker-nodes",
+                "2",
             ]
         )
 
@@ -4555,6 +4558,43 @@ class RunnerOptionsTest(unittest.TestCase):
         )
         self.assertEqual(options.kubernetes_worker_image, "synara-worker:test")
         self.assertTrue(options.kubernetes_skip_worker_build)
+
+    def test_owned_kind_accepts_explicit_worker_node_count(self) -> None:
+        options = acceptance.parse_args(
+            [
+                "--target",
+                "kubernetes",
+                "--kind-worker-nodes",
+                "2",
+                "--failure-case",
+                "kubernetes-pdb-drain",
+            ]
+        )
+
+        self.assertEqual(options.kind_worker_nodes, 2)
+        self.assertIn("kubernetes-pdb-drain", options.failure_cases)
+
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            acceptance.parse_args(
+                [
+                    "--target",
+                    "kubernetes",
+                    "--failure-case",
+                    "kubernetes-pdb-drain",
+                ]
+            )
+
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            acceptance.parse_args(
+                [
+                    "--target",
+                    "kubernetes",
+                    "--kubernetes-context",
+                    "kind-fixture",
+                    "--kind-worker-nodes",
+                    "2",
+                ]
+            )
 
     def test_kubernetes_reused_context_accepts_explicit_api_route(self) -> None:
         options = acceptance.parse_args(
@@ -5810,6 +5850,81 @@ class SSHDriverTest(unittest.TestCase):
 
 
 class KubernetesDriverObservationTest(unittest.TestCase):
+    def test_owned_kind_cluster_configures_and_records_worker_topology(self) -> None:
+        options = dataclasses.replace(
+            runner_options(),
+            target="kubernetes",
+            kind_worker_nodes=2,
+        )
+        nodes = json.dumps(
+            {
+                "items": [
+                    {
+                        "metadata": {
+                            "name": "kind-control-plane",
+                            "labels": {"node-role.kubernetes.io/control-plane": ""},
+                        },
+                        "spec": {
+                            "taints": [
+                                {
+                                    "key": "node-role.kubernetes.io/control-plane",
+                                    "effect": "NoSchedule",
+                                }
+                            ]
+                        },
+                        "status": {"conditions": [{"type": "Ready", "status": "True"}]},
+                    },
+                    {
+                        "metadata": {"name": "kind-worker", "labels": {}},
+                        "spec": {},
+                        "status": {"conditions": [{"type": "Ready", "status": "True"}]},
+                    },
+                    {
+                        "metadata": {"name": "kind-worker2", "labels": {}},
+                        "spec": {},
+                        "status": {"conditions": [{"type": "Ready", "status": "True"}]},
+                    },
+                ]
+            }
+        )
+
+        class OwnedKindDriver(acceptance.KubernetesDriver):
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                super().__init__(*args, **kwargs)
+                self.kind_commands: list[list[str]] = []
+
+            def _kind_command(self, arguments: Sequence[str], **_kwargs: Any) -> str:
+                self.kind_commands.append(list(arguments))
+                return ""
+
+            def _kubectl_command(self, arguments: Sequence[str], **_kwargs: Any) -> str:
+                if list(arguments[:2]) == ["config", "get-contexts"]:
+                    return self.context
+                if arguments[0] == "version":
+                    return json.dumps({"serverVersion": {"gitVersion": "v1.33.1"}})
+                if list(arguments[:2]) == ["get", "nodes"]:
+                    return nodes
+                raise AssertionError(arguments)
+
+        driver = OwnedKindDriver(
+            pathlib.Path.cwd(),
+            options,
+            acceptance.Deadline(30.0),
+            acceptance.SecretRedactor(),
+        )
+        self.addCleanup(driver._release_state)
+
+        evidence = driver._prepare_cluster()
+
+        create = driver.kind_commands[0]
+        config_path = pathlib.Path(create[create.index("--config") + 1])
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        self.assertEqual([node["role"] for node in config["nodes"]], ["control-plane", "worker", "worker"])
+        self.assertEqual(evidence["requestedKindWorkerNodes"], 2)
+        self.assertEqual(evidence["topology"]["nodeCount"], 3)
+        self.assertEqual(evidence["topology"]["workerNodeCount"], 2)
+        self.assertEqual(evidence["topology"]["schedulableNodeCount"], 2)
+
     def test_cluster_access_uses_explicit_api_server_for_control_plane_target(self) -> None:
         options = dataclasses.replace(
             runner_options(),
@@ -6394,6 +6509,124 @@ class KubernetesDriverObservationTest(unittest.TestCase):
             drain,
         )
         self.assertIn("--disable-eviction", drain)
+        self.assertTrue(evidence["uncordoned"])
+
+    def test_pdb_drain_blocks_then_reschedules_before_uncordon(self) -> None:
+        options = dataclasses.replace(
+            runner_options(),
+            target="kubernetes",
+            kubernetes_context="kind-fixture",
+            kubernetes_kubeconfig=pathlib.Path("/tmp/kind-fixture-kubeconfig"),
+            kubernetes_allow_node_drain=True,
+        )
+        test_case = self
+
+        class PdbDrainDriver(acceptance.KubernetesDriver):
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                super().__init__(*args, **kwargs)
+                self.commands: list[tuple[list[str], str | None]] = []
+                self.completed_commands: list[list[str]] = []
+
+            def _wait_execution_pod(self, target_id: str, execution_id: str) -> dict[str, Any]:
+                del target_id, execution_id
+                return {
+                    "metadata": {
+                        "name": "synara-exec-fixture",
+                        "uid": "pod-uid",
+                        "labels": {"synara.io/generation": "4"},
+                    },
+                    "spec": {"nodeName": "kind-worker"},
+                    "status": {"phase": "Running"},
+                }
+
+            def _ready_schedulable_node_names(self) -> tuple[str, ...]:
+                return ("kind-worker", "kind-worker2")
+
+            def _wait_pdb_blocking(self, namespace: str, pdb_name: str) -> Mapping[str, Any]:
+                del namespace, pdb_name
+                return {
+                    "minAvailable": 1,
+                    "currentHealthy": 1,
+                    "desiredHealthy": 1,
+                    "expectedPods": 1,
+                    "disruptionsAllowed": 0,
+                    "observedGeneration": 1,
+                }
+
+            def _wait_replacement_execution_pod(
+                self,
+                target_id: str,
+                execution_id: str,
+                *,
+                stale_uid: str,
+                stale_node: str,
+            ) -> Mapping[str, Any]:
+                test_case.assertEqual((target_id, execution_id), ("target-id", "execution-id"))
+                test_case.assertEqual((stale_uid, stale_node), ("pod-uid", "kind-worker"))
+                return {
+                    "name": "synara-exec-replacement",
+                    "uid": "replacement-uid",
+                    "node": "kind-worker2",
+                    "generation": "5",
+                }
+
+            def _kubectl_command(
+                self,
+                arguments: Sequence[str],
+                *,
+                input_text: str | None = None,
+                cleanup_timeout: float | None = None,
+            ) -> str:
+                del cleanup_timeout
+                self.commands.append((list(arguments), input_text))
+                return ""
+
+            def _kubectl_completed(
+                self,
+                arguments: Sequence[str],
+                *,
+                input_text: str | None = None,
+                cleanup_timeout: float | None = None,
+            ) -> subprocess.CompletedProcess[str]:
+                del input_text, cleanup_timeout
+                self.completed_commands.append(list(arguments))
+                return subprocess.CompletedProcess(
+                    ["kubectl"],
+                    1,
+                    stdout="Cannot evict pod as it would violate the pod's disruption budget.",
+                )
+
+        driver = PdbDrainDriver(
+            pathlib.Path.cwd(),
+            options,
+            acceptance.Deadline(30.0),
+            acceptance.SecretRedactor(),
+        )
+        self.addCleanup(driver._release_state)
+
+        evidence = driver.inject_failure("kubernetes-pdb-drain", "target-id", "execution-id")
+
+        self.assertEqual(driver.commands[0][0], ["cordon", "kind-worker"])
+        self.assertEqual(driver.commands[-1][0], ["uncordon", "kind-worker"])
+        applied = json.loads(next(input_text for _, input_text in driver.commands if input_text is not None))
+        self.assertEqual(applied["kind"], "PodDisruptionBudget")
+        self.assertEqual(applied["spec"]["minAvailable"], 1)
+        self.assertEqual(
+            applied["spec"]["selector"]["matchLabels"],
+            {
+                "synara.io/execution-target-id": "target-id",
+                "synara.io/execution-id": "execution-id",
+            },
+        )
+        self.assertNotIn("--disable-eviction", driver.completed_commands[0])
+        graceful_drain = next(
+            command for command, _ in driver.commands if command[:2] == ["drain", "kind-worker"]
+        )
+        self.assertIn("--disable-eviction", graceful_drain)
+        self.assertTrue(evidence["pdbBlockedDrain"])
+        self.assertTrue(evidence["pdbRemovedBeforeDrain"])
+        self.assertTrue(evidence["multiNodeRescheduled"])
+        self.assertEqual(evidence["replacementNode"], "kind-worker2")
         self.assertTrue(evidence["uncordoned"])
 
 

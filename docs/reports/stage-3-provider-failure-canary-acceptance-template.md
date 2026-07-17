@@ -30,6 +30,10 @@ List every non-default safety authorization, reused image, Docker network, Kuber
 timeout. Never redact an image digest or Git SHA; always redact bearer tokens, cookies, private keys, and
 Credential payloads.
 
+For an owned Kind Kubernetes matrix, add `--kind-worker-nodes 2` so the PDB drain case can prove replacement onto
+another Ready schedulable Node while the source remains cordoned. A reused context must already expose at least two
+such Nodes and still requires the explicit non-disposable/Node-drain authorizations.
+
 ## Machine-readable matrix result
 
 Copy the generated `configuration.failureMatrix` object and the case summary from `acceptance-report.json`.
@@ -41,6 +45,7 @@ Copy the generated `configuration.failureMatrix` object and the case summary fro
 | Provider crash              | `<status>` | `provider_unavailable`                   | `<fault and recovery execution IDs>`                 |
 | Worker network interruption | `<status>` | `<reason>`                               | `<stale/replacement request and Generation>`         |
 | Kubernetes Node drain       | `<status>` | `<reason>`                               | `<node, selector, Pod UID, replacement UID>`         |
+| Kubernetes PDB Node drain   | `<status>` | `<reason>`                               | `<PDB budget, source/replacement Nodes, Generation>` |
 | Kubernetes Pod eviction     | `<status>` | `<reason>`                               | `<Eviction API, UID precondition, replacement UID>`  |
 | Kubernetes image canary     | `<status>` | `<reason>`                               | `<source/canary image, Target, Namespace, Manifest>` |
 | Output Secret scan          | `<status>` | `runner.output_secret_detected` or empty | `<files/bytes/pattern names>`                        |

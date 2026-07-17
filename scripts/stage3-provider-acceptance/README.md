@@ -564,6 +564,7 @@ python3 scripts/stage3-provider-acceptance/acceptance_runner.py \
 python3 scripts/stage3-provider-acceptance/acceptance_runner.py \
   --target kubernetes \
   --provider codex \
+  --kind-worker-nodes 2 \
   --failure-matrix \
   --timeout 1800
 ```
@@ -592,6 +593,7 @@ The available cases are:
 | `provider-crash`          | all               | mid-Turn Host exit is `provider_unavailable`, then Host recovery                                         |
 | `worker-network`          | Docker/Kubernetes | outage crosses the 6-second acceptance Lease TTL, then Generation-fenced Approval recovery               |
 | `kubernetes-drain`        | Kubernetes        | exact Node cordon/drain/uncordon with a target+execution Pod selector and graceful Pod DELETE            |
+| `kubernetes-pdb-drain`    | Kubernetes        | exact PDB blocks Eviction before graceful drain reschedules onto another still-schedulable Node          |
 | `kubernetes-eviction`     | Kubernetes        | `policy/v1` Eviction with exact Namespace, Pod name, and UID precondition                                |
 | `kubernetes-image-canary` | Kind Kubernetes   | independent canary Target/Namespace/Session through the user API, followed by baseline Target continuity |
 
@@ -605,6 +607,22 @@ Kubernetes Node drain runs automatically only on an owned disposable Kind cluste
 the existing `--kubernetes-allow-nondisposable` gate and the separate
 `--kubernetes-allow-node-drain` authorization. The runner always attempts `uncordon` in `finally`. Eviction stays
 scoped to the unique acceptance Namespace and Pod UID and does not require Node mutation.
+
+The PDB drain case additionally requires at least two Ready schedulable Nodes. For an owned cluster, request two
+Kind Worker Nodes explicitly. The case first installs an owner-labeled, exact Target+Execution
+`policy/v1` PodDisruptionBudget and proves a normal Eviction-backed drain is blocked with the original Pod still
+running. It then deletes only that PDB, performs the existing graceful Pod DELETE drain, waits for the replacement
+Pod to run on another Node while the source remains cordoned, and finally uncordons the source Node:
+
+```sh
+python3 scripts/stage3-provider-acceptance/acceptance_runner.py \
+  --target kubernetes \
+  --provider codex \
+  --kind-worker-nodes 2 \
+  --failure-only \
+  --failure-case kubernetes-pdb-drain \
+  --timeout 1800
+```
 
 Reusable local contexts that share the host Docker image store, such as OrbStack, require a second explicit image
 authorization. The runner then builds its uniquely tagged Worker image, configures `imagePullPolicy=Never`, records
