@@ -39,12 +39,12 @@ export function classifyProviderResumeFailure(
   }
   if (
     /\bno conversation found\b/u.test(normalized) ||
-    /\bno (?:cursor|session|thread) found\b/u.test(normalized) ||
-    /\bmissing (?:conversation|cursor|session|thread)\b/u.test(normalized) ||
-    /\b(?:invalid|unknown) (?:resume )?(?:conversation|cursor|session|thread)\b/u.test(
+    /\bno (?:cursor|rollout|session|thread) found\b/u.test(normalized) ||
+    /\bmissing (?:conversation|cursor|rollout|session|thread)\b/u.test(normalized) ||
+    /\b(?:invalid|unknown) (?:resume )?(?:conversation|cursor|rollout|session|thread)\b/u.test(
       normalized,
     ) ||
-    /\b(?:conversation|cursor|session|thread) (?:(?:id )?[a-z0-9_.:-]+ )?(?:is )?(?:invalid|missing|not found|unknown|does not exist)\b/u.test(
+    /\b(?:conversation|cursor|rollout|session|thread) (?:(?:id )?[a-z0-9_.:-]+ )?(?:is )?(?:invalid|missing|not found|unknown|does not exist)\b/u.test(
       normalized,
     ) ||
     /\bresume (?:cursor|target) (?:(?:id )?[a-z0-9_.:-]+ )?(?:is )?(?:invalid|missing|not found|unknown|does not exist)\b/u.test(
