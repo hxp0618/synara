@@ -40,6 +40,7 @@ def runner_options(*, restart_control_plane: bool = True) -> acceptance.RunnerOp
         restart_control_plane=restart_control_plane,
         soak_turns=0,
         soak_restart_every=0,
+        load_waves=0,
         ssh_orbctl_bin="orbctl",
         ssh_machine_name=None,
         ssh_machine_arch="arm64",
@@ -499,6 +500,206 @@ class FixtureConcurrencySuite(acceptance.AcceptanceSuite):
                     "generation": 1,
                 }
             )
+        return {
+            "turnId": turn["id"],
+            "executionId": execution_id,
+            "requestId": interaction["requestId"],
+            "interactionId": interaction_id,
+            "resolutionStatus": "resolved",
+            "deliveryStatus": "delivered",
+            "sequenceRange": self._sequence_range(events),
+        }
+
+
+class FixtureLoadSuite(FixtureConcurrencySuite):
+    def __init__(
+        self,
+        *,
+        wave_count: int = 2,
+        enforce_quota: bool = True,
+        duplicate_worker: bool = False,
+    ) -> None:
+        super().__init__(duplicate_worker=duplicate_worker)
+        self.options = dataclasses.replace(
+            self.options,
+            suite="fixture-load",
+            load_waves=wave_count,
+        )
+        self.enforce_quota = enforce_quota
+        self.pending_workers: dict[str, str] = {}
+
+    def _create_project_session(
+        self,
+        *,
+        provider: str,
+        title: str,
+        credential_id: str | None,
+        model: str | None = None,
+        description: str,
+    ) -> dict[str, Any]:
+        del title, model, description
+        base = f"session-{provider}"
+        suffix = 1
+        session_id = base
+        while session_id in self.events:
+            suffix += 1
+            session_id = f"{base}-{suffix}"
+        self.events[session_id] = []
+        return {
+            "id": session_id,
+            "provider": provider,
+            "executionTargetId": "target-id",
+            "providerCredentialId": credential_id,
+        }
+
+    def _create_turn(
+        self,
+        input_text: str,
+        *,
+        runtime_mode: str = "full-access",
+        interaction_mode: str = "default",
+        session_id: str | None = None,
+    ) -> dict[str, Any]:
+        del input_text, runtime_mode, interaction_mode
+        if self.enforce_quota and len(self.pending) >= acceptance.FIXTURE_CONCURRENCY_WORKERS:
+            raise acceptance.AcceptanceError(
+                "execution_quota_exceeded",
+                "The tenant concurrent execution quota has been reached.",
+            )
+        resolved_session = session_id or self.state.session_id
+        if resolved_session is None:
+            raise AssertionError("missing fake load Session")
+        turn_id = f"turn-{len(self.turn_sessions) + 1}"
+        execution_id = f"execution-{len(self.turn_sessions) + 1}"
+        self.turn_sessions[turn_id] = resolved_session
+        events = self.events[resolved_session]
+        events.append(
+            {
+                "sequence": len(events) + 1,
+                "eventType": "turn.created",
+                "executionId": execution_id,
+                "payload": {"turnId": turn_id, "executionId": execution_id},
+            }
+        )
+        return {"id": turn_id}
+
+    def _wait_for_interaction(
+        self,
+        turn_id: str,
+        kind: str,
+        *,
+        session_id: str | None = None,
+    ) -> dict[str, Any]:
+        resolved_session = session_id or self.turn_sessions[turn_id]
+        events = self.events[resolved_session]
+        execution_id = str(events[-1]["executionId"])
+        used_workers = set(self.pending_workers.values())
+        if self.duplicate_worker:
+            worker_id = "worker-1"
+        else:
+            worker_id = next(
+                (
+                    candidate
+                    for candidate in ("worker-1", "worker-2")
+                    if candidate not in used_workers
+                ),
+                "worker-missing",
+            )
+        for event_type in (
+            "execution.leased",
+            "workspace.ready",
+            "execution.started",
+            "content.delta",
+            "item.started",
+            "item.completed",
+            "thread.token-usage.updated",
+            "artifact.ready",
+            "request.opened",
+        ):
+            events.append(
+                {
+                    "sequence": len(events) + 1,
+                    "eventType": event_type,
+                    "executionId": execution_id,
+                    "workerId": worker_id,
+                    "generation": 1,
+                }
+            )
+        interaction = {
+            "id": f"interaction-{execution_id}",
+            "turnId": turn_id,
+            "kind": kind,
+            "executionId": execution_id,
+            "requestId": f"request-{execution_id}",
+        }
+        interaction_id = str(interaction["id"])
+        self.pending[interaction_id] = interaction
+        self.pending_workers[interaction_id] = worker_id
+        return interaction
+
+    def _all_events(self, *, session_id: str | None = None) -> list[dict[str, Any]]:
+        resolved_session = session_id or self.state.session_id
+        if resolved_session is None:
+            raise AssertionError("missing fake load Session")
+        return [dict(event) for event in self.events[resolved_session]]
+
+    def _pending_interactions(self, session_id: str) -> list[dict[str, Any]]:
+        turn_ids = {
+            turn_id
+            for turn_id, resolved_session in self.turn_sessions.items()
+            if resolved_session == session_id
+        }
+        return [
+            dict(interaction)
+            for interaction in self.pending.values()
+            if interaction.get("turnId") in turn_ids
+        ]
+
+    def _resolve_approval_turn(
+        self,
+        turn: Mapping[str, Any],
+        interaction: Mapping[str, Any],
+        *,
+        session_id: str,
+    ) -> dict[str, Any]:
+        interaction_id = str(interaction["id"])
+        worker_id = self.pending_workers.pop(interaction_id)
+        del self.pending[interaction_id]
+        events = self.events[session_id]
+        execution_id = str(interaction["executionId"])
+        for event_type in (
+            "workspace.dirty",
+            "checkpoint.created",
+            "artifact.ready",
+            "checkpoint.ready",
+            "request.resolved",
+        ):
+            events.append(
+                {
+                    "sequence": len(events) + 1,
+                    "eventType": event_type,
+                    "executionId": execution_id,
+                    "workerId": worker_id,
+                    "generation": 1,
+                }
+            )
+        events.append(
+            {
+                "sequence": len(events) + 1,
+                "eventType": "execution.completed",
+                "executionId": execution_id,
+                "workerId": worker_id,
+                "generation": 1,
+                "payload": {
+                    "output": {
+                        "credentialEvidence": {
+                            "credentialPayloadKeys": ["acceptanceToken"],
+                            "credentialVerified": True,
+                        }
+                    }
+                },
+            }
+        )
         return {
             "turnId": turn["id"],
             "executionId": execution_id,
@@ -1820,6 +2021,26 @@ class ManagedWorkerImageTest(unittest.TestCase):
         finally:
             driver._release_state()
 
+    def test_fixture_load_reuses_two_managed_docker_workers(self) -> None:
+        driver = acceptance.DockerDriver(
+            REPO_ROOT,
+            dataclasses.replace(
+                runner_options(),
+                target="docker",
+                suite="fixture-load",
+                load_waves=acceptance.FIXTURE_LOAD_DEFAULT_WAVES,
+            ),
+            acceptance.Deadline(30.0),
+            acceptance.SecretRedactor(),
+        )
+        try:
+            self.assertEqual(
+                driver.desired_workers,
+                acceptance.FIXTURE_CONCURRENCY_WORKERS,
+            )
+        finally:
+            driver._release_state()
+
     def test_worker_smoke_preserves_image_path_with_non_login_shell(self) -> None:
         driver = object.__new__(acceptance.ManagedWorkerDriver)
         driver.logs_dir = pathlib.Path(tempfile.gettempdir()) / "synara-stage3-worker-smoke-test"
@@ -1871,6 +2092,39 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
 
         self.assertEqual(evidence["providers"], ["claudeAgent", "codex"])
         self.assertEqual(evidence["distinctWorkerCount"], 2)
+
+    def test_fixture_load_validates_quota_recovery_and_durable_turns(self) -> None:
+        evidence = FixtureLoadSuite(wave_count=2)._fixture_load_admission_waves()
+
+        self.assertEqual(evidence["wavesCompleted"], 2)
+        self.assertEqual(evidence["executionsCompleted"], 8)
+        self.assertEqual(evidence["quotaRejections"], 4)
+        self.assertEqual(evidence["admissionRetriesSucceeded"], 4)
+        self.assertEqual(evidence["overlapObservations"], 6)
+        self.assertEqual(evidence["distinctWorkerCount"], 2)
+        self.assertEqual(evidence["providerExecutionCounts"], {"claudeAgent": 4, "codex": 4})
+        self.assertEqual(set(evidence["sessionExecutionCounts"].values()), {2})
+        self.assertEqual(evidence["eventTypeCounts"]["execution.completed"], 8)
+        self.assertEqual(evidence["eventTypeCounts"]["checkpoint.ready"], 8)
+        self.assertEqual(evidence["eventTypeCounts"]["artifact.ready"], 16)
+        self.assertFalse(evidence["doubleExecution"])
+        self.assertFalse(evidence["duplicateTerminal"])
+
+    def test_fixture_load_rejects_missing_quota_enforcement(self) -> None:
+        suite = FixtureLoadSuite(wave_count=2, enforce_quota=False)
+
+        with self.assertRaises(acceptance.AcceptanceError) as caught:
+            suite._fixture_load_admission_waves()
+
+        self.assertEqual(caught.exception.code, "runner.load_quota_not_enforced")
+
+    def test_fixture_load_rejects_duplicate_worker_overlap(self) -> None:
+        suite = FixtureLoadSuite(wave_count=2, duplicate_worker=True)
+
+        with self.assertRaises(acceptance.AcceptanceError) as caught:
+            suite._fixture_load_admission_waves()
+
+        self.assertEqual(caught.exception.code, "runner.load_worker_overlap_invalid")
 
     def test_fixture_soak_validates_unique_executions_and_restart_history(self) -> None:
         suite = FixtureSoakSuite()
@@ -2391,6 +2645,33 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
                 "runtime.concurrent-worker-discovery",
                 "resources.credential-project-session",
                 "concurrency.multi-provider-multi-session",
+            ],
+        )
+
+    def test_fixture_load_reuses_parallel_worker_setup_with_one_load_case(self) -> None:
+        suite = CaseOrderSuite(
+            FakeDriver(acceptance.STANDING_MANAGED_WORKER, name="docker"),
+            dataclasses.replace(
+                runner_options(),
+                target="docker",
+                suite="fixture-load",
+                load_waves=acceptance.FIXTURE_LOAD_DEFAULT_WAVES,
+                restart_control_plane=False,
+            ),
+        )
+
+        suite.run()
+
+        self.assertEqual(
+            suite.case_order,
+            [
+                "environment.target-prepare",
+                "environment.control-plane-start",
+                "identity.dev-login",
+                "runtime.target-provision",
+                "runtime.concurrent-worker-discovery",
+                "resources.credential-project-session",
+                "load.multi-session-admission-waves",
             ],
         )
 
@@ -3061,6 +3342,39 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
         self.assertEqual(driver.api.requests, [])
 
 
+class MarkdownReportTest(unittest.TestCase):
+    def test_fixture_load_report_renders_boundary_and_requested_shape(self) -> None:
+        report = {
+            "schemaVersion": acceptance.SCHEMA_VERSION,
+            "runId": "run-load",
+            "mode": "fixture-load",
+            "target": "docker",
+            "provider": "codex",
+            "status": "pass",
+            "startedAt": "2026-07-17T00:00:00Z",
+            "finishedAt": "2026-07-17T00:01:00Z",
+            "durationMs": 60_000,
+            "configuration": {
+                "load": {
+                    "workers": 2,
+                    "sessions": 4,
+                    "waves": 25,
+                    "boundary": "bounded deterministic load only",
+                },
+                "failureMatrix": {"requestedCases": []},
+                "realProvider": {"requestedCases": [], "requestedFailureCases": []},
+            },
+            "cases": [],
+        }
+
+        rendered = acceptance.markdown_from_report(report)
+
+        self.assertIn("# Stage 3 Provider Fixture Load Acceptance", rendered)
+        self.assertIn("bounded deterministic load only", rendered)
+        self.assertIn("## Requested fixture load", rendered)
+        self.assertIn('"waves": 25', rendered)
+
+
 class RunnerOptionsTest(unittest.TestCase):
     def test_fixture_soak_uses_canonical_defaults(self) -> None:
         options = acceptance.parse_args(["--suite", "fixture-soak"])
@@ -3113,6 +3427,63 @@ class RunnerOptionsTest(unittest.TestCase):
             [
                 "--suite",
                 "fixture-concurrency",
+                "--target",
+                "docker",
+                "--failure-case",
+                "provider-crash",
+            ],
+        )
+        for arguments in invalid_arguments:
+            with self.subTest(arguments=arguments):
+                with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                    acceptance.parse_args(arguments)
+
+    def test_fixture_load_uses_canonical_docker_shape(self) -> None:
+        options = acceptance.parse_args(
+            ["--suite", "fixture-load", "--target", "docker"]
+        )
+
+        self.assertEqual(options.suite, "fixture-load")
+        self.assertEqual(options.target, "docker")
+        self.assertEqual(options.load_waves, acceptance.FIXTURE_LOAD_DEFAULT_WAVES)
+        self.assertFalse(options.restart_control_plane)
+        self.assertEqual(options.timeout_seconds, 900.0)
+
+    def test_fixture_load_parses_bounds_and_rejects_noncanonical_combinations(self) -> None:
+        options = acceptance.parse_args(
+            [
+                "--suite",
+                "fixture-load",
+                "--target",
+                "docker",
+                "--load-waves",
+                "8",
+            ]
+        )
+        self.assertEqual(options.load_waves, 8)
+
+        invalid_arguments = (
+            ["--load-waves", "8"],
+            ["--suite", "fixture-load"],
+            [
+                "--suite",
+                "fixture-load",
+                "--target",
+                "docker",
+                "--load-waves",
+                str(acceptance.FIXTURE_LOAD_MIN_WAVES - 1),
+            ],
+            [
+                "--suite",
+                "fixture-load",
+                "--target",
+                "docker",
+                "--load-waves",
+                str(acceptance.FIXTURE_LOAD_MAX_WAVES + 1),
+            ],
+            [
+                "--suite",
+                "fixture-load",
                 "--target",
                 "docker",
                 "--failure-case",

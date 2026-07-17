@@ -111,6 +111,10 @@ REAL_PROVIDER_SMOKE_PROVIDERS = frozenset({"codex", "claudeAgent"})
 REAL_PROVIDER_CREDENTIAL_FIELDS = ("apiKey", "authToken")
 FIXTURE_CONCURRENCY_PROVIDERS = ("codex", "claudeAgent")
 FIXTURE_CONCURRENCY_WORKERS = 2
+FIXTURE_LOAD_SESSIONS = 4
+FIXTURE_LOAD_DEFAULT_WAVES = 25
+FIXTURE_LOAD_MIN_WAVES = 2
+FIXTURE_LOAD_MAX_WAVES = 100
 FIXTURE_RETENTION_SWEEP_INTERVAL = "250ms"
 FIXTURE_RETENTION_DAYS = 1
 FIXTURE_RETENTION_AGE_DAYS = 2
@@ -118,6 +122,7 @@ SUITES = (
     "fixture",
     "fixture-soak",
     "fixture-concurrency",
+    "fixture-load",
     "fixture-retention-concurrency",
     "real-provider-smoke",
 )
@@ -710,6 +715,7 @@ class RunnerOptions:
     restart_control_plane: bool
     soak_turns: int
     soak_restart_every: int
+    load_waves: int
     ssh_orbctl_bin: str
     ssh_machine_name: str | None
     ssh_machine_arch: str
@@ -3033,7 +3039,9 @@ class DockerDriver(ManagedWorkerDriver):
         self.head_sha = self._head_sha()
         self.image = options.docker_worker_image or f"synara-stage3-provider-acceptance:{self.head_sha}-{suffix}"
         self.desired_workers = (
-            FIXTURE_CONCURRENCY_WORKERS if options.suite == "fixture-concurrency" else 1
+            FIXTURE_CONCURRENCY_WORKERS
+            if options.suite in {"fixture-concurrency", "fixture-load"}
+            else 1
         )
         self.target_id: str | None = None
 
@@ -3153,7 +3161,7 @@ class DockerDriver(ManagedWorkerDriver):
     ) -> Mapping[str, Any]:
         enabled_providers = (
             list(FIXTURE_CONCURRENCY_PROVIDERS)
-            if self.options.suite == "fixture-concurrency"
+            if self.options.suite in {"fixture-concurrency", "fixture-load"}
             else [provider]
         )
         target = json_object(
@@ -6390,6 +6398,9 @@ class AcceptanceSuite:
         if self.options.suite == "fixture-concurrency":
             self._run_fixture_concurrency()
             return self.cases
+        if self.options.suite == "fixture-load":
+            self._run_fixture_load()
+            return self.cases
         if self.options.suite == "fixture-retention-concurrency":
             self._run_fixture_retention_concurrency()
             return self.cases
@@ -6560,6 +6571,32 @@ class AcceptanceSuite:
             "concurrency.multi-provider-multi-session",
             "Run overlapping Codex and Claude fixture Executions on distinct Workers",
             self._fixture_multi_provider_concurrency,
+            requires=("resources.credential-project-session",),
+        )
+
+    def _run_fixture_load(self) -> None:
+        self._case(
+            "runtime.target-provision",
+            "Provision a two-Worker managed Docker Target",
+            self._provision_target,
+            requires=("identity.dev-login",),
+        )
+        self._case(
+            "runtime.concurrent-worker-discovery",
+            "Discover two compatible Workers exposing both fixture Providers",
+            self._discover_concurrency_workers,
+            requires=("runtime.target-provision",),
+        )
+        self._case(
+            "resources.credential-project-session",
+            "Create the primary bound Credential, empty Repository Project, and Session",
+            self._create_resources,
+            requires=("runtime.concurrent-worker-discovery",),
+        )
+        self._case(
+            "load.multi-session-admission-waves",
+            "Run bounded multi-Session load with quota rejection, slot reuse, Artifacts, and Checkpoints",
+            self._fixture_load_admission_waves,
             requires=("resources.credential-project-session",),
         )
 
@@ -10342,7 +10379,6 @@ class AcceptanceSuite:
             )
 
     def _fixture_multi_provider_concurrency(self) -> Mapping[str, Any]:
-        tenant_id = self._required("tenant_id")
         primary_session_id = self._required("session_id")
         primary_provider = self.options.provider
         secondary_provider = next(
@@ -10350,26 +10386,11 @@ class AcceptanceSuite:
             for provider in FIXTURE_CONCURRENCY_PROVIDERS
             if provider != primary_provider
         )
-        quota = json_object(
-            self.api.request(
-                "PUT",
-                f"/v1/tenants/{tenant_id}/quota",
-                {
-                    "maxConcurrentExecutions": FIXTURE_CONCURRENCY_WORKERS,
-                    "maxArtifactBytes": None,
-                },
-            ),
-            "concurrency quota",
+        quota = self._set_fixture_execution_quota(
+            FIXTURE_CONCURRENCY_WORKERS,
+            "concurrency",
+            "runner.concurrency_quota_mismatch",
         )
-        if quota.get("maxConcurrentExecutions") != FIXTURE_CONCURRENCY_WORKERS:
-            raise AcceptanceError(
-                "runner.concurrency_quota_mismatch",
-                "The Tenant did not retain the requested concurrent Execution quota.",
-                {
-                    "expected": FIXTURE_CONCURRENCY_WORKERS,
-                    "actual": quota.get("maxConcurrentExecutions"),
-                },
-            )
 
         secondary_credential = self._create_fixture_credential(
             secondary_provider,
@@ -10471,6 +10492,581 @@ class AcceptanceSuite:
             "resolved": [primary_resolution, secondary_resolution],
         }
 
+    def _set_fixture_execution_quota(
+        self,
+        maximum: int,
+        description: str,
+        mismatch_code: str,
+    ) -> dict[str, Any]:
+        tenant_id = self._required("tenant_id")
+        quota = json_object(
+            self.api.request(
+                "PUT",
+                f"/v1/tenants/{tenant_id}/quota",
+                {
+                    "maxConcurrentExecutions": maximum,
+                    "maxArtifactBytes": None,
+                },
+            ),
+            f"{description} quota",
+        )
+        if quota.get("maxConcurrentExecutions") != maximum:
+            raise AcceptanceError(
+                mismatch_code,
+                "The Tenant did not retain the requested concurrent Execution quota.",
+                {
+                    "description": description,
+                    "expected": maximum,
+                    "actual": quota.get("maxConcurrentExecutions"),
+                },
+            )
+        return quota
+
+    def _fixture_load_admission_waves(self) -> Mapping[str, Any]:
+        wave_count = self.options.load_waves
+        if not FIXTURE_LOAD_MIN_WAVES <= wave_count <= FIXTURE_LOAD_MAX_WAVES:
+            raise AcceptanceError(
+                "runner.load_waves_invalid",
+                "The fixture load wave count was outside the accepted range.",
+                {
+                    "minimum": FIXTURE_LOAD_MIN_WAVES,
+                    "maximum": FIXTURE_LOAD_MAX_WAVES,
+                    "actual": wave_count,
+                },
+            )
+        quota = self._set_fixture_execution_quota(
+            FIXTURE_CONCURRENCY_WORKERS,
+            "load admission",
+            "runner.load_quota_mismatch",
+        )
+        sessions = self._fixture_load_sessions()
+        execution_ids: set[str] = set()
+        worker_ids: set[str] = set()
+        provider_execution_counts = {
+            provider: 0 for provider in FIXTURE_CONCURRENCY_PROVIDERS
+        }
+        session_execution_counts = {
+            str(session["sessionId"]): 0 for session in sessions
+        }
+        event_type_counts: dict[str, int] = {}
+        quota_rejections = 0
+        overlap_observations = 0
+        admission_recovery_ms: list[int] = []
+        wave_durations_ms: list[int] = []
+        wave_samples: list[dict[str, Any]] = []
+        started = time.monotonic()
+
+        def complete(load_turn: Mapping[str, Any]) -> None:
+            terminal = self._complete_fixture_load_turn(load_turn)
+            self._accumulate_fixture_load_terminal(
+                terminal,
+                execution_ids,
+                worker_ids,
+                provider_execution_counts,
+                session_execution_counts,
+                event_type_counts,
+            )
+
+        for wave_index in range(wave_count):
+            wave_started = time.monotonic()
+            offset = wave_index % len(sessions)
+            ordered = sessions[offset:] + sessions[:offset]
+            active = [
+                self._start_fixture_load_turn(ordered[0], wave_index, 1),
+                self._start_fixture_load_turn(ordered[1], wave_index, 2),
+            ]
+            overlaps = [self._fixture_load_overlap(active, wave_index, "initial")]
+            overlap_observations += 1
+            worker_ids.update(overlaps[-1]["workerIds"])
+            rejections: list[dict[str, Any]] = []
+
+            for position, session in enumerate(ordered[2:], start=3):
+                rejections.append(
+                    self._assert_fixture_load_quota_rejected(
+                        session,
+                        wave_index,
+                        position,
+                    )
+                )
+                quota_rejections += 1
+                complete(active.pop(0))
+                self._assert_fixture_load_turn_pending(
+                    active[0],
+                    wave_index,
+                    f"before-position-{position}-admission",
+                )
+                recovery_started = time.monotonic()
+                active.append(
+                    self._start_fixture_load_turn(
+                        session,
+                        wave_index,
+                        position,
+                    )
+                )
+                admission_recovery_ms.append(elapsed_ms(recovery_started))
+                overlaps.append(
+                    self._fixture_load_overlap(
+                        active,
+                        wave_index,
+                        f"slot-reuse-{position - 2}",
+                    )
+                )
+                overlap_observations += 1
+                worker_ids.update(overlaps[-1]["workerIds"])
+
+            complete(active.pop(0))
+            self._assert_fixture_load_turn_pending(
+                active[0],
+                wave_index,
+                "before-final-terminal",
+            )
+            complete(active.pop(0))
+
+            for session in sessions:
+                pending = self._pending_interactions(str(session["sessionId"]))
+                if pending:
+                    raise AcceptanceError(
+                        "runner.load_interaction_leaked",
+                        "A fixture load wave ended with a pending interaction.",
+                        {
+                            "wave": wave_index + 1,
+                            "sessionId": session["sessionId"],
+                            "interactionIds": [item.get("id") for item in pending],
+                        },
+                    )
+
+            wave_duration = elapsed_ms(wave_started)
+            wave_durations_ms.append(wave_duration)
+            sample = {
+                "wave": wave_index + 1,
+                "sessionOrder": [str(session["sessionId"]) for session in ordered],
+                "providerOrder": [str(session["provider"]) for session in ordered],
+                "overlapWorkerIds": [overlap["workerIds"] for overlap in overlaps],
+                "quotaRejections": rejections,
+                "durationMs": wave_duration,
+            }
+            if wave_index < 2 or wave_index >= wave_count - 2:
+                wave_samples.append(sample)
+
+        expected_executions = wave_count * FIXTURE_LOAD_SESSIONS
+        expected_rejections = wave_count * (FIXTURE_LOAD_SESSIONS - FIXTURE_CONCURRENCY_WORKERS)
+        expected_overlaps = wave_count * (FIXTURE_LOAD_SESSIONS - 1)
+        if (
+            len(execution_ids) != expected_executions
+            or quota_rejections != expected_rejections
+            or overlap_observations != expected_overlaps
+            or len(worker_ids) != FIXTURE_CONCURRENCY_WORKERS
+            or any(count != wave_count for count in session_execution_counts.values())
+            or any(count != expected_executions // 2 for count in provider_execution_counts.values())
+        ):
+            raise AcceptanceError(
+                "runner.load_aggregate_invalid",
+                "The fixture load run did not retain its canonical execution, rejection, overlap, or distribution counts.",
+                {
+                    "expectedExecutions": expected_executions,
+                    "distinctExecutionCount": len(execution_ids),
+                    "expectedQuotaRejections": expected_rejections,
+                    "quotaRejections": quota_rejections,
+                    "expectedOverlapObservations": expected_overlaps,
+                    "overlapObservations": overlap_observations,
+                    "workerIds": sorted(worker_ids),
+                    "providerExecutionCounts": dict(sorted(provider_execution_counts.items())),
+                    "sessionExecutionCounts": dict(sorted(session_execution_counts.items())),
+                },
+            )
+
+        duration_ms = elapsed_ms(started)
+        return {
+            "maxConcurrentExecutions": quota.get("maxConcurrentExecutions"),
+            "workers": FIXTURE_CONCURRENCY_WORKERS,
+            "sessions": FIXTURE_LOAD_SESSIONS,
+            "providers": list(FIXTURE_CONCURRENCY_PROVIDERS),
+            "wavesRequested": wave_count,
+            "wavesCompleted": wave_count,
+            "executionsCompleted": len(execution_ids),
+            "distinctExecutionCount": len(execution_ids),
+            "distinctWorkerCount": len(worker_ids),
+            "quotaRejections": quota_rejections,
+            "admissionRetriesSucceeded": len(admission_recovery_ms),
+            "overlapObservations": overlap_observations,
+            "doubleExecution": False,
+            "duplicateTerminal": False,
+            "pendingInteractionCount": 0,
+            "providerExecutionCounts": dict(sorted(provider_execution_counts.items())),
+            "sessionExecutionCounts": dict(sorted(session_execution_counts.items())),
+            "eventTypeCounts": dict(sorted(event_type_counts.items())),
+            "durationMs": duration_ms,
+            "observedCompletedExecutionsPerSecond": round(
+                len(execution_ids) / max(duration_ms / 1000.0, 0.001),
+                3,
+            ),
+            "waveDurationMs": {
+                "minimum": min(wave_durations_ms),
+                "maximum": max(wave_durations_ms),
+                "average": round(sum(wave_durations_ms) / len(wave_durations_ms), 3),
+            },
+            "admissionRecoveryMs": {
+                "minimum": min(admission_recovery_ms),
+                "maximum": max(admission_recovery_ms),
+                "average": round(sum(admission_recovery_ms) / len(admission_recovery_ms), 3),
+            },
+            "sessionsEvidence": [
+                {
+                    "sessionId": session["sessionId"],
+                    "provider": session["provider"],
+                }
+                for session in sessions
+            ],
+            "waveSamples": wave_samples,
+        }
+
+    def _fixture_load_sessions(self) -> list[dict[str, Any]]:
+        primary_provider = self.options.provider
+        if primary_provider not in FIXTURE_CONCURRENCY_PROVIDERS:
+            raise AcceptanceError(
+                "runner.load_provider_unsupported",
+                "The fixture load suite requires Codex or Claude Agent as its primary Provider.",
+                {"provider": primary_provider},
+            )
+        secondary_provider = next(
+            provider
+            for provider in FIXTURE_CONCURRENCY_PROVIDERS
+            if provider != primary_provider
+        )
+        credentials = {
+            primary_provider: self._required("credential_id"),
+        }
+        secondary_credential = self._create_fixture_credential(
+            secondary_provider,
+            "Stage 3 Provider Load Fixture",
+        )
+        credentials[secondary_provider] = self._string_id(
+            secondary_credential,
+            "load fixture secondary Credential",
+        )
+        providers = [
+            primary_provider,
+            secondary_provider,
+            primary_provider,
+            secondary_provider,
+        ]
+        sessions = [
+            {
+                "sessionId": self._required("session_id"),
+                "provider": primary_provider,
+                "credentialId": credentials[primary_provider],
+            }
+        ]
+        for index, provider in enumerate(providers[1:], start=2):
+            session = self._create_project_session(
+                provider=provider,
+                title=f"Stage 3 Provider Load Session {index}",
+                credential_id=credentials[provider],
+                model="stage3-acceptance-fixture",
+                description=f"load Session {index}",
+            )
+            sessions.append(
+                {
+                    "sessionId": self._string_id(session, f"load Session {index}"),
+                    "provider": provider,
+                    "credentialId": credentials[provider],
+                }
+            )
+        session_ids = {str(session["sessionId"]) for session in sessions}
+        if len(session_ids) != FIXTURE_LOAD_SESSIONS:
+            raise AcceptanceError(
+                "runner.load_session_reused",
+                "The fixture load suite did not create four distinct Sessions.",
+                {"sessionIds": sorted(session_ids)},
+            )
+        return sessions
+
+    def _start_fixture_load_turn(
+        self,
+        session: Mapping[str, Any],
+        wave_index: int,
+        position: int,
+    ) -> dict[str, Any]:
+        session_id = str(session["sessionId"])
+        provider = str(session["provider"])
+        started = time.monotonic()
+        turn = self._create_turn(
+            "[text] [tool] [usage] [artifact] [credential] [approval] "
+            f"fixture-load-wave-{wave_index + 1}-position-{position}",
+            session_id=session_id,
+        )
+        turn_id = self._turn_id(turn, "fixture load Turn")
+        interaction = self._wait_for_interaction(
+            turn_id,
+            "approval",
+            session_id=session_id,
+        )
+        active = self._active_approval_evidence(
+            turn_id,
+            interaction,
+            session_id=session_id,
+            provider=provider,
+        )
+        return {
+            "sessionId": session_id,
+            "provider": provider,
+            "turn": turn,
+            "interaction": interaction,
+            "active": active,
+            "admissionMs": elapsed_ms(started),
+        }
+
+    def _fixture_load_overlap(
+        self,
+        active_turns: Sequence[Mapping[str, Any]],
+        wave_index: int,
+        stage: str,
+    ) -> dict[str, Any]:
+        active = [json_object(item.get("active"), "load active evidence") for item in active_turns]
+        session_ids = {str(item.get("sessionId")) for item in active}
+        execution_ids = {str(item.get("executionId")) for item in active}
+        worker_ids = {str(item.get("workerId")) for item in active}
+        pending = all(
+            self._interaction_pending(
+                str(item["sessionId"]),
+                json_object(item.get("interaction"), "load overlap interaction"),
+            )
+            for item in active_turns
+        )
+        if (
+            len(active) != FIXTURE_CONCURRENCY_WORKERS
+            or len(session_ids) != FIXTURE_CONCURRENCY_WORKERS
+            or len(execution_ids) != FIXTURE_CONCURRENCY_WORKERS
+            or len(worker_ids) != FIXTURE_CONCURRENCY_WORKERS
+            or not pending
+        ):
+            raise AcceptanceError(
+                "runner.load_worker_overlap_invalid",
+                "The fixture load wave did not hold two pending Executions on distinct Workers.",
+                {
+                    "wave": wave_index + 1,
+                    "stage": stage,
+                    "sessionIds": sorted(session_ids),
+                    "executionIds": sorted(execution_ids),
+                    "workerIds": sorted(worker_ids),
+                    "allInteractionsPending": pending,
+                },
+            )
+        return {
+            "stage": stage,
+            "sessionIds": sorted(session_ids),
+            "executionIds": sorted(execution_ids),
+            "workerIds": sorted(worker_ids),
+        }
+
+    def _assert_fixture_load_turn_pending(
+        self,
+        load_turn: Mapping[str, Any],
+        wave_index: int,
+        stage: str,
+    ) -> None:
+        session_id = str(load_turn["sessionId"])
+        interaction = json_object(
+            load_turn.get("interaction"),
+            "load pending interaction",
+        )
+        if not self._interaction_pending(session_id, interaction):
+            raise AcceptanceError(
+                "runner.load_overlap_isolation_lost",
+                "Completing one load Execution changed another pending Approval.",
+                {
+                    "wave": wave_index + 1,
+                    "stage": stage,
+                    "sessionId": session_id,
+                    "interactionId": interaction.get("id"),
+                },
+            )
+
+    def _assert_fixture_load_quota_rejected(
+        self,
+        session: Mapping[str, Any],
+        wave_index: int,
+        position: int,
+    ) -> dict[str, Any]:
+        session_id = str(session["sessionId"])
+        before_events = self._all_events(session_id=session_id)
+        before_pending = self._pending_interactions(session_id)
+        started = time.monotonic()
+        try:
+            self._create_turn(
+                "[approval] "
+                f"fixture-load-quota-rejection-wave-{wave_index + 1}-position-{position}",
+                session_id=session_id,
+            )
+        except AcceptanceError as error:
+            if error.code != "execution_quota_exceeded":
+                raise
+            reason_code = error.code
+        else:
+            raise AcceptanceError(
+                "runner.load_quota_not_enforced",
+                "The Tenant admitted a third Execution while the two-slot load quota was occupied.",
+                {
+                    "wave": wave_index + 1,
+                    "position": position,
+                    "sessionId": session_id,
+                },
+            )
+        after_events = self._all_events(session_id=session_id)
+        after_pending = self._pending_interactions(session_id)
+        if after_events != before_events or after_pending != before_pending:
+            raise AcceptanceError(
+                "runner.load_quota_rejection_mutated_session",
+                "A rejected load admission mutated the Session Event or interaction state.",
+                {
+                    "wave": wave_index + 1,
+                    "position": position,
+                    "sessionId": session_id,
+                    "beforeEventCount": len(before_events),
+                    "afterEventCount": len(after_events),
+                    "beforeInteractionCount": len(before_pending),
+                    "afterInteractionCount": len(after_pending),
+                },
+            )
+        return {
+            "sessionId": session_id,
+            "reasonCode": reason_code,
+            "stateMutated": False,
+            "durationMs": elapsed_ms(started),
+        }
+
+    def _complete_fixture_load_turn(
+        self,
+        load_turn: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        session_id = str(load_turn["sessionId"])
+        provider = str(load_turn["provider"])
+        turn = json_object(load_turn.get("turn"), "load Turn")
+        interaction = json_object(load_turn.get("interaction"), "load interaction")
+        active = json_object(load_turn.get("active"), "load active evidence")
+        resolution = self._resolve_approval_turn(
+            turn,
+            interaction,
+            session_id=session_id,
+        )
+        turn_id = self._turn_id(turn, "load Turn")
+        snapshot = self._turn_terminal_snapshot(turn_id, session_id=session_id)
+        if snapshot is None:
+            raise AcceptanceError(
+                "runner.load_terminal_missing",
+                "A resolved fixture load Turn had no terminal snapshot.",
+                {"sessionId": session_id, "turnId": turn_id},
+            )
+        terminal, events = snapshot
+        event_type_counts: dict[str, int] = {}
+        for event in events:
+            event_type = str(event.get("eventType") or "")
+            event_type_counts[event_type] = event_type_counts.get(event_type, 0) + 1
+        exact_counts = {
+            "turn.created": 1,
+            "execution.leased": 1,
+            "workspace.ready": 1,
+            "execution.started": 1,
+            "content.delta": 1,
+            "item.started": 1,
+            "item.completed": 1,
+            "thread.token-usage.updated": 1,
+            "request.opened": 1,
+            "request.resolved": 1,
+            "workspace.dirty": 1,
+            "checkpoint.created": 1,
+            "checkpoint.ready": 1,
+            "execution.completed": 1,
+        }
+        invalid_counts = {
+            event_type: {
+                "expected": expected,
+                "actual": event_type_counts.get(event_type, 0),
+            }
+            for event_type, expected in exact_counts.items()
+            if event_type_counts.get(event_type, 0) != expected
+        }
+        if event_type_counts.get("artifact.ready", 0) < 2:
+            invalid_counts["artifact.ready"] = {
+                "expectedMinimum": 2,
+                "actual": event_type_counts.get("artifact.ready", 0),
+            }
+        terminal_payload = json_object(terminal.get("payload"), "load terminal payload")
+        output = json_object(terminal_payload.get("output"), "load terminal output")
+        credential_evidence = json_object(
+            output.get("credentialEvidence"),
+            "load credential evidence",
+        )
+        expected_credential_evidence = {
+            "credentialPayloadKeys": ["acceptanceToken"],
+            "credentialVerified": True,
+        }
+        terminal_worker_id, terminal_generation = self._event_worker_identity(terminal)
+        if (
+            invalid_counts
+            or credential_evidence != expected_credential_evidence
+            or terminal.get("executionId") != active.get("executionId")
+            or terminal_worker_id != active.get("workerId")
+            or terminal_generation != active.get("generation")
+        ):
+            raise AcceptanceError(
+                "runner.load_terminal_evidence_invalid",
+                "A fixture load Turn omitted required durable events, Credential evidence, or Worker fencing.",
+                {
+                    "sessionId": session_id,
+                    "provider": provider,
+                    "turnId": turn_id,
+                    "executionId": terminal.get("executionId"),
+                    "invalidEventTypeCounts": invalid_counts,
+                    "credentialEvidence": credential_evidence,
+                    "activeWorkerId": active.get("workerId"),
+                    "terminalWorkerId": terminal_worker_id,
+                    "activeGeneration": active.get("generation"),
+                    "terminalGeneration": terminal_generation,
+                },
+            )
+        return {
+            "sessionId": session_id,
+            "provider": provider,
+            "turnId": turn_id,
+            "executionId": terminal.get("executionId"),
+            "workerId": terminal_worker_id,
+            "generation": terminal_generation,
+            "resolution": resolution,
+            "eventTypeCounts": dict(sorted(event_type_counts.items())),
+            "sequenceRange": self._sequence_range(events),
+        }
+
+    @staticmethod
+    def _accumulate_fixture_load_terminal(
+        terminal: Mapping[str, Any],
+        execution_ids: set[str],
+        worker_ids: set[str],
+        provider_execution_counts: dict[str, int],
+        session_execution_counts: dict[str, int],
+        event_type_counts: dict[str, int],
+    ) -> None:
+        execution_id = str(terminal.get("executionId") or "")
+        if not execution_id or execution_id in execution_ids:
+            raise AcceptanceError(
+                "runner.load_execution_reused",
+                "The fixture load run reused or omitted an Execution identity.",
+                {"executionId": execution_id},
+            )
+        execution_ids.add(execution_id)
+        worker_ids.add(str(terminal["workerId"]))
+        provider = str(terminal["provider"])
+        session_id = str(terminal["sessionId"])
+        provider_execution_counts[provider] += 1
+        session_execution_counts[session_id] += 1
+        terminal_counts = json_object(
+            terminal.get("eventTypeCounts"),
+            "load terminal event type counts",
+        )
+        for event_type, count in terminal_counts.items():
+            if isinstance(count, int):
+                event_type_counts[event_type] = event_type_counts.get(event_type, 0) + count
+
     def _active_approval_evidence(
         self,
         turn_id: str,
@@ -10553,20 +11149,25 @@ class AcceptanceSuite:
                 "runner.interaction_identity_missing",
                 "The pending interaction omitted its ID.",
             )
+        return any(item.get("id") == interaction_id for item in self._pending_interactions(session_id))
+
+    def _pending_interactions(self, session_id: str) -> list[dict[str, Any]]:
         snapshot = json_object(
             self.api.request("GET", f"/v1/sessions/{session_id}/interactions"),
-            "pending concurrency interactions",
+            "pending interactions",
         )
         items = snapshot.get("items")
         if not isinstance(items, list):
             raise AcceptanceError(
                 "runner.response_shape_invalid",
-                "pending concurrency interactions.items was not an array.",
+                "pending interactions.items was not an array.",
             )
-        return any(
-            isinstance(item, dict) and item.get("id") == interaction_id
-            for item in items
-        )
+        if not all(isinstance(item, dict) for item in items):
+            raise AcceptanceError(
+                "runner.response_shape_invalid",
+                "pending interactions.items contained a non-object value.",
+            )
+        return [dict(item) for item in items]
 
     def _resolve_approval_turn(
         self,
@@ -11710,12 +12311,14 @@ def markdown_from_report(report: Mapping[str, Any]) -> str:
     real_provider_smoke = report.get("mode") == "real-provider-smoke"
     fixture_soak = report.get("mode") == "fixture-soak"
     fixture_concurrency = report.get("mode") == "fixture-concurrency"
+    fixture_load = report.get("mode") == "fixture-load"
     fixture_retention_concurrency = report.get("mode") == "fixture-retention-concurrency"
     configuration = report.get("configuration")
     failure_matrix = configuration.get("failureMatrix") if isinstance(configuration, dict) else None
     real_provider = configuration.get("realProvider") if isinstance(configuration, dict) else None
     soak = configuration.get("soak") if isinstance(configuration, dict) else None
     concurrency = configuration.get("concurrency") if isinstance(configuration, dict) else None
+    load = configuration.get("load") if isinstance(configuration, dict) else None
     retention_concurrency = (
         configuration.get("retentionConcurrency") if isinstance(configuration, dict) else None
     )
@@ -11730,6 +12333,8 @@ def markdown_from_report(report: Mapping[str, Any]) -> str:
             if real_provider_smoke
             else "# Stage 3 Provider Fixture Retention Concurrency Acceptance"
             if fixture_retention_concurrency
+            else "# Stage 3 Provider Fixture Load Acceptance"
+            if fixture_load
             else "# Stage 3 Provider Fixture Concurrency Acceptance"
             if fixture_concurrency
             else "# Stage 3 Provider Fixture Soak Acceptance"
@@ -11760,6 +12365,10 @@ def markdown_from_report(report: Mapping[str, Any]) -> str:
             if fixture_retention_concurrency
             and isinstance(retention_concurrency, dict)
             and isinstance(retention_concurrency.get("boundary"), str)
+            else str(load.get("boundary"))
+            if fixture_load
+            and isinstance(load, dict)
+            and isinstance(load.get("boundary"), str)
             else str(concurrency.get("boundary"))
             if fixture_concurrency
             and isinstance(concurrency, dict)
@@ -11792,6 +12401,17 @@ def markdown_from_report(report: Mapping[str, Any]) -> str:
                 "",
                 "```json",
                 json.dumps(concurrency, indent=2, sort_keys=True, ensure_ascii=False),
+                "```",
+            ]
+        )
+    if fixture_load and isinstance(load, dict):
+        lines.extend(
+            [
+                "",
+                "## Requested fixture load",
+                "",
+                "```json",
+                json.dumps(load, indent=2, sort_keys=True, ensure_ascii=False),
                 "```",
             ]
         )
@@ -12030,7 +12650,8 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
         choices=SUITES,
         help=(
             "Acceptance suite: deterministic fixture, deterministic long-session soak, managed Docker "
-            "multi-Provider concurrency, Local retention concurrency, or real Provider smoke"
+            "multi-Provider concurrency, bounded Docker load/admission, Local retention concurrency, or real "
+            "Provider smoke"
         ),
     )
     parser.add_argument("--output-dir", type=pathlib.Path)
@@ -12153,6 +12774,14 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
         type=int,
         help="Restart the Control Plane after each N completed soak Turns (default: 10; 0 disables)",
     )
+    parser.add_argument(
+        "--load-waves",
+        type=int,
+        help=(
+            "Four-Session fixture-load waves (default: 25; allowed: "
+            f"{FIXTURE_LOAD_MIN_WAVES}..{FIXTURE_LOAD_MAX_WAVES})"
+        ),
+    )
     parsed = parser.parse_args(argv)
     soak_turns = parsed.soak_turns if parsed.soak_turns is not None else 100 if parsed.suite == "fixture-soak" else 0
     soak_restart_every = (
@@ -12160,6 +12789,13 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
         if parsed.soak_restart_every is not None
         else 10
         if parsed.suite == "fixture-soak"
+        else 0
+    )
+    load_waves = (
+        parsed.load_waves
+        if parsed.load_waves is not None
+        else FIXTURE_LOAD_DEFAULT_WAVES
+        if parsed.suite == "fixture-load"
         else 0
     )
     default_timeout = (
@@ -12187,6 +12823,14 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
             parser.error("--suite fixture-soak requires Control Plane restart continuity")
         if parsed.failure_only:
             parser.error("--suite fixture-soak cannot be combined with --failure-only")
+    if parsed.suite != "fixture-load" and parsed.load_waves is not None:
+        parser.error("--load-waves requires --suite fixture-load")
+    if parsed.suite == "fixture-load" and not (
+        FIXTURE_LOAD_MIN_WAVES <= load_waves <= FIXTURE_LOAD_MAX_WAVES
+    ):
+        parser.error(
+            f"--load-waves must be between {FIXTURE_LOAD_MIN_WAVES} and {FIXTURE_LOAD_MAX_WAVES}"
+        )
     if parsed.control_plane_binary is not None and not parsed.skip_build:
         parser.error("--control-plane-binary requires --skip-build to prevent overwriting the configured binary")
     if parsed.skip_build and parsed.control_plane_binary is None:
@@ -12307,6 +12951,13 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
             parser.error(
                 "--suite fixture-concurrency cannot be combined with fixture failure/canary options"
             )
+    if parsed.suite == "fixture-load":
+        if parsed.target != "docker":
+            parser.error("--suite fixture-load currently requires --target docker")
+        if failure_cases or parsed.failure_only:
+            parser.error(
+                "--suite fixture-load cannot be combined with fixture failure/canary options"
+            )
     if parsed.suite == "fixture-retention-concurrency":
         if parsed.target != "local":
             parser.error("--suite fixture-retention-concurrency requires --target local")
@@ -12370,10 +13021,12 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
         keep=parsed.keep,
         restart_control_plane=(
             not parsed.no_restart_control_plane
-            and parsed.suite not in {"fixture-concurrency", "fixture-retention-concurrency"}
+            and parsed.suite
+            not in {"fixture-concurrency", "fixture-load", "fixture-retention-concurrency"}
         ),
         soak_turns=soak_turns,
         soak_restart_every=soak_restart_every,
+        load_waves=load_waves,
         ssh_orbctl_bin=parsed.ssh_orbctl_bin.strip(),
         ssh_machine_name=ssh_machine_name,
         ssh_machine_arch=parsed.ssh_machine_arch,
@@ -12514,12 +13167,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         cases = suite.cases
     real_provider_smoke = options.suite == "real-provider-smoke"
     fixture_concurrency = options.suite == "fixture-concurrency"
+    fixture_load = options.suite == "fixture-load"
     fixture_retention_concurrency = options.suite == "fixture-retention-concurrency"
     mode = (
         "real-provider-smoke"
         if real_provider_smoke
         else "fixture-retention-concurrency"
         if fixture_retention_concurrency
+        else "fixture-load"
+        if fixture_load
         else "fixture-concurrency"
         if fixture_concurrency
         else "fixture-soak"
@@ -12547,10 +13203,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             if fixture_retention_concurrency
             else (
                 "deterministic Codex and Claude Provider Host fixtures over one real Control Plane and two managed "
-                "Docker agentd Workers; simultaneous pending Approval barriers prove multi-Session execution "
-                "overlap, not real Provider, load, remote Target, or production concurrency"
-                if fixture_concurrency
-                else "deterministic Provider Host fixture over real Control Plane, agentd, Worker Protocol, and Target paths"
+                "Docker agentd Workers; four Sessions run repeated quota rejection, immediate slot reuse, three "
+                "overlap observations per wave and durable Artifact/Checkpoint completion; bounded admission/load "
+                "mechanics only, not real Provider, production performance, multi-node, or production-duration load"
+                if fixture_load
+                else (
+                    "deterministic Codex and Claude Provider Host fixtures over one real Control Plane and two managed "
+                    "Docker agentd Workers; simultaneous pending Approval barriers prove multi-Session execution "
+                    "overlap, not real Provider, load, remote Target, or production concurrency"
+                    if fixture_concurrency
+                    else "deterministic Provider Host fixture over real Control Plane, agentd, Worker Protocol, and Target paths"
+                )
             )
         )
     )
@@ -12586,6 +13249,25 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "providers": list(FIXTURE_CONCURRENCY_PROVIDERS) if fixture_concurrency else [],
                 "barrier": "simultaneous-pending-approval" if fixture_concurrency else None,
                 "boundary": evidence_boundary if fixture_concurrency else None,
+            },
+            "load": {
+                "workers": FIXTURE_CONCURRENCY_WORKERS if fixture_load else 0,
+                "sessions": FIXTURE_LOAD_SESSIONS if fixture_load else 0,
+                "waves": options.load_waves if fixture_load else 0,
+                "plannedExecutions": (
+                    FIXTURE_LOAD_SESSIONS * options.load_waves if fixture_load else 0
+                ),
+                "plannedQuotaRejections": (
+                    (FIXTURE_LOAD_SESSIONS - FIXTURE_CONCURRENCY_WORKERS)
+                    * options.load_waves
+                    if fixture_load
+                    else 0
+                ),
+                "providers": list(FIXTURE_CONCURRENCY_PROVIDERS) if fixture_load else [],
+                "maxConcurrentExecutions": (
+                    FIXTURE_CONCURRENCY_WORKERS if fixture_load else None
+                ),
+                "boundary": evidence_boundary if fixture_load else None,
             },
             "retentionConcurrency": {
                 "target": "local" if fixture_retention_concurrency else None,

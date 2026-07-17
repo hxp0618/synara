@@ -71,6 +71,33 @@ The primary Provider may be `codex` or `claudeAgent`; the suite automatically cr
 secondary Session. Other Targets and fixture failure/canary options are rejected so a passing report always carries
 the same two-Worker overlap meaning.
 
+## Deterministic bounded load and admission
+
+`--suite fixture-load` reuses the managed Docker Target, two agentd Workers, Codex/Claude fixtures, bound Credential
+delivery, Session APIs, report format, Secret scan and exact cleanup from the concurrency suite. It creates four
+Sessions split evenly across both Providers and sets the Tenant concurrent Execution quota to two. Every wave runs
+four Approval Turns with Text, Tool, Usage, generated Artifact and ready Checkpoint evidence. At three observation
+points per wave, exactly two pending Executions must occupy distinct Workers. Attempts to admit a third Execution
+must fail with `execution_quota_exceeded` without mutating Session Events or interactions; after one terminal, the
+same rejected Session must be admitted immediately while the other Approval remains pending.
+
+The canonical `25` waves complete `100` unique Executions, record `50` quota rejections followed by successful slot
+reuse, and make `75` simultaneous-overlap observations. Use a smaller bounded value during development; the accepted
+range is `2..100` waves.
+
+```sh
+python3 scripts/stage3-provider-acceptance/acceptance_runner.py \
+  --suite fixture-load \
+  --target docker \
+  --provider codex \
+  --load-waves 25 \
+  --timeout 900
+```
+
+This gate proves deterministic bounded quota/admission, two-Worker overlap, repeated Session reuse, durable
+Artifact/Checkpoint completion and unique terminal mechanics. It is not a real Codex/Claude performance result,
+multi-node evidence, a production latency SLA, sustained production load or a production-duration soak.
+
 ## Deterministic Retention/Cleanup concurrency
 
 `--suite fixture-retention-concurrency` runs only on the isolated Local Target. It first creates a terminal generated
