@@ -3,6 +3,8 @@ package httpapi
 import (
 	"net/http"
 	"strings"
+
+	"github.com/synara-ai/synara/services/control-plane/internal/outbox"
 )
 
 func (s *Server) listOutboxMessages(w http.ResponseWriter, r *http.Request) {
@@ -16,7 +18,14 @@ func (s *Server) listOutboxMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	items, err := s.outbox.ListForTenant(
-		r.Context(), mustPrincipal(r), tenantID, strings.TrimSpace(r.URL.Query().Get("status")), limit,
+		r.Context(),
+		mustPrincipal(r),
+		tenantID,
+		outbox.ListQuery{
+			Status:      strings.TrimSpace(r.URL.Query().Get("status")),
+			TopicPrefix: strings.TrimSpace(r.URL.Query().Get("topicPrefix")),
+			Limit:       limit,
+		},
 	)
 	if err != nil {
 		s.writeError(w, r, err)

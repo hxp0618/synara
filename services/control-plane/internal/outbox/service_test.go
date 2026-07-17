@@ -14,6 +14,7 @@ import (
 
 	"github.com/synara-ai/synara/services/control-plane/internal/identity"
 	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
+	"github.com/synara-ai/synara/services/control-plane/internal/problem"
 )
 
 func TestDispatcherPublishesAndAcknowledgesBatch(t *testing.T) {
@@ -142,6 +143,7 @@ func TestTenantOperatorsCanInspectAndAuditReplayWithoutPayloadExposure(t *testin
 		&persistence.Tenant{ID: tenantID, Slug: "outbox-" + strings.ReplaceAll(uuid.NewString(), "-", "")[:10], Name: "Outbox tenant", Status: "active", PlanCode: "free", Region: "default", Settings: map[string]any{}, CreatedBy: userID},
 		&persistence.TenantMembership{TenantID: tenantID, UserID: userID, Role: "auditor", Status: "active", JoinedAt: &now},
 		&persistence.OutboxMessage{ID: messageID, TenantID: &tenantID, Topic: "artifact.ready", MessageKey: uuid.NewString(), Payload: map[string]any{"secret": "must-not-be-listed"}, Headers: map[string]any{}, Attempts: 3, AvailableAt: now, CreatedAt: now, DeadLetteredAt: &deadAt},
+		&persistence.OutboxMessage{ID: uuid.New(), TenantID: &tenantID, Topic: "worker.release.promoted", MessageKey: uuid.NewString(), Payload: map[string]any{}, Headers: map[string]any{}, Attempts: 3, AvailableAt: now, CreatedAt: now.Add(time.Second), DeadLetteredAt: &deadAt},
 	}
 	for _, model := range models {
 		if err := db.Create(model).Error; err != nil {
@@ -149,12 +151,21 @@ func TestTenantOperatorsCanInspectAndAuditReplayWithoutPayloadExposure(t *testin
 		}
 	}
 	principal := identity.Principal{UserID: userID, ActiveTenantID: &tenantID}
-	items, err := service.ListForTenant(context.Background(), principal, tenantID, "dead-letter", 10)
+	items, err := service.ListForTenant(context.Background(), principal, tenantID, ListQuery{
+		Status: "dead-letter", TopicPrefix: "artifact.", Limit: 10,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(items) != 1 || items[0].ID != messageID || items[0].Status != "dead-letter" {
 		t.Fatalf("unexpected operational list: %#v", items)
+	}
+	_, err = service.ListForTenant(context.Background(), principal, tenantID, ListQuery{
+		Status: "all", TopicPrefix: "worker.release.%", Limit: 10,
+	})
+	var apiError *problem.Error
+	if !errors.As(err, &apiError) || apiError.Code != "invalid_outbox_topic_prefix" {
+		t.Fatalf("invalid topic prefix error = %v", err)
 	}
 	if _, err := service.ReplayAuthorized(context.Background(), principal, tenantID, messageID, "request-auditor", "127.0.0.1"); err == nil {
 		t.Fatal("auditor was allowed to replay a dead-letter message")

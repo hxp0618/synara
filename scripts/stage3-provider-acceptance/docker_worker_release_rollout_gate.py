@@ -1993,7 +1993,9 @@ class WorkerReleaseRolloutSuite(acceptance.AcceptanceSuite):
         )
         outbox_page = acceptance.json_object(
             self.api.request(
-                "GET", f"/v1/tenants/{tenant_id}/outbox-messages?status=all&limit=200"
+                "GET",
+                f"/v1/tenants/{tenant_id}/outbox-messages"
+                "?status=all&topicPrefix=worker.release.&limit=200",
             ),
             "Worker Release Outbox page",
         )

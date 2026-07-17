@@ -30,6 +30,7 @@ var (
 	bearerCredential    = regexp.MustCompile(`(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+`)
 	urlQuery            = regexp.MustCompile(`https?://[^\s?]+\?[^\s]+`)
 	highRiskToken       = regexp.MustCompile(`\b(?:AKIA|ASIA)[0-9A-Z]{16}\b|\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b`)
+	outboxTopicPrefix   = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$`)
 )
 
 type Config struct {
@@ -74,6 +75,12 @@ type AdminMessage struct {
 	PublishedAt    *time.Time `json:"publishedAt,omitempty"`
 	DeadLetteredAt *time.Time `json:"deadLetteredAt,omitempty"`
 	LastError      *string    `json:"lastError,omitempty"`
+}
+
+type ListQuery struct {
+	Status      string
+	TopicPrefix string
+	Limit       int
 }
 
 type Service struct {
@@ -238,13 +245,16 @@ func (s *Service) ListForTenant(
 	ctx context.Context,
 	principal identity.Principal,
 	tenantID uuid.UUID,
-	status string,
-	limit int,
+	input ListQuery,
 ) ([]AdminMessage, error) {
 	if _, err := s.authorizer.RequireTenant(ctx, principal.UserID, tenantID, authorization.OutboxRead); err != nil {
 		return nil, err
 	}
-	status = strings.ToLower(strings.TrimSpace(status))
+	status := strings.ToLower(strings.TrimSpace(input.Status))
+	topicPrefix := strings.TrimSpace(input.TopicPrefix)
+	if topicPrefix != "" && !outboxTopicPrefix.MatchString(topicPrefix) {
+		return nil, problem.New(400, "invalid_outbox_topic_prefix", "Outbox topic prefix is invalid.")
+	}
 	query := s.db.WithContext(ctx).Where("tenant_id = ?", tenantID)
 	switch status {
 	case "", "all":
@@ -259,8 +269,11 @@ func (s *Service) ListForTenant(
 	default:
 		return nil, problem.New(400, "invalid_outbox_status", "Outbox status must be pending, retrying, dead-letter, published, or all.")
 	}
+	if topicPrefix != "" {
+		query = query.Where("topic LIKE ?", topicPrefix+"%")
+	}
 	models := make([]persistence.OutboxMessage, 0)
-	if err := query.Order("created_at DESC, id DESC").Limit(persistence.NormalizeLimit(limit, 50, 200)).Find(&models).Error; err != nil {
+	if err := query.Order("created_at DESC, id DESC").Limit(persistence.NormalizeLimit(input.Limit, 50, 200)).Find(&models).Error; err != nil {
 		return nil, problem.Wrap(500, "outbox_list_failed", "Outbox messages could not be loaded.", err)
 	}
 	items := make([]AdminMessage, 0, len(models))
