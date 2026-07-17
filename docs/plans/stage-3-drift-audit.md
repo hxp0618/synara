@@ -1,7 +1,9 @@
 # Stage 3 Drift Audit
 
-Baseline: `codex/saas-tenancy-user` after clean commit `41683366`, including deterministic managed Docker immutable
-Worker Release candidate container-loss recovery under baseline/canary overlap, `25` release-pinned load waves
+Baseline: `codex/saas-tenancy-user` after clean commit `1e826324`, adding the operator-approved reusable `orbstack`
+Kubernetes deterministic fixture/failure gate `19/19`, shared local image transport, exact Pod Eviction and cleanup
+on top of clean commit `41683366`'s deterministic managed Docker immutable Worker Release candidate container-loss
+recovery under baseline/canary overlap, `25` release-pinned load waves
 across promote and rollback, load-safe paginated Audit and topic-filtered Outbox history, the earlier exact
 network/container/fixture Provider Host failure-under-load gates, managed same-Worker replacement and their
 post-recovery four-Session bounded load/admission waves, the deterministic Local active-Execution
@@ -10,8 +12,9 @@ gate, and the deterministic Local 100-Turn fixture soak. The
 consolidated real Codex/Claude Local product and controlled-failure
 release gate remains tied to `253052aa`; terminal-aware Interaction waits, the Provider Cursor expiry policy,
 audited Resume selection, standalone Provider-native generated-file capture and Artifact-backed Large Diff
-projection remain part of that earlier clean evidence chain. The immutable Kubernetes deterministic Provider
-fixture report remains tied to `2763ebd3` and was recorded on 2026-07-14. The latest Docker rollout/load evidence is
+projection remain part of that earlier clean evidence chain. The owned Kind Kubernetes deterministic Provider
+fixture remains tied to `2763ebd3`; the latest approved reusable-context evidence is summarized in
+`docs/reports/stage-3-kubernetes-orbstack-fixture-1e826324.md`. The latest Docker rollout/load evidence is
 summarized in `docs/reports/stage-3-worker-release-rollout-load-41683366.md`; its earlier Busy Worker predecessor is
 retained in `docs/reports/stage-3-worker-release-rollout-d3af9380.md`; the real Local release evidence remains in
 `docs/reports/stage-3-real-provider-local-release-gate-253052aa.md`; deterministic Local long-Session evidence is in
@@ -34,10 +37,11 @@ evidence that the Provider is supported by a remote Worker.
 
 Operator inputs recorded on 2026-07-17 narrow the next gates without closing them: controlled Codex/Claude
 Credentials must support third-party `apiKey` plus optional `baseUrl`; an external SSH target is authorized but its
-authentication remains outside the repository; the local Kubernetes context selected for acceptance is `orbstack`;
+authentication remains outside the repository; the selected local Kubernetes context `orbstack` now has a
+clean-SHA deterministic `19/19` fixture/failure report with exact cleanup, while its real-Provider gate remains open;
 production concurrency is governed by quota, Worker slots and CPU/memory resource profiles rather than one hard-coded
 number; and production signing will use `kms-key`, potentially through a self-hosted Vault `hashivault://...`
-reference. External-host integration, clean-SHA reports, numeric latency/error/duration SLA, and the concrete KMS
+reference. External-host integration, real-Provider remote reports, numeric latency/error/duration SLA, and concrete KMS
 identity/tlog/admission policy remain required evidence.
 
 ## Release boundary
@@ -92,6 +96,11 @@ Acceptance Fixture used by Codex and Claude.
 > process crash, `provider_unavailable` terminalization and distinct new-Execution recovery are closed by `cfecba63`;
 > deterministic immutable release-rollout container-loss recovery, `25` release-pinned waves, paginated Audit and
 > topic-filtered Outbox history are closed by `41683366`.
+
+> 2026-07-17 OrbStack correction: clean commit `1e826324` supersedes the D/L table wording that still lists
+> deterministic Kubernetes Eviction or approved-context clean-SHA fixture evidence as missing. The `19/19` report
+> and Stage 3 Python `259/259` close only fixture Pod-loss/network/Eviction/Canary/restart/cleanup mechanics; real
+> Codex/Claude, Node Drain/PDB, multi-node and immutable registry rollout remain open.
 
 ### 2026-07-15 Advanced Session operation evidence update
 

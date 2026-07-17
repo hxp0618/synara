@@ -19,7 +19,12 @@
 - **预计工作量**：XL
 - **风险**：HIGH
 - **计划基线分支**：`codex/saas-tenancy-user`
-- **最近稳定检查点**：`41683366`（clean-SHA managed Docker immutable Worker Release gate `15/15` 已通过
+- **最近稳定检查点**：`1e826324`（operator-approved reusable `orbstack` Kubernetes context 上的 clean-SHA
+  deterministic fixture/failure gate `19/19` 已通过：Pending Approval Pod loss、Worker-only network、精确
+  `policy/v1` Eviction、shared-local-image Canary、Control Plane restart、Session Sequence `1..119`、三个
+  Namespace/RBAC/主镜像/Canary 镜像 exact cleanup 与零 Secret finding。正式证据见
+  `docs/reports/stage-3-kubernetes-orbstack-fixture-1e826324.md`。此前 `41683366` 的 clean-SHA managed Docker
+  immutable Worker Release gate `15/15` 已通过
   baseline/promoted 与 candidate/canary 双 Worker overlap 中的 exact candidate container loss；同 Execution/
   logical Worker/Revision/Channel/Manifest/digest 保持，Generation `1 -> 2`，baseline peer 不变。随后四 Session
   完成 `25` 波、`100/100` release-pinned load Execution、`50/50` 无副作用 quota rejection/retry、`75/75`
@@ -30,11 +35,12 @@
   Retention/Cleanup 为 `c27914da`，managed Docker Provider concurrency 为 `eeb7a2f1`，deterministic Local
   `100/100` Turn soak 为 `6e866a30`，immutable rollout predecessor 为 `d3af9380`。
   真实 Codex/Claude consolidated Local product/failure 四矩阵的 clean checkpoint 仍为 `253052aa`，Kubernetes
-  deterministic fixture 13/13 的历史 clean checkpoint 仍为 `2763ebd3`）
+  owned Kind deterministic fixture 13/13 的历史 clean checkpoint 为 `2763ebd3`）
 - **工作区状态**：Stage 3 持续执行中，执行时以当前分支和已验证证据为准
 - **发布文档**：
   `docs/release-checklists/stage-3-provider-runtime-remote-worker.md`、
   `docs/runbooks/worker-release-rollout.md`、
+  `docs/reports/stage-3-kubernetes-orbstack-fixture-1e826324.md`、
   `docs/reports/stage-3-worker-release-rollout-load-41683366.md`、
   `docs/reports/stage-3-docker-fixture-load-failure-cfecba63.md`、
   `docs/reports/stage-3-docker-fixture-load-failure-7684c6d8.md`、
@@ -1486,6 +1492,14 @@ Provider × Capability × Execution Target
   `docs/reports/stage-3-kubernetes-provider-fixture-acceptance-2763ebd3.md`。当前 failure-only run 已补充
   deterministic Drain、Eviction、网络和同内容 Image Canary，但 clean-commit core report 仍是旧证据，
   两者都不覆盖真实 Provider Release Gate。
+- Clean commit `1e826324` 进一步在操作人批准的 reusable `orbstack` Context 上通过 `19/19`：Runner 显式
+  使用 shared local Docker image store、`imagePullPolicy=Never` 和唯一 owner；覆盖 Pending Approval Pod
+  Delete、Worker-only network、`policy/v1` 精确 UID Eviction、独立 Canary Target/Namespace、Control Plane
+  restart 与 Session Sequence `1..119`。三个 Namespace、RBAC、主/Canary 镜像和临时状态全部精确删除，
+  output Secret scan 为零 finding。OrbStack hostname 路径不稳定时使用只改变 server address、保留原 CA/TLS
+  name 的临时 `0600` kubeconfig，运行后已删除。见
+  `docs/reports/stage-3-kubernetes-orbstack-fixture-1e826324.md`。该证据仍是 deterministic fixture，不替代
+  真实 Codex/Claude Kubernetes Release Gate、Node Drain/PDB、多节点或 registry-pushed immutable rollout。
 - 默认运行的是 deterministic Provider Host Protocol 2.1 fixture。它能证明共享 Contract、
   Control Plane-to-Worker-to-Host 通路和 Local/SSH/Docker/Kubernetes 恢复编排，**不等于**使用真实
   Codex App Server 或 Claude Agent SDK 的 Release Acceptance。

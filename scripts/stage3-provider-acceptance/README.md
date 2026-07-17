@@ -646,6 +646,13 @@ the owned cluster and exact auto-built image were absent; see
 Agent. Cursor, Antigravity, Grok, Kilo, OpenCode, and Pi produce an explicit `unsupported` report instead of being
 rejected before a report can be written. Droid remains intentionally outside the remote Provider Host catalog.
 
+Clean commit `1e826324` also passed `19/19` on the operator-approved reusable `orbstack` context using the explicit
+shared local image store, `imagePullPolicy=Never`, Worker-only network interruption, exact `policy/v1` Pod Eviction,
+an isolated local-image Canary, Control Plane restart, Session Sequence `1..119`, bounded idempotent cleanup retry,
+exact Namespace/RBAC/image cleanup and zero Secret findings. See
+`docs/reports/stage-3-kubernetes-orbstack-fixture-1e826324.md`. This remains deterministic fixture evidence, not a
+real Codex/Claude, multi-node or immutable registry rollout gate.
+
 ## Provider Host Protocol fixture
 
 This directory contains a deterministic Provider Host Protocol 2.1 fixture for the Stage 3 protocol and fault
