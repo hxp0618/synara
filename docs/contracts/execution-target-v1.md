@@ -211,8 +211,11 @@ the cache and coordinate it with filesystem locks while retaining private Worksp
 
 Reconciliation is idempotent: stable pools produce no writes or Audit rows. Configuration changes use
 the digest to replace stale containers. Scale-down and replacement skip Workers with an unexpired
-Lease; those containers are removed on a later pass after the Lease clears. A fully running desired
-pool marks the target active; partial or failed reconciliation marks it offline.
+Lease; those containers are removed on a later pass after the Lease clears. A running deferred container remains
+part of the desired capacity and is first matched to an unoccupied slot with the same Release Revision/Channel, so
+a Busy promoted Worker does not consume a canary slot or make a healthy Target appear offline. A fully running
+desired pool, including safely deferred Busy containers, marks the target active; partial or failed reconciliation
+marks it offline.
 
 Without a Release Policy the pool remains unmanaged and uses the encrypted Target `image`. With a Policy, each slot
 uses the promoted or canary Manifest Digest. Docker canary requires `desiredWorkers >= 2`; percentage rounding must
@@ -252,7 +255,8 @@ Namespace management may replace it with equivalent per-Namespace Roles.
 
 The operator workflow is documented in `docs/runbooks/worker-release-rollout.md`; the required release evidence is in
 `docs/release-checklists/stage-3-provider-runtime-remote-worker.md`. Current implementation evidence is summarized in
-`docs/reports/stage-3-provider-runtime-acceptance-2026-07-15.md`.
+`docs/reports/stage-3-provider-runtime-acceptance-2026-07-15.md`; the latest deterministic managed Docker immutable
+rollout and Busy Worker fencing evidence is in `docs/reports/stage-3-worker-release-rollout-d3af9380.md`.
 
 Current deterministic Local/Docker/Kubernetes and historical SSH/Kubernetes fixture evidence proves selected shared
 orchestration and failure paths, not a real Provider release. Stage 3 remains `partial` until the same committed,

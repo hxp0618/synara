@@ -109,6 +109,9 @@ the Runtime Event.
 10. Re-registering the same target/cluster/namespace/pod identity rotates the Worker token atomically.
     The previous token becomes invalid immediately; retrying registration with the installation
     registration credential returns a fresh usable token.
+11. Lease renewal cadence is derived from the authoritative Control Plane Worker Lease TTL. Managed Local, SSH,
+    Docker and Kubernetes agentd use an interval of approximately one third of that TTL, with bounded floors for
+    unusually short test TTLs; a fixed default must never outlive the Lease it is intended to renew.
 
 ## Approval and user input boundary
 
