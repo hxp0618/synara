@@ -7,6 +7,8 @@
 `docs/reports/stage-3-real-provider-local-release-gate-253052aa.md`。它关闭同一 clean SHA 上真实
 Codex/Claude 的 Local product 与 failure slice，但仍明确保持四 Target、Registry rollout、并发和 soak
 `RELEASE GATE OPEN`，不能直接作为 SSH、Docker、Kubernetes 或生产环境发布批准。
+Deterministic Local long-Session/restart/pagination mechanics 的最新证据见
+`docs/reports/stage-3-local-fixture-soak-6e866a30.md`，同样不能替代真实 Provider 或 production soak。
 
 ## 1. 发布身份与证据边界
 
@@ -164,6 +166,7 @@ bun run --cwd apps/web test \
 | 真实 Codex/Claude Local Large Diff                  | clean commit `90fae52c` matrix pass        | Ready `diff`/下载/顺序/restart/cleanup/Secret scan 已验                                                                              |
 | 真实 Codex/Claude Local failure matrix              | clean commit `61e38f4f` 各 `16/16`         | 401/429、scoped Host crash、Cursor expiry/restart 与新 Execution 已验                                                                |
 | 真实 Codex/Claude consolidated Local release gate   | clean commit `253052aa` aggregate pass     | 四份 product/failure 报告同 SHA/hash，无 fail/skipped，cleanup/Secret scan 已验                                                      |
+| deterministic Local long-Session fixture soak       | clean commit `6e866a30` 100/100 Turns      | 9 次额外 restart、Event `1..1371`、分页与 repeated Checkpoint 已验；不是真实 Provider/production soak                                |
 | 真实 Codex `0.144.x` `terminal-large`               | Explicit Unsupported                       | Unified Exec 仅保留 1 MiB Head/Tail；不得牺牲 durable Approval                                                                       |
 | Claude ambient OAuth `terminal-large`               | Explicit Unsupported                       | 需 controlled Credential 绑定 Runtime Output Root                                                                                    |
 | deterministic Local/Docker core suite               | 已通过                                     | 证明共享 Control Plane/agentd/Host orchestration，不证明真实 Adapter                                                                 |
@@ -192,7 +195,8 @@ bun run --cwd apps/web test \
 - [ ] Codex × Kubernetes：Pod replacement、Drain、Eviction、Network、Image rollout。
 - [ ] Claude × Kubernetes：同上。
 - [ ] 所有运行均来自本次发布 Commit 和 registry-pushed immutable image。
-- [ ] 多 Turn 长 Session、多 Provider 并发、长日志、Checkpoint/Resume 和 Retention soak 完成。
+- [ ] 多 Turn 长 Session、多 Provider 并发、长日志、Checkpoint/Resume 和 Retention soak 完成。（`6e866a30`
+      仅关闭 deterministic Local 100-Turn/restart/pagination/repeated-Checkpoint mechanics。）
 - [ ] 故障运行没有重复终态、双 Worker 写入、Generation 回退或 Credential 泄漏。
 
 ## 7. Web 与前后端联通

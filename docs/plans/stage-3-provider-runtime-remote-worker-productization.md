@@ -19,15 +19,17 @@
 - **预计工作量**：XL
 - **风险**：HIGH
 - **计划基线分支**：`codex/saas-tenancy-user`
-- **最近稳定检查点**：`d3af9380`（同一 clean SHA 的两个不同 Registry Digest 已通过 managed Docker
-  immutable Revision、Busy baseline Worker preservation、canary、promote、rollback 与 active-Execution
-  fencing 15/15；正式证据见 `docs/reports/stage-3-worker-release-rollout-d3af9380.md`。真实 Codex/Claude consolidated Local product 与
+- **最近稳定检查点**：`6e866a30`（clean-SHA deterministic Local fixture soak 已通过额外 `100/100` Turn、
+  `9` 次额外 Control Plane restart、Session Event `1..1371` 与 500-event pagination；正式证据见
+  `docs/reports/stage-3-local-fixture-soak-6e866a30.md`。managed Docker immutable rollout 最新证据仍为
+  `docs/reports/stage-3-worker-release-rollout-d3af9380.md`。真实 Codex/Claude consolidated Local product 与
   failure 四矩阵的 clean checkpoint 仍为 `253052aa`，Kubernetes deterministic fixture 13/13 的历史 clean
   checkpoint 仍为 `2763ebd3`）
 - **工作区状态**：Stage 3 持续执行中，执行时以当前分支和已验证证据为准
 - **发布文档**：
   `docs/release-checklists/stage-3-provider-runtime-remote-worker.md`、
   `docs/runbooks/worker-release-rollout.md`、
+  `docs/reports/stage-3-local-fixture-soak-6e866a30.md`、
   `docs/reports/stage-3-worker-release-rollout-d3af9380.md`、
   `docs/reports/stage-3-real-provider-local-release-gate-253052aa.md`、
   `docs/reports/stage-3-real-provider-local-standalone-generated-file-matrix-be919393.md`
@@ -1184,7 +1186,7 @@ Manifest 不包含 Credential、路径中的用户信息或高基数 Secret。
   dependency graph 不包含该 package，`govulncheck v1.6.0` 报告实际受影响漏洞为 `0`，因此没有新增 waiver。
   Checked-in signing policy 已实现 `ephemeral-key`、`keyless` 与 `kms-key`；生产模式拒绝非 TLS Registry、
   强制 tlog，并隔离 OIDC token 或只按允许的环境变量名传递 KMS Credential。Registry
-  release/supply-chain tests 合计 `40/40`，全部 release-gate tests `108/108`，Stage 3 Python `211/211`。
+  release/supply-chain tests 合计 `40/40`，全部 release-gate tests `108/108`，Stage 3 Python `218/218`。
   完整证据见 `docs/reports/stage-3-worker-registry-signing-policy-7659dd5f.md`。
 - Clean commit `d3af9380` 进一步从同一 clean SHA 构建并推送 baseline/candidate 两个不同 Registry Digest，
   通过正式 API 创建 immutable Revision，完成 `1 promote -> 2 canary -> 3 promote -> 4 rollback`。Gate
@@ -1368,7 +1370,7 @@ Provider × Capability × Execution Target
 - 故障测试没有 Event 丢失、重复终态、双 Worker 写入或 Credential 泄漏。
 - Acceptance 结果生成机器可读报告和 Markdown 摘要。
 
-### L 当前证据（2026-07-16）
+### L 当前证据（2026-07-17）
 
 - `scripts/stage3-provider-acceptance/acceptance_runner.py` 已形成同一套用例编排、红线脱敏与
   JSON/Markdown 报告；Local、Docker 和 Kubernetes 通过用户 API、真实 Control Plane/agentd
@@ -1514,7 +1516,7 @@ Provider × Capability × Execution Target
   npm，bundled undici 为 `6.27.0`；同层删除 npm 产生的 `/tmp/node-compile-cache`，避免 cached/no-cache
   rootfs 漂移。Trivy DB 下载仅对明确的瞬时网络错误执行一次有界重试，扫描 finding、过期 DB、无效报告和
   第二次下载失败继续立即 fail closed。当前 Registry release/supply-chain tests `40/40`，全部
-  release-gate tests `108/108`，Stage 3 Python `211/211`。
+  release-gate tests `108/108`，Stage 3 Python `218/218`。
 - clean commit `7659dd5f` 已完成正式 cached/no-cache 双架构 Registry gate：OCI index digest 分别为
   `sha256:912223cb...`、`sha256:630bff03...`，`linux/amd64` 共同 manifest 为
   `sha256:2d0b9d8a...`，`linux/arm64` 共同 manifest 为 `sha256:7fd11ce0...`；两平台 SPDX/SLSA、non-root
@@ -1532,6 +1534,14 @@ Provider × Capability × Execution Target
   Docker cleanup 与零 Secret finding，正式运行 `15/15`。该结果只关闭 deterministic managed Docker 与
   Busy Worker completion/fencing mechanics；生产 Registry、真实 Provider Credential、Kubernetes 多节点、
   load 与 soak 仍保持 open。完整证据见 `docs/reports/stage-3-worker-release-rollout-d3af9380.md`。
+- 新增 `fixture-soak`，不复制 Target Driver 或 Provider 编排：在正常 core/restart/second-Turn 后默认追加
+  `100` Turn，并每 `10` Turn 在仍有后续工作时重启 Control Plane。Clean commit `6e866a30` 的 Local run
+  完成 `100/100` 唯一 Execution、`9` 次额外 restart、`1,300` 条新增 Event、最终连续 Sequence `1..1371`
+  和实际 500-event pagination；每个 soak Turn 强制具备 Text、Tool、Usage、Workspace dirty、Artifact 与
+  ready Checkpoint，且无双执行/重复终态。Runner unit `106/106`、Stage 3 Python `218/218`，精确 cleanup 与
+  14 files / 1,542,440 bytes Secret scan 为零。该结果关闭 deterministic Local long-Session/restart/pagination/
+  repeated-Checkpoint mechanics，不关闭真实 Provider、multi-Provider、Retention concurrency、remote Target、
+  load 或 production-duration soak。完整证据见 `docs/reports/stage-3-local-fixture-soak-6e866a30.md`。
 
 ## 18. 实施顺序
 
@@ -1601,8 +1611,10 @@ Provider × Capability × Execution Target
   Generated File Artifact 与 Workspace Checkpoint 捕获；clean commit `90fae52c` 的 Codex/Claude 11-case
   matrix 也通过真实 Local Large Diff；clean commit `61e38f4f` 的两份独立 failure matrix 各通过
   `16/16` 真实 401/429、scoped Host crash 和 Cursor expiry/restart。clean commit `253052aa` 已将四份
-  product/failure 报告聚合为同一 clean-SHA Local release gate 并通过；SSH、Docker、Kubernetes Gate 与
-  soak 尚未完成。
+  product/failure 报告聚合为同一 clean-SHA Local release gate 并通过；clean commit `6e866a30` 进一步通过
+  deterministic Local `100` Turn、重复 restart、Event pagination 与 repeated Checkpoint mechanics。SSH、
+  Docker、Kubernetes 真实 Provider Gate、multi-Provider/Retention concurrency 和 production-duration soak
+  尚未完成。
 
 ### Step 8：文档、Runbook 与发布门禁
 
