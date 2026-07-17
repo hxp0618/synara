@@ -65,6 +65,7 @@
   `docs/reports/stage-3-kubernetes-kind-drain-fixture-fc9b2bf6.md`、
   `docs/reports/stage-3-kubernetes-orbstack-fixture-6b71703f.md`、
   `docs/reports/stage-3-real-provider-kubernetes-third-party-gate-6b71703f.md`、
+  `docs/reports/stage-3-real-provider-docker-third-party-gate-f958c1b2.md`、
   `docs/reports/stage-3-kubernetes-orbstack-fixture-1e826324.md`、
   `docs/reports/stage-3-worker-release-rollout-load-41683366.md`、
   `docs/reports/stage-3-docker-fixture-load-failure-cfecba63.md`、
@@ -91,7 +92,11 @@
   child gate 证明受控注入、同镜像/Catalog、Codex failure matrix、cleanup 和 Secret scan；但当前 Claude
   profile 稳定返回 HTTP `502`，当前 Codex profile 的 approval-required Turn 只有 `reasoning`、没有
   `command_execution`/approval interaction。两者均 fail closed，不能把“能回复文本”升级为 Tier 1 支持。
-  完整边界见 `docs/reports/stage-3-real-provider-kubernetes-third-party-gate-6b71703f.md`。
+  clean SHA `f958c1b2` 的真实 Docker 四 child gate 随后复现同一边界：Codex failure `16/16` 通过，Codex
+  product 缺 Approval Interaction，Claude product/failure 的 baseline Turn 均稳定返回 HTTP `502`；四个
+  child 的 container/network/volume/state、共享 Image 和 Secret scan 全部精确收口。完整边界见
+  `docs/reports/stage-3-real-provider-kubernetes-third-party-gate-6b71703f.md` 与
+  `docs/reports/stage-3-real-provider-docker-third-party-gate-f958c1b2.md`。
 - 操作人已授权一个外部 SSH 验收目标，认证信息保持在仓库外。Runner 与 `ssh_release_gate.py` 已增加显式
   external-host 模式：要求仓库外 owner-only identity、精确 Host Key、显式 non-disposable 授权和唯一 ownership
   root；安装前拒绝既有 service/binary/storage 路径，升级不重启 sshd，cleanup 只走产品 revoke 加本次
@@ -1608,8 +1613,9 @@ Provider × Capability × Execution Target
   当前 dirty-worktree disposable OrbStack SSH fixture 也通过 `16/16`、精确 machine/key cleanup 与零 Secret
   finding。SSH real-provider runtime 预检进一步从当前源码构建并上传 Host bundle，按 checked-in npm lock
   在 disposable Ubuntu 24.04 安装并验证 Codex `0.144.1`、Claude Code `2.1.197`、Host SHA 与
-  `/usr/local/bin/provider-host`，随后删除 machine/key 且未发现 Credential/private-key material。但仍缺受控
-  Provider 凭据下的真实 SSH/Docker/Kubernetes product/failure 报告，因此四 Target Gate 保持 open。
+  `/usr/local/bin/provider-host`，随后删除 machine/key 且未发现 Credential/private-key material。真实 SSH
+  四矩阵仍缺安全本机 identity；Docker/Kubernetes 已有受控 Provider 报告但当前 profile fail closed，因此四
+  Target Gate 保持 open。
 - Consolidated release gate 已抽取 target-aware 公共验证器，Local 既有 CLI/Schema 与冻结 Unsupported 边界
   保持兼容；新增 `docker_release_gate.py` 在完全 clean SHA 上串行运行 Codex/Claude product + failure 四份
   child report。每个 child 仅继承工具白名单与当前 Provider Credential；Gate 从 clean SHA 单次构建带唯一
@@ -1618,7 +1624,11 @@ Provider × Capability × Execution Target
   hash、与 Gate build 完全一致的 Worker Image ID、完整 case、exact child cleanup、空 Secret scan，且
   child/aggregate 均不持久化 operator 环境变量名或值；Gate 在包括 child 失败的 `finally` 路径校验 Image
   ownership + ID 后自行删除。当前 Local+Docker release-gate tests `32/32` 与缺 Credential/preflight 泄漏负例已通过；
-  尚未执行 clean-SHA 真实 Docker 四矩阵，因此仍不构成发布证据。
+  clean SHA `f958c1b2` 已执行真实 Docker 四矩阵：Codex failure `16/16` 通过；Codex product 的首个
+  approval-required Turn 没有产生 Approval Interaction；Claude product/failure 的 baseline Turn 均以稳定
+  HTTP `502` `provider_unavailable` 失败。四个 child 共用同一 clean-SHA Image/Catalog，全部通过精确 cleanup
+  和 Secret scan；聚合扫描 `37` 个文件/`4,971,618` bytes 为零 finding，Gate 保持 fail closed。正式证据见
+  `docs/reports/stage-3-real-provider-docker-third-party-gate-f958c1b2.md`。
 - 受控远程 Gate 现进一步抽取 `controlled_remote_release_gate.py`，统一 Credential environment isolation、
   单次 Gate-owned Worker Image build、四 child 聚合、Catalog/Image consensus、Secret scan 与 ownership cleanup；
   `docker_release_gate.py` 保留原 CLI/Schema 的薄适配层。新增 `kubernetes_release_gate.py` 让四个 child 各自
@@ -1875,9 +1885,11 @@ Provider × Capability × Execution Target
   clean commit `aa1d0225` 进一步在 one-control-plane/two-Worker owned Kind 上通过完整 `24/24` deterministic
   matrix，证明 PDB 阻断、源 Node cordon 期间跨 Worker replacement、普通 Drain、独立 Eviction、Canary、restart
   与 exact cleanup；这不等于 production multi-node/cloud CNI/registry rollout。
-  SSH、Docker、Kubernetes 真实 Provider Gate、真实 Provider 并发/Retention/load/failure、已授权外部 SSH
-  target/本机 `orbstack` context 的 clean-SHA 运行、multi-host/production Kubernetes multi-node、按资源档位验证的生产
-  SLA 与 production-duration soak 尚未完成。
+  Kubernetes 与 Docker 真实 Provider 四 child Gate 已分别在 clean `6b71703f`/`f958c1b2` 执行并 fail
+  closed：受控第三方注入、cleanup、Secret scan 与 Codex failure matrix 已证明，但当前 Codex profile 不产生
+  Approval Interaction，当前 Claude profile 稳定返回 HTTP `502`。真实 SSH Gate、安全本机 identity、通过的
+  Docker/Kubernetes Provider profile、真实 Provider 并发/Retention/load/failure、multi-host/production
+  Kubernetes multi-node、按资源档位验证的生产 SLA 与 production-duration soak 尚未完成。
 
 ### Step 8：文档、Runbook 与发布门禁
 
