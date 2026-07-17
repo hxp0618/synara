@@ -11,7 +11,9 @@ Deterministic Local long-Session/restart/pagination mechanics 的最新证据见
 `docs/reports/stage-3-local-fixture-soak-6e866a30.md`，同样不能替代真实 Provider 或 production soak。
 Deterministic managed Docker multi-Provider/multi-Session overlap mechanics 的最新证据见
 `docs/reports/stage-3-docker-fixture-concurrency-eeb7a2f1.md`；它不替代真实 Codex/Claude、remote Target、
-Retention/Cleanup、load 或 production concurrency。
+load 或 production concurrency。Deterministic Local active-Execution Retention fencing 与 post-terminal physical
+cleanup mechanics 的最新证据见 `docs/reports/stage-3-local-fixture-retention-concurrency-c27914da.md`；它不替代
+真实 Provider、remote Target、multi-node、load、生产时长或生产 Retention。
 
 ## 1. 发布身份与证据边界
 
@@ -162,30 +164,31 @@ bun run --cwd apps/web test \
 
 当前仓库已有的实现期证据不能替代下列发布勾选项：
 
-| 证据                                                | 当前结论                                   | 发布边界                                                                                                                               |
-| --------------------------------------------------- | ------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------- |
-| 真实 Codex/Claude Local two-Turn product-path smoke | clean commit `fb9e25ec` 各 12/12           | 经过 Control Plane/LocalSupervisor/agentd，但不是完整 Local Gate                                                                       |
-| 真实 Codex/Claude Generated File + Checkpoint       | clean commit `be919393` matrix pass        | standalone Ready Artifact 与 Snapshot 已验；Diff 由下一行独立跟踪                                                                      |
-| 真实 Codex/Claude Local Large Diff                  | clean commit `90fae52c` matrix pass        | Ready `diff`/下载/顺序/restart/cleanup/Secret scan 已验                                                                                |
-| 真实 Codex/Claude Local failure matrix              | clean commit `61e38f4f` 各 `16/16`         | 401/429、scoped Host crash、Cursor expiry/restart 与新 Execution 已验                                                                  |
-| 真实 Codex/Claude consolidated Local release gate   | clean commit `253052aa` aggregate pass     | 四份 product/failure 报告同 SHA/hash，无 fail/skipped，cleanup/Secret scan 已验                                                        |
-| deterministic Local long-Session fixture soak       | clean commit `6e866a30` 100/100 Turns      | 9 次额外 restart、Event `1..1371`、分页与 repeated Checkpoint 已验；不是真实 Provider/production soak                                  |
-| deterministic Docker Provider concurrency fixture   | clean commit `eeb7a2f1` 9/9                | 两 Worker、Codex/Claude 两 Session/Execution、同时 pending Approval 与隔离终态已验；不是真实 Provider/Retention/production concurrency |
-| 真实 Codex `0.144.x` `terminal-large`               | Explicit Unsupported                       | Unified Exec 仅保留 1 MiB Head/Tail；不得牺牲 durable Approval                                                                         |
-| Claude ambient OAuth `terminal-large`               | Explicit Unsupported                       | 需 controlled Credential 绑定 Runtime Output Root                                                                                      |
-| deterministic Local/Docker core suite               | 已通过                                     | 证明共享 Control Plane/agentd/Host orchestration，不证明真实 Adapter                                                                   |
-| deterministic Provider fault matrix                 | malformed/oversized/crash 已通过           | 不是真实 Provider failure 分类                                                                                                         |
-| deterministic Docker/Kubernetes failure matrix      | 已通过实现期运行                           | 不等于生产网络、真实 CNI 或正式 rollout                                                                                                |
-| SSH real Provider runtime provisioning              | disposable VM preflight 已通过             | Host SHA + Codex 0.144.1 + Claude 2.1.197 已验；尚无真实 Credential 报告                                                               |
-| SSH real Provider fault-injection transport         | Runner 99/99 + SSH fixture 16/16           | token-scoped reverse relay 与 systemd MainPID crash 已实现；尚无真实 Credential 报告                                                   |
-| Docker real Provider fault-injection transport      | 实现期容器探针与 Docker 16/16 已通过       | 401/429/精确 Host crash 已实现；尚无真实 Provider Credential 报告                                                                      |
-| Kubernetes real Provider fault-injection transport  | Runner 99/99 + Linux 容器探针通过          | host-gateway 401/429 与精确 Pod crash 已实现；尚无真实 Provider Credential 报告                                                        |
-| SSH consolidated release gate                       | 独立引擎与 10 项 SSH gate tests 已通过     | 四个 disposable VM child 尚待真实 Credential 执行                                                                                      |
-| Docker consolidated release gate                    | Local+Docker 32 项 gate tests 已通过       | 单次 Gate-owned Image + 四份同 SHA/Catalog/Image 报告尚待真实 Credential 执行                                                          |
-| Kubernetes consolidated release gate                | 公共引擎与 8 项 K8s gate tests 已通过      | 四个 disposable Kind child 尚待真实 Credential 执行                                                                                    |
-| Worker Registry signing-policy gate                 | clean commit `7659dd5f` gate/report 已通过 | keyless/KMS 实现路径与 ephemeral mechanics 已验；真实生产 identity/tlog/admission、Registry Credential/retention 与 rollout 尚待记录   |
-| SSH fixture                                         | 2026-07-14 disposable VM 13/13             | 不是当前 Commit 的真实 Provider gate                                                                                                   |
-| Kubernetes fixture                                  | clean commit `2763ebd3` 13/13              | 不是当前 Commit 的真实 Provider gate                                                                                                   |
+| 证据                                                | 当前结论                                   | 发布边界                                                                                                                                         |
+| --------------------------------------------------- | ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 真实 Codex/Claude Local two-Turn product-path smoke | clean commit `fb9e25ec` 各 12/12           | 经过 Control Plane/LocalSupervisor/agentd，但不是完整 Local Gate                                                                                 |
+| 真实 Codex/Claude Generated File + Checkpoint       | clean commit `be919393` matrix pass        | standalone Ready Artifact 与 Snapshot 已验；Diff 由下一行独立跟踪                                                                                |
+| 真实 Codex/Claude Local Large Diff                  | clean commit `90fae52c` matrix pass        | Ready `diff`/下载/顺序/restart/cleanup/Secret scan 已验                                                                                          |
+| 真实 Codex/Claude Local failure matrix              | clean commit `61e38f4f` 各 `16/16`         | 401/429、scoped Host crash、Cursor expiry/restart 与新 Execution 已验                                                                            |
+| 真实 Codex/Claude consolidated Local release gate   | clean commit `253052aa` aggregate pass     | 四份 product/failure 报告同 SHA/hash，无 fail/skipped，cleanup/Secret scan 已验                                                                  |
+| deterministic Local long-Session fixture soak       | clean commit `6e866a30` 100/100 Turns      | 9 次额外 restart、Event `1..1371`、分页与 repeated Checkpoint 已验；不是真实 Provider/production soak                                            |
+| deterministic Docker Provider concurrency fixture   | clean commit `eeb7a2f1` 9/9                | 两 Worker、Codex/Claude 两 Session/Execution、同时 pending Approval 与隔离终态已验；不是真实 Provider/Retention/production concurrency           |
+| deterministic Local Retention/Cleanup fixture       | clean commit `c27914da` 9/9                | active Execution fencing、无引用 Artifact 删除、Checkpoint 保护与终态后单次 physical cleanup 已验；不是真实 Provider/remote/production Retention |
+| 真实 Codex `0.144.x` `terminal-large`               | Explicit Unsupported                       | Unified Exec 仅保留 1 MiB Head/Tail；不得牺牲 durable Approval                                                                                   |
+| Claude ambient OAuth `terminal-large`               | Explicit Unsupported                       | 需 controlled Credential 绑定 Runtime Output Root                                                                                                |
+| deterministic Local/Docker core suite               | 已通过                                     | 证明共享 Control Plane/agentd/Host orchestration，不证明真实 Adapter                                                                             |
+| deterministic Provider fault matrix                 | malformed/oversized/crash 已通过           | 不是真实 Provider failure 分类                                                                                                                   |
+| deterministic Docker/Kubernetes failure matrix      | 已通过实现期运行                           | 不等于生产网络、真实 CNI 或正式 rollout                                                                                                          |
+| SSH real Provider runtime provisioning              | disposable VM preflight 已通过             | Host SHA + Codex 0.144.1 + Claude 2.1.197 已验；尚无真实 Credential 报告                                                                         |
+| SSH real Provider fault-injection transport         | Runner 99/99 + SSH fixture 16/16           | token-scoped reverse relay 与 systemd MainPID crash 已实现；尚无真实 Credential 报告                                                             |
+| Docker real Provider fault-injection transport      | 实现期容器探针与 Docker 16/16 已通过       | 401/429/精确 Host crash 已实现；尚无真实 Provider Credential 报告                                                                                |
+| Kubernetes real Provider fault-injection transport  | Runner 99/99 + Linux 容器探针通过          | host-gateway 401/429 与精确 Pod crash 已实现；尚无真实 Provider Credential 报告                                                                  |
+| SSH consolidated release gate                       | 独立引擎与 10 项 SSH gate tests 已通过     | 四个 disposable VM child 尚待真实 Credential 执行                                                                                                |
+| Docker consolidated release gate                    | Local+Docker 32 项 gate tests 已通过       | 单次 Gate-owned Image + 四份同 SHA/Catalog/Image 报告尚待真实 Credential 执行                                                                    |
+| Kubernetes consolidated release gate                | 公共引擎与 8 项 K8s gate tests 已通过      | 四个 disposable Kind child 尚待真实 Credential 执行                                                                                              |
+| Worker Registry signing-policy gate                 | clean commit `7659dd5f` gate/report 已通过 | keyless/KMS 实现路径与 ephemeral mechanics 已验；真实生产 identity/tlog/admission、Registry Credential/retention 与 rollout 尚待记录             |
+| SSH fixture                                         | 2026-07-14 disposable VM 13/13             | 不是当前 Commit 的真实 Provider gate                                                                                                             |
+| Kubernetes fixture                                  | clean commit `2763ebd3` 13/13              | 不是当前 Commit 的真实 Provider gate                                                                                                             |
 
 真实 Provider × Target gate：
 
@@ -201,7 +204,8 @@ bun run --cwd apps/web test \
 - [ ] 所有运行均来自本次发布 Commit 和 registry-pushed immutable image。
 - [ ] 多 Turn 长 Session、多 Provider 并发、长日志、Checkpoint/Resume 和 Retention soak 完成。（`6e866a30`
       仅关闭 deterministic Local 100-Turn/restart/pagination/repeated-Checkpoint mechanics；`eeb7a2f1` 仅关闭
-      deterministic managed Docker 双 Worker、双 Provider、双 Session overlap mechanics。）
+      deterministic managed Docker 双 Worker、双 Provider、双 Session overlap mechanics；`c27914da` 仅关闭
+      deterministic Local active-Execution Retention fencing 与 post-terminal physical cleanup mechanics。）
 - [ ] 故障运行没有重复终态、双 Worker 写入、Generation 回退或 Credential 泄漏。
 
 ## 7. Web 与前后端联通

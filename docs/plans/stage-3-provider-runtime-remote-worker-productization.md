@@ -19,16 +19,19 @@
 - **预计工作量**：XL
 - **风险**：HIGH
 - **计划基线分支**：`codex/saas-tenancy-user`
-- **最近稳定检查点**：`eeb7a2f1`（clean-SHA managed Docker `fixture-concurrency` 9/9 已通过同一
-  Control Plane 下 Codex/Claude 两个 Session、两个 Execution、两个 Worker 的同时 pending Approval 与
-  隔离终态；正式证据见 `docs/reports/stage-3-docker-fixture-concurrency-eeb7a2f1.md`。deterministic Local
-  `100/100` Turn soak 的 clean checkpoint 仍为 `6e866a30`，managed Docker immutable rollout 为
-  `d3af9380`。真实 Codex/Claude consolidated Local product/failure 四矩阵的 clean checkpoint 仍为
-  `253052aa`，Kubernetes deterministic fixture 13/13 的历史 clean checkpoint 仍为 `2763ebd3`）
+- **最近稳定检查点**：`c27914da`（clean-SHA Local `fixture-retention-concurrency` 9/9 已通过 active
+  Approval Execution 下的 Session/Workspace cleanup fencing、并行无引用 Artifact 删除、Checkpoint lineage
+  保护与终态后单次物理 cleanup；正式证据见
+  `docs/reports/stage-3-local-fixture-retention-concurrency-c27914da.md`。managed Docker Provider concurrency
+  的 clean checkpoint 仍为 `eeb7a2f1`，deterministic Local `100/100` Turn soak 为 `6e866a30`，managed
+  Docker immutable rollout 为 `d3af9380`。真实 Codex/Claude consolidated Local product/failure 四矩阵的
+  clean checkpoint 仍为 `253052aa`，Kubernetes deterministic fixture 13/13 的历史 clean checkpoint 仍为
+  `2763ebd3`）
 - **工作区状态**：Stage 3 持续执行中，执行时以当前分支和已验证证据为准
 - **发布文档**：
   `docs/release-checklists/stage-3-provider-runtime-remote-worker.md`、
   `docs/runbooks/worker-release-rollout.md`、
+  `docs/reports/stage-3-local-fixture-retention-concurrency-c27914da.md`、
   `docs/reports/stage-3-docker-fixture-concurrency-eeb7a2f1.md`、
   `docs/reports/stage-3-local-fixture-soak-6e866a30.md`、
   `docs/reports/stage-3-worker-release-rollout-d3af9380.md`、
@@ -962,6 +965,14 @@ Checkpoint 应包含：
 - Active Lease、Pending Artifact Upload、Pending Checkpoint 时禁止清理。
 - 磁盘压力时按可解释优先级回收，并记录 Metrics/Audit。
 
+当前 deterministic Local 证据（clean commit `c27914da`）已验证：真实后台 Retention sweep 在 pending
+Approval Execution 活跃期间可以删除无引用旧 Artifact，但必须保留 Session、Lease、Interaction、Workspace
+generation 与 seed/current Ready Checkpoint，且不能派发 physical cleanup；Execution 单终态完成后，Session
+才归档，并由 agentd 以 generation 1、attempt 1 精确 acknowledged 唯一 cleanup command，物理 Workspace
+generation 被删除而两个 Ready Checkpoint lineage 均保留。该结果不替代真实 Provider、remote Target、
+multi-node、load 或 production-duration retention。详见
+`docs/reports/stage-3-local-fixture-retention-concurrency-c27914da.md`。
+
 ### H 验收
 
 - 私有仓库可在 SSH/Docker/Kubernetes Target 安全 Clone/Fetch。
@@ -1552,6 +1563,17 @@ Provider × Capability × Execution Target
   finding 为零。该结果只关闭 deterministic managed Docker multi-Provider/multi-Session overlap mechanics，
   不关闭真实 Provider、remote Target、load、Retention concurrency 或 production concurrency。完整证据见
   `docs/reports/stage-3-docker-fixture-concurrency-eeb7a2f1.md`。
+- 新增 `fixture-retention-concurrency`，只允许 isolated Local Target，并复用同一 Runner、Provider fixture、
+  报告、Secret scan、Control Plane、Local agentd 与 cleanup。Clean commit `c27914da` 的 canonical run 只老化
+  runner-owned SQLite 行，在真实 Tenant retention policy 与 `250ms` sweep 下，以 pending Approval active
+  Execution 为屏障：Session 保持 active，Execution 为 `waiting-for-approval` 且 Lease 为 1，Interaction pending，
+  Workspace generation 与 seed/current Ready Checkpoint 保留，cleanup command 为 0，同时无引用旧 Artifact 可
+  安全删除。终态后 Session 才归档，新的 current Checkpoint 与 seed Checkpoint 均 Ready，唯一 cleanup command
+  以 generation 1、attempt 1 被 agentd acknowledged，物理 Workspace generation 删除。正式 report `9/9`、
+  Runner unit `118/118` 与 Stage 3 Python `230/230` 通过；4 files / 71,518 bytes Secret scan finding 为零。
+  该结果只关闭 deterministic Local active-Execution/Retention/physical-cleanup mechanics，不关闭真实 Provider、
+  remote Target、multi-node、load、生产时长或生产 Retention。完整证据见
+  `docs/reports/stage-3-local-fixture-retention-concurrency-c27914da.md`。
 
 ## 18. 实施顺序
 
@@ -1588,6 +1610,9 @@ Provider × Capability × Execution Target
 - 实现安全 Clone/Fetch/Worktree/Cleanup。
 - 建立 Patch/Snapshot Checkpoint 和恢复。
 - 接入 Artifact 与 Retention。
+- 当前进度：clean commit `c27914da` 已关闭 deterministic Local active-Execution Retention fencing、并行无引用
+  Artifact 删除、Checkpoint lineage 保护与终态后单次 physical cleanup mechanics；真实 Provider、remote
+  Target、multi-node、load 与 production-duration retention 仍是完成门禁。
 
 ### Step 5：Worker 生命周期生产化
 
@@ -1624,8 +1649,10 @@ Provider × Capability × Execution Target
   product/failure 报告聚合为同一 clean-SHA Local release gate 并通过；clean commit `6e866a30` 进一步通过
   deterministic Local `100` Turn、重复 restart、Event pagination 与 repeated Checkpoint mechanics；clean
   commit `eeb7a2f1` 通过 managed Docker 双 Worker、Codex/Claude 双 Session 的 deterministic simultaneous
-  Approval overlap 与隔离终态。SSH、Docker、Kubernetes 真实 Provider Gate、真实 Provider 并发、Retention
-  concurrency、load 和 production-duration soak 尚未完成。
+  Approval overlap 与隔离终态；clean commit `c27914da` 通过 deterministic Local active-Execution Retention
+  fencing、并行无引用 Artifact 删除、Checkpoint lineage 保护与终态后物理 Workspace cleanup。SSH、Docker、
+  Kubernetes 真实 Provider Gate、真实 Provider 并发/Retention、multi-node、load 和 production-duration soak
+  尚未完成。
 
 ### Step 8：文档、Runbook 与发布门禁
 
