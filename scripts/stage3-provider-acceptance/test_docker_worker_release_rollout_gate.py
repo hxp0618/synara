@@ -161,6 +161,7 @@ class ParseArgsTest(unittest.TestCase):
 
         self.assertEqual(options.registry_image, gate.DEFAULT_REGISTRY_IMAGE)
         self.assertEqual(options.go_proxy, "https://goproxy.cn,direct")
+        self.assertEqual(options.load_waves, 25)
         self.assertFalse(options.skip_build)
 
     def test_rejects_unsafe_build_and_proxy_inputs(self) -> None:
@@ -170,6 +171,19 @@ class ParseArgsTest(unittest.TestCase):
             gate.parse_args(["--go-proxy", "https://user:secret@example.test"])
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             gate.parse_args(["--registry-image", "https://registry.invalid/image"])
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            gate.parse_args(["--load-waves", "1"])
+
+    def test_passes_rollout_load_configuration_to_shared_runner(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            options = gate.parse_args(
+                ["--output-dir", directory, "--load-waves", "2"]
+            )
+
+        child = gate.runner_options(options)
+
+        self.assertEqual(child.suite, "fixture-load")
+        self.assertEqual(child.load_waves, 2)
 
 
 class IdentityHelperTest(unittest.TestCase):
@@ -352,6 +366,106 @@ class BusyWorkerValidationTest(unittest.TestCase):
             revision_id=BASELINE_REVISION,
             channel="promoted",
         )
+
+    def test_validates_release_load_and_container_recovery_identity(self) -> None:
+        active = {
+            "executionId": "execution-1",
+            "workerId": WORKER_ID,
+            "generation": 1,
+            "requestId": "request-1",
+            "interactionId": "interaction-1",
+        }
+        gate.validate_release_load_identity(active, dict(active))
+        image = gate.ReleaseImage(
+            slot="candidate",
+            version="0.5.4+rollout.candidate",
+            tag="candidate:tag",
+            exact_reference=f"candidate@{CANDIDATE_DIGEST}",
+            digest=CANDIDATE_DIGEST,
+            image_id="sha256:" + "c" * 64,
+            metadata_path=pathlib.Path("metadata.json"),
+        )
+        before = {
+            "id": "before123456",
+            "name": "candidate-worker",
+            "imageId": image.image_id,
+            "digest": CANDIDATE_DIGEST,
+            "revisionId": CANDIDATE_REVISION,
+            "channel": "canary",
+            "volume": "rollout-volume",
+        }
+        after = {**before, "id": "after1234567"}
+        target_recovery = {
+            "fault": "worker-container-loss",
+            "executionId": "execution-1",
+            "executionGeneration": 1,
+            "workerId": WORKER_ID,
+            "removedContainerId": "before123456",
+            "replacementContainerId": "after1234567",
+            "containerName": "candidate-worker",
+            "containerIdChanged": True,
+            "exactExecutionWorkerMatch": True,
+            "workerIdStable": True,
+            "workerIncarnationAdvanced": True,
+            "instanceUidChanged": True,
+            "replacementReady": True,
+            "namedVolumeContinuity": {"preservedAcrossReplacement": True},
+        }
+        recovery = {
+            "staleExecutionId": "execution-1",
+            "replacementExecutionId": "execution-1",
+            "staleWorkerId": WORKER_ID,
+            "replacementWorkerId": WORKER_ID,
+            "staleGeneration": 1,
+            "replacementGeneration": 2,
+            "staleInteractionId": "interaction-1",
+            "replacementInteractionId": "interaction-2",
+            "staleRequestId": "request-1",
+            "replacementRequestId": "request-2",
+        }
+
+        evidence = gate.validate_release_container_loss_recovery(
+            before,
+            after,
+            active=active,
+            recovery=recovery,
+            target_recovery=target_recovery,
+            revision_id=CANDIDATE_REVISION,
+            channel="canary",
+            image=image,
+        )
+
+        self.assertEqual(evidence["generation"], {"before": 1, "after": 2})
+        self.assertTrue(evidence["workerIdStable"])
+
+    def test_rejects_release_rebind_or_peer_generation_change(self) -> None:
+        with self.assertRaises(acceptance.AcceptanceError):
+            gate.validate_release_load_identity(
+                {
+                    "executionId": "execution-1",
+                    "workerId": WORKER_ID,
+                    "generation": 1,
+                },
+                {
+                    "executionId": "execution-1",
+                    "workerId": WORKER_ID,
+                    "generation": 2,
+                },
+            )
+        before_active = {
+            "executionId": "baseline-execution",
+            "workerId": WORKER_ID,
+            "generation": 1,
+            "requestId": "request-1",
+            "interactionId": "interaction-1",
+        }
+        with self.assertRaises(acceptance.AcceptanceError):
+            gate.validate_release_peer_preserved(
+                before_active,
+                {**before_active, "generation": 2},
+                {"id": "container", "name": "baseline-worker"},
+                {"id": "container", "name": "baseline-worker"},
+            )
 
 
 class OverviewValidationTest(unittest.TestCase):

@@ -11337,8 +11337,17 @@ class AcceptanceSuite:
             "pendingInteractionCount": 0,
         }
 
-    def _fixture_load_admission_waves(self) -> Mapping[str, Any]:
-        wave_count = self.options.load_waves
+    def _fixture_load_admission_waves(
+        self,
+        *,
+        wave_start: int = 0,
+        wave_count: int | None = None,
+        active_validator: Callable[[Mapping[str, Any]], None] | None = None,
+        terminal_validator: (
+            Callable[[Mapping[str, Any], Mapping[str, Any]], None] | None
+        ) = None,
+    ) -> Mapping[str, Any]:
+        wave_count = self.options.load_waves if wave_count is None else wave_count
         if not FIXTURE_LOAD_MIN_WAVES <= wave_count <= FIXTURE_LOAD_MAX_WAVES:
             raise AcceptanceError(
                 "runner.load_waves_invalid",
@@ -11347,6 +11356,16 @@ class AcceptanceSuite:
                     "minimum": FIXTURE_LOAD_MIN_WAVES,
                     "maximum": FIXTURE_LOAD_MAX_WAVES,
                     "actual": wave_count,
+                },
+            )
+        if wave_start < 0 or wave_start + wave_count > FIXTURE_LOAD_MAX_WAVES:
+            raise AcceptanceError(
+                "runner.load_wave_range_invalid",
+                "The fixture load wave range was outside the accepted boundary.",
+                {
+                    "start": wave_start,
+                    "count": wave_count,
+                    "maximum": FIXTURE_LOAD_MAX_WAVES,
                 },
             )
         quota = self._set_fixture_execution_quota(
@@ -11373,6 +11392,8 @@ class AcceptanceSuite:
 
         def complete(load_turn: Mapping[str, Any]) -> None:
             terminal = self._complete_fixture_load_turn(load_turn)
+            if terminal_validator is not None:
+                terminal_validator(load_turn, terminal)
             self._accumulate_fixture_load_terminal(
                 terminal,
                 execution_ids,
@@ -11382,13 +11403,28 @@ class AcceptanceSuite:
                 event_type_counts,
             )
 
-        for wave_index in range(wave_count):
+        def start(
+            session: Mapping[str, Any],
+            wave_index: int,
+            position: int,
+        ) -> dict[str, Any]:
+            load_turn = self._start_fixture_load_turn(
+                session,
+                wave_index,
+                position,
+            )
+            if active_validator is not None:
+                active_validator(load_turn)
+            return load_turn
+
+        for local_wave_index in range(wave_count):
+            wave_index = wave_start + local_wave_index
             wave_started = time.monotonic()
             offset = wave_index % len(sessions)
             ordered = sessions[offset:] + sessions[:offset]
             active = [
-                self._start_fixture_load_turn(ordered[0], wave_index, 1),
-                self._start_fixture_load_turn(ordered[1], wave_index, 2),
+                start(ordered[0], wave_index, 1),
+                start(ordered[1], wave_index, 2),
             ]
             overlaps = [self._fixture_load_overlap(active, wave_index, "initial")]
             overlap_observations += 1
@@ -11412,7 +11448,7 @@ class AcceptanceSuite:
                 )
                 recovery_started = time.monotonic()
                 active.append(
-                    self._start_fixture_load_turn(
+                    start(
                         session,
                         wave_index,
                         position,
@@ -11460,7 +11496,7 @@ class AcceptanceSuite:
                 "quotaRejections": rejections,
                 "durationMs": wave_duration,
             }
-            if wave_index < 2 or wave_index >= wave_count - 2:
+            if local_wave_index < 2 or local_wave_index >= wave_count - 2:
                 wave_samples.append(sample)
 
         expected_executions = wave_count * FIXTURE_LOAD_SESSIONS
@@ -11498,6 +11534,8 @@ class AcceptanceSuite:
             "providers": list(FIXTURE_CONCURRENCY_PROVIDERS),
             "wavesRequested": wave_count,
             "wavesCompleted": wave_count,
+            "firstWave": wave_start + 1,
+            "lastWave": wave_start + wave_count,
             "executionsCompleted": len(execution_ids),
             "distinctExecutionCount": len(execution_ids),
             "distinctWorkerCount": len(worker_ids),

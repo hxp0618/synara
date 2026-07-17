@@ -62,6 +62,7 @@ class GateOptions:
     docker_control_plane_host: str
     docker_memory_bytes: int
     docker_nano_cpus: int
+    load_waves: int
     registry_image: str
     go_proxy: str | None
 
@@ -92,6 +93,7 @@ def parse_args(argv: Sequence[str]) -> GateOptions:
     parser.add_argument("--docker-control-plane-host", default="host.docker.internal")
     parser.add_argument("--docker-memory-bytes", type=int, default=2 << 30)
     parser.add_argument("--docker-nano-cpus", type=int, default=1_000_000_000)
+    parser.add_argument("--load-waves", type=int, default=25)
     parser.add_argument("--registry-image", default=DEFAULT_REGISTRY_IMAGE)
     parser.add_argument("--go-proxy")
     parsed = parser.parse_args(argv)
@@ -105,6 +107,11 @@ def parse_args(argv: Sequence[str]) -> GateOptions:
         parser.error("--docker-memory-bytes must be at least 67108864")
     if parsed.docker_nano_cpus <= 0:
         parser.error("--docker-nano-cpus must be positive")
+    if not 2 <= parsed.load_waves <= acceptance.FIXTURE_LOAD_MAX_WAVES:
+        parser.error(
+            "--load-waves must be between 2 and "
+            f"{acceptance.FIXTURE_LOAD_MAX_WAVES}"
+        )
     docker_socket_path = parsed.docker_socket_path.expanduser().resolve()
     if not docker_socket_path.is_absolute():
         parser.error("--docker-socket-path must be absolute")
@@ -147,6 +154,7 @@ def parse_args(argv: Sequence[str]) -> GateOptions:
         docker_control_plane_host=docker_host,
         docker_memory_bytes=parsed.docker_memory_bytes,
         docker_nano_cpus=parsed.docker_nano_cpus,
+        load_waves=parsed.load_waves,
         registry_image=registry_image,
         go_proxy=go_proxy,
     )
@@ -166,6 +174,10 @@ def runner_options(options: GateOptions) -> acceptance.RunnerOptions:
         "docker",
         "--provider",
         "codex",
+        "--suite",
+        "fixture-load",
+        "--load-waves",
+        str(options.load_waves),
         "--output-dir",
         str(options.output_dir),
         "--timeout",
@@ -217,6 +229,7 @@ class DockerWorkerReleaseRolloutDriver(acceptance.DockerDriver):
         self.registry_created = False
         self.owns_network = True
         self.owns_image = True
+        self.desired_workers = acceptance.FIXTURE_CONCURRENCY_WORKERS
 
     def prepare(self) -> Mapping[str, Any]:
         control_plane = acceptance.LocalDriver.prepare(self)
@@ -452,14 +465,13 @@ class DockerWorkerReleaseRolloutDriver(acceptance.DockerDriver):
         self,
         tenant_id: str,
         organization_id: str,
-        provider: str,
+        _provider: str,
     ) -> Mapping[str, Any]:
         baseline = self.images["baseline"]
         candidate = self.images["candidate"]
         main = self._create_target(
             tenant_id,
             organization_id,
-            provider,
             name=self.target_name,
             image=baseline.exact_reference,
             desired_workers=2,
@@ -468,7 +480,6 @@ class DockerWorkerReleaseRolloutDriver(acceptance.DockerDriver):
         observer = self._create_target(
             tenant_id,
             organization_id,
-            provider,
             name=self.observer_target_name,
             image=candidate.exact_reference,
             desired_workers=1,
@@ -501,7 +512,6 @@ class DockerWorkerReleaseRolloutDriver(acceptance.DockerDriver):
         self,
         tenant_id: str,
         organization_id: str,
-        provider: str,
         *,
         name: str,
         image: str,
@@ -535,7 +545,11 @@ class DockerWorkerReleaseRolloutDriver(acceptance.DockerDriver):
                     },
                     "capabilities": {
                         "workspaceModes": ["local", "worktree"],
-                        "providerPolicy": {"experimentalProviders": [provider]},
+                        "providerPolicy": {
+                            "experimentalProviders": list(
+                                acceptance.FIXTURE_CONCURRENCY_PROVIDERS
+                            )
+                        },
                     },
                 },
                 expected=(201,),
@@ -918,6 +932,11 @@ class WorkerReleaseRolloutSuite(acceptance.AcceptanceSuite):
         self.manifests: dict[str, dict[str, Any]] = {}
         self.revisions: dict[str, dict[str, Any]] = {}
         self.busy_baseline: dict[str, Any] | None = None
+        self.release_load_execution_ids: set[str] = set()
+        self.release_load_phase_counts: dict[str, int] = {
+            "candidate-promoted": 0,
+            "baseline-promoted": 0,
+        }
 
     def run(self) -> list[dict[str, Any]]:
         self._case(
@@ -974,20 +993,20 @@ class WorkerReleaseRolloutSuite(acceptance.AcceptanceSuite):
             requires=("release.baseline-active",),
         )
         self._case(
-            "release.canary-active-fence",
-            "Pin an Approval Execution to canary and block promote/rollback until terminal",
-            self._canary_active_fence,
+            "release.canary-failure-under-load",
+            "Recover exact canary container loss while baseline and candidate Executions overlap",
+            self._canary_failure_under_load,
             requires=("release.canary",),
         )
         self._case(
             "release.promote",
-            "Promote the candidate and prove new Executions use only candidate/promoted",
+            "Promote the candidate and run its bounded release-pinned load waves",
             self._promote_candidate,
-            requires=("release.canary-active-fence",),
+            requires=("release.canary-failure-under-load",),
         )
         self._case(
             "release.rollback",
-            "Roll back to baseline and prove new Executions use only baseline/promoted",
+            "Roll back to baseline and run its bounded release-pinned load waves",
             self._rollback_baseline,
             requires=("release.promote",),
         )
@@ -1262,23 +1281,6 @@ class WorkerReleaseRolloutSuite(acceptance.AcceptanceSuite):
             revision_id=self.revisions["baseline"]["id"],
             channel="promoted",
         )
-        resolution = self._approval_resolution()
-        terminal = self._wait_execution_release(
-            required_string(busy["barrier"], "turnId", "baseline Approval barrier"),
-            revision_id=self.revisions["baseline"]["id"],
-            channel="promoted",
-            manifest_id=self.manifests["baseline"]["manifestId"],
-            terminal=True,
-        )
-        converged_pool = self.driver.wait_container_pool(
-            self._required("target_id"),
-            [
-                pool_class("promoted", self.revisions["baseline"]["id"], self.driver.images["baseline"], 1),
-                pool_class("canary", self.revisions["candidate"]["id"], self.driver.images["candidate"], 1),
-            ],
-            excluded_container_ids=(required_string(busy_container, "id", "busy container"),),
-        )
-        self.busy_baseline = None
         return {
             "policy": policy_evidence(policy),
             "pool": pool,
@@ -1287,9 +1289,7 @@ class WorkerReleaseRolloutSuite(acceptance.AcceptanceSuite):
             "busyBaselinePreserved": preservation,
             "stalePolicy": stale,
             "promoteConflict": promote_conflict,
-            "resolution": resolution,
-            "terminal": terminal,
-            "postTerminalPool": converged_pool,
+            "busyBaselineStillPending": True,
         }
 
     def _wait_managed_worker(
@@ -1326,16 +1326,208 @@ class WorkerReleaseRolloutSuite(acceptance.AcceptanceSuite):
             interval=0.2,
         )
 
-    def _canary_active_fence(self) -> Mapping[str, Any]:
-        barrier = self._begin_approval_readiness_barrier()
-        turn_id = required_string(barrier, "turnId", "Approval barrier")
-        execution = self._wait_execution_release(
-            turn_id,
+    def _canary_failure_under_load(self) -> Mapping[str, Any]:
+        busy = self.busy_baseline
+        pending = self.state.pending_approval
+        if busy is None or pending is None:
+            raise acceptance.AcceptanceError(
+                "runner.worker_release_busy_baseline_missing",
+                "The baseline Approval was not still pending before canary failure injection.",
+            )
+        quota = self._set_fixture_execution_quota(
+            acceptance.FIXTURE_CONCURRENCY_WORKERS,
+            "Worker Release failure load",
+            "runner.worker_release_load_quota_mismatch",
+        )
+        sessions = self._fixture_load_sessions()
+        baseline_turn = {
+            "sessionId": self._required("session_id"),
+            "provider": self.options.provider,
+            "turn": acceptance.json_object(
+                pending.get("turn"), "busy baseline Approval Turn"
+            ),
+            "interaction": acceptance.json_object(
+                pending.get("interaction"), "busy baseline Approval interaction"
+            ),
+        }
+        baseline_turn["active"] = self._active_approval_evidence(
+            required_string(busy["barrier"], "turnId", "baseline Approval barrier"),
+            baseline_turn["interaction"],
+            session_id=str(baseline_turn["sessionId"]),
+            provider=str(baseline_turn["provider"]),
+        )
+        baseline_active = acceptance.json_object(
+            baseline_turn["active"], "busy baseline active Execution"
+        )
+        baseline_execution = acceptance.json_object(
+            busy.get("execution"), "busy baseline release Execution"
+        )
+        if (
+            baseline_active.get("executionId") != baseline_execution.get("executionId")
+            or baseline_active.get("workerId") != baseline_execution.get("workerId")
+            or baseline_active.get("generation") != baseline_execution.get("generation")
+        ):
+            raise acceptance.AcceptanceError(
+                "runner.worker_release_baseline_load_identity_mismatch",
+                "The original busy baseline did not retain its Execution, Worker, and Generation identity.",
+                {"active": baseline_active, "release": baseline_execution},
+            )
+
+        candidate_turn = self._start_fixture_load_failure_turn(
+            sessions[1], "worker-container-loss", 2
+        )
+        candidate_active = acceptance.json_object(
+            candidate_turn.get("active"), "candidate canary active Execution"
+        )
+        candidate_turn_id = self._turn_id(
+            acceptance.json_object(candidate_turn.get("turn"), "candidate canary Turn"),
+            "candidate canary Turn",
+        )
+        candidate_execution = self._wait_execution_release(
+            candidate_turn_id,
             revision_id=self.revisions["candidate"]["id"],
             channel="canary",
             manifest_id=self.manifests["candidate"]["manifestId"],
             terminal=False,
         )
+        validate_release_load_identity(candidate_active, candidate_execution)
+        candidate_worker = self._wait_managed_worker(
+            candidate_execution,
+            revision_id=self.revisions["candidate"]["id"],
+            channel="canary",
+            manifest_id=self.manifests["candidate"]["manifestId"],
+        )
+        pre_failure_pool = self.driver.wait_container_pool(
+            self._required("target_id"),
+            [
+                pool_class(
+                    "promoted",
+                    self.revisions["baseline"]["id"],
+                    self.driver.images["baseline"],
+                    1,
+                ),
+                pool_class(
+                    "canary",
+                    self.revisions["candidate"]["id"],
+                    self.driver.images["candidate"],
+                    1,
+                ),
+            ],
+        )
+        candidate_container = pool_container_for_worker(
+            pre_failure_pool, candidate_worker
+        )
+        overlap = self._fixture_load_overlap(
+            [baseline_turn, candidate_turn], 0, "release-canary-pre-container-loss"
+        )
+        quota_rejections = [
+            self._assert_fixture_load_quota_rejected(session, 0, position)
+            for position, session in enumerate(sessions[2:], start=3)
+        ]
+
+        baseline_session_id = str(baseline_turn["sessionId"])
+        baseline_events = self._all_events(session_id=baseline_session_id)
+        baseline_pending = self._pending_interactions(baseline_session_id)
+        recovery, replacement = self._recover_pending_approval_context(
+            {
+                "turn": acceptance.json_object(
+                    candidate_turn.get("turn"), "candidate canary Turn"
+                ),
+                "interaction": acceptance.json_object(
+                    candidate_turn.get("interaction"),
+                    "candidate canary interaction",
+                ),
+            },
+            session_id=str(candidate_turn["sessionId"]),
+            recover=lambda target_id, execution_id: self.driver.inject_failure(
+                "worker-container-loss", target_id, execution_id
+            ),
+        )
+        target_recovery = acceptance.json_object(
+            recovery.get("targetRecovery"), "candidate container-loss recovery"
+        )
+        candidate_after_execution = self._wait_execution_release(
+            candidate_turn_id,
+            revision_id=self.revisions["candidate"]["id"],
+            channel="canary",
+            manifest_id=self.manifests["candidate"]["manifestId"],
+            terminal=False,
+        )
+        candidate_after_worker = self._wait_managed_worker(
+            candidate_after_execution,
+            revision_id=self.revisions["candidate"]["id"],
+            channel="canary",
+            manifest_id=self.manifests["candidate"]["manifestId"],
+        )
+        post_recovery_pool = self.driver.wait_container_pool(
+            self._required("target_id"),
+            [
+                pool_class(
+                    "promoted",
+                    self.revisions["baseline"]["id"],
+                    self.driver.images["baseline"],
+                    1,
+                ),
+                pool_class(
+                    "canary",
+                    self.revisions["candidate"]["id"],
+                    self.driver.images["candidate"],
+                    1,
+                ),
+            ],
+            excluded_container_ids=(
+                required_string(candidate_container, "id", "lost candidate container"),
+            ),
+        )
+        candidate_after_container = pool_container_for_worker(
+            post_recovery_pool, candidate_after_worker
+        )
+        replacement_evidence = validate_release_container_loss_recovery(
+            candidate_container,
+            candidate_after_container,
+            active=candidate_active,
+            recovery=recovery,
+            target_recovery=target_recovery,
+            revision_id=self.revisions["candidate"]["id"],
+            channel="canary",
+            image=self.driver.images["candidate"],
+        )
+
+        self._assert_fixture_load_session_unchanged(
+            baseline_turn,
+            baseline_events,
+            baseline_pending,
+            "after-release-canary-container-recovery",
+        )
+        baseline_after_active = self._active_approval_evidence(
+            required_string(busy["barrier"], "turnId", "baseline Approval barrier"),
+            baseline_turn["interaction"],
+            session_id=baseline_session_id,
+            provider=str(baseline_turn["provider"]),
+        )
+        baseline_after_execution = self._wait_execution_release(
+            required_string(busy["barrier"], "turnId", "baseline Approval barrier"),
+            revision_id=self.revisions["baseline"]["id"],
+            channel="promoted",
+            manifest_id=self.manifests["baseline"]["manifestId"],
+            terminal=False,
+        )
+        baseline_after_worker = self._wait_managed_worker(
+            baseline_after_execution,
+            revision_id=self.revisions["baseline"]["id"],
+            channel="promoted",
+            manifest_id=self.manifests["baseline"]["manifestId"],
+        )
+        baseline_after_container = pool_container_for_worker(
+            post_recovery_pool, baseline_after_worker
+        )
+        peer_preservation = validate_release_peer_preserved(
+            baseline_active,
+            baseline_after_active,
+            acceptance.json_object(busy.get("container"), "busy baseline container"),
+            baseline_after_container,
+        )
+
         promote_conflict = expect_problem(
             self.api,
             "POST",
@@ -1345,8 +1537,16 @@ class WorkerReleaseRolloutSuite(acceptance.AcceptanceSuite):
                 self.revisions["candidate"]["id"],
                 "promote",
             ),
-            {"expectedPolicyVersion": 2, "reason": "active canary blocks promotion"},
+            {
+                "expectedPolicyVersion": 2,
+                "reason": "recovered canary and busy baseline block promotion",
+            },
             "worker_release_active_executions",
+        )
+        validate_active_execution_conflict(
+            promote_conflict,
+            revision_id=self.revisions["baseline"]["id"],
+            channel="promoted",
         )
         rollback_conflict = expect_problem(
             self.api,
@@ -1357,24 +1557,243 @@ class WorkerReleaseRolloutSuite(acceptance.AcceptanceSuite):
                 self.revisions["baseline"]["id"],
                 "rollback",
             ),
-            {"expectedPolicyVersion": 2, "reason": "active canary blocks rollback"},
+            {
+                "expectedPolicyVersion": 2,
+                "reason": "recovered canary blocks rollback",
+            },
             "worker_release_active_executions",
         )
-        resolution = self._approval_resolution()
-        terminal = self._wait_execution_release(
-            turn_id,
+        validate_active_execution_conflict(
+            rollback_conflict,
+            revision_id=self.revisions["candidate"]["id"],
+            channel="canary",
+        )
+
+        recovered_candidate = {**candidate_turn, "interaction": replacement}
+        candidate_terminal = self._complete_fixture_failure_turn(
+            recovered_candidate,
+            expected_worker_id=str(recovery["replacementWorkerId"]),
+            expected_generation=int(recovery["replacementGeneration"]),
+            expected_request_count=2,
+        )
+        candidate_terminal_release = self._wait_execution_release(
+            candidate_turn_id,
             revision_id=self.revisions["candidate"]["id"],
             channel="canary",
             manifest_id=self.manifests["candidate"]["manifestId"],
             terminal=True,
         )
+        self._assert_fixture_load_session_unchanged(
+            baseline_turn,
+            baseline_events,
+            baseline_pending,
+            "after-release-canary-terminal",
+        )
+        baseline_resolution = self._approval_resolution()
+        baseline_terminal = self._wait_execution_release(
+            required_string(busy["barrier"], "turnId", "baseline Approval barrier"),
+            revision_id=self.revisions["baseline"]["id"],
+            channel="promoted",
+            manifest_id=self.manifests["baseline"]["manifestId"],
+            terminal=True,
+        )
+        converged_pool = self.driver.wait_container_pool(
+            self._required("target_id"),
+            [
+                pool_class(
+                    "promoted",
+                    self.revisions["baseline"]["id"],
+                    self.driver.images["baseline"],
+                    1,
+                ),
+                pool_class(
+                    "canary",
+                    self.revisions["candidate"]["id"],
+                    self.driver.images["candidate"],
+                    1,
+                ),
+            ],
+            excluded_container_ids=(
+                required_string(
+                    acceptance.json_object(busy.get("container"), "busy baseline container"),
+                    "id",
+                    "completed busy baseline container",
+                ),
+                required_string(candidate_container, "id", "lost candidate container"),
+            ),
+        )
+        leaked = {
+            str(session["sessionId"]): self._pending_interactions(
+                str(session["sessionId"])
+            )
+            for session in sessions
+        }
+        leaked = {session_id: items for session_id, items in leaked.items() if items}
+        if leaked:
+            raise acceptance.AcceptanceError(
+                "runner.worker_release_load_interaction_leaked",
+                "The canary failure load left pending interactions behind.",
+                {
+                    "sessions": {
+                        session_id: [item.get("id") for item in items]
+                        for session_id, items in leaked.items()
+                    }
+                },
+            )
+        self.busy_baseline = None
         return {
-            "barrier": barrier,
-            "execution": execution,
+            "maxConcurrentExecutions": quota.get("maxConcurrentExecutions"),
+            "sessions": acceptance.FIXTURE_LOAD_SESSIONS,
+            "workers": acceptance.FIXTURE_CONCURRENCY_WORKERS,
+            "overlap": overlap,
+            "quotaRejections": quota_rejections,
+            "baseline": baseline_active,
+            "candidate": candidate_active,
+            "preFailurePool": pre_failure_pool,
+            "recovery": recovery,
+            "replacement": replacement_evidence,
+            "postRecoveryPool": post_recovery_pool,
+            "peerPreservation": peer_preservation,
             "promoteConflict": promote_conflict,
             "rollbackConflict": rollback_conflict,
-            "resolution": resolution,
-            "terminal": terminal,
+            "candidateTerminal": candidate_terminal,
+            "candidateTerminalRelease": candidate_terminal_release,
+            "baselineResolution": baseline_resolution,
+            "baselineTerminal": baseline_terminal,
+            "postTerminalPool": converged_pool,
+            "targetedGenerationFenced": True,
+            "peerSessionEventsUnchanged": True,
+            "peerWorkerAndGenerationUnchanged": True,
+            "pendingInteractionCount": 0,
+            "duplicateTerminal": False,
+        }
+
+    def _release_load_waves(
+        self,
+        *,
+        slot: str,
+        channel: str,
+        wave_start: int,
+        wave_count: int,
+    ) -> Mapping[str, Any]:
+        revision_id = required_string(
+            self.revisions[slot], "id", f"{slot} Release Revision"
+        )
+        manifest_id = required_string(
+            self.manifests[slot], "manifestId", f"{slot} Worker Manifest"
+        )
+        phase = f"{slot}-{channel}"
+        active_checks = 0
+        terminal_checks = 0
+        worker_binding_checks = 0
+        samples: list[dict[str, Any]] = []
+
+        def active_validator(load_turn: Mapping[str, Any]) -> None:
+            nonlocal active_checks, worker_binding_checks
+            turn = acceptance.json_object(
+                load_turn.get("turn"), "release load Turn"
+            )
+            active = acceptance.json_object(
+                load_turn.get("active"), "release load active Execution"
+            )
+            turn_id = self._turn_id(turn, "release load Turn")
+            release = self._wait_execution_release(
+                turn_id,
+                revision_id=revision_id,
+                channel=channel,
+                manifest_id=manifest_id,
+                terminal=False,
+            )
+            validate_release_load_identity(active, release)
+            worker = self._wait_managed_worker(
+                release,
+                revision_id=revision_id,
+                channel=channel,
+                manifest_id=manifest_id,
+            )
+            active_checks += 1
+            worker_binding_checks += 1
+            if len(samples) < 2:
+                samples.append(
+                    {
+                        "stage": "active",
+                        "sessionId": load_turn.get("sessionId"),
+                        "execution": release,
+                        "worker": worker,
+                    }
+                )
+
+        def terminal_validator(
+            load_turn: Mapping[str, Any], terminal: Mapping[str, Any]
+        ) -> None:
+            nonlocal terminal_checks
+            turn = acceptance.json_object(
+                load_turn.get("turn"), "release load Turn"
+            )
+            turn_id = self._turn_id(turn, "release load Turn")
+            release = self._wait_execution_release(
+                turn_id,
+                revision_id=revision_id,
+                channel=channel,
+                manifest_id=manifest_id,
+                terminal=True,
+            )
+            validate_release_load_identity(terminal, release)
+            execution_id = required_string(
+                release, "executionId", "release load Execution"
+            )
+            if execution_id in self.release_load_execution_ids:
+                raise acceptance.AcceptanceError(
+                    "runner.worker_release_load_execution_reused",
+                    "Worker Release load reused an Execution across rollout phases.",
+                    {"phase": phase, "executionId": execution_id},
+                )
+            self.release_load_execution_ids.add(execution_id)
+            terminal_checks += 1
+            if len(samples) < 4:
+                samples.append(
+                    {
+                        "stage": "terminal",
+                        "sessionId": load_turn.get("sessionId"),
+                        "execution": release,
+                    }
+                )
+
+        load = self._fixture_load_admission_waves(
+            wave_start=wave_start,
+            wave_count=wave_count,
+            active_validator=active_validator,
+            terminal_validator=terminal_validator,
+        )
+        expected_executions = wave_count * acceptance.FIXTURE_LOAD_SESSIONS
+        if (
+            active_checks != expected_executions
+            or terminal_checks != expected_executions
+            or worker_binding_checks != expected_executions
+        ):
+            raise acceptance.AcceptanceError(
+                "runner.worker_release_load_pin_count_invalid",
+                "Worker Release load did not validate every active and terminal release pin.",
+                {
+                    "phase": phase,
+                    "expectedExecutions": expected_executions,
+                    "activeChecks": active_checks,
+                    "terminalChecks": terminal_checks,
+                    "workerBindingChecks": worker_binding_checks,
+                },
+            )
+        self.release_load_phase_counts[phase] = expected_executions
+        return {
+            **dict(load),
+            "phase": phase,
+            "revisionId": revision_id,
+            "channel": channel,
+            "manifestId": manifest_id,
+            "registryDigest": self.driver.images[slot].digest,
+            "activeReleasePinChecks": active_checks,
+            "terminalReleasePinChecks": terminal_checks,
+            "workerBindingChecks": worker_binding_checks,
+            "releasePinSamples": samples,
         }
 
     def _promote_candidate(self) -> Mapping[str, Any]:
@@ -1407,17 +1826,19 @@ class WorkerReleaseRolloutSuite(acceptance.AcceptanceSuite):
             expected_online=0,
             manifest_id=self.manifests["baseline"]["manifestId"],
         )
-        smoke = self._release_smoke(
-            revision_id=self.revisions["candidate"]["id"],
+        candidate_waves = (self.options.load_waves + 1) // 2
+        load = self._release_load_waves(
+            slot="candidate",
             channel="promoted",
-            manifest_id=self.manifests["candidate"]["manifestId"],
+            wave_start=0,
+            wave_count=candidate_waves,
         )
         return {
             "policy": policy_evidence(policy),
             "pool": pool,
             "candidateManifest": manifest_evidence(candidate_manifest),
             "retiredBaselineManifest": manifest_evidence(baseline_manifest),
-            "execution": smoke,
+            "load": load,
             "oldWorkerClaimed": False,
         }
 
@@ -1463,10 +1884,13 @@ class WorkerReleaseRolloutSuite(acceptance.AcceptanceSuite):
             expected_online=1,
             manifest_id=self.manifests["candidate"]["manifestId"],
         )
-        smoke = self._release_smoke(
-            revision_id=self.revisions["baseline"]["id"],
+        candidate_waves = (self.options.load_waves + 1) // 2
+        baseline_waves = self.options.load_waves - candidate_waves
+        load = self._release_load_waves(
+            slot="baseline",
             channel="promoted",
-            manifest_id=self.manifests["baseline"]["manifestId"],
+            wave_start=candidate_waves,
+            wave_count=baseline_waves,
         )
         return {
             "policy": policy_evidence(policy),
@@ -1474,26 +1898,8 @@ class WorkerReleaseRolloutSuite(acceptance.AcceptanceSuite):
             "baselineManifest": manifest_evidence(baseline_manifest),
             "retiredCandidateManifest": manifest_evidence(candidate_manifest),
             "observerCandidateManifest": manifest_evidence(observer_manifest),
-            "execution": smoke,
+            "load": load,
         }
-
-    def _release_smoke(
-        self,
-        *,
-        revision_id: str,
-        channel: str,
-        manifest_id: str,
-    ) -> Mapping[str, Any]:
-        turn = self._create_turn("[text] [usage]")
-        turn_id = required_string(turn, "id", "release smoke Turn")
-        self._wait_for_turn_terminal(turn_id, "execution.completed")
-        return self._wait_execution_release(
-            turn_id,
-            revision_id=revision_id,
-            channel=channel,
-            manifest_id=manifest_id,
-            terminal=True,
-        )
 
     def _wait_execution_release(
         self,
@@ -1605,14 +2011,52 @@ class WorkerReleaseRolloutSuite(acceptance.AcceptanceSuite):
                 self.revisions["candidate"]["id"],
             },
         )
-        events = self._all_events()
+        sessions = self._fixture_load_sessions()
+        events_by_session = {
+            str(session["sessionId"]): self._all_events(
+                session_id=str(session["sessionId"])
+            )
+            for session in sessions
+        }
+        sequence_ranges: dict[str, Mapping[str, Any]] = {}
+        events: list[dict[str, Any]] = []
+        for session_id, session_events in events_by_session.items():
+            sequences = [int(event["sequence"]) for event in session_events]
+            expected_sequences = (
+                list(range(1, sequences[-1] + 1)) if sequences else []
+            )
+            if sequences != expected_sequences:
+                raise acceptance.AcceptanceError(
+                    "runner.worker_release_session_sequence_discontinuous",
+                    "A Worker Release load Session did not retain contiguous Event sequence.",
+                    {"sessionId": session_id, "sequences": sequences},
+                )
+            sequence_ranges[session_id] = self._sequence_range(session_events)
+            events.extend(session_events)
         turns = [event for event in events if event.get("eventType") == "turn.created"]
-        execution_ids = [acceptance.AcceptanceSuite._event_execution_id(event) for event in turns]
-        if len(execution_ids) != 4 or len(set(execution_ids)) != 4:
+        execution_ids = [
+            acceptance.AcceptanceSuite._event_execution_id(event) for event in turns
+        ]
+        expected_execution_count = (
+            2 + self.options.load_waves * acceptance.FIXTURE_LOAD_SESSIONS
+        )
+        if (
+            len(execution_ids) != expected_execution_count
+            or len(set(execution_ids)) != expected_execution_count
+            or len(self.release_load_execution_ids)
+            != self.options.load_waves * acceptance.FIXTURE_LOAD_SESSIONS
+        ):
             raise acceptance.AcceptanceError(
                 "runner.worker_release_execution_count_invalid",
-                "The rollout Session did not retain exactly four distinct Executions.",
-                {"executionCount": len(execution_ids), "distinctCount": len(set(execution_ids))},
+                "The rollout Sessions did not retain the exact distinct Execution count.",
+                {
+                    "expectedExecutionCount": expected_execution_count,
+                    "executionCount": len(execution_ids),
+                    "distinctCount": len(set(execution_ids)),
+                    "releaseLoadExecutionCount": len(
+                        self.release_load_execution_ids
+                    ),
+                },
             )
         terminal_counts = {
             execution_id: sum(
@@ -1634,11 +2078,17 @@ class WorkerReleaseRolloutSuite(acceptance.AcceptanceSuite):
             "audit": audit,
             "outbox": outbox,
             "sessionEvents": {
-                "sequenceRange": self._sequence_range(events),
-                "executionIds": execution_ids,
+                "sequenceRanges": sequence_ranges,
+                "executionCount": len(execution_ids),
+                "executionIdSamples": execution_ids[:4] + execution_ids[-4:],
                 "terminalCounts": terminal_counts,
                 "duplicateTerminal": False,
                 "doubleExecution": False,
+            },
+            "load": {
+                "waves": self.options.load_waves,
+                "executionCount": len(self.release_load_execution_ids),
+                "phaseExecutionCounts": dict(self.release_load_phase_counts),
             },
         }
 
@@ -1868,6 +2318,161 @@ def validate_busy_container_preserved(
             {"expected": expected, "actual": actual},
         )
     return {**actual, "preservedWhileBusy": True}
+
+
+def validate_release_load_identity(
+    expected: Mapping[str, Any], release: Mapping[str, Any]
+) -> None:
+    expected_identity = {
+        key: expected.get(key) for key in ("executionId", "workerId", "generation")
+    }
+    actual_identity = {
+        key: release.get(key) for key in ("executionId", "workerId", "generation")
+    }
+    if (
+        not isinstance(expected_identity["executionId"], str)
+        or not expected_identity["executionId"]
+        or not isinstance(expected_identity["workerId"], str)
+        or not expected_identity["workerId"]
+        or not isinstance(expected_identity["generation"], int)
+        or actual_identity != expected_identity
+    ):
+        raise acceptance.AcceptanceError(
+            "runner.worker_release_load_identity_mismatch",
+            "A bounded load Execution did not retain its release-pinned Worker identity.",
+            {"expected": expected_identity, "actual": actual_identity},
+        )
+
+
+def validate_release_container_loss_recovery(
+    before: Mapping[str, Any],
+    after: Mapping[str, Any],
+    *,
+    active: Mapping[str, Any],
+    recovery: Mapping[str, Any],
+    target_recovery: Mapping[str, Any],
+    revision_id: str,
+    channel: str,
+    image: ReleaseImage,
+) -> dict[str, Any]:
+    stable_container = {
+        key: before.get(key)
+        for key in ("name", "imageId", "digest", "revisionId", "channel", "volume")
+    }
+    expected_container = {
+        "name": target_recovery.get("containerName"),
+        "imageId": image.image_id,
+        "digest": image.digest,
+        "revisionId": revision_id,
+        "channel": channel,
+        "volume": before.get("volume"),
+    }
+    after_container = {key: after.get(key) for key in stable_container}
+    before_id = before.get("id")
+    after_id = after.get("id")
+    active_generation = active.get("generation")
+    volume = target_recovery.get("namedVolumeContinuity")
+    target_valid = (
+        target_recovery.get("fault") == "worker-container-loss"
+        and target_recovery.get("executionId") == active.get("executionId")
+        and target_recovery.get("executionGeneration") == active.get("generation")
+        and target_recovery.get("workerId") == active.get("workerId")
+        and target_recovery.get("removedContainerId") == before_id
+        and target_recovery.get("replacementContainerId") == after_id
+        and target_recovery.get("containerIdChanged") is True
+        and target_recovery.get("exactExecutionWorkerMatch") is True
+        and target_recovery.get("workerIdStable") is True
+        and target_recovery.get("workerIncarnationAdvanced") is True
+        and target_recovery.get("instanceUidChanged") is True
+        and target_recovery.get("replacementReady") is True
+        and isinstance(volume, Mapping)
+        and volume.get("preservedAcrossReplacement") is True
+    )
+    recovery_valid = (
+        recovery.get("staleExecutionId") == active.get("executionId")
+        and recovery.get("replacementExecutionId") == active.get("executionId")
+        and recovery.get("staleWorkerId") == active.get("workerId")
+        and recovery.get("replacementWorkerId") == active.get("workerId")
+        and isinstance(active_generation, int)
+        and recovery.get("staleGeneration") == active_generation
+        and recovery.get("replacementGeneration") == active_generation + 1
+        and recovery.get("staleInteractionId")
+        != recovery.get("replacementInteractionId")
+        and recovery.get("staleRequestId") != recovery.get("replacementRequestId")
+    )
+    if (
+        not isinstance(before_id, str)
+        or not before_id
+        or not isinstance(after_id, str)
+        or not after_id
+        or before_id == after_id
+        or stable_container != expected_container
+        or after_container != expected_container
+        or not target_valid
+        or not recovery_valid
+    ):
+        raise acceptance.AcceptanceError(
+            "runner.worker_release_container_recovery_invalid",
+            "Canary container loss did not preserve the exact Release while advancing one fenced Generation.",
+            {
+                "before": {"id": before_id, **stable_container},
+                "after": {"id": after_id, **after_container},
+                "expectedContainer": expected_container,
+                "active": dict(active),
+                "recovery": dict(recovery),
+                "targetRecovery": dict(target_recovery),
+            },
+        )
+    return {
+        "executionId": active.get("executionId"),
+        "workerId": active.get("workerId"),
+        "generation": {
+            "before": recovery.get("staleGeneration"),
+            "after": recovery.get("replacementGeneration"),
+        },
+        "containerId": {"before": before_id, "after": after_id},
+        "containerName": after.get("name"),
+        "revisionId": revision_id,
+        "channel": channel,
+        "manifestPreserved": True,
+        "registryDigest": image.digest,
+        "workerIdStable": True,
+        "workerIncarnationAdvanced": True,
+        "instanceUidChanged": True,
+        "namedVolumeContinuity": dict(volume),
+    }
+
+
+def validate_release_peer_preserved(
+    before_active: Mapping[str, Any],
+    after_active: Mapping[str, Any],
+    before_container: Mapping[str, Any],
+    after_container: Mapping[str, Any],
+) -> dict[str, Any]:
+    expected_identity = {
+        key: before_active.get(key)
+        for key in (
+            "executionId",
+            "workerId",
+            "generation",
+            "requestId",
+            "interactionId",
+        )
+    }
+    actual_identity = {key: after_active.get(key) for key in expected_identity}
+    if actual_identity != expected_identity:
+        raise acceptance.AcceptanceError(
+            "runner.worker_release_peer_identity_changed",
+            "The busy baseline peer changed while the candidate Worker recovered.",
+            {"expected": expected_identity, "actual": actual_identity},
+        )
+    container = validate_busy_container_preserved(before_container, after_container)
+    return {
+        **expected_identity,
+        "container": container,
+        "sessionEventsUnchanged": True,
+        "interactionPending": True,
+    }
 
 
 def validate_active_execution_conflict(
@@ -2221,10 +2826,11 @@ def markdown_from_report(report: Mapping[str, Any]) -> str:
         "",
         "This gate proves the product Docker Target path for two registry-pushed immutable Worker images: "
         "Revision creation, initial promotion, Busy Worker preservation, canary, active-Execution fencing, "
-        "promotion, rollback, exact "
-        "container/manifest/Execution release pins, audit/Outbox history, Secret scan, and exact cleanup. It does "
+        "exact canary container-loss recovery under two-Worker overlap, bounded four-Session load across promotion "
+        "and rollback, exact container/manifest/Execution release pins, audit/Outbox history, Secret scan, and "
+        "exact cleanup. It does "
         "not replace production Registry Credential/TLS, real Provider Credentials, Kubernetes multi-node rollout, "
-        "load, or soak evidence.",
+        "real Provider load/failure, production SLA, or soak evidence.",
         "",
         "## Cases",
         "",
@@ -2385,6 +2991,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             "desiredWorkers": 2,
             "candidateObserverWorkers": 1,
             "canaryPercent": 100,
+            "loadWaves": options.load_waves,
+            "loadSessions": acceptance.FIXTURE_LOAD_SESSIONS,
+            "maxConcurrentExecutions": acceptance.FIXTURE_CONCURRENCY_WORKERS,
             "broadCleanupAllowed": False,
         },
         "cases": cases,
