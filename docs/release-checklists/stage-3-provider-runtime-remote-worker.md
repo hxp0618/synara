@@ -35,6 +35,8 @@ multi-host/Kubernetes multi-node、real Provider-process/release-rollout failure
 - [ ] Provider Host Protocol 固定为 `2.1`，Worker Protocol 固定为 `2`，Runtime Event 固定为 `2`。
 - [ ] 报告明确区分真实 Provider、deterministic fixture、Target 类型和是否经过 Control Plane/agentd。
 - [ ] 当前已知限制、外部依赖和未执行项已由发布负责人接受。
+- [ ] 第三方 Codex/Claude API Key 只通过受控 Credential `apiKey`/`authToken` 与可选 `baseUrl` 注入；值和
+      operator 环境变量名未进入聊天、命令参数、Target 配置、日志或报告。
 - [ ] 没有把 Local Provider Host smoke 描述成 Local Supervisor、SSH、Docker 或 Kubernetes Release Gate。
 
 ## 2. 数据库与 DDL
@@ -108,6 +110,8 @@ clean-commit 证据；生产 Registry、生产签名身份、Credential、retent
 - [ ] Worker Manifest 中的 Git SHA、OS/Arch、Image Digest、Protocol、Provider Runtime 和 Capability Hash 可追溯。
 - [ ] 生产发布已归档 SBOM/扫描报告，并使用获批的 KMS/keyless 身份、transparency log 与 admission policy
       完成镜像签名/来源验证；不得以 disposable ephemeral-key 证据替代。
+- [ ] 当前生产选择 `kms-key`；具体 KMS reference（自建 Vault 可使用 `hashivault://...`）、最小 credential
+      环境变量名、signer identity、tlog 和 admission policy 已审批并留存非 Secret 证据。
 - [ ] Worker 使用非 Root 用户，Workspace、Git Cache 和 Runtime Output Root 权限正确。
 - [ ] 没有在镜像、Layer、Build Arg、Environment 或 Manifest 中写入 Credential。
 - [ ] 私有 Registry 使用 Tenant/Organization-scoped Registry Credential 和 Target-scoped
@@ -187,6 +191,7 @@ bun run --cwd apps/web test \
 | deterministic Local Retention/Cleanup fixture          | clean commit `c27914da` 9/9                | active Execution fencing、无引用 Artifact 删除、Checkpoint 保护与终态后单次 physical cleanup 已验；不是真实 Provider/remote/production Retention                         |
 | deterministic Docker bounded load/admission fixture    | clean commit `e944b449` 100/100 Executions | 四 Session、50 次 quota rejection/retry、75 次双 Worker overlap、Artifact/Checkpoint 唯一终态已验；不是真实 Provider/production load                                     |
 | deterministic Docker network/container/Host crash load | clean commit `cfecba63` 12/12              | exact network/container/Host-process fault、same-Worker replacement、Generation 或 new-Execution recovery 与 100 Execution load 已验；不是真实 Provider/multi-node fault |
+| deterministic Docker release rollout failure/load      | clean commit `41683366` 15/15              | canary container-loss Generation `1->2`、peer 隔离、25 波/100 Execution release pins、分页 Audit 与 topic-filtered Outbox 已验；不是真实 Provider/production rollout     |
 | 真实 Codex `0.144.x` `terminal-large`                  | Explicit Unsupported                       | Unified Exec 仅保留 1 MiB Head/Tail；不得牺牲 durable Approval                                                                                                           |
 | Claude ambient OAuth `terminal-large`                  | Explicit Unsupported                       | 需 controlled Credential 绑定 Runtime Output Root                                                                                                                        |
 | deterministic Local/Docker core suite                  | 已通过                                     | 证明共享 Control Plane/agentd/Host orchestration，不证明真实 Adapter                                                                                                     |
@@ -214,6 +219,8 @@ bun run --cwd apps/web test \
 - [ ] Claude × Docker：同上。
 - [ ] Codex × Kubernetes：Pod replacement、Drain、Eviction、Network、Image rollout。
 - [ ] Claude × Kubernetes：同上。
+- [ ] 已授权外部 SSH target 与本地 `orbstack` context 均完成 Host/Context pinning、clean-SHA 运行和精确
+      cleanup；SSH 认证信息未写入仓库或 evidence。
 - [ ] 所有运行均来自本次发布 Commit 和 registry-pushed immutable image。
 - [ ] 多 Turn 长 Session、多 Provider 并发、长日志、Checkpoint/Resume、Retention 与 load/soak 完成。（`6e866a30`
       仅关闭 deterministic Local 100-Turn/restart/pagination/repeated-Checkpoint mechanics；`eeb7a2f1` 仅关闭
@@ -222,7 +229,12 @@ bun run --cwd apps/web test \
       仅关闭 deterministic managed Docker 四 Session、100 Execution 的 bounded quota/admission、slot reuse 与
       Artifact/Checkpoint terminal mechanics；`cfecba63` 仅关闭 deterministic single-host exact Docker
       network/container-loss/fixture Provider Host process fault、same logical Worker replacement、Peer Session 隔离、
-      incarnation/Generation fencing、distinct new-Execution recovery 与 post-failure load mechanics。）
+      incarnation/Generation fencing、distinct new-Execution recovery 与 post-failure load mechanics；`41683366` 仅关闭
+      deterministic single-host immutable release-rollout container loss、25 波 release-pinned load、load-safe
+      Audit/Outbox retrieval 与 rollback mechanics。）
+- [ ] Load 报告记录 Tenant quota、Worker/slot 数、CPU/内存 requests/limits、达到的有效并发和
+      admission/retry；生产并发不以脱离资源档位的单一硬编码数字验收。
+- [ ] 生产持续时间、P95/P99、错误率和恢复时间满足审批 SLA；数值未批准前此项保持未勾选。
 - [ ] 故障运行没有重复终态、双 Worker 写入、Generation 回退或 Credential 泄漏。
 
 ## 7. Web 与前后端联通
@@ -244,6 +256,7 @@ Clean-SHA managed Docker mechanics gate（使用 loopback disposable Registry，
 ```bash
 python3 scripts/stage3-provider-acceptance/docker_worker_release_rollout_gate.py \
   --go-proxy https://goproxy.cn,direct \
+  --load-waves 25 \
   --output-dir /tmp/synara-docker-worker-release-rollout \
   --timeout 3600
 ```

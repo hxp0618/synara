@@ -220,8 +220,10 @@ Control Plane state, Worker container, volume, network and auto-built image are 
 
 Use `--real-provider-credential-field authToken` only for a Claude token that intentionally uses that payload field.
 `apiKey` is the default for Codex and Claude. An optional controlled endpoint can be supplied with
-`--real-provider-base-url-env`; its value is also redacted. Remote real-Provider runs fail during CLI validation when
-the Credential source is omitted, so an unauthenticated container failure cannot be mistaken for release evidence.
+`--real-provider-base-url-env`; its value is also redacted. This is the supported third-party API-key/Base URL path;
+the key and endpoint remain runtime Credential data rather than image or Target configuration. Remote real-Provider
+runs fail during CLI validation when the Credential source is omitted, so an unauthenticated container failure
+cannot be mistaken for release evidence.
 
 `--real-provider-case generated-file-checkpoint` first requires a Provider-native file mutation (`apply_patch` for
 Codex, `Write` for Claude) to create a 43-byte standalone file, then uses one exact shell command to write a
@@ -462,6 +464,7 @@ Run it only from a clean committed checkout:
 ```sh
 python3 scripts/stage3-provider-acceptance/docker_worker_release_rollout_gate.py \
   --go-proxy https://goproxy.cn,direct \
+  --load-waves 25 \
   --output-dir /tmp/synara-docker-worker-release-rollout \
   --timeout 3600
 ```
@@ -474,17 +477,22 @@ running it on the main Target. The gate then verifies:
 - two immutable Target-scoped Revisions and duplicate-Manifest rejection;
 - initial promote, a `100%` Execution-selection canary that still preserves one promoted and one canary Worker,
   stale CAS rejection, and matching container/Manifest/Execution Revision plus Channel evidence;
-- a waiting Approval Execution blocks both candidate promote and rollback with
-  `worker_release_active_executions`, then promotion succeeds only after the Execution reaches one terminal event;
-- new promoted Executions cannot be claimed by the retired baseline pool, and a later rollback creates only
-  baseline/promoted Workers and Executions while the candidate observer remains independently online;
-- exactly four immutable Transitions, six matching Audit entries, six matching Outbox messages, contiguous Session
-  Sequence, no double Execution, no duplicate terminal, an empty output Secret scan, and exact resource cleanup.
+- simultaneous baseline/promoted and candidate/canary Approval Executions occupy two Workers while two further
+  Sessions receive side-effect-free quota rejection;
+- exact candidate container loss advances one Execution Generation while preserving its logical Worker, Revision,
+  Channel, Manifest, digest and named-volume content, without changing the baseline peer;
+- recovered pending work blocks both candidate promote and rollback with `worker_release_active_executions`;
+- `--load-waves` bounded waves are split across candidate/promoted and rollback baseline/promoted, with every active
+  and terminal Execution checked for its exact release pin and Worker binding;
+- exactly four immutable Transitions, load-safe paginated Audit history, topic-filtered six-message Outbox history,
+  contiguous per-Session Sequence, no double Execution, no duplicate terminal, an empty output Secret scan, and
+  exact resource cleanup.
 
-The Registry uses loopback HTTP and no Registry Credential, so this gate is deterministic rollout evidence rather
-than production Registry/TLS/auth evidence. It does not close real Codex/Claude Docker credentials, Kubernetes
-multi-node rollout, load, or soak. Cleanup stops the isolated Control Plane before removing only the two Target
-pools, Registry container, three named volumes, network, and two owner-labeled Worker images; it never runs prune.
+The Registry uses loopback HTTP and no Registry Credential, so this gate is deterministic rollout/load evidence
+rather than production Registry/TLS/auth or real Provider evidence. It does not close Kubernetes multi-node
+rollout, production SLA, or production-duration soak. Cleanup stops the isolated Control Plane before removing only
+the two Target pools, Registry container, three named volumes, network, and two owner-labeled Worker images; it
+never runs prune.
 
 ## Deterministic failure and canary matrix
 
@@ -611,8 +619,8 @@ owned disposable Kind cluster, including Pending Approval Pod deletion, Generati
 Artifact/User Input/Provider Error, Control Plane restart and Session Event Sequence 1→57. Post-run checks confirmed
 the owned cluster and exact auto-built image were absent; see
 `docs/reports/stage-3-kubernetes-provider-fixture-acceptance-2763ebd3.md`. The fixture executes Codex and Claude
-Agent. Cursor, Gemini, Grok, Kilo, OpenCode, and Pi produce an explicit `unsupported` report instead of being
-rejected before a report can be written.
+Agent. Cursor, Antigravity, Grok, Kilo, OpenCode, and Pi produce an explicit `unsupported` report instead of being
+rejected before a report can be written. Droid remains intentionally outside the remote Provider Host catalog.
 
 ## Provider Host Protocol fixture
 
