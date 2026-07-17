@@ -19,11 +19,13 @@
 - **预计工作量**：XL
 - **风险**：HIGH
 - **计划基线分支**：`codex/saas-tenancy-user`
-- **最近稳定检查点**：`1e826324`（operator-approved reusable `orbstack` Kubernetes context 上的 clean-SHA
-  deterministic fixture/failure gate `19/19` 已通过：Pending Approval Pod loss、Worker-only network、精确
-  `policy/v1` Eviction、shared-local-image Canary、Control Plane restart、Session Sequence `1..119`、三个
-  Namespace/RBAC/主镜像/Canary 镜像 exact cleanup 与零 Secret finding。正式证据见
-  `docs/reports/stage-3-kubernetes-orbstack-fixture-1e826324.md`。此前 `41683366` 的 clean-SHA managed Docker
+- **最近稳定检查点**：`6b71703f`（operator-approved reusable `orbstack` Kubernetes context 上的 clean-SHA
+  deterministic fixture/failure gate 已通过 `22` 个 case，Node Drain 因未授权为一个显式 unsupported：Pending
+  Approval Pod loss、Worker-only network、精确 `policy/v1` Eviction、shared-local-image Canary、Control Plane
+  restart、exact Namespace/RBAC/主镜像/Canary 镜像 cleanup 与零 Secret finding。Runner 通过 per-process API
+  origin/TLS server-name override 绕过不稳定的 generated-host route，未修改 operator kubeconfig。正式证据见
+  `docs/reports/stage-3-kubernetes-orbstack-fixture-6b71703f.md`；前序 clean checkpoint `1e826324` 保留。此前
+  `41683366` 的 clean-SHA managed Docker
   immutable Worker Release gate `15/15` 已通过
   baseline/promoted 与 candidate/canary 双 Worker overlap 中的 exact candidate container loss；同 Execution/
   logical Worker/Revision/Channel/Manifest/digest 保持，Generation `1 -> 2`，baseline peer 不变。随后四 Session
@@ -40,6 +42,8 @@
 - **发布文档**：
   `docs/release-checklists/stage-3-provider-runtime-remote-worker.md`、
   `docs/runbooks/worker-release-rollout.md`、
+  `docs/reports/stage-3-kubernetes-orbstack-fixture-6b71703f.md`、
+  `docs/reports/stage-3-real-provider-kubernetes-third-party-gate-6b71703f.md`、
   `docs/reports/stage-3-kubernetes-orbstack-fixture-1e826324.md`、
   `docs/reports/stage-3-worker-release-rollout-load-41683366.md`、
   `docs/reports/stage-3-docker-fixture-load-failure-cfecba63.md`、
@@ -56,12 +60,17 @@
 - **目标结果**：所有正式支持的 Provider 可以通过统一 Provider Host 和 Worker Contract，稳定运行在
   Local、SSH、Docker、Kubernetes Execution Target，并能跨 Worker/Pod 恢复后续 Turn
 
-### 1.1 已确认的运行与生产边界（2026-07-17）
+### 1.1 已确认的运行与生产边界（2026-07-18）
 
 - Codex、Claude 的受控 Credential 必须支持第三方 API Key；Provider payload 使用严格 allowlist 的
   `apiKey`（Claude 可显式选择 `authToken`）和可选 `baseUrl`，分别映射到 Provider 官方环境变量。Secret
   值只从 operator-owned 环境变量读取并在任何构建、子进程或报告生成前注册到 redactor；聊天、命令参数、
   Target 配置和 evidence 均不得保存值或环境变量名。
+- 第三方 API Key/Base URL 注入能力与具体 endpoint 的产品能力分开验收。`6b71703f` 的真实 Kubernetes 四
+  child gate 证明受控注入、同镜像/Catalog、Codex failure matrix、cleanup 和 Secret scan；但当前 Claude
+  profile 稳定返回 HTTP `502`，当前 Codex profile 的 approval-required Turn 只有 `reasoning`、没有
+  `command_execution`/approval interaction。两者均 fail closed，不能把“能回复文本”升级为 Tier 1 支持。
+  完整边界见 `docs/reports/stage-3-real-provider-kubernetes-third-party-gate-6b71703f.md`。
 - 操作人已授权一个外部 SSH 验收目标，认证信息保持在仓库外。Runner 与 `ssh_release_gate.py` 已增加显式
   external-host 模式：要求仓库外 owner-only identity、精确 Host Key、显式 non-disposable 授权和唯一 ownership
   root；安装前拒绝既有 service/binary/storage 路径，升级不重启 sshd，cleanup 只走产品 revoke 加本次
@@ -1559,10 +1568,13 @@ Provider × Capability × Execution Target
   `docker_release_gate.py` 保留原 CLI/Schema 的薄适配层。新增 `kubernetes_release_gate.py` 让四个 child 各自
   创建并删除 disposable Kind cluster，复用同一 host Worker Image 且验证嵌套
   `kubernetes.containerEngine` Image ID、`ownedClusterRemoved=true`、`ownedWorkerImageRemoved=false` 与
-  isolated state cleanup。当前 Local/Docker/Kubernetes release-gate tests 合计 `40/40`，Stage 3 Python
-  `171/171`，SSH/Docker/Kubernetes Gate 的缺 Credential/dirty-worktree 脱敏负例通过。当前机器的 Kind `v0.32.0`、
-  kubectl `v1.33.9` 与 Docker `29.4.0` runtime preflight 已通过；任务环境仍没有专用 Provider Credential，
-  因此尚未执行 clean-SHA Kubernetes 四矩阵，Gate 保持 open。
+  isolated state cleanup。当前 Local/Docker/Kubernetes release-gate tests 合计 `40/40`；新增 endpoint override
+  与脱敏失败摘要后 Acceptance Runner 为 `156/156`，Stage 3 Python 为 `278/278`。当前机器的 Kind `v0.32.0`、kubectl `v1.33.9` 与 Docker
+  `29.4.0` runtime preflight 已通过。clean SHA `6b71703f` 已使用 operator-owned 第三方 Credential/Base URL
+  执行 Kubernetes 四矩阵：Codex failure `16/16` 通过；Codex product 因没有 approval interaction 失败；Claude
+  product/failure 均在首个真实 Turn 以 `provider_unavailable` 失败，clean SHA `8883e037` 的 Local 重现确认
+  第三方 Claude API 返回 HTTP `502`。四个 Kind cluster、共享 Image 与 child state 均精确清理，聚合扫描
+  `37` 个文件/`5,511,658` bytes 为零 finding。Gate 保持 open，不能降级为成功。
 - `ssh_release_gate.py` 的四个 child 各自 cross-build agentd/real Provider Host，并可选择唯一 disposable
   OrbStack machine/SSH key，或同一获批 external host 上四个串行且互异的 ownership installation。两种模式都
   经产品 SSH install/revoke 路径运行 product/failure matrix；聚合器要求同一 clean SHA/Catalog、agentd/Host
@@ -1570,7 +1582,7 @@ Provider × Capability × Execution Target
   Credential/source 元数据。external 模式要求四次共享同一 pinned Host Key，并额外强制 host/identity source
   preserved、`externalHostRestarted=false` 和 owned runtime removed；disposable 模式反而要求每台独立 machine
   使用不同 Host Key。fixture、复用 installation/Host Key 或任一 runtime/cleanup mismatch 均 fail closed。当前
-  Acceptance Runner `151/151`、SSH Gate `15/15`、Stage 3 Python `273/273` 与 Control Plane `go test ./...` 均通过；
+  Acceptance Runner `156/156`、SSH Gate `15/15`、Stage 3 Python `278/278` 与 Control Plane `go test ./...` 均通过；
   尚缺安全本机 SSH identity 与专用 Provider Credential 下的 clean-SHA 四 child 报告，因此真实 SSH Gate 保持
   open。
 - 新增 `registry_release_gate.py`，要求 clean worktree、现有 `docker-container` Buildx builder 和
