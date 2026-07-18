@@ -71,6 +71,7 @@
   `docs/reports/stage-3-docker-fixture-load-failure-cfecba63.md`、
   `docs/reports/stage-3-docker-fixture-load-failure-7684c6d8.md`、
   `docs/reports/stage-3-docker-fixture-load-failure-ab88798d.md`、
+  `docs/reports/stage-3-docker-resource-profiled-load-e2d70fb6.md`、
   `docs/reports/stage-3-docker-fixture-load-e944b449.md`、
   `docs/reports/stage-3-local-fixture-retention-concurrency-c27914da.md`、
   `docs/reports/stage-3-docker-fixture-concurrency-eeb7a2f1.md`、
@@ -111,7 +112,11 @@
   cloud Eviction/CNI、immutable registry rollout 或 production load/soak。
 - 生产并发不冻结为单一数字；由 Tenant quota、Worker 数/每 Worker slot、CPU/内存 requests/limits 和实际
   资源档位共同控制。每次 load/soak 报告必须记录该资源档位、达到的有效并发和 admission/retry 结果；
-  延迟、错误率与持续时间的数值 SLA 尚未给出，因此生产 SLA gate 继续保持 open。
+  clean SHA `e2d70fb6` 已补齐最短持续时间、最大波次安全上限、P50/P95/P99、成功率/意外错误率和资源档位
+  的统一测量机制，并在 `1 CPU/2 GiB × 2 Worker`、Tenant quota `2` 下完成 `304.201s`、`56` 波、`224`
+  Execution 的 deterministic Docker gate。延迟、错误率与生产持续时间的批准阈值仍未给出，因此生产 SLA
+  gate 继续保持 open；该测量不能被写成生产 SLA 已通过。完整证据见
+  `docs/reports/stage-3-docker-resource-profiled-load-e2d70fb6.md`。
 - 生产镜像签名选择 `kms-key`，可能采用自建 Vault KMS 的 `hashivault://...` 路径。具体 KMS reference、
   credential 环境变量名、signer identity、tlog 和 admission policy 尚待生产审批，不能用 disposable
   `ephemeral-key` 或“可能自建”的描述替代真实生产证据。
@@ -1745,6 +1750,17 @@ Provider × Capability × Execution Target
   managed Docker load/admission mechanics，不关闭真实
   Provider、multi-host/Kubernetes multi-node、failure injection under load、生产 SLA 或 production-duration
   load/soak。完整证据见 `docs/reports/stage-3-docker-fixture-load-e944b449.md`。
+- Clean commit `e2d70fb6` 在同一 `fixture-load` 编排上增加最短实测时长与最大波次安全边界；未达到时长即
+  使波次已满足也继续完整波次，达到最大波次仍不足则以 `runner.load_duration_not_reached` fail closed。
+  报告复用既有波次/slot-reuse 数据，统一输出 CPU/内存资源档位、有效并发、Execution 成功率、预期 quota
+  rejection rate、意外错误率、吞吐量以及 wave/admission recovery 的 nearest-rank P50/P95/P99。clean-SHA
+  正式 run 在 `1 CPU/2 GiB × 2 Worker`、quota `2` 下要求至少 `25` 波/`300s`，实际完成 `56` 波、`224/224`
+  Execution、`112/112` quota rejection/retry、`168/168` overlap；负载持续 `304.201s`，成功率 `1.0`、意外
+  错误率 `0.0`，wave P95/P99 为 `6.493s/6.826s`，slot recovery P95/P99 为 `1.372s/1.386s`。所有
+  Artifact/Checkpoint、exact cleanup 与 `10` files / `5,874,277` bytes Secret scan 通过。该证据关闭
+  resource-profiled duration/percentile/error measurement mechanics，不批准任何生产阈值，也不关闭真实
+  Provider、production-duration、multi-node 或生产 SLA。完整证据见
+  `docs/reports/stage-3-docker-resource-profiled-load-e2d70fb6.md`。
 - 新增并扩展 `fixture-load-failure`，复用同一 managed Docker 双 Worker、四 Session、quota/load、Provider
   fixture、report、Secret scan 与 cleanup 路径；通过 isolated metadata 中的
   `agent_executions.worker_id -> worker_instances.pod_name` 将 active Execution 精确映射到带 Target/worker index
@@ -1876,7 +1892,8 @@ Provider × Capability × Execution Target
   Approval overlap 与隔离终态；clean commit `c27914da` 通过 deterministic Local active-Execution Retention
   fencing、并行无引用 Artifact 删除、Checkpoint lineage 保护与终态后物理 Workspace cleanup；clean commit
   `e944b449` 通过 managed Docker 四 Session、25 波次、100 Execution 的 deterministic bounded quota/admission、
-  slot reuse、双 Worker overlap 与 Artifact/Checkpoint completion mechanics；clean commit `ab88798d` 进一步
+  slot reuse、双 Worker overlap 与 Artifact/Checkpoint completion mechanics；clean commit `e2d70fb6` 在同一路径
+  上通过 `300s` 最短负载窗口、资源档位、P50/P95/P99 与意外错误率测量；clean commit `ab88798d` 进一步
   通过 exact Execution-to-Worker-to-container network fault、Peer Session 隔离、Generation 1 -> 2 fencing 与
   同四 Session 的完整 post-recovery load mechanics；clean commit `7684c6d8` 再加入 exact busy-container loss、
   same logical Worker replacement、incarnation fencing 与 named-volume continuity；clean commit `cfecba63` 加入

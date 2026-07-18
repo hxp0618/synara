@@ -200,10 +200,10 @@ bun run --cwd apps/web test \
 | deterministic Docker/Kubernetes failure matrix         | 已通过实现期运行                                                                  | 不等于生产网络、真实 CNI 或正式 rollout                                                                                                                                                    |
 | SSH real Provider runtime provisioning                 | disposable VM preflight 已通过                                                    | Host SHA + Codex 0.144.1 + Claude 2.1.197 已验；尚无真实 Credential 报告                                                                                                                   |
 | SSH real Provider fault-injection transport            | Runner 99/99 + SSH fixture 16/16                                                  | token-scoped reverse relay 与 systemd MainPID crash 已实现；尚无真实 Credential 报告                                                                                                       |
-| Docker real Provider fault-injection transport         | 实现期容器探针与 Docker 16/16 已通过                                              | 401/429/精确 Host crash 已实现；尚无真实 Provider Credential 报告                                                                                                                          |
-| Kubernetes real Provider fault-injection transport     | Runner 99/99 + Linux 容器探针通过                                                 | host-gateway 401/429 与精确 Pod crash 已实现；尚无真实 Provider Credential 报告                                                                                                            |
-| SSH consolidated release gate                          | 独立引擎与 10 项 SSH gate tests 已通过                                            | 四个 disposable VM child 尚待真实 Credential 执行                                                                                                                                          |
-| Docker consolidated release gate                       | Local+Docker 32 项 gate tests 已通过                                              | 单次 Gate-owned Image + 四份同 SHA/Catalog/Image 报告尚待真实 Credential 执行                                                                                                              |
+| Docker real Provider fault-injection transport         | clean `f958c1b2` Codex failure `16/16` 通过                                       | 真实 401/429、精确 Host crash、Cursor expiry/restart 已验；Claude profile 在 baseline HTTP `502`，不构成 Claude failure matrix                                                             |
+| Kubernetes real Provider fault-injection transport     | clean `6b71703f` Codex failure `16/16` 通过                                       | host-gateway 401/429、精确 Pod crash、Cursor expiry/restart 已验；Claude profile 在 baseline HTTP `502`                                                                                    |
+| SSH consolidated release gate                          | 独立引擎与 15 项 SSH gate tests 已通过                                            | 四个 disposable/external child 尚待安全 identity 与合格真实 Credential 执行                                                                                                                |
+| Docker consolidated release gate                       | clean `f958c1b2` 四 child 已真实执行；1 pass/3 fail                               | Codex failure `16/16` 通过；Codex product 缺 approval interaction，Claude profile HTTP `502`；必须更换/修复第三方 profile 后重跑，不得降级放行                                             |
 | Kubernetes consolidated release gate                   | clean `6b71703f` 四 child 已真实执行；1 pass/3 fail                               | Codex failure `16/16` 通过；Codex product 缺 approval interaction，Claude profile HTTP `502`；必须更换/修复第三方 profile 后重跑，不得降级放行                                             |
 | Worker Registry signing-policy gate                    | clean commit `7659dd5f` gate/report 已通过                                        | keyless/KMS 实现路径与 ephemeral mechanics 已验；真实生产 identity/tlog/admission、Registry Credential/retention 与 rollout 尚待记录                                                       |
 | SSH fixture                                            | 2026-07-14 disposable VM 13/13                                                    | 不是当前 Commit 的真实 Provider gate                                                                                                                                                       |
@@ -239,6 +239,10 @@ bun run --cwd apps/web test \
       product 缺 approval interaction，Claude product/failure 为 HTTP `502` `provider_unavailable`。需使用满足
       tool/approval 与 Anthropic streaming 的 profile 重跑；证据为
       `docs/reports/stage-3-real-provider-kubernetes-third-party-gate-6b71703f.md`。
+- [ ] 第三方 Credential 的 Docker 四 child gate 已执行但未通过：Codex failure `16/16` 通过，Codex product
+      缺 approval interaction，Claude product/failure 的 baseline Turn 均为 HTTP `502`。同 SHA/Catalog/Image、
+      exact child/gate cleanup 与 Secret scan 已通过；必须使用合格 profile 重跑。证据为
+      `docs/reports/stage-3-real-provider-docker-third-party-gate-f958c1b2.md`。
 - [ ] 已授权外部 SSH target 尚需 repository-external identity、pinned Host Key 和 clean-SHA external-host
       运行。SSH 认证信息不得写入仓库或 evidence；当前第三方 Provider profile 也不能作为该 gate 的通过输入。
 - [ ] 所有运行均来自本次发布 Commit 和 registry-pushed immutable image。
@@ -247,13 +251,16 @@ bun run --cwd apps/web test \
       deterministic managed Docker 双 Worker、双 Provider、双 Session overlap mechanics；`c27914da` 仅关闭
       deterministic Local active-Execution Retention fencing 与 post-terminal physical cleanup mechanics；`e944b449`
       仅关闭 deterministic managed Docker 四 Session、100 Execution 的 bounded quota/admission、slot reuse 与
-      Artifact/Checkpoint terminal mechanics；`cfecba63` 仅关闭 deterministic single-host exact Docker
+      Artifact/Checkpoint terminal mechanics；`e2d70fb6` 仅关闭同一 load 路径的资源档位、最短持续时间、
+      P50/P95/P99 与意外错误率测量机制；`cfecba63` 仅关闭 deterministic single-host exact Docker
       network/container-loss/fixture Provider Host process fault、same logical Worker replacement、Peer Session 隔离、
       incarnation/Generation fencing、distinct new-Execution recovery 与 post-failure load mechanics；`41683366` 仅关闭
       deterministic single-host immutable release-rollout container loss、25 波 release-pinned load、load-safe
       Audit/Outbox retrieval 与 rollback mechanics。）
-- [ ] Load 报告记录 Tenant quota、Worker/slot 数、CPU/内存 requests/limits、达到的有效并发和
-      admission/retry；生产并发不以脱离资源档位的单一硬编码数字验收。
+- [x] Load 报告记录 Tenant quota、Worker/slot 数、CPU/内存 requests/limits、达到的有效并发和
+      admission/retry；clean `e2d70fb6` 进一步记录最短持续时间、最大波次、吞吐量、成功/意外错误率以及
+      wave/recovery P50/P95/P99。证据为 `docs/reports/stage-3-docker-resource-profiled-load-e2d70fb6.md`；生产
+      并发不以脱离资源档位的单一硬编码数字验收。
 - [ ] 生产持续时间、P95/P99、错误率和恢复时间满足审批 SLA；数值未批准前此项保持未勾选。
 - [ ] 故障运行没有重复终态、双 Worker 写入、Generation 回退或 Credential 泄漏。
 
