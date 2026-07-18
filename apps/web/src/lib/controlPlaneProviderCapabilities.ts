@@ -35,6 +35,8 @@ export type ControlPlaneDispatchDecision = {
   message: string | null;
 };
 
+export const CONTROL_PLANE_CAPABILITY_RECHECK_INTERVAL_MS = 2_000;
+
 const UNOBSERVED_QUEUEABLE_CAPABILITIES = new Set<ProviderCapabilityId>([
   "start-session",
   "send-turn",
@@ -50,6 +52,18 @@ const CONTROL_PLANE_EMULATED_CAPABILITY_OVERRIDES = new Set<ProviderCapabilityId
 const catalogByProvider = new Map(
   PROVIDER_CAPABILITY_CATALOG.providers.map((entry) => [entry.provider, entry] as const),
 );
+
+export function controlPlaneCapabilityRefetchInterval(
+  projection: ProviderCapabilityProjection | undefined,
+): number | false {
+  if (!projection) return false;
+  return projection.items.length === 0 ||
+    projection.items.some(
+      (item) => item.status === "unobserved" || item.reasonCode === "worker_manifest_required",
+    )
+    ? CONTROL_PLANE_CAPABILITY_RECHECK_INTERVAL_MS
+    : false;
+}
 
 function capabilityLabel(capabilityId: ProviderCapabilityId): string {
   return capabilityId.replaceAll("-", " ");

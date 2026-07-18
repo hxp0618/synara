@@ -274,8 +274,11 @@ slice。Clean commit `0b4d8e4e` 又完成未配置 Control Plane 的真实 Codex
 restart、本地 SQLite 恢复和第二轮 native resume；报告为
 `docs/reports/stage-3-web-local-mode-restart-resume-0b4d8e4e.md`。Clean commit `88f922ed` 又完成真实 SaaS
 Artifact Ready/list/download、精确 Payload hash、刷新/reconnect/完整 Server restart 恢复和 SSE lease cleanup；
-报告为 `docs/reports/stage-3-saas-web-artifact-download-88f922ed.md`。下面面向完整高级操作、兼容 Worker 状态
-与多浏览器并发的发布项仍保持未勾选。
+报告为 `docs/reports/stage-3-saas-web-artifact-download-88f922ed.md`。`0eeabbc1` baseline 的 patched worktree
+又完成 deterministic compatible Worker 的两轮 text/Tool/usage、Ready generated file、Checkpoint、Control Plane +
+embedded Worker restart、incarnation `1 -> 2`、同 Session Workspace restore 与连续 Event `1..28`；报告为
+`docs/reports/stage-3-saas-web-compatible-worker-restart-0eeabbc1.md`。下面面向完整高级操作、真实 Provider
+Worker loss 和多浏览器并发的发布项仍保持未勾选。
 
 - [ ] SaaS Web 的 Project、Session、Turn、Compact、Review、Rollback、Fork 只调用 Control Plane API。
 - [ ] SaaS handler 没有回退到 `readNativeApi()` 或本地 Provider discovery。
@@ -286,9 +289,14 @@ Artifact Ready/list/download、精确 Payload hash、刷新/reconnect/完整 Ser
 - [x] SaaS Web 可从权威列表展示 Ready 的用户 Artifact，使用新鲜 download grant 下载精确 Payload，并在
       页面刷新、SSE reconnect 和完整 Server restart 后恢复同一 Artifact；该项不替代 Worker/Interaction
       或多浏览器发布证据。
+- [x] Deterministic compatible Worker 可在 SaaS Web 同一 Session 投影 text、Tool、usage、Ready generated
+      file 与 Checkpoint；Control Plane + embedded Worker between-Turn restart 后 incarnation `1 -> 2`，第二轮
+      恢复首轮 Workspace 并验证文件。该项不替代真实 Provider、active mid-Turn replacement、Approval/Input
+      或多浏览器发布证据。
 - [x] 未配置 Control Plane 的本地主聊天、真实 Codex、刷新、Server restart 与 native resume 没有回归，
       本地 SQLite 也没有 Control Plane 命名表或 SaaS authority 写入；本地 Project 文件操作不在本项证据边界。
-- [ ] 浏览器 Console 无相关 Error/Warning 或框架 Overlay。
+- [x] 上述隔离 Web acceptance 的稳定页面无相关 Browser Error/Warning 或框架 Overlay；开发期 HMR 过渡日志
+      不作为发布页面证据。
 
 ## 8. Canary、Promote 与 Rollback
 

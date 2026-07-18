@@ -7,6 +7,8 @@ import type {
 import { describe, expect, it } from "vitest";
 
 import {
+  CONTROL_PLANE_CAPABILITY_RECHECK_INTERVAL_MS,
+  controlPlaneCapabilityRefetchInterval,
   resolveControlPlaneCapabilityDecision,
   resolveControlPlaneTurnDispatchDecision,
 } from "./controlPlaneProviderCapabilities";
@@ -34,6 +36,28 @@ function projection(
 }
 
 describe("Control Plane Provider capability decisions", () => {
+  it("polls only while a compatible Worker manifest is still unobserved", () => {
+    expect(controlPlaneCapabilityRefetchInterval(undefined)).toBe(false);
+    expect(
+      controlPlaneCapabilityRefetchInterval({
+        executionTargetId: "target-1",
+        targetKind: "kubernetes",
+        basis: "target",
+        items: [],
+      }),
+    ).toBe(CONTROL_PLANE_CAPABILITY_RECHECK_INTERVAL_MS);
+    expect(
+      controlPlaneCapabilityRefetchInterval(
+        projection("codex", {
+          status: "unobserved",
+          reasonCode: "worker_manifest_required",
+          supportMode: undefined,
+        }),
+      ),
+    ).toBe(CONTROL_PLANE_CAPABILITY_RECHECK_INTERVAL_MS);
+    expect(controlPlaneCapabilityRefetchInterval(projection("codex"))).toBe(false);
+  });
+
   it("leaves local mode unchanged without requiring a projection", () => {
     expect(
       resolveControlPlaneCapabilityDecision({

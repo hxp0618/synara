@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import { deriveWorkLogEntries } from "../session-logic";
 import type { ControlPlaneAgentSession, ControlPlaneSessionEvent } from "./controlPlaneClient";
 import {
   applyControlPlaneSessionEvent,
@@ -175,6 +176,52 @@ describe("Control Plane Session projection", () => {
     expect(
       applyControlPlaneSessionEvent(projection, event(4, "content.delta", {}, 2)).projection,
     ).toBe(projection);
+  });
+
+  it("correlates execution-scoped runtime events when their payload omits turnId", () => {
+    let projection = createControlPlaneSessionProjection(session);
+    for (const item of [
+      event(1, "turn.created", {
+        turnId: "turn-1",
+        executionId: "execution-1",
+        inputText: "Run the fixture",
+      }),
+      event(2, "content.delta", { streamKind: "assistant_text", delta: "Fixture output" }, 2),
+      event(
+        3,
+        "item.completed",
+        {
+          itemType: "command_execution",
+          status: "completed",
+          title: "Deterministic fixture tool",
+          data: { exitCode: 0 },
+        },
+        2,
+      ),
+      event(4, "thread.token-usage.updated", { usage: { usedTokens: 42 } }, 2),
+      event(5, "artifact.ready", {
+        artifactId: "artifact-1",
+        kind: "generated-file",
+        contentType: "text/plain",
+        sizeBytes: 42,
+      }),
+    ]) {
+      projection = applyControlPlaneSessionEvent(projection, item).projection;
+    }
+
+    expect(projection.messages[1]).toEqual(
+      expect.objectContaining({ text: "Fixture output", turnId: "turn-1" }),
+    );
+    expect(projection.activities.map((activity) => activity.turnId)).toEqual([
+      "turn-1",
+      "turn-1",
+      "turn-1",
+    ]);
+    expect(
+      deriveWorkLogEntries(projection.activities, projection.latestTurn?.turnId, {
+        visibleTurnIds: new Set(["turn-1"]),
+      }).map((entry) => entry.label),
+    ).toEqual(["Deterministic fixture tool", "Token usage updated", "Artifact ready"]);
   });
 
   it("degrades canonical lifecycle, warning, and future v2 events into stable activities", () => {

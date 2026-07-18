@@ -33,6 +33,7 @@ export type ControlPlaneSessionProjection = {
   lastAppliedSequence: number;
   durableLastSequence: number;
   streamStatus: ControlPlaneStreamStatus;
+  executionTurnIds: Readonly<Record<string, TurnId>>;
   messages: Thread["messages"];
   activities: Thread["activities"];
   latestTurn: OrchestrationLatestTurn | null;
@@ -262,6 +263,7 @@ function appendAssistantDelta(
   messages: Thread["messages"],
   event: ControlPlaneSessionEvent,
   text: string,
+  turnId: TurnId | null,
 ): Thread["messages"] {
   const executionId = event.executionId ?? `event-${event.eventId}`;
   const id = assistantMessageId(executionId);
@@ -273,7 +275,7 @@ function appendAssistantDelta(
         id,
         role: "assistant",
         text,
-        turnId: eventTurnId(event),
+        turnId,
         createdAt: event.occurredAt,
         streaming: true,
         source: "native",
@@ -392,6 +394,7 @@ function activitySummary(event: ControlPlaneSessionEvent): string | null {
 function appendActivity(
   activities: Thread["activities"],
   event: ControlPlaneSessionEvent,
+  turnId: TurnId | null,
 ): Thread["activities"] {
   const summary = activitySummary(event);
   if (
@@ -432,7 +435,7 @@ function appendActivity(
           ? { executionId: event.executionId }
           : {}),
       } as OrchestrationThreadActivity["payload"],
-      turnId: eventTurnId(event),
+      turnId,
       sequence: event.sequence,
       createdAt: event.occurredAt,
     },
@@ -448,6 +451,7 @@ export function createControlPlaneSessionProjection(
     lastAppliedSequence: 0,
     durableLastSequence: session.lastEventSequence,
     streamStatus: "idle",
+    executionTurnIds: {},
     messages: [],
     activities: [],
     latestTurn: null,
@@ -499,7 +503,10 @@ export function applyControlPlaneSessionEvent(
   let interactionMode = projection.interactionMode;
   let orchestrationStatus = projection.orchestrationStatus;
   let error = projection.error;
-  const turnId = eventTurnId(event);
+  let executionTurnIds = projection.executionTurnIds;
+  let turnId =
+    eventTurnId(event) ??
+    (event.executionId ? (executionTurnIds[event.executionId] ?? null) : null);
 
   switch (event.eventType) {
     case "turn.created": {
@@ -507,6 +514,12 @@ export function applyControlPlaneSessionEvent(
       const inputText = payloadString(event, "inputText") ?? "";
       const turnKind = eventTurnKind(event);
       if (rawTurnId) {
+        const createdTurnId = TurnId.makeUnsafe(rawTurnId);
+        const executionId = event.executionId ?? payloadString(event, "executionId");
+        turnId = createdTurnId;
+        if (executionId && executionTurnIds[executionId] !== createdTurnId) {
+          executionTurnIds = { ...executionTurnIds, [executionId]: createdTurnId };
+        }
         if (turnKind === "message") {
           messages = [
             ...messages,
@@ -514,7 +527,7 @@ export function applyControlPlaneSessionEvent(
               id: userMessageId(rawTurnId),
               role: "user",
               text: inputText,
-              turnId: TurnId.makeUnsafe(rawTurnId),
+              turnId: createdTurnId,
               createdAt: event.occurredAt,
               streaming: false,
               source: "native",
@@ -522,7 +535,7 @@ export function applyControlPlaneSessionEvent(
           ];
         }
         latestTurn = {
-          turnId: TurnId.makeUnsafe(rawTurnId),
+          turnId: createdTurnId,
           state: "running",
           requestedAt: event.occurredAt,
           startedAt: null,
@@ -601,7 +614,7 @@ export function applyControlPlaneSessionEvent(
             : null
           : payloadString(event, "text");
       if (text && (latestTurnKind === "message" || latestTurnKind === "review")) {
-        messages = appendAssistantDelta(messages, event, text);
+        messages = appendAssistantDelta(messages, event, text, turnId);
         const executionId = event.executionId ?? `event-${event.eventId}`;
         if (latestTurn && (!turnId || latestTurn.turnId === turnId)) {
           latestTurn = {
@@ -691,8 +704,9 @@ export function applyControlPlaneSessionEvent(
       },
       lastAppliedSequence: event.sequence,
       durableLastSequence: Math.max(projection.durableLastSequence, event.sequence),
+      executionTurnIds,
       messages,
-      activities: appendActivity(projection.activities, event),
+      activities: appendActivity(projection.activities, event, turnId),
       latestTurn,
       latestTurnKind,
       forkSourceSessionId,

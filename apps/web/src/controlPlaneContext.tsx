@@ -48,6 +48,7 @@ import {
 import { ControlPlaneProjectionRuntime } from "./lib/controlPlaneProjectionRuntime";
 import {
   assertControlPlaneCapabilityAllowed,
+  controlPlaneCapabilityRefetchInterval,
   resolveControlPlaneCapabilityDecision,
   resolveControlPlaneTurnDispatchDecision,
 } from "./lib/controlPlaneProviderCapabilities";
@@ -218,6 +219,7 @@ function projectProviderCapabilitiesQueryOptions(
     enabled: enabled && projectId !== null,
     retry: false,
     staleTime: CONTROL_PLANE_CAPABILITY_STALE_TIME_MS,
+    refetchInterval: (query) => controlPlaneCapabilityRefetchInterval(query.state.data),
   });
 }
 
@@ -228,6 +230,7 @@ function sessionProviderCapabilitiesQueryOptions(sessionId: string | null, enabl
     enabled: enabled && sessionId !== null,
     retry: false,
     staleTime: 0,
+    refetchInterval: (query) => controlPlaneCapabilityRefetchInterval(query.state.data),
   });
 }
 
