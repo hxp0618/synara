@@ -1123,7 +1123,7 @@ func providerHostV2TestInput(t *testing.T) RunnerInput {
 			TenantID: uuid.New(), OrganizationID: uuid.New(), ProjectID: uuid.New(),
 			SessionID: uuid.New(), TurnID: turnID, Provider: "codex", InputText: "run",
 		},
-		WorkspaceDirectory: t.TempDir(), RuntimeOutputDirectory: t.TempDir(),
+		WorkspaceDirectory: t.TempDir(), ProviderStateDirectory: t.TempDir(), RuntimeOutputDirectory: t.TempDir(),
 	}
 }
 
@@ -1205,6 +1205,7 @@ func TestProviderHostV2HelperProcess(t *testing.T) {
 			os.Exit(2)
 		}
 	}
+	credentialDelivered := false
 	if fd := strings.TrimSpace(os.Getenv("SYNARA_PROVIDER_CREDENTIAL_FD")); fd != "" {
 		file := os.NewFile(3, "provider-credential")
 		var credential RunnerCredential
@@ -1213,6 +1214,7 @@ func TestProviderHostV2HelperProcess(t *testing.T) {
 			os.Exit(2)
 		}
 		_ = file.Close()
+		credentialDelivered = true
 	}
 
 	mode := providerHostTestArgument(providerHostTestModeArgument)
@@ -1221,6 +1223,7 @@ func TestProviderHostV2HelperProcess(t *testing.T) {
 	encoder := json.NewEncoder(os.Stdout)
 	var pendingSend *providerHostCommand
 	runtimeOutputDirectory := ""
+	providerStateDirectory := ""
 	for scanner.Scan() {
 		var command providerHostCommand
 		if err := json.Unmarshal(scanner.Bytes(), &command); err != nil {
@@ -1316,6 +1319,11 @@ func TestProviderHostV2HelperProcess(t *testing.T) {
 			}
 			if runnerInput, ok := command.Payload["runnerInput"].(map[string]any); ok {
 				runtimeOutputDirectory, _ = runnerInput["runtimeOutputDirectory"].(string)
+				providerStateDirectory, _ = runnerInput["providerStateDirectory"].(string)
+			}
+			if credentialDelivered && strings.TrimSpace(providerStateDirectory) == "" {
+				fmt.Fprintln(os.Stderr, "Provider state directory was not carried into the session command")
+				os.Exit(2)
 			}
 			emitProviderHostTestMessage(encoder, command, "Result", map[string]any{"started": true}, nil)
 		case "SendTurn":

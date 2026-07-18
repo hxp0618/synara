@@ -27,6 +27,7 @@ export type RunnerInput = {
   providerResumeCursor?: string | null;
   workspaceDirectory: string;
   runtimeOutputDirectory?: string;
+  providerStateDirectory?: string;
 };
 
 export type ResumeSnapshot = {
@@ -339,12 +340,15 @@ export function startProviderHostRun(
       input.runtimeOutputDirectory,
       "Codex Credential runtimeOutputDirectory",
     );
-    if (!runtimeOutputDirectory) {
+    const providerStateDirectory =
+      optionalString(input.providerStateDirectory, "Codex Credential providerStateDirectory") ??
+      runtimeOutputDirectory;
+    if (!providerStateDirectory) {
       throw new Error(
-        "Codex Credential requires an agentd-owned runtimeOutputDirectory for isolated CODEX_HOME.",
+        "Codex Credential requires an agentd-owned providerStateDirectory or runtimeOutputDirectory for isolated CODEX_HOME.",
       );
     }
-    environment.CODEX_HOME = writeControlledCodexConfig(runtimeOutputDirectory, environment);
+    environment.CODEX_HOME = writeControlledCodexConfig(providerStateDirectory, environment);
   }
   const hasDurableHistory = hasAuthoritativeResumeData(input.workload);
   const prompt = hasDurableHistory ? reconstructedPrompt(input) : input.workload.inputText;
@@ -507,6 +511,15 @@ export function validateRunnerInput(input: RunnerInput): void {
       !isAbsolute(input.runtimeOutputDirectory))
   ) {
     throw new Error("runtimeOutputDirectory must be an absolute path without control characters");
+  }
+  if (
+    input.providerStateDirectory !== undefined &&
+    (typeof input.providerStateDirectory !== "string" ||
+      input.providerStateDirectory.trim() === "" ||
+      /[\r\n\0]/u.test(input.providerStateDirectory) ||
+      !isAbsolute(input.providerStateDirectory))
+  ) {
+    throw new Error("providerStateDirectory must be an absolute path without control characters");
   }
   if (
     input.execution.generation !== undefined &&

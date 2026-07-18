@@ -14,6 +14,7 @@ type RunnerInput struct {
 	Workload               executions.Workload  `json:"workload"`
 	ProviderResumeCursor   *string              `json:"providerResumeCursor,omitempty"`
 	WorkspaceDirectory     string               `json:"workspaceDirectory"`
+	ProviderStateDirectory string               `json:"providerStateDirectory,omitempty"`
 	RuntimeOutputDirectory string               `json:"runtimeOutputDirectory,omitempty"`
 }
 

@@ -19,11 +19,12 @@ const (
 	// workspaceLayoutVersion is retained as the legacy v2 Manifest format so
 	// existing on-disk generations and focused tests remain explicit. New
 	// materializations use workspaceLayoutV3Format.
-	workspaceLayoutVersion   = "synara-workspace-layout-v2"
-	workspaceLayoutV3Format  = "synara-workspace-layout-v3"
-	workspaceLayoutV2        = 2
-	workspaceLayoutV3        = 3
-	workspaceManifestMaxSize = 32 << 10
+	workspaceLayoutVersion    = "synara-workspace-layout-v2"
+	workspaceLayoutV3Format   = "synara-workspace-layout-v3"
+	workspaceLayoutV2         = 2
+	workspaceLayoutV3         = 3
+	workspaceManifestMaxSize  = 32 << 10
+	workspaceProviderStateDir = ".provider-state"
 )
 
 type workspaceLayout struct {
@@ -356,6 +357,48 @@ func buildNonGitWorkspaceGeneration(root string, manifest workspaceGenerationMan
 	return writeWorkspaceManifest(root, manifest)
 }
 
+func workspaceProviderStateDirectory(root string) string {
+	return filepath.Join(root, workspaceProviderStateDir)
+}
+
+func workspaceProviderStateDirectoryStatus(root string) (string, bool, error) {
+	path := workspaceProviderStateDirectory(root)
+	info, err := os.Lstat(path)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return path, false, nil
+	case err != nil:
+		return path, false, err
+	case info.Mode()&os.ModeSymlink != 0 || !info.IsDir():
+		return path, false, errors.New("Workspace provider state directory is unsafe")
+	case info.Mode().Perm() != 0o700:
+		return path, false, errors.New("Workspace provider state directory permissions are unsafe")
+	default:
+		return path, true, nil
+	}
+}
+
+func ensureWorkspaceProviderStateDirectory(root string) (string, error) {
+	if err := validateExistingRealDirectory(root); err != nil {
+		return "", err
+	}
+	path, exists, err := workspaceProviderStateDirectoryStatus(root)
+	if err != nil {
+		return "", err
+	}
+	if exists {
+		return path, nil
+	}
+	if err := os.Mkdir(path, 0o700); err != nil {
+		return "", err
+	}
+	if err := os.Chmod(path, 0o700); err != nil {
+		_ = os.Remove(path)
+		return "", err
+	}
+	return path, validateExistingRealDirectory(path)
+}
+
 func validatePrivateWorktreeFilesystem(layout workspaceLayout, expected workspaceGenerationManifest) error {
 	for _, directory := range []string{layout.Root, layout.GitDir, layout.Checkout} {
 		if err := validateExistingRealDirectory(directory); err != nil {
@@ -529,11 +572,33 @@ func replaceWorkspaceGenerationWithFS(active, staging string, fs workspaceGenera
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	if err := fs.rename(staging, active); err != nil {
-		if hadActive {
+	providerStateMoved := false
+	if hadActive {
+		moved, err := transplantWorkspaceProviderStateDirectory(backup, staging)
+		if err != nil {
 			if rollbackErr := fs.rename(backup, active); rollbackErr != nil {
 				return errors.Join(err, fmt.Errorf("restore previous Workspace generation: %w", rollbackErr))
 			}
+			return err
+		}
+		providerStateMoved = moved
+	}
+	if err := fs.rename(staging, active); err != nil {
+		rollbackErrors := make([]error, 0, 2)
+		if hadActive {
+			if providerStateMoved {
+				if _, restoreStateErr := transplantWorkspaceProviderStateDirectory(staging, backup); restoreStateErr != nil {
+					rollbackErrors = append(rollbackErrors, fmt.Errorf("restore previous Workspace provider state: %w", restoreStateErr))
+				}
+			}
+			if rollbackErr := fs.rename(backup, active); rollbackErr != nil {
+				rollbackErrors = append(rollbackErrors, fmt.Errorf("restore previous Workspace generation: %w", rollbackErr))
+			}
+		}
+		if len(rollbackErrors) != 0 {
+			joined := []error{err}
+			joined = append(joined, rollbackErrors...)
+			return errors.Join(joined...)
 		}
 		return err
 	}
@@ -544,6 +609,33 @@ func replaceWorkspaceGenerationWithFS(active, staging string, fs workspaceGenera
 		_ = fs.removeAll(backup)
 	}
 	return nil
+}
+
+func transplantWorkspaceProviderStateDirectory(sourceRoot, destinationRoot string) (bool, error) {
+	if err := validateExistingRealDirectory(sourceRoot); err != nil {
+		return false, err
+	}
+	if err := validateExistingRealDirectory(destinationRoot); err != nil {
+		return false, err
+	}
+	sourcePath, sourceExists, err := workspaceProviderStateDirectoryStatus(sourceRoot)
+	if err != nil {
+		return false, err
+	}
+	destinationPath, destinationExists, err := workspaceProviderStateDirectoryStatus(destinationRoot)
+	if err != nil {
+		return false, err
+	}
+	if !sourceExists {
+		return false, nil
+	}
+	if destinationExists {
+		return false, errors.New("destination Workspace provider state directory already exists")
+	}
+	if err := os.Rename(sourcePath, destinationPath); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func reconcileWorkspaceGeneration(

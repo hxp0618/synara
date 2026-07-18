@@ -632,6 +632,25 @@ func (d *Daemon) runExecution(
 		}
 		defer clearRunnerCredential(credential)
 	}
+	providerStateDirectory := ""
+	if credential != nil && strings.EqualFold(strings.TrimSpace(workload.Provider), "codex") {
+		providerStateDirectory, err = ensureWorkspaceProviderStateDirectory(materialized.LogicalRoot)
+		if err != nil {
+			failErr := d.failExecutionGuarded(
+				executionContext,
+				execution.ID,
+				lease,
+				executionGuard,
+				workspaceFailure(
+					"workspace_invalid",
+					"The Workspace provider state directory is unavailable.",
+					true,
+					true,
+				),
+			)
+			return errors.Join(failErr, stopRenewal())
+		}
+	}
 	runtimeOutputRoot, err := newRuntimeOutputArtifactRoot()
 	if err != nil {
 		if ctx.Err() != nil {
@@ -705,7 +724,8 @@ func (d *Daemon) runExecution(
 	}()
 	result, runErr := d.runner.RunControlled(executionContext, RunnerInput{
 		Execution: execution, Workload: workload, ProviderResumeCursor: resumeCursor,
-		WorkspaceDirectory: materialized.Directory, RuntimeOutputDirectory: runtimeOutputRoot.directory,
+		WorkspaceDirectory: materialized.Directory, ProviderStateDirectory: providerStateDirectory,
+		RuntimeOutputDirectory: runtimeOutputRoot.directory,
 	}, credential, primaryControl, controls, func(messageContext context.Context, message RunnerMessage) error {
 		switch message.Type {
 		case "event":

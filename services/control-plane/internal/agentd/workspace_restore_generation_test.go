@@ -76,6 +76,30 @@ func TestReplaceWorkspaceGenerationTreatsBackupCleanupAsPostInstallCleanup(t *te
 	}
 }
 
+func TestReplaceWorkspaceGenerationPreservesProviderStateDirectory(t *testing.T) {
+	parent := t.TempDir()
+	active := filepath.Join(parent, "active")
+	staging := filepath.Join(parent, "staging")
+	if err := os.Mkdir(active, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(staging, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	activeState, err := ensureWorkspaceProviderStateDirectory(active)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeWorkspaceTestFile(t, filepath.Join(activeState, "auth.json"), "{\"token\":\"durable\"}\n")
+	writeWorkspaceTestFile(t, filepath.Join(staging, "new.txt"), "new generation\n")
+
+	if err := replaceWorkspaceGeneration(active, staging); err != nil {
+		t.Fatal(err)
+	}
+	assertWorkspaceTestFile(t, filepath.Join(active, "new.txt"), "new generation\n")
+	assertWorkspaceTestFile(t, filepath.Join(workspaceProviderStateDirectory(active), "auth.json"), "{\"token\":\"durable\"}\n")
+}
+
 func TestReplaceWorkspaceGenerationRollsBackFailedInstall(t *testing.T) {
 	parent := t.TempDir()
 	active := filepath.Join(parent, "active")
@@ -86,11 +110,16 @@ func TestReplaceWorkspaceGenerationRollsBackFailedInstall(t *testing.T) {
 	if err := os.Mkdir(staging, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	activeState, err := ensureWorkspaceProviderStateDirectory(active)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeWorkspaceTestFile(t, filepath.Join(activeState, "auth.json"), "{\"token\":\"rollback\"}\n")
 	writeWorkspaceTestFile(t, filepath.Join(active, "old.txt"), "old generation\n")
 	writeWorkspaceTestFile(t, filepath.Join(staging, "new.txt"), "new generation\n")
 	installErr := errors.New("injected staging install failure")
 	renameCalls := 0
-	err := replaceWorkspaceGenerationWithFS(active, staging, workspaceGenerationFS{
+	replaceErr := replaceWorkspaceGenerationWithFS(active, staging, workspaceGenerationFS{
 		rename: func(from, to string) error {
 			renameCalls++
 			if renameCalls == 2 {
@@ -100,14 +129,40 @@ func TestReplaceWorkspaceGenerationRollsBackFailedInstall(t *testing.T) {
 		},
 		removeAll: os.RemoveAll,
 	})
-	if !errors.Is(err, installErr) {
-		t.Fatalf("failed generation install returned %v", err)
+	if !errors.Is(replaceErr, installErr) {
+		t.Fatalf("failed generation install returned %v", replaceErr)
 	}
 	assertWorkspaceTestFile(t, filepath.Join(active, "old.txt"), "old generation\n")
+	assertWorkspaceTestFile(t, filepath.Join(workspaceProviderStateDirectory(active), "auth.json"), "{\"token\":\"rollback\"}\n")
 	assertWorkspaceTestFile(t, filepath.Join(staging, "new.txt"), "new generation\n")
+	if _, err := os.Stat(workspaceProviderStateDirectory(active)); err != nil {
+		t.Fatalf("rollback lost active provider state directory: %v", err)
+	}
 	backups, globErr := filepath.Glob(filepath.Join(parent, ".active.backup-*"))
 	if globErr != nil || len(backups) != 0 {
 		t.Fatalf("successful rollback left backup state: backups=%v err=%v", backups, globErr)
+	}
+}
+
+func TestReplaceWorkspaceGenerationRejectsUnsafeProviderStateDirectory(t *testing.T) {
+	parent := t.TempDir()
+	active := filepath.Join(parent, "active")
+	staging := filepath.Join(parent, "staging")
+	if err := os.Mkdir(active, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(staging, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	outside := t.TempDir()
+	if err := os.Symlink(outside, workspaceProviderStateDirectory(active)); err != nil {
+		t.Fatal(err)
+	}
+	if err := replaceWorkspaceGeneration(active, staging); err == nil {
+		t.Fatal("unsafe provider state path was accepted during generation replace")
+	}
+	if _, err := os.Lstat(active); err != nil {
+		t.Fatalf("unsafe provider state path unexpectedly removed active generation: %v", err)
 	}
 }
 

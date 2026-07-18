@@ -2899,28 +2899,54 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
         self.assertEqual(generated, acceptance.generated_file_bytes())
         self.assertEqual(len(generated), (1 << 20) + 257)
 
-    def test_real_provider_approval_command_is_read_only_and_emits_exact_marker(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            completed = subprocess.run(
-                ["bash", "-c", acceptance.real_provider_approval_command()],
-                cwd=directory,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                check=True,
-            )
-            workspace_entries = list(pathlib.Path(directory).iterdir())
+    def test_real_provider_approval_gated_commands_are_read_only(self) -> None:
+        cases = (
+            (
+                "approval",
+                acceptance.real_provider_approval_command,
+                acceptance.real_provider_approval_prompt,
+                acceptance.REAL_PROVIDER_APPROVAL_CONTENT,
+                acceptance.REAL_PROVIDER_APPROVAL_RELATIVE_PATH,
+            ),
+            (
+                "steer",
+                acceptance.real_provider_steer_command,
+                acceptance.real_provider_steer_prompt,
+                acceptance.REAL_PROVIDER_STEER_CONTENT,
+                acceptance.REAL_PROVIDER_STEER_RELATIVE_PATH,
+            ),
+            (
+                "interrupt",
+                acceptance.real_provider_interrupt_command,
+                acceptance.real_provider_interrupt_prompt,
+                acceptance.REAL_PROVIDER_INTERRUPT_CONTENT,
+                ".synara-real-provider-interrupt.txt",
+            ),
+        )
 
-        prompt = acceptance.real_provider_approval_prompt("APPROVAL_MARKER")
-        command = acceptance.real_provider_approval_command()
-        self.assertEqual(completed.stdout, acceptance.REAL_PROVIDER_APPROVAL_CONTENT)
-        self.assertEqual(completed.stderr, b"")
-        self.assertEqual(workspace_entries, [])
-        self.assertNotIn(">", prompt)
-        self.assertNotIn(acceptance.REAL_PROVIDER_APPROVAL_RELATIVE_PATH, prompt)
-        self.assertIn(f"\n{command}\n", prompt)
-        self.assertIn("Do not emit any assistant text before the tool call", prompt)
-        self.assertIn("complete assistant text for this Turn must be exactly", prompt)
-        self.assertEqual(prompt.count("APPROVAL_MARKER"), 1)
+        for label, command_factory, prompt_factory, expected_output, relative_path in cases:
+            with self.subTest(case=label), tempfile.TemporaryDirectory() as directory:
+                command = command_factory()
+                marker = f"{label.upper()}_MARKER"
+                completed = subprocess.run(
+                    ["bash", "-c", command],
+                    cwd=directory,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    check=True,
+                )
+                workspace_entries = list(pathlib.Path(directory).iterdir())
+                prompt = prompt_factory(marker)
+
+                self.assertEqual(completed.stdout, expected_output)
+                self.assertEqual(completed.stderr, b"")
+                self.assertEqual(workspace_entries, [])
+                self.assertNotIn(">", prompt)
+                self.assertNotIn(relative_path, prompt)
+                self.assertIn(f"\n{command}\n", prompt)
+                self.assertIn("Do not emit any assistant text before the tool call", prompt)
+                self.assertIn("complete assistant text for this Turn must be exactly", prompt)
+                self.assertEqual(prompt.count(marker), 1)
 
     def test_real_provider_user_input_prompt_requires_provider_native_tool_first(self) -> None:
         expected_tools = {

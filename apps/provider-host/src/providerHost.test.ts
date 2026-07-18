@@ -348,6 +348,28 @@ describe("durable conversation reconstruction", () => {
       );
     }
   });
+
+  it("accepts only a safe absolute Provider State Directory", () => {
+    const input = {
+      execution: { id: "execution-1" },
+      workload: { provider: "codex", inputText: "continue" },
+      workspaceDirectory: "/tmp/workspace",
+      providerStateDirectory: "/tmp/synara-provider-state",
+    };
+
+    expect(() => validateRunnerInput(input)).not.toThrow();
+    for (const providerStateDirectory of [
+      "",
+      "   ",
+      "relative/provider-state",
+      "/tmp/provider-state\nforged",
+      "/tmp/provider-state\0forged",
+    ]) {
+      expect(() => validateRunnerInput({ ...input, providerStateDirectory })).toThrow(
+        "providerStateDirectory must be an absolute path without control characters",
+      );
+    }
+  });
 });
 
 describe("provider process lifecycle", () => {

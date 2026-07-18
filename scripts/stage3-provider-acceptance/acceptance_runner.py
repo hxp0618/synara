@@ -63,6 +63,7 @@ REAL_PROVIDER_APPROVAL_RELATIVE_PATH = ".synara-real-provider-approval.txt"
 REAL_PROVIDER_APPROVAL_CONTENT = b"SYNARA_REAL_PROVIDER_APPROVAL_TOOL_OK\n"
 REAL_PROVIDER_STEER_RELATIVE_PATH = ".synara-real-provider-steer.txt"
 REAL_PROVIDER_STEER_CONTENT = b"SYNARA_REAL_PROVIDER_STEER_TOOL_OK\n"
+REAL_PROVIDER_INTERRUPT_CONTENT = b"SYNARA_REAL_PROVIDER_INTERRUPT_TOOL_SHOULD_NOT_RUN\n"
 TERMINAL_LARGE_TOTAL_BYTES = 2 * (1 << 20) + 257
 TERMINAL_LARGE_CHUNK_BYTES = 63 << 10
 TERMINAL_LOG_PREVIEW_BYTES = 32 << 10
@@ -396,19 +397,43 @@ def terminal_large_node_command() -> str:
     )
 
 
-def real_provider_approval_command() -> str:
-    output = json.dumps(REAL_PROVIDER_APPROVAL_CONTENT.decode("ascii"))
+def real_provider_read_only_output_command(content: bytes) -> str:
+    output = json.dumps(content.decode("ascii"))
     return f"node -e 'process.stdout.write({output})'"
 
 
-def real_provider_approval_prompt(marker: str) -> str:
+def real_provider_approval_command() -> str:
+    return real_provider_read_only_output_command(REAL_PROVIDER_APPROVAL_CONTENT)
+
+
+def real_provider_steer_command() -> str:
+    return real_provider_read_only_output_command(REAL_PROVIDER_STEER_CONTENT)
+
+
+def real_provider_interrupt_command() -> str:
+    return real_provider_read_only_output_command(REAL_PROVIDER_INTERRUPT_CONTENT)
+
+
+def real_provider_approval_gated_prompt(command: str, marker: str) -> str:
     return (
         "Use the Bash or shell tool exactly once. Do not emit any assistant text before the tool call. "
         "Run this exact read-only Node command as the sole shell command:\n"
-        f"{real_provider_approval_command()}\n"
+        f"{command}\n"
         "Do not add redirection, pipes, wrappers, or file changes. After the tool finishes, the complete "
         f"assistant text for this Turn must be exactly {marker} and no other text."
     )
+
+
+def real_provider_approval_prompt(marker: str) -> str:
+    return real_provider_approval_gated_prompt(real_provider_approval_command(), marker)
+
+
+def real_provider_steer_prompt(marker: str) -> str:
+    return real_provider_approval_gated_prompt(real_provider_steer_command(), marker)
+
+
+def real_provider_interrupt_prompt(marker: str) -> str:
+    return real_provider_approval_gated_prompt(real_provider_interrupt_command(), marker)
 
 
 def real_provider_user_input_prompt(provider: str, marker: str) -> str:
@@ -10382,13 +10407,8 @@ class AcceptanceSuite:
         steered_marker = self._real_provider_marker("steer")
         if self.options.provider == "claudeAgent":
             return self._real_claude_provider_steer_active_turn(original_marker, steered_marker)
-        steer_text = REAL_PROVIDER_STEER_CONTENT.decode("ascii").rstrip("\n")
-        steer_command = f"printf '{steer_text}\\n' > {REAL_PROVIDER_STEER_RELATIVE_PATH}"
         turn = self._create_turn(
-            "Use the Bash or shell tool exactly once to run this command: "
-            f"{steer_command}. "
-            "After it succeeds, reply with exactly "
-            f"{original_marker} and no other text.",
+            real_provider_steer_prompt(original_marker),
             runtime_mode="approval-required",
         )
         turn_id = self._turn_id(turn, "real Provider Steer Turn")
@@ -10538,12 +10558,9 @@ class AcceptanceSuite:
         }
 
     def _real_provider_interrupt_active_turn(self) -> Mapping[str, Any]:
+        unreachable_marker = self._real_provider_marker("interrupt-should-not-complete")
         turn = self._create_turn(
-            "Immediately invoke the Bash or shell tool exactly once with this command: "
-            "printf 'SYNARA_REAL_PROVIDER_INTERRUPT_TOOL_SHOULD_NOT_RUN\\n' > "
-            ".synara-real-provider-interrupt.txt. The runtime will pause that invocation for approval; "
-            "do not wait before invoking the tool, do not answer in text, and do nothing else after the "
-            "approval request appears.",
+            real_provider_interrupt_prompt(unreachable_marker),
             runtime_mode="approval-required",
         )
         turn_id = self._turn_id(turn, "real Provider Interrupt Turn")

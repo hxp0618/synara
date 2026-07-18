@@ -10,8 +10,9 @@ const CONTROLLED_PROVIDER_PROXY = "http://provider-user:provider-password@proxy.
 describe("Codex app-server runtime", () => {
   it("isolates controlled Credential authentication from ambient CODEX_HOME", async () => {
     await withFakeCodex("credential-environment", async (directory, _tracePath, environment) => {
+      const providerStateDirectory = join(directory, "provider-state");
       const run = startProviderHostRun(
-        codexInput(directory, { runtimeOutputDirectory: directory }),
+        codexInput(directory, { runtimeOutputDirectory: directory, providerStateDirectory }),
         {
           payload: {
             apiKey: "provider-secret",
@@ -23,7 +24,10 @@ describe("Codex app-server runtime", () => {
       );
 
       await expect(run.result).resolves.toMatchObject({ output: { text: "credential isolated" } });
-      const config = readFileSync(join(directory, "codex-home", "config.toml"), "utf8");
+      const config = readFileSync(
+        join(providerStateDirectory, "codex-home", "config.toml"),
+        "utf8",
+      );
       expect(config).toContain('model_provider = "synara_controlled"');
       expect(config).toContain('base_url = "http://provider-fault.example.test/v1"');
       expect(config).toContain('env_key = "OPENAI_API_KEY"');
@@ -623,6 +627,7 @@ function codexInput(
     interactionMode?: "default" | "plan";
     generation?: number;
     runtimeOutputDirectory?: string;
+    providerStateDirectory?: string;
   } = {},
 ) {
   return {
@@ -640,6 +645,9 @@ function codexInput(
     workspaceDirectory: directory,
     ...(modes.runtimeOutputDirectory
       ? { runtimeOutputDirectory: modes.runtimeOutputDirectory }
+      : {}),
+    ...(modes.providerStateDirectory
+      ? { providerStateDirectory: modes.providerStateDirectory }
       : {}),
   };
 }
@@ -758,7 +766,7 @@ const requiredEnvironment = ${JSON.stringify({
       ? {
           OPENAI_API_KEY: "provider-secret",
           OPENAI_BASE_URL: "http://provider-fault.example.test/v1",
-          CODEX_HOME: join(directory, "codex-home"),
+          CODEX_HOME: join(directory, "provider-state", "codex-home"),
         }
       : {}),
   })};
