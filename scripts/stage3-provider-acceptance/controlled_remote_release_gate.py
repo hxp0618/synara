@@ -332,6 +332,9 @@ def build_gate_worker_image(
         f"{IMAGE_TARGET_LABEL}={image.target}",
         "--load",
     ]
+    go_proxy = getattr(options, "go_proxy", None)
+    if go_proxy is not None:
+        command.extend(["--go-proxy", go_proxy])
     started = time.monotonic()
     try:
         completed = subprocess.run(

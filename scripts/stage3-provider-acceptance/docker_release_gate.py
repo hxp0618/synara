@@ -50,6 +50,7 @@ class DockerReleaseGateOptions:
     docker_nano_cpus: int
     codex_model: str | None = None
     claude_model: str | None = None
+    go_proxy: str | None = None
 
 
 def parse_args(argv: Sequence[str]) -> DockerReleaseGateOptions:
@@ -77,6 +78,7 @@ def parse_args(argv: Sequence[str]) -> DockerReleaseGateOptions:
     parser.add_argument("--docker-control-plane-host", default="host.docker.internal")
     parser.add_argument("--docker-memory-bytes", type=int, default=2 << 30)
     parser.add_argument("--docker-nano-cpus", type=int, default=1_000_000_000)
+    parser.add_argument("--go-proxy")
     parsed = parser.parse_args(argv)
     if parsed.product_timeout <= 0 or parsed.failure_timeout <= 0:
         parser.error("matrix timeouts must be positive")
@@ -117,6 +119,7 @@ def parse_args(argv: Sequence[str]) -> DockerReleaseGateOptions:
             model_option="--claude-model",
             model_env_option="--claude-model-env",
         )
+        go_proxy = common.normalize_go_proxy(parsed.go_proxy)
     except ValueError as error:
         parser.error(str(error))
     output_dir = parsed.output_dir or remote.default_output_dir(repo_root, "docker")
@@ -133,6 +136,7 @@ def parse_args(argv: Sequence[str]) -> DockerReleaseGateOptions:
         docker_nano_cpus=parsed.docker_nano_cpus,
         codex_model=codex_model,
         claude_model=claude_model,
+        go_proxy=go_proxy,
     )
 
 
@@ -258,6 +262,7 @@ def target_configuration(options: DockerReleaseGateOptions) -> dict[str, Any]:
         "controlPlaneHost": options.docker_control_plane_host,
         "memoryBytes": options.docker_memory_bytes,
         "nanoCpus": options.docker_nano_cpus,
+        "goProxyOverride": options.go_proxy is not None,
     }
 
 

@@ -169,6 +169,8 @@ class ParseArgsTest(unittest.TestCase):
                     "CLAUDE_BASE_URL",
                     "--claude-model",
                     "claude-sonnet-4-6",
+                    "--go-proxy",
+                    "https://goproxy.cn,direct",
                     "--output-dir",
                     directory,
                 ]
@@ -179,6 +181,7 @@ class ParseArgsTest(unittest.TestCase):
         self.assertEqual(options.claude_credential.field, "authToken")
         self.assertEqual(options.codex_model, "gpt-5.6-sol")
         self.assertEqual(options.claude_model, "claude-sonnet-4-6")
+        self.assertEqual(options.go_proxy, "https://goproxy.cn,direct")
         self.assertNotIn("codex-secret-value", encoded)
         self.assertNotIn("claude-secret-value", encoded)
         self.assertNotIn("https://claude.example.test", encoded)
@@ -529,6 +532,36 @@ class GateWorkerImageLifecycleTest(unittest.TestCase):
         self.assertIn(f"{gate.IMAGE_OWNER_LABEL}=owner", command)
         self.assertEqual(evidence["id"], WORKER_IMAGE_ID)
         self.assertTrue(evidence["ownershipVerified"])
+
+    def test_passes_the_validated_public_go_proxy_to_the_worker_build(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            output_dir = pathlib.Path(directory)
+            options = dataclasses.replace(
+                docker_options(output_dir),
+                go_proxy="https://goproxy.cn,direct",
+            )
+            image = gate.GateWorkerImage(WORKER_IMAGE_NAME, "owner")
+            (output_dir / "worker-image-build-metadata.json").write_text(
+                "{}\n", encoding="utf-8"
+            )
+            labels = gate.required_gate_worker_image_labels(image, "a" * 40)
+            completed = subprocess.CompletedProcess([], 0, "build complete\n", "")
+
+            with (
+                mock.patch.object(gate.subprocess, "run", return_value=completed) as run,
+                mock.patch.object(
+                    gate.remote,
+                    "inspect_gate_worker_image",
+                    return_value=(WORKER_IMAGE_ID, labels),
+                ),
+            ):
+                gate.build_gate_worker_image(options, image, "a" * 40)
+
+        command = run.call_args.args[0]
+        self.assertEqual(
+            command[command.index("--go-proxy") + 1],
+            "https://goproxy.cn,direct",
+        )
 
     def test_removes_owned_shared_image_by_id_and_verifies_absence(self) -> None:
         options = docker_options(pathlib.Path("/tmp/docker-release"))
