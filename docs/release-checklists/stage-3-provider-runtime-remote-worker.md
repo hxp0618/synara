@@ -266,6 +266,12 @@ bun run --cwd apps/web test \
 
 ## 7. Web 与前后端联通
 
+实现期证据：clean commit `3a6d347d` 已在隔离 PostgreSQL/MinIO/Go Control Plane + Web 上完成真实
+Project/Session/Turn 创建、PostgreSQL 恢复、连续刷新、Browser reconnect、Server restart、Console 健康与
+SSE lease 精确回收；报告为
+`docs/reports/stage-3-saas-web-control-plane-authority-sse-3a6d347d.md`。该证据只关闭基础 authority/reconnect
+slice，下面面向完整高级操作、Artifact、Worker 状态与本地回退的发布项仍保持未勾选。
+
 - [ ] SaaS Web 的 Project、Session、Turn、Compact、Review、Rollback、Fork 只调用 Control Plane API。
 - [ ] SaaS handler 没有回退到 `readNativeApi()` 或本地 Provider discovery。
 - [ ] Credential Scope、Auto-select、Project/Target Binding 和 Disable 操作可以从设置页完成。
