@@ -401,6 +401,115 @@ describe("Codex app-server runtime", () => {
     });
   });
 
+  it("rebuilds a missing native Compact thread from authoritative history before compacting", async () => {
+    await withFakeCodex("compact-rebuild", async (directory, tracePath, environment) => {
+      const messages: RunnerMessage[] = [];
+      const input = codexInput(directory);
+      const run = startProviderHostRun(
+        {
+          ...input,
+          providerResumeCursor: "thread-missing",
+          workload: {
+            ...input.workload,
+            resumeSnapshot: {
+              version: 1,
+              sessionId: "session-1",
+              turnId: "turn-2",
+              provider: "codex",
+              messages: [
+                { role: "user", text: "first" },
+                { role: "assistant", text: "response" },
+              ],
+              toolResults: [{ summary: "Focused tests passed" }],
+              sourceSequenceRange: { from: 1, through: 4 },
+              authoritativeHistorySequence: 23,
+            },
+          },
+        },
+        null,
+        (message) => messages.push(message),
+        {
+          environment,
+          operation: { commandType: "CompactSession", payload: {} },
+        },
+      );
+
+      await expect(run.result).resolves.toMatchObject({
+        output: {
+          provider: "codex",
+          operation: "compact",
+          supportMode: "native",
+          boundary: {
+            kind: "context_compaction",
+            terminalKind: "contextCompaction",
+            providerItemId: "compact-item-1",
+          },
+        },
+        providerResumeCursor: "thread-rebuilt",
+      });
+      const warning = messages.find(
+        (message) => message.type === "event" && message.eventType === "runtime.provider.warning",
+      );
+      expect(warning).toEqual({
+        type: "event",
+        eventType: "runtime.provider.warning",
+        payload: {
+          provider: "codex",
+          message:
+            "Native Codex resume failed before turn activity; authoritative-history fallback selected.",
+          kind: "session_resume",
+          attemptedStrategy: "native-cursor",
+          selectedStrategy: "authoritative-history",
+          outcome: "fallback_selected",
+          reasonCode: "session_resume_invalid",
+          fallbackSafety: "before_turn_activity",
+          authoritativeHistorySequence: 23,
+        },
+      });
+      expect(JSON.stringify(warning)).not.toContain("thread-missing");
+      expect(JSON.stringify(warning)).not.toContain("Focused tests passed");
+      expect(readFileSync(tracePath, "utf8")).toBe(
+        "initialize\ninitialized\nthread/resume\nthread/resume\nthread/compact/start\n",
+      );
+    });
+  });
+
+  it("does not rebuild Compact from history after a native resume authentication failure", async () => {
+    await withFakeCodex("compact-auth-failure", async (directory, tracePath, environment) => {
+      const messages: RunnerMessage[] = [];
+      const input = codexInput(directory);
+      const run = startProviderHostRun(
+        {
+          ...input,
+          providerResumeCursor: "thread-private",
+          workload: {
+            ...input.workload,
+            resumeSnapshot: {
+              version: 1,
+              sessionId: "session-1",
+              turnId: "turn-2",
+              provider: "codex",
+              messages: [{ role: "assistant", text: "authoritative response" }],
+              authoritativeHistorySequence: 24,
+            },
+          },
+        },
+        null,
+        (message) => messages.push(message),
+        {
+          environment,
+          operation: { commandType: "CompactSession", payload: {} },
+        },
+      );
+
+      await expect(run.result).rejects.toThrow("Unauthorized");
+      expect(messages).not.toContainEqual(
+        expect.objectContaining({ eventType: "runtime.provider.warning" }),
+      );
+      expect(readFileSync(tracePath, "utf8")).toBe("initialize\ninitialized\nthread/resume\n");
+    });
+  });
+
   it("runs native inline review and waits for the matching review Turn terminal", async () => {
     await withFakeCodex("review", async (directory, tracePath, environment) => {
       const messages: RunnerMessage[] = [];
@@ -705,6 +814,8 @@ async function withFakeCodex(
     | "generated-file"
     | "large-diff"
     | "compact"
+    | "compact-rebuild"
+    | "compact-auth-failure"
     | "review"
     | "review-fresh"
     | "credential-environment",
@@ -766,6 +877,8 @@ function fakeCodexSource(
     | "generated-file"
     | "large-diff"
     | "compact"
+    | "compact-rebuild"
+    | "compact-auth-failure"
     | "review"
     | "review-fresh"
     | "credential-environment",
@@ -830,6 +943,7 @@ for (const name of ${JSON.stringify([
 }
 const send = (message) => process.stdout.write(JSON.stringify(message) + "\\n");
 const longApprovalId = "approval-" + "x".repeat(400);
+let resumeAttempt = 0;
 const complete = (text) => {
   send({ method: "item/agentMessage/delta", params: { threadId: "thread-new", turnId: "turn-1", itemId: "agent-1", delta: text } });
   send({ method: "turn/completed", params: { threadId: "thread-new", turn: { id: "turn-1", items: [], status: "completed", error: null } } });
@@ -842,19 +956,31 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
   } else if (message.method === "initialized") {
     return;
   } else if (message.method === "thread/resume") {
-    if (scenario === "resume-rebuild") send({ id: message.id, error: { code: -2, message: "missing thread: native-resume-secret" } });
-    else if (scenario === "resume-auth-failure") send({ id: message.id, error: { code: 401, message: "Unauthorized: invalid API key" } });
+    if (scenario === "compact-rebuild") {
+      resumeAttempt += 1;
+      if (resumeAttempt === 1) {
+        if (message.params?.threadId !== "thread-missing" || message.params?.history !== undefined) process.exit(10);
+        send({ id: message.id, error: { code: -2, message: "no rollout found for thread id thread-missing" } });
+      } else if (resumeAttempt === 2) {
+        const history = message.params?.history;
+        const prompt = history?.[0]?.content?.[0]?.text ?? "";
+        if (message.params?.threadId !== "thread-missing" || history?.length !== 1 || history?.[0]?.type !== "message" || history?.[0]?.role !== "user" || history?.[0]?.content?.[0]?.type !== "input_text" || !prompt.includes("<synara_resume_snapshot_json>") || !prompt.includes("Focused tests passed")) process.exit(11);
+        send({ id: message.id, result: { thread: { id: "thread-rebuilt" }, model: "gpt-test" } });
+      } else process.exit(12);
+    } else if (scenario === "resume-rebuild") send({ id: message.id, error: { code: -2, message: "missing thread: native-resume-secret" } });
+    else if (scenario === "resume-auth-failure" || scenario === "compact-auth-failure") send({ id: message.id, error: { code: 401, message: "Unauthorized: invalid API key" } });
     else send({ id: message.id, result: { thread: { id: message.params.threadId }, model: "gpt-test" } });
   } else if (message.method === "thread/start") {
-    if (scenario === "resume" || scenario === "resume-auth-failure") send({ id: message.id, error: { code: -1, message: "unexpected thread/start" } });
+    if (scenario === "resume" || scenario === "resume-auth-failure" || scenario === "compact-rebuild" || scenario === "compact-auth-failure") send({ id: message.id, error: { code: -1, message: "unexpected thread/start" } });
     else send({ id: message.id, result: { thread: { id: "thread-new" }, model: "gpt-test" } });
   } else if (message.method === "thread/compact/start") {
-    if (scenario !== "compact" || message.params?.threadId !== "thread-resume") process.exit(4);
-    send({ method: "turn/completed", params: { threadId: "thread-resume", turn: { id: "turn-compact-1", items: [], status: "completed", error: null } } });
+    const compactThreadId = scenario === "compact-rebuild" ? "thread-rebuilt" : "thread-resume";
+    if ((scenario !== "compact" && scenario !== "compact-rebuild") || message.params?.threadId !== compactThreadId) process.exit(4);
+    send({ method: "turn/completed", params: { threadId: compactThreadId, turn: { id: "turn-compact-1", items: [], status: "completed", error: null } } });
     setTimeout(() => {
-      send({ method: "item/completed", params: { threadId: "thread-resume", turnId: "turn-compact-1", item: { id: "compact-item-1", type: "contextCompaction" } } });
+      send({ method: "item/completed", params: { threadId: compactThreadId, turnId: "turn-compact-1", item: { id: "compact-item-1", type: "contextCompaction" } } });
       send({ id: "late-compact-approval", method: "item/commandExecution/requestApproval", params: { command: "late compact command" } });
-      send({ method: "thread/tokenUsage/updated", params: { threadId: "thread-resume", tokenUsage: { last: { inputTokens: 987654 } } } });
+      send({ method: "thread/tokenUsage/updated", params: { threadId: compactThreadId, tokenUsage: { last: { inputTokens: 987654 } } } });
       send({ method: "warning", params: { message: "late compact warning" } });
       send({ id: message.id, result: {} });
     }, 15);

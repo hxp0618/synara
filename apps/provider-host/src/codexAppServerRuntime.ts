@@ -278,6 +278,8 @@ class CodexAppServerRuntime {
   ): Promise<boolean> {
     const cursor = trimmedString(this.options.input.providerResumeCursor);
     const historyAvailable = hasAuthoritativeResumeData(this.options.input.workload);
+    const allowCompactHistoryResumeFallback =
+      requireNativeResume && this.options.operation?.commandType === "CompactSession";
     const approvalRequired =
       this.options.interactive && this.options.input.workload.runtimeMode === "approval-required";
     const common = {
@@ -292,25 +294,44 @@ class CodexAppServerRuntime {
 
     if (cursor) {
       try {
-        const response = asRecord(
-          await this.sendRequest("thread/resume", {
-            ...common,
-            threadId: cursor,
-          }),
+        this.applyThreadOpenResponse(
+          asRecord(
+            await this.sendRequest("thread/resume", {
+              ...common,
+              threadId: cursor,
+            }),
+          ),
+          "thread/resume",
         );
-        this.threadId = readThreadId(response);
-        this.model =
-          readString(response, "model") ?? trimmedString(this.options.input.workload.model);
-        if (!this.threadId) {
-          throw new Error("Codex app-server thread/resume response did not include a thread id.");
-        }
         return true;
       } catch (error) {
+        const reasonCode = classifyProviderResumeFailure(error);
+        if (allowCompactHistoryResumeFallback && reasonCode && historyAvailable) {
+          this.options.emit(providerResumeFallbackWarning(this.options.input, "codex", reasonCode));
+          try {
+            this.applyThreadOpenResponse(
+              asRecord(
+                await this.sendRequest("thread/resume", {
+                  ...common,
+                  threadId: cursor,
+                  history: codexAuthoritativeResumeHistory(this.options.authoritativePrompt),
+                }),
+              ),
+              "thread/resume",
+            );
+          } catch (historyError) {
+            const detail =
+              historyError instanceof Error ? historyError.message : String(historyError);
+            throw new Error(
+              `Codex app-server authoritative-history resume for native compact failed: ${detail}`,
+            );
+          }
+          return true;
+        }
         if (requireNativeResume) {
           const detail = error instanceof Error ? error.message : String(error);
           throw new Error(`Codex app-server session resume is invalid: ${detail}`);
         }
-        const reasonCode = classifyProviderResumeFailure(error);
         if (!reasonCode) throw error;
         if (!historyAvailable && !allowFreshThreadOnResumeFailure) {
           const detail = error instanceof Error ? error.message : String(error);
@@ -326,13 +347,22 @@ class CodexAppServerRuntime {
       throw new Error("Codex app-server native Session operation requires a Provider Cursor.");
     }
 
-    const response = asRecord(await this.sendRequest("thread/start", common));
+    this.applyThreadOpenResponse(
+      asRecord(await this.sendRequest("thread/start", common)),
+      "thread/start",
+    );
+    return false;
+  }
+
+  private applyThreadOpenResponse(
+    response: Record<string, unknown> | undefined,
+    method: "thread/resume" | "thread/start",
+  ): void {
     this.threadId = readThreadId(response);
     this.model = readString(response, "model") ?? trimmedString(this.options.input.workload.model);
     if (!this.threadId) {
-      throw new Error("Codex app-server thread/start response did not include a thread id.");
+      throw new Error(`Codex app-server ${method} response did not include a thread id.`);
     }
-    return false;
   }
 
   private attachProcessListeners(): void {
@@ -971,6 +1001,18 @@ function approvalPayload(
         }
       : {}),
   };
+}
+
+function codexAuthoritativeResumeHistory(
+  authoritativePrompt: string,
+): Array<Record<string, unknown>> {
+  return [
+    {
+      type: "message",
+      role: "user",
+      content: [{ type: "input_text", text: authoritativePrompt }],
+    },
+  ];
 }
 
 function userInputPayload(
