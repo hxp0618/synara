@@ -8,6 +8,7 @@ import {
   buildAntigravityHookConfig,
   antigravityPromptCommandLineIssue,
   hookScriptSource,
+  makeAntigravityToolResultDeltaPayload,
   makeAntigravityRuntimeEventBase,
   parseAntigravityCliModelLabel,
   parseAntigravityModelLines,
@@ -15,6 +16,7 @@ import {
   resolveAntigravityCliModelLabel,
   runAntigravityHelperProcess,
 } from "./AntigravityAdapter";
+import { RuntimeItemId } from "@synara/contracts";
 
 describe("Antigravity CLI model translation", () => {
   it("collapses CLI model/effort labels into base models with effort ladders", () => {
@@ -143,6 +145,36 @@ describe("Antigravity CLI integration helpers", () => {
       lifecycleGeneration: "generation-1",
       eventId: "event-1",
       createdAt: "2026-07-17T00:00:00.000Z",
+    });
+  });
+
+  it("emits command tool results as utf-8 command_output deltas", () => {
+    const payload = makeAntigravityToolResultDeltaPayload({
+      itemId: RuntimeItemId.makeUnsafe("terminal-antigravity-command"),
+      itemType: "command_execution",
+      delta: "echo\n",
+    });
+
+    expect(payload).toEqual({
+      streamKind: "command_output",
+      delta: "echo\n",
+      terminalId: "terminal-antigravity-command",
+      encoding: "utf-8",
+      byteOffset: 0,
+      byteLength: 5,
+    });
+  });
+
+  it("keeps non-command tool results as plain content deltas", () => {
+    const payload = makeAntigravityToolResultDeltaPayload({
+      itemId: RuntimeItemId.makeUnsafe("terminal-antigravity-file"),
+      itemType: "file_change",
+      delta: "updated file",
+    });
+
+    expect(payload).toEqual({
+      streamKind: "file_change_output",
+      delta: "updated file",
     });
   });
 

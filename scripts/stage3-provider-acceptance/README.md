@@ -194,14 +194,17 @@ Remote Targets require an explicit controlled Provider Credential. Put the secre
 variable, pass only its variable name, and use the Provider Host installed in the Worker image:
 
 ```sh
-# Set SYNARA_ACCEPTANCE_CODEX_KEY out of band; do not put its value in this command.
+source ~/.synara-acceptance-env
+
+# Keep the Credential value out of the command line; pass only its variable name.
 python3 scripts/stage3-provider-acceptance/acceptance_runner.py \
   --suite real-provider-smoke \
   --target docker \
   --provider codex \
   --runner-command-json '["/usr/local/bin/provider-host"]' \
   --real-provider-credential-env SYNARA_ACCEPTANCE_CODEX_KEY \
-  --real-provider-model gpt-5.4 \
+  --real-provider-base-url-env SYNARA_ACCEPTANCE_CODEX_BASE_URL \
+  --real-provider-model-env SYNARA_ACCEPTANCE_CODEX_MODEL \
   --real-provider-matrix \
   --timeout 1800
 ```
@@ -209,13 +212,16 @@ python3 scripts/stage3-provider-acceptance/acceptance_runner.py \
 For SSH, use the owned disposable OrbStack target and the real Host command installed by the Runner:
 
 ```sh
+source ~/.synara-acceptance-env
+
 python3 scripts/stage3-provider-acceptance/acceptance_runner.py \
   --suite real-provider-smoke \
   --target ssh \
   --provider codex \
   --runner-command-json '["/usr/local/bin/provider-host"]' \
   --real-provider-credential-env SYNARA_ACCEPTANCE_CODEX_KEY \
-  --real-provider-model gpt-5.4 \
+  --real-provider-base-url-env SYNARA_ACCEPTANCE_CODEX_BASE_URL \
+  --real-provider-model-env SYNARA_ACCEPTANCE_CODEX_MODEL \
   --real-provider-matrix \
   --timeout 3600
 ```
@@ -230,13 +236,16 @@ absolute, outside the repository, and the private key must be readable only by i
 password authentication and never reads user SSH configuration:
 
 ```sh
+source ~/.synara-acceptance-env
+
 python3 scripts/stage3-provider-acceptance/acceptance_runner.py \
   --suite real-provider-smoke \
   --target ssh \
   --provider codex \
   --runner-command-json '["/usr/local/bin/provider-host"]' \
   --real-provider-credential-env SYNARA_ACCEPTANCE_CODEX_KEY \
-  --real-provider-model gpt-5.4 \
+  --real-provider-base-url-env SYNARA_ACCEPTANCE_CODEX_BASE_URL \
+  --real-provider-model-env SYNARA_ACCEPTANCE_CODEX_MODEL \
   --real-provider-matrix \
   --ssh-external-host ssh.example.internal \
   --ssh-external-port 22 \
@@ -266,10 +275,11 @@ Control Plane state, Worker container, volume, network and auto-built image are 
 Use `--real-provider-credential-field authToken` only for a Claude token that intentionally uses that payload field.
 `apiKey` is the default for Codex and Claude. An optional controlled endpoint can be supplied with
 `--real-provider-base-url-env`; its value is also redacted. This is the supported third-party API-key/Base URL path;
-the key and endpoint remain runtime Credential data rather than image or Target configuration. Pin the endpoint's
-non-secret model identifier with `--real-provider-model`; the report records it so an SDK default-model mismatch
-cannot be mistaken for Provider failure. Remote real-Provider runs fail during CLI validation when the Credential
-source is omitted, so an unauthenticated container failure cannot be mistaken for release evidence.
+the key and endpoint remain runtime Credential data rather than image or Target configuration. Read the endpoint's
+non-secret model identifier from `--real-provider-model-env`, or pin it literally with `--real-provider-model`;
+the report records only the resolved model identifier so an SDK default-model mismatch cannot be mistaken for
+Provider failure. Remote real-Provider runs fail during CLI validation when the Credential source is omitted, so an
+unauthenticated container failure cannot be mistaken for release evidence.
 
 `--real-provider-case generated-file-checkpoint` first requires a Provider-native file mutation (`apply_patch` for
 Codex, `Write` for Claude) to create a 43-byte standalone file, then uses one exact shell command to write a
@@ -422,24 +432,31 @@ the missing interaction into an unsupported result.
 
 `docker_release_gate.py` uses the same shared clean-SHA child-report validator while keeping Docker-specific
 Credential, Worker image and cleanup requirements explicit. Set both product Credentials out of band and pass only
-their environment-variable names:
+their environment-variable names. When a third-party endpoint also needs controlled Base URL and model settings,
+source the operator-owned acceptance env file first:
 
 ```sh
+source ~/.synara-acceptance-env
+
 python3 scripts/stage3-provider-acceptance/docker_release_gate.py \
   --codex-credential-env SYNARA_ACCEPTANCE_CODEX_KEY \
-  --codex-model gpt-5.6-sol \
+  --codex-base-url-env SYNARA_ACCEPTANCE_CODEX_BASE_URL \
+  --codex-model-env SYNARA_ACCEPTANCE_CODEX_MODEL \
   --claude-credential-env SYNARA_ACCEPTANCE_CLAUDE_KEY \
   --claude-credential-field apiKey \
-  --claude-model claude-sonnet-4-6 \
+  --claude-base-url-env SYNARA_ACCEPTANCE_CLAUDE_BASE_URL \
+  --claude-model-env SYNARA_ACCEPTANCE_CLAUDE_MODEL \
   --product-timeout 2400 \
   --failure-timeout 900
 ```
 
 Use `--claude-credential-field authToken` only when the controlled Claude secret intentionally maps to
 `ANTHROPIC_AUTH_TOKEN`. Optional Codex/Claude Base URLs are supplied through `--codex-base-url-env` and
-`--claude-base-url-env`; their values and all Credential values are registered with the aggregate redactor. Use
-`--codex-model` and `--claude-model` to pin the non-secret model identifiers supported by that controlled endpoint;
-the child reports persist and the aggregate validates those exact identifiers instead of relying on SDK defaults.
+`--claude-base-url-env`; Key, Base URL, and model may all come from the same third-party endpoint profile. Credential
+and Base URL values are redacted. Models are non-sensitive: the child reports persist the resolved model identifiers
+and the aggregate validates those exact values, but it does not record the model environment-variable names. Literal
+`--codex-model` and `--claude-model` remain available when you want to pin the identifiers directly on the command
+line instead of reading them from `--codex-model-env` / `--claude-model-env`.
 
 The gate fails before any build when either source is missing or invalid, and fails on a dirty/untracked worktree.
 Each child receives only the tool environment allowlist plus that child Provider's Credential/Base URL; Codex and
@@ -460,18 +477,22 @@ isolated child boundaries as the Docker gate. Each child creates and removes its
 the shared image without rebuilding it, and runs one Codex/Claude product or failure matrix:
 
 ```sh
+source ~/.synara-acceptance-env
+
 python3 scripts/stage3-provider-acceptance/kubernetes_release_gate.py \
   --codex-credential-env SYNARA_ACCEPTANCE_CODEX_KEY \
-  --codex-model gpt-5.6-sol \
+  --codex-base-url-env SYNARA_ACCEPTANCE_CODEX_BASE_URL \
+  --codex-model-env SYNARA_ACCEPTANCE_CODEX_MODEL \
   --claude-credential-env SYNARA_ACCEPTANCE_CLAUDE_KEY \
   --claude-credential-field apiKey \
-  --claude-model claude-sonnet-4-6 \
+  --claude-base-url-env SYNARA_ACCEPTANCE_CLAUDE_BASE_URL \
+  --claude-model-env SYNARA_ACCEPTANCE_CLAUDE_MODEL \
   --kind-bin /absolute/path/to/kind \
   --product-timeout 3600 \
   --failure-timeout 1200
 ```
 
-The Credential and optional Base URL environment rules are identical to the Docker gate. Preflight also requires a
+The Credential, Base URL, and model environment rules are identical to the Docker gate. Preflight also requires a
 working Docker Engine, Kind executable and kubectl client before the shared image is built. A child pass must prove
 the owned cluster and isolated state were removed while `ownedWorkerImageRemoved=false`; the aggregate then verifies
 all four nested `kubernetes.containerEngine` image IDs, Secret scans and Catalog hashes before ownership-checking and
@@ -486,12 +507,16 @@ By default each child builds the current runtime, creates a unique owned OrbStac
 provisions through the product SSH API, and removes its machine, key and isolated state during cleanup:
 
 ```sh
+source ~/.synara-acceptance-env
+
 python3 scripts/stage3-provider-acceptance/ssh_release_gate.py \
   --codex-credential-env SYNARA_ACCEPTANCE_CODEX_KEY \
-  --codex-model gpt-5.6-sol \
+  --codex-base-url-env SYNARA_ACCEPTANCE_CODEX_BASE_URL \
+  --codex-model-env SYNARA_ACCEPTANCE_CODEX_MODEL \
   --claude-credential-env SYNARA_ACCEPTANCE_CLAUDE_KEY \
   --claude-credential-field apiKey \
-  --claude-model claude-sonnet-4-6 \
+  --claude-base-url-env SYNARA_ACCEPTANCE_CLAUDE_BASE_URL \
+  --claude-model-env SYNARA_ACCEPTANCE_CLAUDE_MODEL \
   --ssh-orbctl-bin /usr/local/bin/orbctl \
   --product-timeout 3600 \
   --failure-timeout 2400
@@ -501,12 +526,16 @@ The same aggregate can target one explicitly authorized, non-disposable host. Ch
 installation/ownership IDs while sharing only the operator-provided identity and pinned Host Key source:
 
 ```sh
+source ~/.synara-acceptance-env
+
 python3 scripts/stage3-provider-acceptance/ssh_release_gate.py \
   --codex-credential-env SYNARA_ACCEPTANCE_CODEX_KEY \
-  --codex-model gpt-5.6-sol \
+  --codex-base-url-env SYNARA_ACCEPTANCE_CODEX_BASE_URL \
+  --codex-model-env SYNARA_ACCEPTANCE_CODEX_MODEL \
   --claude-credential-env SYNARA_ACCEPTANCE_CLAUDE_KEY \
   --claude-credential-field apiKey \
-  --claude-model claude-sonnet-4-6 \
+  --claude-base-url-env SYNARA_ACCEPTANCE_CLAUDE_BASE_URL \
+  --claude-model-env SYNARA_ACCEPTANCE_CLAUDE_MODEL \
   --ssh-external-host ssh.example.internal \
   --ssh-external-user synara-admin \
   --ssh-external-identity-file /secure/synara/id_ed25519 \

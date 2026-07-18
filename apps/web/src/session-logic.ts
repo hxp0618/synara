@@ -3,6 +3,7 @@ import {
   isToolLifecycleItemType,
   STUDIO_OUTPUTS_ACTIVITY_KIND,
   type OrchestrationLatestTurn,
+  type OrchestrationPendingInteraction,
   type OrchestrationThreadActivity,
   type OrchestrationProposedPlanId,
   type ProviderKind,
@@ -435,7 +436,9 @@ function activityLifecycleGeneration(payload: Record<string, unknown> | null): s
   return typeof generation === "string" && generation.length > 0 ? generation : undefined;
 }
 
-function deletePendingRequest<T extends { requestId: ApprovalRequestId; lifecycleGeneration?: string }>(
+function deletePendingRequest<
+  T extends { requestId: ApprovalRequestId; lifecycleGeneration?: string },
+>(
   openByRequestKey: Map<string, T>,
   requestKey: string,
   lifecycleGeneration: string | undefined,
@@ -447,7 +450,9 @@ function deletePendingRequest<T extends { requestId: ApprovalRequestId; lifecycl
   }
 }
 
-function retainActionableSettlements<T extends { requestId: ApprovalRequestId; lifecycleGeneration?: string }>(
+function retainActionableSettlements<
+  T extends { requestId: ApprovalRequestId; lifecycleGeneration?: string },
+>(
   openByRequestKey: Map<string, T>,
   settlements: ReadonlyArray<OrchestrationPendingInteraction> | undefined,
   interactionKind: OrchestrationPendingInteraction["interactionKind"],

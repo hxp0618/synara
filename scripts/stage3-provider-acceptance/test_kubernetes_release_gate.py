@@ -186,6 +186,71 @@ class ParseArgsTest(unittest.TestCase):
         self.assertNotIn("claude-secret-value", encoded)
         self.assertNotIn("https://claude.example.test", encoded)
 
+    def test_resolves_provider_models_from_environment_names(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(
+            os.environ,
+            {
+                "CODEX_KEY": "codex-secret-value",
+                "CLAUDE_TOKEN": "claude-secret-value",
+                "CODEX_MODEL": "gpt-5.6-sol",
+                "CLAUDE_MODEL": "claude-sonnet-4-6",
+            },
+        ):
+            options = gate.parse_args(
+                [
+                    "--codex-credential-env",
+                    "CODEX_KEY",
+                    "--codex-model-env",
+                    "CODEX_MODEL",
+                    "--claude-credential-env",
+                    "CLAUDE_TOKEN",
+                    "--claude-model-env",
+                    "CLAUDE_MODEL",
+                    "--output-dir",
+                    directory,
+                ]
+            )
+
+        encoded = json.dumps(dataclasses.asdict(options), default=str)
+        self.assertEqual(options.codex_model, "gpt-5.6-sol")
+        self.assertEqual(options.claude_model, "claude-sonnet-4-6")
+        self.assertNotIn("CODEX_MODEL", encoded)
+        self.assertNotIn("CLAUDE_MODEL", encoded)
+
+    def test_model_literal_and_environment_name_are_mutually_exclusive(self) -> None:
+        with mock.patch.dict(
+            os.environ,
+            {
+                "CODEX_KEY": "codex-secret-value",
+                "CLAUDE_TOKEN": "claude-secret-value",
+                "CODEX_MODEL": "gpt-5.6-sol",
+                "CLAUDE_MODEL": "claude-sonnet-4-6",
+            },
+        ):
+            for provider_args in (
+                ["--codex-model", "gpt-5.6-sol", "--codex-model-env", "CODEX_MODEL"],
+                [
+                    "--claude-model",
+                    "claude-sonnet-4-6",
+                    "--claude-model-env",
+                    "CLAUDE_MODEL",
+                ],
+            ):
+                with self.subTest(provider_args=provider_args):
+                    with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(
+                        SystemExit
+                    ) as caught:
+                        gate.parse_args(
+                            [
+                                "--codex-credential-env",
+                                "CODEX_KEY",
+                                "--claude-credential-env",
+                                "CLAUDE_TOKEN",
+                                *provider_args,
+                            ]
+                        )
+                    self.assertEqual(caught.exception.code, 2)
+
     def test_fails_before_work_when_a_credential_value_is_missing(self) -> None:
         with mock.patch.dict(os.environ, {"CODEX_KEY": "", "CLAUDE_KEY": "claude-secret"}):
             with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as caught:
@@ -257,6 +322,56 @@ class ChildCommandAndPolicyTest(unittest.TestCase):
         self.assertEqual(claude["DOCKER_HOST"], "unix:///var/run/docker.sock")
         self.assertNotIn("DOCKER_CONTEXT", codex)
         self.assertNotIn("DOCKER_CONTEXT", claude)
+
+    def test_child_command_uses_resolved_model_without_forwarding_model_env_name(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(
+            os.environ,
+            {
+                "CODEX_KEY": "codex-secret-value",
+                "CLAUDE_TOKEN": "claude-secret-value",
+                "CODEX_MODEL": "gpt-5.6-sol",
+                "CLAUDE_MODEL": "claude-sonnet-4-6",
+            },
+        ):
+            options = gate.parse_args(
+                [
+                    "--codex-credential-env",
+                    "CODEX_KEY",
+                    "--codex-model-env",
+                    "CODEX_MODEL",
+                    "--claude-credential-env",
+                    "CLAUDE_TOKEN",
+                    "--claude-model-env",
+                    "CLAUDE_MODEL",
+                    "--output-dir",
+                    directory,
+                ]
+            )
+
+        product = gate.child_command(
+            options,
+            "codex",
+            "product",
+            options.output_dir / "codex/product",
+            WORKER_IMAGE_NAME,
+        )
+        failure = gate.child_command(
+            options,
+            "claudeAgent",
+            "failure",
+            options.output_dir / "claudeAgent/failure",
+            WORKER_IMAGE_NAME,
+        )
+
+        self.assertEqual(product[product.index("--real-provider-model") + 1], "gpt-5.6-sol")
+        self.assertEqual(
+            failure[failure.index("--real-provider-model") + 1],
+            "claude-sonnet-4-6",
+        )
+        self.assertNotIn("CODEX_MODEL", product)
+        self.assertNotIn("CLAUDE_MODEL", failure)
+        self.assertNotIn("CODEX_MODEL", json.dumps([product, failure]))
+        self.assertNotIn("CLAUDE_MODEL", json.dumps([product, failure]))
 
     def test_accepts_nested_kubernetes_worker_image_and_exact_cleanup(self) -> None:
         options = kubernetes_options(pathlib.Path("/tmp/kubernetes-release"))

@@ -15594,6 +15594,13 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
         help="Explicit non-secret model identifier used by the controlled real Provider profile",
     )
     parser.add_argument(
+        "--real-provider-model-env",
+        help=(
+            "Environment variable containing the controlled real Provider model identifier; its "
+            "name is not persisted, while the resolved non-secret model may appear in reports"
+        ),
+    )
+    parser.add_argument(
         "--real-provider-case",
         action="append",
         choices=REAL_PROVIDER_CASES,
@@ -16034,12 +16041,18 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
             parsed.real_provider_base_url_env,
             "--real-provider-base-url-env",
         )
+        real_provider_model_env = parse_environment_variable_name(
+            parsed.real_provider_model_env,
+            "--real-provider-model-env",
+        )
         real_provider_model = parse_provider_model(
             parsed.real_provider_model,
             "--real-provider-model",
         )
     except ValueError as error:
         parser.error(str(error))
+    if real_provider_model is not None and real_provider_model_env is not None:
+        parser.error("--real-provider-model and --real-provider-model-env are mutually exclusive")
     run_id = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:8]
     output_dir = parsed.output_dir or repo_root / ".tmp" / "stage3-provider-acceptance-results" / run_id
     kubernetes_kubeconfig = parsed.kubernetes_kubeconfig.expanduser().resolve() if parsed.kubernetes_kubeconfig else None
@@ -16132,6 +16145,8 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
         parser.error("real Provider Credential options require --suite real-provider-smoke")
     elif real_provider_model is not None:
         parser.error("--real-provider-model requires --suite real-provider-smoke")
+    elif real_provider_model_env is not None:
+        parser.error("--real-provider-model-env requires --suite real-provider-smoke")
     try:
         if real_provider_credential_env is not None:
             read_environment_value(
@@ -16146,6 +16161,16 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
                 "real Provider Base URL",
                 maximum_length=2048,
                 forbidden_characters="\r\n\t\x00",
+            )
+        if real_provider_model_env is not None:
+            real_provider_model = parse_provider_model(
+                read_environment_value(
+                    real_provider_model_env,
+                    "real Provider model",
+                    maximum_length=256,
+                    forbidden_characters="\r\n\t\x00",
+                ),
+                "--real-provider-model-env",
             )
     except ValueError as error:
         parser.error(str(error))

@@ -224,8 +224,8 @@ const ServerConfigLive = (input: CliInput) =>
       const host = Option.getOrUndefined(input.host) ?? env.host ?? "127.0.0.1";
       const remotePolicyError = remoteAccessPolicyError({
         host,
-          authToken,
-          ...(controlPlaneUrl === undefined ? {} : { controlPlaneUrl }),
+        authToken,
+        ...(controlPlaneUrl === undefined ? {} : { controlPlaneUrl }),
         devUrl,
         publicUrl,
         allowInsecureRemote,

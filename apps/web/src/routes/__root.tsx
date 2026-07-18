@@ -225,7 +225,11 @@ function RootRouteView() {
         <ToastProvider position="top-center">
           <AnchoredToastProvider>
             <GitProgressToastPreviewDev />
-            {controlPlane.isAuthoritative ? <ControlPlaneSessionRouteCoordinator /> : <EventRouter />}
+            {controlPlane.isAuthoritative ? (
+              <ControlPlaneSessionRouteCoordinator />
+            ) : (
+              <EventRouter />
+            )}
             <ProviderStatusRefreshCoordinator />
             <GlobalShortcutsDialog />
             <GlobalFeedbackDialog />

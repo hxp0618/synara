@@ -64,7 +64,7 @@ def parse_args(argv: Sequence[str]) -> SSHReleaseGateOptions:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--codex-credential-env", required=True)
     parser.add_argument("--codex-base-url-env")
-    parser.add_argument("--codex-model")
+    remote.add_provider_model_arguments(parser, "codex")
     parser.add_argument("--claude-credential-env", required=True)
     parser.add_argument(
         "--claude-credential-field",
@@ -72,7 +72,7 @@ def parse_args(argv: Sequence[str]) -> SSHReleaseGateOptions:
         default="apiKey",
     )
     parser.add_argument("--claude-base-url-env")
-    parser.add_argument("--claude-model")
+    remote.add_provider_model_arguments(parser, "claude")
     parser.add_argument("--output-dir", type=pathlib.Path)
     parser.add_argument("--product-timeout", type=float, default=3600.0)
     parser.add_argument("--failure-timeout", type=float, default=2400.0)
@@ -167,8 +167,20 @@ def parse_args(argv: Sequence[str]) -> SSHReleaseGateOptions:
             parsed.claude_base_url_env,
             "Claude",
         )
-        codex_model = acceptance.parse_provider_model(parsed.codex_model, "--codex-model")
-        claude_model = acceptance.parse_provider_model(parsed.claude_model, "--claude-model")
+        codex_model = remote.parse_provider_model_argument(
+            parsed.codex_model,
+            parsed.codex_model_env,
+            provider_label="Codex",
+            model_option="--codex-model",
+            model_env_option="--codex-model-env",
+        )
+        claude_model = remote.parse_provider_model_argument(
+            parsed.claude_model,
+            parsed.claude_model_env,
+            provider_label="Claude",
+            model_option="--claude-model",
+            model_env_option="--claude-model-env",
+        )
     except ValueError as error:
         parser.error(str(error))
     output_dir = parsed.output_dir or remote.default_output_dir(repo_root, "ssh")

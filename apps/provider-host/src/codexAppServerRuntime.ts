@@ -1,6 +1,8 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createInterface } from "node:readline";
 
+import { codexDeveloperInstructionsForMode } from "@synara/shared/codexCollaborationMode";
+
 import {
   hasAuthoritativeResumeData,
   type ProviderPrimaryOperation,
@@ -368,12 +370,13 @@ class CodexAppServerRuntime {
     if (!model) {
       throw new Error("Codex app-server did not report a model required for collaboration mode.");
     }
+    const interactionMode = this.options.input.workload.interactionMode ?? "default";
     return {
-      mode: this.options.input.workload.interactionMode ?? "default",
+      mode: interactionMode,
       settings: {
         model,
         reasoning_effort: "medium",
-        developer_instructions: null,
+        developer_instructions: codexDeveloperInstructionsForMode(interactionMode),
       },
     };
   }

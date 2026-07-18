@@ -400,6 +400,26 @@ function resultStreamKind(itemType: PendingTool["itemType"]) {
   return "unknown" as const;
 }
 
+export function makeAntigravityToolResultDeltaPayload(input: {
+  readonly itemId: RuntimeItemId;
+  readonly itemType: PendingTool["itemType"];
+  readonly delta: string;
+}) {
+  const streamKind = resultStreamKind(input.itemType);
+  if (streamKind === "command_output") {
+    return makeUtf8RuntimeContentDeltaPayload({
+      streamKind,
+      delta: input.delta,
+      terminalId: input.itemId,
+      byteOffset: 0,
+    });
+  }
+  return makeUtf8RuntimeContentDeltaPayload({
+    streamKind,
+    delta: input.delta,
+  });
+}
+
 function isToolResultStep(step: TranscriptStep): boolean {
   return (
     step.source === "MODEL" &&
@@ -579,7 +599,11 @@ const makeAntigravityAdapter = Effect.gen(function* () {
         offer({
           ...base(context, { itemId: pending.itemId }),
           type: "content.delta",
-          payload: { streamKind: resultStreamKind(pending.itemType), delta: content },
+          payload: makeAntigravityToolResultDeltaPayload({
+            itemId: pending.itemId,
+            itemType: pending.itemType,
+            delta: content,
+          }),
           raw: raw(step.type ?? "tool-result", step),
         } satisfies ProviderRuntimeEvent);
       }

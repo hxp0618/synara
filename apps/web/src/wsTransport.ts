@@ -154,11 +154,12 @@ function rawSocketUrl(explicitUrl: string | null): string {
   if (explicitUrl) return withRemoteAccessToken(explicitUrl);
   const bridgeUrl = window.desktopBridge?.getWsUrl();
   const envUrl = import.meta.env.VITE_WS_URL as string | undefined;
-  const rawUrl = bridgeUrl && bridgeUrl.length > 0
-    ? bridgeUrl
-    : envUrl && envUrl.length > 0
-      ? envUrl
-       : `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.hostname}:${window.location.port}`;
+  const rawUrl =
+    bridgeUrl && bridgeUrl.length > 0
+      ? bridgeUrl
+      : envUrl && envUrl.length > 0
+        ? envUrl
+        : `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.hostname}:${window.location.port}`;
   return withRemoteAccessToken(rawUrl);
 }
 

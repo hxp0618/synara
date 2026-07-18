@@ -4,6 +4,7 @@ import type { OrchestrationReadModel, OrchestrationShellSnapshot } from "@synara
 
 import type { AppState } from "./store";
 import { syncAuthoritativeProjection, syncServerReadModel, syncServerShellSnapshot } from "./store";
+import { getThreadsFromState } from "./threadDerivation";
 import type { Project, Thread } from "./types";
 
 const project: Project = {
@@ -43,7 +44,6 @@ describe("syncAuthoritativeProjection", () => {
   it("replaces local shell entities with one normalized SaaS projection", () => {
     const state: AppState = {
       projects: [{ ...project, id: "local-project" as Project["id"], name: "Local" }],
-      threads: [{ ...thread, id: "local-thread" as Thread["id"] }],
       sidebarThreadSummaryById: {},
       threadsHydrated: true,
     };
@@ -51,7 +51,7 @@ describe("syncAuthoritativeProjection", () => {
     const next = syncAuthoritativeProjection(state, [project], [thread]);
 
     expect(next.projects.map((item) => item.id)).toEqual([project.id]);
-    expect(next.threads.map((item) => item.id)).toEqual([thread.id]);
+    expect(getThreadsFromState(next).map((item) => item.id)).toEqual([thread.id]);
     expect(next.threadIds).toEqual([thread.id]);
     expect(next.sidebarThreadSummaryById[thread.id]?.title).toBe("Remote session");
     expect(next.projectionAuthority).toBe("control-plane");
@@ -61,7 +61,6 @@ describe("syncAuthoritativeProjection", () => {
     const authoritative = syncAuthoritativeProjection(
       {
         projects: [],
-        threads: [],
         sidebarThreadSummaryById: {},
         threadsHydrated: false,
       },

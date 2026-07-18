@@ -1,6 +1,10 @@
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import {
+  CODEX_DEFAULT_MODE_DEVELOPER_INSTRUCTIONS,
+  CODEX_PLAN_MODE_DEVELOPER_INSTRUCTIONS,
+} from "@synara/shared/codexCollaborationMode";
 import { describe, expect, it } from "vitest";
 
 import { startProviderHostRun, type RunnerMessage } from "./providerHost";
@@ -863,8 +867,12 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
     send({ method: "turn/completed", params: { threadId: expectedReviewThread, turn: { id: "turn-review-1", items: [], status: "completed", error: null } } });
   } else if (message.method === "turn/start") {
     const expectedCollaborationMode = scenario === "user-input" ? "plan" : "default";
+    const expectedDeveloperInstructions = scenario === "user-input"
+      ? ${JSON.stringify(CODEX_PLAN_MODE_DEVELOPER_INSTRUCTIONS)}
+      : ${JSON.stringify(CODEX_DEFAULT_MODE_DEVELOPER_INSTRUCTIONS)};
     if (message.params?.collaborationMode?.mode !== expectedCollaborationMode) process.exit(6);
     if (message.params?.collaborationMode?.settings?.model !== "gpt-test") process.exit(7);
+    if (message.params?.collaborationMode?.settings?.developer_instructions !== expectedDeveloperInstructions) process.exit(8);
     if (scenario === "resume-rebuild") {
       const prompt = message.params?.input?.[0]?.text ?? "";
 			if (!prompt.includes("<synara_resume_snapshot_json>") || !prompt.includes("Focused tests passed") || !prompt.includes("<current_user>\\ncontinue\\n</current_user>")) process.exit(3);

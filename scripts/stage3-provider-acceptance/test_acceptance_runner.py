@@ -4369,6 +4369,98 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
         self.assertEqual(redactor.text(secret), "[REDACTED_REAL_PROVIDER_CREDENTIAL]")
         self.assertEqual(redactor.text(base_url), "[REDACTED_REAL_PROVIDER_BASE_URL]")
 
+    def test_real_provider_resources_resolve_model_from_environment_without_persisting_name(self) -> None:
+        secret = "stage3-real-provider-product-secret"
+        model = "claude-sonnet-4-6"
+        environment_name = "SYNARA_ACCEPTANCE_PROVIDER_MODEL"
+        with mock.patch.dict(
+            os.environ,
+            {
+                "SYNARA_ACCEPTANCE_PROVIDER_KEY": secret,
+                "SYNARA_ACCEPTANCE_PROVIDER_MODEL": model,
+            },
+        ):
+            options = acceptance.parse_args(
+                [
+                    "--target",
+                    "docker",
+                    "--provider",
+                    "claudeAgent",
+                    "--suite",
+                    "real-provider-smoke",
+                    "--runner-command-json",
+                    '["node","/tmp/provider-host.mjs"]',
+                    "--real-provider-credential-env",
+                    "SYNARA_ACCEPTANCE_PROVIDER_KEY",
+                    "--real-provider-model-env",
+                    environment_name,
+                ]
+            )
+        driver = FakeDriver(acceptance.STANDING_MANAGED_WORKER, name="docker")
+
+        class ResourceAPI(FakeAPI):
+            def request(
+                self,
+                method: str,
+                path: str,
+                payload: Mapping[str, Any] | None = None,
+                expected: Sequence[int] = (200,),
+                *,
+                maximum_timeout: float = 10.0,
+            ) -> Any:
+                del expected, maximum_timeout
+                self.requests.append((method, path, payload))
+                if path.endswith("/credentials"):
+                    return {
+                        "id": "credential-1",
+                        "organizationId": "organization-id",
+                        "provider": "claudeAgent",
+                        "credentialType": "api_key",
+                        "version": 1,
+                    }
+                if path.endswith("/projects"):
+                    return {
+                        "id": "project-1",
+                        "organizationId": "organization-id",
+                        "repositoryUrl": None,
+                    }
+                if path.endswith("/sessions"):
+                    assert payload is not None
+                    return {
+                        "id": "session-1",
+                        "provider": payload.get("provider"),
+                        "executionTargetId": payload.get("executionTargetId"),
+                        "providerCredentialId": payload.get("providerCredentialId"),
+                        "model": payload.get("model"),
+                        "lastEventSequence": 1,
+                    }
+                raise AssertionError(f"unexpected resource request: {method} {path}")
+
+        api = ResourceAPI()
+        driver.api = api
+        suite = acceptance.AcceptanceSuite(
+            options,
+            driver,
+            acceptance.Deadline(30.0),
+            acceptance.SecretRedactor(),
+        )
+        suite.state.tenant_id = "tenant-id"
+        suite.state.organization_id = "organization-id"
+        suite.state.target_id = "target-id"
+
+        with mock.patch.dict(
+            os.environ,
+            {
+                "SYNARA_ACCEPTANCE_PROVIDER_KEY": secret,
+            },
+        ):
+            evidence = suite._create_resources()
+
+        session_request = next(request for request in api.requests if request[1].endswith("/sessions"))
+        self.assertEqual(session_request[2]["model"], model)  # type: ignore[index]
+        self.assertNotIn(environment_name, json.dumps(session_request[2]))
+        self.assertNotIn(environment_name, json.dumps(evidence))
+
     def test_real_provider_resources_fail_closed_when_credential_env_is_missing(self) -> None:
         options = dataclasses.replace(
             runner_options(),
@@ -4823,6 +4915,28 @@ class RunnerOptionsTest(unittest.TestCase):
         )
         self.assertEqual(options.real_provider_model, "claude-sonnet-4-6")
 
+    def test_real_provider_model_env_resolves_without_persisting_environment_name(self) -> None:
+        environment_name = "SYNARA_ACCEPTANCE_CODEX_MODEL"
+        with mock.patch.dict(
+            os.environ,
+            {
+                "SYNARA_ACCEPTANCE_CODEX_MODEL": "gpt-5.6-sol",
+            },
+        ):
+            options = acceptance.parse_args(
+                [
+                    "--suite",
+                    "real-provider-smoke",
+                    "--runner-command-json",
+                    '["node","/tmp/provider-host.mjs"]',
+                    "--real-provider-model-env",
+                    environment_name,
+                ]
+            )
+
+        self.assertEqual(options.real_provider_model, "gpt-5.6-sol")
+        self.assertNotIn(environment_name, repr(dataclasses.asdict(options)))
+
     def test_real_provider_model_rejects_unsafe_or_non_real_provider_usage(self) -> None:
         invalid_arguments = (
             ["--real-provider-model", "gpt-5.6-sol"],
@@ -4834,11 +4948,41 @@ class RunnerOptionsTest(unittest.TestCase):
                 "--real-provider-model",
                 "bad model",
             ],
+            [
+                "--real-provider-model-env",
+                "SYNARA_ACCEPTANCE_CODEX_MODEL",
+            ],
+            [
+                "--suite",
+                "real-provider-smoke",
+                "--runner-command-json",
+                '["node","/tmp/provider-host.mjs"]',
+                "--real-provider-model-env",
+                "SYNARA_ACCEPTANCE_CODEX_MODEL",
+                "--real-provider-model",
+                "gpt-5.6-sol",
+            ],
         )
         for arguments in invalid_arguments:
             with self.subTest(arguments=arguments):
                 with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
                     acceptance.parse_args(arguments)
+
+    def test_real_provider_model_env_fails_closed_when_missing_or_empty(self) -> None:
+        arguments = [
+            "--suite",
+            "real-provider-smoke",
+            "--runner-command-json",
+            '["node","/tmp/provider-host.mjs"]',
+            "--real-provider-model-env",
+            "SYNARA_ACCEPTANCE_MISSING_MODEL",
+        ]
+        with mock.patch.dict(os.environ, {}, clear=True):
+            with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                acceptance.parse_args(arguments)
+        with mock.patch.dict(os.environ, {"SYNARA_ACCEPTANCE_MISSING_MODEL": ""}, clear=True):
+            with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                acceptance.parse_args(arguments)
 
     def test_real_provider_credential_options_reject_unsafe_names_and_fields(self) -> None:
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):

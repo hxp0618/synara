@@ -4475,7 +4475,6 @@ export function syncAuthoritativeProjection(
     ...normalizedState,
     projectionAuthority: "control-plane",
     projects: [...projects],
-    threads,
     sidebarThreadSummaryById,
     threadsHydrated: true,
   };

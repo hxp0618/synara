@@ -208,7 +208,11 @@ import {
   ensureLeadingSpaceForReplacement,
   extendReplacementRangeForTrailingSpace,
 } from "../composerTriggerInsertion";
-import { createProjectSelector, createThreadSelector } from "../storeSelectors";
+import {
+  createAllThreadsSelector,
+  createProjectSelector,
+  createThreadSelector,
+} from "../storeSelectors";
 import {
   canOfferForkSlashCommand,
   canOfferSideSlashCommand,
@@ -1285,6 +1289,7 @@ export default function ChatView({
   const markTemporaryThread = useTemporaryThreadStore((store) => store.markTemporaryThread);
   const clearTemporaryThread = useTemporaryThreadStore((store) => store.clearTemporaryThread);
   const serverThread = useStore(useMemo(() => createThreadSelector(threadId), [threadId]));
+  const selectAllThreads = useMemo(() => createAllThreadsSelector(), []);
   const fallbackDraftProjectId = draftThread?.projectId ?? null;
   const fallbackDraftProject = useStore(
     useMemo(() => createProjectSelector(fallbackDraftProjectId), [fallbackDraftProjectId]),
@@ -1783,7 +1788,7 @@ export default function ChatView({
     [activeThreadId, controlPlane.sessions],
   );
   const automationProjects = useStore((state) => state.projects);
-  const automationThreads = useStore((state) => state.threads);
+  const automationThreads = useStore(selectAllThreads);
   const { data: automationData, updateMutation: automationUpdateMutation } = useAutomations();
   const [automationDraftForm, setAutomationDraftForm] = useState<AutomationFormState | null>(null);
   const [automationEditingDefinition, setAutomationEditingDefinition] =
@@ -3701,12 +3706,6 @@ export default function ChatView({
           : selectedProvider === "kilo"
             ? providerOptionsForDispatch?.kilo?.serverUrl
             : null) ?? null,
-      serverPassword:
-        (selectedProvider === "opencode"
-          ? providerOptionsForDispatch?.opencode?.serverPassword
-          : selectedProvider === "kilo"
-            ? providerOptionsForDispatch?.kilo?.serverPassword
-            : null) ?? null,
       experimentalWebSockets:
         selectedProvider === "opencode"
           ? providerOptionsForDispatch?.opencode?.experimentalWebSockets
@@ -5108,8 +5107,6 @@ export default function ChatView({
     isServerThread,
     stopActiveThreadSession,
     runProjectScript,
-    setStoreThreadWorkspace,
-    syncServerShellSnapshot,
   });
   const persistProjectScripts = useCallback(
     async (input: {
@@ -8432,6 +8429,7 @@ export default function ChatView({
       selectedComposerMentionsForSend,
     );
     const turnAttachmentsPromise = buildUploadComposerAttachments({
+      threadId: threadIdForSend,
       images: composerImagesSnapshot,
       files: composerFilesSnapshot,
       assistantSelections: composerAssistantSelectionsSnapshot,

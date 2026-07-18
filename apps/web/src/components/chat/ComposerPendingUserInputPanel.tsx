@@ -50,7 +50,9 @@ export const ComposerPendingUserInputPanel = memo(function ComposerPendingUserIn
         `${activePrompt.requestId}:${activePrompt.lifecycleGeneration ?? "legacy"}`
       }
       prompt={activePrompt}
-      isResponding={respondingRequestIds.includes(activePrompt.requestKey ?? activePrompt.requestId)}
+      isResponding={respondingRequestIds.includes(
+        activePrompt.requestKey ?? activePrompt.requestId,
+      )}
       answers={answers}
       questionIndex={questionIndex}
       onToggleOption={onToggleOption}
@@ -100,19 +102,22 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
     };
   }, [activeQuestion?.id, isResponding]);
 
-  const handleOptionSelection = useCallback((questionId: string, optionLabel: string) => {
-    const nextDraftAnswer = onToggleOption(questionId, optionLabel);
-    if (activeQuestion?.multiSelect) {
-      return;
-    }
-    if (autoAdvanceTimerRef.current !== null) {
-      window.clearTimeout(autoAdvanceTimerRef.current);
-    }
-    autoAdvanceTimerRef.current = window.setTimeout(() => {
-      autoAdvanceTimerRef.current = null;
-      onAdvanceRef.current(nextDraftAnswer ? { [questionId]: nextDraftAnswer } : undefined);
-    }, 200);
-  }, [activeQuestion?.multiSelect, onToggleOption]);
+  const handleOptionSelection = useCallback(
+    (questionId: string, optionLabel: string) => {
+      const nextDraftAnswer = onToggleOption(questionId, optionLabel);
+      if (activeQuestion?.multiSelect) {
+        return;
+      }
+      if (autoAdvanceTimerRef.current !== null) {
+        window.clearTimeout(autoAdvanceTimerRef.current);
+      }
+      autoAdvanceTimerRef.current = window.setTimeout(() => {
+        autoAdvanceTimerRef.current = null;
+        onAdvanceRef.current(nextDraftAnswer ? { [questionId]: nextDraftAnswer } : undefined);
+      }, 200);
+    },
+    [activeQuestion?.multiSelect, onToggleOption],
+  );
 
   // Keyboard shortcut: digits toggle options for multi-select prompts and preserve
   // the current auto-advance behavior for single-select questions.

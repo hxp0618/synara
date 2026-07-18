@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import dataclasses
 import datetime as dt
 import json
@@ -116,6 +117,45 @@ def provider_model(options: Any, provider: str) -> str | None:
     if provider == "claudeAgent":
         return options.claude_model
     raise ValueError(f"unsupported controlled remote release Provider: {provider}")
+
+
+def add_provider_model_arguments(
+    parser: argparse.ArgumentParser,
+    provider_name: str,
+) -> None:
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument(
+        f"--{provider_name}-model",
+        help=f"Explicit non-secret {provider_name} model identifier",
+    )
+    group.add_argument(
+        f"--{provider_name}-model-env",
+        help=(
+            f"Environment variable containing the non-secret {provider_name} model identifier; "
+            "only the resolved value is retained"
+        ),
+    )
+
+
+def parse_provider_model_argument(
+    raw_model: str | None,
+    raw_model_env: str | None,
+    *,
+    provider_label: str,
+    model_option: str,
+    model_env_option: str,
+) -> str | None:
+    if raw_model_env is None:
+        return acceptance.parse_provider_model(raw_model, model_option)
+    environment_name = acceptance.parse_environment_variable_name(raw_model_env, model_env_option)
+    assert environment_name is not None
+    resolved_model = acceptance.read_environment_value(
+        environment_name,
+        f"{provider_label} real Provider model",
+        maximum_length=256,
+        forbidden_characters="\r\n\t\x00",
+    )
+    return acceptance.parse_provider_model(resolved_model, model_env_option)
 
 
 def child_policy(
