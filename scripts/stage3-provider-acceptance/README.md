@@ -792,6 +792,32 @@ exact Namespace/RBAC/image cleanup and zero Secret findings. See
 `docs/reports/stage-3-kubernetes-orbstack-fixture-1e826324.md`. This remains deterministic fixture evidence, not a
 real Codex/Claude, multi-node or immutable registry rollout gate.
 
+## SaaS Web Structured User Input multi-browser acceptance
+
+`apps/web/scripts/stage3-user-input-multibrowser.mjs` is a state-writing live acceptance harness for an isolated
+SaaS Web, Control Plane, PostgreSQL, and MinIO stack. It creates its own Tenant-scoped Project, Session, Turn,
+Execution, and fixture Worker, then verifies competing two-page resolution, stale auto-submit cancellation,
+replacement-request draft isolation, acknowledged delivery, and one authoritative terminal Event.
+
+Set the Worker registration token out of band. Pass only these environment variable names to the process; never
+copy a token, Cookie, or Provider Credential into chat, shell history, screenshots, or reports:
+
+```sh
+export SYNARA_STAGE3_WEB_ORIGIN=http://localhost:57733
+export SYNARA_STAGE3_CONTROL_PLANE_URL=http://127.0.0.1:60331
+# Set SYNARA_WORKER_REGISTRATION_TOKEN out of band.
+bun run --cwd apps/web stage3:user-input:multibrowser
+```
+
+Optional inputs are `SYNARA_STAGE3_EVIDENCE_DIR`, `SYNARA_STAGE3_USER_EMAIL`,
+`SYNARA_STAGE3_MANUAL=1`, and `SYNARA_STAGE3_MANUAL_TIMEOUT_MS`. Automatic mode stores two terminal screenshots in
+the evidence directory. Manual mode prints only the generated Session URL and non-secret dev-login identity, then
+waits for the operator to resolve `manual-choice=Continue` in the browser.
+
+Do not point this harness at shared or production state. Product requests go through the Web origin, Worker requests
+go directly to the isolated Control Plane, Cookies remain in process memory, and failure/console diagnostics retain
+only bounded problem codes or hashes rather than raw response bodies or console text.
+
 ## Provider Host Protocol fixture
 
 This directory contains a deterministic Provider Host Protocol 2.1 fixture for the Stage 3 protocol and fault

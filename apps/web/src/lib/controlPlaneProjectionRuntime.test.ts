@@ -152,7 +152,7 @@ describe("ControlPlaneProjectionRuntime", () => {
     runtime.dispose();
   });
 
-  it("keeps watched catch-up failures reconnecting until the live stream opens", async () => {
+  it("leaves reconnecting once a replacement live stream is attached", async () => {
     let handlers:
       | {
           onEvent: (event: ControlPlaneSessionEvent) => void;
@@ -188,7 +188,7 @@ describe("ControlPlaneProjectionRuntime", () => {
     runtime.watch(session.id);
     await vi.waitFor(() => expect(subscribeSessionEvents).toHaveBeenCalledTimes(1));
     expect(listSessionEvents).toHaveBeenCalledTimes(2);
-    expect(runtime.projections.get(session.id)?.streamStatus).toBe("reconnecting");
+    expect(runtime.projections.get(session.id)?.streamStatus).toBe("connecting");
 
     handlers?.onOpen?.();
     expect(runtime.projections.get(session.id)?.streamStatus).toBe("live");
@@ -378,7 +378,7 @@ describe("ControlPlaneProjectionRuntime", () => {
     expect(FakeEventSource.instances[1]!.url).toBe(
       "https://synara.example/v1/sessions/session-1/events/stream?afterSequence=3",
     );
-    expect(runtime.projections.get(session.id)?.streamStatus).toBe("reconnecting");
+    expect(runtime.projections.get(session.id)?.streamStatus).toBe("connecting");
     FakeEventSource.instances[1]!.onopen?.();
     expect(runtime.projections.get(session.id)?.streamStatus).toBe("live");
 

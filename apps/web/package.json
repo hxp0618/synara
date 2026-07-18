@@ -12,6 +12,7 @@
     "test": "vitest run --passWithNoTests",
     "test:browser": "vitest run --config vitest.browser.config.ts",
     "test:browser:install": "playwright install --with-deps chromium",
+    "stage3:user-input:multibrowser": "node scripts/stage3-user-input-multibrowser.mjs",
     "measure:lcp": "node scripts/measure-lcp.mjs"
   },
   "dependencies": {

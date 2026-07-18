@@ -36,8 +36,9 @@ multi-host/Kubernetes multi-node、real Provider-process/release-rollout failure
 - [ ] 报告明确区分真实 Provider、deterministic fixture、Target 类型和是否经过 Control Plane/agentd。
 - [ ] 当前已知限制、外部依赖和未执行项已由发布负责人接受。
 - [ ] 第三方 Codex/Claude API Key 只通过受控 Credential `apiKey` 与可选 `baseUrl` 注入；新建/轮换拒绝
-      Codex `organization` 与 Claude `authToken`，历史记录只保留解析兼容；值和 operator 环境变量名未进入
-      聊天、命令参数、Target 配置、日志或报告。
+      Codex `organization` 与 Claude `authToken`，历史记录只保留解析兼容；Secret 值未进入聊天、命令参数、
+      Target 配置、日志或报告；operator 环境变量名只作为受控 gate CLI 输入，未进入 Target 配置、持久化
+      command evidence、日志或报告。
 - [ ] 没有把 Local Provider Host smoke 描述成 Local Supervisor、SSH、Docker 或 Kubernetes Release Gate。
 
 ## 2. 数据库与 DDL

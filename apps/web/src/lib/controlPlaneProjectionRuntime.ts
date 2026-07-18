@@ -279,6 +279,9 @@ export class ControlPlaneProjectionRuntime {
         },
       });
       this.#streams.set(sessionId, { close, reconnectTimer: null });
+      if (this.#projections.get(sessionId)?.streamStatus === "reconnecting") {
+        this.#setStreamStatus(sessionId, "connecting");
+      }
     } catch {
       this.#setStreamStatus(sessionId, "reconnecting");
       this.#scheduleReconnect(sessionId);

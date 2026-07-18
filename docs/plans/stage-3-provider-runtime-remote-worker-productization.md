@@ -91,8 +91,9 @@
 - Codex、Claude 的受控 Credential 必须支持第三方 API Key；新建和轮换的 managed Provider payload 使用
   严格 allowlist 的 `apiKey` 和可选 `baseUrl`，分别映射到 Provider 官方环境变量。历史 Claude
   `authToken` 与 Codex `organization` 只保留只读解析兼容，不能由新建/轮换入口继续写入。Secret
-  值只从 operator-owned 环境变量读取并在任何构建、子进程或报告生成前注册到 redactor；聊天、命令参数、
-  Target 配置和 evidence 均不得保存值或环境变量名。
+  值只从 operator-owned 环境变量读取并在任何构建、子进程或报告生成前注册到 redactor；Secret 值不得进入
+  聊天、命令参数、Target 配置或 evidence。环境变量名只允许作为受控 gate CLI 输入，不得进入 Target 配置、
+  持久化 command evidence、日志或报告。
 - 第三方 API Key/Base URL 注入能力与具体 endpoint 的产品能力分开验收。`6b71703f` 的真实 Kubernetes 四
   child gate 证明受控注入、同镜像/Catalog、Codex failure matrix、cleanup 和 Secret scan；但当前 Claude
   profile 稳定返回 HTTP `502`，当前 Codex profile 的 approval-required Turn 只有 `reasoning`、没有
