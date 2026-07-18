@@ -92,6 +92,7 @@ import {
 } from "~/lib/providerDiscoveryReactQuery";
 import { projectSearchEntriesQueryOptions } from "~/lib/projectReactQuery";
 import { serverConfigQueryOptions, serverQueryKeys } from "~/lib/serverReactQuery";
+import { downloadUrlAsBlob } from "~/lib/browserDownload";
 import { useRefreshProviderStatusesNow } from "~/hooks/useProviderStatusRefresh";
 import { SINGLE_CHAT_PANE_SCOPE_ID } from "~/lib/chatPaneScope";
 import {
@@ -349,8 +350,14 @@ import {
   useControlPlane,
   useControlPlanePendingInteractions,
   useControlPlaneProjectProviderCapabilities,
+  useControlPlaneSessionArtifacts,
   useControlPlaneSessionProviderCapabilities,
 } from "../controlPlaneContext";
+import {
+  controlPlaneArtifactDisplayName,
+  latestControlPlaneArtifactReadySequence,
+} from "../lib/controlPlaneArtifacts";
+import { controlPlaneClient, type ControlPlaneArtifact } from "../lib/controlPlaneClient";
 import { ControlPlaneTurnDispatcher } from "../lib/controlPlaneTurnDispatch";
 import {
   assertControlPlaneCapabilityAllowed,
@@ -517,6 +524,7 @@ import { resolveRuntimeModelDescriptor } from "./chat/runtimeModelCapabilities";
 import { ProjectPicker } from "./chat/ProjectPicker";
 import { FolderClosed } from "./FolderClosed";
 import { ControlPlaneProviderCapabilityBanner } from "./chat/ControlPlaneProviderCapabilityBanner";
+import { ControlPlaneSessionArtifacts } from "./chat/ControlPlaneSessionArtifacts";
 import { ControlPlaneSessionStreamBanner } from "./chat/ControlPlaneSessionStreamBanner";
 import { ProviderHealthBanner } from "./chat/ProviderHealthBanner";
 import { ThreadErrorBanner } from "./chat/ThreadErrorBanner";
@@ -1722,6 +1730,10 @@ export default function ChatView({
   const activeThreadId = activeThread?.id ?? null;
   const activeLatestTurn = activeThread?.latestTurn ?? null;
   const threadActivities = activeThread?.activities ?? EMPTY_ACTIVITIES;
+  const observedArtifactReadySequence = useMemo(
+    () => latestControlPlaneArtifactReadySequence(threadActivities),
+    [threadActivities],
+  );
   const hasLiveTurnTail = hasLiveTurnTailWork({
     latestTurn: activeLatestTurn,
     messages: activeThread?.messages ?? EMPTY_MESSAGES,
@@ -2072,6 +2084,27 @@ export default function ChatView({
   const sessionProviderCapabilitiesQuery = useControlPlaneSessionProviderCapabilities(
     controlPlane.isAuthoritative && isServerThread ? (activeThread?.id ?? null) : null,
   );
+  const sessionArtifactsQuery = useControlPlaneSessionArtifacts(
+    controlPlane.isAuthoritative && isServerThread ? (activeThread?.id ?? null) : null,
+    observedArtifactReadySequence,
+  );
+  const artifactDownloadMutation = useMutation({
+    mutationFn: async (artifact: ControlPlaneArtifact) => {
+      const grant = await controlPlaneClient.issueArtifactDownload(artifact.id);
+      await downloadUrlAsBlob({
+        url: grant.url,
+        filename: controlPlaneArtifactDisplayName(grant.artifact),
+      });
+      return grant.artifact;
+    },
+    onError: (error) => {
+      toastManager.add({
+        type: "error",
+        title: "Artifact download failed",
+        description: error instanceof Error ? error.message : "An error occurred.",
+      });
+    },
+  });
   const activeProviderCapabilityProjection = isServerThread
     ? sessionProviderCapabilitiesQuery.data
     : projectProviderCapabilitiesQuery.data;
@@ -12022,6 +12055,17 @@ export default function ChatView({
         decision={controlPlane.isAuthoritative ? activeComposerDispatchDecision : null}
       />
       <ControlPlaneSessionStreamBanner status={activeControlPlaneStreamStatus} />
+      <ControlPlaneSessionArtifacts
+        artifacts={sessionArtifactsQuery.data?.items}
+        error={sessionArtifactsQuery.error instanceof Error ? sessionArtifactsQuery.error : null}
+        downloadingArtifactId={
+          artifactDownloadMutation.isPending
+            ? (artifactDownloadMutation.variables?.id ?? null)
+            : null
+        }
+        onDownload={artifactDownloadMutation.mutate}
+        onRetry={() => void sessionArtifactsQuery.refetch()}
+      />
       <ThreadErrorBanner error={activeThread.error} onDismiss={dismissActiveThreadError} />
       <RateLimitBanner
         rateLimitStatus={visibleActiveRateLimitStatus}

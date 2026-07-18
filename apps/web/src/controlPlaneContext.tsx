@@ -25,6 +25,7 @@ import {
   type ControlPlaneAdvancedCommandResult,
   type ControlPlaneAgentSession,
   type ControlPlaneAgentTurn,
+  type ControlPlaneArtifact,
   type ControlPlaneControlCommand,
   type ControlPlaneForkResult,
   type ControlPlaneIdempotencyOptions,
@@ -83,6 +84,8 @@ export const controlPlaneQueryKeys = {
     ] as const,
   pendingInteractions: (tenantId: string | null, sessionId: string | null) =>
     ["control-plane", "tenants", tenantId, "sessions", sessionId, "pending-interactions"] as const,
+  sessionArtifacts: (tenantId: string | null, sessionId: string | null) =>
+    ["control-plane", "tenants", tenantId, "sessions", sessionId, "artifacts"] as const,
   projectProviderCapabilities: (projectId: string | null, executionTargetId: string | null) =>
     ["control-plane", "projects", projectId, "provider-capabilities", executionTargetId] as const,
   sessionProviderCapabilities: (sessionId: string | null) =>
@@ -1248,5 +1251,49 @@ export function useControlPlanePendingInteractions(
     lastReconciliationRef.current = { sessionId, sequence: observedInteractionSequence };
     void query.refetch();
   }, [observedInteractionSequence, query.isFetching, query.refetch, sessionId, snapshotSequence]);
+  return query;
+}
+
+export function useControlPlaneSessionArtifacts(
+  sessionId: string | null,
+  observedArtifactReadySequence: number | null,
+) {
+  const controlPlane = useControlPlane();
+  const tenantId = controlPlane.activeTenant?.id ?? null;
+  const lastReconciliationRef = useRef<{ sessionId: string | null; sequence: number | null }>({
+    sessionId: null,
+    sequence: null,
+  });
+  const query = useQuery<{ items: ReadonlyArray<ControlPlaneArtifact> }>({
+    queryKey: controlPlaneQueryKeys.sessionArtifacts(tenantId, sessionId),
+    queryFn: () => controlPlaneClient.listArtifacts(sessionId!),
+    enabled: controlPlane.isAuthoritative && tenantId !== null && sessionId !== null,
+    retry: false,
+  });
+  useEffect(() => {
+    if (lastReconciliationRef.current.sessionId !== sessionId) {
+      // The query already fetches when a Session first becomes active. Treat
+      // the latest sequence visible at that point as part of that initial
+      // reconciliation so an already-rendered artifact.ready event does not
+      // trigger a redundant second request.
+      lastReconciliationRef.current = {
+        sessionId,
+        sequence: observedArtifactReadySequence,
+      };
+      return;
+    }
+    if (
+      observedArtifactReadySequence === null ||
+      query.isFetching ||
+      lastReconciliationRef.current.sequence === observedArtifactReadySequence
+    ) {
+      return;
+    }
+    lastReconciliationRef.current = {
+      sessionId,
+      sequence: observedArtifactReadySequence,
+    };
+    void query.refetch();
+  }, [observedArtifactReadySequence, query.isFetching, query.refetch, sessionId]);
   return query;
 }
