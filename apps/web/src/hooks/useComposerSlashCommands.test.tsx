@@ -157,4 +157,53 @@ describe("useComposerSlashCommands SaaS routing", () => {
     expect(navigateToThread).toHaveBeenCalledWith(ThreadId.makeUnsafe("session-forked"));
     expect(readNativeApiMock).not.toHaveBeenCalled();
   });
+
+  it("routes plan and default through interaction mode updates without local API access", async () => {
+    const handleInteractionModeChange = vi.fn();
+    const controller = renderSlashCommandHook(makeInput({ handleInteractionModeChange }));
+
+    await expect(controller.handleStandaloneSlashCommand("/plan")).resolves.toBe(true);
+    await expect(controller.handleStandaloneSlashCommand("/default")).resolves.toBe(true);
+
+    expect(handleInteractionModeChange.mock.calls).toEqual([["plan"], ["default"]]);
+    expect(readNativeApiMock).not.toHaveBeenCalled();
+  });
+
+  it("opens the SaaS review target picker without falling back to local discovery", async () => {
+    const openReviewTargetPicker = vi.fn();
+    const startControlPlaneReview = vi.fn(async () => undefined);
+    const controller = renderSlashCommandHook(
+      makeInput({
+        openReviewTargetPicker,
+        startControlPlaneReview,
+      }),
+    );
+
+    await expect(controller.handleStandaloneSlashCommand("/review")).resolves.toBe(true);
+
+    expect(openReviewTargetPicker).toHaveBeenCalledOnce();
+    expect(startControlPlaneReview).not.toHaveBeenCalled();
+    expect(readNativeApiMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects SaaS fork local and worktree targets instead of falling back to local forking", async () => {
+    const forkControlPlaneSession = vi.fn(async () => ThreadId.makeUnsafe("session-forked"));
+    const navigateToThread = vi.fn(async () => undefined);
+    const openForkTargetPicker = vi.fn();
+    const controller = renderSlashCommandHook(
+      makeInput({
+        forkControlPlaneSession,
+        navigateToThread,
+        openForkTargetPicker,
+      }),
+    );
+
+    await expect(controller.handleStandaloneSlashCommand("/fork local")).resolves.toBe(true);
+    await expect(controller.handleStandaloneSlashCommand("/fork worktree")).resolves.toBe(true);
+
+    expect(forkControlPlaneSession).not.toHaveBeenCalled();
+    expect(navigateToThread).not.toHaveBeenCalled();
+    expect(openForkTargetPicker).not.toHaveBeenCalled();
+    expect(readNativeApiMock).not.toHaveBeenCalled();
+  });
 });

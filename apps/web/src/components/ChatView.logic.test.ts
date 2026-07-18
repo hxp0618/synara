@@ -86,6 +86,20 @@ describe("authoritative conversation rollback routing", () => {
     ).toBe(nativeApi);
     expect(readNativeApi).toHaveBeenCalledOnce();
   });
+
+  it("short-circuits authoritative rollback before a failing local API read", () => {
+    const readNativeApi = vi.fn(() => {
+      throw new Error("local rollback should stay unreachable");
+    });
+
+    expect(
+      readNativeApiForConversationRollback({
+        controlPlaneAuthoritative: true,
+        readNativeApi,
+      }),
+    ).toBeUndefined();
+    expect(readNativeApi).not.toHaveBeenCalled();
+  });
 });
 
 describe("server thread model switching availability", () => {

@@ -815,7 +815,12 @@ export class Stage3ProviderAcceptanceHost {
       return;
     }
     const requestId = optionalString(command.payload.requestId);
-    if (requestId !== pending.requestId || !asRecord(command.payload.resolution)) {
+    const resolution = asRecord(command.payload.resolution);
+    const answers = expected === "user-input" ? asRecord(resolution?.answers) : undefined;
+    const validUserInputAnswer =
+      expected !== "user-input" ||
+      (answers?.["fixture-choice"] === "Continue" && Object.keys(answers).length === 1);
+    if (requestId !== pending.requestId || !resolution || !validUserInputAnswer) {
       this.#terminalError(
         command,
         protocolError(`${command.commandType} payload does not match the active interaction.`),
@@ -1030,7 +1035,7 @@ export class Stage3ProviderAcceptanceHost {
     try {
       const decoded = JSON.parse(encoded.toString("utf8"));
       const payload = asRecord(asRecord(decoded)?.payload);
-      if (payload?.acceptanceToken !== STAGE3_FIXTURE_CREDENTIAL_SENTINEL) {
+      if (payload?.apiKey !== STAGE3_FIXTURE_CREDENTIAL_SENTINEL) {
         this.#credentialReadResult = { ok: false, code: "credential_invalid" };
       } else {
         this.#credentialReadResult = {

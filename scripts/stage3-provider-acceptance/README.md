@@ -846,11 +846,11 @@ bun run scripts/stage3-provider-acceptance/provider-host-fixture.ts \
   --fault=oversized --fault-on=SendTurn
 ```
 
-The fixture reads the anonymous Credential FD only when `[credential]` is requested. It requires this exact test
-shape and Sentinel:
+The fixture reads the anonymous Credential FD only when `[credential]` is requested. The deterministic Credential
+uses the same supported `api_key` / `apiKey` shape as product Provider Credentials and requires this exact Sentinel:
 
 ```json
-{ "payload": { "acceptanceToken": "stage3-provider-acceptance-credential-v1" } }
+{ "payload": { "apiKey": "stage3-provider-acceptance-credential-v1" } }
 ```
 
 It closes the FD, clears byte buffers, and returns only `credentialVerified` plus sorted payload key names under

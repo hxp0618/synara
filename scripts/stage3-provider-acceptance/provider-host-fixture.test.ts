@@ -307,6 +307,17 @@ describe("Stage 3 Provider Host acceptance fixture", () => {
       },
     });
     host.handleCommand(
+      command("ResolveUserInput", "resolve-input-invalid", {
+        requestId: "fixture-user-input-generation-1-2",
+        resolution: { answers: { "fixture-choice": "Stop" } },
+      }),
+    );
+    expect(messagesFor(output, "resolve-input-invalid").at(-1)).toMatchObject({
+      messageType: "Error",
+      error: { code: "protocol_violation" },
+    });
+    expect(messagesFor(output, "send-input").filter(isTerminal)).toHaveLength(0);
+    host.handleCommand(
       command("ResolveUserInput", "resolve-input", {
         requestId: "fixture-user-input-generation-1-2",
         resolution: { answers: { "fixture-choice": "Continue" } },
@@ -491,7 +502,7 @@ describe("Stage 3 Provider Host acceptance fixture", () => {
     const secret = STAGE3_FIXTURE_CREDENTIAL_SENTINEL;
     writeFileSync(
       credentialPath,
-      JSON.stringify({ payload: { acceptanceToken: secret, provider: "fixture" } }),
+      JSON.stringify({ payload: { apiKey: secret, provider: "fixture" } }),
       { mode: 0o600 },
     );
     const descriptor = openSync(credentialPath, "r");
@@ -517,7 +528,7 @@ describe("Stage 3 Provider Host acceptance fixture", () => {
         output: {
           credentialEvidence: {
             credentialVerified: true,
-            credentialPayloadKeys: ["acceptanceToken", "provider"],
+            credentialPayloadKeys: ["apiKey", "provider"],
           },
         },
       },

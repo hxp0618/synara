@@ -388,7 +388,7 @@ class FixtureConcurrencySuite(acceptance.AcceptanceSuite):
         return {
             "id": f"credential-{provider}",
             "provider": provider,
-            "credentialType": "acceptance_fixture",
+            "credentialType": "api_key",
         }
 
     def _create_project_session(
@@ -724,7 +724,7 @@ class FixtureLoadSuite(FixtureConcurrencySuite):
                 "payload": {
                     "output": {
                         "credentialEvidence": {
-                            "credentialPayloadKeys": ["acceptanceToken"],
+                            "credentialPayloadKeys": ["apiKey"],
                             "credentialVerified": True,
                         }
                     }
@@ -969,13 +969,27 @@ class BarrierSuite(acceptance.AcceptanceSuite):
         return {"manifestId": "manifest-after-restart", "workerStatusCounts": {"online": 1}}
 
 
-class PendingApprovalRecoverySuite(BarrierSuite):
-    def __init__(self, *, replacement_request_id: str = "approval-request-2") -> None:
+class PendingInteractionRecoverySuite(BarrierSuite):
+    def __init__(
+        self,
+        *,
+        kind: str,
+        initial_request_id: str,
+        replacement_request_id: str,
+        resolved_event_type: str,
+        stale_status: str = "expired",
+        stale_delivery_status: str = "superseded",
+    ) -> None:
         super().__init__(acceptance.EXECUTION_PINNED_WORKER)
         self.fake_driver.pending_interaction_recovery = "delete-pod"
         self.fake_driver.recover_pending_interaction = self._recover_pending_interaction  # type: ignore[method-assign]
         self.fake_driver.observe_execution = self._observe_execution  # type: ignore[method-assign]
+        self.kind = kind
+        self.initial_request_id = initial_request_id
         self.replacement_request_id = replacement_request_id
+        self.resolved_event_type = resolved_event_type
+        self.stale_status = stale_status
+        self.stale_delivery_status = stale_delivery_status
         self.recovered = False
 
     def _recover_pending_interaction(self, target_id: str, execution_id: str) -> Mapping[str, Any]:
@@ -988,21 +1002,17 @@ class PendingApprovalRecoverySuite(BarrierSuite):
 
     def _wait_for_interaction(self, turn_id: str, kind: str) -> dict[str, Any]:
         self.interaction_waits += 1
-        if not self.recovered:
-            return {
-                "id": "interaction-1",
-                "turnId": turn_id,
-                "kind": kind,
-                "executionId": "execution-1",
-                "requestId": "approval-request-1",
-            }
-        return {
-            "id": "interaction-2",
+        interaction = {
+            "id": "interaction-2" if self.recovered else "interaction-1",
             "turnId": turn_id,
             "kind": kind,
             "executionId": "execution-1",
-            "requestId": self.replacement_request_id,
+            "requestId": self.replacement_request_id if self.recovered else self.initial_request_id,
         }
+        payload = self._interaction_payload()
+        if payload is not None:
+            interaction["payload"] = payload
+        return interaction
 
     def _wait_for_replacement_interaction(
         self,
@@ -1029,11 +1039,13 @@ class PendingApprovalRecoverySuite(BarrierSuite):
             },
             {
                 "sequence": 2,
-                "eventType": "request.opened",
+                "eventType": (
+                    "request.opened" if self.kind == "approval" else "user-input.requested"
+                ),
                 "executionId": "execution-1",
                 "workerId": "worker-1",
                 "generation": 1,
-                "payload": {"requestId": "approval-request-1"},
+                "payload": {"requestId": self.initial_request_id},
             },
         ]
         if self.recovered:
@@ -1049,7 +1061,11 @@ class PendingApprovalRecoverySuite(BarrierSuite):
                     },
                     {
                         "sequence": 4,
-                        "eventType": "request.opened",
+                        "eventType": (
+                            "request.opened"
+                            if self.kind == "approval"
+                            else "user-input.requested"
+                        ),
                         "executionId": "execution-1",
                         "workerId": "worker-2",
                         "generation": 2,
@@ -1078,13 +1094,105 @@ class PendingApprovalRecoverySuite(BarrierSuite):
                 "executionId": "execution-1",
                 "payload": {"turnId": turn_id, "executionId": "execution-1"},
             },
-            {"sequence": 2, "eventType": "request.resolved", "executionId": "execution-1"},
+            {"sequence": 2, "eventType": self.resolved_event_type, "executionId": "execution-1"},
             terminal,
         ]
+
+    def _execution_interactions(self, execution_id: str) -> list[dict[str, Any]]:
+        if execution_id != "execution-1":
+            raise AssertionError(f"unexpected execution ID: {execution_id}")
+        interactions = [
+            {
+                "id": "interaction-1",
+                "turnId": "turn-1",
+                "executionId": execution_id,
+                "workerId": "worker-1",
+                "generation": 1,
+                "requestId": self.initial_request_id,
+                "kind": self.kind,
+                "status": self.stale_status if self.recovered else "pending",
+                "deliveryStatus": self.stale_delivery_status if self.recovered else "pending",
+                "deliveryError": (
+                    "The Execution generation advanced before this interaction could be resolved or delivered."
+                    if self.recovered and self.stale_delivery_status == "superseded"
+                    else None
+                ),
+            }
+        ]
+        if self.recovered:
+            interactions.append(
+                {
+                    "id": "interaction-2",
+                    "turnId": "turn-1",
+                    "executionId": execution_id,
+                    "workerId": "worker-2",
+                    "generation": 2,
+                    "requestId": self.replacement_request_id,
+                    "kind": self.kind,
+                    "status": "pending",
+                    "deliveryStatus": "pending",
+                }
+            )
+        return interactions
 
     def _observe_execution(self, target_id: str, execution_id: str) -> Mapping[str, Any]:
         del target_id, execution_id
         return {"podUid": "pod-uid-2", "generation": "2"}
+
+    def _interaction_payload(self) -> dict[str, Any] | None:
+        return None
+
+
+class PendingApprovalRecoverySuite(PendingInteractionRecoverySuite):
+    def __init__(
+        self,
+        *,
+        replacement_request_id: str = "approval-request-2",
+        stale_status: str = "expired",
+        stale_delivery_status: str = "superseded",
+    ) -> None:
+        super().__init__(
+            kind="approval",
+            initial_request_id="approval-request-1",
+            replacement_request_id=replacement_request_id,
+            resolved_event_type="request.resolved",
+            stale_status=stale_status,
+            stale_delivery_status=stale_delivery_status,
+        )
+
+
+class PendingUserInputRecoverySuite(PendingInteractionRecoverySuite):
+    def __init__(
+        self,
+        *,
+        replacement_request_id: str = "user-input-request-2",
+        stale_status: str = "expired",
+        stale_delivery_status: str = "superseded",
+    ) -> None:
+        super().__init__(
+            kind="user-input",
+            initial_request_id="user-input-request-1",
+            replacement_request_id=replacement_request_id,
+            resolved_event_type="user-input.resolved",
+            stale_status=stale_status,
+            stale_delivery_status=stale_delivery_status,
+        )
+
+    def _interaction_payload(self) -> dict[str, Any] | None:
+        return {
+            "questions": [
+                {
+                    "id": "fixture-choice",
+                    "header": "Fixture",
+                    "question": "Choose the deterministic acceptance answer.",
+                    "options": [
+                        {"label": "Continue", "description": "Complete the fixture turn."},
+                        {"label": "Stop", "description": "Decline the fixture turn."},
+                    ],
+                    "multiSelect": False,
+                }
+            ]
+        }
 
 
 class ProviderFailureSuite(BarrierSuite):
@@ -3749,6 +3857,7 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
                 "fixture.approval-resolution",
                 "fixture.text-tool-usage-artifact",
                 "fixture.terminal-large-log",
+                "recovery.pending-user-input-runtime-loss",
                 "fixture.user-input-resolution",
                 "fixture.provider-error",
                 "recovery.control-plane-restart",
@@ -3799,6 +3908,7 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
         self.assertEqual(recovery["staleInteractionId"], "interaction-1")
         self.assertEqual(recovery["replacementInteractionId"], "interaction-2")
         self.assertEqual(recovery["replacementRequestId"], "approval-request-2")
+        self.assertNotIn("staleInteraction", recovery)
         self.assertEqual(recovery["targetRuntime"]["podUid"], "pod-uid-2")
         self.assertEqual(resolution["requestId"], "approval-request-2")
         self.assertEqual(
@@ -3846,6 +3956,100 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
             suite._recover_pending_approval_runtime()
 
         self.assertEqual(raised.exception.code, "runner.pending_interaction_request_not_replaced")
+
+    def test_pending_user_input_runtime_recovery_rebinds_the_barrier(self) -> None:
+        suite = PendingUserInputRecoverySuite()
+
+        recovery = suite._recover_pending_user_input_runtime()
+        resolution = suite._user_input_resolution()
+
+        self.assertEqual(suite.created_turns, ["[user-input]"])
+        self.assertTrue(suite.recovered)
+        self.assertEqual(recovery["staleInteractionId"], "interaction-1")
+        self.assertEqual(recovery["replacementInteractionId"], "interaction-2")
+        self.assertEqual(recovery["replacementExecutionId"], "execution-1")
+        self.assertEqual(recovery["staleInteraction"]["status"], "expired")
+        self.assertEqual(recovery["staleInteraction"]["deliveryStatus"], "superseded")
+        self.assertIsNone(suite.state.pending_user_input)
+        self.assertEqual(resolution["requestId"], "user-input-request-2")
+        self.assertTrue(resolution["singleTerminal"])
+        self.assertEqual(
+            suite.fake_driver.api.requests,
+            [
+                (
+                    "POST",
+                    "/v1/executions/execution-1/user-input/user-input-request-2/resolve",
+                    {"answers": {"fixture-choice": "Continue"}},
+                )
+            ],
+        )
+
+    def test_pending_user_input_runtime_recovery_rejects_reused_request_identity(self) -> None:
+        suite = PendingUserInputRecoverySuite(replacement_request_id="user-input-request-1")
+
+        with self.assertRaises(acceptance.AcceptanceError) as raised:
+            suite._recover_pending_user_input_runtime()
+
+        self.assertEqual(raised.exception.code, "runner.pending_interaction_request_not_replaced")
+
+    def test_pending_user_input_runtime_recovery_requires_superseded_stale_request(self) -> None:
+        suite = PendingUserInputRecoverySuite(stale_delivery_status="pending")
+        original_wait_until = suite.fake_driver.api.wait_until
+
+        def wait_until_timeout(
+            description: str,
+            probe: Callable[[], Any | None],
+            interval: float = 0.25,
+        ) -> Any:
+            if not description.startswith("stale Structured User Input"):
+                return original_wait_until(description, probe, interval)
+            del interval
+            self.assertIsNone(probe())
+            raise acceptance.AcceptanceError(
+                "runner.wait_timeout",
+                f"Timed out waiting for {description}.",
+                {"waitedFor": description},
+            )
+
+        suite.fake_driver.api.wait_until = wait_until_timeout  # type: ignore[method-assign]
+
+        with self.assertRaises(acceptance.AcceptanceError) as raised:
+            suite._recover_pending_user_input_runtime()
+
+        self.assertEqual(raised.exception.code, "runner.pending_interaction_not_superseded")
+
+    def test_pending_user_input_resolution_rejects_missing_recovered_questions(self) -> None:
+        suite = PendingUserInputRecoverySuite()
+        suite._interaction_payload = lambda: None  # type: ignore[method-assign]
+
+        suite._recover_pending_user_input_runtime()
+        with self.assertRaises(acceptance.AcceptanceError) as raised:
+            suite._user_input_resolution()
+
+        self.assertEqual(raised.exception.code, "runner.user_input_payload_invalid")
+
+    def test_pending_user_input_resolution_rejects_changed_recovered_question(self) -> None:
+        suite = PendingUserInputRecoverySuite()
+        suite._interaction_payload = lambda: {  # type: ignore[method-assign]
+            "questions": [
+                {
+                    "id": "changed-choice",
+                    "header": "Fixture",
+                    "question": "Choose the deterministic acceptance answer.",
+                    "options": [
+                        {"label": "Continue", "description": "Complete the fixture turn."},
+                        {"label": "Stop", "description": "Decline the fixture turn."},
+                    ],
+                    "multiSelect": False,
+                }
+            ]
+        }
+
+        suite._recover_pending_user_input_runtime()
+        with self.assertRaises(acceptance.AcceptanceError) as raised:
+            suite._user_input_resolution()
+
+        self.assertEqual(raised.exception.code, "runner.user_input_payload_invalid")
 
     def test_provider_host_fault_requires_stable_code_and_next_turn_recovery(self) -> None:
         suite = ProviderFailureSuite("protocol_violation")
@@ -3916,6 +4120,64 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
 
         self.assertEqual(suite.post_restart_waits, 1)
         self.assertEqual(evidence["postRestartManifestId"], "manifest-after-restart")
+
+    def test_fixture_credential_uses_supported_provider_api_key_shape(self) -> None:
+        driver = FakeDriver(acceptance.STANDING_WORKER)
+
+        class CredentialAPI(FakeAPI):
+            def request(
+                self,
+                method: str,
+                path: str,
+                payload: Mapping[str, Any] | None = None,
+                expected: Sequence[int] = (200,),
+                *,
+                maximum_timeout: float = 10.0,
+            ) -> Any:
+                del expected, maximum_timeout
+                self.requests.append((method, path, payload))
+                return {
+                    "id": "credential-1",
+                    "organizationId": "organization-id",
+                    "provider": "codex",
+                    "credentialType": "api_key",
+                    "version": 1,
+                }
+
+        api = CredentialAPI()
+        driver.api = api
+        suite = acceptance.AcceptanceSuite(
+            runner_options(),
+            driver,
+            acceptance.Deadline(30.0),
+            acceptance.SecretRedactor(),
+        )
+        suite.state.tenant_id = "tenant-id"
+        suite.state.organization_id = "organization-id"
+
+        credential = suite._create_fixture_credential(
+            "codex",
+            "Stage 3 Provider Acceptance Fixture",
+        )
+
+        self.assertEqual(credential["credentialType"], "api_key")
+        self.assertEqual(
+            api.requests,
+            [
+                (
+                    "POST",
+                    "/v1/tenants/tenant-id/credentials",
+                    {
+                        "organizationId": "organization-id",
+                        "name": "Stage 3 Provider Acceptance Fixture",
+                        "purpose": "provider",
+                        "provider": "codex",
+                        "credentialType": "api_key",
+                        "payload": {"apiKey": acceptance.FIXTURE_CREDENTIAL_SENTINEL},
+                    },
+                )
+            ],
+        )
 
     def test_real_provider_resources_bind_controlled_environment_credential(self) -> None:
         secret = "stage3-real-provider-product-secret"

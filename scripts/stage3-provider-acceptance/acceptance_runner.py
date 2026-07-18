@@ -883,6 +883,7 @@ class ScenarioState:
     worker_replaced: bool = False
     replacement_worker_id: str | None = None
     pending_approval: dict[str, Any] | None = None
+    pending_user_input: dict[str, Any] | None = None
     pending_real_turn_id: str | None = None
     last_real_marker: str | None = None
     rollback_anchor_turn_id: str | None = None
@@ -8040,11 +8041,23 @@ class AcceptanceSuite:
             self._terminal_large_log,
             requires=("fixture.text-tool-usage-artifact", "fixture.approval-resolution"),
         )
+        user_input_requirement = "fixture.terminal-large-log"
+        if (
+            self.driver.lifecycle.execution_pinned
+            and getattr(self.driver, "pending_interaction_recovery", None) is not None
+        ):
+            self._case(
+                "recovery.pending-user-input-runtime-loss",
+                "Force pending structured user input runtime loss and verify recovery fencing",
+                self._recover_pending_user_input_runtime,
+                requires=("fixture.terminal-large-log",),
+            )
+            user_input_requirement = "recovery.pending-user-input-runtime-loss"
         self._case(
             "fixture.user-input-resolution",
             "Resolve Provider user input through the user API",
             self._user_input_resolution,
-            requires=("fixture.terminal-large-log",),
+            requires=(user_input_requirement,),
         )
         self._case(
             "fixture.provider-error",
@@ -8660,33 +8673,65 @@ class AcceptanceSuite:
             },
         }
 
-    def _begin_approval_readiness_barrier(self) -> Mapping[str, Any]:
-        if self.state.pending_approval is not None:
+    def _begin_pending_interaction_barrier(
+        self,
+        *,
+        state_field: str,
+        kind: str,
+        input_text: str,
+        display_name: str,
+        already_started_code: str,
+        invalid_code: str,
+    ) -> Mapping[str, Any]:
+        if getattr(self.state, state_field) is not None:
             raise AcceptanceError(
-                "runner.approval_barrier_already_started",
-                "The execution-pinned Approval readiness barrier was already started.",
+                already_started_code,
+                f"The execution-pinned {display_name} readiness barrier was already started.",
             )
-        turn = self._create_turn("[approval]")
+        turn = self._create_turn(input_text)
         turn_id = turn.get("id")
         if not isinstance(turn_id, str) or not turn_id:
-            raise AcceptanceError("runner.turn_id_missing", "Approval readiness Turn did not return an ID.")
-        interaction = self._wait_for_interaction(turn_id, "approval")
+            raise AcceptanceError(
+                "runner.turn_id_missing",
+                f"{display_name} readiness Turn did not return an ID.",
+            )
+        interaction = self._wait_for_interaction(turn_id, kind)
         execution_id = interaction.get("executionId")
         request_id = interaction.get("requestId")
         if not isinstance(execution_id, str) or not execution_id or not isinstance(request_id, str) or not request_id:
             raise AcceptanceError(
-                "runner.approval_barrier_invalid",
-                "The execution-pinned Approval readiness barrier omitted its Execution or Request ID.",
+                invalid_code,
+                f"The execution-pinned {display_name} readiness barrier omitted its Execution or Request ID.",
                 {"turnId": turn_id, "interactionId": interaction.get("id")},
             )
-        self.state.pending_approval = {"turn": turn, "interaction": interaction}
+        setattr(self.state, state_field, {"turn": turn, "interaction": interaction})
         return {
-            "kind": "approval",
+            "kind": kind,
             "turnId": turn_id,
             "executionId": execution_id,
             "requestId": request_id,
             "interactionId": interaction.get("id"),
         }
+
+    def _begin_approval_readiness_barrier(self) -> Mapping[str, Any]:
+        return self._begin_pending_interaction_barrier(
+            state_field="pending_approval",
+            kind="approval",
+            input_text="[approval]",
+            display_name="Approval",
+            already_started_code="runner.approval_barrier_already_started",
+            invalid_code="runner.approval_barrier_invalid",
+        )
+
+    def _begin_user_input_readiness_barrier(self) -> Mapping[str, Any]:
+        return self._begin_pending_interaction_barrier(
+            state_field="pending_user_input",
+            kind="user-input",
+            input_text="[user-input]",
+            display_name="Structured User Input",
+            already_started_code="runner.user_input_barrier_already_started",
+            invalid_code="runner.user_input_barrier_invalid",
+        )
 
     def _wait_compatible_manifest(self, target_id: str) -> dict[str, Any]:
         discovered = self._wait_compatible_manifest_for_providers(
@@ -8932,8 +8977,8 @@ class AcceptanceSuite:
                     "name": title,
                     "purpose": "provider",
                     "provider": provider,
-                    "credentialType": "acceptance_fixture",
-                    "payload": {"acceptanceToken": FIXTURE_CREDENTIAL_SENTINEL},
+                    "credentialType": "api_key",
+                    "payload": {"apiKey": FIXTURE_CREDENTIAL_SENTINEL},
                 },
                 expected=(201,),
             ),
@@ -8941,7 +8986,7 @@ class AcceptanceSuite:
         )
         if (
             str(credential.get("provider") or "").lower() != provider.lower()
-            or credential.get("credentialType") != "acceptance_fixture"
+            or credential.get("credentialType") != "api_key"
         ):
             raise AcceptanceError(
                 "runner.credential_binding_mismatch",
@@ -11358,7 +11403,7 @@ class AcceptanceSuite:
         output = json_object(terminal_payload.get("output"), "execution.completed payload.output")
         credential_evidence = json_object(output.get("credentialEvidence"), "credential evidence")
         if credential_evidence != {
-            "credentialPayloadKeys": ["acceptanceToken"],
+            "credentialPayloadKeys": ["apiKey"],
             "credentialVerified": True,
         }:
             raise AcceptanceError(
@@ -13219,7 +13264,7 @@ class AcceptanceSuite:
             "load credential evidence",
         )
         expected_credential_evidence = {
-            "credentialPayloadKeys": ["acceptanceToken"],
+            "credentialPayloadKeys": ["apiKey"],
             "credentialVerified": True,
         }
         terminal_worker_id, terminal_generation = self._event_worker_identity(terminal)
@@ -13390,30 +13435,144 @@ class AcceptanceSuite:
             )
         return [dict(item) for item in items]
 
-    def _resolve_approval_turn(
+    def _execution_interactions(self, execution_id: str) -> list[dict[str, Any]]:
+        snapshot = json_object(
+            self.api.request(
+                "GET",
+                f"/v1/executions/{urllib.parse.quote(execution_id, safe='')}/interactions",
+            ),
+            "execution interactions",
+        )
+        items = snapshot.get("items")
+        if not isinstance(items, list):
+            raise AcceptanceError(
+                "runner.response_shape_invalid",
+                "execution interactions.items was not an array.",
+            )
+        if not all(isinstance(item, dict) for item in items):
+            raise AcceptanceError(
+                "runner.response_shape_invalid",
+                "execution interactions.items contained a non-object value.",
+            )
+        return [dict(item) for item in items]
+
+    def _find_execution_interaction_record(
+        self,
+        execution_id: str,
+        interaction_id: str,
+    ) -> dict[str, Any] | None:
+        matches = [
+            item
+            for item in self._execution_interactions(execution_id)
+            if item.get("id") == interaction_id
+        ]
+        if len(matches) != 1:
+            if not matches:
+                return None
+            raise AcceptanceError(
+                "runner.execution_interaction_missing",
+                "Execution interaction history contained duplicate interaction records.",
+                {
+                    "executionId": execution_id,
+                    "interactionId": interaction_id,
+                    "matchCount": len(matches),
+                },
+            )
+        return matches[0]
+
+    def _interaction_record_summary(self, interaction: Mapping[str, Any]) -> dict[str, Any]:
+        summary = {
+            key: interaction.get(key)
+            for key in (
+                "id",
+                "turnId",
+                "executionId",
+                "workerId",
+                "generation",
+                "requestId",
+                "kind",
+                "status",
+                "deliveryStatus",
+                "deliveryAttempts",
+                "resolutionKind",
+            )
+        }
+        delivery_error = interaction.get("deliveryError")
+        if isinstance(delivery_error, str) and delivery_error:
+            summary["deliveryError"] = self.redactor.text(delivery_error)
+        return summary
+
+    def _wait_for_execution_interaction_state(
+        self,
+        execution_id: str,
+        interaction_id: str,
+        *,
+        status: str,
+        delivery_status: str,
+        description: str,
+    ) -> dict[str, Any]:
+        last_seen: dict[str, Any] | None = None
+
+        def probe() -> dict[str, Any] | None:
+            nonlocal last_seen
+            interaction = self._find_execution_interaction_record(execution_id, interaction_id)
+            if interaction is None:
+                return None
+            last_seen = interaction
+            if (
+                interaction.get("status") == status
+                and interaction.get("deliveryStatus") == delivery_status
+            ):
+                return interaction
+            return None
+
+        try:
+            return self.api.wait_until(description, probe)
+        except AcceptanceError as error:
+            if error.code != "runner.wait_timeout" or last_seen is None:
+                raise
+            raise AcceptanceError(
+                "runner.pending_interaction_not_superseded",
+                "The stale Structured User Input did not become expired with superseded delivery after runtime recovery.",
+                {
+                    "expectedStatus": status,
+                    "expectedDeliveryStatus": delivery_status,
+                    "interaction": self._interaction_record_summary(last_seen),
+                },
+            ) from None
+
+    def _resolve_pending_interaction_turn(
         self,
         turn: Mapping[str, Any],
         interaction: Mapping[str, Any],
         *,
         session_id: str,
+        request_path: str,
+        resolution_payload: Mapping[str, Any],
+        interaction_name: str,
+        resolution_name: str,
+        resolved_event_type: str,
+        interaction_invalid_code: str,
+        resolution_event_missing_code: str,
+        terminal_execution_mismatch_code: str,
     ) -> dict[str, Any]:
         execution_id = interaction.get("executionId")
         request_id = interaction.get("requestId")
         if not isinstance(execution_id, str) or not execution_id or not isinstance(request_id, str) or not request_id:
             raise AcceptanceError(
-                "runner.approval_interaction_invalid",
-                "The Approval interaction omitted its Execution or Request ID.",
+                interaction_invalid_code,
+                f"The {interaction_name} omitted its Execution or Request ID.",
                 {"turnId": turn.get("id"), "interactionId": interaction.get("id")},
             )
         resolved = json_object(
             self.api.request(
                 "POST",
-                f"/v1/executions/{execution_id}/approvals/{urllib.parse.quote(request_id, safe='')}/resolve",
-                {"decision": "accept"},
+                f"/v1/executions/{execution_id}/{request_path}/{urllib.parse.quote(request_id, safe='')}/resolve",
+                dict(resolution_payload),
             ),
-            "approval resolution",
+            resolution_name,
         )
-        turn_id = self._turn_id(turn, "approval Turn")
+        turn_id = self._turn_id(turn, f"{interaction_name} Turn")
         if session_id == self.state.session_id:
             terminal, events = self._wait_for_turn_terminal(
                 turn_id,
@@ -13425,17 +13584,17 @@ class AcceptanceSuite:
                 "execution.completed",
                 session_id=session_id,
             )
-        if not any(event.get("eventType") == "request.resolved" for event in events):
+        if not any(event.get("eventType") == resolved_event_type for event in events):
             raise AcceptanceError(
-                "runner.approval_resolution_event_missing",
-                "Approval completed without a request.resolved event.",
+                resolution_event_missing_code,
+                f"{interaction_name} completed without a {resolved_event_type} event.",
                 {"eventTypes": [event.get("eventType") for event in events]},
             )
         terminal_execution_id = self._event_execution_id(terminal)
         if terminal_execution_id != execution_id:
             raise AcceptanceError(
-                "runner.approval_terminal_execution_mismatch",
-                "Approval resolution completed a different Execution.",
+                terminal_execution_mismatch_code,
+                f"{interaction_name} resolution completed a different Execution.",
                 {
                     "expectedExecutionId": execution_id,
                     "terminalExecutionId": terminal_execution_id,
@@ -13449,7 +13608,29 @@ class AcceptanceSuite:
             "resolutionStatus": resolved.get("status"),
             "deliveryStatus": resolved.get("deliveryStatus"),
             "sequenceRange": self._sequence_range(events),
+            "singleTerminal": True,
         }
+
+    def _resolve_approval_turn(
+        self,
+        turn: Mapping[str, Any],
+        interaction: Mapping[str, Any],
+        *,
+        session_id: str,
+    ) -> dict[str, Any]:
+        return self._resolve_pending_interaction_turn(
+            turn,
+            interaction,
+            session_id=session_id,
+            request_path="approvals",
+            resolution_payload={"decision": "accept"},
+            interaction_name="Approval interaction",
+            resolution_name="approval resolution",
+            resolved_event_type="request.resolved",
+            interaction_invalid_code="runner.approval_interaction_invalid",
+            resolution_event_missing_code="runner.approval_resolution_event_missing",
+            terminal_execution_mismatch_code="runner.approval_terminal_execution_mismatch",
+        )
 
     def _approval_resolution(self) -> Mapping[str, Any]:
         pending = self.state.pending_approval
@@ -13485,16 +13666,17 @@ class AcceptanceSuite:
             )
         return self._recover_pending_approval_with(recover)
 
-    def _request_opened_identity(
+    def _interaction_request_identity(
         self,
         events: Sequence[Mapping[str, Any]],
         execution_id: str,
         request_id: str,
+        event_type: str,
         description: str,
     ) -> tuple[str, int]:
         matches = []
         for event in events:
-            if event.get("executionId") != execution_id or event.get("eventType") != "request.opened":
+            if event.get("executionId") != execution_id or event.get("eventType") != event_type:
                 continue
             payload = event.get("payload")
             if isinstance(payload, Mapping) and payload.get("requestId") == request_id:
@@ -13502,30 +13684,34 @@ class AcceptanceSuite:
         if len(matches) != 1:
             raise AcceptanceError(
                 "runner.pending_interaction_request_event_invalid",
-                f"The {description} did not map to exactly one request.opened Event.",
+                f"The {description} did not map to exactly one {event_type} Event.",
                 {
                     "executionId": execution_id,
                     "requestId": request_id,
+                    "eventType": event_type,
                     "matchCount": len(matches),
                 },
             )
         return self._event_worker_identity(matches[0])
 
-    def _recover_pending_approval_context(
+    def _recover_pending_interaction_context(
         self,
         pending: Mapping[str, Any],
         *,
         session_id: str,
         recover: Callable[[str, str], Mapping[str, Any]],
+        kind: str,
+        label: str,
         recovering_validator: (
             Callable[[Mapping[str, Any], Mapping[str, Any]], None] | None
         ) = None,
         observe_replacement: (
             Callable[[str, str], Mapping[str, Any]] | None
         ) = None,
+        verify_stale_superseded: bool = False,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
-        turn = json_object(pending.get("turn"), "pending approval turn")
-        interaction = json_object(pending.get("interaction"), "pending approval interaction")
+        turn = json_object(pending.get("turn"), f"pending {label} turn")
+        interaction = json_object(pending.get("interaction"), f"pending {label} interaction")
         turn_id = turn.get("id")
         previous_interaction_id = interaction.get("id")
         execution_id = interaction.get("executionId")
@@ -13541,21 +13727,25 @@ class AcceptanceSuite:
             or not request_id
         ):
             raise AcceptanceError(
-                "runner.pending_approval_invalid",
-                "The pending Approval barrier omitted its Turn, Interaction, Execution, or Request identity.",
+                "runner.pending_interaction_invalid",
+                f"The pending {label} barrier omitted its Turn, Interaction, Execution, or Request identity.",
                 {"turn": turn, "interaction": interaction},
             )
         primary_session = session_id == self.state.session_id
+        request_event_type = (
+            "request.opened" if kind == "approval" else "user-input.requested"
+        )
         before_events = (
             self._all_events()
             if primary_session
             else self._all_events(session_id=session_id)
         )
-        stale_worker_id, stale_generation = self._request_opened_identity(
+        stale_worker_id, stale_generation = self._interaction_request_identity(
             before_events,
             execution_id,
             request_id,
-            "pending Approval",
+            request_event_type,
+            f"pending {label}",
         )
         before_sequence = max(
             max((int(event.get("sequence") or 0) for event in before_events), default=0),
@@ -13584,7 +13774,7 @@ class AcceptanceSuite:
             recovering_validator(target_evidence, recovery_event)
         replacement = self._wait_for_replacement_interaction(
             turn_id,
-            "approval",
+            kind,
             previous_interaction_id,
             session_id=None if primary_session else session_id,
         )
@@ -13598,13 +13788,13 @@ class AcceptanceSuite:
         ):
             raise AcceptanceError(
                 "runner.recovered_interaction_invalid",
-                "The recovered Approval omitted its Execution or Request identity.",
+                f"The recovered {label} omitted its Execution or Request identity.",
                 {"interaction": replacement},
             )
         if replacement_request_id == request_id:
             raise AcceptanceError(
                 "runner.pending_interaction_request_not_replaced",
-                "Pending Approval recovery reused the obsolete Generation's Request identity.",
+                f"Pending {label} recovery reused the obsolete Generation's Request identity.",
                 {
                     "staleInteractionId": previous_interaction_id,
                     "staleRequestId": request_id,
@@ -13615,7 +13805,7 @@ class AcceptanceSuite:
         if replacement_execution_id != execution_id:
             raise AcceptanceError(
                 "runner.pending_interaction_execution_changed",
-                "Pending Approval recovery created a different Execution instead of advancing its Generation.",
+                f"Pending {label} recovery created a different Execution instead of advancing its Generation.",
                 {
                     "staleExecutionId": execution_id,
                     "replacementExecutionId": replacement_execution_id,
@@ -13626,22 +13816,32 @@ class AcceptanceSuite:
             if primary_session
             else self._all_events(session_id=session_id)
         )
-        replacement_worker_id, replacement_generation = self._request_opened_identity(
+        replacement_worker_id, replacement_generation = self._interaction_request_identity(
             after_events,
             replacement_execution_id,
             replacement_request_id,
-            "replacement Approval",
+            request_event_type,
+            f"replacement {label}",
         )
         if replacement_generation != stale_generation + 1:
             raise AcceptanceError(
                 "runner.pending_interaction_generation_not_advanced",
-                "Pending Approval recovery did not advance exactly one Execution Generation.",
+                f"Pending {label} recovery did not advance exactly one Execution Generation.",
                 {
                     "staleGeneration": stale_generation,
                     "replacementGeneration": replacement_generation,
                     "staleWorkerId": stale_worker_id,
                     "replacementWorkerId": replacement_worker_id,
                 },
+            )
+        stale_interaction: dict[str, Any] | None = None
+        if verify_stale_superseded:
+            stale_interaction = self._wait_for_execution_interaction_state(
+                execution_id,
+                previous_interaction_id,
+                status="expired",
+                delivery_status="superseded",
+                description=f"stale {label} superseded interaction",
             )
         observer = observe_replacement or self.driver.observe_execution
         target_runtime = observer(
@@ -13653,27 +13853,50 @@ class AcceptanceSuite:
         if isinstance(deleted_uid, str) and isinstance(replacement_uid, str) and deleted_uid == replacement_uid:
             raise AcceptanceError(
                 "runner.pending_interaction_recovery_not_replaced",
-                "Pending Approval recovery reused the deleted execution-pinned runtime identity.",
+                f"Pending {label} recovery reused the deleted execution-pinned runtime identity.",
                 {"deletedPodUid": deleted_uid, "replacementPodUid": replacement_uid},
             )
-        return (
-            {
-                "turnId": turn_id,
-                "staleInteractionId": previous_interaction_id,
-                "staleRequestId": request_id,
-                "staleExecutionId": execution_id,
-                "staleWorkerId": stale_worker_id,
-                "staleGeneration": stale_generation,
-                "recoveryEvent": self._event_summary(recovery_event),
-                "replacementInteractionId": replacement.get("id"),
-                "replacementRequestId": replacement_request_id,
-                "replacementExecutionId": replacement_execution_id,
-                "replacementWorkerId": replacement_worker_id,
-                "replacementGeneration": replacement_generation,
-                "targetRecovery": dict(target_evidence),
-                "targetRuntime": dict(target_runtime),
-            },
-            replacement,
+        evidence = {
+            "turnId": turn_id,
+            "staleInteractionId": previous_interaction_id,
+            "staleRequestId": request_id,
+            "staleExecutionId": execution_id,
+            "staleWorkerId": stale_worker_id,
+            "staleGeneration": stale_generation,
+            "recoveryEvent": self._event_summary(recovery_event),
+            "replacementInteractionId": replacement.get("id"),
+            "replacementRequestId": replacement_request_id,
+            "replacementExecutionId": replacement_execution_id,
+            "replacementWorkerId": replacement_worker_id,
+            "replacementGeneration": replacement_generation,
+            "targetRecovery": dict(target_evidence),
+            "targetRuntime": dict(target_runtime),
+        }
+        if stale_interaction is not None:
+            evidence["staleInteraction"] = self._interaction_record_summary(stale_interaction)
+        return evidence, replacement
+
+    def _recover_pending_approval_context(
+        self,
+        pending: Mapping[str, Any],
+        *,
+        session_id: str,
+        recover: Callable[[str, str], Mapping[str, Any]],
+        recovering_validator: (
+            Callable[[Mapping[str, Any], Mapping[str, Any]], None] | None
+        ) = None,
+        observe_replacement: (
+            Callable[[str, str], Mapping[str, Any]] | None
+        ) = None,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        return self._recover_pending_interaction_context(
+            pending,
+            session_id=session_id,
+            recover=recover,
+            kind="approval",
+            label="Approval",
+            recovering_validator=recovering_validator,
+            observe_replacement=observe_replacement,
         )
 
     def _recover_pending_approval_with(
@@ -13697,34 +13920,170 @@ class AcceptanceSuite:
         }
         return evidence
 
-    def _user_input_resolution(self) -> Mapping[str, Any]:
-        turn = self._create_turn("[user-input]")
-        interaction = self._wait_for_interaction(str(turn["id"]), "user-input")
-        execution_id = str(interaction["executionId"])
-        request_id = str(interaction["requestId"])
-        resolved = json_object(
-            self.api.request(
-                "POST",
-                f"/v1/executions/{execution_id}/user-input/{urllib.parse.quote(request_id, safe='')}/resolve",
-                {"answers": {"fixture-choice": "Continue"}},
-            ),
-            "user-input resolution",
+    def _recover_pending_user_input_context(
+        self,
+        pending: Mapping[str, Any],
+        *,
+        session_id: str,
+        recover: Callable[[str, str], Mapping[str, Any]],
+        recovering_validator: (
+            Callable[[Mapping[str, Any], Mapping[str, Any]], None] | None
+        ) = None,
+        observe_replacement: (
+            Callable[[str, str], Mapping[str, Any]] | None
+        ) = None,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        return self._recover_pending_interaction_context(
+            pending,
+            session_id=session_id,
+            recover=recover,
+            kind="user-input",
+            label="Structured User Input",
+            recovering_validator=recovering_validator,
+            observe_replacement=observe_replacement,
+            verify_stale_superseded=True,
         )
-        terminal, events = self._wait_for_turn_terminal(str(turn["id"]), "execution.completed")
-        if not any(event.get("eventType") == "user-input.resolved" for event in events):
+
+    def _recover_pending_user_input_with(
+        self,
+        recover: Callable[[str, str], Mapping[str, Any]],
+    ) -> Mapping[str, Any]:
+        pending = self.state.pending_user_input
+        if pending is None:
             raise AcceptanceError(
-                "runner.user_input_resolution_event_missing",
-                "User input completed without a user-input.resolved event.",
-                {"eventTypes": [event.get("eventType") for event in events]},
+                "runner.pending_user_input_missing",
+                "The pending structured user input barrier was unavailable for runtime recovery.",
             )
+        evidence, replacement = self._recover_pending_user_input_context(
+            pending,
+            session_id=self._required("session_id"),
+            recover=recover,
+        )
+        self.state.pending_user_input = {
+            "turn": json_object(pending.get("turn"), "pending user input turn"),
+            "interaction": replacement,
+        }
+        return evidence
+
+    def _recover_pending_user_input_runtime(self) -> Mapping[str, Any]:
+        recover = getattr(self.driver, "recover_pending_interaction", None)
+        if not callable(recover):
+            raise AcceptanceError(
+                "runner.pending_interaction_recovery_unsupported",
+                "The TargetDriver cannot recover a pending interaction runtime.",
+                {"target": self.driver.name},
+            )
+        if self.state.pending_user_input is None:
+            self._begin_user_input_readiness_barrier()
+        return self._recover_pending_user_input_with(recover)
+
+    def _fixture_user_input_answers(
+        self,
+        interaction: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        payload = interaction.get("payload")
+        if not isinstance(payload, Mapping):
+            raise AcceptanceError(
+                "runner.user_input_payload_invalid",
+                "The deterministic user input interaction omitted its structured payload.",
+                {"interactionId": interaction.get("id")},
+            )
+        questions = payload.get("questions")
+        if not isinstance(questions, list) or len(questions) != 1:
+            raise AcceptanceError(
+                "runner.user_input_payload_invalid",
+                "The deterministic user input interaction did not contain exactly one structured question.",
+                {
+                    "interactionId": interaction.get("id"),
+                    "questionCount": len(questions) if isinstance(questions, list) else None,
+                },
+            )
+        question = questions[0]
+        if not isinstance(question, Mapping):
+            raise AcceptanceError(
+                "runner.user_input_payload_invalid",
+                "The deterministic user input question was not an object.",
+                {"interactionId": interaction.get("id")},
+            )
+        options = question.get("options")
+        option_labels = (
+            [
+                option.get("label")
+                for option in options
+                if isinstance(option, Mapping)
+            ]
+            if isinstance(options, list)
+            else None
+        )
+        expected = {
+            "id": "fixture-choice",
+            "header": "Fixture",
+            "question": "Choose the deterministic acceptance answer.",
+            "multiSelect": False,
+            "optionLabels": ["Continue", "Stop"],
+        }
+        actual = {
+            "id": question.get("id"),
+            "header": question.get("header"),
+            "question": question.get("question"),
+            "multiSelect": question.get("multiSelect"),
+            "optionLabels": option_labels,
+        }
+        if actual != expected:
+            raise AcceptanceError(
+                "runner.user_input_payload_invalid",
+                "The deterministic user input question changed across runtime recovery.",
+                {
+                    "interactionId": interaction.get("id"),
+                    "expected": expected,
+                    "actual": actual,
+                },
+            )
+        return {"fixture-choice": "Continue"}
+
+    def _resolve_user_input_turn(
+        self,
+        turn: Mapping[str, Any],
+        interaction: Mapping[str, Any],
+        *,
+        session_id: str,
+    ) -> dict[str, Any]:
+        return self._resolve_pending_interaction_turn(
+            turn,
+            interaction,
+            session_id=session_id,
+            request_path="user-input",
+            resolution_payload={"answers": self._fixture_user_input_answers(interaction)},
+            interaction_name="Structured user input interaction",
+            resolution_name="user-input resolution",
+            resolved_event_type="user-input.resolved",
+            interaction_invalid_code="runner.user_input_interaction_invalid",
+            resolution_event_missing_code="runner.user_input_resolution_event_missing",
+            terminal_execution_mismatch_code="runner.user_input_terminal_execution_mismatch",
+        )
+
+    def _user_input_resolution(self) -> Mapping[str, Any]:
+        pending = self.state.pending_user_input
+        if pending is None:
+            turn = self._create_turn("[user-input]")
+            interaction = self._wait_for_interaction(str(turn["id"]), "user-input")
+        else:
+            turn = json_object(pending.get("turn"), "pending user input turn")
+            interaction = json_object(pending.get("interaction"), "pending user input interaction")
+            self.state.pending_user_input = None
+        result = self._resolve_user_input_turn(
+            turn,
+            interaction,
+            session_id=self._required("session_id"),
+        )
+        execution_id = str(result["executionId"])
+        target_evidence = self.driver.observe_terminal_execution(
+            self._required("target_id"),
+            execution_id,
+        )
         return {
-            "turnId": turn.get("id"),
-            "executionId": terminal.get("executionId"),
-            "requestId": request_id,
-            "interactionId": interaction.get("id"),
-            "resolutionStatus": resolved.get("status"),
-            "deliveryStatus": resolved.get("deliveryStatus"),
-            "sequenceRange": self._sequence_range(events),
+            **result,
+            "targetTerminal": dict(target_evidence) if target_evidence else None,
         }
 
     def _provider_error(self) -> Mapping[str, Any]:
