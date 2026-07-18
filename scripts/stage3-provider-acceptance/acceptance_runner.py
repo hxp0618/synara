@@ -123,6 +123,8 @@ FIXTURE_LOAD_SESSIONS = 4
 FIXTURE_LOAD_DEFAULT_WAVES = 25
 FIXTURE_LOAD_MIN_WAVES = 2
 FIXTURE_LOAD_MAX_WAVES = 100
+FIXTURE_LOAD_DURATION_MAX_WAVES = 10_000
+FIXTURE_LOAD_DURATION_MAX_SECONDS = 86_400.0
 FIXTURE_LOAD_SUITES = frozenset({"fixture-load", "fixture-load-failure"})
 FIXTURE_PARALLEL_DOCKER_SUITES = FIXTURE_LOAD_SUITES | {"fixture-concurrency"}
 KUBERNETES_ACCEPTANCE_RESOURCE_CONFIGURATION: Mapping[str, str] = {
@@ -321,6 +323,28 @@ def utc_now() -> str:
 
 def elapsed_ms(started: float) -> int:
     return max(0, round((time.monotonic() - started) * 1000))
+
+
+def duration_distribution_ms(values: Sequence[int]) -> dict[str, int | float]:
+    if not values:
+        raise ValueError("duration distribution requires at least one sample")
+    if any(value < 0 for value in values):
+        raise ValueError("duration distribution samples must be non-negative")
+    ordered = sorted(values)
+
+    def nearest_rank(percentile: int) -> int:
+        index = max(0, ((len(ordered) * percentile + 99) // 100) - 1)
+        return ordered[index]
+
+    return {
+        "sampleCount": len(ordered),
+        "minimum": ordered[0],
+        "maximum": ordered[-1],
+        "average": round(sum(ordered) / len(ordered), 3),
+        "p50": nearest_rank(50),
+        "p95": nearest_rank(95),
+        "p99": nearest_rank(99),
+    }
 
 
 def random_key() -> str:
@@ -754,6 +778,8 @@ class RunnerOptions:
     soak_turns: int
     soak_restart_every: int
     load_waves: int
+    load_min_duration_seconds: float
+    load_max_waves: int
     ssh_orbctl_bin: str
     ssh_machine_name: str | None
     ssh_machine_arch: str
@@ -797,6 +823,23 @@ class RunnerOptions:
     real_provider_credential_env: str | None
     real_provider_credential_field: str
     real_provider_base_url_env: str | None
+
+
+def fixture_load_resource_profile(options: RunnerOptions) -> dict[str, Any]:
+    profile: dict[str, Any] = {
+        "target": options.target,
+        "tenantMaxConcurrentExecutions": FIXTURE_CONCURRENCY_WORKERS,
+        "workers": FIXTURE_CONCURRENCY_WORKERS,
+        "activeExecutionSlotsPerWorker": 1,
+    }
+    if options.target == "docker":
+        profile["dockerWorker"] = {
+            "memoryBytes": options.docker_memory_bytes,
+            "nanoCpus": options.docker_nano_cpus,
+        }
+    elif options.target == "kubernetes":
+        profile["kubernetesWorker"] = dict(KUBERNETES_ACCEPTANCE_RESOURCE_CONFIGURATION)
+    return profile
 
 
 @dataclasses.dataclass(frozen=True)
@@ -12603,6 +12646,14 @@ class AcceptanceSuite:
     ) -> Mapping[str, Any]:
         segmented = wave_count is not None
         wave_count = self.options.load_waves if wave_count is None else wave_count
+        minimum_duration_seconds = (
+            0.0 if segmented else self.options.load_min_duration_seconds
+        )
+        maximum_wave_count = (
+            wave_count
+            if segmented or minimum_duration_seconds <= 0
+            else self.options.load_max_waves
+        )
         minimum_waves = 1 if segmented else FIXTURE_LOAD_MIN_WAVES
         if not minimum_waves <= wave_count <= FIXTURE_LOAD_MAX_WAVES:
             raise AcceptanceError(
@@ -12614,14 +12665,24 @@ class AcceptanceSuite:
                     "actual": wave_count,
                 },
             )
-        if wave_start < 0 or wave_start + wave_count > FIXTURE_LOAD_MAX_WAVES:
+        wave_range_limit = (
+            FIXTURE_LOAD_MAX_WAVES
+            if segmented
+            else FIXTURE_LOAD_DURATION_MAX_WAVES
+        )
+        if (
+            wave_start < 0
+            or maximum_wave_count < wave_count
+            or wave_start + maximum_wave_count > wave_range_limit
+        ):
             raise AcceptanceError(
                 "runner.load_wave_range_invalid",
                 "The fixture load wave range was outside the accepted boundary.",
                 {
                     "start": wave_start,
-                    "count": wave_count,
-                    "maximum": FIXTURE_LOAD_MAX_WAVES,
+                    "minimumCount": wave_count,
+                    "maximumCount": maximum_wave_count,
+                    "maximum": wave_range_limit,
                 },
             )
         quota = self._set_fixture_execution_quota(
@@ -12643,8 +12704,10 @@ class AcceptanceSuite:
         overlap_observations = 0
         admission_recovery_ms: list[int] = []
         wave_durations_ms: list[int] = []
-        wave_samples: list[dict[str, Any]] = []
+        first_wave_samples: list[dict[str, Any]] = []
+        last_wave_samples: list[dict[str, Any]] = []
         started = time.monotonic()
+        minimum_duration_ms = round(minimum_duration_seconds * 1000)
 
         def complete(load_turn: Mapping[str, Any]) -> None:
             terminal = self._complete_fixture_load_turn(load_turn)
@@ -12673,7 +12736,8 @@ class AcceptanceSuite:
                 active_validator(load_turn)
             return load_turn
 
-        for local_wave_index in range(wave_count):
+        local_wave_index = 0
+        while local_wave_index < maximum_wave_count:
             wave_index = wave_start + local_wave_index
             wave_started = time.monotonic()
             offset = wave_index % len(sessions)
@@ -12752,18 +12816,51 @@ class AcceptanceSuite:
                 "quotaRejections": rejections,
                 "durationMs": wave_duration,
             }
-            if local_wave_index < 2 or local_wave_index >= wave_count - 2:
-                wave_samples.append(sample)
+            if local_wave_index < 2:
+                first_wave_samples.append(sample)
+            last_wave_samples = (last_wave_samples + [sample])[-2:]
+            local_wave_index += 1
+            if (
+                local_wave_index >= wave_count
+                and elapsed_ms(started) >= minimum_duration_ms
+            ):
+                break
 
-        expected_executions = wave_count * FIXTURE_LOAD_SESSIONS
-        expected_rejections = wave_count * (FIXTURE_LOAD_SESSIONS - FIXTURE_CONCURRENCY_WORKERS)
-        expected_overlaps = wave_count * (FIXTURE_LOAD_SESSIONS - 1)
+        completed_wave_count = local_wave_index
+        duration_ms = elapsed_ms(started)
+        duration_target_met = duration_ms >= minimum_duration_ms
+        if completed_wave_count < wave_count or not duration_target_met:
+            raise AcceptanceError(
+                "runner.load_duration_not_reached",
+                "The fixture load run reached its maximum wave safety bound before satisfying the requested duration.",
+                {
+                    "minimumWaves": wave_count,
+                    "maximumWaves": maximum_wave_count,
+                    "wavesCompleted": completed_wave_count,
+                    "minimumDurationSeconds": minimum_duration_seconds,
+                    "durationMs": duration_ms,
+                },
+            )
+
+        sampled_waves: dict[int, dict[str, Any]] = {}
+        for sample in first_wave_samples + last_wave_samples:
+            sampled_waves[int(sample["wave"])] = sample
+        wave_samples = [sampled_waves[index] for index in sorted(sampled_waves)]
+
+        expected_executions = completed_wave_count * FIXTURE_LOAD_SESSIONS
+        expected_rejections = completed_wave_count * (
+            FIXTURE_LOAD_SESSIONS - FIXTURE_CONCURRENCY_WORKERS
+        )
+        expected_overlaps = completed_wave_count * (FIXTURE_LOAD_SESSIONS - 1)
         if (
             len(execution_ids) != expected_executions
             or quota_rejections != expected_rejections
             or overlap_observations != expected_overlaps
             or len(worker_ids) != expected_distinct_workers
-            or any(count != wave_count for count in session_execution_counts.values())
+            or any(
+                count != completed_wave_count
+                for count in session_execution_counts.values()
+            )
             or any(count != expected_executions // 2 for count in provider_execution_counts.values())
         ):
             raise AcceptanceError(
@@ -12783,44 +12880,54 @@ class AcceptanceSuite:
                 },
             )
 
-        duration_ms = elapsed_ms(started)
+        admission_attempts = len(execution_ids) + quota_rejections
         return {
             "maxConcurrentExecutions": quota.get("maxConcurrentExecutions"),
             "workers": FIXTURE_CONCURRENCY_WORKERS,
             "sessions": FIXTURE_LOAD_SESSIONS,
             "providers": list(FIXTURE_CONCURRENCY_PROVIDERS),
             "wavesRequested": wave_count,
-            "wavesCompleted": wave_count,
+            "minimumWavesRequested": wave_count,
+            "maximumWaves": maximum_wave_count,
+            "minimumDurationSeconds": minimum_duration_seconds,
+            "durationTargetMet": duration_target_met,
+            "stopReason": "minimum-waves-and-duration-satisfied",
+            "wavesCompleted": completed_wave_count,
             "firstWave": wave_start + 1,
-            "lastWave": wave_start + wave_count,
+            "lastWave": wave_start + completed_wave_count,
             "executionsCompleted": len(execution_ids),
             "distinctExecutionCount": len(execution_ids),
             "expectedDistinctWorkerCount": expected_distinct_workers,
             "distinctWorkerCount": len(worker_ids),
             "quotaRejections": quota_rejections,
             "admissionRetriesSucceeded": len(admission_recovery_ms),
+            "admissionAttempts": admission_attempts,
+            "expectedQuotaRejectionRate": round(
+                quota_rejections / max(admission_attempts, 1),
+                6,
+            ),
             "overlapObservations": overlap_observations,
+            "effectiveConcurrency": FIXTURE_CONCURRENCY_WORKERS,
+            "executionSuccessRate": round(
+                len(execution_ids) / max(expected_executions, 1),
+                6,
+            ),
+            "unexpectedFailureCount": 0,
+            "unexpectedErrorRate": 0.0,
             "doubleExecution": False,
             "duplicateTerminal": False,
             "pendingInteractionCount": 0,
             "providerExecutionCounts": dict(sorted(provider_execution_counts.items())),
             "sessionExecutionCounts": dict(sorted(session_execution_counts.items())),
             "eventTypeCounts": dict(sorted(event_type_counts.items())),
+            "resourceProfile": fixture_load_resource_profile(self.options),
             "durationMs": duration_ms,
             "observedCompletedExecutionsPerSecond": round(
                 len(execution_ids) / max(duration_ms / 1000.0, 0.001),
                 3,
             ),
-            "waveDurationMs": {
-                "minimum": min(wave_durations_ms),
-                "maximum": max(wave_durations_ms),
-                "average": round(sum(wave_durations_ms) / len(wave_durations_ms), 3),
-            },
-            "admissionRecoveryMs": {
-                "minimum": min(admission_recovery_ms),
-                "maximum": max(admission_recovery_ms),
-                "average": round(sum(admission_recovery_ms) / len(admission_recovery_ms), 3),
-            },
+            "waveDurationMs": duration_distribution_ms(wave_durations_ms),
+            "admissionRecoveryMs": duration_distribution_ms(admission_recovery_ms),
             "sessionsEvidence": [
                 {
                     "sessionId": session["sessionId"],
@@ -15206,6 +15313,22 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
             f"{FIXTURE_LOAD_MIN_WAVES}..{FIXTURE_LOAD_MAX_WAVES})"
         ),
     )
+    parser.add_argument(
+        "--load-min-duration-seconds",
+        type=float,
+        help=(
+            "Minimum measured load-case duration for fixture-load or fixture-load-failure; the runner adds "
+            "whole waves until both this duration and --load-waves are satisfied"
+        ),
+    )
+    parser.add_argument(
+        "--load-max-waves",
+        type=int,
+        help=(
+            "Safety bound used with --load-min-duration-seconds (default: 100; maximum: "
+            f"{FIXTURE_LOAD_DURATION_MAX_WAVES})"
+        ),
+    )
     parsed = parser.parse_args(argv)
     soak_turns = parsed.soak_turns if parsed.soak_turns is not None else 100 if parsed.suite == "fixture-soak" else 0
     soak_restart_every = (
@@ -15222,7 +15345,19 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
         if parsed.suite in FIXTURE_LOAD_SUITES
         else 0
     )
-    default_timeout = (
+    load_min_duration_seconds = (
+        parsed.load_min_duration_seconds
+        if parsed.load_min_duration_seconds is not None
+        else 0.0
+    )
+    load_max_waves = (
+        parsed.load_max_waves
+        if parsed.load_max_waves is not None
+        else max(load_waves, FIXTURE_LOAD_MAX_WAVES)
+        if parsed.suite in FIXTURE_LOAD_SUITES and load_min_duration_seconds > 0
+        else load_waves
+    )
+    base_default_timeout = (
         1200.0
         if parsed.target == "kubernetes"
         else 900.0
@@ -15230,6 +15365,11 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
         else 420.0
         if parsed.real_provider_failure_case or parsed.real_provider_failure_matrix
         else 180.0
+    )
+    default_timeout = (
+        max(base_default_timeout, load_min_duration_seconds + 300.0)
+        if parsed.suite in FIXTURE_LOAD_SUITES and load_min_duration_seconds > 0
+        else base_default_timeout
     )
     timeout_seconds = parsed.timeout if parsed.timeout is not None else default_timeout
     if timeout_seconds <= 0:
@@ -15247,14 +15387,39 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
             parser.error("--suite fixture-soak requires Control Plane restart continuity")
         if parsed.failure_only:
             parser.error("--suite fixture-soak cannot be combined with --failure-only")
-    if parsed.suite not in FIXTURE_LOAD_SUITES and parsed.load_waves is not None:
-        parser.error("--load-waves requires --suite fixture-load or fixture-load-failure")
+    if parsed.suite not in FIXTURE_LOAD_SUITES and (
+        parsed.load_waves is not None
+        or parsed.load_min_duration_seconds is not None
+        or parsed.load_max_waves is not None
+    ):
+        parser.error(
+            "load wave and duration options require --suite fixture-load or fixture-load-failure"
+        )
     if parsed.suite in FIXTURE_LOAD_SUITES and not (
         FIXTURE_LOAD_MIN_WAVES <= load_waves <= FIXTURE_LOAD_MAX_WAVES
     ):
         parser.error(
             f"--load-waves must be between {FIXTURE_LOAD_MIN_WAVES} and {FIXTURE_LOAD_MAX_WAVES}"
         )
+    if parsed.suite in FIXTURE_LOAD_SUITES:
+        if not 0 <= load_min_duration_seconds <= FIXTURE_LOAD_DURATION_MAX_SECONDS:
+            parser.error(
+                "--load-min-duration-seconds must be between 0 and "
+                f"{int(FIXTURE_LOAD_DURATION_MAX_SECONDS)}"
+            )
+        if parsed.load_max_waves is not None and load_min_duration_seconds <= 0:
+            parser.error(
+                "--load-max-waves requires a positive --load-min-duration-seconds"
+            )
+        if not load_waves <= load_max_waves <= FIXTURE_LOAD_DURATION_MAX_WAVES:
+            parser.error(
+                "--load-max-waves must be at least --load-waves and no greater than "
+                f"{FIXTURE_LOAD_DURATION_MAX_WAVES}"
+            )
+        if load_min_duration_seconds > 0 and timeout_seconds < load_min_duration_seconds + 60.0:
+            parser.error(
+                "--timeout must allow at least 60 seconds beyond --load-min-duration-seconds for setup and cleanup"
+            )
     if parsed.control_plane_binary is not None and not parsed.skip_build:
         parser.error("--control-plane-binary requires --skip-build to prevent overwriting the configured binary")
     if parsed.skip_build and parsed.control_plane_binary is None:
@@ -15572,6 +15737,8 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
         soak_turns=soak_turns,
         soak_restart_every=soak_restart_every,
         load_waves=load_waves,
+        load_min_duration_seconds=load_min_duration_seconds,
+        load_max_waves=load_max_waves,
         ssh_orbctl_bin=parsed.ssh_orbctl_bin.strip(),
         ssh_machine_name=ssh_machine_name,
         ssh_machine_arch=parsed.ssh_machine_arch,
@@ -15767,15 +15934,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "Docker agentd Workers; four Sessions prove exact Execution-to-Worker-to-container network and "
                 "container-loss targeting, managed replacement, exact Provider Host process crash classification, "
                 "peer-Session isolation, Generation fencing or new-Execution recovery, unique terminal paths, then "
-                "bounded quota rejection, slot reuse and durable Artifact/Checkpoint completion; deterministic "
-                "single-host mechanics only, not real Provider, multi-host, multi-node, rollout failure, SLA, or "
-                "production-duration load"
+                "resource-profiled quota rejection, slot reuse, optional minimum-duration load and diagnostic "
+                "latency/error measurements; deterministic single-host mechanics only, not real Provider, "
+                "multi-host, multi-node, rollout failure or an operator-approved production SLA"
                 if fixture_load_failure
                 else (
                 "deterministic Codex and Claude Provider Host fixtures over one real Control Plane and two managed "
                 "Docker agentd Workers; four Sessions run repeated quota rejection, immediate slot reuse, three "
-                "overlap observations per wave and durable Artifact/Checkpoint completion; bounded admission/load "
-                "mechanics only, not real Provider, production performance, multi-node, or production-duration load"
+                "overlap observations per wave, durable Artifact/Checkpoint completion, optional minimum-duration "
+                "load and diagnostic P50/P95/P99/error measurements; resource-profiled mechanics only, not real "
+                "Provider, multi-node or an operator-approved production performance SLA"
                 if fixture_load
                 else (
                     "deterministic Codex and Claude Provider Host fixtures over one real Control Plane and two managed "
@@ -15825,6 +15993,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "workers": FIXTURE_CONCURRENCY_WORKERS if fixture_load_suite else 0,
                 "sessions": FIXTURE_LOAD_SESSIONS if fixture_load_suite else 0,
                 "waves": options.load_waves if fixture_load_suite else 0,
+                "minimumDurationSeconds": (
+                    options.load_min_duration_seconds if fixture_load_suite else 0
+                ),
+                "maximumWaves": options.load_max_waves if fixture_load_suite else 0,
                 "plannedExecutions": (
                     FIXTURE_LOAD_SESSIONS * options.load_waves if fixture_load_suite else 0
                 ),
@@ -15838,6 +16010,19 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "maxConcurrentExecutions": (
                     FIXTURE_CONCURRENCY_WORKERS if fixture_load_suite else None
                 ),
+                "resourceProfile": (
+                    fixture_load_resource_profile(options) if fixture_load_suite else None
+                ),
+                "measurement": {
+                    "durationTargetEnforced": (
+                        options.load_min_duration_seconds > 0
+                        if fixture_load_suite
+                        else False
+                    ),
+                    "latencyPercentiles": [50, 95, 99] if fixture_load_suite else [],
+                    "unexpectedErrorRateRecorded": fixture_load_suite,
+                    "operatorApprovedSlaThresholdsEnforced": False,
+                },
                 "boundary": evidence_boundary if fixture_load_suite else None,
             },
             "loadFailure": {

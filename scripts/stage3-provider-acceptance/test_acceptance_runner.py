@@ -41,6 +41,8 @@ def runner_options(*, restart_control_plane: bool = True) -> acceptance.RunnerOp
         soak_turns=0,
         soak_restart_every=0,
         load_waves=0,
+        load_min_duration_seconds=0.0,
+        load_max_waves=0,
         ssh_orbctl_bin="orbctl",
         ssh_machine_name=None,
         ssh_machine_arch="arm64",
@@ -531,12 +533,16 @@ class FixtureLoadSuite(FixtureConcurrencySuite):
         enforce_quota: bool = True,
         duplicate_worker: bool = False,
         execution_pinned_workers: bool = False,
+        minimum_duration_seconds: float = 0.0,
+        maximum_waves: int | None = None,
     ) -> None:
         super().__init__(duplicate_worker=duplicate_worker)
         self.options = dataclasses.replace(
             self.options,
             suite="fixture-load",
             load_waves=wave_count,
+            load_min_duration_seconds=minimum_duration_seconds,
+            load_max_waves=maximum_waves or wave_count,
         )
         self.enforce_quota = enforce_quota
         self.execution_pinned_workers = execution_pinned_workers
@@ -2543,8 +2549,54 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
         self.assertEqual(evidence["eventTypeCounts"]["execution.completed"], 8)
         self.assertEqual(evidence["eventTypeCounts"]["checkpoint.ready"], 8)
         self.assertEqual(evidence["eventTypeCounts"]["artifact.ready"], 16)
+        self.assertEqual(evidence["effectiveConcurrency"], 2)
+        self.assertEqual(evidence["executionSuccessRate"], 1.0)
+        self.assertEqual(evidence["unexpectedFailureCount"], 0)
+        self.assertEqual(evidence["unexpectedErrorRate"], 0.0)
+        self.assertTrue(evidence["durationTargetMet"])
+        self.assertEqual(evidence["waveDurationMs"]["sampleCount"], 2)
+        self.assertIn("p95", evidence["waveDurationMs"])
+        self.assertIn("p99", evidence["admissionRecoveryMs"])
+        self.assertEqual(
+            evidence["resourceProfile"]["dockerWorker"],
+            {"memoryBytes": 2 << 30, "nanoCpus": 1_000_000_000},
+        )
         self.assertFalse(evidence["doubleExecution"])
         self.assertFalse(evidence["duplicateTerminal"])
+
+    def test_fixture_load_fails_when_duration_safety_bound_is_exhausted(self) -> None:
+        suite = FixtureLoadSuite(
+            wave_count=2,
+            minimum_duration_seconds=60.0,
+            maximum_waves=2,
+        )
+
+        with mock.patch.object(acceptance, "elapsed_ms", return_value=0):
+            with self.assertRaises(acceptance.AcceptanceError) as caught:
+                suite._fixture_load_admission_waves()
+
+        self.assertEqual(caught.exception.code, "runner.load_duration_not_reached")
+        self.assertEqual(caught.exception.evidence["wavesCompleted"], 2)
+
+    def test_duration_distribution_reports_nearest_rank_percentiles(self) -> None:
+        summary = acceptance.duration_distribution_ms([1, 2, 3, 4, 100])
+
+        self.assertEqual(
+            summary,
+            {
+                "sampleCount": 5,
+                "minimum": 1,
+                "maximum": 100,
+                "average": 22.0,
+                "p50": 3,
+                "p95": 100,
+                "p99": 100,
+            },
+        )
+        with self.assertRaises(ValueError):
+            acceptance.duration_distribution_ms([])
+        with self.assertRaises(ValueError):
+            acceptance.duration_distribution_ms([1, -1])
 
     def test_fixture_load_allows_one_explicit_rollout_segment_with_hooks(self) -> None:
         suite = FixtureLoadSuite(wave_count=2)
@@ -4144,6 +4196,8 @@ class RunnerOptionsTest(unittest.TestCase):
         self.assertEqual(options.suite, "fixture-load")
         self.assertEqual(options.target, "docker")
         self.assertEqual(options.load_waves, acceptance.FIXTURE_LOAD_DEFAULT_WAVES)
+        self.assertEqual(options.load_min_duration_seconds, 0.0)
+        self.assertEqual(options.load_max_waves, acceptance.FIXTURE_LOAD_DEFAULT_WAVES)
         self.assertFalse(options.restart_control_plane)
         self.assertEqual(options.timeout_seconds, 900.0)
 
@@ -4173,8 +4227,27 @@ class RunnerOptionsTest(unittest.TestCase):
         )
         self.assertEqual(options.load_waves, 8)
 
+        duration_options = acceptance.parse_args(
+            [
+                "--suite",
+                "fixture-load",
+                "--target",
+                "docker",
+                "--load-waves",
+                "8",
+                "--load-min-duration-seconds",
+                "1800",
+                "--load-max-waves",
+                "400",
+            ]
+        )
+        self.assertEqual(duration_options.load_min_duration_seconds, 1800.0)
+        self.assertEqual(duration_options.load_max_waves, 400)
+        self.assertEqual(duration_options.timeout_seconds, 2100.0)
+
         invalid_arguments = (
             ["--load-waves", "8"],
+            ["--load-min-duration-seconds", "60"],
             ["--suite", "fixture-load"],
             [
                 "--suite",
@@ -4191,6 +4264,44 @@ class RunnerOptionsTest(unittest.TestCase):
                 "docker",
                 "--load-waves",
                 str(acceptance.FIXTURE_LOAD_MAX_WAVES + 1),
+            ],
+            [
+                "--suite",
+                "fixture-load",
+                "--target",
+                "docker",
+                "--load-max-waves",
+                "50",
+            ],
+            [
+                "--suite",
+                "fixture-load",
+                "--target",
+                "docker",
+                "--load-waves",
+                "50",
+                "--load-min-duration-seconds",
+                "60",
+                "--load-max-waves",
+                "49",
+            ],
+            [
+                "--suite",
+                "fixture-load",
+                "--target",
+                "docker",
+                "--load-min-duration-seconds",
+                str(acceptance.FIXTURE_LOAD_DURATION_MAX_SECONDS + 1),
+            ],
+            [
+                "--suite",
+                "fixture-load",
+                "--target",
+                "docker",
+                "--load-min-duration-seconds",
+                "600",
+                "--timeout",
+                "659",
             ],
             [
                 "--suite",

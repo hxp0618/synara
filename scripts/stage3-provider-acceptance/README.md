@@ -85,18 +85,29 @@ The canonical `25` waves complete `100` unique Executions, record `50` quota rej
 reuse, and make `75` simultaneous-overlap observations. Use a smaller bounded value during development; the accepted
 range is `2..100` waves.
 
+For sustained resource-profiled measurement, add `--load-min-duration-seconds`. The load case continues with whole
+waves until both the requested minimum wave count and minimum measured duration are satisfied. `--load-max-waves`
+is the fail-closed safety bound (default `100`, maximum `10000`); if the duration is not reached before that bound,
+the case fails instead of silently shortening the soak. The report records the exact Docker CPU/memory profile,
+effective concurrency, execution success and unexpected-error rates, observed throughput, plus P50/P95/P99 wave and
+quota-slot recovery latency. These values are diagnostic until an operator-approved SLA supplies thresholds.
+
 ```sh
 python3 scripts/stage3-provider-acceptance/acceptance_runner.py \
   --suite fixture-load \
   --target docker \
   --provider codex \
   --load-waves 25 \
+  --load-min-duration-seconds 300 \
+  --load-max-waves 100 \
   --timeout 900
 ```
 
 This gate proves deterministic bounded quota/admission, two-Worker overlap, repeated Session reuse, durable
-Artifact/Checkpoint completion and unique terminal mechanics. It is not a real Codex/Claude performance result,
-multi-node evidence, a production latency SLA, sustained production load or a production-duration soak.
+Artifact/Checkpoint completion, unique terminal mechanics and the requested resource-profiled measurement window. It
+is not a real Codex/Claude performance result, multi-node evidence or an operator-approved production latency/error
+SLA. A release claim must still use the approved production duration and thresholds rather than treating the example
+values above as policy.
 
 ## Deterministic targeted failure under load
 
