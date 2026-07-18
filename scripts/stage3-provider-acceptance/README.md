@@ -191,7 +191,10 @@ isolation; ambient OAuth runs preserve the user's normal Claude configuration lo
 discard a valid login.
 
 Remote Targets require an explicit controlled Provider Credential. Put the secret in an operator-owned environment
-variable, pass only its variable name, and use the Provider Host installed in the Worker image:
+variable, pass only its variable name, and use the Provider Host installed in the Worker image. Entries in
+`~/.synara-acceptance-env` must be exported to child processes: either declare each assignment with `export`, or add
+one `export SYNARA_ACCEPTANCE_CODEX_KEY ...` declaration covering every configured Key, Base URL, and Model name.
+Plain unexported shell assignments are intentionally invisible to the acceptance runner and fail closed:
 
 ```sh
 source ~/.synara-acceptance-env
