@@ -2,6 +2,7 @@
 // Purpose: Proxy same-origin /v1 SaaS API requests to the optional Go control plane.
 // Layer: Server HTTP transport
 
+import { NodeHttpServerRequest } from "@effect/platform-node";
 import { Effect, Layer, Stream } from "effect";
 import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/unstable/http";
 
@@ -42,6 +43,49 @@ export function shouldStreamControlPlaneResponse(response: Response): boolean {
   return (
     response.headers.get("content-disposition")?.toLowerCase().startsWith("attachment;") === true
   );
+}
+
+export function streamControlPlaneResponseBody(
+  body: ReadableStream<Uint8Array>,
+  finalizeUpstream: () => void,
+) {
+  return Stream.fromReadableStream({
+    evaluate: () => body,
+    onError: (cause) => cause,
+  }).pipe(Stream.ensuring(Effect.sync(finalizeUpstream)));
+}
+
+export function bindControlPlaneProxyAbort(
+  downstream: {
+    request: {
+      readonly complete: boolean;
+      once(event: "aborted" | "close", listener: () => void): unknown;
+      off(event: "aborted" | "close", listener: () => void): unknown;
+    };
+    response: {
+      readonly writableEnded: boolean;
+      once(event: "close", listener: () => void): unknown;
+      off(event: "close", listener: () => void): unknown;
+    };
+  },
+  upstreamAbort: AbortController,
+) {
+  const abortUpstream = () => upstreamAbort.abort();
+  const abortIncompleteRequest = () => {
+    if (!downstream.request.complete) abortUpstream();
+  };
+  const abortIncompleteResponse = () => {
+    if (!downstream.response.writableEnded) abortUpstream();
+  };
+  downstream.request.once("aborted", abortUpstream);
+  downstream.request.once("close", abortIncompleteRequest);
+  downstream.response.once("close", abortIncompleteResponse);
+  return () => {
+    downstream.request.off("aborted", abortUpstream);
+    downstream.request.off("close", abortIncompleteRequest);
+    downstream.response.off("close", abortIncompleteResponse);
+    upstreamAbort.abort();
+  };
 }
 
 export function buildControlPlaneProxyRequestHeaders(input: {
@@ -105,9 +149,19 @@ const proxyControlPlaneRequest = Effect.gen(function* () {
 
   const webRequest = yield* HttpServerRequest.toWeb(request);
   const body = request.method === "GET" || request.method === "HEAD" ? undefined : webRequest.body;
+  const upstreamAbort = new AbortController();
+  const finalizeUpstream = bindControlPlaneProxyAbort(
+    {
+      request: NodeHttpServerRequest.toIncomingMessage(request),
+      response: NodeHttpServerRequest.toServerResponse(request),
+    },
+    upstreamAbort,
+  );
   const response = yield* Effect.tryPromise({
-    try: (signal) =>
-      fetch(resolveControlPlaneTarget(config.controlPlaneUrl!, requestUrl), {
+    try: (signal) => {
+      const abortUpstream = () => upstreamAbort.abort(signal.reason);
+      signal.addEventListener("abort", abortUpstream, { once: true });
+      return fetch(resolveControlPlaneTarget(config.controlPlaneUrl!, requestUrl), {
         method: request.method,
         headers: buildControlPlaneProxyRequestHeaders({
           headers: request.headers,
@@ -117,12 +171,16 @@ const proxyControlPlaneRequest = Effect.gen(function* () {
         body,
         ...(body === undefined ? {} : { duplex: "half" as const }),
         redirect: "manual",
-        signal,
-      } as RequestInit & { duplex?: "half" }),
+        signal: upstreamAbort.signal,
+      } as RequestInit & { duplex?: "half" }).finally(() => {
+        signal.removeEventListener("abort", abortUpstream);
+      });
+    },
     catch: (cause) => cause,
   }).pipe(Effect.option);
 
   if (response._tag === "None") {
+    finalizeUpstream();
     return unavailableResponse(
       502,
       "control_plane_proxy_failed",
@@ -132,7 +190,7 @@ const proxyControlPlaneRequest = Effect.gen(function* () {
   const upstream = response.value;
   if (shouldStreamControlPlaneResponse(upstream)) {
     return HttpServerResponse.stream(
-      Stream.fromAsyncIterable(upstream.body!, (cause) => cause),
+      streamControlPlaneResponseBody(upstream.body!, finalizeUpstream),
       {
         status: upstream.status,
         statusText: upstream.statusText,
@@ -140,7 +198,11 @@ const proxyControlPlaneRequest = Effect.gen(function* () {
       },
     );
   }
-  const bytes = new Uint8Array(yield* Effect.promise(() => upstream.arrayBuffer()));
+  const bytes = new Uint8Array(
+    yield* Effect.promise(() => upstream.arrayBuffer()).pipe(
+      Effect.ensuring(Effect.sync(finalizeUpstream)),
+    ),
+  );
   return HttpServerResponse.uint8Array(bytes, {
     status: upstream.status,
     statusText: upstream.statusText,
