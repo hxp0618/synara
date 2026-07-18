@@ -16,7 +16,7 @@ import { COMPOSER_INPUT_SURFACE_CLASS_NAME } from "./composerPickerStyles";
 
 interface PendingUserInputPanelProps {
   pendingUserInputs: ReadonlyArray<PendingUserInput>;
-  respondingRequestIds: string[];
+  respondingRequestIds: readonly string[];
   answers: Record<string, PendingUserInputDraftAnswer>;
   questionIndex: number;
   onToggleOption: (questionId: string, optionLabel: string) => PendingUserInputDraftAnswer | null;
@@ -42,13 +42,15 @@ export const ComposerPendingUserInputPanel = memo(function ComposerPendingUserIn
   if (pendingUserInputs.length === 0) return null;
   const activePrompt = pendingUserInputs[0];
   if (!activePrompt) return null;
-  const requestKey = activePrompt.requestKey ?? activePrompt.requestId;
 
   return (
     <ComposerPendingUserInputCard
-      key={requestKey}
+      key={
+        activePrompt.requestKey ??
+        `${activePrompt.requestId}:${activePrompt.lifecycleGeneration ?? "legacy"}`
+      }
       prompt={activePrompt}
-      isResponding={respondingRequestIds.includes(requestKey)}
+      isResponding={respondingRequestIds.includes(activePrompt.requestKey ?? activePrompt.requestId)}
       answers={answers}
       questionIndex={questionIndex}
       onToggleOption={onToggleOption}
@@ -98,22 +100,19 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
     };
   }, [activeQuestion?.id, isResponding]);
 
-  const handleOptionSelection = useCallback(
-    (questionId: string, optionLabel: string) => {
-      const nextDraftAnswer = onToggleOption(questionId, optionLabel);
-      if (activeQuestion?.multiSelect) {
-        return;
-      }
-      if (autoAdvanceTimerRef.current !== null) {
-        window.clearTimeout(autoAdvanceTimerRef.current);
-      }
-      autoAdvanceTimerRef.current = window.setTimeout(() => {
-        autoAdvanceTimerRef.current = null;
-        onAdvanceRef.current(nextDraftAnswer ? { [questionId]: nextDraftAnswer } : undefined);
-      }, 200);
-    },
-    [activeQuestion?.multiSelect, onToggleOption],
-  );
+  const handleOptionSelection = useCallback((questionId: string, optionLabel: string) => {
+    const nextDraftAnswer = onToggleOption(questionId, optionLabel);
+    if (activeQuestion?.multiSelect) {
+      return;
+    }
+    if (autoAdvanceTimerRef.current !== null) {
+      window.clearTimeout(autoAdvanceTimerRef.current);
+    }
+    autoAdvanceTimerRef.current = window.setTimeout(() => {
+      autoAdvanceTimerRef.current = null;
+      onAdvanceRef.current(nextDraftAnswer ? { [questionId]: nextDraftAnswer } : undefined);
+    }, 200);
+  }, [activeQuestion?.multiSelect, onToggleOption]);
 
   // Keyboard shortcut: digits toggle options for multi-select prompts and preserve
   // the current auto-advance behavior for single-select questions.
@@ -144,7 +143,7 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
     };
     document.addEventListener("keydown", handler);
     return () => document.removeEventListener("keydown", handler);
-  }, [activeQuestion, handleOptionSelection, isResponding]);
+  }, [activeQuestion, isResponding]);
 
   if (!activeQuestion) {
     return null;

@@ -6,4 +6,13 @@ import { captureRemoteAccessToken } from "./remoteAccessToken";
 
 captureRemoteAccessToken();
 
-void import("./main");
+import { bootstrapSignedOutScreen } from "./authSignedOut";
+import { bootstrapPairingSession } from "./pairingBootstrap";
+
+if (!bootstrapSignedOutScreen()) {
+  void bootstrapPairingSession().then((result) => {
+    if (result === "not-pairing") {
+      return import("./main");
+    }
+  });
+}

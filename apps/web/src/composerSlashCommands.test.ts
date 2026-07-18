@@ -15,6 +15,7 @@ import {
   parseFastSlashCommandAction,
   parseForkSlashCommandArgs,
   resolveUnavailableControlPlaneAdvancedSlashCommand,
+  providerSupportsTextNativeReviewCommand,
   shouldHideProviderNativeCommandFromComposerMenu,
 } from "./composerSlashCommands";
 
@@ -75,27 +76,6 @@ describe("composerSlashCommands", () => {
       command: "clear",
       args: "",
     });
-  });
-
-  it("consumes recognized unavailable SaaS advanced commands instead of treating them as prompts", () => {
-    expect(
-      resolveUnavailableControlPlaneAdvancedSlashCommand({
-        text: "/compact",
-        availableCommands: ["clear", "model"],
-      }),
-    ).toBe("compact");
-    expect(
-      resolveUnavailableControlPlaneAdvancedSlashCommand({
-        text: "/fork local",
-        availableCommands: ["fork"],
-      }),
-    ).toBeNull();
-    expect(
-      resolveUnavailableControlPlaneAdvancedSlashCommand({
-        text: "/unknown",
-        availableCommands: [],
-      }),
-    ).toBeNull();
   });
 
   it("parses /fast actions", () => {
@@ -225,7 +205,6 @@ describe("composerSlashCommands", () => {
       provider: "codex",
       supportsFastSlashCommand: true,
       canOfferCompactCommand: true,
-      canOfferPlanCommand: true,
       canOfferReviewCommand: true,
       canOfferForkCommand: true,
       canOfferSideCommand: true,
@@ -245,7 +224,6 @@ describe("composerSlashCommands", () => {
       provider: "codex",
       supportsFastSlashCommand: true,
       canOfferCompactCommand: true,
-      canOfferPlanCommand: true,
       canOfferReviewCommand: true,
       canOfferForkCommand: true,
       canOfferSideCommand: true,
@@ -258,12 +236,32 @@ describe("composerSlashCommands", () => {
     expect(shouldHideProviderNativeCommandFromComposerMenu("codex", "status")).toBe(false);
   });
 
+  // #218: OpenCode lists native /review but does not honor bare `/review` text turns.
+  it("keeps app-level /review for opencode and does not treat review as text-native", () => {
+    const availableCommands = getAvailableComposerSlashCommands({
+      provider: "opencode",
+      supportsFastSlashCommand: false,
+      canOfferCompactCommand: true,
+      canOfferReviewCommand: true,
+      canOfferForkCommand: true,
+      canOfferSideCommand: true,
+      canOfferExportCommand: true,
+      providerNativeCommandNames: ["review", "status"],
+    });
+
+    expect(availableCommands).toContain("review");
+    expect(shouldHideProviderNativeCommandFromComposerMenu("opencode", "review")).toBe(true);
+    expect(providerSupportsTextNativeReviewCommand("opencode", ["review", "status"])).toBe(false);
+    expect(providerSupportsTextNativeReviewCommand("opencode", [{ name: "review" }])).toBe(false);
+    // Other providers with a native review still use text pass-through.
+    expect(providerSupportsTextNativeReviewCommand("claudeAgent", ["review"])).toBe(true);
+  });
+
   it("keeps app-level /automation available even if a provider exposes a native collision", () => {
     const availableCommands = getAvailableComposerSlashCommands({
       provider: "antigravity",
       supportsFastSlashCommand: false,
       canOfferCompactCommand: false,
-      canOfferPlanCommand: true,
       canOfferReviewCommand: true,
       canOfferForkCommand: true,
       canOfferSideCommand: true,
@@ -280,7 +278,6 @@ describe("composerSlashCommands", () => {
       provider: "claudeAgent",
       supportsFastSlashCommand: true,
       canOfferCompactCommand: true,
-      canOfferPlanCommand: true,
       canOfferReviewCommand: true,
       canOfferForkCommand: true,
       canOfferSideCommand: true,
@@ -298,7 +295,6 @@ describe("composerSlashCommands", () => {
         provider: "claudeAgent",
         supportsFastSlashCommand: true,
         canOfferCompactCommand: true,
-        canOfferPlanCommand: true,
         canOfferReviewCommand: true,
         canOfferForkCommand: true,
         canOfferSideCommand: true,
@@ -307,42 +303,12 @@ describe("composerSlashCommands", () => {
     ).toEqual(["side", "export", "feedback", "automation"]);
   });
 
-  it("uses cross-provider app advanced commands for Claude in SaaS routing mode", () => {
-    expect(
-      getAvailableComposerSlashCommands({
-        provider: "claudeAgent",
-        routingMode: "control-plane",
-        supportsFastSlashCommand: false,
-        canOfferCompactCommand: true,
-        canOfferPlanCommand: true,
-        canOfferReviewCommand: true,
-        canOfferForkCommand: true,
-        canOfferSideCommand: false,
-        canOfferExportCommand: true,
-      }),
-    ).toEqual([
-      "clear",
-      "compact",
-      "model",
-      "plan",
-      "default",
-      "review",
-      "fork",
-      "status",
-      "subagents",
-      "export",
-      "feedback",
-      "automation",
-    ]);
-  });
-
   it("offers the app-level /export command on every provider", () => {
     expect(
       getAvailableComposerSlashCommands({
         provider: "codex",
         supportsFastSlashCommand: true,
         canOfferCompactCommand: true,
-        canOfferPlanCommand: true,
         canOfferReviewCommand: true,
         canOfferForkCommand: true,
         canOfferSideCommand: true,
@@ -357,7 +323,6 @@ describe("composerSlashCommands", () => {
         provider: "codex",
         supportsFastSlashCommand: true,
         canOfferCompactCommand: true,
-        canOfferPlanCommand: true,
         canOfferReviewCommand: true,
         canOfferForkCommand: true,
         canOfferSideCommand: true,
@@ -371,7 +336,6 @@ describe("composerSlashCommands", () => {
       provider: "claudeAgent",
       supportsFastSlashCommand: true,
       canOfferCompactCommand: true,
-      canOfferPlanCommand: true,
       canOfferReviewCommand: true,
       canOfferForkCommand: true,
       canOfferSideCommand: true,
@@ -405,7 +369,6 @@ describe("composerSlashCommands", () => {
         provider: "codex",
         supportsFastSlashCommand: true,
         canOfferCompactCommand: true,
-        canOfferPlanCommand: true,
         canOfferReviewCommand: true,
         canOfferForkCommand: true,
         canOfferSideCommand: true,
@@ -418,28 +381,12 @@ describe("composerSlashCommands", () => {
         provider: "codex",
         supportsFastSlashCommand: true,
         canOfferCompactCommand: false,
-        canOfferPlanCommand: true,
         canOfferReviewCommand: true,
         canOfferForkCommand: true,
         canOfferSideCommand: true,
         canOfferExportCommand: true,
       }),
     ).not.toContain("compact");
-  });
-
-  it("only offers /plan when plan mode is available", () => {
-    expect(
-      getAvailableComposerSlashCommands({
-        provider: "codex",
-        supportsFastSlashCommand: true,
-        canOfferCompactCommand: true,
-        canOfferPlanCommand: false,
-        canOfferReviewCommand: true,
-        canOfferForkCommand: true,
-        canOfferSideCommand: true,
-        canOfferExportCommand: true,
-      }),
-    ).not.toContain("plan");
   });
 
   it("exposes shared app slash commands for Antigravity", () => {

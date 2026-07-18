@@ -19,7 +19,11 @@ interface ComposerPendingApprovalPanelProps {
   pendingCount: number;
   isResponding: boolean;
   allowSessionDecision: boolean;
-  onRespond: (requestId: ApprovalRequestId, decision: ProviderApprovalDecision) => Promise<void>;
+  onRespond: (
+    requestId: ApprovalRequestId,
+    decision: ProviderApprovalDecision,
+    lifecycleGeneration?: string,
+  ) => Promise<void>;
 }
 
 type ParsedApproval = {
@@ -110,7 +114,7 @@ export const ComposerPendingApprovalPanel = memo(function ComposerPendingApprova
     const action = approvalActions[digit - 1];
     if (!action) return;
     event.preventDefault();
-    void onRespond(requestId, action.decision);
+    void onRespond(requestId, action.decision, approval.lifecycleGeneration);
   };
 
   return (
@@ -143,7 +147,9 @@ export const ComposerPendingApprovalPanel = memo(function ComposerPendingApprova
             description={action.description}
             tone={action.tone}
             disabled={isResponding}
-            onSelect={() => void onRespond(requestId, action.decision)}
+            onSelect={() =>
+              void onRespond(requestId, action.decision, approval.lifecycleGeneration)
+            }
           />
         ))}
       </div>
