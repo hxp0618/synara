@@ -270,7 +270,10 @@ bun run --cwd apps/web test \
 Project/Session/Turn 创建、PostgreSQL 恢复、连续刷新、Browser reconnect、Server restart、Console 健康与
 SSE lease 精确回收；报告为
 `docs/reports/stage-3-saas-web-control-plane-authority-sse-3a6d347d.md`。该证据只关闭基础 authority/reconnect
-slice，下面面向完整高级操作、Artifact、Worker 状态与本地回退的发布项仍保持未勾选。
+slice。Clean commit `0b4d8e4e` 又完成未配置 Control Plane 的真实 Codex 本地主聊天、刷新、完整 Server/dev
+restart、本地 SQLite 恢复和第二轮 native resume；报告为
+`docs/reports/stage-3-web-local-mode-restart-resume-0b4d8e4e.md`。下面面向完整高级操作、Artifact、Worker 状态
+与多浏览器并发的发布项仍保持未勾选。
 
 - [ ] SaaS Web 的 Project、Session、Turn、Compact、Review、Rollback、Fork 只调用 Control Plane API。
 - [ ] SaaS handler 没有回退到 `readNativeApi()` 或本地 Provider discovery。
@@ -278,7 +281,8 @@ slice，下面面向完整高级操作、Artifact、Worker 状态与本地回退
 - [ ] Worker 列表、operator revoke、Release Revision、Canary、Promote、Rollback 使用服务端权威状态。
 - [ ] CAS conflict 会重新读取 `policyVersion`，不会覆盖并发运维操作。
 - [ ] SSE 断开、刷新和 Server restart 后 Event Sequence、Interaction、Artifact 和 Worker 状态一致。
-- [ ] 未配置 Control Plane 的本地模式没有回归，也不会写入 SaaS authority。
+- [x] 未配置 Control Plane 的本地主聊天、真实 Codex、刷新、Server restart 与 native resume 没有回归，
+      本地 SQLite 也没有 Control Plane 命名表或 SaaS authority 写入；本地 Project 文件操作不在本项证据边界。
 - [ ] 浏览器 Console 无相关 Error/Warning 或框架 Overlay。
 
 ## 8. Canary、Promote 与 Rollback
