@@ -663,6 +663,7 @@ describe("Claude Agent SDK runtime", () => {
             itemId: "tool-approval",
             terminalId: "tool-approval",
             terminalEventType: "terminal.exited",
+            exitCode: 0,
           }),
         },
         {
@@ -672,6 +673,73 @@ describe("Claude Agent SDK runtime", () => {
         },
       ]),
     );
+  });
+
+  it("preserves an explicit snake-case Bash exit code", async () => {
+    const messages: RunnerMessage[] = [];
+    const queryFactory: ClaudeQueryFactory = () =>
+      fakeQuery(
+        (async function* () {
+          yield sdkMessage(systemInit("session-explicit-exit", "claude-test"));
+          yield sdkMessage({
+            type: "assistant",
+            session_id: "session-explicit-exit",
+            message: {
+              content: [
+                {
+                  type: "tool_use",
+                  id: "tool-explicit-exit",
+                  name: "Bash",
+                  input: { command: "exit 7" },
+                },
+              ],
+            },
+          });
+          yield sdkMessage({
+            type: "user",
+            session_id: "session-explicit-exit",
+            tool_use_result: {
+              stdout: "",
+              stderr: "command failed",
+              interrupted: false,
+              exit_code: 7,
+            },
+            message: {
+              content: [
+                {
+                  type: "tool_result",
+                  tool_use_id: "tool-explicit-exit",
+                  content: "command failed",
+                  is_error: true,
+                },
+              ],
+            },
+          });
+          yield sdkMessage(successResult("session-explicit-exit", "handled", {}));
+        })(),
+      );
+
+    const run = startProviderHostRun(
+      claudeInput({ inputText: "run a failing command" }),
+      null,
+      (message) => messages.push(message),
+      { claudeQueryFactory: queryFactory },
+    );
+
+    await expect(run.result).resolves.toMatchObject({ output: { text: "handled" } });
+    expect(messages).toContainEqual({
+      type: "event",
+      eventType: "runtime.provider.activity",
+      payload: expect.objectContaining({
+        provider: "claudeAgent",
+        itemType: "Bash",
+        status: "failed",
+        itemId: "tool-explicit-exit",
+        terminalId: "tool-explicit-exit",
+        terminalEventType: "terminal.failed",
+        exitCode: 7,
+      }),
+    });
   });
 
   it("answers AskUserQuestion in native Plan Mode", async () => {

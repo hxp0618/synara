@@ -11057,14 +11057,12 @@ class AcceptanceSuite:
         self.state.last_real_marker = source_marker
         source = self._current_session()
         expected_sequence = self._session_last_event_sequence(source)
+        fork_input = self._real_provider_fork_input(source, expected_sequence)
         result = json_object(
             self.api.request(
                 "POST",
                 f"/v1/sessions/{source_session_id}/fork",
-                {
-                    "expectedLastEventSequence": expected_sequence,
-                    "title": "Stage 3 real Provider acceptance fork",
-                },
+                fork_input,
                 expected=(201,),
             ),
             "real Provider Fork emulation",
@@ -11110,6 +11108,25 @@ class AcceptanceSuite:
             "sourceAnchor": anchor_evidence,
             "continuity": continuity,
         }
+
+    @staticmethod
+    def _real_provider_fork_input(
+        source: Mapping[str, Any], expected_sequence: int
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "expectedLastEventSequence": expected_sequence,
+            "title": "Stage 3 real Provider acceptance fork",
+        }
+        source_credential_id = source.get("providerCredentialId")
+        if source_credential_id is None:
+            return payload
+        if not isinstance(source_credential_id, str) or not source_credential_id:
+            raise AcceptanceError(
+                "runner.real_provider_fork_credential_invalid",
+                "The source Session returned an invalid Provider Credential binding.",
+            )
+        payload["providerCredentialId"] = source_credential_id
+        return payload
 
     def _current_session(self, session_id: str | None = None) -> dict[str, Any]:
         resolved_session_id = session_id or self._required("session_id")

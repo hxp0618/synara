@@ -10439,6 +10439,9 @@ export default function ChatView({
             const result = await controlPlane.forkSession(activeThread.id, {
               title: `${activeThread.title} Fork`,
               visibility: activeControlPlaneSession.visibility,
+              ...(activeControlPlaneSession.providerCredentialId
+                ? { providerCredentialId: activeControlPlaneSession.providerCredentialId }
+                : {}),
             });
             return ThreadId.makeUnsafe(result.session.id);
           },

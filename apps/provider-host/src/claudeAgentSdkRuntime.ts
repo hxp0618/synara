@@ -884,7 +884,10 @@ class ClaudeAgentSdkRuntime {
         }
         state.tools.delete(toolUseId);
         const failed = block?.is_error === true || structured?.interrupted === true;
+        const exitCode =
+          structured?.exitCode ?? (!failed && structured !== undefined ? 0 : undefined);
         this.emitToolActivity(tool, failed ? "failed" : "completed", toolUseId, {
+          ...(exitCode !== undefined ? { exitCode } : {}),
           ...(failed ? { failureKind: "provider_error" as const } : {}),
         });
       } else {
@@ -1724,6 +1727,7 @@ type ClaudeBashOutput = {
   stdout: string;
   stderr: string;
   interrupted: boolean;
+  exitCode?: number;
   backgroundTaskId?: string;
   rawOutputPath?: string;
   persistedOutputPath?: string;
@@ -1741,6 +1745,8 @@ function claudeBashOutput(value: unknown): ClaudeBashOutput | undefined {
     return undefined;
   }
   const persistedOutputSize = record.persistedOutputSize;
+  const exitCode =
+    nonNegativeIntegerField(record, "exitCode") ?? nonNegativeIntegerField(record, "exit_code");
   const backgroundTaskId = readString(record, "backgroundTaskId");
   const rawOutputPath = readString(record, "rawOutputPath");
   const persistedOutputPath = readString(record, "persistedOutputPath");
@@ -1748,6 +1754,7 @@ function claudeBashOutput(value: unknown): ClaudeBashOutput | undefined {
     stdout: record.stdout,
     stderr: record.stderr,
     interrupted: record.interrupted,
+    ...(exitCode !== undefined ? { exitCode } : {}),
     ...(backgroundTaskId ? { backgroundTaskId } : {}),
     ...(rawOutputPath ? { rawOutputPath } : {}),
     ...(persistedOutputPath ? { persistedOutputPath } : {}),

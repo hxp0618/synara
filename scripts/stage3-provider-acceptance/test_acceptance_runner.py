@@ -3675,6 +3675,18 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
             ],
         )
 
+    def test_real_provider_fork_explicitly_rebinds_the_source_credential(self) -> None:
+        self.assertEqual(
+            acceptance.AcceptanceSuite._real_provider_fork_input(
+                {"providerCredentialId": "credential-controlled"}, 7
+            ),
+            {
+                "expectedLastEventSequence": 7,
+                "title": "Stage 3 real Provider acceptance fork",
+                "providerCredentialId": "credential-controlled",
+            },
+        )
+
     def test_real_provider_failure_matrix_runs_before_restart_and_expiry_continuity(self) -> None:
         suite = CaseOrderSuite(
             FakeDriver(acceptance.STANDING_WORKER, name="local"),
