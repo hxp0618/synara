@@ -354,6 +354,7 @@ class InputValidationTest(unittest.TestCase):
         self.assertIn("rm -f /var/log/apk.log", dockerfile)
         self.assertIn("--mount=from=worker-provider-tools", dockerfile)
         self.assertIn('/opt/synara/.build-revision', dockerfile)
+        self.assertIn("COPY packages/shared/src ./packages/shared/src", dockerfile)
         self.assertIn('touch -d "@${SOURCE_DATE_EPOCH}" /out/synara-agentd', dockerfile)
         self.assertIn('touch -d "@${SOURCE_DATE_EPOCH}" /out/provider-host.mjs', dockerfile)
         self.assertNotIn(

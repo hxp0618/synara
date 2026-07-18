@@ -185,6 +185,7 @@ RUN --mount=type=cache,target=/root/.bun/install/cache \
   bun install --frozen-lockfile --filter @synara/provider-host
 COPY apps/provider-host/src ./apps/provider-host/src
 COPY packages/contracts/src ./packages/contracts/src
+COPY packages/shared/src ./packages/shared/src
 RUN bun build apps/provider-host/src/index.ts --target=node --outfile=/out/provider-host.mjs \
   && touch -d "@${SOURCE_DATE_EPOCH}" /out/provider-host.mjs
 
