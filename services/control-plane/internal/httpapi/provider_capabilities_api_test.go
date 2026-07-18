@@ -174,6 +174,176 @@ func TestSessionCapabilityProjectionUsesExactExecutionManifest(t *testing.T) {
 	}
 }
 
+func TestSessionCapabilityProjectionUsesBoundManifestWhenTargetIsTemporarilyUnobserved(
+	t *testing.T,
+) {
+	fixture := newProviderCapabilityHTTPFixture(t)
+	manifestID := uuid.New()
+	seedProviderCapabilityManifest(t, fixture.db, manifestID, "native")
+	completeProviderCapabilityExecutionWithManifest(t, fixture, manifestID)
+
+	response := fixture.request(
+		t, fixture.operatorToken,
+		"/v1/sessions/"+fixture.sessionID.String()+"/provider-capabilities",
+	)
+	if response.Code != http.StatusOK {
+		t.Fatalf("bound Session projection status = %d, body = %s", response.Code, response.Body.String())
+	}
+	projection := decodeProviderCapabilityProjection(t, response)
+	if projection.Basis != providercapabilities.BasisExecution || projection.ExecutionID == nil ||
+		*projection.ExecutionID != fixture.executionID {
+		t.Fatalf("bound Session projection identity = %#v", projection)
+	}
+	assertProjectedCapabilityMode(t, projection, "codex", "compact", providercapabilities.SupportModeNative)
+	assertProjectedCapabilityMode(t, projection, "codex", "review", providercapabilities.SupportModeNative)
+	if strings.Contains(response.Body.String(), manifestID.String()) {
+		t.Fatalf("bound Session projection leaked Worker manifest ID: %s", response.Body.String())
+	}
+}
+
+func TestSessionCapabilityProjectionKeepsUnsupportedBoundCapabilityUnobserved(
+	t *testing.T,
+) {
+	fixture := newProviderCapabilityHTTPFixture(t)
+	manifestID := uuid.New()
+	seedProviderCapabilityManifest(t, fixture.db, manifestID, "unsupported")
+	completeProviderCapabilityExecutionWithManifest(t, fixture, manifestID)
+
+	response := fixture.request(
+		t, fixture.operatorToken,
+		"/v1/sessions/"+fixture.sessionID.String()+"/provider-capabilities",
+	)
+	if response.Code != http.StatusOK {
+		t.Fatalf("bound Session projection status = %d, body = %s", response.Code, response.Body.String())
+	}
+	projection := decodeProviderCapabilityProjection(t, response)
+	assertProjectedCapability(
+		t, projection, "codex", "steer-turn",
+		providercapabilities.StatusUnobserved, providercapabilities.ReasonWorkerManifestRequired,
+	)
+	assertProjectedCapabilityMode(t, projection, "codex", "review", providercapabilities.SupportModeNative)
+}
+
+func TestSessionCapabilityProjectionUsesHighestRevisionActiveBindingWhenPointerIsStale(
+	t *testing.T,
+) {
+	fixture := newProviderCapabilityHTTPFixture(t)
+	manifestID := uuid.New()
+	seedProviderCapabilityManifest(t, fixture.db, manifestID, "native")
+
+	var execution persistence.AgentExecution
+	if err := fixture.db.Where("tenant_id = ? AND id = ?", fixture.tenantID, fixture.executionID).
+		Take(&execution).Error; err != nil {
+		t.Fatal(err)
+	}
+	if execution.ProviderRuntimeBindingID == nil {
+		t.Fatal("queued Session execution omitted its Provider runtime binding")
+	}
+	staleBindingID := *execution.ProviderRuntimeBindingID
+	var staleBinding persistence.ProviderRuntimeBinding
+	if err := fixture.db.Where("tenant_id = ? AND id = ?", fixture.tenantID, staleBindingID).
+		Take(&staleBinding).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Now().UTC()
+	latestBindingID := uuid.New()
+	generation := execution.Generation
+	if err := fixture.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(&persistence.ProviderRuntimeBinding{
+			ID: latestBindingID, TenantID: fixture.tenantID, SessionID: fixture.sessionID,
+			Provider: "codex", Revision: staleBinding.Revision + 1, Status: "active",
+			WorkerManifestID: &manifestID, ResumeStrategy: "authoritative-history",
+			LastExecutionID: &fixture.executionID, LastGeneration: &generation,
+			CreatedAt: now, UpdatedAt: now,
+		}).Error; err != nil {
+			return err
+		}
+		if err := tx.Model(&persistence.AgentExecution{}).
+			Where("tenant_id = ? AND id = ?", fixture.tenantID, fixture.executionID).
+			Updates(map[string]any{
+				"status": "completed", "worker_manifest_id": manifestID,
+				"provider_runtime_binding_id": latestBindingID, "finished_at": now,
+			}).Error; err != nil {
+			return err
+		}
+		return tx.Model(&persistence.AgentSession{}).
+			Where("tenant_id = ? AND id = ?", fixture.tenantID, fixture.sessionID).
+			Updates(map[string]any{
+				"provider_resume_cursor_state":     "usable",
+				"provider_resume_cursor_encrypted": []byte("encrypted-test-cursor"),
+				"current_runtime_binding_id":       staleBindingID,
+			}).Error
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	response := fixture.request(
+		t, fixture.operatorToken,
+		"/v1/sessions/"+fixture.sessionID.String()+"/provider-capabilities",
+	)
+	if response.Code != http.StatusOK {
+		t.Fatalf("latest binding projection status = %d, body = %s", response.Code, response.Body.String())
+	}
+	projection := decodeProviderCapabilityProjection(t, response)
+	assertProjectedCapabilityMode(t, projection, "codex", "steer-turn", providercapabilities.SupportModeNative)
+	if projection.ExecutionID == nil || *projection.ExecutionID != fixture.executionID {
+		t.Fatalf("latest binding projection identity = %#v", projection)
+	}
+	var stored persistence.AgentSession
+	if err := fixture.db.Select("current_runtime_binding_id").
+		Where("tenant_id = ? AND id = ?", fixture.tenantID, fixture.sessionID).
+		Take(&stored).Error; err != nil {
+		t.Fatal(err)
+	}
+	if stored.CurrentRuntimeBindingID == nil || *stored.CurrentRuntimeBindingID != staleBindingID {
+		t.Fatalf("read-only projection unexpectedly rewrote the stale binding pointer: %#v", stored.CurrentRuntimeBindingID)
+	}
+}
+
+func completeProviderCapabilityExecutionWithManifest(
+	t *testing.T,
+	fixture providerCapabilityHTTPFixture,
+	manifestID uuid.UUID,
+) {
+	t.Helper()
+	var execution persistence.AgentExecution
+	if err := fixture.db.Where("tenant_id = ? AND id = ?", fixture.tenantID, fixture.executionID).
+		Take(&execution).Error; err != nil {
+		t.Fatal(err)
+	}
+	if execution.ProviderRuntimeBindingID == nil {
+		t.Fatal("queued Session execution omitted its Provider runtime binding")
+	}
+	now := time.Now().UTC()
+	if err := fixture.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(&persistence.AgentExecution{}).
+			Where("tenant_id = ? AND id = ?", fixture.tenantID, fixture.executionID).
+			Updates(map[string]any{
+				"status": "completed", "worker_manifest_id": manifestID, "finished_at": now,
+			}).Error; err != nil {
+			return err
+		}
+		if err := tx.Model(&persistence.ProviderRuntimeBinding{}).
+			Where("tenant_id = ? AND id = ? AND session_id = ?", fixture.tenantID,
+				*execution.ProviderRuntimeBindingID, fixture.sessionID).
+			Updates(map[string]any{
+				"worker_manifest_id": manifestID, "last_execution_id": fixture.executionID,
+				"last_generation": execution.Generation, "status": "active", "updated_at": now,
+			}).Error; err != nil {
+			return err
+		}
+		return tx.Model(&persistence.AgentSession{}).
+			Where("tenant_id = ? AND id = ?", fixture.tenantID, fixture.sessionID).
+			Updates(map[string]any{
+				"provider_resume_cursor_state":     "usable",
+				"provider_resume_cursor_encrypted": []byte("encrypted-test-cursor"),
+			}).Error
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 type providerCapabilityHTTPFixture struct {
 	db               *gorm.DB
 	handler          http.Handler

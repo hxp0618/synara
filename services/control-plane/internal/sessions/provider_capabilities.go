@@ -63,6 +63,14 @@ func (s *Service) requireTargetProviderCapabilitiesWithObservation(
 		return problem.Wrap(500, "provider_capabilities_load_failed", "Provider capabilities could not be loaded.", err)
 	}
 	decision := providercapabilities.Check(projection, provider, capabilityIDs...)
+	return EnforceProviderCapabilityDecision(target, decision, requireObserved)
+}
+
+func EnforceProviderCapabilityDecision(
+	target persistence.ExecutionTarget,
+	decision providercapabilities.Decision,
+	requireObserved bool,
+) error {
 	if decision.Status == providercapabilities.StatusSupported ||
 		(!requireObserved && decision.Status == providercapabilities.StatusUnobserved) {
 		return nil

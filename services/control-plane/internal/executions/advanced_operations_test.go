@@ -131,6 +131,92 @@ func TestPrimaryOperationsEnforceQuotaAndObservedCapability(t *testing.T) {
 	})
 }
 
+func TestPrimaryOperationsUseBoundManifestAcrossExecutionPinnedObservationGap(t *testing.T) {
+	for _, test := range []struct {
+		name            string
+		compactSupport  string
+		expectedProblem string
+	}{
+		{name: "supported", compactSupport: "native"},
+		{name: "unsupported remains unobserved", compactSupport: "unsupported", expectedProblem: providercapabilities.ReasonWorkerManifestRequired},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			capabilities := workerManifestTestCapabilities()
+			setTestProviderCapability(capabilities, "codex", "compact", test.compactSupport)
+			fixture := newAdvancedOperationFixture(t, capabilities)
+			expected := fixture.lastSequence(t, fixture.sessionID)
+			review, err := fixture.service.RequestReview(
+				context.Background(), fixture.principal, fixture.sessionID,
+				StartReviewInput{
+					ExpectedLastEventSequence: &expected,
+					Target:                    ReviewTarget{Type: "uncommittedChanges"},
+				},
+				"review-observation-gap", "review-observation-gap", "127.0.0.1",
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			fixture.completeExecutionWithCurrentManifest(t, review.Value.ExecutionID)
+			fixture.setUsableCursor(t)
+			fixture.markWorkersOffline(t)
+
+			expected = fixture.lastSequence(t, fixture.sessionID)
+			compact, err := fixture.service.RequestCompact(
+				context.Background(), fixture.principal, fixture.sessionID,
+				CompactSessionInput{ExpectedLastEventSequence: &expected},
+				"compact-observation-gap", "compact-observation-gap", "127.0.0.1",
+			)
+			if test.expectedProblem != "" {
+				assertAdvancedOperationProblem(t, err, 409, test.expectedProblem)
+				fixture.assertPrimaryOperationCounts(t, 1, 1, 1, 1, 1)
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if compact.StatusCode != 202 || compact.Value.Type != "compact" {
+				t.Fatalf("unexpected Compact result after observation gap: %#v", compact)
+			}
+			fixture.assertPrimaryOperationCounts(t, 2, 2, 2, 2, 2)
+		})
+	}
+}
+
+func TestReviewUsesBoundManifestAcrossExecutionPinnedObservationGap(t *testing.T) {
+	fixture := newAdvancedOperationFixture(t, nil)
+	expected := fixture.lastSequence(t, fixture.sessionID)
+	first, err := fixture.service.RequestReview(
+		context.Background(), fixture.principal, fixture.sessionID,
+		StartReviewInput{
+			ExpectedLastEventSequence: &expected,
+			Target:                    ReviewTarget{Type: "uncommittedChanges"},
+		},
+		"review-observation-gap-first", "review-observation-gap-first", "127.0.0.1",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.completeExecutionWithCurrentManifest(t, first.Value.ExecutionID)
+	fixture.markWorkersOffline(t)
+
+	expected = fixture.lastSequence(t, fixture.sessionID)
+	second, err := fixture.service.RequestReview(
+		context.Background(), fixture.principal, fixture.sessionID,
+		StartReviewInput{
+			ExpectedLastEventSequence: &expected,
+			Target:                    ReviewTarget{Type: "uncommittedChanges"},
+		},
+		"review-observation-gap-second", "review-observation-gap-second", "127.0.0.1",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.StatusCode != 202 || second.Value.Type != "review" {
+		t.Fatalf("unexpected Review result after observation gap: %#v", second)
+	}
+	fixture.assertPrimaryOperationCounts(t, 2, 2, 2, 2, 2)
+}
+
 func TestCompactRequiresUsableCursorAfterNewForkAndRollbackHistory(t *testing.T) {
 	t.Run("new session", func(t *testing.T) {
 		fixture := newAdvancedOperationFixture(t, nil)
@@ -382,6 +468,68 @@ func (f advancedOperationFixture) setUsableCursor(t *testing.T) {
 			"provider_resume_cursor_state":     "usable",
 			"provider_resume_cursor_encrypted": []byte("encrypted-test-cursor"),
 		}).Error; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func (f advancedOperationFixture) completeExecutionWithCurrentManifest(
+	t *testing.T,
+	executionID uuid.UUID,
+) {
+	t.Helper()
+	var execution persistence.AgentExecution
+	if err := f.db.Where("tenant_id = ? AND id = ?", f.tenantID, executionID).
+		Take(&execution).Error; err != nil {
+		t.Fatal(err)
+	}
+	var worker persistence.WorkerInstance
+	if err := f.db.Where("execution_target_id = ? AND current_manifest_id IS NOT NULL", f.targetID).
+		Take(&worker).Error; err != nil {
+		t.Fatal(err)
+	}
+	if execution.ProviderRuntimeBindingID == nil || worker.CurrentManifestID == nil {
+		t.Fatal("test execution or Worker omitted its Provider runtime manifest binding")
+	}
+	now := time.Now().UTC()
+	if err := f.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(&persistence.AgentExecution{}).
+			Where("tenant_id = ? AND id = ?", f.tenantID, execution.ID).
+			Updates(map[string]any{
+				"status": "completed", "worker_id": worker.ID,
+				"worker_manifest_id": worker.CurrentManifestID,
+				"started_at":         now, "finished_at": now,
+			}).Error; err != nil {
+			return err
+		}
+		if err := tx.Model(&persistence.AgentTurn{}).
+			Where("tenant_id = ? AND id = ?", f.tenantID, execution.TurnID).
+			Updates(map[string]any{"status": "completed", "started_at": now, "completed_at": now}).Error; err != nil {
+			return err
+		}
+		if err := tx.Model(&persistence.ExecutionControlCommand{}).
+			Where("tenant_id = ? AND execution_id = ?", f.tenantID, execution.ID).
+			Updates(map[string]any{"status": "acknowledged", "acknowledged_at": now}).Error; err != nil {
+			return err
+		}
+		return tx.Model(&persistence.ProviderRuntimeBinding{}).
+			Where("tenant_id = ? AND id = ? AND session_id = ?", f.tenantID,
+				*execution.ProviderRuntimeBindingID, f.sessionID).
+			Updates(map[string]any{
+				"worker_manifest_id": worker.CurrentManifestID,
+				"last_execution_id":  execution.ID,
+				"last_generation":    execution.Generation,
+				"status":             "active", "updated_at": now,
+			}).Error
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func (f advancedOperationFixture) markWorkersOffline(t *testing.T) {
+	t.Helper()
+	if err := f.db.Model(&persistence.WorkerInstance{}).
+		Where("execution_target_id = ?", f.targetID).
+		Update("status", "offline").Error; err != nil {
 		t.Fatal(err)
 	}
 }

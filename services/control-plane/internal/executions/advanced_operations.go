@@ -222,9 +222,14 @@ func (s *Service) requestPrimaryOperation(
 			Take(&target).Error; err != nil {
 			return QueuedSessionOperation{}, problem.Wrap(409, "execution_target_unavailable", "The Session Execution Target is unavailable.", err)
 		}
-		if err := s.sessions.RequireObservedTargetProviderCapabilities(
-			ctx, tx, target, session.Provider, request.CapabilityID,
-		); err != nil {
+		projection, err := s.projectIdleSessionProviderCapabilities(ctx, tx, target, sessions.Session{
+			ID: session.ID, TenantID: session.TenantID, Provider: session.Provider,
+		})
+		if err != nil {
+			return QueuedSessionOperation{}, err
+		}
+		decision := providercapabilities.Check(projection, session.Provider, request.CapabilityID)
+		if err := sessions.EnforceProviderCapabilityDecision(target, decision, true); err != nil {
 			return QueuedSessionOperation{}, err
 		}
 		resources, err := s.sessions.EnsureRuntimeResources(ctx, tx, &session)

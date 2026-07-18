@@ -92,7 +92,9 @@ func (s *Service) ProjectProviderCapabilitiesForSession(
 		if err != nil {
 			return providercapabilities.Projection{}, capabilityProjectionError(err)
 		}
-		if err := s.applySessionCapabilityConstraints(ctx, tenantID, sessionID, provider, &projection); err != nil {
+		if err := s.applySessionCapabilityConstraints(
+			ctx, s.db, tenantID, sessionID, provider, &projection,
+		); err != nil {
 			return providercapabilities.Projection{}, err
 		}
 		return projection, nil
@@ -106,8 +108,26 @@ func (s *Service) ProjectProviderCapabilitiesForSession(
 	if targetErr != nil {
 		return providercapabilities.Projection{}, problem.Wrap(500, "execution_target_lookup_failed", "Failed to load the Session Execution Target.", targetErr)
 	}
+	projection, err := s.projectIdleSessionProviderCapabilities(ctx, s.db, target, session)
+	if err != nil {
+		return providercapabilities.Projection{}, err
+	}
+	if err := s.applySessionCapabilityConstraints(
+		ctx, s.db, tenantID, sessionID, session.Provider, &projection,
+	); err != nil {
+		return providercapabilities.Projection{}, err
+	}
+	return projection, nil
+}
+
+func (s *Service) projectIdleSessionProviderCapabilities(
+	ctx context.Context,
+	db *gorm.DB,
+	target persistence.ExecutionTarget,
+	session sessions.Session,
+) (providercapabilities.Projection, error) {
 	projection, err := providercapabilities.LoadTargetProjection(
-		ctx, s.db, target, s.now(), s.heartbeatTimeout,
+		ctx, db, target, s.now(), s.heartbeatTimeout,
 	)
 	if err != nil {
 		return providercapabilities.Projection{}, capabilityProjectionError(err)
@@ -119,14 +139,93 @@ func (s *Service) ProjectProviderCapabilitiesForSession(
 		}
 	}
 	projection.Items = filtered
-	if err := s.applySessionCapabilityConstraints(ctx, tenantID, sessionID, session.Provider, &projection); err != nil {
+	if !projectionHasUnobservedCapabilities(projection) {
+		return projection, nil
+	}
+
+	bound, found, err := s.loadBoundSessionProviderCapabilities(ctx, db, target, session)
+	if err != nil {
 		return providercapabilities.Projection{}, err
+	}
+	if !found {
+		return projection, nil
+	}
+	boundByCapability := make(map[string]providercapabilities.Item, len(bound.Items))
+	for _, item := range bound.Items {
+		boundByCapability[item.CapabilityID] = item
+	}
+	replaced := false
+	for index := range projection.Items {
+		item := &projection.Items[index]
+		if item.Status != providercapabilities.StatusUnobserved {
+			continue
+		}
+		observed, exists := boundByCapability[item.CapabilityID]
+		if !exists || observed.Status != providercapabilities.StatusSupported {
+			continue
+		}
+		*item = observed
+		replaced = true
+	}
+	if replaced {
+		projection.Basis = providercapabilities.BasisExecution
+		projection.ExecutionID = bound.ExecutionID
 	}
 	return projection, nil
 }
 
+func (s *Service) loadBoundSessionProviderCapabilities(
+	ctx context.Context,
+	db *gorm.DB,
+	target persistence.ExecutionTarget,
+	session sessions.Session,
+) (providercapabilities.Projection, bool, error) {
+	binding, found, err := s.sessions.LoadActiveRuntimeBinding(
+		ctx, db, session.TenantID, session.ID, session.Provider,
+	)
+	if err != nil {
+		return providercapabilities.Projection{}, false, err
+	}
+	if !found {
+		return providercapabilities.Projection{}, false, nil
+	}
+	if binding.WorkerManifestID == nil || binding.LastExecutionID == nil {
+		return providercapabilities.Projection{}, false, nil
+	}
+	var execution persistence.AgentExecution
+	err = db.WithContext(ctx).
+		Where("tenant_id = ? AND id = ? AND session_id = ? AND execution_target_id = ? AND provider_runtime_binding_id = ? AND worker_manifest_id = ?",
+			session.TenantID, *binding.LastExecutionID, session.ID, target.ID,
+			binding.ID, *binding.WorkerManifestID).
+		Take(&execution).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return providercapabilities.Projection{}, false, nil
+	}
+	if err != nil {
+		return providercapabilities.Projection{}, false,
+			problem.Wrap(500, "runtime_binding_execution_load_failed", "The Session Provider runtime execution could not be loaded.", err)
+	}
+	projection, err := providercapabilities.LoadExecutionProjection(
+		ctx, db, target, execution, session.Provider,
+	)
+	if err != nil {
+		return providercapabilities.Projection{}, false, capabilityProjectionError(err)
+	}
+	return projection, true, nil
+}
+
+func projectionHasUnobservedCapabilities(projection providercapabilities.Projection) bool {
+	for _, item := range projection.Items {
+		if item.Status == providercapabilities.StatusUnobserved {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Service) applySessionCapabilityConstraints(
 	ctx context.Context,
+	db *gorm.DB,
 	tenantID, sessionID uuid.UUID,
 	provider string,
 	projection *providercapabilities.Projection,
@@ -138,7 +237,7 @@ func (s *Service) applySessionCapabilityConstraints(
 		State     string `gorm:"column:provider_resume_cursor_state"`
 		Encrypted []byte `gorm:"column:provider_resume_cursor_encrypted"`
 	}
-	if err := s.db.WithContext(ctx).Table("agent_sessions").
+	if err := db.WithContext(ctx).Table("agent_sessions").
 		Select("provider_resume_cursor_state", "provider_resume_cursor_encrypted").
 		Where("tenant_id = ? AND id = ?", tenantID, sessionID).
 		Take(&cursor).Error; err != nil {

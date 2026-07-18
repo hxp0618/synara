@@ -63,15 +63,13 @@ func (s *Service) ensureRuntimeBinding(
 	tx *gorm.DB,
 	session *persistence.AgentSession,
 ) (persistence.ProviderRuntimeBinding, error) {
-	var binding persistence.ProviderRuntimeBinding
-	query := tx.WithContext(ctx).
-		Where("tenant_id = ? AND session_id = ? AND provider = ? AND status = ?",
-			session.TenantID, session.ID, session.Provider, "active").
-		Order("revision DESC, id DESC").Take(&binding)
-	if query.Error != nil && !errors.Is(query.Error, gorm.ErrRecordNotFound) {
-		return persistence.ProviderRuntimeBinding{}, problem.Wrap(500, "runtime_binding_load_failed", "Failed to load the Provider runtime binding.", query.Error)
+	binding, found, err := s.LoadActiveRuntimeBinding(
+		ctx, tx, session.TenantID, session.ID, session.Provider,
+	)
+	if err != nil {
+		return persistence.ProviderRuntimeBinding{}, err
 	}
-	if errors.Is(query.Error, gorm.ErrRecordNotFound) {
+	if !found {
 		var maximum int
 		if err := tx.WithContext(ctx).Model(&persistence.ProviderRuntimeBinding{}).
 			Where("tenant_id = ? AND session_id = ?", session.TenantID, session.ID).
@@ -97,6 +95,27 @@ func (s *Service) ensureRuntimeBinding(
 		session.CurrentRuntimeBindingID = &binding.ID
 	}
 	return binding, nil
+}
+
+func (s *Service) LoadActiveRuntimeBinding(
+	ctx context.Context,
+	db *gorm.DB,
+	tenantID, sessionID uuid.UUID,
+	provider string,
+) (persistence.ProviderRuntimeBinding, bool, error) {
+	var binding persistence.ProviderRuntimeBinding
+	err := db.WithContext(ctx).
+		Where("tenant_id = ? AND session_id = ? AND provider = ? AND status = ?",
+			tenantID, sessionID, provider, "active").
+		Order("revision DESC, id DESC").Take(&binding).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return persistence.ProviderRuntimeBinding{}, false, nil
+	}
+	if err != nil {
+		return persistence.ProviderRuntimeBinding{}, false,
+			problem.Wrap(500, "runtime_binding_load_failed", "Failed to load the Provider runtime binding.", err)
+	}
+	return binding, true, nil
 }
 
 func (s *Service) ensureRemoteWorkspace(
