@@ -3183,6 +3183,13 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
                 self.assertNotIn(">", prompt)
                 self.assertNotIn(relative_path, prompt)
                 self.assertIn(f"\n{command}\n", prompt)
+                self.assertTrue(acceptance.real_provider_approval_command_matches(command, command))
+                self.assertTrue(
+                    acceptance.real_provider_approval_command_matches(
+                        "/bin/bash -lc " + json.dumps(command),
+                        command,
+                    )
+                )
                 self.assertIn("Do not emit any assistant text before the tool call", prompt)
                 self.assertIn("complete assistant text for this Turn must be exactly", prompt)
                 self.assertEqual(prompt.count(marker), 1)

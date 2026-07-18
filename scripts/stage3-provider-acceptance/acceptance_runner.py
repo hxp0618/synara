@@ -407,8 +407,7 @@ def real_provider_approval_command() -> str:
     return real_provider_read_only_output_command(REAL_PROVIDER_APPROVAL_CONTENT)
 
 
-def real_provider_approval_command_matches(candidate: str) -> bool:
-    expected = real_provider_approval_command()
+def real_provider_approval_command_matches(candidate: str, expected: str) -> bool:
     if candidate == expected:
         return True
     try:
@@ -10268,6 +10267,7 @@ class AcceptanceSuite:
         interaction: Mapping[str, Any],
         *,
         turn_id: str,
+        expected_command: str,
     ) -> tuple[str, str, dict[str, Any], str]:
         interaction_id = interaction.get("id")
         if not isinstance(interaction_id, str) or not interaction_id:
@@ -10305,7 +10305,7 @@ class AcceptanceSuite:
                     "requestKind": interaction_payload.get("requestKind"),
                 },
             )
-        if not real_provider_approval_command_matches(command):
+        if not real_provider_approval_command_matches(command, expected_command):
             raise AcceptanceError(
                 "runner.real_provider_approval_command_invalid",
                 "The real Provider Approval interaction requested a non-canonical command.",
@@ -10322,11 +10322,16 @@ class AcceptanceSuite:
         self,
         turn_id: str,
         *,
+        expected_command: str,
         session_id: str | None = None,
     ) -> tuple[dict[str, Any], str, str, dict[str, Any], str]:
         interaction = self._wait_for_interaction(turn_id, "approval", session_id=session_id)
         execution_id, request_id, interaction_payload, command = (
-            self._real_provider_approval_request_details(interaction, turn_id=turn_id)
+            self._real_provider_approval_request_details(
+                interaction,
+                turn_id=turn_id,
+                expected_command=expected_command,
+            )
         )
         return interaction, execution_id, request_id, interaction_payload, command
 
@@ -10454,7 +10459,10 @@ class AcceptanceSuite:
         )
         turn_id = self._turn_id(turn, "real Provider Approval Turn")
         interaction, execution_id, request_id, interaction_payload, command = (
-            self._real_provider_approval_interaction(turn_id)
+            self._real_provider_approval_interaction(
+                turn_id,
+                expected_command=real_provider_approval_command(),
+            )
         )
         approvals: list[dict[str, Any]] = []
         seen_request_ids: set[str] = set()
@@ -10533,7 +10541,11 @@ class AcceptanceSuite:
                 "real Provider follow-up Approval interaction",
             )
             next_execution_id, next_request_id, next_payload, next_command = (
-                self._real_provider_approval_request_details(next_interaction, turn_id=turn_id)
+                self._real_provider_approval_request_details(
+                    next_interaction,
+                    turn_id=turn_id,
+                    expected_command=real_provider_approval_command(),
+                )
             )
             if next_execution_id != execution_id:
                 raise AcceptanceError(
@@ -10700,7 +10712,10 @@ class AcceptanceSuite:
         )
         turn_id = self._turn_id(turn, "real Provider Steer Turn")
         interaction, execution_id, request_id, interaction_payload, command = (
-            self._real_provider_approval_interaction(turn_id)
+            self._real_provider_approval_interaction(
+                turn_id,
+                expected_command=real_provider_steer_command(),
+            )
         )
         before_sequence = self.state.last_sequence
         steer = json_object(
@@ -10852,7 +10867,10 @@ class AcceptanceSuite:
         )
         turn_id = self._turn_id(turn, "real Provider Interrupt Turn")
         interaction, execution_id, request_id, interaction_payload, command = (
-            self._real_provider_approval_interaction(turn_id)
+            self._real_provider_approval_interaction(
+                turn_id,
+                expected_command=real_provider_interrupt_command(),
+            )
         )
         interrupt = json_object(
             self.api.request(
