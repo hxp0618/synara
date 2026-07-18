@@ -415,6 +415,7 @@ class CodexAppServerRuntime {
   }
 
   private handleServerRequest(request: JsonRpcRequest): void {
+    if (this.turnSettled) return;
     const params = asRecord(request.params) ?? {};
     const requestId = interactionRequestId(request.id, this.options.input.execution.generation);
     if (
@@ -455,6 +456,7 @@ class CodexAppServerRuntime {
   }
 
   private handleNotification(notification: JsonRpcNotification): void {
+    if (this.turnSettled) return;
     const params = asRecord(notification.params) ?? {};
     switch (notification.method) {
       case "thread/started": {

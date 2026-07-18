@@ -350,7 +350,8 @@ describe("Codex app-server runtime", () => {
         },
       );
 
-      await expect(run.result).resolves.toMatchObject({
+      const result = await run.result;
+      expect(result).toMatchObject({
         output: {
           provider: "codex",
           operation: "compact",
@@ -364,6 +365,7 @@ describe("Codex app-server runtime", () => {
         },
         providerResumeCursor: "thread-resume",
       });
+      await new Promise((resolve) => setTimeout(resolve, 10));
       expect(messages).toContainEqual(
         expect.objectContaining({
           type: "event",
@@ -374,6 +376,21 @@ describe("Codex app-server runtime", () => {
           }),
         }),
       );
+      expect(messages).not.toContainEqual(
+        expect.objectContaining({
+          type: "event",
+          eventType: "runtime.usage",
+          payload: expect.objectContaining({ inputTokens: 987_654 }),
+        }),
+      );
+      expect(messages).not.toContainEqual(
+        expect.objectContaining({
+          type: "event",
+          eventType: "runtime.provider.warning",
+          payload: expect.objectContaining({ message: "late compact warning" }),
+        }),
+      );
+      expect(messages).not.toContainEqual(expect.objectContaining({ type: "interaction" }));
       expect(readFileSync(tracePath, "utf8")).toBe(
         "initialize\ninitialized\nthread/resume\nthread/compact/start\n",
       );
@@ -829,10 +846,13 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
     else send({ id: message.id, result: { thread: { id: "thread-new" }, model: "gpt-test" } });
   } else if (message.method === "thread/compact/start") {
     if (scenario !== "compact" || message.params?.threadId !== "thread-resume") process.exit(4);
-    send({ id: message.id, result: {} });
     send({ method: "turn/completed", params: { threadId: "thread-resume", turn: { id: "turn-compact-1", items: [], status: "completed", error: null } } });
     setTimeout(() => {
       send({ method: "item/completed", params: { threadId: "thread-resume", turnId: "turn-compact-1", item: { id: "compact-item-1", type: "contextCompaction" } } });
+      send({ id: "late-compact-approval", method: "item/commandExecution/requestApproval", params: { command: "late compact command" } });
+      send({ method: "thread/tokenUsage/updated", params: { threadId: "thread-resume", tokenUsage: { last: { inputTokens: 987654 } } } });
+      send({ method: "warning", params: { message: "late compact warning" } });
+      send({ id: message.id, result: {} });
     }, 15);
   } else if (message.method === "review/start") {
     const expectedReviewThread = scenario === "review-fresh" ? "thread-new" : "thread-resume";
