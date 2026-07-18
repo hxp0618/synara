@@ -529,7 +529,7 @@ func (s *Service) resolveModel(ctx context.Context, model persistence.ProviderCr
 	if err := json.Unmarshal(plaintext, &payload); err != nil {
 		return nil, problem.Wrap(500, "credential_payload_invalid", "Credential payload is invalid.", err)
 	}
-	normalized, _, validationErr := normalizeCredentialPayload(
+	normalized, _, validationErr := normalizeResolvedCredentialPayload(
 		purpose,
 		model.Provider,
 		model.CredentialType,

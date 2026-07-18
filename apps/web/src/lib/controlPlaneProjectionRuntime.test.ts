@@ -242,6 +242,99 @@ describe("ControlPlaneProjectionRuntime", () => {
     runtime.dispose();
   });
 
+  it("keeps an active stream live during a successful manual catch-up", async () => {
+    let handlers:
+      | {
+          onEvent: (event: ControlPlaneSessionEvent) => void;
+          onOpen?: () => void;
+          onError?: () => void;
+        }
+      | undefined;
+    let resolveCatchUp: (page: ControlPlaneSessionEventPage) => void = () => undefined;
+    const pendingCatchUp = new Promise<ControlPlaneSessionEventPage>((resolve) => {
+      resolveCatchUp = resolve;
+    });
+    let catchUpAttempt = 0;
+    const listSessionEvents = vi.fn(async (): Promise<ControlPlaneSessionEventPage> => {
+      catchUpAttempt += 1;
+      if (catchUpAttempt === 1) {
+        return { items: [event(1, "turn.created"), event(2)], lastSequence: 2 };
+      }
+      return pendingCatchUp;
+    });
+    const subscribeSessionEvents = vi.fn(
+      (_sessionId: string, _afterSequence: number, nextHandlers: NonNullable<typeof handlers>) => {
+        handlers = nextHandlers;
+        return () => undefined;
+      },
+    );
+    const runtime = new ControlPlaneProjectionRuntime({
+      client: { listSessionEvents, subscribeSessionEvents },
+      onChange: () => undefined,
+    });
+    runtime.setScope("tenant-1:organization-1", [session]);
+    runtime.watch(session.id);
+    await vi.waitFor(() => expect(subscribeSessionEvents).toHaveBeenCalledTimes(1));
+    handlers?.onOpen?.();
+
+    const catchUp = runtime.catchUp(session.id);
+    await vi.waitFor(() => expect(listSessionEvents).toHaveBeenCalledTimes(2));
+    expect(runtime.projections.get(session.id)?.streamStatus).toBe("live");
+
+    resolveCatchUp({ items: [], lastSequence: 2 });
+    await catchUp;
+
+    expect(runtime.projections.get(session.id)?.streamStatus).toBe("live");
+    runtime.dispose();
+  });
+
+  it("does not replace an active live stream when manual catch-up fails", async () => {
+    vi.useFakeTimers();
+    let handlers:
+      | {
+          onEvent: (event: ControlPlaneSessionEvent) => void;
+          onOpen?: () => void;
+          onError?: () => void;
+        }
+      | undefined;
+    const close = vi.fn();
+    let catchUpAttempt = 0;
+    const listSessionEvents = vi.fn(async (): Promise<ControlPlaneSessionEventPage> => {
+      catchUpAttempt += 1;
+      if (catchUpAttempt === 1) {
+        return { items: [event(1, "turn.created"), event(2)], lastSequence: 2 };
+      }
+      throw new Error("Control Plane unavailable");
+    });
+    const subscribeSessionEvents = vi.fn(
+      (_sessionId: string, _afterSequence: number, nextHandlers: NonNullable<typeof handlers>) => {
+        handlers = nextHandlers;
+        return close;
+      },
+    );
+    const runtime = new ControlPlaneProjectionRuntime({
+      client: { listSessionEvents, subscribeSessionEvents },
+      onChange: () => undefined,
+      reconnectDelayMs: 2_000,
+    });
+    runtime.setScope("tenant-1:organization-1", [session]);
+    runtime.watch(session.id);
+    await vi.waitFor(() => expect(subscribeSessionEvents).toHaveBeenCalledTimes(1));
+    handlers?.onOpen?.();
+
+    await expect(runtime.catchUp(session.id)).rejects.toThrow(
+      "Failed to catch up Session Events for session-1.",
+    );
+    expect(runtime.projections.get(session.id)?.streamStatus).toBe("live");
+    expect(close).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(subscribeSessionEvents).toHaveBeenCalledTimes(1);
+
+    runtime.dispose();
+    expect(close).toHaveBeenCalledTimes(1);
+  });
+
   it("keeps a single reconnect loop when using the real SSE client", async () => {
     vi.useFakeTimers();
     vi.stubGlobal("window", { location: new URL("https://synara.example/settings") });

@@ -1,5 +1,5 @@
 // FILE: MessagesTimeline.tsx
-// Purpose: Renders the chat transcript rows and lets LegendList own scrolling/follow behavior.
+// Purpose: Renders the chat transcript rows while preserving the shared list-owned scroll contract.
 // Layer: Web chat presentation component
 // Exports: MessagesTimeline
 
@@ -783,7 +783,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   }, [rows]);
   const tailScrollFrameRef = useRef<number | null>(null);
   const tailScrollTimeoutsRef = useRef<number[]>([]);
-  const clearTailExpansionScrollTimers = useCallback(() => {
+  const clearTailScrollTimers = useCallback(() => {
     if (tailScrollFrameRef.current !== null) {
       window.cancelAnimationFrame(tailScrollFrameRef.current);
       tailScrollFrameRef.current = null;
@@ -793,8 +793,8 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     }
     tailScrollTimeoutsRef.current = [];
   }, []);
-  const scrollTailExpansionToEnd = useCallback(() => {
-    clearTailExpansionScrollTimers();
+  const scheduleTailScrollToEnd = useCallback(() => {
+    clearTailScrollTimers();
     const scrollToEnd = () => {
       void resolvedListRef.current?.scrollToEnd?.({ animated: false });
     };
@@ -806,8 +806,8 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       const timeoutId = window.setTimeout(scrollToEnd, delay);
       tailScrollTimeoutsRef.current.push(timeoutId);
     }
-  }, [clearTailExpansionScrollTimers, resolvedListRef]);
-  useEffect(() => clearTailExpansionScrollTimers, [clearTailExpansionScrollTimers]);
+  }, [clearTailScrollTimers, resolvedListRef]);
+  useEffect(() => clearTailScrollTimers, [clearTailScrollTimers]);
   const ignoreTimelineImageLoad = useCallback(() => {}, []);
   const latestEditableUserMessageId = useMemo(() => {
     const messages = rows.flatMap((row) => (row.kind === "message" ? [row.message] : []));
@@ -817,21 +817,15 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     });
     return editTarget.editable ? (editTarget.messageId as MessageId) : null;
   }, [activeTurnId, rows]);
-  const previousRowCountRef = useRef(rows.length);
+  const hasBootstrappedInitialTailScrollRef = useRef(false);
   useEffect(() => {
-    const previousRowCount = previousRowCountRef.current;
-    previousRowCountRef.current = rows.length;
-    if (previousRowCount > 0 || rows.length === 0) {
+    if (hasBootstrappedInitialTailScrollRef.current || rows.length === 0) {
       return;
     }
+    hasBootstrappedInitialTailScrollRef.current = true;
     onIsAtEndChange?.(true);
-    const frameId = window.requestAnimationFrame(() => {
-      void resolvedListRef.current?.scrollToEnd?.({ animated: false });
-    });
-    return () => {
-      window.cancelAnimationFrame(frameId);
-    };
-  }, [onIsAtEndChange, resolvedListRef, rows.length]);
+    scheduleTailScrollToEnd();
+  }, [onIsAtEndChange, rows.length, scheduleTailScrollToEnd]);
   // Sent-message anchors (id + position in the virtualized row list) for the
   // navigation trail. Held in a ref so the viewability callback stays stable and
   // doesn't re-subscribe LegendList on every transcript change.
@@ -1127,7 +1121,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
                         userImages={userImages}
                         onImageExpand={onImageExpand}
                         onTimelineImageLoad={
-                          isTailContentRow ? scrollTailExpansionToEnd : ignoreTimelineImageLoad
+                          isTailContentRow ? scheduleTailScrollToEnd : ignoreTimelineImageLoad
                         }
                         resolvedTheme={resolvedTheme}
                       />
@@ -1700,7 +1694,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
                               event.preventDefault();
                               event.stopPropagation();
                               if (!fileChangesExpanded && isTailContentRow) {
-                                scrollTailExpansionToEnd();
+                                scheduleTailScrollToEnd();
                               }
                               toggleFileChangesExpanded(turnSummary.turnId);
                             }}
@@ -1827,7 +1821,6 @@ export const MessagesTimeline = memo(function MessagesTimeline({
         // LegendList caches rendered rows, so every local expansion map that changes row content
         // has to be surfaced through extraData.
         extraData={timelineExtraData}
-        initialScrollAtEnd
         maintainScrollAtEnd={followLiveOutput}
         maintainScrollAtEndThreshold={0.1}
         {...(!followLiveOutput ? { maintainVisibleContentPosition: true } : {})}

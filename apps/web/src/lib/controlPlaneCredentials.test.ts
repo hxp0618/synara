@@ -98,4 +98,21 @@ describe("listUsableControlPlaneCredentials", () => {
       }).map((item) => item.id),
     ).toEqual(["git-tenant", "git-organization"]);
   });
+
+  it("matches canonical provider requests against lowercased stored provider codes", () => {
+    const items = [
+      credential({ id: "provider-claudeagent", purpose: "provider", provider: "claudeagent" }),
+      credential({ id: "provider-claude", purpose: "provider", provider: "claude" }),
+      credential({ id: "provider-codex", purpose: "provider", provider: "codex" }),
+    ];
+
+    expect(
+      listUsableControlPlaneCredentials(items, {
+        purpose: "provider",
+        provider: "claudeAgent",
+        organizationId: null,
+        now: Date.parse("2026-07-13T00:00:00Z"),
+      }).map((item) => item.id),
+    ).toEqual(["provider-claudeagent"]);
+  });
 });

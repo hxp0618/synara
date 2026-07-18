@@ -26,9 +26,13 @@ const (
 	PurposeRegistry = "registry"
 	PurposePackage  = "package"
 
-	GitProvider            = "git"
-	GitHTTPSCredentialType = "https_token"
-	GitSSHCredentialType   = "ssh_key"
+	ProviderCodex                = "codex"
+	ProviderClaude               = "claude"
+	ProviderClaudeAgent          = "claudeagent"
+	ProviderAPIKeyCredentialType = "api_key"
+	GitProvider                  = "git"
+	GitHTTPSCredentialType       = "https_token"
+	GitSSHCredentialType         = "ssh_key"
 
 	RegistryProviderOci             = "oci"
 	RegistryBasicCredentialType     = "basic"
@@ -95,9 +99,28 @@ func normalizeCredentialPayload(
 	purpose, provider, credentialType string,
 	payload map[string]any,
 ) (map[string]any, []byte, error) {
+	return normalizeCredentialPayloadMode(purpose, provider, credentialType, payload, false)
+}
+
+func normalizeResolvedCredentialPayload(
+	purpose, provider, credentialType string,
+	payload map[string]any,
+) (map[string]any, []byte, error) {
+	return normalizeCredentialPayloadMode(purpose, provider, credentialType, payload, true)
+}
+
+func normalizeCredentialPayloadMode(
+	purpose, provider, credentialType string,
+	payload map[string]any,
+	allowLegacyProviderFields bool,
+) (map[string]any, []byte, error) {
 	if purpose == PurposeProvider {
-		encoded, err := encodePayload(payload)
-		return payload, encoded, err
+		normalized, err := normalizeProviderPayload(provider, credentialType, payload, allowLegacyProviderFields)
+		if err != nil {
+			return nil, nil, err
+		}
+		encoded, err := encodePayload(normalized)
+		return normalized, encoded, err
 	}
 	var normalized map[string]any
 	var err error
@@ -116,6 +139,153 @@ func normalizeCredentialPayload(
 	}
 	encoded, err := encodePayload(normalized)
 	return normalized, encoded, err
+}
+
+func normalizeProviderPayload(
+	provider, credentialType string,
+	payload map[string]any,
+	allowLegacyFields bool,
+) (map[string]any, error) {
+	switch normalizeProviderCode(provider) {
+	case ProviderCodex:
+		return normalizeCodexProviderPayload(credentialType, payload, allowLegacyFields)
+	case ProviderClaudeAgent:
+		return normalizeClaudeProviderPayload(credentialType, payload, allowLegacyFields)
+	default:
+		return payload, nil
+	}
+}
+
+func normalizeCodexProviderPayload(
+	credentialType string,
+	payload map[string]any,
+	allowLegacyFields bool,
+) (map[string]any, error) {
+	if credentialType != ProviderAPIKeyCredentialType {
+		return nil, invalidProviderCredentialType("Codex")
+	}
+	allowedKeys := []string{"apiKey", "baseUrl"}
+	if allowLegacyFields {
+		allowedKeys = append(allowedKeys, "organization")
+	}
+	if len(payload) < 1 || len(payload) > len(allowedKeys) || !payloadHasOnlyKeys(payload, allowedKeys...) {
+		return nil, invalidProviderCredentialPayload("Codex")
+	}
+	apiKey, ok := payload["apiKey"].(string)
+	if !ok || !validSecret(apiKey) {
+		return nil, invalidProviderCredentialPayload("Codex")
+	}
+	value := map[string]any{"apiKey": apiKey}
+	if rawBaseURL, present := payload["baseUrl"]; present {
+		baseURL, ok := rawBaseURL.(string)
+		normalizedBaseURL, err := normalizeManagedProviderBaseURL(baseURL)
+		if !ok || err != nil {
+			return nil, invalidProviderCredentialPayload("Codex")
+		}
+		value["baseUrl"] = normalizedBaseURL
+	}
+	if rawOrganization, present := payload["organization"]; present {
+		if !allowLegacyFields {
+			return nil, invalidProviderCredentialPayload("Codex")
+		}
+		organization, ok := rawOrganization.(string)
+		normalizedOrganization, err := normalizeLegacyProviderField(organization)
+		if !ok || err != nil {
+			return nil, invalidProviderCredentialPayload("Codex")
+		}
+		value["organization"] = normalizedOrganization
+	}
+	return value, nil
+}
+
+func normalizeClaudeProviderPayload(
+	credentialType string,
+	payload map[string]any,
+	allowLegacyFields bool,
+) (map[string]any, error) {
+	if credentialType != ProviderAPIKeyCredentialType {
+		return nil, invalidProviderCredentialType("Claude")
+	}
+	allowedKeys := []string{"apiKey", "baseUrl"}
+	if allowLegacyFields {
+		allowedKeys = append(allowedKeys, "authToken")
+	}
+	if len(payload) < 1 || len(payload) > len(allowedKeys) || !payloadHasOnlyKeys(payload, allowedKeys...) {
+		return nil, invalidProviderCredentialPayload("Claude")
+	}
+	apiKey, hasAPIKey := payload["apiKey"].(string)
+	authToken, hasAuthToken := payload["authToken"].(string)
+	if hasAPIKey == hasAuthToken {
+		return nil, invalidProviderCredentialPayload("Claude")
+	}
+	value := map[string]any{}
+	if hasAPIKey {
+		if !validSecret(apiKey) {
+			return nil, invalidProviderCredentialPayload("Claude")
+		}
+		value["apiKey"] = apiKey
+	} else {
+		if !allowLegacyFields || !validSecret(authToken) {
+			return nil, invalidProviderCredentialPayload("Claude")
+		}
+		value["authToken"] = authToken
+	}
+	if rawBaseURL, present := payload["baseUrl"]; present {
+		baseURL, ok := rawBaseURL.(string)
+		normalizedBaseURL, err := normalizeManagedProviderBaseURL(baseURL)
+		if !ok || err != nil {
+			return nil, invalidProviderCredentialPayload("Claude")
+		}
+		value["baseUrl"] = normalizedBaseURL
+	}
+	return value, nil
+}
+
+func normalizeProviderCode(value string) string {
+	normalized := strings.TrimSpace(strings.ToLower(value))
+	if normalized == ProviderClaude {
+		return ProviderClaudeAgent
+	}
+	return normalized
+}
+
+func normalizeManagedProviderBaseURL(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" || len(value) > 2048 || containsControl(value) {
+		return "", errors.New("invalid provider base URL")
+	}
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Opaque != "" || parsed.Host == "" || parsed.User != nil || parsed.Fragment != "" {
+		return "", errors.New("invalid provider base URL")
+	}
+	if !strings.EqualFold(parsed.Scheme, "https") && !strings.EqualFold(parsed.Scheme, "http") {
+		return "", errors.New("invalid provider base URL")
+	}
+	return strings.TrimRight(value, "/"), nil
+}
+
+func normalizeLegacyProviderField(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" || len(value) > maximumCredentialStringLength || containsControl(value) {
+		return "", errors.New("invalid legacy provider field")
+	}
+	return value, nil
+}
+
+func invalidProviderCredentialType(providerName string) error {
+	return problem.New(
+		400,
+		"invalid_provider_credential_type",
+		fmt.Sprintf("%s Provider Credentials support only api_key.", providerName),
+	)
+}
+
+func invalidProviderCredentialPayload(providerName string) error {
+	return problem.New(
+		400,
+		"invalid_provider_credential_payload",
+		fmt.Sprintf("%s Provider Credential payload is invalid.", providerName),
+	)
 }
 
 func normalizeGitPayload(provider, credentialType string, payload map[string]any) (map[string]any, error) {

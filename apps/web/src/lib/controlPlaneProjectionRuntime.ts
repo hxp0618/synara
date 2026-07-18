@@ -153,8 +153,9 @@ export class ControlPlaneProjectionRuntime {
 
   async #runCatchUp(sessionId: string, generation: number): Promise<void> {
     if (!this.#sessions.has(sessionId) || this.#disposed) return;
+    const activeStream = this.#hasActiveStream(sessionId);
     const reconnecting = this.#projections.get(sessionId)?.streamStatus === "reconnecting";
-    if (!reconnecting) this.#setStreamStatus(sessionId, "catching-up");
+    if (!reconnecting && !activeStream) this.#setStreamStatus(sessionId, "catching-up");
     try {
       while (generation === this.#generation && !this.#disposed) {
         const projection = this.#projections.get(sessionId);
@@ -192,17 +193,25 @@ export class ControlPlaneProjectionRuntime {
       if (generation === this.#generation && !this.#disposed) {
         const watched = (this.#watchCounts.get(sessionId) ?? 0) > 0;
         const currentStatus = this.#projections.get(sessionId)?.streamStatus;
+        const hasActiveStream = this.#hasActiveStream(sessionId);
         const nextStatus =
-          watched && (currentStatus === "reconnecting" || currentStatus === "live")
-            ? currentStatus
-            : watched
-              ? "connecting"
-              : "idle";
+          watched && currentStatus === "reconnecting"
+            ? "reconnecting"
+            : watched && hasActiveStream
+              ? currentStatus === "connecting"
+                ? "connecting"
+                : "live"
+              : watched
+                ? "connecting"
+                : "idle";
         this.#setStreamStatus(sessionId, nextStatus);
       }
     } catch {
       if (generation !== this.#generation || this.#disposed) return;
       const watched = (this.#watchCounts.get(sessionId) ?? 0) > 0;
+      if (this.#hasActiveStream(sessionId)) {
+        throw new Error(`Failed to catch up Session Events for ${sessionId}.`);
+      }
       this.#setStreamStatus(sessionId, watched ? "reconnecting" : "error");
       if (watched) this.#scheduleReconnect(sessionId);
       throw new Error(`Failed to catch up Session Events for ${sessionId}.`);
@@ -294,7 +303,7 @@ export class ControlPlaneProjectionRuntime {
       return;
     }
     const existing = this.#streams.get(sessionId);
-    if (existing?.reconnectTimer) return;
+    if (existing) return;
     const generation = this.#generation;
     const timer = setTimeout(() => {
       const stream = this.#streams.get(sessionId);
@@ -314,6 +323,10 @@ export class ControlPlaneProjectionRuntime {
 
   #closeAllStreams(): void {
     for (const sessionId of [...this.#streams.keys()]) this.#closeStream(sessionId);
+  }
+
+  #hasActiveStream(sessionId: string): boolean {
+    return this.#streams.get(sessionId)?.reconnectTimer === null;
   }
 
   #notify(): void {

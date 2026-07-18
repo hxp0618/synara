@@ -16,10 +16,28 @@ export function CredentialPayloadFields(props: {
   const replacement = props.mode === "rotate" ? "Replacement " : "";
 
   switch (props.kind) {
-    case "provider":
+    case "provider_codex":
+      return (
+        <ManagedProviderFields
+          draft={props.draft}
+          replacement={replacement}
+          providerName="Codex"
+          onChange={update}
+        />
+      );
+    case "provider_claude":
+      return (
+        <ManagedProviderFields
+          draft={props.draft}
+          replacement={replacement}
+          providerName="Claude"
+          onChange={update}
+        />
+      );
+    case "provider_advanced":
       return (
         <>
-          <ControlPlaneFormField label="Provider">
+          <ControlPlaneFormField label="Advanced provider code">
             <Input
               autoCapitalize="none"
               placeholder="openai"
@@ -29,7 +47,7 @@ export function CredentialPayloadFields(props: {
               onChange={(event) => update("provider", event.target.value.toLowerCase())}
             />
           </ControlPlaneFormField>
-          <ControlPlaneFormField label="Credential type">
+          <ControlPlaneFormField label="Advanced credential type">
             <Input
               autoCapitalize="none"
               placeholder="api_key"
@@ -225,6 +243,47 @@ export function CredentialPayloadFields(props: {
         </>
       );
   }
+}
+
+function ManagedProviderFields(props: {
+  draft: CredentialPayloadDraft;
+  providerName: string;
+  replacement: string;
+  onChange: <Key extends keyof CredentialPayloadDraft>(
+    key: Key,
+    value: CredentialPayloadDraft[Key],
+  ) => void;
+}) {
+  return (
+    <>
+      <ControlPlaneFormField
+        label={`${props.replacement}${props.providerName} third-party API key`}
+      >
+        <Input
+          autoComplete="new-password"
+          autoCapitalize="none"
+          required
+          type="password"
+          value={props.draft.secret}
+          onChange={(event) => props.onChange("secret", event.target.value)}
+        />
+      </ControlPlaneFormField>
+      <ControlPlaneFormField label="Base URL (optional)">
+        <Input
+          autoCapitalize="none"
+          inputMode="url"
+          placeholder="https://api.example.test/v1"
+          type="url"
+          value={props.draft.endpointUrl}
+          onChange={(event) => props.onChange("endpointUrl", event.target.value)}
+        />
+      </ControlPlaneFormField>
+      <p className="text-xs text-muted-foreground sm:col-span-2">
+        API keys stay encrypted and are injected through the managed provider runtime. Base URLs are
+        validated before use.
+      </p>
+    </>
+  );
 }
 
 function HostField(props: { value: string; onChange: (value: string) => void }) {

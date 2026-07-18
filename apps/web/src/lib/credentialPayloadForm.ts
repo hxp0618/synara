@@ -1,7 +1,10 @@
 import type { ControlPlaneCredential, ControlPlaneCredentialPurpose } from "./controlPlaneClient";
+import { normalizeControlPlaneProviderCode } from "./controlPlaneProviderCode";
 
 export type CredentialFormKind =
-  | "provider"
+  | "provider_codex"
+  | "provider_claude"
+  | "provider_advanced"
   | "git_https"
   | "git_ssh"
   | "registry_basic"
@@ -30,11 +33,15 @@ export type CredentialFormDescriptor = {
   credentialType: string;
 };
 
+export const DEFAULT_CREDENTIAL_FORM_KIND: CredentialFormKind = "provider_codex";
+
 export const CREDENTIAL_FORM_KIND_OPTIONS: ReadonlyArray<{
   kind: CredentialFormKind;
   label: string;
 }> = [
-  { kind: "provider", label: "Provider runtime" },
+  { kind: "provider_codex", label: "Provider runtime (Codex)" },
+  { kind: "provider_claude", label: "Provider runtime (Claude)" },
+  { kind: "provider_advanced", label: "Provider runtime (advanced JSON)" },
   { kind: "git_https", label: "Git HTTPS token" },
   { kind: "git_ssh", label: "Git SSH key" },
   { kind: "registry_basic", label: "OCI Registry username/password" },
@@ -45,7 +52,7 @@ export const CREDENTIAL_FORM_KIND_OPTIONS: ReadonlyArray<{
 
 export function createCredentialPayloadDraft(kind: CredentialFormKind): CredentialPayloadDraft {
   return {
-    provider: "",
+    provider: kind === "provider_codex" ? "codex" : kind === "provider_claude" ? "claudeagent" : "",
     credentialType: "api_key",
     jsonPayload: "",
     host: "",
@@ -75,7 +82,16 @@ export function createCredentialPayloadDraft(kind: CredentialFormKind): Credenti
 export function credentialFormKindForCredential(
   credential: Pick<ControlPlaneCredential, "purpose" | "provider" | "credentialType">,
 ): CredentialFormKind | null {
-  if (credential.purpose === "provider") return "provider";
+  if (credential.purpose === "provider") {
+    const provider = normalizeControlPlaneProviderCode(credential.provider);
+    if (credential.credentialType === "api_key" && provider === "codex") {
+      return "provider_codex";
+    }
+    if (credential.credentialType === "api_key" && provider === "claudeagent") {
+      return "provider_claude";
+    }
+    return "provider_advanced";
+  }
   if (credential.purpose === "git" && credential.credentialType === "https_token") {
     return "git_https";
   }
@@ -118,7 +134,11 @@ export function describeCredentialForm(
   draft: CredentialPayloadDraft,
 ): CredentialFormDescriptor {
   switch (kind) {
-    case "provider":
+    case "provider_codex":
+      return { purpose: "provider", provider: "codex", credentialType: "api_key" };
+    case "provider_claude":
+      return { purpose: "provider", provider: "claudeagent", credentialType: "api_key" };
+    case "provider_advanced":
       return {
         purpose: "provider",
         provider: draft.provider.trim().toLowerCase(),
@@ -144,7 +164,10 @@ export function buildCredentialPayload(
   draft: CredentialPayloadDraft,
 ): Record<string, unknown> {
   switch (kind) {
-    case "provider":
+    case "provider_codex":
+    case "provider_claude":
+      return buildManagedProviderPayload(draft);
+    case "provider_advanced":
       return parseCredentialJSONPayload(draft.jsonPayload);
     case "git_https":
       return { host: draft.host, username: draft.username, token: draft.secret };
@@ -199,6 +222,18 @@ export function clearCredentialSecrets(draft: CredentialPayloadDraft): Credentia
     secret: "",
     privateKey: "",
     privateKeyPassphrase: "",
+  };
+}
+
+export function isAdvancedProviderCredentialFormKind(kind: CredentialFormKind): boolean {
+  return kind === "provider_advanced";
+}
+
+function buildManagedProviderPayload(draft: CredentialPayloadDraft): Record<string, unknown> {
+  const baseUrl = draft.endpointUrl.trim();
+  return {
+    apiKey: draft.secret,
+    ...(baseUrl === "" ? {} : { baseUrl }),
   };
 }
 

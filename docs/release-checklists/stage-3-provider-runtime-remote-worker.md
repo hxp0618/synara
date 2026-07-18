@@ -35,8 +35,9 @@ multi-host/Kubernetes multi-node、real Provider-process/release-rollout failure
 - [ ] Provider Host Protocol 固定为 `2.1`，Worker Protocol 固定为 `2`，Runtime Event 固定为 `2`。
 - [ ] 报告明确区分真实 Provider、deterministic fixture、Target 类型和是否经过 Control Plane/agentd。
 - [ ] 当前已知限制、外部依赖和未执行项已由发布负责人接受。
-- [ ] 第三方 Codex/Claude API Key 只通过受控 Credential `apiKey`/`authToken` 与可选 `baseUrl` 注入；值和
-      operator 环境变量名未进入聊天、命令参数、Target 配置、日志或报告。
+- [ ] 第三方 Codex/Claude API Key 只通过受控 Credential `apiKey` 与可选 `baseUrl` 注入；新建/轮换拒绝
+      Codex `organization` 与 Claude `authToken`，历史记录只保留解析兼容；值和 operator 环境变量名未进入
+      聊天、命令参数、Target 配置、日志或报告。
 - [ ] 没有把 Local Provider Host smoke 描述成 Local Supervisor、SSH、Docker 或 Kubernetes Release Gate。
 
 ## 2. 数据库与 DDL
@@ -277,8 +278,11 @@ Artifact Ready/list/download、精确 Payload hash、刷新/reconnect/完整 Ser
 报告为 `docs/reports/stage-3-saas-web-artifact-download-88f922ed.md`。`0eeabbc1` baseline 的 patched worktree
 又完成 deterministic compatible Worker 的两轮 text/Tool/usage、Ready generated file、Checkpoint、Control Plane +
 embedded Worker restart、incarnation `1 -> 2`、同 Session Workspace restore 与连续 Event `1..28`；报告为
-`docs/reports/stage-3-saas-web-compatible-worker-restart-0eeabbc1.md`。下面面向完整高级操作、真实 Provider
-Worker loss 和多浏览器并发的发布项仍保持未勾选。
+`docs/reports/stage-3-saas-web-compatible-worker-restart-0eeabbc1.md`。`82adfc3f` baseline 的 patched
+worktree 又完成 deterministic active mid-Turn standalone Worker loss/replacement、Generation-fenced Approval、
+Workspace/Checkpoint 连续性、双页面 pending Interaction 收敛和严格模型 CAS 冲突收敛；报告为
+`docs/reports/stage-3-saas-web-active-worker-replacement-multibrowser-82adfc3f.md`。该证据不替代真实 Provider、
+Structured User Input、远程 Target 或完整高级操作。
 
 - [ ] SaaS Web 的 Project、Session、Turn、Compact、Review、Rollback、Fork 只调用 Control Plane API。
 - [ ] SaaS handler 没有回退到 `readNativeApi()` 或本地 Provider discovery。
@@ -293,6 +297,13 @@ Worker loss 和多浏览器并发的发布项仍保持未勾选。
       file 与 Checkpoint；Control Plane + embedded Worker between-Turn restart 后 incarnation `1 -> 2`，第二轮
       恢复首轮 Workspace 并验证文件。该项不替代真实 Provider、active mid-Turn replacement、Approval/Input
       或多浏览器发布证据。
+- [x] Deterministic active mid-Turn standalone Worker loss 保持同一 Session/Turn/Execution/Workspace，Worker
+      incarnation `1 -> 2`、Execution Generation `1 -> 2`；旧 Approval `expired/superseded`，替换 Approval
+      只向 Generation `2` 交付并由原 Browser 解决，Event 连续且只有一个终态，Workspace 从首轮 Ready
+      Checkpoint 恢复并生成新的 Ready Checkpoint。
+- [x] 两个 Browser 页面可同时投影同一 pending Approval；第二页解决后两页无刷新移除 Interaction 并显示
+      唯一终态。普通模型切换传播到被动页；并发模型切换精确产生一个成功和一个
+      `409 session_model_conflict`，冲突页重读服务端 Session 后收敛且不覆盖胜出模型。
 - [x] 未配置 Control Plane 的本地主聊天、真实 Codex、刷新、Server restart 与 native resume 没有回归，
       本地 SQLite 也没有 Control Plane 命名表或 SaaS authority 写入；本地 Project 文件操作不在本项证据边界。
 - [x] 上述隔离 Web acceptance 的稳定页面无相关 Browser Error/Warning 或框架 Overlay；开发期 HMR 过渡日志

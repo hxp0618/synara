@@ -1,4 +1,5 @@
 import type { ControlPlaneCredential, ControlPlaneCredentialPurpose } from "./controlPlaneClient";
+import { normalizeControlPlaneProviderCode } from "./controlPlaneProviderCode";
 
 export function listUsableControlPlaneCredentials(
   credentials: ReadonlyArray<ControlPlaneCredential>,
@@ -18,7 +19,9 @@ export function listUsableControlPlaneCredentials(
       credential.revokedAt === null &&
       (credential.expiresAt === null || Date.parse(credential.expiresAt) > now) &&
       credentialMatchesScope(credential, options) &&
-      (options.provider === undefined || credential.provider === options.provider),
+      (options.provider === undefined ||
+        normalizeControlPlaneProviderCode(credential.provider) ===
+          normalizeControlPlaneProviderCode(options.provider)),
   );
 }
 

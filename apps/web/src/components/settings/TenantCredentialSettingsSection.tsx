@@ -29,7 +29,9 @@ import {
   clearCredentialSecrets,
   createCredentialPayloadDraft,
   credentialFormKindForCredential,
+  DEFAULT_CREDENTIAL_FORM_KIND,
   describeCredentialForm,
+  isAdvancedProviderCredentialFormKind,
   type CredentialFormKind,
 } from "~/lib/credentialPayloadForm";
 import { cn } from "~/lib/utils";
@@ -125,8 +127,10 @@ export function TenantCredentialSettingsSection(props: {
     [props.members],
   );
   const [name, setName] = useState("");
-  const [createKind, setCreateKind] = useState<CredentialFormKind>("provider");
-  const [createDraft, setCreateDraft] = useState(() => createCredentialPayloadDraft("provider"));
+  const [createKind, setCreateKind] = useState<CredentialFormKind>(DEFAULT_CREDENTIAL_FORM_KIND);
+  const [createDraft, setCreateDraft] = useState(() =>
+    createCredentialPayloadDraft(DEFAULT_CREDENTIAL_FORM_KIND),
+  );
   const [scope, setScope] = useState<ControlPlaneCredentialScope>("tenant");
   const [scopeUserId, setScopeUserId] = useState("");
   const [organizationId, setOrganizationId] = useState("");
@@ -138,7 +142,9 @@ export function TenantCredentialSettingsSection(props: {
   const [createError, setCreateError] = useState<unknown>(null);
   const [rotateCredentialId, setRotateCredentialId] = useState("");
   const [rotateExpiresAt, setRotateExpiresAt] = useState("");
-  const [rotateDraft, setRotateDraft] = useState(() => createCredentialPayloadDraft("provider"));
+  const [rotateDraft, setRotateDraft] = useState(() =>
+    createCredentialPayloadDraft(DEFAULT_CREDENTIAL_FORM_KIND),
+  );
   const [rotatePending, setRotatePending] = useState(false);
   const [rotateError, setRotateError] = useState<unknown>(null);
   const [revokePendingId, setRevokePendingId] = useState<string | null>(null);
@@ -196,7 +202,7 @@ export function TenantCredentialSettingsSection(props: {
     } catch (error) {
       setCreateError(error);
     } finally {
-      if (submittedKind !== "provider") {
+      if (!isAdvancedProviderCredentialFormKind(submittedKind)) {
         setCreateDraft((current) => clearCredentialSecrets(current));
       }
       setCreatePending(false);
@@ -229,7 +235,7 @@ export function TenantCredentialSettingsSection(props: {
       setRotateExpiresAt("");
       const nextDraft = createCredentialPayloadDraft(selectedRotationKind);
       setRotateDraft(
-        selectedRotationKind === "provider"
+        selectedRotationKind === "provider_advanced"
           ? {
               ...nextDraft,
               provider: selectedRotation.provider,
@@ -240,7 +246,7 @@ export function TenantCredentialSettingsSection(props: {
     } catch (error) {
       setRotateError(error);
     } finally {
-      if (selectedRotationKind !== "provider") {
+      if (selectedRotationKind && !isAdvancedProviderCredentialFormKind(selectedRotationKind)) {
         setRotateDraft((current) => clearCredentialSecrets(current));
       }
       setRotatePending(false);
@@ -260,7 +266,7 @@ export function TenantCredentialSettingsSection(props: {
       await credentials.refetch();
       if (rotateCredentialId === item.id) {
         setRotateCredentialId("");
-        setRotateDraft(createCredentialPayloadDraft("provider"));
+        setRotateDraft(createCredentialPayloadDraft(DEFAULT_CREDENTIAL_FORM_KIND));
       }
     } catch (error) {
       setRevokeError(error);
@@ -603,9 +609,11 @@ export function TenantCredentialSettingsSection(props: {
                   setRotateExpiresAt("");
                   const credential = activeCredentials.find((item) => item.id === credentialId);
                   const kind = credential ? credentialFormKindForCredential(credential) : null;
-                  const nextDraft = createCredentialPayloadDraft(kind ?? "provider");
+                  const nextDraft = createCredentialPayloadDraft(
+                    kind ?? DEFAULT_CREDENTIAL_FORM_KIND,
+                  );
                   setRotateDraft(
-                    credential?.purpose === "provider"
+                    kind === "provider_advanced" && credential
                       ? {
                           ...nextDraft,
                           provider: credential.provider,
