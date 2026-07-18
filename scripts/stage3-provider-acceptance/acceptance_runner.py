@@ -182,6 +182,7 @@ REAL_PROVIDER_HTTP_FAULT_TARGETS = ("local", "ssh", "docker", "kubernetes")
 REAL_PROVIDER_HOST_CRASH_TARGETS = ("local", "ssh", "docker", "kubernetes")
 REAL_PROVIDER_CURSOR_MAX_AGE = "1s"
 REAL_PROVIDER_CURSOR_EXPIRY_WAIT_SECONDS = 1.25
+REAL_PROVIDER_MAX_SEQUENTIAL_APPROVALS = 4
 REAL_PROVIDER_CASE_METADATA: Mapping[str, Mapping[str, str]] = {
     "generated-file-checkpoint": {
         "id": "real-provider.generated-file-checkpoint",
@@ -404,6 +405,22 @@ def real_provider_read_only_output_command(content: bytes) -> str:
 
 def real_provider_approval_command() -> str:
     return real_provider_read_only_output_command(REAL_PROVIDER_APPROVAL_CONTENT)
+
+
+def real_provider_approval_command_matches(candidate: str) -> bool:
+    expected = real_provider_approval_command()
+    if candidate == expected:
+        return True
+    try:
+        command = shlex.split(candidate)
+    except ValueError:
+        return False
+    return (
+        len(command) == 3
+        and pathlib.PurePosixPath(command[0]).name in {"bash", "sh", "zsh"}
+        and command[1] in {"-c", "-lc"}
+        and command[2] == expected
+    )
 
 
 def real_provider_steer_command() -> str:
@@ -10246,17 +10263,33 @@ class AcceptanceSuite:
             ),
         }
 
-    def _real_provider_approval_interaction(
+    def _real_provider_approval_request_details(
         self,
-        turn_id: str,
+        interaction: Mapping[str, Any],
         *,
-        session_id: str | None = None,
-    ) -> tuple[dict[str, Any], str, str, dict[str, Any], str]:
-        interaction = self._wait_for_interaction(turn_id, "approval", session_id=session_id)
+        turn_id: str,
+    ) -> tuple[str, str, dict[str, Any], str]:
+        interaction_id = interaction.get("id")
+        if not isinstance(interaction_id, str) or not interaction_id:
+            raise AcceptanceError(
+                "runner.real_provider_approval_interaction_id_invalid",
+                "The real Provider Approval interaction omitted a valid interaction ID.",
+                {"turnId": turn_id, "interactionId": interaction_id},
+            )
         execution_id, request_id = self._interaction_identity(
             interaction,
             "real Provider Approval interaction",
         )
+        if interaction.get("turnId") != turn_id:
+            raise AcceptanceError(
+                "runner.real_provider_approval_turn_mismatch",
+                "The real Provider Approval interaction did not stay bound to its Turn.",
+                {
+                    "expectedTurnId": turn_id,
+                    "interactionId": interaction.get("id"),
+                    "actualTurnId": interaction.get("turnId"),
+                },
+            )
         interaction_payload = json_object(
             interaction.get("payload"),
             "real Provider Approval interaction payload",
@@ -10272,7 +10305,146 @@ class AcceptanceSuite:
                     "requestKind": interaction_payload.get("requestKind"),
                 },
             )
+        if not real_provider_approval_command_matches(command):
+            raise AcceptanceError(
+                "runner.real_provider_approval_command_invalid",
+                "The real Provider Approval interaction requested a non-canonical command.",
+                {
+                    "turnId": turn_id,
+                    "interactionId": interaction_id,
+                    "requestId": request_id,
+                    "actualCommand": self.redactor.text(command[:256]),
+                },
+            )
+        return execution_id, request_id, interaction_payload, command
+
+    def _real_provider_approval_interaction(
+        self,
+        turn_id: str,
+        *,
+        session_id: str | None = None,
+    ) -> tuple[dict[str, Any], str, str, dict[str, Any], str]:
+        interaction = self._wait_for_interaction(turn_id, "approval", session_id=session_id)
+        execution_id, request_id, interaction_payload, command = (
+            self._real_provider_approval_request_details(interaction, turn_id=turn_id)
+        )
         return interaction, execution_id, request_id, interaction_payload, command
+
+    def _wait_for_turn_terminal_or_follow_up_approval(
+        self,
+        turn_id: str,
+        previous_interaction_id: str,
+        previous_request_id: str,
+        *,
+        session_id: str | None = None,
+    ) -> dict[str, Any]:
+        resolved_session_id = session_id or self._required("session_id")
+
+        def approval_probe() -> dict[str, Any] | None:
+            interactions = json_object(
+                self.api.request("GET", f"/v1/sessions/{resolved_session_id}/interactions"),
+                "pending interactions",
+            )
+            items = interactions.get("items")
+            if not isinstance(items, list):
+                raise AcceptanceError(
+                    "runner.response_shape_invalid",
+                    "pending interactions.items was not an array.",
+                )
+            same_turn_pending = [
+                item for item in items if isinstance(item, dict) and item.get("turnId") == turn_id
+            ]
+            invalid_kind = [
+                item
+                for item in same_turn_pending
+                if item.get("kind") != "approval"
+            ]
+            if invalid_kind:
+                raise AcceptanceError(
+                    "runner.real_provider_follow_up_interaction_kind_invalid",
+                    "The real Provider Approval Turn exposed a non-approval pending interaction.",
+                    {
+                        "turnId": turn_id,
+                        "previousInteractionId": previous_interaction_id,
+                        "pendingInteractions": [
+                            self._interaction_record_summary(item) for item in invalid_kind
+                        ],
+                    },
+                )
+            snapshot = self._turn_terminal_snapshot(
+                turn_id,
+                session_id=resolved_session_id if session_id is not None else None,
+            )
+            if snapshot is not None:
+                terminal, matching = snapshot
+                if same_turn_pending:
+                    raise AcceptanceError(
+                        "runner.real_provider_terminal_pending_interaction",
+                        "The real Provider Approval Turn reached terminal state while pending interactions remained.",
+                        {
+                            "turnId": turn_id,
+                            "terminal": self._terminal_event_summary(terminal),
+                            "pendingInteractions": [
+                                self._interaction_record_summary(item) for item in same_turn_pending
+                            ],
+                        },
+                    )
+                if terminal.get("eventType") != "execution.completed":
+                    raise AcceptanceError(
+                        "runner.turn_terminal_mismatch",
+                        "Real Provider Approval Turn terminated unexpectedly.",
+                        {
+                            "turnId": turn_id,
+                            "terminal": self._terminal_event_summary(terminal),
+                            "eventTypes": [event.get("eventType") for event in matching],
+                            "runtimeWarnings": self._runtime_warning_summaries(matching),
+                        },
+                    )
+                if resolved_session_id == self.state.session_id:
+                    self.state.last_sequence = max(self.state.last_sequence, int(terminal["sequence"]))
+                return {
+                    "terminal": terminal,
+                    "events": matching,
+                }
+            previous_pending = [
+                item
+                for item in same_turn_pending
+                if item.get("id") == previous_interaction_id
+            ]
+            if previous_pending:
+                if any(item.get("requestId") != previous_request_id for item in previous_pending):
+                    raise AcceptanceError(
+                        "runner.real_provider_approval_interaction_reused",
+                        "The real Provider Approval Turn reused an existing interaction ID for a new request.",
+                        {
+                            "turnId": turn_id,
+                            "interactionId": previous_interaction_id,
+                            "previousRequestId": previous_request_id,
+                            "pendingInteractions": [
+                                self._interaction_record_summary(item) for item in previous_pending
+                            ],
+                        },
+                    )
+                return None
+            matches = [item for item in same_turn_pending if item.get("id") != previous_interaction_id]
+            if len(matches) > 1:
+                raise AcceptanceError(
+                    "runner.real_provider_follow_up_approval_ambiguous",
+                    "The real Provider Approval Turn exposed more than one follow-up Approval at once.",
+                    {
+                        "turnId": turn_id,
+                        "previousInteractionId": previous_interaction_id,
+                        "interactionIds": [item.get("id") for item in matches],
+                    },
+                )
+            if matches:
+                return {"interaction": matches[0]}
+            return None
+
+        return self.api.wait_until(
+            f"terminal event or follow-up approval for Turn {turn_id}",
+            approval_probe,
+        )
 
     def _real_provider_approval_resolution(self) -> Mapping[str, Any]:
         marker = self._real_provider_marker("approval")
@@ -10284,17 +10456,119 @@ class AcceptanceSuite:
         interaction, execution_id, request_id, interaction_payload, command = (
             self._real_provider_approval_interaction(turn_id)
         )
-        resolved = json_object(
-            self.api.request(
-                "POST",
-                f"/v1/executions/{execution_id}/approvals/{urllib.parse.quote(request_id, safe='')}/resolve",
-                {"decision": "accept"},
-            ),
-            "real Provider Approval resolution",
-        )
-        terminal, events = self._wait_for_turn_terminal(turn_id, "execution.completed")
+        approvals: list[dict[str, Any]] = []
+        seen_request_ids: set[str] = set()
+        seen_interaction_ids: set[str] = set()
+        terminal: dict[str, Any] | None = None
+        events: list[dict[str, Any]] | None = None
+        current_interaction = interaction
+        current_execution_id = execution_id
+        current_request_id = request_id
+        current_payload = interaction_payload
+        current_command = command
+        for _attempt in range(REAL_PROVIDER_MAX_SEQUENTIAL_APPROVALS):
+            current_interaction_id = str(current_interaction["id"])
+            if current_interaction_id in seen_interaction_ids:
+                raise AcceptanceError(
+                    "runner.real_provider_approval_interaction_reused",
+                    "The real Provider Approval Turn reused a resolved interaction ID.",
+                    {
+                        "turnId": turn_id,
+                        "executionId": execution_id,
+                        "interactionId": current_interaction_id,
+                        "resolvedInteractionIds": [entry["interactionId"] for entry in approvals],
+                    },
+                )
+            if current_request_id in seen_request_ids:
+                raise AcceptanceError(
+                    "runner.real_provider_approval_request_reused",
+                    "The real Provider Approval Turn reused a resolved Request identity.",
+                    {
+                        "turnId": turn_id,
+                        "executionId": execution_id,
+                        "requestId": current_request_id,
+                        "interactionId": current_interaction.get("id"),
+                        "resolvedRequestIds": [entry["requestId"] for entry in approvals],
+                    },
+                )
+            seen_interaction_ids.add(current_interaction_id)
+            resolved = json_object(
+                self.api.request(
+                    "POST",
+                    f"/v1/executions/{current_execution_id}/approvals/{urllib.parse.quote(current_request_id, safe='')}/resolve",
+                    {"decision": "accept"},
+                ),
+                "real Provider Approval resolution",
+            )
+            approval_entry = {
+                "interactionId": current_interaction_id,
+                "requestId": current_request_id,
+                "requestKind": current_payload.get("requestKind"),
+                "commandSummary": self.redactor.text(current_command[:256]),
+                "resolutionStatus": resolved.get("status"),
+                "deliveryStatus": resolved.get("deliveryStatus"),
+            }
+            approvals.append(approval_entry)
+            seen_request_ids.add(current_request_id)
+            outcome = self._wait_for_turn_terminal_or_follow_up_approval(
+                turn_id,
+                current_interaction_id,
+                current_request_id,
+            )
+            terminal_candidate = outcome.get("terminal")
+            if isinstance(terminal_candidate, dict):
+                matching_events = outcome.get("events")
+                if not isinstance(matching_events, list) or not all(
+                    isinstance(event, dict) for event in matching_events
+                ):
+                    raise AcceptanceError(
+                        "runner.response_shape_invalid",
+                        "The real Provider Approval terminal snapshot omitted its Event list.",
+                    )
+                terminal = terminal_candidate
+                events = matching_events
+                break
+            next_interaction = json_object(
+                outcome.get("interaction"),
+                "real Provider follow-up Approval interaction",
+            )
+            next_execution_id, next_request_id, next_payload, next_command = (
+                self._real_provider_approval_request_details(next_interaction, turn_id=turn_id)
+            )
+            if next_execution_id != execution_id:
+                raise AcceptanceError(
+                    "runner.real_provider_follow_up_approval_execution_mismatch",
+                    "The real Provider Approval Turn changed Execution identity between sequential Approvals.",
+                    {
+                        "turnId": turn_id,
+                        "expectedExecutionId": execution_id,
+                        "actualExecutionId": next_execution_id,
+                        "interactionId": next_interaction.get("id"),
+                    },
+                )
+            current_interaction = next_interaction
+            current_execution_id = next_execution_id
+            current_request_id = next_request_id
+            current_payload = next_payload
+            current_command = next_command
+        else:
+            raise AcceptanceError(
+                "runner.real_provider_approval_limit_exceeded",
+                "The real Provider Approval Turn required too many sequential Approval resolutions.",
+                {
+                    "turnId": turn_id,
+                    "executionId": execution_id,
+                    "maxSequentialApprovals": REAL_PROVIDER_MAX_SEQUENTIAL_APPROVALS,
+                    "resolvedApprovalCount": len(approvals),
+                    "resolvedRequestIds": [entry["requestId"] for entry in approvals],
+                    "nextInteraction": self._interaction_record_summary(current_interaction),
+                },
+            )
+
+        assert terminal is not None
+        assert events is not None
         event_types = [str(event.get("eventType")) for event in events]
-        for required_event_type in ("request.resolved", "item.started", "item.completed"):
+        for required_event_type in ("item.started", "item.completed"):
             if required_event_type not in event_types:
                 raise AcceptanceError(
                     "runner.real_provider_approval_events_missing",
@@ -10305,6 +10579,15 @@ class AcceptanceSuite:
                         "eventTypes": event_types,
                     },
                 )
+        for index, approval_entry in enumerate(approvals, start=1):
+            resolved_event = self._interaction_request_event(
+                events,
+                execution_id,
+                str(approval_entry["requestId"]),
+                "request.resolved",
+                f"real Provider Approval resolution #{index}",
+            )
+            approval_entry["resolvedEvent"] = self._event_summary(resolved_event)
         evidence = self._real_provider_turn_evidence(
             turn_id,
             terminal,
@@ -10314,14 +10597,18 @@ class AcceptanceSuite:
             expected_resume_reason="cursor_usable",
         )
         self.state.last_real_marker = marker
+        first_approval = approvals[0]
+        last_approval = approvals[-1]
         return {
             **evidence,
-            "interactionId": interaction.get("id"),
-            "requestId": request_id,
-            "requestKind": interaction_payload.get("requestKind"),
-            "commandSummary": self.redactor.text(command[:256]),
-            "resolutionStatus": resolved.get("status"),
-            "deliveryStatus": resolved.get("deliveryStatus"),
+            "interactionId": first_approval["interactionId"],
+            "requestId": first_approval["requestId"],
+            "requestKind": first_approval["requestKind"],
+            "commandSummary": first_approval["commandSummary"],
+            "resolutionStatus": last_approval["resolutionStatus"],
+            "deliveryStatus": last_approval["deliveryStatus"],
+            "approvalCount": len(approvals),
+            "approvalResolutions": approvals,
         }
 
     def _real_provider_user_input_resolution(self) -> Mapping[str, Any]:
@@ -13736,14 +14023,14 @@ class AcceptanceSuite:
             )
         return self._recover_pending_approval_with(recover)
 
-    def _interaction_request_identity(
+    def _interaction_request_event(
         self,
         events: Sequence[Mapping[str, Any]],
         execution_id: str,
         request_id: str,
         event_type: str,
         description: str,
-    ) -> tuple[str, int]:
+    ) -> Mapping[str, Any]:
         matches = []
         for event in events:
             if event.get("executionId") != execution_id or event.get("eventType") != event_type:
@@ -13762,7 +14049,25 @@ class AcceptanceSuite:
                     "matchCount": len(matches),
                 },
             )
-        return self._event_worker_identity(matches[0])
+        return matches[0]
+
+    def _interaction_request_identity(
+        self,
+        events: Sequence[Mapping[str, Any]],
+        execution_id: str,
+        request_id: str,
+        event_type: str,
+        description: str,
+    ) -> tuple[str, int]:
+        return self._event_worker_identity(
+            self._interaction_request_event(
+                events,
+                execution_id,
+                request_id,
+                event_type,
+                description,
+            )
+        )
 
     def _recover_pending_interaction_context(
         self,

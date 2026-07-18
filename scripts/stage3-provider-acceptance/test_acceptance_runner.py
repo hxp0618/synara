@@ -1778,6 +1778,245 @@ class RealProviderGeneratedFileSuite(acceptance.AcceptanceSuite):
         return self.execution_terminal, self.events
 
 
+class RealProviderSequentialApprovalAPI(FakeAPI):
+    def __init__(
+        self,
+        *,
+        marker: str,
+        approval_request_ids: Sequence[str],
+        execution_ids: Sequence[str] | None = None,
+        missing_resolved_request_ids: Sequence[str] = (),
+        interaction_ids: Sequence[str] | None = None,
+        commands: Sequence[str] | None = None,
+        kinds: Sequence[str] | None = None,
+        terminal_pending_interaction: Mapping[str, Any] | None = None,
+    ) -> None:
+        super().__init__()
+        if not approval_request_ids:
+            raise ValueError("approval_request_ids must not be empty")
+        resolved_execution_ids = list(execution_ids or ("execution-approval",) * len(approval_request_ids))
+        if len(resolved_execution_ids) != len(approval_request_ids):
+            raise ValueError("execution_ids length must match approval_request_ids")
+        resolved_interaction_ids = list(
+            interaction_ids
+            or tuple(f"interaction-approval-{index}" for index in range(1, len(approval_request_ids) + 1))
+        )
+        resolved_commands = list(
+            commands
+            or tuple(acceptance.real_provider_approval_command() for _ in approval_request_ids)
+        )
+        resolved_kinds = list(kinds or ("approval",) * len(approval_request_ids))
+        if len(resolved_interaction_ids) != len(approval_request_ids):
+            raise ValueError("interaction_ids length must match approval_request_ids")
+        if len(resolved_commands) != len(approval_request_ids):
+            raise ValueError("commands length must match approval_request_ids")
+        if len(resolved_kinds) != len(approval_request_ids):
+            raise ValueError("kinds length must match approval_request_ids")
+        self.marker = marker
+        self.approvals = [
+            {
+                "interactionId": resolved_interaction_ids[index - 1],
+                "requestId": request_id,
+                "executionId": resolved_execution_ids[index - 1],
+                "command": resolved_commands[index - 1],
+                "kind": resolved_kinds[index - 1],
+            }
+            for index, request_id in enumerate(approval_request_ids, start=1)
+        ]
+        self.pending_index = 0
+        self.missing_resolved_request_ids = set(missing_resolved_request_ids)
+        self.terminal_pending_interaction = (
+            dict(terminal_pending_interaction) if terminal_pending_interaction is not None else None
+        )
+        self.events: list[dict[str, Any]] = []
+        first_execution_id = self.approvals[0]["executionId"]
+        self._append_event(
+            "turn.created",
+            first_execution_id,
+            payload={"turnId": "turn-approval", "executionId": first_execution_id},
+        )
+        self._append_event(
+            "execution.leased",
+            first_execution_id,
+            payload={
+                "providerResume": {
+                    "requestedStrategy": "native-cursor",
+                    "selectedStrategy": "native-cursor",
+                    "reasonCode": "cursor_usable",
+                }
+            },
+        )
+        self._append_event("execution.started", first_execution_id)
+        self._append_event(
+            "request.opened",
+            first_execution_id,
+            payload={"requestId": str(self.approvals[0]["requestId"])},
+        )
+
+    def _append_event(
+        self,
+        event_type: str,
+        execution_id: str,
+        *,
+        payload: Mapping[str, Any] | None = None,
+        event_version: int | None = None,
+    ) -> None:
+        event = {
+            "sequence": len(self.events) + 1,
+            "eventType": event_type,
+            "executionId": execution_id,
+            "workerId": "worker-approval",
+            "generation": 1,
+            **({"payload": dict(payload)} if payload is not None else {}),
+        }
+        if event_version is not None:
+            event["eventVersion"] = event_version
+        self.events.append(event)
+
+    def _interaction(self, approval: Mapping[str, Any]) -> dict[str, Any]:
+        return {
+            "id": approval["interactionId"],
+            "turnId": "turn-approval",
+            "kind": approval["kind"],
+            "executionId": approval["executionId"],
+            "requestId": approval["requestId"],
+            "payload": {
+                "requestKind": "command",
+                "command": approval["command"],
+            },
+        }
+
+    @staticmethod
+    def _query_value(path: str, key: str) -> str | None:
+        _base, _question, query = path.partition("?")
+        for part in query.split("&"):
+            if not part:
+                continue
+            name, _equals, value = part.partition("=")
+            if name == key:
+                return value
+        return None
+
+    def request(
+        self,
+        method: str,
+        path: str,
+        payload: Mapping[str, Any] | None = None,
+        expected: Sequence[int] = (200,),
+        *,
+        maximum_timeout: float = 10.0,
+    ) -> Any:
+        del expected, maximum_timeout
+        self.requests.append((method, path, payload))
+        if method == "GET" and path == "/v1/sessions/session-id/interactions":
+            if self.pending_index < len(self.approvals):
+                pending = [self._interaction(self.approvals[self.pending_index])]
+            elif self.terminal_pending_interaction is not None:
+                pending = [dict(self.terminal_pending_interaction)]
+            else:
+                pending = []
+            return {"items": pending}
+        if method == "GET" and path.startswith("/v1/sessions/session-id/events?"):
+            after = int(self._query_value(path, "afterSequence") or 0)
+            limit = int(self._query_value(path, "limit") or 500)
+            items = [dict(event) for event in self.events if int(event["sequence"]) > after][:limit]
+            return {"items": items, "lastSequence": len(self.events)}
+        if method == "POST" and self.pending_index < len(self.approvals):
+            approval = self.approvals[self.pending_index]
+            expected_path = (
+                f"/v1/executions/{approval['executionId']}/approvals/{approval['requestId']}/resolve"
+            )
+            if path != expected_path:
+                raise AssertionError(f"unexpected resolve path: {path}")
+            if payload != {"decision": "accept"}:
+                raise AssertionError(f"unexpected approval payload: {payload}")
+            if approval["requestId"] not in self.missing_resolved_request_ids:
+                self._append_event(
+                    "request.resolved",
+                    str(approval["executionId"]),
+                    payload={"requestId": str(approval["requestId"])},
+                )
+            self.pending_index += 1
+            if self.pending_index < len(self.approvals):
+                next_approval = self.approvals[self.pending_index]
+                self._append_event(
+                    "request.opened",
+                    str(next_approval["executionId"]),
+                    payload={"requestId": str(next_approval["requestId"])},
+                )
+            else:
+                self._append_event("item.started", str(approval["executionId"]))
+                self._append_event("item.completed", str(approval["executionId"]))
+                self._append_event(
+                    "content.delta",
+                    str(approval["executionId"]),
+                    payload={"streamKind": "assistant_text", "delta": self.marker},
+                    event_version=2,
+                )
+                self._append_event(
+                    "execution.completed",
+                    str(approval["executionId"]),
+                    payload={"output": {"text": self.marker}},
+                )
+            return {"status": "resolved", "deliveryStatus": "delivered"}
+        raise AssertionError(f"unexpected fake API request: {method} {path}")
+
+
+class RealProviderSequentialApprovalSuite(acceptance.AcceptanceSuite):
+    def __init__(
+        self,
+        *,
+        approval_request_ids: Sequence[str],
+        execution_ids: Sequence[str] | None = None,
+        missing_resolved_request_ids: Sequence[str] = (),
+        interaction_ids: Sequence[str] | None = None,
+        commands: Sequence[str] | None = None,
+        kinds: Sequence[str] | None = None,
+        terminal_pending_interaction: Mapping[str, Any] | None = None,
+    ) -> None:
+        driver = FakeDriver(acceptance.STANDING_WORKER)
+        super().__init__(
+            dataclasses.replace(
+                runner_options(),
+                suite="real-provider-smoke",
+                real_provider_cases=("approval",),
+            ),
+            driver,
+            acceptance.Deadline(30.0),
+            acceptance.SecretRedactor(),
+        )
+        self.state.session_id = "session-id"
+        self.marker = self._real_provider_marker("approval")
+        driver.api = RealProviderSequentialApprovalAPI(
+            marker=self.marker,
+            approval_request_ids=approval_request_ids,
+            execution_ids=execution_ids,
+            missing_resolved_request_ids=missing_resolved_request_ids,
+            interaction_ids=interaction_ids,
+            commands=commands,
+            kinds=kinds,
+            terminal_pending_interaction=terminal_pending_interaction,
+        )
+        self.created_input: str | None = None
+
+    def _create_turn(
+        self,
+        input_text: str,
+        *,
+        runtime_mode: str = "full-access",
+        interaction_mode: str = "default",
+        session_id: str | None = None,
+    ) -> dict[str, Any]:
+        del session_id
+        if runtime_mode != "approval-required" or interaction_mode != "default":
+            raise AssertionError("unexpected real Provider approval Turn mode")
+        command = acceptance.real_provider_approval_command()
+        if input_text.count(command) != 1 or input_text.count(self.marker) != 1:
+            raise AssertionError("real Provider approval prompt omitted its command or marker")
+        self.created_input = input_text
+        return {"id": "turn-approval"}
+
+
 class ProviderFaultServerTest(unittest.TestCase):
     def test_rate_limit_endpoint_records_only_bounded_request_metadata(self) -> None:
         server = acceptance._ProviderFaultServer("codex", "rate-limit")
@@ -2947,6 +3186,157 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
                 self.assertIn("Do not emit any assistant text before the tool call", prompt)
                 self.assertIn("complete assistant text for this Turn must be exactly", prompt)
                 self.assertEqual(prompt.count(marker), 1)
+
+    def test_real_provider_approval_resolution_accepts_sequential_follow_up_approvals(self) -> None:
+        canonical_command = acceptance.real_provider_approval_command()
+        suite = RealProviderSequentialApprovalSuite(
+            approval_request_ids=("approval-request-1", "approval-request-2"),
+            commands=("/bin/bash -lc " + json.dumps(canonical_command), canonical_command),
+        )
+
+        evidence = suite._real_provider_approval_resolution()
+
+        self.assertEqual(evidence["approvalCount"], 2)
+        self.assertEqual(
+            [entry["requestId"] for entry in evidence["approvalResolutions"]],
+            ["approval-request-1", "approval-request-2"],
+        )
+        self.assertEqual(
+            [entry["resolvedEvent"]["eventType"] for entry in evidence["approvalResolutions"]],
+            ["request.resolved", "request.resolved"],
+        )
+        self.assertEqual(
+            evidence["eventTypes"].count("request.resolved"),
+            2,
+        )
+        post_requests = [
+            (method, path, payload)
+            for method, path, payload in suite.api.requests
+            if method == "POST"
+        ]
+        self.assertEqual(
+            post_requests,
+            [
+                (
+                    "POST",
+                    "/v1/executions/execution-approval/approvals/approval-request-1/resolve",
+                    {"decision": "accept"},
+                ),
+                (
+                    "POST",
+                    "/v1/executions/execution-approval/approvals/approval-request-2/resolve",
+                    {"decision": "accept"},
+                ),
+            ],
+        )
+
+    def test_real_provider_approval_resolution_fails_closed_when_sequential_limit_is_exceeded(
+        self,
+    ) -> None:
+        request_ids = tuple(
+            f"approval-request-{index}"
+            for index in range(1, acceptance.REAL_PROVIDER_MAX_SEQUENTIAL_APPROVALS + 2)
+        )
+        suite = RealProviderSequentialApprovalSuite(approval_request_ids=request_ids)
+
+        with self.assertRaises(acceptance.AcceptanceError) as caught:
+            suite._real_provider_approval_resolution()
+
+        self.assertEqual(caught.exception.code, "runner.real_provider_approval_limit_exceeded")
+        self.assertEqual(
+            caught.exception.evidence["maxSequentialApprovals"],
+            acceptance.REAL_PROVIDER_MAX_SEQUENTIAL_APPROVALS,
+        )
+        self.assertEqual(
+            caught.exception.evidence["resolvedApprovalCount"],
+            acceptance.REAL_PROVIDER_MAX_SEQUENTIAL_APPROVALS,
+        )
+        self.assertEqual(
+            caught.exception.evidence["nextInteraction"]["requestId"],
+            f"approval-request-{acceptance.REAL_PROVIDER_MAX_SEQUENTIAL_APPROVALS + 1}",
+        )
+
+    def test_real_provider_approval_resolution_requires_a_durable_request_resolved_for_each_request(
+        self,
+    ) -> None:
+        suite = RealProviderSequentialApprovalSuite(
+            approval_request_ids=("approval-request-1", "approval-request-2"),
+            missing_resolved_request_ids=("approval-request-2",),
+        )
+
+        with self.assertRaises(acceptance.AcceptanceError) as caught:
+            suite._real_provider_approval_resolution()
+
+        self.assertEqual(caught.exception.code, "runner.pending_interaction_request_event_invalid")
+        self.assertEqual(caught.exception.evidence["requestId"], "approval-request-2")
+        self.assertEqual(caught.exception.evidence["eventType"], "request.resolved")
+        self.assertEqual(caught.exception.evidence["matchCount"], 0)
+
+    def test_real_provider_approval_resolution_rejects_invalid_interaction_variants(self) -> None:
+        scenarios = (
+            (
+                "non-canonical-command",
+                {
+                    "approval_request_ids": ("approval-request-1",),
+                    "commands": ("printf not-canonical\\n",),
+                },
+                "runner.real_provider_approval_command_invalid",
+            ),
+            (
+                "invalid-interaction-id",
+                {
+                    "approval_request_ids": ("approval-request-1",),
+                    "interaction_ids": ("",),
+                },
+                "runner.real_provider_approval_interaction_id_invalid",
+            ),
+            (
+                "reused-interaction-id",
+                {
+                    "approval_request_ids": ("approval-request-1", "approval-request-2"),
+                    "interaction_ids": ("interaction-reused", "interaction-reused"),
+                },
+                "runner.real_provider_approval_interaction_reused",
+            ),
+            (
+                "reused-request-id",
+                {
+                    "approval_request_ids": ("approval-request-reused", "approval-request-reused"),
+                },
+                "runner.real_provider_approval_request_reused",
+            ),
+            (
+                "non-approval-follow-up-kind",
+                {
+                    "approval_request_ids": ("approval-request-1", "approval-request-2"),
+                    "kinds": ("approval", "user-input"),
+                },
+                "runner.real_provider_follow_up_interaction_kind_invalid",
+            ),
+            (
+                "terminal-with-pending-interaction",
+                {
+                    "approval_request_ids": ("approval-request-1",),
+                    "terminal_pending_interaction": {
+                        "id": "interaction-terminal-pending",
+                        "turnId": "turn-approval",
+                        "kind": "approval",
+                        "executionId": "execution-approval",
+                        "requestId": "approval-request-stale",
+                    },
+                },
+                "runner.real_provider_terminal_pending_interaction",
+            ),
+        )
+
+        for label, kwargs, expected_code in scenarios:
+            with self.subTest(scenario=label):
+                suite = RealProviderSequentialApprovalSuite(**kwargs)
+
+                with self.assertRaises(acceptance.AcceptanceError) as caught:
+                    suite._real_provider_approval_resolution()
+
+                self.assertEqual(caught.exception.code, expected_code)
 
     def test_real_provider_user_input_prompt_requires_provider_native_tool_first(self) -> None:
         expected_tools = {
