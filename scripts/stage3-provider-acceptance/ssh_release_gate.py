@@ -55,6 +55,8 @@ class SSHReleaseGateOptions:
     ssh_external_service_user: str
     ssh_external_use_sudo: bool
     ssh_allow_external_host: bool
+    codex_model: str | None = None
+    claude_model: str | None = None
 
 
 def parse_args(argv: Sequence[str]) -> SSHReleaseGateOptions:
@@ -62,6 +64,7 @@ def parse_args(argv: Sequence[str]) -> SSHReleaseGateOptions:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--codex-credential-env", required=True)
     parser.add_argument("--codex-base-url-env")
+    parser.add_argument("--codex-model")
     parser.add_argument("--claude-credential-env", required=True)
     parser.add_argument(
         "--claude-credential-field",
@@ -69,6 +72,7 @@ def parse_args(argv: Sequence[str]) -> SSHReleaseGateOptions:
         default="apiKey",
     )
     parser.add_argument("--claude-base-url-env")
+    parser.add_argument("--claude-model")
     parser.add_argument("--output-dir", type=pathlib.Path)
     parser.add_argument("--product-timeout", type=float, default=3600.0)
     parser.add_argument("--failure-timeout", type=float, default=2400.0)
@@ -163,6 +167,8 @@ def parse_args(argv: Sequence[str]) -> SSHReleaseGateOptions:
             parsed.claude_base_url_env,
             "Claude",
         )
+        codex_model = acceptance.parse_provider_model(parsed.codex_model, "--codex-model")
+        claude_model = acceptance.parse_provider_model(parsed.claude_model, "--claude-model")
     except ValueError as error:
         parser.error(str(error))
     output_dir = parsed.output_dir or remote.default_output_dir(repo_root, "ssh")
@@ -185,11 +191,16 @@ def parse_args(argv: Sequence[str]) -> SSHReleaseGateOptions:
         ssh_external_service_user=external_service_user,
         ssh_external_use_sudo=parsed.ssh_external_use_sudo,
         ssh_allow_external_host=parsed.ssh_allow_external_host,
+        codex_model=codex_model,
+        claude_model=claude_model,
     )
 
 
 def credential_source(options: SSHReleaseGateOptions, provider: str) -> CredentialSource:
     return remote.credential_source(options, provider)
+
+
+provider_model = remote.provider_model
 
 
 def uses_external_host(options: SSHReleaseGateOptions) -> bool:
@@ -284,6 +295,9 @@ def child_policy(options: SSHReleaseGateOptions) -> common.ChildReportPolicy:
             provider: credential_source(options, provider).base_url_environment_name is not None
             for provider in common.PROVIDERS
         },
+        provider_models={
+            provider: remote.provider_model(options, provider) for provider in common.PROVIDERS
+        },
         cleanup_true_fields=cleanup_true_fields,
         cleanup_false_fields=cleanup_false_fields,
     )
@@ -362,6 +376,9 @@ def child_command(
         )
     if source.base_url_environment_name is not None:
         command.extend(["--real-provider-base-url-env", source.base_url_environment_name])
+    model = remote.provider_model(options, provider)
+    if model is not None:
+        command.extend(["--real-provider-model", model])
     return command
 
 
@@ -800,6 +817,7 @@ def configuration_evidence(options: SSHReleaseGateOptions) -> dict[str, Any]:
                 "controlledBaseUrl": (
                     credential_source(options, provider).base_url_environment_name is not None
                 ),
+                "model": provider_model(options, provider),
             }
             for provider in common.PROVIDERS
         },

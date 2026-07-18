@@ -45,6 +45,8 @@ class KubernetesReleaseGateOptions:
     kubernetes_control_plane_host: str
     kind_bin: str
     kind_node_image: str
+    codex_model: str | None = None
+    claude_model: str | None = None
 
 
 def parse_args(argv: Sequence[str]) -> KubernetesReleaseGateOptions:
@@ -52,6 +54,7 @@ def parse_args(argv: Sequence[str]) -> KubernetesReleaseGateOptions:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--codex-credential-env", required=True)
     parser.add_argument("--codex-base-url-env")
+    parser.add_argument("--codex-model")
     parser.add_argument("--claude-credential-env", required=True)
     parser.add_argument(
         "--claude-credential-field",
@@ -59,6 +62,7 @@ def parse_args(argv: Sequence[str]) -> KubernetesReleaseGateOptions:
         default="apiKey",
     )
     parser.add_argument("--claude-base-url-env")
+    parser.add_argument("--claude-model")
     parser.add_argument("--output-dir", type=pathlib.Path)
     parser.add_argument("--product-timeout", type=float, default=3600.0)
     parser.add_argument("--failure-timeout", type=float, default=1200.0)
@@ -100,6 +104,8 @@ def parse_args(argv: Sequence[str]) -> KubernetesReleaseGateOptions:
             parsed.claude_base_url_env,
             "Claude",
         )
+        codex_model = acceptance.parse_provider_model(parsed.codex_model, "--codex-model")
+        claude_model = acceptance.parse_provider_model(parsed.claude_model, "--claude-model")
     except ValueError as error:
         parser.error(str(error))
     output_dir = parsed.output_dir or remote.default_output_dir(repo_root, "kubernetes")
@@ -114,11 +120,16 @@ def parse_args(argv: Sequence[str]) -> KubernetesReleaseGateOptions:
         kubernetes_control_plane_host=control_plane_host,
         kind_bin=kind_bin,
         kind_node_image=kind_node_image,
+        codex_model=codex_model,
+        claude_model=claude_model,
     )
 
 
 def credential_source(options: KubernetesReleaseGateOptions, provider: str) -> CredentialSource:
     return remote.credential_source(options, provider)
+
+
+provider_model = remote.provider_model
 
 
 def child_policy(
@@ -176,6 +187,9 @@ def child_command(
     ]
     if source.base_url_environment_name is not None:
         command.extend(["--real-provider-base-url-env", source.base_url_environment_name])
+    model = remote.provider_model(options, provider)
+    if model is not None:
+        command.extend(["--real-provider-model", model])
     return command
 
 

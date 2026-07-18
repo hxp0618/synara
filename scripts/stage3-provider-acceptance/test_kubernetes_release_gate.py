@@ -38,6 +38,8 @@ def kubernetes_options(output_dir: pathlib.Path) -> gate.KubernetesReleaseGateOp
         kubernetes_control_plane_host="host.docker.internal",
         kind_bin="kind",
         kind_node_image="kindest/node:v1.33.1",
+        codex_model="gpt-5.6-sol",
+        claude_model="claude-sonnet-4-6",
     )
 
 
@@ -135,6 +137,7 @@ def sample_child_report(
                 "controlledProductCredentialField": source.field,
                 "productCredentialEnvironmentNamePersisted": False,
                 "controlledBaseUrl": source.base_url_environment_name is not None,
+                "model": gate.provider_model(options, provider),
                 "controlledFaultCredentials": matrix == "failure",
                 "cursorMaximumAge": (
                     acceptance.REAL_PROVIDER_CURSOR_MAX_AGE if matrix == "failure" else None
@@ -159,12 +162,16 @@ class ParseArgsTest(unittest.TestCase):
                 [
                     "--codex-credential-env",
                     "CODEX_KEY",
+                    "--codex-model",
+                    "gpt-5.6-sol",
                     "--claude-credential-env",
                     "CLAUDE_TOKEN",
                     "--claude-credential-field",
                     "authToken",
                     "--claude-base-url-env",
                     "CLAUDE_BASE_URL",
+                    "--claude-model",
+                    "claude-sonnet-4-6",
                     "--output-dir",
                     directory,
                 ]
@@ -172,6 +179,8 @@ class ParseArgsTest(unittest.TestCase):
 
         encoded = json.dumps(dataclasses.asdict(options), default=str)
         self.assertEqual(options.claude_credential.field, "authToken")
+        self.assertEqual(options.codex_model, "gpt-5.6-sol")
+        self.assertEqual(options.claude_model, "claude-sonnet-4-6")
         self.assertEqual(options.kind_node_image, "kindest/node:v1.33.1")
         self.assertNotIn("codex-secret-value", encoded)
         self.assertNotIn("claude-secret-value", encoded)
@@ -218,8 +227,13 @@ class ChildCommandAndPolicyTest(unittest.TestCase):
         self.assertIn(WORKER_IMAGE_NAME, product)
         self.assertIn("kindest/node:v1.33.1", product)
         self.assertIn("CODEX_KEY", product)
+        self.assertEqual(product[product.index("--real-provider-model") + 1], "gpt-5.6-sol")
         self.assertIn("CLAUDE_TOKEN", failure)
         self.assertIn("CLAUDE_BASE_URL", failure)
+        self.assertEqual(
+            failure[failure.index("--real-provider-model") + 1],
+            "claude-sonnet-4-6",
+        )
 
         with mock.patch.dict(
             os.environ,

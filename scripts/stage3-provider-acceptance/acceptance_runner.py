@@ -396,6 +396,21 @@ def terminal_large_node_command() -> str:
     )
 
 
+def real_provider_approval_command() -> str:
+    output = json.dumps(REAL_PROVIDER_APPROVAL_CONTENT.decode("ascii"))
+    return f"node -e 'process.stdout.write({output})'"
+
+
+def real_provider_approval_prompt(marker: str) -> str:
+    return (
+        "Use the exec_command, Bash, or shell tool exactly once. Run this exact read-only Node command "
+        "without redirection, pipes, additional wrappers, or file changes: "
+        f"{real_provider_approval_command()}. "
+        "Wait for the tool to finish, then reply with exactly "
+        f"{marker} and no other text."
+    )
+
+
 def generated_file_bytes() -> bytes:
     return terminal_large_bytes(0, GENERATED_FILE_TOTAL_BYTES)
 
@@ -823,6 +838,7 @@ class RunnerOptions:
     real_provider_credential_env: str | None
     real_provider_credential_field: str
     real_provider_base_url_env: str | None
+    real_provider_model: str | None
 
 
 def fixture_load_resource_profile(options: RunnerOptions) -> dict[str, Any]:
@@ -8916,7 +8932,11 @@ class AcceptanceSuite:
                 else "Stage 3 Provider Acceptance"
             ),
             credential_id=credential_id,
-            model=("stage3-acceptance-fixture" if not real_provider_smoke else None),
+            model=(
+                self.options.real_provider_model
+                if real_provider_smoke
+                else "stage3-acceptance-fixture"
+            ),
             description="session",
         )
         session_id = session.get("id")
@@ -9034,15 +9054,18 @@ class AcceptanceSuite:
             str(session.get("provider") or "").lower() != provider.lower()
             or session.get("executionTargetId") != target_id
             or session.get("providerCredentialId") != credential_id
+            or (model is not None and session.get("model") != model)
         ):
             raise AcceptanceError(
                 "runner.session_binding_mismatch",
-                f"The {description} did not retain the requested Provider, Target, and Credential bindings.",
+                f"The {description} did not retain the requested Provider, Target, Credential, and model bindings.",
                 {
                     "requestedProvider": provider,
                     "provider": session.get("provider"),
                     "executionTargetId": session.get("executionTargetId"),
                     "providerCredentialId": session.get("providerCredentialId"),
+                    "requestedModel": model,
+                    "model": session.get("model"),
                 },
             )
         self._string_id(session, description)
@@ -9480,6 +9503,7 @@ class AcceptanceSuite:
             provider=self.options.provider,
             title=title,
             credential_id=credential_id,
+            model=self.options.real_provider_model,
             description="real Provider failure Session",
         )
 
@@ -10206,15 +10230,8 @@ class AcceptanceSuite:
 
     def _real_provider_approval_resolution(self) -> Mapping[str, Any]:
         marker = self._real_provider_marker("approval")
-        approval_text = REAL_PROVIDER_APPROVAL_CONTENT.decode("ascii").rstrip("\n")
-        approval_command = (
-            f"printf '{approval_text}\\n' > {REAL_PROVIDER_APPROVAL_RELATIVE_PATH}"
-        )
         turn = self._create_turn(
-            "Use the Bash or shell tool exactly once to run this command: "
-            f"{approval_command}. "
-            "Wait for the tool to finish, then reply with exactly "
-            f"{marker} and no other text.",
+            real_provider_approval_prompt(marker),
             runtime_mode="approval-required",
         )
         turn_id = self._turn_id(turn, "real Provider Approval Turn")
@@ -15410,6 +15427,19 @@ def parse_environment_variable_name(raw: str | None, option: str) -> str | None:
     return value
 
 
+def parse_provider_model(raw: str | None, option: str) -> str | None:
+    if raw is None:
+        return None
+    value = raw.strip()
+    if (
+        not value
+        or len(value) > 256
+        or any(character.isspace() or ord(character) < 32 for character in value)
+    ):
+        raise ValueError(f"{option} must be one non-empty model identifier without whitespace")
+    return value
+
+
 def parse_https_origin(raw: str | None, option: str) -> str | None:
     if raw is None:
         return None
@@ -15522,6 +15552,10 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
     parser.add_argument(
         "--real-provider-base-url-env",
         help="Optional environment variable containing the controlled Provider Base URL",
+    )
+    parser.add_argument(
+        "--real-provider-model",
+        help="Explicit non-secret model identifier used by the controlled real Provider profile",
     )
     parser.add_argument(
         "--real-provider-case",
@@ -15964,6 +15998,10 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
             parsed.real_provider_base_url_env,
             "--real-provider-base-url-env",
         )
+        real_provider_model = parse_provider_model(
+            parsed.real_provider_model,
+            "--real-provider-model",
+        )
     except ValueError as error:
         parser.error(str(error))
     run_id = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:8]
@@ -16056,6 +16094,8 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
         )
     elif real_provider_credential_env is not None or real_provider_base_url_env is not None:
         parser.error("real Provider Credential options require --suite real-provider-smoke")
+    elif real_provider_model is not None:
+        parser.error("--real-provider-model requires --suite real-provider-smoke")
     try:
         if real_provider_credential_env is not None:
             read_environment_value(
@@ -16141,6 +16181,7 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
         real_provider_credential_env=real_provider_credential_env,
         real_provider_credential_field=parsed.real_provider_credential_field,
         real_provider_base_url_env=real_provider_base_url_env,
+        real_provider_model=real_provider_model,
     )
 
 
@@ -16449,6 +16490,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 ),
                 "productCredentialEnvironmentNamePersisted": False,
                 "controlledBaseUrl": options.real_provider_base_url_env is not None,
+                "model": options.real_provider_model,
                 "controlledFaultCredentials": bool(options.real_provider_failure_cases),
                 "cursorMaximumAge": (
                     REAL_PROVIDER_CURSOR_MAX_AGE

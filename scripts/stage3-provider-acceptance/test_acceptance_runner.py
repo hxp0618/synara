@@ -86,6 +86,7 @@ def runner_options(*, restart_control_plane: bool = True) -> acceptance.RunnerOp
         real_provider_credential_env=None,
         real_provider_credential_field="apiKey",
         real_provider_base_url_env=None,
+        real_provider_model=None,
     )
 
 
@@ -2898,6 +2899,25 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
         self.assertEqual(generated, acceptance.generated_file_bytes())
         self.assertEqual(len(generated), (1 << 20) + 257)
 
+    def test_real_provider_approval_command_is_read_only_and_emits_exact_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            completed = subprocess.run(
+                ["bash", "-c", acceptance.real_provider_approval_command()],
+                cwd=directory,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=True,
+            )
+            workspace_entries = list(pathlib.Path(directory).iterdir())
+
+        prompt = acceptance.real_provider_approval_prompt("APPROVAL_MARKER")
+        self.assertEqual(completed.stdout, acceptance.REAL_PROVIDER_APPROVAL_CONTENT)
+        self.assertEqual(completed.stderr, b"")
+        self.assertEqual(workspace_entries, [])
+        self.assertNotIn(">", prompt)
+        self.assertNotIn(acceptance.REAL_PROVIDER_APPROVAL_RELATIVE_PATH, prompt)
+        self.assertEqual(prompt.count("APPROVAL_MARKER"), 1)
+
     def test_large_diff_seed_command_writes_exact_workspace_payload(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             completed = subprocess.run(
@@ -4189,6 +4209,7 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
             suite="real-provider-smoke",
             real_provider_credential_env="SYNARA_ACCEPTANCE_PROVIDER_KEY",
             real_provider_base_url_env="SYNARA_ACCEPTANCE_PROVIDER_BASE_URL",
+            real_provider_model="gpt-5.6-sol",
         )
         driver = FakeDriver(acceptance.STANDING_MANAGED_WORKER, name="docker")
 
@@ -4225,6 +4246,7 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
                         "provider": payload.get("provider"),
                         "executionTargetId": payload.get("executionTargetId"),
                         "providerCredentialId": payload.get("providerCredentialId"),
+                        "model": payload.get("model"),
                         "lastEventSequence": 1,
                     }
                 raise AssertionError(f"unexpected resource request: {method} {path}")
@@ -4265,7 +4287,7 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
             },
         )
         self.assertEqual(session_request[2]["providerCredentialId"], "credential-1")  # type: ignore[index]
-        self.assertNotIn("model", session_request[2])  # type: ignore[operator]
+        self.assertEqual(session_request[2]["model"], "gpt-5.6-sol")  # type: ignore[index]
         self.assertEqual(evidence["credential"]["source"], "operator-environment")
         self.assertFalse(evidence["credential"]["environmentVariableNamePersisted"])
         self.assertNotIn(secret, json.dumps(evidence))
@@ -4677,6 +4699,7 @@ class RunnerOptionsTest(unittest.TestCase):
         self.assertIsNone(options.real_provider_credential_env)
         self.assertEqual(options.real_provider_credential_field, "apiKey")
         self.assertIsNone(options.real_provider_base_url_env)
+        self.assertIsNone(options.real_provider_model)
 
     def test_remote_real_provider_requires_controlled_credential_source(self) -> None:
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
@@ -4713,6 +4736,8 @@ class RunnerOptionsTest(unittest.TestCase):
                     "SYNARA_ACCEPTANCE_CLAUDE_KEY",
                     "--real-provider-base-url-env",
                     "SYNARA_ACCEPTANCE_CLAUDE_BASE_URL",
+                    "--real-provider-model",
+                    "claude-sonnet-4-6",
                 ]
             )
 
@@ -4722,6 +4747,24 @@ class RunnerOptionsTest(unittest.TestCase):
             options.real_provider_base_url_env,
             "SYNARA_ACCEPTANCE_CLAUDE_BASE_URL",
         )
+        self.assertEqual(options.real_provider_model, "claude-sonnet-4-6")
+
+    def test_real_provider_model_rejects_unsafe_or_non_real_provider_usage(self) -> None:
+        invalid_arguments = (
+            ["--real-provider-model", "gpt-5.6-sol"],
+            [
+                "--suite",
+                "real-provider-smoke",
+                "--runner-command-json",
+                '["node","/tmp/provider-host.mjs"]',
+                "--real-provider-model",
+                "bad model",
+            ],
+        )
+        for arguments in invalid_arguments:
+            with self.subTest(arguments=arguments):
+                with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                    acceptance.parse_args(arguments)
 
     def test_real_provider_credential_options_reject_unsafe_names_and_fields(self) -> None:
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):

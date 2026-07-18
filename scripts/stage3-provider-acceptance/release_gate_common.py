@@ -25,6 +25,7 @@ class ChildReportPolicy:
     authentication: str
     credential_fields: Mapping[str, str | None]
     controlled_base_urls: Mapping[str, bool]
+    provider_models: Mapping[str, str | None]
     cleanup_true_fields: tuple[str, ...]
     cleanup_false_fields: tuple[str, ...] = ()
     expected_worker_image_build: str | None = None
@@ -209,12 +210,14 @@ def validate_child_report(
         elif policy.authentication == "controlled":
             expected_field = policy.credential_fields.get(provider)
             expected_base_url = policy.controlled_base_urls.get(provider, False)
+            expected_model = policy.provider_models.get(provider)
             if (
                 real_provider.get("ambientAuthentication") is not False
                 or real_provider.get("controlledProductCredential") is not True
                 or real_provider.get("controlledProductCredentialField") != expected_field
                 or real_provider.get("productCredentialEnvironmentNamePersisted") is not False
                 or real_provider.get("controlledBaseUrl") is not expected_base_url
+                or real_provider.get("model") != expected_model
             ):
                 fail(
                     "release.child_auth_boundary_invalid",
@@ -222,6 +225,7 @@ def validate_child_report(
                     {
                         "expectedCredentialField": expected_field,
                         "expectedControlledBaseUrl": expected_base_url,
+                        "expectedModel": expected_model,
                     },
                 )
         else:

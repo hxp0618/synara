@@ -110,6 +110,14 @@ def credential_source(options: Any, provider: str) -> CredentialSource:
     raise ValueError(f"unsupported controlled remote release Provider: {provider}")
 
 
+def provider_model(options: Any, provider: str) -> str | None:
+    if provider == "codex":
+        return options.codex_model
+    if provider == "claudeAgent":
+        return options.claude_model
+    raise ValueError(f"unsupported controlled remote release Provider: {provider}")
+
+
 def child_policy(
     options: Any,
     spec: RemoteReleaseTargetSpec,
@@ -126,6 +134,9 @@ def child_policy(
         controlled_base_urls={
             provider: credential_source(options, provider).base_url_environment_name is not None
             for provider in common.PROVIDERS
+        },
+        provider_models={
+            provider: provider_model(options, provider) for provider in common.PROVIDERS
         },
         cleanup_true_fields=spec.cleanup_true_fields,
         cleanup_false_fields=spec.cleanup_false_fields,
@@ -607,6 +618,7 @@ def configuration_evidence(
                 "controlledBaseUrl": (
                     credential_source(options, provider).base_url_environment_name is not None
                 ),
+                "model": provider_model(options, provider),
             }
             for provider in common.PROVIDERS
         },

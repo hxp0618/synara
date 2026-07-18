@@ -201,6 +201,7 @@ python3 scripts/stage3-provider-acceptance/acceptance_runner.py \
   --provider codex \
   --runner-command-json '["/usr/local/bin/provider-host"]' \
   --real-provider-credential-env SYNARA_ACCEPTANCE_CODEX_KEY \
+  --real-provider-model gpt-5.4 \
   --real-provider-matrix \
   --timeout 1800
 ```
@@ -214,6 +215,7 @@ python3 scripts/stage3-provider-acceptance/acceptance_runner.py \
   --provider codex \
   --runner-command-json '["/usr/local/bin/provider-host"]' \
   --real-provider-credential-env SYNARA_ACCEPTANCE_CODEX_KEY \
+  --real-provider-model gpt-5.4 \
   --real-provider-matrix \
   --timeout 3600
 ```
@@ -234,6 +236,7 @@ python3 scripts/stage3-provider-acceptance/acceptance_runner.py \
   --provider codex \
   --runner-command-json '["/usr/local/bin/provider-host"]' \
   --real-provider-credential-env SYNARA_ACCEPTANCE_CODEX_KEY \
+  --real-provider-model gpt-5.4 \
   --real-provider-matrix \
   --ssh-external-host ssh.example.internal \
   --ssh-external-port 22 \
@@ -263,9 +266,10 @@ Control Plane state, Worker container, volume, network and auto-built image are 
 Use `--real-provider-credential-field authToken` only for a Claude token that intentionally uses that payload field.
 `apiKey` is the default for Codex and Claude. An optional controlled endpoint can be supplied with
 `--real-provider-base-url-env`; its value is also redacted. This is the supported third-party API-key/Base URL path;
-the key and endpoint remain runtime Credential data rather than image or Target configuration. Remote real-Provider
-runs fail during CLI validation when the Credential source is omitted, so an unauthenticated container failure
-cannot be mistaken for release evidence.
+the key and endpoint remain runtime Credential data rather than image or Target configuration. Pin the endpoint's
+non-secret model identifier with `--real-provider-model`; the report records it so an SDK default-model mismatch
+cannot be mistaken for Provider failure. Remote real-Provider runs fail during CLI validation when the Credential
+source is omitted, so an unauthenticated container failure cannot be mistaken for release evidence.
 
 `--real-provider-case generated-file-checkpoint` first requires a Provider-native file mutation (`apply_patch` for
 Codex, `Write` for Claude) to create a 43-byte standalone file, then uses one exact shell command to write a
@@ -423,15 +427,19 @@ their environment-variable names:
 ```sh
 python3 scripts/stage3-provider-acceptance/docker_release_gate.py \
   --codex-credential-env SYNARA_ACCEPTANCE_CODEX_KEY \
+  --codex-model gpt-5.6-sol \
   --claude-credential-env SYNARA_ACCEPTANCE_CLAUDE_KEY \
   --claude-credential-field apiKey \
+  --claude-model claude-sonnet-4-6 \
   --product-timeout 2400 \
   --failure-timeout 900
 ```
 
 Use `--claude-credential-field authToken` only when the controlled Claude secret intentionally maps to
 `ANTHROPIC_AUTH_TOKEN`. Optional Codex/Claude Base URLs are supplied through `--codex-base-url-env` and
-`--claude-base-url-env`; their values and all Credential values are registered with the aggregate redactor.
+`--claude-base-url-env`; their values and all Credential values are registered with the aggregate redactor. Use
+`--codex-model` and `--claude-model` to pin the non-secret model identifiers supported by that controlled endpoint;
+the child reports persist and the aggregate validates those exact identifiers instead of relying on SDK defaults.
 
 The gate fails before any build when either source is missing or invalid, and fails on a dirty/untracked worktree.
 Each child receives only the tool environment allowlist plus that child Provider's Credential/Base URL; Codex and
@@ -454,8 +462,10 @@ the shared image without rebuilding it, and runs one Codex/Claude product or fai
 ```sh
 python3 scripts/stage3-provider-acceptance/kubernetes_release_gate.py \
   --codex-credential-env SYNARA_ACCEPTANCE_CODEX_KEY \
+  --codex-model gpt-5.6-sol \
   --claude-credential-env SYNARA_ACCEPTANCE_CLAUDE_KEY \
   --claude-credential-field apiKey \
+  --claude-model claude-sonnet-4-6 \
   --kind-bin /absolute/path/to/kind \
   --product-timeout 3600 \
   --failure-timeout 1200
@@ -478,8 +488,10 @@ provisions through the product SSH API, and removes its machine, key and isolate
 ```sh
 python3 scripts/stage3-provider-acceptance/ssh_release_gate.py \
   --codex-credential-env SYNARA_ACCEPTANCE_CODEX_KEY \
+  --codex-model gpt-5.6-sol \
   --claude-credential-env SYNARA_ACCEPTANCE_CLAUDE_KEY \
   --claude-credential-field apiKey \
+  --claude-model claude-sonnet-4-6 \
   --ssh-orbctl-bin /usr/local/bin/orbctl \
   --product-timeout 3600 \
   --failure-timeout 2400
@@ -491,8 +503,10 @@ installation/ownership IDs while sharing only the operator-provided identity and
 ```sh
 python3 scripts/stage3-provider-acceptance/ssh_release_gate.py \
   --codex-credential-env SYNARA_ACCEPTANCE_CODEX_KEY \
+  --codex-model gpt-5.6-sol \
   --claude-credential-env SYNARA_ACCEPTANCE_CLAUDE_KEY \
   --claude-credential-field apiKey \
+  --claude-model claude-sonnet-4-6 \
   --ssh-external-host ssh.example.internal \
   --ssh-external-user synara-admin \
   --ssh-external-identity-file /secure/synara/id_ed25519 \

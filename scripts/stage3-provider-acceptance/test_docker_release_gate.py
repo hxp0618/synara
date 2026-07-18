@@ -37,6 +37,8 @@ def docker_options(output_dir: pathlib.Path) -> gate.DockerReleaseGateOptions:
         docker_control_plane_host="host.docker.internal",
         docker_memory_bytes=2 << 30,
         docker_nano_cpus=1_000_000_000,
+        codex_model="gpt-5.6-sol",
+        claude_model="claude-sonnet-4-6",
     )
 
 
@@ -132,6 +134,7 @@ def sample_child_report(
                 "controlledProductCredentialField": source.field,
                 "productCredentialEnvironmentNamePersisted": False,
                 "controlledBaseUrl": source.base_url_environment_name is not None,
+                "model": gate.provider_model(options, provider),
                 "controlledFaultCredentials": matrix == "failure",
                 "cursorMaximumAge": (
                     acceptance.REAL_PROVIDER_CURSOR_MAX_AGE if matrix == "failure" else None
@@ -156,12 +159,16 @@ class ParseArgsTest(unittest.TestCase):
                 [
                     "--codex-credential-env",
                     "CODEX_KEY",
+                    "--codex-model",
+                    "gpt-5.6-sol",
                     "--claude-credential-env",
                     "CLAUDE_TOKEN",
                     "--claude-credential-field",
                     "authToken",
                     "--claude-base-url-env",
                     "CLAUDE_BASE_URL",
+                    "--claude-model",
+                    "claude-sonnet-4-6",
                     "--output-dir",
                     directory,
                 ]
@@ -170,6 +177,8 @@ class ParseArgsTest(unittest.TestCase):
         encoded = json.dumps(dataclasses.asdict(options), default=str)
         self.assertEqual(options.codex_credential.environment_name, "CODEX_KEY")
         self.assertEqual(options.claude_credential.field, "authToken")
+        self.assertEqual(options.codex_model, "gpt-5.6-sol")
+        self.assertEqual(options.claude_model, "claude-sonnet-4-6")
         self.assertNotIn("codex-secret-value", encoded)
         self.assertNotIn("claude-secret-value", encoded)
         self.assertNotIn("https://claude.example.test", encoded)
@@ -226,11 +235,16 @@ class ChildCommandTest(unittest.TestCase):
         self.assertNotIn("--real-provider-failure-matrix", product)
         self.assertIn('["/usr/local/bin/provider-host"]', product)
         self.assertIn("CODEX_KEY", product)
+        self.assertEqual(product[product.index("--real-provider-model") + 1], "gpt-5.6-sol")
         self.assertIn("--real-provider-failure-matrix", failure)
         self.assertNotIn("--real-provider-matrix", failure)
         self.assertIn("CLAUDE_TOKEN", failure)
         self.assertIn("authToken", failure)
         self.assertIn("CLAUDE_BASE_URL", failure)
+        self.assertEqual(
+            failure[failure.index("--real-provider-model") + 1],
+            "claude-sonnet-4-6",
+        )
         self.assertIn("--docker-skip-worker-build", product)
         self.assertIn(WORKER_IMAGE_NAME, product)
         self.assertIn("--docker-skip-worker-build", failure)
@@ -288,10 +302,26 @@ class ChildReportValidationTest(unittest.TestCase):
             gate.EXPECTED_UNSUPPORTED[("claudeAgent", "product")],
         )
 
-    def test_rejects_ambient_authentication_or_child_owned_image_removal(self) -> None:
+    def test_rejects_controlled_provider_model_drift(self) -> None:
+        options = docker_options(pathlib.Path("/tmp/docker-release"))
+        report = sample_child_report(options, "codex", "product")
+        report["configuration"]["realProvider"]["model"] = "gpt-5.4"
+
+        errors = common.validate_child_report(
+            report,
+            provider="codex",
+            matrix="product",
+            expected_git_sha="a" * 40,
+            policy=gate.child_policy(options, WORKER_IMAGE_NAME),
+        )
+
+        self.assertIn("release.child_auth_boundary_invalid", {error["code"] for error in errors})
+
+    def test_rejects_ambient_authentication_model_drift_or_child_owned_image_removal(self) -> None:
         options = docker_options(pathlib.Path("/tmp/docker-release"))
         report = sample_child_report(options, "codex", "failure")
         report["configuration"]["realProvider"]["ambientAuthentication"] = True
+        report["configuration"]["realProvider"]["model"] = "gpt-5.4"
         for case in report["cases"]:
             if case["id"] == "environment.cleanup":
                 case["evidence"]["ownedImageRemoved"] = True

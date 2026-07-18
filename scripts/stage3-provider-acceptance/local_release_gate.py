@@ -48,6 +48,7 @@ LOCAL_CHILD_POLICY = common.ChildReportPolicy(
     authentication="ambient",
     credential_fields={provider: None for provider in PROVIDERS},
     controlled_base_urls={provider: False for provider in PROVIDERS},
+    provider_models={provider: None for provider in PROVIDERS},
     cleanup_true_fields=("controlPlaneStopped", "stateRemoved"),
 )
 
