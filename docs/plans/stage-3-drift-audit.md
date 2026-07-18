@@ -46,27 +46,24 @@ evidence; see `docs/reports/stage-3-saas-web-artifact-download-88f922ed.md`. Non
 This audit treats executable code, migrations and repeatable tests as evidence. A local Provider Adapter is not
 evidence that the Provider is supported by a remote Worker.
 
-Operator inputs recorded on 2026-07-17 and executed on 2026-07-18 narrow the next gates without closing them:
-controlled Codex/Claude Credentials must support third-party `apiKey` plus optional `baseUrl`; an external SSH target
-is authorized but its authentication remains outside the repository; the selected local Kubernetes context
-`orbstack` now has a new
-clean-SHA `6b71703f` deterministic report with `22` pass, one explicitly unauthorized Node Drain and exact cleanup.
-The clean-SHA real Kubernetes four-child gate also ran with controlled third-party profiles: Codex failure passed
-`16/16`, while Codex product lacked an approval interaction and Claude product/failure received a stable HTTP `502`
-`provider_unavailable`; all clusters/image/state were removed and the aggregate Secret scan was empty. Clean SHA
-`f958c1b2` then ran the same four-child gate through Docker: Codex failure again passed `16/16`, Codex product again
-completed without an Approval Interaction, and both Claude children failed their baseline Turn with the same HTTP
-`502`; all child container/network/volume/state resources and the shared Image were removed, and the aggregate scan
-covered `37` files/`4,971,618` bytes with zero findings. The real-Provider gate therefore remains open rather than
-silently degrading the profiles. Production concurrency is
+Operator inputs recorded on 2026-07-17 and executed through 2026-07-19 require controlled Codex/Claude profiles to
+support third-party `apiKey`, optional `baseUrl`, and a custom model while keeping secret values outside the
+repository. The earlier clean `6b71703f` Kubernetes and `f958c1b2` Docker aggregates correctly failed closed on the
+configured Codex Approval and Claude HTTP `502` boundaries. After the corresponding runtime and acceptance fixes,
+clean `b1c52bae` passes the real Docker four-child aggregate and clean `3c523417` passes the disposable-Kind
+Kubernetes aggregate. Each records Codex product `22 pass + 1 unsupported` and failure `16 pass`, plus Claude product
+`22 pass + 1 unsupported` and failure `16 pass`; both preserve only the frozen Codex large-Terminal and Claude
+Compact unsupported results, use one shared gate-owned image, complete exact cleanup, and have empty aggregate Secret
+scans. The remaining four-Target release blocker is the real SSH aggregate, not the already passing Docker or
+disposable-Kind Kubernetes profiles. Production concurrency is
 governed by quota, Worker slots and CPU/memory resource profiles rather than one hard-coded number. Clean SHA
 `e2d70fb6` now enforces a minimum measured load duration plus a maximum-wave safety bound and records the exact
 resource profile, effective concurrency, success/unexpected-error rates, throughput and nearest-rank P50/P95/P99.
 Its deterministic Docker gate completed `304.201s`, `56` waves and `224/224` Executions with zero unexpected errors;
 production signing will use `kms-key`, potentially through a self-hosted Vault `hashivault://...`
 reference. External-host Runner/Gate integration is implemented with repository-external identity, pinned Host Key,
-install conflict refusal and non-destructive cleanup; its clean-SHA real-Provider report, the remaining remote reports,
-numeric latency/error/duration SLA, and concrete KMS identity/tlog/admission policy remain required evidence.
+install conflict refusal and non-destructive cleanup; its clean-SHA real-Provider report, production multi-node and
+rollout evidence, numeric latency/error/duration SLA, and concrete KMS identity/tlog/admission policy remain required.
 
 ## Release boundary
 
@@ -103,7 +100,7 @@ Acceptance Fixture used by Codex and Claude.
 | I. Terminal/log/generated file/checkpoint     | partial              | Artifact path containment, server-side size/hash verification and retry-safe Checkpoint Artifact identity are implemented. Ordinary `generated_file`, `terminal_log` and `diff` uploads negotiate a header-based v1 idempotency feature, derive a content-bound deterministic Execution/Generation Artifact ID, reuse stable Create/Complete request IDs, refresh pending grants and recover a Ready Artifact after ambiguous responses. Before Provider start, agentd binds the Workspace and Runtime Output roots to anchored descriptors, rejects traversal/symlinks/non-regular files, and retains the opened descriptor through Secret Guard, hashing, upload and Ready verification. Migrations `000020`, `000024` and `000025` enforce Checkpoint scope and binding; forward migration `000041` adds only the `diff` Artifact kind. Agentd automatically creates Git-reference/Patch/Snapshot Checkpoints, including an empty Snapshot after the last non-Git file is deleted. Clean commit `be919393` proves the generated-file boundary, clean commit `90fae52c` proves Ready downloadable Large Diff Artifacts for Codex and Claude, and clean commit `c27914da` proves concurrent deletion of one unreferenced generated Artifact without deleting protected seed/current Checkpoint Artifacts during an active Execution. `workspace-checkpoint-unconfirmed` remains an explicit error Activity. Lossless real large-log, cross-Target and production Retention acceptance remain.                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | J. Worker drain/upgrade/version isolation     | partial              | Migrations `000017`, `000034`, `000037` and `000040` provide immutable Worker manifests, operator-revocation fencing, target-scoped Release Revisions, strict-CAS promoted/canary policy, transition history and release-pinned scheduling. Agentd Drain preserves the Workspace lock and reports conservative data-loss risk. Clean commit `7659dd5f` proves cached/no-cache multi-arch Registry reproducibility, SPDX/SLSA, embedded identity, default ephemeral exact-digest signing, `HIGH/CRITICAL=0`, Secret=0, EOSL/DB freshness and exact cleanup. Clean commit `d3af9380` proves deterministic managed Docker immutable Revision canary/promote/rollback and Busy baseline fencing. Clean commit `41683366` adds exact candidate container-loss recovery while promoted/canary Executions overlap, Generation `1->2`, unchanged baseline peer, promote/rollback fail-closed behavior, `25` release-pinned load waves across promotion and rollback, load-safe Audit/Outbox history and exact cleanup. Clean commit `aa1d0225` proves a deterministic three-node owned-Kind PDB-blocked drain followed by cross-Worker replacement while the source Node remains cordoned, plus separate graceful Drain and direct Eviction recovery. Checked-in keyless/KMS production signing paths are implemented; real production signer identity/tlog/admission, Registry Credential/retention, real Provider remote rollout, production Kubernetes multi-node canary/rollback/cloud eviction/CNI and production-duration SLA/soak remain.                                                                                                                                                                                                                                                                                                                                                                                      |
 | K. Web authority switch                       | partial              | SaaS Project/Session/Turn/Event is Control Plane authoritative, local mode remains isolated, and Provider/advanced-operation handlers fail closed through Control Plane projections without local Native API fallback. Clean `3a6d347d`, `0b4d8e4e` and `88f922ed` prove SaaS authority/reconnect, local-mode restart/resume and durable Artifact download boundaries. The `0eeabbc1` and `82adfc3f` Browser slices add compatible-Worker restart, active pending-Approval Worker replacement, two-page Approval convergence, strict-CAS model convergence and transcript/SSE fixes. Clean `b07e5bd9` adds `4/4` Structured User Input component tests plus remote deterministic Kind replacement evidence. Clean `807ffa8c` closes two-page Structured User Input convergence, concurrent resolve, stale timer/draft isolation and the replacement-SSE false reconnect state. Real Provider live output/replacement, remaining advanced operations and remote-Target multi-browser evidence remain.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
-| L. Unified acceptance suite                   | partial              | The shared Runner and Local/SSH/Docker/Kubernetes/Registry gates emit source, cleanup and Secret-scanned reports. Clean `253052aa` passes the real Codex/Claude Local product/failure aggregate; `7659dd5f`, `d3af9380`, `41683366`, `aa1d0225`, `e2d70fb6` and the focused load/Retention/soak commits cover deterministic supply chain, immutable rollout, multi-node recovery, resource-profiled load and cleanup mechanics. Clean `b07e5bd9` updates the owned-Kind core suite to `17/17` with Pending Structured User Input Pod-loss recovery and product-shaped fixture Credentials; clean `807ffa8c` adds the reusable SaaS multi-browser User Input live harness and clean-SHA evidence. Acceptance Runner is `170/170` and Stage 3 Python is `304/304`. Clean `6b71703f` and `f958c1b2` execute the real Kubernetes/Docker four-child gates but the configured Codex product and Claude profiles still fail closed. A real SSH aggregate, passing Docker/Kubernetes Provider profiles, approved production SLA thresholds, concrete production KMS identity/tlog/admission, production Kubernetes multi-node rollout and real-Provider concurrency/Retention/load/failure remain open.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| L. Unified acceptance suite                   | partial              | The shared Runner and Local/SSH/Docker/Kubernetes/Registry gates emit source, cleanup and Secret-scanned reports. Clean `253052aa` passes the real Codex/Claude Local product/failure aggregate; `7659dd5f`, `d3af9380`, `41683366`, `aa1d0225`, `e2d70fb6` and the focused load/Retention/soak commits cover deterministic supply chain, immutable rollout, multi-node recovery, resource-profiled load and cleanup mechanics. Clean `b07e5bd9` updates the owned-Kind core suite to `17/17` with Pending Structured User Input Pod-loss recovery and product-shaped fixture Credentials; clean `807ffa8c` adds the reusable SaaS multi-browser User Input live harness and clean-SHA evidence. Clean `b1c52bae` and `3c523417` pass the real Codex/Claude Docker and disposable-Kind Kubernetes product/failure aggregates with controlled third-party Key/Base URL/custom-model profiles, frozen explicit-unsupported boundaries, exact cleanup and empty Secret scans. A real SSH aggregate, approved production SLA thresholds, concrete production KMS identity/tlog/admission, production Kubernetes multi-node rollout and real-Provider concurrency/Retention/load/failure remain open.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 
 > 2026-07-17 status correction: the earlier J/L summary-table wording that still lists clean Registry
 > reproducibility, image-signing mechanics, vulnerability-policy evidence, or the production signing implementation
@@ -134,6 +131,15 @@ Acceptance Fixture used by Codex and Claude.
 > unsupported capability was accepted. See
 > `docs/reports/stage-3-real-provider-kubernetes-third-party-gate-6b71703f.md`.
 
+> 2026-07-19 real Provider Docker/Kubernetes correction: clean `b1c52bae` supersedes the earlier Docker profile
+> failure, and clean `3c523417` supersedes the earlier Kubernetes profile failure. Both four-child aggregates pass
+> Codex/Claude product and controlled-failure matrices using operator-owned Key, Base URL, and custom-model inputs.
+> Only the frozen Codex `terminal-large` and Claude `compact` unsupported results remain; exact Target/shared-image
+> cleanup and aggregate Secret scans pass. This closes the executed Docker and disposable-Kind Kubernetes profile
+> blockers, not SSH, production multi-node/Registry/KMS, SLA/soak, or real-Provider concurrency/Retention/load.
+> See `docs/reports/stage-3-real-provider-docker-release-gate-b1c52bae.md` and
+> `docs/reports/stage-3-real-provider-kubernetes-release-gate-3c523417.md`.
+
 > 2026-07-18 owned-Kind Drain correction: clean commit `fc9b2bf6` passes the complete deterministic Kubernetes
 > `23/23` matrix on a runner-owned disposable Kind cluster. Exact Node cordon/drain/uncordon, graceful Pod DELETE,
 > Generation `1 -> 2` fencing, `policy/v1` Eviction, Canary, restart, exact cluster/image/state cleanup and Secret
@@ -157,7 +163,7 @@ Acceptance Fixture used by Codex and Claude.
 > rejection/retry, `18/18` overlap, `24/24` pin/binding/resource checks, no double execution or duplicate terminal,
 > Audit `2097` entries/`11` pages, six published Outbox messages, exact cleanup, and zero Secret findings. Stage 3
 > Python is `296/296`; focused `agentd` and `workerreleases` Go tests pass. This remains deterministic fixture
-> evidence: real SSH/Docker/Kubernetes Provider aggregates, numeric production SLA/soak, production Registry, and
+> evidence: the real SSH Provider aggregate, numeric production SLA/soak, production Registry, and
 > concrete KMS signer identity/tlog/admission remain open. See
 > `docs/reports/stage-3-kubernetes-kind-rollout-recovery-load-39b9b328.md`.
 
@@ -276,7 +282,8 @@ Acceptance Fixture used by Codex and Claude.
   canary；所有运行的 cleanup 与 output Secret scan 均通过。Kind image canary 使用同内容 alias，不是
   `000037` immutable Release Revision rollout，也不替代真实 Provider gate。
 - 2026-07-14 的 SSH 13/13 和 clean commit `2763ebd3` Kubernetes 13/13 仍只作为历史 fixture 证据；真实
-  Codex/Claude consolidated Local 已在 `253052aa` 关闭，SSH/Docker/Kubernetes Release Acceptance 仍待完成。
+  Codex/Claude consolidated Local 已在 `253052aa` 关闭。后续 `b1c52bae`/`3c523417` 已关闭 Docker 与
+  disposable-Kind Kubernetes Release Acceptance；真实 SSH aggregate 仍待完成。
 - 新增 Stage 3 发布检查单、Worker Release rollout Runbook 和当前验收报告：
   `docs/release-checklists/stage-3-provider-runtime-remote-worker.md`、
   `docs/runbooks/worker-release-rollout.md`、
@@ -520,6 +527,27 @@ Acceptance Fixture used by Codex and Claude.
   tool-capable Codex profile and a Claude streaming endpoint without HTTP `502` are required before rerunning the
   Docker gate as release evidence.
 
+### 2026-07-19 Real Docker and Kubernetes Provider release-gate correction
+
+- Clean SHA `b1c52bae` reran the controlled third-party Docker aggregate after fixing the executed Provider
+  blockers. Codex product passed `22` cases with one frozen large-Terminal unsupported result and failure passed
+  `16/16`; Claude product passed `22` with one frozen Compact unsupported result and failure passed `16/16`.
+  All four children used one gate-owned Image/Catalog, exact cleanup passed, and the aggregate Secret scan covered
+  `40` files / `2,637,168` bytes with zero findings. Full evidence is
+  `docs/reports/stage-3-real-provider-docker-release-gate-b1c52bae.md`.
+- Clean SHA `3c523417` then ran the same product/failure contract through four independent disposable Kind clusters.
+  Codex product/failure passed `22 + 1 unsupported` / `16`; Claude product/failure passed
+  `22 + 1 unsupported` / `16`. The gate used controlled Key, Base URL, and custom-model bindings, one shared
+  clean-SHA Worker Image, exact cluster/state/image cleanup, and a `40` files / `4,231,228` bytes aggregate Secret
+  scan with zero findings. Full evidence is
+  `docs/reports/stage-3-real-provider-kubernetes-release-gate-3c523417.md`.
+- The earlier `f958c1b2` and `6b71703f` reports remain valid failure diagnostics but no longer describe the current
+  Docker/Kubernetes profile status. No unsupported result was widened and no failed/skipped case was accepted.
+- This correction closes only the executed real Codex/Claude Docker and disposable-Kind Kubernetes product/failure
+  slices. Real SSH, production multi-node/Registry/KMS/admission, approved production SLA/soak, and real-Provider
+  concurrency/Retention/load/rollout remain open. No DDL changed; the migration boundary remains
+  `000041_diff_artifact_kind.sql`.
+
 ### 2026-07-18 Resource-profiled minimum-duration load measurement update
 
 - The existing `fixture-load` orchestration now accepts a minimum measured load duration and a maximum-wave safety
@@ -560,9 +588,9 @@ Acceptance Fixture used by Codex and Claude.
   multi-select deferral, stale timer cancellation on replacement request remount, and resolving-state disabling.
   Acceptance Runner is `170/170`, Stage 3 Python is `304/304`, Provider Host fixture is `17/17`, and
   `bun fmt`/`bun lint`/`bun typecheck` pass.
-- This closes deterministic Kubernetes Structured User Input runtime replacement mechanics only. Real Provider remote
-  interactions, real SSH/Docker/Kubernetes aggregates, approved production SLA thresholds, and concrete production
-  KMS identity/tlog/admission remain open. No DDL changed; the migration boundary remains
+- This closes deterministic Kubernetes Structured User Input runtime replacement mechanics only. Real SSH and
+  production-scale Provider remote interactions, approved production SLA thresholds, and concrete production KMS
+  identity/tlog/admission remain open. No DDL changed; the migration boundary remains
   `000041_diff_artifact_kind.sql`.
 
 ### 2026-07-18 SaaS Web Structured User Input multi-browser correction
@@ -681,7 +709,7 @@ local no-new-DDL statements do not redefine the repository-wide migration bounda
 
 1. Completed: add shared Capability and Provider Host Protocol 2.1 contracts plus contract fixtures.
 2. Completed: implement Host Describe/Handshake, persisted compatibility gating and the bounded v1 path.
-3. In progress: Codex App Server and Claude Agent SDK multi-Turn, native Interrupt/Steer, Approval, Plan Mode Input and history fallback are implemented. Runtime Event v2 is canonical end to end. Cursor Envelope v2, per-Execution Provider snapshots, Cursor quarantine/lineage, the bounded expiry policy, audited Claim selection, safe Provider-native invalid/expired fallback, one active Execution per Session and pre-Claim Interrupt cancellation are implemented. Clean commit `253052aa` passes the consolidated real Local product/failure release gate with the frozen Compact/lossless-Terminal boundaries, standalone `generated_file`, Workspace Checkpoint, Artifact-backed Large Diff, real 401/429, scoped Host crash and Cursor-expiry recovery. Clean `6b71703f`/`f958c1b2` execute the Kubernetes/Docker gates but fail closed on the configured Codex approval and Claude HTTP 502 boundaries; continue with qualifying profiles and SSH acceptance.
+3. In progress: Codex App Server and Claude Agent SDK multi-Turn, native Interrupt/Steer, Approval, Plan Mode Input and history fallback are implemented. Runtime Event v2 is canonical end to end. Cursor Envelope v2, per-Execution Provider snapshots, Cursor quarantine/lineage, the bounded expiry policy, audited Claim selection, safe Provider-native invalid/expired fallback, one active Execution per Session and pre-Claim Interrupt cancellation are implemented. Clean commit `253052aa` passes the consolidated real Local product/failure release gate with the frozen Compact/lossless-Terminal boundaries, standalone `generated_file`, Workspace Checkpoint, Artifact-backed Large Diff, real 401/429, scoped Host crash and Cursor-expiry recovery. Clean `b1c52bae`/`3c523417` pass the Docker/disposable-Kind Kubernetes product and controlled-failure aggregates with third-party Key/Base URL/custom-model profiles; continue with SSH acceptance and the remaining production/scale evidence.
 4. In progress: Workspace/Git/Checkpoint DDL, public/private HTTPS Clone/Fetch, Git Credential, state reporting, cross-process locked cache plus private relative worktree generations, Git-reference/Patch/Snapshot capture/restore, interrupted staging/backup reconciliation, physical cleanup and Checkpoint/Artifact retention are implemented. Clean commit `c27914da` closes deterministic Local active-Execution Retention fencing and post-terminal physical cleanup mechanics; add SSH Credential delivery plus real Provider multi-Worker/Target, multi-node, load and production-duration Retention acceptance.
 5. In progress: Worker Manifest, graceful Drain, disposable Registry reproducibility/supply-chain evidence and the
    deterministic managed Docker immutable canary/promote/rollback gate are implemented. Clean commit `41683366`
@@ -708,6 +736,6 @@ local no-new-DDL statements do not redefine the repository-wide migration bounda
    pending Structured User Input Pod-loss recovery, strict replacement-question validation and product-shaped fixture
    Credentials. Clean commit `807ffa8c` closes the SaaS two-page User Input convergence/concurrent-resolve slice and
    replacement-SSE false reconnect state.
-   Run both real adapters on SSH and rerun Docker/Kubernetes with qualifying profiles, then complete real Provider/remote Target
-   Retention/load/failure, multi-host/Kubernetes multi-node, real Provider process/rollout evidence and
+   Run both real adapters on SSH, then complete real Provider/remote Target Retention/load/failure,
+   multi-host/production Kubernetes multi-node, real Provider process/rollout evidence and
    production-duration soak before promoting any Local-only Provider or claiming the four-Target release gate.

@@ -7,6 +7,10 @@
 `docs/reports/stage-3-real-provider-local-release-gate-253052aa.md`。它关闭同一 clean SHA 上真实
 Codex/Claude 的 Local product 与 failure slice，但仍明确保持四 Target、Registry rollout、并发和 soak
 `RELEASE GATE OPEN`，不能直接作为 SSH、Docker、Kubernetes 或生产环境发布批准。
+真实 Docker 与 disposable-Kind Kubernetes product/failure aggregates 已分别由 clean `b1c52bae` 与
+`3c523417` 通过；证据见 `docs/reports/stage-3-real-provider-docker-release-gate-b1c52bae.md` 与
+`docs/reports/stage-3-real-provider-kubernetes-release-gate-3c523417.md`。它们关闭这两个已执行的受控
+Provider profile slice，不关闭 SSH、生产多节点/Registry/KMS、并发/Retention/load 或 soak。
 Deterministic Local long-Session/restart/pagination mechanics 的最新证据见
 `docs/reports/stage-3-local-fixture-soak-6e866a30.md`，同样不能替代真实 Provider 或 production soak。
 Deterministic managed Docker multi-Provider/multi-Session overlap mechanics 的最新证据见
@@ -202,11 +206,11 @@ bun run --cwd apps/web test \
 | deterministic Docker/Kubernetes failure matrix         | 已通过实现期运行                                                                  | 不等于生产网络、真实 CNI 或正式 rollout                                                                                                                                                    |
 | SSH real Provider runtime provisioning                 | disposable VM preflight 已通过                                                    | Host SHA + Codex 0.144.1 + Claude 2.1.197 已验；尚无真实 Credential 报告                                                                                                                   |
 | SSH real Provider fault-injection transport            | Runner 99/99 + SSH fixture 16/16                                                  | token-scoped reverse relay 与 systemd MainPID crash 已实现；尚无真实 Credential 报告                                                                                                       |
-| Docker real Provider fault-injection transport         | clean `f958c1b2` Codex failure `16/16` 通过                                       | 真实 401/429、精确 Host crash、Cursor expiry/restart 已验；Claude profile 在 baseline HTTP `502`，不构成 Claude failure matrix                                                             |
-| Kubernetes real Provider fault-injection transport     | clean `6b71703f` Codex failure `16/16` 通过                                       | host-gateway 401/429、精确 Pod crash、Cursor expiry/restart 已验；Claude profile 在 baseline HTTP `502`                                                                                    |
+| Docker real Provider fault-injection transport         | clean `b1c52bae` Codex/Claude failure 各 `16/16`                                  | 真实 401/429、精确 Host crash、Cursor expiry/restart、exact cleanup 与 Secret scan 已验                                                                                                    |
+| Kubernetes real Provider fault-injection transport     | clean `3c523417` Codex/Claude failure 各 `16/16`                                  | host-gateway 401/429、精确 Pod crash、Cursor expiry/restart、四集群 exact cleanup 与 Secret scan 已验                                                                                      |
 | SSH consolidated release gate                          | 独立引擎与 15 项 SSH gate tests 已通过                                            | 四个 disposable/external child 尚待安全 identity 与合格真实 Credential 执行                                                                                                                |
-| Docker consolidated release gate                       | clean `f958c1b2` 四 child 已真实执行；1 pass/3 fail                               | Codex failure `16/16` 通过；Codex product 缺 approval interaction，Claude profile HTTP `502`；必须更换/修复第三方 profile 后重跑，不得降级放行                                             |
-| Kubernetes consolidated release gate                   | clean `6b71703f` 四 child 已真实执行；1 pass/3 fail                               | Codex failure `16/16` 通过；Codex product 缺 approval interaction，Claude profile HTTP `502`；必须更换/修复第三方 profile 后重跑，不得降级放行                                             |
+| Docker consolidated release gate                       | clean `b1c52bae` 四 child aggregate pass                                          | Codex/Claude product 各 `22 pass + 1 unsupported`、failure 各 `16 pass`；同 Image/Catalog、exact cleanup、Secret scan 已验                                                                 |
+| Kubernetes consolidated release gate                   | clean `3c523417` 四 child aggregate pass                                          | Codex/Claude product 各 `22 pass + 1 unsupported`、failure 各 `16 pass`；四个 disposable Kind、共享 Image、state 精确清理                                                                  |
 | Worker Registry signing-policy gate                    | clean commit `7659dd5f` gate/report 已通过                                        | keyless/KMS 实现路径与 ephemeral mechanics 已验；真实生产 identity/tlog/admission、Registry Credential/retention 与 rollout 尚待记录                                                       |
 | SSH fixture                                            | 2026-07-14 disposable VM 13/13                                                    | 不是当前 Commit 的真实 Provider gate                                                                                                                                                       |
 | Kubernetes fixture                                     | `aa1d0225` three-node owned Kind 24/24；`6b71703f` OrbStack 22 pass/1 unsupported | PDB-blocked Drain、跨 Worker replacement、普通 Drain、Eviction、Network、Canary、restart 与 exact cleanup 已验；不证明真实 Provider 或 production multi-node pass gate                     |
@@ -237,16 +241,16 @@ bun run --cwd apps/web test \
       Revision/Channel/digest、Audit/Outbox、Event Sequence、Secret scan 与 exact cleanup。两个 overlap Pod 本次
       调度到同一 Worker，因此不关闭 production scheduler distribution 或 rollout under load。证据为
       `docs/reports/stage-3-kubernetes-kind-registry-rollout-d1f3b68a.md`。
-- [ ] 第三方 Credential 的 Kubernetes 四 child gate 已执行但未通过：Codex failure `16/16` 通过，Codex
-      product 缺 approval interaction，Claude product/failure 为 HTTP `502` `provider_unavailable`。需使用满足
-      tool/approval 与 Anthropic streaming 的 profile 重跑；证据为
-      `docs/reports/stage-3-real-provider-kubernetes-third-party-gate-6b71703f.md`。
-- [ ] 第三方 Credential 的 Docker 四 child gate 已执行但未通过：Codex failure `16/16` 通过，Codex product
-      缺 approval interaction，Claude product/failure 的 baseline Turn 均为 HTTP `502`。同 SHA/Catalog/Image、
-      exact child/gate cleanup 与 Secret scan 已通过；必须使用合格 profile 重跑。证据为
-      `docs/reports/stage-3-real-provider-docker-third-party-gate-f958c1b2.md`。
+- [x] 第三方 Key/Base URL/自定义模型的 Kubernetes 四 child gate 已在 clean `3c523417` 通过：Codex/Claude
+      product 各 `22 pass + 1 unsupported`，failure 各 `16 pass`；四个 disposable Kind cluster、共享 Image、
+      state、Secret scan 均精确收口。证据为
+      `docs/reports/stage-3-real-provider-kubernetes-release-gate-3c523417.md`。
+- [x] 第三方 Key/Base URL/自定义模型的 Docker 四 child gate 已在 clean `b1c52bae` 通过：Codex/Claude
+      product 各 `22 pass + 1 unsupported`，failure 各 `16 pass`；同 SHA/Catalog/Image、exact child/gate
+      cleanup 与 Secret scan 均通过。证据为
+      `docs/reports/stage-3-real-provider-docker-release-gate-b1c52bae.md`。
 - [ ] 已授权外部 SSH target 尚需 repository-external identity、pinned Host Key 和 clean-SHA external-host
-      运行。SSH 认证信息不得写入仓库或 evidence；当前第三方 Provider profile 也不能作为该 gate 的通过输入。
+      运行。SSH 认证信息不得写入仓库或 evidence；Provider Key/Base URL/模型继续只从 operator-owned 环境读取。
 - [ ] 所有运行均来自本次发布 Commit 和 registry-pushed immutable image。
 - [ ] 多 Turn 长 Session、多 Provider 并发、长日志、Checkpoint/Resume、Retention 与 load/soak 完成。（`6e866a30`
       仅关闭 deterministic Local 100-Turn/restart/pagination/repeated-Checkpoint mechanics；`eeb7a2f1` 仅关闭
