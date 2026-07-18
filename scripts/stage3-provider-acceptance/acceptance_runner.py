@@ -403,11 +403,28 @@ def real_provider_approval_command() -> str:
 
 def real_provider_approval_prompt(marker: str) -> str:
     return (
-        "Use the exec_command, Bash, or shell tool exactly once. Run this exact read-only Node command "
-        "without redirection, pipes, additional wrappers, or file changes: "
-        f"{real_provider_approval_command()}. "
-        "Wait for the tool to finish, then reply with exactly "
-        f"{marker} and no other text."
+        "Use the Bash or shell tool exactly once. Do not emit any assistant text before the tool call. "
+        "Run this exact read-only Node command as the sole shell command:\n"
+        f"{real_provider_approval_command()}\n"
+        "Do not add redirection, pipes, wrappers, or file changes. After the tool finishes, the complete "
+        f"assistant text for this Turn must be exactly {marker} and no other text."
+    )
+
+
+def real_provider_user_input_prompt(provider: str, marker: str) -> str:
+    tool_name = {
+        "codex": "request_user_input",
+        "claudeAgent": "AskUserQuestion",
+    }.get(provider)
+    if tool_name is None:
+        raise ValueError(f"unsupported real Provider user-input tool: {provider}")
+    return (
+        f"Call the {tool_name} tool as your very next action and call no other tool. "
+        "Do not emit any assistant text before the tool call and do not answer the question yourself. "
+        "Ask exactly one question with header 'Environment', question "
+        "'Which environment should this acceptance use?', and exactly two options labeled 'Staging' and "
+        "'Production'. Do not call ExitPlanMode. After the tool returns the user's answer, the complete "
+        f"assistant text after the tool call must be exactly {marker} and no other text."
     )
 
 
@@ -9441,7 +9458,11 @@ class AcceptanceSuite:
             title=f"Stage 3 Real Provider {failure_case} Recovery",
         )
         session_id = self._string_id(session, "real Provider recovery Session")
-        marker = self._real_provider_marker(f"{failure_case}-recovery", session_id=session_id)
+        marker = self._real_provider_marker(
+            f"{failure_case}-recovery",
+            session_id=session_id,
+            visible_label="recovery",
+        )
         turn = self._create_turn(
             f"Reply with exactly {marker} and no other text.",
             session_id=session_id,
@@ -10281,10 +10302,7 @@ class AcceptanceSuite:
     def _real_provider_user_input_resolution(self) -> Mapping[str, Any]:
         marker = self._real_provider_marker("user-input")
         turn = self._create_turn(
-            "Before answering, use the Provider's structured user-input or AskUserQuestion tool to ask exactly "
-            "one question with header 'Environment', question 'Which environment should this acceptance use?', "
-            "and options 'Staging' and 'Production'. Do not call ExitPlanMode. After receiving the answer, reply "
-            f"with exactly {marker} and no other text.",
+            real_provider_user_input_prompt(self.options.provider, marker),
             runtime_mode="approval-required",
             interaction_mode="plan",
         )
@@ -11182,6 +11200,7 @@ class AcceptanceSuite:
         case: str = "continuity",
         *,
         session_id: str | None = None,
+        visible_label: str | None = None,
     ) -> str:
         session_id = session_id or self._required("session_id")
         provider = re.sub(r"[^A-Za-z0-9]+", "_", self.options.provider).strip("_").upper()
@@ -11190,7 +11209,7 @@ class AcceptanceSuite:
                 "utf-8"
             )
         ).hexdigest()[:16].upper()
-        label = re.sub(r"[^A-Za-z0-9]+", "_", case).strip("_").upper()
+        label = re.sub(r"[^A-Za-z0-9]+", "_", visible_label or case).strip("_").upper()
         return f"SYNARA_REAL_PROVIDER_{label}_{provider}_{digest}"
 
     def _last_real_marker(self) -> str:

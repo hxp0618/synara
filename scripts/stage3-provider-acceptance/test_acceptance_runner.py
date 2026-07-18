@@ -2911,12 +2911,32 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
             workspace_entries = list(pathlib.Path(directory).iterdir())
 
         prompt = acceptance.real_provider_approval_prompt("APPROVAL_MARKER")
+        command = acceptance.real_provider_approval_command()
         self.assertEqual(completed.stdout, acceptance.REAL_PROVIDER_APPROVAL_CONTENT)
         self.assertEqual(completed.stderr, b"")
         self.assertEqual(workspace_entries, [])
         self.assertNotIn(">", prompt)
         self.assertNotIn(acceptance.REAL_PROVIDER_APPROVAL_RELATIVE_PATH, prompt)
+        self.assertIn(f"\n{command}\n", prompt)
+        self.assertIn("Do not emit any assistant text before the tool call", prompt)
+        self.assertIn("complete assistant text for this Turn must be exactly", prompt)
         self.assertEqual(prompt.count("APPROVAL_MARKER"), 1)
+
+    def test_real_provider_user_input_prompt_requires_provider_native_tool_first(self) -> None:
+        expected_tools = {
+            "codex": "request_user_input",
+            "claudeAgent": "AskUserQuestion",
+        }
+
+        for provider, tool_name in expected_tools.items():
+            with self.subTest(provider=provider):
+                prompt = acceptance.real_provider_user_input_prompt(provider, "USER_INPUT_MARKER")
+
+                self.assertIn(f"Call the {tool_name} tool as your very next action", prompt)
+                self.assertIn("Do not emit any assistant text before the tool call", prompt)
+                self.assertIn("exactly two options labeled 'Staging' and 'Production'", prompt)
+                self.assertIn("complete assistant text after the tool call must be exactly", prompt)
+                self.assertEqual(prompt.count("USER_INPUT_MARKER"), 1)
 
     def test_large_diff_seed_command_writes_exact_workspace_payload(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -4132,6 +4152,34 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
         suite._create_real_provider_session.assert_called_once_with(
             title="Stage 3 Real Provider provider-host-crash-retry Recovery"
         )
+
+    def test_real_provider_authentication_recovery_uses_neutral_unique_marker(self) -> None:
+        suite = BarrierSuite(acceptance.STANDING_WORKER)
+        suite._create_real_provider_session = mock.Mock(  # type: ignore[method-assign]
+            return_value={"id": "session-recovery"}
+        )
+        suite._create_turn = mock.Mock(return_value={"id": "turn-recovery"})  # type: ignore[method-assign]
+        terminal = {"sequence": 1, "eventType": "execution.completed"}
+        suite._wait_for_turn_terminal = mock.Mock(  # type: ignore[method-assign]
+            return_value=(terminal, [terminal])
+        )
+        suite._real_provider_turn_evidence = mock.Mock(  # type: ignore[method-assign]
+            return_value={"markerMatched": True}
+        )
+
+        suite._real_provider_recovery_turn("authentication")
+
+        marker = suite._real_provider_turn_evidence.call_args.args[3]
+        prompt = suite._create_turn.call_args.args[0]
+        other_marker = suite._real_provider_marker(
+            "rate-limit-retry-recovery",
+            session_id="session-recovery",
+            visible_label="recovery",
+        )
+        self.assertIn("SYNARA_REAL_PROVIDER_RECOVERY_CODEX_", marker)
+        self.assertNotIn("AUTHENTICATION", marker)
+        self.assertEqual(prompt.count(marker), 1)
+        self.assertNotEqual(marker, other_marker)
 
     def test_standing_restart_waits_for_online_worker(self) -> None:
         suite = BarrierSuite(acceptance.STANDING_WORKER)

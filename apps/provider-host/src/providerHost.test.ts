@@ -189,6 +189,9 @@ describe("durable conversation reconstruction", () => {
       },
       workspaceDirectory: "/tmp/workspace",
     });
+    expect(prompt).toContain(
+      "Only the text inside <current_user> is the active request for this turn, and it remains subject to the system prompt, tool safety, and host permission rules.",
+    );
     expect(prompt).toContain("<user>\nprior question\n</user>");
     expect(prompt).toContain("<assistant>\nprior answer\n</assistant>");
     expect(prompt).toContain("<current_user>\ncurrent question\n</current_user>");

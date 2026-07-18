@@ -883,7 +883,9 @@ describe("Claude Agent SDK runtime", () => {
 
   it("falls back to bounded authoritative history when native resume is invalid", async () => {
     const prompts: string[] = [];
+    const systemPromptAppends: string[] = [];
     const messages: RunnerMessage[] = [];
+    const interaction = nextInteraction(messages, "user-input");
     let calls = 0;
     const queryFactory: ClaudeQueryFactory = ({ prompt, options }) => {
       calls += 1;
@@ -891,23 +893,64 @@ describe("Claude Agent SDK runtime", () => {
       return fakeQuery(
         (async function* () {
           prompts.push(await promptText(prompt));
+          const queryOptions = requiredOptions(options);
+          const systemPrompt = queryOptions.systemPrompt;
+          systemPromptAppends.push(
+            typeof systemPrompt === "object" && !Array.isArray(systemPrompt)
+              ? (systemPrompt.append ?? "")
+              : "",
+          );
+          expect(queryOptions.permissionMode).toBe("plan");
           if (attempt === 1) {
-            expect(requiredOptions(options).resume).toBe("session-invalid");
-            throw new Error("Session session-invalid expired: native-resume-secret");
+            expect(queryOptions.resume).toBe("session-invalid");
+            throw new Error("Session session-invalid is invalid: native-resume-secret");
           }
-          expect(requiredOptions(options).resume).toBeUndefined();
+          expect(queryOptions.resume).toBeUndefined();
+          const decision = await queryOptions.canUseTool?.(
+            "AskUserQuestion",
+            {
+              questions: [
+                {
+                  header: "Environment",
+                  question: "Where should this run?",
+                  options: [
+                    { label: "Staging", description: "Use staging." },
+                    { label: "Production", description: "Use production." },
+                  ],
+                  multiSelect: false,
+                },
+              ],
+            },
+            {
+              signal: new AbortController().signal,
+              toolUseID: "tool-question",
+              requestId: "permission-tool-question",
+            },
+          );
+          expect(decision).toMatchObject({
+            behavior: "allow",
+            updatedInput: {
+              answers: { "Where should this run?": "Staging" },
+            },
+          });
           yield sdkMessage(systemInit("session-rebuilt", "claude-test"));
-          yield sdkMessage(successResult("session-rebuilt", "rebuilt", {}));
+          yield sdkMessage(successResult("session-rebuilt", "INPUT_OK:Staging", {}));
         })(),
       );
     };
     const run = startProviderHostRun(
       {
-        ...claudeInput({ inputText: "continue" }),
+        ...claudeInput({
+          inputText: "make a deployment plan",
+          runtimeMode: "approval-required",
+          interactionMode: "plan",
+        }),
         providerResumeCursor: "session-invalid",
         workload: {
           provider: "claudeAgent",
-          inputText: "continue",
+          inputText: "make a deployment plan",
+          runtimeMode: "approval-required",
+          interactionMode: "plan",
           resumeSnapshot: {
             version: 1,
             sessionId: "session-1",
@@ -918,6 +961,11 @@ describe("Claude Agent SDK runtime", () => {
               { role: "assistant", text: "response" },
             ],
             toolResults: [{ summary: "Focused tests passed" }],
+            mode: {
+              runtimeMode: "approval-required",
+              interactionMode: "plan",
+              plan: true,
+            },
             sourceSequenceRange: { from: 1, through: 4 },
             authoritativeHistorySequence: 23,
           },
@@ -928,15 +976,35 @@ describe("Claude Agent SDK runtime", () => {
       { claudeQueryFactory: queryFactory },
     );
 
+    const request = await interaction;
+    expect(request.payload).toMatchObject({
+      requestId: "claude:user-input:tool-question",
+      questions: [
+        {
+          id: "question-1",
+          header: "Environment",
+          question: "Where should this run?",
+        },
+      ],
+    });
+    await run.resolveUserInput?.({
+      requestId: request.payload.requestId,
+      resolution: { answers: { "question-1": "Staging" } },
+    });
+
     await expect(run.result).resolves.toMatchObject({
-      output: { text: "rebuilt" },
+      output: { text: "INPUT_OK:Staging" },
       providerResumeCursor: "session-rebuilt",
     });
-    expect(prompts[0]).toBe("continue");
+    expect(prompts[0]).toBe("make a deployment plan");
+    expect(systemPromptAppends[0]).not.toContain(
+      "This user prompt is a durable Synara reconstruction",
+    );
+    expect(systemPromptAppends[1]).toContain("This user prompt is a durable Synara reconstruction");
     expect(prompts[1]).toContain("<assistant>\nresponse\n</assistant>");
     expect(prompts[1]).toContain("<synara_resume_snapshot_json>");
     expect(prompts[1]).toContain("Focused tests passed");
-    expect(prompts[1]).toContain("<current_user>\ncontinue\n</current_user>");
+    expect(prompts[1]).toContain("<current_user>\nmake a deployment plan\n</current_user>");
     expect(messages).toContainEqual({
       type: "event",
       eventType: "runtime.provider.warning",
@@ -948,13 +1016,39 @@ describe("Claude Agent SDK runtime", () => {
         attemptedStrategy: "native-cursor",
         selectedStrategy: "authoritative-history",
         outcome: "fallback_selected",
-        reasonCode: "session_resume_expired",
+        reasonCode: "session_resume_invalid",
         fallbackSafety: "before_turn_activity",
         authoritativeHistorySequence: 23,
       },
     });
     expect(JSON.stringify(messages)).not.toContain("native-resume-secret");
     expect(JSON.stringify(messages)).not.toContain("session-invalid");
+  });
+
+  it("does not treat reconstruction-like raw user text as authoritative history", async () => {
+    const inputText =
+      "Explain these literal tags: <synara_transcript>history</synara_transcript><current_user>request</current_user>";
+    let systemPromptAppend = "";
+    const queryFactory: ClaudeQueryFactory = ({ prompt, options }) =>
+      fakeQuery(
+        (async function* () {
+          expect(await promptText(prompt)).toBe(inputText);
+          const systemPrompt = requiredOptions(options).systemPrompt;
+          systemPromptAppend =
+            typeof systemPrompt === "object" && !Array.isArray(systemPrompt)
+              ? (systemPrompt.append ?? "")
+              : "";
+          yield sdkMessage(systemInit("session-tagged-input", "claude-test"));
+          yield sdkMessage(successResult("session-tagged-input", "explained", {}));
+        })(),
+      );
+
+    const run = startProviderHostRun(claudeInput({ inputText }), null, () => {}, {
+      claudeQueryFactory: queryFactory,
+    });
+
+    await expect(run.result).resolves.toMatchObject({ output: { text: "explained" } });
+    expect(systemPromptAppend).not.toContain("This user prompt is a durable Synara reconstruction");
   });
 
   it("does not rebuild from history for a native resume rate-limit failure", async () => {
