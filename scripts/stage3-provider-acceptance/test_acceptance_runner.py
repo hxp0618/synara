@@ -7415,6 +7415,61 @@ class SSHDriverTest(unittest.TestCase):
         self.assertEqual(evidence["providerTools"]["codex"]["version"], "0.144.1")
         self.assertEqual(evidence["providerTools"]["claudeAgent"]["version"], "2.1.197")
 
+    def test_external_real_provider_runtime_versions_use_pinned_node_path(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            identity = root / "id_ed25519"
+            host_key_source = root / "host-key"
+            identity.write_text("private-key-placeholder\n", encoding="utf-8")
+            identity.chmod(0o600)
+            host_key_source.write_text(
+                self._key(b"trusted-external-host") + "\n",
+                encoding="utf-8",
+            )
+            driver = acceptance.SSHDriver(
+                REPO_ROOT,
+                dataclasses.replace(
+                    self._external_options(identity, host_key_source),
+                    suite="real-provider-smoke",
+                    runner_command=(acceptance.SSH_PROVIDER_HOST_COMMAND_PATH,),
+                ),
+                acceptance.Deadline(30.0),
+                acceptance.SecretRedactor(),
+            )
+            self.addCleanup(driver._release_state)
+            driver.provider_host_bundle_path.parent.mkdir(parents=True, exist_ok=True)
+            driver.provider_host_bundle_path.write_bytes(b"provider-host-bundle")
+            expected_sha = hashlib.sha256(b"provider-host-bundle").hexdigest()
+            version_commands: list[list[str]] = []
+
+            def remote(command: Sequence[str], **_kwargs: Any) -> str:
+                if command[0] == "env":
+                    version_commands.append(list(command))
+                    executable = command[2]
+                    if executable.endswith("/codex"):
+                        return "codex-cli 0.144.1\n"
+                    if executable.endswith("/claude"):
+                        return "2.1.197 (Claude Code)\n"
+                if command[0] == "sha256sum":
+                    return f"{expected_sha}  {driver.remote_provider_host_path}\n"
+                raise AssertionError(command)
+
+            driver._remote_command = mock.Mock(side_effect=remote)  # type: ignore[method-assign]
+
+            evidence = driver._inspect_ssh_provider_runtime()
+
+        self.assertEqual(evidence["kind"], "real-provider")
+        self.assertEqual(len(version_commands), 2)
+        expected_path = f"PATH={driver._external_provider_runtime_path()}"
+        self.assertEqual([command[:2] for command in version_commands], [["env", expected_path]] * 2)
+        self.assertEqual(
+            [command[2] for command in version_commands],
+            [
+                f"{driver.remote_provider_tools_root}/node_modules/.bin/codex",
+                f"{driver.remote_provider_tools_root}/node_modules/.bin/claude",
+            ],
+        )
+
 
 class KubernetesDriverObservationTest(unittest.TestCase):
     def test_owned_kind_cluster_configures_and_records_worker_topology(self) -> None:

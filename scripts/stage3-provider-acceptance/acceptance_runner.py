@@ -5329,7 +5329,7 @@ class SSHDriver(ManagedWorkerDriver):
             [
                 "test \"$(cat /proc/1/comm)\" = systemd",
                 f"id -u {shlex.quote(self.options.ssh_external_service_user)} >/dev/null",
-                "for tool in sh curl tar xz sha256sum git systemctl install base64; do command -v \"$tool\" >/dev/null; done",
+                "for tool in sh env curl tar xz sha256sum git systemctl install base64; do command -v \"$tool\" >/dev/null; done",
                 "systemctl is-active --quiet ssh || systemctl is-active --quiet sshd",
                 f"test ! -e {shlex.quote(self.external_runtime_root)}",
                 f"test ! -e {shlex.quote(self.external_stage_root)}",
@@ -5461,7 +5461,7 @@ class SSHDriver(ManagedWorkerDriver):
                 f"export XDG_STATE_HOME={provider_home}/.local/state",
                 f"export CODEX_HOME={provider_home}/.codex",
                 f"export CLAUDE_CONFIG_DIR={provider_home}/.claude",
-                f"export PATH={self.remote_provider_tools_root}/node_modules/.bin:{node_root}/bin:$PATH",
+                f"export PATH={self._external_provider_runtime_path()}",
                 f'exec {self.remote_node_path} {self.remote_provider_host_path} "$@"',
                 "EOF",
                 f"chmod 0755 {shlex.quote(self.remote_provider_host_command_path)}",
@@ -5493,6 +5493,28 @@ class SSHDriver(ManagedWorkerDriver):
                 f"rm -rf {shlex.quote(stage)}",
             ]
         )
+
+    def _external_provider_runtime_path(self) -> str:
+        if not self.external_host:
+            raise AssertionError("external Provider runtime PATH requires an external SSH host")
+        return ":".join(
+            (
+                f"{self.remote_provider_tools_root}/node_modules/.bin",
+                pathlib.PurePosixPath(self.remote_node_path).parent.as_posix(),
+                "/usr/local/sbin",
+                "/usr/local/bin",
+                "/usr/sbin",
+                "/usr/bin",
+                "/sbin",
+                "/bin",
+            )
+        )
+
+    def _remote_provider_cli_version(self, executable: str) -> str:
+        command = [executable, "--version"]
+        if self.external_host:
+            command = ["env", f"PATH={self._external_provider_runtime_path()}", *command]
+        return self._remote_command(command).strip()
 
     def _remove_external_runtime(self) -> None:
         if not self.external_host or not self.external_runtime_created:
@@ -5536,12 +5558,12 @@ class SSHDriver(ManagedWorkerDriver):
                 "runner.ssh_provider_tools_lock_invalid",
                 "SSH Provider tools package metadata omitted locked Codex or Claude versions.",
             )
-        codex_output = self._remote_command(
-            [f"{self.remote_provider_tools_root}/node_modules/.bin/codex", "--version"]
-        ).strip()
-        claude_output = self._remote_command(
-            [f"{self.remote_provider_tools_root}/node_modules/.bin/claude", "--version"]
-        ).strip()
+        codex_output = self._remote_provider_cli_version(
+            f"{self.remote_provider_tools_root}/node_modules/.bin/codex"
+        )
+        claude_output = self._remote_provider_cli_version(
+            f"{self.remote_provider_tools_root}/node_modules/.bin/claude"
+        )
         if codex_version not in codex_output or claude_version not in claude_output:
             raise AcceptanceError(
                 "runner.ssh_provider_tools_version_mismatch",
