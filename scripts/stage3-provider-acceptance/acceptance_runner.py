@@ -79,6 +79,7 @@ SSH_SERVICE_USER = "synara"
 SSH_RELAY_LOOPBACK_HOST = "127.0.0.1"
 SSH_RELAY_TRANSPORT = "runner-owned reverse SSH relay to the local Worker-only proxy"
 SSH_CONTROL_PLANE_OPERATION_TIMEOUT = 180.0
+SSH_EXTERNAL_RECOVERY_OPERATION_TIMEOUT = 60.0
 SSH_CREDENTIAL_LIFECYCLE = (
     "runner posts the one-time private key once during Target creation, deletes the local plaintext copy after "
     "provisioning, and relies on the Control Plane encrypted credential until ssh/revoke"
@@ -4277,7 +4278,7 @@ class SSHDriver(ManagedWorkerDriver):
         main_pid = int(service["mainPid"])
         output = self._remote_root_command(
             [self.remote_node_path, "-e", provider_host_crash_script(), str(main_pid)],
-            maximum_timeout=15.0,
+            maximum_timeout=SSH_EXTERNAL_RECOVERY_OPERATION_TIMEOUT,
         )
         return provider_host_crash_evidence(
             output,
@@ -4554,7 +4555,7 @@ class SSHDriver(ManagedWorkerDriver):
                 lambda: self._remote_root_command(
                     ["journalctl", "--no-pager", "-u", self.service_name, "-n", "500"],
                     log_path=self.logs_dir / "ssh-agentd-journal.log",
-                    cleanup_timeout=20.0,
+                    cleanup_timeout=SSH_EXTERNAL_RECOVERY_OPERATION_TIMEOUT,
                 ),
             )
         if self.target_id and self.tenant_id and self.process is not None and self.process.poll() is None:
@@ -5916,11 +5917,24 @@ class SSHDriver(ManagedWorkerDriver):
                 timeout=timeout,
                 check=False,
             )
-        except (OSError, subprocess.TimeoutExpired) as error:
-            del error
+        except subprocess.TimeoutExpired:
             raise AcceptanceError(
                 "runner.ssh_external_command_failed",
                 "The pinned external SSH command could not run.",
+                {
+                    "failureKind": "timeout",
+                    "remoteExecutable": pathlib.PurePosixPath(command[0]).name,
+                    "timeoutSeconds": timeout,
+                },
+            ) from None
+        except OSError:
+            raise AcceptanceError(
+                "runner.ssh_external_command_failed",
+                "The pinned external SSH command could not run.",
+                {
+                    "failureKind": "process-start",
+                    "remoteExecutable": pathlib.PurePosixPath(command[0]).name,
+                },
             ) from None
         output = self.redactor.text(completed.stdout)
         if log_path is not None:

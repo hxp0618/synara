@@ -6146,6 +6146,46 @@ class SSHDriverTest(unittest.TestCase):
                 any(value.startswith("-----BEGIN OPENSSH PRIVATE KEY-----") for value in redactor.secret_values())
             )
 
+    def test_external_command_timeout_reports_bounded_nonsecret_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            identity = root / "id_ed25519"
+            host_key_source = root / "host-key"
+            identity.write_text("private-key-placeholder\n", encoding="utf-8")
+            identity.chmod(0o600)
+            host_key = self._key(b"trusted-external-host")
+            host_key_source.write_text(host_key + "\n", encoding="utf-8")
+            driver = acceptance.SSHDriver(
+                pathlib.Path.cwd(),
+                self._external_options(identity, host_key_source),
+                acceptance.Deadline(300.0),
+                acceptance.SecretRedactor(),
+            )
+            self.addCleanup(driver._release_state)
+            driver.host_key = host_key
+
+            with (
+                mock.patch.object(
+                    acceptance.subprocess,
+                    "run",
+                    side_effect=subprocess.TimeoutExpired(["ssh"], 60.0),
+                ),
+                self.assertRaises(acceptance.AcceptanceError) as caught,
+            ):
+                driver._external_ssh_command(
+                    ["journalctl", "--no-pager"],
+                    cleanup_timeout=acceptance.SSH_EXTERNAL_RECOVERY_OPERATION_TIMEOUT,
+                )
+
+        self.assertEqual(caught.exception.code, "runner.ssh_external_command_failed")
+        self.assertEqual(caught.exception.evidence["failureKind"], "timeout")
+        self.assertEqual(caught.exception.evidence["remoteExecutable"], "journalctl")
+        self.assertEqual(
+            caught.exception.evidence["timeoutSeconds"],
+            acceptance.SSH_EXTERNAL_RECOVERY_OPERATION_TIMEOUT,
+        )
+        self.assertNotIn(str(identity), json.dumps(caught.exception.evidence))
+
     def test_external_preflight_refuses_existing_runtime_before_upload(self) -> None:
         events: list[str] = []
 
@@ -6667,7 +6707,8 @@ class SSHDriverTest(unittest.TestCase):
 
         class CleanupDriver(acceptance.SSHDriver):
             def _remote_root_command(self, command: Sequence[str], **kwargs: Any) -> str:
-                del kwargs
+                if command[0] == "journalctl":
+                    events.append(f"journal-timeout:{kwargs.get('cleanup_timeout')}")
                 events.append("root:" + " ".join(command[:2]))
                 return ""
 
@@ -6727,6 +6768,10 @@ class SSHDriverTest(unittest.TestCase):
         runtime_index = events.index("remove-owned-runtime")
         self.assertLess(revoke_index, verify_index)
         self.assertLess(verify_index, runtime_index)
+        self.assertIn(
+            f"journal-timeout:{acceptance.SSH_EXTERNAL_RECOVERY_OPERATION_TIMEOUT}",
+            events,
+        )
         self.assertFalse(any("authorized_keys" in event for event in events))
         self.assertTrue(evidence["externalHostPreserved"])
         self.assertFalse(evidence["externalHostRestarted"])
@@ -6985,6 +7030,10 @@ class SSHDriverTest(unittest.TestCase):
         evidence = driver.crash_provider_host()
 
         command = driver._remote_command.call_args.args[0]
+        self.assertEqual(
+            driver._remote_command.call_args.kwargs["maximum_timeout"],
+            acceptance.SSH_EXTERNAL_RECOVERY_OPERATION_TIMEOUT,
+        )
         self.assertEqual(command[:2], ["node", "-e"])
         self.assertNotIn("--protocol-v2", command[2])
         self.assertEqual(command[-1], "321")
