@@ -790,6 +790,9 @@ func (s *Service) recoverExecutionGenerationLocked(
 			Take(&workspace).Error; err != nil {
 			return persistence.SessionEvent{}, problem.Wrap(500, "workspace_recovery_load_failed", "Failed to load the logical Workspace during Execution recovery.", err)
 		}
+		if err := s.failSupersededWorkspaceCheckpointsLocked(ctx, tx, execution, workspace.ID, lease.Generation); err != nil {
+			return persistence.SessionEvent{}, err
+		}
 		restoreCheckpointID = workspace.CurrentCheckpointID
 		if err := tx.WithContext(ctx).Model(&persistence.RemoteWorkspace{}).
 			Where("tenant_id = ? AND id = ?", workspace.TenantID, workspace.ID).
@@ -830,6 +833,35 @@ func (s *Service) recoverExecutionGenerationLocked(
 		ExecutionID: &execution.ID, WorkerID: &lease.WorkerID, Generation: &execution.Generation,
 		Payload: payload,
 	})
+}
+
+func (s *Service) failSupersededWorkspaceCheckpointsLocked(
+	ctx context.Context,
+	tx *gorm.DB,
+	execution persistence.AgentExecution,
+	workspaceID uuid.UUID,
+	generation int64,
+) error {
+	const failureCode = "checkpoint_lease_inactive"
+	const failureMessage = "The Worker lease ended before the Workspace Checkpoint became ready."
+
+	now := s.now()
+	updated := tx.WithContext(ctx).Model(&persistence.WorkspaceCheckpoint{}).
+		Where(
+			"tenant_id = ? AND workspace_id = ? AND execution_id = ? AND generation = ? AND status IN ?",
+			execution.TenantID, workspaceID, execution.ID, generation, []string{"pending", "uploading"},
+		).
+		Updates(map[string]any{
+			"status": "failed", "failure_code": failureCode, "failure_message": failureMessage,
+			"failed_at": now, "ready_at": nil,
+		})
+	if updated.Error != nil {
+		return problem.Wrap(
+			500, "workspace_checkpoint_recovery_failed",
+			"Failed to reconcile the expired Generation Workspace Checkpoint.", updated.Error,
+		)
+	}
+	return nil
 }
 
 func (s *Service) failPrimaryOperationOutcomeUnknownLocked(
