@@ -139,48 +139,21 @@ def real_provider_turn_events(
 def real_provider_reclaimed_turn_events(
     assistant_text: str,
     *,
-    terminal_text: str | None = None,
+    terminal_generation: int,
     selected_strategy: str,
     reason_code: str,
-    terminal_reason_code: str | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     terminal, events = real_provider_turn_events(
         assistant_text,
-        terminal_text=terminal_text,
+        terminal_text=assistant_text,
         selected_strategy=selected_strategy,
         reason_code=reason_code,
     )
-    events[1]["generation"] = 1
-    events[2]["generation"] = 1
-    events[3]["generation"] = 3
-    terminal["generation"] = 3
-    leased_events = [
-        {
-            "eventType": "execution.leased",
-            "executionId": "execution-1",
-            "generation": 2,
-            "payload": {
-                "providerResume": {
-                    "requestedStrategy": "native-cursor",
-                    "selectedStrategy": selected_strategy,
-                    "reasonCode": reason_code,
-                }
-            },
-        },
-        {
-            "eventType": "execution.leased",
-            "executionId": "execution-1",
-            "generation": 3,
-            "payload": {
-                "providerResume": {
-                    "requestedStrategy": "native-cursor",
-                    "selectedStrategy": selected_strategy,
-                    "reasonCode": terminal_reason_code or reason_code,
-                }
-            },
-        },
+    events[1:2] = [
+        {**events[1], "generation": generation}
+        for generation in range(1, terminal_generation + 1)
     ]
-    events[2:2] = leased_events
+    terminal["generation"] = terminal_generation
     for sequence, event in enumerate(events, start=1):
         event["sequence"] = sequence
     return terminal, events
@@ -4189,15 +4162,18 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
         self.assertTrue(evidence["terminalOutputMatched"])
         self.assertEqual(evidence["providerResume"]["selectedStrategy"], "native-cursor")
 
-    def test_real_provider_resume_evidence_rejects_multiple_leases_by_default(self) -> None:
+    def test_real_provider_resume_evidence_rejects_multiple_leases(self) -> None:
         suite = BarrierSuite(acceptance.EXECUTION_PINNED_WORKER)
-        marker = "SYNARA_REAL_PROVIDER_SMOKE_CODEX_RECLAIM_DEFAULT"
-        terminal, events = real_provider_reclaimed_turn_events(
-            marker + "\n",
+        marker = "SYNARA_REAL_PROVIDER_SMOKE_CODEX_DUPLICATE_LEASE"
+        terminal, events = real_provider_turn_events(
+            marker,
             terminal_text=marker,
             selected_strategy="authoritative-history",
             reason_code="cursor_absent",
         )
+        duplicate_lease = dict(events[1])
+        duplicate_lease["generation"] = 2
+        events.insert(2, duplicate_lease)
 
         with self.assertRaises(acceptance.AcceptanceError) as raised:
             suite._real_provider_turn_evidence(
@@ -4211,12 +4187,12 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
 
         self.assertEqual(raised.exception.code, "runner.real_provider_resume_decision_missing")
 
-    def test_real_provider_recovery_evidence_accepts_terminal_generation_reclaims(self) -> None:
+    def test_real_provider_recovery_accepts_bounded_contiguous_lease_generations(self) -> None:
         suite = BarrierSuite(acceptance.EXECUTION_PINNED_WORKER)
-        marker = "SYNARA_REAL_PROVIDER_SMOKE_CODEX_RECLAIM_TERMINAL"
+        marker = "SYNARA_REAL_PROVIDER_SMOKE_CODEX_BOUNDED_RECOVERY"
         terminal, events = real_provider_reclaimed_turn_events(
-            marker + "\n",
-            terminal_text=marker,
+            marker,
+            terminal_generation=3,
             selected_strategy="authoritative-history",
             reason_code="cursor_absent",
         )
@@ -4228,23 +4204,20 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
             marker,
             expected_resume_strategy="authoritative-history",
             expected_resume_reason="cursor_absent",
-            leased_event_mode="terminal-generation",
+            max_lease_generations=3,
         )
 
-        self.assertEqual(evidence["generation"], 3)
+        self.assertEqual(evidence["leasedGenerations"], [1, 2, 3])
         self.assertEqual(evidence["executionLeasedEvents"], 3)
-        self.assertEqual(evidence["leasedEventMode"], "terminal-generation")
-        self.assertEqual(evidence["providerResume"]["selectedStrategy"], "authoritative-history")
 
-    def test_real_provider_recovery_evidence_rejects_mismatched_reclaimed_resume(self) -> None:
+    def test_real_provider_recovery_rejects_lease_generation_thrash(self) -> None:
         suite = BarrierSuite(acceptance.EXECUTION_PINNED_WORKER)
-        marker = "SYNARA_REAL_PROVIDER_SMOKE_CODEX_RECLAIM_MISMATCH"
+        marker = "SYNARA_REAL_PROVIDER_SMOKE_CODEX_RECOVERY_THRASH"
         terminal, events = real_provider_reclaimed_turn_events(
-            marker + "\n",
-            terminal_text=marker,
+            marker,
+            terminal_generation=4,
             selected_strategy="authoritative-history",
             reason_code="cursor_absent",
-            terminal_reason_code="cursor_usable",
         )
 
         with self.assertRaises(acceptance.AcceptanceError) as raised:
@@ -4255,10 +4228,10 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
                 marker,
                 expected_resume_strategy="authoritative-history",
                 expected_resume_reason="cursor_absent",
-                leased_event_mode="terminal-generation",
+                max_lease_generations=3,
             )
 
-        self.assertEqual(raised.exception.code, "runner.real_provider_resume_decision_mismatch")
+        self.assertEqual(raised.exception.code, "runner.real_provider_resume_decision_missing")
 
     def test_codex_steer_waits_for_durable_ack_before_resolving_approval(self) -> None:
         suite = BarrierSuite(acceptance.EXECUTION_PINNED_WORKER)
@@ -4785,6 +4758,10 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
         self.assertFalse(evidence["ambientAuthentication"])
         suite._create_real_provider_session.assert_called_once_with(
             title="Stage 3 Real Provider provider-host-crash-retry Recovery"
+        )
+        self.assertEqual(
+            suite._real_provider_turn_evidence.call_args.kwargs["max_lease_generations"],
+            acceptance.REAL_PROVIDER_MAX_RECOVERY_LEASE_GENERATIONS,
         )
 
     def test_real_provider_authentication_recovery_uses_neutral_unique_marker(self) -> None:

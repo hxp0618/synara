@@ -183,6 +183,7 @@ REAL_PROVIDER_HOST_CRASH_TARGETS = ("local", "ssh", "docker", "kubernetes")
 REAL_PROVIDER_CURSOR_MAX_AGE = "1s"
 REAL_PROVIDER_CURSOR_EXPIRY_WAIT_SECONDS = 1.25
 REAL_PROVIDER_MAX_SEQUENTIAL_APPROVALS = 4
+REAL_PROVIDER_MAX_RECOVERY_LEASE_GENERATIONS = 3
 REAL_PROVIDER_CASE_METADATA: Mapping[str, Mapping[str, str]] = {
     "generated-file-checkpoint": {
         "id": "real-provider.generated-file-checkpoint",
@@ -9521,10 +9522,10 @@ class AcceptanceSuite:
             marker,
             expected_resume_strategy="authoritative-history",
             expected_resume_reason="cursor_absent",
-            leased_event_mode=(
-                "terminal-generation"
+            max_lease_generations=(
+                REAL_PROVIDER_MAX_RECOVERY_LEASE_GENERATIONS
                 if failure_case == "provider-host-crash-retry"
-                else "single"
+                else 1
             ),
         )
         return {
@@ -11592,12 +11593,12 @@ class AcceptanceSuite:
         expected_resume_strategy: str,
         expected_resume_reason: str,
         marker_match_mode: str = "exact",
-        leased_event_mode: str = "single",
+        max_lease_generations: int = 1,
     ) -> dict[str, Any]:
         if marker_match_mode not in {"exact", "contains-once"}:
             raise ValueError(f"unsupported marker match mode: {marker_match_mode}")
-        if leased_event_mode not in {"single", "terminal-generation"}:
-            raise ValueError(f"unsupported leased event mode: {leased_event_mode}")
+        if max_lease_generations < 1:
+            raise ValueError("max_lease_generations must be positive")
         event_types = [str(event.get("eventType")) for event in events]
         required_types = {
             "turn.created",
@@ -11677,45 +11678,41 @@ class AcceptanceSuite:
             )
 
         worker_id, generation = self._event_worker_identity(terminal)
+        leased_events = [event for event in events if event.get("eventType") == "execution.leased"]
+        if not 1 <= len(leased_events) <= max_lease_generations:
+            raise AcceptanceError(
+                "runner.real_provider_resume_decision_missing",
+                "The real Provider Turn did not contain the allowed number of Provider resume decisions.",
+                {
+                    "turnId": turn_id,
+                    "executionLeasedEvents": len(leased_events),
+                    "maxLeaseGenerations": max_lease_generations,
+                },
+            )
+        leased_generations: list[int] = []
+        if max_lease_generations > 1:
+            leased_generations = [
+                event.get("generation")
+                for event in leased_events
+                if isinstance(event.get("generation"), int)
+            ]
+            expected_generations = list(range(1, generation + 1))
+            if leased_generations != expected_generations:
+                raise AcceptanceError(
+                    "runner.real_provider_recovery_generation_invalid",
+                    "The real Provider recovery Turn did not use one contiguous lease decision per Generation.",
+                    {
+                        "turnId": turn_id,
+                        "leasedGenerations": leased_generations,
+                        "terminalGeneration": generation,
+                        "maxLeaseGenerations": max_lease_generations,
+                    },
+                )
         expected_resume = {
             "requestedStrategy": "native-cursor",
             "selectedStrategy": expected_resume_strategy,
             "reasonCode": expected_resume_reason,
         }
-        leased_events = [event for event in events if event.get("eventType") == "execution.leased"]
-        selected_leased_event: Mapping[str, Any] | None = None
-        if leased_event_mode == "single":
-            if len(leased_events) != 1:
-                raise AcceptanceError(
-                    "runner.real_provider_resume_decision_missing",
-                    "The real Provider Turn did not contain exactly one Provider resume decision.",
-                    {"turnId": turn_id, "executionLeasedEvents": len(leased_events)},
-                )
-            selected_leased_event = leased_events[0]
-        else:
-            if not leased_events:
-                raise AcceptanceError(
-                    "runner.real_provider_resume_decision_missing",
-                    "The real Provider recovery Turn did not contain a Provider resume decision.",
-                    {"turnId": turn_id, "executionLeasedEvents": 0, "terminalGeneration": generation},
-                )
-            matching_generation_leases = [
-                event for event in leased_events if event.get("generation") == generation
-            ]
-            if len(matching_generation_leases) != 1:
-                raise AcceptanceError(
-                    "runner.real_provider_resume_decision_missing",
-                    "The real Provider recovery Turn did not contain exactly one terminal-generation Provider resume decision.",
-                    {
-                        "turnId": turn_id,
-                        "executionLeasedEvents": len(leased_events),
-                        "terminalGeneration": generation,
-                        "leasedGenerations": [
-                            event.get("generation") for event in leased_events
-                        ],
-                    },
-                )
-            selected_leased_event = matching_generation_leases[0]
         actual_resume: dict[str, Any] | None = None
         for leased_event in leased_events:
             leased_payload = json_object(leased_event.get("payload"), "execution.leased payload")
@@ -11732,13 +11729,12 @@ class AcceptanceSuite:
                         "leasedGeneration": leased_event.get("generation"),
                     },
                 )
-            if leased_event is selected_leased_event:
-                actual_resume = leased_resume
+            actual_resume = leased_resume
         if actual_resume is None:
             raise AcceptanceError(
                 "runner.real_provider_resume_decision_missing",
-                "The real Provider Turn did not retain the selected Provider resume decision.",
-                {"turnId": turn_id, "executionLeasedEvents": len(leased_events)},
+                "The real Provider Turn did not retain a Provider resume decision.",
+                {"turnId": turn_id},
             )
 
         terminal_payload = terminal.get("payload")
@@ -11781,7 +11777,8 @@ class AcceptanceSuite:
             "terminalOutputMatched": terminal_output_matches,
             "providerResume": actual_resume,
             "executionLeasedEvents": len(leased_events),
-            "leasedEventMode": leased_event_mode,
+            "leasedGenerations": leased_generations,
+            "maxLeaseGenerations": max_lease_generations,
             "eventTypes": event_types,
             "sequenceRange": self._sequence_range(events),
         }

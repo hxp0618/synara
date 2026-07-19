@@ -193,7 +193,7 @@ func TestDaemonDrainReleasesAfterNormalRenewalIsCanceled(t *testing.T) {
 		drainTimeout:       50 * time.Millisecond,
 		managed:            true,
 		blockFirstRenew:    true,
-		leaseRenewInterval: time.Millisecond,
+		leaseRenewInterval: 10 * time.Millisecond,
 	})
 	select {
 	case <-harness.state.started:
@@ -218,8 +218,20 @@ func TestDaemonDrainReleasesAfterNormalRenewalIsCanceled(t *testing.T) {
 	if !strings.Contains(harness.state.releaseReason, "workspace-checkpoint=ready") {
 		t.Fatalf("cancelled normal renewal lost the safe Drain reason: %q", harness.state.releaseReason)
 	}
-	if len(harness.state.normalRenewRequestIDs) != 1 || len(harness.state.drainRenewRequestIDs) != 1 ||
-		harness.state.normalRenewRequestIDs[0] == harness.state.drainRenewRequestIDs[0] {
+	normalRequestIDs := make(map[string]struct{}, len(harness.state.normalRenewRequestIDs))
+	for _, requestID := range harness.state.normalRenewRequestIDs {
+		if requestID == "" {
+			t.Fatal("normal Renew omitted its request identity")
+		}
+		normalRequestIDs[requestID] = struct{}{}
+	}
+	drainIDReused := false
+	if len(harness.state.drainRenewRequestIDs) == 1 {
+		_, drainIDReused = normalRequestIDs[harness.state.drainRenewRequestIDs[0]]
+	}
+	if len(harness.state.normalRenewRequestIDs) < 1 ||
+		len(normalRequestIDs) != len(harness.state.normalRenewRequestIDs) ||
+		len(harness.state.drainRenewRequestIDs) != 1 || drainIDReused {
 		t.Fatalf(
 			"normal and Drain Renew did not use isolated request identities: normal=%#v drain=%#v",
 			harness.state.normalRenewRequestIDs,

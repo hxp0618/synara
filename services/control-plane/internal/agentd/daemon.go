@@ -1433,7 +1433,10 @@ func (d *Daemon) renewLeaseLoop(ctx context.Context, executionID uuid.UUID, leas
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			requestContext, requestCancel := context.WithTimeout(ctx, d.config.RequestTimeout)
+			requestContext, requestCancel := context.WithTimeout(
+				ctx,
+				executionLeaseRenewalRequestTimeout(d.config),
+			)
 			err := d.client.Renew(requestContext, executionID, lease)
 			requestCancel()
 			if err != nil {

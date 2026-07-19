@@ -21,17 +21,18 @@ import (
 func TestRenewLeaseLoopRetriesAfterBoundedTransportStall(t *testing.T) {
 	var requestCount atomic.Int32
 	secondRequest := make(chan struct{})
+	releaseFirstRequest := make(chan struct{})
 	var secondRequestOnce sync.Once
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
 		if requestCount.Add(1) == 1 {
-			time.Sleep(200 * time.Millisecond)
-			writer.WriteHeader(http.StatusNoContent)
+			<-releaseFirstRequest
 			return
 		}
 		secondRequestOnce.Do(func() { close(secondRequest) })
 		writer.WriteHeader(http.StatusNoContent)
 	}))
 	t.Cleanup(server.Close)
+	t.Cleanup(func() { close(releaseFirstRequest) })
 	baseURL, err := url.Parse(server.URL)
 	if err != nil {
 		t.Fatal(err)
@@ -64,7 +65,7 @@ func TestRenewLeaseLoopRetriesAfterBoundedTransportStall(t *testing.T) {
 
 	select {
 	case <-secondRequest:
-	case <-time.After(500 * time.Millisecond):
+	case <-time.After(300 * time.Millisecond):
 		cancel()
 		<-done
 		t.Fatalf("renewal did not retry after the first request stalled; requests = %d", requestCount.Load())
