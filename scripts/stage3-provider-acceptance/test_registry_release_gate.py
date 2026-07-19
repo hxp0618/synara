@@ -718,6 +718,32 @@ class InputValidationTest(unittest.TestCase):
         self.assertEqual(payload, [{"Id": "fixture-container"}])
         self.assertEqual(raw, completed.stdout)
 
+    def test_registry_probe_treats_http_header_names_as_case_insensitive(self) -> None:
+        certificate_sha256 = "f" * 64
+        inputs = gate.HostRegistryClientInputs(
+            registry_host="registry.example.com",
+            username="registry-user",
+            password="registry-password",
+            ca_path=pathlib.Path("/tmp/registry-ca.pem"),
+        )
+        with mock.patch.object(
+            gate,
+            "_registry_https_request",
+            side_effect=[
+                (401, {"Www-Authenticate": 'Basic realm="registry"'}, certificate_sha256),
+                (200, {}, certificate_sha256),
+                (404, {}, certificate_sha256),
+            ],
+        ):
+            evidence = gate._probe_live_registry_boundary(
+                inputs,
+                image_repository="registry.example.com/synara/worker",
+            )
+
+        self.assertEqual(evidence["registryHost"], "registry.example.com")
+        self.assertEqual(evidence["repositoryProbeStatus"], 404)
+        self.assertEqual(evidence["tlsPeerCertificateSha256"], certificate_sha256)
+
     def test_validates_production_registry_retention_boundary(self) -> None:
         checked_in_policy = json.loads(
             (REPO_ROOT / gate.PRODUCTION_REGISTRY_RETENTION_POLICY_PATH).read_text(encoding="utf-8")

@@ -2287,6 +2287,14 @@ def _registry_https_request(
         connection.close()
 
 
+def _http_header_value(headers: Mapping[str, str], name: str) -> str:
+    expected = name.casefold()
+    return next(
+        (value for key, value in headers.items() if key.casefold() == expected),
+        "",
+    )
+
+
 def _probe_live_registry_boundary(
     inputs: HostRegistryClientInputs,
     *,
@@ -2304,7 +2312,7 @@ def _probe_live_registry_boundary(
         "/v2/",
         authenticated=True,
     )
-    challenge = unauth_headers.get("WWW-Authenticate", "")
+    challenge = _http_header_value(unauth_headers, "WWW-Authenticate")
     if unauth_status != 401 or "basic" not in challenge.lower():
         raise ReleaseGateError(
             "release.registry_production_boundary_invalid",
