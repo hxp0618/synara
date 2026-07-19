@@ -655,14 +655,15 @@ class ChildCommandAndValidationTest(unittest.TestCase):
                 encoding="utf-8",
             )
             (child_dir / acceptance.MARKDOWN_REPORT_NAME).write_text("# ok\n", encoding="utf-8")
-            with mock.patch.dict(
-                os.environ,
-                {
-                    "CODEX_KEY": "codex-secret",
-                    "CLAUDE_TOKEN": "claude-secret",
-                    "CLAUDE_BASE_URL": "https://claude.example.test",
-                },
-            ), \
+            with (
+                mock.patch.dict(
+                    os.environ,
+                    {
+                        "CODEX_KEY": "codex-secret",
+                        "CLAUDE_TOKEN": "claude-secret",
+                        "CLAUDE_BASE_URL": "https://claude.example.test",
+                    },
+                ),
                 mock.patch.object(
                     common,
                     "run_child_report",
@@ -684,7 +685,8 @@ class ChildCommandAndValidationTest(unittest.TestCase):
                             "claudeVersion": EXPECTED_VERSIONS["claudeAgent"],
                         },
                     ),
-                ):
+                ),
+            ):
                 gate.run_ssh_child_report(
                     options=options,
                     provider="codex",
