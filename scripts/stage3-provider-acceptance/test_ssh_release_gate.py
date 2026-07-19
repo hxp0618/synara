@@ -641,6 +641,71 @@ class ChildCommandAndValidationTest(unittest.TestCase):
         self.assertNotIn("CODEX_MODEL", json.dumps([product, failure]))
         self.assertNotIn("CLAUDE_MODEL", json.dumps([product, failure]))
 
+    def test_run_ssh_child_report_forwards_process_output_scan_and_model_env_names(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            options = dataclasses.replace(
+                ssh_options(pathlib.Path(directory) / "gate"),
+                codex_model_environment_name="SYNARA_ACCEPTANCE_CODEX_MODEL",
+                claude_model_environment_name="SYNARA_ACCEPTANCE_CLAUDE_MODEL",
+            )
+            child_dir = options.output_dir / "codex" / "product"
+            child_dir.mkdir(parents=True, exist_ok=True)
+            (child_dir / acceptance.JSON_REPORT_NAME).write_text(
+                json.dumps(sample_child_report(options, "codex", "product")),
+                encoding="utf-8",
+            )
+            (child_dir / acceptance.MARKDOWN_REPORT_NAME).write_text("# ok\n", encoding="utf-8")
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "CODEX_KEY": "codex-secret",
+                    "CLAUDE_TOKEN": "claude-secret",
+                    "CLAUDE_BASE_URL": "https://claude.example.test",
+                },
+            ), \
+                mock.patch.object(
+                    common,
+                    "run_child_report",
+                    return_value=({"status": "pass"}, []),
+                ) as run_child_report,
+                mock.patch.object(
+                    gate,
+                    "validate_ssh_child_runtime",
+                    return_value=(
+                        [],
+                        {
+                            "runtime": "owned-disposable-orbstack",
+                            "runtimeIdentity": "synara-stage3-0123456789ab",
+                            "machineName": "synara-stage3-0123456789ab",
+                            "hostKeyFingerprint": "SHA256:test",
+                            "agentdSha256": "c" * 64,
+                            "providerHostSha256": "d" * 64,
+                            "codexVersion": EXPECTED_VERSIONS["codex"],
+                            "claudeVersion": EXPECTED_VERSIONS["claudeAgent"],
+                        },
+                    ),
+                ):
+                gate.run_ssh_child_report(
+                    options=options,
+                    provider="codex",
+                    matrix="product",
+                    expected_git_sha="a" * 40,
+                    policy=gate.child_policy(options),
+                    expected_versions=EXPECTED_VERSIONS,
+                )
+
+        kwargs = run_child_report.call_args.kwargs
+        self.assertTrue(kwargs["capture_process_output"])
+        self.assertTrue(
+            {
+                "CODEX_KEY",
+                "CLAUDE_TOKEN",
+                "CLAUDE_BASE_URL",
+                "SYNARA_ACCEPTANCE_CODEX_MODEL",
+                "SYNARA_ACCEPTANCE_CLAUDE_MODEL",
+            }.issubset(set(kwargs["forbidden_output_tokens"]))
+        )
+
     def test_accepts_complete_locked_ssh_product_and_failure_reports(self) -> None:
         options = ssh_options(pathlib.Path("/tmp/ssh-release"))
         policy = gate.child_policy(options)

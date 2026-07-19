@@ -735,6 +735,121 @@ class VaultAuditSiemDeliveryGateTest(unittest.TestCase):
         self.assertEqual(report["errors"][0]["code"], "release.vault_audit_siem_object_lock_invalid")
         self.assertIn("COMPLIANCE/WORM enforcement", report["errors"][0]["message"])
 
+    def test_verify_sink_chain_uses_healthz_and_requires_verified_ledger_depth(self) -> None:
+        secret_inputs = gate.SecretInputs(
+            vault_address="https://vault.example.test",
+            vault_cacert_value="/tmp/vault-ca.crt",
+            vault_cacert_runtime_value="/workspace/vault-ca.crt",
+            vault_cacert_environment="VAULT_CACERT",
+            auditor_token="vault-token",
+            auditor_token_environment="VAULT_OPERATOR_TOKEN",
+            sink_endpoint="https://sink.example.test",
+            sink_endpoint_environment="SINK_ENDPOINT",
+            sink_connect_host="sink.example.test",
+            sink_client_cert_path=pathlib.Path("/tmp/client.crt"),
+            sink_client_key_path=pathlib.Path("/tmp/client.key"),
+            sink_ca_cert_path=pathlib.Path("/tmp/ca.crt"),
+            sink_client_certificate_sha256="b" * 64,
+            object_lock_alias="worm",
+            object_lock_config_dir=pathlib.Path("/tmp/object-lock"),
+            object_lock_writer_host="worm-writer.example.test",
+            object_lock_verifier_host="worm-verifier.example.test",
+            object_lock_resolve=(),
+            temporary_paths=(),
+        )
+        options = gate_options(pathlib.Path("/tmp/output"), vault_command=("vault",))
+        with (
+            mock.patch.object(gate, "build_sink_ssl_context", return_value=object()),
+            mock.patch.object(
+                gate,
+                "_https_json_request",
+                return_value=(
+                    200,
+                    {
+                        "status": "ok",
+                        "ledger": {
+                            "entryCount": 3,
+                            "latestEntrySha256": "a" * 64,
+                            "verified": True,
+                        },
+                    },
+                    {"peerCertificateSha256": "c" * 64},
+                ),
+            ) as request,
+        ):
+            report = gate.verify_sink_chain(
+                sink_endpoint="https://sink.example.test",
+                required_ledger_index=2,
+                secret_inputs=secret_inputs,
+                options=options,
+            )
+
+        self.assertEqual(request.call_args.kwargs["url"], "https://sink.example.test/healthz")
+        self.assertEqual(report["entryCount"], 3)
+        self.assertEqual(report["latestEntrySha256"], "a" * 64)
+        self.assertTrue(report["verified"])
+
+    def test_verify_sink_chain_rejects_unverified_or_short_healthz_ledger(self) -> None:
+        secret_inputs = gate.SecretInputs(
+            vault_address="https://vault.example.test",
+            vault_cacert_value="/tmp/vault-ca.crt",
+            vault_cacert_runtime_value="/workspace/vault-ca.crt",
+            vault_cacert_environment="VAULT_CACERT",
+            auditor_token="vault-token",
+            auditor_token_environment="VAULT_OPERATOR_TOKEN",
+            sink_endpoint="https://sink.example.test",
+            sink_endpoint_environment="SINK_ENDPOINT",
+            sink_connect_host="sink.example.test",
+            sink_client_cert_path=pathlib.Path("/tmp/client.crt"),
+            sink_client_key_path=pathlib.Path("/tmp/client.key"),
+            sink_ca_cert_path=pathlib.Path("/tmp/ca.crt"),
+            sink_client_certificate_sha256="b" * 64,
+            object_lock_alias="worm",
+            object_lock_config_dir=pathlib.Path("/tmp/object-lock"),
+            object_lock_writer_host="worm-writer.example.test",
+            object_lock_verifier_host="worm-verifier.example.test",
+            object_lock_resolve=(),
+            temporary_paths=(),
+        )
+        options = gate_options(pathlib.Path("/tmp/output"), vault_command=("vault",))
+        payloads = (
+            {
+                "status": "ok",
+                "ledger": {
+                    "entryCount": 3,
+                    "latestEntrySha256": "a" * 64,
+                    "verified": False,
+                },
+            },
+            {
+                "status": "ok",
+                "ledger": {
+                    "entryCount": 1,
+                    "latestEntrySha256": "a" * 64,
+                    "verified": True,
+                },
+            },
+        )
+        for payload in payloads:
+            with self.subTest(payload=payload):
+                with (
+                    mock.patch.object(gate, "build_sink_ssl_context", return_value=object()),
+                    mock.patch.object(
+                        gate,
+                        "_https_json_request",
+                        return_value=(200, payload, {"peerCertificateSha256": "c" * 64}),
+                    ),
+                    self.assertRaises(common.ReleaseGateError) as caught,
+                ):
+                    gate.verify_sink_chain(
+                        sink_endpoint="https://sink.example.test",
+                        required_ledger_index=2,
+                        secret_inputs=secret_inputs,
+                        options=options,
+                    )
+
+                self.assertEqual(caught.exception.code, "release.vault_audit_siem_chain_invalid")
+
     def test_verify_object_lock_archive_rejects_payload_hash_tampering(self) -> None:
         request_id = "req-gate-payload-tamper-001"
         with self._archive_context(request_id) as context:
