@@ -5,8 +5,6 @@
 import "../../index.css";
 
 import { MessageId } from "@synara/contracts";
-import { type LegendListRef } from "@legendapp/list/react";
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { render } from "vitest-browser-react";
 
@@ -99,65 +97,28 @@ async function expectNearBottom(scrollContainer: HTMLElement): Promise<void> {
 }
 
 function BootstrapScrollTimeline() {
-  const [bottomContentInsetPx, setBottomContentInsetPx] = useState(0);
-  const [isAtEnd, setIsAtEnd] = useState(true);
-  const listRef = useRef<LegendListRef | null>(null);
-  const previousBottomContentInsetPxRef = useRef(bottomContentInsetPx);
-
-  useEffect(() => {
-    const timeoutId = window.setTimeout(() => setBottomContentInsetPx(120), 40);
-    return () => window.clearTimeout(timeoutId);
-  }, []);
-
-  useLayoutEffect(() => {
-    const previousBottomContentInsetPx = previousBottomContentInsetPxRef.current;
-    previousBottomContentInsetPxRef.current = bottomContentInsetPx;
-    if (
-      previousBottomContentInsetPx <= 0 ||
-      bottomContentInsetPx <= 0 ||
-      previousBottomContentInsetPx === bottomContentInsetPx ||
-      !isAtEnd
-    ) {
-      return;
-    }
-    const frameId = window.requestAnimationFrame(() => {
-      void listRef.current?.scrollToEnd?.({ animated: false });
-    });
-    return () => {
-      window.cancelAnimationFrame(frameId);
-    };
-  }, [bottomContentInsetPx, isAtEnd]);
-
   return (
-    <div>
-      <button type="button" onClick={() => setBottomContentInsetPx(260)}>
-        Increase bottom inset
-      </button>
-      <div style={{ height: 420 }}>
-        <MessagesTimeline
-          hasMessages
-          isWorking={false}
-          activeTurnInProgress={false}
-          activeTurnStartedAt={null}
-          listRef={listRef}
-          timelineEntries={TIMELINE_ENTRIES}
-          turnDiffSummaryByAssistantMessageId={new Map()}
-          nowIso="2026-07-18T08:30:00.000Z"
-          expandedWorkGroups={{}}
-          onToggleWorkGroup={() => {}}
-          onOpenTurnDiff={() => {}}
-          revertTurnCountByUserMessageId={new Map()}
-          onRevertUserMessage={() => {}}
-          isRevertingCheckpoint={false}
-          onImageExpand={() => {}}
-          onIsAtEndChange={setIsAtEnd}
-          markdownCwd={undefined}
-          resolvedTheme="dark"
-          timestampFormat="locale"
-          workspaceRoot={undefined}
-          bottomContentInsetPx={bottomContentInsetPx}
-        />
-      </div>
+    <div style={{ height: 420 }}>
+      <MessagesTimeline
+        hasMessages
+        isWorking={false}
+        activeTurnInProgress={false}
+        activeTurnStartedAt={null}
+        timelineEntries={TIMELINE_ENTRIES}
+        turnDiffSummaryByAssistantMessageId={new Map()}
+        nowIso="2026-07-18T08:30:00.000Z"
+        expandedWorkGroups={{}}
+        onToggleWorkGroup={() => {}}
+        onOpenTurnDiff={() => {}}
+        revertTurnCountByUserMessageId={new Map()}
+        onRevertUserMessage={() => {}}
+        isRevertingCheckpoint={false}
+        onImageExpand={() => {}}
+        markdownCwd={undefined}
+        resolvedTheme="dark"
+        timestampFormat="locale"
+        workspaceRoot={undefined}
+      />
     </div>
   );
 }
@@ -175,11 +136,6 @@ describe("MessagesTimeline bootstrap bottom-stick", () => {
 
     try {
       const scrollContainer = await waitForScrollContainer();
-      await waitForLayout();
-      await expectNearBottom(scrollContainer);
-
-      document.querySelector<HTMLButtonElement>("button")?.click();
-
       await waitForLayout();
       await expectNearBottom(scrollContainer);
 
