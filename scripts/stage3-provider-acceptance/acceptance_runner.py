@@ -415,13 +415,17 @@ def real_provider_host_crash_command() -> str:
     return real_provider_approval_command()
 
 
-def real_provider_host_crash_approval_prompt() -> str:
+def real_provider_approval_tool_prompt(command: str) -> str:
     return (
         "Use the Bash or shell tool exactly once. Do not emit any assistant text before the tool call. "
-        "Request approval for this exact read-only command as the sole shell command:\n"
-        f"{real_provider_host_crash_command()}\n"
-        "Do not add wrappers, redirection, pipes, file changes, or any other action."
+        "Run this exact read-only Node command as the sole shell command:\n"
+        f"{command}\n"
+        "Do not add redirection, pipes, wrappers, or file changes."
     )
+
+
+def real_provider_host_crash_approval_prompt() -> str:
+    return real_provider_approval_tool_prompt(real_provider_host_crash_command())
 
 
 def real_provider_approval_command_matches(candidate: str, expected: str) -> bool:
@@ -449,10 +453,8 @@ def real_provider_interrupt_command() -> str:
 
 def real_provider_approval_gated_prompt(command: str, marker: str) -> str:
     return (
-        "Use the Bash or shell tool exactly once. Do not emit any assistant text before the tool call. "
-        "Run this exact read-only Node command as the sole shell command:\n"
-        f"{command}\n"
-        "Do not add redirection, pipes, wrappers, or file changes. After the tool finishes, the complete "
+        f"{real_provider_approval_tool_prompt(command)} "
+        "After the tool finishes, the complete "
         f"assistant text for this Turn must be exactly {marker} and no other text."
     )
 

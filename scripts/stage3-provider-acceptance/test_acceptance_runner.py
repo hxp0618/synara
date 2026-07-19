@@ -3365,6 +3365,7 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
                 self.assertNotIn(">", prompt)
                 self.assertNotIn(relative_path, prompt)
                 self.assertIn(f"\n{command}\n", prompt)
+                self.assertTrue(prompt.startswith(acceptance.real_provider_approval_tool_prompt(command)))
                 self.assertTrue(acceptance.real_provider_approval_command_matches(command, command))
                 self.assertTrue(
                     acceptance.real_provider_approval_command_matches(
@@ -4699,6 +4700,14 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
         evidence = suite._real_provider_host_crash_retry()
 
         self.assertTrue(suite.approval_waited)
+        self.assertEqual(
+            suite.created_turns,
+            [
+                acceptance.real_provider_approval_tool_prompt(
+                    acceptance.real_provider_host_crash_command()
+                )
+            ],
+        )
         self.assertEqual(suite.turn_runtime_mode, "approval-required")
         self.assertEqual(suite.barrier_event_type, "item.started")
         self.assertEqual(evidence["activeWorkBarrier"]["eventType"], "item.started")
