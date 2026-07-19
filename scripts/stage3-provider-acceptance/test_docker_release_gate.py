@@ -27,6 +27,10 @@ def docker_options(output_dir: pathlib.Path) -> gate.DockerReleaseGateOptions:
         output_dir=output_dir,
         product_timeout_seconds=2400.0,
         failure_timeout_seconds=900.0,
+        real_provider_load_sla_file=(
+            pathlib.Path("/tmp/synara/deploy/worker/production-load-sla.json").resolve()
+        ),
+        real_provider_load_restart_every_waves=10,
         codex_credential=gate.CredentialSource("CODEX_KEY", "apiKey", None),
         claude_credential=gate.CredentialSource(
             "CLAUDE_TOKEN",
@@ -42,6 +46,168 @@ def docker_options(output_dir: pathlib.Path) -> gate.DockerReleaseGateOptions:
     )
 
 
+def sample_load_operator_approved_sla() -> dict[str, Any]:
+    return {
+        "requested": {
+            "minimumDurationSeconds": 1800,
+            "latencyMs": {"p95Max": 10000, "p99Max": 15000},
+            "recoveryTimeMs": {"p95Max": 2000, "p99Max": 3000},
+            "unexpectedErrorRateMax": 0.0,
+        },
+        "metricMapping": {
+            "minimumDurationSeconds": {"observedEvidencePath": "durationMs"},
+            "latencyMs.p95Max": {"observedEvidencePath": "turnLatencyMs.p95"},
+            "latencyMs.p99Max": {"observedEvidencePath": "turnLatencyMs.p99"},
+            "recoveryTimeMs.p95Max": {"observedEvidencePath": "admissionRecoveryMs.p95"},
+            "recoveryTimeMs.p99Max": {"observedEvidencePath": "admissionRecoveryMs.p99"},
+            "unexpectedErrorRateMax": {"observedEvidencePath": "unexpectedErrorRate"},
+        },
+        "checks": [
+            {"id": "minimumDurationSeconds", "status": "pass"},
+            {"id": "latencyMs.p95Max", "status": "pass"},
+            {"id": "latencyMs.p99Max", "status": "pass"},
+            {"id": "recoveryTimeMs.p95Max", "status": "pass"},
+            {"id": "recoveryTimeMs.p99Max", "status": "pass"},
+            {"id": "unexpectedErrorRateMax", "status": "pass"},
+        ],
+        "enforced": True,
+    }
+
+
+def sample_load_case_evidence(provider: str) -> dict[str, Any]:
+    summary = sample_load_operator_approved_sla()
+    return {
+        "maxConcurrentExecutions": 2,
+        "workers": 2,
+        "sessions": 4,
+        "providers": [provider],
+        "wavesRequested": 1,
+        "minimumWavesRequested": 1,
+        "maximumWaves": 400,
+        "restartEveryWaves": 10,
+        "minimumDurationSeconds": 1800,
+        "durationTargetMet": True,
+        "stopReason": "minimum-waves-and-duration-satisfied",
+        "wavesCompleted": 1,
+        "firstWave": 1,
+        "lastWave": 1,
+        "controlPlaneRestartCount": 0,
+        "controlPlaneRestarts": [],
+        "executionsCompleted": 4,
+        "distinctExecutionCount": 4,
+        "distinctWorkerCount": 2,
+        "quotaRejections": 2,
+        "admissionRetriesSucceeded": 2,
+        "admissionAttempts": 6,
+        "expectedQuotaRejectionRate": 0.333333,
+        "overlapObservations": 3,
+        "effectiveConcurrency": 2,
+        "executionSuccessRate": 1.0,
+        "unexpectedFailureCount": 0,
+        "unexpectedErrorRate": 0.0,
+        "doubleExecution": False,
+        "duplicateTerminal": False,
+        "pendingInteractionCount": 0,
+        "providerExecutionCounts": {provider: 4},
+        "sessionExecutionCounts": {
+            "session-1": 1,
+            "session-2": 1,
+            "session-3": 1,
+            "session-4": 1,
+        },
+        "eventTypeCounts": {
+            "execution.completed": 4,
+            "request.opened": 4,
+            "request.resolved": 4,
+        },
+        "resourceProfile": acceptance.fixture_load_resource_profile(
+            dataclasses.replace(
+                acceptance.parse_args(["--suite", "fixture-load", "--target", "docker"]),
+                suite="real-provider-load",
+            )
+        ),
+        "durationMs": 1_800_000,
+        "observedCompletedExecutionsPerSecond": 0.002,
+        "turnLatencyMs": {
+            "sampleCount": 4,
+            "minimum": 9000,
+            "maximum": 12000,
+            "average": 10250.0,
+            "p50": 10000,
+            "p95": 12000,
+            "p99": 12000,
+        },
+        "waveDurationMs": {
+            "sampleCount": 1,
+            "minimum": 1_800_000,
+            "maximum": 1_800_000,
+            "average": 1_800_000.0,
+            "p50": 1_800_000,
+            "p95": 1_800_000,
+            "p99": 1_800_000,
+        },
+        "admissionRecoveryMs": {
+            "sampleCount": 2,
+            "minimum": 1200,
+            "maximum": 1800,
+            "average": 1500.0,
+            "p50": 1200,
+            "p95": 1800,
+            "p99": 1800,
+        },
+        "sessionsEvidence": [
+            {"sessionId": "session-1", "provider": provider},
+            {"sessionId": "session-2", "provider": provider},
+            {"sessionId": "session-3", "provider": provider},
+            {"sessionId": "session-4", "provider": provider},
+        ],
+        "waveSamples": [
+            {
+                "wave": 1,
+                "sessionOrder": ["session-1", "session-2", "session-3", "session-4"],
+                "providerOrder": [provider] * 4,
+                "overlapWorkerIds": [
+                    ["worker-1", "worker-2"],
+                    ["worker-1", "worker-2"],
+                    ["worker-1", "worker-2"],
+                ],
+                "targetExecutionIdentities": [
+                    ["container-1", "container-2"],
+                    ["container-1", "container-2"],
+                    ["container-1", "container-2"],
+                ],
+                "quotaRejections": [
+                    {
+                        "sessionId": "session-3",
+                        "reasonCode": "execution_quota_exceeded",
+                        "stateMutated": False,
+                        "wave": 1,
+                        "durationMs": 100,
+                    },
+                    {
+                        "sessionId": "session-4",
+                        "reasonCode": "execution_quota_exceeded",
+                        "stateMutated": False,
+                        "wave": 1,
+                        "durationMs": 100,
+                    },
+                ],
+                "turnLatencyMs": {
+                    "sampleCount": 4,
+                    "minimum": 9000,
+                    "maximum": 12000,
+                    "average": 10250.0,
+                    "p50": 10000,
+                    "p95": 12000,
+                    "p99": 12000,
+                },
+                "durationMs": 1_800_000,
+            }
+        ],
+        "operatorApprovedSla": summary,
+    }
+
+
 def sample_child_report(
     options: gate.DockerReleaseGateOptions,
     provider: str,
@@ -53,7 +219,9 @@ def sample_child_report(
 ) -> dict[str, Any]:
     requested_product = list(acceptance.REAL_PROVIDER_CASES) if matrix == "product" else []
     requested_failure = list(acceptance.REAL_PROVIDER_FAILURE_CASES) if matrix == "failure" else []
+    requested_load = [acceptance.REAL_PROVIDER_LOAD_CASE_ID] if matrix == common.REMOTE_LOAD_MATRIX else []
     source = gate.credential_source(options, provider)
+    load_sla = sample_load_operator_approved_sla()
     case_statuses: dict[str, str] = {
         "environment.control-plane-start": "pass",
         "identity.dev-login": "pass",
@@ -69,10 +237,12 @@ def sample_child_report(
         case_statuses[case_id] = "pass"
     for case_id in gate.EXPECTED_UNSUPPORTED[(provider, matrix)]:
         case_statuses[case_id] = "unsupported"
-    cases = [
-        {"id": case_id, "status": status}
-        for case_id, status in sorted(case_statuses.items())
-    ]
+    cases = []
+    for case_id, status in sorted(case_statuses.items()):
+        case: dict[str, Any] = {"id": case_id, "status": status}
+        if matrix == common.REMOTE_LOAD_MATRIX and case_id == acceptance.REAL_PROVIDER_LOAD_CASE_ID:
+            case["evidence"] = sample_load_case_evidence(provider)
+        cases.append(case)
     cases.extend(
         [
             {
@@ -108,7 +278,7 @@ def sample_child_report(
     return {
         "schemaVersion": acceptance.SCHEMA_VERSION,
         "runId": f"run-{provider}-{matrix}",
-        "mode": "real-provider-smoke",
+        "mode": "real-provider-load" if matrix == common.REMOTE_LOAD_MATRIX else "real-provider-smoke",
         "target": "docker",
         "provider": provider,
         "status": "pass",
@@ -119,16 +289,53 @@ def sample_child_report(
             "providerCapabilityCatalogSha256": catalog_hash,
         },
         "configuration": {
-            "restartControlPlane": True,
+            "restartControlPlane": matrix != common.REMOTE_LOAD_MATRIX,
             "keepState": False,
             "runnerCommand": {"executable": "provider-host"},
             "docker": {
                 "workerImage": worker_image_name,
                 "skipWorkerBuild": True,
             },
+            "realProviderLoad": {
+                "workers": 2 if matrix == common.REMOTE_LOAD_MATRIX else 0,
+                "sessions": 4 if matrix == common.REMOTE_LOAD_MATRIX else 0,
+                "waves": 1 if matrix == common.REMOTE_LOAD_MATRIX else 0,
+                "restartEveryWaves": (
+                    options.real_provider_load_restart_every_waves
+                    if matrix == common.REMOTE_LOAD_MATRIX
+                    else 0
+                ),
+                "minimumDurationSeconds": 1800 if matrix == common.REMOTE_LOAD_MATRIX else 0,
+                "maximumWaves": 400 if matrix == common.REMOTE_LOAD_MATRIX else 0,
+                "maxConcurrentExecutions": 2 if matrix == common.REMOTE_LOAD_MATRIX else None,
+                "resourceProfile": (
+                    sample_load_case_evidence(provider)["resourceProfile"]
+                    if matrix == common.REMOTE_LOAD_MATRIX
+                    else None
+                ),
+                "measurement": {
+                    "durationTargetEnforced": matrix == common.REMOTE_LOAD_MATRIX,
+                    "latencyPercentiles": [50, 95, 99] if matrix == common.REMOTE_LOAD_MATRIX else [],
+                    "unexpectedErrorRateRecorded": matrix == common.REMOTE_LOAD_MATRIX,
+                    "operatorApprovedSlaThresholdsEnforced": matrix == common.REMOTE_LOAD_MATRIX,
+                    "operatorApprovedSla": load_sla if matrix == common.REMOTE_LOAD_MATRIX else None,
+                    "operatorApprovedSlaFile": (
+                        {
+                            "path": "deploy/worker/production-load-sla.json",
+                            "sourceKind": "repo-relative",
+                            "sha256": "d" * 64,
+                            "requested": load_sla["requested"],
+                        }
+                        if matrix == common.REMOTE_LOAD_MATRIX
+                        else None
+                    ),
+                },
+                "boundary": "operator-approved real Provider load",
+            },
             "realProvider": {
                 "requestedCases": requested_product,
                 "requestedFailureCases": requested_failure,
+                "requestedLoadCases": requested_load,
                 "ambientAuthentication": False,
                 "controlledProductCredential": True,
                 "controlledProductCredentialField": source.field,
@@ -182,9 +389,33 @@ class ParseArgsTest(unittest.TestCase):
         self.assertEqual(options.codex_model, "gpt-5.6-sol")
         self.assertEqual(options.claude_model, "claude-sonnet-4-6")
         self.assertEqual(options.go_proxy, "https://goproxy.cn,direct")
+        self.assertEqual(options.real_provider_load_restart_every_waves, 10)
         self.assertNotIn("codex-secret-value", encoded)
         self.assertNotIn("claude-secret-value", encoded)
         self.assertNotIn("https://claude.example.test", encoded)
+
+    def test_accepts_custom_real_provider_load_restart_cadence(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(
+            os.environ,
+            {
+                "CODEX_KEY": "codex-secret-value",
+                "CLAUDE_TOKEN": "claude-secret-value",
+            },
+        ):
+            options = gate.parse_args(
+                [
+                    "--codex-credential-env",
+                    "CODEX_KEY",
+                    "--claude-credential-env",
+                    "CLAUDE_TOKEN",
+                    "--real-provider-load-restart-every-waves",
+                    "12",
+                    "--output-dir",
+                    directory,
+                ]
+            )
+
+        self.assertEqual(options.real_provider_load_restart_every_waves, 12)
 
     def test_resolves_provider_models_from_environment_names(self) -> None:
         with tempfile.TemporaryDirectory() as directory, mock.patch.dict(
@@ -214,8 +445,10 @@ class ParseArgsTest(unittest.TestCase):
         encoded = json.dumps(dataclasses.asdict(options), default=str)
         self.assertEqual(options.codex_model, "gpt-5.6-sol")
         self.assertEqual(options.claude_model, "claude-sonnet-4-6")
-        self.assertNotIn("CODEX_MODEL", encoded)
-        self.assertNotIn("CLAUDE_MODEL", encoded)
+        self.assertEqual(options.codex_model_environment_name, "CODEX_MODEL")
+        self.assertEqual(options.claude_model_environment_name, "CLAUDE_MODEL")
+        self.assertIn("CODEX_MODEL", encoded)
+        self.assertIn("CLAUDE_MODEL", encoded)
 
     def test_model_literal_and_environment_name_are_mutually_exclusive(self) -> None:
         with mock.patch.dict(
@@ -282,13 +515,20 @@ class ParseArgsTest(unittest.TestCase):
 
 
 class ChildCommandTest(unittest.TestCase):
-    def test_keeps_four_matrix_boundaries_and_never_places_values_in_arguments(self) -> None:
+    def test_keeps_matrix_boundaries_and_never_places_values_in_arguments(self) -> None:
         options = docker_options(pathlib.Path("/tmp/docker-release"))
         product = gate.child_command(
             options,
             "codex",
             "product",
             options.output_dir / "codex/product",
+            WORKER_IMAGE_NAME,
+        )
+        load = gate.child_command(
+            options,
+            "codex",
+            common.REMOTE_LOAD_MATRIX,
+            options.output_dir / "codex/load",
             WORKER_IMAGE_NAME,
         )
         failure = gate.child_command(
@@ -304,6 +544,18 @@ class ChildCommandTest(unittest.TestCase):
         self.assertIn('["/usr/local/bin/provider-host"]', product)
         self.assertIn("CODEX_KEY", product)
         self.assertEqual(product[product.index("--real-provider-model") + 1], "gpt-5.6-sol")
+        self.assertEqual(load[load.index("--suite") + 1], "real-provider-load")
+        self.assertNotIn("--real-provider-matrix", load)
+        self.assertNotIn("--real-provider-failure-matrix", load)
+        self.assertEqual(load[load.index("--timeout") + 1], str(options.product_timeout_seconds))
+        self.assertEqual(
+            load[load.index("--real-provider-load-restart-every-waves") + 1],
+            str(options.real_provider_load_restart_every_waves),
+        )
+        self.assertEqual(
+            load[load.index("--operator-approved-sla-file") + 1],
+            str(options.real_provider_load_sla_file),
+        )
         self.assertIn("--real-provider-failure-matrix", failure)
         self.assertNotIn("--real-provider-matrix", failure)
         self.assertIn("CLAUDE_TOKEN", failure)
@@ -315,9 +567,11 @@ class ChildCommandTest(unittest.TestCase):
         )
         self.assertIn("--docker-skip-worker-build", product)
         self.assertIn(WORKER_IMAGE_NAME, product)
+        self.assertIn("--docker-skip-worker-build", load)
+        self.assertIn(WORKER_IMAGE_NAME, load)
         self.assertIn("--docker-skip-worker-build", failure)
         self.assertIn(WORKER_IMAGE_NAME, failure)
-        encoded = json.dumps([product, failure])
+        encoded = json.dumps([product, load, failure])
         self.assertNotIn("secret-value", encoded)
 
     def test_child_command_uses_resolved_model_without_forwarding_model_env_name(self) -> None:
@@ -399,11 +653,11 @@ class ChildCommandTest(unittest.TestCase):
 
 
 class ChildReportValidationTest(unittest.TestCase):
-    def test_accepts_all_complete_docker_product_and_failure_reports(self) -> None:
+    def test_accepts_all_complete_docker_product_failure_and_load_reports(self) -> None:
         options = docker_options(pathlib.Path("/tmp/docker-release"))
         policy = gate.child_policy(options, WORKER_IMAGE_NAME)
         for provider in common.PROVIDERS:
-            for matrix in common.MATRICES:
+            for matrix in gate.REMOTE_GATE_MATRICES:
                 with self.subTest(provider=provider, matrix=matrix):
                     errors = common.validate_child_report(
                         sample_child_report(options, provider, matrix),
@@ -413,6 +667,45 @@ class ChildReportValidationTest(unittest.TestCase):
                         policy=policy,
                     )
                     self.assertEqual(errors, [])
+
+    def test_rejects_missing_real_provider_smoke_baseline_cases(self) -> None:
+        options = docker_options(pathlib.Path("/tmp/docker-release"))
+        policy = gate.child_policy(options, WORKER_IMAGE_NAME)
+        report = sample_child_report(options, "codex", "product")
+        report["cases"] = [
+            case
+            for case in report["cases"]
+            if case["id"] != "real-provider.turn-1-start"
+        ]
+
+        errors = common.validate_child_report(
+            report,
+            provider="codex",
+            matrix="product",
+            expected_git_sha="a" * 40,
+            policy=policy,
+        )
+
+        self.assertEqual(errors[0]["code"], "release.child_cases_missing")
+        self.assertIn("real-provider.turn-1-start", errors[0]["evidence"]["missingCaseIds"])
+
+    def test_rejects_status_only_real_provider_load_case(self) -> None:
+        options = docker_options(pathlib.Path("/tmp/docker-release"))
+        policy = gate.child_policy(options, WORKER_IMAGE_NAME)
+        report = sample_child_report(options, "codex", common.REMOTE_LOAD_MATRIX)
+        for case in report["cases"]:
+            if case["id"] == acceptance.REAL_PROVIDER_LOAD_CASE_ID:
+                case.pop("evidence", None)
+
+        errors = common.validate_child_report(
+            report,
+            provider="codex",
+            matrix=common.REMOTE_LOAD_MATRIX,
+            expected_git_sha="a" * 40,
+            policy=policy,
+        )
+
+        self.assertEqual(errors[0]["code"], "release.child_load_evidence_invalid")
 
     def test_claude_controlled_terminal_large_is_not_frozen_unsupported(self) -> None:
         self.assertNotIn(
@@ -495,13 +788,13 @@ class ImageConsensusTest(unittest.TestCase):
         runs = [
             {"provider": provider, "matrix": matrix, "workerImageId": other_image_id}
             for provider in common.PROVIDERS
-            for matrix in common.MATRICES
+            for matrix in gate.REMOTE_GATE_MATRICES
         ]
 
         errors = gate.worker_image_reference_errors(runs, WORKER_IMAGE_ID)
 
         self.assertEqual(errors[0]["code"], "release.worker_image_reference_mismatch")
-        self.assertEqual(len(errors[0]["evidence"]["runs"]), 4)
+        self.assertEqual(len(errors[0]["evidence"]["runs"]), 6)
 
 
 class GateWorkerImageLifecycleTest(unittest.TestCase):
@@ -674,7 +967,7 @@ class OutputSecurityTest(unittest.TestCase):
 
 
 class AggregateMainTest(unittest.TestCase):
-    def test_emits_a_pass_only_for_four_same_sha_catalog_and_image_runs(self) -> None:
+    def test_emits_a_pass_only_for_all_same_sha_catalog_and_image_runs(self) -> None:
         with tempfile.TemporaryDirectory() as directory, mock.patch.dict(
             os.environ,
             {
@@ -684,7 +977,11 @@ class AggregateMainTest(unittest.TestCase):
             },
         ):
             output_dir = pathlib.Path(directory) / "gate"
-            options = docker_options(output_dir)
+            options = dataclasses.replace(
+                docker_options(output_dir),
+                codex_model_environment_name="SYNARA_ACCEPTANCE_CODEX_MODEL",
+                claude_model_environment_name="SYNARA_ACCEPTANCE_CLAUDE_MODEL",
+            )
 
             def child_run(**kwargs: Any) -> tuple[dict[str, Any], list[dict[str, Any]]]:
                 return (
@@ -762,21 +1059,50 @@ class AggregateMainTest(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         self.assertEqual(build.call_count, 1)
-        self.assertEqual(run_child.call_count, 4)
+        self.assertEqual(run_child.call_count, 6)
         self.assertEqual(cleanup.call_count, 1)
+        self.assertTrue(all(call.kwargs["capture_process_output"] for call in run_child.call_args_list))
+        self.assertTrue(
+            all(
+                {
+                    "CODEX_KEY",
+                    "CLAUDE_TOKEN",
+                    "CLAUDE_BASE_URL",
+                    "SYNARA_ACCEPTANCE_CODEX_MODEL",
+                    "SYNARA_ACCEPTANCE_CLAUDE_MODEL",
+                }.issubset(set(call.kwargs["forbidden_output_tokens"]))
+                for call in run_child.call_args_list
+            )
+        )
         child_commands = [call.kwargs["command"] for call in run_child.call_args_list]
         shared_image_names = {
             command[command.index("--docker-worker-image") + 1] for command in child_commands
         }
         self.assertEqual(len(shared_image_names), 1)
         self.assertTrue(all("--docker-skip-worker-build" in command for command in child_commands))
+        self.assertEqual(
+            sum(command[command.index("--suite") + 1] == "real-provider-load" for command in child_commands),
+            len(common.PROVIDERS),
+        )
         self.assertEqual(report["status"], "pass")
         self.assertEqual(report["runtime"]["docker"]["serverVersion"], "29.4.0")
-        self.assertEqual(report["coverage"]["completedRuns"], 4)
+        self.assertEqual(report["coverage"]["completedRuns"], 6)
+        self.assertEqual(report["coverage"]["matrices"], list(gate.REMOTE_GATE_MATRICES))
+        self.assertEqual(report["coverage"]["loadCases"], [acceptance.REAL_PROVIDER_LOAD_CASE_ID])
         self.assertEqual(report["workerImage"]["id"], WORKER_IMAGE_ID)
         self.assertTrue(report["workerImage"]["sharedAcrossRuns"])
         self.assertTrue(report["workerImage"]["cleanup"]["removed"])
         self.assertFalse(report["security"]["credentialEnvironmentNamesPersisted"])
+
+    def test_scan_process_output_rejects_stdout_only_model_environment_name(self) -> None:
+        evidence = common.scan_process_output(
+            "stdout leaked SYNARA_ACCEPTANCE_CODEX_MODEL\n",
+            "",
+            redactor=acceptance.SecretRedactor(),
+            forbidden_tokens=("SYNARA_ACCEPTANCE_CODEX_MODEL",),
+        )
+
+        self.assertEqual(evidence["findings"], [{"kind": "forbidden-environment-name"}])
 
     def test_cleans_the_shared_image_when_child_execution_raises(self) -> None:
         with tempfile.TemporaryDirectory() as directory, mock.patch.dict(

@@ -55,6 +55,7 @@ class RemoteReleaseTargetSpec:
     inspect_runtime: Callable[[Any], Mapping[str, Any]]
     target_configuration: Callable[[Any], Mapping[str, Any]]
     evidence_boundary: tuple[str, str]
+    matrices: tuple[str, ...] = common.MATRICES
     runner_executable: str = "provider-host"
 
 
@@ -156,6 +157,37 @@ def parse_provider_model_argument(
         forbidden_characters="\r\n\t\x00",
     )
     return acceptance.parse_provider_model(resolved_model, model_env_option)
+
+
+def provider_model_environment_name(options: Any, provider: str) -> str | None:
+    attribute = (
+        "codex_model_environment_name"
+        if provider == "codex"
+        else "claude_model_environment_name"
+        if provider == "claudeAgent"
+        else None
+    )
+    if attribute is None:
+        raise ValueError(f"unsupported controlled remote release Provider: {provider}")
+    value = getattr(options, attribute, None)
+    return value if isinstance(value, str) and value else None
+
+
+def operator_environment_names(options: Any) -> tuple[str, ...]:
+    return tuple(
+        sorted(
+            {
+                value
+                for provider in common.PROVIDERS
+                for value in (
+                    credential_source(options, provider).environment_name,
+                    credential_source(options, provider).base_url_environment_name,
+                    provider_model_environment_name(options, provider),
+                )
+                if value is not None
+            }
+        )
+    )
 
 
 def child_policy(
@@ -563,12 +595,13 @@ def credential_redactor(options: Any) -> acceptance.SecretRedactor:
 def scan_child_outputs(
     options: Any,
     redactor: acceptance.SecretRedactor,
+    matrices: Sequence[str],
 ) -> dict[str, Any]:
     findings: list[dict[str, Any]] = []
     scanned_files = 0
     scanned_bytes = 0
     for provider in common.PROVIDERS:
-        for matrix in common.MATRICES:
+        for matrix in matrices:
             child_dir = options.output_dir / provider / matrix
             if not child_dir.is_dir():
                 continue
@@ -584,7 +617,7 @@ def scan_child_outputs(
                         }
                     )
     return {
-        "scope": "all four child JSON, Markdown, text metadata, and redacted logs",
+        "scope": "all child JSON, Markdown, text metadata, and redacted logs",
         "scannedFiles": scanned_files,
         "scannedBytes": scanned_bytes,
         "findings": findings,
@@ -592,15 +625,7 @@ def scan_child_outputs(
 
 
 def credential_environment_name_findings(options: Any) -> list[dict[str, Any]]:
-    names = {
-        value.encode("utf-8")
-        for provider in common.PROVIDERS
-        for value in (
-            credential_source(options, provider).environment_name,
-            credential_source(options, provider).base_url_environment_name,
-        )
-        if value is not None
-    }
+    names = {value.encode("utf-8") for value in operator_environment_names(options)}
     patterns = [
         re.compile(rb"(?<![A-Za-z0-9_])" + re.escape(name) + rb"(?![A-Za-z0-9_])")
         for name in names
@@ -687,8 +712,8 @@ def markdown_from_report(
         f"- Worker Image ID: `{report.get('workerImage', {}).get('id', '')}`",
         f"- Duration: `{report['durationMs']} ms`",
         "",
-        "The gate builds one owned Worker acceptance image from the clean SHA, shares it with all four child",
-        "runs, then removes it itself. The aggregate passes only when Codex/Claude product and failure reports",
+        "The gate builds one owned Worker acceptance image from the clean SHA, shares it with all child",
+        "runs, then removes it itself. The aggregate passes only when Codex/Claude child reports",
         "share the same Capability Catalog and image ID, use controlled Credentials, clean child resources,",
         "and have empty Secret scans.",
         "",
@@ -838,7 +863,7 @@ def run_remote_release_gate(
         image_build = build_image(options, image, str(source["gitSha"]))
         policy = child_policy(options, spec, image.name)
         for provider in common.PROVIDERS:
-            for matrix in common.MATRICES:
+            for matrix in spec.matrices:
                 child_dir = options.output_dir / provider / matrix
                 run, child_errors = run_child(
                     repo_root=options.repo_root,
@@ -849,6 +874,9 @@ def run_remote_release_gate(
                     command=spec.child_command(options, provider, matrix, child_dir, image.name),
                     policy=policy,
                     environment=child_environment(options, provider),
+                    capture_process_output=True,
+                    process_output_redactor=redactor,
+                    forbidden_output_tokens=operator_environment_names(options),
                 )
                 runs.append(run)
                 errors.extend(child_errors)
@@ -891,7 +919,7 @@ def run_remote_release_gate(
             if cleanup_error is not None:
                 errors.append(cleanup_error.as_report_error())
 
-    required_runs = len(common.PROVIDERS) * len(common.MATRICES)
+    required_runs = len(common.PROVIDERS) * len(spec.matrices)
     if len(runs) != required_runs:
         errors.append(
             {
@@ -916,7 +944,7 @@ def run_remote_release_gate(
         else None
     )
     errors.extend(worker_image_reference_errors(runs, expected_image_id))
-    output_secret_scan = scan_child_outputs(options, redactor)
+    output_secret_scan = scan_child_outputs(options, redactor, spec.matrices)
     if output_secret_scan["findings"]:
         errors.append(
             {
@@ -991,8 +1019,14 @@ def run_remote_release_gate(
             "requiredRuns": required_runs,
             "completedRuns": len(runs),
             "providers": list(common.PROVIDERS),
+            "matrices": list(spec.matrices),
             "productCases": list(acceptance.REAL_PROVIDER_CASES),
             "failureCases": list(acceptance.REAL_PROVIDER_FAILURE_CASES),
+            "loadCases": (
+                [acceptance.REAL_PROVIDER_LOAD_CASE_ID]
+                if common.REMOTE_LOAD_MATRIX in spec.matrices
+                else []
+            ),
         },
         "security": {
             "rawChildOutputPersisted": False,

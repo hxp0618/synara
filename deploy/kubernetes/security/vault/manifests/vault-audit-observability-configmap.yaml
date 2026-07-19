@@ -1,0 +1,232 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: synara-vault-audit-observability
+data:
+  vector.yaml: |
+    data_dir: /vault/audit/vector-data
+    sources:
+      vault_audit_primary:
+        type: file
+        include:
+          - /vault/audit/audit-primary.log
+          - /vault/audit/audit-primary.log.*
+        exclude:
+          - /vault/audit/audit-primary.log.*.gz
+        read_from: beginning
+        fingerprinting:
+          strategy: device_and_inode
+        offset_key: offset
+    transforms:
+      vault_audit_primary_json:
+        type: remap
+        inputs:
+          - vault_audit_primary
+        source: |
+          .vault_audit = parse_json!(string!(.message))
+          del(.message)
+    sinks:
+      audit_siem:
+        type: http
+        inputs:
+          - vault_audit_primary_json
+        uri: ${VAULT_AUDIT_SIEM_ENDPOINT}/v1/audit/events
+        method: post
+        framing:
+          method: newline_delimited
+        encoding:
+          codec: json
+        buffer:
+          type: disk
+          max_size: 536870912
+          when_full: block
+        tls:
+          ca_file: /var/run/vault-audit-siem/ca.crt
+          crt_file: /var/run/vault-audit-siem/client.crt
+          key_file: /var/run/vault-audit-siem/client.key
+          verify_certificate: true
+          verify_hostname: true
+  ship-audit.sh: |
+    #!/bin/sh
+    set -eu
+
+    : "${VAULT_AUDIT_SIEM_ENDPOINT:?missing VAULT_AUDIT_SIEM_ENDPOINT}"
+    : "${VAULT_AUDIT_SIEM_CLIENT_CERT:?missing VAULT_AUDIT_SIEM_CLIENT_CERT}"
+    : "${VAULT_AUDIT_SIEM_CLIENT_KEY:?missing VAULT_AUDIT_SIEM_CLIENT_KEY}"
+    : "${VAULT_AUDIT_SIEM_CA_CERT:?missing VAULT_AUDIT_SIEM_CA_CERT}"
+
+    umask 077
+    mkdir -p /vault/audit/vector-data
+    chmod 0700 /vault/audit/vector-data
+    mkdir -p /var/run/vault-audit-siem
+    printf '%s\n' "${VAULT_AUDIT_SIEM_CLIENT_CERT}" > /var/run/vault-audit-siem/client.crt
+    printf '%s\n' "${VAULT_AUDIT_SIEM_CLIENT_KEY}" > /var/run/vault-audit-siem/client.key
+    printf '%s\n' "${VAULT_AUDIT_SIEM_CA_CERT}" > /var/run/vault-audit-siem/ca.crt
+
+    exec /usr/bin/vector --config /etc/vault-audit/vector.yaml
+  rotate-audit.sh: |
+    #!/bin/sh
+    set -eu
+
+    MAX_BYTES=104857600
+    KEEP_ARCHIVES=7
+    ROTATION_INTERVAL_SECONDS=60
+    FD_WAIT_ATTEMPTS=60
+
+    current_size_bytes() {
+      wc -c < "$1" | tr -d ' '
+    }
+
+    needs_rotation() {
+      current_file="$1"
+      [ -f "${current_file}" ] || return 1
+      [ "$(current_size_bytes "${current_file}")" -ge "${MAX_BYTES}" ]
+    }
+
+    ensure_active_file() {
+      current_file="$1"
+      if [ ! -e "${current_file}" ]; then
+        umask 077
+        : > "${current_file}"
+      fi
+      [ -f "${current_file}" ] || {
+        echo "Vault audit path was not a regular file: ${current_file}" >&2
+        return 1
+      }
+      chmod 0600 "${current_file}"
+    }
+
+    find_vault_server_pid() {
+      vault_pid=""
+      for proc_dir in /proc/[0-9]*; do
+        [ -r "${proc_dir}/cmdline" ] || continue
+        cmdline="$(tr '\000' ' ' < "${proc_dir}/cmdline" 2>/dev/null || true)"
+        case "${cmdline}" in
+          *"vault server"*)
+            pid="${proc_dir#/proc/}"
+            if [ -n "${vault_pid}" ]; then
+              echo "expected exactly one Vault server process, found multiple" >&2
+              return 1
+            fi
+            vault_pid="${pid}"
+            ;;
+        esac
+      done
+      [ -n "${vault_pid}" ] || {
+        echo "expected exactly one Vault server process, found none" >&2
+        return 1
+      }
+      printf '%s\n' "${vault_pid}"
+    }
+
+    rotate_stream() {
+      current_file="$1"
+      archive_suffix="$2"
+      archived_file="${current_file}.${archive_suffix}"
+
+      mv -- "${current_file}" "${archived_file}"
+      umask 077
+      : > "${current_file}"
+      chmod 0600 "${current_file}"
+      printf '%s|%s\n' "${current_file}" "${archived_file}"
+    }
+
+    vault_fd_points_to() {
+      vault_pid="$1"
+      expected_path="$2"
+      for fd_path in /proc/"${vault_pid}"/fd/*; do
+        [ "$(readlink "${fd_path}" 2>/dev/null || true)" = "${expected_path}" ] && return 0
+      done
+      return 1
+    }
+
+    wait_for_vault_fd_rollover() {
+      vault_pid="$1"
+      rotation_plan="$2"
+      attempts="${FD_WAIT_ATTEMPTS}"
+
+      while [ "${attempts}" -gt 0 ]; do
+        pending=0
+        while IFS='|' read -r current_file archived_file; do
+          [ -n "${current_file}" ] || continue
+          if ! vault_fd_points_to "${vault_pid}" "${current_file}" || vault_fd_points_to "${vault_pid}" "${archived_file}"; then
+            pending=1
+            break
+          fi
+        done < "${rotation_plan}"
+
+        [ "${pending}" -eq 0 ] && return 0
+        attempts=$((attempts - 1))
+        sleep 1
+      done
+
+      echo "Vault did not reopen audit file descriptors before timeout" >&2
+      return 1
+    }
+
+    list_archives() {
+      current_file="$1"
+      ls -1t "${current_file}".* 2>/dev/null || true
+    }
+
+    compress_stale_archives() {
+      current_file="$1"
+      newest_archive=""
+      for candidate in $(list_archives "${current_file}"); do
+        newest_archive="${candidate}"
+        break
+      done
+
+      for candidate in $(list_archives "${current_file}"); do
+        [ "${candidate}" = "${newest_archive}" ] && continue
+        case "${candidate}" in
+          *.gz)
+            continue
+            ;;
+        esac
+        gzip -f -- "${candidate}"
+      done
+    }
+
+    prune_archives() {
+      current_file="$1"
+      retained=0
+      for candidate in $(list_archives "${current_file}"); do
+        retained=$((retained + 1))
+        if [ "${retained}" -gt "${KEEP_ARCHIVES}" ]; then
+          rm -f -- "${candidate}"
+        fi
+      done
+    }
+
+    umask 077
+
+    for current_file in /vault/audit/audit-primary.log /vault/audit/audit-secondary.log; do
+      ensure_active_file "${current_file}"
+    done
+
+    while true; do
+      rotation_plan=/tmp/vault-audit-rotation.plan
+      : > "${rotation_plan}"
+      timestamp="$(date -u +%Y%m%d%H%M%S)"
+
+      for current_file in /vault/audit/audit-primary.log /vault/audit/audit-secondary.log; do
+        if needs_rotation "${current_file}"; then
+          rotate_stream "${current_file}" "${timestamp}" >> "${rotation_plan}"
+        fi
+      done
+
+      if [ -s "${rotation_plan}" ]; then
+        vault_pid="$(find_vault_server_pid)"
+        kill -HUP "${vault_pid}"
+        wait_for_vault_fd_rollover "${vault_pid}" "${rotation_plan}"
+
+        while IFS='|' read -r current_file archived_file; do
+          [ -n "${current_file}" ] || continue
+          compress_stale_archives "${current_file}"
+          prune_archives "${current_file}"
+        done < "${rotation_plan}"
+      fi
+
+      sleep "${ROTATION_INTERVAL_SECONDS}"
+    done

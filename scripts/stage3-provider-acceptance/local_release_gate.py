@@ -13,6 +13,7 @@ import argparse
 import dataclasses
 import datetime as dt
 import json
+import os
 import pathlib
 import re
 import subprocess
@@ -23,6 +24,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 import acceptance_runner as acceptance
+import controlled_remote_release_gate as remote
 import release_gate_common as common
 
 
@@ -35,22 +37,10 @@ NODE_MINIMUM = (24, 13, 1)
 NODE_MAXIMUM_EXCLUSIVE = (25, 0, 0)
 EXPECTED_UNSUPPORTED: Mapping[tuple[str, str], frozenset[str]] = {
     ("codex", "product"): frozenset({"real-provider.terminal-large-log"}),
-    ("claudeAgent", "product"): frozenset(
-        {"real-provider.terminal-large-log", "real-provider.compact-boundary"}
-    ),
+    ("claudeAgent", "product"): frozenset({"real-provider.compact-boundary"}),
     ("codex", "failure"): frozenset(),
     ("claudeAgent", "failure"): frozenset(),
 }
-LOCAL_CHILD_POLICY = common.ChildReportPolicy(
-    target="local",
-    runner_executable="node",
-    expected_unsupported=EXPECTED_UNSUPPORTED,
-    authentication="ambient",
-    credential_fields={provider: None for provider in PROVIDERS},
-    controlled_base_urls={provider: False for provider in PROVIDERS},
-    provider_models={provider: None for provider in PROVIDERS},
-    cleanup_true_fields=("controlPlaneStopped", "stateRemoved"),
-)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -60,6 +50,12 @@ class ReleaseGateOptions:
     runner_command: tuple[str, str]
     product_timeout_seconds: float
     failure_timeout_seconds: float
+    codex_credential: remote.CredentialSource
+    claude_credential: remote.CredentialSource
+    codex_model: str | None = None
+    claude_model: str | None = None
+    codex_model_environment_name: str | None = None
+    claude_model_environment_name: str | None = None
 
 
 ReleaseGateError = common.ReleaseGateError
@@ -76,13 +72,58 @@ def parse_args(argv: Sequence[str]) -> ReleaseGateOptions:
     parser.add_argument("--output-dir", type=pathlib.Path)
     parser.add_argument("--product-timeout", type=float, default=1800.0)
     parser.add_argument("--failure-timeout", type=float, default=420.0)
+    parser.add_argument("--codex-credential-env", required=True)
+    parser.add_argument("--codex-base-url-env")
+    remote.add_provider_model_arguments(parser, "codex")
+    parser.add_argument("--claude-credential-env", required=True)
+    parser.add_argument(
+        "--claude-credential-field",
+        choices=acceptance.REAL_PROVIDER_CREDENTIAL_FIELDS,
+        default="apiKey",
+    )
+    parser.add_argument("--claude-base-url-env")
+    remote.add_provider_model_arguments(parser, "claude")
     parsed = parser.parse_args(argv)
     if parsed.product_timeout <= 0 or parsed.failure_timeout <= 0:
         parser.error("matrix timeouts must be positive")
     try:
         runner_command = parse_runner_command(parsed.runner_command_json, repo_root)
-    except ReleaseGateError as error:
-        parser.error(error.message)
+        codex_credential = remote.parse_credential_source(
+            parsed.codex_credential_env,
+            "apiKey",
+            parsed.codex_base_url_env,
+            "Codex",
+        )
+        claude_credential = remote.parse_credential_source(
+            parsed.claude_credential_env,
+            parsed.claude_credential_field,
+            parsed.claude_base_url_env,
+            "Claude",
+        )
+        codex_model_environment_name = acceptance.parse_environment_variable_name(
+            parsed.codex_model_env,
+            "--codex-model-env",
+        )
+        claude_model_environment_name = acceptance.parse_environment_variable_name(
+            parsed.claude_model_env,
+            "--claude-model-env",
+        )
+        codex_model = remote.parse_provider_model_argument(
+            parsed.codex_model,
+            codex_model_environment_name,
+            provider_label="Codex",
+            model_option="--codex-model",
+            model_env_option="--codex-model-env",
+        )
+        claude_model = remote.parse_provider_model_argument(
+            parsed.claude_model,
+            claude_model_environment_name,
+            provider_label="Claude",
+            model_option="--claude-model",
+            model_env_option="--claude-model-env",
+        )
+    except (ReleaseGateError, ValueError) as error:
+        parser.error(error.message if isinstance(error, ReleaseGateError) else str(error))
     run_id = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:8]
     output_dir = (
         parsed.output_dir
@@ -94,6 +135,124 @@ def parse_args(argv: Sequence[str]) -> ReleaseGateOptions:
         runner_command=runner_command,
         product_timeout_seconds=parsed.product_timeout,
         failure_timeout_seconds=parsed.failure_timeout,
+        codex_credential=codex_credential,
+        claude_credential=claude_credential,
+        codex_model=codex_model,
+        claude_model=claude_model,
+        codex_model_environment_name=codex_model_environment_name,
+        claude_model_environment_name=claude_model_environment_name,
+    )
+
+
+def credential_source(options: ReleaseGateOptions, provider: str) -> remote.CredentialSource:
+    return remote.credential_source(options, provider)
+
+
+def provider_model(options: ReleaseGateOptions, provider: str) -> str | None:
+    return remote.provider_model(options, provider)
+
+
+def provider_model_environment_name(
+    options: ReleaseGateOptions,
+    provider: str,
+) -> str | None:
+    if provider == "codex":
+        return options.codex_model_environment_name
+    if provider == "claudeAgent":
+        return options.claude_model_environment_name
+    raise ValueError(f"unsupported Local release Provider: {provider}")
+
+
+def forbidden_environment_names(options: ReleaseGateOptions) -> tuple[str, ...]:
+    return tuple(
+        sorted(
+            {
+                value
+                for provider in PROVIDERS
+                for value in (
+                    credential_source(options, provider).environment_name,
+                    credential_source(options, provider).base_url_environment_name,
+                    provider_model_environment_name(options, provider),
+                )
+                if value is not None
+            }
+        )
+    )
+
+
+def local_process_environment(environment: Mapping[str, str]) -> dict[str, str]:
+    allowed = (
+        "PATH",
+        "HOME",
+        "USER",
+        "LOGNAME",
+        "USERNAME",
+        "USERPROFILE",
+        "HOMEDRIVE",
+        "HOMEPATH",
+        "TMPDIR",
+        "TMP",
+        "TEMP",
+        "SYSTEMROOT",
+        "WINDIR",
+        "COMSPEC",
+        "PATHEXT",
+        "LANG",
+        "LANGUAGE",
+        "LC_ALL",
+        "LC_CTYPE",
+        "TZ",
+        "TERM",
+        "COLORTERM",
+        "SHELL",
+        "NO_COLOR",
+        "FORCE_COLOR",
+        "CLICOLOR",
+        "CLICOLOR_FORCE",
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+        "NODE_EXTRA_CA_CERTS",
+        "GOCACHE",
+        "GOMODCACHE",
+        "GOPATH",
+        "GOROOT",
+        "DOCKER_HOST",
+        "DOCKER_CONTEXT",
+        "DOCKER_CONFIG",
+        "XDG_RUNTIME_DIR",
+    )
+    selected = {key: environment[key] for key in allowed if key in environment}
+    selected.setdefault("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+    return selected
+
+
+def local_child_environment(
+    options: ReleaseGateOptions,
+    provider: str,
+    environment: Mapping[str, str],
+) -> dict[str, str]:
+    return remote.controlled_child_environment(
+        options,
+        provider,
+        local_process_environment(environment),
+    )
+
+
+def child_policy(options: ReleaseGateOptions) -> common.ChildReportPolicy:
+    return common.ChildReportPolicy(
+        target="local",
+        runner_executable="node",
+        expected_unsupported=EXPECTED_UNSUPPORTED,
+        authentication="controlled",
+        credential_fields={
+            provider: credential_source(options, provider).field for provider in PROVIDERS
+        },
+        controlled_base_urls={
+            provider: credential_source(options, provider).base_url_environment_name is not None
+            for provider in PROVIDERS
+        },
+        provider_models={provider: provider_model(options, provider) for provider in PROVIDERS},
+        cleanup_true_fields=("controlPlaneStopped", "stateRemoved"),
     )
 
 
@@ -179,13 +338,33 @@ def repository_state(repo_root: pathlib.Path) -> dict[str, Any]:
     return common.repository_state(repo_root)
 
 
-def build_provider_host(options: ReleaseGateOptions) -> dict[str, Any]:
+def build_provider_host(
+    options: ReleaseGateOptions,
+    redactor: acceptance.SecretRedactor,
+) -> dict[str, Any]:
     started = time.monotonic()
     completed = subprocess.run(
         ["bun", "run", "--cwd", "apps/provider-host", "build"],
         cwd=options.repo_root,
+        env=local_process_environment(os.environ),
         check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
     )
+    process_output_scan = common.scan_process_output(
+        completed.stdout if isinstance(completed.stdout, str) else "",
+        completed.stderr if isinstance(completed.stderr, str) else "",
+        redactor=redactor,
+        forbidden_tokens=forbidden_environment_names(options),
+    )
+    if process_output_scan["findings"]:
+        raise ReleaseGateError(
+            "release.provider_host_build_output_secret_scan_failed",
+            "Provider Host build stdout or stderr contained controlled Provider material.",
+            {"findingCount": len(process_output_scan["findings"])},
+        )
     if completed.returncode != 0:
         raise ReleaseGateError(
             "release.provider_host_build_failed",
@@ -203,6 +382,7 @@ def build_provider_host(options: ReleaseGateOptions) -> dict[str, Any]:
         "durationMs": round((time.monotonic() - started) * 1000),
         "output": str(host_path.relative_to(options.repo_root)),
         "sha256": file_sha256(host_path),
+        "processOutputScan": process_output_scan,
     }
 
 
@@ -212,13 +392,14 @@ def child_command(
     matrix: str,
     output_dir: pathlib.Path,
 ) -> list[str]:
+    source = credential_source(options, provider)
     timeout = (
         options.product_timeout_seconds
         if matrix == "product"
         else options.failure_timeout_seconds
     )
     matrix_flag = "--real-provider-matrix" if matrix == "product" else "--real-provider-failure-matrix"
-    return [
+    command = [
         sys.executable,
         str(options.repo_root / "scripts" / "stage3-provider-acceptance" / "acceptance_runner.py"),
         "--suite",
@@ -230,11 +411,21 @@ def child_command(
         "--runner-command-json",
         json.dumps(list(options.runner_command), separators=(",", ":")),
         matrix_flag,
+        "--real-provider-credential-env",
+        source.environment_name,
+        "--real-provider-credential-field",
+        source.field,
         "--output-dir",
         str(output_dir),
         "--timeout",
         str(timeout),
     ]
+    if source.base_url_environment_name is not None:
+        command.extend(["--real-provider-base-url-env", source.base_url_environment_name])
+    model = provider_model(options, provider)
+    if model is not None:
+        command.extend(["--real-provider-model", model])
+    return command
 
 
 def expected_case_ids(matrix: str) -> frozenset[str]:
@@ -244,6 +435,7 @@ def expected_case_ids(matrix: str) -> frozenset[str]:
 def validate_child_report(
     report: Mapping[str, Any],
     *,
+    options: ReleaseGateOptions,
     provider: str,
     matrix: str,
     expected_git_sha: str,
@@ -253,8 +445,9 @@ def validate_child_report(
         provider=provider,
         matrix=matrix,
         expected_git_sha=expected_git_sha,
-        policy=LOCAL_CHILD_POLICY,
+        policy=child_policy(options),
     )
+
 
 def file_sha256(path: pathlib.Path) -> str:
     return common.file_sha256(path)
@@ -270,6 +463,7 @@ def run_child(
     provider: str,
     matrix: str,
     expected_git_sha: str,
+    redactor: acceptance.SecretRedactor,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     child_dir = options.output_dir / provider / matrix
     return common.run_child_report(
@@ -279,11 +473,26 @@ def run_child(
         matrix=matrix,
         expected_git_sha=expected_git_sha,
         command=child_command(options, provider, matrix, child_dir),
-        policy=LOCAL_CHILD_POLICY,
+        policy=child_policy(options),
+        environment=local_child_environment(options, provider, os.environ),
+        capture_process_output=True,
+        process_output_redactor=redactor,
+        forbidden_output_tokens=forbidden_environment_names(options),
     )
+
 
 def catalog_consensus_errors(runs: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     return common.catalog_consensus_errors(runs)
+
+
+def operator_environment_name_findings(
+    options: ReleaseGateOptions,
+) -> list[dict[str, Any]]:
+    return common.output_file_token_findings(
+        options.output_dir,
+        forbidden_environment_names(options),
+    )
+
 
 def markdown_from_report(report: Mapping[str, Any]) -> str:
     lines = [
@@ -377,6 +586,7 @@ def failure_report(
             "productTimeoutSeconds": options.product_timeout_seconds,
             "failureTimeoutSeconds": options.failure_timeout_seconds,
             "separateChildBoundaries": True,
+            "authentication": "controlled",
         },
         "runs": [],
         "errors": [error.as_report_error()],
@@ -395,9 +605,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     started = time.monotonic()
     run_id = f"stage3-provider-local-release-{uuid.uuid4()}"
     try:
+        redactor = remote.credential_redactor(options)
         source = repository_state(options.repo_root)
         runtime = {"node": inspect_node_runtime(options.runner_command[0])}
-        build = build_provider_host(options)
+        build = build_provider_host(options, redactor)
     except (OSError, subprocess.SubprocessError, ReleaseGateError) as raw_error:
         error = (
             raw_error
@@ -426,10 +637,32 @@ def main(argv: Sequence[str] | None = None) -> int:
                 provider=provider,
                 matrix=matrix,
                 expected_git_sha=str(source["gitSha"]),
+                redactor=redactor,
             )
             runs.append(run)
             errors.extend(child_errors)
     errors.extend(catalog_consensus_errors(runs))
+    output_secret_scan = remote.scan_child_outputs(options, redactor, MATRICES)
+    if output_secret_scan["findings"]:
+        errors.append(
+            {
+                "code": "release.aggregate_secret_scan_failed",
+                "message": "Aggregate child output scan found controlled Credential material.",
+                "evidence": {"findingCount": len(output_secret_scan["findings"])},
+            }
+        )
+    environment_name_findings = operator_environment_name_findings(options)
+    if environment_name_findings:
+        errors.append(
+            {
+                "code": "release.credential_environment_name_persisted",
+                "message": (
+                    "Child output persisted an operator Credential, model, or Base URL "
+                    "environment-variable name."
+                ),
+                "evidence": {"files": environment_name_findings},
+            }
+        )
     status = "pass" if not errors and all(run.get("status") == "pass" for run in runs) else "fail"
     catalog_hashes = {
         source_value.get("providerCapabilityCatalogSha256")
@@ -462,6 +695,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             "productTimeoutSeconds": options.product_timeout_seconds,
             "failureTimeoutSeconds": options.failure_timeout_seconds,
             "separateChildBoundaries": True,
+            "authentication": "controlled",
+            "providers": {
+                provider: {
+                    "credentialField": credential_source(options, provider).field,
+                    "controlledBaseUrl": (
+                        credential_source(options, provider).base_url_environment_name is not None
+                    ),
+                    "model": provider_model(options, provider),
+                }
+                for provider in PROVIDERS
+            },
         },
         "coverage": {
             "requiredRuns": len(PROVIDERS) * len(MATRICES),
@@ -474,6 +718,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             "rawChildOutputPersisted": False,
             "childSecretScansRequired": True,
             "childCleanupRequired": True,
+            "credentialEnvironmentNamesPersisted": bool(environment_name_findings),
+            "aggregateChildOutputScan": output_secret_scan,
         },
         "runs": runs,
         "errors": errors,

@@ -1,0 +1,41 @@
+version: 0.1
+
+log:
+  level: info
+
+storage:
+  filesystem:
+    rootdirectory: /var/lib/registry
+  delete:
+    enabled: false
+
+http:
+  addr: :5000
+  host: https://registry.example.com
+  tls:
+    certificate: /certs/tls.crt
+    key: /certs/tls.key
+  headers:
+    X-Content-Type-Options:
+      - nosniff
+
+auth:
+  htpasswd:
+    realm: synara-registry
+    path: /auth/htpasswd
+
+health:
+  storagedriver:
+    enabled: true
+    interval: 10s
+    threshold: 3
+
+maintenance:
+  uploadpurging:
+    enabled: true
+    age: 168h
+    interval: 24h
+    dryrun: false
+
+validation:
+  disabled: false

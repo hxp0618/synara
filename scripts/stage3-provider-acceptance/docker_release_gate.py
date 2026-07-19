@@ -25,7 +25,10 @@ EXPECTED_UNSUPPORTED: Mapping[tuple[str, str], frozenset[str]] = {
     ("claudeAgent", "product"): frozenset({"real-provider.compact-boundary"}),
     ("codex", "failure"): frozenset(),
     ("claudeAgent", "failure"): frozenset(),
+    ("codex", "load"): frozenset(),
+    ("claudeAgent", "load"): frozenset(),
 }
+REMOTE_GATE_MATRICES = (*common.MATRICES, common.REMOTE_LOAD_MATRIX)
 
 CredentialSource = remote.CredentialSource
 GateWorkerImage = remote.GateWorkerImage
@@ -42,6 +45,8 @@ class DockerReleaseGateOptions:
     output_dir: pathlib.Path
     product_timeout_seconds: float
     failure_timeout_seconds: float
+    real_provider_load_sla_file: pathlib.Path
+    real_provider_load_restart_every_waves: int
     codex_credential: CredentialSource
     claude_credential: CredentialSource
     docker_socket_path: pathlib.Path
@@ -50,6 +55,8 @@ class DockerReleaseGateOptions:
     docker_nano_cpus: int
     codex_model: str | None = None
     claude_model: str | None = None
+    codex_model_environment_name: str | None = None
+    claude_model_environment_name: str | None = None
     go_proxy: str | None = None
 
 
@@ -71,6 +78,16 @@ def parse_args(argv: Sequence[str]) -> DockerReleaseGateOptions:
     parser.add_argument("--product-timeout", type=float, default=2400.0)
     parser.add_argument("--failure-timeout", type=float, default=900.0)
     parser.add_argument(
+        "--real-provider-load-sla-file",
+        type=pathlib.Path,
+        default=repo_root / "deploy" / "worker" / "production-load-sla.json",
+    )
+    parser.add_argument(
+        "--real-provider-load-restart-every-waves",
+        type=int,
+        default=10,
+    )
+    parser.add_argument(
         "--docker-socket-path",
         type=pathlib.Path,
         default=pathlib.Path("/var/run/docker.sock"),
@@ -86,6 +103,15 @@ def parse_args(argv: Sequence[str]) -> DockerReleaseGateOptions:
         parser.error("--docker-memory-bytes must be at least 67108864")
     if parsed.docker_nano_cpus <= 0:
         parser.error("--docker-nano-cpus must be positive")
+    if (
+        parsed.real_provider_load_restart_every_waves < 0
+        or parsed.real_provider_load_restart_every_waves
+        > acceptance.REAL_PROVIDER_LOAD_MAX_WAVES
+    ):
+        parser.error(
+            "--real-provider-load-restart-every-waves must be between 0 and "
+            f"{acceptance.REAL_PROVIDER_LOAD_MAX_WAVES}"
+        )
     docker_socket_path = parsed.docker_socket_path.expanduser().resolve()
     if not docker_socket_path.is_absolute():
         parser.error("--docker-socket-path must be absolute")
@@ -93,6 +119,12 @@ def parse_args(argv: Sequence[str]) -> DockerReleaseGateOptions:
     if not docker_host or re.fullmatch(r"[A-Za-z0-9._-]+", docker_host) is None:
         parser.error("--docker-control-plane-host must be a hostname or address without scheme or port")
     try:
+        real_provider_load_sla_file = parsed.real_provider_load_sla_file.expanduser().resolve()
+        acceptance.parse_operator_approved_sla_file(
+            real_provider_load_sla_file,
+            "real-provider-load",
+            option="--real-provider-load-sla-file",
+        )
         codex_credential = parse_credential_source(
             parsed.codex_credential_env,
             "apiKey",
@@ -119,6 +151,14 @@ def parse_args(argv: Sequence[str]) -> DockerReleaseGateOptions:
             model_option="--claude-model",
             model_env_option="--claude-model-env",
         )
+        codex_model_environment_name = acceptance.parse_environment_variable_name(
+            parsed.codex_model_env,
+            "--codex-model-env",
+        )
+        claude_model_environment_name = acceptance.parse_environment_variable_name(
+            parsed.claude_model_env,
+            "--claude-model-env",
+        )
         go_proxy = common.normalize_go_proxy(parsed.go_proxy)
     except ValueError as error:
         parser.error(str(error))
@@ -128,6 +168,8 @@ def parse_args(argv: Sequence[str]) -> DockerReleaseGateOptions:
         output_dir=output_dir.expanduser().resolve(),
         product_timeout_seconds=parsed.product_timeout,
         failure_timeout_seconds=parsed.failure_timeout,
+        real_provider_load_sla_file=real_provider_load_sla_file,
+        real_provider_load_restart_every_waves=parsed.real_provider_load_restart_every_waves,
         codex_credential=codex_credential,
         claude_credential=claude_credential,
         docker_socket_path=docker_socket_path,
@@ -136,6 +178,8 @@ def parse_args(argv: Sequence[str]) -> DockerReleaseGateOptions:
         docker_nano_cpus=parsed.docker_nano_cpus,
         codex_model=codex_model,
         claude_model=claude_model,
+        codex_model_environment_name=codex_model_environment_name,
+        claude_model_environment_name=claude_model_environment_name,
         go_proxy=go_proxy,
     )
 
@@ -175,15 +219,14 @@ def child_command(
     source = credential_source(options, provider)
     timeout = (
         options.product_timeout_seconds
-        if matrix == "product"
+        if matrix in {"product", common.REMOTE_LOAD_MATRIX}
         else options.failure_timeout_seconds
     )
-    matrix_flag = "--real-provider-matrix" if matrix == "product" else "--real-provider-failure-matrix"
     command = [
         sys.executable,
         str(options.repo_root / "scripts" / "stage3-provider-acceptance" / "acceptance_runner.py"),
         "--suite",
-        "real-provider-smoke",
+        "real-provider-load" if matrix == common.REMOTE_LOAD_MATRIX else "real-provider-smoke",
         "--target",
         "docker",
         "--provider",
@@ -194,7 +237,6 @@ def child_command(
         source.environment_name,
         "--real-provider-credential-field",
         source.field,
-        matrix_flag,
         "--output-dir",
         str(output_dir),
         "--timeout",
@@ -211,6 +253,19 @@ def child_command(
         worker_image_name,
         "--docker-skip-worker-build",
     ]
+    if matrix == "product":
+        command.append("--real-provider-matrix")
+    elif matrix == "failure":
+        command.append("--real-provider-failure-matrix")
+    elif matrix == common.REMOTE_LOAD_MATRIX:
+        command.extend(
+            [
+                "--real-provider-load-restart-every-waves",
+                str(options.real_provider_load_restart_every_waves),
+                "--operator-approved-sla-file",
+                str(options.real_provider_load_sla_file),
+            ]
+        )
     if source.base_url_environment_name is not None:
         command.extend(["--real-provider-base-url-env", source.base_url_environment_name])
     model = remote.provider_model(options, provider)
@@ -288,9 +343,10 @@ def target_spec() -> remote.RemoteReleaseTargetSpec:
         inspect_runtime=inspect_docker_runtime_report,
         target_configuration=target_configuration,
         evidence_boundary=(
-            "A pass closes the implemented real Codex/Claude Docker product and controlled-failure release slice.",
-            "It does not close SSH, Kubernetes, registry-pushed multi-arch rollout, concurrency, or soak gates.",
+            "A pass closes the implemented real Codex/Claude Docker product, controlled-failure, and one-wave load admission release slice.",
+            "It does not close SSH, registry-pushed multi-arch rollout, production-duration SLA/soak, or multi-node evidence.",
         ),
+        matrices=REMOTE_GATE_MATRICES,
     )
 
 

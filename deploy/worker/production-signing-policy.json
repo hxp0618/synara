@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "mode": "kms-key",
+  "requireTransparencyLog": true,
+  "keyReference": "hashivault://synara-worker-release",
+  "credentialEnvironment": ["VAULT_ADDR", "VAULT_TOKEN", "VAULT_CACERT"],
+  "identityTokenEnvironment": null,
+  "certificateIdentity": null,
+  "certificateIdentityRegexp": null,
+  "certificateOidcIssuer": null,
+  "certificateOidcIssuerRegexp": null
+}

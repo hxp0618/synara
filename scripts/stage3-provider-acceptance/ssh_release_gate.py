@@ -59,6 +59,8 @@ class SSHReleaseGateOptions:
     ssh_allow_external_host: bool
     codex_model: str | None = None
     claude_model: str | None = None
+    codex_model_environment_name: str | None = None
+    claude_model_environment_name: str | None = None
 
 
 def parse_args(argv: Sequence[str]) -> SSHReleaseGateOptions:
@@ -183,6 +185,14 @@ def parse_args(argv: Sequence[str]) -> SSHReleaseGateOptions:
             model_option="--claude-model",
             model_env_option="--claude-model-env",
         )
+        codex_model_environment_name = acceptance.parse_environment_variable_name(
+            parsed.codex_model_env,
+            "--codex-model-env",
+        )
+        claude_model_environment_name = acceptance.parse_environment_variable_name(
+            parsed.claude_model_env,
+            "--claude-model-env",
+        )
     except ValueError as error:
         parser.error(str(error))
     output_dir = parsed.output_dir or remote.default_output_dir(repo_root, "ssh")
@@ -207,6 +217,8 @@ def parse_args(argv: Sequence[str]) -> SSHReleaseGateOptions:
         ssh_allow_external_host=parsed.ssh_allow_external_host,
         codex_model=codex_model,
         claude_model=claude_model,
+        codex_model_environment_name=codex_model_environment_name,
+        claude_model_environment_name=claude_model_environment_name,
     )
 
 
@@ -793,6 +805,7 @@ def run_ssh_child_report(
     expected_versions: Mapping[str, str],
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     child_dir = options.output_dir / provider / matrix
+    process_output_redactor = remote.credential_redactor(options)
     record, errors = common.run_child_report(
         repo_root=options.repo_root,
         output_dir=options.output_dir,
@@ -802,6 +815,9 @@ def run_ssh_child_report(
         command=child_command(options, provider, matrix, child_dir),
         policy=policy,
         environment=child_environment(options, provider),
+        capture_process_output=True,
+        process_output_redactor=process_output_redactor,
+        forbidden_output_tokens=remote.operator_environment_names(options),
     )
     json_path = child_dir / acceptance.JSON_REPORT_NAME
     if not json_path.is_file():
@@ -1176,7 +1192,7 @@ def run_ssh_release_gate(
     if runs:
         errors.extend(common.catalog_consensus_errors(runs))
         errors.extend(_runtime_consensus_errors(runs))
-    output_secret_scan = remote.scan_child_outputs(options, redactor)
+    output_secret_scan = remote.scan_child_outputs(options, redactor, common.MATRICES)
     if output_secret_scan["findings"]:
         errors.append(
             {

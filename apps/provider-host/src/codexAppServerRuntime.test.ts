@@ -7,11 +7,25 @@ import {
 } from "@synara/shared/codexCollaborationMode";
 import { describe, expect, it } from "vitest";
 
+import { codexThreadOpenPermissions } from "./codexAppServerRuntime";
 import { startProviderHostRun, type RunnerMessage } from "./providerHost";
 
 const CONTROLLED_PROVIDER_PROXY = "http://provider-user:provider-password@proxy.example.test:8080";
 
 describe("Codex app-server runtime", () => {
+  it("uses durable approval without an unavailable nested container sandbox", () => {
+    expect(codexThreadOpenPermissions("approval-required", true)).toEqual({
+      approvalPolicy: "untrusted",
+      approvalsReviewer: "user",
+      sandbox: "danger-full-access",
+    });
+    expect(codexThreadOpenPermissions("full-access", true)).toEqual({
+      approvalPolicy: "never",
+      approvalsReviewer: "user",
+      sandbox: "danger-full-access",
+    });
+  });
+
   it("isolates controlled Credential authentication from ambient CODEX_HOME", async () => {
     await withFakeCodex("credential-environment", async (directory, _tracePath, environment) => {
       const providerStateDirectory = join(directory, "provider-state");

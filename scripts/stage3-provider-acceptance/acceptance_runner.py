@@ -21,6 +21,7 @@ import http.server
 import io
 import ipaddress
 import json
+import math
 import os
 import pathlib
 import re
@@ -140,6 +141,7 @@ MARKDOWN_REPORT_NAME = "acceptance-report.md"
 PROVIDERS = ("codex", "claudeAgent", "cursor", "antigravity", "grok", "kilo", "opencode", "pi")
 FIXTURE_SUPPORTED_PROVIDERS = frozenset({"codex", "claudeAgent"})
 REAL_PROVIDER_SMOKE_PROVIDERS = frozenset({"codex", "claudeAgent"})
+REAL_PROVIDER_RUNTIME_SUITES = frozenset({"real-provider-smoke", "real-provider-load"})
 REAL_PROVIDER_CREDENTIAL_FIELDS = ("apiKey", "authToken")
 FIXTURE_CONCURRENCY_PROVIDERS = ("codex", "claudeAgent")
 FIXTURE_CONCURRENCY_WORKERS = 2
@@ -151,6 +153,12 @@ FIXTURE_LOAD_DURATION_MAX_WAVES = 10_000
 FIXTURE_LOAD_DURATION_MAX_SECONDS = 86_400.0
 FIXTURE_LOAD_SUITES = frozenset({"fixture-load", "fixture-load-failure"})
 FIXTURE_PARALLEL_DOCKER_SUITES = FIXTURE_LOAD_SUITES | {"fixture-concurrency"}
+REAL_PROVIDER_LOAD_TARGETS = ("docker", "kubernetes")
+REAL_PROVIDER_LOAD_DEFAULT_WAVES = 1
+REAL_PROVIDER_LOAD_MAX_WAVES = 400
+REAL_PROVIDER_LOAD_SESSIONS = 4
+REAL_PROVIDER_LOAD_CONCURRENCY = 2
+REAL_PROVIDER_LOAD_CASE_ID = "real-provider.load.multi-session-admission-wave"
 KUBERNETES_ACCEPTANCE_RESOURCE_CONFIGURATION: Mapping[str, str] = {
     "cpuRequest": "100m",
     "cpuLimit": "1",
@@ -183,6 +191,7 @@ SUITES = (
     "fixture-load-failure",
     "fixture-retention-concurrency",
     "real-provider-smoke",
+    "real-provider-load",
 )
 REAL_PROVIDER_PRE_RESTART_CASES = (
     "approval",
@@ -271,6 +280,10 @@ REAL_PROVIDER_FAILURE_CASE_METADATA: Mapping[str, Mapping[str, str]] = {
         "name": "Expire the authenticated Provider Cursor before restart continuity",
     },
 }
+REAL_PROVIDER_LOAD_CASE_METADATA: Mapping[str, str] = {
+    "id": REAL_PROVIDER_LOAD_CASE_ID,
+    "name": "Hold two real Provider Approval Turns active, reject third/fourth admissions, and reuse both slots",
+}
 FAILURE_CASES = (
     "provider-malformed",
     "provider-oversized",
@@ -351,6 +364,14 @@ def elapsed_ms(started: float) -> int:
     return max(0, round((time.monotonic() - started) * 1000))
 
 
+def is_real_provider_runtime_suite(suite: str) -> bool:
+    return suite in REAL_PROVIDER_RUNTIME_SUITES
+
+
+def is_duration_aware_load_suite(suite: str) -> bool:
+    return suite in {*FIXTURE_LOAD_SUITES, "real-provider-load"}
+
+
 def duration_distribution_ms(values: Sequence[int]) -> dict[str, int | float]:
     if not values:
         raise ValueError("duration distribution requires at least one sample")
@@ -428,13 +449,30 @@ def terminal_large_node_command(node_executable: str = "node") -> str:
     )
 
 
-def real_provider_read_only_output_command(content: bytes) -> str:
+def real_provider_read_only_output_command(
+    content: bytes,
+    *,
+    nonce: str | None = None,
+) -> str:
     output = json.dumps(content.decode("ascii"))
-    return f"node -e 'process.stdout.write({output})'"
+    nonce_statement = ""
+    if nonce is not None:
+        if re.fullmatch(r"[A-Za-z0-9_.:-]{1,256}", nonce) is None:
+            raise ValueError("read-only command nonce must be a bounded safe identifier")
+        nonce_statement = f"void {json.dumps(nonce)};"
+    return f"node -e '{nonce_statement}process.stdout.write({output})'"
 
 
-def real_provider_approval_command() -> str:
-    return real_provider_read_only_output_command(REAL_PROVIDER_APPROVAL_CONTENT)
+def real_provider_approval_command(turn_marker: str | None = None) -> str:
+    turn_nonce = None
+    if turn_marker is not None:
+        if re.fullmatch(r"[A-Za-z0-9_.:-]{1,256}", turn_marker) is None:
+            raise ValueError("approval Turn marker must be a bounded safe identifier")
+        turn_nonce = "turn-" + hashlib.sha256(turn_marker.encode("utf-8")).hexdigest()[:24]
+    return real_provider_read_only_output_command(
+        REAL_PROVIDER_APPROVAL_CONTENT,
+        nonce=turn_nonce,
+    )
 
 
 def real_provider_host_crash_command() -> str:
@@ -443,7 +481,11 @@ def real_provider_host_crash_command() -> str:
 
 def real_provider_approval_tool_prompt(command: str) -> str:
     return (
-        "Use the Bash or shell tool exactly once. Do not emit any assistant text before the tool call. "
+        "This is a new Turn. Ignore every matching command or tool call from earlier Turns when "
+        "deciding what to do now. In this current Turn, use the Bash or shell tool exactly once, "
+        "even if the identical command already ran earlier. Do not emit any assistant text before "
+        "the tool call. Use the shell tool's ordinary approval path: do not request escalated "
+        "permissions and do not set sandbox_permissions, justification, or prefix_rule. "
         "Run this exact read-only Node command as the sole shell command:\n"
         f"{command}\n"
         "Do not add redirection, pipes, wrappers, or file changes."
@@ -486,7 +528,7 @@ def real_provider_approval_gated_prompt(command: str, marker: str) -> str:
 
 
 def real_provider_approval_prompt(marker: str) -> str:
-    return real_provider_approval_gated_prompt(real_provider_approval_command(), marker)
+    return real_provider_approval_gated_prompt(real_provider_approval_command(marker), marker)
 
 
 def real_provider_steer_prompt(marker: str) -> str:
@@ -896,6 +938,9 @@ class RunnerOptions:
     load_waves: int
     load_min_duration_seconds: float
     load_max_waves: int
+    real_provider_load_restart_every_waves: int
+    operator_approved_sla: OperatorApprovedSla | None
+    operator_approved_sla_file: pathlib.Path | None
     worker_lease_ttl: str
     worker_heartbeat_timeout: str
     ssh_orbctl_bin: str
@@ -944,6 +989,64 @@ class RunnerOptions:
     real_provider_model: str | None
 
 
+@dataclasses.dataclass(frozen=True)
+class OperatorApprovedSlaPercentileThresholds:
+    p95_max: float
+    p99_max: float
+
+    def __post_init__(self) -> None:
+        if not math.isfinite(self.p95_max) or self.p95_max <= 0:
+            raise ValueError("operator-approved SLA p95Max must be a positive finite number")
+        if not math.isfinite(self.p99_max) or self.p99_max <= 0:
+            raise ValueError("operator-approved SLA p99Max must be a positive finite number")
+        if self.p99_max < self.p95_max:
+            raise ValueError("operator-approved SLA p99Max must be greater than or equal to p95Max")
+
+    def as_report(self) -> dict[str, float]:
+        return {"p95Max": self.p95_max, "p99Max": self.p99_max}
+
+
+@dataclasses.dataclass(frozen=True)
+class OperatorApprovedSla:
+    minimum_duration_seconds: float
+    latency_ms: OperatorApprovedSlaPercentileThresholds | None = None
+    recovery_time_ms: OperatorApprovedSlaPercentileThresholds | None = None
+    unexpected_error_rate_max: float | None = None
+
+    def __post_init__(self) -> None:
+        if (
+            not math.isfinite(self.minimum_duration_seconds)
+            or self.minimum_duration_seconds <= 0
+        ):
+            raise ValueError(
+                "operator-approved SLA minimumDurationSeconds must be a positive finite number"
+            )
+        if self.minimum_duration_seconds > FIXTURE_LOAD_DURATION_MAX_SECONDS:
+            raise ValueError(
+                "operator-approved SLA minimumDurationSeconds exceeded the accepted maximum"
+            )
+        if self.unexpected_error_rate_max is not None:
+            if (
+                not math.isfinite(self.unexpected_error_rate_max)
+                or self.unexpected_error_rate_max != 0.0
+            ):
+                raise ValueError(
+                    "operator-approved SLA unexpectedErrorRateMax currently must be exactly 0.0"
+                )
+
+    def as_report(self) -> dict[str, Any]:
+        report: dict[str, Any] = {
+            "minimumDurationSeconds": self.minimum_duration_seconds,
+        }
+        if self.latency_ms is not None:
+            report["latencyMs"] = self.latency_ms.as_report()
+        if self.recovery_time_ms is not None:
+            report["recoveryTimeMs"] = self.recovery_time_ms.as_report()
+        if self.unexpected_error_rate_max is not None:
+            report["unexpectedErrorRateMax"] = self.unexpected_error_rate_max
+        return report
+
+
 def fixture_load_resource_profile(options: RunnerOptions) -> dict[str, Any]:
     profile: dict[str, Any] = {
         "target": options.target,
@@ -959,6 +1062,408 @@ def fixture_load_resource_profile(options: RunnerOptions) -> dict[str, Any]:
     elif options.target == "kubernetes":
         profile["kubernetesWorker"] = dict(KUBERNETES_ACCEPTANCE_RESOURCE_CONFIGURATION)
     return profile
+
+
+def _strict_json_number(
+    value: Any,
+    label: str,
+    *,
+    zero_allowed: bool = False,
+) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{label} must be a finite JSON number")
+    numeric = float(value)
+    if not math.isfinite(numeric):
+        raise ValueError(f"{label} must be a finite JSON number")
+    if zero_allowed:
+        if numeric < 0:
+            raise ValueError(f"{label} must be zero or positive")
+    elif numeric <= 0:
+        raise ValueError(f"{label} must be greater than 0")
+    return numeric
+
+
+def _strict_json_object(
+    value: Any,
+    label: str,
+    *,
+    allowed_keys: set[str],
+    required_keys: set[str],
+) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValueError(f"{label} must be a JSON object")
+    keys = set(value)
+    unexpected = sorted(keys - allowed_keys)
+    if unexpected:
+        raise ValueError(f"{label} contained unsupported keys: {', '.join(unexpected)}")
+    missing = sorted(required_keys - keys)
+    if missing:
+        raise ValueError(f"{label} omitted required keys: {', '.join(missing)}")
+    return value
+
+
+def _parse_operator_approved_sla_percentiles(
+    value: Any,
+    label: str,
+) -> OperatorApprovedSlaPercentileThresholds:
+    payload = _strict_json_object(
+        value,
+        label,
+        allowed_keys={"p95Max", "p99Max"},
+        required_keys={"p95Max", "p99Max"},
+    )
+    return OperatorApprovedSlaPercentileThresholds(
+        p95_max=_strict_json_number(payload["p95Max"], f"{label}.p95Max"),
+        p99_max=_strict_json_number(payload["p99Max"], f"{label}.p99Max"),
+    )
+
+
+def parse_operator_approved_sla_file(
+    raw: pathlib.Path | None,
+    suite: str,
+    option: str = "--operator-approved-sla-file",
+) -> OperatorApprovedSla | None:
+    if raw is None:
+        return None
+    if suite not in {*FIXTURE_LOAD_SUITES, "fixture-soak", "real-provider-load"}:
+        raise ValueError(
+            f"{option} requires --suite fixture-load, fixture-load-failure, fixture-soak, or real-provider-load"
+        )
+    path = raw.expanduser().resolve()
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except OSError as error:
+        raise ValueError(f"{option} could not be read: {error}") from error
+    except json.JSONDecodeError as error:
+        raise ValueError(f"{option} contained invalid JSON: {error.msg}") from None
+
+    load_suite = suite in {*FIXTURE_LOAD_SUITES, "real-provider-load"}
+    allowed_keys = {"minimumDurationSeconds"}
+    if load_suite:
+        allowed_keys |= {"latencyMs", "recoveryTimeMs", "unexpectedErrorRateMax"}
+    decoded = _strict_json_object(
+        payload,
+        option,
+        allowed_keys=allowed_keys,
+        required_keys=allowed_keys if load_suite else {"minimumDurationSeconds"},
+    )
+    minimum_duration_seconds = _strict_json_number(
+        decoded["minimumDurationSeconds"],
+        f"{option}.minimumDurationSeconds",
+    )
+    if load_suite:
+        unexpected_error_rate_max = _strict_json_number(
+            decoded["unexpectedErrorRateMax"],
+            f"{option}.unexpectedErrorRateMax",
+            zero_allowed=True,
+        )
+        if unexpected_error_rate_max != 0.0:
+            raise ValueError(
+                f"{option}.unexpectedErrorRateMax currently must be exactly 0.0 because the runner only "
+                "proves zero unexpected errors through existing fail-fast terminal accounting"
+            )
+        return OperatorApprovedSla(
+            minimum_duration_seconds=minimum_duration_seconds,
+            latency_ms=_parse_operator_approved_sla_percentiles(
+                decoded["latencyMs"],
+                f"{option}.latencyMs",
+            ),
+            recovery_time_ms=_parse_operator_approved_sla_percentiles(
+                decoded["recoveryTimeMs"],
+                f"{option}.recoveryTimeMs",
+            ),
+            unexpected_error_rate_max=unexpected_error_rate_max,
+        )
+    return OperatorApprovedSla(minimum_duration_seconds=minimum_duration_seconds)
+
+
+def operator_approved_sla_metric_mapping(suite: str) -> dict[str, Any] | None:
+    if suite in {*FIXTURE_LOAD_SUITES, "real-provider-load"}:
+        return {
+            "minimumDurationSeconds": {
+                "comparison": "observed >= requested",
+                "observedEvidencePath": "durationMs",
+                "normalization": "durationMs / 1000",
+            },
+            "latencyMs.p95Max": {
+                "comparison": "observed <= requested",
+                "observedEvidencePath": "turnLatencyMs.p95",
+            },
+            "latencyMs.p99Max": {
+                "comparison": "observed <= requested",
+                "observedEvidencePath": "turnLatencyMs.p99",
+            },
+            "recoveryTimeMs.p95Max": {
+                "comparison": "observed <= requested",
+                "observedEvidencePath": "admissionRecoveryMs.p95",
+            },
+            "recoveryTimeMs.p99Max": {
+                "comparison": "observed <= requested",
+                "observedEvidencePath": "admissionRecoveryMs.p99",
+            },
+            "unexpectedErrorRateMax": {
+                "comparison": "observed <= requested",
+                "observedEvidencePath": "unexpectedErrorRate",
+                "notes": (
+                    "The runner currently records only the existing zero-unexpected-error outcome; non-zero "
+                    "thresholds are rejected instead of pretending to measure tolerated unexpected failures."
+                ),
+            },
+        }
+    if suite == "fixture-soak":
+        return {
+            "minimumDurationSeconds": {
+                "comparison": "observed >= requested",
+                "observedEvidencePath": "durationMs",
+                "normalization": "durationMs / 1000",
+                "notes": (
+                    "fixture-soak records minimum duration only; latency, recovery, and unexpected-error SLA "
+                    "metrics are intentionally unsupported because the suite does not measure them."
+                ),
+            }
+        }
+    return None
+
+
+def _operator_approved_sla_check(
+    check_id: str,
+    requested: float,
+    observed: float | None,
+    *,
+    comparison: str,
+    observed_evidence_path: str,
+) -> dict[str, Any]:
+    passed = observed is not None and (
+        observed >= requested if comparison == "observed >= requested" else observed <= requested
+    )
+    check: dict[str, Any] = {
+        "id": check_id,
+        "comparison": comparison,
+        "requested": requested,
+        "observed": observed,
+        "observedEvidencePath": observed_evidence_path,
+        "status": "pass" if passed else "fail",
+    }
+    if observed is None:
+        check["message"] = "Observed metric was missing."
+    return check
+
+
+def _operator_approved_sla_not_evaluated(
+    *,
+    requested: OperatorApprovedSla,
+    metric_mapping: Mapping[str, Any],
+    reason: str,
+    checks: Sequence[Mapping[str, Any]] | None = None,
+) -> dict[str, Any]:
+    return {
+        "requested": requested.as_report(),
+        "metricMapping": dict(metric_mapping),
+        "checks": [dict(check) for check in (checks or [])],
+        "enforced": False,
+        "notEvaluated": True,
+        "notEvaluatedReason": reason,
+    }
+
+
+def evaluate_operator_approved_sla(
+    suite: str,
+    requested: OperatorApprovedSla,
+    evidence: Mapping[str, Any],
+) -> dict[str, Any]:
+    metric_mapping = operator_approved_sla_metric_mapping(suite)
+    if metric_mapping is None:
+        raise ValueError(f"operator-approved SLA is unsupported for suite {suite}")
+    if suite == "fixture-soak" and (
+        requested.latency_ms is not None
+        or requested.recovery_time_ms is not None
+        or requested.unexpected_error_rate_max is not None
+    ):
+        raise ValueError(
+            "fixture-soak operator-approved SLA supports minimumDurationSeconds only"
+        )
+
+    duration_ms = evidence.get("durationMs")
+    duration_seconds = (
+        round(float(duration_ms) / 1000.0, 3)
+        if isinstance(duration_ms, (int, float)) and not isinstance(duration_ms, bool)
+        else None
+    )
+    checks = [
+        _operator_approved_sla_check(
+            "minimumDurationSeconds",
+            requested.minimum_duration_seconds,
+            duration_seconds,
+            comparison="observed >= requested",
+            observed_evidence_path="durationMs",
+        )
+    ]
+
+    if suite in {*FIXTURE_LOAD_SUITES, "real-provider-load"}:
+        turn_latency = evidence.get("turnLatencyMs")
+        admission_recovery = evidence.get("admissionRecoveryMs")
+        turn_latency_summary = turn_latency if isinstance(turn_latency, Mapping) else {}
+        admission_recovery_summary = (
+            admission_recovery
+            if isinstance(admission_recovery, Mapping)
+            else {}
+        )
+        latency_thresholds = requested.latency_ms
+        recovery_thresholds = requested.recovery_time_ms
+        if (
+            latency_thresholds is None
+            or recovery_thresholds is None
+            or requested.unexpected_error_rate_max is None
+        ):
+            raise ValueError("fixture-load operator-approved SLA requires latency, recovery, and error thresholds")
+        checks.extend(
+            [
+                _operator_approved_sla_check(
+                    "latencyMs.p95Max",
+                    latency_thresholds.p95_max,
+                    float(turn_latency_summary["p95"])
+                    if isinstance(turn_latency_summary.get("p95"), (int, float))
+                    and not isinstance(turn_latency_summary.get("p95"), bool)
+                    else None,
+                    comparison="observed <= requested",
+                    observed_evidence_path="turnLatencyMs.p95",
+                ),
+                _operator_approved_sla_check(
+                    "latencyMs.p99Max",
+                    latency_thresholds.p99_max,
+                    float(turn_latency_summary["p99"])
+                    if isinstance(turn_latency_summary.get("p99"), (int, float))
+                    and not isinstance(turn_latency_summary.get("p99"), bool)
+                    else None,
+                    comparison="observed <= requested",
+                    observed_evidence_path="turnLatencyMs.p99",
+                ),
+                _operator_approved_sla_check(
+                    "recoveryTimeMs.p95Max",
+                    recovery_thresholds.p95_max,
+                    float(admission_recovery_summary["p95"])
+                    if isinstance(admission_recovery_summary.get("p95"), (int, float))
+                    and not isinstance(admission_recovery_summary.get("p95"), bool)
+                    else None,
+                    comparison="observed <= requested",
+                    observed_evidence_path="admissionRecoveryMs.p95",
+                ),
+                _operator_approved_sla_check(
+                    "recoveryTimeMs.p99Max",
+                    recovery_thresholds.p99_max,
+                    float(admission_recovery_summary["p99"])
+                    if isinstance(admission_recovery_summary.get("p99"), (int, float))
+                    and not isinstance(admission_recovery_summary.get("p99"), bool)
+                    else None,
+                    comparison="observed <= requested",
+                    observed_evidence_path="admissionRecoveryMs.p99",
+                ),
+                _operator_approved_sla_check(
+                    "unexpectedErrorRateMax",
+                    requested.unexpected_error_rate_max,
+                    float(evidence["unexpectedErrorRate"])
+                    if isinstance(evidence.get("unexpectedErrorRate"), (int, float))
+                    and not isinstance(evidence.get("unexpectedErrorRate"), bool)
+                    else None,
+                    comparison="observed <= requested",
+                    observed_evidence_path="unexpectedErrorRate",
+                ),
+            ]
+        )
+
+    missing = [str(check["id"]) for check in checks if check.get("observed") is None]
+    if missing:
+        return _operator_approved_sla_not_evaluated(
+            requested=requested,
+            metric_mapping=metric_mapping,
+            reason=(
+                "The suite finished without the evidence required to evaluate these SLA checks: "
+                + ", ".join(missing)
+            ),
+            checks=checks,
+        )
+
+    return {
+        "requested": requested.as_report(),
+        "metricMapping": metric_mapping,
+        "checks": checks,
+        "enforced": True,
+    }
+
+
+def operator_approved_sla_report_from_cases(
+    suite: str,
+    requested: OperatorApprovedSla | None,
+    cases: Sequence[Mapping[str, Any]],
+) -> dict[str, Any] | None:
+    metric_mapping = operator_approved_sla_metric_mapping(suite)
+    if metric_mapping is None and requested is None:
+        return None
+    report: dict[str, Any] = {
+        "requested": requested.as_report() if requested is not None else None,
+        "metricMapping": metric_mapping,
+        "checks": [],
+        "enforced": False,
+    }
+    case_ids = {
+        "fixture-load": "load.multi-session-admission-waves",
+        "fixture-load-failure": "load.post-failure-admission-waves",
+        "fixture-soak": "soak.multi-turn-restart-continuity",
+        "real-provider-load": REAL_PROVIDER_LOAD_CASE_ID,
+    }
+    relevant_case_id = case_ids.get(suite)
+    if relevant_case_id is None:
+        return report
+    for case in reversed(cases):
+        if case.get("id") != relevant_case_id:
+            continue
+        evidence = case.get("evidence")
+        if not isinstance(evidence, Mapping):
+            return {
+                **report,
+                "notEvaluated": True,
+                "notEvaluatedReason": "The relevant suite case finished without a mapping evidence payload.",
+            }
+        summary = evidence.get("operatorApprovedSla")
+        if isinstance(summary, Mapping):
+            return dict(summary)
+        return {
+            **report,
+            "notEvaluated": True,
+            "notEvaluatedReason": "The relevant suite case finished without operatorApprovedSla evidence.",
+        }
+    return {
+        **report,
+        "notEvaluated": requested is not None,
+        "notEvaluatedReason": (
+            "The relevant suite case was not present in the report."
+            if requested is not None
+            else None
+        ),
+    }
+
+
+def operator_approved_sla_file_report(
+    path: pathlib.Path | None,
+    requested: OperatorApprovedSla | None,
+) -> dict[str, Any] | None:
+    if path is None or requested is None:
+        return None
+    encoded = path.read_bytes()
+    repo_root = pathlib.Path(__file__).resolve().parents[2]
+    resolved = path.resolve()
+    try:
+        display_path = str(resolved.relative_to(repo_root))
+        source_kind = "repo-relative"
+    except ValueError:
+        display_path = path.name
+        source_kind = "external"
+    return {
+        "path": display_path,
+        "sourceKind": source_kind,
+        "sha256": hashlib.sha256(encoded).hexdigest(),
+        "requested": requested.as_report(),
+    }
 
 
 @dataclasses.dataclass(frozen=True)
@@ -3307,6 +3812,7 @@ class DockerDriver(ManagedWorkerDriver):
         self.desired_workers = (
             FIXTURE_CONCURRENCY_WORKERS
             if options.suite in FIXTURE_PARALLEL_DOCKER_SUITES
+            or options.suite == "real-provider-load"
             else 1
         )
         self.target_id: str | None = None
@@ -4275,7 +4781,7 @@ class SSHDriver(ManagedWorkerDriver):
     def _runner_command(self) -> list[str]:
         if not self.external_host:
             return list(self.options.runner_command)
-        if self.options.suite == "real-provider-smoke":
+        if is_real_provider_runtime_suite(self.options.suite):
             return [self.remote_provider_host_command_path]
         return [self.remote_node_path, self.remote_fixture_path, "--protocol-v2"]
 
@@ -4956,7 +5462,7 @@ class SSHDriver(ManagedWorkerDriver):
             description="Linux synara-agentd cross-build",
         )
         agentd_duration = elapsed_ms(agentd_started)
-        real_provider_runtime = self.options.suite == "real-provider-smoke"
+        real_provider_runtime = is_real_provider_runtime_suite(self.options.suite)
         provider_host_bundle_path = (
             self.provider_host_bundle_path if real_provider_runtime else self.fixture_bundle_path
         )
@@ -5239,7 +5745,7 @@ class SSHDriver(ManagedWorkerDriver):
             f"{stage}/{self.client_public_key_path.name}",
             "0600",
         )
-        if self.options.suite == "real-provider-smoke":
+        if is_real_provider_runtime_suite(self.options.suite):
             for source in (
                 self.provider_host_bundle_path,
                 self.provider_tools_package_path,
@@ -5302,7 +5808,7 @@ class SSHDriver(ManagedWorkerDriver):
             )
         provider_runtime = (
             self._inspect_ssh_provider_runtime()
-            if self.options.suite == "real-provider-smoke"
+            if is_real_provider_runtime_suite(self.options.suite)
             else {"kind": "deterministic-fixture"}
         )
         return {
@@ -5377,7 +5883,7 @@ class SSHDriver(ManagedWorkerDriver):
             ) from None
         self.external_runtime_created = True
         self._remote_command(["install", "-d", "-m", "0700", self.external_stage_root])
-        if self.options.suite == "real-provider-smoke":
+        if is_real_provider_runtime_suite(self.options.suite):
             sources = (
                 self.provider_host_bundle_path,
                 self.provider_tools_package_path,
@@ -5395,7 +5901,7 @@ class SSHDriver(ManagedWorkerDriver):
         self.machine_created = True
         provider_runtime = (
             self._inspect_ssh_provider_runtime()
-            if self.options.suite == "real-provider-smoke"
+            if is_real_provider_runtime_suite(self.options.suite)
             else {"kind": "deterministic-fixture"}
         )
         return {
@@ -5475,7 +5981,7 @@ class SSHDriver(ManagedWorkerDriver):
         npm_cache = f"{root}/npm-cache"
         provider_home = f"{root}/provider-home"
         node_download = shlex.join(("curl", *SSH_EXTERNAL_NODE_DOWNLOAD_CURL_ARGUMENTS))
-        if self.options.suite == "real-provider-smoke":
+        if is_real_provider_runtime_suite(self.options.suite):
             runtime_install = [
                 f"install -d -m 0755 {shlex.quote(pathlib.PurePosixPath(self.remote_provider_host_path).parent.as_posix())}",
                 f"install -d -m 0755 {shlex.quote(self.remote_provider_tools_root)} {shlex.quote(pathlib.PurePosixPath(self.remote_provider_host_command_path).parent.as_posix())}",
@@ -5640,7 +6146,7 @@ class SSHDriver(ManagedWorkerDriver):
         version = self.options.ssh_node_version
         archive = f"node-v{version}-linux-{node_arch}.tar.xz"
         stage = "/tmp/synara-stage3-acceptance"
-        if self.options.suite == "real-provider-smoke":
+        if is_real_provider_runtime_suite(self.options.suite):
             runtime_install = [
                 f"install -d -m 0755 {pathlib.PurePosixPath(SSH_REMOTE_PROVIDER_HOST_PATH).parent}",
                 f"install -d -m 0755 {SSH_REMOTE_PROVIDER_TOOLS_ROOT}",
@@ -6416,6 +6922,11 @@ class KubernetesDriver(ManagedWorkerDriver):
             namespace=self.target_namespace,
             service_account=self.worker_service_account,
             image=self.image,
+            max_active_pods=(
+                REAL_PROVIDER_LOAD_CONCURRENCY
+                if self.options.suite == "real-provider-load"
+                else 1
+            ),
         )
         target_id = target.get("id")
         if not isinstance(target_id, str) or not target_id:
@@ -8097,12 +8608,38 @@ class AcceptanceSuite:
         self.cases: list[dict[str, Any]] = []
         self._failed_cases: set[str] = set()
         self._fixture_load_session_cache: list[dict[str, Any]] | None = None
+        self._real_provider_load_session_cache: list[dict[str, Any]] | None = None
 
     @property
     def api(self) -> APIClient:
         if self.driver.api is None:
             raise AcceptanceError("runner.api_unavailable", "The TargetDriver did not expose a user API.")
         return self.driver.api
+
+    def _with_operator_approved_sla(self, evidence: Mapping[str, Any]) -> Mapping[str, Any]:
+        requested = self.options.operator_approved_sla
+        if requested is None:
+            return evidence
+        enriched = dict(evidence)
+        summary = evaluate_operator_approved_sla(
+            self.options.suite,
+            requested,
+            enriched,
+        )
+        enriched["operatorApprovedSla"] = summary
+        if summary.get("notEvaluated") is True:
+            raise AcceptanceError(
+                "runner.operator_approved_sla_not_evaluated",
+                "The operator-approved SLA could not be evaluated from the recorded evidence.",
+                enriched,
+            )
+        if any(check.get("status") != "pass" for check in summary["checks"]):
+            raise AcceptanceError(
+                "runner.operator_approved_sla_not_met",
+                "The operator-approved SLA was not met.",
+                enriched,
+            )
+        return enriched
 
     def run(self) -> list[dict[str, Any]]:
         self._case("environment.target-prepare", "Prepare isolated Control Plane and Target runtime", self.driver.prepare)
@@ -8120,6 +8657,9 @@ class AcceptanceSuite:
         )
         if self.options.suite == "real-provider-smoke":
             self._run_real_provider_smoke()
+            return self.cases
+        if self.options.suite == "real-provider-load":
+            self._run_real_provider_load()
             return self.cases
         if self.options.suite == "fixture-concurrency":
             self._run_fixture_concurrency()
@@ -8503,6 +9043,26 @@ class AcceptanceSuite:
                 requires=(advanced_requirement,),
             )
             advanced_requirement = case_id
+
+    def _run_real_provider_load(self) -> None:
+        self._case(
+            "runtime.target-provision",
+            "Provision the exact Target for the real Provider load gate",
+            self._provision_target,
+            requires=("identity.dev-login",),
+        )
+        self._case(
+            "resources.real-provider-project-session",
+            "Create a controlled-credential real Provider Project and Session",
+            self._create_resources,
+            requires=("runtime.target-provision",),
+        )
+        self._case(
+            REAL_PROVIDER_LOAD_CASE_ID,
+            REAL_PROVIDER_LOAD_CASE_METADATA["name"],
+            self._real_provider_load_admission_wave,
+            requires=("resources.real-provider-project-session",),
+        )
 
     def _run_failure_only(self) -> None:
         if self.driver.lifecycle.execution_pinned:
@@ -9035,10 +9595,10 @@ class AcceptanceSuite:
         tenant_id = self._required("tenant_id")
         organization_id = self._required("organization_id")
         self._required("target_id")
-        real_provider_smoke = self.options.suite == "real-provider-smoke"
+        real_provider_runtime = is_real_provider_runtime_suite(self.options.suite)
         credential: dict[str, Any] | None = None
         credential_id: str | None = None
-        if not real_provider_smoke:
+        if not real_provider_runtime:
             credential = self._create_fixture_credential(
                 self.options.provider,
                 "Stage 3 Provider Acceptance Fixture",
@@ -9077,14 +9637,16 @@ class AcceptanceSuite:
         session = self._create_project_session(
             provider=self.options.provider,
             title=(
-                "Stage 3 Real Provider Smoke"
-                if real_provider_smoke
+                "Stage 3 Real Provider Load"
+                if self.options.suite == "real-provider-load"
+                else "Stage 3 Real Provider Smoke"
+                if real_provider_runtime
                 else "Stage 3 Provider Acceptance"
             ),
             credential_id=credential_id,
             model=(
                 self.options.real_provider_model
-                if real_provider_smoke
+                if real_provider_runtime
                 else "stage3-acceptance-fixture"
             ),
             description="session",
@@ -9111,7 +9673,7 @@ class AcceptanceSuite:
                             "baseUrlConfigured": self.options.real_provider_base_url_env is not None,
                             "environmentVariableNamePersisted": False,
                         }
-                        if real_provider_smoke
+                        if real_provider_runtime
                         else {"delivery": "acceptance-fixture"}
                     ),
                 }
@@ -10632,7 +11194,7 @@ class AcceptanceSuite:
         interaction, execution_id, request_id, interaction_payload, command = (
             self._real_provider_approval_interaction(
                 turn_id,
-                expected_command=real_provider_approval_command(),
+                expected_command=real_provider_approval_command(marker),
             )
         )
         approvals: list[dict[str, Any]] = []
@@ -10715,7 +11277,7 @@ class AcceptanceSuite:
                 self._real_provider_approval_request_details(
                     next_interaction,
                     turn_id=turn_id,
-                    expected_command=real_provider_approval_command(),
+                    expected_command=real_provider_approval_command(marker),
                 )
             )
             if next_execution_id != execution_id:
@@ -11723,7 +12285,7 @@ class AcceptanceSuite:
         session_id = session_id or self._required("session_id")
         provider = re.sub(r"[^A-Za-z0-9]+", "_", self.options.provider).strip("_").upper()
         digest = hashlib.sha256(
-            f"synara-real-provider-smoke-v1\0{session_id}\0{self.options.provider}\0{case}".encode(
+            f"synara-{self.options.suite}-v1\0{session_id}\0{self.options.provider}\0{case}".encode(
                 "utf-8"
             )
         ).hexdigest()[:16].upper()
@@ -12623,6 +13185,880 @@ class AcceptanceSuite:
                 {"snapshot": dict(snapshot)},
             )
 
+    def _real_provider_load_sessions(self) -> list[dict[str, Any]]:
+        if self._real_provider_load_session_cache is not None:
+            return [dict(session) for session in self._real_provider_load_session_cache]
+        credential_id = self._required("credential_id")
+        sessions = [
+            {
+                "sessionId": self._required("session_id"),
+                "provider": self.options.provider,
+                "credentialId": credential_id,
+            }
+        ]
+        for index in range(2, REAL_PROVIDER_LOAD_SESSIONS + 1):
+            session = self._create_real_provider_session(
+                title=f"Stage 3 Real Provider Load Session {index}",
+                credential_id=credential_id,
+            )
+            sessions.append(
+                {
+                    "sessionId": self._string_id(session, f"real Provider load Session {index}"),
+                    "provider": self.options.provider,
+                    "credentialId": credential_id,
+                }
+            )
+        session_ids = {str(session["sessionId"]) for session in sessions}
+        if len(session_ids) != REAL_PROVIDER_LOAD_SESSIONS:
+            raise AcceptanceError(
+                "runner.real_provider_load_session_reused",
+                "The real Provider load suite did not create four distinct Sessions.",
+                {"sessionIds": sorted(session_ids)},
+            )
+        self._real_provider_load_session_cache = [dict(session) for session in sessions]
+        return [dict(session) for session in sessions]
+
+    def _start_real_provider_load_turn(
+        self,
+        session: Mapping[str, Any],
+        wave_index: int,
+        position: int,
+    ) -> dict[str, Any]:
+        session_id = str(session["sessionId"])
+        session_events = self._all_events(session_id=session_id)
+        session_sequence_before_turn = (
+            int(session_events[-1]["sequence"])
+            if session_events and isinstance(session_events[-1].get("sequence"), int)
+            else 0
+        )
+        marker = self._real_provider_marker(
+            f"load-wave-{wave_index + 1}-position-{position}",
+            session_id=session_id,
+            visible_label=f"load_wave_{wave_index + 1}_position_{position}",
+        )
+        started = time.monotonic()
+        turn = self._create_turn(
+            real_provider_approval_prompt(marker),
+            runtime_mode="approval-required",
+            session_id=session_id,
+        )
+        turn_id = self._turn_id(turn, "real Provider load Turn")
+        interaction, execution_id, request_id, interaction_payload, command = (
+            self._real_provider_approval_interaction(
+                turn_id,
+                expected_command=real_provider_approval_command(marker),
+                session_id=session_id,
+            )
+        )
+        active = self._active_approval_evidence(
+            turn_id,
+            interaction,
+            session_id=session_id,
+            provider=self.options.provider,
+        )
+        target_execution = self.driver.observe_execution(
+            self._required("target_id"),
+            execution_id,
+        )
+        return {
+            "sessionId": session_id,
+            "provider": self.options.provider,
+            "turn": turn,
+            "interaction": interaction,
+            "active": active,
+            "marker": marker,
+            "requestId": request_id,
+            "requestKind": interaction_payload.get("requestKind"),
+            "commandSummary": self.redactor.text(command[:256]),
+            "admissionMs": elapsed_ms(started),
+            "sessionSequenceBeforeTurn": session_sequence_before_turn,
+            "turnStartedMonotonic": started,
+            "targetExecution": dict(target_execution) if target_execution else None,
+        }
+
+    def _real_provider_load_overlap(
+        self,
+        active_turns: Sequence[Mapping[str, Any]],
+        stage: str,
+    ) -> dict[str, Any]:
+        active = [json_object(item.get("active"), "real Provider load active evidence") for item in active_turns]
+        session_ids = {str(item.get("sessionId")) for item in active}
+        execution_ids = {str(item.get("executionId")) for item in active}
+        worker_ids = {str(item.get("workerId")) for item in active}
+        pending = all(
+            self._interaction_pending(
+                str(item["sessionId"]),
+                json_object(item.get("interaction"), "real Provider load overlap interaction"),
+            )
+            for item in active_turns
+        )
+        target_execution_identities = {
+            identity
+            for item in active_turns
+            if isinstance((target_execution := item.get("targetExecution")), Mapping)
+            for identity in (
+                target_execution.get("podName")
+                or target_execution.get("containerId")
+                or target_execution.get("containerName"),
+            )
+            if isinstance(identity, str) and identity
+        }
+        if (
+            len(active) != REAL_PROVIDER_LOAD_CONCURRENCY
+            or len(session_ids) != REAL_PROVIDER_LOAD_CONCURRENCY
+            or len(execution_ids) != REAL_PROVIDER_LOAD_CONCURRENCY
+            or len(worker_ids) != REAL_PROVIDER_LOAD_CONCURRENCY
+            or not pending
+            or (
+                target_execution_identities
+                and len(target_execution_identities) != REAL_PROVIDER_LOAD_CONCURRENCY
+            )
+        ):
+            raise AcceptanceError(
+                "runner.real_provider_load_worker_overlap_invalid",
+                "The real Provider load gate did not hold two pending Executions on distinct Workers.",
+                {
+                    "stage": stage,
+                    "sessionIds": sorted(session_ids),
+                    "executionIds": sorted(execution_ids),
+                    "workerIds": sorted(worker_ids),
+                    "targetExecutionIdentities": sorted(target_execution_identities),
+                    "allInteractionsPending": pending,
+                },
+            )
+        return {
+            "stage": stage,
+            "sessionIds": sorted(session_ids),
+            "executionIds": sorted(execution_ids),
+            "workerIds": sorted(worker_ids),
+            "targetExecutionIdentities": sorted(target_execution_identities),
+        }
+
+    def _assert_real_provider_load_turn_pending(
+        self,
+        load_turn: Mapping[str, Any],
+        stage: str,
+    ) -> None:
+        session_id = str(load_turn["sessionId"])
+        interaction = json_object(
+            load_turn.get("interaction"),
+            "real Provider load pending interaction",
+        )
+        if not self._interaction_pending(session_id, interaction):
+            raise AcceptanceError(
+                "runner.real_provider_load_overlap_isolation_lost",
+                "Completing one real Provider load Execution changed another pending Approval.",
+                {
+                    "stage": stage,
+                    "sessionId": session_id,
+                    "interactionId": interaction.get("id"),
+                },
+            )
+
+    def _assert_real_provider_load_quota_rejected(
+        self,
+        session: Mapping[str, Any],
+        wave_index: int,
+        position: int,
+    ) -> dict[str, Any]:
+        session_id = str(session["sessionId"])
+        before_events = self._all_events(session_id=session_id)
+        before_pending = self._pending_interactions(session_id)
+        started = time.monotonic()
+        marker = self._real_provider_marker(
+            f"load-wave-{wave_index + 1}-quota-rejection-{position}",
+            session_id=session_id,
+            visible_label=f"load_wave_{wave_index + 1}_quota_rejection_{position}",
+        )
+        try:
+            self._create_turn(
+                real_provider_approval_prompt(marker),
+                runtime_mode="approval-required",
+                session_id=session_id,
+            )
+        except AcceptanceError as error:
+            if error.code != "execution_quota_exceeded":
+                raise
+            reason_code = error.code
+        else:
+            raise AcceptanceError(
+                "runner.real_provider_load_quota_not_enforced",
+                "The Tenant admitted a third Execution while the two-slot real Provider load quota was occupied.",
+                {
+                    "position": position,
+                    "sessionId": session_id,
+                },
+            )
+        after_events = self._all_events(session_id=session_id)
+        after_pending = self._pending_interactions(session_id)
+        if after_events != before_events or after_pending != before_pending:
+            raise AcceptanceError(
+                "runner.real_provider_load_quota_rejection_mutated_session",
+                "A rejected real Provider load admission mutated Session Event or interaction state.",
+                {
+                    "position": position,
+                    "sessionId": session_id,
+                    "beforeEventCount": len(before_events),
+                    "afterEventCount": len(after_events),
+                    "beforeInteractionCount": len(before_pending),
+                    "afterInteractionCount": len(after_pending),
+                },
+            )
+        return {
+            "sessionId": session_id,
+            "reasonCode": reason_code,
+            "stateMutated": False,
+            "wave": wave_index + 1,
+            "durationMs": elapsed_ms(started),
+        }
+
+    def _approval_command_item_evidence(
+        self,
+        events: Sequence[Mapping[str, Any]],
+        *,
+        execution_id: str,
+        worker_id: str,
+        generation: int,
+        terminal_sequence: Any,
+    ) -> dict[str, Any]:
+        if not isinstance(terminal_sequence, int):
+            raise AcceptanceError(
+                "runner.real_provider_approval_command_item_invalid",
+                "The Approval terminal omitted its durable sequence.",
+                {"executionId": execution_id},
+            )
+        command_events: dict[str, list[Mapping[str, Any]]] = {
+            "item.started": [],
+            "item.completed": [],
+        }
+        for event in events:
+            event_type = event.get("eventType")
+            if event_type not in command_events:
+                continue
+            payload = json_object(event.get("payload"), "real Provider command item payload")
+            if payload.get("itemType") == "command_execution":
+                command_events[str(event_type)].append(event)
+        if any(len(command_events[event_type]) != 1 for event_type in command_events):
+            raise AcceptanceError(
+                "runner.real_provider_approval_command_item_count_invalid",
+                "The Approval Turn did not retain exactly one command item start/completion pair.",
+                {
+                    "executionId": execution_id,
+                    "startedCount": len(command_events["item.started"]),
+                    "completedCount": len(command_events["item.completed"]),
+                },
+            )
+        started = command_events["item.started"][0]
+        completed = command_events["item.completed"][0]
+
+        def item_identity(event: Mapping[str, Any], label: str) -> tuple[str, str, int]:
+            if (
+                event.get("executionId") != execution_id
+                or event.get("workerId") != worker_id
+                or event.get("generation") != generation
+            ):
+                raise AcceptanceError(
+                    "runner.real_provider_approval_command_item_fence_mismatch",
+                    "An Approval command item was not fenced to the terminal Execution.",
+                    {
+                        "label": label,
+                        "expectedExecutionId": execution_id,
+                        "actualExecutionId": event.get("executionId"),
+                        "expectedWorkerId": worker_id,
+                        "actualWorkerId": event.get("workerId"),
+                        "expectedGeneration": generation,
+                        "actualGeneration": event.get("generation"),
+                    },
+                )
+            sequence = event.get("sequence")
+            payload = json_object(event.get("payload"), f"{label} command item payload")
+            data = json_object(payload.get("data"), f"{label} command item data")
+            terminal = json_object(data.get("terminal"), f"{label} command item terminal")
+            provider_item_id = data.get("providerItemId")
+            terminal_id = terminal.get("terminalId")
+            if (
+                not isinstance(sequence, int)
+                or not isinstance(provider_item_id, str)
+                or not provider_item_id
+                or terminal_id != provider_item_id
+                or data.get("provider") != self.options.provider
+            ):
+                raise AcceptanceError(
+                    "runner.real_provider_approval_command_item_identity_invalid",
+                    "An Approval command item omitted its Provider/Terminal correspondence.",
+                    {
+                        "label": label,
+                        "executionId": execution_id,
+                        "sequence": sequence,
+                        "provider": data.get("provider"),
+                        "providerItemIdPresent": isinstance(provider_item_id, str)
+                        and bool(provider_item_id),
+                        "terminalIdentityMatched": terminal_id == provider_item_id,
+                    },
+                )
+            return provider_item_id, str(terminal.get("eventType") or ""), sequence
+
+        started_id, started_terminal_event, started_sequence = item_identity(started, "started")
+        completed_id, completed_terminal_event, completed_sequence = item_identity(
+            completed,
+            "completed",
+        )
+        started_payload = json_object(started.get("payload"), "started command payload")
+        completed_payload = json_object(completed.get("payload"), "completed command payload")
+        completed_terminal = json_object(
+            json_object(completed_payload.get("data"), "completed command data").get("terminal"),
+            "completed command terminal",
+        )
+        if (
+            started_id != completed_id
+            or started_payload.get("status") != "inProgress"
+            or completed_payload.get("status") != "completed"
+            or started_terminal_event != "terminal.started"
+            or completed_terminal_event != "terminal.exited"
+            or (
+                isinstance(completed_terminal.get("exitCode"), int)
+                and completed_terminal.get("exitCode") != 0
+            )
+            or not started_sequence < completed_sequence < terminal_sequence
+        ):
+            raise AcceptanceError(
+                "runner.real_provider_approval_command_item_correspondence_invalid",
+                "The Approval command item start/completion pair did not correspond to one successful terminal before Execution completion.",
+                {
+                    "executionId": execution_id,
+                    "sameProviderItem": started_id == completed_id,
+                    "startedStatus": started_payload.get("status"),
+                    "completedStatus": completed_payload.get("status"),
+                    "startedTerminalEvent": started_terminal_event,
+                    "completedTerminalEvent": completed_terminal_event,
+                    "startedSequence": started_sequence,
+                    "completedSequence": completed_sequence,
+                    "terminalSequence": terminal_sequence,
+                },
+            )
+        return {
+            "providerItemId": started_id,
+            "startedEvent": self._event_summary(started),
+            "completedEvent": self._event_summary(completed),
+            "executionFenceMatched": True,
+            "terminalIdentityMatched": True,
+            "successfulCompletion": True,
+        }
+
+    def _complete_real_provider_load_turn(
+        self,
+        load_turn: Mapping[str, Any],
+        *,
+        expected_resume_strategy: str,
+        expected_resume_reason: str,
+    ) -> dict[str, Any]:
+        session_id = str(load_turn["sessionId"])
+        turn = json_object(load_turn.get("turn"), "real Provider load Turn")
+        interaction = json_object(load_turn.get("interaction"), "real Provider load interaction")
+        active = json_object(load_turn.get("active"), "real Provider load active evidence")
+        marker = str(load_turn["marker"])
+        resolution = self._resolve_approval_turn(
+            turn,
+            interaction,
+            session_id=session_id,
+        )
+        turn_id = self._turn_id(turn, "real Provider load Turn")
+        snapshot = self._turn_terminal_snapshot(turn_id, session_id=session_id)
+        if snapshot is None:
+            raise AcceptanceError(
+                "runner.real_provider_load_terminal_missing",
+                "A resolved real Provider load Turn had no terminal snapshot.",
+                {"sessionId": session_id, "turnId": turn_id},
+            )
+        terminal, events = snapshot
+        provider_turn = self._real_provider_turn_evidence(
+            turn_id,
+            terminal,
+            events,
+            marker,
+            expected_resume_strategy=expected_resume_strategy,
+            expected_resume_reason=expected_resume_reason,
+        )
+        event_type_counts: dict[str, int] = {}
+        for event in events:
+            event_type = str(event.get("eventType") or "")
+            event_type_counts[event_type] = event_type_counts.get(event_type, 0) + 1
+        invalid_counts = {
+            event_type: {
+                "expected": 1,
+                "actual": event_type_counts.get(event_type, 0),
+            }
+            for event_type in ("request.opened", "request.resolved")
+            if event_type_counts.get(event_type, 0) != 1
+        }
+        if (
+            invalid_counts
+            or provider_turn["executionId"] != active.get("executionId")
+            or provider_turn["workerId"] != active.get("workerId")
+            or provider_turn["generation"] != active.get("generation")
+        ):
+            raise AcceptanceError(
+                "runner.real_provider_load_terminal_evidence_invalid",
+                "A real Provider load Turn omitted its canonical approval events or Worker fencing.",
+                {
+                    "sessionId": session_id,
+                    "turnId": turn_id,
+                    "invalidEventTypeCounts": invalid_counts,
+                    "activeExecutionId": active.get("executionId"),
+                    "terminalExecutionId": provider_turn["executionId"],
+                    "activeWorkerId": active.get("workerId"),
+                    "terminalWorkerId": provider_turn["workerId"],
+                    "activeGeneration": active.get("generation"),
+                    "terminalGeneration": provider_turn["generation"],
+                },
+            )
+        command_item = self._approval_command_item_evidence(
+            events,
+            execution_id=str(provider_turn["executionId"]),
+            worker_id=str(provider_turn["workerId"]),
+            generation=int(provider_turn["generation"]),
+            terminal_sequence=terminal.get("sequence"),
+        )
+        session_sequence_before_turn = load_turn.get("sessionSequenceBeforeTurn")
+        if not isinstance(session_sequence_before_turn, int) or session_sequence_before_turn < 0:
+            raise AcceptanceError(
+                "runner.real_provider_load_sequence_anchor_missing",
+                "A real Provider load Turn did not retain its prior Session sequence anchor.",
+                {
+                    "sessionId": session_id,
+                    "turnId": turn_id,
+                    "sessionSequenceBeforeTurn": session_sequence_before_turn,
+                },
+            )
+        session_events = self._all_events(session_id=session_id)
+        session_sequences = [
+            int(event["sequence"])
+            for event in session_events
+            if isinstance(event.get("sequence"), int)
+        ]
+        expected_session_sequences = (
+            list(range(1, session_sequences[-1] + 1)) if session_sequences else []
+        )
+        if session_sequences != expected_session_sequences:
+            raise AcceptanceError(
+                "runner.real_provider_load_session_sequence_discontinuous",
+                "The real Provider load Session sequence was not contiguous across repeated Turns or restarts.",
+                {
+                    "sessionId": session_id,
+                    "turnId": turn_id,
+                    "sequences": session_sequences,
+                },
+            )
+        provider_turn_sequence_range = json_object(
+            provider_turn.get("sequenceRange"),
+            "real Provider load provider turn sequence range",
+        )
+        turn_first_sequence = provider_turn_sequence_range.get("first")
+        turn_last_sequence = provider_turn_sequence_range.get("last")
+        if (
+            not isinstance(turn_first_sequence, int)
+            or not isinstance(turn_last_sequence, int)
+            or turn_first_sequence != session_sequence_before_turn + 1
+            or turn_last_sequence != session_sequences[-1]
+        ):
+            raise AcceptanceError(
+                "runner.real_provider_load_session_sequence_not_advanced",
+                "The real Provider load Turn did not advance Session sequence contiguously from its prior anchor.",
+                {
+                    "sessionId": session_id,
+                    "turnId": turn_id,
+                    "sessionSequenceBeforeTurn": session_sequence_before_turn,
+                    "turnSequenceRange": provider_turn_sequence_range,
+                    "sessionSequenceAfterTurn": session_sequences[-1] if session_sequences else None,
+                },
+            )
+        target_terminal = self.driver.observe_terminal_execution(
+            self._required("target_id"),
+            str(provider_turn["executionId"]),
+        )
+        turn_started_monotonic = load_turn.get("turnStartedMonotonic")
+        turn_latency_ms = (
+            elapsed_ms(turn_started_monotonic)
+            if isinstance(turn_started_monotonic, (int, float))
+            else None
+        )
+        if turn_latency_ms is None:
+            raise AcceptanceError(
+                "runner.real_provider_load_latency_missing",
+                "A real Provider load Turn did not retain its monotonic start time for latency accounting.",
+                {
+                    "sessionId": session_id,
+                    "turnId": turn_id,
+                },
+            )
+        return {
+            "sessionId": session_id,
+            "provider": self.options.provider,
+            "turnId": turn_id,
+            "executionId": provider_turn["executionId"],
+            "workerId": provider_turn["workerId"],
+            "generation": provider_turn["generation"],
+            "resolution": resolution,
+            "sessionSequenceBeforeTurn": session_sequence_before_turn,
+            "sessionSequenceAfterTurn": session_sequences[-1],
+            "turnLatencyMs": turn_latency_ms,
+            "providerTurn": provider_turn,
+            "commandItem": command_item,
+            "eventTypeCounts": dict(sorted(event_type_counts.items())),
+            "sequenceRange": self._sequence_range(events),
+            "targetTerminal": dict(target_terminal) if target_terminal else None,
+        }
+
+    def _real_provider_load_admission_wave(self) -> Mapping[str, Any]:
+        if self.options.target not in REAL_PROVIDER_LOAD_TARGETS:
+            raise AcceptanceUnsupported(
+                "runner.real_provider_load_target_unsupported",
+                "The real Provider load suite currently supports only Docker and Kubernetes Targets.",
+                {
+                    "target": self.options.target,
+                    "supportedTargets": list(REAL_PROVIDER_LOAD_TARGETS),
+                },
+            )
+        quota = self._set_fixture_execution_quota(
+            REAL_PROVIDER_LOAD_CONCURRENCY,
+            "real Provider load admission",
+            "runner.real_provider_load_quota_mismatch",
+        )
+        sessions = self._real_provider_load_sessions()
+        execution_ids: set[str] = set()
+        worker_ids: set[str] = set()
+        session_execution_counts = {
+            str(session["sessionId"]): 0 for session in sessions
+        }
+        provider_execution_counts = {self.options.provider: 0}
+        event_type_counts: dict[str, int] = {}
+        admission_recovery_ms: list[int] = []
+        turn_latency_ms: list[int] = []
+        quota_rejections = 0
+        overlap_observations = 0
+        restart_evidence: list[dict[str, Any]] = []
+        pending_restart_verification: dict[str, Any] | None = None
+        wave_durations_ms: list[int] = []
+        first_wave_samples: list[dict[str, Any]] = []
+        last_wave_samples: list[dict[str, Any]] = []
+        started = time.monotonic()
+        minimum_duration_seconds = self.options.load_min_duration_seconds
+        minimum_duration_ms = round(minimum_duration_seconds * 1000)
+        restart_every_waves = self.options.real_provider_load_restart_every_waves
+        maximum_wave_count = (
+            self.options.load_max_waves
+            if minimum_duration_seconds > 0
+            else self.options.load_waves
+        )
+        if not 1 <= self.options.load_waves <= REAL_PROVIDER_LOAD_MAX_WAVES:
+            raise AcceptanceError(
+                "runner.real_provider_load_waves_invalid",
+                "The real Provider load wave count was outside the accepted range.",
+                {
+                    "minimum": 1,
+                    "maximum": REAL_PROVIDER_LOAD_MAX_WAVES,
+                    "actual": self.options.load_waves,
+                },
+            )
+        if (
+            maximum_wave_count < self.options.load_waves
+            or maximum_wave_count > REAL_PROVIDER_LOAD_MAX_WAVES
+        ):
+            raise AcceptanceError(
+                "runner.real_provider_load_wave_range_invalid",
+                "The real Provider load maximum wave bound was outside the accepted range.",
+                {
+                    "minimumCount": self.options.load_waves,
+                    "maximumCount": maximum_wave_count,
+                    "maximum": REAL_PROVIDER_LOAD_MAX_WAVES,
+                },
+            )
+
+        def complete(load_turn: Mapping[str, Any]) -> dict[str, Any]:
+            prior_session_execution_count = session_execution_counts[str(load_turn["sessionId"])]
+            terminal = self._complete_real_provider_load_turn(
+                load_turn,
+                expected_resume_strategy=(
+                    "authoritative-history"
+                    if prior_session_execution_count == 0
+                    else "native-cursor"
+                ),
+                expected_resume_reason=(
+                    "cursor_absent"
+                    if prior_session_execution_count == 0
+                    else "cursor_usable"
+                ),
+            )
+            execution_id = str(terminal["executionId"])
+            if not execution_id or execution_id in execution_ids:
+                raise AcceptanceError(
+                    "runner.real_provider_load_execution_reused",
+                    "The real Provider load gate reused or omitted an Execution identity.",
+                    {"executionId": execution_id},
+                )
+            execution_ids.add(execution_id)
+            worker_ids.add(str(terminal["workerId"]))
+            session_execution_counts[str(terminal["sessionId"])] += 1
+            provider_execution_counts[self.options.provider] += 1
+            turn_latency_ms.append(int(terminal["turnLatencyMs"]))
+            terminal_counts = json_object(
+                terminal.get("eventTypeCounts"),
+                "real Provider load terminal event type counts",
+            )
+            for event_type, count in terminal_counts.items():
+                if isinstance(count, int):
+                    event_type_counts[event_type] = event_type_counts.get(event_type, 0) + count
+            return terminal
+
+        completed_wave_count = 0
+        while completed_wave_count < maximum_wave_count:
+            wave_index = completed_wave_count
+            wave_started = time.monotonic()
+            offset = wave_index % len(sessions)
+            ordered = sessions[offset:] + sessions[:offset]
+            active = [
+                self._start_real_provider_load_turn(ordered[0], wave_index, 1),
+                self._start_real_provider_load_turn(ordered[1], wave_index, 2),
+            ]
+            overlaps = [self._real_provider_load_overlap(active, "initial")]
+            overlap_observations += 1
+            worker_ids.update(overlaps[-1]["workerIds"])
+            rejections: list[dict[str, Any]] = []
+            wave_turn_latency_ms: list[int] = []
+
+            for position, session in enumerate(ordered[2:], start=3):
+                rejections.append(
+                    self._assert_real_provider_load_quota_rejected(session, wave_index, position)
+                )
+                quota_rejections += 1
+                wave_turn_latency_ms.append(int(complete(active.pop(0))["turnLatencyMs"]))
+                self._assert_real_provider_load_turn_pending(
+                    active[0],
+                    f"wave-{wave_index + 1}-before-position-{position}-admission",
+                )
+                recovery_started = time.monotonic()
+                active.append(self._start_real_provider_load_turn(session, wave_index, position))
+                admission_recovery_ms.append(elapsed_ms(recovery_started))
+                overlaps.append(
+                    self._real_provider_load_overlap(
+                        active,
+                        f"slot-reuse-{position - REAL_PROVIDER_LOAD_CONCURRENCY}",
+                    )
+                )
+                overlap_observations += 1
+                worker_ids.update(overlaps[-1]["workerIds"])
+
+            wave_turn_latency_ms.append(int(complete(active.pop(0))["turnLatencyMs"]))
+            self._assert_real_provider_load_turn_pending(
+                active[0],
+                f"wave-{wave_index + 1}-before-final-terminal",
+            )
+            wave_turn_latency_ms.append(int(complete(active.pop(0))["turnLatencyMs"]))
+
+            for session in sessions:
+                pending = self._pending_interactions(str(session["sessionId"]))
+                if pending:
+                    raise AcceptanceError(
+                        "runner.real_provider_load_interaction_leaked",
+                        "The real Provider load gate ended with a pending interaction.",
+                        {
+                            "wave": wave_index + 1,
+                            "sessionId": session["sessionId"],
+                            "interactionIds": [item.get("id") for item in pending],
+                        },
+                    )
+
+            wave_duration_ms = elapsed_ms(wave_started)
+            wave_durations_ms.append(wave_duration_ms)
+            sample = {
+                "wave": wave_index + 1,
+                "sessionOrder": [str(session["sessionId"]) for session in ordered],
+                "providerOrder": [self.options.provider] * REAL_PROVIDER_LOAD_SESSIONS,
+                "overlapWorkerIds": [overlap["workerIds"] for overlap in overlaps],
+                "targetExecutionIdentities": [
+                    overlap["targetExecutionIdentities"] for overlap in overlaps
+                ],
+                "quotaRejections": rejections,
+                "turnLatencyMs": duration_distribution_ms(wave_turn_latency_ms),
+                "durationMs": wave_duration_ms,
+            }
+            if completed_wave_count < 2:
+                first_wave_samples.append(sample)
+            last_wave_samples = (last_wave_samples + [sample])[-2:]
+            completed_wave_count += 1
+            if pending_restart_verification is not None:
+                pending_restart_verification.update(
+                    {
+                        "postRestartWave": completed_wave_count,
+                        "postRestartNativeCursorVerified": True,
+                        "postRestartSessionSequenceContinuityVerified": True,
+                        "postRestartExecutionIdReuseVerified": True,
+                        "postRestartTerminalPathUniquenessVerified": True,
+                    }
+                )
+                pending_restart_verification = None
+            duration_target_met_now = elapsed_ms(started) >= minimum_duration_ms
+            should_continue = not (
+                completed_wave_count >= self.options.load_waves
+                and duration_target_met_now
+            )
+            restart_due = (
+                restart_every_waves > 0
+                and completed_wave_count % restart_every_waves == 0
+                and (should_continue or not restart_evidence)
+            )
+            if restart_due:
+                if completed_wave_count >= maximum_wave_count:
+                    raise AcceptanceError(
+                        "runner.real_provider_load_restart_followup_wave_unavailable",
+                        "The real Provider load cadence required a post-restart proof wave, but the maximum wave bound left no room to run it.",
+                        {
+                            "wavesCompleted": completed_wave_count,
+                            "loadWaves": self.options.load_waves,
+                            "maximumWaves": maximum_wave_count,
+                            "restartEveryWaves": restart_every_waves,
+                            "minimumDurationSeconds": minimum_duration_seconds,
+                            "durationTargetMet": duration_target_met_now,
+                        },
+                    )
+                pre_restart_sequences = {
+                    str(session["sessionId"]): (
+                        int(events[-1]["sequence"])
+                        if (
+                            (events := self._all_events(session_id=str(session["sessionId"])))
+                            and isinstance(events[-1].get("sequence"), int)
+                        )
+                        else 0
+                    )
+                    for session in sessions
+                }
+                restarted = self._restart_control_plane()
+                restart_record = {
+                    "afterWave": completed_wave_count,
+                    "preRestartSequences": dict(sorted(pre_restart_sequences.items())),
+                    **dict(restarted),
+                }
+                restart_evidence.append(restart_record)
+                pending_restart_verification = restart_record
+                should_continue = True
+            if not should_continue:
+                break
+
+        duration_ms = elapsed_ms(started)
+        duration_target_met = duration_ms >= minimum_duration_ms
+        if pending_restart_verification is not None:
+            raise AcceptanceError(
+                "runner.real_provider_load_restart_followup_wave_missing",
+                "The real Provider load run restarted the Control Plane but did not complete a follow-up proof wave.",
+                {
+                    "wavesCompleted": completed_wave_count,
+                    "restartEveryWaves": restart_every_waves,
+                    "pendingRestart": dict(pending_restart_verification),
+                },
+            )
+        if completed_wave_count < self.options.load_waves or not duration_target_met:
+            raise AcceptanceError(
+                "runner.real_provider_load_duration_not_reached",
+                "The real Provider load run reached its maximum wave safety bound before satisfying the requested duration.",
+                {
+                    "minimumWaves": self.options.load_waves,
+                    "maximumWaves": maximum_wave_count,
+                    "wavesCompleted": completed_wave_count,
+                    "minimumDurationSeconds": minimum_duration_seconds,
+                    "durationMs": duration_ms,
+                },
+            )
+
+        sampled_waves: dict[int, dict[str, Any]] = {}
+        for sample in first_wave_samples + last_wave_samples:
+            sampled_waves[int(sample["wave"])] = sample
+        wave_samples = [sampled_waves[index] for index in sorted(sampled_waves)]
+
+        expected_executions = completed_wave_count * REAL_PROVIDER_LOAD_SESSIONS
+        expected_rejections = completed_wave_count * (
+            REAL_PROVIDER_LOAD_SESSIONS - REAL_PROVIDER_LOAD_CONCURRENCY
+        )
+        expected_overlaps = completed_wave_count * (REAL_PROVIDER_LOAD_SESSIONS - 1)
+        if (
+            len(execution_ids) != expected_executions
+            or quota_rejections != expected_rejections
+            or overlap_observations != expected_overlaps
+            or len(worker_ids) != REAL_PROVIDER_LOAD_CONCURRENCY
+            or any(count != completed_wave_count for count in session_execution_counts.values())
+            or provider_execution_counts[self.options.provider] != expected_executions
+        ):
+            raise AcceptanceError(
+                "runner.real_provider_load_aggregate_invalid",
+                "The real Provider load gate did not retain its canonical execution, rejection, overlap, or distribution counts.",
+                {
+                    "expectedExecutions": expected_executions,
+                    "distinctExecutionCount": len(execution_ids),
+                    "expectedQuotaRejections": expected_rejections,
+                    "quotaRejections": quota_rejections,
+                    "expectedOverlapObservations": expected_overlaps,
+                    "overlapObservations": overlap_observations,
+                    "workerIds": sorted(worker_ids),
+                    "providerExecutionCounts": dict(sorted(provider_execution_counts.items())),
+                    "sessionExecutionCounts": dict(sorted(session_execution_counts.items())),
+                },
+            )
+
+        admission_attempts = len(execution_ids) + quota_rejections
+        evidence = {
+            "maxConcurrentExecutions": quota.get("maxConcurrentExecutions"),
+            "workers": REAL_PROVIDER_LOAD_CONCURRENCY,
+            "sessions": REAL_PROVIDER_LOAD_SESSIONS,
+            "providers": [self.options.provider],
+            "wavesRequested": self.options.load_waves,
+            "minimumWavesRequested": self.options.load_waves,
+            "maximumWaves": maximum_wave_count,
+            "restartEveryWaves": restart_every_waves,
+            "minimumDurationSeconds": minimum_duration_seconds,
+            "durationTargetMet": duration_target_met,
+            "stopReason": "minimum-waves-and-duration-satisfied",
+            "wavesCompleted": completed_wave_count,
+            "firstWave": 1,
+            "lastWave": completed_wave_count,
+            "controlPlaneRestartCount": len(restart_evidence),
+            "controlPlaneRestarts": restart_evidence,
+            "executionsCompleted": len(execution_ids),
+            "distinctExecutionCount": len(execution_ids),
+            "distinctWorkerCount": len(worker_ids),
+            "quotaRejections": quota_rejections,
+            "admissionRetriesSucceeded": len(admission_recovery_ms),
+            "admissionAttempts": admission_attempts,
+            "expectedQuotaRejectionRate": round(
+                quota_rejections / max(admission_attempts, 1),
+                6,
+            ),
+            "overlapObservations": overlap_observations,
+            "effectiveConcurrency": REAL_PROVIDER_LOAD_CONCURRENCY,
+            "executionSuccessRate": round(
+                len(execution_ids) / max(expected_executions, 1),
+                6,
+            ),
+            "unexpectedFailureCount": 0,
+            "unexpectedErrorRate": 0.0,
+            "doubleExecution": False,
+            "duplicateTerminal": False,
+            "pendingInteractionCount": 0,
+            "providerExecutionCounts": dict(sorted(provider_execution_counts.items())),
+            "sessionExecutionCounts": dict(sorted(session_execution_counts.items())),
+            "eventTypeCounts": dict(sorted(event_type_counts.items())),
+            "resourceProfile": fixture_load_resource_profile(self.options),
+            "durationMs": duration_ms,
+            "observedCompletedExecutionsPerSecond": round(
+                len(execution_ids) / max(duration_ms / 1000.0, 0.001),
+                3,
+            ),
+            "turnLatencyMs": duration_distribution_ms(turn_latency_ms),
+            "waveDurationMs": duration_distribution_ms(wave_durations_ms),
+            "admissionRecoveryMs": duration_distribution_ms(admission_recovery_ms),
+            "sessionsEvidence": [dict(session) for session in sessions],
+            "waveSamples": wave_samples,
+        }
+        return self._with_operator_approved_sla(evidence)
+
     def _fixture_multi_provider_concurrency(self) -> Mapping[str, Any]:
         primary_session_id = self._required("session_id")
         primary_provider = self.options.provider
@@ -13345,6 +14781,7 @@ class AcceptanceSuite:
         quota_rejections = 0
         overlap_observations = 0
         admission_recovery_ms: list[int] = []
+        turn_latency_ms: list[int] = []
         wave_durations_ms: list[int] = []
         first_wave_samples: list[dict[str, Any]] = []
         last_wave_samples: list[dict[str, Any]] = []
@@ -13355,6 +14792,7 @@ class AcceptanceSuite:
             terminal = self._complete_fixture_load_turn(load_turn)
             if terminal_validator is not None:
                 terminal_validator(load_turn, terminal)
+            turn_latency_ms.append(int(terminal["turnLatencyMs"]))
             self._accumulate_fixture_load_terminal(
                 terminal,
                 execution_ids,
@@ -13392,6 +14830,7 @@ class AcceptanceSuite:
             overlap_observations += 1
             worker_ids.update(overlaps[-1]["workerIds"])
             rejections: list[dict[str, Any]] = []
+            wave_turn_latency_ms: list[int] = []
 
             for position, session in enumerate(ordered[2:], start=3):
                 rejections.append(
@@ -13403,6 +14842,7 @@ class AcceptanceSuite:
                 )
                 quota_rejections += 1
                 complete(active.pop(0))
+                wave_turn_latency_ms.append(turn_latency_ms[-1])
                 self._assert_fixture_load_turn_pending(
                     active[0],
                     wave_index,
@@ -13428,12 +14868,14 @@ class AcceptanceSuite:
                 worker_ids.update(overlaps[-1]["workerIds"])
 
             complete(active.pop(0))
+            wave_turn_latency_ms.append(turn_latency_ms[-1])
             self._assert_fixture_load_turn_pending(
                 active[0],
                 wave_index,
                 "before-final-terminal",
             )
             complete(active.pop(0))
+            wave_turn_latency_ms.append(turn_latency_ms[-1])
 
             for session in sessions:
                 pending = self._pending_interactions(str(session["sessionId"]))
@@ -13456,6 +14898,7 @@ class AcceptanceSuite:
                 "providerOrder": [str(session["provider"]) for session in ordered],
                 "overlapWorkerIds": [overlap["workerIds"] for overlap in overlaps],
                 "quotaRejections": rejections,
+                "turnLatencyMs": duration_distribution_ms(wave_turn_latency_ms),
                 "durationMs": wave_duration,
             }
             if local_wave_index < 2:
@@ -13523,7 +14966,7 @@ class AcceptanceSuite:
             )
 
         admission_attempts = len(execution_ids) + quota_rejections
-        return {
+        evidence = {
             "maxConcurrentExecutions": quota.get("maxConcurrentExecutions"),
             "workers": FIXTURE_CONCURRENCY_WORKERS,
             "sessions": FIXTURE_LOAD_SESSIONS,
@@ -13568,6 +15011,7 @@ class AcceptanceSuite:
                 len(execution_ids) / max(duration_ms / 1000.0, 0.001),
                 3,
             ),
+            "turnLatencyMs": duration_distribution_ms(turn_latency_ms),
             "waveDurationMs": duration_distribution_ms(wave_durations_ms),
             "admissionRecoveryMs": duration_distribution_ms(admission_recovery_ms),
             "sessionsEvidence": [
@@ -13579,6 +15023,7 @@ class AcceptanceSuite:
             ],
             "waveSamples": wave_samples,
         }
+        return self._with_operator_approved_sla(evidence)
 
     def _fixture_load_sessions(self) -> list[dict[str, Any]]:
         if self._fixture_load_session_cache is not None:
@@ -13677,6 +15122,7 @@ class AcceptanceSuite:
             "interaction": interaction,
             "active": active,
             "admissionMs": elapsed_ms(started),
+            "turnStartedMonotonic": started,
         }
 
     def _fixture_load_overlap(
@@ -13888,6 +15334,22 @@ class AcceptanceSuite:
                     "terminalGeneration": terminal_generation,
                 },
             )
+        turn_started_monotonic = load_turn.get("turnStartedMonotonic")
+        turn_latency_ms = (
+            elapsed_ms(turn_started_monotonic)
+            if isinstance(turn_started_monotonic, (int, float))
+            else None
+        )
+        if turn_latency_ms is None:
+            raise AcceptanceError(
+                "runner.load_latency_missing",
+                "A fixture load Turn did not retain its monotonic start time for latency accounting.",
+                {
+                    "sessionId": session_id,
+                    "provider": provider,
+                    "turnId": turn_id,
+                },
+            )
         return {
             "sessionId": session_id,
             "provider": provider,
@@ -13896,6 +15358,7 @@ class AcceptanceSuite:
             "workerId": terminal_worker_id,
             "generation": terminal_generation,
             "resolution": resolution,
+            "turnLatencyMs": turn_latency_ms,
             "eventTypeCounts": dict(sorted(event_type_counts.items())),
             "sequenceRange": self._sequence_range(events),
         }
@@ -15057,8 +16520,15 @@ class AcceptanceSuite:
         }
 
     def _fixture_long_session_soak(self) -> Mapping[str, Any]:
+        started = time.monotonic()
         turn_count = self.options.soak_turns
         restart_every = self.options.soak_restart_every
+        minimum_duration_seconds = (
+            self.options.operator_approved_sla.minimum_duration_seconds
+            if self.options.operator_approved_sla is not None
+            else 0.0
+        )
+        minimum_duration_ms = round(minimum_duration_seconds * 1000)
         if turn_count <= 0:
             raise AcceptanceError(
                 "runner.soak_turns_invalid",
@@ -15073,7 +16543,9 @@ class AcceptanceSuite:
         execution_ids: set[str] = set()
         worker_ids: set[str] = set()
 
-        for turn_index in range(1, turn_count + 1):
+        turn_index = 0
+        while True:
+            turn_index += 1
             turn = self._create_turn(f"[text] [tool] [usage] fixture-soak-turn-{turn_index}")
             turn_id = self._turn_id(turn, f"fixture soak Turn {turn_index}")
             terminal, events = self._wait_for_turn_terminal(turn_id, "execution.completed")
@@ -15113,7 +16585,11 @@ class AcceptanceSuite:
                 }
             )
 
-            if restart_every > 0 and turn_index % restart_every == 0 and turn_index < turn_count:
+            duration_target_met = elapsed_ms(started) >= minimum_duration_ms
+            if turn_index >= turn_count and duration_target_met:
+                break
+
+            if restart_every > 0 and turn_index % restart_every == 0:
                 restarted = self._restart_control_plane()
                 restart_evidence.append(
                     {
@@ -15169,9 +16645,11 @@ class AcceptanceSuite:
             sort_keys=True,
         ).encode("utf-8")
         sample_size = min(3, len(turn_evidence))
-        return {
+        evidence = {
             "turnsRequested": turn_count,
             "turnsCompleted": len(turn_evidence),
+            "minimumDurationSeconds": minimum_duration_seconds,
+            "durationTargetMet": elapsed_ms(started) >= minimum_duration_ms,
             "distinctExecutionCount": len(execution_ids),
             "distinctWorkerCount": len(worker_ids),
             "controlPlaneRestartEvery": restart_every,
@@ -15189,11 +16667,13 @@ class AcceptanceSuite:
             "doubleExecution": False,
             "duplicateTerminal": False,
             "identitySha256": hashlib.sha256(encoded_identity).hexdigest(),
+            "durationMs": elapsed_ms(started),
             "turnSamples": {
                 "first": turn_evidence[:sample_size],
                 "last": turn_evidence[-sample_size:],
             },
         }
+        return self._with_operator_approved_sla(evidence)
 
     def _create_turn(
         self,
@@ -15707,6 +17187,7 @@ def explicit_unsupported_case(
 
 def markdown_from_report(report: Mapping[str, Any]) -> str:
     real_provider_smoke = report.get("mode") == "real-provider-smoke"
+    real_provider_load = report.get("mode") == "real-provider-load"
     fixture_soak = report.get("mode") == "fixture-soak"
     fixture_concurrency = report.get("mode") == "fixture-concurrency"
     fixture_load = report.get("mode") == "fixture-load"
@@ -15719,6 +17200,9 @@ def markdown_from_report(report: Mapping[str, Any]) -> str:
     concurrency = configuration.get("concurrency") if isinstance(configuration, dict) else None
     load = configuration.get("load") if isinstance(configuration, dict) else None
     load_failure = configuration.get("loadFailure") if isinstance(configuration, dict) else None
+    real_provider_load_configuration = (
+        configuration.get("realProviderLoad") if isinstance(configuration, dict) else None
+    )
     retention_concurrency = (
         configuration.get("retentionConcurrency") if isinstance(configuration, dict) else None
     )
@@ -15731,6 +17215,8 @@ def markdown_from_report(report: Mapping[str, Any]) -> str:
         (
             "# Stage 3 Real Provider Smoke Acceptance"
             if real_provider_smoke
+            else "# Stage 3 Real Provider Load Acceptance"
+            if real_provider_load
             else "# Stage 3 Provider Fixture Retention Concurrency Acceptance"
             if fixture_retention_concurrency
             else "# Stage 3 Provider Fixture Load Failure Acceptance"
@@ -15763,6 +17249,11 @@ def markdown_from_report(report: Mapping[str, Any]) -> str:
             "native-cursor second Turn. It is a narrow two-Turn smoke, not the complete Local or four-Target "
             "Release Gate."
             if real_provider_smoke
+            else "This report runs a real Codex or Claude Agent through the real Control Plane, selected remote "
+            "Target, agentd, Worker Protocol, and Provider Host. It proves one controlled two-slot admission "
+            "wave with pending Approval overlap, exact quota rejection, and immediate slot reuse. It is not a "
+            "product/failure matrix, four-Target release gate, long-duration SLA, or production soak."
+            if real_provider_load
             else str(retention_concurrency.get("boundary"))
             if fixture_retention_concurrency
             and isinstance(retention_concurrency, dict)
@@ -15839,8 +17330,26 @@ def markdown_from_report(report: Mapping[str, Any]) -> str:
                 "```",
             ]
         )
+    if real_provider_load and isinstance(real_provider_load_configuration, dict):
+        lines.extend(
+            [
+                "",
+                "## Requested real Provider load",
+                "",
+                "```json",
+                json.dumps(
+                    real_provider_load_configuration,
+                    indent=2,
+                    sort_keys=True,
+                    ensure_ascii=False,
+                ),
+                "```",
+            ]
+        )
     if isinstance(real_provider, dict) and (
-        real_provider.get("requestedCases") or real_provider.get("requestedFailureCases")
+        real_provider.get("requestedCases")
+        or real_provider.get("requestedFailureCases")
+        or real_provider.get("requestedLoadCases")
     ):
         lines.extend(
             [
@@ -16127,7 +17636,7 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
         help=(
             "Acceptance suite: deterministic fixture, deterministic long-session soak, managed Docker "
             "multi-Provider concurrency, bounded Docker load/admission, targeted Docker failure under load, "
-            "Local retention concurrency, or real Provider smoke"
+            "Local retention concurrency, real Provider smoke, or one-wave remote real Provider load admission"
         ),
     )
     parser.add_argument("--output-dir", type=pathlib.Path)
@@ -16323,27 +17832,61 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
         "--load-waves",
         type=int,
         help=(
-            "Four-Session load waves for fixture-load or fixture-load-failure (default: 25; allowed: "
-            f"{FIXTURE_LOAD_MIN_WAVES}..{FIXTURE_LOAD_MAX_WAVES})"
+            "Four-Session load waves for fixture-load, fixture-load-failure, or real-provider-load "
+            f"(fixture default: {FIXTURE_LOAD_DEFAULT_WAVES}; real-provider-load default: {REAL_PROVIDER_LOAD_DEFAULT_WAVES})"
         ),
     )
     parser.add_argument(
         "--load-min-duration-seconds",
         type=float,
         help=(
-            "Minimum measured load-case duration for fixture-load or fixture-load-failure; the runner adds "
-            "whole waves until both this duration and --load-waves are satisfied"
+            "Minimum measured load-case duration for fixture-load, fixture-load-failure, or real-provider-load; "
+            "the runner adds whole waves until both this duration and --load-waves are satisfied"
         ),
     )
     parser.add_argument(
         "--load-max-waves",
         type=int,
         help=(
-            "Safety bound used with --load-min-duration-seconds (default: 100; maximum: "
-            f"{FIXTURE_LOAD_DURATION_MAX_WAVES})"
+            "Safety bound used with --load-min-duration-seconds (fixture maximum: "
+            f"{FIXTURE_LOAD_DURATION_MAX_WAVES}; real-provider-load maximum: {REAL_PROVIDER_LOAD_MAX_WAVES})"
+        ),
+    )
+    parser.add_argument(
+        "--real-provider-load-restart-every-waves",
+        type=int,
+        help=(
+            "Restart cadence for real-provider-load. Restart only after a full wave completes with no pending "
+            "interactions, then continue the next wave on the same Sessions."
+        ),
+    )
+    parser.add_argument(
+        "--operator-approved-sla-file",
+        type=pathlib.Path,
+        help=(
+            "Strict JSON operator-approved SLA thresholds. fixture-load, fixture-load-failure, and "
+            "real-provider-load require minimumDurationSeconds, latencyMs, recoveryTimeMs, and "
+            "unexpectedErrorRateMax=0.0; fixture-soak supports minimumDurationSeconds only."
         ),
     )
     parsed = parser.parse_args(argv)
+    operator_approved_sla_file = (
+        parsed.operator_approved_sla_file.expanduser().resolve()
+        if parsed.operator_approved_sla_file is not None
+        else None
+    )
+    try:
+        operator_approved_sla = parse_operator_approved_sla_file(
+            operator_approved_sla_file,
+            parsed.suite,
+        )
+    except ValueError as error:
+        parser.error(str(error))
+    operator_approved_min_duration_seconds = (
+        operator_approved_sla.minimum_duration_seconds
+        if operator_approved_sla is not None
+        else 0.0
+    )
     soak_turns = parsed.soak_turns if parsed.soak_turns is not None else 100 if parsed.suite == "fixture-soak" else 0
     soak_restart_every = (
         parsed.soak_restart_every
@@ -16357,19 +17900,33 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
         if parsed.load_waves is not None
         else FIXTURE_LOAD_DEFAULT_WAVES
         if parsed.suite in FIXTURE_LOAD_SUITES
+        else REAL_PROVIDER_LOAD_DEFAULT_WAVES
+        if parsed.suite == "real-provider-load"
         else 0
     )
-    load_min_duration_seconds = (
+    requested_load_min_duration_seconds = (
         parsed.load_min_duration_seconds
         if parsed.load_min_duration_seconds is not None
         else 0.0
+    )
+    load_min_duration_seconds = (
+        max(requested_load_min_duration_seconds, operator_approved_min_duration_seconds)
+        if is_duration_aware_load_suite(parsed.suite)
+        else requested_load_min_duration_seconds
     )
     load_max_waves = (
         parsed.load_max_waves
         if parsed.load_max_waves is not None
         else max(load_waves, FIXTURE_LOAD_MAX_WAVES)
         if parsed.suite in FIXTURE_LOAD_SUITES and load_min_duration_seconds > 0
+        else max(load_waves, REAL_PROVIDER_LOAD_MAX_WAVES)
+        if parsed.suite == "real-provider-load" and load_min_duration_seconds > 0
         else load_waves
+    )
+    real_provider_load_restart_every_waves = (
+        parsed.real_provider_load_restart_every_waves
+        if parsed.real_provider_load_restart_every_waves is not None
+        else 0
     )
     base_default_timeout = (
         1200.0
@@ -16382,7 +17939,9 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
     )
     default_timeout = (
         max(base_default_timeout, load_min_duration_seconds + 300.0)
-        if parsed.suite in FIXTURE_LOAD_SUITES and load_min_duration_seconds > 0
+        if is_duration_aware_load_suite(parsed.suite) and load_min_duration_seconds > 0
+        else max(base_default_timeout, operator_approved_min_duration_seconds + 60.0)
+        if parsed.suite == "fixture-soak" and operator_approved_min_duration_seconds > 0
         else base_default_timeout
     )
     worker_lease_ttl = parsed.worker_lease_ttl.strip()
@@ -16406,13 +17965,15 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
     if worker_heartbeat_timeout_seconds <= worker_lease_ttl_seconds:
         parser.error("--worker-heartbeat-timeout must be greater than --worker-lease-ttl")
     if (
-        parsed.suite != "real-provider-smoke"
+        not is_real_provider_runtime_suite(parsed.suite)
         and (
             worker_lease_ttl != DEFAULT_ACCEPTANCE_WORKER_LEASE_TTL
             or worker_heartbeat_timeout != DEFAULT_ACCEPTANCE_WORKER_HEARTBEAT_TIMEOUT
         )
     ):
-        parser.error("custom worker lease timing is only supported by --suite real-provider-smoke")
+        parser.error(
+            "custom worker lease timing is only supported by real Provider runtime suites"
+        )
     timeout_seconds = parsed.timeout if parsed.timeout is not None else default_timeout
     if timeout_seconds <= 0:
         parser.error("--timeout must be positive")
@@ -16429,21 +17990,34 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
             parser.error("--suite fixture-soak requires Control Plane restart continuity")
         if parsed.failure_only:
             parser.error("--suite fixture-soak cannot be combined with --failure-only")
-    if parsed.suite not in FIXTURE_LOAD_SUITES and (
+        if (
+            operator_approved_sla is not None
+            and timeout_seconds < operator_approved_sla.minimum_duration_seconds + 60.0
+        ):
+            parser.error(
+                "--timeout must allow at least 60 seconds beyond the operator-approved minimumDurationSeconds"
+            )
+    if not is_duration_aware_load_suite(parsed.suite) and (
         parsed.load_waves is not None
         or parsed.load_min_duration_seconds is not None
         or parsed.load_max_waves is not None
     ):
         parser.error(
-            "load wave and duration options require --suite fixture-load or fixture-load-failure"
+            "load wave and duration options require --suite fixture-load, fixture-load-failure, or real-provider-load"
         )
-    if parsed.suite in FIXTURE_LOAD_SUITES and not (
-        FIXTURE_LOAD_MIN_WAVES <= load_waves <= FIXTURE_LOAD_MAX_WAVES
+    minimum_load_waves = 1 if parsed.suite == "real-provider-load" else FIXTURE_LOAD_MIN_WAVES
+    maximum_load_waves = (
+        REAL_PROVIDER_LOAD_MAX_WAVES
+        if parsed.suite == "real-provider-load"
+        else FIXTURE_LOAD_MAX_WAVES
+    )
+    if is_duration_aware_load_suite(parsed.suite) and not (
+        minimum_load_waves <= load_waves <= maximum_load_waves
     ):
         parser.error(
-            f"--load-waves must be between {FIXTURE_LOAD_MIN_WAVES} and {FIXTURE_LOAD_MAX_WAVES}"
+            f"--load-waves must be between {minimum_load_waves} and {maximum_load_waves}"
         )
-    if parsed.suite in FIXTURE_LOAD_SUITES:
+    if is_duration_aware_load_suite(parsed.suite):
         if not 0 <= load_min_duration_seconds <= FIXTURE_LOAD_DURATION_MAX_SECONDS:
             parser.error(
                 "--load-min-duration-seconds must be between 0 and "
@@ -16453,14 +18027,31 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
             parser.error(
                 "--load-max-waves requires a positive --load-min-duration-seconds"
             )
-        if not load_waves <= load_max_waves <= FIXTURE_LOAD_DURATION_MAX_WAVES:
+        maximum_duration_waves = (
+            REAL_PROVIDER_LOAD_MAX_WAVES
+            if parsed.suite == "real-provider-load"
+            else FIXTURE_LOAD_DURATION_MAX_WAVES
+        )
+        if not load_waves <= load_max_waves <= maximum_duration_waves:
             parser.error(
                 "--load-max-waves must be at least --load-waves and no greater than "
-                f"{FIXTURE_LOAD_DURATION_MAX_WAVES}"
+                f"{maximum_duration_waves}"
             )
         if load_min_duration_seconds > 0 and timeout_seconds < load_min_duration_seconds + 60.0:
             parser.error(
                 "--timeout must allow at least 60 seconds beyond --load-min-duration-seconds for setup and cleanup"
+            )
+    if parsed.suite != "real-provider-load" and parsed.real_provider_load_restart_every_waves is not None:
+        parser.error(
+            "--real-provider-load-restart-every-waves requires --suite real-provider-load"
+        )
+    if parsed.suite == "real-provider-load":
+        if real_provider_load_restart_every_waves < 0:
+            parser.error("--real-provider-load-restart-every-waves must be zero or positive")
+        if real_provider_load_restart_every_waves > REAL_PROVIDER_LOAD_MAX_WAVES:
+            parser.error(
+                "--real-provider-load-restart-every-waves must be no greater than "
+                f"{REAL_PROVIDER_LOAD_MAX_WAVES}"
             )
     if parsed.control_plane_binary is not None and not parsed.skip_build:
         parser.error("--control-plane-binary requires --skip-build to prevent overwriting the configured binary")
@@ -16722,6 +18313,27 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
             parser.error(
                 "--suite fixture-retention-concurrency cannot be combined with fixture failure/canary options"
             )
+    if parsed.suite == "real-provider-load":
+        if parsed.target not in REAL_PROVIDER_LOAD_TARGETS:
+            parser.error(
+                "--suite real-provider-load currently requires --target docker or --target kubernetes"
+            )
+        if parsed.runner_command_json is None:
+            parser.error("--suite real-provider-load requires an explicit --runner-command-json")
+        if failure_cases or parsed.failure_only:
+            parser.error(
+                "--suite real-provider-load cannot be combined with fixture failure/canary options"
+            )
+        if real_provider_credential_env is None:
+            parser.error(
+                "--suite real-provider-load requires --real-provider-credential-env"
+            )
+        if real_provider_base_url_env is not None and real_provider_credential_env is None:
+            parser.error(
+                "--real-provider-base-url-env requires --real-provider-credential-env"
+            )
+        if parsed.real_provider_credential_field == "authToken" and parsed.provider != "claudeAgent":
+            parser.error("--real-provider-credential-field authToken is supported only for claudeAgent")
     if parsed.suite == "real-provider-smoke":
         if parsed.runner_command_json is None:
             parser.error("--suite real-provider-smoke requires an explicit --runner-command-json")
@@ -16747,12 +18359,21 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
         parser.error(
             "real Provider case options require --suite real-provider-smoke"
         )
-    elif real_provider_credential_env is not None or real_provider_base_url_env is not None:
-        parser.error("real Provider Credential options require --suite real-provider-smoke")
-    elif real_provider_model is not None:
-        parser.error("--real-provider-model requires --suite real-provider-smoke")
-    elif real_provider_model_env is not None:
-        parser.error("--real-provider-model-env requires --suite real-provider-smoke")
+    elif (
+        parsed.suite not in REAL_PROVIDER_RUNTIME_SUITES
+        and (real_provider_credential_env is not None or real_provider_base_url_env is not None)
+    ):
+        parser.error(
+            "real Provider Credential options require --suite real-provider-smoke or --suite real-provider-load"
+        )
+    elif parsed.suite not in REAL_PROVIDER_RUNTIME_SUITES and real_provider_model is not None:
+        parser.error(
+            "--real-provider-model requires --suite real-provider-smoke or --suite real-provider-load"
+        )
+    elif parsed.suite not in REAL_PROVIDER_RUNTIME_SUITES and real_provider_model_env is not None:
+        parser.error(
+            "--real-provider-model-env requires --suite real-provider-smoke or --suite real-provider-load"
+        )
     try:
         if real_provider_credential_env is not None:
             read_environment_value(
@@ -16798,6 +18419,7 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
                 "fixture-load",
                 "fixture-load-failure",
                 "fixture-retention-concurrency",
+                "real-provider-load",
             }
         ),
         soak_turns=soak_turns,
@@ -16805,6 +18427,9 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
         load_waves=load_waves,
         load_min_duration_seconds=load_min_duration_seconds,
         load_max_waves=load_max_waves,
+        real_provider_load_restart_every_waves=real_provider_load_restart_every_waves,
+        operator_approved_sla=operator_approved_sla,
+        operator_approved_sla_file=operator_approved_sla_file,
         worker_lease_ttl=worker_lease_ttl,
         worker_heartbeat_timeout=worker_heartbeat_timeout,
         ssh_orbctl_bin=parsed.ssh_orbctl_bin.strip(),
@@ -16885,7 +18510,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     run_id = f"stage3-provider-acceptance-{uuid.uuid4()}"
     supported_providers = (
         REAL_PROVIDER_SMOKE_PROVIDERS
-        if options.suite == "real-provider-smoke"
+        if is_real_provider_runtime_suite(options.suite)
         else FIXTURE_SUPPORTED_PROVIDERS
     )
     if options.target in {"local", "ssh", "docker", "kubernetes"} and os.name != "posix":
@@ -16901,6 +18526,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         ]
     elif options.provider not in supported_providers:
         real_provider_smoke = options.suite == "real-provider-smoke"
+        real_provider_load = options.suite == "real-provider-load"
         cases = [
             explicit_unsupported_case(
                 "provider.explicit-unsupported",
@@ -16909,11 +18535,15 @@ def main(argv: Sequence[str] | None = None) -> int:
                 (
                     "runner.real_provider_smoke_provider_unsupported"
                     if real_provider_smoke
+                    else "runner.real_provider_load_provider_unsupported"
+                    if real_provider_load
                     else "runner.fixture_provider_unsupported"
                 ),
                 (
                     f"The real Provider smoke does not support Provider {options.provider}."
                     if real_provider_smoke
+                    else f"The real Provider load suite does not support Provider {options.provider}."
+                    if real_provider_load
                     else f"The deterministic fixture does not implement Provider {options.provider}."
                 ),
                 {"suite": options.suite, "supportedProviders": sorted(supported_providers)},
@@ -16959,14 +18589,26 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         cases = suite.cases
     real_provider_smoke = options.suite == "real-provider-smoke"
+    real_provider_load = options.suite == "real-provider-load"
     fixture_concurrency = options.suite == "fixture-concurrency"
     fixture_load = options.suite == "fixture-load"
     fixture_load_failure = options.suite == "fixture-load-failure"
     fixture_load_suite = options.suite in FIXTURE_LOAD_SUITES
     fixture_retention_concurrency = options.suite == "fixture-retention-concurrency"
+    operator_approved_sla_report = operator_approved_sla_report_from_cases(
+        options.suite,
+        options.operator_approved_sla,
+        cases,
+    )
+    operator_approved_sla_source = operator_approved_sla_file_report(
+        options.operator_approved_sla_file,
+        options.operator_approved_sla,
+    )
     mode = (
         "real-provider-smoke"
         if real_provider_smoke
+        else "real-provider-load"
+        if real_provider_load
         else "fixture-retention-concurrency"
         if fixture_retention_concurrency
         else "fixture-load-failure"
@@ -16981,6 +18623,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         if options.failure_cases
         else "fixture"
     )
+    real_provider_load_restart_boundary = (
+        f"Control Plane restart continuity every {options.real_provider_load_restart_every_waves} completed waves"
+        if options.real_provider_load_restart_every_waves > 0
+        else "no Control Plane restart continuity"
+    )
     evidence_boundary = (
         (
             "real Codex/Claude through the real Control Plane, Local agentd, Worker Protocol and Provider Host; "
@@ -16993,6 +18640,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         if real_provider_smoke
         else (
+            "real Codex/Claude through the real Control Plane, selected remote Target, agentd, Worker Protocol, "
+            "Provider Host, controlled Credentials, two-slot pending-Approval admission waves, exact "
+            "execution_quota_exceeded rejection for the third/fourth admissions, immediate slot reuse after "
+            "terminal resolution, and optional minimum-duration operator-approved turn-latency/recovery/error "
+            f"threshold enforcement, with {real_provider_load_restart_boundary}; separate product/failure matrix "
+            "and production-duration Retention/soak evidence remain required"
+        )
+        if real_provider_load
+        else (
             "deterministic Provider Host fixture over the real Local Control Plane, Local agentd and background "
             "retention sweeper; runner-scoped metadata aging proves active Execution fencing, concurrent deletion "
             "of an unreferenced Artifact, protected seed/current Checkpoint lineages and post-terminal physical "
@@ -17004,23 +18660,39 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "container-loss targeting, managed replacement, exact Provider Host process crash classification, "
                 "peer-Session isolation, Generation fencing or new-Execution recovery, unique terminal paths, then "
                 "resource-profiled quota rejection, slot reuse, optional minimum-duration load and diagnostic "
+                "latency/error measurements with caller-supplied operator-approved thresholds enforced; "
+                "deterministic single-host mechanics only, not real Provider, multi-host, multi-node or rollout "
+                "failure proof"
+                if fixture_load_failure and options.operator_approved_sla is not None
+                else "deterministic Codex and Claude Provider Host fixtures over one real Control Plane and two managed "
+                "Docker agentd Workers; four Sessions prove exact Execution-to-Worker-to-container network and "
+                "container-loss targeting, managed replacement, exact Provider Host process crash classification, "
+                "peer-Session isolation, Generation fencing or new-Execution recovery, unique terminal paths, then "
+                "resource-profiled quota rejection, slot reuse, optional minimum-duration load and diagnostic "
                 "latency/error measurements; deterministic single-host mechanics only, not real Provider, "
                 "multi-host, multi-node, rollout failure or an operator-approved production SLA"
                 if fixture_load_failure
                 else (
-                "deterministic Codex and Claude Provider Host fixtures over one real Control Plane and two managed "
-                "Docker agentd Workers; four Sessions run repeated quota rejection, immediate slot reuse, three "
-                "overlap observations per wave, durable Artifact/Checkpoint completion, optional minimum-duration "
-                "load and diagnostic P50/P95/P99/error measurements; resource-profiled mechanics only, not real "
-                "Provider, multi-node or an operator-approved production performance SLA"
-                if fixture_load
-                else (
+                    "deterministic Codex and Claude Provider Host fixtures over one real Control Plane and two managed "
+                    "Docker agentd Workers; four Sessions run repeated quota rejection, immediate slot reuse, three "
+                    "overlap observations per wave, durable Artifact/Checkpoint completion, optional minimum-duration "
+                    "load and diagnostic P50/P95/P99/error measurements with caller-supplied operator-approved "
+                    "thresholds enforced; deterministic single-host mechanics only, not real Provider or multi-node "
+                    "performance proof"
+                    if fixture_load and options.operator_approved_sla is not None
+                    else "deterministic Codex and Claude Provider Host fixtures over one real Control Plane and two managed "
+                    "Docker agentd Workers; four Sessions run repeated quota rejection, immediate slot reuse, three "
+                    "overlap observations per wave, durable Artifact/Checkpoint completion, optional minimum-duration "
+                    "load and diagnostic P50/P95/P99/error measurements; resource-profiled mechanics only, not real "
+                    "Provider, multi-node or an operator-approved production performance SLA"
+                    if fixture_load
+                    else (
                     "deterministic Codex and Claude Provider Host fixtures over one real Control Plane and two managed "
                     "Docker agentd Workers; simultaneous pending Approval barriers prove multi-Session execution "
                     "overlap, not real Provider, load, remote Target, or production concurrency"
                     if fixture_concurrency
                     else "deterministic Provider Host fixture over real Control Plane, agentd, Worker Protocol, and Target paths"
-                )
+                    )
                 )
             )
         )
@@ -17047,6 +18719,25 @@ def main(argv: Sequence[str] | None = None) -> int:
             "soak": {
                 "turns": options.soak_turns,
                 "restartEvery": options.soak_restart_every,
+                "measurement": {
+                    "durationRecorded": options.suite == "fixture-soak",
+                    "operatorApprovedSlaThresholdsEnforced": (
+                        bool(operator_approved_sla_report.get("enforced"))
+                        if options.suite == "fixture-soak"
+                        and isinstance(operator_approved_sla_report, Mapping)
+                        else False
+                    ),
+                    "operatorApprovedSla": (
+                        operator_approved_sla_report
+                        if options.suite == "fixture-soak"
+                        else None
+                    ),
+                    "operatorApprovedSlaFile": (
+                        operator_approved_sla_source
+                        if options.suite == "fixture-soak"
+                        else None
+                    ),
+                },
                 "boundary": (
                     "deterministic long-session, repeated Control Plane restart, event pagination and terminal "
                     "integrity, plus repeated Tool/Usage/Checkpoint mechanics only; not real Provider, multi-node, "
@@ -17094,7 +18785,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                     ),
                     "latencyPercentiles": [50, 95, 99] if fixture_load_suite else [],
                     "unexpectedErrorRateRecorded": fixture_load_suite,
-                    "operatorApprovedSlaThresholdsEnforced": False,
+                    "operatorApprovedSlaThresholdsEnforced": (
+                        bool(operator_approved_sla_report.get("enforced"))
+                        if fixture_load_suite
+                        and isinstance(operator_approved_sla_report, Mapping)
+                        else False
+                    ),
+                    "operatorApprovedSla": (
+                        operator_approved_sla_report if fixture_load_suite else None
+                    ),
+                    "operatorApprovedSlaFile": (
+                        operator_approved_sla_source if fixture_load_suite else None
+                    ),
                 },
                 "boundary": evidence_boundary if fixture_load_suite else None,
             },
@@ -17140,6 +18842,46 @@ def main(argv: Sequence[str] | None = None) -> int:
                 ),
                 "boundary": evidence_boundary if fixture_retention_concurrency else None,
             },
+            "realProviderLoad": {
+                "workers": REAL_PROVIDER_LOAD_CONCURRENCY if real_provider_load else 0,
+                "sessions": REAL_PROVIDER_LOAD_SESSIONS if real_provider_load else 0,
+                "waves": options.load_waves if real_provider_load else 0,
+                "restartEveryWaves": (
+                    options.real_provider_load_restart_every_waves
+                    if real_provider_load
+                    else 0
+                ),
+                "minimumDurationSeconds": (
+                    options.load_min_duration_seconds if real_provider_load else 0
+                ),
+                "maximumWaves": options.load_max_waves if real_provider_load else 0,
+                "maxConcurrentExecutions": (
+                    REAL_PROVIDER_LOAD_CONCURRENCY if real_provider_load else None
+                ),
+                "resourceProfile": (
+                    fixture_load_resource_profile(options) if real_provider_load else None
+                ),
+                "measurement": {
+                    "durationTargetEnforced": (
+                        options.load_min_duration_seconds > 0 if real_provider_load else False
+                    ),
+                    "latencyPercentiles": [50, 95, 99] if real_provider_load else [],
+                    "unexpectedErrorRateRecorded": real_provider_load,
+                    "operatorApprovedSlaThresholdsEnforced": (
+                        bool(operator_approved_sla_report.get("enforced"))
+                        if real_provider_load
+                        and isinstance(operator_approved_sla_report, Mapping)
+                        else False
+                    ),
+                    "operatorApprovedSla": (
+                        operator_approved_sla_report if real_provider_load else None
+                    ),
+                    "operatorApprovedSlaFile": (
+                        operator_approved_sla_source if real_provider_load else None
+                    ),
+                },
+                "boundary": evidence_boundary if real_provider_load else None,
+            },
             "skipBuild": options.skip_build,
             "keepState": options.keep,
             "failureMatrix": {
@@ -17152,8 +18894,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             "realProvider": {
                 "requestedCases": list(options.real_provider_cases),
                 "requestedFailureCases": list(options.real_provider_failure_cases),
+                "requestedLoadCases": (
+                    [REAL_PROVIDER_LOAD_CASE_ID] if real_provider_load else []
+                ),
                 "ambientAuthentication": (
-                    real_provider_smoke and options.real_provider_credential_env is None
+                    is_real_provider_runtime_suite(options.suite)
+                    and options.real_provider_credential_env is None
                 ),
                 "controlledProductCredential": options.real_provider_credential_env is not None,
                 "controlledProductCredentialField": (
@@ -17173,6 +18919,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "boundary": (
                     evidence_boundary
                     if options.real_provider_failure_cases
+                    else evidence_boundary
+                    if real_provider_load
                     else "selected real Provider cases run in canonical pre/post-restart positions around the "
                     "two-Turn continuity baseline"
                     if options.real_provider_cases
@@ -17253,7 +19001,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "nanoCpus": options.docker_nano_cpus,
                 "desiredWorkers": (
                     FIXTURE_CONCURRENCY_WORKERS
-                    if fixture_concurrency or fixture_load_suite
+                    if fixture_concurrency or fixture_load_suite or real_provider_load
                     else 1
                 ),
                 "allowOperatorNetworkInterruption": options.docker_allow_network_interruption,

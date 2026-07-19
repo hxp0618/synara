@@ -26,7 +26,10 @@ EXPECTED_UNSUPPORTED: Mapping[tuple[str, str], frozenset[str]] = {
     ("claudeAgent", "product"): frozenset({"real-provider.compact-boundary"}),
     ("codex", "failure"): frozenset(),
     ("claudeAgent", "failure"): frozenset(),
+    ("codex", "load"): frozenset(),
+    ("claudeAgent", "load"): frozenset(),
 }
+REMOTE_GATE_MATRICES = (*common.MATRICES, common.REMOTE_LOAD_MATRIX)
 
 CredentialSource = remote.CredentialSource
 GateWorkerImage = remote.GateWorkerImage
@@ -39,6 +42,8 @@ class KubernetesReleaseGateOptions:
     output_dir: pathlib.Path
     product_timeout_seconds: float
     failure_timeout_seconds: float
+    real_provider_load_sla_file: pathlib.Path
+    real_provider_load_restart_every_waves: int
     codex_credential: CredentialSource
     claude_credential: CredentialSource
     docker_socket_path: pathlib.Path
@@ -47,6 +52,8 @@ class KubernetesReleaseGateOptions:
     kind_node_image: str
     codex_model: str | None = None
     claude_model: str | None = None
+    codex_model_environment_name: str | None = None
+    claude_model_environment_name: str | None = None
 
 
 def parse_args(argv: Sequence[str]) -> KubernetesReleaseGateOptions:
@@ -66,6 +73,16 @@ def parse_args(argv: Sequence[str]) -> KubernetesReleaseGateOptions:
     parser.add_argument("--output-dir", type=pathlib.Path)
     parser.add_argument("--product-timeout", type=float, default=3600.0)
     parser.add_argument("--failure-timeout", type=float, default=1200.0)
+    parser.add_argument(
+        "--real-provider-load-sla-file",
+        type=pathlib.Path,
+        default=repo_root / "deploy" / "worker" / "production-load-sla.json",
+    )
+    parser.add_argument(
+        "--real-provider-load-restart-every-waves",
+        type=int,
+        default=10,
+    )
     parser.add_argument(
         "--docker-socket-path",
         type=pathlib.Path,
@@ -91,7 +108,22 @@ def parse_args(argv: Sequence[str]) -> KubernetesReleaseGateOptions:
         parser.error("--kind-bin must be a non-empty executable name or path")
     if not kind_node_image or any(character in kind_node_image for character in "\r\n\t\x00"):
         parser.error("--kind-node-image must be a non-empty image reference")
+    if (
+        parsed.real_provider_load_restart_every_waves < 0
+        or parsed.real_provider_load_restart_every_waves
+        > acceptance.REAL_PROVIDER_LOAD_MAX_WAVES
+    ):
+        parser.error(
+            "--real-provider-load-restart-every-waves must be between 0 and "
+            f"{acceptance.REAL_PROVIDER_LOAD_MAX_WAVES}"
+        )
     try:
+        real_provider_load_sla_file = parsed.real_provider_load_sla_file.expanduser().resolve()
+        acceptance.parse_operator_approved_sla_file(
+            real_provider_load_sla_file,
+            "real-provider-load",
+            option="--real-provider-load-sla-file",
+        )
         codex_credential = remote.parse_credential_source(
             parsed.codex_credential_env,
             "apiKey",
@@ -118,6 +150,14 @@ def parse_args(argv: Sequence[str]) -> KubernetesReleaseGateOptions:
             model_option="--claude-model",
             model_env_option="--claude-model-env",
         )
+        codex_model_environment_name = acceptance.parse_environment_variable_name(
+            parsed.codex_model_env,
+            "--codex-model-env",
+        )
+        claude_model_environment_name = acceptance.parse_environment_variable_name(
+            parsed.claude_model_env,
+            "--claude-model-env",
+        )
     except ValueError as error:
         parser.error(str(error))
     output_dir = parsed.output_dir or remote.default_output_dir(repo_root, "kubernetes")
@@ -126,6 +166,8 @@ def parse_args(argv: Sequence[str]) -> KubernetesReleaseGateOptions:
         output_dir=output_dir.expanduser().resolve(),
         product_timeout_seconds=parsed.product_timeout,
         failure_timeout_seconds=parsed.failure_timeout,
+        real_provider_load_sla_file=real_provider_load_sla_file,
+        real_provider_load_restart_every_waves=parsed.real_provider_load_restart_every_waves,
         codex_credential=codex_credential,
         claude_credential=claude_credential,
         docker_socket_path=docker_socket_path,
@@ -134,6 +176,8 @@ def parse_args(argv: Sequence[str]) -> KubernetesReleaseGateOptions:
         kind_node_image=kind_node_image,
         codex_model=codex_model,
         claude_model=claude_model,
+        codex_model_environment_name=codex_model_environment_name,
+        claude_model_environment_name=claude_model_environment_name,
     )
 
 
@@ -161,15 +205,14 @@ def child_command(
     source = credential_source(options, provider)
     timeout = (
         options.product_timeout_seconds
-        if matrix == "product"
+        if matrix in {"product", common.REMOTE_LOAD_MATRIX}
         else options.failure_timeout_seconds
     )
-    matrix_flag = "--real-provider-matrix" if matrix == "product" else "--real-provider-failure-matrix"
     command = [
         sys.executable,
         str(options.repo_root / "scripts" / "stage3-provider-acceptance" / "acceptance_runner.py"),
         "--suite",
-        "real-provider-smoke",
+        "real-provider-load" if matrix == common.REMOTE_LOAD_MATRIX else "real-provider-smoke",
         "--target",
         "kubernetes",
         "--provider",
@@ -180,7 +223,6 @@ def child_command(
         source.environment_name,
         "--real-provider-credential-field",
         source.field,
-        matrix_flag,
         "--output-dir",
         str(output_dir),
         "--timeout",
@@ -197,6 +239,19 @@ def child_command(
         worker_image_name,
         "--kubernetes-skip-worker-build",
     ]
+    if matrix == "product":
+        command.append("--real-provider-matrix")
+    elif matrix == "failure":
+        command.append("--real-provider-failure-matrix")
+    elif matrix == common.REMOTE_LOAD_MATRIX:
+        command.extend(
+            [
+                "--real-provider-load-restart-every-waves",
+                str(options.real_provider_load_restart_every_waves),
+                "--operator-approved-sla-file",
+                str(options.real_provider_load_sla_file),
+            ]
+        )
     if source.base_url_environment_name is not None:
         command.extend(["--real-provider-base-url-env", source.base_url_environment_name])
     model = remote.provider_model(options, provider)
@@ -330,9 +385,10 @@ def target_spec() -> remote.RemoteReleaseTargetSpec:
         inspect_runtime=inspect_kubernetes_runtime,
         target_configuration=target_configuration,
         evidence_boundary=(
-            "A pass closes the implemented real Codex/Claude disposable-Kind product and controlled-failure slice.",
-            "It does not close SSH, production multi-node Kubernetes, registry rollout, concurrency, or soak gates.",
+            "A pass closes the implemented real Codex/Claude disposable-Kind product, controlled-failure, and one-wave load admission slice.",
+            "It does not close SSH, production multi-node Kubernetes, registry rollout, or production-duration SLA/soak.",
         ),
+        matrices=REMOTE_GATE_MATRICES,
     )
 
 

@@ -81,6 +81,22 @@ const INTERRUPT_GRACE_MS = 2_000;
 const MAX_STDERR_BYTES = 64 * 1024;
 const MAX_WIRE_LINE_BYTES = 4 * 1024 * 1024;
 
+export function codexThreadOpenPermissions(
+  runtimeMode: RunnerInput["workload"]["runtimeMode"],
+  interactive: boolean,
+) {
+  const approvalRequired = interactive && runtimeMode === "approval-required";
+  return {
+    approvalPolicy: approvalRequired ? ("untrusted" as const) : ("never" as const),
+    approvalsReviewer: "user" as const,
+    // Managed remote Workers are already the isolation boundary. Codex's read-only
+    // sandbox uses bubblewrap, which cannot create user namespaces in standard
+    // Docker/Kubernetes Worker containers. Keep the durable approval boundary,
+    // then execute the approved command inside the isolated Worker container.
+    sandbox: "danger-full-access" as const,
+  };
+}
+
 export function startCodexAppServerRun(options: CodexRunOptions): ProviderRunController {
   const runtime = new CodexAppServerRuntime(options);
   return runtime.start();
@@ -280,16 +296,16 @@ class CodexAppServerRuntime {
     const historyAvailable = hasAuthoritativeResumeData(this.options.input.workload);
     const allowCompactHistoryResumeFallback =
       requireNativeResume && this.options.operation?.commandType === "CompactSession";
-    const approvalRequired =
-      this.options.interactive && this.options.input.workload.runtimeMode === "approval-required";
+    const permissions = codexThreadOpenPermissions(
+      this.options.input.workload.runtimeMode,
+      this.options.interactive,
+    );
     const common = {
       ...(trimmedString(this.options.input.workload.model)
         ? { model: trimmedString(this.options.input.workload.model) }
         : {}),
       cwd: this.options.input.workspaceDirectory,
-      approvalPolicy: approvalRequired ? "untrusted" : "never",
-      approvalsReviewer: "user",
-      sandbox: approvalRequired ? "read-only" : "danger-full-access",
+      ...permissions,
     } as const;
 
     if (cursor) {

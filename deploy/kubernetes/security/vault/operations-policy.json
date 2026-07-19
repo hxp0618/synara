@@ -1,0 +1,172 @@
+{
+  "schemaVersion": "synara.vault-kms-operations-policy.v1",
+  "signing": {
+    "kmsReference": "hashivault://synara-worker-release",
+    "credentialEnvironment": ["VAULT_ADDR", "VAULT_TOKEN", "VAULT_CACERT"],
+    "signerIdentity": "auth/approle/role/synara-worker-release-signer",
+    "auditRequestPath": "transit/sign/synara-worker-release"
+  },
+  "transparencyLog": {
+    "provider": "public-rekor",
+    "url": "https://rekor.sigstore.dev",
+    "required": true
+  },
+  "admission": {
+    "controller": "kyverno",
+    "validationFailureAction": "Enforce",
+    "failurePolicy": "Fail",
+    "clusterPolicyPath": "deploy/kubernetes/security/cluster/verify-synara-worker-images.yaml"
+  },
+  "vault": {
+    "transitKeyName": "synara-worker-release",
+    "transitKey": {
+      "type": "ecdsa-p256",
+      "exportable": false,
+      "allowPlaintextBackup": false,
+      "deletionAllowed": false,
+      "derived": false,
+      "autoRotatePeriodSeconds": 0,
+      "rotationMode": "staged-manual-with-admission-key-overlap",
+      "rotationCadence": "At least annually and immediately after suspected signer or key-boundary compromise."
+    },
+    "signerAppRoleName": "synara-worker-release-signer",
+    "auditorAppRoleName": "synara-vault-production-auditor",
+    "snapshotOperatorAppRoleName": "synara-vault-snapshot-operator",
+    "snapshotOperatorPolicyName": "synara-vault-snapshot-operator",
+    "snapshotOperatorRole": {
+      "tokenPolicies": ["synara-vault-snapshot-operator"],
+      "tokenType": "batch",
+      "tokenTtlSeconds": 1800,
+      "tokenMaxTtlSeconds": 3600,
+      "tokenNumUses": 0,
+      "secretIdTtlSeconds": 600,
+      "secretIdNumUses": 1,
+      "tokenNoDefaultPolicy": true
+    }
+  },
+  "custody": {
+    "scheme": "shamir",
+    "totalShares": 5,
+    "threshold": 3,
+    "minimumParticipatingCustodians": 3,
+    "custodianClasses": ["platform-sre", "security", "operations"],
+    "storageRequirement": "Store each share in a separate managed secret store or hardware-backed password manager under distinct operator control.",
+    "rotationTriggers": [
+      "custodian_departure",
+      "suspected_share_exposure",
+      "major_cluster_rebuild",
+      "cryptographic_boundary_change"
+    ]
+  },
+  "snapshotRestoreDrill": {
+    "cadence": "Quarterly and before every Vault minor or major version upgrade.",
+    "credentials": {
+      "vaultAddressEnvironment": "VAULT_ADDR",
+      "vaultCaCertificateEnvironment": "VAULT_CACERT",
+      "snapshotOperatorRoleIdEnvironment": "VAULT_SNAPSHOT_OPERATOR_ROLE_ID",
+      "snapshotOperatorSecretIdEnvironment": "VAULT_SNAPSHOT_OPERATOR_SECRET_ID",
+      "restoreUnsealKeyEnvironments": [
+        "VAULT_SNAPSHOT_RESTORE_KEY_1",
+        "VAULT_SNAPSHOT_RESTORE_KEY_2",
+        "VAULT_SNAPSHOT_RESTORE_KEY_3"
+      ]
+    },
+    "restoreTarget": {
+      "strategy": "isolated-docker-raft",
+      "dockerImage": "hashicorp/vault:2.0.3@sha256:a296a888b118615dc01d5f1a6846e6d4a7277946caaed5b447008fff5fe06b54",
+      "dockerNetworkMode": "none",
+      "auditTmpfs": "/vault/audit:rw,noexec,nosuid,nodev,uid=100,gid=1000,mode=0700",
+      "requireFreshStateDir": true,
+      "forbidRetryJoin": true,
+      "forbidSourceClusterRestore": true
+    },
+    "requiredChecks": [
+      "vault-status",
+      "raft-configuration",
+      "audit-devices",
+      "transit-key",
+      "signer-approle",
+      "auditor-approle",
+      "snapshot-operator-approle"
+    ],
+    "requiredArtifacts": ["vault-snapshot-restore-drill.json", "vault-snapshot-restore-drill.md"]
+  },
+  "audit": {
+    "localDevices": [
+      {
+        "path": "file",
+        "filePath": "/vault/audit/audit-primary.log"
+      },
+      {
+        "path": "file-secondary",
+        "filePath": "/vault/audit/audit-secondary.log"
+      }
+    ],
+    "localRotation": {
+      "required": true,
+      "method": "same-filesystem rename plus recreate-0600 plus Vault SIGHUP after exact /proc PID discovery plus /proc fd rollover wait before compression or prune",
+      "image": "alpine:3.22.1@sha256:4bcff63911fcb4448bd4fdacec207030997caf25e9bea4045fa6c8c44de311d1",
+      "configMapName": "synara-vault-audit-observability",
+      "scriptKey": "rotate-audit.sh",
+      "shareProcessNamespace": true,
+      "runAsUser": 100,
+      "runAsGroup": 1000,
+      "activeFilePermissions": "0600",
+      "initializeMissingActiveFiles": true,
+      "reloadSignal": "SIGHUP",
+      "fdRolloverVerification": "wait until Vault no longer holds /proc fd references to renamed archives and has reopened recreated active files",
+      "maxMiBPerFile": 100,
+      "retainedFilesPerStream": 7,
+      "compression": "gzip",
+      "delayCompressNewestArchive": true
+    },
+    "externalSiem": {
+      "required": true,
+      "transport": "private-network HTTPS collector with mTLS",
+      "image": "timberio/vector:0.45.0-debian@sha256:987a15ebfb2eac3a4d5efb26252d140f799553feffb753dc215bdf738a7d4174",
+      "configMapName": "synara-vault-audit-observability",
+      "configKey": "vector.yaml",
+      "bootstrapScriptKey": "ship-audit.sh",
+      "secretName": "synara-vault-audit-siem",
+      "includePaths": ["/vault/audit/audit-primary.log", "/vault/audit/audit-primary.log.*"],
+      "excludePaths": ["/vault/audit/audit-primary.log.*.gz"],
+      "parseJsonPerLine": true,
+      "offsetKey": "offset",
+      "parsedEventField": "vault_audit",
+      "preservedEnvelopeFields": ["file", "host", "offset"],
+      "endpointEnvironment": "VAULT_AUDIT_SIEM_ENDPOINT",
+      "resolveEnvironment": "VAULT_AUDIT_SIEM_RESOLVE",
+      "clientCertificateEnvironment": "VAULT_AUDIT_SIEM_CLIENT_CERT",
+      "clientKeyEnvironment": "VAULT_AUDIT_SIEM_CLIENT_KEY",
+      "caCertificateEnvironment": "VAULT_AUDIT_SIEM_CA_CERT",
+      "secretKeys": {
+        "VAULT_AUDIT_SIEM_ENDPOINT": "VAULT_AUDIT_SIEM_ENDPOINT",
+        "VAULT_AUDIT_SIEM_CLIENT_CERT": "VAULT_AUDIT_SIEM_CLIENT_CERT",
+        "VAULT_AUDIT_SIEM_CLIENT_KEY": "VAULT_AUDIT_SIEM_CLIENT_KEY",
+        "VAULT_AUDIT_SIEM_CA_CERT": "VAULT_AUDIT_SIEM_CA_CERT"
+      },
+      "allowedEgress": [
+        {
+          "cidr": "0.250.250.254/32",
+          "port": 18443,
+          "protocol": "TCP"
+        }
+      ],
+      "deliverySlo": "near-real-time <= 5 minutes",
+      "retentionRequirement": "immutable retention outside the Vault cluster",
+      "objectLock": {
+        "provider": "s3-compatible",
+        "mode": "COMPLIANCE",
+        "retentionDays": 365,
+        "bucket": "synara-vault-audit",
+        "objectPrefix": "entries",
+        "mcAliasEnvironment": "VAULT_AUDIT_WORM_MC_ALIAS",
+        "mcConfigDirectoryEnvironment": "VAULT_AUDIT_WORM_MC_CONFIG_DIR",
+        "mcHostEnvironment": "VAULT_AUDIT_WORM_MC_HOST",
+        "mcVerifierHostEnvironment": "VAULT_AUDIT_WORM_MC_VERIFIER_HOST",
+        "mcResolveEnvironment": "VAULT_AUDIT_WORM_MC_RESOLVE",
+        "credentialPolicyPath": "deploy/kubernetes/security/vault/audit-object-lock-writer-policy.json"
+      }
+    }
+  }
+}

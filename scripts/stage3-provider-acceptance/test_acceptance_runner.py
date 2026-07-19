@@ -43,6 +43,9 @@ def runner_options(*, restart_control_plane: bool = True) -> acceptance.RunnerOp
         load_waves=0,
         load_min_duration_seconds=0.0,
         load_max_waves=0,
+        real_provider_load_restart_every_waves=0,
+        operator_approved_sla=None,
+        operator_approved_sla_file=None,
         worker_lease_ttl=acceptance.DEFAULT_ACCEPTANCE_WORKER_LEASE_TTL,
         worker_heartbeat_timeout=acceptance.DEFAULT_ACCEPTANCE_WORKER_HEARTBEAT_TIMEOUT,
         ssh_orbctl_bin="orbctl",
@@ -664,16 +667,28 @@ class FixtureLoadSuite(FixtureConcurrencySuite):
             "execution.started",
             "content.delta",
             "item.started",
-            "item.completed",
             "thread.token-usage.updated",
             "artifact.ready",
             "request.opened",
         ):
-            payload = (
-                {"requestId": f"request-{execution_id}"}
-                if event_type == "request.opened"
-                else None
-            )
+            if event_type == "request.opened":
+                payload = {"requestId": f"request-{execution_id}"}
+            elif event_type == "item.started":
+                terminal_id = f"command-item-{execution_id}"
+                payload = {
+                    "itemType": "command_execution",
+                    "status": "inProgress",
+                    "data": {
+                        "provider": self.options.provider,
+                        "providerItemId": terminal_id,
+                        "terminal": {
+                            "terminalId": terminal_id,
+                            "eventType": "terminal.started",
+                        },
+                    },
+                }
+            else:
+                payload = None
             events.append(
                 {
                     "sequence": len(events) + 1,
@@ -728,6 +743,29 @@ class FixtureLoadSuite(FixtureConcurrencySuite):
         del self.pending[interaction_id]
         events = self.events[session_id]
         execution_id = str(interaction["executionId"])
+        terminal_id = f"command-item-{execution_id}"
+        events.append(
+            {
+                "sequence": len(events) + 1,
+                "eventType": "item.completed",
+                "executionId": execution_id,
+                "workerId": worker_id,
+                "generation": generation,
+                "payload": {
+                    "itemType": "command_execution",
+                    "status": "completed",
+                    "data": {
+                        "provider": self.options.provider,
+                        "providerItemId": terminal_id,
+                        "terminal": {
+                            "terminalId": terminal_id,
+                            "eventType": "terminal.exited",
+                            "exitCode": 0,
+                        },
+                    },
+                },
+            }
+        )
         for event_type in (
             "workspace.dirty",
             "checkpoint.created",
@@ -919,6 +957,85 @@ class FixtureLoadFailureSuite(FixtureLoadSuite):
         if len(matches) != 1:
             raise AssertionError(matches)
         return matches[0]
+
+
+class RealProviderLoadSuite(FixtureLoadSuite):
+    def __init__(
+        self,
+        *,
+        target: str = "docker",
+        provider: str = "codex",
+        enforce_quota: bool = True,
+    ) -> None:
+        super().__init__(wave_count=1, enforce_quota=enforce_quota)
+        self.options = dataclasses.replace(
+            self.options,
+            suite="real-provider-load",
+            target=target,
+            provider=provider,
+            restart_control_plane=False,
+            real_provider_credential_env="SYNARA_ACCEPTANCE_PROVIDER_KEY",
+            real_provider_model=(
+                "claude-sonnet-4-6" if provider == "claudeAgent" else "gpt-5.6-sol"
+            ),
+        )
+        self.driver.name = target
+
+    def _create_real_provider_session(
+        self,
+        *,
+        title: str,
+        credential_id: str | None = None,
+    ) -> dict[str, Any]:
+        return self._create_project_session(
+            provider=self.options.provider,
+            title=title,
+            credential_id=credential_id,
+            model=self.options.real_provider_model,
+            description="real Provider load Session",
+        )
+
+    def _real_provider_approval_interaction(
+        self,
+        turn_id: str,
+        *,
+        expected_command: str,
+        session_id: str | None = None,
+    ) -> tuple[dict[str, Any], str, str, dict[str, Any], str]:
+        interaction = self._wait_for_interaction(
+            turn_id,
+            "approval",
+            session_id=session_id,
+        )
+        execution_id = str(interaction["executionId"])
+        request_id = str(interaction["requestId"])
+        return (
+            interaction,
+            execution_id,
+            request_id,
+            {"requestKind": "command"},
+            expected_command,
+        )
+
+    def _real_provider_turn_evidence(
+        self,
+        turn_id: str,
+        terminal: Mapping[str, Any],
+        events: Sequence[Mapping[str, Any]],
+        marker: str,
+        *,
+        expected_resume_strategy: str,
+        expected_resume_reason: str,
+        max_lease_generations: int = 1,
+    ) -> Mapping[str, Any]:
+        del turn_id, marker, expected_resume_strategy, expected_resume_reason, max_lease_generations
+        worker_id, generation = self._event_worker_identity(terminal)
+        return {
+            "executionId": str(terminal["executionId"]),
+            "workerId": worker_id,
+            "generation": generation,
+            "sequenceRange": self._sequence_range(events),
+        }
 
 
 class BarrierSuite(acceptance.AcceptanceSuite):
@@ -1974,7 +2091,10 @@ class RealProviderSequentialApprovalAPI(FakeAPI):
         )
         resolved_commands = list(
             commands
-            or tuple(acceptance.real_provider_approval_command() for _ in approval_request_ids)
+            or tuple(
+                acceptance.real_provider_approval_command(marker)
+                for _ in approval_request_ids
+            )
         )
         resolved_kinds = list(kinds or ("approval",) * len(approval_request_ids))
         if len(resolved_interaction_ids) != len(approval_request_ids):
@@ -2181,7 +2301,7 @@ class RealProviderSequentialApprovalSuite(acceptance.AcceptanceSuite):
         del session_id
         if runtime_mode != "approval-required" or interaction_mode != "default":
             raise AssertionError("unexpected real Provider approval Turn mode")
-        command = acceptance.real_provider_approval_command()
+        command = acceptance.real_provider_approval_command(self.marker)
         if input_text.count(command) != 1 or input_text.count(self.marker) != 1:
             raise AssertionError("real Provider approval prompt omitted its command or marker")
         self.created_input = input_text
@@ -3102,6 +3222,82 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
         self.assertFalse(evidence["doubleExecution"])
         self.assertFalse(evidence["duplicateTerminal"])
 
+    def test_fixture_load_records_operator_approved_sla_checks_when_thresholds_pass(self) -> None:
+        suite = FixtureLoadSuite(wave_count=2)
+        suite.options = dataclasses.replace(
+            suite.options,
+            operator_approved_sla=acceptance.OperatorApprovedSla(
+                minimum_duration_seconds=0.01,
+                latency_ms=acceptance.OperatorApprovedSlaPercentileThresholds(
+                    p95_max=10.0,
+                    p99_max=10.0,
+                ),
+                recovery_time_ms=acceptance.OperatorApprovedSlaPercentileThresholds(
+                    p95_max=10.0,
+                    p99_max=10.0,
+                ),
+                unexpected_error_rate_max=0.0,
+            ),
+        )
+
+        with mock.patch.object(acceptance, "elapsed_ms", return_value=10):
+            evidence = suite._fixture_load_admission_waves()
+
+        summary = evidence["operatorApprovedSla"]
+        self.assertTrue(summary["enforced"])
+        self.assertEqual(evidence["turnLatencyMs"]["sampleCount"], 8)
+        self.assertEqual(
+            summary["requested"],
+            {
+                "minimumDurationSeconds": 0.01,
+                "latencyMs": {"p95Max": 10.0, "p99Max": 10.0},
+                "recoveryTimeMs": {"p95Max": 10.0, "p99Max": 10.0},
+                "unexpectedErrorRateMax": 0.0,
+            },
+        )
+        self.assertEqual(
+            [check["status"] for check in summary["checks"]],
+            ["pass"] * 6,
+        )
+
+    def test_fixture_load_fails_closed_when_operator_approved_sla_is_not_met(self) -> None:
+        suite = FixtureLoadSuite(wave_count=2)
+        suite.options = dataclasses.replace(
+            suite.options,
+            operator_approved_sla=acceptance.OperatorApprovedSla(
+                minimum_duration_seconds=0.01,
+                latency_ms=acceptance.OperatorApprovedSlaPercentileThresholds(
+                    p95_max=9.0,
+                    p99_max=9.0,
+                ),
+                recovery_time_ms=acceptance.OperatorApprovedSlaPercentileThresholds(
+                    p95_max=10.0,
+                    p99_max=10.0,
+                ),
+                unexpected_error_rate_max=0.0,
+            ),
+        )
+
+        with mock.patch.object(acceptance, "elapsed_ms", return_value=10):
+            with self.assertRaises(acceptance.AcceptanceError) as caught:
+                suite._fixture_load_admission_waves()
+
+        self.assertEqual(caught.exception.code, "runner.operator_approved_sla_not_met")
+        summary = caught.exception.evidence["operatorApprovedSla"]
+        self.assertTrue(summary["enforced"])
+        self.assertEqual(
+            {
+                check["id"]
+                for check in summary["checks"]
+                if check["status"] == "fail"
+            },
+            {"latencyMs.p95Max", "latencyMs.p99Max"},
+        )
+        self.assertEqual(
+            summary["metricMapping"]["latencyMs.p95Max"]["observedEvidencePath"],
+            "turnLatencyMs.p95",
+        )
+
     def test_fixture_load_fails_when_duration_safety_bound_is_exhausted(self) -> None:
         suite = FixtureLoadSuite(
             wave_count=2,
@@ -3115,6 +3311,295 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
 
         self.assertEqual(caught.exception.code, "runner.load_duration_not_reached")
         self.assertEqual(caught.exception.evidence["wavesCompleted"], 2)
+
+    def test_real_provider_load_validates_one_wave_quota_overlap_and_slot_reuse(self) -> None:
+        suite = RealProviderLoadSuite()
+
+        with mock.patch.object(acceptance, "elapsed_ms", return_value=10):
+            evidence = suite._real_provider_load_admission_wave()
+
+        self.assertEqual(evidence["wavesCompleted"], 1)
+        self.assertEqual(evidence["executionsCompleted"], 4)
+        self.assertEqual(evidence["quotaRejections"], 2)
+        self.assertEqual(evidence["admissionRetriesSucceeded"], 2)
+        self.assertEqual(evidence["overlapObservations"], 3)
+        self.assertEqual(evidence["distinctExecutionCount"], 4)
+        self.assertEqual(evidence["distinctWorkerCount"], 2)
+        self.assertEqual(evidence["effectiveConcurrency"], 2)
+        self.assertEqual(evidence["providerExecutionCounts"], {"codex": 4})
+        self.assertEqual(set(evidence["sessionExecutionCounts"].values()), {1})
+        self.assertEqual(evidence["eventTypeCounts"]["execution.completed"], 4)
+        self.assertEqual(evidence["eventTypeCounts"]["request.opened"], 4)
+        self.assertEqual(evidence["eventTypeCounts"]["request.resolved"], 4)
+        self.assertEqual(evidence["turnLatencyMs"]["sampleCount"], 4)
+        self.assertEqual(evidence["waveDurationMs"]["sampleCount"], 1)
+        self.assertEqual(evidence["admissionRecoveryMs"]["sampleCount"], 2)
+        self.assertEqual(
+            [entry["reasonCode"] for entry in evidence["waveSamples"][0]["quotaRejections"]],
+            ["execution_quota_exceeded", "execution_quota_exceeded"],
+        )
+        self.assertEqual(len(evidence["waveSamples"][0]["overlapWorkerIds"]), 3)
+        self.assertEqual(
+            evidence["resourceProfile"]["dockerWorker"],
+            {"memoryBytes": 2 << 30, "nanoCpus": 1_000_000_000},
+        )
+        self.assertEqual(evidence["unexpectedErrorRate"], 0.0)
+        self.assertFalse(evidence["doubleExecution"])
+        self.assertFalse(evidence["duplicateTerminal"])
+
+    def test_real_provider_load_records_operator_approved_sla_checks(self) -> None:
+        suite = RealProviderLoadSuite()
+        suite.options = dataclasses.replace(
+            suite.options,
+            operator_approved_sla=acceptance.OperatorApprovedSla(
+                minimum_duration_seconds=0.01,
+                latency_ms=acceptance.OperatorApprovedSlaPercentileThresholds(
+                    p95_max=10.0,
+                    p99_max=10.0,
+                ),
+                recovery_time_ms=acceptance.OperatorApprovedSlaPercentileThresholds(
+                    p95_max=10.0,
+                    p99_max=10.0,
+                ),
+                unexpected_error_rate_max=0.0,
+            ),
+        )
+
+        with mock.patch.object(acceptance, "elapsed_ms", return_value=10):
+            evidence = suite._real_provider_load_admission_wave()
+
+        summary = evidence["operatorApprovedSla"]
+        self.assertTrue(summary["enforced"])
+        self.assertEqual(
+            summary["metricMapping"]["latencyMs.p95Max"]["observedEvidencePath"],
+            "turnLatencyMs.p95",
+        )
+        self.assertEqual([check["status"] for check in summary["checks"]], ["pass"] * 6)
+
+    def test_real_provider_load_uses_native_cursor_after_first_wave_on_each_session(self) -> None:
+        class ResumeAwareRealProviderLoadSuite(RealProviderLoadSuite):
+            def __init__(self) -> None:
+                super().__init__()
+                self.resume_expectations: list[tuple[str, str]] = []
+
+            def _real_provider_turn_evidence(
+                self,
+                turn_id: str,
+                terminal: Mapping[str, Any],
+                events: Sequence[Mapping[str, Any]],
+                marker: str,
+                *,
+                expected_resume_strategy: str,
+                expected_resume_reason: str,
+                max_lease_generations: int = 1,
+            ) -> Mapping[str, Any]:
+                self.resume_expectations.append(
+                    (expected_resume_strategy, expected_resume_reason)
+                )
+                return super()._real_provider_turn_evidence(
+                    turn_id,
+                    terminal,
+                    events,
+                    marker,
+                    expected_resume_strategy=expected_resume_strategy,
+                    expected_resume_reason=expected_resume_reason,
+                    max_lease_generations=max_lease_generations,
+                )
+
+        suite = ResumeAwareRealProviderLoadSuite()
+        suite.options = dataclasses.replace(
+            suite.options,
+            load_waves=2,
+            load_max_waves=2,
+        )
+
+        with mock.patch.object(acceptance, "elapsed_ms", return_value=10):
+            evidence = suite._real_provider_load_admission_wave()
+
+        self.assertEqual(evidence["wavesCompleted"], 2)
+        self.assertEqual(
+            suite.resume_expectations,
+            [("authoritative-history", "cursor_absent")] * 4
+            + [("native-cursor", "cursor_usable")] * 4,
+        )
+
+    def test_real_provider_load_rejects_a_failed_approved_command_item(self) -> None:
+        class FailedCommandRealProviderLoadSuite(RealProviderLoadSuite):
+            def _resolve_approval_turn(
+                self,
+                turn: Mapping[str, Any],
+                interaction: Mapping[str, Any],
+                *,
+                session_id: str,
+            ) -> dict[str, Any]:
+                evidence = super()._resolve_approval_turn(
+                    turn,
+                    interaction,
+                    session_id=session_id,
+                )
+                completed = next(
+                    event
+                    for event in reversed(self.events[session_id])
+                    if event.get("eventType") == "item.completed"
+                )
+                completed["payload"]["status"] = "failed"
+                completed["payload"]["data"]["terminal"].update(
+                    {"eventType": "terminal.failed", "exitCode": 1}
+                )
+                return evidence
+
+        suite = FailedCommandRealProviderLoadSuite()
+
+        with self.assertRaises(acceptance.AcceptanceError) as caught:
+            suite._real_provider_load_admission_wave()
+
+        self.assertEqual(
+            caught.exception.code,
+            "runner.real_provider_approval_command_item_correspondence_invalid",
+        )
+
+    def test_real_provider_load_restarts_only_on_eligible_completed_wave_boundaries(self) -> None:
+        class RestartAwareRealProviderLoadSuite(RealProviderLoadSuite):
+            def __init__(self) -> None:
+                super().__init__()
+                self.restart_calls = 0
+
+            def _restart_control_plane(self) -> Mapping[str, Any]:
+                self.restart_calls += 1
+                return {
+                    "processGeneration": self.restart_calls + 1,
+                    "previousPid": 100 + self.restart_calls,
+                    "preRestartSequence": 1000 + self.restart_calls,
+                }
+
+        suite = RestartAwareRealProviderLoadSuite()
+        suite.options = dataclasses.replace(
+            suite.options,
+            load_waves=11,
+            load_max_waves=11,
+            real_provider_load_restart_every_waves=10,
+        )
+
+        evidence = suite._real_provider_load_admission_wave()
+
+        self.assertEqual(evidence["restartEveryWaves"], 10)
+        self.assertEqual(evidence["wavesCompleted"], 11)
+        self.assertEqual(evidence["controlPlaneRestartCount"], 1)
+        self.assertEqual(suite.restart_calls, 1)
+        self.assertEqual(evidence["controlPlaneRestarts"][0]["afterWave"], 10)
+        self.assertEqual(
+            len(evidence["controlPlaneRestarts"][0]["preRestartSequences"]),
+            acceptance.REAL_PROVIDER_LOAD_SESSIONS,
+        )
+        self.assertEqual(
+            evidence["sessionExecutionCounts"],
+            {
+                session_id: 11
+                for session_id in sorted(evidence["sessionExecutionCounts"])
+            },
+        )
+        self.assertEqual(
+            evidence["controlPlaneRestarts"][0]["postRestartWave"],
+            11,
+        )
+        self.assertTrue(
+            evidence["controlPlaneRestarts"][0]["postRestartNativeCursorVerified"]
+        )
+
+        short_run = RestartAwareRealProviderLoadSuite()
+        short_run.options = dataclasses.replace(
+            short_run.options,
+            load_waves=9,
+            load_max_waves=9,
+            real_provider_load_restart_every_waves=10,
+        )
+
+        short_evidence = short_run._real_provider_load_admission_wave()
+
+        self.assertEqual(short_evidence["restartEveryWaves"], 10)
+        self.assertEqual(short_evidence["controlPlaneRestartCount"], 0)
+        self.assertEqual(short_evidence["controlPlaneRestarts"], [])
+        self.assertEqual(short_run.restart_calls, 0)
+
+        forced_followup = RestartAwareRealProviderLoadSuite()
+        forced_followup.options = dataclasses.replace(
+            forced_followup.options,
+            load_waves=2,
+            load_min_duration_seconds=0.001,
+            load_max_waves=3,
+            real_provider_load_restart_every_waves=2,
+        )
+
+        with mock.patch.object(acceptance, "elapsed_ms", return_value=1):
+            forced_evidence = forced_followup._real_provider_load_admission_wave()
+
+        self.assertEqual(forced_evidence["wavesCompleted"], 3)
+        self.assertEqual(forced_evidence["controlPlaneRestartCount"], 1)
+        self.assertEqual(forced_evidence["controlPlaneRestarts"][0]["afterWave"], 2)
+        self.assertEqual(forced_evidence["controlPlaneRestarts"][0]["postRestartWave"], 3)
+        self.assertEqual(forced_followup.restart_calls, 1)
+
+        every_wave = RestartAwareRealProviderLoadSuite()
+        every_wave.options = dataclasses.replace(
+            every_wave.options,
+            load_waves=2,
+            load_max_waves=2,
+            real_provider_load_restart_every_waves=1,
+        )
+
+        every_wave_evidence = every_wave._real_provider_load_admission_wave()
+
+        self.assertEqual(every_wave_evidence["wavesCompleted"], 2)
+        self.assertEqual(every_wave_evidence["controlPlaneRestartCount"], 1)
+        self.assertEqual(every_wave_evidence["controlPlaneRestarts"][0]["afterWave"], 1)
+        self.assertEqual(every_wave_evidence["controlPlaneRestarts"][0]["postRestartWave"], 2)
+        self.assertEqual(every_wave.restart_calls, 1)
+
+    def test_operator_approved_sla_report_marks_missing_case_as_not_evaluated(self) -> None:
+        requested = acceptance.OperatorApprovedSla(
+            minimum_duration_seconds=600,
+            latency_ms=acceptance.OperatorApprovedSlaPercentileThresholds(
+                p95_max=10000,
+                p99_max=15000,
+            ),
+            recovery_time_ms=acceptance.OperatorApprovedSlaPercentileThresholds(
+                p95_max=2000,
+                p99_max=3000,
+            ),
+            unexpected_error_rate_max=0.0,
+        )
+
+        summary = acceptance.operator_approved_sla_report_from_cases(
+            "real-provider-load",
+            requested,
+            [],
+        )
+
+        self.assertFalse(summary["enforced"])
+        self.assertTrue(summary["notEvaluated"])
+
+    def test_operator_approved_sla_file_report_uses_repo_relative_or_redacted_path(self) -> None:
+        repo_relative = acceptance.operator_approved_sla_file_report(
+            pathlib.Path("deploy/worker/production-load-sla.json").resolve(),
+            acceptance.OperatorApprovedSla(minimum_duration_seconds=600),
+        )
+        self.assertEqual(repo_relative["path"], "deploy/worker/production-load-sla.json")
+        self.assertEqual(repo_relative["sourceKind"], "repo-relative")
+        self.assertNotIn("/Users/", repo_relative["path"])
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            external_path = pathlib.Path(temp_dir) / "operator-approved-sla.json"
+            external_path.write_text(
+                json.dumps({"minimumDurationSeconds": 600}),
+                encoding="utf-8",
+            )
+            external = acceptance.operator_approved_sla_file_report(
+                external_path,
+                acceptance.OperatorApprovedSla(minimum_duration_seconds=600),
+            )
+
+        self.assertEqual(external["path"], "operator-approved-sla.json")
+        self.assertEqual(external["sourceKind"], "external")
 
     def test_duration_distribution_reports_nearest_rank_percentiles(self) -> None:
         summary = acceptance.duration_distribution_ms([1, 2, 3, 4, 100])
@@ -3270,6 +3755,27 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
         self.assertTrue(evidence["eventPagination"]["exercised"])
         self.assertGreater(evidence["sessionSequenceRange"]["count"], 500)
 
+    def test_fixture_soak_continues_until_operator_approved_minimum_duration(self) -> None:
+        suite = FixtureSoakSuite(turn_count=3)
+        suite.options = dataclasses.replace(
+            suite.options,
+            operator_approved_sla=acceptance.OperatorApprovedSla(
+                minimum_duration_seconds=0.004,
+            ),
+        )
+        elapsed_values = iter([0, 1, 2, 4, 4, 4, 4, 4])
+
+        with mock.patch.object(
+            acceptance,
+            "elapsed_ms",
+            side_effect=lambda _started: next(elapsed_values),
+        ):
+            evidence = suite._fixture_long_session_soak()
+
+        self.assertEqual(evidence["turnsRequested"], 3)
+        self.assertEqual(evidence["turnsCompleted"], 4)
+        self.assertTrue(evidence["durationTargetMet"])
+
     def test_terminal_large_pattern_has_stable_segment_hashes(self) -> None:
         self.assertEqual(
             acceptance.terminal_large_expected_segments(),
@@ -3340,10 +3846,11 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
                 self.assertTrue(command_factory(node_path).startswith(f"{node_path} -e '"))
 
     def test_real_provider_approval_gated_commands_are_read_only(self) -> None:
+        marker = "APPROVAL_MARKER"
         cases = (
             (
                 "approval",
-                acceptance.real_provider_approval_command,
+                lambda: acceptance.real_provider_approval_command(marker),
                 acceptance.real_provider_approval_prompt,
                 acceptance.REAL_PROVIDER_APPROVAL_CONTENT,
                 acceptance.REAL_PROVIDER_APPROVAL_RELATIVE_PATH,
@@ -3367,7 +3874,7 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
         for label, command_factory, prompt_factory, expected_output, relative_path in cases:
             with self.subTest(case=label), tempfile.TemporaryDirectory() as directory:
                 command = command_factory()
-                marker = f"{label.upper()}_MARKER"
+                case_marker = marker if label == "approval" else f"{label.upper()}_MARKER"
                 completed = subprocess.run(
                     ["bash", "-c", command],
                     cwd=directory,
@@ -3376,7 +3883,7 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
                     check=True,
                 )
                 workspace_entries = list(pathlib.Path(directory).iterdir())
-                prompt = prompt_factory(marker)
+                prompt = prompt_factory(case_marker)
 
                 self.assertEqual(completed.stdout, expected_output)
                 self.assertEqual(completed.stderr, b"")
@@ -3394,14 +3901,45 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
                 )
                 self.assertIn("Do not emit any assistant text before the tool call", prompt)
                 self.assertIn("complete assistant text for this Turn must be exactly", prompt)
-                self.assertEqual(prompt.count(marker), 1)
+                self.assertEqual(prompt.count(case_marker), 1)
+
+    def test_real_provider_approval_prompt_counts_exactly_once_in_current_new_turn(self) -> None:
+        marker = "APPROVAL_TURN_NONCE"
+        command = acceptance.real_provider_approval_command(marker)
+
+        prompt = acceptance.real_provider_approval_prompt(marker)
+
+        self.assertIn("This is a new Turn", prompt)
+        self.assertIn("Ignore every matching command or tool call from earlier Turns", prompt)
+        self.assertIn("In this current Turn, use the Bash or shell tool exactly once", prompt)
+        self.assertIn("even if the identical command already ran earlier", prompt)
+        self.assertIn("do not request escalated permissions", prompt)
+        self.assertIn("do not set sandbox_permissions, justification, or prefix_rule", prompt)
+        self.assertEqual(prompt.count(command), 1)
+
+    def test_real_provider_approval_command_is_unique_per_turn_marker(self) -> None:
+        first = acceptance.real_provider_approval_command("APPROVAL_TURN_ONE")
+        repeated = acceptance.real_provider_approval_command("APPROVAL_TURN_ONE")
+        second = acceptance.real_provider_approval_command("APPROVAL_TURN_TWO")
+
+        self.assertEqual(first, repeated)
+        self.assertNotEqual(first, second)
+        self.assertTrue(acceptance.real_provider_approval_command_matches(first, first))
+        self.assertFalse(acceptance.real_provider_approval_command_matches(first, second))
+        self.assertIn('void "turn-', first)
+        self.assertNotIn("APPROVAL_TURN_ONE", first)
+
+    def test_real_provider_approval_command_rejects_unsafe_turn_nonce(self) -> None:
+        with self.assertRaisesRegex(ValueError, "bounded safe identifier"):
+            acceptance.real_provider_approval_command("unsafe'nonce")
 
     def test_real_provider_approval_resolution_accepts_sequential_follow_up_approvals(self) -> None:
-        canonical_command = acceptance.real_provider_approval_command()
         suite = RealProviderSequentialApprovalSuite(
             approval_request_ids=("approval-request-1", "approval-request-2"),
-            commands=("/bin/bash -lc " + json.dumps(canonical_command), canonical_command),
         )
+        canonical_command = acceptance.real_provider_approval_command(suite.marker)
+        suite.api.approvals[0]["command"] = "/bin/bash -lc " + json.dumps(canonical_command)
+        suite.api.approvals[1]["command"] = canonical_command
 
         evidence = suite._real_provider_approval_resolution()
 
@@ -4182,6 +4720,31 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
                 "real-provider.turn-1",
                 "recovery.control-plane-restart",
                 "real-provider.turn-2-continuity",
+            ],
+        )
+
+    def test_real_provider_load_uses_one_wave_case_order(self) -> None:
+        suite = CaseOrderSuite(
+            FakeDriver(acceptance.STANDING_WORKER, name="docker"),
+            dataclasses.replace(
+                runner_options(),
+                suite="real-provider-load",
+                target="docker",
+                restart_control_plane=False,
+            ),
+        )
+
+        suite.run()
+
+        self.assertEqual(
+            suite.case_order,
+            [
+                "environment.target-prepare",
+                "environment.control-plane-start",
+                "identity.dev-login",
+                "runtime.target-provision",
+                "resources.real-provider-project-session",
+                acceptance.REAL_PROVIDER_LOAD_CASE_ID,
             ],
         )
 
@@ -5388,6 +5951,90 @@ class MarkdownReportTest(unittest.TestCase):
         self.assertIn('"provider-host-process-crash"', rendered)
         self.assertIn("## Requested fixture load", rendered)
 
+    def test_fixture_load_report_renders_operator_approved_sla_summary(self) -> None:
+        report = {
+            "schemaVersion": acceptance.SCHEMA_VERSION,
+            "runId": "run-load-sla",
+            "mode": "fixture-load",
+            "target": "docker",
+            "provider": "codex",
+            "status": "pass",
+            "startedAt": "2026-07-17T00:00:00Z",
+            "finishedAt": "2026-07-17T00:01:00Z",
+            "durationMs": 60_000,
+            "configuration": {
+                "load": {
+                    "workers": 2,
+                    "sessions": 4,
+                    "waves": 25,
+                    "boundary": "operator-approved deterministic load",
+                    "measurement": {
+                        "operatorApprovedSlaThresholdsEnforced": True,
+                        "operatorApprovedSla": {
+                            "requested": {
+                                "minimumDurationSeconds": 600,
+                                "latencyMs": {"p95Max": 250, "p99Max": 500},
+                                "recoveryTimeMs": {"p95Max": 300, "p99Max": 600},
+                                "unexpectedErrorRateMax": 0.0,
+                            },
+                            "metricMapping": {
+                                "latencyMs.p95Max": {
+                                    "observedEvidencePath": "turnLatencyMs.p95"
+                                }
+                            },
+                            "checks": [{"id": "latencyMs.p95Max", "status": "pass"}],
+                            "enforced": True,
+                        },
+                    },
+                },
+                "failureMatrix": {"requestedCases": []},
+                "realProvider": {"requestedCases": [], "requestedFailureCases": []},
+            },
+            "cases": [],
+        }
+
+        rendered = acceptance.markdown_from_report(report)
+
+        self.assertIn('"operatorApprovedSlaThresholdsEnforced": true', rendered)
+        self.assertIn('"metricMapping"', rendered)
+        self.assertIn('"checks"', rendered)
+
+    def test_real_provider_load_report_renders_boundary_and_requested_shape(self) -> None:
+        report = {
+            "schemaVersion": acceptance.SCHEMA_VERSION,
+            "runId": "run-real-provider-load",
+            "mode": "real-provider-load",
+            "target": "docker",
+            "provider": "codex",
+            "status": "pass",
+            "startedAt": "2026-07-19T00:00:00Z",
+            "finishedAt": "2026-07-19T00:01:00Z",
+            "durationMs": 60_000,
+            "configuration": {
+                "realProviderLoad": {
+                    "workers": 2,
+                    "sessions": 4,
+                    "waves": 1,
+                    "restartEveryWaves": 10,
+                },
+                "realProvider": {
+                    "requestedCases": [],
+                    "requestedFailureCases": [],
+                    "requestedLoadCases": [acceptance.REAL_PROVIDER_LOAD_CASE_ID],
+                    "boundary": "one-wave controlled load boundary",
+                },
+            },
+            "cases": [],
+        }
+
+        rendered = acceptance.markdown_from_report(report)
+
+        self.assertIn("# Stage 3 Real Provider Load Acceptance", rendered)
+        self.assertIn("one-wave controlled load boundary", rendered)
+        self.assertIn("## Requested real Provider cases", rendered)
+        self.assertIn(acceptance.REAL_PROVIDER_LOAD_CASE_ID, rendered)
+        self.assertIn('"restartEveryWaves": 10', rendered)
+
 
 class RunnerOptionsTest(unittest.TestCase):
     def test_provider_choices_use_canonical_antigravity_name(self) -> None:
@@ -5588,6 +6235,120 @@ class RunnerOptionsTest(unittest.TestCase):
                 with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
                     acceptance.parse_args(arguments)
 
+    def test_fixture_load_parses_operator_approved_sla_file_and_forces_duration(self) -> None:
+        payload = {
+            "minimumDurationSeconds": 600,
+            "latencyMs": {"p95Max": 250, "p99Max": 500},
+            "recoveryTimeMs": {"p95Max": 300, "p99Max": 600},
+            "unexpectedErrorRateMax": 0.0,
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = pathlib.Path(temp_dir) / "operator-approved-sla.json"
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            options = acceptance.parse_args(
+                [
+                    "--suite",
+                    "fixture-load",
+                    "--target",
+                    "docker",
+                    "--operator-approved-sla-file",
+                    str(path),
+                ]
+            )
+
+        self.assertIsNotNone(options.operator_approved_sla)
+        self.assertEqual(options.operator_approved_sla.as_report(), payload)
+        self.assertEqual(options.load_min_duration_seconds, 600.0)
+        self.assertEqual(options.load_max_waves, acceptance.FIXTURE_LOAD_MAX_WAVES)
+        self.assertEqual(options.operator_approved_sla_file, path.resolve())
+        self.assertEqual(options.timeout_seconds, 900.0)
+
+    def test_real_provider_load_parses_operator_approved_sla_file_and_uses_real_provider_bound(
+        self,
+    ) -> None:
+        payload = {
+            "minimumDurationSeconds": 1200,
+            "latencyMs": {"p95Max": 10000, "p99Max": 15000},
+            "recoveryTimeMs": {"p95Max": 2000, "p99Max": 3000},
+            "unexpectedErrorRateMax": 0.0,
+        }
+        with tempfile.TemporaryDirectory() as temp_dir, mock.patch.dict(
+            os.environ,
+            {"SYNARA_ACCEPTANCE_CODEX_KEY": "controlled-codex-key"},
+        ):
+            path = pathlib.Path(temp_dir) / "operator-approved-sla.json"
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            options = acceptance.parse_args(
+                [
+                    "--suite",
+                    "real-provider-load",
+                    "--target",
+                    "docker",
+                    "--runner-command-json",
+                    '["node","/opt/synara/provider-host/index.mjs"]',
+                    "--real-provider-credential-env",
+                    "SYNARA_ACCEPTANCE_CODEX_KEY",
+                    "--operator-approved-sla-file",
+                    str(path),
+                ]
+            )
+
+        self.assertEqual(options.load_waves, 1)
+        self.assertEqual(options.load_min_duration_seconds, 1200.0)
+        self.assertEqual(options.load_max_waves, acceptance.REAL_PROVIDER_LOAD_MAX_WAVES)
+        self.assertEqual(options.operator_approved_sla_file, path.resolve())
+        self.assertEqual(options.timeout_seconds, 1500.0)
+
+    def test_operator_approved_sla_file_rejects_unsupported_suite(self) -> None:
+        payload = {"minimumDurationSeconds": 600}
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = pathlib.Path(temp_dir) / "operator-approved-sla.json"
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                acceptance.parse_args(
+                    ["--operator-approved-sla-file", str(path)]
+                )
+
+    def test_fixture_load_operator_approved_sla_rejects_nonzero_unexpected_error_rate(self) -> None:
+        payload = {
+            "minimumDurationSeconds": 600,
+            "latencyMs": {"p95Max": 250, "p99Max": 500},
+            "recoveryTimeMs": {"p95Max": 300, "p99Max": 600},
+            "unexpectedErrorRateMax": 0.01,
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = pathlib.Path(temp_dir) / "operator-approved-sla.json"
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                acceptance.parse_args(
+                    [
+                        "--suite",
+                        "fixture-load",
+                        "--target",
+                        "docker",
+                        "--operator-approved-sla-file",
+                        str(path),
+                    ]
+                )
+
+    def test_fixture_soak_operator_approved_sla_rejects_unmeasured_fields(self) -> None:
+        payload = {
+            "minimumDurationSeconds": 600,
+            "latencyMs": {"p95Max": 250, "p99Max": 500},
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = pathlib.Path(temp_dir) / "operator-approved-sla.json"
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                acceptance.parse_args(
+                    [
+                        "--suite",
+                        "fixture-soak",
+                        "--operator-approved-sla-file",
+                        str(path),
+                    ]
+                )
+
     def test_fixture_load_failure_uses_canonical_docker_shape(self) -> None:
         options = acceptance.parse_args(
             [
@@ -5736,6 +6497,106 @@ class RunnerOptionsTest(unittest.TestCase):
         )
         self.assertEqual(options.real_provider_model, "claude-sonnet-4-6")
 
+    def test_real_provider_load_parses_controlled_credential_source_and_custom_worker_timing(
+        self,
+    ) -> None:
+        with mock.patch.dict(
+            os.environ,
+            {"SYNARA_ACCEPTANCE_CODEX_KEY": "controlled-codex-key"},
+        ):
+            options = acceptance.parse_args(
+                [
+                    "--suite",
+                    "real-provider-load",
+                    "--target",
+                    "docker",
+                    "--runner-command-json",
+                    '["node","/opt/synara/provider-host/index.mjs"]',
+                    "--real-provider-credential-env",
+                    "SYNARA_ACCEPTANCE_CODEX_KEY",
+                    "--real-provider-model",
+                    "gpt-5.6-sol",
+                    "--worker-lease-ttl",
+                    "60s",
+                    "--worker-heartbeat-timeout",
+                    "180s",
+                ]
+            )
+
+        self.assertEqual(options.suite, "real-provider-load")
+        self.assertEqual(options.target, "docker")
+        self.assertFalse(options.restart_control_plane)
+        self.assertEqual(options.timeout_seconds, 900.0)
+        self.assertEqual(options.real_provider_credential_env, "SYNARA_ACCEPTANCE_CODEX_KEY")
+        self.assertEqual(options.real_provider_model, "gpt-5.6-sol")
+        self.assertEqual(options.worker_lease_ttl, "60s")
+        self.assertEqual(options.worker_heartbeat_timeout, "180s")
+
+    def test_real_provider_load_parses_restart_cadence_and_rejects_invalid_usage(self) -> None:
+        with mock.patch.dict(
+            os.environ,
+            {"SYNARA_ACCEPTANCE_CODEX_KEY": "controlled-codex-key"},
+        ):
+            options = acceptance.parse_args(
+                [
+                    "--suite",
+                    "real-provider-load",
+                    "--target",
+                    "docker",
+                    "--runner-command-json",
+                    '["node","/opt/synara/provider-host/index.mjs"]',
+                    "--real-provider-credential-env",
+                    "SYNARA_ACCEPTANCE_CODEX_KEY",
+                    "--real-provider-load-restart-every-waves",
+                    "10",
+                ]
+            )
+
+        self.assertEqual(options.real_provider_load_restart_every_waves, 10)
+
+        invalid_arguments = (
+            [
+                "--suite",
+                "real-provider-smoke",
+                "--runner-command-json",
+                '["node","/tmp/provider-host.mjs"]',
+                "--real-provider-load-restart-every-waves",
+                "10",
+            ],
+            [
+                "--suite",
+                "real-provider-load",
+                "--target",
+                "docker",
+                "--runner-command-json",
+                '["node","/opt/synara/provider-host/index.mjs"]',
+                "--real-provider-credential-env",
+                "SYNARA_ACCEPTANCE_CODEX_KEY",
+                "--real-provider-load-restart-every-waves",
+                "-1",
+            ],
+            [
+                "--suite",
+                "real-provider-load",
+                "--target",
+                "docker",
+                "--runner-command-json",
+                '["node","/opt/synara/provider-host/index.mjs"]',
+                "--real-provider-credential-env",
+                "SYNARA_ACCEPTANCE_CODEX_KEY",
+                "--real-provider-load-restart-every-waves",
+                str(acceptance.REAL_PROVIDER_LOAD_MAX_WAVES + 1),
+            ],
+        )
+        with mock.patch.dict(
+            os.environ,
+            {"SYNARA_ACCEPTANCE_CODEX_KEY": "controlled-codex-key"},
+        ):
+            for arguments in invalid_arguments:
+                with self.subTest(arguments=arguments):
+                    with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                        acceptance.parse_args(arguments)
+
     def test_real_provider_model_env_resolves_without_persisting_environment_name(self) -> None:
         environment_name = "SYNARA_ACCEPTANCE_CODEX_MODEL"
         with mock.patch.dict(
@@ -5788,6 +6649,38 @@ class RunnerOptionsTest(unittest.TestCase):
             with self.subTest(arguments=arguments):
                 with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
                     acceptance.parse_args(arguments)
+
+    def test_real_provider_load_rejects_unsupported_target_or_missing_controlled_credential(
+        self,
+    ) -> None:
+        invalid_arguments = (
+            [
+                "--suite",
+                "real-provider-load",
+                "--target",
+                "ssh",
+                "--runner-command-json",
+                '["node","/tmp/provider-host.mjs"]',
+                "--real-provider-credential-env",
+                "SYNARA_ACCEPTANCE_CODEX_KEY",
+            ],
+            [
+                "--suite",
+                "real-provider-load",
+                "--target",
+                "docker",
+                "--runner-command-json",
+                '["node","/tmp/provider-host.mjs"]',
+            ],
+        )
+        with mock.patch.dict(
+            os.environ,
+            {"SYNARA_ACCEPTANCE_CODEX_KEY": "controlled-codex-key"},
+        ):
+            for arguments in invalid_arguments:
+                with self.subTest(arguments=arguments):
+                    with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                        acceptance.parse_args(arguments)
 
     def test_real_provider_model_env_fails_closed_when_missing_or_empty(self) -> None:
         arguments = [

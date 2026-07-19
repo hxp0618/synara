@@ -97,6 +97,83 @@ python3 scripts/stage3-provider-acceptance/registry_release_gate.py \
   --output-dir /tmp/synara-worker-registry-release
 ```
 
+当前 checked-in production profile 的 Registry/Vault KMS/Rekor/Kyverno 门禁命令如下。只传环境变量名，
+不要把值写进命令、仓库、报告或 shell history；`--production-*configmap` 应指向当前生产集群已应用
+ConfigMap 的导出 YAML，而不是仍含 placeholder 的模板文件：
+
+```bash
+kubectl --context production -n synara-system get configmap synara-worker-cosign-public-key -o yaml \
+  > /secure/synara/synara-worker-cosign-public-key.yaml
+kubectl --context production -n synara-system get configmap synara-worker-signing-settings -o yaml \
+  > /secure/synara/synara-worker-signing-settings.yaml
+
+python3 scripts/stage3-provider-acceptance/registry_release_gate.py \
+  --image-repository registry.example.com/synara/worker \
+  --builder synara-worker-release \
+  --signing-policy-profile production \
+  --registry-auth-username-env REGISTRY_USERNAME \
+  --registry-auth-password-env REGISTRY_PASSWORD \
+  --registry-ca-cert-env REGISTRY_CA_CERT \
+  --production-public-key-configmap /secure/synara/synara-worker-cosign-public-key.yaml \
+  --production-repository-configmap /secure/synara/synara-worker-signing-settings.yaml \
+  --production-registry-config /secure/synara/registry-config.yml \
+  --production-registry-retention-policy /secure/synara/registry-retention-policy.json \
+  --production-registry-container synara-production-registry \
+  --production-registry-runtime-config-path /etc/distribution/config.yml \
+  --output-dir /tmp/synara-worker-registry-release
+
+python3 scripts/stage3-provider-acceptance/vault_kms_admission_gate.py \
+  --kube-context production \
+  --vault-namespace synara-kms \
+  --security-namespace synara-system \
+  --admission-test-namespace synara-admission \
+  --expected-approle-policy synara-worker-release-signer \
+  --registry-release-gate-report /tmp/synara-worker-registry-release/worker-registry-release-gate.json \
+  --unsigned-image-ref registry.example.com/synara/worker@sha256:<unsigned-digest> \
+  --wrong-key-image-ref registry.example.com/synara/worker@sha256:<wrong-key-digest> \
+  --tag-drift-image-ref registry.example.com/synara/worker:latest \
+  --output-dir /tmp/synara-worker-vault-kms-admission
+
+python3 scripts/stage3-provider-acceptance/vault_snapshot_restore_drill.py \
+  --output-dir /tmp/synara-worker-vault-snapshot-restore
+```
+
+生产 KMS pin 固定为 Helm chart `hashicorp/vault` `0.34.0`、release `synara-vault`、namespace
+`synara-kms` 和 image
+`hashicorp/vault:2.0.3@sha256:a296a888b118615dc01d5f1a6846e6d4a7277946caaed5b447008fff5fe06b54`。
+KMS reference 为 `hashivault://synara-worker-release`；signer identity 为
+`auth/approle/role/synara-worker-release-signer`，仅允许审计路径 `transit/sign/synara-worker-release`。
+Credential 环境变量名固定为 `VAULT_ADDR`、`VAULT_TOKEN`、`VAULT_CACERT`，token 必须短期且 policy-scoped。
+tlog 强制上传并在线验证 public Rekor `https://rekor.sigstore.dev` 的 inclusion proof 与 signed entry
+timestamp；Kyverno 固定 `failurePolicy: Fail`、`validationFailureAction: Enforce`、tag-to-digest mutation 和
+exact-digest signature verification。
+
+当前 production 路径固定绑定 clean SHA 与 checked-in source hash：`deploy/worker/production-signing-policy.json`、
+`deploy/worker/production-signing-profile.json`、`deploy/kubernetes/security/cluster/verify-synara-worker-images.yaml`、
+`deploy/kubernetes/security/namespaced/synara-worker-cosign-public-key-configmap.yaml`、
+`deploy/kubernetes/security/namespaced/synara-worker-signing-settings-configmap.yaml`、
+`deploy/kubernetes/security/production/kustomization.yaml`。`registry_release_gate.py`
+先验证这些 source，再读取命名的运行中 Registry 容器及其 runtime config，把 container/image identity、TLS
+证书、auth、repository、delete/retention 设置与导出配置和 checked-in retention contract 比对，并校验当前
+导出的 runtime ConfigMap YAML 与 Vault 导出的公钥/仓库模式一致；
+`vault_kms_admission_gate.py` 再通过 passing `registry_release_gate.py` 报告复核同一 clean-SHA/source-hash
+boundary，并要求 isolated state、materialized Vault/Registry CA、Registry auth config 与 owner-scoped 临时
+admission 资源全部被精确清理。以下命令是当前实现的门禁，不代表它们已经在 clean commit 上执行通过。
+
+生产 Vault 运维边界额外固定在 `deploy/kubernetes/security/vault/operations-policy.json` 与
+`docs/runbooks/vault-kms-operations.md`。Shamir custody 固定为 `5` shares / `3` threshold；隔离 snapshot restore
+drill 固定使用 snapshot-operator AppRole、三把 unseal key、`--network none` 的 isolated Docker Vault 和
+UID-100 hardened audit tmpfs，并由 `vault_snapshot_restore_drill.py` 报告当前 clean Git SHA、异步 snapshot
+application、单节点 leader 与 source/restore hash；audit 仍要求恰好两个 PVC-backed file device，并且
+必须保留独立的 rotation/外部 SIEM retained sink 边界。
+
+Registry runtime 必须精确使用
+`registry:2.8.3@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373`；门禁同时
+绑定容器 `Config.Image`、实际 Image ID 与匹配 RepoDigest，mutable tag、alias repository 或 digest drift
+一律 fail closed。Vault `lookup-self` 还必须证明 signer token 来自
+`synara-worker-release-signer` AppRole、类型为 `batch`、`orphan=true` 且只含该 signer policy；报告仅保留
+这些安全字段和 policy-list SHA256，不保留 token 或 Credential 值。
+
 最新 clean-SHA signing-policy/disposable Registry slice 已在 commit `7659dd5f` 通过，证据见
 `docs/reports/stage-3-worker-registry-signing-policy-7659dd5f.md`；较早 supply-chain 与仅覆盖 reproducibility
 的报告分别保留在 `docs/reports/stage-3-worker-registry-supply-chain-71ef4b5e.md` 和
@@ -111,15 +188,39 @@ clean-commit 证据；生产 Registry、生产签名身份、Credential、retent
 - [x] Worker build-revision cache identity 等于发布 Git SHA，跨 stage runtime artifacts 的 mtime 已归一。
 - [x] Disposable gate 使用 digest-pinned Cosign/Trivy，精确验证两个 OCI index 的 Git SHA、Version、Run ID、
       Slot 和 Digest annotations，并删除临时私钥与隔离 state。
-- [x] Checked-in signing policy 可显式选择 `ephemeral-key`、`keyless` 或 `kms-key`；生产模式拒绝非 TLS
-      Registry、强制 tlog，并隔离/清理 OIDC token 或仅按允许的环境变量名传递 KMS Credential。
+- [x] Checked-in signing policy schema 可区分 `ephemeral-key`、`keyless` 与 `kms-key`；当前 checked-in
+      `--signing-policy-profile production` 固定为 Vault Transit `kms-key`，并强制 TLS Registry、Rekor 与
+      Kyverno admission。
 - [x] `linux/amd64`、`linux/arm64` 均为 `HIGH=0`、`CRITICAL=0`、Secret=0、非 EOSL，Trivy DB 满足 24 小时
       freshness；`GO-2026-5932` 保留为未豁免的不可达 `UNKNOWN` review finding。
 - [ ] Worker Manifest 中的 Git SHA、OS/Arch、Image Digest、Protocol、Provider Runtime 和 Capability Hash 可追溯。
-- [ ] 生产发布已归档 SBOM/扫描报告，并使用获批的 KMS/keyless 身份、transparency log 与 admission policy
-      完成镜像签名/来源验证；不得以 disposable ephemeral-key 证据替代。
-- [ ] 当前生产选择 `kms-key`；具体 KMS reference（自建 Vault 可使用 `hashivault://...`）、最小 credential
-      环境变量名、signer identity、tlog 和 admission policy 已审批并留存非 Secret 证据。
+- [ ] 生产发布已归档 SBOM/扫描报告，并使用当前 checked-in Vault Transit `kms-key` signer、Rekor
+      transparency log 与 Kyverno admission policy 完成镜像签名/来源验证；不得以 disposable
+      ephemeral-key 证据替代。
+- [ ] 当前 production Registry Credential 仅通过 `--registry-auth-username-env`、
+      `--registry-auth-password-env` 与 `--registry-ca-cert-env` 传入；当前 runtime ConfigMap YAML 仅通过
+      `--production-public-key-configmap` 与 `--production-repository-configmap` 指向导出文件；Registry
+      config/retention/container/runtime path 四个 production 参数齐全，live 容器身份、TLS 证书、auth 与
+      retention 和导出/checked-in contract 一致；Registry exact tag+digest、runtime Image ID 与 RepoDigest
+      一致；没有把值写进命令、仓库或报告。
+- [ ] `vault_kms_admission_gate.py` 已用 passing `registry_release_gate.py` 报告、当前 clean SHA/source hash、
+      Vault AppRole policy、正向 signed image 和负向 unsigned/wrong-key/tag-drift probes 完成 admission
+      验证，并留存非 Secret 证据。
+- [ ] `vault_snapshot_restore_drill.py` 已在当前 clean SHA 上使用 checked-in
+      `operations-policy.json`、snapshot-operator AppRole 和三把 Shamir key shares 完成 isolated Docker restore，
+      验证 `source.gitSha`/clean worktree、`vault status`、单节点 Raft leader、两个 audit device 及 0600 sink、
+      Transit key、signer/auditor/snapshot-operator AppRole，并精确清理 container、tmpfs 与临时 state。
+- [ ] `deploy/kubernetes/security/vault/operations-policy.json` 与
+      `docs/runbooks/vault-kms-operations.md` 已记录当前生产 KMS reference、Credential 环境变量名、signer
+      identity、Rekor/tlog、Kyverno admission、Shamir custody、snapshot drill 和 audit/SIEM boundary，且与
+      checked-in bootstrap/policy 文件一致。
+- [ ] 生产 Vault live 只保留恰好两个 PVC-backed file audit device：
+      `file -> /vault/audit/audit-primary.log` 与
+      `file-secondary -> /vault/audit/audit-secondary.log`；没有额外 active audit sink。
+- [ ] audit PVC rotation 与外部 SIEM retained sink 已按
+      `operations-policy.json` / `vault-kms-operations.md` 落地；正式 gate 必须直接验证外部 bucket
+      versioning、365 天 `COMPLIANCE` Object Lock、exact audit batch/version/content hash，并证明 delete 与
+      retention-shortening 均被存储层拒绝。仅有本地 hash-chain 或 DELETE API 405 不得勾选此项。
 - [ ] Worker 使用非 Root 用户，Workspace、Git Cache 和 Runtime Output Root 权限正确。
 - [ ] 没有在镜像、Layer、Build Arg、Environment 或 Manifest 中写入 Credential。
 - [ ] 私有 Registry 使用 Tenant/Organization-scoped Registry Credential 和 Target-scoped
@@ -187,6 +288,45 @@ bun run --cwd apps/web test \
 
 当前仓库已有的实现期证据不能替代下列发布勾选项：
 
+真实 Provider immutable Kubernetes rollout 必须从同一 clean release boundary 分别运行 Codex 与 Claude；
+只传第三方 Credential、Base URL 和自定义模型的环境变量名：
+
+```bash
+source ~/.synara-acceptance-env
+
+python3 scripts/stage3-provider-acceptance/kubernetes_real_provider_release_rollout_gate.py \
+  --provider codex \
+  --real-provider-credential-env SYNARA_ACCEPTANCE_CODEX_KEY \
+  --real-provider-credential-field apiKey \
+  --real-provider-base-url-env SYNARA_ACCEPTANCE_CODEX_BASE_URL \
+  --real-provider-model-env SYNARA_ACCEPTANCE_CODEX_MODEL \
+  --real-provider-load-sla-file deploy/worker/production-load-sla.json \
+  --kind-worker-nodes 2 \
+  --load-waves 6 \
+  --timeout 5400 \
+  --output-dir /tmp/synara-kubernetes-real-provider-codex-rollout
+
+python3 scripts/stage3-provider-acceptance/kubernetes_real_provider_release_rollout_gate.py \
+  --provider claudeAgent \
+  --real-provider-credential-env SYNARA_ACCEPTANCE_CLAUDE_KEY \
+  --real-provider-credential-field apiKey \
+  --real-provider-base-url-env SYNARA_ACCEPTANCE_CLAUDE_BASE_URL \
+  --real-provider-model-env SYNARA_ACCEPTANCE_CLAUDE_MODEL \
+  --real-provider-load-sla-file deploy/worker/production-load-sla.json \
+  --kind-worker-nodes 2 \
+  --load-waves 6 \
+  --timeout 5400 \
+  --output-dir /tmp/synara-kubernetes-real-provider-claude-rollout
+```
+
+默认 6 个 nominal waves 在 candidate promotion 与 baseline rollback 间拆为 `3 + 3` 的最低波数；两个 phase
+各自还必须达到 `minimumDurationSeconds: 1800`，不足时继续完整 wave，因此 load 部分最低约 60 分钟，另加
+build/rollout/fault/cleanup 时间。门禁必须证明两个 immutable digest、每个 Execution 独立 Pod/Worker、两个
+overlap Pod 分布到两个可调度 non-control-plane Node、同一 Sessions 跨 Revision 的 native Cursor continuity、
+Audit/Outbox、精确 cleanup 和输出扫描。该门禁自带的 disposable loopback HTTP Registry 无 TLS/auth，只证明
+immutable rollout；production Registry live evidence 仍由带四个 runtime 参数的 production
+`registry_release_gate.py` 提供，Vault/Kyverno/Rekor live evidence 由 `vault_kms_admission_gate.py` 提供。
+
 | 证据                                                   | 当前结论                                                                          | 发布边界                                                                                                                                                                                        |
 | ------------------------------------------------------ | --------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | 真实 Codex/Claude Local two-Turn product-path smoke    | clean commit `fb9e25ec` 各 12/12                                                  | 经过 Control Plane/LocalSupervisor/agentd，但不是完整 Local Gate                                                                                                                                |
@@ -211,8 +351,8 @@ bun run --cwd apps/web test \
 | Docker real Provider fault-injection transport         | clean `b1c52bae` Codex/Claude failure 各 `16/16`                                  | 真实 401/429、精确 Host crash、Cursor expiry/restart、exact cleanup 与 Secret scan 已验                                                                                                         |
 | Kubernetes real Provider fault-injection transport     | clean `3c523417` Codex/Claude failure 各 `16/16`                                  | host-gateway 401/429、精确 Pod crash、Cursor expiry/restart、四集群 exact cleanup 与 Secret scan 已验                                                                                           |
 | SSH consolidated release gate                          | clean `14f7dd2d` 四 child aggregate pass                                          | Codex/Claude product 各 `22 pass + 1 unsupported`、failure 各 `16 pass`；同一 pinned Host Key/Provider Host SHA、4 个不同 runtime identity、exact cleanup、Secret scan 与环境变量名非持久化已验 |
-| Docker consolidated release gate                       | clean `b1c52bae` 四 child aggregate pass                                          | Codex/Claude product 各 `22 pass + 1 unsupported`、failure 各 `16 pass`；同 Image/Catalog、exact cleanup、Secret scan 已验                                                                      |
-| Kubernetes consolidated release gate                   | clean `3c523417` 四 child aggregate pass                                          | Codex/Claude product 各 `22 pass + 1 unsupported`、failure 各 `16 pass`；四个 disposable Kind、共享 Image、state 精确清理                                                                       |
+| Docker consolidated release gate                       | historical clean `b1c52bae` 四 child pass；当前六 child gate open                 | 历史 product/failure 已验；当前实现新增 Codex/Claude 两个 1800s SLA/load child，必须在本次 clean SHA 重跑                                                                                       |
+| Kubernetes consolidated release gate                   | historical clean `3c523417` 四 child pass；当前六 child gate open                 | 历史 product/failure 已验；当前实现新增两个 SLA/load child，必须在本次 clean SHA 的六个 disposable Kind 上重跑                                                                                  |
 | Worker Registry signing-policy gate                    | clean commit `7659dd5f` gate/report 已通过                                        | keyless/KMS 实现路径与 ephemeral mechanics 已验；真实生产 identity/tlog/admission、Registry Credential/retention 与 rollout 尚待记录                                                            |
 | SSH fixture                                            | 2026-07-14 disposable VM 13/13                                                    | 不是当前 Commit 的真实 Provider gate                                                                                                                                                            |
 | Kubernetes fixture                                     | `aa1d0225` three-node owned Kind 24/24；`6b71703f` OrbStack 22 pass/1 unsupported | PDB-blocked Drain、跨 Worker replacement、普通 Drain、Eviction、Network、Canary、restart 与 exact cleanup 已验；不证明真实 Provider 或 production multi-node pass gate                          |
@@ -228,8 +368,11 @@ bun run --cwd apps/web test \
       `16 pass`；唯一 frozen unsupported 为 `real-provider.compact-boundary`；证据同上。
 - [ ] Codex × Docker：replace、volume/checkpoint、network interruption、resource limits。
 - [ ] Claude × Docker：同上。
-- [ ] Codex × Kubernetes：Pod replacement、Drain、Eviction、Network、Image rollout。
-- [ ] Claude × Kubernetes：同上。
+- [ ] Codex × Kubernetes：`kubernetes_real_provider_release_rollout_gate.py` 在本次 clean release boundary
+      完成 immutable canary/promote/rollback、Pod replacement、跨 Node overlap、跨 Revision Session resume、
+      两 phase production-duration SLA 和 exact cleanup。
+- [ ] Claude × Kubernetes：同一真实 rollout/SLA 门禁通过；使用受控 `apiKey` 或明确批准的 `authToken`、
+      第三方 Base URL 与自定义模型环境变量名，且不持久化这些名称或值。
 - [x] 本地 `orbstack` context 已完成 deterministic clean-SHA required matrix、Context/TLS pinning、共享本地镜像
       `Never` 策略与精确 cleanup；证据为
       `docs/reports/stage-3-kubernetes-orbstack-fixture-6b71703f.md`。
@@ -245,13 +388,13 @@ bun run --cwd apps/web test \
       Revision/Channel/digest、Audit/Outbox、Event Sequence、Secret scan 与 exact cleanup。两个 overlap Pod 本次
       调度到同一 Worker，因此不关闭 production scheduler distribution 或 rollout under load。证据为
       `docs/reports/stage-3-kubernetes-kind-registry-rollout-d1f3b68a.md`。
-- [x] 第三方 Key/Base URL/自定义模型的 Kubernetes 四 child gate 已在 clean `3c523417` 通过：Codex/Claude
-      product 各 `22 pass + 1 unsupported`，failure 各 `16 pass`；四个 disposable Kind cluster、共享 Image、
-      state、Secret scan 均精确收口。证据为
+- [ ] 第三方 Key/Base URL/自定义模型的 Kubernetes 当前六 child gate 在本次 clean SHA 通过：历史 clean
+      `3c523417` 仅覆盖 Codex/Claude product/failure 四 child；新增的两个 1800s SLA/load child、每 10 waves
+      Control Plane restart 和当前 source boundary 尚须重跑。历史证据保留在
       `docs/reports/stage-3-real-provider-kubernetes-release-gate-3c523417.md`。
-- [x] 第三方 Key/Base URL/自定义模型的 Docker 四 child gate 已在 clean `b1c52bae` 通过：Codex/Claude
-      product 各 `22 pass + 1 unsupported`，failure 各 `16 pass`；同 SHA/Catalog/Image、exact child/gate
-      cleanup 与 Secret scan 均通过。证据为
+- [ ] 第三方 Key/Base URL/自定义模型的 Docker 当前六 child gate 在本次 clean SHA 通过：历史 clean
+      `b1c52bae` 仅覆盖 Codex/Claude product/failure 四 child；新增两个 SLA/load child 及当前 source boundary
+      尚须重跑。历史证据保留在
       `docs/reports/stage-3-real-provider-docker-release-gate-b1c52bae.md`。
 - [x] 已授权 external SSH target 已在 clean `14f7dd2d` 通过 repository-external identity、单一 pinned Host Key
       与 clean-SHA external-host 四 child gate；aggregate Secret scan `40` files / `3,177,374` bytes 零 finding，且未
@@ -273,7 +416,8 @@ bun run --cwd apps/web test \
       admission/retry；clean `e2d70fb6` 进一步记录最短持续时间、最大波次、吞吐量、成功/意外错误率以及
       wave/recovery P50/P95/P99。证据为 `docs/reports/stage-3-docker-resource-profiled-load-e2d70fb6.md`；生产
       并发不以脱离资源档位的单一硬编码数字验收。
-- [ ] 生产持续时间、P95/P99、错误率和恢复时间满足审批 SLA；数值未批准前此项保持未勾选。
+- [ ] 当前 clean SHA 的生产持续时间、P95/P99、错误率和恢复时间满足
+      `deploy/worker/production-load-sla.json`；该行业基线已批准，正式 gate 未通过前此项保持未勾选。
 - [ ] 故障运行没有重复终态、双 Worker 写入、Generation 回退或 Credential 泄漏。
 
 ## 7. Web 与前后端联通

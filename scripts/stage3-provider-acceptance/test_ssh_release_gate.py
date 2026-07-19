@@ -424,8 +424,10 @@ class ParseArgsTest(unittest.TestCase):
         encoded = json.dumps(dataclasses.asdict(options), default=str)
         self.assertEqual(options.codex_model, "gpt-5.6-sol")
         self.assertEqual(options.claude_model, "claude-sonnet-4-6")
-        self.assertNotIn("CODEX_MODEL", encoded)
-        self.assertNotIn("CLAUDE_MODEL", encoded)
+        self.assertEqual(options.codex_model_environment_name, "CODEX_MODEL")
+        self.assertEqual(options.claude_model_environment_name, "CLAUDE_MODEL")
+        self.assertIn("CODEX_MODEL", encoded)
+        self.assertIn("CLAUDE_MODEL", encoded)
 
     def test_model_literal_and_environment_name_are_mutually_exclusive(self) -> None:
         with mock.patch.dict(

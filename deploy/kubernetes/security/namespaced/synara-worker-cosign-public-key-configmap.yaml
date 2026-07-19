@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: synara-worker-cosign-public-key
+  namespace: synara-system
+  labels:
+    cache.kyverno.io/enabled: "true"
+data:
+  cosignPublicKey: |
+    -----BEGIN PUBLIC KEY-----
+    MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEx40JQE0oiMdQ6rWgzg4JuEWfLqfR
+    YcGEF1t+R4QmpIOUnuC8bbkrBKwFUyrHaMzByovisD3QaOvl2PnIn+acVg==
+    -----END PUBLIC KEY-----

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import contextlib
+import dataclasses
+import datetime as dt
 import hashlib
 import io
 import json
@@ -38,7 +40,48 @@ def options(
     output_dir: pathlib.Path,
     *,
     repo_root: pathlib.Path = REPO_ROOT,
+    signing_policy_profile: str = "disposable",
+    insecure_registry: bool | None = None,
+    registry_auth_username_environment: str | None = None,
+    registry_auth_password_environment: str | None = None,
+    registry_ca_cert_environment: str | None = None,
+    production_public_key_configmap_path: pathlib.Path | None = None,
+    production_repository_configmap_path: pathlib.Path | None = None,
+    production_registry_config_path: pathlib.Path | None = None,
+    production_registry_retention_policy_path: pathlib.Path | None = None,
+    production_registry_container: str | None = None,
+    production_registry_runtime_config_path: str | None = None,
 ) -> gate.RegistryReleaseGateOptions:
+    if insecure_registry is None:
+        insecure_registry = signing_policy_profile != "production"
+    if signing_policy_profile == "production":
+        registry_auth_username_environment = (
+            registry_auth_username_environment or gate.supply_chain.PRODUCTION_REGISTRY_USERNAME_ENV
+        )
+        registry_auth_password_environment = (
+            registry_auth_password_environment or gate.supply_chain.PRODUCTION_REGISTRY_PASSWORD_ENV
+        )
+        registry_ca_cert_environment = (
+            registry_ca_cert_environment or gate.supply_chain.PRODUCTION_REGISTRY_CA_CERT_ENV
+        )
+        production_public_key_configmap_path = production_public_key_configmap_path or pathlib.Path(
+            "/tmp/production-public-key-configmap.yaml"
+        )
+        production_repository_configmap_path = (
+            production_repository_configmap_path
+            or pathlib.Path("/tmp/production-repository-configmap.yaml")
+        )
+        production_registry_config_path = production_registry_config_path or pathlib.Path(
+            "/tmp/production-registry-config.yaml"
+        )
+        production_registry_retention_policy_path = (
+            production_registry_retention_policy_path
+            or pathlib.Path("/tmp/production-registry-retention-policy.json")
+        )
+        production_registry_container = production_registry_container or "synara-production-registry"
+        production_registry_runtime_config_path = (
+            production_registry_runtime_config_path or "/etc/distribution/config.yml"
+        )
     return gate.RegistryReleaseGateOptions(
         repo_root=repo_root,
         output_dir=output_dir,
@@ -48,8 +91,86 @@ def options(
         supply_chain_timeout_seconds=1800.0,
         docker_bin="docker",
         go_proxy="https://goproxy.cn,direct",
-        insecure_registry=True,
+        insecure_registry=insecure_registry,
+        signing_policy_profile=signing_policy_profile,
+        registry_auth_username_environment=registry_auth_username_environment,
+        registry_auth_password_environment=registry_auth_password_environment,
+        registry_ca_cert_environment=registry_ca_cert_environment,
+        production_public_key_configmap_path=production_public_key_configmap_path,
+        production_repository_configmap_path=production_repository_configmap_path,
+        production_registry_config_path=production_registry_config_path,
+        production_registry_retention_policy_path=production_registry_retention_policy_path,
+        production_registry_container=production_registry_container,
+        production_registry_runtime_config_path=production_registry_runtime_config_path,
     )
+
+
+def live_runtime_evidence(
+    gate_options: gate.RegistryReleaseGateOptions,
+    *,
+    exported_config_sha256: str,
+    live_policy_sha256: str,
+    checked_in_policy_sha256: str,
+    collected_at: str | None = None,
+    registry_host: str | None = None,
+    registry_authority: str | None = None,
+    repository_authority: str | None = None,
+    tls_peer_certificate_sha256: str = "f" * 64,
+    repository_probe_status: int = 404,
+    runtime_config_path: str | None = None,
+    runtime_config_sha256: str | None = None,
+    exported_runtime_config_sha256: str | None = None,
+    container_name: str = "synara-production-registry",
+    container_id: str = "a" * 64,
+    expected_image_reference: str | None = None,
+    expected_image_digest: str | None = None,
+    config_image_reference: str | None = None,
+    runtime_image_id: str = "sha256:" + "b" * 64,
+    matched_repo_digest: str | None = None,
+    container_started_at: str | None = None,
+) -> dict[str, Any]:
+    registry_host = registry_host or gate_options.image_repository.split("/", 1)[0]
+    registry_authority = registry_authority or f"https://{registry_host}"
+    repository_authority = repository_authority or gate_options.image_repository
+    runtime_config_path = runtime_config_path or gate_options.production_registry_runtime_config_path
+    runtime_config_sha256 = runtime_config_sha256 or exported_config_sha256
+    exported_runtime_config_sha256 = exported_runtime_config_sha256 or exported_config_sha256
+    collected_at = collected_at or dt.datetime.now(dt.timezone.utc).isoformat()
+    container_started_at = container_started_at or dt.datetime.now(dt.timezone.utc).isoformat()
+    image_contract = gate._production_registry_runtime_image_contract(
+        gate.PRODUCTION_REGISTRY_RUNTIME_IMAGE_REFERENCE
+    )
+    expected_image_reference = expected_image_reference or image_contract["reference"]
+    expected_image_digest = expected_image_digest or image_contract["digest"]
+    config_image_reference = config_image_reference or image_contract["reference"]
+    matched_repo_digest = matched_repo_digest or image_contract["repoDigest"]
+    evidence = {
+        "collectedAt": collected_at,
+        "registryHost": registry_host,
+        "registryAuthority": registry_authority,
+        "repositoryAuthority": repository_authority,
+        "repositoryProbeStatus": repository_probe_status,
+        "tlsPeerCertificateSha256": tls_peer_certificate_sha256,
+        "runtimeConfigPath": runtime_config_path,
+        "runtimeConfigSha256": runtime_config_sha256,
+        "exportedConfigSha256": exported_runtime_config_sha256,
+        "retentionPolicySha256": live_policy_sha256,
+        "checkedInRetentionPolicySha256": checked_in_policy_sha256,
+        "container": {
+            "name": container_name,
+            "id": container_id,
+            "image": {
+                "expectedReference": expected_image_reference,
+                "expectedDigest": expected_image_digest,
+                "configReference": config_image_reference,
+                "runtimeId": runtime_image_id,
+                "matchedRepoDigest": matched_repo_digest,
+            },
+            "startedAt": container_started_at,
+        },
+    }
+    evidence["runtimeEvidenceSha256"] = gate._stable_json_sha256(evidence)
+    return evidence
 
 
 def image_config(platform: str, *, extra_environment: list[str] | None = None) -> dict[str, Any]:
@@ -283,14 +404,991 @@ def sample_supply_chain() -> dict[str, Any]:
     }
 
 
+def production_supply_chain() -> dict[str, Any]:
+    report = sample_supply_chain()
+    report["signing"] = {
+        **report["signing"],
+        "mode": "kms-key",
+        "productionSigningPolicySatisfied": True,
+        "signerIdentity": gate._expected_production_signer_identity(),
+    }
+    return report
+
+
 class InputValidationTest(unittest.TestCase):
     def test_configuration_requires_checked_in_signing_and_vulnerability_policies(self) -> None:
         evidence = gate.configuration_evidence(options(pathlib.Path("/tmp/output")))
 
         self.assertTrue(evidence["signingPolicyRequired"])
+        self.assertEqual(evidence["signingPolicyProfile"], "disposable")
         self.assertEqual(evidence["signingPolicy"], "deploy/worker/signing-policy.json")
         self.assertEqual(evidence["vulnerabilityPolicy"], "deploy/worker/vulnerability-policy.json")
         self.assertNotIn("ephemeralDigestSigning", evidence)
+
+    def test_configuration_can_select_production_signing_profile(self) -> None:
+        evidence = gate.configuration_evidence(
+            options(pathlib.Path("/tmp/output"), signing_policy_profile="production")
+        )
+
+        self.assertEqual(evidence["signingPolicyProfile"], "production")
+        self.assertEqual(
+            evidence["signingPolicy"],
+            "deploy/worker/production-signing-policy.json",
+        )
+        self.assertEqual(
+            evidence["productionSigningProfile"],
+            "deploy/worker/production-signing-profile.json",
+        )
+        self.assertEqual(
+            evidence["productionAdmissionInputs"],
+            {
+                "publicKeyConfigMap": "/tmp/production-public-key-configmap.yaml",
+                "repositoryConfigMap": "/tmp/production-repository-configmap.yaml",
+            },
+        )
+        self.assertEqual(
+            evidence["productionRegistryBoundaryInputs"],
+            {
+                "registryConfig": "/tmp/production-registry-config.yaml",
+                "retentionPolicy": "/tmp/production-registry-retention-policy.json",
+            },
+        )
+        self.assertEqual(
+            evidence["productionRegistryRuntimeEvidenceInputs"],
+            {
+                "container": "synara-production-registry",
+                "runtimeConfigPath": "/etc/distribution/config.yml",
+            },
+        )
+        self.assertEqual(
+            evidence["registryAccess"],
+            {
+                "usernameEnvironment": gate.supply_chain.PRODUCTION_REGISTRY_USERNAME_ENV,
+                "passwordEnvironment": gate.supply_chain.PRODUCTION_REGISTRY_PASSWORD_ENV,
+                "caCertEnvironment": gate.supply_chain.PRODUCTION_REGISTRY_CA_CERT_ENV,
+            },
+        )
+
+    def test_parse_args_requires_production_runtime_configmaps(self) -> None:
+        with self.assertRaises(SystemExit):
+            gate.parse_args(
+                [
+                    "--image-repository",
+                    "localhost:55091/synara/worker",
+                    "--builder",
+                    "synara-stage3-registry-builder",
+                    "--signing-policy-profile",
+                    "production",
+                    "--production-registry-container",
+                    "synara-production-registry",
+                    "--production-registry-runtime-config-path",
+                    "/etc/distribution/config.yml",
+                ]
+            )
+
+    def test_parse_args_requires_production_registry_boundary_inputs(self) -> None:
+        with self.assertRaises(SystemExit):
+            gate.parse_args(
+                [
+                    "--image-repository",
+                    "localhost:55091/synara/worker",
+                    "--builder",
+                    "synara-stage3-registry-builder",
+                    "--signing-policy-profile",
+                    "production",
+                    "--production-public-key-configmap",
+                    "/tmp/public-key.yaml",
+                    "--production-repository-configmap",
+                    "/tmp/repository.yaml",
+                    "--production-registry-container",
+                    "synara-production-registry",
+                    "--production-registry-runtime-config-path",
+                    "/etc/distribution/config.yml",
+                ]
+            )
+
+    def test_parse_args_rejects_production_insecure_registry(self) -> None:
+        with self.assertRaises(SystemExit):
+            gate.parse_args(
+                [
+                    "--image-repository",
+                    "localhost:55091/synara/worker",
+                    "--builder",
+                    "synara-stage3-registry-builder",
+                    "--signing-policy-profile",
+                    "production",
+                    "--insecure-registry",
+                    "--production-public-key-configmap",
+                    "/tmp/public-key.yaml",
+                    "--production-repository-configmap",
+                    "/tmp/repository.yaml",
+                    "--production-registry-container",
+                    "synara-production-registry",
+                    "--production-registry-runtime-config-path",
+                    "/etc/distribution/config.yml",
+                ]
+            )
+
+    def test_parse_args_rejects_production_runtime_configmaps_for_disposable_profile(self) -> None:
+        with self.assertRaises(SystemExit):
+            gate.parse_args(
+                [
+                    "--image-repository",
+                    "localhost:55091/synara/worker",
+                    "--builder",
+                    "synara-stage3-registry-builder",
+                    "--production-public-key-configmap",
+                    "/tmp/public-key.yaml",
+                    "--production-repository-configmap",
+                    "/tmp/repository.yaml",
+                ]
+            )
+
+    def test_parse_args_rejects_production_registry_boundary_inputs_for_disposable_profile(self) -> None:
+        with self.assertRaises(SystemExit):
+            gate.parse_args(
+                [
+                    "--image-repository",
+                    "localhost:55091/synara/worker",
+                    "--builder",
+                    "synara-stage3-registry-builder",
+                    "--production-registry-config",
+                    "/tmp/registry.yaml",
+                    "--production-registry-retention-policy",
+                    "/tmp/retention-policy.json",
+                ]
+            )
+
+    def test_parse_args_requires_production_runtime_container_inputs(self) -> None:
+        with self.assertRaises(SystemExit):
+            gate.parse_args(
+                [
+                    "--image-repository",
+                    "localhost:55091/synara/worker",
+                    "--builder",
+                    "synara-stage3-registry-builder",
+                    "--signing-policy-profile",
+                    "production",
+                    "--production-public-key-configmap",
+                    "/tmp/public-key.yaml",
+                    "--production-repository-configmap",
+                    "/tmp/repository.yaml",
+                    "--production-registry-config",
+                    "/tmp/registry.yaml",
+                    "--production-registry-retention-policy",
+                    "/tmp/retention-policy.json",
+                ]
+            )
+
+    def test_parse_args_defaults_production_registry_access_environment_names(self) -> None:
+        parsed = gate.parse_args(
+            [
+                "--image-repository",
+                "localhost:55091/synara/worker",
+                "--builder",
+                "synara-stage3-registry-builder",
+                "--signing-policy-profile",
+                "production",
+                "--production-public-key-configmap",
+                "/tmp/public-key.yaml",
+                "--production-repository-configmap",
+                "/tmp/repository.yaml",
+                "--production-registry-config",
+                "/tmp/registry.yaml",
+                "--production-registry-retention-policy",
+                "/tmp/retention-policy.json",
+                "--production-registry-container",
+                "synara-production-registry",
+                "--production-registry-runtime-config-path",
+                "/etc/distribution/config.yml",
+            ]
+        )
+
+        self.assertEqual(
+            (
+                parsed.registry_auth_username_environment,
+                parsed.registry_auth_password_environment,
+                parsed.registry_ca_cert_environment,
+            ),
+            gate.supply_chain.PRODUCTION_REGISTRY_ACCESS_ENVIRONMENT,
+        )
+
+    def test_parse_args_rejects_production_registry_access_environment_drift(self) -> None:
+        with self.assertRaises(SystemExit):
+            gate.parse_args(
+                [
+                    "--image-repository",
+                    "localhost:55091/synara/worker",
+                    "--builder",
+                    "synara-stage3-registry-builder",
+                    "--signing-policy-profile",
+                    "production",
+                    "--registry-auth-username-env",
+                    "REGISTRY_USER_ENV",
+                    "--production-public-key-configmap",
+                    "/tmp/public-key.yaml",
+                    "--production-repository-configmap",
+                    "/tmp/repository.yaml",
+                    "--production-registry-config",
+                    "/tmp/registry.yaml",
+                    "--production-registry-retention-policy",
+                    "/tmp/retention-policy.json",
+                    "--production-registry-container",
+                    "synara-production-registry",
+                    "--production-registry-runtime-config-path",
+                    "/etc/distribution/config.yml",
+                ]
+            )
+
+    def test_production_boundary_rejects_programmatic_registry_access_environment_drift(self) -> None:
+        with self.assertRaises(gate.ReleaseGateError) as caught:
+            gate._validate_production_boundary(
+                options(
+                    pathlib.Path("/tmp/output"),
+                    signing_policy_profile="production",
+                    registry_auth_username_environment="REGISTRY_USER_ENV",
+                    registry_auth_password_environment="REGISTRY_PASSWORD_ENV",
+                    registry_ca_cert_environment="REGISTRY_CA_ENV",
+                )
+            )
+
+        self.assertEqual(caught.exception.code, "release.registry_production_boundary_invalid")
+
+    def test_host_registry_environment_uses_isolated_docker_config_and_ca_layout(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state_dir = pathlib.Path(directory) / "state"
+            ca_path = pathlib.Path(directory) / "registry-ca.pem"
+            ca_bytes = b"-----BEGIN CERTIFICATE-----\nfixture\n-----END CERTIFICATE-----\n"
+            ca_path.write_bytes(ca_bytes)
+            redactor = gate.acceptance.SecretRedactor()
+            with mock.patch.dict(
+                gate.supply_chain.os.environ,
+                {
+                    gate.supply_chain.PRODUCTION_REGISTRY_USERNAME_ENV: "registry-user",
+                    gate.supply_chain.PRODUCTION_REGISTRY_PASSWORD_ENV: "registry-password",
+                    gate.supply_chain.PRODUCTION_REGISTRY_CA_CERT_ENV: str(ca_path),
+                },
+            ):
+                environment = gate._prepare_host_registry_environment(
+                    options(
+                        pathlib.Path(directory) / "output",
+                        signing_policy_profile="production",
+                        registry_auth_username_environment=gate.supply_chain.PRODUCTION_REGISTRY_USERNAME_ENV,
+                        registry_auth_password_environment=gate.supply_chain.PRODUCTION_REGISTRY_PASSWORD_ENV,
+                        registry_ca_cert_environment=gate.supply_chain.PRODUCTION_REGISTRY_CA_CERT_ENV,
+                    ),
+                    state_dir=state_dir,
+                    redactor=redactor,
+                )
+            docker_config_dir = state_dir / "host-registry-access/registry-access/docker-config"
+            self.assertEqual(environment, {"DOCKER_CONFIG": str(docker_config_dir)})
+            self.assertTrue((docker_config_dir / "config.json").is_file())
+            self.assertTrue((docker_config_dir / "certs.d/localhost:55091/ca.crt").is_file())
+
+    def test_host_tool_helpers_apply_environment_overrides(self) -> None:
+        completed = subprocess.CompletedProcess(["docker"], 0, stdout=b"{}", stderr=b"")
+        with mock.patch.object(gate.subprocess, "run", return_value=completed) as run:
+            gate._json_tool_output(
+                dataclasses.replace(
+                    options(pathlib.Path("/tmp/output")),
+                    tool_environment_overrides={"DOCKER_CONFIG": "/tmp/docker-config"},
+                ),
+                ["buildx", "imagetools", "inspect", "--raw", "example.invalid/synara/worker:tag"],
+                code="release.registry_index_invalid",
+                message="inspect failed",
+            )
+
+        self.assertEqual(run.call_args.kwargs["env"]["DOCKER_CONFIG"], "/tmp/docker-config")
+
+    def test_validates_production_registry_retention_boundary(self) -> None:
+        checked_in_policy = json.loads(
+            (REPO_ROOT / gate.PRODUCTION_REGISTRY_RETENTION_POLICY_PATH).read_text(encoding="utf-8")
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            live_config = root / "registry-config.yml"
+            live_policy = root / "retention-policy.json"
+            live_config.write_text(
+                "\n".join(
+                    [
+                        "storage:",
+                        "  filesystem:",
+                        "    rootdirectory: /var/lib/registry",
+                        "  delete:",
+                        "    enabled: false",
+                        "http:",
+                        "  host: https://localhost:55091",
+                        "  tls:",
+                        "    certificate: /certs/tls.crt",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            live_policy.write_text(json.dumps(checked_in_policy), encoding="utf-8")
+
+            exported_config_sha256 = hashlib.sha256(live_config.read_bytes()).hexdigest()
+            checked_in_policy_sha256 = gate._stable_json_sha256(checked_in_policy)
+            evidence = gate.validate_production_registry_boundary(
+                options(
+                    root / "output",
+                    signing_policy_profile="production",
+                    production_registry_config_path=live_config,
+                    production_registry_retention_policy_path=live_policy,
+                ),
+                runtime_evidence=live_runtime_evidence(
+                    options(
+                        root / "output",
+                        signing_policy_profile="production",
+                        production_registry_config_path=live_config,
+                        production_registry_retention_policy_path=live_policy,
+                    ),
+                    exported_config_sha256=exported_config_sha256,
+                    live_policy_sha256=checked_in_policy_sha256,
+                    checked_in_policy_sha256=checked_in_policy_sha256,
+                ),
+            )
+
+        self.assertEqual(evidence["deleteEnabled"], False)
+        self.assertEqual(evidence["promotionBoundary"], "digest-only")
+        self.assertEqual(
+            evidence["liveRuntimeEvidence"]["repositoryAuthority"],
+            "localhost:55091/synara/worker",
+        )
+        self.assertEqual(
+            evidence["liveRuntimeEvidence"]["container"]["image"],
+            {
+                "expectedReference": gate.PRODUCTION_REGISTRY_RUNTIME_IMAGE_REFERENCE,
+                "expectedDigest": "sha256:"
+                "a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373",
+                "configReference": gate.PRODUCTION_REGISTRY_RUNTIME_IMAGE_REFERENCE,
+                "runtimeId": "sha256:" + "b" * 64,
+                "matchedRepoDigest": "registry@sha256:"
+                "a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373",
+            },
+        )
+
+    def test_live_registry_runtime_image_requires_exact_config_reference(self) -> None:
+        runtime_image_id = "sha256:" + "b" * 64
+        for config_reference in (
+            "registry:2.8.3",
+            "example.invalid/registry:2.8.3@sha256:"
+            "a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373",
+            "registry:2.8.3@sha256:" + "c" * 64,
+        ):
+            with self.subTest(config_reference=config_reference), self.assertRaises(
+                gate.ReleaseGateError
+            ) as caught:
+                gate._inspect_live_registry_runtime_image(
+                    options(pathlib.Path("/tmp/output"), signing_policy_profile="production"),
+                    {
+                        "Config": {"Image": config_reference},
+                        "Image": runtime_image_id,
+                    },
+                    expected_reference=gate.PRODUCTION_REGISTRY_RUNTIME_IMAGE_REFERENCE,
+                )
+
+            self.assertEqual(
+                caught.exception.code,
+                "release.registry_production_boundary_invalid",
+            )
+
+    def test_live_registry_runtime_image_binds_image_id_and_repo_digest(self) -> None:
+        runtime_image_id = "sha256:" + "b" * 64
+        image_contract = gate._production_registry_runtime_image_contract(
+            gate.PRODUCTION_REGISTRY_RUNTIME_IMAGE_REFERENCE
+        )
+        container_payload = {
+            "Config": {"Image": gate.PRODUCTION_REGISTRY_RUNTIME_IMAGE_REFERENCE},
+            "Image": runtime_image_id,
+        }
+        gate_options = options(
+            pathlib.Path("/tmp/output"),
+            signing_policy_profile="production",
+        )
+        with mock.patch.object(
+            gate,
+            "_json_tool_output",
+            return_value=(
+                [
+                    {
+                        "Id": runtime_image_id,
+                        "RepoDigests": [image_contract["repoDigest"]],
+                    }
+                ],
+                b"[]",
+            ),
+        ):
+            evidence = gate._inspect_live_registry_runtime_image(
+                gate_options,
+                container_payload,
+                expected_reference=gate.PRODUCTION_REGISTRY_RUNTIME_IMAGE_REFERENCE,
+            )
+
+        self.assertEqual(
+            evidence,
+            {
+                "expectedReference": image_contract["reference"],
+                "expectedDigest": image_contract["digest"],
+                "configReference": image_contract["reference"],
+                "runtimeId": runtime_image_id,
+                "matchedRepoDigest": image_contract["repoDigest"],
+            },
+        )
+
+    def test_live_registry_runtime_image_rejects_id_or_repo_digest_mismatch(self) -> None:
+        runtime_image_id = "sha256:" + "b" * 64
+        image_contract = gate._production_registry_runtime_image_contract(
+            gate.PRODUCTION_REGISTRY_RUNTIME_IMAGE_REFERENCE
+        )
+        container_payload = {
+            "Config": {"Image": image_contract["reference"]},
+            "Image": runtime_image_id,
+        }
+        mismatches = (
+            {
+                "Id": "sha256:" + "c" * 64,
+                "RepoDigests": [image_contract["repoDigest"]],
+            },
+            {
+                "Id": runtime_image_id,
+                "RepoDigests": ["registry@sha256:" + "d" * 64],
+            },
+            {
+                "Id": runtime_image_id,
+                "RepoDigests": [
+                    "example.invalid/registry@" + image_contract["digest"]
+                ],
+            },
+        )
+        for image_payload in mismatches:
+            with (
+                self.subTest(image_payload=image_payload),
+                mock.patch.object(
+                    gate,
+                    "_json_tool_output",
+                    return_value=([image_payload], b"[]"),
+                ),
+                self.assertRaises(gate.ReleaseGateError) as caught,
+            ):
+                gate._inspect_live_registry_runtime_image(
+                    options(
+                        pathlib.Path("/tmp/output"),
+                        signing_policy_profile="production",
+                    ),
+                    container_payload,
+                    expected_reference=image_contract["reference"],
+                )
+
+            self.assertEqual(
+                caught.exception.code,
+                "release.registry_production_boundary_invalid",
+            )
+
+    def test_live_registry_runtime_evidence_rejects_tampered_image_identity(self) -> None:
+        checked_in_policy = json.loads(
+            (REPO_ROOT / gate.PRODUCTION_REGISTRY_RETENTION_POLICY_PATH).read_text(encoding="utf-8")
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            live_config = root / "registry-config.yml"
+            live_policy = root / "retention-policy.json"
+            live_config.write_text(
+                (
+                    "storage:\n"
+                    "  delete:\n"
+                    "    enabled: false\n"
+                    "http:\n"
+                    "  host: https://localhost:55091\n"
+                    "  tls:\n"
+                    "    certificate: /certs/tls.crt\n"
+                ),
+                encoding="utf-8",
+            )
+            live_policy.write_text(json.dumps(checked_in_policy), encoding="utf-8")
+            gate_options = options(
+                root / "output",
+                signing_policy_profile="production",
+                production_registry_config_path=live_config,
+                production_registry_retention_policy_path=live_policy,
+            )
+            exported_config_sha256 = hashlib.sha256(live_config.read_bytes()).hexdigest()
+            checked_in_policy_sha256 = gate._stable_json_sha256(checked_in_policy)
+            for overrides in (
+                {"config_image_reference": "registry:2.8.3"},
+                {"expected_image_digest": "sha256:" + "c" * 64},
+                {"matched_repo_digest": "registry@sha256:" + "e" * 64},
+            ):
+                with self.subTest(overrides=overrides), self.assertRaises(
+                    gate.ReleaseGateError
+                ) as caught:
+                    gate.validate_production_registry_boundary(
+                        gate_options,
+                        runtime_evidence=live_runtime_evidence(
+                            gate_options,
+                            exported_config_sha256=exported_config_sha256,
+                            live_policy_sha256=checked_in_policy_sha256,
+                            checked_in_policy_sha256=checked_in_policy_sha256,
+                            **overrides,
+                        ),
+                    )
+
+                self.assertEqual(
+                    caught.exception.code,
+                    "release.registry_production_boundary_invalid",
+                )
+
+            tampered_evidence = live_runtime_evidence(
+                gate_options,
+                exported_config_sha256=exported_config_sha256,
+                live_policy_sha256=checked_in_policy_sha256,
+                checked_in_policy_sha256=checked_in_policy_sha256,
+            )
+            tampered_evidence["container"]["image"]["runtimeId"] = "sha256:" + "d" * 64
+            with self.assertRaises(gate.ReleaseGateError) as caught:
+                gate.validate_production_registry_boundary(
+                    gate_options,
+                    runtime_evidence=tampered_evidence,
+                )
+
+            self.assertEqual(
+                caught.exception.code,
+                "release.registry_production_boundary_invalid",
+            )
+
+    def test_rejects_registry_boundary_when_live_config_allows_delete(self) -> None:
+        checked_in_policy = json.loads(
+            (REPO_ROOT / gate.PRODUCTION_REGISTRY_RETENTION_POLICY_PATH).read_text(encoding="utf-8")
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            live_config = root / "registry-config.yml"
+            live_policy = root / "retention-policy.json"
+            live_config.write_text(
+                "\n".join(
+                    [
+                        "storage:",
+                        "  delete:",
+                        "    enabled: true",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            live_policy.write_text(json.dumps(checked_in_policy), encoding="utf-8")
+
+            with self.assertRaises(gate.ReleaseGateError) as caught:
+                gate.validate_production_registry_boundary(
+                    options(
+                        root / "output",
+                        signing_policy_profile="production",
+                        production_registry_config_path=live_config,
+                        production_registry_retention_policy_path=live_policy,
+                    )
+                )
+
+        self.assertEqual(caught.exception.code, "release.registry_production_boundary_invalid")
+
+    def test_rejects_registry_boundary_when_live_config_uses_commented_false_only(self) -> None:
+        checked_in_policy = json.loads(
+            (REPO_ROOT / gate.PRODUCTION_REGISTRY_RETENTION_POLICY_PATH).read_text(encoding="utf-8")
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            live_config = root / "registry-config.yml"
+            live_policy = root / "retention-policy.json"
+            live_config.write_text(
+                "\n".join(
+                    [
+                        "storage:",
+                        "  delete:",
+                        "    # enabled: false",
+                        "    enabled: true",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            live_policy.write_text(json.dumps(checked_in_policy), encoding="utf-8")
+
+            with self.assertRaises(gate.ReleaseGateError) as caught:
+                gate.validate_production_registry_boundary(
+                    options(
+                        root / "output",
+                        signing_policy_profile="production",
+                        production_registry_config_path=live_config,
+                        production_registry_retention_policy_path=live_policy,
+                    )
+                )
+
+        self.assertEqual(caught.exception.code, "release.registry_production_boundary_invalid")
+
+    def test_rejects_registry_boundary_when_live_config_duplicates_delete_enabled(self) -> None:
+        checked_in_policy = json.loads(
+            (REPO_ROOT / gate.PRODUCTION_REGISTRY_RETENTION_POLICY_PATH).read_text(encoding="utf-8")
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            live_config = root / "registry-config.yml"
+            live_policy = root / "retention-policy.json"
+            live_config.write_text(
+                "\n".join(
+                    [
+                        "storage:",
+                        "  delete:",
+                        "    enabled: false",
+                        "    enabled: true",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            live_policy.write_text(json.dumps(checked_in_policy), encoding="utf-8")
+
+            with self.assertRaises(gate.ReleaseGateError) as caught:
+                gate.validate_production_registry_boundary(
+                    options(
+                        root / "output",
+                        signing_policy_profile="production",
+                        production_registry_config_path=live_config,
+                        production_registry_retention_policy_path=live_policy,
+                    )
+                )
+
+        self.assertEqual(caught.exception.code, "release.registry_production_boundary_invalid")
+
+    def test_rejects_registry_boundary_when_retention_policy_runtime_config_path_drifts(self) -> None:
+        checked_in_policy = json.loads(
+            (REPO_ROOT / gate.PRODUCTION_REGISTRY_RETENTION_POLICY_PATH).read_text(encoding="utf-8")
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            live_config = root / "registry-config.yml"
+            live_policy = root / "retention-policy.json"
+            live_config.write_text(
+                (
+                    "storage:\n"
+                    "  delete:\n"
+                    "    enabled: false\n"
+                    "http:\n"
+                    "  host: https://localhost:55091\n"
+                    "  tls:\n"
+                    "    certificate: /certs/tls.crt\n"
+                ),
+                encoding="utf-8",
+            )
+            drifted_policy = dict(checked_in_policy)
+            drifted_policy["registryConfigPath"] = "/etc/distribution/other-config.yml"
+            live_policy.write_text(json.dumps(drifted_policy), encoding="utf-8")
+
+            with self.assertRaises(gate.ReleaseGateError) as caught:
+                gate.validate_production_registry_boundary(
+                    options(
+                        root / "output",
+                        signing_policy_profile="production",
+                        production_registry_config_path=live_config,
+                        production_registry_retention_policy_path=live_policy,
+                    )
+                )
+
+        self.assertEqual(caught.exception.code, "release.registry_production_boundary_invalid")
+
+    def test_rejects_registry_boundary_when_runtime_evidence_is_stale(self) -> None:
+        checked_in_policy = json.loads(
+            (REPO_ROOT / gate.PRODUCTION_REGISTRY_RETENTION_POLICY_PATH).read_text(encoding="utf-8")
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            live_config = root / "registry-config.yml"
+            live_policy = root / "retention-policy.json"
+            live_config.write_text(
+                (
+                    "storage:\n"
+                    "  delete:\n"
+                    "    enabled: false\n"
+                    "http:\n"
+                    "  host: https://localhost:55091\n"
+                    "  tls:\n"
+                    "    certificate: /certs/tls.crt\n"
+                ),
+                encoding="utf-8",
+            )
+            live_policy.write_text(json.dumps(checked_in_policy), encoding="utf-8")
+            gate_options = options(
+                root / "output",
+                signing_policy_profile="production",
+                production_registry_config_path=live_config,
+                production_registry_retention_policy_path=live_policy,
+            )
+            exported_config_sha256 = hashlib.sha256(live_config.read_bytes()).hexdigest()
+            checked_in_policy_sha256 = gate._stable_json_sha256(checked_in_policy)
+            stale_collected_at = (
+                dt.datetime.now(dt.timezone.utc)
+                - dt.timedelta(seconds=gate.PRODUCTION_REGISTRY_RUNTIME_EVIDENCE_MAX_AGE_SECONDS + 1)
+            ).isoformat()
+
+            with self.assertRaises(gate.ReleaseGateError) as caught:
+                gate.validate_production_registry_boundary(
+                    gate_options,
+                    runtime_evidence=live_runtime_evidence(
+                        gate_options,
+                        exported_config_sha256=exported_config_sha256,
+                        live_policy_sha256=checked_in_policy_sha256,
+                        checked_in_policy_sha256=checked_in_policy_sha256,
+                        collected_at=stale_collected_at,
+                    ),
+                )
+
+        self.assertEqual(caught.exception.code, "release.registry_production_boundary_invalid")
+
+    def test_rejects_registry_boundary_when_runtime_evidence_authority_drifts(self) -> None:
+        checked_in_policy = json.loads(
+            (REPO_ROOT / gate.PRODUCTION_REGISTRY_RETENTION_POLICY_PATH).read_text(encoding="utf-8")
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            live_config = root / "registry-config.yml"
+            live_policy = root / "retention-policy.json"
+            live_config.write_text(
+                (
+                    "storage:\n"
+                    "  delete:\n"
+                    "    enabled: false\n"
+                    "http:\n"
+                    "  host: https://localhost:55091\n"
+                    "  tls:\n"
+                    "    certificate: /certs/tls.crt\n"
+                ),
+                encoding="utf-8",
+            )
+            live_policy.write_text(json.dumps(checked_in_policy), encoding="utf-8")
+            gate_options = options(
+                root / "output",
+                signing_policy_profile="production",
+                production_registry_config_path=live_config,
+                production_registry_retention_policy_path=live_policy,
+            )
+            exported_config_sha256 = hashlib.sha256(live_config.read_bytes()).hexdigest()
+            checked_in_policy_sha256 = gate._stable_json_sha256(checked_in_policy)
+
+            with self.assertRaises(gate.ReleaseGateError) as caught:
+                gate.validate_production_registry_boundary(
+                    gate_options,
+                    runtime_evidence=live_runtime_evidence(
+                        gate_options,
+                        exported_config_sha256=exported_config_sha256,
+                        live_policy_sha256=checked_in_policy_sha256,
+                        checked_in_policy_sha256=checked_in_policy_sha256,
+                        registry_authority="https://other.example.test",
+                    ),
+                )
+
+        self.assertEqual(caught.exception.code, "release.registry_production_boundary_invalid")
+
+    def test_rejects_registry_boundary_when_runtime_evidence_certificate_drifts(self) -> None:
+        checked_in_policy = json.loads(
+            (REPO_ROOT / gate.PRODUCTION_REGISTRY_RETENTION_POLICY_PATH).read_text(encoding="utf-8")
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            live_config = root / "registry-config.yml"
+            live_policy = root / "retention-policy.json"
+            live_config.write_text(
+                (
+                    "storage:\n"
+                    "  delete:\n"
+                    "    enabled: false\n"
+                    "http:\n"
+                    "  host: https://localhost:55091\n"
+                    "  tls:\n"
+                    "    certificate: /certs/tls.crt\n"
+                ),
+                encoding="utf-8",
+            )
+            live_policy.write_text(json.dumps(checked_in_policy), encoding="utf-8")
+            gate_options = options(
+                root / "output",
+                signing_policy_profile="production",
+                production_registry_config_path=live_config,
+                production_registry_retention_policy_path=live_policy,
+            )
+            prepared_registry_access = gate.supply_chain.PreparedRegistryAccess(
+                environment={},
+                host_environment={"DOCKER_CONFIG": str(root / "docker-config")},
+                registry_host="localhost:55091",
+                auth_configured=True,
+                ca_materialized=True,
+                registry_ca_container_path="/workspace/registry-access/docker-config/certs.d/localhost:55091/ca.crt",
+            )
+            inspect_payload = [
+                {
+                    "Id": "a" * 64,
+                    "Image": "sha256:" + "b" * 64,
+                    "Name": "/synara-production-registry",
+                    "State": {
+                        "Running": True,
+                        "StartedAt": dt.datetime.now(dt.timezone.utc).isoformat(),
+                    },
+                    "Config": {"Image": gate.PRODUCTION_REGISTRY_RUNTIME_IMAGE_REFERENCE},
+                }
+            ]
+            image_inspect_payload = [
+                {
+                    "Id": "sha256:" + "b" * 64,
+                    "RepoDigests": [
+                        gate._production_registry_runtime_image_contract(
+                            gate.PRODUCTION_REGISTRY_RUNTIME_IMAGE_REFERENCE
+                        )["repoDigest"]
+                    ],
+                }
+            ]
+
+            with (
+                mock.patch.object(
+                    gate,
+                    "_prepare_host_registry_access",
+                    return_value=prepared_registry_access,
+                ),
+                mock.patch.object(
+                    gate,
+                    "_json_tool_output",
+                    side_effect=[
+                        (inspect_payload, b"[]"),
+                        (image_inspect_payload, b"[]"),
+                    ],
+                ),
+                mock.patch.object(
+                    gate,
+                    "_production_boundary_docker_output",
+                    side_effect=[
+                        (
+                            "storage:\n"
+                            "  delete:\n"
+                            "    enabled: false\n"
+                            "http:\n"
+                            "  host: https://localhost:55091\n"
+                            "  tls:\n"
+                            "    certificate: /certs/tls.crt\n"
+                        ),
+                        "-----BEGIN CERTIFICATE-----\nfixture\n-----END CERTIFICATE-----\n",
+                    ],
+                ),
+                mock.patch.object(
+                    gate,
+                    "_load_host_registry_client_inputs",
+                    return_value=gate.HostRegistryClientInputs(
+                        registry_host="localhost:55091",
+                        username="registry-user",
+                        password="registry-password",
+                        ca_path=root / "registry-ca.pem",
+                    ),
+                ),
+                mock.patch.object(gate, "_pem_certificate_sha256", return_value="a" * 64),
+                mock.patch.object(
+                    gate,
+                    "_probe_live_registry_boundary",
+                    return_value={
+                        "registryHost": "localhost:55091",
+                        "repositoryProbeStatus": 404,
+                        "tlsPeerCertificateSha256": "b" * 64,
+                    },
+                ),
+                self.assertRaises(gate.ReleaseGateError) as caught,
+            ):
+                gate.validate_production_registry_boundary(
+                    gate_options,
+                    state_dir=root / "_state",
+                    redactor=gate.acceptance.SecretRedactor(),
+                )
+
+        self.assertEqual(caught.exception.code, "release.registry_production_boundary_invalid")
+
+    def test_rejects_registry_boundary_when_runtime_evidence_retention_hash_drifts(self) -> None:
+        checked_in_policy = json.loads(
+            (REPO_ROOT / gate.PRODUCTION_REGISTRY_RETENTION_POLICY_PATH).read_text(encoding="utf-8")
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            live_config = root / "registry-config.yml"
+            live_policy = root / "retention-policy.json"
+            live_config.write_text(
+                (
+                    "storage:\n"
+                    "  delete:\n"
+                    "    enabled: false\n"
+                    "http:\n"
+                    "  host: https://localhost:55091\n"
+                    "  tls:\n"
+                    "    certificate: /certs/tls.crt\n"
+                ),
+                encoding="utf-8",
+            )
+            live_policy.write_text(json.dumps(checked_in_policy), encoding="utf-8")
+            gate_options = options(
+                root / "output",
+                signing_policy_profile="production",
+                production_registry_config_path=live_config,
+                production_registry_retention_policy_path=live_policy,
+            )
+            exported_config_sha256 = hashlib.sha256(live_config.read_bytes()).hexdigest()
+            checked_in_policy_sha256 = gate._stable_json_sha256(checked_in_policy)
+
+            with self.assertRaises(gate.ReleaseGateError) as caught:
+                gate.validate_production_registry_boundary(
+                    gate_options,
+                    runtime_evidence=live_runtime_evidence(
+                        gate_options,
+                        exported_config_sha256=exported_config_sha256,
+                        live_policy_sha256="c" * 64,
+                        checked_in_policy_sha256=checked_in_policy_sha256,
+                    ),
+                )
+
+        self.assertEqual(caught.exception.code, "release.registry_production_boundary_invalid")
+
+    def test_rejects_registry_boundary_when_runtime_evidence_config_hash_drifts(self) -> None:
+        checked_in_policy = json.loads(
+            (REPO_ROOT / gate.PRODUCTION_REGISTRY_RETENTION_POLICY_PATH).read_text(encoding="utf-8")
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            live_config = root / "registry-config.yml"
+            live_policy = root / "retention-policy.json"
+            live_config.write_text(
+                (
+                    "storage:\n"
+                    "  delete:\n"
+                    "    enabled: false\n"
+                    "http:\n"
+                    "  host: https://localhost:55091\n"
+                    "  tls:\n"
+                    "    certificate: /certs/tls.crt\n"
+                ),
+                encoding="utf-8",
+            )
+            live_policy.write_text(json.dumps(checked_in_policy), encoding="utf-8")
+            gate_options = options(
+                root / "output",
+                signing_policy_profile="production",
+                production_registry_config_path=live_config,
+                production_registry_retention_policy_path=live_policy,
+            )
+            exported_config_sha256 = hashlib.sha256(live_config.read_bytes()).hexdigest()
+            checked_in_policy_sha256 = gate._stable_json_sha256(checked_in_policy)
+
+            with self.assertRaises(gate.ReleaseGateError) as caught:
+                gate.validate_production_registry_boundary(
+                    gate_options,
+                    runtime_evidence=live_runtime_evidence(
+                        gate_options,
+                        exported_config_sha256=exported_config_sha256,
+                        live_policy_sha256=checked_in_policy_sha256,
+                        checked_in_policy_sha256=checked_in_policy_sha256,
+                        runtime_config_sha256="b" * 64,
+                    ),
+                )
+
+        self.assertEqual(caught.exception.code, "release.registry_production_boundary_invalid")
 
     def test_accepts_registry_port_nested_repository_and_public_go_proxy(self) -> None:
         self.assertEqual(
@@ -672,13 +1770,53 @@ class ReproducibilityTest(unittest.TestCase):
 
 
 class AggregateGateTest(unittest.TestCase):
+    def test_production_signer_identity_requires_exact_approle_boundary(self) -> None:
+        gate_options = options(
+            pathlib.Path("/tmp/output"),
+            signing_policy_profile="production",
+        )
+        report = production_supply_chain()
+
+        self.assertEqual(
+            gate._validate_production_signer_identity(gate_options, report),
+            gate._expected_production_signer_identity(),
+        )
+
+    def test_production_signer_identity_rejects_missing_or_tampered_evidence(self) -> None:
+        gate_options = options(
+            pathlib.Path("/tmp/output"),
+            signing_policy_profile="production",
+        )
+        mutations = (
+            lambda report: report["signing"].pop("signerIdentity"),
+            lambda report: report["signing"]["signerIdentity"].update(
+                {"roleName": "other-release-signer"}
+            ),
+            lambda report: report["signing"]["signerIdentity"].update(
+                {"type": "service"}
+            ),
+            lambda report: report["signing"]["signerIdentity"].update(
+                {"orphan": False}
+            ),
+            lambda report: report["signing"]["signerIdentity"].update(
+                {"policiesSha256": "c" * 64}
+            ),
+        )
+        for mutate in mutations:
+            report = production_supply_chain()
+            mutate(report)
+            with self.subTest(mutate=mutate), self.assertRaises(
+                gate.ReleaseGateError
+            ) as caught:
+                gate._validate_production_signer_identity(gate_options, report)
+
+            self.assertEqual(
+                caught.exception.code,
+                "release.registry_supply_chain_signer_identity_invalid",
+            )
+
     def test_markdown_distinguishes_production_signing_from_ephemeral_mechanics(self) -> None:
-        supply_chain_report = sample_supply_chain()
-        supply_chain_report["signing"] = {
-            **supply_chain_report["signing"],
-            "mode": "keyless",
-            "productionSigningPolicySatisfied": True,
-        }
+        supply_chain_report = production_supply_chain()
         markdown = gate.markdown_from_report(
             {
                 "schemaVersion": gate.SCHEMA_VERSION,
@@ -693,6 +1831,9 @@ class AggregateGateTest(unittest.TestCase):
         )
 
         self.assertIn("also enforced the checked-in production KMS/keyless identity", markdown)
+        self.assertIn("digest-only Registry retention and archive-first GC boundary", markdown)
+        self.assertIn("Vault signer AppRole: `synara-worker-release-signer`", markdown)
+        self.assertIn("Vault signer token: type `batch`, orphan `True`", markdown)
         self.assertNotIn("Ephemeral signing does not prove", markdown)
 
     def test_emits_pass_report_for_cached_and_no_cache_consensus(self) -> None:
@@ -725,6 +1866,10 @@ class AggregateGateTest(unittest.TestCase):
         self.assertEqual(len(report["builds"]), 2)
         self.assertEqual(report["supplyChain"]["status"], "pass")
         self.assertEqual(report["security"]["outputSecretScan"]["findings"], [])
+        self.assertIn(
+            str(gate.PRODUCTION_REGISTRY_RETENTION_POLICY_PATH),
+            report["source"]["sourceHashes"],
+        )
 
     def test_emits_fail_report_when_supply_chain_policy_fails(self) -> None:
         sha = subprocess.run(
@@ -766,6 +1911,56 @@ class AggregateGateTest(unittest.TestCase):
             {"release.registry_vulnerability_policy_blocked"},
         )
 
+    def test_production_gate_rejects_passing_report_without_signer_identity(self) -> None:
+        sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=REPO_ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        with tempfile.TemporaryDirectory() as directory:
+            output_dir = pathlib.Path(directory) / "gate"
+            gate_options = options(
+                output_dir,
+                signing_policy_profile="production",
+            )
+            supply_chain_report = production_supply_chain()
+            supply_chain_report["signing"].pop("signerIdentity")
+
+            def build_runner(_options: Any, **kwargs: Any) -> dict[str, Any]:
+                return sample_build(kwargs["slot"], kwargs["no_cache"])
+
+            with (
+                mock.patch.object(gate, "_validate_production_boundary"),
+                mock.patch.object(
+                    gate,
+                    "_prepare_host_registry_environment",
+                    return_value={},
+                ),
+                mock.patch.object(
+                    gate,
+                    "validate_production_registry_boundary",
+                    return_value={},
+                ),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                exit_code = gate.run_registry_release_gate(
+                    gate_options,
+                    repository_state=lambda _root: {"gitSha": sha, "worktreeDirty": False},
+                    runtime_inspector=lambda _options: {"builder": gate_options.builder},
+                    build_runner=build_runner,
+                    supply_chain_runner=lambda *_args, **_kwargs: supply_chain_report,
+                )
+            report = json.loads((output_dir / gate.JSON_REPORT_NAME).read_text(encoding="utf-8"))
+
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(report["status"], "fail")
+        self.assertIn(
+            "release.registry_supply_chain_signer_identity_invalid",
+            {error["code"] for error in report["errors"]},
+        )
+
     def test_emits_fail_report_when_no_cache_build_fails(self) -> None:
         sha = subprocess.run(
             ["git", "rev-parse", "HEAD"],
@@ -804,6 +1999,37 @@ class AggregateGateTest(unittest.TestCase):
                 "release.registry_build_coverage_incomplete",
             },
         )
+
+    def test_production_insecure_registry_fails_before_build_execution(self) -> None:
+        sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=REPO_ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        with tempfile.TemporaryDirectory() as directory:
+            output_dir = pathlib.Path(directory) / "gate"
+            gate_options = options(
+                output_dir,
+                signing_policy_profile="production",
+                insecure_registry=True,
+            )
+
+            build_runner = mock.Mock()
+            with contextlib.redirect_stdout(io.StringIO()):
+                exit_code = gate.run_registry_release_gate(
+                    gate_options,
+                    repository_state=lambda _root: {"gitSha": sha, "worktreeDirty": False},
+                    runtime_inspector=lambda _options: {"builder": gate_options.builder},
+                    build_runner=build_runner,
+                    supply_chain_runner=lambda *_args, **_kwargs: sample_supply_chain(),
+                )
+            report = json.loads((output_dir / gate.JSON_REPORT_NAME).read_text(encoding="utf-8"))
+
+        self.assertEqual(exit_code, 1)
+        self.assertFalse(build_runner.called)
+        self.assertEqual(report["errors"][0]["code"], "release.registry_production_signing_insecure_registry")
 
 
 if __name__ == "__main__":

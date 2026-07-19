@@ -1,0 +1,8 @@
+apiVersion: v1
+name: synara-vault-tls-readiness
+type: postrenderer/v1
+runtime: subprocess
+version: 1.0.0
+runtimeConfig:
+  platformCommand:
+    - command: "${HELM_PLUGIN_DIR}/../../helm-post-renderer.sh"

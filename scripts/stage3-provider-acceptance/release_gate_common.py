@@ -15,6 +15,31 @@ import acceptance_runner as acceptance
 
 PROVIDERS = ("codex", "claudeAgent")
 MATRICES = ("product", "failure")
+REMOTE_LOAD_MATRIX = "load"
+COMMON_BASELINE_CASE_IDS = frozenset(
+    {
+        "environment.target-prepare",
+        "environment.control-plane-start",
+        "identity.dev-login",
+    }
+)
+REAL_PROVIDER_SMOKE_BASELINE_CASE_IDS = frozenset(
+    {
+        "runtime.target-provision",
+        "resources.real-provider-project-session",
+        "real-provider.turn-1-start",
+        "runtime.real-provider-worker-discovery",
+        "real-provider.turn-1",
+        "recovery.control-plane-restart",
+        "real-provider.turn-2-continuity",
+    }
+)
+REAL_PROVIDER_LOAD_BASELINE_CASE_IDS = frozenset(
+    {
+        "runtime.target-provision",
+        "resources.real-provider-project-session",
+    }
+)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -115,9 +140,20 @@ def expected_case_ids(matrix: str) -> frozenset[str]:
         return frozenset(
             metadata["id"] for metadata in acceptance.REAL_PROVIDER_CASE_METADATA.values()
         )
+    if matrix == REMOTE_LOAD_MATRIX:
+        return frozenset({acceptance.REAL_PROVIDER_LOAD_CASE_ID})
     return frozenset(
         metadata["id"] for metadata in acceptance.REAL_PROVIDER_FAILURE_CASE_METADATA.values()
     )
+
+
+def required_case_ids(matrix: str) -> frozenset[str]:
+    baseline = (
+        REAL_PROVIDER_LOAD_BASELINE_CASE_IDS
+        if matrix == REMOTE_LOAD_MATRIX
+        else REAL_PROVIDER_SMOKE_BASELINE_CASE_IDS
+    )
+    return COMMON_BASELINE_CASE_IDS | baseline | expected_case_ids(matrix)
 
 
 def validate_child_report(
@@ -148,11 +184,16 @@ def validate_child_report(
             "release.child_identity_mismatch",
             "Child report Provider or Target does not match the requested release run.",
         )
-    if report.get("mode") != "real-provider-smoke" or report.get("status") != "pass":
+    expected_mode = "real-provider-load" if matrix == REMOTE_LOAD_MATRIX else "real-provider-smoke"
+    if report.get("mode") != expected_mode or report.get("status") != "pass":
         fail(
             "release.child_status_invalid",
-            "Child report is not a passing real Provider smoke report.",
-            {"status": report.get("status"), "mode": report.get("mode")},
+            "Child report is not a passing real Provider acceptance report for the requested matrix.",
+            {
+                "status": report.get("status"),
+                "mode": report.get("mode"),
+                "expectedMode": expected_mode,
+            },
         )
 
     source = report.get("source")
@@ -177,10 +218,14 @@ def validate_child_report(
     if not isinstance(configuration, dict) or not isinstance(real_provider, dict):
         fail("release.child_configuration_missing", "Child report omitted real Provider configuration.")
     else:
-        if configuration.get("restartControlPlane") is not True or configuration.get("keepState") is not False:
+        expected_restart_control_plane = matrix != REMOTE_LOAD_MATRIX
+        if (
+            configuration.get("restartControlPlane") is not expected_restart_control_plane
+            or configuration.get("keepState") is not False
+        ):
             fail(
                 "release.child_lifecycle_invalid",
-                "Child report must restart the Control Plane and remove its isolated state.",
+                "Child report did not preserve the expected Control Plane restart and cleanup boundary.",
             )
         runner = configuration.get("runnerCommand")
         if not isinstance(runner, dict) or runner.get("executable") != policy.runner_executable:
@@ -191,6 +236,7 @@ def validate_child_report(
             )
         expected_product = list(acceptance.REAL_PROVIDER_CASES) if matrix == "product" else []
         expected_failure = list(acceptance.REAL_PROVIDER_FAILURE_CASES) if matrix == "failure" else []
+        expected_load = [acceptance.REAL_PROVIDER_LOAD_CASE_ID] if matrix == REMOTE_LOAD_MATRIX else []
         if real_provider.get("requestedCases") != expected_product:
             fail(
                 "release.child_product_coverage_invalid",
@@ -200,6 +246,11 @@ def validate_child_report(
             fail(
                 "release.child_failure_coverage_invalid",
                 "Child report did not request the canonical real Provider failure matrix.",
+            )
+        if real_provider.get("requestedLoadCases", []) != expected_load:
+            fail(
+                "release.child_load_coverage_invalid",
+                "Child report did not request the canonical real Provider load suite.",
             )
         if policy.authentication == "ambient":
             if real_provider.get("ambientAuthentication") is not True:
@@ -235,10 +286,20 @@ def validate_child_report(
                 "release.child_fault_credential_boundary_invalid",
                 "Failure child report did not use controlled fault Credentials.",
             )
+        if matrix == REMOTE_LOAD_MATRIX and real_provider.get("controlledFaultCredentials") is not False:
+            fail(
+                "release.child_fault_credential_boundary_invalid",
+                "Load child report must not claim controlled fault Credentials.",
+            )
         if matrix == "failure" and real_provider.get("cursorMaximumAge") != acceptance.REAL_PROVIDER_CURSOR_MAX_AGE:
             fail(
                 "release.child_cursor_policy_invalid",
                 "Failure child report did not use the canonical Cursor expiry policy.",
+            )
+        if matrix == REMOTE_LOAD_MATRIX and real_provider.get("cursorMaximumAge") is not None:
+            fail(
+                "release.child_cursor_policy_invalid",
+                "Load child report must not claim the failure-only Cursor expiry policy.",
             )
 
     cases = report.get("cases")
@@ -254,11 +315,11 @@ def validate_child_report(
             {"caseIds": duplicate_ids},
         )
     by_id = {str(case.get("id")): case for case in cases}
-    missing = sorted(expected_case_ids(matrix).difference(by_id))
+    missing = sorted(required_case_ids(matrix).difference(by_id))
     if missing:
         fail(
             "release.child_cases_missing",
-            "Child report omitted required matrix cases.",
+            "Child report omitted required baseline or matrix cases.",
             {"missingCaseIds": missing},
         )
 
@@ -284,6 +345,413 @@ def validate_child_report(
                 "Child report contains an unsupported case outside the frozen target boundary.",
                 {"caseId": case_id},
             )
+
+    def require_distribution(
+        value: Any,
+        *,
+        label: str,
+        expected_sample_count: int | None = None,
+    ) -> None:
+        if not isinstance(value, Mapping):
+            fail(
+                "release.child_load_evidence_invalid",
+                "Load child report omitted a required duration distribution mapping.",
+                {"field": label},
+            )
+            return
+        sample_count = value.get("sampleCount")
+        if not isinstance(sample_count, int) or sample_count <= 0:
+            fail(
+                "release.child_load_evidence_invalid",
+                "Load child report omitted a positive sampleCount in a duration distribution.",
+                {"field": label, "sampleCount": sample_count},
+            )
+        elif expected_sample_count is not None and sample_count != expected_sample_count:
+            fail(
+                "release.child_load_evidence_invalid",
+                "Load child report used an unexpected sampleCount in a duration distribution.",
+                {
+                    "field": label,
+                    "expectedSampleCount": expected_sample_count,
+                    "actualSampleCount": sample_count,
+                },
+            )
+        for percentile in ("p95", "p99"):
+            observed = value.get(percentile)
+            if isinstance(observed, bool) or not isinstance(observed, (int, float)):
+                fail(
+                    "release.child_load_evidence_invalid",
+                    "Load child report omitted a numeric percentile in a duration distribution.",
+                    {"field": f"{label}.{percentile}", "value": observed},
+                )
+
+    def require_operator_approved_sla(summary: Any) -> None:
+        if not isinstance(summary, Mapping):
+            fail(
+                "release.child_load_sla_invalid",
+                "Load child report omitted its operator-approved SLA evaluation summary.",
+            )
+            return
+        if summary.get("enforced") is not True or summary.get("notEvaluated") is True:
+            fail(
+                "release.child_load_sla_invalid",
+                "Load child report did not complete an enforced operator-approved SLA evaluation.",
+                {
+                    "enforced": summary.get("enforced"),
+                    "notEvaluated": summary.get("notEvaluated"),
+                    "notEvaluatedReason": summary.get("notEvaluatedReason"),
+                },
+            )
+        checks = summary.get("checks")
+        if not isinstance(checks, list) or not checks or any(
+            not isinstance(check, Mapping) or check.get("status") != "pass" for check in checks
+        ):
+            fail(
+                "release.child_load_sla_invalid",
+                "Load child report operator-approved SLA checks were missing or not fully passing.",
+            )
+        metric_mapping = summary.get("metricMapping")
+        if not isinstance(metric_mapping, Mapping):
+            fail(
+                "release.child_load_sla_invalid",
+                "Load child report operator-approved SLA metric mapping was missing.",
+            )
+        else:
+            expected_paths = {
+                "minimumDurationSeconds": "durationMs",
+                "latencyMs.p95Max": "turnLatencyMs.p95",
+                "latencyMs.p99Max": "turnLatencyMs.p99",
+                "recoveryTimeMs.p95Max": "admissionRecoveryMs.p95",
+                "recoveryTimeMs.p99Max": "admissionRecoveryMs.p99",
+                "unexpectedErrorRateMax": "unexpectedErrorRate",
+            }
+            for check_id, expected_path in expected_paths.items():
+                entry = metric_mapping.get(check_id)
+                if not isinstance(entry, Mapping) or entry.get("observedEvidencePath") != expected_path:
+                    fail(
+                        "release.child_load_sla_invalid",
+                        "Load child report operator-approved SLA metric mapping did not match the canonical evidence paths.",
+                        {
+                            "checkId": check_id,
+                            "expectedObservedEvidencePath": expected_path,
+                            "actualObservedEvidencePath": (
+                                entry.get("observedEvidencePath") if isinstance(entry, Mapping) else None
+                            ),
+                        },
+                    )
+
+    if matrix == REMOTE_LOAD_MATRIX:
+        load_case = by_id.get(acceptance.REAL_PROVIDER_LOAD_CASE_ID)
+        load_evidence = load_case.get("evidence") if isinstance(load_case, dict) else None
+        if not isinstance(load_case, dict) or load_case.get("status") != "pass" or not isinstance(load_evidence, Mapping):
+            fail(
+                "release.child_load_evidence_invalid",
+                "Load child report omitted the canonical load evidence payload.",
+            )
+        else:
+            waves_completed = load_evidence.get("wavesCompleted")
+            sessions = load_evidence.get("sessions")
+            workers = load_evidence.get("workers")
+            executions_completed = load_evidence.get("executionsCompleted")
+            restart_every_waves = load_evidence.get("restartEveryWaves")
+            restart_count = load_evidence.get("controlPlaneRestartCount")
+            restarts = load_evidence.get("controlPlaneRestarts")
+            if workers != acceptance.REAL_PROVIDER_LOAD_CONCURRENCY or sessions != acceptance.REAL_PROVIDER_LOAD_SESSIONS:
+                fail(
+                    "release.child_load_evidence_invalid",
+                    "Load child report did not retain the canonical worker/session topology.",
+                    {"workers": workers, "sessions": sessions},
+                )
+            if not isinstance(waves_completed, int) or waves_completed < 1:
+                fail(
+                    "release.child_load_evidence_invalid",
+                    "Load child report omitted a positive completed-wave count.",
+                    {"wavesCompleted": waves_completed},
+                )
+            if not isinstance(executions_completed, int):
+                fail(
+                    "release.child_load_evidence_invalid",
+                    "Load child report omitted a numeric completed execution count.",
+                    {"executionsCompleted": executions_completed},
+                )
+            expected_rejections = (
+                (acceptance.REAL_PROVIDER_LOAD_SESSIONS - acceptance.REAL_PROVIDER_LOAD_CONCURRENCY)
+                * waves_completed
+                if isinstance(waves_completed, int)
+                else None
+            )
+            if (
+                isinstance(waves_completed, int)
+                and isinstance(executions_completed, int)
+                and executions_completed != acceptance.REAL_PROVIDER_LOAD_SESSIONS * waves_completed
+            ):
+                fail(
+                    "release.child_load_evidence_invalid",
+                    "Load child report did not retain the canonical execution count for the completed waves.",
+                    {
+                        "wavesCompleted": waves_completed,
+                        "executionsCompleted": executions_completed,
+                    },
+                )
+            if load_evidence.get("quotaRejections") != expected_rejections:
+                fail(
+                    "release.child_load_evidence_invalid",
+                    "Load child report did not retain the canonical quota-rejection count.",
+                    {
+                        "quotaRejections": load_evidence.get("quotaRejections"),
+                        "expectedQuotaRejections": expected_rejections,
+                    },
+                )
+            if load_evidence.get("effectiveConcurrency") != acceptance.REAL_PROVIDER_LOAD_CONCURRENCY:
+                fail(
+                    "release.child_load_evidence_invalid",
+                    "Load child report did not retain the canonical effective concurrency.",
+                    {"effectiveConcurrency": load_evidence.get("effectiveConcurrency")},
+                )
+            if (
+                load_evidence.get("unexpectedFailureCount") != 0
+                or load_evidence.get("unexpectedErrorRate") != 0.0
+                or load_evidence.get("doubleExecution") is not False
+                or load_evidence.get("duplicateTerminal") is not False
+                or load_evidence.get("pendingInteractionCount") != 0
+                or load_evidence.get("durationTargetMet") is not True
+            ):
+                fail(
+                    "release.child_load_evidence_invalid",
+                    "Load child report did not preserve the canonical zero-error or duration-target boundary.",
+                    {
+                        "unexpectedFailureCount": load_evidence.get("unexpectedFailureCount"),
+                        "unexpectedErrorRate": load_evidence.get("unexpectedErrorRate"),
+                        "doubleExecution": load_evidence.get("doubleExecution"),
+                        "duplicateTerminal": load_evidence.get("duplicateTerminal"),
+                        "pendingInteractionCount": load_evidence.get("pendingInteractionCount"),
+                        "durationTargetMet": load_evidence.get("durationTargetMet"),
+                    },
+                )
+            if (
+                not isinstance(restart_every_waves, int)
+                or restart_every_waves < 0
+                or not isinstance(restart_count, int)
+                or restart_count < 0
+                or not isinstance(restarts, list)
+            ):
+                fail(
+                    "release.child_load_evidence_invalid",
+                    "Load child report omitted restart cadence evidence or used the wrong types.",
+                    {
+                        "restartEveryWaves": restart_every_waves,
+                        "controlPlaneRestartCount": restart_count,
+                        "controlPlaneRestartsType": type(restarts).__name__,
+                    },
+                )
+            elif isinstance(waves_completed, int):
+                expected_restart_waves = (
+                    list(range(restart_every_waves, waves_completed, restart_every_waves))
+                    if restart_every_waves > 0
+                    else []
+                )
+                if restart_count != len(expected_restart_waves) or len(restarts) != restart_count:
+                    fail(
+                        "release.child_load_evidence_invalid",
+                        "Load child report did not retain the canonical Control Plane restart count.",
+                        {
+                            "restartEveryWaves": restart_every_waves,
+                            "wavesCompleted": waves_completed,
+                            "expectedRestartCount": len(expected_restart_waves),
+                            "controlPlaneRestartCount": restart_count,
+                            "controlPlaneRestarts": restarts,
+                        },
+                    )
+                else:
+                    actual_restart_waves: list[int] = []
+                    for restart in restarts:
+                        if not isinstance(restart, Mapping):
+                            fail(
+                                "release.child_load_evidence_invalid",
+                                "Load child report contained a malformed Control Plane restart record.",
+                            )
+                            continue
+                        after_wave = restart.get("afterWave")
+                        pre_restart_sequences = restart.get("preRestartSequences")
+                        process_generation = restart.get("processGeneration")
+                        pre_restart_sequence = restart.get("preRestartSequence")
+                        if not isinstance(after_wave, int):
+                            fail(
+                                "release.child_load_evidence_invalid",
+                                "Load child report restart evidence omitted its completed-wave boundary.",
+                                {"restart": dict(restart)},
+                            )
+                            continue
+                        actual_restart_waves.append(after_wave)
+                        if (
+                            not isinstance(pre_restart_sequences, Mapping)
+                            or len(pre_restart_sequences) != acceptance.REAL_PROVIDER_LOAD_SESSIONS
+                            or any(
+                                not isinstance(sequence, int) or sequence <= 0
+                                for sequence in pre_restart_sequences.values()
+                            )
+                            or not isinstance(process_generation, int)
+                            or process_generation <= 0
+                            or not isinstance(pre_restart_sequence, int)
+                            or pre_restart_sequence <= 0
+                        ):
+                            fail(
+                                "release.child_load_evidence_invalid",
+                                "Load child report restart evidence omitted canonical pre-restart sequence metadata.",
+                                {"restart": dict(restart)},
+                            )
+                        if (
+                            restart.get("postRestartWave") != after_wave + 1
+                            or restart.get("postRestartNativeCursorVerified") is not True
+                            or restart.get("postRestartSessionSequenceContinuityVerified")
+                            is not True
+                            or restart.get("postRestartExecutionIdReuseVerified") is not True
+                            or restart.get("postRestartTerminalPathUniquenessVerified")
+                            is not True
+                        ):
+                            fail(
+                                "release.child_load_evidence_invalid",
+                                "Load child report restart evidence did not prove the required post-restart continuity checks.",
+                                {"restart": dict(restart)},
+                            )
+                    if actual_restart_waves != expected_restart_waves:
+                        fail(
+                            "release.child_load_evidence_invalid",
+                            "Load child report restart evidence used the wrong wave boundaries.",
+                            {
+                                "expectedRestartWaves": expected_restart_waves,
+                                "actualRestartWaves": actual_restart_waves,
+                            },
+                        )
+            require_distribution(
+                load_evidence.get("turnLatencyMs"),
+                label="turnLatencyMs",
+                expected_sample_count=executions_completed if isinstance(executions_completed, int) else None,
+            )
+            require_distribution(
+                load_evidence.get("admissionRecoveryMs"),
+                label="admissionRecoveryMs",
+                expected_sample_count=expected_rejections if isinstance(expected_rejections, int) else None,
+            )
+            require_distribution(
+                load_evidence.get("waveDurationMs"),
+                label="waveDurationMs",
+                expected_sample_count=waves_completed if isinstance(waves_completed, int) else None,
+            )
+            provider_counts = load_evidence.get("providerExecutionCounts")
+            if provider_counts != {provider: executions_completed}:
+                fail(
+                    "release.child_load_evidence_invalid",
+                    "Load child report did not retain the canonical provider execution counts.",
+                    {"providerExecutionCounts": provider_counts},
+                )
+            session_counts = load_evidence.get("sessionExecutionCounts")
+            if (
+                not isinstance(session_counts, Mapping)
+                or len(session_counts) != acceptance.REAL_PROVIDER_LOAD_SESSIONS
+                or (
+                    isinstance(waves_completed, int)
+                    and any(count != waves_completed for count in session_counts.values())
+                )
+            ):
+                fail(
+                    "release.child_load_evidence_invalid",
+                    "Load child report did not retain the canonical per-session execution counts.",
+                    {"sessionExecutionCounts": session_counts},
+                )
+            wave_samples = load_evidence.get("waveSamples")
+            if not isinstance(wave_samples, list) or not wave_samples:
+                fail(
+                    "release.child_load_evidence_invalid",
+                    "Load child report omitted its canonical waveSamples diagnostics.",
+                )
+            else:
+                for sample in wave_samples:
+                    if not isinstance(sample, Mapping):
+                        fail(
+                            "release.child_load_evidence_invalid",
+                            "Load child report contained a malformed wave sample.",
+                        )
+                        continue
+                    quota_rejections = sample.get("quotaRejections")
+                    overlap_worker_ids = sample.get("overlapWorkerIds")
+                    if not isinstance(quota_rejections, list) or len(quota_rejections) != (
+                        acceptance.REAL_PROVIDER_LOAD_SESSIONS - acceptance.REAL_PROVIDER_LOAD_CONCURRENCY
+                    ):
+                        fail(
+                            "release.child_load_evidence_invalid",
+                            "Load child report waveSamples did not retain the canonical quota-rejection diagnostics.",
+                            {"wave": sample.get("wave")},
+                        )
+                    if not isinstance(overlap_worker_ids, list) or len(overlap_worker_ids) != (
+                        acceptance.REAL_PROVIDER_LOAD_SESSIONS - 1
+                    ):
+                        fail(
+                            "release.child_load_evidence_invalid",
+                            "Load child report waveSamples did not retain the canonical overlap diagnostics.",
+                            {"wave": sample.get("wave")},
+                        )
+                    require_distribution(sample.get("turnLatencyMs"), label="waveSamples.turnLatencyMs")
+            load_configuration = (
+                configuration.get("realProviderLoad") if isinstance(configuration, Mapping) else None
+            )
+            measurement = (
+                load_configuration.get("measurement")
+                if isinstance(load_configuration, Mapping)
+                else None
+            )
+            sla_file = (
+                measurement.get("operatorApprovedSlaFile")
+                if isinstance(measurement, Mapping)
+                else None
+            )
+            configured_waves = (
+                load_configuration.get("waves")
+                if isinstance(load_configuration, Mapping)
+                else None
+            )
+            configured_maximum_waves = (
+                load_configuration.get("maximumWaves")
+                if isinstance(load_configuration, Mapping)
+                else None
+            )
+            configured_restart_every_waves = (
+                load_configuration.get("restartEveryWaves")
+                if isinstance(load_configuration, Mapping)
+                else None
+            )
+            if (
+                not isinstance(load_configuration, Mapping)
+                or load_configuration.get("workers") != acceptance.REAL_PROVIDER_LOAD_CONCURRENCY
+                or load_configuration.get("sessions") != acceptance.REAL_PROVIDER_LOAD_SESSIONS
+                or not isinstance(configured_waves, int)
+                or configured_waves < 1
+                or not isinstance(configured_restart_every_waves, int)
+                or configured_restart_every_waves < 0
+                or not isinstance(load_configuration.get("minimumDurationSeconds"), (int, float))
+                or float(load_configuration.get("minimumDurationSeconds")) <= 0
+                or not isinstance(configured_maximum_waves, int)
+                or configured_maximum_waves < configured_waves
+                or not isinstance(measurement, Mapping)
+                or measurement.get("operatorApprovedSlaThresholdsEnforced") is not True
+                or not isinstance(sla_file, Mapping)
+                or re.fullmatch(r"[0-9a-f]{64}", str(sla_file.get("sha256") or "")) is None
+            ):
+                fail(
+                    "release.child_load_configuration_invalid",
+                    "Load child report omitted the canonical operator-approved SLA configuration metadata.",
+                )
+            else:
+                if load_evidence.get("restartEveryWaves") != configured_restart_every_waves:
+                    fail(
+                        "release.child_load_configuration_invalid",
+                        "Load child report restart cadence evidence did not match its configuration.",
+                        {
+                            "configuredRestartEveryWaves": configured_restart_every_waves,
+                            "evidenceRestartEveryWaves": load_evidence.get("restartEveryWaves"),
+                        },
+                    )
+                require_operator_approved_sla(measurement.get("operatorApprovedSla"))
 
     cleanup = by_id.get("environment.cleanup")
     cleanup_evidence = cleanup.get("evidence") if isinstance(cleanup, dict) else None
@@ -409,10 +877,22 @@ def run_child_report(
     command: Sequence[str],
     policy: ChildReportPolicy,
     environment: Mapping[str, str] | None = None,
+    capture_process_output: bool = False,
+    process_output_redactor: acceptance.SecretRedactor | None = None,
+    forbidden_output_tokens: Sequence[str] = (),
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     child_dir = output_dir / provider / matrix
     started = time.monotonic()
-    completed = subprocess.run(command, cwd=repo_root, env=environment, check=False)
+    completed = subprocess.run(
+        command,
+        cwd=repo_root,
+        env=environment,
+        check=False,
+        capture_output=capture_process_output,
+        text=capture_process_output,
+        encoding="utf-8" if capture_process_output else None,
+        errors="replace" if capture_process_output else None,
+    )
     duration_ms = round((time.monotonic() - started) * 1000)
     json_path = child_dir / acceptance.JSON_REPORT_NAME
     markdown_path = child_dir / acceptance.MARKDOWN_REPORT_NAME
@@ -425,6 +905,22 @@ def run_child_report(
         "reportPath": str(json_path.relative_to(output_dir)),
         "markdownPath": str(markdown_path.relative_to(output_dir)),
     }
+    if capture_process_output:
+        process_output_scan = scan_process_output(
+            completed.stdout if isinstance(completed.stdout, str) else "",
+            completed.stderr if isinstance(completed.stderr, str) else "",
+            redactor=process_output_redactor,
+            forbidden_tokens=forbidden_output_tokens,
+        )
+        record["processOutputScan"] = process_output_scan
+        if process_output_scan["findings"]:
+            errors.append(
+                ReleaseGateError(
+                    "release.child_process_output_secret_scan_failed",
+                    "Child process stdout or stderr contained controlled Credential material or forbidden environment names.",
+                    {"findingCount": len(process_output_scan["findings"])},
+                ).as_report_error(provider=provider, matrix=matrix)
+            )
     if not json_path.is_file() or not markdown_path.is_file():
         errors.append(
             ReleaseGateError(
@@ -500,6 +996,76 @@ def run_child_report(
         }
     )
     return record, errors
+
+
+def scan_process_output(
+    stdout: str,
+    stderr: str,
+    *,
+    redactor: acceptance.SecretRedactor | None,
+    forbidden_tokens: Sequence[str] = (),
+) -> dict[str, Any]:
+    combined = f"{stdout}\n{stderr}".encode("utf-8", errors="replace")
+    findings: list[dict[str, Any]] = []
+    if redactor is not None:
+        for index, secret in enumerate(redactor.secret_values(), start=1):
+            if secret.encode("utf-8") in combined:
+                findings.append({"kind": f"known-secret-{index}"})
+        # Keep a redacted representation as the only form that may be handled
+        # after the raw capture has been scanned. Neither representation is
+        # persisted by the release gate.
+        redactor.text(stdout)
+        redactor.text(stderr)
+    for token in sorted({token for token in forbidden_tokens if token}):
+        if token.encode("utf-8") in combined:
+            findings.append({"kind": "forbidden-environment-name"})
+    for kind, pattern in acceptance.SECRET_SCAN_PATTERNS:
+        if pattern.search(combined) is not None:
+            findings.append({"kind": kind})
+    return {
+        "captured": True,
+        "stdoutBytes": len(stdout.encode("utf-8")),
+        "stderrBytes": len(stderr.encode("utf-8")),
+        "findings": findings,
+        "redactionApplied": redactor is not None,
+        "rawOutputPersisted": False,
+        "redactedOutputPersisted": False,
+    }
+
+
+def output_file_token_findings(
+    output_dir: pathlib.Path,
+    forbidden_tokens: Sequence[str],
+) -> list[dict[str, Any]]:
+    tokens = sorted(
+        {token.encode("utf-8") for token in forbidden_tokens if token},
+        key=len,
+        reverse=True,
+    )
+    if not tokens or not output_dir.is_dir():
+        return []
+    overlap = max(len(token) for token in tokens) - 1
+    findings: list[dict[str, Any]] = []
+    for path in sorted(output_dir.rglob("*")):
+        if path.is_symlink() or not path.is_file():
+            continue
+        carry = b""
+        found = False
+        with path.open("rb") as source:
+            while chunk := source.read(1 << 20):
+                window = carry + chunk
+                if any(token in window for token in tokens):
+                    found = True
+                    break
+                carry = window[-overlap:] if overlap > 0 else b""
+        if found:
+            findings.append(
+                {
+                    "file": str(path.relative_to(output_dir)),
+                    "kind": "forbidden-environment-name",
+                }
+            )
+    return findings
 
 
 def consensus_errors(

@@ -1,0 +1,41 @@
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: verify-synara-worker-images
+  annotations:
+    pod-policies.kyverno.io/title: Verify Synara Worker Images
+    pod-policies.kyverno.io/category: Supply Chain Security
+    pod-policies.kyverno.io/autogen-controllers: DaemonSet,Deployment,Job,StatefulSet,CronJob
+spec:
+  validationFailureAction: Enforce
+  failurePolicy: Fail
+  background: false
+  webhookTimeoutSeconds: 30
+  rules:
+    - name: verify-synara-worker-images
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      context:
+        - name: workerPublicKey
+          configMap:
+            namespace: synara-system
+            name: synara-worker-cosign-public-key
+      verifyImages:
+        - imageReferences:
+            # The production kustomization replaces this fail-closed value
+            # from synara-worker-signing-settings.data.repositoryPattern.
+            - registry.invalid/synara/worker*
+          mutateDigest: true
+          verifyDigest: true
+          required: true
+          attestors:
+            - count: 1
+              entries:
+                - keys:
+                    publicKeys: "{{ workerPublicKey.data.cosignPublicKey }}"
+                    rekor:
+                      url: https://rekor.sigstore.dev
+                      ignoreTlog: false

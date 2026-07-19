@@ -327,6 +327,54 @@ patterns. The report records only file, pattern name, and byte offset; it never 
 SQLite and Artifact payloads are deliberately excluded from this output scan and remain covered by their own
 storage/SecretGuard acceptance.
 
+## Real Provider bounded load admission
+
+`--suite real-provider-load` is the narrow remote load slice used by the consolidated Docker and Kubernetes real
+Provider release gates. It runs only on `--target docker` or `--target kubernetes`, requires an explicit real Host
+command plus a controlled Provider Credential environment-variable name, and keeps the same real Control Plane,
+selected Target, agentd, Worker Protocol, and Provider Host product path as the smoke suite.
+
+It opens four Sessions, keeps two Approval Turns active at once, requires exact `execution_quota_exceeded`
+rejection for the third and fourth admissions, and then requires immediate slot reuse after the first two Turns
+resolve. The consolidated Docker and Kubernetes release gates additionally require
+`deploy/worker/production-load-sla.json`: each Provider load child runs for at least 1800 seconds, enforces the
+checked-in P95/P99 latency and recovery bounds with zero unexpected errors, and restarts the Control Plane every 10
+completed waves before verifying continued native-Cursor execution. This load slice still does not replace the
+separate failure-injection matrix, production-duration Retention, or soak evidence.
+
+Like remote smoke, pass only environment-variable names on the command line. The runner reads the values only when
+creating the isolated Provider Credential, redacts them before any report write, and persists only the resolved
+non-secret model identifier:
+
+```sh
+source ~/.synara-acceptance-env
+
+python3 scripts/stage3-provider-acceptance/acceptance_runner.py \
+  --suite real-provider-load \
+  --target docker \
+  --provider codex \
+  --runner-command-json '["/usr/local/bin/provider-host"]' \
+  --real-provider-credential-env SYNARA_ACCEPTANCE_CODEX_KEY \
+  --real-provider-base-url-env SYNARA_ACCEPTANCE_CODEX_BASE_URL \
+  --real-provider-model-env SYNARA_ACCEPTANCE_CODEX_MODEL \
+  --timeout 900
+```
+
+```sh
+source ~/.synara-acceptance-env
+
+python3 scripts/stage3-provider-acceptance/acceptance_runner.py \
+  --suite real-provider-load \
+  --target kubernetes \
+  --provider claudeAgent \
+  --runner-command-json '["/usr/local/bin/provider-host"]' \
+  --real-provider-credential-env SYNARA_ACCEPTANCE_CLAUDE_KEY \
+  --real-provider-credential-field apiKey \
+  --real-provider-base-url-env SYNARA_ACCEPTANCE_CLAUDE_BASE_URL \
+  --real-provider-model-env SYNARA_ACCEPTANCE_CLAUDE_MODEL \
+  --timeout 1800
+```
+
 ## Real Provider failure and recovery matrix
 
 Real Provider failures use a separate canonical run so the stable product/capability matrix is not polluted by
@@ -414,11 +462,25 @@ The gate requires a completely clean worktree, including no untracked files. It 
 against LocalSupervisor and emits `local-release-gate.json` plus `local-release-gate.md`:
 
 ```sh
+source ~/.synara-acceptance-env
+
 python3 scripts/stage3-provider-acceptance/local_release_gate.py \
   --runner-command-json '["/absolute/path/to/node-24.13.1","/absolute/path/to/apps/provider-host/dist/index.mjs"]' \
+  --codex-credential-env SYNARA_ACCEPTANCE_CODEX_KEY \
+  --codex-base-url-env SYNARA_ACCEPTANCE_CODEX_BASE_URL \
+  --codex-model-env SYNARA_ACCEPTANCE_CODEX_MODEL \
+  --claude-credential-env SYNARA_ACCEPTANCE_CLAUDE_KEY \
+  --claude-credential-field apiKey \
+  --claude-base-url-env SYNARA_ACCEPTANCE_CLAUDE_BASE_URL \
+  --claude-model-env SYNARA_ACCEPTANCE_CLAUDE_MODEL \
   --product-timeout 1800 \
   --failure-timeout 420
 ```
+
+The Credential, optional Base URL, and optional custom-model rules are the same as the remote gates below. Pass
+only environment-variable names; never place values in the command or report. Use literal `--codex-model` or
+`--claude-model` instead of the corresponding `--*-model-env` only when the model identifier is intentionally
+pinned on the command line.
 
 A consolidated pass requires all four reports to share the same clean Git SHA and Capability Catalog hash, all
 canonical cases to be present, no failed/skipped cases, only the frozen Local explicit-unsupported boundaries,
@@ -434,9 +496,19 @@ the missing interaction into an unsupported result.
 ## Consolidated real Provider Docker release gate
 
 `docker_release_gate.py` uses the same shared clean-SHA child-report validator while keeping Docker-specific
-Credential, Worker image and cleanup requirements explicit. Set both product Credentials out of band and pass only
-their environment-variable names. When a third-party endpoint also needs controlled Base URL and model settings,
-source the operator-owned acceptance env file first:
+Credential, Worker image and cleanup requirements explicit. The current gate executes six child reports per run:
+
+```text
+Codex product matrix   + Codex failure matrix   + Codex load matrix
+Claude product matrix  + Claude failure matrix  + Claude load matrix
+```
+
+The product and failure children use `real-provider-smoke`; the load children use `real-provider-load` with the
+checked-in `deploy/worker/production-load-sla.json`. Each load child completes whole four-Session waves until both
+its minimum wave count and `minimumDurationSeconds` are satisfied; the current production boundary is at least
+`1800` seconds, subject to the runner's `400`-wave safety cap. Set both product Credentials out of band and pass
+only their environment-variable names. When a third-party endpoint also needs controlled Base URL and model
+settings, source the operator-owned acceptance env file first:
 
 ```sh
 source ~/.synara-acceptance-env
@@ -449,6 +521,7 @@ python3 scripts/stage3-provider-acceptance/docker_release_gate.py \
   --claude-credential-field apiKey \
   --claude-base-url-env SYNARA_ACCEPTANCE_CLAUDE_BASE_URL \
   --claude-model-env SYNARA_ACCEPTANCE_CLAUDE_MODEL \
+  --real-provider-load-sla-file deploy/worker/production-load-sla.json \
   --product-timeout 2400 \
   --failure-timeout 900
 ```
@@ -459,25 +532,27 @@ Use `--claude-credential-field authToken` only when the controlled Claude secret
 and Base URL values are redacted. Models are non-sensitive: the child reports persist the resolved model identifiers
 and the aggregate validates those exact values, but it does not record the model environment-variable names. Literal
 `--codex-model` and `--claude-model` remain available when you want to pin the identifiers directly on the command
-line instead of reading them from `--codex-model-env` / `--claude-model-env`.
+line instead of reading them from `--codex-model-env` / `--claude-model-env`. `--product-timeout` applies to both
+the product and load children; `--failure-timeout` applies only to the failure children.
 
 The gate fails before any build when either source is missing or invalid, and fails on a dirty/untracked worktree.
 Each child receives only the tool environment allowlist plus that child Provider's Credential/Base URL; Codex and
 Claude secrets are never co-inherited. After clean-SHA preflight, the gate builds one uniquely labeled official
-`worker-acceptance` image and passes the same tag to all four children with `--docker-skip-worker-build`. Each child
+`worker-acceptance` image and passes the same tag to all six children with `--docker-skip-worker-build`. Each child
 must remove its exact container/volume/network/state resources, prove `ownedImageRemoved=false`, and leave the shared
-image to the gate. A pass requires all four reports to reference the gate-built image ID and one Capability Catalog
-hash, canonical product and failure coverage, controlled rather than ambient authentication, empty child and
-aggregate Secret scans, and no persisted operator environment-variable names. In `finally`, including child failure
-paths, the gate verifies the image ownership labels and ID before removing it without broad cleanup. The aggregate
-records that cleanup evidence in `docker-release-gate.json` and `docker-release-gate.md`. Until a clean run with real
-controlled Credentials exists, this command is an implemented gate rather than Docker release evidence.
+image to the gate. A pass requires all six reports to reference the gate-built image ID, share one Capability
+Catalog hash and clean Git SHA, preserve canonical product/failure/load coverage, use controlled rather than ambient
+authentication, keep the load children on the non-fault Credential boundary, and leave both child and aggregate
+Secret scans empty. In `finally`, including child failure paths, the gate verifies the image ownership labels and ID
+before removing it without broad cleanup. The aggregate records that cleanup evidence in `docker-release-gate.json`
+and `docker-release-gate.md`. Until a clean run with real controlled Credentials exists, this command is an
+implemented gate rather than Docker release evidence.
 
 ## Consolidated real Provider Kubernetes release gate
 
-`kubernetes_release_gate.py` uses the same controlled-remote gate engine, shared clean-SHA Worker image and four
-isolated child boundaries as the Docker gate. Each child creates and removes its own disposable Kind cluster, loads
-the shared image without rebuilding it, and runs one Codex/Claude product or failure matrix:
+`kubernetes_release_gate.py` uses the same controlled-remote gate engine, shared clean-SHA Worker image and the same
+six-child product/failure/load structure as the Docker gate. Each child creates and removes its own disposable Kind
+cluster, loads the shared image without rebuilding it, and runs one Codex/Claude product, failure, or load matrix:
 
 ```sh
 source ~/.synara-acceptance-env
@@ -490,6 +565,7 @@ python3 scripts/stage3-provider-acceptance/kubernetes_release_gate.py \
   --claude-credential-field apiKey \
   --claude-base-url-env SYNARA_ACCEPTANCE_CLAUDE_BASE_URL \
   --claude-model-env SYNARA_ACCEPTANCE_CLAUDE_MODEL \
+  --real-provider-load-sla-file deploy/worker/production-load-sla.json \
   --kind-bin /absolute/path/to/kind \
   --product-timeout 3600 \
   --failure-timeout 1200
@@ -498,10 +574,13 @@ python3 scripts/stage3-provider-acceptance/kubernetes_release_gate.py \
 The Credential, Base URL, and model environment rules are identical to the Docker gate. Preflight also requires a
 working Docker Engine, Kind executable and kubectl client before the shared image is built. A child pass must prove
 the owned cluster and isolated state were removed while `ownedWorkerImageRemoved=false`; the aggregate then verifies
-all four nested `kubernetes.containerEngine` image IDs, Secret scans and Catalog hashes before ownership-checking and
-removing the shared host image itself. It emits `kubernetes-release-gate.json` and
-`kubernetes-release-gate.md`. The implementation and preflight negative tests are not real Kubernetes Provider
-release evidence until dedicated Credentials and a usable Kind binary are supplied and the clean-SHA command passes.
+all six nested `kubernetes.containerEngine` image IDs, Secret scans, Catalog hashes, clean Git SHA, and canonical
+product/failure/load coverage before ownership-checking and removing the shared host image itself. Load children use
+the same controlled product Credential boundary, repeat whole four-Session waves until the checked-in `1800`-second
+SLA duration and minimum wave count are both met, and use no failure-only Cursor policy. It emits
+`kubernetes-release-gate.json` and `kubernetes-release-gate.md`. The
+implementation and preflight negative tests are not real Kubernetes Provider release evidence until dedicated
+Credentials and a usable Kind binary are supplied and the clean-SHA command passes.
 
 ## Consolidated real Provider SSH release gate
 
@@ -560,6 +639,179 @@ It emits `ssh-release-gate.json` and `ssh-release-gate.md`. Unlike Docker/Kubern
 child intentionally rebuilds and verifies the same runtime from the clean checkout. The implementation and
 unit/runtime preflight evidence are not a real SSH Provider release pass until dedicated Credentials and a usable
 repository-external identity are configured and all four clean-SHA children complete.
+
+## Production Registry and Vault KMS admission gates
+
+The production supply-chain boundary is separate from every runner-owned loopback Registry. Export the live
+admission ConfigMaps and the approved Registry configuration/retention contract to repository-external files, then
+run the production Registry gate. Pass only Credential environment-variable names:
+
+```sh
+kubectl --context production -n synara-system get configmap synara-worker-cosign-public-key -o yaml \
+  > /secure/synara/synara-worker-cosign-public-key.yaml
+kubectl --context production -n synara-system get configmap synara-worker-signing-settings -o yaml \
+  > /secure/synara/synara-worker-signing-settings.yaml
+
+python3 scripts/stage3-provider-acceptance/registry_release_gate.py \
+  --image-repository registry.example.com/synara/worker \
+  --builder synara-worker-release \
+  --signing-policy-profile production \
+  --registry-auth-username-env REGISTRY_USERNAME \
+  --registry-auth-password-env REGISTRY_PASSWORD \
+  --registry-ca-cert-env REGISTRY_CA_CERT \
+  --production-public-key-configmap /secure/synara/synara-worker-cosign-public-key.yaml \
+  --production-repository-configmap /secure/synara/synara-worker-signing-settings.yaml \
+  --production-registry-config /secure/synara/registry-config.yml \
+  --production-registry-retention-policy /secure/synara/registry-retention-policy.json \
+  --production-registry-container synara-production-registry \
+  --production-registry-runtime-config-path /etc/distribution/config.yml \
+  --output-dir /tmp/synara-worker-registry-release
+```
+
+Production mode inspects the named running Registry container, reads its runtime configuration at the pinned path,
+and binds the live container identity, TLS certificate, auth mode, repository, and deletion/retention settings to
+the exported configuration and the checked-in retention contract. A disposable HTTP Registry, a static config
+file without its live container, or a passing immutable-rollout gate is not production Registry evidence.
+
+The retention contract pins the live Registry to
+`registry:2.8.3@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373`. Production
+evidence binds the requested container reference, actual runtime Image ID, and matching RepoDigest; mutable tags,
+alias repositories, wrong digests, and Image-ID drift fail closed.
+
+The self-hosted production signer is Vault Transit KMS with these immutable public controls:
+
+- Helm chart `hashicorp/vault` `0.34.0`, release `synara-vault`, namespace `synara-kms`;
+- image `hashicorp/vault:2.0.3@sha256:a296a888b118615dc01d5f1a6846e6d4a7277946caaed5b447008fff5fe06b54`;
+- KMS reference `hashivault://synara-worker-release`, AppRole signer identity
+  `auth/approle/role/synara-worker-release-signer`, and audited request path
+  `transit/sign/synara-worker-release`;
+- non-exportable, non-derived, non-deletable ECDSA P-256 Transit key with
+  plaintext backup disabled; rotation is a staged admission-key-overlap change,
+  not an automatic uncoordinated key-version switch;
+- Credential environment names `VAULT_ADDR`, `VAULT_TOKEN`, and `VAULT_CACERT`; the token must be short-lived and
+  policy-scoped, and no Credential value is persisted;
+- Vault `lookup-self` must identify an AppRole `batch` orphan token with only the
+  `synara-worker-release-signer` policy; evidence retains safe identity fields and the policy-list SHA256 only;
+- required public Rekor `https://rekor.sigstore.dev` upload and online verification, including inclusion proof and
+  signed entry timestamp;
+- Kyverno `failurePolicy: Fail`, `validationFailureAction: Enforce`, tag-to-digest mutation, and digest signature
+  verification using the live `synara-system` ConfigMaps.
+
+After the Registry report passes, verify the live signer and admission boundary:
+
+```sh
+python3 scripts/stage3-provider-acceptance/vault_kms_admission_gate.py \
+  --kube-context production \
+  --vault-namespace synara-kms \
+  --security-namespace synara-system \
+  --admission-test-namespace synara-admission \
+  --expected-approle-policy synara-worker-release-signer \
+  --registry-release-gate-report /tmp/synara-worker-registry-release/worker-registry-release-gate.json \
+  --unsigned-image-ref registry.example.com/synara/worker@sha256:<unsigned-digest> \
+  --wrong-key-image-ref registry.example.com/synara/worker@sha256:<wrong-key-digest> \
+  --tag-drift-image-ref registry.example.com/synara/worker:latest \
+  --output-dir /tmp/synara-worker-vault-kms-admission
+```
+
+This gate requires the live Vault image/policy/key/public key, Registry report, Rekor result, ConfigMaps,
+`ClusterPolicy`, positive signed-image admission, and negative unsigned/wrong-key/tag-drift probes to agree on the
+same clean source boundary. It also requires exact cleanup and an empty output Secret scan.
+
+The production operational KMS boundary also includes the checked-in
+`deploy/kubernetes/security/vault/operations-policy.json` and
+`docs/runbooks/vault-kms-operations.md` documents. Use the isolated snapshot restore drill to prove the approved
+snapshot-operator AppRole, Shamir custody boundary, and exact `--network none` Docker restore path:
+
+```sh
+python3 scripts/stage3-provider-acceptance/vault_snapshot_restore_drill.py \
+  --output-dir /tmp/synara-worker-vault-snapshot-restore
+```
+
+This drill consumes only the approved environment names `VAULT_ADDR`, `VAULT_CACERT`,
+`VAULT_SNAPSHOT_OPERATOR_ROLE_ID`, `VAULT_SNAPSHOT_OPERATOR_SECRET_ID`,
+`VAULT_SNAPSHOT_RESTORE_KEY_1`, `VAULT_SNAPSHOT_RESTORE_KEY_2`, and
+`VAULT_SNAPSHOT_RESTORE_KEY_3`. It captures one source-cluster snapshot-operator token, restores the snapshot into
+one isolated Docker Vault using `hashicorp/vault:2.0.3@sha256:a296a888b118615dc01d5f1a6846e6d4a7277946caaed5b447008fff5fe06b54`,
+waits for the asynchronous snapshot application to finish, then verifies `vault status`, the single-node Raft
+leader, both restored audit devices on a hardened UID-100 tmpfs, the transit key, and the
+signer/auditor/snapshot-operator AppRoles,
+then removes the container and temporary state. It does not replace the still-required external SIEM retained sink
+evidence.
+
+The SIEM evidence uses a separate S3-compatible Object Lock bucket with
+versioning and `COMPLIANCE` retention. Configure only the environment names
+`VAULT_AUDIT_WORM_MC_ALIAS`, `VAULT_AUDIT_WORM_MC_CONFIG_DIR`,
+`VAULT_AUDIT_WORM_MC_HOST`, and `VAULT_AUDIT_WORM_MC_RESOLVE`; never put the
+scoped archive credential value in a command or report. Each archive entry
+contains the complete structured Vault audit payload; the gate recomputes its
+canonical payload, entry, and batch hashes out of band. It writes a gate-owned
+probe with the writer identity and requires writer deletion to fail at IAM,
+then uses the independent verifier identity to prove the exact retained versions
+cannot be deleted or shortened specifically because of COMPLIANCE Object Lock.
+The gate additionally requires the short-lived
+`VAULT_AUDIT_WORM_MC_VERIFIER_HOST` identity for its negative probes; this keeps
+a writer-policy denial distinct from storage-enforced WORM denial.
+
+The collector must be started with `--object-lock-required`; otherwise its
+retention API explicitly reports only a tamper-evident local hash chain and the
+formal gate fails. Run the formal evidence command from a clean SHA:
+
+```sh
+python3 scripts/stage3-provider-acceptance/vault_audit_siem_delivery_gate.py \
+  --vault-command-json '["/secure/bin/vault"]' \
+  --vault-auditor-token-env VAULT_OPERATOR_TOKEN \
+  --kube-context kind-synara-stage3-prod \
+  --vault-namespace synara-kms \
+  --vault-statefulset synara-vault \
+  --output-dir /tmp/synara-stage3-vault-audit-siem
+```
+
+## Kubernetes real Provider immutable rollout gate
+
+Run the real rollout once for Codex and once for Claude from the same clean release boundary. The examples support
+third-party API endpoints, keys, and custom models through environment-variable names:
+
+```sh
+source ~/.synara-acceptance-env
+
+python3 scripts/stage3-provider-acceptance/kubernetes_real_provider_release_rollout_gate.py \
+  --provider codex \
+  --real-provider-credential-env SYNARA_ACCEPTANCE_CODEX_KEY \
+  --real-provider-credential-field apiKey \
+  --real-provider-base-url-env SYNARA_ACCEPTANCE_CODEX_BASE_URL \
+  --real-provider-model-env SYNARA_ACCEPTANCE_CODEX_MODEL \
+  --real-provider-load-sla-file deploy/worker/production-load-sla.json \
+  --kind-worker-nodes 2 \
+  --load-waves 6 \
+  --timeout 5400 \
+  --output-dir /tmp/synara-kubernetes-real-provider-codex-rollout
+
+python3 scripts/stage3-provider-acceptance/kubernetes_real_provider_release_rollout_gate.py \
+  --provider claudeAgent \
+  --real-provider-credential-env SYNARA_ACCEPTANCE_CLAUDE_KEY \
+  --real-provider-credential-field apiKey \
+  --real-provider-base-url-env SYNARA_ACCEPTANCE_CLAUDE_BASE_URL \
+  --real-provider-model-env SYNARA_ACCEPTANCE_CLAUDE_MODEL \
+  --real-provider-load-sla-file deploy/worker/production-load-sla.json \
+  --kind-worker-nodes 2 \
+  --load-waves 6 \
+  --timeout 5400 \
+  --output-dir /tmp/synara-kubernetes-real-provider-claude-rollout
+```
+
+Use `--real-provider-credential-field authToken` only for a Claude profile that intentionally maps to
+`ANTHROPIC_AUTH_TOKEN`. The default six nominal waves are split across candidate promotion and baseline rollback;
+with six, each phase has a three-wave minimum. Each phase independently continues whole waves until it also reaches
+the checked-in `minimumDurationSeconds: 1800`, so the two load phases require at least about 60 minutes before
+build, rollout, fault, and cleanup overhead. The gate proves controlled real Provider Turns, two distinct immutable
+Registry digests, canary/promote/rollback and Pod-loss recovery, one execution-pinned Pod/Worker identity per
+Execution, two simultaneous Pods on distinct schedulable non-control-plane Nodes, same-Session native Cursor
+continuity across revisions, Audit/Outbox consistency, exact cleanup, and output scanning.
+
+Its Registry is runner-owned loopback HTTP without TLS or authentication. That Registry proves immutable digest
+rollout only; production Registry TLS/auth/retention evidence still comes from the production
+`registry_release_gate.py`, and live signer/tlog/admission evidence still comes from
+`vault_kms_admission_gate.py`.
 
 ## Kubernetes immutable Worker Release rollout gate
 

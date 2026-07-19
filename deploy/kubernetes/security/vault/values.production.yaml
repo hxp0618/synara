@@ -1,0 +1,309 @@
+global:
+  tlsDisable: false
+
+injector:
+  enabled: false
+
+ui:
+  enabled: false
+  serviceType: ClusterIP
+
+server:
+  terminationGracePeriodSeconds: 30
+  shareProcessNamespace: true
+
+  livenessProbe:
+    enabled: true
+    execCommand:
+      - /bin/sh
+      - -c
+      - 'vault status >/dev/null 2>&1; status=$?; [ "$status" -eq 0 ] || [ "$status" -eq 2 ]'
+    initialDelaySeconds: 300
+    periodSeconds: 10
+    failureThreshold: 3
+    successThreshold: 1
+    timeoutSeconds: 3
+
+  readinessProbe:
+    enabled: true
+    path: /v1/sys/health?standbyok=true&perfstandbyok=true&sealedcode=204&uninitcode=204
+    port: 8200
+    initialDelaySeconds: 300
+    periodSeconds: 10
+    failureThreshold: 3
+    successThreshold: 1
+    timeoutSeconds: 3
+
+  standalone:
+    enabled: false
+
+  image:
+    repository: hashicorp/vault
+    tag: 2.0.3@sha256:a296a888b118615dc01d5f1a6846e6d4a7277946caaed5b447008fff5fe06b54
+    pullPolicy: IfNotPresent
+
+  resources:
+    requests:
+      cpu: 500m
+      memory: 2Gi
+    limits:
+      cpu: "2"
+      memory: 4Gi
+
+  dataStorage:
+    enabled: true
+    size: 50Gi
+    accessMode: ReadWriteOnce
+
+  auditStorage:
+    enabled: true
+    size: 20Gi
+    accessMode: ReadWriteOnce
+
+  volumes:
+    - name: tls
+      secret:
+        secretName: synara-vault-server-tls
+    - name: audit-observability-config
+      configMap:
+        name: synara-vault-audit-observability
+        defaultMode: 0550
+    - name: audit-siem-tls
+      emptyDir:
+        medium: Memory
+        sizeLimit: 4Mi
+    - name: tmp
+      emptyDir: {}
+
+  volumeMounts:
+    - name: tls
+      mountPath: /vault/tls
+      readOnly: true
+    - name: tmp
+      mountPath: /tmp
+
+  extraEnvironmentVars:
+    VAULT_CACERT: /vault/tls/ca.crt
+
+  extraContainers:
+    - name: vault-audit-shipper
+      image: timberio/vector:0.45.0-debian@sha256:987a15ebfb2eac3a4d5efb26252d140f799553feffb753dc215bdf738a7d4174
+      imagePullPolicy: IfNotPresent
+      command:
+        - /bin/sh
+        - /etc/vault-audit/ship-audit.sh
+      env:
+        - name: VAULT_AUDIT_SIEM_ENDPOINT
+          valueFrom:
+            secretKeyRef:
+              name: synara-vault-audit-siem
+              key: VAULT_AUDIT_SIEM_ENDPOINT
+        - name: VAULT_AUDIT_SIEM_CLIENT_CERT
+          valueFrom:
+            secretKeyRef:
+              name: synara-vault-audit-siem
+              key: VAULT_AUDIT_SIEM_CLIENT_CERT
+        - name: VAULT_AUDIT_SIEM_CLIENT_KEY
+          valueFrom:
+            secretKeyRef:
+              name: synara-vault-audit-siem
+              key: VAULT_AUDIT_SIEM_CLIENT_KEY
+        - name: VAULT_AUDIT_SIEM_CA_CERT
+          valueFrom:
+            secretKeyRef:
+              name: synara-vault-audit-siem
+              key: VAULT_AUDIT_SIEM_CA_CERT
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 100
+        runAsGroup: 1000
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        seccompProfile:
+          type: RuntimeDefault
+        capabilities:
+          drop:
+            - ALL
+      volumeMounts:
+        - name: audit
+          mountPath: /vault/audit
+        - name: audit-observability-config
+          mountPath: /etc/vault-audit
+          readOnly: true
+        - name: audit-siem-tls
+          mountPath: /var/run/vault-audit-siem
+        - name: tmp
+          mountPath: /tmp
+    - name: vault-audit-rotation
+      image: alpine:3.22.1@sha256:4bcff63911fcb4448bd4fdacec207030997caf25e9bea4045fa6c8c44de311d1
+      imagePullPolicy: IfNotPresent
+      command:
+        - /bin/sh
+        - /etc/vault-audit/rotate-audit.sh
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 100
+        runAsGroup: 1000
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        seccompProfile:
+          type: RuntimeDefault
+        capabilities:
+          drop:
+            - ALL
+      volumeMounts:
+        - name: audit
+          mountPath: /vault/audit
+        - name: audit-observability-config
+          mountPath: /etc/vault-audit
+          readOnly: true
+        - name: tmp
+          mountPath: /tmp
+
+  affinity: |
+    podAntiAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        - labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: {{ template "vault.name" . }}
+              app.kubernetes.io/instance: "{{ .Release.Name }}"
+              component: server
+          topologyKey: kubernetes.io/hostname
+
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: kubernetes.io/hostname
+      whenUnsatisfiable: DoNotSchedule
+      labelSelector:
+        matchLabels:
+          app.kubernetes.io/name: vault
+          component: server
+    - maxSkew: 1
+      topologyKey: topology.kubernetes.io/zone
+      whenUnsatisfiable: ScheduleAnyway
+      labelSelector:
+        matchLabels:
+          app.kubernetes.io/name: vault
+          component: server
+
+  networkPolicy:
+    enabled: true
+    ingress:
+      - from:
+          - podSelector:
+              matchLabels:
+                app.kubernetes.io/name: vault
+                app.kubernetes.io/instance: synara-vault
+                component: server
+        ports:
+          - port: 8200
+            protocol: TCP
+          - port: 8201
+            protocol: TCP
+      - from:
+          - namespaceSelector:
+              matchLabels:
+                kubernetes.io/metadata.name: synara-system
+        ports:
+          - port: 8200
+            protocol: TCP
+    egress:
+      - to:
+          - podSelector:
+              matchLabels:
+                app.kubernetes.io/name: vault
+                app.kubernetes.io/instance: synara-vault
+                component: server
+        ports:
+          - port: 8200
+            protocol: TCP
+          - port: 8201
+            protocol: TCP
+      - to:
+          - namespaceSelector:
+              matchLabels:
+                kubernetes.io/metadata.name: kube-system
+            podSelector:
+              matchLabels:
+                k8s-app: kube-dns
+        ports:
+          - port: 53
+            protocol: UDP
+          - port: 53
+            protocol: TCP
+      - to:
+          - ipBlock:
+              cidr: 10.96.0.1/32
+        ports:
+          - port: 443
+            protocol: TCP
+      - to:
+          - ipBlock:
+              cidr: 192.168.155.4/32
+        ports:
+          - port: 6443
+            protocol: TCP
+      - to:
+          - ipBlock:
+              cidr: 0.250.250.254/32
+        ports:
+          - port: 18443
+            protocol: TCP
+
+  statefulSet:
+    securityContext:
+      pod:
+        runAsNonRoot: true
+        runAsUser: 100
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      container:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop:
+            - ALL
+        readOnlyRootFilesystem: true
+
+  ha:
+    enabled: true
+    replicas: 3
+    raft:
+      enabled: true
+      setNodeId: true
+      config: |
+        ui = false
+
+        listener "tcp" {
+          tls_disable = 0
+          address = "[::]:8200"
+          cluster_address = "[::]:8201"
+          tls_cert_file = "/vault/tls/tls.crt"
+          tls_key_file = "/vault/tls/tls.key"
+          tls_client_ca_file = "/vault/tls/ca.crt"
+        }
+
+        storage "raft" {
+          path = "/vault/data"
+
+          retry_join {
+            leader_api_addr = "https://synara-vault-0.synara-vault-internal:8200"
+            leader_ca_cert_file = "/vault/tls/ca.crt"
+          }
+
+          retry_join {
+            leader_api_addr = "https://synara-vault-1.synara-vault-internal:8200"
+            leader_ca_cert_file = "/vault/tls/ca.crt"
+          }
+
+          retry_join {
+            leader_api_addr = "https://synara-vault-2.synara-vault-internal:8200"
+            leader_ca_cert_file = "/vault/tls/ca.crt"
+          }
+        }
+
+        service_registration "kubernetes" {}
+
+    disruptionBudget:
+      enabled: false

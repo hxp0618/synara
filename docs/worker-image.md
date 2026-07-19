@@ -127,6 +127,9 @@ the `docker-container` driver and expose both `linux/amd64` and `linux/arm64`. D
 authentication, when required, must already be configured outside the command; credentials are rejected in the
 repository and GOPROXY arguments and are never written to the report.
 
+The default command below uses the checked-in disposable profile (`--signing-policy-profile disposable`) and
+`deploy/worker/signing-policy.json`:
+
 ```bash
 python3 scripts/stage3-provider-acceptance/registry_release_gate.py \
   --image-repository registry.example.com/synara/worker \
@@ -141,10 +144,12 @@ For a disposable local HTTP Registry only, add `--insecure-registry`; production
 
 ### Signing policy
 
-The gate reads `deploy/worker/signing-policy.json` from the clean checkout. The checked-in default is
-`ephemeral-key`, which proves exact-digest signing mechanics without claiming a production identity or transparency
-log. Production releases must commit either `keyless` or `kms-key`; both modes reject `--insecure-registry` and
-require transparency-log upload and verification.
+The checked-in default `deploy/worker/signing-policy.json` is `ephemeral-key`, which proves exact-digest signing
+mechanics without claiming a production identity or transparency log. The generic signing-policy schema still
+distinguishes `ephemeral-key`, `keyless`, and `kms-key`, but the current production selector is the checked-in pair
+`deploy/worker/production-signing-policy.json` plus `deploy/worker/production-signing-profile.json`. That
+production profile is pinned to Vault Transit KMS (`hashivault://synara-worker-release`), Rekor upload and
+verification, and Kyverno admission.
 
 Keyless example using exact certificate identity and issuer:
 
@@ -186,6 +191,97 @@ the gate process and never written to JSON, shell arguments, CI logs, or Docker 
 stored in a gate-owned `0600` file for Cosign and deleted in `finally`; KMS values are passed only through the named
 container environment. Reports retain only non-Secret identity, policy SHA, tlog conclusion, and cleanup evidence.
 
+### Current production profile
+
+Before a production run, export the current live admission ConfigMaps to local files. Pass only environment-variable
+names for Registry auth and CA paths; never inline their values:
+
+```bash
+kubectl --context production -n synara-system get configmap synara-worker-cosign-public-key -o yaml \
+  > /secure/synara/synara-worker-cosign-public-key.yaml
+kubectl --context production -n synara-system get configmap synara-worker-signing-settings -o yaml \
+  > /secure/synara/synara-worker-signing-settings.yaml
+
+python3 scripts/stage3-provider-acceptance/registry_release_gate.py \
+  --image-repository registry.example.com/synara/worker \
+  --builder synara-worker-release \
+  --signing-policy-profile production \
+  --registry-auth-username-env REGISTRY_USERNAME \
+  --registry-auth-password-env REGISTRY_PASSWORD \
+  --registry-ca-cert-env REGISTRY_CA_CERT \
+  --production-public-key-configmap /secure/synara/synara-worker-cosign-public-key.yaml \
+  --production-repository-configmap /secure/synara/synara-worker-signing-settings.yaml \
+  --production-registry-config /secure/synara/registry-config.yml \
+  --production-registry-retention-policy /secure/synara/registry-retention-policy.json \
+  --production-registry-container synara-production-registry \
+  --production-registry-runtime-config-path /etc/distribution/config.yml \
+  --output-dir /tmp/synara-worker-registry-release
+```
+
+In `production` mode the gate binds the clean Git SHA to the checked-in production signing source set:
+
+- `deploy/worker/production-signing-policy.json`
+- `deploy/worker/production-signing-profile.json`
+- `deploy/kubernetes/security/cluster/verify-synara-worker-images.yaml`
+- `deploy/kubernetes/security/namespaced/synara-worker-cosign-public-key-configmap.yaml`
+- `deploy/kubernetes/security/namespaced/synara-worker-signing-settings-configmap.yaml`
+- `deploy/kubernetes/security/production/kustomization.yaml`
+
+It also validates the runtime ConfigMap YAML inputs against the configured image repository and the public key
+exported from the current Vault Transit KMS key. The gate reads the named running Registry container's configuration
+at `--production-registry-runtime-config-path` and binds its container/image identity, TLS certificate, auth mode,
+repository, and deletion/retention settings to the exported production configuration and checked-in retention
+contract. A production run fails if TLS is missing, Registry auth is not passed by environment-variable name, live
+runtime evidence is stale or drifts, the runtime ConfigMaps drift from the KMS key or repository pattern, or the
+isolated state, materialized Vault/Registry CA files, and Registry auth config are not removed exactly. A static
+configuration file or disposable loopback Registry alone is not live production Registry evidence.
+
+The checked-in Registry runtime pin is
+`registry:2.8.3@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373`. The gate
+requires the container's requested `Config.Image`, top-level runtime Image ID, and the ID's inspected RepoDigest to
+bind to that exact pin; a mutable tag, alias repository, wrong digest, or Image-ID mismatch fails closed.
+
+### Vault KMS admission gate
+
+After a passing production `registry_release_gate.py` run, verify the live Vault Transit, Registry, Rekor-backed
+signature, and Kyverno admission boundary with `vault_kms_admission_gate.py`. The default `--admission-mode` is
+`verify-existing`, which checks the current live ConfigMaps and `ClusterPolicy` instead of applying a temporary
+bundle:
+
+```bash
+python3 scripts/stage3-provider-acceptance/vault_kms_admission_gate.py \
+  --kube-context production \
+  --vault-namespace synara-kms \
+  --security-namespace synara-system \
+  --admission-test-namespace synara-admission \
+  --expected-approle-policy synara-worker-release-signer \
+  --registry-release-gate-report /tmp/synara-worker-registry-release/worker-registry-release-gate.json \
+  --unsigned-image-ref registry.example.com/synara/worker@sha256:<unsigned-digest> \
+  --wrong-key-image-ref registry.example.com/synara/worker@sha256:<wrong-key-digest> \
+  --tag-drift-image-ref registry.example.com/synara/worker:latest \
+  --output-dir /tmp/synara-worker-vault-kms-admission
+```
+
+The production Vault deployment is pinned to Helm chart `hashicorp/vault` `0.34.0`, release `synara-vault`,
+namespace `synara-kms`, and image
+`hashicorp/vault:2.0.3@sha256:a296a888b118615dc01d5f1a6846e6d4a7277946caaed5b447008fff5fe06b54`.
+The signer identity is AppRole `auth/approle/role/synara-worker-release-signer`; it may call only the audited
+`transit/sign/synara-worker-release` path for KMS reference `hashivault://synara-worker-release`. Cosign receives a
+short-lived policy-scoped token via the `VAULT_ADDR`, `VAULT_TOKEN`, and `VAULT_CACERT` environment names. The
+production tlog policy requires upload and online verification against public Rekor `https://rekor.sigstore.dev`,
+including an inclusion proof and signed entry timestamp. Kyverno admission is fail-closed and enforced, mutates
+matching tags to digests, and verifies the exact digest signature using the live `synara-system` ConfigMaps.
+Vault `lookup-self` must additionally prove an AppRole `batch` orphan token with only the
+`synara-worker-release-signer` policy. Reports retain only the role/type/orphan/policy-count fields and the policy
+list SHA256, never the token or Credential values.
+
+The gate reads only `VAULT_ADDR`, `VAULT_TOKEN`, `VAULT_CACERT`, `REGISTRY_USERNAME`, `REGISTRY_PASSWORD`, and
+`REGISTRY_CA_CERT` by environment-variable name; it does not persist their values. It re-checks the clean current
+source boundary against the passing production `registry_release_gate.py` report, verifies the exported Vault public
+key and live Registry repository pattern, then requires one positive signed-image admission plus negative unsigned,
+wrong-key, and tag-drift probes. It fails closed if source hashes drift, if the passing Registry report retained
+secret-like findings, or if isolated state or exact-owner temporary admission resources are not removed.
+
 The gate pushes two uniquely tagged builds from the same Git SHA: one normal cached build and one independent
 `--no-cache` build. The Registry exporter rewrites layer timestamps to `SOURCE_DATE_EPOCH`; transient APK logs and
 the pre-normalized npm SBOM are excluded from final layers. The gate requires both builds to reproduce the same
@@ -201,7 +297,9 @@ platform manifest digests and validates:
   matching their checked-in tags;
 - the checked-in Cosign signing policy, which signs both OCI index digests and verifies exact Git SHA, version,
   run ID, slot, Registry identity, and manifest digest claims; disposable mode removes its private key, while
-  production keyless/KMS modes additionally require TLS, approved identity/KMS input, and transparency-log evidence;
+  the current production Vault Transit KMS profile additionally requires TLS, approved Registry auth/CA environment
+  names, current runtime admission ConfigMap inputs, Rekor upload and verification, and clean removal of all
+  materialized secret state;
 - both platform manifests scanned by Trivy for vulnerabilities and Secret-like material under
   `deploy/worker/vulnerability-policy.json`, including vulnerability-database freshness and OS end-of-life checks;
 - exact local inspection cleanup, report redaction, and an empty output Secret scan without Docker-wide prune.
@@ -209,10 +307,11 @@ platform manifest digests and validates:
 The JSON and Markdown reports are written to the requested empty output directory. The gate intentionally retains
 the two remote image tags and their signatures as release evidence; apply the Registry retention policy only after
 their digests, attestations, signatures, scan summaries, and tool/database identities are archived. A default
-ephemeral-key pass proves the cryptographic Registry path and exact source claims, but it does not satisfy a
-production KMS/keyless identity or transparency-log policy. A production-mode pass must also archive its
-certificate/KMS identity and transparency-log conclusion. Neither mode alone proves production Registry Credential and
-retention, real Provider rollout across all four Targets, multi-node canary/rollback, or soak.
+ephemeral-key pass proves the cryptographic Registry path and exact source claims, but it does not satisfy the
+current production Vault Transit KMS, Rekor, or Kyverno admission policy. A production-mode pass must also archive
+its Registry release report, production admission verification report, KMS identity, transparency-log conclusion,
+and the checked-in Registry retention-policy boundary. Neither mode alone proves real Provider rollout across all
+four Targets, multi-node canary/rollback, or soak.
 
 ## Docker Release Revision rollout gate
 
@@ -237,6 +336,51 @@ empty output Secret scan.
 The local Registry intentionally has no TLS or Registry Credential. Its result closes only deterministic managed
 Docker rollout mechanics; production Registry auth/retention, keyless or KMS identity, Kubernetes multi-node
 rollout, real Provider credentials, load, and soak remain separate gates.
+
+## Kubernetes real Provider Release Revision rollout gate
+
+After both production supply-chain gates are green, run the immutable Kubernetes rollout separately for Codex and
+Claude. The following template uses only controlled environment-variable names and supports third-party Base URLs,
+keys, and custom models:
+
+```bash
+source ~/.synara-acceptance-env
+
+python3 scripts/stage3-provider-acceptance/kubernetes_real_provider_release_rollout_gate.py \
+  --provider codex \
+  --real-provider-credential-env SYNARA_ACCEPTANCE_CODEX_KEY \
+  --real-provider-credential-field apiKey \
+  --real-provider-base-url-env SYNARA_ACCEPTANCE_CODEX_BASE_URL \
+  --real-provider-model-env SYNARA_ACCEPTANCE_CODEX_MODEL \
+  --real-provider-load-sla-file deploy/worker/production-load-sla.json \
+  --kind-worker-nodes 2 \
+  --load-waves 6 \
+  --timeout 5400 \
+  --output-dir /tmp/synara-kubernetes-real-provider-codex-rollout
+
+python3 scripts/stage3-provider-acceptance/kubernetes_real_provider_release_rollout_gate.py \
+  --provider claudeAgent \
+  --real-provider-credential-env SYNARA_ACCEPTANCE_CLAUDE_KEY \
+  --real-provider-credential-field apiKey \
+  --real-provider-base-url-env SYNARA_ACCEPTANCE_CLAUDE_BASE_URL \
+  --real-provider-model-env SYNARA_ACCEPTANCE_CLAUDE_MODEL \
+  --real-provider-load-sla-file deploy/worker/production-load-sla.json \
+  --kind-worker-nodes 2 \
+  --load-waves 6 \
+  --timeout 5400 \
+  --output-dir /tmp/synara-kubernetes-real-provider-claude-rollout
+```
+
+The default six nominal waves split three/three between candidate promotion and baseline rollback. Each phase also
+has to reach `minimumDurationSeconds: 1800`, continuing whole waves as needed, so the load portion alone takes at
+least about 60 minutes. A pass proves real Provider Turns, two immutable Registry digests, canary/promote/rollback,
+Pod-loss recovery, one Pod/Worker identity per Execution, distinct-node overlap on two schedulable non-control-plane
+Nodes, same-Session native Cursor continuity across revisions, release-pinned Audit/Outbox history, exact cleanup,
+and output scanning.
+
+This gate's Registry is disposable loopback HTTP without TLS or authentication. It does not replace production
+Registry live evidence from `registry_release_gate.py` or Vault/Kyverno/Rekor evidence from
+`vault_kms_admission_gate.py`.
 
 ## Runtime and storage
 

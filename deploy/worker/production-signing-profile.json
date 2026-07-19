@@ -1,0 +1,47 @@
+{
+  "schemaVersion": 1,
+  "signingPolicyPath": "deploy/worker/production-signing-policy.json",
+  "signer": {
+    "type": "vault-transit-kms",
+    "keyReference": "hashivault://synara-worker-release",
+    "authMethod": "approle",
+    "principal": "auth/approle/role/synara-worker-release-signer",
+    "auditRequestPath": "transit/sign/synara-worker-release",
+    "credentialEnvironment": ["VAULT_ADDR", "VAULT_TOKEN", "VAULT_CACERT"]
+  },
+  "registryAccess": {
+    "usernameEnvironment": "REGISTRY_USERNAME",
+    "passwordEnvironment": "REGISTRY_PASSWORD",
+    "caCertEnvironment": "REGISTRY_CA_CERT"
+  },
+  "transparencyLog": {
+    "provider": "public-rekor",
+    "url": "https://rekor.sigstore.dev",
+    "upload": true,
+    "required": true,
+    "verify": true,
+    "inclusionProofRequired": true,
+    "signedEntryTimestampRequired": true
+  },
+  "admission": {
+    "provider": "kyverno",
+    "required": true,
+    "failurePolicy": "Fail",
+    "validationFailureAction": "Enforce",
+    "mutateDigest": true,
+    "verifyDigest": true,
+    "publicKeyConfigMap": {
+      "namespace": "synara-system",
+      "name": "synara-worker-cosign-public-key",
+      "key": "cosignPublicKey"
+    },
+    "repositoryConfigMap": {
+      "namespace": "synara-system",
+      "name": "synara-worker-signing-settings",
+      "key": "repositoryPattern"
+    },
+    "clusterPolicyPath": "deploy/kubernetes/security/cluster/verify-synara-worker-images.yaml",
+    "clusterKustomizationPath": "deploy/kubernetes/security/production",
+    "namespaceKustomizationPath": "deploy/kubernetes/security/production"
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "registryConfigPath": "/etc/distribution/config.yml",
+  "runtimeImage": "registry:2.8.3@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373",
+  "immutability": {
+    "deleteEnabled": false,
+    "promotionBoundary": "digest-only"
+  },
+  "retention": {
+    "releaseEvidenceDays": 90,
+    "appliesAfterArchive": true
+  },
+  "garbageCollection": {
+    "mode": "manual-after-archive",
+    "requiresReleaseEvidenceArchive": true
+  }
+}

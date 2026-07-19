@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: synara-worker-signing-settings
+  namespace: synara-system
+  labels:
+    cache.kyverno.io/enabled: "true"
+data:
+  repositoryPattern: 192.168.139.3:5443/synara/worker*

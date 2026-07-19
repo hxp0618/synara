@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import dataclasses
 import datetime as dt
 import json
@@ -19,10 +20,28 @@ PLATFORM = "linux/amd64"
 DIGEST = "sha256:" + "a" * 64
 REFERENCE = f"localhost:55091/synara/worker@{DIGEST}"
 NOW = dt.datetime(2026, 7, 17, tzinfo=dt.timezone.utc)
+PUBLIC_KEY_PEM = """-----BEGIN PUBLIC KEY-----
+MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEQVkNH8kvecKHNfCGpmOfb4W8GXV5
+PFhf/AZNZRPMI+AF7b5TN/EM/TCPLLU1+7sP/ye/sDw53VdCJ1QjiAZVYg==
+-----END PUBLIC KEY-----
+"""
+PRODUCTION_PROFILE_REQUIRED_PATHS = (
+    supply.TOOLS_LOCK_PATH,
+    supply.VULNERABILITY_POLICY_PATH,
+    supply.PRODUCTION_SIGNING_POLICY_PATH,
+    supply.PRODUCTION_SIGNING_PROFILE_PATH,
+    supply.SECURITY_PRODUCTION_KUSTOMIZATION_PATH / "kustomization.yaml",
+    supply.SECURITY_CLUSTER_KUSTOMIZATION_PATH / "kustomization.yaml",
+    supply.SECURITY_CLUSTER_POLICY_PATH,
+    supply.SECURITY_NAMESPACE_KUSTOMIZATION_PATH / "kustomization.yaml",
+    supply.SECURITY_PUBLIC_KEY_CONFIGMAP_PATH,
+    supply.SECURITY_REPOSITORY_CONFIGMAP_PATH,
+)
 
 
 def signing_policy(
     *,
+    path: str = str(supply.SIGNING_POLICY_PATH),
     mode: str = "ephemeral-key",
     require_transparency_log: bool = False,
     key_reference: str | None = None,
@@ -34,6 +53,7 @@ def signing_policy(
     certificate_oidc_issuer_regexp: str | None = None,
 ) -> supply.SigningPolicy:
     return supply.SigningPolicy(
+        path=path,
         mode=mode,
         require_transparency_log=require_transparency_log,
         key_reference=key_reference,
@@ -86,14 +106,91 @@ def verification_payload(
     ]
 
 
+def transparency_bundle_payload(
+    *,
+    include_inclusion_proof: bool = True,
+    include_signed_entry_timestamp: bool = True,
+) -> dict[str, Any]:
+    entry: dict[str, Any] = {
+        "logIndex": 7,
+        "integratedTime": 1_720_000_000,
+    }
+    if include_inclusion_proof:
+        entry["inclusionProof"] = {
+            "logIndex": 7,
+            "rootHash": "ab" * 32,
+            "treeSize": 8,
+            "hashes": ["cd" * 32],
+        }
+    if include_signed_entry_timestamp:
+        entry["inclusionPromise"] = {
+            "signedEntryTimestamp": "c2lnbmVkLWVudHJ5LXRpbWVzdGFtcA==",
+        }
+    return {
+        "mediaType": "application/vnd.dev.sigstore.bundle+json;version=0.3",
+        "verificationMaterial": {
+            "tlogEntries": [entry],
+        },
+    }
+
+
+def vault_token_lookup_payload(
+    *,
+    display_name: str = supply.VAULT_TRANSIT_AUTH_METHOD,
+    role_name: str = "synara-worker-release-signer",
+    token_type: str = "batch",
+    orphan: bool = True,
+    policies: list[str] | None = None,
+) -> dict[str, Any]:
+    return {
+        "data": {
+            "display_name": display_name,
+            "meta": {"role_name": role_name},
+            "type": token_type,
+            "orphan": orphan,
+            "policies": policies if policies is not None else [role_name],
+        }
+    }
+
+
+def write_transparency_bundle(
+    path: pathlib.Path,
+    *,
+    include_inclusion_proof: bool = True,
+    include_signed_entry_timestamp: bool = True,
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            transparency_bundle_payload(
+                include_inclusion_proof=include_inclusion_proof,
+                include_signed_entry_timestamp=include_signed_entry_timestamp,
+            )
+        ),
+        encoding="utf-8",
+    )
+
+
 def configuration_with(policy: supply.SigningPolicy) -> supply.SupplyChainConfiguration:
     return dataclasses.replace(supply.load_configuration(REPO_ROOT), signing_policy=policy)
+
+
+def production_configuration_with(policy: supply.SigningPolicy) -> supply.SupplyChainConfiguration:
+    return dataclasses.replace(
+        supply.load_configuration(REPO_ROOT, signing_policy_profile="production"),
+        signing_policy=policy,
+    )
 
 
 def supply_options(
     state_dir: pathlib.Path,
     *,
     insecure_registry: bool = False,
+    registry_auth_username_environment: str | None = None,
+    registry_auth_password_environment: str | None = None,
+    registry_ca_cert_environment: str | None = None,
+    production_public_key_configmap_path: pathlib.Path | None = None,
+    production_repository_configmap_path: pathlib.Path | None = None,
 ) -> supply.SupplyChainOptions:
     return supply.SupplyChainOptions(
         repo_root=REPO_ROOT,
@@ -102,7 +199,55 @@ def supply_options(
         docker_bin="docker",
         timeout_seconds=60.0,
         insecure_registry=insecure_registry,
+        registry_auth_username_environment=registry_auth_username_environment,
+        registry_auth_password_environment=registry_auth_password_environment,
+        registry_ca_cert_environment=registry_ca_cert_environment,
+        production_public_key_configmap_path=production_public_key_configmap_path,
+        production_repository_configmap_path=production_repository_configmap_path,
     )
+
+
+def write_runtime_configmaps(
+    directory: pathlib.Path,
+    *,
+    public_key: str = PUBLIC_KEY_PEM,
+    repository_pattern: str = "registry.example.test/synara/worker*",
+) -> tuple[pathlib.Path, pathlib.Path]:
+    public_key_path = directory / "runtime-public-key-configmap.yaml"
+    repository_path = directory / "runtime-repository-configmap.yaml"
+    public_key_path.write_text(
+        (
+            "apiVersion: v1\n"
+            "kind: ConfigMap\n"
+            "metadata:\n"
+            "  name: synara-worker-cosign-public-key\n"
+            "  namespace: synara-system\n"
+            "data:\n"
+            "  cosignPublicKey: |\n"
+            + "".join(f"    {line}\n" for line in public_key.strip().splitlines())
+        ),
+        encoding="utf-8",
+    )
+    repository_path.write_text(
+        (
+            "apiVersion: v1\n"
+            "kind: ConfigMap\n"
+            "metadata:\n"
+            "  name: synara-worker-signing-settings\n"
+            "  namespace: synara-system\n"
+            "data:\n"
+            f"  repositoryPattern: {repository_pattern}\n"
+        ),
+        encoding="utf-8",
+    )
+    return public_key_path, repository_path
+
+
+def copy_required_paths(repo_root: pathlib.Path, paths: tuple[pathlib.Path, ...]) -> None:
+    for relative_path in paths:
+        target = repo_root / relative_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes((REPO_ROOT / relative_path).read_bytes())
 
 
 def policy(
@@ -165,19 +310,290 @@ def trivy_report(
 
 class ConfigurationTest(unittest.TestCase):
     def test_checked_in_tool_and_policy_locks_are_valid(self) -> None:
-        configuration = supply.load_configuration(REPO_ROOT)
+        disposable = supply.load_configuration(REPO_ROOT)
+        production = supply.load_configuration(REPO_ROOT, signing_policy_profile="production")
 
-        self.assertIn(":v3.1.1@sha256:", configuration.tools.cosign)
-        self.assertIn(":0.72.0@sha256:", configuration.tools.trivy)
-        self.assertEqual(configuration.signing_policy.mode, "ephemeral-key")
-        self.assertFalse(configuration.signing_policy.production_policy)
-        self.assertFalse(configuration.signing_policy.require_transparency_log)
+        self.assertIn(":v3.1.1@sha256:", disposable.tools.cosign)
+        self.assertIn(":0.72.0@sha256:", disposable.tools.trivy)
+        self.assertEqual(disposable.signing_policy_profile, "disposable")
+        self.assertEqual(disposable.signing_policy.path, "deploy/worker/signing-policy.json")
+        self.assertEqual(disposable.signing_policy.mode, "ephemeral-key")
+        self.assertFalse(disposable.signing_policy.production_policy)
+        self.assertFalse(disposable.signing_policy.require_transparency_log)
+        self.assertIsNone(disposable.production_signing_profile)
         self.assertEqual(
-            configuration.vulnerability_policy.blocked_severities,
+            disposable.vulnerability_policy.blocked_severities,
             ("HIGH", "CRITICAL"),
         )
-        self.assertFalse(configuration.vulnerability_policy.ignore_unfixed)
-        self.assertEqual(configuration.vulnerability_policy.exceptions, ())
+        self.assertFalse(disposable.vulnerability_policy.ignore_unfixed)
+        self.assertEqual(disposable.vulnerability_policy.exceptions, ())
+
+        self.assertEqual(production.signing_policy_profile, "production")
+        self.assertEqual(
+            production.signing_policy.path,
+            "deploy/worker/production-signing-policy.json",
+        )
+        self.assertEqual(production.signing_policy.mode, "kms-key")
+        self.assertTrue(production.signing_policy.production_policy)
+        self.assertTrue(production.signing_policy.require_transparency_log)
+        self.assertEqual(
+            production.signing_policy.key_reference,
+            supply.VAULT_TRANSIT_KEY_REFERENCE,
+        )
+        self.assertEqual(
+            production.signing_policy.credential_environment,
+            supply.VAULT_TRANSIT_REQUIRED_ENVIRONMENT,
+        )
+        profile = production.production_signing_profile
+        self.assertIsNotNone(profile)
+        assert profile is not None
+        self.assertEqual(profile.path, "deploy/worker/production-signing-profile.json")
+        self.assertEqual(profile.signer_type, "vault-transit-kms")
+        self.assertEqual(profile.key_reference, supply.VAULT_TRANSIT_KEY_REFERENCE)
+        self.assertEqual(profile.auth_method, supply.VAULT_TRANSIT_AUTH_METHOD)
+        self.assertEqual(profile.principal, supply.VAULT_TRANSIT_PRINCIPAL)
+        self.assertEqual(profile.audit_request_path, supply.VAULT_TRANSIT_AUDIT_REQUEST_PATH)
+        self.assertEqual(profile.credential_environment, supply.VAULT_TRANSIT_REQUIRED_ENVIRONMENT)
+        self.assertEqual(
+            profile.registry_username_environment,
+            supply.PRODUCTION_REGISTRY_USERNAME_ENV,
+        )
+        self.assertEqual(
+            profile.registry_password_environment,
+            supply.PRODUCTION_REGISTRY_PASSWORD_ENV,
+        )
+        self.assertEqual(
+            profile.registry_ca_cert_environment,
+            supply.PRODUCTION_REGISTRY_CA_CERT_ENV,
+        )
+        self.assertEqual(profile.transparency_log_provider, supply.TRANSPARENCY_LOG_PROVIDER)
+        self.assertEqual(profile.transparency_log_url, supply.TRANSPARENCY_LOG_URL)
+        self.assertTrue(profile.transparency_log_upload)
+        self.assertTrue(profile.transparency_log_required)
+        self.assertTrue(profile.transparency_log_verify)
+        self.assertTrue(profile.transparency_log_inclusion_proof_required)
+        self.assertTrue(profile.transparency_log_signed_entry_timestamp_required)
+        self.assertEqual(profile.admission_provider, "kyverno")
+        self.assertTrue(profile.admission_required)
+        self.assertEqual(profile.admission_failure_policy, supply.ADMISSION_FAILURE_POLICY)
+        self.assertEqual(
+            profile.admission_validation_failure_action,
+            supply.ADMISSION_VALIDATION_FAILURE_ACTION,
+        )
+        self.assertTrue(profile.admission_mutate_digest)
+        self.assertTrue(profile.admission_verify_digest)
+        self.assertEqual(profile.public_key_configmap_name, "synara-worker-cosign-public-key")
+        self.assertEqual(profile.repository_configmap_name, "synara-worker-signing-settings")
+        report = production.source_evidence()["productionSigningProfile"]
+        self.assertEqual(report["signer"]["authMethod"], "approle")
+        self.assertEqual(
+            report["signer"]["principal"],
+            "auth/approle/role/synara-worker-release-signer",
+        )
+        self.assertEqual(
+            report["signer"]["auditRequestPath"],
+            "transit/sign/synara-worker-release",
+        )
+        self.assertEqual(
+            report["registryAccess"],
+            {
+                "usernameEnvironment": supply.PRODUCTION_REGISTRY_USERNAME_ENV,
+                "passwordEnvironment": supply.PRODUCTION_REGISTRY_PASSWORD_ENV,
+                "caCertEnvironment": supply.PRODUCTION_REGISTRY_CA_CERT_ENV,
+            },
+        )
+        self.assertEqual(report["transparencyLog"]["provider"], "public-rekor")
+        self.assertEqual(report["transparencyLog"]["url"], "https://rekor.sigstore.dev")
+        self.assertTrue(report["transparencyLog"]["upload"])
+        self.assertTrue(report["transparencyLog"]["inclusionProofRequired"])
+        self.assertTrue(report["transparencyLog"]["signedEntryTimestampRequired"])
+        self.assertEqual(report["admission"]["failurePolicy"], "Fail")
+        self.assertEqual(report["admission"]["validationFailureAction"], "Enforce")
+        self.assertTrue(report["admission"]["mutateDigest"])
+        self.assertTrue(report["admission"]["verifyDigest"])
+        self.assertEqual(
+            report["admission"]["clusterPolicyPath"],
+            "deploy/kubernetes/security/cluster/verify-synara-worker-images.yaml",
+        )
+        self.assertIn(
+            supply.SECURITY_CLUSTER_KUSTOMIZATION_PATH / "kustomization.yaml",
+            supply.PRODUCTION_RELEASE_SOURCE_PATHS,
+        )
+        self.assertIn(
+            supply.SECURITY_NAMESPACE_KUSTOMIZATION_PATH / "kustomization.yaml",
+            supply.PRODUCTION_RELEASE_SOURCE_PATHS,
+        )
+
+    def test_rejects_production_signing_profile_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repo_root = pathlib.Path(directory)
+            copy_required_paths(repo_root, PRODUCTION_PROFILE_REQUIRED_PATHS)
+            profile_path = repo_root / supply.PRODUCTION_SIGNING_PROFILE_PATH
+            payload = json.loads(profile_path.read_text(encoding="utf-8"))
+            payload["signer"]["principal"] = "auth/approle/role/other"
+            profile_path.write_text(json.dumps(payload), encoding="utf-8")
+            with self.assertRaises(supply.common.ReleaseGateError) as caught:
+                supply.load_configuration(repo_root, signing_policy_profile="production")
+
+        self.assertEqual(
+            caught.exception.code,
+            "release.registry_production_signing_profile_invalid",
+        )
+
+    def test_rejects_production_registry_access_environment_name_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repo_root = pathlib.Path(directory)
+            copy_required_paths(repo_root, PRODUCTION_PROFILE_REQUIRED_PATHS)
+            profile_path = repo_root / supply.PRODUCTION_SIGNING_PROFILE_PATH
+            payload = json.loads(profile_path.read_text(encoding="utf-8"))
+            payload["registryAccess"]["passwordEnvironment"] = "REGISTRY_PASSWORD_ENV"
+            profile_path.write_text(json.dumps(payload), encoding="utf-8")
+            with self.assertRaises(supply.common.ReleaseGateError) as caught:
+                supply.load_configuration(repo_root, signing_policy_profile="production")
+
+        self.assertEqual(
+            caught.exception.code,
+            "release.registry_production_signing_profile_invalid",
+        )
+
+    def test_rejects_stale_production_cluster_policy_repository_placeholder_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repo_root = pathlib.Path(directory)
+            copy_required_paths(repo_root, PRODUCTION_PROFILE_REQUIRED_PATHS)
+            cluster_policy_path = repo_root / supply.SECURITY_CLUSTER_POLICY_PATH
+            cluster_policy_path.write_text(
+                cluster_policy_path.read_text(encoding="utf-8").replace(
+                    "registry.invalid/synara/worker*",
+                    "192.168.139.3:5443/synara/worker*",
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaises(supply.common.ReleaseGateError) as caught:
+                supply.load_configuration(repo_root, signing_policy_profile="production")
+
+        self.assertEqual(
+            caught.exception.code,
+            "release.registry_production_signing_profile_invalid",
+        )
+
+    def test_rejects_cluster_policy_transparency_log_boundary_drift(self) -> None:
+        cases = (
+            ("missing-rekor", "                    rekor:\n", ""),
+            (
+                "wrong-rekor-url",
+                "                      url: https://rekor.sigstore.dev",
+                "                      url: https://rekor.example.test",
+            ),
+            ("ignore-tlog", "                      ignoreTlog: false", "                      ignoreTlog: true"),
+        )
+        for label, original, replacement in cases:
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as directory:
+                repo_root = pathlib.Path(directory)
+                copy_required_paths(repo_root, PRODUCTION_PROFILE_REQUIRED_PATHS)
+                cluster_policy_path = repo_root / supply.SECURITY_CLUSTER_POLICY_PATH
+                cluster_policy_path.write_text(
+                    cluster_policy_path.read_text(encoding="utf-8").replace(original, replacement),
+                    encoding="utf-8",
+                )
+                with self.assertRaises(supply.common.ReleaseGateError) as caught:
+                    supply.load_configuration(repo_root, signing_policy_profile="production")
+                self.assertEqual(
+                    caught.exception.code,
+                    "release.registry_production_signing_profile_invalid",
+                )
+
+    def test_rejects_production_kustomization_target_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repo_root = pathlib.Path(directory)
+            copy_required_paths(repo_root, PRODUCTION_PROFILE_REQUIRED_PATHS)
+            kustomization_path = (
+                repo_root / supply.SECURITY_PRODUCTION_KUSTOMIZATION_PATH / "kustomization.yaml"
+            )
+            kustomization_path.write_text(
+                kustomization_path.read_text(encoding="utf-8").replace(
+                    "spec.rules.0.verifyImages.0.imageReferences.0",
+                    "spec.rules.0.verifyImages.0.imageReferences.1",
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaises(supply.common.ReleaseGateError) as caught:
+                supply.load_configuration(repo_root, signing_policy_profile="production")
+
+        self.assertEqual(
+            caught.exception.code,
+            "release.registry_production_signing_profile_invalid",
+        )
+
+    def test_rejects_checked_in_public_key_placeholder_and_non_spki_pem(self) -> None:
+        cases = (
+            (
+                "placeholder",
+                "-----BEGIN PUBLIC KEY-----\nREPLACE_WITH_COSIGN_PUBLIC_KEY_PEM\n-----END PUBLIC KEY-----\n",
+            ),
+            (
+                "non-spki",
+                "-----BEGIN PUBLIC KEY-----\n"
+                + base64.b64encode(bytes(range(80))).decode("ascii")
+                + "\n-----END PUBLIC KEY-----\n",
+            ),
+        )
+        for label, public_key in cases:
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as directory:
+                repo_root = pathlib.Path(directory)
+                copy_required_paths(repo_root, PRODUCTION_PROFILE_REQUIRED_PATHS)
+                configmap_path = repo_root / supply.SECURITY_PUBLIC_KEY_CONFIGMAP_PATH
+                configmap_path.write_text(
+                    (
+                        "apiVersion: v1\n"
+                        "kind: ConfigMap\n"
+                        "metadata:\n"
+                        "  name: synara-worker-cosign-public-key\n"
+                        "  namespace: synara-system\n"
+                        "  labels:\n"
+                        '    cache.kyverno.io/enabled: "true"\n'
+                        "data:\n"
+                        "  cosignPublicKey: |\n"
+                        + "".join(f"    {line}\n" for line in public_key.strip().splitlines())
+                    ),
+                    encoding="utf-8",
+                )
+                with self.assertRaises(supply.common.ReleaseGateError) as caught:
+                    supply.load_configuration(repo_root, signing_policy_profile="production")
+                self.assertEqual(
+                    caught.exception.code,
+                    "release.registry_production_signing_profile_invalid",
+                )
+
+    def test_rejects_checked_in_repository_pattern_placeholder_and_invalid_shape(self) -> None:
+        cases = (
+            ("placeholder", supply.PLACEHOLDER_REPOSITORY_PATTERN),
+            ("invalid-shape", "192.168.139.3:5443/synara/worker**"),
+        )
+        for label, repository_pattern in cases:
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as directory:
+                repo_root = pathlib.Path(directory)
+                copy_required_paths(repo_root, PRODUCTION_PROFILE_REQUIRED_PATHS)
+                configmap_path = repo_root / supply.SECURITY_REPOSITORY_CONFIGMAP_PATH
+                configmap_path.write_text(
+                    (
+                        "apiVersion: v1\n"
+                        "kind: ConfigMap\n"
+                        "metadata:\n"
+                        "  name: synara-worker-signing-settings\n"
+                        "  namespace: synara-system\n"
+                        "  labels:\n"
+                        '    cache.kyverno.io/enabled: "true"\n'
+                        "data:\n"
+                        f"  repositoryPattern: {repository_pattern}\n"
+                    ),
+                    encoding="utf-8",
+                )
+                with self.assertRaises(supply.common.ReleaseGateError) as caught:
+                    supply.load_configuration(repo_root, signing_policy_profile="production")
+                self.assertEqual(
+                    caught.exception.code,
+                    "release.registry_production_signing_profile_invalid",
+                )
 
     def test_rejects_mutable_or_incomplete_tool_lock(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -364,6 +780,81 @@ class CommandBoundaryTest(unittest.TestCase):
         self.assertIn("no-new-privileges", command)
         self.assertIn("ALL", command)
 
+    def test_registry_access_materializes_docker_config_and_uses_tool_native_ca_flags(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state_dir = pathlib.Path(directory) / "state"
+            registry_ca_path = pathlib.Path(directory) / "registry-ca.pem"
+            registry_ca_bytes = b"-----BEGIN CERTIFICATE-----\nfixture\n-----END CERTIFICATE-----\n"
+            registry_ca_path.write_bytes(registry_ca_bytes)
+            options = supply_options(
+                state_dir,
+                registry_auth_username_environment="REGISTRY_USER_ENV",
+                registry_auth_password_environment="REGISTRY_PASSWORD_ENV",
+                registry_ca_cert_environment="REGISTRY_CA_ENV",
+            )
+            redactor = acceptance.SecretRedactor()
+            with mock.patch.dict(
+                supply.os.environ,
+                {
+                    "REGISTRY_USER_ENV": "registry-user",
+                    "REGISTRY_PASSWORD_ENV": "registry-password",
+                    "REGISTRY_CA_ENV": str(registry_ca_path),
+                },
+            ):
+                prepared = supply._prepare_registry_access(options, redactor=redactor)
+                completed = subprocess.CompletedProcess(["docker"], 0, stdout="ok", stderr="")
+                with mock.patch.object(supply.subprocess, "run", return_value=completed) as run:
+                    supply._run_tool(
+                        options,
+                        image="example.test/cosign:v1.0.0@sha256:" + "d" * 64,
+                        arguments=["sign", "--yes", REFERENCE],
+                        tool="cosign",
+                        deadline=supply.time.monotonic() + 60,
+                        redactor=redactor,
+                    )
+                    cosign_command = run.call_args.args[0]
+                    cosign_environment = run.call_args.kwargs["env"]
+                    supply._run_tool(
+                        options,
+                        image="example.test/trivy:1.0.0@sha256:" + "e" * 64,
+                        arguments=["image", "--format", "json", REFERENCE],
+                        tool="trivy",
+                        deadline=supply.time.monotonic() + 60,
+                        redactor=redactor,
+                    )
+                    trivy_command = run.call_args.args[0]
+                    trivy_environment = run.call_args.kwargs["env"]
+
+            docker_config_dir = state_dir / "registry-access/docker-config"
+            self.assertEqual(
+                prepared.environment,
+                {"DOCKER_CONFIG": "/workspace/registry-access/docker-config"},
+            )
+            self.assertEqual(
+                prepared.host_environment,
+                {"DOCKER_CONFIG": str(docker_config_dir)},
+            )
+            self.assertEqual(
+                prepared.registry_ca_container_path,
+                "/workspace/registry-access/docker-config/certs.d/registry.example.test/ca.crt",
+            )
+            self.assertTrue((docker_config_dir / "config.json").is_file())
+            self.assertTrue(
+                (docker_config_dir / "certs.d/registry.example.test/ca.crt").is_file()
+            )
+            self.assertNotIn("SSL_CERT_FILE", cosign_environment)
+            self.assertNotIn("SSL_CERT_FILE", trivy_environment)
+            self.assertIn("--registry-ca-cert", cosign_command)
+            self.assertIn(
+                "/workspace/registry-access/docker-config/certs.d/registry.example.test/ca.crt",
+                cosign_command,
+            )
+            self.assertIn("--cacert", trivy_command)
+            self.assertIn(
+                "/workspace/registry-access/docker-config/certs.d/registry.example.test/ca.crt",
+                trivy_command,
+            )
+
     def test_retries_only_transient_trivy_database_download_failures(self) -> None:
         transient = supply.common.ReleaseGateError(
             "release.registry_supply_chain_command_failed",
@@ -475,6 +966,75 @@ class SignatureVerificationTest(unittest.TestCase):
 
 
 class ProductionSigningTest(unittest.TestCase):
+    def _lookup_vault_identity(
+        self,
+        directory: str,
+        *,
+        payload: Any = None,
+        response_body: bytes | None = None,
+        status: int = 200,
+        address: str = "https://vault.example.test:8200",
+        context_error: Exception | None = None,
+        request_error: Exception | None = None,
+    ) -> tuple[dict[str, Any], mock.Mock, mock.Mock, mock.Mock, pathlib.Path]:
+        state_dir = pathlib.Path(directory) / "state"
+        materialized_cacert = state_dir / supply.MATERIALIZED_VAULT_CACERT_RELATIVE_PATH
+        materialized_cacert.parent.mkdir(parents=True, exist_ok=True)
+        materialized_cacert.write_bytes(b"materialized Vault CA fixture")
+        policy = signing_policy(
+            path=str(supply.PRODUCTION_SIGNING_POLICY_PATH),
+            mode="kms-key",
+            require_transparency_log=True,
+            key_reference=supply.VAULT_TRANSIT_KEY_REFERENCE,
+            credential_environment=supply.VAULT_TRANSIT_REQUIRED_ENVIRONMENT,
+        )
+        configuration = production_configuration_with(policy)
+        prepared_environment = supply.PreparedKmsEnvironment(
+            secret_environment={
+                "VAULT_ADDR": address,
+                "VAULT_TOKEN": "vault-token-value",
+                "VAULT_CACERT": (
+                    f"/workspace/{supply.MATERIALIZED_VAULT_CACERT_RELATIVE_PATH.as_posix()}"
+                ),
+            },
+            vault_ca_materialized=True,
+        )
+        if response_body is None:
+            response_body = json.dumps(
+                vault_token_lookup_payload() if payload is None else payload
+            ).encode("utf-8")
+        response = mock.Mock(status=status)
+        response.read.return_value = response_body
+        connection = mock.Mock()
+        connection.getresponse.return_value = response
+        connection.request.side_effect = request_error
+        context = object()
+        context_patch = mock.patch.object(
+            supply.ssl,
+            "create_default_context",
+            return_value=context,
+            side_effect=context_error,
+        )
+        connection_patch = mock.patch.object(
+            supply.http.client,
+            "HTTPSConnection",
+            return_value=connection,
+        )
+        with context_patch as create_default_context, connection_patch as https_connection:
+            identity = supply._production_vault_signer_identity(
+                supply_options(state_dir),
+                configuration,
+                prepared_environment=prepared_environment,
+                deadline=supply.time.monotonic() + 60,
+            )
+        return (
+            identity,
+            connection,
+            create_default_context,
+            https_connection,
+            materialized_cacert,
+        )
+
     def test_keyless_signing_keeps_token_out_of_arguments_and_requires_identity_and_tlog(self) -> None:
         token = "header.payload.signature"
         policy = signing_policy(
@@ -499,6 +1059,8 @@ class ProductionSigningTest(unittest.TestCase):
                     token_path = state_dir / token_relative
                     self.assertEqual(token_path.read_text(encoding="utf-8"), token)
                     self.assertEqual(token_path.stat().st_mode & 0o777, 0o600)
+                    bundle_relative = pathlib.Path(arguments[arguments.index("--bundle") + 1])
+                    write_transparency_bundle(state_dir / bundle_relative)
                 stdout = json.dumps(verification_payload(reference=reference)) if arguments[0] == "verify" else ""
                 return subprocess.CompletedProcess(arguments, 0, stdout=stdout, stderr="")
 
@@ -522,11 +1084,15 @@ class ProductionSigningTest(unittest.TestCase):
         sign_arguments = calls[0]["arguments"]
         verify_arguments = calls[1]["arguments"]
         self.assertIn("--tlog-upload=true", sign_arguments)
+        self.assertIn("--bundle", sign_arguments)
         self.assertIn("--certificate-identity", verify_arguments)
         self.assertIn("--certificate-oidc-issuer", verify_arguments)
-        self.assertNotIn("--insecure-ignore-tlog=true", verify_arguments)
+        self.assertIn("--insecure-ignore-tlog=false", verify_arguments)
         self.assertEqual(result["mode"], "keyless")
         self.assertTrue(result["productionSigningPolicySatisfied"])
+        self.assertTrue(result["transparencyLogVerified"])
+        self.assertTrue(result["transparencyLogInclusionProofPresent"])
+        self.assertTrue(result["transparencyLogSignedEntryTimestampPresent"])
         self.assertTrue(result["identityTokenRemoved"])
 
     def test_kms_signing_passes_only_named_environment_and_verifies_tlog(self) -> None:
@@ -546,6 +1112,9 @@ class ProductionSigningTest(unittest.TestCase):
             arguments = kwargs["arguments"]
             self.assertNotIn(credential, arguments)
             self.assertEqual(kwargs["secret_environment"], {"SYNARA_TEST_KMS_CREDENTIAL": credential})
+            if arguments[0] == "sign":
+                bundle_relative = pathlib.Path(arguments[arguments.index("--bundle") + 1])
+                write_transparency_bundle((pathlib.Path(directory) / "state") / bundle_relative)
             stdout = json.dumps(verification_payload(reference=reference)) if arguments[0] == "verify" else ""
             return subprocess.CompletedProcess(arguments, 0, stdout=stdout, stderr="")
 
@@ -565,11 +1134,726 @@ class ProductionSigningTest(unittest.TestCase):
             )
 
         self.assertIn("--tlog-upload=true", calls[0]["arguments"])
+        self.assertIn("--bundle", calls[0]["arguments"])
         self.assertEqual(calls[0]["arguments"][calls[0]["arguments"].index("--key") + 1], key_reference)
-        self.assertNotIn("--insecure-ignore-tlog=true", calls[1]["arguments"])
+        self.assertIn("--insecure-ignore-tlog=false", calls[1]["arguments"])
         self.assertEqual(result["mode"], "kms-key")
         self.assertTrue(result["productionSigningPolicySatisfied"])
+        self.assertTrue(result["transparencyLogVerified"])
+        self.assertTrue(result["transparencyLogInclusionProofPresent"])
+        self.assertTrue(result["transparencyLogSignedEntryTimestampPresent"])
         self.assertEqual(result["credentialEnvironmentCount"], 1)
+
+    def test_vault_signer_identity_lookup_uses_materialized_ca_and_reports_only_safe_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            identity, connection, create_context, https_connection, materialized_cacert = (
+                self._lookup_vault_identity(directory)
+            )
+
+        expected_policy_hash = supply._sha256(
+            json.dumps(
+                ["synara-worker-release-signer"],
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+        )
+        self.assertEqual(
+            identity,
+            {
+                "verified": True,
+                "displayName": "approle",
+                "roleName": "synara-worker-release-signer",
+                "type": "batch",
+                "orphan": True,
+                "policyCount": 1,
+                "policiesSha256": expected_policy_hash,
+            },
+        )
+        create_context.assert_called_once_with(cafile=str(materialized_cacert.resolve()))
+        https_connection.assert_called_once_with(
+            "vault.example.test:8200",
+            timeout=mock.ANY,
+            context=create_context.return_value,
+        )
+        connection.request.assert_called_once_with(
+            "GET",
+            supply.VAULT_TOKEN_LOOKUP_PATH,
+            headers={
+                "Accept": "application/json",
+                "X-Vault-Token": "vault-token-value",
+            },
+        )
+        connection.getresponse.return_value.read.assert_called_once_with(
+            supply.VAULT_TOKEN_LOOKUP_MAX_RESPONSE_BYTES + 1
+        )
+        connection.close.assert_called_once_with()
+        serialized = json.dumps(identity, sort_keys=True)
+        self.assertNotIn("vault-token-value", serialized)
+        self.assertNotIn(str(materialized_cacert), serialized)
+
+    def test_vault_signer_identity_rejects_root_token_shape(self) -> None:
+        root_payload = vault_token_lookup_payload(
+            display_name="root",
+            role_name="root",
+            token_type="service",
+            policies=["root"],
+        )
+        with tempfile.TemporaryDirectory() as directory, self.assertRaises(
+            supply.common.ReleaseGateError
+        ) as caught:
+            self._lookup_vault_identity(directory, payload=root_payload)
+
+        self.assertEqual(caught.exception.code, "release.registry_signing_credential_invalid")
+        serialized = json.dumps(caught.exception.as_report_error(), sort_keys=True)
+        self.assertNotIn("vault-token-value", serialized)
+        self.assertNotIn(json.dumps(root_payload, sort_keys=True), serialized)
+
+    def test_vault_signer_identity_rejects_wrong_approle(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, self.assertRaises(
+            supply.common.ReleaseGateError
+        ) as caught:
+            self._lookup_vault_identity(
+                directory,
+                payload=vault_token_lookup_payload(
+                    role_name="other-release-signer",
+                    policies=["synara-worker-release-signer"],
+                ),
+            )
+
+        self.assertEqual(caught.exception.code, "release.registry_signing_credential_invalid")
+
+    def test_vault_signer_identity_rejects_default_and_extra_policies(self) -> None:
+        policy_sets = (
+            ["synara-worker-release-signer", "default"],
+            ["synara-worker-release-signer", "other-policy"],
+        )
+        for policies in policy_sets:
+            with self.subTest(policies=policies), tempfile.TemporaryDirectory() as directory:
+                with self.assertRaises(supply.common.ReleaseGateError) as caught:
+                    self._lookup_vault_identity(
+                        directory,
+                        payload=vault_token_lookup_payload(policies=policies),
+                    )
+                self.assertEqual(
+                    caught.exception.code,
+                    "release.registry_signing_credential_invalid",
+                )
+
+    def test_vault_signer_identity_requires_strict_https_authority(self) -> None:
+        invalid_addresses = (
+            "http://vault.example.test:8200",
+            "https://root@vault.example.test:8200",
+            "https://vault.example.test:8200/v1",
+            "https://vault.example.test:8200?namespace=admin",
+            "https://vault.example.test:8200?",
+            "https://vault.example.test:8200#fragment",
+            "https://vault.example.test:8200#",
+            "https://vault.example.test:0",
+        )
+        for address in invalid_addresses:
+            with self.subTest(address=address), tempfile.TemporaryDirectory() as directory:
+                with self.assertRaises(supply.common.ReleaseGateError) as caught:
+                    self._lookup_vault_identity(directory, address=address)
+                self.assertEqual(
+                    caught.exception.code,
+                    "release.registry_signing_credential_invalid",
+                )
+
+    def test_vault_signer_identity_fails_closed_on_tls_http_network_and_malformed_responses(self) -> None:
+        cases = (
+            {"context_error": supply.ssl.SSLError("TLS fixture failure")},
+            {"request_error": OSError("network fixture failure")},
+            {"status": 403, "response_body": b"forbidden response fixture"},
+            {"response_body": b"{not-json"},
+            {"payload": {"data": []}},
+            {"response_body": "not-bytes"},
+            {
+                "response_body": b"x"
+                * (supply.VAULT_TOKEN_LOOKUP_MAX_RESPONSE_BYTES + 1)
+            },
+        )
+        for case in cases:
+            with self.subTest(case=tuple(case)), tempfile.TemporaryDirectory() as directory:
+                with self.assertRaises(supply.common.ReleaseGateError) as caught:
+                    self._lookup_vault_identity(directory, **case)
+                self.assertEqual(
+                    caught.exception.code,
+                    "release.registry_signing_credential_invalid",
+                )
+                serialized = json.dumps(caught.exception.as_report_error(), sort_keys=True)
+                self.assertNotIn("vault-token-value", serialized)
+                self.assertNotIn("forbidden response fixture", serialized)
+                self.assertNotIn("network fixture failure", serialized)
+                self.assertNotIn("TLS fixture failure", serialized)
+
+    def test_hashivault_signing_materializes_vault_ca_into_gate_state(self) -> None:
+        token = "vault-token-value"
+        address = "https://vault.example.test"
+        policy = signing_policy(
+            path=str(supply.PRODUCTION_SIGNING_POLICY_PATH),
+            mode="kms-key",
+            require_transparency_log=True,
+            key_reference=supply.VAULT_TRANSIT_KEY_REFERENCE,
+            credential_environment=supply.VAULT_TRANSIT_REQUIRED_ENVIRONMENT,
+        )
+        reference = f"registry.example.test/synara/worker@{DIGEST}"
+        calls: list[dict[str, Any]] = []
+        with tempfile.TemporaryDirectory() as directory:
+            state_dir = pathlib.Path(directory) / "state"
+            ca_path = pathlib.Path(directory) / "ca.pem"
+            ca_bytes = (
+                b"-----BEGIN CERTIFICATE-----\n"
+                b"MIIBsjCCAVmgAwIBAgIUQ2hlY2tlZEluQ0EwCgYIKoZIzj0EAwIwEzERMA8GA1UE\n"
+                b"AwwIdmF1bHQtY2EwHhcNMjYwNzE5MDAwMDAwWhcNMzYwNzE2MDAwMDAwWjATMREw\n"
+                b"DwYDVQQDDAh2YXVsdC1jYTBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABH2sKp75\n"
+                b"vVZ8jw2C4gP9b+Yr1Gg9c9m6dQH3v9wM9V5A7Q0YkDf6Jf4G1uW0n2c+uY3JY5U2\n"
+                b"5VdB9rjN7s7X5wSjUzBRMB0GA1UdDgQWBBRDZXBsYXlPbkx5Q2hlY2s2MDBTMB8G\n"
+                b"A1UdIwQYMBaAFENlcGxheU9uTHlDaGVjazYwMFQwDwYDVR0TAQH/BAUwAwEB/zAK\n"
+                b"BggqhkjOPQQDAgNIADBFAiEA4d3rQIfvH5h5rQ4WQwY3mA9Vq1EJ9gZb1x0kN6d5\n"
+                b"uCsCIFm+f36m7x9Y2nR2rG4sy5pT4h5zvK6A8M0w3Q9F6R9C\n"
+                b"-----END CERTIFICATE-----\n"
+            )
+            ca_path.write_bytes(ca_bytes)
+
+            def run_tool(_options: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+                calls.append(kwargs)
+                secret_environment = kwargs["secret_environment"]
+                self.assertEqual(secret_environment["VAULT_ADDR"], address)
+                self.assertEqual(secret_environment["VAULT_TOKEN"], token)
+                self.assertEqual(
+                    secret_environment["VAULT_CACERT"],
+                    "/workspace/vault/ca-certificates/vault-ca.crt",
+                )
+                materialized = state_dir / supply.MATERIALIZED_VAULT_CACERT_RELATIVE_PATH
+                self.assertTrue(materialized.is_file())
+                self.assertEqual(materialized.read_bytes(), ca_bytes)
+                self.assertEqual(materialized.stat().st_mode & 0o777, 0o600)
+                self.assertNotIn(str(ca_path), json.dumps(secret_environment))
+                arguments = kwargs["arguments"]
+                if arguments[0] == "sign":
+                    bundle_relative = pathlib.Path(arguments[arguments.index("--bundle") + 1])
+                    write_transparency_bundle(state_dir / bundle_relative)
+                stdout = json.dumps(verification_payload(reference=reference)) if arguments[0] == "verify" else ""
+                return subprocess.CompletedProcess(arguments, 0, stdout=stdout, stderr="")
+
+            with mock.patch.dict(
+                supply.os.environ,
+                {
+                    "VAULT_ADDR": address,
+                    "VAULT_TOKEN": token,
+                    "VAULT_CACERT": str(ca_path),
+                },
+            ), mock.patch.object(supply, "_run_tool", side_effect=run_tool):
+                result = supply._sign_and_verify(
+                    supply_options(state_dir),
+                    configuration_with(policy),
+                    builds=[{"slot": "cached", "registryDigest": DIGEST}],
+                    git_sha="a" * 40,
+                    version="0.5.4",
+                    run_id="run-1",
+                    deadline=supply.time.monotonic() + 60,
+                    redactor=acceptance.SecretRedactor(),
+                )
+
+        self.assertEqual(result["mode"], "kms-key")
+        self.assertTrue(result["vaultCaMaterialized"])
+        self.assertEqual(
+            result["credentialEnvironmentNames"],
+            list(supply.VAULT_TRANSIT_REQUIRED_ENVIRONMENT),
+        )
+        self.assertEqual(len(calls), 2)
+
+    def test_production_kms_signing_validates_runtime_admission_inputs_against_kms_key(self) -> None:
+        token = "vault-token-value"
+        address = "https://vault.example.test"
+        policy = signing_policy(
+            path=str(supply.PRODUCTION_SIGNING_POLICY_PATH),
+            mode="kms-key",
+            require_transparency_log=True,
+            key_reference=supply.VAULT_TRANSIT_KEY_REFERENCE,
+            credential_environment=supply.VAULT_TRANSIT_REQUIRED_ENVIRONMENT,
+        )
+        configuration = production_configuration_with(policy)
+        reference = f"registry.example.test/synara/worker@{DIGEST}"
+        with tempfile.TemporaryDirectory() as directory:
+            state_dir = pathlib.Path(directory) / "state"
+            vault_ca_path = pathlib.Path(directory) / "vault-ca.pem"
+            vault_ca_path.write_bytes(
+                b"-----BEGIN CERTIFICATE-----\nfixture\n-----END CERTIFICATE-----\n"
+            )
+            public_key_path, repository_path = write_runtime_configmaps(pathlib.Path(directory))
+            calls: list[list[str]] = []
+            events: list[str] = []
+            signer_identity = {
+                "verified": True,
+                "displayName": "approle",
+                "roleName": "synara-worker-release-signer",
+                "type": "batch",
+                "orphan": True,
+                "policyCount": 1,
+                "policiesSha256": "c" * 64,
+            }
+
+            def run_tool(_options: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+                arguments = kwargs["arguments"]
+                calls.append(list(arguments))
+                events.append(arguments[0])
+                if arguments[0] == "public-key":
+                    return subprocess.CompletedProcess(arguments, 0, stdout=PUBLIC_KEY_PEM, stderr="")
+                if arguments[0] == "sign":
+                    bundle_relative = pathlib.Path(arguments[arguments.index("--bundle") + 1])
+                    write_transparency_bundle(state_dir / bundle_relative)
+                stdout = json.dumps(verification_payload(reference=reference)) if arguments[0] == "verify" else ""
+                return subprocess.CompletedProcess(arguments, 0, stdout=stdout, stderr="")
+
+            def verify_signer_identity(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+                events.append("vault-lookup-self")
+                return signer_identity
+
+            with mock.patch.dict(
+                supply.os.environ,
+                {
+                    "VAULT_ADDR": address,
+                    "VAULT_TOKEN": token,
+                    "VAULT_CACERT": str(vault_ca_path),
+                },
+            ), mock.patch.object(
+                supply,
+                "_production_vault_signer_identity",
+                side_effect=verify_signer_identity,
+            ) as identity_lookup, mock.patch.object(supply, "_run_tool", side_effect=run_tool):
+                result = supply._sign_and_verify(
+                    supply_options(
+                        state_dir,
+                        registry_auth_username_environment=supply.PRODUCTION_REGISTRY_USERNAME_ENV,
+                        registry_auth_password_environment=supply.PRODUCTION_REGISTRY_PASSWORD_ENV,
+                        registry_ca_cert_environment=supply.PRODUCTION_REGISTRY_CA_CERT_ENV,
+                        production_public_key_configmap_path=public_key_path,
+                        production_repository_configmap_path=repository_path,
+                    ),
+                    configuration,
+                    builds=[{"slot": "cached", "registryDigest": DIGEST}],
+                    git_sha="a" * 40,
+                    version="0.5.4",
+                    run_id="run-1",
+                    deadline=supply.time.monotonic() + 60,
+                    redactor=acceptance.SecretRedactor(),
+                )
+
+        self.assertTrue(result["productionAdmissionValidated"])
+        self.assertTrue(result["admission"]["runtimeValidated"])
+        self.assertEqual(
+            result["admission"]["repositoryConfigMap"]["pattern"],
+            "registry.example.test/synara/worker*",
+        )
+        self.assertEqual(
+            result["admission"]["publicKeyConfigMap"]["sha256"],
+            result["admission"]["publicKeyConfigMap"]["kmsSha256"],
+        )
+        self.assertEqual(calls[0][0], "public-key")
+        self.assertEqual(calls[1][0], "sign")
+        self.assertEqual(calls[2][0], "verify")
+        self.assertIn("--insecure-ignore-tlog=false", calls[2])
+        self.assertEqual(events, ["public-key", "vault-lookup-self", "sign", "verify"])
+        identity_lookup.assert_called_once()
+        self.assertEqual(result["signerIdentity"], signer_identity)
+
+    def test_production_kms_signing_rejects_registry_access_environment_name_drift(self) -> None:
+        policy = signing_policy(
+            path=str(supply.PRODUCTION_SIGNING_POLICY_PATH),
+            mode="kms-key",
+            require_transparency_log=True,
+            key_reference=supply.VAULT_TRANSIT_KEY_REFERENCE,
+            credential_environment=supply.VAULT_TRANSIT_REQUIRED_ENVIRONMENT,
+        )
+        configuration = production_configuration_with(policy)
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(
+            supply.os.environ,
+            {
+                "VAULT_ADDR": "https://vault.example.test",
+                "VAULT_TOKEN": "vault-token-value",
+                "VAULT_CACERT": str(pathlib.Path(directory) / "vault-ca.pem"),
+            },
+        ):
+            state_dir = pathlib.Path(directory) / "state"
+            vault_ca_path = pathlib.Path(directory) / "vault-ca.pem"
+            vault_ca_path.write_bytes(
+                b"-----BEGIN CERTIFICATE-----\nfixture\n-----END CERTIFICATE-----\n"
+            )
+            public_key_path, repository_path = write_runtime_configmaps(pathlib.Path(directory))
+            with self.assertRaises(supply.common.ReleaseGateError) as caught:
+                supply._sign_and_verify(
+                    supply_options(
+                        state_dir,
+                        registry_auth_username_environment="REGISTRY_USER_ENV",
+                        registry_auth_password_environment="REGISTRY_PASSWORD_ENV",
+                        registry_ca_cert_environment="REGISTRY_CA_ENV",
+                        production_public_key_configmap_path=public_key_path,
+                        production_repository_configmap_path=repository_path,
+                    ),
+                    configuration,
+                    builds=[{"slot": "cached", "registryDigest": DIGEST}],
+                    git_sha="a" * 40,
+                    version="0.5.4",
+                    run_id="run-1",
+                    deadline=supply.time.monotonic() + 60,
+                    redactor=acceptance.SecretRedactor(),
+                )
+
+        self.assertEqual(caught.exception.code, "release.registry_signing_credential_invalid")
+
+    def test_kms_signing_rejects_missing_bundle_inclusion_proof(self) -> None:
+        credential = "kms-secret-value"
+        key_reference = "awskms:///arn:aws:kms:us-east-1:123456789012:key/key-id"
+        policy = signing_policy(
+            mode="kms-key",
+            require_transparency_log=True,
+            key_reference=key_reference,
+            credential_environment=("SYNARA_TEST_KMS_CREDENTIAL",),
+        )
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(
+            supply.os.environ,
+            {"SYNARA_TEST_KMS_CREDENTIAL": credential},
+        ):
+            state_dir = pathlib.Path(directory) / "state"
+
+            def run_tool(_options: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+                arguments = kwargs["arguments"]
+                if arguments[0] == "sign":
+                    bundle_relative = pathlib.Path(arguments[arguments.index("--bundle") + 1])
+                    write_transparency_bundle(
+                        state_dir / bundle_relative,
+                        include_inclusion_proof=False,
+                    )
+                stdout = json.dumps(verification_payload(reference=f"registry.example.test/synara/worker@{DIGEST}")) if arguments[0] == "verify" else ""
+                return subprocess.CompletedProcess(arguments, 0, stdout=stdout, stderr="")
+
+            with mock.patch.object(supply, "_run_tool", side_effect=run_tool), self.assertRaises(
+                supply.common.ReleaseGateError
+            ) as caught:
+                supply._sign_and_verify(
+                    supply_options(state_dir),
+                    configuration_with(policy),
+                    builds=[{"slot": "cached", "registryDigest": DIGEST}],
+                    git_sha="a" * 40,
+                    version="0.5.4",
+                    run_id="run-1",
+                    deadline=supply.time.monotonic() + 60,
+                    redactor=acceptance.SecretRedactor(),
+                )
+
+        self.assertEqual(caught.exception.code, "release.registry_transparency_log_invalid")
+
+    def test_kms_signing_rejects_missing_bundle_signed_entry_timestamp(self) -> None:
+        credential = "kms-secret-value"
+        key_reference = "awskms:///arn:aws:kms:us-east-1:123456789012:key/key-id"
+        policy = signing_policy(
+            mode="kms-key",
+            require_transparency_log=True,
+            key_reference=key_reference,
+            credential_environment=("SYNARA_TEST_KMS_CREDENTIAL",),
+        )
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(
+            supply.os.environ,
+            {"SYNARA_TEST_KMS_CREDENTIAL": credential},
+        ):
+            state_dir = pathlib.Path(directory) / "state"
+
+            def run_tool(_options: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+                arguments = kwargs["arguments"]
+                if arguments[0] == "sign":
+                    bundle_relative = pathlib.Path(arguments[arguments.index("--bundle") + 1])
+                    write_transparency_bundle(
+                        state_dir / bundle_relative,
+                        include_signed_entry_timestamp=False,
+                    )
+                stdout = json.dumps(verification_payload(reference=f"registry.example.test/synara/worker@{DIGEST}")) if arguments[0] == "verify" else ""
+                return subprocess.CompletedProcess(arguments, 0, stdout=stdout, stderr="")
+
+            with mock.patch.object(supply, "_run_tool", side_effect=run_tool), self.assertRaises(
+                supply.common.ReleaseGateError
+            ) as caught:
+                supply._sign_and_verify(
+                    supply_options(state_dir),
+                    configuration_with(policy),
+                    builds=[{"slot": "cached", "registryDigest": DIGEST}],
+                    git_sha="a" * 40,
+                    version="0.5.4",
+                    run_id="run-1",
+                    deadline=supply.time.monotonic() + 60,
+                    redactor=acceptance.SecretRedactor(),
+                )
+
+        self.assertEqual(caught.exception.code, "release.registry_transparency_log_invalid")
+
+    def test_production_runtime_admission_rejects_placeholder_public_key_before_kms_export(self) -> None:
+        policy = signing_policy(
+            path=str(supply.PRODUCTION_SIGNING_POLICY_PATH),
+            mode="kms-key",
+            require_transparency_log=True,
+            key_reference=supply.VAULT_TRANSIT_KEY_REFERENCE,
+            credential_environment=supply.VAULT_TRANSIT_REQUIRED_ENVIRONMENT,
+        )
+        configuration = production_configuration_with(policy)
+        with tempfile.TemporaryDirectory() as directory:
+            state_dir = pathlib.Path(directory) / "state"
+            vault_ca_path = pathlib.Path(directory) / "vault-ca.pem"
+            vault_ca_path.write_bytes(
+                b"-----BEGIN CERTIFICATE-----\nfixture\n-----END CERTIFICATE-----\n"
+            )
+            public_key_path, repository_path = write_runtime_configmaps(
+                pathlib.Path(directory),
+                public_key=(
+                    "-----BEGIN PUBLIC KEY-----\n"
+                    "REPLACE_WITH_COSIGN_PUBLIC_KEY_PEM\n"
+                    "-----END PUBLIC KEY-----\n"
+                ),
+            )
+            with mock.patch.dict(
+                supply.os.environ,
+                {
+                    "VAULT_ADDR": "https://vault.example.test",
+                    "VAULT_TOKEN": "vault-token-value",
+                    "VAULT_CACERT": str(vault_ca_path),
+                },
+            ), mock.patch.object(supply, "_run_tool") as run_tool, self.assertRaises(
+                supply.common.ReleaseGateError
+            ) as caught:
+                supply._sign_and_verify(
+                    supply_options(
+                        state_dir,
+                        registry_auth_username_environment=supply.PRODUCTION_REGISTRY_USERNAME_ENV,
+                        registry_auth_password_environment=supply.PRODUCTION_REGISTRY_PASSWORD_ENV,
+                        registry_ca_cert_environment=supply.PRODUCTION_REGISTRY_CA_CERT_ENV,
+                        production_public_key_configmap_path=public_key_path,
+                        production_repository_configmap_path=repository_path,
+                    ),
+                    configuration,
+                    builds=[{"slot": "cached", "registryDigest": DIGEST}],
+                    git_sha="a" * 40,
+                    version="0.5.4",
+                    run_id="run-1",
+                    deadline=supply.time.monotonic() + 60,
+                    redactor=acceptance.SecretRedactor(),
+                )
+
+        self.assertEqual(
+            caught.exception.code,
+            "release.registry_production_admission_input_invalid",
+        )
+        self.assertEqual(run_tool.call_count, 0)
+
+    def test_production_runtime_admission_rejects_invalid_public_key_pem(self) -> None:
+        policy = signing_policy(
+            path=str(supply.PRODUCTION_SIGNING_POLICY_PATH),
+            mode="kms-key",
+            require_transparency_log=True,
+            key_reference=supply.VAULT_TRANSIT_KEY_REFERENCE,
+            credential_environment=supply.VAULT_TRANSIT_REQUIRED_ENVIRONMENT,
+        )
+        configuration = production_configuration_with(policy)
+        with tempfile.TemporaryDirectory() as directory:
+            state_dir = pathlib.Path(directory) / "state"
+            vault_ca_path = pathlib.Path(directory) / "vault-ca.pem"
+            vault_ca_path.write_bytes(
+                b"-----BEGIN CERTIFICATE-----\nfixture\n-----END CERTIFICATE-----\n"
+            )
+            public_key_path, repository_path = write_runtime_configmaps(
+                pathlib.Path(directory),
+                public_key="not-a-public-key",
+            )
+            with mock.patch.dict(
+                supply.os.environ,
+                {
+                    "VAULT_ADDR": "https://vault.example.test",
+                    "VAULT_TOKEN": "vault-token-value",
+                    "VAULT_CACERT": str(vault_ca_path),
+                },
+            ), mock.patch.object(supply, "_run_tool") as run_tool, self.assertRaises(
+                supply.common.ReleaseGateError
+            ) as caught:
+                supply._sign_and_verify(
+                    supply_options(
+                        state_dir,
+                        registry_auth_username_environment=supply.PRODUCTION_REGISTRY_USERNAME_ENV,
+                        registry_auth_password_environment=supply.PRODUCTION_REGISTRY_PASSWORD_ENV,
+                        registry_ca_cert_environment=supply.PRODUCTION_REGISTRY_CA_CERT_ENV,
+                        production_public_key_configmap_path=public_key_path,
+                        production_repository_configmap_path=repository_path,
+                    ),
+                    configuration,
+                    builds=[{"slot": "cached", "registryDigest": DIGEST}],
+                    git_sha="a" * 40,
+                    version="0.5.4",
+                    run_id="run-1",
+                    deadline=supply.time.monotonic() + 60,
+                    redactor=acceptance.SecretRedactor(),
+                )
+
+        self.assertEqual(
+            caught.exception.code,
+            "release.registry_production_admission_input_invalid",
+        )
+        self.assertEqual(run_tool.call_count, 0)
+
+    def test_production_runtime_admission_rejects_repository_pattern_drift(self) -> None:
+        policy = signing_policy(
+            path=str(supply.PRODUCTION_SIGNING_POLICY_PATH),
+            mode="kms-key",
+            require_transparency_log=True,
+            key_reference=supply.VAULT_TRANSIT_KEY_REFERENCE,
+            credential_environment=supply.VAULT_TRANSIT_REQUIRED_ENVIRONMENT,
+        )
+        configuration = production_configuration_with(policy)
+        with tempfile.TemporaryDirectory() as directory:
+            state_dir = pathlib.Path(directory) / "state"
+            vault_ca_path = pathlib.Path(directory) / "vault-ca.pem"
+            vault_ca_path.write_bytes(
+                b"-----BEGIN CERTIFICATE-----\nfixture\n-----END CERTIFICATE-----\n"
+            )
+            public_key_path, repository_path = write_runtime_configmaps(
+                pathlib.Path(directory),
+                repository_pattern="registry.example.test/synara/other*",
+            )
+
+            def run_tool(_options: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+                arguments = kwargs["arguments"]
+                stdout = PUBLIC_KEY_PEM if arguments[0] == "public-key" else ""
+                return subprocess.CompletedProcess(arguments, 0, stdout=stdout, stderr="")
+
+            with mock.patch.dict(
+                supply.os.environ,
+                {
+                    "VAULT_ADDR": "https://vault.example.test",
+                    "VAULT_TOKEN": "vault-token-value",
+                    "VAULT_CACERT": str(vault_ca_path),
+                },
+            ), mock.patch.object(supply, "_run_tool", side_effect=run_tool) as patched_run_tool, self.assertRaises(
+                supply.common.ReleaseGateError
+            ) as caught:
+                supply._sign_and_verify(
+                    supply_options(
+                        state_dir,
+                        registry_auth_username_environment=supply.PRODUCTION_REGISTRY_USERNAME_ENV,
+                        registry_auth_password_environment=supply.PRODUCTION_REGISTRY_PASSWORD_ENV,
+                        registry_ca_cert_environment=supply.PRODUCTION_REGISTRY_CA_CERT_ENV,
+                        production_public_key_configmap_path=public_key_path,
+                        production_repository_configmap_path=repository_path,
+                    ),
+                    configuration,
+                    builds=[{"slot": "cached", "registryDigest": DIGEST}],
+                    git_sha="a" * 40,
+                    version="0.5.4",
+                    run_id="run-1",
+                    deadline=supply.time.monotonic() + 60,
+                    redactor=acceptance.SecretRedactor(),
+                )
+
+        self.assertEqual(
+            caught.exception.code,
+            "release.registry_production_admission_input_invalid",
+        )
+        self.assertEqual(patched_run_tool.call_count, 1)
+
+    def test_verify_supply_chain_cleans_registry_and_vault_ca_state_and_redacts_report(self) -> None:
+        token = "vault-token-value"
+        address = "https://vault.example.test"
+        registry_username = "registry-user"
+        registry_password = "registry-password"
+        policy = signing_policy(
+            path=str(supply.PRODUCTION_SIGNING_POLICY_PATH),
+            mode="kms-key",
+            require_transparency_log=True,
+            key_reference=supply.VAULT_TRANSIT_KEY_REFERENCE,
+            credential_environment=supply.VAULT_TRANSIT_REQUIRED_ENVIRONMENT,
+        )
+        configuration = configuration_with(policy)
+        reference = f"registry.example.test/synara/worker@{DIGEST}"
+        with tempfile.TemporaryDirectory() as directory:
+            state_dir = pathlib.Path(directory) / "state"
+            vault_ca_path = pathlib.Path(directory) / "vault-ca.pem"
+            registry_ca_path = pathlib.Path(directory) / "registry-ca.pem"
+            ca_bytes = b"-----BEGIN CERTIFICATE-----\nfixture\n-----END CERTIFICATE-----\n"
+            vault_ca_path.write_bytes(ca_bytes)
+            registry_ca_path.write_bytes(ca_bytes)
+
+            def run_tool(_options: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+                secret_environment = kwargs["secret_environment"]
+                self.assertEqual(secret_environment["VAULT_CACERT"], "/workspace/vault/ca-certificates/vault-ca.crt")
+                arguments = kwargs["arguments"]
+                if arguments[0] == "sign":
+                    bundle_relative = pathlib.Path(arguments[arguments.index("--bundle") + 1])
+                    write_transparency_bundle(state_dir / bundle_relative)
+                stdout = json.dumps(verification_payload(reference=reference)) if arguments[0] == "verify" else ""
+                return subprocess.CompletedProcess(arguments, 0, stdout=stdout, stderr="")
+
+            redactor = acceptance.SecretRedactor()
+            with (
+                mock.patch.dict(
+                    supply.os.environ,
+                    {
+                        "VAULT_ADDR": address,
+                        "VAULT_TOKEN": token,
+                        "VAULT_CACERT": str(vault_ca_path),
+                        "REGISTRY_USER_ENV": registry_username,
+                        "REGISTRY_PASSWORD_ENV": registry_password,
+                        "REGISTRY_CA_ENV": str(registry_ca_path),
+                    },
+                ),
+                mock.patch.object(supply, "_run_tool", side_effect=run_tool),
+                mock.patch.object(
+                    supply,
+                    "_tool_versions",
+                    return_value={"cosign": "v3.1.1", "trivy": "0.72.0"},
+                ),
+                mock.patch.object(
+                    supply,
+                    "_scan_platforms",
+                    return_value=({"scans": [], "database": {}, "policy": {}}, []),
+                ),
+            ):
+                result = supply.verify_supply_chain(
+                    supply_options(
+                        state_dir,
+                        registry_auth_username_environment="REGISTRY_USER_ENV",
+                        registry_auth_password_environment="REGISTRY_PASSWORD_ENV",
+                        registry_ca_cert_environment="REGISTRY_CA_ENV",
+                    ),
+                    configuration,
+                    builds=[
+                        {
+                            "slot": "cached",
+                            "registryDigest": DIGEST,
+                            "platformDigests": {
+                                "linux/amd64": DIGEST,
+                                "linux/arm64": "sha256:" + "b" * 64,
+                            },
+                        }
+                    ],
+                    git_sha="a" * 40,
+                    version="0.5.4",
+                    run_id="run-1",
+                    redactor=redactor,
+                )
+
+            self.assertFalse((state_dir / supply.MATERIALIZED_VAULT_CACERT_RELATIVE_PATH).exists())
+            self.assertFalse((state_dir / "registry-access/docker-config/config.json").exists())
+            self.assertFalse(
+                (
+                    state_dir
+                    / "registry-access/docker-config/certs.d/registry.example.test/ca.crt"
+                ).exists()
+            )
+            self.assertTrue(result["cleanup"]["vaultCaRemoved"])
+            self.assertTrue(result["cleanup"]["registryAuthConfigRemoved"])
+            self.assertTrue(result["cleanup"]["registryCaRemoved"])
+            self.assertTrue(result["signing"]["vaultCaRemoved"])
+            self.assertTrue(result["signing"]["registryAuthConfigRemoved"])
+            self.assertTrue(result["signing"]["registryCaRemoved"])
+            serialized = json.dumps(redactor.value(result), sort_keys=True)
+            self.assertNotIn(str(vault_ca_path), serialized)
+            self.assertNotIn(str(registry_ca_path), serialized)
+            self.assertNotIn(registry_password, serialized)
 
     def test_keyless_identity_token_is_removed_when_cosign_fails(self) -> None:
         token = "header.payload.signature"

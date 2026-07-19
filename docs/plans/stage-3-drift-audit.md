@@ -62,16 +62,19 @@ Compact unsupported results, use one shared gate-owned image, complete exact cle
 scans. Clean `14f7dd2d` now passes the real authorized external-host SSH aggregate with the same case boundary, one
 pinned Host Key and Provider Host SHA, four distinct runtime identities, exact owned-runtime cleanup, and a `40`
 files / `3,177,374` bytes zero-finding aggregate Secret scan. The remaining release blockers are the same-release
-four-Target rerun, approved production SLA thresholds, concrete production KMS identity/tlog/admission, production
-Kubernetes multi-node rollout, and real-Provider concurrency/Retention/load/failure evidence. Production concurrency is
+four-Target rerun, execution of the checked-in production SLA thresholds, live evidence for the approved Vault
+KMS/Rekor/Kyverno boundary, production Kubernetes multi-node rollout, and real-Provider
+concurrency/Retention/load/failure evidence. Production concurrency is
 governed by quota, Worker slots and CPU/memory resource profiles rather than one hard-coded number. Clean SHA
 `e2d70fb6` now enforces a minimum measured load duration plus a maximum-wave safety bound and records the exact
 resource profile, effective concurrency, success/unexpected-error rates, throughput and nearest-rank P50/P95/P99.
 Its deterministic Docker gate completed `304.201s`, `56` waves and `224/224` Executions with zero unexpected errors;
-production signing will use `kms-key`, potentially through a self-hosted Vault `hashivault://...`
-reference. External-host Runner/Gate integration is implemented with repository-external identity, pinned Host Key,
-install conflict refusal and non-destructive cleanup; its clean-SHA real-Provider report, production multi-node and
-rollout evidence, numeric latency/error/duration SLA, and concrete KMS identity/tlog/admission policy remain required.
+production signing uses the self-hosted Vault reference `hashivault://synara-worker-release`.
+External-host Runner/Gate integration is implemented with repository-external identity, pinned Host Key,
+install conflict refusal and non-destructive cleanup. The resource-bound SLA is now checked in at
+`deploy/worker/production-load-sla.json`, and the concrete KMS identity/tlog/admission policy is checked in under
+`deploy/worker/production-signing-profile.json` plus `deploy/kubernetes/security/vault/operations-policy.json`;
+their current clean-SHA live gates, production multi-node rollout, and same-release Target evidence remain required.
 
 ## Release boundary
 
