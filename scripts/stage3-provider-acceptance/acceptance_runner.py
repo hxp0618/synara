@@ -411,6 +411,19 @@ def real_provider_approval_command() -> str:
     return real_provider_read_only_output_command(REAL_PROVIDER_APPROVAL_CONTENT)
 
 
+def real_provider_host_crash_command() -> str:
+    return "sleep 120"
+
+
+def real_provider_host_crash_approval_prompt() -> str:
+    return (
+        "Use the Bash or shell tool exactly once. Do not emit any assistant text before the tool call. "
+        "Request approval for this exact long-running read-only command as the sole shell command:\n"
+        f"{real_provider_host_crash_command()}\n"
+        "Do not add wrappers, redirection, pipes, file changes, or any other action."
+    )
+
+
 def real_provider_approval_command_matches(candidate: str, expected: str) -> bool:
     if candidate == expected:
         return True
@@ -9448,22 +9461,71 @@ class AcceptanceSuite:
             title="Stage 3 Real Provider Host Crash",
         )
         session_id = self._string_id(session, "real Provider crash Session")
+        approval_barrier = self._real_provider_host_crash_uses_pending_approval()
         turn = self._create_turn(
-            "Immediately invoke the Bash or shell tool exactly once with the command `sleep 120`. "
-            "Do not wait before invoking the tool, do not answer in text, and do nothing else while the command "
-            "is running. This is an automated process-crash acceptance barrier.",
-            runtime_mode="full-access",
+            (
+                real_provider_host_crash_approval_prompt()
+                if approval_barrier
+                else (
+                    "Immediately invoke the Bash or shell tool exactly once with the command `sleep 120`. "
+                    "Do not wait before invoking the tool, do not answer in text, and do nothing else while the "
+                    "command is running. This is an automated process-crash acceptance barrier."
+                )
+            ),
+            runtime_mode="approval-required" if approval_barrier else "full-access",
             session_id=session_id,
         )
         turn_id = self._turn_id(turn, "real Provider Host crash Turn")
         created = self._wait_for_turn_created(turn_id, session_id=session_id)
         execution_id = self._event_execution_id(created)
+        approval_evidence: dict[str, Any] | None = None
+        approval_interaction: dict[str, Any] | None = None
+        if approval_barrier:
+            (
+                approval_interaction,
+                approval_execution_id,
+                approval_request_id,
+                approval_payload,
+                approval_command,
+            ) = self._real_provider_approval_interaction(
+                turn_id,
+                expected_command=real_provider_host_crash_command(),
+                session_id=session_id,
+            )
+            if approval_execution_id != execution_id:
+                raise AcceptanceError(
+                    "runner.real_provider_host_crash_approval_execution_mismatch",
+                    "The external SSH Host-crash Approval barrier changed Execution identity.",
+                    {
+                        "turnId": turn_id,
+                        "expectedExecutionId": execution_id,
+                        "actualExecutionId": approval_execution_id,
+                    },
+                )
+            approval_evidence = {
+                "interactionId": approval_interaction.get("id"),
+                "requestId": approval_request_id,
+                "requestKind": approval_payload.get("requestKind"),
+                "commandSummary": self.redactor.text(approval_command[:256]),
+            }
         started = self._wait_for_execution_event(
             execution_id,
             "item.started",
             after_sequence=int(created.get("sequence") or 0),
             session_id=session_id,
         )
+        if approval_interaction is not None:
+            if not self._interaction_pending(session_id, approval_interaction):
+                raise AcceptanceError(
+                    "runner.real_provider_host_crash_approval_not_pending",
+                    "The external SSH Host-crash Approval barrier resolved before crash injection.",
+                    {
+                        "turnId": turn_id,
+                        "interactionId": approval_interaction.get("id"),
+                    },
+                )
+            assert approval_evidence is not None
+            approval_evidence["pendingAtCrash"] = True
         crash_evidence = dict(crash())
         terminal, events = self._wait_for_turn_terminal(
             turn_id,
@@ -9480,6 +9542,23 @@ class AcceptanceSuite:
                     "actualFailureCode": payload.get("failureCode"),
                 },
             )
+        if approval_interaction is not None:
+            pending = [
+                item
+                for item in self._pending_interactions(session_id)
+                if item.get("turnId") == turn_id
+            ]
+            if pending:
+                raise AcceptanceError(
+                    "runner.real_provider_host_crash_interaction_leaked",
+                    "The external SSH Provider Host crash left its Approval interaction pending.",
+                    {
+                        "turnId": turn_id,
+                        "interactionIds": [item.get("id") for item in pending],
+                    },
+                )
+            assert approval_evidence is not None
+            approval_evidence["clearedAfterCrash"] = True
         recovery = self._real_provider_recovery_turn("provider-host-crash-retry")
         return {
             "failureCase": "provider-host-crash-retry",
@@ -9491,11 +9570,17 @@ class AcceptanceSuite:
                 "eventType": started.get("eventType"),
                 "sequence": started.get("sequence"),
             },
+            **({"approvalBarrier": approval_evidence} if approval_evidence is not None else {}),
             "crash": crash_evidence,
             "faultSequenceRange": self._sequence_range(events),
             "singleTerminal": True,
             "recovery": recovery,
         }
+
+    def _real_provider_host_crash_uses_pending_approval(self) -> bool:
+        return getattr(self.driver, "name", None) == "ssh" and bool(
+            getattr(self.driver, "external_host", False)
+        )
 
     def _real_provider_cursor_expiry_barrier(self) -> Mapping[str, Any]:
         if "cursor-expiry" not in self.options.real_provider_failure_cases:

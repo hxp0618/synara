@@ -1221,6 +1221,144 @@ class PendingUserInputRecoverySuite(PendingInteractionRecoverySuite):
         }
 
 
+class RealProviderHostCrashBarrierSuite(BarrierSuite):
+    def __init__(self) -> None:
+        super().__init__(acceptance.EXECUTION_PINNED_WORKER)
+        self.fake_driver.name = "ssh"
+        self.fake_driver.external_host = True  # type: ignore[attr-defined]
+        self.fake_driver.crash_provider_host = mock.Mock(return_value={"providerHostPid": 654})  # type: ignore[method-assign]
+        self.barrier_event_type: str | None = None
+        self.turn_runtime_mode: str | None = None
+        self.approval_waited = False
+        self.pending_interaction_reads = 0
+
+    def _create_real_provider_session(self, *, title: str) -> dict[str, Any]:
+        del title
+        return {"id": "session-1"}
+
+    def _create_turn(self, input_text: str, **kwargs: Any) -> dict[str, Any]:
+        self.created_turns.append(input_text)
+        self.turn_runtime_mode = kwargs.get("runtime_mode")
+        if kwargs.get("session_id") != "session-1":
+            raise AssertionError(kwargs)
+        return {"id": "turn-1"}
+
+    def _wait_for_turn_created(
+        self,
+        turn_id: str,
+        *,
+        session_id: str | None = None,
+    ) -> dict[str, Any]:
+        if turn_id != "turn-1":
+            raise AssertionError(turn_id)
+        if session_id != "session-1":
+            raise AssertionError(session_id)
+        return {
+            "sequence": 1,
+            "eventType": "turn.created",
+            "executionId": "execution-1",
+            "payload": {"turnId": "turn-1", "executionId": "execution-1"},
+        }
+
+    def _wait_for_execution_event(
+        self,
+        execution_id: str,
+        event_type: str,
+        *,
+        after_sequence: int,
+        session_id: str | None = None,
+    ) -> dict[str, Any]:
+        if execution_id != "execution-1":
+            raise AssertionError(execution_id)
+        if after_sequence != 1:
+            raise AssertionError(after_sequence)
+        if session_id != "session-1":
+            raise AssertionError(session_id)
+        self.barrier_event_type = event_type
+        return {
+            "eventId": "event-1",
+            "eventType": event_type,
+            "sequence": 2,
+            "executionId": execution_id,
+        }
+
+    def _real_provider_approval_interaction(
+        self,
+        turn_id: str,
+        *,
+        expected_command: str,
+        session_id: str | None = None,
+    ) -> tuple[dict[str, Any], str, str, dict[str, Any], str]:
+        if turn_id != "turn-1" or session_id != "session-1":
+            raise AssertionError((turn_id, session_id))
+        if expected_command != acceptance.real_provider_host_crash_command():
+            raise AssertionError(expected_command)
+        self.approval_waited = True
+        return (
+            {
+                "id": "interaction-1",
+                "turnId": turn_id,
+                "executionId": "execution-1",
+                "requestId": "request-1",
+            },
+            "execution-1",
+            "request-1",
+            {"requestKind": "command"},
+            expected_command,
+        )
+
+    def _wait_for_turn_terminal(
+        self,
+        turn_id: str,
+        expected_event_type: str,
+        *,
+        session_id: str | None = None,
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        if turn_id != "turn-1":
+            raise AssertionError(turn_id)
+        if expected_event_type != "execution.failed":
+            raise AssertionError(expected_event_type)
+        if session_id != "session-1":
+            raise AssertionError(session_id)
+        terminal = {
+            "sequence": 3,
+            "eventType": "execution.failed",
+            "executionId": "execution-1",
+            "workerId": "worker-1",
+            "generation": 1,
+            "payload": {"failureCode": "provider_unavailable"},
+        }
+        return terminal, [
+            {
+                "sequence": 1,
+                "eventType": "turn.created",
+                "executionId": "execution-1",
+                "payload": {"turnId": "turn-1", "executionId": "execution-1"},
+            },
+            terminal,
+        ]
+
+    def _real_provider_recovery_turn(self, failure_case: str) -> Mapping[str, Any]:
+        if failure_case != "provider-host-crash-retry":
+            raise AssertionError(failure_case)
+        return {"recovered": True}
+
+    def _pending_interactions(self, session_id: str) -> list[dict[str, Any]]:
+        if session_id != "session-1":
+            raise AssertionError(session_id)
+        self.pending_interaction_reads += 1
+        if self.pending_interaction_reads == 1:
+            return [
+                {
+                    "id": "interaction-1",
+                    "turnId": "turn-1",
+                    "executionId": "execution-1",
+                    "requestId": "request-1",
+                }
+            ]
+        return []
+
+
 class ProviderFailureSuite(BarrierSuite):
     def __init__(self, actual_failure_code: str) -> None:
         super().__init__(acceptance.STANDING_WORKER)
@@ -4554,6 +4692,45 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
                 )
             ],
         )
+
+    def test_external_ssh_host_crash_waits_on_pending_approval_and_item_started(self) -> None:
+        suite = RealProviderHostCrashBarrierSuite()
+
+        evidence = suite._real_provider_host_crash_retry()
+
+        self.assertTrue(suite.approval_waited)
+        self.assertEqual(suite.turn_runtime_mode, "approval-required")
+        self.assertEqual(suite.barrier_event_type, "item.started")
+        self.assertEqual(evidence["activeWorkBarrier"]["eventType"], "item.started")
+        self.assertEqual(
+            evidence["approvalBarrier"],
+            {
+                "interactionId": "interaction-1",
+                "requestId": "request-1",
+                "requestKind": "command",
+                "commandSummary": acceptance.real_provider_host_crash_command(),
+                "pendingAtCrash": True,
+                "clearedAfterCrash": True,
+            },
+        )
+        self.assertEqual(suite.pending_interaction_reads, 2)
+        suite.fake_driver.crash_provider_host.assert_called_once()
+
+    def test_pending_approval_host_crash_barrier_is_external_ssh_only(self) -> None:
+        suite = BarrierSuite(acceptance.STANDING_WORKER)
+        cases = (
+            ("external-ssh", "ssh", True, True),
+            ("owned-ssh", "ssh", False, False),
+            ("local", "local", False, False),
+        )
+        for label, driver_name, external_host, expected in cases:
+            with self.subTest(label=label):
+                suite.fake_driver.name = driver_name
+                suite.fake_driver.external_host = external_host  # type: ignore[attr-defined]
+                self.assertEqual(
+                    suite._real_provider_host_crash_uses_pending_approval(),
+                    expected,
+                )
 
     def test_execution_pinned_restart_defers_worker_wait_until_next_execution(self) -> None:
         suite = BarrierSuite(acceptance.EXECUTION_PINNED_WORKER)
