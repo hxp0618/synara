@@ -43,6 +43,8 @@ def runner_options(*, restart_control_plane: bool = True) -> acceptance.RunnerOp
         load_waves=0,
         load_min_duration_seconds=0.0,
         load_max_waves=0,
+        worker_lease_ttl=acceptance.DEFAULT_ACCEPTANCE_WORKER_LEASE_TTL,
+        worker_heartbeat_timeout=acceptance.DEFAULT_ACCEPTANCE_WORKER_HEARTBEAT_TIMEOUT,
         ssh_orbctl_bin="orbctl",
         ssh_machine_name=None,
         ssh_machine_arch="arm64",
@@ -2604,6 +2606,25 @@ class LocalRetentionHarnessTest(unittest.TestCase):
         finally:
             for driver in drivers:
                 driver._release_state()
+
+    def test_local_driver_uses_configured_worker_lease_profile(self) -> None:
+        driver = acceptance.LocalDriver(
+            REPO_ROOT,
+            dataclasses.replace(
+                runner_options(),
+                target="local",
+                worker_lease_ttl="60s",
+                worker_heartbeat_timeout="180s",
+            ),
+            acceptance.Deadline(30.0),
+            acceptance.SecretRedactor(),
+        )
+        try:
+            environment = driver._control_plane_environment()
+            self.assertEqual(environment["SYNARA_WORKER_LEASE_TTL"], "60s")
+            self.assertEqual(environment["SYNARA_WORKER_HEARTBEAT_TIMEOUT"], "180s")
+        finally:
+            driver._release_state()
 
     def test_harness_stages_and_validates_active_then_terminal_cleanup(self) -> None:
         with tempfile.TemporaryDirectory() as raw_state:
@@ -5669,6 +5690,26 @@ class RunnerOptionsTest(unittest.TestCase):
                     "--real-provider-failure-matrix",
                 ]
             )
+
+    def test_worker_lease_profile_defaults_to_short_acceptance_window(self) -> None:
+        options = acceptance.parse_args([])
+
+        self.assertEqual(options.worker_lease_ttl, acceptance.DEFAULT_ACCEPTANCE_WORKER_LEASE_TTL)
+        self.assertEqual(
+            options.worker_heartbeat_timeout,
+            acceptance.DEFAULT_ACCEPTANCE_WORKER_HEARTBEAT_TIMEOUT,
+        )
+
+    def test_worker_lease_profile_rejects_invalid_or_non_increasing_durations(self) -> None:
+        for arguments in (
+            ["--worker-lease-ttl", "bad"],
+            ["--worker-heartbeat-timeout", "18"],
+            ["--worker-lease-ttl", "60s", "--worker-heartbeat-timeout", "60s"],
+            ["--worker-lease-ttl", "180s", "--worker-heartbeat-timeout", "60s"],
+        ):
+            with self.subTest(arguments=arguments):
+                with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                    acceptance.parse_args(arguments)
 
     def test_fixture_suite_rejects_real_provider_cases(self) -> None:
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):

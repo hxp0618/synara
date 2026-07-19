@@ -89,6 +89,8 @@ SSH_EXTERNAL_CREDENTIAL_LIFECYCLE = (
     "to scrub later evidence, preserves the operator source, and relies on the Control Plane encrypted credential "
     "until ssh/revoke"
 )
+DEFAULT_ACCEPTANCE_WORKER_LEASE_TTL = "6s"
+DEFAULT_ACCEPTANCE_WORKER_HEARTBEAT_TIMEOUT = "18s"
 WORKER_PROXY_ALLOWED_PATH_PREFIXES = ("/v1/workers/", "/v1/artifact-content/")
 WORKER_PROXY_MAX_REQUEST_BYTES = 64 << 20
 CASE_STATUSES = frozenset({"pass", "unsupported", "skipped", "fail"})
@@ -854,6 +856,8 @@ class RunnerOptions:
     load_waves: int
     load_min_duration_seconds: float
     load_max_waves: int
+    worker_lease_ttl: str
+    worker_heartbeat_timeout: str
     ssh_orbctl_bin: str
     ssh_machine_name: str | None
     ssh_machine_arch: str
@@ -2746,8 +2750,8 @@ class LocalDriver:
                 "SYNARA_LOCAL_AGENTD_GIT_CACHE_ROOT": str(self.state_dir / "git-cache"),
                 "SYNARA_LOCAL_AGENTD_RESTART_BACKOFF": "250ms",
                 "SYNARA_CONTROL_PLANE_SHUTDOWN_TIMEOUT": "4s",
-                "SYNARA_WORKER_LEASE_TTL": "6s",
-                "SYNARA_WORKER_HEARTBEAT_TIMEOUT": "18s",
+                "SYNARA_WORKER_LEASE_TTL": self.options.worker_lease_ttl,
+                "SYNARA_WORKER_HEARTBEAT_TIMEOUT": self.options.worker_heartbeat_timeout,
                 "SYNARA_OUTBOX_POLL_INTERVAL": "100ms",
                 "SYNARA_OUTBOX_CLAIM_TTL": "5s",
                 "SYNARA_RETENTION_SWEEP_INTERVAL": (
@@ -16124,6 +16128,22 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
         help="Worker-only network interruption duration (minimum 7 seconds; default: 8)",
     )
     parser.add_argument(
+        "--worker-lease-ttl",
+        default=DEFAULT_ACCEPTANCE_WORKER_LEASE_TTL,
+        help=(
+            "Acceptance Control Plane worker Lease TTL duration literal "
+            f"(default: {DEFAULT_ACCEPTANCE_WORKER_LEASE_TTL})"
+        ),
+    )
+    parser.add_argument(
+        "--worker-heartbeat-timeout",
+        default=DEFAULT_ACCEPTANCE_WORKER_HEARTBEAT_TIMEOUT,
+        help=(
+            "Acceptance Control Plane worker heartbeat timeout duration literal "
+            f"(default: {DEFAULT_ACCEPTANCE_WORKER_HEARTBEAT_TIMEOUT})"
+        ),
+    )
+    parser.add_argument(
         "--no-restart-control-plane",
         action="store_true",
         help="Run the second Turn without restarting the Control Plane",
@@ -16204,6 +16224,26 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
         if parsed.suite in FIXTURE_LOAD_SUITES and load_min_duration_seconds > 0
         else base_default_timeout
     )
+    worker_lease_ttl = parsed.worker_lease_ttl.strip()
+    worker_heartbeat_timeout = parsed.worker_heartbeat_timeout.strip()
+    duration_match = re.compile(r"([1-9][0-9]*)(ms|s|m|h)$")
+
+    def duration_seconds(value: str, option: str) -> float:
+        match = duration_match.fullmatch(value)
+        if match is None:
+            parser.error(f"{option} must be a valid duration like 250ms, 6s, 5m, or 1h")
+        amount = int(match.group(1))
+        unit = match.group(2)
+        multiplier = {"ms": 0.001, "s": 1.0, "m": 60.0, "h": 3600.0}[unit]
+        return amount * multiplier
+
+    worker_lease_ttl_seconds = duration_seconds(worker_lease_ttl, "--worker-lease-ttl")
+    worker_heartbeat_timeout_seconds = duration_seconds(
+        worker_heartbeat_timeout,
+        "--worker-heartbeat-timeout",
+    )
+    if worker_heartbeat_timeout_seconds <= worker_lease_ttl_seconds:
+        parser.error("--worker-heartbeat-timeout must be greater than --worker-lease-ttl")
     timeout_seconds = parsed.timeout if parsed.timeout is not None else default_timeout
     if timeout_seconds <= 0:
         parser.error("--timeout must be positive")
@@ -16596,6 +16636,8 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
         load_waves=load_waves,
         load_min_duration_seconds=load_min_duration_seconds,
         load_max_waves=load_max_waves,
+        worker_lease_ttl=worker_lease_ttl,
+        worker_heartbeat_timeout=worker_heartbeat_timeout,
         ssh_orbctl_bin=parsed.ssh_orbctl_bin.strip(),
         ssh_machine_name=ssh_machine_name,
         ssh_machine_arch=parsed.ssh_machine_arch,

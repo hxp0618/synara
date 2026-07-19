@@ -540,9 +540,25 @@ class ChildCommandAndValidationTest(unittest.TestCase):
         self.assertIn('["/usr/local/bin/provider-host"]', product)
         self.assertNotIn("--ssh-machine-name", product)
         self.assertIn("CODEX_KEY", product)
+        self.assertEqual(
+            product[product.index("--worker-lease-ttl") + 1],
+            gate.SSH_PRODUCT_WORKER_LEASE_TTL,
+        )
+        self.assertEqual(
+            product[product.index("--worker-heartbeat-timeout") + 1],
+            gate.SSH_PRODUCT_WORKER_HEARTBEAT_TIMEOUT,
+        )
         self.assertEqual(product[product.index("--real-provider-model") + 1], "gpt-5.6-sol")
         self.assertIn("CLAUDE_TOKEN", failure)
         self.assertIn("CLAUDE_BASE_URL", failure)
+        self.assertEqual(
+            failure[failure.index("--worker-lease-ttl") + 1],
+            gate.SSH_FAILURE_WORKER_LEASE_TTL,
+        )
+        self.assertEqual(
+            failure[failure.index("--worker-heartbeat-timeout") + 1],
+            gate.SSH_FAILURE_WORKER_HEARTBEAT_TIMEOUT,
+        )
         self.assertEqual(
             failure[failure.index("--real-provider-model") + 1],
             "claude-sonnet-4-6",

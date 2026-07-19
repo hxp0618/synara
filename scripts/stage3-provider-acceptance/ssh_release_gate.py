@@ -30,6 +30,10 @@ EXPECTED_UNSUPPORTED: Mapping[tuple[str, str], frozenset[str]] = {
     ("codex", "failure"): frozenset(),
     ("claudeAgent", "failure"): frozenset(),
 }
+SSH_PRODUCT_WORKER_LEASE_TTL = "60s"
+SSH_PRODUCT_WORKER_HEARTBEAT_TIMEOUT = "180s"
+SSH_FAILURE_WORKER_LEASE_TTL = acceptance.DEFAULT_ACCEPTANCE_WORKER_LEASE_TTL
+SSH_FAILURE_WORKER_HEARTBEAT_TIMEOUT = acceptance.DEFAULT_ACCEPTANCE_WORKER_HEARTBEAT_TIMEOUT
 
 CredentialSource = remote.CredentialSource
 ReleaseGateError = remote.ReleaseGateError
@@ -328,6 +332,16 @@ def child_command(
         else options.failure_timeout_seconds
     )
     matrix_flag = "--real-provider-matrix" if matrix == "product" else "--real-provider-failure-matrix"
+    worker_lease_ttl = (
+        SSH_PRODUCT_WORKER_LEASE_TTL
+        if matrix == "product"
+        else SSH_FAILURE_WORKER_LEASE_TTL
+    )
+    worker_heartbeat_timeout = (
+        SSH_PRODUCT_WORKER_HEARTBEAT_TIMEOUT
+        if matrix == "product"
+        else SSH_FAILURE_WORKER_HEARTBEAT_TIMEOUT
+    )
     command = [
         sys.executable,
         str(options.repo_root / "scripts" / "stage3-provider-acceptance" / "acceptance_runner.py"),
@@ -343,6 +357,10 @@ def child_command(
         source.environment_name,
         "--real-provider-credential-field",
         source.field,
+        "--worker-lease-ttl",
+        worker_lease_ttl,
+        "--worker-heartbeat-timeout",
+        worker_heartbeat_timeout,
         matrix_flag,
         "--output-dir",
         str(output_dir),
