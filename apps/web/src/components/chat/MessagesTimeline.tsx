@@ -44,6 +44,7 @@ import ChatMarkdown from "../ChatMarkdown";
 import { InlineLinkChip } from "../InlineLinkChip";
 import {
   ArrowUpCircleIcon,
+  BackgroundTrayIcon,
   BotIcon,
   CheckIcon,
   ChangesIcon,
@@ -159,6 +160,7 @@ import {
   normalizeSubagentStatusKind,
   resolveSubagentPresentation,
 } from "../../lib/subagentPresentation";
+import type { SubagentToolTrace } from "./subagentToolTrace.logic";
 import {
   USER_MESSAGE_COLLAPSED_FADE_LINES,
   USER_MESSAGE_COLLAPSED_MAX_LINES,
@@ -177,7 +179,7 @@ const MAX_VISIBLE_INLINE_TOOL_ENTRIES = 4;
 const MAX_VISIBLE_CHANGED_FILES = 5;
 // The composer overlaps the transcript by design, so the list needs extra tail
 // space beyond the overlap to keep final cards from sitting flush against it.
-const MIN_BOTTOM_CONTENT_INSET_PX = 64;
+const BOTTOM_CONTENT_INSET_PX = 64;
 const MESSAGE_HOVER_REVEAL_CLASS_NAME =
   "opacity-0 transition-opacity pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto group-focus-within:opacity-100 group-focus-within:pointer-events-auto focus-visible:opacity-100 focus-visible:pointer-events-auto";
 // Shared interaction tone for a work row's leading glyph and labels: muted by
@@ -410,6 +412,8 @@ interface MessagesTimelineProps {
   onOpenThread?: (threadId: ThreadId) => void;
   /** Open an automation's detail page from a "created automation" transcript card. */
   onOpenAutomation?: (automationId: string) => void;
+  /** Recent child-thread tool calls rendered under subagent rows, keyed by child thread id. */
+  subagentToolTraceByThreadId?: ReadonlyMap<string, SubagentToolTrace>;
   revertTurnCountByUserMessageId: Map<MessageId, number>;
   onRevertUserMessage: (messageId: MessageId) => void;
   onUndoTurnFiles?: (turnCounts: readonly number[]) => void;
@@ -435,7 +439,6 @@ interface MessagesTimelineProps {
   chatFontSizePx?: number;
   timestampFormat: TimestampFormat;
   workspaceRoot: string | undefined;
-  bottomContentInsetPx?: number | undefined;
   /**
    * Right padding (px) applied to the scroll viewport so transcript rows clear a right-edge
    * overlay (e.g. the docked Environment card). The scrollbar stays pinned to the viewport's
@@ -467,6 +470,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   onOpenTurnDiff,
   onOpenThread,
   onOpenAutomation,
+  subagentToolTraceByThreadId,
   revertTurnCountByUserMessageId,
   onRevertUserMessage,
   onUndoTurnFiles,
@@ -492,7 +496,6 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   timestampFormat,
   workspaceRoot,
   emptyStateContent,
-  bottomContentInsetPx,
   contentInsetRightPx,
 }: MessagesTimelineProps) {
   const normalizedChatFontSizePx = normalizeChatFontSizePx(chatFontSizePx);
@@ -586,10 +589,9 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   const fallbackListRef = useRef<LegendListRef | null>(null);
   const resolvedListRef = listRef ?? fallbackListRef;
   const timelineRootRef = useRef<HTMLDivElement | null>(null);
-  const bottomSpacerHeightPx = Math.max(bottomContentInsetPx ?? 0, MIN_BOTTOM_CONTENT_INSET_PX);
   const listFooter = useMemo(
-    () => <div aria-hidden="true" style={{ height: bottomSpacerHeightPx }} />,
-    [bottomSpacerHeightPx],
+    () => <div aria-hidden="true" style={{ height: BOTTOM_CONTENT_INSET_PX }} />,
+    [],
   );
 
   const presentedWorktreeSetup = useWorktreeSetupPresentation(worktreeSetup);
@@ -981,6 +983,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
                     {...(onOpenAgentActivity ? { onOpenAgentActivity } : {})}
                     {...(onOpenThread ? { onOpenThread } : {})}
                     {...(onOpenAutomation ? { onOpenAutomation } : {})}
+                    {...(subagentToolTraceByThreadId ? { subagentToolTraceByThreadId } : {})}
                   />
                 ))}
               </div>
@@ -1350,6 +1353,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
                         {...(onOpenAgentActivity ? { onOpenAgentActivity } : {})}
                         {...(onOpenThread ? { onOpenThread } : {})}
                         {...(onOpenAutomation ? { onOpenAutomation } : {})}
+                        {...(subagentToolTraceByThreadId ? { subagentToolTraceByThreadId } : {})}
                         {...(turnSummary?.turnId ? { turnId: turnSummary.turnId } : {})}
                       />
                     ))}
@@ -1386,6 +1390,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
                       {...(onOpenAgentActivity ? { onOpenAgentActivity } : {})}
                       {...(onOpenThread ? { onOpenThread } : {})}
                       {...(onOpenAutomation ? { onOpenAutomation } : {})}
+                      {...(subagentToolTraceByThreadId ? { subagentToolTraceByThreadId } : {})}
                     />
                   ))}
                 </div>
@@ -1406,6 +1411,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
                 {...(onOpenAgentActivity ? { onOpenAgentActivity } : {})}
                 {...(onOpenThread ? { onOpenThread } : {})}
                 {...(onOpenAutomation ? { onOpenAutomation } : {})}
+                {...(subagentToolTraceByThreadId ? { subagentToolTraceByThreadId } : {})}
               />
             ) : (
               <div
@@ -2716,6 +2722,8 @@ function workEntryIcon(workEntry: TimelineWorkEntry): LucideIcon {
   // (answer submitted) rather than the generic "info" checkmark.
   if (workEntry.activityKind === "user-input.requested") return CircleQuestionIcon;
   if (workEntry.activityKind === "user-input.resolved") return ArrowUpCircleIcon;
+  // "Moved to background" notices read as a tray drop, not a warning check.
+  if (workEntry.nativeEventType === "background_tasks_changed") return BackgroundTrayIcon;
 
   if (workEntry.requestKind === "command") return commandWorkEntryIcon(workEntry);
   if (workEntry.requestKind === "file-read") return SearchIcon;
@@ -2933,6 +2941,7 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
   onOpenAgentActivity?: (activityId: string) => void;
   onOpenThread?: (threadId: ThreadId) => void;
   onOpenAutomation?: (automationId: string) => void;
+  subagentToolTraceByThreadId?: ReadonlyMap<string, SubagentToolTrace>;
 }) {
   const {
     workEntry,
@@ -2948,6 +2957,7 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
     onOpenAgentActivity,
     onOpenThread,
     onOpenAutomation,
+    subagentToolTraceByThreadId,
   } = props;
   const compact = density === "compact";
   const isCodexStatusRow = isCodexActivityStatusWorkEntry(workEntry);
@@ -3167,6 +3177,9 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
                   subagent.statusLabel ??
                   humanizeSubagentStatus(subagent.rawStatus, subagent.isActive);
                 const canOpenThread = Boolean(onOpenThread);
+                const toolTrace = subagentToolTraceByThreadId?.get(
+                  subagent.resolvedThreadId ?? subagent.threadId,
+                );
                 return (
                   <div
                     key={`${workEntry.id}:${subagent.threadId}`}
@@ -3210,6 +3223,36 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
                         >
                           <span className="shrink-0 text-muted-foreground/30">Latest</span>
                           <span className="truncate">{subagent.latestUpdate}</span>
+                        </div>
+                      ) : null}
+                      {toolTrace ? (
+                        <div className="mt-1.5 space-y-[3px] border-l border-border/35 pl-2">
+                          {toolTrace.entries.map((toolEntry) => {
+                            const ToolEntryIcon = workEntryIcon(toolEntry);
+                            const toolText = combineWorkEntryDisplayText(
+                              toolWorkEntryHeading(toolEntry),
+                              workEntryPreview(toolEntry),
+                            );
+                            return (
+                              <div
+                                key={toolEntry.id}
+                                className="flex min-w-0 items-center gap-1.5 text-muted-foreground/48"
+                                style={{ fontSize: `${Math.max(10, rowFontSizePx - 2)}px` }}
+                                title={toolText}
+                              >
+                                <ToolEntryIcon className="size-3 shrink-0 text-muted-foreground/32" />
+                                <span className="truncate">{toolText}</span>
+                              </div>
+                            );
+                          })}
+                          {toolTrace.overflowCount > 0 ? (
+                            <div
+                              className="pl-[18px] text-muted-foreground/36"
+                              style={{ fontSize: `${Math.max(10, rowFontSizePx - 2)}px` }}
+                            >
+                              +{toolTrace.overflowCount} more tool uses
+                            </div>
+                          ) : null}
                         </div>
                       ) : null}
                     </div>

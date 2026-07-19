@@ -8,6 +8,7 @@ import {
   PROVIDER_RUNTIME_EVENT_VERSION,
   ProviderRuntimeEvent,
 } from "./providerRuntime";
+import type { ProviderRuntimeEventType } from "./providerRuntime";
 
 const decodeRuntimeEvent = Schema.decodeUnknownSync(ProviderRuntimeEvent);
 
@@ -35,6 +36,11 @@ describe("ProviderRuntimeEvent", () => {
 
     expect(schema.properties.eventVersion.const).toBe(PROVIDER_RUNTIME_EVENT_VERSION);
     expect(schema.properties.eventType.enum).toEqual(PROVIDER_RUNTIME_EVENT_TYPES);
+  });
+
+  it("includes turn.steered in the exported event type", () => {
+    const eventType: ProviderRuntimeEventType = "turn.steered";
+    expect(eventType).toBe("turn.steered");
   });
 
   it("decodes turn.tasks.updated for task-list rendering", () => {

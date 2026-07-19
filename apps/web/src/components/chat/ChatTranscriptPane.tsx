@@ -39,7 +39,6 @@ interface ChatTranscriptPaneProps {
   activeTurnInProgress: boolean;
   activeTurnStartedAt: string | null;
   agentActivityDetail?: AgentActivityDetail | null;
-  bottomContentInsetPx?: ComponentProps<typeof MessagesTimeline>["bottomContentInsetPx"];
   contentInsetRightPx?: ComponentProps<typeof MessagesTimeline>["contentInsetRightPx"];
   chatFontSizePx: number;
   emptyStateContent?: ReactNode;
@@ -82,6 +81,9 @@ interface ChatTranscriptPaneProps {
   resolvedTheme: "light" | "dark";
   revertTurnCountByUserMessageId: Map<MessageId, number>;
   scrollButtonVisible: boolean;
+  subagentToolTraceByThreadId?: ComponentProps<
+    typeof MessagesTimeline
+  >["subagentToolTraceByThreadId"];
   terminalWorkspaceTerminalTabActive: boolean;
   timelineEntries: ComponentProps<typeof MessagesTimeline>["timelineEntries"];
   timestampFormat: TimestampFormat;
@@ -96,7 +98,6 @@ export const ChatTranscriptPane = memo(function ChatTranscriptPane({
   activeTurnInProgress,
   activeTurnStartedAt,
   agentActivityDetail,
-  bottomContentInsetPx,
   contentInsetRightPx,
   chatFontSizePx,
   emptyStateContent,
@@ -139,6 +140,7 @@ export const ChatTranscriptPane = memo(function ChatTranscriptPane({
   resolvedTheme,
   revertTurnCountByUserMessageId,
   scrollButtonVisible,
+  subagentToolTraceByThreadId,
   terminalWorkspaceTerminalTabActive,
   timelineEntries,
   timestampFormat,
@@ -184,7 +186,6 @@ export const ChatTranscriptPane = memo(function ChatTranscriptPane({
         {agentActivityDetail && onCloseAgentActivityDetail ? (
           <AgentActivityDetailView
             detail={agentActivityDetail}
-            bottomContentInsetPx={bottomContentInsetPx}
             chatFontSizePx={chatFontSizePx}
             contentInsetRightPx={contentInsetRightPx}
             markdownCwd={markdownCwd}
@@ -214,6 +215,7 @@ export const ChatTranscriptPane = memo(function ChatTranscriptPane({
             onOpenTurnDiff={onOpenTurnDiff}
             onOpenThread={onOpenThread}
             {...(onOpenAutomation ? { onOpenAutomation } : {})}
+            {...(subagentToolTraceByThreadId ? { subagentToolTraceByThreadId } : {})}
             revertTurnCountByUserMessageId={revertTurnCountByUserMessageId}
             onRevertUserMessage={onRevertUserMessage}
             {...(onUndoTurnFiles ? { onUndoTurnFiles } : {})}
@@ -238,7 +240,6 @@ export const ChatTranscriptPane = memo(function ChatTranscriptPane({
             chatFontSizePx={chatFontSizePx}
             timestampFormat={timestampFormat}
             workspaceRoot={workspaceRoot}
-            bottomContentInsetPx={bottomContentInsetPx}
             contentInsetRightPx={contentInsetRightPx}
             {...(onOpenAgentActivity ? { onOpenAgentActivity } : {})}
             emptyStateContent={

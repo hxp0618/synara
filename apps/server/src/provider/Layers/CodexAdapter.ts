@@ -1769,7 +1769,7 @@ const makeCodexAdapter = (options?: CodexAdapterLiveOptions) =>
                 url: `data:${attachment.mimeType};base64,${Buffer.from(bytes).toString("base64")}`,
               };
             }),
-          { concurrency: 1 },
+          { concurrency: 4 },
         );
         const nativeCodexAttachments = codexAttachments.filter(
           (attachment): attachment is NonNullable<typeof attachment> => attachment !== null,
@@ -1847,7 +1847,7 @@ const makeCodexAdapter = (options?: CodexAdapterLiveOptions) =>
                 url: `data:${attachment.mimeType};base64,${Buffer.from(bytes).toString("base64")}`,
               };
             }),
-          { concurrency: 1 },
+          { concurrency: 4 },
         );
         const nativeCodexAttachments = codexAttachments.filter(
           (attachment): attachment is NonNullable<typeof attachment> => attachment !== null,
