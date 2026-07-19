@@ -412,13 +412,13 @@ def real_provider_approval_command() -> str:
 
 
 def real_provider_host_crash_command() -> str:
-    return "sleep 120"
+    return real_provider_approval_command()
 
 
 def real_provider_host_crash_approval_prompt() -> str:
     return (
         "Use the Bash or shell tool exactly once. Do not emit any assistant text before the tool call. "
-        "Request approval for this exact long-running read-only command as the sole shell command:\n"
+        "Request approval for this exact read-only command as the sole shell command:\n"
         f"{real_provider_host_crash_command()}\n"
         "Do not add wrappers, redirection, pipes, file changes, or any other action."
     )
