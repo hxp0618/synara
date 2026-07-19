@@ -6327,6 +6327,32 @@ class SSHDriverTest(unittest.TestCase):
                 driver._load_external_host_key()
             self.assertEqual(caught.exception.code, "runner.ssh_external_host_key_invalid")
 
+    def test_external_setup_uses_bounded_http1_retries_for_node_downloads(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            identity = root / "id_ed25519"
+            host_key_source = root / "host-key"
+            identity.write_text("private-key-placeholder\n", encoding="utf-8")
+            identity.chmod(0o600)
+            host_key_source.write_text(self._key(b"trusted-external-host") + "\n", encoding="utf-8")
+            driver = acceptance.SSHDriver(
+                pathlib.Path.cwd(),
+                self._external_options(identity, host_key_source),
+                acceptance.Deadline(30.0),
+                acceptance.SecretRedactor(),
+            )
+            self.addCleanup(driver._release_state)
+
+            script = driver._external_setup_script()
+
+        download = "curl " + " ".join(acceptance.SSH_EXTERNAL_NODE_DOWNLOAD_CURL_ARGUMENTS)
+        self.assertEqual(script.count(download), 2)
+        self.assertIn("--http1.1", download)
+        self.assertIn("--retry-all-errors", download)
+        self.assertIn("--max-time 300", download)
+        self.assertIn("--retry-max-time 600", download)
+        self.assertNotIn("curl -fsSLO", script)
+
     def test_external_identity_is_loaded_without_copy_and_operator_source_is_preserved(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)

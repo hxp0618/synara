@@ -80,6 +80,25 @@ SSH_RELAY_LOOPBACK_HOST = "127.0.0.1"
 SSH_RELAY_TRANSPORT = "runner-owned reverse SSH relay to the local Worker-only proxy"
 SSH_CONTROL_PLANE_OPERATION_TIMEOUT = 180.0
 SSH_EXTERNAL_RECOVERY_OPERATION_TIMEOUT = 60.0
+SSH_EXTERNAL_NODE_DOWNLOAD_CURL_ARGUMENTS = (
+    "--fail",
+    "--location",
+    "--silent",
+    "--show-error",
+    "--remote-name",
+    "--http1.1",
+    "--retry",
+    "5",
+    "--retry-all-errors",
+    "--retry-delay",
+    "2",
+    "--connect-timeout",
+    "15",
+    "--max-time",
+    "300",
+    "--retry-max-time",
+    "600",
+)
 SSH_CREDENTIAL_LIFECYCLE = (
     "runner posts the one-time private key once during Target creation, deletes the local plaintext copy after "
     "provisioning, and relies on the Control Plane encrypted credential until ssh/revoke"
@@ -5454,6 +5473,7 @@ class SSHDriver(ManagedWorkerDriver):
         build_home = f"{root}/build-home"
         npm_cache = f"{root}/npm-cache"
         provider_home = f"{root}/provider-home"
+        node_download = shlex.join(("curl", *SSH_EXTERNAL_NODE_DOWNLOAD_CURL_ARGUMENTS))
         if self.options.suite == "real-provider-smoke":
             runtime_install = [
                 f"install -d -m 0755 {shlex.quote(pathlib.PurePosixPath(self.remote_provider_host_path).parent.as_posix())}",
@@ -5495,8 +5515,8 @@ class SSHDriver(ManagedWorkerDriver):
                 f"workdir=$(mktemp -d {shlex.quote(stage + '/node.XXXXXX')})",
                 "trap 'rm -rf \"$workdir\"' EXIT",
                 "cd \"$workdir\"",
-                f"curl -fsSLO https://nodejs.org/dist/v{version}/{archive}",
-                f"curl -fsSLO https://nodejs.org/dist/v{version}/SHASUMS256.txt",
+                f"{node_download} https://nodejs.org/dist/v{version}/{archive}",
+                f"{node_download} https://nodejs.org/dist/v{version}/SHASUMS256.txt",
                 f"grep '  {archive}$' SHASUMS256.txt | sha256sum -c -",
                 f"install -d -m 0755 {shlex.quote(node_root)}",
                 f"tar -xJf {shlex.quote(archive)} -C {shlex.quote(node_root)} --strip-components=1",
