@@ -390,10 +390,16 @@ def terminal_large_expected_segments() -> list[dict[str, Any]]:
     return segments
 
 
-def terminal_large_node_command() -> str:
+def node_eval_command_prefix(node_executable: str) -> str:
+    executable = node_executable.strip()
+    if not executable or any(character in executable for character in "\r\n\x00"):
+        raise ValueError("Node executable must be a non-empty command or path")
+    return f"{shlex.quote(executable)} -e '"
+
+
+def terminal_large_node_command(node_executable: str = "node") -> str:
     pattern = TERMINAL_LARGE_PATTERN.decode("ascii")
-    return (
-        "node -e '"
+    return node_eval_command_prefix(node_executable) + (
         f'const p=Buffer.from("{pattern}");'
         f"const n={TERMINAL_LARGE_TOTAL_BYTES};"
         "const b=Buffer.allocUnsafe(n);"
@@ -492,10 +498,9 @@ def generated_file_bytes() -> bytes:
     return terminal_large_bytes(0, GENERATED_FILE_TOTAL_BYTES)
 
 
-def generated_file_node_command() -> str:
+def generated_file_node_command(node_executable: str = "node") -> str:
     pattern = TERMINAL_LARGE_PATTERN.decode("ascii")
-    return (
-        "node -e '"
+    return node_eval_command_prefix(node_executable) + (
         'const f=require("node:fs");'
         f'const p="{GENERATED_FILE_RELATIVE_PATH}";'
         'f.mkdirSync(".synara-stage3-acceptance",{recursive:true});'
@@ -516,9 +521,8 @@ def large_diff_seed_bytes() -> bytes:
     ).encode("ascii")
 
 
-def large_diff_seed_node_command() -> str:
-    return (
-        "node -e '"
+def large_diff_seed_node_command(node_executable: str = "node") -> str:
+    return node_eval_command_prefix(node_executable) + (
         'const f=require("node:fs");'
         f'const p="{LARGE_DIFF_RELATIVE_PATH}";'
         f"const n={LARGE_DIFF_LINE_COUNT};"
@@ -1663,6 +1667,8 @@ class TargetDriver(Protocol):
     replacement_workspace_semantics: str
     pending_interaction_recovery: str | None
 
+    def real_provider_node_executable(self) -> str: ...
+
     def prepare(self) -> Mapping[str, Any]: ...
 
     def start(self) -> Mapping[str, Any]: ...
@@ -2348,6 +2354,9 @@ class LocalDriver:
     lifecycle = STANDING_WORKER
     replacement_workspace_semantics = "no managed Worker replacement"
     pending_interaction_recovery: str | None = None
+
+    def real_provider_node_executable(self) -> str:
+        return "node"
 
     def __init__(
         self,
@@ -4227,6 +4236,9 @@ class SSHDriver(ManagedWorkerDriver):
             if self.external_host
             else SSH_CREDENTIAL_LIFECYCLE
         )
+
+    def real_provider_node_executable(self) -> str:
+        return self.remote_node_path
 
     @property
     def identity_path(self) -> pathlib.Path:
@@ -8000,6 +8012,9 @@ class MissingTargetDriver:
         self.lifecycle = STANDING_WORKER
         self.pending_interaction_recovery: str | None = None
 
+    def real_provider_node_executable(self) -> str:
+        return "node"
+
     def prepare(self) -> Mapping[str, Any]:
         raise AcceptanceError(
             "runner.target_driver_missing",
@@ -9711,7 +9726,9 @@ class AcceptanceSuite:
 
     def _real_provider_large_diff_artifact(self) -> Mapping[str, Any]:
         seed_marker = self._real_provider_marker("large-diff-seed")
-        seed_command = large_diff_seed_node_command()
+        seed_command = large_diff_seed_node_command(
+            self.driver.real_provider_node_executable()
+        )
         seed_turn = self._create_turn(
             "Use the Bash or shell tool exactly once. Run this exact command as the sole shell command:\n"
             f"{seed_command}\n"
@@ -9999,7 +10016,7 @@ class AcceptanceSuite:
             if isinstance(item.get("id"), str) and item.get("id")
         }
         marker = self._real_provider_marker("generated-file-checkpoint")
-        command = generated_file_node_command()
+        command = generated_file_node_command(self.driver.real_provider_node_executable())
         native_file_tool = (
             "the native apply_patch file-change tool"
             if self.options.provider == "codex"
@@ -11126,7 +11143,7 @@ class AcceptanceSuite:
                 },
             )
         marker = self._real_provider_marker("terminal-large")
-        command = terminal_large_node_command()
+        command = terminal_large_node_command(self.driver.real_provider_node_executable())
         turn = self._create_turn(
             "Use the Bash or shell tool exactly once. Run this exact command as the sole shell command:\n"
             f"{command}\n"

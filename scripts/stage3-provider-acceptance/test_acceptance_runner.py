@@ -198,6 +198,10 @@ class FakeDriver:
         self.api = FakeAPI()
         self.restart_calls = 0
         self.pending_interaction_recovery: str | None = None
+        self.node_executable = "node"
+
+    def real_provider_node_executable(self) -> str:
+        return self.node_executable
 
     def prepare(self) -> Mapping[str, Any]:
         return {}
@@ -1748,6 +1752,7 @@ class RealProviderGeneratedFileSuite(acceptance.AcceptanceSuite):
         snapshot_member_name: str = acceptance.GENERATED_FILE_RELATIVE_PATH,
         corrupt_sha256: bool = False,
         corrupt_generated_file: bool = False,
+        node_executable: str = "node",
     ) -> None:
         snapshot = generated_file_snapshot_bytes(snapshot_member_name)
         snapshot_sha256 = "0" * 64 if corrupt_sha256 else hashlib.sha256(snapshot).hexdigest()
@@ -1777,6 +1782,7 @@ class RealProviderGeneratedFileSuite(acceptance.AcceptanceSuite):
             "sha256": snapshot_sha256,
         }
         driver = FakeDriver(acceptance.STANDING_WORKER)
+        driver.node_executable = node_executable
         driver.api = GeneratedFileAPI(
             [generated_artifact, artifact],
             {
@@ -1917,7 +1923,9 @@ class RealProviderGeneratedFileSuite(acceptance.AcceptanceSuite):
     ) -> dict[str, Any]:
         if runtime_mode != "full-access" or interaction_mode != "default":
             raise AssertionError("unexpected generated-file Turn mode")
-        command = acceptance.generated_file_node_command()
+        command = acceptance.generated_file_node_command(
+            self.driver.real_provider_node_executable()
+        )
         marker = self._real_provider_marker("generated-file-checkpoint")
         standalone_text = acceptance.STANDALONE_GENERATED_FILE_CONTENT.decode("ascii").rstrip("\n")
         if (
@@ -3320,6 +3328,17 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
         self.assertEqual(generated, acceptance.generated_file_bytes())
         self.assertEqual(len(generated), (1 << 20) + 257)
 
+    def test_real_provider_fixture_commands_accept_pinned_node_path(self) -> None:
+        node_path = "/opt/synara/acceptance/fixture/node/bin/node"
+
+        for command_factory in (
+            acceptance.generated_file_node_command,
+            acceptance.large_diff_seed_node_command,
+            acceptance.terminal_large_node_command,
+        ):
+            with self.subTest(command=command_factory.__name__):
+                self.assertTrue(command_factory(node_path).startswith(f"{node_path} -e '"))
+
     def test_real_provider_approval_gated_commands_are_read_only(self) -> None:
         cases = (
             (
@@ -3600,6 +3619,7 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
                 ).hexdigest(),
             },
         )
+
         self.assertEqual(
             evidence["checkpoint"]["generatedFileArtifact"]["download"],
             {
@@ -3616,6 +3636,15 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
         self.assertTrue(evidence["providerTurn"]["markerMatched"])
         self.assertEqual(evidence["providerTurn"]["markerMatchMode"], "contains-once")
         self.assertIsNotNone(suite.created_input)
+
+    def test_real_provider_generated_file_prompt_uses_target_node_executable(self) -> None:
+        node_path = "/opt/synara/acceptance/fixture/node/bin/node"
+        suite = RealProviderGeneratedFileSuite(node_executable=node_path)
+
+        suite._real_provider_generated_file_checkpoint()
+
+        self.assertIsNotNone(suite.created_input)
+        self.assertIn(acceptance.generated_file_node_command(node_path), suite.created_input)
 
     def test_real_provider_generated_file_checkpoint_rejects_duplicate_ready_artifact(self) -> None:
         with self.assertRaises(acceptance.AcceptanceError) as caught:
