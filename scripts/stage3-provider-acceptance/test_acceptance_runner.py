@@ -136,6 +136,56 @@ def real_provider_turn_events(
     ]
 
 
+def real_provider_reclaimed_turn_events(
+    assistant_text: str,
+    *,
+    terminal_text: str | None = None,
+    selected_strategy: str,
+    reason_code: str,
+    terminal_reason_code: str | None = None,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    terminal, events = real_provider_turn_events(
+        assistant_text,
+        terminal_text=terminal_text,
+        selected_strategy=selected_strategy,
+        reason_code=reason_code,
+    )
+    events[1]["generation"] = 1
+    events[2]["generation"] = 1
+    events[3]["generation"] = 3
+    terminal["generation"] = 3
+    leased_events = [
+        {
+            "eventType": "execution.leased",
+            "executionId": "execution-1",
+            "generation": 2,
+            "payload": {
+                "providerResume": {
+                    "requestedStrategy": "native-cursor",
+                    "selectedStrategy": selected_strategy,
+                    "reasonCode": reason_code,
+                }
+            },
+        },
+        {
+            "eventType": "execution.leased",
+            "executionId": "execution-1",
+            "generation": 3,
+            "payload": {
+                "providerResume": {
+                    "requestedStrategy": "native-cursor",
+                    "selectedStrategy": selected_strategy,
+                    "reasonCode": terminal_reason_code or reason_code,
+                }
+            },
+        },
+    ]
+    events[2:2] = leased_events
+    for sequence, event in enumerate(events, start=1):
+        event["sequence"] = sequence
+    return terminal, events
+
+
 class FakeAPI:
     def __init__(self) -> None:
         self.requests: list[tuple[str, str, Mapping[str, Any] | None]] = []
@@ -4138,6 +4188,155 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
         self.assertTrue(evidence["markerMatched"])
         self.assertTrue(evidence["terminalOutputMatched"])
         self.assertEqual(evidence["providerResume"]["selectedStrategy"], "native-cursor")
+
+    def test_real_provider_resume_evidence_rejects_multiple_leases_by_default(self) -> None:
+        suite = BarrierSuite(acceptance.EXECUTION_PINNED_WORKER)
+        marker = "SYNARA_REAL_PROVIDER_SMOKE_CODEX_RECLAIM_DEFAULT"
+        terminal, events = real_provider_reclaimed_turn_events(
+            marker + "\n",
+            terminal_text=marker,
+            selected_strategy="authoritative-history",
+            reason_code="cursor_absent",
+        )
+
+        with self.assertRaises(acceptance.AcceptanceError) as raised:
+            suite._real_provider_turn_evidence(
+                "turn-1",
+                terminal,
+                events,
+                marker,
+                expected_resume_strategy="authoritative-history",
+                expected_resume_reason="cursor_absent",
+            )
+
+        self.assertEqual(raised.exception.code, "runner.real_provider_resume_decision_missing")
+
+    def test_real_provider_recovery_evidence_accepts_terminal_generation_reclaims(self) -> None:
+        suite = BarrierSuite(acceptance.EXECUTION_PINNED_WORKER)
+        marker = "SYNARA_REAL_PROVIDER_SMOKE_CODEX_RECLAIM_TERMINAL"
+        terminal, events = real_provider_reclaimed_turn_events(
+            marker + "\n",
+            terminal_text=marker,
+            selected_strategy="authoritative-history",
+            reason_code="cursor_absent",
+        )
+
+        evidence = suite._real_provider_turn_evidence(
+            "turn-1",
+            terminal,
+            events,
+            marker,
+            expected_resume_strategy="authoritative-history",
+            expected_resume_reason="cursor_absent",
+            leased_event_mode="terminal-generation",
+        )
+
+        self.assertEqual(evidence["generation"], 3)
+        self.assertEqual(evidence["executionLeasedEvents"], 3)
+        self.assertEqual(evidence["leasedEventMode"], "terminal-generation")
+        self.assertEqual(evidence["providerResume"]["selectedStrategy"], "authoritative-history")
+
+    def test_real_provider_recovery_evidence_rejects_mismatched_reclaimed_resume(self) -> None:
+        suite = BarrierSuite(acceptance.EXECUTION_PINNED_WORKER)
+        marker = "SYNARA_REAL_PROVIDER_SMOKE_CODEX_RECLAIM_MISMATCH"
+        terminal, events = real_provider_reclaimed_turn_events(
+            marker + "\n",
+            terminal_text=marker,
+            selected_strategy="authoritative-history",
+            reason_code="cursor_absent",
+            terminal_reason_code="cursor_usable",
+        )
+
+        with self.assertRaises(acceptance.AcceptanceError) as raised:
+            suite._real_provider_turn_evidence(
+                "turn-1",
+                terminal,
+                events,
+                marker,
+                expected_resume_strategy="authoritative-history",
+                expected_resume_reason="cursor_absent",
+                leased_event_mode="terminal-generation",
+            )
+
+        self.assertEqual(raised.exception.code, "runner.real_provider_resume_decision_mismatch")
+
+    def test_codex_steer_waits_for_durable_ack_before_resolving_approval(self) -> None:
+        suite = BarrierSuite(acceptance.EXECUTION_PINNED_WORKER)
+        order: list[str] = []
+
+        class RecordingAPI(FakeAPI):
+            def request(
+                self,
+                method: str,
+                path: str,
+                payload: Mapping[str, Any] | None = None,
+                expected: Sequence[int] = (200,),
+                *,
+                maximum_timeout: float = 10.0,
+            ) -> Any:
+                del method, payload, expected, maximum_timeout
+                if path.endswith("/turns/active/steer"):
+                    order.append("steer-requested")
+                    return {"id": "control-1", "commandType": "steer", "status": "pending"}
+                if "/approvals/" in path:
+                    order.append("approval-resolved")
+                    return {"status": "resolved", "deliveryStatus": "delivered"}
+                raise AssertionError(path)
+
+        suite.fake_driver.api = RecordingAPI()
+        suite._create_turn = mock.Mock(return_value={"id": "turn-1"})  # type: ignore[method-assign]
+        suite._real_provider_approval_interaction = mock.Mock(  # type: ignore[method-assign]
+            return_value=(
+                {"id": "interaction-1"},
+                "execution-1",
+                "approval-1",
+                {"requestKind": "command"},
+                "printf marker",
+            )
+        )
+
+        def wait_for_ack(
+            execution_id: str,
+            event_type: str,
+            *,
+            after_sequence: int,
+            session_id: str | None = None,
+        ) -> dict[str, Any]:
+            del session_id
+            self.assertEqual(execution_id, "execution-1")
+            self.assertEqual(event_type, "turn.steered")
+            self.assertEqual(after_sequence, 0)
+            order.append("steer-acknowledged")
+            return {
+                "sequence": 1,
+                "eventId": "event-1",
+                "eventType": "turn.steered",
+                "executionId": execution_id,
+            }
+
+        suite._wait_for_execution_event = wait_for_ack  # type: ignore[method-assign]
+        suite._wait_for_turn_terminal = mock.Mock(  # type: ignore[method-assign]
+            return_value=(
+                {"sequence": 4, "eventType": "execution.completed"},
+                [
+                    {"eventType": "turn.steer-requested"},
+                    {"eventType": "turn.steered"},
+                    {"eventType": "request.resolved"},
+                ],
+            )
+        )
+        suite._real_provider_turn_evidence = mock.Mock(return_value={})  # type: ignore[method-assign]
+
+        evidence = suite._real_provider_steer_active_turn()
+
+        self.assertEqual(
+            order,
+            ["steer-requested", "steer-acknowledged", "approval-resolved"],
+        )
+        self.assertEqual(
+            evidence["steerAcknowledgedBeforeApprovalResolution"]["eventType"],
+            "turn.steered",
+        )
 
     def test_real_provider_cursor_expiry_continuity_requires_authoritative_history(self) -> None:
         suite = BarrierSuite(acceptance.STANDING_WORKER)
