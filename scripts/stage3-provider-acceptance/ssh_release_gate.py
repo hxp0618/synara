@@ -30,10 +30,8 @@ EXPECTED_UNSUPPORTED: Mapping[tuple[str, str], frozenset[str]] = {
     ("codex", "failure"): frozenset(),
     ("claudeAgent", "failure"): frozenset(),
 }
-SSH_PRODUCT_WORKER_LEASE_TTL = "60s"
-SSH_PRODUCT_WORKER_HEARTBEAT_TIMEOUT = "180s"
-SSH_FAILURE_WORKER_LEASE_TTL = acceptance.DEFAULT_ACCEPTANCE_WORKER_LEASE_TTL
-SSH_FAILURE_WORKER_HEARTBEAT_TIMEOUT = acceptance.DEFAULT_ACCEPTANCE_WORKER_HEARTBEAT_TIMEOUT
+SSH_REAL_PROVIDER_WORKER_LEASE_TTL = "60s"
+SSH_REAL_PROVIDER_WORKER_HEARTBEAT_TIMEOUT = "180s"
 
 CredentialSource = remote.CredentialSource
 ReleaseGateError = remote.ReleaseGateError
@@ -332,16 +330,6 @@ def child_command(
         else options.failure_timeout_seconds
     )
     matrix_flag = "--real-provider-matrix" if matrix == "product" else "--real-provider-failure-matrix"
-    worker_lease_ttl = (
-        SSH_PRODUCT_WORKER_LEASE_TTL
-        if matrix == "product"
-        else SSH_FAILURE_WORKER_LEASE_TTL
-    )
-    worker_heartbeat_timeout = (
-        SSH_PRODUCT_WORKER_HEARTBEAT_TIMEOUT
-        if matrix == "product"
-        else SSH_FAILURE_WORKER_HEARTBEAT_TIMEOUT
-    )
     command = [
         sys.executable,
         str(options.repo_root / "scripts" / "stage3-provider-acceptance" / "acceptance_runner.py"),
@@ -358,9 +346,9 @@ def child_command(
         "--real-provider-credential-field",
         source.field,
         "--worker-lease-ttl",
-        worker_lease_ttl,
+        SSH_REAL_PROVIDER_WORKER_LEASE_TTL,
         "--worker-heartbeat-timeout",
-        worker_heartbeat_timeout,
+        SSH_REAL_PROVIDER_WORKER_HEARTBEAT_TIMEOUT,
         matrix_flag,
         "--output-dir",
         str(output_dir),
@@ -560,6 +548,7 @@ def validate_ssh_child_runtime(
         )
 
     configuration = report.get("configuration")
+    worker_timing = configuration.get("workerTiming") if isinstance(configuration, dict) else None
     ssh_configuration = configuration.get("ssh") if isinstance(configuration, dict) else None
     control_plane_transport = (
         ssh_configuration.get("controlPlaneTransport")
@@ -567,7 +556,11 @@ def validate_ssh_child_runtime(
         else None
     )
     configuration_invalid = (
-        not isinstance(ssh_configuration, dict)
+        not isinstance(worker_timing, dict)
+        or worker_timing.get("leaseTTL") != SSH_REAL_PROVIDER_WORKER_LEASE_TTL
+        or worker_timing.get("heartbeatTimeout")
+        != SSH_REAL_PROVIDER_WORKER_HEARTBEAT_TIMEOUT
+        or not isinstance(ssh_configuration, dict)
         or ssh_configuration.get("runtime")
         != ("authorized-external-host" if external else "owned-disposable-orbstack")
         or ssh_configuration.get("machineArch") != options.ssh_machine_arch
@@ -841,6 +834,10 @@ def configuration_evidence(options: SSHReleaseGateOptions) -> dict[str, Any]:
         "failureTimeoutSeconds": options.failure_timeout_seconds,
         "separateChildBoundaries": True,
         "credentialEnvironmentNamesRecordedByGate": False,
+        "workerTiming": {
+            "leaseTTL": SSH_REAL_PROVIDER_WORKER_LEASE_TTL,
+            "heartbeatTimeout": SSH_REAL_PROVIDER_WORKER_HEARTBEAT_TIMEOUT,
+        },
         "credentials": {
             provider: {
                 "field": credential_source(options, provider).field,

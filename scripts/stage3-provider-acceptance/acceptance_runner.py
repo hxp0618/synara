@@ -16244,6 +16244,14 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
     )
     if worker_heartbeat_timeout_seconds <= worker_lease_ttl_seconds:
         parser.error("--worker-heartbeat-timeout must be greater than --worker-lease-ttl")
+    if (
+        parsed.suite != "real-provider-smoke"
+        and (
+            worker_lease_ttl != DEFAULT_ACCEPTANCE_WORKER_LEASE_TTL
+            or worker_heartbeat_timeout != DEFAULT_ACCEPTANCE_WORKER_HEARTBEAT_TIMEOUT
+        )
+    ):
+        parser.error("custom worker lease timing is only supported by --suite real-provider-smoke")
     timeout_seconds = parsed.timeout if parsed.timeout is not None else default_timeout
     if timeout_seconds <= 0:
         parser.error("--timeout must be positive")
@@ -16871,6 +16879,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             "suite": options.suite,
             "timeoutSeconds": options.timeout_seconds,
             "restartControlPlane": options.restart_control_plane,
+            "workerTiming": {
+                "leaseTTL": options.worker_lease_ttl,
+                "heartbeatTimeout": options.worker_heartbeat_timeout,
+            },
             "soak": {
                 "turns": options.soak_turns,
                 "restartEvery": options.soak_restart_every,

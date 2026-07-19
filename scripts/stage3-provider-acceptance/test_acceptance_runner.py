@@ -5711,6 +5711,25 @@ class RunnerOptionsTest(unittest.TestCase):
                 with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
                     acceptance.parse_args(arguments)
 
+    def test_custom_worker_lease_profile_requires_real_provider_suite(self) -> None:
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            acceptance.parse_args(["--worker-lease-ttl", "60s", "--worker-heartbeat-timeout", "180s"])
+
+        options = acceptance.parse_args(
+            [
+                "--suite",
+                "real-provider-smoke",
+                "--runner-command-json",
+                '["provider-host"]',
+                "--worker-lease-ttl",
+                "60s",
+                "--worker-heartbeat-timeout",
+                "180s",
+            ]
+        )
+        self.assertEqual(options.worker_lease_ttl, "60s")
+        self.assertEqual(options.worker_heartbeat_timeout, "180s")
+
     def test_fixture_suite_rejects_real_provider_cases(self) -> None:
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             acceptance.parse_args(["--real-provider-case", "approval"])
