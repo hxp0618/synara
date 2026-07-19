@@ -98,10 +98,10 @@ var canonicalRuntimeEventV2Types = map[string]struct{}{
 	"thread.realtime.started": {}, "thread.realtime.item-added": {}, "thread.realtime.audio.delta": {},
 	"thread.realtime.error": {}, "thread.realtime.closed": {},
 	"turn.started": {}, "turn.completed": {}, "turn.aborted": {}, "turn.tasks.updated": {},
-	"turn.proposed.delta": {}, "turn.proposed.completed": {}, "turn.diff.updated": {},
+	"turn.proposed.delta": {}, "turn.proposed.completed": {}, "turn.diff.updated": {}, "turn.steered": {},
 	"item.started": {}, "item.updated": {}, "item.completed": {}, "content.delta": {},
 	"request.opened": {}, "request.resolved": {}, "user-input.requested": {}, "user-input.resolved": {},
-	"task.started": {}, "task.progress": {}, "task.completed": {},
+	"task.started": {}, "task.progress": {}, "task.updated": {}, "task.completed": {},
 	"hook.started": {}, "hook.progress": {}, "hook.completed": {},
 	"tool.progress": {}, "tool.summary": {}, "auth.status": {}, "account.updated": {},
 	"account.rate-limits.updated": {}, "mcp.status.updated": {}, "mcp.oauth.completed": {},
@@ -223,6 +223,8 @@ func IsCanonicalRuntimeEventV2Payload(eventType string, payload map[string]any) 
 			requiredNonNegativeInteger(artifact, "sizeBytes") &&
 			requiredLowerSHA256(artifact, "sha256") && requiredNonNegativeInteger(artifact, "fileCount") &&
 			requiredNonNegativeInteger(artifact, "additions") && requiredNonNegativeInteger(artifact, "deletions")
+	case "turn.steered":
+		return requiredTrimmedString(payload, "message")
 	case "item.started", "item.updated", "item.completed":
 		return validItemLifecycle(payload)
 	case "content.delta":
@@ -242,6 +244,12 @@ func IsCanonicalRuntimeEventV2Payload(eventType string, payload map[string]any) 
 	case "task.progress":
 		return requiredTrimmedString(payload, "taskId") && requiredTrimmedString(payload, "description") &&
 			optionalTrimmedString(payload, "summary") && optionalTrimmedString(payload, "lastToolName")
+	case "task.updated":
+		return requiredTrimmedString(payload, "taskId") &&
+			optionalEnum(payload, "status", "pending", "running", "completed", "failed", "killed", "paused") &&
+			optionalTrimmedString(payload, "error") && optionalBool(payload, "isBackgrounded") &&
+			optionalTrimmedString(payload, "toolUseId") && optionalTrimmedString(payload, "workflowTaskId") &&
+			optionalTrimmedString(payload, "workflowRunId") && optionalTrimmedString(payload, "workflowScriptPath")
 	case "task.completed":
 		return requiredTrimmedString(payload, "taskId") && requiredEnum(payload, "status", "completed", "failed", "stopped") &&
 			optionalTrimmedString(payload, "summary")
