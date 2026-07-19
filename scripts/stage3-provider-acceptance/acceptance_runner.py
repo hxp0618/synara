@@ -86,6 +86,7 @@ SSH_EXTERNAL_NODE_DOWNLOAD_CURL_ARGUMENTS = (
     "--silent",
     "--show-error",
     "--remote-name",
+    "--ipv4",
     "--http1.1",
     "--retry",
     "5",

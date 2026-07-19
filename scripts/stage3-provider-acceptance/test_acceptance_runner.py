@@ -6347,6 +6347,7 @@ class SSHDriverTest(unittest.TestCase):
 
         download = "curl " + " ".join(acceptance.SSH_EXTERNAL_NODE_DOWNLOAD_CURL_ARGUMENTS)
         self.assertEqual(script.count(download), 2)
+        self.assertIn("--ipv4", download)
         self.assertIn("--http1.1", download)
         self.assertIn("--retry-all-errors", download)
         self.assertIn("--max-time 300", download)
