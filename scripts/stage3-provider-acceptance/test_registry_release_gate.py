@@ -700,6 +700,24 @@ class InputValidationTest(unittest.TestCase):
 
         self.assertEqual(run.call_args.kwargs["env"]["DOCKER_CONFIG"], "/tmp/docker-config")
 
+    def test_json_tool_output_accepts_standard_docker_inspect_array(self) -> None:
+        completed = subprocess.CompletedProcess(
+            ["docker", "inspect"],
+            0,
+            stdout=b'[{"Id":"fixture-container"}]',
+            stderr=b"",
+        )
+        with mock.patch.object(gate.subprocess, "run", return_value=completed):
+            payload, raw = gate._json_tool_output(
+                options(pathlib.Path("/tmp/output")),
+                ["inspect", "synara-production-registry"],
+                code="release.registry_production_boundary_invalid",
+                message="inspect failed",
+            )
+
+        self.assertEqual(payload, [{"Id": "fixture-container"}])
+        self.assertEqual(raw, completed.stdout)
+
     def test_validates_production_registry_retention_boundary(self) -> None:
         checked_in_policy = json.loads(
             (REPO_ROOT / gate.PRODUCTION_REGISTRY_RETENTION_POLICY_PATH).read_text(encoding="utf-8")

@@ -683,7 +683,7 @@ def _json_tool_output(
     code: str,
     message: str,
     timeout: float = 60.0,
-) -> tuple[dict[str, Any], bytes]:
+) -> tuple[dict[str, Any] | list[Any], bytes]:
     try:
         completed = subprocess.run(
             [options.docker_bin, *arguments],
@@ -702,7 +702,7 @@ def _json_tool_output(
         payload = json.loads(completed.stdout)
     except json.JSONDecodeError:
         raise ReleaseGateError(code, message) from None
-    if not isinstance(payload, dict):
+    if not isinstance(payload, (dict, list)):
         raise ReleaseGateError(code, message)
     return payload, completed.stdout
 
