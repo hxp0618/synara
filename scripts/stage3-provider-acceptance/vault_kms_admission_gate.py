@@ -176,7 +176,8 @@ VAULT_SERVER_LABELS = {**VAULT_RELEASE_LABELS, "component": "server"}
 VAULT_DNS_NAMESPACE_LABELS = {"kubernetes.io/metadata.name": "kube-system"}
 VAULT_DNS_POD_LABELS = {"k8s-app": "kube-dns"}
 VAULT_KUBERNETES_SERVICE_IP_CIDR = "10.96.0.1/32"
-VAULT_KUBERNETES_APISERVER_IP_CIDR = "192.168.155.4/32"
+# Kind/OrbStack can reassign the control-plane container IP within this node subnet.
+VAULT_KUBERNETES_APISERVER_CIDR = "192.168.155.0/24"
 SIGNER_ROLE_CONSTRAINTS = {
     "token_ttl": 2 * 60 * 60,
     "token_max_ttl": 4 * 60 * 60,
@@ -2155,7 +2156,7 @@ def _load_vault_baseline(repo_root: pathlib.Path) -> dict[str, Any]:
             protocol: TCP"""
     expected_apiserver_egress = f"""      - to:
           - ipBlock:
-              cidr: {VAULT_KUBERNETES_APISERVER_IP_CIDR}
+              cidr: {VAULT_KUBERNETES_APISERVER_CIDR}
         ports:
           - port: 6443
             protocol: TCP"""
@@ -2694,7 +2695,7 @@ def _expected_vault_network_policy_rules() -> tuple[list[dict[str, Any]], list[d
             "ports": [{"port": 443, "protocol": "TCP"}],
         },
         {
-            "to": [{"ipBlock": {"cidr": VAULT_KUBERNETES_APISERVER_IP_CIDR}}],
+            "to": [{"ipBlock": {"cidr": VAULT_KUBERNETES_APISERVER_CIDR}}],
             "ports": [{"port": 6443, "protocol": "TCP"}],
         },
         {

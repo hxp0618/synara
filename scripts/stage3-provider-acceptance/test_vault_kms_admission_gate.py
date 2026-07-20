@@ -742,7 +742,7 @@ storage "raft" {
                     },
                     {
                         "to": [
-                            {"ipBlock": {"cidr": gate.VAULT_KUBERNETES_APISERVER_IP_CIDR}}
+                            {"ipBlock": {"cidr": gate.VAULT_KUBERNETES_APISERVER_CIDR}}
                         ],
                         "ports": [
                             {"port": 6443, "protocol": "TCP"},
@@ -2002,6 +2002,13 @@ class VaultPolicyBoundaryTest(unittest.TestCase):
                     1,
                 )
             },
+            "api-egress-cidr": {
+                "values_text": values.replace(
+                    gate.VAULT_KUBERNETES_APISERVER_CIDR,
+                    "192.168.155.4/32",
+                    1,
+                )
+            },
             "audit-secondary-default": {
                 "bootstrap_text": bootstrap.replace(
                     'AUDIT_DEVICE_PATH_SECONDARY="${AUDIT_DEVICE_PATH_SECONDARY:-file-secondary}"',
@@ -2222,6 +2229,25 @@ class VaultPolicyBoundaryTest(unittest.TestCase):
             api_egress = payloads[5]["spec"]["egress"][3]["ports"]
             payloads[5]["spec"]["egress"][3]["ports"] = [
                 item for item in api_egress if item["port"] != 6443
+            ]
+            with (
+                mock.patch.object(gate, "kubectl_json", side_effect=payloads),
+                self.assertRaises(gate.ReleaseGateError) as caught,
+            ):
+                gate.verify_vault_cluster(
+                    options,
+                    vault_secret_inputs(pathlib.Path(directory)),
+                    redactor=acceptance.SecretRedactor(),
+                )
+
+        self.assertEqual(caught.exception.code, "release.vault_kms_network_policy_invalid")
+
+    def test_rejects_live_network_policy_with_drifted_control_plane_cidr(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            options = gate_options(pathlib.Path(directory) / "output")
+            payloads = vault_kubectl_side_effect()
+            payloads[5]["spec"]["egress"][3]["to"] = [
+                {"ipBlock": {"cidr": "192.168.155.4/32"}}
             ]
             with (
                 mock.patch.object(gate, "kubectl_json", side_effect=payloads),

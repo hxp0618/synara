@@ -13,8 +13,8 @@ signer:
   8200/8201, client traffic from `synara-system` on 8200 only, a seal-aware
   liveness probe, a 30-second termination grace period, DNS egress only to the
   CoreDNS Pods in `kube-system`, Kubernetes Service egress only to
-  `10.96.0.1/32:443`, direct control-plane egress only to
-  `192.168.155.4/32:6443`, and external SIEM egress only to
+  `10.96.0.1/32:443`, direct Kubernetes API egress only to the dedicated Kind
+  node subnet `192.168.155.0/24:6443`, and external SIEM egress only to
   `0.250.250.254/32:18443`
 - the built-in Vault UI and chart UI service are disabled; operators use the
   Vault CLI through an authenticated administrative access path
@@ -44,8 +44,8 @@ signer:
   - keys: `VAULT_AUDIT_SIEM_ENDPOINT`, `VAULT_AUDIT_SIEM_CLIENT_CERT`,
     `VAULT_AUDIT_SIEM_CLIENT_KEY`, `VAULT_AUDIT_SIEM_CA_CERT`
 
-The Service IP, Kubernetes API endpoint, SIEM host address, and Worker Registry
-host checked into this Stage 3 baseline are concrete values for
+The Service IP, Kubernetes API node subnet, SIEM host address, and Worker
+Registry host checked into this Stage 3 baseline are concrete values for
 `kind-synara-stage3-prod` on OrbStack. They are not portable defaults. Every
 production cluster must render an reviewed per-cluster overlay and update both
 the NetworkPolicy and `operations-policy.json` together before deployment; a
