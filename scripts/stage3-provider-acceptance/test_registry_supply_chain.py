@@ -855,9 +855,9 @@ class CommandBoundaryTest(unittest.TestCase):
             self.assertNotIn("SSL_CERT_FILE", trivy_environment)
             self.assertNotIn("--registry-ca-cert", cosign_command)
             self.assertIn("--registry-cacert", cosign_command)
-            self.assertIn("--registry-referrers-mode=legacy", cosign_command)
+            self.assertIn("--new-bundle-format=false", cosign_command)
             self.assertIn("--registry-cacert", cosign_verify_command)
-            self.assertNotIn("--registry-referrers-mode=legacy", cosign_verify_command)
+            self.assertNotIn("--new-bundle-format=false", cosign_verify_command)
             self.assertIn(
                 "/workspace/registry-access/docker-config/certs.d/registry.example.test/ca.crt",
                 cosign_command,
