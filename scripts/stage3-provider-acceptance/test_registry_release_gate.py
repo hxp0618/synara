@@ -773,7 +773,7 @@ class InputValidationTest(unittest.TestCase):
         self.assertEqual(evidence["repositoryProbeStatus"], 404)
         self.assertEqual(evidence["tlsPeerCertificateSha256"], certificate_sha256)
 
-    def test_validates_production_registry_retention_boundary(self) -> None:
+    def test_final_registry_boundary_rejects_repository_404(self) -> None:
         checked_in_policy = json.loads(
             (REPO_ROOT / gate.PRODUCTION_REGISTRY_RETENTION_POLICY_PATH).read_text(encoding="utf-8")
         )
@@ -802,26 +802,30 @@ class InputValidationTest(unittest.TestCase):
 
             exported_config_sha256 = hashlib.sha256(live_config.read_bytes()).hexdigest()
             checked_in_policy_sha256 = gate._stable_json_sha256(checked_in_policy)
-            evidence = gate.validate_production_registry_boundary(
-                options(
-                    root / "output",
-                    signing_policy_profile="production",
-                    production_registry_config_path=live_config,
-                    production_registry_retention_policy_path=live_policy,
-                ),
-                runtime_evidence=live_runtime_evidence(
-                    options(
-                        root / "output",
-                        signing_policy_profile="production",
-                        production_registry_config_path=live_config,
-                        production_registry_retention_policy_path=live_policy,
-                    ),
-                    exported_config_sha256=exported_config_sha256,
-                    live_policy_sha256=checked_in_policy_sha256,
-                    checked_in_policy_sha256=checked_in_policy_sha256,
-                ),
+            gate_options = options(
+                root / "output",
+                signing_policy_profile="production",
+                production_registry_config_path=live_config,
+                production_registry_retention_policy_path=live_policy,
             )
+            runtime_evidence = live_runtime_evidence(
+                gate_options,
+                exported_config_sha256=exported_config_sha256,
+                live_policy_sha256=checked_in_policy_sha256,
+                checked_in_policy_sha256=checked_in_policy_sha256,
+            )
+            evidence = gate.validate_production_registry_boundary(
+                gate_options,
+                runtime_evidence=runtime_evidence,
+            )
+            with self.assertRaises(gate.ReleaseGateError) as caught:
+                gate.validate_production_registry_boundary(
+                    gate_options,
+                    runtime_evidence=runtime_evidence,
+                    require_repository=True,
+                )
 
+        self.assertEqual(caught.exception.code, "release.registry_production_boundary_invalid")
         self.assertEqual(evidence["deleteEnabled"], False)
         self.assertEqual(evidence["promotionBoundary"], "digest-only")
         self.assertEqual(
@@ -2143,6 +2147,7 @@ class AggregateGateTest(unittest.TestCase):
             capture_output=True,
             text=True,
         ).stdout.strip()
+        expected_version, expected_source_date_epoch = gate.source_metadata(REPO_ROOT, sha)
         with tempfile.TemporaryDirectory() as directory:
             output_dir = pathlib.Path(directory) / "gate"
             gate_options = options(output_dir, signing_policy_profile="production")
@@ -2151,7 +2156,11 @@ class AggregateGateTest(unittest.TestCase):
             validator_state_dirs: list[pathlib.Path] = []
             validator_redactors: list[gate.acceptance.SecretRedactor] = []
 
-            def production_boundary(collected_at: str, marker: str) -> dict[str, Any]:
+            def production_boundary(
+                collected_at: str,
+                marker: str,
+                repository_probe_status: int,
+            ) -> dict[str, Any]:
                 return {
                     "registryConfigPath": str(gate_options.production_registry_config_path),
                     "retentionPolicyPath": str(
@@ -2168,6 +2177,7 @@ class AggregateGateTest(unittest.TestCase):
                         live_policy_sha256="d" * 64,
                         checked_in_policy_sha256="d" * 64,
                         collected_at=collected_at,
+                        repository_probe_status=repository_probe_status,
                         container_id=marker * 64,
                     ),
                 }
@@ -2175,10 +2185,12 @@ class AggregateGateTest(unittest.TestCase):
             initial_boundary = production_boundary(
                 "2026-07-20T00:00:00+00:00",
                 "a",
+                404,
             )
             refreshed_boundary = production_boundary(
                 "2026-07-20T00:20:00+00:00",
                 "b",
+                200,
             )
 
             def boundary_validator(
@@ -2187,6 +2199,7 @@ class AggregateGateTest(unittest.TestCase):
                 state_dir: pathlib.Path | None = None,
                 redactor: gate.acceptance.SecretRedactor | None = None,
                 runtime_evidence: Any = None,
+                require_repository: bool = False,
             ) -> dict[str, Any]:
                 if state_dir is None or redactor is None or runtime_evidence is not None:
                     raise AssertionError("live boundary refresh inputs were not preserved")
@@ -2195,8 +2208,10 @@ class AggregateGateTest(unittest.TestCase):
                 validator_state_dirs.append(state_dir)
                 validator_redactors.append(redactor)
                 if len(validator_options) == 1:
+                    self.assertFalse(require_repository)
                     events.append("boundary:preflight")
                     return initial_boundary
+                self.assertTrue(require_repository)
                 events.append("boundary:refresh")
                 return refreshed_boundary
 
@@ -2207,6 +2222,26 @@ class AggregateGateTest(unittest.TestCase):
             def supply_chain_runner(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
                 events.append("supply-chain")
                 return production_supply_chain()
+
+            def final_image_inspector(
+                current_options: gate.RegistryReleaseGateOptions,
+                *,
+                image: str,
+                expected_digest: str,
+                git_sha: str,
+                version: str,
+                source_date_epoch: str,
+            ) -> dict[str, Any]:
+                slot = "cached" if expected_digest == "sha256:" + "0" * 64 else "no-cache"
+                events.append(f"digest:{slot}")
+                self.assertEqual(
+                    image,
+                    f"{current_options.image_repository}@{expected_digest}",
+                )
+                self.assertEqual(git_sha, sha)
+                self.assertEqual(version, expected_version)
+                self.assertEqual(source_date_epoch, expected_source_date_epoch)
+                return {}
 
             with (
                 mock.patch.object(gate, "_validate_production_boundary"),
@@ -2219,6 +2254,11 @@ class AggregateGateTest(unittest.TestCase):
                     gate,
                     "validate_production_registry_boundary",
                     side_effect=boundary_validator,
+                ),
+                mock.patch.object(
+                    gate,
+                    "inspect_registry_image",
+                    side_effect=final_image_inspector,
                 ),
                 contextlib.redirect_stdout(io.StringIO()),
             ):
@@ -2243,9 +2283,17 @@ class AggregateGateTest(unittest.TestCase):
                 "build:no-cache",
                 "supply-chain",
                 "boundary:refresh",
+                "digest:cached",
+                "digest:no-cache",
             ],
         )
         self.assertEqual(report["runtime"]["productionRegistryBoundary"], refreshed_boundary)
+        self.assertEqual(
+            report["runtime"]["productionRegistryBoundary"]["liveRuntimeEvidence"][
+                "repositoryProbeStatus"
+            ],
+            200,
+        )
         self.assertIs(validator_options[0], validator_options[1])
         self.assertEqual(validator_state_dirs[0], validator_state_dirs[1])
         self.assertIs(validator_redactors[0], validator_redactors[1])
@@ -2283,6 +2331,11 @@ class AggregateGateTest(unittest.TestCase):
                     "validate_production_registry_boundary",
                     side_effect=[initial_boundary, OSError("live registry unavailable")],
                 ) as boundary_validator,
+                mock.patch.object(
+                    gate,
+                    "inspect_registry_image",
+                    return_value={},
+                ) as final_image_inspector,
                 contextlib.redirect_stdout(io.StringIO()),
             ):
                 exit_code = gate.run_registry_release_gate(
@@ -2297,11 +2350,96 @@ class AggregateGateTest(unittest.TestCase):
             self.assertFalse((output_dir / "_state").exists())
 
         self.assertEqual(boundary_validator.call_count, 2)
+        self.assertEqual(final_image_inspector.call_count, 0)
         self.assertEqual(exit_code, 1)
         self.assertEqual(report["status"], "fail")
         self.assertIn(
             "release.registry_production_boundary_refresh_failed",
             {error["code"] for error in report["errors"]},
+        )
+
+    def test_production_gate_fails_closed_when_final_digest_is_missing(self) -> None:
+        sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=REPO_ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        with tempfile.TemporaryDirectory() as directory:
+            output_dir = pathlib.Path(directory) / "gate"
+            gate_options = options(output_dir, signing_policy_profile="production")
+            initial_boundary = {
+                "liveRuntimeEvidence": {
+                    "collectedAt": "2026-07-20T00:00:00+00:00",
+                    "repositoryProbeStatus": 404,
+                    "runtimeEvidenceSha256": "a" * 64,
+                }
+            }
+            refreshed_boundary = {
+                "liveRuntimeEvidence": {
+                    "collectedAt": "2026-07-20T00:20:00+00:00",
+                    "repositoryProbeStatus": 200,
+                    "runtimeEvidenceSha256": "b" * 64,
+                }
+            }
+
+            def build_runner(_options: Any, **kwargs: Any) -> dict[str, Any]:
+                return sample_build(kwargs["slot"], kwargs["no_cache"])
+
+            with (
+                mock.patch.object(gate, "_validate_production_boundary"),
+                mock.patch.object(
+                    gate,
+                    "_prepare_host_registry_environment",
+                    return_value={},
+                ),
+                mock.patch.object(
+                    gate,
+                    "validate_production_registry_boundary",
+                    side_effect=[initial_boundary, refreshed_boundary],
+                ) as boundary_validator,
+                mock.patch.object(
+                    gate,
+                    "inspect_registry_image",
+                    side_effect=[
+                        {},
+                        gate.ReleaseGateError(
+                            "release.registry_index_invalid",
+                            "Worker Registry OCI index inspection failed.",
+                        ),
+                    ],
+                ) as final_image_inspector,
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                exit_code = gate.run_registry_release_gate(
+                    gate_options,
+                    repository_state=lambda _root: {"gitSha": sha, "worktreeDirty": False},
+                    runtime_inspector=lambda _options: {"builder": gate_options.builder},
+                    build_runner=build_runner,
+                    supply_chain_runner=lambda *_args, **_kwargs: production_supply_chain(),
+                )
+            report = json.loads((output_dir / gate.JSON_REPORT_NAME).read_text(encoding="utf-8"))
+
+            self.assertFalse((output_dir / "_state").exists())
+
+        self.assertEqual(boundary_validator.call_count, 2)
+        self.assertTrue(
+            boundary_validator.call_args_list[1].kwargs["require_repository"]
+        )
+        self.assertEqual(final_image_inspector.call_count, 2)
+        self.assertEqual(
+            [call.kwargs["image"] for call in final_image_inspector.call_args_list],
+            [
+                f"{gate_options.image_repository}@{'sha256:' + '0' * 64}",
+                f"{gate_options.image_repository}@{'sha256:' + '1' * 64}",
+            ],
+        )
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(report["status"], "fail")
+        self.assertEqual(
+            {error["code"] for error in report["errors"]},
+            {"release.registry_index_invalid"},
         )
 
     def test_production_gate_rejects_passing_report_without_signer_identity(self) -> None:

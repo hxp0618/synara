@@ -2301,6 +2301,7 @@ def _probe_live_registry_boundary(
     inputs: HostRegistryClientInputs,
     *,
     image_repository: str,
+    require_repository: bool = False,
 ) -> dict[str, Any]:
     unauth_status, unauth_headers, unauth_certificate_sha256 = _registry_https_request(
         inputs,
@@ -2348,7 +2349,8 @@ def _probe_live_registry_boundary(
             "release.registry_production_boundary_invalid",
             "The live Worker Registry TLS peer certificate drifted across repository probes.",
         )
-    if repository_status not in {200, 404}:
+    allowed_repository_statuses = {200} if require_repository else {200, 404}
+    if repository_status not in allowed_repository_statuses:
         raise ReleaseGateError(
             "release.registry_production_boundary_invalid",
             "The live Worker Registry did not prove the exact repository authority boundary.",
@@ -2439,6 +2441,7 @@ def _collect_live_registry_boundary_evidence(
     live_policy_sha256: str,
     checked_in_policy_sha256: str,
     expected_runtime_image_reference: str,
+    require_repository: bool = False,
 ) -> dict[str, Any]:
     if (
         options.production_registry_container is None
@@ -2519,6 +2522,7 @@ def _collect_live_registry_boundary_evidence(
     tls_probe = _probe_live_registry_boundary(
         client_inputs,
         image_repository=options.image_repository,
+        require_repository=require_repository,
     )
     if tls_probe["tlsPeerCertificateSha256"] != runtime_certificate_sha256:
         raise ReleaseGateError(
@@ -2561,6 +2565,7 @@ def _validate_live_registry_boundary_evidence(
     exported_config_sha256: str,
     live_policy_sha256: str,
     checked_in_policy_sha256: str,
+    require_repository: bool = False,
 ) -> dict[str, Any]:
     if not isinstance(evidence, Mapping):
         raise ReleaseGateError(
@@ -2628,6 +2633,7 @@ def _validate_live_registry_boundary_evidence(
             "Worker Registry live runtime image evidence was invalid.",
             {"field": "liveRuntimeEvidence.container.image"},
         )
+    allowed_repository_statuses = {200} if require_repository else {200, 404}
     if (
         evidence.get("registryHost") != registry_host
         or evidence.get("repositoryAuthority") != image_repository
@@ -2637,7 +2643,7 @@ def _validate_live_registry_boundary_evidence(
         or evidence.get("retentionPolicySha256") != live_policy_sha256
         or evidence.get("checkedInRetentionPolicySha256") != checked_in_policy_sha256
         or not isinstance(evidence.get("repositoryProbeStatus"), int)
-        or evidence["repositoryProbeStatus"] not in {200, 404}
+        or evidence["repositoryProbeStatus"] not in allowed_repository_statuses
     ):
         raise ReleaseGateError(
             "release.registry_production_boundary_invalid",
@@ -2707,6 +2713,7 @@ def validate_production_registry_boundary(
     state_dir: pathlib.Path | None = None,
     redactor: acceptance.SecretRedactor | None = None,
     runtime_evidence: Mapping[str, Any] | None = None,
+    require_repository: bool = False,
 ) -> dict[str, Any]:
     if options.signing_policy_profile != "production":
         return {}
@@ -2792,6 +2799,7 @@ def validate_production_registry_boundary(
             live_policy_sha256=live_policy_sha256,
             checked_in_policy_sha256=checked_in_policy_sha256,
             expected_runtime_image_reference=checked_in_policy["runtimeImage"],
+            require_repository=require_repository,
         )
     live_runtime_evidence = _validate_live_registry_boundary_evidence(
         runtime_evidence,
@@ -2801,6 +2809,7 @@ def validate_production_registry_boundary(
         exported_config_sha256=exported_config_sha256,
         live_policy_sha256=live_policy_sha256,
         checked_in_policy_sha256=checked_in_policy_sha256,
+        require_repository=require_repository,
     )
     return {
         "registryConfigPath": str(options.production_registry_config_path),
@@ -3043,17 +3052,21 @@ def run_registry_release_gate(
                 )
                 errors.append(error.as_report_error())
 
-    if (
+    production_report_candidate = (
         not errors
         and options.signing_policy_profile == "production"
         and len(builds) == 2
         and supply_chain_report.get("status") == "pass"
-    ):
+        and version is not None
+        and source_date_epoch is not None
+    )
+    if production_report_candidate:
         try:
             refreshed_production_registry_boundary = validate_production_registry_boundary(
                 options,
                 state_dir=state_dir,
                 redactor=redactor,
+                require_repository=True,
             )
             if not refreshed_production_registry_boundary:
                 raise ReleaseGateError(
@@ -3068,6 +3081,38 @@ def run_registry_release_gate(
                 else ReleaseGateError(
                     "release.registry_production_boundary_refresh_failed",
                     "Worker Registry final live runtime evidence refresh failed.",
+                )
+            )
+            errors.append(error.as_report_error())
+
+    if production_report_candidate and not errors:
+        try:
+            for build in builds:
+                registry_digest = build.get("registryDigest")
+                if (
+                    not isinstance(registry_digest, str)
+                    or SHA256_DIGEST_PATTERN.fullmatch(registry_digest) is None
+                ):
+                    raise ReleaseGateError(
+                        "release.registry_index_invalid",
+                        "Worker Registry final release evidence omitted a valid immutable index digest.",
+                        {"slot": build.get("slot")},
+                    )
+                inspect_registry_image(
+                    options,
+                    image=f"{options.image_repository}@{registry_digest}",
+                    expected_digest=registry_digest,
+                    git_sha=str(source["gitSha"]),
+                    version=version,
+                    source_date_epoch=source_date_epoch,
+                )
+        except (OSError, subprocess.SubprocessError, ReleaseGateError) as raw_error:
+            error = (
+                raw_error
+                if isinstance(raw_error, ReleaseGateError)
+                else ReleaseGateError(
+                    "release.registry_release_evidence_reinspection_failed",
+                    "Worker Registry final immutable release evidence inspection failed.",
                 )
             )
             errors.append(error.as_report_error())
