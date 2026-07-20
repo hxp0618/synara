@@ -18,6 +18,7 @@ interface ComposerPendingApprovalPanelProps {
   approval: PendingApproval;
   pendingCount: number;
   isResponding: boolean;
+  allowSessionDecision?: boolean;
   onRespond: (
     requestId: ApprovalRequestId,
     decision: ProviderApprovalDecision,
@@ -68,20 +69,32 @@ const APPROVAL_ACTIONS: ReadonlyArray<ApprovalAction> = [
   },
 ];
 
+export function availableApprovalActions(
+  allowSessionDecision: boolean,
+): ReadonlyArray<ApprovalAction> {
+  return allowSessionDecision
+    ? APPROVAL_ACTIONS
+    : APPROVAL_ACTIONS.filter((action) => action.decision !== "acceptForSession");
+}
+
 const KIND_PROMPT: Record<PendingApproval["requestKind"], string> = {
   command: "Approve this command?",
   "file-read": "Approve reading this file?",
   "file-change": "Approve this file change?",
+  tool: "Approve this tool action?",
+  network: "Approve this network request?",
 };
 
 export const ComposerPendingApprovalPanel = function ComposerPendingApprovalPanel({
   approval,
   pendingCount,
   isResponding,
+  allowSessionDecision = true,
   onRespond,
 }: ComposerPendingApprovalPanelProps) {
   const parsed = parseApprovalDetail(approval.detail);
   const requestId = approval.requestId;
+  const actions = availableApprovalActions(allowSessionDecision);
 
   // Digit shortcuts bubble from focused controls inside this card only; a bare
   // number key elsewhere in the app must never approve a tool request.
@@ -96,8 +109,8 @@ export const ComposerPendingApprovalPanel = function ComposerPendingApprovalPane
       return;
     }
     const digit = Number.parseInt(event.key, 10);
-    if (Number.isNaN(digit) || digit < 1 || digit > APPROVAL_ACTIONS.length) return;
-    const action = APPROVAL_ACTIONS[digit - 1];
+    if (Number.isNaN(digit) || digit < 1 || digit > actions.length) return;
+    const action = actions[digit - 1];
     if (!action) return;
     event.preventDefault();
     void onRespond(requestId, action.decision, approval.lifecycleGeneration);
@@ -125,7 +138,7 @@ export const ComposerPendingApprovalPanel = function ComposerPendingApprovalPane
       </div>
       <ApprovalDetail parsed={parsed} />
       <div className="mt-2.5 space-y-0.5">
-        {APPROVAL_ACTIONS.map((action, index) => (
+        {actions.map((action, index) => (
           <ComposerChoiceRow
             key={action.decision}
             shortcut={index + 1}

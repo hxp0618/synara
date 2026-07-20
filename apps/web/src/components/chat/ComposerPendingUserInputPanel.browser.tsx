@@ -55,7 +55,7 @@ function renderPanel(input?: {
   const element = (activePrompt: PendingUserInput, isResponding = false) => (
     <ComposerPendingUserInputPanel
       pendingUserInputs={[activePrompt]}
-      respondingRequestIds={isResponding ? [activePrompt.requestKey ?? activePrompt.requestId] : []}
+      isResponding={isResponding}
       answers={{}}
       questionIndex={0}
       onToggleOption={onToggleOption}

@@ -3742,6 +3742,7 @@ export default function ChatView({
       isServerThread &&
       activeThread?.session !== null &&
       activeThread?.session?.status !== "closed",
+    canOfferPlanCommand: true,
     canOfferReviewCommand,
     canOfferForkCommand,
     canOfferSideCommand,
@@ -9987,11 +9988,15 @@ export default function ChatView({
     activeRootBranch,
     isServerThread,
     supportsFastSlashCommand,
+    canUseLocalProviderCommands: true,
     canOfferCompactCommand:
       supportsThreadCompaction(providerComposerCapabilitiesQuery.data) &&
       isServerThread &&
       activeThread?.session !== null &&
       activeThread?.session?.status !== "closed",
+    canOfferPlanCommand: true,
+    canOfferReviewCommand,
+    canOfferForkCommand,
     canOfferSideCommand,
     canOfferExportCommand,
     supportsTextNativeReviewCommand,
@@ -11001,6 +11006,7 @@ export default function ChatView({
                         activePendingApproval.lifecycleGeneration,
                       ),
                     )}
+                    allowSessionDecision={activePendingApproval.executionId === undefined}
                     onRespond={onRespondToApproval}
                   />
                 </div>

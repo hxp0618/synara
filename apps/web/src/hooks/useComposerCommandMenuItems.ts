@@ -55,6 +55,7 @@ export function useComposerCommandMenuItems(input: {
   searchableModelOptions: readonly SearchableModelOption[];
   supportsFastSlashCommand: boolean;
   canOfferCompactCommand: boolean;
+  canOfferPlanCommand?: boolean;
   canOfferReviewCommand: boolean;
   canOfferForkCommand: boolean;
   canOfferSideCommand: boolean;
@@ -72,6 +73,7 @@ export function useComposerCommandMenuItems(input: {
     searchableModelOptions,
     supportsFastSlashCommand,
     canOfferCompactCommand,
+    canOfferPlanCommand = true,
     canOfferReviewCommand,
     canOfferForkCommand,
     canOfferSideCommand,
@@ -160,6 +162,7 @@ export function useComposerCommandMenuItems(input: {
       provider,
       supportsFastSlashCommand,
       canOfferCompactCommand,
+      canOfferPlanCommand,
       canOfferReviewCommand,
       canOfferForkCommand,
       canOfferSideCommand,
