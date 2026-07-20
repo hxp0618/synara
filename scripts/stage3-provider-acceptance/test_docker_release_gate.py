@@ -50,24 +50,32 @@ def sample_load_operator_approved_sla() -> dict[str, Any]:
     return {
         "requested": {
             "minimumDurationSeconds": 1800,
-            "latencyMs": {"p95Max": 10000, "p99Max": 15000},
-            "recoveryTimeMs": {"p95Max": 2000, "p99Max": 3000},
+            "controlPlaneAdmissionLatencyMs": {"p95Max": 1000, "p99Max": 2000},
+            "slotReuseAdmissionLatencyMs": {"p95Max": 2000, "p99Max": 3000},
             "unexpectedErrorRateMax": 0.0,
         },
         "metricMapping": {
             "minimumDurationSeconds": {"observedEvidencePath": "durationMs"},
-            "latencyMs.p95Max": {"observedEvidencePath": "turnLatencyMs.p95"},
-            "latencyMs.p99Max": {"observedEvidencePath": "turnLatencyMs.p99"},
-            "recoveryTimeMs.p95Max": {"observedEvidencePath": "admissionRecoveryMs.p95"},
-            "recoveryTimeMs.p99Max": {"observedEvidencePath": "admissionRecoveryMs.p99"},
+            "controlPlaneAdmissionLatencyMs.p95Max": {
+                "observedEvidencePath": "controlPlaneAdmissionLatencyMs.p95"
+            },
+            "controlPlaneAdmissionLatencyMs.p99Max": {
+                "observedEvidencePath": "controlPlaneAdmissionLatencyMs.p99"
+            },
+            "slotReuseAdmissionLatencyMs.p95Max": {
+                "observedEvidencePath": "slotReuseAdmissionLatencyMs.p95"
+            },
+            "slotReuseAdmissionLatencyMs.p99Max": {
+                "observedEvidencePath": "slotReuseAdmissionLatencyMs.p99"
+            },
             "unexpectedErrorRateMax": {"observedEvidencePath": "unexpectedErrorRate"},
         },
         "checks": [
             {"id": "minimumDurationSeconds", "status": "pass"},
-            {"id": "latencyMs.p95Max", "status": "pass"},
-            {"id": "latencyMs.p99Max", "status": "pass"},
-            {"id": "recoveryTimeMs.p95Max", "status": "pass"},
-            {"id": "recoveryTimeMs.p99Max", "status": "pass"},
+            {"id": "controlPlaneAdmissionLatencyMs.p95Max", "status": "pass"},
+            {"id": "controlPlaneAdmissionLatencyMs.p99Max", "status": "pass"},
+            {"id": "slotReuseAdmissionLatencyMs.p95Max", "status": "pass"},
+            {"id": "slotReuseAdmissionLatencyMs.p99Max", "status": "pass"},
             {"id": "unexpectedErrorRateMax", "status": "pass"},
         ],
         "enforced": True,
@@ -128,7 +136,34 @@ def sample_load_case_evidence(provider: str) -> dict[str, Any]:
         ),
         "durationMs": 1_800_000,
         "observedCompletedExecutionsPerSecond": 0.002,
-        "turnLatencyMs": {
+        "controlPlaneAdmissionLatencyMs": {
+            "sampleCount": 4,
+            "minimum": 40,
+            "maximum": 120,
+            "average": 80.0,
+            "p50": 80,
+            "p95": 120,
+            "p99": 120,
+        },
+        "slotReuseAdmissionLatencyMs": {
+            "sampleCount": 2,
+            "minimum": 80,
+            "maximum": 120,
+            "average": 100.0,
+            "p50": 80,
+            "p95": 120,
+            "p99": 120,
+        },
+        "interactionReadyLatencyMs": {
+            "sampleCount": 4,
+            "minimum": 5000,
+            "maximum": 8000,
+            "average": 6500.0,
+            "p50": 6000,
+            "p95": 8000,
+            "p99": 8000,
+        },
+        "turnCompletionLatencyMs": {
             "sampleCount": 4,
             "minimum": 9000,
             "maximum": 12000,
@@ -145,15 +180,6 @@ def sample_load_case_evidence(provider: str) -> dict[str, Any]:
             "p50": 1_800_000,
             "p95": 1_800_000,
             "p99": 1_800_000,
-        },
-        "admissionRecoveryMs": {
-            "sampleCount": 2,
-            "minimum": 1200,
-            "maximum": 1800,
-            "average": 1500.0,
-            "p50": 1200,
-            "p95": 1800,
-            "p99": 1800,
         },
         "sessionsEvidence": [
             {"sessionId": "session-1", "provider": provider},
@@ -192,7 +218,34 @@ def sample_load_case_evidence(provider: str) -> dict[str, Any]:
                         "durationMs": 100,
                     },
                 ],
-                "turnLatencyMs": {
+                "controlPlaneAdmissionLatencyMs": {
+                    "sampleCount": 4,
+                    "minimum": 40,
+                    "maximum": 120,
+                    "average": 80.0,
+                    "p50": 80,
+                    "p95": 120,
+                    "p99": 120,
+                },
+                "slotReuseAdmissionLatencyMs": {
+                    "sampleCount": 2,
+                    "minimum": 80,
+                    "maximum": 120,
+                    "average": 100.0,
+                    "p50": 80,
+                    "p95": 120,
+                    "p99": 120,
+                },
+                "interactionReadyLatencyMs": {
+                    "sampleCount": 4,
+                    "minimum": 5000,
+                    "maximum": 8000,
+                    "average": 6500.0,
+                    "p50": 6000,
+                    "p95": 8000,
+                    "p99": 8000,
+                },
+                "turnCompletionLatencyMs": {
                     "sampleCount": 4,
                     "minimum": 9000,
                     "maximum": 12000,

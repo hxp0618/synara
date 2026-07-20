@@ -1009,8 +1009,8 @@ class OperatorApprovedSlaPercentileThresholds:
 @dataclasses.dataclass(frozen=True)
 class OperatorApprovedSla:
     minimum_duration_seconds: float
-    latency_ms: OperatorApprovedSlaPercentileThresholds | None = None
-    recovery_time_ms: OperatorApprovedSlaPercentileThresholds | None = None
+    control_plane_admission_latency_ms: OperatorApprovedSlaPercentileThresholds | None = None
+    slot_reuse_admission_latency_ms: OperatorApprovedSlaPercentileThresholds | None = None
     unexpected_error_rate_max: float | None = None
 
     def __post_init__(self) -> None:
@@ -1038,10 +1038,14 @@ class OperatorApprovedSla:
         report: dict[str, Any] = {
             "minimumDurationSeconds": self.minimum_duration_seconds,
         }
-        if self.latency_ms is not None:
-            report["latencyMs"] = self.latency_ms.as_report()
-        if self.recovery_time_ms is not None:
-            report["recoveryTimeMs"] = self.recovery_time_ms.as_report()
+        if self.control_plane_admission_latency_ms is not None:
+            report["controlPlaneAdmissionLatencyMs"] = (
+                self.control_plane_admission_latency_ms.as_report()
+            )
+        if self.slot_reuse_admission_latency_ms is not None:
+            report["slotReuseAdmissionLatencyMs"] = (
+                self.slot_reuse_admission_latency_ms.as_report()
+            )
         if self.unexpected_error_rate_max is not None:
             report["unexpectedErrorRateMax"] = self.unexpected_error_rate_max
         return report
@@ -1140,7 +1144,11 @@ def parse_operator_approved_sla_file(
     load_suite = suite in {*FIXTURE_LOAD_SUITES, "real-provider-load"}
     allowed_keys = {"minimumDurationSeconds"}
     if load_suite:
-        allowed_keys |= {"latencyMs", "recoveryTimeMs", "unexpectedErrorRateMax"}
+        allowed_keys |= {
+            "controlPlaneAdmissionLatencyMs",
+            "slotReuseAdmissionLatencyMs",
+            "unexpectedErrorRateMax",
+        }
     decoded = _strict_json_object(
         payload,
         option,
@@ -1164,13 +1172,13 @@ def parse_operator_approved_sla_file(
             )
         return OperatorApprovedSla(
             minimum_duration_seconds=minimum_duration_seconds,
-            latency_ms=_parse_operator_approved_sla_percentiles(
-                decoded["latencyMs"],
-                f"{option}.latencyMs",
+            control_plane_admission_latency_ms=_parse_operator_approved_sla_percentiles(
+                decoded["controlPlaneAdmissionLatencyMs"],
+                f"{option}.controlPlaneAdmissionLatencyMs",
             ),
-            recovery_time_ms=_parse_operator_approved_sla_percentiles(
-                decoded["recoveryTimeMs"],
-                f"{option}.recoveryTimeMs",
+            slot_reuse_admission_latency_ms=_parse_operator_approved_sla_percentiles(
+                decoded["slotReuseAdmissionLatencyMs"],
+                f"{option}.slotReuseAdmissionLatencyMs",
             ),
             unexpected_error_rate_max=unexpected_error_rate_max,
         )
@@ -1185,21 +1193,25 @@ def operator_approved_sla_metric_mapping(suite: str) -> dict[str, Any] | None:
                 "observedEvidencePath": "durationMs",
                 "normalization": "durationMs / 1000",
             },
-            "latencyMs.p95Max": {
+            "controlPlaneAdmissionLatencyMs.p95Max": {
                 "comparison": "observed <= requested",
-                "observedEvidencePath": "turnLatencyMs.p95",
+                "observedEvidencePath": "controlPlaneAdmissionLatencyMs.p95",
+                "notes": "Measures POST /turns admission through the Synara control plane; Provider inference is excluded.",
             },
-            "latencyMs.p99Max": {
+            "controlPlaneAdmissionLatencyMs.p99Max": {
                 "comparison": "observed <= requested",
-                "observedEvidencePath": "turnLatencyMs.p99",
+                "observedEvidencePath": "controlPlaneAdmissionLatencyMs.p99",
+                "notes": "Measures POST /turns admission through the Synara control plane; Provider inference is excluded.",
             },
-            "recoveryTimeMs.p95Max": {
+            "slotReuseAdmissionLatencyMs.p95Max": {
                 "comparison": "observed <= requested",
-                "observedEvidencePath": "admissionRecoveryMs.p95",
+                "observedEvidencePath": "slotReuseAdmissionLatencyMs.p95",
+                "notes": "Measures the first successful admission after a saturated execution slot is released.",
             },
-            "recoveryTimeMs.p99Max": {
+            "slotReuseAdmissionLatencyMs.p99Max": {
                 "comparison": "observed <= requested",
-                "observedEvidencePath": "admissionRecoveryMs.p99",
+                "observedEvidencePath": "slotReuseAdmissionLatencyMs.p99",
+                "notes": "Measures the first successful admission after a saturated execution slot is released.",
             },
             "unexpectedErrorRateMax": {
                 "comparison": "observed <= requested",
@@ -1275,8 +1287,8 @@ def evaluate_operator_approved_sla(
     if metric_mapping is None:
         raise ValueError(f"operator-approved SLA is unsupported for suite {suite}")
     if suite == "fixture-soak" and (
-        requested.latency_ms is not None
-        or requested.recovery_time_ms is not None
+        requested.control_plane_admission_latency_ms is not None
+        or requested.slot_reuse_admission_latency_ms is not None
         or requested.unexpected_error_rate_max is not None
     ):
         raise ValueError(
@@ -1300,63 +1312,89 @@ def evaluate_operator_approved_sla(
     ]
 
     if suite in {*FIXTURE_LOAD_SUITES, "real-provider-load"}:
-        turn_latency = evidence.get("turnLatencyMs")
-        admission_recovery = evidence.get("admissionRecoveryMs")
-        turn_latency_summary = turn_latency if isinstance(turn_latency, Mapping) else {}
-        admission_recovery_summary = (
-            admission_recovery
-            if isinstance(admission_recovery, Mapping)
+        control_plane_admission_latency = evidence.get("controlPlaneAdmissionLatencyMs")
+        slot_reuse_admission_latency = evidence.get("slotReuseAdmissionLatencyMs")
+        control_plane_admission_latency_summary = (
+            control_plane_admission_latency
+            if isinstance(control_plane_admission_latency, Mapping)
             else {}
         )
-        latency_thresholds = requested.latency_ms
-        recovery_thresholds = requested.recovery_time_ms
+        slot_reuse_admission_latency_summary = (
+            slot_reuse_admission_latency
+            if isinstance(slot_reuse_admission_latency, Mapping)
+            else {}
+        )
+        control_plane_admission_thresholds = requested.control_plane_admission_latency_ms
+        slot_reuse_admission_thresholds = requested.slot_reuse_admission_latency_ms
         if (
-            latency_thresholds is None
-            or recovery_thresholds is None
+            control_plane_admission_thresholds is None
+            or slot_reuse_admission_thresholds is None
             or requested.unexpected_error_rate_max is None
         ):
-            raise ValueError("fixture-load operator-approved SLA requires latency, recovery, and error thresholds")
+            raise ValueError(
+                "fixture-load operator-approved SLA requires control-plane admission, slot-reuse admission, and error thresholds"
+            )
         checks.extend(
             [
                 _operator_approved_sla_check(
-                    "latencyMs.p95Max",
-                    latency_thresholds.p95_max,
-                    float(turn_latency_summary["p95"])
-                    if isinstance(turn_latency_summary.get("p95"), (int, float))
-                    and not isinstance(turn_latency_summary.get("p95"), bool)
+                    "controlPlaneAdmissionLatencyMs.p95Max",
+                    control_plane_admission_thresholds.p95_max,
+                    float(control_plane_admission_latency_summary["p95"])
+                    if isinstance(
+                        control_plane_admission_latency_summary.get("p95"),
+                        (int, float),
+                    )
+                    and not isinstance(
+                        control_plane_admission_latency_summary.get("p95"), bool
+                    )
                     else None,
                     comparison="observed <= requested",
-                    observed_evidence_path="turnLatencyMs.p95",
+                    observed_evidence_path="controlPlaneAdmissionLatencyMs.p95",
                 ),
                 _operator_approved_sla_check(
-                    "latencyMs.p99Max",
-                    latency_thresholds.p99_max,
-                    float(turn_latency_summary["p99"])
-                    if isinstance(turn_latency_summary.get("p99"), (int, float))
-                    and not isinstance(turn_latency_summary.get("p99"), bool)
+                    "controlPlaneAdmissionLatencyMs.p99Max",
+                    control_plane_admission_thresholds.p99_max,
+                    float(control_plane_admission_latency_summary["p99"])
+                    if isinstance(
+                        control_plane_admission_latency_summary.get("p99"),
+                        (int, float),
+                    )
+                    and not isinstance(
+                        control_plane_admission_latency_summary.get("p99"), bool
+                    )
                     else None,
                     comparison="observed <= requested",
-                    observed_evidence_path="turnLatencyMs.p99",
+                    observed_evidence_path="controlPlaneAdmissionLatencyMs.p99",
                 ),
                 _operator_approved_sla_check(
-                    "recoveryTimeMs.p95Max",
-                    recovery_thresholds.p95_max,
-                    float(admission_recovery_summary["p95"])
-                    if isinstance(admission_recovery_summary.get("p95"), (int, float))
-                    and not isinstance(admission_recovery_summary.get("p95"), bool)
+                    "slotReuseAdmissionLatencyMs.p95Max",
+                    slot_reuse_admission_thresholds.p95_max,
+                    float(slot_reuse_admission_latency_summary["p95"])
+                    if isinstance(
+                        slot_reuse_admission_latency_summary.get("p95"),
+                        (int, float),
+                    )
+                    and not isinstance(
+                        slot_reuse_admission_latency_summary.get("p95"), bool
+                    )
                     else None,
                     comparison="observed <= requested",
-                    observed_evidence_path="admissionRecoveryMs.p95",
+                    observed_evidence_path="slotReuseAdmissionLatencyMs.p95",
                 ),
                 _operator_approved_sla_check(
-                    "recoveryTimeMs.p99Max",
-                    recovery_thresholds.p99_max,
-                    float(admission_recovery_summary["p99"])
-                    if isinstance(admission_recovery_summary.get("p99"), (int, float))
-                    and not isinstance(admission_recovery_summary.get("p99"), bool)
+                    "slotReuseAdmissionLatencyMs.p99Max",
+                    slot_reuse_admission_thresholds.p99_max,
+                    float(slot_reuse_admission_latency_summary["p99"])
+                    if isinstance(
+                        slot_reuse_admission_latency_summary.get("p99"),
+                        (int, float),
+                    )
+                    and not isinstance(
+                        slot_reuse_admission_latency_summary.get("p99"), bool
+                    )
                     else None,
                     comparison="observed <= requested",
-                    observed_evidence_path="admissionRecoveryMs.p99",
+                    observed_evidence_path="slotReuseAdmissionLatencyMs.p99",
                 ),
                 _operator_approved_sla_check(
                     "unexpectedErrorRateMax",
@@ -13237,7 +13275,7 @@ class AcceptanceSuite:
             visible_label=f"load_wave_{wave_index + 1}_position_{position}",
         )
         started = time.monotonic()
-        turn = self._create_turn(
+        turn, control_plane_admission_latency_ms = self._create_turn_with_admission_latency(
             real_provider_approval_prompt(marker),
             runtime_mode="approval-required",
             session_id=session_id,
@@ -13270,7 +13308,8 @@ class AcceptanceSuite:
             "requestId": request_id,
             "requestKind": interaction_payload.get("requestKind"),
             "commandSummary": self.redactor.text(command[:256]),
-            "admissionMs": elapsed_ms(started),
+            "controlPlaneAdmissionLatencyMs": control_plane_admission_latency_ms,
+            "interactionReadyLatencyMs": elapsed_ms(started),
             "sessionSequenceBeforeTurn": session_sequence_before_turn,
             "turnStartedMonotonic": started,
             "targetExecution": dict(target_execution) if target_execution else None,
@@ -13701,7 +13740,7 @@ class AcceptanceSuite:
             "resolution": resolution,
             "sessionSequenceBeforeTurn": session_sequence_before_turn,
             "sessionSequenceAfterTurn": session_sequences[-1],
-            "turnLatencyMs": turn_latency_ms,
+            "turnCompletionLatencyMs": turn_latency_ms,
             "providerTurn": provider_turn,
             "commandItem": command_item,
             "eventTypeCounts": dict(sorted(event_type_counts.items())),
@@ -13732,8 +13771,10 @@ class AcceptanceSuite:
         }
         provider_execution_counts = {self.options.provider: 0}
         event_type_counts: dict[str, int] = {}
-        admission_recovery_ms: list[int] = []
-        turn_latency_ms: list[int] = []
+        control_plane_admission_latency_ms: list[int] = []
+        slot_reuse_admission_latency_ms: list[int] = []
+        interaction_ready_latency_ms: list[int] = []
+        turn_completion_latency_ms: list[int] = []
         quota_rejections = 0
         overlap_observations = 0
         restart_evidence: list[dict[str, Any]] = []
@@ -13800,7 +13841,9 @@ class AcceptanceSuite:
             worker_ids.add(str(terminal["workerId"]))
             session_execution_counts[str(terminal["sessionId"])] += 1
             provider_execution_counts[self.options.provider] += 1
-            turn_latency_ms.append(int(terminal["turnLatencyMs"]))
+            turn_completion_latency_ms.append(
+                int(terminal["turnCompletionLatencyMs"])
+            )
             terminal_counts = json_object(
                 terminal.get("eventTypeCounts"),
                 "real Provider load terminal event type counts",
@@ -13820,25 +13863,50 @@ class AcceptanceSuite:
                 self._start_real_provider_load_turn(ordered[0], wave_index, 1),
                 self._start_real_provider_load_turn(ordered[1], wave_index, 2),
             ]
+            wave_control_plane_admission_latency_ms: list[int] = []
+            wave_slot_reuse_admission_latency_ms: list[int] = []
+            wave_interaction_ready_latency_ms: list[int] = []
+            for load_turn in active:
+                admission_latency_ms, interaction_latency_ms = (
+                    self._record_load_start_latencies(
+                        load_turn,
+                        control_plane_admission_latency_ms,
+                        interaction_ready_latency_ms,
+                    )
+                )
+                wave_control_plane_admission_latency_ms.append(admission_latency_ms)
+                wave_interaction_ready_latency_ms.append(interaction_latency_ms)
             overlaps = [self._real_provider_load_overlap(active, "initial")]
             overlap_observations += 1
             worker_ids.update(overlaps[-1]["workerIds"])
             rejections: list[dict[str, Any]] = []
-            wave_turn_latency_ms: list[int] = []
+            wave_turn_completion_latency_ms: list[int] = []
 
             for position, session in enumerate(ordered[2:], start=3):
                 rejections.append(
                     self._assert_real_provider_load_quota_rejected(session, wave_index, position)
                 )
                 quota_rejections += 1
-                wave_turn_latency_ms.append(int(complete(active.pop(0))["turnLatencyMs"]))
+                wave_turn_completion_latency_ms.append(
+                    int(complete(active.pop(0))["turnCompletionLatencyMs"])
+                )
                 self._assert_real_provider_load_turn_pending(
                     active[0],
                     f"wave-{wave_index + 1}-before-position-{position}-admission",
                 )
-                recovery_started = time.monotonic()
-                active.append(self._start_real_provider_load_turn(session, wave_index, position))
-                admission_recovery_ms.append(elapsed_ms(recovery_started))
+                recovered = self._start_real_provider_load_turn(session, wave_index, position)
+                admission_latency_ms, interaction_latency_ms = (
+                    self._record_load_start_latencies(
+                        recovered,
+                        control_plane_admission_latency_ms,
+                        interaction_ready_latency_ms,
+                    )
+                )
+                slot_reuse_admission_latency_ms.append(admission_latency_ms)
+                wave_control_plane_admission_latency_ms.append(admission_latency_ms)
+                wave_slot_reuse_admission_latency_ms.append(admission_latency_ms)
+                wave_interaction_ready_latency_ms.append(interaction_latency_ms)
+                active.append(recovered)
                 overlaps.append(
                     self._real_provider_load_overlap(
                         active,
@@ -13848,12 +13916,16 @@ class AcceptanceSuite:
                 overlap_observations += 1
                 worker_ids.update(overlaps[-1]["workerIds"])
 
-            wave_turn_latency_ms.append(int(complete(active.pop(0))["turnLatencyMs"]))
+            wave_turn_completion_latency_ms.append(
+                int(complete(active.pop(0))["turnCompletionLatencyMs"])
+            )
             self._assert_real_provider_load_turn_pending(
                 active[0],
                 f"wave-{wave_index + 1}-before-final-terminal",
             )
-            wave_turn_latency_ms.append(int(complete(active.pop(0))["turnLatencyMs"]))
+            wave_turn_completion_latency_ms.append(
+                int(complete(active.pop(0))["turnCompletionLatencyMs"])
+            )
 
             for session in sessions:
                 pending = self._pending_interactions(str(session["sessionId"]))
@@ -13879,7 +13951,18 @@ class AcceptanceSuite:
                     overlap["targetExecutionIdentities"] for overlap in overlaps
                 ],
                 "quotaRejections": rejections,
-                "turnLatencyMs": duration_distribution_ms(wave_turn_latency_ms),
+                "controlPlaneAdmissionLatencyMs": duration_distribution_ms(
+                    wave_control_plane_admission_latency_ms
+                ),
+                "slotReuseAdmissionLatencyMs": duration_distribution_ms(
+                    wave_slot_reuse_admission_latency_ms
+                ),
+                "interactionReadyLatencyMs": duration_distribution_ms(
+                    wave_interaction_ready_latency_ms
+                ),
+                "turnCompletionLatencyMs": duration_distribution_ms(
+                    wave_turn_completion_latency_ms
+                ),
                 "durationMs": wave_duration_ms,
             }
             if completed_wave_count < 2:
@@ -14025,7 +14108,7 @@ class AcceptanceSuite:
             "distinctExecutionCount": len(execution_ids),
             "distinctWorkerCount": len(worker_ids),
             "quotaRejections": quota_rejections,
-            "admissionRetriesSucceeded": len(admission_recovery_ms),
+            "admissionRetriesSucceeded": len(slot_reuse_admission_latency_ms),
             "admissionAttempts": admission_attempts,
             "expectedQuotaRejectionRate": round(
                 quota_rejections / max(admission_attempts, 1),
@@ -14051,9 +14134,19 @@ class AcceptanceSuite:
                 len(execution_ids) / max(duration_ms / 1000.0, 0.001),
                 3,
             ),
-            "turnLatencyMs": duration_distribution_ms(turn_latency_ms),
+            "controlPlaneAdmissionLatencyMs": duration_distribution_ms(
+                control_plane_admission_latency_ms
+            ),
+            "slotReuseAdmissionLatencyMs": duration_distribution_ms(
+                slot_reuse_admission_latency_ms
+            ),
+            "interactionReadyLatencyMs": duration_distribution_ms(
+                interaction_ready_latency_ms
+            ),
+            "turnCompletionLatencyMs": duration_distribution_ms(
+                turn_completion_latency_ms
+            ),
             "waveDurationMs": duration_distribution_ms(wave_durations_ms),
-            "admissionRecoveryMs": duration_distribution_ms(admission_recovery_ms),
             "sessionsEvidence": [dict(session) for session in sessions],
             "waveSamples": wave_samples,
         }
@@ -14780,8 +14873,10 @@ class AcceptanceSuite:
         event_type_counts: dict[str, int] = {}
         quota_rejections = 0
         overlap_observations = 0
-        admission_recovery_ms: list[int] = []
-        turn_latency_ms: list[int] = []
+        control_plane_admission_latency_ms: list[int] = []
+        slot_reuse_admission_latency_ms: list[int] = []
+        interaction_ready_latency_ms: list[int] = []
+        turn_completion_latency_ms: list[int] = []
         wave_durations_ms: list[int] = []
         first_wave_samples: list[dict[str, Any]] = []
         last_wave_samples: list[dict[str, Any]] = []
@@ -14792,7 +14887,9 @@ class AcceptanceSuite:
             terminal = self._complete_fixture_load_turn(load_turn)
             if terminal_validator is not None:
                 terminal_validator(load_turn, terminal)
-            turn_latency_ms.append(int(terminal["turnLatencyMs"]))
+            turn_completion_latency_ms.append(
+                int(terminal["turnCompletionLatencyMs"])
+            )
             self._accumulate_fixture_load_terminal(
                 terminal,
                 execution_ids,
@@ -14826,11 +14923,24 @@ class AcceptanceSuite:
                 start(ordered[0], wave_index, 1),
                 start(ordered[1], wave_index, 2),
             ]
+            wave_control_plane_admission_latency_ms: list[int] = []
+            wave_slot_reuse_admission_latency_ms: list[int] = []
+            wave_interaction_ready_latency_ms: list[int] = []
+            for load_turn in active:
+                admission_latency_ms, interaction_latency_ms = (
+                    self._record_load_start_latencies(
+                        load_turn,
+                        control_plane_admission_latency_ms,
+                        interaction_ready_latency_ms,
+                    )
+                )
+                wave_control_plane_admission_latency_ms.append(admission_latency_ms)
+                wave_interaction_ready_latency_ms.append(interaction_latency_ms)
             overlaps = [self._fixture_load_overlap(active, wave_index, "initial")]
             overlap_observations += 1
             worker_ids.update(overlaps[-1]["workerIds"])
             rejections: list[dict[str, Any]] = []
-            wave_turn_latency_ms: list[int] = []
+            wave_turn_completion_latency_ms: list[int] = []
 
             for position, session in enumerate(ordered[2:], start=3):
                 rejections.append(
@@ -14842,21 +14952,31 @@ class AcceptanceSuite:
                 )
                 quota_rejections += 1
                 complete(active.pop(0))
-                wave_turn_latency_ms.append(turn_latency_ms[-1])
+                wave_turn_completion_latency_ms.append(
+                    turn_completion_latency_ms[-1]
+                )
                 self._assert_fixture_load_turn_pending(
                     active[0],
                     wave_index,
                     f"before-position-{position}-admission",
                 )
-                recovery_started = time.monotonic()
-                active.append(
-                    start(
-                        session,
-                        wave_index,
-                        position,
+                recovered = start(
+                    session,
+                    wave_index,
+                    position,
+                )
+                admission_latency_ms, interaction_latency_ms = (
+                    self._record_load_start_latencies(
+                        recovered,
+                        control_plane_admission_latency_ms,
+                        interaction_ready_latency_ms,
                     )
                 )
-                admission_recovery_ms.append(elapsed_ms(recovery_started))
+                slot_reuse_admission_latency_ms.append(admission_latency_ms)
+                wave_control_plane_admission_latency_ms.append(admission_latency_ms)
+                wave_slot_reuse_admission_latency_ms.append(admission_latency_ms)
+                wave_interaction_ready_latency_ms.append(interaction_latency_ms)
+                active.append(recovered)
                 overlaps.append(
                     self._fixture_load_overlap(
                         active,
@@ -14868,14 +14988,14 @@ class AcceptanceSuite:
                 worker_ids.update(overlaps[-1]["workerIds"])
 
             complete(active.pop(0))
-            wave_turn_latency_ms.append(turn_latency_ms[-1])
+            wave_turn_completion_latency_ms.append(turn_completion_latency_ms[-1])
             self._assert_fixture_load_turn_pending(
                 active[0],
                 wave_index,
                 "before-final-terminal",
             )
             complete(active.pop(0))
-            wave_turn_latency_ms.append(turn_latency_ms[-1])
+            wave_turn_completion_latency_ms.append(turn_completion_latency_ms[-1])
 
             for session in sessions:
                 pending = self._pending_interactions(str(session["sessionId"]))
@@ -14898,7 +15018,18 @@ class AcceptanceSuite:
                 "providerOrder": [str(session["provider"]) for session in ordered],
                 "overlapWorkerIds": [overlap["workerIds"] for overlap in overlaps],
                 "quotaRejections": rejections,
-                "turnLatencyMs": duration_distribution_ms(wave_turn_latency_ms),
+                "controlPlaneAdmissionLatencyMs": duration_distribution_ms(
+                    wave_control_plane_admission_latency_ms
+                ),
+                "slotReuseAdmissionLatencyMs": duration_distribution_ms(
+                    wave_slot_reuse_admission_latency_ms
+                ),
+                "interactionReadyLatencyMs": duration_distribution_ms(
+                    wave_interaction_ready_latency_ms
+                ),
+                "turnCompletionLatencyMs": duration_distribution_ms(
+                    wave_turn_completion_latency_ms
+                ),
                 "durationMs": wave_duration,
             }
             if local_wave_index < 2:
@@ -14985,7 +15116,7 @@ class AcceptanceSuite:
             "expectedDistinctWorkerCount": expected_distinct_workers,
             "distinctWorkerCount": len(worker_ids),
             "quotaRejections": quota_rejections,
-            "admissionRetriesSucceeded": len(admission_recovery_ms),
+            "admissionRetriesSucceeded": len(slot_reuse_admission_latency_ms),
             "admissionAttempts": admission_attempts,
             "expectedQuotaRejectionRate": round(
                 quota_rejections / max(admission_attempts, 1),
@@ -15011,9 +15142,19 @@ class AcceptanceSuite:
                 len(execution_ids) / max(duration_ms / 1000.0, 0.001),
                 3,
             ),
-            "turnLatencyMs": duration_distribution_ms(turn_latency_ms),
+            "controlPlaneAdmissionLatencyMs": duration_distribution_ms(
+                control_plane_admission_latency_ms
+            ),
+            "slotReuseAdmissionLatencyMs": duration_distribution_ms(
+                slot_reuse_admission_latency_ms
+            ),
+            "interactionReadyLatencyMs": duration_distribution_ms(
+                interaction_ready_latency_ms
+            ),
+            "turnCompletionLatencyMs": duration_distribution_ms(
+                turn_completion_latency_ms
+            ),
             "waveDurationMs": duration_distribution_ms(wave_durations_ms),
-            "admissionRecoveryMs": duration_distribution_ms(admission_recovery_ms),
             "sessionsEvidence": [
                 {
                     "sessionId": session["sessionId"],
@@ -15098,7 +15239,7 @@ class AcceptanceSuite:
         session_id = str(session["sessionId"])
         provider = str(session["provider"])
         started = time.monotonic()
-        turn = self._create_turn(
+        turn, control_plane_admission_latency_ms = self._create_turn_with_admission_latency(
             "[text] [tool] [usage] [artifact] [credential] [approval] "
             f"fixture-load-wave-{wave_index + 1}-position-{position}",
             session_id=session_id,
@@ -15121,7 +15262,8 @@ class AcceptanceSuite:
             "turn": turn,
             "interaction": interaction,
             "active": active,
-            "admissionMs": elapsed_ms(started),
+            "controlPlaneAdmissionLatencyMs": control_plane_admission_latency_ms,
+            "interactionReadyLatencyMs": elapsed_ms(started),
             "turnStartedMonotonic": started,
         }
 
@@ -15358,7 +15500,7 @@ class AcceptanceSuite:
             "workerId": terminal_worker_id,
             "generation": terminal_generation,
             "resolution": resolution,
-            "turnLatencyMs": turn_latency_ms,
+            "turnCompletionLatencyMs": turn_latency_ms,
             "eventTypeCounts": dict(sorted(event_type_counts.items())),
             "sequenceRange": self._sequence_range(events),
         }
@@ -16697,6 +16839,55 @@ class AcceptanceSuite:
             ),
             "turn",
         )
+
+    def _create_turn_with_admission_latency(
+        self,
+        input_text: str,
+        *,
+        runtime_mode: str = "full-access",
+        interaction_mode: str = "default",
+        session_id: str | None = None,
+    ) -> tuple[dict[str, Any], int]:
+        started = time.monotonic()
+        turn = self._create_turn(
+            input_text,
+            runtime_mode=runtime_mode,
+            interaction_mode=interaction_mode,
+            session_id=session_id,
+        )
+        return turn, elapsed_ms(started)
+
+    @staticmethod
+    def _record_load_start_latencies(
+        load_turn: Mapping[str, Any],
+        control_plane_admission_latencies_ms: list[int],
+        interaction_ready_latencies_ms: list[int],
+    ) -> tuple[int, int]:
+        control_plane_admission_latency_ms = load_turn.get(
+            "controlPlaneAdmissionLatencyMs"
+        )
+        interaction_ready_latency_ms = load_turn.get("interactionReadyLatencyMs")
+        if (
+            isinstance(control_plane_admission_latency_ms, bool)
+            or not isinstance(control_plane_admission_latency_ms, int)
+            or control_plane_admission_latency_ms < 0
+            or isinstance(interaction_ready_latency_ms, bool)
+            or not isinstance(interaction_ready_latency_ms, int)
+            or interaction_ready_latency_ms < control_plane_admission_latency_ms
+        ):
+            raise AcceptanceError(
+                "runner.load_admission_latency_invalid",
+                "A load Turn omitted monotonic control-plane admission or interaction-ready latency.",
+                {
+                    "controlPlaneAdmissionLatencyMs": control_plane_admission_latency_ms,
+                    "interactionReadyLatencyMs": interaction_ready_latency_ms,
+                },
+            )
+        control_plane_admission_latencies_ms.append(
+            control_plane_admission_latency_ms
+        )
+        interaction_ready_latencies_ms.append(interaction_ready_latency_ms)
+        return control_plane_admission_latency_ms, interaction_ready_latency_ms
 
     @staticmethod
     def _turn_id(turn: Mapping[str, Any], description: str) -> str:

@@ -129,9 +129,12 @@
   clean SHA `e2d70fb6` 已补齐最短持续时间、最大波次安全上限、P50/P95/P99、成功率/意外错误率和资源档位
   的统一测量机制，并在 `1 CPU/2 GiB × 2 Worker`、Tenant quota `2` 下完成 `304.201s`、`56` 波、`224`
   Execution 的 deterministic Docker gate。操作人已授权按行业标准给出资源绑定的生产基线；当前
-  `deploy/worker/production-load-sla.json` 固定最短 `1800s`、Turn latency P95/P99 `10s/15s`、slot recovery
-  P95/P99 `2s/3s` 与 unexpected error rate `0`。生产 SLA gate 在当前 clean SHA 正式执行前继续保持 open；
-  该测量不能被写成生产 SLA 已通过。完整前序证据见
+  `deploy/worker/production-load-sla.json` 固定最短 `1800s`、Control Plane admission P95/P99 `1s/2s`、
+  饱和槽位释放后的 slot-reuse admission P95/P99 `2s/3s` 与 unexpected error rate `0`。两个 admission
+  时钟都在 `POST /turns` 返回 `201` 时停止，不把第三方 API、自定义模型推理或生成 Approval interaction
+  的时间伪装成 Synara 控制面 SLI；后两者仍以 `interactionReadyLatencyMs` / `turnCompletionLatencyMs`
+  强制记录 P50/P95/P99，供 Provider profile 容量规划。生产 SLA gate 在当前 clean SHA 正式执行前继续
+  保持 open；该测量不能被写成生产 SLA 已通过。完整前序证据见
   `docs/reports/stage-3-docker-resource-profiled-load-e2d70fb6.md`。
 - 生产镜像签名已批准使用自建三节点 Vault Transit KMS：KMS reference
   `hashivault://synara-worker-release`，Credential 环境变量名 `VAULT_ADDR` / `VAULT_TOKEN` /

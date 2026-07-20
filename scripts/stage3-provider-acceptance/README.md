@@ -338,9 +338,13 @@ It opens four Sessions, keeps two Approval Turns active at once, requires exact 
 rejection for the third and fourth admissions, and then requires immediate slot reuse after the first two Turns
 resolve. The consolidated Docker and Kubernetes release gates additionally require
 `deploy/worker/production-load-sla.json`: each Provider load child runs for at least 1800 seconds, enforces the
-checked-in P95/P99 latency and recovery bounds with zero unexpected errors, and restarts the Control Plane every 10
-completed waves before verifying continued native-Cursor execution. This load slice still does not replace the
-separate failure-injection matrix, production-duration Retention, or soak evidence.
+checked-in P95/P99 Synara control-plane admission and post-saturation slot-reuse admission bounds with zero
+unexpected errors, and restarts the Control Plane every 10 completed waves before verifying continued native-Cursor
+execution. The enforced clocks stop when `POST /turns` returns `201`; third-party Provider inference is deliberately
+excluded. `interactionReadyLatencyMs` and `turnCompletionLatencyMs` remain mandatory P50/P95/P99 evidence for
+capacity planning, but a generic platform gate does not claim those model-dependent measurements are controlled by
+Synara. This load slice still does not replace the separate failure-injection matrix, production-duration Retention,
+or soak evidence.
 
 Like remote smoke, pass only environment-variable names on the command line. The runner reads the values only when
 creating the isolated Provider Credential, redacts them before any report write, and persists only the resolved

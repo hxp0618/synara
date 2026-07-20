@@ -604,7 +604,7 @@ class KubernetesRealProviderReleaseRolloutSuite(
         )
         expected_command = acceptance.real_provider_approval_command(marker)
         started = time.monotonic()
-        turn = self._create_turn(
+        turn, control_plane_admission_latency_ms = self._create_turn_with_admission_latency(
             real_provider_rollout_approval_prompt(marker),
             runtime_mode="approval-required",
             session_id=session_id,
@@ -633,7 +633,8 @@ class KubernetesRealProviderReleaseRolloutSuite(
             "requestId": request_id,
             "requestKind": interaction_payload.get("requestKind"),
             "commandSummary": self.redactor.text(command[:256]),
-            "admissionMs": acceptance.elapsed_ms(started),
+            "controlPlaneAdmissionLatencyMs": control_plane_admission_latency_ms,
+            "interactionReadyLatencyMs": acceptance.elapsed_ms(started),
             "sessionSequenceBeforeTurn": session_sequence_before_turn,
             "turnStartedMonotonic": started,
             "targetExecution": None,
@@ -925,8 +926,10 @@ class KubernetesRealProviderReleaseRolloutSuite(
         runtime_checks = 0
         quota_rejections = 0
         overlap_observations = 0
-        admission_recovery_ms: list[int] = []
-        turn_latency_ms: list[int] = []
+        control_plane_admission_latency_ms: list[int] = []
+        slot_reuse_admission_latency_ms: list[int] = []
+        interaction_ready_latency_ms: list[int] = []
+        turn_completion_latency_ms: list[int] = []
         wave_durations_ms: list[int] = []
         first_wave_samples: list[dict[str, Any]] = []
         last_wave_samples: list[dict[str, Any]] = []
@@ -1149,7 +1152,9 @@ class KubernetesRealProviderReleaseRolloutSuite(
                 }
             )
             session_execution_counts[session_id] += 1
-            turn_latency_ms.append(int(terminal["turnLatencyMs"]))
+            turn_completion_latency_ms.append(
+                int(terminal["turnCompletionLatencyMs"])
+            )
             terminal_checks += 1
             counts = acceptance.json_object(
                 terminal.get("eventTypeCounts"),
@@ -1187,12 +1192,25 @@ class KubernetesRealProviderReleaseRolloutSuite(
                 start(ordered[0], global_wave_index, phase_wave_index, 1),
                 start(ordered[1], global_wave_index, phase_wave_index, 2),
             ]
+            wave_control_plane_admission_latency_ms: list[int] = []
+            wave_slot_reuse_admission_latency_ms: list[int] = []
+            wave_interaction_ready_latency_ms: list[int] = []
+            for load_turn in active:
+                admission_latency_ms, interaction_latency_ms = (
+                    self._record_load_start_latencies(
+                        load_turn,
+                        control_plane_admission_latency_ms,
+                        interaction_ready_latency_ms,
+                    )
+                )
+                wave_control_plane_admission_latency_ms.append(admission_latency_ms)
+                wave_interaction_ready_latency_ms.append(interaction_latency_ms)
             overlaps = [
                 observe_overlap(active, f"wave-{global_wave_index + 1}-initial")
             ]
             overlap_observations += 1
             rejections: list[dict[str, Any]] = []
-            wave_turn_latency_ms: list[int] = []
+            wave_turn_completion_latency_ms: list[int] = []
             for position, session in enumerate(ordered[2:], start=3):
                 rejections.append(
                     self._assert_real_provider_load_quota_rejected(
@@ -1202,21 +1220,31 @@ class KubernetesRealProviderReleaseRolloutSuite(
                     )
                 )
                 quota_rejections += 1
-                wave_turn_latency_ms.append(int(complete(active.pop(0))["turnLatencyMs"]))
+                wave_turn_completion_latency_ms.append(
+                    int(complete(active.pop(0))["turnCompletionLatencyMs"])
+                )
                 self._assert_real_provider_load_turn_pending(
                     active[0],
                     f"wave-{global_wave_index + 1}-before-position-{position}-admission",
                 )
-                recovery_started = time.monotonic()
-                active.append(
-                    start(
-                        session,
-                        global_wave_index,
-                        phase_wave_index,
-                        position,
+                recovered = start(
+                    session,
+                    global_wave_index,
+                    phase_wave_index,
+                    position,
+                )
+                admission_latency_ms, interaction_latency_ms = (
+                    self._record_load_start_latencies(
+                        recovered,
+                        control_plane_admission_latency_ms,
+                        interaction_ready_latency_ms,
                     )
                 )
-                admission_recovery_ms.append(acceptance.elapsed_ms(recovery_started))
+                slot_reuse_admission_latency_ms.append(admission_latency_ms)
+                wave_control_plane_admission_latency_ms.append(admission_latency_ms)
+                wave_slot_reuse_admission_latency_ms.append(admission_latency_ms)
+                wave_interaction_ready_latency_ms.append(interaction_latency_ms)
+                active.append(recovered)
                 overlaps.append(
                     observe_overlap(
                         active,
@@ -1226,12 +1254,16 @@ class KubernetesRealProviderReleaseRolloutSuite(
                     )
                 )
                 overlap_observations += 1
-            wave_turn_latency_ms.append(int(complete(active.pop(0))["turnLatencyMs"]))
+            wave_turn_completion_latency_ms.append(
+                int(complete(active.pop(0))["turnCompletionLatencyMs"])
+            )
             self._assert_real_provider_load_turn_pending(
                 active[0],
                 f"wave-{global_wave_index + 1}-before-final-terminal",
             )
-            wave_turn_latency_ms.append(int(complete(active.pop(0))["turnLatencyMs"]))
+            wave_turn_completion_latency_ms.append(
+                int(complete(active.pop(0))["turnCompletionLatencyMs"])
+            )
             for session in sessions:
                 pending = self._pending_interactions(str(session["sessionId"]))
                 if pending:
@@ -1259,7 +1291,18 @@ class KubernetesRealProviderReleaseRolloutSuite(
                     overlap["targetExecutionIdentities"] for overlap in overlaps
                 ],
                 "quotaRejections": rejections,
-                "turnLatencyMs": acceptance.duration_distribution_ms(wave_turn_latency_ms),
+                "controlPlaneAdmissionLatencyMs": acceptance.duration_distribution_ms(
+                    wave_control_plane_admission_latency_ms
+                ),
+                "slotReuseAdmissionLatencyMs": acceptance.duration_distribution_ms(
+                    wave_slot_reuse_admission_latency_ms
+                ),
+                "interactionReadyLatencyMs": acceptance.duration_distribution_ms(
+                    wave_interaction_ready_latency_ms
+                ),
+                "turnCompletionLatencyMs": acceptance.duration_distribution_ms(
+                    wave_turn_completion_latency_ms
+                ),
                 "durationMs": wave_duration_ms,
             }
             if completed_wave_count < 2:
@@ -1365,7 +1408,7 @@ class KubernetesRealProviderReleaseRolloutSuite(
             "distinctNodeCount": len(node_names),
             "distinctNodeNames": sorted(node_names),
             "quotaRejections": quota_rejections,
-            "admissionRetriesSucceeded": len(admission_recovery_ms),
+            "admissionRetriesSucceeded": len(slot_reuse_admission_latency_ms),
             "admissionAttempts": admission_attempts,
             "expectedQuotaRejectionRate": round(
                 quota_rejections / max(admission_attempts, 1),
@@ -1391,9 +1434,19 @@ class KubernetesRealProviderReleaseRolloutSuite(
                 len(execution_ids) / max(duration_ms / 1000.0, 0.001),
                 3,
             ),
-            "turnLatencyMs": acceptance.duration_distribution_ms(turn_latency_ms),
+            "controlPlaneAdmissionLatencyMs": acceptance.duration_distribution_ms(
+                control_plane_admission_latency_ms
+            ),
+            "slotReuseAdmissionLatencyMs": acceptance.duration_distribution_ms(
+                slot_reuse_admission_latency_ms
+            ),
+            "interactionReadyLatencyMs": acceptance.duration_distribution_ms(
+                interaction_ready_latency_ms
+            ),
+            "turnCompletionLatencyMs": acceptance.duration_distribution_ms(
+                turn_completion_latency_ms
+            ),
             "waveDurationMs": acceptance.duration_distribution_ms(wave_durations_ms),
-            "admissionRecoveryMs": acceptance.duration_distribution_ms(admission_recovery_ms),
             "sessionsEvidence": [dict(session) for session in sessions],
             "sessionResumeContinuity": resume_continuity,
             "waveSamples": wave_samples,
@@ -1685,7 +1738,7 @@ class KubernetesRealProviderReleaseRolloutSuite(
             "commandItemVerified": isinstance(resolution.get("commandItem"), Mapping),
             "sessionSequenceBeforeTurn": session_sequence_before_turn,
             "sessionSequenceAfterTurn": session_sequences[-1],
-            "turnLatencyMs": acceptance.elapsed_ms(turn_started_monotonic),
+            "turnCompletionLatencyMs": acceptance.elapsed_ms(turn_started_monotonic),
             "targetTerminal": dict(target_terminal) if target_terminal else None,
             "release": release,
         }

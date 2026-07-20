@@ -1,10 +1,10 @@
 {
   "minimumDurationSeconds": 1800,
-  "latencyMs": {
-    "p95Max": 10000,
-    "p99Max": 15000
+  "controlPlaneAdmissionLatencyMs": {
+    "p95Max": 1000,
+    "p99Max": 2000
   },
-  "recoveryTimeMs": {
+  "slotReuseAdmissionLatencyMs": {
     "p95Max": 2000,
     "p99Max": 3000
   },

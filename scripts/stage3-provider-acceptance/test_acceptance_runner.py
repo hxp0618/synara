@@ -3214,7 +3214,9 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
         self.assertTrue(evidence["durationTargetMet"])
         self.assertEqual(evidence["waveDurationMs"]["sampleCount"], 2)
         self.assertIn("p95", evidence["waveDurationMs"])
-        self.assertIn("p99", evidence["admissionRecoveryMs"])
+        self.assertIn("p99", evidence["slotReuseAdmissionLatencyMs"])
+        self.assertEqual(evidence["controlPlaneAdmissionLatencyMs"]["sampleCount"], 8)
+        self.assertEqual(evidence["interactionReadyLatencyMs"]["sampleCount"], 8)
         self.assertEqual(
             evidence["resourceProfile"]["dockerWorker"],
             {"memoryBytes": 2 << 30, "nanoCpus": 1_000_000_000},
@@ -3228,11 +3230,11 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
             suite.options,
             operator_approved_sla=acceptance.OperatorApprovedSla(
                 minimum_duration_seconds=0.01,
-                latency_ms=acceptance.OperatorApprovedSlaPercentileThresholds(
+                control_plane_admission_latency_ms=acceptance.OperatorApprovedSlaPercentileThresholds(
                     p95_max=10.0,
                     p99_max=10.0,
                 ),
-                recovery_time_ms=acceptance.OperatorApprovedSlaPercentileThresholds(
+                slot_reuse_admission_latency_ms=acceptance.OperatorApprovedSlaPercentileThresholds(
                     p95_max=10.0,
                     p99_max=10.0,
                 ),
@@ -3245,13 +3247,19 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
 
         summary = evidence["operatorApprovedSla"]
         self.assertTrue(summary["enforced"])
-        self.assertEqual(evidence["turnLatencyMs"]["sampleCount"], 8)
+        self.assertEqual(evidence["turnCompletionLatencyMs"]["sampleCount"], 8)
         self.assertEqual(
             summary["requested"],
             {
                 "minimumDurationSeconds": 0.01,
-                "latencyMs": {"p95Max": 10.0, "p99Max": 10.0},
-                "recoveryTimeMs": {"p95Max": 10.0, "p99Max": 10.0},
+                "controlPlaneAdmissionLatencyMs": {
+                    "p95Max": 10.0,
+                    "p99Max": 10.0,
+                },
+                "slotReuseAdmissionLatencyMs": {
+                    "p95Max": 10.0,
+                    "p99Max": 10.0,
+                },
                 "unexpectedErrorRateMax": 0.0,
             },
         )
@@ -3266,11 +3274,11 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
             suite.options,
             operator_approved_sla=acceptance.OperatorApprovedSla(
                 minimum_duration_seconds=0.01,
-                latency_ms=acceptance.OperatorApprovedSlaPercentileThresholds(
+                control_plane_admission_latency_ms=acceptance.OperatorApprovedSlaPercentileThresholds(
                     p95_max=9.0,
                     p99_max=9.0,
                 ),
-                recovery_time_ms=acceptance.OperatorApprovedSlaPercentileThresholds(
+                slot_reuse_admission_latency_ms=acceptance.OperatorApprovedSlaPercentileThresholds(
                     p95_max=10.0,
                     p99_max=10.0,
                 ),
@@ -3291,11 +3299,16 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
                 for check in summary["checks"]
                 if check["status"] == "fail"
             },
-            {"latencyMs.p95Max", "latencyMs.p99Max"},
+            {
+                "controlPlaneAdmissionLatencyMs.p95Max",
+                "controlPlaneAdmissionLatencyMs.p99Max",
+            },
         )
         self.assertEqual(
-            summary["metricMapping"]["latencyMs.p95Max"]["observedEvidencePath"],
-            "turnLatencyMs.p95",
+            summary["metricMapping"]["controlPlaneAdmissionLatencyMs.p95Max"][
+                "observedEvidencePath"
+            ],
+            "controlPlaneAdmissionLatencyMs.p95",
         )
 
     def test_fixture_load_fails_when_duration_safety_bound_is_exhausted(self) -> None:
@@ -3331,9 +3344,11 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
         self.assertEqual(evidence["eventTypeCounts"]["execution.completed"], 4)
         self.assertEqual(evidence["eventTypeCounts"]["request.opened"], 4)
         self.assertEqual(evidence["eventTypeCounts"]["request.resolved"], 4)
-        self.assertEqual(evidence["turnLatencyMs"]["sampleCount"], 4)
+        self.assertEqual(evidence["turnCompletionLatencyMs"]["sampleCount"], 4)
+        self.assertEqual(evidence["controlPlaneAdmissionLatencyMs"]["sampleCount"], 4)
+        self.assertEqual(evidence["interactionReadyLatencyMs"]["sampleCount"], 4)
         self.assertEqual(evidence["waveDurationMs"]["sampleCount"], 1)
-        self.assertEqual(evidence["admissionRecoveryMs"]["sampleCount"], 2)
+        self.assertEqual(evidence["slotReuseAdmissionLatencyMs"]["sampleCount"], 2)
         self.assertEqual(
             [entry["reasonCode"] for entry in evidence["waveSamples"][0]["quotaRejections"]],
             ["execution_quota_exceeded", "execution_quota_exceeded"],
@@ -3347,17 +3362,29 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
         self.assertFalse(evidence["doubleExecution"])
         self.assertFalse(evidence["duplicateTerminal"])
 
+    def test_real_provider_load_separates_admission_from_interaction_ready_latency(
+        self,
+    ) -> None:
+        suite = RealProviderLoadSuite()
+        session = suite._real_provider_load_sessions()[0]
+
+        with mock.patch.object(acceptance, "elapsed_ms", side_effect=[25, 7_000]):
+            started = suite._start_real_provider_load_turn(session, 0, 1)
+
+        self.assertEqual(started["controlPlaneAdmissionLatencyMs"], 25)
+        self.assertEqual(started["interactionReadyLatencyMs"], 7_000)
+
     def test_real_provider_load_records_operator_approved_sla_checks(self) -> None:
         suite = RealProviderLoadSuite()
         suite.options = dataclasses.replace(
             suite.options,
             operator_approved_sla=acceptance.OperatorApprovedSla(
                 minimum_duration_seconds=0.01,
-                latency_ms=acceptance.OperatorApprovedSlaPercentileThresholds(
+                control_plane_admission_latency_ms=acceptance.OperatorApprovedSlaPercentileThresholds(
                     p95_max=10.0,
                     p99_max=10.0,
                 ),
-                recovery_time_ms=acceptance.OperatorApprovedSlaPercentileThresholds(
+                slot_reuse_admission_latency_ms=acceptance.OperatorApprovedSlaPercentileThresholds(
                     p95_max=10.0,
                     p99_max=10.0,
                 ),
@@ -3371,8 +3398,10 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
         summary = evidence["operatorApprovedSla"]
         self.assertTrue(summary["enforced"])
         self.assertEqual(
-            summary["metricMapping"]["latencyMs.p95Max"]["observedEvidencePath"],
-            "turnLatencyMs.p95",
+            summary["metricMapping"]["controlPlaneAdmissionLatencyMs.p95Max"][
+                "observedEvidencePath"
+            ],
+            "controlPlaneAdmissionLatencyMs.p95",
         )
         self.assertEqual([check["status"] for check in summary["checks"]], ["pass"] * 6)
 
@@ -3558,11 +3587,11 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
     def test_operator_approved_sla_report_marks_missing_case_as_not_evaluated(self) -> None:
         requested = acceptance.OperatorApprovedSla(
             minimum_duration_seconds=600,
-            latency_ms=acceptance.OperatorApprovedSlaPercentileThresholds(
+            control_plane_admission_latency_ms=acceptance.OperatorApprovedSlaPercentileThresholds(
                 p95_max=10000,
                 p99_max=15000,
             ),
-            recovery_time_ms=acceptance.OperatorApprovedSlaPercentileThresholds(
+            slot_reuse_admission_latency_ms=acceptance.OperatorApprovedSlaPercentileThresholds(
                 p95_max=2000,
                 p99_max=3000,
             ),
@@ -5973,16 +6002,27 @@ class MarkdownReportTest(unittest.TestCase):
                         "operatorApprovedSla": {
                             "requested": {
                                 "minimumDurationSeconds": 600,
-                                "latencyMs": {"p95Max": 250, "p99Max": 500},
-                                "recoveryTimeMs": {"p95Max": 300, "p99Max": 600},
+                                "controlPlaneAdmissionLatencyMs": {
+                                    "p95Max": 250,
+                                    "p99Max": 500,
+                                },
+                                "slotReuseAdmissionLatencyMs": {
+                                    "p95Max": 300,
+                                    "p99Max": 600,
+                                },
                                 "unexpectedErrorRateMax": 0.0,
                             },
                             "metricMapping": {
-                                "latencyMs.p95Max": {
-                                    "observedEvidencePath": "turnLatencyMs.p95"
+                                "controlPlaneAdmissionLatencyMs.p95Max": {
+                                    "observedEvidencePath": "controlPlaneAdmissionLatencyMs.p95"
                                 }
                             },
-                            "checks": [{"id": "latencyMs.p95Max", "status": "pass"}],
+                            "checks": [
+                                {
+                                    "id": "controlPlaneAdmissionLatencyMs.p95Max",
+                                    "status": "pass",
+                                }
+                            ],
                             "enforced": True,
                         },
                     },
@@ -6238,8 +6278,8 @@ class RunnerOptionsTest(unittest.TestCase):
     def test_fixture_load_parses_operator_approved_sla_file_and_forces_duration(self) -> None:
         payload = {
             "minimumDurationSeconds": 600,
-            "latencyMs": {"p95Max": 250, "p99Max": 500},
-            "recoveryTimeMs": {"p95Max": 300, "p99Max": 600},
+            "controlPlaneAdmissionLatencyMs": {"p95Max": 250, "p99Max": 500},
+            "slotReuseAdmissionLatencyMs": {"p95Max": 300, "p99Max": 600},
             "unexpectedErrorRateMax": 0.0,
         }
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -6268,8 +6308,11 @@ class RunnerOptionsTest(unittest.TestCase):
     ) -> None:
         payload = {
             "minimumDurationSeconds": 1200,
-            "latencyMs": {"p95Max": 10000, "p99Max": 15000},
-            "recoveryTimeMs": {"p95Max": 2000, "p99Max": 3000},
+            "controlPlaneAdmissionLatencyMs": {
+                "p95Max": 10000,
+                "p99Max": 15000,
+            },
+            "slotReuseAdmissionLatencyMs": {"p95Max": 2000, "p99Max": 3000},
             "unexpectedErrorRateMax": 0.0,
         }
         with tempfile.TemporaryDirectory() as temp_dir, mock.patch.dict(
@@ -6312,8 +6355,8 @@ class RunnerOptionsTest(unittest.TestCase):
     def test_fixture_load_operator_approved_sla_rejects_nonzero_unexpected_error_rate(self) -> None:
         payload = {
             "minimumDurationSeconds": 600,
-            "latencyMs": {"p95Max": 250, "p99Max": 500},
-            "recoveryTimeMs": {"p95Max": 300, "p99Max": 600},
+            "controlPlaneAdmissionLatencyMs": {"p95Max": 250, "p99Max": 500},
+            "slotReuseAdmissionLatencyMs": {"p95Max": 300, "p99Max": 600},
             "unexpectedErrorRateMax": 0.01,
         }
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -6334,7 +6377,7 @@ class RunnerOptionsTest(unittest.TestCase):
     def test_fixture_soak_operator_approved_sla_rejects_unmeasured_fields(self) -> None:
         payload = {
             "minimumDurationSeconds": 600,
-            "latencyMs": {"p95Max": 250, "p99Max": 500},
+            "controlPlaneAdmissionLatencyMs": {"p95Max": 250, "p99Max": 500},
         }
         with tempfile.TemporaryDirectory() as temp_dir:
             path = pathlib.Path(temp_dir) / "operator-approved-sla.json"

@@ -699,6 +699,8 @@ class SuiteBehaviorTest(unittest.TestCase):
                 "interaction": {"id": f"interaction-{execution_counter}"},
                 "active": active,
                 "marker": f"MARKER-{wave_index + 1}-{position}",
+                "controlPlaneAdmissionLatencyMs": 1,
+                "interactionReadyLatencyMs": 1,
                 "sessionSequenceBeforeTurn": session_sequences[session_id],
                 "turnStartedMonotonic": 0.0,
                 "targetExecution": None,
@@ -732,7 +734,7 @@ class SuiteBehaviorTest(unittest.TestCase):
                 "sessionId": session_id,
                 "turnId": str(dict(load_turn["turn"])["id"]),
                 "turnOrdinal": load_turn["turnOrdinal"],
-                "turnLatencyMs": 1,
+                "turnCompletionLatencyMs": 1,
                 "eventTypeCounts": {"execution.completed": 1},
                 "providerResume": {
                     "requestedStrategy": "native-cursor",

@@ -419,10 +419,10 @@ def validate_child_report(
         else:
             expected_paths = {
                 "minimumDurationSeconds": "durationMs",
-                "latencyMs.p95Max": "turnLatencyMs.p95",
-                "latencyMs.p99Max": "turnLatencyMs.p99",
-                "recoveryTimeMs.p95Max": "admissionRecoveryMs.p95",
-                "recoveryTimeMs.p99Max": "admissionRecoveryMs.p99",
+                "controlPlaneAdmissionLatencyMs.p95Max": "controlPlaneAdmissionLatencyMs.p95",
+                "controlPlaneAdmissionLatencyMs.p99Max": "controlPlaneAdmissionLatencyMs.p99",
+                "slotReuseAdmissionLatencyMs.p95Max": "slotReuseAdmissionLatencyMs.p95",
+                "slotReuseAdmissionLatencyMs.p99Max": "slotReuseAdmissionLatencyMs.p99",
                 "unexpectedErrorRateMax": "unexpectedErrorRate",
             }
             for check_id, expected_path in expected_paths.items():
@@ -624,14 +624,24 @@ def validate_child_report(
                             },
                         )
             require_distribution(
-                load_evidence.get("turnLatencyMs"),
-                label="turnLatencyMs",
+                load_evidence.get("controlPlaneAdmissionLatencyMs"),
+                label="controlPlaneAdmissionLatencyMs",
                 expected_sample_count=executions_completed if isinstance(executions_completed, int) else None,
             )
             require_distribution(
-                load_evidence.get("admissionRecoveryMs"),
-                label="admissionRecoveryMs",
+                load_evidence.get("slotReuseAdmissionLatencyMs"),
+                label="slotReuseAdmissionLatencyMs",
                 expected_sample_count=expected_rejections if isinstance(expected_rejections, int) else None,
+            )
+            require_distribution(
+                load_evidence.get("interactionReadyLatencyMs"),
+                label="interactionReadyLatencyMs",
+                expected_sample_count=executions_completed if isinstance(executions_completed, int) else None,
+            )
+            require_distribution(
+                load_evidence.get("turnCompletionLatencyMs"),
+                label="turnCompletionLatencyMs",
+                expected_sample_count=executions_completed if isinstance(executions_completed, int) else None,
             )
             require_distribution(
                 load_evidence.get("waveDurationMs"),
@@ -691,7 +701,29 @@ def validate_child_report(
                             "Load child report waveSamples did not retain the canonical overlap diagnostics.",
                             {"wave": sample.get("wave")},
                         )
-                    require_distribution(sample.get("turnLatencyMs"), label="waveSamples.turnLatencyMs")
+                    require_distribution(
+                        sample.get("controlPlaneAdmissionLatencyMs"),
+                        label="waveSamples.controlPlaneAdmissionLatencyMs",
+                        expected_sample_count=acceptance.REAL_PROVIDER_LOAD_SESSIONS,
+                    )
+                    require_distribution(
+                        sample.get("slotReuseAdmissionLatencyMs"),
+                        label="waveSamples.slotReuseAdmissionLatencyMs",
+                        expected_sample_count=(
+                            acceptance.REAL_PROVIDER_LOAD_SESSIONS
+                            - acceptance.REAL_PROVIDER_LOAD_CONCURRENCY
+                        ),
+                    )
+                    require_distribution(
+                        sample.get("interactionReadyLatencyMs"),
+                        label="waveSamples.interactionReadyLatencyMs",
+                        expected_sample_count=acceptance.REAL_PROVIDER_LOAD_SESSIONS,
+                    )
+                    require_distribution(
+                        sample.get("turnCompletionLatencyMs"),
+                        label="waveSamples.turnCompletionLatencyMs",
+                        expected_sample_count=acceptance.REAL_PROVIDER_LOAD_SESSIONS,
+                    )
             load_configuration = (
                 configuration.get("realProviderLoad") if isinstance(configuration, Mapping) else None
             )
