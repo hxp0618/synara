@@ -166,6 +166,7 @@ function basenameOfPath(value: string): string | null {
 }
 
 function rememberProjectUiState(projects: ReadonlyArray<Pick<Project, "cwd" | "expanded">>): void {
+  const knownOrderCwds = new Set(persistedProjectOrderCwds);
   for (const project of projects) {
     const cwdKey = projectCwdKey(project.cwd);
     if (project.expanded) {
@@ -173,7 +174,8 @@ function rememberProjectUiState(projects: ReadonlyArray<Pick<Project, "cwd" | "e
     } else {
       persistedExpandedProjectCwds.delete(cwdKey);
     }
-    if (!persistedProjectOrderCwds.includes(cwdKey)) {
+    if (!knownOrderCwds.has(cwdKey)) {
+      knownOrderCwds.add(cwdKey);
       persistedProjectOrderCwds.push(cwdKey);
     }
   }
@@ -213,9 +215,11 @@ function readPersistedState(): AppState {
         persistedExpandedProjectCwds.add(projectCwdKey(cwd));
       }
     }
+    const seenOrderCwds = new Set(persistedProjectOrderCwds);
     for (const cwd of parsed.projectOrderCwds ?? []) {
       const cwdKey = typeof cwd === "string" ? projectCwdKey(cwd) : "";
-      if (cwdKey.length > 0 && !persistedProjectOrderCwds.includes(cwdKey)) {
+      if (cwdKey.length > 0 && !seenOrderCwds.has(cwdKey)) {
+        seenOrderCwds.add(cwdKey);
         persistedProjectOrderCwds.push(cwdKey);
       }
     }
@@ -366,6 +370,8 @@ function threadShellsEqual(left: ThreadShell | undefined, right: ThreadShell): b
     (left.associatedWorktreeRef ?? null) === (right.associatedWorktreeRef ?? null) &&
     (left.createBranchFlowCompleted ?? false) === (right.createBranchFlowCompleted ?? false) &&
     (left.parentThreadId ?? null) === (right.parentThreadId ?? null) &&
+    (left.creationSource ?? null) === (right.creationSource ?? null) &&
+    (left.sourceThreadId ?? null) === (right.sourceThreadId ?? null) &&
     (left.subagentAgentId ?? null) === (right.subagentAgentId ?? null) &&
     (left.subagentNickname ?? null) === (right.subagentNickname ?? null) &&
     (left.subagentRole ?? null) === (right.subagentRole ?? null) &&
@@ -415,6 +421,8 @@ function toThreadShell(thread: Thread): ThreadShell {
     associatedWorktreeRef: thread.associatedWorktreeRef ?? null,
     createBranchFlowCompleted: thread.createBranchFlowCompleted ?? false,
     parentThreadId: thread.parentThreadId ?? null,
+    creationSource: thread.creationSource ?? null,
+    sourceThreadId: thread.sourceThreadId ?? null,
     subagentAgentId: thread.subagentAgentId ?? null,
     subagentNickname: thread.subagentNickname ?? null,
     subagentRole: thread.subagentRole ?? null,
@@ -1027,7 +1035,7 @@ function mergeReadModelMessagesWithLiveHotPath(
       ...incomingMessage,
       text: previousMessage.text,
       dispatchMode: previousMessage.dispatchMode ?? incomingMessage.dispatchMode,
-      dispatchOrigin: previousMessage.dispatchOrigin ?? incomingMessage.dispatchOrigin,
+      dispatchOrigin: incomingMessage.dispatchOrigin ?? previousMessage.dispatchOrigin,
       turnId: previousMessage.turnId ?? incomingMessage.turnId ?? null,
       source: previousMessage.source ?? incomingMessage.source ?? "native",
       streaming: previousMessage.streaming,
@@ -1724,6 +1732,8 @@ function normalizeThreadFromReadModel(
     previous.pendingSourceProposedPlan === pendingSourceProposedPlan &&
     previous.lastVisitedAt === lastVisitedAt &&
     (previous.parentThreadId ?? null) === (incoming.parentThreadId ?? null) &&
+    (previous.creationSource ?? null) === (incoming.creationSource ?? null) &&
+    (previous.sourceThreadId ?? null) === (incoming.sourceThreadId ?? null) &&
     (previous.subagentAgentId ?? null) === (incoming.subagentAgentId ?? null) &&
     (previous.subagentNickname ?? null) === (incoming.subagentNickname ?? null) &&
     (previous.subagentRole ?? null) === (incoming.subagentRole ?? null) &&
@@ -1772,6 +1782,8 @@ function normalizeThreadFromReadModel(
     ...(pendingSourceProposedPlan ? { pendingSourceProposedPlan } : {}),
     lastVisitedAt,
     parentThreadId: incoming.parentThreadId ?? null,
+    creationSource: incoming.creationSource ?? null,
+    sourceThreadId: incoming.sourceThreadId ?? null,
     subagentAgentId: incoming.subagentAgentId ?? null,
     subagentNickname: incoming.subagentNickname ?? null,
     subagentRole: incoming.subagentRole ?? null,
@@ -1873,6 +1885,8 @@ function normalizeThreadShellSnapshot(
     associatedWorktreeRef: nextAssociatedWorktreeRef,
     createBranchFlowCompleted: resolvedCreateBranchFlowCompleted,
     parentThreadId: incoming.parentThreadId ?? null,
+    creationSource: incoming.creationSource ?? null,
+    sourceThreadId: incoming.sourceThreadId ?? null,
     subagentAgentId: incoming.subagentAgentId ?? null,
     subagentNickname: incoming.subagentNickname ?? null,
     subagentRole: incoming.subagentRole ?? null,

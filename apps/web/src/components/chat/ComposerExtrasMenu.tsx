@@ -4,7 +4,7 @@
 // Depends on: shared menu primitives, icon buttons, and caller-owned composer state callbacks.
 
 import { type ProviderInteractionMode } from "@synara/contracts";
-import { memo, useId, useRef, type ChangeEvent } from "react";
+import { useId, useRef, type ChangeEvent } from "react";
 import { GoTasklist } from "react-icons/go";
 
 import { PaperclipIcon, PlusIcon } from "~/lib/icons";
@@ -22,7 +22,7 @@ import {
   MenuTrigger,
 } from "../ui/menu";
 
-export const ComposerExtrasMenu = memo(function ComposerExtrasMenu(props: {
+export const ComposerExtrasMenu = function ComposerExtrasMenu(props: {
   interactionMode: ProviderInteractionMode;
   planModeAvailable?: boolean;
   planModeUnavailableReason?: string | null;
@@ -124,4 +124,4 @@ export const ComposerExtrasMenu = memo(function ComposerExtrasMenu(props: {
       </Menu>
     </>
   );
-});
+};

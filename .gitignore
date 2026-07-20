@@ -102,6 +102,7 @@ packages/*/dist
 /.synara/electron-dev
 /.synara/backups
 /.synara-*/
+/apps/server/.synara-*/
 /.synara/
 .idea/
 apps/web/.playwright

@@ -8,7 +8,7 @@
 // Exports: ComposerPendingApprovalPanel
 
 import { type ApprovalRequestId, type ProviderApprovalDecision } from "@synara/contracts";
-import { type KeyboardEvent, memo, useMemo } from "react";
+import { type KeyboardEvent } from "react";
 import { type PendingApproval } from "../../session-logic";
 import { cn } from "~/lib/utils";
 import { ComposerChoiceRow, type ComposerChoiceTone } from "./ComposerChoiceRow";
@@ -18,7 +18,6 @@ interface ComposerPendingApprovalPanelProps {
   approval: PendingApproval;
   pendingCount: number;
   isResponding: boolean;
-  allowSessionDecision: boolean;
   onRespond: (
     requestId: ApprovalRequestId,
     decision: ProviderApprovalDecision,
@@ -69,32 +68,19 @@ const APPROVAL_ACTIONS: ReadonlyArray<ApprovalAction> = [
   },
 ];
 
-export function availableApprovalActions(allowSessionDecision: boolean) {
-  return allowSessionDecision
-    ? APPROVAL_ACTIONS
-    : APPROVAL_ACTIONS.filter((action) => action.decision !== "acceptForSession");
-}
-
 const KIND_PROMPT: Record<PendingApproval["requestKind"], string> = {
   command: "Approve this command?",
   "file-read": "Approve reading this file?",
   "file-change": "Approve this file change?",
-  network: "Approve network access?",
-  tool: "Approve this tool call?",
 };
 
-export const ComposerPendingApprovalPanel = memo(function ComposerPendingApprovalPanel({
+export const ComposerPendingApprovalPanel = function ComposerPendingApprovalPanel({
   approval,
   pendingCount,
   isResponding,
-  allowSessionDecision,
   onRespond,
 }: ComposerPendingApprovalPanelProps) {
-  const parsed = useMemo(() => parseApprovalDetail(approval.detail), [approval.detail]);
-  const approvalActions = useMemo(
-    () => availableApprovalActions(allowSessionDecision),
-    [allowSessionDecision],
-  );
+  const parsed = parseApprovalDetail(approval.detail);
   const requestId = approval.requestId;
 
   // Digit shortcuts bubble from focused controls inside this card only; a bare
@@ -110,8 +96,8 @@ export const ComposerPendingApprovalPanel = memo(function ComposerPendingApprova
       return;
     }
     const digit = Number.parseInt(event.key, 10);
-    if (Number.isNaN(digit) || digit < 1 || digit > approvalActions.length) return;
-    const action = approvalActions[digit - 1];
+    if (Number.isNaN(digit) || digit < 1 || digit > APPROVAL_ACTIONS.length) return;
+    const action = APPROVAL_ACTIONS[digit - 1];
     if (!action) return;
     event.preventDefault();
     void onRespond(requestId, action.decision, approval.lifecycleGeneration);
@@ -139,7 +125,7 @@ export const ComposerPendingApprovalPanel = memo(function ComposerPendingApprova
       </div>
       <ApprovalDetail parsed={parsed} />
       <div className="mt-2.5 space-y-0.5">
-        {approvalActions.map((action, index) => (
+        {APPROVAL_ACTIONS.map((action, index) => (
           <ComposerChoiceRow
             key={action.decision}
             shortcut={index + 1}
@@ -155,7 +141,7 @@ export const ComposerPendingApprovalPanel = memo(function ComposerPendingApprova
       </div>
     </div>
   );
-});
+};
 
 function ApprovalDetail({ parsed }: { parsed: ParsedApproval }) {
   if (parsed.fileName) {

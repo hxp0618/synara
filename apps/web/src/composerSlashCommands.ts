@@ -25,7 +25,6 @@ export interface ComposerSlashInvocation {
 
 export type FastSlashCommandAction = "toggle" | "on" | "off" | "status" | "invalid";
 export type ForkSlashCommandTarget = "local" | "worktree";
-export type ControlPlaneAdvancedSlashCommand = "compact" | "review" | "fork";
 
 const CLAUDE_NATIVE_COMMAND_ALIASES: Record<string, readonly string[]> = {
   clear: ["reset", "new"],
@@ -246,29 +245,6 @@ export function parseComposerSlashInvocationForCommands(
   };
 }
 
-export function resolveUnavailableControlPlaneAdvancedSlashCommand(input: {
-  text: string;
-  availableCommands: ReadonlyArray<ComposerSlashCommand>;
-}): ControlPlaneAdvancedSlashCommand | null {
-  const invocation = parseComposerSlashInvocation(input.text);
-  if (
-    !invocation ||
-    (invocation.command !== "compact" &&
-      invocation.command !== "review" &&
-      invocation.command !== "fork") ||
-    input.availableCommands.includes(invocation.command)
-  ) {
-    return null;
-  }
-  return invocation.command;
-}
-
-export function getComposerSlashCommandDefinition(
-  command: ComposerSlashCommand,
-): ComposerSlashCommandDefinition {
-  return COMPOSER_SLASH_COMMAND_DEFINITIONS[command];
-}
-
 export function filterComposerSlashCommands(
   query: string,
   commands: ReadonlyArray<ComposerSlashCommand> = BUILT_IN_COMPOSER_SLASH_COMMANDS,
@@ -401,10 +377,8 @@ export function resolveComposerSlashRootBranch(input: {
 
 export function getAvailableComposerSlashCommands(input: {
   provider: ProviderKind;
-  routingMode?: "local" | "control-plane";
   supportsFastSlashCommand: boolean;
   canOfferCompactCommand: boolean;
-  canOfferPlanCommand: boolean;
   canOfferReviewCommand: boolean;
   canOfferForkCommand: boolean;
   canOfferSideCommand: boolean;
@@ -423,13 +397,13 @@ export function getAvailableComposerSlashCommands(input: {
   );
 
   const availableCommands: ComposerSlashCommand[] =
-    input.routingMode === "control-plane" || input.provider !== "claudeAgent"
+    input.provider !== "claudeAgent"
       ? [
           "clear",
           ...(input.canOfferCompactCommand ? (["compact"] as const) : []),
           "model",
           ...(input.supportsFastSlashCommand ? (["fast"] as const) : []),
-          ...(input.canOfferPlanCommand ? (["plan"] as const) : []),
+          "plan",
           "default",
           ...(input.canOfferReviewCommand ? (["review"] as const) : []),
           ...(input.canOfferForkCommand ? (["fork"] as const) : []),

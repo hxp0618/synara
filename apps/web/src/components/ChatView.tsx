@@ -23,7 +23,6 @@ import {
   type ProviderStartOptions,
   type ProviderUserInputAnswers,
   type PinnedMessage,
-  PROVIDER_DISPLAY_NAMES,
   PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
   type ResolvedKeybindingsConfig,
   type ServerProviderStatus,
@@ -43,6 +42,7 @@ import { getModelCapabilities, normalizeModelSlug } from "@synara/shared/model";
 import { resolveTailUserMessageEditTarget } from "@synara/shared/conversationEdit";
 import { threadExportBlockedReason } from "@synara/shared/threadExport";
 import { buildTemporaryWorktreeBranchName } from "@synara/shared/git";
+import { pendingRequestInstanceKey } from "@synara/shared/threadSummary";
 import {
   buildPromptThreadTitleFallback,
   GENERIC_CHAT_THREAD_TITLE,
@@ -92,7 +92,6 @@ import {
 } from "~/lib/providerDiscoveryReactQuery";
 import { projectSearchEntriesQueryOptions } from "~/lib/projectReactQuery";
 import { serverConfigQueryOptions, serverQueryKeys } from "~/lib/serverReactQuery";
-import { downloadUrlAsBlob } from "~/lib/browserDownload";
 import { useRefreshProviderStatusesNow } from "~/hooks/useProviderStatusRefresh";
 import { SINGLE_CHAT_PANE_SCOPE_ID } from "~/lib/chatPaneScope";
 import {
@@ -136,7 +135,7 @@ import {
   buildComposerFileAttachmentsFromFiles,
   IMAGE_SIZE_LIMIT_LABEL,
   buildComposerImageAttachmentsFromFiles,
-  buildUploadComposerAttachments,
+  stageUploadComposerAttachments,
   cloneComposerImageAttachment,
   effectiveComposerAttachmentCount,
   findPendingBlobComposerAttachments,
@@ -183,12 +182,8 @@ import {
   resolveEnvironmentPanelVisible,
   resolveProjectScriptTerminalTarget,
   resolvePromptHistoryNavigation,
-  resolveAuthoritativeTurnDispatch,
-  readNativeApiForConversationRollback,
-  resolveServerThreadModelSwitchAvailability,
   shouldHandlePromptHistoryNavigationKey,
   shouldEnableComposerPastedTextCollapse,
-  shouldEnableThreadRecap,
   shouldConsumePendingCustomBinaryConfirmation,
   shouldShowComposerModelBootstrapSkeleton,
 } from "./ChatView.logic";
@@ -221,6 +216,7 @@ import {
   canOfferSideSlashCommand,
   canOfferReviewSlashCommand,
   hasProviderNativeSlashCommand,
+  providerSupportsTextNativeReviewCommand,
   resolveComposerSlashRootBranch,
 } from "../composerSlashCommands";
 import {
@@ -354,32 +350,6 @@ import {
   useEffectiveComposerModelState,
 } from "../composerDraftStore";
 import { useTemporaryThreadStore } from "../temporaryThreadStore";
-import {
-  useControlPlane,
-  useControlPlanePendingInteractions,
-  useControlPlaneProjectProviderCapabilities,
-  useControlPlaneSessionArtifacts,
-  useControlPlaneSessionProviderCapabilities,
-} from "../controlPlaneContext";
-import {
-  controlPlaneArtifactDisplayName,
-  latestControlPlaneArtifactReadySequence,
-} from "../lib/controlPlaneArtifacts";
-import { controlPlaneClient, type ControlPlaneArtifact } from "../lib/controlPlaneClient";
-import { ControlPlaneTurnDispatcher } from "../lib/controlPlaneTurnDispatch";
-import {
-  assertControlPlaneCapabilityAllowed,
-  resolveControlPlaneCapabilityDecision,
-  resolveControlPlaneTurnDispatchDecision,
-} from "../lib/controlPlaneProviderCapabilities";
-import {
-  latestControlPlaneInteractionSequence,
-  projectPendingControlPlaneInteractions,
-} from "../lib/controlPlaneInteractions";
-import {
-  dispatchApprovalInteractionResponse,
-  dispatchUserInputInteractionResponse,
-} from "../lib/interactionResponseRouting";
 import { useComposerFocusRequestStore } from "../composerFocusRequestStore";
 import { useWorkflowRunUiStore, useWorkflowRunUiThreadState } from "../workflowRunUiStore";
 import { appendComposerPromptText } from "../lib/chatReferences";
@@ -487,7 +457,6 @@ import {
   AVAILABLE_PROVIDER_OPTIONS,
   ProviderModelPicker,
   resolveProviderModelLabel,
-  type ProviderModelAvailability,
 } from "./chat/ProviderModelPicker";
 import { ComposerModelEffortPicker } from "./chat/ComposerModelEffortPicker";
 import { resolveTraitsTriggerSummary, TraitsPicker } from "./chat/TraitsPicker";
@@ -550,9 +519,6 @@ import { getComposerTraitSelection } from "./chat/composerTraits";
 import { resolveRuntimeModelDescriptor } from "./chat/runtimeModelCapabilities";
 import { ProjectPicker } from "./chat/ProjectPicker";
 import { FolderClosed } from "./FolderClosed";
-import { ControlPlaneProviderCapabilityBanner } from "./chat/ControlPlaneProviderCapabilityBanner";
-import { ControlPlaneSessionArtifacts } from "./chat/ControlPlaneSessionArtifacts";
-import { ControlPlaneSessionStreamBanner } from "./chat/ControlPlaneSessionStreamBanner";
 import { ProviderHealthBanner } from "./chat/ProviderHealthBanner";
 import { ThreadErrorBanner } from "./chat/ThreadErrorBanner";
 import {
@@ -892,6 +858,8 @@ const EMPTY_PROVIDER_STATUSES: ServerProviderStatus[] = [];
 const EMPTY_PROVIDER_AGENTS: readonly ProviderAgentDescriptor[] = [];
 const EMPTY_PENDING_USER_INPUT_ANSWERS: Record<string, PendingUserInputDraftAnswer> = {};
 const MAX_DISMISSED_PROVIDER_HEALTH_BANNERS = 50;
+const EMPTY_LAST_INVOKED_SCRIPT_BY_PROJECT: Record<string, string> = {};
+const EMPTY_DISMISSED_PROVIDER_HEALTH_BANNERS: ReadonlyArray<string> = [];
 
 function getThreadProviderCustomBinaryPathKey(threadId: Thread["id"], provider: ProviderKind) {
   return `${threadId}:${provider}`;
@@ -1142,6 +1110,8 @@ function makeAutomationSetupBubble(role: "user" | "assistant", text: string): Ch
   };
 }
 
+const selectAllThreads = createAllThreadsSelector();
+
 export default function ChatView({
   threadId,
   paneScopeId = SINGLE_CHAT_PANE_SCOPE_ID,
@@ -1163,8 +1133,6 @@ export default function ChatView({
   const syncServerShellSnapshot = useStore((store) => store.syncServerShellSnapshot);
   const setStoreThreadError = useStore((store) => store.setError);
   const setStoreThreadWorkspace = useStore((store) => store.setThreadWorkspace);
-  const controlPlane = useControlPlane();
-  const [controlPlaneTurnDispatcher] = useState(() => new ControlPlaneTurnDispatcher(randomUUID));
   const { settings, updateSettings } = useAppSettings();
   const assistantDeliveryMode = resolveAssistantDeliveryMode(settings);
   const desktopTopBarTrafficLightGutterClassName = useDesktopTopBarTrafficLightGutterClassName();
@@ -1179,7 +1147,9 @@ export default function ChatView({
   const { handleNewChat } = useHandleNewChat();
   const { createThreadHandoff } = useThreadHandoff();
   const rawSearch = useDiffRouteSearch();
-  const activeSplitView = useSplitViewStore(selectSplitView(rawSearch.splitViewId ?? null));
+  const activeSplitView = useSplitViewStore(
+    useMemo(() => selectSplitView(rawSearch.splitViewId ?? null), [rawSearch.splitViewId]),
+  );
   const removeThreadFromSplitViews = useSplitViewStore((store) => store.removeThreadFromSplitViews);
   const { resolvedTheme } = useTheme();
   const queryClient = useQueryClient();
@@ -1315,7 +1285,23 @@ export default function ChatView({
   const markWorkflowRunPaused = useWorkflowRunUiStore((store) => store.markPaused);
   const markWorkflowRunDismissed = useWorkflowRunUiStore((store) => store.markDismissed);
   const serverThread = useStore(useMemo(() => createThreadSelector(threadId), [threadId]));
-  const selectAllThreads = useMemo(() => createAllThreadsSelector(), []);
+  const crossTaskSourceThreadId =
+    serverThread?.creationSource && serverThread.sourceThreadId
+      ? serverThread.sourceThreadId
+      : null;
+  const crossTaskSourceThread = useStore(
+    useMemo(() => createThreadSelector(crossTaskSourceThreadId), [crossTaskSourceThreadId]),
+  );
+  const crossTaskOrigin = useMemo(
+    () =>
+      crossTaskSourceThreadId
+        ? {
+            sourceThreadId: crossTaskSourceThreadId,
+            sourceProvider: crossTaskSourceThread?.modelSelection.provider ?? null,
+          }
+        : null,
+    [crossTaskSourceThread?.modelSelection.provider, crossTaskSourceThreadId],
+  );
   const fallbackDraftProjectId = draftThread?.projectId ?? null;
   const fallbackDraftProject = useStore(
     useMemo(() => createProjectSelector(fallbackDraftProjectId), [fallbackDraftProjectId]),
@@ -1325,7 +1311,11 @@ export default function ChatView({
   const [expandedImage, setExpandedImage] = useState<ExpandedImagePreview | null>(null);
   const [optimisticUserMessages, setOptimisticUserMessages] = useState<ChatMessage[]>([]);
   const optimisticUserMessagesRef = useRef(optimisticUserMessages);
-  optimisticUserMessagesRef.current = optimisticUserMessages;
+  // Mirror during the commit, before events or async continuations can observe
+  // the new UI with the previous render's preview URLs.
+  useLayoutEffect(() => {
+    optimisticUserMessagesRef.current = optimisticUserMessages;
+  }, [optimisticUserMessages]);
   const composerAssistantSelectionsRef = useRef<ComposerAssistantSelectionAttachment[]>(
     composerAssistantSelections,
   );
@@ -1341,8 +1331,10 @@ export default function ChatView({
   const [isRevertingCheckpoint, setIsRevertingCheckpoint] = useState(false);
   const [pendingFileUndo, setPendingFileUndo] = useState<PendingFileUndo | null>(null);
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
-  const [respondingRequestIds, setRespondingRequestIds] = useState<string[]>([]);
-  const [respondingUserInputRequestIds, setRespondingUserInputRequestIds] = useState<string[]>([]);
+  const [respondingRequestKeys, setRespondingRequestKeys] = useState<string[]>([]);
+  const [respondingUserInputRequestKeys, setRespondingUserInputRequestKeys] = useState<string[]>(
+    [],
+  );
   const [pendingUserInputAnswersByRequestId, setPendingUserInputAnswersByRequestId] = useState<
     Record<string, Record<string, PendingUserInputDraftAnswer>>
   >({});
@@ -1397,8 +1389,14 @@ export default function ChatView({
   >(() => composerMentions);
   const selectedComposerSkillsRef = useRef<ProviderSkillReference[]>(selectedComposerSkills);
   const selectedComposerMentionsRef = useRef<ProviderMentionReference[]>(selectedComposerMentions);
-  selectedComposerSkillsRef.current = selectedComposerSkills;
-  selectedComposerMentionsRef.current = selectedComposerMentions;
+  // The setters below stamp these refs synchronously; layout effects backstop
+  // external state changes before another browser event can read stale values.
+  useLayoutEffect(() => {
+    selectedComposerSkillsRef.current = selectedComposerSkills;
+  }, [selectedComposerSkills]);
+  useLayoutEffect(() => {
+    selectedComposerMentionsRef.current = selectedComposerMentions;
+  }, [selectedComposerMentions]);
   const updateSelectedComposerSkills = useCallback(
     (
       next:
@@ -1429,12 +1427,12 @@ export default function ChatView({
   );
   const [lastInvokedScriptByProjectId, setLastInvokedScriptByProjectId] = useLocalStorage(
     LAST_INVOKED_SCRIPT_BY_PROJECT_KEY,
-    {},
+    EMPTY_LAST_INVOKED_SCRIPT_BY_PROJECT,
     LastInvokedScriptByProjectSchema,
   );
   const [dismissedProviderHealthBannerKeys, setDismissedProviderHealthBannerKeys] = useLocalStorage(
     DISMISSED_PROVIDER_HEALTH_BANNERS_KEY,
-    [],
+    EMPTY_DISMISSED_PROVIDER_HEALTH_BANNERS,
     DismissedProviderHealthBannersSchema,
   );
   const [dismissedRateLimitBannerKey, setDismissedRateLimitBannerKey] = useState<string | null>(
@@ -1456,9 +1454,14 @@ export default function ChatView({
   );
 
   useEffect(() => {
-    setComposerCommandPicker(null);
-    setIsModelPickerOpen(false);
-    setIsTraitsPickerOpen(false);
+    // Async setState (post-paint) keeps this thread-change reset out of the
+    // render->effect->render cascade; the pickers already closed post-commit.
+    const settle = window.setTimeout(() => {
+      setComposerCommandPicker(null);
+      setIsModelPickerOpen(false);
+      setIsTraitsPickerOpen(false);
+    }, 0);
+    return () => window.clearTimeout(settle);
   }, [threadId]);
   useEffect(() => {
     const scrollDebouncer = showScrollDebouncer.current;
@@ -1743,12 +1746,18 @@ export default function ChatView({
   const activeThread = serverThread ?? localDraftThread;
   useEffect(() => {
     if (
-      pendingFileUndo &&
-      hasFileUndoSettled({ pending: pendingFileUndo, thread: activeThread ?? null })
+      !pendingFileUndo ||
+      !hasFileUndoSettled({ pending: pendingFileUndo, thread: activeThread ?? null })
     ) {
+      return;
+    }
+    // Async setState (post-paint) keeps this settled-undo cleanup out of the
+    // render->effect->render cascade.
+    const settle = window.setTimeout(() => {
       setPendingFileUndo(null);
       setIsRevertingCheckpoint(false);
-    }
+    }, 0);
+    return () => window.clearTimeout(settle);
   }, [activeThread, pendingFileUndo]);
   const runtimeMode =
     composerDraft.runtimeMode ?? activeThread?.runtimeMode ?? DEFAULT_RUNTIME_MODE;
@@ -1763,10 +1772,6 @@ export default function ChatView({
   const activeThreadId = activeThread?.id ?? null;
   const activeLatestTurn = activeThread?.latestTurn ?? null;
   const threadActivities = activeThread?.activities ?? EMPTY_ACTIVITIES;
-  const observedArtifactReadySequence = useMemo(
-    () => latestControlPlaneArtifactReadySequence(threadActivities),
-    [threadActivities],
-  );
   const hasLiveTurnTail = hasLiveTurnTailWork({
     latestTurn: activeLatestTurn,
     messages: activeThread?.messages ?? EMPTY_MESSAGES,
@@ -1807,14 +1812,6 @@ export default function ChatView({
   const activeProject = useStore(
     useMemo(() => createProjectSelector(activeProjectId), [activeProjectId]),
   );
-  const activeControlPlaneProject = useMemo(
-    () => controlPlane.projects.find((project) => project.id === activeProjectId) ?? null,
-    [activeProjectId, controlPlane.projects],
-  );
-  const activeControlPlaneSession = useMemo(
-    () => controlPlane.sessions.find((session) => session.id === activeThreadId) ?? null,
-    [activeThreadId, controlPlane.sessions],
-  );
   const automationProjects = useStore((state) => state.projects);
   const automationThreads = useStore(selectAllThreads);
   const { data: automationData, updateMutation: automationUpdateMutation } = useAutomations();
@@ -1852,9 +1849,13 @@ export default function ChatView({
   // Tracks the live thread + setup/send state so an async automation resolve that
   // finishes after navigation, cancel, or a later send never commits a stale result.
   const activeThreadIdRef = useRef(threadId);
-  activeThreadIdRef.current = threadId;
   const pendingAutomationConversationRef = useRef(pendingAutomationConversation);
-  pendingAutomationConversationRef.current = pendingAutomationConversation;
+  // Commit these before an in-flight automation promise can resume against a
+  // newly-rendered thread. Declared ahead of the navigation reset below.
+  useLayoutEffect(() => {
+    activeThreadIdRef.current = threadId;
+    pendingAutomationConversationRef.current = pendingAutomationConversation;
+  }, [threadId, pendingAutomationConversation]);
   const hasLiveTurnRef = useRef(false);
   // Ephemeral setup bubbles are rendered as ordinary transcript messages, so persistent
   // actions (pin, markers) must skip them — their ids vanish when setup ends and would
@@ -1943,28 +1944,23 @@ export default function ChatView({
     isFocusedPane && latestTurnLive && !diffEnvironmentPending && !resolvedDiffOpen
       ? GIT_WORKING_TREE_DIFF_LIVE_REFETCH_INTERVAL_MS
       : false;
-  const activeThreadAssociatedWorktree = useMemo(() => {
-    const associatedWorktreeInput = {
-      branch: activeThread?.branch ?? null,
-      worktreePath: activeThread?.worktreePath ?? null,
-      ...(activeThread?.associatedWorktreePath !== undefined
-        ? { associatedWorktreePath: activeThread.associatedWorktreePath }
-        : {}),
-      ...(activeThread?.associatedWorktreeBranch !== undefined
-        ? { associatedWorktreeBranch: activeThread.associatedWorktreeBranch }
-        : {}),
-      ...(activeThread?.associatedWorktreeRef !== undefined
-        ? { associatedWorktreeRef: activeThread.associatedWorktreeRef }
-        : {}),
-    };
-    return deriveAssociatedWorktreeMetadata(associatedWorktreeInput);
-  }, [
-    activeThread?.associatedWorktreeBranch,
-    activeThread?.associatedWorktreePath,
-    activeThread?.associatedWorktreeRef,
-    activeThread?.branch,
-    activeThread?.worktreePath,
-  ]);
+  const activeThreadAssociatedWorktree = useMemo(
+    () =>
+      deriveAssociatedWorktreeMetadata({
+        branch: activeThread?.branch ?? null,
+        worktreePath: activeThread?.worktreePath ?? null,
+        ...(activeThread?.associatedWorktreePath !== undefined
+          ? { associatedWorktreePath: activeThread.associatedWorktreePath }
+          : {}),
+        ...(activeThread?.associatedWorktreeBranch !== undefined
+          ? { associatedWorktreeBranch: activeThread.associatedWorktreeBranch }
+          : {}),
+        ...(activeThread?.associatedWorktreeRef !== undefined
+          ? { associatedWorktreeRef: activeThread.associatedWorktreeRef }
+          : {}),
+      }),
+    [activeThread],
+  );
 
   const openPullRequestDialog = useCallback(
     (reference?: string) => {
@@ -2099,276 +2095,6 @@ export default function ChatView({
     : null;
   const selectedProvider: ProviderKind =
     lockedProvider ?? selectedProviderByThreadId ?? threadProvider ?? settings.defaultProvider;
-  const phase = derivePhase(activeThread?.session ?? null);
-  const isServerThreadModelSwitchPending = Boolean(
-    isServerThread &&
-    activeThread &&
-    controlPlane.sessionModelSwitchingBySessionId[activeThread.id] === true,
-  );
-  const hasActiveServerExecution = Boolean(
-    isServerThread &&
-    (phase === "running" ||
-      activeThread?.latestTurn?.state === "running" ||
-      activeThread?.session?.activeTurnId !== undefined),
-  );
-  const projectProviderCapabilitiesQuery = useControlPlaneProjectProviderCapabilities(
-    controlPlane.isAuthoritative && !isServerThread ? (activeProject?.id ?? null) : null,
-  );
-  const sessionProviderCapabilitiesQuery = useControlPlaneSessionProviderCapabilities(
-    controlPlane.isAuthoritative && isServerThread ? (activeThread?.id ?? null) : null,
-  );
-  const sessionArtifactsQuery = useControlPlaneSessionArtifacts(
-    controlPlane.isAuthoritative && isServerThread ? (activeThread?.id ?? null) : null,
-    observedArtifactReadySequence,
-  );
-  const artifactDownloadMutation = useMutation({
-    mutationFn: async (artifact: ControlPlaneArtifact) => {
-      const grant = await controlPlaneClient.issueArtifactDownload(artifact.id);
-      await downloadUrlAsBlob({
-        url: grant.url,
-        filename: controlPlaneArtifactDisplayName(grant.artifact),
-      });
-      return grant.artifact;
-    },
-    onError: (error) => {
-      toastManager.add({
-        type: "error",
-        title: "Artifact download failed",
-        description: error instanceof Error ? error.message : "An error occurred.",
-      });
-    },
-  });
-  const activeProviderCapabilityProjection = isServerThread
-    ? sessionProviderCapabilitiesQuery.data
-    : projectProviderCapabilitiesQuery.data;
-  const activeProviderCapabilityError = isServerThread
-    ? sessionProviderCapabilitiesQuery.error
-    : projectProviderCapabilitiesQuery.error;
-  const selectedProviderDispatchDecision = useMemo(
-    () =>
-      resolveControlPlaneTurnDispatchDecision({
-        isAuthoritative: controlPlane.isAuthoritative,
-        projection: activeProviderCapabilityProjection,
-        ...(activeProviderCapabilityError
-          ? { projectionError: activeProviderCapabilityError }
-          : {}),
-        provider: selectedProvider,
-        includeSessionStart: !isServerThread,
-        interactionMode,
-      }),
-    [
-      activeProviderCapabilityError,
-      activeProviderCapabilityProjection,
-      controlPlane.isAuthoritative,
-      interactionMode,
-      isServerThread,
-      selectedProvider,
-    ],
-  );
-  const selectedProviderDefaultDispatchDecision = useMemo(
-    () =>
-      resolveControlPlaneTurnDispatchDecision({
-        isAuthoritative: controlPlane.isAuthoritative,
-        projection: activeProviderCapabilityProjection,
-        ...(activeProviderCapabilityError
-          ? { projectionError: activeProviderCapabilityError }
-          : {}),
-        provider: selectedProvider,
-        includeSessionStart: !isServerThread,
-        interactionMode: "default",
-      }),
-    [
-      activeProviderCapabilityError,
-      activeProviderCapabilityProjection,
-      controlPlane.isAuthoritative,
-      isServerThread,
-      selectedProvider,
-    ],
-  );
-  const forkTargetDispatchDecision = useMemo(
-    () =>
-      resolveControlPlaneTurnDispatchDecision({
-        isAuthoritative: controlPlane.isAuthoritative,
-        projection: activeProviderCapabilityProjection,
-        ...(activeProviderCapabilityError
-          ? { projectionError: activeProviderCapabilityError }
-          : {}),
-        provider: selectedProvider,
-        includeSessionStart: true,
-        interactionMode: "default",
-      }),
-    [
-      activeProviderCapabilityError,
-      activeProviderCapabilityProjection,
-      controlPlane.isAuthoritative,
-      selectedProvider,
-    ],
-  );
-  const planModeCapabilityDecision = useMemo(
-    () =>
-      resolveControlPlaneCapabilityDecision({
-        isAuthoritative: controlPlane.isAuthoritative,
-        projection: activeProviderCapabilityProjection,
-        ...(activeProviderCapabilityError
-          ? { projectionError: activeProviderCapabilityError }
-          : {}),
-        provider: selectedProvider,
-        capabilityId: "plan-mode",
-      }),
-    [
-      activeProviderCapabilityError,
-      activeProviderCapabilityProjection,
-      controlPlane.isAuthoritative,
-      selectedProvider,
-    ],
-  );
-  const interruptCapabilityDecision = useMemo(
-    () =>
-      resolveControlPlaneCapabilityDecision({
-        isAuthoritative: controlPlane.isAuthoritative,
-        projection: activeProviderCapabilityProjection,
-        ...(activeProviderCapabilityError
-          ? { projectionError: activeProviderCapabilityError }
-          : {}),
-        provider: selectedProvider,
-        capabilityId: "interrupt-turn",
-      }),
-    [
-      activeProviderCapabilityError,
-      activeProviderCapabilityProjection,
-      controlPlane.isAuthoritative,
-      selectedProvider,
-    ],
-  );
-  const modelSwitchCapabilityDecision = useMemo(
-    () =>
-      resolveControlPlaneCapabilityDecision({
-        isAuthoritative: controlPlane.isAuthoritative,
-        projection: activeProviderCapabilityProjection,
-        ...(activeProviderCapabilityError
-          ? { projectionError: activeProviderCapabilityError }
-          : {}),
-        provider: selectedProvider,
-        capabilityId: "model-switch",
-      }),
-    [
-      activeProviderCapabilityError,
-      activeProviderCapabilityProjection,
-      controlPlane.isAuthoritative,
-      selectedProvider,
-    ],
-  );
-  const advancedCapabilityDecisions = useMemo(
-    () =>
-      Object.fromEntries(
-        (["compact", "review", "rollback", "fork", "checkpoint"] as const).map((capabilityId) => [
-          capabilityId,
-          resolveControlPlaneCapabilityDecision({
-            isAuthoritative: controlPlane.isAuthoritative,
-            projection: activeProviderCapabilityProjection,
-            ...(activeProviderCapabilityError
-              ? { projectionError: activeProviderCapabilityError }
-              : {}),
-            provider: selectedProvider,
-            capabilityId,
-          }),
-        ]),
-      ) as Record<
-        "compact" | "review" | "rollback" | "fork" | "checkpoint",
-        ReturnType<typeof resolveControlPlaneCapabilityDecision>
-      >,
-    [
-      activeProviderCapabilityError,
-      activeProviderCapabilityProjection,
-      controlPlane.isAuthoritative,
-      selectedProvider,
-    ],
-  );
-  const canUseLocalProviderCommands = !controlPlane.isAuthoritative;
-  const canUseCheckpointActions =
-    canUseLocalProviderCommands &&
-    advancedCapabilityDecisions.rollback.allowed &&
-    advancedCapabilityDecisions.checkpoint.allowed;
-  const canUseConversationRollbackActions =
-    advancedCapabilityDecisions.rollback.allowed &&
-    (canUseLocalProviderCommands ||
-      (isServerThread && !hasActiveServerExecution && controlPlane.capabilities.canCreateTurn));
-  const canImplementPlanInNewThread =
-    canUseLocalProviderCommands && advancedCapabilityDecisions.fork.allowed;
-  const providerAvailabilityByProvider = useMemo<
-    Partial<Record<ProviderKind, ProviderModelAvailability>> | undefined
-  >(() => {
-    if (!controlPlane.isAuthoritative) return undefined;
-    return Object.fromEntries(
-      AVAILABLE_PROVIDER_OPTIONS.map((option) => {
-        if (isServerThread) {
-          if (sessionProvider && option.value !== sessionProvider) {
-            return [
-              option.value,
-              {
-                selectable: false,
-                label: "Locked",
-                temporary: false,
-                message: `This SaaS Session is locked to ${PROVIDER_DISPLAY_NAMES[sessionProvider]}.`,
-              },
-            ] as const;
-          }
-          return [
-            option.value,
-            resolveServerThreadModelSwitchAvailability({
-              capabilityAllowed: modelSwitchCapabilityDecision.allowed,
-              capabilityTemporary: modelSwitchCapabilityDecision.temporary,
-              capabilityMessage: modelSwitchCapabilityDecision.message,
-              phase,
-              hasActiveExecution: hasActiveServerExecution,
-              isPending: isServerThreadModelSwitchPending,
-            }),
-          ] as const;
-        }
-        const dispatchDecision = resolveControlPlaneTurnDispatchDecision({
-          isAuthoritative: true,
-          projection: activeProviderCapabilityProjection,
-          ...(activeProviderCapabilityError
-            ? { projectionError: activeProviderCapabilityError }
-            : {}),
-          provider: option.value,
-          includeSessionStart: !isServerThread,
-          interactionMode,
-        });
-        const selectable = dispatchDecision.allowed;
-        const temporary = dispatchDecision.temporary;
-        const message = dispatchDecision.message;
-        return [
-          option.value,
-          {
-            selectable,
-            label: selectable
-              ? temporary
-                ? "Waiting for worker"
-                : "Available"
-              : dispatchDecision.blockingDecision?.status === "loading"
-                ? "Checking"
-                : "Unavailable",
-            temporary,
-            message,
-          },
-        ] as const;
-      }),
-    );
-  }, [
-    activeProviderCapabilityError,
-    activeProviderCapabilityProjection,
-    controlPlane.isAuthoritative,
-    hasActiveServerExecution,
-    interactionMode,
-    isServerThread,
-    isServerThreadModelSwitchPending,
-    modelSwitchCapabilityDecision.allowed,
-    modelSwitchCapabilityDecision.message,
-    modelSwitchCapabilityDecision.temporary,
-    phase,
-    sessionProvider,
-  ]);
   const previousSelectedProviderRef = useRef<{
     threadId: ThreadId;
     provider: ProviderKind;
@@ -2377,8 +2103,12 @@ export default function ChatView({
   const voiceThreadIdRef = useRef(threadId);
   const voiceProviderRef = useRef<ProviderKind>(selectedProvider);
   const voiceRecordingStartedAtRef = useRef<number | null>(null);
-  voiceThreadIdRef.current = threadId;
-  voiceProviderRef.current = selectedProvider;
+  // A transcription can resolve immediately after navigation commits, so stamp
+  // the request identity before passive effects and browser events.
+  useLayoutEffect(() => {
+    voiceThreadIdRef.current = threadId;
+    voiceProviderRef.current = selectedProvider;
+  }, [threadId, selectedProvider]);
   const customModelsByProvider = useMemo(() => getCustomModelsByProvider(settings), [settings]);
   const featureFlags = useFeatureFlags();
   const showDebugTaskBanner = import.meta.env.DEV && featureFlags["show-debug-task-banner"];
@@ -2389,12 +2119,8 @@ export default function ChatView({
     const draftSelections = composerDraft.modelSelectionByProvider;
 
     const resolveHint = (provider: ProviderKind): string | null =>
-      (isServerThread && threadModelSelection?.provider === provider
-        ? threadModelSelection.model
-        : draftSelections[provider]?.model) ??
-      (!isServerThread && threadModelSelection?.provider === provider
-        ? threadModelSelection.model
-        : null) ??
+      draftSelections[provider]?.model ??
+      (threadModelSelection?.provider === provider ? threadModelSelection.model : null) ??
       (projectModelSelection?.provider === provider ? projectModelSelection.model : null);
 
     return {
@@ -2412,40 +2138,28 @@ export default function ChatView({
     activeProject?.defaultModelSelection,
     activeThread?.modelSelection,
     composerDraft.modelSelectionByProvider,
-    isServerThread,
   ]);
   const providerModelDiscoveryCwd = resolveProviderDiscoveryCwd({
     activeThreadWorktreePath: resolvedThreadWorktreePath,
     activeProjectCwd: activeProject?.cwd ?? null,
     serverCwd: serverConfigQuery.data?.cwd ?? null,
   });
-  const localProviderDiscoveryEnabled = canUseLocalProviderCommands;
   const claudeDynamicModelsQuery = useQuery(
-    providerModelsQueryOptions({
-      provider: "claudeAgent",
-      enabled: localProviderDiscoveryEnabled,
-    }),
+    providerModelsQueryOptions({ provider: "claudeAgent" }),
   );
-  const codexDynamicModelsQuery = useQuery(
-    providerModelsQueryOptions({ provider: "codex", enabled: localProviderDiscoveryEnabled }),
-  );
+  const codexDynamicModelsQuery = useQuery(providerModelsQueryOptions({ provider: "codex" }));
   const openCodeModelDiscoveryEnabled =
-    localProviderDiscoveryEnabled &&
-    (selectedProvider === "opencode" || lockedProvider === "opencode" || isModelPickerOpen);
+    selectedProvider === "opencode" || lockedProvider === "opencode" || isModelPickerOpen;
   const kiloModelDiscoveryEnabled =
-    localProviderDiscoveryEnabled &&
-    (selectedProvider === "kilo" || lockedProvider === "kilo" || isModelPickerOpen);
+    selectedProvider === "kilo" || lockedProvider === "kilo" || isModelPickerOpen;
   const piModelDiscoveryEnabled =
-    localProviderDiscoveryEnabled &&
-    (selectedProvider === "pi" || lockedProvider === "pi" || isModelPickerOpen);
+    selectedProvider === "pi" || lockedProvider === "pi" || isModelPickerOpen;
   const cursorDynamicModelsQuery = useQuery(
     providerModelsQueryOptions({
       provider: "cursor",
       binaryPath: settings.cursorBinaryPath || null,
       apiEndpoint: settings.cursorApiEndpoint || null,
-      enabled:
-        localProviderDiscoveryEnabled &&
-        (selectedProvider === "cursor" || lockedProvider === "cursor" || isModelPickerOpen),
+      enabled: selectedProvider === "cursor" || lockedProvider === "cursor" || isModelPickerOpen,
     }),
   );
   const antigravityModelsQuery = useQuery(
@@ -2454,23 +2168,17 @@ export default function ChatView({
       binaryPath: settings.antigravityBinaryPath || null,
       cwd: providerModelDiscoveryCwd,
       enabled:
-        localProviderDiscoveryEnabled &&
-        (selectedProvider === "antigravity" ||
-          lockedProvider === "antigravity" ||
-          isModelPickerOpen),
+        selectedProvider === "antigravity" || lockedProvider === "antigravity" || isModelPickerOpen,
     }),
   );
   const grokDynamicModelsQuery = useQuery(
     providerModelsQueryOptions({
       provider: "grok",
       binaryPath: settings.grokBinaryPath || null,
-      enabled:
-        localProviderDiscoveryEnabled &&
-        (selectedProvider === "grok" || lockedProvider === "grok" || isModelPickerOpen),
+      enabled: selectedProvider === "grok" || lockedProvider === "grok" || isModelPickerOpen,
     }),
   );
-  const droidModelDiscoveryEnabled =
-    localProviderDiscoveryEnabled && (selectedProvider === "droid" || lockedProvider === "droid");
+  const droidModelDiscoveryEnabled = selectedProvider === "droid" || lockedProvider === "droid";
   const droidDynamicModelsQuery = useQuery(
     providerModelsQueryOptions({
       provider: "droid",
@@ -2505,14 +2213,9 @@ export default function ChatView({
     }),
   );
   const claudeDynamicAgentsQuery = useQuery(
-    providerAgentsQueryOptions({
-      provider: "claudeAgent",
-      enabled: localProviderDiscoveryEnabled,
-    }),
+    providerAgentsQueryOptions({ provider: "claudeAgent" }),
   );
-  const codexDynamicAgentsQuery = useQuery(
-    providerAgentsQueryOptions({ provider: "codex", enabled: localProviderDiscoveryEnabled }),
-  );
+  const codexDynamicAgentsQuery = useQuery(providerAgentsQueryOptions({ provider: "codex" }));
   const openCodeDynamicAgentsQuery = useQuery(
     providerAgentsQueryOptions({
       provider: "opencode",
@@ -2628,18 +2331,18 @@ export default function ChatView({
     > = { ...staticOptions };
 
     const dynamicSources: Record<ProviderKind, typeof claudeDynamicModelsQuery.data> = {
-      claudeAgent: localProviderDiscoveryEnabled ? claudeDynamicModelsQuery.data : undefined,
-      codex: localProviderDiscoveryEnabled ? codexDynamicModelsQuery.data : undefined,
+      claudeAgent: claudeDynamicModelsQuery.data,
+      codex: codexDynamicModelsQuery.data,
       cursor:
-        !localProviderDiscoveryEnabled || cursorDynamicModelsQuery.data === undefined
+        cursorDynamicModelsQuery.data === undefined
           ? undefined
           : { ...cursorDynamicModelsQuery.data, models: cursorRuntimeModels },
-      antigravity: localProviderDiscoveryEnabled ? antigravityModelsQuery.data : undefined,
-      grok: localProviderDiscoveryEnabled ? grokDynamicModelsQuery.data : undefined,
-      droid: localProviderDiscoveryEnabled ? droidDynamicModelsQuery.data : undefined,
-      kilo: localProviderDiscoveryEnabled ? kiloDynamicModelsQuery.data : undefined,
-      opencode: localProviderDiscoveryEnabled ? openCodeDynamicModelsQuery.data : undefined,
-      pi: localProviderDiscoveryEnabled ? piDynamicModelsQuery.data : undefined,
+      antigravity: antigravityModelsQuery.data,
+      grok: grokDynamicModelsQuery.data,
+      droid: droidDynamicModelsQuery.data,
+      kilo: kiloDynamicModelsQuery.data,
+      opencode: openCodeDynamicModelsQuery.data,
+      pi: piDynamicModelsQuery.data,
     };
 
     for (const provider of [
@@ -2675,7 +2378,6 @@ export default function ChatView({
     antigravityModelsQuery.data,
     grokDynamicModelsQuery.data,
     kiloDynamicModelsQuery.data,
-    localProviderDiscoveryEnabled,
     openCodeDynamicModelsQuery.data,
     piDynamicModelsQuery.data,
   ]);
@@ -2684,35 +2386,21 @@ export default function ChatView({
     selectedProvider,
     threadModelSelection: activeThread?.modelSelection,
     projectModelSelection: activeProject?.defaultModelSelection,
-    preferThreadModelSelection: isServerThread,
     customModelsByProvider,
     availableModelOptionsByProvider: modelOptionsByProvider,
   });
   const runtimeModelsByProvider = useMemo(
-    () =>
-      localProviderDiscoveryEnabled
-        ? {
-            claudeAgent: claudeDynamicModelsQuery.data?.models ?? [],
-            codex: codexDynamicModelsQuery.data?.models ?? [],
-            cursor: cursorRuntimeModels,
-            antigravity: antigravityModelsQuery.data?.models ?? [],
-            grok: grokDynamicModelsQuery.data?.models ?? [],
-            droid: droidDynamicModelsQuery.data?.models ?? [],
-            kilo: kiloDynamicModelsQuery.data?.models ?? [],
-            opencode: openCodeDynamicModelsQuery.data?.models ?? [],
-            pi: piDynamicModelsQuery.data?.models ?? [],
-          }
-        : {
-            claudeAgent: [],
-            codex: [],
-            cursor: [],
-            antigravity: [],
-            grok: [],
-            droid: [],
-            kilo: [],
-            opencode: [],
-            pi: [],
-          },
+    () => ({
+      claudeAgent: claudeDynamicModelsQuery.data?.models ?? [],
+      codex: codexDynamicModelsQuery.data?.models ?? [],
+      cursor: cursorRuntimeModels,
+      antigravity: antigravityModelsQuery.data?.models ?? [],
+      grok: grokDynamicModelsQuery.data?.models ?? [],
+      droid: droidDynamicModelsQuery.data?.models ?? [],
+      kilo: kiloDynamicModelsQuery.data?.models ?? [],
+      opencode: openCodeDynamicModelsQuery.data?.models ?? [],
+      pi: piDynamicModelsQuery.data?.models ?? [],
+    }),
     [
       claudeDynamicModelsQuery.data?.models,
       codexDynamicModelsQuery.data?.models,
@@ -2721,7 +2409,6 @@ export default function ChatView({
       antigravityModelsQuery.data?.models,
       grokDynamicModelsQuery.data?.models,
       kiloDynamicModelsQuery.data?.models,
-      localProviderDiscoveryEnabled,
       openCodeDynamicModelsQuery.data?.models,
       piDynamicModelsQuery.data?.models,
     ],
@@ -2850,13 +2537,6 @@ export default function ChatView({
         compareProvidersByOrder(settings.providerOrder, left.value, right.value),
       )
         .filter((option) => {
-          if (
-            controlPlane.isAuthoritative &&
-            providerAvailabilityByProvider?.[option.value]?.selectable === false &&
-            !(isServerThread && option.value === selectedProvider)
-          ) {
-            return false;
-          }
           if (lockedProvider !== null) {
             return option.value === lockedProvider;
           }
@@ -2890,16 +2570,18 @@ export default function ChatView({
       hiddenProviderSet,
       lockedProvider,
       modelOptionsByProvider,
-      controlPlane.isAuthoritative,
-      providerAvailabilityByProvider,
-      isServerThread,
       selectedProvider,
       settings.providerOrder,
     ],
   );
+  const phase = derivePhase(activeThread?.session ?? null);
   const isConnecting = isLocalConnecting || phase === "connecting";
   // User messages intentionally have no turn id; assistant messages are the stable
   // bridge for deciding which historical work can fold into visible replies.
+  // Memoized on purpose: ChatView does not compile under React Compiler yet
+  // (hoisting blockers), so an inline Set would change identity every render
+  // and cascade through the memoized work-log/timeline chain into the
+  // virtualized list, which resets in a loop on unstable data.
   const workLogVisibleTurnIds = useMemo(() => {
     const turnIds = new Set<TurnId>();
     for (const message of activeThread?.messages ?? []) {
@@ -3079,58 +2761,38 @@ export default function ChatView({
     ? (agentActivityTimelineState.detailById.get(openAgentActivityId) ?? null)
     : null;
   useEffect(() => {
-    setOpenAgentActivityId(null);
+    // Async setState (post-paint) keeps this thread-change reset out of the
+    // render->effect->render cascade.
+    const settle = window.setTimeout(() => {
+      setOpenAgentActivityId(null);
+    }, 0);
+    return () => window.clearTimeout(settle);
   }, [activeThread?.id]);
   useEffect(() => {
-    if (openAgentActivityId && !agentActivityTimelineState.detailById.has(openAgentActivityId)) {
-      setOpenAgentActivityId(null);
-    }
-  }, [agentActivityTimelineState.detailById, openAgentActivityId]);
-  const eventPendingApprovals = useMemo(
-    () => derivePendingApprovals(threadActivities),
-    [threadActivities],
-  );
-  const eventPendingUserInputs = useMemo(
-    () => derivePendingUserInputs(threadActivities),
-    [threadActivities],
-  );
-  const observedInteractionSequence = useMemo(
-    () => latestControlPlaneInteractionSequence(threadActivities),
-    [threadActivities],
-  );
-  const pendingInteractionQuery = useControlPlanePendingInteractions(
-    activeThreadId,
-    observedInteractionSequence,
-  );
-  const durablePendingInteractions = useMemo(
-    () => projectPendingControlPlaneInteractions(pendingInteractionQuery.data?.items ?? []),
-    [pendingInteractionQuery.data?.items],
-  );
-  const pendingApprovals = controlPlane.isAuthoritative
-    ? durablePendingInteractions.approvals
-    : eventPendingApprovals;
-  const pendingUserInputs = controlPlane.isAuthoritative
-    ? durablePendingInteractions.userInputs
-    : eventPendingUserInputs;
-  useEffect(() => {
-    if (!controlPlane.isAuthoritative || !activeThreadId || !pendingInteractionQuery.error) {
+    if (!openAgentActivityId || agentActivityTimelineState.detailById.has(openAgentActivityId)) {
       return;
     }
-    setStoreThreadError(
-      activeThreadId,
-      pendingInteractionQuery.error instanceof Error
-        ? pendingInteractionQuery.error.message
-        : "Failed to load pending approval and user-input requests.",
-    );
-  }, [
-    activeThreadId,
-    controlPlane.isAuthoritative,
-    pendingInteractionQuery.error,
-    setStoreThreadError,
-  ]);
+    // Async setState (post-paint) keeps this stale-detail cleanup out of the
+    // render->effect->render cascade.
+    const settle = window.setTimeout(() => {
+      setOpenAgentActivityId(null);
+    }, 0);
+    return () => window.clearTimeout(settle);
+  }, [agentActivityTimelineState.detailById, openAgentActivityId]);
+  const pendingApprovals = useMemo(
+    () => derivePendingApprovals(threadActivities, activeThread?.pendingInteractions),
+    [activeThread?.pendingInteractions, threadActivities],
+  );
+  const pendingUserInputs = useMemo(
+    () => derivePendingUserInputs(threadActivities, activeThread?.pendingInteractions),
+    [activeThread?.pendingInteractions, threadActivities],
+  );
   const activePendingUserInput = pendingUserInputs[0] ?? null;
   const activePendingUserInputKey = activePendingUserInput
-    ? (activePendingUserInput.requestKey ?? activePendingUserInput.requestId)
+    ? pendingRequestInstanceKey(
+        activePendingUserInput.requestId,
+        activePendingUserInput.lifecycleGeneration,
+      )
     : null;
   const activePendingDraftAnswers = useMemo(
     () =>
@@ -3162,7 +2824,7 @@ export default function ChatView({
     [activePendingDraftAnswers, activePendingUserInput],
   );
   const activePendingIsResponding = activePendingUserInputKey
-    ? respondingUserInputRequestIds.includes(activePendingUserInputKey)
+    ? respondingUserInputRequestKeys.includes(activePendingUserInputKey)
     : false;
   const activeProposedPlan = useMemo(() => {
     if (!latestTurnSettled) {
@@ -3353,14 +3015,7 @@ export default function ChatView({
     interactionMode === "plan" &&
     latestTurnSettled &&
     hasActionableProposedPlan(activeProposedPlan);
-  const activeComposerDispatchDecision =
-    showPlanFollowUpPrompt && prompt.trim().length === 0
-      ? selectedProviderDefaultDispatchDecision
-      : selectedProviderDispatchDecision;
   const activePendingApproval = pendingApprovals[0] ?? null;
-  const activePendingApprovalKey = activePendingApproval
-    ? (activePendingApproval.requestKey ?? activePendingApproval.requestId)
-    : null;
   const serverAcknowledgedLocalDispatch = useMemo(
     () =>
       hasServerAcknowledgedLocalDispatch({
@@ -3386,7 +3041,9 @@ export default function ChatView({
   const activeWorktreeSetup = localDispatch?.worktreeSetup ?? null;
   const isPreparingWorktree = activeWorktreeSetup !== null;
   const hasLiveTurn = phase === "running";
-  hasLiveTurnRef.current = hasLiveTurn;
+  useLayoutEffect(() => {
+    hasLiveTurnRef.current = hasLiveTurn;
+  }, [hasLiveTurn]);
   const isWorking = hasLiveTurn || isSendBusy || isConnecting || isRevertingCheckpoint;
   const hasStreamingAssistantText =
     activeThread?.messages.some((message) => message.role === "assistant" && message.streaming) ??
@@ -3465,7 +3122,7 @@ export default function ChatView({
       lastSyncedPendingInputRef.current = null;
       return;
     }
-    const nextRequestId = activePendingUserInputKey;
+    const nextRequestId = activePendingUserInput?.requestId ?? null;
     const nextQuestionId = activePendingProgress?.activeQuestion?.id ?? null;
     const questionChanged =
       lastSyncedPendingInputRef.current?.requestId !== nextRequestId ||
@@ -3493,10 +3150,10 @@ export default function ChatView({
     setComposerHighlightedItemId(null);
   }, [
     activePendingProgress?.customAnswer,
-    activePendingUserInputKey,
+    activePendingUserInput?.requestId,
     activePendingProgress?.activeQuestion?.id,
   ]);
-  useEffect(() => {
+  useLayoutEffect(() => {
     attachmentPreviewHandoffByMessageIdRef.current = attachmentPreviewHandoffByMessageId;
   }, [attachmentPreviewHandoffByMessageId]);
   const clearAttachmentPreviewHandoffs = useCallback(() => {
@@ -3853,10 +3510,6 @@ export default function ChatView({
 
     return byUserMessageId;
   }, [inferredCheckpointTurnCountByTurnId, timelineEntries, turnDiffSummaryByAssistantMessageId]);
-  const visibleRevertTurnCountByUserMessageId = useMemo(
-    () => (canUseCheckpointActions ? revertTurnCountByUserMessageId : new Map<MessageId, number>()),
-    [canUseCheckpointActions, revertTurnCountByUserMessageId],
-  );
 
   const threadWorkspaceCwd = activeProject
     ? resolveSharedThreadWorkspaceCwd({
@@ -3894,10 +3547,9 @@ export default function ChatView({
   );
   const effectiveMentionQuery = mentionTriggerQuery.length > 0 ? debouncedPathQuery : "";
   const composerSkillCwd = providerModelDiscoveryCwd;
-  const providerComposerCapabilitiesQuery = useQuery({
-    ...providerComposerCapabilitiesQueryOptions(selectedProvider),
-    enabled: localProviderDiscoveryEnabled,
-  });
+  const providerComposerCapabilitiesQuery = useQuery(
+    providerComposerCapabilitiesQueryOptions(selectedProvider),
+  );
   const providerCommandsQuery = useQuery(
     providerCommandsQueryOptions({
       provider: selectedProvider,
@@ -3921,7 +3573,6 @@ export default function ChatView({
           : undefined,
       agentDir: selectedProvider === "pi" ? settings.piAgentDir || null : null,
       enabled:
-        localProviderDiscoveryEnabled &&
         (composerTriggerKind === "slash-command" || composerTriggerKind === "slash-model") &&
         supportsNativeSlashCommandDiscovery(providerComposerCapabilitiesQuery.data) &&
         composerSkillCwd !== null,
@@ -3936,7 +3587,6 @@ export default function ChatView({
       threadId,
       agentDir: selectedProvider === "pi" ? settings.piAgentDir || null : null,
       enabled:
-        localProviderDiscoveryEnabled &&
         (isSkillTrigger || composerTriggerKind === "slash-command" || selectedProvider === "pi") &&
         canDiscoverProviderSkills &&
         composerSkillCwd !== null,
@@ -3948,7 +3598,6 @@ export default function ChatView({
       cwd: composerSkillCwd,
       threadId,
       enabled:
-        localProviderDiscoveryEnabled &&
         supportsPluginDiscovery(providerComposerCapabilitiesQuery.data) &&
         composerSkillCwd !== null,
     }),
@@ -3974,22 +3623,19 @@ export default function ChatView({
   // Keep plugin suggestions referentially stable so prompt-sync effects do not loop on rerender.
   const providerPlugins = useMemo(
     () =>
-      localProviderDiscoveryEnabled
-        ? (providerPluginsQuery.data?.marketplaces.flatMap((marketplace) =>
-            marketplace.plugins.map((plugin) => ({
-              plugin,
-              mention: {
-                name: plugin.name,
-                path: `plugin://${plugin.name}@${marketplace.name}`,
-              } satisfies ProviderMentionReference,
-            })),
-          ) ?? EMPTY_COMPOSER_PLUGIN_SUGGESTIONS)
-        : EMPTY_COMPOSER_PLUGIN_SUGGESTIONS,
-    [localProviderDiscoveryEnabled, providerPluginsQuery.data],
+      providerPluginsQuery.data?.marketplaces.flatMap((marketplace) =>
+        marketplace.plugins.map((plugin) => ({
+          plugin,
+          mention: {
+            name: plugin.name,
+            path: `plugin://${plugin.name}@${marketplace.name}`,
+          } satisfies ProviderMentionReference,
+        })),
+      ) ?? EMPTY_COMPOSER_PLUGIN_SUGGESTIONS,
+    [providerPluginsQuery.data],
   );
-  const providerNativeCommands = localProviderDiscoveryEnabled
-    ? (providerCommandsQuery.data?.commands ?? EMPTY_PROVIDER_NATIVE_COMMANDS)
-    : EMPTY_PROVIDER_NATIVE_COMMANDS;
+  const providerNativeCommands =
+    providerCommandsQuery.data?.commands ?? EMPTY_PROVIDER_NATIVE_COMMANDS;
   const providerNativeCommandNames = useMemo(
     () => providerNativeCommands.map((command) => command.name),
     [providerNativeCommands],
@@ -4009,18 +3655,15 @@ export default function ChatView({
   }, [composerTrigger, providerNativeCommandNames, selectedProvider]);
   const effectiveComposerTriggerKind = effectiveComposerTrigger?.kind ?? null;
   const supportsTextNativeReviewCommand = useMemo(
-    () => providerNativeCommands.some((command) => command.name.toLowerCase() === "review"),
-    [providerNativeCommands],
+    () => providerSupportsTextNativeReviewCommand(selectedProvider, providerNativeCommands),
+    [providerNativeCommands, selectedProvider],
   );
-  const providerSkills = localProviderDiscoveryEnabled
-    ? (providerSkillsQuery.data?.skills ?? EMPTY_PROVIDER_SKILLS)
-    : EMPTY_PROVIDER_SKILLS;
+  const providerSkills = providerSkillsQuery.data?.skills ?? EMPTY_PROVIDER_SKILLS;
   const selectedModelCaps = useMemo(
     () => getModelCapabilities(selectedProvider, selectedModel),
     [selectedModel, selectedProvider],
   );
-  const supportsFastSlashCommand =
-    localProviderDiscoveryEnabled && selectedModelCaps.supportsFastMode;
+  const supportsFastSlashCommand = selectedModelCaps.supportsFastMode;
   const currentProviderModelOptions = composerModelOptions?.[selectedProvider];
   const fastModeEnabled =
     supportsFastSlashCommand &&
@@ -4029,22 +3672,8 @@ export default function ChatView({
     composerTrigger?.kind === "slash-command"
       ? stripComposerTriggerText(prompt, composerTrigger)
       : prompt;
-  const canOfferCompactCommand =
-    advancedCapabilityDecisions.compact.allowed &&
-    isServerThread &&
-    activeThread?.session !== null &&
-    activeThread?.session?.status !== "closed" &&
-    (controlPlane.isAuthoritative
-      ? !hasActiveServerExecution && controlPlane.capabilities.canCreateTurn
-      : supportsThreadCompaction(providerComposerCapabilitiesQuery.data));
   const canOfferReviewCommand =
-    advancedCapabilityDecisions.review.allowed &&
-    (controlPlane.isAuthoritative
-      ? isServerThread &&
-        !hasActiveServerExecution &&
-        controlPlane.capabilities.canCreateTurn &&
-        Boolean(activeControlPlaneProject?.repositoryUrl)
-      : (branchesQuery.data?.isRepo ?? true)) &&
+    (branchesQuery.data?.isRepo ?? true) &&
     canOfferReviewSlashCommand({
       prompt: composerPromptWithoutActiveSlashTrigger,
       imageCount: composerImages.length,
@@ -4053,13 +3682,8 @@ export default function ChatView({
       selectedMentionCount: selectedComposerMentions.length,
     });
   const canOfferForkCommand =
-    advancedCapabilityDecisions.fork.allowed &&
     isServerThread &&
     activeThread !== undefined &&
-    (!controlPlane.isAuthoritative ||
-      (!hasActiveServerExecution &&
-        controlPlane.capabilities.canCreateSession &&
-        forkTargetDispatchDecision.allowed)) &&
     canOfferForkSlashCommand({
       prompt: composerPromptWithoutActiveSlashTrigger,
       imageCount: composerImages.length,
@@ -4069,8 +3693,6 @@ export default function ChatView({
       interactionMode,
     });
   const canOfferSideCommand =
-    canUseLocalProviderCommands &&
-    canOfferForkCommand &&
     isServerThread &&
     activeThread !== undefined &&
     canOfferSideSlashCommand({
@@ -4089,15 +3711,14 @@ export default function ChatView({
     isServerThread &&
     activeThread !== undefined &&
     threadExportBlockedReason(activeThread) === null;
-  const selectedDynamicAgents = localProviderDiscoveryEnabled
-    ? selectedProvider === "claudeAgent"
+  const selectedDynamicAgents =
+    selectedProvider === "claudeAgent"
       ? (claudeDynamicAgentsQuery.data?.agents ?? EMPTY_PROVIDER_AGENTS)
       : selectedProvider === "kilo"
         ? (kiloDynamicAgentsQuery.data?.agents ?? EMPTY_PROVIDER_AGENTS)
         : selectedProvider === "opencode"
           ? (openCodeDynamicAgentsQuery.data?.agents ?? EMPTY_PROVIDER_AGENTS)
-          : (codexDynamicAgentsQuery.data?.agents ?? EMPTY_PROVIDER_AGENTS)
-    : EMPTY_PROVIDER_AGENTS;
+          : (codexDynamicAgentsQuery.data?.agents ?? EMPTY_PROVIDER_AGENTS);
   const dynamicAgents = useMemo(
     () =>
       selectedDynamicAgents.map((agent) =>
@@ -4110,15 +3731,17 @@ export default function ChatView({
   const normalComposerMenuItems = useComposerCommandMenuItems({
     composerTrigger: effectiveComposerTrigger,
     provider: selectedProvider,
-    commandRoutingMode: controlPlane.isAuthoritative ? "control-plane" : "local",
     providerPlugins,
     providerNativeCommands,
     providerSkills,
     workspaceEntries,
     searchableModelOptions,
     supportsFastSlashCommand,
-    canOfferCompactCommand,
-    canOfferPlanCommand: planModeCapabilityDecision.allowed,
+    canOfferCompactCommand:
+      supportsThreadCompaction(providerComposerCapabilitiesQuery.data) &&
+      isServerThread &&
+      activeThread?.session !== null &&
+      activeThread?.session?.status !== "closed",
     canOfferReviewCommand,
     canOfferForkCommand,
     canOfferSideCommand,
@@ -4153,23 +3776,15 @@ export default function ChatView({
           id: "review-target:changes",
           type: "review-target" as const,
           target: "changes" as const,
-          label: controlPlane.isAuthoritative
-            ? "Review Workspace Changes"
-            : "Review Uncommitted Changes",
-          description: controlPlane.isAuthoritative
-            ? "Review changes in the authoritative SaaS workspace"
-            : "Review local uncommitted changes",
+          label: "Review Uncommitted Changes",
+          description: "Review local uncommitted changes",
         },
         {
           id: "review-target:base-branch",
           type: "review-target" as const,
           target: "base-branch" as const,
-          label: controlPlane.isAuthoritative
-            ? "Review Against Default Branch"
-            : "Review Against Base Branch",
-          description: controlPlane.isAuthoritative
-            ? `Review the workspace against ${activeControlPlaneProject?.defaultBranch ?? "the Project default branch"}`
-            : "Review the current branch diff against its base",
+          label: "Review Against Base Branch",
+          description: "Review the current branch diff against its base",
         },
       ];
     }
@@ -4178,9 +3793,7 @@ export default function ChatView({
   }, [
     activeThread?.envMode,
     activeThread?.worktreePath,
-    activeControlPlaneProject?.defaultBranch,
     composerCommandPicker,
-    controlPlane.isAuthoritative,
     normalComposerMenuItems,
   ]);
   const composerMenuOpen = Boolean(composerTrigger || composerCommandPicker);
@@ -4191,9 +3804,12 @@ export default function ChatView({
       null,
     [composerHighlightedItemId, composerMenuItems],
   );
-  composerMenuOpenRef.current = composerMenuOpen;
-  composerMenuItemsRef.current = composerMenuItems;
-  activeComposerMenuItemRef.current = activeComposerMenuItem;
+  // Keydown can fire as soon as the updated menu commits, before passive effects.
+  useLayoutEffect(() => {
+    composerMenuOpenRef.current = composerMenuOpen;
+    composerMenuItemsRef.current = composerMenuItems;
+    activeComposerMenuItemRef.current = activeComposerMenuItem;
+  }, [composerMenuOpen, composerMenuItems, activeComposerMenuItem]);
   const nonPersistedComposerImageIdSet = useMemo(() => {
     const durableBlobIds = new Set(
       durablyPersistedComposerImageIds
@@ -4287,9 +3903,6 @@ export default function ChatView({
         .flatMap((status) => (status ? [status] : [])),
     [confirmedCustomBinaryPathsByProvider, serverConfigQuery.data?.providers, settings],
   );
-  const effectiveProviderStatuses = controlPlane.isAuthoritative
-    ? EMPTY_PROVIDER_STATUSES
-    : providerStatuses;
   const handoffBadgeLabel = useMemo(
     () => (activeThread ? resolveThreadHandoffBadgeLabel(activeThread) : null),
     [activeThread],
@@ -4302,15 +3915,15 @@ export default function ChatView({
     () =>
       activeThread
         ? resolveAvailableHandoffTargetProviders(activeThread.modelSelection.provider).filter(
-            (provider) => isProviderUsable(findProviderStatus(effectiveProviderStatuses, provider)),
+            (provider) => isProviderUsable(findProviderStatus(providerStatuses, provider)),
           )
         : [],
-    [activeThread, effectiveProviderStatuses],
+    [activeThread, providerStatuses],
   );
   const handoffActionLabel = activeThread ? "Hand off thread" : "Create handoff thread";
   const activeProviderStatus = useMemo(
-    () => findProviderStatus(effectiveProviderStatuses, selectedProvider),
-    [selectedProvider, effectiveProviderStatuses],
+    () => findProviderStatus(providerStatuses, selectedProvider),
+    [selectedProvider, providerStatuses],
   );
   const activeProviderHealthBannerDismissalKey = useMemo(
     () => getProviderHealthBannerDismissalKey(activeProviderStatus),
@@ -4322,18 +3935,16 @@ export default function ChatView({
       ? null
       : activeProviderStatus;
   const voiceProviderStatus = useMemo(
-    () => findProviderStatus(effectiveProviderStatuses, "codex"),
-    [effectiveProviderStatuses],
+    () => findProviderStatus(providerStatuses, "codex"),
+    [providerStatuses],
   );
   const refreshProviderStatuses = useRefreshProviderStatusesNow();
   const voiceRecordingDurationLabel = useMemo(
     () => formatVoiceRecordingDuration(voiceRecordingDurationMs),
     [voiceRecordingDurationMs],
   );
-  const canRenderVoiceNotes =
-    !controlPlane.isAuthoritative && voiceProviderStatus?.authStatus !== "unauthenticated";
+  const canRenderVoiceNotes = voiceProviderStatus?.authStatus !== "unauthenticated";
   const canStartVoiceNotes =
-    !controlPlane.isAuthoritative &&
     voiceProviderStatus?.authStatus !== "unauthenticated" &&
     voiceProviderStatus?.voiceTranscriptionAvailable !== false;
   const showVoiceNotesControl = canRenderVoiceNotes || isVoiceRecording || isVoiceTranscribing;
@@ -5082,10 +4693,7 @@ export default function ChatView({
   const threadRecap = useThreadRecap({
     thread: activeThread,
     cwd: threadWorkspaceCwd,
-    enabled: shouldEnableThreadRecap({
-      environmentPanelVisible,
-      controlPlaneAuthoritative: controlPlane.isAuthoritative,
-    }),
+    enabled: environmentPanelVisible,
     latestTurnSettled,
     codexHomePath: settings.codexHomePath || null,
     providerOptions: providerOptionsForDispatch ?? null,
@@ -5454,7 +5062,7 @@ export default function ChatView({
       if (isLocalDraftThread) {
         setDraftThreadContext(threadId, { runtimeMode: mode });
       }
-      if (serverThread && !controlPlane.isAuthoritative) {
+      if (serverThread) {
         const api = readNativeApi();
         if (api) {
           void api.orchestration
@@ -5479,7 +5087,6 @@ export default function ChatView({
     },
     [
       isLocalDraftThread,
-      controlPlane.isAuthoritative,
       runtimeMode,
       scheduleComposerFocus,
       serverThread,
@@ -5492,22 +5099,11 @@ export default function ChatView({
   const handleInteractionModeChange = useCallback(
     (mode: ProviderInteractionMode) => {
       if (mode === interactionMode) return;
-      if (mode === "plan" && !planModeCapabilityDecision.allowed) {
-        toastManager.add({
-          type: planModeCapabilityDecision.temporary ? "warning" : "error",
-          title: "Plan mode is unavailable",
-          description:
-            planModeCapabilityDecision.message ??
-            "The selected Provider cannot use Plan mode on this SaaS target.",
-        });
-        scheduleComposerFocus();
-        return;
-      }
       setComposerDraftInteractionMode(threadId, mode);
       if (isLocalDraftThread) {
         setDraftThreadContext(threadId, { interactionMode: mode });
       }
-      if (serverThread && !controlPlane.isAuthoritative) {
+      if (serverThread) {
         const api = readNativeApi();
         if (api) {
           void api.orchestration
@@ -5533,8 +5129,6 @@ export default function ChatView({
     [
       interactionMode,
       isLocalDraftThread,
-      controlPlane.isAuthoritative,
-      planModeCapabilityDecision,
       scheduleComposerFocus,
       serverThread,
       setComposerDraftInteractionMode,
@@ -6003,18 +5597,21 @@ export default function ChatView({
   ]);
 
   useEffect(() => {
-    setPullRequestDialogState(null);
-    setRenameDialogOpen(false);
     isAtEndRef.current = true;
     showScrollDebouncer.current.cancel();
-    setShowScrollToBottom(false);
-    if (planSidebarOpenOnNextThreadRef.current) {
-      planSidebarOpenOnNextThreadRef.current = false;
-      setPlanSidebarOpen(true);
-    } else {
-      setPlanSidebarOpen(false);
-    }
+    // Capture the carried sidebar-open intent synchronously (ref reads/writes stay
+    // in render->commit order); defer only the setState so this thread-change reset
+    // stays out of the render->effect->render cascade.
+    const openPlanSidebar = planSidebarOpenOnNextThreadRef.current;
+    planSidebarOpenOnNextThreadRef.current = false;
     planSidebarDismissedForTurnRef.current = null;
+    const settle = window.setTimeout(() => {
+      setPullRequestDialogState(null);
+      setRenameDialogOpen(false);
+      setShowScrollToBottom(false);
+      setPlanSidebarOpen(openPlanSidebar);
+    }, 0);
+    return () => window.clearTimeout(settle);
   }, [activeThread?.id]);
 
   useEffect(() => {
@@ -6030,7 +5627,12 @@ export default function ChatView({
   }, [composerMenuItems, composerMenuOpen]);
 
   useEffect(() => {
-    setIsRevertingCheckpoint(false);
+    // Async setState (post-paint) keeps this thread-change reset out of the
+    // render->effect->render cascade.
+    const settle = window.setTimeout(() => {
+      setIsRevertingCheckpoint(false);
+    }, 0);
+    return () => window.clearTimeout(settle);
   }, [activeThread?.id]);
 
   useEffect(() => {
@@ -6073,7 +5675,12 @@ export default function ChatView({
 
   useEffect(() => {
     autoDispatchingQueuedTurnRef.current = false;
-    setQueuedSteerGate(null);
+    // Async setState (post-paint) keeps this thread-change reset out of the
+    // render->effect->render cascade.
+    const settle = window.setTimeout(() => {
+      setQueuedSteerGate(null);
+    }, 0);
+    return () => window.clearTimeout(settle);
   }, [threadId]);
 
   useEffect(() => {
@@ -6181,21 +5788,30 @@ export default function ChatView({
     voiceTranscriptionRequestIdRef.current += 1;
     voiceRecordingStartedAtRef.current = null;
     void cancelVoiceRecording();
-    setIsVoiceTranscribing(false);
-    setOptimisticUserMessages((existing) => {
-      if (existing.length === 0) return existing;
-      for (const message of existing) {
-        revokeUserMessagePreviewUrls(message);
-      }
-      return [];
-    });
-    setLocalDispatch(null);
-    setComposerHighlightedItemId(null);
-    setComposerCursor(collapseExpandedComposerCursor(promptRef.current, promptRef.current.length));
-    setComposerTrigger(detectComposerTrigger(promptRef.current, promptRef.current.length));
     dragDepthRef.current = 0;
-    setIsDragOverComposer(false);
-    setExpandedImage(null);
+    // Async setState (post-paint) keeps this thread-change reset out of the
+    // render->effect->render cascade. The pre-paint overlay clear (optimistic
+    // messages, expanded image) lives in the layout effect above, so deferring
+    // these residual resets by a tick is imperceptible.
+    const settle = window.setTimeout(() => {
+      setIsVoiceTranscribing(false);
+      setOptimisticUserMessages((existing) => {
+        if (existing.length === 0) return existing;
+        for (const message of existing) {
+          revokeUserMessagePreviewUrls(message);
+        }
+        return [];
+      });
+      setLocalDispatch(null);
+      setComposerHighlightedItemId(null);
+      setComposerCursor(
+        collapseExpandedComposerCursor(promptRef.current, promptRef.current.length),
+      );
+      setComposerTrigger(detectComposerTrigger(promptRef.current, promptRef.current.length));
+      setIsDragOverComposer(false);
+      setExpandedImage(null);
+    }, 0);
+    return () => window.clearTimeout(settle);
   }, [cancelVoiceRecording, threadId]);
 
   useEffect(() => {
@@ -6511,28 +6127,6 @@ export default function ChatView({
   }, [focusComposer, terminalState.workspaceActiveTab, terminalWorkspaceOpen]);
 
   const onInterrupt = useCallback(async () => {
-    if (controlPlane.isAuthoritative) {
-      if (!activeThread || !controlPlane.capabilities.canInterruptExecution) return;
-      if (!interruptCapabilityDecision.allowed) {
-        toastManager.add({
-          type: interruptCapabilityDecision.temporary ? "warning" : "error",
-          title: "Interrupt is unavailable",
-          description:
-            interruptCapabilityDecision.message ??
-            "The selected Provider cannot interrupt this SaaS Turn.",
-        });
-        return;
-      }
-      try {
-        await controlPlane.interruptActiveTurn(activeThread.id);
-      } catch (error) {
-        setThreadError(
-          activeThread.id,
-          error instanceof Error ? error.message : "Failed to interrupt the remote Turn.",
-        );
-      }
-      return;
-    }
     const api = readNativeApi();
     if (!api || !activeThread) return;
     await api.orchestration.dispatchCommand({
@@ -6541,7 +6135,7 @@ export default function ChatView({
       threadId: activeThread.id,
       createdAt: new Date().toISOString(),
     });
-  }, [activeThread, controlPlane, interruptCapabilityDecision, setThreadError]);
+  }, [activeThread]);
 
   const onStopWorkflowRun = useCallback(async () => {
     const api = readNativeApi();
@@ -6621,24 +6215,8 @@ export default function ChatView({
   }, [activeThreadId, markWorkflowRunDismissed, workflowRunState]);
 
   const onProviderModelSelect = useCallback(
-    async (provider: ProviderKind, model: ModelSlug) => {
+    (provider: ProviderKind, model: ModelSlug) => {
       if (!activeThread) return;
-      const providerAvailability = providerAvailabilityByProvider?.[provider];
-      if (providerAvailability?.selectable === false) {
-        toastManager.add({
-          type: providerAvailability.temporary ? "warning" : "error",
-          title: isServerThread
-            ? "Model switching is unavailable"
-            : `${PROVIDER_DISPLAY_NAMES[provider]} is unavailable`,
-          description:
-            providerAvailability.message ??
-            (isServerThread
-              ? "This SaaS Session cannot switch models right now."
-              : "This Provider or model cannot be selected on the active SaaS target."),
-        });
-        scheduleComposerFocus();
-        return;
-      }
       if (lockedProvider !== null && provider !== lockedProvider) {
         scheduleComposerFocus();
         return;
@@ -6652,29 +6230,6 @@ export default function ChatView({
         provider,
         model: resolvedModel,
       };
-      if (controlPlane.isAuthoritative && isServerThread) {
-        if (
-          activeThread.modelSelection.provider === nextModelSelection.provider &&
-          activeThread.modelSelection.model === nextModelSelection.model
-        ) {
-          scheduleComposerFocus();
-          return;
-        }
-        try {
-          await controlPlane.switchSessionModel(activeThread.id, nextModelSelection.model);
-        } catch (error) {
-          toastManager.add({
-            type: "error",
-            title: "Failed to switch model",
-            description:
-              error instanceof Error
-                ? error.message
-                : "The SaaS Session model could not be updated.",
-          });
-        }
-        scheduleComposerFocus();
-        return;
-      }
       setComposerDraftModelSelectionAndSticky(activeThread.id, nextModelSelection);
       if (provider === "cursor") {
         setComposerDraftProviderModelOptions(activeThread.id, provider, undefined, {
@@ -6686,16 +6241,12 @@ export default function ChatView({
     },
     [
       activeThread,
-      controlPlane,
-      controlPlane.isAuthoritative,
-      isServerThread,
       lockedProvider,
       scheduleComposerFocus,
       setComposerDraftModelSelectionAndSticky,
       setComposerDraftProviderModelOptions,
       customModelsByProvider,
       modelOptionsByProvider,
-      providerAvailabilityByProvider,
     ],
   );
 
@@ -7060,7 +6611,7 @@ export default function ChatView({
       voiceThreadIdRef.current === requestThreadId &&
       voiceProviderRef.current === requestProvider;
 
-    try {
+    await (async () => {
       const payload = await stopVoiceRecording();
       if (!isCurrentVoiceRequest()) {
         return;
@@ -7082,41 +6633,43 @@ export default function ChatView({
         return;
       }
       appendVoiceTranscriptToComposer(result.text);
-    } catch (error) {
-      if (!isCurrentVoiceRequest()) {
-        return;
-      }
-      const description =
-        error instanceof Error
-          ? sanitizeVoiceErrorMessage(error.message)
-          : "The voice note could not be transcribed.";
-      const authExpired = isVoiceAuthExpiredMessage(description);
-      if (authExpired) {
-        void refreshProviderStatuses();
-      }
-      toastManager.add({
-        type: "error",
-        title: authExpired ? "Sign in to ChatGPT again" : "Couldn't transcribe voice note",
-        description: authExpired
-          ? "Voice transcription uses your ChatGPT session in Codex. That session was rejected, so sign in again there and retry."
-          : description,
-        ...(authExpired
-          ? {
-              actionProps: {
-                children: "Refresh status",
-                onClick: () => {
-                  void refreshProviderStatuses();
+    })()
+      .catch((error: unknown) => {
+        if (!isCurrentVoiceRequest()) {
+          return;
+        }
+        const description =
+          error instanceof Error
+            ? sanitizeVoiceErrorMessage(error.message)
+            : "The voice note could not be transcribed.";
+        const authExpired = isVoiceAuthExpiredMessage(description);
+        if (authExpired) {
+          void refreshProviderStatuses();
+        }
+        toastManager.add({
+          type: "error",
+          title: authExpired ? "Sign in to ChatGPT again" : "Couldn't transcribe voice note",
+          description: authExpired
+            ? "Voice transcription uses your ChatGPT session in Codex. That session was rejected, so sign in again there and retry."
+            : description,
+          ...(authExpired
+            ? {
+                actionProps: {
+                  children: "Refresh status",
+                  onClick: () => {
+                    void refreshProviderStatuses();
+                  },
                 },
-              },
-            }
-          : {}),
+              }
+            : {}),
+        });
+      })
+      .finally(() => {
+        if (isCurrentVoiceRequest()) {
+          voiceRecordingStartedAtRef.current = null;
+          setIsVoiceTranscribing(false);
+        }
       });
-    } finally {
-      if (isCurrentVoiceRequest()) {
-        voiceRecordingStartedAtRef.current = null;
-        setIsVoiceTranscribing(false);
-      }
-    }
   }, [
     activeProject,
     activeThread,
@@ -7265,14 +6818,6 @@ export default function ChatView({
 
   const onRevertToTurnCount = useCallback(
     async (turnCount: number) => {
-      if (!canUseCheckpointActions) {
-        toastManager.add({
-          type: "warning",
-          title: "Checkpoint revert is unavailable",
-          description: "This thread cannot roll back checkpoints in the active backend.",
-        });
-        return;
-      }
       const api = readNativeApi();
       if (!api || !activeThread || isRevertingCheckpoint) return;
 
@@ -7310,27 +6855,11 @@ export default function ChatView({
       }
       setIsRevertingCheckpoint(false);
     },
-    [
-      activeThread,
-      canUseCheckpointActions,
-      hasLiveTurn,
-      isConnecting,
-      isRevertingCheckpoint,
-      isSendBusy,
-      setThreadError,
-    ],
+    [activeThread, hasLiveTurn, isConnecting, isRevertingCheckpoint, isSendBusy, setThreadError],
   );
 
   const onUndoTurnFiles = useCallback(
     async (turnCounts: readonly number[]) => {
-      if (!canUseCheckpointActions) {
-        toastManager.add({
-          type: "warning",
-          title: "File undo is unavailable",
-          description: "This thread cannot roll back file checkpoints in the active backend.",
-        });
-        return;
-      }
       const api = readNativeApi();
       if (!api || !activeThread || isRevertingCheckpoint || turnCounts.length === 0) return;
 
@@ -7377,15 +6906,7 @@ export default function ChatView({
         );
       }
     },
-    [
-      activeThread,
-      canUseCheckpointActions,
-      hasLiveTurn,
-      isConnecting,
-      isRevertingCheckpoint,
-      isSendBusy,
-      setThreadError,
-    ],
+    [activeThread, hasLiveTurn, isConnecting, isRevertingCheckpoint, isSendBusy, setThreadError],
   );
 
   const onCreateHandoffThread = useCallback(
@@ -7534,7 +7055,7 @@ export default function ChatView({
       );
       automationDraftSubmittingRef.current = true;
       setIsAutomationDraftSubmitting(true);
-      try {
+      return await (async () => {
         const definition = await api.automation.create(automationInput);
         if (activityThreadId) {
           void (async () => {
@@ -7580,18 +7101,20 @@ export default function ChatView({
           description: `${definition.name} - ${formatCadence(definition.schedule)}`,
         });
         return true;
-      } catch (error) {
-        toastManager.add({
-          type: "error",
-          title: "Could not create automation",
-          description:
-            error instanceof Error ? error.message : "Synara could not save the automation.",
+      })()
+        .catch((error: unknown) => {
+          toastManager.add({
+            type: "error",
+            title: "Could not create automation",
+            description:
+              error instanceof Error ? error.message : "Synara could not save the automation.",
+          });
+          return false;
+        })
+        .finally(() => {
+          automationDraftSubmittingRef.current = false;
+          setIsAutomationDraftSubmitting(false);
         });
-        return false;
-      } finally {
-        automationDraftSubmittingRef.current = false;
-        setIsAutomationDraftSubmitting(false);
-      }
     },
     [
       activeProject,
@@ -7770,7 +7293,7 @@ export default function ChatView({
       );
       automationDraftSubmittingRef.current = true;
       setIsAutomationDraftSubmitting(true);
-      try {
+      return await (async () => {
         const providerOptions =
           input.providerOptions ??
           providerOptionsForAutomationEdit(
@@ -7788,12 +7311,12 @@ export default function ChatView({
           description: `${updated.name} - ${formatCadence(updated.schedule)}`,
         });
         return true;
-      } catch {
-        return false;
-      } finally {
-        automationDraftSubmittingRef.current = false;
-        setIsAutomationDraftSubmitting(false);
-      }
+      })()
+        .catch(() => false)
+        .finally(() => {
+          automationDraftSubmittingRef.current = false;
+          setIsAutomationDraftSubmitting(false);
+        });
     },
     [automationUpdateMutation, providerOptionsForDispatch, resetAutomationDraftState],
   );
@@ -7934,7 +7457,9 @@ export default function ChatView({
     queuedTurn?: QueuedComposerChatTurn,
   ): Promise<boolean> => {
     e?.preventDefault();
+    const api = readNativeApi();
     if (
+      !api ||
       !activeThread ||
       isSendBusy ||
       isConnecting ||
@@ -8075,38 +7600,32 @@ export default function ChatView({
         interactionModeForSend = followUp.interactionMode;
         trimmedPromptForSend = followUp.text.trim();
       } else {
-        if (controlPlane.isAuthoritative) {
-          promptForSend = followUp.text;
-          interactionModeForSend = followUp.interactionMode;
-          trimmedPromptForSend = followUp.text.trim();
-        } else {
-          if (hasLiveTurn && dispatchMode === "queue") {
-            clearComposerInput(activeThread.id);
-            scheduleComposerFocus();
-            enqueueQueuedComposerTurn(activeThread.id, {
-              id: randomUUID(),
-              kind: "plan-follow-up",
-              createdAt: new Date().toISOString(),
-              previewText: followUp.text.trim(),
-              text: followUp.text,
-              interactionMode: followUp.interactionMode,
-              selectedProvider,
-              selectedModel,
-              selectedPromptEffort,
-              modelSelection: selectedModelSelection,
-              ...(providerOptionsForDispatch ? { providerOptionsForDispatch } : {}),
-              runtimeMode,
-            });
-            return true;
-          }
+        if (hasLiveTurn && dispatchMode === "queue") {
           clearComposerInput(activeThread.id);
           scheduleComposerFocus();
-          return onSubmitPlanFollowUp({
+          enqueueQueuedComposerTurn(activeThread.id, {
+            id: randomUUID(),
+            kind: "plan-follow-up",
+            createdAt: new Date().toISOString(),
+            previewText: followUp.text.trim(),
             text: followUp.text,
             interactionMode: followUp.interactionMode,
-            dispatchMode,
+            selectedProvider,
+            selectedModel,
+            selectedPromptEffort,
+            modelSelection: selectedModelSelection,
+            ...(providerOptionsForDispatch ? { providerOptionsForDispatch } : {}),
+            runtimeMode,
           });
+          return true;
         }
+        clearComposerInput(activeThread.id);
+        scheduleComposerFocus();
+        return onSubmitPlanFollowUp({
+          text: followUp.text,
+          interactionMode: followUp.interactionMode,
+          dispatchMode,
+        });
       }
     }
     const hasNoStructuredComposerContext =
@@ -8122,163 +7641,12 @@ export default function ChatView({
     if (hasPromptOnlySendableContent) {
       const handledSlashCommand = await handleStandaloneSlashCommand(trimmedPromptForSend);
       if (handledSlashCommand) {
+        // A slash command (e.g. /clear) consumes the composer, so abandon any in-progress
+        // automation setup rather than leaving a stale banner/request behind.
         pendingAutomationConversationRef.current = null;
         setPendingAutomationConversation(null);
         return true;
       }
-    }
-    if (controlPlane.isAuthoritative) {
-      if (!hasSendableContent) return false;
-      if (!hasNoStructuredComposerContext || selectedComposerMentionsForSend.length > 0) {
-        toastManager.add({
-          type: "warning",
-          title: "Remote attachments are not ready yet",
-          description:
-            "This Control Plane Turn was not created. Remove file, image, terminal, selection, or provider-mention attachments and try again.",
-        });
-        return false;
-      }
-      const outgoingMessageText = formatOutgoingComposerPrompt({
-        provider: selectedProviderForSend,
-        model: selectedModelForSend,
-        effort: selectedPromptEffortForSend,
-        text: trimmedPromptForSend,
-      });
-      const authoritativeDispatch = resolveAuthoritativeTurnDispatch({
-        hasLiveTurn,
-        dispatchMode,
-      });
-      if (authoritativeDispatch === "steer") {
-        if (!controlPlane.capabilities.canSteerExecution) {
-          toastManager.add({
-            type: "error",
-            title: "This SaaS context cannot steer Executions",
-            description:
-              "Select an active Tenant and Organization with Session execution permission.",
-          });
-          return false;
-        }
-        const activeSteerDecision = resolveControlPlaneCapabilityDecision({
-          isAuthoritative: true,
-          projection: activeProviderCapabilityProjection,
-          ...(activeProviderCapabilityError
-            ? { projectionError: activeProviderCapabilityError }
-            : {}),
-          provider: selectedProviderForSend,
-          capabilityId: "steer-turn",
-        });
-        try {
-          assertControlPlaneCapabilityAllowed(activeSteerDecision);
-        } catch (error) {
-          setThreadError(
-            activeThread.id,
-            error instanceof Error ? error.message : "Steer is unavailable for this SaaS Turn.",
-          );
-          return false;
-        }
-        sendInFlightRef.current = true;
-        setThreadError(activeThread.id, null);
-        try {
-          await controlPlane.steerActiveTurn(activeThread.id, outgoingMessageText);
-          if (queuedChatTurn === null) {
-            clearComposerInput(activeThread.id);
-            scheduleComposerFocus();
-          }
-          return true;
-        } catch (error) {
-          setThreadError(
-            activeThread.id,
-            error instanceof Error ? error.message : "Failed to steer the active remote Turn.",
-          );
-          return false;
-        } finally {
-          sendInFlightRef.current = false;
-        }
-      }
-      if (authoritativeDispatch === "queue-unsupported") {
-        toastManager.add({
-          type: "warning",
-          title: "Remote queued delivery is not supported yet",
-          description: "Steer the active remote Turn, or wait for it to finish before sending.",
-        });
-        return false;
-      }
-      if (!activeProject || !controlPlane.capabilities.canCreateTurn) {
-        toastManager.add({
-          type: "error",
-          title: "This SaaS context is read-only",
-          description:
-            "Select an active Tenant and Organization with Session execution permission.",
-        });
-        return false;
-      }
-      const activeDispatchDecision = resolveControlPlaneTurnDispatchDecision({
-        isAuthoritative: true,
-        projection: activeProviderCapabilityProjection,
-        ...(activeProviderCapabilityError
-          ? { projectionError: activeProviderCapabilityError }
-          : {}),
-        provider: selectedProviderForSend,
-        includeSessionStart: !isServerThread,
-        interactionMode: interactionModeForSend,
-      });
-      try {
-        assertControlPlaneCapabilityAllowed(activeDispatchDecision);
-      } catch (error) {
-        setThreadError(
-          activeThread.id,
-          error instanceof Error
-            ? error.message
-            : "The selected Provider cannot create this SaaS Turn.",
-        );
-        return false;
-      }
-      const draftKey = activeThread.id;
-      sendInFlightRef.current = true;
-      setThreadError(activeThread.id, null);
-      try {
-        const dispatch = await controlPlaneTurnDispatcher.dispatch({
-          draftThreadId: draftKey,
-          persistedSessionId: isServerThread ? activeThread.id : null,
-          projectId: activeProject.id,
-          title: buildPromptThreadTitleFallback(trimmedPromptForSend),
-          provider: selectedProviderForSend,
-          ...(selectedModelForSend ? { model: selectedModelForSend } : {}),
-          inputText: outgoingMessageText,
-          runtimeMode: runtimeModeForSend,
-          interactionMode: interactionModeForSend,
-          createSession: ({ projectId, idempotencyKey, ...input }) =>
-            controlPlane.createSession(projectId, { ...input, idempotencyKey }),
-          createTurn: ({ sessionId, inputText, runtimeMode, interactionMode, idempotencyKey }) =>
-            controlPlane.createTurn(sessionId, inputText, idempotencyKey, {
-              runtimeMode,
-              interactionMode,
-            }),
-        });
-        clearComposerInput(activeThread.id);
-        scheduleComposerFocus();
-
-        if (!isServerThread) {
-          const targetThreadId = ThreadId.makeUnsafe(dispatch.sessionId);
-          await navigate({ to: "/$threadId", params: { threadId: targetThreadId } });
-          const draftStore = useComposerDraftStore.getState();
-          draftStore.clearProjectDraftThreadId(activeProject.id);
-          draftStore.clearDraftThread(activeThread.id);
-        }
-        sendInFlightRef.current = false;
-        return true;
-      } catch (error) {
-        setThreadError(
-          activeThread.id,
-          error instanceof Error ? error.message : "Failed to create the remote Turn.",
-        );
-        sendInFlightRef.current = false;
-        return false;
-      }
-    }
-    const api = readNativeApi();
-    if (!api) {
-      return false;
     }
     const sourceProposedPlanForSend =
       queuedChatTurn?.sourceProposedPlan ??
@@ -8435,17 +7803,13 @@ export default function ChatView({
       }
     }
     sendPreflightInFlightRef.current = true;
-    const sendProviderAvailability = await (async () => {
-      try {
-        return await resolveProviderSendAvailabilityWithRefresh({
-          provider: selectedModelSelectionForSend.provider,
-          statuses: providerStatuses,
-          refreshStatuses: () => refreshProviderStatuses({ silent: true }),
-        });
-      } finally {
-        sendPreflightInFlightRef.current = false;
-      }
-    })();
+    const sendProviderAvailability = await resolveProviderSendAvailabilityWithRefresh({
+      provider: selectedModelSelectionForSend.provider,
+      statuses: providerStatuses,
+      refreshStatuses: () => refreshProviderStatuses({ silent: true }),
+    }).finally(() => {
+      sendPreflightInFlightRef.current = false;
+    });
     if (!sendProviderAvailability.usable) {
       toastManager.add({
         type: "error",
@@ -8756,7 +8120,7 @@ export default function ChatView({
       outgoingMessageText,
       selectedComposerMentionsForSend,
     );
-    const turnAttachmentsPromise = buildUploadComposerAttachments({
+    const turnAttachmentsPromise = stageUploadComposerAttachments({
       threadId: threadIdForSend,
       images: composerImagesSnapshot,
       files: composerFilesSnapshot,
@@ -8991,42 +8355,52 @@ export default function ChatView({
           ? { worktreeSetupStepId: "start-session", setupScriptName: worktreeSetupScriptName }
           : undefined,
       );
-      const turnAttachments = await turnAttachmentsPromise;
+      const stagedTurnAttachments = await turnAttachmentsPromise;
       rememberCustomBinaryPathForDispatch({
         threadId: threadIdForSend,
         provider: selectedModelSelectionForSend.provider,
         providerOptions: providerOptionsForDispatchForSend,
       });
-      await api.orchestration.dispatchCommand({
-        type: "thread.turn.start",
-        commandId: newCommandId(),
-        threadId: threadIdForSend,
-        message: {
-          messageId: messageIdForSend,
-          role: "user",
-          text: outgoingMessageText,
-          attachments: turnAttachments,
-          ...(mentionedSkillsForSend.length > 0 ? { skills: mentionedSkillsForSend } : {}),
-          ...(mentionedPluginMentionsForSend.length > 0
-            ? { mentions: mentionedPluginMentionsForSend }
+      await stagedTurnAttachments.runWithDispatch((turnAttachments) =>
+        api.orchestration.dispatchCommand({
+          type: "thread.turn.start",
+          commandId: newCommandId(),
+          threadId: threadIdForSend,
+          message: {
+            messageId: messageIdForSend,
+            role: "user",
+            text: outgoingMessageText,
+            attachments: turnAttachments,
+            ...(mentionedSkillsForSend.length > 0 ? { skills: mentionedSkillsForSend } : {}),
+            ...(mentionedPluginMentionsForSend.length > 0
+              ? { mentions: mentionedPluginMentionsForSend }
+              : {}),
+          },
+          modelSelection: selectedModelSelectionForSend,
+          ...(providerOptionsForDispatchForSend
+            ? { providerOptions: providerOptionsForDispatchForSend }
             : {}),
-        },
-        modelSelection: selectedModelSelectionForSend,
-        ...(providerOptionsForDispatchForSend
-          ? { providerOptions: providerOptionsForDispatchForSend }
-          : {}),
-        assistantDeliveryMode,
-        dispatchMode,
-        runtimeMode: nextRuntimeModeForSend,
-        interactionMode: interactionModeForSend,
-        ...(sourceProposedPlanForSend ? { sourceProposedPlan: sourceProposedPlanForSend } : {}),
-        createdAt: messageCreatedAt,
-      });
+          assistantDeliveryMode,
+          dispatchMode,
+          runtimeMode: nextRuntimeModeForSend,
+          interactionMode: interactionModeForSend,
+          ...(sourceProposedPlanForSend ? { sourceProposedPlan: sourceProposedPlanForSend } : {}),
+          createdAt: messageCreatedAt,
+        }),
+      );
       turnStartSucceeded = true;
       // Non-Codex steers interrupt the live turn before re-dispatching; hold
-      // queued auto-dispatch through that gap so it can't race the steer.
-      if (dispatchMode === "steer" && selectedModelSelectionForSend.provider !== "codex") {
-        setQueuedSteerGate({ sawInterruptGap: false, gapStartedAt: null });
+      // queued auto-dispatch through that gap so it can't race the steer. The
+      // live session provider decides the interrupt path server-side, so the
+      // gate keys off it rather than the requested model selection.
+      const liveProviderForSteerGate =
+        activeThread?.session?.provider ?? selectedModelSelectionForSend.provider;
+      if (dispatchMode === "steer" && liveProviderForSteerGate !== "codex") {
+        setQueuedSteerGate({
+          sawInterruptGap: false,
+          gapStartedAt: null,
+          armedActiveTurnId: activeThread?.session?.activeTurnId ?? null,
+        });
       }
       if (sourceProposedPlanForSend) {
         planSidebarDismissedForTurnRef.current = null;
@@ -9036,6 +8410,12 @@ export default function ChatView({
         setRestoredQueuedSourceProposedPlan(threadIdForSend, null);
       }
     })().catch(async (err: unknown) => {
+      // Uploads start in parallel with workspace/session preparation. If any
+      // earlier step fails, settle that promise and release every staged blob.
+      await turnAttachmentsPromise.then(
+        (staged) => staged.cleanup(),
+        () => undefined,
+      );
       // Surface the failure on whichever setup step was active (no-op for
       // sends without a worktree setup in flight).
       failLocalDispatchWorktreeSetup();
@@ -9109,165 +8489,81 @@ export default function ChatView({
   };
 
   const onRespondToApproval = useCallback(
-    async (requestId: ApprovalRequestId, decision: ProviderApprovalDecision) => {
-      const approval = activePendingApproval;
-      const requestKey = activePendingApprovalKey;
-      if (!approval || approval.requestId !== requestId || !requestKey || !activeThreadId) return;
+    async (
+      requestId: ApprovalRequestId,
+      decision: ProviderApprovalDecision,
+      lifecycleGeneration?: string,
+    ) => {
+      const api = readNativeApi();
+      if (!api || !activeThreadId) return;
+      const requestKey = pendingRequestInstanceKey(requestId, lifecycleGeneration);
 
-      setRespondingRequestIds((existing) =>
+      setRespondingRequestKeys((existing) =>
         existing.includes(requestKey) ? existing : [...existing, requestKey],
       );
-      try {
-        await dispatchApprovalInteractionResponse({
-          authoritative: controlPlane.isAuthoritative,
-          ...(approval.executionId !== undefined ? { executionId: approval.executionId } : {}),
+      // Durably persist "always allow" client-side so the next turn (after an
+      // idle-stop or runtime restart) keeps full-access instead of asking again.
+      // The server's session override only covers the current live turn.
+      const durableRuntimeMode = resolveRuntimeModeAfterApprovalDecision(runtimeMode, decision);
+      if (durableRuntimeMode) {
+        setComposerDraftRuntimeMode(activeThreadId, durableRuntimeMode);
+      }
+      await api.orchestration
+        .dispatchCommand({
+          type: "thread.approval.respond",
+          commandId: newCommandId(),
+          threadId: activeThreadId,
           requestId,
           decision,
-          resolveControlPlane: async (executionId, durableRequestId, durableDecision) => {
-            if (!approval.interactionId) {
-              throw new Error("The durable approval is missing its Interaction reference.");
-            }
-            await controlPlane.resolveApproval(
-              activeThreadId,
-              executionId,
-              durableRequestId,
-              durableDecision,
-              `web-interaction-${approval.interactionId}-approval-${durableDecision}`,
-            );
-          },
-          interruptControlPlane: async () => {
-            if (!approval.interactionId) {
-              throw new Error("The durable approval is missing its Interaction reference.");
-            }
-            await controlPlane.interruptActiveTurn(
-              activeThreadId,
-              `web-interaction-${approval.interactionId}-interrupt`,
-            );
-          },
-          respondNative: async () => {
-            const api = readNativeApi();
-            if (!api) {
-              throw new Error("The local provider connection is unavailable.");
-            }
-            // Durably persist "always allow" client-side so the next turn (after an
-            // idle-stop or runtime restart) keeps full-access instead of asking again.
-            // The server's session override only covers the current live turn.
-            const durableRuntimeMode = resolveRuntimeModeAfterApprovalDecision(
-              runtimeMode,
-              decision,
-            );
-            if (durableRuntimeMode) {
-              setComposerDraftRuntimeMode(activeThreadId, durableRuntimeMode);
-            }
-            await api.orchestration.dispatchCommand({
-              type: "thread.approval.respond",
-              commandId: newCommandId(),
-              threadId: activeThreadId,
-              requestId,
-              decision,
-              createdAt: new Date().toISOString(),
-            });
-          },
+          ...(lifecycleGeneration !== undefined ? { lifecycleGeneration } : {}),
+          createdAt: new Date().toISOString(),
+        })
+        .catch((err: unknown) => {
+          setStoreThreadError(
+            activeThreadId,
+            err instanceof Error ? err.message : "Failed to submit approval decision.",
+          );
         });
-      } catch (err) {
-        setStoreThreadError(
-          activeThreadId,
-          err instanceof Error ? err.message : "Failed to submit approval decision.",
-        );
-      } finally {
-        setRespondingRequestIds((existing) => existing.filter((id) => id !== requestKey));
-      }
+      setRespondingRequestKeys((existing) => existing.filter((key) => key !== requestKey));
     },
-    [
-      activePendingApproval,
-      activePendingApprovalKey,
-      activeThreadId,
-      controlPlane,
-      runtimeMode,
-      setComposerDraftRuntimeMode,
-      setStoreThreadError,
-    ],
+    [activeThreadId, runtimeMode, setComposerDraftRuntimeMode, setStoreThreadError],
   );
 
   const onRespondToUserInput = useCallback(
-    async (requestId: ApprovalRequestId, answers: ProviderUserInputAnswers, cancel = false) => {
-      const pendingInput = activePendingUserInput;
-      const requestKey = activePendingUserInputKey;
-      if (!pendingInput || pendingInput.requestId !== requestId || !requestKey || !activeThreadId) {
-        return;
-      }
+    async (
+      requestId: ApprovalRequestId,
+      answers: ProviderUserInputAnswers,
+      lifecycleGeneration?: string,
+    ) => {
+      const api = readNativeApi();
+      if (!api || !activeThreadId) return;
+      const requestKey = pendingRequestInstanceKey(requestId, lifecycleGeneration);
+      const dispatchAnswers = hasCompletePendingUserInputAnswers(answers)
+        ? answers
+        : omitNullPendingUserInputAnswers(answers);
 
-      setRespondingUserInputRequestIds((existing) =>
+      setRespondingUserInputRequestKeys((existing) =>
         existing.includes(requestKey) ? existing : [...existing, requestKey],
       );
-      try {
-        await dispatchUserInputInteractionResponse({
-          authoritative: controlPlane.isAuthoritative,
-          cancel,
-          ...(pendingInput.executionId !== undefined
-            ? { executionId: pendingInput.executionId }
-            : {}),
+      await api.orchestration
+        .dispatchCommand({
+          type: "thread.user-input.respond",
+          commandId: newCommandId(),
+          threadId: activeThreadId,
           requestId,
-          answers,
-          resolveControlPlane: async (executionId, durableRequestId, durableAnswers) => {
-            if (!pendingInput.interactionId) {
-              throw new Error(
-                "The durable user-input request is missing its Interaction reference.",
-              );
-            }
-            await controlPlane.resolveUserInput(
-              activeThreadId,
-              executionId,
-              durableRequestId,
-              durableAnswers,
-              `web-interaction-${pendingInput.interactionId}-user-input`,
-            );
-          },
-          interruptControlPlane: async () => {
-            if (!pendingInput.interactionId) {
-              throw new Error(
-                "The durable user-input request is missing its Interaction reference.",
-              );
-            }
-            await controlPlane.interruptActiveTurn(
-              activeThreadId,
-              `web-interaction-${pendingInput.interactionId}-interrupt`,
-            );
-          },
-          respondNative: async () => {
-            const api = readNativeApi();
-            if (!api) {
-              throw new Error("The local provider connection is unavailable.");
-            }
-            const dispatchAnswers = hasCompletePendingUserInputAnswers(answers)
-              ? answers
-              : omitNullPendingUserInputAnswers(answers);
-            await api.orchestration.dispatchCommand({
-              type: "thread.user-input.respond",
-              commandId: newCommandId(),
-              threadId: activeThreadId,
-              requestId,
-              answers: dispatchAnswers,
-              createdAt: new Date().toISOString(),
-            });
-          },
+          answers: dispatchAnswers,
+          ...(lifecycleGeneration !== undefined ? { lifecycleGeneration } : {}),
+          createdAt: new Date().toISOString(),
+        })
+        .catch((err: unknown) => {
+          setStoreThreadError(
+            activeThreadId,
+            err instanceof Error ? err.message : "Failed to submit user input.",
+          );
         });
-      } catch (err) {
-        setStoreThreadError(
-          activeThreadId,
-          err instanceof Error ? err.message : "Failed to submit user input.",
-        );
-      } finally {
-        setRespondingUserInputRequestIds((existing) => existing.filter((id) => id !== requestKey));
-      }
+      setRespondingUserInputRequestKeys((existing) => existing.filter((key) => key !== requestKey));
     },
-    [
-      activePendingUserInput,
-      activePendingUserInputKey,
-      activeThreadId,
-      controlPlane,
-      setStoreThreadError,
-    ],
+    [activeThreadId, setStoreThreadError],
   );
 
   const onCancelActivePendingUserInput = useCallback(() => {
@@ -9278,7 +8574,11 @@ export default function ChatView({
     setPrompt("");
     setComposerCursor(0);
     setComposerTrigger(null);
-    void onRespondToUserInput(activePendingUserInput.requestId, {}, true);
+    void onRespondToUserInput(
+      activePendingUserInput.requestId,
+      {},
+      activePendingUserInput.lifecycleGeneration,
+    );
   }, [activePendingIsResponding, activePendingUserInput, onRespondToUserInput, setPrompt]);
 
   const setActivePendingUserInputQuestionIndex = useCallback(
@@ -9336,7 +8636,7 @@ export default function ChatView({
       expandedCursor: number,
       cursorAdjacentToMention: boolean,
     ) => {
-      if (!activePendingUserInput || !activePendingUserInputKey) {
+      if (!activePendingUserInputKey) {
         return;
       }
       promptRef.current = value;
@@ -9361,7 +8661,7 @@ export default function ChatView({
         cursorAdjacentToMention ? null : detectComposerTrigger(value, expandedCursor),
       );
     },
-    [activePendingUserInput, activePendingUserInputKey],
+    [activePendingUserInputKey],
   );
 
   const onAdvanceActivePendingUserInput = useCallback(
@@ -9393,7 +8693,11 @@ export default function ChatView({
       );
       if (activePendingProgress.isLastQuestion) {
         if (resolvedAnswers) {
-          void onRespondToUserInput(activePendingUserInput.requestId, resolvedAnswers);
+          void onRespondToUserInput(
+            activePendingUserInput.requestId,
+            resolvedAnswers,
+            activePendingUserInput.lifecycleGeneration,
+          );
           return true;
         }
         return false;
@@ -9436,7 +8740,15 @@ export default function ChatView({
     dispatchMode: "queue" | "steer";
     queuedTurn?: QueuedComposerPlanFollowUp;
   }): Promise<boolean> {
-    if (!activeThread || !isServerThread || isSendBusy || isConnecting || sendInFlightRef.current) {
+    const api = readNativeApi();
+    if (
+      !api ||
+      !activeThread ||
+      !isServerThread ||
+      isSendBusy ||
+      isConnecting ||
+      sendInFlightRef.current
+    ) {
       return false;
     }
 
@@ -9454,63 +8766,6 @@ export default function ChatView({
       effort: queuedTurn?.selectedPromptEffort ?? selectedPromptEffort,
       text: trimmed,
     });
-
-    if (controlPlane.isAuthoritative) {
-      if (!hasLiveTurn || dispatchMode !== "steer") {
-        toastManager.add({
-          type: "warning",
-          title: "Remote queued delivery is not supported yet",
-          description: "Steer the active remote Turn, or wait for it to finish before sending.",
-        });
-        return false;
-      }
-      if (!controlPlane.capabilities.canSteerExecution) {
-        toastManager.add({
-          type: "error",
-          title: "This SaaS context cannot steer Executions",
-          description:
-            "Select an active Tenant and Organization with Session execution permission.",
-        });
-        return false;
-      }
-      const activeSteerDecision = resolveControlPlaneCapabilityDecision({
-        isAuthoritative: true,
-        projection: activeProviderCapabilityProjection,
-        ...(activeProviderCapabilityError
-          ? { projectionError: activeProviderCapabilityError }
-          : {}),
-        provider: queuedTurn?.selectedProvider ?? selectedProvider,
-        capabilityId: "steer-turn",
-      });
-      try {
-        assertControlPlaneCapabilityAllowed(activeSteerDecision);
-      } catch (error) {
-        setThreadError(
-          threadIdForSend,
-          error instanceof Error ? error.message : "Steer is unavailable for this SaaS Turn.",
-        );
-        return false;
-      }
-      sendInFlightRef.current = true;
-      setThreadError(threadIdForSend, null);
-      try {
-        await controlPlane.steerActiveTurn(threadIdForSend, outgoingMessageText);
-        return true;
-      } catch (err) {
-        setThreadError(
-          threadIdForSend,
-          err instanceof Error ? err.message : "Failed to steer the active remote Turn.",
-        );
-        return false;
-      } finally {
-        sendInFlightRef.current = false;
-      }
-    }
-
-    const api = readNativeApi();
-    if (!api) {
-      return false;
-    }
 
     sendInFlightRef.current = true;
     beginLocalDispatch();
@@ -9581,9 +8836,17 @@ export default function ChatView({
         createdAt: messageCreatedAt,
       });
       // Non-Codex steers interrupt the live turn before re-dispatching; hold
-      // queued auto-dispatch through that gap so it can't race the steer.
-      if (dispatchMode === "steer" && modelSelectionForPlanDispatch.provider !== "codex") {
-        setQueuedSteerGate({ sawInterruptGap: false, gapStartedAt: null });
+      // queued auto-dispatch through that gap so it can't race the steer. The
+      // live session provider decides the interrupt path server-side, so the
+      // gate keys off it rather than the requested model selection.
+      const livePlanProviderForSteerGate =
+        activeThread?.session?.provider ?? modelSelectionForPlanDispatch.provider;
+      if (dispatchMode === "steer" && livePlanProviderForSteerGate !== "codex") {
+        setQueuedSteerGate({
+          sawInterruptGap: false,
+          gapStartedAt: null,
+          armedActiveTurnId: activeThread?.session?.activeTurnId ?? null,
+        });
       }
       // Optimistically open the plan sidebar when implementing (not refining).
       // "default" mode here means the agent is executing the plan, which produces
@@ -9610,15 +8873,8 @@ export default function ChatView({
 
   const onEditUserMessage = useCallback(
     async (messageId: MessageId, text: string): Promise<boolean> => {
-      if (!canUseConversationRollbackActions) {
-        toastManager.add({
-          type: "warning",
-          title: "Message editing is unavailable",
-          description: "This backend cannot roll back and resend historical messages.",
-        });
-        return false;
-      }
-      if (!activeThread || !isServerThread || isRevertingCheckpoint) {
+      const api = readNativeApi();
+      if (!api || !activeThread || !isServerThread || isRevertingCheckpoint) {
         return false;
       }
       const editTarget = resolveTailUserMessageEditTarget({
@@ -9643,56 +8899,6 @@ export default function ChatView({
         return false;
       }
 
-      const rollbackNativeApi = readNativeApiForConversationRollback({
-        controlPlaneAuthoritative: controlPlane.isAuthoritative,
-        readNativeApi,
-      });
-
-      if (controlPlane.isAuthoritative) {
-        if (!originalMessage.turnId) {
-          setThreadError(
-            activeThread.id,
-            "The rollback target is missing its authoritative Turn ID.",
-          );
-          return false;
-        }
-        const confirmed = window.confirm(
-          "This rolls back conversation history only. Workspace files and external side effects such as deployments, messages, or API calls are unchanged. Continue?",
-        );
-        if (!confirmed) return false;
-
-        setIsRevertingCheckpoint(true);
-        setThreadError(activeThread.id, null);
-        try {
-          await controlPlane.rollbackSession(activeThread.id, originalMessage.turnId);
-          promptRef.current = text;
-          setPrompt(text);
-          const restoredCursor = collapseExpandedComposerCursor(text, text.length);
-          setComposerCursor(restoredCursor);
-          setComposerTrigger(detectComposerTrigger(text, text.length));
-          setComposerHighlightedItemId(null);
-          toastManager.add({
-            type: "success",
-            title: "Session history rolled back",
-            description:
-              "Your edited message is in the composer and has not been sent. Workspace files were not changed.",
-          });
-          scheduleComposerFocus();
-          return true;
-        } catch (error) {
-          setThreadError(
-            activeThread.id,
-            error instanceof Error ? error.message : "Failed to roll back the remote Session.",
-          );
-          return false;
-        } finally {
-          setIsRevertingCheckpoint(false);
-        }
-      }
-
-      const api = rollbackNativeApi;
-      if (!api) return false;
-
       setIsRevertingCheckpoint(true);
       setThreadError(activeThread.id, null);
       const messageCreatedAt = new Date().toISOString();
@@ -9706,7 +8912,7 @@ export default function ChatView({
         effort: selectedPromptEffort,
         text: editedTextWithOriginalContext,
       });
-      try {
+      return await (async () => {
         await persistThreadSettingsForNextTurn({
           threadId: activeThread.id,
           createdAt: messageCreatedAt,
@@ -9728,20 +8934,20 @@ export default function ChatView({
           createdAt: messageCreatedAt,
         });
         return true;
-      } catch (err) {
-        setThreadError(
-          activeThread.id,
-          err instanceof Error ? err.message : "Failed to edit message.",
-        );
-        return false;
-      } finally {
-        setIsRevertingCheckpoint(false);
-      }
+      })()
+        .catch((err: unknown) => {
+          setThreadError(
+            activeThread.id,
+            err instanceof Error ? err.message : "Failed to edit message.",
+          );
+          return false;
+        })
+        .finally(() => {
+          setIsRevertingCheckpoint(false);
+        });
     },
     [
       activeThread,
-      canUseConversationRollbackActions,
-      controlPlane,
       isConnecting,
       isRevertingCheckpoint,
       isSendBusy,
@@ -9754,8 +8960,6 @@ export default function ChatView({
       selectedModelSelection,
       selectedPromptEffort,
       selectedProvider,
-      scheduleComposerFocus,
-      setPrompt,
       setThreadError,
       assistantDeliveryMode,
     ],
@@ -9763,8 +8967,12 @@ export default function ChatView({
 
   const onSendRef = useRef(onSend);
   const onSubmitPlanFollowUpRef = useRef(onSubmitPlanFollowUp);
-  onSendRef.current = onSend;
-  onSubmitPlanFollowUpRef.current = onSubmitPlanFollowUp;
+  // The queued dispatcher can run from the same commit's follow-up work, so do
+  // not leave a passive-effect window where it sees the previous callbacks.
+  useLayoutEffect(() => {
+    onSendRef.current = onSend;
+    onSubmitPlanFollowUpRef.current = onSubmitPlanFollowUp;
+  });
 
   const dispatchQueuedComposerTurn = useCallback(
     async (queuedTurn: QueuedComposerTurn, dispatchMode: "queue" | "steer"): Promise<boolean> => {
@@ -9862,6 +9070,7 @@ export default function ChatView({
   // Advance/expire the steer gate as the session moves through the
   // interrupt→steered-turn handoff (or fails out of it).
   const sessionErroredForSteerGate = activeThread?.session?.status === "error";
+  const activeTurnIdForSteerGate = activeThread?.session?.activeTurnId ?? null;
   useEffect(() => {
     if (!queuedSteerGate) {
       return;
@@ -9870,6 +9079,7 @@ export default function ChatView({
       gate: queuedSteerGate,
       phase,
       sessionErrored: sessionErroredForSteerGate,
+      activeTurnId: activeTurnIdForSteerGate,
       now: Date.now(),
     });
     if (transition.kind === "clear") {
@@ -9878,7 +9088,8 @@ export default function ChatView({
     }
     if (
       transition.gate.sawInterruptGap !== queuedSteerGate.sawInterruptGap ||
-      transition.gate.gapStartedAt !== queuedSteerGate.gapStartedAt
+      transition.gate.gapStartedAt !== queuedSteerGate.gapStartedAt ||
+      transition.gate.armedActiveTurnId !== queuedSteerGate.armedActiveTurnId
     ) {
       setQueuedSteerGate(transition.gate);
       return;
@@ -9888,7 +9099,7 @@ export default function ChatView({
     }
     const timer = window.setTimeout(() => setQueuedSteerGate(null), transition.expiresInMs);
     return () => window.clearTimeout(timer);
-  }, [phase, queuedSteerGate, sessionErroredForSteerGate]);
+  }, [activeTurnIdForSteerGate, phase, queuedSteerGate, sessionErroredForSteerGate]);
 
   useEffect(() => {
     if (
@@ -9944,14 +9155,6 @@ export default function ChatView({
   ]);
 
   const onImplementPlanInNewThread = useCallback(async () => {
-    if (!canImplementPlanInNewThread) {
-      toastManager.add({
-        type: "warning",
-        title: "New implementation thread is unavailable",
-        description: "This backend cannot fork the current Plan into a new thread.",
-      });
-      return;
-    }
     const api = readNativeApi();
     if (
       !api ||
@@ -10075,7 +9278,6 @@ export default function ChatView({
     activeThread,
     activeThreadAssociatedWorktree,
     beginLocalDispatch,
-    canImplementPlanInNewThread,
     isConnecting,
     isSendBusy,
     isServerThread,
@@ -10210,8 +9412,7 @@ export default function ChatView({
         provider={selectedProvider}
         model={selectedModelForPickerWithCustomFallback}
         lockedProvider={lockedProvider}
-        providers={effectiveProviderStatuses}
-        {...(providerAvailabilityByProvider ? { providerAvailabilityByProvider } : {})}
+        providers={providerStatuses}
         modelOptionsByProvider={modelOptionsByProvider}
         loadingModelProviders={{
           antigravity: antigravityModelDiscoveryPending,
@@ -10254,8 +9455,7 @@ export default function ChatView({
       provider={selectedProvider}
       model={selectedModelForPickerWithCustomFallback}
       lockedProvider={lockedProvider}
-      providers={effectiveProviderStatuses}
-      {...(providerAvailabilityByProvider ? { providerAvailabilityByProvider } : {})}
+      providers={providerStatuses}
       modelOptionsByProvider={modelOptionsByProvider}
       loadingModelProviders={{
         antigravity: antigravityModelDiscoveryPending,
@@ -10282,7 +9482,7 @@ export default function ChatView({
     />
   );
   const toggleFastMode = useCallback(() => {
-    if (!canUseLocalProviderCommands || !composerTraitSelection.caps.supportsFastMode) {
+    if (!composerTraitSelection.caps.supportsFastMode) {
       scheduleComposerFocus();
       return;
     }
@@ -10298,7 +9498,6 @@ export default function ChatView({
   }, [
     composerTraitSelection.caps.supportsFastMode,
     composerTraitSelection.fastModeEnabled,
-    canUseLocalProviderCommands,
     scheduleComposerFocus,
     selectedProvider,
     selectedProviderModelOptions,
@@ -10788,56 +9987,13 @@ export default function ChatView({
     activeRootBranch,
     isServerThread,
     supportsFastSlashCommand,
-    canUseLocalProviderCommands,
-    canOfferCompactCommand,
-    canOfferPlanCommand: planModeCapabilityDecision.allowed,
-    canOfferReviewCommand,
-    canOfferForkCommand,
+    canOfferCompactCommand:
+      supportsThreadCompaction(providerComposerCapabilitiesQuery.data) &&
+      isServerThread &&
+      activeThread?.session !== null &&
+      activeThread?.session?.status !== "closed",
     canOfferSideCommand,
     canOfferExportCommand,
-    advancedCommandUnavailableMessages: {
-      compact: advancedCapabilityDecisions.compact.message,
-      review: advancedCapabilityDecisions.review.message,
-      fork: advancedCapabilityDecisions.fork.message,
-    },
-    ...(controlPlane.isAuthoritative
-      ? {
-          compactControlPlaneSession: async () => {
-            if (!activeThread) {
-              throw new Error("Open a persisted SaaS Session before compacting.");
-            }
-            await controlPlane.compactSession(activeThread.id);
-          },
-          forkControlPlaneSession: async () => {
-            if (!activeThread || !activeControlPlaneSession) {
-              throw new Error("Open a persisted SaaS Session before forking.");
-            }
-            const result = await controlPlane.forkSession(activeThread.id, {
-              title: `${activeThread.title} Fork`,
-              visibility: activeControlPlaneSession.visibility,
-              ...(activeControlPlaneSession.providerCredentialId
-                ? { providerCredentialId: activeControlPlaneSession.providerCredentialId }
-                : {}),
-            });
-            return ThreadId.makeUnsafe(result.session.id);
-          },
-          startControlPlaneReview: async (target: "changes" | "base-branch") => {
-            if (!activeThread) throw new Error("Open a persisted SaaS Session before reviewing.");
-            await controlPlane.startReview(
-              activeThread.id,
-              runtimeMode,
-              target === "base-branch"
-                ? {
-                    type: "baseBranch",
-                    ...(activeControlPlaneProject?.defaultBranch
-                      ? { branch: activeControlPlaneProject.defaultBranch }
-                      : {}),
-                  }
-                : { type: "uncommittedChanges" },
-            );
-          },
-        }
-      : {}),
     supportsTextNativeReviewCommand,
     fastModeEnabled,
     providerNativeCommands,
@@ -11469,10 +10625,6 @@ export default function ChatView({
     isHomeChat: isChatProject,
     isEmpty: timelineEntries.length === 0,
   });
-  const activeControlPlaneStreamStatus =
-    controlPlane.isAuthoritative && isServerThread
-      ? (controlPlane.streamStatusBySessionId[activeThread.id] ?? null)
-      : null;
 
   const handleRenameActiveThread = async (newTitle: string) => {
     const outcome = await dispatchThreadRename({
@@ -11532,11 +10684,7 @@ export default function ChatView({
     <>
       <ComposerExtrasMenu
         interactionMode={interactionMode}
-        planModeAvailable={planModeCapabilityDecision.allowed}
-        planModeUnavailableReason={planModeCapabilityDecision.message}
-        supportsFastMode={
-          canUseLocalProviderCommands && composerTraitSelection.caps.supportsFastMode
-        }
+        supportsFastMode={composerTraitSelection.caps.supportsFastMode}
         fastModeEnabled={composerTraitSelection.fastModeEnabled}
         onAddPhotos={addComposerImages}
         onToggleFastMode={toggleFastMode}
@@ -11847,11 +10995,12 @@ export default function ChatView({
                   <ComposerPendingApprovalPanel
                     approval={activePendingApproval}
                     pendingCount={pendingApprovals.length}
-                    isResponding={
-                      activePendingApprovalKey !== null &&
-                      respondingRequestIds.includes(activePendingApprovalKey)
-                    }
-                    allowSessionDecision={!controlPlane.isAuthoritative}
+                    isResponding={respondingRequestKeys.includes(
+                      pendingRequestInstanceKey(
+                        activePendingApproval.requestId,
+                        activePendingApproval.lifecycleGeneration,
+                      ),
+                    )}
                     onRespond={onRespondToApproval}
                   />
                 </div>
@@ -11859,7 +11008,7 @@ export default function ChatView({
                 <div className="pb-2">
                   <ComposerPendingUserInputPanel
                     pendingUserInputs={pendingUserInputs}
-                    respondingRequestIds={respondingUserInputRequestIds}
+                    isResponding={activePendingIsResponding}
                     answers={activePendingDraftAnswers}
                     questionIndex={activePendingQuestionIndex}
                     onToggleOption={onToggleActivePendingUserInputOption}
@@ -12147,16 +11296,8 @@ export default function ChatView({
                           size="icon-xs"
                           className="sm:size-[26px]"
                           onClick={() => void onInterrupt()}
-                          disabled={
-                            controlPlane.isAuthoritative && !interruptCapabilityDecision.allowed
-                          }
                           aria-label="Stop generation"
-                          title={
-                            controlPlane.isAuthoritative && !interruptCapabilityDecision.allowed
-                              ? (interruptCapabilityDecision.message ??
-                                "Interrupt is unavailable for this SaaS Turn.")
-                              : "Stop the current response. On Mac, press Ctrl+C to interrupt."
-                          }
+                          title="Stop the current response. On Mac, press Ctrl+C to interrupt."
                         >
                           <span
                             aria-hidden="true"
@@ -12172,12 +11313,7 @@ export default function ChatView({
                               type="submit"
                               size="sm"
                               className="h-9 rounded-full px-4 sm:h-8"
-                              disabled={
-                                isSendBusy ||
-                                isConnecting ||
-                                (controlPlane.isAuthoritative &&
-                                  !activeComposerDispatchDecision.allowed)
-                              }
+                              disabled={isSendBusy || isConnecting}
                             >
                               {isConnecting || isSendBusy ? "Sending..." : "Refine"}
                             </Button>
@@ -12186,46 +11322,34 @@ export default function ChatView({
                               <Button
                                 type="submit"
                                 size="sm"
-                                className={cn(
-                                  "h-9 px-4 sm:h-8",
-                                  canImplementPlanInNewThread
-                                    ? "rounded-l-full rounded-r-none"
-                                    : "rounded-full",
-                                )}
-                                disabled={
-                                  isSendBusy ||
-                                  isConnecting ||
-                                  (controlPlane.isAuthoritative &&
-                                    !activeComposerDispatchDecision.allowed)
-                                }
+                                className="h-9 rounded-l-full rounded-r-none px-4 sm:h-8"
+                                disabled={isSendBusy || isConnecting}
                               >
                                 {isConnecting || isSendBusy ? "Sending..." : "Implement"}
                               </Button>
-                              {canImplementPlanInNewThread ? (
-                                <Menu>
-                                  <MenuTrigger
-                                    render={
-                                      <Button
-                                        size="sm"
-                                        variant="default"
-                                        className="h-9 rounded-l-none rounded-r-full border-l-white/12 px-2 sm:h-8"
-                                        aria-label="Implementation actions"
-                                        disabled={isSendBusy || isConnecting}
-                                      />
-                                    }
-                                  >
-                                    <ChevronDownIcon className="size-3.5" />
-                                  </MenuTrigger>
-                                  <ComposerPickerMenuPopup align="end" side="top">
-                                    <MenuItem
+                              <Menu>
+                                <MenuTrigger
+                                  render={
+                                    <Button
+                                      size="sm"
+                                      variant="default"
+                                      className="h-9 rounded-l-none rounded-r-full border-l-white/12 px-2 sm:h-8"
+                                      aria-label="Implementation actions"
                                       disabled={isSendBusy || isConnecting}
-                                      onClick={() => void onImplementPlanInNewThread()}
-                                    >
-                                      Implement in a new thread
-                                    </MenuItem>
-                                  </ComposerPickerMenuPopup>
-                                </Menu>
-                              ) : null}
+                                    />
+                                  }
+                                >
+                                  <ChevronDownIcon className="size-3.5" />
+                                </MenuTrigger>
+                                <ComposerPickerMenuPopup align="end" side="top">
+                                  <MenuItem
+                                    disabled={isSendBusy || isConnecting}
+                                    onClick={() => void onImplementPlanInNewThread()}
+                                  >
+                                    Implement in a new thread
+                                  </MenuItem>
+                                </ComposerPickerMenuPopup>
+                              </Menu>
                             </div>
                           )
                         ) : (
@@ -12248,8 +11372,6 @@ export default function ChatView({
                                 isSendBusy ||
                                 isConnecting ||
                                 isVoiceTranscribing ||
-                                (controlPlane.isAuthoritative &&
-                                  !activeComposerDispatchDecision.allowed) ||
                                 !composerSendState.hasSendableContent
                               }
                               aria-label={
@@ -12473,21 +11595,6 @@ export default function ChatView({
         status={shouldShowProviderHealthBanner ? visibleActiveProviderStatus : null}
         onDismiss={dismissActiveProviderHealthBanner}
       />
-      <ControlPlaneProviderCapabilityBanner
-        decision={controlPlane.isAuthoritative ? activeComposerDispatchDecision : null}
-      />
-      <ControlPlaneSessionStreamBanner status={activeControlPlaneStreamStatus} />
-      <ControlPlaneSessionArtifacts
-        artifacts={sessionArtifactsQuery.data?.items}
-        error={sessionArtifactsQuery.error instanceof Error ? sessionArtifactsQuery.error : null}
-        downloadingArtifactId={
-          artifactDownloadMutation.isPending
-            ? (artifactDownloadMutation.variables?.id ?? null)
-            : null
-        }
-        onDownload={artifactDownloadMutation.mutate}
-        onRetry={() => void sessionArtifactsQuery.refetch()}
-      />
       <ThreadErrorBanner error={activeThread.error} onDismiss={dismissActiveThreadError} />
       <RateLimitBanner
         rateLimitStatus={visibleActiveRateLimitStatus}
@@ -12590,16 +11697,17 @@ export default function ChatView({
                     onTogglePinMessage={handleTogglePinMessageGuarded}
                     threadMarkers={threadMarkers}
                     enteringUserMessageIds={enteringUserMessageIds}
+                    crossTaskOrigin={crossTaskOrigin}
                     timelineEntries={timelineEntries}
                     turnDiffSummaryByAssistantMessageId={turnDiffSummaryByAssistantMessageId}
                     onOpenTurnDiff={onOpenTurnDiff}
                     onOpenThread={onNavigateToThread}
                     onOpenAutomation={onOpenAutomation}
-                    revertTurnCountByUserMessageId={visibleRevertTurnCountByUserMessageId}
                     subagentToolTraceByThreadId={subagentToolTraceByThreadId}
+                    revertTurnCountByUserMessageId={revertTurnCountByUserMessageId}
                     onRevertUserMessage={onRevertUserMessage}
-                    {...(canUseCheckpointActions ? { onUndoTurnFiles } : {})}
-                    {...(canUseConversationRollbackActions ? { onEditUserMessage } : {})}
+                    onUndoTurnFiles={onUndoTurnFiles}
+                    onEditUserMessage={onEditUserMessage}
                     isRevertingCheckpoint={isRevertingCheckpoint}
                     onExpandTimelineImage={onExpandTimelineImage}
                     followLiveOutput={hasStreamingAssistantText}

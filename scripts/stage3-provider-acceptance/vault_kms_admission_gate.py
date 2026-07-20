@@ -394,7 +394,10 @@ def normalize_environment_name(value: str, flag: str) -> str:
 
 def normalize_executable(value: str, flag: str) -> str:
     executable = value.strip()
-    if EXECUTABLE_PATTERN.fullmatch(executable) is None:
+    if (
+        any(character in value for character in "\r\n\t\x00")
+        or EXECUTABLE_PATTERN.fullmatch(executable) is None
+    ):
         raise ValueError(f"{flag} must be a command or executable path")
     return executable
 

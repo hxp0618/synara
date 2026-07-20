@@ -163,6 +163,7 @@ export function useComposerSlashCommands(input: {
     providerNativeCommandNames,
   });
 
+  // Manual memoization kept: this file does not compile under React Compiler (see compile-report).
   const compactProviderThread = useCallback(async (): Promise<boolean> => {
     if (!canOfferCompactCommand || !isServerThread || !activeThread?.session) {
       toastManager.add({
