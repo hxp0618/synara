@@ -41,6 +41,24 @@
         "typescript": "catalog:",
       },
     },
+    "apps/provider-host": {
+      "name": "@synara/provider-host",
+      "version": "0.2.0",
+      "bin": {
+        "provider-host": "./dist/index.mjs",
+      },
+      "dependencies": {
+        "@anthropic-ai/claude-agent-sdk": "0.3.207",
+        "@synara/contracts": "workspace:*",
+        "@synara/shared": "workspace:*",
+        "effect": "catalog:",
+      },
+      "devDependencies": {
+        "@types/node": "catalog:",
+        "typescript": "catalog:",
+        "vitest": "catalog:",
+      },
+    },
     "apps/server": {
       "name": "@synara/cli",
       "version": "0.5.5",
@@ -52,9 +70,9 @@
         "@agentclientprotocol/sdk": "1.2.1",
         "@anthropic-ai/claude-agent-sdk": "0.3.207",
         "@anthropic-ai/sdk": "^0.100.0",
-        "@earendil-works/pi-agent-core": "^0.80.6",
-        "@earendil-works/pi-ai": "^0.80.6",
-        "@earendil-works/pi-coding-agent": "^0.80.6",
+        "@earendil-works/pi-agent-core": "0.80.6",
+        "@earendil-works/pi-ai": "0.80.6",
+        "@earendil-works/pi-coding-agent": "0.80.6",
         "@effect/platform-node": "catalog:",
         "@effect/sql-sqlite-bun": "catalog:",
         "@opencode-ai/sdk": "^1.15.13",
@@ -120,7 +138,7 @@
         "react": "^19.0.0",
         "react-colorful": "^5.6.1",
         "react-dom": "^19.0.0",
-        "react-icons": "^5.6.0",
+        "react-icons": "5.6.0",
         "react-markdown": "^10.1.0",
         "rehype-katex": "^7.0.1",
         "remark-breaks": "^4.0.0",
@@ -214,6 +232,10 @@
     "@effect/platform-node-shared@https://pkg.pr.new/Effect-TS/effect-smol/@effect/platform-node-shared@8881a9b606d84a6f5eb6615279138322984f5368": "patches/@effect%2Fplatform-node-shared@8881a9b.patch",
   },
   "overrides": {
+    "@earendil-works/pi-agent-core": "0.80.6",
+    "@earendil-works/pi-ai": "0.80.6",
+    "@earendil-works/pi-coding-agent": "0.80.6",
+    "@earendil-works/pi-tui": "0.80.6",
     "axios": "^1.16.0",
     "defu": "^6.1.5",
     "fast-uri": "^3.1.2",
@@ -977,6 +999,8 @@
     "@synara/desktop": ["@synara/desktop@workspace:apps/desktop"],
 
     "@synara/marketing": ["@synara/marketing@workspace:apps/marketing"],
+
+    "@synara/provider-host": ["@synara/provider-host@workspace:apps/provider-host"],
 
     "@synara/scripts": ["@synara/scripts@workspace:scripts"],
 
