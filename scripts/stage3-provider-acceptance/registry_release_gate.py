@@ -1642,16 +1642,75 @@ def _host_registry_access_options(
     )
 
 
+def _original_host_docker_config_dir() -> pathlib.Path:
+    environment = remote.tool_environment()
+    configured = environment.get("DOCKER_CONFIG")
+    if isinstance(configured, str) and configured.strip():
+        return pathlib.Path(configured).expanduser()
+    home = environment.get("HOME")
+    if isinstance(home, str) and home.strip():
+        return pathlib.Path(home).expanduser() / ".docker"
+    return pathlib.Path.home() / ".docker"
+
+
+def _original_host_cli_plugin_directories() -> list[str]:
+    candidate = _original_host_docker_config_dir() / "cli-plugins"
+    candidate_text = str(candidate)
+    if any(character in candidate_text for character in "\r\n\x00"):
+        return []
+    try:
+        resolved = candidate.resolve(strict=True)
+    except OSError:
+        return []
+    if not resolved.is_dir():
+        return []
+    return [str(resolved)]
+
+
+def _add_host_cli_plugins_to_isolated_docker_config(
+    registry_options: supply_chain.SupplyChainOptions,
+    *,
+    cli_plugin_directories: Sequence[str],
+) -> None:
+    if not cli_plugin_directories:
+        return
+    paths = supply_chain._registry_state_paths(registry_options)
+    try:
+        payload = json.loads(paths["docker_config"].read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError
+        payload["cliPluginsExtraDirs"] = list(cli_plugin_directories)
+        paths["docker_config"].write_text(
+            json.dumps(payload, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        paths["docker_config"].chmod(0o600)
+    except (OSError, ValueError, json.JSONDecodeError):
+        paths["docker_config"].unlink(missing_ok=True)
+        paths["registry_ca"].unlink(missing_ok=True)
+        raise ReleaseGateError(
+            "release.registry_signing_credential_invalid",
+            "Worker Registry gate could not create isolated registry access state.",
+        ) from None
+
+
 def _prepare_host_registry_access(
     options: RegistryReleaseGateOptions,
     *,
     state_dir: pathlib.Path,
     redactor: acceptance.SecretRedactor,
 ) -> supply_chain.PreparedRegistryAccess:
-    return supply_chain._prepare_registry_access(
-        _host_registry_access_options(options, state_dir=state_dir),
+    registry_options = _host_registry_access_options(options, state_dir=state_dir)
+    prepared = supply_chain._prepare_registry_access(
+        registry_options,
         redactor=redactor,
     )
+    if prepared.host_environment:
+        _add_host_cli_plugins_to_isolated_docker_config(
+            registry_options,
+            cli_plugin_directories=_original_host_cli_plugin_directories(),
+        )
+    return prepared
 
 
 def _prepare_host_registry_environment(

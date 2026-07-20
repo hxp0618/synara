@@ -686,17 +686,26 @@ class InputValidationTest(unittest.TestCase):
     def test_host_registry_environment_uses_isolated_docker_config_and_ca_layout(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             state_dir = pathlib.Path(directory) / "state"
+            home_dir = pathlib.Path(directory) / "home"
             ca_path = pathlib.Path(directory) / "registry-ca.pem"
             ca_bytes = b"-----BEGIN CERTIFICATE-----\nfixture\n-----END CERTIFICATE-----\n"
             ca_path.write_bytes(ca_bytes)
             redactor = gate.acceptance.SecretRedactor()
-            with mock.patch.dict(
-                gate.supply_chain.os.environ,
-                {
-                    gate.supply_chain.PRODUCTION_REGISTRY_USERNAME_ENV: "registry-user",
-                    gate.supply_chain.PRODUCTION_REGISTRY_PASSWORD_ENV: "registry-password",
-                    gate.supply_chain.PRODUCTION_REGISTRY_CA_CERT_ENV: str(ca_path),
-                },
+            with (
+                mock.patch.dict(
+                    gate.remote.os.environ,
+                    {"HOME": str(home_dir)},
+                    clear=True,
+                ),
+                mock.patch.dict(
+                    gate.supply_chain.os.environ,
+                    {
+                        gate.supply_chain.PRODUCTION_REGISTRY_USERNAME_ENV: "registry-user",
+                        gate.supply_chain.PRODUCTION_REGISTRY_PASSWORD_ENV: "registry-password",
+                        gate.supply_chain.PRODUCTION_REGISTRY_CA_CERT_ENV: str(ca_path),
+                    },
+                    clear=False,
+                ),
             ):
                 environment = gate._prepare_host_registry_environment(
                     options(
@@ -710,9 +719,130 @@ class InputValidationTest(unittest.TestCase):
                     redactor=redactor,
                 )
             docker_config_dir = state_dir / "host-registry-access/registry-access/docker-config"
+            docker_config_payload = json.loads(
+                (docker_config_dir / "config.json").read_text(encoding="utf-8")
+            )
             self.assertEqual(environment, {"DOCKER_CONFIG": str(docker_config_dir)})
             self.assertTrue((docker_config_dir / "config.json").is_file())
             self.assertTrue((docker_config_dir / "certs.d/localhost:55091/ca.crt").is_file())
+            self.assertNotIn("cliPluginsExtraDirs", docker_config_payload)
+
+    def test_host_registry_environment_adds_default_cli_plugin_dir_to_isolated_config(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state_dir = pathlib.Path(directory) / "state"
+            home_dir = pathlib.Path(directory) / "home"
+            plugin_dir = home_dir / ".docker/cli-plugins"
+            plugin_dir.mkdir(parents=True)
+            ca_path = pathlib.Path(directory) / "registry-ca.pem"
+            ca_path.write_bytes(
+                b"-----BEGIN CERTIFICATE-----\nfixture\n-----END CERTIFICATE-----\n"
+            )
+            redactor = gate.acceptance.SecretRedactor()
+            with (
+                mock.patch.dict(
+                    gate.remote.os.environ,
+                    {"HOME": str(home_dir)},
+                    clear=True,
+                ),
+                mock.patch.dict(
+                    gate.supply_chain.os.environ,
+                    {
+                        gate.supply_chain.PRODUCTION_REGISTRY_USERNAME_ENV: "registry-user",
+                        gate.supply_chain.PRODUCTION_REGISTRY_PASSWORD_ENV: "registry-password",
+                        gate.supply_chain.PRODUCTION_REGISTRY_CA_CERT_ENV: str(ca_path),
+                    },
+                    clear=False,
+                ),
+            ):
+                gate._prepare_host_registry_environment(
+                    options(
+                        pathlib.Path(directory) / "output",
+                        signing_policy_profile="production",
+                        registry_auth_username_environment=gate.supply_chain.PRODUCTION_REGISTRY_USERNAME_ENV,
+                        registry_auth_password_environment=gate.supply_chain.PRODUCTION_REGISTRY_PASSWORD_ENV,
+                        registry_ca_cert_environment=gate.supply_chain.PRODUCTION_REGISTRY_CA_CERT_ENV,
+                    ),
+                    state_dir=state_dir,
+                    redactor=redactor,
+                )
+            docker_config_path = (
+                state_dir / "host-registry-access/registry-access/docker-config/config.json"
+            )
+            docker_config_payload = json.loads(docker_config_path.read_text(encoding="utf-8"))
+
+            self.assertEqual(
+                docker_config_payload["cliPluginsExtraDirs"],
+                [str(plugin_dir.resolve())],
+            )
+
+    def test_host_registry_environment_honors_custom_docker_config_plugins_without_copying_auth(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state_dir = pathlib.Path(directory) / "state"
+            original_docker_config = pathlib.Path(directory) / "original-docker-config"
+            plugin_dir = original_docker_config / "cli-plugins"
+            plugin_dir.mkdir(parents=True)
+            (original_docker_config / "config.json").write_text(
+                json.dumps(
+                    {
+                        "auths": {
+                            "docker.io": {
+                                "auth": "leaked-token",
+                            }
+                        }
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            ca_path = pathlib.Path(directory) / "registry-ca.pem"
+            ca_path.write_bytes(
+                b"-----BEGIN CERTIFICATE-----\nfixture\n-----END CERTIFICATE-----\n"
+            )
+            redactor = gate.acceptance.SecretRedactor()
+            with (
+                mock.patch.dict(
+                    gate.remote.os.environ,
+                    {
+                        "HOME": str(pathlib.Path(directory) / "home"),
+                        "DOCKER_CONFIG": str(original_docker_config),
+                    },
+                    clear=True,
+                ),
+                mock.patch.dict(
+                    gate.supply_chain.os.environ,
+                    {
+                        gate.supply_chain.PRODUCTION_REGISTRY_USERNAME_ENV: "registry-user",
+                        gate.supply_chain.PRODUCTION_REGISTRY_PASSWORD_ENV: "registry-password",
+                        gate.supply_chain.PRODUCTION_REGISTRY_CA_CERT_ENV: str(ca_path),
+                    },
+                    clear=False,
+                ),
+            ):
+                gate._prepare_host_registry_environment(
+                    options(
+                        pathlib.Path(directory) / "output",
+                        signing_policy_profile="production",
+                        registry_auth_username_environment=gate.supply_chain.PRODUCTION_REGISTRY_USERNAME_ENV,
+                        registry_auth_password_environment=gate.supply_chain.PRODUCTION_REGISTRY_PASSWORD_ENV,
+                        registry_ca_cert_environment=gate.supply_chain.PRODUCTION_REGISTRY_CA_CERT_ENV,
+                    ),
+                    state_dir=state_dir,
+                    redactor=redactor,
+                )
+            docker_config_dir = state_dir / "host-registry-access/registry-access/docker-config"
+            docker_config_path = docker_config_dir / "config.json"
+            docker_config_text = docker_config_path.read_text(encoding="utf-8")
+            docker_config_payload = json.loads(docker_config_text)
+
+            self.assertEqual(
+                docker_config_payload["cliPluginsExtraDirs"],
+                [str(plugin_dir.resolve())],
+            )
+            self.assertEqual(set(docker_config_payload["auths"]), {"localhost:55091"})
+            self.assertNotIn("leaked-token", docker_config_text)
+            self.assertNotIn("docker.io", docker_config_text)
+            self.assertEqual(docker_config_path.stat().st_mode & 0o777, 0o600)
+            self.assertFalse((docker_config_dir / "cli-plugins").exists())
 
     def test_host_tool_helpers_apply_environment_overrides(self) -> None:
         completed = subprocess.CompletedProcess(["docker"], 0, stdout=b"{}", stderr=b"")
