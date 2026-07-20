@@ -816,6 +816,15 @@ class CommandBoundaryTest(unittest.TestCase):
                     cosign_environment = run.call_args.kwargs["env"]
                     supply._run_tool(
                         options,
+                        image="example.test/cosign:v1.0.0@sha256:" + "d" * 64,
+                        arguments=["verify", "--output", "json", REFERENCE],
+                        tool="cosign",
+                        deadline=supply.time.monotonic() + 60,
+                        redactor=redactor,
+                    )
+                    cosign_verify_command = run.call_args.args[0]
+                    supply._run_tool(
+                        options,
                         image="example.test/trivy:1.0.0@sha256:" + "e" * 64,
                         arguments=["image", "--format", "json", REFERENCE],
                         tool="trivy",
@@ -846,6 +855,9 @@ class CommandBoundaryTest(unittest.TestCase):
             self.assertNotIn("SSL_CERT_FILE", trivy_environment)
             self.assertNotIn("--registry-ca-cert", cosign_command)
             self.assertIn("--registry-cacert", cosign_command)
+            self.assertIn("--registry-referrers-mode=legacy", cosign_command)
+            self.assertIn("--registry-cacert", cosign_verify_command)
+            self.assertNotIn("--registry-referrers-mode=legacy", cosign_verify_command)
             self.assertIn(
                 "/workspace/registry-access/docker-config/certs.d/registry.example.test/ca.crt",
                 cosign_command,

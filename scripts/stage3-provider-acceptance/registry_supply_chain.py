@@ -75,6 +75,7 @@ TRIVY_DATABASE_DOWNLOAD_RETRY_MARKERS = (
     "503 service unavailable",
 )
 COSIGN_CLAIM_TYPE = "https://sigstore.dev/cosign/sign/v1"
+COSIGN_SIGNATURE_REFERRERS_MODE = "legacy"
 IMMUTABLE_IMAGE_PATTERN = re.compile(
     r"[A-Za-z0-9][A-Za-z0-9._:-]*(?:/[A-Za-z0-9][A-Za-z0-9._:-]*)+"
     r"@sha256:[0-9a-f]{64}"
@@ -1882,6 +1883,14 @@ def _tool_arguments_with_registry_access(
     insecure_registry: bool,
 ) -> list[str]:
     result = list(arguments)
+    if tool == "cosign" and result and result[0] == "sign":
+        # Kyverno v1.18 discovers Cosign signatures through the digest .sig tag;
+        # Cosign v3 otherwise writes OCI 1.1 referrers that this verifier cannot find.
+        result = [
+            result[0],
+            f"--registry-referrers-mode={COSIGN_SIGNATURE_REFERRERS_MODE}",
+            *result[1:],
+        ]
     registry_ca = registry_access.registry_ca_container_path
     if insecure_registry or registry_ca is None:
         return result
