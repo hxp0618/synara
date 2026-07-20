@@ -11,6 +11,7 @@ import datetime as dt
 import hashlib
 import http.client
 import json
+import os
 import pathlib
 import re
 import shutil
@@ -1653,18 +1654,41 @@ def _original_host_docker_config_dir() -> pathlib.Path:
     return pathlib.Path.home() / ".docker"
 
 
-def _original_host_cli_plugin_directories() -> list[str]:
-    candidate = _original_host_docker_config_dir() / "cli-plugins"
+def _resolved_existing_host_directory(
+    value: str | pathlib.Path | None,
+    *,
+    require_absolute: bool = False,
+) -> str | None:
+    if value is None:
+        return None
+    candidate = value.expanduser() if isinstance(value, pathlib.Path) else pathlib.Path(value).expanduser()
     candidate_text = str(candidate)
-    if any(character in candidate_text for character in "\r\n\x00"):
-        return []
+    if not candidate_text or any(character in candidate_text for character in "\r\n\x00"):
+        return None
+    if require_absolute and not candidate.is_absolute():
+        return None
     try:
         resolved = candidate.resolve(strict=True)
     except OSError:
-        return []
+        return None
     if not resolved.is_dir():
-        return []
-    return [str(resolved)]
+        return None
+    return str(resolved)
+
+
+def _original_host_cli_plugin_directories() -> list[str]:
+    candidate = _resolved_existing_host_directory(_original_host_docker_config_dir() / "cli-plugins")
+    return [candidate] if candidate is not None else []
+
+
+def _original_host_buildx_config_directory() -> str | None:
+    explicit = _resolved_existing_host_directory(
+        os.environ.get("BUILDX_CONFIG"),
+        require_absolute=True,
+    )
+    if explicit is not None:
+        return explicit
+    return _resolved_existing_host_directory(_original_host_docker_config_dir() / "buildx")
 
 
 def _add_host_cli_plugins_to_isolated_docker_config(
@@ -1710,6 +1734,11 @@ def _prepare_host_registry_access(
             registry_options,
             cli_plugin_directories=_original_host_cli_plugin_directories(),
         )
+        host_environment = dict(prepared.host_environment)
+        buildx_config_directory = _original_host_buildx_config_directory()
+        if buildx_config_directory is not None:
+            host_environment["BUILDX_CONFIG"] = buildx_config_directory
+        prepared = dataclasses.replace(prepared, host_environment=host_environment)
     return prepared
 
 
