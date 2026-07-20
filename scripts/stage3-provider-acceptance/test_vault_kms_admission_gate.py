@@ -2597,6 +2597,49 @@ class VaultPolicyBoundaryTest(unittest.TestCase):
 
 
 class PositiveSignatureBoundaryTest(unittest.TestCase):
+    def test_accepts_cosign_v3_claim_output_and_binds_registry_bundle(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            options = gate_options(pathlib.Path(directory) / "output")
+            public_key_path = pathlib.Path(directory) / "cosign.pub"
+            public_key_path.write_text(PUBLIC_KEY, encoding="utf-8")
+            evidence = release_evidence()
+            payload = [
+                {
+                    "critical": {
+                        "identity": {"docker-reference": f"{IMAGE_REPOSITORY}@{DIGEST}"},
+                        "image": {"docker-manifest-digest": DIGEST},
+                        "type": supply.COSIGN_CLAIM_TYPE,
+                    },
+                    "optional": evidence.cached_signature_annotations,
+                }
+            ]
+            completed = subprocess.CompletedProcess(
+                ["cosign", "verify"],
+                0,
+                stdout=json.dumps(payload),
+                stderr="",
+            )
+            with mock.patch.object(gate, "cosign_completed", return_value=completed) as run_cosign:
+                result = gate.verify_positive_signature(
+                    options,
+                    vault_secret_inputs(pathlib.Path(directory)),
+                    public_key_path,
+                    gate.normalize_image_reference(
+                        f"{IMAGE_REPOSITORY}@{DIGEST}",
+                        flag="signed image reference",
+                        require_digest=True,
+                    ),
+                    evidence,
+                    redactor=acceptance.SecretRedactor(),
+                )
+
+        arguments = run_cosign.call_args.args[2]
+        self.assertIn("--insecure-ignore-tlog=false", arguments)
+        self.assertEqual(result["rekorEntries"][0]["index"], 7)
+        self.assertTrue(result["rekorEntries"][0]["inclusionProofPresent"])
+        self.assertTrue(result["rekorEntries"][0]["signedEntryTimestampPresent"])
+        self.assertEqual(result["transparencyLog"], evidence.cached_signature_transparency_log)
+
     def test_rejects_signature_annotation_mismatch(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             options = gate_options(pathlib.Path(directory) / "output")

@@ -120,7 +120,6 @@ REGISTRY_HOST_PATTERN = re.compile(
 )
 TAG_PATTERN = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._-]{0,127}")
 DIGEST_PATTERN = re.compile(r"sha256:[0-9a-f]{64}")
-REKOR_UUID_PATTERN = re.compile(r"[0-9a-fA-F-]{32,}")
 ADMISSION_DENIAL_MARKERS = (
     "kyverno",
     "verifyimages",
@@ -4224,62 +4223,6 @@ def resolve_registry_digest_for_tag(
     return digest
 
 
-def _find_rekor_entries(value: Any) -> list[dict[str, Any]]:
-    entries: list[dict[str, Any]] = []
-
-    def visit(node: Any) -> None:
-        if isinstance(node, dict):
-            lower_map = {str(key).lower(): key for key in node}
-            uuid_value = None
-            index_value = None
-            integrated_time_value = None
-            for candidate in ("uuid", "entryuuid", "entry_uuid"):
-                key = lower_map.get(candidate)
-                if key is not None and isinstance(node[key], str) and REKOR_UUID_PATTERN.fullmatch(node[key]) is not None:
-                    uuid_value = node[key]
-                    break
-            for candidate in ("logindex", "integratedlogindex", "index"):
-                key = lower_map.get(candidate)
-                if key is not None and isinstance(node[key], int):
-                    index_value = node[key]
-                    break
-            for candidate in ("integratedtime", "integrated_time"):
-                key = lower_map.get(candidate)
-                if key is not None and isinstance(node[key], int):
-                    integrated_time_value = node[key]
-                    break
-            if uuid_value is not None and index_value is not None:
-                entry = {"uuid": uuid_value, "index": index_value}
-                if integrated_time_value is not None:
-                    entry["integratedTime"] = integrated_time_value
-                entries.append(entry)
-            for candidate in ("body", "payload"):
-                key = lower_map.get(candidate)
-                if key is not None and isinstance(node[key], str):
-                    raw = node[key]
-                    decoded: Any | None = None
-                    for parser in (
-                        lambda item: json.loads(item),
-                        lambda item: json.loads(base64.b64decode(item).decode("utf-8")),
-                    ):
-                        try:
-                            decoded = parser(raw)
-                            break
-                        except Exception:
-                            continue
-                    if decoded is not None:
-                        visit(decoded)
-            for child in node.values():
-                visit(child)
-        elif isinstance(node, list):
-            for child in node:
-                visit(child)
-
-    visit(value)
-    unique = {(item["uuid"], item["index"]): item for item in entries}
-    return [unique[key] for key in sorted(unique)]
-
-
 def verify_positive_signature(
     options: GateOptions,
     secret_inputs: SecretInputs,
@@ -4294,6 +4237,7 @@ def verify_positive_signature(
         secret_inputs,
         [
             "verify",
+            "--insecure-ignore-tlog=false",
             "--key",
             str(public_key_path),
             "--output",
@@ -4334,17 +4278,29 @@ def verify_positive_signature(
             "Cosign verification did not return the cached production signature with the expected release annotations.",
             error.evidence,
         ) from None
-    rekor_entries = _find_rekor_entries(payload)
+    transparency_log = copy.deepcopy(release_evidence.cached_signature_transparency_log)
+    rekor_entries = [
+        {
+            "index": entry["logIndex"],
+            "integratedTime": entry["integratedTime"],
+            "inclusionProofPresent": entry["inclusionProofPresent"],
+            "inclusionProofHashCount": entry["inclusionProofHashCount"],
+            "signedEntryTimestampPresent": entry["signedEntryTimestampPresent"],
+            "signedEntryTimestampSha256": entry["signedEntryTimestampSha256"],
+        }
+        for entry in transparency_log["entries"]
+    ]
     if not rekor_entries:
         raise ReleaseGateError(
             "release.vault_kms_cosign_invalid",
-            "Cosign verification output did not expose any Rekor UUID/index evidence.",
+            "The fresh production Registry release evidence did not expose Rekor bundle entries.",
         )
     return {
         "reference": signed_image.digest_reference,
         "matchingSignatureCount": int(verification["verifiedSignatureCount"]),
         "annotations": dict(sorted(release_evidence.cached_signature_annotations.items())),
         "rekorEntries": rekor_entries,
+        "transparencyLog": transparency_log,
         "verificationPayloadSha256": verification["verificationPayloadSha256"],
     }
 
