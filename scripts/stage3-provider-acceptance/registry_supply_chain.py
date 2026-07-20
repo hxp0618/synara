@@ -1885,7 +1885,7 @@ def _tool_arguments_with_registry_access(
     if insecure_registry or registry_ca is None:
         return result
     if tool == "cosign" and result and result[0] in {"sign", "verify"}:
-        return [result[0], "--registry-ca-cert", registry_ca, *result[1:]]
+        return [result[0], "--registry-cacert", registry_ca, *result[1:]]
     if tool == "trivy" and result and result[0] == "image":
         return ["--cacert", registry_ca, *result]
     return result
