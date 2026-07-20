@@ -108,7 +108,7 @@ PEM_PUBLIC_KEY_PATTERN = re.compile(
     re.DOTALL,
 )
 ENVIRONMENT_NAME_PATTERN = re.compile(r"[A-Z][A-Z0-9_]{0,127}")
-EXECUTABLE_PATTERN = re.compile(r"[^\\r\\n\\t\\x00]+")
+EXECUTABLE_PATTERN = re.compile(r"[^\r\n\t\x00]+")
 LABEL_SELECTOR_PATTERN = re.compile(r"[A-Za-z0-9./=,_:-]{1,1024}")
 REPOSITORY_COMPONENT_PATTERN = re.compile(r"[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*")
 REGISTRY_HOST_PATTERN = re.compile(

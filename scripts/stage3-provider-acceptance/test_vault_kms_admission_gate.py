@@ -846,6 +846,20 @@ def vault_json_side_effect() -> list[dict[str, Any]]:
 
 
 class ParseArgsTest(unittest.TestCase):
+    def test_accepts_standard_executable_names_and_paths(self) -> None:
+        self.assertEqual(gate.normalize_executable("kubectl", "--kubectl-bin"), "kubectl")
+        self.assertEqual(gate.normalize_executable("vault", "--vault-bin"), "vault")
+        self.assertEqual(gate.normalize_executable("cosign", "--cosign-bin"), "cosign")
+        self.assertEqual(
+            gate.normalize_executable("/opt/homebrew/bin/cosign", "--cosign-bin"),
+            "/opt/homebrew/bin/cosign",
+        )
+
+    def test_rejects_executable_control_characters(self) -> None:
+        for invalid in ("kubectl\r", "kubectl\n", "kubectl\t", "kubectl\x00"):
+            with self.subTest(invalid=repr(invalid)), self.assertRaises(ValueError):
+                gate.normalize_executable(invalid, "--kubectl-bin")
+
     def test_rejects_duplicate_expected_approle_policies(self) -> None:
         with (
             tempfile.TemporaryDirectory() as directory,
