@@ -74,8 +74,11 @@ TRIVY_DATABASE_DOWNLOAD_RETRY_MARKERS = (
     "502 bad gateway",
     "503 service unavailable",
 )
-COSIGN_CLAIM_TYPE = "https://sigstore.dev/cosign/sign/v1"
-COSIGN_KYVERNO_COMPATIBILITY_ARGUMENT = "--new-bundle-format=false"
+COSIGN_CLAIM_TYPE = "cosign container image signature"
+COSIGN_KYVERNO_COMPATIBILITY_ARGUMENTS = (
+    "--new-bundle-format=false",
+    "--use-signing-config=false",
+)
 IMMUTABLE_IMAGE_PATTERN = re.compile(
     r"[A-Za-z0-9][A-Za-z0-9._:-]*(?:/[A-Za-z0-9][A-Za-z0-9._:-]*)+"
     r"@sha256:[0-9a-f]{64}"
@@ -352,6 +355,14 @@ class PreparedRegistryAccess:
     auth_configured: bool
     ca_materialized: bool
     registry_ca_container_path: str | None
+
+
+@dataclasses.dataclass(frozen=True)
+class CosignSignatureEvidencePaths:
+    bundle: pathlib.Path
+    signature: pathlib.Path
+    payload: pathlib.Path
+    certificate: pathlib.Path | None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1883,14 +1894,6 @@ def _tool_arguments_with_registry_access(
     insecure_registry: bool,
 ) -> list[str]:
     result = list(arguments)
-    if tool == "cosign" and result and result[0] == "sign":
-        # Kyverno v1.18 discovers classic Cosign signatures through the digest
-        # .sig tag; Cosign v3's bundle format uses an incompatible tag index.
-        result = [
-            result[0],
-            COSIGN_KYVERNO_COMPATIBILITY_ARGUMENT,
-            *result[1:],
-        ]
     registry_ca = registry_access.registry_ca_container_path
     if insecure_registry or registry_ca is None:
         return result
@@ -1899,6 +1902,12 @@ def _tool_arguments_with_registry_access(
     if tool == "trivy" and result and result[0] == "image":
         return ["--cacert", registry_ca, *result]
     return result
+
+
+def _classic_cosign_sign_arguments(*arguments: str) -> list[str]:
+    # Kyverno v1.18 discovers classic Cosign signatures through the digest .sig
+    # tag; Cosign v3's default bundle format uses an incompatible tag index.
+    return ["sign", *COSIGN_KYVERNO_COMPATIBILITY_ARGUMENTS, *arguments]
 
 
 def _run_tool(
@@ -2039,6 +2048,12 @@ def validate_cosign_verification(
             "Cosign verification did not return a valid signature claim list.",
         )
     matching: list[dict[str, Any]] = []
+    expected_repository, separator, _ = reference.rpartition("@")
+    if separator != "@" or not expected_repository:
+        raise common.ReleaseGateError(
+            "release.registry_signature_verification_invalid",
+            "Cosign verification expected an immutable image reference.",
+        )
     for item in payload:
         critical = item.get("critical")
         optional = item.get("optional")
@@ -2047,7 +2062,7 @@ def validate_cosign_verification(
         if (
             isinstance(identity, dict)
             and isinstance(image, dict)
-            and identity.get("docker-reference") == reference
+            and identity.get("docker-reference") == expected_repository
             and image.get("docker-manifest-digest") == digest
             and critical.get("type") == COSIGN_CLAIM_TYPE
             and isinstance(optional, dict)
@@ -2322,6 +2337,169 @@ def _signature_bundle_evidence(
             bool(entry["signedEntryTimestampPresent"]) for entry in entries
         ),
     }
+
+
+def _cosign_signature_evidence_paths(
+    slot: str,
+    *,
+    include_certificate: bool,
+) -> CosignSignatureEvidencePaths:
+    prefix = pathlib.Path("cosign") / slot
+    return CosignSignatureEvidencePaths(
+        bundle=pathlib.Path(f"{prefix}.bundle.json"),
+        signature=pathlib.Path(f"{prefix}.signature"),
+        payload=pathlib.Path(f"{prefix}.payload.json"),
+        certificate=(pathlib.Path(f"{prefix}.certificate.pem") if include_certificate else None),
+    )
+
+
+def _cosign_classic_output_arguments(paths: CosignSignatureEvidencePaths) -> list[str]:
+    arguments = [
+        "--output-signature",
+        str(paths.signature),
+        "--output-payload",
+        str(paths.payload),
+    ]
+    if paths.certificate is not None:
+        arguments.extend(["--output-certificate", str(paths.certificate)])
+    return arguments
+
+
+def _reset_cosign_signature_evidence(
+    options: SupplyChainOptions,
+    paths: CosignSignatureEvidencePaths,
+) -> None:
+    relative_paths = [paths.bundle, paths.signature, paths.payload]
+    if paths.certificate is not None:
+        relative_paths.extend(
+            [paths.certificate, pathlib.Path(f"{paths.certificate}.base64")]
+        )
+    for relative_path in relative_paths:
+        (options.state_dir / relative_path).unlink(missing_ok=True)
+
+
+def _validate_cosign_bundle_binding(
+    bundle_path: pathlib.Path,
+    *,
+    payload_bytes: bytes,
+    signature_bytes: bytes,
+) -> None:
+    try:
+        bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
+        message_signature = bundle["messageSignature"]
+        message_digest = message_signature["messageDigest"]
+        digest_bytes = base64.b64decode(message_digest["digest"], validate=True)
+        bundled_signature = base64.b64decode(message_signature["signature"], validate=True)
+    except (OSError, KeyError, TypeError, json.JSONDecodeError, binascii.Error):
+        raise common.ReleaseGateError(
+            "release.registry_transparency_log_invalid",
+            "Cosign transparency-log evidence was not bound to its signing material.",
+        ) from None
+    if (
+        message_digest.get("algorithm") != "SHA2_256"
+        or digest_bytes != hashlib.sha256(payload_bytes).digest()
+        or bundled_signature != signature_bytes
+    ):
+        raise common.ReleaseGateError(
+            "release.registry_transparency_log_invalid",
+            "Cosign transparency-log evidence was not bound to its signing material.",
+        )
+
+
+def _create_cosign_transparency_bundle(
+    options: SupplyChainOptions,
+    configuration: SupplyChainConfiguration,
+    *,
+    paths: CosignSignatureEvidencePaths,
+    subject: Mapping[str, Any],
+    verification_key: str | None,
+    secret_environment: Mapping[str, str] | None,
+    require_inclusion_proof: bool,
+    require_signed_entry_timestamp: bool,
+    deadline: float,
+    redactor: acceptance.SecretRedactor,
+) -> dict[str, Any]:
+    if (paths.certificate is None) == (verification_key is None):
+        raise common.ReleaseGateError(
+            "release.registry_transparency_log_invalid",
+            "Cosign transparency-log evidence did not have exactly one verifier.",
+        )
+    try:
+        payload_bytes = (options.state_dir / paths.payload).read_bytes()
+        payload = json.loads(payload_bytes)
+        signature_bytes = base64.b64decode(
+            (options.state_dir / paths.signature).read_text(encoding="utf-8").strip(),
+            validate=True,
+        )
+        if not signature_bytes:
+            raise ValueError
+    except (OSError, ValueError, json.JSONDecodeError, binascii.Error):
+        raise common.ReleaseGateError(
+            "release.registry_transparency_log_invalid",
+            "Cosign did not write valid signing material for transparency-log evidence.",
+        ) from None
+    validate_cosign_verification(
+        [payload],
+        reference=str(subject["reference"]),
+        digest=str(subject["digest"]),
+        annotations=subject["annotations"],
+    )
+    certificate_base64_relative: pathlib.Path | None = None
+    verifier_arguments: list[str]
+    if paths.certificate is not None:
+        certificate_path = options.state_dir / paths.certificate
+        certificate_base64_relative = pathlib.Path(f"{paths.certificate}.base64")
+        certificate_base64_path = options.state_dir / certificate_base64_relative
+        try:
+            certificate_bytes = certificate_path.read_bytes()
+            if not certificate_bytes:
+                raise OSError
+            certificate_base64_path.write_bytes(base64.b64encode(certificate_bytes))
+            certificate_base64_path.chmod(0o600)
+        except OSError:
+            certificate_base64_path.unlink(missing_ok=True)
+            raise common.ReleaseGateError(
+                "release.registry_transparency_log_invalid",
+                "Cosign did not write a valid signing certificate for transparency-log evidence.",
+            ) from None
+        verifier_arguments = ["--certificate", str(certificate_base64_relative)]
+    else:
+        verifier_arguments = ["--key", str(verification_key)]
+    try:
+        _run_tool(
+            options,
+            image=configuration.tools.cosign,
+            arguments=[
+                "bundle",
+                "create",
+                "--artifact",
+                str(paths.payload),
+                "--signature",
+                str(paths.signature),
+                *verifier_arguments,
+                "--rekor-url",
+                TRANSPARENCY_LOG_URL,
+                "--out",
+                str(paths.bundle),
+            ],
+            tool="cosign",
+            deadline=deadline,
+            redactor=redactor,
+            secret_environment=secret_environment,
+        )
+    finally:
+        if certificate_base64_relative is not None:
+            (options.state_dir / certificate_base64_relative).unlink(missing_ok=True)
+    _validate_cosign_bundle_binding(
+        options.state_dir / paths.bundle,
+        payload_bytes=payload_bytes,
+        signature_bytes=signature_bytes,
+    )
+    return _signature_bundle_evidence(
+        options.state_dir / paths.bundle,
+        require_inclusion_proof=require_inclusion_proof,
+        require_signed_entry_timestamp=require_signed_entry_timestamp,
+    )
 
 
 def _transparency_log_requirements(
@@ -2785,7 +2963,6 @@ def _sign_and_verify_ephemeral(
 ) -> dict[str, Any]:
     cosign_dir = options.state_dir / "cosign"
     cosign_dir.mkdir(parents=True, exist_ok=True)
-    signing_config = pathlib.Path("cosign/signing-config.json")
     key_prefix = pathlib.Path("cosign/ephemeral")
     private_key = options.state_dir / "cosign" / "ephemeral.key"
     public_key = options.state_dir / "cosign" / "ephemeral.pub"
@@ -2795,23 +2972,6 @@ def _sign_and_verify_ephemeral(
     signatures: list[dict[str, Any]] = []
     public_key_sha256: str | None = None
     try:
-        _run_tool(
-            options,
-            image=configuration.tools.cosign,
-            arguments=[
-                "signing-config",
-                "create",
-                "--no-default-fulcio",
-                "--no-default-oidc",
-                "--no-default-rekor",
-                "--no-default-tsa",
-                "--out",
-                str(signing_config),
-            ],
-            tool="cosign",
-            deadline=deadline,
-            redactor=redactor,
-        )
         _run_tool(
             options,
             image=configuration.tools.cosign,
@@ -2838,17 +2998,15 @@ def _sign_and_verify_ephemeral(
             _run_tool(
                 options,
                 image=configuration.tools.cosign,
-                arguments=[
-                    "sign",
+                arguments=_classic_cosign_sign_arguments(
                     "--yes",
-                    "--signing-config",
-                    str(signing_config),
+                    "--tlog-upload=false",
                     *insecure_arguments,
                     "--key",
                     str(key_prefix.with_suffix(".key")),
                     *subject["annotationArguments"],
                     subject["reference"],
-                ],
+                ),
                 tool="cosign",
                 deadline=deadline,
                 redactor=redactor,
@@ -2964,23 +3122,24 @@ def _sign_and_verify_keyless(
             version=version,
             run_id=run_id,
         ):
-            bundle_relative = pathlib.Path(f"cosign/{subject['slot']}.bundle.json")
-            bundle_path = options.state_dir / bundle_relative
-            bundle_path.parent.mkdir(parents=True, exist_ok=True)
+            paths = _cosign_signature_evidence_paths(
+                str(subject["slot"]),
+                include_certificate=True,
+            )
+            (options.state_dir / paths.bundle).parent.mkdir(parents=True, exist_ok=True)
+            _reset_cosign_signature_evidence(options, paths)
             _run_tool(
                 options,
                 image=configuration.tools.cosign,
-                arguments=[
-                    "sign",
+                arguments=_classic_cosign_sign_arguments(
                     "--yes",
                     "--tlog-upload=true",
-                    "--bundle",
-                    str(bundle_relative),
+                    *_cosign_classic_output_arguments(paths),
                     "--identity-token",
                     str(token_relative),
                     *subject["annotationArguments"],
                     subject["reference"],
-                ],
+                ),
                 tool="cosign",
                 deadline=deadline,
                 redactor=redactor,
@@ -3001,14 +3160,22 @@ def _sign_and_verify_keyless(
                 deadline=deadline,
                 redactor=redactor,
             )
+            transparency_log = _create_cosign_transparency_bundle(
+                options,
+                configuration,
+                paths=paths,
+                subject=subject,
+                verification_key=None,
+                secret_environment=None,
+                require_inclusion_proof=require_inclusion_proof,
+                require_signed_entry_timestamp=require_signed_entry_timestamp,
+                deadline=deadline,
+                redactor=redactor,
+            )
             signatures.append(
                 {
                     **_verification_evidence(verification, subject=subject),
-                    "transparencyLog": _signature_bundle_evidence(
-                        bundle_path,
-                        require_inclusion_proof=require_inclusion_proof,
-                        require_signed_entry_timestamp=require_signed_entry_timestamp,
-                    ),
+                    "transparencyLog": transparency_log,
                 }
             )
     finally:
@@ -3101,30 +3268,33 @@ def _sign_and_verify_kms(
         version=version,
         run_id=run_id,
     ):
-        bundle_relative = pathlib.Path(f"cosign/{subject['slot']}.bundle.json")
-        bundle_path = options.state_dir / bundle_relative
-        bundle_path.parent.mkdir(parents=True, exist_ok=True)
+        paths = _cosign_signature_evidence_paths(
+            str(subject["slot"]),
+            include_certificate=False,
+        )
+        (options.state_dir / paths.bundle).parent.mkdir(parents=True, exist_ok=True)
+        _reset_cosign_signature_evidence(options, paths)
+        verification_key = (
+            verification_key_path.as_posix()
+            if verification_key_path is not None
+            else key_reference
+        )
         _run_tool(
             options,
             image=configuration.tools.cosign,
-            arguments=[
-                "sign",
+            arguments=_classic_cosign_sign_arguments(
                 "--yes",
                 "--tlog-upload=true",
-                "--bundle",
-                str(bundle_relative),
+                *_cosign_classic_output_arguments(paths),
                 "--key",
                 key_reference,
                 *subject["annotationArguments"],
                 subject["reference"],
-            ],
+            ),
             tool="cosign",
             deadline=deadline,
             redactor=redactor,
             secret_environment=secret_environment,
-        )
-        verification_key = (
-            verification_key_path.as_posix() if verification_key_path is not None else key_reference
         )
         verification = _run_tool(
             options,
@@ -3144,14 +3314,22 @@ def _sign_and_verify_kms(
             redactor=redactor,
             secret_environment=(secret_environment if verification_key_path is None else None),
         )
+        transparency_log = _create_cosign_transparency_bundle(
+            options,
+            configuration,
+            paths=paths,
+            subject=subject,
+            verification_key=verification_key,
+            secret_environment=(secret_environment if verification_key_path is None else None),
+            require_inclusion_proof=require_inclusion_proof,
+            require_signed_entry_timestamp=require_signed_entry_timestamp,
+            deadline=deadline,
+            redactor=redactor,
+        )
         signatures.append(
             {
                 **_verification_evidence(verification, subject=subject),
-                "transparencyLog": _signature_bundle_evidence(
-                    bundle_path,
-                    require_inclusion_proof=require_inclusion_proof,
-                    require_signed_entry_timestamp=require_signed_entry_timestamp,
-                ),
+                "transparencyLog": transparency_log,
             }
         )
     return {

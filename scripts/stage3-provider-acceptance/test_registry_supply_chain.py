@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import dataclasses
 import datetime as dt
+import hashlib
 import json
 import pathlib
 import subprocess
@@ -92,7 +93,7 @@ def verification_payload(
     return [
         {
             "critical": {
-                "identity": {"docker-reference": reference},
+                "identity": {"docker-reference": reference.rpartition("@")[0]},
                 "image": {"docker-manifest-digest": digest},
                 "type": supply.COSIGN_CLAIM_TYPE,
             },
@@ -169,6 +170,81 @@ def write_transparency_bundle(
         ),
         encoding="utf-8",
     )
+
+
+def write_classic_signing_outputs(state_dir: pathlib.Path, arguments: list[str]) -> None:
+    reference = arguments[-1]
+    repository, separator, digest = reference.rpartition("@")
+    if separator != "@":
+        raise AssertionError("classic signing output requires a digest reference")
+    annotations = {
+        arguments[index + 1].split("=", 1)[0]: arguments[index + 1].split("=", 1)[1]
+        for index, argument in enumerate(arguments[:-1])
+        if argument == "-a"
+    }
+    payload = json.dumps(
+        {
+            "critical": {
+                "identity": {"docker-reference": repository},
+                "image": {"docker-manifest-digest": digest},
+                "type": supply.COSIGN_CLAIM_TYPE,
+            },
+            "optional": annotations,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    outputs = {
+        "--output-signature": b"c2lnbmF0dXJl\n",
+        "--output-payload": payload,
+        "--output-certificate": b"-----BEGIN CERTIFICATE-----\nfixture\n-----END CERTIFICATE-----\n",
+    }
+    for flag, content in outputs.items():
+        if flag not in arguments:
+            continue
+        path = state_dir / pathlib.Path(arguments[arguments.index(flag) + 1])
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+
+
+def write_bundle_create_output(
+    state_dir: pathlib.Path,
+    arguments: list[str],
+    *,
+    include_inclusion_proof: bool = True,
+    include_signed_entry_timestamp: bool = True,
+) -> None:
+    if arguments[:2] != ["bundle", "create"]:
+        raise AssertionError("expected cosign bundle create")
+    artifact_path = state_dir / pathlib.Path(arguments[arguments.index("--artifact") + 1])
+    signature_path = state_dir / pathlib.Path(arguments[arguments.index("--signature") + 1])
+    for flag, path in (("--artifact", artifact_path), ("--signature", signature_path)):
+        if not path.is_file():
+            raise AssertionError(f"missing bundle input: {flag}")
+    if "--certificate" in arguments:
+        certificate_path = state_dir / pathlib.Path(
+            arguments[arguments.index("--certificate") + 1]
+        )
+        base64.b64decode(certificate_path.read_bytes().strip(), validate=True)
+    elif "--key" not in arguments:
+        raise AssertionError("bundle create omitted its verifier")
+    output = state_dir / pathlib.Path(arguments[arguments.index("--out") + 1])
+    bundle = transparency_bundle_payload(
+        include_inclusion_proof=include_inclusion_proof,
+        include_signed_entry_timestamp=include_signed_entry_timestamp,
+    )
+    payload_bytes = artifact_path.read_bytes()
+    signature = signature_path.read_text(encoding="utf-8").strip()
+    base64.b64decode(signature, validate=True)
+    bundle["messageSignature"] = {
+        "messageDigest": {
+            "algorithm": "SHA2_256",
+            "digest": base64.b64encode(hashlib.sha256(payload_bytes).digest()).decode("ascii"),
+        },
+        "signature": signature,
+    }
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(bundle), encoding="utf-8")
 
 
 def configuration_with(policy: supply.SigningPolicy) -> supply.SupplyChainConfiguration:
@@ -807,7 +883,7 @@ class CommandBoundaryTest(unittest.TestCase):
                     supply._run_tool(
                         options,
                         image="example.test/cosign:v1.0.0@sha256:" + "d" * 64,
-                        arguments=["sign", "--yes", REFERENCE],
+                        arguments=supply._classic_cosign_sign_arguments("--yes", REFERENCE),
                         tool="cosign",
                         deadline=supply.time.monotonic() + 60,
                         redactor=redactor,
@@ -856,8 +932,10 @@ class CommandBoundaryTest(unittest.TestCase):
             self.assertNotIn("--registry-ca-cert", cosign_command)
             self.assertIn("--registry-cacert", cosign_command)
             self.assertIn("--new-bundle-format=false", cosign_command)
+            self.assertIn("--use-signing-config=false", cosign_command)
             self.assertIn("--registry-cacert", cosign_verify_command)
             self.assertNotIn("--new-bundle-format=false", cosign_verify_command)
+            self.assertNotIn("--use-signing-config=false", cosign_verify_command)
             self.assertIn(
                 "/workspace/registry-access/docker-config/certs.d/registry.example.test/ca.crt",
                 cosign_command,
@@ -932,12 +1010,108 @@ class CommandBoundaryTest(unittest.TestCase):
             self.assertEqual(run.call_count, 1)
 
 
+class EphemeralSigningTest(unittest.TestCase):
+    def test_ephemeral_signing_uses_classic_layout_without_external_services(self) -> None:
+        reference = f"registry.example.test/synara/worker@{DIGEST}"
+        calls: list[list[str]] = []
+        with tempfile.TemporaryDirectory() as directory:
+            state_dir = pathlib.Path(directory) / "state"
+
+            def run_tool(_options: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+                arguments = list(kwargs["arguments"])
+                calls.append(arguments)
+                if arguments[0] == "generate-key-pair":
+                    key_prefix = state_dir / pathlib.Path(
+                        arguments[arguments.index("--output-key-prefix") + 1]
+                    )
+                    key_prefix.parent.mkdir(parents=True, exist_ok=True)
+                    key_prefix.with_suffix(".key").write_text("private", encoding="utf-8")
+                    key_prefix.with_suffix(".pub").write_text(PUBLIC_KEY_PEM, encoding="utf-8")
+                stdout = (
+                    json.dumps(verification_payload(reference=reference))
+                    if arguments[0] == "verify"
+                    else ""
+                )
+                return subprocess.CompletedProcess(arguments, 0, stdout=stdout, stderr="")
+
+            with mock.patch.object(supply, "_run_tool", side_effect=run_tool):
+                result = supply._sign_and_verify(
+                    supply_options(state_dir),
+                    configuration_with(signing_policy()),
+                    builds=[{"slot": "cached", "registryDigest": DIGEST}],
+                    git_sha="a" * 40,
+                    version="0.5.4",
+                    run_id="run-1",
+                    deadline=supply.time.monotonic() + 60,
+                    redactor=acceptance.SecretRedactor(),
+                )
+
+            self.assertFalse((state_dir / "cosign/ephemeral.key").exists())
+
+        self.assertEqual([arguments[0] for arguments in calls], ["generate-key-pair", "sign", "verify"])
+        sign_arguments = calls[1]
+        verify_arguments = calls[2]
+        self.assertIn("--new-bundle-format=false", sign_arguments)
+        self.assertIn("--use-signing-config=false", sign_arguments)
+        self.assertIn("--tlog-upload=false", sign_arguments)
+        self.assertEqual(
+            sign_arguments[sign_arguments.index("--key") + 1],
+            "cosign/ephemeral.key",
+        )
+        for argument in ("--bundle", "--signing-config", "--identity-token"):
+            self.assertNotIn(argument, sign_arguments)
+        self.assertIn("--insecure-ignore-tlog=true", verify_arguments)
+        self.assertEqual(
+            verify_arguments[verify_arguments.index("--key") + 1],
+            "cosign/ephemeral.pub",
+        )
+        self.assertNotIn("--insecure-ignore-tlog=false", verify_arguments)
+        self.assertEqual(result["mode"], "ephemeral-key")
+        self.assertFalse(result["transparencyLog"])
+        self.assertFalse(result["productionSigningPolicySatisfied"])
+        self.assertTrue(result["privateKeyRemoved"])
+
+    def test_ephemeral_signing_failure_removes_private_key(self) -> None:
+        failure = supply.common.ReleaseGateError("test.cosign_failed", "Cosign failed.")
+        with tempfile.TemporaryDirectory() as directory:
+            state_dir = pathlib.Path(directory) / "state"
+
+            def run_tool(_options: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+                arguments = list(kwargs["arguments"])
+                if arguments[0] == "generate-key-pair":
+                    key_prefix = state_dir / pathlib.Path(
+                        arguments[arguments.index("--output-key-prefix") + 1]
+                    )
+                    key_prefix.parent.mkdir(parents=True, exist_ok=True)
+                    key_prefix.with_suffix(".key").write_text("private", encoding="utf-8")
+                    key_prefix.with_suffix(".pub").write_text(PUBLIC_KEY_PEM, encoding="utf-8")
+                    return subprocess.CompletedProcess(arguments, 0, stdout="", stderr="")
+                raise failure
+
+            with mock.patch.object(supply, "_run_tool", side_effect=run_tool), self.assertRaises(
+                supply.common.ReleaseGateError
+            ) as caught:
+                supply._sign_and_verify(
+                    supply_options(state_dir),
+                    configuration_with(signing_policy()),
+                    builds=[{"slot": "cached", "registryDigest": DIGEST}],
+                    git_sha="a" * 40,
+                    version="0.5.4",
+                    run_id="run-1",
+                    deadline=supply.time.monotonic() + 60,
+                    redactor=acceptance.SecretRedactor(),
+                )
+
+            self.assertIs(caught.exception, failure)
+            self.assertFalse((state_dir / "cosign/ephemeral.key").exists())
+
+
 class SignatureVerificationTest(unittest.TestCase):
     def verification_payload(self, *, digest: str = DIGEST) -> list[dict[str, Any]]:
         return [
             {
                 "critical": {
-                    "identity": {"docker-reference": REFERENCE},
+                    "identity": {"docker-reference": REFERENCE.rpartition("@")[0]},
                     "image": {"docker-manifest-digest": digest},
                     "type": supply.COSIGN_CLAIM_TYPE,
                 },
@@ -1015,6 +1189,29 @@ class SignatureVerificationTest(unittest.TestCase):
                         code="test.invalid_bundle",
                         message="invalid bundle",
                     )
+
+    def test_rejects_bundle_material_binding_mismatch(self) -> None:
+        payload = b"signed payload"
+        signature = b"signature"
+        bundle = transparency_bundle_payload()
+        bundle["messageSignature"] = {
+            "messageDigest": {
+                "algorithm": "SHA2_256",
+                "digest": base64.b64encode(hashlib.sha256(payload).digest()).decode("ascii"),
+            },
+            "signature": base64.b64encode(b"different signature").decode("ascii"),
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            bundle_path = pathlib.Path(directory) / "bundle.json"
+            bundle_path.write_text(json.dumps(bundle), encoding="utf-8")
+            with self.assertRaises(supply.common.ReleaseGateError) as caught:
+                supply._validate_cosign_bundle_binding(
+                    bundle_path,
+                    payload_bytes=payload,
+                    signature_bytes=signature,
+                )
+
+        self.assertEqual(caught.exception.code, "release.registry_transparency_log_invalid")
 
 
 class ProductionSigningTest(unittest.TestCase):
@@ -1111,8 +1308,9 @@ class ProductionSigningTest(unittest.TestCase):
                     token_path = state_dir / token_relative
                     self.assertEqual(token_path.read_text(encoding="utf-8"), token)
                     self.assertEqual(token_path.stat().st_mode & 0o777, 0o600)
-                    bundle_relative = pathlib.Path(arguments[arguments.index("--bundle") + 1])
-                    write_transparency_bundle(state_dir / bundle_relative)
+                    write_classic_signing_outputs(state_dir, arguments)
+                if arguments[:2] == ["bundle", "create"]:
+                    write_bundle_create_output(state_dir, arguments)
                 stdout = json.dumps(verification_payload(reference=reference)) if arguments[0] == "verify" else ""
                 return subprocess.CompletedProcess(arguments, 0, stdout=stdout, stderr="")
 
@@ -1135,11 +1333,24 @@ class ProductionSigningTest(unittest.TestCase):
 
         sign_arguments = calls[0]["arguments"]
         verify_arguments = calls[1]["arguments"]
+        bundle_arguments = calls[2]["arguments"]
         self.assertIn("--tlog-upload=true", sign_arguments)
-        self.assertIn("--bundle", sign_arguments)
+        self.assertIn("--new-bundle-format=false", sign_arguments)
+        self.assertIn("--use-signing-config=false", sign_arguments)
+        self.assertIn("--output-signature", sign_arguments)
+        self.assertIn("--output-payload", sign_arguments)
+        self.assertIn("--output-certificate", sign_arguments)
+        self.assertNotIn("--bundle", sign_arguments)
         self.assertIn("--certificate-identity", verify_arguments)
         self.assertIn("--certificate-oidc-issuer", verify_arguments)
         self.assertIn("--insecure-ignore-tlog=false", verify_arguments)
+        self.assertEqual(bundle_arguments[:2], ["bundle", "create"])
+        self.assertIn("--certificate", bundle_arguments)
+        self.assertNotIn("--key", bundle_arguments)
+        self.assertEqual(
+            bundle_arguments[bundle_arguments.index("--rekor-url") + 1],
+            supply.TRANSPARENCY_LOG_URL,
+        )
         self.assertEqual(result["mode"], "keyless")
         self.assertTrue(result["productionSigningPolicySatisfied"])
         self.assertTrue(result["transparencyLogVerified"])
@@ -1165,8 +1376,9 @@ class ProductionSigningTest(unittest.TestCase):
             self.assertNotIn(credential, arguments)
             self.assertEqual(kwargs["secret_environment"], {"SYNARA_TEST_KMS_CREDENTIAL": credential})
             if arguments[0] == "sign":
-                bundle_relative = pathlib.Path(arguments[arguments.index("--bundle") + 1])
-                write_transparency_bundle((pathlib.Path(directory) / "state") / bundle_relative)
+                write_classic_signing_outputs(pathlib.Path(directory) / "state", arguments)
+            if arguments[:2] == ["bundle", "create"]:
+                write_bundle_create_output(pathlib.Path(directory) / "state", arguments)
             stdout = json.dumps(verification_payload(reference=reference)) if arguments[0] == "verify" else ""
             return subprocess.CompletedProcess(arguments, 0, stdout=stdout, stderr="")
 
@@ -1186,9 +1398,18 @@ class ProductionSigningTest(unittest.TestCase):
             )
 
         self.assertIn("--tlog-upload=true", calls[0]["arguments"])
-        self.assertIn("--bundle", calls[0]["arguments"])
+        self.assertIn("--new-bundle-format=false", calls[0]["arguments"])
+        self.assertIn("--use-signing-config=false", calls[0]["arguments"])
+        self.assertIn("--output-signature", calls[0]["arguments"])
+        self.assertIn("--output-payload", calls[0]["arguments"])
+        self.assertNotIn("--bundle", calls[0]["arguments"])
         self.assertEqual(calls[0]["arguments"][calls[0]["arguments"].index("--key") + 1], key_reference)
         self.assertIn("--insecure-ignore-tlog=false", calls[1]["arguments"])
+        self.assertEqual(calls[2]["arguments"][:2], ["bundle", "create"])
+        self.assertEqual(
+            calls[2]["arguments"][calls[2]["arguments"].index("--key") + 1],
+            key_reference,
+        )
         self.assertEqual(result["mode"], "kms-key")
         self.assertTrue(result["productionSigningPolicySatisfied"])
         self.assertTrue(result["transparencyLogVerified"])
@@ -1383,8 +1604,9 @@ class ProductionSigningTest(unittest.TestCase):
                 self.assertNotIn(str(ca_path), json.dumps(secret_environment))
                 arguments = kwargs["arguments"]
                 if arguments[0] == "sign":
-                    bundle_relative = pathlib.Path(arguments[arguments.index("--bundle") + 1])
-                    write_transparency_bundle(state_dir / bundle_relative)
+                    write_classic_signing_outputs(state_dir, arguments)
+                if arguments[:2] == ["bundle", "create"]:
+                    write_bundle_create_output(state_dir, arguments)
                 stdout = json.dumps(verification_payload(reference=reference)) if arguments[0] == "verify" else ""
                 return subprocess.CompletedProcess(arguments, 0, stdout=stdout, stderr="")
 
@@ -1413,7 +1635,7 @@ class ProductionSigningTest(unittest.TestCase):
             result["credentialEnvironmentNames"],
             list(supply.VAULT_TRANSIT_REQUIRED_ENVIRONMENT),
         )
-        self.assertEqual(len(calls), 2)
+        self.assertEqual(len(calls), 3)
 
     def test_production_kms_signing_validates_runtime_admission_inputs_against_kms_key(self) -> None:
         token = "vault-token-value"
@@ -1457,8 +1679,7 @@ class ProductionSigningTest(unittest.TestCase):
                         arguments[arguments.index("--key") + 1],
                         supply.VAULT_TRANSIT_KEY_REFERENCE,
                     )
-                    bundle_relative = pathlib.Path(arguments[arguments.index("--bundle") + 1])
-                    write_transparency_bundle(state_dir / bundle_relative)
+                    write_classic_signing_outputs(state_dir, arguments)
                 if arguments[0] == "verify":
                     self.assertEqual(
                         arguments[arguments.index("--key") + 1],
@@ -1470,6 +1691,13 @@ class ProductionSigningTest(unittest.TestCase):
                     )
                     self.assertEqual(materialized_key.read_text(encoding="utf-8"), PUBLIC_KEY_PEM)
                     self.assertEqual(materialized_key.stat().st_mode & 0o777, 0o600)
+                if arguments[:2] == ["bundle", "create"]:
+                    self.assertEqual(
+                        arguments[arguments.index("--key") + 1],
+                        supply.MATERIALIZED_KMS_PUBLIC_KEY_RELATIVE_PATH.as_posix(),
+                    )
+                    self.assertIsNone(kwargs["secret_environment"])
+                    write_bundle_create_output(state_dir, arguments)
                 stdout = json.dumps(verification_payload(reference=reference)) if arguments[0] == "verify" else ""
                 return subprocess.CompletedProcess(arguments, 0, stdout=stdout, stderr="")
 
@@ -1520,8 +1748,12 @@ class ProductionSigningTest(unittest.TestCase):
         self.assertEqual(calls[0][0], "public-key")
         self.assertEqual(calls[1][0], "sign")
         self.assertEqual(calls[2][0], "verify")
+        self.assertEqual(calls[3][:2], ["bundle", "create"])
         self.assertIn("--insecure-ignore-tlog=false", calls[2])
-        self.assertEqual(events, ["public-key", "vault-lookup-self", "sign", "verify"])
+        self.assertEqual(
+            events,
+            ["public-key", "vault-lookup-self", "sign", "verify", "bundle"],
+        )
         self.assertEqual(result["verificationKeyMode"], "kms-exported-public-key")
         identity_lookup.assert_called_once()
         self.assertEqual(result["signerIdentity"], signer_identity)
@@ -1588,9 +1820,11 @@ class ProductionSigningTest(unittest.TestCase):
             def run_tool(_options: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
                 arguments = kwargs["arguments"]
                 if arguments[0] == "sign":
-                    bundle_relative = pathlib.Path(arguments[arguments.index("--bundle") + 1])
-                    write_transparency_bundle(
-                        state_dir / bundle_relative,
+                    write_classic_signing_outputs(state_dir, arguments)
+                if arguments[:2] == ["bundle", "create"]:
+                    write_bundle_create_output(
+                        state_dir,
+                        arguments,
                         include_inclusion_proof=False,
                     )
                 stdout = json.dumps(verification_payload(reference=f"registry.example.test/synara/worker@{DIGEST}")) if arguments[0] == "verify" else ""
@@ -1630,12 +1864,71 @@ class ProductionSigningTest(unittest.TestCase):
             def run_tool(_options: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
                 arguments = kwargs["arguments"]
                 if arguments[0] == "sign":
-                    bundle_relative = pathlib.Path(arguments[arguments.index("--bundle") + 1])
-                    write_transparency_bundle(
-                        state_dir / bundle_relative,
+                    write_classic_signing_outputs(state_dir, arguments)
+                if arguments[:2] == ["bundle", "create"]:
+                    write_bundle_create_output(
+                        state_dir,
+                        arguments,
                         include_signed_entry_timestamp=False,
                     )
                 stdout = json.dumps(verification_payload(reference=f"registry.example.test/synara/worker@{DIGEST}")) if arguments[0] == "verify" else ""
+                return subprocess.CompletedProcess(arguments, 0, stdout=stdout, stderr="")
+
+            with mock.patch.object(supply, "_run_tool", side_effect=run_tool), self.assertRaises(
+                supply.common.ReleaseGateError
+            ) as caught:
+                supply._sign_and_verify(
+                    supply_options(state_dir),
+                    configuration_with(policy),
+                    builds=[{"slot": "cached", "registryDigest": DIGEST}],
+                    git_sha="a" * 40,
+                    version="0.5.4",
+                    run_id="run-1",
+                    deadline=supply.time.monotonic() + 60,
+                    redactor=acceptance.SecretRedactor(),
+                )
+
+        self.assertEqual(caught.exception.code, "release.registry_transparency_log_invalid")
+
+    def test_kms_signing_rejects_stale_unrefreshed_local_material(self) -> None:
+        credential = "kms-secret-value"
+        key_reference = "awskms:///arn:aws:kms:us-east-1:123456789012:key/key-id"
+        policy = signing_policy(
+            mode="kms-key",
+            require_transparency_log=True,
+            key_reference=key_reference,
+            credential_environment=("SYNARA_TEST_KMS_CREDENTIAL",),
+        )
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(
+            supply.os.environ,
+            {"SYNARA_TEST_KMS_CREDENTIAL": credential},
+        ):
+            state_dir = pathlib.Path(directory) / "state"
+            paths = supply._cosign_signature_evidence_paths(
+                "cached",
+                include_certificate=False,
+            )
+            for relative_path in (paths.bundle, paths.signature, paths.payload):
+                path = state_dir / relative_path
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("stale", encoding="utf-8")
+
+            def run_tool(_options: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+                arguments = kwargs["arguments"]
+                if arguments[0] == "sign":
+                    for relative_path in (paths.bundle, paths.signature, paths.payload):
+                        self.assertFalse((state_dir / relative_path).exists())
+                if arguments[:2] == ["bundle", "create"]:
+                    self.fail("stale signing material reached bundle creation")
+                stdout = (
+                    json.dumps(
+                        verification_payload(
+                            reference=f"registry.example.test/synara/worker@{DIGEST}"
+                        )
+                    )
+                    if arguments[0] == "verify"
+                    else ""
+                )
                 return subprocess.CompletedProcess(arguments, 0, stdout=stdout, stderr="")
 
             with mock.patch.object(supply, "_run_tool", side_effect=run_tool), self.assertRaises(
@@ -1850,8 +2143,9 @@ class ProductionSigningTest(unittest.TestCase):
                 self.assertEqual(secret_environment["VAULT_CACERT"], "/workspace/vault/ca-certificates/vault-ca.crt")
                 arguments = kwargs["arguments"]
                 if arguments[0] == "sign":
-                    bundle_relative = pathlib.Path(arguments[arguments.index("--bundle") + 1])
-                    write_transparency_bundle(state_dir / bundle_relative)
+                    write_classic_signing_outputs(state_dir, arguments)
+                if arguments[:2] == ["bundle", "create"]:
+                    write_bundle_create_output(state_dir, arguments)
                 stdout = json.dumps(verification_payload(reference=reference)) if arguments[0] == "verify" else ""
                 return subprocess.CompletedProcess(arguments, 0, stdout=stdout, stderr="")
 

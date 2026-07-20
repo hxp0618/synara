@@ -2606,7 +2606,7 @@ class PositiveSignatureBoundaryTest(unittest.TestCase):
             payload = [
                 {
                     "critical": {
-                        "identity": {"docker-reference": f"{IMAGE_REPOSITORY}@{DIGEST}"},
+                        "identity": {"docker-reference": IMAGE_REPOSITORY},
                         "image": {"docker-manifest-digest": DIGEST},
                         "type": supply.COSIGN_CLAIM_TYPE,
                     },
@@ -2649,7 +2649,7 @@ class PositiveSignatureBoundaryTest(unittest.TestCase):
             payload = [
                 {
                     "critical": {
-                        "identity": {"docker-reference": f"{IMAGE_REPOSITORY}@{DIGEST}"},
+                        "identity": {"docker-reference": IMAGE_REPOSITORY},
                         "image": {"docker-manifest-digest": DIGEST},
                         "type": supply.COSIGN_CLAIM_TYPE,
                     },
