@@ -1736,6 +1736,9 @@ Name: fake0
 Status: running
 Platforms: linux/amd64,linux/arm64
 EOF
+        for ((detail_index = 0; detail_index < 4096; detail_index++)); do
+          printf 'Detail-%04d: buildkit worker capability metadata\n' "$detail_index"
+        done
         ;;
       create)
         exit 0

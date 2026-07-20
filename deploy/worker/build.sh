@@ -237,7 +237,7 @@ if [[ "$output_mode" == "push" ]]; then
   if ! "$docker_bin" buildx inspect "$builder" >/dev/null 2>&1; then
     "$docker_bin" buildx create --name "$builder" --driver docker-container >/dev/null
   fi
-  builder_driver="$("$docker_bin" buildx inspect "$builder" | awk -F: '/^Driver:/ {gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2); print $2; exit}')"
+  builder_driver="$("$docker_bin" buildx inspect "$builder" | awk -F: '/^Driver:/ && driver == "" {driver = $2; gsub(/^[[:space:]]+|[[:space:]]+$/, "", driver)} END {print driver}')"
   if [[ "$builder_driver" != "docker-container" ]]; then
     echo "Buildx builder $builder uses unsupported driver $builder_driver; a docker-container builder is required for attestations." >&2
     exit 1
