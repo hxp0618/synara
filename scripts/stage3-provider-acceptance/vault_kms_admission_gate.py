@@ -54,6 +54,10 @@ MAX_OUTPUT_EXCERPT = 2000
 KYVERNO_CA_BUNDLE_KEY = "ca-certificates.crt"
 KYVERNO_CA_MOUNT_PATH = "/etc/ssl/certs/ca-certificates.crt"
 KYVERNO_VERIFY_IMAGE_COMPONENTS = ("admission-controller", "background-controller")
+KYVERNO_VERIFY_IMAGE_SELECTOR = (
+    "app.kubernetes.io/component in (admission-controller,background-controller)"
+)
+KYVERNO_CHART_PATTERN = re.compile(r"kyverno-[0-9][0-9A-Za-z._-]*")
 AUTOGEN_CONTROLLERS_ANNOTATION = "pod-policies.kyverno.io/autogen-controllers"
 REQUIRED_AUTOGEN_CONTROLLERS = ("DaemonSet", "Deployment", "Job", "StatefulSet", "CronJob")
 REQUIRED_CONTROLLER_PROBE_KINDS = ("Deployment", "StatefulSet", "Job", "CronJob")
@@ -5376,7 +5380,7 @@ def verify_kyverno_runtime(
 ) -> dict[str, Any]:
     deployments = kubectl_json(
         options,
-        ["get", "deploy", "-A", "-l", "app.kubernetes.io/name=kyverno", "-o", "json"],
+        ["get", "deploy", "-A", "-l", KYVERNO_VERIFY_IMAGE_SELECTOR, "-o", "json"],
         redactor=redactor,
         timeout=20.0,
     )
@@ -5386,10 +5390,11 @@ def verify_kyverno_runtime(
             "release.vault_kms_kyverno_missing",
             "Kyverno was not installed in the target cluster.",
         )
-    available = 0
     names: list[str] = []
     controllers: list[dict[str, str]] = []
     for item in items:
+        if not isinstance(item, dict):
+            continue
         metadata = item.get("metadata")
         spec = item.get("spec")
         status = item.get("status")
@@ -5399,40 +5404,55 @@ def verify_kyverno_runtime(
         labels = metadata_obj.get("labels") if isinstance(metadata_obj.get("labels"), dict) else {}
         name = metadata_obj.get("name")
         namespace = metadata_obj.get("namespace")
-        if isinstance(name, str) and isinstance(namespace, str):
-            names.append(f"{namespace}/{name}")
-            component = labels.get("app.kubernetes.io/component")
-            if not isinstance(component, str) or component not in KYVERNO_VERIFY_IMAGE_COMPONENTS:
-                lowered_name = name.lower()
-                if "admission-controller" in lowered_name:
-                    component = "admission-controller"
-                elif "background-controller" in lowered_name:
-                    component = "background-controller"
-            service_account = spec_obj.get("template", {}).get("spec", {}).get("serviceAccountName")
-            if (
-                isinstance(component, str)
-                and component in KYVERNO_VERIFY_IMAGE_COMPONENTS
-                and isinstance(service_account, str)
-                and service_account
-            ):
-                controllers.append(
-                    {
-                        "namespace": namespace,
-                        "deployment": name,
-                        "serviceAccount": service_account,
-                        "component": component,
-                    }
-                )
-        if isinstance(status_obj.get("availableReplicas"), int) and status_obj.get("availableReplicas", 0) > 0:
-            available += 1
-    if available <= 0:
+        component = labels.get("app.kubernetes.io/component")
+        application_name = labels.get("app.kubernetes.io/name")
+        chart = labels.get("helm.sh/chart")
+        expected_name = f"kyverno-{component}"
+        if (
+            component not in KYVERNO_VERIFY_IMAGE_COMPONENTS
+            or name != expected_name
+            or application_name != expected_name
+            or not isinstance(chart, str)
+            or KYVERNO_CHART_PATTERN.fullmatch(chart) is None
+            or not isinstance(namespace, str)
+            or supply_chain.KUBERNETES_NAME_PATTERN.fullmatch(namespace) is None
+        ):
+            continue
+        names.append(f"{namespace}/{name}")
+        template = spec_obj.get("template")
+        template_spec = template.get("spec") if isinstance(template, dict) else None
+        service_account = (
+            template_spec.get("serviceAccountName") if isinstance(template_spec, dict) else None
+        )
+        available_replicas = status_obj.get("availableReplicas")
+        if (
+            not isinstance(available_replicas, int)
+            or available_replicas <= 0
+            or not isinstance(service_account, str)
+            or supply_chain.KUBERNETES_NAME_PATTERN.fullmatch(service_account) is None
+        ):
+            continue
+        controllers.append(
+            {
+                "namespace": namespace,
+                "deployment": name,
+                "serviceAccount": service_account,
+                "component": component,
+            }
+        )
+    component_counts = {
+        component: sum(controller["component"] == component for controller in controllers)
+        for component in KYVERNO_VERIFY_IMAGE_COMPONENTS
+    }
+    if any(component_counts[component] != 1 for component in KYVERNO_VERIFY_IMAGE_COMPONENTS):
         raise ReleaseGateError(
             "release.vault_kms_kyverno_missing",
-            "Kyverno did not expose any available Deployment replicas.",
+            "Kyverno did not expose exactly one available admission/background controller with a valid service account.",
+            {"availableComponentCounts": component_counts},
         )
     return {
-        "deploymentCount": len(items),
-        "availableDeploymentCount": available,
+        "deploymentCount": len(names),
+        "availableDeploymentCount": len(controllers),
         "deployments": sorted(names),
         "verifyImageControllers": sorted(
             controllers,

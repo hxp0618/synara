@@ -425,6 +425,23 @@ def kyverno_runtime() -> dict[str, Any]:
     }
 
 
+def kyverno_deployment(component: str, *, available_replicas: int = 1) -> dict[str, Any]:
+    name = f"kyverno-{component}"
+    return {
+        "metadata": {
+            "namespace": "kyverno",
+            "name": name,
+            "labels": {
+                "app.kubernetes.io/component": component,
+                "app.kubernetes.io/name": name,
+                "helm.sh/chart": "kyverno-3.8.2",
+            },
+        },
+        "spec": {"template": {"spec": {"serviceAccountName": name}}},
+        "status": {"availableReplicas": available_replicas},
+    }
+
+
 def vault_kubectl_side_effect() -> list[dict[str, Any]]:
     audit_observability_data = gate._literal_configmap_data(
         (REPO_ROOT / gate.VAULT_AUDIT_OBSERVABILITY_CONFIGMAP_PATH).read_text(encoding="utf-8"),
@@ -1491,34 +1508,36 @@ class KyvernoControllerMutationTest(unittest.TestCase):
             "kubectl_json",
             return_value={
                 "items": [
-                    {
-                        "metadata": {
-                            "namespace": "kyverno",
-                            "name": "kyverno-admission-controller",
-                            "labels": {"app.kubernetes.io/component": "admission-controller"},
-                        },
-                        "spec": {"template": {"spec": {"serviceAccountName": "kyverno-admission-controller"}}},
-                        "status": {"availableReplicas": 1},
-                    },
-                    {
-                        "metadata": {
-                            "namespace": "kyverno",
-                            "name": "kyverno-background-controller",
-                            "labels": {"app.kubernetes.io/component": "background-controller"},
-                        },
-                        "spec": {"template": {"spec": {"serviceAccountName": "kyverno-background-controller"}}},
-                        "status": {"availableReplicas": 1},
-                    },
+                    kyverno_deployment("admission-controller"),
+                    kyverno_deployment("background-controller"),
                 ]
             },
-        ):
+        ) as kubectl_json:
             evidence = gate.verify_kyverno_runtime(options, redactor=acceptance.SecretRedactor())
 
+        self.assertEqual(
+            kubectl_json.call_args.args[1],
+            ["get", "deploy", "-A", "-l", gate.KYVERNO_VERIFY_IMAGE_SELECTOR, "-o", "json"],
+        )
         self.assertEqual(len(evidence["verifyImageControllers"]), 2)
         self.assertEqual(
             evidence["verifyImageControllers"][0]["component"],
             "admission-controller",
         )
+
+    def test_verify_kyverno_runtime_requires_both_available_controllers(self) -> None:
+        options = gate_options(pathlib.Path(tempfile.gettempdir()) / "synara-kyverno-runtime")
+        with (
+            mock.patch.object(
+                gate,
+                "kubectl_json",
+                return_value={"items": [kyverno_deployment("admission-controller")]},
+            ),
+            self.assertRaises(gate.ReleaseGateError) as caught,
+        ):
+            gate.verify_kyverno_runtime(options, redactor=acceptance.SecretRedactor())
+
+        self.assertEqual(caught.exception.code, "release.vault_kms_kyverno_missing")
 
     def test_apply_owned_bundle_injects_controller_ca_and_cleanup_restores_it(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
