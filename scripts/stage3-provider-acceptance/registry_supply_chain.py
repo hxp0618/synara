@@ -97,6 +97,7 @@ VAULT_TRANSIT_KEY_REFERENCE = "hashivault://synara-worker-release"
 VAULT_TRANSIT_REQUIRED_ENVIRONMENT = ("VAULT_ADDR", "VAULT_TOKEN", "VAULT_CACERT")
 VAULT_TRANSIT_OPTIONAL_ENVIRONMENT = ("TRANSIT_SECRET_ENGINE_PATH",)
 MATERIALIZED_VAULT_CACERT_RELATIVE_PATH = pathlib.Path("vault/ca-certificates/vault-ca.crt")
+MATERIALIZED_KMS_PUBLIC_KEY_RELATIVE_PATH = pathlib.Path("cosign/production-kms.pub")
 VAULT_TRANSIT_AUTH_METHOD = "approle"
 VAULT_TRANSIT_PRINCIPAL = "auth/approle/role/synara-worker-release-signer"
 VAULT_TRANSIT_AUDIT_REQUEST_PATH = "transit/sign/synara-worker-release"
@@ -2617,7 +2618,7 @@ def _production_vault_signer_identity(
     }
 
 
-def _export_cosign_public_key_sha256(
+def _export_cosign_public_key(
     options: SupplyChainOptions,
     configuration: SupplyChainConfiguration,
     *,
@@ -2625,7 +2626,7 @@ def _export_cosign_public_key_sha256(
     secret_environment: Mapping[str, str],
     deadline: float,
     redactor: acceptance.SecretRedactor,
-) -> str:
+) -> tuple[str, pathlib.Path]:
     completed = _run_tool(
         options,
         image=configuration.tools.cosign,
@@ -2635,12 +2636,26 @@ def _export_cosign_public_key_sha256(
         redactor=redactor,
         secret_environment=secret_environment,
     )
-    return _public_key_sha256(
+    public_key_sha256 = _public_key_sha256(
         completed.stdout,
         code="release.registry_production_admission_input_invalid",
         message="Worker Registry production admission inputs were invalid.",
         field="kmsPublicKey",
     )
+    public_key_path = options.state_dir / MATERIALIZED_KMS_PUBLIC_KEY_RELATIVE_PATH
+    public_key_path.parent.mkdir(parents=True, exist_ok=True)
+    normalized_public_key = completed.stdout.strip().replace("\r\n", "\n").replace("\r", "\n") + "\n"
+    try:
+        public_key_path.write_text(normalized_public_key, encoding="utf-8")
+        public_key_path.chmod(0o600)
+    except OSError:
+        public_key_path.unlink(missing_ok=True)
+        raise common.ReleaseGateError(
+            "release.registry_production_admission_input_invalid",
+            "Worker Registry production admission inputs were invalid.",
+            {"reason": "KMS public key could not be materialized in isolated gate state"},
+        ) from None
+    return public_key_sha256, MATERIALIZED_KMS_PUBLIC_KEY_RELATIVE_PATH
 
 
 def _validate_runtime_admission_inputs(
@@ -2651,10 +2666,10 @@ def _validate_runtime_admission_inputs(
     secret_environment: Mapping[str, str],
     deadline: float,
     redactor: acceptance.SecretRedactor,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], pathlib.Path | None]:
     profile = configuration.production_signing_profile
     if profile is None:
-        return {}
+        return {}, None
     public_key_path = options.production_public_key_configmap_path
     repository_path = options.production_repository_configmap_path
     if public_key_path is None or repository_path is None:
@@ -2685,7 +2700,7 @@ def _validate_runtime_admission_inputs(
         message="Worker Registry production admission inputs were invalid.",
         field="admission.publicKeyConfigMap.data",
     )
-    kms_public_key_sha256 = _export_cosign_public_key_sha256(
+    kms_public_key_sha256, verification_key_path = _export_cosign_public_key(
         options,
         configuration,
         key_reference=key_reference,
@@ -2709,25 +2724,28 @@ def _validate_runtime_admission_inputs(
         message="Worker Registry production admission inputs were invalid.",
         field="admission.repositoryConfigMap.data",
     )
-    return {
-        "provider": profile.admission_provider,
-        "runtimeValidated": True,
-        "publicKeyConfigMapPath": str(public_key_path),
-        "repositoryConfigMapPath": str(repository_path),
-        "publicKeyConfigMap": {
-            "namespace": profile.public_key_configmap_namespace,
-            "name": profile.public_key_configmap_name,
-            "key": profile.public_key_configmap_key,
-            "sha256": runtime_public_key_sha256,
-            "kmsSha256": kms_public_key_sha256,
+    return (
+        {
+            "provider": profile.admission_provider,
+            "runtimeValidated": True,
+            "publicKeyConfigMapPath": str(public_key_path),
+            "repositoryConfigMapPath": str(repository_path),
+            "publicKeyConfigMap": {
+                "namespace": profile.public_key_configmap_namespace,
+                "name": profile.public_key_configmap_name,
+                "key": profile.public_key_configmap_key,
+                "sha256": runtime_public_key_sha256,
+                "kmsSha256": kms_public_key_sha256,
+            },
+            "repositoryConfigMap": {
+                "namespace": profile.repository_configmap_namespace,
+                "name": profile.repository_configmap_name,
+                "key": profile.repository_configmap_key,
+                "pattern": repository_pattern,
+            },
         },
-        "repositoryConfigMap": {
-            "namespace": profile.repository_configmap_namespace,
-            "name": profile.repository_configmap_name,
-            "key": profile.repository_configmap_key,
-            "pattern": repository_pattern,
-        },
-    }
+        verification_key_path,
+    )
 
 
 def _sign_and_verify_ephemeral(
@@ -3037,7 +3055,7 @@ def _sign_and_verify_kms(
         redactor=redactor,
     )
     secret_environment = prepared_environment.secret_environment
-    admission = _validate_runtime_admission_inputs(
+    admission, verification_key_path = _validate_runtime_admission_inputs(
         options,
         configuration,
         key_reference=key_reference,
@@ -3081,6 +3099,9 @@ def _sign_and_verify_kms(
             redactor=redactor,
             secret_environment=secret_environment,
         )
+        verification_key = (
+            verification_key_path.as_posix() if verification_key_path is not None else key_reference
+        )
         verification = _run_tool(
             options,
             image=configuration.tools.cosign,
@@ -3088,7 +3109,7 @@ def _sign_and_verify_kms(
                 "verify",
                 "--insecure-ignore-tlog=false",
                 "--key",
-                key_reference,
+                verification_key,
                 *subject["annotationArguments"],
                 "--output",
                 "json",
@@ -3097,7 +3118,7 @@ def _sign_and_verify_kms(
             tool="cosign",
             deadline=deadline,
             redactor=redactor,
-            secret_environment=secret_environment,
+            secret_environment=(secret_environment if verification_key_path is None else None),
         )
         signatures.append(
             {
@@ -3130,6 +3151,9 @@ def _sign_and_verify_kms(
         ),
         "productionSigningPolicySatisfied": True,
         "productionAdmissionValidated": bool(admission),
+        "verificationKeyMode": (
+            "kms-exported-public-key" if verification_key_path is not None else "kms-reference"
+        ),
         "policySha256": policy.sha256,
         "keyReference": key_reference,
         "credentialEnvironmentCount": len(policy.credential_environment),

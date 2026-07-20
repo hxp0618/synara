@@ -1402,8 +1402,23 @@ class ProductionSigningTest(unittest.TestCase):
                 if arguments[0] == "public-key":
                     return subprocess.CompletedProcess(arguments, 0, stdout=PUBLIC_KEY_PEM, stderr="")
                 if arguments[0] == "sign":
+                    self.assertEqual(
+                        arguments[arguments.index("--key") + 1],
+                        supply.VAULT_TRANSIT_KEY_REFERENCE,
+                    )
                     bundle_relative = pathlib.Path(arguments[arguments.index("--bundle") + 1])
                     write_transparency_bundle(state_dir / bundle_relative)
+                if arguments[0] == "verify":
+                    self.assertEqual(
+                        arguments[arguments.index("--key") + 1],
+                        supply.MATERIALIZED_KMS_PUBLIC_KEY_RELATIVE_PATH.as_posix(),
+                    )
+                    self.assertIsNone(kwargs["secret_environment"])
+                    materialized_key = (
+                        state_dir / supply.MATERIALIZED_KMS_PUBLIC_KEY_RELATIVE_PATH
+                    )
+                    self.assertEqual(materialized_key.read_text(encoding="utf-8"), PUBLIC_KEY_PEM)
+                    self.assertEqual(materialized_key.stat().st_mode & 0o777, 0o600)
                 stdout = json.dumps(verification_payload(reference=reference)) if arguments[0] == "verify" else ""
                 return subprocess.CompletedProcess(arguments, 0, stdout=stdout, stderr="")
 
@@ -1456,6 +1471,7 @@ class ProductionSigningTest(unittest.TestCase):
         self.assertEqual(calls[2][0], "verify")
         self.assertIn("--insecure-ignore-tlog=false", calls[2])
         self.assertEqual(events, ["public-key", "vault-lookup-self", "sign", "verify"])
+        self.assertEqual(result["verificationKeyMode"], "kms-exported-public-key")
         identity_lookup.assert_called_once()
         self.assertEqual(result["signerIdentity"], signer_identity)
 
