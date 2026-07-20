@@ -3043,6 +3043,35 @@ def run_registry_release_gate(
                 )
                 errors.append(error.as_report_error())
 
+    if (
+        not errors
+        and options.signing_policy_profile == "production"
+        and len(builds) == 2
+        and supply_chain_report.get("status") == "pass"
+    ):
+        try:
+            refreshed_production_registry_boundary = validate_production_registry_boundary(
+                options,
+                state_dir=state_dir,
+                redactor=redactor,
+            )
+            if not refreshed_production_registry_boundary:
+                raise ReleaseGateError(
+                    "release.registry_production_boundary_invalid",
+                    "Worker Registry final live runtime evidence refresh returned no production boundary.",
+                )
+            runtime["productionRegistryBoundary"] = refreshed_production_registry_boundary
+        except (OSError, subprocess.SubprocessError, ReleaseGateError) as raw_error:
+            error = (
+                raw_error
+                if isinstance(raw_error, ReleaseGateError)
+                else ReleaseGateError(
+                    "release.registry_production_boundary_refresh_failed",
+                    "Worker Registry final live runtime evidence refresh failed.",
+                )
+            )
+            errors.append(error.as_report_error())
+
     shutil.rmtree(state_dir, ignore_errors=True)
     state_removed = not state_dir.exists()
     supply_chain_cleanup = supply_chain_report.get("cleanup")

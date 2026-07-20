@@ -2135,6 +2135,175 @@ class AggregateGateTest(unittest.TestCase):
             {"release.registry_vulnerability_policy_blocked"},
         )
 
+    def test_production_report_refreshes_runtime_evidence_after_long_work(self) -> None:
+        sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=REPO_ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        with tempfile.TemporaryDirectory() as directory:
+            output_dir = pathlib.Path(directory) / "gate"
+            gate_options = options(output_dir, signing_policy_profile="production")
+            events: list[str] = []
+            validator_options: list[gate.RegistryReleaseGateOptions] = []
+            validator_state_dirs: list[pathlib.Path] = []
+            validator_redactors: list[gate.acceptance.SecretRedactor] = []
+
+            def production_boundary(collected_at: str, marker: str) -> dict[str, Any]:
+                return {
+                    "registryConfigPath": str(gate_options.production_registry_config_path),
+                    "retentionPolicyPath": str(
+                        gate_options.production_registry_retention_policy_path
+                    ),
+                    "deleteEnabled": False,
+                    "promotionBoundary": "digest-only",
+                    "releaseEvidenceDays": 30,
+                    "garbageCollectionMode": "manual-after-archive",
+                    "archiveRequiredBeforeGc": True,
+                    "liveRuntimeEvidence": live_runtime_evidence(
+                        gate_options,
+                        exported_config_sha256="c" * 64,
+                        live_policy_sha256="d" * 64,
+                        checked_in_policy_sha256="d" * 64,
+                        collected_at=collected_at,
+                        container_id=marker * 64,
+                    ),
+                }
+
+            initial_boundary = production_boundary(
+                "2026-07-20T00:00:00+00:00",
+                "a",
+            )
+            refreshed_boundary = production_boundary(
+                "2026-07-20T00:20:00+00:00",
+                "b",
+            )
+
+            def boundary_validator(
+                current_options: gate.RegistryReleaseGateOptions,
+                *,
+                state_dir: pathlib.Path | None = None,
+                redactor: gate.acceptance.SecretRedactor | None = None,
+                runtime_evidence: Any = None,
+            ) -> dict[str, Any]:
+                if state_dir is None or redactor is None or runtime_evidence is not None:
+                    raise AssertionError("live boundary refresh inputs were not preserved")
+                self.assertTrue(state_dir.is_dir())
+                validator_options.append(current_options)
+                validator_state_dirs.append(state_dir)
+                validator_redactors.append(redactor)
+                if len(validator_options) == 1:
+                    events.append("boundary:preflight")
+                    return initial_boundary
+                events.append("boundary:refresh")
+                return refreshed_boundary
+
+            def build_runner(_options: Any, **kwargs: Any) -> dict[str, Any]:
+                events.append(f"build:{kwargs['slot']}")
+                return sample_build(kwargs["slot"], kwargs["no_cache"])
+
+            def supply_chain_runner(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+                events.append("supply-chain")
+                return production_supply_chain()
+
+            with (
+                mock.patch.object(gate, "_validate_production_boundary"),
+                mock.patch.object(
+                    gate,
+                    "_prepare_host_registry_environment",
+                    return_value={},
+                ),
+                mock.patch.object(
+                    gate,
+                    "validate_production_registry_boundary",
+                    side_effect=boundary_validator,
+                ),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                exit_code = gate.run_registry_release_gate(
+                    gate_options,
+                    repository_state=lambda _root: {"gitSha": sha, "worktreeDirty": False},
+                    runtime_inspector=lambda _options: {"builder": gate_options.builder},
+                    build_runner=build_runner,
+                    supply_chain_runner=supply_chain_runner,
+                )
+            report = json.loads((output_dir / gate.JSON_REPORT_NAME).read_text(encoding="utf-8"))
+
+            self.assertFalse((output_dir / "_state").exists())
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(report["status"], "pass")
+        self.assertEqual(
+            events,
+            [
+                "boundary:preflight",
+                "build:cached",
+                "build:no-cache",
+                "supply-chain",
+                "boundary:refresh",
+            ],
+        )
+        self.assertEqual(report["runtime"]["productionRegistryBoundary"], refreshed_boundary)
+        self.assertIs(validator_options[0], validator_options[1])
+        self.assertEqual(validator_state_dirs[0], validator_state_dirs[1])
+        self.assertIs(validator_redactors[0], validator_redactors[1])
+
+    def test_production_gate_fails_closed_when_final_runtime_refresh_errors(self) -> None:
+        sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=REPO_ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        with tempfile.TemporaryDirectory() as directory:
+            output_dir = pathlib.Path(directory) / "gate"
+            gate_options = options(output_dir, signing_policy_profile="production")
+            initial_boundary = {
+                "liveRuntimeEvidence": {
+                    "collectedAt": "2026-07-20T00:00:00+00:00",
+                    "runtimeEvidenceSha256": "a" * 64,
+                }
+            }
+
+            def build_runner(_options: Any, **kwargs: Any) -> dict[str, Any]:
+                return sample_build(kwargs["slot"], kwargs["no_cache"])
+
+            with (
+                mock.patch.object(gate, "_validate_production_boundary"),
+                mock.patch.object(
+                    gate,
+                    "_prepare_host_registry_environment",
+                    return_value={},
+                ),
+                mock.patch.object(
+                    gate,
+                    "validate_production_registry_boundary",
+                    side_effect=[initial_boundary, OSError("live registry unavailable")],
+                ) as boundary_validator,
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                exit_code = gate.run_registry_release_gate(
+                    gate_options,
+                    repository_state=lambda _root: {"gitSha": sha, "worktreeDirty": False},
+                    runtime_inspector=lambda _options: {"builder": gate_options.builder},
+                    build_runner=build_runner,
+                    supply_chain_runner=lambda *_args, **_kwargs: production_supply_chain(),
+                )
+            report = json.loads((output_dir / gate.JSON_REPORT_NAME).read_text(encoding="utf-8"))
+
+            self.assertFalse((output_dir / "_state").exists())
+
+        self.assertEqual(boundary_validator.call_count, 2)
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(report["status"], "fail")
+        self.assertIn(
+            "release.registry_production_boundary_refresh_failed",
+            {error["code"] for error in report["errors"]},
+        )
+
     def test_production_gate_rejects_passing_report_without_signer_identity(self) -> None:
         sha = subprocess.run(
             ["git", "rev-parse", "HEAD"],
