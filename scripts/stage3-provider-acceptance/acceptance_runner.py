@@ -18056,8 +18056,9 @@ def parse_args(argv: Sequence[str]) -> RunnerOptions:
         type=pathlib.Path,
         help=(
             "Strict JSON operator-approved SLA thresholds. fixture-load, fixture-load-failure, and "
-            "real-provider-load require minimumDurationSeconds, latencyMs, recoveryTimeMs, and "
-            "unexpectedErrorRateMax=0.0; fixture-soak supports minimumDurationSeconds only."
+            "real-provider-load require minimumDurationSeconds, controlPlaneAdmissionLatencyMs, "
+            "slotReuseAdmissionLatencyMs, and unexpectedErrorRateMax=0.0; fixture-soak supports "
+            "minimumDurationSeconds only."
         ),
     )
     parsed = parser.parse_args(argv)
