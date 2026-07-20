@@ -4067,6 +4067,14 @@ class RegistryHttpsClient:
             connection.close()
 
 
+def http_header_value(headers: Mapping[str, str], name: str) -> str:
+    normalized_name = name.casefold()
+    return next(
+        (value for header_name, value in headers.items() if header_name.casefold() == normalized_name),
+        "",
+    )
+
+
 def _manifest_path(reference: ImageReference) -> str:
     target = reference.digest or reference.tag
     if target is None:
@@ -4094,7 +4102,7 @@ def verify_tls_registry(
     authenticated = client.request("GET", "/v2/", authenticated=True)
     unauth_status, unauth_headers, _body, certificate_sha256 = unauthenticated
     auth_status, _auth_headers, _auth_body, _certificate_sha256 = authenticated
-    challenge = unauth_headers.get("WWW-Authenticate", "")
+    challenge = http_header_value(unauth_headers, "WWW-Authenticate")
     if unauth_status != 401 or "basic" not in challenge.lower():
         raise ReleaseGateError(
             "release.vault_kms_registry_boundary_invalid",

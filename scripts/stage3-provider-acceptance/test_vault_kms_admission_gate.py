@@ -1140,6 +1140,28 @@ class RegistryReleaseEvidenceTest(unittest.TestCase):
 
 
 class ReleaseEvidenceBoundaryTest(unittest.TestCase):
+    def test_accepts_case_insensitive_registry_basic_challenge_header(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            secret_inputs = vault_secret_inputs(pathlib.Path(directory))
+            registry_client = mock.Mock()
+            registry_client.request.side_effect = [
+                (401, {"www-authenticate": 'Basic realm="registry"'}, b"", "e" * 64),
+                (200, {}, b"", "e" * 64),
+            ]
+            with mock.patch.object(
+                gate,
+                "RegistryHttpsClient",
+                return_value=registry_client,
+            ):
+                returned_client, boundary = gate.verify_tls_registry(
+                    release_evidence(),
+                    secret_inputs,
+                )
+
+        self.assertIs(returned_client, registry_client)
+        self.assertTrue(boundary["basicAuthEnforced"])
+        self.assertEqual(boundary["tlsCertificateSha256"], "e" * 64)
+
     def test_rejects_source_hash_drift_against_current_source(self) -> None:
         configuration = production_configuration()
         drifted_hashes = current_release_source_hashes()
