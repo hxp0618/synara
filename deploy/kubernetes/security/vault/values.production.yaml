@@ -274,6 +274,7 @@ server:
       setNodeId: true
       config: |
         ui = false
+        enable_unauthenticated_access = []
 
         listener "tcp" {
           tls_disable = 0

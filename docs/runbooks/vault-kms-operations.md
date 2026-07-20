@@ -78,6 +78,36 @@ environment variable names and hashes only.
 - Rotate the custody set after custodian departure, suspected share exposure,
   major cluster rebuild, or any cryptographic boundary change.
 
+## Generate-root break-glass
+
+- Checked-in steady state is explicit fail-closed:
+  `enable_unauthenticated_access = []` in
+  `deploy/kubernetes/security/vault/values.production.yaml`.
+- The only approved temporary unauthenticated opening is
+  `enable_unauthenticated_access = ["generate-root"]`.
+  No other endpoint family may be added.
+- The window is limited to `15` minutes maximum and requires `3` of `5`
+  Shamir custodians spanning platform/SRE, security, and operations.
+- Open the window only by applying a temporary top-level HCL edit to the live
+  Vault server config, then sending `SIGHUP` to the exact `/bin/vault server`
+  PID on every pod. Do not signal a shell wrapper or leave the temporary file
+  in place after the window closes.
+- Before opening, record the approved change ticket and verify an
+  unauthenticated `sys/generate-root/attempt` probe returns `403`.
+- During the window, verify the same unauthenticated probe returns `200`,
+  complete the `3/5` share submissions, and mint only the minimum privileged
+  replacement material required to restore signer operations.
+- Immediately after the root is generated, restore the checked-in config,
+  `SIGHUP` every Vault pod again, and verify unauthenticated
+  `sys/generate-root/attempt` returns `403`.
+- Revoke the generated root token immediately after the replacement signer
+  token or Secret ID is minted. Reports retain only operator identities,
+  timestamps, status codes, and hashes; never token or share material.
+- Required audit evidence for every window:
+  `approved-change-record`, `pre-open-403-check`, `window-open-200-check`,
+  `three-custodian-share-submissions`, `post-close-403-check`,
+  `generated-root-revoked`.
+
 ## Snapshot operator identity
 
 - Policy file:

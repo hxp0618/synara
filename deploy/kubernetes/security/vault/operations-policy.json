@@ -58,6 +58,41 @@
       "cryptographic_boundary_change"
     ]
   },
+  "rootGenerationBreakGlass": {
+    "steadyState": {
+      "enableUnauthenticatedAccess": [],
+      "expectedAttemptStatusCode": 403
+    },
+    "temporaryWindow": {
+      "enableUnauthenticatedAccess": ["generate-root"],
+      "maximumDurationMinutes": 15,
+      "expectedAttemptStatusCode": 200,
+      "configReload": {
+        "mode": "temporary-top-level-hcl-edit-plus-sighup",
+        "targetProcess": "/bin/vault server",
+        "requireExactPidTargeting": true,
+        "restoreCheckedInConfigAfterWindow": true
+      },
+      "requiredQuorum": {
+        "scheme": "shamir",
+        "totalShares": 5,
+        "threshold": 3,
+        "minimumParticipatingCustodians": 3
+      },
+      "requiredAuditEvidence": [
+        "approved-change-record",
+        "pre-open-403-check",
+        "window-open-200-check",
+        "three-custodian-share-submissions",
+        "post-close-403-check",
+        "generated-root-revoked"
+      ],
+      "postClose": {
+        "expectedAttemptStatusCode": 403,
+        "revokeGeneratedRootImmediately": true
+      }
+    }
+  },
   "snapshotRestoreDrill": {
     "cadence": "Quarterly and before every Vault minor or major version upgrade.",
     "credentials": {

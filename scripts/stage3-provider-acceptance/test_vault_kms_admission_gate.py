@@ -433,6 +433,7 @@ def vault_kubectl_side_effect() -> list[dict[str, Any]]:
     sidecar_security_context = gate._expected_vault_audit_sidecar_security_context()
     listener_config = """
 ui = false
+enable_unauthenticated_access = []
 
 listener "tcp" {
   tls_disable = 0
@@ -1637,6 +1638,15 @@ class KyvernoControllerMutationTest(unittest.TestCase):
 
 
 class VaultPolicyBoundaryTest(unittest.TestCase):
+    def setUp(self) -> None:
+        patcher = mock.patch.object(
+            gate,
+            "_probe_unauthenticated_generate_root_attempt_status",
+            return_value=403,
+        )
+        self.addCleanup(patcher.stop)
+        self.generate_root_probe_mock = patcher.start()
+
     @staticmethod
     def _write_vault_baseline(
         root: pathlib.Path,
@@ -1747,6 +1757,11 @@ class VaultPolicyBoundaryTest(unittest.TestCase):
                     is secret_inputs.vault_operator_environment
                     for call in vault_text_mock.call_args_list
                 )
+            )
+            self.generate_root_probe_mock.assert_called_once_with(
+                "https://vault.example.test",
+                vault_cacert=pathlib.Path(secret_inputs.vault_environment["VAULT_CACERT"]),
+                timeout=30.0,
             )
 
         self.assertEqual(evidence["vault"]["policyName"], gate.VAULT_SIGNER_POLICY_NAME)
@@ -1887,6 +1902,20 @@ class VaultPolicyBoundaryTest(unittest.TestCase):
                 "values_text": values.replace(
                     "path: /v1/sys/health?standbyok=true&perfstandbyok=true&sealedcode=204&uninitcode=204",
                     "path: /v1/sys/health?standbyok=true",
+                    1,
+                )
+            },
+            "generate-root-break-glass-open": {
+                "values_text": values.replace(
+                    "enable_unauthenticated_access = []",
+                    'enable_unauthenticated_access = ["generate-root"]',
+                    1,
+                )
+            },
+            "generate-root-break-glass-missing": {
+                "values_text": values.replace(
+                    "        enable_unauthenticated_access = []\n",
+                    "",
                     1,
                 )
             },
@@ -2059,6 +2088,45 @@ class VaultPolicyBoundaryTest(unittest.TestCase):
                     },
                 },
             },
+            "operations-policy-break-glass-steady-open": {
+                "operations_policy_payload": {
+                    **operations_policy,
+                    "rootGenerationBreakGlass": {
+                        **operations_policy["rootGenerationBreakGlass"],
+                        "steadyState": {
+                            **operations_policy["rootGenerationBreakGlass"]["steadyState"],
+                            "enableUnauthenticatedAccess": ["generate-root"],
+                        },
+                    },
+                },
+            },
+            "operations-policy-break-glass-window-too-long": {
+                "operations_policy_payload": {
+                    **operations_policy,
+                    "rootGenerationBreakGlass": {
+                        **operations_policy["rootGenerationBreakGlass"],
+                        "temporaryWindow": {
+                            **operations_policy["rootGenerationBreakGlass"]["temporaryWindow"],
+                            "maximumDurationMinutes": 16,
+                        },
+                    },
+                },
+            },
+            "operations-policy-break-glass-open-scope": {
+                "operations_policy_payload": {
+                    **operations_policy,
+                    "rootGenerationBreakGlass": {
+                        **operations_policy["rootGenerationBreakGlass"],
+                        "temporaryWindow": {
+                            **operations_policy["rootGenerationBreakGlass"]["temporaryWindow"],
+                            "enableUnauthenticatedAccess": [
+                                "generate-root",
+                                "auth/token/lookup-self",
+                            ],
+                        },
+                    },
+                },
+            },
         }
         for case, overrides in cases.items():
             with self.subTest(case=case), tempfile.TemporaryDirectory() as directory:
@@ -2081,6 +2149,11 @@ class VaultPolicyBoundaryTest(unittest.TestCase):
         self.assertIn('path "sys/storage/raft/configuration"', operator_policy)
         self.assertIn('path "sys/audit"', operator_policy)
         self.assertNotIn("transit/sign", operator_policy)
+
+    def test_checked_in_baseline_explicitly_disables_unauthenticated_generate_root(self) -> None:
+        baseline = gate._load_vault_baseline(REPO_ROOT)
+
+        self.assertEqual(baseline["enableUnauthenticatedAccess"], [])
 
     def test_rejects_live_network_policy_peer_port_drift(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -2266,6 +2339,55 @@ class VaultPolicyBoundaryTest(unittest.TestCase):
                 )
 
         self.assertEqual(caught.exception.code, "release.vault_kms_kubernetes_invalid")
+
+    def test_rejects_live_generate_root_break_glass_left_open(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            options = gate_options(pathlib.Path(directory) / "output")
+            payloads = vault_kubectl_side_effect()
+            configmap = payloads[-1]
+            configmap["data"]["extraconfig-from-values.hcl"] = configmap["data"][
+                "extraconfig-from-values.hcl"
+            ].replace(
+                "enable_unauthenticated_access = []",
+                'enable_unauthenticated_access = ["generate-root"]',
+                1,
+            )
+            with (
+                mock.patch.object(gate, "kubectl_json", side_effect=payloads),
+                self.assertRaises(gate.ReleaseGateError) as caught,
+            ):
+                gate.verify_vault_cluster(
+                    options,
+                    vault_secret_inputs(pathlib.Path(directory)),
+                    redactor=acceptance.SecretRedactor(),
+                )
+
+        self.assertEqual(caught.exception.code, "release.vault_kms_kubernetes_invalid")
+
+    def test_rejects_live_generate_root_break_glass_probe_when_status_not_403(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            self.generate_root_probe_mock.return_value = 200
+            options = gate_options(pathlib.Path(directory) / "output")
+            with (
+                mock.patch.object(gate, "kubectl_json", side_effect=vault_kubectl_side_effect()),
+                mock.patch.object(gate, "vault_json", side_effect=vault_json_side_effect()),
+                mock.patch.object(
+                    gate,
+                    "vault_text",
+                    side_effect=[
+                        (REPO_ROOT / gate.VAULT_SIGNER_POLICY_PATH).read_text(encoding="utf-8"),
+                        (REPO_ROOT / gate.VAULT_OPERATOR_POLICY_PATH).read_text(encoding="utf-8"),
+                    ],
+                ),
+                self.assertRaises(gate.ReleaseGateError) as caught,
+            ):
+                gate.verify_vault_cluster(
+                    options,
+                    vault_secret_inputs(pathlib.Path(directory)),
+                    redactor=acceptance.SecretRedactor(),
+                )
+
+        self.assertEqual(caught.exception.code, "release.vault_kms_break_glass_invalid")
 
     def test_rejects_live_signer_identity_with_extra_default_policy(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

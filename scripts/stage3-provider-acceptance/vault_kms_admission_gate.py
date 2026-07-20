@@ -162,6 +162,9 @@ VAULT_RETRY_JOIN_ADDRESSES = tuple(
     for index in range(REQUIRED_VAULT_PEERS)
 )
 VAULT_RETRY_JOIN_CA_CERT_FILE = "/vault/tls/ca.crt"
+VAULT_BREAK_GLASS_UNAUTHENTICATED_ACCESS = "generate-root"
+VAULT_BREAK_GLASS_MAXIMUM_WINDOW_MINUTES = 15
+VAULT_BREAK_GLASS_PROBE_MAX_RESPONSE_BYTES = 1 << 20
 VAULT_RELEASE_LABELS = {
     "app.kubernetes.io/name": "vault",
     "app.kubernetes.io/instance": "synara-vault",
@@ -1819,6 +1822,42 @@ def vault_text(
     return completed.stdout
 
 
+def _probe_unauthenticated_generate_root_attempt_status(
+    vault_address: str,
+    *,
+    vault_cacert: pathlib.Path,
+    timeout: float,
+) -> int:
+    parsed_address = urllib.parse.urlsplit(vault_address)
+    request_path = f"{parsed_address.path.rstrip('/')}/v1/sys/generate-root/attempt"
+    if not request_path.startswith("/"):
+        request_path = f"/{request_path}"
+    connection = http.client.HTTPSConnection(
+        parsed_address.netloc,
+        timeout=timeout,
+        context=ssl.create_default_context(cafile=str(vault_cacert)),
+    )
+    try:
+        connection.request("GET", request_path)
+        response = connection.getresponse()
+        body = response.read(VAULT_BREAK_GLASS_PROBE_MAX_RESPONSE_BYTES + 1)
+        if len(body) > VAULT_BREAK_GLASS_PROBE_MAX_RESPONSE_BYTES:
+            raise ReleaseGateError(
+                "release.vault_kms_vault_failed",
+                "The unauthenticated Vault generate-root boundary probe returned an oversized response.",
+                {"path": "/v1/sys/generate-root/attempt"},
+            )
+        return response.status
+    except (OSError, ValueError, http.client.HTTPException):
+        raise ReleaseGateError(
+            "release.vault_kms_vault_failed",
+            "The unauthenticated Vault generate-root boundary probe could not complete.",
+            {"path": "/v1/sys/generate-root/attempt"},
+        ) from None
+    finally:
+        connection.close()
+
+
 def cosign_completed(
     options: GateOptions,
     secret_inputs: SecretInputs,
@@ -1847,6 +1886,32 @@ def _json_object(value: Any, *, code: str, message: str) -> dict[str, Any]:
 
 def _stringify_json(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+
+def _normalized_unauthenticated_access_configuration(
+    config_text: Any,
+    *,
+    code: str,
+    message: str,
+) -> list[str]:
+    if not isinstance(config_text, str):
+        raise ReleaseGateError(code, message)
+    matches = re.findall(
+        r'(?m)^\s*enable_unauthenticated_access\s*=\s*\[(?P<items>[^\]]*)\]\s*$',
+        config_text,
+    )
+    if len(matches) != 1:
+        raise ReleaseGateError(code, message, {"matchCount": len(matches)})
+    raw_items = matches[0].strip()
+    if not raw_items:
+        return []
+    normalized: list[str] = []
+    for raw_item in raw_items.split(","):
+        match = re.fullmatch(r'"([A-Za-z0-9._/-]+)"', raw_item.strip())
+        if match is None:
+            raise ReleaseGateError(code, message)
+        normalized.append(match.group(1))
+    return normalized
 
 
 def _normalized_retry_join_configuration(
@@ -1971,6 +2036,42 @@ def _load_vault_baseline(repo_root: pathlib.Path) -> dict[str, Any]:
     )
     external_siem_policy = (
         audit_policy.get("externalSiem") if isinstance(audit_policy, dict) else None
+    )
+    custody_policy = operations_policy.get("custody") if isinstance(operations_policy, dict) else None
+    root_generation_break_glass_policy = (
+        operations_policy.get("rootGenerationBreakGlass")
+        if isinstance(operations_policy, dict)
+        else None
+    )
+    steady_state_break_glass_policy = (
+        root_generation_break_glass_policy.get("steadyState")
+        if isinstance(root_generation_break_glass_policy, dict)
+        else None
+    )
+    temporary_break_glass_policy = (
+        root_generation_break_glass_policy.get("temporaryWindow")
+        if isinstance(root_generation_break_glass_policy, dict)
+        else None
+    )
+    break_glass_reload_policy = (
+        temporary_break_glass_policy.get("configReload")
+        if isinstance(temporary_break_glass_policy, dict)
+        else None
+    )
+    break_glass_quorum_policy = (
+        temporary_break_glass_policy.get("requiredQuorum")
+        if isinstance(temporary_break_glass_policy, dict)
+        else None
+    )
+    break_glass_post_close_policy = (
+        temporary_break_glass_policy.get("postClose")
+        if isinstance(temporary_break_glass_policy, dict)
+        else None
+    )
+    enable_unauthenticated_access = _normalized_unauthenticated_access_configuration(
+        values_text,
+        code="release.vault_kms_source_invalid",
+        message="The checked-in Vault production baseline did not define a single top-level unauthenticated-access policy.",
     )
     expected_liveness_probe = _expected_vault_liveness_probe()
     expected_liveness_exec = """    execCommand:
@@ -2159,6 +2260,7 @@ def _load_vault_baseline(repo_root: pathlib.Path) -> dict[str, Any]:
     operations_policy_valid = (
         isinstance(audit_policy, dict)
         and isinstance(vault_operations_policy, dict)
+        and isinstance(custody_policy, dict)
         and vault_operations_policy.get("transitKeyName") == EXPECTED_VAULT_KEY_NAME
         and transit_key_policy
         == {
@@ -2222,6 +2324,47 @@ def _load_vault_baseline(repo_root: pathlib.Path) -> dict[str, Any]:
                 "protocol": "TCP",
             }
         ]
+        and enable_unauthenticated_access == []
+        and isinstance(root_generation_break_glass_policy, dict)
+        and isinstance(steady_state_break_glass_policy, dict)
+        and isinstance(temporary_break_glass_policy, dict)
+        and steady_state_break_glass_policy.get("enableUnauthenticatedAccess") == []
+        and steady_state_break_glass_policy.get("expectedAttemptStatusCode") == 403
+        and temporary_break_glass_policy.get("enableUnauthenticatedAccess")
+        == [VAULT_BREAK_GLASS_UNAUTHENTICATED_ACCESS]
+        and temporary_break_glass_policy.get("maximumDurationMinutes")
+        == VAULT_BREAK_GLASS_MAXIMUM_WINDOW_MINUTES
+        and temporary_break_glass_policy.get("expectedAttemptStatusCode") == 200
+        and isinstance(break_glass_reload_policy, dict)
+        and break_glass_reload_policy
+        == {
+            "mode": "temporary-top-level-hcl-edit-plus-sighup",
+            "targetProcess": "/bin/vault server",
+            "requireExactPidTargeting": True,
+            "restoreCheckedInConfigAfterWindow": True,
+        }
+        and isinstance(break_glass_quorum_policy, dict)
+        and break_glass_quorum_policy
+        == {
+            "scheme": custody_policy.get("scheme"),
+            "totalShares": custody_policy.get("totalShares"),
+            "threshold": custody_policy.get("threshold"),
+            "minimumParticipatingCustodians": custody_policy.get(
+                "minimumParticipatingCustodians"
+            ),
+        }
+        and temporary_break_glass_policy.get("requiredAuditEvidence")
+        == [
+            "approved-change-record",
+            "pre-open-403-check",
+            "window-open-200-check",
+            "three-custodian-share-submissions",
+            "post-close-403-check",
+            "generated-root-revoked",
+        ]
+        and isinstance(break_glass_post_close_policy, dict)
+        and break_glass_post_close_policy.get("expectedAttemptStatusCode") == 403
+        and break_glass_post_close_policy.get("revokeGeneratedRootImmediately") is True
     )
     config_data_valid = (
         audit_observability_name_match is not None
@@ -2382,9 +2525,11 @@ def _load_vault_baseline(repo_root: pathlib.Path) -> dict[str, Any]:
             "port": VAULT_AUDIT_SIEM_EGRESS_PORT,
             "protocol": "TCP",
         },
+        "enableUnauthenticatedAccess": enable_unauthenticated_access,
         "retryJoin": retry_join,
         "listenerFragments": (
             "ui = false",
+            "enable_unauthenticated_access = []",
             'listener "tcp" {',
             "tls_disable = 0",
             'address = "[::]:8200"',
@@ -3111,6 +3256,12 @@ def verify_vault_cluster(
         configmap_metadata.get("name") != baseline["configMapName"]
         or not isinstance(live_server_config, str)
         or not all(fragment in live_server_config for fragment in baseline["listenerFragments"])
+        or _normalized_unauthenticated_access_configuration(
+            live_server_config,
+            code="release.vault_kms_kubernetes_invalid",
+            message="The live Vault ConfigMap did not expose a single top-level unauthenticated-access policy.",
+        )
+        != baseline["enableUnauthenticatedAccess"]
         or live_retry_join != baseline["retryJoin"]
     ):
         raise ReleaseGateError(
@@ -3538,6 +3689,19 @@ def verify_vault_cluster(
             "The configured Vault address did not use HTTPS.",
             {"environment": options.vault_address_env},
         )
+    unauthenticated_generate_root_attempt_status = (
+        _probe_unauthenticated_generate_root_attempt_status(
+            vault_address,
+            vault_cacert=pathlib.Path(secret_inputs.vault_environment["VAULT_CACERT"]),
+            timeout=30.0,
+        )
+    )
+    if unauthenticated_generate_root_attempt_status != 403:
+        raise ReleaseGateError(
+            "release.vault_kms_break_glass_invalid",
+            "Vault still allowed unauthenticated generate-root access outside the checked-in fail-closed baseline.",
+            {"status": unauthenticated_generate_root_attempt_status},
+        )
     peer_section = raft_obj.get("data")
     peers = peer_section.get("config", {}).get("servers") if isinstance(peer_section, dict) else None
     if not isinstance(peers, list) or len(peers) < REQUIRED_VAULT_PEERS:
@@ -3760,6 +3924,8 @@ def verify_vault_cluster(
             "auditSiemEgress": baseline["auditSiemEgress"],
             "retryJoinPeerCount": len(live_retry_join),
             "retryJoinSha256": sha256_text(_stringify_json(live_retry_join)),
+            "enableUnauthenticatedAccess": list(baseline["enableUnauthenticatedAccess"]),
+            "unauthenticatedGenerateRootAttemptStatus": unauthenticated_generate_root_attempt_status,
             "vaultCaEnvironment": "VAULT_CACERT",
             "tlsSecretName": baseline["tlsSecretName"],
             "tlsSecretType": tls_secret_type,
@@ -5545,6 +5711,7 @@ def markdown_from_report(report: Mapping[str, Any]) -> str:
                 f"- Audit observability ConfigMap: `{kubernetes_details.get('auditObservabilityConfigMapName', '')}`",
                 f"- Audit observability SHA256: `{kubernetes_details.get('auditObservabilityConfigSha256', '')}`",
                 f"- Audit SIEM Secret: `{kubernetes_details.get('auditSiemSecretName', '')}`",
+                f"- Unauthenticated generate-root attempt status: `{kubernetes_details.get('unauthenticatedGenerateRootAttemptStatus', '')}`",
             ]
         )
     if isinstance(registry, dict):
