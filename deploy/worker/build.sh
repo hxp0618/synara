@@ -13,6 +13,7 @@ platforms=""
 metadata_file=""
 output_mode="load"
 builder="${SYNARA_WORKER_BUILDER:-}"
+docker_bin="docker"
 go_proxy="${SYNARA_WORKER_GOPROXY:-}"
 allow_dirty=0
 no_cache=0
@@ -32,6 +33,7 @@ Options:
   --platform PLATFORM[,PLATFORM]
   --metadata-file PATH
   --builder NAME
+  --docker-bin PATH          Optional docker executable or wrapper path.
   --go-proxy URLS            Optional public GOPROXY list; credentials are rejected.
   --label KEY=VALUE          May be repeated.
   --load                     Load one platform into the local Docker Engine (default).
@@ -40,6 +42,20 @@ Options:
   --no-cache
   --help
 EOF
+}
+
+normalize_executable() {
+  local value="$1"
+  local flag="$2"
+  local trimmed="$value"
+
+  trimmed="${trimmed#"${trimmed%%[![:space:]]*}"}"
+  trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
+  if [[ -z "$trimmed" || "$trimmed" =~ [[:cntrl:]] ]]; then
+    echo "$flag must be a command or executable path" >&2
+    exit 2
+  fi
+  printf '%s' "$trimmed"
 }
 
 while (($# > 0)); do
@@ -74,6 +90,10 @@ while (($# > 0)); do
       ;;
     --builder)
       builder="${2:?--builder requires a value}"
+      shift 2
+      ;;
+    --docker-bin)
+      docker_bin="${2:?--docker-bin requires a value}"
       shift 2
       ;;
     --go-proxy)
@@ -112,6 +132,8 @@ while (($# > 0)); do
       ;;
   esac
 done
+
+docker_bin="$(normalize_executable "$docker_bin" "--docker-bin")"
 
 case "$target" in
   worker|worker-acceptance) ;;
@@ -173,7 +195,7 @@ if [[ -z "$platforms" ]]; then
   if [[ "$output_mode" == "push" ]]; then
     platforms="linux/amd64,linux/arm64"
   else
-    engine_arch="$(docker info --format '{{.Architecture}}')"
+    engine_arch="$("$docker_bin" info --format '{{.Architecture}}')"
     case "$engine_arch" in
       amd64|x86_64) platforms="linux/amd64" ;;
       arm64|aarch64) platforms="linux/arm64" ;;
@@ -212,16 +234,16 @@ if [[ "$output_mode" == "push" ]]; then
   if [[ -z "$builder" ]]; then
     builder="synara-worker-builder"
   fi
-  if ! docker buildx inspect "$builder" >/dev/null 2>&1; then
-    docker buildx create --name "$builder" --driver docker-container >/dev/null
+  if ! "$docker_bin" buildx inspect "$builder" >/dev/null 2>&1; then
+    "$docker_bin" buildx create --name "$builder" --driver docker-container >/dev/null
   fi
-  builder_driver="$(docker buildx inspect "$builder" | awk -F: '/^Driver:/ {gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2); print $2; exit}')"
+  builder_driver="$("$docker_bin" buildx inspect "$builder" | awk -F: '/^Driver:/ {gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2); print $2; exit}')"
   if [[ "$builder_driver" != "docker-container" ]]; then
     echo "Buildx builder $builder uses unsupported driver $builder_driver; a docker-container builder is required for attestations." >&2
     exit 1
   fi
-  docker buildx inspect "$builder" --bootstrap >/dev/null
-elif [[ -n "$builder" ]] && ! docker buildx inspect "$builder" >/dev/null 2>&1; then
+  "$docker_bin" buildx inspect "$builder" --bootstrap >/dev/null
+elif [[ -n "$builder" ]] && ! "$docker_bin" buildx inspect "$builder" >/dev/null 2>&1; then
   echo "Buildx builder $builder does not exist." >&2
   exit 1
 fi
@@ -231,7 +253,9 @@ if [[ "$output_mode" == "push" ]]; then
   output=(--output "type=image,push=true,rewrite-timestamp=true")
 fi
 build_command=(
-  docker buildx build
+  "$docker_bin"
+  buildx
+  build
   --target "$target"
   --tag "$image"
   --platform "$platforms"

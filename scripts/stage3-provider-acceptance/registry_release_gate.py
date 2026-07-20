@@ -571,6 +571,8 @@ def build_command(
         str(metadata_path),
         "--builder",
         options.builder,
+        "--docker-bin",
+        options.docker_bin,
         "--push",
     ]
     if options.go_proxy is not None:

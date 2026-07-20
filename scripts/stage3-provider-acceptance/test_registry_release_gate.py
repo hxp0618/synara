@@ -7,6 +7,7 @@ import hashlib
 import io
 import json
 import pathlib
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -40,6 +41,7 @@ def options(
     output_dir: pathlib.Path,
     *,
     repo_root: pathlib.Path = REPO_ROOT,
+    docker_bin: str = "docker",
     signing_policy_profile: str = "disposable",
     insecure_registry: bool | None = None,
     registry_auth_username_environment: str | None = None,
@@ -89,7 +91,7 @@ def options(
         builder="synara-stage3-registry-builder",
         build_timeout_seconds=7200.0,
         supply_chain_timeout_seconds=1800.0,
-        docker_bin="docker",
+        docker_bin=docker_bin,
         go_proxy="https://goproxy.cn,direct",
         insecure_registry=insecure_registry,
         signing_policy_profile=signing_policy_profile,
@@ -416,6 +418,33 @@ def production_supply_chain() -> dict[str, Any]:
 
 
 class InputValidationTest(unittest.TestCase):
+    def test_parse_args_accepts_explicit_docker_bin_path(self) -> None:
+        parsed = gate.parse_args(
+            [
+                "--image-repository",
+                "localhost:55091/synara/worker",
+                "--builder",
+                "synara-stage3-registry-builder",
+                "--docker-bin",
+                "/tmp/docker-wrapper",
+            ]
+        )
+
+        self.assertEqual(parsed.docker_bin, "/tmp/docker-wrapper")
+
+    def test_parse_args_rejects_control_characters_in_docker_bin(self) -> None:
+        with self.assertRaises(SystemExit):
+            gate.parse_args(
+                [
+                    "--image-repository",
+                    "localhost:55091/synara/worker",
+                    "--builder",
+                    "synara-stage3-registry-builder",
+                    "--docker-bin",
+                    "docker\nwrapper",
+                ]
+            )
+
     def test_configuration_requires_checked_in_signing_and_vulnerability_policies(self) -> None:
         evidence = gate.configuration_evidence(options(pathlib.Path("/tmp/output")))
 
@@ -1472,7 +1501,7 @@ class InputValidationTest(unittest.TestCase):
 
     def test_build_inputs_keep_proxy_no_cache_and_pinned_sbom_generator(self) -> None:
         command = gate.build_command(
-            options(pathlib.Path("/tmp/output")),
+            options(pathlib.Path("/tmp/output"), docker_bin="/tmp/docker-wrapper"),
             image="localhost:55091/synara/worker:tag",
             git_sha=GIT_SHA,
             version=VERSION,
@@ -1484,6 +1513,7 @@ class InputValidationTest(unittest.TestCase):
         self.assertIn("--push", command)
         self.assertIn("--no-cache", command)
         self.assertEqual(command[command.index("--go-proxy") + 1], "https://goproxy.cn,direct")
+        self.assertEqual(command[command.index("--docker-bin") + 1], "/tmp/docker-wrapper")
         self.assertEqual(
             gate.locked_sbom_generator(REPO_ROOT),
             "docker.io/docker/buildkit-syft-scanner@sha256:"
@@ -1636,6 +1666,156 @@ class InputValidationTest(unittest.TestCase):
         )
         self.assertEqual(valid_proxy.returncode, 2)
         self.assertIn("--source-date-epoch", valid_proxy.stderr)
+
+    def test_worker_build_script_rejects_dangerous_docker_bin_before_runtime_checks(self) -> None:
+        completed = subprocess.run(
+            [
+                str(REPO_ROOT / "deploy/worker/build.sh"),
+                "--git-sha",
+                GIT_SHA,
+                "--docker-bin",
+                "docker\nwrapper",
+                "--source-date-epoch",
+                "invalid",
+            ],
+            cwd=REPO_ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertEqual(completed.returncode, 2)
+        self.assertIn("--docker-bin must be a command or executable path", completed.stderr)
+
+    def test_worker_build_script_uses_explicit_docker_bin_for_builder_setup_and_build(self) -> None:
+        required_commands = ("bash", "node", "dirname", "tr", "mkdir", "awk", "cat")
+        helpers = {name: shutil.which(name) for name in required_commands}
+        missing = [name for name, path in helpers.items() if path is None]
+        if missing:
+            self.skipTest(f"missing helper commands: {', '.join(missing)}")
+
+        with tempfile.TemporaryDirectory() as directory:
+            temp_root = pathlib.Path(directory)
+            helper_bin = temp_root / "bin"
+            helper_bin.mkdir()
+            for name, path in helpers.items():
+                (helper_bin / name).symlink_to(pathlib.Path(path))
+
+            metadata_path = temp_root / "metadata.json"
+            log_path = temp_root / "docker.log"
+            state_dir = temp_root / "state"
+            state_dir.mkdir()
+            wrapper_path = temp_root / "docker-wrapper.sh"
+            wrapper_path.write_text(
+                """#!/usr/bin/env bash
+set -euo pipefail
+log_file="${FAKE_DOCKER_LOG:?}"
+state_dir="${FAKE_DOCKER_STATE_DIR:?}"
+printf '%s\n' "$*" >> "$log_file"
+command_name="${1:?missing docker command}"
+shift
+case "$command_name" in
+  buildx)
+    subcommand="${1:?missing buildx subcommand}"
+    shift
+    case "$subcommand" in
+      inspect)
+        inspect_state="$state_dir/inspect-once"
+        if [[ ! -f "$inspect_state" && "${1:-}" == "explicit-builder" && "${2:-}" != "--bootstrap" ]]; then
+          : > "$inspect_state"
+          exit 1
+        fi
+        cat <<'EOF'
+Driver: docker-container
+Nodes:
+Name: fake0
+Status: running
+Platforms: linux/amd64,linux/arm64
+EOF
+        ;;
+      create)
+        exit 0
+        ;;
+      build)
+        metadata_file=""
+        while (($# > 0)); do
+          if [[ "$1" == "--metadata-file" ]]; then
+            metadata_file="${2:?missing metadata path}"
+            shift 2
+            continue
+          fi
+          shift
+        done
+        cat > "$metadata_file" <<'EOF'
+{"containerimage.digest":"sha256:1111111111111111111111111111111111111111111111111111111111111111"}
+EOF
+        ;;
+      *)
+        echo "unexpected buildx subcommand: $subcommand" >&2
+        exit 97
+        ;;
+    esac
+    ;;
+  *)
+    echo "unexpected docker command: $command_name" >&2
+    exit 98
+    ;;
+esac
+""",
+                encoding="utf-8",
+            )
+            wrapper_path.chmod(0o755)
+
+            completed = subprocess.run(
+                [
+                    str(REPO_ROOT / "deploy/worker/build.sh"),
+                    "--allow-dirty",
+                    "--git-sha",
+                    GIT_SHA,
+                    "--version",
+                    VERSION,
+                    "--source-date-epoch",
+                    SOURCE_DATE_EPOCH,
+                    "--image",
+                    "localhost:55091/synara/worker:wrapper-test",
+                    "--platform",
+                    "linux/amd64,linux/arm64",
+                    "--metadata-file",
+                    str(metadata_path),
+                    "--builder",
+                    "explicit-builder",
+                    "--docker-bin",
+                    str(wrapper_path),
+                    "--push",
+                ],
+                cwd=REPO_ROOT,
+                env={
+                    "PATH": str(helper_bin),
+                    "FAKE_DOCKER_LOG": str(log_path),
+                    "FAKE_DOCKER_STATE_DIR": str(state_dir),
+                },
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+            log_lines = log_path.read_text(encoding="utf-8").splitlines()
+            self.assertIn("buildx inspect explicit-builder", log_lines)
+            self.assertIn(
+                "buildx create --name explicit-builder --driver docker-container",
+                log_lines,
+            )
+            self.assertIn("buildx inspect explicit-builder --bootstrap", log_lines)
+            build_line = next(line for line in log_lines if line.startswith("buildx build "))
+            self.assertIn("--builder explicit-builder", build_line)
+            self.assertIn(f"--metadata-file {metadata_path}", build_line)
+            self.assertIn("--output type=image,push=true,rewrite-timestamp=true", build_line)
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                metadata["containerimage.digest"],
+                "sha256:" + "1" * 64,
+            )
 
 
 class ImageConfigTest(unittest.TestCase):
