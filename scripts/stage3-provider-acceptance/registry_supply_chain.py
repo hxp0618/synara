@@ -2149,20 +2149,31 @@ def _nonempty_text(value: Any) -> str | None:
     return value.strip() if isinstance(value, str) and value.strip() else None
 
 
+def _protobuf_uint64(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        parsed = value
+    elif isinstance(value, str) and re.fullmatch(r"(?:0|[1-9][0-9]*)", value) is not None:
+        parsed = int(value)
+    else:
+        return None
+    return parsed if 0 <= parsed <= (1 << 64) - 1 else None
+
+
 def _valid_inclusion_proof(value: Any) -> bool:
     if not isinstance(value, dict):
         return False
     root_hash = _nonempty_text(value.get("rootHash", value.get("root_hash")))
     hashes = value.get("hashes")
-    log_index = value.get("logIndex", value.get("log_index"))
-    tree_size = value.get("treeSize", value.get("tree_size"))
+    log_index = _protobuf_uint64(value.get("logIndex", value.get("log_index")))
+    tree_size = _protobuf_uint64(value.get("treeSize", value.get("tree_size")))
     return (
         root_hash is not None
         and isinstance(hashes, list)
         and all(_nonempty_text(item) is not None for item in hashes)
-        and isinstance(log_index, int)
-        and log_index >= 0
-        and isinstance(tree_size, int)
+        and log_index is not None
+        and tree_size is not None
         and tree_size >= 1
     )
 
@@ -2197,8 +2208,12 @@ def _bundle_transparency_entries(
                 raise common.ReleaseGateError(code, message)
             normalized_entries.append(
                 {
-                    "logIndex": entry.get("logIndex", entry.get("log_index")),
-                    "integratedTime": entry.get("integratedTime", entry.get("integrated_time")),
+                    "logIndex": _protobuf_uint64(
+                        entry.get("logIndex", entry.get("log_index"))
+                    ),
+                    "integratedTime": _protobuf_uint64(
+                        entry.get("integratedTime", entry.get("integrated_time"))
+                    ),
                     "inclusionProofPresent": _valid_inclusion_proof(inclusion_proof),
                     "inclusionProofHashCount": (
                         len(inclusion_proof.get("hashes"))

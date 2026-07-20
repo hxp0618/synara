@@ -965,6 +965,45 @@ class SignatureVerificationTest(unittest.TestCase):
 
         self.assertEqual(caught.exception.code, "release.registry_signature_verification_invalid")
 
+    def test_accepts_sigstore_v03_protobuf_json_uint64_fields(self) -> None:
+        bundle = transparency_bundle_payload()
+        bundle["mediaType"] = "application/vnd.dev.sigstore.bundle.v0.3+json"
+        entry = bundle["verificationMaterial"]["tlogEntries"][0]
+        entry["logIndex"] = "7"
+        entry["integratedTime"] = "1720000000"
+        entry["inclusionProof"]["logIndex"] = "7"
+        entry["inclusionProof"]["treeSize"] = "8"
+
+        media_type, entries = supply._bundle_transparency_entries(
+            bundle,
+            require_inclusion_proof=True,
+            require_signed_entry_timestamp=True,
+            code="test.invalid_bundle",
+            message="invalid bundle",
+        )
+
+        self.assertEqual(media_type, "application/vnd.dev.sigstore.bundle.v0.3+json")
+        self.assertEqual(entries[0]["logIndex"], 7)
+        self.assertEqual(entries[0]["integratedTime"], 1_720_000_000)
+        self.assertTrue(entries[0]["inclusionProofPresent"])
+        self.assertTrue(entries[0]["signedEntryTimestampPresent"])
+
+    def test_rejects_noncanonical_protobuf_json_uint64_fields(self) -> None:
+        for invalid_value in (True, -1, "-1", "07", str(1 << 64)):
+            with self.subTest(invalid_value=invalid_value):
+                bundle = transparency_bundle_payload()
+                bundle["verificationMaterial"]["tlogEntries"][0]["inclusionProof"][
+                    "treeSize"
+                ] = invalid_value
+                with self.assertRaises(supply.common.ReleaseGateError):
+                    supply._bundle_transparency_entries(
+                        bundle,
+                        require_inclusion_proof=True,
+                        require_signed_entry_timestamp=True,
+                        code="test.invalid_bundle",
+                        message="invalid bundle",
+                    )
+
 
 class ProductionSigningTest(unittest.TestCase):
     def _lookup_vault_identity(
