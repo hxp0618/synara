@@ -53,6 +53,7 @@ DEFAULT_TIMEOUT_SECONDS = 300.0
 MAX_OUTPUT_EXCERPT = 2000
 KYVERNO_CA_BUNDLE_KEY = "ca-certificates.crt"
 KYVERNO_CA_MOUNT_PATH = "/etc/ssl/certs/ca-certificates.crt"
+KYVERNO_REGISTRY_PULL_SECRET_NAME = supply_chain.SECURITY_REGISTRY_PULL_SECRET_NAME
 KYVERNO_VERIFY_IMAGE_COMPONENTS = ("admission-controller", "background-controller")
 KYVERNO_VERIFY_IMAGE_SELECTOR = (
     "app.kubernetes.io/component in (admission-controller,background-controller)"
@@ -4584,6 +4585,9 @@ def render_admission_bundle(
                     "verifyImages": [
                         {
                             "imageReferences": [repository_pattern],
+                            "imageRegistryCredentials": {
+                                "secrets": [KYVERNO_REGISTRY_PULL_SECRET_NAME],
+                            },
                             "mutateDigest": True,
                             "verifyDigest": True,
                             "required": True,
@@ -5286,17 +5290,24 @@ def validate_cluster_policy_spec(
         )
     verify_image = verify_images[0]
     attestors = verify_image.get("attestors") if isinstance(verify_image, dict) else None
+    registry_credentials = (
+        verify_image.get("imageRegistryCredentials")
+        if isinstance(verify_image, dict)
+        else None
+    )
     if (
         verify_image.get("mutateDigest") is not True
         or verify_image.get("verifyDigest") is not True
         or verify_image.get("required") is not True
         or verify_image.get("imageReferences") != [repository_pattern]
+        or registry_credentials
+        != {"secrets": [KYVERNO_REGISTRY_PULL_SECRET_NAME]}
         or not isinstance(attestors, list)
         or len(attestors) != 1
     ):
         raise ReleaseGateError(
             "release.vault_kms_admission_invalid",
-            "The Kyverno ClusterPolicy verifyImages rule did not preserve digest mutation and verification.",
+            "The Kyverno ClusterPolicy verifyImages rule did not preserve digest verification and private Registry credentials.",
         )
     attestor = attestors[0]
     entries = attestor.get("entries") if isinstance(attestor, dict) else None

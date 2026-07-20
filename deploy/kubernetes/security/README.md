@@ -25,6 +25,11 @@ Before applying a cluster overlay:
    per-cluster production Worker repository pattern.
 3. Install Kyverno and merge the private Registry CA into its existing trusted
    CA bundle.
+4. Provision a `kubernetes.io/dockerconfigjson` Secret named
+   `synara-worker-registry-pull` in the Kyverno namespace through the cluster's
+   Secret manager. Grant only the admission and background controller service
+   accounts read access to that Secret. The ClusterPolicy uses it solely through
+   `imageRegistryCredentials` when resolving signatures and attestations.
 
 Render and apply the ConfigMaps and policy atomically:
 
@@ -38,3 +43,4 @@ never be applied directly. The production kustomization replaces it from the
 single repository ConfigMap source. The concrete repository host is a
 per-cluster overlay, not a portable default. Do not put private keys, Vault
 tokens, Registry credentials, or any other secret material in these manifests.
+The Registry pull Secret is deliberately not part of this Kustomize tree.

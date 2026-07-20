@@ -1294,6 +1294,50 @@ class ClusterPolicyValidationTest(unittest.TestCase):
 
         self.assertEqual(caught.exception.code, "release.vault_kms_admission_invalid")
 
+    def test_rejects_registry_credential_boundary_drift(self) -> None:
+        cases = (
+            ("missing", None),
+            ("wrong-secret", {"secrets": ["unrelated-registry-pull"]}),
+            (
+                "insecure-registry",
+                {
+                    "secrets": [gate.KYVERNO_REGISTRY_PULL_SECRET_NAME],
+                    "allowInsecureRegistry": True,
+                },
+            ),
+        )
+        for label, replacement in cases:
+            with self.subTest(label=label):
+                _bundle, _public_key_cm, _repository_cm, cluster_policy = (
+                    gate.render_admission_bundle(
+                        run_id=f"run-registry-credential-{label}",
+                        namespace="synara-system",
+                        repository_pattern=f"{IMAGE_REPOSITORY}*",
+                        public_key=PUBLIC_KEY,
+                        source_hashes={
+                            "deploy/worker/production-signing-policy.json": "c" * 64,
+                        },
+                    )
+                )
+                verify_image = cluster_policy["spec"]["rules"][0]["verifyImages"][0]
+                if replacement is None:
+                    verify_image.pop("imageRegistryCredentials")
+                else:
+                    verify_image["imageRegistryCredentials"] = replacement
+
+                with self.assertRaises(gate.ReleaseGateError) as caught:
+                    gate.validate_cluster_policy_spec(
+                        cluster_policy["spec"],
+                        public_key_configmap_namespace="synara-system",
+                        public_key_configmap_name="synara-worker-cosign-public-key",
+                        repository_pattern=f"{IMAGE_REPOSITORY}*",
+                    )
+
+                self.assertEqual(
+                    caught.exception.code,
+                    "release.vault_kms_admission_invalid",
+                )
+
     def test_verify_existing_resources_uses_profile_specific_namespaces(self) -> None:
         configuration = production_configuration()
         profile = configuration.production_signing_profile

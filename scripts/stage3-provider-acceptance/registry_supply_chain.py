@@ -49,6 +49,7 @@ SECURITY_CLUSTER_POLICY_NAME = "verify-synara-worker-images"
 SECURITY_PUBLIC_KEY_CONTEXT_NAME = "workerPublicKey"
 SECURITY_IMAGE_REFERENCE_FIELD_PATH = "spec.rules.0.verifyImages.0.imageReferences.0"
 SECURITY_IMAGE_REFERENCE_PLACEHOLDER = "registry.invalid/synara/worker*"
+SECURITY_REGISTRY_PULL_SECRET_NAME = "synara-worker-registry-pull"
 PRODUCTION_RELEASE_SOURCE_PATHS = (
     PRODUCTION_SIGNING_POLICY_PATH,
     PRODUCTION_SIGNING_PROFILE_PATH,
@@ -834,6 +835,9 @@ def _expected_cluster_policy_lines(profile: ProductionSigningProfile) -> tuple[s
         "      verifyImages:",
         "        - imageReferences:",
         f"            - {SECURITY_IMAGE_REFERENCE_PLACEHOLDER}",
+        "          imageRegistryCredentials:",
+        "            secrets:",
+        f"              - {SECURITY_REGISTRY_PULL_SECRET_NAME}",
         f"          mutateDigest: {str(profile.admission_mutate_digest).lower()}",
         f"          verifyDigest: {str(profile.admission_verify_digest).lower()}",
         f"          required: {str(profile.admission_required).lower()}",

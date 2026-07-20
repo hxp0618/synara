@@ -578,6 +578,40 @@ class ConfigurationTest(unittest.TestCase):
                     "release.registry_production_signing_profile_invalid",
                 )
 
+    def test_rejects_cluster_policy_registry_credential_boundary_drift(self) -> None:
+        cases = (
+            (
+                "missing-secret",
+                "          imageRegistryCredentials:\n"
+                "            secrets:\n"
+                "              - synara-worker-registry-pull\n",
+                "",
+            ),
+            (
+                "wrong-secret",
+                "              - synara-worker-registry-pull",
+                "              - unrelated-registry-pull",
+            ),
+        )
+        for label, original, replacement in cases:
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as directory:
+                repo_root = pathlib.Path(directory)
+                copy_required_paths(repo_root, PRODUCTION_PROFILE_REQUIRED_PATHS)
+                cluster_policy_path = repo_root / supply.SECURITY_CLUSTER_POLICY_PATH
+                cluster_policy_path.write_text(
+                    cluster_policy_path.read_text(encoding="utf-8").replace(
+                        original,
+                        replacement,
+                    ),
+                    encoding="utf-8",
+                )
+                with self.assertRaises(supply.common.ReleaseGateError) as caught:
+                    supply.load_configuration(repo_root, signing_policy_profile="production")
+                self.assertEqual(
+                    caught.exception.code,
+                    "release.registry_production_signing_profile_invalid",
+                )
+
     def test_rejects_production_kustomization_target_drift(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             repo_root = pathlib.Path(directory)

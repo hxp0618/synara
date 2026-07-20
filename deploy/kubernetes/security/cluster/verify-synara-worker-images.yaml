@@ -28,6 +28,9 @@ spec:
             # The production kustomization replaces this fail-closed value
             # from synara-worker-signing-settings.data.repositoryPattern.
             - registry.invalid/synara/worker*
+          imageRegistryCredentials:
+            secrets:
+              - synara-worker-registry-pull
           mutateDigest: true
           verifyDigest: true
           required: true
