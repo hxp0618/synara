@@ -879,6 +879,12 @@ def load_snapshot_operator_policy(path: pathlib.Path) -> tuple[str, str]:
             "release.vault_snapshot_restore_policy_invalid",
             "The checked-in snapshot operator policy did not grant the Raft snapshot read path.",
         )
+    required_audit_stanza = 'path "sys/audit" {\n  capabilities = ["read", "sudo"]\n}'
+    if required_audit_stanza not in text:
+        raise ReleaseGateError(
+            "release.vault_snapshot_restore_policy_invalid",
+            "The checked-in snapshot operator policy did not grant read-only audit device inspection.",
+        )
     return text, sha256_text(text)
 
 

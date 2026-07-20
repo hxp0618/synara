@@ -26,6 +26,10 @@ path "auth/approle/role/synara-vault-snapshot-operator" {
   capabilities = ["read"]
 }
 
+path "sys/audit" {
+  capabilities = ["read", "sudo"]
+}
+
 path "sys/policies/acl/synara-worker-release-signer" {
   capabilities = ["read"]
 }

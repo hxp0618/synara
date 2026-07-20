@@ -99,7 +99,7 @@ The script:
   configures `synara-vault-production-auditor` as an independent
   no-default-policy batch-token AppRole with a 30-minute TTL and 1-hour maximum
   TTL
-- writes the read-only snapshot/raft/key/AppRole/policy inspection policy and
+- writes the read-only snapshot/raft/key/AppRole/policy/audit-device inspection policy and
   configures `synara-vault-snapshot-operator` as an independent no-default-policy
   batch-token AppRole with a 30-minute TTL, 1-hour maximum TTL, and one-use
   10-minute Secret IDs

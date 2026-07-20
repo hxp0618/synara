@@ -368,7 +368,28 @@ class VaultSnapshotRestoreDrillTests(unittest.TestCase):
         self.assertEqual(policy.snapshot_operator_role_policy.secret_id_num_uses, 1)
         self.assertRegex(sha256, r"^[0-9a-f]{64}$")
         self.assertIn('path "sys/storage/raft/snapshot"', text)
+        self.assertIn('path "sys/audit"', text)
+        self.assertIn('capabilities = ["read", "sudo"]', text)
         self.assertNotIn("capabilities = [\"update\"]", text)
+
+    def test_snapshot_operator_policy_requires_read_only_audit_inspection(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            policy_path = pathlib.Path(directory) / "snapshot-operator.hcl"
+            policy_path.write_text(
+                SNAPSHOT_OPERATOR_POLICY_PATH.read_text(encoding="utf-8").replace(
+                    'path "sys/audit" {\n  capabilities = ["read", "sudo"]\n}\n\n',
+                    "",
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(drill.ReleaseGateError) as caught:
+                drill.load_snapshot_operator_policy(policy_path)
+
+        self.assertEqual(
+            caught.exception.code,
+            "release.vault_snapshot_restore_policy_invalid",
+        )
 
     def test_dirty_repository_fails_before_vault_or_secret_actions(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

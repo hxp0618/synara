@@ -121,8 +121,10 @@ environment variable names and hashes only.
   - `1` Secret ID use
   - `600s` Secret ID TTL
 
-The snapshot operator is read-only except for the Raft snapshot read endpoint.
-It must not be reused as the signing identity.
+The snapshot operator is read-only. Its `sys/audit` access is limited to
+`read, sudo`, which Vault requires to inspect audit-device metadata during the
+restore drill; it has no audit create, update, or delete capability. It must not
+be reused as the signing identity.
 
 ## Isolated snapshot restore drill
 
