@@ -8806,6 +8806,55 @@ class KubernetesDriverObservationTest(unittest.TestCase):
         )
         self.assertEqual(command.call_count, 2)
 
+    def test_execution_pods_retries_transient_read_failure_once(self) -> None:
+        driver = self._owned_kind_driver()
+        driver.target_runtimes = {"target-a": {"namespace": "namespace-a"}}
+        payload = json.dumps({"items": [{"metadata": {"name": "worker-a"}}]})
+
+        with (
+            mock.patch.object(
+                driver,
+                "_kubectl_completed",
+                side_effect=[
+                    subprocess.CompletedProcess(
+                        ["kubectl"],
+                        1,
+                        stdout="Unable to connect to the server: net/http: TLS handshake timeout",
+                    ),
+                    subprocess.CompletedProcess(["kubectl"], 0, stdout=payload),
+                ],
+            ) as command,
+            mock.patch.object(acceptance.time, "sleep") as sleep,
+        ):
+            pods = driver._execution_pods("target-a", "execution-a")
+
+        self.assertEqual(pods, [{"metadata": {"name": "worker-a"}}])
+        self.assertEqual(command.call_count, 2)
+        sleep.assert_called_once_with(1.0)
+
+    def test_execution_pods_does_not_retry_nontransient_read_failure(self) -> None:
+        driver = self._owned_kind_driver()
+        driver.target_runtimes = {"target-a": {"namespace": "namespace-a"}}
+
+        with (
+            mock.patch.object(
+                driver,
+                "_kubectl_completed",
+                return_value=subprocess.CompletedProcess(
+                    ["kubectl"],
+                    1,
+                    stdout="Error from server (Forbidden): access denied",
+                ),
+            ) as command,
+            mock.patch.object(acceptance.time, "sleep") as sleep,
+            self.assertRaises(acceptance.AcceptanceError) as caught,
+        ):
+            driver._execution_pods("target-a", "execution-a")
+
+        self.assertEqual(caught.exception.code, "runner.kubernetes_command_failed")
+        command.assert_called_once()
+        sleep.assert_not_called()
+
     def test_cleanup_retries_only_transient_idempotent_kubectl_operations(self) -> None:
         options = dataclasses.replace(
             runner_options(),

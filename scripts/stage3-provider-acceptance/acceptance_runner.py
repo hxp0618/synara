@@ -8293,7 +8293,7 @@ class KubernetesDriver(ManagedWorkerDriver):
 
     def _execution_pods(self, target_id: str, execution_id: str) -> list[dict[str, Any]]:
         runtime = self._target_runtime(target_id)
-        output = self._kubectl_command(
+        output = self._kubectl_read_command(
             [
                 "-n",
                 runtime["namespace"],
@@ -8361,6 +8361,61 @@ class KubernetesDriver(ManagedWorkerDriver):
             arguments,
             input_text=input_text,
             cleanup_timeout=cleanup_timeout,
+        )
+        output = self.redactor.text(completed.stdout)
+        if completed.returncode != 0:
+            raise AcceptanceError(
+                "runner.kubernetes_command_failed",
+                f"kubectl exited with status {completed.returncode}.",
+                {
+                    "command": ["kubectl", *arguments[:3]],
+                    "exitCode": completed.returncode,
+                    "outputExcerpt": output[-1000:],
+                },
+            )
+        return output
+
+    def _kubectl_read_completed(
+        self,
+        arguments: Sequence[str],
+        *,
+        command_timeout: float | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        """Retry transient transport failures for idempotent, read-only kubectl calls."""
+        last_completed: subprocess.CompletedProcess[str] | None = None
+        last_error: AcceptanceError | None = None
+        for attempt in range(KUBERNETES_CLEANUP_MAX_ATTEMPTS):
+            try:
+                completed = self._kubectl_completed(
+                    arguments,
+                    cleanup_timeout=command_timeout,
+                )
+            except AcceptanceError as error:
+                if not self._kubernetes_cleanup_error_is_transient(error):
+                    raise
+                last_error = error
+            else:
+                last_completed = completed
+                output = self.redactor.text(completed.stdout)
+                if completed.returncode == 0 or not self._kubernetes_cleanup_failure_is_transient(output):
+                    return completed
+            if attempt + 1 < KUBERNETES_CLEANUP_MAX_ATTEMPTS:
+                time.sleep(KUBERNETES_CLEANUP_RETRY_DELAYS_SECONDS[attempt])
+        if last_completed is not None:
+            return last_completed
+        if last_error is not None:
+            raise last_error
+        raise AssertionError("Kubernetes read retry loop produced no result")
+
+    def _kubectl_read_command(
+        self,
+        arguments: Sequence[str],
+        *,
+        command_timeout: float | None = None,
+    ) -> str:
+        completed = self._kubectl_read_completed(
+            arguments,
+            command_timeout=command_timeout,
         )
         output = self.redactor.text(completed.stdout)
         if completed.returncode != 0:
