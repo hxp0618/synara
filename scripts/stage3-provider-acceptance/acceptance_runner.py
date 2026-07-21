@@ -14116,11 +14116,16 @@ class AcceptanceSuite:
             REAL_PROVIDER_LOAD_SESSIONS - REAL_PROVIDER_LOAD_CONCURRENCY
         )
         expected_overlaps = completed_wave_count * (REAL_PROVIDER_LOAD_SESSIONS - 1)
+        expected_distinct_workers = (
+            expected_executions
+            if self.options.target == "kubernetes"
+            else REAL_PROVIDER_LOAD_CONCURRENCY
+        )
         if (
             len(execution_ids) != expected_executions
             or quota_rejections != expected_rejections
             or overlap_observations != expected_overlaps
-            or len(worker_ids) != REAL_PROVIDER_LOAD_CONCURRENCY
+            or len(worker_ids) != expected_distinct_workers
             or any(count != completed_wave_count for count in session_execution_counts.values())
             or provider_execution_counts[self.options.provider] != expected_executions
         ):
@@ -14134,6 +14139,7 @@ class AcceptanceSuite:
                     "quotaRejections": quota_rejections,
                     "expectedOverlapObservations": expected_overlaps,
                     "overlapObservations": overlap_observations,
+                    "expectedDistinctWorkerCount": expected_distinct_workers,
                     "workerIds": sorted(worker_ids),
                     "providerExecutionCounts": dict(sorted(provider_execution_counts.items())),
                     "sessionExecutionCounts": dict(sorted(session_execution_counts.items())),
@@ -14160,6 +14166,7 @@ class AcceptanceSuite:
             "controlPlaneRestarts": restart_evidence,
             "executionsCompleted": len(execution_ids),
             "distinctExecutionCount": len(execution_ids),
+            "expectedDistinctWorkerCount": expected_distinct_workers,
             "distinctWorkerCount": len(worker_ids),
             "quotaRejections": quota_rejections,
             "admissionRetriesSucceeded": len(slot_reuse_admission_latency_ms),

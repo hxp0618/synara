@@ -967,7 +967,11 @@ class RealProviderLoadSuite(FixtureLoadSuite):
         provider: str = "codex",
         enforce_quota: bool = True,
     ) -> None:
-        super().__init__(wave_count=1, enforce_quota=enforce_quota)
+        super().__init__(
+            wave_count=1,
+            enforce_quota=enforce_quota,
+            execution_pinned_workers=target == "kubernetes",
+        )
         self.options = dataclasses.replace(
             self.options,
             suite="real-provider-load",
@@ -3337,6 +3341,7 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
         self.assertEqual(evidence["admissionRetriesSucceeded"], 2)
         self.assertEqual(evidence["overlapObservations"], 3)
         self.assertEqual(evidence["distinctExecutionCount"], 4)
+        self.assertEqual(evidence["expectedDistinctWorkerCount"], 2)
         self.assertEqual(evidence["distinctWorkerCount"], 2)
         self.assertEqual(evidence["effectiveConcurrency"], 2)
         self.assertEqual(evidence["providerExecutionCounts"], {"codex": 4})
@@ -3361,6 +3366,19 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
         self.assertEqual(evidence["unexpectedErrorRate"], 0.0)
         self.assertFalse(evidence["doubleExecution"])
         self.assertFalse(evidence["duplicateTerminal"])
+
+    def test_real_provider_load_accepts_execution_pinned_kubernetes_worker_identity_topology(
+        self,
+    ) -> None:
+        suite = RealProviderLoadSuite(target="kubernetes")
+
+        with mock.patch.object(acceptance, "elapsed_ms", return_value=10):
+            evidence = suite._real_provider_load_admission_wave()
+
+        self.assertEqual(evidence["distinctExecutionCount"], 4)
+        self.assertEqual(evidence["expectedDistinctWorkerCount"], 4)
+        self.assertEqual(evidence["distinctWorkerCount"], 4)
+        self.assertEqual(evidence["effectiveConcurrency"], 2)
 
     def test_real_provider_load_separates_admission_from_interaction_ready_latency(
         self,
