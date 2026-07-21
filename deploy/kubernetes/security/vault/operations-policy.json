@@ -9,12 +9,21 @@
   "transparencyLog": {
     "provider": "public-rekor",
     "url": "https://rekor.sigstore.dev",
-    "required": true
+    "required": true,
+    "inclusionProofRequired": true,
+    "signedEntryTimestampRequired": true,
+    "offlineVerificationAllowed": false
   },
   "admission": {
     "controller": "kyverno",
     "validationFailureAction": "Enforce",
     "failurePolicy": "Fail",
+    "mutateDigest": true,
+    "verifyDigest": true,
+    "ignoreTlog": false,
+    "exactDigestVerificationRequired": true,
+    "publicKeyConfigMap": "synara-worker-cosign-public-key",
+    "signingSettingsConfigMap": "synara-worker-signing-settings",
     "clusterPolicyPath": "deploy/kubernetes/security/cluster/verify-synara-worker-images.yaml"
   },
   "operationalRuntime": {

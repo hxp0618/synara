@@ -121,6 +121,12 @@ REGISTRY_HOST_PATTERN = re.compile(
 )
 TAG_PATTERN = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._-]{0,127}")
 DIGEST_PATTERN = re.compile(r"sha256:[0-9a-f]{64}")
+TAG_DRIFT_IMAGE_TAG_PREFIX = "synara-stage3-tag-drift-"
+TAG_DRIFT_IMAGE_TAG_SUFFIX_MIN_LENGTH = 16
+TAG_DRIFT_IMAGE_TAG_SUFFIX_MAX_LENGTH = 128 - len(TAG_DRIFT_IMAGE_TAG_PREFIX)
+TAG_DRIFT_IMAGE_TAG_SUFFIX_PATTERN = re.compile(
+    rf"[a-z0-9](?:[a-z0-9-]{{{TAG_DRIFT_IMAGE_TAG_SUFFIX_MIN_LENGTH - 1},{TAG_DRIFT_IMAGE_TAG_SUFFIX_MAX_LENGTH - 1}}})"
+)
 ADMISSION_DENIAL_MARKERS = (
     "kyverno",
     "verifyimages",
@@ -487,6 +493,33 @@ def normalize_image_reference(
     )
 
 
+def normalize_tag_drift_image_reference(value: str, *, flag: str) -> ImageReference:
+    reference = normalize_image_reference(value, flag=flag, require_digest=False)
+    tag = reference.tag
+    if tag is None:
+        raise ValueError(
+            f"{flag} must use a gate-owned run-scoped tag starting with "
+            f"'{TAG_DRIFT_IMAGE_TAG_PREFIX}'"
+        )
+    if tag.lower() == "latest":
+        raise ValueError(
+            f"{flag} must not use the mutable latest tag; use a gate-owned run-scoped tag "
+            f"starting with '{TAG_DRIFT_IMAGE_TAG_PREFIX}'"
+        )
+    if not tag.startswith(TAG_DRIFT_IMAGE_TAG_PREFIX):
+        raise ValueError(
+            f"{flag} must use a gate-owned run-scoped tag starting with "
+            f"'{TAG_DRIFT_IMAGE_TAG_PREFIX}'"
+        )
+    suffix = tag[len(TAG_DRIFT_IMAGE_TAG_PREFIX) :]
+    if TAG_DRIFT_IMAGE_TAG_SUFFIX_PATTERN.fullmatch(suffix) is None:
+        raise ValueError(
+            f"{flag} must use a gate-owned run-scoped tag with a lowercase [a-z0-9-] "
+            f"suffix of at least {TAG_DRIFT_IMAGE_TAG_SUFFIX_MIN_LENGTH} characters"
+        )
+    return reference
+
+
 def parse_args(argv: Sequence[str]) -> GateOptions:
     repo_root = pathlib.Path(__file__).resolve().parents[2]
     parser = argparse.ArgumentParser(description=__doc__)
@@ -571,11 +604,7 @@ def parse_args(argv: Sequence[str]) -> GateOptions:
             flag="--wrong-key-image-ref",
             require_digest=True,
         )
-        normalize_image_reference(
-            parsed.tag_drift_image_ref,
-            flag="--tag-drift-image-ref",
-            require_digest=False,
-        )
+        normalize_tag_drift_image_reference(parsed.tag_drift_image_ref, flag="--tag-drift-image-ref")
         kubectl_bin = normalize_executable(parsed.kubectl_bin, "--kubectl-bin")
         vault_bin = normalize_executable(parsed.vault_bin, "--vault-bin")
         cosign_bin = normalize_executable(parsed.cosign_bin, "--cosign-bin")
@@ -5867,11 +5896,16 @@ def run_vault_kms_admission_gate(
             flag="--wrong-key-image-ref",
             require_digest=True,
         )
-        tag_drift_image = normalize_image_reference(
-            options.tag_drift_image_ref,
-            flag="--tag-drift-image-ref",
-            require_digest=False,
-        )
+        try:
+            tag_drift_image = normalize_tag_drift_image_reference(
+                options.tag_drift_image_ref,
+                flag="--tag-drift-image-ref",
+            )
+        except ValueError as error:
+            raise ReleaseGateError(
+                "release.vault_kms_configuration_invalid",
+                str(error),
+            ) from None
         for label, reference in (
             ("unsigned image", unsigned_image),
             ("wrong-key image", wrong_key_image),

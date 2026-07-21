@@ -10,9 +10,16 @@ restore drill, and audit-log retention/export expectations.
 - KMS reference: `hashivault://synara-worker-release`
 - Signer identity: `auth/approle/role/synara-worker-release-signer`
 - Transit audit request path: `transit/sign/synara-worker-release`
-- Transparency log: public Rekor at `https://rekor.sigstore.dev`
-- Admission policy: Kyverno `Enforce` + webhook `Fail`, checked in at
-  `deploy/kubernetes/security/cluster/verify-synara-worker-images.yaml`
+- Transparency log: online upload and verification against public Rekor at
+  `https://rekor.sigstore.dev`, with both the inclusion proof and signed entry
+  timestamp (SET) required; offline or ignored-tlog verification is not an
+  approved release path.
+- Admission policy: Kyverno `Enforce` + webhook `Fail`, `mutateDigest=true`,
+  `verifyDigest=true`, and `ignoreTlog=false`, checked in at
+  `deploy/kubernetes/security/cluster/verify-synara-worker-images.yaml`.
+- Exact-digest admission uses the live `synara-system/synara-worker-cosign-public-key`
+  public-key bundle and `synara-system/synara-worker-signing-settings` repository/tlog
+  boundary. A tag-only match or an unlogged signature is insufficient.
 
 ## Transit key lifecycle
 

@@ -33,6 +33,7 @@ VERSION = "0.5.4"
 DIGEST = "sha256:" + "1" * 64
 TAG_DRIFT_DIGEST = "sha256:" + "2" * 64
 IMAGE_REPOSITORY = "registry.example.test/synara/worker"
+TAG_DRIFT_TAG = "synara-stage3-tag-drift-0123456789abcdef"
 PUBLIC_KEY = "-----BEGIN PUBLIC KEY-----\nQUJD\n-----END PUBLIC KEY-----\n"
 VAULT_IMAGE_REFERENCE = gate._load_vault_baseline(REPO_ROOT)["imageReference"]
 DEFAULT_REGISTRY_ACCESS = {
@@ -85,7 +86,7 @@ def gate_options(
         signed_image_ref=None,
         unsigned_image_ref=f"{IMAGE_REPOSITORY}@{'sha256:' + '3' * 64}",
         wrong_key_image_ref=f"{IMAGE_REPOSITORY}@{'sha256:' + '4' * 64}",
-        tag_drift_image_ref=f"{IMAGE_REPOSITORY}:latest",
+        tag_drift_image_ref=f"{IMAGE_REPOSITORY}:{TAG_DRIFT_TAG}",
         admission_mode=admission_mode,
         kubectl_bin="kubectl",
         vault_bin="vault",
@@ -864,6 +865,43 @@ def vault_json_side_effect() -> list[dict[str, Any]]:
 
 
 class ParseArgsTest(unittest.TestCase):
+    def _parse_args_with_tag_drift(
+        self,
+        tag_drift_image_ref: str,
+    ) -> gate.GateOptions:
+        with tempfile.TemporaryDirectory() as directory:
+            return gate.parse_args(
+                [
+                    "--kube-context",
+                    "test-context",
+                    "--vault-namespace",
+                    "vault-system",
+                    "--security-namespace",
+                    "synara-system",
+                    "--admission-test-namespace",
+                    "synara-admission",
+                    "--expected-approle-policy",
+                    "default",
+                    "--registry-release-gate-report",
+                    str(pathlib.Path(directory) / "release.json"),
+                    "--unsigned-image-ref",
+                    f"{IMAGE_REPOSITORY}@{'sha256:' + '3' * 64}",
+                    "--wrong-key-image-ref",
+                    f"{IMAGE_REPOSITORY}@{'sha256:' + '4' * 64}",
+                    "--tag-drift-image-ref",
+                    tag_drift_image_ref,
+                ]
+            )
+
+    def _assert_parse_args_rejected(self, tag_drift_image_ref: str, message: str) -> None:
+        with (
+            contextlib.redirect_stderr(io.StringIO()) as stderr,
+            self.assertRaises(SystemExit) as caught,
+        ):
+            self._parse_args_with_tag_drift(tag_drift_image_ref)
+        self.assertEqual(caught.exception.code, 2)
+        self.assertIn(message, stderr.getvalue())
+
     def test_accepts_standard_executable_names_and_paths(self) -> None:
         self.assertEqual(gate.normalize_executable("kubectl", "--kubectl-bin"), "kubectl")
         self.assertEqual(gate.normalize_executable("vault", "--vault-bin"), "vault")
@@ -877,6 +915,29 @@ class ParseArgsTest(unittest.TestCase):
         for invalid in ("kubectl\r", "kubectl\n", "kubectl\t", "kubectl\x00"):
             with self.subTest(invalid=repr(invalid)), self.assertRaises(ValueError):
                 gate.normalize_executable(invalid, "--kubectl-bin")
+
+    def test_accepts_gate_owned_run_scoped_tag_drift_reference(self) -> None:
+        options = self._parse_args_with_tag_drift(f"{IMAGE_REPOSITORY}:{TAG_DRIFT_TAG}")
+        self.assertEqual(options.tag_drift_image_ref, f"{IMAGE_REPOSITORY}:{TAG_DRIFT_TAG}")
+
+    def test_rejects_latest_tag_drift_reference(self) -> None:
+        self._assert_parse_args_rejected(
+            f"{IMAGE_REPOSITORY}:latest",
+            "--tag-drift-image-ref must not use the mutable latest tag",
+        )
+
+    def test_rejects_non_run_scoped_tag_drift_reference(self) -> None:
+        self._assert_parse_args_rejected(
+            f"{IMAGE_REPOSITORY}:stage3-negative-test",
+            "--tag-drift-image-ref must use a gate-owned run-scoped tag starting with "
+            f"'{gate.TAG_DRIFT_IMAGE_TAG_PREFIX}'",
+        )
+
+    def test_rejects_digest_pinned_tag_drift_reference(self) -> None:
+        self._assert_parse_args_rejected(
+            f"{IMAGE_REPOSITORY}@{'sha256:' + '5' * 64}",
+            "--tag-drift-image-ref must not be digest-pinned",
+        )
 
     def test_rejects_duplicate_expected_approle_policies(self) -> None:
         with (
@@ -905,7 +966,7 @@ class ParseArgsTest(unittest.TestCase):
                     "--wrong-key-image-ref",
                     f"{IMAGE_REPOSITORY}@{'sha256:' + '4' * 64}",
                     "--tag-drift-image-ref",
-                    f"{IMAGE_REPOSITORY}:latest",
+                    f"{IMAGE_REPOSITORY}:{TAG_DRIFT_TAG}",
                 ]
             )
         self.assertEqual(caught.exception.code, 2)

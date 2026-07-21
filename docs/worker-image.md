@@ -269,9 +269,12 @@ python3 scripts/stage3-provider-acceptance/vault_kms_admission_gate.py \
   --registry-release-gate-report /tmp/synara-worker-registry-release/worker-registry-release-gate.json \
   --unsigned-image-ref 192.168.139.3:5443/synara/worker@sha256:<unsigned-digest> \
   --wrong-key-image-ref 192.168.139.3:5443/synara/worker@sha256:<wrong-key-digest> \
-  --tag-drift-image-ref 192.168.139.3:5443/synara/worker:latest \
+  --tag-drift-image-ref 192.168.139.3:5443/synara/worker:synara-stage3-tag-drift-<unique-run-id> \
   --output-dir /tmp/synara-worker-vault-kms-admission
 ```
+
+The tag-drift probe must use a gate-owned run-scoped tag that resolves to a non-baseline digest and is removed by
+exact ownership after the run. It must not read, replace, or reuse `latest`.
 
 The production Vault deployment is pinned to Helm chart `hashicorp/vault` `0.34.0`, release `synara-vault`,
 namespace `synara-kms`, and image

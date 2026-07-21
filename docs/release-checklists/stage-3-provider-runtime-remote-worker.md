@@ -142,9 +142,11 @@ python3 scripts/stage3-provider-acceptance/vault_kms_admission_gate.py \
   --registry-release-gate-report /tmp/synara-worker-registry-release/worker-registry-release-gate.json \
   --unsigned-image-ref 192.168.139.3:5443/synara/worker@sha256:<unsigned-digest> \
   --wrong-key-image-ref 192.168.139.3:5443/synara/worker@sha256:<wrong-key-digest> \
-  --tag-drift-image-ref 192.168.139.3:5443/synara/worker:latest \
+  --tag-drift-image-ref 192.168.139.3:5443/synara/worker:synara-stage3-tag-drift-<unique-run-id> \
   --output-dir /tmp/synara-worker-vault-kms-admission
 
+# `synara-stage3-tag-drift-<unique-run-id>` must resolve to a non-baseline Digest, be owned by this run,
+# and be removed exactly after the gate. Never read, replace, or reuse `latest`.
 python3 scripts/stage3-provider-acceptance/vault_snapshot_restore_drill.py \
   --vault-bin "$SYNARA_STAGE3_KMS_RUNTIME/bin/vault-kubectl-active" \
   --output-dir /tmp/synara-worker-vault-snapshot-restore
