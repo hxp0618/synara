@@ -171,6 +171,8 @@ def runner_options(options: GateOptions) -> acceptance.RunnerOptions:
     return dataclasses.replace(
         acceptance.parse_args(arguments),
         load_waves=options.load_waves,
+        worker_lease_ttl=ROLLOUT_WORKER_LEASE_TTL,
+        worker_heartbeat_timeout=ROLLOUT_WORKER_HEARTBEAT_TIMEOUT,
     )
 
 
@@ -206,8 +208,8 @@ class KubernetesWorkerReleaseRolloutDriver(acceptance.KubernetesDriver):
         environment = super()._control_plane_environment()
         environment.update(
             {
-                "SYNARA_WORKER_LEASE_TTL": ROLLOUT_WORKER_LEASE_TTL,
-                "SYNARA_WORKER_HEARTBEAT_TIMEOUT": ROLLOUT_WORKER_HEARTBEAT_TIMEOUT,
+                "SYNARA_WORKER_LEASE_TTL": self.options.worker_lease_ttl,
+                "SYNARA_WORKER_HEARTBEAT_TIMEOUT": self.options.worker_heartbeat_timeout,
             }
         )
         return environment
@@ -262,8 +264,8 @@ class KubernetesWorkerReleaseRolloutDriver(acceptance.KubernetesDriver):
             "controlPlane": {
                 **dict(control_plane),
                 "workerTiming": {
-                    "leaseTtl": ROLLOUT_WORKER_LEASE_TTL,
-                    "heartbeatTimeout": ROLLOUT_WORKER_HEARTBEAT_TIMEOUT,
+                    "leaseTtl": self.options.worker_lease_ttl,
+                    "heartbeatTimeout": self.options.worker_heartbeat_timeout,
                 },
             },
             "docker": {

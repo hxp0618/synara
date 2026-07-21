@@ -160,6 +160,20 @@ class DriverConfigurationTest(unittest.TestCase):
         self.addCleanup(driver._release_state)
         return driver
 
+    def test_control_plane_uses_production_worker_timing(self) -> None:
+        driver = self.build_driver()
+
+        environment = driver._control_plane_environment()
+
+        self.assertEqual(
+            environment["SYNARA_WORKER_LEASE_TTL"],
+            gate.REAL_PROVIDER_ROLLOUT_WORKER_LEASE_TTL,
+        )
+        self.assertEqual(
+            environment["SYNARA_WORKER_HEARTBEAT_TIMEOUT"],
+            gate.REAL_PROVIDER_ROLLOUT_WORKER_HEARTBEAT_TIMEOUT,
+        )
+
     def test_provision_targets_enable_only_requested_provider(self) -> None:
         driver = self.build_driver()
         driver.images = {

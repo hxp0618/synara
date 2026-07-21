@@ -73,6 +73,11 @@ class ParseArgsTest(unittest.TestCase):
         self.assertEqual(runner.suite, "fixture")
         self.assertEqual(runner.load_waves, gate.DEFAULT_LOAD_WAVES)
         self.assertEqual(runner.kind_worker_nodes, 2)
+        self.assertEqual(runner.worker_lease_ttl, gate.ROLLOUT_WORKER_LEASE_TTL)
+        self.assertEqual(
+            runner.worker_heartbeat_timeout,
+            gate.ROLLOUT_WORKER_HEARTBEAT_TIMEOUT,
+        )
         self.assertTrue(runner.kubernetes_skip_worker_build)
         self.assertEqual(
             runner.kubernetes_worker_image,
