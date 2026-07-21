@@ -23,7 +23,7 @@ export interface PendingThreadRequestIds {
 }
 
 export type PendingThreadRequestKind = "approval" | "user-input";
-export type ApprovalRequestKind = "command" | "file-read" | "file-change";
+export type ApprovalRequestKind = "command" | "file-read" | "file-change" | "network" | "tool";
 
 export function pendingRequestInstanceKey(requestId: string, lifecycleGeneration?: string): string {
   return `${requestId}\u0000${lifecycleGeneration ?? "legacy"}`;
@@ -65,6 +65,12 @@ export function approvalRequestKindFromRequestType(
     case "file_change_approval":
     case "apply_patch_approval":
       return "file-change";
+    case "auth_tokens_refresh":
+      return "network";
+    case "dynamic_tool_call":
+    case "tool_user_input":
+    case "unknown":
+      return "tool";
     default:
       return null;
   }
@@ -93,27 +99,70 @@ function lifecycleGenerationFromPayload(
   return typeof generation === "string" && generation.length > 0 ? generation : undefined;
 }
 
+function interactionIdFromPayload(payload: Record<string, unknown> | null): string | undefined {
+  const interactionId = payload?.interactionId;
+  return typeof interactionId === "string" && interactionId.trim().length > 0
+    ? interactionId.trim()
+    : undefined;
+}
+
+interface OpenThreadRequest {
+  requestId: string;
+  durable: boolean;
+}
+
+function durableRequestInstanceKey(interactionId: string): string {
+  return `interaction:${interactionId}`;
+}
+
 function deleteOpenRequest(
-  openRequests: Map<string, string>,
+  openRequests: Map<string, OpenThreadRequest>,
   requestId: string,
   lifecycleGeneration: string | undefined,
+  interactionId: string | undefined,
+  durableLifecycle: boolean,
 ): void {
-  if (lifecycleGeneration !== undefined) {
-    openRequests.delete(pendingRequestInstanceKey(requestId, lifecycleGeneration));
+  if (interactionId !== undefined) {
+    openRequests.delete(durableRequestInstanceKey(interactionId));
     return;
   }
-  for (const [key, openRequestId] of openRequests) {
-    if (openRequestId === requestId) openRequests.delete(key);
+  if (lifecycleGeneration !== undefined) {
+    openRequests.delete(
+      durableLifecycle
+        ? durableRequestInstanceKey(lifecycleGeneration)
+        : pendingRequestInstanceKey(requestId, lifecycleGeneration),
+    );
+    return;
+  }
+  for (const [key, openRequest] of openRequests) {
+    if (openRequest.requestId === requestId) openRequests.delete(key);
   }
 }
 
 function replaceOpenRequest(
-  openRequests: Map<string, string>,
+  openRequests: Map<string, OpenThreadRequest>,
   requestId: string,
   lifecycleGeneration: string | undefined,
+  interactionId: string | undefined,
+  durableLifecycle: boolean,
 ): void {
-  deleteOpenRequest(openRequests, requestId, undefined);
-  openRequests.set(pendingRequestInstanceKey(requestId, lifecycleGeneration), requestId);
+  const durableInstanceId = interactionId ?? (durableLifecycle ? lifecycleGeneration : undefined);
+  if (durableInstanceId !== undefined) {
+    openRequests.set(durableRequestInstanceKey(durableInstanceId), {
+      requestId,
+      durable: true,
+    });
+    return;
+  }
+  for (const [key, openRequest] of openRequests) {
+    if (!openRequest.durable && openRequest.requestId === requestId) {
+      openRequests.delete(key);
+    }
+  }
+  openRequests.set(pendingRequestInstanceKey(requestId, lifecycleGeneration), {
+    requestId,
+    durable: false,
+  });
 }
 
 export function buildStalePendingRequestFailureDetail(
@@ -187,30 +236,51 @@ export function derivePendingThreadRequestIds(input: {
     Pick<OrchestrationThreadActivity, "createdAt" | "id" | "kind" | "payload" | "sequence">
   >;
 }): PendingThreadRequestIds {
-  const openApprovals = new Map<string, string>();
-  const openUserInputs = new Map<string, string>();
+  const openApprovals = new Map<string, OpenThreadRequest>();
+  const openUserInputs = new Map<string, OpenThreadRequest>();
   const orderedActivities = [...input.activities].toSorted(compareActivitiesByOrder);
   for (const activity of orderedActivities) {
     const payload = toPayloadRecord(activity.payload);
     const requestId = typeof payload?.requestId === "string" ? payload.requestId : null;
     const detail = typeof payload?.detail === "string" ? payload.detail : undefined;
     const lifecycleGeneration = lifecycleGenerationFromPayload(payload);
+    const interactionId = interactionIdFromPayload(payload);
 
-    if (activity.kind === "approval.requested" && requestId) {
+    if (
+      (activity.kind === "approval.requested" || activity.kind === "request.opened") &&
+      requestId
+    ) {
       const requestKind =
         payload?.requestKind === "command" ||
         payload?.requestKind === "file-read" ||
-        payload?.requestKind === "file-change"
+        payload?.requestKind === "file-change" ||
+        payload?.requestKind === "network" ||
+        payload?.requestKind === "tool"
           ? payload.requestKind
           : approvalRequestKindFromRequestType(payload?.requestType);
       if (requestKind) {
-        replaceOpenRequest(openApprovals, requestId, lifecycleGeneration);
+        replaceOpenRequest(
+          openApprovals,
+          requestId,
+          lifecycleGeneration,
+          interactionId,
+          activity.kind === "request.opened",
+        );
       }
       continue;
     }
 
-    if (activity.kind === "approval.resolved" && requestId) {
-      deleteOpenRequest(openApprovals, requestId, lifecycleGeneration);
+    if (
+      (activity.kind === "approval.resolved" || activity.kind === "request.resolved") &&
+      requestId
+    ) {
+      deleteOpenRequest(
+        openApprovals,
+        requestId,
+        lifecycleGeneration,
+        interactionId,
+        activity.kind === "request.resolved",
+      );
       continue;
     }
 
@@ -219,19 +289,31 @@ export function derivePendingThreadRequestIds(input: {
       requestId &&
       isStalePendingRequestFailureDetail(detail)
     ) {
-      deleteOpenRequest(openApprovals, requestId, lifecycleGeneration);
+      deleteOpenRequest(openApprovals, requestId, lifecycleGeneration, interactionId, false);
       continue;
     }
 
     if (activity.kind === "user-input.requested" && requestId) {
       if (hasStructuredUserInputQuestions(payload)) {
-        replaceOpenRequest(openUserInputs, requestId, lifecycleGeneration);
+        replaceOpenRequest(
+          openUserInputs,
+          requestId,
+          lifecycleGeneration,
+          interactionId,
+          interactionId !== undefined,
+        );
       }
       continue;
     }
 
     if (activity.kind === "user-input.resolved" && requestId) {
-      deleteOpenRequest(openUserInputs, requestId, lifecycleGeneration);
+      deleteOpenRequest(
+        openUserInputs,
+        requestId,
+        lifecycleGeneration,
+        interactionId,
+        interactionId !== undefined,
+      );
       continue;
     }
 
@@ -240,13 +322,13 @@ export function derivePendingThreadRequestIds(input: {
       requestId &&
       isStalePendingRequestFailureDetail(detail)
     ) {
-      deleteOpenRequest(openUserInputs, requestId, lifecycleGeneration);
+      deleteOpenRequest(openUserInputs, requestId, lifecycleGeneration, interactionId, false);
     }
   }
 
   return {
-    approvalRequestIds: [...openApprovals.values()],
-    userInputRequestIds: [...openUserInputs.values()],
+    approvalRequestIds: [...openApprovals.values()].map((request) => request.requestId),
+    userInputRequestIds: [...openUserInputs.values()].map((request) => request.requestId),
   };
 }
 

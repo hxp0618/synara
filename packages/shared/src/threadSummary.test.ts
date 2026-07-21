@@ -9,7 +9,11 @@ import {
 } from "@synara/contracts";
 import { describe, expect, it } from "vitest";
 
-import { approvalRequestKindFromRequestType, deriveThreadSummaryMetadata } from "./threadSummary";
+import {
+  approvalRequestKindFromRequestType,
+  derivePendingThreadRequestIds,
+  deriveThreadSummaryMetadata,
+} from "./threadSummary";
 
 describe("approvalRequestKindFromRequestType", () => {
   it.each([
@@ -18,7 +22,10 @@ describe("approvalRequestKindFromRequestType", () => {
     ["file_read_approval", "file-read"],
     ["file_change_approval", "file-change"],
     ["apply_patch_approval", "file-change"],
-    ["unknown", null],
+    ["auth_tokens_refresh", "network"],
+    ["dynamic_tool_call", "tool"],
+    ["tool_user_input", "tool"],
+    ["unknown", "tool"],
     [null, null],
   ] as const)("maps %s to %s", (requestType, expected) => {
     expect(approvalRequestKindFromRequestType(requestType)).toBe(expected);
@@ -290,6 +297,13 @@ describe("deriveThreadSummaryMetadata", () => {
     ];
 
     expect(
+      derivePendingThreadRequestIds({ activities: activities.slice(0, 2) }).approvalRequestIds,
+    ).toEqual(["reused-approval"]);
+    expect(
+      derivePendingThreadRequestIds({ activities: activities.slice(3, 5) }).userInputRequestIds,
+    ).toEqual(["reused-input"]);
+
+    expect(
       deriveThreadSummaryMetadata({
         messages: [],
         activities,
@@ -300,6 +314,95 @@ describe("deriveThreadSummaryMetadata", () => {
       hasPendingApprovals: true,
       hasPendingUserInput: true,
     });
+  });
+
+  it("tracks canonical durable approval request lifecycles", () => {
+    const opened: OrchestrationThreadActivity = {
+      id: EventId.makeUnsafe("durable-approval-opened"),
+      tone: "approval",
+      kind: "request.opened",
+      summary: "Approval required",
+      payload: {
+        requestId: "durable-approval-1",
+        requestKind: "command",
+        lifecycleGeneration: "interaction-1",
+      },
+      sequence: 1,
+      turnId: TurnId.makeUnsafe("turn-1"),
+      createdAt: "2026-02-27T00:01:00.000Z",
+    };
+    const resolved: OrchestrationThreadActivity = {
+      id: EventId.makeUnsafe("durable-approval-resolved"),
+      tone: "info",
+      kind: "request.resolved",
+      summary: "Approval resolved",
+      payload: {
+        requestId: "durable-approval-1",
+        lifecycleGeneration: "interaction-1",
+      },
+      sequence: 2,
+      turnId: TurnId.makeUnsafe("turn-1"),
+      createdAt: "2026-02-27T00:02:00.000Z",
+    };
+    const derive = (activities: OrchestrationThreadActivity[]) =>
+      deriveThreadSummaryMetadata({
+        messages: [],
+        activities,
+        proposedPlans: [],
+        latestTurn: null,
+      });
+
+    expect(derive([opened]).hasPendingApprovals).toBe(true);
+    expect(derive([opened, resolved]).hasPendingApprovals).toBe(false);
+  });
+
+  it("keeps durable instances with one request id distinct and resolves only the matching one", () => {
+    const opened = (interactionId: string, sequence: number): OrchestrationThreadActivity => ({
+      id: EventId.makeUnsafe(`durable-opened-${interactionId}`),
+      tone: "approval",
+      kind: "request.opened",
+      summary: "Approval required",
+      payload: {
+        requestId: "reused-durable-request",
+        requestKind: "tool",
+        interactionId,
+        lifecycleGeneration: interactionId,
+      },
+      sequence,
+      turnId: TurnId.makeUnsafe("turn-1"),
+      createdAt: `2026-02-27T00:0${sequence}:00.000Z`,
+    });
+    const first = opened("interaction-a", 1);
+    const firstReplay = {
+      ...first,
+      id: EventId.makeUnsafe("durable-opened-interaction-a-replayed"),
+      sequence: 2,
+      createdAt: "2026-02-27T00:02:00.000Z",
+    };
+    const second = opened("interaction-b", 3);
+    const resolveFirst: OrchestrationThreadActivity = {
+      id: EventId.makeUnsafe("durable-resolved-interaction-a"),
+      tone: "info",
+      kind: "request.resolved",
+      summary: "Approval resolved",
+      payload: {
+        requestId: "reused-durable-request",
+        interactionId: "interaction-a",
+        lifecycleGeneration: "interaction-a",
+      },
+      sequence: 4,
+      turnId: TurnId.makeUnsafe("turn-1"),
+      createdAt: "2026-02-27T00:04:00.000Z",
+    };
+
+    expect(
+      derivePendingThreadRequestIds({ activities: [first, firstReplay, second] })
+        .approvalRequestIds,
+    ).toEqual(["reused-durable-request", "reused-durable-request"]);
+    expect(
+      derivePendingThreadRequestIds({ activities: [first, firstReplay, second, resolveFirst] })
+        .approvalRequestIds,
+    ).toEqual(["reused-durable-request"]);
   });
 
   it("ignores malformed user-input questions that the UI could not render", () => {

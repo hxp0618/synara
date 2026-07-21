@@ -3,7 +3,12 @@ import { describe, expect, it } from "vitest";
 import type { OrchestrationReadModel, OrchestrationShellSnapshot } from "@synara/contracts";
 
 import type { AppState } from "./store";
-import { syncAuthoritativeProjection, syncServerReadModel, syncServerShellSnapshot } from "./store";
+import {
+  setProjectionAuthority,
+  syncAuthoritativeProjection,
+  syncServerReadModel,
+  syncServerShellSnapshot,
+} from "./store";
 import { getThreadsFromState } from "./threadDerivation";
 import type { Project, Thread } from "./types";
 
@@ -82,5 +87,40 @@ describe("syncAuthoritativeProjection", () => {
 
     expect(syncServerShellSnapshot(authoritative, shellSnapshot)).toBe(authoritative);
     expect(syncServerReadModel(authoritative, readModel)).toBe(authoritative);
+  });
+
+  it("accepts local snapshots after auth-loss or Tenant-switch teardown demotes authority", () => {
+    const authoritative = syncAuthoritativeProjection(
+      {
+        projects: [],
+        sidebarThreadSummaryById: {},
+        threadsHydrated: false,
+      },
+      [project],
+      [thread],
+    );
+    const demoted = setProjectionAuthority(authoritative, "local");
+    const cleared = syncAuthoritativeProjection(demoted, [], []);
+    const localSnapshot = {
+      snapshotSequence: 2,
+      updatedAt: "2026-07-12T00:02:00Z",
+      projects: [
+        {
+          id: "local-project-after-teardown" as OrchestrationShellSnapshot["projects"][number]["id"],
+          title: "Local project",
+          workspaceRoot: "/tmp/local-project",
+          defaultModelSelection: null,
+          createdAt: "2026-07-12T00:00:00Z",
+          updatedAt: "2026-07-12T00:02:00Z",
+          scripts: [],
+        },
+      ],
+      threads: [],
+    } satisfies OrchestrationShellSnapshot;
+
+    expect(cleared.projectionAuthority).toBe("local");
+    expect(syncServerShellSnapshot(cleared, localSnapshot).projects.map((item) => item.id)).toEqual(
+      ["local-project-after-teardown"],
+    );
   });
 });

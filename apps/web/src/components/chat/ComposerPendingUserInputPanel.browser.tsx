@@ -17,10 +17,12 @@ const REPLACEMENT_REQUEST_ID = ApprovalRequestId.makeUnsafe("user-input-request-
 function makePrompt(
   requestId: ApprovalRequestId = FIRST_REQUEST_ID,
   multiSelect = false,
+  lifecycleGeneration = "generation-1",
 ): PendingUserInput {
   return {
     requestId,
-    requestKey: `execution-1:${requestId}`,
+    requestKey: `execution-1:${requestId}:${lifecycleGeneration}`,
+    lifecycleGeneration,
     executionId: "execution-1",
     createdAt: "2026-07-18T10:00:00.000Z",
     questions: [
@@ -119,6 +121,21 @@ describe("ComposerPendingUserInputPanel", () => {
       await expect
         .element(page.getByText("Choose the deterministic acceptance answer."))
         .toBeInTheDocument();
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("remounts when the same request ID advances to a replacement generation", async () => {
+    const mounted = renderPanel();
+    const screen = await render(mounted.element(mounted.prompt));
+
+    try {
+      await page.getByRole("button", { name: /Continue/u }).click();
+      await screen.rerender(mounted.element(makePrompt(FIRST_REQUEST_ID, false, "generation-2")));
+      await new Promise((resolve) => window.setTimeout(resolve, 250));
+
+      expect(mounted.onAdvance).not.toHaveBeenCalled();
     } finally {
       await screen.unmount();
     }

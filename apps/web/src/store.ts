@@ -21,6 +21,8 @@ import {
   evictThreadDetailFromClientState,
   removeDeletedProjectFromClientState,
   removeDeletedThreadFromClientState,
+  setProjectionAuthority,
+  syncAuthoritativeProjection,
   syncServerReadModel,
   syncServerShellSnapshot,
   syncServerThreadDetail,
@@ -34,7 +36,7 @@ import {
   rememberProjectUiState,
 } from "./storePersistence";
 import { initialState, type AppState } from "./storeState";
-import type { Project, ThreadWorkspacePatch } from "./types";
+import type { Project, Thread, ThreadWorkspacePatch } from "./types";
 
 type ReadModelThread = OrchestrationReadModel["threads"][number];
 
@@ -45,6 +47,8 @@ export {
   evictThreadDetailFromClientState,
   removeDeletedProjectFromClientState,
   removeDeletedThreadFromClientState,
+  setProjectionAuthority,
+  syncAuthoritativeProjection,
   syncServerReadModel,
   syncServerShellSnapshot,
   syncServerThreadDetail,
@@ -250,6 +254,11 @@ export function setThreadWorkspace(
 // ── Zustand store ────────────────────────────────────────────────────
 
 interface AppStore extends AppState {
+  syncAuthoritativeProjection: (
+    projects: ReadonlyArray<Project>,
+    threads: ReadonlyArray<Thread>,
+  ) => void;
+  setProjectionAuthority: (authority: "local" | "control-plane") => void;
   syncServerShellSnapshot: (snapshot: OrchestrationShellSnapshot) => void;
   syncServerThreadDetail: (thread: ReadModelThread) => void;
   syncServerThreadDetailHotPath: (thread: ReadModelThread) => void;
@@ -274,18 +283,28 @@ interface AppStore extends AppState {
 
 export const useStore = create<AppStore>((set) => ({
   ...readPersistedState(initialState),
+  syncAuthoritativeProjection: (projects, threads) =>
+    set((state) => syncAuthoritativeProjection(state, projects, threads)),
+  setProjectionAuthority: (authority) => set((state) => setProjectionAuthority(state, authority)),
   syncServerShellSnapshot: (snapshot) => set((state) => syncServerShellSnapshot(state, snapshot)),
   syncServerThreadDetail: (thread) => set((state) => syncServerThreadDetail(state, thread)),
   syncServerThreadDetailHotPath: (thread) =>
     set((state) => syncServerThreadDetailHotPath(state, thread)),
   syncServerReadModel: (readModel) => set((state) => syncServerReadModel(state, readModel)),
   applyShellEvent: (event) => set((state) => applyShellEvent(state, event)),
-  applyOrchestrationEvents: (events) => set((state) => applyOrchestrationEvents(state, events)),
+  applyOrchestrationEvents: (events) =>
+    set((state) =>
+      state.projectionAuthority === "control-plane"
+        ? state
+        : applyOrchestrationEvents(state, events),
+    ),
   applyOrchestrationEventsHotPath: (events) =>
     set((state) =>
-      applyOrchestrationEventsHotPath(state, events, {
-        updateSidebarSummary: false,
-      }),
+      state.projectionAuthority === "control-plane"
+        ? state
+        : applyOrchestrationEventsHotPath(state, events, {
+            updateSidebarSummary: false,
+          }),
     ),
   evictThreadDetail: (threadId) =>
     set((state) => evictThreadDetailFromClientState(state, threadId)),

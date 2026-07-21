@@ -40,6 +40,7 @@ export function projectPendingControlPlaneInteractions(
       ...interaction.payload,
       interactionId: interaction.id,
       requestId: interaction.requestId,
+      lifecycleGeneration: interaction.id,
       executionId: interaction.executionId,
     } as OrchestrationThreadActivity["payload"],
     turnId: null,

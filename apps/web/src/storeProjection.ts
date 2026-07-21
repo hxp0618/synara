@@ -14,6 +14,7 @@ import { deriveThreadSummaryMetadata } from "@synara/shared/threadSummary";
 
 import { getThreadFromState, getThreadsFromState } from "./threadDerivation";
 import {
+  arraysShallowEqual,
   capThreadActivities,
   dedupeActivitiesById,
   deepEqualJson,
@@ -48,6 +49,7 @@ import {
   EMPTY_TURN_DIFF_BY_THREAD,
   EMPTY_TURN_DIFF_IDS_BY_THREAD,
   type AppState,
+  type ProjectionAuthority,
 } from "./storeState";
 import type {
   ChatMessage,
@@ -61,6 +63,14 @@ import type {
 
 type ReadModelThread = OrchestrationReadModel["threads"][number];
 export type ProjectMatchPolicy = "id-only" | "id-or-cwd";
+
+function projectionAuthority(state: AppState): ProjectionAuthority {
+  return state.projectionAuthority ?? "local";
+}
+
+function controlPlaneProjectionActive(state: AppState): boolean {
+  return projectionAuthority(state) === "control-plane";
+}
 
 function toThreadShell(thread: Thread): ThreadShell {
   return {
@@ -300,6 +310,39 @@ function ensureThreadRegistered(state: AppState, threadId: ThreadId): AppState {
     ...state,
     threadIds: [...threadIds, threadId],
   };
+}
+
+function authoritativeProjectsEqual(left: Project | undefined, right: Project): boolean {
+  return (
+    left !== undefined &&
+    left.id === right.id &&
+    left.kind === right.kind &&
+    left.name === right.name &&
+    left.remoteName === right.remoteName &&
+    left.folderName === right.folderName &&
+    left.localName === right.localName &&
+    left.cwd === right.cwd &&
+    deepEqualJson(left.defaultModelSelection ?? null, right.defaultModelSelection ?? null) &&
+    left.expanded === right.expanded &&
+    (left.isPinned ?? false) === (right.isPinned ?? false) &&
+    left.createdAt === right.createdAt &&
+    left.updatedAt === right.updatedAt &&
+    deepEqualJson(left.scripts, right.scripts)
+  );
+}
+
+function normalizeAuthoritativeProjects(
+  projects: ReadonlyArray<Project>,
+  previous: ReadonlyArray<Project>,
+): Project[] {
+  const previousById = new Map(previous.map((project) => [project.id, project] as const));
+  const nextProjects = projects.map((project) => {
+    const existing = previousById.get(project.id);
+    return existing !== undefined && authoritativeProjectsEqual(existing, project)
+      ? existing
+      : project;
+  });
+  return arraysShallowEqual(previous, nextProjects) ? (previous as Project[]) : nextProjects;
 }
 
 function retainThreadScopedRecord<T>(
@@ -747,10 +790,117 @@ export function applyThreadUpdate(
   });
 }
 
+export function setProjectionAuthority(state: AppState, authority: ProjectionAuthority): AppState {
+  return projectionAuthority(state) === authority
+    ? state
+    : { ...state, projectionAuthority: authority };
+}
+
+export function syncAuthoritativeProjection(
+  state: AppState,
+  projects: ReadonlyArray<Project>,
+  threads: ReadonlyArray<Thread>,
+): AppState {
+  rememberProjectUiState(state.projects);
+  rememberProjectLocalNames(state.projects);
+  const deletedProjectIdsById = state.deletedProjectIdsById ?? {};
+  const deletedThreadIdsById = state.deletedThreadIdsById ?? {};
+  const normalizedProjects = normalizeAuthoritativeProjects(
+    projects.filter((project) => deletedProjectIdsById[project.id] !== true),
+    state.projects,
+  );
+  const nextThreads = threads
+    .filter(
+      (thread) =>
+        deletedProjectIdsById[thread.projectId] !== true &&
+        deletedThreadIdsById[thread.id] !== true,
+    )
+    .map(withDerivedThreadStateSignals);
+  const nextThreadIds = new Set(nextThreads.map((thread) => thread.id));
+
+  let normalizedState: AppState = {
+    ...state,
+    threadIds: [],
+    threadShellById: retainThreadScopedRecord(state.threadShellById, nextThreadIds),
+    threadSessionById: retainThreadScopedRecord(state.threadSessionById, nextThreadIds),
+    threadTurnStateById: retainThreadScopedRecord(state.threadTurnStateById, nextThreadIds),
+    messageIdsByThreadId: retainThreadScopedRecord(state.messageIdsByThreadId, nextThreadIds),
+    messageByThreadId: retainThreadScopedRecord(state.messageByThreadId, nextThreadIds),
+    activityIdsByThreadId: retainThreadScopedRecord(state.activityIdsByThreadId, nextThreadIds),
+    activityByThreadId: retainThreadScopedRecord(state.activityByThreadId, nextThreadIds),
+    proposedPlanIdsByThreadId: retainThreadScopedRecord(
+      state.proposedPlanIdsByThreadId,
+      nextThreadIds,
+    ),
+    proposedPlanByThreadId: retainThreadScopedRecord(state.proposedPlanByThreadId, nextThreadIds),
+    turnDiffIdsByThreadId: retainThreadScopedRecord(state.turnDiffIdsByThreadId, nextThreadIds),
+    turnDiffSummaryByThreadId: retainThreadScopedRecord(
+      state.turnDiffSummaryByThreadId,
+      nextThreadIds,
+    ),
+  };
+  for (const thread of nextThreads) {
+    normalizedState = writeThreadState(
+      normalizedState,
+      thread,
+      getThreadFromState(state, thread.id),
+    );
+  }
+  const normalizedThreadList = getThreadsFromState(normalizedState);
+  const nextSidebarThreadSummaryById = Object.fromEntries(
+    normalizedThreadList.map((thread) => [
+      thread.id,
+      buildSidebarThreadSummary(thread, state.sidebarThreadSummaryById[thread.id]),
+    ]),
+  ) as Record<string, SidebarThreadSummary>;
+  const sidebarThreadSummaryById = recordsShallowEqual(
+    state.sidebarThreadSummaryById,
+    nextSidebarThreadSummaryById,
+  )
+    ? state.sidebarThreadSummaryById
+    : nextSidebarThreadSummaryById;
+  const nextProjectionAuthority: ProjectionAuthority =
+    controlPlaneProjectionActive(state) || normalizedProjects.length > 0 || nextThreads.length > 0
+      ? "control-plane"
+      : projectionAuthority(state);
+
+  if (
+    normalizedProjects === state.projects &&
+    sidebarThreadSummaryById === state.sidebarThreadSummaryById &&
+    normalizedState.threadIds === state.threadIds &&
+    normalizedState.threadShellById === state.threadShellById &&
+    normalizedState.threadSessionById === state.threadSessionById &&
+    normalizedState.threadTurnStateById === state.threadTurnStateById &&
+    normalizedState.messageIdsByThreadId === state.messageIdsByThreadId &&
+    normalizedState.messageByThreadId === state.messageByThreadId &&
+    normalizedState.activityIdsByThreadId === state.activityIdsByThreadId &&
+    normalizedState.activityByThreadId === state.activityByThreadId &&
+    normalizedState.proposedPlanIdsByThreadId === state.proposedPlanIdsByThreadId &&
+    normalizedState.proposedPlanByThreadId === state.proposedPlanByThreadId &&
+    normalizedState.turnDiffIdsByThreadId === state.turnDiffIdsByThreadId &&
+    normalizedState.turnDiffSummaryByThreadId === state.turnDiffSummaryByThreadId &&
+    state.threadsHydrated &&
+    projectionAuthority(state) === nextProjectionAuthority
+  ) {
+    return state;
+  }
+
+  return {
+    ...normalizedState,
+    projects: normalizedProjects,
+    sidebarThreadSummaryById,
+    threadsHydrated: true,
+    projectionAuthority: nextProjectionAuthority,
+  };
+}
+
 export function syncServerShellSnapshot(
   state: AppState,
   snapshot: OrchestrationShellSnapshot,
 ): AppState {
+  if (controlPlaneProjectionActive(state)) {
+    return state;
+  }
   rememberProjectUiState(state.projects);
   rememberProjectLocalNames(state.projects);
   const deletedProjectIdsById = state.deletedProjectIdsById ?? {};
@@ -842,6 +992,9 @@ function syncServerThreadDetailWithOptions(
 }
 
 export function syncServerThreadDetail(state: AppState, thread: ReadModelThread): AppState {
+  if (controlPlaneProjectionActive(state)) {
+    return state;
+  }
   if (
     state.deletedProjectIdsById?.[thread.projectId] === true ||
     state.deletedThreadIdsById?.[thread.id] === true
@@ -852,6 +1005,9 @@ export function syncServerThreadDetail(state: AppState, thread: ReadModelThread)
 }
 
 export function syncServerThreadDetailHotPath(state: AppState, thread: ReadModelThread): AppState {
+  if (controlPlaneProjectionActive(state)) {
+    return state;
+  }
   if (
     state.deletedProjectIdsById?.[thread.projectId] === true ||
     state.deletedThreadIdsById?.[thread.id] === true
@@ -862,6 +1018,9 @@ export function syncServerThreadDetailHotPath(state: AppState, thread: ReadModel
 }
 
 export function applyShellEvent(state: AppState, event: OrchestrationShellStreamEvent): AppState {
+  if (controlPlaneProjectionActive(state)) {
+    return state;
+  }
   switch (event.kind) {
     case "project-upserted":
       return upsertProject(state, event.project, "id-or-cwd");
@@ -887,6 +1046,9 @@ export function applyShellEvent(state: AppState, event: OrchestrationShellStream
 }
 
 export function syncServerReadModel(state: AppState, readModel: OrchestrationReadModel): AppState {
+  if (controlPlaneProjectionActive(state)) {
+    return state;
+  }
   rememberProjectUiState(state.projects);
   rememberProjectLocalNames(state.projects);
   const deletedProjectIdsById = state.deletedProjectIdsById ?? {};

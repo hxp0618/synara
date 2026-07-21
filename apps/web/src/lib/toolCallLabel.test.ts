@@ -187,6 +187,19 @@ describe("deriveSynaraMcpToolTitle", () => {
 });
 
 describe("deriveReadableToolTitle", () => {
+  it.each([
+    ["network", "Network access"],
+    ["tool", "Tool call"],
+  ] as const)("humanizes %s approval requests", (requestKind, expected) => {
+    expect(
+      deriveReadableToolTitle({
+        title: "Tool call",
+        fallbackLabel: "Approval requested",
+        requestKind,
+      }),
+    ).toBe(expected);
+  });
+
   it("humanizes search commands even when wrapped in shell -lc", () => {
     expect(
       deriveReadableToolTitle({

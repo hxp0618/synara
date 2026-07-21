@@ -375,6 +375,8 @@ function humanizeRequestKind(
 ): string | null {
   if (requestKind === "file-read") return "Read";
   if (requestKind === "file-change" || itemType === "file_change") return "Edited";
+  if (requestKind === "network") return "Network access";
+  if (requestKind === "tool") return "Tool call";
   // Don't handle command types here — let humanizeCommandToolLabel produce more specific labels
   if (itemType === "web_search") return "Searched the web";
   if (itemType === "image_generation") return "Generated image";

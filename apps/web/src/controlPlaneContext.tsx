@@ -415,10 +415,8 @@ export function ControlPlaneProvider({ children }: { children: ReactNode }) {
       resourcesRef.current = { projects: [], sessions: [] };
       projectionRuntime.setScope("", []);
       setProjectionError(null);
-      if (availability === "local") {
-        useStore.getState().setProjectionAuthority("local");
-      }
       if (hadAuthoritativeProjectionRef.current || availability === "available") {
+        useStore.getState().setProjectionAuthority("local");
         useStore.getState().syncAuthoritativeProjection([], []);
       }
       hadAuthoritativeProjectionRef.current = false;
@@ -426,6 +424,7 @@ export function ControlPlaneProvider({ children }: { children: ReactNode }) {
     }
     authoritativeProjectionEnabledRef.current = true;
     hadAuthoritativeProjectionRef.current = true;
+    useStore.getState().setProjectionAuthority("control-plane");
     resourcesRef.current = { projects, sessions };
     projectionRuntime.setScope(`${activeTenantId}:${activeOrganizationId}`, sessions);
     setProjectionError(null);
@@ -509,6 +508,7 @@ export function ControlPlaneProvider({ children }: { children: ReactNode }) {
               projectionRuntime.setScope("", []);
               setStreamStatusBySessionId({});
               setProjectionError(null);
+              useStore.getState().setProjectionAuthority("local");
               useStore.getState().syncAuthoritativeProjection([], []);
             },
             clearProjectDrafts: (projectId) =>

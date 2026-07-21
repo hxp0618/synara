@@ -124,6 +124,82 @@ describe("derivePendingApprovals", () => {
     ]);
   });
 
+  it("keeps durable interactions with the same provider request ID isolated", () => {
+    const activities: OrchestrationThreadActivity[] = [
+      makeActivity({
+        id: "durable-approval-1",
+        createdAt: "2026-02-23T00:00:01.000Z",
+        kind: "request.opened",
+        summary: "Approval required",
+        tone: "approval",
+        payload: {
+          interactionId: "interaction-1",
+          requestId: "shared-request",
+          lifecycleGeneration: "interaction-1",
+          executionId: "execution-1",
+          requestKind: "command",
+        },
+      }),
+      makeActivity({
+        id: "durable-approval-2",
+        createdAt: "2026-02-23T00:00:02.000Z",
+        kind: "request.opened",
+        summary: "Approval required",
+        tone: "approval",
+        payload: {
+          interactionId: "interaction-2",
+          requestId: "shared-request",
+          lifecycleGeneration: "interaction-2",
+          executionId: "execution-2",
+          requestKind: "command",
+        },
+      }),
+    ];
+
+    expect(derivePendingApprovals(activities)).toMatchObject([
+      {
+        interactionId: "interaction-1",
+        requestKey: "interaction:interaction-1",
+        requestId: "shared-request",
+        lifecycleGeneration: "interaction-1",
+        executionId: "execution-1",
+      },
+      {
+        interactionId: "interaction-2",
+        requestKey: "interaction:interaction-2",
+        requestId: "shared-request",
+        lifecycleGeneration: "interaction-2",
+        executionId: "execution-2",
+      },
+    ]);
+  });
+
+  it("preserves tool and network approval kinds", () => {
+    const activities: OrchestrationThreadActivity[] = [
+      makeActivity({
+        id: "tool-approval",
+        createdAt: "2026-02-23T00:00:01.000Z",
+        kind: "approval.requested",
+        summary: "Tool approval requested",
+        tone: "approval",
+        payload: { requestId: "tool-request", requestKind: "tool" },
+      }),
+      makeActivity({
+        id: "network-approval",
+        createdAt: "2026-02-23T00:00:02.000Z",
+        kind: "approval.requested",
+        summary: "Network approval requested",
+        tone: "approval",
+        payload: { requestId: "network-request", requestKind: "network" },
+      }),
+    ];
+
+    expect(derivePendingApprovals(activities).map((approval) => approval.requestKind)).toEqual([
+      "tool",
+      "network",
+    ]);
+  });
+
   it("clears stale pending approvals when provider reports unknown pending request", () => {
     const activities: OrchestrationThreadActivity[] = [
       makeActivity({

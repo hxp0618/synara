@@ -14,10 +14,13 @@ import type {
   ThreadTurnState,
 } from "./types";
 
+export type ProjectionAuthority = "local" | "control-plane";
+
 export interface AppState {
   projects: Project[];
   sidebarThreadSummaryById: Record<string, SidebarThreadSummary>;
   threadsHydrated: boolean;
+  projectionAuthority?: ProjectionAuthority;
   threadIds?: ThreadId[];
   threadShellById?: Record<ThreadId, ThreadShell>;
   threadSessionById?: Record<ThreadId, ThreadSession | null>;
@@ -63,6 +66,7 @@ export const initialState: AppState = {
   projects: [],
   sidebarThreadSummaryById: {},
   threadsHydrated: false,
+  projectionAuthority: "local",
   threadIds: [],
   threadShellById: {},
   threadSessionById: {},

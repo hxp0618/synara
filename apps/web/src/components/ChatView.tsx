@@ -331,6 +331,15 @@ import {
   useEffectiveComposerModelState,
 } from "../composerDraftStore";
 import { useTemporaryThreadStore } from "../temporaryThreadStore";
+import { useControlPlane, useControlPlanePendingInteractions } from "../controlPlaneContext";
+import {
+  latestControlPlaneInteractionSequence,
+  projectPendingControlPlaneInteractions,
+} from "../lib/controlPlaneInteractions";
+import {
+  dispatchApprovalInteractionResponse,
+  dispatchUserInputInteractionResponse,
+} from "../lib/interactionResponseRouting";
 import { useComposerFocusRequestStore } from "../composerFocusRequestStore";
 import { useWorkflowRunUiStore, useWorkflowRunUiThreadState } from "../workflowRunUiStore";
 import { appendComposerPromptText } from "../lib/chatReferences";
@@ -1079,6 +1088,7 @@ export default function ChatView({
   onChangeThreadInSplitPane,
   onCloseThreadPane,
 }: ChatViewProps) {
+  const controlPlane = useControlPlane();
   const markThreadVisited = useStore((store) => store.markThreadVisited);
   const syncServerShellSnapshot = useStore((store) => store.syncServerShellSnapshot);
   const setStoreThreadError = useStore((store) => store.setError);
@@ -2367,20 +2377,55 @@ export default function ChatView({
     }, 0);
     return () => window.clearTimeout(settle);
   }, [agentActivityTimelineState.detailById, openAgentActivityId]);
-  const pendingApprovals = useMemo(
+  const eventPendingApprovals = useMemo(
     () => derivePendingApprovals(threadActivities, activeThread?.pendingInteractions),
     [activeThread?.pendingInteractions, threadActivities],
   );
-  const pendingUserInputs = useMemo(
+  const eventPendingUserInputs = useMemo(
     () => derivePendingUserInputs(threadActivities, activeThread?.pendingInteractions),
     [activeThread?.pendingInteractions, threadActivities],
   );
+  const observedInteractionSequence = useMemo(
+    () => latestControlPlaneInteractionSequence(threadActivities),
+    [threadActivities],
+  );
+  const pendingInteractionQuery = useControlPlanePendingInteractions(
+    activeThreadId,
+    observedInteractionSequence,
+  );
+  const durablePendingInteractions = useMemo(
+    () => projectPendingControlPlaneInteractions(pendingInteractionQuery.data?.items ?? []),
+    [pendingInteractionQuery.data?.items],
+  );
+  const pendingApprovals = controlPlane.isAuthoritative
+    ? durablePendingInteractions.approvals
+    : eventPendingApprovals;
+  const pendingUserInputs = controlPlane.isAuthoritative
+    ? durablePendingInteractions.userInputs
+    : eventPendingUserInputs;
+  useEffect(() => {
+    if (!controlPlane.isAuthoritative || !activeThreadId || !pendingInteractionQuery.error) {
+      return;
+    }
+    setStoreThreadError(
+      activeThreadId,
+      pendingInteractionQuery.error instanceof Error
+        ? pendingInteractionQuery.error.message
+        : "Failed to load pending approval and user-input requests.",
+    );
+  }, [
+    activeThreadId,
+    controlPlane.isAuthoritative,
+    pendingInteractionQuery.error,
+    setStoreThreadError,
+  ]);
   const activePendingUserInput = pendingUserInputs[0] ?? null;
   const activePendingUserInputKey = activePendingUserInput
-    ? pendingRequestInstanceKey(
+    ? (activePendingUserInput.requestKey ??
+      pendingRequestInstanceKey(
         activePendingUserInput.requestId,
         activePendingUserInput.lifecycleGeneration,
-      )
+      ))
     : null;
   const activePendingDraftAnswers = useMemo(
     () =>
@@ -2604,6 +2649,13 @@ export default function ChatView({
     latestTurnSettled &&
     hasActionableProposedPlan(activeProposedPlan);
   const activePendingApproval = pendingApprovals[0] ?? null;
+  const activePendingApprovalKey = activePendingApproval
+    ? (activePendingApproval.requestKey ??
+      pendingRequestInstanceKey(
+        activePendingApproval.requestId,
+        activePendingApproval.lifecycleGeneration,
+      ))
+    : null;
   const serverAcknowledgedLocalDispatch = useMemo(
     () =>
       hasServerAcknowledgedLocalDispatch({
@@ -2703,7 +2755,7 @@ export default function ChatView({
     })
   );
   const lastSyncedPendingInputRef = useRef<{
-    requestId: string | null;
+    requestKey: string | null;
     questionId: string | null;
   } | null>(null);
   useLayoutEffect(() => {
@@ -2745,15 +2797,15 @@ export default function ChatView({
       lastSyncedPendingInputRef.current = null;
       return;
     }
-    const nextRequestId = activePendingUserInput?.requestId ?? null;
+    const nextRequestKey = activePendingUserInputKey;
     const nextQuestionId = activePendingProgress?.activeQuestion?.id ?? null;
     const questionChanged =
-      lastSyncedPendingInputRef.current?.requestId !== nextRequestId ||
+      lastSyncedPendingInputRef.current?.requestKey !== nextRequestKey ||
       lastSyncedPendingInputRef.current?.questionId !== nextQuestionId;
     const textChangedExternally = promptRef.current !== nextCustomAnswer;
 
     lastSyncedPendingInputRef.current = {
-      requestId: nextRequestId,
+      requestKey: nextRequestKey,
       questionId: nextQuestionId,
     };
 
@@ -2773,7 +2825,7 @@ export default function ChatView({
     setComposerHighlightedItemId(null);
   }, [
     activePendingProgress?.customAnswer,
-    activePendingUserInput?.requestId,
+    activePendingUserInputKey,
     activePendingProgress?.activeQuestion?.id,
   ]);
   useLayoutEffect(() => {
@@ -7564,39 +7616,92 @@ export default function ChatView({
       decision: ProviderApprovalDecision,
       lifecycleGeneration?: string,
     ) => {
-      const api = readNativeApi();
-      if (!api || !activeThreadId) return;
-      const requestKey = pendingRequestInstanceKey(requestId, lifecycleGeneration);
+      const approval = activePendingApproval;
+      const requestKey = activePendingApprovalKey;
+      if (
+        !approval ||
+        approval.requestId !== requestId ||
+        approval.lifecycleGeneration !== lifecycleGeneration ||
+        !requestKey ||
+        !activeThreadId
+      ) {
+        return;
+      }
 
       setRespondingRequestKeys((existing) =>
         existing.includes(requestKey) ? existing : [...existing, requestKey],
       );
-      // Durably persist "always allow" client-side so the next turn (after an
-      // idle-stop or runtime restart) keeps full-access instead of asking again.
-      // The server's session override only covers the current live turn.
-      const durableRuntimeMode = resolveRuntimeModeAfterApprovalDecision(runtimeMode, decision);
-      if (durableRuntimeMode) {
-        setComposerDraftRuntimeMode(activeThreadId, durableRuntimeMode);
-      }
-      await api.orchestration
-        .dispatchCommand({
-          type: "thread.approval.respond",
-          commandId: newCommandId(),
-          threadId: activeThreadId,
+      try {
+        await dispatchApprovalInteractionResponse({
+          authoritative: controlPlane.isAuthoritative,
+          ...(approval.executionId !== undefined ? { executionId: approval.executionId } : {}),
           requestId,
           decision,
-          ...(lifecycleGeneration !== undefined ? { lifecycleGeneration } : {}),
-          createdAt: new Date().toISOString(),
-        })
-        .catch((err: unknown) => {
-          setStoreThreadError(
-            activeThreadId,
-            err instanceof Error ? err.message : "Failed to submit approval decision.",
-          );
+          resolveControlPlane: async (executionId, durableRequestId, durableDecision) => {
+            if (!approval.interactionId) {
+              throw new Error("The durable approval is missing its Interaction reference.");
+            }
+            await controlPlane.resolveApproval(
+              activeThreadId,
+              executionId,
+              durableRequestId,
+              durableDecision,
+              `web-interaction-${approval.interactionId}-approval-${durableDecision}`,
+            );
+          },
+          interruptControlPlane: async () => {
+            if (!approval.interactionId) {
+              throw new Error("The durable approval is missing its Interaction reference.");
+            }
+            await controlPlane.interruptActiveTurn(
+              activeThreadId,
+              `web-interaction-${approval.interactionId}-interrupt`,
+            );
+          },
+          respondNative: async () => {
+            const api = readNativeApi();
+            if (!api) {
+              throw new Error("The local provider connection is unavailable.");
+            }
+            // Durably persist "always allow" client-side so the next turn (after an
+            // idle-stop or runtime restart) keeps full-access instead of asking again.
+            // The server's session override only covers the current live turn.
+            const durableRuntimeMode = resolveRuntimeModeAfterApprovalDecision(
+              runtimeMode,
+              decision,
+            );
+            if (durableRuntimeMode) {
+              setComposerDraftRuntimeMode(activeThreadId, durableRuntimeMode);
+            }
+            await api.orchestration.dispatchCommand({
+              type: "thread.approval.respond",
+              commandId: newCommandId(),
+              threadId: activeThreadId,
+              requestId,
+              decision,
+              ...(lifecycleGeneration !== undefined ? { lifecycleGeneration } : {}),
+              createdAt: new Date().toISOString(),
+            });
+          },
         });
-      setRespondingRequestKeys((existing) => existing.filter((key) => key !== requestKey));
+      } catch (err) {
+        setStoreThreadError(
+          activeThreadId,
+          err instanceof Error ? err.message : "Failed to submit approval decision.",
+        );
+      } finally {
+        setRespondingRequestKeys((existing) => existing.filter((key) => key !== requestKey));
+      }
     },
-    [activeThreadId, runtimeMode, setComposerDraftRuntimeMode, setStoreThreadError],
+    [
+      activePendingApproval,
+      activePendingApprovalKey,
+      activeThreadId,
+      controlPlane,
+      runtimeMode,
+      setComposerDraftRuntimeMode,
+      setStoreThreadError,
+    ],
   );
 
   const onRespondToUserInput = useCallback(
@@ -7604,36 +7709,94 @@ export default function ChatView({
       requestId: ApprovalRequestId,
       answers: ProviderUserInputAnswers,
       lifecycleGeneration?: string,
+      cancel = false,
     ) => {
-      const api = readNativeApi();
-      if (!api || !activeThreadId) return;
-      const requestKey = pendingRequestInstanceKey(requestId, lifecycleGeneration);
-      const dispatchAnswers = hasCompletePendingUserInputAnswers(answers)
-        ? answers
-        : omitNullPendingUserInputAnswers(answers);
+      const pendingInput = activePendingUserInput;
+      const requestKey = activePendingUserInputKey;
+      if (
+        !pendingInput ||
+        pendingInput.requestId !== requestId ||
+        pendingInput.lifecycleGeneration !== lifecycleGeneration ||
+        !requestKey ||
+        !activeThreadId
+      ) {
+        return;
+      }
 
       setRespondingUserInputRequestKeys((existing) =>
         existing.includes(requestKey) ? existing : [...existing, requestKey],
       );
-      await api.orchestration
-        .dispatchCommand({
-          type: "thread.user-input.respond",
-          commandId: newCommandId(),
-          threadId: activeThreadId,
+      try {
+        await dispatchUserInputInteractionResponse({
+          authoritative: controlPlane.isAuthoritative,
+          cancel,
+          ...(pendingInput.executionId !== undefined
+            ? { executionId: pendingInput.executionId }
+            : {}),
           requestId,
-          answers: dispatchAnswers,
-          ...(lifecycleGeneration !== undefined ? { lifecycleGeneration } : {}),
-          createdAt: new Date().toISOString(),
-        })
-        .catch((err: unknown) => {
-          setStoreThreadError(
-            activeThreadId,
-            err instanceof Error ? err.message : "Failed to submit user input.",
-          );
+          answers,
+          resolveControlPlane: async (executionId, durableRequestId, durableAnswers) => {
+            if (!pendingInput.interactionId) {
+              throw new Error(
+                "The durable user-input request is missing its Interaction reference.",
+              );
+            }
+            await controlPlane.resolveUserInput(
+              activeThreadId,
+              executionId,
+              durableRequestId,
+              durableAnswers,
+              `web-interaction-${pendingInput.interactionId}-user-input`,
+            );
+          },
+          interruptControlPlane: async () => {
+            if (!pendingInput.interactionId) {
+              throw new Error(
+                "The durable user-input request is missing its Interaction reference.",
+              );
+            }
+            await controlPlane.interruptActiveTurn(
+              activeThreadId,
+              `web-interaction-${pendingInput.interactionId}-interrupt`,
+            );
+          },
+          respondNative: async () => {
+            const api = readNativeApi();
+            if (!api) {
+              throw new Error("The local provider connection is unavailable.");
+            }
+            const dispatchAnswers = hasCompletePendingUserInputAnswers(answers)
+              ? answers
+              : omitNullPendingUserInputAnswers(answers);
+            await api.orchestration.dispatchCommand({
+              type: "thread.user-input.respond",
+              commandId: newCommandId(),
+              threadId: activeThreadId,
+              requestId,
+              answers: dispatchAnswers,
+              ...(lifecycleGeneration !== undefined ? { lifecycleGeneration } : {}),
+              createdAt: new Date().toISOString(),
+            });
+          },
         });
-      setRespondingUserInputRequestKeys((existing) => existing.filter((key) => key !== requestKey));
+      } catch (err) {
+        setStoreThreadError(
+          activeThreadId,
+          err instanceof Error ? err.message : "Failed to submit user input.",
+        );
+      } finally {
+        setRespondingUserInputRequestKeys((existing) =>
+          existing.filter((key) => key !== requestKey),
+        );
+      }
     },
-    [activeThreadId, setStoreThreadError],
+    [
+      activePendingUserInput,
+      activePendingUserInputKey,
+      activeThreadId,
+      controlPlane,
+      setStoreThreadError,
+    ],
   );
 
   const onCancelActivePendingUserInput = useCallback(() => {
@@ -7648,6 +7811,7 @@ export default function ChatView({
       activePendingUserInput.requestId,
       {},
       activePendingUserInput.lifecycleGeneration,
+      true,
     );
   }, [activePendingIsResponding, activePendingUserInput, onRespondToUserInput, setPrompt]);
 
@@ -10055,13 +10219,11 @@ export default function ChatView({
                   <ComposerPendingApprovalPanel
                     approval={activePendingApproval}
                     pendingCount={pendingApprovals.length}
-                    isResponding={respondingRequestKeys.includes(
-                      pendingRequestInstanceKey(
-                        activePendingApproval.requestId,
-                        activePendingApproval.lifecycleGeneration,
-                      ),
-                    )}
-                    allowSessionDecision={activePendingApproval.executionId === undefined}
+                    isResponding={
+                      activePendingApprovalKey !== null &&
+                      respondingRequestKeys.includes(activePendingApprovalKey)
+                    }
+                    allowSessionDecision={!controlPlane.isAuthoritative}
                     onRespond={onRespondToApproval}
                   />
                 </div>

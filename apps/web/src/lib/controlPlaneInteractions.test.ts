@@ -50,6 +50,7 @@ describe("projectPendingControlPlaneInteractions", () => {
         interactionId: "interaction-approval",
         requestId: "approval-1",
         requestKey: "interaction:interaction-approval",
+        lifecycleGeneration: "interaction-approval",
         executionId: "execution-1",
         requestKind: "command",
         detail: "bun run build",
@@ -60,6 +61,7 @@ describe("projectPendingControlPlaneInteractions", () => {
         interactionId: "interaction-input",
         requestId: "input-1",
         requestKey: "interaction:interaction-input",
+        lifecycleGeneration: "interaction-input",
         executionId: "execution-1",
       }),
     ]);
@@ -86,6 +88,10 @@ describe("projectPendingControlPlaneInteractions", () => {
     expect(projected.approvals.map((approval) => approval.requestKey)).toEqual([
       "interaction:interaction-1",
       "interaction:interaction-2",
+    ]);
+    expect(projected.approvals.map((approval) => approval.lifecycleGeneration)).toEqual([
+      "interaction-1",
+      "interaction-2",
     ]);
   });
 });

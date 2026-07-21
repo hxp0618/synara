@@ -164,6 +164,10 @@ function workEntryPreview(workEntry: TimelineWorkEntry): string | null {
     workEntry.requestKind === "file-change" ||
     workEntry.itemType === "file_change";
 
+  if (workEntry.terminalEventType && workEntry.preview) {
+    return workEntry.preview;
+  }
+
   if (workEntry.itemType === "command_execution" || workEntry.command || workEntry.rawCommand) {
     const command = workEntry.command ?? workEntry.rawCommand;
     if (command) return deriveReadableCommandDisplay(command).target;
@@ -251,6 +255,8 @@ function workEntryIcon(workEntry: TimelineWorkEntry): LucideIcon {
   if (workEntry.requestKind === "command") return commandWorkEntryIcon(workEntry);
   if (workEntry.requestKind === "file-read") return SearchIcon;
   if (workEntry.requestKind === "file-change") return PencilIcon;
+  if (workEntry.requestKind === "network") return WebSearchIcon;
+  if (workEntry.requestKind === "tool") return HammerIcon;
 
   if (workEntry.itemType === "command_execution" || workEntry.command) {
     return commandWorkEntryIcon(workEntry);
