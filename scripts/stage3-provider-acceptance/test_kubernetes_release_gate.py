@@ -909,6 +909,116 @@ class AggregateMainTest(unittest.TestCase):
         self.assertTrue(report["workerImage"]["cleanup"]["removed"])
         self.assertFalse(report["security"]["credentialEnvironmentNamesPersisted"])
 
+    def test_cleanup_invalid_child_stops_later_runs_and_still_cleans_shared_image(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(
+            os.environ,
+            {
+                "CODEX_KEY": "codex-secret",
+                "CLAUDE_TOKEN": "claude-secret",
+                "CLAUDE_BASE_URL": "https://claude.example.test",
+            },
+        ):
+            output_dir = pathlib.Path(directory) / "gate"
+            options = kubernetes_options(output_dir)
+            spec = dataclasses.replace(gate.target_spec(), inspect_runtime=lambda _options: {})
+            child_calls: list[tuple[str, str]] = []
+            cleanup_calls: list[str] = []
+
+            def child_run(**kwargs: Any) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+                provider = kwargs["provider"]
+                matrix = kwargs["matrix"]
+                child_calls.append((provider, matrix))
+                child_errors = (
+                    [
+                        gate.ReleaseGateError(
+                            "release.child_cleanup_invalid",
+                            "Child report did not prove the required target cleanup boundary.",
+                        ).as_report_error(provider=provider, matrix=matrix)
+                    ]
+                    if (provider, matrix) == ("codex", "load")
+                    else []
+                )
+                return (
+                    {
+                        "provider": provider,
+                        "matrix": matrix,
+                        "status": "fail" if child_errors else "pass",
+                        "caseCounts": {
+                            "pass": 15,
+                            "unsupported": 0,
+                            "skipped": 0,
+                            "fail": 1 if child_errors else 0,
+                        },
+                        "unsupportedCaseIds": [],
+                        "reportSha256": "d" * 64,
+                        "workerImageId": WORKER_IMAGE_ID,
+                        "source": {"providerCapabilityCatalogSha256": "b" * 64},
+                    },
+                    child_errors,
+                )
+
+            def build_image(
+                _options: gate.KubernetesReleaseGateOptions,
+                image: gate.GateWorkerImage,
+                _git_sha: str,
+            ) -> dict[str, Any]:
+                return {
+                    "name": image.name,
+                    "id": WORKER_IMAGE_ID,
+                    "status": "completed",
+                    "ownershipVerified": True,
+                }
+
+            def cleanup_image(
+                _options: gate.KubernetesReleaseGateOptions,
+                image: gate.GateWorkerImage,
+                *,
+                expected_image_id: str | None,
+            ) -> tuple[dict[str, Any], None]:
+                cleanup_calls.append(image.name)
+                return (
+                    {
+                        "name": image.name,
+                        "expectedImageId": expected_image_id,
+                        "presentBeforeCleanup": True,
+                        "ownershipVerified": True,
+                        "removed": True,
+                        "broadCleanupUsed": False,
+                    },
+                    None,
+                )
+
+            with contextlib.redirect_stdout(io.StringIO()):
+                exit_code = remote.run_remote_release_gate(
+                    options,
+                    spec,
+                    build_image=build_image,
+                    cleanup_image=cleanup_image,
+                    repository_state=lambda _repo_root: {
+                        "gitSha": "a" * 40,
+                        "worktreeDirty": False,
+                    },
+                    run_child=child_run,
+                )
+
+            report = json.loads((output_dir / gate.JSON_REPORT_NAME).read_text(encoding="utf-8"))
+
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(
+            child_calls,
+            [("codex", "product"), ("codex", "failure"), ("codex", "load")],
+        )
+        self.assertEqual(len(cleanup_calls), 1)
+        self.assertEqual(report["status"], "fail")
+        self.assertEqual(report["coverage"]["completedRuns"], 3)
+        self.assertLess(report["coverage"]["completedRuns"], report["coverage"]["requiredRuns"])
+        self.assertTrue(report["workerImage"]["cleanup"]["removed"])
+        self.assertTrue(
+            {"release.child_cleanup_invalid", "release.child_coverage_incomplete"}.issubset(
+                {error["code"] for error in report["errors"]}
+            )
+        )
+
     def test_scan_process_output_rejects_stderr_only_model_environment_name(self) -> None:
         evidence = common.scan_process_output(
             "",

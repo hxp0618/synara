@@ -183,6 +183,7 @@ FIXTURE_RETENTION_DAYS = 1
 FIXTURE_RETENTION_AGE_DAYS = 2
 KUBERNETES_CLEANUP_MAX_ATTEMPTS = 3
 KUBERNETES_CLEANUP_RETRY_DELAYS_SECONDS = (1.0, 2.0)
+KIND_CLEANUP_ATTEMPT_TIMEOUT_SECONDS = 150.0
 SUITES = (
     "fixture",
     "fixture-soak",
@@ -7792,17 +7793,20 @@ class KubernetesDriver(ManagedWorkerDriver):
         evidence = dict(super().collect_failure_diagnostics(case_id))
         pod_summaries: list[dict[str, Any]] = []
         for namespace in sorted({runtime["namespace"] for runtime in self.target_runtimes.values()}):
-            completed = self._kubectl_completed(
-                [
-                    "-n",
-                    namespace,
-                    "get",
-                    "pods",
-                    "-o",
-                    "json",
-                ],
-                cleanup_timeout=8.0,
-            )
+            try:
+                completed = self._kubectl_completed(
+                    [
+                        "-n",
+                        namespace,
+                        "get",
+                        "pods",
+                        "-o",
+                        "json",
+                    ],
+                    cleanup_timeout=8.0,
+                )
+            except Exception:
+                continue
             if completed.returncode != 0:
                 continue
             try:
@@ -7859,12 +7863,8 @@ class KubernetesDriver(ManagedWorkerDriver):
         elif self.owns_cluster and self.cluster_created:
             collect(
                 "delete Kind cluster",
-                lambda: self._kind_command(
-                    ["delete", "cluster", "--name", self.cluster_name],
-                    cleanup_timeout=60.0,
-                ),
+                self._cleanup_owned_kind_cluster,
             )
-            self.cluster_created = False
         else:
             collect("delete Kubernetes acceptance resources", self._delete_cluster_resources)
         if not self.options.keep:
@@ -8429,8 +8429,62 @@ class KubernetesDriver(ManagedWorkerDriver):
             )
         return output
 
+    def _cleanup_owned_kind_cluster(self) -> None:
+        if not self.cluster_created:
+            return
+        last_error: AcceptanceError | None = None
+        for attempt in range(KUBERNETES_CLEANUP_MAX_ATTEMPTS):
+            delete_retryable = True
+            try:
+                self._kind_command(
+                    ["delete", "cluster", "--name", self.cluster_name],
+                    cleanup_timeout=KIND_CLEANUP_ATTEMPT_TIMEOUT_SECONDS,
+                )
+            except AcceptanceError as error:
+                last_error = error
+                delete_retryable = self._kubernetes_cleanup_error_is_transient(error)
+
+            verification_retryable = True
+            try:
+                clusters = self._kind_command(
+                    ["get", "clusters"],
+                    cleanup_timeout=30.0,
+                )
+            except AcceptanceError as error:
+                last_error = error
+                verification_retryable = self._kubernetes_cleanup_error_is_transient(error)
+            else:
+                cluster_names = {line.strip() for line in clusters.splitlines() if line.strip()}
+                if self.cluster_name not in cluster_names:
+                    self.cluster_created = False
+                    return
+                last_error = AcceptanceError(
+                    "runner.kind_command_failed",
+                    "Kind still lists the owned cluster after cleanup.",
+                    {
+                        "cluster": self.cluster_name,
+                        "maximumAttempts": KUBERNETES_CLEANUP_MAX_ATTEMPTS,
+                    },
+                )
+
+            if not delete_retryable or not verification_retryable:
+                break
+            if attempt + 1 < KUBERNETES_CLEANUP_MAX_ATTEMPTS:
+                time.sleep(KUBERNETES_CLEANUP_RETRY_DELAYS_SECONDS[attempt])
+        if last_error is not None:
+            raise last_error
+        raise AssertionError("Kind cleanup retry loop produced no result")
+
+    def _kubernetes_cleanup_error_is_transient(self, error: AcceptanceError) -> bool:
+        output = error.evidence.get("outputExcerpt")
+        detail = output if isinstance(output, str) else str(error)
+        return (
+            "timed out" in detail.lower()
+            or self._kubernetes_cleanup_failure_is_transient(detail)
+        )
+
     @staticmethod
-    def _kubectl_cleanup_failure_is_transient(output: str) -> bool:
+    def _kubernetes_cleanup_failure_is_transient(output: str) -> bool:
         normalized = output.lower()
         return any(
             marker in normalized
@@ -8468,7 +8522,7 @@ class KubernetesDriver(ManagedWorkerDriver):
             else:
                 last_completed = completed
                 output = self.redactor.text(completed.stdout)
-                if completed.returncode == 0 or not self._kubectl_cleanup_failure_is_transient(output):
+                if completed.returncode == 0 or not self._kubernetes_cleanup_failure_is_transient(output):
                     return completed
             if attempt + 1 < KUBERNETES_CLEANUP_MAX_ATTEMPTS:
                 time.sleep(KUBERNETES_CLEANUP_RETRY_DELAYS_SECONDS[attempt])

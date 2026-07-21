@@ -862,6 +862,7 @@ def run_remote_release_gate(
         image_build_attempted = True
         image_build = build_image(options, image, str(source["gitSha"]))
         policy = child_policy(options, spec, image.name)
+        stop_scheduling = False
         for provider in common.PROVIDERS:
             for matrix in spec.matrices:
                 child_dir = options.output_dir / provider / matrix
@@ -880,6 +881,11 @@ def run_remote_release_gate(
                 )
                 runs.append(run)
                 errors.extend(child_errors)
+                if child_errors:
+                    stop_scheduling = True
+                    break
+            if stop_scheduling:
+                break
     except Exception as raw_error:
         errors.append(
             (

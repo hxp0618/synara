@@ -8464,6 +8464,20 @@ class SSHDriverTest(unittest.TestCase):
 
 
 class KubernetesDriverObservationTest(unittest.TestCase):
+    def _owned_kind_driver(self) -> acceptance.KubernetesDriver:
+        options = dataclasses.replace(runner_options(), target="kubernetes")
+        with mock.patch.object(acceptance, "reserve_loopback_port", return_value=43123):
+            driver = acceptance.KubernetesDriver(
+                pathlib.Path.cwd(),
+                options,
+                acceptance.Deadline(30.0),
+                acceptance.SecretRedactor(),
+            )
+        self.addCleanup(driver._release_state)
+        driver.cluster_created = True
+        driver.owns_image = False
+        return driver
+
     def test_owned_kind_cluster_configures_and_records_worker_topology(self) -> None:
         options = dataclasses.replace(
             runner_options(),
@@ -8636,6 +8650,143 @@ class KubernetesDriverObservationTest(unittest.TestCase):
                 "json",
             ],
         )
+
+    def test_owned_kind_cleanup_retries_transient_delete_and_verifies_absence(self) -> None:
+        driver = self._owned_kind_driver()
+        responses = [
+            subprocess.CompletedProcess(
+                ["kind"],
+                1,
+                stdout="error deleting cluster: TLS handshake timeout",
+            ),
+            subprocess.CompletedProcess(["kind"], 0, stdout=f"{driver.cluster_name}\n"),
+            subprocess.CompletedProcess(["kind"], 0, stdout="Deleted nodes\n"),
+            subprocess.CompletedProcess(["kind"], 0, stdout="No kind clusters found.\n"),
+        ]
+
+        with (
+            mock.patch.object(driver, "_kind_completed", side_effect=responses) as command,
+            mock.patch.object(acceptance.time, "sleep") as sleep,
+        ):
+            driver._cleanup_owned_kind_cluster()
+
+        self.assertFalse(driver.cluster_created)
+        self.assertEqual(command.call_count, 4)
+        self.assertEqual(
+            [call.args[0] for call in command.call_args_list],
+            [
+                ["delete", "cluster", "--name", driver.cluster_name],
+                ["get", "clusters"],
+                ["delete", "cluster", "--name", driver.cluster_name],
+                ["get", "clusters"],
+            ],
+        )
+        self.assertEqual(
+            command.call_args_list[0].kwargs["cleanup_timeout"],
+            acceptance.KIND_CLEANUP_ATTEMPT_TIMEOUT_SECONDS,
+        )
+        sleep.assert_called_once_with(1.0)
+
+    def test_owned_kind_cleanup_exhaustion_retains_state_and_fails_cleanup(self) -> None:
+        driver = self._owned_kind_driver()
+        responses = [
+            response
+            for _attempt in range(acceptance.KUBERNETES_CLEANUP_MAX_ATTEMPTS)
+            for response in (
+                subprocess.CompletedProcess(
+                    ["kind"],
+                    1,
+                    stdout="error deleting cluster: TLS handshake timeout",
+                ),
+                subprocess.CompletedProcess(["kind"], 0, stdout=f"{driver.cluster_name}\n"),
+            )
+        ]
+
+        with (
+            mock.patch.object(driver, "stop"),
+            mock.patch.object(driver, "_stop_worker_proxy"),
+            mock.patch.object(driver, "_release_state"),
+            mock.patch.object(driver, "_kind_completed", side_effect=responses) as command,
+            mock.patch.object(acceptance.time, "sleep") as sleep,
+            self.assertRaises(acceptance.AcceptanceError) as caught,
+        ):
+            driver.cleanup()
+
+        self.assertEqual(caught.exception.code, "runner.kubernetes_cleanup_failed")
+        self.assertIn("delete Kind cluster", caught.exception.evidence["errors"][0])
+        self.assertTrue(driver.cluster_created)
+        self.assertEqual(command.call_count, acceptance.KUBERNETES_CLEANUP_MAX_ATTEMPTS * 2)
+        self.assertEqual(
+            sleep.call_args_list,
+            [mock.call(delay) for delay in acceptance.KUBERNETES_CLEANUP_RETRY_DELAYS_SECONDS],
+        )
+
+    def test_owned_kind_cleanup_retries_timeout_but_not_permission_failure(self) -> None:
+        driver = self._owned_kind_driver()
+
+        self.assertTrue(
+            driver._kubernetes_cleanup_error_is_transient(
+                acceptance.AcceptanceError(
+                    "runner.kind_command_failed",
+                    "Kind could not run: Command timed out after 150 seconds.",
+                )
+            )
+        )
+        self.assertFalse(
+            driver._kubernetes_cleanup_error_is_transient(
+                acceptance.AcceptanceError(
+                    "runner.kind_command_failed",
+                    "Kind could not run: permission denied.",
+                )
+            )
+        )
+
+    def test_diagnostic_kubectl_timeout_preserves_base_and_other_namespace_diagnostics(self) -> None:
+        driver = self._owned_kind_driver()
+        driver.target_runtimes = {
+            "target-a": {"namespace": "namespace-a"},
+            "target-b": {"namespace": "namespace-b"},
+        }
+        pod_payload = json.dumps(
+            {
+                "items": [
+                    {
+                        "metadata": {"name": "worker-b", "uid": "pod-b"},
+                        "status": {"phase": "Running"},
+                    }
+                ]
+            }
+        )
+
+        with mock.patch.object(
+            driver,
+            "_kubectl_completed",
+            side_effect=[
+                acceptance.AcceptanceError(
+                    "runner.kubernetes_command_failed",
+                    "kubectl could not run: TLS handshake timeout",
+                ),
+                subprocess.CompletedProcess(["kubectl"], 0, stdout=pod_payload),
+            ],
+        ) as command:
+            evidence = driver.collect_failure_diagnostics("failure-case")
+
+        self.assertEqual(evidence["caseId"], "failure-case")
+        self.assertEqual(evidence["context"], driver.context)
+        self.assertEqual(
+            evidence["pods"],
+            [
+                {
+                    "namespace": "namespace-b",
+                    "name": "worker-b",
+                    "uid": "pod-b",
+                    "deletionTimestamp": None,
+                    "phase": "Running",
+                    "reason": None,
+                }
+            ],
+        )
+        self.assertEqual(command.call_count, 2)
 
     def test_cleanup_retries_only_transient_idempotent_kubectl_operations(self) -> None:
         options = dataclasses.replace(
