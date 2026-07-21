@@ -490,6 +490,11 @@ class SuiteBehaviorTest(unittest.TestCase):
                     {"terminal": terminal, "events": events},
                 ],
             ),
+            mock.patch.object(
+                suite,
+                "_real_provider_turn_evidence",
+                wraps=suite._real_provider_turn_evidence,
+            ) as turn_evidence,
         ):
             evidence = suite._resolve_real_provider_command_turn(
                 turn=turn,
@@ -510,6 +515,75 @@ class SuiteBehaviorTest(unittest.TestCase):
         self.assertEqual(evidence["approvalResolutions"][0]["requestId"], "request-1")
         self.assertEqual(evidence["approvalResolutions"][1]["requestId"], "request-2")
         self.assertEqual(suite.driver.api.request.call_count, 2)
+        self.assertEqual(turn_evidence.call_args.kwargs["max_lease_generations"], 1)
+
+    def test_recovered_pending_approval_passes_replacement_generation_to_evidence(
+        self,
+    ) -> None:
+        suite = self.build_suite()
+        command = acceptance.real_provider_approval_command("MARKER")
+        interaction = {
+            "id": "replacement-interaction",
+            "kind": "approval",
+            "turnId": "turn-1",
+            "executionId": "execution-1",
+            "requestId": "replacement-request",
+            "payload": {"requestKind": "command", "command": command},
+        }
+        terminal = {
+            "eventType": "execution.completed",
+            "executionId": "execution-1",
+            "workerId": "worker-2",
+            "generation": 2,
+            "sequence": 1,
+            "payload": {"output": {"text": "MARKER"}},
+        }
+        pending = {
+            "sessionId": "session-1",
+            "targetId": "target-1",
+            "turn": {"id": "turn-1"},
+            "interaction": interaction,
+            "marker": "MARKER",
+            "replacementGeneration": 2,
+        }
+        suite.driver.api = mock.Mock()
+        suite.driver.api.request.return_value = {
+            "status": "resolved",
+            "deliveryStatus": "acknowledged",
+        }
+
+        with (
+            mock.patch.object(
+                suite,
+                "_wait_for_turn_terminal_or_follow_up_approval",
+                return_value={"terminal": terminal, "events": [terminal]},
+            ),
+            mock.patch.object(
+                suite,
+                "_real_provider_turn_evidence",
+                return_value={"leasedGenerations": [1, 2]},
+            ) as turn_evidence,
+            mock.patch.object(
+                suite,
+                "_approval_command_item_evidence",
+                return_value={"terminalIdentityMatched": True},
+            ),
+            mock.patch.object(
+                suite,
+                "_interaction_request_event",
+                return_value=terminal,
+            ),
+            mock.patch.object(
+                suite.driver,
+                "observe_terminal_execution",
+                return_value={"podName": "candidate-pod-2", "generation": "2"},
+            ),
+        ):
+            evidence = suite._resolve_pending_approval(pending)
+
+        self.assertEqual(turn_evidence.call_args.kwargs["max_lease_generations"], 2)
+        self.assertEqual(evidence["providerTurn"]["leasedGenerations"], [1, 2])
+        self.assertEqual(evidence["targetTerminal"]["generation"], "2")
 
     def test_resolve_pending_approval_uses_marker_bound_command_validation(self) -> None:
         suite = self.build_suite()

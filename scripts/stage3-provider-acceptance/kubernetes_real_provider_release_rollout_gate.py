@@ -652,12 +652,19 @@ class KubernetesRealProviderReleaseRolloutSuite(
         interaction = acceptance.json_object(pending.get("interaction"), "pending interaction")
         marker = rollout.required_string(pending, "marker", "pending marker")
         expected_command = acceptance.real_provider_approval_command(marker)
+        replacement_generation = self._pending_replacement_generation(pending)
+        recovery_options = (
+            {"max_lease_generations": replacement_generation}
+            if replacement_generation is not None
+            else {}
+        )
         resolution = self._resolve_real_provider_command_turn(
             turn=turn,
             interaction=interaction,
             session_id=session_id,
             marker=marker,
             expected_command=expected_command,
+            **recovery_options,
         )
         target_terminal = self.driver.observe_terminal_execution(
             target_id,
@@ -675,6 +682,7 @@ class KubernetesRealProviderReleaseRolloutSuite(
         expected_command: str,
         expected_resume_strategy: str = "authoritative-history",
         expected_resume_reason: str = "cursor_absent",
+        max_lease_generations: int = 1,
     ) -> dict[str, Any]:
         turn_id = self._turn_id(turn, "real Provider rollout approval Turn")
         interaction_payload = acceptance.json_object(
@@ -811,6 +819,7 @@ class KubernetesRealProviderReleaseRolloutSuite(
             marker,
             expected_resume_strategy=expected_resume_strategy,
             expected_resume_reason=expected_resume_reason,
+            max_lease_generations=max_lease_generations,
         )
         terminal_worker_id, terminal_generation = self._event_worker_identity(terminal)
         command_item = self._approval_command_item_evidence(

@@ -1146,6 +1146,39 @@ class KubernetesWorkerReleaseRolloutSuite(rollout.WorkerReleaseAcceptanceSuite):
         self.active_baseline = active
         return active
 
+    @staticmethod
+    def _pending_replacement_generation(pending: Mapping[str, Any]) -> int | None:
+        if "replacementGeneration" not in pending:
+            return None
+        generation = pending.get("replacementGeneration")
+        if (
+            isinstance(generation, bool)
+            or not isinstance(generation, int)
+            or generation < 1
+        ):
+            raise acceptance.AcceptanceError(
+                "runner.kubernetes_rollout_replacement_generation_invalid",
+                "The recovered pending Approval omitted a positive replacement Generation.",
+                {"replacementGeneration": generation},
+            )
+        return generation
+
+    @classmethod
+    def _recovered_pending_approval(
+        cls,
+        pending: Mapping[str, Any],
+        replacement: Mapping[str, Any],
+        recovery: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        recovered = {
+            **dict(pending),
+            "interaction": dict(replacement),
+            "requestId": replacement.get("requestId"),
+            "replacementGeneration": recovery.get("replacementGeneration"),
+        }
+        cls._pending_replacement_generation(recovered)
+        return recovered
+
     def _canary_overlap(self) -> Mapping[str, Any]:
         baseline = self.active_baseline
         if baseline is None:
@@ -1402,11 +1435,11 @@ class KubernetesWorkerReleaseRolloutSuite(rollout.WorkerReleaseAcceptanceSuite):
             expected_active_pods=2,
             max_active_pods=2,
         )
-        recovered_pending = {
-            **dict(candidate_pending),
-            "interaction": replacement,
-            "requestId": replacement.get("requestId"),
-        }
+        recovered_pending = self._recovered_pending_approval(
+            candidate_pending,
+            replacement,
+            recovery,
+        )
         recovered_candidate = {
             **dict(candidate),
             "pending": recovered_pending,

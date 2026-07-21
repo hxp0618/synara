@@ -433,6 +433,42 @@ class ResourceProfileTest(unittest.TestCase):
 
 
 class PodRecoveryTest(unittest.TestCase):
+    def test_recovered_pending_approval_carries_replacement_generation(self) -> None:
+        recovered = gate.KubernetesWorkerReleaseRolloutSuite._recovered_pending_approval(
+            {
+                "interaction": {"id": "stale-interaction"},
+                "requestId": "stale-request",
+                "replacementGeneration": 99,
+            },
+            {
+                "id": "replacement-interaction",
+                "requestId": "replacement-request",
+            },
+            {"replacementGeneration": 2},
+        )
+
+        self.assertEqual(recovered["replacementGeneration"], 2)
+        self.assertEqual(recovered["requestId"], "replacement-request")
+        self.assertEqual(recovered["interaction"]["id"], "replacement-interaction")
+
+    def test_recovered_pending_approval_requires_positive_replacement_generation(self) -> None:
+        for invalid_generation in (None, 0, -1, True, "2"):
+            with self.subTest(replacement_generation=invalid_generation):
+                with self.assertRaises(acceptance.AcceptanceError) as raised:
+                    gate.KubernetesWorkerReleaseRolloutSuite._recovered_pending_approval(
+                        {"interaction": {"id": "stale-interaction"}},
+                        {
+                            "id": "replacement-interaction",
+                            "requestId": "replacement-request",
+                        },
+                        {"replacementGeneration": invalid_generation},
+                    )
+
+                self.assertEqual(
+                    raised.exception.code,
+                    "runner.kubernetes_rollout_replacement_generation_invalid",
+                )
+
     def test_candidate_recovery_preserves_release_and_advances_generation(self) -> None:
         image = release_image("candidate", DIGEST_B, IMAGE_ID_B)
         before_pod = {
