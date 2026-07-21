@@ -8759,6 +8759,67 @@ class KubernetesDriverObservationTest(unittest.TestCase):
         driver.owns_image = False
         return driver
 
+    def test_create_kubernetes_target_serializes_require_node_spread(self) -> None:
+        class TargetAPI:
+            def __init__(self) -> None:
+                self.payloads: list[Mapping[str, Any]] = []
+
+            def request(
+                inner_self,
+                method: str,
+                path: str,
+                payload: Mapping[str, Any] | None = None,
+                expected: Sequence[int] = (200,),
+                *,
+                maximum_timeout: float = 10.0,
+            ) -> Any:
+                del method, path, expected, maximum_timeout
+                assert payload is not None
+                inner_self.payloads.append(payload)
+                return {"id": f"target-{len(inner_self.payloads)}"}
+
+        class TargetDriver(acceptance.KubernetesDriver):
+            def _worker_proxy_url(self) -> str:
+                return "http://127.0.0.1:41234"
+
+        options = dataclasses.replace(runner_options(), target="kubernetes")
+        with mock.patch.object(acceptance, "reserve_loopback_port", return_value=43123):
+            driver = TargetDriver(
+                pathlib.Path.cwd(),
+                options,
+                acceptance.Deadline(30.0),
+                acceptance.SecretRedactor(),
+            )
+        self.addCleanup(driver._release_state)
+        driver.api = TargetAPI()  # type: ignore[assignment]
+        driver.api_server = "https://127.0.0.1:26443"
+        driver.ca_certificate = "fixture-ca"
+        driver.kubernetes_token = "fixture-token"
+
+        driver._create_kubernetes_target(
+            "tenant-id",
+            "organization-id",
+            "codex",
+            name="default-target",
+            namespace="default-namespace",
+            service_account="default-service-account",
+            image="default-image",
+        )
+        driver._create_kubernetes_target(
+            "tenant-id",
+            "organization-id",
+            "codex",
+            name="spread-target",
+            namespace="spread-namespace",
+            service_account="spread-service-account",
+            image="spread-image",
+            require_node_spread=True,
+        )
+
+        payloads = driver.api.payloads  # type: ignore[attr-defined]
+        self.assertFalse(payloads[0]["configuration"]["requireNodeSpread"])
+        self.assertTrue(payloads[1]["configuration"]["requireNodeSpread"])
+
     def test_owned_kind_cluster_configures_and_records_worker_topology(self) -> None:
         options = dataclasses.replace(
             runner_options(),

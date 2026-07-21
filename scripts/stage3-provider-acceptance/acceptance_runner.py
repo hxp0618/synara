@@ -7048,6 +7048,7 @@ class KubernetesDriver(ManagedWorkerDriver):
         service_account: str,
         image: str,
         max_active_pods: int = 1,
+        require_node_spread: bool = False,
         experimental_providers: Sequence[str] | None = None,
     ) -> dict[str, Any]:
         if not self.api_server or not self.ca_certificate or not self.kubernetes_token:
@@ -7090,6 +7091,7 @@ class KubernetesDriver(ManagedWorkerDriver):
                         "allowInsecureControlPlane": True,
                         "runnerCommand": list(self.options.runner_command),
                         "maxActivePods": max_active_pods,
+                        "requireNodeSpread": require_node_spread,
                         "egressCidrs": ["0.0.0.0/0"],
                         **dict(KUBERNETES_ACCEPTANCE_RESOURCE_CONFIGURATION),
                     },

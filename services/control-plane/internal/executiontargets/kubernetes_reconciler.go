@@ -84,6 +84,7 @@ type kubernetesTargetConfiguration struct {
 	QuotaEphemeralStorage         string            `json:"quotaEphemeralStorage"`
 	NodeSelector                  map[string]string `json:"nodeSelector"`
 	Tolerations                   []map[string]any  `json:"tolerations"`
+	RequireNodeSpread             bool              `json:"requireNodeSpread"`
 }
 
 type kubernetesPod struct {
@@ -689,6 +690,9 @@ func (r *KubernetesReconciler) executionPod(
 	if len(configuration.Tolerations) > 0 {
 		podSpec["tolerations"] = configuration.Tolerations
 	}
+	if configuration.RequireNodeSpread {
+		podSpec["topologySpreadConstraints"] = kubernetesNodeSpreadConstraints(target.ID)
+	}
 	if len(configuration.ImagePullSecrets) > 0 || credential != nil {
 		secrets := make([]any, 0, len(configuration.ImagePullSecrets)+1)
 		seen := make(map[string]struct{}, len(configuration.ImagePullSecrets)+1)
@@ -715,6 +719,21 @@ func (r *KubernetesReconciler) executionPod(
 		},
 		"spec": podSpec,
 	}, nil
+}
+
+func kubernetesNodeSpreadConstraints(targetID uuid.UUID) []any {
+	return []any{
+		map[string]any{
+			"maxSkew":           1,
+			"topologyKey":       "kubernetes.io/hostname",
+			"whenUnsatisfiable": "DoNotSchedule",
+			"labelSelector": map[string]any{
+				"matchLabels": map[string]any{
+					kubernetesTargetLabel: targetID.String(),
+				},
+			},
+		},
+	}
 }
 
 func kubernetesTargetLabels(target persistence.ExecutionTarget) map[string]string {

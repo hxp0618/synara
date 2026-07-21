@@ -244,7 +244,13 @@ capabilities, no privilege escalation, no ServiceAccount token, bounded EmptyDir
 and explicit CPU/memory/ephemeral-storage limits. By default `/data/workspaces` and `/data/git-cache` are
 separate trees on the Pod-local workspace EmptyDir. Optional `gitCachePersistentVolumeClaim` mounts a dedicated
 cache at `/git-cache`; cross-Pod sharing is valid only when the claim supplies RWX-equivalent access and reliable
-POSIX file locking. The registration token is referenced from a Secret;
+POSIX file locking. Optional `requireNodeSpread=true` adds one Pod `topologySpreadConstraints` rule with
+`maxSkew=1`, `topologyKey=kubernetes.io/hostname`, `whenUnsatisfiable=DoNotSchedule`, and
+`labelSelector.matchLabels["synara.io/execution-target-id"]=<target UUID>`. The reconciler deliberately does not
+emit required `podAntiAffinity`, so once each eligible hostname already has one Pod, additional concurrency may
+still schedule on occupied nodes while keeping per-host skew within 1. The balancing guarantee applies only when
+the scheduler sees at least two eligible `kubernetes.io/hostname` domains after `nodeSelector`, `tolerations`,
+and cluster policy are applied; the default `requireNodeSpread=false` emits no spread constraint. The registration token is referenced from a Secret;
 it is not embedded in Pod labels, Audit metadata, responses, or runner arguments.
 
 The in-cluster control-plane RBAC and Kustomize base live in `deploy/kubernetes`. The reconciler role is

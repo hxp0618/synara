@@ -376,6 +376,7 @@ class KubernetesRealProviderReleaseRolloutDriver(
             service_account=self.worker_service_account,
             image=baseline.exact_reference,
             max_active_pods=2,
+            require_node_spread=True,
             experimental_providers=enabled_providers,
         )
         observer = self._create_kubernetes_target(

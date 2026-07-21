@@ -204,6 +204,8 @@ class DriverConfigurationTest(unittest.TestCase):
 
         self.assertEqual(calls[0]["experimental_providers"], ("claudeAgent",))
         self.assertEqual(calls[1]["experimental_providers"], ("claudeAgent",))
+        self.assertTrue(calls[0]["require_node_spread"])
+        self.assertNotIn("require_node_spread", calls[1])
         self.assertEqual(evidence["mainExperimentalProviders"], ["claudeAgent"])
         self.assertEqual(evidence["observerExperimentalProviders"], ["claudeAgent"])
 

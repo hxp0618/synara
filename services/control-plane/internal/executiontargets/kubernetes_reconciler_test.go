@@ -232,6 +232,63 @@ func TestKubernetesReconcilerMountsPersistentGitCacheVolume(t *testing.T) {
 	}
 }
 
+func TestKubernetesReconcilerRequiresNodeSpread(t *testing.T) {
+	fixture := newKubernetesReconcileFixture(t, "")
+	configuration := kubernetesTestConfiguration("")
+	configuration["requireNodeSpread"] = true
+	fixture.updateConfiguration(t, configuration)
+	client := newFakeKubernetesClient()
+	fixture.reconciler.factory = &fakeKubernetesFactory{client: client}
+
+	if err := fixture.reconciler.ReconcileOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	pod := client.lastKind("Pod")
+	if pod == nil {
+		t.Fatal("Kubernetes reconciliation did not create a Pod")
+	}
+	spec := pod["spec"].(map[string]any)
+	if _, found := spec["affinity"]; found {
+		t.Fatalf("Kubernetes Pod unexpectedly used affinity instead of topology spread: %#v", spec["affinity"])
+	}
+	constraints, ok := spec["topologySpreadConstraints"].([]any)
+	if !ok || len(constraints) != 1 {
+		t.Fatalf("Kubernetes Pod topology spread constraints are invalid: %#v", spec["topologySpreadConstraints"])
+	}
+	constraint := constraints[0].(map[string]any)
+	if constraint["maxSkew"] != 1 ||
+		constraint["topologyKey"] != "kubernetes.io/hostname" ||
+		constraint["whenUnsatisfiable"] != "DoNotSchedule" {
+		t.Fatalf("Kubernetes Pod topology spread constraint policy is invalid: %#v", constraint)
+	}
+	labelSelector, ok := constraint["labelSelector"].(map[string]any)
+	if !ok {
+		t.Fatalf("Kubernetes Pod topology spread label selector is invalid: %#v", constraint["labelSelector"])
+	}
+	matchLabels, ok := labelSelector["matchLabels"].(map[string]any)
+	if !ok || matchLabels[kubernetesTargetLabel] != fixture.targetID.String() {
+		t.Fatalf("Kubernetes Pod topology spread target selector is invalid: %#v", labelSelector)
+	}
+}
+
+func TestKubernetesReconcilerDefaultsToNoNodeSpreadConstraint(t *testing.T) {
+	fixture := newKubernetesReconcileFixture(t, "")
+	client := newFakeKubernetesClient()
+	fixture.reconciler.factory = &fakeKubernetesFactory{client: client}
+
+	if err := fixture.reconciler.ReconcileOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	pod := client.lastKind("Pod")
+	if pod == nil {
+		t.Fatal("Kubernetes reconciliation did not create a Pod")
+	}
+	spec := pod["spec"].(map[string]any)
+	if _, found := spec["topologySpreadConstraints"]; found {
+		t.Fatalf("Kubernetes Pod unexpectedly emitted topology spread constraints by default: %#v", spec["topologySpreadConstraints"])
+	}
+}
+
 func TestKubernetesReconcilerPinsExecutionReleaseImageAndUsesTargetPullCredential(t *testing.T) {
 	fixture := newKubernetesReconcileFixture(t, "")
 	configuration := kubernetesTestConfiguration("")
