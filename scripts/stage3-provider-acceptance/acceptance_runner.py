@@ -839,6 +839,13 @@ class Deadline:
             raise AcceptanceError("runner.timeout", "The acceptance deadline was exceeded.")
         time.sleep(min(seconds, remaining))
 
+    def child(self, seconds: float) -> Deadline:
+        if seconds <= 0:
+            raise ValueError("child deadline seconds must be positive")
+        child = Deadline(seconds)
+        child._end = min(self._end, child._end)
+        return child
+
 
 class SecretRedactor:
     def __init__(self) -> None:
@@ -2211,16 +2218,39 @@ class APIClient:
         description: str,
         probe: Callable[[], T | None],
         interval: float = 0.25,
+        *,
+        timeout_seconds: float | None = None,
+        wait_deadline: Deadline | None = None,
     ) -> T:
-        while self.deadline.remaining() > 0:
+        if timeout_seconds is not None and wait_deadline is not None:
+            raise ValueError("wait timeout_seconds and wait_deadline are mutually exclusive")
+        resolved_deadline = (
+            wait_deadline
+            if wait_deadline is not None
+            else (
+                self.deadline.child(timeout_seconds)
+                if timeout_seconds is not None
+                else self.deadline
+            )
+        )
+        child_deadline = resolved_deadline is not self.deadline
+        while resolved_deadline.remaining() > 0:
             value = probe()
             if value is not None:
                 return value
-            self.deadline.sleep(interval)
+            try:
+                resolved_deadline.sleep(interval)
+            except AcceptanceError as error:
+                if not child_deadline or error.code != "runner.timeout":
+                    raise
+                break
+        evidence: dict[str, Any] = {"waitedFor": description}
+        if timeout_seconds is not None:
+            evidence["timeoutSeconds"] = timeout_seconds
         raise AcceptanceError(
             "runner.wait_timeout",
             f"Timed out waiting for {description}.",
-            {"waitedFor": description},
+            evidence,
         )
 
 
@@ -11206,8 +11236,14 @@ class AcceptanceSuite:
         *,
         expected_command: str,
         session_id: str | None = None,
+        wait_deadline: Deadline | None = None,
     ) -> tuple[dict[str, Any], str, str, dict[str, Any], str]:
-        interaction = self._wait_for_interaction(turn_id, "approval", session_id=session_id)
+        interaction = self._wait_for_interaction(
+            turn_id,
+            "approval",
+            session_id=session_id,
+            wait_deadline=wait_deadline,
+        )
         execution_id, request_id, interaction_payload, command = (
             self._real_provider_approval_request_details(
                 interaction,
@@ -11224,6 +11260,7 @@ class AcceptanceSuite:
         previous_request_id: str,
         *,
         session_id: str | None = None,
+        wait_deadline: Deadline | None = None,
     ) -> dict[str, Any]:
         resolved_session_id = session_id or self._required("session_id")
 
@@ -11328,9 +11365,13 @@ class AcceptanceSuite:
                 return {"interaction": matches[0]}
             return None
 
+        wait_description = f"terminal event or follow-up approval for Turn {turn_id}"
+        if wait_deadline is None:
+            return self.api.wait_until(wait_description, approval_probe)
         return self.api.wait_until(
-            f"terminal event or follow-up approval for Turn {turn_id}",
+            wait_description,
             approval_probe,
+            wait_deadline=wait_deadline,
         )
 
     def _real_provider_approval_resolution(self) -> Mapping[str, Any]:
@@ -17225,6 +17266,7 @@ class AcceptanceSuite:
         kind: str,
         *,
         session_id: str | None = None,
+        wait_deadline: Deadline | None = None,
     ) -> dict[str, Any]:
         session_id = session_id or self._required("session_id")
 
@@ -17249,7 +17291,14 @@ class AcceptanceSuite:
             )
             return None
 
-        return self.api.wait_until(f"{kind} interaction for Turn {turn_id}", interaction_probe)
+        wait_description = f"{kind} interaction for Turn {turn_id}"
+        if wait_deadline is None:
+            return self.api.wait_until(wait_description, interaction_probe)
+        return self.api.wait_until(
+            wait_description,
+            interaction_probe,
+            wait_deadline=wait_deadline,
+        )
 
     def _wait_for_replacement_interaction(
         self,

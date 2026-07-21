@@ -2880,6 +2880,43 @@ class APIClientTimeoutTest(unittest.TestCase):
         self.assertAlmostEqual(timeouts[0], 10.0, delta=0.1)
         self.assertAlmostEqual(timeouts[1], 25.0, delta=0.1)
 
+    def test_wait_until_uses_bounded_child_deadline_without_consuming_parent(self) -> None:
+        class ExhaustingDeadline:
+            def __init__(self) -> None:
+                self.exhausted = False
+
+            def remaining(self) -> float:
+                return 0.0 if self.exhausted else 1.0
+
+            def sleep(self, _seconds: float) -> None:
+                self.exhausted = True
+
+        client = acceptance.APIClient(
+            "http://127.0.0.1:3780",
+            acceptance.Deadline(30.0),
+            acceptance.SecretRedactor(),
+        )
+        child = ExhaustingDeadline()
+        with mock.patch.object(client.deadline, "child", return_value=child) as bounded:
+            with self.assertRaises(acceptance.AcceptanceError) as caught:
+                client.wait_until(
+                    "bounded Provider interaction",
+                    lambda: None,
+                    timeout_seconds=300.0,
+                )
+
+        bounded.assert_called_once_with(300.0)
+        self.assertEqual(caught.exception.code, "runner.wait_timeout")
+        self.assertEqual(caught.exception.evidence["timeoutSeconds"], 300.0)
+        self.assertGreater(client.deadline.remaining(), 0.0)
+
+    def test_child_deadline_never_extends_its_parent(self) -> None:
+        parent = acceptance.Deadline(30.0)
+
+        child = parent.child(300.0)
+
+        self.assertEqual(child._end, parent._end)
+
 
 class LocalRetentionHarnessTest(unittest.TestCase):
     def test_local_driver_uses_short_sweep_only_for_retention_concurrency(self) -> None:

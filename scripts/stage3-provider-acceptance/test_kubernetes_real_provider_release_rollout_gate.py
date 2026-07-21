@@ -249,8 +249,9 @@ class SuiteBehaviorTest(unittest.TestCase):
             *,
             expected_command: str,
             session_id: str | None = None,
+            wait_deadline: acceptance.Deadline | None = None,
         ) -> tuple[dict[str, Any], str, str, dict[str, Any], str]:
-            del session_id
+            del session_id, wait_deadline
             interaction = {
                 "id": "interaction-1",
                 "kind": "approval",
@@ -301,6 +302,11 @@ class SuiteBehaviorTest(unittest.TestCase):
             "turn-1",
             expected_command=acceptance.real_provider_approval_command(pending["marker"]),
             session_id="session-1",
+            wait_deadline=mock.ANY,
+        )
+        self.assertIsInstance(
+            approval.call_args.kwargs["wait_deadline"],
+            acceptance.Deadline,
         )
         self.assertEqual(pending["requestKind"], "command")
 
@@ -313,7 +319,9 @@ class SuiteBehaviorTest(unittest.TestCase):
             *,
             expected_command: str,
             session_id: str | None = None,
+            wait_deadline: acceptance.Deadline | None = None,
         ) -> tuple[dict[str, Any], str, str, dict[str, Any], str]:
+            del wait_deadline
             interaction = {
                 "id": "interaction-1",
                 "kind": "approval",
@@ -362,6 +370,11 @@ class SuiteBehaviorTest(unittest.TestCase):
             "turn-2",
             expected_command=acceptance.real_provider_approval_command(evidence["marker"]),
             session_id="session-1",
+            wait_deadline=mock.ANY,
+        )
+        self.assertIsInstance(
+            approval.call_args.kwargs["wait_deadline"],
+            acceptance.Deadline,
         )
         self.assertEqual(evidence["sessionSequenceBeforeTurn"], 10)
 
@@ -491,7 +504,7 @@ class SuiteBehaviorTest(unittest.TestCase):
                     {"interaction": interaction_2},
                     {"terminal": terminal, "events": events},
                 ],
-            ),
+            ) as wait_for_outcome,
             mock.patch.object(
                 suite,
                 "_real_provider_turn_evidence",
@@ -518,6 +531,35 @@ class SuiteBehaviorTest(unittest.TestCase):
         self.assertEqual(evidence["approvalResolutions"][1]["requestId"], "request-2")
         self.assertEqual(suite.driver.api.request.call_count, 2)
         self.assertEqual(turn_evidence.call_args.kwargs["max_lease_generations"], 1)
+        self.assertEqual(wait_for_outcome.call_count, 2)
+        self.assertIs(
+            wait_for_outcome.call_args_list[0].kwargs["wait_deadline"],
+            wait_for_outcome.call_args_list[1].kwargs["wait_deadline"],
+        )
+
+    def test_resolve_real_provider_command_turn_does_not_approve_after_turn_deadline(self) -> None:
+        suite = self.build_suite()
+        command = acceptance.real_provider_approval_command("MARKER")
+        suite.driver.api = mock.Mock()
+
+        with self.assertRaises(acceptance.AcceptanceError) as caught:
+            suite._resolve_real_provider_command_turn(
+                turn={"id": "turn-1"},
+                interaction={
+                    "id": "interaction-1",
+                    "turnId": "turn-1",
+                    "executionId": "execution-1",
+                    "requestId": "request-1",
+                    "payload": {"requestKind": "command", "command": command},
+                },
+                session_id="session-1",
+                marker="MARKER",
+                expected_command=command,
+                wait_deadline=acceptance.Deadline(0.0),
+            )
+
+        self.assertEqual(caught.exception.code, "runner.wait_timeout")
+        suite.driver.api.request.assert_not_called()
 
     def test_recovered_pending_approval_passes_replacement_generation_to_evidence(
         self,
@@ -589,6 +631,10 @@ class SuiteBehaviorTest(unittest.TestCase):
 
     def test_resolve_pending_approval_uses_marker_bound_command_validation(self) -> None:
         suite = self.build_suite()
+        turn_deadline = suite.deadline.child(
+            gate.REAL_PROVIDER_APPROVAL_INTERACTION_TIMEOUT_SECONDS
+        )
+        suite.real_provider_turn_deadlines["turn-1"] = turn_deadline
         pending = {
             "sessionId": "session-1",
             "targetId": "target-1",
@@ -617,9 +663,11 @@ class SuiteBehaviorTest(unittest.TestCase):
             session_id="session-1",
             marker="MARKER",
             expected_command=acceptance.real_provider_approval_command("MARKER"),
+            wait_deadline=turn_deadline,
         )
         observe_terminal.assert_called_once_with("target-1", "execution-1")
         self.assertEqual(evidence["targetTerminal"], {"podName": "pod-1"})
+        self.assertNotIn("turn-1", suite.real_provider_turn_deadlines)
 
     def test_complete_load_turn_uses_marker_bound_command_validation(self) -> None:
         suite = self.build_suite()
@@ -685,6 +733,7 @@ class SuiteBehaviorTest(unittest.TestCase):
             expected_command=acceptance.real_provider_approval_command("MARKER"),
             expected_resume_strategy="authoritative-history",
             expected_resume_reason="cursor_absent",
+            wait_deadline=None,
         )
         self.assertTrue(evidence["markerMatched"])
         self.assertTrue(evidence["commandItemVerified"])

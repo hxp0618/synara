@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import dataclasses
+import json
 import pathlib
 import subprocess
 import tempfile
@@ -570,7 +571,7 @@ class CleanupTest(unittest.TestCase):
 
             with (
                 mock.patch.object(acceptance.KubernetesDriver, "cleanup", return_value={"ownedClusterRemoved": True}),
-                mock.patch.object(rollout, "validate_owned_release_image", return_value=True),
+                mock.patch.object(rollout, "validate_owned_release_image", return_value=True) as validate_image,
                 mock.patch.object(driver, "_require_docker_resource_owner"),
                 mock.patch.object(driver, "_docker_completed", side_effect=completed),
             ):
@@ -581,7 +582,148 @@ class CleanupTest(unittest.TestCase):
         self.assertTrue(evidence["registryVolumeRemoved"])
         self.assertFalse(evidence["broadCleanupUsed"])
         self.assertFalse(evidence["registryBaseImageRemoved"])
+        self.assertEqual(
+            [call.kwargs["cleanup_timeout"] for call in validate_image.call_args_list],
+            [10.0, 10.0],
+        )
         self.assertFalse(any(command and command[0] in {"prune", "system"} for command in commands))
+
+    def test_cleanup_still_removes_owned_images_after_main_deadline_expires(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            options = gate_options(pathlib.Path(temporary))
+            driver = gate.KubernetesWorkerReleaseRolloutDriver(
+                options,
+                gate.runner_options(options),
+                acceptance.Deadline(0.0),
+                acceptance.SecretRedactor(),
+            )
+            self.addCleanup(driver._release_state)
+            driver.images = {
+                "baseline": release_image("baseline", DIGEST_A, IMAGE_ID_A),
+                "candidate": release_image("candidate", DIGEST_B, IMAGE_ID_B),
+            }
+            commands: list[tuple[list[str], float | None]] = []
+            labels_by_image = {
+                IMAGE_ID_A: json.dumps(
+                    {
+                        rollout.OWNER_LABEL: driver.resource_owner,
+                        rollout.SLOT_LABEL: "baseline",
+                    }
+                ),
+                IMAGE_ID_B: json.dumps(
+                    {
+                        rollout.OWNER_LABEL: driver.resource_owner,
+                        rollout.SLOT_LABEL: "candidate",
+                    }
+                ),
+            }
+
+            def completed(
+                arguments: list[str],
+                *,
+                cleanup_timeout: float | None = None,
+                **_kwargs: Any,
+            ) -> subprocess.CompletedProcess[str]:
+                commands.append((arguments, cleanup_timeout))
+                if arguments[:3] == ["image", "inspect", "--format"]:
+                    image_id = arguments[-1]
+                    return subprocess.CompletedProcess(arguments, 0, labels_by_image[image_id], "")
+                if arguments[:3] == ["image", "rm", "-f"]:
+                    return subprocess.CompletedProcess(arguments, 0, "removed\n", "")
+                if arguments[:2] == ["image", "inspect"]:
+                    return subprocess.CompletedProcess(arguments, 1, "", "")
+                raise AssertionError(f"unexpected docker cleanup command: {arguments}")
+
+            with (
+                mock.patch.object(acceptance.KubernetesDriver, "cleanup", return_value={"ownedClusterRemoved": True}),
+                mock.patch.object(driver, "_docker_completed", side_effect=completed),
+            ):
+                evidence = driver.cleanup()
+
+        self.assertTrue(evidence["workerImagesRemoved"])
+        self.assertEqual(evidence["removedImageSlots"], ["baseline", "candidate"])
+        self.assertEqual(
+            commands,
+            [
+                (
+                    ["image", "inspect", "--format", "{{json .Config.Labels}}", IMAGE_ID_A],
+                    10.0,
+                ),
+                (["image", "rm", "-f", IMAGE_ID_A], 60.0),
+                (["image", "inspect", IMAGE_ID_A], 10.0),
+                (
+                    ["image", "inspect", "--format", "{{json .Config.Labels}}", IMAGE_ID_B],
+                    10.0,
+                ),
+                (["image", "rm", "-f", IMAGE_ID_B], 60.0),
+                (["image", "inspect", IMAGE_ID_B], 10.0),
+            ],
+        )
+
+    def test_cleanup_refuses_image_removal_when_owned_labels_do_not_match(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            options = gate_options(pathlib.Path(temporary))
+            driver = gate.KubernetesWorkerReleaseRolloutDriver(
+                options,
+                gate.runner_options(options),
+                acceptance.Deadline(0.0),
+                acceptance.SecretRedactor(),
+            )
+            self.addCleanup(driver._release_state)
+            driver.images = {
+                "baseline": release_image("baseline", DIGEST_A, IMAGE_ID_A),
+            }
+            commands: list[list[str]] = []
+
+            def completed(
+                arguments: list[str],
+                *,
+                cleanup_timeout: float | None = None,
+                **_kwargs: Any,
+            ) -> subprocess.CompletedProcess[str]:
+                del cleanup_timeout
+                commands.append(arguments)
+                if arguments[:3] == ["image", "inspect", "--format"]:
+                    labels = {
+                        rollout.OWNER_LABEL: "different-owner",
+                        rollout.SLOT_LABEL: "baseline",
+                    }
+                    return subprocess.CompletedProcess(
+                        arguments,
+                        0,
+                        json.dumps(labels),
+                        "",
+                    )
+                raise AssertionError(f"unexpected Docker cleanup command: {arguments}")
+
+            with (
+                mock.patch.object(
+                    acceptance.KubernetesDriver,
+                    "cleanup",
+                    return_value={"ownedClusterRemoved": True},
+                ),
+                mock.patch.object(driver, "_docker_completed", side_effect=completed),
+            ):
+                with self.assertRaises(acceptance.AcceptanceError) as caught:
+                    driver.cleanup()
+
+        self.assertEqual(
+            caught.exception.code,
+            "runner.kubernetes_worker_release_rollout_cleanup_failed",
+        )
+        self.assertEqual(
+            commands,
+            [
+                [
+                    "image",
+                    "inspect",
+                    "--format",
+                    "{{json .Config.Labels}}",
+                    IMAGE_ID_A,
+                ]
+            ],
+        )
+        self.assertFalse(any(command[:3] == ["image", "rm", "-f"] for command in commands))
 
 
 if __name__ == "__main__":

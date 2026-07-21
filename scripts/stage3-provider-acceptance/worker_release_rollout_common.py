@@ -164,9 +164,42 @@ def build_release_image(
     return image
 
 
-def validate_owned_release_image(driver: Any, image: ReleaseImage, *, owner: str) -> bool:
-    raw = driver._docker_command(
-        ["image", "inspect", "--format", "{{json .Config.Labels}}", image.image_id]
+def _docker_output(
+    driver: Any,
+    arguments: Sequence[str],
+    *,
+    cleanup_timeout: float | None = None,
+) -> str:
+    if cleanup_timeout is None:
+        return driver._docker_command(arguments)
+    completed = driver._docker_completed(arguments, cleanup_timeout=cleanup_timeout)
+    redactor = getattr(driver, "redactor", None)
+    output = redactor.text(completed.stdout) if redactor is not None else completed.stdout
+    if completed.returncode != 0:
+        raise acceptance.AcceptanceError(
+            "runner.docker_command_failed",
+            f"Docker command exited with status {completed.returncode}.",
+            {
+                "command": ["docker", *arguments[:3]],
+                "exitCode": completed.returncode,
+                "log": None,
+                "outputExcerpt": output[-1000:],
+            },
+        )
+    return output
+
+
+def validate_owned_release_image(
+    driver: Any,
+    image: ReleaseImage,
+    *,
+    owner: str,
+    cleanup_timeout: float | None = None,
+) -> bool:
+    raw = _docker_output(
+        driver,
+        ["image", "inspect", "--format", "{{json .Config.Labels}}", image.image_id],
+        cleanup_timeout=cleanup_timeout,
     ).strip()
     try:
         labels = json.loads(raw)

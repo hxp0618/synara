@@ -29,6 +29,7 @@ JSON_REPORT_NAME = "kubernetes-real-provider-worker-release-rollout-gate.json"
 MARKDOWN_REPORT_NAME = "kubernetes-real-provider-worker-release-rollout-gate.md"
 DEFAULT_REGISTRY_IMAGE = fixture_rollout.DEFAULT_REGISTRY_IMAGE
 DEFAULT_LOAD_WAVES = fixture_rollout.DEFAULT_LOAD_WAVES
+REAL_PROVIDER_APPROVAL_INTERACTION_TIMEOUT_SECONDS = 300.0
 REAL_PROVIDER_ROLLOUT_WORKER_LEASE_TTL = release_gate.PRODUCTION_WORKER_LEASE_TTL
 REAL_PROVIDER_ROLLOUT_WORKER_HEARTBEAT_TIMEOUT = (
     release_gate.PRODUCTION_WORKER_HEARTBEAT_TIMEOUT
@@ -442,6 +443,7 @@ class KubernetesRealProviderReleaseRolloutSuite(
         self.real_provider_load_completed_wave_count = 0
         self.real_provider_load_session_turn_counts: dict[str, int] = {}
         self.real_provider_load_session_continuity: dict[str, list[dict[str, Any]]] = {}
+        self.real_provider_turn_deadlines: dict[str, acceptance.Deadline] = {}
 
     def _create_rollout_resources(self) -> Mapping[str, Any]:
         tenant_id = self._required("tenant_id")
@@ -549,6 +551,9 @@ class KubernetesRealProviderReleaseRolloutSuite(
 
     def _start_pending_approval(self, session_key: str, target_id: str) -> dict[str, Any]:
         session_id = self.sessions[session_key]
+        turn_deadline = self.deadline.child(
+            REAL_PROVIDER_APPROVAL_INTERACTION_TIMEOUT_SECONDS
+        )
         marker = self._real_provider_marker(
             f"{session_key}-release",
             session_id=session_id,
@@ -561,13 +566,19 @@ class KubernetesRealProviderReleaseRolloutSuite(
             session_id=session_id,
         )
         turn_id = self._turn_id(turn, f"{session_key} Turn")
-        interaction, execution_id, request_id, interaction_payload, command = (
-            self._real_provider_approval_interaction(
-                turn_id,
-                expected_command=expected_command,
-                session_id=session_id,
+        self.real_provider_turn_deadlines[turn_id] = turn_deadline
+        try:
+            interaction, execution_id, request_id, interaction_payload, command = (
+                self._real_provider_approval_interaction(
+                    turn_id,
+                    expected_command=expected_command,
+                    session_id=session_id,
+                    wait_deadline=turn_deadline,
+                )
             )
-        )
+        except Exception:
+            self.real_provider_turn_deadlines.pop(turn_id, None)
+            raise
         active = self._active_approval_evidence(
             turn_id,
             interaction,
@@ -609,19 +620,28 @@ class KubernetesRealProviderReleaseRolloutSuite(
         )
         expected_command = acceptance.real_provider_approval_command(marker)
         started = time.monotonic()
+        turn_deadline = self.deadline.child(
+            REAL_PROVIDER_APPROVAL_INTERACTION_TIMEOUT_SECONDS
+        )
         turn, control_plane_admission_latency_ms = self._create_turn_with_admission_latency(
             real_provider_rollout_approval_prompt(marker),
             runtime_mode="approval-required",
             session_id=session_id,
         )
         turn_id = self._turn_id(turn, "real Provider rollout load Turn")
-        interaction, execution_id, request_id, interaction_payload, command = (
-            self._real_provider_approval_interaction(
-                turn_id,
-                expected_command=expected_command,
-                session_id=session_id,
+        self.real_provider_turn_deadlines[turn_id] = turn_deadline
+        try:
+            interaction, execution_id, request_id, interaction_payload, command = (
+                self._real_provider_approval_interaction(
+                    turn_id,
+                    expected_command=expected_command,
+                    session_id=session_id,
+                    wait_deadline=turn_deadline,
+                )
             )
-        )
+        except Exception:
+            self.real_provider_turn_deadlines.pop(turn_id, None)
+            raise
         active = self._active_approval_evidence(
             turn_id,
             interaction,
@@ -653,6 +673,8 @@ class KubernetesRealProviderReleaseRolloutSuite(
         interaction = acceptance.json_object(pending.get("interaction"), "pending interaction")
         marker = rollout.required_string(pending, "marker", "pending marker")
         expected_command = acceptance.real_provider_approval_command(marker)
+        turn_id = self._turn_id(turn, "real Provider rollout approval Turn")
+        turn_deadline = self.real_provider_turn_deadlines.pop(turn_id, None)
         replacement_generation = self._pending_replacement_generation(pending)
         recovery_options = (
             {"max_lease_generations": replacement_generation}
@@ -665,6 +687,7 @@ class KubernetesRealProviderReleaseRolloutSuite(
             session_id=session_id,
             marker=marker,
             expected_command=expected_command,
+            wait_deadline=turn_deadline,
             **recovery_options,
         )
         target_terminal = self.driver.observe_terminal_execution(
@@ -684,8 +707,13 @@ class KubernetesRealProviderReleaseRolloutSuite(
         expected_resume_strategy: str = "authoritative-history",
         expected_resume_reason: str = "cursor_absent",
         max_lease_generations: int = 1,
+        wait_deadline: acceptance.Deadline | None = None,
     ) -> dict[str, Any]:
         turn_id = self._turn_id(turn, "real Provider rollout approval Turn")
+        if wait_deadline is None:
+            wait_deadline = self.deadline.child(
+                REAL_PROVIDER_APPROVAL_INTERACTION_TIMEOUT_SECONDS
+            )
         interaction_payload = acceptance.json_object(
             interaction.get("payload"),
             "real Provider rollout Approval payload",
@@ -706,6 +734,17 @@ class KubernetesRealProviderReleaseRolloutSuite(
         terminal: dict[str, Any] | None = None
         events: list[dict[str, Any]] | None = None
         for _attempt in range(acceptance.REAL_PROVIDER_MAX_SEQUENTIAL_APPROVALS):
+            if wait_deadline.remaining() <= 0:
+                raise acceptance.AcceptanceError(
+                    "runner.wait_timeout",
+                    f"Timed out waiting for approval phase for Turn {turn_id}.",
+                    {
+                        "waitedFor": f"approval phase for Turn {turn_id}",
+                        "timeoutSeconds": (
+                            REAL_PROVIDER_APPROVAL_INTERACTION_TIMEOUT_SECONDS
+                        ),
+                    },
+                )
             current_interaction_id = rollout.required_string(
                 {"id": current_interaction.get("id")},
                 "id",
@@ -760,6 +799,7 @@ class KubernetesRealProviderReleaseRolloutSuite(
                 current_interaction_id,
                 current_request_id,
                 session_id=session_id,
+                wait_deadline=wait_deadline,
             )
             terminal_candidate = outcome.get("terminal")
             if isinstance(terminal_candidate, dict):
@@ -1654,6 +1694,8 @@ class KubernetesRealProviderReleaseRolloutSuite(
         )
         marker = rollout.required_string(load_turn, "marker", "real Provider rollout load marker")
         expected_command = acceptance.real_provider_approval_command(marker)
+        turn_id = self._turn_id(turn, "real Provider rollout load Turn")
+        turn_deadline = self.real_provider_turn_deadlines.pop(turn_id, None)
         resolution = self._resolve_real_provider_command_turn(
             turn=turn,
             interaction=interaction,
@@ -1662,8 +1704,8 @@ class KubernetesRealProviderReleaseRolloutSuite(
             expected_command=expected_command,
             expected_resume_strategy=expected_resume_strategy,
             expected_resume_reason=expected_resume_reason,
+            wait_deadline=turn_deadline,
         )
-        turn_id = self._turn_id(turn, "real Provider rollout load Turn")
         release = self._wait_execution_release(
             turn_id,
             revision_id=revision_id,
@@ -2259,6 +2301,9 @@ def build_report(
                 "credentialField": gate_options.real_provider_credential_field,
                 "baseUrlConfigured": gate_options.real_provider_base_url_env is not None,
                 "model": gate_options.real_provider_model,
+                "approvalInteractionTimeoutSeconds": (
+                    REAL_PROVIDER_APPROVAL_INTERACTION_TIMEOUT_SECONDS
+                ),
                 "productCredentialEnvironmentNamePersisted": False,
                 "sensitiveEnvironmentNameReportRedactionEnforced": True,
                 "sensitiveEnvironmentNameOutputScanEnforced": True,

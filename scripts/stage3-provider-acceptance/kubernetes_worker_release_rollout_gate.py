@@ -606,6 +606,7 @@ class KubernetesWorkerReleaseRolloutDriver(acceptance.KubernetesDriver):
                     self,
                     image,
                     owner=self.resource_owner,
+                    cleanup_timeout=10.0,
                 )
                 completed = self._docker_completed(
                     ["image", "rm", "-f", image.image_id], cleanup_timeout=60.0
