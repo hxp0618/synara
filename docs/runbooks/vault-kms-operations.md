@@ -68,6 +68,67 @@ External WORM archive verification:
 Do not commit values for any of these environments. Reports may retain the
 environment variable names and hashes only.
 
+## Short-lived operator credential session
+
+For the repository-owned Stage 3 production-like overlay observed on July 21,
+2026, the current live non-secret runtime boundary is:
+
+- Kubernetes context: `kind-synara-stage3-prod`
+- Vault namespace: `synara-kms`
+- active Vault Service: `synara-vault-active`
+- Registry host: `192.168.139.3:5443`
+- Registry repository: `192.168.139.3:5443/synara/worker`
+- Registry container: `synara-stage3-prod-registry`
+
+Long-running rollout, load, or soak gates must finish before minting Vault or
+Registry material. Start the short-lived credential shell only immediately
+before the Registry/KMS/admission/snapshot/SIEM chain.
+
+Required launcher inputs:
+
+- `SYNARA_STAGE3_KMS_RUNTIME`
+- `SYNARA_VAULT_INIT_JSON`
+- `VAULT_ADDR`
+- `VAULT_CACERT`
+- optional `SYNARA_STAGE3_REGISTRY_HOST`
+
+The launcher emits a clean shell that exports:
+
+- `VAULT_TOKEN`
+- `VAULT_OPERATOR_TOKEN`
+- `VAULT_SNAPSHOT_OPERATOR_ROLE_ID`
+- `VAULT_SNAPSHOT_OPERATOR_SECRET_ID`
+- `VAULT_SNAPSHOT_RESTORE_KEY_1`
+- `VAULT_SNAPSHOT_RESTORE_KEY_2`
+- `VAULT_SNAPSHOT_RESTORE_KEY_3`
+- `REGISTRY_USERNAME`
+- `REGISTRY_PASSWORD`
+- `REGISTRY_CA_CERT`
+- `SYNARA_STAGE3_CREDENTIAL_SESSION=ready`
+
+The helper itself is operator-owned and not checked into this repository.
+Treat `SYNARA_STAGE3_KMS_RUNTIME` as the owner-only runtime directory that
+contains the live boundary files plus:
+
+- `bin/start-short-lived-credential-session.py`
+- `bin/vault-kubectl-active`
+
+Start it with environment-variable names and owner-only paths only:
+
+```sh
+export SYNARA_STAGE3_KMS_RUNTIME=/secure/synara-stage3-kms-runtime
+export SYNARA_VAULT_INIT_JSON=/secure/synara-vault/init.json
+export VAULT_ADDR=<approved-live-vault-address>
+export VAULT_CACERT="$SYNARA_STAGE3_KMS_RUNTIME/ca.crt"
+
+"$SYNARA_STAGE3_KMS_RUNTIME/bin/start-short-lived-credential-session.py"
+```
+
+Inside that shell, prefer the checked wrapper
+`"$SYNARA_STAGE3_KMS_RUNTIME/bin/vault-kubectl-active"` for live Vault CLI
+commands so every gate resolves the current active Vault pod on
+`kind-synara-stage3-prod` without separate port-forwarding.
+
 ## Shamir custody policy
 
 - Scheme: `5` total shares, `3` required to restore or generate a new root.
@@ -142,6 +203,7 @@ Run the gate with an empty output directory:
 
 ```bash
 python3 scripts/stage3-provider-acceptance/vault_snapshot_restore_drill.py \
+  --vault-bin "$SYNARA_STAGE3_KMS_RUNTIME/bin/vault-kubectl-active" \
   --output-dir ./.stage3-vault-restore-drill
 ```
 
@@ -241,7 +303,7 @@ the named environments:
 
 ```sh
 python3 scripts/stage3-provider-acceptance/vault_audit_siem_delivery_gate.py \
-  --vault-command-json '["/secure/bin/vault"]' \
+  --vault-command-json "[\"$SYNARA_STAGE3_KMS_RUNTIME/bin/vault-kubectl-active\"]" \
   --vault-auditor-token-env VAULT_OPERATOR_TOKEN \
   --kube-context kind-synara-stage3-prod \
   --vault-namespace synara-kms \

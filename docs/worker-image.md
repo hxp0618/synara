@@ -193,27 +193,37 @@ container environment. Reports retain only non-Secret identity, policy SHA, tlog
 
 ### Current production profile
 
-Before a production run, export the current live admission ConfigMaps to local files. Pass only environment-variable
-names for Registry auth and CA paths; never inline their values:
+Before a production run, finish any long-running rollout/load/soak gates, then start the operator-owned short-lived
+credential shell. For the repository-owned Stage 3 production-like overlay observed on July 21, 2026, the live
+non-secret runtime values are `kind-synara-stage3-prod`, `synara-kms`, `192.168.139.3:5443/synara/worker`, and
+Registry container `synara-stage3-prod-registry`. Pass only environment-variable names for Registry auth and CA
+paths; never inline their values:
 
 ```bash
-kubectl --context production -n synara-system get configmap synara-worker-cosign-public-key -o yaml \
-  > /secure/synara/synara-worker-cosign-public-key.yaml
-kubectl --context production -n synara-system get configmap synara-worker-signing-settings -o yaml \
-  > /secure/synara/synara-worker-signing-settings.yaml
+export SYNARA_STAGE3_KMS_RUNTIME=/secure/synara-stage3-kms-runtime
+export SYNARA_VAULT_INIT_JSON=/secure/synara-vault/init.json
+export VAULT_ADDR=<approved-live-vault-address>
+export VAULT_CACERT="$SYNARA_STAGE3_KMS_RUNTIME/ca.crt"
+
+"$SYNARA_STAGE3_KMS_RUNTIME/bin/start-short-lived-credential-session.py"
+
+kubectl --context kind-synara-stage3-prod -n synara-system get configmap synara-worker-cosign-public-key -o yaml \
+  > "$SYNARA_STAGE3_KMS_RUNTIME/synara-worker-cosign-public-key.live.yaml"
+kubectl --context kind-synara-stage3-prod -n synara-system get configmap synara-worker-signing-settings -o yaml \
+  > "$SYNARA_STAGE3_KMS_RUNTIME/synara-worker-signing-settings.live.yaml"
 
 python3 scripts/stage3-provider-acceptance/registry_release_gate.py \
-  --image-repository registry.example.com/synara/worker \
+  --image-repository 192.168.139.3:5443/synara/worker \
   --builder synara-worker-release \
   --signing-policy-profile production \
   --registry-auth-username-env REGISTRY_USERNAME \
   --registry-auth-password-env REGISTRY_PASSWORD \
   --registry-ca-cert-env REGISTRY_CA_CERT \
-  --production-public-key-configmap /secure/synara/synara-worker-cosign-public-key.yaml \
-  --production-repository-configmap /secure/synara/synara-worker-signing-settings.yaml \
-  --production-registry-config /secure/synara/registry-config.yml \
-  --production-registry-retention-policy /secure/synara/registry-retention-policy.json \
-  --production-registry-container synara-production-registry \
+  --production-public-key-configmap "$SYNARA_STAGE3_KMS_RUNTIME/synara-worker-cosign-public-key.live.yaml" \
+  --production-repository-configmap "$SYNARA_STAGE3_KMS_RUNTIME/synara-worker-signing-settings.live.yaml" \
+  --production-registry-config "$SYNARA_STAGE3_KMS_RUNTIME/registry-production.yml" \
+  --production-registry-retention-policy "$SYNARA_STAGE3_KMS_RUNTIME/registry-retention-policy.json" \
+  --production-registry-container synara-stage3-prod-registry \
   --production-registry-runtime-config-path /etc/distribution/config.yml \
   --output-dir /tmp/synara-worker-registry-release
 ```
@@ -250,15 +260,16 @@ bundle:
 
 ```bash
 python3 scripts/stage3-provider-acceptance/vault_kms_admission_gate.py \
-  --kube-context production \
+  --kube-context kind-synara-stage3-prod \
   --vault-namespace synara-kms \
   --security-namespace synara-system \
   --admission-test-namespace synara-admission \
+  --vault-bin "$SYNARA_STAGE3_KMS_RUNTIME/bin/vault-kubectl-active" \
   --expected-approle-policy synara-worker-release-signer \
   --registry-release-gate-report /tmp/synara-worker-registry-release/worker-registry-release-gate.json \
-  --unsigned-image-ref registry.example.com/synara/worker@sha256:<unsigned-digest> \
-  --wrong-key-image-ref registry.example.com/synara/worker@sha256:<wrong-key-digest> \
-  --tag-drift-image-ref registry.example.com/synara/worker:latest \
+  --unsigned-image-ref 192.168.139.3:5443/synara/worker@sha256:<unsigned-digest> \
+  --wrong-key-image-ref 192.168.139.3:5443/synara/worker@sha256:<wrong-key-digest> \
+  --tag-drift-image-ref 192.168.139.3:5443/synara/worker:latest \
   --output-dir /tmp/synara-worker-vault-kms-admission
 ```
 
@@ -268,7 +279,10 @@ namespace `synara-kms`, and image
 The signer identity is AppRole `auth/approle/role/synara-worker-release-signer`; it may call only the audited
 `transit/sign/synara-worker-release` path for KMS reference `hashivault://synara-worker-release`. Cosign receives a
 short-lived policy-scoped token via the `VAULT_ADDR`, `VAULT_TOKEN`, and `VAULT_CACERT` environment names. The
-production tlog policy requires upload and online verification against public Rekor `https://rekor.sigstore.dev`,
+helper shell additionally exports only `VAULT_OPERATOR_TOKEN`, `VAULT_SNAPSHOT_OPERATOR_ROLE_ID`,
+`VAULT_SNAPSHOT_OPERATOR_SECRET_ID`, `VAULT_SNAPSHOT_RESTORE_KEY_1`, `VAULT_SNAPSHOT_RESTORE_KEY_2`,
+`VAULT_SNAPSHOT_RESTORE_KEY_3`, `REGISTRY_USERNAME`, `REGISTRY_PASSWORD`, and `REGISTRY_CA_CERT`. The production
+tlog policy requires upload and online verification against public Rekor `https://rekor.sigstore.dev`,
 including an inclusion proof and signed entry timestamp. Kyverno admission is fail-closed and enforced, mutates
 matching tags to digests, and verifies the exact digest signature using the live `synara-system` ConfigMaps.
 Vault `lookup-self` must additionally prove an AppRole `batch` orphan token with only the

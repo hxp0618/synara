@@ -17,6 +17,48 @@
     "failurePolicy": "Fail",
     "clusterPolicyPath": "deploy/kubernetes/security/cluster/verify-synara-worker-images.yaml"
   },
+  "operationalRuntime": {
+    "currentRepositoryOwnedOverlay": {
+      "name": "kind-synara-stage3-prod",
+      "vaultNamespace": "synara-kms",
+      "vaultActiveService": "synara-vault-active",
+      "registryHost": "192.168.139.3:5443",
+      "registryRepository": "192.168.139.3:5443/synara/worker",
+      "registryContainer": "synara-stage3-prod-registry",
+      "liveBoundaryFiles": [
+        "synara-worker-cosign-public-key.live.yaml",
+        "synara-worker-signing-settings.live.yaml",
+        "registry-production.yml",
+        "registry-retention-policy.json"
+      ],
+      "recordedAt": "2026-07-21"
+    },
+    "shortLivedCredentialSession": {
+      "requiredInputEnvironment": [
+        "SYNARA_STAGE3_KMS_RUNTIME",
+        "SYNARA_VAULT_INIT_JSON",
+        "VAULT_ADDR",
+        "VAULT_CACERT"
+      ],
+      "optionalInputEnvironment": ["SYNARA_STAGE3_REGISTRY_HOST"],
+      "exportedEnvironment": [
+        "VAULT_TOKEN",
+        "VAULT_OPERATOR_TOKEN",
+        "VAULT_SNAPSHOT_OPERATOR_ROLE_ID",
+        "VAULT_SNAPSHOT_OPERATOR_SECRET_ID",
+        "VAULT_SNAPSHOT_RESTORE_KEY_1",
+        "VAULT_SNAPSHOT_RESTORE_KEY_2",
+        "VAULT_SNAPSHOT_RESTORE_KEY_3",
+        "REGISTRY_USERNAME",
+        "REGISTRY_PASSWORD",
+        "REGISTRY_CA_CERT"
+      ],
+      "readyEnvironment": "SYNARA_STAGE3_CREDENTIAL_SESSION",
+      "launcherPathSuffix": "bin/start-short-lived-credential-session.py",
+      "vaultCommandWrapperPathSuffix": "bin/vault-kubectl-active",
+      "startOnlyAfterLongRunningRolloutAndLoadGates": true
+    }
+  },
   "vault": {
     "transitKeyName": "synara-worker-release",
     "transitKey": {

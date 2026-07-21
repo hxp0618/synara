@@ -98,52 +98,67 @@ python3 scripts/stage3-provider-acceptance/registry_release_gate.py \
 ```
 
 当前 checked-in production profile 的 Registry/Vault KMS/Rekor/Kyverno 门禁命令如下。只传环境变量名，
-不要把值写进命令、仓库、报告或 shell history；`--production-*configmap` 应指向当前生产集群已应用
-ConfigMap 的导出 YAML，而不是仍含 placeholder 的模板文件：
+不要把值写进命令、仓库、报告或 shell history；`--production-*configmap` 应指向当前 live 集群已应用
+ConfigMap 的导出 YAML，而不是仍含 placeholder 的模板文件。长时间的 rollout/load/soak 门禁先完成，
+然后才启动短期 Credential shell。当前仓库自建 Stage 3 production-like overlay 在 2026-07-21 的
+non-secret runtime truth 是：`kind-synara-stage3-prod`、`synara-kms`、`192.168.139.3:5443/synara/worker`
+和 Registry container `synara-stage3-prod-registry`。
 
 ```bash
-kubectl --context production -n synara-system get configmap synara-worker-cosign-public-key -o yaml \
-  > /secure/synara/synara-worker-cosign-public-key.yaml
-kubectl --context production -n synara-system get configmap synara-worker-signing-settings -o yaml \
-  > /secure/synara/synara-worker-signing-settings.yaml
+export SYNARA_STAGE3_KMS_RUNTIME=/secure/synara-stage3-kms-runtime
+export SYNARA_VAULT_INIT_JSON=/secure/synara-vault/init.json
+export VAULT_ADDR=<approved-live-vault-address>
+export VAULT_CACERT="$SYNARA_STAGE3_KMS_RUNTIME/ca.crt"
+
+"$SYNARA_STAGE3_KMS_RUNTIME/bin/start-short-lived-credential-session.py"
+
+kubectl --context kind-synara-stage3-prod -n synara-system get configmap synara-worker-cosign-public-key -o yaml \
+  > "$SYNARA_STAGE3_KMS_RUNTIME/synara-worker-cosign-public-key.live.yaml"
+kubectl --context kind-synara-stage3-prod -n synara-system get configmap synara-worker-signing-settings -o yaml \
+  > "$SYNARA_STAGE3_KMS_RUNTIME/synara-worker-signing-settings.live.yaml"
 
 python3 scripts/stage3-provider-acceptance/registry_release_gate.py \
-  --image-repository registry.example.com/synara/worker \
+  --image-repository 192.168.139.3:5443/synara/worker \
   --builder synara-worker-release \
   --signing-policy-profile production \
   --registry-auth-username-env REGISTRY_USERNAME \
   --registry-auth-password-env REGISTRY_PASSWORD \
   --registry-ca-cert-env REGISTRY_CA_CERT \
-  --production-public-key-configmap /secure/synara/synara-worker-cosign-public-key.yaml \
-  --production-repository-configmap /secure/synara/synara-worker-signing-settings.yaml \
-  --production-registry-config /secure/synara/registry-config.yml \
-  --production-registry-retention-policy /secure/synara/registry-retention-policy.json \
-  --production-registry-container synara-production-registry \
+  --production-public-key-configmap "$SYNARA_STAGE3_KMS_RUNTIME/synara-worker-cosign-public-key.live.yaml" \
+  --production-repository-configmap "$SYNARA_STAGE3_KMS_RUNTIME/synara-worker-signing-settings.live.yaml" \
+  --production-registry-config "$SYNARA_STAGE3_KMS_RUNTIME/registry-production.yml" \
+  --production-registry-retention-policy "$SYNARA_STAGE3_KMS_RUNTIME/registry-retention-policy.json" \
+  --production-registry-container synara-stage3-prod-registry \
   --production-registry-runtime-config-path /etc/distribution/config.yml \
   --output-dir /tmp/synara-worker-registry-release
 
 python3 scripts/stage3-provider-acceptance/vault_kms_admission_gate.py \
-  --kube-context production \
+  --kube-context kind-synara-stage3-prod \
   --vault-namespace synara-kms \
   --security-namespace synara-system \
   --admission-test-namespace synara-admission \
+  --vault-bin "$SYNARA_STAGE3_KMS_RUNTIME/bin/vault-kubectl-active" \
   --expected-approle-policy synara-worker-release-signer \
   --registry-release-gate-report /tmp/synara-worker-registry-release/worker-registry-release-gate.json \
-  --unsigned-image-ref registry.example.com/synara/worker@sha256:<unsigned-digest> \
-  --wrong-key-image-ref registry.example.com/synara/worker@sha256:<wrong-key-digest> \
-  --tag-drift-image-ref registry.example.com/synara/worker:latest \
+  --unsigned-image-ref 192.168.139.3:5443/synara/worker@sha256:<unsigned-digest> \
+  --wrong-key-image-ref 192.168.139.3:5443/synara/worker@sha256:<wrong-key-digest> \
+  --tag-drift-image-ref 192.168.139.3:5443/synara/worker:latest \
   --output-dir /tmp/synara-worker-vault-kms-admission
 
 python3 scripts/stage3-provider-acceptance/vault_snapshot_restore_drill.py \
+  --vault-bin "$SYNARA_STAGE3_KMS_RUNTIME/bin/vault-kubectl-active" \
   --output-dir /tmp/synara-worker-vault-snapshot-restore
 ```
 
-生产 KMS pin 固定为 Helm chart `hashicorp/vault` `0.34.0`、release `synara-vault`、namespace
-`synara-kms` 和 image
+生产 KMS pin 固定为自建 HashiCorp Vault Transit on Kubernetes：Helm chart `hashicorp/vault` `0.34.0`、
+release `synara-vault`、namespace `synara-kms` 和 image
 `hashicorp/vault:2.0.3@sha256:a296a888b118615dc01d5f1a6846e6d4a7277946caaed5b447008fff5fe06b54`。
 KMS reference 为 `hashivault://synara-worker-release`；signer identity 为
 `auth/approle/role/synara-worker-release-signer`，仅允许审计路径 `transit/sign/synara-worker-release`。
-Credential 环境变量名固定为 `VAULT_ADDR`、`VAULT_TOKEN`、`VAULT_CACERT`，token 必须短期且 policy-scoped。
+signing Credential 环境变量名固定为 `VAULT_ADDR`、`VAULT_TOKEN`、`VAULT_CACERT`，token 必须短期且
+policy-scoped。helper shell 额外只导出 `VAULT_OPERATOR_TOKEN`、`VAULT_SNAPSHOT_OPERATOR_ROLE_ID`、
+`VAULT_SNAPSHOT_OPERATOR_SECRET_ID`、`VAULT_SNAPSHOT_RESTORE_KEY_1..3`、`REGISTRY_USERNAME`、
+`REGISTRY_PASSWORD` 和 `REGISTRY_CA_CERT`。
 tlog 强制上传并在线验证 public Rekor `https://rekor.sigstore.dev` 的 inclusion proof 与 signed entry
 timestamp；Kyverno 固定 `failurePolicy: Fail`、`validationFailureAction: Enforce`、tag-to-digest mutation 和
 exact-digest signature verification。
