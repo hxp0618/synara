@@ -111,7 +111,6 @@ COPY apps/provider-host/package.json ./apps/provider-host/package.json
 COPY apps/server/package.json ./apps/server/package.json
 COPY apps/web/package.json ./apps/web/package.json
 COPY packages/contracts/package.json ./packages/contracts/package.json
-COPY packages/effect-acp/package.json ./packages/effect-acp/package.json
 COPY packages/shared/package.json ./packages/shared/package.json
 COPY scripts/package.json ./scripts/package.json
 COPY patches ./patches
@@ -177,7 +176,6 @@ COPY apps/provider-host/package.json ./apps/provider-host/package.json
 COPY apps/server/package.json ./apps/server/package.json
 COPY apps/web/package.json ./apps/web/package.json
 COPY packages/contracts/package.json ./packages/contracts/package.json
-COPY packages/effect-acp/package.json ./packages/effect-acp/package.json
 COPY packages/shared/package.json ./packages/shared/package.json
 COPY scripts/package.json ./scripts/package.json
 COPY patches ./patches
