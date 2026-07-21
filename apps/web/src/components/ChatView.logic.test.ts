@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   appendVoiceTranscriptToPrompt,
   buildComposerMenuSelectionKey,
+  buildTranscriptAutoFollowSignal,
   createLocalDispatchSnapshot,
   createWorktreeSetupSnapshot,
   derivePromptHistoryFromMessages,
@@ -169,6 +170,41 @@ describe("server thread model switching availability", () => {
       temporary: false,
       message: "Codex does not support model switch on this SaaS target.",
     });
+  });
+});
+
+describe("transcript auto-follow signal", () => {
+  it("stays stable when only non-message turn activity changes", () => {
+    const before = buildTranscriptAutoFollowSignal({
+      messageCount: 3,
+      tailKey: "assistant-3:assistant:streaming:content",
+    });
+    const afterWorkRow = buildTranscriptAutoFollowSignal({
+      messageCount: 3,
+      tailKey: "assistant-3:assistant:streaming:content",
+    });
+
+    expect(afterWorkRow).toBe(before);
+  });
+
+  it("changes for a real transcript append or tail lifecycle change", () => {
+    const streaming = buildTranscriptAutoFollowSignal({
+      messageCount: 3,
+      tailKey: "assistant-3:assistant:streaming:content",
+    });
+
+    expect(
+      buildTranscriptAutoFollowSignal({
+        messageCount: 4,
+        tailKey: "user-4:user:settled:content",
+      }),
+    ).not.toBe(streaming);
+    expect(
+      buildTranscriptAutoFollowSignal({
+        messageCount: 3,
+        tailKey: "assistant-3:assistant:settled:content",
+      }),
+    ).not.toBe(streaming);
   });
 });
 
