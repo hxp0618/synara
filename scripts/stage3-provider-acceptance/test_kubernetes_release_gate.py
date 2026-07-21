@@ -343,6 +343,10 @@ def sample_child_report(
             "restartControlPlane": matrix != common.REMOTE_LOAD_MATRIX,
             "keepState": False,
             "runnerCommand": {"executable": "provider-host"},
+            "workerTiming": {
+                "leaseTTL": gate.KUBERNETES_RELEASE_WORKER_LEASE_TTL,
+                "heartbeatTimeout": gate.KUBERNETES_RELEASE_WORKER_HEARTBEAT_TIMEOUT,
+            },
             "kubernetes": {
                 "workerImage": worker_image_name,
                 "skipWorkerBuild": True,
@@ -586,6 +590,15 @@ class ChildCommandAndPolicyTest(unittest.TestCase):
             load[load.index("--operator-approved-sla-file") + 1],
             str(options.real_provider_load_sla_file),
         )
+        for command in (product, load, failure):
+            self.assertEqual(
+                command[command.index("--worker-lease-ttl") + 1],
+                gate.KUBERNETES_RELEASE_WORKER_LEASE_TTL,
+            )
+            self.assertEqual(
+                command[command.index("--worker-heartbeat-timeout") + 1],
+                gate.KUBERNETES_RELEASE_WORKER_HEARTBEAT_TIMEOUT,
+            )
         self.assertIn("--real-provider-failure-matrix", failure)
         self.assertIn("--kubernetes-skip-worker-build", product)
         self.assertIn("--kubernetes-worker-image", product)
@@ -711,6 +724,25 @@ class ChildCommandAndPolicyTest(unittest.TestCase):
 
         self.assertEqual(errors[0]["code"], "release.child_cases_missing")
         self.assertIn("real-provider.turn-1-start", errors[0]["evidence"]["missingCaseIds"])
+
+    def test_rejects_non_production_worker_timing(self) -> None:
+        options = kubernetes_options(pathlib.Path("/tmp/kubernetes-release"))
+        report = sample_child_report(options, "codex", common.REMOTE_LOAD_MATRIX)
+        report["configuration"]["workerTiming"]["leaseTTL"] = "6s"
+        report["configuration"]["workerTiming"]["heartbeatTimeout"] = "18s"
+
+        errors = common.validate_child_report(
+            report,
+            provider="codex",
+            matrix=common.REMOTE_LOAD_MATRIX,
+            expected_git_sha="a" * 40,
+            policy=gate.child_policy(options, WORKER_IMAGE_NAME),
+        )
+
+        self.assertIn(
+            "release.child_worker_timing_invalid",
+            {error["code"] for error in errors},
+        )
 
     def test_rejects_status_only_real_provider_load_case(self) -> None:
         options = kubernetes_options(pathlib.Path("/tmp/kubernetes-release"))
@@ -896,6 +928,15 @@ class AggregateMainTest(unittest.TestCase):
         }
         self.assertEqual(len(image_names), 1)
         self.assertTrue(all("--kubernetes-skip-worker-build" in command for command in commands))
+        self.assertTrue(
+            all(
+                command[command.index("--worker-lease-ttl") + 1]
+                == gate.KUBERNETES_RELEASE_WORKER_LEASE_TTL
+                and command[command.index("--worker-heartbeat-timeout") + 1]
+                == gate.KUBERNETES_RELEASE_WORKER_HEARTBEAT_TIMEOUT
+                for command in commands
+            )
+        )
         self.assertEqual(
             sum(command[command.index("--suite") + 1] == "real-provider-load" for command in commands),
             len(common.PROVIDERS),
@@ -907,6 +948,13 @@ class AggregateMainTest(unittest.TestCase):
         self.assertEqual(report["coverage"]["loadCases"], [acceptance.REAL_PROVIDER_LOAD_CASE_ID])
         self.assertTrue(report["workerImage"]["sharedAcrossRuns"])
         self.assertTrue(report["workerImage"]["cleanup"]["removed"])
+        self.assertEqual(
+            report["configuration"]["kubernetes"]["workerTiming"],
+            {
+                "leaseTTL": gate.KUBERNETES_RELEASE_WORKER_LEASE_TTL,
+                "heartbeatTimeout": gate.KUBERNETES_RELEASE_WORKER_HEARTBEAT_TIMEOUT,
+            },
+        )
         self.assertFalse(report["security"]["credentialEnvironmentNamesPersisted"])
 
     def test_cleanup_invalid_child_stops_later_runs_and_still_cleans_shared_image(self) -> None:

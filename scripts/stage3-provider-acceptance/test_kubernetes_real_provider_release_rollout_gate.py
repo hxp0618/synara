@@ -115,7 +115,7 @@ class ParseArgsTest(unittest.TestCase):
 
 
 class RunnerOptionsTest(unittest.TestCase):
-    def test_runner_options_use_real_provider_load_suite_and_rollout_worker_timing(self) -> None:
+    def test_runner_options_use_real_provider_load_suite_and_production_worker_timing(self) -> None:
         with tempfile.TemporaryDirectory() as directory, mock.patch.dict(
             "os.environ",
             {"CODEX_KEY": "codex-secret-value"},
@@ -129,12 +129,14 @@ class RunnerOptionsTest(unittest.TestCase):
         self.assertEqual(runner.real_provider_model, "gpt-5.6-sol")
         self.assertEqual(
             runner.worker_lease_ttl,
-            gate.fixture_rollout.ROLLOUT_WORKER_LEASE_TTL,
+            gate.REAL_PROVIDER_ROLLOUT_WORKER_LEASE_TTL,
         )
         self.assertEqual(
             runner.worker_heartbeat_timeout,
-            gate.fixture_rollout.ROLLOUT_WORKER_HEARTBEAT_TIMEOUT,
+            gate.REAL_PROVIDER_ROLLOUT_WORKER_HEARTBEAT_TIMEOUT,
         )
+        self.assertEqual(runner.worker_lease_ttl, "30s")
+        self.assertEqual(runner.worker_heartbeat_timeout, "90s")
         self.assertEqual(runner.operator_approved_sla_file, options.real_provider_load_sla_file)
 
 
@@ -963,6 +965,13 @@ class BuildReportTest(unittest.TestCase):
         self.assertEqual(
             report["configuration"]["realProviderLoad"]["operatorApprovedSla"]["requested"]["minimumDurationSeconds"],
             1800,
+        )
+        self.assertEqual(
+            report["configuration"]["workerTiming"],
+            {
+                "leaseTTL": gate.REAL_PROVIDER_ROLLOUT_WORKER_LEASE_TTL,
+                "heartbeatTimeout": gate.REAL_PROVIDER_ROLLOUT_WORKER_HEARTBEAT_TIMEOUT,
+            },
         )
         self.assertNotIn("CODEX_KEY", encoded)
         self.assertNotIn("codex-secret-value", encoded)

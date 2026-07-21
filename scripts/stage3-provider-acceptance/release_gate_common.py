@@ -16,6 +16,8 @@ import acceptance_runner as acceptance
 PROVIDERS = ("codex", "claudeAgent")
 MATRICES = ("product", "failure")
 REMOTE_LOAD_MATRIX = "load"
+PRODUCTION_WORKER_LEASE_TTL = "30s"
+PRODUCTION_WORKER_HEARTBEAT_TIMEOUT = "90s"
 COMMON_BASELINE_CASE_IDS = frozenset(
     {
         "environment.target-prepare",
@@ -58,6 +60,8 @@ class ChildReportPolicy:
     expected_skip_worker_build: bool | None = None
     worker_image_evidence_path: tuple[str, ...] = ("docker",)
     worker_image_configuration_key: str | None = None
+    expected_worker_lease_ttl: str | None = None
+    expected_worker_heartbeat_timeout: str | None = None
 
 
 class ReleaseGateError(Exception):
@@ -301,6 +305,25 @@ def validate_child_report(
                 "release.child_cursor_policy_invalid",
                 "Load child report must not claim the failure-only Cursor expiry policy.",
             )
+        if (
+            policy.expected_worker_lease_ttl is not None
+            or policy.expected_worker_heartbeat_timeout is not None
+        ):
+            worker_timing = configuration.get("workerTiming")
+            if (
+                not isinstance(worker_timing, Mapping)
+                or worker_timing.get("leaseTTL") != policy.expected_worker_lease_ttl
+                or worker_timing.get("heartbeatTimeout")
+                != policy.expected_worker_heartbeat_timeout
+            ):
+                fail(
+                    "release.child_worker_timing_invalid",
+                    "Child report did not preserve the release gate worker timing policy.",
+                    {
+                        "expectedLeaseTTL": policy.expected_worker_lease_ttl,
+                        "expectedHeartbeatTimeout": policy.expected_worker_heartbeat_timeout,
+                    },
+                )
 
     cases = report.get("cases")
     if not isinstance(cases, list) or not all(isinstance(case, dict) for case in cases):

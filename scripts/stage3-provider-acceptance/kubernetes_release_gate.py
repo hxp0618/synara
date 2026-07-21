@@ -30,6 +30,10 @@ EXPECTED_UNSUPPORTED: Mapping[tuple[str, str], frozenset[str]] = {
     ("claudeAgent", "load"): frozenset(),
 }
 REMOTE_GATE_MATRICES = (*common.MATRICES, common.REMOTE_LOAD_MATRIX)
+KUBERNETES_RELEASE_WORKER_LEASE_TTL = common.PRODUCTION_WORKER_LEASE_TTL
+KUBERNETES_RELEASE_WORKER_HEARTBEAT_TIMEOUT = (
+    common.PRODUCTION_WORKER_HEARTBEAT_TIMEOUT
+)
 
 CredentialSource = remote.CredentialSource
 GateWorkerImage = remote.GateWorkerImage
@@ -192,7 +196,11 @@ def child_policy(
     options: KubernetesReleaseGateOptions,
     worker_image_name: str,
 ) -> common.ChildReportPolicy:
-    return remote.child_policy(options, target_spec(), worker_image_name)
+    return dataclasses.replace(
+        remote.child_policy(options, target_spec(), worker_image_name),
+        expected_worker_lease_ttl=KUBERNETES_RELEASE_WORKER_LEASE_TTL,
+        expected_worker_heartbeat_timeout=KUBERNETES_RELEASE_WORKER_HEARTBEAT_TIMEOUT,
+    )
 
 
 def child_command(
@@ -223,6 +231,10 @@ def child_command(
         source.environment_name,
         "--real-provider-credential-field",
         source.field,
+        "--worker-lease-ttl",
+        KUBERNETES_RELEASE_WORKER_LEASE_TTL,
+        "--worker-heartbeat-timeout",
+        KUBERNETES_RELEASE_WORKER_HEARTBEAT_TIMEOUT,
         "--output-dir",
         str(output_dir),
         "--timeout",
@@ -360,6 +372,10 @@ def target_configuration(options: KubernetesReleaseGateOptions) -> dict[str, Any
         "kindBinary": options.kind_bin,
         "kindNodeImage": options.kind_node_image,
         "clusterLifecycle": "owned-disposable-per-child",
+        "workerTiming": {
+            "leaseTTL": KUBERNETES_RELEASE_WORKER_LEASE_TTL,
+            "heartbeatTimeout": KUBERNETES_RELEASE_WORKER_HEARTBEAT_TIMEOUT,
+        },
     }
 
 

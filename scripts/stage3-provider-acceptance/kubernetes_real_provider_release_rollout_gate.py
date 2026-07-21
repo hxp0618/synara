@@ -29,6 +29,10 @@ JSON_REPORT_NAME = "kubernetes-real-provider-worker-release-rollout-gate.json"
 MARKDOWN_REPORT_NAME = "kubernetes-real-provider-worker-release-rollout-gate.md"
 DEFAULT_REGISTRY_IMAGE = fixture_rollout.DEFAULT_REGISTRY_IMAGE
 DEFAULT_LOAD_WAVES = fixture_rollout.DEFAULT_LOAD_WAVES
+REAL_PROVIDER_ROLLOUT_WORKER_LEASE_TTL = release_gate.PRODUCTION_WORKER_LEASE_TTL
+REAL_PROVIDER_ROLLOUT_WORKER_HEARTBEAT_TIMEOUT = (
+    release_gate.PRODUCTION_WORKER_HEARTBEAT_TIMEOUT
+)
 DEFAULT_SLA_FILE = (
     pathlib.Path(__file__).resolve().parents[2]
     / "deploy"
@@ -240,9 +244,9 @@ def runner_options(options: GateOptions) -> acceptance.RunnerOptions:
         "--operator-approved-sla-file",
         str(options.real_provider_load_sla_file),
         "--worker-lease-ttl",
-        fixture_rollout.ROLLOUT_WORKER_LEASE_TTL,
+        REAL_PROVIDER_ROLLOUT_WORKER_LEASE_TTL,
         "--worker-heartbeat-timeout",
-        fixture_rollout.ROLLOUT_WORKER_HEARTBEAT_TIMEOUT,
+        REAL_PROVIDER_ROLLOUT_WORKER_HEARTBEAT_TIMEOUT,
         "--real-provider-credential-env",
         options.real_provider_credential_env,
         "--real-provider-credential-field",
@@ -2237,6 +2241,10 @@ def build_report(
                 acceptance.KUBERNETES_ACCEPTANCE_RESOURCE_CONFIGURATION
             ),
             "broadCleanupAllowed": False,
+            "workerTiming": {
+                "leaseTTL": options.worker_lease_ttl,
+                "heartbeatTimeout": options.worker_heartbeat_timeout,
+            },
             "realProvider": {
                 "credentialField": gate_options.real_provider_credential_field,
                 "baseUrlConfigured": gate_options.real_provider_base_url_env is not None,
