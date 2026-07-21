@@ -13579,6 +13579,15 @@ class AcceptanceSuite:
             "item.started": [],
             "item.completed": [],
         }
+        fenced_command_events: dict[str, list[Mapping[str, Any]]] = {
+            "item.started": [],
+            "item.completed": [],
+        }
+        non_fenced_started_events: list[Mapping[str, Any]] = []
+        invalid_non_fenced_started_events: list[Mapping[str, Any]] = []
+        stale_started_counts_by_generation: dict[int, int] = {}
+        non_fenced_completed_events: list[Mapping[str, Any]] = []
+        stale_generation_completed_events: list[Mapping[str, Any]] = []
         for event in events:
             event_type = event.get("eventType")
             if event_type not in command_events:
@@ -13586,18 +13595,73 @@ class AcceptanceSuite:
             payload = json_object(event.get("payload"), "real Provider command item payload")
             if payload.get("itemType") == "command_execution":
                 command_events[str(event_type)].append(event)
-        if any(len(command_events[event_type]) != 1 for event_type in command_events):
+                if (
+                    event.get("executionId") == execution_id
+                    and event.get("workerId") == worker_id
+                    and event.get("generation") == generation
+                ):
+                    fenced_command_events[str(event_type)].append(event)
+                elif event_type == "item.started":
+                    non_fenced_started_events.append(event)
+                    event_generation = event.get("generation")
+                    if (
+                        event.get("executionId") != execution_id
+                        or not isinstance(event_generation, int)
+                        or event_generation < 1
+                        or event_generation >= generation
+                    ):
+                        invalid_non_fenced_started_events.append(event)
+                    else:
+                        stale_started_counts_by_generation[event_generation] = (
+                            stale_started_counts_by_generation.get(event_generation, 0) + 1
+                        )
+                        if stale_started_counts_by_generation[event_generation] > 1:
+                            invalid_non_fenced_started_events.append(event)
+                elif event_type == "item.completed":
+                    non_fenced_completed_events.append(event)
+                    if (
+                        event.get("executionId") == execution_id
+                        and isinstance(event.get("generation"), int)
+                        and event.get("generation") < generation
+                    ):
+                        stale_generation_completed_events.append(event)
+        if stale_generation_completed_events:
+            raise AcceptanceError(
+                "runner.real_provider_approval_command_item_stale_completion",
+                "The Approval Turn retained a stale command completion from an earlier Execution generation.",
+                {
+                    "executionId": execution_id,
+                    "workerId": worker_id,
+                    "generation": generation,
+                    "staleCompletedCount": len(stale_generation_completed_events),
+                    "rawCompletedCount": len(command_events["item.completed"]),
+                    "staleCompletedEvents": [
+                        self._event_summary(event) for event in stale_generation_completed_events
+                    ],
+                },
+            )
+        if any(
+            len(fenced_command_events[event_type]) != 1
+            for event_type in fenced_command_events
+        ) or invalid_non_fenced_started_events or non_fenced_completed_events:
             raise AcceptanceError(
                 "runner.real_provider_approval_command_item_count_invalid",
                 "The Approval Turn did not retain exactly one command item start/completion pair.",
                 {
                     "executionId": execution_id,
-                    "startedCount": len(command_events["item.started"]),
-                    "completedCount": len(command_events["item.completed"]),
+                    "workerId": worker_id,
+                    "generation": generation,
+                    "startedCount": len(fenced_command_events["item.started"]),
+                    "completedCount": len(fenced_command_events["item.completed"]),
+                    "rawStartedCount": len(command_events["item.started"]),
+                    "nonFencedStartedCount": len(non_fenced_started_events),
+                    "invalidNonFencedStartedCount": len(invalid_non_fenced_started_events),
+                    "rawCompletedCount": len(command_events["item.completed"]),
+                    "nonFencedCompletedCount": len(non_fenced_completed_events),
                 },
             )
-        started = command_events["item.started"][0]
-        completed = command_events["item.completed"][0]
+        started = fenced_command_events["item.started"][0]
+        completed = fenced_command_events["item.completed"][0]
 
         def item_identity(event: Mapping[str, Any], label: str) -> tuple[str, str, int]:
             if (

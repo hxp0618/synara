@@ -687,7 +687,7 @@ class SuiteBehaviorTest(unittest.TestCase):
         self.assertTrue(evidence["markerMatched"])
         self.assertTrue(evidence["commandItemVerified"])
 
-    def test_approval_command_items_must_match_terminal_execution_fence(self) -> None:
+    def test_approval_command_items_require_one_terminal_execution_fenced_pair(self) -> None:
         suite = self.build_suite()
 
         def command_event(event_type: str, execution_id: str, sequence: int) -> dict[str, Any]:
@@ -727,8 +727,11 @@ class SuiteBehaviorTest(unittest.TestCase):
 
         self.assertEqual(
             caught.exception.code,
-            "runner.real_provider_approval_command_item_fence_mismatch",
+            "runner.real_provider_approval_command_item_count_invalid",
         )
+        self.assertEqual(caught.exception.evidence["startedCount"], 1)
+        self.assertEqual(caught.exception.evidence["completedCount"], 0)
+        self.assertEqual(caught.exception.evidence["rawCompletedCount"], 1)
 
     def test_multi_wave_rollout_uses_distinct_workers_and_cross_revision_native_cursor(self) -> None:
         suite = self.build_suite()

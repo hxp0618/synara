@@ -164,6 +164,38 @@ def real_provider_reclaimed_turn_events(
     return terminal, events
 
 
+def _approval_command_item_event(
+    event_type: str,
+    *,
+    execution_id: str = "execution-1",
+    worker_id: str = "worker-1",
+    generation: int = 1,
+    sequence: int,
+    provider_item_id: str = "command-item-1",
+) -> dict[str, Any]:
+    started = event_type == "item.started"
+    return {
+        "eventType": event_type,
+        "executionId": execution_id,
+        "workerId": worker_id,
+        "generation": generation,
+        "sequence": sequence,
+        "payload": {
+            "itemType": "command_execution",
+            "status": "inProgress" if started else "completed",
+            "data": {
+                "provider": "codex",
+                "providerItemId": provider_item_id,
+                "terminal": {
+                    "terminalId": provider_item_id,
+                    "eventType": "terminal.started" if started else "terminal.exited",
+                    **({} if started else {"exitCode": 0}),
+                },
+            },
+        },
+    }
+
+
 class FakeAPI:
     def __init__(self) -> None:
         self.requests: list[tuple[str, str, Mapping[str, Any] | None]] = []
@@ -3504,6 +3536,237 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
             caught.exception.code,
             "runner.real_provider_approval_command_item_correspondence_invalid",
         )
+
+    def test_approval_command_item_evidence_ignores_stale_generation_starts(self) -> None:
+        suite = BarrierSuite(acceptance.EXECUTION_PINNED_WORKER)
+
+        evidence = suite._approval_command_item_evidence(
+            [
+                _approval_command_item_event(
+                    "item.started",
+                    worker_id="worker-1",
+                    generation=1,
+                    sequence=8,
+                    provider_item_id="stale-command-item",
+                ),
+                _approval_command_item_event(
+                    "item.started",
+                    worker_id="worker-2",
+                    generation=2,
+                    sequence=9,
+                    provider_item_id="command-item-2",
+                ),
+                _approval_command_item_event(
+                    "item.completed",
+                    worker_id="worker-2",
+                    generation=2,
+                    sequence=10,
+                    provider_item_id="command-item-2",
+                ),
+            ],
+            execution_id="execution-1",
+            worker_id="worker-2",
+            generation=2,
+            terminal_sequence=11,
+        )
+
+        self.assertEqual(evidence["providerItemId"], "command-item-2")
+        self.assertTrue(evidence["terminalIdentityMatched"])
+
+    def test_approval_command_item_evidence_rejects_stale_generation_completion(self) -> None:
+        suite = BarrierSuite(acceptance.EXECUTION_PINNED_WORKER)
+
+        with self.assertRaises(acceptance.AcceptanceError) as caught:
+            suite._approval_command_item_evidence(
+                [
+                    _approval_command_item_event(
+                        "item.started",
+                        worker_id="worker-1",
+                        generation=1,
+                        sequence=8,
+                        provider_item_id="stale-command-item",
+                    ),
+                    _approval_command_item_event(
+                        "item.completed",
+                        worker_id="worker-1",
+                        generation=1,
+                        sequence=9,
+                        provider_item_id="stale-command-item",
+                    ),
+                    _approval_command_item_event(
+                        "item.started",
+                        worker_id="worker-2",
+                        generation=2,
+                        sequence=10,
+                        provider_item_id="command-item-2",
+                    ),
+                    _approval_command_item_event(
+                        "item.completed",
+                        worker_id="worker-2",
+                        generation=2,
+                        sequence=11,
+                        provider_item_id="command-item-2",
+                    ),
+                ],
+                execution_id="execution-1",
+                worker_id="worker-2",
+                generation=2,
+                terminal_sequence=12,
+            )
+
+        self.assertEqual(
+            caught.exception.code,
+            "runner.real_provider_approval_command_item_stale_completion",
+        )
+        self.assertEqual(caught.exception.evidence["staleCompletedCount"], 1)
+        self.assertEqual(caught.exception.evidence["rawCompletedCount"], 2)
+        self.assertEqual(
+            caught.exception.evidence["staleCompletedEvents"][0]["generation"],
+            1,
+        )
+
+    def test_approval_command_item_evidence_rejects_future_generation_start(self) -> None:
+        suite = BarrierSuite(acceptance.EXECUTION_PINNED_WORKER)
+
+        with self.assertRaises(acceptance.AcceptanceError) as caught:
+            suite._approval_command_item_evidence(
+                [
+                    _approval_command_item_event(
+                        "item.started",
+                        worker_id="worker-3",
+                        generation=3,
+                        sequence=8,
+                        provider_item_id="future-command-item",
+                    ),
+                    _approval_command_item_event(
+                        "item.started",
+                        worker_id="worker-2",
+                        generation=2,
+                        sequence=9,
+                        provider_item_id="command-item-2",
+                    ),
+                    _approval_command_item_event(
+                        "item.completed",
+                        worker_id="worker-2",
+                        generation=2,
+                        sequence=10,
+                        provider_item_id="command-item-2",
+                    ),
+                ],
+                execution_id="execution-1",
+                worker_id="worker-2",
+                generation=2,
+                terminal_sequence=11,
+            )
+
+        self.assertEqual(
+            caught.exception.code,
+            "runner.real_provider_approval_command_item_count_invalid",
+        )
+        self.assertEqual(caught.exception.evidence["nonFencedStartedCount"], 1)
+        self.assertEqual(caught.exception.evidence["invalidNonFencedStartedCount"], 1)
+        self.assertEqual(caught.exception.evidence["nonFencedCompletedCount"], 0)
+
+    def test_approval_command_item_evidence_rejects_duplicate_stale_generation_starts(
+        self,
+    ) -> None:
+        suite = BarrierSuite(acceptance.EXECUTION_PINNED_WORKER)
+
+        with self.assertRaises(acceptance.AcceptanceError) as caught:
+            suite._approval_command_item_evidence(
+                [
+                    _approval_command_item_event(
+                        "item.started",
+                        worker_id="worker-1",
+                        generation=1,
+                        sequence=7,
+                        provider_item_id="stale-command-item",
+                    ),
+                    _approval_command_item_event(
+                        "item.started",
+                        worker_id="worker-1",
+                        generation=1,
+                        sequence=8,
+                        provider_item_id="stale-command-item-duplicate",
+                    ),
+                    _approval_command_item_event(
+                        "item.started",
+                        worker_id="worker-2",
+                        generation=2,
+                        sequence=9,
+                        provider_item_id="command-item-2",
+                    ),
+                    _approval_command_item_event(
+                        "item.completed",
+                        worker_id="worker-2",
+                        generation=2,
+                        sequence=10,
+                        provider_item_id="command-item-2",
+                    ),
+                ],
+                execution_id="execution-1",
+                worker_id="worker-2",
+                generation=2,
+                terminal_sequence=11,
+            )
+
+        self.assertEqual(
+            caught.exception.code,
+            "runner.real_provider_approval_command_item_count_invalid",
+        )
+        self.assertEqual(caught.exception.evidence["nonFencedStartedCount"], 2)
+        self.assertEqual(caught.exception.evidence["invalidNonFencedStartedCount"], 1)
+
+    def test_approval_command_item_evidence_rejects_duplicate_terminal_generation_items(self) -> None:
+        suite = BarrierSuite(acceptance.EXECUTION_PINNED_WORKER)
+
+        with self.assertRaises(acceptance.AcceptanceError) as caught:
+            suite._approval_command_item_evidence(
+                [
+                    _approval_command_item_event(
+                        "item.started",
+                        worker_id="worker-2",
+                        generation=2,
+                        sequence=8,
+                        provider_item_id="command-item-2",
+                    ),
+                    _approval_command_item_event(
+                        "item.started",
+                        worker_id="worker-2",
+                        generation=2,
+                        sequence=9,
+                        provider_item_id="command-item-2-duplicate",
+                    ),
+                    _approval_command_item_event(
+                        "item.completed",
+                        worker_id="worker-2",
+                        generation=2,
+                        sequence=10,
+                        provider_item_id="command-item-2",
+                    ),
+                    _approval_command_item_event(
+                        "item.completed",
+                        worker_id="worker-2",
+                        generation=2,
+                        sequence=11,
+                        provider_item_id="command-item-2-duplicate",
+                    ),
+                ],
+                execution_id="execution-1",
+                worker_id="worker-2",
+                generation=2,
+                terminal_sequence=12,
+            )
+
+        self.assertEqual(
+            caught.exception.code,
+            "runner.real_provider_approval_command_item_count_invalid",
+        )
+        self.assertEqual(caught.exception.evidence["nonFencedStartedCount"], 0)
+        self.assertEqual(caught.exception.evidence["invalidNonFencedStartedCount"], 0)
+        self.assertEqual(caught.exception.evidence["startedCount"], 2)
+        self.assertEqual(caught.exception.evidence["completedCount"], 2)
+        self.assertEqual(caught.exception.evidence["nonFencedCompletedCount"], 0)
 
     def test_real_provider_load_restarts_only_on_eligible_completed_wave_boundaries(self) -> None:
         class RestartAwareRealProviderLoadSuite(RealProviderLoadSuite):
