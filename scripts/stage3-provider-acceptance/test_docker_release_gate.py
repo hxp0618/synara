@@ -567,6 +567,15 @@ class ParseArgsTest(unittest.TestCase):
         self.assertEqual(caught.exception.code, 2)
 
 
+class TargetSpecTest(unittest.TestCase):
+    def test_describes_the_current_sla_bounded_six_child_gate(self) -> None:
+        boundary = " ".join(gate.target_spec().evidence_boundary)
+
+        self.assertIn("SLA-bounded load admission", boundary)
+        self.assertIn("Kubernetes multi-node candidate/rollback soak", boundary)
+        self.assertNotIn("one-wave", boundary)
+
+
 class ChildCommandTest(unittest.TestCase):
     def test_keeps_matrix_boundaries_and_never_places_values_in_arguments(self) -> None:
         options = docker_options(pathlib.Path("/tmp/docker-release"))

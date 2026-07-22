@@ -76,7 +76,19 @@ const providerToolsLockfile = `${JSON.stringify(
         },
       },
       "node_modules/@anthropic-ai/claude-code": { version: "2.1.197" },
-      "node_modules/@openai/codex": { version: "0.144.1" },
+      "node_modules/@openai/codex": {
+        version: "0.144.1",
+        optionalDependencies: {
+          "@openai/codex-linux-arm64": "npm:@openai/codex@0.144.1-linux-arm64",
+        },
+      },
+      "node_modules/@openai/codex-linux-arm64": {
+        name: "@openai/codex",
+        version: "0.144.1-linux-arm64",
+        optional: true,
+        os: ["linux"],
+        cpu: ["arm64"],
+      },
     },
   },
   null,
@@ -192,5 +204,15 @@ describe("Worker image manifest", () => {
         ),
       }),
     ).toThrow(/does not describe @openai\/codex@0.144.1/);
+
+    const withoutCodexPlatform = JSON.parse(
+      rawSBOM("2026-01-01T00:00:00.000Z", "urn:uuid:missing-platform"),
+    );
+    withoutCodexPlatform.packages = withoutCodexPlatform.packages.filter(
+      (entry: { versionInfo?: string }) => entry.versionInfo !== "0.144.1-linux-arm64",
+    );
+    expect(() => build({ rawProviderToolsSBOM: JSON.stringify(withoutCodexPlatform) })).toThrow(
+      /does not describe @openai\/codex@0.144.1-linux-arm64/,
+    );
   });
 });

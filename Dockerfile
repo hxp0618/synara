@@ -11,9 +11,8 @@ FROM ${SERVER_RUNTIME_IMAGE} AS provider-tools-bookworm
 
 WORKDIR /opt/synara/provider-tools
 COPY deploy/worker/provider-tools/package.json deploy/worker/provider-tools/package-lock.json ./
-RUN npm ci --omit=dev --ignore-scripts --no-audit --no-fund \
-  && node node_modules/@anthropic-ai/claude-code/install.cjs \
-  && npm cache clean --force
+COPY deploy/worker/install-provider-tools.sh /usr/local/bin/install-provider-tools.sh
+RUN sh /usr/local/bin/install-provider-tools.sh
 
 FROM ${SERVER_RUNTIME_IMAGE} AS runtime-base
 
@@ -202,10 +201,9 @@ ARG SOURCE_DATE_EPOCH=0
 
 WORKDIR /opt/synara/provider-tools
 COPY deploy/worker/provider-tools/package.json deploy/worker/provider-tools/package-lock.json ./
-RUN npm ci --omit=dev --ignore-scripts --no-audit --no-fund \
-  && node node_modules/@anthropic-ai/claude-code/install.cjs \
+COPY deploy/worker/install-provider-tools.sh /usr/local/bin/install-provider-tools.sh
+RUN sh /usr/local/bin/install-provider-tools.sh \
   && npm sbom --omit=dev --sbom-format spdx > /tmp/provider-tools.raw.spdx.json \
-  && npm cache clean --force \
   && find /opt/synara/provider-tools -exec touch -h -d "@${SOURCE_DATE_EPOCH}" {} + \
   && touch -d "@${SOURCE_DATE_EPOCH}" /tmp/provider-tools.raw.spdx.json
 
@@ -224,8 +222,19 @@ RUN mkdir -p /opt/synara \
   && touch -d "@${SOURCE_DATE_EPOCH}" /opt /opt/synara /opt/synara/.build-revision
 
 COPY deploy/worker/apk-packages.lock /opt/synara/worker-apk-packages.lock
-RUN xargs apk add --no-cache < /opt/synara/worker-apk-packages.lock \
-  && rm -f /var/log/apk.log
+RUN set -eu; \
+  apk_install_attempt=1; \
+  while :; do \
+    if xargs apk add --no-cache < /opt/synara/worker-apk-packages.lock; then \
+      break; \
+    fi; \
+    if [ "${apk_install_attempt}" -ge 3 ]; then \
+      exit 1; \
+    fi; \
+    echo "apk add failed on attempt ${apk_install_attempt}; retrying" >&2; \
+    apk_install_attempt=$((apk_install_attempt + 1)); \
+  done; \
+  rm -f /var/log/apk.log
 
 COPY --from=worker-provider-tools /opt/synara/provider-tools /opt/synara/provider-tools
 RUN set -eu; \

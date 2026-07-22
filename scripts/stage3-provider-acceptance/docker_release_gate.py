@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the clean-SHA real Codex/Claude Docker product and failure release gate."""
+"""Run the clean-SHA real Codex/Claude Docker product, failure, and load release gate."""
 
 from __future__ import annotations
 
@@ -343,8 +343,8 @@ def target_spec() -> remote.RemoteReleaseTargetSpec:
         inspect_runtime=inspect_docker_runtime_report,
         target_configuration=target_configuration,
         evidence_boundary=(
-            "A pass closes the implemented real Codex/Claude Docker product, controlled-failure, and one-wave load admission release slice.",
-            "It does not close SSH, registry-pushed multi-arch rollout, production-duration SLA/soak, or multi-node evidence.",
+            "A pass closes the implemented real Codex/Claude Docker product, controlled-failure, and operator-approved SLA-bounded load admission release slice.",
+            "It does not close SSH, registry-pushed multi-arch rollout, Kubernetes multi-node candidate/rollback soak, or production deployment evidence.",
         ),
         matrices=REMOTE_GATE_MATRICES,
     )

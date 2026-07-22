@@ -187,6 +187,38 @@ function providerRuntimes(providerToolsLockfile, providerHostPackageJSON) {
   );
 }
 
+function codexPlatformRuntime(providerToolsLockfile, architecture) {
+  const lockfile = parseJSONObject(providerToolsLockfile, "Provider tools package-lock");
+  const packages = lockfile.packages;
+  invariant(isRecord(packages), "Provider tools package-lock is missing packages");
+  const codexVersion = packageVersion(lockfile, "@openai/codex");
+  const npmArchitecture = architecture === "amd64" ? "x64" : "arm64";
+  const packageName = `@openai/codex-linux-${npmArchitecture}`;
+  const expectedVersion = `${codexVersion}-linux-${npmArchitecture}`;
+  const codexEntry = packages["node_modules/@openai/codex"];
+  const platformEntry = packages[`node_modules/${packageName}`];
+  invariant(
+    isRecord(codexEntry) && isRecord(codexEntry.optionalDependencies),
+    "Provider tools package-lock is missing Codex platform dependencies",
+  );
+  invariant(
+    codexEntry.optionalDependencies[packageName] === `npm:@openai/codex@${expectedVersion}`,
+    `Provider tools package-lock does not pin ${packageName}@${expectedVersion}`,
+  );
+  invariant(
+    isRecord(platformEntry) &&
+      platformEntry.name === "@openai/codex" &&
+      platformEntry.version === expectedVersion &&
+      platformEntry.optional === true &&
+      Array.isArray(platformEntry.os) &&
+      platformEntry.os.includes("linux") &&
+      Array.isArray(platformEntry.cpu) &&
+      platformEntry.cpu.includes(npmArchitecture),
+    `Provider tools package-lock is missing the locked ${packageName} platform package`,
+  );
+  return { package: "@openai/codex", version: expectedVersion };
+}
+
 function validateAPKLockfile(value) {
   const names = new Set();
   const entries = [];
@@ -210,7 +242,10 @@ function validateAPKLockfile(value) {
   );
 }
 
-function normalizeProviderToolsSBOM(rawValue, { lockfileSHA256, created, architecture, runtimes }) {
+function normalizeProviderToolsSBOM(
+  rawValue,
+  { lockfileSHA256, created, architecture, runtimes, codexPlatform },
+) {
   const document = parseJSONObject(rawValue, "Provider tools SPDX SBOM");
   invariant(document.spdxVersion === "SPDX-2.3", "Provider tools SBOM must use SPDX 2.3");
   invariant(Array.isArray(document.packages), "Provider tools SBOM is missing packages");
@@ -230,6 +265,10 @@ function normalizeProviderToolsSBOM(rawValue, { lockfileSHA256, created, archite
       `Provider tools SBOM does not describe ${runtime.package}@${runtime.version}`,
     );
   }
+  invariant(
+    packages.has(`${codexPlatform.package}\x00${codexPlatform.version}`),
+    `Provider tools SBOM does not describe ${codexPlatform.package}@${codexPlatform.version}`,
+  );
   document.name = "synara-worker-provider-tools";
   document.documentNamespace = `https://synara.dev/spdx/worker-provider-tools/${lockfileSHA256}/linux-${architecture}`;
   document.creationInfo = {
@@ -273,12 +312,14 @@ export function buildWorkerImageArtifacts({
   const normalizedBaseImages = normalizeBaseImages(baseImages);
   validateAPKLockfile(workerAPKLockfile);
   const runtimes = providerRuntimes(providerToolsLockfile, providerHostPackageJSON);
+  const codexPlatform = codexPlatformRuntime(providerToolsLockfile, workerArchitecture);
   const providerToolsLockfileSHA256 = sha256Hex(providerToolsLockfile);
   const providerToolsSBOM = normalizeProviderToolsSBOM(rawProviderToolsSBOM, {
     lockfileSHA256: providerToolsLockfileSHA256,
     created,
     architecture: workerArchitecture,
     runtimes,
+    codexPlatform,
   });
   const manifest = {
     schemaVersion: SCHEMA_VERSION,

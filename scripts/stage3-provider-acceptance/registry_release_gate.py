@@ -1086,6 +1086,66 @@ def _expected_provider_runtimes(repo_root: pathlib.Path) -> list[dict[str, str]]
     ]
 
 
+def _expected_codex_platform_sbom_package(
+    repo_root: pathlib.Path, architecture: str
+) -> tuple[str, str]:
+    npm_architecture = {"amd64": "x64", "arm64": "arm64"}.get(architecture)
+    if npm_architecture is None:
+        raise ReleaseGateError(
+            "release.registry_embedded_manifest_invalid",
+            "Worker Registry image used an unsupported Codex platform architecture.",
+            {"architecture": architecture},
+        )
+    try:
+        provider_lock = json.loads(
+            (repo_root / "deploy/worker/provider-tools/package-lock.json").read_text(
+                encoding="utf-8"
+            )
+        )
+    except (OSError, json.JSONDecodeError):
+        raise ReleaseGateError(
+            "release.registry_embedded_manifest_invalid",
+            "Worker Registry gate could not read locked Provider runtime metadata.",
+        ) from None
+    packages = provider_lock.get("packages") if isinstance(provider_lock, dict) else None
+    codex = packages.get("node_modules/@openai/codex") if isinstance(packages, dict) else None
+    codex_version = codex.get("version") if isinstance(codex, dict) else None
+    package_name = f"@openai/codex-linux-{npm_architecture}"
+    expected_version = (
+        f"{codex_version}-linux-{npm_architecture}"
+        if isinstance(codex_version, str) and codex_version
+        else None
+    )
+    platform = (
+        packages.get(f"node_modules/{package_name}") if isinstance(packages, dict) else None
+    )
+    platform_os = platform.get("os") if isinstance(platform, dict) else None
+    platform_cpu = platform.get("cpu") if isinstance(platform, dict) else None
+    optional_dependencies = (
+        codex.get("optionalDependencies") if isinstance(codex, dict) else None
+    )
+    if (
+        not isinstance(expected_version, str)
+        or not isinstance(optional_dependencies, dict)
+        or optional_dependencies.get(package_name)
+        != f"npm:@openai/codex@{expected_version}"
+        or not isinstance(platform, dict)
+        or platform.get("name") != "@openai/codex"
+        or platform.get("version") != expected_version
+        or platform.get("optional") is not True
+        or not isinstance(platform_os, list)
+        or "linux" not in platform_os
+        or not isinstance(platform_cpu, list)
+        or npm_architecture not in platform_cpu
+    ):
+        raise ReleaseGateError(
+            "release.registry_embedded_manifest_invalid",
+            "Worker Registry gate Codex platform package was not exactly locked.",
+            {"architecture": architecture, "package": package_name},
+        )
+    return ("@openai/codex", expected_version)
+
+
 def validate_embedded_artifacts(
     options: RegistryReleaseGateOptions,
     files: Mapping[str, pathlib.Path],
@@ -1160,6 +1220,9 @@ def validate_embedded_artifacts(
     sbom_descriptor = sboms[0] if isinstance(sboms, list) and len(sboms) == 1 else None
     sbom_digest = hashlib.sha256(sbom_bytes).hexdigest()
     expected_runtimes = _expected_provider_runtimes(options.repo_root)
+    expected_codex_platform = _expected_codex_platform_sbom_package(
+        options.repo_root, architecture
+    )
     packages = sbom.get("packages")
     package_items = packages if isinstance(packages, list) else []
     described_packages = {
@@ -1187,6 +1250,7 @@ def validate_embedded_artifacts(
             for runtime in expected_runtimes
             if runtime["kind"] == "cli"
         )
+        or expected_codex_platform not in described_packages
     ):
         raise ReleaseGateError(
             "release.registry_embedded_manifest_invalid",

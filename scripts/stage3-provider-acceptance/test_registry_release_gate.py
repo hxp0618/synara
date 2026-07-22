@@ -6,6 +6,7 @@ import datetime as dt
 import hashlib
 import io
 import json
+import os
 import pathlib
 import shutil
 import subprocess
@@ -299,6 +300,9 @@ def write_embedded_fixture(
         path.parent.mkdir(parents=True, exist_ok=True)
 
     runtimes = gate._expected_provider_runtimes(REPO_ROOT)
+    codex_version = next(
+        runtime["version"] for runtime in runtimes if runtime["provider"] == "codex"
+    )
     for name, local_path in gate.LOCAL_LOCK_PATHS.items():
         embedded_name = EMBEDDED_LOCK_FILE_NAMES[name]
         paths[embedded_name].write_bytes((REPO_ROOT / local_path).read_bytes())
@@ -310,6 +314,12 @@ def write_embedded_fixture(
             {"name": runtime["package"], "versionInfo": runtime["version"]}
             for runtime in runtimes
             if runtime["kind"] == "cli"
+        ]
+        + [
+            {
+                "name": "@openai/codex",
+                "versionInfo": f"{codex_version}-linux-x64",
+            }
         ],
     }
     if mutate_sbom is not None:
@@ -1901,6 +1911,9 @@ class InputValidationTest(unittest.TestCase):
         self.assertNotIn("registry.npmmirror.com", lock_text)
 
         dockerfile = (REPO_ROOT / "Dockerfile").read_text(encoding="utf-8")
+        installer = (REPO_ROOT / "deploy/worker/install-provider-tools.sh").read_text(
+            encoding="utf-8"
+        )
         self.assertIn("rm -rf /usr/local/lib/node_modules/npm", dockerfile)
         self.assertIn(
             "node_modules/npm/bin/npm-cli.js /usr/local/bin/npm",
@@ -1916,6 +1929,176 @@ class InputValidationTest(unittest.TestCase):
         )
         self.assertIn('test "$(npm --version)" = "$expected_npm"', dockerfile)
         self.assertIn("rm -rf /tmp/node-compile-cache", dockerfile)
+        self.assertEqual(dockerfile.count("COPY deploy/worker/install-provider-tools.sh"), 2)
+        self.assertEqual(dockerfile.count("RUN sh /usr/local/bin/install-provider-tools.sh"), 2)
+        self.assertIn("npm ci --omit=dev --include=optional", installer)
+        self.assertIn("./node_modules/.bin/codex --version", installer)
+        self.assertIn("./node_modules/.bin/claude --version", installer)
+        self.assertIn('max_attempts=3', installer)
+        self.assertIn('provider-tools install failed after ${attempt} attempts', installer)
+        self.assertIn('if [ "${apk_install_attempt}" -ge 3 ]; then', dockerfile)
+        self.assertIn('echo "apk add failed on attempt ${apk_install_attempt}; retrying" >&2', dockerfile)
+
+    def test_provider_tools_installer_retries_until_versions_pass(self) -> None:
+        installer = REPO_ROOT / "deploy/worker/install-provider-tools.sh"
+
+        with tempfile.TemporaryDirectory() as directory:
+            temp_root = pathlib.Path(directory)
+            bin_dir = temp_root / "bin"
+            work_dir = temp_root / "work"
+            bin_dir.mkdir()
+            work_dir.mkdir()
+            attempt_file = temp_root / "attempts.txt"
+            codex_log = temp_root / "codex.log"
+            claude_log = temp_root / "claude.log"
+            node_log = temp_root / "node.log"
+
+            (bin_dir / "npm").write_text(
+                "\n".join(
+                    [
+                        "#!/bin/sh",
+                        "set -eu",
+                        'if [ \"$1\" = \"cache\" ]; then',
+                        "  exit 0",
+                        "fi",
+                        'if [ \"$1\" != \"ci\" ]; then',
+                        '  echo \"unexpected npm args: $*\" >&2',
+                        "  exit 1",
+                        "fi",
+                        'attempts=0',
+                        'if [ -f \"$TEST_ATTEMPT_FILE\" ]; then',
+                        '  attempts=$(cat \"$TEST_ATTEMPT_FILE\")',
+                        "fi",
+                        'attempts=$((attempts + 1))',
+                        'printf \"%s\" \"$attempts\" > \"$TEST_ATTEMPT_FILE\"',
+                        "mkdir -p node_modules/.bin node_modules/@anthropic-ai/claude-code",
+                        "cat <<'EOF' > node_modules/.bin/codex",
+                        "#!/bin/sh",
+                        "set -eu",
+                        'printf \"codex\\n\" >> \"$TEST_CODEX_LOG\"',
+                        'if [ \"$(cat \"$TEST_ATTEMPT_FILE\")\" -lt 3 ]; then',
+                        "  exit 1",
+                        "fi",
+                        "echo 0.144.1",
+                        "EOF",
+                        "chmod +x node_modules/.bin/codex",
+                        "cat <<'EOF' > node_modules/.bin/claude",
+                        "#!/bin/sh",
+                        "set -eu",
+                        'printf \"claude\\n\" >> \"$TEST_CLAUDE_LOG\"',
+                        "echo 2.1.197",
+                        "EOF",
+                        "chmod +x node_modules/.bin/claude",
+                        ": > node_modules/@anthropic-ai/claude-code/install.cjs",
+                        "exit 0",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            (bin_dir / "node").write_text(
+                "\n".join(
+                    [
+                        "#!/bin/sh",
+                        "set -eu",
+                        'printf \"%s\\n\" \"$1\" >> \"$TEST_NODE_LOG\"',
+                        "exit 0",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            for script in (bin_dir / "npm", bin_dir / "node"):
+                script.chmod(0o755)
+
+            completed = subprocess.run(
+                ["sh", str(installer)],
+                cwd=work_dir,
+                check=False,
+                capture_output=True,
+                text=True,
+                env={
+                    **os.environ,
+                    "PATH": f"{bin_dir}:{os.environ['PATH']}",
+                    "TEST_ATTEMPT_FILE": str(attempt_file),
+                    "TEST_CODEX_LOG": str(codex_log),
+                    "TEST_CLAUDE_LOG": str(claude_log),
+                    "TEST_NODE_LOG": str(node_log),
+                },
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertEqual(attempt_file.read_text(encoding="utf-8"), "3")
+            self.assertEqual(codex_log.read_text(encoding="utf-8").splitlines(), ["codex"] * 3)
+            self.assertEqual(claude_log.read_text(encoding="utf-8").splitlines(), ["claude"])
+            self.assertEqual(
+                node_log.read_text(encoding="utf-8").splitlines(),
+                ["node_modules/@anthropic-ai/claude-code/install.cjs"] * 3,
+            )
+            self.assertIn("provider-tools install attempt 1 failed; retrying", completed.stderr)
+            self.assertIn("provider-tools install attempt 2 failed; retrying", completed.stderr)
+
+    def test_provider_tools_installer_fails_closed_after_three_attempts(self) -> None:
+        installer = REPO_ROOT / "deploy/worker/install-provider-tools.sh"
+
+        with tempfile.TemporaryDirectory() as directory:
+            temp_root = pathlib.Path(directory)
+            bin_dir = temp_root / "bin"
+            work_dir = temp_root / "work"
+            bin_dir.mkdir()
+            work_dir.mkdir()
+            attempt_file = temp_root / "attempts.txt"
+
+            (bin_dir / "npm").write_text(
+                "\n".join(
+                    [
+                        "#!/bin/sh",
+                        "set -eu",
+                        'if [ \"$1\" = \"cache\" ]; then',
+                        "  exit 0",
+                        "fi",
+                        'attempts=0',
+                        'if [ -f \"$TEST_ATTEMPT_FILE\" ]; then',
+                        '  attempts=$(cat \"$TEST_ATTEMPT_FILE\")',
+                        "fi",
+                        'attempts=$((attempts + 1))',
+                        'printf \"%s\" \"$attempts\" > \"$TEST_ATTEMPT_FILE\"',
+                        "mkdir -p node_modules/.bin node_modules/@anthropic-ai/claude-code",
+                        "cat <<'EOF' > node_modules/.bin/codex",
+                        "#!/bin/sh",
+                        "exit 1",
+                        "EOF",
+                        "chmod +x node_modules/.bin/codex",
+                        ": > node_modules/@anthropic-ai/claude-code/install.cjs",
+                        "exit 0",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            (bin_dir / "node").write_text(
+                "#!/bin/sh\nexit 0\n",
+                encoding="utf-8",
+            )
+            for script in (bin_dir / "npm", bin_dir / "node"):
+                script.chmod(0o755)
+
+            completed = subprocess.run(
+                ["sh", str(installer)],
+                cwd=work_dir,
+                check=False,
+                capture_output=True,
+                text=True,
+                env={
+                    **os.environ,
+                    "PATH": f"{bin_dir}:{os.environ['PATH']}",
+                    "TEST_ATTEMPT_FILE": str(attempt_file),
+                },
+            )
+
+            self.assertEqual(completed.returncode, 1)
+            self.assertEqual(attempt_file.read_text(encoding="utf-8"), "3")
+            self.assertIn("provider-tools install failed after 3 attempts", completed.stderr)
 
     def test_worker_build_script_rejects_non_https_proxy_before_docker(self) -> None:
         completed = subprocess.run(
@@ -2215,6 +2398,37 @@ class EmbeddedArtifactTest(unittest.TestCase):
 
         self.assertEqual(set(evidence["lockfileSha256"]), set(gate.LOCAL_LOCK_PATHS))
         self.assertEqual(evidence["providerRuntimes"], gate._expected_provider_runtimes(REPO_ROOT))
+
+    def test_rejects_sbom_without_the_locked_codex_platform_package(self) -> None:
+        codex_version = next(
+            runtime["version"]
+            for runtime in gate._expected_provider_runtimes(REPO_ROOT)
+            if runtime["provider"] == "codex"
+        )
+        platform_version = f"{codex_version}-linux-x64"
+
+        def remove_codex_platform(sbom: dict[str, Any]) -> None:
+            sbom["packages"] = [
+                package
+                for package in sbom["packages"]
+                if package.get("versionInfo") != platform_version
+            ]
+
+        with tempfile.TemporaryDirectory() as directory:
+            files = write_embedded_fixture(
+                pathlib.Path(directory), mutate_sbom=remove_codex_platform
+            )
+            with self.assertRaises(gate.ReleaseGateError) as caught:
+                gate.validate_embedded_artifacts(
+                    options(pathlib.Path(directory) / "output"),
+                    files,
+                    platform="linux/amd64",
+                    git_sha=GIT_SHA,
+                    version=VERSION,
+                    source_date_epoch=SOURCE_DATE_EPOCH,
+                )
+
+        self.assertEqual(caught.exception.code, "release.registry_embedded_manifest_invalid")
 
     def test_rejects_embedded_lockfile_that_differs_from_source(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
