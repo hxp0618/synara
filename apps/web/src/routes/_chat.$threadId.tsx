@@ -40,15 +40,26 @@ function ChatThreadRouteView() {
   const draftThreadState = useComposerDraftStore(
     (store) => store.draftThreadsByThreadId[threadId] ?? null,
   );
+  const promotionSourceDraftId = useComposerDraftStore((store) => {
+    for (const [candidateId, draft] of Object.entries(store.draftThreadsByThreadId)) {
+      if (draft.promotedTo === threadId) {
+        return ThreadId.makeUnsafe(candidateId);
+      }
+    }
+    return null;
+  });
+  const promotionSourceDraftState = useComposerDraftStore((store) =>
+    promotionSourceDraftId ? (store.draftThreadsByThreadId[promotionSourceDraftId] ?? null) : null,
+  );
   const draftThreadExists = draftThreadState !== null;
-  const routeThreadExists = threadExists || draftThreadExists;
+  const routeThreadExists = threadExists || draftThreadExists || promotionSourceDraftState !== null;
   const splitView = useSplitViewStore(
     useMemo(() => selectSplitView(search.splitViewId ?? null), [search.splitViewId]),
   );
   const splitViewsHydrated = useSplitViewStore((store) => store.hasHydrated);
   const activeProjectId = resolveSingleProjectId({
     threadProjectId,
-    draftProjectId: draftThreadState?.projectId ?? null,
+    draftProjectId: draftThreadState?.projectId ?? promotionSourceDraftState?.projectId ?? null,
   });
   const navigate = useNavigate();
   const [missingThreadRecoveryState, setMissingThreadRecoveryState] =
@@ -66,6 +77,13 @@ function ChatThreadRouteView() {
       mountedRef.current = false;
     };
   }, []);
+
+  useEffect(() => {
+    if (!threadExists || !promotionSourceDraftId) {
+      return;
+    }
+    useComposerDraftStore.getState().clearDraftThread(promotionSourceDraftId);
+  }, [promotionSourceDraftId, threadExists]);
 
   useEffect(() => {
     // Invalidate any in-flight recovery and start a fresh episode for the new

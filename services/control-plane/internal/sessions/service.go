@@ -178,6 +178,25 @@ func normalizeInteractionMode(value string) (string, error) {
 	return value, nil
 }
 
+func normalizeSourceProposedPlan(
+	value *SourceProposedPlanReference,
+) (*SourceProposedPlanReference, error) {
+	if value == nil {
+		return nil, nil
+	}
+	threadID := strings.TrimSpace(value.ThreadID)
+	planID := strings.TrimSpace(value.PlanID)
+	if threadID == "" || planID == "" || len(threadID) > 300 || len(planID) > 300 ||
+		strings.ContainsAny(threadID, "\r\n\t\x00") || strings.ContainsAny(planID, "\r\n\t\x00") {
+		return nil, problem.New(
+			400,
+			"invalid_source_proposed_plan",
+			"sourceProposedPlan must contain valid threadId and planId values.",
+		)
+	}
+	return &SourceProposedPlanReference{ThreadID: threadID, PlanID: planID}, nil
+}
+
 func normalizeModel(value *string) (*string, error) {
 	if value == nil {
 		return nil, nil
@@ -450,6 +469,10 @@ func (s *Service) CreateTurnWithIdempotency(
 	if err != nil {
 		return Turn{}, false, err
 	}
+	sourceProposedPlan, err := normalizeSourceProposedPlan(input.SourceProposedPlan)
+	if err != nil {
+		return Turn{}, false, err
+	}
 	var execution persistence.AgentExecution
 	var createdEvent persistence.SessionEvent
 	result, err := apiidempotency.Execute(ctx, s.db, apiidempotency.Scope{
@@ -458,6 +481,7 @@ func (s *Service) CreateTurnWithIdempotency(
 		Request: map[string]any{
 			"sessionId": sessionID, "inputText": inputText,
 			"runtimeMode": runtimeMode, "interactionMode": interactionMode,
+			"sourceProposedPlan": sourceProposedPlan,
 		},
 	}, func(tx *gorm.DB) (Turn, error) {
 		queuedAt := time.Now().UTC()
@@ -551,18 +575,22 @@ func (s *Service) CreateTurnWithIdempotency(
 		}); err != nil {
 			return Turn{}, problem.Wrap(409, "execution_outbox_create_rejected", "Execution dispatch could not be queued atomically.", err)
 		}
+		turnCreatedPayload := map[string]any{
+			"turnId": turn.ID, "executionId": execution.ID, "inputText": inputText,
+			"status": "queued", "executionTargetId": execution.ExecutionTargetID,
+			"targetKind":                 execution.TargetKind,
+			"workerReleaseRevisionId":    execution.WorkerReleaseRevisionID,
+			"workerReleaseChannel":       execution.WorkerReleaseChannel,
+			"workspaceMaterializationId": resources.MaterializationID,
+			"runtimeMode":                runtimeMode, "interactionMode": interactionMode,
+		}
+		if sourceProposedPlan != nil {
+			turnCreatedPayload["sourceProposedPlan"] = sourceProposedPlan
+		}
 		createdEvent, err = appendEvent(ctx, tx, &locked, eventInput{
 			EventType: "turn.created", ActorType: "user", ActorID: &principal.UserID,
 			ExecutionID: &execution.ID,
-			Payload: map[string]any{
-				"turnId": turn.ID, "executionId": execution.ID, "inputText": inputText,
-				"status": "queued", "executionTargetId": execution.ExecutionTargetID,
-				"targetKind":                 execution.TargetKind,
-				"workerReleaseRevisionId":    execution.WorkerReleaseRevisionID,
-				"workerReleaseChannel":       execution.WorkerReleaseChannel,
-				"workspaceMaterializationId": resources.MaterializationID,
-				"runtimeMode":                runtimeMode, "interactionMode": interactionMode,
-			},
+			Payload:     turnCreatedPayload,
 		})
 		if err != nil {
 			return Turn{}, err

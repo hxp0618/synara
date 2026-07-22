@@ -81,10 +81,37 @@
       "rotationCadence": "At least annually and immediately after suspected signer or key-boundary compromise."
     },
     "signerAppRoleName": "synara-worker-release-signer",
+    "signerPolicyName": "synara-worker-release-signer",
+    "signerRole": {
+      "bindSecretId": true,
+      "tokenPolicies": ["synara-worker-release-signer"],
+      "tokenType": "batch",
+      "tokenTtlSeconds": 7200,
+      "tokenMaxTtlSeconds": 14400,
+      "tokenNumUses": 0,
+      "secretIdTtlSeconds": 600,
+      "secretIdNumUses": 1,
+      "tokenNoDefaultPolicy": true,
+      "orphanRequired": true
+    },
     "auditorAppRoleName": "synara-vault-production-auditor",
+    "auditorPolicyName": "synara-vault-production-auditor",
+    "auditorRole": {
+      "bindSecretId": true,
+      "tokenPolicies": ["synara-vault-production-auditor"],
+      "tokenType": "batch",
+      "tokenTtlSeconds": 1800,
+      "tokenMaxTtlSeconds": 3600,
+      "tokenNumUses": 0,
+      "secretIdTtlSeconds": 600,
+      "secretIdNumUses": 1,
+      "tokenNoDefaultPolicy": true,
+      "orphanRequired": true
+    },
     "snapshotOperatorAppRoleName": "synara-vault-snapshot-operator",
     "snapshotOperatorPolicyName": "synara-vault-snapshot-operator",
     "snapshotOperatorRole": {
+      "bindSecretId": true,
       "tokenPolicies": ["synara-vault-snapshot-operator"],
       "tokenType": "batch",
       "tokenTtlSeconds": 1800,
@@ -92,7 +119,8 @@
       "tokenNumUses": 0,
       "secretIdTtlSeconds": 600,
       "secretIdNumUses": 1,
-      "tokenNoDefaultPolicy": true
+      "tokenNoDefaultPolicy": true,
+      "orphanRequired": true
     }
   },
   "custody": {
@@ -251,7 +279,8 @@
         "mcHostEnvironment": "VAULT_AUDIT_WORM_MC_HOST",
         "mcVerifierHostEnvironment": "VAULT_AUDIT_WORM_MC_VERIFIER_HOST",
         "mcResolveEnvironment": "VAULT_AUDIT_WORM_MC_RESOLVE",
-        "credentialPolicyPath": "deploy/kubernetes/security/vault/audit-object-lock-writer-policy.json"
+        "credentialPolicyPath": "deploy/kubernetes/security/vault/audit-object-lock-writer-policy.json",
+        "verifierCredentialPolicyPath": "deploy/kubernetes/security/vault/audit-object-lock-verifier-policy.json"
       }
     }
   }

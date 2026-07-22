@@ -42,7 +42,7 @@ docker compose --env-file deploy/saas/.env -f deploy/saas/docker-compose.yml log
 
 1. 确认 PostgreSQL 网络、证书、权限、连接数和磁盘状态。
 2. 读取 `/ready.checks.schema.expectedVersion`，并与当前镜像内最高的 forward migration 对照；
-   不使用历史 Stage 2 固定数量。当前仓库迁移已连续到 `000040`，后续新增迁移时以运行构建返回值为准。
+   不使用历史 Stage 2 固定数量。当前仓库迁移已连续到 `000041`，后续新增迁移时以运行构建返回值为准。
 3. 查询已应用版本，只读取，不手工补写：
 
    ```sql

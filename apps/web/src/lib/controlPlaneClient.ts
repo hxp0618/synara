@@ -1,4 +1,5 @@
 import type {
+  OrchestrationLatestTurn,
   ProviderCapabilityMap,
   ProviderCapabilityProjection,
   ProviderHostProviderKind,
@@ -302,6 +303,48 @@ export type ControlPlaneExecutionTarget = {
   capabilities: Record<string, unknown>;
   createdAt: string;
   updatedAt: string;
+};
+
+export type ControlPlaneWorker = {
+  id: string;
+  incarnation: number;
+  instanceUid: string;
+  executionTargetId: string;
+  targetKind: ControlPlaneExecutionTargetKind | string;
+  clusterId: string;
+  namespace: string;
+  podName: string;
+  version: string;
+  protocolVersion: number;
+  currentManifestId?: string | null;
+  compatibilityStatus: string;
+  compatibilityReason?: string | null;
+  compatibilityCheckedAt?: string | null;
+  workerReleaseRevisionId?: string | null;
+  workerReleaseChannel?: string | null;
+  workerReleaseStatus: string;
+  workerReleaseReason?: string | null;
+  workerReleaseCheckedAt?: string | null;
+  leaseSupported: boolean;
+  fencingSupported: boolean;
+  status: string;
+  administrativeStatus: string;
+  registeredAt: string;
+  lastHeartbeatAt: string;
+  drainingAt?: string | null;
+  terminatedAt?: string | null;
+  revokedAt?: string | null;
+  revokedBy?: string | null;
+  revocationReason?: string | null;
+};
+
+export type ControlPlaneWorkerRevocationResult = {
+  worker: ControlPlaneWorker;
+  releasedExecutionLeases: number;
+  recoveringExecutions: number;
+  outcomeUnknownExecutions: number;
+  checkpointUnconfirmedExecutions: number;
+  requeuedWorkspaceCleanups: number;
 };
 
 export type ControlPlaneProviderCompatibilityStatus =
@@ -1099,6 +1142,24 @@ export const controlPlaneClient = {
     controlPlaneRequest<{ items: ReadonlyArray<ControlPlaneExecutionTarget> }>(
       `/v1/tenants/${encodeURIComponent(tenantId)}/execution-targets`,
     ),
+  listWorkers: (tenantId: string) =>
+    controlPlaneRequest<{ items: ReadonlyArray<ControlPlaneWorker> }>(
+      `/v1/tenants/${encodeURIComponent(tenantId)}/workers`,
+    ),
+  revokeWorker: (
+    tenantId: string,
+    workerId: string,
+    input: { expectedIncarnation: number; reason: string },
+    options?: ControlPlaneIdempotencyOptions,
+  ) =>
+    controlPlaneRequest<ControlPlaneWorkerRevocationResult>(
+      `/v1/tenants/${encodeURIComponent(tenantId)}/workers/${encodeURIComponent(workerId)}/revoke`,
+      {
+        method: "POST",
+        ...idempotencyRequestHeaders(options),
+        body: input,
+      },
+    ),
   listWorkerManifests: (tenantId: string) =>
     controlPlaneRequest<{ items: ReadonlyArray<ControlPlaneWorkerManifest> }>(
       `/v1/tenants/${encodeURIComponent(tenantId)}/worker-manifests`,
@@ -1174,13 +1235,14 @@ export const controlPlaneClient = {
     inputText: string,
     options?: ControlPlaneIdempotencyOptions,
     modes?: { runtimeMode: RuntimeMode; interactionMode: ProviderInteractionMode },
+    sourceProposedPlan?: NonNullable<OrchestrationLatestTurn["sourceProposedPlan"]>,
   ) =>
     controlPlaneRequest<ControlPlaneAgentTurn>(
       `/v1/sessions/${encodeURIComponent(sessionId)}/turns`,
       {
         method: "POST",
         ...idempotencyRequestHeaders(options),
-        body: { inputText, ...modes },
+        body: { inputText, ...modes, ...(sourceProposedPlan ? { sourceProposedPlan } : {}) },
       },
     ),
   compactSession: (

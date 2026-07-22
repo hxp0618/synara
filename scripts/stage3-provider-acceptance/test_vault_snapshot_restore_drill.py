@@ -165,6 +165,7 @@ TOKEN_LOOKUP = {
         "path": "auth/approle/login",
         "policies": ["synara-vault-snapshot-operator"],
         "type": "batch",
+        "orphan": True,
     }
 }
 RESTORE_INIT = {
@@ -364,13 +365,56 @@ class VaultSnapshotRestoreDrillTests(unittest.TestCase):
         self.assertEqual(policy.audit_devices, drill.EXPECTED_AUDIT_DEVICES)
         self.assertEqual(policy.restore_audit_tmpfs, drill.DEFAULT_RESTORE_AUDIT_TMPFS)
         self.assertTrue(policy.audit_siem_required)
+        self.assertTrue(policy.snapshot_operator_role_policy.bind_secret_id)
         self.assertEqual(policy.snapshot_operator_role_policy.token_type, "batch")
         self.assertEqual(policy.snapshot_operator_role_policy.secret_id_num_uses, 1)
+        self.assertTrue(policy.snapshot_operator_role_policy.orphan_required)
         self.assertRegex(sha256, r"^[0-9a-f]{64}$")
         self.assertIn('path "sys/storage/raft/snapshot"', text)
         self.assertIn('path "sys/audit"', text)
         self.assertIn('capabilities = ["read", "sudo"]', text)
         self.assertNotIn("capabilities = [\"update\"]", text)
+
+    def test_snapshot_operator_identity_requires_orphan_batch_token(self) -> None:
+        policy = drill.load_operations_policy(OPERATIONS_POLICY_PATH)
+        identity = drill.token_lookup_summary(
+            {
+                "data": {
+                    "display_name": "approle",
+                    "path": "auth/approle/login",
+                    "policies": ["synara-vault-snapshot-operator"],
+                    "type": "batch",
+                    "orphan": False,
+                }
+            }
+        )
+
+        with self.assertRaises(drill.ReleaseGateError) as caught:
+            drill.validate_snapshot_operator_identity(policy, identity)
+
+        self.assertEqual(
+            caught.exception.code,
+            "release.vault_snapshot_restore_validation_failed",
+        )
+
+    def test_snapshot_operator_role_requires_bound_single_use_secret_id(self) -> None:
+        policy = drill.load_operations_policy(OPERATIONS_POLICY_PATH)
+        role_summary = drill.approle_summary(
+            {
+                "data": {
+                    **SNAPSHOT_OPERATOR_ROLE["data"],
+                    "bind_secret_id": False,
+                }
+            }
+        )
+
+        with self.assertRaises(drill.ReleaseGateError) as caught:
+            drill.validate_snapshot_operator_role(policy, role_summary)
+
+        self.assertEqual(
+            caught.exception.code,
+            "release.vault_snapshot_restore_validation_failed",
+        )
 
     def test_snapshot_operator_policy_requires_read_only_audit_inspection(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

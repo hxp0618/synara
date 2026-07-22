@@ -9,6 +9,7 @@ import {
 } from "./ExecutionTargetSettingsSection";
 import type {
   ControlPlaneExecutionTarget,
+  ControlPlaneWorker,
   ControlPlaneWorkerManifest,
   ControlPlaneWorkerProviderManifest,
 } from "~/lib/controlPlaneClient";
@@ -91,6 +92,7 @@ function workerManifest(input: {
 function renderExecutionTargetSection(input: {
   target: ControlPlaneExecutionTarget;
   manifests?: ReadonlyArray<ControlPlaneWorkerManifest>;
+  workers?: ReadonlyArray<ControlPlaneWorker>;
   canManage?: boolean;
 }): string {
   return renderToStaticMarkup(
@@ -111,6 +113,9 @@ function renderExecutionTargetSection(input: {
         workerManifests={input.manifests ?? []}
         workerManifestsError={null}
         workerManifestsLoading={false}
+        workers={input.workers ?? []}
+        workersError={null}
+        workersLoading={false}
       />
     </QueryClientProvider>,
   );
@@ -203,6 +208,38 @@ describe("Execution Target Provider Policy", () => {
 
     expect(markup).toContain("Shared target observation is not available");
     expect(markup).not.toContain("Not observed yet");
+  });
+
+  it("keeps worker revocation available for shared targets when the tenant can manage workers", () => {
+    const markup = renderExecutionTargetSection({
+      canManage: true,
+      target: executionTarget({ tenantId: null, kind: "kubernetes", name: "Platform pool" }),
+      workers: [
+        {
+          id: "worker-1",
+          incarnation: 4,
+          instanceUid: "worker-instance-1",
+          executionTargetId: "target-1",
+          targetKind: "kubernetes",
+          clusterId: "cluster-a",
+          namespace: "synara-workers",
+          podName: "platform-worker-1",
+          version: "0.6.0",
+          protocolVersion: 2,
+          compatibilityStatus: "compatible",
+          workerReleaseStatus: "unmanaged",
+          leaseSupported: true,
+          fencingSupported: true,
+          status: "online",
+          administrativeStatus: "active",
+          registeredAt: "2026-07-18T18:49:19.000Z",
+          lastHeartbeatAt: "2026-07-18T18:50:19.000Z",
+        },
+      ],
+    });
+
+    expect(markup).toContain("Shared target observation is not available");
+    expect(markup).toContain("Revoke worker");
   });
 
   it("offers an explicit Provider Policy update path for tenant-owned targets", () => {

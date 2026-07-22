@@ -167,6 +167,7 @@ import {
   type PromptHistoryNavigationState,
   resolveActiveThreadTitle,
   resolveActiveTurnLiveDiffState,
+  resolveAuthoritativeTurnDispatch,
   resolveCommittedProviderModel,
   resolveCycledModelSlug,
   resolveDefaultEnvironmentPanelOpen,
@@ -304,6 +305,13 @@ import {
 import { runProjectCommandInTerminal } from "~/projectTerminalRunner";
 import { newCommandId, newMessageId, newProjectId, newThreadId } from "~/lib/utils";
 import { readNativeApi } from "~/nativeApi";
+import {
+  clearSharedControlPlaneModelSwitchIdempotencyKey,
+  dispatchControlPlaneTurn,
+  reserveSharedControlPlaneModelSwitchIdempotencyKey,
+  type ControlPlaneSourceProposedPlan,
+} from "~/lib/controlPlaneTurnDispatch";
+import { ControlPlaneError } from "~/lib/controlPlaneClient";
 import { promoteThreadCreate } from "~/lib/threadCreatePromotion";
 import { readFavoriteModelSlugs } from "~/lib/modelFavorites";
 import {
@@ -956,6 +964,39 @@ function buildQueuedComposerPreviewText(input: {
   return "Queued follow-up";
 }
 
+function buildThreadTitleSeed(input: {
+  trimmedPrompt: string;
+  images: ReadonlyArray<ComposerImageAttachment>;
+  files: ReadonlyArray<ComposerFileAttachment>;
+  assistantSelections: ReadonlyArray<{ id: string }>;
+  terminalContexts: ReadonlyArray<TerminalContextDraft>;
+  fileComments: ReadonlyArray<FileCommentDraft>;
+  pastedTexts: ReadonlyArray<PastedTextDraft>;
+}): string {
+  if (input.trimmedPrompt.length > 0) {
+    return input.trimmedPrompt;
+  }
+  const firstImage = input.images[0];
+  if (firstImage) {
+    return `Image: ${firstImage.name}`;
+  }
+  const firstFile = input.files[0];
+  if (firstFile) {
+    return `File: ${firstFile.name}`;
+  }
+  if (input.assistantSelections.length > 0) {
+    return formatAssistantSelectionTitleSeed(input.assistantSelections.length);
+  }
+  const firstTerminalContext = input.terminalContexts[0];
+  if (firstTerminalContext) {
+    return formatTerminalContextLabel(firstTerminalContext);
+  }
+  if (input.fileComments.length > 0) {
+    return formatFileCommentTitleSeed(input.fileComments.length);
+  }
+  return formatPastedTextTitleSeed(input.pastedTexts) ?? GENERIC_CHAT_THREAD_TITLE;
+}
+
 function formatPastedTextTitleSeed(pastedTexts: ReadonlyArray<PastedTextDraft>): string | null {
   const firstPastedText = pastedTexts[0];
   if (!firstPastedText) {
@@ -1217,6 +1258,9 @@ export default function ChatView({
     (store) => store.setRestoredSourceProposedPlan,
   );
   const clearComposerDraftContent = useComposerDraftStore((store) => store.clearComposerContent);
+  const copyTransferableComposerState = useComposerDraftStore(
+    (store) => store.copyTransferableComposerState,
+  );
   const setDraftThreadContext = useComposerDraftStore((store) => store.setDraftThreadContext);
   const moveDraftThreadToProject = useComposerDraftStore((store) => store.moveDraftThreadToProject);
   const getDraftThreadByProjectId = useComposerDraftStore(
@@ -2025,6 +2069,7 @@ export default function ChatView({
     threadId: ThreadId;
     provider: ProviderKind;
   } | null>(null);
+  const nativeProviderDiscoveryEnabled = !controlPlane.isAuthoritative;
   const featureFlags = useFeatureFlags();
   const showDebugTaskBanner = import.meta.env.DEV && featureFlags["show-debug-task-banner"];
   const serverConfigQuery = useQuery(serverConfigQueryOptions());
@@ -2073,6 +2118,7 @@ export default function ChatView({
     cwd: providerModelDiscoveryCwd,
     modelHintByProvider: composerModelHintByProvider,
     agentDiscoveryPolicy: "eager-core",
+    runtimeDiscoveryEnabled: nativeProviderDiscoveryEnabled,
   });
   const { modelOptions: composerModelOptions, selectedModel } = useEffectiveComposerModelState({
     threadId,
@@ -3222,9 +3268,13 @@ export default function ChatView({
   );
   const effectiveMentionQuery = mentionTriggerQuery.length > 0 ? debouncedPathQuery : "";
   const composerSkillCwd = providerModelDiscoveryCwd;
-  const providerComposerCapabilitiesQuery = useQuery(
-    providerComposerCapabilitiesQueryOptions(selectedProvider),
-  );
+  const providerComposerCapabilitiesQuery = useQuery({
+    ...providerComposerCapabilitiesQueryOptions(selectedProvider),
+    enabled: nativeProviderDiscoveryEnabled,
+  });
+  const providerComposerCapabilities = nativeProviderDiscoveryEnabled
+    ? providerComposerCapabilitiesQuery.data
+    : undefined;
   const providerCommandsQuery = useQuery(
     providerCommandsQueryOptions({
       provider: selectedProvider,
@@ -3248,13 +3298,15 @@ export default function ChatView({
           : undefined,
       agentDir: selectedProvider === "pi" ? settings.piAgentDir || null : null,
       enabled:
+        nativeProviderDiscoveryEnabled &&
         (composerTriggerKind === "slash-command" || composerTriggerKind === "slash-model") &&
-        supportsNativeSlashCommandDiscovery(providerComposerCapabilitiesQuery.data) &&
+        supportsNativeSlashCommandDiscovery(providerComposerCapabilities) &&
         composerSkillCwd !== null,
     }),
   );
   const canDiscoverProviderSkills =
-    selectedProvider === "pi" || supportsSkillDiscovery(providerComposerCapabilitiesQuery.data);
+    nativeProviderDiscoveryEnabled &&
+    (selectedProvider === "pi" || supportsSkillDiscovery(providerComposerCapabilities));
   const providerSkillsQuery = useQuery(
     providerSkillsQueryOptions({
       provider: selectedProvider,
@@ -3262,6 +3314,7 @@ export default function ChatView({
       threadId,
       agentDir: selectedProvider === "pi" ? settings.piAgentDir || null : null,
       enabled:
+        nativeProviderDiscoveryEnabled &&
         (isSkillTrigger || composerTriggerKind === "slash-command" || selectedProvider === "pi") &&
         canDiscoverProviderSkills &&
         composerSkillCwd !== null,
@@ -3273,7 +3326,8 @@ export default function ChatView({
       cwd: composerSkillCwd,
       threadId,
       enabled:
-        supportsPluginDiscovery(providerComposerCapabilitiesQuery.data) &&
+        nativeProviderDiscoveryEnabled &&
+        supportsPluginDiscovery(providerComposerCapabilities) &&
         composerSkillCwd !== null,
     }),
   );
@@ -3298,19 +3352,22 @@ export default function ChatView({
   // Keep plugin suggestions referentially stable so prompt-sync effects do not loop on rerender.
   const providerPlugins = useMemo(
     () =>
-      providerPluginsQuery.data?.marketplaces.flatMap((marketplace) =>
-        marketplace.plugins.map((plugin) => ({
-          plugin,
-          mention: {
-            name: plugin.name,
-            path: `plugin://${plugin.name}@${marketplace.name}`,
-          } satisfies ProviderMentionReference,
-        })),
-      ) ?? EMPTY_COMPOSER_PLUGIN_SUGGESTIONS,
-    [providerPluginsQuery.data],
+      nativeProviderDiscoveryEnabled
+        ? (providerPluginsQuery.data?.marketplaces.flatMap((marketplace) =>
+            marketplace.plugins.map((plugin) => ({
+              plugin,
+              mention: {
+                name: plugin.name,
+                path: `plugin://${plugin.name}@${marketplace.name}`,
+              } satisfies ProviderMentionReference,
+            })),
+          ) ?? EMPTY_COMPOSER_PLUGIN_SUGGESTIONS)
+        : EMPTY_COMPOSER_PLUGIN_SUGGESTIONS,
+    [nativeProviderDiscoveryEnabled, providerPluginsQuery.data],
   );
-  const providerNativeCommands =
-    providerCommandsQuery.data?.commands ?? EMPTY_PROVIDER_NATIVE_COMMANDS;
+  const providerNativeCommands = nativeProviderDiscoveryEnabled
+    ? (providerCommandsQuery.data?.commands ?? EMPTY_PROVIDER_NATIVE_COMMANDS)
+    : EMPTY_PROVIDER_NATIVE_COMMANDS;
   const providerNativeCommandNames = useMemo(
     () => providerNativeCommands.map((command) => command.name),
     [providerNativeCommands],
@@ -3333,7 +3390,9 @@ export default function ChatView({
     () => providerSupportsTextNativeReviewCommand(selectedProvider, providerNativeCommands),
     [providerNativeCommands, selectedProvider],
   );
-  const providerSkills = providerSkillsQuery.data?.skills ?? EMPTY_PROVIDER_SKILLS;
+  const providerSkills = nativeProviderDiscoveryEnabled
+    ? (providerSkillsQuery.data?.skills ?? EMPTY_PROVIDER_SKILLS)
+    : EMPTY_PROVIDER_SKILLS;
   const selectedModelCaps = useMemo(
     () => getModelCapabilities(selectedProvider, selectedModel),
     [selectedModel, selectedProvider],
@@ -3396,7 +3455,7 @@ export default function ChatView({
     searchableModelOptions,
     supportsFastSlashCommand,
     canOfferCompactCommand:
-      supportsThreadCompaction(providerComposerCapabilitiesQuery.data) &&
+      supportsThreadCompaction(providerComposerCapabilities) &&
       isServerThread &&
       activeThread?.session !== null &&
       activeThread?.session?.status !== "closed",
@@ -4553,6 +4612,127 @@ export default function ChatView({
       }
     },
     [serverThread],
+  );
+  const promoteAuthoritativeDraftThread = useCallback(
+    async (draftThreadId: ThreadId, sessionId: string) => {
+      const promotedThreadId = ThreadId.makeUnsafe(sessionId);
+      if (draftThreadId === promotedThreadId) {
+        return;
+      }
+      useComposerDraftStore.getState().markDraftThreadPromoting(draftThreadId, promotedThreadId);
+      copyTransferableComposerState(draftThreadId, promotedThreadId);
+      await navigate({
+        to: "/$threadId",
+        params: { threadId: promotedThreadId },
+        replace: true,
+      });
+    },
+    [copyTransferableComposerState, navigate],
+  );
+  const dispatchAuthoritativeTurn = useCallback(
+    async (input: {
+      draftThreadId: ThreadId;
+      persistedSessionId: string | null;
+      projectId: string;
+      title: string;
+      messageText: string;
+      modelSelection: ModelSelection;
+      runtimeMode: RuntimeMode;
+      interactionMode: ProviderInteractionMode;
+      sourceProposedPlan?: ControlPlaneSourceProposedPlan;
+      dispatchMode: "queue" | "steer";
+      hasLiveTurn: boolean;
+    }) => {
+      const dispatchKind = resolveAuthoritativeTurnDispatch({
+        hasLiveTurn: input.hasLiveTurn,
+        dispatchMode: input.dispatchMode,
+      });
+      if (dispatchKind === "queue-unsupported") {
+        throw new Error(
+          "Wait for the active SaaS Turn to finish before sending another queued message.",
+        );
+      }
+      if (dispatchKind === "steer") {
+        if (!input.persistedSessionId) {
+          throw new Error("The SaaS Session is not ready to steer yet.");
+        }
+        await controlPlane.steerActiveTurn(
+          input.persistedSessionId,
+          input.messageText,
+          `web-steer-${randomUUID()}`,
+        );
+        clearSharedControlPlaneModelSwitchIdempotencyKey(input.draftThreadId);
+        return { sessionId: input.persistedSessionId, createdSession: false, turnId: null };
+      }
+
+      const activeSessionModel = input.persistedSessionId
+        ? (activeThread?.modelSelection.model ?? null)
+        : null;
+      if (
+        input.persistedSessionId &&
+        input.modelSelection.model &&
+        input.modelSelection.model !== activeSessionModel
+      ) {
+        const modelSwitchIdempotencyKey = reserveSharedControlPlaneModelSwitchIdempotencyKey({
+          draftThreadId: input.draftThreadId,
+          sessionId: input.persistedSessionId,
+          targetModel: input.modelSelection.model,
+        });
+        try {
+          await controlPlane.switchSessionModel(
+            input.persistedSessionId,
+            input.modelSelection.model,
+            modelSwitchIdempotencyKey,
+          );
+          clearSharedControlPlaneModelSwitchIdempotencyKey(input.draftThreadId);
+        } catch (error) {
+          if (error instanceof ControlPlaneError && error.code === "session_model_conflict") {
+            clearSharedControlPlaneModelSwitchIdempotencyKey(input.draftThreadId);
+          }
+          throw error;
+        }
+      }
+
+      const result = await dispatchControlPlaneTurn({
+        draftThreadId: input.draftThreadId,
+        persistedSessionId: input.persistedSessionId,
+        projectId: input.projectId,
+        title: input.title,
+        provider: input.modelSelection.provider,
+        ...(input.modelSelection.model ? { model: input.modelSelection.model } : {}),
+        inputText: input.messageText,
+        runtimeMode: input.runtimeMode,
+        interactionMode: input.interactionMode,
+        ...(input.sourceProposedPlan ? { sourceProposedPlan: input.sourceProposedPlan } : {}),
+        createSession: ({ projectId, title, provider, model, idempotencyKey }) =>
+          controlPlane.createSession(projectId, {
+            title,
+            provider,
+            ...(model ? { model } : {}),
+            idempotencyKey,
+          }),
+        createTurn: ({
+          sessionId,
+          inputText,
+          runtimeMode,
+          interactionMode,
+          sourceProposedPlan,
+          idempotencyKey,
+        }) =>
+          controlPlane.createTurn(
+            sessionId,
+            inputText,
+            idempotencyKey,
+            { runtimeMode, interactionMode },
+            sourceProposedPlan,
+          ),
+        onSessionResolved: ({ sessionId }) =>
+          promoteAuthoritativeDraftThread(input.draftThreadId, sessionId),
+      });
+      clearSharedControlPlaneModelSwitchIdempotencyKey(input.draftThreadId);
+      return result;
+    },
+    [activeThread?.modelSelection.model, controlPlane, promoteAuthoritativeDraftThread],
   );
 
   // Scroll helpers stay list-owned so transcript updates stop bouncing through
@@ -6525,9 +6705,7 @@ export default function ChatView({
     queuedTurn?: QueuedComposerChatTurn,
   ): Promise<boolean> => {
     e?.preventDefault();
-    const api = readNativeApi();
     if (
-      !api ||
       !activeThread ||
       isSendBusy ||
       isConnecting ||
@@ -6740,6 +6918,88 @@ export default function ChatView({
       return false;
     }
     if (!activeProject) return false;
+    const threadIdForSend = activeThread.id;
+    if (controlPlane.isAuthoritative) {
+      const authoritativeMessageTextSeed = appendPastedTextsToPrompt(
+        appendFileCommentsToPrompt(
+          appendTerminalContextsToPrompt(
+            appendAssistantSelectionsToPrompt(promptForSend, composerAssistantSelectionsForSend),
+            sendableComposerTerminalContexts,
+          ),
+          composerFileCommentsForSend,
+        ),
+        sendableComposerPastedTexts,
+      );
+      const authoritativeOutgoingMessageText = formatOutgoingComposerPrompt({
+        provider: selectedProviderForSend,
+        model: selectedModelForSend,
+        effort: selectedPromptEffortForSend,
+        text:
+          authoritativeMessageTextSeed ||
+          (composerImagesForSend.length > 0 ? IMAGE_ONLY_BOOTSTRAP_PROMPT : ""),
+      });
+      const title = buildPromptThreadTitleFallback(
+        buildThreadTitleSeed({
+          trimmedPrompt: trimmedPromptForSend,
+          images: composerImagesForSend,
+          files: composerFilesForSend,
+          assistantSelections: composerAssistantSelectionsForSend,
+          terminalContexts: sendableComposerTerminalContexts,
+          fileComments: composerFileCommentsForSend,
+          pastedTexts: sendableComposerPastedTexts,
+        }),
+      );
+      if (composerImagesForSend.length > 0 || composerFilesForSend.length > 0) {
+        setThreadError(
+          threadIdForSend,
+          "File and image attachments are not supported for SaaS chat turns yet.",
+        );
+        return false;
+      }
+
+      sendInFlightRef.current = true;
+      setThreadError(threadIdForSend, null);
+      try {
+        const result = await dispatchAuthoritativeTurn({
+          draftThreadId: threadIdForSend,
+          persistedSessionId: isLocalDraftThread ? null : threadIdForSend,
+          projectId: activeProject.id,
+          title,
+          messageText: authoritativeOutgoingMessageText,
+          modelSelection: selectedModelSelectionForSend,
+          runtimeMode: runtimeModeForSend,
+          interactionMode: interactionModeForSend,
+          ...(sourceProposedPlanForSend ? { sourceProposedPlan: sourceProposedPlanForSend } : {}),
+          dispatchMode,
+          hasLiveTurn,
+        });
+        const dispatchedThreadId = ThreadId.makeUnsafe(result.sessionId);
+        if (queuedChatTurn === null) {
+          if (isLivePlanFollowUpSubmission) {
+            setComposerDraftInteractionMode(dispatchedThreadId, interactionModeForSend);
+          }
+          clearComposerInput(dispatchedThreadId);
+          scheduleComposerFocus();
+        }
+        if (sourceProposedPlanForSend) {
+          planSidebarDismissedForTurnRef.current = null;
+          setPlanSidebarOpen(true);
+        }
+        sendInFlightRef.current = false;
+        return true;
+      } catch (err) {
+        setThreadError(
+          threadIdForSend,
+          err instanceof Error ? err.message : "Failed to send message.",
+        );
+        sendInFlightRef.current = false;
+        return false;
+      }
+    }
+    const api = readNativeApi();
+    if (!api) {
+      return false;
+    }
     if (queuedChatTurn === null && !isLivePlanFollowUpSubmission) {
       const conversation = pendingAutomationConversation;
       // While gathering missing details, fold the reply into the cleaned request so it
@@ -6980,33 +7240,17 @@ export default function ChatView({
       });
       return true;
     }
-    const threadIdForSend = activeThread.id;
     const isFirstMessage = !isServerThread || !hasNativeUserMessages;
     const firstSendCreatedAt = new Date();
-    let firstComposerImageNameForTitle: string | null = null;
-    if (composerImagesForSend.length > 0) {
-      firstComposerImageNameForTitle = composerImagesForSend[0]?.name ?? null;
-    }
-    let titleSeed = trimmedPromptForSend;
-    if (!titleSeed) {
-      if (firstComposerImageNameForTitle) {
-        titleSeed = `Image: ${firstComposerImageNameForTitle}`;
-      } else if (composerFilesForSend.length > 0) {
-        titleSeed = `File: ${composerFilesForSend[0]?.name ?? "attachment"}`;
-      } else if (composerAssistantSelectionsForSend.length > 0) {
-        titleSeed = formatAssistantSelectionTitleSeed(composerAssistantSelectionsForSend.length);
-      } else if (sendableComposerTerminalContexts.length > 0) {
-        titleSeed = formatTerminalContextLabel(sendableComposerTerminalContexts[0]!);
-      } else if (composerFileCommentsForSend.length > 0) {
-        titleSeed = formatFileCommentTitleSeed(composerFileCommentsForSend.length);
-      } else if (sendableComposerPastedTexts.length > 0) {
-        titleSeed =
-          formatPastedTextTitleSeed(sendableComposerPastedTexts) ?? GENERIC_CHAT_THREAD_TITLE;
-      } else {
-        titleSeed = GENERIC_CHAT_THREAD_TITLE;
-      }
-    }
-    // Keep the optimistic label short while the server asks Codex for a better summary.
+    const titleSeed = buildThreadTitleSeed({
+      trimmedPrompt: trimmedPromptForSend,
+      images: composerImagesForSend,
+      files: composerFilesForSend,
+      assistantSelections: composerAssistantSelectionsForSend,
+      terminalContexts: sendableComposerTerminalContexts,
+      fileComments: composerFileCommentsForSend,
+      pastedTexts: sendableComposerPastedTexts,
+    });
     const title = buildPromptThreadTitleFallback(titleSeed);
     const firstSendTarget = resolveFirstSendTarget({
       activeProject,
@@ -7974,10 +8218,9 @@ export default function ChatView({
     dispatchMode: "queue" | "steer";
     queuedTurn?: QueuedComposerPlanFollowUp;
   }): Promise<boolean> {
-    const api = readNativeApi();
     if (
-      !api ||
       !activeThread ||
+      !activeProject ||
       !isServerThread ||
       isSendBusy ||
       isConnecting ||
@@ -8000,10 +8243,55 @@ export default function ChatView({
       effort: queuedTurn?.selectedPromptEffort ?? selectedPromptEffort,
       text: trimmed,
     });
+    const sourceProposedPlan =
+      nextInteractionMode === "default"
+        ? buildSourceProposedPlanReference({
+            threadId: activeThread.id,
+            proposedPlan: activeProposedPlan,
+          })
+        : undefined;
 
     sendInFlightRef.current = true;
-    beginLocalDispatch();
     setThreadError(threadIdForSend, null);
+    if (controlPlane.isAuthoritative) {
+      try {
+        await dispatchAuthoritativeTurn({
+          draftThreadId: threadIdForSend,
+          persistedSessionId: threadIdForSend,
+          projectId: activeProject.id,
+          title: activeThread.title,
+          messageText: outgoingMessageText,
+          modelSelection: queuedTurn?.modelSelection ?? selectedModelSelection,
+          runtimeMode: queuedTurn?.runtimeMode ?? runtimeMode,
+          interactionMode: nextInteractionMode,
+          ...(sourceProposedPlan ? { sourceProposedPlan } : {}),
+          dispatchMode,
+          hasLiveTurn,
+        });
+        setComposerDraftInteractionMode(threadIdForSend, nextInteractionMode);
+        if (nextInteractionMode === "default") {
+          planSidebarDismissedForTurnRef.current = null;
+          setPlanSidebarOpen(true);
+        }
+        clearComposerInput(threadIdForSend);
+        scheduleComposerFocus();
+        sendInFlightRef.current = false;
+        return true;
+      } catch (err) {
+        setThreadError(
+          threadIdForSend,
+          err instanceof Error ? err.message : "Failed to send plan follow-up.",
+        );
+        sendInFlightRef.current = false;
+        return false;
+      }
+    }
+    const api = readNativeApi();
+    if (!api) {
+      sendInFlightRef.current = false;
+      return false;
+    }
+    beginLocalDispatch();
     setOptimisticUserMessages((existing) => [
       ...existing,
       {
@@ -8034,13 +8322,6 @@ export default function ChatView({
       const providerOptionsForPlanDispatch =
         queuedTurn?.providerOptionsForDispatch ?? providerOptionsForDispatch;
       const modelSelectionForPlanDispatch = queuedTurn?.modelSelection ?? selectedModelSelection;
-      const sourceProposedPlan =
-        nextInteractionMode === "default"
-          ? buildSourceProposedPlanReference({
-              threadId: activeThread.id,
-              proposedPlan: activeProposedPlan,
-            })
-          : undefined;
       rememberCustomBinaryPathForDispatch({
         threadId: threadIdForSend,
         provider: modelSelectionForPlanDispatch.provider,
@@ -8389,9 +8670,7 @@ export default function ChatView({
   ]);
 
   const onImplementPlanInNewThread = useCallback(async () => {
-    const api = readNativeApi();
     if (
-      !api ||
       !activeThread ||
       !activeProject ||
       !activeProposedPlan ||
@@ -8421,6 +8700,45 @@ export default function ChatView({
     });
 
     sendInFlightRef.current = true;
+    if (controlPlane.isAuthoritative) {
+      setComposerDraftPrompt(nextThreadId, implementationPrompt);
+      await dispatchAuthoritativeTurn({
+        draftThreadId: nextThreadId,
+        persistedSessionId: null,
+        projectId: activeProject.id,
+        title: nextThreadTitle,
+        messageText: outgoingImplementationPrompt,
+        modelSelection: nextThreadModelSelection,
+        runtimeMode,
+        interactionMode: "default",
+        ...(sourceProposedPlan ? { sourceProposedPlan } : {}),
+        dispatchMode: "queue",
+        hasLiveTurn: false,
+      })
+        .then((result) => {
+          planSidebarOpenOnNextThreadRef.current = true;
+          clearComposerInput(ThreadId.makeUnsafe(result.sessionId));
+        })
+        .catch((err) => {
+          toastManager.add({
+            type: "error",
+            title: "Could not start implementation thread",
+            description:
+              err instanceof Error
+                ? err.message
+                : "An error occurred while creating the new thread.",
+          });
+        })
+        .finally(() => {
+          sendInFlightRef.current = false;
+        });
+      return;
+    }
+    const api = readNativeApi();
+    if (!api) {
+      sendInFlightRef.current = false;
+      return;
+    }
     beginLocalDispatch();
     const finish = () => {
       sendInFlightRef.current = false;
@@ -8512,6 +8830,9 @@ export default function ChatView({
     activeThread,
     activeThreadAssociatedWorktree,
     beginLocalDispatch,
+    clearComposerInput,
+    controlPlane.isAuthoritative,
+    dispatchAuthoritativeTurn,
     isConnecting,
     isSendBusy,
     isServerThread,
@@ -8524,6 +8845,7 @@ export default function ChatView({
     rememberCustomBinaryPathForDispatch,
     selectedProvider,
     assistantDeliveryMode,
+    setComposerDraftPrompt,
     syncServerShellSnapshot,
     selectedModel,
   ]);
@@ -9207,9 +9529,9 @@ export default function ChatView({
     activeRootBranch,
     isServerThread,
     supportsFastSlashCommand,
-    canUseLocalProviderCommands: true,
+    canUseLocalProviderCommands: nativeProviderDiscoveryEnabled,
     canOfferCompactCommand:
-      supportsThreadCompaction(providerComposerCapabilitiesQuery.data) &&
+      supportsThreadCompaction(providerComposerCapabilities) &&
       isServerThread &&
       activeThread?.session !== null &&
       activeThread?.session?.status !== "closed",

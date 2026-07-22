@@ -9,8 +9,11 @@ import {
   EventId,
   MessageId,
   ORCHESTRATION_WS_METHODS,
+  type OrchestrationLatestTurn,
   type OrchestrationReadModel,
   type ProjectId,
+  type ProviderCapabilityId,
+  type ProviderCapabilityProjection,
   type ServerConfig,
   ThreadId,
   TurnId,
@@ -43,6 +46,8 @@ import {
 import { isMacPlatform } from "../lib/utils";
 import { readNativeApi } from "../nativeApi";
 import { resetHomeChatProjectPrewarmStateForTests } from "../lib/chatProjects";
+import { ControlPlaneError, controlPlaneClient } from "../lib/controlPlaneClient";
+import { resetSharedControlPlaneTurnDispatcherForTests } from "../lib/controlPlaneTurnDispatch";
 import { resetStudioProjectPrewarmStateForTests } from "../lib/studioProjects";
 import { getRouter } from "../router";
 import { useSplitViewStore } from "../splitViewStore";
@@ -1212,6 +1217,293 @@ function installDeterministicSendNativeApi(): () => void {
   };
 }
 
+function createAuthoritativeSession(
+  sessionId: string,
+  overrides: Partial<{
+    projectId: string;
+    title: string;
+    model: string | null;
+    lastEventSequence: number;
+    updatedAt: string;
+  }> = {},
+) {
+  return {
+    id: sessionId,
+    tenantId: "tenant-1",
+    organizationId: "organization-1",
+    projectId: overrides.projectId ?? PROJECT_ID,
+    createdBy: "user-1",
+    title: overrides.title ?? "Authoritative session",
+    status: "active" as const,
+    visibility: "private" as const,
+    provider: "codex" as const,
+    model: overrides.model ?? "gpt-5",
+    providerCredentialId: null,
+    executionTargetId: "target-1",
+    lastEventSequence: overrides.lastEventSequence ?? 0,
+    createdAt: NOW_ISO,
+    updatedAt: overrides.updatedAt ?? NOW_ISO,
+    archivedAt: null,
+  };
+}
+
+function supportedCapabilityProjection(
+  capabilityIds: ReadonlyArray<ProviderCapabilityId>,
+): ProviderCapabilityProjection {
+  return {
+    executionTargetId: "target-1",
+    targetKind: "docker" as const,
+    basis: "target" as const,
+    items: capabilityIds.map((capabilityId) => ({
+      provider: "codex" as const,
+      capabilityId,
+      status: "supported" as const,
+      reasonCode: "capability_supported" as const,
+      supportMode: "native" as const,
+    })),
+  };
+}
+
+function installAuthoritativeControlPlaneFixture(options?: {
+  existingSessions?: ReturnType<typeof createAuthoritativeSession>[];
+  createTurnFailures?: number;
+  modelSwitchConflictOnce?: boolean;
+}) {
+  const sessions = [...(options?.existingSessions ?? [])];
+  const sessionByIdempotencyKey = new Map<string, ReturnType<typeof createAuthoritativeSession>>();
+  const createSessionCalls: Array<{
+    projectId: string;
+    title: string;
+    model: string | undefined;
+    idempotencyKey: string | null;
+  }> = [];
+  const createTurnCalls: Array<{
+    sessionId: string;
+    inputText: string;
+    runtimeMode: string | undefined;
+    interactionMode: string | undefined;
+    sourceProposedPlan: OrchestrationLatestTurn["sourceProposedPlan"];
+    idempotencyKey: string | null;
+  }> = [];
+  const switchSessionModelCalls: Array<{
+    sessionId: string;
+    model: string;
+    expectedModel: string | null;
+    idempotencyKey: string | null;
+  }> = [];
+  let createTurnFailuresRemaining = options?.createTurnFailures ?? 0;
+  let modelSwitchConflictsRemaining = options?.modelSwitchConflictOnce ? 1 : 0;
+  const profile = {
+    profile: "enterprise" as const,
+    metadataStore: "postgresql" as const,
+    artifactStore: "minio" as const,
+    queueDriver: "postgres-outbox" as const,
+    controlPlaneReplicas: 1,
+    highAvailability: false,
+    leaseEnabled: true,
+    fencingEnabled: true,
+    executionTargetKinds: ["docker"] as const,
+    artifactPayloadMigration: false,
+    metadataExportImport: false,
+  };
+  const sessionState = {
+    authenticated: true as const,
+    user: {
+      userId: "user-1",
+      sessionId: "web-session-1",
+      activeTenantId: "tenant-1",
+      email: "owner@example.com",
+      displayName: "Owner",
+    },
+    tenants: [
+      {
+        id: "tenant-1",
+        slug: "tenant-1",
+        name: "Tenant 1",
+        status: "active" as const,
+        planCode: "enterprise",
+        region: "local",
+        role: "owner" as const,
+      },
+    ],
+  };
+  const organizations = {
+    items: [
+      {
+        id: "organization-1",
+        tenantId: "tenant-1",
+        parentOrganizationId: null,
+        slug: "root",
+        name: "Root",
+        kind: "root" as const,
+        status: "active" as const,
+        currentUserRole: "owner" as const,
+        settings: {},
+        createdAt: NOW_ISO,
+        updatedAt: NOW_ISO,
+        archivedAt: null,
+      },
+    ],
+  };
+  const projects = {
+    items: [
+      {
+        id: PROJECT_ID,
+        tenantId: "tenant-1",
+        organizationId: "organization-1",
+        name: "Project",
+        repositoryUrl: null,
+        defaultBranch: "main",
+        gitCredentialId: null,
+        visibility: "organization" as const,
+        createdBy: "user-1",
+        createdAt: NOW_ISO,
+        updatedAt: NOW_ISO,
+        archivedAt: null,
+      },
+    ],
+  };
+
+  const spies = [
+    vi.spyOn(controlPlaneClient, "getPlatformProfile").mockResolvedValue(profile),
+    vi.spyOn(controlPlaneClient, "getSession").mockResolvedValue(sessionState),
+    vi.spyOn(controlPlaneClient, "listOrganizations").mockResolvedValue(organizations),
+    vi.spyOn(controlPlaneClient, "listProjects").mockResolvedValue(projects),
+    vi.spyOn(controlPlaneClient, "listProjectSessions").mockImplementation(async () => ({
+      items: [...sessions],
+    })),
+    vi.spyOn(controlPlaneClient, "getAgentSession").mockImplementation(async (sessionId) => {
+      const session = sessions.find((candidate) => candidate.id === sessionId);
+      if (!session) throw new Error(`Unknown authoritative Session ${sessionId}`);
+      return session;
+    }),
+    vi
+      .spyOn(controlPlaneClient, "getProjectProviderCapabilities")
+      .mockResolvedValue(
+        supportedCapabilityProjection(["start-session", "send-turn", "plan-mode"]),
+      ),
+    vi
+      .spyOn(controlPlaneClient, "getSessionProviderCapabilities")
+      .mockResolvedValue(supportedCapabilityProjection(["send-turn", "plan-mode", "model-switch"])),
+    vi
+      .spyOn(controlPlaneClient, "listPendingInteractions")
+      .mockResolvedValue({ items: [], snapshotSequence: 0 }),
+    vi.spyOn(controlPlaneClient, "listSessionEvents").mockImplementation(async (sessionId) => ({
+      items: [],
+      lastSequence:
+        sessions.find((candidate) => candidate.id === sessionId)?.lastEventSequence ?? 0,
+    })),
+    vi.spyOn(controlPlaneClient, "subscribeSessionEvents").mockImplementation(() => () => {}),
+    vi
+      .spyOn(controlPlaneClient, "createSession")
+      .mockImplementation(async (projectId, input, options) => {
+        createSessionCalls.push({
+          projectId,
+          title: input.title,
+          model: input.model,
+          idempotencyKey: options?.idempotencyKey ?? null,
+        });
+        const existing = options?.idempotencyKey
+          ? sessionByIdempotencyKey.get(options.idempotencyKey)
+          : sessions.find(
+              (candidate) => candidate.title === input.title && candidate.projectId === projectId,
+            );
+        if (existing) {
+          return existing;
+        }
+        const nextSession = createAuthoritativeSession(
+          createSessionCalls.length === 1
+            ? "session-authority-1"
+            : `session-authority-${createSessionCalls.length}`,
+          {
+            projectId,
+            title: input.title,
+            model: input.model ?? "gpt-5",
+          },
+        );
+        sessions.push(nextSession);
+        if (options?.idempotencyKey) {
+          sessionByIdempotencyKey.set(options.idempotencyKey, nextSession);
+        }
+        return nextSession;
+      }),
+    vi
+      .spyOn(controlPlaneClient, "switchSessionModel")
+      .mockImplementation(async (sessionId, input, options) => {
+        switchSessionModelCalls.push({
+          sessionId,
+          model: input.model,
+          expectedModel: input.expectedModel,
+          idempotencyKey: options?.idempotencyKey ?? null,
+        });
+        const index = sessions.findIndex((candidate) => candidate.id === sessionId);
+        const current = sessions[index];
+        if (!current) throw new Error(`Unknown authoritative Session ${sessionId}`);
+        if (modelSwitchConflictsRemaining > 0) {
+          modelSwitchConflictsRemaining -= 1;
+          sessions[index] = {
+            ...current,
+            model: "gpt-5.5",
+            updatedAt: "2026-07-22T00:00:01Z",
+          };
+          throw new ControlPlaneError(
+            409,
+            "session_model_conflict",
+            "The Session model changed before the switch was committed.",
+          );
+        }
+        const next = {
+          ...current,
+          model: input.model,
+          updatedAt: "2026-07-22T00:00:02Z",
+        };
+        sessions[index] = next;
+        return next;
+      }),
+    vi
+      .spyOn(controlPlaneClient, "createTurn")
+      .mockImplementation(async (sessionId, inputText, options, modes, sourceProposedPlan) => {
+        createTurnCalls.push({
+          sessionId,
+          inputText,
+          runtimeMode: modes?.runtimeMode,
+          interactionMode: modes?.interactionMode,
+          sourceProposedPlan,
+          idempotencyKey: options?.idempotencyKey ?? null,
+        });
+        if (createTurnFailuresRemaining > 0) {
+          createTurnFailuresRemaining -= 1;
+          throw new Error("connection reset");
+        }
+        return {
+          id: `turn-${createTurnCalls.length}`,
+          tenantId: "tenant-1",
+          sessionId,
+          createdBy: "user-1",
+          status: "queued" as const,
+          inputText,
+          runtimeMode: modes?.runtimeMode ?? "full-access",
+          interactionMode: modes?.interactionMode ?? "default",
+          startedAt: null,
+          completedAt: null,
+          createdAt: NOW_ISO,
+        };
+      }),
+  ];
+
+  return {
+    sessions,
+    createSessionCalls,
+    createTurnCalls,
+    switchSessionModelCalls,
+    restore: () => {
+      for (const spy of spies) {
+        spy.mockRestore();
+      }
+    },
+  };
+}
+
 function toRecordedWsRequestBody(request: {
   readonly tag: string;
   readonly payload: unknown;
@@ -1817,7 +2109,9 @@ describe("ChatView timeline estimator parity (full app)", () => {
   });
 
   beforeEach(async () => {
+    vi.restoreAllMocks();
     await resetWsNativeApiForTest();
+    resetSharedControlPlaneTurnDispatcherForTests();
     resetRetainedThreadDetailSubscriptionsForTests();
     await resetHomeChatProjectPrewarmStateForTests();
     await resetStudioProjectPrewarmStateForTests();
@@ -1865,6 +2159,7 @@ describe("ChatView timeline estimator parity (full app)", () => {
   });
 
   afterEach(async () => {
+    vi.restoreAllMocks();
     await resetHomeChatProjectPrewarmStateForTests();
     await resetStudioProjectPrewarmStateForTests();
     resetRetainedThreadDetailSubscriptionsForTests();
@@ -2435,6 +2730,208 @@ describe("ChatView timeline estimator parity (full app)", () => {
         false,
       );
     } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("routes authoritative draft retries through Control Plane only and reuses Session/Turn idempotency", async () => {
+    const authoritative = installAuthoritativeControlPlaneFixture({ createTurnFailures: 1 });
+    const draftThreadId = "4f6dd5c1-5dfc-4ac6-a95d-dc603f6ad55a" as ThreadId;
+    const providerDiscoveryTags = new Set<string>([
+      WS_METHODS.providerGetComposerCapabilities,
+      WS_METHODS.providerListModels,
+      WS_METHODS.providerListAgents,
+      WS_METHODS.providerListSkills,
+      WS_METHODS.providerListPlugins,
+    ]);
+    useComposerDraftStore.setState({
+      draftThreadsByThreadId: {
+        [draftThreadId]: {
+          projectId: PROJECT_ID,
+          createdAt: NOW_ISO,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          entryPoint: "chat",
+          branch: null,
+          worktreePath: null,
+          envMode: "local",
+        },
+      },
+      projectDraftThreadIdByProjectId: {
+        [PROJECT_ID]: draftThreadId,
+      },
+    });
+
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: createDraftOnlySnapshot(),
+      initialEntry: `/${draftThreadId}`,
+    });
+
+    try {
+      const firstPrompt = "Ship the authoritative control plane turn path";
+      useComposerDraftStore.getState().setModelSelection(draftThreadId, {
+        provider: "codex",
+        model: "gpt-5",
+      });
+      useComposerDraftStore.getState().setPrompt(draftThreadId, firstPrompt);
+      const composerEditor = await waitForComposerEditor();
+      await vi.waitFor(
+        () => {
+          expect(composerEditor.textContent ?? "").toContain(firstPrompt);
+        },
+        { timeout: 8_000, interval: 16 },
+      );
+      await vi.waitFor(
+        () => {
+          expect(useStore.getState().projectionAuthority).toBe("control-plane");
+        },
+        { timeout: 8_000, interval: 16 },
+      );
+      wsRequests.length = 0;
+
+      const sendButton = await waitForSendButton();
+      expect(sendButton.disabled).toBe(false);
+      sendButton.click();
+
+      await vi.waitFor(
+        () => {
+          expect(authoritative.createSessionCalls).toHaveLength(1);
+          expect(authoritative.createTurnCalls).toHaveLength(1);
+        },
+        { timeout: 8_000, interval: 16 },
+      );
+
+      await waitForURL(
+        mounted.router,
+        (pathname) => pathname === "/session-authority-1",
+        "Draft route should promote to the durable Control Plane Session.",
+      );
+
+      expect(
+        useComposerDraftStore.getState().draftThreadsByThreadId[draftThreadId],
+      ).toBeUndefined();
+      expect(hasDispatchedCommandType("thread.turn.start")).toBe(false);
+      expect(wsRequests.some((request) => providerDiscoveryTags.has(request._tag))).toBe(false);
+
+      const promotedThreadId = ThreadId.makeUnsafe("session-authority-1");
+      const promotedComposerEditor = await waitForComposerEditor();
+      await vi.waitFor(
+        () => {
+          expect(promotedComposerEditor.textContent ?? "").toContain(firstPrompt);
+        },
+        { timeout: 8_000, interval: 16 },
+      );
+
+      const retrySendButton = await waitForSendButton();
+      expect(retrySendButton.disabled).toBe(false);
+      retrySendButton.click();
+
+      await vi.waitFor(
+        () => {
+          expect(authoritative.createSessionCalls).toHaveLength(1);
+          expect(authoritative.createTurnCalls).toHaveLength(2);
+        },
+        { timeout: 8_000, interval: 16 },
+      );
+
+      expect(authoritative.createTurnCalls[0]?.sessionId).toBe("session-authority-1");
+      expect(authoritative.createTurnCalls[0]?.idempotencyKey).toBe(
+        authoritative.createTurnCalls[1]?.idempotencyKey,
+      );
+      await vi.waitFor(
+        () => {
+          expect(
+            useComposerDraftStore.getState().draftsByThreadId[promotedThreadId]?.prompt ?? "",
+          ).toBe("");
+        },
+        { timeout: 8_000, interval: 16 },
+      );
+      expect(hasDispatchedCommandType("thread.turn.start")).toBe(false);
+      expect(wsRequests.some((request) => providerDiscoveryTags.has(request._tag))).toBe(false);
+    } finally {
+      authoritative.restore();
+      await mounted.cleanup();
+    }
+  });
+
+  it("starts a fresh model-switch operation after an authoritative model conflict", async () => {
+    const authoritative = installAuthoritativeControlPlaneFixture({
+      existingSessions: [createAuthoritativeSession(THREAD_ID, { model: "gpt-5" })],
+      modelSwitchConflictOnce: true,
+    });
+    const snapshot = createSnapshotForTargetUser({
+      targetMessageId: "msg-user-model-conflict" as MessageId,
+      targetText: "model conflict setup",
+    });
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: {
+        ...snapshot,
+        threads: snapshot.threads.map((thread) =>
+          thread.id === THREAD_ID
+            ? { ...thread, messages: [], activities: [], latestTurn: null }
+            : thread,
+        ),
+      },
+    });
+
+    try {
+      await vi.waitFor(
+        () => expect(useStore.getState().projectionAuthority).toBe("control-plane"),
+        { timeout: 8_000, interval: 16 },
+      );
+      useComposerDraftStore.getState().setModelSelection(THREAD_ID, {
+        provider: "codex",
+        model: "gpt-5.6-sol",
+      });
+      useComposerDraftStore.getState().setPrompt(THREAD_ID, "Use the selected model");
+      const composerEditor = await waitForComposerEditor();
+      await vi.waitFor(
+        () => expect(composerEditor.textContent ?? "").toContain("Use the selected model"),
+        { timeout: 8_000, interval: 16 },
+      );
+
+      const sendButton = await waitForSendButton();
+      sendButton.click();
+      await vi.waitFor(() => expect(authoritative.switchSessionModelCalls).toHaveLength(1), {
+        timeout: 8_000,
+        interval: 16,
+      });
+      await vi.waitFor(
+        () =>
+          expect(useComposerDraftStore.getState().draftsByThreadId[THREAD_ID]?.prompt).toBe(
+            "Use the selected model",
+          ),
+        { timeout: 8_000, interval: 16 },
+      );
+      await vi.waitFor(() => expect(sendButton.disabled).toBe(false), {
+        timeout: 8_000,
+        interval: 16,
+      });
+
+      sendButton.click();
+      await vi.waitFor(
+        () => {
+          expect(authoritative.switchSessionModelCalls).toHaveLength(2);
+          expect(authoritative.createTurnCalls).toHaveLength(1);
+        },
+        { timeout: 8_000, interval: 16 },
+      );
+
+      expect(authoritative.switchSessionModelCalls[0]).toMatchObject({
+        model: "gpt-5.6-sol",
+        expectedModel: "gpt-5",
+      });
+      expect(authoritative.switchSessionModelCalls[1]).toMatchObject({
+        model: "gpt-5.6-sol",
+        expectedModel: "gpt-5.5",
+      });
+      expect(authoritative.switchSessionModelCalls[0]?.idempotencyKey).not.toBe(
+        authoritative.switchSessionModelCalls[1]?.idempotencyKey,
+      );
+    } finally {
+      authoritative.restore();
       await mounted.cleanup();
     }
   });

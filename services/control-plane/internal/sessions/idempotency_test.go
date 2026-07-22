@@ -18,6 +18,9 @@ func TestTurnCreateIdempotencyDoesNotDuplicateExecutionEventOrOutbox(t *testing.
 	ctx := context.Background()
 	input := CreateTurnInput{
 		InputText: "one durable Turn", RuntimeMode: "approval-required", InteractionMode: "plan",
+		SourceProposedPlan: &SourceProposedPlanReference{
+			ThreadID: "source-session", PlanID: "source-plan",
+		},
 	}
 
 	first, replayed, err := fixture.service.CreateTurnWithIdempotency(
@@ -44,7 +47,12 @@ func TestTurnCreateIdempotencyDoesNotDuplicateExecutionEventOrOutbox(t *testing.
 
 	_, _, err = fixture.service.CreateTurnWithIdempotency(
 		ctx, fixture.principal, fixture.sessionID,
-		CreateTurnInput{InputText: "one durable Turn", RuntimeMode: "full-access", InteractionMode: "default"},
+		CreateTurnInput{
+			InputText: "one durable Turn", RuntimeMode: "approval-required", InteractionMode: "plan",
+			SourceProposedPlan: &SourceProposedPlanReference{
+				ThreadID: "source-session", PlanID: "different-plan",
+			},
+		},
 		"turn-key", "turn-conflict", "127.0.0.1",
 	)
 	assertIdempotencyConflict(t, err)
@@ -98,6 +106,29 @@ func TestTurnCreateIdempotencyDoesNotDuplicateExecutionEventOrOutbox(t *testing.
 	if event.Payload["runtimeMode"] != "approval-required" || event.Payload["interactionMode"] != "plan" {
 		t.Fatalf("Turn modes were not captured in the authoritative Event: %#v", event.Payload)
 	}
+	sourceProposedPlan, ok := event.Payload["sourceProposedPlan"].(map[string]any)
+	if !ok || sourceProposedPlan["threadId"] != "source-session" || sourceProposedPlan["planId"] != "source-plan" {
+		t.Fatalf("Turn plan lineage was not captured in the authoritative Event: %#v", event.Payload)
+	}
+}
+
+func TestTurnCreateRejectsIncompleteSourceProposedPlan(t *testing.T) {
+	fixture := newTenantExecutionPolicyFixture(t)
+	_, _, err := fixture.service.CreateTurnWithIdempotency(
+		context.Background(),
+		fixture.principal,
+		fixture.sessionID,
+		CreateTurnInput{
+			InputText: "implement it",
+			SourceProposedPlan: &SourceProposedPlanReference{
+				ThreadID: "source-session",
+			},
+		},
+		"invalid-plan-lineage",
+		"invalid-plan-lineage",
+		"127.0.0.1",
+	)
+	assertSessionProblemCode(t, err, "invalid_source_proposed_plan")
 }
 
 func TestSessionCreateAndArchiveIdempotency(t *testing.T) {

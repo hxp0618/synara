@@ -56,11 +56,18 @@ REQUIRED_OBJECT_LOCK_BUCKET_ACTIONS = {
     "s3:ListBucket",
     "s3:ListBucketVersions",
 }
-REQUIRED_OBJECT_LOCK_OBJECT_ACTIONS = {
+REQUIRED_OBJECT_LOCK_WRITER_OBJECT_ACTIONS = {
     "s3:GetObject",
     "s3:GetObjectRetention",
     "s3:GetObjectVersion",
     "s3:PutObject",
+}
+REQUIRED_OBJECT_LOCK_VERIFIER_OBJECT_ACTIONS = {
+    "s3:DeleteObjectVersion",
+    "s3:GetObject",
+    "s3:GetObjectRetention",
+    "s3:GetObjectVersion",
+    "s3:PutObjectRetention",
 }
 
 ReleaseGateError = common.ReleaseGateError
@@ -114,6 +121,8 @@ class OperationsPolicy:
     object_lock_resolve_env: str
     object_lock_credential_policy_path: pathlib.Path
     object_lock_credential_policy_sha256: str
+    object_lock_verifier_credential_policy_path: pathlib.Path
+    object_lock_verifier_credential_policy_sha256: str
 
 
 @dataclasses.dataclass(frozen=True)
@@ -264,45 +273,56 @@ def _load_object_lock_credential_policy(
     value: Any,
     *,
     bucket: str,
+    policy_label: str,
+    required_object_actions: set[str],
     code: str,
 ) -> tuple[pathlib.Path, str]:
     relative = _require_string(
         value,
-        label="audit.externalSiem.objectLock.credentialPolicyPath",
+        label=policy_label,
         code=code,
     )
     pure_path = pathlib.PurePosixPath(relative)
     if pure_path.is_absolute() or ".." in pure_path.parts or any(
         part in {"", "."} for part in pure_path.parts
     ):
-        raise ReleaseGateError(code, "The Object Lock credential policy path was not repository-relative.")
+        raise ReleaseGateError(
+            code,
+            f"The {policy_label} path was not repository-relative.",
+        )
     path = repo_root.joinpath(*pure_path.parts)
     try:
         raw = path.read_bytes()
         payload = json.loads(raw)
     except (OSError, json.JSONDecodeError):
-        raise ReleaseGateError(code, "The Object Lock credential policy was unavailable or malformed.") from None
+        raise ReleaseGateError(
+            code,
+            f"The {policy_label} file was unavailable or malformed.",
+        ) from None
     statements = payload.get("Statement") if isinstance(payload, dict) else None
     if not isinstance(statements, list) or len(statements) != 2:
-        raise ReleaseGateError(code, "The Object Lock credential policy did not use the exact two-statement boundary.")
+        raise ReleaseGateError(
+            code,
+            f"The {policy_label} did not use the exact two-statement boundary.",
+        )
     actions_by_resource: dict[str, set[str]] = {}
     for statement in statements:
         if not isinstance(statement, dict) or statement.get("Effect") != "Allow":
-            raise ReleaseGateError(code, "The Object Lock credential policy statement was invalid.")
+            raise ReleaseGateError(code, f"The {policy_label} statement was invalid.")
         resource = statement.get("Resource")
         actions = statement.get("Action")
         if not isinstance(resource, str) or not isinstance(actions, list) or not all(
             isinstance(action, str) for action in actions
         ):
-            raise ReleaseGateError(code, "The Object Lock credential policy actions were invalid.")
+            raise ReleaseGateError(code, f"The {policy_label} actions were invalid.")
         actions_by_resource[resource] = set(actions)
     if actions_by_resource != {
         f"arn:aws:s3:::{bucket}": REQUIRED_OBJECT_LOCK_BUCKET_ACTIONS,
-        f"arn:aws:s3:::{bucket}/*": REQUIRED_OBJECT_LOCK_OBJECT_ACTIONS,
+        f"arn:aws:s3:::{bucket}/*": required_object_actions,
     }:
         raise ReleaseGateError(
             code,
-            "The Object Lock credential policy exceeded or drifted from the scoped bucket boundary.",
+            f"The {policy_label} exceeded or drifted from the scoped bucket boundary.",
         )
     return path, sha256_bytes(raw)
 
@@ -385,7 +405,19 @@ def load_operations_policy(policy_path: pathlib.Path) -> OperationsPolicy:
         repo_root,
         object_lock_policy.get("credentialPolicyPath"),
         bucket=object_lock_bucket,
+        policy_label="audit.externalSiem.objectLock.credentialPolicyPath",
+        required_object_actions=REQUIRED_OBJECT_LOCK_WRITER_OBJECT_ACTIONS,
         code=code,
+    )
+    verifier_credential_policy_path, verifier_credential_policy_sha256 = (
+        _load_object_lock_credential_policy(
+            repo_root,
+            object_lock_policy.get("verifierCredentialPolicyPath"),
+            bucket=object_lock_bucket,
+            policy_label="audit.externalSiem.objectLock.verifierCredentialPolicyPath",
+            required_object_actions=REQUIRED_OBJECT_LOCK_VERIFIER_OBJECT_ACTIONS,
+            code=code,
+        )
     )
     return OperationsPolicy(
         path=policy_path,
@@ -489,6 +521,8 @@ def load_operations_policy(policy_path: pathlib.Path) -> OperationsPolicy:
         ),
         object_lock_credential_policy_path=credential_policy_path,
         object_lock_credential_policy_sha256=credential_policy_sha256,
+        object_lock_verifier_credential_policy_path=verifier_credential_policy_path,
+        object_lock_verifier_credential_policy_sha256=verifier_credential_policy_sha256,
     )
 
 
@@ -1226,6 +1260,12 @@ def verify_object_lock_archive(
         "verifierCredentialEnvironment": policy.object_lock_verifier_host_env,
         "credentialPolicyPath": str(policy.object_lock_credential_policy_path),
         "credentialPolicySha256": policy.object_lock_credential_policy_sha256,
+        "verifierCredentialPolicyPath": str(
+            policy.object_lock_verifier_credential_policy_path
+        ),
+        "verifierCredentialPolicySha256": (
+            policy.object_lock_verifier_credential_policy_sha256
+        ),
     }
 
 
@@ -2072,6 +2112,12 @@ def run_vault_audit_siem_delivery_gate(
                 "objectPrefix": policy.object_lock_prefix,
                 "credentialPolicyPath": str(policy.object_lock_credential_policy_path),
                 "credentialPolicySha256": policy.object_lock_credential_policy_sha256,
+                "verifierCredentialPolicyPath": str(
+                    policy.object_lock_verifier_credential_policy_path
+                ),
+                "verifierCredentialPolicySha256": (
+                    policy.object_lock_verifier_credential_policy_sha256
+                ),
             },
             "environmentNames": {
                 "vaultAddress": policy.vault_addr_env,

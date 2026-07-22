@@ -55,6 +55,7 @@ ReleaseGateError = common.ReleaseGateError
 @dataclasses.dataclass(frozen=True)
 class SnapshotOperatorRolePolicy:
     name: str
+    bind_secret_id: bool
     token_policies: tuple[str, ...]
     token_type: str
     token_ttl_seconds: int
@@ -63,6 +64,7 @@ class SnapshotOperatorRolePolicy:
     secret_id_ttl_seconds: int
     secret_id_num_uses: int
     token_no_default_policy: bool
+    orphan_required: bool
 
 
 @dataclasses.dataclass(frozen=True)
@@ -316,6 +318,10 @@ def load_operations_policy(policy_path: pathlib.Path) -> OperationsPolicy:
         )
     snapshot_operator_role_policy = SnapshotOperatorRolePolicy(
         name=require_string(vault.get("snapshotOperatorAppRoleName"), label="vault.snapshotOperatorAppRoleName"),
+        bind_secret_id=require_bool(
+            snapshot_role.get("bindSecretId"),
+            label="vault.snapshotOperatorRole.bindSecretId",
+        ),
         token_policies=require_string_list(
             snapshot_role.get("tokenPolicies"),
             label="vault.snapshotOperatorRole.tokenPolicies",
@@ -350,6 +356,10 @@ def load_operations_policy(policy_path: pathlib.Path) -> OperationsPolicy:
         token_no_default_policy=require_bool(
             snapshot_role.get("tokenNoDefaultPolicy"),
             label="vault.snapshotOperatorRole.tokenNoDefaultPolicy",
+        ),
+        orphan_required=require_bool(
+            snapshot_role.get("orphanRequired"),
+            label="vault.snapshotOperatorRole.orphanRequired",
         ),
     )
     if sorted(required_artifacts) != sorted((JSON_REPORT_NAME, MARKDOWN_REPORT_NAME)):
@@ -903,6 +913,7 @@ def token_lookup_summary(payload: Mapping[str, Any]) -> dict[str, Any]:
         "path": str(data.get("path") or ""),
         "displayName": str(data.get("display_name") or ""),
         "tokenType": token_type,
+        "orphan": bool(data.get("orphan")),
         "tokenPolicies": policies,
         "tokenPoliciesSha256": sha256_text("\n".join(policies)),
     }
@@ -964,10 +975,19 @@ def validate_snapshot_operator_identity(
                 "actualTokenType": identity.get("tokenType"),
             },
         )
+    if (
+        policy.snapshot_operator_role_policy.orphan_required
+        and identity.get("orphan") is not True
+    ):
+        raise ReleaseGateError(
+            "release.vault_snapshot_restore_validation_failed",
+            "The snapshot operator token was not an orphan batch token.",
+        )
     return {
         "tokenPolicies": expected_policies,
         "tokenPoliciesSha256": sha256_text("\n".join(expected_policies)),
         "tokenType": policy.snapshot_operator_role_policy.token_type,
+        "orphan": bool(identity.get("orphan")),
         "path": str(identity.get("path") or ""),
         "displayName": str(identity.get("displayName") or ""),
     }
@@ -1023,6 +1043,9 @@ def validate_snapshot_operator_role(
     if role_summary.get("tokenNoDefaultPolicy") is not expected.token_no_default_policy:
         mismatches["expectedTokenNoDefaultPolicy"] = expected.token_no_default_policy
         mismatches["actualTokenNoDefaultPolicy"] = role_summary.get("tokenNoDefaultPolicy")
+    if role_summary.get("bindSecretId") is not expected.bind_secret_id:
+        mismatches["expectedBindSecretId"] = expected.bind_secret_id
+        mismatches["actualBindSecretId"] = role_summary.get("bindSecretId")
     if mismatches:
         raise ReleaseGateError(
             "release.vault_snapshot_restore_validation_failed",

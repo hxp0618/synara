@@ -75,6 +75,32 @@ External WORM archive verification:
 Do not commit values for any of these environments. Reports may retain the
 environment variable names and hashes only.
 
+## AppRole production contract
+
+All three machine identities use bound Secret IDs, orphan `batch` tokens, an
+exact single policy, and `token_no_default_policy=true`. Secret IDs are valid
+for at most `600` seconds and exactly one login. The signer token TTL is
+`7200` seconds with a `14400` second maximum; the production auditor and
+snapshot operator each use `1800` seconds with a `3600` second maximum. Tokens
+are non-renewable batch credentials and may not inherit `default` or `root`.
+
+| Identity | Exact policy | Token TTL / max TTL | Secret ID TTL / uses |
+| --- | --- | --- | --- |
+| `auth/approle/role/synara-worker-release-signer` | `synara-worker-release-signer` | `7200s / 14400s` | `600s / 1` |
+| `auth/approle/role/synara-vault-production-auditor` | `synara-vault-production-auditor` | `1800s / 3600s` | `600s / 1` |
+| `auth/approle/role/synara-vault-snapshot-operator` | `synara-vault-snapshot-operator` | `1800s / 3600s` | `600s / 1` |
+
+`deploy/kubernetes/security/vault/operations-policy.json` is the non-secret
+contract. The bootstrap and live gates must match it exactly; increasing a TTL,
+making a Secret ID reusable, changing token type, or adding a policy is a
+release-blocking drift.
+
+`VAULT_TOKEN` must resolve to the signer AppRole and `VAULT_OPERATOR_TOKEN`
+must resolve to the independent production-auditor AppRole. The KMS gate
+compares their safe identity hashes and fails if the two tokens resolve to the
+same identity. Neither token may be substituted for the snapshot operator or a
+root token.
+
 ## Short-lived operator credential session
 
 For the repository-owned Stage 3 production-like overlay observed on July 21,
@@ -145,6 +171,14 @@ commands so every gate resolves the current active Vault pod on
   password manager under distinct operator control.
 - Rotate the custody set after custodian departure, suspected share exposure,
   major cluster rebuild, or any cryptographic boundary change.
+
+The repository-owned `kind-synara-stage3-prod` overlay currently proves the
+`5-of-3` mechanics only. If three shares are controlled by the same local
+operator or stored on the same machine, the release report must say
+`production-like custody only` and Stage 3 production go-live remains blocked.
+Production custody passes only with evidence of three distinct custodians and
+three independently controlled storage locations; a single operator may not
+self-attest all three roles.
 
 ## Generate-root break-glass
 
@@ -279,7 +313,11 @@ gate uses the separate, short-lived
 and requires its delete and retention-shortening attempts to fail specifically
 at COMPLIANCE Object Lock, so an archive writer's IAM denial cannot be mistaken
 for storage enforcement. That verifier is not injected into Vault or the
-long-running collector.
+long-running collector. Its exact independent allow-list is checked in at
+`deploy/kubernetes/security/vault/audit-object-lock-verifier-policy.json`: it
+can read the exact retained version and attempt `DeleteObjectVersion` and
+`PutObjectRetention`, but cannot upload archive data. The formal report records
+the SHA-256 of both policy files, never either credential value.
 
 The concrete Kind Service IP, API server address, OrbStack host address, and
 Registry host in this repository are the `kind-synara-stage3-prod` overlay.

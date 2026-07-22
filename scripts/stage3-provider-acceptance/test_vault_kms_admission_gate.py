@@ -1602,6 +1602,20 @@ class ProbeAccessTest(unittest.TestCase):
             manifest["spec"]["imagePullSecrets"],
             [{"name": "registry-pull-secret"}],
         )
+        self.assertEqual(
+            manifest["spec"]["securityContext"],
+            {
+                "runAsNonRoot": True,
+                "seccompProfile": {"type": "RuntimeDefault"},
+            },
+        )
+        self.assertEqual(
+            manifest["spec"]["containers"][0]["securityContext"],
+            {
+                "allowPrivilegeEscalation": False,
+                "capabilities": {"drop": ["ALL"]},
+            },
+        )
 
     def test_dry_run_workload_manifest_sets_controller_pull_secret(self) -> None:
         for kind in gate.REQUIRED_CONTROLLER_PROBE_KINDS:
@@ -1624,6 +1638,20 @@ class ProbeAccessTest(unittest.TestCase):
             self.assertEqual(
                 template_spec["imagePullSecrets"],
                 [{"name": "registry-pull-secret"}],
+            )
+            self.assertEqual(
+                template_spec["securityContext"],
+                {
+                    "runAsNonRoot": True,
+                    "seccompProfile": {"type": "RuntimeDefault"},
+                },
+            )
+            self.assertEqual(
+                template_spec["containers"][0]["securityContext"],
+                {
+                    "allowPrivilegeEscalation": False,
+                    "capabilities": {"drop": ["ALL"]},
+                },
             )
 
 
@@ -2237,6 +2265,42 @@ class VaultPolicyBoundaryTest(unittest.TestCase):
                         "transitKey": {
                             **operations_policy["vault"]["transitKey"],
                             "exportable": True,
+                        },
+                    },
+                },
+            },
+            "operations-policy-signer-role-ttl": {
+                "operations_policy_payload": {
+                    **operations_policy,
+                    "vault": {
+                        **operations_policy["vault"],
+                        "signerRole": {
+                            **operations_policy["vault"]["signerRole"],
+                            "tokenTtlSeconds": 7201,
+                        },
+                    },
+                },
+            },
+            "operations-policy-auditor-default-policy": {
+                "operations_policy_payload": {
+                    **operations_policy,
+                    "vault": {
+                        **operations_policy["vault"],
+                        "auditorRole": {
+                            **operations_policy["vault"]["auditorRole"],
+                            "tokenNoDefaultPolicy": False,
+                        },
+                    },
+                },
+            },
+            "operations-policy-snapshot-reusable-secret-id": {
+                "operations_policy_payload": {
+                    **operations_policy,
+                    "vault": {
+                        **operations_policy["vault"],
+                        "snapshotOperatorRole": {
+                            **operations_policy["vault"]["snapshotOperatorRole"],
+                            "secretIdNumUses": 2,
                         },
                     },
                 },

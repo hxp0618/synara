@@ -112,6 +112,25 @@ describe("Control Plane Session projection", () => {
     ).toEqual({ afterSequence: 1, receivedSequence: 3 });
   });
 
+  it("projects source proposed-plan lineage from the authoritative Turn event", () => {
+    const projection = applyControlPlaneSessionEvent(
+      createControlPlaneSessionProjection(session),
+      event(1, "turn.created", {
+        turnId: "turn-1",
+        inputText: "Implement the accepted plan",
+        sourceProposedPlan: {
+          threadId: "source-session",
+          planId: "source-plan",
+        },
+      }),
+    ).projection;
+
+    expect(projection.latestTurn?.sourceProposedPlan).toEqual({
+      threadId: "source-session",
+      planId: "source-plan",
+    });
+  });
+
   it("projects durable user and assistant messages without coupling SSE state to running", () => {
     let projection = createControlPlaneSessionProjection(session);
     projection = applyControlPlaneSessionEvent(

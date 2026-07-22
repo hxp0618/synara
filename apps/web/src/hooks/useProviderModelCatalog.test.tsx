@@ -98,6 +98,14 @@ function readAgentQueryEnabled(provider: ProviderKind): boolean | undefined {
   return call ? (call[0] as QueryOptionsLike).enabled : undefined;
 }
 
+function readModelQueryEnabled(provider: ProviderKind): boolean | undefined {
+  const call = mocks.useQuery.mock.calls.find(([value]) => {
+    const queryKey = (value as QueryOptionsLike).queryKey;
+    return queryKey[1] === "models" && queryKey[2] === provider;
+  });
+  return call ? (call[0] as QueryOptionsLike).enabled : undefined;
+}
+
 beforeEach(() => {
   modelQueries.clear();
   agentQueries.clear();
@@ -143,6 +151,37 @@ describe("useProviderModelCatalog", () => {
     });
     expect(readAgentQueryEnabled("claudeAgent")).toBe(true);
     expect(readAgentQueryEnabled("codex")).toBe(true);
+  });
+
+  it("falls back to static catalogs when runtime discovery is disabled", () => {
+    modelQueries.set("codex", {
+      data: {
+        models: [{ slug: "cached-runtime", name: "Cached runtime" }],
+        source: "codex-app-server",
+      },
+      ...EMPTY_QUERY,
+    });
+    agentQueries.set("codex", {
+      data: { agents: [{ name: "cached-agent", displayName: "Cached agent" }] },
+      ...EMPTY_QUERY,
+    });
+    const catalog = readCatalogRenders({
+      selectedProvider: "codex",
+      discoveryEnabled: true,
+      runtimeDiscoveryEnabled: false,
+      agentDiscoveryPolicy: "eager-core",
+    }).at(-1);
+
+    expect(readModelQueryEnabled("codex")).toBe(false);
+    expect(readModelQueryEnabled("cursor")).toBe(false);
+    expect(readAgentQueryEnabled("claudeAgent")).toBe(false);
+    expect(readAgentQueryEnabled("codex")).toBe(false);
+    expect(catalog?.runtimeModelsByProvider.codex).toEqual([]);
+    expect(catalog?.selectedRuntimeAgents).toEqual([]);
+    expect(
+      catalog?.modelOptionsByProvider.codex.some((model) => model.slug === "cached-runtime"),
+    ).toBe(false);
+    expect(catalog?.selectedProviderModelsLoading).toBe(false);
   });
 
   it("merges a settled runtime catalog with custom models without reporting loading", () => {

@@ -1,6 +1,7 @@
 import { queryOptions, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ProjectId,
+  type OrchestrationLatestTurn,
   type ProviderCapabilityProjection,
   type ProviderInteractionMode,
   type ProviderKind,
@@ -150,6 +151,7 @@ export type ControlPlaneContextValue = {
     inputText: string,
     idempotencyKey?: string,
     modes?: { runtimeMode: RuntimeMode; interactionMode: ProviderInteractionMode },
+    sourceProposedPlan?: NonNullable<OrchestrationLatestTurn["sourceProposedPlan"]>,
   ) => Promise<ControlPlaneAgentTurn>;
   compactSession: (
     sessionId: string,
@@ -940,6 +942,7 @@ export function ControlPlaneProvider({ children }: { children: ReactNode }) {
       inputText: string,
       idempotencyKey?: string,
       modes?: { runtimeMode: RuntimeMode; interactionMode: ProviderInteractionMode },
+      sourceProposedPlan?: NonNullable<OrchestrationLatestTurn["sourceProposedPlan"]>,
     ) => {
       if (!capabilities.canCreateTurn) {
         throw new Error("The active Tenant or Organization is read-only for new Turns.");
@@ -959,6 +962,7 @@ export function ControlPlaneProvider({ children }: { children: ReactNode }) {
         inputText,
         idempotencyOptions("turn", idempotencyKey),
         modes,
+        sourceProposedPlan,
       );
       void queryClient.invalidateQueries({
         queryKey: controlPlaneQueryKeys.sessionProviderCapabilities(sessionId),

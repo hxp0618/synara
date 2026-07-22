@@ -4689,6 +4689,10 @@ describe("ProviderRuntimeIngestion", () => {
       itemId: asItemId("item-command-output"),
       payload: {
         streamKind: "command_output",
+        terminalId: "item-command-output",
+        encoding: "utf-8",
+        byteOffset: 0,
+        byteLength: 11,
         delta: "first line\n",
       },
     });
@@ -4702,6 +4706,10 @@ describe("ProviderRuntimeIngestion", () => {
       itemId: asItemId("item-command-output"),
       payload: {
         streamKind: "command_output",
+        terminalId: "item-command-output",
+        encoding: "utf-8",
+        byteOffset: 11,
+        byteLength: 12,
         delta: "second line\n",
       },
     });
@@ -4758,6 +4766,10 @@ describe("ProviderRuntimeIngestion", () => {
       itemId: asItemId("item-empty-stream-output"),
       payload: {
         streamKind: "command_output",
+        terminalId: "item-empty-stream-output",
+        encoding: "utf-8",
+        byteOffset: 0,
+        byteLength: 23,
         delta: "captured through delta\n",
       },
     });

@@ -72,9 +72,15 @@ type CreateSessionInput struct {
 }
 
 type CreateTurnInput struct {
-	InputText       string `json:"inputText"`
-	RuntimeMode     string `json:"runtimeMode"`
-	InteractionMode string `json:"interactionMode"`
+	InputText          string                       `json:"inputText"`
+	RuntimeMode        string                       `json:"runtimeMode"`
+	InteractionMode    string                       `json:"interactionMode"`
+	SourceProposedPlan *SourceProposedPlanReference `json:"sourceProposedPlan,omitempty"`
+}
+
+type SourceProposedPlanReference struct {
+	ThreadID string `json:"threadId"`
+	PlanID   string `json:"planId"`
 }
 
 type SwitchModelInput struct {

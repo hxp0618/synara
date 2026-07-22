@@ -9,6 +9,7 @@ import {
   ControlPlaneStatusPill,
 } from "~/components/settings/ControlPlaneSettingsPrimitives";
 import { ExecutionTargetCredentialBindings } from "~/components/settings/ExecutionTargetCredentialBindings";
+import { ExecutionTargetWorkerManagement } from "~/components/settings/ExecutionTargetWorkerManagement";
 import { WorkerReleaseControls } from "~/components/settings/WorkerReleaseControls";
 import {
   SettingsListRow,
@@ -26,6 +27,7 @@ import {
   type ControlPlaneExecutionTarget,
   type ControlPlaneExecutionTargetKind,
   type ControlPlaneOrganization,
+  type ControlPlaneWorker,
   type ControlPlaneWorkerManifest,
   type ControlPlaneWorkerProviderManifest,
 } from "~/lib/controlPlaneClient";
@@ -59,6 +61,9 @@ export function ExecutionTargetSettingsSection(props: {
   workerManifests: ReadonlyArray<ControlPlaneWorkerManifest>;
   workerManifestsLoading: boolean;
   workerManifestsError: unknown;
+  workers: ReadonlyArray<ControlPlaneWorker>;
+  workersLoading: boolean;
+  workersError: unknown;
   canManage: boolean;
   canManageCredentialBindings: boolean;
   credentials: ReadonlyArray<ControlPlaneCredential>;
@@ -68,6 +73,7 @@ export function ExecutionTargetSettingsSection(props: {
   onCreated: (target: ControlPlaneExecutionTarget) => void;
   onUpdated: (targetId: string, status: ControlPlaneExecutionTarget["status"]) => void;
   onProviderPolicyUpdated: (target: ControlPlaneExecutionTarget) => void;
+  onWorkersChanged?: () => void;
 }) {
   const [name, setName] = useState("");
   const [kind, setKind] = useState<ControlPlaneExecutionTargetKind>("local");
@@ -124,6 +130,7 @@ export function ExecutionTargetSettingsSection(props: {
     () => groupWorkerManifestsByTarget(props.workerManifests),
     [props.workerManifests],
   );
+  const workersByTarget = useMemo(() => groupWorkersByTarget(props.workers), [props.workers]);
   const organizationByID = useMemo(
     () => new Map(props.organizations.map((organization) => [organization.id, organization])),
     [props.organizations],
@@ -150,6 +157,10 @@ export function ExecutionTargetSettingsSection(props: {
             workerManifests={workerManifestsByTarget.get(target.id) ?? EMPTY_WORKER_MANIFESTS}
             workerManifestsError={props.workerManifestsError}
             workerManifestsLoading={props.workerManifestsLoading}
+            workers={workersByTarget.get(target.id) ?? []}
+            workersError={props.workersError}
+            workersLoading={props.workersLoading}
+            {...(props.onWorkersChanged ? { onWorkersChanged: props.onWorkersChanged } : {})}
           />
         );
       })}
@@ -252,8 +263,12 @@ function ExecutionTargetRow(props: {
   workerManifests: ReadonlyArray<ControlPlaneWorkerManifest>;
   workerManifestsLoading: boolean;
   workerManifestsError: unknown;
+  workers: ReadonlyArray<ControlPlaneWorker>;
+  workersLoading: boolean;
+  workersError: unknown;
   onUpdated: (targetId: string, status: ControlPlaneExecutionTarget["status"]) => void;
   onProviderPolicyUpdated: (target: ControlPlaneExecutionTarget) => void;
+  onWorkersChanged?: () => void;
 }) {
   return (
     <SettingsListRow
@@ -264,6 +279,7 @@ function ExecutionTargetRow(props: {
           <p>{`${props.scope} · ${props.target.kind}`}</p>
           <ExecutionTargetPolicyDisclosure
             canManage={props.canManage && props.target.tenantId !== null}
+            canManageWorkers={props.canManage}
             manifestError={props.workerManifestsError}
             manifestLoading={props.workerManifestsLoading}
             manifests={props.workerManifests}
@@ -271,6 +287,10 @@ function ExecutionTargetRow(props: {
             onProviderPolicyUpdated={props.onProviderPolicyUpdated}
             tenantId={props.tenantId}
             target={props.target}
+            workers={props.workers}
+            workersError={props.workersError}
+            workersLoading={props.workersLoading}
+            {...(props.onWorkersChanged ? { onWorkersChanged: props.onWorkersChanged } : {})}
           />
         </div>
       }
@@ -298,8 +318,13 @@ export function ExecutionTargetPolicyDisclosure(props: {
   manifestLoading?: boolean;
   manifestError?: unknown;
   canManage?: boolean;
+  canManageWorkers?: boolean;
   tenantId?: string;
   onProviderPolicyUpdated?: (target: ControlPlaneExecutionTarget) => void;
+  workers?: ReadonlyArray<ControlPlaneWorker>;
+  workersLoading?: boolean;
+  workersError?: unknown;
+  onWorkersChanged?: () => void;
 }) {
   const [open, setOpen] = useState(false);
   const experimentalProviders = readExperimentalProviders(props.target.capabilities);
@@ -363,6 +388,19 @@ export function ExecutionTargetPolicyDisclosure(props: {
               manifests={props.releaseManifests ?? manifests}
               target={props.target}
               tenantId={props.tenantId}
+            />
+          ) : null}
+          {props.tenantId ? (
+            <ExecutionTargetWorkerManagement
+              canManage={props.canManageWorkers ?? false}
+              target={props.target}
+              tenantId={props.tenantId}
+              {...(props.workers ? { workers: props.workers } : {})}
+              {...(props.workersError !== undefined ? { workersError: props.workersError } : {})}
+              {...(props.workersLoading !== undefined
+                ? { workersLoading: props.workersLoading }
+                : {})}
+              {...(props.onWorkersChanged ? { onWorkersChanged: props.onWorkersChanged } : {})}
             />
           ) : null}
           {manifests.length > 0 ? (
@@ -637,6 +675,21 @@ function groupWorkerManifestsByTarget(
   }
   for (const [targetId, targetManifests] of grouped) {
     grouped.set(targetId, targetManifests.toSorted(compareWorkerManifestVariants));
+  }
+  return grouped;
+}
+
+function groupWorkersByTarget(
+  workers: ReadonlyArray<ControlPlaneWorker>,
+): ReadonlyMap<string, ReadonlyArray<ControlPlaneWorker>> {
+  const grouped = new Map<string, Array<ControlPlaneWorker>>();
+  for (const worker of workers) {
+    if (typeof worker.executionTargetId !== "string" || worker.executionTargetId.length === 0) {
+      continue;
+    }
+    const targetWorkers = grouped.get(worker.executionTargetId);
+    if (targetWorkers) targetWorkers.push(worker);
+    else grouped.set(worker.executionTargetId, [worker]);
   }
   return grouped;
 }

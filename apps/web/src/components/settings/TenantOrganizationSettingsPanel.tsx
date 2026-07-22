@@ -12,6 +12,7 @@ import { Button } from "~/components/ui/button";
 import { Input } from "~/components/ui/input";
 import { ProjectSessionSettingsSection } from "~/components/settings/ProjectSessionSettingsSection";
 import { ExecutionTargetSettingsSection } from "~/components/settings/ExecutionTargetSettingsSection";
+import { tenantWorkersQueryKey } from "~/components/settings/ExecutionTargetWorkerManagement";
 import { TenantQuotaSettingsSection } from "~/components/settings/TenantQuotaSettingsSection";
 import { TenantRetentionSettingsSection } from "~/components/settings/TenantRetentionSettingsSection";
 import { TenantAuditSettingsSection } from "~/components/settings/TenantAuditSettingsSection";
@@ -40,6 +41,7 @@ const settingsQueryKeys = {
     ["control-plane", "tenants", tenantId, "execution-targets"] as const,
   workerManifests: (tenantId: string | null) =>
     ["control-plane", "tenants", tenantId, "worker-manifests"] as const,
+  workers: tenantWorkersQueryKey,
 };
 
 function LoginPanel() {
@@ -254,6 +256,12 @@ function AuthenticatedTenantPanel() {
   const workerManifestsQuery = useQuery({
     queryKey: settingsQueryKeys.workerManifests(activeTenantId),
     queryFn: () => controlPlaneClient.listWorkerManifests(activeTenantId!),
+    enabled: activeTenantId !== null && canReadExecutionTargets,
+    retry: false,
+  });
+  const workersQuery = useQuery({
+    queryKey: settingsQueryKeys.workers(activeTenantId),
+    queryFn: () => controlPlaneClient.listWorkers(activeTenantId!),
     enabled: activeTenantId !== null && canReadExecutionTargets,
     retry: false,
   });
@@ -510,6 +518,19 @@ function AuthenticatedTenantPanel() {
               workerManifests={workerManifestsQuery.data?.items ?? []}
               workerManifestsError={workerManifestsQuery.error}
               workerManifestsLoading={workerManifestsQuery.isPending}
+              workers={workersQuery.data?.items ?? []}
+              workersError={workersQuery.error}
+              workersLoading={workersQuery.isPending}
+              onWorkersChanged={() =>
+                void Promise.all([
+                  queryClient.invalidateQueries({
+                    queryKey: settingsQueryKeys.workers(activeTenantId),
+                  }),
+                  queryClient.invalidateQueries({
+                    queryKey: settingsQueryKeys.workerManifests(activeTenantId),
+                  }),
+                ])
+              }
             />
           ) : null}
           <ProjectSessionSettingsSection

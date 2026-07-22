@@ -1,3 +1,4 @@
+import { ThreadId } from "@synara/contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
@@ -555,6 +556,10 @@ describe("controlPlaneClient", () => {
         runtimeMode: "approval-required",
         interactionMode: "plan",
       },
+      {
+        threadId: ThreadId.makeUnsafe("source-session"),
+        planId: "source-plan",
+      },
     );
 
     expect(page.lastSequence).toBe(23);
@@ -569,6 +574,10 @@ describe("controlPlaneClient", () => {
       inputText: "Continue",
       runtimeMode: "approval-required",
       interactionMode: "plan",
+      sourceProposedPlan: {
+        threadId: "source-session",
+        planId: "source-plan",
+      },
     });
   });
 
@@ -955,6 +964,124 @@ describe("controlPlaneClient", () => {
       "/v1/tenants/tenant%2Fone/worker-manifests",
       expect.objectContaining({ credentials: "include" }),
     );
+  });
+
+  it("lists tenant Workers and revokes the exact incarnation with CAS idempotency", async () => {
+    const fetchMock = vi
+      .fn<RequiredInitFetch>()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            items: [
+              {
+                id: "worker-1",
+                incarnation: 2,
+                instanceUid: "pod-uid-1",
+                executionTargetId: "target-1",
+                targetKind: "kubernetes",
+                clusterId: "cluster-a",
+                namespace: "synara-workers",
+                podName: "synara-exec-1-g2",
+                version: "0.6.0",
+                protocolVersion: 2,
+                currentManifestId: "manifest-1",
+                compatibilityStatus: "compatible",
+                compatibilityReason: null,
+                compatibilityCheckedAt: "2026-07-18T18:50:20.000Z",
+                workerReleaseRevisionId: "release-2",
+                workerReleaseChannel: "promoted",
+                workerReleaseStatus: "active",
+                workerReleaseReason: null,
+                workerReleaseCheckedAt: "2026-07-18T18:50:21.000Z",
+                leaseSupported: true,
+                fencingSupported: true,
+                status: "online",
+                administrativeStatus: "active",
+                registeredAt: "2026-07-18T18:49:19.000Z",
+                lastHeartbeatAt: "2026-07-18T18:50:19.000Z",
+              },
+            ],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            worker: {
+              id: "worker-1",
+              incarnation: 2,
+              instanceUid: "pod-uid-1",
+              executionTargetId: "target-1",
+              targetKind: "kubernetes",
+              clusterId: "cluster-a",
+              namespace: "synara-workers",
+              podName: "synara-exec-1-g2",
+              version: "0.6.0",
+              protocolVersion: 2,
+              compatibilityStatus: "compatible",
+              workerReleaseRevisionId: "release-2",
+              workerReleaseChannel: "promoted",
+              workerReleaseStatus: "active",
+              leaseSupported: true,
+              fencingSupported: true,
+              status: "online",
+              administrativeStatus: "revoked",
+              registeredAt: "2026-07-18T18:49:19.000Z",
+              lastHeartbeatAt: "2026-07-18T18:50:19.000Z",
+              revokedAt: "2026-07-18T18:55:19.000Z",
+              revocationReason: "Confirmed Worker identity compromise",
+            },
+            releasedExecutionLeases: 1,
+            recoveringExecutions: 1,
+            outcomeUnknownExecutions: 0,
+            checkpointUnconfirmedExecutions: 0,
+            requeuedWorkspaceCleanups: 1,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const workers = await controlPlaneClient.listWorkers("tenant/one");
+    const result = await controlPlaneClient.revokeWorker(
+      "tenant/one",
+      "worker-1",
+      {
+        expectedIncarnation: 2,
+        reason: "Confirmed Worker identity compromise",
+      },
+      { idempotencyKey: "worker-revoke-1" },
+    );
+
+    expect(workers.items[0]).toMatchObject({
+      id: "worker-1",
+      executionTargetId: "target-1",
+      incarnation: 2,
+      namespace: "synara-workers",
+      podName: "synara-exec-1-g2",
+      workerReleaseRevisionId: "release-2",
+      workerReleaseChannel: "promoted",
+      status: "online",
+      administrativeStatus: "active",
+    });
+    expect(result).toMatchObject({
+      worker: expect.objectContaining({
+        id: "worker-1",
+        administrativeStatus: "revoked",
+      }),
+      releasedExecutionLeases: 1,
+      recoveringExecutions: 1,
+      requeuedWorkspaceCleanups: 1,
+    });
+    expect(fetchMock.mock.calls[0]![0]).toBe("/v1/tenants/tenant%2Fone/workers");
+    expect(fetchMock.mock.calls[1]![0]).toBe("/v1/tenants/tenant%2Fone/workers/worker-1/revoke");
+    const revokeRequest = fetchMock.mock.calls[1]![1];
+    expect(new Headers(revokeRequest.headers).get("Idempotency-Key")).toBe("worker-revoke-1");
+    expect(JSON.parse(String(revokeRequest.body))).toEqual({
+      expectedIncarnation: 2,
+      reason: "Confirmed Worker identity compromise",
+    });
   });
 
   it("lists and transitions immutable Worker release revisions with CAS idempotency", async () => {

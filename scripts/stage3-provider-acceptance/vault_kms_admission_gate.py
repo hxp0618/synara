@@ -44,6 +44,7 @@ EXPECTED_VAULT_KEY_TYPE = "ecdsa-p256"
 EXPECTED_VAULT_KEY_AUTO_ROTATE_PERIOD_SECONDS = 0
 DEFAULT_VAULT_APPROLE_NAME = "synara-worker-release-signer"
 DEFAULT_VAULT_OPERATOR_APPROLE_NAME = "synara-vault-production-auditor"
+DEFAULT_VAULT_SNAPSHOT_APPROLE_NAME = "synara-vault-snapshot-operator"
 DEFAULT_VAULT_SELECTOR = "app.kubernetes.io/name=vault"
 DEFAULT_VAULT_OPERATOR_TOKEN_ENV = "VAULT_OPERATOR_TOKEN"
 DEFAULT_REGISTRY_CA_ENV = "REGISTRY_CA_CERT"
@@ -199,6 +200,25 @@ OPERATOR_ROLE_CONSTRAINTS = {
     "secret_id_ttl": 10 * 60,
     "secret_id_num_uses": 1,
 }
+SNAPSHOT_ROLE_CONSTRAINTS = dict(OPERATOR_ROLE_CONSTRAINTS)
+
+
+def _operations_policy_role_contract(
+    policy_name: str,
+    constraints: Mapping[str, int],
+) -> dict[str, Any]:
+    return {
+        "bindSecretId": True,
+        "tokenPolicies": [policy_name],
+        "tokenType": "batch",
+        "tokenTtlSeconds": constraints["token_ttl"],
+        "tokenMaxTtlSeconds": constraints["token_max_ttl"],
+        "tokenNumUses": constraints["token_num_uses"],
+        "secretIdTtlSeconds": constraints["secret_id_ttl"],
+        "secretIdNumUses": constraints["secret_id_num_uses"],
+        "tokenNoDefaultPolicy": True,
+        "orphanRequired": True,
+    }
 
 ReleaseGateError = common.ReleaseGateError
 
@@ -2065,6 +2085,21 @@ def _load_vault_baseline(repo_root: pathlib.Path) -> dict[str, Any]:
         if isinstance(vault_operations_policy, dict)
         else None
     )
+    signer_role_policy = (
+        vault_operations_policy.get("signerRole")
+        if isinstance(vault_operations_policy, dict)
+        else None
+    )
+    auditor_role_policy = (
+        vault_operations_policy.get("auditorRole")
+        if isinstance(vault_operations_policy, dict)
+        else None
+    )
+    snapshot_role_policy = (
+        vault_operations_policy.get("snapshotOperatorRole")
+        if isinstance(vault_operations_policy, dict)
+        else None
+    )
     local_rotation_policy = (
         audit_policy.get("localRotation") if isinstance(audit_policy, dict) else None
     )
@@ -2296,6 +2331,24 @@ def _load_vault_baseline(repo_root: pathlib.Path) -> dict[str, Any]:
         and isinstance(vault_operations_policy, dict)
         and isinstance(custody_policy, dict)
         and vault_operations_policy.get("transitKeyName") == EXPECTED_VAULT_KEY_NAME
+        and vault_operations_policy.get("signerAppRoleName") == DEFAULT_VAULT_APPROLE_NAME
+        and vault_operations_policy.get("signerPolicyName") == VAULT_SIGNER_POLICY_NAME
+        and signer_role_policy
+        == _operations_policy_role_contract(VAULT_SIGNER_POLICY_NAME, SIGNER_ROLE_CONSTRAINTS)
+        and vault_operations_policy.get("auditorAppRoleName")
+        == DEFAULT_VAULT_OPERATOR_APPROLE_NAME
+        and vault_operations_policy.get("auditorPolicyName") == VAULT_OPERATOR_POLICY_NAME
+        and auditor_role_policy
+        == _operations_policy_role_contract(VAULT_OPERATOR_POLICY_NAME, OPERATOR_ROLE_CONSTRAINTS)
+        and vault_operations_policy.get("snapshotOperatorAppRoleName")
+        == DEFAULT_VAULT_SNAPSHOT_APPROLE_NAME
+        and vault_operations_policy.get("snapshotOperatorPolicyName")
+        == DEFAULT_VAULT_SNAPSHOT_APPROLE_NAME
+        and snapshot_role_policy
+        == _operations_policy_role_contract(
+            DEFAULT_VAULT_SNAPSHOT_APPROLE_NAME,
+            SNAPSHOT_ROLE_CONSTRAINTS,
+        )
         and transit_key_policy
         == {
             "type": EXPECTED_VAULT_KEY_TYPE,
@@ -5473,12 +5526,20 @@ def _probe_pod_spec(
     restart_policy: str | None,
 ) -> dict[str, Any]:
     spec: dict[str, Any] = {
+        "securityContext": {
+            "runAsNonRoot": True,
+            "seccompProfile": {"type": "RuntimeDefault"},
+        },
         "containers": [
             {
                 "name": "worker",
                 "image": image,
                 "command": ["sh", "-c", "exit 0"],
                 "imagePullPolicy": "Always",
+                "securityContext": {
+                    "allowPrivilegeEscalation": False,
+                    "capabilities": {"drop": ["ALL"]},
+                },
             }
         ]
     }

@@ -125,6 +125,16 @@ function recordValue(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
+function sourceProposedPlan(
+  event: ControlPlaneSessionEvent,
+): OrchestrationLatestTurn["sourceProposedPlan"] | undefined {
+  const reference = recordValue(event.payload.sourceProposedPlan);
+  if (!reference) return undefined;
+  const threadId = recordString(reference, "threadId");
+  const planId = recordString(reference, "planId");
+  return threadId && planId ? { threadId: ThreadId.makeUnsafe(threadId), planId } : undefined;
+}
+
 function terminalData(event: ControlPlaneSessionEvent): Record<string, unknown> | null {
   return recordValue(recordValue(event.payload.data)?.terminal);
 }
@@ -513,6 +523,7 @@ export function applyControlPlaneSessionEvent(
       const rawTurnId = payloadString(event, "turnId");
       const inputText = payloadString(event, "inputText") ?? "";
       const turnKind = eventTurnKind(event);
+      const proposedPlanSource = sourceProposedPlan(event);
       if (rawTurnId) {
         const createdTurnId = TurnId.makeUnsafe(rawTurnId);
         const executionId = event.executionId ?? payloadString(event, "executionId");
@@ -541,6 +552,7 @@ export function applyControlPlaneSessionEvent(
           startedAt: null,
           completedAt: null,
           assistantMessageId: null,
+          ...(proposedPlanSource ? { sourceProposedPlan: proposedPlanSource } : {}),
         };
         latestTurnKind = turnKind;
       }

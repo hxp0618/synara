@@ -494,6 +494,78 @@ class VaultAuditSiemDeliveryGateTest(unittest.TestCase):
             )
         return policy, options, redactor, secret_inputs
 
+    def test_operations_policy_pins_independent_writer_and_verifier_policies(self) -> None:
+        policy = gate.load_operations_policy(POLICY_PATH)
+
+        self.assertEqual(
+            policy.object_lock_credential_policy_path.name,
+            "audit-object-lock-writer-policy.json",
+        )
+        self.assertEqual(
+            policy.object_lock_verifier_credential_policy_path.name,
+            "audit-object-lock-verifier-policy.json",
+        )
+        self.assertRegex(policy.object_lock_credential_policy_sha256, r"^[0-9a-f]{64}$")
+        self.assertRegex(
+            policy.object_lock_verifier_credential_policy_sha256,
+            r"^[0-9a-f]{64}$",
+        )
+        self.assertNotEqual(
+            policy.object_lock_credential_policy_sha256,
+            policy.object_lock_verifier_credential_policy_sha256,
+        )
+
+    def test_operations_policy_rejects_verifier_policy_contract_drift(self) -> None:
+        cases = ("missing-field", "missing-file", "bucket-drift", "action-drift")
+        for case in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as directory:
+                root = pathlib.Path(directory)
+                vault_dir = root / "deploy" / "kubernetes" / "security" / "vault"
+                vault_dir.mkdir(parents=True)
+                operations_policy = json.loads(POLICY_PATH.read_text(encoding="utf-8"))
+                writer_policy = json.loads(
+                    (
+                        REPO_ROOT
+                        / "deploy/kubernetes/security/vault/audit-object-lock-writer-policy.json"
+                    ).read_text(encoding="utf-8")
+                )
+                verifier_policy = json.loads(
+                    (
+                        REPO_ROOT
+                        / "deploy/kubernetes/security/vault/audit-object-lock-verifier-policy.json"
+                    ).read_text(encoding="utf-8")
+                )
+                if case == "missing-field":
+                    del operations_policy["audit"]["externalSiem"]["objectLock"][
+                        "verifierCredentialPolicyPath"
+                    ]
+                elif case == "bucket-drift":
+                    verifier_policy["Statement"][0]["Resource"] = (
+                        "arn:aws:s3:::other-audit-bucket"
+                    )
+                elif case == "action-drift":
+                    verifier_policy["Statement"][1]["Action"].append("s3:PutObject")
+                policy_path = vault_dir / "operations-policy.json"
+                policy_path.write_text(json.dumps(operations_policy), encoding="utf-8")
+                (vault_dir / "audit-object-lock-writer-policy.json").write_text(
+                    json.dumps(writer_policy),
+                    encoding="utf-8",
+                )
+                if case != "missing-file":
+                    (vault_dir / "audit-object-lock-verifier-policy.json").write_text(
+                        json.dumps(verifier_policy),
+                        encoding="utf-8",
+                    )
+
+                with self.assertRaises(common.ReleaseGateError) as caught:
+                    gate.load_operations_policy(policy_path)
+
+                self.assertEqual(
+                    caught.exception.code,
+                    "release.vault_audit_siem_policy_invalid",
+                )
+                self.assertIn("verifierCredentialPolicyPath", caught.exception.message)
+
     def _run_gate(
         self,
         request_id: str,
@@ -602,6 +674,10 @@ class VaultAuditSiemDeliveryGateTest(unittest.TestCase):
         self.assertTrue(report["sink"]["objectLock"]["shortenRetentionBlocked"])
         self.assertEqual(report["sink"]["objectLock"]["shortenRetentionDenialKind"], "object_lock")
         self.assertEqual(report["runtime"]["status"], "observed")
+        self.assertRegex(
+            report["policy"]["objectLock"]["verifierCredentialPolicySha256"],
+            r"^[0-9a-f]{64}$",
+        )
         self.assertEqual(report["cleanup"]["removedFileCount"], 4)
         self.assertTrue(report["cleanup"]["stateDirEmpty"])
         self.assertEqual(report["security"]["outputSecretScan"]["status"], "pass")

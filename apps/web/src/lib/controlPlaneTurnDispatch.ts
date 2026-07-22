@@ -1,4 +1,15 @@
-import type { ProviderInteractionMode, ProviderKind, RuntimeMode } from "@synara/contracts";
+import type {
+  OrchestrationLatestTurn,
+  ProviderInteractionMode,
+  ProviderKind,
+  RuntimeMode,
+} from "@synara/contracts";
+
+import { randomUUID } from "./utils";
+
+export type ControlPlaneSourceProposedPlan = NonNullable<
+  OrchestrationLatestTurn["sourceProposedPlan"]
+>;
 
 export type ControlPlaneTurnDispatchInput = {
   draftThreadId: string;
@@ -10,6 +21,7 @@ export type ControlPlaneTurnDispatchInput = {
   inputText: string;
   runtimeMode: RuntimeMode;
   interactionMode: ProviderInteractionMode;
+  sourceProposedPlan?: ControlPlaneSourceProposedPlan;
   createSession: (input: {
     projectId: string;
     title: string;
@@ -22,13 +34,25 @@ export type ControlPlaneTurnDispatchInput = {
     inputText: string;
     runtimeMode: RuntimeMode;
     interactionMode: ProviderInteractionMode;
+    sourceProposedPlan?: ControlPlaneSourceProposedPlan;
     idempotencyKey: string;
-  }) => Promise<unknown>;
+  }) => Promise<{ id: string }>;
+  onSessionResolved?: (input: {
+    sessionId: string;
+    createdSession: boolean;
+  }) => Promise<void> | void;
 };
 
 export type ControlPlaneTurnDispatchResult = {
   sessionId: string;
   createdSession: boolean;
+  turnId: string;
+};
+
+type PendingControlPlaneModelSwitch = {
+  sessionId: string;
+  targetModel: string;
+  idempotencyKey: string;
 };
 
 export class ControlPlaneTurnDispatcher {
@@ -61,21 +85,65 @@ export class ControlPlaneTurnDispatcher {
       this.#draftSessionIds.set(input.draftThreadId, sessionId);
     }
 
-    const turnRequestKey = `${sessionId}\u0000${input.runtimeMode}\u0000${input.interactionMode}\u0000${input.inputText}`;
+    if (sessionId !== input.persistedSessionId) {
+      await input.onSessionResolved?.({ sessionId, createdSession });
+    }
+
+    const sourceKey = input.sourceProposedPlan
+      ? `${input.sourceProposedPlan.threadId}\u0000${input.sourceProposedPlan.planId}`
+      : "";
+    const turnRequestKey = `${sessionId}\u0000${input.runtimeMode}\u0000${input.interactionMode}\u0000${sourceKey}\u0000${input.inputText}`;
     const turnIdempotencyKey =
       this.#turnKeys.get(turnRequestKey) ?? `web-turn-${this.#randomUUID()}`;
     this.#turnKeys.set(turnRequestKey, turnIdempotencyKey);
-    await input.createTurn({
+    const turn = await input.createTurn({
       sessionId,
       inputText: input.inputText,
       runtimeMode: input.runtimeMode,
       interactionMode: input.interactionMode,
+      ...(input.sourceProposedPlan ? { sourceProposedPlan: input.sourceProposedPlan } : {}),
       idempotencyKey: turnIdempotencyKey,
     });
 
     this.#turnKeys.delete(turnRequestKey);
     this.#draftSessionIds.delete(input.draftThreadId);
     this.#sessionCreateKeys.delete(input.draftThreadId);
-    return { sessionId, createdSession };
+    return { sessionId, createdSession, turnId: turn.id };
   }
+}
+
+let sharedControlPlaneTurnDispatcher = new ControlPlaneTurnDispatcher(randomUUID);
+let sharedPendingControlPlaneModelSwitches = new Map<string, PendingControlPlaneModelSwitch>();
+
+export function dispatchControlPlaneTurn(
+  input: ControlPlaneTurnDispatchInput,
+): Promise<ControlPlaneTurnDispatchResult> {
+  return sharedControlPlaneTurnDispatcher.dispatch(input);
+}
+
+export function reserveSharedControlPlaneModelSwitchIdempotencyKey(input: {
+  draftThreadId: string;
+  sessionId: string;
+  targetModel: string;
+}): string {
+  const existing = sharedPendingControlPlaneModelSwitches.get(input.draftThreadId);
+  if (existing?.sessionId === input.sessionId && existing.targetModel === input.targetModel) {
+    return existing.idempotencyKey;
+  }
+  const idempotencyKey = `web-model-switch-${randomUUID()}`;
+  sharedPendingControlPlaneModelSwitches.set(input.draftThreadId, {
+    sessionId: input.sessionId,
+    targetModel: input.targetModel,
+    idempotencyKey,
+  });
+  return idempotencyKey;
+}
+
+export function clearSharedControlPlaneModelSwitchIdempotencyKey(draftThreadId: string): void {
+  sharedPendingControlPlaneModelSwitches.delete(draftThreadId);
+}
+
+export function resetSharedControlPlaneTurnDispatcherForTests(): void {
+  sharedControlPlaneTurnDispatcher = new ControlPlaneTurnDispatcher(randomUUID);
+  sharedPendingControlPlaneModelSwitches = new Map();
 }

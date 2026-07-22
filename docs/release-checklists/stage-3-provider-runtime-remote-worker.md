@@ -150,7 +150,37 @@ python3 scripts/stage3-provider-acceptance/vault_kms_admission_gate.py \
 python3 scripts/stage3-provider-acceptance/vault_snapshot_restore_drill.py \
   --vault-bin "$SYNARA_STAGE3_KMS_RUNTIME/bin/vault-kubectl-active" \
   --output-dir /tmp/synara-worker-vault-snapshot-restore
+
+# Start in a separate operator-owned terminal before the formal SIEM gate.
+python3 scripts/stage3-provider-acceptance/vault_audit_acceptance_sink.py \
+  --bind-host 0.0.0.0 \
+  --port 18443 \
+  --state-dir /secure/synara-vault-audit-state \
+  --server-cert /secure/synara-vault-audit-tls/server.crt \
+  --server-key /secure/synara-vault-audit-tls/server.key \
+  --client-ca-cert /secure/synara-vault-audit-tls/ca.crt \
+  --retention-days 365 \
+  --object-lock-required
+
+python3 scripts/stage3-provider-acceptance/vault_audit_siem_delivery_gate.py \
+  --vault-command-json "[\"$SYNARA_STAGE3_KMS_RUNTIME/bin/vault-kubectl-active\"]" \
+  --vault-auditor-token-env VAULT_OPERATOR_TOKEN \
+  --kube-context kind-synara-stage3-prod \
+  --vault-namespace synara-kms \
+  --vault-statefulset synara-vault \
+  --output-dir /tmp/synara-stage3-vault-audit-siem
 ```
+
+The audit/SIEM gate consumes only the named inputs `VAULT_ADDR`, `VAULT_CACERT`,
+`VAULT_OPERATOR_TOKEN`, `VAULT_AUDIT_SIEM_ENDPOINT`,
+`VAULT_AUDIT_SIEM_RESOLVE`, `VAULT_AUDIT_SIEM_CLIENT_CERT`,
+`VAULT_AUDIT_SIEM_CLIENT_KEY`, `VAULT_AUDIT_SIEM_CA_CERT`,
+`VAULT_AUDIT_WORM_MC_ALIAS`, `VAULT_AUDIT_WORM_MC_CONFIG_DIR`,
+`VAULT_AUDIT_WORM_MC_HOST`, `VAULT_AUDIT_WORM_MC_VERIFIER_HOST`, and
+`VAULT_AUDIT_WORM_MC_RESOLVE`. Its required retained artifacts are
+`vault-audit-siem-delivery-gate.json` and
+`vault-audit-siem-delivery-gate.md`; neither report may contain a value from
+those environments.
 
 生产 KMS pin 固定为自建 HashiCorp Vault Transit on Kubernetes：Helm chart `hashicorp/vault` `0.34.0`、
 release `synara-vault`、namespace `synara-kms` 和 image
@@ -190,6 +220,12 @@ Registry runtime 必须精确使用
 一律 fail closed。Vault `lookup-self` 还必须证明 signer token 来自
 `synara-worker-release-signer` AppRole、类型为 `batch`、`orphan=true` 且只含该 signer policy；报告仅保留
 这些安全字段和 policy-list SHA256，不保留 token 或 Credential 值。
+Signer AppRole 还必须与 `operations-policy.json` 的精确合同一致：bound
+Secret ID、`batch` orphan token、仅 `synara-worker-release-signer` policy、
+`token_no_default_policy=true`、token TTL/max TTL `7200s/14400s`、Secret ID
+TTL/uses `600s/1`。Auditor 和 snapshot-operator 同样为单 policy、bound
+single-use Secret ID、`batch` orphan、no-default-policy，token TTL/max TTL
+固定 `1800s/3600s`。任一放宽都阻断发布。
 
 最新 clean-SHA signing-policy/disposable Registry slice 已在 commit `7659dd5f` 通过，证据见
 `docs/reports/stage-3-worker-registry-signing-policy-7659dd5f.md`；较早 supply-chain 与仅覆盖 reproducibility
@@ -237,7 +273,8 @@ clean-commit 证据；生产 Registry、生产签名身份、Credential、retent
 - [ ] audit PVC rotation 与外部 SIEM retained sink 已按
       `operations-policy.json` / `vault-kms-operations.md` 落地；正式 gate 必须直接验证外部 bucket
       versioning、365 天 `COMPLIANCE` Object Lock、exact audit batch/version/content hash，并证明 delete 与
-      retention-shortening 均被存储层拒绝。仅有本地 hash-chain 或 DELETE API 405 不得勾选此项。
+      retention-shortening 均被存储层拒绝；报告同时固定 writer/verifier 两份 IAM policy 的 repository path
+      和 SHA-256。仅有本地 hash-chain 或 DELETE API 405 不得勾选此项。
 - [ ] Worker 使用非 Root 用户，Workspace、Git Cache 和 Runtime Output Root 权限正确。
 - [ ] 没有在镜像、Layer、Build Arg、Environment 或 Manifest 中写入 Credential。
 - [ ] 私有 Registry 使用 Tenant/Organization-scoped Registry Credential 和 Target-scoped
@@ -335,6 +372,21 @@ python3 scripts/stage3-provider-acceptance/kubernetes_real_provider_release_roll
   --timeout 5400 \
   --output-dir /tmp/synara-kubernetes-real-provider-claude-rollout
 ```
+
+For Stage 3, these two commands are also the explicit production-duration soak
+gate. Concurrency is resource-governed, not an unbounded request count: two
+worker nodes, one active execution slot per Worker, Tenant concurrency `2`, and
+four Sessions continuously exercise quota rejection and slot reuse. Each
+Worker is pinned to `requests cpu=100m/memory=128Mi/ephemeral=128Mi`,
+`limits cpu=1/memory=1Gi/ephemeral=2Gi`, and a `1Gi` Workspace; the namespace
+quota is `requests cpu=1/memory=1Gi`, `limits cpu=2/memory=2Gi`, and `4Gi`
+ephemeral storage. Both candidate and rollback phases must independently meet
+the checked-in `1800s` minimum plus P95/P99 admission limits and zero unexpected
+errors from `deploy/worker/production-load-sla.json`. A pass therefore requires
+at least `3600s` load per Provider and produces
+`kubernetes-real-provider-worker-release-rollout-gate.json` plus the matching
+Markdown report. A shorter smoke, more client concurrency without more
+resources, or a report missing either phase cannot close production soak.
 
 默认 6 个 nominal waves 在 candidate promotion 与 baseline rollback 间拆为 `3 + 3` 的最低波数；两个 phase
 各自还必须达到 `minimumDurationSeconds: 1800`，不足时继续完整 wave，因此 load 部分最低约 60 分钟，另加
