@@ -184,6 +184,8 @@ FIXTURE_RETENTION_AGE_DAYS = 2
 KUBERNETES_CLEANUP_MAX_ATTEMPTS = 3
 KUBERNETES_CLEANUP_RETRY_DELAYS_SECONDS = (1.0, 2.0)
 KIND_CLEANUP_ATTEMPT_TIMEOUT_SECONDS = 150.0
+KUBERNETES_TOKEN_CLEANUP_RESERVE_SECONDS = 600.0
+KUBERNETES_TOKEN_EXPIRATION_TOLERANCE_SECONDS = 5.0
 SUITES = (
     "fixture",
     "fixture-soak",
@@ -8176,6 +8178,13 @@ class KubernetesDriver(ManagedWorkerDriver):
             ],
         }
         self._kubectl_command(["apply", "-f", "-"], input_text=json.dumps(manifest))
+        requested_token_duration_seconds = max(
+            1,
+            math.ceil(
+                self.deadline.remaining()
+                + KUBERNETES_TOKEN_CLEANUP_RESERVE_SECONDS
+            ),
+        )
         completed = self._kubectl_completed(
             [
                 "-n",
@@ -8183,7 +8192,9 @@ class KubernetesDriver(ManagedWorkerDriver):
                 "create",
                 "token",
                 self.bootstrap_service_account,
-                "--duration=1h",
+                f"--duration={requested_token_duration_seconds}s",
+                "-o",
+                "json",
             ]
         )
         if completed.returncode != 0:
@@ -8192,11 +8203,72 @@ class KubernetesDriver(ManagedWorkerDriver):
                 "The disposable Kubernetes ServiceAccount token could not be created.",
                 {"outputExcerpt": self.redactor.text(completed.stdout)[-1000:]},
             )
-        token = completed.stdout.strip()
-        if not token:
-            raise AcceptanceError("runner.kubernetes_token_failed", "Kubernetes returned an empty token.")
-        self.kubernetes_token = token
+        try:
+            token_request = json.loads(completed.stdout)
+        except json.JSONDecodeError:
+            raise AcceptanceError(
+                "runner.kubernetes_token_response_invalid",
+                "Kubernetes returned an invalid ServiceAccount TokenRequest response.",
+            ) from None
+        token_status = json_object(
+            token_request.get("status") if isinstance(token_request, dict) else None,
+            "Kubernetes ServiceAccount TokenRequest status",
+        )
+        token = token_status.get("token")
+        if not isinstance(token, str) or not token:
+            raise AcceptanceError(
+                "runner.kubernetes_token_response_invalid",
+                "Kubernetes returned an empty ServiceAccount token.",
+            )
         self.redactor.add(token, "[REDACTED_KUBERNETES_TOKEN]")
+        expiration_timestamp = token_status.get("expirationTimestamp")
+        if not isinstance(expiration_timestamp, str) or not expiration_timestamp:
+            raise AcceptanceError(
+                "runner.kubernetes_token_response_invalid",
+                "Kubernetes omitted the ServiceAccount token expiration timestamp.",
+            )
+        try:
+            expiration = dt.datetime.fromisoformat(
+                expiration_timestamp.replace("Z", "+00:00")
+            )
+        except ValueError:
+            raise AcceptanceError(
+                "runner.kubernetes_token_response_invalid",
+                "Kubernetes returned an invalid ServiceAccount token expiration timestamp.",
+            ) from None
+        if expiration.tzinfo is None:
+            raise AcceptanceError(
+                "runner.kubernetes_token_response_invalid",
+                "Kubernetes returned a timezone-free ServiceAccount token expiration timestamp.",
+            )
+        expiration = expiration.astimezone(dt.timezone.utc)
+        now = dt.datetime.now(dt.timezone.utc)
+        required_coverage_seconds = (
+            self.deadline.remaining()
+            + KUBERNETES_TOKEN_CLEANUP_RESERVE_SECONDS
+        )
+        granted_remaining_seconds = (expiration - now).total_seconds()
+        if (
+            granted_remaining_seconds
+            + KUBERNETES_TOKEN_EXPIRATION_TOLERANCE_SECONDS
+            < required_coverage_seconds
+        ):
+            raise AcceptanceError(
+                "runner.kubernetes_token_lifetime_insufficient",
+                "The Kubernetes ServiceAccount token does not cover the acceptance deadline and cleanup reserve.",
+                {
+                    "requestedDurationSeconds": requested_token_duration_seconds,
+                    "requiredCoverageSeconds": math.ceil(required_coverage_seconds),
+                    "grantedRemainingSeconds": max(
+                        0,
+                        math.floor(granted_remaining_seconds),
+                    ),
+                    "cleanupReserveSeconds": (
+                        KUBERNETES_TOKEN_CLEANUP_RESERVE_SECONDS
+                    ),
+                },
+            )
+        self.kubernetes_token = token
         config = json.loads(
             self._kubectl_command(["config", "view", "--raw", "--minify", "--context", self.context, "-o", "json"])
         )
@@ -8230,6 +8302,19 @@ class KubernetesDriver(ManagedWorkerDriver):
             "serviceAccount": self.bootstrap_service_account,
             "rbacScope": "cluster-wide disposable acceptance role",
             "ownershipLabels": ownership_labels,
+            "serviceAccountToken": {
+                "requestedDurationSeconds": requested_token_duration_seconds,
+                "requiredCoverageSeconds": math.ceil(required_coverage_seconds),
+                "grantedRemainingSeconds": math.floor(
+                    granted_remaining_seconds
+                ),
+                "cleanupReserveSeconds": KUBERNETES_TOKEN_CLEANUP_RESERVE_SECONDS,
+                "expirationTimestamp": expiration.isoformat(
+                    timespec="seconds"
+                ).replace("+00:00", "Z"),
+                "expirationVerified": True,
+                "tokenPersistedInEvidence": False,
+            },
         }
 
     def _ownership_labels(self) -> dict[str, str]:

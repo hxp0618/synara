@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import base64
 import dataclasses
+import datetime as dt
 import hashlib
 import io
 import json
@@ -8970,8 +8971,20 @@ class KubernetesDriverObservationTest(unittest.TestCase):
                 ]
             }
         )
+        expiration = (
+            dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=1)
+        ).isoformat(timespec="seconds").replace("+00:00", "Z")
+        token_request = json.dumps(
+            {
+                "status": {
+                    "token": "fixture-token",
+                    "expirationTimestamp": expiration,
+                }
+            }
+        )
 
         with (
+            mock.patch.object(driver.deadline, "remaining", return_value=30.0),
             mock.patch.object(
                 driver,
                 "_kubectl_command",
@@ -8980,14 +8993,90 @@ class KubernetesDriverObservationTest(unittest.TestCase):
             mock.patch.object(
                 driver,
                 "_kubectl_completed",
-                return_value=subprocess.CompletedProcess(["kubectl"], 0, stdout="fixture-token\n"),
-            ),
+                return_value=subprocess.CompletedProcess(
+                    ["kubectl"],
+                    0,
+                    stdout=token_request,
+                ),
+            ) as token_command,
         ):
             evidence = driver._prepare_cluster_access()
 
         self.assertEqual(driver.api_server, "https://127.0.0.1:26443")
         self.assertEqual(driver.ca_certificate, "fixture-ca")
         self.assertEqual(evidence["apiServerHost"], "127.0.0.1:26443")
+        self.assertEqual(
+            token_command.call_args.args[0],
+            [
+                "-n",
+                driver.bootstrap_namespace,
+                "create",
+                "token",
+                driver.bootstrap_service_account,
+                "--duration=630s",
+                "-o",
+                "json",
+            ],
+        )
+        self.assertTrue(evidence["serviceAccountToken"]["expirationVerified"])
+        self.assertFalse(evidence["serviceAccountToken"]["tokenPersistedInEvidence"])
+        self.assertNotIn("fixture-token", json.dumps(evidence))
+
+    def test_cluster_access_rejects_token_that_expires_before_gate_cleanup(self) -> None:
+        options = dataclasses.replace(
+            runner_options(),
+            target="kubernetes",
+            kubernetes_context="orbstack",
+            kubernetes_allow_nondisposable=True,
+        )
+        driver = acceptance.KubernetesDriver(
+            pathlib.Path.cwd(),
+            options,
+            acceptance.Deadline(6000.0),
+            acceptance.SecretRedactor(),
+        )
+        self.addCleanup(driver._release_state)
+        expiration = (
+            dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=1)
+        ).isoformat(timespec="seconds").replace("+00:00", "Z")
+        token_request = json.dumps(
+            {
+                "status": {
+                    "token": "fixture-short-lived-token",
+                    "expirationTimestamp": expiration,
+                }
+            }
+        )
+
+        with (
+            mock.patch.object(driver.deadline, "remaining", return_value=5400.0),
+            mock.patch.object(driver, "_kubectl_command", return_value=""),
+            mock.patch.object(
+                driver,
+                "_kubectl_completed",
+                return_value=subprocess.CompletedProcess(
+                    ["kubectl"],
+                    0,
+                    stdout=token_request,
+                ),
+            ) as token_command,
+        ):
+            with self.assertRaises(acceptance.AcceptanceError) as caught:
+                driver._prepare_cluster_access()
+
+        self.assertEqual(
+            caught.exception.code,
+            "runner.kubernetes_token_lifetime_insufficient",
+        )
+        self.assertEqual(
+            token_command.call_args.args[0][-3:],
+            ["--duration=6000s", "-o", "json"],
+        )
+        self.assertEqual(driver.kubernetes_token, "")
+        self.assertNotIn(
+            "fixture-short-lived-token",
+            json.dumps(caught.exception.evidence),
+        )
 
     def test_kubectl_uses_explicit_api_route_without_mutating_kubeconfig(self) -> None:
         options = dataclasses.replace(
