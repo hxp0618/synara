@@ -151,7 +151,23 @@ python3 scripts/stage3-provider-acceptance/vault_snapshot_restore_drill.py \
   --vault-bin "$SYNARA_STAGE3_KMS_RUNTIME/bin/vault-kubectl-active" \
   --output-dir /tmp/synara-worker-vault-snapshot-restore
 
-# Start in a separate operator-owned terminal before the formal SIEM gate.
+# Formal audit SIEM/WORM gate inputs. Keep values outside the repository and shell history;
+# only the environment variable names may appear in reports. The three TLS variables below
+# carry PEM contents, not file paths. The endpoint must be a bare `https://host:port`
+# authority with no path or embedded credentials. The two mc host variables are
+# credentialed HTTPS authorities for distinct writer and verifier identities.
+export VAULT_AUDIT_SIEM_ENDPOINT="$(< /secure/synara-vault-audit-siem/endpoint.txt)"
+export VAULT_AUDIT_SIEM_RESOLVE="$(< /secure/synara-vault-audit-siem/resolve.txt)"
+export VAULT_AUDIT_SIEM_CLIENT_CERT="$(< /secure/synara-vault-audit-tls/client.crt)"
+export VAULT_AUDIT_SIEM_CLIENT_KEY="$(< /secure/synara-vault-audit-tls/client.key)"
+export VAULT_AUDIT_SIEM_CA_CERT="$(< /secure/synara-vault-audit-tls/ca.crt)"
+export VAULT_AUDIT_WORM_MC_ALIAS=synara-vault-audit
+export VAULT_AUDIT_WORM_MC_CONFIG_DIR=/secure/synara-vault-audit-mc
+export VAULT_AUDIT_WORM_MC_HOST="$(< /secure/synara-vault-audit-mc/writer-host.txt)"
+export VAULT_AUDIT_WORM_MC_VERIFIER_HOST="$(< /secure/synara-vault-audit-mc/verifier-host.txt)"
+export VAULT_AUDIT_WORM_MC_RESOLVE="$(< /secure/synara-vault-audit-mc/resolve.txt)"
+
+# Start the acceptance sink in a separate operator-owned terminal before the formal SIEM gate.
 python3 scripts/stage3-provider-acceptance/vault_audit_acceptance_sink.py \
   --bind-host 0.0.0.0 \
   --port 18443 \
@@ -160,15 +176,29 @@ python3 scripts/stage3-provider-acceptance/vault_audit_acceptance_sink.py \
   --server-key /secure/synara-vault-audit-tls/server.key \
   --client-ca-cert /secure/synara-vault-audit-tls/ca.crt \
   --retention-days 365 \
-  --object-lock-required
+  --object-lock-required \
+  --object-lock-mc-alias-env VAULT_AUDIT_WORM_MC_ALIAS \
+  --object-lock-mc-config-dir-env VAULT_AUDIT_WORM_MC_CONFIG_DIR \
+  --object-lock-mc-host-env VAULT_AUDIT_WORM_MC_HOST \
+  --object-lock-mc-resolve-env VAULT_AUDIT_WORM_MC_RESOLVE \
+  --object-lock-bucket synara-vault-audit \
+  --object-lock-prefix entries
 
 python3 scripts/stage3-provider-acceptance/vault_audit_siem_delivery_gate.py \
+  --operations-policy deploy/kubernetes/security/vault/operations-policy.json \
   --vault-command-json "[\"$SYNARA_STAGE3_KMS_RUNTIME/bin/vault-kubectl-active\"]" \
   --vault-auditor-token-env VAULT_OPERATOR_TOKEN \
   --kube-context kind-synara-stage3-prod \
   --vault-namespace synara-kms \
   --vault-statefulset synara-vault \
+  --shipper-container vault-audit-shipper \
+  --timeout-seconds 60 \
+  --poll-interval-seconds 2 \
+  --mc-bin mc \
   --output-dir /tmp/synara-stage3-vault-audit-siem
+
+test -f /tmp/synara-stage3-vault-audit-siem/vault-audit-siem-delivery-gate.json
+test -f /tmp/synara-stage3-vault-audit-siem/vault-audit-siem-delivery-gate.md
 ```
 
 The audit/SIEM gate consumes only the named inputs `VAULT_ADDR`, `VAULT_CACERT`,

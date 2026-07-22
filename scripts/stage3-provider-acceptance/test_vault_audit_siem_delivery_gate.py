@@ -515,56 +515,104 @@ class VaultAuditSiemDeliveryGateTest(unittest.TestCase):
             policy.object_lock_verifier_credential_policy_sha256,
         )
 
-    def test_operations_policy_rejects_verifier_policy_contract_drift(self) -> None:
-        cases = ("missing-field", "missing-file", "bucket-drift", "action-drift")
-        for case in cases:
-            with self.subTest(case=case), tempfile.TemporaryDirectory() as directory:
-                root = pathlib.Path(directory)
-                vault_dir = root / "deploy" / "kubernetes" / "security" / "vault"
-                vault_dir.mkdir(parents=True)
-                operations_policy = json.loads(POLICY_PATH.read_text(encoding="utf-8"))
-                writer_policy = json.loads(
-                    (
-                        REPO_ROOT
-                        / "deploy/kubernetes/security/vault/audit-object-lock-writer-policy.json"
-                    ).read_text(encoding="utf-8")
-                )
-                verifier_policy = json.loads(
-                    (
-                        REPO_ROOT
-                        / "deploy/kubernetes/security/vault/audit-object-lock-verifier-policy.json"
-                    ).read_text(encoding="utf-8")
-                )
-                if case == "missing-field":
-                    del operations_policy["audit"]["externalSiem"]["objectLock"][
-                        "verifierCredentialPolicyPath"
-                    ]
-                elif case == "bucket-drift":
-                    verifier_policy["Statement"][0]["Resource"] = (
-                        "arn:aws:s3:::other-audit-bucket"
-                    )
-                elif case == "action-drift":
-                    verifier_policy["Statement"][1]["Action"].append("s3:PutObject")
-                policy_path = vault_dir / "operations-policy.json"
-                policy_path.write_text(json.dumps(operations_policy), encoding="utf-8")
-                (vault_dir / "audit-object-lock-writer-policy.json").write_text(
-                    json.dumps(writer_policy),
+    def _write_verifier_policy_fixture(
+        self,
+        root: pathlib.Path,
+    ) -> tuple[pathlib.Path, dict[str, Any], dict[str, Any], dict[str, Any], pathlib.Path]:
+        vault_dir = root / "deploy" / "kubernetes" / "security" / "vault"
+        vault_dir.mkdir(parents=True)
+        operations_policy = json.loads(POLICY_PATH.read_text(encoding="utf-8"))
+        writer_policy = json.loads(
+            (
+                REPO_ROOT / "deploy/kubernetes/security/vault/audit-object-lock-writer-policy.json"
+            ).read_text(encoding="utf-8")
+        )
+        verifier_policy = json.loads(
+            (
+                REPO_ROOT
+                / "deploy/kubernetes/security/vault/audit-object-lock-verifier-policy.json"
+            ).read_text(encoding="utf-8")
+        )
+        return (
+            vault_dir,
+            operations_policy,
+            writer_policy,
+            verifier_policy,
+            vault_dir / "operations-policy.json",
+        )
+
+    def _assert_verifier_policy_contract_invalid(
+        self,
+        *,
+        mutate_operations_policy: Callable[[dict[str, Any]], None] | None = None,
+        mutate_verifier_policy: Callable[[dict[str, Any]], None] | None = None,
+        write_verifier_policy: bool = True,
+        expected_message: str,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            (
+                vault_dir,
+                operations_policy,
+                writer_policy,
+                verifier_policy,
+                policy_path,
+            ) = self._write_verifier_policy_fixture(root)
+            if mutate_operations_policy is not None:
+                mutate_operations_policy(operations_policy)
+            if mutate_verifier_policy is not None:
+                mutate_verifier_policy(verifier_policy)
+            policy_path.write_text(json.dumps(operations_policy), encoding="utf-8")
+            (vault_dir / "audit-object-lock-writer-policy.json").write_text(
+                json.dumps(writer_policy),
+                encoding="utf-8",
+            )
+            if write_verifier_policy:
+                (vault_dir / "audit-object-lock-verifier-policy.json").write_text(
+                    json.dumps(verifier_policy),
                     encoding="utf-8",
                 )
-                if case != "missing-file":
-                    (vault_dir / "audit-object-lock-verifier-policy.json").write_text(
-                        json.dumps(verifier_policy),
-                        encoding="utf-8",
-                    )
 
-                with self.assertRaises(common.ReleaseGateError) as caught:
-                    gate.load_operations_policy(policy_path)
+            with self.assertRaises(common.ReleaseGateError) as caught:
+                gate.load_operations_policy(policy_path)
 
-                self.assertEqual(
-                    caught.exception.code,
-                    "release.vault_audit_siem_policy_invalid",
-                )
-                self.assertIn("verifierCredentialPolicyPath", caught.exception.message)
+        self.assertEqual(
+            caught.exception.code,
+            "release.vault_audit_siem_policy_invalid",
+        )
+        self.assertIn("verifierCredentialPolicyPath", caught.exception.message)
+        self.assertIn(expected_message, caught.exception.message)
+
+    def test_operations_policy_rejects_missing_verifier_policy_path(self) -> None:
+        self._assert_verifier_policy_contract_invalid(
+            mutate_operations_policy=lambda operations_policy: operations_policy["audit"][
+                "externalSiem"
+            ]["objectLock"].pop("verifierCredentialPolicyPath"),
+            expected_message="was not a non-empty string",
+        )
+
+    def test_operations_policy_rejects_missing_verifier_policy_file(self) -> None:
+        self._assert_verifier_policy_contract_invalid(
+            write_verifier_policy=False,
+            expected_message="file was unavailable or malformed",
+        )
+
+    def test_operations_policy_rejects_verifier_policy_bucket_drift(self) -> None:
+        self._assert_verifier_policy_contract_invalid(
+            mutate_verifier_policy=lambda verifier_policy: verifier_policy["Statement"][0].__setitem__(
+                "Resource",
+                "arn:aws:s3:::other-audit-bucket",
+            ),
+            expected_message="scoped bucket boundary",
+        )
+
+    def test_operations_policy_rejects_verifier_policy_action_allow_list_drift(self) -> None:
+        self._assert_verifier_policy_contract_invalid(
+            mutate_verifier_policy=lambda verifier_policy: verifier_policy["Statement"][1][
+                "Action"
+            ].append("s3:PutObject"),
+            expected_message="scoped bucket boundary",
+        )
 
     def _run_gate(
         self,

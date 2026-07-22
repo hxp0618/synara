@@ -407,6 +407,18 @@ it.layer(testLayer)("server CLI command", (it) => {
     }),
   );
 
+  it.effect("forwards the configured SaaS control plane URL to the server runtime", () =>
+    Effect.gen(function* () {
+      yield* runCli([], {
+        SYNARA_CONTROL_PLANE_URL: "http://127.0.0.1:58180",
+        SYNARA_NO_BROWSER: "true",
+      });
+
+      assert.equal(start.mock.calls.length, 1);
+      assert.equal(resolvedConfig?.controlPlaneUrl?.href, "http://127.0.0.1:58180/");
+    }),
+  );
+
   it.effect("issues pairing through an HTTPS public origin that proxies to loopback", () =>
     Effect.gen(function* () {
       yield* runCli(

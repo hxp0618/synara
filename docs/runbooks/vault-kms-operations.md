@@ -77,18 +77,18 @@ environment variable names and hashes only.
 
 ## AppRole production contract
 
-All three machine identities use bound Secret IDs, orphan `batch` tokens, an
-exact single policy, and `token_no_default_policy=true`. Secret IDs are valid
-for at most `600` seconds and exactly one login. The signer token TTL is
-`7200` seconds with a `14400` second maximum; the production auditor and
-snapshot operator each use `1800` seconds with a `3600` second maximum. Tokens
-are non-renewable batch credentials and may not inherit `default` or `root`.
+All three machine identities are literal AppRole contracts from
+`deploy/kubernetes/security/vault/operations-policy.json`. Every role must keep
+`bind_secret_id=true`, an exact single policy, `token_type=batch`,
+`token_no_default_policy=true`, and `orphan=true`. Secret IDs are valid for at
+most `600` seconds and exactly one login. Tokens are non-renewable batch
+credentials and may not inherit `default` or `root`.
 
-| Identity | Exact policy | Token TTL / max TTL | Secret ID TTL / uses |
-| --- | --- | --- | --- |
-| `auth/approle/role/synara-worker-release-signer` | `synara-worker-release-signer` | `7200s / 14400s` | `600s / 1` |
-| `auth/approle/role/synara-vault-production-auditor` | `synara-vault-production-auditor` | `1800s / 3600s` | `600s / 1` |
-| `auth/approle/role/synara-vault-snapshot-operator` | `synara-vault-snapshot-operator` | `1800s / 3600s` | `600s / 1` |
+| Identity                                            | Exact policy                      | `bind_secret_id` | `token_no_default_policy` | `orphanRequired` | Token TTL / max TTL | Secret ID TTL / uses |
+| --------------------------------------------------- | --------------------------------- | ---------------- | ------------------------- | ---------------- | ------------------- | -------------------- |
+| `auth/approle/role/synara-worker-release-signer`    | `synara-worker-release-signer`    | `true`           | `true`                    | `true`           | `7200s / 14400s`    | `600s / 1`           |
+| `auth/approle/role/synara-vault-production-auditor` | `synara-vault-production-auditor` | `true`           | `true`                    | `true`           | `1800s / 3600s`     | `600s / 1`           |
+| `auth/approle/role/synara-vault-snapshot-operator`  | `synara-vault-snapshot-operator`  | `true`           | `true`                    | `true`           | `1800s / 3600s`     | `600s / 1`           |
 
 `deploy/kubernetes/security/vault/operations-policy.json` is the non-secret
 contract. The bootstrap and live gates must match it exactly; increasing a TTL,
@@ -96,10 +96,13 @@ making a Secret ID reusable, changing token type, or adding a policy is a
 release-blocking drift.
 
 `VAULT_TOKEN` must resolve to the signer AppRole and `VAULT_OPERATOR_TOKEN`
-must resolve to the independent production-auditor AppRole. The KMS gate
-compares their safe identity hashes and fails if the two tokens resolve to the
-same identity. Neither token may be substituted for the snapshot operator or a
-root token.
+must resolve to the independent production-auditor AppRole. They are separate
+machine identities, not aliases for the same login. The KMS and audit gates
+compare their safe identity hashes and fail if the two variables resolve to the
+same principal, the same policy boundary, or a root token. `VAULT_TOKEN` is
+signing-only and must not satisfy the auditor role; `VAULT_OPERATOR_TOKEN` is
+auditor-only and must not satisfy the signer role. Neither token may be
+substituted for the snapshot operator.
 
 ## Short-lived operator credential session
 
@@ -138,6 +141,11 @@ The launcher emits a clean shell that exports:
 - `REGISTRY_PASSWORD`
 - `REGISTRY_CA_CERT`
 - `SYNARA_STAGE3_CREDENTIAL_SESSION=ready`
+
+That helper must mint `VAULT_TOKEN` and `VAULT_OPERATOR_TOKEN` through separate
+AppRole logins. Reusing a single Vault login, wrapping a root token into both
+variables, or widening either variable beyond its exact signer/auditor policy
+is release-blocking drift.
 
 The helper itself is operator-owned and not checked into this repository.
 Treat `SYNARA_STAGE3_KMS_RUNTIME` as the owner-only runtime directory that

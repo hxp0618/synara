@@ -254,6 +254,7 @@ const ServerConfigLive = (input: CliInput) =>
         allowInsecureRemote,
         noBrowser,
         authToken,
+        ...(controlPlaneUrl === undefined ? {} : { controlPlaneUrl }),
         autoBootstrapProjectFromCwd,
         logProviderEvents,
         logWebSocketEvents,
