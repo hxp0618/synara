@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import dataclasses
 import datetime as dt
+import fcntl
 import json
 import os
 import pathlib
 import re
+import stat
 import subprocess
 import sys
 import time
@@ -22,6 +25,13 @@ IMAGE_ACCEPTANCE_LABEL = "synara.io/stage3-provider-acceptance"
 IMAGE_GATE_LABEL = "synara.io/stage3-provider-release-gate"
 IMAGE_OWNER_LABEL = "synara.io/stage3-provider-acceptance-owner"
 IMAGE_TARGET_LABEL = "synara.io/stage3-provider-release-gate-target"
+CHECKPOINT_SCHEMA_VERSION = "synara.provider-remote-release-checkpoint.v1"
+CHILD_ATTESTATION_SCHEMA_VERSION = "synara.provider-remote-release-child-attestation.v1"
+CHECKPOINT_FILE_NAME = ".release-gate-checkpoint.json"
+CHILD_ATTESTATION_FILE_NAME = ".release-gate-attestation.json"
+LOCK_FILE_NAME = ".release-gate.lock"
+STAGING_DIRECTORY_NAME = ".release-gate-staging"
+ATTEMPT_DIRECTORY_NAME = ".release-gate-attempts"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -57,6 +67,9 @@ class RemoteReleaseTargetSpec:
     evidence_boundary: tuple[str, str]
     matrices: tuple[str, ...] = common.MATRICES
     runner_executable: str = "provider-host"
+    validate_reused_child_runtime: (
+        Callable[[Any, Mapping[str, Any]], Sequence[Mapping[str, Any]]] | None
+    ) = None
 
 
 ReleaseGateError = common.ReleaseGateError
@@ -188,6 +201,170 @@ def operator_environment_names(options: Any) -> tuple[str, ...]:
             }
         )
     )
+
+
+def resumable_requested(options: Any) -> bool:
+    return bool(getattr(options, "resume", False))
+
+
+def _fsync_directory(path: pathlib.Path) -> None:
+    descriptor = os.open(
+        path,
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+    )
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _fsync_file(path: pathlib.Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _durable_replace(source: pathlib.Path, destination: pathlib.Path) -> None:
+    source_parent = source.parent
+    destination_parent = destination.parent
+    os.replace(source, destination)
+    _fsync_directory(destination_parent)
+    if source_parent != destination_parent:
+        _fsync_directory(source_parent)
+
+
+def _reject_symlink_components(
+    root: pathlib.Path,
+    path: pathlib.Path,
+    *,
+    code: str,
+    message: str,
+) -> None:
+    try:
+        relative = path.relative_to(root)
+    except ValueError:
+        raise ReleaseGateError(code, message) from None
+    current = root
+    if current.is_symlink():
+        raise ReleaseGateError(code, message)
+    for part in relative.parts:
+        current = current / part
+        if current.is_symlink():
+            raise ReleaseGateError(code, message)
+
+
+def _ensure_safe_directory(
+    root: pathlib.Path,
+    path: pathlib.Path,
+    *,
+    code: str,
+    message: str,
+) -> None:
+    try:
+        relative = path.relative_to(root)
+    except ValueError:
+        raise ReleaseGateError(code, message) from None
+    current = root
+    if current.is_symlink() or not current.is_dir():
+        raise ReleaseGateError(code, message)
+    for part in relative.parts:
+        child = current / part
+        if child.is_symlink():
+            raise ReleaseGateError(code, message)
+        if child.exists():
+            if not child.is_dir():
+                raise ReleaseGateError(code, message)
+        else:
+            child.mkdir(mode=0o700)
+            _fsync_directory(current)
+        current = child
+
+
+def _atomic_write_text(path: pathlib.Path, value: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as destination:
+            destination.write(value)
+            destination.flush()
+            os.fsync(destination.fileno())
+        _durable_replace(temporary, path)
+    except BaseException:
+        with contextlib.suppress(FileNotFoundError):
+            temporary.unlink()
+        raise
+
+
+def _atomic_write_json(path: pathlib.Path, value: Mapping[str, Any]) -> None:
+    _atomic_write_text(
+        path,
+        json.dumps(value, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
+    )
+
+
+def _load_json_object(
+    path: pathlib.Path,
+    *,
+    code: str,
+    message: str,
+    root: pathlib.Path | None = None,
+) -> dict[str, Any]:
+    if root is not None:
+        _reject_symlink_components(root, path, code=code, message=message)
+    if path.is_symlink() or not path.is_file():
+        raise ReleaseGateError(code, message)
+    try:
+        decoded = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        raise ReleaseGateError(code, message) from None
+    if not isinstance(decoded, dict):
+        raise ReleaseGateError(code, message)
+    return decoded
+
+
+@contextlib.contextmanager
+def release_output_lock(output_dir: pathlib.Path):
+    lock_path = output_dir / LOCK_FILE_NAME
+    try:
+        descriptor = os.open(
+            lock_path,
+            os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+    except OSError:
+        raise ReleaseGateError(
+            "release.output_lock_path_invalid",
+            "The release-gate output lock path is unsafe.",
+        ) from None
+    if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+        os.close(descriptor)
+        raise ReleaseGateError(
+            "release.output_lock_path_invalid",
+            "The release-gate output lock path is unsafe.",
+        )
+    try:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise ReleaseGateError(
+                "release.output_directory_locked",
+                "Another release-gate process already owns this output directory.",
+            ) from None
+        os.ftruncate(descriptor, 0)
+        os.write(descriptor, f"pid={os.getpid()}\n".encode("ascii"))
+        os.fsync(descriptor)
+        yield
+    finally:
+        with contextlib.suppress(OSError):
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+
+
+def _output_payload_entries(output_dir: pathlib.Path) -> list[pathlib.Path]:
+    return sorted(path for path in output_dir.iterdir() if path.name != LOCK_FILE_NAME)
 
 
 def child_policy(
@@ -384,7 +561,7 @@ def build_gate_worker_image(
             "release.worker_image_build_failed",
             "The gate-owned Worker image build could not run to completion.",
         ) from None
-    log_path.write_text(completed.stdout, encoding="utf-8")
+    _atomic_write_text(log_path, completed.stdout)
     if completed.returncode != 0:
         raise ReleaseGateError(
             "release.worker_image_build_failed",
@@ -402,11 +579,13 @@ def build_gate_worker_image(
             "The built Worker image does not carry the required gate ownership labels.",
             {"invalidLabelKeys": invalid_labels},
         )
-    if not metadata_path.is_file():
+    if metadata_path.is_symlink() or not metadata_path.is_file():
         raise ReleaseGateError(
             "release.worker_image_metadata_missing",
             "The gate-owned Worker image build did not produce build metadata.",
         )
+    _fsync_file(metadata_path)
+    _fsync_directory(metadata_path.parent)
     return {
         "name": image.name,
         "id": image_id,
@@ -440,22 +619,45 @@ def cleanup_gate_worker_image(
             if expected_image_id is None:
                 evidence["absentAfterIncompleteBuild"] = True
                 return evidence, None
+            immutable_reference = GateWorkerImage(
+                name=expected_image_id,
+                owner=image.owner,
+                target=image.target,
+            )
+            try:
+                image_id, labels = inspect_gate_worker_image(options, immutable_reference)
+            except (OSError, subprocess.SubprocessError, ReleaseGateError) as immutable_error:
+                if (
+                    isinstance(immutable_error, ReleaseGateError)
+                    and immutable_error.code == "release.worker_image_not_found"
+                ):
+                    return (
+                        evidence,
+                        ReleaseGateError(
+                            "release.worker_image_missing_before_cleanup",
+                            "The shared Worker image disappeared before gate-owned cleanup.",
+                        ),
+                    )
+                return (
+                    evidence,
+                    immutable_error
+                    if isinstance(immutable_error, ReleaseGateError)
+                    else ReleaseGateError(
+                        "release.worker_image_cleanup_failed",
+                        "The gate-owned Worker image could not be inspected by immutable ID.",
+                    ),
+                )
+            evidence["resolvedByImageId"] = True
+        if evidence.get("resolvedByImageId") is not True:
             return (
                 evidence,
-                ReleaseGateError(
-                    "release.worker_image_missing_before_cleanup",
-                    "The shared Worker image disappeared before gate-owned cleanup.",
+                raw_error
+                if isinstance(raw_error, ReleaseGateError)
+                else ReleaseGateError(
+                    "release.worker_image_cleanup_failed",
+                    "The gate-owned Worker image could not be inspected for cleanup.",
                 ),
             )
-        return (
-            evidence,
-            raw_error
-            if isinstance(raw_error, ReleaseGateError)
-            else ReleaseGateError(
-                "release.worker_image_cleanup_failed",
-                "The gate-owned Worker image could not be inspected for cleanup.",
-            ),
-        )
 
     evidence["presentBeforeCleanup"] = True
     evidence["imageId"] = image_id
@@ -616,8 +818,21 @@ def scan_child_outputs(
                             "file": f"{provider}/{matrix}/{finding.get('file', '')}",
                         }
                     )
+    attempts_dir = options.output_dir / ATTEMPT_DIRECTORY_NAME
+    if attempts_dir.is_dir() and not attempts_dir.is_symlink():
+        evidence = acceptance.scan_output_secrets(attempts_dir, redactor)
+        scanned_files += int(evidence.get("scannedFiles") or 0)
+        scanned_bytes += int(evidence.get("scannedBytes") or 0)
+        for finding in evidence.get("findings", []):
+            if isinstance(finding, dict):
+                findings.append(
+                    {
+                        **finding,
+                        "file": f"{ATTEMPT_DIRECTORY_NAME}/{finding.get('file', '')}",
+                    }
+                )
     return {
-        "scope": "all child JSON, Markdown, text metadata, and redacted logs",
+        "scope": "all current and archived child JSON, Markdown, text metadata, and redacted logs",
         "scannedFiles": scanned_files,
         "scannedBytes": scanned_bytes,
         "findings": findings,
@@ -674,7 +889,7 @@ def configuration_evidence(
     options: Any,
     spec: RemoteReleaseTargetSpec,
 ) -> dict[str, Any]:
-    return {
+    evidence: dict[str, Any] = {
         "runnerCommand": {"executable": spec.runner_executable, "argumentCount": 0},
         "productTimeoutSeconds": options.product_timeout_seconds,
         "failureTimeoutSeconds": options.failure_timeout_seconds,
@@ -696,6 +911,32 @@ def configuration_evidence(
             "childWorkerImageBuild": "skipped-shared-gate-image",
         },
     }
+    sla_path = getattr(options, "real_provider_load_sla_file", None)
+    if isinstance(sla_path, pathlib.Path) and sla_path.is_file():
+        parsed_sla = acceptance.parse_operator_approved_sla_file(
+            sla_path,
+            "real-provider-load",
+            option="--real-provider-load-sla-file",
+        )
+        assert parsed_sla is not None
+        try:
+            relative_sla_path = str(sla_path.relative_to(options.repo_root))
+            source_kind = "repo-relative"
+        except ValueError:
+            relative_sla_path = str(sla_path)
+            source_kind = "absolute"
+        evidence["realProviderLoad"] = {
+            "restartEveryWaves": int(
+                getattr(options, "real_provider_load_restart_every_waves", 0)
+            ),
+            "operatorApprovedSlaFile": {
+                "path": relative_sla_path,
+                "sourceKind": source_kind,
+                "sha256": common.file_sha256(sla_path),
+                "requested": parsed_sla.as_report(),
+            },
+        }
+    return evidence
 
 
 def markdown_from_report(
@@ -769,8 +1010,20 @@ def write_report(
     encoded = json.dumps(sanitized, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
     json_path = output_dir / spec.json_report_name
     markdown_path = output_dir / spec.markdown_report_name
-    json_path.write_text(encoded, encoding="utf-8")
-    markdown_path.write_text(markdown_from_report(sanitized, spec), encoding="utf-8")
+    _reject_symlink_components(
+        output_dir,
+        json_path,
+        code="release.aggregate_report_path_invalid",
+        message="The aggregate report path is unsafe.",
+    )
+    _reject_symlink_components(
+        output_dir,
+        markdown_path,
+        code="release.aggregate_report_path_invalid",
+        message="The aggregate report path is unsafe.",
+    )
+    _atomic_write_text(json_path, encoded)
+    _atomic_write_text(markdown_path, markdown_from_report(sanitized, spec))
     return json_path, markdown_path
 
 
@@ -798,7 +1051,165 @@ def failure_report(
     }
 
 
-def run_remote_release_gate(
+def _aggregate_report(
+    *,
+    options: Any,
+    spec: RemoteReleaseTargetSpec,
+    run_id: str,
+    started_at: str,
+    started: float,
+    source: Mapping[str, Any],
+    runtime: Mapping[str, Any],
+    image: GateWorkerImage,
+    image_build_attempted: bool,
+    image_build: Mapping[str, Any] | None,
+    image_cleanup: Mapping[str, Any],
+    runs: Sequence[Mapping[str, Any]],
+    errors: Sequence[Mapping[str, Any]],
+    redactor: acceptance.SecretRedactor,
+    output_secret_scan: Mapping[str, Any] | None = None,
+    environment_name_findings: Sequence[Mapping[str, Any]] | None = None,
+    continuation: Mapping[str, Any] | None = None,
+) -> tuple[dict[str, Any], str]:
+    aggregate_errors = [dict(error) for error in errors]
+    required_runs = len(common.PROVIDERS) * len(spec.matrices)
+    if len(runs) != required_runs:
+        aggregate_errors.append(
+            {
+                "code": "release.child_coverage_incomplete",
+                "message": (
+                    f"The {spec.display_name} release gate did not complete all required child matrices."
+                ),
+                "evidence": {"requiredRuns": required_runs, "completedRuns": len(runs)},
+            }
+        )
+    if runs:
+        aggregate_errors.extend(common.catalog_consensus_errors(runs))
+        aggregate_errors.extend(
+            common.consensus_errors(
+                runs,
+                field="workerImageId",
+                code="release.worker_image_id_mismatch",
+                message="Child reports do not reference one shared Worker image ID.",
+            )
+        )
+    expected_image_id = (
+        str(image_build["id"])
+        if isinstance(image_build, Mapping) and isinstance(image_build.get("id"), str)
+        else None
+    )
+    aggregate_errors.extend(worker_image_reference_errors(runs, expected_image_id))
+    output_scan = dict(
+        output_secret_scan
+        if output_secret_scan is not None
+        else scan_child_outputs(options, redactor, spec.matrices)
+    )
+    if output_scan.get("findings"):
+        aggregate_errors.append(
+            {
+                "code": "release.aggregate_secret_scan_failed",
+                "message": "Aggregate child output scan found controlled Credential material.",
+                "evidence": {"findingCount": len(output_scan.get("findings", []))},
+            }
+        )
+    name_findings = list(
+        environment_name_findings
+        if environment_name_findings is not None
+        else credential_environment_name_findings(options)
+    )
+    if name_findings:
+        aggregate_errors.append(
+            {
+                "code": "release.credential_environment_name_persisted",
+                "message": "Child output persisted an operator Credential environment-variable name.",
+                "evidence": {"files": name_findings},
+            }
+        )
+    status = (
+        "pass"
+        if not aggregate_errors
+        and len(runs) == required_runs
+        and all(run.get("status") == "pass" for run in runs)
+        else "fail"
+    )
+    catalog_hashes = {
+        source_value.get("providerCapabilityCatalogSha256")
+        for run in runs
+        if isinstance((source_value := run.get("source")), Mapping)
+        and isinstance(source_value.get("providerCapabilityCatalogSha256"), str)
+    }
+    image_ids = {
+        run.get("workerImageId") for run in runs if isinstance(run.get("workerImageId"), str)
+    }
+    shared_image = (
+        expected_image_id is not None
+        and len(runs) == required_runs
+        and image_ids == {expected_image_id}
+    )
+    child_builds_skipped = shared_image and not any(
+        error.get("code") == "release.child_worker_image_invalid"
+        for error in aggregate_errors
+    )
+    report = {
+        "schemaVersion": spec.schema_version,
+        "runId": run_id,
+        "mode": spec.mode,
+        "target": spec.target,
+        "status": status,
+        "source": {
+            **dict(source),
+            "providerCapabilityCatalogSha256": (
+                next(iter(catalog_hashes)) if len(catalog_hashes) == 1 else None
+            ),
+        },
+        "runtime": dict(runtime),
+        "workerImage": {
+            "name": image.name,
+            "owner": image.owner,
+            "id": expected_image_id,
+            "build": (
+                {key: value for key, value in image_build.items() if key not in {"name", "id"}}
+                if image_build is not None
+                else {"status": "failed" if image_build_attempted else "not-started"}
+            ),
+            "sharedAcrossRuns": shared_image,
+            "childBuildsSkipped": child_builds_skipped,
+            "cleanup": dict(image_cleanup),
+        },
+        "startedAt": started_at,
+        "finishedAt": acceptance.utc_now(),
+        "durationMs": acceptance.elapsed_ms(started),
+        "configuration": configuration_evidence(options, spec),
+        "coverage": {
+            "requiredRuns": required_runs,
+            "completedRuns": len(runs),
+            "providers": list(common.PROVIDERS),
+            "matrices": list(spec.matrices),
+            "productCases": list(acceptance.REAL_PROVIDER_CASES),
+            "failureCases": list(acceptance.REAL_PROVIDER_FAILURE_CASES),
+            "loadCases": (
+                [acceptance.REAL_PROVIDER_LOAD_CASE_ID]
+                if common.REMOTE_LOAD_MATRIX in spec.matrices
+                else []
+            ),
+        },
+        "security": {
+            "rawChildOutputPersisted": False,
+            "childSecretScansRequired": True,
+            "childCleanupRequired": True,
+            "gateImageCleanupRequired": True,
+            "gateImageCleanupDeferred": bool(image_cleanup.get("deferredForResume")),
+            "credentialEnvironmentNamesPersisted": bool(name_findings),
+            "aggregateChildOutputScan": output_scan,
+        },
+        **({"continuation": dict(continuation)} if continuation is not None else {}),
+        "runs": [dict(run) for run in runs],
+        "errors": aggregate_errors,
+    }
+    return report, status
+
+
+def _run_non_checkpointed_remote_release_gate(
     options: Any,
     spec: RemoteReleaseTargetSpec,
     *,
@@ -808,7 +1219,7 @@ def run_remote_release_gate(
     run_child: Callable[..., tuple[dict[str, Any], list[dict[str, Any]]]] = common.run_child_report,
 ) -> int:
     if options.output_dir.exists() and (
-        not options.output_dir.is_dir() or any(options.output_dir.iterdir())
+        not options.output_dir.is_dir() or _output_payload_entries(options.output_dir)
     ):
         print(
             f"{spec.display_name} release gate output directory must be empty or absent.",
@@ -925,131 +1336,74 @@ def run_remote_release_gate(
             if cleanup_error is not None:
                 errors.append(cleanup_error.as_report_error())
 
-    required_runs = len(common.PROVIDERS) * len(spec.matrices)
-    if len(runs) != required_runs:
-        errors.append(
-            {
-                "code": "release.child_coverage_incomplete",
-                "message": f"The {spec.display_name} release gate did not complete all required child matrices.",
-                "evidence": {"requiredRuns": required_runs, "completedRuns": len(runs)},
-            }
-        )
-    if runs:
-        errors.extend(common.catalog_consensus_errors(runs))
-        errors.extend(
-            common.consensus_errors(
-                runs,
-                field="workerImageId",
-                code="release.worker_image_id_mismatch",
-                message="Child reports do not reference one shared Worker image ID.",
-            )
-        )
-    expected_image_id = (
-        str(image_build["id"])
-        if isinstance(image_build, dict) and isinstance(image_build.get("id"), str)
-        else None
+    report, status = _aggregate_report(
+        options=options,
+        spec=spec,
+        run_id=run_id,
+        started_at=started_at,
+        started=started,
+        source=source,
+        runtime=runtime,
+        image=image,
+        image_build_attempted=image_build_attempted,
+        image_build=image_build,
+        image_cleanup=image_cleanup,
+        runs=runs,
+        errors=errors,
+        redactor=redactor,
     )
-    errors.extend(worker_image_reference_errors(runs, expected_image_id))
-    output_secret_scan = scan_child_outputs(options, redactor, spec.matrices)
-    if output_secret_scan["findings"]:
-        errors.append(
-            {
-                "code": "release.aggregate_secret_scan_failed",
-                "message": "Aggregate child output scan found controlled Credential material.",
-                "evidence": {"findingCount": len(output_secret_scan["findings"])},
-            }
-        )
-    environment_name_findings = credential_environment_name_findings(options)
-    if environment_name_findings:
-        errors.append(
-            {
-                "code": "release.credential_environment_name_persisted",
-                "message": "Child output persisted an operator Credential environment-variable name.",
-                "evidence": {"files": environment_name_findings},
-            }
-        )
-    status = (
-        "pass"
-        if not errors
-        and len(runs) == required_runs
-        and all(run.get("status") == "pass" for run in runs)
-        else "fail"
-    )
-    catalog_hashes = {
-        source_value.get("providerCapabilityCatalogSha256")
-        for run in runs
-        if isinstance((source_value := run.get("source")), dict)
-        and isinstance(source_value.get("providerCapabilityCatalogSha256"), str)
-    }
-    image_ids = {
-        run.get("workerImageId") for run in runs if isinstance(run.get("workerImageId"), str)
-    }
-    shared_image = (
-        expected_image_id is not None
-        and len(runs) == required_runs
-        and image_ids == {expected_image_id}
-    )
-    child_builds_skipped = shared_image and not any(
-        error.get("code") == "release.child_worker_image_invalid" for error in errors
-    )
-    report = {
-        "schemaVersion": spec.schema_version,
-        "runId": run_id,
-        "mode": spec.mode,
-        "target": spec.target,
-        "status": status,
-        "source": {
-            **source,
-            "providerCapabilityCatalogSha256": (
-                next(iter(catalog_hashes)) if len(catalog_hashes) == 1 else None
-            ),
-        },
-        "runtime": runtime,
-        "workerImage": {
-            "name": image.name,
-            "id": expected_image_id,
-            "build": (
-                {key: value for key, value in image_build.items() if key not in {"name", "id"}}
-                if image_build is not None
-                else {"status": "failed" if image_build_attempted else "not-started"}
-            ),
-            "sharedAcrossRuns": shared_image,
-            "childBuildsSkipped": child_builds_skipped,
-            "cleanup": image_cleanup,
-        },
-        "startedAt": started_at,
-        "finishedAt": acceptance.utc_now(),
-        "durationMs": acceptance.elapsed_ms(started),
-        "configuration": configuration_evidence(options, spec),
-        "coverage": {
-            "requiredRuns": required_runs,
-            "completedRuns": len(runs),
-            "providers": list(common.PROVIDERS),
-            "matrices": list(spec.matrices),
-            "productCases": list(acceptance.REAL_PROVIDER_CASES),
-            "failureCases": list(acceptance.REAL_PROVIDER_FAILURE_CASES),
-            "loadCases": (
-                [acceptance.REAL_PROVIDER_LOAD_CASE_ID]
-                if common.REMOTE_LOAD_MATRIX in spec.matrices
-                else []
-            ),
-        },
-        "security": {
-            "rawChildOutputPersisted": False,
-            "childSecretScansRequired": True,
-            "childCleanupRequired": True,
-            "gateImageCleanupRequired": True,
-            "credentialEnvironmentNamesPersisted": bool(environment_name_findings),
-            "aggregateChildOutputScan": output_secret_scan,
-        },
-        "runs": runs,
-        "errors": errors,
-    }
     json_path, markdown_path = write_report(report, options.output_dir, redactor, spec)
     print(f"Stage 3 real Provider {spec.display_name} release gate: {status}")
     print(f"JSON: {json_path}")
     print(f"Markdown: {markdown_path}")
     return 0 if status == "pass" else 1
+
+
+def run_remote_release_gate(
+    options: Any,
+    spec: RemoteReleaseTargetSpec,
+    *,
+    build_image: Callable[[Any, GateWorkerImage, str], dict[str, Any]] = build_gate_worker_image,
+    cleanup_image: Callable[..., tuple[dict[str, Any], ReleaseGateError | None]] | None = None,
+    repository_state: Callable[[pathlib.Path], dict[str, Any]] = common.repository_state,
+    run_child: Callable[..., tuple[dict[str, Any], list[dict[str, Any]]]] = common.run_child_report,
+) -> int:
+    output_dir_existed = options.output_dir.exists()
+    if options.output_dir.is_symlink() or (
+        options.output_dir.exists() and not options.output_dir.is_dir()
+    ):
+        print(
+            f"{spec.display_name} release gate output path is not a directory.",
+            file=sys.stderr,
+        )
+        return 2
+    options.output_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if not output_dir_existed:
+        _fsync_directory(options.output_dir.parent)
+    try:
+        with release_output_lock(options.output_dir):
+            if resumable_requested(options):
+                import controlled_remote_release_checkpoint as checkpoint
+
+                return checkpoint.run_checkpointed_remote_release_gate(
+                    options,
+                    spec,
+                    build_image=build_image,
+                    cleanup_image=cleanup_image,
+                    repository_state=repository_state,
+                    run_child=run_child,
+                )
+            return _run_non_checkpointed_remote_release_gate(
+                options,
+                spec,
+                build_image=build_image,
+                cleanup_image=cleanup_image,
+                repository_state=repository_state,
+                run_child=run_child,
+            )
+    except ReleaseGateError as error:
+        print(f"{spec.display_name} release gate could not acquire its output lock: {error.message}", file=sys.stderr)
+        return 2
 
 
 def default_output_dir(repo_root: pathlib.Path, target: str) -> pathlib.Path:

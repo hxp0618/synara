@@ -116,6 +116,11 @@ __screenshots__/
 .tanstack
 /.pi/
 /.tmp/
+**/.release-gate-checkpoint.json
+**/.release-gate-attestation.json
+**/.release-gate.lock
+**/.release-gate-staging/
+**/.release-gate-attempts/
 /~/
 /bootstrap.js
 /preload.js

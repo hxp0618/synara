@@ -881,6 +881,21 @@ def file_sha256(path: pathlib.Path) -> str:
     return digest.hexdigest()
 
 
+def path_has_symlink_component(root: pathlib.Path, path: pathlib.Path) -> bool:
+    try:
+        relative = path.relative_to(root)
+    except ValueError:
+        return True
+    current = root
+    if current.is_symlink():
+        return True
+    for part in relative.parts:
+        current = current / part
+        if current.is_symlink():
+            return True
+    return False
+
+
 def case_counts(report: Mapping[str, Any]) -> dict[str, int]:
     result = {status: 0 for status in sorted(acceptance.CASE_STATUSES)}
     for case in report.get("cases", []):
@@ -922,70 +937,84 @@ def child_worker_image_id(
     return value if isinstance(value, str) else None
 
 
-def run_child_report(
+def load_child_report_artifacts(
     *,
-    repo_root: pathlib.Path,
     output_dir: pathlib.Path,
     provider: str,
     matrix: str,
     expected_git_sha: str,
-    command: Sequence[str],
     policy: ChildReportPolicy,
-    environment: Mapping[str, str] | None = None,
-    capture_process_output: bool = False,
-    process_output_redactor: acceptance.SecretRedactor | None = None,
-    forbidden_output_tokens: Sequence[str] = (),
-) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    process_return_code: int,
+    duration_ms: int,
+    process_output_scan: Mapping[str, Any] | None = None,
+    expected_report_sha256: str | None = None,
+    expected_markdown_sha256: str | None = None,
+) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any] | None]:
+    """Load and validate one child report without trusting prior aggregate metadata."""
     child_dir = output_dir / provider / matrix
-    started = time.monotonic()
-    completed = subprocess.run(
-        command,
-        cwd=repo_root,
-        env=environment,
-        check=False,
-        capture_output=capture_process_output,
-        text=capture_process_output,
-        encoding="utf-8" if capture_process_output else None,
-        errors="replace" if capture_process_output else None,
-    )
-    duration_ms = round((time.monotonic() - started) * 1000)
     json_path = child_dir / acceptance.JSON_REPORT_NAME
     markdown_path = child_dir / acceptance.MARKDOWN_REPORT_NAME
     errors: list[dict[str, Any]] = []
     record: dict[str, Any] = {
         "provider": provider,
         "matrix": matrix,
-        "processReturnCode": completed.returncode,
+        "processReturnCode": process_return_code,
         "durationMs": duration_ms,
         "reportPath": str(json_path.relative_to(output_dir)),
         "markdownPath": str(markdown_path.relative_to(output_dir)),
     }
-    if capture_process_output:
-        process_output_scan = scan_process_output(
-            completed.stdout if isinstance(completed.stdout, str) else "",
-            completed.stderr if isinstance(completed.stderr, str) else "",
-            redactor=process_output_redactor,
-            forbidden_tokens=forbidden_output_tokens,
-        )
-        record["processOutputScan"] = process_output_scan
-        if process_output_scan["findings"]:
+    if process_output_scan is not None:
+        record["processOutputScan"] = dict(process_output_scan)
+        if process_output_scan.get("findings"):
             errors.append(
                 ReleaseGateError(
                     "release.child_process_output_secret_scan_failed",
                     "Child process stdout or stderr contained controlled Credential material or forbidden environment names.",
-                    {"findingCount": len(process_output_scan["findings"])},
+                    {"findingCount": len(process_output_scan.get("findings", []))},
                 ).as_report_error(provider=provider, matrix=matrix)
             )
+    if path_has_symlink_component(output_dir, json_path) or path_has_symlink_component(
+        output_dir, markdown_path
+    ):
+        errors.append(
+            ReleaseGateError(
+                "release.child_report_unsafe_path",
+                "Child acceptance reports must be regular files, not symbolic links.",
+            ).as_report_error(provider=provider, matrix=matrix)
+        )
+        record["status"] = "fail"
+        return record, errors, None
     if not json_path.is_file() or not markdown_path.is_file():
         errors.append(
             ReleaseGateError(
                 "release.child_report_missing",
                 "Child acceptance run did not produce both JSON and Markdown reports.",
-                {"returnCode": completed.returncode},
+                {"returnCode": process_return_code},
             ).as_report_error(provider=provider, matrix=matrix)
         )
         record["status"] = "fail"
-        return record, errors
+        return record, errors, None
+    report_sha256 = file_sha256(json_path)
+    markdown_sha256 = file_sha256(markdown_path)
+    if (
+        expected_report_sha256 is not None
+        and report_sha256 != expected_report_sha256
+    ) or (
+        expected_markdown_sha256 is not None
+        and markdown_sha256 != expected_markdown_sha256
+    ):
+        errors.append(
+            ReleaseGateError(
+                "release.child_report_hash_mismatch",
+                "Child acceptance report content no longer matches its validated attestation.",
+                {
+                    "jsonMatches": expected_report_sha256 in {None, report_sha256},
+                    "markdownMatches": expected_markdown_sha256 in {None, markdown_sha256},
+                },
+            ).as_report_error(provider=provider, matrix=matrix)
+        )
+        record["status"] = "fail"
+        return record, errors, None
     try:
         decoded = json.loads(json_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
@@ -996,7 +1025,7 @@ def run_child_report(
             ).as_report_error(provider=provider, matrix=matrix)
         )
         record["status"] = "fail"
-        return record, errors
+        return record, errors, None
     if not isinstance(decoded, dict):
         errors.append(
             ReleaseGateError(
@@ -1005,7 +1034,7 @@ def run_child_report(
             ).as_report_error(provider=provider, matrix=matrix)
         )
         record["status"] = "fail"
-        return record, errors
+        return record, errors, None
 
     errors.extend(
         validate_child_report(
@@ -1016,12 +1045,12 @@ def run_child_report(
             policy=policy,
         )
     )
-    if completed.returncode != 0:
+    if process_return_code != 0:
         errors.append(
             ReleaseGateError(
                 "release.child_process_failed",
                 "Child acceptance process returned a non-zero status.",
-                {"returnCode": completed.returncode},
+                {"returnCode": process_return_code},
             ).as_report_error(provider=provider, matrix=matrix)
         )
     cases = decoded.get("cases") if isinstance(decoded.get("cases"), list) else []
@@ -1040,8 +1069,8 @@ def run_child_report(
                 for case in cases
                 if isinstance(case, dict) and case.get("status") == "unsupported"
             ),
-            "reportSha256": file_sha256(json_path),
-            "markdownSha256": file_sha256(markdown_path),
+            "reportSha256": report_sha256,
+            "markdownSha256": markdown_sha256,
             "source": decoded.get("source"),
             **(
                 {"workerImageId": worker_image_id}
@@ -1049,6 +1078,55 @@ def run_child_report(
                 else {}
             ),
         }
+    )
+    return record, errors, decoded
+
+
+def run_child_report(
+    *,
+    repo_root: pathlib.Path,
+    output_dir: pathlib.Path,
+    provider: str,
+    matrix: str,
+    expected_git_sha: str,
+    command: Sequence[str],
+    policy: ChildReportPolicy,
+    environment: Mapping[str, str] | None = None,
+    capture_process_output: bool = False,
+    process_output_redactor: acceptance.SecretRedactor | None = None,
+    forbidden_output_tokens: Sequence[str] = (),
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    started = time.monotonic()
+    completed = subprocess.run(
+        command,
+        cwd=repo_root,
+        env=environment,
+        check=False,
+        capture_output=capture_process_output,
+        text=capture_process_output,
+        encoding="utf-8" if capture_process_output else None,
+        errors="replace" if capture_process_output else None,
+    )
+    duration_ms = round((time.monotonic() - started) * 1000)
+    process_output_scan = (
+        scan_process_output(
+            completed.stdout if isinstance(completed.stdout, str) else "",
+            completed.stderr if isinstance(completed.stderr, str) else "",
+            redactor=process_output_redactor,
+            forbidden_tokens=forbidden_output_tokens,
+        )
+        if capture_process_output
+        else None
+    )
+    record, errors, _ = load_child_report_artifacts(
+        output_dir=output_dir,
+        provider=provider,
+        matrix=matrix,
+        expected_git_sha=expected_git_sha,
+        policy=policy,
+        process_return_code=completed.returncode,
+        duration_ms=duration_ms,
+        process_output_scan=process_output_scan,
     )
     return record, errors
 

@@ -516,6 +516,7 @@ settings, source the operator-owned acceptance env file first:
 
 ```sh
 source ~/.synara-acceptance-env
+export SYNARA_STAGE3_DOCKER_OUTPUT_DIR=".tmp/stage3-real-provider-docker-release-$(git rev-parse --short=12 HEAD)"
 
 python3 scripts/stage3-provider-acceptance/docker_release_gate.py \
   --codex-credential-env SYNARA_ACCEPTANCE_CODEX_KEY \
@@ -526,8 +527,10 @@ python3 scripts/stage3-provider-acceptance/docker_release_gate.py \
   --claude-base-url-env SYNARA_ACCEPTANCE_CLAUDE_BASE_URL \
   --claude-model-env SYNARA_ACCEPTANCE_CLAUDE_MODEL \
   --real-provider-load-sla-file deploy/worker/production-load-sla.json \
+  --output-dir "$SYNARA_STAGE3_DOCKER_OUTPUT_DIR" \
   --product-timeout 2400 \
-  --failure-timeout 900
+  --failure-timeout 900 \
+  --resume
 ```
 
 Use `--claude-credential-field authToken` only when the controlled Claude secret intentionally maps to
@@ -538,6 +541,27 @@ and the aggregate validates those exact values, but it does not record the model
 `--codex-model` and `--claude-model` remain available when you want to pin the identifiers directly on the command
 line instead of reading them from `--codex-model-env` / `--claude-model-env`. `--product-timeout` applies to both
 the product and load children; `--failure-timeout` applies only to the failure children.
+
+`--resume` is opt-in on the first invocation. A fresh run without it is a separate empty-directory execution and does
+not create a durable checkpoint. If you want restartable Docker release evidence, start the fresh run with `--resume`
+and rerun the same command against the same `--output-dir`.
+
+The resumable checkpoint freezes the clean Git SHA, target/matrix contract, load SLA/configuration, and a salted proof
+over the resolved Codex/Claude Credential, Base URL, model, and selected environment-variable names. Raw Credential
+and Base URL values, plus the variable names, are not persisted. On resume, the gate revalidates the output lock,
+checkpoint contract, attested child hashes, completed-child runtime cleanup, and the exact owner-labeled shared image
+before it reuses any prior result.
+
+Only pending children are rescheduled. `building`, `running`, `waiting`, `finalizing`, and `completed` checkpoints all
+have explicit crash-recovery paths: rebuild or reclaim the shared image, reuse only validated pass-child attestations,
+recreate the final aggregate when needed, and treat a completed checkpoint as reusable only while the stored aggregate
+JSON/Markdown hashes still match. Any artifact/image/runtime residue, Secret finding, lock conflict, profile/config
+drift, or report/hash tamper fails closed.
+
+On a recoverable child failure, the gate keeps only the exact owner-labeled shared image plus already validated pass
+children; it does not retain broad runtime residue or accept a legacy report directory after the fact. After a full
+pass, it removes the shared image with exact cleanup. If the clean SHA, target/matrices, SLA/config, or controlled
+Credential/Base URL/model profile changes, start a new fresh run in a new empty output directory instead of resuming.
 
 The gate fails before any build when either source is missing or invalid, and fails on a dirty/untracked worktree.
 Each child receives only the tool environment allowlist plus that child Provider's Credential/Base URL; Codex and

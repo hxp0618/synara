@@ -405,6 +405,23 @@ def sample_child_report(
     }
 
 
+def write_child_report_artifacts(
+    output_dir: pathlib.Path,
+    provider: str,
+    matrix: str,
+    report: dict[str, Any],
+    *,
+    markdown: str = "# acceptance report\n",
+) -> tuple[pathlib.Path, pathlib.Path]:
+    child_dir = output_dir / provider / matrix
+    child_dir.mkdir(parents=True, exist_ok=True)
+    json_path = child_dir / acceptance.JSON_REPORT_NAME
+    markdown_path = child_dir / acceptance.MARKDOWN_REPORT_NAME
+    json_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    markdown_path.write_text(markdown, encoding="utf-8")
+    return json_path, markdown_path
+
+
 class ParseArgsTest(unittest.TestCase):
     def test_reads_only_controlled_environment_names_into_options(self) -> None:
         with tempfile.TemporaryDirectory() as directory, mock.patch.dict(
@@ -829,6 +846,115 @@ class ChildReportValidationTest(unittest.TestCase):
         self.assertIn("release.child_worker_image_invalid", {error["code"] for error in errors})
 
 
+class ChildArtifactLoadingTest(unittest.TestCase):
+    def test_recomputes_hashes_and_returns_decoded_child_report(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            output_dir = pathlib.Path(directory)
+            options = docker_options(output_dir)
+            policy = gate.child_policy(options, WORKER_IMAGE_NAME)
+            report = sample_child_report(options, "codex", "product")
+            json_path, markdown_path = write_child_report_artifacts(
+                output_dir,
+                "codex",
+                "product",
+                report,
+                markdown="# codex product\n",
+            )
+            expected_report_sha256 = common.file_sha256(json_path)
+            expected_markdown_sha256 = common.file_sha256(markdown_path)
+
+            record, errors, decoded = common.load_child_report_artifacts(
+                output_dir=output_dir,
+                provider="codex",
+                matrix="product",
+                expected_git_sha="a" * 40,
+                policy=policy,
+                process_return_code=0,
+                duration_ms=123,
+            )
+
+        self.assertEqual(errors, [])
+        self.assertEqual(decoded, report)
+        self.assertEqual(record["status"], "pass")
+        self.assertEqual(record["reportSha256"], expected_report_sha256)
+        self.assertEqual(record["markdownSha256"], expected_markdown_sha256)
+        self.assertEqual(record["reportPath"], "codex/product/acceptance-report.json")
+        self.assertEqual(record["markdownPath"], "codex/product/acceptance-report.md")
+        self.assertEqual(record["workerImageId"], WORKER_IMAGE_ID)
+        self.assertEqual(record["childRunId"], report["runId"])
+
+    def test_rejects_tampered_expected_report_hash(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            output_dir = pathlib.Path(directory)
+            options = docker_options(output_dir)
+            policy = gate.child_policy(options, WORKER_IMAGE_NAME)
+            report = sample_child_report(options, "codex", "product")
+            write_child_report_artifacts(output_dir, "codex", "product", report)
+
+            record, errors, decoded = common.load_child_report_artifacts(
+                output_dir=output_dir,
+                provider="codex",
+                matrix="product",
+                expected_git_sha="a" * 40,
+                policy=policy,
+                process_return_code=0,
+                duration_ms=123,
+                expected_report_sha256="0" * 64,
+            )
+
+        self.assertIsNone(decoded)
+        self.assertEqual(record["status"], "fail")
+        self.assertEqual([error["code"] for error in errors], ["release.child_report_hash_mismatch"])
+        self.assertEqual(
+            errors[0]["evidence"],
+            {"jsonMatches": False, "markdownMatches": True},
+        )
+
+    def test_rejects_json_or_markdown_symlink_reports(self) -> None:
+        if not hasattr(os, "symlink"):
+            self.skipTest("symlink is unavailable on this platform")
+
+        for symlink_kind in ("json", "markdown"):
+            with self.subTest(symlink_kind=symlink_kind), tempfile.TemporaryDirectory() as directory:
+                output_dir = pathlib.Path(directory)
+                options = docker_options(output_dir)
+                policy = gate.child_policy(options, WORKER_IMAGE_NAME)
+                report = sample_child_report(options, "codex", "product")
+                json_path, markdown_path = write_child_report_artifacts(
+                    output_dir,
+                    "codex",
+                    "product",
+                    report,
+                )
+                if symlink_kind == "json":
+                    target_path = output_dir / "json-target.json"
+                    target_path.write_text(json_path.read_text(encoding="utf-8"), encoding="utf-8")
+                    json_path.unlink()
+                    os.symlink(target_path, json_path)
+                else:
+                    target_path = output_dir / "markdown-target.md"
+                    target_path.write_text(markdown_path.read_text(encoding="utf-8"), encoding="utf-8")
+                    markdown_path.unlink()
+                    os.symlink(target_path, markdown_path)
+
+                record, errors, decoded = common.load_child_report_artifacts(
+                    output_dir=output_dir,
+                    provider="codex",
+                    matrix="product",
+                    expected_git_sha="a" * 40,
+                    policy=policy,
+                    process_return_code=0,
+                    duration_ms=123,
+                )
+
+                self.assertIsNone(decoded)
+                self.assertEqual(record["status"], "fail")
+                self.assertEqual(
+                    [error["code"] for error in errors],
+                    ["release.child_report_unsafe_path"],
+                )
+
+
 class ImageConsensusTest(unittest.TestCase):
     def test_requires_all_four_runs_to_share_one_worker_image_id(self) -> None:
         runs = [
@@ -947,6 +1073,42 @@ class GateWorkerImageLifecycleTest(unittest.TestCase):
         self.assertTrue(evidence["ownershipVerified"])
         self.assertTrue(evidence["removed"])
         self.assertEqual(docker.call_args_list[0].args[1], ["image", "rm", "-f", WORKER_IMAGE_ID])
+
+    def test_recovers_missing_tag_by_inspecting_and_removing_immutable_image_id(self) -> None:
+        options = docker_options(pathlib.Path("/tmp/docker-release"))
+        image = gate.GateWorkerImage(WORKER_IMAGE_NAME, "owner")
+        labels = gate.required_gate_worker_image_labels(image, "a" * 40)
+        removed = subprocess.CompletedProcess([], 0, WORKER_IMAGE_ID, "")
+        absent = subprocess.CompletedProcess([], 1, "", "Error: No such image")
+
+        with (
+            mock.patch.object(
+                gate.remote,
+                "inspect_gate_worker_image",
+                side_effect=[
+                    gate.ReleaseGateError(
+                        "release.worker_image_not_found",
+                        "The gate-owned Worker image does not exist.",
+                    ),
+                    (WORKER_IMAGE_ID, labels),
+                ],
+            ) as inspect,
+            mock.patch.object(
+                gate.remote,
+                "docker_completed",
+                side_effect=[removed, absent],
+            ),
+        ):
+            evidence, error = gate.cleanup_gate_worker_image(
+                options,
+                image,
+                expected_image_id=WORKER_IMAGE_ID,
+            )
+
+        self.assertIsNone(error)
+        self.assertTrue(evidence["resolvedByImageId"])
+        self.assertTrue(evidence["removed"])
+        self.assertEqual(inspect.call_args_list[1].args[1].name, WORKER_IMAGE_ID)
 
     def test_refuses_to_remove_image_with_wrong_owner_label(self) -> None:
         options = docker_options(pathlib.Path("/tmp/docker-release"))

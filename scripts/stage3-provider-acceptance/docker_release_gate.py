@@ -58,6 +58,7 @@ class DockerReleaseGateOptions:
     codex_model_environment_name: str | None = None
     claude_model_environment_name: str | None = None
     go_proxy: str | None = None
+    resume: bool = False
 
 
 def parse_args(argv: Sequence[str]) -> DockerReleaseGateOptions:
@@ -96,6 +97,15 @@ def parse_args(argv: Sequence[str]) -> DockerReleaseGateOptions:
     parser.add_argument("--docker-memory-bytes", type=int, default=2 << 30)
     parser.add_argument("--docker-nano-cpus", type=int, default=1_000_000_000)
     parser.add_argument("--go-proxy")
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help=(
+            "Start or continue a durable gate checkpoint. On a child failure, retain only the "
+            "exact owner-labeled shared image and validated pass-child attestations; rerunning the "
+            "same command resumes pending children after fail-closed drift checks."
+        ),
+    )
     parsed = parser.parse_args(argv)
     if parsed.product_timeout <= 0 or parsed.failure_timeout <= 0:
         parser.error("matrix timeouts must be positive")
@@ -181,6 +191,7 @@ def parse_args(argv: Sequence[str]) -> DockerReleaseGateOptions:
         codex_model_environment_name=codex_model_environment_name,
         claude_model_environment_name=claude_model_environment_name,
         go_proxy=go_proxy,
+        resume=parsed.resume,
     )
 
 
@@ -321,6 +332,69 @@ def target_configuration(options: DockerReleaseGateOptions) -> dict[str, Any]:
     }
 
 
+def validate_reused_child_runtime(
+    options: DockerReleaseGateOptions,
+    report: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    cases = report.get("cases") if isinstance(report.get("cases"), list) else []
+    target_prepare = next(
+        (
+            case
+            for case in cases
+            if isinstance(case, dict) and case.get("id") == "environment.target-prepare"
+        ),
+        None,
+    )
+    evidence = target_prepare.get("evidence") if isinstance(target_prepare, dict) else None
+    docker = evidence.get("docker") if isinstance(evidence, dict) else None
+    owner = docker.get("resourceOwner") if isinstance(docker, dict) else None
+    if not isinstance(owner, str) or re.fullmatch(r"[0-9a-f]{20}", owner) is None:
+        return [
+            {
+                "code": "release.reused_child_resource_owner_invalid",
+                "message": "The reusable Docker child omitted its exact resource owner.",
+            }
+        ]
+    owner_filter = f"label={IMAGE_OWNER_LABEL}={owner}"
+    errors: list[dict[str, Any]] = []
+    for resource, arguments in (
+        ("container", ["ps", "-aq", "--filter", owner_filter]),
+        ("network", ["network", "ls", "-q", "--filter", owner_filter]),
+        ("volume", ["volume", "ls", "-q", "--filter", owner_filter]),
+    ):
+        try:
+            completed = docker_completed(options, arguments, timeout=15.0)
+        except (OSError, subprocess.SubprocessError):
+            errors.append(
+                {
+                    "code": "release.reused_child_resource_inspection_failed",
+                    "message": "Docker resource residue could not be inspected.",
+                    "evidence": {"resource": resource},
+                }
+            )
+            continue
+        if completed.returncode != 0:
+            errors.append(
+                {
+                    "code": "release.reused_child_resource_inspection_failed",
+                    "message": "Docker resource residue inspection returned a non-zero status.",
+                    "evidence": {"resource": resource, "returnCode": completed.returncode},
+                }
+            )
+        elif completed.stdout.strip():
+            errors.append(
+                {
+                    "code": "release.reused_child_resource_residue",
+                    "message": "A checkpointed pass child still owns Docker runtime resources.",
+                    "evidence": {
+                        "resource": resource,
+                        "resourceCount": len(completed.stdout.splitlines()),
+                    },
+                }
+            )
+    return errors
+
+
 def target_spec() -> remote.RemoteReleaseTargetSpec:
     return remote.RemoteReleaseTargetSpec(
         target="docker",
@@ -347,6 +421,7 @@ def target_spec() -> remote.RemoteReleaseTargetSpec:
             "It does not close SSH, registry-pushed multi-arch rollout, Kubernetes multi-node candidate/rollback soak, or production deployment evidence.",
         ),
         matrices=REMOTE_GATE_MATRICES,
+        validate_reused_child_runtime=validate_reused_child_runtime,
     )
 
 
