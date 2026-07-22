@@ -116,6 +116,28 @@ def normalize_go_proxy(value: str | None) -> str | None:
     return proxy
 
 
+def normalize_apk_repositories(value: str | None) -> str | None:
+    if value is None:
+        return None
+    repositories = value.strip()
+    if (
+        not repositories
+        or len(repositories) > 4096
+        or any(character.isspace() or ord(character) < 32 for character in repositories)
+        or any(character in repositories for character in "@?#")
+    ):
+        raise ValueError(
+            "--apk-repositories must be a public credential-free comma-separated HTTPS repository list "
+            "without whitespace, userinfo, query, or fragment data"
+        )
+    pattern = re.compile(
+        r"https://[A-Za-z0-9.-]+(?::[0-9]+)?(?:/[A-Za-z0-9._~!$&'()*+,;=:@%/-]*)?"
+    )
+    if any(pattern.fullmatch(entry) is None for entry in repositories.split(",")):
+        raise ValueError("--apk-repositories entries must use https://")
+    return repositories
+
+
 def repository_state(repo_root: pathlib.Path) -> dict[str, Any]:
     sha = subprocess.run(
         ["git", "rev-parse", "HEAD"],

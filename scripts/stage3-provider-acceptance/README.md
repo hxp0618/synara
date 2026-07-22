@@ -670,6 +670,8 @@ kubectl --context kind-synara-stage3-prod -n synara-system get configmap synara-
 python3 scripts/stage3-provider-acceptance/registry_release_gate.py \
   --image-repository 192.168.139.3:5443/synara/worker \
   --builder synara-worker-release \
+  --go-proxy https://goproxy.cn,direct \
+  --apk-repositories https://mirror.example.test/alpine/v3.22/main,https://mirror.example.test/alpine/v3.22/community \
   --signing-policy-profile production \
   --registry-auth-username-env REGISTRY_USERNAME \
   --registry-auth-password-env REGISTRY_PASSWORD \
@@ -687,6 +689,9 @@ Production mode inspects the named running Registry container, reads its runtime
 and binds the live container identity, TLS certificate, auth mode, repository, and deletion/retention settings to
 the exported configuration and the checked-in retention contract. A disposable HTTP Registry, a static config
 file without its live container, or a passing immutable-rollout gate is not production Registry evidence.
+If the release runner cannot reach the public Alpine package origin for the locked Worker APK closure, pass
+`--apk-repositories` with an operator-controlled HTTPS mirror list for the exact Alpine release channel instead of
+loosening the lockfile or dropping the no-cache build.
 
 The retention contract pins the live Registry to
 `registry:2.8.3@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373`. Production
@@ -846,6 +851,7 @@ Kubernetes reconciler without requiring a real Provider API key. Run it only fro
 ```sh
 python3 scripts/stage3-provider-acceptance/kubernetes_worker_release_rollout_gate.py \
   --go-proxy https://goproxy.cn,direct \
+  --apk-repositories https://mirror.example.test/alpine/v3.22/main,https://mirror.example.test/alpine/v3.22/community \
   --kind-worker-nodes 2 \
   --output-dir /tmp/synara-kubernetes-worker-release-rollout \
   --timeout 3600
@@ -891,6 +897,7 @@ Run it only from a clean committed checkout:
 ```sh
 python3 scripts/stage3-provider-acceptance/docker_worker_release_rollout_gate.py \
   --go-proxy https://goproxy.cn,direct \
+  --apk-repositories https://mirror.example.test/alpine/v3.22/main,https://mirror.example.test/alpine/v3.22/community \
   --load-waves 25 \
   --output-dir /tmp/synara-docker-worker-release-rollout \
   --timeout 3600

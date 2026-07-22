@@ -48,6 +48,7 @@ class GateOptions:
     load_waves: int
     registry_image: str
     go_proxy: str | None
+    apk_repositories: str | None
 
 
 def parse_args(argv: Sequence[str]) -> GateOptions:
@@ -69,6 +70,7 @@ def parse_args(argv: Sequence[str]) -> GateOptions:
     parser.add_argument("--load-waves", type=int, default=DEFAULT_LOAD_WAVES)
     parser.add_argument("--registry-image", default=DEFAULT_REGISTRY_IMAGE)
     parser.add_argument("--go-proxy")
+    parser.add_argument("--apk-repositories")
     parsed = parser.parse_args(argv)
     if parsed.timeout <= 0:
         parser.error("--timeout must be positive")
@@ -108,6 +110,7 @@ def parse_args(argv: Sequence[str]) -> GateOptions:
         parser.error("--registry-image must be a credential-free Docker image reference")
     try:
         go_proxy = release_gate.normalize_go_proxy(parsed.go_proxy)
+        apk_repositories = release_gate.normalize_apk_repositories(parsed.apk_repositories)
     except ValueError as error:
         parser.error(str(error))
     run_id = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -135,6 +138,7 @@ def parse_args(argv: Sequence[str]) -> GateOptions:
         load_waves=parsed.load_waves,
         registry_image=registry_image,
         go_proxy=go_proxy,
+        apk_repositories=apk_repositories,
     )
 
 
@@ -238,6 +242,7 @@ class KubernetesWorkerReleaseRolloutDriver(acceptance.KubernetesDriver):
             owner=self.resource_owner,
             logs_dir=self.logs_dir,
             go_proxy=self.gate_options.go_proxy,
+            apk_repositories=self.gate_options.apk_repositories,
         )
         candidate = rollout.build_release_image(
             self,
@@ -248,6 +253,7 @@ class KubernetesWorkerReleaseRolloutDriver(acceptance.KubernetesDriver):
             owner=self.resource_owner,
             logs_dir=self.logs_dir,
             go_proxy=self.gate_options.go_proxy,
+            apk_repositories=self.gate_options.apk_repositories,
         )
         if baseline.digest == candidate.digest or baseline.image_id == candidate.image_id:
             raise acceptance.AcceptanceError(

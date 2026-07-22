@@ -62,6 +62,7 @@ registry-pushed recovery/load 证据见
 ```bash
 python3 scripts/stage3-provider-acceptance/docker_worker_release_rollout_gate.py \
   --go-proxy https://goproxy.cn,direct \
+  --apk-repositories https://mirror.example.test/alpine/v3.22/main,https://mirror.example.test/alpine/v3.22/community \
   --load-waves 25 \
   --output-dir /tmp/synara-docker-worker-release-rollout \
   --timeout 3600
@@ -79,6 +80,7 @@ Credential/TLS，也不执行真实 Provider、Kubernetes 多节点、生产 SLA
 ```bash
 python3 scripts/stage3-provider-acceptance/kubernetes_worker_release_rollout_gate.py \
   --go-proxy https://goproxy.cn,direct \
+  --apk-repositories https://mirror.example.test/alpine/v3.22/main,https://mirror.example.test/alpine/v3.22/community \
   --kind-worker-nodes 2 \
   --output-dir /tmp/synara-kubernetes-worker-release-rollout \
   --timeout 3600

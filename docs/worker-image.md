@@ -140,6 +140,9 @@ python3 scripts/stage3-provider-acceptance/registry_release_gate.py \
 
 If the default Go module proxy is unavailable, append the public credential-free override
 `--go-proxy https://goproxy.cn,direct`.
+If the locked Alpine package origin is unavailable, append `--apk-repositories` with an operator-controlled HTTPS
+mirror list for the exact Alpine release channel, for example
+`--apk-repositories https://mirror.example.test/alpine/v3.22/main,https://mirror.example.test/alpine/v3.22/community`.
 For a disposable local HTTP Registry only, add `--insecure-registry`; production Registry runs must use TLS.
 
 ### Signing policy

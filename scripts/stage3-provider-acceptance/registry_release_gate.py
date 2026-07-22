@@ -100,6 +100,7 @@ class RegistryReleaseGateOptions:
     supply_chain_timeout_seconds: float
     docker_bin: str
     go_proxy: str | None
+    apk_repositories: str | None
     insecure_registry: bool
     signing_policy_profile: str
     registry_auth_username_environment: str | None
@@ -181,6 +182,7 @@ def parse_args(argv: Sequence[str]) -> RegistryReleaseGateOptions:
     parser.add_argument("--supply-chain-timeout", type=float, default=1800.0)
     parser.add_argument("--docker-bin", default="docker")
     parser.add_argument("--go-proxy")
+    parser.add_argument("--apk-repositories")
     parser.add_argument("--insecure-registry", action="store_true")
     parser.add_argument(
         "--signing-policy-profile",
@@ -207,6 +209,7 @@ def parse_args(argv: Sequence[str]) -> RegistryReleaseGateOptions:
         builder = normalize_builder_name(parsed.builder)
         docker_bin = normalize_executable(parsed.docker_bin, "--docker-bin")
         go_proxy = normalize_go_proxy(parsed.go_proxy)
+        apk_repositories = normalize_apk_repositories(parsed.apk_repositories)
         registry_auth_username_environment = normalize_environment_name(
             parsed.registry_auth_username_env,
             "--registry-auth-username-env",
@@ -299,6 +302,7 @@ def parse_args(argv: Sequence[str]) -> RegistryReleaseGateOptions:
         supply_chain_timeout_seconds=parsed.supply_chain_timeout,
         docker_bin=docker_bin,
         go_proxy=go_proxy,
+        apk_repositories=apk_repositories,
         insecure_registry=parsed.insecure_registry,
         signing_policy_profile=parsed.signing_policy_profile,
         registry_auth_username_environment=registry_auth_username_environment,
@@ -378,6 +382,7 @@ def normalize_executable(value: str, flag: str) -> str:
 
 
 normalize_go_proxy = common.normalize_go_proxy
+normalize_apk_repositories = common.normalize_apk_repositories
 
 
 def _tool_environment(options: RegistryReleaseGateOptions) -> dict[str, str]:
@@ -578,6 +583,8 @@ def build_command(
     ]
     if options.go_proxy is not None:
         command.extend(["--go-proxy", options.go_proxy])
+    if options.apk_repositories is not None:
+        command.extend(["--apk-repositories", options.apk_repositories])
     if no_cache:
         command.append("--no-cache")
     return command
@@ -1599,6 +1606,7 @@ def configuration_evidence(options: RegistryReleaseGateOptions) -> dict[str, Any
         "vulnerabilityPolicy": str(supply_chain.VULNERABILITY_POLICY_PATH),
         "insecureRegistry": options.insecure_registry,
         "goProxyOverride": options.go_proxy is not None,
+        "apkRepositoriesOverride": options.apk_repositories is not None,
         "remoteImagesRetainedAsReleaseEvidence": True,
         "remoteBroadCleanupUsed": False,
     }

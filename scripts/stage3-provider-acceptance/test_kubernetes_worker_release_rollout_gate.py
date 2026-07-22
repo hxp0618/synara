@@ -18,6 +18,10 @@ DIGEST_A = "sha256:" + "a" * 64
 DIGEST_B = "sha256:" + "b" * 64
 IMAGE_ID_A = "sha256:" + "c" * 64
 IMAGE_ID_B = "sha256:" + "d" * 64
+APK_REPOSITORIES = (
+    "https://mirror.example.test/alpine/v3.22/main,"
+    "https://mirror.example.test/alpine/v3.22/community"
+)
 
 
 def gate_options(output_dir: pathlib.Path) -> gate.GateOptions:
@@ -35,6 +39,7 @@ def gate_options(output_dir: pathlib.Path) -> gate.GateOptions:
         load_waves=gate.DEFAULT_LOAD_WAVES,
         registry_image=gate.DEFAULT_REGISTRY_IMAGE,
         go_proxy=None,
+        apk_repositories=None,
     )
 
 
@@ -52,18 +57,23 @@ def release_image(slot: str, digest: str, image_id: str) -> rollout.ReleaseImage
 
 class ParseArgsTest(unittest.TestCase):
     def test_defaults_require_multi_node_owned_kind(self) -> None:
-        options = gate.parse_args([])
+        options = gate.parse_args(["--apk-repositories", APK_REPOSITORIES])
 
         self.assertEqual(options.kind_worker_nodes, 2)
         self.assertEqual(options.load_waves, gate.DEFAULT_LOAD_WAVES)
         self.assertEqual(options.registry_image, gate.DEFAULT_REGISTRY_IMAGE)
         self.assertEqual(options.kind_node_image, "kindest/node:v1.33.1")
+        self.assertEqual(options.apk_repositories, APK_REPOSITORIES)
 
     def test_rejects_single_worker_and_credential_bearing_registry_reference(self) -> None:
         with self.assertRaises(SystemExit):
             gate.parse_args(["--kind-worker-nodes", "1"])
         with self.assertRaises(SystemExit):
             gate.parse_args(["--registry-image", "https://registry.invalid/image"])
+        with self.assertRaises(SystemExit):
+            gate.parse_args(
+                ["--apk-repositories", "https://user:secret@mirror.example.test/alpine/v3.22/main"]
+            )
 
     def test_runner_options_pin_existing_placeholder_without_local_kind_load(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

@@ -218,13 +218,17 @@ ARG SOURCE_DATE_EPOCH=0
 ARG BUN_IMAGE
 ARG AGENTD_BUILD_IMAGE
 ARG WORKER_RUNTIME_IMAGE
+ARG APK_REPOSITORIES=
 
 RUN mkdir -p /opt/synara \
   && printf '%s\n' "${SYNARA_GIT_SHA}" > /opt/synara/.build-revision \
   && touch -d "@${SOURCE_DATE_EPOCH}" /opt /opt/synara /opt/synara/.build-revision
 
 COPY deploy/worker/apk-packages.lock /opt/synara/worker-apk-packages.lock
-RUN xargs apk add --no-cache < /opt/synara/worker-apk-packages.lock \
+RUN if [ -n "${APK_REPOSITORIES}" ]; then \
+    printf '%s' "${APK_REPOSITORIES}" | tr ',' '\n' > /etc/apk/repositories; \
+  fi \
+  && xargs apk add --no-cache < /opt/synara/worker-apk-packages.lock \
   && rm -f /var/log/apk.log
 
 COPY --from=worker-provider-tools /opt/synara/provider-tools /opt/synara/provider-tools
