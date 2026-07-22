@@ -15,7 +15,6 @@ output_mode="load"
 builder="${SYNARA_WORKER_BUILDER:-}"
 docker_bin="docker"
 go_proxy="${SYNARA_WORKER_GOPROXY:-}"
-apk_repositories="${SYNARA_WORKER_APK_REPOSITORIES:-}"
 allow_dirty=0
 no_cache=0
 label_values=()
@@ -36,7 +35,6 @@ Options:
   --builder NAME
   --docker-bin PATH          Optional docker executable or wrapper path.
   --go-proxy URLS            Optional public GOPROXY list; credentials are rejected.
-  --apk-repositories URLS    Optional public Alpine repository list for locked APK packages.
   --label KEY=VALUE          May be repeated.
   --load                     Load one platform into the local Docker Engine (default).
   --push                     Push the image and its attestations.
@@ -100,10 +98,6 @@ while (($# > 0)); do
       ;;
     --go-proxy)
       go_proxy="${2:?--go-proxy requires a value}"
-      shift 2
-      ;;
-    --apk-repositories)
-      apk_repositories="${2:?--apk-repositories requires a value}"
       shift 2
       ;;
     --label)
@@ -172,20 +166,6 @@ if [[ -n "$go_proxy" ]]; then
   for go_proxy_entry in "${go_proxy_entries[@]}"; do
     if [[ "$go_proxy_entry" != "direct" && "$go_proxy_entry" != "off" && ! "$go_proxy_entry" =~ $go_proxy_url_pattern ]]; then
       echo "--go-proxy entries must use https://, direct, or off" >&2
-      exit 2
-    fi
-  done
-fi
-if [[ -n "$apk_repositories" ]]; then
-  if [[ "$apk_repositories" =~ [[:space:][:cntrl:]] || "$apk_repositories" == *"@"* || "$apk_repositories" == *"?"* || "$apk_repositories" == *"#"* ]]; then
-    echo "--apk-repositories must be a public credential-free comma-separated HTTPS repository list without whitespace, userinfo, query, or fragment data" >&2
-    exit 2
-  fi
-  apk_repository_url_pattern="^https://[A-Za-z0-9.-]+(:[0-9]+)?(/[A-Za-z0-9._~!$&'()*+,;=:%/-]*)?$"
-  IFS=',' read -r -a apk_repository_entries <<<"$apk_repositories"
-  for apk_repository_entry in "${apk_repository_entries[@]}"; do
-    if [[ ! "$apk_repository_entry" =~ $apk_repository_url_pattern ]]; then
-      echo "--apk-repositories entries must use https://" >&2
       exit 2
     fi
   done
@@ -288,9 +268,6 @@ build_command=(
 )
 if [[ -n "$go_proxy" ]]; then
   build_command+=(--build-arg "GOPROXY=$go_proxy")
-fi
-if [[ -n "$apk_repositories" ]]; then
-  build_command+=(--build-arg "APK_REPOSITORIES=$apk_repositories")
 fi
 if [[ -n "$builder" ]]; then
   build_command+=(--builder "$builder")

@@ -22,10 +22,6 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 GIT_SHA = "a" * 40
 VERSION = "0.0.0"
 SOURCE_DATE_EPOCH = "1700000000"
-APK_REPOSITORIES = (
-    "https://mirror.example.test/alpine/v3.22/main,"
-    "https://mirror.example.test/alpine/v3.22/community"
-)
 INDEX_DIGESTS = {
     "linux/amd64": "sha256:" + "a" * 64,
     "linux/arm64": "sha256:" + "b" * 64,
@@ -47,7 +43,6 @@ def options(
     repo_root: pathlib.Path = REPO_ROOT,
     docker_bin: str = "docker",
     signing_policy_profile: str = "disposable",
-    apk_repositories: str | None = None,
     insecure_registry: bool | None = None,
     registry_auth_username_environment: str | None = None,
     registry_auth_password_environment: str | None = None,
@@ -98,7 +93,6 @@ def options(
         supply_chain_timeout_seconds=1800.0,
         docker_bin=docker_bin,
         go_proxy="https://goproxy.cn,direct",
-        apk_repositories=apk_repositories,
         insecure_registry=insecure_registry,
         signing_policy_profile=signing_policy_profile,
         registry_auth_username_environment=registry_auth_username_environment,
@@ -458,7 +452,6 @@ class InputValidationTest(unittest.TestCase):
         self.assertEqual(evidence["signingPolicyProfile"], "disposable")
         self.assertEqual(evidence["signingPolicy"], "deploy/worker/signing-policy.json")
         self.assertEqual(evidence["vulnerabilityPolicy"], "deploy/worker/vulnerability-policy.json")
-        self.assertFalse(evidence["apkRepositoriesOverride"])
         self.assertNotIn("ephemeralDigestSigning", evidence)
 
     def test_configuration_can_select_production_signing_profile(self) -> None:
@@ -504,13 +497,6 @@ class InputValidationTest(unittest.TestCase):
                 "caCertEnvironment": gate.supply_chain.PRODUCTION_REGISTRY_CA_CERT_ENV,
             },
         )
-
-    def test_configuration_records_apk_repository_override(self) -> None:
-        evidence = gate.configuration_evidence(
-            options(pathlib.Path("/tmp/output"), apk_repositories=APK_REPOSITORIES)
-        )
-
-        self.assertTrue(evidence["apkRepositoriesOverride"])
 
     def test_parse_args_requires_production_runtime_configmaps(self) -> None:
         with self.assertRaises(SystemExit):
@@ -1772,7 +1758,6 @@ class InputValidationTest(unittest.TestCase):
             gate.normalize_go_proxy("https://goproxy.cn,direct"),
             "https://goproxy.cn,direct",
         )
-        self.assertEqual(gate.normalize_apk_repositories(APK_REPOSITORIES), APK_REPOSITORIES)
 
     def test_rejects_tag_digest_credentials_query_and_invalid_repository_shape(self) -> None:
         invalid = [
@@ -1800,25 +1785,9 @@ class InputValidationTest(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 gate.normalize_go_proxy(value)
 
-    def test_rejects_non_https_or_credential_like_apk_repository_values(self) -> None:
-        invalid = [
-            "http://mirror.example.test/alpine/v3.22/main",
-            "https://user:password@mirror.example.test/alpine/v3.22/main",
-            "https://mirror.example.test/alpine/v3.22/main?token=value",
-            "https://mirror.example.test/alpine/v3.22/main, https://mirror.example.test/alpine/v3.22/community",
-            "https://mirror.example.test/alpine/v3.22/main,,https://mirror.example.test/alpine/v3.22/community",
-        ]
-        for value in invalid:
-            with self.subTest(value=value), self.assertRaises(ValueError):
-                gate.normalize_apk_repositories(value)
-
     def test_build_inputs_keep_proxy_no_cache_and_pinned_sbom_generator(self) -> None:
         command = gate.build_command(
-            options(
-                pathlib.Path("/tmp/output"),
-                docker_bin="/tmp/docker-wrapper",
-                apk_repositories=APK_REPOSITORIES,
-            ),
+            options(pathlib.Path("/tmp/output"), docker_bin="/tmp/docker-wrapper"),
             image="localhost:55091/synara/worker:tag",
             git_sha=GIT_SHA,
             version=VERSION,
@@ -1830,7 +1799,6 @@ class InputValidationTest(unittest.TestCase):
         self.assertIn("--push", command)
         self.assertIn("--no-cache", command)
         self.assertEqual(command[command.index("--go-proxy") + 1], "https://goproxy.cn,direct")
-        self.assertEqual(command[command.index("--apk-repositories") + 1], APK_REPOSITORIES)
         self.assertEqual(command[command.index("--docker-bin") + 1], "/tmp/docker-wrapper")
         self.assertEqual(
             gate.locked_sbom_generator(REPO_ROOT),
@@ -1842,7 +1810,6 @@ class InputValidationTest(unittest.TestCase):
         self.assertIn("type=image,push=true,rewrite-timestamp=true", build_script)
         self.assertIn("--sbom=generator=$sbom_generator", build_script)
         self.assertIn("rm -f /var/log/apk.log", dockerfile)
-        self.assertIn("tr ',' '\\n' > /etc/apk/repositories", dockerfile)
         self.assertIn("--mount=from=worker-provider-tools", dockerfile)
         self.assertIn('/opt/synara/.build-revision', dockerfile)
         self.assertIn("COPY packages/shared/src ./packages/shared/src", dockerfile)
@@ -1985,42 +1952,6 @@ class InputValidationTest(unittest.TestCase):
         )
         self.assertEqual(valid_proxy.returncode, 2)
         self.assertIn("--source-date-epoch", valid_proxy.stderr)
-
-    def test_worker_build_script_rejects_non_https_apk_repositories_before_docker(self) -> None:
-        completed = subprocess.run(
-            [
-                str(REPO_ROOT / "deploy/worker/build.sh"),
-                "--git-sha",
-                GIT_SHA,
-                "--apk-repositories",
-                "http://mirror.example.test/alpine/v3.22/main",
-            ],
-            cwd=REPO_ROOT,
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-
-        self.assertEqual(completed.returncode, 2)
-        self.assertIn("--apk-repositories entries must use https://", completed.stderr)
-
-        valid_repositories = subprocess.run(
-            [
-                str(REPO_ROOT / "deploy/worker/build.sh"),
-                "--git-sha",
-                GIT_SHA,
-                "--source-date-epoch",
-                "invalid",
-                "--apk-repositories",
-                APK_REPOSITORIES,
-            ],
-            cwd=REPO_ROOT,
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-        self.assertEqual(valid_repositories.returncode, 2)
-        self.assertIn("--source-date-epoch", valid_repositories.stderr)
 
     def test_worker_build_script_rejects_dangerous_docker_bin_before_runtime_checks(self) -> None:
         completed = subprocess.run(

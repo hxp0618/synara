@@ -80,7 +80,6 @@ def build_release_image(
     owner: str,
     logs_dir: pathlib.Path,
     go_proxy: str | None,
-    apk_repositories: str | None,
 ) -> ReleaseImage:
     git_sha = driver._head_sha()
     tag = f"{repository}:{slot}-{git_sha[:12]}-{owner[:8]}"
@@ -110,8 +109,6 @@ def build_release_image(
     ]
     if go_proxy is not None:
         arguments.extend(["--go-proxy", go_proxy])
-    if apk_repositories is not None:
-        arguments.extend(["--apk-repositories", apk_repositories])
     driver._worker_build_command(
         arguments,
         log_path=logs_dir / f"worker-{slot}-build.log",

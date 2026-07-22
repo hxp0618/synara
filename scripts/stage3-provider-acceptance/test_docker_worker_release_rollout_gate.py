@@ -19,10 +19,6 @@ TARGET_ID = "55555555-5555-4555-8555-555555555555"
 WORKER_ID = "66666666-6666-4666-8666-666666666666"
 BASELINE_DIGEST = "sha256:" + "a" * 64
 CANDIDATE_DIGEST = "sha256:" + "b" * 64
-APK_REPOSITORIES = (
-    "https://mirror.example.test/alpine/v3.22/main,"
-    "https://mirror.example.test/alpine/v3.22/community"
-)
 
 
 def sample_overview() -> dict[str, object]:
@@ -161,20 +157,10 @@ def sample_outbox() -> list[dict[str, object]]:
 class ParseArgsTest(unittest.TestCase):
     def test_builds_isolated_defaults_without_credentials(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            options = gate.parse_args(
-                [
-                    "--output-dir",
-                    directory,
-                    "--go-proxy",
-                    "https://goproxy.cn,direct",
-                    "--apk-repositories",
-                    APK_REPOSITORIES,
-                ]
-            )
+            options = gate.parse_args(["--output-dir", directory, "--go-proxy", "https://goproxy.cn,direct"])
 
         self.assertEqual(options.registry_image, gate.DEFAULT_REGISTRY_IMAGE)
         self.assertEqual(options.go_proxy, "https://goproxy.cn,direct")
-        self.assertEqual(options.apk_repositories, APK_REPOSITORIES)
         self.assertEqual(options.load_waves, 25)
         self.assertFalse(options.skip_build)
 
@@ -183,8 +169,6 @@ class ParseArgsTest(unittest.TestCase):
             gate.parse_args(["--skip-build"])
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             gate.parse_args(["--go-proxy", "https://user:secret@example.test"])
-        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
-            gate.parse_args(["--apk-repositories", "https://user:secret@mirror.example.test/alpine/v3.22/main"])
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             gate.parse_args(["--registry-image", "https://registry.invalid/image"])
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
