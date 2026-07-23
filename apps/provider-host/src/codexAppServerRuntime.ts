@@ -78,6 +78,7 @@ type CodexRunOptions = {
 
 const REQUEST_TIMEOUT_MS = 20_000;
 const INTERRUPT_GRACE_MS = 2_000;
+const COMMAND_TERMINAL_DRAIN_MS = 2_000;
 const MAX_STDERR_BYTES = 64 * 1024;
 const MAX_WIRE_LINE_BYTES = 4 * 1024 * 1024;
 
@@ -125,6 +126,8 @@ class CodexAppServerRuntime {
   private processExited = false;
   private turnSettled = false;
   private forceKillTimer: NodeJS.Timeout | undefined;
+  private commandTerminalDrainTimer: NodeJS.Timeout | undefined;
+  private completedTurnPendingTerminalDrain: Record<string, unknown> | undefined;
 
   constructor(private readonly options: CodexRunOptions) {
     this.generatedFiles = new WorkspaceGeneratedFileCollector({
@@ -464,7 +467,7 @@ class CodexAppServerRuntime {
   }
 
   private handleServerRequest(request: JsonRpcRequest): void {
-    if (this.turnSettled) return;
+    if (this.turnSettled || this.completedTurnPendingTerminalDrain) return;
     const params = asRecord(request.params) ?? {};
     const requestId = interactionRequestId(request.id, this.options.input.execution.generation);
     if (
@@ -507,6 +510,12 @@ class CodexAppServerRuntime {
   private handleNotification(notification: JsonRpcNotification): void {
     if (this.turnSettled) return;
     const params = asRecord(notification.params) ?? {};
+    if (
+      this.completedTurnPendingTerminalDrain &&
+      !this.isPendingCommandTerminalNotification(notification.method, params)
+    ) {
+      return;
+    }
     switch (notification.method) {
       case "thread/started": {
         this.threadId = readString(asRecord(params.thread), "id") ?? this.threadId;
@@ -617,6 +626,7 @@ class CodexAppServerRuntime {
         });
         if (terminal && notification.method === "item/completed" && itemId) {
           this.commandTerminals.delete(itemId);
+          this.finishCompletedTurnAfterTerminalDrain();
         }
         if (
           notification.method === "item/completed" &&
@@ -726,14 +736,7 @@ class CodexAppServerRuntime {
         if (this.turnId && completedTurnId && completedTurnId !== this.turnId) return;
         const status = readString(turn, "status");
         if (status === "completed") {
-          if (this.commandTerminals.size > 0) {
-            this.failOpenCommandTerminals();
-            this.settleTurn(
-              new Error("Codex app-server completed a Turn with an open command execution."),
-            );
-            return;
-          }
-          this.settleTurn(undefined, turn ?? {});
+          this.settleCompletedTurnAfterTerminalDrain(turn ?? {});
         } else if (status === "interrupted") {
           this.failOpenCommandTerminals();
           this.settleTurn(new ProviderInterruptedError());
@@ -863,7 +866,13 @@ class CodexAppServerRuntime {
 
   private async steer(payload: Record<string, unknown>): Promise<void> {
     const inputText = requiredString(payload.inputText, "SteerTurn inputText");
-    if (!this.threadId || !this.turnId || this.turnSettled || this.processExited) {
+    if (
+      !this.threadId ||
+      !this.turnId ||
+      this.turnSettled ||
+      this.completedTurnPendingTerminalDrain ||
+      this.processExited
+    ) {
       throw new Error("Codex app-server does not have an active steerable Turn.");
     }
     await this.sendRequest("turn/steer", {
@@ -874,7 +883,14 @@ class CodexAppServerRuntime {
   }
 
   private interrupt(): void {
-    if (this.turnSettled || this.processExited || this.interruptRequested) return;
+    if (
+      this.turnSettled ||
+      this.completedTurnPendingTerminalDrain ||
+      this.processExited ||
+      this.interruptRequested
+    ) {
+      return;
+    }
     this.interruptRequested = true;
     if (this.threadId && this.turnId) {
       this.requestNativeInterrupt();
@@ -884,7 +900,15 @@ class CodexAppServerRuntime {
   }
 
   private requestNativeInterrupt(): void {
-    if (!this.threadId || !this.turnId || this.turnSettled || this.processExited) return;
+    if (
+      !this.threadId ||
+      !this.turnId ||
+      this.turnSettled ||
+      this.completedTurnPendingTerminalDrain ||
+      this.processExited
+    ) {
+      return;
+    }
     void this.sendRequest(
       "turn/interrupt",
       { threadId: this.threadId, turnId: this.turnId },
@@ -924,8 +948,53 @@ class CodexAppServerRuntime {
     if (this.turnSettled) return;
     this.turnSettled = true;
     if (this.forceKillTimer) clearTimeout(this.forceKillTimer);
+    if (this.commandTerminalDrainTimer) clearTimeout(this.commandTerminalDrainTimer);
+    this.commandTerminalDrainTimer = undefined;
+    this.completedTurnPendingTerminalDrain = undefined;
     if (error) this.rejectTurn(error);
     else this.resolveTurn(turn);
+  }
+
+  private isPendingCommandTerminalNotification(
+    method: string,
+    params: Record<string, unknown>,
+  ): boolean {
+    if (method === "item/commandExecution/outputDelta") {
+      const itemId = readString(params, "itemId");
+      return itemId !== undefined && this.commandTerminals.has(itemId);
+    }
+    if (method !== "item/completed") return false;
+    const item = asRecord(params.item);
+    const itemId = readString(item, "id");
+    const itemType = readString(item, "type");
+    return (
+      itemId !== undefined &&
+      itemType !== undefined &&
+      isCommandExecutionItem(itemType) &&
+      this.commandTerminals.has(itemId)
+    );
+  }
+
+  private settleCompletedTurnAfterTerminalDrain(turn: Record<string, unknown>): void {
+    if (this.commandTerminals.size === 0) {
+      this.settleTurn(undefined, turn);
+      return;
+    }
+    if (this.completedTurnPendingTerminalDrain) return;
+    this.completedTurnPendingTerminalDrain = turn;
+    this.commandTerminalDrainTimer = setTimeout(() => {
+      this.commandTerminalDrainTimer = undefined;
+      this.completedTurnPendingTerminalDrain = undefined;
+      this.failOpenCommandTerminals();
+      this.settleTurn(
+        new Error("Codex app-server completed a Turn with an open command execution."),
+      );
+    }, COMMAND_TERMINAL_DRAIN_MS);
+  }
+
+  private finishCompletedTurnAfterTerminalDrain(): void {
+    if (!this.completedTurnPendingTerminalDrain || this.commandTerminals.size > 0) return;
+    this.settleTurn(undefined, this.completedTurnPendingTerminalDrain);
   }
 
   private failRuntime(error: Error): void {

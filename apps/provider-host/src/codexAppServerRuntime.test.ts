@@ -167,6 +167,86 @@ describe("Codex app-server runtime", () => {
     });
   });
 
+  it("drains an authoritative command completion delivered after turn completion", async () => {
+    await withFakeCodex("terminal-after-turn", async (directory, _tracePath, environment) => {
+      const messages: RunnerMessage[] = [];
+      const run = startProviderHostRun(
+        codexInput(directory),
+        null,
+        (message) => messages.push(message),
+        { environment },
+      );
+
+      await expect(run.result).resolves.toMatchObject({
+        output: { text: "terminal complete" },
+      });
+      expect(messages).toContainEqual(
+        expect.objectContaining({
+          type: "event",
+          eventType: "runtime.provider.activity",
+          payload: expect.objectContaining({
+            itemId: "command-terminal-late",
+            status: "completed",
+            terminalEventType: "terminal.exited",
+            exitCode: 0,
+          }),
+        }),
+      );
+      expect(messages).not.toContainEqual(
+        expect.objectContaining({
+          type: "event",
+          eventType: "runtime.provider.activity",
+          payload: expect.objectContaining({
+            itemId: "command-terminal-late",
+            status: "failed",
+          }),
+        }),
+      );
+      expect(messages).not.toContainEqual(expect.objectContaining({ type: "interaction" }));
+      expect(messages).not.toContainEqual(
+        expect.objectContaining({
+          type: "event",
+          eventType: "runtime.usage",
+          payload: expect.objectContaining({ inputTokens: 987_654 }),
+        }),
+      );
+      expect(messages).not.toContainEqual(
+        expect.objectContaining({
+          type: "event",
+          eventType: "runtime.provider.warning",
+          payload: expect.objectContaining({ message: "late terminal warning" }),
+        }),
+      );
+    });
+  });
+
+  it("fails closed when a completed turn never closes its command item", async () => {
+    await withFakeCodex("terminal-missing-completion", async (directory, _tracePath, environment) => {
+      const messages: RunnerMessage[] = [];
+      const run = startProviderHostRun(
+        codexInput(directory),
+        null,
+        (message) => messages.push(message),
+        { environment },
+      );
+
+      await expect(run.result).rejects.toThrow(
+        "Codex app-server completed a Turn with an open command execution.",
+      );
+      expect(messages).toContainEqual(
+        expect.objectContaining({
+          type: "event",
+          eventType: "runtime.provider.activity",
+          payload: expect.objectContaining({
+            itemId: "command-terminal-missing",
+            status: "failed",
+            terminalEventType: "terminal.failed",
+          }),
+        }),
+      );
+    });
+  });
+
   it("delivers a native approval response and returns streamed output", async () => {
     await withFakeCodex("approval", async (directory, _tracePath, environment) => {
       const messages: RunnerMessage[] = [];
@@ -825,6 +905,8 @@ async function withFakeCodex(
     | "steer"
     | "proxy-output"
     | "terminal"
+    | "terminal-after-turn"
+    | "terminal-missing-completion"
     | "generated-file"
     | "large-diff"
     | "compact"
@@ -888,6 +970,8 @@ function fakeCodexSource(
     | "steer"
     | "proxy-output"
     | "terminal"
+    | "terminal-after-turn"
+    | "terminal-missing-completion"
     | "generated-file"
     | "large-diff"
     | "compact"
@@ -1040,6 +1124,19 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
       send({ method: "item/commandExecution/outputDelta", params: { threadId: "thread-new", turnId: "turn-1", itemId: "command-terminal-1", delta: "passed\\n" } });
       send({ method: "item/completed", params: { threadId: "thread-new", turnId: "turn-1", item: { id: "command-terminal-1", type: "commandExecution", command: "bun run test", cwd: process.cwd(), aggregatedOutput: "tests passed\\n", exitCode: 0, status: "completed" } } });
       complete("terminal complete");
+    } else if (scenario === "terminal-after-turn") {
+      send({ method: "item/started", params: { threadId: "thread-new", turnId: "turn-1", item: { id: "command-terminal-late", type: "commandExecution", command: "bun run test", cwd: process.cwd(), status: "inProgress" } } });
+      complete("terminal complete");
+      send({ id: "late-terminal-approval", method: "item/commandExecution/requestApproval", params: { command: "late command" } });
+      send({ method: "thread/tokenUsage/updated", params: { threadId: "thread-new", tokenUsage: { last: { inputTokens: 987654 } } } });
+      send({ method: "warning", params: { message: "late terminal warning" } });
+      setTimeout(() => {
+        send({ method: "item/commandExecution/outputDelta", params: { threadId: "thread-new", turnId: "turn-1", itemId: "command-terminal-late", delta: "tests passed\\n" } });
+        send({ method: "item/completed", params: { threadId: "thread-new", turnId: "turn-1", item: { id: "command-terminal-late", type: "commandExecution", command: "bun run test", cwd: process.cwd(), aggregatedOutput: "tests passed\\n", exitCode: 0, status: "completed" } } });
+      }, 15);
+    } else if (scenario === "terminal-missing-completion") {
+      send({ method: "item/started", params: { threadId: "thread-new", turnId: "turn-1", item: { id: "command-terminal-missing", type: "commandExecution", command: "bun run test", cwd: process.cwd(), status: "inProgress" } } });
+      complete("terminal incomplete");
     } else if (scenario === "generated-file") {
       const path = require("node:path");
       const generatedDirectory = path.join(process.cwd(), ".synara-stage3-acceptance");
