@@ -1964,6 +1964,15 @@ def _run_tool(
             ).hostname
         except ValueError:
             registry_hostname = None
+        vault_address = (secret_environment or {}).get("VAULT_ADDR")
+        try:
+            vault_hostname = (
+                urllib.parse.urlsplit(vault_address).hostname
+                if isinstance(vault_address, str)
+                else None
+            )
+        except ValueError:
+            vault_hostname = None
         no_proxy_values = tuple(
             dict.fromkeys(
                 value
@@ -1971,8 +1980,10 @@ def _run_tool(
                     "127.0.0.1",
                     "localhost",
                     "::1",
+                    "host.docker.internal",
                     registry_access.registry_host,
                     registry_hostname,
+                    vault_hostname,
                 )
                 if value
             )

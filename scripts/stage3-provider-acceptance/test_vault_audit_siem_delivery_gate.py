@@ -196,6 +196,9 @@ def write_kubectl_stub(path: pathlib.Path, request_id: str) -> pathlib.Path:
                 "        'status': {'readyReplicas': 3, 'replicas': 3}",
                 "    }))",
                 "elif 'logs' in argv:",
+                "    assert '--since-time' in argv",
+                "    since_time = argv[argv.index('--since-time') + 1]",
+                "    assert since_time.endswith('Z')",
                 "    print('Vector v0.45.0 started')",
                 "else:",
                 "    raise SystemExit('unexpected kubectl argv: ' + ' '.join(argv))",
@@ -722,6 +725,7 @@ class VaultAuditSiemDeliveryGateTest(unittest.TestCase):
         self.assertTrue(report["sink"]["objectLock"]["shortenRetentionBlocked"])
         self.assertEqual(report["sink"]["objectLock"]["shortenRetentionDenialKind"], "object_lock")
         self.assertEqual(report["runtime"]["status"], "observed")
+        self.assertEqual(report["runtime"]["logWindowStartedAt"], report["startedAt"])
         self.assertRegex(
             report["policy"]["objectLock"]["verifierCredentialPolicySha256"],
             r"^[0-9a-f]{64}$",

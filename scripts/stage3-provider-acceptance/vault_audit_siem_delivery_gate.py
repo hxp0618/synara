@@ -1774,6 +1774,7 @@ def inspect_shipper_runtime(
     policy: OperationsPolicy,
     request_id: str,
     request_path: str,
+    since_time: str,
     redactor: acceptance.SecretRedactor,
 ) -> dict[str, Any]:
     try:
@@ -1846,6 +1847,8 @@ def inspect_shipper_runtime(
         f"statefulset/{options.vault_statefulset}",
         "-c",
         options.shipper_container,
+        "--since-time",
+        since_time,
         "--tail=200",
     ]
     try:
@@ -1889,6 +1892,7 @@ def inspect_shipper_runtime(
         "shipperImage": image,
         "readyReplicas": status.get("readyReplicas"),
         "replicas": status.get("replicas"),
+        "logWindowStartedAt": since_time,
         "logSha256": sha256_bytes(logs.encode("utf-8")),
         "logErrorMarkers": [],
         "requestIdentityLogged": False,
@@ -2182,6 +2186,7 @@ def run_vault_audit_siem_delivery_gate(
             policy=policy,
             request_id=str(vault_report["requestId"]),
             request_path=str(vault_report["requestPath"]),
+            since_time=started_at,
             redactor=redactor,
         )
         endpoint = urllib.parse.urlsplit(secret_inputs.sink_endpoint)

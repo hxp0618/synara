@@ -877,6 +877,9 @@ class CommandBoundaryTest(unittest.TestCase):
                     tool="trivy",
                     deadline=supply.time.monotonic() + 60,
                     redactor=redactor,
+                    secret_environment={
+                        "VAULT_ADDR": "https://vault.internal.test:8200",
+                    },
                 )
 
         command = run.call_args.args[0]
@@ -887,6 +890,8 @@ class CommandBoundaryTest(unittest.TestCase):
             self.assertIn(name, environment)
         self.assertEqual(environment["HTTPS_PROXY"], proxy_url)
         self.assertIn("registry.example.test", environment["NO_PROXY"])
+        self.assertIn("host.docker.internal", environment["NO_PROXY"])
+        self.assertIn("vault.internal.test", environment["NO_PROXY"])
         self.assertIn("localhost", environment["NO_PROXY"])
 
     def test_secret_environment_value_is_not_written_to_docker_arguments(self) -> None:
