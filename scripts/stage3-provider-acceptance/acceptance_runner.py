@@ -452,30 +452,28 @@ def terminal_large_node_command(node_executable: str = "node") -> str:
     )
 
 
-def real_provider_read_only_output_command(
-    content: bytes,
-    *,
-    nonce: str | None = None,
-) -> str:
-    output = json.dumps(content.decode("ascii"))
-    nonce_statement = ""
-    if nonce is not None:
-        if re.fullmatch(r"[A-Za-z0-9_.:-]{1,256}", nonce) is None:
-            raise ValueError("read-only command nonce must be a bounded safe identifier")
-        nonce_statement = f"void {json.dumps(nonce)};"
-    return f"node -e '{nonce_statement}process.stdout.write({output})'"
+def real_provider_read_only_output_command(content: bytes) -> str:
+    try:
+        text = content.decode("ascii")
+    except UnicodeDecodeError as error:
+        raise ValueError("read-only output must be one ASCII line") from error
+    if not text.endswith("\n") or "\n" in text[:-1] or "\r" in text:
+        raise ValueError("read-only output must be one ASCII line ending in a newline")
+
+    # Keep the approval command free of both backslash escapes and nested calls.
+    # Codex may present an exact command through a JSON-quoted `bash -lc` wrapper;
+    # the smallest stable command shape is a single console.log call whose own
+    # newline preserves the exact requested output bytes.
+    output = json.dumps(text[:-1])
+    return f"node -e 'console.log({output})'"
 
 
 def real_provider_approval_command(turn_marker: str | None = None) -> str:
-    turn_nonce = None
-    if turn_marker is not None:
-        if re.fullmatch(r"[A-Za-z0-9_.:-]{1,256}", turn_marker) is None:
-            raise ValueError("approval Turn marker must be a bounded safe identifier")
-        turn_nonce = "turn-" + hashlib.sha256(turn_marker.encode("utf-8")).hexdigest()[:24]
-    return real_provider_read_only_output_command(
-        REAL_PROVIDER_APPROVAL_CONTENT,
-        nonce=turn_nonce,
-    )
+    if turn_marker is None:
+        return real_provider_read_only_output_command(REAL_PROVIDER_APPROVAL_CONTENT)
+    if re.fullmatch(r"[A-Za-z0-9_.:-]{1,256}", turn_marker) is None:
+        raise ValueError("approval Turn marker must be a bounded safe identifier")
+    return real_provider_read_only_output_command((turn_marker + "\n").encode("ascii"))
 
 
 def real_provider_host_crash_command() -> str:

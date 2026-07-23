@@ -2339,7 +2339,7 @@ class RealProviderSequentialApprovalSuite(acceptance.AcceptanceSuite):
         if runtime_mode != "approval-required" or interaction_mode != "default":
             raise AssertionError("unexpected real Provider approval Turn mode")
         command = acceptance.real_provider_approval_command(self.marker)
-        if input_text.count(command) != 1 or input_text.count(self.marker) != 1:
+        if input_text.count(command) != 1 or input_text.count(self.marker) != 2:
             raise AssertionError("real Provider approval prompt omitted its command or marker")
         self.created_input = input_text
         return {"id": "turn-approval"}
@@ -4200,7 +4200,7 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
                 "approval",
                 lambda: acceptance.real_provider_approval_command(marker),
                 acceptance.real_provider_approval_prompt,
-                acceptance.REAL_PROVIDER_APPROVAL_CONTENT,
+                (marker + "\n").encode("ascii"),
                 acceptance.REAL_PROVIDER_APPROVAL_RELATIVE_PATH,
             ),
             (
@@ -4230,12 +4230,23 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
                     stderr=subprocess.PIPE,
                     check=True,
                 )
+                wrapped_command = "/bin/bash -lc " + json.dumps(command)
+                wrapped_completed = subprocess.run(
+                    ["bash", "-c", wrapped_command],
+                    cwd=directory,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    check=True,
+                )
                 workspace_entries = list(pathlib.Path(directory).iterdir())
                 prompt = prompt_factory(case_marker)
 
                 self.assertEqual(completed.stdout, expected_output)
                 self.assertEqual(completed.stderr, b"")
+                self.assertEqual(wrapped_completed.stdout, expected_output)
+                self.assertEqual(wrapped_completed.stderr, b"")
                 self.assertEqual(workspace_entries, [])
+                self.assertNotIn("\\", command)
                 self.assertNotIn(">", prompt)
                 self.assertNotIn(relative_path, prompt)
                 self.assertIn(f"\n{command}\n", prompt)
@@ -4243,15 +4254,15 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
                 self.assertTrue(acceptance.real_provider_approval_command_matches(command, command))
                 self.assertTrue(
                     acceptance.real_provider_approval_command_matches(
-                        "/bin/bash -lc " + json.dumps(command),
+                        wrapped_command,
                         command,
                     )
                 )
                 self.assertIn("Do not emit any assistant text before the tool call", prompt)
                 self.assertIn("complete assistant text for this Turn must be exactly", prompt)
-                self.assertEqual(prompt.count(case_marker), 1)
+                self.assertEqual(prompt.count(case_marker), 2 if label == "approval" else 1)
 
-    def test_real_provider_approval_prompt_counts_exactly_once_in_current_new_turn(self) -> None:
+    def test_real_provider_approval_prompt_binds_marker_to_command_and_final_text(self) -> None:
         marker = "APPROVAL_TURN_NONCE"
         command = acceptance.real_provider_approval_command(marker)
 
@@ -4264,6 +4275,7 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
         self.assertIn("do not request escalated permissions", prompt)
         self.assertIn("do not set sandbox_permissions, justification, or prefix_rule", prompt)
         self.assertEqual(prompt.count(command), 1)
+        self.assertEqual(prompt.count(marker), 2)
 
     def test_real_provider_approval_command_is_unique_per_turn_marker(self) -> None:
         first = acceptance.real_provider_approval_command("APPROVAL_TURN_ONE")
@@ -4274,12 +4286,16 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
         self.assertNotEqual(first, second)
         self.assertTrue(acceptance.real_provider_approval_command_matches(first, first))
         self.assertFalse(acceptance.real_provider_approval_command_matches(first, second))
-        self.assertIn('void "turn-', first)
-        self.assertNotIn("APPROVAL_TURN_ONE", first)
+        self.assertIn("APPROVAL_TURN_ONE", first)
 
-    def test_real_provider_approval_command_rejects_unsafe_turn_nonce(self) -> None:
+    def test_real_provider_approval_command_rejects_unsafe_turn_marker(self) -> None:
         with self.assertRaisesRegex(ValueError, "bounded safe identifier"):
             acceptance.real_provider_approval_command("unsafe'nonce")
+
+    def test_real_provider_read_only_output_command_requires_one_ascii_line(self) -> None:
+        for content in (b"missing-newline", b"two\nlines\n", b"carriage-return\r\n", b"bad-\xff\n"):
+            with self.subTest(content=content), self.assertRaisesRegex(ValueError, "one ASCII line"):
+                acceptance.real_provider_read_only_output_command(content)
 
     def test_real_provider_approval_resolution_accepts_sequential_follow_up_approvals(self) -> None:
         suite = RealProviderSequentialApprovalSuite(
