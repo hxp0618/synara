@@ -133,9 +133,11 @@
   饱和槽位释放后的 slot-reuse admission P95/P99 `2s/3s` 与 unexpected error rate `0`。两个 admission
   时钟都在 `POST /turns` 返回 `201` 时停止，不把第三方 API、自定义模型推理或生成 Approval interaction
   的时间伪装成 Synara 控制面 SLI；后两者仍以 `interactionReadyLatencyMs` / `turnCompletionLatencyMs`
-  强制记录 P50/P95/P99，供 Provider profile 容量规划。生产 SLA gate 在当前 clean SHA 正式执行前继续
-  保持 open；该测量不能被写成生产 SLA 已通过。完整前序证据见
-  `docs/reports/stage-3-docker-resource-profiled-load-e2d70fb6.md`。
+  强制记录 P50/P95/P99，供 Provider profile 容量规划。真实 Kubernetes Codex/Claude load children 已分别
+  在 clean `cc546d3a`/`46f99518` 完成 `1869.164s`/`1835.697s`、一次 Control Plane restart、全部 SLA 与零
+  unexpected error；证据见 `docs/reports/stage-3-real-provider-kubernetes-load-2026-07-23.md`。这关闭两个
+  新增 load child，不等于同一 SHA/共享镜像六 child aggregate 或 production-duration Retention/soak 已完成。
+  完整前序测量证据见 `docs/reports/stage-3-docker-resource-profiled-load-e2d70fb6.md`。
 - 生产镜像签名已批准使用自建三节点 Vault Transit KMS：KMS reference
   `hashivault://synara-worker-release`，Credential 环境变量名 `VAULT_ADDR` / `VAULT_TOKEN` /
   `VAULT_CACERT`，signer identity `auth/approle/role/synara-worker-release-signer`。签名强制 public Rekor
@@ -1582,7 +1584,7 @@ Provider × Capability × Execution Target
 - 故障测试没有 Event 丢失、重复终态、双 Worker 写入或 Credential 泄漏。
 - Acceptance 结果生成机器可读报告和 Markdown 摘要。
 
-### L 当前证据（2026-07-19）
+### L 当前证据（更新于 2026-07-23）
 
 - `scripts/stage3-provider-acceptance/acceptance_runner.py` 已形成同一套用例编排、红线脱敏与
   JSON/Markdown 报告；Local、Docker 和 Kubernetes 通过用户 API、真实 Control Plane/agentd
@@ -2017,6 +2019,18 @@ Provider × Capability × Execution Target
   与 exact cleanup；这不等于 production multi-node/cloud CNI/registry rollout。
   SSH、Kubernetes 与 Docker 真实 Provider 四 child Gate 已分别在 clean `14f7dd2d`/`3c523417`/`b1c52bae`
   通过；受控第三方 Key/Base URL/自定义模型、完整 product/failure matrix、cleanup 与 Secret scan 均已证明。
+  `47214f38` 的 Docker 六 child 聚合后来通过 Codex product/failure/load 与 Claude product/failure，只在
+  Claude load 失败；该唯一失败 child 已在 clean `7ed723e2` 以 operator-approved `1800s` SLA 单独通过
+  `17` 波、`68/68` Execution、`34/34` quota rejection/retry、一次 Control Plane restart、精确 cleanup 与
+  零 Secret finding。证据见 `docs/reports/stage-3-real-provider-docker-claude-load-7ed723e2.md`。这关闭该
+  具体实现 blocker，但没有把分离的 child 结果伪装成同一 SHA/共享不可变镜像的六 child aggregate。
+  Kubernetes 新增的两个 `1800s` load child 也已分别在 clean `cc546d3a`/`46f99518` 通过：Codex `11` 波、
+  `44/44` Execution、`22/22` quota rejection/retry；Claude `12` 波、`48/48` Execution、`24/24` rejection/retry；
+  两者均完成一次 Control Plane restart、严格 SLA、精确 cleanup 与零 Secret finding。证据见
+  `docs/reports/stage-3-real-provider-kubernetes-load-2026-07-23.md`。这同样不替代同 SHA 六 child aggregate。
+  前序 Registry production-profile gate 的唯一 Trivy DB `EOF` 失败也已由 `d0b379c8` 的不持久化代理通道
+  和 plain-EOF bounded retry 关闭；针对两个已验证 digest 的双架构扫描为 `HIGH=0`、`CRITICAL=0`、Secret=0，
+  且没有重复 build/sign/Rekor write。证据见 `docs/reports/stage-3-registry-vulnerability-proxy-d0b379c8.md`。
   同一 release SHA 的四 Target 重跑、真实 Provider 并发/Retention/load/failure、multi-host/production
   Kubernetes multi-node、按资源档位验证的生产 SLA 与 production-duration soak 尚未完成。
 
