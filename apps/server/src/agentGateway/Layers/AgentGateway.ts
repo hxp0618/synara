@@ -169,6 +169,10 @@ export const makeAgentGateway = Effect.gen(function* () {
     providerDiscovery,
     loadProviderAvailabilities,
     requireThreadShell,
+    workspacePaths: {
+      homeDir: serverConfig.homeDir,
+      chatWorkspaceRoot: serverConfig.chatWorkspaceRoot,
+    },
   });
   const diagnosticTools = makeThreadDiagnosticTools({
     snapshotQuery,
@@ -247,7 +251,13 @@ export const makeAgentGateway = Effect.gen(function* () {
         openWorldHint: true,
       },
     },
-    handler: (args, context) => runCreateThreads(decodeCreateThreadsInput(args), context),
+    handler: (args, context) =>
+      runCreateThreads(decodeCreateThreadsInput(args), {
+        kind: "provider-session",
+        callerThreadId: context.callerThreadId,
+        callerTurnId: context.callerTurnId,
+        assertAuthority: context.assertCallerTurnActive,
+      }),
   };
 
   const createThread: ToolEntry = {
@@ -325,7 +335,12 @@ export const makeAgentGateway = Effect.gen(function* () {
             requestId: readStringArg(args, "requestId", { required: true }),
             threads: [spec],
           }),
-          context,
+          {
+            kind: "provider-session",
+            callerThreadId: context.callerThreadId,
+            callerTurnId: context.callerTurnId,
+            assertAuthority: context.assertCallerTurnActive,
+          },
         ).pipe(
           Effect.map((result) => {
             if (result.isError) return result;

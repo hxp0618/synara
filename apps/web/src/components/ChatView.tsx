@@ -117,6 +117,7 @@ import { resolveSubagentPresentationForThread } from "../lib/subagentPresentatio
 import { ensureHomeChatProject, isHomeChatContainerProject } from "../lib/chatProjects";
 import { ensureStudioProject, isStudioContainerProject } from "../lib/studioProjects";
 import { resolveFirstSendTarget } from "../lib/chatFirstSend";
+import { readActiveSpaceId } from "../spacesUiStore";
 import {
   createOrRecoverProjectFromPath,
   PROJECT_CREATE_EXISTING_SYNC_ERROR,
@@ -175,6 +176,7 @@ import {
   resolveEnvironmentPanelPreferenceAfterFirstSend,
   resolveEnvironmentPanelPreferenceUpdate,
   resolveEnvironmentPanelVisible,
+  resolveGitRepoUiState,
   resolveProjectScriptTerminalTarget,
   resolvePromptHistoryNavigation,
   shouldHandlePromptHistoryNavigationKey,
@@ -200,7 +202,11 @@ import {
   ensureLeadingSpaceForReplacement,
   extendReplacementRangeForTrailingSpace,
 } from "../composerTriggerInsertion";
-import { createProjectSelector, createThreadSelector } from "../storeSelectors";
+import {
+  createProjectSelector,
+  createComposerThreadMentionSourcesSelector,
+  createThreadSelector,
+} from "../storeSelectors";
 import { retainThreadDetailSubscription } from "../threadDetailSubscriptionRetention";
 import {
   canOfferForkSlashCommand,
@@ -1282,6 +1288,10 @@ export default function ChatView({
   const markWorkflowRunPaused = useWorkflowRunUiStore((store) => store.markPaused);
   const markWorkflowRunDismissed = useWorkflowRunUiStore((store) => store.markDismissed);
   const serverThread = useStore(useMemo(() => createThreadSelector(threadId), [threadId]));
+  const composerThreadSummaries = useStore(
+    useMemo(() => createComposerThreadMentionSourcesSelector(), []),
+  );
+  const composerThreadProjects = useStore((state) => state.projects);
   const crossTaskSourceThreadId =
     serverThread?.creationSource && serverThread.sourceThreadId
       ? serverThread.sourceThreadId
@@ -3240,7 +3250,6 @@ export default function ChatView({
       })
     : null;
   const gitCwd = threadWorkspaceCwd;
-  const showGitActions = !isContainerLandingProject || Boolean(resolvedThreadWorktreePath);
   const gitBranchSourceCwd = activeProject
     ? resolveThreadBranchSourceCwd({
         projectCwd: activeProject.cwd,
@@ -3465,6 +3474,11 @@ export default function ChatView({
     canOfferSideCommand,
     canOfferExportCommand,
     dynamicAgents,
+    threadMentionSources: {
+      threads: composerThreadSummaries,
+      projects: composerThreadProjects,
+      currentThreadId: threadId,
+    },
   });
   const composerMenuItems = useMemo(() => {
     if (composerCommandPicker === "fork-target") {
@@ -3675,8 +3689,15 @@ export default function ChatView({
       worktreePath: activeThreadWorktreePath,
     });
   }, [activeProjectCwd, activeThreadWorktreePath]);
-  // Default true while loading to avoid toolbar flicker.
-  const isGitRepo = branchesQuery.data?.isRepo ?? true;
+  const isGitRepo = resolveGitRepoUiState({
+    isStudioContainer,
+    queriedIsRepo: branchesQuery.data?.isRepo,
+  });
+  // Studio never offers "Initialize Git": a folder picked via "Use a folder" is casual
+  // context, not a repo-to-be, so git actions appear there only when it already is one.
+  const showGitActions = isStudioContainer
+    ? Boolean(resolvedThreadWorktreePath) && isGitRepo
+    : !isContainerLandingProject || Boolean(resolvedThreadWorktreePath);
   const repoDiffTotals = useRepoDiffTotals({
     gitCwd: threadWorkspaceCwd,
     isGitRepo,
@@ -7252,6 +7273,10 @@ export default function ChatView({
       pastedTexts: sendableComposerPastedTexts,
     });
     const title = buildPromptThreadTitleFallback(titleSeed);
+    const currentStoreState = useStore.getState();
+    // Keep an optimistically selected Space across the command/snapshot race. The server
+    // validates this best-effort target and degrades genuinely stale/deleted ids to Void.
+    const activeSpaceIdForSend = readActiveSpaceId();
     const firstSendTarget = resolveFirstSendTarget({
       activeProject,
       chatWorkspaceRoot,
@@ -7259,7 +7284,7 @@ export default function ChatView({
       isFirstMessage,
       isHomeChatContainer,
       isStudioContainer,
-      projects: useStore.getState().projects,
+      projects: currentStoreState.projects,
       selectedWorkspaceRoot: isContainerLandingProject
         ? (resolvedThreadWorktreePath ?? null)
         : null,
@@ -7303,6 +7328,11 @@ export default function ChatView({
             workspaceRoot: firstSendTarget.creation.workspaceRoot,
             createWorkspaceRootIfMissing: firstSendTarget.creation.createWorkspaceRootIfMissing,
             defaultModelSelection: firstSendTarget.creation.defaultModelSelection,
+            // Managed chat rows stay global; a folder mention creates an ordinary project
+            // and should inherit the Space where the first send originated.
+            ...(firstSendTarget.creation.kind === "project"
+              ? { spaceId: activeSpaceIdForSend }
+              : {}),
             createdAt,
           });
           targetProjectIdForSend = projectId;
@@ -9654,7 +9684,7 @@ export default function ChatView({
         });
         return;
       }
-      if (item.type === "plugin") {
+      if (item.type === "plugin" || item.type === "thread") {
         applyComposerTriggerReplacement({
           snapshot,
           trigger,
@@ -10306,10 +10336,21 @@ export default function ChatView({
           triggerClassName="h-7 py-1"
           showResetToHome={Boolean(resolvedThreadWorktreePath)}
           selectedWorkspaceRoot={resolvedThreadWorktreePath}
-          onSelectProject={handleSelectProjectForEmptyDraft}
           onSelectWorkspaceRoot={handleSelectWorkspaceRoot}
-          onCreateProjectFromPath={handleCreateProjectFromPickerPath}
           onResetToHome={handleResetWorkspaceToHome}
+          // Studio folder picks only tag the chat's workspace root; they never create a
+          // Projects entry or move the draft out of the Studio container.
+          {...(isStudioContainer
+            ? {
+                emptyTriggerLabel: "Use a folder",
+                addActionLabel: "Choose a folder",
+                resetActionLabel: "Don't use a folder",
+                searchPlaceholder: "Search folders",
+              }
+            : {
+                onSelectProject: handleSelectProjectForEmptyDraft,
+                onCreateProjectFromPath: handleCreateProjectFromPickerPath,
+              })}
         />
       ) : showEmptyLandingProjectPicker ? (
         <ProjectPicker
@@ -10390,6 +10431,7 @@ export default function ChatView({
     activeThreadId: activeThread.id,
     activeProvider: activeThread.session?.provider ?? activeThread.modelSelection.provider,
     isStudioChat: isStudioContainer,
+    studioFolderPath: isStudioContainer ? resolvedThreadWorktreePath : null,
     showGitActions,
     diffOpen: resolvedDiffOpen,
     threadAutomations: threadAutomationItems,

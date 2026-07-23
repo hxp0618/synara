@@ -10,6 +10,7 @@ export * from "./providerHost";
 export * from "./model";
 export * from "./agentMentions";
 export * from "./agentGateway";
+export * from "./externalMcp";
 export * from "./ws";
 export * from "./wsCompatibility";
 export * from "./keybindings";

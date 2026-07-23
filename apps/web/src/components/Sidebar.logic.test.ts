@@ -21,6 +21,7 @@ import {
   getRenderedThreadsForSidebarProject,
   groupSidebarThreadsByProjectId,
   isLatestPinnedProjectMutation,
+  isProjectsSidebarSurface,
   getUnpinnedThreadsForSidebar,
   getVisibleSidebarThreadIds,
   getVisibleThreadsForProject,
@@ -81,6 +82,39 @@ describe("resolvePendingSidebarViewSelection", () => {
   });
 });
 
+describe("isProjectsSidebarSurface", () => {
+  it("enables Space shortcuts only where the Space switcher is visible", () => {
+    expect(
+      isProjectsSidebarSurface({
+        isOnSettings: false,
+        isOnStudio: false,
+        isOnWorkspace: false,
+      }),
+    ).toBe(true);
+    expect(
+      isProjectsSidebarSurface({
+        isOnSettings: false,
+        isOnStudio: true,
+        isOnWorkspace: false,
+      }),
+    ).toBe(false);
+    expect(
+      isProjectsSidebarSurface({
+        isOnSettings: false,
+        isOnStudio: false,
+        isOnWorkspace: true,
+      }),
+    ).toBe(false);
+    expect(
+      isProjectsSidebarSurface({
+        isOnSettings: true,
+        isOnStudio: false,
+        isOnWorkspace: false,
+      }),
+    ).toBe(false);
+  });
+});
+
 describe("resolvePullRequestReviewBadge", () => {
   it("distinguishes complete, partial, and unavailable review counts", () => {
     expect(resolvePullRequestReviewBadge({ count: 3, incomplete: false })).toEqual({
@@ -91,10 +125,7 @@ describe("resolvePullRequestReviewBadge", () => {
       text: "3+",
       accessibleLabel: "At least 3 pull requests are waiting for your review",
     });
-    expect(resolvePullRequestReviewBadge({ count: 0, incomplete: true })).toEqual({
-      text: "?",
-      accessibleLabel: "The pull request review count is temporarily incomplete",
-    });
+    expect(resolvePullRequestReviewBadge({ count: 0, incomplete: true })).toBeNull();
     expect(resolvePullRequestReviewBadge({ count: 0, incomplete: false })).toBeNull();
     expect(resolvePullRequestReviewBadge(undefined)).toBeNull();
     expect(resolvePullRequestReviewBadge({ count: 1, incomplete: false })?.accessibleLabel).toBe(
@@ -588,6 +619,7 @@ describe("pin helpers", () => {
       cwd: `/tmp/${id}`,
       defaultModelSelection: null,
       expanded: true,
+      spaceId: null,
       createdAt: "2026-03-09T10:00:00.000Z",
       updatedAt: "2026-03-09T10:00:00.000Z",
       scripts: [],
@@ -1453,6 +1485,7 @@ function makeProject(overrides: Partial<Project> = {}): Project {
       ...defaultModelSelection,
     },
     expanded: true,
+    spaceId: null,
     createdAt: "2026-03-09T10:00:00.000Z",
     updatedAt: "2026-03-09T10:00:00.000Z",
     scripts: [],
@@ -1901,7 +1934,7 @@ describe("sortThreadsForSidebar", () => {
     ]);
   });
 
-  it("floats unseen finished threads above live threads, and live above plain", () => {
+  it("floats live threads above unseen finished, and unseen finished above plain", () => {
     const sorted = sortThreadsForSidebar(
       [
         makeThread({
@@ -1928,8 +1961,8 @@ describe("sortThreadsForSidebar", () => {
     );
 
     expect(sorted.map((thread) => thread.id)).toEqual([
-      ThreadId.makeUnsafe("thread-finished"),
       ThreadId.makeUnsafe("thread-working"),
+      ThreadId.makeUnsafe("thread-finished"),
       ThreadId.makeUnsafe("thread-newest-plain"),
     ]);
   });
