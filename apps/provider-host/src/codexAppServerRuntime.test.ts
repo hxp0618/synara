@@ -220,32 +220,39 @@ describe("Codex app-server runtime", () => {
     });
   });
 
-  it("fails closed when a completed turn never closes its command item", async () => {
-    await withFakeCodex("terminal-missing-completion", async (directory, _tracePath, environment) => {
-      const messages: RunnerMessage[] = [];
-      const run = startProviderHostRun(
-        codexInput(directory),
-        null,
-        (message) => messages.push(message),
-        { environment },
-      );
+  it(
+    "fails closed when a completed turn never closes its command item",
+    async () => {
+      await withFakeCodex(
+        "terminal-missing-completion",
+        async (directory, _tracePath, environment) => {
+          const messages: RunnerMessage[] = [];
+          const run = startProviderHostRun(
+            codexInput(directory),
+            null,
+            (message) => messages.push(message),
+            { environment },
+          );
 
-      await expect(run.result).rejects.toThrow(
-        "Codex app-server completed a Turn with an open command execution.",
+          await expect(run.result).rejects.toThrow(
+            "Codex app-server completed a Turn with an open command execution.",
+          );
+          expect(messages).toContainEqual(
+            expect.objectContaining({
+              type: "event",
+              eventType: "runtime.provider.activity",
+              payload: expect.objectContaining({
+                itemId: "command-terminal-missing",
+                status: "failed",
+                terminalEventType: "terminal.failed",
+              }),
+            }),
+          );
+        },
       );
-      expect(messages).toContainEqual(
-        expect.objectContaining({
-          type: "event",
-          eventType: "runtime.provider.activity",
-          payload: expect.objectContaining({
-            itemId: "command-terminal-missing",
-            status: "failed",
-            terminalEventType: "terminal.failed",
-          }),
-        }),
-      );
-    });
-  });
+    },
+    15_000,
+  );
 
   it("delivers a native approval response and returns streamed output", async () => {
     await withFakeCodex("approval", async (directory, _tracePath, environment) => {
@@ -1133,7 +1140,7 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
       setTimeout(() => {
         send({ method: "item/commandExecution/outputDelta", params: { threadId: "thread-new", turnId: "turn-1", itemId: "command-terminal-late", delta: "tests passed\\n" } });
         send({ method: "item/completed", params: { threadId: "thread-new", turnId: "turn-1", item: { id: "command-terminal-late", type: "commandExecution", command: "bun run test", cwd: process.cwd(), aggregatedOutput: "tests passed\\n", exitCode: 0, status: "completed" } } });
-      }, 15);
+      }, 2_250);
     } else if (scenario === "terminal-missing-completion") {
       send({ method: "item/started", params: { threadId: "thread-new", turnId: "turn-1", item: { id: "command-terminal-missing", type: "commandExecution", command: "bun run test", cwd: process.cwd(), status: "inProgress" } } });
       complete("terminal incomplete");
