@@ -265,6 +265,7 @@ def supply_options(
     registry_auth_username_environment: str | None = None,
     registry_auth_password_environment: str | None = None,
     registry_ca_cert_environment: str | None = None,
+    tool_proxy_url: str | None = None,
     production_public_key_configmap_path: pathlib.Path | None = None,
     production_repository_configmap_path: pathlib.Path | None = None,
 ) -> supply.SupplyChainOptions:
@@ -278,6 +279,7 @@ def supply_options(
         registry_auth_username_environment=registry_auth_username_environment,
         registry_auth_password_environment=registry_auth_password_environment,
         registry_ca_cert_environment=registry_ca_cert_environment,
+        tool_proxy_url=tool_proxy_url,
         production_public_key_configmap_path=production_public_key_configmap_path,
         production_repository_configmap_path=production_repository_configmap_path,
     )
@@ -857,6 +859,36 @@ class ConfigurationTest(unittest.TestCase):
 
 
 class CommandBoundaryTest(unittest.TestCase):
+    def test_proxy_value_is_passed_by_environment_and_registry_bypasses_it(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            proxy_url = "http://host.docker.internal:6152"
+            options = supply_options(
+                pathlib.Path(directory) / "state",
+                insecure_registry=True,
+                tool_proxy_url=proxy_url,
+            )
+            completed = subprocess.CompletedProcess(["docker"], 0, stdout="ok", stderr="")
+            redactor = acceptance.SecretRedactor()
+            with mock.patch.object(supply.subprocess, "run", return_value=completed) as run:
+                supply._run_tool(
+                    options,
+                    image="example.test/trivy:v1.0.0@sha256:" + "d" * 64,
+                    arguments=["image", "registry.example.test/synara/worker@sha256:" + "a" * 64],
+                    tool="trivy",
+                    deadline=supply.time.monotonic() + 60,
+                    redactor=redactor,
+                )
+
+        command = run.call_args.args[0]
+        environment = run.call_args.kwargs["env"]
+        self.assertNotIn(proxy_url, command)
+        for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"):
+            self.assertIn(name, command)
+            self.assertIn(name, environment)
+        self.assertEqual(environment["HTTPS_PROXY"], proxy_url)
+        self.assertIn("registry.example.test", environment["NO_PROXY"])
+        self.assertIn("localhost", environment["NO_PROXY"])
+
     def test_secret_environment_value_is_not_written_to_docker_arguments(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             state_dir = pathlib.Path(directory) / "state"
@@ -992,12 +1024,25 @@ class CommandBoundaryTest(unittest.TestCase):
                 ),
             },
         )
+        plain_eof = supply.common.ReleaseGateError(
+            "release.registry_supply_chain_command_failed",
+            "Trivy failed.",
+            {
+                "tool": "trivy",
+                "returnCode": 1,
+                "outputExcerpt": (
+                    'failed to download vulnerability DB: Get "https://mirror.gcr.io/v2/": EOF'
+                ),
+            },
+        )
         policy_failure = supply.common.ReleaseGateError(
             "release.registry_supply_chain_command_failed",
             "Trivy failed.",
             {"tool": "trivy", "returnCode": 1, "outputExcerpt": "policy failure"},
         )
         completed = subprocess.CompletedProcess(["docker"], 0, stdout="", stderr="")
+
+        self.assertTrue(supply._retryable_trivy_database_download(plain_eof))
 
         with tempfile.TemporaryDirectory() as directory:
             state_dir = pathlib.Path(directory) / "state"

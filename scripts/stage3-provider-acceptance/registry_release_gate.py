@@ -105,6 +105,7 @@ class RegistryReleaseGateOptions:
     registry_auth_username_environment: str | None
     registry_auth_password_environment: str | None
     registry_ca_cert_environment: str | None
+    supply_chain_proxy_url: str | None = None
     production_public_key_configmap_path: pathlib.Path | None = None
     production_repository_configmap_path: pathlib.Path | None = None
     production_registry_config_path: pathlib.Path | None = None
@@ -129,6 +130,35 @@ def normalize_environment_name(value: str | None, flag: str) -> str | None:
     if not name or supply_chain.ENVIRONMENT_NAME_PATTERN.fullmatch(name) is None:
         raise ValueError(f"{flag} must be an uppercase environment variable name")
     return name
+
+
+def normalize_supply_chain_proxy_url(value: str, flag: str) -> str:
+    proxy_url = value.strip()
+    if not proxy_url or len(proxy_url) > 2048 or any(
+        character in "\r\n\t\x00" for character in proxy_url
+    ):
+        raise ValueError(f"{flag} must contain one HTTP(S) proxy URL")
+    try:
+        parsed = urllib.parse.urlsplit(proxy_url)
+        port = parsed.port
+    except ValueError:
+        raise ValueError(f"{flag} must contain one HTTP(S) proxy URL") from None
+    if (
+        parsed.scheme not in {"http", "https"}
+        or parsed.hostname is None
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+        or parsed.path not in {"", "/"}
+        or port is None
+        or port < 1
+        or port > 65535
+    ):
+        raise ValueError(
+            f"{flag} must contain one credential-free HTTP(S) proxy URL with an explicit port"
+        )
+    return proxy_url.removesuffix("/")
 
 
 def normalize_container_name(value: str | None, flag: str) -> str | None:
@@ -190,6 +220,13 @@ def parse_args(argv: Sequence[str]) -> RegistryReleaseGateOptions:
     parser.add_argument("--registry-auth-username-env")
     parser.add_argument("--registry-auth-password-env")
     parser.add_argument("--registry-ca-cert-env")
+    parser.add_argument(
+        "--supply-chain-proxy-env",
+        help=(
+            "Environment variable containing the credential-free, container-reachable HTTP(S) "
+            "proxy URL used only by digest-pinned supply-chain tool containers"
+        ),
+    )
     parser.add_argument("--production-public-key-configmap", type=pathlib.Path)
     parser.add_argument("--production-repository-configmap", type=pathlib.Path)
     parser.add_argument("--production-registry-config", type=pathlib.Path)
@@ -218,6 +255,23 @@ def parse_args(argv: Sequence[str]) -> RegistryReleaseGateOptions:
         registry_ca_cert_environment = normalize_environment_name(
             parsed.registry_ca_cert_env,
             "--registry-ca-cert-env",
+        )
+        supply_chain_proxy_environment = normalize_environment_name(
+            parsed.supply_chain_proxy_env,
+            "--supply-chain-proxy-env",
+        )
+        supply_chain_proxy_url = (
+            normalize_supply_chain_proxy_url(
+                acceptance.read_environment_value(
+                    supply_chain_proxy_environment,
+                    "Worker Registry supply-chain proxy",
+                    maximum_length=2048,
+                    forbidden_characters="\r\n\t\x00",
+                ),
+                "--supply-chain-proxy-env",
+            )
+            if supply_chain_proxy_environment is not None
+            else None
         )
         production_registry_container = normalize_container_name(
             parsed.production_registry_container,
@@ -304,6 +358,7 @@ def parse_args(argv: Sequence[str]) -> RegistryReleaseGateOptions:
         registry_auth_username_environment=registry_auth_username_environment,
         registry_auth_password_environment=registry_auth_password_environment,
         registry_ca_cert_environment=registry_ca_cert_environment,
+        supply_chain_proxy_url=supply_chain_proxy_url,
         production_public_key_configmap_path=(
             parsed.production_public_key_configmap.expanduser().resolve()
             if parsed.production_public_key_configmap is not None
@@ -1663,6 +1718,7 @@ def configuration_evidence(options: RegistryReleaseGateOptions) -> dict[str, Any
         "vulnerabilityPolicy": str(supply_chain.VULNERABILITY_POLICY_PATH),
         "insecureRegistry": options.insecure_registry,
         "goProxyOverride": options.go_proxy is not None,
+        "supplyChainToolProxyConfigured": options.supply_chain_proxy_url is not None,
         "remoteImagesRetainedAsReleaseEvidence": True,
         "remoteBroadCleanupUsed": False,
     }
@@ -3159,6 +3215,7 @@ def run_registry_release_gate(
                         registry_auth_username_environment=options.registry_auth_username_environment,
                         registry_auth_password_environment=options.registry_auth_password_environment,
                         registry_ca_cert_environment=options.registry_ca_cert_environment,
+                        tool_proxy_url=options.supply_chain_proxy_url,
                         production_public_key_configmap_path=options.production_public_key_configmap_path,
                         production_repository_configmap_path=options.production_repository_configmap_path,
                     ),

@@ -707,6 +707,19 @@ python3 scripts/stage3-provider-acceptance/registry_release_gate.py \
   --output-dir /tmp/synara-worker-registry-release
 ```
 
+When public Rekor or the pinned Trivy database endpoint requires an operator-owned network proxy, provide only an
+environment-variable name. The resolved proxy must be a credential-free, container-reachable HTTP(S) URL with an
+explicit port; its name and value are not written to reports or Docker arguments. Registry traffic is added to
+`NO_PROXY` so private Registry auth and TLS verification do not cross that proxy:
+
+```sh
+export SYNARA_STAGE3_SUPPLY_CHAIN_PROXY=http://host.docker.internal:6152
+
+python3 scripts/stage3-provider-acceptance/registry_release_gate.py \
+  ... \
+  --supply-chain-proxy-env SYNARA_STAGE3_SUPPLY_CHAIN_PROXY
+```
+
 Production mode inspects the named running Registry container, reads its runtime configuration at the pinned path,
 and binds the live container identity, TLS certificate, auth mode, repository, and deletion/retention settings to
 the exported configuration and the checked-in retention contract. A disposable HTTP Registry, a static config

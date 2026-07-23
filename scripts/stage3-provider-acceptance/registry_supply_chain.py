@@ -68,6 +68,7 @@ SUPPORTED_SEVERITIES = ("UNKNOWN", "LOW", "MEDIUM", "HIGH", "CRITICAL")
 TRIVY_DATABASE_DOWNLOAD_RETRY_DELAY_SECONDS = 1.0
 TRIVY_DATABASE_DOWNLOAD_RETRY_MARKERS = (
     "unexpected eof",
+    ": eof",
     "connection reset by peer",
     "i/o timeout",
     "tls handshake timeout",
@@ -338,6 +339,7 @@ class SupplyChainOptions:
     registry_auth_username_environment: str | None = None
     registry_auth_password_environment: str | None = None
     registry_ca_cert_environment: str | None = None
+    tool_proxy_url: str | None = None
     production_public_key_configmap_path: pathlib.Path | None = None
     production_repository_configmap_path: pathlib.Path | None = None
 
@@ -1954,6 +1956,37 @@ def _run_tool(
         "/workspace",
     ]
     environment = remote.tool_environment()
+    if options.tool_proxy_url is not None:
+        redactor.add(options.tool_proxy_url)
+        try:
+            registry_hostname = urllib.parse.urlsplit(
+                f"//{registry_access.registry_host}"
+            ).hostname
+        except ValueError:
+            registry_hostname = None
+        no_proxy_values = tuple(
+            dict.fromkeys(
+                value
+                for value in (
+                    "127.0.0.1",
+                    "localhost",
+                    "::1",
+                    registry_access.registry_host,
+                    registry_hostname,
+                )
+                if value
+            )
+        )
+        proxy_environment = {
+            "HTTP_PROXY": options.tool_proxy_url,
+            "HTTPS_PROXY": options.tool_proxy_url,
+            "ALL_PROXY": options.tool_proxy_url,
+            "NO_PROXY": ",".join(no_proxy_values),
+        }
+        proxy_environment.update({name.lower(): value for name, value in proxy_environment.items()})
+        for name, value in proxy_environment.items():
+            environment[name] = value
+            command.extend(["--env", name])
     for name, value in registry_access.environment.items():
         command.extend(["--env", f"{name}={value}"])
     for name, value in (secret_environment or {}).items():

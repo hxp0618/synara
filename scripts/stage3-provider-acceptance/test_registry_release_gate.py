@@ -48,6 +48,7 @@ def options(
     registry_auth_username_environment: str | None = None,
     registry_auth_password_environment: str | None = None,
     registry_ca_cert_environment: str | None = None,
+    supply_chain_proxy_url: str | None = None,
     production_public_key_configmap_path: pathlib.Path | None = None,
     production_repository_configmap_path: pathlib.Path | None = None,
     production_registry_config_path: pathlib.Path | None = None,
@@ -99,6 +100,7 @@ def options(
         registry_auth_username_environment=registry_auth_username_environment,
         registry_auth_password_environment=registry_auth_password_environment,
         registry_ca_cert_environment=registry_ca_cert_environment,
+        supply_chain_proxy_url=supply_chain_proxy_url,
         production_public_key_configmap_path=production_public_key_configmap_path,
         production_repository_configmap_path=production_repository_configmap_path,
         production_registry_config_path=production_registry_config_path,
@@ -428,6 +430,41 @@ def production_supply_chain() -> dict[str, Any]:
 
 
 class InputValidationTest(unittest.TestCase):
+    def test_parse_args_reads_supply_chain_proxy_without_retaining_environment_name(self) -> None:
+        with mock.patch.dict(
+            gate.os.environ,
+            {"SYNARA_STAGE3_TOOL_PROXY": "http://host.docker.internal:6152"},
+        ):
+            parsed = gate.parse_args(
+                [
+                    "--image-repository",
+                    "localhost:55091/synara/worker",
+                    "--builder",
+                    "synara-stage3-registry-builder",
+                    "--supply-chain-proxy-env",
+                    "SYNARA_STAGE3_TOOL_PROXY",
+                ]
+            )
+
+        self.assertEqual(parsed.supply_chain_proxy_url, "http://host.docker.internal:6152")
+        self.assertNotIn("SYNARA_STAGE3_TOOL_PROXY", dataclasses.asdict(parsed))
+
+    def test_parse_args_rejects_credential_bearing_supply_chain_proxy(self) -> None:
+        with mock.patch.dict(
+            gate.os.environ,
+            {"SYNARA_STAGE3_TOOL_PROXY": "http://user:secret@proxy.example.test:6152"},
+        ), self.assertRaises(SystemExit):
+            gate.parse_args(
+                [
+                    "--image-repository",
+                    "localhost:55091/synara/worker",
+                    "--builder",
+                    "synara-stage3-registry-builder",
+                    "--supply-chain-proxy-env",
+                    "SYNARA_STAGE3_TOOL_PROXY",
+                ]
+            )
+
     def test_parse_args_accepts_explicit_docker_bin_path(self) -> None:
         parsed = gate.parse_args(
             [
@@ -463,6 +500,17 @@ class InputValidationTest(unittest.TestCase):
         self.assertEqual(evidence["signingPolicy"], "deploy/worker/signing-policy.json")
         self.assertEqual(evidence["vulnerabilityPolicy"], "deploy/worker/vulnerability-policy.json")
         self.assertNotIn("ephemeralDigestSigning", evidence)
+
+    def test_configuration_records_only_supply_chain_proxy_presence(self) -> None:
+        evidence = gate.configuration_evidence(
+            options(
+                pathlib.Path("/tmp/output"),
+                supply_chain_proxy_url="http://host.docker.internal:6152",
+            )
+        )
+
+        self.assertTrue(evidence["supplyChainToolProxyConfigured"])
+        self.assertNotIn("host.docker.internal", json.dumps(evidence))
 
     def test_configuration_can_select_production_signing_profile(self) -> None:
         evidence = gate.configuration_evidence(
