@@ -72,19 +72,19 @@ const providerToolsLockfile = `${JSON.stringify(
       "": {
         dependencies: {
           "@anthropic-ai/claude-code": "2.1.197",
-          "@openai/codex": "0.144.1",
+          "@openai/codex": "0.145.0",
         },
       },
       "node_modules/@anthropic-ai/claude-code": { version: "2.1.197" },
       "node_modules/@openai/codex": {
-        version: "0.144.1",
+        version: "0.145.0",
         optionalDependencies: {
-          "@openai/codex-linux-arm64": "npm:@openai/codex@0.144.1-linux-arm64",
+          "@openai/codex-linux-arm64": "npm:@openai/codex@0.145.0-linux-arm64",
         },
       },
       "node_modules/@openai/codex-linux-arm64": {
         name: "@openai/codex",
-        version: "0.144.1-linux-arm64",
+        version: "0.145.0-linux-arm64",
         optional: true,
         os: ["linux"],
         cpu: ["arm64"],
@@ -117,11 +117,11 @@ function rawSBOM(created: string, namespace: string) {
     creationInfo: { created, creators: ["Tool: npm/cli-random"] },
     documentDescribes: ["SPDXRef-openai", "SPDXRef-anthropic"],
     packages: [
-      { SPDXID: "SPDXRef-openai", name: "@openai/codex", versionInfo: "0.144.1" },
+      { SPDXID: "SPDXRef-openai", name: "@openai/codex", versionInfo: "0.145.0" },
       {
         SPDXID: "SPDXRef-openai-platform",
         name: "@openai/codex",
-        versionInfo: "0.144.1-linux-arm64",
+        versionInfo: "0.145.0-linux-arm64",
       },
       { SPDXID: "SPDXRef-anthropic", name: "@anthropic-ai/claude-code", versionInfo: "2.1.197" },
     ],
@@ -174,7 +174,7 @@ describe("Worker image manifest", () => {
         package: "@anthropic-ai/claude-agent-sdk",
         version: "0.3.207",
       },
-      { provider: "codex", kind: "cli", package: "@openai/codex", version: "0.144.1" },
+      { provider: "codex", kind: "cli", package: "@openai/codex", version: "0.145.0" },
     ]);
     expect(first.manifest.lockfiles).toHaveLength(3);
     expect(first.manifest.sboms[0]?.sha256).toBe(sha256Hex(first.providerToolsSBOM));
@@ -199,20 +199,20 @@ describe("Worker image manifest", () => {
     expect(() =>
       build({
         rawProviderToolsSBOM: rawSBOM("2026-01-01T00:00:00.000Z", "urn:uuid:missing").replace(
-          '"0.144.1"',
+          '"0.145.0"',
           '"0.144.0"',
         ),
       }),
-    ).toThrow(/does not describe @openai\/codex@0.144.1/);
+    ).toThrow(/does not describe @openai\/codex@0.145.0/);
 
     const withoutCodexPlatform = JSON.parse(
       rawSBOM("2026-01-01T00:00:00.000Z", "urn:uuid:missing-platform"),
     );
     withoutCodexPlatform.packages = withoutCodexPlatform.packages.filter(
-      (entry: { versionInfo?: string }) => entry.versionInfo !== "0.144.1-linux-arm64",
+      (entry: { versionInfo?: string }) => entry.versionInfo !== "0.145.0-linux-arm64",
     );
     expect(() => build({ rawProviderToolsSBOM: JSON.stringify(withoutCodexPlatform) })).toThrow(
-      /does not describe @openai\/codex@0.144.1-linux-arm64/,
+      /does not describe @openai\/codex@0.145.0-linux-arm64/,
     );
   });
 });

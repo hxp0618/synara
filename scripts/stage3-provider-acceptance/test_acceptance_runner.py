@@ -4645,7 +4645,7 @@ class AcceptanceSuiteLifecycleTest(unittest.TestCase):
                 "requestedBytes": 2 * (1 << 20) + 257,
                 "retainedBytes": 1 << 20,
                 "lossless": False,
-                "compatibleProviderVersionRange": "0.144.x",
+                "compatibleProviderVersionRange": "0.145.x",
             },
         )
         self.assertIsNone(suite.created_input)
@@ -8710,7 +8710,7 @@ class SSHDriverTest(unittest.TestCase):
         def remote(command: Sequence[str], **_kwargs: Any) -> str:
             executable = command[0]
             if executable.endswith("/codex"):
-                return "codex-cli 0.144.1\n"
+                return "codex-cli 0.145.0\n"
             if executable.endswith("/claude"):
                 return "2.1.197 (Claude Code)\n"
             if executable == "sha256sum":
@@ -8723,7 +8723,7 @@ class SSHDriverTest(unittest.TestCase):
 
         self.assertEqual(evidence["kind"], "real-provider")
         self.assertEqual(evidence["providerHost"]["sha256"], expected_sha)
-        self.assertEqual(evidence["providerTools"]["codex"]["version"], "0.144.1")
+        self.assertEqual(evidence["providerTools"]["codex"]["version"], "0.145.0")
         self.assertEqual(evidence["providerTools"]["claudeAgent"]["version"], "2.1.197")
 
     def test_external_real_provider_runtime_versions_use_pinned_node_path(self) -> None:
@@ -8758,7 +8758,7 @@ class SSHDriverTest(unittest.TestCase):
                     version_commands.append(list(command))
                     executable = command[2]
                     if executable.endswith("/codex"):
-                        return "codex-cli 0.144.1\n"
+                        return "codex-cli 0.145.0\n"
                     if executable.endswith("/claude"):
                         return "2.1.197 (Claude Code)\n"
                 if command[0] == "sha256sum":

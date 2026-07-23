@@ -73,12 +73,12 @@ function workerManifest(input: {
         runtime: {
           kind: "cli",
           name: "codex-cli",
-          version: "0.144.1",
+          version: "0.145.0",
           available: true,
           versionSource: "probe",
           compatibleRange: {
-            minimumInclusive: "0.144.1",
-            maximumExclusive: "0.145.0",
+            minimumInclusive: "0.145.0",
+            maximumExclusive: "0.146.0",
           },
           compatible: true,
         },

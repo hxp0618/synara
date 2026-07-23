@@ -310,7 +310,7 @@ Claude reads only one bounded line before Write so the SDK satisfies its read-be
 
 `--real-provider-case terminal-large` adds the large-Terminal capability boundary before Control Plane restart.
 The deterministic fixture still requires the exact `2 MiB + 257 B` stream, a 32 KiB preview, and
-`1 MiB / 1 MiB / 257 B` Ready Artifacts. Real Codex `0.144.x` is explicit `unsupported`: Unified Exec retains only
+`1 MiB / 1 MiB / 257 B` Ready Artifacts. Real Codex `0.145.x` is explicit `unsupported`: Unified Exec retains only
 a 1 MiB head/tail transcript, and the Runner does not disable it because that changes native durable Approval
 semantics. Claude ambient OAuth is also explicit `unsupported`: lossless SDK retained output requires a controlled
 Provider Credential so `CLAUDE_CONFIG_DIR` can be bound to the agentd-owned Runtime Output Root. The strict real
@@ -444,7 +444,7 @@ and deterministic Target regression coverage. SSH now has token-scoped reverse-r
 reachability accounting and systemd-MainPID-scoped Host crash unit coverage; a current dirty-worktree disposable
 OrbStack fixture passes all 16 deterministic cases with exact machine/key cleanup and no Secret findings. A separate
 no-Provider-call runtime preflight builds the real Host bundle from the checkout, installs the checked-in locked
-Codex `0.144.1` and Claude Code `2.1.197` packages in a disposable Ubuntu 24.04 machine, verifies CLI versions and
+Codex `0.145.0` and Claude Code `2.1.197` packages in a disposable Ubuntu 24.04 machine, verifies CLI versions and
 the remote Host SHA, then removes the exact machine and local key material. Kubernetes has host-gateway 401/429
 transport, actual-request reachability accounting, unique execution-Pod selection and shared Linux `/proc`
 Host-crash coverage. No real SSH, Docker or Kubernetes Codex/Claude failure report exists without an

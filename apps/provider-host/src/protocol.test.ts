@@ -103,16 +103,16 @@ describe("Provider Host Protocol v2", () => {
       },
     });
 
-    expect(codex.capabilityDescriptor.providerCliVersion).toBe("0.144.1");
+    expect(codex.capabilityDescriptor.providerCliVersion).toBe("0.145.0");
     expect(codex.capabilityDescriptor.runtime).toEqual({
       kind: "cli",
       name: "codex",
-      version: "0.144.1",
+      version: "0.145.0",
       available: true,
       versionSource: "probe",
       compatibleRange: {
-        minimumInclusive: "0.144.1",
-        maximumExclusive: "0.145.0",
+        minimumInclusive: "0.145.0",
+        maximumExclusive: "0.146.0",
       },
       compatible: true,
     });
@@ -337,7 +337,7 @@ describe("Provider Host Protocol v2", () => {
         emit: () => {},
         descriptorForProvider: codexDescriptorFactory({
           available: true,
-          output: "codex-cli 0.145.0",
+          output: "codex-cli 0.146.0",
         }),
       });
       const result = await handle(
@@ -366,7 +366,7 @@ describe("Provider Host Protocol v2", () => {
       },
       {
         label: "unstable-semver",
-        probe: { available: true, output: "codex-cli 0.144.1-beta.1" },
+        probe: { available: true, output: "codex-cli 0.145.0-beta.1" },
         expected: "provider_version_incompatible",
       },
       {
@@ -376,17 +376,17 @@ describe("Provider Host Protocol v2", () => {
       },
       {
         label: "minimum",
-        probe: { available: true, output: "codex-cli 0.144.1" },
+        probe: { available: true, output: "codex-cli 0.145.0" },
         expected: "Result",
       },
       {
         label: "compatible-patch",
-        probe: { available: true, output: "codex-cli 0.144.99" },
+        probe: { available: true, output: "codex-cli 0.145.99" },
         expected: "Result",
       },
       {
         label: "maximum-exclusive",
-        probe: { available: true, output: "codex-cli 0.145.0" },
+        probe: { available: true, output: "codex-cli 0.146.0" },
         expected: "provider_version_incompatible",
       },
     ] as const;
@@ -875,7 +875,7 @@ describe("Provider Host Protocol v2", () => {
 });
 
 function compatibleCodexProbe(): CodexVersionProbeResult {
-  return { available: true, output: "codex-cli 0.144.1" };
+  return { available: true, output: "codex-cli 0.145.0" };
 }
 
 function enabledDescriptorForProvider(provider: ProviderHostProviderKind) {

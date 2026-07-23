@@ -210,7 +210,7 @@ func newWorkerImageManifestFixture(t *testing.T) workerImageManifestFixture {
 		},
 		Lockfiles: lockfiles,
 		ProviderRuntimes: []workerImageProviderRuntime{
-			{Provider: "codex", Kind: "cli", Package: "@openai/codex", Version: "0.144.1"},
+			{Provider: "codex", Kind: "cli", Package: "@openai/codex", Version: "0.145.0"},
 			{Provider: "claudeAgent", Kind: "sdk", Package: "@anthropic-ai/claude-agent-sdk", Version: "0.3.207"},
 			{Provider: "claudeAgent", Kind: "cli", Package: "@anthropic-ai/claude-code", Version: "2.1.197"},
 		},

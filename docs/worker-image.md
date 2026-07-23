@@ -50,7 +50,7 @@ The Worker build fails closed unless all of these inputs are immutable:
 The tracked Provider runtime versions are intentionally separate:
 
 ```text
-Codex CLI:        @openai/codex@0.144.1
+Codex CLI:        @openai/codex@0.145.0
 Claude SDK:       @anthropic-ai/claude-agent-sdk@0.3.207
 Claude Code CLI:  @anthropic-ai/claude-code@2.1.197
 ```

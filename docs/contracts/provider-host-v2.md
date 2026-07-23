@@ -84,7 +84,7 @@ Checkpoint unless the Provider also supplies an exact native file-change path. T
 predictable security boundary instead of making root-level or Provider-specific filesystem watching look recursive
 when it is not.
 
-Codex `0.144.x` Unified Exec retains a fixed 1 MiB head/tail transcript for larger commands and does not expose a
+Codex `0.145.x` Unified Exec retains a fixed 1 MiB head/tail transcript for larger commands and does not expose a
 contained lossless file reference. Provider Host keeps the default execution path because disabling Unified Exec
 changes native durable Approval behavior, and the app-server cursor is reused across Turns. The real
 `terminal-large` capability is therefore explicitly unsupported for this version range; the Host must not hide the

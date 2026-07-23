@@ -19,7 +19,7 @@ import ssh_release_gate as gate
 
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
-EXPECTED_VERSIONS = {"codex": "0.144.1", "claudeAgent": "2.1.197"}
+EXPECTED_VERSIONS = {"codex": "0.145.0", "claudeAgent": "2.1.197"}
 
 
 def ssh_options(output_dir: pathlib.Path) -> gate.SSHReleaseGateOptions:
@@ -173,7 +173,7 @@ def sample_child_report(
                                 "lockedInstall": True,
                                 "codex": {
                                     "version": EXPECTED_VERSIONS["codex"],
-                                    "versionOutput": "codex-cli 0.144.1",
+                                    "versionOutput": "codex-cli 0.145.0",
                                 },
                                 "claudeAgent": {
                                     "version": EXPECTED_VERSIONS["claudeAgent"],

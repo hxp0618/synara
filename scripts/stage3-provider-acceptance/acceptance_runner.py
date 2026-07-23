@@ -11972,7 +11972,7 @@ class AcceptanceSuite:
         if self.options.provider == "codex":
             raise AcceptanceUnsupported(
                 "runner.real_provider_terminal_large_lossless_output_unsupported",
-                "Codex 0.144.x Unified Exec does not expose a lossless stream for output larger than 1 MiB.",
+                "Codex 0.145.x Unified Exec does not expose a lossless stream for output larger than 1 MiB.",
                 {
                     "provider": self.options.provider,
                     "supportMode": "unsupported",
@@ -11980,7 +11980,7 @@ class AcceptanceSuite:
                     "requestedBytes": TERMINAL_LARGE_TOTAL_BYTES,
                     "retainedBytes": 1 << 20,
                     "lossless": False,
-                    "compatibleProviderVersionRange": "0.144.x",
+                    "compatibleProviderVersionRange": "0.145.x",
                 },
             )
         if self.options.provider == "claudeAgent" and self.state.credential_id is None:

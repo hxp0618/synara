@@ -3,7 +3,7 @@
 package providercatalog
 
 const SchemaVersion = 1
-const SourceSHA256 = "742a7eef08fde2394438fb0a9ee008cf1d062576d3b884709c291ffc17e9bdeb"
+const SourceSHA256 = "c75cd9113831dc4df5cb0ed1e27a2c19ca5f5ef8f9cf38e9362b11fcbb55e567"
 
 var generatedCapabilityIDs = []string{
 	"discovery",
@@ -57,8 +57,8 @@ var generatedProviders = []Provider{
 			Name:          "codex",
 			VersionSource: "probe",
 			CompatibleRange: CompatibleRange{
-				MinimumInclusive: "0.144.1",
-				MaximumExclusive: "0.145.0",
+				MinimumInclusive: "0.145.0",
+				MaximumExclusive: "0.146.0",
 			},
 		},
 		Capabilities: map[string]string{

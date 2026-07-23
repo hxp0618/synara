@@ -2027,7 +2027,7 @@ class InputValidationTest(unittest.TestCase):
                         'if [ \"$(cat \"$TEST_ATTEMPT_FILE\")\" -lt 3 ]; then',
                         "  exit 1",
                         "fi",
-                        "echo 0.144.1",
+                        "echo 0.145.0",
                         "EOF",
                         "chmod +x node_modules/.bin/codex",
                         "cat <<'EOF' > node_modules/.bin/claude",
