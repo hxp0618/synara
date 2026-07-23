@@ -510,6 +510,7 @@ class InputValidationTest(unittest.TestCase):
         )
 
         self.assertTrue(evidence["supplyChainToolProxyConfigured"])
+        self.assertTrue(evidence["workerBuildProxyConfigured"])
         self.assertNotIn("host.docker.internal", json.dumps(evidence))
 
     def test_configuration_can_select_production_signing_profile(self) -> None:
@@ -1845,7 +1846,11 @@ class InputValidationTest(unittest.TestCase):
 
     def test_build_inputs_keep_proxy_no_cache_and_pinned_sbom_generator(self) -> None:
         command = gate.build_command(
-            options(pathlib.Path("/tmp/output"), docker_bin="/tmp/docker-wrapper"),
+            options(
+                pathlib.Path("/tmp/output"),
+                docker_bin="/tmp/docker-wrapper",
+                supply_chain_proxy_url="http://host.docker.internal:6152",
+            ),
             image="localhost:55091/synara/worker:tag",
             git_sha=GIT_SHA,
             version=VERSION,
@@ -1859,6 +1864,10 @@ class InputValidationTest(unittest.TestCase):
         self.assertEqual(command[command.index("--go-proxy") + 1], "https://goproxy.cn,direct")
         self.assertEqual(command[command.index("--docker-bin") + 1], "/tmp/docker-wrapper")
         self.assertEqual(
+            command[command.index("--network-proxy") + 1],
+            "http://host.docker.internal:6152",
+        )
+        self.assertEqual(
             gate.locked_sbom_generator(REPO_ROOT),
             "docker.io/docker/buildkit-syft-scanner@sha256:"
             "79e7b013cbec16bbb436f312819a49a4a57752b2270c1a9332ae1a10fcc82a68",
@@ -1867,6 +1876,8 @@ class InputValidationTest(unittest.TestCase):
         dockerfile = (REPO_ROOT / "Dockerfile").read_text(encoding="utf-8")
         self.assertIn("type=image,push=true,rewrite-timestamp=true", build_script)
         self.assertIn("--sbom=generator=$sbom_generator", build_script)
+        self.assertIn('--build-arg "HTTP_PROXY=$network_proxy"', build_script)
+        self.assertIn('--build-arg "http_proxy=$network_proxy"', build_script)
         self.assertIn("rm -f /var/log/apk.log", dockerfile)
         self.assertIn("--mount=from=worker-provider-tools", dockerfile)
         self.assertIn('/opt/synara/.build-revision', dockerfile)
@@ -2175,6 +2186,42 @@ class InputValidationTest(unittest.TestCase):
                 "invalid",
                 "--go-proxy",
                 "https://goproxy.cn,direct",
+            ],
+            cwd=REPO_ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(valid_proxy.returncode, 2)
+        self.assertIn("--source-date-epoch", valid_proxy.stderr)
+
+    def test_worker_build_script_rejects_credentialed_network_proxy_before_docker(self) -> None:
+        invalid_proxy = subprocess.run(
+            [
+                str(REPO_ROOT / "deploy/worker/build.sh"),
+                "--git-sha",
+                GIT_SHA,
+                "--network-proxy",
+                "http://user:password@host.docker.internal:6152",
+            ],
+            cwd=REPO_ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertEqual(invalid_proxy.returncode, 2)
+        self.assertIn("credential-free HTTP(S) authority", invalid_proxy.stderr)
+
+        valid_proxy = subprocess.run(
+            [
+                str(REPO_ROOT / "deploy/worker/build.sh"),
+                "--git-sha",
+                GIT_SHA,
+                "--source-date-epoch",
+                "invalid",
+                "--network-proxy",
+                "http://host.docker.internal:6152",
             ],
             cwd=REPO_ROOT,
             check=False,

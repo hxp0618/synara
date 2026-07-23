@@ -224,7 +224,7 @@ def parse_args(argv: Sequence[str]) -> RegistryReleaseGateOptions:
         "--supply-chain-proxy-env",
         help=(
             "Environment variable containing the credential-free, container-reachable HTTP(S) "
-            "proxy URL used only by digest-pinned supply-chain tool containers"
+            "proxy URL used by Worker build RUN steps and digest-pinned supply-chain tools"
         ),
     )
     parser.add_argument("--production-public-key-configmap", type=pathlib.Path)
@@ -633,6 +633,8 @@ def build_command(
     ]
     if options.go_proxy is not None:
         command.extend(["--go-proxy", options.go_proxy])
+    if options.supply_chain_proxy_url is not None:
+        command.extend(["--network-proxy", options.supply_chain_proxy_url])
     if no_cache:
         command.append("--no-cache")
     return command
@@ -1719,6 +1721,7 @@ def configuration_evidence(options: RegistryReleaseGateOptions) -> dict[str, Any
         "insecureRegistry": options.insecure_registry,
         "goProxyOverride": options.go_proxy is not None,
         "supplyChainToolProxyConfigured": options.supply_chain_proxy_url is not None,
+        "workerBuildProxyConfigured": options.supply_chain_proxy_url is not None,
         "remoteImagesRetainedAsReleaseEvidence": True,
         "remoteBroadCleanupUsed": False,
     }

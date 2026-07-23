@@ -15,6 +15,7 @@ output_mode="load"
 builder="${SYNARA_WORKER_BUILDER:-}"
 docker_bin="docker"
 go_proxy="${SYNARA_WORKER_GOPROXY:-}"
+network_proxy="${SYNARA_WORKER_NETWORK_PROXY:-}"
 allow_dirty=0
 no_cache=0
 label_values=()
@@ -35,6 +36,7 @@ Options:
   --builder NAME
   --docker-bin PATH          Optional docker executable or wrapper path.
   --go-proxy URLS            Optional public GOPROXY list; credentials are rejected.
+  --network-proxy URL        Optional credential-free HTTP(S) proxy for BuildKit RUN steps.
   --label KEY=VALUE          May be repeated.
   --load                     Load one platform into the local Docker Engine (default).
   --push                     Push the image and its attestations.
@@ -98,6 +100,10 @@ while (($# > 0)); do
       ;;
     --go-proxy)
       go_proxy="${2:?--go-proxy requires a value}"
+      shift 2
+      ;;
+    --network-proxy)
+      network_proxy="${2:?--network-proxy requires a value}"
       shift 2
       ;;
     --label)
@@ -169,6 +175,18 @@ if [[ -n "$go_proxy" ]]; then
       exit 2
     fi
   done
+fi
+if [[ -n "$network_proxy" ]]; then
+  if [[ "$network_proxy" =~ [[:space:][:cntrl:]] || "$network_proxy" == *"@"* || "$network_proxy" == *"?"* || "$network_proxy" == *"#"* ]]; then
+    echo "--network-proxy must be a credential-free HTTP(S) authority without whitespace, userinfo, query, or fragment data" >&2
+    exit 2
+  fi
+  network_proxy_pattern='^https?://[A-Za-z0-9.-]+:[0-9]+/?$'
+  if [[ ! "$network_proxy" =~ $network_proxy_pattern ]]; then
+    echo "--network-proxy must use http:// or https:// with an explicit host and port" >&2
+    exit 2
+  fi
+  network_proxy="${network_proxy%/}"
 fi
 if [[ -z "$version" ]]; then
   echo "Worker version is empty" >&2
@@ -268,6 +286,21 @@ build_command=(
 )
 if [[ -n "$go_proxy" ]]; then
   build_command+=(--build-arg "GOPROXY=$go_proxy")
+fi
+if [[ -n "$network_proxy" ]]; then
+  # Docker treats these predefined proxy build arguments specially: they are
+  # available to RUN steps but are excluded from image history and cache keys.
+  # Pass both cases because package managers differ in which form they honor.
+  build_command+=(
+    --build-arg "HTTP_PROXY=$network_proxy"
+    --build-arg "HTTPS_PROXY=$network_proxy"
+    --build-arg "ALL_PROXY=$network_proxy"
+    --build-arg "NO_PROXY=127.0.0.1,localhost,::1"
+    --build-arg "http_proxy=$network_proxy"
+    --build-arg "https_proxy=$network_proxy"
+    --build-arg "all_proxy=$network_proxy"
+    --build-arg "no_proxy=127.0.0.1,localhost,::1"
+  )
 fi
 if [[ -n "$builder" ]]; then
   build_command+=(--builder "$builder")

@@ -707,10 +707,12 @@ python3 scripts/stage3-provider-acceptance/registry_release_gate.py \
   --output-dir /tmp/synara-worker-registry-release
 ```
 
-When public Rekor or the pinned Trivy database endpoint requires an operator-owned network proxy, provide only an
-environment-variable name. The resolved proxy must be a credential-free, container-reachable HTTP(S) URL with an
-explicit port; its name and value are not written to reports or Docker arguments. Registry traffic is added to
-`NO_PROXY` so private Registry auth and TLS verification do not cross that proxy:
+When Alpine package fetches, public Rekor, or the pinned Trivy database endpoint require an operator-owned network
+proxy, provide only an environment-variable name. The resolved proxy must be a credential-free,
+container-reachable HTTP(S) URL with an explicit port. Only presence booleans are written to the report. BuildKit
+receives Docker's predefined proxy build arguments, which are excluded from image history and cache keys, while
+digest-pinned supply-chain tools receive the same URL through their process environment. Registry traffic is added
+to `NO_PROXY` so private Registry auth and TLS verification do not cross that proxy:
 
 ```sh
 export SYNARA_STAGE3_SUPPLY_CHAIN_PROXY=http://host.docker.internal:6152
