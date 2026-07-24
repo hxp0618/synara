@@ -37,6 +37,7 @@ import (
 	"github.com/synara-ai/synara/services/control-plane/internal/serviceaccounts"
 	"github.com/synara-ai/synara/services/control-plane/internal/sessions"
 	"github.com/synara-ai/synara/services/control-plane/internal/tenancy"
+	"github.com/synara-ai/synara/services/control-plane/internal/workerreleases"
 	"github.com/synara-ai/synara/services/control-plane/migrations"
 )
 
@@ -192,6 +193,13 @@ func main() {
 		ReconcileEphemeralWorkspaceCleanup: executionService.ReconcileEphemeralWorkspaceCleanup,
 		Observer:                           metrics, ResolveImagePull: resolveImagePull,
 	}, logger)
+	workerReleaseAutoRollback := workerreleases.NewAutoRollbackController(
+		workerreleases.NewService(db),
+		workerreleases.AutoRollbackControllerConfig{
+			Enabled: cfg.WorkerAutoRollbackEnabled, Interval: cfg.WorkerAutoRollbackInterval, Observer: metrics,
+		},
+		logger,
+	)
 	artifactStore, err := artifacts.NewStore(ctx, cfg)
 	if err != nil {
 		logger.Error("failed to configure artifact store", "kind", cfg.Platform.ArtifactStore, "error", err)
@@ -255,6 +263,7 @@ func main() {
 	}
 	startBackground(func() { dockerReconciler.Run(runtimeContext) })
 	startBackground(func() { kubernetesReconciler.Run(runtimeContext) })
+	startBackground(func() { workerReleaseAutoRollback.Run(runtimeContext) })
 	startBackground(func() { retentionService.Run(runtimeContext) })
 	startBackground(func() { outboxDispatcher.Run(runtimeContext) })
 	if localAgentd != nil {

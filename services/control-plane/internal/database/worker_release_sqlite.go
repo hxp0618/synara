@@ -26,6 +26,9 @@ func migrateWorkerReleaseSQLiteSafety(ctx context.Context, db *gorm.DB) error {
 		 ON worker_release_revisions (worker_manifest_id, execution_target_id, id)`,
 		`CREATE INDEX IF NOT EXISTS idx_worker_release_transitions_tenant_target
 		 ON worker_release_transitions (tenant_id, execution_target_id, policy_version DESC, id)`,
+		`CREATE INDEX IF NOT EXISTS idx_worker_release_auto_rollback_pending
+		 ON worker_release_auto_rollback_windows (status, expires_at, execution_target_id, policy_version)
+		 WHERE status IN ('monitoring', 'rollback-pending')`,
 		`CREATE INDEX IF NOT EXISTS idx_worker_instances_release_claimability
 		 ON worker_instances (
 		   execution_target_id, worker_release_status, worker_release_revision_id,
@@ -170,6 +173,100 @@ func migrateWorkerReleaseSQLiteSafety(ctx context.Context, db *gorm.DB) error {
 		 BEFORE DELETE ON worker_release_transitions
 		 BEGIN
 		   SELECT RAISE(ABORT, 'Worker release transitions are immutable');
+		 END`,
+		`DROP TRIGGER IF EXISTS trg_worker_release_auto_rollback_window_insert_shape`,
+		`CREATE TRIGGER trg_worker_release_auto_rollback_window_insert_shape
+		 BEFORE INSERT ON worker_release_auto_rollback_windows
+		 BEGIN
+		   SELECT RAISE(ABORT, 'invalid Worker release auto-rollback window')
+		   WHERE NEW.policy_version <= 0
+		      OR NEW.candidate_channel NOT IN ('promoted', 'canary')
+		      OR NEW.candidate_revision_id = NEW.fallback_revision_id
+		      OR NEW.expires_at <= NEW.started_at
+		      OR NEW.minimum_executions NOT BETWEEN 1 AND 10000
+		      OR NEW.failure_threshold NOT BETWEEN 1 AND NEW.minimum_executions
+		      OR NEW.failure_rate_percent NOT BETWEEN 1 AND 100
+		      OR NEW.status <> 'monitoring'
+		      OR NEW.decision_reason IS NOT NULL
+		      OR NEW.decision_at IS NOT NULL
+		      OR NOT json_valid(NEW.evidence)
+		      OR json_type(NEW.evidence) <> 'object'
+		      OR NOT EXISTS (
+		        SELECT 1 FROM execution_targets AS target
+		        WHERE target.id = NEW.execution_target_id
+		          AND target.tenant_id = NEW.tenant_id
+		      )
+		      OR NOT EXISTS (
+		        SELECT 1 FROM worker_release_transitions AS transition
+		        WHERE transition.execution_target_id = NEW.execution_target_id
+		          AND transition.policy_version = NEW.policy_version
+		          AND transition.tenant_id = NEW.tenant_id
+		          AND (
+		            (
+		              NEW.candidate_channel = 'canary'
+		              AND transition.action = 'canary'
+		              AND transition.to_canary_revision_id = NEW.candidate_revision_id
+		              AND transition.to_promoted_revision_id = NEW.fallback_revision_id
+		            )
+		            OR
+		            (
+		              NEW.candidate_channel = 'promoted'
+		              AND transition.action = 'promote'
+		              AND transition.to_promoted_revision_id = NEW.candidate_revision_id
+		              AND transition.from_promoted_revision_id = NEW.fallback_revision_id
+		            )
+		          )
+		      )
+		      OR NOT EXISTS (
+		        SELECT 1 FROM worker_release_revisions AS revision
+		        WHERE revision.execution_target_id = NEW.execution_target_id
+		          AND revision.id = NEW.candidate_revision_id
+		      )
+		      OR NOT EXISTS (
+		        SELECT 1 FROM worker_release_revisions AS revision
+		        WHERE revision.execution_target_id = NEW.execution_target_id
+		          AND revision.id = NEW.fallback_revision_id
+		      );
+		 END`,
+		`DROP TRIGGER IF EXISTS trg_worker_release_auto_rollback_window_update_shape`,
+		`CREATE TRIGGER trg_worker_release_auto_rollback_window_update_shape
+		 BEFORE UPDATE ON worker_release_auto_rollback_windows
+		 BEGIN
+		   SELECT RAISE(ABORT, 'Worker release auto-rollback window identity and policy are immutable')
+		   WHERE NEW.id IS NOT OLD.id
+		      OR NEW.tenant_id IS NOT OLD.tenant_id
+		      OR NEW.execution_target_id IS NOT OLD.execution_target_id
+		      OR NEW.policy_version IS NOT OLD.policy_version
+		      OR NEW.candidate_revision_id IS NOT OLD.candidate_revision_id
+		      OR NEW.candidate_channel IS NOT OLD.candidate_channel
+		      OR NEW.fallback_revision_id IS NOT OLD.fallback_revision_id
+		      OR NEW.started_at IS NOT OLD.started_at
+		      OR NEW.expires_at IS NOT OLD.expires_at
+		      OR NEW.minimum_executions IS NOT OLD.minimum_executions
+		      OR NEW.failure_threshold IS NOT OLD.failure_threshold
+		      OR NEW.failure_rate_percent IS NOT OLD.failure_rate_percent
+		      OR NEW.enabled_by IS NOT OLD.enabled_by
+		      OR NEW.created_at IS NOT OLD.created_at;
+
+		   SELECT RAISE(ABORT, 'Worker release auto-rollback window status is terminal or regressed')
+		   WHERE NOT (
+		     (OLD.status = 'monitoring' AND NEW.status IN ('monitoring', 'rollback-pending', 'expired', 'superseded'))
+		     OR
+		     (OLD.status = 'rollback-pending' AND NEW.status IN ('rollback-pending', 'triggered', 'superseded'))
+		   );
+
+		   SELECT RAISE(ABORT, 'invalid Worker release auto-rollback decision')
+		   WHERE NOT json_valid(NEW.evidence)
+		      OR json_type(NEW.evidence) <> 'object'
+		      OR (NEW.decision_reason IS NOT NULL AND length(trim(NEW.decision_reason)) NOT BETWEEN 1 AND 2000)
+		      OR (NEW.status IN ('monitoring', 'expired') AND (NEW.decision_reason IS NOT NULL OR NEW.decision_at IS NOT NULL))
+		      OR (NEW.status IN ('rollback-pending', 'triggered') AND (NEW.decision_reason IS NULL OR NEW.decision_at IS NULL));
+		 END`,
+		`DROP TRIGGER IF EXISTS trg_worker_release_auto_rollback_window_delete`,
+		`CREATE TRIGGER trg_worker_release_auto_rollback_window_delete
+		 BEFORE DELETE ON worker_release_auto_rollback_windows
+		 BEGIN
+		   SELECT RAISE(ABORT, 'Worker release auto-rollback windows are durable release evidence');
 		 END`,
 		`DROP TRIGGER IF EXISTS trg_worker_instances_release_shape_insert`,
 		`CREATE TRIGGER trg_worker_instances_release_shape_insert

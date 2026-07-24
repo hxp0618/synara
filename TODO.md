@@ -52,6 +52,8 @@ Secret scan 证据见
 - 所有正式支持的 Provider 在 Local、SSH、Docker、Kubernetes Target 中具有一致的核心行为。
 - TypeScript 本地 Orchestration 不再与 Go Agent Session 同时充当 SaaS 权威状态。
 - Worker 可以升级、Drain、重连和恢复，不丢失 Session、Event、Artifact 或审批状态。
+- Worker canary/promoted 观察窗口可自动判定并触发安全回滚；第三方 Provider 鉴权、限流和网络故障不作为
+  Worker Release 回滚信号。
 
 #### TODO
 

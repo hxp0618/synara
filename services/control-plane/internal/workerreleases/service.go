@@ -25,6 +25,10 @@ type Service struct {
 	now        func() time.Time
 }
 
+type policyChangeOptions struct {
+	automaticWindowID *uuid.UUID
+}
+
 // Queued executions can be reassigned atomically before they acquire runtime
 // lineage. Recovering executions cannot: they retain prior work and interaction
 // identity until their replacement Generation is ready.
@@ -87,11 +91,22 @@ func (s *Service) List(
 	}
 
 	var policyView *Policy
+	var autoRollbackView *AutoRollbackWindow
 	var policy persistence.WorkerReleasePolicy
 	policyErr := s.db.WithContext(ctx).Where("execution_target_id = ?", targetID).Take(&policy).Error
 	if policyErr == nil {
 		projected := projectPolicy(policy)
 		policyView = &projected
+		var window persistence.WorkerReleaseAutoRollbackWindow
+		windowErr := s.db.WithContext(ctx).
+			Where("execution_target_id = ? AND policy_version = ?", targetID, policy.PolicyVersion).
+			Take(&window).Error
+		if windowErr == nil {
+			projectedWindow := projectAutoRollbackWindow(window)
+			autoRollbackView = &projectedWindow
+		} else if !errors.Is(windowErr, gorm.ErrRecordNotFound) {
+			return Overview{}, problem.Wrap(500, "worker_release_auto_rollback_lookup_failed", "Failed to load the Worker release auto-rollback window.", windowErr)
+		}
 	} else if !errors.Is(policyErr, gorm.ErrRecordNotFound) {
 		return Overview{}, problem.Wrap(500, "worker_release_policy_lookup_failed", "Failed to load the Worker release policy.", policyErr)
 	}
@@ -106,7 +121,7 @@ func (s *Service) List(
 	for _, model := range transitionModels {
 		transitions = append(transitions, projectTransition(model))
 	}
-	return Overview{Policy: policyView, Revisions: revisions, Transitions: transitions}, nil
+	return Overview{Policy: policyView, AutoRollback: autoRollbackView, Revisions: revisions, Transitions: transitions}, nil
 }
 
 func (s *Service) CreateRevision(
@@ -266,12 +281,20 @@ func (s *Service) changePolicy(
 	tenantID, targetID, revisionID uuid.UUID,
 	input PolicyChangeInput,
 	idempotencyKey, requestID, ipAddress, action string,
+	options ...policyChangeOptions,
 ) (OperationResult[Policy], error) {
+	var option policyChangeOptions
+	if len(options) > 0 {
+		option = options[0]
+	}
+	automatic := option.automaticWindowID != nil
 	if err := requireTenant(principal, tenantID); err != nil {
 		return OperationResult[Policy]{}, err
 	}
-	if _, err := s.authorizer.RequireTenant(ctx, principal.UserID, tenantID, authorization.WorkerManage); err != nil {
-		return OperationResult[Policy]{}, err
+	if !automatic {
+		if _, err := s.authorizer.RequireTenant(ctx, principal.UserID, tenantID, authorization.WorkerManage); err != nil {
+			return OperationResult[Policy]{}, err
+		}
 	}
 	if err := requireIdempotencyKey(idempotencyKey); err != nil {
 		return OperationResult[Policy]{}, err
@@ -296,6 +319,13 @@ func (s *Service) changePolicy(
 	if action != "canary" && input.CanaryPercent != 0 {
 		return OperationResult[Policy]{}, problem.New(400, "invalid_worker_release_canary_percent", "canaryPercent is only valid for a canary transition.")
 	}
+	if action != "canary" && input.AutoRollback != nil {
+		return OperationResult[Policy]{}, problem.New(400, "invalid_worker_release_auto_rollback", "autoRollback is only valid for a canary transition.")
+	}
+	autoRollbackConfig, err := normalizeAutoRollbackInput(action, input.AutoRollback)
+	if err != nil {
+		return OperationResult[Policy]{}, err
+	}
 
 	result, err := apiidempotency.Execute(ctx, s.db, apiidempotency.Scope{
 		TenantID: tenantID, ActorID: principal.UserID, Key: idempotencyKey,
@@ -304,6 +334,7 @@ func (s *Service) changePolicy(
 			"executionTargetId": targetID, "releaseRevisionId": revisionID,
 			"expectedPolicyVersion": input.ExpectedPolicyVersion,
 			"reason":                input.Reason, "canaryPercent": input.CanaryPercent,
+			"autoRollback": input.AutoRollback,
 		},
 	}, func(tx *gorm.DB) (Policy, error) {
 		target, err := loadTenantTarget(ctx, tx, tenantID, targetID, true)
@@ -332,6 +363,23 @@ func (s *Service) changePolicy(
 				"expectedPolicyVersion": input.ExpectedPolicyVersion, "currentPolicyVersion": currentVersion,
 			}
 			return Policy{}, conflict
+		}
+		var currentWindow *persistence.WorkerReleaseAutoRollbackWindow
+		if policyFound {
+			var window persistence.WorkerReleaseAutoRollbackWindow
+			windowErr := persistence.WithLocking(tx.WithContext(ctx), "UPDATE", "").
+				Where("execution_target_id = ? AND policy_version = ?", targetID, currentVersion).
+				Take(&window).Error
+			if windowErr == nil {
+				currentWindow = &window
+			} else if !errors.Is(windowErr, gorm.ErrRecordNotFound) {
+				return Policy{}, problem.Wrap(500, "worker_release_auto_rollback_lock_failed", "Failed to lock the Worker release auto-rollback window.", windowErr)
+			}
+		}
+		if automatic {
+			if currentWindow == nil || currentWindow.ID != *option.automaticWindowID || currentWindow.Status != "rollback-pending" {
+				return Policy{}, problem.New(409, "worker_release_auto_rollback_superseded", "Worker release auto-rollback decision is no longer current.")
+			}
 		}
 
 		var fromPromoted, fromCanary *uuid.UUID
@@ -441,14 +489,53 @@ func (s *Service) changePolicy(
 		if err := tx.WithContext(ctx).Create(&transition).Error; err != nil {
 			return Policy{}, problem.Wrap(500, "worker_release_transition_store_failed", "Worker release transition history could not be persisted.", err)
 		}
+		if currentWindow != nil && (currentWindow.Status == "monitoring" || currentWindow.Status == "rollback-pending") {
+			nextWindowStatus := "superseded"
+			if automatic {
+				nextWindowStatus = "triggered"
+			}
+			updated := tx.WithContext(ctx).Model(&persistence.WorkerReleaseAutoRollbackWindow{}).
+				Where("id = ? AND status = ?", currentWindow.ID, currentWindow.Status).
+				Updates(map[string]any{"status": nextWindowStatus, "updated_at": next.UpdatedAt})
+			if updated.Error != nil {
+				return Policy{}, problem.Wrap(500, "worker_release_auto_rollback_update_failed", "Worker release auto-rollback state could not be updated.", updated.Error)
+			}
+			if updated.RowsAffected != 1 {
+				return Policy{}, problem.New(409, "worker_release_auto_rollback_superseded", "Worker release auto-rollback state changed before the transition could be committed.")
+			}
+		}
+		var nextWindow *persistence.WorkerReleaseAutoRollbackWindow
+		if action == "canary" && autoRollbackConfig != nil {
+			window := newAutoRollbackWindow(tenantID, targetID, next.PolicyVersion, revision.ID, ChannelCanary, current.PromotedRevisionID, principal.UserID, next.UpdatedAt, *autoRollbackConfig)
+			if err := tx.WithContext(ctx).Create(&window).Error; err != nil {
+				return Policy{}, problem.Wrap(500, "worker_release_auto_rollback_store_failed", "Worker release auto-rollback window could not be persisted.", err)
+			}
+			nextWindow = &window
+		} else if action == "promote" && currentWindow != nil && current.CanaryRevisionID != nil {
+			config := autoRollbackConfigurationFromWindow(*currentWindow)
+			window := newAutoRollbackWindow(tenantID, targetID, next.PolicyVersion, revision.ID, ChannelPromoted, current.PromotedRevisionID, currentWindow.EnabledBy, next.UpdatedAt, config)
+			if err := tx.WithContext(ctx).Create(&window).Error; err != nil {
+				return Policy{}, problem.Wrap(500, "worker_release_auto_rollback_store_failed", "Worker release auto-rollback window could not be persisted.", err)
+			}
+			nextWindow = &window
+		}
 		metadata := map[string]any{
 			"executionTargetId": targetID, "policyVersion": next.PolicyVersion, "action": transitionAction,
 			"fromPromotedRevisionId": fromPromoted, "fromCanaryRevisionId": fromCanary,
 			"toPromotedRevisionId": next.PromotedRevisionID, "toCanaryRevisionId": next.CanaryRevisionID,
 			"canaryPercent": next.CanaryPercent, "reason": input.Reason,
 		}
+		if nextWindow != nil {
+			metadata["autoRollback"] = projectAutoRollbackWindow(*nextWindow)
+		}
+		actorType := "user"
+		actorID := &principal.UserID
+		if automatic {
+			actorType = "system"
+			actorID = nil
+		}
 		if err := audit.Record(ctx, tx, audit.Entry{
-			TenantID: tenantID, ActorType: "user", ActorID: &principal.UserID,
+			TenantID: tenantID, ActorType: actorType, ActorID: actorID,
 			Action:       "worker_release." + transitionAuditAction(transitionAction),
 			ResourceType: "execution_target", ResourceID: &targetID,
 			OrganizationID: target.OrganizationID, RequestID: requestID, IPAddress: ipAddress, Metadata: metadata,
@@ -468,6 +555,29 @@ func (s *Service) changePolicy(
 			},
 		}); err != nil {
 			return Policy{}, problem.Wrap(500, "worker_release_outbox_failed", "Worker release event could not be queued.", err)
+		}
+		if automatic && currentWindow != nil {
+			autoMetadata := map[string]any{
+				"tenantId": tenantID, "organizationId": target.OrganizationID,
+				"executionTargetId": targetID, "windowId": currentWindow.ID,
+				"policyVersion": currentWindow.PolicyVersion, "candidateRevisionId": currentWindow.CandidateRevisionID,
+				"candidateChannel": currentWindow.CandidateChannel, "fallbackRevisionId": currentWindow.FallbackRevisionID,
+				"decisionReason": currentWindow.DecisionReason, "decisionAt": currentWindow.DecisionAt,
+				"evidence": currentWindow.Evidence,
+			}
+			if err := audit.Record(ctx, tx, audit.Entry{
+				TenantID: tenantID, ActorType: "system", ActorID: nil,
+				Action: "worker_release.auto_rollback_triggered", ResourceType: "execution_target", ResourceID: &targetID,
+				OrganizationID: target.OrganizationID, RequestID: requestID, Metadata: autoMetadata,
+			}); err != nil {
+				return Policy{}, problem.Wrap(500, "worker_release_audit_failed", "Worker release auto-rollback audit record could not be persisted.", err)
+			}
+			if err := outbox.Enqueue(ctx, tx, outbox.EnqueueInput{
+				TenantID: &tenantID, Topic: "worker.release.auto-rollback-triggered",
+				MessageKey: currentWindow.ID.String(), Payload: autoMetadata,
+			}); err != nil {
+				return Policy{}, problem.Wrap(500, "worker_release_outbox_failed", "Worker release auto-rollback event could not be queued.", err)
+			}
 		}
 		return projectPolicy(next), nil
 	})

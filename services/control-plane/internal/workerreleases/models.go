@@ -9,6 +9,11 @@ import (
 const (
 	ChannelPromoted = "promoted"
 	ChannelCanary   = "canary"
+
+	DefaultAutoRollbackObservationWindow  = 15 * time.Minute
+	DefaultAutoRollbackMinimumExecutions  = 4
+	DefaultAutoRollbackFailureThreshold   = 2
+	DefaultAutoRollbackFailureRatePercent = 50
 )
 
 type Revision struct {
@@ -54,9 +59,10 @@ type Transition struct {
 }
 
 type Overview struct {
-	Policy      *Policy      `json:"policy"`
-	Revisions   []Revision   `json:"revisions"`
-	Transitions []Transition `json:"transitions"`
+	Policy       *Policy             `json:"policy"`
+	AutoRollback *AutoRollbackWindow `json:"autoRollback,omitempty"`
+	Revisions    []Revision          `json:"revisions"`
+	Transitions  []Transition        `json:"transitions"`
 }
 
 type CreateRevisionInput struct {
@@ -65,9 +71,36 @@ type CreateRevisionInput struct {
 }
 
 type PolicyChangeInput struct {
-	ExpectedPolicyVersion int64  `json:"expectedPolicyVersion"`
-	Reason                string `json:"reason"`
-	CanaryPercent         int    `json:"canaryPercent,omitempty"`
+	ExpectedPolicyVersion int64              `json:"expectedPolicyVersion"`
+	Reason                string             `json:"reason"`
+	CanaryPercent         int                `json:"canaryPercent,omitempty"`
+	AutoRollback          *AutoRollbackInput `json:"autoRollback,omitempty"`
+}
+
+type AutoRollbackInput struct {
+	Enabled                  bool `json:"enabled"`
+	ObservationWindowSeconds int  `json:"observationWindowSeconds,omitempty"`
+	MinimumExecutions        int  `json:"minimumExecutions,omitempty"`
+	FailureThreshold         int  `json:"failureThreshold,omitempty"`
+	FailureRatePercent       int  `json:"failureRatePercent,omitempty"`
+}
+
+type AutoRollbackWindow struct {
+	ID                  uuid.UUID      `json:"id"`
+	PolicyVersion       int64          `json:"policyVersion"`
+	CandidateRevisionID uuid.UUID      `json:"candidateRevisionId"`
+	CandidateChannel    string         `json:"candidateChannel"`
+	FallbackRevisionID  uuid.UUID      `json:"fallbackRevisionId"`
+	StartedAt           time.Time      `json:"startedAt"`
+	ExpiresAt           time.Time      `json:"expiresAt"`
+	MinimumExecutions   int            `json:"minimumExecutions"`
+	FailureThreshold    int            `json:"failureThreshold"`
+	FailureRatePercent  int            `json:"failureRatePercent"`
+	Status              string         `json:"status"`
+	DecisionReason      *string        `json:"decisionReason,omitempty"`
+	Evidence            map[string]any `json:"evidence"`
+	DecisionAt          *time.Time     `json:"decisionAt,omitempty"`
+	EnabledBy           uuid.UUID      `json:"enabledBy"`
 }
 
 type Selection struct {

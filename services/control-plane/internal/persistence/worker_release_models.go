@@ -50,3 +50,29 @@ type WorkerReleaseTransition struct {
 }
 
 func (WorkerReleaseTransition) TableName() string { return "worker_release_transitions" }
+
+type WorkerReleaseAutoRollbackWindow struct {
+	ID                     uuid.UUID      `gorm:"column:id;type:uuid;primaryKey"`
+	TenantID               uuid.UUID      `gorm:"column:tenant_id;type:uuid;not null"`
+	ExecutionTargetID      uuid.UUID      `gorm:"column:execution_target_id;type:uuid;not null;uniqueIndex:uq_worker_release_auto_rollback_target_version,priority:1"`
+	PolicyVersion          int64          `gorm:"column:policy_version;not null;uniqueIndex:uq_worker_release_auto_rollback_target_version,priority:2"`
+	CandidateRevisionID    uuid.UUID      `gorm:"column:candidate_revision_id;type:uuid;not null"`
+	CandidateChannel       string         `gorm:"column:candidate_channel;not null"`
+	FallbackRevisionID     uuid.UUID      `gorm:"column:fallback_revision_id;type:uuid;not null"`
+	StartedAt              time.Time      `gorm:"column:started_at;not null"`
+	ExpiresAt              time.Time      `gorm:"column:expires_at;not null"`
+	MinimumExecutions      int            `gorm:"column:minimum_executions;not null"`
+	FailureThreshold       int            `gorm:"column:failure_threshold;not null"`
+	FailureRatePercent     int            `gorm:"column:failure_rate_percent;not null"`
+	EnabledBy              uuid.UUID      `gorm:"column:enabled_by;type:uuid;not null"`
+	Status                 string         `gorm:"column:status;not null"`
+	DecisionReason         *string        `gorm:"column:decision_reason"`
+	Evidence               map[string]any `gorm:"column:evidence;serializer:json"`
+	DecisionAt             *time.Time     `gorm:"column:decision_at"`
+	CreatedAt              time.Time      `gorm:"column:created_at;not null"`
+	UpdatedAt              time.Time      `gorm:"column:updated_at;not null"`
+}
+
+func (WorkerReleaseAutoRollbackWindow) TableName() string {
+	return "worker_release_auto_rollback_windows"
+}

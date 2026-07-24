@@ -67,6 +67,8 @@ type Config struct {
 	SSHProvisionTimeout           time.Duration
 	DockerReconcileInterval       time.Duration
 	KubernetesReconcileInterval   time.Duration
+	WorkerAutoRollbackEnabled     bool
+	WorkerAutoRollbackInterval    time.Duration
 	RetentionSweepInterval        time.Duration
 	OutboxPollInterval            time.Duration
 	OutboxClaimTTL                time.Duration
@@ -231,6 +233,12 @@ func Load() (Config, error) {
 	if cfg.KubernetesReconcileInterval, err = envDurationStrict("SYNARA_KUBERNETES_RECONCILE_INTERVAL", 5*time.Second); err != nil {
 		return Config{}, err
 	}
+	if cfg.WorkerAutoRollbackEnabled, err = envBoolStrict("SYNARA_WORKER_AUTO_ROLLBACK_ENABLED", true); err != nil {
+		return Config{}, err
+	}
+	if cfg.WorkerAutoRollbackInterval, err = envDurationStrict("SYNARA_WORKER_AUTO_ROLLBACK_INTERVAL", 10*time.Second); err != nil {
+		return Config{}, err
+	}
 	if cfg.RetentionSweepInterval, err = envDurationStrict("SYNARA_RETENTION_SWEEP_INTERVAL", time.Hour); err != nil {
 		return Config{}, err
 	}
@@ -390,6 +398,9 @@ func Load() (Config, error) {
 	}
 	if cfg.KubernetesReconcileInterval <= 0 {
 		return Config{}, errors.New("SYNARA_KUBERNETES_RECONCILE_INTERVAL must be positive")
+	}
+	if cfg.WorkerAutoRollbackInterval <= 0 {
+		return Config{}, errors.New("SYNARA_WORKER_AUTO_ROLLBACK_INTERVAL must be positive")
 	}
 	if cfg.RetentionSweepInterval <= 0 {
 		return Config{}, errors.New("SYNARA_RETENTION_SWEEP_INTERVAL must be positive")

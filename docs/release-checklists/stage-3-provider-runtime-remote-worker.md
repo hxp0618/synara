@@ -33,7 +33,7 @@ open 状态或双模型矩阵要求当作新的 resume cursor。
 
 ## 2. 数据库与 DDL
 
-当前工作树的 checked-in forward migration boundary 是 `000041`：
+当前工作树的 checked-in forward migration boundary 是 `000042`：
 
 | Migration | 发布不变量                                                                              |
 | --------- | --------------------------------------------------------------------------------------- |
@@ -47,6 +47,7 @@ open 状态或双模型矩阵要求当作新的 resume cursor。
 | `000039`  | 每个 Execution Target 最多一个 active `worker_image_pull` Binding，歧义升级 fail closed |
 | `000040`  | Worker Release Transition 必须与当前 Policy 的版本和 promoted/canary 状态完全一致       |
 | `000041`  | `artifacts_kind_check` forward 扩展 `diff`，历史 Artifact kind 与 migration 保持不变    |
+| `000042`  | 持久化 Worker Release 自动回滚观察窗口、阈值、决策证据和不可变状态流转                  |
 
 - [x] PostgreSQL 备份完成，并在隔离环境验证可恢复。
 - [x] `/ready.checks.schema.expectedVersion` 与当前镜像内 migration boundary 一致。
@@ -58,6 +59,7 @@ open 状态或双模型矩阵要求当作新的 resume cursor。
 - [x] `000039` 在重复 active Target Binding 上拒绝升级，修复歧义后可重试且新唯一索引生效。
 - [x] `000040` 在 Policy/最新 Transition 不一致时拒绝升级，并阻止写入不匹配的 Transition。
 - [x] `000041` 升级前拒绝 `diff`、升级后保留全部既有 kind 并接受 `diff`，未知 kind 继续被拒绝。
+- [x] `000042` 的自动回滚窗口按 Policy Version 唯一，决策证据持久化且终态不可回退或删除。
 - [x] PostgreSQL 不依赖 Runtime `AutoMigrate`；历史 migration 文件没有被修改。
 - [x] 回滚方案确认旧镜像可以读取已应用的新 schema，或已有经过评审的 forward fix；不得仅回滚 Deployment。
 

@@ -223,7 +223,7 @@ func fencingOperation(route string) string {
 func (r *Registry) ObserveBackground(kind string, started time.Time, err error) {
 	kind = strings.ToLower(strings.TrimSpace(kind))
 	switch kind {
-	case "docker", "kubernetes", "retention", "outbox":
+	case "docker", "kubernetes", "worker-release-auto-rollback", "retention", "outbox":
 	default:
 		kind = "other"
 	}

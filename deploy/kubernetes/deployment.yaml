@@ -116,6 +116,10 @@ spec:
                   key: aws-region
             - name: SYNARA_KUBERNETES_RECONCILE_INTERVAL
               value: 5s
+            - name: SYNARA_WORKER_AUTO_ROLLBACK_ENABLED
+              value: "true"
+            - name: SYNARA_WORKER_AUTO_ROLLBACK_INTERVAL
+              value: 10s
             - name: SYNARA_OUTBOX_POLL_INTERVAL
               value: 500ms
             - name: SYNARA_OUTBOX_CLAIM_TTL

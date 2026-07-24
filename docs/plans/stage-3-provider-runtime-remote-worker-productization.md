@@ -64,6 +64,7 @@
 - **发布文档**：
   `docs/release-checklists/stage-3-provider-runtime-remote-worker.md`、
   `docs/runbooks/worker-release-rollout.md`、
+  `docs/reports/stage-3-worker-release-auto-rollback-2026-07-24.md`、
   `docs/reports/stage-3-production-release-8415efa1.md`、
   `docs/reports/stage-3-real-provider-ssh-release-gate-14f7dd2d.md`、
   `docs/reports/stage-3-kubernetes-kind-rollout-recovery-load-39b9b328.md`、
@@ -110,6 +111,16 @@ rollout/promote/rollback 均已通过；最终 aggregate Secret scan 为零 find
 产品路径和可控故障测试；长时间 load/soak、多节点与 immutable rollout 只需一个代表性 API-key Provider
 通过，不再把多个模型重复执行同一基础设施门禁。第三方 Provider 请求中断属于外部依赖诊断，不能替代
 确定性基础设施验证，也不会自动触发整套重跑。订阅/OAuth 登录为低优先级后续兼容项，不阻断 Stage 3。
+
+#### 1.0.1 收口后 Worker 自动回滚补强
+
+Worker Release 现已在 canary 和随后 promoted 阶段建立持久化观察窗口。后台单例控制器只统计
+`provider_not_installed`、`provider_version_incompatible`、`protocol_violation` 与候选 Worker/Manifest
+不兼容等 Synara 可归因信号；第三方 API Key/OAuth、额度、限流、网络和 Provider 服务不可用明确排除。
+阈值命中后先写 `rollback-pending` 决策与非 Secret evidence，再复用 Policy CAS、active Execution fencing、
+immutable Transition、Audit 和 Outbox 触发 abort-canary/rollback；被 active/recovering Execution 阻断时保持
+pending 并自动重试。该补强引入 `000042_worker_release_auto_rollback.sql`，不改变运行时 SHA `8415efa1`
+已经封存的 Stage 3 production-profile 证据边界；部署新版本时须单独执行 migration 与定向 smoke。
 
 ### 1.1 已确认的运行与生产边界（2026-07-18）
 

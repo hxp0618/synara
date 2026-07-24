@@ -3,6 +3,9 @@
 本 Runbook 描述当前 Worker Release API、Credential Binding、Canary/Promote/Rollback 和安全撤销边界。
 Stage 3 rollout production gate 已在运行时 SHA `8415efa1` 通过；具体环境仍须使用已批准的 Credential、
 不可变 Digest、目标环境变更评审与本文预检，不能把该结论扩展成对任意云环境的自动授权。
+自动回滚补强的实现与定向验证见
+`docs/reports/stage-3-worker-release-auto-rollback-2026-07-24.md`；它是 Stage 3 收口后的发布安全扩展，
+不追溯改写 `8415efa1` 的已封存生产证据。
 
 发布门禁见 `docs/release-checklists/stage-3-provider-runtime-remote-worker.md`；最新 deterministic managed
 Docker rollout/failure/load 证据见 `docs/reports/stage-3-worker-release-rollout-load-41683366.md`，前序 Busy
@@ -25,6 +28,8 @@ registry-pushed recovery/load 证据见
   TTL 派生，约为 TTL 的三分之一；单次 renew 请求 timeout 不得长于 renew interval，也不得依赖可能长于
   权威 TTL 的固定默认值。
 - Canary、Promote、Rollback 都写 immutable Transition、Audit 和 Outbox 记录。
+- Canary 默认创建 policy-version scoped 自动回滚观察窗口；判定证据先持久化，再由单例控制器触发
+  abort-canary 或回滚到上一 promoted Revision。Promote 后会为新 promoted Revision 重新开始同配置观察窗口。
 - 每个 Target 最多一个 active `worker_image_pull` Binding；`000039` 在历史歧义未清理时拒绝升级。
 - `000040` 要求最新 immutable Transition 与当前 Policy 的 Tenant、Target、Version、promoted、canary
   和百分比完全一致。
@@ -43,11 +48,12 @@ registry-pushed recovery/load 证据见
 | Transition       | immutable promote/canary/rollback 历史                                                     |
 | Abort canary     | 调用 rollback API 指向当前 promoted Revision，仅移除 canary，不伪造新 promoted 镜像        |
 | Operator revoke  | 不可逆撤销 Worker incarnation，并写 logical identity tombstone                             |
+| Auto rollback    | 只基于 Synara 可归因的 release/runtime 失败或候选 Worker 不兼容自动回到 fallback Revision |
 
 ## 3. 预检
 
 1. 完成 PostgreSQL 备份，并确认 `/ready=200`。
-2. 确认当前镜像 embedded migration 与数据库 Checksum 一致；本实现边界为 `000041`。
+2. 确认当前镜像 embedded migration 与数据库 Checksum 一致；本实现边界为 `000042`。
 3. 记录 Tenant、Execution Target、Worker Manifest、Image Digest、Commit SHA 和当前 Policy Version。
 4. 从同一 clean SHA 运行 Registry supply-chain gate，确认双平台 manifest 可重复、`HIGH/CRITICAL=0`、
    Secret=0、非 EOSL、漏洞数据库未过期，并人工评审所有 `UNKNOWN` finding。
@@ -248,12 +254,17 @@ curl --fail-with-body --silent --show-error \
   --cookie "${SYNARA_COOKIE_JAR}" \
   --header 'Content-Type: application/json' \
   --header "Idempotency-Key: ${SYNARA_CANARY_KEY}" \
-  --data "{\"expectedPolicyVersion\":${SYNARA_POLICY_VERSION},\"reason\":\"approved canary window\",\"canaryPercent\":${SYNARA_CANARY_PERCENT}}" \
+  --data "{\"expectedPolicyVersion\":${SYNARA_POLICY_VERSION},\"reason\":\"approved canary window\",\"canaryPercent\":${SYNARA_CANARY_PERCENT},\"autoRollback\":{\"enabled\":true,\"observationWindowSeconds\":900,\"minimumExecutions\":4,\"failureThreshold\":2,\"failureRatePercent\":50}}" \
   "${SYNARA_ORIGIN}/v1/tenants/${SYNARA_TENANT_ID}/execution-targets/${SYNARA_TARGET_ID}/worker-releases/${SYNARA_CANARY_REVISION_ID}/canary"
 ```
 
 任何 `409 worker_release_policy_version_conflict` 都表示状态已变化。重新读取 overview，确认操作者和
 Transition 后再决定下一步；不要仅替换 Version 重放旧意图。
+
+省略 `autoRollback` 时默认启用：观察 `15m`，至少 `4` 个相关终态 Execution，至少 `2` 个可归因失败且
+失败率达到 `50%`。可显式传 `{"enabled":false}` 关闭单次 canary 的自动回滚；生产关闭必须记录理由。
+全局应急开关为 `SYNARA_WORKER_AUTO_ROLLBACK_ENABLED`，控制器轮询间隔由
+`SYNARA_WORKER_AUTO_ROLLBACK_INTERVAL` 设置。全局关闭只停止判定和触发，不删除已持久化窗口或证据。
 
 ## 8. Canary 观察
 
@@ -272,6 +283,20 @@ Transition 后再决定下一步；不要仅替换 Version 重放旧意图。
 
 当前 deterministic managed Docker gate 已使用两个不同 Registry Digest 验证第 3、4、6、8 项的 mechanics，
 但 deterministic Provider fixture 不能满足第 5 项，也不能替代真实 Provider 与生产 rollout。
+
+### 8.1 自动回滚判定边界
+
+- 可计入阈值的失败码只有 `provider_not_installed`、`provider_version_incompatible` 和
+  `protocol_violation`；新候选 Manifest 的 Worker 在观察期内被判定为 `incompatible` 时可立即触发。
+- 第三方 Provider 的 API Key/OAuth、额度、限流、服务不可用、网络或 Base URL 故障不计入分母和阈值，
+  包括 `provider_unavailable`、鉴权类失败和 `rate_limited`。这些故障应按 Provider/网络事件处理，不能靠
+  Worker 镜像回滚掩盖。
+- 判定状态依次为 `monitoring -> rollback-pending -> triggered`；观察结束且未命中为 `expired`，被人工
+  Policy 变更替代为 `superseded`。运行中或 recovering Execution 会阻止实际切换，但持久化的
+  `rollback-pending` 决策会继续重试，绝不改绑已租用执行。
+- 自动动作仍使用 Policy CAS、Drain/fencing、immutable Transition，并额外写入
+  `worker_release.auto_rollback_triggered` Audit 与 `worker.release.auto-rollback-triggered` Outbox。
+  Evidence 只保存计数、失败码和 Revision/Window ID，不保存 Provider 错误消息、API Key 或 Base URL。
 
 ## 9. Promote Canary
 

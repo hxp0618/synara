@@ -258,6 +258,34 @@ func TestLoadValidatesSSHProvisioningConfiguration(t *testing.T) {
 	}
 }
 
+func TestLoadValidatesWorkerAutoRollbackConfiguration(t *testing.T) {
+	clearConfigEnvironment(t)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.WorkerAutoRollbackEnabled || cfg.WorkerAutoRollbackInterval != 10*time.Second {
+		t.Fatalf("unexpected default Worker auto-rollback config: %#v", cfg)
+	}
+
+	clearConfigEnvironment(t)
+	t.Setenv("SYNARA_WORKER_AUTO_ROLLBACK_ENABLED", "false")
+	t.Setenv("SYNARA_WORKER_AUTO_ROLLBACK_INTERVAL", "3s")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.WorkerAutoRollbackEnabled || cfg.WorkerAutoRollbackInterval != 3*time.Second {
+		t.Fatalf("unexpected configured Worker auto-rollback config: %#v", cfg)
+	}
+
+	clearConfigEnvironment(t)
+	t.Setenv("SYNARA_WORKER_AUTO_ROLLBACK_INTERVAL", "0s")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "SYNARA_WORKER_AUTO_ROLLBACK_INTERVAL") {
+		t.Fatalf("expected invalid Worker auto-rollback interval error, got %v", err)
+	}
+}
+
 func TestLoadValidatesOutboxConfiguration(t *testing.T) {
 	clearConfigEnvironment(t)
 	t.Setenv("SYNARA_OUTBOX_POLL_INTERVAL", "2s")
@@ -340,6 +368,7 @@ func clearConfigEnvironment(t *testing.T) {
 		"SYNARA_SSH_PROVISION_TIMEOUT",
 		"SYNARA_DOCKER_RECONCILE_INTERVAL",
 		"SYNARA_KUBERNETES_RECONCILE_INTERVAL",
+		"SYNARA_WORKER_AUTO_ROLLBACK_ENABLED", "SYNARA_WORKER_AUTO_ROLLBACK_INTERVAL",
 		"SYNARA_RETENTION_SWEEP_INTERVAL",
 		"SYNARA_OUTBOX_POLL_INTERVAL", "SYNARA_OUTBOX_CLAIM_TTL",
 		"SYNARA_OUTBOX_BATCH_SIZE", "SYNARA_OUTBOX_MAX_ATTEMPTS",

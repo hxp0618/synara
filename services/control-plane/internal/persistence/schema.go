@@ -16,7 +16,7 @@ func AllModels() []any {
 		&ArtifactPayloadMigration{}, &ArtifactAccessToken{}, &ProviderCredential{}, &ProviderCredentialScopePolicy{},
 		&CredentialBinding{}, &ExecutionCredentialGrant{},
 		&WorkerManifest{}, &WorkerProviderManifest{}, &WorkerReleaseRevision{}, &WorkerReleasePolicy{},
-		&WorkerReleaseTransition{}, &ProviderRuntimeBinding{}, &RemoteWorkspace{},
+		&WorkerReleaseTransition{}, &WorkerReleaseAutoRollbackWindow{}, &ProviderRuntimeBinding{}, &RemoteWorkspace{},
 		&WorkspaceMaterialization{}, &WorkspaceCleanupCommand{}, &WorkspaceCheckpoint{},
 		&SSEConnectionLease{},
 		&TenantRetentionPolicy{}, &IdentityConnection{}, &IdentityLoginAttempt{},
