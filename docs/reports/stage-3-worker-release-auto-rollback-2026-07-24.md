@@ -34,6 +34,14 @@ go test ./internal/workerreleases ./internal/config ./internal/database \
 go vet ./...
 ```
 
+The final workspace checks also passed from a clean worktree with Bun `1.3.14` and Node `24.14.0`:
+
+```text
+bun fmt
+bun lint       # 0 errors; existing warnings remain non-blocking
+bun typecheck  # 8/8 packages
+```
+
 Automatic rollback tests cover threshold trigger, ignored external Provider failures, durable pending/retry after an
 active Execution drains, immediate candidate incompatibility, and the promoted-revision observation window.
 

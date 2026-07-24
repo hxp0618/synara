@@ -48,7 +48,7 @@ registry-pushed recovery/load 证据见
 | Transition       | immutable promote/canary/rollback 历史                                                     |
 | Abort canary     | 调用 rollback API 指向当前 promoted Revision，仅移除 canary，不伪造新 promoted 镜像        |
 | Operator revoke  | 不可逆撤销 Worker incarnation，并写 logical identity tombstone                             |
-| Auto rollback    | 只基于 Synara 可归因的 release/runtime 失败或候选 Worker 不兼容自动回到 fallback Revision |
+| Auto rollback    | 只基于 Synara 可归因的 release/runtime 失败或候选 Worker 不兼容自动回到 fallback Revision  |
 
 ## 3. 预检
 
