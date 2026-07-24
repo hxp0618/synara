@@ -79,6 +79,7 @@ export interface WorkLogAutomation {
   id: string;
   name: string;
   cadenceLabel: string;
+  proposalState?: "pending" | "accepted" | "dismissed";
 }
 
 export interface WorkLogSynaraCreatedThread {
@@ -339,7 +340,18 @@ function extractWorkLogAutomation(
     return null;
   }
   const cadenceLabel = typeof payload.cadenceLabel === "string" ? payload.cadenceLabel : "";
-  return { id, name, cadenceLabel };
+  const proposalState =
+    payload.proposalState === "pending" ||
+    payload.proposalState === "accepted" ||
+    payload.proposalState === "dismissed"
+      ? payload.proposalState
+      : undefined;
+  return {
+    id,
+    name,
+    cadenceLabel,
+    ...(proposalState ? { proposalState } : {}),
+  };
 }
 
 function extractWorkLogSynaraThreadCreation(

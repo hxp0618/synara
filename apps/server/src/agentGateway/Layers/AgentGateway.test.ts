@@ -2,6 +2,7 @@ import { assert, describe, it } from "@effect/vitest";
 import type {
   AutomationCreateInput,
   AutomationDefinition,
+  AutomationUpdateInput,
   OrchestrationCommand,
   OrchestrationEvent,
   OrchestrationProjectShell,
@@ -139,8 +140,9 @@ function makeThreadDetail(shell: OrchestrationThreadShell): OrchestrationThread 
 interface GatewayHarness {
   readonly dispatched: Array<OrchestrationCommand>;
   readonly automationCreates: Array<AutomationCreateInput>;
-  readonly automationUpdates: Array<{ id: string; enabled?: boolean | undefined }>;
+  readonly automationUpdates: Array<AutomationUpdateInput>;
   readonly automationDeletes: Array<{ id: string }>;
+  readonly automationMemoryUpdates: Array<{ automationId: string | null; content: string }>;
   readonly worktreeCreates: Array<{
     ref?: string;
     newBranch?: string;
@@ -265,11 +267,16 @@ function makeHarnessLayer(
     readonly providerRuntimeEvents?: ReadonlyArray<PersistedProviderRuntimeEvent>;
     readonly operationalDiagnostics?: ReadonlyArray<OperationalDiagnostic>;
     readonly providerDeliveryBlockers?: ReadonlyArray<ProviderBlockingDeliveryEvidence>;
+    readonly automationRuns?: ReadonlyArray<{
+      readonly id: string;
+      readonly automationId: AutomationDefinition["id"];
+    }>;
   } = {},
 ) {
   const dispatched: Array<OrchestrationCommand> = [];
   const automationCreates: Array<AutomationCreateInput> = [];
-  const automationUpdates: Array<{ id: string; enabled?: boolean | undefined }> = [];
+  const automationMemoryUpdates: Array<{ automationId: string | null; content: string }> = [];
+  const automationUpdates: Array<AutomationUpdateInput> = [];
   const automationDeletes: Array<{ id: string }> = [];
   const worktreeCreates: Array<{
     ref?: string;
@@ -555,7 +562,7 @@ function makeHarnessLayer(
         return {
           ...input,
           id: "automation-1",
-          enabled: true,
+          enabled: input.enabled ?? true,
           nextRunAt: NOW,
           completionPolicyVersion: 0,
           completionPolicyUpdatedAt: NOW,
@@ -565,7 +572,7 @@ function makeHarnessLayer(
           archivedAt: null,
         };
       }),
-    update: (input: { id: string; enabled?: boolean }) =>
+    update: (input: AutomationUpdateInput) =>
       Effect.sync(() => {
         automationUpdates.push(input);
         return { id: input.id };
@@ -582,6 +589,23 @@ function makeHarnessLayer(
           )
           .filter((definition) => (input?.includeArchived ? true : definition.archivedAt === null)),
         runs: [],
+        memories: [],
+      }),
+    listRunsForDefinition: (input: { automationId: AutomationDefinition["id"]; limit: number }) =>
+      Effect.succeed(
+        (options.automationRuns ?? [])
+          .filter((run) => run.automationId === input.automationId)
+          .slice(0, input.limit),
+      ),
+    getMemory: () => Effect.succeed(null),
+    updateMemory: (input: { automationId: string | null; content: string }) =>
+      Effect.sync(() => {
+        automationMemoryUpdates.push({ automationId: input.automationId, content: input.content });
+        return {
+          automationId: input.automationId ?? "automation-1",
+          content: input.content,
+          updatedAt: NOW,
+        };
       }),
   } as unknown as (typeof AutomationService)["Service"]);
 
@@ -1080,6 +1104,7 @@ function makeHarnessLayer(
       automationCreates,
       automationUpdates,
       automationDeletes,
+      automationMemoryUpdates,
       worktreeCreates,
       gitExecutions,
       fetchedPullRequests,
@@ -1335,6 +1360,7 @@ describe("AgentGateway", () => {
           result: {
             tools: Array<{
               name: string;
+              description?: string;
               inputSchema: { properties?: Record<string, unknown> };
             }>;
           };
@@ -1360,13 +1386,61 @@ describe("AgentGateway", () => {
         "synara_set_thread_archived",
         "synara_create_automation",
         "synara_list_automations",
+        "synara_view_automation",
+        "synara_update_automation",
         "synara_cancel_automation",
+        "synara_update_automation_memory",
+        "synara_report_automation_result",
       ]);
       const createThreadProperties = tools.find((tool) => tool.name === "synara_create_thread")
         ?.inputSchema.properties;
       assert.property(createThreadProperties, "baseRef");
       assert.notProperty(createThreadProperties, "baseBranch");
       assert.notProperty(createThreadProperties, "branchName");
+
+      const createAutomation = tools.find((tool) => tool.name === "synara_create_automation");
+      assert.include(createAutomation?.description ?? "", "self-contained brief");
+      const createAutomationProperties = createAutomation?.inputSchema.properties as
+        | Record<string, { description?: string }>
+        | undefined;
+      assert.include(
+        createAutomationProperties?.name?.description ?? "",
+        "3–8 word outcome-oriented",
+      );
+      assert.include(
+        createAutomationProperties?.prompt?.description ?? "",
+        "no assumed chat context",
+      );
+      assert.include(
+        createAutomationProperties?.prompt?.description ?? "",
+        "notifying the user versus staying silent",
+      );
+      const updateAutomationMemory = tools.find(
+        (tool) => tool.name === "synara_update_automation_memory",
+      );
+      const reportAutomationResult = tools.find(
+        (tool) => tool.name === "synara_report_automation_result",
+      );
+      assert.include(
+        updateAutomationMemory?.description ?? "",
+        'manual follow-up such as "continue"',
+      );
+      assert.include(
+        reportAutomationResult?.description ?? "",
+        'manual follow-up such as "continue"',
+      );
+
+      const updateAutomationProperties = tools.find(
+        (tool) => tool.name === "synara_update_automation",
+      )?.inputSchema.properties as Record<string, { description?: string }> | undefined;
+      assert.equal(
+        updateAutomationProperties?.name?.description,
+        createAutomationProperties?.name?.description,
+      );
+      assert.equal(
+        updateAutomationProperties?.prompt?.description,
+        createAutomationProperties?.prompt?.description,
+      );
     }).pipe(Effect.provide(gatewayLayer));
   });
 
@@ -4065,6 +4139,190 @@ describe("AgentGateway", () => {
     }).pipe(Effect.provide(gatewayLayer));
   });
 
+  it.effect("creates standalone automations with the additive full schedule shape", () => {
+    const { gatewayLayer, makeHarness } = makeHarnessLayer(baseThreads);
+    return Effect.gen(function* () {
+      const harness = yield* makeHarness;
+      const response = yield* harness.callTool({
+        token: "token-parent",
+        name: "synara_create_automation",
+        args: {
+          name: "Daily review",
+          prompt: "Review the project.",
+          mode: "standalone",
+          schedule: {
+            type: "daily",
+            timeOfDay: "09:30",
+            timezone: "Europe/Rome",
+          },
+          worktreeMode: "worktree",
+          notificationPolicy: "failed-runs-only",
+        },
+      });
+
+      assert.isFalse(isToolError(response.result), toolErrorText(response.result));
+      const created = harness.automationCreates[0]!;
+      assert.equal(created.mode, "standalone");
+      assert.isNull(created.targetThreadId);
+      assert.deepEqual(created.schedule, {
+        type: "daily",
+        timeOfDay: "09:30",
+        timezone: "Europe/Rome",
+      });
+      assert.equal(created.worktreeMode, "worktree");
+      assert.equal(created.notificationPolicy, "failed-runs-only");
+    }).pipe(Effect.provide(gatewayLayer));
+  });
+
+  it.effect("rejects standalone automations targeting another project", () => {
+    const { gatewayLayer, makeHarness } = makeHarnessLayer(baseThreads);
+    return Effect.gen(function* () {
+      const harness = yield* makeHarness;
+      const response = yield* harness.callTool({
+        token: "token-parent",
+        name: "synara_create_automation",
+        args: {
+          name: "Cross-project review",
+          prompt: "Review another project.",
+          mode: "standalone",
+          projectId: "project-other",
+        },
+      });
+
+      assert.isTrue(isToolError(response.result));
+      assert.include(toolErrorText(response.result), "caller's project");
+      assert.lengthOf(harness.automationCreates, 0);
+    }).pipe(Effect.provide(gatewayLayer));
+  });
+
+  it.effect(
+    "requires an explicit flag and bounded loop for sub-minute automation schedules",
+    () => {
+      const { gatewayLayer, makeHarness } = makeHarnessLayer(baseThreads);
+      return Effect.gen(function* () {
+        const harness = yield* makeHarness;
+        const rejected = yield* harness.callTool({
+          token: "token-parent",
+          name: "synara_create_automation",
+          args: {
+            name: "Fast monitor",
+            prompt: "Check quickly.",
+            schedule: { type: "interval", everySeconds: 15 },
+          },
+        });
+        assert.isTrue(isToolError(rejected.result));
+        assert.include(toolErrorText(rejected.result), "fastInterval");
+
+        const accepted = yield* harness.callTool({
+          token: "token-parent",
+          name: "synara_create_automation",
+          args: {
+            name: "Fast monitor",
+            prompt: "Check quickly.",
+            schedule: { type: "interval", everySeconds: 15 },
+            fastInterval: true,
+          },
+        });
+        assert.isFalse(isToolError(accepted.result), toolErrorText(accepted.result));
+        const created = harness.automationCreates[0]!;
+        assert.equal(created.maxIterations, 10);
+        assert.include(created.acknowledgedRisks ?? [], "fast-interval");
+        // The default cooldown must not exceed the schedule spacing, or the
+        // acknowledged fast interval would silently degrade to cooldown cadence.
+        assert.equal(created.heartbeatCooldownSeconds, 15);
+      }).pipe(Effect.provide(gatewayLayer));
+    },
+  );
+
+  it.effect("accepts memory writes without automationId and via the content alias", () => {
+    const { gatewayLayer, makeHarness } = makeHarnessLayer(baseThreads);
+    return Effect.gen(function* () {
+      const harness = yield* makeHarness;
+      const implicit = yield* harness.callTool({
+        token: "token-parent",
+        name: "synara_update_automation_memory",
+        args: { memory: "Iteration 1 complete." },
+      });
+      const legacy = yield* harness.callTool({
+        token: "token-parent",
+        name: "synara_update_automation_memory",
+        args: { automationId: "automation-1", content: "Legacy payload." },
+      });
+      const missing = yield* harness.callTool({
+        token: "token-parent",
+        name: "synara_update_automation_memory",
+        args: { automationId: "automation-1" },
+      });
+
+      assert.isFalse(isToolError(implicit.result), toolErrorText(implicit.result));
+      assert.isFalse(isToolError(legacy.result), toolErrorText(legacy.result));
+      assert.isTrue(isToolError(missing.result));
+      assert.include(toolErrorText(missing.result), '"memory"');
+      assert.deepEqual(harness.automationMemoryUpdates, [
+        { automationId: null, content: "Iteration 1 complete." },
+        { automationId: "automation-1", content: "Legacy payload." },
+      ]);
+    }).pipe(Effect.provide(gatewayLayer));
+  });
+
+  it.effect("persists suggested automations as pending and surfaces a proposal card", () => {
+    const { gatewayLayer, makeHarness } = makeHarnessLayer(baseThreads);
+    return Effect.gen(function* () {
+      const harness = yield* makeHarness;
+      const response = yield* harness.callTool({
+        token: "token-parent",
+        name: "synara_create_automation",
+        args: {
+          name: "Suggested monitor",
+          prompt: "Watch the build.",
+          suggested: true,
+        },
+      });
+
+      assert.isFalse(isToolError(response.result), toolErrorText(response.result));
+      const created = harness.automationCreates[0]!;
+      assert.isFalse(created.enabled ?? true);
+      assert.equal(created.proposalState, "pending");
+      const proposal = harness.dispatched.find(
+        (command) => command.type === "thread.activity.append",
+      );
+      assert.equal(proposal?.type, "thread.activity.append");
+      if (proposal?.type !== "thread.activity.append") {
+        assert.fail("Expected a proposal activity command.");
+      }
+      assert.equal(proposal.activity.kind, "automation.created");
+      assert.equal(proposal.activity.id, "automation-proposal:automation-1");
+      assert.equal((proposal.activity.payload as Record<string, unknown>).proposalState, "pending");
+    }).pipe(Effect.provide(gatewayLayer));
+  });
+
+  it.effect("views run history through the automation-scoped query", () => {
+    const definition = makeAutomationDefinition();
+    const { gatewayLayer, makeHarness } = makeHarnessLayer(baseThreads, [definition], {
+      automationRuns: [
+        { id: "target-newest", automationId: definition.id },
+        { id: "target-older", automationId: definition.id },
+        {
+          id: "unrelated",
+          automationId: AutomationId.makeUnsafe("automation-unrelated"),
+        },
+      ],
+    });
+    return Effect.gen(function* () {
+      const harness = yield* makeHarness;
+      const response = yield* harness.callTool({
+        token: "token-parent",
+        name: "synara_view_automation",
+        args: { automationId: definition.id, runLimit: 1 },
+      });
+
+      assert.isFalse(isToolError(response.result), toolErrorText(response.result));
+      assert.deepEqual(toolResultJson(response.result).runs, [
+        { id: "target-newest", automationId: definition.id },
+      ]);
+    }).pipe(Effect.provide(gatewayLayer));
+  });
+
   it.effect("disables an automation on cancel", () => {
     const { gatewayLayer, makeHarness } = makeHarnessLayer(baseThreads, [
       makeAutomationDefinition(),
@@ -4077,7 +4335,9 @@ describe("AgentGateway", () => {
         args: { automationId: "automation-1" },
       });
       assert.isFalse(isToolError(response.result), toolErrorText(response.result));
-      assert.deepEqual(harness.automationUpdates, [{ id: "automation-1", enabled: false }]);
+      assert.deepEqual(harness.automationUpdates, [
+        { id: AutomationId.makeUnsafe("automation-1"), enabled: false },
+      ]);
     }).pipe(Effect.provide(gatewayLayer));
   });
 
@@ -4109,6 +4369,62 @@ describe("AgentGateway", () => {
       assert.include(toolErrorText(response.result), "full-access");
       assert.deepEqual(harness.automationUpdates, []);
       assert.deepEqual(harness.automationDeletes, []);
+    }).pipe(Effect.provide(gatewayLayer));
+  });
+
+  it.effect("rejects ambiguous partial automation updates", () => {
+    const { gatewayLayer, makeHarness } = makeHarnessLayer(baseThreads, [
+      makeAutomationDefinition(),
+    ]);
+    return Effect.gen(function* () {
+      const harness = yield* makeHarness;
+      const response = yield* harness.callTool({
+        token: "token-parent",
+        name: "synara_update_automation",
+        args: {
+          automationId: "automation-1",
+          name: "Only a name",
+        },
+      });
+
+      assert.isTrue(isToolError(response.result));
+      assert.deepEqual(harness.automationUpdates, []);
+    }).pipe(Effect.provide(gatewayLayer));
+  });
+
+  it.effect("applies explicit full-replacement automation updates", () => {
+    const { gatewayLayer, makeHarness } = makeHarnessLayer(baseThreads, [
+      makeAutomationDefinition(),
+    ]);
+    return Effect.gen(function* () {
+      const harness = yield* makeHarness;
+      const response = yield* harness.callTool({
+        token: "token-parent",
+        name: "synara_update_automation",
+        args: {
+          automationId: "automation-1",
+          name: "Updated monitor",
+          prompt: "Check the children carefully.",
+          schedule: { type: "interval", everySeconds: 600 },
+          enabled: true,
+          maxIterations: null,
+          notificationPolicy: "failed-runs-only",
+          completionPolicy: { type: "none" },
+        },
+      });
+
+      assert.isFalse(isToolError(response.result), toolErrorText(response.result));
+      assert.deepEqual(harness.automationUpdates[0], {
+        id: AutomationId.makeUnsafe("automation-1"),
+        name: "Updated monitor",
+        prompt: "Check the children carefully.",
+        schedule: { type: "interval", everySeconds: 600 },
+        enabled: true,
+        maxIterations: null,
+        notificationPolicy: "failed-runs-only",
+        completionPolicy: { type: "none" },
+        acknowledgedRisks: ["local-checkout"],
+      });
     }).pipe(Effect.provide(gatewayLayer));
   });
 
