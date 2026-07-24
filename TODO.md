@@ -37,10 +37,8 @@ Stage 3 的独立执行计划：
 
 ### Stage 3：Provider Runtime 与远程 Worker 产品化
 
-状态：COMPLETE。Runtime 发布源码固定为 `8415efa15cebc48a23723dbdb147d3bafd7071bf`；最终
-production-profile、四 Target、Registry/Vault/Kyverno、SIEM/WORM、负载、故障、rollout/rollback 和
-Secret scan 证据见
-[`docs/reports/stage-3-production-release-8415efa1.md`](docs/reports/stage-3-production-release-8415efa1.md)。
+状态：COMPLETE。Runtime 发布源码固定为 `8415efa15cebc48a23723dbdb147d3bafd7071bf`；本地验证环境、临时输出和
+最终生成报告已按操作人要求清理。
 
 验收边界：远程 Agent 的正式路径是第三方 API Key、可选 Base URL 和自定义模型。每个 Provider Adapter
 保留契约、产品路径和可控故障验证；耗额度的长时间 load/soak、多节点与 immutable rollout 只要求一个

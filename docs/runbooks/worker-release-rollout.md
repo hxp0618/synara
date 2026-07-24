@@ -3,9 +3,6 @@
 本 Runbook 描述当前 Worker Release API、Credential Binding、Canary/Promote/Rollback 和安全撤销边界。
 Stage 3 rollout production gate 已在运行时 SHA `8415efa1` 通过；具体环境仍须使用已批准的 Credential、
 不可变 Digest、目标环境变更评审与本文预检，不能把该结论扩展成对任意云环境的自动授权。
-自动回滚补强的实现与定向验证见
-`docs/reports/stage-3-worker-release-auto-rollback-2026-07-24.md`；它是 Stage 3 收口后的发布安全扩展，
-不追溯改写 `8415efa1` 的已封存生产证据。
 
 发布门禁见 `docs/release-checklists/stage-3-provider-runtime-remote-worker.md`；最新 deterministic managed
 Docker rollout/failure/load 证据见 `docs/reports/stage-3-worker-release-rollout-load-41683366.md`，前序 Busy
@@ -421,8 +418,7 @@ Revocation 会写 immutable Worker 状态与 logical identity tombstone，阻止
 ## 14. Stage 3 closure 与后续风险
 
 Stage 3 的 production release boundary 已在运行时 clean SHA
-`8415efa15cebc48a23723dbdb147d3bafd7071bf` 关闭，正式证据见
-`docs/reports/stage-3-production-release-8415efa1.md`。TLS Registry、Vault Transit KMS、Rekor/Kyverno、
+`8415efa15cebc48a23723dbdb147d3bafd7071bf` 关闭。TLS Registry、Vault Transit KMS、Rekor/Kyverno、
 SIEM/WORM、四 Target、三节点 immutable rollout/promote/rollback、负载、故障与精确清理均已验证。
 
 以下事项不属于 Stage 3 发布阻断项：

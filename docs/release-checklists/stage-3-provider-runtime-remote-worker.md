@@ -4,8 +4,8 @@
 未满足项必须保持未勾选，不能用 deterministic fixture、单一 Target 或静态代码检查替代真实发布证据。
 
 > **Stage 3 final closure（2026-07-24）**：本检查单已由运行时 clean SHA
-> `8415efa15cebc48a23723dbdb147d3bafd7071bf` 的最终 production evidence 关闭；完整索引见
-> `docs/reports/stage-3-production-release-8415efa1.md`。以下旧 checkpoint 说明作为审计历史保留；其中
+> `8415efa15cebc48a23723dbdb147d3bafd7071bf` 的最终 production evidence 关闭；生成的最终报告与本地
+> 验证资源已按操作人要求清理。以下旧 checkpoint 说明作为审计历史保留；其中
 > “仍需重跑”“gate open”或要求两个模型重复执行同一 load/rollout 的文字，均由本次最终结论取代。
 > 正式路径是第三方 API Key、可选 Base URL 与自定义模型；每个 Adapter 通过轻量 contract/product/failure
 > 验证，长时间 load/soak、多节点与 immutable rollout 只要求一个代表性 API-key Provider。订阅/OAuth

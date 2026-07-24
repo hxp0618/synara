@@ -212,8 +212,7 @@ Stage 3 completes the schema, Session/Execution bindings, public/private HTTPS C
 Project Git Credential binding, short-lived SSH Agent/Host Key delivery, cross-process locked shared Git cache,
 Workspace-private relative `git worktree` generations, Generation-fenced state reporting,
 Git-reference/Patch/Snapshot Checkpoint capture/restore, safe Checkpoint/Artifact retention, interrupted
-staging/backup reconciliation, and the shared Local/SSH/Docker/Kubernetes acceptance boundary. Multi-Worker
-release acceptance is recorded in `docs/reports/stage-3-production-release-8415efa1.md`.
+staging/backup reconciliation, and the shared Local/SSH/Docker/Kubernetes acceptance boundary.
 
 Kubernetes cross-Pod cache sharing still requires an explicitly configured RWX-equivalent PVC; the default cache
 remains Pod-local and disposable. This is a Stage 4 capacity/storage scaling option, not a Stage 3 correctness or
