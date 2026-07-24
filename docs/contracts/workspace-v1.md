@@ -206,12 +206,15 @@ cleanup and Execution Claims so cleanup cannot starve ordinary work or monopoliz
 Generation, layout-v2 inference, or historical physical incarnation cannot acknowledge or delete a replacement
 Workspace.
 
-## Remaining implementation gate
+## Implemented boundary and future scaling
 
-The schema, Session/Execution bindings, public/private HTTPS Clone/Fetch materialization, Project Git Credential
-binding, cross-process locked shared Git cache, Workspace-private relative `git worktree` generations,
-Generation-fenced state reporting, Git-reference/Patch/Snapshot Checkpoint capture/restore and safe
-Checkpoint/Artifact retention, interrupted staging/backup reconciliation and the shared deterministic
-Local/SSH/Docker/Kubernetes fixture are active. Stage 3 still must implement short-lived SSH Credential delivery
-and real multi-Worker/Target release acceptance. Kubernetes cache sharing additionally requires an explicitly
-configured RWX-equivalent PVC; its default cache remains Pod-local and disposable.
+Stage 3 completes the schema, Session/Execution bindings, public/private HTTPS Clone/Fetch materialization,
+Project Git Credential binding, short-lived SSH Agent/Host Key delivery, cross-process locked shared Git cache,
+Workspace-private relative `git worktree` generations, Generation-fenced state reporting,
+Git-reference/Patch/Snapshot Checkpoint capture/restore, safe Checkpoint/Artifact retention, interrupted
+staging/backup reconciliation, and the shared Local/SSH/Docker/Kubernetes acceptance boundary. Multi-Worker
+release acceptance is recorded in `docs/reports/stage-3-production-release-8415efa1.md`.
+
+Kubernetes cross-Pod cache sharing still requires an explicitly configured RWX-equivalent PVC; the default cache
+remains Pod-local and disposable. This is a Stage 4 capacity/storage scaling option, not a Stage 3 correctness or
+release blocker.

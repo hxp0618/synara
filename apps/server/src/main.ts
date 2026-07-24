@@ -228,8 +228,8 @@ const ServerConfigLive = (input: CliInput) =>
       });
       const noBrowser = resolveBooleanConfig(input.noBrowser, env.noBrowser, mode === "desktop");
       const authToken = Option.getOrUndefined(input.authToken) ?? env.authToken;
-  const controlPlaneUrl = env.controlPlaneUrl;
-  const desktopShutdownToken = env.desktopShutdownToken ?? liveProcessDesktopShutdownToken;
+      const controlPlaneUrl = env.controlPlaneUrl;
+      const desktopShutdownToken = env.desktopShutdownToken ?? liveProcessDesktopShutdownToken;
       const autoBootstrapProjectFromCwd = resolveBooleanConfig(
         input.autoBootstrapProjectFromCwd,
         env.autoBootstrapProjectFromCwd,

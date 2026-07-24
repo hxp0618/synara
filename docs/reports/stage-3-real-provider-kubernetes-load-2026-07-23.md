@@ -8,10 +8,10 @@
 
 ## Results
 
-| Provider | Source | Duration | Waves | Executions | Quota reject/retry | Overlap | Restart | Result |
-| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
-| Codex | `cc546d3a` | `1869.164s` | `11` | `44/44` | `22/22` | `33` | `1` | pass |
-| Claude Agent SDK | `46f99518` | `1835.697s` | `12` | `48/48` | `24/24` | `36` | `1` | pass |
+| Provider         | Source     |    Duration | Waves | Executions | Quota reject/retry | Overlap | Restart | Result |
+| ---------------- | ---------- | ----------: | ----: | ---------: | -----------------: | ------: | ------: | ------ |
+| Codex            | `cc546d3a` | `1869.164s` |  `11` |    `44/44` |            `22/22` |    `33` |     `1` | pass   |
+| Claude Agent SDK | `46f99518` | `1835.697s` |  `12` |    `48/48` |            `24/24` |    `36` |     `1` | pass   |
 
 Both children completed with `executionSuccessRate=1`, zero unexpected failure, zero duplicate terminal outcome and
 zero double execution. Each restarted the Control Plane after wave `10`, then verified native-Cursor reuse, Session
@@ -19,10 +19,10 @@ sequence continuity, unique terminal paths and continued admission on the same f
 
 The enforced Synara-controlled SLA observations were:
 
-| Provider | Admission P95 / P99 | Slot-reuse P95 / P99 | Required bounds | Error rate |
-| --- | ---: | ---: | --- | ---: |
-| Codex | `7ms / 10ms` | `4ms / 5ms` | `<= 1000/2000ms`, `<= 2000/3000ms` | `0` |
-| Claude Agent SDK | `5ms / 16ms` | `5ms / 16ms` | `<= 1000/2000ms`, `<= 2000/3000ms` | `0` |
+| Provider         | Admission P95 / P99 | Slot-reuse P95 / P99 | Required bounds                    | Error rate |
+| ---------------- | ------------------: | -------------------: | ---------------------------------- | ---------: |
+| Codex            |        `7ms / 10ms` |          `4ms / 5ms` | `<= 1000/2000ms`, `<= 2000/3000ms` |        `0` |
+| Claude Agent SDK |        `5ms / 16ms` |         `5ms / 16ms` | `<= 1000/2000ms`, `<= 2000/3000ms` |        `0` |
 
 Provider-dependent interaction-ready and Turn-completion distributions remain capacity-planning evidence and are not
 presented as Synara-controlled admission SLIs.

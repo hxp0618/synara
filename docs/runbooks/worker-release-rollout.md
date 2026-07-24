@@ -1,8 +1,8 @@
 # Worker Release Rollout 运维 Runbook
 
 本 Runbook 描述当前 Worker Release API、Credential Binding、Canary/Promote/Rollback 和安全撤销边界。
-它不是“rollout 已通过生产发布门禁”的声明。真实 Codex/Claude 四 Target gate、registry-pushed
-multi-arch 镜像、多节点生产 Kubernetes 和 soak 尚未完成前，只能在明确授权的验收环境使用。
+Stage 3 rollout production gate 已在运行时 SHA `8415efa1` 通过；具体环境仍须使用已批准的 Credential、
+不可变 Digest、目标环境变更评审与本文预检，不能把该结论扩展成对任意云环境的自动授权。
 
 发布门禁见 `docs/release-checklists/stage-3-provider-runtime-remote-worker.md`；最新 deterministic managed
 Docker rollout/failure/load 证据见 `docs/reports/stage-3-worker-release-rollout-load-41683366.md`，前序 Busy
@@ -393,20 +393,19 @@ Revocation 会写 immutable Worker 状态与 logical identity tombstone，阻止
 - 对报告、JSON、Markdown 和日志运行 Secret scan。
 - 在 Release/PR 中链接本 Runbook、发布检查单、Acceptance Report 和已知限制。
 
-## 14. 当前未关闭的发布风险
+## 14. Stage 3 closure 与后续风险
 
-- 真实 Codex/Claude 尚未在 Local、SSH、Docker、Kubernetes 完成同 Commit 的统一 Release Gate。
-- 操作人已授权一个外部 SSH 目标，并确认本机 `orbstack` Kubernetes context 可用于验收；现有 SSH
-  aggregate gate 仍只管理 disposable OrbStack machine，外部目标适配和两个目标上的 clean-SHA 真实
-  Provider 报告尚未完成。SSH 认证信息必须保留在 operator-owned Secret source，不得写入仓库、报告或聊天。
-- 当前 deterministic Kubernetes image-canary 不等于 registry-pushed immutable Revision rollout。
-- Clean commit `aa1d0225` 已证明 deterministic three-node owned Kind 的 PDB-blocked Drain、源 Node cordon
-  期间跨 Worker replacement、普通 Drain 与独立 Eviction；多节点生产 Kubernetes 的云厂商 Eviction、CNI
-  enforcement、registry-pushed rollout、真实 Provider 和升级/负载压力仍未证明。
-- Clean commit `7659dd5f` 已证明 disposable Registry 上的 multi-arch reproducibility、默认 ephemeral
-  exact-digest signing、SBOM、`HIGH/CRITICAL=0`、Secret=0、EOSL 与 DB freshness，并验证 checked-in policy
-  可安全选择 keyless/KMS 路径；生产方向已选择 KMS，但真实 signer identity、KMS reference、
-  transparency-log entry/admission policy、Registry
-  Credential/retention 和长时间 soak 尚未完成。证据见
-  `docs/reports/stage-3-worker-registry-signing-policy-7659dd5f.md`。
-- rollout/reconciler 在最终代码评审和门禁完成前不得标记为 production-approved。
+Stage 3 的 production release boundary 已在运行时 clean SHA
+`8415efa15cebc48a23723dbdb147d3bafd7071bf` 关闭，正式证据见
+`docs/reports/stage-3-production-release-8415efa1.md`。TLS Registry、Vault Transit KMS、Rekor/Kyverno、
+SIEM/WORM、四 Target、三节点 immutable rollout/promote/rollback、负载、故障与精确清理均已验证。
+
+以下事项不属于 Stage 3 发布阻断项：
+
+- 订阅/OAuth 登录兼容为低优先级；远程 Agent 的正式路径是第三方 API Key、可选 Base URL 和自定义模型。
+- 长时间 load/soak 与多节点 rollout 由一个代表性 API-key Provider 证明；其他 Adapter 使用 contract、
+  product 和 controlled-failure gate，不重复消耗模型额度。
+- 第三方 Provider endpoint 的连接中断是外部依赖风险。门禁必须安全终止、无重复副作用、完成 Secret scan
+  与精确 cleanup；外部中断不会自动触发另一个模型或整套 gate 重跑。
+- 云厂商多区域/多集群调度、真实云 CNI/Eviction 差异、RWX cache、Warm Pool 与跨 Region 灾难恢复进入
+  Stage 4。生产部署时仍须按目标云环境执行变更评审和环境专项 smoke。

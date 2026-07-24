@@ -220,39 +220,35 @@ describe("Codex app-server runtime", () => {
     });
   });
 
-  it(
-    "fails closed when a completed turn never closes its command item",
-    async () => {
-      await withFakeCodex(
-        "terminal-missing-completion",
-        async (directory, _tracePath, environment) => {
-          const messages: RunnerMessage[] = [];
-          const run = startProviderHostRun(
-            codexInput(directory),
-            null,
-            (message) => messages.push(message),
-            { environment },
-          );
+  it("fails closed when a completed turn never closes its command item", async () => {
+    await withFakeCodex(
+      "terminal-missing-completion",
+      async (directory, _tracePath, environment) => {
+        const messages: RunnerMessage[] = [];
+        const run = startProviderHostRun(
+          codexInput(directory),
+          null,
+          (message) => messages.push(message),
+          { environment },
+        );
 
-          await expect(run.result).rejects.toThrow(
-            "Codex app-server completed a Turn with an open command execution.",
-          );
-          expect(messages).toContainEqual(
-            expect.objectContaining({
-              type: "event",
-              eventType: "runtime.provider.activity",
-              payload: expect.objectContaining({
-                itemId: "command-terminal-missing",
-                status: "failed",
-                terminalEventType: "terminal.failed",
-              }),
+        await expect(run.result).rejects.toThrow(
+          "Codex app-server completed a Turn with an open command execution.",
+        );
+        expect(messages).toContainEqual(
+          expect.objectContaining({
+            type: "event",
+            eventType: "runtime.provider.activity",
+            payload: expect.objectContaining({
+              itemId: "command-terminal-missing",
+              status: "failed",
+              terminalEventType: "terminal.failed",
             }),
-          );
-        },
-      );
-    },
-    15_000,
-  );
+          }),
+        );
+      },
+    );
+  }, 15_000);
 
   it("delivers a native approval response and returns streamed output", async () => {
     await withFakeCodex("approval", async (directory, _tracePath, environment) => {

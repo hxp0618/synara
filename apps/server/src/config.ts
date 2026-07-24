@@ -263,7 +263,6 @@ export class ServerConfig extends ServiceMap.Service<ServerConfig, ServerConfigS
           port: 0,
           host: undefined,
           authToken: undefined,
-          controlPlaneUrl: undefined,
           desktopShutdownToken: undefined,
           staticDir: undefined,
           devUrl,

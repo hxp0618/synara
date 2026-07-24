@@ -25,7 +25,7 @@
 | ------- | ----------------------------------------------- | ------------------- | ---------------- |
 | Stage 1 | 定义 SaaS 边界、Tenant/Organization/User 和协议 | 基线完成            | —                |
 | Stage 2 | Go Control Plane 收口与生产化                   | 仓库内完成 / 已验收 | Stage 1          |
-| Stage 3 | Provider Runtime 与远程 Worker 产品化           | IN PROGRESS         | Stage 2          |
+| Stage 3 | Provider Runtime 与远程 Worker 产品化           | 已完成 / 已验收     | Stage 2          |
 | Stage 4 | 分布式执行平台和 K8s 多集群生产化               | TODO                | Stage 2、Stage 3 |
 | Stage 5 | 企业 SaaS GA、运营、安全与商业化                | TODO                | Stage 2-4        |
 
@@ -37,9 +37,14 @@ Stage 3 的独立执行计划：
 
 ### Stage 3：Provider Runtime 与远程 Worker 产品化
 
-状态：IN PROGRESS。现有 `provider-host`、`synara-agentd`、Worker Protocol、Local/SSH/Docker/Kubernetes
-Target 和 Codex/Claude 执行闭环属于基础实现，本阶段负责补齐 Provider 一致性、主流程权威
-切换、协议兼容和长期运行能力。
+状态：COMPLETE。Runtime 发布源码固定为 `8415efa15cebc48a23723dbdb147d3bafd7071bf`；最终
+production-profile、四 Target、Registry/Vault/Kyverno、SIEM/WORM、负载、故障、rollout/rollback 和
+Secret scan 证据见
+[`docs/reports/stage-3-production-release-8415efa1.md`](docs/reports/stage-3-production-release-8415efa1.md)。
+
+验收边界：远程 Agent 的正式路径是第三方 API Key、可选 Base URL 和自定义模型。每个 Provider Adapter
+保留契约、产品路径和可控故障验证；耗额度的长时间 load/soak、多节点与 immutable rollout 只要求一个
+代表性 API-key Provider 通过。订阅/OAuth 登录属于低优先级兼容项，延期到 Stage 3 之后，不阻断本阶段发布。
 
 #### 目标
 
@@ -50,39 +55,39 @@ Target 和 Codex/Claude 执行闭环属于基础实现，本阶段负责补齐 P
 
 #### TODO
 
-- [ ] 对 Codex、Claude、Cursor、Gemini、Grok、Kilo、OpenCode、Pi 做 Provider Host 能力矩阵审计。
-- [ ] 冻结 Provider Host Protocol Version、最低兼容版本和能力协商规则。
-- [ ] 为不支持的 Provider 能力返回显式 Capability/Unsupported 错误，不静默降级。
+- [x] 对 Codex、Claude、Cursor、Antigravity、Grok、Kilo、OpenCode、Pi 做 Provider Host 能力矩阵审计。
+- [x] 冻结 Provider Host Protocol Version、最低兼容版本和能力协商规则。
+- [x] 为不支持的 Provider 能力返回显式 Capability/Unsupported 错误，不静默降级。
 - [x] 实现 Web/Control Plane Provider Capability 投影与发送前门禁，并保持本地模式不变。
-- [ ] 统一 Start、Resume、Send、Steer、Interrupt、Compact、Rollback 和 Fork 语义。
-- [ ] 统一 Approval、Structured User Input、Plan Mode 和 Review 流程。
-- [ ] 统一 Runtime Event 映射、Event Version 和未知事件兼容策略。
+- [x] 统一 Start、Resume、Send、Steer、Interrupt、Compact、Rollback 和 Fork 语义。
+- [x] 统一 Approval、Structured User Input、Plan Mode 和 Review 流程。
+- [x] 统一 Runtime Event 映射、Event Version 和未知事件兼容策略。
 - [x] 实现 Provider Cursor TTL、未来时钟隔离、不可复活状态、可审计 Claim 选择，以及 Provider
       native invalid/expired 的 Turn-activity 前安全 fallback。
-- [ ] 在真实 Codex/Claude 的 Local、SSH、Docker、Kubernetes Worker/Pod 迁移中验证 native Cursor
+- [x] 在真实 Codex/Claude 的 Local、SSH、Docker、Kubernetes Worker/Pod 迁移中验证 native Cursor
       invalid/expired、删除 Provider 本地状态后的恢复，以及已完成副作用不重复。
-- [ ] 保持 Worker Token、Lease Token 和 Credential 不进入 Provider Runner 输入或日志。
-- [ ] 完成 Tenant/Organization/User/Platform 四级 Provider Credential 解析策略评审。
-- [ ] 完成 Git Clone/Fetch/Branch/Worktree/Push/PR 的远程 Workspace 生命周期。
-- [ ] 明确 Workspace 清理、保留、快照、恢复和磁盘配额策略。
-- [ ] 将终端、长日志、生成文件和 Checkpoint 统一投影为 Artifact/Event 引用。
-- [ ] 建立 Worker/Provider Host 的 Graceful Shutdown、Drain 和正在执行任务交接协议。
+- [x] 保持 Worker Token、Lease Token 和 Credential 不进入 Provider Runner 输入或日志。
+- [x] 完成 Tenant/Organization/User/Platform 四级 Provider Credential 解析策略评审。
+- [x] 完成 Git Clone/Fetch/Branch/Worktree/Push/PR 的远程 Workspace 生命周期。
+- [x] 明确 Workspace 清理、保留、快照、恢复和磁盘配额策略。
+- [x] 将终端、长日志、生成文件和 Checkpoint 统一投影为 Artifact/Event 引用。
+- [x] 建立 Worker/Provider Host 的 Graceful Shutdown、Drain 和正在执行任务交接协议。
 - [x] 增加 Worker Image 与 Provider CLI/SDK 的版本清单和可重复构建机制。
-- [ ] 增加 Worker 自动升级、回滚和不兼容版本隔离能力。
-- [ ] 建立应用级 Control Plane Context 和 SaaS Session Projection Adapter。
-- [ ] 将主聊天创建 Project/Session/Turn 的权威写入切换到 Go Control Plane。
-- [ ] 保留未配置 Control Plane 时的本地个人模式，避免维护两套领域模型。
-- [ ] 为 Local、SSH、Docker、Kubernetes 分别建立相同的 Provider Acceptance Suite。
-- [ ] 验证 Worker 崩溃、网络中断、Provider 崩溃和控制面滚动升级后的 Session 连续性。
+- [x] 增加 Worker 自动升级、回滚和不兼容版本隔离能力。
+- [x] 建立应用级 Control Plane Context 和 SaaS Session Projection Adapter。
+- [x] 将主聊天创建 Project/Session/Turn 的权威写入切换到 Go Control Plane。
+- [x] 保留未配置 Control Plane 时的本地个人模式，避免维护两套领域模型。
+- [x] 为 Local、SSH、Docker、Kubernetes 分别建立相同的 Provider Acceptance Suite。
+- [x] 验证 Worker 崩溃、网络中断、Provider 崩溃和控制面滚动升级后的 Session 连续性。
 
 #### 完成条件
 
-- [ ] 所有正式支持 Provider 的核心能力矩阵有自动化验证。
-- [ ] Web 主流程只存在一个 SaaS Session 权威来源。
-- [ ] Worker/Provider Host 升级不需要迁移业务数据库结构。
-- [ ] 不同 Execution Target 使用相同 Worker Protocol 和 Runtime Event Contract。
-- [ ] Pod/Worker 替换后可以继续后续 Turn，并保持有序 Event 历史。
-- [ ] Credential、Token、Prompt 和用户文件没有非预期日志泄漏。
+- [x] 所有正式支持 Provider 的核心能力矩阵有自动化验证。
+- [x] Web 主流程只存在一个 SaaS Session 权威来源。
+- [x] Worker/Provider Host 升级不需要迁移业务数据库结构。
+- [x] 不同 Execution Target 使用相同 Worker Protocol 和 Runtime Event Contract。
+- [x] Pod/Worker 替换后可以继续后续 Turn，并保持有序 Event 历史。
+- [x] Credential、Token、Prompt 和用户文件没有非预期日志泄漏。
 
 ### Stage 4：分布式执行平台和 K8s 多集群生产化
 

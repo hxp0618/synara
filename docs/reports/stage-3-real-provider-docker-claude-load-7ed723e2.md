@@ -26,14 +26,14 @@ The run completed:
 
 The enforced Synara-controlled SLA observations were:
 
-| Metric | Observed | Required | Result |
-| --- | ---: | ---: | --- |
-| Minimum duration | `1866.483s` | `>= 1800s` | pass |
-| Control Plane admission P95 | `7ms` | `<= 1000ms` | pass |
-| Control Plane admission P99 | `18ms` | `<= 2000ms` | pass |
-| Slot-reuse admission P95 | `7ms` | `<= 2000ms` | pass |
-| Slot-reuse admission P99 | `18ms` | `<= 3000ms` | pass |
-| Unexpected error rate | `0` | `0` | pass |
+| Metric                      |    Observed |    Required | Result |
+| --------------------------- | ----------: | ----------: | ------ |
+| Minimum duration            | `1866.483s` |  `>= 1800s` | pass   |
+| Control Plane admission P95 |       `7ms` | `<= 1000ms` | pass   |
+| Control Plane admission P99 |      `18ms` | `<= 2000ms` | pass   |
+| Slot-reuse admission P95    |       `7ms` | `<= 2000ms` | pass   |
+| Slot-reuse admission P99    |      `18ms` | `<= 3000ms` | pass   |
+| Unexpected error rate       |         `0` |         `0` | pass   |
 
 The Provider-dependent interaction-ready and Turn-completion distributions remain capacity-planning evidence and
 are not presented as Synara-controlled admission SLIs.

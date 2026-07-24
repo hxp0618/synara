@@ -48,6 +48,7 @@ const thread: Thread = {
 describe("syncAuthoritativeProjection", () => {
   it("replaces local shell entities with one normalized SaaS projection", () => {
     const state: AppState = {
+      spaces: [],
       projects: [{ ...project, id: "local-project" as Project["id"], name: "Local" }],
       sidebarThreadSummaryById: {},
       threadsHydrated: true,
@@ -65,6 +66,7 @@ describe("syncAuthoritativeProjection", () => {
   it("rejects delayed local snapshots after Control Plane authority is active", () => {
     const authoritative = syncAuthoritativeProjection(
       {
+        spaces: [],
         projects: [],
         sidebarThreadSummaryById: {},
         threadsHydrated: false,
@@ -75,12 +77,14 @@ describe("syncAuthoritativeProjection", () => {
     const shellSnapshot = {
       snapshotSequence: 1,
       updatedAt: "2026-07-12T00:01:00Z",
+      spaces: [],
       projects: [],
       threads: [],
     } satisfies OrchestrationShellSnapshot;
     const readModel = {
       snapshotSequence: 1,
       updatedAt: "2026-07-12T00:01:00Z",
+      spaces: [],
       projects: [],
       threads: [],
     } satisfies OrchestrationReadModel;
@@ -92,6 +96,7 @@ describe("syncAuthoritativeProjection", () => {
   it("accepts local snapshots after auth-loss or Tenant-switch teardown demotes authority", () => {
     const authoritative = syncAuthoritativeProjection(
       {
+        spaces: [],
         projects: [],
         sidebarThreadSummaryById: {},
         threadsHydrated: false,
@@ -104,6 +109,7 @@ describe("syncAuthoritativeProjection", () => {
     const localSnapshot = {
       snapshotSequence: 2,
       updatedAt: "2026-07-12T00:02:00Z",
+      spaces: [],
       projects: [
         {
           id: "local-project-after-teardown" as OrchestrationShellSnapshot["projects"][number]["id"],
