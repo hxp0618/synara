@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/url"
 	"os"
@@ -46,20 +47,28 @@ type SSHProvisionResult struct {
 }
 
 type sshTargetConfiguration struct {
-	Host                      string   `json:"host"`
-	Port                      int      `json:"port"`
-	User                      string   `json:"user"`
-	PrivateKey                string   `json:"privateKey"`
-	PrivateKeyPassphrase      string   `json:"privateKeyPassphrase"`
-	HostKey                   string   `json:"hostKey"`
-	ControlPlaneURL           string   `json:"controlPlaneUrl"`
-	AllowInsecureControlPlane bool     `json:"allowInsecureControlPlane"`
-	RunnerCommand             []string `json:"runnerCommand"`
-	WorkspaceRoot             string   `json:"workspaceRoot"`
-	GitCacheRoot              string   `json:"gitCacheRoot"`
-	InstallRoot               string   `json:"installRoot"`
-	ServiceUser               string   `json:"serviceUser"`
-	UseSudo                   *bool    `json:"useSudo"`
+	Host                       string   `json:"host"`
+	Port                       int      `json:"port"`
+	User                       string   `json:"user"`
+	PrivateKey                 string   `json:"privateKey"`
+	PrivateKeyPassphrase       string   `json:"privateKeyPassphrase"`
+	HostKey                    string   `json:"hostKey"`
+	ControlPlaneURL            string   `json:"controlPlaneUrl"`
+	AllowInsecureControlPlane  bool     `json:"allowInsecureControlPlane"`
+	RunnerCommand              []string `json:"runnerCommand"`
+	WorkspaceRoot              string   `json:"workspaceRoot"`
+	GitCacheRoot               string   `json:"gitCacheRoot"`
+	InstallRoot                string   `json:"installRoot"`
+	ServiceUser                string   `json:"serviceUser"`
+	UseSudo                    *bool    `json:"useSudo"`
+	AgentdVersion              string   `json:"agentdVersion"`
+	AgentdBuildGitSHA          string   `json:"agentdBuildGitSha"`
+	AgentdImageDigest          string   `json:"agentdImageDigest"`
+	CgroupV2Root               string   `json:"cgroupV2Root"`
+	CgroupV2ProviderUID        *int     `json:"cgroupV2ProviderUid"`
+	CgroupV2ProviderGID        *int     `json:"cgroupV2ProviderGid"`
+	CgroupV2AttestationKeyID   string   `json:"cgroupV2AttestationKeyId"`
+	CgroupV2AttestationKeyPath string   `json:"cgroupV2AttestationPrivateKeyPath"`
 }
 
 type sshDialInput struct {
@@ -219,6 +228,15 @@ func (p *SSHProvisioner) apply(
 				err,
 			)
 		}
+		if err := ensureSSHInstallProtectedCgroupPaths(operationContext, remote, paths, configuration); err != nil {
+			p.recordFailure(ctx, target, principal.UserID, operation, requestID, ipAddress)
+			return SSHProvisionResult{}, problem.Wrap(
+				502,
+				"ssh_install_preflight_failed",
+				"SSH Worker installation preflight failed.",
+				err,
+			)
+		}
 	}
 	defer cleanupSSHTemporaryFiles(remote, paths)
 	hash := sha256.New()
@@ -226,7 +244,8 @@ func (p *SSHProvisioner) apply(
 		p.recordFailure(ctx, target, principal.UserID, operation, requestID, ipAddress)
 		return SSHProvisionResult{}, problem.Wrap(502, "ssh_agentd_upload_failed", "synara-agentd could not be uploaded.", err)
 	}
-	environment, err := p.environmentFile(target, configuration, paths)
+	workerInstanceUID := uuid.NewString()
+	environment, err := p.environmentFile(target, configuration, paths, workerInstanceUID)
 	if err != nil {
 		p.recordFailure(ctx, target, principal.UserID, operation, requestID, ipAddress)
 		return SSHProvisionResult{}, err
@@ -235,21 +254,27 @@ func (p *SSHProvisioner) apply(
 		p.recordFailure(ctx, target, principal.UserID, operation, requestID, ipAddress)
 		return SSHProvisionResult{}, problem.Wrap(502, "ssh_agentd_upload_failed", "The synara-agentd environment could not be uploaded.", err)
 	}
-	unit := []byte(systemdUnit(paths, configuration.ServiceUser))
+	unit := []byte(systemdUnitWithDelegate(paths, configuration.ServiceUser, configuration.protectedCgroupEnabled()))
 	if err := remote.Upload(operationContext, paths.temporaryUnitPath, 0o600, bytes.NewReader(unit)); err != nil {
 		p.recordFailure(ctx, target, principal.UserID, operation, requestID, ipAddress)
 		return SSHProvisionResult{}, problem.Wrap(502, "ssh_agentd_upload_failed", "The synara-agentd service unit could not be uploaded.", err)
 	}
-	commands := []string{
-		"install -d -m 0755 " + shellQuote(paths.installRoot) + " " + shellQuote(paths.workspaceRoot) + " " + shellQuote(paths.gitCacheRoot),
-		"chown " + shellQuote(configuration.ServiceUser+":") + " " + shellQuote(paths.workspaceRoot) + " " + shellQuote(paths.gitCacheRoot),
-		"install -m 0755 " + shellQuote(paths.temporaryBinaryPath) + " " + shellQuote(paths.binaryPath),
-		"install -m 0600 " + shellQuote(paths.temporaryEnvPath) + " " + shellQuote(paths.envPath),
-		"install -m 0644 " + shellQuote(paths.temporaryUnitPath) + " " + shellQuote(paths.unitPath),
-		"rm -f " + shellQuote(paths.temporaryBinaryPath) + " " + shellQuote(paths.temporaryEnvPath) + " " + shellQuote(paths.temporaryUnitPath),
+	commands := append(sshInstallDirectoryCommands(paths, configuration),
+		"install -m 0755 "+shellQuote(paths.temporaryBinaryPath)+" "+shellQuote(paths.binaryPath),
+		"install -m 0600 "+shellQuote(paths.temporaryEnvPath)+" "+shellQuote(paths.envPath),
+		"install -m 0644 "+shellQuote(paths.temporaryUnitPath)+" "+shellQuote(paths.unitPath),
+		"rm -f "+shellQuote(paths.temporaryBinaryPath)+" "+shellQuote(paths.temporaryEnvPath)+" "+shellQuote(paths.temporaryUnitPath),
 		"systemctl daemon-reload",
-		"systemctl enable " + shellQuote(paths.serviceName),
-		"systemctl restart " + shellQuote(paths.serviceName),
+		"systemctl enable "+shellQuote(paths.serviceName),
+		"systemctl restart "+shellQuote(paths.serviceName),
+		sshServiceStableCommand(paths.serviceName),
+	)
+	if configuration.protectedCgroupEnabled() {
+		commands = append(commands,
+			"test \"$(systemctl show "+shellQuote(paths.serviceName)+" --property=ControlGroup --value)\" = "+shellQuote("/system.slice/"+paths.serviceName),
+			"test -d "+shellQuote(configuration.CgroupV2Root),
+			"test \"$(stat -fc %T "+shellQuote(configuration.CgroupV2Root)+")\" = cgroup2fs",
+		)
 	}
 	command := paths.prefix + "sh -c " + shellQuote(strings.Join(commands, " && "))
 	if err := remote.Run(operationContext, command); err != nil {
@@ -263,6 +288,20 @@ func (p *SSHProvisioner) apply(
 		TargetID: target.ID, Operation: operation, Status: "active", ServiceName: paths.serviceName,
 		BinarySHA256: hex.EncodeToString(hash.Sum(nil)),
 	}, nil
+}
+
+func sshServiceStableCommand(serviceName string) string {
+	service := shellQuote(serviceName)
+	checks := strings.Join([]string{
+		"sleep 1",
+		"test \"$(systemctl show " + service + " --property=ActiveState --value)\" = active",
+		"test \"$(systemctl show " + service + " --property=SubState --value)\" = running",
+		"test \"$(systemctl show " + service + " --property=MainPID --value)\" -gt 0",
+		"test \"$(systemctl show " + service + " --property=NRestarts --value)\" = \"$service_restarts\"",
+	}, " && ")
+	return "service_restarts=$(systemctl show " + service + " --property=NRestarts --value) && " +
+		"test \"$service_restarts\" -ge 0 && " +
+		"for attempt in 1 2 3; do " + checks + " || exit 1; done"
 }
 
 func ensureSSHInstallPathsAvailable(ctx context.Context, remote sshRemote, paths sshProvisionPaths) error {
@@ -291,6 +330,26 @@ func ensureSSHInstallPathsAvailable(ctx context.Context, remote sshRemote, paths
 		return fmt.Errorf("%w: %v", errSSHInstallConflict, err)
 	}
 	return err
+}
+
+func ensureSSHInstallProtectedCgroupPaths(
+	ctx context.Context,
+	remote sshRemote,
+	paths sshProvisionPaths,
+	configuration sshTargetConfiguration,
+) error {
+	if !configuration.protectedCgroupEnabled() {
+		return nil
+	}
+	script := strings.Join([]string{
+		"set -eu",
+		"test \"$(stat -fc %T /sys/fs/cgroup)\" = cgroup2fs",
+		"test -f " + shellQuote(configuration.CgroupV2AttestationKeyPath),
+		"test \"$(stat -c %u " + shellQuote(configuration.CgroupV2AttestationKeyPath) + ")\" = 0",
+		"test \"$(stat -c %F " + shellQuote(configuration.CgroupV2AttestationKeyPath) + ")\" = " + shellQuote("regular file"),
+		"case \"$(stat -c %a " + shellQuote(configuration.CgroupV2AttestationKeyPath) + ")\" in 000|?00|??00) ;; *) exit 1 ;; esac",
+	}, "\n")
+	return remote.Run(ctx, paths.prefix+"sh -c "+shellQuote(script))
 }
 
 type sshProvisionPaths struct {
@@ -395,6 +454,12 @@ func (p *SSHProvisioner) normalize(
 	if configuration.GitCacheRoot = strings.TrimSpace(configuration.GitCacheRoot); configuration.GitCacheRoot == "" {
 		configuration.GitCacheRoot = "/var/lib/synara/targets/" + target.ID.String() + "/git-cache"
 	}
+	configuration.AgentdVersion = strings.TrimSpace(configuration.AgentdVersion)
+	configuration.AgentdBuildGitSHA = strings.TrimSpace(configuration.AgentdBuildGitSHA)
+	configuration.AgentdImageDigest = strings.TrimSpace(configuration.AgentdImageDigest)
+	configuration.CgroupV2Root = strings.TrimSpace(configuration.CgroupV2Root)
+	configuration.CgroupV2AttestationKeyID = strings.TrimSpace(configuration.CgroupV2AttestationKeyID)
+	configuration.CgroupV2AttestationKeyPath = strings.TrimSpace(configuration.CgroupV2AttestationKeyPath)
 	configuration.ControlPlaneURL = strings.TrimRight(strings.TrimSpace(configuration.ControlPlaneURL), "/")
 	if configuration.ControlPlaneURL == "" {
 		configuration.ControlPlaneURL = strings.TrimRight(strings.TrimSpace(p.config.PublicControlPlaneURL), "/")
@@ -429,6 +494,62 @@ func (p *SSHProvisioner) normalize(
 		strings.HasPrefix(configuration.GitCacheRoot, configuration.WorkspaceRoot+"/") {
 		return sshTargetConfiguration{}, sshProvisionPaths{}, problem.New(400, "invalid_ssh_configuration", "SSH workspaceRoot and gitCacheRoot must be separate.")
 	}
+	serviceName := "synara-agentd-" + target.ID.String() + ".service"
+	if configuration.protectedCgroupEnabled() {
+		expectedCgroupV2Root := "/sys/fs/cgroup/system.slice/" + serviceName
+		if configuration.CgroupV2Root == "" {
+			configuration.CgroupV2Root = expectedCgroupV2Root
+		}
+		if configuration.CgroupV2ProviderUID == nil || configuration.CgroupV2ProviderGID == nil ||
+			configuration.CgroupV2AttestationKeyID == "" || configuration.CgroupV2AttestationKeyPath == "" ||
+			configuration.AgentdVersion == "" || configuration.AgentdBuildGitSHA == "" || configuration.AgentdImageDigest == "" {
+			return sshTargetConfiguration{}, sshProvisionPaths{}, problem.New(
+				400,
+				"invalid_ssh_configuration",
+				"SSH protected cgroup supervision requires cgroup root, provider uid/gid, attestation key, and explicit agentd build identity.",
+			)
+		}
+		if configuration.ServiceUser != "root" {
+			return sshTargetConfiguration{}, sshProvisionPaths{}, problem.New(
+				400,
+				"invalid_ssh_configuration",
+				"SSH protected cgroup supervision requires serviceUser=root.",
+			)
+		}
+		if !remotePathPattern.MatchString(configuration.CgroupV2Root) ||
+			strings.Contains(configuration.CgroupV2Root, "//") || strings.Contains(configuration.CgroupV2Root, "..") ||
+			!remotePathPattern.MatchString(configuration.CgroupV2AttestationKeyPath) ||
+			strings.Contains(configuration.CgroupV2AttestationKeyPath, "//") ||
+			strings.Contains(configuration.CgroupV2AttestationKeyPath, "..") {
+			return sshTargetConfiguration{}, sshProvisionPaths{}, problem.New(
+				400,
+				"invalid_ssh_configuration",
+				"SSH protected cgroup root and attestation key path must be safe absolute paths.",
+			)
+		}
+		if configuration.CgroupV2Root != expectedCgroupV2Root {
+			return sshTargetConfiguration{}, sshProvisionPaths{}, problem.New(
+				400,
+				"invalid_ssh_configuration",
+				"SSH protected cgroup root must be the managed systemd service ControlGroup.",
+			)
+		}
+		if *configuration.CgroupV2ProviderUID <= 0 || *configuration.CgroupV2ProviderUID > math.MaxUint32 ||
+			*configuration.CgroupV2ProviderGID < 0 || *configuration.CgroupV2ProviderGID > math.MaxUint32 {
+			return sshTargetConfiguration{}, sshProvisionPaths{}, problem.New(
+				400,
+				"invalid_ssh_configuration",
+				"SSH protected cgroup provider uid/gid are invalid.",
+			)
+		}
+		if !validSSHProvisionBuildGitSHA(configuration.AgentdBuildGitSHA) || !validSSHProvisionImageDigest(configuration.AgentdImageDigest) {
+			return sshTargetConfiguration{}, sshProvisionPaths{}, problem.New(
+				400,
+				"invalid_ssh_configuration",
+				"SSH protected cgroup build identity is invalid.",
+			)
+		}
+	}
 	useSudo := true
 	if configuration.UseSudo != nil {
 		useSudo = *configuration.UseSudo
@@ -437,7 +558,6 @@ func (p *SSHProvisioner) normalize(
 	if useSudo {
 		prefix = "sudo -n "
 	}
-	serviceName := "synara-agentd-" + target.ID.String() + ".service"
 	temporaryPrefix := "/tmp/synara-agentd-" + target.ID.String()
 	paths := sshProvisionPaths{
 		prefix: prefix, serviceName: serviceName, installRoot: configuration.InstallRoot,
@@ -457,7 +577,12 @@ func (p *SSHProvisioner) environmentFile(
 	target persistence.ExecutionTarget,
 	configuration sshTargetConfiguration,
 	paths sshProvisionPaths,
+	workerInstanceUID string,
 ) ([]byte, error) {
+	parsedWorkerInstanceUID, err := uuid.Parse(strings.TrimSpace(workerInstanceUID))
+	if err != nil || parsedWorkerInstanceUID == uuid.Nil {
+		return nil, problem.New(500, "ssh_worker_instance_uid_invalid", "SSH Worker instance identity could not be generated.")
+	}
 	runnerCommand, err := json.Marshal(configuration.RunnerCommand)
 	if err != nil {
 		return nil, problem.New(400, "invalid_ssh_configuration", "SSH runnerCommand is invalid.")
@@ -474,7 +599,8 @@ func (p *SSHProvisioner) environmentFile(
 		{"SYNARA_AGENTD_CLUSTER_ID", "ssh"},
 		{"SYNARA_AGENTD_NAMESPACE", "default"},
 		{"SYNARA_AGENTD_INSTANCE_ID", "ssh-" + target.ID.String()},
-		{"SYNARA_AGENTD_VERSION", "managed"},
+		{"SYNARA_AGENTD_INSTANCE_UID", parsedWorkerInstanceUID.String()},
+		{"SYNARA_AGENTD_VERSION", envDefaultString(configuration.AgentdVersion, "managed")},
 		{"SYNARA_AGENTD_CAPABILITIES_JSON", string(capabilities)},
 		{"SYNARA_AGENTD_RUNNER_COMMAND_JSON", string(runnerCommand)},
 		{"SYNARA_AGENTD_PROVIDER_HOST_PROTOCOL", "v2"},
@@ -482,6 +608,21 @@ func (p *SSHProvisioner) environmentFile(
 		{"SYNARA_AGENTD_DRAIN_TIMEOUT", "20s"},
 		{"SYNARA_AGENTD_WORKSPACE_ROOT", paths.workspaceRoot},
 		{"SYNARA_AGENTD_GIT_CACHE_ROOT", paths.gitCacheRoot},
+	}
+	if configuration.AgentdBuildGitSHA != "" {
+		values = append(values, [2]string{"SYNARA_AGENTD_BUILD_GIT_SHA", configuration.AgentdBuildGitSHA})
+	}
+	if configuration.AgentdImageDigest != "" {
+		values = append(values, [2]string{"SYNARA_AGENTD_IMAGE_DIGEST", configuration.AgentdImageDigest})
+	}
+	if configuration.protectedCgroupEnabled() {
+		values = append(values,
+			[2]string{"SYNARA_AGENTD_CGROUP_V2_ROOT", configuration.CgroupV2Root},
+			[2]string{"SYNARA_AGENTD_CGROUP_V2_PROVIDER_UID", strconv.Itoa(*configuration.CgroupV2ProviderUID)},
+			[2]string{"SYNARA_AGENTD_CGROUP_V2_PROVIDER_GID", strconv.Itoa(*configuration.CgroupV2ProviderGID)},
+			[2]string{"SYNARA_AGENTD_CGROUP_V2_ATTESTATION_KEY_ID", configuration.CgroupV2AttestationKeyID},
+			[2]string{"SYNARA_AGENTD_CGROUP_V2_ATTESTATION_PRIVATE_KEY_FILE", configuration.CgroupV2AttestationKeyPath},
+		)
 	}
 	var output strings.Builder
 	for _, item := range values {
@@ -494,7 +635,11 @@ func (p *SSHProvisioner) environmentFile(
 }
 
 func systemdUnit(paths sshProvisionPaths, serviceUser string) string {
-	return strings.Join([]string{
+	return systemdUnitWithDelegate(paths, serviceUser, false)
+}
+
+func systemdUnitWithDelegate(paths sshProvisionPaths, serviceUser string, delegate bool) string {
+	lines := []string{
 		"[Unit]",
 		"Description=Synara agentd for " + paths.serviceName,
 		"After=network-online.target",
@@ -511,11 +656,17 @@ func systemdUnit(paths sshProvisionPaths, serviceUser string) string {
 		"KillSignal=SIGTERM",
 		"TimeoutStopSec=30",
 		"NoNewPrivileges=true",
+	}
+	if delegate {
+		lines = append(lines, "Delegate=yes")
+	}
+	lines = append(lines,
 		"",
 		"[Install]",
 		"WantedBy=multi-user.target",
 		"",
-	}, "\n")
+	)
+	return strings.Join(lines, "\n")
 }
 
 func (p *SSHProvisioner) recordOperation(
@@ -566,6 +717,60 @@ func cleanupSSHTemporaryFiles(remote sshRemote, paths sshProvisionPaths) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_ = remote.Run(ctx, "rm -f "+shellQuote(paths.temporaryBinaryPath)+" "+shellQuote(paths.temporaryEnvPath)+" "+shellQuote(paths.temporaryUnitPath))
+}
+
+func sshInstallDirectoryCommands(paths sshProvisionPaths, configuration sshTargetConfiguration) []string {
+	if !configuration.protectedCgroupEnabled() {
+		return []string{
+			"install -d -m 0755 " + shellQuote(paths.installRoot) + " " + shellQuote(paths.workspaceRoot) + " " + shellQuote(paths.gitCacheRoot),
+			"chown " + shellQuote(configuration.ServiceUser+":") + " " + shellQuote(paths.workspaceRoot) + " " + shellQuote(paths.gitCacheRoot),
+		}
+	}
+	return []string{
+		"install -d -m 0755 " + shellQuote(paths.installRoot),
+		"install -d -m 0711 " + shellQuote(paths.workspaceRoot),
+		"install -d -m 0700 " + shellQuote(paths.gitCacheRoot),
+		"chown " + shellQuote(configuration.ServiceUser+":") + " " + shellQuote(paths.workspaceRoot) + " " + shellQuote(paths.gitCacheRoot),
+	}
+}
+
+func envDefaultString(value, fallback string) string {
+	if strings.TrimSpace(value) == "" {
+		return fallback
+	}
+	return value
+}
+
+func (c sshTargetConfiguration) protectedCgroupEnabled() bool {
+	return c.CgroupV2Root != "" ||
+		c.CgroupV2ProviderUID != nil ||
+		c.CgroupV2ProviderGID != nil ||
+		c.CgroupV2AttestationKeyID != "" ||
+		c.CgroupV2AttestationKeyPath != ""
+}
+
+func validSSHProvisionBuildGitSHA(value string) bool {
+	if len(value) < 7 || len(value) > 64 {
+		return false
+	}
+	for _, character := range value {
+		if (character < '0' || character > '9') && (character < 'a' || character > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func validSSHProvisionImageDigest(value string) bool {
+	if !strings.HasPrefix(value, "sha256:") || len(value) != len("sha256:")+64 {
+		return false
+	}
+	for _, character := range value[len("sha256:"):] {
+		if (character < '0' || character > '9') && (character < 'a' || character > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 type realSSHDialer struct{}

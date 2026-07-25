@@ -1,7 +1,11 @@
 package executions
 
 import (
+	"crypto/ed25519"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -9,7 +13,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
+	"github.com/synara-ai/synara/services/control-plane/internal/containmentattestation"
+	"github.com/synara-ai/synara/services/control-plane/internal/executiontargets"
 	"github.com/synara-ai/synara/services/control-plane/internal/platform"
+	"github.com/synara-ai/synara/services/control-plane/internal/problem"
 )
 
 func TestNormalizeWorkerManifestIsStableAndClassifiesProviders(t *testing.T) {
@@ -90,6 +99,112 @@ func TestNormalizeWorkerManifestHashIncludesStorageSchemaVersion(t *testing.T) {
 	}
 	if normalized.Manifest.ManifestHash == legacyHash {
 		t.Fatal("storage schema version did not fence the legacy canonical-name manifest hash")
+	}
+}
+
+func TestNormalizeWorkerManifestFreezesProcessContainmentEvidence(t *testing.T) {
+	capabilities := workerManifestTestCapabilities()
+	registration := workerManifestTestRegistrationContext(platform.TargetKubernetes)
+	addWorkerManifestTestSignedContainment(t, capabilities, registration)
+	normalized, err := normalizeWorkerManifest(
+		"worker-test", capabilities, workerManifestTestTargetCapabilities(), platform.TargetKubernetes, time.Now().UTC(), registration,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest := normalized.Manifest
+	if manifest.ProcessContainmentMode != "cgroup-v2" ||
+		manifest.ProcessContainmentSupervisorVersion == nil || *manifest.ProcessContainmentSupervisorVersion != "supervisor-test" ||
+		manifest.ProcessContainmentProbeVersion == nil || *manifest.ProcessContainmentProbeVersion != 1 ||
+		manifest.ProcessContainmentProbeSHA256 == nil || len(*manifest.ProcessContainmentProbeSHA256) != 64 ||
+		manifest.ProcessContainmentSupervisorIdentity == nil || *manifest.ProcessContainmentSupervisorIdentity != "uid:10001" ||
+		manifest.ProcessContainmentProviderIdentity == nil || *manifest.ProcessContainmentProviderIdentity != "uid:10002" ||
+		manifest.ProcessContainmentTrustMode != executiontargets.ProcessContainmentTrustSignedV1 ||
+		manifest.ProcessContainmentAttestationKeyID == nil || *manifest.ProcessContainmentAttestationKeyID != workerManifestTestAttestationKeyID ||
+		manifest.ProcessContainmentAttestationKeySHA256 == nil || *manifest.ProcessContainmentAttestationKeySHA256 == "" {
+		t.Fatalf("Worker manifest omitted process-containment evidence: %#v", manifest)
+	}
+
+	unproven := workerManifestTestCapabilities()
+	unproven["resourceSuspendContainment"] = "cgroup-v2"
+	withoutProof, err := normalizeWorkerManifest(
+		"worker-test", unproven, workerManifestTestTargetCapabilities(), platform.TargetKubernetes, time.Now().UTC(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if withoutProof.Manifest.ProcessContainmentMode != "none" ||
+		withoutProof.Manifest.ManifestHash == manifest.ManifestHash {
+		t.Fatalf("transient containment capability became authoritative: %#v", withoutProof.Manifest)
+	}
+}
+
+func TestNormalizeWorkerManifestRejectsUntrustedProcessContainmentByDefault(t *testing.T) {
+	capabilities := workerManifestTestCapabilities()
+	addWorkerManifestTestContainmentEvidence(capabilities)
+	_, err := normalizeWorkerManifest(
+		"worker-test", capabilities, map[string]any{}, platform.TargetKubernetes, time.Now().UTC(),
+	)
+	var apiError *problem.Error
+	if !errors.As(err, &apiError) || apiError.Code != "worker_containment_untrusted" {
+		t.Fatalf("default trust policy error = %#v", err)
+	}
+}
+
+func TestNormalizeWorkerManifestRequiresSignedAttestationWhenConfigured(t *testing.T) {
+	capabilities := workerManifestTestCapabilities()
+	addWorkerManifestTestContainmentEvidence(capabilities)
+	_, err := normalizeWorkerManifest(
+		"worker-test",
+		capabilities,
+		workerManifestTestTargetCapabilities(),
+		platform.TargetKubernetes,
+		time.Now().UTC(),
+	)
+	var apiError *problem.Error
+	if !errors.As(err, &apiError) || apiError.Code != "worker_attestation_required" {
+		t.Fatalf("verified attestor policy error = %#v", err)
+	}
+}
+
+func TestNormalizeWorkerManifestRejectsInvalidProcessContainmentEvidence(t *testing.T) {
+	for _, testCase := range []struct {
+		name   string
+		mutate func(map[string]any)
+	}{
+		{
+			name: "same security identity",
+			mutate: func(value map[string]any) {
+				value["providerIdentity"] = value["supervisorIdentity"]
+			},
+		},
+		{
+			name: "invalid probe digest",
+			mutate: func(value map[string]any) {
+				value["probeSha256"] = "not-a-digest"
+			},
+		},
+		{
+			name: "wrong operating system",
+			mutate: func(_ map[string]any) {
+			},
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			capabilities := workerManifestTestCapabilities()
+			addWorkerManifestTestContainmentEvidence(capabilities)
+			workerRuntime := capabilities["workerRuntime"].(map[string]any)
+			containment := workerRuntime["processContainment"].(map[string]any)
+			testCase.mutate(containment)
+			if testCase.name == "wrong operating system" {
+				workerRuntime["operatingSystem"] = "darwin"
+			}
+			if _, err := normalizeWorkerManifest(
+				"worker-test", capabilities, workerManifestTestTargetCapabilities(), platform.TargetKubernetes, time.Now().UTC(),
+			); err == nil {
+				t.Fatal("invalid process-containment evidence was accepted")
+			}
+		})
 	}
 }
 
@@ -330,10 +445,8 @@ func workerManifestTestCapabilitiesForVersion(workerVersion string) map[string]a
 		compatible := available
 		var version *string
 		switch entry.Provider {
-		case "codex":
-			version = stringReference("0.144.1")
-		case "claudeAgent":
-			version = stringReference("0.3.207")
+		case "codex", "claudeAgent":
+			version = stringReference(entry.RuntimePolicy.CompatibleRange.MinimumInclusive)
 		}
 		runtimeDescriptor := map[string]any{
 			"kind": entry.RuntimePolicy.Kind, "name": entry.RuntimePolicy.Name,
@@ -391,7 +504,78 @@ func workerManifestTestTargetCapabilities() map[string]any {
 		"providerPolicy": map[string]any{
 			"experimentalProviders": []any{"codex", "claudeAgent"},
 		},
+		"processContainmentPolicy": map[string]any{
+			"trustMode":        executiontargets.ProcessContainmentTrustSignedV1,
+			"keyId":            workerManifestTestAttestationKeyID,
+			"ed25519PublicKey": base64.StdEncoding.EncodeToString(workerManifestTestAttestationPublicKey),
+		},
 	}
+}
+
+const workerManifestTestAttestationKeyID = "worker-manifest-test-key"
+
+var (
+	workerManifestTestAttestationSeed       = sha256.Sum256([]byte("synara-worker-manifest-test-attestation-key"))
+	workerManifestTestAttestationPrivateKey = ed25519.NewKeyFromSeed(workerManifestTestAttestationSeed[:])
+	workerManifestTestAttestationPublicKey  = workerManifestTestAttestationPrivateKey.Public().(ed25519.PublicKey)
+)
+
+func workerManifestTestRegistrationContext(targetKind platform.ExecutionTargetKind) workerManifestRegistrationContext {
+	return workerManifestRegistrationContext{
+		ExecutionTargetID: uuid.New(), TargetKind: targetKind, InstanceUID: uuid.NewString(),
+		ClusterID: "test-cluster", Namespace: "default", PodName: "worker-test-pod",
+	}
+}
+
+func addWorkerManifestTestContainmentEvidence(capabilities map[string]any) {
+	capabilities["workerRuntime"].(map[string]any)["processContainment"] = map[string]any{
+		"mode": "cgroup-v2", "supervisorVersion": "supervisor-test",
+		"probeVersion":       1,
+		"probeSha256":        "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+		"supervisorIdentity": "uid:10001", "providerIdentity": "uid:10002",
+	}
+}
+
+func addWorkerManifestTestSignedContainment(
+	t *testing.T,
+	capabilities map[string]any,
+	registration workerManifestRegistrationContext,
+) {
+	t.Helper()
+	addWorkerManifestTestContainmentEvidence(capabilities)
+	signWorkerManifestTestContainment(t, capabilities, registration)
+}
+
+func signWorkerManifestTestContainment(
+	t *testing.T,
+	capabilities map[string]any,
+	registration workerManifestRegistrationContext,
+) {
+	t.Helper()
+	var runtimeCapability workerRuntimeCapability
+	if err := decodeCapability(capabilities["workerRuntime"], &runtimeCapability); err != nil {
+		t.Fatal(err)
+	}
+	containment := runtimeCapability.ProcessContainment
+	statement := containmentattestation.Statement{
+		ExecutionTargetID: registration.ExecutionTargetID.String(), TargetKind: string(registration.TargetKind),
+		InstanceUID: registration.InstanceUID, ClusterID: registration.ClusterID,
+		Namespace: registration.Namespace, PodName: registration.PodName,
+		WorkerBuildVersion: runtimeCapability.WorkerBuildVersion,
+		WorkerBuildGitSHA:  optionalStringValue(runtimeCapability.WorkerBuildGitSHA),
+		ImageDigest:        optionalStringValue(runtimeCapability.ImageDigest),
+		OperatingSystem:    runtimeCapability.OperatingSystem, Architecture: runtimeCapability.Architecture,
+		Mode: containment.Mode, SupervisorVersion: containment.SupervisorVersion,
+		ProbeVersion: containment.ProbeVersion, ProbeSHA256: containment.ProbeSHA256,
+		SupervisorIdentity: containment.SupervisorIdentity, ProviderIdentity: containment.ProviderIdentity,
+	}
+	envelope, err := containmentattestation.Sign(
+		workerManifestTestAttestationPrivateKey, workerManifestTestAttestationKeyID, statement,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	capabilities["workerRuntime"].(map[string]any)["processContainment"].(map[string]any)["attestation"] = envelope
 }
 
 func testProviderCapabilityMap(capabilities map[string]any, provider string) map[string]any {

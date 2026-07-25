@@ -51,20 +51,41 @@ func (s *Server) revokeTenantWorker(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) registerWorker(w http.ResponseWriter, r *http.Request) {
-	configured := strings.TrimSpace(s.config.WorkerRegistrationToken)
-	provided := bearerToken(r)
-	if configured == "" {
-		s.writeError(w, r, problem.New(503, "worker_registration_disabled", "Worker registration is not configured."))
-		return
-	}
-	if len(provided) != len(configured) || subtle.ConstantTimeCompare([]byte(provided), []byte(configured)) != 1 {
-		s.writeError(w, r, problem.New(401, "invalid_worker_registration_token", "The worker registration token is invalid."))
-		return
-	}
 	var input executions.RegisterWorkerInput
 	if err := decodeJSON(r, &input); err != nil {
 		s.writeError(w, r, err)
 		return
+	}
+	provided := bearerToken(r)
+	if strings.TrimSpace(input.TargetKind) == "kubernetes" {
+		verified, err := s.targets.VerifyKubernetesWorkerRegistration(
+			r.Context(), input.ExecutionTargetID, input.Namespace, input.PodName, input.InstanceUID, provided,
+		)
+		if err != nil {
+			s.writeError(w, r, err)
+			return
+		}
+		input.WorkerMode = verified.WorkerMode
+		input.AssignedExecutionID = verified.AssignedExecutionID
+		input.WorkerPoolID = verified.WorkerPoolID
+		input.WorkerPoolVersion = verified.WorkerPoolVersion
+		input.CapacityClass = verified.CapacityClass
+		input.ClusterID = verified.ClusterID
+		input.RequestedCPUMillicores = verified.RequestedCPUMillicores
+		input.RequestedMemoryBytes = verified.RequestedMemoryBytes
+		input.RequestedEphemeralStorageBytes = verified.RequestedEphemeralStorageBytes
+		input.RegistrationTrustMode = executions.WorkerRegistrationTrustKubernetesPodBoundV1
+	} else {
+		configured := strings.TrimSpace(s.config.WorkerRegistrationToken)
+		if configured == "" {
+			s.writeError(w, r, problem.New(503, "worker_registration_disabled", "Worker registration is not configured."))
+			return
+		}
+		if len(provided) != len(configured) || subtle.ConstantTimeCompare([]byte(provided), []byte(configured)) != 1 {
+			s.writeError(w, r, problem.New(401, "invalid_worker_registration_token", "The worker registration token is invalid."))
+			return
+		}
+		input.RegistrationTrustMode = executions.WorkerRegistrationTrustSharedToken
 	}
 	registered, err := s.executions.Register(r.Context(), input)
 	if err != nil {
@@ -399,6 +420,98 @@ func (s *Server) releaseExecution(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	result, err := s.executions.Release(r.Context(), mustWorker(r), executionID, input, requestID(r))
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	writeOperation(w, result.Replayed, result.StatusCode, result.Value)
+}
+
+func (s *Server) pullExecutionResourceDirective(w http.ResponseWriter, r *http.Request) {
+	executionID, ok := s.pathUUID(w, r, "executionID")
+	if !ok {
+		return
+	}
+	var input executions.PullResourceDirectiveInput
+	if err := decodeJSON(r, &input); err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	directive, err := s.executions.PullResourceDirective(r.Context(), mustWorker(r), executionID, input)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"directive": directive})
+}
+
+func (s *Server) completeExecutionResourceSuspend(w http.ResponseWriter, r *http.Request) {
+	executionID, ok := s.pathUUID(w, r, "executionID")
+	if !ok {
+		return
+	}
+	var input executions.CompleteResourceSuspendInput
+	if err := decodeJSON(r, &input); err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	result, err := s.executions.CompleteResourceSuspend(r.Context(), mustWorker(r), executionID, input, requestID(r))
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	writeOperation(w, result.Replayed, result.StatusCode, result.Value)
+}
+
+func (s *Server) markExecutionResourceSuspendQuiesced(w http.ResponseWriter, r *http.Request) {
+	executionID, ok := s.pathUUID(w, r, "executionID")
+	if !ok {
+		return
+	}
+	var input executions.MarkResourceSuspendQuiescedInput
+	if err := decodeJSON(r, &input); err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	result, err := s.executions.MarkResourceSuspendQuiesced(r.Context(), mustWorker(r), executionID, input, requestID(r))
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	writeOperation(w, result.Replayed, result.StatusCode, result.Value)
+}
+
+func (s *Server) markExecutionResourceSuspendCheckpointReady(w http.ResponseWriter, r *http.Request) {
+	executionID, ok := s.pathUUID(w, r, "executionID")
+	if !ok {
+		return
+	}
+	var input executions.MarkResourceSuspendCheckpointReadyInput
+	if err := decodeJSON(r, &input); err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	result, err := s.executions.MarkResourceSuspendCheckpointReady(
+		r.Context(), mustWorker(r), executionID, input, requestID(r),
+	)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	writeOperation(w, result.Replayed, result.StatusCode, result.Value)
+}
+
+func (s *Server) abortExecutionResourceSuspend(w http.ResponseWriter, r *http.Request) {
+	executionID, ok := s.pathUUID(w, r, "executionID")
+	if !ok {
+		return
+	}
+	var input executions.AbortResourceSuspendInput
+	if err := decodeJSON(r, &input); err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	result, err := s.executions.AbortResourceSuspend(r.Context(), mustWorker(r), executionID, input, requestID(r))
 	if err != nil {
 		s.writeError(w, r, err)
 		return

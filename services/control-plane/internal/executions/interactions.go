@@ -14,6 +14,7 @@ import (
 	"github.com/synara-ai/synara/services/control-plane/internal/authorization"
 	apiidempotency "github.com/synara-ai/synara/services/control-plane/internal/idempotency"
 	"github.com/synara-ai/synara/services/control-plane/internal/identity"
+	"github.com/synara-ai/synara/services/control-plane/internal/outbox"
 	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
 	"github.com/synara-ai/synara/services/control-plane/internal/problem"
 	"github.com/synara-ai/synara/services/control-plane/internal/sessions"
@@ -145,6 +146,9 @@ func (s *Service) expireValidatedLeasePendingInteraction(
 	); err != nil {
 		return false, persistence.SessionEvent{}, err
 	}
+	if err := transitionWorkerAfterLeaseReleasedLocked(ctx, tx, lease, expiredAt); err != nil {
+		return false, persistence.SessionEvent{}, err
+	}
 	const reason = "The interaction exceeded its maximum waiting time before a user response was received."
 	appended, err := s.recoverExecutionGenerationLocked(
 		ctx, tx, execution, lease, "interaction_expired", reason, "",
@@ -209,6 +213,14 @@ func (s *Service) expirePendingInteractionCandidate(
 				return err
 			}
 			changed = updated
+			if updated && execution.Status == "suspended" {
+				appended, err = s.failSuspendedInteractionExpiryLocked(
+					ctx, tx, &execution, interaction.WorkerID, expiredAt, reason,
+				)
+				if err != nil {
+					return err
+				}
+			}
 			return nil
 		}
 
@@ -228,6 +240,9 @@ func (s *Service) expirePendingInteractionCandidate(
 				).
 				Delete(&persistence.WorkerLease{})
 			if err := expectOne(leaseDelete, 409, "interaction_expiry_lease_release_conflict", "The interaction lease changed during expiry."); err != nil {
+				return err
+			}
+			if err := transitionWorkerAfterLeaseReleasedLocked(ctx, tx, lease, expiredAt); err != nil {
 				return err
 			}
 		} else {
@@ -254,6 +269,73 @@ func (s *Service) expirePendingInteractionCandidate(
 		s.sessions.PublishInternalEvent(appended)
 	}
 	return changed, appended, nil
+}
+
+func (s *Service) failSuspendedInteractionExpiryLocked(
+	ctx context.Context,
+	tx *gorm.DB,
+	execution *persistence.AgentExecution,
+	workerID uuid.UUID,
+	expiredAt time.Time,
+	reason string,
+) (persistence.SessionEvent, error) {
+	failureCode := "interaction_expired"
+	remaining := tx.WithContext(ctx).Model(&persistence.ExecutionInteraction{}).
+		Where("tenant_id = ? AND execution_id = ? AND status = ?", execution.TenantID, execution.ID, "pending").
+		Updates(map[string]any{
+			"status": "expired", "delivery_status": "superseded", "delivery_error": reason,
+		})
+	if remaining.Error != nil {
+		return persistence.SessionEvent{}, problem.Wrap(
+			500,
+			"suspended_interaction_set_expiry_failed",
+			"The remaining suspended interactions could not be terminalized after a required response expired.",
+			remaining.Error,
+		)
+	}
+	updated := tx.WithContext(ctx).Model(&persistence.AgentExecution{}).
+		Where("tenant_id = ? AND id = ? AND status = ? AND worker_id IS NULL AND generation = ?",
+			execution.TenantID, execution.ID, "suspended", execution.Generation).
+		Updates(map[string]any{
+			"status": "failed", "finished_at": expiredAt, "next_recovery_reason": nil,
+			"failure_code": failureCode, "failure_message": reason,
+		})
+	if err := expectOne(updated, 409, "suspended_interaction_expiry_conflict", "The suspended Execution changed while its interaction expired."); err != nil {
+		return persistence.SessionEvent{}, err
+	}
+	turnUpdate := tx.WithContext(ctx).Model(&persistence.AgentTurn{}).
+		Where("tenant_id = ? AND session_id = ? AND id = ?", execution.TenantID, execution.SessionID, execution.TurnID).
+		Updates(map[string]any{"status": "failed", "completed_at": expiredAt})
+	if err := expectOne(turnUpdate, 500, "turn_interaction_expiry_failed", "Failed to terminalize the Turn after suspended interaction expiry."); err != nil {
+		return persistence.SessionEvent{}, err
+	}
+	execution.Status = "failed"
+	execution.FinishedAt = &expiredAt
+	execution.NextRecoveryReason = nil
+	execution.FailureCode = &failureCode
+	execution.FailureMessage = &reason
+	event, err := s.sessions.AppendInternalEvent(ctx, tx, execution.TenantID, execution.SessionID, sessions.InternalEventInput{
+		EventType: "execution.failed", ActorType: "system", ExecutionID: &execution.ID,
+		WorkerID: &workerID, Generation: &execution.Generation,
+		Payload: map[string]any{
+			"turnId": execution.TurnID, "failureCode": failureCode,
+			"failureMessage": reason, "finishedAt": expiredAt,
+		},
+	})
+	if err != nil {
+		return persistence.SessionEvent{}, err
+	}
+	if err := outbox.Enqueue(ctx, tx, outbox.EnqueueInput{
+		TenantID: &execution.TenantID, Topic: "execution.failed", MessageKey: execution.ID.String(),
+		Payload: map[string]any{
+			"tenantId": execution.TenantID, "sessionId": execution.SessionID,
+			"turnId": execution.TurnID, "executionId": execution.ID,
+			"failureCode": failureCode, "finishedAt": expiredAt,
+		},
+	}); err != nil {
+		return persistence.SessionEvent{}, problem.Wrap(500, "suspended_interaction_expiry_outbox_failed", "The suspended interaction expiry event could not be queued.", err)
+	}
+	return event, nil
 }
 
 func expirePendingInteractionRow(
@@ -499,6 +581,338 @@ func (s *Service) supersedeInteractionGeneration(
 	)
 }
 
+func (s *Service) prepareInteractionGenerationForRelease(
+	ctx context.Context,
+	tx *gorm.DB,
+	execution persistence.AgentExecution,
+	lease persistence.WorkerLease,
+	preserveRequested bool,
+	now time.Time,
+) (bool, bool, error) {
+	preserve, err := s.shouldPreserveInteractionGeneration(
+		ctx, tx, execution, lease, preserveRequested, now,
+	)
+	if err != nil {
+		return false, false, err
+	}
+	outcomeUnknown, err := s.reconcileInteractionGenerationForRecovery(
+		ctx,
+		tx,
+		execution,
+		lease,
+		preserve,
+		now,
+		"The Worker released the Execution before the interaction lifecycle completed.",
+	)
+	return preserve, outcomeUnknown, err
+}
+
+// shouldPreserveInteractionGeneration derives the lost-Generation recovery
+// decision from durable Control Plane state. Pod-terminal mode is excluded:
+// a Worker-authored quiesce marker cannot authorize suspension after lease
+// expiry without the exact kubelet terminal proof.
+func (s *Service) shouldPreserveInteractionGeneration(
+	ctx context.Context,
+	tx *gorm.DB,
+	execution persistence.AgentExecution,
+	lease persistence.WorkerLease,
+	_ bool,
+	now time.Time,
+) (bool, error) {
+	var count int64
+	if err := tx.WithContext(ctx).Model(&persistence.ExecutionSuspendAttempt{}).
+		Where(
+			"tenant_id = ? AND execution_id = ? AND worker_id = ? AND generation = ? AND status = ? AND completion_mode = ? AND provider_quiesced_at IS NOT NULL AND checkpoint_deadline_at > ?",
+			execution.TenantID, execution.ID, lease.WorkerID, lease.Generation, "checkpointing",
+			ResourceSuspendCompletionWorkerAttestedV1, now,
+		).
+		Count(&count).Error; err != nil {
+		return false, problem.Wrap(
+			500,
+			"interaction_suspend_provenance_load_failed",
+			"The durable resource suspension provenance could not be inspected during recovery.",
+			err,
+		)
+	}
+	return count > 0, nil
+}
+
+// shouldDeferInteractionDeliveryForSuspend only decides whether a freshly
+// resolved interaction must be recorded for a future Recovery Bundle instead
+// of being sent back into a Provider that is shutting down. It does not grant
+// authority to release the Lease or enter suspended state.
+func (s *Service) shouldDeferInteractionDeliveryForSuspend(
+	ctx context.Context,
+	tx *gorm.DB,
+	execution persistence.AgentExecution,
+	lease persistence.WorkerLease,
+	now time.Time,
+) (bool, error) {
+	var count int64
+	if err := tx.WithContext(ctx).Model(&persistence.ExecutionSuspendAttempt{}).
+		Where(
+			"tenant_id = ? AND execution_id = ? AND worker_id = ? AND generation = ? AND status = ? AND provider_quiesced_at IS NOT NULL AND checkpoint_deadline_at > ?",
+			execution.TenantID, execution.ID, lease.WorkerID, lease.Generation, "checkpointing", now,
+		).
+		Count(&count).Error; err != nil {
+		return false, problem.Wrap(
+			500,
+			"interaction_suspend_provenance_load_failed",
+			"The durable resource suspension handoff could not be inspected during interaction resolution.",
+			err,
+		)
+	}
+	return count > 0, nil
+}
+
+func (s *Service) reconcileInteractionGenerationForRecovery(
+	ctx context.Context,
+	tx *gorm.DB,
+	execution persistence.AgentExecution,
+	lease persistence.WorkerLease,
+	preserve bool,
+	now time.Time,
+	reason string,
+) (bool, error) {
+	// delivered is persisted immediately before the Provider write. Losing the
+	// generation afterwards makes application outcome unknowable; replay would
+	// risk a duplicate side effect.
+	deliveredUnknown := tx.WithContext(ctx).Model(&persistence.ExecutionInteraction{}).
+		Where(
+			"tenant_id = ? AND execution_id = ? AND delivery_worker_id = ? AND delivery_generation = ? AND status = ? AND delivery_status = ?",
+			execution.TenantID, execution.ID, lease.WorkerID, lease.Generation, "resolved", "delivered",
+		).
+		Updates(map[string]any{
+			"delivery_status": "outcome-unknown",
+			"delivery_error":  reason,
+		})
+	if deliveredUnknown.Error != nil {
+		return false, problem.Wrap(
+			500,
+			"interaction_resolution_outcome_unknown_update_failed",
+			"The uncertain Provider interaction resolution could not be fenced.",
+			deliveredUnknown.Error,
+		)
+	}
+
+	// A resume-bound resolution was included in exactly one immutable Bundle,
+	// but Provider application has no durable ACK. If that Bundle's generation
+	// is lost, fail closed rather than injecting the same resolution again.
+	boundUnknown := tx.WithContext(ctx).Model(&persistence.ExecutionInteraction{}).
+		Where(
+			"tenant_id = ? AND execution_id = ? AND status = ? AND delivery_status = ? AND resume_generation = ?",
+			execution.TenantID, execution.ID, "resolved", "resume-bound", lease.Generation,
+		).
+		Updates(map[string]any{
+			"delivery_status": "outcome-unknown",
+			"delivery_error":  reason,
+		})
+	if boundUnknown.Error != nil {
+		return false, problem.Wrap(
+			500,
+			"interaction_resume_outcome_unknown_update_failed",
+			"The recovery-bound interaction resolution could not be terminalized safely.",
+			boundUnknown.Error,
+		)
+	}
+
+	outcomeUnknown := deliveredUnknown.RowsAffected > 0 || boundUnknown.RowsAffected > 0
+	if outcomeUnknown {
+		if err := s.terminalizeInteractionsAfterOutcomeUnknown(ctx, tx, execution, reason); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+
+	if preserve {
+		preserved := tx.WithContext(ctx).Model(&persistence.ExecutionInteraction{}).
+			Where(
+				"tenant_id = ? AND execution_id = ? AND delivery_worker_id = ? AND delivery_generation = ? AND status = ? AND delivery_status IN ?",
+				execution.TenantID,
+				execution.ID,
+				lease.WorkerID,
+				lease.Generation,
+				"resolved",
+				[]string{"pending", "failed"},
+			).
+			Updates(map[string]any{
+				"delivery_status":       "resume-recorded",
+				"delivery_worker_id":    nil,
+				"delivery_generation":   nil,
+				"delivery_available_at": now,
+				"delivered_at":          nil,
+				"acknowledged_at":       nil,
+				"delivery_error":        nil,
+				"resume_bundle_id":      nil,
+				"resume_generation":     nil,
+				"resume_bound_at":       nil,
+			})
+		if preserved.Error != nil {
+			return false, problem.Wrap(
+				500,
+				"interaction_resolution_preserve_failed",
+				"Unacknowledged interaction resolutions could not be preserved for recovery.",
+				preserved.Error,
+			)
+		}
+		return false, nil
+	}
+	return false, s.supersedeInteractionGenerationWithReason(
+		ctx,
+		tx,
+		execution,
+		lease,
+		reason,
+	)
+}
+
+func (s *Service) terminalizeInteractionsAfterOutcomeUnknown(
+	ctx context.Context,
+	tx *gorm.DB,
+	execution persistence.AgentExecution,
+	reason string,
+) error {
+	if err := tx.WithContext(ctx).Model(&persistence.ExecutionInteraction{}).
+		Where("tenant_id = ? AND execution_id = ? AND status = ?", execution.TenantID, execution.ID, "pending").
+		Updates(map[string]any{
+			"status": "expired", "delivery_status": "superseded", "delivery_error": reason,
+		}).Error; err != nil {
+		return problem.Wrap(
+			500,
+			"interaction_outcome_unknown_pending_terminalize_failed",
+			"Pending interactions could not be terminalized after an uncertain Provider outcome.",
+			err,
+		)
+	}
+	if err := tx.WithContext(ctx).Model(&persistence.ExecutionInteraction{}).
+		Where(
+			"tenant_id = ? AND execution_id = ? AND status = ? AND delivery_status IN ?",
+			execution.TenantID, execution.ID, "resolved", []string{"pending", "failed"},
+		).
+		Updates(map[string]any{"delivery_status": "superseded", "delivery_error": reason}).Error; err != nil {
+		return problem.Wrap(
+			500,
+			"interaction_outcome_unknown_delivery_terminalize_failed",
+			"Other interaction resolution deliveries could not be terminalized after an uncertain Provider outcome.",
+			err,
+		)
+	}
+	return nil
+}
+
+func bindPendingInteractionsToGeneration(
+	ctx context.Context,
+	tx *gorm.DB,
+	execution persistence.AgentExecution,
+	workerID uuid.UUID,
+) error {
+	if err := tx.WithContext(ctx).Model(&persistence.ExecutionInteraction{}).
+		Where(
+			"tenant_id = ? AND execution_id = ? AND status = ? AND generation < ?",
+			execution.TenantID, execution.ID, "pending", execution.Generation,
+		).
+		Updates(map[string]any{"worker_id": workerID, "generation": execution.Generation}).Error; err != nil {
+		return problem.Wrap(
+			500,
+			"interaction_pending_bind_failed",
+			"Recovered pending interactions could not be fenced to the claimed generation.",
+			err,
+		)
+	}
+	return nil
+}
+
+func bindResumeRecordedInteractionsToRecoveryBundle(
+	ctx context.Context,
+	tx *gorm.DB,
+	execution persistence.AgentExecution,
+	snapshot *ResumeSnapshot,
+	bundle RecoveryBundle,
+	boundAt time.Time,
+) error {
+	if snapshot == nil || len(snapshot.ResumeRecordedInteractions) == 0 {
+		return nil
+	}
+	ids := make([]uuid.UUID, 0, len(snapshot.ResumeRecordedInteractions))
+	seen := make(map[uuid.UUID]struct{}, len(snapshot.ResumeRecordedInteractions))
+	for _, interaction := range snapshot.ResumeRecordedInteractions {
+		if interaction.ID == uuid.Nil || interaction.ExecutionID != execution.ID {
+			return problem.New(
+				500,
+				"interaction_resume_bundle_corrupt",
+				"A Recovery Bundle interaction resolution does not match its Execution.",
+			)
+		}
+		if _, duplicate := seen[interaction.ID]; duplicate {
+			return problem.New(
+				500,
+				"interaction_resume_bundle_duplicate",
+				"A Recovery Bundle contains the same interaction resolution more than once.",
+			)
+		}
+		seen[interaction.ID] = struct{}{}
+		ids = append(ids, interaction.ID)
+	}
+
+	models := make([]persistence.ExecutionInteraction, 0, len(ids))
+	if err := persistence.WithLocking(tx.WithContext(ctx), "UPDATE", "").
+		Where("tenant_id = ? AND execution_id = ? AND id IN ?", execution.TenantID, execution.ID, ids).
+		Order("id").Find(&models).Error; err != nil {
+		return problem.Wrap(
+			500,
+			"interaction_resume_bundle_lock_failed",
+			"Recovery Bundle interaction resolutions could not be locked for one-time binding.",
+			err,
+		)
+	}
+	if len(models) != len(ids) {
+		return problem.New(
+			409,
+			"interaction_resume_bundle_stale",
+			"A Recovery Bundle interaction resolution is no longer available for one-time binding.",
+		)
+	}
+	for _, model := range models {
+		switch model.DeliveryStatus {
+		case "resume-recorded":
+			updated := tx.WithContext(ctx).Model(&persistence.ExecutionInteraction{}).
+				Where(
+					"tenant_id = ? AND execution_id = ? AND id = ? AND delivery_status = ? AND resume_bundle_id IS NULL AND resume_generation IS NULL AND resume_bound_at IS NULL",
+					execution.TenantID, execution.ID, model.ID, "resume-recorded",
+				).
+				Updates(map[string]any{
+					"delivery_status": "resume-bound", "resume_bundle_id": bundle.ID,
+					"resume_generation": bundle.Generation, "resume_bound_at": boundAt,
+				})
+			if err := expectOne(
+				updated,
+				409,
+				"interaction_resume_bundle_bind_conflict",
+				"The interaction resolution was bound to Recovery concurrently.",
+			); err != nil {
+				return err
+			}
+		case "resume-bound":
+			if model.ResumeBundleID == nil || *model.ResumeBundleID != bundle.ID ||
+				model.ResumeGeneration == nil || *model.ResumeGeneration != bundle.Generation ||
+				model.ResumeBoundAt == nil {
+				return problem.New(
+					409,
+					"interaction_resume_bundle_replay_conflict",
+					"The interaction resolution is already bound to a different Recovery Bundle.",
+				)
+			}
+		default:
+			return problem.New(
+				409,
+				"interaction_resume_bundle_stale",
+				"The interaction resolution is not eligible for Recovery Bundle binding.",
+			)
+		}
+	}
+	return nil
+}
+
 func (s *Service) supersedeInteractionGenerationWithReason(
 	ctx context.Context,
 	tx *gorm.DB,
@@ -541,7 +955,7 @@ func (s *Service) resolveInteraction(
 		return OperationResult[Interaction]{}, err
 	}
 
-	var appended persistence.SessionEvent
+	appended := make([]persistence.SessionEvent, 0, 2)
 	result, err := apiidempotency.Execute(ctx, s.db, apiidempotency.Scope{
 		TenantID: tenantID, ActorID: principal.UserID, Key: idempotencyKey,
 		Operation: "interaction." + kind + ".resolve", SuccessStatus: 200,
@@ -552,28 +966,8 @@ func (s *Service) resolveInteraction(
 		var lease persistence.WorkerLease
 		leaseErr := persistence.WithLocking(tx.WithContext(ctx), "UPDATE", "").
 			Where("tenant_id = ? AND execution_id = ?", tenantID, executionID).Take(&lease).Error
-		if errors.Is(leaseErr, gorm.ErrRecordNotFound) {
-			var interactionState persistence.ExecutionInteraction
-			stateErr := tx.WithContext(ctx).
-				Select("id", "status", "expires_at").
-				Where(
-					"tenant_id = ? AND execution_id = ? AND request_id = ? AND kind = ?",
-					tenantID, executionID, requestID, kind,
-				).
-				Take(&interactionState).Error
-			if stateErr == nil && (interactionState.Status == "expired" || !interactionState.ExpiresAt.After(s.now())) {
-				return Interaction{}, problem.New(409, "interaction_expired", "The execution interaction expired before it was resolved.")
-			}
-			if stateErr != nil && !errors.Is(stateErr, gorm.ErrRecordNotFound) {
-				return Interaction{}, problem.Wrap(500, "interaction_load_failed", "The execution interaction could not be loaded.", stateErr)
-			}
-			return Interaction{}, problem.New(409, "interaction_lease_expired", "The execution lease is no longer active.")
-		}
-		if leaseErr != nil {
+		if leaseErr != nil && !errors.Is(leaseErr, gorm.ErrRecordNotFound) {
 			return Interaction{}, problem.Wrap(500, "lease_lock_failed", "Failed to lock the execution lease.", leaseErr)
-		}
-		if !lease.ExpiresAt.After(s.now()) {
-			return Interaction{}, problem.New(409, "interaction_lease_expired", "The execution lease expired before the interaction was resolved.")
 		}
 
 		var execution persistence.AgentExecution
@@ -602,6 +996,13 @@ func (s *Service) resolveInteraction(
 			return Interaction{}, problem.New(409, "interaction_not_pending", "The execution interaction is no longer pending.")
 		}
 		now := s.now()
+		if session.AbsoluteExpiresAt != nil && !session.AbsoluteExpiresAt.After(now) {
+			return Interaction{}, problem.New(
+				409,
+				"session_absolute_expired",
+				"The Session reached its absolute lifetime and cannot accept an interaction resolution.",
+			)
+		}
 		if !interaction.ExpiresAt.After(now) {
 			return Interaction{}, problem.New(409, "interaction_expired", "The execution interaction expired before it was resolved.")
 		}
@@ -611,15 +1012,39 @@ func (s *Service) resolveInteraction(
 				return Interaction{}, err
 			}
 		}
-		if interaction.WorkerID != lease.WorkerID || interaction.Generation != lease.Generation ||
-			execution.WorkerID == nil || *execution.WorkerID != lease.WorkerID || execution.Generation != lease.Generation {
-			return Interaction{}, problem.New(409, "interaction_generation_fenced", "The interaction belongs to an obsolete Worker generation.")
+		suspendedResolution := execution.Status == "suspended"
+		if suspendedResolution {
+			if leaseErr == nil || execution.WorkerID != nil || interaction.Generation != execution.Generation {
+				return Interaction{}, problem.New(409, "interaction_generation_fenced", "The suspended interaction does not match the fenced Execution generation.")
+			}
+		} else {
+			if errors.Is(leaseErr, gorm.ErrRecordNotFound) || !lease.ExpiresAt.After(now) {
+				return Interaction{}, problem.New(409, "interaction_lease_expired", "The execution lease is no longer active.")
+			}
+			if interaction.WorkerID != lease.WorkerID || interaction.Generation != lease.Generation ||
+				execution.WorkerID == nil || *execution.WorkerID != lease.WorkerID || execution.Generation != lease.Generation {
+				return Interaction{}, problem.New(409, "interaction_generation_fenced", "The interaction belongs to an obsolete Worker generation.")
+			}
+		}
+		quiescedCheckpointingResolution := false
+		if !suspendedResolution {
+			preserve, preserveErr := s.shouldDeferInteractionDeliveryForSuspend(ctx, tx, execution, lease, now)
+			if preserveErr != nil {
+				return Interaction{}, preserveErr
+			}
+			quiescedCheckpointingResolution = preserve
 		}
 
 		resolutionKind := interactionResolutionKind(kind, resolution)
 		resolutionCommandID := requestID + ":resolution"
-		deliveryWorkerID := lease.WorkerID
-		deliveryGeneration := lease.Generation
+		deliveryStatus := "resume-recorded"
+		var deliveryWorkerID *uuid.UUID
+		var deliveryGeneration *int64
+		if !suspendedResolution && !quiescedCheckpointingResolution {
+			deliveryStatus = "pending"
+			deliveryWorkerID = &lease.WorkerID
+			deliveryGeneration = &lease.Generation
+		}
 		updated := tx.WithContext(ctx).Model(&persistence.ExecutionInteraction{}).
 			Where("id = ? AND status = ?", interaction.ID, "pending").
 			Select(
@@ -629,8 +1054,8 @@ func (s *Service) resolveInteraction(
 			Updates(&persistence.ExecutionInteraction{
 				Status: "resolved", Resolution: resolution, ResolvedAt: &now, ResolvedBy: &principal.UserID,
 				ResolutionKind: &resolutionKind, ResolutionCommandID: &resolutionCommandID,
-				DeliveryStatus: "pending", DeliveryWorkerID: &deliveryWorkerID,
-				DeliveryGeneration: &deliveryGeneration, DeliveryAvailableAt: &now,
+				DeliveryStatus: deliveryStatus, DeliveryWorkerID: deliveryWorkerID,
+				DeliveryGeneration: deliveryGeneration, DeliveryAvailableAt: &now,
 			})
 		if err := expectOne(updated, 409, "interaction_resolve_conflict", "The execution interaction was resolved concurrently."); err != nil {
 			return Interaction{}, err
@@ -641,9 +1066,9 @@ func (s *Service) resolveInteraction(
 		interaction.ResolvedBy = &principal.UserID
 		interaction.ResolutionKind = &resolutionKind
 		interaction.ResolutionCommandID = &resolutionCommandID
-		interaction.DeliveryStatus = "pending"
-		interaction.DeliveryWorkerID = &deliveryWorkerID
-		interaction.DeliveryGeneration = &deliveryGeneration
+		interaction.DeliveryStatus = deliveryStatus
+		interaction.DeliveryWorkerID = deliveryWorkerID
+		interaction.DeliveryGeneration = deliveryGeneration
 		interaction.DeliveryAvailableAt = &now
 
 		var pending int64
@@ -652,7 +1077,15 @@ func (s *Service) resolveInteraction(
 			Count(&pending).Error; err != nil {
 			return Interaction{}, problem.Wrap(500, "interaction_pending_count_failed", "Pending interactions could not be checked.", err)
 		}
-		if pending == 0 && execution.Status == "waiting-for-approval" {
+		if !suspendedResolution && !quiescedCheckpointingResolution {
+			if err := supersedeResourceSuspendAttempts(
+				ctx, tx, execution, now, "interaction_resolved",
+				"A user resolved the interaction while the suspend Checkpoint was in progress.",
+			); err != nil {
+				return Interaction{}, err
+			}
+		}
+		if pending == 0 && execution.Status == "waiting-for-approval" && !quiescedCheckpointingResolution {
 			resumed := tx.WithContext(ctx).Model(&persistence.AgentExecution{}).
 				Where("tenant_id = ? AND id = ? AND status = ? AND worker_id = ? AND generation = ?",
 					tenantID, executionID, "waiting-for-approval", lease.WorkerID, lease.Generation).
@@ -661,18 +1094,50 @@ func (s *Service) resolveInteraction(
 				return Interaction{}, err
 			}
 		}
+		workerID := interaction.WorkerID
+		generation := interaction.Generation
+		if pending == 0 && suspendedResolution {
+			recoveringEvent, eventErr := s.resumeSuspendedExecutionLocked(
+				ctx,
+				tx,
+				&execution,
+				"system",
+				nil,
+				&workerID,
+				"interaction_resolved",
+				"suspend-resume",
+				now,
+			)
+			if eventErr != nil {
+				return Interaction{}, eventErr
+			}
+			appended = append(appended, recoveringEvent)
+		}
 		eventVersion, eventType, eventPayload, eventErr := resolvedInteractionRuntimeEvent(interaction, resolution)
 		if eventErr != nil {
 			return Interaction{}, eventErr
 		}
-		workerID := interaction.WorkerID
-		generation := interaction.Generation
-		appended, err = s.sessions.AppendInternalEvent(ctx, tx, tenantID, execution.SessionID, sessions.InternalEventInput{
+		resolvedEvent, err := s.sessions.AppendInternalEvent(ctx, tx, tenantID, execution.SessionID, sessions.InternalEventInput{
 			EventVersion: eventVersion, EventType: eventType, ActorType: "user", ActorID: &principal.UserID,
 			ExecutionID: &execution.ID, WorkerID: &workerID, Generation: &generation, Payload: eventPayload,
 		})
 		if err != nil {
 			return Interaction{}, err
+		}
+		appended = append(appended, resolvedEvent)
+		if suspendedResolution && pending > 0 {
+			if err := tx.WithContext(ctx).Model(&persistence.AgentSession{}).
+				Where("tenant_id = ? AND id = ?", tenantID, execution.SessionID).
+				Updates(map[string]any{"resource_state": "suspended", "resource_idle_since": now}).Error; err != nil {
+				return Interaction{}, problem.Wrap(500, "session_resource_state_update_failed", "Failed to keep the partially resolved Session suspended.", err)
+			}
+		}
+		if !suspendedResolution && pending > 0 {
+			if err := tx.WithContext(ctx).Model(&persistence.AgentSession{}).
+				Where("tenant_id = ? AND id = ?", tenantID, execution.SessionID).
+				Updates(map[string]any{"resource_state": "waiting", "resource_idle_since": nil}).Error; err != nil {
+				return Interaction{}, problem.Wrap(500, "session_resource_state_update_failed", "Failed to keep the partially resolved Session waiting.", err)
+			}
 		}
 		if err := audit.Record(ctx, tx, audit.Entry{
 			TenantID: tenantID, ActorType: "user", ActorID: &principal.UserID,
@@ -684,8 +1149,12 @@ func (s *Service) resolveInteraction(
 		}
 		return toInteraction(interaction), nil
 	})
-	if err == nil && !result.Replayed && appended.EventID != uuid.Nil {
-		s.sessions.PublishInternalEvent(appended)
+	if err == nil && !result.Replayed {
+		for _, event := range appended {
+			if event.EventID != uuid.Nil {
+				s.sessions.PublishInternalEvent(event)
+			}
+		}
 	}
 	return OperationResult[Interaction]{
 		Value: result.Value, Replayed: result.Replayed, StatusCode: result.StatusCode,

@@ -1,0 +1,48 @@
+{
+  "schemaVersion": "synara.kubernetes.resilience.acceptance.v1",
+  "status": "failed",
+  "startedAt": "2026-07-25T10:57:26Z",
+  "finishedAt": "2026-07-25T10:57:39Z",
+  "durationSeconds": 13,
+  "context": "orbstack",
+  "namespace": "synara-system",
+  "evidenceFile": "/Users/huang/devel/project/huang/business/synara/docs/reports/stage-4-orbstack-leader-takeover-20260725-final4.json",
+  "safety": {
+    "kindOnlyByDefault": true,
+    "allowNonDisposableOverride": "SYNARA_K8S_ACCEPTANCE_ALLOW_NONDISPOSABLE"
+  },
+  "baseline": {
+    "executed": false,
+    "status": "skipped",
+    "durationSeconds": 0
+  },
+  "plannedCases": [
+    "leader-takeover"
+  ],
+  "allowedSkippedCases": [],
+  "caseCounts": {
+    "passed": 0,
+    "failed": 1,
+    "skipped": 0
+  },
+  "permissions": [],
+  "topology": null,
+  "scenarios": [
+    {
+      "name": "leader-takeover",
+      "status": "failed",
+      "startedAt": "2026-07-25T10:57:26Z",
+      "finishedAt": "2026-07-25T10:57:39Z",
+      "details": {
+        "error": "active reconciler lease could not be guarded",
+        "leaseName": "synara:kubernetes-execution-reconciler",
+        "readyProbeFailures": 3
+      }
+    }
+  ],
+  "soak": {
+    "executed": false,
+    "status": "skipped",
+    "reason": "disabled"
+  }
+}

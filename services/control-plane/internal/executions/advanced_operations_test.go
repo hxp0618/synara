@@ -16,10 +16,12 @@ import (
 	"github.com/synara-ai/synara/services/control-plane/internal/executiontargets"
 	"github.com/synara-ai/synara/services/control-plane/internal/identity"
 	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
+	"github.com/synara-ai/synara/services/control-plane/internal/placement"
 	"github.com/synara-ai/synara/services/control-plane/internal/platform"
 	"github.com/synara-ai/synara/services/control-plane/internal/problem"
 	"github.com/synara-ai/synara/services/control-plane/internal/projects"
 	"github.com/synara-ai/synara/services/control-plane/internal/providercapabilities"
+	"github.com/synara-ai/synara/services/control-plane/internal/routing"
 	"github.com/synara-ai/synara/services/control-plane/internal/sessions"
 	"github.com/synara-ai/synara/services/control-plane/migrations"
 )
@@ -182,6 +184,57 @@ func TestPrimaryOperationsUseBoundManifestAcrossExecutionPinnedObservationGap(t 
 	}
 }
 
+func TestPrimaryOperationsRetryPastPoolScopedObservationGapOnPreferredTarget(t *testing.T) {
+	fixture := newAdvancedOperationFixture(t, nil)
+	fixture.markWorkersOffline(t)
+	badTarget := fixture.loadTarget(t, fixture.targetID)
+	badDefault := configureAdvancedWarmDefaultPool(t, fixture.db, badTarget)
+	alternatePool := createAdvancedWorkerPool(t, fixture.db, badTarget, "advanced-alt-supported")
+	registerPoolWorkerWithCapabilities(t, fixture.service, badTarget.ID, badTarget.Kind, alternatePool, "advanced-alt-supported", workerManifestTestCapabilities())
+
+	goodTarget := fixture.createExecutionTarget(t, "advanced-good-target", nil)
+	goodDefault := configureAdvancedWarmDefaultPool(t, fixture.db, goodTarget)
+	registerPoolWorkerWithCapabilities(t, fixture.service, goodTarget.ID, goodTarget.Kind, goodDefault, "advanced-good-default", workerManifestTestCapabilities())
+
+	group, _, destinationMember := fixture.configureSessionTargetGroup(
+		t, badTarget, goodTarget, "cn-shanghai", "cluster-a", "cn-shanghai", "cluster-b",
+	)
+	now := time.Now().UTC()
+	fixture.observeTargetHealth(t, badTarget.ID, routing.HealthHealthy, routing.CapacityAvailable, intPointer(10), 0, now)
+	fixture.observeTargetHealth(t, goodTarget.ID, routing.HealthHealthy, routing.CapacityAvailable, intPointer(10), 0, now)
+
+	expected := fixture.lastSequence(t, fixture.sessionID)
+	review, err := fixture.service.RequestReview(
+		context.Background(), fixture.principal, fixture.sessionID,
+		StartReviewInput{
+			ExpectedLastEventSequence: &expected,
+			Target:                    ReviewTarget{Type: "uncommittedChanges"},
+		},
+		"review-pool-scoped-observation-gap", "review-pool-scoped-observation-gap", "127.0.0.1",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	execution := fixture.loadExecution(t, review.Value.ExecutionID)
+	if execution.ExecutionTargetID != goodTarget.ID {
+		t.Fatalf("execution target = %s, want %s", execution.ExecutionTargetID, goodTarget.ID)
+	}
+	if execution.WorkerPoolID == nil || *execution.WorkerPoolID != goodDefault.ID {
+		t.Fatalf("execution pool = %#v, want %s", execution.WorkerPoolID, goodDefault.ID)
+	}
+	if execution.TargetGroupID == nil || *execution.TargetGroupID != group.ID ||
+		execution.TargetGroupMemberVersion == nil || *execution.TargetGroupMemberVersion != destinationMember.Version {
+		t.Fatalf("execution routing snapshot = %#v", execution)
+	}
+	session := fixture.loadSession(t)
+	if session.ExecutionTargetID != goodTarget.ID {
+		t.Fatalf("session execution target = %s, want %s", session.ExecutionTargetID, goodTarget.ID)
+	}
+	if badDefault.ID == uuid.Nil {
+		t.Fatal("bad default pool was not configured")
+	}
+}
+
 func TestReviewUsesBoundManifestAcrossExecutionPinnedObservationGap(t *testing.T) {
 	fixture := newAdvancedOperationFixture(t, nil)
 	expected := fixture.lastSequence(t, fixture.sessionID)
@@ -288,6 +341,295 @@ func TestCompactWithUsableCursorQueuesOnePrimaryOperation(t *testing.T) {
 		t.Fatalf("unexpected Compact result: %#v", result)
 	}
 	fixture.assertPrimaryOperationCounts(t, 1, 1, 1, 1, 1)
+}
+
+func TestPrimaryOperationsFreezeGroupRoutingSnapshotIntoExecutionEventAndOutbox(t *testing.T) {
+	fixture := newAdvancedOperationFixture(t, nil)
+	source := fixture.loadTarget(t, fixture.targetID)
+	destination := fixture.createExecutionTarget(t, "advanced-operation-snapshot-destination", nil)
+	group, sourceMember, _ := fixture.configureSessionTargetGroup(
+		t,
+		source,
+		destination,
+		"cn-shanghai",
+		"cluster-a",
+		"cn-shanghai",
+		"cluster-b",
+	)
+	now := time.Now().UTC()
+	fixture.observeTargetHealth(t, source.ID, routing.HealthHealthy, routing.CapacityAvailable, intPointer(10), 0, now)
+	fixture.observeTargetHealth(t, destination.ID, routing.HealthHealthy, routing.CapacityAvailable, intPointer(10), 0, now)
+
+	expected := fixture.lastSequence(t, fixture.sessionID)
+	result, err := fixture.service.RequestReview(
+		context.Background(), fixture.principal, fixture.sessionID,
+		StartReviewInput{
+			ExpectedLastEventSequence: &expected,
+			Target:                    ReviewTarget{Type: "uncommittedChanges"},
+		},
+		"review-routing-snapshot", "review-routing-snapshot", "127.0.0.1",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	execution := fixture.loadExecution(t, result.Value.ExecutionID)
+	if execution.ExecutionTargetID != source.ID ||
+		execution.TargetGroupID == nil || *execution.TargetGroupID != group.ID ||
+		execution.TargetGroupVersion == nil || *execution.TargetGroupVersion != group.Version ||
+		execution.TargetGroupMemberVersion == nil || *execution.TargetGroupMemberVersion != sourceMember.Version ||
+		execution.SelectedRegion == nil || *execution.SelectedRegion != "cn-shanghai" ||
+		execution.SelectedClusterID == nil || *execution.SelectedClusterID != "cluster-a" ||
+		execution.RoutingReason == nil || *execution.RoutingReason != "preferred-target" {
+		t.Fatalf("execution routing snapshot = %#v", execution)
+	}
+
+	event := fixture.loadTurnCreatedEvent(t, result.Value.ExecutionID)
+	fixture.assertRoutingPayload(t, event.Payload, routingPayloadExpectation{
+		TargetGroupID: group.ID, GroupVersion: group.Version, MemberVersion: sourceMember.Version,
+		Region: "cn-shanghai", ClusterID: "cluster-a", Reason: "preferred-target",
+	})
+
+	outboxMessage := fixture.loadLatestExecutionQueuedOutbox(t)
+	fixture.assertRoutingPayload(t, outboxMessage.Payload, routingPayloadExpectation{
+		TargetGroupID: group.ID, GroupVersion: group.Version, MemberVersion: sourceMember.Version,
+		Region: "cn-shanghai", ClusterID: "cluster-a", Reason: "preferred-target",
+	})
+
+	session := fixture.loadSession(t)
+	if session.ExecutionTargetID != source.ID || session.RoutingPolicyVersion == nil || *session.RoutingPolicyVersion != group.Version {
+		t.Fatalf("session routing authority = %#v", session)
+	}
+	fixture.assertPrimaryOperationCounts(t, 1, 1, 1, 1, 1)
+}
+
+func TestPrimaryOperationsCrossDomainRerouteUseFrozenSourceAuthorityAndAdvanceSession(t *testing.T) {
+	fixture := newAdvancedOperationFixture(t, nil)
+	source := fixture.loadTarget(t, fixture.targetID)
+	destination := fixture.createExecutionTarget(t, "advanced-operation-dr-destination", nil)
+	group, sourceMember, destinationMember := fixture.configureSessionTargetGroup(
+		t,
+		source,
+		destination,
+		"cn-shanghai",
+		"cluster-a",
+		"cn-beijing",
+		"cluster-b",
+	)
+	now := time.Now().UTC()
+	fixture.observeTargetHealth(t, source.ID, routing.HealthHealthy, routing.CapacityAvailable, intPointer(10), 0, now)
+	fixture.observeTargetHealth(t, destination.ID, routing.HealthHealthy, routing.CapacityAvailable, intPointer(10), 0, now)
+
+	expected := fixture.lastSequence(t, fixture.sessionID)
+	first, err := fixture.service.RequestReview(
+		context.Background(), fixture.principal, fixture.sessionID,
+		StartReviewInput{
+			ExpectedLastEventSequence: &expected,
+			Target:                    ReviewTarget{Type: "uncommittedChanges"},
+		},
+		"review-routing-dr-first", "review-routing-dr-first", "127.0.0.1",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstExecution := fixture.loadExecution(t, first.Value.ExecutionID)
+	if firstExecution.TargetGroupMemberVersion == nil || *firstExecution.TargetGroupMemberVersion != sourceMember.Version {
+		t.Fatalf("seed execution did not remain on the preferred source target: %#v", firstExecution)
+	}
+	fixture.completeExecutionWithCurrentManifest(t, first.Value.ExecutionID)
+
+	readyAt := now.Add(time.Minute)
+	fixture.createReadyWorkspaceCheckpoint(t, firstExecution, first.Value.Turn.ID, readyAt)
+	fixture.observeTargetHealth(t, source.ID, routing.HealthUnreachable, routing.CapacityUnknown, nil, 0, readyAt.Add(time.Second))
+	fixture.observeTargetHealth(t, destination.ID, routing.HealthHealthy, routing.CapacityAvailable, intPointer(10), 0, readyAt.Add(2*time.Second))
+	sourceDRDomain := routing.DRDomainForLocation("cn-shanghai", "cluster-a")
+	fixture.observeTargetDRReadiness(
+		t,
+		destination.ID,
+		sourceDRDomain,
+		routing.DRDomainForLocation("cn-beijing", "cluster-b"),
+		readyAt,
+		false,
+		true,
+		false,
+		readyAt.Add(3*time.Second),
+	)
+
+	expected = fixture.lastSequence(t, fixture.sessionID)
+	second, err := fixture.service.RequestReview(
+		context.Background(), fixture.principal, fixture.sessionID,
+		StartReviewInput{
+			ExpectedLastEventSequence: &expected,
+			Target:                    ReviewTarget{Type: "uncommittedChanges"},
+		},
+		"review-routing-dr-second", "review-routing-dr-second", "127.0.0.1",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	execution := fixture.loadExecution(t, second.Value.ExecutionID)
+	if execution.ExecutionTargetID != destination.ID ||
+		execution.TargetGroupID == nil || *execution.TargetGroupID != group.ID ||
+		execution.TargetGroupVersion == nil || *execution.TargetGroupVersion != group.Version ||
+		execution.TargetGroupMemberVersion == nil || *execution.TargetGroupMemberVersion != destinationMember.Version ||
+		execution.SelectedRegion == nil || *execution.SelectedRegion != "cn-beijing" ||
+		execution.SelectedClusterID == nil || *execution.SelectedClusterID != "cluster-b" ||
+		execution.RoutingReason == nil || *execution.RoutingReason != routing.StrategyPriority {
+		t.Fatalf("rerouted execution snapshot = %#v", execution)
+	}
+
+	session := fixture.loadSession(t)
+	if session.ExecutionTargetID != destination.ID || session.RoutingPolicyVersion == nil || *session.RoutingPolicyVersion != group.Version {
+		t.Fatalf("session did not advance to the rerouted target: %#v", session)
+	}
+	fixture.assertPrimaryOperationCounts(t, 2, 2, 2, 2, 2)
+}
+
+func TestPrimaryOperationsCrossDomainRerouteUsesProviderAffinityBetweenEligibleDestinations(t *testing.T) {
+	fixture := newAdvancedOperationFixture(t, nil)
+	source := fixture.loadTarget(t, fixture.targetID)
+	avoidDestination := fixture.createExecutionTarget(t, "advanced-operation-dr-avoid", nil)
+	preferDestination := fixture.createExecutionTarget(t, "advanced-operation-dr-prefer", nil)
+	setAdvancedOperationTargetRoutingPreferences(t, fixture.db, avoidDestination.ID, map[string]string{"codex": "avoid"})
+	setAdvancedOperationTargetRoutingPreferences(t, fixture.db, preferDestination.ID, map[string]string{"codex": "prefer"})
+
+	router := routing.NewService(fixture.db)
+	group, err := router.CreateGroup(context.Background(), routing.CreateGroupInput{
+		TenantID: fixture.tenantID, OrganizationID: &fixture.organizationID,
+		Name: "advanced-operation-affinity-group-" + uuid.NewString(), Strategy: routing.StrategyPriority,
+		AllowCrossRegion: true, MaxFailoverAttempts: intPointer(3), HealthMaxStalenessSeconds: 90,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sourceMember, err := router.AddMember(context.Background(), routing.AddMemberInput{
+		TenantID: fixture.tenantID, TargetGroupID: group.ID, ExecutionTargetID: source.ID,
+		Region: "cn-shanghai", ClusterID: "cluster-a", Priority: 10, Weight: 100,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := router.AddMember(context.Background(), routing.AddMemberInput{
+		TenantID: fixture.tenantID, TargetGroupID: group.ID, ExecutionTargetID: avoidDestination.ID,
+		Region: "cn-beijing", ClusterID: "cluster-b", Priority: 20, Weight: 100,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := router.AddMember(context.Background(), routing.AddMemberInput{
+		TenantID: fixture.tenantID, TargetGroupID: group.ID, ExecutionTargetID: preferDestination.ID,
+		Region: "cn-beijing", ClusterID: "cluster-c", Priority: 30, Weight: 100,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.db.Model(&persistence.AgentSession{}).
+		Where("tenant_id = ? AND id = ?", fixture.tenantID, fixture.sessionID).
+		Updates(map[string]any{
+			"requested_execution_target_id": source.ID,
+			"execution_target_group_id":     group.ID,
+			"routing_policy_version":        group.Version,
+			"execution_target_id":           source.ID,
+			"preferred_execution_region":    "cn-shanghai",
+		}).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Now().UTC()
+	fixture.observeTargetHealth(t, source.ID, routing.HealthHealthy, routing.CapacityAvailable, intPointer(10), 0, now)
+	fixture.observeTargetHealth(t, avoidDestination.ID, routing.HealthHealthy, routing.CapacityAvailable, intPointer(10), 0, now)
+	fixture.observeTargetHealth(t, preferDestination.ID, routing.HealthHealthy, routing.CapacityAvailable, intPointer(10), 0, now)
+
+	expected := fixture.lastSequence(t, fixture.sessionID)
+	first, err := fixture.service.RequestReview(
+		context.Background(), fixture.principal, fixture.sessionID,
+		StartReviewInput{
+			ExpectedLastEventSequence: &expected,
+			Target:                    ReviewTarget{Type: "uncommittedChanges"},
+		},
+		"review-routing-affinity-first", "review-routing-affinity-first", "127.0.0.1",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstExecution := fixture.loadExecution(t, first.Value.ExecutionID)
+	if firstExecution.TargetGroupMemberVersion == nil || *firstExecution.TargetGroupMemberVersion != sourceMember.Version {
+		t.Fatalf("seed execution did not stay on the source target: %#v", firstExecution)
+	}
+	fixture.completeExecutionWithCurrentManifest(t, first.Value.ExecutionID)
+
+	readyAt := now.Add(time.Minute)
+	fixture.createReadyWorkspaceCheckpoint(t, firstExecution, first.Value.Turn.ID, readyAt)
+	fixture.observeTargetHealth(t, source.ID, routing.HealthUnreachable, routing.CapacityUnknown, nil, 0, readyAt.Add(time.Second))
+	fixture.observeTargetHealth(t, avoidDestination.ID, routing.HealthHealthy, routing.CapacityAvailable, intPointer(10), 0, readyAt.Add(2*time.Second))
+	fixture.observeTargetHealth(t, preferDestination.ID, routing.HealthHealthy, routing.CapacityAvailable, intPointer(10), 0, readyAt.Add(3*time.Second))
+	sourceDRDomain := routing.DRDomainForLocation("cn-shanghai", "cluster-a")
+	fixture.observeTargetDRReadiness(
+		t,
+		avoidDestination.ID,
+		sourceDRDomain,
+		routing.DRDomainForLocation("cn-beijing", "cluster-b"),
+		readyAt,
+		false,
+		true,
+		false,
+		readyAt.Add(4*time.Second),
+	)
+	fixture.observeTargetDRReadiness(
+		t,
+		preferDestination.ID,
+		sourceDRDomain,
+		routing.DRDomainForLocation("cn-beijing", "cluster-c"),
+		readyAt,
+		false,
+		true,
+		false,
+		readyAt.Add(5*time.Second),
+	)
+
+	expected = fixture.lastSequence(t, fixture.sessionID)
+	second, err := fixture.service.RequestReview(
+		context.Background(), fixture.principal, fixture.sessionID,
+		StartReviewInput{
+			ExpectedLastEventSequence: &expected,
+			Target:                    ReviewTarget{Type: "uncommittedChanges"},
+		},
+		"review-routing-affinity-second", "review-routing-affinity-second", "127.0.0.1",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	execution := fixture.loadExecution(t, second.Value.ExecutionID)
+	if execution.ExecutionTargetID != preferDestination.ID {
+		t.Fatalf("provider-affinity reroute execution = %#v", execution)
+	}
+}
+
+func TestPrimaryOperationsFailClosedWhenSessionRoutingCannotBeReconstructed(t *testing.T) {
+	fixture := newAdvancedOperationFixture(t, nil)
+	source := fixture.loadTarget(t, fixture.targetID)
+	destination := fixture.createExecutionTarget(t, "advanced-operation-routing-failure-destination", nil)
+	fixture.configureSessionTargetGroup(
+		t,
+		source,
+		destination,
+		"cn-shanghai",
+		"cluster-a",
+		"cn-beijing",
+		"cluster-b",
+	)
+	fixture.seedLegacyCompletedExecutionWithoutRoutingSnapshot(t, source)
+
+	expected := fixture.lastSequence(t, fixture.sessionID)
+	_, err := fixture.service.RequestReview(
+		context.Background(), fixture.principal, fixture.sessionID,
+		StartReviewInput{
+			ExpectedLastEventSequence: &expected,
+			Target:                    ReviewTarget{Type: "uncommittedChanges"},
+		},
+		"review-routing-fail-closed", "review-routing-fail-closed", "127.0.0.1",
+	)
+	assertAdvancedOperationProblem(t, err, 409, "session_routing_source_domain_missing")
+	fixture.assertPrimaryOperationCounts(t, 1, 1, 0, 0, 0)
 }
 
 func TestConcurrentPrimaryOperationRequestsHaveSingleWinner(t *testing.T) {
@@ -450,6 +792,15 @@ func (f advancedOperationFixture) createOperator(t *testing.T) identity.Principa
 	return identity.Principal{UserID: userID, ActiveTenantID: &f.tenantID}
 }
 
+type routingPayloadExpectation struct {
+	TargetGroupID uuid.UUID
+	GroupVersion  int64
+	MemberVersion int64
+	Region        string
+	ClusterID     string
+	Reason        string
+}
+
 func (f advancedOperationFixture) lastSequence(t *testing.T, sessionID uuid.UUID) int64 {
 	t.Helper()
 	var session persistence.AgentSession
@@ -468,6 +819,176 @@ func (f advancedOperationFixture) setUsableCursor(t *testing.T) {
 			"provider_resume_cursor_state":     "usable",
 			"provider_resume_cursor_encrypted": []byte("encrypted-test-cursor"),
 		}).Error; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func (f advancedOperationFixture) loadSession(t *testing.T) persistence.AgentSession {
+	t.Helper()
+	var session persistence.AgentSession
+	if err := f.db.Where("tenant_id = ? AND id = ?", f.tenantID, f.sessionID).Take(&session).Error; err != nil {
+		t.Fatal(err)
+	}
+	return session
+}
+
+func (f advancedOperationFixture) loadTarget(t *testing.T, targetID uuid.UUID) persistence.ExecutionTarget {
+	t.Helper()
+	var target persistence.ExecutionTarget
+	if err := f.db.Where("id = ?", targetID).Take(&target).Error; err != nil {
+		t.Fatal(err)
+	}
+	return target
+}
+
+func setAdvancedOperationTargetRoutingPreferences(
+	t *testing.T,
+	db *gorm.DB,
+	targetID uuid.UUID,
+	preferences map[string]string,
+) {
+	t.Helper()
+	var target persistence.ExecutionTarget
+	if err := db.Where("id = ?", targetID).Take(&target).Error; err != nil {
+		t.Fatal(err)
+	}
+	capabilities := make(map[string]any, len(target.Capabilities))
+	for key, value := range target.Capabilities {
+		capabilities[key] = value
+	}
+	rawPolicy, _ := capabilities["providerPolicy"].(map[string]any)
+	providerPolicy := make(map[string]any, len(rawPolicy)+1)
+	for key, value := range rawPolicy {
+		providerPolicy[key] = value
+	}
+	routingPreferences := make(map[string]any, len(preferences))
+	for provider, preference := range preferences {
+		routingPreferences[provider] = preference
+	}
+	providerPolicy["routingPreferences"] = routingPreferences
+	capabilities["providerPolicy"] = providerPolicy
+	if err := db.Model(&persistence.ExecutionTarget{}).
+		Where("id = ?", targetID).
+		Select("capabilities").
+		Updates(&persistence.ExecutionTarget{Capabilities: capabilities}).Error; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func (f advancedOperationFixture) createExecutionTarget(
+	t *testing.T,
+	name string,
+	workerCapabilities map[string]any,
+) persistence.ExecutionTarget {
+	t.Helper()
+	now := time.Now().UTC()
+	target := persistence.ExecutionTarget{
+		ID: uuid.New(), TenantID: &f.tenantID, OrganizationID: &f.organizationID,
+		Kind: "kubernetes", Name: name, Status: "active", ConfigurationEncrypted: []byte{},
+		Capabilities: workerManifestTestTargetCapabilities(), CreatedAt: now, UpdatedAt: now,
+	}
+	if err := f.db.Create(&target).Error; err != nil {
+		t.Fatal(err)
+	}
+	if workerCapabilities == nil {
+		workerCapabilities = workerManifestTestCapabilities()
+	}
+	registerTestWorkerWithCapabilities(t, f.service, target.ID, target.Kind, name, workerCapabilities)
+	return target
+}
+
+func (f advancedOperationFixture) configureSessionTargetGroup(
+	t *testing.T,
+	source persistence.ExecutionTarget,
+	destination persistence.ExecutionTarget,
+	sourceRegion, sourceClusterID, destinationRegion, destinationClusterID string,
+) (
+	persistence.ExecutionTargetGroup,
+	persistence.ExecutionTargetGroupMember,
+	persistence.ExecutionTargetGroupMember,
+) {
+	t.Helper()
+	router := routing.NewService(f.db)
+	group, err := router.CreateGroup(context.Background(), routing.CreateGroupInput{
+		TenantID: f.tenantID, OrganizationID: &f.organizationID,
+		Name: "advanced-operation-group-" + uuid.NewString(), Strategy: routing.StrategyPriority,
+		AllowCrossRegion: true, MaxFailoverAttempts: intPointer(3), HealthMaxStalenessSeconds: 90,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sourceMember, err := router.AddMember(context.Background(), routing.AddMemberInput{
+		TenantID: f.tenantID, TargetGroupID: group.ID, ExecutionTargetID: source.ID,
+		Region: sourceRegion, ClusterID: sourceClusterID, Priority: 10, Weight: 100,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	destinationMember, err := router.AddMember(context.Background(), routing.AddMemberInput{
+		TenantID: f.tenantID, TargetGroupID: group.ID, ExecutionTargetID: destination.ID,
+		Region: destinationRegion, ClusterID: destinationClusterID, Priority: 20, Weight: 100,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.Model(&persistence.AgentSession{}).
+		Where("tenant_id = ? AND id = ?", f.tenantID, f.sessionID).
+		Updates(map[string]any{
+			"requested_execution_target_id": source.ID,
+			"execution_target_group_id":     group.ID,
+			"routing_policy_version":        group.Version,
+			"execution_target_id":           source.ID,
+			"preferred_execution_region":    sourceRegion,
+		}).Error; err != nil {
+		t.Fatal(err)
+	}
+	return group, sourceMember, destinationMember
+}
+
+func (f advancedOperationFixture) observeTargetHealth(
+	t *testing.T,
+	targetID uuid.UUID,
+	status, capacityStatus string,
+	availableCapacityUnits *int,
+	allocatedCapacityUnits int,
+	observedAt time.Time,
+) {
+	t.Helper()
+	if _, err := routing.NewService(f.db).ObserveHealth(context.Background(), routing.HealthObservation{
+		ExecutionTargetID:      targetID,
+		Status:                 status,
+		CapacityStatus:         capacityStatus,
+		AvailableCapacityUnits: availableCapacityUnits,
+		AllocatedCapacityUnits: allocatedCapacityUnits,
+		Source:                 "advanced-operations-test",
+		ObservedAt:             observedAt,
+		TTL:                    time.Minute,
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func (f advancedOperationFixture) observeTargetDRReadiness(
+	t *testing.T,
+	targetID uuid.UUID,
+	sourceDRDomain, drDomain string,
+	replicatedThroughAt time.Time,
+	artifactsReady, checkpointsReady, memoryReady bool,
+	observedAt time.Time,
+) {
+	t.Helper()
+	if _, err := routing.NewService(f.db).ObserveDRReadiness(context.Background(), routing.DRReadinessObservation{
+		ExecutionTargetID:   targetID,
+		SourceDRDomain:      sourceDRDomain,
+		DRDomain:            drDomain,
+		ReplicatedThroughAt: replicatedThroughAt,
+		ArtifactsReady:      artifactsReady,
+		CheckpointsReady:    checkpointsReady,
+		MemoryReady:         memoryReady,
+		PublisherIdentity:   "advanced-operations-test",
+		ObservedAt:          observedAt,
+		TTL:                 time.Minute,
+	}); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -534,6 +1055,129 @@ func (f advancedOperationFixture) markWorkersOffline(t *testing.T) {
 	}
 }
 
+func (f advancedOperationFixture) loadExecution(t *testing.T, executionID uuid.UUID) persistence.AgentExecution {
+	t.Helper()
+	var execution persistence.AgentExecution
+	if err := f.db.Where("tenant_id = ? AND id = ?", f.tenantID, executionID).Take(&execution).Error; err != nil {
+		t.Fatal(err)
+	}
+	return execution
+}
+
+func (f advancedOperationFixture) loadTurnCreatedEvent(
+	t *testing.T,
+	executionID uuid.UUID,
+) persistence.SessionEvent {
+	t.Helper()
+	var event persistence.SessionEvent
+	if err := f.db.Where(
+		"tenant_id = ? AND session_id = ? AND execution_id = ? AND event_type = ?",
+		f.tenantID, f.sessionID, executionID, "turn.created",
+	).Order("sequence DESC").Take(&event).Error; err != nil {
+		t.Fatal(err)
+	}
+	return event
+}
+
+func (f advancedOperationFixture) loadLatestExecutionQueuedOutbox(t *testing.T) persistence.OutboxMessage {
+	t.Helper()
+	var message persistence.OutboxMessage
+	if err := f.db.Where("tenant_id = ? AND topic = ?", f.tenantID, "execution.queued").
+		Order("created_at DESC, id DESC").Take(&message).Error; err != nil {
+		t.Fatal(err)
+	}
+	return message
+}
+
+func (f advancedOperationFixture) assertRoutingPayload(
+	t *testing.T,
+	payload map[string]any,
+	expected routingPayloadExpectation,
+) {
+	t.Helper()
+	if payload == nil {
+		t.Fatal("routing payload is nil")
+	}
+	if got := payload["targetGroupId"]; got != expected.TargetGroupID.String() {
+		t.Fatalf("payload targetGroupId = %#v, want %s", got, expected.TargetGroupID)
+	}
+	if got := payload["targetGroupVersion"]; got != float64(expected.GroupVersion) {
+		t.Fatalf("payload targetGroupVersion = %#v, want %d", got, expected.GroupVersion)
+	}
+	if got := payload["targetGroupMemberVersion"]; got != float64(expected.MemberVersion) {
+		t.Fatalf("payload targetGroupMemberVersion = %#v, want %d", got, expected.MemberVersion)
+	}
+	if got := payload["selectedRegion"]; got != expected.Region {
+		t.Fatalf("payload selectedRegion = %#v, want %s", got, expected.Region)
+	}
+	if got := payload["selectedClusterId"]; got != expected.ClusterID {
+		t.Fatalf("payload selectedClusterId = %#v, want %s", got, expected.ClusterID)
+	}
+	if got := payload["routingReason"]; got != expected.Reason {
+		t.Fatalf("payload routingReason = %#v, want %s", got, expected.Reason)
+	}
+}
+
+func (f advancedOperationFixture) createReadyWorkspaceCheckpoint(
+	t *testing.T,
+	execution persistence.AgentExecution,
+	turnID uuid.UUID,
+	readyAt time.Time,
+) {
+	t.Helper()
+	var workspace persistence.RemoteWorkspace
+	if err := f.db.Where("tenant_id = ? AND session_id = ?", f.tenantID, f.sessionID).Take(&workspace).Error; err != nil {
+		t.Fatal(err)
+	}
+	checkpoint := persistence.WorkspaceCheckpoint{
+		ID: uuid.New(), TenantID: f.tenantID, WorkspaceID: workspace.ID, SessionID: f.sessionID,
+		TurnID: &turnID, ExecutionID: execution.ID, Generation: execution.Generation,
+		IdempotencyKey: "advanced-operation-checkpoint-" + uuid.NewString(),
+		Strategy:       "manual",
+		Status:         "ready",
+		CreatedAt:      readyAt.Add(-time.Second),
+		ReadyAt:        &readyAt,
+	}
+	if err := f.db.Create(&checkpoint).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.Model(&persistence.RemoteWorkspace{}).
+		Where("tenant_id = ? AND id = ?", f.tenantID, workspace.ID).
+		Updates(map[string]any{
+			"current_checkpoint_id": checkpoint.ID,
+			"updated_at":            readyAt,
+		}).Error; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func (f advancedOperationFixture) seedLegacyCompletedExecutionWithoutRoutingSnapshot(
+	t *testing.T,
+	target persistence.ExecutionTarget,
+) persistence.AgentExecution {
+	t.Helper()
+	now := time.Now().UTC()
+	turn := persistence.AgentTurn{
+		ID: uuid.New(), TenantID: f.tenantID, SessionID: f.sessionID, CreatedBy: f.principal.UserID,
+		Status: "completed", InputText: "legacy-routing-authority", TurnKind: "message",
+		RuntimeMode: "full-access", InteractionMode: "default", CreatedAt: now, CompletedAt: &now,
+	}
+	if err := f.db.Create(&turn).Error; err != nil {
+		t.Fatal(err)
+	}
+	provider := "codex"
+	execution := persistence.AgentExecution{
+		ID: uuid.New(), TenantID: f.tenantID, SessionID: f.sessionID, TurnID: turn.ID,
+		Attempt: 1, Status: "completed", ExecutionTargetID: target.ID, TargetKind: target.Kind,
+		Provider: &provider, WarmPoolModeSnapshot: "disabled", RequestedBy: f.principal.UserID,
+		QueuedAt: now, FinishedAt: &now,
+	}
+	if err := f.db.Create(&execution).Error; err != nil {
+		t.Fatal(err)
+	}
+	return execution
+}
+
 func (f advancedOperationFixture) appendCompletedTurn(t *testing.T) uuid.UUID {
 	t.Helper()
 	turnID := uuid.New()
@@ -586,3 +1230,116 @@ func assertAdvancedOperationProblem(t *testing.T, err error, status int, code st
 		t.Fatalf("error = %#v, want status %d code %q", err, status, code)
 	}
 }
+
+func registerPoolWorkerWithCapabilities(
+	t *testing.T,
+	service *Service,
+	targetID uuid.UUID,
+	targetKind string,
+	pool persistence.WorkerPool,
+	podName string,
+	capabilities map[string]any,
+) persistence.WorkerInstance {
+	t.Helper()
+	parsedTargetKind, err := platform.ParseExecutionTargetKind(targetKind)
+	if err != nil {
+		t.Fatal(err)
+	}
+	instanceUID := uuid.NewString()
+	fullPodName := podName + "-" + uuid.NewString()
+	if runtimeCapability, ok := capabilities["workerRuntime"].(map[string]any); ok && runtimeCapability["processContainment"] != nil {
+		signWorkerManifestTestContainment(t, capabilities, workerManifestRegistrationContext{
+			ExecutionTargetID: targetID, TargetKind: parsedTargetKind, InstanceUID: instanceUID,
+			ClusterID: "test-cluster", Namespace: "default", PodName: fullPodName,
+		})
+	}
+	registered, err := service.Register(context.Background(), RegisterWorkerInput{
+		ExecutionTargetID: targetID,
+		TargetKind:        targetKind,
+		WorkerMode:        WorkerModeWarmPool,
+		WorkerPoolID:      &pool.ID,
+		WorkerPoolVersion: &pool.Version,
+		CapacityClass:     &pool.CapacityClass,
+		InstanceUID:       instanceUID,
+		ClusterID:         "test-cluster",
+		Namespace:         "default",
+		PodName:           fullPodName,
+		Version:           "worker-test",
+		ProtocolVersion:   WorkerProtocolVersion,
+		Capabilities:      capabilities,
+		LeaseSupported:    true,
+		FencingSupported:  true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker, err := service.Authenticate(context.Background(), registered.Token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return worker
+}
+
+func ensureAdvancedTargetDefaultPlacement(
+	t *testing.T,
+	db *gorm.DB,
+	target persistence.ExecutionTarget,
+) placement.Selection {
+	t.Helper()
+	selection, err := placement.NewService(db).SelectExecution(context.Background(), db, target, placement.WarmPoolModeDisabled)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return selection
+}
+
+func configureAdvancedWarmDefaultPool(
+	t *testing.T,
+	db *gorm.DB,
+	target persistence.ExecutionTarget,
+) persistence.WorkerPool {
+	t.Helper()
+	ensureAdvancedTargetDefaultPlacement(t, db, target)
+	now := time.Now().UTC()
+	pool := persistence.WorkerPool{
+		ID: uuid.New(), TenantID: target.TenantID, ExecutionTargetID: target.ID,
+		Name: "warm-default-" + uuid.NewString(), Mode: placement.PoolModeWarm, CapacityClass: placement.CapacityClassInteractive,
+		DesiredIdleUnits: 0, MaxActiveUnits: 1, SchedulingTemplate: map[string]any{},
+		Status: placement.PoolStatusActive, Version: 1, CreatedAt: now, UpdatedAt: now,
+	}
+	if err := db.Create(&pool).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Model(&persistence.ExecutionPlacementPolicy{}).
+		Where("execution_target_id = ?", target.ID).
+		Updates(map[string]any{
+			"default_pool_id": pool.ID,
+			"version":         gorm.Expr("version + 1"),
+			"updated_at":      now,
+		}).Error; err != nil {
+		t.Fatal(err)
+	}
+	return pool
+}
+
+func createAdvancedWorkerPool(
+	t *testing.T,
+	db *gorm.DB,
+	target persistence.ExecutionTarget,
+	name string,
+) persistence.WorkerPool {
+	t.Helper()
+	now := time.Now().UTC()
+	pool := persistence.WorkerPool{
+		ID: uuid.New(), TenantID: target.TenantID, ExecutionTargetID: target.ID,
+		Name: name, Mode: placement.PoolModeWarm, CapacityClass: placement.CapacityClassInteractive,
+		DesiredIdleUnits: 0, MaxActiveUnits: 1, SchedulingTemplate: map[string]any{},
+		Status: placement.PoolStatusActive, Version: 1, CreatedAt: now, UpdatedAt: now,
+	}
+	if err := db.Create(&pool).Error; err != nil {
+		t.Fatal(err)
+	}
+	return pool
+}
+
+func intPointer(value int) *int { return &value }

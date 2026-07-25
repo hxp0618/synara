@@ -47,6 +47,9 @@ func TestSQLiteCredentialBindingsEnforceOwnerPurposeAndGenerationFencing(t *test
 		"trg_execution_credential_grants_validate_insert",
 		"trg_execution_credential_grants_no_update",
 		"trg_execution_credential_grants_no_delete",
+		"trg_execution_provider_credential_grants_validate_insert",
+		"trg_execution_provider_credential_grants_no_update",
+		"trg_execution_provider_credential_grants_no_delete",
 	} {
 		var count int64
 		if err := store.DB().Raw(`SELECT count(*) FROM sqlite_master WHERE name = ?`, name).Scan(&count).Error; err != nil {
@@ -153,6 +156,8 @@ func TestSQLiteCredentialBindingsEnforceOwnerPurposeAndGenerationFencing(t *test
 	if err := store.DB().Create(&persistence.AgentExecution{
 		ID: executionID, TenantID: domain.TenantID, SessionID: sessionID, TurnID: turnID,
 		Attempt: 1, Status: "queued", ExecutionTargetID: domain.ExecutionTargetID,
+		ProviderCredentialIDSnapshot: &credential.ID,
+		ProviderCredentialVersionSnapshot: pointerInt(credential.Version),
 		TargetKind: "local", Generation: 1, RequestedBy: domain.UserID, QueuedAt: now,
 	}).Error; err != nil {
 		t.Fatal(err)
@@ -177,6 +182,26 @@ func TestSQLiteCredentialBindingsEnforceOwnerPurposeAndGenerationFencing(t *test
 	}
 	if err := store.DB().Delete(&persistence.ExecutionCredentialGrant{}, "id = ?", grant.ID).Error; err == nil {
 		t.Fatal("SQLite allowed an Execution Credential Grant to be deleted")
+	}
+	providerGrant := persistence.ExecutionProviderCredentialGrant{
+		ID: uuid.New(), TenantID: domain.TenantID, ExecutionID: executionID, Generation: 1,
+		CredentialID: credential.ID, CredentialVersion: credential.Version, CreatedAt: now,
+	}
+	if err := store.DB().Create(&providerGrant).Error; err != nil {
+		t.Fatalf("create valid Execution Provider Credential Grant: %v", err)
+	}
+	staleProviderGrant := providerGrant
+	staleProviderGrant.ID = uuid.New()
+	staleProviderGrant.Generation = 2
+	if err := store.DB().Create(&staleProviderGrant).Error; err == nil {
+		t.Fatal("SQLite accepted a stale Execution Provider Credential Grant generation")
+	}
+	if err := store.DB().Model(&persistence.ExecutionProviderCredentialGrant{}).
+		Where("id = ?", providerGrant.ID).Update("credential_version", 2).Error; err == nil {
+		t.Fatal("SQLite allowed an Execution Provider Credential Grant to mutate")
+	}
+	if err := store.DB().Delete(&persistence.ExecutionProviderCredentialGrant{}, "id = ?", providerGrant.ID).Error; err == nil {
+		t.Fatal("SQLite allowed an Execution Provider Credential Grant to be deleted")
 	}
 
 	disabledAt := now.Add(time.Second)

@@ -98,6 +98,10 @@ func (s *Service) loadWorkload(ctx context.Context, tx *gorm.DB, execution persi
 	if err != nil {
 		return Workload{}, err
 	}
+	providerCredentialGrantID, err := loadExecutionProviderCredentialGrantID(ctx, tx, execution)
+	if err != nil {
+		return Workload{}, err
+	}
 	snapshotCheckpoint := restoreCheckpoint
 	if snapshotCheckpoint == nil && row.WorkspaceCurrentCheckpointID != nil {
 		snapshotCheckpoint, err = loadReadyResumeCheckpoint(
@@ -126,6 +130,15 @@ func (s *Service) loadWorkload(ctx context.Context, tx *gorm.DB, execution persi
 	if err != nil {
 		return Workload{}, err
 	}
+	memoryReferences := make([]RecoveryMemoryReference, 0)
+	if s.memoryReferences != nil {
+		memoryReferences, err = s.memoryReferences.ResolveExecutionRecoveryMemoryReferences(
+			ctx, tx, execution.TenantID, execution.ID,
+		)
+		if err != nil {
+			return Workload{}, err
+		}
+	}
 	return Workload{
 		TenantID: row.TenantID, OrganizationID: row.OrganizationID, ProjectID: row.ProjectID,
 		SessionID: row.SessionID, TurnID: row.TurnID, SessionTitle: row.SessionTitle,
@@ -138,13 +151,15 @@ func (s *Service) loadWorkload(ctx context.Context, tx *gorm.DB, execution persi
 		WorkspaceRepositoryFingerprint:        row.WorkspaceRepositoryFingerprint,
 		WorkerManifestID:                      row.WorkerManifestID,
 		Model:                                 row.Model, ProviderCredentialID: row.ProviderCredentialID,
-		CredentialGrants: credentialGrants,
-		InputText:        row.InputText,
-		TurnKind:         row.TurnKind, PrimaryOperation: primaryOperation,
+		ProviderCredentialGrantID:             providerCredentialGrantID,
+		CredentialGrants:                      credentialGrants,
+		InputText:                             row.InputText,
+		TurnKind:                              row.TurnKind, PrimaryOperation: primaryOperation,
 		RuntimeMode: row.RuntimeMode, InteractionMode: row.InteractionMode,
 		RepositoryURL: row.RepositoryURL, DefaultBranch: row.DefaultBranch,
 		ConversationHistory: conversationHistoryFromResumeSnapshot(resumeSnapshot),
 		ResumeSnapshot:      &resumeSnapshot,
+		MemoryReferences:    memoryReferences,
 	}, nil
 }
 

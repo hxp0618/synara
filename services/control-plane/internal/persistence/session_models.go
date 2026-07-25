@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"gorm.io/gorm"
 )
 
 type Project struct {
@@ -36,6 +37,10 @@ type AgentSession struct {
 	Model                                 *string    `gorm:"column:model"`
 	ProviderCredentialID                  *uuid.UUID `gorm:"column:provider_credential_id;type:uuid"`
 	ExecutionTargetID                     uuid.UUID  `gorm:"column:execution_target_id;type:uuid"`
+	RequestedExecutionTargetID            uuid.UUID  `gorm:"column:requested_execution_target_id;type:uuid"`
+	ExecutionTargetGroupID                *uuid.UUID `gorm:"column:execution_target_group_id;type:uuid"`
+	RoutingPolicyVersion                  *int64     `gorm:"column:routing_policy_version"`
+	PreferredExecutionRegion              *string    `gorm:"column:preferred_execution_region"`
 	ProviderResumeCursorEncrypted         []byte     `gorm:"column:provider_resume_cursor_encrypted"`
 	ProviderResumeCursorState             string     `gorm:"column:provider_resume_cursor_state;default:absent"`
 	ProviderResumeCursorSourceExecutionID *uuid.UUID `gorm:"column:provider_resume_cursor_source_execution_id;type:uuid"`
@@ -47,12 +52,47 @@ type AgentSession struct {
 	ForkSourceEventSequence               *int64     `gorm:"column:fork_source_event_sequence"`
 	ForkStrategy                          *string    `gorm:"column:fork_strategy"`
 	LastEventSequence                     int64      `gorm:"column:last_event_sequence"`
+	MeaningfulActivitySequence            int64      `gorm:"column:meaningful_activity_sequence;not null;default:0"`
+	ResourceState                         string     `gorm:"column:resource_state;default:idle"`
+	MeaningfulActivityAt                  time.Time  `gorm:"column:meaningful_activity_at"`
+	ResourceIdleSince                     *time.Time `gorm:"column:resource_idle_since"`
+	AbsoluteExpiresAt                     *time.Time `gorm:"column:absolute_expires_at"`
+	WaitingKeepAliveSeconds               int        `gorm:"column:waiting_keep_alive_seconds;default:900"`
+	SuspendAfterIdleSeconds               int        `gorm:"column:suspend_after_idle_seconds;default:1800"`
+	AbsoluteSessionLifetimeSeconds        *int       `gorm:"column:absolute_session_lifetime_seconds"`
+	WorkspaceRetentionDays                int        `gorm:"column:workspace_retention_days;default:30"`
+	WarmPoolMode                          string     `gorm:"column:warm_pool_mode;default:disabled"`
 	CreatedAt                             time.Time  `gorm:"column:created_at"`
 	UpdatedAt                             time.Time  `gorm:"column:updated_at"`
 	ArchivedAt                            *time.Time `gorm:"column:archived_at"`
 }
 
 func (AgentSession) TableName() string { return "agent_sessions" }
+
+// BeforeCreate keeps direct persistence fixtures and import paths safe while
+// allowing old-schema migration tests to exclude the Stage 4 column through an
+// explicit Select list.
+func (model *AgentSession) BeforeCreate(_ *gorm.DB) error {
+	if model.RequestedExecutionTargetID == uuid.Nil {
+		model.RequestedExecutionTargetID = model.ExecutionTargetID
+	}
+	if model.MeaningfulActivityAt.IsZero() {
+		model.MeaningfulActivityAt = time.Now().UTC()
+	}
+	if model.WaitingKeepAliveSeconds == 0 {
+		model.WaitingKeepAliveSeconds = 900
+	}
+	if model.SuspendAfterIdleSeconds == 0 {
+		model.SuspendAfterIdleSeconds = 1800
+	}
+	if model.WorkspaceRetentionDays == 0 {
+		model.WorkspaceRetentionDays = 30
+	}
+	if model.WarmPoolMode == "" {
+		model.WarmPoolMode = "disabled"
+	}
+	return nil
+}
 
 type AgentTurn struct {
 	ID              uuid.UUID  `gorm:"column:id;type:uuid;primaryKey"`

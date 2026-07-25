@@ -86,7 +86,7 @@ func TestProviderRuntimeReleasePolicyMigrationFencesLegacyManifests(t *testing.T
 			t.Fatal(err)
 		}
 	}
-	if err := db.Create(&manifest).Error; err != nil {
+	if err := insertPreContainmentWorkerManifest(db, &manifest); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Exec(`
@@ -112,11 +112,7 @@ func TestProviderRuntimeReleasePolicyMigrationFencesLegacyManifests(t *testing.T
 		LeaseSupported: true, FencingSupported: true, AuthTokenHash: secret.HashToken("runtime-policy-migration"),
 		Status: "online", RegisteredAt: now, LastHeartbeatAt: now,
 	}
-	if err := db.Omit(
-		"AdministrativeStatus", "RevokedAt", "RevokedBy", "RevocationReason",
-		"WorkerReleaseRevisionID", "WorkerReleaseChannel", "WorkerReleaseStatus",
-		"WorkerReleaseReason", "WorkerReleaseCheckedAt",
-	).Create(&worker).Error; err != nil {
+	if err := insertPreRevocationWorker(db, &worker); err != nil {
 		t.Fatal(err)
 	}
 

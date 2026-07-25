@@ -302,11 +302,19 @@ func seedLeasedWorkspaceCleanup(
 	}); err != nil {
 		t.Fatal(err)
 	}
-	claim, err := service.ClaimWorkspaceCleanup(context.Background(), worker, WorkspaceCleanupClaimInput{
-		ExecutionTargetID: fixture.TargetID, TargetKind: fixture.TargetKind,
-	}, "worker-revoke-cleanup-claim")
-	if err != nil || claim.Value.Cleanup == nil || claim.Value.Cleanup.CleanupID != command.ID {
-		t.Fatalf("claim Workspace cleanup before Worker revoke: %#v, %v", claim, err)
+	// Preserve coverage for rolling-upgrade state that predates the single-job
+	// Worker ownership fence. New claims reject simultaneous Execution and
+	// cleanup leases, but revocation must still recover both if such durable
+	// state already exists during deployment.
+	expiresAt := now.Add(service.leaseTTL)
+	if err := db.Model(&persistence.WorkspaceCleanupCommand{}).Where("id = ?", command.ID).
+		Updates(map[string]any{
+			"status": "leased", "lease_token_hash": []byte("legacy-dual-lease"),
+			"dispatch_generation": 1, "delivery_worker_id": worker.ID,
+			"delivery_worker_incarnation": worker.Incarnation, "delivery_attempts": 1,
+			"leased_at": now, "lease_expires_at": expiresAt, "updated_at": now,
+		}).Error; err != nil {
+		t.Fatalf("seed rolling-upgrade Workspace cleanup lease: %v", err)
 	}
 	if err := db.Where("id = ?", command.ID).Take(&command).Error; err != nil {
 		t.Fatal(err)

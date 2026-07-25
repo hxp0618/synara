@@ -157,3 +157,28 @@ func (s *Server) resolveExecutionCredential(w http.ResponseWriter, r *http.Reque
 	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, http.StatusOK, map[string]any{"payload": payload})
 }
+
+func (s *Server) resolveExecutionProviderCredentialGrant(w http.ResponseWriter, r *http.Request) {
+	executionID, ok := s.pathUUID(w, r, "executionID")
+	if !ok {
+		return
+	}
+	grantID, ok := s.pathUUID(w, r, "grantID")
+	if !ok {
+		return
+	}
+	var input executions.LeaseInput
+	if err := decodeJSON(r, &input); err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	resolved, err := s.credentials.ResolveProviderGrantForExecution(
+		r.Context(), s.executions, mustWorker(r), executionID, grantID, input,
+	)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, resolved)
+}

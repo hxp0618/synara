@@ -42,6 +42,7 @@ import { normalizeRuntimeEventV2 } from "./runtimeEventV2";
 const decodeCommand = Schema.decodeUnknownSync(ProviderHostCommandEnvelope);
 const HOST_BUILD_VERSION = providerHostPackage.version;
 const CLAUDE_AGENT_SDK_VERSION = providerHostPackage.dependencies["@anthropic-ai/claude-agent-sdk"];
+const SUSPEND_TURN_CHECKPOINT_PROTOCOL = "provider-host-suspend-terminal-v1";
 
 export type CodexVersionProbeResult = {
   readonly available: boolean;
@@ -399,7 +400,7 @@ async function executeCommand(
       if (
         command.commandType === "ResumeSession" &&
         !runnerInput.providerResumeCursor?.trim() &&
-        !hasAuthoritativeResumeData(runnerInput.workload)
+        !hasAuthoritativeResumeData(runnerInput.workload, runnerInput.memoryDocuments)
       ) {
         throw new ProtocolFailure({
           code: "session_resume_invalid",
@@ -589,6 +590,45 @@ async function executeCommand(
         ...(providerResumeCursor ? { providerResumeCursor } : {}),
       });
     }
+    case "SuspendTurn": {
+      const activeTurn = requireActiveOperation(state, command.commandType);
+      if (activeTurn.commandType !== "SendTurn") {
+        throw unsupportedActiveTurnCommand(command.commandType);
+      }
+      validateTargetCommandId(command.payload.targetCommandId, activeTurn.commandId);
+      const terminalPromise = state.inFlightByCommandId.get(activeTurn.commandId);
+      if (!terminalPromise) {
+        throw suspendTurnFailure(
+          "SuspendTurn could not observe the active SendTurn terminal confirmation.",
+        );
+      }
+      activeTurn.run.interrupt();
+      const terminal = await terminalPromise;
+      if (!isInterruptedTerminalMessage(terminal)) {
+        const detail =
+          terminal.messageType === "Result"
+            ? "the active SendTurn completed naturally"
+            : `the active SendTurn ended with ${terminal.error.code}`;
+        throw suspendTurnFailure(
+          `SuspendTurn requires an interrupted terminal confirmation, but ${detail}.`,
+        );
+      }
+      const providerResumeCursor = activeTurn.run.getResumeCursor?.()?.trim();
+      if (!providerResumeCursor) {
+        throw suspendTurnFailure(
+          "SuspendTurn requires a non-empty providerResumeCursor after interrupted terminal confirmation.",
+        );
+      }
+      if (state.sessionInput) {
+        state.sessionInput = { ...state.sessionInput, providerResumeCursor };
+      }
+      return resultMessage(command, {
+        quiesced: true,
+        targetCommandId: activeTurn.commandId,
+        checkpointProtocol: SUSPEND_TURN_CHECKPOINT_PROTOCOL,
+        providerResumeCursor,
+      });
+    }
     case "ResolveApproval": {
       const activeTurn = requireActiveOperation(state, command.commandType);
       if (!activeTurn.run.resolveApproval) {
@@ -719,13 +759,25 @@ function validateTargetCommandId(value: unknown, activeCommandId: string): void 
   });
 }
 
-function unsupportedActiveTurnCommand(commandType: "SteerTurn"): ProtocolFailure {
+function unsupportedActiveTurnCommand(commandType: "SteerTurn" | "SuspendTurn"): ProtocolFailure {
   return new ProtocolFailure({
     code: "capability_unsupported",
     message: `${commandType} is not supported by the active Provider runtime.`,
     retryable: false,
     requiresNewExecution: false,
     requiresUserAction: true,
+    canReconstructFromHistory: true,
+    canMoveWorker: true,
+  });
+}
+
+function suspendTurnFailure(message: string): ProtocolFailure {
+  return new ProtocolFailure({
+    code: "provider_unavailable",
+    message,
+    retryable: false,
+    requiresNewExecution: true,
+    requiresUserAction: false,
     canReconstructFromHistory: true,
     canMoveWorker: true,
   });
@@ -959,6 +1011,12 @@ function errorMessage(
     messageType: "Error",
     error,
   };
+}
+
+function isInterruptedTerminalMessage(
+  message: ProviderHostMessageEnvelope,
+): message is Extract<ProviderHostMessageEnvelope, { messageType: "Error" }> {
+  return message.messageType === "Error" && message.error.code === "interrupted";
 }
 
 function messageBase(command: ProviderHostCommand) {

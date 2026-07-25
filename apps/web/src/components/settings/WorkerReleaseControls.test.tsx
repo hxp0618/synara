@@ -35,6 +35,11 @@ const manifests: ReadonlyArray<ControlPlaneWorkerManifest> = [
     },
     workerProtocol: { minimum: 2, maximum: 2 },
     runtimeEvent: { minimum: 2, maximum: 2 },
+    processContainment: {
+      mode: "none",
+      trustState: "none",
+      reasonCode: "no-attestation",
+    },
     providers: [],
   },
   {
@@ -50,6 +55,11 @@ const manifests: ReadonlyArray<ControlPlaneWorkerManifest> = [
     },
     workerProtocol: { minimum: 2, maximum: 2 },
     runtimeEvent: { minimum: 2, maximum: 2 },
+    processContainment: {
+      mode: "none",
+      trustState: "none",
+      reasonCode: "no-attestation",
+    },
     providers: [],
   },
 ];

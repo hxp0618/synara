@@ -902,8 +902,25 @@ func seedWorkspaceCleanupFixture(
 	db *gorm.DB,
 	activeExecution bool,
 ) (executionFixture, persistence.RemoteWorkspace, persistence.WorkspaceMaterialization) {
+	return seedWorkspaceCleanupFixtureWithCleanup(t, db, activeExecution, true)
+}
+
+func seedWorkspaceCleanupFixtureWithoutCleanup(
+	t *testing.T,
+	db *gorm.DB,
+	activeExecution bool,
+) (executionFixture, persistence.RemoteWorkspace, persistence.WorkspaceMaterialization) {
+	return seedWorkspaceCleanupFixtureWithCleanup(t, db, activeExecution, false)
+}
+
+func seedWorkspaceCleanupFixtureWithCleanup(
+	t *testing.T,
+	db *gorm.DB,
+	activeExecution bool,
+	registerCleanup bool,
+) (executionFixture, persistence.RemoteWorkspace, persistence.WorkspaceMaterialization) {
 	t.Helper()
-	fixture := seedExecutionFixture(t, db)
+	fixture := seedExecutionFixtureWithCleanup(t, db, registerCleanup)
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	createdAt := now.Add(-48 * time.Hour)
 	retentionUntil := now.Add(-time.Hour)

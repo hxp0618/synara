@@ -278,6 +278,11 @@ func (s *Service) Fork(
 			}
 		}
 		now := s.now()
+		var absoluteExpiresAt *time.Time
+		if locked.AbsoluteSessionLifetimeSeconds != nil {
+			expiresAt := now.Add(time.Duration(*locked.AbsoluteSessionLifetimeSeconds) * time.Second)
+			absoluteExpiresAt = &expiresAt
+		}
 		strategy := "emulated"
 		forkSequence := locked.LastEventSequence
 		created := persistence.AgentSession{
@@ -287,7 +292,14 @@ func (s *Service) Fork(
 			ProviderCredentialID: credentialID, ExecutionTargetID: target.ID,
 			ProviderResumeCursorState: "absent", ForkSourceSessionID: &sourceSessionID,
 			ForkSourceTurnID: sourceTurnID, ForkSourceEventSequence: &forkSequence, ForkStrategy: &strategy,
-			LastEventSequence: forkSequence, CreatedAt: now, UpdatedAt: now,
+			LastEventSequence: forkSequence, ResourceState: "idle",
+			MeaningfulActivityAt: now, ResourceIdleSince: &now,
+			AbsoluteExpiresAt:              absoluteExpiresAt,
+			WaitingKeepAliveSeconds:        locked.WaitingKeepAliveSeconds,
+			SuspendAfterIdleSeconds:        locked.SuspendAfterIdleSeconds,
+			AbsoluteSessionLifetimeSeconds: cloneOptionalInt(locked.AbsoluteSessionLifetimeSeconds),
+			WorkspaceRetentionDays:         locked.WorkspaceRetentionDays, WarmPoolMode: locked.WarmPoolMode,
+			CreatedAt: now, UpdatedAt: now,
 		}
 		if err := tx.WithContext(ctx).Create(&created).Error; err != nil {
 			return ForkSessionResult{}, problem.Wrap(409, "session_fork_rejected", "The Fork Session could not be created.", err)

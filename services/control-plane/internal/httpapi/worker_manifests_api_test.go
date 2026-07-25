@@ -54,7 +54,7 @@ func TestListWorkerManifestsRouteProjectsOnlySafeManifestFields(t *testing.T) {
 	item := items[0]
 	assertManifestJSONKeys(t, item,
 		"executionTargetId", "manifestId", "workerStatusCounts", "lastHeartbeatAt",
-		"workerBuild", "workerProtocol", "runtimeEvent", "providers",
+		"workerBuild", "workerProtocol", "runtimeEvent", "processContainment", "providers",
 	)
 	var targetID, manifestID uuid.UUID
 	if err := json.Unmarshal(item["executionTargetId"], &targetID); err != nil {
@@ -67,12 +67,13 @@ func TestListWorkerManifestsRouteProjectsOnlySafeManifestFields(t *testing.T) {
 		t.Fatalf("unexpected Target/Manifest IDs: %s %s", targetID, manifestID)
 	}
 
-	var counts, build, workerProtocol, runtimeEvent map[string]json.RawMessage
+	var counts, build, workerProtocol, runtimeEvent, processContainment map[string]json.RawMessage
 	for encoded, destination := range map[string]*map[string]json.RawMessage{
 		"workerStatusCounts": &counts,
 		"workerBuild":        &build,
 		"workerProtocol":     &workerProtocol,
 		"runtimeEvent":       &runtimeEvent,
+		"processContainment": &processContainment,
 	} {
 		if err := json.Unmarshal(item[encoded], destination); err != nil {
 			t.Fatal(err)
@@ -82,6 +83,7 @@ func TestListWorkerManifestsRouteProjectsOnlySafeManifestFields(t *testing.T) {
 	assertManifestJSONKeys(t, build, "version", "gitSha", "imageDigest", "operatingSystem", "architecture")
 	assertManifestJSONKeys(t, workerProtocol, "minimum", "maximum")
 	assertManifestJSONKeys(t, runtimeEvent, "minimum", "maximum")
+	assertManifestJSONKeys(t, processContainment, "mode", "trustState", "reasonCode")
 
 	var providers []map[string]json.RawMessage
 	if err := json.Unmarshal(item["providers"], &providers); err != nil {
@@ -148,6 +150,7 @@ func TestListWorkerManifestsRouteEnforcesAuthenticationActiveTenantAndWorkerRead
 }
 
 type workerManifestHTTPFixture struct {
+	db               *gorm.DB
 	handler          http.Handler
 	cookieName       string
 	tenantID         uuid.UUID
@@ -270,7 +273,7 @@ func newWorkerManifestHTTPFixture(t *testing.T) workerManifestHTTPFixture {
 		t.Fatal(err)
 	}
 	return workerManifestHTTPFixture{
-		handler: server.Handler(), cookieName: cfg.CookieName, tenantID: domain.TenantID,
+		db: store.DB(), handler: server.Handler(), cookieName: cfg.CookieName, tenantID: domain.TenantID,
 		targetID: domain.ExecutionTargetID, workerID: workerID, manifestID: manifestID,
 		ownerToken: ownerToken, readOnlyToken: readOnlyToken, memberToken: memberToken, crossTenantToken: crossTenantToken,
 		sensitiveValues: sensitive,
@@ -334,7 +337,7 @@ func seedWorkerManifestHTTPModels(
 		}
 		if err := db.Create(&persistence.WorkerProviderManifest{
 			WorkerManifestID: manifestID, Provider: provider, SupportTier: supportTier,
-			CompatibilityStatus: compatibilityStatus, ProviderHostMajor: 2, ProviderHostMinor: 1,
+			CompatibilityStatus: compatibilityStatus, ProviderHostMajor: 2, ProviderHostMinor: 2,
 			HostBuildVersion: "host-test", AdapterVersion: "adapter-test",
 			RuntimeKind: runtimeKind, RuntimeName: provider + "-runtime", RuntimeVersion: runtimeVersion,
 			RuntimeAvailable: runtimeAvailable, RuntimeVersionSource: runtimeSource,
@@ -409,4 +412,5 @@ var workerManifestHTTPCapabilityIDs = []string{
 	"read-history", "model-list", "model-switch", "skill-discovery", "skill-mentions",
 	"plugin-discovery", "plugin-mentions", "native-commands", "tool-events", "diff-events", "usage-events",
 	"checkpoint", "credential-injection", "authoritative-history-reconstruction", "worker-migration",
+	"suspend-active-turn",
 }

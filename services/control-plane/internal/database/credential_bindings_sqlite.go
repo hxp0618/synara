@@ -243,6 +243,47 @@ func migrateCredentialBindingsSQLiteSafety(ctx context.Context, db *gorm.DB) err
 		 BEGIN
 		   SELECT RAISE(ABORT, 'Execution Credential Grants are immutable');
 		 END`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_execution_provider_credential_grants_execution
+		 ON execution_provider_credential_grants (tenant_id, execution_id, generation)`,
+		`CREATE INDEX IF NOT EXISTS idx_execution_provider_credential_grants_execution
+		 ON execution_provider_credential_grants (tenant_id, execution_id, generation, id)`,
+		`CREATE INDEX IF NOT EXISTS idx_execution_provider_credential_grants_credential
+		 ON execution_provider_credential_grants (tenant_id, credential_id, credential_version, id)`,
+		`DROP TRIGGER IF EXISTS trg_execution_provider_credential_grants_validate_insert`,
+		`CREATE TRIGGER trg_execution_provider_credential_grants_validate_insert
+		 BEFORE INSERT ON execution_provider_credential_grants
+		 BEGIN
+		   SELECT RAISE(ABORT, 'Execution Provider Credential Grant generation is fenced')
+		   WHERE NEW.generation <= 0 OR NOT EXISTS (
+		     SELECT 1 FROM agent_executions AS execution
+		     WHERE execution.tenant_id = NEW.tenant_id
+		       AND execution.id = NEW.execution_id
+		       AND execution.generation = NEW.generation
+		       AND execution.provider_credential_id_snapshot = NEW.credential_id
+		       AND execution.provider_credential_version_snapshot = NEW.credential_version
+		   );
+		   SELECT RAISE(ABORT, 'Execution Provider Credential Grant Credential is unavailable')
+		   WHERE NOT EXISTS (
+		     SELECT 1 FROM provider_credentials AS credential
+		     WHERE credential.tenant_id = NEW.tenant_id
+		       AND credential.id = NEW.credential_id
+		       AND credential.version = NEW.credential_version
+		       AND credential.revoked_at IS NULL
+		       AND (credential.expires_at IS NULL OR credential.expires_at > CURRENT_TIMESTAMP)
+		   );
+		 END`,
+		`DROP TRIGGER IF EXISTS trg_execution_provider_credential_grants_no_update`,
+		`CREATE TRIGGER trg_execution_provider_credential_grants_no_update
+		 BEFORE UPDATE ON execution_provider_credential_grants
+		 BEGIN
+		   SELECT RAISE(ABORT, 'Execution Provider Credential Grants are immutable');
+		 END`,
+		`DROP TRIGGER IF EXISTS trg_execution_provider_credential_grants_no_delete`,
+		`CREATE TRIGGER trg_execution_provider_credential_grants_no_delete
+		 BEFORE DELETE ON execution_provider_credential_grants
+		 BEGIN
+		   SELECT RAISE(ABORT, 'Execution Provider Credential Grants are immutable');
+		 END`,
 	}
 	for _, statement := range statements {
 		if err := db.WithContext(ctx).Exec(statement).Error; err != nil {

@@ -269,6 +269,13 @@ stay under a unique ownership-marked root. Worker replacement upgrades only the 
 sshd or the host. Cleanup uses product `ssh/revoke`, verifies the target unit/binary is absent, removes only the exact
 ownership-marked runtime, preserves the host and operator identity source, and keeps host/source paths out of reports.
 
+Protected cgroup SSH mode adds stricter host prerequisites before it can count as trusted containment evidence:
+the installed unit must run as `root`, must include `Delegate=yes`, the delegated cgroup-v2 subtree and attestation
+key path must already exist as operator-managed absolute paths, the Provider UID/GID must differ from the supervisor
+UID, and `synara-agentd protected-cgroup-preflight` must succeed on the live host. A release claim must also verify
+that the preflight public key matches the target `processContainmentPolicy`; a local probe without that policy match
+is not signed strict-containment evidence.
+
 The Runner reads the value only when creating the isolated Control Plane Credential, registers it with the output
 redactor before the API call, binds the Credential ID to the real Provider Session, and never persists the variable
 name or secret in reports. Agentd delivers the resolved Credential only through the existing anonymous FD 3 path;
@@ -663,6 +670,16 @@ The aggregate rejects reused runtime identities, fixture runtimes, unlocked/mism
 agentd/Host digests, a changed pinned Host Key in external-host mode, reused Host Keys across disposable machines,
 incomplete product revoke/owned cleanup, non-canonical cases, persisted Credential/source metadata or any Secret
 finding.
+When protected cgroup SSH mode is enabled, the same clean-SHA release evidence also requires a successful live
+`synara-agentd protected-cgroup-preflight` result and an explicit match between its attestation public key and the
+Execution Target `processContainmentPolicy`; otherwise the run is only ordinary SSH Provider evidence.
+Use `ssh_protected_cgroup_gate.py` for that narrow host proof. It refuses to touch any host without
+`--allow-remote-host`, accepts only explicit SSH/service/path inputs, reads only an allowlist of non-secret
+protected-cgroup env keys from the remote `agentd.env`, and requires an active/running systemd MainPID whose executable,
+EnvironmentFile, allowlisted process environment, and cgroup membership bind to those exact inputs. The configured
+cgroup root must be that unit's delegated `ControlGroup`, and the live registration identity must match the supplied
+control-plane projection context. The gate then requires projected `processContainment.trustState=verified` and
+independently re-verifies the signed live preflight attestation against the Target `processContainmentPolicy`.
 It emits `ssh-release-gate.json` and `ssh-release-gate.md`. Unlike Docker/Kubernetes, there is no shared image: each
 child intentionally rebuilds and verifies the same runtime from the clean checkout. The implementation and
 unit/runtime preflight evidence are not a real SSH Provider release pass until dedicated Credentials and a usable
@@ -1182,7 +1199,7 @@ only bounded problem codes or hashes rather than raw response bodies or console 
 
 ## Provider Host Protocol fixture
 
-This directory contains a deterministic Provider Host Protocol 2.1 fixture for the Stage 3 protocol and fault
+This directory contains a deterministic Provider Host Protocol 2.2 fixture for the Stage 3 protocol and fault
 acceptance suite. It is not a substitute for Target acceptance using the built
 `apps/provider-host/dist/index.mjs` and real Codex/Claude adapter paths.
 

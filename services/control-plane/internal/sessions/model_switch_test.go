@@ -247,9 +247,14 @@ func TestSwitchModelRejectsEveryActiveExecutionStatus(t *testing.T) {
 				t.Fatal(err)
 			}
 			if status != "queued" {
+				updates := map[string]any{"status": status}
+				if status == "suspended" {
+					updates["worker_id"] = nil
+					updates["next_recovery_reason"] = "suspend-resume"
+				}
 				if err := fixture.db.Model(&persistence.AgentExecution{}).
 					Where("tenant_id = ? AND turn_id = ?", fixture.tenantID, turn.ID).
-					Update("status", status).Error; err != nil {
+					Updates(updates).Error; err != nil {
 					t.Fatal(err)
 				}
 			}

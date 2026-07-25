@@ -22,6 +22,7 @@ type WorkerManifestProjection struct {
 	WorkerBuild        WorkerManifestBuild          `json:"workerBuild"`
 	WorkerProtocol     WorkerManifestVersionRange   `json:"workerProtocol"`
 	RuntimeEvent       WorkerManifestVersionRange   `json:"runtimeEvent"`
+	ProcessContainment WorkerProcessContainmentView `json:"processContainment"`
 	Providers          []WorkerProviderManifestView `json:"providers"`
 }
 
@@ -42,6 +43,12 @@ type WorkerManifestBuild struct {
 type WorkerManifestVersionRange struct {
 	Minimum int `json:"minimum"`
 	Maximum int `json:"maximum"`
+}
+
+type WorkerProcessContainmentView struct {
+	Mode       string  `json:"mode"`
+	TrustState string  `json:"trustState"`
+	ReasonCode *string `json:"reasonCode,omitempty"`
 }
 
 type WorkerProviderManifestView struct {
@@ -143,10 +150,32 @@ func (s *Service) ListWorkerManifests(
 	for _, provider := range providerModels {
 		providersByManifest[provider.WorkerManifestID] = append(providersByManifest[provider.WorkerManifestID], provider)
 	}
+	targetIDs := make([]uuid.UUID, 0, len(groups))
+	seenTargets := make(map[uuid.UUID]struct{}, len(groups))
+	for _, group := range groups {
+		if _, found := seenTargets[group.ExecutionTargetID]; !found {
+			seenTargets[group.ExecutionTargetID] = struct{}{}
+			targetIDs = append(targetIDs, group.ExecutionTargetID)
+		}
+	}
+	targetModels := make([]persistence.ExecutionTarget, 0, len(targetIDs))
+	if err := s.db.WithContext(ctx).
+		Where("id IN ? AND tenant_id = ?", targetIDs, tenantID).
+		Find(&targetModels).Error; err != nil {
+		return nil, problem.Wrap(500, "worker_manifests_load_failed", "Failed to load Worker Manifest Target policies.", err)
+	}
+	targetByID := make(map[uuid.UUID]persistence.ExecutionTarget, len(targetModels))
+	for _, target := range targetModels {
+		targetByID[target.ID] = target
+	}
 
 	items := make([]WorkerManifestProjection, 0, len(groups))
 	for _, group := range groups {
 		manifest, found := manifestByID[group.ManifestID]
+		if !found {
+			return nil, invalidStoredWorkerManifest()
+		}
+		target, found := targetByID[group.ExecutionTargetID]
 		if !found {
 			return nil, invalidStoredWorkerManifest()
 		}
@@ -155,6 +184,10 @@ func (s *Service) ListWorkerManifests(
 			return nil, problem.Wrap(500, "worker_manifests_load_failed", "Failed to load Worker manifests.", err)
 		}
 		providers, err := projectWorkerProviders(providersByManifest[group.ManifestID])
+		if err != nil {
+			return nil, err
+		}
+		processContainment, err := projectWorkerProcessContainment(manifest, target)
 		if err != nil {
 			return nil, err
 		}
@@ -176,10 +209,57 @@ func (s *Service) ListWorkerManifests(
 			RuntimeEvent: WorkerManifestVersionRange{
 				Minimum: manifest.RuntimeEventMinimum, Maximum: manifest.RuntimeEventMaximum,
 			},
-			Providers: providers,
+			ProcessContainment: processContainment,
+			Providers:          providers,
 		})
 	}
 	return items, nil
+}
+
+func projectWorkerProcessContainment(
+	manifest persistence.WorkerManifest,
+	target persistence.ExecutionTarget,
+) (WorkerProcessContainmentView, error) {
+	view := WorkerProcessContainmentView{Mode: manifest.ProcessContainmentMode, TrustState: "none"}
+	if view.Mode == "" {
+		view.Mode = "none"
+	}
+	if view.Mode == "none" {
+		if manifest.ProcessContainmentSupervisorVersion != nil || manifest.ProcessContainmentProbeVersion != nil ||
+			manifest.ProcessContainmentProbeSHA256 != nil || manifest.ProcessContainmentSupervisorIdentity != nil ||
+			manifest.ProcessContainmentProviderIdentity != nil || manifest.ProcessContainmentTrustMode != "none" ||
+			manifest.ProcessContainmentAttestationKeyID != nil || manifest.ProcessContainmentAttestationKeySHA256 != nil {
+			return WorkerProcessContainmentView{}, invalidStoredWorkerManifest()
+		}
+		view.ReasonCode = stringReference("no-attestation")
+		return view, nil
+	}
+	if !workerManifestSupportsStrictResourceSuspendContainment(manifest) {
+		return WorkerProcessContainmentView{}, invalidStoredWorkerManifest()
+	}
+	if manifest.ProcessContainmentTrustMode == "legacy-untrusted" &&
+		manifest.ProcessContainmentAttestationKeyID == nil && manifest.ProcessContainmentAttestationKeySHA256 == nil {
+		view.TrustState = "untrusted"
+		view.ReasonCode = stringReference("legacy-unverified")
+		return view, nil
+	}
+	if manifest.ProcessContainmentTrustMode != executiontargets.ProcessContainmentTrustSignedV1 ||
+		manifest.ProcessContainmentAttestationKeyID == nil || manifest.ProcessContainmentAttestationKeySHA256 == nil {
+		return WorkerProcessContainmentView{}, invalidStoredWorkerManifest()
+	}
+	policy, err := executiontargets.ParseProcessContainmentPolicy(target.Capabilities)
+	if err != nil {
+		return WorkerProcessContainmentView{}, invalidStoredWorkerManifest()
+	}
+	if policy.TrustMode != executiontargets.ProcessContainmentTrustSignedV1 ||
+		policy.KeyID != *manifest.ProcessContainmentAttestationKeyID ||
+		policy.PublicKeySHA256 != *manifest.ProcessContainmentAttestationKeySHA256 {
+		view.TrustState = "untrusted"
+		view.ReasonCode = stringReference("target-policy-mismatch")
+		return view, nil
+	}
+	view.TrustState = "verified"
+	return view, nil
 }
 
 func workerManifestHeartbeatTime(value sql.NullString) (time.Time, error) {

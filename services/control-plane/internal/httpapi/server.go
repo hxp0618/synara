@@ -20,6 +20,7 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/synara-ai/synara/services/control-plane/internal/artifacts"
+	"github.com/synara-ai/synara/services/control-plane/internal/billing"
 	"github.com/synara-ai/synara/services/control-plane/internal/config"
 	"github.com/synara-ai/synara/services/control-plane/internal/credentialbindings"
 	"github.com/synara-ai/synara/services/control-plane/internal/credentials"
@@ -29,12 +30,16 @@ import (
 	"github.com/synara-ai/synara/services/control-plane/internal/executions"
 	"github.com/synara-ai/synara/services/control-plane/internal/executiontargets"
 	"github.com/synara-ai/synara/services/control-plane/internal/identity"
+	"github.com/synara-ai/synara/services/control-plane/internal/lifecyclepolicy"
+	"github.com/synara-ai/synara/services/control-plane/internal/memories"
 	"github.com/synara-ai/synara/services/control-plane/internal/observability"
 	"github.com/synara-ai/synara/services/control-plane/internal/outbox"
+	"github.com/synara-ai/synara/services/control-plane/internal/placement"
 	"github.com/synara-ai/synara/services/control-plane/internal/problem"
 	"github.com/synara-ai/synara/services/control-plane/internal/projects"
 	"github.com/synara-ai/synara/services/control-plane/internal/quotas"
 	"github.com/synara-ai/synara/services/control-plane/internal/retention"
+	"github.com/synara-ai/synara/services/control-plane/internal/routing"
 	"github.com/synara-ai/synara/services/control-plane/internal/scim"
 	"github.com/synara-ai/synara/services/control-plane/internal/serviceaccounts"
 	"github.com/synara-ai/synara/services/control-plane/internal/sessions"
@@ -70,10 +75,15 @@ type Server struct {
 	targets            *executiontargets.Service
 	sshTargets         *executiontargets.SSHProvisioner
 	artifacts          *artifacts.Service
+	billing            *billing.Service
+	memories           *memories.Service
+	lifecyclePolicies  *lifecyclepolicy.Service
 	quotas             *quotas.Service
 	credentials        *credentials.Service
 	credentialBindings *credentialbindings.Service
 	workerReleases     *workerreleases.Service
+	placement          *placement.Service
+	routing            *routing.Service
 	retention          *retention.Service
 	metrics            *observability.Registry
 	outbox             *outbox.Service
@@ -92,6 +102,17 @@ type Server struct {
 type schemaReadiness interface {
 	Check(context.Context) (database.SchemaStatus, error)
 	CheckWrite(context.Context) error
+}
+
+type Option func(*Server)
+
+func WithBilling(service *billing.Service) Option {
+	return func(server *Server) {
+		if server == nil {
+			return
+		}
+		server.billing = service
+	}
 }
 
 func New(
@@ -115,6 +136,7 @@ func New(
 	scimService *scim.Service,
 	schemaChecker schemaReadiness,
 	logger *slog.Logger,
+	options ...Option,
 ) (*Server, error) {
 	eventStreams, err := eventstream.New(db, eventstream.Config{
 		InstanceID: uuid.NewString(), LeaseTTL: cfg.SSELeaseTTL,
@@ -124,18 +146,32 @@ func New(
 	if err != nil {
 		return nil, err
 	}
+	resourceLifecycleConfig := cfg.ResourceLifecycle
+	if reflect.DeepEqual(resourceLifecycleConfig, lifecyclepolicy.Config{}) {
+		resourceLifecycleConfig = lifecyclepolicy.DefaultConfig(cfg.Platform.Profile)
+	}
+	lifecyclePolicies, err := lifecyclepolicy.NewService(db, resourceLifecycleConfig)
+	if err != nil {
+		return nil, err
+	}
 	server := &Server{
 		config: cfg, db: db, identity: identityService, tenancy: tenancyService,
 		projects: projectService, sessions: sessionService, executions: executionService,
 		targets: executionTargetService, sshTargets: sshProvisioner,
-		artifacts: artifactService, quotas: quotaService,
+		artifacts: artifactService, memories: memories.NewService(db), lifecyclePolicies: lifecyclePolicies,
+		quotas:      quotaService,
 		credentials: credentialService, credentialBindings: credentialbindings.NewService(db, credentialService),
-		workerReleases: workerreleases.NewService(db),
-		retention:      retentionService, metrics: metrics, outbox: outboxService,
+		workerReleases: workerreleases.NewService(db), placement: placement.NewService(db), routing: routing.NewService(db),
+		retention: retentionService, metrics: metrics, outbox: outboxService,
 		enterpriseIdentity: enterpriseIdentityService, serviceAccounts: serviceAccountService,
 		scim: scimService, schema: schemaChecker, logger: logger, eventStreams: eventStreams,
 		sessionEventPoll: cfg.SSEPollInterval, sessionEventBeat: cfg.SSEHeartbeatInterval,
 		sessionEventWrite: cfg.SSEWriteTimeout,
+	}
+	for _, option := range options {
+		if option != nil {
+			option(server)
+		}
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", server.health)
@@ -168,6 +204,11 @@ func New(
 	mux.Handle("POST /v1/workers/executions/{executionID}/complete", server.requireWorker(http.HandlerFunc(server.completeExecution)))
 	mux.Handle("POST /v1/workers/executions/{executionID}/fail", server.requireWorker(http.HandlerFunc(server.failExecution)))
 	mux.Handle("POST /v1/workers/executions/{executionID}/release", server.requireWorker(http.HandlerFunc(server.releaseExecution)))
+	mux.Handle("POST /v1/workers/executions/{executionID}/resource-directives/pull", server.requireWorker(http.HandlerFunc(server.pullExecutionResourceDirective)))
+	mux.Handle("POST /v1/workers/executions/{executionID}/resource-suspend/quiesced", server.requireWorker(http.HandlerFunc(server.markExecutionResourceSuspendQuiesced)))
+	mux.Handle("POST /v1/workers/executions/{executionID}/resource-suspend/checkpoint-ready", server.requireWorker(http.HandlerFunc(server.markExecutionResourceSuspendCheckpointReady)))
+	mux.Handle("POST /v1/workers/executions/{executionID}/resource-suspend/complete", server.requireWorker(http.HandlerFunc(server.completeExecutionResourceSuspend)))
+	mux.Handle("POST /v1/workers/executions/{executionID}/resource-suspend/abort", server.requireWorker(http.HandlerFunc(server.abortExecutionResourceSuspend)))
 	mux.Handle("POST /v1/workers/executions/{executionID}/events", server.requireWorker(http.HandlerFunc(server.appendRuntimeEvent)))
 	mux.Handle("POST /v1/workers/executions/{executionID}/interaction-resolutions/pull", server.requireWorker(http.HandlerFunc(server.pullInteractionResolutions)))
 	mux.Handle("POST /v1/workers/executions/{executionID}/interaction-resolutions/{interactionID}/delivered", server.requireWorker(http.HandlerFunc(server.markInteractionResolutionDelivered)))
@@ -178,7 +219,9 @@ func New(
 	mux.Handle("POST /v1/workers/executions/{executionID}/artifacts", server.requireWorker(http.HandlerFunc(server.createWorkerArtifact)))
 	mux.Handle("POST /v1/workers/executions/{executionID}/artifacts/{artifactID}/complete", server.requireWorker(http.HandlerFunc(server.completeWorkerArtifact)))
 	mux.Handle("POST /v1/workers/executions/{executionID}/workspace/checkpoints/{checkpointID}/artifact/download", server.requireWorker(http.HandlerFunc(server.downloadWorkerCheckpointArtifact)))
+	mux.Handle("POST /v1/workers/executions/{executionID}/memory-revisions/{revisionID}/artifact/download", server.requireWorker(http.HandlerFunc(server.downloadWorkerMemoryArtifact)))
 	mux.Handle("POST /v1/workers/executions/{executionID}/credentials/{credentialID}/resolve", server.requireWorker(http.HandlerFunc(server.resolveExecutionCredential)))
+	mux.Handle("POST /v1/workers/executions/{executionID}/provider-credential-grants/{grantID}/resolve", server.requireWorker(http.HandlerFunc(server.resolveExecutionProviderCredentialGrant)))
 	mux.Handle("POST /v1/workers/executions/{executionID}/credential-grants/{grantID}/resolve", server.requireWorker(http.HandlerFunc(server.resolveExecutionCredentialGrant)))
 	mux.Handle("GET /v1/auth/session", server.requireAuth(http.HandlerFunc(server.getSession)))
 	mux.Handle("POST /v1/auth/logout", server.requireAuth(http.HandlerFunc(server.logout)))
@@ -208,16 +251,34 @@ func New(
 	mux.Handle("POST /v1/tenants/{tenantID}/execution-targets/{executionTargetID}/worker-releases/{releaseRevisionID}/canary", server.requireAuth(http.HandlerFunc(server.startWorkerReleaseCanary)))
 	mux.Handle("POST /v1/tenants/{tenantID}/execution-targets/{executionTargetID}/worker-releases/{releaseRevisionID}/promote", server.requireAuth(http.HandlerFunc(server.promoteWorkerRelease)))
 	mux.Handle("POST /v1/tenants/{tenantID}/execution-targets/{executionTargetID}/worker-releases/{releaseRevisionID}/rollback", server.requireAuth(http.HandlerFunc(server.rollbackWorkerRelease)))
+	mux.Handle("GET /v1/tenants/{tenantID}/execution-targets/{executionTargetID}/worker-pools", server.requireAuth(http.HandlerFunc(server.listWorkerPools)))
+	mux.Handle("POST /v1/tenants/{tenantID}/execution-targets/{executionTargetID}/worker-pools", server.requireAuth(http.HandlerFunc(server.createWorkerPool)))
+	mux.Handle("PATCH /v1/tenants/{tenantID}/execution-targets/{executionTargetID}/worker-pools/{workerPoolID}", server.requireAuth(http.HandlerFunc(server.updateWorkerPool)))
+	mux.Handle("PUT /v1/tenants/{tenantID}/execution-targets/{executionTargetID}/placement-policy", server.requireAuth(http.HandlerFunc(server.updateExecutionPlacementPolicy)))
+	mux.Handle("GET /v1/tenants/{tenantID}/execution-target-groups", server.requireAuth(http.HandlerFunc(server.listExecutionTargetGroups)))
+	mux.Handle("POST /v1/tenants/{tenantID}/execution-target-groups", server.requireAuth(http.HandlerFunc(server.createExecutionTargetGroup)))
+	mux.Handle("POST /v1/tenants/{tenantID}/execution-target-groups/{targetGroupID}/members", server.requireAuth(http.HandlerFunc(server.addExecutionTargetGroupMember)))
+	mux.Handle("PUT /v1/tenants/{tenantID}/execution-targets/{executionTargetID}/health-observation", server.requireAuth(http.HandlerFunc(server.observeExecutionTargetHealth)))
+	mux.Handle("GET /v1/tenants/{tenantID}/location-outages", server.requireAuth(http.HandlerFunc(server.listLocationOutages)))
+	mux.Handle("PUT /v1/tenants/{tenantID}/location-outages", server.requireAuth(http.HandlerFunc(server.observeLocationOutage)))
 	mux.Handle("POST /v1/tenants/{tenantID}/execution-targets", server.requireAuth(http.HandlerFunc(server.createExecutionTarget)))
 	mux.Handle("GET /v1/tenants/{tenantID}/execution-targets/{executionTargetID}", server.requireAuth(http.HandlerFunc(server.getExecutionTarget)))
 	mux.Handle("PATCH /v1/tenants/{tenantID}/execution-targets/{executionTargetID}/provider-policy", server.requireAuth(http.HandlerFunc(server.updateExecutionTargetProviderPolicy)))
+	mux.Handle("PATCH /v1/tenants/{tenantID}/execution-targets/{executionTargetID}/process-containment-policy", server.requireAuth(http.HandlerFunc(server.updateExecutionTargetProcessContainmentPolicy)))
 	mux.Handle("POST /v1/tenants/{tenantID}/execution-targets/{executionTargetID}/ssh/install", server.requireAuth(http.HandlerFunc(server.installSSHExecutionTarget)))
 	mux.Handle("POST /v1/tenants/{tenantID}/execution-targets/{executionTargetID}/ssh/upgrade", server.requireAuth(http.HandlerFunc(server.upgradeSSHExecutionTarget)))
 	mux.Handle("POST /v1/tenants/{tenantID}/execution-targets/{executionTargetID}/ssh/revoke", server.requireAuth(http.HandlerFunc(server.revokeSSHExecutionTarget)))
 	mux.Handle("GET /v1/tenants/{tenantID}/quota", server.requireAuth(http.HandlerFunc(server.getTenantQuota)))
 	mux.Handle("PUT /v1/tenants/{tenantID}/quota", server.requireAuth(http.HandlerFunc(server.putTenantQuota)))
+	mux.Handle("GET /v1/tenants/{tenantID}/billing/tariffs", server.requireAuth(http.HandlerFunc(server.listBillingTariffs)))
+	mux.Handle("POST /v1/tenants/{tenantID}/billing/tariffs", server.requireAuth(http.HandlerFunc(server.createBillingTariff)))
+	mux.Handle("POST /v1/tenants/{tenantID}/billing/imports/{provider}/{externalImportID}", server.requireAuth(http.HandlerFunc(server.triggerBillingImport)))
+	mux.Handle("POST /v1/tenants/{tenantID}/billing/imports/{importID}/reconcile", server.requireAuth(http.HandlerFunc(server.reconcileBillingImport)))
 	mux.Handle("GET /v1/tenants/{tenantID}/retention-policy", server.requireAuth(http.HandlerFunc(server.getRetentionPolicy)))
 	mux.Handle("PUT /v1/tenants/{tenantID}/retention-policy", server.requireAuth(http.HandlerFunc(server.putRetentionPolicy)))
+	mux.Handle("GET /v1/tenants/{tenantID}/resource-lifecycle-policy", server.requireAuth(http.HandlerFunc(server.getTenantResourceLifecyclePolicy)))
+	mux.Handle("PUT /v1/tenants/{tenantID}/resource-lifecycle-policy", server.requireAuth(http.HandlerFunc(server.putTenantResourceLifecyclePolicy)))
+	mux.Handle("POST /v1/tenants/{tenantID}/memory-revisions", server.requireAuth(http.HandlerFunc(server.publishMemoryRevision)))
 	mux.Handle("GET /v1/tenants/{tenantID}/credentials", server.requireAuth(http.HandlerFunc(server.listCredentials)))
 	mux.Handle("POST /v1/tenants/{tenantID}/credentials", server.requireAuth(http.HandlerFunc(server.createCredential)))
 	mux.Handle("POST /v1/tenants/{tenantID}/credentials/{credentialID}/rotate", server.requireAuth(http.HandlerFunc(server.rotateCredential)))
@@ -269,6 +330,8 @@ func New(
 	mux.Handle("GET /v1/projects/{projectID}", server.requireAuth(http.HandlerFunc(server.getProject)))
 	mux.Handle("PATCH /v1/projects/{projectID}", server.requireAuth(http.HandlerFunc(server.updateProject)))
 	mux.Handle("DELETE /v1/projects/{projectID}", server.requireAuth(http.HandlerFunc(server.archiveProject)))
+	mux.Handle("GET /v1/projects/{projectID}/resource-lifecycle-policy", server.requireAuth(http.HandlerFunc(server.getProjectResourceLifecyclePolicy)))
+	mux.Handle("PUT /v1/projects/{projectID}/resource-lifecycle-policy", server.requireAuth(http.HandlerFunc(server.putProjectResourceLifecyclePolicy)))
 	mux.Handle("GET /v1/projects/{projectID}/provider-capabilities", server.requireAuth(http.HandlerFunc(server.projectProviderCapabilities)))
 	mux.Handle("GET /v1/projects/{projectID}/sessions", server.requireAuth(http.HandlerFunc(server.listProjectSessions)))
 	mux.Handle("POST /v1/projects/{projectID}/sessions", server.requireAuth(http.HandlerFunc(server.createSession)))
@@ -279,9 +342,11 @@ func New(
 	mux.Handle("GET /v1/sessions/{sessionID}/events", server.requireAuth(http.HandlerFunc(server.listSessionEvents)))
 	mux.Handle("GET /v1/sessions/{sessionID}/events/stream", server.requireAuth(http.HandlerFunc(server.streamSessionEvents)))
 	mux.Handle("GET /v1/sessions/{sessionID}/interactions", server.requireAuth(http.HandlerFunc(server.listPendingSessionInteractions)))
+	mux.Handle("GET /v1/sessions/{sessionID}/memory-references", server.requireAuth(http.HandlerFunc(server.listEffectiveMemoryReferences)))
 	mux.Handle("POST /v1/sessions/{sessionID}/turns", server.requireAuth(http.HandlerFunc(server.createTurn)))
 	mux.Handle("POST /v1/sessions/{sessionID}/turns/active/steer", server.requireAuth(http.HandlerFunc(server.steerActiveTurn)))
 	mux.Handle("POST /v1/sessions/{sessionID}/turns/active/interrupt", server.requireAuth(http.HandlerFunc(server.interruptActiveTurn)))
+	mux.Handle("POST /v1/sessions/{sessionID}/turns/active/resume", server.requireAuth(http.HandlerFunc(server.resumeActiveTurn)))
 	mux.Handle("POST /v1/sessions/{sessionID}/compact", server.requireAuth(http.HandlerFunc(server.compactSession)))
 	mux.Handle("POST /v1/sessions/{sessionID}/reviews", server.requireAuth(http.HandlerFunc(server.startSessionReview)))
 	mux.Handle("POST /v1/sessions/{sessionID}/rollback", server.requireAuth(http.HandlerFunc(server.rollbackSession)))
@@ -290,6 +355,7 @@ func New(
 	mux.Handle("POST /v1/sessions/{sessionID}/resume", server.requireAuth(http.HandlerFunc(server.resumeSession)))
 	mux.Handle("POST /v1/sessions/{sessionID}/archive", server.requireAuth(http.HandlerFunc(server.archiveSession)))
 	mux.Handle("POST /v1/executions/{executionID}/cancel", server.requireAuth(http.HandlerFunc(server.cancelExecution)))
+	mux.Handle("POST /v1/executions/{executionID}/resume", server.requireAuth(http.HandlerFunc(server.resumeActiveTurnExecution)))
 	mux.Handle("GET /v1/executions/{executionID}/interactions", server.requireAuth(http.HandlerFunc(server.listExecutionInteractions)))
 	mux.Handle("POST /v1/executions/{executionID}/approvals/{requestID}/resolve", server.requireAuth(http.HandlerFunc(server.resolveExecutionApproval)))
 	mux.Handle("POST /v1/executions/{executionID}/user-input/{requestID}/resolve", server.requireAuth(http.HandlerFunc(server.resolveExecutionUserInput)))
@@ -1005,6 +1071,23 @@ func (s *Server) cancelExecution(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, result.StatusCode, result.Value)
 }
 
+func (s *Server) resumeActiveTurnExecution(w http.ResponseWriter, r *http.Request) {
+	executionID, ok := s.pathUUID(w, r, "executionID")
+	if !ok {
+		return
+	}
+	result, err := s.executions.ResumeActiveTurn(
+		r.Context(), mustPrincipal(r), executionID,
+		r.Header.Get("Idempotency-Key"), requestID(r), clientIP(r),
+	)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	setIdempotencyReplayHeader(w, result.Replayed)
+	writeJSON(w, result.StatusCode, result.Value)
+}
+
 func (s *Server) interruptActiveTurn(w http.ResponseWriter, r *http.Request) {
 	sessionID, ok := s.pathUUID(w, r, "sessionID")
 	if !ok {
@@ -1012,6 +1095,23 @@ func (s *Server) interruptActiveTurn(w http.ResponseWriter, r *http.Request) {
 	}
 	result, err := s.executions.RequestInterrupt(
 		r.Context(), mustPrincipal(r), sessionID, r.Header.Get("Idempotency-Key"), requestID(r), clientIP(r),
+	)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	setIdempotencyReplayHeader(w, result.Replayed)
+	writeJSON(w, result.StatusCode, result.Value)
+}
+
+func (s *Server) resumeActiveTurn(w http.ResponseWriter, r *http.Request) {
+	sessionID, ok := s.pathUUID(w, r, "sessionID")
+	if !ok {
+		return
+	}
+	result, err := s.executions.ResumeActiveTurnForSession(
+		r.Context(), mustPrincipal(r), sessionID,
+		r.Header.Get("Idempotency-Key"), requestID(r), clientIP(r),
 	)
 	if err != nil {
 		s.writeError(w, r, err)

@@ -12,7 +12,7 @@ class WorkerManifestTest(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.catalog = json.loads(worker_manifest.default_catalog_path().read_text())
 
-    def test_builds_complete_protocol_v21_manifest_from_shared_catalog(self) -> None:
+    def test_builds_complete_protocol_v22_manifest_from_shared_catalog(self) -> None:
         capabilities = worker_manifest.build_worker_capabilities(
             self.catalog,
             {"providerPolicy": {"experimentalProviders": ["codex", "claudeAgent"]}},
@@ -24,7 +24,7 @@ class WorkerManifestTest(unittest.TestCase):
         self.assertEqual(runtime["workerProtocolMinimum"], 2)
         self.assertEqual(runtime["runtimeEventMaximum"], 2)
         provider_host = capabilities["providerHost"]
-        self.assertEqual(provider_host["protocolVersion"], {"major": 2, "minor": 1})
+        self.assertEqual(provider_host["protocolVersion"], {"major": 2, "minor": 2})
         providers = provider_host["providers"]
         self.assertEqual(list(providers), [entry["provider"] for entry in self.catalog["providers"]])
 

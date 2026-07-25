@@ -1,0 +1,21 @@
+{
+  "billingPeriodStartAt": "2026-07-01T00:00:00Z",
+  "billingPeriodEndAt": "2026-08-01T00:00:00Z",
+  "currencyCode": "USD",
+  "items": [
+    {
+      "externalLineId": "az-json-1",
+      "costInBillingCurrency": "3.0000004",
+      "chargeKind": "request",
+      "resourceId": "/subscriptions/SUB-456/resourceGroups/rg/providers/Microsoft.ApiManagement/service/api-gateway",
+      "region": "westus3"
+    },
+    {
+      "externalLineId": "az-json-2",
+      "costInBillingCurrency": "1.125",
+      "chargeKind": "storage",
+      "resourceId": "/subscriptions/SUB-456/resourceGroups/rg/providers/Microsoft.Compute/disks/cache-disk",
+      "region": "westus3"
+    }
+  ]
+}

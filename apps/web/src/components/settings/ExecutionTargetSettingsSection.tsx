@@ -11,6 +11,7 @@ import {
 import { ExecutionTargetCredentialBindings } from "~/components/settings/ExecutionTargetCredentialBindings";
 import { ExecutionTargetWorkerManagement } from "~/components/settings/ExecutionTargetWorkerManagement";
 import { WorkerReleaseControls } from "~/components/settings/WorkerReleaseControls";
+import { WorkerPoolPlacementControls } from "~/components/settings/WorkerPoolPlacementControls";
 import {
   SettingsListRow,
   SettingsRow,
@@ -390,6 +391,14 @@ export function ExecutionTargetPolicyDisclosure(props: {
               tenantId={props.tenantId}
             />
           ) : null}
+          {props.tenantId && props.target.tenantId !== null ? (
+            <WorkerPoolPlacementControls
+              canManage={props.canManage ?? false}
+              enabled={open}
+              target={props.target}
+              tenantId={props.tenantId}
+            />
+          ) : null}
           {props.tenantId ? (
             <ExecutionTargetWorkerManagement
               canManage={props.canManageWorkers ?? false}
@@ -568,6 +577,10 @@ function ObservedWorkerManifestDetails(props: {
           label="Runtime Event"
           value={formatVersionRange(manifest.runtimeEvent.minimum, manifest.runtimeEvent.maximum)}
         />
+        <ManifestFact
+          label="Process containment"
+          value={formatProcessContainment(manifest.processContainment)}
+        />
       </dl>
       <div className="space-y-2">
         <p className="font-medium text-foreground">Providers</p>
@@ -577,6 +590,14 @@ function ObservedWorkerManifestDetails(props: {
       </div>
     </article>
   );
+}
+
+function formatProcessContainment(
+  containment: ControlPlaneWorkerManifest["processContainment"],
+): string {
+  if (containment.mode === "none") return "Not attested";
+  const mode = containment.mode === "cgroup-v2" ? "Linux cgroup v2" : "Windows Job Object";
+  return containment.trustState === "verified" ? `${mode} · verified` : `${mode} · untrusted`;
 }
 
 function ManifestFact(props: { label: string; value: string; mono?: boolean; dateTime?: string }) {

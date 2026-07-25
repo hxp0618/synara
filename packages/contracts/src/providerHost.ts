@@ -15,7 +15,7 @@ import providerCapabilityCatalog from "./providerCapabilityCatalog.json";
 import { ProviderKind } from "./orchestration";
 import { PROVIDER_RUNTIME_EVENT_VERSION, ProviderRuntimeEventType } from "./providerRuntime";
 
-export const PROVIDER_HOST_PROTOCOL_VERSION = { major: 2, minor: 1 } as const;
+export const PROVIDER_HOST_PROTOCOL_VERSION = { major: 2, minor: 2 } as const;
 export const PROVIDER_HOST_MAX_COMMAND_BYTES = 2 * 1024 * 1024;
 export const PROVIDER_HOST_MAX_MESSAGE_BYTES = 1024 * 1024;
 
@@ -40,6 +40,7 @@ export const PROVIDER_CAPABILITY_IDS = [
   "send-turn",
   "steer-turn",
   "interrupt-turn",
+  "suspend-active-turn",
   "approval",
   "structured-user-input",
   "plan-mode",
@@ -234,6 +235,7 @@ export const PROVIDER_HOST_COMMAND_TYPES = [
   "SendTurn",
   "SteerTurn",
   "InterruptTurn",
+  "SuspendTurn",
   "ResolveApproval",
   "ResolveUserInput",
   "CompactSession",

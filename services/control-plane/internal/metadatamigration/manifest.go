@@ -101,7 +101,7 @@ func Export(ctx context.Context, db *gorm.DB, profile platform.DeploymentProfile
 	}
 	var activeExecutions int64
 	if err := db.WithContext(ctx).Model(&persistence.AgentExecution{}).
-		Where("status IN ?", []string{"leased", "running", "waiting-for-approval", "recovering"}).Count(&activeExecutions).Error; err != nil {
+		Where("status IN ?", []string{"leased", "running", "waiting-for-approval", "recovering", "suspended"}).Count(&activeExecutions).Error; err != nil {
 		return Manifest{}, fmt.Errorf("check active executions: %w", err)
 	}
 	var leases int64

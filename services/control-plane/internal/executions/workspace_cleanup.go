@@ -265,6 +265,9 @@ func (s *Service) recoverWorkspaceCleanupCommandLocked(
 			return false, err
 		}
 	}
+	if err := transitionWorkerAfterWorkspaceCleanupLeaseReleasedLocked(ctx, tx, command, now); err != nil {
+		return false, err
+	}
 	return true, nil
 }
 
@@ -274,6 +277,13 @@ func (s *Service) ClaimWorkspaceCleanup(
 	input WorkspaceCleanupClaimInput,
 	requestID string,
 ) (OperationResult[WorkspaceCleanupClaimResult], error) {
+	workerMode, err := normalizeWorkerMode(worker.WorkerMode)
+	if err != nil {
+		return OperationResult[WorkspaceCleanupClaimResult]{}, problem.Wrap(500, "invalid_worker_mode", "The persisted Worker mode is invalid.", err)
+	}
+	if workerMode != WorkerModeGeneralPool {
+		return OperationResult[WorkspaceCleanupClaimResult]{}, problem.New(409, "worker_mode_cleanup_unsupported", "Only general-pool Workers can claim Workspace cleanup.")
+	}
 	targetID, targetKind, err := normalizeWorkspaceCleanupTarget(worker, input)
 	if err != nil {
 		return OperationResult[WorkspaceCleanupClaimResult]{}, err
@@ -295,11 +305,9 @@ func (s *Service) ClaimWorkspaceCleanup(
 		result := WorkspaceCleanupClaimResult{}
 		replayed := false
 		err = persistence.InTransaction(ctx, s.db, func(tx *gorm.DB) error {
-			var receipt persistence.WorkerRequestReceipt
-			lookupErr := persistence.WithLocking(tx.WithContext(ctx), "UPDATE", "").
-				Where("worker_id = ? AND request_id = ?", worker.ID, requestID).Take(&receipt).Error
-			if err := lockCurrentWorkerIncarnation(ctx, tx, worker); err != nil {
-				return err
+			receipt, lookupErr, lockErr := lockWorkerAndLoadRequestReceipt(ctx, tx, worker, requestID)
+			if lockErr != nil {
+				return lockErr
 			}
 			if lookupErr == nil {
 				if receipt.WorkerIncarnation == worker.Incarnation && receipt.ExpiresAt.After(s.now()) {
@@ -397,6 +405,25 @@ func (s *Service) ClaimWorkspaceCleanup(
 						"leased_at": now, "started_at": nil, "lease_expires_at": expiresAt, "updated_at": now,
 					})
 				if err := expectOne(updated, 409, "workspace_cleanup_claim_conflict", "The Workspace cleanup command was claimed concurrently."); err != nil {
+					return err
+				}
+				if err := transitionWorkerIncarnationFactLocked(
+					ctx, tx, claimWorker, now, workerFactStateActive, true, "",
+				); err != nil {
+					return err
+				}
+				dispatchGeneration := command.DispatchGeneration
+				if err := recordWorkerClaimFactLocked(ctx, tx, workerClaimFactInput{
+					Worker:                    claimWorker,
+					TenantID:                  command.TenantID,
+					ExecutionTargetID:         command.ExecutionTargetID,
+					TargetKind:                command.TargetKind,
+					ClaimKind:                 workerClaimKindWorkspaceCleanup,
+					RequestID:                 requestID,
+					ClaimedAt:                 now,
+					CleanupCommandID:          &command.ID,
+					CleanupDispatchGeneration: &dispatchGeneration,
+				}); err != nil {
 					return err
 				}
 				claim, err := loadWorkspaceCleanupClaim(ctx, tx, command, plainToken, expiresAt)
@@ -552,6 +579,9 @@ func (s *Service) AcknowledgeWorkspaceCleanup(
 		if err := acknowledgeWorkspaceCleanup(ctx, tx, command, now); err != nil {
 			return WorkspaceCleanupState{}, err
 		}
+		if err := transitionWorkerAfterWorkspaceCleanupLeaseReleasedLocked(ctx, tx, command, now); err != nil {
+			return WorkspaceCleanupState{}, err
+		}
 		command.Status = "acknowledged"
 		command.LeaseTokenHash = nil
 		command.DeliveryWorkerID = nil
@@ -640,6 +670,9 @@ func (s *Service) FailWorkspaceCleanup(
 				return WorkspaceCleanupState{}, problem.Wrap(500, "workspace_cleanup_logical_failure_failed", "Failed to record the logical Workspace cleanup failure.", err)
 			}
 		}
+		if err := transitionWorkerAfterWorkspaceCleanupLeaseReleasedLocked(ctx, tx, command, now); err != nil {
+			return WorkspaceCleanupState{}, err
+		}
 		command.Status = status
 		command.LeaseTokenHash = nil
 		command.DeliveryWorkerID = nil
@@ -684,6 +717,9 @@ func (s *Service) ReleaseWorkspaceCleanup(
 				"delivery_available_at": now, "updated_at": now,
 			})
 		if err := expectOne(updated, 409, "workspace_cleanup_lease_fenced", "The Workspace cleanup lease is no longer current."); err != nil {
+			return WorkspaceCleanupState{}, err
+		}
+		if err := transitionWorkerAfterWorkspaceCleanupLeaseReleasedLocked(ctx, tx, command, now); err != nil {
 			return WorkspaceCleanupState{}, err
 		}
 		command.Status = "pending"

@@ -84,6 +84,9 @@ func TestClientAdvertisesWorkerProtocolV2OnRegisterAndHeartbeat(t *testing.T) {
 	if registerInput.ProtocolVersion != 2 {
 		t.Fatalf("register protocolVersion = %d, want Worker Protocol v2", registerInput.ProtocolVersion)
 	}
+	if registerInput.WorkerMode != executions.WorkerModeGeneralPool {
+		t.Fatalf("register workerMode = %q, want %q", registerInput.WorkerMode, executions.WorkerModeGeneralPool)
+	}
 	if heartbeatInput.ProtocolVersion != 2 {
 		t.Fatalf("heartbeat protocolVersion = %d, want Worker Protocol v2", heartbeatInput.ProtocolVersion)
 	}

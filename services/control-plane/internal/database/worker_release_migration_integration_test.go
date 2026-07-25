@@ -263,7 +263,13 @@ func seedWorkerReleaseMigrationBase(t *testing.T, db *gorm.DB) workerReleaseMigr
 	}
 	if err := db.Transaction(func(tx *gorm.DB) error {
 		for _, model := range models {
-			if err := tx.Create(model).Error; err != nil {
+			var err error
+			if manifest, ok := model.(*persistence.WorkerManifest); ok {
+				err = insertPreContainmentWorkerManifest(tx, manifest)
+			} else {
+				err = tx.Create(model).Error
+			}
+			if err != nil {
 				return err
 			}
 		}
@@ -276,10 +282,7 @@ func seedWorkerReleaseMigrationBase(t *testing.T, db *gorm.DB) workerReleaseMigr
 			LeaseSupported: true, FencingSupported: true, AuthTokenHash: secret.HashToken(uuid.NewString()),
 			Status: "online", AdministrativeStatus: "active", RegisteredAt: now, LastHeartbeatAt: now,
 		}
-		return tx.Omit(
-			"WorkerReleaseRevisionID", "WorkerReleaseChannel", "WorkerReleaseStatus",
-			"WorkerReleaseReason", "WorkerReleaseCheckedAt",
-		).Create(&worker).Error
+		return insertPreReleaseWorker(tx, &worker)
 	}); err != nil {
 		t.Fatal(err)
 	}

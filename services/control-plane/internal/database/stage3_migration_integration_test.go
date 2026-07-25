@@ -840,14 +840,20 @@ func TestGitCredentialMigrationEnforcesBindingPurposeScopeAndAvailability(t *tes
 		CreatedBy: userID, Title: "Wrong purpose", Status: "active", Visibility: "private",
 		Provider: "codex", ProviderCredentialID: &gitCredentialID, ExecutionTargetID: targetID,
 	}
-	if err := db.Create(&invalidSession).Error; err == nil {
+	createHistoricalSession := func(session *persistence.AgentSession) error {
+		return db.Select(
+			"id", "tenant_id", "organization_id", "project_id", "created_by", "title",
+			"status", "visibility", "provider", "provider_credential_id", "execution_target_id",
+		).Create(session).Error
+	}
+	if err := createHistoricalSession(&invalidSession); err == nil {
 		t.Fatal("PostgreSQL accepted a Git Credential as an Agent Session Provider Credential")
 	}
 	validSession := invalidSession
 	validSession.ID = uuid.New()
 	validSession.Title = "Valid provider binding"
 	validSession.ProviderCredentialID = &providerCredentialID
-	if err := db.Create(&validSession).Error; err != nil {
+	if err := createHistoricalSession(&validSession); err != nil {
 		t.Fatal(err)
 	}
 	for name, credentialID := range map[string]uuid.UUID{
@@ -1489,7 +1495,8 @@ func seedStage3MigrationState(t *testing.T, db *gorm.DB) stage3MigrationSeed {
 			[]string{"id", "execution_target_id", "target_kind", "cluster_id", "namespace", "pod_name", "version", "protocol_version", "capabilities", "lease_supported", "fencing_supported", "auth_token_hash", "status", "registered_at", "last_heartbeat_at"}},
 		{&persistence.AgentExecution{ID: executionID, TenantID: tenantID, SessionID: sessionID, TurnID: turnID, Attempt: 1, Status: "waiting-for-approval", ExecutionTargetID: targetID, TargetKind: "kubernetes", WorkerID: &workerID, Generation: 1, RequestedBy: userID, QueuedAt: now, StartedAt: &now},
 			[]string{"id", "tenant_id", "session_id", "turn_id", "attempt", "status", "execution_target_id", "target_kind", "worker_id", "generation", "requested_by", "queued_at", "started_at"}},
-		{&persistence.WorkerLease{ExecutionID: executionID, TenantID: tenantID, WorkerID: workerID, Generation: 1, LeaseTokenHash: []byte("migration-lease-token"), AcquiredAt: now, HeartbeatAt: now, ExpiresAt: now.Add(time.Hour)}, nil},
+		{&persistence.WorkerLease{ExecutionID: executionID, TenantID: tenantID, WorkerID: workerID, Generation: 1, LeaseTokenHash: []byte("migration-lease-token"), AcquiredAt: now, HeartbeatAt: now, ExpiresAt: now.Add(time.Hour)},
+			[]string{"execution_id", "tenant_id", "worker_id", "generation", "lease_token_hash", "acquired_at", "heartbeat_at", "expires_at"}},
 		{&persistence.SessionEvent{TenantID: tenantID, OrganizationID: organizationID, ProjectID: projectID, SessionID: sessionID, Sequence: 1, EventID: uuid.New(), EventVersion: 1, EventType: "turn.created", ActorType: "user", ActorID: &userID, ExecutionID: &executionID, Payload: map[string]any{"inputText": "Continue"}, OccurredAt: now}, nil},
 		{&persistence.ExecutionInteraction{ID: interactionID, TenantID: tenantID, ExecutionID: executionID, SessionID: sessionID, WorkerID: workerID, Generation: 1, RequestID: "approval-migration", Kind: "approval", Status: "resolved", Payload: map[string]any{"summary": "Run"}, Resolution: map[string]any{"decision": "accept"}, RequestedAt: now, ResolvedAt: &resolvedAt, ResolvedBy: &userID},
 			[]string{"id", "tenant_id", "execution_id", "session_id", "worker_id", "generation", "request_id", "kind", "status", "payload", "resolution", "requested_at", "resolved_at", "resolved_by"}},

@@ -15,6 +15,7 @@ import { ExecutionTargetSettingsSection } from "~/components/settings/ExecutionT
 import { tenantWorkersQueryKey } from "~/components/settings/ExecutionTargetWorkerManagement";
 import { TenantQuotaSettingsSection } from "~/components/settings/TenantQuotaSettingsSection";
 import { TenantRetentionSettingsSection } from "~/components/settings/TenantRetentionSettingsSection";
+import { TenantLifecyclePolicySettingsSection } from "~/components/settings/TenantLifecyclePolicySettingsSection";
 import { TenantAuditSettingsSection } from "~/components/settings/TenantAuditSettingsSection";
 import { TenantIdentitySettingsSection } from "~/components/settings/TenantIdentitySettingsSection";
 import { TenantServiceAccountSettingsSection } from "~/components/settings/TenantServiceAccountSettingsSection";
@@ -220,6 +221,9 @@ function AuthenticatedTenantPanel() {
   const [createdInvitation, setCreatedInvitation] = useState<TenantInvitation | null>(null);
 
   const {
+    canReadProjects,
+    canCreateProject,
+    canUpdateProject,
     canReadMembers,
     canManageMembers,
     canReadExecutionTargets,
@@ -228,6 +232,8 @@ function AuthenticatedTenantPanel() {
     canManageQuota,
     canReadRetention,
     canManageRetention,
+    canReadLifecycle,
+    canManageLifecycle,
     canReadAudit,
     canManageCredentials,
     canReadIdentity,
@@ -367,6 +373,15 @@ function AuthenticatedTenantPanel() {
         <TenantRetentionSettingsSection
           key={`retention-${activeTenant.id}`}
           canManage={canManageRetention}
+          tenantId={activeTenant.id}
+        />
+      ) : null}
+
+      {canReadLifecycle && controlPlane.profile?.resourceLifecyclePolicy ? (
+        <TenantLifecyclePolicySettingsSection
+          key={`lifecycle-${activeTenant.id}`}
+          canManage={canManageLifecycle}
+          config={controlPlane.profile.resourceLifecyclePolicy}
           tenantId={activeTenant.id}
         />
       ) : null}
@@ -534,8 +549,11 @@ function AuthenticatedTenantPanel() {
             />
           ) : null}
           <ProjectSessionSettingsSection
+            canManageProjectLifecycle={canUpdateProject}
+            canReadProjects={canReadProjects}
             credentials={credentialsQuery.data?.items ?? []}
             executionTargets={executionTargetsQuery.data?.items ?? []}
+            resourceLifecycleConfig={controlPlane.profile?.resourceLifecyclePolicy ?? null}
             tenantId={activeTenant.id}
             userId={controlPlane.session!.user.userId}
             organizations={controlPlane.organizations.filter(

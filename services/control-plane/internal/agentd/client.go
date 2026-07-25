@@ -16,6 +16,7 @@ import (
 	"path"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 
@@ -66,8 +67,9 @@ func NewClient(cfg Config) *Client {
 func (c *Client) Register(ctx context.Context, cfg Config) (executions.RegisteredWorker, error) {
 	var output executions.RegisteredWorker
 	headers, err := c.doJSONResponse(ctx, http.MethodPost, "/v1/workers/register", c.registrationToken, "", executions.RegisterWorkerInput{
-		ExecutionTargetID: cfg.ExecutionTargetID, TargetKind: string(cfg.TargetKind),
-		ClusterID: cfg.ClusterID, Namespace: cfg.Namespace, PodName: cfg.PodName, InstanceUID: cfg.InstanceUID,
+		ExecutionTargetID: cfg.ExecutionTargetID, TargetKind: string(cfg.TargetKind), WorkerMode: effectiveWorkerMode(cfg),
+		AssignedExecutionID: cfg.AssignedExecutionID,
+		ClusterID:           cfg.ClusterID, Namespace: cfg.Namespace, PodName: cfg.PodName, InstanceUID: cfg.InstanceUID,
 		Version: cfg.Version, ProtocolVersion: executions.WorkerProtocolVersion,
 		Capabilities: cfg.Capabilities, LeaseSupported: true, FencingSupported: true,
 	}, &output)
@@ -282,10 +284,32 @@ func (c *Client) ResolveCredential(
 	return output, err
 }
 
-func (c *Client) Renew(ctx context.Context, executionID uuid.UUID, lease executions.Lease) error {
-	return c.executionRequest(ctx, executionID, "renew", executions.RenewLeaseInput{LeaseInput: executions.LeaseInput{
+func (c *Client) ResolveProviderCredentialGrant(
+	ctx context.Context,
+	executionID, grantID uuid.UUID,
+	lease executions.Lease,
+) (RunnerCredential, error) {
+	var output RunnerCredential
+	err := c.doJSON(
+		ctx,
+		http.MethodPost,
+		executionPath(executionID, "provider-credential-grants/"+grantID.String()+"/resolve"),
+		c.workerToken,
+		uuid.NewString(),
+		executions.LeaseInput{
+			TenantID: lease.TenantID, Generation: lease.Generation, LeaseToken: lease.LeaseToken,
+		},
+		&output,
+	)
+	return output, err
+}
+
+func (c *Client) Renew(ctx context.Context, executionID uuid.UUID, lease executions.Lease) (executions.Lease, error) {
+	var output executions.Lease
+	err := c.executionRequest(ctx, executionID, "renew", executions.RenewLeaseInput{LeaseInput: executions.LeaseInput{
 		TenantID: lease.TenantID, Generation: lease.Generation, LeaseToken: lease.LeaseToken,
-	}}, nil)
+	}}, &output)
+	return output, err
 }
 
 func (c *Client) AppendEvent(ctx context.Context, executionID uuid.UUID, lease executions.Lease, message RunnerMessage) error {
@@ -481,14 +505,151 @@ func (c *Client) Fail(ctx context.Context, executionID uuid.UUID, lease executio
 }
 
 func (c *Client) Release(ctx context.Context, executionID uuid.UUID, lease executions.Lease, reason string) error {
+	return c.release(ctx, executionID, lease, reason, false)
+}
+
+func (c *Client) ReleaseAfterQuiescedResourceSuspend(
+	ctx context.Context,
+	executionID uuid.UUID,
+	lease executions.Lease,
+	reason string,
+) error {
+	return c.release(ctx, executionID, lease, reason, true)
+}
+
+func (c *Client) release(
+	ctx context.Context,
+	executionID uuid.UUID,
+	lease executions.Lease,
+	reason string,
+	preserveInteractionResolutions bool,
+) error {
 	input := executions.ReleaseLeaseInput{
 		LeaseInput: executions.LeaseInput{TenantID: lease.TenantID, Generation: lease.Generation, LeaseToken: lease.LeaseToken},
-		Reason:     reason,
+		Reason:     reason, PreserveInteractionResolutions: preserveInteractionResolutions,
 	}
-	requestID := executionLifecycleRequestID(executionID, lease, "release", reason)
+	requestDiscriminator := reason
+	if preserveInteractionResolutions {
+		requestDiscriminator += ":preserve-interaction-resolutions"
+	}
+	requestID := executionLifecycleRequestID(executionID, lease, "release", requestDiscriminator)
 	return retryCheckpointOperation(ctx, func() error {
 		return c.doJSON(
 			ctx, http.MethodPost, executionPath(executionID, "release"), c.workerToken, requestID, input, nil,
+		)
+	})
+}
+
+func (c *Client) PullResourceDirective(
+	ctx context.Context,
+	executionID uuid.UUID,
+	lease executions.Lease,
+) (*executions.ResourceDirective, error) {
+	var output struct {
+		Directive *executions.ResourceDirective `json:"directive"`
+	}
+	err := c.doJSON(
+		ctx, http.MethodPost, executionPath(executionID, "resource-directives/pull"),
+		c.workerToken, uuid.NewString(), executions.PullResourceDirectiveInput{LeaseInput: executions.LeaseInput{
+			TenantID: lease.TenantID, Generation: lease.Generation, LeaseToken: lease.LeaseToken,
+		}}, &output,
+	)
+	return output.Directive, err
+}
+
+func (c *Client) CompleteResourceSuspend(
+	ctx context.Context,
+	executionID uuid.UUID,
+	lease executions.Lease,
+	directive executions.ResourceDirective,
+	checkpointStatus string,
+) error {
+	input := executions.CompleteResourceSuspendInput{
+		LeaseInput: executions.LeaseInput{
+			TenantID: lease.TenantID, Generation: lease.Generation, LeaseToken: lease.LeaseToken,
+		},
+		SuspendAttemptID: directive.SuspendAttemptID, CheckpointStatus: checkpointStatus,
+	}
+	requestID := executionLifecycleRequestID(executionID, lease, "resource-suspend-complete", directive.SuspendAttemptID.String()+":"+checkpointStatus)
+	return retryCheckpointOperation(ctx, func() error {
+		return c.doJSON(
+			ctx, http.MethodPost, executionPath(executionID, "resource-suspend/complete"),
+			c.workerToken, requestID, input, nil,
+		)
+	})
+}
+
+func (c *Client) MarkResourceSuspendCheckpointReady(
+	ctx context.Context,
+	executionID uuid.UUID,
+	lease executions.Lease,
+	directive executions.ResourceDirective,
+	checkpointStatus string,
+) (executions.ResourceSuspendCheckpointReadyReceipt, error) {
+	input := executions.MarkResourceSuspendCheckpointReadyInput{
+		LeaseInput: executions.LeaseInput{
+			TenantID: lease.TenantID, Generation: lease.Generation, LeaseToken: lease.LeaseToken,
+		},
+		SuspendAttemptID: directive.SuspendAttemptID, CheckpointStatus: checkpointStatus,
+	}
+	requestID := executionLifecycleRequestID(
+		executionID, lease, "resource-suspend-checkpoint-ready",
+		directive.SuspendAttemptID.String()+":"+checkpointStatus,
+	)
+	var output executions.ResourceSuspendCheckpointReadyReceipt
+	err := retryCheckpointOperation(ctx, func() error {
+		return c.doJSON(
+			ctx, http.MethodPost, executionPath(executionID, "resource-suspend/checkpoint-ready"),
+			c.workerToken, requestID, input, &output,
+		)
+	})
+	return output, err
+}
+
+func (c *Client) MarkResourceSuspendQuiesced(
+	ctx context.Context,
+	executionID uuid.UUID,
+	lease executions.Lease,
+	directive executions.ResourceDirective,
+) (executions.ResourceSuspendQuiesceReceipt, error) {
+	input := executions.MarkResourceSuspendQuiescedInput{
+		LeaseInput: executions.LeaseInput{
+			TenantID: lease.TenantID, Generation: lease.Generation, LeaseToken: lease.LeaseToken,
+		},
+		SuspendAttemptID: directive.SuspendAttemptID,
+	}
+	requestID := executionLifecycleRequestID(
+		executionID, lease, "resource-suspend-quiesced", directive.SuspendAttemptID.String(),
+	)
+	var output executions.ResourceSuspendQuiesceReceipt
+	err := retryCheckpointOperation(ctx, func() error {
+		return c.doJSON(
+			ctx, http.MethodPost, executionPath(executionID, "resource-suspend/quiesced"),
+			c.workerToken, requestID, input, &output,
+		)
+	})
+	return output, err
+}
+
+func (c *Client) AbortResourceSuspend(
+	ctx context.Context,
+	executionID uuid.UUID,
+	lease executions.Lease,
+	directive executions.ResourceDirective,
+	failureCode, failureMessage string,
+) error {
+	input := executions.AbortResourceSuspendInput{
+		LeaseInput: executions.LeaseInput{
+			TenantID: lease.TenantID, Generation: lease.Generation, LeaseToken: lease.LeaseToken,
+		},
+		SuspendAttemptID: directive.SuspendAttemptID,
+		FailureCode:      failureCode, FailureMessage: failureMessage,
+	}
+	requestID := executionLifecycleRequestID(executionID, lease, "resource-suspend-abort", directive.SuspendAttemptID.String()+":"+failureCode)
+	return retryCheckpointOperation(ctx, func() error {
+		return c.doJSON(
+			ctx, http.MethodPost, executionPath(executionID, "resource-suspend/abort"),
+			c.workerToken, requestID, input, nil,
 		)
 	})
 }
@@ -880,6 +1041,10 @@ func retryCheckpointOperation(ctx context.Context, operation func() error) error
 	for attempt := 0; attempt < 3; attempt++ {
 		if err := operation(); err != nil {
 			lastErr = err
+			var problem *controlPlaneProblem
+			if errors.As(err, &problem) && problem.Status >= 400 && problem.Status < 500 {
+				break
+			}
 			if ctx.Err() != nil {
 				break
 			}
@@ -952,6 +1117,84 @@ func (c *Client) DownloadWorkspaceCheckpointArtifact(
 		return "", nil, errors.New("Workspace Checkpoint Artifact size or SHA-256 verification failed")
 	}
 	return path, cleanup, nil
+}
+
+func (c *Client) DownloadMemoryArtifact(
+	ctx context.Context,
+	executionID uuid.UUID,
+	lease executions.Lease,
+	reference executions.RecoveryMemoryReference,
+) (MemoryDocument, error) {
+	var grant artifacts.DownloadGrant
+	err := c.doJSON(
+		ctx, http.MethodPost,
+		executionPath(executionID, "memory-revisions/"+reference.RevisionID.String()+"/artifact/download"),
+		c.workerToken, memoryRequestID(executionID, lease, reference.RevisionID),
+		executions.LeaseInput{
+			TenantID: lease.TenantID, Generation: lease.Generation, LeaseToken: lease.LeaseToken,
+		}, &grant,
+	)
+	if err != nil {
+		return MemoryDocument{}, err
+	}
+	if grant.Artifact.ID != reference.ArtifactID || grant.Artifact.SizeBytes == nil ||
+		grant.Artifact.SHA256 == nil || *grant.Artifact.SHA256 != reference.SHA256 ||
+		grant.Artifact.ContentType == nil || reference.SizeBytes < 0 ||
+		reference.SizeBytes > executions.MaximumRecoveryMemoryArtifactBytes ||
+		*grant.Artifact.SizeBytes != reference.SizeBytes {
+		return MemoryDocument{}, errors.New("Agent Memory Artifact grant does not match the frozen Recovery Bundle reference")
+	}
+	contentType, _, err := mime.ParseMediaType(*grant.Artifact.ContentType)
+	contentType = strings.ToLower(strings.TrimSpace(contentType))
+	if err != nil || (contentType != "text/plain" && contentType != "text/markdown" && contentType != "application/json") {
+		return MemoryDocument{}, errors.New("Agent Memory Artifact content type is unsupported")
+	}
+	if contentType != reference.MediaType {
+		return MemoryDocument{}, errors.New("Agent Memory Artifact grant does not match the frozen Recovery Bundle reference")
+	}
+	downloadURL, err := c.resolveURL(grant.URL)
+	if err != nil {
+		return MemoryDocument{}, err
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, downloadURL.String(), nil)
+	if err != nil {
+		return MemoryDocument{}, err
+	}
+	response, err := c.uploadHTTP.Do(request)
+	if err != nil {
+		return MemoryDocument{}, fmt.Errorf("download Agent Memory Artifact: %w", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return MemoryDocument{}, responseError(response)
+	}
+	hash := sha256.New()
+	var payload bytes.Buffer
+	written, copyErr := io.Copy(
+		io.MultiWriter(&payload, hash),
+		io.LimitReader(response.Body, reference.SizeBytes+1),
+	)
+	if copyErr != nil {
+		return MemoryDocument{}, copyErr
+	}
+	if written != reference.SizeBytes || hex.EncodeToString(hash.Sum(nil)) != reference.SHA256 {
+		return MemoryDocument{}, errors.New("Agent Memory Artifact size or SHA-256 verification failed")
+	}
+	if !utf8.Valid(payload.Bytes()) {
+		return MemoryDocument{}, errors.New("Agent Memory Artifact must contain valid UTF-8")
+	}
+	return MemoryDocument{
+		Scope: reference.Scope, ScopeID: reference.ScopeID, MemoryKey: reference.MemoryKey,
+		RevisionID: reference.RevisionID, ArtifactID: reference.ArtifactID, SHA256: reference.SHA256,
+		ContentType: contentType, Content: payload.String(),
+	}, nil
+}
+
+func memoryRequestID(executionID uuid.UUID, lease executions.Lease, revisionID uuid.UUID) string {
+	digest := sha256.Sum256([]byte(strings.Join([]string{
+		executionID.String(), fmt.Sprintf("%d", lease.Generation), revisionID.String(), "memory-download",
+	}, "\x00")))
+	return "memory-download-" + hex.EncodeToString(digest[:16])
 }
 
 func checkpointRequestID(

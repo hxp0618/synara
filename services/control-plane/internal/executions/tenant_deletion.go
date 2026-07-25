@@ -15,7 +15,7 @@ import (
 	"github.com/synara-ai/synara/services/control-plane/internal/sessions"
 )
 
-var nonterminalExecutionStatuses = []string{"queued", "recovering", "leased", "running", "waiting-for-approval"}
+var nonterminalExecutionStatuses = []string{"queued", "recovering", "leased", "running", "waiting-for-approval", "suspended"}
 
 func (s *Service) PrepareTenantDeletion(
 	ctx context.Context,

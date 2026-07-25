@@ -470,6 +470,89 @@ func TestRunnerProviderHostV2DeliversDurableInterruptDuringSend(t *testing.T) {
 	}
 }
 
+func TestRunnerProviderHostV2DeliversDurableSuspendDuringSend(t *testing.T) {
+	t.Setenv("GO_WANT_PROVIDER_HOST_HELPER", "1")
+	t.Setenv("PROVIDER_HOST_TEST_MODE", "suspend")
+	commandLog := filepath.Join(t.TempDir(), "commands.log")
+	exitMarker := filepath.Join(t.TempDir(), "provider-stopped")
+	t.Setenv("PROVIDER_HOST_TEST_COMMAND_LOG", commandLog)
+	t.Setenv("PROVIDER_HOST_TEST_EXIT_MARKER", exitMarker)
+
+	input := providerHostV2TestInput(t)
+	controls := make(chan RunnerControl, 1)
+	done := make(chan error, 1)
+	markedDelivered := false
+	acknowledgedQuiesced := false
+	acknowledgedCursor := ""
+	acknowledgedTarget := ""
+	acknowledgedProtocol := ""
+	result, err := providerHostV2TestRunner().RunControlled(
+		context.Background(), input, nil, nil, controls,
+		func(_ context.Context, message RunnerMessage) error {
+			if message.Type == "progress" {
+				controls <- RunnerControl{
+					Command: RunnerControlCommand{
+						Provider: "codex", CommandType: "SuspendTurn", CommandID: "suspend:durable",
+						Payload: map[string]any{
+							"turnId": input.Workload.TurnID.String(), "suspendAttemptId": uuid.NewString(),
+						},
+					},
+					MarkDelivered: func(context.Context) error {
+						markedDelivered = true
+						return nil
+					},
+					Acknowledge: func(_ context.Context, payload map[string]any) error {
+						acknowledgedQuiesced, _ = payload["quiesced"].(bool)
+						acknowledgedCursor, _ = payload["providerResumeCursor"].(string)
+						acknowledgedTarget, _ = payload["targetCommandId"].(string)
+						acknowledgedProtocol, _ = payload["checkpointProtocol"].(string)
+						return nil
+					},
+					Done: done,
+				}
+			}
+			return nil
+		},
+	)
+	if result.Output != nil {
+		t.Fatalf("unexpected suspended Runner result %#v", result)
+	}
+	suspended, ok := runnerSuspendedTerminal(err)
+	if !ok || suspended.TargetCommandID == "" || suspended.CheckpointProtocol != runnerSuspendCheckpointProtocol {
+		t.Fatalf("unexpected durable suspend err=%v suspended=%#v", err, suspended)
+	}
+	if !markedDelivered || !acknowledgedQuiesced || acknowledgedCursor != "cursor-suspended" ||
+		acknowledgedTarget != suspended.TargetCommandID ||
+		acknowledgedProtocol != runnerSuspendCheckpointProtocol {
+		t.Fatalf(
+			"durable suspend delivery was incomplete: delivered=%t quiesced=%t cursor=%q target=%q protocol=%q",
+			markedDelivered,
+			acknowledgedQuiesced,
+			acknowledgedCursor,
+			acknowledgedTarget,
+			acknowledgedProtocol,
+		)
+	}
+	select {
+	case controlErr := <-done:
+		if controlErr != nil {
+			t.Fatalf("suspend control failed: %v", controlErr)
+		}
+	default:
+		t.Fatal("suspend control completion was not reported")
+	}
+	commands, err := os.ReadFile(commandLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(commands) != "Describe\nStartSession\nSendTurn\nSuspendTurn\n" {
+		t.Fatalf("unexpected suspend command sequence %q", commands)
+	}
+	if _, err := os.Stat(exitMarker); err != nil {
+		t.Fatalf("Provider Host was not fully stopped before return: %v", err)
+	}
+}
+
 func TestRunnerProviderHostV2DeliversDurableSteerDuringSend(t *testing.T) {
 	t.Setenv("GO_WANT_PROVIDER_HOST_HELPER", "1")
 	t.Setenv("PROVIDER_HOST_TEST_MODE", "steer")
@@ -543,8 +626,8 @@ func TestRunnerProviderHostV2InterruptsProviderBeforeHostShutdown(t *testing.T) 
 			return nil
 		},
 	)
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("expected cancelled Runner after graceful interrupt, got %v", err)
+	if err != context.Canceled {
+		t.Fatalf("expected a pure cancellation after graceful Provider quiesce, got %v", err)
 	}
 	commands, err := os.ReadFile(commandLog)
 	if err != nil {
@@ -552,6 +635,28 @@ func TestRunnerProviderHostV2InterruptsProviderBeforeHostShutdown(t *testing.T) 
 	}
 	if string(commands) != "Describe\nStartSession\nSendTurn\nInterruptTurn\n" {
 		t.Fatalf("Provider was not interrupted before Host shutdown: %q", commands)
+	}
+}
+
+func TestRunnerProviderHostV2PreservesResidualQuiesceFailure(t *testing.T) {
+	t.Setenv("GO_WANT_PROVIDER_HOST_HELPER", "1")
+	t.Setenv("PROVIDER_HOST_TEST_MODE", "interrupt-active-error")
+	ctx, cancel := context.WithCancel(context.Background())
+
+	_, err := providerHostV2TestRunner().Run(
+		ctx, providerHostV2TestInput(t), nil,
+		func(_ context.Context, message RunnerMessage) error {
+			if message.Type == "progress" {
+				cancel()
+			}
+			return nil
+		},
+	)
+	if !errors.Is(err, context.Canceled) || err == context.Canceled {
+		t.Fatalf("Provider quiesce failure did not retain both cancellation and residual error: %v", err)
+	}
+	if runnerFailureCode(err) != "internal_error" {
+		t.Fatalf("Provider quiesce residual code = %q, want internal_error: %v", runnerFailureCode(err), err)
 	}
 }
 
@@ -1070,6 +1175,7 @@ const (
 	providerHostTestHelperArgument     = "--synara-provider-host-test-helper"
 	providerHostTestModeArgument       = "--synara-provider-host-test-mode"
 	providerHostTestCommandLogArgument = "--synara-provider-host-test-command-log"
+	providerHostTestExitMarkerArgument = "--synara-provider-host-test-exit-marker"
 	providerHostTestExpectedEnvArg     = "--synara-provider-host-test-expected-env"
 )
 
@@ -1082,6 +1188,9 @@ func providerHostV2TestCommand() []string {
 	}
 	if commandLog := os.Getenv("PROVIDER_HOST_TEST_COMMAND_LOG"); commandLog != "" {
 		command = append(command, providerHostTestCommandLogArgument, commandLog)
+	}
+	if exitMarker := os.Getenv("PROVIDER_HOST_TEST_EXIT_MARKER"); exitMarker != "" {
+		command = append(command, providerHostTestExitMarkerArgument, exitMarker)
 	}
 	for _, name := range append(
 		[]string{"PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "TERM"},
@@ -1191,7 +1300,7 @@ func TestProviderHostV2HelperProcess(t *testing.T) {
 		}
 	}
 	for _, name := range []string{
-		"GO_WANT_PROVIDER_HOST_HELPER", "PROVIDER_HOST_TEST_MODE", "PROVIDER_HOST_TEST_COMMAND_LOG",
+		"GO_WANT_PROVIDER_HOST_HELPER", "PROVIDER_HOST_TEST_MODE", "PROVIDER_HOST_TEST_COMMAND_LOG", "PROVIDER_HOST_TEST_EXIT_MARKER",
 		"SYNARA_PROVIDER_HOST_BUILD_VERSION",
 		"SECRET", "HOST_SECRET", "SYNARA_HOST_SECRET", "SYNARA_AUTH_TOKEN", "SYNARA_WORKER_REGISTRATION_TOKEN",
 		"SYNARA_AGENTD_ASSIGNED_EXECUTION_ID", "SYNARA_LEASE_TOKEN", "SYNARA_CONTROL_PLANE_URL",
@@ -1348,7 +1457,8 @@ func TestProviderHostV2HelperProcess(t *testing.T) {
 				}, nil)
 				continue
 			}
-			if mode == "interrupt" || mode == "steer" {
+			if mode == "interrupt" || mode == "interrupt-active-error" || mode == "steer" ||
+				mode == "suspend" || mode == "suspend-hang" {
 				copy := command
 				pendingSend = &copy
 				emitProviderHostTestMessage(encoder, command, "Progress", map[string]any{"ready": true}, nil)
@@ -1359,6 +1469,14 @@ func TestProviderHostV2HelperProcess(t *testing.T) {
 					fmt.Fprintln(os.Stderr, err)
 					os.Exit(2)
 				}
+				continue
+			}
+			if mode == "progress-complete" {
+				emitProviderHostTestMessage(encoder, command, "Progress", map[string]any{"ready": true}, nil)
+				time.Sleep(150 * time.Millisecond)
+				emitProviderHostTestMessage(encoder, command, "Result", map[string]any{
+					"output": map[string]any{"text": "done"}, "providerResumeCursor": "cursor-next",
+				}, nil)
 				continue
 			}
 			eventPayload := map[string]any{
@@ -1422,8 +1540,30 @@ func TestProviderHostV2HelperProcess(t *testing.T) {
 				"output": map[string]any{"text": "steered"}, "providerResumeCursor": "cursor-steered",
 			}, nil)
 			pendingSend = nil
+		case "SuspendTurn":
+			if (mode != "suspend" && mode != "suspend-hang") || pendingSend == nil ||
+				command.Payload["targetCommandId"] != pendingSend.CommandID {
+				fmt.Fprintln(os.Stderr, "unexpected turn suspend")
+				os.Exit(2)
+			}
+			if mode == "suspend-hang" {
+				continue
+			}
+			no := false
+			yes := true
+			emitProviderHostTestMessage(encoder, *pendingSend, "Error", nil, &providerHostWireError{
+				Code: "cancelled", Message: "Provider turn was suspended", Retryable: &no,
+				RequiresNewExecution: &no, RequiresUserAction: &no,
+				CanReconstructFromHistory: &yes, CanMoveWorker: &yes,
+			})
+			emitProviderHostTestMessage(encoder, command, "Result", map[string]any{
+				"quiesced": true, "targetCommandId": pendingSend.CommandID,
+				"checkpointProtocol":   runnerSuspendCheckpointProtocol,
+				"providerResumeCursor": "cursor-suspended",
+			}, nil)
+			pendingSend = nil
 		case "InterruptTurn":
-			if mode != "interrupt" || pendingSend == nil || command.Payload["targetCommandId"] != pendingSend.CommandID {
+			if (mode != "interrupt" && mode != "interrupt-active-error" && mode != "interaction") || pendingSend == nil || command.Payload["targetCommandId"] != pendingSend.CommandID {
 				fmt.Fprintln(os.Stderr, "unexpected turn interrupt")
 				os.Exit(2)
 			}
@@ -1432,8 +1572,14 @@ func TestProviderHostV2HelperProcess(t *testing.T) {
 			}, nil)
 			no := false
 			yes := true
+			activeCode := "interrupted"
+			activeMessage := "Provider turn was interrupted"
+			if mode == "interrupt-active-error" {
+				activeCode = "internal_error"
+				activeMessage = "Provider failed while quiescing"
+			}
 			emitProviderHostTestMessage(encoder, *pendingSend, "Error", nil, &providerHostWireError{
-				Code: "interrupted", Message: "Provider turn was interrupted", Retryable: &no,
+				Code: activeCode, Message: activeMessage, Retryable: &no,
 				RequiresNewExecution: &no, RequiresUserAction: &no,
 				CanReconstructFromHistory: &yes, CanMoveWorker: &yes,
 			})
@@ -1446,6 +1592,12 @@ func TestProviderHostV2HelperProcess(t *testing.T) {
 	if err := scanner.Err(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
+	}
+	if exitMarker := providerHostTestArgument(providerHostTestExitMarkerArgument); exitMarker != "" {
+		if err := os.WriteFile(exitMarker, []byte("stopped\n"), 0o600); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(2)
+		}
 	}
 	os.Exit(0)
 }

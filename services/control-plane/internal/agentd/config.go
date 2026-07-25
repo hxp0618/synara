@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -14,38 +15,45 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/synara-ai/synara/services/control-plane/internal/executions"
 	"github.com/synara-ai/synara/services/control-plane/internal/platform"
 	"github.com/synara-ai/synara/services/control-plane/internal/providercatalog"
 	"github.com/synara-ai/synara/services/control-plane/internal/validation"
 )
 
 type Config struct {
-	ControlPlaneURL       *url.URL
-	RegistrationToken     string
-	ExecutionTargetID     uuid.UUID
-	AssignedExecutionID   *uuid.UUID
-	TargetKind            platform.ExecutionTargetKind
-	ClusterID             string
-	Namespace             string
-	PodName               string
-	InstanceUID           string
-	Version               string
-	BuildGitSHA           string
-	ImageDigest           string
-	WorkerImageManifest   *workerImageManifest
-	Capabilities          map[string]any
-	ExperimentalProviders []string
-	RunnerCommand         []string
-	RunnerProtocol        RunnerProtocol
-	WorkspaceRoot         string
-	GitCacheRoot          string
-	PollInterval          time.Duration
-	HeartbeatInterval     time.Duration
-	LeaseRenewInterval    time.Duration
-	DrainTimeout          time.Duration
-	RequestTimeout        time.Duration
-	ArtifactTimeout       time.Duration
-	RunnerMessageBytes    int
+	ControlPlaneURL              *url.URL
+	RegistrationToken            string
+	RegistrationTokenFile        string
+	ExecutionTargetID            uuid.UUID
+	AssignedExecutionID          *uuid.UUID
+	WorkerMode                   string
+	TargetKind                   platform.ExecutionTargetKind
+	ClusterID                    string
+	Namespace                    string
+	PodName                      string
+	InstanceUID                  string
+	Version                      string
+	BuildGitSHA                  string
+	ImageDigest                  string
+	WorkerImageManifest          *workerImageManifest
+	Capabilities                 map[string]any
+	ExperimentalProviders        []string
+	RunnerCommand                []string
+	RunnerProtocol               RunnerProtocol
+	CgroupV2Root                 string
+	CgroupV2ProviderIdentity     *ProtectedCgroupIdentity
+	CgroupV2Attestation          *ProtectedCgroupAttestationConfig
+	ProcessContainmentCapability map[string]any
+	WorkspaceRoot                string
+	GitCacheRoot                 string
+	PollInterval                 time.Duration
+	HeartbeatInterval            time.Duration
+	LeaseRenewInterval           time.Duration
+	DrainTimeout                 time.Duration
+	RequestTimeout               time.Duration
+	ArtifactTimeout              time.Duration
+	RunnerMessageBytes           int
 }
 
 var stage3ProviderNames = providercatalog.ProviderNames()
@@ -72,12 +80,34 @@ func LoadConfig() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	cgroupV2Root, err := parseCgroupV2Root(os.Getenv("SYNARA_AGENTD_CGROUP_V2_ROOT"))
+	if err != nil {
+		return Config{}, err
+	}
+	cgroupV2ProviderIdentity, err := parseProtectedCgroupProviderIdentity(
+		cgroupV2Root,
+		os.Getenv("SYNARA_AGENTD_CGROUP_V2_PROVIDER_UID"),
+		os.Getenv("SYNARA_AGENTD_CGROUP_V2_PROVIDER_GID"),
+	)
+	if err != nil {
+		return Config{}, err
+	}
+	cgroupV2Attestation, err := parseProtectedCgroupAttestationConfig(
+		cgroupV2Root,
+		cgroupV2ProviderIdentity,
+		os.Getenv("SYNARA_AGENTD_CGROUP_V2_ATTESTATION_KEY_ID"),
+		os.Getenv("SYNARA_AGENTD_CGROUP_V2_ATTESTATION_PRIVATE_KEY_FILE"),
+	)
+	if err != nil {
+		return Config{}, err
+	}
 	capabilities := map[string]any{}
 	if raw := strings.TrimSpace(os.Getenv("SYNARA_AGENTD_CAPABILITIES_JSON")); raw != "" {
 		if err := json.Unmarshal([]byte(raw), &capabilities); err != nil || capabilities == nil {
 			return Config{}, errors.New("SYNARA_AGENTD_CAPABILITIES_JSON must be a JSON object")
 		}
 	}
+	delete(capabilities, resourceSuspendContainmentCapabilityKey)
 	if err := validateWorkerImageBuildFeatureFlagReservation(capabilities); err != nil {
 		return Config{}, err
 	}
@@ -129,9 +159,25 @@ func LoadConfig() (Config, error) {
 		return Config{}, errors.New("SYNARA_AGENTD_INSTANCE_UID is invalid")
 	}
 	instanceUID = parsedInstanceUID.String()
+	registrationToken := strings.TrimSpace(os.Getenv("SYNARA_WORKER_REGISTRATION_TOKEN"))
+	registrationTokenFile := strings.TrimSpace(os.Getenv("SYNARA_WORKER_REGISTRATION_TOKEN_FILE"))
+	if registrationToken != "" && registrationTokenFile != "" {
+		return Config{}, errors.New("configure only one of SYNARA_WORKER_REGISTRATION_TOKEN and SYNARA_WORKER_REGISTRATION_TOKEN_FILE")
+	}
+	if registrationTokenFile != "" {
+		if targetKind != platform.TargetKubernetes || !filepath.IsAbs(registrationTokenFile) {
+			return Config{}, errors.New("SYNARA_WORKER_REGISTRATION_TOKEN_FILE must be an absolute path for a Kubernetes worker")
+		}
+		contents, readErr := os.ReadFile(filepath.Clean(registrationTokenFile))
+		if readErr != nil {
+			return Config{}, fmt.Errorf("read SYNARA_WORKER_REGISTRATION_TOKEN_FILE: %w", readErr)
+		}
+		registrationToken = strings.TrimSpace(string(contents))
+	}
 	cfg := Config{
-		ControlPlaneURL: parsedURL, RegistrationToken: strings.TrimSpace(os.Getenv("SYNARA_WORKER_REGISTRATION_TOKEN")),
-		ExecutionTargetID: targetID, TargetKind: targetKind,
+		ControlPlaneURL: parsedURL, RegistrationToken: registrationToken,
+		RegistrationTokenFile: registrationTokenFile,
+		ExecutionTargetID:     targetID, TargetKind: targetKind,
 		ClusterID: envDefault("SYNARA_AGENTD_CLUSTER_ID", "local"), Namespace: envDefault("SYNARA_AGENTD_NAMESPACE", "default"),
 		PodName: envDefault("SYNARA_AGENTD_INSTANCE_ID", hostname()), InstanceUID: instanceUID,
 		Version: version, BuildGitSHA: buildGitSHA,
@@ -139,7 +185,10 @@ func LoadConfig() (Config, error) {
 		WorkerImageManifest: workerImageManifest,
 		Capabilities:        capabilities, ExperimentalProviders: experimentalProviders,
 		RunnerCommand: runnerCommand, RunnerProtocol: runnerProtocol,
-		WorkspaceRoot: workspaceRoot, GitCacheRoot: gitCacheRoot,
+		CgroupV2Root:             cgroupV2Root,
+		CgroupV2ProviderIdentity: cgroupV2ProviderIdentity,
+		CgroupV2Attestation:      cgroupV2Attestation,
+		WorkspaceRoot:            workspaceRoot, GitCacheRoot: gitCacheRoot,
 	}
 	if raw := strings.TrimSpace(os.Getenv("SYNARA_AGENTD_ASSIGNED_EXECUTION_ID")); raw != "" {
 		assignedExecutionID, parseErr := uuid.Parse(raw)
@@ -148,8 +197,15 @@ func LoadConfig() (Config, error) {
 		}
 		cfg.AssignedExecutionID = &assignedExecutionID
 	}
+	cfg.WorkerMode, err = resolveConfiguredWorkerMode(
+		os.Getenv("SYNARA_AGENTD_WORKER_MODE"),
+		cfg.AssignedExecutionID,
+	)
+	if err != nil {
+		return Config{}, err
+	}
 	if cfg.RegistrationToken == "" {
-		return Config{}, errors.New("SYNARA_WORKER_REGISTRATION_TOKEN is required")
+		return Config{}, errors.New("a Worker registration token or token file is required")
 	}
 	if cfg.PollInterval, err = durationEnv("SYNARA_AGENTD_POLL_INTERVAL", time.Second); err != nil {
 		return Config{}, err
@@ -179,6 +235,143 @@ func LoadConfig() (Config, error) {
 		return Config{}, errors.New("agentd image digest is invalid")
 	}
 	return cfg, nil
+}
+
+func effectiveWorkerMode(cfg Config) string {
+	mode, err := resolveConfiguredWorkerMode(cfg.WorkerMode, cfg.AssignedExecutionID)
+	if err != nil {
+		if cfg.AssignedExecutionID != nil {
+			return executions.WorkerModeExecutionPinned
+		}
+		return executions.WorkerModeGeneralPool
+	}
+	return mode
+}
+
+func resolveConfiguredWorkerMode(raw string, assignedExecutionID *uuid.UUID) (string, error) {
+	mode := strings.TrimSpace(raw)
+	if mode == "" {
+		if assignedExecutionID != nil {
+			return executions.WorkerModeExecutionPinned, nil
+		}
+		return executions.WorkerModeGeneralPool, nil
+	}
+	switch mode {
+	case executions.WorkerModeExecutionPinned:
+		if assignedExecutionID == nil {
+			return "", errors.New("SYNARA_AGENTD_WORKER_MODE=execution-pinned requires SYNARA_AGENTD_ASSIGNED_EXECUTION_ID")
+		}
+	case executions.WorkerModeWarmPool, executions.WorkerModeGeneralPool:
+		if assignedExecutionID != nil {
+			return "", fmt.Errorf("SYNARA_AGENTD_WORKER_MODE=%s cannot be combined with SYNARA_AGENTD_ASSIGNED_EXECUTION_ID", mode)
+		}
+	default:
+		return "", errors.New("SYNARA_AGENTD_WORKER_MODE must be execution-pinned, warm-pool, or general-pool")
+	}
+	return mode, nil
+}
+
+func parseCgroupV2Root(value string) (string, error) {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return "", nil
+	}
+	if runtime.GOOS != "linux" {
+		return "", errors.New("SYNARA_AGENTD_CGROUP_V2_ROOT is only supported on Linux workers")
+	}
+	if !filepath.IsAbs(trimmed) {
+		return "", errors.New("SYNARA_AGENTD_CGROUP_V2_ROOT must be an absolute path")
+	}
+	normalized := filepath.Clean(trimmed)
+	if normalized == string(filepath.Separator) {
+		return "", errors.New("SYNARA_AGENTD_CGROUP_V2_ROOT must point at a delegated subtree, not /")
+	}
+	return normalized, nil
+}
+
+func parseProtectedCgroupProviderIdentity(
+	cgroupV2Root, uidValue, gidValue string,
+) (*ProtectedCgroupIdentity, error) {
+	uidValue = strings.TrimSpace(uidValue)
+	gidValue = strings.TrimSpace(gidValue)
+	if uidValue == "" && gidValue == "" {
+		return nil, nil
+	}
+	if runtime.GOOS != "linux" {
+		return nil, errors.New(
+			"SYNARA_AGENTD_CGROUP_V2_PROVIDER_UID and SYNARA_AGENTD_CGROUP_V2_PROVIDER_GID are only supported on Linux workers",
+		)
+	}
+	if uidValue == "" || gidValue == "" {
+		return nil, errors.New(
+			"configure both SYNARA_AGENTD_CGROUP_V2_PROVIDER_UID and SYNARA_AGENTD_CGROUP_V2_PROVIDER_GID together",
+		)
+	}
+	if strings.TrimSpace(cgroupV2Root) == "" {
+		return nil, errors.New(
+			"SYNARA_AGENTD_CGROUP_V2_PROVIDER_UID and SYNARA_AGENTD_CGROUP_V2_PROVIDER_GID require SYNARA_AGENTD_CGROUP_V2_ROOT",
+		)
+	}
+	uid, err := parseProtectedCgroupIdentityComponent("SYNARA_AGENTD_CGROUP_V2_PROVIDER_UID", uidValue)
+	if err != nil {
+		return nil, err
+	}
+	gid, err := parseProtectedCgroupIdentityComponent("SYNARA_AGENTD_CGROUP_V2_PROVIDER_GID", gidValue)
+	if err != nil {
+		return nil, err
+	}
+	return &ProtectedCgroupIdentity{UID: uid, GID: gid}, nil
+}
+
+func parseProtectedCgroupAttestationConfig(
+	cgroupV2Root string,
+	providerIdentity *ProtectedCgroupIdentity,
+	keyIDValue, keyPathValue string,
+) (*ProtectedCgroupAttestationConfig, error) {
+	keyIDValue = strings.TrimSpace(keyIDValue)
+	keyPathValue = strings.TrimSpace(keyPathValue)
+	if keyIDValue == "" && keyPathValue == "" {
+		return nil, nil
+	}
+	if runtime.GOOS != "linux" {
+		return nil, errors.New(
+			"SYNARA_AGENTD_CGROUP_V2_ATTESTATION_KEY_ID and SYNARA_AGENTD_CGROUP_V2_ATTESTATION_PRIVATE_KEY_FILE are only supported on Linux workers",
+		)
+	}
+	if keyIDValue == "" || keyPathValue == "" {
+		return nil, errors.New(
+			"configure both SYNARA_AGENTD_CGROUP_V2_ATTESTATION_KEY_ID and SYNARA_AGENTD_CGROUP_V2_ATTESTATION_PRIVATE_KEY_FILE together",
+		)
+	}
+	if strings.TrimSpace(cgroupV2Root) == "" || providerIdentity == nil {
+		return nil, errors.New(
+			"SYNARA_AGENTD_CGROUP_V2_ATTESTATION_KEY_ID and SYNARA_AGENTD_CGROUP_V2_ATTESTATION_PRIVATE_KEY_FILE require protected cgroup Provider identity configuration",
+		)
+	}
+	if !filepath.IsAbs(keyPathValue) {
+		return nil, errors.New("SYNARA_AGENTD_CGROUP_V2_ATTESTATION_PRIVATE_KEY_FILE must be an absolute path")
+	}
+	keyIDValue = strings.TrimSpace(keyIDValue)
+	if len(keyIDValue) == 0 || len(keyIDValue) > 160 {
+		return nil, errors.New("SYNARA_AGENTD_CGROUP_V2_ATTESTATION_KEY_ID length is invalid")
+	}
+	for index := 0; index < len(keyIDValue); index++ {
+		if keyIDValue[index] < 0x21 || keyIDValue[index] > 0x7e {
+			return nil, errors.New("SYNARA_AGENTD_CGROUP_V2_ATTESTATION_KEY_ID must use safe ASCII without whitespace")
+		}
+	}
+	return &ProtectedCgroupAttestationConfig{
+		KeyID:          keyIDValue,
+		PrivateKeyPath: filepath.Clean(keyPathValue),
+	}, nil
+}
+
+func parseProtectedCgroupIdentityComponent(name, value string) (uint32, error) {
+	parsed, err := strconv.ParseUint(strings.TrimSpace(value), 10, 32)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be a uint32: %w", name, err)
+	}
+	return uint32(parsed), nil
 }
 
 func parseExperimentalProviders(capabilities map[string]any) ([]string, error) {

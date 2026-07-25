@@ -30,9 +30,18 @@ func (s *Service) ResolveForExecution(
 	}
 	var credential persistence.ProviderCredential
 	err := persistence.InTransaction(ctx, s.db, func(tx *gorm.DB) error {
-		execution, err := executionService.AuthorizeLease(ctx, tx, worker, executionID, leaseInput)
+		execution, err := executionService.AuthorizeLeaseWithinSessionLifetime(ctx, tx, worker, executionID, leaseInput)
 		if err != nil {
 			return err
+		}
+		var providerGrantCount int64
+		if err := tx.WithContext(ctx).Model(&persistence.ExecutionProviderCredentialGrant{}).
+			Where("tenant_id = ? AND execution_id = ? AND generation = ?", execution.TenantID, execution.ID, execution.Generation).
+			Count(&providerGrantCount).Error; err != nil {
+			return problem.Wrap(500, "provider_credential_grant_load_failed", "Provider Credential Grant could not be checked.", err)
+		}
+		if providerGrantCount != 0 {
+			return problem.New(409, "provider_credential_grant_required", "This Execution generation only permits opaque Provider Credential Grant resolution.")
 		}
 		if execution.ProviderCredentialIDSnapshot == nil || *execution.ProviderCredentialIDSnapshot != credentialID {
 			return problem.New(404, "credential_not_found", "Provider Credential not found.")

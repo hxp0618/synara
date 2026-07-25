@@ -78,10 +78,29 @@ Reliable at-least-once delivery and audited dead-letter replay are defined in
 `docs/contracts/outbox-delivery-v1.md`.
 Provider Credential envelope encryption and Worker retrieval are defined in
 `docs/contracts/provider-credential-v1.md`.
+Global Target routing, DR readiness, and tenant-scoped Region/Cluster evacuation authority are defined in
+`docs/contracts/global-target-routing-dr-v1.md`.
 Enterprise identity, retention, Provider Host, observability, and Worker image boundaries
 are documented under `docs/contracts` and `docs/worker-image.md`.
 Session/Execution transitions, API idempotency, Cancel races, and persisted Approval/User Input are
 defined in `docs/contracts/session-execution-state-machine.md`.
+
+## Billing runtime
+
+Cloud cost accounting is defined in `docs/contracts/cloud-cost-accounting-v1.md`.
+
+- `billing_provider_tariffs` is a shared global provider catalog. Rows are append-only and immutable after insert.
+- `GET /v1/tenants/{tenantID}/billing/tariffs` requires the caller's active tenant plus `billing.manage`.
+  `POST` additionally requires that exact Tenant to match the platform-owned
+  `SYNARA_BILLING_TARIFF_OPERATOR_TENANT_ID`; non-Personal deployments fail closed when it is unset. Personal
+  deployments bind the catalog to their bootstrapped Tenant automatically.
+- Provider/region/currency mutations are serialized both by the service and by a PostgreSQL transaction advisory
+  lock inside the overlap trigger. SQLite enforces the same insert-time non-overlap boundary.
+- Actual invoice imports and reconciliation remain tenant-owned through
+  `POST /v1/tenants/{tenantID}/billing/imports/{provider}/{externalImportID}` and
+  `POST /v1/tenants/{tenantID}/billing/imports/{importID}/reconcile`.
+- Shared-target allocation and unavailable per-period request deltas remain fail-closed; the control plane does not
+  invent cloud cost history that the Worker facts do not provide.
 
 ## Production authentication
 
@@ -95,6 +114,9 @@ are defined in `docs/contracts/production-authentication-policy.md`. In particul
 - Authenticated Provider Cursors default to a 720-hour maximum age through
   `SYNARA_PROVIDER_CURSOR_MAX_AGE`; expired Cursors are quarantined and the Worker receives
   authoritative Session history instead. Values must be positive and no greater than 8760 hours.
+- Provider Credential access uses a short Worker/Generation-bound authorization configured by
+  `SYNARA_PROVIDER_CREDENTIAL_ACCESS_TTL` (default `5m`). Only committed semantic Session activity
+  refreshes its authority; browser presence, Worker heartbeat, and Lease renewal do not count as activity.
 - Tenant administrators can revoke a member's active-Tenant sessions through the audited
   `POST /v1/tenants/{tenantID}/members/{userID}/revoke-sessions` endpoint.
 

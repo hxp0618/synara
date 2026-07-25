@@ -269,6 +269,10 @@ func TestReregisteredWorkerFencesAuthenticatedHeartbeatAndLeaseRequests(t *testi
 		LeaseInput: leaseInput,
 	}, "renew-stale-worker-incarnation")
 	assertWorkerIncarnationFenced("renew lease", err)
+	_, err = service.Renew(context.Background(), currentWorker, fixture.ExecutionID, RenewLeaseInput{
+		LeaseInput: leaseInput,
+	}, "renew-inherited-lease-from-previous-incarnation")
+	assertWorkerIncarnationFenced("inherit previous incarnation lease", err)
 
 	var workerAfter persistence.WorkerInstance
 	if err := db.Where("id = ?", currentWorker.ID).Take(&workerAfter).Error; err != nil {
@@ -2565,6 +2569,14 @@ func integrationService(t *testing.T, db *gorm.DB) *Service {
 }
 
 func seedExecutionFixture(t *testing.T, db *gorm.DB) executionFixture {
+	return seedExecutionFixtureWithCleanup(t, db, true)
+}
+
+func seedExecutionFixtureWithoutCleanup(t *testing.T, db *gorm.DB) executionFixture {
+	return seedExecutionFixtureWithCleanup(t, db, false)
+}
+
+func seedExecutionFixtureWithCleanup(t *testing.T, db *gorm.DB, registerCleanup bool) executionFixture {
 	t.Helper()
 	now := time.Now().UTC()
 	userID := uuid.New()
@@ -2636,7 +2648,7 @@ func seedExecutionFixture(t *testing.T, db *gorm.DB) executionFixture {
 	}); err != nil {
 		t.Fatalf("seed execution fixture: %v", err)
 	}
-	if db.Dialector.Name() == "postgres" {
+	if registerCleanup && db.Dialector.Name() == "postgres" {
 		t.Cleanup(func() {
 			if err := cleanupFixture(db, tenantID); err != nil {
 				t.Errorf("cleanup execution fixture: %v", err)
@@ -2694,8 +2706,10 @@ func registerManifestTestWorker(
 	podName string,
 ) persistence.WorkerInstance {
 	t.Helper()
+	capabilities := workerManifestTestCapabilities()
+	addWorkerManifestTestContainmentEvidence(capabilities)
 	return registerTestWorkerWithCapabilities(
-		t, service, targetID, targetKind, podName, workerManifestTestCapabilities(),
+		t, service, targetID, targetKind, podName, capabilities,
 	)
 }
 
@@ -2708,10 +2722,22 @@ func registerTestWorkerWithCapabilities(
 	capabilities map[string]any,
 ) persistence.WorkerInstance {
 	t.Helper()
+	parsedTargetKind, err := platform.ParseExecutionTargetKind(targetKind)
+	if err != nil {
+		t.Fatal(err)
+	}
+	instanceUID := uuid.NewString()
+	fullPodName := podName + "-" + uuid.NewString()
+	if runtimeCapability, ok := capabilities["workerRuntime"].(map[string]any); ok && runtimeCapability["processContainment"] != nil {
+		signWorkerManifestTestContainment(t, capabilities, workerManifestRegistrationContext{
+			ExecutionTargetID: targetID, TargetKind: parsedTargetKind, InstanceUID: instanceUID,
+			ClusterID: "test-cluster", Namespace: "default", PodName: fullPodName,
+		})
+	}
 	registered, err := service.Register(context.Background(), RegisterWorkerInput{
 		ExecutionTargetID: targetID, TargetKind: targetKind,
-		InstanceUID: uuid.NewString(),
-		ClusterID:   "test-cluster", Namespace: "default", PodName: podName + "-" + uuid.NewString(),
+		InstanceUID: instanceUID,
+		ClusterID:   "test-cluster", Namespace: "default", PodName: fullPodName,
 		Version: "worker-test", ProtocolVersion: WorkerProtocolVersion, Capabilities: capabilities,
 		LeaseSupported: true, FencingSupported: true,
 	})
@@ -2753,6 +2779,10 @@ func cleanupWorkers(t *testing.T, db *gorm.DB, workerIDs ...uuid.UUID) {
 			}
 			if err := tx.Where("delivery_worker_id IN ? OR worker_id IN ?", workerIDs, workerIDs).
 				Delete(&persistence.ExecutionInteraction{}).Error; err != nil {
+				return err
+			}
+			if err := tx.Where("worker_id IN ?", workerIDs).
+				Delete(&persistence.ExecutionSuspendAttempt{}).Error; err != nil {
 				return err
 			}
 			if err := tx.Where("delivery_worker_id IN ?", workerIDs).
@@ -2808,6 +2838,24 @@ func cleanupWorkers(t *testing.T, db *gorm.DB, workerIDs ...uuid.UUID) {
 
 func cleanupFixture(db *gorm.DB, tenantID uuid.UUID) error {
 	return db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Exec(
+			"ALTER TABLE execution_recovery_bundles DISABLE TRIGGER trg_execution_recovery_bundles_immutable",
+		).Error; err != nil {
+			return err
+		}
+		if err := tx.Model(&persistence.ExecutionRecoveryBundle{}).Where("tenant_id = ?", tenantID).
+			Update("previous_bundle_id", nil).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("tenant_id = ?", tenantID).
+			Delete(&persistence.ExecutionRecoveryBundle{}).Error; err != nil {
+			return err
+		}
+		if err := tx.Exec(
+			"ALTER TABLE execution_recovery_bundles ENABLE TRIGGER trg_execution_recovery_bundles_immutable",
+		).Error; err != nil {
+			return err
+		}
 		if err := tx.Model(&persistence.AgentSession{}).Where("tenant_id = ?", tenantID).
 			Updates(map[string]any{
 				"provider_resume_cursor_encrypted": nil, "provider_resume_cursor_state": providerCursorStateAbsent,
@@ -2846,6 +2894,20 @@ func cleanupFixture(db *gorm.DB, tenantID uuid.UUID) error {
 		).Error; err != nil {
 			return err
 		}
+		if err := tx.Exec(
+			"ALTER TABLE execution_provider_credential_grants DISABLE TRIGGER trg_execution_provider_credential_grants_no_delete",
+		).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("tenant_id = ?", tenantID).
+			Delete(&persistence.ExecutionProviderCredentialGrant{}).Error; err != nil {
+			return err
+		}
+		if err := tx.Exec(
+			"ALTER TABLE execution_provider_credential_grants ENABLE TRIGGER trg_execution_provider_credential_grants_no_delete",
+		).Error; err != nil {
+			return err
+		}
 		if err := tx.Where("tenant_id = ?", tenantID).
 			Delete(&persistence.ExecutionCredentialGrant{}).Error; err != nil {
 			return err
@@ -2871,7 +2933,7 @@ func cleanupFixture(db *gorm.DB, tenantID uuid.UUID) error {
 		}
 		models := []any{
 			&persistence.WorkerLease{}, &persistence.SessionEvent{}, &persistence.OutboxMessage{},
-			&persistence.APIIdempotencyKey{}, &persistence.ExecutionInteraction{}, &persistence.ExecutionControlCommand{},
+			&persistence.APIIdempotencyKey{}, &persistence.ExecutionInteraction{}, &persistence.ExecutionSuspendAttempt{}, &persistence.ExecutionControlCommand{},
 			&persistence.WorkspaceCleanupCommand{}, &persistence.WorkspaceMaterialization{},
 			&persistence.WorkspaceCheckpoint{}, &persistence.Artifact{},
 			&persistence.TenantQuota{}, &persistence.AgentExecution{}, &persistence.RemoteWorkspace{}, &persistence.AgentTurn{},

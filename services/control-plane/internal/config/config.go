@@ -2,8 +2,10 @@ package config
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/netip"
 	"net/url"
 	"os"
@@ -12,76 +14,84 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
+
+	"github.com/synara-ai/synara/services/control-plane/internal/billing"
+	"github.com/synara-ai/synara/services/control-plane/internal/lifecyclepolicy"
 	"github.com/synara-ai/synara/services/control-plane/internal/platform"
 	"github.com/synara-ai/synara/services/control-plane/internal/validation"
 )
 
 type Config struct {
-	Platform                      platform.Config
-	ListenAddress                 string
-	DatabaseURL                   string
-	DatabaseMaxOpenConnections    int
-	DatabaseMaxIdleConnections    int
-	DatabaseConnectionMaxLifetime time.Duration
-	DatabaseConnectionMaxIdleTime time.Duration
-	DatabaseMigrationLockTimeout  time.Duration
-	SQLitePath                    string
-	ArtifactLocalPath             string
-	ArtifactBucket                string
-	ArtifactRegion                string
-	ArtifactEndpoint              string
-	ArtifactPublicEndpoint        string
-	ArtifactAccessKeyID           string
-	ArtifactSecretAccessKey       string
-	ArtifactSessionToken          string
-	ArtifactUsePathStyle          bool
-	ArtifactPresignTTL            time.Duration
-	ArtifactMaxUploadBytes        int64
-	InstallationID                string
-	CookieName                    string
-	CookieDomain                  string
-	CookiePath                    string
-	CookieSameSite                string
-	CookieSecure                  bool
-	DevBootstrapEnabled           bool
-	SessionTTL                    time.Duration
-	SessionIdleTTL                time.Duration
-	TrustedProxyCIDRs             []netip.Prefix
-	ShutdownTimeout               time.Duration
-	WorkerRegistrationToken       string
-	WorkerLeaseTTL                time.Duration
-	WorkerHeartbeatTimeout        time.Duration
-	WorkerReceiptTTL              time.Duration
-	ProviderCursorKey             []byte
-	ProviderCursorMaximumAge      time.Duration
-	LocalAgentdRunnerCommand      []string
-	LocalAgentdWorkspaceRoot      string
-	LocalAgentdGitCacheRoot       string
-	LocalAgentdRestartBackoff     time.Duration
-	CredentialKMSProvider         string
-	CredentialKMSKeyID            string
-	CredentialKMSLocalKey         []byte
-	CredentialKMSAWSRegion        string
-	PublicControlPlaneURL         string
-	AgentdBinaryPath              string
-	SSHProvisionTimeout           time.Duration
-	DockerReconcileInterval       time.Duration
-	KubernetesReconcileInterval   time.Duration
-	WorkerAutoRollbackEnabled     bool
-	WorkerAutoRollbackInterval    time.Duration
-	RetentionSweepInterval        time.Duration
-	OutboxPollInterval            time.Duration
-	OutboxClaimTTL                time.Duration
-	OutboxBatchSize               int
-	OutboxMaxAttempts             int
-	OutboxBaseBackoff             time.Duration
-	OutboxMaxBackoff              time.Duration
-	SSEPollInterval               time.Duration
-	SSEHeartbeatInterval          time.Duration
-	SSEWriteTimeout               time.Duration
-	SSELeaseTTL                   time.Duration
-	SSEMaxConnectionsPerUser      int
-	SSEMaxConnectionsPerTenant    int
+	Platform                       platform.Config
+	ResourceLifecycle              lifecyclepolicy.Config
+	ListenAddress                  string
+	DatabaseURL                    string
+	DatabaseMaxOpenConnections     int
+	DatabaseMaxIdleConnections     int
+	DatabaseConnectionMaxLifetime  time.Duration
+	DatabaseConnectionMaxIdleTime  time.Duration
+	DatabaseMigrationLockTimeout   time.Duration
+	SQLitePath                     string
+	ArtifactLocalPath              string
+	ArtifactBucket                 string
+	ArtifactRegion                 string
+	ArtifactEndpoint               string
+	ArtifactPublicEndpoint         string
+	ArtifactAccessKeyID            string
+	ArtifactSecretAccessKey        string
+	ArtifactSessionToken           string
+	ArtifactUsePathStyle           bool
+	ArtifactPresignTTL             time.Duration
+	ArtifactMaxUploadBytes         int64
+	InstallationID                 string
+	CookieName                     string
+	CookieDomain                   string
+	CookiePath                     string
+	CookieSameSite                 string
+	CookieSecure                   bool
+	DevBootstrapEnabled            bool
+	SessionTTL                     time.Duration
+	SessionIdleTTL                 time.Duration
+	TrustedProxyCIDRs              []netip.Prefix
+	ShutdownTimeout                time.Duration
+	WorkerRegistrationToken        string
+	WorkerLeaseTTL                 time.Duration
+	WorkerHeartbeatTimeout         time.Duration
+	WorkerReceiptTTL               time.Duration
+	ProviderCredentialAccessTTL    time.Duration
+	ProviderCursorKey              []byte
+	ProviderCursorMaximumAge       time.Duration
+	LocalAgentdRunnerCommand       []string
+	LocalAgentdWorkspaceRoot       string
+	LocalAgentdGitCacheRoot        string
+	LocalAgentdRestartBackoff      time.Duration
+	CredentialKMSProvider          string
+	CredentialKMSKeyID             string
+	CredentialKMSLocalKey          []byte
+	CredentialKMSAWSRegion         string
+	PublicControlPlaneURL          string
+	AgentdBinaryPath               string
+	SSHProvisionTimeout            time.Duration
+	DockerReconcileInterval        time.Duration
+	KubernetesReconcileInterval    time.Duration
+	ResourceLifecycleSweepInterval time.Duration
+	WorkerAutoRollbackEnabled      bool
+	WorkerAutoRollbackInterval     time.Duration
+	RetentionSweepInterval         time.Duration
+	OutboxPollInterval             time.Duration
+	OutboxClaimTTL                 time.Duration
+	OutboxBatchSize                int
+	OutboxMaxAttempts              int
+	OutboxBaseBackoff              time.Duration
+	OutboxMaxBackoff               time.Duration
+	SSEPollInterval                time.Duration
+	SSEHeartbeatInterval           time.Duration
+	SSEWriteTimeout                time.Duration
+	SSELeaseTTL                    time.Duration
+	SSEMaxConnectionsPerUser       int
+	SSEMaxConnectionsPerTenant     int
+	Billing                        billing.RuntimeConfig
 }
 
 func Load() (Config, error) {
@@ -123,10 +133,15 @@ func Load() (Config, error) {
 	if err := platformConfig.Validate(); err != nil {
 		return Config{}, fmt.Errorf("invalid deployment profile configuration: %w", err)
 	}
+	resourceLifecycle, err := loadResourceLifecycleConfig(profile)
+	if err != nil {
+		return Config{}, err
+	}
 
 	defaultDataDir := envOrDefault("SYNARA_CONTROL_PLANE_DATA_DIR", "./data")
 	cfg := Config{
 		Platform:                platformConfig,
+		ResourceLifecycle:       resourceLifecycle,
 		ListenAddress:           envOrDefault("SYNARA_CONTROL_PLANE_LISTEN", ":3780"),
 		DatabaseURL:             strings.TrimSpace(os.Getenv("SYNARA_DATABASE_URL")),
 		SQLitePath:              envOrDefault("SYNARA_SQLITE_PATH", filepath.Join(defaultDataDir, "metadata.sqlite")),
@@ -187,6 +202,13 @@ func Load() (Config, error) {
 	if cfg.WorkerReceiptTTL, err = envDurationStrict("SYNARA_WORKER_RECEIPT_TTL", 24*time.Hour); err != nil {
 		return Config{}, err
 	}
+	defaultProviderCredentialAccessTTL := max(5*time.Minute, 4*cfg.WorkerLeaseTTL)
+	if cfg.ProviderCredentialAccessTTL, err = envDurationStrict(
+		"SYNARA_PROVIDER_CREDENTIAL_ACCESS_TTL",
+		defaultProviderCredentialAccessTTL,
+	); err != nil {
+		return Config{}, err
+	}
 	if cfg.ProviderCursorMaximumAge, err = envDurationStrict("SYNARA_PROVIDER_CURSOR_MAX_AGE", 30*24*time.Hour); err != nil {
 		return Config{}, err
 	}
@@ -233,6 +255,9 @@ func Load() (Config, error) {
 	if cfg.KubernetesReconcileInterval, err = envDurationStrict("SYNARA_KUBERNETES_RECONCILE_INTERVAL", 5*time.Second); err != nil {
 		return Config{}, err
 	}
+	if cfg.ResourceLifecycleSweepInterval, err = envDurationStrict("SYNARA_RESOURCE_LIFECYCLE_SWEEP_INTERVAL", 10*time.Second); err != nil {
+		return Config{}, err
+	}
 	if cfg.WorkerAutoRollbackEnabled, err = envBoolStrict("SYNARA_WORKER_AUTO_ROLLBACK_ENABLED", true); err != nil {
 		return Config{}, err
 	}
@@ -277,6 +302,49 @@ func Load() (Config, error) {
 	}
 	if cfg.SSEMaxConnectionsPerTenant, err = envInt("SYNARA_SSE_MAX_CONNECTIONS_PER_TENANT", 200); err != nil {
 		return Config{}, err
+	}
+	cfg.Billing = billing.RuntimeConfig{
+		MaxObjectBytes: 16 << 20,
+		Source: billing.SourceConfig{
+			Kind:              strings.ToLower(strings.TrimSpace(os.Getenv("SYNARA_BILLING_BLOB_SOURCE"))),
+			LocalBaseDir:      strings.TrimSpace(os.Getenv("SYNARA_BILLING_LOCAL_BASE_DIR")),
+			S3Bucket:          strings.TrimSpace(os.Getenv("SYNARA_BILLING_S3_BUCKET")),
+			S3Region:          strings.TrimSpace(os.Getenv("SYNARA_BILLING_S3_REGION")),
+			S3Endpoint:        strings.TrimSpace(os.Getenv("SYNARA_BILLING_S3_ENDPOINT")),
+			GCSBucket:         strings.TrimSpace(os.Getenv("SYNARA_BILLING_GCS_BUCKET")),
+			AzureContainerURL: strings.TrimSpace(os.Getenv("SYNARA_BILLING_AZURE_CONTAINER_URL")),
+			Prefix:            strings.TrimSpace(os.Getenv("SYNARA_BILLING_BLOB_PREFIX")),
+		},
+	}
+	if rawTenantID, ok := nonEmptyEnv("SYNARA_BILLING_TARIFF_OPERATOR_TENANT_ID"); ok {
+		cfg.Billing.TariffOperatorTenantID, err = uuid.Parse(rawTenantID)
+		if err != nil {
+			return Config{}, errors.New("SYNARA_BILLING_TARIFF_OPERATOR_TENANT_ID must be a UUID")
+		}
+	}
+	if cfg.Billing.MaxObjectBytes, err = envInt64("SYNARA_BILLING_MAX_OBJECT_BYTES", cfg.Billing.MaxObjectBytes); err != nil {
+		return Config{}, err
+	}
+	if cfg.Billing.Source.S3UsePathStyle, err = envBoolStrict("SYNARA_BILLING_S3_USE_PATH_STYLE", false); err != nil {
+		return Config{}, err
+	}
+	if cfg.Billing.Source.S3AllowCustomEndpoint, err = envBoolStrict("SYNARA_BILLING_S3_ALLOW_CUSTOM_ENDPOINT", false); err != nil {
+		return Config{}, err
+	}
+	if cfg.Billing.Source.S3AllowHTTP, err = envBoolStrict("SYNARA_BILLING_S3_ALLOW_HTTP", false); err != nil {
+		return Config{}, err
+	}
+	if cfg.Billing.Source.AzureAllowHTTP, err = envBoolStrict("SYNARA_BILLING_AZURE_ALLOW_HTTP", false); err != nil {
+		return Config{}, err
+	}
+	if rawMappings, ok := nonEmptyEnv("SYNARA_BILLING_IMPORT_MAPPINGS_JSON"); ok {
+		cfg.Billing.Imports, err = parseBillingImportMappings(rawMappings)
+		if err != nil {
+			return Config{}, fmt.Errorf("SYNARA_BILLING_IMPORT_MAPPINGS_JSON: %w", err)
+		}
+	}
+	if cfg.Billing, err = cfg.Billing.Normalize(); err != nil {
+		return Config{}, fmt.Errorf("invalid billing configuration: %w", err)
 	}
 	if encodedKey := strings.TrimSpace(os.Getenv("SYNARA_CREDENTIAL_MASTER_KEY")); encodedKey != "" {
 		cfg.CredentialKMSLocalKey, err = decodeKey(encodedKey, "SYNARA_CREDENTIAL_MASTER_KEY")
@@ -353,6 +421,9 @@ func Load() (Config, error) {
 	if cfg.WorkerReceiptTTL <= 0 {
 		return Config{}, errors.New("SYNARA_WORKER_RECEIPT_TTL must be positive")
 	}
+	if cfg.ProviderCredentialAccessTTL <= 2*cfg.WorkerLeaseTTL || cfg.ProviderCredentialAccessTTL > time.Hour {
+		return Config{}, errors.New("SYNARA_PROVIDER_CREDENTIAL_ACCESS_TTL must be greater than twice SYNARA_WORKER_LEASE_TTL and at most 1h")
+	}
 	if cfg.ProviderCursorMaximumAge <= 0 || cfg.ProviderCursorMaximumAge > 365*24*time.Hour {
 		return Config{}, errors.New("SYNARA_PROVIDER_CURSOR_MAX_AGE must be positive and at most 8760h")
 	}
@@ -398,6 +469,9 @@ func Load() (Config, error) {
 	}
 	if cfg.KubernetesReconcileInterval <= 0 {
 		return Config{}, errors.New("SYNARA_KUBERNETES_RECONCILE_INTERVAL must be positive")
+	}
+	if cfg.ResourceLifecycleSweepInterval <= 0 {
+		return Config{}, errors.New("SYNARA_RESOURCE_LIFECYCLE_SWEEP_INTERVAL must be positive")
 	}
 	if cfg.WorkerAutoRollbackInterval <= 0 {
 		return Config{}, errors.New("SYNARA_WORKER_AUTO_ROLLBACK_INTERVAL must be positive")
@@ -511,6 +585,91 @@ func decodeKey(value, name string) ([]byte, error) {
 	return nil, fmt.Errorf("%s must be base64 encoded", name)
 }
 
+func loadResourceLifecycleConfig(profile platform.DeploymentProfile) (lifecyclepolicy.Config, error) {
+	config := lifecyclepolicy.DefaultConfig(profile)
+	storageBounds := config.Bounds
+	boundFields := []struct {
+		minimumName string
+		maximumName string
+		bounds      *lifecyclepolicy.IntBounds
+		storage     lifecyclepolicy.IntBounds
+	}{
+		{"SYNARA_RESOURCE_WAITING_KEEP_ALIVE_MIN_SECONDS", "SYNARA_RESOURCE_WAITING_KEEP_ALIVE_MAX_SECONDS", &config.Bounds.WaitingKeepAliveSeconds, storageBounds.WaitingKeepAliveSeconds},
+		{"SYNARA_RESOURCE_SUSPEND_AFTER_IDLE_MIN_SECONDS", "SYNARA_RESOURCE_SUSPEND_AFTER_IDLE_MAX_SECONDS", &config.Bounds.SuspendAfterIdleSeconds, storageBounds.SuspendAfterIdleSeconds},
+		{"SYNARA_RESOURCE_ABSOLUTE_SESSION_LIFETIME_MIN_SECONDS", "SYNARA_RESOURCE_ABSOLUTE_SESSION_LIFETIME_MAX_SECONDS", &config.Bounds.AbsoluteSessionLifetimeSeconds, storageBounds.AbsoluteSessionLifetimeSeconds},
+		{"SYNARA_RESOURCE_WORKSPACE_RETENTION_MIN_DAYS", "SYNARA_RESOURCE_WORKSPACE_RETENTION_MAX_DAYS", &config.Bounds.WorkspaceRetentionDays, storageBounds.WorkspaceRetentionDays},
+	}
+	for _, field := range boundFields {
+		minimum, err := envInt(field.minimumName, field.bounds.Minimum)
+		if err != nil {
+			return lifecyclepolicy.Config{}, err
+		}
+		maximum, err := envInt(field.maximumName, field.bounds.Maximum)
+		if err != nil {
+			return lifecyclepolicy.Config{}, err
+		}
+		if minimum < field.storage.Minimum || maximum > field.storage.Maximum {
+			return lifecyclepolicy.Config{}, fmt.Errorf(
+				"%s and %s must stay within the database-supported range %d..%d",
+				field.minimumName, field.maximumName, field.storage.Minimum, field.storage.Maximum,
+			)
+		}
+		*field.bounds = lifecyclepolicy.IntBounds{Minimum: minimum, Maximum: maximum}
+	}
+
+	waiting, err := envWholeSeconds(
+		"SYNARA_RESOURCE_WAITING_KEEP_ALIVE", time.Duration(config.Defaults.WaitingKeepAliveSeconds)*time.Second,
+	)
+	if err != nil {
+		return lifecyclepolicy.Config{}, err
+	}
+	suspendAfterIdle, err := envWholeSeconds(
+		"SYNARA_RESOURCE_SUSPEND_AFTER_IDLE", time.Duration(config.Defaults.SuspendAfterIdleSeconds)*time.Second,
+	)
+	if err != nil {
+		return lifecyclepolicy.Config{}, err
+	}
+	config.Defaults.WaitingKeepAliveSeconds = waiting
+	config.Defaults.SuspendAfterIdleSeconds = suspendAfterIdle
+
+	absoluteRaw := strings.TrimSpace(os.Getenv("SYNARA_RESOURCE_ABSOLUTE_SESSION_LIFETIME"))
+	if absoluteRaw != "" {
+		absoluteDuration, err := time.ParseDuration(absoluteRaw)
+		if err != nil || absoluteDuration < 0 || absoluteDuration%time.Second != 0 {
+			return lifecyclepolicy.Config{}, errors.New("SYNARA_RESOURCE_ABSOLUTE_SESSION_LIFETIME must be zero or a whole-second duration")
+		}
+		if absoluteDuration == 0 {
+			config.Defaults.AbsoluteSessionLifetimeSeconds = nil
+		} else {
+			seconds := int(absoluteDuration / time.Second)
+			config.Defaults.AbsoluteSessionLifetimeSeconds = &seconds
+		}
+	}
+	if config.Defaults.WorkspaceRetentionDays, err = envInt(
+		"SYNARA_RESOURCE_WORKSPACE_RETENTION_DAYS", config.Defaults.WorkspaceRetentionDays,
+	); err != nil {
+		return lifecyclepolicy.Config{}, err
+	}
+	config.Defaults.WarmPoolMode = strings.ToLower(envOrDefault(
+		"SYNARA_RESOURCE_WARM_POOL_MODE", config.Defaults.WarmPoolMode,
+	))
+	if err := config.Validate(); err != nil {
+		return lifecyclepolicy.Config{}, fmt.Errorf("invalid Resource Lifecycle configuration: %w", err)
+	}
+	return config, nil
+}
+
+func envWholeSeconds(name string, fallback time.Duration) (int, error) {
+	duration, err := envDurationStrict(name, fallback)
+	if err != nil {
+		return 0, err
+	}
+	if duration <= 0 || duration%time.Second != 0 {
+		return 0, fmt.Errorf("%s must be a positive whole-second duration", name)
+	}
+	return int(duration / time.Second), nil
+}
+
 func envOrDefault(name, fallback string) string {
 	if value := strings.TrimSpace(os.Getenv(name)); value != "" {
 		return value
@@ -569,4 +728,100 @@ func envInt64(name string, fallback int64) (int64, error) {
 		return 0, fmt.Errorf("%s must be an integer", name)
 	}
 	return parsed, nil
+}
+
+type billingImportMappingEnvelope struct {
+	Imports *[]billingImportMapping `json:"imports"`
+}
+
+type billingImportMapping struct {
+	TenantID            string                     `json:"tenantId"`
+	Provider            string                     `json:"provider"`
+	ExternalImportID    string                     `json:"externalImportId"`
+	Format              billing.ExportObjectFormat `json:"format"`
+	ObjectKey           string                     `json:"objectKey"`
+	ObjectVersion       string                     `json:"objectVersion"`
+	ExecutionTargetIDs  []string                   `json:"executionTargetIds"`
+	ScheduleInterval    string                     `json:"scheduleInterval"`
+	Reconcile           bool                       `json:"reconcile"`
+	EstimateAfterImport bool                       `json:"estimateAfterImport"`
+}
+
+func parseBillingImportMappings(raw string) ([]billing.ConfiguredImport, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	var items []billingImportMapping
+	switch raw[0] {
+	case '[':
+		if err := decodeStrictBillingJSON(raw, &items); err != nil {
+			return nil, err
+		}
+	case '{':
+		envelope := billingImportMappingEnvelope{}
+		if err := decodeStrictBillingJSON(raw, &envelope); err != nil {
+			return nil, err
+		}
+		if envelope.Imports == nil {
+			return nil, errors.New("must be a JSON array or an object with an imports array")
+		}
+		items = *envelope.Imports
+	default:
+		return nil, errors.New("must be a JSON array or an object with an imports array")
+	}
+	imports := make([]billing.ConfiguredImport, 0, len(items))
+	for index, item := range items {
+		tenantID, err := uuid.Parse(strings.TrimSpace(item.TenantID))
+		if err != nil {
+			return nil, fmt.Errorf("imports[%d].tenantId must be a UUID", index)
+		}
+		var scheduleInterval time.Duration
+		if strings.TrimSpace(item.ScheduleInterval) != "" {
+			scheduleInterval, err = time.ParseDuration(strings.TrimSpace(item.ScheduleInterval))
+			if err != nil {
+				return nil, fmt.Errorf("imports[%d].scheduleInterval must be a valid duration", index)
+			}
+		}
+		executionTargetIDs := make([]uuid.UUID, 0, len(item.ExecutionTargetIDs))
+		for targetIndex, rawTargetID := range item.ExecutionTargetIDs {
+			targetID, parseErr := uuid.Parse(strings.TrimSpace(rawTargetID))
+			if parseErr != nil || targetID == uuid.Nil {
+				return nil, fmt.Errorf("imports[%d].executionTargetIds[%d] must be a UUID", index, targetIndex)
+			}
+			executionTargetIDs = append(executionTargetIDs, targetID)
+		}
+		imports = append(imports, billing.ConfiguredImport{
+			TenantID:            tenantID,
+			Provider:            item.Provider,
+			ExternalImportID:    item.ExternalImportID,
+			Format:              item.Format,
+			ObjectKey:           item.ObjectKey,
+			ObjectVersion:       item.ObjectVersion,
+			ExecutionTargetIDs:  executionTargetIDs,
+			ScheduleInterval:    scheduleInterval,
+			Reconcile:           item.Reconcile,
+			EstimateAfterImport: item.EstimateAfterImport,
+		})
+	}
+	return imports, nil
+}
+
+func decodeStrictBillingJSON(raw string, destination any) error {
+	decoder := json.NewDecoder(strings.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(destination); err != nil {
+		return err
+	}
+	if decoder.More() {
+		return errors.New("unexpected trailing JSON content")
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			return errors.New("unexpected trailing JSON content")
+		}
+		return err
+	}
+	return nil
 }

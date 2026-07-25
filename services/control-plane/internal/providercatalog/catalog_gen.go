@@ -3,7 +3,7 @@
 package providercatalog
 
 const SchemaVersion = 1
-const SourceSHA256 = "c75cd9113831dc4df5cb0ed1e27a2c19ca5f5ef8f9cf38e9362b11fcbb55e567"
+const SourceSHA256 = "62f2d2c3bd446f936be80316ca1a30b2ae7fa5d64795031ce3b505366c75b0a4"
 
 var generatedCapabilityIDs = []string{
 	"discovery",
@@ -12,6 +12,7 @@ var generatedCapabilityIDs = []string{
 	"send-turn",
 	"steer-turn",
 	"interrupt-turn",
+	"suspend-active-turn",
 	"approval",
 	"structured-user-input",
 	"plan-mode",
@@ -68,6 +69,7 @@ var generatedProviders = []Provider{
 			"send-turn":                            "native",
 			"steer-turn":                           "native",
 			"interrupt-turn":                       "native",
+			"suspend-active-turn":                  "native",
 			"approval":                             "native",
 			"structured-user-input":                "native",
 			"plan-mode":                            "native",
@@ -112,6 +114,7 @@ var generatedProviders = []Provider{
 			"send-turn":                            "native",
 			"steer-turn":                           "native",
 			"interrupt-turn":                       "native",
+			"suspend-active-turn":                  "native",
 			"approval":                             "native",
 			"structured-user-input":                "native",
 			"plan-mode":                            "native",
@@ -155,6 +158,7 @@ var generatedProviders = []Provider{
 			"send-turn":                            "unsupported",
 			"steer-turn":                           "unsupported",
 			"interrupt-turn":                       "unsupported",
+			"suspend-active-turn":                  "unsupported",
 			"approval":                             "unsupported",
 			"structured-user-input":                "unsupported",
 			"plan-mode":                            "unsupported",
@@ -198,6 +202,7 @@ var generatedProviders = []Provider{
 			"send-turn":                            "unsupported",
 			"steer-turn":                           "unsupported",
 			"interrupt-turn":                       "unsupported",
+			"suspend-active-turn":                  "unsupported",
 			"approval":                             "unsupported",
 			"structured-user-input":                "unsupported",
 			"plan-mode":                            "unsupported",
@@ -241,6 +246,7 @@ var generatedProviders = []Provider{
 			"send-turn":                            "unsupported",
 			"steer-turn":                           "unsupported",
 			"interrupt-turn":                       "unsupported",
+			"suspend-active-turn":                  "unsupported",
 			"approval":                             "unsupported",
 			"structured-user-input":                "unsupported",
 			"plan-mode":                            "unsupported",
@@ -284,6 +290,7 @@ var generatedProviders = []Provider{
 			"send-turn":                            "unsupported",
 			"steer-turn":                           "unsupported",
 			"interrupt-turn":                       "unsupported",
+			"suspend-active-turn":                  "unsupported",
 			"approval":                             "unsupported",
 			"structured-user-input":                "unsupported",
 			"plan-mode":                            "unsupported",
@@ -327,6 +334,7 @@ var generatedProviders = []Provider{
 			"send-turn":                            "unsupported",
 			"steer-turn":                           "unsupported",
 			"interrupt-turn":                       "unsupported",
+			"suspend-active-turn":                  "unsupported",
 			"approval":                             "unsupported",
 			"structured-user-input":                "unsupported",
 			"plan-mode":                            "unsupported",
@@ -370,6 +378,7 @@ var generatedProviders = []Provider{
 			"send-turn":                            "unsupported",
 			"steer-turn":                           "unsupported",
 			"interrupt-turn":                       "unsupported",
+			"suspend-active-turn":                  "unsupported",
 			"approval":                             "unsupported",
 			"structured-user-input":                "unsupported",
 			"plan-mode":                            "unsupported",

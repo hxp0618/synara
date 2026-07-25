@@ -93,3 +93,17 @@ type ExecutionCredentialGrant struct {
 }
 
 func (ExecutionCredentialGrant) TableName() string { return "execution_credential_grants" }
+
+type ExecutionProviderCredentialGrant struct {
+	ID                uuid.UUID `gorm:"column:id;type:uuid;primaryKey"`
+	TenantID          uuid.UUID `gorm:"column:tenant_id;type:uuid"`
+	ExecutionID       uuid.UUID `gorm:"column:execution_id;type:uuid"`
+	Generation        int64     `gorm:"column:generation"`
+	CredentialID      uuid.UUID `gorm:"column:credential_id;type:uuid"`
+	CredentialVersion int       `gorm:"column:credential_version"`
+	CreatedAt         time.Time `gorm:"column:created_at"`
+}
+
+func (ExecutionProviderCredentialGrant) TableName() string {
+	return "execution_provider_credential_grants"
+}

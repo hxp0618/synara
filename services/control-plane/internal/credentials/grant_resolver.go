@@ -45,7 +45,7 @@ func (s *Service) ResolveGrantForExecution(
 	var credential persistence.ProviderCredential
 	var repositoryURL *string
 	err := persistence.InTransaction(ctx, s.db, func(tx *gorm.DB) error {
-		execution, err := executionService.AuthorizeLease(ctx, tx, worker, executionID, leaseInput)
+		execution, err := executionService.AuthorizeLeaseWithinSessionLifetime(ctx, tx, worker, executionID, leaseInput)
 		if err != nil {
 			return err
 		}

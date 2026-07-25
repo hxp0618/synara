@@ -195,6 +195,7 @@ func insertPreRevocationWorker(db *gorm.DB, worker *persistence.WorkerInstance) 
 	return db.Select(
 		"id", "incarnation", "instance_uid", "execution_target_id", "target_kind",
 		"cluster_id", "namespace", "pod_name", "version", "protocol_version", "capabilities",
+		"current_manifest_id",
 		"compatibility_status", "compatibility_reason", "compatibility_checked_at",
 		"lease_supported", "fencing_supported", "auth_token_hash", "status",
 		"registered_at", "last_heartbeat_at", "draining_at", "terminated_at",
@@ -202,9 +203,13 @@ func insertPreRevocationWorker(db *gorm.DB, worker *persistence.WorkerInstance) 
 }
 
 func insertPreReleaseWorker(db *gorm.DB, worker *persistence.WorkerInstance) error {
-	return db.Omit(
-		"WorkerReleaseRevisionID", "WorkerReleaseChannel", "WorkerReleaseStatus",
-		"WorkerReleaseReason", "WorkerReleaseCheckedAt",
+	return db.Select(
+		"id", "incarnation", "instance_uid", "execution_target_id", "target_kind",
+		"cluster_id", "namespace", "pod_name", "version", "protocol_version", "capabilities",
+		"current_manifest_id", "compatibility_status", "compatibility_reason", "compatibility_checked_at",
+		"lease_supported", "fencing_supported", "auth_token_hash", "status", "administrative_status",
+		"registered_at", "last_heartbeat_at", "draining_at", "terminated_at",
+		"revoked_at", "revoked_by", "revocation_reason",
 	).Create(worker).Error
 }
 

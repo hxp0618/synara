@@ -3,6 +3,7 @@ package executions
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -12,6 +13,7 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
+	"github.com/synara-ai/synara/services/control-plane/internal/problem"
 )
 
 func TestProjectResumeSnapshotEventsAggregatesLegacyAndV2AssistantTextBySequence(t *testing.T) {
@@ -128,6 +130,146 @@ func TestFitResumeSnapshotBudgetRetainsSuffixOfSingleOversizedNewestMessage(t *t
 	}
 	if snapshot.Truncation == nil || !containsString(snapshot.Truncation.Reasons, "message_text_budget") {
 		t.Fatalf("single-message truncation was not recorded: %#v", snapshot.Truncation)
+	}
+}
+
+func TestFitResumeSnapshotBudgetKeepsArtifactReferencesWhenEvictingOldNarrative(t *testing.T) {
+	contentType := strings.Repeat("text/plain;", 256)
+	sizeBytes := int64(12345)
+	sha256 := strings.Repeat("a", 64)
+	snapshot := ResumeSnapshot{
+		Version:   ResumeSnapshotVersionV1,
+		SessionID: uuid.New(),
+		TurnID:    uuid.New(),
+		Provider:  "codex",
+		Messages: []ResumeMessage{
+			{Role: "user", Text: strings.Repeat("x", resumeSnapshotByteLimit), SequenceFrom: 1, SequenceThrough: 1},
+			{Role: "assistant", Text: "newest answer", SequenceFrom: 2, SequenceThrough: 2},
+		},
+		ArtifactReferences: []ResumeArtifactReference{{
+			Sequence: 3, ArtifactID: uuid.New(), ExecutionID: pointerUUID(uuid.New()),
+			Kind: "generated_file", ContentType: &contentType, SizeBytes: &sizeBytes, SHA256: &sha256,
+		}},
+		PendingInteractions:          make([]ResumePendingInteraction, 0),
+		ResumeRecordedInteractions:   make([]ResumeRecordedInteraction, 0),
+		SourceSequenceRange:          ResumeSequenceRange{From: 1, Through: 3},
+		AuthoritativeHistorySequence: 3,
+		Budget:                       ResumeSnapshotBudget{ByteLimit: resumeSnapshotByteLimit, TokenLimit: resumeSnapshotTokenLimit},
+	}
+	if err := fitResumeSnapshotBudget(&snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Messages) != 1 || snapshot.Messages[0].Text != "newest answer" {
+		t.Fatalf("narrative eviction was not deterministic: %#v", snapshot.Messages)
+	}
+	if len(snapshot.ArtifactReferences) != 1 || snapshot.ArtifactReferences[0].ArtifactID == uuid.Nil ||
+		snapshot.ArtifactReferences[0].SHA256 == nil || *snapshot.ArtifactReferences[0].SHA256 != sha256 {
+		t.Fatalf("artifact reference was dropped or mutated: %#v", snapshot.ArtifactReferences)
+	}
+}
+
+func TestFitResumeSnapshotBudgetStripsOnlyOptionalArtifactMetadata(t *testing.T) {
+	contentType := strings.Repeat("application/octet-stream;", 512)
+	sizeBytes := int64(987654321)
+	sha256 := strings.Repeat("b", 64)
+	snapshot := ResumeSnapshot{
+		Version:   ResumeSnapshotVersionV1,
+		SessionID: uuid.New(),
+		TurnID:    uuid.New(),
+		Provider:  "codex",
+		ArtifactReferences: []ResumeArtifactReference{{
+			Sequence: 1, ArtifactID: uuid.New(), ExecutionID: pointerUUID(uuid.New()),
+			Kind: "generated_file", ContentType: &contentType, SizeBytes: &sizeBytes, SHA256: &sha256,
+		}},
+		PendingInteractions:          make([]ResumePendingInteraction, 0),
+		ResumeRecordedInteractions:   make([]ResumeRecordedInteraction, 0),
+		SourceSequenceRange:          ResumeSequenceRange{From: 1, Through: 1},
+		AuthoritativeHistorySequence: 1,
+		Budget:                       ResumeSnapshotBudget{ByteLimit: 1024, TokenLimit: 256},
+	}
+	if err := fitResumeSnapshotBudget(&snapshot); err != nil {
+		t.Fatal(err)
+	}
+	reference := snapshot.ArtifactReferences[0]
+	if reference.ContentType != nil || reference.SizeBytes != nil ||
+		reference.SHA256 == nil || *reference.SHA256 != sha256 {
+		t.Fatalf("artifact metadata stripping did not preserve required authority fields: %#v", reference)
+	}
+	if snapshot.Truncation == nil || !containsString(snapshot.Truncation.Reasons, "artifact_optional_metadata_budget") {
+		t.Fatalf("artifact metadata truncation was not recorded: %#v", snapshot.Truncation)
+	}
+}
+
+func TestFitResumeSnapshotBudgetFailsClosedWhenArtifactAuthorityAloneExceedsBudget(t *testing.T) {
+	sha256 := strings.Repeat("c", 64)
+	snapshot := ResumeSnapshot{
+		Version:   ResumeSnapshotVersionV1,
+		SessionID: uuid.New(),
+		TurnID:    uuid.New(),
+		Provider:  "codex",
+		ArtifactReferences: []ResumeArtifactReference{{
+			Sequence: 1, ArtifactID: uuid.New(), ExecutionID: pointerUUID(uuid.New()),
+			Kind: "generated_file", SHA256: &sha256,
+		}},
+		PendingInteractions:          make([]ResumePendingInteraction, 0),
+		ResumeRecordedInteractions:   make([]ResumeRecordedInteraction, 0),
+		SourceSequenceRange:          ResumeSequenceRange{From: 1, Through: 1},
+		AuthoritativeHistorySequence: 1,
+		Budget:                       ResumeSnapshotBudget{ByteLimit: 64, TokenLimit: 16},
+	}
+	err := fitResumeSnapshotBudget(&snapshot)
+	if err == nil {
+		t.Fatal("expected artifact authority budget failure")
+	}
+	assertExecutionProblemCode(t, err, "resume_snapshot_artifact_authority_budget_exhausted")
+}
+
+func TestFitResumeSnapshotBudgetDropsExcessPendingInteractionBeforeArtifactMetadata(t *testing.T) {
+	contentType := "application/octet-stream"
+	sizeBytes := int64(42)
+	sha256 := strings.Repeat("d", 64)
+	interaction := func(requestID string) ResumePendingInteraction {
+		return ResumePendingInteraction{
+			ID: uuid.New(), ExecutionID: uuid.New(), TurnID: uuid.New(), Provider: "codex",
+			RequestID: requestID, EventVersion: RuntimeEventVersionV2, Kind: "approval",
+			RequestedAt: time.Unix(100, 0).UTC(), ExpiresAt: time.Unix(200, 0).UTC(),
+		}
+	}
+	first := interaction("approval-1")
+	second := interaction("approval-2")
+	snapshot := ResumeSnapshot{
+		Version:   ResumeSnapshotVersionV1,
+		SessionID: uuid.New(),
+		TurnID:    uuid.New(),
+		Provider:  "codex",
+		ArtifactReferences: []ResumeArtifactReference{{
+			Sequence: 1, ArtifactID: uuid.New(), ExecutionID: pointerUUID(uuid.New()),
+			Kind: "generated_file", ContentType: &contentType, SizeBytes: &sizeBytes, SHA256: &sha256,
+		}},
+		PendingInteractions:          []ResumePendingInteraction{first, second},
+		ResumeRecordedInteractions:   make([]ResumeRecordedInteraction, 0),
+		SourceSequenceRange:          ResumeSequenceRange{From: 1, Through: 1},
+		AuthoritativeHistorySequence: 1,
+		Budget:                       ResumeSnapshotBudget{ByteLimit: 999999, TokenLimit: 999999},
+	}
+	single := snapshot
+	single.PendingInteractions = []ResumePendingInteraction{second}
+	if _, _, err := refreshResumeSnapshotBudget(&single); err != nil {
+		t.Fatal(err)
+	}
+	snapshot.Budget.ByteLimit = single.Budget.UsedBytes + 192
+	if err := fitResumeSnapshotBudget(&snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.PendingInteractions) != 1 || snapshot.PendingInteractions[0].RequestID != second.RequestID {
+		t.Fatalf("oldest excess pending interaction was not dropped: %#v", snapshot.PendingInteractions)
+	}
+	reference := snapshot.ArtifactReferences[0]
+	if reference.ContentType == nil || reference.SizeBytes == nil || reference.SHA256 == nil {
+		t.Fatalf("artifact metadata was stripped before excess pending interaction: %#v", reference)
+	}
+	if snapshot.Truncation == nil || !containsString(snapshot.Truncation.Reasons, "pending_interaction_budget") {
+		t.Fatalf("pending interaction truncation was not recorded: %#v", snapshot.Truncation)
 	}
 }
 
@@ -257,8 +399,172 @@ func TestResumeSnapshotStateAndSequenceQueriesAreSQLiteCompatible(t *testing.T) 
 	}
 }
 
+func TestLoadResumeArtifactReferencesFailClosedForUnavailableOrScopeMismatch(t *testing.T) {
+	t.Run("missing or unready artifact fails closed", func(t *testing.T) {
+		db := newResumeArtifactAuthorityTestDB(t)
+		tenantID := uuid.New()
+		sessionID := uuid.New()
+		executionID := uuid.New()
+		now := time.Now().UTC()
+		seedResumeArtifactAuthoritySession(t, db, tenantID, sessionID, now)
+		pendingArtifact := persistence.Artifact{
+			ID: uuid.New(), TenantID: tenantID, OrganizationID: uuid.New(), ProjectID: uuid.New(),
+			SessionID: sessionID, ExecutionID: &executionID, Kind: "generated_file", Status: "pending",
+			Bucket: "resume-test", ObjectKey: "artifact/pending", CreatedByType: "system", CreatedByID: uuid.New(), CreatedAt: now,
+		}
+		seedResumeArtifactAuthorityArtifact(t, db, pendingArtifact)
+		for _, artifactID := range []uuid.UUID{uuid.New(), pendingArtifact.ID} {
+			_, err := loadResumeArtifactReferences(context.Background(), db, persistence.AgentExecution{
+				TenantID: tenantID, SessionID: sessionID,
+			}, []resumeArtifactEvent{{
+				Sequence: 1, ArtifactID: artifactID, SessionID: sessionID, ExecutionID: &executionID,
+			}})
+			assertExecutionProblemCode(t, err, "execution_history_artifact_unavailable")
+		}
+	})
+
+	t.Run("deleted artifact fails closed", func(t *testing.T) {
+		db := newResumeArtifactAuthorityTestDB(t)
+		tenantID := uuid.New()
+		sessionID := uuid.New()
+		executionID := uuid.New()
+		now := time.Now().UTC()
+		seedResumeArtifactAuthoritySession(t, db, tenantID, sessionID, now)
+		readyAt := now
+		deletedAt := now.Add(time.Minute)
+		artifact := persistence.Artifact{
+			ID: uuid.New(), TenantID: tenantID, OrganizationID: uuid.New(), ProjectID: uuid.New(),
+			SessionID: sessionID, ExecutionID: &executionID, Kind: "generated_file", Status: "ready",
+			Bucket: "resume-test", ObjectKey: "artifact/deleted", CreatedByType: "system", CreatedByID: uuid.New(),
+			ReadyAt: &readyAt, CreatedAt: now, DeletedAt: &deletedAt,
+		}
+		seedResumeArtifactAuthorityArtifact(t, db, artifact)
+		_, err := loadResumeArtifactReferences(context.Background(), db, persistence.AgentExecution{
+			TenantID: tenantID, SessionID: sessionID,
+		}, []resumeArtifactEvent{{
+			Sequence: 1, ArtifactID: artifact.ID, SessionID: sessionID, ExecutionID: &executionID,
+		}})
+		assertExecutionProblemCode(t, err, "execution_history_artifact_unavailable")
+	})
+
+	t.Run("ready artifact without content hash fails closed", func(t *testing.T) {
+		db := newResumeArtifactAuthorityTestDB(t)
+		tenantID := uuid.New()
+		sessionID := uuid.New()
+		executionID := uuid.New()
+		now := time.Now().UTC()
+		seedResumeArtifactAuthoritySession(t, db, tenantID, sessionID, now)
+		readyAt := now
+		artifact := persistence.Artifact{
+			ID: uuid.New(), TenantID: tenantID, OrganizationID: uuid.New(), ProjectID: uuid.New(),
+			SessionID: sessionID, ExecutionID: &executionID, Kind: "generated_file", Status: "ready",
+			Bucket: "resume-test", ObjectKey: "artifact/hashless", CreatedByType: "system", CreatedByID: uuid.New(),
+			ReadyAt: &readyAt, CreatedAt: now,
+		}
+		seedResumeArtifactAuthorityArtifact(t, db, artifact)
+		_, err := loadResumeArtifactReferences(context.Background(), db, persistence.AgentExecution{
+			TenantID: tenantID, SessionID: sessionID,
+		}, []resumeArtifactEvent{{
+			Sequence: 1, ArtifactID: artifact.ID, SessionID: sessionID, ExecutionID: &executionID,
+		}})
+		assertExecutionProblemCode(t, err, "execution_history_artifact_unavailable")
+	})
+
+	t.Run("cross session fails closed", func(t *testing.T) {
+		db := newResumeArtifactAuthorityTestDB(t)
+		tenantID := uuid.New()
+		sessionID := uuid.New()
+		otherSessionID := uuid.New()
+		executionID := uuid.New()
+		now := time.Now().UTC()
+		seedResumeArtifactAuthoritySession(t, db, tenantID, sessionID, now)
+		seedResumeArtifactAuthoritySession(t, db, tenantID, otherSessionID, now)
+		readyAt := now
+		artifact := persistence.Artifact{
+			ID: uuid.New(), TenantID: tenantID, OrganizationID: uuid.New(), ProjectID: uuid.New(),
+			SessionID: otherSessionID, ExecutionID: &executionID, Kind: "generated_file", Status: "ready",
+			Bucket: "resume-test", ObjectKey: "artifact/other-session", CreatedByType: "system", CreatedByID: uuid.New(),
+			ReadyAt: &readyAt, CreatedAt: now,
+		}
+		seedResumeArtifactAuthorityArtifact(t, db, artifact)
+		_, err := loadResumeArtifactReferences(context.Background(), db, persistence.AgentExecution{
+			TenantID: tenantID, SessionID: sessionID,
+		}, []resumeArtifactEvent{{
+			Sequence: 1, ArtifactID: artifact.ID, SessionID: sessionID, ExecutionID: &executionID,
+		}})
+		assertExecutionProblemCode(t, err, "execution_history_artifact_scope_mismatch")
+	})
+
+	t.Run("cross execution fails closed", func(t *testing.T) {
+		db := newResumeArtifactAuthorityTestDB(t)
+		tenantID := uuid.New()
+		sessionID := uuid.New()
+		executionID := uuid.New()
+		otherExecutionID := uuid.New()
+		now := time.Now().UTC()
+		seedResumeArtifactAuthoritySession(t, db, tenantID, sessionID, now)
+		readyAt := now
+		artifact := persistence.Artifact{
+			ID: uuid.New(), TenantID: tenantID, OrganizationID: uuid.New(), ProjectID: uuid.New(),
+			SessionID: sessionID, ExecutionID: &otherExecutionID, Kind: "generated_file", Status: "ready",
+			Bucket: "resume-test", ObjectKey: "artifact/other-exec", CreatedByType: "system", CreatedByID: uuid.New(),
+			ReadyAt: &readyAt, CreatedAt: now,
+		}
+		seedResumeArtifactAuthorityArtifact(t, db, artifact)
+		_, err := loadResumeArtifactReferences(context.Background(), db, persistence.AgentExecution{
+			TenantID: tenantID, SessionID: sessionID,
+		}, []resumeArtifactEvent{{
+			Sequence: 1, ArtifactID: artifact.ID, SessionID: sessionID, ExecutionID: &executionID,
+		}})
+		assertExecutionProblemCode(t, err, "execution_history_artifact_scope_mismatch")
+	})
+}
+
 func resumeTestEvent(sequence int64, eventType string, payload map[string]any) persistence.SessionEvent {
 	return persistence.SessionEvent{
 		EventID: uuid.New(), Sequence: sequence, EventType: eventType, Payload: payload,
+	}
+}
+
+func newResumeArtifactAuthorityTestDB(t *testing.T) *gorm.DB {
+	t.Helper()
+	db, err := gorm.Open(sqlite.Open("file:"+uuid.NewString()+"?mode=memory&cache=shared"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AutoMigrate(&persistence.AgentSession{}, &persistence.Artifact{}); err != nil {
+		t.Fatal(err)
+	}
+	return db
+}
+
+func seedResumeArtifactAuthoritySession(t *testing.T, db *gorm.DB, tenantID, sessionID uuid.UUID, now time.Time) {
+	t.Helper()
+	if err := db.Create(&persistence.AgentSession{
+		ID: sessionID, TenantID: tenantID, OrganizationID: uuid.New(), ProjectID: uuid.New(), CreatedBy: uuid.New(),
+		Title: "Resume Artifact Authority", Status: "active", Visibility: "private", Provider: "codex",
+		ExecutionTargetID: uuid.New(), LastEventSequence: 1, CreatedAt: now, UpdatedAt: now,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func seedResumeArtifactAuthorityArtifact(t *testing.T, db *gorm.DB, artifact persistence.Artifact) {
+	t.Helper()
+	if err := db.Create(&artifact).Error; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func pointerUUID(value uuid.UUID) *uuid.UUID { return &value }
+
+func assertExecutionProblemCode(t *testing.T, err error, code string) {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("expected problem code %q, got nil", code)
+	}
+	var apiError *problem.Error
+	if !errors.As(err, &apiError) || apiError.Code != code {
+		t.Fatalf("problem error = %v, want code %q", err, code)
 	}
 }

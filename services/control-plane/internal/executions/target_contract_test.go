@@ -160,3 +160,47 @@ func TestRemoteWorkerRequiresLeaseAndFencingAndCannotSwitchTargets(t *testing.T)
 		t.Fatal("worker claimed against an incompatible execution target")
 	}
 }
+
+func TestRegisterRejectsUntrustedProcessContainmentProofByDefault(t *testing.T) {
+	ctx := context.Background()
+	config, _ := platform.Defaults(platform.ProfilePersonal)
+	store, err := database.OpenMetadataStore(ctx, config, "", filepath.Join(t.TempDir(), "metadata.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.Migrate(ctx, migrations.Files); err != nil {
+		t.Fatal(err)
+	}
+	domain, err := bootstrap.Ensure(ctx, store.DB(), platform.ProfilePersonal, "worker-containment-default-trust-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := persistence.ExecutionTarget{
+		ID: uuid.New(), TenantID: &domain.TenantID, OrganizationID: &domain.OrganizationID,
+		Kind: "ssh", Name: "ssh-default-containment", Status: "active", ConfigurationEncrypted: []byte{},
+		Capabilities: map[string]any{
+			"providerPolicy": map[string]any{
+				"experimentalProviders": []any{"codex", "claudeAgent"},
+			},
+		},
+	}
+	if err := store.DB().Create(&target).Error; err != nil {
+		t.Fatal(err)
+	}
+	targetService := executiontargets.NewService(store.DB(), config, nil)
+	service := NewService(store.DB(), nil, 30*time.Second, 90*time.Second, time.Hour, nil, targetService)
+	capabilities := workerManifestTestCapabilities()
+	addWorkerManifestTestContainmentEvidence(capabilities)
+	_, err = service.Register(ctx, RegisterWorkerInput{
+		ExecutionTargetID: target.ID, TargetKind: "ssh",
+		InstanceUID: uuid.NewString(),
+		ClusterID:   "default-trust", Namespace: "default", PodName: "worker-default-trust",
+		Version: "worker-test", ProtocolVersion: WorkerProtocolVersion,
+		Capabilities: capabilities, LeaseSupported: true, FencingSupported: true,
+	})
+	var apiError *problem.Error
+	if !errors.As(err, &apiError) || apiError.Status != 409 || apiError.Code != "worker_containment_untrusted" {
+		t.Fatalf("containment trust problem = %#v", err)
+	}
+}

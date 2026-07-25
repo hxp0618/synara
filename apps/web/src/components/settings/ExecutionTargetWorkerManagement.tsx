@@ -136,12 +136,14 @@ function WorkerCard(props: {
           <code className="break-all font-mono text-[10px] text-muted-foreground">{worker.id}</code>
         </div>
         <ControlPlaneStatusPill value={worker.status} />
+        <ControlPlaneStatusPill active={false} value={worker.workerMode} />
         <ControlPlaneStatusPill value={worker.administrativeStatus} />
         <ControlPlaneStatusPill value={worker.compatibilityStatus} />
       </header>
 
       <dl className="grid gap-x-5 gap-y-1.5 sm:grid-cols-2">
         <WorkerFact label="Target" value={`${props.target.name} · ${worker.targetKind}`} />
+        <WorkerFact label="Worker mode" value={worker.workerMode} />
         <WorkerFact label="Incarnation" mono value={String(worker.incarnation)} />
         <WorkerFact label="Instance UID" mono value={worker.instanceUid} />
         <WorkerFact label="Cluster" mono value={worker.clusterId} />

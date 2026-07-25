@@ -1,11 +1,63 @@
 package agentd
 
 import (
+	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"sync"
 )
+
+const resourceSuspendContainmentCapabilityKey = "resourceSuspendContainment"
+
+type processTreeOptions struct {
+	CgroupV2Root              string
+	ProtectedProviderIdentity *ProtectedCgroupIdentity
+	ContainmentFence          ProtectedCgroupFence
+}
+
+type containmentError struct {
+	phase string
+	err   error
+}
+
+func (e *containmentError) Error() string {
+	if e == nil {
+		return ""
+	}
+	message := "process containment failed"
+	if e.phase != "" {
+		message += " during " + e.phase
+	}
+	if e.err == nil {
+		return message
+	}
+	return fmt.Sprintf("%s: %v", message, e.err)
+}
+
+func (e *containmentError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.err
+}
+
+func newContainmentError(phase string, err error) error {
+	if err == nil {
+		return nil
+	}
+	var containment *containmentError
+	if errors.As(err, &containment) {
+		return err
+	}
+	return &containmentError{phase: phase, err: err}
+}
+
+func isContainmentError(err error) bool {
+	var containment *containmentError
+	return errors.As(err, &containment)
+}
 
 // processOutputPipes uses caller-owned OS pipes so exec.Cmd.Wait can observe
 // the root process independently of descendants that inherited stdout or

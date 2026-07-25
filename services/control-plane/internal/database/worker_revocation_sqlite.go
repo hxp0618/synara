@@ -97,6 +97,7 @@ func migrateWorkerRevocationSQLiteSafety(ctx context.Context, db *gorm.DB) error
 		`CREATE INDEX IF NOT EXISTS idx_worker_instances_claimability
 		 ON worker_instances (
 		   execution_target_id,
+		   worker_mode,
 		   administrative_status,
 		   compatibility_status,
 		   status,

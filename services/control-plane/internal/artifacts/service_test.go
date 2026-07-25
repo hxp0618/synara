@@ -43,6 +43,35 @@ func TestNormalizeCreateAcceptsDiffArtifactKind(t *testing.T) {
 	}
 }
 
+func TestValidateFrozenMemoryArtifactMetadataRequiresExactBundleIdentity(t *testing.T) {
+	size := int64(42)
+	sha := strings.Repeat("a", 64)
+	contentType := "text/markdown; charset=utf-8"
+	model := persistence.Artifact{
+		ID: uuid.New(), ContentType: &contentType, SizeBytes: &size, SHA256: &sha,
+	}
+	reference := executions.RecoveryMemoryReference{
+		ArtifactID: model.ID, SHA256: sha, MediaType: "text/markdown", SizeBytes: size,
+	}
+	if err := validateFrozenMemoryArtifactMetadata(model, reference); err != nil {
+		t.Fatalf("matching frozen Memory metadata rejected: %v", err)
+	}
+
+	for name, mutate := range map[string]func(*executions.RecoveryMemoryReference){
+		"artifact":   func(value *executions.RecoveryMemoryReference) { value.ArtifactID = uuid.New() },
+		"sha256":     func(value *executions.RecoveryMemoryReference) { value.SHA256 = strings.Repeat("b", 64) },
+		"media type": func(value *executions.RecoveryMemoryReference) { value.MediaType = "text/plain" },
+		"size":       func(value *executions.RecoveryMemoryReference) { value.SizeBytes++ },
+	} {
+		t.Run(name, func(t *testing.T) {
+			tampered := reference
+			mutate(&tampered)
+			err := validateFrozenMemoryArtifactMetadata(model, tampered)
+			assertProblemCode(t, err, "memory_artifact_identity_mismatch")
+		})
+	}
+}
+
 func TestLocalArtifactLifecycleAndTenantIsolation(t *testing.T) {
 	fixture := newArtifactFixture(t)
 	payload := []byte("artifact payload\n")
@@ -429,7 +458,7 @@ func seedCheckpointArtifactFixture(
 	checkpointID := uuid.New()
 	leaseToken := "checkpoint-lease-token"
 	worker := persistence.WorkerInstance{
-		ID: workerID, ExecutionTargetID: fixture.targetID, TargetKind: "local", ClusterID: "local",
+		ID: workerID, Incarnation: 1, InstanceUID: uuid.NewString(), ExecutionTargetID: fixture.targetID, TargetKind: "local", ClusterID: "local",
 		Namespace: "default", PodName: "checkpoint-worker", Version: "test", ProtocolVersion: 1,
 		Capabilities: map[string]any{}, LeaseSupported: true, FencingSupported: true,
 		AuthTokenHash: secret.HashToken("worker-token"), Status: "online", RegisteredAt: now, LastHeartbeatAt: now,
@@ -454,7 +483,8 @@ func seedCheckpointArtifactFixture(
 			RequestedBy: fixture.principal.UserID, QueuedAt: now, StartedAt: &now,
 		},
 		&persistence.WorkerLease{
-			ExecutionID: executionID, TenantID: fixture.tenantID, WorkerID: workerID, Generation: 2,
+			ExecutionID: executionID, TenantID: fixture.tenantID, WorkerID: workerID,
+			WorkerIncarnation: worker.Incarnation, WorkerInstanceUID: worker.InstanceUID, Generation: 2,
 			LeaseTokenHash: secret.HashToken(leaseToken), AcquiredAt: now, HeartbeatAt: now, ExpiresAt: now.Add(time.Hour),
 		},
 		&persistence.WorkspaceCheckpoint{
@@ -484,7 +514,7 @@ func seedWorkerArtifactFixture(
 	leaseToken := "current-lease-token"
 	now := time.Now().UTC()
 	worker := persistence.WorkerInstance{
-		ID: workerID, ExecutionTargetID: fixture.targetID, TargetKind: "local", ClusterID: "local",
+		ID: workerID, Incarnation: 1, InstanceUID: uuid.NewString(), ExecutionTargetID: fixture.targetID, TargetKind: "local", ClusterID: "local",
 		Namespace: "default", PodName: "worker-1", Version: "test", ProtocolVersion: 1,
 		Capabilities: map[string]any{}, LeaseSupported: true, FencingSupported: true,
 		AuthTokenHash: secret.HashToken("worker-token"), Status: "online", RegisteredAt: now, LastHeartbeatAt: now,
@@ -501,7 +531,8 @@ func seedWorkerArtifactFixture(
 			WorkerID: &workerID, Generation: 2, RequestedBy: fixture.principal.UserID, QueuedAt: now, StartedAt: &now,
 		},
 		&persistence.WorkerLease{
-			ExecutionID: executionID, TenantID: fixture.tenantID, WorkerID: workerID, Generation: 2,
+			ExecutionID: executionID, TenantID: fixture.tenantID, WorkerID: workerID,
+			WorkerIncarnation: worker.Incarnation, WorkerInstanceUID: worker.InstanceUID, Generation: 2,
 			LeaseTokenHash: secret.HashToken(leaseToken), AcquiredAt: now, HeartbeatAt: now, ExpiresAt: now.Add(time.Hour),
 		},
 	}

@@ -97,6 +97,48 @@ func TestExecutionCredentialGrantsSnapshotAndReplayByGeneration(t *testing.T) {
 	}
 }
 
+func TestExecutionProviderCredentialGrantSnapshotAndReplayByGeneration(t *testing.T) {
+	ctx := context.Background()
+	profile, err := platform.Defaults(platform.ProfilePersonal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := database.OpenMetadataStore(
+		ctx, profile, "", filepath.Join(t.TempDir(), "metadata.sqlite"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.Migrate(ctx, migrations.Files); err != nil {
+		t.Fatal(err)
+	}
+	db := store.DB()
+	fixture := seedExecutionFixture(t, db)
+
+	first := snapshotProviderCredentialGrantForGeneration(t, ctx, db, fixture, 1)
+	if first == nil {
+		t.Fatal("expected an Execution Provider Credential Grant")
+	}
+	replayed := snapshotProviderCredentialGrantForGeneration(t, ctx, db, fixture, 1)
+	if replayed == nil || *replayed != *first {
+		t.Fatalf("same generation did not reuse its immutable Provider Credential Grant: first=%v replay=%v", first, replayed)
+	}
+	second := snapshotProviderCredentialGrantForGeneration(t, ctx, db, fixture, 2)
+	if second == nil || *second == *first {
+		t.Fatalf("replacement generation did not receive a new Provider Credential Grant: first=%v second=%v", first, second)
+	}
+	var count int64
+	if err := db.Model(&persistence.ExecutionProviderCredentialGrant{}).
+		Where("tenant_id = ? AND execution_id = ?", fixture.TenantID, fixture.ExecutionID).
+		Count(&count).Error; err != nil {
+		t.Fatal(err)
+	}
+	if count != 2 {
+		t.Fatalf("expected one immutable Provider Credential Grant per generation, got %d", count)
+	}
+}
+
 func TestClaimPersistsCredentialGrantDescriptorsAndReplaysSameGrant(t *testing.T) {
 	ctx := context.Background()
 	profile, err := platform.Defaults(platform.ProfilePersonal)
@@ -141,6 +183,53 @@ func TestClaimPersistsCredentialGrantDescriptorsAndReplaysSameGrant(t *testing.T
 		len(replayed.Value.Workload.CredentialGrants) != 1 ||
 		replayed.Value.Workload.CredentialGrants[0].GrantID != grantID {
 		t.Fatalf("Claim receipt replay changed the Credential Grant: %#v", replayed)
+	}
+}
+
+func TestClaimPersistsProviderCredentialGrantAndReplaysSameGrant(t *testing.T) {
+	ctx := context.Background()
+	profile, err := platform.Defaults(platform.ProfilePersonal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := database.OpenMetadataStore(
+		ctx, profile, "", filepath.Join(t.TempDir(), "metadata.sqlite"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.Migrate(ctx, migrations.Files); err != nil {
+		t.Fatal(err)
+	}
+	db := store.DB()
+	fixture := seedExecutionFixture(t, db)
+	service := integrationService(t, db)
+	worker := registerManifestTestWorker(
+		t, service, fixture.TargetID, fixture.TargetKind, "provider-credential-grant-claim",
+	)
+	cleanupWorkers(t, db, worker.ID)
+	input := ClaimExecutionInput{
+		ExecutionTargetID: fixture.TargetID, TargetKind: fixture.TargetKind,
+		ExecutionID: &fixture.ExecutionID,
+	}
+
+	first, err := service.Claim(ctx, worker, input, "provider-credential-grant-claim-replay")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Value.Workload == nil || first.Value.Workload.ProviderCredentialGrantID == nil {
+		t.Fatalf("Claim omitted the Provider Credential Grant: %#v", first.Value.Workload)
+	}
+	grantID := *first.Value.Workload.ProviderCredentialGrantID
+	replayed, err := service.Claim(ctx, worker, input, "provider-credential-grant-claim-replay")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !replayed.Replayed || replayed.Value.Workload == nil ||
+		replayed.Value.Workload.ProviderCredentialGrantID == nil ||
+		*replayed.Value.Workload.ProviderCredentialGrantID != grantID {
+		t.Fatalf("Claim receipt replay changed the Provider Credential Grant: %#v", replayed)
 	}
 }
 
@@ -203,4 +292,38 @@ func snapshotCredentialGrantsForGeneration(
 		t.Fatal(err)
 	}
 	return descriptors
+}
+
+func snapshotProviderCredentialGrantForGeneration(
+	t *testing.T,
+	ctx context.Context,
+	db *gorm.DB,
+	fixture executionFixture,
+	generation int64,
+) *uuid.UUID {
+	t.Helper()
+	if err := db.Model(&persistence.AgentExecution{}).
+		Where("tenant_id = ? AND id = ?", fixture.TenantID, fixture.ExecutionID).
+		Updates(map[string]any{
+			"generation": generation,
+			"provider_credential_id_snapshot": fixture.ProviderCredentialID,
+			"provider_credential_version_snapshot": 1,
+		}).Error; err != nil {
+		t.Fatal(err)
+	}
+	var grantID *uuid.UUID
+	err := db.Transaction(func(tx *gorm.DB) error {
+		var execution persistence.AgentExecution
+		if err := tx.Where("tenant_id = ? AND id = ?", fixture.TenantID, fixture.ExecutionID).
+			Take(&execution).Error; err != nil {
+			return err
+		}
+		var err error
+		grantID, err = bindExecutionProviderCredentialGrant(ctx, tx, execution, time.Now().UTC())
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return grantID
 }

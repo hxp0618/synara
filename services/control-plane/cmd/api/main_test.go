@@ -8,6 +8,10 @@ import (
 	"net/http"
 	"testing"
 	"time"
+
+	"github.com/google/uuid"
+
+	"github.com/synara-ai/synara/services/control-plane/internal/billing"
 )
 
 func TestControlPlaneHTTPShutdownCancelsActiveRequestAfterClosingListener(t *testing.T) {
@@ -69,5 +73,18 @@ func TestControlPlaneHTTPShutdownCancelsActiveRequestAfterClosingListener(t *tes
 	case <-clientDone:
 	case <-time.After(2 * time.Second):
 		t.Fatal("HTTP client did not finish after shutdown")
+	}
+}
+
+func TestBillingImportScheduleIntervalUsesMinimumConfiguredJob(t *testing.T) {
+	interval := billingImportScheduleInterval(billing.RuntimeConfig{
+		Imports: []billing.ConfiguredImport{
+			{TenantID: uuid.New(), Provider: "aws", ExternalImportID: "daily", ScheduleInterval: 24 * time.Hour},
+			{TenantID: uuid.New(), Provider: "aws", ExternalImportID: "hourly", ScheduleInterval: time.Hour},
+			{TenantID: uuid.New(), Provider: "aws", ExternalImportID: "manual"},
+		},
+	})
+	if interval != time.Hour {
+		t.Fatalf("billing import schedule interval = %s, want 1h", interval)
 	}
 }

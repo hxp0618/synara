@@ -72,6 +72,7 @@ type CodexRunOptions = {
   redact: TerminalRedactor;
   emit: (message: RunnerMessage) => void;
   authoritativePrompt: string;
+  nativeResumePrompt: string;
   interactive: boolean;
   operation?: ProviderPrimaryOperation;
 };
@@ -193,7 +194,7 @@ class CodexAppServerRuntime {
         return await this.runReview(this.options.operation.payload.target);
       }
       const prompt = resumed
-        ? this.options.input.workload.inputText
+        ? this.options.nativeResumePrompt
         : this.options.authoritativePrompt;
       const turnParams = {
         threadId: this.threadId,
@@ -296,7 +297,10 @@ class CodexAppServerRuntime {
     allowFreshThreadOnResumeFailure = false,
   ): Promise<boolean> {
     const cursor = trimmedString(this.options.input.providerResumeCursor);
-    const historyAvailable = hasAuthoritativeResumeData(this.options.input.workload);
+    const historyAvailable = hasAuthoritativeResumeData(
+      this.options.input.workload,
+      this.options.input.memoryDocuments,
+    );
     const allowCompactHistoryResumeFallback =
       requireNativeResume && this.options.operation?.commandType === "CompactSession";
     const permissions = codexThreadOpenPermissions(

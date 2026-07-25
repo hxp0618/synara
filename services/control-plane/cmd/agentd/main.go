@@ -19,6 +19,13 @@ func main() {
 		}
 		return
 	}
+	if handled, err := agentd.RunProtectedCgroupCommand(context.Background(), os.Args, os.Stdout); handled {
+		if err != nil {
+			_, _ = fmt.Fprintln(os.Stderr, "Protected cgroup command failed")
+			os.Exit(1)
+		}
+		return
+	}
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	cfg, err := agentd.LoadConfig()
 	if err != nil {

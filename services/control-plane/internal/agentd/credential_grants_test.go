@@ -60,6 +60,69 @@ func TestResolveCredentialGrantUsesOpaqueGrantAndCurrentLease(t *testing.T) {
 	}
 }
 
+func TestResolveProviderCredentialGrantUsesOpaqueGrantAndCurrentLease(t *testing.T) {
+	executionID := uuid.New()
+	grantID := uuid.New()
+	tenantID := uuid.New()
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodPost ||
+			request.URL.Path != "/v1/workers/executions/"+executionID.String()+"/provider-credential-grants/"+grantID.String()+"/resolve" {
+			t.Fatalf("unexpected Provider Credential Grant request: %s %s", request.Method, request.URL.Path)
+		}
+		if request.Header.Get("Authorization") != "Bearer worker-token" {
+			t.Fatalf("Provider Credential Grant request omitted Worker authentication: %q", request.Header.Get("Authorization"))
+		}
+		var lease executions.LeaseInput
+		if err := json.NewDecoder(request.Body).Decode(&lease); err != nil {
+			t.Fatal(err)
+		}
+		if lease.TenantID != tenantID || lease.Generation != 7 || lease.LeaseToken != "lease-token" {
+			t.Fatalf("Provider Credential Grant request used the wrong Lease: %#v", lease)
+		}
+		issuedAt := time.Now().UTC().Add(-time.Minute)
+		activityAt := issuedAt.Add(30 * time.Second)
+		renewedAt := activityAt.Add(10 * time.Second)
+		refreshDeadlineAt := renewedAt.Add(20 * time.Second)
+		expiresAt := refreshDeadlineAt.Add(30 * time.Second)
+		renewAfterAt := renewedAt.Add(10 * time.Second)
+		response.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(response).Encode(map[string]any{
+			"grantId": grantID,
+			"access": map[string]any{
+				"grantId": grantID,
+				"serial": 11,
+				"status": "active",
+				"activitySequence": 4,
+				"activityAt": activityAt,
+				"issuedAt": issuedAt,
+				"renewedAt": renewedAt,
+				"expiresAt": expiresAt,
+				"refreshDeadlineAt": refreshDeadlineAt,
+				"renewAfterAt": renewAfterAt,
+			},
+			"payload": map[string]any{"apiKey": "provider-secret", "baseUrl": "https://api.example.com"},
+		})
+	}))
+	t.Cleanup(server.Close)
+	baseURL, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := NewClient(Config{ControlPlaneURL: baseURL, RequestTimeout: time.Second, ArtifactTimeout: time.Second})
+	client.workerToken = "worker-token"
+
+	resolved, err := client.ResolveProviderCredentialGrant(context.Background(), executionID, grantID, executions.Lease{
+		TenantID: tenantID, Generation: 7, LeaseToken: "lease-token",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.GrantID != grantID || resolved.Access == nil || resolved.Access.Serial != 11 ||
+		resolved.Payload["apiKey"] != "provider-secret" {
+		t.Fatalf("unexpected resolved Provider Credential Grant: %#v", resolved)
+	}
+}
+
 func TestResolveCredentialStageResolvesOnlyRequestedDescriptor(t *testing.T) {
 	executionID := uuid.New()
 	gitGrantID := uuid.New()

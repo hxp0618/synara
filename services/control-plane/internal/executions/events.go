@@ -65,6 +65,10 @@ func (s *Service) AppendRuntimeEvent(
 		if err != nil {
 			return RuntimeEventResult{}, err
 		}
+		if err := s.requireExecutionSessionWithinAbsoluteLifetime(ctx, tx, execution, s.now()); err != nil {
+			return RuntimeEventResult{}, err
+		}
+		observedAt := s.now()
 		if kind, pending := pendingInteractionKind(input.EventVersion, input.EventType); pending {
 			if err := s.persistPendingInteraction(
 				ctx, tx, worker, &execution, input.EventVersion, kind, input.Payload, input.OccurredAt,
@@ -75,11 +79,26 @@ func (s *Service) AppendRuntimeEvent(
 		appended, err = s.sessions.AppendInternalEvent(ctx, tx, execution.TenantID, execution.SessionID, sessions.InternalEventInput{
 			EventID: &input.EventID, EventVersion: input.EventVersion,
 			EventType: input.EventType, ActorType: "worker", ActorID: &worker.ID,
-			ExecutionID: &execution.ID, WorkerID: &worker.ID, Generation: &execution.Generation,
+			MeaningfulActivity: meaningfulRuntimeActivity(input.EventType),
+			ExecutionID:        &execution.ID, WorkerID: &worker.ID, Generation: &execution.Generation,
 			Payload: input.Payload, OccurredAt: &input.OccurredAt,
 		})
 		if err != nil {
 			return RuntimeEventResult{}, err
+		}
+		if input.EventType == "session.started" {
+			if err := s.markExecutionGenerationProviderReadyLocked(
+				ctx, tx, execution, observedAt,
+			); err != nil {
+				return RuntimeEventResult{}, err
+			}
+		}
+		if input.EventType == "runtime.warning" {
+			if err := s.recordExecutionGenerationFallbackLocked(
+				ctx, tx, execution, input.Payload, observedAt,
+			); err != nil {
+				return RuntimeEventResult{}, err
+			}
 		}
 		return RuntimeEventResult{
 			EventID: appended.EventID, SessionID: appended.SessionID,
@@ -107,6 +126,34 @@ var canonicalRuntimeEventV2Types = map[string]struct{}{
 	"account.rate-limits.updated": {}, "mcp.status.updated": {}, "mcp.oauth.completed": {},
 	"model.rerouted": {}, "config.warning": {}, "deprecation.notice": {}, "files.persisted": {},
 	"runtime.warning": {}, "runtime.error": {},
+}
+
+// meaningfulRuntimeActivity is deliberately narrower than the accepted Runtime
+// Event vocabulary. Provider status, usage, account, and connection bookkeeping
+// may be emitted periodically and must not keep a Session resource alive. Only
+// events that represent conversation progress, an interaction, or an actual
+// tool/turn transition renew the server-authoritative activity clock.
+var meaningfulRuntimeEventTypes = map[string]struct{}{
+	// Legacy Runtime Event v1 compatibility.
+	"runtime.output.delta": {}, "runtime.command.output": {}, "runtime.provider.activity": {},
+	"runtime.provider.warning": {}, "approval.requested": {}, "approval.resolved": {},
+	"user-input.requested": {}, "user-input.resolved": {},
+
+	// Canonical Runtime Event v2 semantic progress.
+	"thread.realtime.item-added": {}, "thread.realtime.audio.delta": {}, "thread.realtime.error": {},
+	"turn.started": {}, "turn.completed": {}, "turn.aborted": {}, "turn.tasks.updated": {},
+	"turn.proposed.delta": {}, "turn.proposed.completed": {}, "turn.diff.updated": {}, "turn.steered": {},
+	"item.started": {}, "item.updated": {}, "item.completed": {}, "content.delta": {},
+	"request.opened": {}, "request.resolved": {},
+	"task.started": {}, "task.progress": {}, "task.updated": {}, "task.completed": {},
+	"hook.started": {}, "hook.progress": {}, "hook.completed": {},
+	"tool.progress": {}, "tool.summary": {}, "model.rerouted": {}, "files.persisted": {},
+	"runtime.warning": {}, "runtime.error": {},
+}
+
+func meaningfulRuntimeActivity(eventType string) bool {
+	_, ok := meaningfulRuntimeEventTypes[eventType]
+	return ok
 }
 
 func IsCanonicalRuntimeEventV2Type(eventType string) bool {

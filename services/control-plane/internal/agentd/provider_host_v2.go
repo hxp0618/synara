@@ -28,7 +28,7 @@ const (
 	RunnerProtocolV2 RunnerProtocol = "v2"
 
 	providerHostProtocolMajor       = 2
-	providerHostProtocolMinor       = 1
+	providerHostProtocolMinor       = 2
 	providerHostCommandLimit        = 2 << 20
 	providerHostRuntimeEventVersion = executions.RuntimeEventVersionV2
 	providerHostExperimentalEnv     = "SYNARA_PROVIDER_HOST_EXPERIMENTAL_PROVIDERS"
@@ -155,6 +155,12 @@ func runnerFailureCode(err error) string {
 	if errors.As(err, &exposure) && exposure.Code == secretguard.ErrorCode {
 		return secretguard.ErrorCode
 	}
+	if isContainmentError(err) {
+		return "worker_containment_failed"
+	}
+	if _, suspended := runnerSuspendedTerminal(err); suspended {
+		return "suspended"
+	}
 	var failure *runnerFailure
 	if errors.As(err, &failure) && strings.TrimSpace(failure.code) != "" {
 		return failure.code
@@ -184,7 +190,7 @@ func (r *Runner) CapabilitySummary(ctx context.Context) (map[string]any, error) 
 	}, nil
 }
 
-func (r *Runner) describeProviderHostV2(ctx context.Context, provider string) (providerHostDescriptor, error) {
+func (r *Runner) describeProviderHostV2(ctx context.Context, provider string) (descriptor providerHostDescriptor, err error) {
 	process, err := r.startProviderHostV2(ctx, nil)
 	if err != nil {
 		return providerHostDescriptor{}, err
@@ -192,7 +198,7 @@ func (r *Runner) describeProviderHostV2(ctx context.Context, provider string) (p
 	finished := false
 	defer func() {
 		if !finished {
-			process.abort()
+			err = errors.Join(err, process.abort())
 		}
 	}()
 	command := newProviderHostCommand(
@@ -203,7 +209,7 @@ func (r *Runner) describeProviderHostV2(ctx context.Context, provider string) (p
 	if err != nil {
 		return providerHostDescriptor{}, err
 	}
-	descriptor, err := descriptorFromResult(terminal)
+	descriptor, err = descriptorFromResult(terminal)
 	if err != nil {
 		return providerHostDescriptor{}, err
 	}
@@ -226,7 +232,7 @@ func (r *Runner) runProviderHostV2(
 	primary *RunnerPrimaryOperationControl,
 	controls <-chan RunnerControl,
 	handle func(context.Context, RunnerMessage) error,
-) (RunnerResult, error) {
+) (result RunnerResult, err error) {
 	process, err := r.startProviderHostV2(ctx, credential)
 	if err != nil {
 		return RunnerResult{}, err
@@ -234,7 +240,7 @@ func (r *Runner) runProviderHostV2(
 	finished := false
 	defer func() {
 		if !finished {
-			process.abort()
+			err = errors.Join(err, process.abort())
 		}
 	}()
 
@@ -297,7 +303,7 @@ func (r *Runner) runProviderHostV2(
 			if outcome.err != nil {
 				return RunnerResult{}, outcome.err
 			}
-			result, err := runnerResultFromTerminal(outcome.message)
+			result, err = runnerResultFromTerminal(outcome.message)
 			if err != nil {
 				return RunnerResult{}, err
 			}
@@ -314,27 +320,52 @@ func (r *Runner) runProviderHostV2(
 				controls = nil
 				continue
 			}
-			terminalized, controlErr := process.executeControl(ctx, input, activeCommand.CommandID, control)
+			controlResult, controlErr := process.executeControlDetailed(
+				ctx,
+				input,
+				activeCommand.CommandID,
+				activeCommand.CommandType,
+				control,
+			)
 			if control.Done != nil {
 				control.Done <- controlErr
 			}
 			if controlErr != nil {
 				return RunnerResult{}, controlErr
 			}
-			if terminalized {
+			if controlResult.terminalState != runnerControlTerminalContinue {
+				if err := process.finishTerminalizedActiveCommand(ctx, activeExecution); err != nil {
+					return RunnerResult{}, err
+				}
+				finished = true
+			}
+			switch controlResult.terminalState {
+			case runnerControlTerminalInterrupted:
 				return RunnerResult{}, &runnerFailure{
 					code: "interrupted", message: "Provider turn was interrupted.", persistedTerminal: true,
 				}
+			case runnerControlTerminalSuspended:
+				return RunnerResult{}, controlResult.suspended
 			}
 		case <-ctx.Done():
-			if err := process.interruptActiveTurn(input, activeCommand.CommandID); err == nil {
+			shutdownErr := process.interruptActiveTurn(input, activeCommand.CommandID)
+			if shutdownErr == nil {
 				timer := time.NewTimer(2 * time.Second)
 				select {
-				case <-activeExecution.result:
-					if finishErr := process.finish(); finishErr == nil {
+				case outcome := <-activeExecution.result:
+					outcomeErr := outcome.err
+					var interrupted *runnerFailure
+					if errors.As(outcomeErr, &interrupted) &&
+						(interrupted.code == "interrupted" || interrupted.code == "cancelled") {
+						outcomeErr = nil
+					}
+					finishErr := process.finish()
+					shutdownErr = errors.Join(outcomeErr, finishErr)
+					if shutdownErr == nil {
 						finished = true
 					}
 				case <-timer.C:
+					shutdownErr = errors.New("Provider Host did not acknowledge interruption before the quiesce deadline")
 				}
 				if !timer.Stop() {
 					select {
@@ -342,6 +373,9 @@ func (r *Runner) runProviderHostV2(
 					default:
 					}
 				}
+			}
+			if shutdownErr != nil {
+				return RunnerResult{}, errors.Join(ctx.Err(), shutdownErr)
 			}
 			return RunnerResult{}, ctx.Err()
 		}
@@ -428,25 +462,40 @@ func (p *providerHostV2Process) executeControl(
 	targetCommandID string,
 	control RunnerControl,
 ) (bool, error) {
+	result, err := p.executeControlDetailed(ctx, input, targetCommandID, "SendTurn", control)
+	return result.terminalState != runnerControlTerminalContinue, err
+}
+
+func (p *providerHostV2Process) executeControlDetailed(
+	ctx context.Context,
+	input RunnerInput,
+	targetCommandID string,
+	activeCommandType string,
+	control RunnerControl,
+) (runnerControlExecutionResult, error) {
 	if control.Err != nil {
-		return false, control.Err
+		return runnerControlExecutionResult{}, control.Err
 	}
 	delivery := control.Command
 	if normalizeProvider(delivery.Provider) != normalizeProvider(input.Workload.Provider) {
-		return false, protocolFailure("Control command Provider does not match the active Provider Session")
+		return runnerControlExecutionResult{}, protocolFailure("Control command Provider does not match the active Provider Session")
 	}
 	if delivery.CommandType != "ResolveApproval" && delivery.CommandType != "ResolveUserInput" &&
-		delivery.CommandType != "SteerTurn" && delivery.CommandType != "InterruptTurn" {
-		return false, protocolFailure("Worker delivery uses an unsupported Provider Host command")
+		delivery.CommandType != "SteerTurn" && delivery.CommandType != "InterruptTurn" &&
+		delivery.CommandType != "SuspendTurn" {
+		return runnerControlExecutionResult{}, protocolFailure("Worker delivery uses an unsupported Provider Host command")
 	}
 	if strings.TrimSpace(delivery.CommandID) == "" || delivery.Payload == nil {
-		return false, protocolFailure("Worker delivery omitted required command fields")
+		return runnerControlExecutionResult{}, protocolFailure("Worker delivery omitted required command fields")
+	}
+	if delivery.CommandType == "SuspendTurn" && activeCommandType != "SendTurn" {
+		return runnerControlExecutionResult{}, protocolFailure("SuspendTurn requires an active SendTurn")
 	}
 	payload := make(map[string]any, len(delivery.Payload)+1)
 	for key, value := range delivery.Payload {
 		payload[key] = value
 	}
-	if delivery.CommandType == "SteerTurn" || delivery.CommandType == "InterruptTurn" {
+	if delivery.CommandType == "SteerTurn" || delivery.CommandType == "InterruptTurn" || delivery.CommandType == "SuspendTurn" {
 		payload["targetCommandId"] = targetCommandID
 	}
 	command := newProviderHostCommand(
@@ -454,7 +503,7 @@ func (p *providerHostV2Process) executeControl(
 		payload,
 	)
 	if control.MarkDelivered == nil || control.Acknowledge == nil {
-		return false, protocolFailure("Worker delivery omitted persistence callbacks")
+		return runnerControlExecutionResult{}, protocolFailure("Worker delivery omitted persistence callbacks")
 	}
 	beforeWrite := func() error {
 		if err := control.MarkDelivered(ctx); err != nil {
@@ -464,16 +513,65 @@ func (p *providerHostV2Process) executeControl(
 	}
 	execution, err := p.startCommandBeforeWrite(ctx, command, nil, beforeWrite)
 	if err != nil {
-		return false, err
+		return runnerControlExecutionResult{}, err
 	}
 	terminal, terminalErr := execution.waitContext(ctx)
 	if terminalErr != nil {
-		return false, terminalErr
+		return runnerControlExecutionResult{}, terminalErr
+	}
+	var suspended *runnerSuspended
+	if delivery.CommandType == "SuspendTurn" {
+		suspended, err = runnerSuspendedResultFromPayload(targetCommandID, terminal.Payload)
+		if err != nil {
+			return runnerControlExecutionResult{}, err
+		}
 	}
 	if err := control.Acknowledge(ctx, terminal.Payload); err != nil {
-		return false, fmt.Errorf("acknowledge Provider Host command: %w", err)
+		return runnerControlExecutionResult{}, fmt.Errorf("acknowledge Provider Host command: %w", err)
 	}
-	return delivery.CommandType == "InterruptTurn", nil
+	switch delivery.CommandType {
+	case "InterruptTurn":
+		return runnerControlExecutionResult{terminalState: runnerControlTerminalInterrupted}, nil
+	case "SuspendTurn":
+		return runnerControlExecutionResult{
+			terminalState: runnerControlTerminalSuspended,
+			suspended:     suspended,
+		}, nil
+	default:
+		return runnerControlExecutionResult{terminalState: runnerControlTerminalContinue}, nil
+	}
+}
+
+func runnerSuspendedResultFromPayload(targetCommandID string, payload map[string]any) (*runnerSuspended, error) {
+	if len(payload) == 0 {
+		return nil, protocolFailure("SuspendTurn Result omitted its checkpoint payload")
+	}
+	quiesced, _ := payload["quiesced"].(bool)
+	activeCommandID, _ := payload["targetCommandId"].(string)
+	checkpointProtocol, _ := payload["checkpointProtocol"].(string)
+	activeCommandID = strings.TrimSpace(activeCommandID)
+	checkpointProtocol = strings.TrimSpace(checkpointProtocol)
+	if !quiesced || activeCommandID != targetCommandID || checkpointProtocol != runnerSuspendCheckpointProtocol {
+		return nil, protocolFailure("SuspendTurn Result omitted the durable checkpoint receipt")
+	}
+	return &runnerSuspended{
+		TargetCommandID:    activeCommandID,
+		CheckpointProtocol: checkpointProtocol,
+	}, nil
+}
+
+func (p *providerHostV2Process) finishTerminalizedActiveCommand(
+	ctx context.Context,
+	activeExecution *providerHostCommandExecution,
+) error {
+	if _, err := activeExecution.waitContext(ctx); err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return err
+		}
+		// Durable terminal controls own the user-visible outcome. The active
+		// command still needs to drain so shutdown can prove the Host is empty.
+	}
+	return p.finish()
 }
 
 func newProviderHostCommand(
@@ -811,6 +909,19 @@ type providerHostCommandExecution struct {
 	result <-chan providerHostCommandOutcome
 }
 
+type runnerControlTerminalState int
+
+const (
+	runnerControlTerminalContinue runnerControlTerminalState = iota
+	runnerControlTerminalInterrupted
+	runnerControlTerminalSuspended
+)
+
+type runnerControlExecutionResult struct {
+	terminalState runnerControlTerminalState
+	suspended     *runnerSuspended
+}
+
 func (e *providerHostCommandExecution) wait() (providerHostMessage, error) {
 	outcome := <-e.result
 	return outcome.message, outcome.err
@@ -837,7 +948,7 @@ func (r *Runner) startProviderHostV2(
 		arguments = append(arguments, "--protocol-v2")
 	}
 	command := exec.Command(r.command[0], arguments...)
-	processTree, err := newProcessTree(command)
+	processTree, err := newProcessTree(command, r.processTreeOptions())
 	if err != nil {
 		return nil, &runnerFailure{
 			code: "provider_unavailable", message: safeRunnerMessage("prepare Provider Host process tree: " + err.Error()),
@@ -892,25 +1003,25 @@ func (r *Runner) startProviderHostV2(
 	if err := ctx.Err(); err != nil {
 		_ = stdin.Close()
 		closeProviderHostFiles(command)
-		return nil, err
+		return nil, errors.Join(err, processTree.release())
 	}
 	if err := command.Start(); err != nil {
 		_ = stdin.Close()
 		closeProviderHostFiles(command)
-		return nil, &runnerFailure{
+		startErr := &runnerFailure{
 			code: "provider_unavailable", message: safeRunnerMessage("start Provider Host: " + err.Error()),
 			retryable: true, canReconstructFromHistory: true, canMoveWorker: true,
 		}
+		return nil, errors.Join(startErr, processTree.release())
 	}
 	if err := processTree.started(); err != nil {
-		_ = processTree.terminate()
-		_ = command.Wait()
 		_ = stdin.Close()
 		closeProviderHostFiles(command)
-		return nil, &runnerFailure{
+		startErr := &runnerFailure{
 			code: "provider_unavailable", message: safeRunnerMessage("isolate Provider Host process tree: " + err.Error()),
 			retryable: true, canReconstructFromHistory: true, canMoveWorker: true,
 		}
+		return nil, errors.Join(startErr, processTree.terminate(), command.Wait(), processTree.release())
 	}
 	outputPipes.started()
 	closeProviderHostFiles(command)
@@ -1094,7 +1205,7 @@ func (p *providerHostV2Process) readLoop(scanner *bufio.Scanner) {
 		p.fail(protocolFailure("Provider Host emitted a malformed or oversized JSONL message"))
 	}
 	waitErr := p.waitProcess()
-	_ = p.processTree.terminate()
+	terminateErr := p.processTree.terminate()
 	p.outputPipes.waitStderr()
 	p.mu.Lock()
 	fatalErr := p.fatalErr
@@ -1102,6 +1213,10 @@ func (p *providerHostV2Process) readLoop(scanner *bufio.Scanner) {
 	active := len(p.commands)
 	p.mu.Unlock()
 	if fatalErr != nil {
+		return
+	}
+	if terminateErr != nil {
+		p.fail(terminateErr)
 		return
 	}
 	if waitErr != nil {
@@ -1218,35 +1333,34 @@ func (p *providerHostV2Process) finish() error {
 		return fmt.Errorf("close Provider Host stdin: %w", err)
 	}
 	<-p.readerDone
-	defer p.releaseProcessResources()
 	p.mu.Lock()
 	fatalErr := p.fatalErr
 	p.mu.Unlock()
 	if fatalErr != nil {
-		return fatalErr
+		return errors.Join(fatalErr, p.releaseProcessResources())
 	}
 	if err := p.waitProcess(); err != nil {
-		return p.processFailure(err)
+		return errors.Join(p.processFailure(err), p.releaseProcessResources())
 	}
 	if err := p.credentialResult(); err != nil {
-		return &runnerFailure{
+		return errors.Join(&runnerFailure{
 			code: "credential_invalid", message: "Provider credential could not be delivered to the Provider Host",
 			requiresNewExecution: true, requiresUserAction: true, canMoveWorker: true,
-		}
+		}, p.releaseProcessResources())
 	}
-	return nil
+	return p.releaseProcessResources()
 }
 
-func (p *providerHostV2Process) abort() {
+func (p *providerHostV2Process) abort() error {
 	p.mu.Lock()
 	p.closing = true
 	p.mu.Unlock()
 	_ = p.stdin.Close()
-	_ = p.processTree.terminate()
+	terminateErr := p.processTree.terminate()
 	<-p.readerDone
 	_ = p.waitProcess()
 	_ = p.credentialResult()
-	p.releaseProcessResources()
+	return errors.Join(terminateErr, p.releaseProcessResources())
 }
 
 func (p *providerHostV2Process) fail(err error) {
@@ -1255,6 +1369,7 @@ func (p *providerHostV2Process) fail(err error) {
 	}
 	p.mu.Lock()
 	if p.fatalErr != nil {
+		p.fatalErr = errors.Join(p.fatalErr, err)
 		p.mu.Unlock()
 		return
 	}
@@ -1274,9 +1389,9 @@ func (p *providerHostV2Process) fail(err error) {
 	_ = p.processTree.terminate()
 }
 
-func (p *providerHostV2Process) releaseProcessResources() {
+func (p *providerHostV2Process) releaseProcessResources() error {
 	p.outputPipes.close()
-	_ = p.processTree.release()
+	return p.processTree.release()
 }
 
 func (p *providerHostV2Process) waitProcess() error {

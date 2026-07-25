@@ -193,15 +193,30 @@ func TestProviderCursorClaimReplayRejectsCursorWrittenAfterInitialClaim(t *testi
 func TestProviderCursorIssuedBeyondClockSkewIsQuarantinedOnSQLite(t *testing.T) {
 	ctx := context.Background()
 	db, service, worker, fixture := sqliteProviderCursorPolicyFixture(t)
-	issuedAt := time.Date(2026, 7, 14, 16, 0, 0, 0, time.UTC)
-	current := issuedAt
+	observedAt := time.Date(2026, 7, 14, 16, 0, 0, 0, time.UTC)
+	current := observedAt
 	service.providerCursorMaximumAge = time.Hour
 	service.now = func() time.Time { return current }
-	seedUsableProviderCursor(t, ctx, db, service, worker, fixture, fixture.ExecutionID, "future-provider-cursor")
+	const cursor = "future-provider-cursor"
+	seedUsableProviderCursor(t, ctx, db, service, worker, fixture, fixture.ExecutionID, cursor)
+	var sourceExecution persistence.AgentExecution
+	if err := db.Where("tenant_id = ? AND id = ?", fixture.TenantID, fixture.ExecutionID).
+		Take(&sourceExecution).Error; err != nil {
+		t.Fatal(err)
+	}
+	// Move only the Provider cursor issuer into the future. The Worker fact
+	// clock remains monotonic, so this test isolates cursor quarantine rather
+	// than relying on a globally regressed Control Plane clock.
+	current = observedAt.Add(providerCursorMaximumFutureSkew + time.Nanosecond)
+	if err := db.Transaction(func(tx *gorm.DB) error {
+		return service.storeProviderCursor(ctx, tx, sourceExecution, pointer(cursor), true)
+	}); err != nil {
+		t.Fatal(err)
+	}
 	before := loadProviderCursorSessionForTest(t, db, fixture)
 
 	execution := createNextCursorExecution(t, db, fixture, "resume with future Cursor timestamp")
-	current = issuedAt.Add(-providerCursorMaximumFutureSkew - time.Nanosecond)
+	current = observedAt
 	claim := claimCursorExecution(t, ctx, service, worker, fixture, execution.ID, "sqlite-future-cursor-claim")
 	if claim.Value.ProviderResumeCursor != nil {
 		t.Fatalf("future-issued Cursor reached the Worker: %#v", claim.Value.ProviderResumeCursor)
@@ -234,6 +249,8 @@ func sqliteProviderCursorPolicyFixture(
 	fixture := seedExecutionFixture(t, store.DB())
 	service := cursorIntegrationService(t, store.DB(), bytes.Repeat([]byte{0x42}, 32))
 	service.heartbeatTimeout = 24 * time.Hour
+	registrationAt := time.Date(2026, 7, 14, 0, 0, 0, 0, time.UTC)
+	service.now = func() time.Time { return registrationAt }
 	worker := registerManifestTestWorker(t, service, fixture.TargetID, fixture.TargetKind, "sqlite-cursor-policy")
 	cleanupWorkers(t, store.DB(), worker.ID)
 	return store.DB(), service, worker, fixture

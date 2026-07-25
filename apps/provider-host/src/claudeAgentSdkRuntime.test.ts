@@ -949,6 +949,83 @@ describe("Claude Agent SDK runtime", () => {
     expect(calls).toBe(1);
   });
 
+  it("sends recovery metadata in the resumed turn when native resume succeeds", async () => {
+    let calls = 0;
+    const queryFactory: ClaudeQueryFactory = ({ prompt, options }) =>
+      fakeQuery(
+        (async function* () {
+          calls += 1;
+          expect(requiredOptions(options).resume).toBe("session-existing");
+          const text = await promptText(prompt);
+          expect(text).toContain("<synara_agent_memory_json>");
+          expect(text).toContain('"memoryKey":"instructions"');
+          expect(text).toContain("<synara_resume_snapshot_json>");
+          expect(text).toContain('"requestId":"approval-suspended"');
+          expect(text).toContain(
+            "<current_user>\ncontinue from the suspended approval\n</current_user>",
+          );
+          expect(text).not.toContain("<synara_transcript>");
+          expect(text).not.toContain("prior native question");
+          expect(text).not.toContain("prior native answer");
+          yield sdkMessage(systemInit("session-existing", "claude-test"));
+          yield sdkMessage(successResult("session-existing", "resumed with metadata", {}));
+        })(),
+      );
+    const run = startProviderHostRun(
+      {
+        ...claudeInput({ inputText: "continue from the suspended approval" }),
+        providerResumeCursor: "session-existing",
+        workload: {
+          provider: "claudeAgent",
+          inputText: "continue from the suspended approval",
+          resumeSnapshot: {
+            version: 1,
+            sessionId: "session-1",
+            turnId: "turn-2",
+            provider: "claudeAgent",
+            messages: [
+              { role: "user", text: "prior native question" },
+              { role: "assistant", text: "prior native answer" },
+            ],
+            resumeRecordedInteractions: [
+              {
+                kind: "approval",
+                requestId: "approval-suspended",
+                resolutionKind: "approved",
+                resolution: { decision: "accept" },
+              },
+            ],
+            workspace: {
+              workspaceId: "workspace-1",
+              checkpoint: { checkpointId: "checkpoint-1", strategy: "git-reference" },
+            },
+          },
+        },
+        memoryDocuments: [
+          {
+            scope: "session",
+            scopeId: "session-1",
+            memoryKey: "instructions",
+            revisionId: "revision-1",
+            artifactId: "artifact-1",
+            sha256: "d".repeat(64),
+            contentType: "text/plain",
+            content: "Remember the preferred deployment environment.",
+          },
+        ],
+      },
+      null,
+      () => {},
+      { claudeQueryFactory: queryFactory },
+    );
+
+    await expect(run.result).resolves.toMatchObject({
+      output: { text: "resumed with metadata" },
+      providerResumeCursor: "session-existing",
+    });
+    expect(calls).toBe(1);
+  });
+
   it("falls back to bounded authoritative history when native resume is invalid", async () => {
     const prompts: string[] = [];
     const systemPromptAppends: string[] = [];
@@ -1064,7 +1141,11 @@ describe("Claude Agent SDK runtime", () => {
       output: { text: "INPUT_OK:Staging" },
       providerResumeCursor: "session-rebuilt",
     });
-    expect(prompts[0]).toBe("make a deployment plan");
+    expect(prompts[0]).toContain("<synara_resume_snapshot_json>");
+    expect(prompts[0]).toContain("Focused tests passed");
+    expect(prompts[0]).toContain("<current_user>\nmake a deployment plan\n</current_user>");
+    expect(prompts[0]).not.toContain("<synara_transcript>");
+    expect(prompts[0]).not.toContain("<assistant>\nresponse\n</assistant>");
     expect(systemPromptAppends[0]).not.toContain(
       "This user prompt is a durable Synara reconstruction",
     );

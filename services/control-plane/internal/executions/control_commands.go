@@ -29,6 +29,7 @@ const (
 var controlCommandCapabilityIDs = map[string]string{
 	"SteerTurn":       "steer-turn",
 	"InterruptTurn":   "interrupt-turn",
+	"SuspendTurn":     activeTurnSuspendCapabilityID,
 	"CompactSession":  "compact",
 	"RollbackSession": "rollback",
 	"ForkSession":     "fork",
@@ -42,16 +43,17 @@ var primaryControlCommandTypes = []string{
 }
 
 type controlCommandRequest struct {
-	CommandType     string
-	CommandPrefix   string
-	Operation       string
-	Permission      authorization.Permission
-	ActiveStatuses  []string
-	NotFoundMessage string
-	RequestedEvent  string
-	AuditAction     string
-	Payload         map[string]any
-	ReuseActive     bool
+	CommandType              string
+	CommandPrefix            string
+	Operation                string
+	Permission               authorization.Permission
+	ActiveStatuses           []string
+	NotFoundMessage          string
+	RequestedEvent           string
+	AuditAction              string
+	Payload                  map[string]any
+	ReuseActive              bool
+	AllowAfterAbsoluteExpiry bool
 }
 
 func (s *Service) RequestInterrupt(
@@ -67,6 +69,7 @@ func (s *Service) RequestInterrupt(
 		NotFoundMessage: "The Session does not have an active Execution to interrupt.",
 		RequestedEvent:  "turn.interrupt-requested", AuditAction: "turn.interrupt_requested",
 		Payload: map[string]any{}, ReuseActive: true,
+		AllowAfterAbsoluteExpiry: true,
 	})
 }
 
@@ -129,6 +132,15 @@ func (s *Service) requestControlCommand(
 		if executionErr != nil {
 			return ControlCommand{}, problem.Wrap(500, "execution_lock_failed", "The active Execution could not be locked.", executionErr)
 		}
+		now := s.now()
+		if !request.AllowAfterAbsoluteExpiry && session.AbsoluteExpiresAt != nil &&
+			!session.AbsoluteExpiresAt.After(now) {
+			return ControlCommand{}, problem.New(
+				409,
+				"session_absolute_expired",
+				"The Session reached its absolute lifetime and cannot accept new Execution work.",
+			)
+		}
 
 		if request.ReuseActive {
 			var existing persistence.ExecutionControlCommand
@@ -158,7 +170,6 @@ func (s *Service) requestControlCommand(
 		if err := requireExecutionCapability(ctx, tx, execution, provider, capabilityID); err != nil {
 			return ControlCommand{}, err
 		}
-		now := s.now()
 		commandID := uuid.New()
 		payload := make(map[string]any, len(request.Payload)+1)
 		for key, value := range request.Payload {
@@ -515,6 +526,10 @@ func (s *Service) updateControlCommandDelivery(
 			return s.acknowledgeSteerControlCommand(
 				ctx, tx, worker, execution, command, input, now, &appended,
 			)
+		case activeTurnSuspendCommandType:
+			return s.acknowledgeSuspendControlCommand(
+				ctx, tx, worker, execution, command, input, now, &appended,
+			)
 		case "CompactSession", "StartReview", "RollbackSession", "ForkSession":
 			return s.acknowledgePrimaryControlCommand(
 				ctx, tx, worker, lease, execution, command, input, now, &appended,
@@ -547,11 +562,20 @@ func (s *Service) acknowledgeInterruptControlCommand(
 	if err := s.storeProviderCursor(ctx, tx, execution, input.ProviderResumeCursor, true); err != nil {
 		return ControlCommand{}, err
 	}
+	if err := supersedeResourceSuspendAttempts(
+		ctx, tx, execution, now, "execution_interrupted",
+		"The Execution was interrupted while a resource suspension attempt was in progress.",
+	); err != nil {
+		return ControlCommand{}, err
+	}
 	if err := s.supersedeInteractionGeneration(ctx, tx, execution, lease); err != nil {
 		return ControlCommand{}, err
 	}
 	if err := tx.WithContext(ctx).Delete(&lease).Error; err != nil {
 		return ControlCommand{}, problem.Wrap(500, "lease_release_failed", "Failed to release the interrupted Execution lease.", err)
+	}
+	if err := transitionWorkerAfterLeaseReleasedLocked(ctx, tx, lease, now); err != nil {
+		return ControlCommand{}, err
 	}
 	updatedCommand := tx.WithContext(ctx).Model(&persistence.ExecutionControlCommand{}).
 		Where("tenant_id = ? AND execution_id = ? AND id = ? AND status = ?", execution.TenantID, execution.ID, command.ID, "delivered").
@@ -591,6 +615,11 @@ func (s *Service) acknowledgeInterruptControlCommand(
 		return ControlCommand{}, err
 	}
 	*appended = append(*appended, event)
+	if err := s.markExecutionGenerationTerminalOutcomeLocked(
+		ctx, tx, execution, now, generationTerminalOutcomeInterrupted,
+	); err != nil {
+		return ControlCommand{}, err
+	}
 	if err := outbox.Enqueue(ctx, tx, outbox.EnqueueInput{
 		TenantID: &execution.TenantID, Topic: "execution.interrupted", MessageKey: execution.ID.String(),
 		Payload: map[string]any{
@@ -675,6 +704,9 @@ func (s *Service) acknowledgePrimaryControlCommand(
 	}
 	if err := tx.WithContext(ctx).Delete(&lease).Error; err != nil {
 		return ControlCommand{}, problem.Wrap(500, "lease_release_failed", "Failed to release the completed operation lease.", err)
+	}
+	if err := transitionWorkerAfterLeaseReleasedLocked(ctx, tx, lease, now); err != nil {
+		return ControlCommand{}, err
 	}
 	execution.Status = "completed"
 	execution.FinishedAt = &now

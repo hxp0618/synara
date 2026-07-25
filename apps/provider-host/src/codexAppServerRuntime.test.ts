@@ -438,6 +438,66 @@ describe("Codex app-server runtime", () => {
     });
   });
 
+  it("sends recovery metadata in the resumed turn when native resume succeeds", async () => {
+    await withFakeCodex(
+      "resume-with-recovery-metadata",
+      async (directory, _tracePath, environment) => {
+        const run = startProviderHostRun(
+          {
+            ...codexInput(directory),
+            providerResumeCursor: "thread-resume",
+            workload: {
+              provider: "codex",
+              inputText: "continue from the suspended approval",
+              resumeSnapshot: {
+                version: 1,
+                sessionId: "session-1",
+                turnId: "turn-2",
+                provider: "codex",
+                messages: [
+                  { role: "user", text: "prior native question" },
+                  { role: "assistant", text: "prior native answer" },
+                ],
+                resumeRecordedInteractions: [
+                  {
+                    kind: "approval",
+                    requestId: "approval-suspended",
+                    resolutionKind: "approved",
+                    resolution: { decision: "accept" },
+                  },
+                ],
+                workspace: {
+                  workspaceId: "workspace-1",
+                  checkpoint: { checkpointId: "checkpoint-1", strategy: "git-reference" },
+                },
+              },
+            },
+            memoryDocuments: [
+              {
+                scope: "session",
+                scopeId: "session-1",
+                memoryKey: "instructions",
+                revisionId: "revision-1",
+                artifactId: "artifact-1",
+                sha256: "c".repeat(64),
+                contentType: "text/plain",
+                content: "Remember the preferred deployment environment.",
+              },
+            ],
+          },
+          null,
+          () => {},
+          { environment },
+        );
+
+        await expect(run.result).resolves.toMatchObject({
+          output: { text: "resumed with metadata" },
+          providerResumeCursor: "thread-resume",
+        });
+      },
+    );
+  });
+
   it("waits for a real contextCompaction terminal after thread/compact/start acknowledgement", async () => {
     await withFakeCodex("compact", async (directory, tracePath, environment) => {
       const messages: RunnerMessage[] = [];
@@ -902,6 +962,7 @@ async function withFakeCodex(
     | "long-approval"
     | "user-input"
     | "resume"
+    | "resume-with-recovery-metadata"
     | "resume-rebuild"
     | "resume-auth-failure"
     | "interrupt"
@@ -1072,7 +1133,7 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
     else if (scenario === "resume-auth-failure" || scenario === "compact-auth-failure") send({ id: message.id, error: { code: 401, message: "Unauthorized: invalid API key" } });
     else send({ id: message.id, result: { thread: { id: message.params.threadId }, model: "gpt-test" } });
   } else if (message.method === "thread/start") {
-    if (scenario === "resume" || scenario === "resume-auth-failure" || scenario === "compact-rebuild" || scenario === "compact-auth-failure") send({ id: message.id, error: { code: -1, message: "unexpected thread/start" } });
+    if (scenario === "resume" || scenario === "resume-with-recovery-metadata" || scenario === "resume-auth-failure" || scenario === "compact-rebuild" || scenario === "compact-auth-failure") send({ id: message.id, error: { code: -1, message: "unexpected thread/start" } });
     else send({ id: message.id, result: { thread: { id: "thread-new" }, model: "gpt-test" } });
   } else if (message.method === "thread/compact/start") {
     const compactThreadId = scenario === "compact-rebuild" ? "thread-rebuilt" : "thread-resume";
@@ -1113,6 +1174,16 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
       send({ id: "user-input-rpc", method: "item/tool/requestUserInput", params: { threadId: "thread-new", turnId: "turn-1", itemId: "input-1", autoResolutionMs: null, questions: [{ id: "environment", header: "Environment", question: "Where should this run?", isOther: false, isSecret: false, options: [{ label: "Staging", description: "Use staging." }] }] } });
     } else if (scenario === "resume") {
       complete("resumed");
+    } else if (scenario === "resume-with-recovery-metadata") {
+      const prompt = message.params?.input?.[0]?.text ?? "";
+      if (!prompt.includes("<synara_agent_memory_json>")) process.exit(13);
+      if (!prompt.includes('"memoryKey":"instructions"')) process.exit(14);
+      if (!prompt.includes("<synara_resume_snapshot_json>")) process.exit(15);
+      if (!prompt.includes('"requestId":"approval-suspended"')) process.exit(16);
+      if (!prompt.includes("<current_user>\\ncontinue from the suspended approval\\n</current_user>")) process.exit(17);
+      if (prompt.includes("<synara_transcript>")) process.exit(18);
+      if (prompt.includes("prior native question") || prompt.includes("prior native answer")) process.exit(19);
+      complete("resumed with metadata");
     } else if (scenario === "resume-rebuild") {
       complete("rebuilt");
     } else if (scenario === "interrupt") {

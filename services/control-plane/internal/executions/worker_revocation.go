@@ -140,6 +140,11 @@ func (s *Service) RevokeWorker(
 		worker.RevokedAt = &now
 		worker.RevokedBy = &principal.UserID
 		worker.RevocationReason = &reason
+		if err := transitionWorkerIncarnationFactLocked(
+			ctx, tx, worker, now, workerFactStateDraining, false, "",
+		); err != nil {
+			return WorkerRevocation{}, err
+		}
 		revocation.Worker = toManagedWorker(worker)
 
 		metadata := map[string]any{
@@ -232,6 +237,9 @@ func (s *Service) revokeWorkerExecutionLeasesLocked(
 		}
 		if deleted.RowsAffected == 0 {
 			continue
+		}
+		if err := transitionWorkerAfterLeaseReleasedLocked(ctx, tx, lease, s.now()); err != nil {
+			return nil, counts, err
 		}
 		counts.releasedLeases++
 		if errors.Is(executionErr, gorm.ErrRecordNotFound) || execution.WorkerID == nil ||
@@ -335,7 +343,12 @@ func toManagedWorker(model persistence.WorkerInstance) ManagedWorker {
 	return ManagedWorker{
 		ID: model.ID, Incarnation: model.Incarnation, InstanceUID: model.InstanceUID,
 		ExecutionTargetID: model.ExecutionTargetID, TargetKind: model.TargetKind,
-		ClusterID: model.ClusterID, Namespace: model.Namespace, PodName: model.PodName,
+		WorkerMode:          model.WorkerMode,
+		AssignedExecutionID: model.AssignedExecutionID,
+		WorkerPoolID:        model.WorkerPoolID,
+		WorkerPoolVersion:   model.WorkerPoolVersion,
+		CapacityClass:       model.CapacityClass,
+		ClusterID:           model.ClusterID, Namespace: model.Namespace, PodName: model.PodName,
 		Version: model.Version, ProtocolVersion: model.ProtocolVersion,
 		CurrentManifestID: model.CurrentManifestID, CompatibilityStatus: model.CompatibilityStatus,
 		CompatibilityReason: model.CompatibilityReason, CompatibilityCheckedAt: model.CompatibilityCheckedAt,

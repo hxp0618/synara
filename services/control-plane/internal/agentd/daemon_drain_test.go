@@ -298,10 +298,10 @@ func TestRenewRequestIDsAreFreshAcrossOrdinaryCallsAndDrainAttempts(t *testing.T
 		Generation:  7,
 		LeaseToken:  "lease-token",
 	}
-	if err := client.Renew(context.Background(), executionID, lease); err != nil {
+	if _, err := client.Renew(context.Background(), executionID, lease); err != nil {
 		t.Fatal(err)
 	}
-	if err := client.Renew(context.Background(), executionID, lease); err != nil {
+	if _, err := client.Renew(context.Background(), executionID, lease); err != nil {
 		t.Fatal(err)
 	}
 	daemon := &Daemon{client: client}

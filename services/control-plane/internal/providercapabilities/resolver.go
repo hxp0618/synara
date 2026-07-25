@@ -23,6 +23,52 @@ func LoadTargetProjection(
 	now time.Time,
 	heartbeatTimeout time.Duration,
 ) (Projection, error) {
+	return loadTargetProjection(ctx, db, target, now, heartbeatTimeout, nil)
+}
+
+func LoadTargetPoolProjection(
+	ctx context.Context,
+	db *gorm.DB,
+	target persistence.ExecutionTarget,
+	poolID uuid.UUID,
+	poolVersion int64,
+	now time.Time,
+	heartbeatTimeout time.Duration,
+) (Projection, error) {
+	return loadTargetProjection(ctx, db, target, now, heartbeatTimeout, &projectionWorkerScope{
+		PoolID:      &poolID,
+		PoolVersion: &poolVersion,
+	})
+}
+
+func LoadTargetPlacementProjection(
+	ctx context.Context,
+	db *gorm.DB,
+	target persistence.ExecutionTarget,
+	poolID uuid.UUID,
+	poolVersion int64,
+	poolMode string,
+	now time.Time,
+	heartbeatTimeout time.Duration,
+) (Projection, error) {
+	scope := projectionWorkerScope{}
+	if strings.EqualFold(strings.TrimSpace(poolMode), "warm") {
+		scope.PoolID = &poolID
+		scope.PoolVersion = &poolVersion
+	} else {
+		scope.GeneralOnly = true
+	}
+	return loadTargetProjection(ctx, db, target, now, heartbeatTimeout, &scope)
+}
+
+func loadTargetProjection(
+	ctx context.Context,
+	db *gorm.DB,
+	target persistence.ExecutionTarget,
+	now time.Time,
+	heartbeatTimeout time.Duration,
+	scope *projectionWorkerScope,
+) (Projection, error) {
 	policy, err := executiontargets.ParseProviderPolicy(target.Capabilities)
 	if err != nil {
 		return Projection{}, err
@@ -50,6 +96,14 @@ func LoadTargetProjection(
 		Where("execution_target_id = ? AND administrative_status = ? AND status = ? AND terminated_at IS NULL", target.ID, "active", "online").
 		Where("last_heartbeat_at >= ? AND current_manifest_id IS NOT NULL", now.Add(-heartbeatTimeout)).
 		Where("protocol_version = ?", workerProtocolVersion)
+	if scope != nil {
+		switch {
+		case scope.PoolID != nil && scope.PoolVersion != nil:
+			query = query.Where("worker_pool_id = ? AND worker_pool_version = ?", *scope.PoolID, *scope.PoolVersion)
+		case scope.GeneralOnly:
+			query = query.Where("worker_pool_id IS NULL AND worker_pool_version IS NULL AND assigned_execution_id IS NULL")
+		}
+	}
 	if target.Kind != "local" {
 		query = query.Where("lease_supported = ? AND fencing_supported = ?", true, true)
 	}
@@ -119,6 +173,12 @@ func LoadTargetProjection(
 		}
 	}
 	return ProjectTarget(input)
+}
+
+type projectionWorkerScope struct {
+	PoolID      *uuid.UUID
+	PoolVersion *int64
+	GeneralOnly bool
 }
 
 func LoadExecutionProjection(

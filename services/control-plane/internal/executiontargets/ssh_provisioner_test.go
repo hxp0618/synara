@@ -10,8 +10,10 @@ import (
 	"errors"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -74,6 +76,17 @@ func TestSSHProvisionerInstallsUpgradesAndRevokesWithoutLeakingSecrets(t *testin
 	}
 	if !commandsContainAll(remote.commands, "chown", expectedWorkspaceRoot, expectedGitCacheRoot) {
 		t.Fatalf("SSH provisioning did not assign both storage roots to the service user: %#v", remote.commands)
+	}
+	if !commandsContainAll(
+		remote.commands,
+		"--property=ActiveState",
+		"--property=SubState",
+		"--property=MainPID",
+		"--property=NRestarts",
+		"for attempt in 1 2 3",
+		"sleep 1",
+	) {
+		t.Fatalf("SSH provisioning did not prove a stable post-start service window: %#v", remote.commands)
 	}
 	for _, command := range remote.commands {
 		if strings.Contains(command, "worker-registration-secret") || strings.Contains(command, "ssh-private-key-secret") {
@@ -204,6 +217,151 @@ func TestSSHProvisionerInstallPreflightReportsRemoteFailureSeparatelyFromConflic
 	}
 }
 
+func TestSSHProvisionerProtectedCgroupInstallAddsDelegateAndSignedContainmentEnv(t *testing.T) {
+	fixture := newSSHProvisionFixtureWithConfiguration(t, "https://control-plane.example.com", map[string]any{
+		"agentdVersion":                     "agentd-1.2.3",
+		"agentdBuildGitSha":                 "abcdef0123456789abcdef0123456789abcdef01",
+		"agentdImageDigest":                 "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+		"cgroupV2ProviderUid":               10001,
+		"cgroupV2ProviderGid":               10002,
+		"cgroupV2AttestationKeyId":          "ssh-protected-key",
+		"cgroupV2AttestationPrivateKeyPath": "/etc/synara/keys/process-containment.ed25519",
+	})
+	remote := &fakeSSHRemote{uploads: map[string][]byte{}}
+	fixture.provisioner.dialer = &fakeSSHDialer{remote: remote}
+
+	if _, err := fixture.provisioner.Install(
+		context.Background(), fixture.principal, fixture.tenantID, fixture.targetID,
+		"ssh-protected-install", "127.0.0.1",
+	); err != nil {
+		t.Fatal(err)
+	}
+	var environment, unit []byte
+	for path, payload := range remote.uploads {
+		switch {
+		case strings.HasSuffix(path, ".env"):
+			environment = payload
+		case strings.HasSuffix(path, ".service"):
+			unit = payload
+		}
+	}
+	expectedCgroupV2Root := "/sys/fs/cgroup/system.slice/synara-agentd-" + fixture.targetID.String() + ".service"
+	for _, fragment := range []string{
+		`SYNARA_AGENTD_VERSION="agentd-1.2.3"`,
+		`SYNARA_AGENTD_BUILD_GIT_SHA="abcdef0123456789abcdef0123456789abcdef01"`,
+		`SYNARA_AGENTD_IMAGE_DIGEST="sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"`,
+		`SYNARA_AGENTD_CGROUP_V2_ROOT="` + expectedCgroupV2Root + `"`,
+		`SYNARA_AGENTD_CGROUP_V2_PROVIDER_UID="10001"`,
+		`SYNARA_AGENTD_CGROUP_V2_PROVIDER_GID="10002"`,
+		`SYNARA_AGENTD_CGROUP_V2_ATTESTATION_KEY_ID="ssh-protected-key"`,
+		`SYNARA_AGENTD_CGROUP_V2_ATTESTATION_PRIVATE_KEY_FILE="/etc/synara/keys/process-containment.ed25519"`,
+	} {
+		if !bytes.Contains(environment, []byte(fragment)) {
+			t.Fatalf("protected SSH env omitted %q: %s", fragment, environment)
+		}
+	}
+	instanceUID := environmentValue(t, environment, "SYNARA_AGENTD_INSTANCE_UID")
+	if parsed, err := uuid.Parse(instanceUID); err != nil || parsed == uuid.Nil {
+		t.Fatalf("protected SSH env instance UID = %q", instanceUID)
+	}
+	if !bytes.Contains(unit, []byte("User=root\n")) || !bytes.Contains(unit, []byte("Delegate=yes\n")) {
+		t.Fatalf("protected SSH unit omitted root+Delegate: %s", unit)
+	}
+	if !commandsContainAll(
+		remote.commands,
+		"stat -fc %T",
+		"/sys/fs/cgroup",
+		"test -f",
+		"/etc/synara/keys/process-containment.ed25519",
+		"stat -c %u",
+		"stat -c %F",
+		"stat -c %a",
+	) {
+		t.Fatalf("protected SSH install omitted cgroup/key preflight: %#v", remote.commands)
+	}
+	if !commandsContainAll(
+		remote.commands,
+		"--property=ActiveState",
+		"--property=SubState",
+		"--property=MainPID",
+		"--property=NRestarts",
+		"for attempt in 1 2 3",
+		"--property=ControlGroup",
+		expectedCgroupV2Root,
+		"test -d",
+	) {
+		t.Fatalf("protected SSH install omitted post-start ControlGroup proof: %#v", remote.commands)
+	}
+	if !commandsContainAll(
+		remote.commands,
+		"install -d -m 0711",
+		"/var/lib/synara/test/workspaces",
+		"install -d -m 0700",
+		"/var/lib/synara/targets/"+fixture.targetID.String()+"/git-cache",
+	) {
+		t.Fatalf("protected SSH install omitted protected storage permissions: %#v", remote.commands)
+	}
+}
+
+func TestSSHProvisionerProtectedCgroupRequiresRootServiceUserAndFullBuildIdentity(t *testing.T) {
+	provisioner := &SSHProvisioner{}
+	target := persistence.ExecutionTarget{ID: uuid.New()}
+	_, _, err := provisioner.normalize(target, sshTargetConfiguration{
+		Host: "ssh.example.com", User: "root", PrivateKey: "private-key", HostKey: "host-key",
+		ControlPlaneURL: "https://control-plane.example.com", RunnerCommand: []string{"runner"},
+		ServiceUser:  "synara",
+		CgroupV2Root: "/sys/fs/cgroup/system.slice/synara-agentd.service",
+		CgroupV2ProviderUID: func() *int {
+			value := 10001
+			return &value
+		}(),
+		CgroupV2ProviderGID: func() *int {
+			value := 10002
+			return &value
+		}(),
+		CgroupV2AttestationKeyID:   "ssh-protected-key",
+		CgroupV2AttestationKeyPath: "/etc/synara/keys/process-containment.ed25519",
+		AgentdVersion:              "agentd-1.2.3",
+	})
+	assertExecutionTargetProblemCode(t, err, "invalid_ssh_configuration")
+}
+
+func TestSSHServiceStableCommandExecutesThreeHealthySamples(t *testing.T) {
+	script := `
+systemctl() {
+  case "$*" in
+    *--property=NRestarts*) printf '%s\n' 0 ;;
+    *--property=ActiveState*) printf '%s\n' active ;;
+    *--property=SubState*) printf '%s\n' running ;;
+    *--property=MainPID*) printf '%s\n' 123 ;;
+    *) return 1 ;;
+  esac
+}
+sleep() { :; }
+` + sshServiceStableCommand("synara-agentd-test.service")
+	if output, err := exec.Command("sh", "-c", script).CombinedOutput(); err != nil {
+		t.Fatalf("stable service command failed: %v: %s", err, output)
+	}
+}
+
+func TestSSHServiceStableCommandRejectsUnhealthySample(t *testing.T) {
+	script := `
+systemctl() {
+  case "$*" in
+    *--property=NRestarts*) printf '%s\n' 0 ;;
+    *--property=ActiveState*) printf '%s\n' activating ;;
+    *--property=SubState*) printf '%s\n' auto-restart ;;
+    *--property=MainPID*) printf '%s\n' 0 ;;
+    *) return 1 ;;
+  esac
+}
+sleep() { :; }
+` + sshServiceStableCommand("synara-agentd-test.service")
+	if output, err := exec.Command("sh", "-c", script).CombinedOutput(); err == nil {
+		t.Fatalf("unstable service command unexpectedly passed: %s", output)
+	}
+}
+
 func TestSSHProvisionerRejectsOverlappingWorkspaceAndGitCacheRoots(t *testing.T) {
 	provisioner := &SSHProvisioner{}
 	target := persistence.ExecutionTarget{ID: uuid.New()}
@@ -319,6 +477,14 @@ type sshProvisionFixture struct {
 }
 
 func newSSHProvisionFixture(t *testing.T, controlPlaneURL string) sshProvisionFixture {
+	return newSSHProvisionFixtureWithConfiguration(t, controlPlaneURL, nil)
+}
+
+func newSSHProvisionFixtureWithConfiguration(
+	t *testing.T,
+	controlPlaneURL string,
+	configurationOverrides map[string]any,
+) sshProvisionFixture {
 	t.Helper()
 	ctx := context.Background()
 	platformConfig, err := platform.Defaults(platform.ProfilePersonal)
@@ -343,19 +509,23 @@ func newSSHProvisionFixture(t *testing.T, controlPlaneURL string) sshProvisionFi
 	}
 	targetService := NewService(store.DB(), platformConfig, cipher)
 	principal := identity.Principal{UserID: domain.UserID, ActiveTenantID: &domain.TenantID}
+	configuration := map[string]any{
+		"host": "ssh.example.com", "port": 2222, "user": "root",
+		"privateKey": "ssh-private-key-secret", "hostKey": "ssh-ed25519 fake-host-key",
+		"controlPlaneUrl": controlPlaneURL,
+		"runnerCommand":   []string{"provider-host", "run", "--jsonl"},
+		"installRoot":     "/opt/synara/test", "workspaceRoot": "/var/lib/synara/test/workspaces",
+		"serviceUser": "root", "useSudo": false,
+	}
+	for key, value := range configurationOverrides {
+		configuration[key] = value
+	}
 	target, err := targetService.Create(ctx, principal, domain.TenantID, CreateInput{
 		OrganizationID: &domain.OrganizationID,
 		Kind:           "ssh",
 		Name:           "managed-ssh",
-		Configuration: map[string]any{
-			"host": "ssh.example.com", "port": 2222, "user": "root",
-			"privateKey": "ssh-private-key-secret", "hostKey": "ssh-ed25519 fake-host-key",
-			"controlPlaneUrl": controlPlaneURL,
-			"runnerCommand":   []string{"provider-host", "run", "--jsonl"},
-			"installRoot":     "/opt/synara/test", "workspaceRoot": "/var/lib/synara/test/workspaces",
-			"serviceUser": "root", "useSudo": false,
-		},
-		Capabilities: map[string]any{"workspaceModes": []string{"local", "worktree"}},
+		Configuration:  configuration,
+		Capabilities:   map[string]any{"workspaceModes": []string{"local", "worktree"}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -440,6 +610,23 @@ func commandsContainAll(commands []string, fragments ...string) bool {
 		}
 	}
 	return false
+}
+
+func environmentValue(t *testing.T, environment []byte, name string) string {
+	t.Helper()
+	prefix := name + "="
+	for _, line := range strings.Split(string(environment), "\n") {
+		if !strings.HasPrefix(line, prefix) {
+			continue
+		}
+		value, err := strconv.Unquote(strings.TrimPrefix(line, prefix))
+		if err != nil {
+			t.Fatalf("decode %s: %v", name, err)
+		}
+		return value
+	}
+	t.Fatalf("environment omitted %s", name)
+	return ""
 }
 
 func mustNewEd25519Signer(t *testing.T) ssh.Signer {

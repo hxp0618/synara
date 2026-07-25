@@ -23,7 +23,7 @@ function completeCapabilities(value: "native" | "emulated" | "unsupported") {
 }
 
 describe("Provider Host v2 contracts", () => {
-  it("freezes the ordered 8 Provider by 28 Capability catalog without Droid", () => {
+  it("freezes the ordered 8 Provider by 29 Capability catalog without Droid", () => {
     expect(PROVIDER_HOST_PROVIDER_KINDS).toEqual([
       "codex",
       "claudeAgent",
@@ -42,6 +42,7 @@ describe("Provider Host v2 contracts", () => {
       "send-turn",
       "steer-turn",
       "interrupt-turn",
+      "suspend-active-turn",
       "approval",
       "structured-user-input",
       "plan-mode",
@@ -122,7 +123,7 @@ describe("Provider Host v2 contracts", () => {
     });
 
     expect(descriptor.capabilityDescriptor.capabilities["send-turn"]).toBe("native");
-    expect(descriptor.protocolVersion).toEqual({ major: 2, minor: 1 });
+    expect(descriptor.protocolVersion).toEqual({ major: 2, minor: 2 });
     expect(descriptor.capabilityDescriptor.runtime.versionSource).toBe("probe");
   });
 
@@ -141,12 +142,14 @@ describe("Provider Host v2 contracts", () => {
     );
 
     expect(providers.get("codex")?.capabilities).toMatchObject({
+      "suspend-active-turn": "native",
       review: "native",
       compact: "native",
       rollback: "unsupported",
       fork: "unsupported",
     });
     expect(providers.get("claudeAgent")?.capabilities).toMatchObject({
+      "suspend-active-turn": "native",
       review: "emulated",
       compact: "unsupported",
       rollback: "unsupported",
@@ -230,7 +233,7 @@ describe("Provider Host v2 contracts", () => {
   it("accepts unknown optional fields from a newer compatible minor", () => {
     expect(() =>
       decodeDescriptor({
-        protocolVersion: { major: 2, minor: 2 },
+        protocolVersion: { major: 2, minor: 3 },
         hostBuildVersion: "host-test",
         futureOptionalField: { enabled: true },
         capabilityDescriptor: {
@@ -307,13 +310,13 @@ describe("Provider Host v2 contracts", () => {
       protocolVersion: PROVIDER_HOST_PROTOCOL_VERSION,
       executionId: "execution-1",
       generation: 2,
-      commandType: "SendTurn",
+      commandType: "SuspendTurn",
       commandId: "command-1",
       occurredAt: "2026-07-13T02:00:00.000Z",
-      payload: { inputText: "hello" },
+      payload: { targetCommandId: "command-send-1" },
     });
 
-    expect(command.commandType).toBe("SendTurn");
+    expect(command.commandType).toBe("SuspendTurn");
   });
 
   it("accepts only canonical Runtime Event v2 payloads on Event messages", () => {

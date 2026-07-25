@@ -4,12 +4,14 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"gorm.io/gorm"
 )
 
 type ExecutionInteraction struct {
 	ID                  uuid.UUID      `gorm:"column:id;type:uuid;primaryKey"`
 	TenantID            uuid.UUID      `gorm:"column:tenant_id;type:uuid"`
 	ExecutionID         uuid.UUID      `gorm:"column:execution_id;type:uuid"`
+	SourceExecutionID   uuid.UUID      `gorm:"column:source_execution_id;type:uuid"`
 	SessionID           uuid.UUID      `gorm:"column:session_id;type:uuid"`
 	TurnID              uuid.UUID      `gorm:"column:turn_id;type:uuid"`
 	WorkerID            uuid.UUID      `gorm:"column:worker_id;type:uuid"`
@@ -35,6 +37,16 @@ type ExecutionInteraction struct {
 	DeliveredAt         *time.Time     `gorm:"column:delivered_at"`
 	AcknowledgedAt      *time.Time     `gorm:"column:acknowledged_at"`
 	DeliveryError       *string        `gorm:"column:delivery_error"`
+	ResumeBundleID      *uuid.UUID     `gorm:"column:resume_bundle_id;type:uuid"`
+	ResumeGeneration    *int64         `gorm:"column:resume_generation"`
+	ResumeBoundAt       *time.Time     `gorm:"column:resume_bound_at"`
 }
 
 func (ExecutionInteraction) TableName() string { return "execution_interactions" }
+
+func (model *ExecutionInteraction) BeforeCreate(_ *gorm.DB) error {
+	if model.SourceExecutionID == uuid.Nil {
+		model.SourceExecutionID = model.ExecutionID
+	}
+	return nil
+}

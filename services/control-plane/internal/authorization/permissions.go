@@ -40,6 +40,8 @@ const (
 	QuotaManage            Permission = "quota.manage"
 	RetentionRead          Permission = "retention.read"
 	RetentionManage        Permission = "retention.manage"
+	LifecycleRead          Permission = "lifecycle.read"
+	LifecycleManage        Permission = "lifecycle.manage"
 	IdentityRead           Permission = "identity.read"
 	IdentityManage         Permission = "identity.manage"
 	IdentitySessionsRevoke Permission = "identity.sessions.revoke"
@@ -58,7 +60,7 @@ var tenantRolePermissions = map[string]map[Permission]struct{}{
 		ExecutionCreate, ExecutionCancel, ExecutionApprove, ExecutionReadLogs,
 		ArtifactRead, ArtifactWrite, ArtifactDelete,
 		CredentialsRead, CredentialsUse, CredentialsManage, WorkerRead, WorkerManage, AuditRead, BillingManage,
-		QuotaRead, QuotaManage, RetentionRead, RetentionManage,
+		QuotaRead, QuotaManage, RetentionRead, RetentionManage, LifecycleRead, LifecycleManage,
 		IdentityRead, IdentityManage, IdentitySessionsRevoke, ServiceAccountsRead, ServiceAccountsManage,
 		OutboxRead, OutboxManage,
 	),
@@ -69,19 +71,19 @@ var tenantRolePermissions = map[string]map[Permission]struct{}{
 		SessionShare, SessionArchive, SessionDelete, ExecutionCreate, ExecutionCancel,
 		ExecutionApprove, ExecutionReadLogs, WorkerRead, WorkerManage, AuditRead,
 		ArtifactRead, ArtifactWrite, ArtifactDelete, CredentialsUse, QuotaRead, QuotaManage,
-		RetentionRead, RetentionManage,
+		RetentionRead, RetentionManage, LifecycleRead, LifecycleManage,
 		IdentityRead, IdentitySessionsRevoke, ServiceAccountsRead, ServiceAccountsManage,
 		OutboxRead, OutboxManage,
 	),
 	"security_admin": permissionSet(
 		TenantRead, TenantMembersRead, OrganizationRead, ProjectRead, SessionRead,
 		ExecutionReadLogs, ArtifactRead, CredentialsRead, CredentialsUse, CredentialsManage, WorkerRead, AuditRead,
-		RetentionRead, RetentionManage,
+		RetentionRead, RetentionManage, LifecycleRead,
 		IdentityRead, IdentityManage, IdentitySessionsRevoke, ServiceAccountsRead, ServiceAccountsManage,
 		OutboxRead,
 	),
 	"billing_admin": permissionSet(TenantRead, TenantMembersRead, BillingManage, QuotaRead, QuotaManage),
-	"auditor":       permissionSet(TenantRead, TenantMembersRead, OrganizationRead, ProjectRead, SessionRead, ExecutionReadLogs, ArtifactRead, AuditRead, QuotaRead, RetentionRead, OutboxRead),
+	"auditor":       permissionSet(TenantRead, TenantMembersRead, OrganizationRead, ProjectRead, SessionRead, ExecutionReadLogs, ArtifactRead, AuditRead, QuotaRead, RetentionRead, LifecycleRead, OutboxRead),
 	"member":        permissionSet(TenantRead),
 }
 

@@ -22,12 +22,20 @@ import (
 )
 
 const (
-	workspaceCleanupProbeExecutionInterval = 4
-	workspaceCleanupProbeMaximumInterval   = 30 * time.Second
-	drainCheckpointTimeout                 = 2 * time.Second
-	drainPreservationTimeout               = 8 * time.Second
-	drainCheckpointRenewMaximumAttempts    = 3
-	drainCheckpointRenewRequestIDPrefix    = "drain-checkpoint-renew-"
+	workspaceCleanupProbeExecutionInterval            = 4
+	workspaceCleanupProbeMaximumInterval              = 30 * time.Second
+	drainCheckpointTimeout                            = 2 * time.Second
+	drainPreservationTimeout                          = 8 * time.Second
+	drainCheckpointRenewMaximumAttempts               = 3
+	drainCheckpointRenewRequestIDPrefix               = "drain-checkpoint-renew-"
+	resourceSuspendReasonActiveIdleTimeout            = "active-idle-timeout"
+	resourceSuspendRunnerActive                       = int32(0)
+	resourceSuspendRunnerQuiescing                    = int32(1)
+	resourceSuspendRunnerFinished                     = int32(2)
+	providerCredentialAccessStatusActive              = "active"
+	providerCredentialAccessStatusRefreshWindowClosed = "refresh-window-closed"
+	providerCredentialAccessStatusUnavailable         = "credential-unavailable"
+	providerCredentialAccessStatusExpired             = "expired"
 )
 
 var turnDiffArtifactEventNamespace = uuid.MustParse("c77821ff-66e7-5bd8-9618-e453ff4625f0")
@@ -35,6 +43,18 @@ var turnDiffArtifactEventNamespace = uuid.MustParse("c77821ff-66e7-5bd8-9618-e45
 type workspaceCleanupClaimSchedule struct {
 	executionsSinceProbe int
 	lastProbe            time.Time
+}
+
+type resourceSuspendResult struct {
+	fenced            bool
+	continueExecution bool
+	disposition       string
+	err               error
+}
+
+type providerCredentialAccessUpdate struct {
+	access *ProviderCredentialAccess
+	err    error
 }
 
 func newWorkspaceCleanupClaimSchedule(now time.Time) workspaceCleanupClaimSchedule {
@@ -56,7 +76,7 @@ func (s *workspaceCleanupClaimSchedule) recordProbe(now time.Time) {
 }
 
 func workspaceCleanupClaimsEnabled(config Config) bool {
-	return config.AssignedExecutionID == nil
+	return effectiveWorkerMode(config) == executions.WorkerModeGeneralPool
 }
 
 type Daemon struct {
@@ -76,18 +96,31 @@ func NewDaemon(cfg Config, logger *slog.Logger) *Daemon {
 }
 
 func (d *Daemon) Run(ctx context.Context) error {
-	probeContext, cancelProbe := context.WithTimeout(ctx, d.config.RequestTimeout)
-	providerHostCapabilities, err := d.runner.CapabilitySummary(probeContext)
-	cancelProbe()
+	containmentProbeContext, cancelContainmentProbe := protectedCgroupPreflightContext(ctx, d.config)
+	processContainmentReport, err := protectedCgroupProbeHook(containmentProbeContext, d.config)
+	if err != nil {
+		cancelContainmentProbe()
+		return fmt.Errorf("probe protected cgroup containment: %w", err)
+	}
+	cancelContainmentProbe()
+	d.config.ProcessContainmentCapability = processContainmentReport.workerRuntimeProcessContainmentCapability()
+	providerHostProbeContext, cancelProviderHostProbe := context.WithTimeout(ctx, d.config.RequestTimeout)
+	providerHostCapabilities, err := d.runner.CapabilitySummary(providerHostProbeContext)
+	cancelProviderHostProbe()
 	if err != nil {
 		return fmt.Errorf("probe Provider Host compatibility: %w", err)
 	}
-	d.config.Capabilities = withProviderHostCapabilities(d.config.Capabilities, providerHostCapabilities, d.config)
+	d.config.Capabilities = withProviderHostCapabilities(
+		d.config.Capabilities,
+		providerHostCapabilities,
+		d.config,
+	)
 	registered, err := d.client.Register(ctx, d.config)
 	if err != nil {
 		return fmt.Errorf("register worker: %w", err)
 	}
-	d.logger.Info("agentd registered", "workerId", registered.Worker.ID, "executionTargetId", registered.Worker.ExecutionTargetID, "targetKind", registered.Worker.TargetKind)
+	workerMode := effectiveWorkerMode(d.config)
+	d.logger.Info("agentd registered", "workerId", registered.Worker.ID, "executionTargetId", registered.Worker.ExecutionTargetID, "targetKind", registered.Worker.TargetKind, "workerMode", workerMode)
 	runContext, cancelRun := context.WithCancel(context.Background())
 	defer cancelRun()
 	runDone := make(chan struct{})
@@ -203,16 +236,34 @@ func (d *Daemon) Run(ctx context.Context) error {
 			_ = d.client.Release(runContext, claim.Execution.ID, *claim.Lease, "claim omitted workload")
 			d.logger.Error("claimed execution omitted workload", "executionId", claim.Execution.ID)
 			cleanupSchedule.recordExecution()
+			if workerMode != executions.WorkerModeGeneralPool {
+				return nil
+			}
 			continue
 		}
-		if err := d.runExecution(runContext, *claim.Execution, *claim.Lease, *claim.Workload, claim.ProviderResumeCursor); err != nil {
-			if isWorkerRevocationError(err) {
+		runErr := d.runExecution(runContext, *claim.Execution, *claim.Lease, *claim.Workload, claim.ProviderResumeCursor)
+		if runErr != nil {
+			if isWorkerRevocationError(runErr) {
 				cancelRun()
-				return fmt.Errorf("run execution after Worker revocation: %w", err)
+				return fmt.Errorf("run execution after Worker revocation: %w", runErr)
 			}
-			d.logger.Error("execution runner failed", "executionId", claim.Execution.ID, "generation", claim.Lease.Generation, "error", err)
+			if isContainmentError(runErr) {
+				cancelRun()
+				return fmt.Errorf("Worker process containment failed: %w", runErr)
+			}
+			d.logger.Error("execution runner failed", "executionId", claim.Execution.ID, "generation", claim.Lease.Generation, "error", runErr)
 		}
 		cleanupSchedule.recordExecution()
+		// A Kubernetes Pod is physically bound to one Execution generation. It
+		// must terminate after that attempt so the kubelet can publish an exact
+		// terminal status; re-claiming a later generation from the old Pod would
+		// bypass the Pod UID/name generation fence.
+		if workerMode != executions.WorkerModeGeneralPool {
+			if runErr != nil {
+				return fmt.Errorf("%s execution attempt failed: %w", workerMode, runErr)
+			}
+			return nil
+		}
 		if d.draining.Load() {
 			<-drainMarked
 			return nil
@@ -490,8 +541,22 @@ func (d *Daemon) runExecution(
 	resumeCursor *string,
 ) error {
 	executionContext, cancelExecution := context.WithCancel(ctx)
+	if err := executions.ValidateRecoveryBundle(execution, workload); err != nil {
+		cancelExecution()
+		return d.failExecution(ctx, execution.ID, lease, err)
+	}
 	renewErrors := make(chan error, 1)
-	go d.renewLeaseLoop(executionContext, execution.ID, lease, cancelExecution, renewErrors)
+	renewLeaseUpdates := make(chan executions.Lease, 1)
+	var providerCredentialAccessRenewalsReady atomic.Bool
+	go d.renewLeaseLoop(
+		executionContext,
+		execution.ID,
+		lease,
+		cancelExecution,
+		renewErrors,
+		renewLeaseUpdates,
+		&providerCredentialAccessRenewalsReady,
+	)
 	renewStopped := false
 	stopRenewal := func() error {
 		if renewStopped {
@@ -613,9 +678,39 @@ func (d *Daemon) runExecution(
 			return errors.Join(failErr, stopRenewal())
 		}
 	}
+	memoryDocuments, err := d.resolveMemoryDocuments(executionContext, execution, lease, workload.MemoryReferences)
+	if err != nil {
+		if ctx.Err() != nil {
+			renewErr := stopRenewal()
+			d.releaseDuringShutdown(execution.ID, lease, "agentd Drain deadline reached while restoring Agent Memory")
+			return errors.Join(ctx.Err(), renewErr)
+		}
+		failErr := d.failExecutionGuarded(
+			executionContext, execution.ID, lease, executionGuard,
+			&runnerFailure{
+				code: "memory_invalid", message: "The frozen Agent Memory could not be downloaded and verified.",
+				requiresNewExecution: true, requiresUserAction: true,
+				canReconstructFromHistory: true, canMoveWorker: true,
+			},
+		)
+		return errors.Join(failErr, stopRenewal())
+	}
 	var credential *RunnerCredential
-	if workload.ProviderCredentialID != nil {
-		resolved, err := d.client.ResolveCredential(executionContext, execution.ID, *workload.ProviderCredentialID, lease)
+	var providerCredentialAccessDone <-chan error
+	if workload.ProviderCredentialGrantID != nil || workload.ProviderCredentialID != nil {
+		var (
+			resolved RunnerCredential
+			err      error
+		)
+		if workload.ProviderCredentialGrantID != nil {
+			resolved, err = d.client.ResolveProviderCredentialGrant(
+				executionContext, execution.ID, *workload.ProviderCredentialGrantID, lease,
+			)
+		} else {
+			resolved, err = d.client.ResolveCredential(
+				executionContext, execution.ID, *workload.ProviderCredentialID, lease,
+			)
+		}
 		if err != nil {
 			if ctx.Err() != nil {
 				renewErr := stopRenewal()
@@ -629,6 +724,18 @@ func (d *Daemon) runExecution(
 		if guardErr := executionGuard.AddProviderCredential(credential); guardErr != nil {
 			clearRunnerCredential(credential)
 			return d.failExecutionGuarded(executionContext, execution.ID, lease, executionGuard, guardErr)
+		}
+		if workload.ProviderCredentialGrantID != nil {
+			initialAccess := credential.Access
+			if err := validateInitialProviderCredentialAccess(*workload.ProviderCredentialGrantID, initialAccess, time.Now().UTC()); err != nil {
+				clearRunnerCredential(credential)
+				return d.failExecutionGuarded(executionContext, execution.ID, lease, executionGuard, err)
+			}
+			// Renewals begin before Workspace materialization so the Execution
+			// Lease cannot expire. Publish access metadata only after the explicit
+			// Grant resolve has attached serial 1; otherwise a delayed pre-resolve
+			// renewal could replay an intentionally absent access block.
+			providerCredentialAccessRenewalsReady.Store(true)
 		}
 		defer clearRunnerCredential(credential)
 	}
@@ -677,6 +784,31 @@ func (d *Daemon) runExecution(
 			)
 		}
 	}()
+	if err := prepareProtectedProviderExecutionFilesystem(
+		d.config,
+		materialized,
+		providerStateDirectory,
+		runtimeOutputRoot.directory,
+	); err != nil {
+		if ctx.Err() != nil {
+			renewErr := stopRenewal()
+			d.releaseDuringShutdown(execution.ID, lease, "agentd Drain deadline reached while preparing protected Provider filesystem access")
+			return errors.Join(ctx.Err(), renewErr)
+		}
+		failErr := d.failExecutionGuarded(
+			executionContext,
+			execution.ID,
+			lease,
+			executionGuard,
+			workspaceFailure(
+				"workspace_invalid",
+				"The protected Provider filesystem handoff is unavailable.",
+				true,
+				true,
+			),
+		)
+		return errors.Join(failErr, stopRenewal())
+	}
 	if err := d.client.Start(executionContext, execution.ID, lease); err != nil {
 		if ctx.Err() != nil {
 			renewErr := stopRenewal()
@@ -705,11 +837,25 @@ func (d *Daemon) runExecution(
 			},
 		}
 	}
+	runnerContext, cancelRunnerCause := context.WithCancelCause(executionContext)
+	cancelRunner := func() { cancelRunnerCause(nil) }
+	defer cancelRunner()
+	if workload.ProviderCredentialGrantID != nil && credential != nil && credential.Access != nil {
+		providerCredentialAccessUpdates := startProviderCredentialAccessLeaseBridge(runnerContext, renewLeaseUpdates)
+		providerCredentialAccessDone = startProviderCredentialAccessMonitor(
+			runnerContext,
+			*workload.ProviderCredentialGrantID,
+			*credential.Access,
+			providerCredentialAccessUpdates,
+			cancelRunnerCause,
+			func() time.Time { return time.Now().UTC() },
+		)
+	}
 	var controls <-chan RunnerControl
 	if d.runner.protocol == RunnerProtocolV2 {
 		controlChannel := make(chan RunnerControl)
 		controls = controlChannel
-		go d.runnerControlLoop(executionContext, execution.ID, lease, executionGuard, controlChannel)
+		go d.runnerControlLoop(runnerContext, execution.ID, lease, executionGuard, controlChannel)
 	}
 	terminalLogs := newTerminalLogCollector(d.client, execution.ID, lease, executionGuard)
 	defer func() {
@@ -722,9 +868,19 @@ func (d *Daemon) runExecution(
 			)
 		}
 	}()
-	result, runErr := d.runner.RunControlled(executionContext, RunnerInput{
-		Execution: execution, Workload: workload, ProviderResumeCursor: resumeCursor,
-		WorkspaceDirectory: materialized.Directory, ProviderStateDirectory: providerStateDirectory,
+	resourceSuspendContext, cancelResourceSuspend := context.WithCancel(executionContext)
+	defer cancelResourceSuspend()
+	runnerStopped := make(chan error, 1)
+	resourceSuspendResults := make(chan resourceSuspendResult, 1)
+	var resourceSuspendRunnerState atomic.Int32
+	go d.resourceSuspendLoop(
+		resourceSuspendContext, execution, lease, workload, materializer, materialized,
+		terminalLogs, cancelRunner, runnerStopped, &resourceSuspendRunnerState, resourceSuspendResults,
+	)
+	result, runErr := d.runner.RunControlled(runnerContext, RunnerInput{
+		Execution: execution, Workload: workload, MemoryDocuments: memoryDocuments,
+		ProviderResumeCursor: resumeCursor,
+		WorkspaceDirectory:   materialized.Directory, ProviderStateDirectory: providerStateDirectory,
 		RuntimeOutputDirectory: runtimeOutputRoot.directory,
 	}, credential, primaryControl, controls, func(messageContext context.Context, message RunnerMessage) error {
 		switch message.Type {
@@ -867,6 +1023,87 @@ func (d *Daemon) runExecution(
 			return protocolFailure("Provider Host emitted an unsupported Worker message")
 		}
 	})
+	if errors.Is(runErr, context.Canceled) {
+		var accessFailure *runnerFailure
+		if errors.As(context.Cause(runnerContext), &accessFailure) {
+			runErr = accessFailure
+		}
+	}
+	cancelRunner()
+	if providerCredentialAccessDone != nil {
+		// Cancellation bounds this wait: the monitor either already selected a
+		// credential failure or observes runnerContext.Done and exits. Draining
+		// it prevents a nil natural-completion cancel from hiding an in-flight
+		// access-expiry decision.
+		if monitorErr := <-providerCredentialAccessDone; runErr == nil && monitorErr != nil {
+			runErr = monitorErr
+		}
+	}
+	resourceSuspendOwnsRunner := finishRunnerForResourceSuspend(&resourceSuspendRunnerState, runnerStopped, runErr)
+	if !resourceSuspendOwnsRunner {
+		_, resourceSuspendOwnsRunner = runnerSuspendedTerminal(runErr)
+	}
+	if !resourceSuspendOwnsRunner {
+		cancelResourceSuspend()
+	} else {
+		suspendResult := <-resourceSuspendResults
+		cancelResourceSuspend()
+		if suspendResult.continueExecution {
+			goto resourceSuspendHandled
+		}
+		if suspendResult.err != nil {
+			suspendResult.err = executionGuard.SanitizeError(suspendResult.err)
+		}
+		renewErr := stopRenewal()
+		if suspendResult.fenced {
+			if suspendResult.err != nil {
+				d.logger.Warn(
+					"execution resource suspension required a fenced recovery path",
+					"executionId", execution.ID,
+					"generation", lease.Generation,
+					"disposition", suspendResult.disposition,
+					"error", suspendResult.err,
+				)
+			}
+			if renewErr != nil {
+				d.logger.Warn(
+					"execution Lease renewal ended after resource suspension",
+					"executionId", execution.ID,
+					"generation", lease.Generation,
+					"error", renewErr,
+				)
+			}
+			d.logger.Info(
+				"execution resource suspension stopped the local Provider generation",
+				"executionId", execution.ID,
+				"generation", lease.Generation,
+				"disposition", suspendResult.disposition,
+			)
+			return nil
+		}
+		if ctx.Err() != nil {
+			preservationStatus := d.persistExecutionStateDuringDrain(
+				execution, lease, workload, materializer, materialized, terminalLogs,
+			)
+			d.releaseDuringShutdown(
+				execution.ID,
+				lease,
+				appendDrainCheckpointStatus(
+					"agentd Drain interrupted resource suspension after Provider quiesce",
+					preservationStatus,
+				),
+			)
+			return errors.Join(ctx.Err(), suspendResult.err, renewErr)
+		}
+		d.logger.Warn(
+			"execution resource suspension could not confirm an authoritative transition; Lease renewal remains fenced",
+			"executionId", execution.ID,
+			"generation", lease.Generation,
+			"error", suspendResult.err,
+		)
+		return errors.Join(suspendResult.err, renewErr)
+	}
+resourceSuspendHandled:
 	if ctx.Err() == nil {
 		hadOpenTerminals, terminalErr := terminalLogs.FinalizeOpen(executionContext, "provider_error")
 		if terminalErr != nil {
@@ -925,7 +1162,7 @@ func (d *Daemon) runExecution(
 			lease,
 			appendDrainCheckpointStatus(reason, preserveForDrain()),
 		)
-		return errors.Join(ctx.Err(), renewErr)
+		return errors.Join(ctx.Err(), runErr, renewErr)
 	}
 	if renewErr != nil {
 		return renewErr
@@ -976,6 +1213,598 @@ func (d *Daemon) runExecution(
 	}
 	d.logger.Info("execution completed", "executionId", execution.ID, "generation", lease.Generation)
 	return nil
+}
+
+func finishRunnerForResourceSuspend(state *atomic.Int32, stopped chan<- error, runnerErr error) bool {
+	resourceSuspendOwnsRunner := !state.CompareAndSwap(
+		resourceSuspendRunnerActive,
+		resourceSuspendRunnerFinished,
+	)
+	// Publish the terminal owner before waking the suspend coordinator. Closing
+	// first would let a late directive steal a naturally completed generation.
+	stopped <- runnerErr
+	close(stopped)
+	return resourceSuspendOwnsRunner
+}
+
+func (d *Daemon) resourceSuspendLoop(
+	ctx context.Context,
+	execution executions.Execution,
+	lease executions.Lease,
+	workload executions.Workload,
+	materializer workspaceMaterializer,
+	materialized WorkspaceMaterialization,
+	terminalLogs *terminalLogCollector,
+	cancelRunner context.CancelFunc,
+	runnerStopped <-chan error,
+	runnerState *atomic.Int32,
+	results chan<- resourceSuspendResult,
+) {
+	interval := d.config.PollInterval
+	if interval <= 0 || interval > time.Second {
+		interval = time.Second
+	}
+	for {
+		requestContext, cancel := context.WithTimeout(ctx, d.config.RequestTimeout)
+		directive, err := d.client.PullResourceDirective(requestContext, execution.ID, lease)
+		cancel()
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			d.logger.Warn(
+				"resource directive pull failed",
+				"executionId", execution.ID,
+				"generation", lease.Generation,
+				"error", err,
+			)
+			if !waitContext(ctx, interval) {
+				return
+			}
+			continue
+		}
+		if directive == nil {
+			if !waitContext(ctx, interval) {
+				return
+			}
+			continue
+		}
+		if directive.Action == "terminate" {
+			if !runnerState.CompareAndSwap(resourceSuspendRunnerActive, resourceSuspendRunnerQuiescing) {
+				return
+			}
+			cancelRunner()
+			select {
+			case runnerErr := <-runnerStopped:
+				if isContainmentError(runnerErr) {
+					results <- resourceSuspendResult{disposition: "containment-failed", err: runnerErr}
+					return
+				}
+				if runnerErr != nil && !errors.Is(runnerErr, context.Canceled) {
+					runnerErr = fmt.Errorf("Provider stopped after authoritative resource termination: %w", runnerErr)
+				}
+				results <- resourceSuspendResult{
+					fenced: true, disposition: "absolute-expired", err: runnerErr,
+				}
+			case <-ctx.Done():
+				results <- resourceSuspendResult{
+					err: fmt.Errorf("wait for Provider termination after absolute expiry: %w", ctx.Err()),
+				}
+			}
+			return
+		}
+		if directive.Action != "suspend" {
+			d.logger.Warn(
+				"unknown resource directive ignored",
+				"executionId", execution.ID,
+				"generation", lease.Generation,
+				"action", directive.Action,
+			)
+			if !waitContext(ctx, interval) {
+				return
+			}
+			continue
+		}
+		if directive.Reason == resourceSuspendReasonActiveIdleTimeout {
+			state := runnerState.Load()
+			switch state {
+			case resourceSuspendRunnerActive:
+				// Arbitration prevents a directive pulled concurrently with
+				// natural completion from starting a second terminal lifecycle.
+				if !runnerState.CompareAndSwap(resourceSuspendRunnerActive, resourceSuspendRunnerQuiescing) {
+					return
+				}
+				waitUntil := directive.CheckpointDeadlineAt
+				waitContext, cancelWait := context.WithDeadline(ctx, waitUntil)
+				runnerErr, waitErr := waitForRunnerStop(waitContext, runnerStopped)
+				cancelWait()
+				if waitErr == nil {
+					results <- d.finishActiveTurnResourceSuspend(
+						ctx,
+						execution,
+						lease,
+						workload,
+						materializer,
+						materialized,
+						terminalLogs,
+						*directive,
+						runnerErr,
+						true,
+					)
+					return
+				}
+				if !errors.Is(waitErr, context.DeadlineExceeded) {
+					results <- resourceSuspendResult{
+						err: fmt.Errorf("wait for Provider stop before active-turn resource suspension: %w", waitErr),
+					}
+					return
+				}
+				cancelRunner()
+				runnerErr, waitErr = waitForRunnerStop(ctx, runnerStopped)
+				if waitErr != nil {
+					results <- resourceSuspendResult{
+						err: fmt.Errorf("wait for Provider stop after active-turn suspension timeout: %w", waitErr),
+					}
+					return
+				}
+				results <- d.finishActiveTurnResourceSuspend(
+					ctx,
+					execution,
+					lease,
+					workload,
+					materializer,
+					materialized,
+					terminalLogs,
+					*directive,
+					errors.Join(
+						runnerErr,
+						errors.New("Provider did not stop before the active-turn suspend checkpoint deadline"),
+					),
+					false,
+				)
+				return
+			case resourceSuspendRunnerFinished:
+				runnerErr, waitErr := waitForRunnerStop(ctx, runnerStopped)
+				if waitErr != nil {
+					results <- resourceSuspendResult{
+						err: fmt.Errorf("load stopped Provider outcome for active-turn resource suspension: %w", waitErr),
+					}
+					return
+				}
+				results <- d.finishActiveTurnResourceSuspend(
+					ctx,
+					execution,
+					lease,
+					workload,
+					materializer,
+					materialized,
+					terminalLogs,
+					*directive,
+					runnerErr,
+					true,
+				)
+				return
+			default:
+				return
+			}
+		}
+
+		// Arbitration prevents a directive pulled concurrently with natural
+		// Provider completion from starting a second terminal lifecycle. Once
+		// quiescing wins, the old generation must never be resumed locally.
+		if !runnerState.CompareAndSwap(resourceSuspendRunnerActive, resourceSuspendRunnerQuiescing) {
+			return
+		}
+		cancelRunner()
+		select {
+		case runnerErr := <-runnerStopped:
+			// RunControlled does not return until the Provider process tree has
+			// terminated, so Workspace and terminal state are stable from here.
+			if isContainmentError(runnerErr) {
+				d.abortResourceSuspend(
+					ctx, execution.ID, lease, *directive,
+					"provider_containment_failed",
+					"The Provider process containment boundary could not prove an empty process tree.",
+				)
+				results <- resourceSuspendResult{
+					disposition: "containment-failed",
+					err:         runnerErr,
+				}
+				return
+			}
+			if runnerErr != nil && !errors.Is(runnerErr, context.Canceled) {
+				results <- d.recoverAfterQuiescedResourceSuspendFailure(
+					ctx, execution.ID, lease, *directive,
+					"provider_quiesce_failed",
+					"The Provider stopped with an unexpected error while preparing resource suspension.",
+					runnerErr,
+				)
+				return
+			}
+		case <-ctx.Done():
+			results <- resourceSuspendResult{
+				err: fmt.Errorf("wait for Provider quiesce before resource suspension: %w", ctx.Err()),
+			}
+			return
+		}
+		quiesceContext, cancelQuiesce := context.WithDeadline(ctx, directive.CheckpointDeadlineAt)
+		_, quiesceErr := d.client.MarkResourceSuspendQuiesced(
+			quiesceContext, execution.ID, lease, *directive,
+		)
+		cancelQuiesce()
+		if quiesceErr != nil {
+			results <- d.recoverAfterQuiescedResourceSuspendFailure(
+				ctx, execution.ID, lease, *directive,
+				"provider_quiesce_record_failed",
+				"The Provider stopped, but its durable quiesce proof could not be recorded.",
+				fmt.Errorf("record durable Provider quiesce proof: %w", quiesceErr),
+			)
+			return
+		}
+		results <- d.completeResourceSuspendAfterProviderQuiesce(
+			ctx, execution, lease, workload, materializer, materialized, terminalLogs, *directive,
+		)
+		return
+	}
+}
+
+func waitForRunnerStop(ctx context.Context, runnerStopped <-chan error) (error, error) {
+	select {
+	case runnerErr, open := <-runnerStopped:
+		if !open {
+			return nil, nil
+		}
+		return runnerErr, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func (d *Daemon) finishActiveTurnResourceSuspend(
+	ctx context.Context,
+	execution executions.Execution,
+	lease executions.Lease,
+	workload executions.Workload,
+	materializer workspaceMaterializer,
+	materialized WorkspaceMaterialization,
+	terminalLogs *terminalLogCollector,
+	directive executions.ResourceDirective,
+	runnerErr error,
+	allowNaturalCompletion bool,
+) resourceSuspendResult {
+	if runnerErr == nil {
+		if allowNaturalCompletion {
+			return resourceSuspendResult{
+				continueExecution: true,
+				disposition:       "completed-before-active-suspend",
+			}
+		}
+		runnerErr = errors.New("active-turn suspension abandoned local execution ownership before the Provider stopped")
+	}
+	if _, suspended := runnerSuspendedTerminal(runnerErr); suspended {
+		quiesceContext, cancelQuiesce := context.WithTimeout(ctx, d.config.RequestTimeout)
+		_, quiesceErr := d.client.MarkResourceSuspendQuiesced(
+			quiesceContext, execution.ID, lease, directive,
+		)
+		cancelQuiesce()
+		if quiesceErr == nil {
+			return d.completeResourceSuspendAfterProviderQuiesce(
+				ctx,
+				execution,
+				lease,
+				workload,
+				materializer,
+				materialized,
+				terminalLogs,
+				directive,
+			)
+		}
+		return d.recoverAfterQuiescedResourceSuspendFailure(
+			ctx,
+			execution.ID,
+			lease,
+			directive,
+			"provider_quiesce_record_failed",
+			"The Provider stopped, but its durable active-turn checkpoint receipt could not be confirmed.",
+			errors.Join(runnerErr, fmt.Errorf("record durable Provider quiesce proof: %w", quiesceErr)),
+		)
+	}
+	return d.recoverAfterActiveTurnSuspendFailure(ctx, execution.ID, lease, directive, runnerErr)
+}
+
+func (d *Daemon) recoverAfterActiveTurnSuspendFailure(
+	ctx context.Context,
+	executionID uuid.UUID,
+	lease executions.Lease,
+	directive executions.ResourceDirective,
+	cause error,
+) resourceSuspendResult {
+	quiesceContext, cancelQuiesce := context.WithTimeout(ctx, d.config.RequestTimeout)
+	_, quiesceErr := d.client.MarkResourceSuspendQuiesced(
+		quiesceContext, executionID, lease, directive,
+	)
+	cancelQuiesce()
+	if quiesceErr == nil {
+		return d.recoverAfterQuiescedResourceSuspendFailure(
+			ctx,
+			executionID,
+			lease,
+			directive,
+			"provider_quiesce_failed",
+			"The Provider stopped before the active-turn suspend checkpoint could be committed.",
+			cause,
+		)
+	}
+	return d.recoverAfterQuiescedResourceSuspendFailure(
+		ctx,
+		executionID,
+		lease,
+		directive,
+		"provider_quiesce_record_failed",
+		"The Provider stopped, but its durable active-turn checkpoint receipt could not be confirmed.",
+		errors.Join(cause, fmt.Errorf("record durable Provider quiesce proof: %w", quiesceErr)),
+	)
+}
+
+func (d *Daemon) completeResourceSuspendAfterProviderQuiesce(
+	ctx context.Context,
+	execution executions.Execution,
+	lease executions.Lease,
+	workload executions.Workload,
+	materializer workspaceMaterializer,
+	materialized WorkspaceMaterialization,
+	terminalLogs *terminalLogCollector,
+	directive executions.ResourceDirective,
+) resourceSuspendResult {
+	checkpointContext, cancelCheckpoint := context.WithDeadline(ctx, directive.CheckpointDeadlineAt)
+	hadOpenTerminals, terminalErr := terminalLogs.FinalizeOpen(checkpointContext, "timeout")
+
+	checkpointStatus := "unchanged"
+	var checkpointErr error
+	if materialized.Managed {
+		var checkpointCreated bool
+		checkpointCreated, checkpointErr = d.persistManagedWorkspaceState(
+			checkpointContext, execution, lease, workload, materializer, materialized,
+		)
+		if checkpointCreated {
+			checkpointStatus = "ready"
+		}
+	}
+	if terminalErr != nil {
+		cancelCheckpoint()
+		return d.recoverAfterQuiescedResourceSuspendFailure(
+			ctx, execution.ID, lease, directive,
+			"terminal_checkpoint_failed",
+			"Terminal state could not be finalized after the Provider was quiesced.",
+			fmt.Errorf("finalize terminal state before resource suspension: %w", terminalErr),
+		)
+	}
+	if checkpointErr != nil {
+		cancelCheckpoint()
+		return d.recoverAfterQuiescedResourceSuspendFailure(
+			ctx, execution.ID, lease, directive,
+			"workspace_checkpoint_failed",
+			"The managed Workspace could not be checkpointed after the Provider was quiesced.",
+			fmt.Errorf("checkpoint Workspace before resource suspension: %w", checkpointErr),
+		)
+	}
+	if hadOpenTerminals {
+		cancelCheckpoint()
+		return d.recoverAfterQuiescedResourceSuspendFailure(
+			ctx, execution.ID, lease, directive,
+			"terminal_activity_in_progress",
+			"A live terminal was finalized while the Provider was being quiesced; the Execution will recover in a new generation.",
+			errors.New("resource suspension encountered terminal activity during Provider quiesce"),
+		)
+	}
+
+	completionMode := directive.CompletionMode
+	if completionMode == "" {
+		completionMode = executions.ResourceSuspendCompletionWorkerAttestedV1
+	}
+	if completionMode == executions.ResourceSuspendCompletionKubernetesPodTerminalV1 {
+		_, readyErr := d.client.MarkResourceSuspendCheckpointReady(
+			checkpointContext, execution.ID, lease, directive, checkpointStatus,
+		)
+		cancelCheckpoint()
+		if readyErr == nil {
+			return resourceSuspendResult{
+				fenced: true, disposition: "checkpoint-ready-awaiting-pod-terminal",
+			}
+		}
+		return d.recoverAfterQuiescedResourceSuspendFailure(
+			ctx, execution.ID, lease, directive,
+			"suspend_checkpoint_handoff_failed",
+			"The suspend Checkpoint could not be handed off for Kubernetes Pod-terminal verification; the Execution will recover in a new generation.",
+			fmt.Errorf("record Kubernetes suspend Checkpoint handoff: %w", readyErr),
+		)
+	}
+	if completionMode != executions.ResourceSuspendCompletionWorkerAttestedV1 {
+		cancelCheckpoint()
+		return d.recoverAfterQuiescedResourceSuspendFailure(
+			ctx, execution.ID, lease, directive,
+			"suspend_completion_mode_unsupported",
+			"The resource suspension completion mode is unsupported by this Worker; the Execution will recover in a new generation.",
+			fmt.Errorf("unsupported resource suspension completion mode %q", completionMode),
+		)
+	}
+
+	stopRunner, completeErr := d.commitResourceSuspend(
+		checkpointContext, execution.ID, lease, directive, checkpointStatus,
+	)
+	cancelCheckpoint()
+	if stopRunner {
+		disposition := "suspended"
+		if completeErr != nil {
+			disposition = "suspend-commit-ambiguous"
+		}
+		return resourceSuspendResult{fenced: true, disposition: disposition, err: completeErr}
+	}
+	return d.recoverAfterQuiescedResourceSuspendFailure(
+		ctx, execution.ID, lease, directive,
+		"suspend_commit_failed",
+		"The resource suspension commit was rejected after the Provider was quiesced; the Execution will recover in a new generation.",
+		completeErr,
+	)
+}
+
+func (d *Daemon) recoverAfterQuiescedResourceSuspendFailure(
+	ctx context.Context,
+	executionID uuid.UUID,
+	lease executions.Lease,
+	directive executions.ResourceDirective,
+	failureCode, failureMessage string,
+	cause error,
+) resourceSuspendResult {
+	releaseContext, cancelRelease := context.WithTimeout(ctx, d.config.RequestTimeout)
+	releaseErr := d.client.ReleaseAfterQuiescedResourceSuspend(
+		releaseContext,
+		executionID,
+		lease,
+		"Provider quiesced before resource suspension could be committed; recover in a new generation.",
+	)
+	cancelRelease()
+	if releaseErr == nil {
+		return resourceSuspendResult{fenced: true, disposition: "recovering", err: cause}
+	}
+	// Release must see the still-active durable quiesce proof so it can retain
+	// pending callbacks while moving to a new Generation. Abort only after a
+	// failed/ambiguous release; aborting first would erase that provenance and
+	// turn a safe recovery into callback loss.
+	d.abortResourceSuspend(ctx, executionID, lease, directive, failureCode, failureMessage)
+	return resourceSuspendResult{
+		disposition: "lease-expiry-recovery",
+		err:         errors.Join(cause, fmt.Errorf("release quiesced Execution for recovery: %w", releaseErr)),
+	}
+}
+
+// commitResourceSuspend distinguishes a definitive semantic rejection from an
+// acknowledgement that may have been lost after the Control Plane committed.
+// The completion request ID is deterministic, so a fresh-context replay reads
+// the atomic idempotency receipt. The Provider is already quiesced before this
+// function runs; if transport ambiguity remains, stopping Lease renewal lets
+// recovery reconcile the server side if the original commit did not land.
+func (d *Daemon) commitResourceSuspend(
+	ctx context.Context,
+	executionID uuid.UUID,
+	lease executions.Lease,
+	directive executions.ResourceDirective,
+	checkpointStatus string,
+) (bool, error) {
+	requestContext, cancel := context.WithDeadline(ctx, directive.CheckpointDeadlineAt)
+	err := d.client.CompleteResourceSuspend(
+		requestContext, executionID, lease, directive, checkpointStatus,
+	)
+	cancel()
+	if err == nil {
+		return true, nil
+	}
+	if ctx.Err() != nil {
+		return false, err
+	}
+	if resourceSuspendCompletionRejected(err) {
+		return false, err
+	}
+
+	confirmationContext, cancelConfirmation := context.WithTimeout(ctx, d.config.RequestTimeout)
+	confirmationErr := d.client.CompleteResourceSuspend(
+		confirmationContext, executionID, lease, directive, checkpointStatus,
+	)
+	cancelConfirmation()
+	if confirmationErr == nil {
+		return true, nil
+	}
+	combined := errors.Join(err, fmt.Errorf("confirm resource suspension commit: %w", confirmationErr))
+	if ctx.Err() != nil {
+		return false, combined
+	}
+	if resourceSuspendCompletionRejected(confirmationErr) {
+		return false, combined
+	}
+	return true, combined
+}
+
+func resourceSuspendCompletionRejected(err error) bool {
+	var controlPlaneErr *controlPlaneProblem
+	if !errors.As(err, &controlPlaneErr) {
+		return false
+	}
+	switch controlPlaneErr.Code {
+	case "invalid_resource_suspend_completion",
+		"session_absolute_expired",
+		"session_not_found",
+		"lease_not_current",
+		"generation_fenced",
+		"resource_suspend_state_conflict",
+		"resource_suspend_attempt_not_found",
+		"resource_suspend_attempt_finished",
+		"resource_suspend_checkpoint_expired",
+		"resource_suspend_no_longer_safe",
+		"resource_suspend_workspace_unavailable",
+		"resource_suspend_checkpoint_required",
+		"resource_suspend_quiesce_required",
+		"active_suspend_activity_boundary_missing",
+		"active_suspend_receipt_required",
+		"active_suspend_receipt_invalid",
+		"active_suspend_receipt_integrity_failed",
+		"active_suspend_control_unacknowledged",
+		"active_suspend_cursor_drift",
+		"active_suspend_primary_outcome_unknown",
+		"active_suspend_session_unavailable":
+		return true
+	default:
+		return false
+	}
+}
+
+func (d *Daemon) abortResourceSuspend(
+	ctx context.Context,
+	executionID uuid.UUID,
+	lease executions.Lease,
+	directive executions.ResourceDirective,
+	failureCode, failureMessage string,
+) {
+	if len(failureMessage) > 2000 {
+		failureMessage = failureMessage[:2000]
+	}
+	requestContext, cancel := context.WithTimeout(ctx, d.config.RequestTimeout)
+	defer cancel()
+	if err := d.client.AbortResourceSuspend(
+		requestContext, executionID, lease, directive, failureCode, failureMessage,
+	); err != nil && ctx.Err() == nil {
+		d.logger.Warn(
+			"resource suspension abort could not be persisted",
+			"executionId", executionID,
+			"generation", lease.Generation,
+			"suspendAttemptId", directive.SuspendAttemptID,
+			"error", err,
+		)
+	}
+}
+
+func (d *Daemon) resolveMemoryDocuments(
+	ctx context.Context,
+	execution executions.Execution,
+	lease executions.Lease,
+	references []executions.RecoveryMemoryReference,
+) ([]MemoryDocument, error) {
+	if len(references) > executions.MaximumRecoveryMemoryReferences {
+		return nil, errors.New("Recovery Bundle contains too many Agent Memory references")
+	}
+	documents := make([]MemoryDocument, 0, len(references))
+	totalBytes := 0
+	for _, reference := range references {
+		document, err := d.client.DownloadMemoryArtifact(ctx, execution.ID, lease, reference)
+		if err != nil {
+			return nil, err
+		}
+		totalBytes += len(document.Content)
+		if totalBytes > executions.MaximumRecoveryMemoryTotalBytes {
+			return nil, errors.New("Recovery Bundle Agent Memory exceeds the total size limit")
+		}
+		documents = append(documents, document)
+	}
+	return documents, nil
 }
 
 func (d *Daemon) persistManagedWorkspaceState(
@@ -1424,20 +2253,32 @@ func canonicalUserInputQuestions(value any) ([]any, error) {
 	return result, nil
 }
 
-func (d *Daemon) renewLeaseLoop(ctx context.Context, executionID uuid.UUID, lease executions.Lease, cancel context.CancelFunc, result chan<- error) {
+func (d *Daemon) renewLeaseLoop(
+	ctx context.Context,
+	executionID uuid.UUID,
+	lease executions.Lease,
+	cancel context.CancelFunc,
+	result chan<- error,
+	updates chan executions.Lease,
+	updatesReady *atomic.Bool,
+) {
 	ticker := time.NewTicker(d.config.LeaseRenewInterval)
 	defer ticker.Stop()
 	defer close(result)
+	if updates != nil {
+		defer close(updates)
+	}
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			publishRenewal := updates != nil && (updatesReady == nil || updatesReady.Load())
 			requestContext, requestCancel := context.WithTimeout(
 				ctx,
 				executionLeaseRenewalRequestTimeout(d.config),
 			)
-			err := d.client.Renew(requestContext, executionID, lease)
+			renewed, err := d.client.Renew(requestContext, executionID, lease)
 			requestCancel()
 			if err != nil {
 				renewErr := executionLeaseRenewalError(ctx, err)
@@ -1460,8 +2301,370 @@ func (d *Daemon) renewLeaseLoop(ctx context.Context, executionID uuid.UUID, leas
 				cancel()
 				return
 			}
+			// A pre-access request can serialize behind the explicit Grant
+			// resolve and therefore return the first valid access projection even
+			// though readiness was false when the HTTP request began. Publish that
+			// non-nil projection once readiness is visible, while still discarding
+			// genuinely pre-attach nil responses.
+			if !publishRenewal && updates != nil && updatesReady != nil &&
+				updatesReady.Load() && renewed.ProviderCredentialAccess != nil {
+				publishRenewal = true
+			}
+			if publishRenewal {
+				publishLatestLeaseUpdate(updates, renewed)
+			}
 		}
 	}
+}
+
+func publishLatestLeaseUpdate(updates chan executions.Lease, lease executions.Lease) {
+	if updates == nil {
+		return
+	}
+	select {
+	case updates <- lease:
+	default:
+		select {
+		case <-updates:
+		default:
+		}
+		select {
+		case updates <- lease:
+		default:
+		}
+	}
+}
+
+func startProviderCredentialAccessMonitor(
+	ctx context.Context,
+	expectedGrantID uuid.UUID,
+	initial ProviderCredentialAccess,
+	updates <-chan providerCredentialAccessUpdate,
+	cancelRunner context.CancelCauseFunc,
+	now func() time.Time,
+) <-chan error {
+	done := make(chan error, 1)
+	go func() {
+		defer close(done)
+		current := initial
+		timer := time.NewTimer(providerCredentialAccessDurationUntil(now, current.ExpiresAt))
+		defer timer.Stop()
+		report := func(err error) {
+			select {
+			case done <- err:
+			default:
+			}
+		}
+		for {
+			select {
+			case <-ctx.Done():
+				report(nil)
+				return
+			case <-timer.C:
+				err := providerCredentialAccessExpiredFailure()
+				cancelRunner(err)
+				report(err)
+				return
+			case update, ok := <-updates:
+				if !ok {
+					if ctx.Err() != nil {
+						report(nil)
+						return
+					}
+					err := providerCredentialAccessUnavailableFailureWithMessage(
+						"The Provider Credential access lease renewal stream closed during execution.",
+					)
+					cancelRunner(err)
+					report(err)
+					return
+				}
+				if update.err != nil {
+					cancelRunner(update.err)
+					report(update.err)
+					return
+				}
+				if update.access == nil {
+					err := providerCredentialAccessInvalidFailure(
+						"The Provider Credential access lease metadata disappeared during execution.",
+					)
+					cancelRunner(err)
+					report(err)
+					return
+				}
+				if err := validateUpdatedProviderCredentialAccess(expectedGrantID, current, *update.access, now()); err != nil {
+					cancelRunner(err)
+					report(err)
+					return
+				}
+				current = *update.access
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+				timer.Reset(providerCredentialAccessDurationUntil(now, current.ExpiresAt))
+			}
+		}
+	}()
+	return done
+}
+
+func startProviderCredentialAccessLeaseBridge(
+	ctx context.Context,
+	leaseUpdates <-chan executions.Lease,
+) <-chan providerCredentialAccessUpdate {
+	updates := make(chan providerCredentialAccessUpdate, 1)
+	go func() {
+		defer close(updates)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case renewed, ok := <-leaseUpdates:
+				if !ok {
+					return
+				}
+				access, err := providerCredentialAccessFromLease(renewed)
+				if err != nil {
+					publishLatestProviderCredentialAccessUpdate(updates, providerCredentialAccessUpdate{
+						err: providerCredentialAccessInvalidFailure(
+							"The Provider Credential access lease metadata in the renewal response is invalid.",
+						),
+					})
+					return
+				}
+				publishLatestProviderCredentialAccessUpdate(updates, providerCredentialAccessUpdate{access: access})
+			}
+		}
+	}()
+	return updates
+}
+
+func providerCredentialAccessDurationUntil(now func() time.Time, deadline time.Time) time.Duration {
+	duration := deadline.Sub(now())
+	if duration <= 0 {
+		return time.Nanosecond
+	}
+	return duration
+}
+
+func publishLatestProviderCredentialAccessUpdate(
+	updates chan providerCredentialAccessUpdate,
+	update providerCredentialAccessUpdate,
+) {
+	select {
+	case updates <- update:
+	default:
+		select {
+		case <-updates:
+		default:
+		}
+		select {
+		case updates <- update:
+		default:
+		}
+	}
+}
+
+func validateInitialProviderCredentialAccess(
+	expectedGrantID uuid.UUID,
+	access *ProviderCredentialAccess,
+	now time.Time,
+) error {
+	if access == nil {
+		return providerCredentialAccessInvalidFailure("The Provider Credential access lease metadata is missing.")
+	}
+	if err := validateProviderCredentialAccessShape(expectedGrantID, *access, now); err != nil {
+		return err
+	}
+	if strings.TrimSpace(access.Status) != providerCredentialAccessStatusActive {
+		return providerCredentialAccessInvalidFailure(
+			"The Provider Credential access lease must start in an active state.",
+		)
+	}
+	return nil
+}
+
+func validateUpdatedProviderCredentialAccess(
+	expectedGrantID uuid.UUID,
+	current ProviderCredentialAccess,
+	next ProviderCredentialAccess,
+	now time.Time,
+) error {
+	if err := validateProviderCredentialAccessShape(expectedGrantID, next, now); err != nil {
+		return err
+	}
+	switch strings.TrimSpace(next.Status) {
+	case providerCredentialAccessStatusUnavailable:
+		return providerCredentialAccessUnavailableFailure()
+	case providerCredentialAccessStatusExpired:
+		return providerCredentialAccessExpiredFailure()
+	}
+	if next.Serial < current.Serial {
+		return providerCredentialAccessInvalidFailure(
+			"The Provider Credential access lease serial rolled back during execution.",
+		)
+	}
+	if !next.IssuedAt.Equal(current.IssuedAt) {
+		return providerCredentialAccessInvalidFailure(
+			"The Provider Credential access lease issuance timestamp changed during execution.",
+		)
+	}
+	if next.ActivitySequence < current.ActivitySequence {
+		return providerCredentialAccessInvalidFailure(
+			"The Provider Credential access lease activity sequence rolled back during execution.",
+		)
+	}
+	if next.ActivitySequence == current.ActivitySequence && !next.ActivityAt.Equal(current.ActivityAt) {
+		return providerCredentialAccessInvalidFailure(
+			"The Provider Credential access lease activity timestamp changed without a newer semantic event.",
+		)
+	}
+	if next.ActivitySequence > current.ActivitySequence && next.ActivityAt.Before(current.ActivityAt) {
+		return providerCredentialAccessInvalidFailure(
+			"The Provider Credential access lease activity timestamp rolled back during execution.",
+		)
+	}
+	if next.RenewedAt.Before(current.RenewedAt) || next.ExpiresAt.Before(current.ExpiresAt) {
+		return providerCredentialAccessInvalidFailure(
+			"The Provider Credential access lease renewal window rolled back during execution.",
+		)
+	}
+	if providerCredentialHardExpiryExtended(current.HardExpiresAt, next.HardExpiresAt) {
+		return providerCredentialAccessInvalidFailure(
+			"The Provider Credential access lease hard expiry was extended during execution.",
+		)
+	}
+	if next.Serial == current.Serial &&
+		(next.ActivitySequence != current.ActivitySequence ||
+			!next.ActivityAt.Equal(current.ActivityAt) ||
+			!next.RenewedAt.Equal(current.RenewedAt) ||
+			!next.ExpiresAt.Equal(current.ExpiresAt) ||
+			!next.RefreshDeadlineAt.Equal(current.RefreshDeadlineAt) ||
+			!optionalTimesEqual(next.HardExpiresAt, current.HardExpiresAt)) {
+		return providerCredentialAccessInvalidFailure(
+			"The Provider Credential access lease changed durable state without advancing its serial.",
+		)
+	}
+	return nil
+}
+
+func providerCredentialHardExpiryExtended(current, next *time.Time) bool {
+	if current == nil {
+		return false
+	}
+	return next == nil || next.After(*current)
+}
+
+func optionalTimesEqual(left, right *time.Time) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return left.Equal(*right)
+}
+
+func validateProviderCredentialAccessShape(
+	expectedGrantID uuid.UUID,
+	access ProviderCredentialAccess,
+	now time.Time,
+) error {
+	status := strings.TrimSpace(access.Status)
+	if expectedGrantID == uuid.Nil || access.GrantID == uuid.Nil || access.GrantID != expectedGrantID {
+		return providerCredentialAccessInvalidFailure(
+			"The Provider Credential access lease no longer matches the expected grant.",
+		)
+	}
+	switch status {
+	case providerCredentialAccessStatusActive, providerCredentialAccessStatusRefreshWindowClosed:
+	case providerCredentialAccessStatusUnavailable:
+		return providerCredentialAccessUnavailableFailure()
+	case providerCredentialAccessStatusExpired:
+		return providerCredentialAccessExpiredFailure()
+	default:
+		return providerCredentialAccessInvalidFailure(
+			"The Provider Credential access lease status is invalid.",
+		)
+	}
+	if access.Serial <= 0 || access.ActivitySequence < 0 {
+		return providerCredentialAccessInvalidFailure(
+			"The Provider Credential access lease sequence metadata is invalid.",
+		)
+	}
+	if access.IssuedAt.IsZero() || access.RenewedAt.IsZero() || access.ExpiresAt.IsZero() ||
+		access.ActivityAt.IsZero() || access.RefreshDeadlineAt.IsZero() {
+		return providerCredentialAccessInvalidFailure(
+			"The Provider Credential access lease deadlines are incomplete.",
+		)
+	}
+	if access.RefreshDeadlineAt.Before(access.ActivityAt) {
+		return providerCredentialAccessInvalidFailure(
+			"The Provider Credential access lease refresh deadline is invalid.",
+		)
+	}
+	if access.RenewedAt.Before(access.IssuedAt) {
+		return providerCredentialAccessInvalidFailure(
+			"The Provider Credential access lease renewal timestamp is invalid.",
+		)
+	}
+	if !access.ExpiresAt.After(access.RenewedAt) || !access.ExpiresAt.After(now) {
+		return providerCredentialAccessExpiredFailure()
+	}
+	if access.RenewAfterAt == nil || access.RenewAfterAt.IsZero() {
+		return providerCredentialAccessInvalidFailure(
+			"The Provider Credential access lease renewAfter deadline is invalid.",
+		)
+	}
+	if access.RenewAfterAt.Before(access.RenewedAt) || !access.RenewAfterAt.Before(access.ExpiresAt) {
+		return providerCredentialAccessInvalidFailure(
+			"The Provider Credential access lease renewAfter deadline is invalid.",
+		)
+	}
+	if access.HardExpiresAt != nil && access.HardExpiresAt.Before(access.ExpiresAt) {
+		return providerCredentialAccessInvalidFailure(
+			"The Provider Credential access lease hard expiry is invalid.",
+		)
+	}
+	return nil
+}
+
+func providerCredentialAccessInvalidFailure(message string) error {
+	return &runnerFailure{
+		code: "credential_invalid", message: message,
+		requiresNewExecution: true, requiresUserAction: true,
+		canReconstructFromHistory: true, canMoveWorker: true,
+	}
+}
+
+func providerCredentialAccessUnavailableFailure() error {
+	return providerCredentialAccessUnavailableFailureWithMessage(
+		"The Provider Credential access lease became unavailable during execution.",
+	)
+}
+
+func providerCredentialAccessUnavailableFailureWithMessage(message string) error {
+	return &runnerFailure{
+		code:                 "credential_unavailable",
+		message:              message,
+		requiresNewExecution: true, requiresUserAction: true,
+		canReconstructFromHistory: true, canMoveWorker: true,
+	}
+}
+
+func providerCredentialAccessExpiredFailure() error {
+	return &runnerFailure{
+		code:                 "credential_expired",
+		message:              "The Provider Credential access lease expired during execution.",
+		requiresNewExecution: true, requiresUserAction: true,
+		canReconstructFromHistory: true, canMoveWorker: true,
+	}
+}
+
+func providerCredentialAccessFromLease(lease executions.Lease) (*ProviderCredentialAccess, error) {
+	if lease.ProviderCredentialAccess == nil {
+		return nil, errors.New("Provider Credential access metadata is missing from the renewed Lease")
+	}
+	return lease.ProviderCredentialAccess, nil
 }
 
 func executionLeaseRenewalRequestTimeout(config Config) time.Duration {
@@ -1506,11 +2709,16 @@ func (d *Daemon) failExecutionGuarded(
 	return d.failExecution(ctx, executionID, lease, cause)
 }
 
-func withProviderHostCapabilities(base map[string]any, providerHost map[string]any, config Config) map[string]any {
+func withProviderHostCapabilities(
+	base map[string]any,
+	providerHost map[string]any,
+	config Config,
+) map[string]any {
 	result := make(map[string]any, len(base)+3)
 	for key, value := range base {
 		result[key] = value
 	}
+	delete(result, resourceSuspendContainmentCapabilityKey)
 	featureFlags := map[string]any{}
 	if raw, ok := base["featureFlags"].(map[string]any); ok {
 		featureFlags = make(map[string]any, len(raw)+1)
@@ -1546,6 +2754,9 @@ func withProviderHostCapabilities(base map[string]any, providerHost map[string]a
 	}
 	if config.ImageDigest != "" {
 		workerRuntime["imageDigest"] = config.ImageDigest
+	}
+	if capability := copyProcessContainmentCapability(config.ProcessContainmentCapability); capability != nil {
+		workerRuntime["processContainment"] = capability
 	}
 	result["workerRuntime"] = workerRuntime
 	return result

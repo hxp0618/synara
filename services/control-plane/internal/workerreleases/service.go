@@ -37,6 +37,7 @@ var releaseTransitionBlockingExecutionStatuses = []string{
 	"running",
 	"waiting-for-approval",
 	"recovering",
+	"suspended",
 }
 
 func NewService(db *gorm.DB) *Service {

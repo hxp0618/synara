@@ -24,6 +24,7 @@ function worker(overrides: Partial<ControlPlaneWorker> = {}): ControlPlaneWorker
     instanceUid: "pod-uid-1",
     executionTargetId: target.id,
     targetKind: "kubernetes",
+    workerMode: "execution-pinned",
     clusterId: "stage3-prod",
     namespace: "synara-workers",
     podName: "synara-worker-1",

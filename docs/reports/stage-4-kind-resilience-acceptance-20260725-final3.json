@@ -1,0 +1,933 @@
+{
+  "schemaVersion": "synara.kubernetes.resilience.acceptance.v1",
+  "status": "passed",
+  "startedAt": "2026-07-25T06:34:14Z",
+  "finishedAt": "2026-07-25T06:47:51Z",
+  "durationSeconds": 817,
+  "context": "kind-synara-stage4-final3-20260725",
+  "namespace": "synara-system",
+  "evidenceFile": "/Users/huang/devel/project/huang/business/synara/docs/reports/stage-4-kind-resilience-acceptance-20260725-final3.json",
+  "safety": {
+    "kindOnlyByDefault": true,
+    "allowNonDisposableOverride": "SYNARA_K8S_ACCEPTANCE_ALLOW_NONDISPOSABLE"
+  },
+  "baseline": {
+    "executed": true,
+    "status": "passed",
+    "durationSeconds": 72
+  },
+  "plannedCases": [
+    "rbac",
+    "topology",
+    "control-plane-failover",
+    "node-drain",
+    "node-partition"
+  ],
+  "allowedSkippedCases": [],
+  "caseCounts": {
+    "passed": 5,
+    "failed": 0,
+    "skipped": 0
+  },
+  "permissions": [
+    {
+      "verb": "create",
+      "resource": "tokenreviews",
+      "apiGroup": "authentication.k8s.io",
+      "namespace": "",
+      "expectedAllowed": true,
+      "allowed": true
+    },
+    {
+      "verb": "get",
+      "resource": "namespaces",
+      "apiGroup": "",
+      "namespace": "",
+      "expectedAllowed": true,
+      "allowed": true
+    },
+    {
+      "verb": "create",
+      "resource": "namespaces",
+      "apiGroup": "",
+      "namespace": "",
+      "expectedAllowed": true,
+      "allowed": true
+    },
+    {
+      "verb": "patch",
+      "resource": "namespaces",
+      "apiGroup": "",
+      "namespace": "",
+      "expectedAllowed": true,
+      "allowed": true
+    },
+    {
+      "verb": "get",
+      "resource": "pods",
+      "apiGroup": "",
+      "namespace": "synara-system",
+      "expectedAllowed": true,
+      "allowed": true
+    },
+    {
+      "verb": "list",
+      "resource": "pods",
+      "apiGroup": "",
+      "namespace": "synara-system",
+      "expectedAllowed": true,
+      "allowed": true
+    },
+    {
+      "verb": "create",
+      "resource": "pods",
+      "apiGroup": "",
+      "namespace": "synara-system",
+      "expectedAllowed": true,
+      "allowed": true
+    },
+    {
+      "verb": "patch",
+      "resource": "pods",
+      "apiGroup": "",
+      "namespace": "synara-system",
+      "expectedAllowed": true,
+      "allowed": true
+    },
+    {
+      "verb": "delete",
+      "resource": "pods",
+      "apiGroup": "",
+      "namespace": "synara-system",
+      "expectedAllowed": true,
+      "allowed": true
+    },
+    {
+      "verb": "get",
+      "resource": "serviceaccounts",
+      "apiGroup": "",
+      "namespace": "synara-system",
+      "expectedAllowed": true,
+      "allowed": true
+    },
+    {
+      "verb": "create",
+      "resource": "serviceaccounts",
+      "apiGroup": "",
+      "namespace": "synara-system",
+      "expectedAllowed": true,
+      "allowed": true
+    },
+    {
+      "verb": "patch",
+      "resource": "serviceaccounts",
+      "apiGroup": "",
+      "namespace": "synara-system",
+      "expectedAllowed": true,
+      "allowed": true
+    },
+    {
+      "verb": "get",
+      "resource": "secrets",
+      "apiGroup": "",
+      "namespace": "synara-system",
+      "expectedAllowed": true,
+      "allowed": true
+    },
+    {
+      "verb": "create",
+      "resource": "secrets",
+      "apiGroup": "",
+      "namespace": "synara-system",
+      "expectedAllowed": true,
+      "allowed": true
+    },
+    {
+      "verb": "patch",
+      "resource": "secrets",
+      "apiGroup": "",
+      "namespace": "synara-system",
+      "expectedAllowed": true,
+      "allowed": true
+    },
+    {
+      "verb": "get",
+      "resource": "resourcequotas",
+      "apiGroup": "",
+      "namespace": "synara-system",
+      "expectedAllowed": true,
+      "allowed": true
+    },
+    {
+      "verb": "create",
+      "resource": "resourcequotas",
+      "apiGroup": "",
+      "namespace": "synara-system",
+      "expectedAllowed": true,
+      "allowed": true
+    },
+    {
+      "verb": "patch",
+      "resource": "resourcequotas",
+      "apiGroup": "",
+      "namespace": "synara-system",
+      "expectedAllowed": true,
+      "allowed": true
+    },
+    {
+      "verb": "get",
+      "resource": "networkpolicies",
+      "apiGroup": "networking.k8s.io",
+      "namespace": "synara-system",
+      "expectedAllowed": true,
+      "allowed": true
+    },
+    {
+      "verb": "create",
+      "resource": "networkpolicies",
+      "apiGroup": "networking.k8s.io",
+      "namespace": "synara-system",
+      "expectedAllowed": true,
+      "allowed": true
+    },
+    {
+      "verb": "patch",
+      "resource": "networkpolicies",
+      "apiGroup": "networking.k8s.io",
+      "namespace": "synara-system",
+      "expectedAllowed": true,
+      "allowed": true
+    },
+    {
+      "verb": "delete",
+      "resource": "namespaces",
+      "apiGroup": "",
+      "namespace": "",
+      "expectedAllowed": false,
+      "allowed": false
+    },
+    {
+      "verb": "delete",
+      "resource": "secrets",
+      "apiGroup": "",
+      "namespace": "synara-system",
+      "expectedAllowed": false,
+      "allowed": false
+    },
+    {
+      "verb": "delete",
+      "resource": "serviceaccounts",
+      "apiGroup": "",
+      "namespace": "synara-system",
+      "expectedAllowed": false,
+      "allowed": false
+    },
+    {
+      "verb": "delete",
+      "resource": "resourcequotas",
+      "apiGroup": "",
+      "namespace": "synara-system",
+      "expectedAllowed": false,
+      "allowed": false
+    },
+    {
+      "verb": "delete",
+      "resource": "networkpolicies",
+      "apiGroup": "networking.k8s.io",
+      "namespace": "synara-system",
+      "expectedAllowed": false,
+      "allowed": false
+    },
+    {
+      "verb": "update",
+      "resource": "pods",
+      "apiGroup": "",
+      "namespace": "synara-system",
+      "expectedAllowed": false,
+      "allowed": false
+    },
+    {
+      "verb": "watch",
+      "resource": "pods",
+      "apiGroup": "",
+      "namespace": "synara-system",
+      "expectedAllowed": false,
+      "allowed": false
+    }
+  ],
+  "topology": {
+    "nodeCount": 4,
+    "controlPlaneNodeCount": 1,
+    "workerNodeCount": 3,
+    "controlPlanePods": [
+      {
+        "name": "synara-control-plane-6764ddf9cd-9vqvn",
+        "node": "synara-stage4-final3-20260725-worker2",
+        "phase": "Running",
+        "ready": true
+      },
+      {
+        "name": "synara-control-plane-6764ddf9cd-vlq47",
+        "node": "synara-stage4-final3-20260725-worker3",
+        "phase": "Running",
+        "ready": true
+      }
+    ],
+    "distinctControlPlaneHosts": 2,
+    "dependencyPods": [
+      {
+        "name": "synara-stage2-minio-884bf6c78-q5w7l",
+        "node": "synara-stage4-final3-20260725-worker"
+      },
+      {
+        "name": "synara-stage2-postgres-f77c995dd-q42qb",
+        "node": "synara-stage4-final3-20260725-worker"
+      }
+    ],
+    "safeControlPlaneTargetCount": 2,
+    "podDisruptionBudget": {
+      "name": "synara-control-plane",
+      "minAvailable": 1,
+      "currentHealthy": 2,
+      "desiredHealthy": 1
+    }
+  },
+  "scenarios": [
+    {
+      "name": "rbac",
+      "status": "passed",
+      "startedAt": "2026-07-25T06:35:26Z",
+      "finishedAt": "2026-07-25T06:35:28Z",
+      "details": {
+        "clusterRoleName": "synara-control-plane-reconciler",
+        "rules": [
+          {
+            "apiGroups": [
+              "authentication.k8s.io"
+            ],
+            "resources": [
+              "tokenreviews"
+            ],
+            "verbs": [
+              "create"
+            ]
+          },
+          {
+            "apiGroups": [
+              ""
+            ],
+            "resources": [
+              "namespaces"
+            ],
+            "verbs": [
+              "get",
+              "create",
+              "patch"
+            ]
+          },
+          {
+            "apiGroups": [
+              ""
+            ],
+            "resources": [
+              "pods"
+            ],
+            "verbs": [
+              "get",
+              "list",
+              "create",
+              "patch",
+              "delete"
+            ]
+          },
+          {
+            "apiGroups": [
+              ""
+            ],
+            "resources": [
+              "secrets",
+              "serviceaccounts",
+              "resourcequotas"
+            ],
+            "verbs": [
+              "get",
+              "create",
+              "patch"
+            ]
+          },
+          {
+            "apiGroups": [
+              "networking.k8s.io"
+            ],
+            "resources": [
+              "networkpolicies"
+            ],
+            "verbs": [
+              "get",
+              "create",
+              "patch"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "topology",
+      "status": "passed",
+      "startedAt": "2026-07-25T06:35:28Z",
+      "finishedAt": "2026-07-25T06:35:28Z",
+      "details": {
+        "nodeCount": 4,
+        "controlPlaneNodeCount": 1,
+        "workerNodeCount": 3,
+        "controlPlanePods": [
+          {
+            "name": "synara-control-plane-6764ddf9cd-9vqvn",
+            "node": "synara-stage4-final3-20260725-worker2",
+            "phase": "Running",
+            "ready": true
+          },
+          {
+            "name": "synara-control-plane-6764ddf9cd-vlq47",
+            "node": "synara-stage4-final3-20260725-worker3",
+            "phase": "Running",
+            "ready": true
+          }
+        ],
+        "distinctControlPlaneHosts": 2,
+        "dependencyPods": [
+          {
+            "name": "synara-stage2-minio-884bf6c78-q5w7l",
+            "node": "synara-stage4-final3-20260725-worker"
+          },
+          {
+            "name": "synara-stage2-postgres-f77c995dd-q42qb",
+            "node": "synara-stage4-final3-20260725-worker"
+          }
+        ],
+        "safeControlPlaneTargetCount": 2,
+        "podDisruptionBudget": {
+          "name": "synara-control-plane",
+          "minAvailable": 1,
+          "currentHealthy": 2,
+          "desiredHealthy": 1
+        }
+      }
+    },
+    {
+      "name": "control-plane-failover",
+      "status": "passed",
+      "startedAt": "2026-07-25T06:35:28Z",
+      "finishedAt": "2026-07-25T06:35:59Z",
+      "details": {
+        "deletedPod": "synara-control-plane-6764ddf9cd-vlq47",
+        "readyProbeFailures": 0,
+        "replacement": {
+          "beforePods": [
+            {
+              "name": "synara-control-plane-6764ddf9cd-9vqvn",
+              "node": "synara-stage4-final3-20260725-worker2"
+            },
+            {
+              "name": "synara-control-plane-6764ddf9cd-vlq47",
+              "node": "synara-stage4-final3-20260725-worker3"
+            }
+          ],
+          "afterPods": [
+            {
+              "name": "synara-control-plane-6764ddf9cd-9vqvn",
+              "node": "synara-stage4-final3-20260725-worker2"
+            },
+            {
+              "name": "synara-control-plane-6764ddf9cd-zxlq2",
+              "node": "synara-stage4-final3-20260725-worker"
+            }
+          ],
+          "replacementPods": [
+            {
+              "name": "synara-control-plane-6764ddf9cd-zxlq2",
+              "node": "synara-stage4-final3-20260725-worker"
+            }
+          ]
+        },
+        "preHook": null,
+        "postHook": null
+      }
+    },
+    {
+      "name": "node-drain",
+      "status": "passed",
+      "startedAt": "2026-07-25T06:35:59Z",
+      "finishedAt": "2026-07-25T06:36:31Z",
+      "details": {
+        "node": "synara-stage4-final3-20260725-worker2",
+        "deletedPod": "synara-control-plane-6764ddf9cd-9vqvn",
+        "readyProbeFailures": 0,
+        "beforePods": [
+          {
+            "name": "synara-control-plane-6764ddf9cd-9vqvn",
+            "node": "synara-stage4-final3-20260725-worker2"
+          },
+          {
+            "name": "synara-control-plane-6764ddf9cd-zxlq2",
+            "node": "synara-stage4-final3-20260725-worker"
+          }
+        ],
+        "afterPods": [
+          {
+            "name": "synara-control-plane-6764ddf9cd-7vr2n",
+            "node": "synara-stage4-final3-20260725-worker3"
+          },
+          {
+            "name": "synara-control-plane-6764ddf9cd-zxlq2",
+            "node": "synara-stage4-final3-20260725-worker"
+          }
+        ],
+        "podsOnCordonedNodeAfter": []
+      }
+    },
+    {
+      "name": "node-partition",
+      "status": "passed",
+      "startedAt": "2026-07-25T06:36:31Z",
+      "finishedAt": "2026-07-25T06:37:51Z",
+      "details": {
+        "node": "synara-stage4-final3-20260725-worker3",
+        "network": "kind",
+        "partitionSeconds": 20,
+        "readyProbeFailures": 1,
+        "nodeReadyBefore": {
+          "lastHeartbeatTime": "2026-07-25T06:36:21Z",
+          "lastTransitionTime": "2026-07-25T06:34:02Z",
+          "message": "kubelet is posting ready status",
+          "reason": "KubeletReady",
+          "status": "True",
+          "type": "Ready"
+        },
+        "nodeReadyAfter": {
+          "lastHeartbeatTime": "2026-07-25T06:37:43Z",
+          "lastTransitionTime": "2026-07-25T06:34:02Z",
+          "message": "kubelet is posting ready status",
+          "reason": "KubeletReady",
+          "status": "True",
+          "type": "Ready"
+        }
+      }
+    }
+  ],
+  "soak": {
+    "executed": true,
+    "status": "passed",
+    "startedAt": "2026-07-25T06:37:51Z",
+    "finishedAt": "2026-07-25T06:47:51Z",
+    "configuredDurationSeconds": 600,
+    "durationSeconds": 600,
+    "plannedCases": [
+      "control-plane-failover"
+    ],
+    "idleReadyProbeFailures": 0,
+    "requiredSkippedCycles": 0,
+    "cycles": [
+      {
+        "case": "control-plane-failover",
+        "status": "passed",
+        "startedAt": "2026-07-25T06:37:51Z",
+        "finishedAt": "2026-07-25T06:38:23Z",
+        "details": {
+          "deletedPod": "synara-control-plane-6764ddf9cd-zxlq2",
+          "readyProbeFailures": 0,
+          "replacement": {
+            "beforePods": [
+              {
+                "name": "synara-control-plane-6764ddf9cd-7vr2n",
+                "node": "synara-stage4-final3-20260725-worker3"
+              },
+              {
+                "name": "synara-control-plane-6764ddf9cd-zxlq2",
+                "node": "synara-stage4-final3-20260725-worker"
+              }
+            ],
+            "afterPods": [
+              {
+                "name": "synara-control-plane-6764ddf9cd-2nx7j",
+                "node": "synara-stage4-final3-20260725-worker2"
+              },
+              {
+                "name": "synara-control-plane-6764ddf9cd-7vr2n",
+                "node": "synara-stage4-final3-20260725-worker3"
+              }
+            ],
+            "replacementPods": [
+              {
+                "name": "synara-control-plane-6764ddf9cd-2nx7j",
+                "node": "synara-stage4-final3-20260725-worker2"
+              }
+            ]
+          },
+          "preHook": null,
+          "postHook": null
+        }
+      },
+      {
+        "case": "control-plane-failover",
+        "status": "passed",
+        "startedAt": "2026-07-25T06:38:54Z",
+        "finishedAt": "2026-07-25T06:39:25Z",
+        "details": {
+          "deletedPod": "synara-control-plane-6764ddf9cd-7vr2n",
+          "readyProbeFailures": 0,
+          "replacement": {
+            "beforePods": [
+              {
+                "name": "synara-control-plane-6764ddf9cd-2nx7j",
+                "node": "synara-stage4-final3-20260725-worker2"
+              },
+              {
+                "name": "synara-control-plane-6764ddf9cd-7vr2n",
+                "node": "synara-stage4-final3-20260725-worker3"
+              }
+            ],
+            "afterPods": [
+              {
+                "name": "synara-control-plane-6764ddf9cd-2nx7j",
+                "node": "synara-stage4-final3-20260725-worker2"
+              },
+              {
+                "name": "synara-control-plane-6764ddf9cd-68q7r",
+                "node": "synara-stage4-final3-20260725-worker"
+              }
+            ],
+            "replacementPods": [
+              {
+                "name": "synara-control-plane-6764ddf9cd-68q7r",
+                "node": "synara-stage4-final3-20260725-worker"
+              }
+            ]
+          },
+          "preHook": null,
+          "postHook": null
+        }
+      },
+      {
+        "case": "control-plane-failover",
+        "status": "passed",
+        "startedAt": "2026-07-25T06:39:56Z",
+        "finishedAt": "2026-07-25T06:40:27Z",
+        "details": {
+          "deletedPod": "synara-control-plane-6764ddf9cd-2nx7j",
+          "readyProbeFailures": 0,
+          "replacement": {
+            "beforePods": [
+              {
+                "name": "synara-control-plane-6764ddf9cd-2nx7j",
+                "node": "synara-stage4-final3-20260725-worker2"
+              },
+              {
+                "name": "synara-control-plane-6764ddf9cd-68q7r",
+                "node": "synara-stage4-final3-20260725-worker"
+              }
+            ],
+            "afterPods": [
+              {
+                "name": "synara-control-plane-6764ddf9cd-68q7r",
+                "node": "synara-stage4-final3-20260725-worker"
+              },
+              {
+                "name": "synara-control-plane-6764ddf9cd-wft7m",
+                "node": "synara-stage4-final3-20260725-worker3"
+              }
+            ],
+            "replacementPods": [
+              {
+                "name": "synara-control-plane-6764ddf9cd-wft7m",
+                "node": "synara-stage4-final3-20260725-worker3"
+              }
+            ]
+          },
+          "preHook": null,
+          "postHook": null
+        }
+      },
+      {
+        "case": "control-plane-failover",
+        "status": "passed",
+        "startedAt": "2026-07-25T06:40:58Z",
+        "finishedAt": "2026-07-25T06:41:29Z",
+        "details": {
+          "deletedPod": "synara-control-plane-6764ddf9cd-68q7r",
+          "readyProbeFailures": 0,
+          "replacement": {
+            "beforePods": [
+              {
+                "name": "synara-control-plane-6764ddf9cd-68q7r",
+                "node": "synara-stage4-final3-20260725-worker"
+              },
+              {
+                "name": "synara-control-plane-6764ddf9cd-wft7m",
+                "node": "synara-stage4-final3-20260725-worker3"
+              }
+            ],
+            "afterPods": [
+              {
+                "name": "synara-control-plane-6764ddf9cd-28v7g",
+                "node": "synara-stage4-final3-20260725-worker2"
+              },
+              {
+                "name": "synara-control-plane-6764ddf9cd-wft7m",
+                "node": "synara-stage4-final3-20260725-worker3"
+              }
+            ],
+            "replacementPods": [
+              {
+                "name": "synara-control-plane-6764ddf9cd-28v7g",
+                "node": "synara-stage4-final3-20260725-worker2"
+              }
+            ]
+          },
+          "preHook": null,
+          "postHook": null
+        }
+      },
+      {
+        "case": "control-plane-failover",
+        "status": "passed",
+        "startedAt": "2026-07-25T06:42:00Z",
+        "finishedAt": "2026-07-25T06:42:32Z",
+        "details": {
+          "deletedPod": "synara-control-plane-6764ddf9cd-wft7m",
+          "readyProbeFailures": 0,
+          "replacement": {
+            "beforePods": [
+              {
+                "name": "synara-control-plane-6764ddf9cd-28v7g",
+                "node": "synara-stage4-final3-20260725-worker2"
+              },
+              {
+                "name": "synara-control-plane-6764ddf9cd-wft7m",
+                "node": "synara-stage4-final3-20260725-worker3"
+              }
+            ],
+            "afterPods": [
+              {
+                "name": "synara-control-plane-6764ddf9cd-28v7g",
+                "node": "synara-stage4-final3-20260725-worker2"
+              },
+              {
+                "name": "synara-control-plane-6764ddf9cd-ssp2m",
+                "node": "synara-stage4-final3-20260725-worker"
+              }
+            ],
+            "replacementPods": [
+              {
+                "name": "synara-control-plane-6764ddf9cd-ssp2m",
+                "node": "synara-stage4-final3-20260725-worker"
+              }
+            ]
+          },
+          "preHook": null,
+          "postHook": null
+        }
+      },
+      {
+        "case": "control-plane-failover",
+        "status": "passed",
+        "startedAt": "2026-07-25T06:43:03Z",
+        "finishedAt": "2026-07-25T06:43:34Z",
+        "details": {
+          "deletedPod": "synara-control-plane-6764ddf9cd-28v7g",
+          "readyProbeFailures": 0,
+          "replacement": {
+            "beforePods": [
+              {
+                "name": "synara-control-plane-6764ddf9cd-28v7g",
+                "node": "synara-stage4-final3-20260725-worker2"
+              },
+              {
+                "name": "synara-control-plane-6764ddf9cd-ssp2m",
+                "node": "synara-stage4-final3-20260725-worker"
+              }
+            ],
+            "afterPods": [
+              {
+                "name": "synara-control-plane-6764ddf9cd-jl75c",
+                "node": "synara-stage4-final3-20260725-worker3"
+              },
+              {
+                "name": "synara-control-plane-6764ddf9cd-ssp2m",
+                "node": "synara-stage4-final3-20260725-worker"
+              }
+            ],
+            "replacementPods": [
+              {
+                "name": "synara-control-plane-6764ddf9cd-jl75c",
+                "node": "synara-stage4-final3-20260725-worker3"
+              }
+            ]
+          },
+          "preHook": null,
+          "postHook": null
+        }
+      },
+      {
+        "case": "control-plane-failover",
+        "status": "passed",
+        "startedAt": "2026-07-25T06:44:05Z",
+        "finishedAt": "2026-07-25T06:44:36Z",
+        "details": {
+          "deletedPod": "synara-control-plane-6764ddf9cd-ssp2m",
+          "readyProbeFailures": 0,
+          "replacement": {
+            "beforePods": [
+              {
+                "name": "synara-control-plane-6764ddf9cd-jl75c",
+                "node": "synara-stage4-final3-20260725-worker3"
+              },
+              {
+                "name": "synara-control-plane-6764ddf9cd-ssp2m",
+                "node": "synara-stage4-final3-20260725-worker"
+              }
+            ],
+            "afterPods": [
+              {
+                "name": "synara-control-plane-6764ddf9cd-jl75c",
+                "node": "synara-stage4-final3-20260725-worker3"
+              },
+              {
+                "name": "synara-control-plane-6764ddf9cd-ld5r2",
+                "node": "synara-stage4-final3-20260725-worker2"
+              }
+            ],
+            "replacementPods": [
+              {
+                "name": "synara-control-plane-6764ddf9cd-ld5r2",
+                "node": "synara-stage4-final3-20260725-worker2"
+              }
+            ]
+          },
+          "preHook": null,
+          "postHook": null
+        }
+      },
+      {
+        "case": "control-plane-failover",
+        "status": "passed",
+        "startedAt": "2026-07-25T06:45:07Z",
+        "finishedAt": "2026-07-25T06:45:38Z",
+        "details": {
+          "deletedPod": "synara-control-plane-6764ddf9cd-jl75c",
+          "readyProbeFailures": 0,
+          "replacement": {
+            "beforePods": [
+              {
+                "name": "synara-control-plane-6764ddf9cd-jl75c",
+                "node": "synara-stage4-final3-20260725-worker3"
+              },
+              {
+                "name": "synara-control-plane-6764ddf9cd-ld5r2",
+                "node": "synara-stage4-final3-20260725-worker2"
+              }
+            ],
+            "afterPods": [
+              {
+                "name": "synara-control-plane-6764ddf9cd-7xvgc",
+                "node": "synara-stage4-final3-20260725-worker"
+              },
+              {
+                "name": "synara-control-plane-6764ddf9cd-ld5r2",
+                "node": "synara-stage4-final3-20260725-worker2"
+              }
+            ],
+            "replacementPods": [
+              {
+                "name": "synara-control-plane-6764ddf9cd-7xvgc",
+                "node": "synara-stage4-final3-20260725-worker"
+              }
+            ]
+          },
+          "preHook": null,
+          "postHook": null
+        }
+      },
+      {
+        "case": "control-plane-failover",
+        "status": "passed",
+        "startedAt": "2026-07-25T06:46:10Z",
+        "finishedAt": "2026-07-25T06:46:41Z",
+        "details": {
+          "deletedPod": "synara-control-plane-6764ddf9cd-ld5r2",
+          "readyProbeFailures": 0,
+          "replacement": {
+            "beforePods": [
+              {
+                "name": "synara-control-plane-6764ddf9cd-7xvgc",
+                "node": "synara-stage4-final3-20260725-worker"
+              },
+              {
+                "name": "synara-control-plane-6764ddf9cd-ld5r2",
+                "node": "synara-stage4-final3-20260725-worker2"
+              }
+            ],
+            "afterPods": [
+              {
+                "name": "synara-control-plane-6764ddf9cd-5mffb",
+                "node": "synara-stage4-final3-20260725-worker3"
+              },
+              {
+                "name": "synara-control-plane-6764ddf9cd-7xvgc",
+                "node": "synara-stage4-final3-20260725-worker"
+              }
+            ],
+            "replacementPods": [
+              {
+                "name": "synara-control-plane-6764ddf9cd-5mffb",
+                "node": "synara-stage4-final3-20260725-worker3"
+              }
+            ]
+          },
+          "preHook": null,
+          "postHook": null
+        }
+      },
+      {
+        "case": "control-plane-failover",
+        "status": "passed",
+        "startedAt": "2026-07-25T06:47:12Z",
+        "finishedAt": "2026-07-25T06:47:43Z",
+        "details": {
+          "deletedPod": "synara-control-plane-6764ddf9cd-7xvgc",
+          "readyProbeFailures": 0,
+          "replacement": {
+            "beforePods": [
+              {
+                "name": "synara-control-plane-6764ddf9cd-5mffb",
+                "node": "synara-stage4-final3-20260725-worker3"
+              },
+              {
+                "name": "synara-control-plane-6764ddf9cd-7xvgc",
+                "node": "synara-stage4-final3-20260725-worker"
+              }
+            ],
+            "afterPods": [
+              {
+                "name": "synara-control-plane-6764ddf9cd-5mffb",
+                "node": "synara-stage4-final3-20260725-worker3"
+              },
+              {
+                "name": "synara-control-plane-6764ddf9cd-9c4fn",
+                "node": "synara-stage4-final3-20260725-worker2"
+              }
+            ],
+            "replacementPods": [
+              {
+                "name": "synara-control-plane-6764ddf9cd-9c4fn",
+                "node": "synara-stage4-final3-20260725-worker2"
+              }
+            ]
+          },
+          "preHook": null,
+          "postHook": null
+        }
+      }
+    ]
+  }
+}

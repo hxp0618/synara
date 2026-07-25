@@ -74,7 +74,7 @@ func (s *Service) Cancel(
 			return toExecution(execution), nil
 		case "completed", "failed", "interrupted":
 			return Execution{}, problem.New(409, "execution_terminal", "The execution already reached a terminal state.")
-		case "queued", "recovering", "leased", "running", "waiting-for-approval":
+		case "queued", "recovering", "leased", "running", "waiting-for-approval", "suspended":
 		default:
 			return Execution{}, problem.New(409, "execution_state_conflict", "The execution cannot be cancelled from its current state.")
 		}
@@ -118,13 +118,36 @@ func (s *Service) cancelExecutionLocked(
 	now time.Time,
 	reason string,
 ) (persistence.SessionEvent, error) {
+	const interactionCancellationReason = "The Execution was cancelled before the interaction lifecycle completed."
+	wasRecovering := execution.Status == "recovering"
+	if err := supersedeResourceSuspendAttempts(
+		ctx, tx, *execution, now, "execution_cancelled",
+		"The Execution was cancelled while a resource suspension attempt was in progress.",
+	); err != nil {
+		return persistence.SessionEvent{}, err
+	}
+	interactionOutcomeUnknown := false
 	if lease != nil {
-		if err := s.supersedeInteractionGenerationWithReason(ctx, tx, *execution, *lease,
-			"The Execution was cancelled before the interaction lifecycle completed."); err != nil {
+		var err error
+		interactionOutcomeUnknown, err = s.reconcileInteractionGenerationForRecovery(
+			ctx, tx, *execution, *lease, false, now, interactionCancellationReason,
+		)
+		if err != nil {
 			return persistence.SessionEvent{}, err
 		}
 		if err := tx.WithContext(ctx).Delete(lease).Error; err != nil {
 			return persistence.SessionEvent{}, problem.Wrap(500, "lease_release_failed", "Failed to release the cancelled Execution lease.", err)
+		}
+		if err := transitionWorkerAfterLeaseReleasedLocked(ctx, tx, *lease, now); err != nil {
+			return persistence.SessionEvent{}, err
+		}
+	} else {
+		var err error
+		interactionOutcomeUnknown, err = s.terminalizeLeaseFreeInteractionsForCancellation(
+			ctx, tx, *execution, interactionCancellationReason,
+		)
+		if err != nil {
+			return persistence.SessionEvent{}, err
 		}
 	}
 
@@ -137,8 +160,10 @@ func (s *Service) cancelExecutionLocked(
 	finishedAt := now
 	cancelled := tx.WithContext(ctx).Model(&persistence.AgentExecution{}).
 		Where("tenant_id = ? AND id = ? AND status IN ?", execution.TenantID, execution.ID,
-			[]string{"queued", "recovering", "leased", "running", "waiting-for-approval"}).
-		Updates(map[string]any{"status": "cancelled", "worker_id": nil, "finished_at": now})
+			[]string{"queued", "recovering", "leased", "running", "waiting-for-approval", "suspended"}).
+		Updates(map[string]any{
+			"status": "cancelled", "worker_id": nil, "next_recovery_reason": nil, "finished_at": now,
+		})
 	if err := expectOne(cancelled, 409, "execution_cancel_conflict", "The Execution could not be cancelled from its current state."); err != nil {
 		return persistence.SessionEvent{}, err
 	}
@@ -153,6 +178,9 @@ func (s *Service) cancelExecutionLocked(
 		return persistence.SessionEvent{}, err
 	}
 	payload := map[string]any{"turnId": execution.TurnID, "finishedAt": now, "reason": reason}
+	if interactionOutcomeUnknown {
+		payload["interactionOutcomeUnknown"] = true
+	}
 	event, err := s.sessions.AppendInternalEvent(ctx, tx, execution.TenantID, execution.SessionID, sessions.InternalEventInput{
 		EventType: "execution.cancelled", ActorType: actorType, ActorID: actorID,
 		ExecutionID: &execution.ID, WorkerID: previousWorkerID, Generation: eventGeneration,
@@ -160,6 +188,18 @@ func (s *Service) cancelExecutionLocked(
 	})
 	if err != nil {
 		return persistence.SessionEvent{}, err
+	}
+	if err := s.markExecutionGenerationTerminalOutcomeLocked(
+		ctx, tx, *execution, now, generationTerminalOutcomeCancelled,
+	); err != nil {
+		return persistence.SessionEvent{}, err
+	}
+	if wasRecovering {
+		if err := s.markExecutionGenerationTerminalOutcomeAtGenerationLocked(
+			ctx, tx, *execution, execution.Generation+1, now, generationTerminalOutcomeCancelled,
+		); err != nil {
+			return persistence.SessionEvent{}, err
+		}
 	}
 	if err := outbox.Enqueue(ctx, tx, outbox.EnqueueInput{
 		TenantID: &execution.TenantID, Topic: "execution.cancelled", MessageKey: execution.ID.String(),
@@ -174,4 +214,80 @@ func (s *Service) cancelExecutionLocked(
 	execution.WorkerID = nil
 	execution.FinishedAt = &finishedAt
 	return event, nil
+}
+
+// terminalizeLeaseFreeInteractionsForCancellation handles queued, recovering,
+// and suspended executions after Worker ownership has already been fenced.
+// A command written across the Provider boundary or consumed by one immutable
+// Recovery Bundle cannot be labelled superseded: its application outcome is
+// unknown and replay must remain forbidden. An unbound resume-recorded answer
+// remains as durable audit history but a terminal Execution can no longer
+// include it in a future Bundle.
+func (s *Service) terminalizeLeaseFreeInteractionsForCancellation(
+	ctx context.Context,
+	tx *gorm.DB,
+	execution persistence.AgentExecution,
+	reason string,
+) (bool, error) {
+	deliveredUnknown := tx.WithContext(ctx).Model(&persistence.ExecutionInteraction{}).
+		Where(
+			"tenant_id = ? AND execution_id = ? AND status = ? AND delivery_status = ?",
+			execution.TenantID, execution.ID, "resolved", "delivered",
+		).
+		Updates(map[string]any{"delivery_status": "outcome-unknown", "delivery_error": reason})
+	if deliveredUnknown.Error != nil {
+		return false, problem.Wrap(
+			500,
+			"interaction_cancellation_outcome_unknown_update_failed",
+			"The delivered interaction resolution could not be fenced during cancellation.",
+			deliveredUnknown.Error,
+		)
+	}
+	boundUnknown := tx.WithContext(ctx).Model(&persistence.ExecutionInteraction{}).
+		Where(
+			"tenant_id = ? AND execution_id = ? AND status = ? AND delivery_status = ?",
+			execution.TenantID, execution.ID, "resolved", "resume-bound",
+		).
+		Updates(map[string]any{"delivery_status": "outcome-unknown", "delivery_error": reason})
+	if boundUnknown.Error != nil {
+		return false, problem.Wrap(
+			500,
+			"interaction_cancellation_resume_outcome_unknown_update_failed",
+			"The recovery-bound interaction resolution could not be fenced during cancellation.",
+			boundUnknown.Error,
+		)
+	}
+	outcomeUnknown := deliveredUnknown.RowsAffected > 0 || boundUnknown.RowsAffected > 0
+	if outcomeUnknown {
+		if err := s.terminalizeInteractionsAfterOutcomeUnknown(ctx, tx, execution, reason); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+	if err := tx.WithContext(ctx).Model(&persistence.ExecutionInteraction{}).
+		Where("tenant_id = ? AND execution_id = ? AND status = ?", execution.TenantID, execution.ID, "pending").
+		Updates(map[string]any{
+			"status": "expired", "delivery_status": "superseded", "delivery_error": reason,
+		}).Error; err != nil {
+		return false, problem.Wrap(
+			500,
+			"interaction_cancellation_pending_terminalize_failed",
+			"Pending interactions could not be terminalized during cancellation.",
+			err,
+		)
+	}
+	if err := tx.WithContext(ctx).Model(&persistence.ExecutionInteraction{}).
+		Where(
+			"tenant_id = ? AND execution_id = ? AND status = ? AND delivery_status IN ?",
+			execution.TenantID, execution.ID, "resolved", []string{"pending", "failed"},
+		).
+		Updates(map[string]any{"delivery_status": "superseded", "delivery_error": reason}).Error; err != nil {
+		return false, problem.Wrap(
+			500,
+			"interaction_cancellation_delivery_terminalize_failed",
+			"Unacknowledged interaction resolutions could not be terminalized during cancellation.",
+			err,
+		)
+	}
+	return false, nil
 }

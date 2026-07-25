@@ -4,29 +4,40 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/synara-ai/synara/services/control-plane/internal/lifecyclepolicy"
 )
 
 type Session struct {
-	ID                   uuid.UUID  `json:"id"`
-	TenantID             uuid.UUID  `json:"tenantId"`
-	OrganizationID       uuid.UUID  `json:"organizationId"`
-	ProjectID            uuid.UUID  `json:"projectId"`
-	CreatedBy            uuid.UUID  `json:"createdBy"`
-	Title                string     `json:"title"`
-	Status               string     `json:"status"`
-	Visibility           string     `json:"visibility"`
-	Provider             string     `json:"provider"`
-	Model                *string    `json:"model"`
-	ProviderCredentialID *uuid.UUID `json:"providerCredentialId"`
-	ExecutionTargetID    uuid.UUID  `json:"executionTargetId"`
-	ForkSourceSessionID  *uuid.UUID `json:"forkSourceSessionId,omitempty"`
-	ForkSourceTurnID     *uuid.UUID `json:"forkSourceTurnId,omitempty"`
-	ForkSourceSequence   *int64     `json:"forkSourceEventSequence,omitempty"`
-	ForkStrategy         *string    `json:"forkStrategy,omitempty"`
-	LastEventSequence    int64      `json:"lastEventSequence"`
-	CreatedAt            time.Time  `json:"createdAt"`
-	UpdatedAt            time.Time  `json:"updatedAt"`
-	ArchivedAt           *time.Time `json:"archivedAt"`
+	ID                         uuid.UUID                 `json:"id"`
+	TenantID                   uuid.UUID                 `json:"tenantId"`
+	OrganizationID             uuid.UUID                 `json:"organizationId"`
+	ProjectID                  uuid.UUID                 `json:"projectId"`
+	CreatedBy                  uuid.UUID                 `json:"createdBy"`
+	Title                      string                    `json:"title"`
+	Status                     string                    `json:"status"`
+	Visibility                 string                    `json:"visibility"`
+	Provider                   string                    `json:"provider"`
+	Model                      *string                   `json:"model"`
+	ProviderCredentialID       *uuid.UUID                `json:"providerCredentialId"`
+	ExecutionTargetID          uuid.UUID                 `json:"executionTargetId"`
+	RequestedExecutionTargetID uuid.UUID                 `json:"requestedExecutionTargetId"`
+	ExecutionTargetGroupID     *uuid.UUID                `json:"executionTargetGroupId,omitempty"`
+	RoutingPolicyVersion       *int64                    `json:"routingPolicyVersion,omitempty"`
+	PreferredExecutionRegion   *string                   `json:"preferredExecutionRegion,omitempty"`
+	ForkSourceSessionID        *uuid.UUID                `json:"forkSourceSessionId,omitempty"`
+	ForkSourceTurnID           *uuid.UUID                `json:"forkSourceTurnId,omitempty"`
+	ForkSourceSequence         *int64                    `json:"forkSourceEventSequence,omitempty"`
+	ForkStrategy               *string                   `json:"forkStrategy,omitempty"`
+	LastEventSequence          int64                     `json:"lastEventSequence"`
+	ResourceState              string                    `json:"resourceState"`
+	MeaningfulActivityAt       time.Time                 `json:"meaningfulActivityAt"`
+	ResourceIdleSince          *time.Time                `json:"resourceIdleSince,omitempty"`
+	AbsoluteExpiresAt          *time.Time                `json:"absoluteExpiresAt,omitempty"`
+	ResourceLifecyclePolicy    lifecyclepolicy.Effective `json:"resourceLifecyclePolicy"`
+	CreatedAt                  time.Time                 `json:"createdAt"`
+	UpdatedAt                  time.Time                 `json:"updatedAt"`
+	ArchivedAt                 *time.Time                `json:"archivedAt"`
 }
 
 type Turn struct {
@@ -63,12 +74,15 @@ type Event struct {
 }
 
 type CreateSessionInput struct {
-	Title                string     `json:"title"`
-	Visibility           string     `json:"visibility"`
-	Provider             string     `json:"provider"`
-	Model                *string    `json:"model"`
-	ProviderCredentialID *uuid.UUID `json:"providerCredentialId"`
-	ExecutionTargetID    *uuid.UUID `json:"executionTargetId"`
+	Title                    string                     `json:"title"`
+	Visibility               string                     `json:"visibility"`
+	Provider                 string                     `json:"provider"`
+	Model                    *string                    `json:"model"`
+	ProviderCredentialID     *uuid.UUID                 `json:"providerCredentialId"`
+	ExecutionTargetID        *uuid.UUID                 `json:"executionTargetId"`
+	ExecutionTargetGroupID   *uuid.UUID                 `json:"executionTargetGroupId,omitempty"`
+	PreferredExecutionRegion *string                    `json:"preferredExecutionRegion,omitempty"`
+	ResourceLifecyclePolicy  *lifecyclepolicy.Overrides `json:"resourceLifecyclePolicy,omitempty"`
 }
 
 type CreateTurnInput struct {

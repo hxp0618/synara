@@ -186,6 +186,16 @@ The Snapshot is generated inside the Claim transaction from Session Events stric
   host filesystem paths;
 - source and included Sequence ranges, fixed byte/token budgets, and explicit truncation reasons.
 
+`artifactReferences[]` are recovery-authoritative and do not participate in context eviction. Budget trimming may
+remove only older narrative Messages and Tool summaries. When an Artifact reference would otherwise exceed the
+budget, Control Plane may omit only optional per-reference metadata such as `contentType` and `sizeBytes`; it must
+retain `sequence`, `artifactId`, `executionId`, `kind`, and `sha256`. If those non-evictable Artifact references
+still do not fit, Claim fails closed instead of silently dropping authority.
+
+Snapshot construction revalidates every reference against the ready, non-deleted Artifact row. Missing/unready
+Artifacts, a missing content hash, or a mismatch with the Event's logical Session or immutable Execution origin fail
+closed; a replacement Generation must never receive a weaker reference synthesized from mutable current state.
+
 The Control Plane monotonically advances the Provider Runtime Binding's `authoritative_history_sequence` in the
 same transaction. Claim replay may rebuild the same Snapshot, but must not move that cursor backwards. A Worker or
 Provider Host must ignore unknown additive Snapshot fields; a future incompatible shape requires a new Snapshot

@@ -42,6 +42,7 @@ describe("resolveControlPlaneCapabilities", () => {
     });
 
     expect(capabilities.canCreateProject).toBe(true);
+    expect(capabilities.canUpdateProject).toBe(true);
     expect(capabilities.canCreateSession).toBe(true);
     expect(capabilities.canCreateTurn).toBe(true);
     expect(capabilities.canSteerExecution).toBe(true);
@@ -63,7 +64,33 @@ describe("resolveControlPlaneCapabilities", () => {
     expect(securityAdministrator.canReadExecutionTargets).toBe(true);
   });
 
+  it("maps lifecycle read and manage capabilities to the backend roles", () => {
+    const admin = resolveControlPlaneCapabilities({
+      tenant: tenant("admin"),
+      organization: organization(null),
+    });
+    const securityAdministrator = resolveControlPlaneCapabilities({
+      tenant: tenant("security_admin"),
+      organization: organization(null),
+    });
+    const auditor = resolveControlPlaneCapabilities({
+      tenant: tenant("auditor"),
+      organization: organization(null),
+    });
+
+    expect(admin.canReadLifecycle).toBe(true);
+    expect(admin.canManageLifecycle).toBe(true);
+    expect(securityAdministrator.canReadLifecycle).toBe(true);
+    expect(securityAdministrator.canManageLifecycle).toBe(false);
+    expect(auditor.canReadLifecycle).toBe(true);
+    expect(auditor.canManageLifecycle).toBe(false);
+  });
+
   it("uses Organization membership for ordinary Tenant members", () => {
+    const manager = resolveControlPlaneCapabilities({
+      tenant: tenant("member"),
+      organization: organization("admin"),
+    });
     const operator = resolveControlPlaneCapabilities({
       tenant: tenant("member"),
       organization: organization("agent_operator"),
@@ -73,9 +100,13 @@ describe("resolveControlPlaneCapabilities", () => {
       organization: organization("viewer"),
     });
 
+    expect(manager.canCreateProject).toBe(true);
+    expect(manager.canUpdateProject).toBe(true);
     expect(operator.canCreateSession).toBe(true);
+    expect(operator.canUpdateProject).toBe(false);
     expect(operator.canApproveExecution).toBe(true);
     expect(viewer.canReadProjects).toBe(true);
+    expect(viewer.canUpdateProject).toBe(false);
     expect(viewer.canCreateSession).toBe(false);
     expect(viewer.canCreateTurn).toBe(false);
     expect(viewer.canSteerExecution).toBe(false);
@@ -88,6 +119,7 @@ describe("resolveControlPlaneCapabilities", () => {
       organization: organization("owner"),
     });
     expect(suspendedTenant.canReadProjects).toBe(true);
+    expect(suspendedTenant.canUpdateProject).toBe(false);
     expect(suspendedTenant.canCreateTurn).toBe(false);
     expect(suspendedTenant.canSteerExecution).toBe(false);
     expect(suspendedTenant.canInterruptExecution).toBe(false);

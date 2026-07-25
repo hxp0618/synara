@@ -38,3 +38,20 @@ func TryAdvisoryLock(ctx context.Context, db *gorm.DB, key string) (func(), bool
 	}
 	return release, true, nil
 }
+
+// TryTransactionAdvisoryLock coordinates a durable transaction with a
+// session-level controller-cycle lock that uses the same key. PostgreSQL keeps
+// the lock until the surrounding transaction commits or rolls back, avoiding
+// an extra connection and closing the release-before-commit gap.
+func TryTransactionAdvisoryLock(ctx context.Context, tx *gorm.DB, key string) (bool, error) {
+	if tx.Dialector.Name() != "postgres" {
+		return true, nil
+	}
+	var acquired bool
+	if err := tx.WithContext(ctx).
+		Raw("SELECT pg_try_advisory_xact_lock(hashtextextended(?, 0))", key).
+		Scan(&acquired).Error; err != nil {
+		return false, fmt.Errorf("acquire PostgreSQL transaction advisory lock: %w", err)
+	}
+	return acquired, nil
+}

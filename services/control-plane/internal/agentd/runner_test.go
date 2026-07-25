@@ -183,6 +183,53 @@ printf '%s\n' '{"type":"result","output":{"summary":"credential received"}}'
 	}
 }
 
+func TestRunnerProcessTreeOptionsRemainLegacyWhenProtectedIdentityIsAbsent(t *testing.T) {
+	runner := &Runner{cgroupV2Root: "/sys/fs/cgroup/synara"}
+	options := runner.processTreeOptions()
+	if options.CgroupV2Root != "/sys/fs/cgroup/synara" {
+		t.Fatalf("cgroup root = %q", options.CgroupV2Root)
+	}
+	if options.ProtectedProviderIdentity != nil {
+		t.Fatalf("unexpected protected provider identity: %#v", options.ProtectedProviderIdentity)
+	}
+	if options.ContainmentFence.Generation != 0 || options.ContainmentFence.WorkerIncarnation != uuid.Nil {
+		t.Fatalf("unexpected legacy containment fence: %#v", options.ContainmentFence)
+	}
+}
+
+func TestRunnerProcessTreeOptionsIncludeProtectedIdentityAndFence(t *testing.T) {
+	instanceUID := uuid.New()
+	runner := &Runner{
+		cgroupV2Root: "/sys/fs/cgroup/synara",
+		cgroupV2ProviderIdentity: &ProtectedCgroupIdentity{
+			UID: 1234,
+			GID: 2345,
+		},
+		instanceUID: instanceUID,
+	}
+	first := runner.processTreeOptions()
+	second := runner.processTreeOptions()
+
+	if first.ProtectedProviderIdentity == nil || second.ProtectedProviderIdentity == nil {
+		t.Fatal("protected provider identity was omitted")
+	}
+	if first.ProtectedProviderIdentity == runner.cgroupV2ProviderIdentity ||
+		second.ProtectedProviderIdentity == runner.cgroupV2ProviderIdentity {
+		t.Fatal("processTreeOptions reused the Runner identity pointer")
+	}
+	if *first.ProtectedProviderIdentity != *runner.cgroupV2ProviderIdentity ||
+		*second.ProtectedProviderIdentity != *runner.cgroupV2ProviderIdentity {
+		t.Fatalf("protected provider identity mismatch: %#v %#v", first, second)
+	}
+	if first.ContainmentFence.WorkerIncarnation != instanceUID ||
+		second.ContainmentFence.WorkerIncarnation != instanceUID {
+		t.Fatalf("unexpected worker incarnation fence: %#v %#v", first.ContainmentFence, second.ContainmentFence)
+	}
+	if first.ContainmentFence.Generation != 1 || second.ContainmentFence.Generation != 2 {
+		t.Fatalf("unexpected containment generations: %#v %#v", first.ContainmentFence, second.ContainmentFence)
+	}
+}
+
 func TestResolveWorkspaceArtifactRejectsSymlinkEscape(t *testing.T) {
 	workspace := t.TempDir()
 	outside := filepath.Join(t.TempDir(), "secret.txt")
@@ -406,6 +453,54 @@ func TestWithProviderHostCapabilitiesKeepsExplicitLegacyRuntimeEventV1(t *testin
 	if runtimeManifest["runtimeEventMinimum"] != executions.RuntimeEventVersionV1 ||
 		runtimeManifest["runtimeEventMaximum"] != executions.RuntimeEventVersionV1 {
 		t.Fatalf("legacy runner advertised a non-v1 Runtime Event range: %#v", runtimeManifest)
+	}
+}
+
+func TestWithProviderHostCapabilitiesRejectsUnprovenContainmentCapability(t *testing.T) {
+	result := withProviderHostCapabilities(
+		map[string]any{
+			"gpu": false, resourceSuspendContainmentCapabilityKey: "forged",
+			"workerRuntime": map[string]any{
+				"processContainment": map[string]any{
+					"mode": "cgroup-v2", "probeSha256": strings.Repeat("a", 64),
+				},
+			},
+		},
+		map[string]any{"legacy": true},
+		Config{Version: "agentd-test", RunnerProtocol: RunnerProtocolV2},
+	)
+	if _, found := result[resourceSuspendContainmentCapabilityKey]; found {
+		t.Fatalf("unproven containment capability was advertised: %#v", result)
+	}
+	workerRuntime := result["workerRuntime"].(map[string]any)
+	if _, found := workerRuntime["processContainment"]; found {
+		t.Fatalf("operator-supplied process-containment proof was advertised: %#v", workerRuntime)
+	}
+}
+
+func TestWithProviderHostCapabilitiesIncludesTrustedProcessContainmentCapability(t *testing.T) {
+	trustedCapability := map[string]any{
+		"mode":               "cgroup-v2",
+		"probeSha256":        strings.Repeat("a", 64),
+		"supervisorIdentity": "uid:0 gid:0",
+		"providerIdentity":   "uid:10001 gid:10002",
+		"attestation": map[string]any{
+			"keyId": "trusted-key",
+		},
+	}
+	result := withProviderHostCapabilities(nil, map[string]any{"legacy": true}, Config{
+		Version:                      "agentd-test",
+		RunnerProtocol:               RunnerProtocolV2,
+		ProcessContainmentCapability: trustedCapability,
+	})
+	workerRuntime := result["workerRuntime"].(map[string]any)
+	processContainment, ok := workerRuntime["processContainment"].(map[string]any)
+	if !ok || processContainment["mode"] != "cgroup-v2" || processContainment["providerIdentity"] != "uid:10001 gid:10002" {
+		t.Fatalf("trusted process containment capability was not advertised: %#v", workerRuntime)
+	}
+	trustedCapability["mode"] = "tampered"
+	if processContainment["mode"] != "cgroup-v2" {
+		t.Fatalf("trusted process containment capability was not copied defensively: %#v", processContainment)
 	}
 }
 

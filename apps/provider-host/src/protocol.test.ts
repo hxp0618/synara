@@ -20,6 +20,7 @@ import {
   type CodexVersionProbeResult,
 } from "./protocol";
 import type { ProviderRunController, RunnerMessage } from "./providerHost";
+import { ProviderInterruptedError } from "./providerRunErrors";
 
 function command(
   commandType: ProviderHostCommandEnvelope["commandType"],
@@ -40,7 +41,7 @@ function command(
 }
 
 describe("Provider Host Protocol v2", () => {
-  it("describes the fixed ordered 8 by 28 Provider matrix from the catalog", () => {
+  it("describes the fixed ordered 8 by 29 Provider matrix from the catalog", () => {
     for (const provider of PROVIDER_HOST_PROVIDER_KINDS) {
       const descriptor = enabledDescriptorForProvider(provider);
       const catalogEntry = PROVIDER_CAPABILITY_CATALOG.providers.find(
@@ -48,7 +49,7 @@ describe("Provider Host Protocol v2", () => {
       );
 
       expect(catalogEntry).toBeDefined();
-      expect(descriptor.protocolVersion).toEqual({ major: 2, minor: 1 });
+      expect(descriptor.protocolVersion).toEqual({ major: 2, minor: 2 });
       expect(descriptor.capabilityDescriptor).toMatchObject({
         provider,
         supportTier: catalogEntry?.supportTier,
@@ -60,6 +61,15 @@ describe("Provider Host Protocol v2", () => {
       expect(descriptor.capabilityDescriptor.capabilities).toEqual(catalogEntry?.capabilities);
       expect(capabilityMapForProvider(provider)).toEqual(catalogEntry?.capabilities);
     }
+  });
+
+  it("advertises native suspend-active-turn for Codex and Claude Agent", () => {
+    const providers = new Map(
+      PROVIDER_CAPABILITY_CATALOG.providers.map((entry) => [entry.provider, entry] as const),
+    );
+
+    expect(providers.get("codex")?.capabilities["suspend-active-turn"]).toBe("native");
+    expect(providers.get("claudeAgent")?.capabilities["suspend-active-turn"]).toBe("native");
   });
 
   it("keeps Experimental Providers disabled by default and separates Local-only policy", () => {
@@ -449,6 +459,128 @@ describe("Provider Host Protocol v2", () => {
     });
   });
 
+  it("does not resolve SuspendTurn before the active SendTurn reaches an interrupted terminal", async () => {
+    let rejectRun: ((error: Error) => void) | undefined;
+    const handle = createProviderHostProtocolHandler({
+      credential: null,
+      emit: () => {},
+      descriptorForProvider: enabledDescriptorForProvider,
+      startRun: () =>
+        ({
+          result: new Promise((_, reject) => {
+            rejectRun = reject;
+          }),
+          interrupt: () => {},
+          getResumeCursor: () => "provider-cursor-after-suspend",
+        }) satisfies ProviderRunController,
+    });
+    await handle(command("StartSession", { runnerInput: remoteRunnerInput() }, "session-suspend"));
+
+    const send = handle(command("SendTurn", { inputText: "long task" }, "send-suspend"));
+    const suspend = handle(
+      command("SuspendTurn", { targetCommandId: "send-suspend" }, "suspend-active"),
+    );
+
+    let resolved = false;
+    void suspend.then(() => {
+      resolved = true;
+    });
+    await Promise.resolve();
+    expect(resolved).toBe(false);
+
+    rejectRun?.(new ProviderInterruptedError());
+
+    expect((await suspend).at(-1)).toMatchObject({
+      messageType: "Result",
+      payload: {
+        quiesced: true,
+        targetCommandId: "send-suspend",
+        checkpointProtocol: "provider-host-suspend-terminal-v1",
+        providerResumeCursor: "provider-cursor-after-suspend",
+      },
+    });
+    expect((await send).at(-1)).toMatchObject({
+      messageType: "Error",
+      error: { code: "interrupted" },
+    });
+  });
+
+  it("fails SuspendTurn closed when the interrupted terminal lacks a resume cursor", async () => {
+    let rejectRun: ((error: Error) => void) | undefined;
+    const handle = createProviderHostProtocolHandler({
+      credential: null,
+      emit: () => {},
+      descriptorForProvider: enabledDescriptorForProvider,
+      startRun: () =>
+        ({
+          result: new Promise((_, reject) => {
+            rejectRun = reject;
+          }),
+          interrupt: () => {},
+          getResumeCursor: () => undefined,
+        }) satisfies ProviderRunController,
+    });
+    await handle(
+      command("ResumeSession", { runnerInput: remoteRunnerInput(true) }, "session-suspend-cursor"),
+    );
+
+    const send = handle(command("SendTurn", { inputText: "long task" }, "send-suspend-cursor"));
+    const suspend = handle(
+      command(
+        "SuspendTurn",
+        { targetCommandId: "send-suspend-cursor" },
+        "suspend-missing-cursor",
+      ),
+    );
+
+    rejectRun?.(new ProviderInterruptedError());
+
+    expect((await suspend).at(-1)).toMatchObject({
+      messageType: "Error",
+      error: { code: "provider_unavailable" },
+    });
+    expect((await send).at(-1)).toMatchObject({
+      messageType: "Error",
+      error: { code: "interrupted" },
+    });
+  });
+
+  it("fails SuspendTurn closed when the active SendTurn ends without an interrupted terminal", async () => {
+    let completeRun: ((message: Extract<RunnerMessage, { type: "result" }>) => void) | undefined;
+    const handle = createProviderHostProtocolHandler({
+      credential: null,
+      emit: () => {},
+      descriptorForProvider: enabledDescriptorForProvider,
+      startRun: () =>
+        ({
+          result: new Promise((resolve) => {
+            completeRun = resolve;
+          }),
+          interrupt: () => {},
+          getResumeCursor: () => "provider-cursor-after-natural-completion",
+        }) satisfies ProviderRunController,
+    });
+    await handle(
+      command("ResumeSession", { runnerInput: remoteRunnerInput(true) }, "session-suspend-race"),
+    );
+
+    const send = handle(command("SendTurn", { inputText: "long task" }, "send-suspend-race"));
+    const suspend = handle(
+      command("SuspendTurn", { targetCommandId: "send-suspend-race" }, "suspend-race"),
+    );
+
+    completeRun?.({ type: "result", output: { text: "completed normally" } });
+
+    expect((await suspend).at(-1)).toMatchObject({
+      messageType: "Error",
+      error: { code: "provider_unavailable" },
+    });
+    expect((await send).at(-1)).toMatchObject({
+      messageType: "Result",
+      payload: { output: { text: "completed normally" } },
+    });
+  });
+
   it.each([
     {
       message: "HTTP 429 Too Many Requests: rate_limit_error",
@@ -599,6 +731,46 @@ describe("Provider Host Protocol v2", () => {
         providerResumeCursor: "provider-cursor-after-primary-interrupt",
       },
     });
+    expect((await compact).at(-1)).toMatchObject({
+      messageType: "Error",
+      error: { code: "interrupted" },
+    });
+  });
+
+  it("rejects SuspendTurn for an active primary operation", async () => {
+    let rejectRun: ((error: Error) => void) | undefined;
+    const handle = createProviderHostProtocolHandler({
+      credential: null,
+      emit: () => {},
+      descriptorForProvider: enabledDescriptorForProvider,
+      startRun: () =>
+        ({
+          result: new Promise((_, reject) => {
+            rejectRun = reject;
+          }),
+          interrupt: () => rejectRun?.(new Error("Provider operation was interrupted.")),
+          getResumeCursor: () => "provider-cursor-after-primary-interrupt",
+        }) satisfies ProviderRunController,
+    });
+    await handle(
+      command(
+        "ResumeSession",
+        { runnerInput: remoteRunnerInput(true) },
+        "session-primary-suspend",
+      ),
+    );
+
+    const compact = handle(command("CompactSession", {}, "compact-suspend"));
+    const suspend = await handle(
+      command("SuspendTurn", { targetCommandId: "compact-suspend" }, "suspend-primary"),
+    );
+
+    expect(suspend.at(-1)).toMatchObject({
+      messageType: "Error",
+      error: { code: "capability_unsupported" },
+    });
+
+    rejectRun?.(new Error("Provider operation was interrupted."));
     expect((await compact).at(-1)).toMatchObject({
       messageType: "Error",
       error: { code: "interrupted" },

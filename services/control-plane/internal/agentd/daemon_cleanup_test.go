@@ -178,13 +178,27 @@ func TestWorkspaceCleanupClaimScheduleProvidesBoundedFairness(t *testing.T) {
 	}
 }
 
-func TestAssignedExecutionDaemonNeverClaimsWorkspaceCleanup(t *testing.T) {
+func TestWorkspaceCleanupClaimsRequireGeneralPoolWorkerMode(t *testing.T) {
 	assignedExecutionID := uuid.New()
-	if workspaceCleanupClaimsEnabled(Config{AssignedExecutionID: &assignedExecutionID}) {
-		t.Fatal("an assigned-execution Worker was allowed to claim Workspace cleanup")
+	tests := []struct {
+		name string
+		cfg  Config
+		want bool
+	}{
+		{name: "implicit general pool", cfg: Config{}, want: true},
+		{name: "explicit general pool", cfg: Config{WorkerMode: executions.WorkerModeGeneralPool}, want: true},
+		{name: "assigned execution defaults to execution pinned", cfg: Config{AssignedExecutionID: &assignedExecutionID}, want: false},
+		{name: "warm pool is excluded", cfg: Config{WorkerMode: executions.WorkerModeWarmPool}, want: false},
+		{
+			name: "explicit execution pinned is excluded",
+			cfg:  Config{AssignedExecutionID: &assignedExecutionID, WorkerMode: executions.WorkerModeExecutionPinned},
+			want: false,
+		},
 	}
-	if !workspaceCleanupClaimsEnabled(Config{}) {
-		t.Fatal("a general Worker was prevented from claiming Workspace cleanup")
+	for _, test := range tests {
+		if got := workspaceCleanupClaimsEnabled(test.cfg); got != test.want {
+			t.Fatalf("%s: workspace cleanup claims enabled = %v, want %v", test.name, got, test.want)
+		}
 	}
 }
 

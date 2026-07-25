@@ -65,6 +65,11 @@ function workerManifest(input: {
     },
     workerProtocol: { minimum: 2, maximum: 2 },
     runtimeEvent: { minimum: 2, maximum: 3 },
+    processContainment: {
+      mode: "none",
+      trustState: "none",
+      reasonCode: "no-attestation",
+    },
     providers: [
       {
         provider: "codex",
@@ -221,6 +226,7 @@ describe("Execution Target Provider Policy", () => {
           instanceUid: "worker-instance-1",
           executionTargetId: "target-1",
           targetKind: "kubernetes",
+          workerMode: "general-pool",
           clusterId: "cluster-a",
           namespace: "synara-workers",
           podName: "platform-worker-1",

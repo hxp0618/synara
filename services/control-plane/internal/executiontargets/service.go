@@ -1,10 +1,10 @@
 package executiontargets
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
-	"slices"
 	"strings"
 	"time"
 
@@ -126,7 +126,7 @@ func (s *Service) Create(ctx context.Context, principal identity.Principal, tena
 	if capabilities == nil {
 		capabilities = map[string]any{}
 	}
-	capabilities, err = normalizeProviderPolicyCapabilities(capabilities)
+	capabilities, err = normalizeExecutionTargetCapabilities(capabilities)
 	if err != nil {
 		return Target{}, err
 	}
@@ -178,7 +178,7 @@ func (s *Service) UpdateProviderPolicy(
 			capabilities[key] = value
 		}
 		capabilities["providerPolicy"] = rawPolicy
-		normalized, err := normalizeProviderPolicyCapabilities(capabilities)
+		normalized, err := normalizeExecutionTargetCapabilities(capabilities)
 		if err != nil {
 			return err
 		}
@@ -187,7 +187,84 @@ func (s *Service) UpdateProviderPolicy(
 			return err
 		}
 		currentPolicy, currentErr := ParseProviderPolicy(model.Capabilities)
-		if currentErr == nil && slices.Equal(currentPolicy.ExperimentalProviders, requestedPolicy.ExperimentalProviders) {
+		if currentErr == nil && currentPolicy.Equal(requestedPolicy) {
+			updated = model
+			return nil
+		}
+		workerCompatibilityChanged := currentErr != nil ||
+			!currentPolicy.WorkerCompatibilityEqual(requestedPolicy)
+
+		now := time.Now().UTC()
+		model.Capabilities = normalized
+		model.UpdatedAt = now
+		if err := tx.WithContext(ctx).Model(&model).
+			Where("id = ? AND tenant_id = ?", targetID, tenantID).
+			Select("capabilities", "updated_at").Updates(&model).Error; err != nil {
+			return problem.Wrap(500, "execution_target_provider_policy_update_failed", "Failed to update the execution target Provider Policy.", err)
+		}
+		if workerCompatibilityChanged {
+			if err := invalidateWorkerManifestsForCapabilityPolicyChange(
+				ctx, tx, targetID, now, "Execution Target Provider Policy changed; re-register the Worker before claiming more executions.",
+			); err != nil {
+				return problem.Wrap(500, "worker_manifest_invalidation_failed", "Failed to invalidate Workers after the Provider Policy changed.", err)
+			}
+		}
+		updated = model
+		return nil
+	})
+	if err != nil {
+		return Target{}, err
+	}
+	return toTarget(updated), nil
+}
+
+func (s *Service) UpdateProcessContainmentPolicy(
+	ctx context.Context,
+	principal identity.Principal,
+	tenantID, targetID uuid.UUID,
+	rawPolicy map[string]any,
+) (Target, error) {
+	if err := requireActiveTenant(principal, tenantID); err != nil {
+		return Target{}, err
+	}
+	if _, err := s.authorizer.RequireTenant(ctx, principal.UserID, tenantID, authorization.WorkerManage); err != nil {
+		return Target{}, err
+	}
+
+	var updated persistence.ExecutionTarget
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var model persistence.ExecutionTarget
+		err := persistence.WithLocking(tx.WithContext(ctx), "UPDATE", "").
+			Where("id = ? AND (tenant_id = ? OR tenant_id IS NULL)", targetID, tenantID).
+			Take(&model).Error
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return problem.New(404, "execution_target_not_found", "Execution target not found.")
+		}
+		if err != nil {
+			return problem.Wrap(500, "execution_target_lookup_failed", "Failed to load the execution target.", err)
+		}
+		if model.TenantID == nil {
+			return problem.New(403, "shared_execution_target_process_containment_policy_immutable", "Platform-shared execution target process containment policy cannot be changed by a tenant.")
+		}
+
+		capabilities := make(map[string]any, len(model.Capabilities)+1)
+		for key, value := range model.Capabilities {
+			capabilities[key] = value
+		}
+		capabilities["processContainmentPolicy"] = rawPolicy
+		normalized, err := normalizeExecutionTargetCapabilities(capabilities)
+		if err != nil {
+			return err
+		}
+		requestedPolicy, err := ParseProcessContainmentPolicy(normalized)
+		if err != nil {
+			return err
+		}
+		currentPolicy, currentErr := ParseProcessContainmentPolicy(model.Capabilities)
+		if currentErr == nil &&
+			currentPolicy.TrustMode == requestedPolicy.TrustMode &&
+			currentPolicy.KeyID == requestedPolicy.KeyID &&
+			bytes.Equal(currentPolicy.PublicKey, requestedPolicy.PublicKey) {
 			updated = model
 			return nil
 		}
@@ -198,17 +275,12 @@ func (s *Service) UpdateProviderPolicy(
 		if err := tx.WithContext(ctx).Model(&model).
 			Where("id = ? AND tenant_id = ?", targetID, tenantID).
 			Select("capabilities", "updated_at").Updates(&model).Error; err != nil {
-			return problem.Wrap(500, "execution_target_provider_policy_update_failed", "Failed to update the execution target Provider Policy.", err)
+			return problem.Wrap(500, "execution_target_process_containment_policy_update_failed", "Failed to update the execution target process containment policy.", err)
 		}
-		reason := "Execution Target Provider Policy changed; re-register the Worker before claiming more executions."
-		if err := tx.WithContext(ctx).Model(&persistence.WorkerInstance{}).
-			Where("execution_target_id = ? AND current_manifest_id IS NOT NULL AND administrative_status <> ? AND terminated_at IS NULL", targetID, "revoked").
-			Updates(map[string]any{
-				"compatibility_status":     "incompatible",
-				"compatibility_reason":     reason,
-				"compatibility_checked_at": now,
-			}).Error; err != nil {
-			return problem.Wrap(500, "worker_manifest_invalidation_failed", "Failed to invalidate Workers after the Provider Policy changed.", err)
+		if err := invalidateWorkerManifestsForCapabilityPolicyChange(
+			ctx, tx, targetID, now, "Execution Target process containment policy changed; re-register the Worker before claiming more executions.",
+		); err != nil {
+			return problem.Wrap(500, "worker_manifest_invalidation_failed", "Failed to invalidate Workers after the process containment policy changed.", err)
 		}
 		updated = model
 		return nil
@@ -326,6 +398,30 @@ func requireActiveTenant(principal identity.Principal, tenantID uuid.UUID) error
 		return problem.New(404, "tenant_not_found", "Tenant not found.")
 	}
 	return nil
+}
+
+func normalizeExecutionTargetCapabilities(capabilities map[string]any) (map[string]any, error) {
+	normalized, err := normalizeProviderPolicyCapabilities(capabilities)
+	if err != nil {
+		return nil, err
+	}
+	return normalizeProcessContainmentPolicyCapabilities(normalized)
+}
+
+func invalidateWorkerManifestsForCapabilityPolicyChange(
+	ctx context.Context,
+	tx *gorm.DB,
+	targetID uuid.UUID,
+	now time.Time,
+	reason string,
+) error {
+	return tx.WithContext(ctx).Model(&persistence.WorkerInstance{}).
+		Where("execution_target_id = ? AND current_manifest_id IS NOT NULL AND administrative_status <> ? AND terminated_at IS NULL", targetID, "revoked").
+		Updates(map[string]any{
+			"compatibility_status":     "incompatible",
+			"compatibility_reason":     reason,
+			"compatibility_checked_at": now,
+		}).Error
 }
 
 func validatePublicCapabilities(value any) error {

@@ -108,7 +108,9 @@ func TestListWorkerManifestsIsTenantScopedAndKeepsTargetManifestGroups(t *testin
 	}
 	if items[0].WorkerBuild.Version != "worker-a" || items[0].WorkerBuild.OperatingSystem != "linux" ||
 		items[0].WorkerProtocol != (WorkerManifestVersionRange{Minimum: 2, Maximum: 2}) ||
-		items[0].RuntimeEvent != (WorkerManifestVersionRange{Minimum: 2, Maximum: 2}) {
+		items[0].RuntimeEvent != (WorkerManifestVersionRange{Minimum: 2, Maximum: 2}) ||
+		items[0].ProcessContainment.Mode != "none" || items[0].ProcessContainment.TrustState != "none" ||
+		items[0].ProcessContainment.ReasonCode == nil || *items[0].ProcessContainment.ReasonCode != "no-attestation" {
 		t.Fatalf("unexpected manifest projection: %#v", items[0])
 	}
 	if len(items[0].Providers) != len(stage3ProviderNames) {

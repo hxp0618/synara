@@ -11,8 +11,10 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
+	"github.com/synara-ai/synara/services/control-plane/internal/placement"
 	"github.com/synara-ai/synara/services/control-plane/internal/providercapabilities"
 	"github.com/synara-ai/synara/services/control-plane/internal/providercatalog"
+	"github.com/synara-ai/synara/services/control-plane/internal/routing"
 )
 
 func TestCreateSessionCapabilityGateRejectsLocalOnlyAndDroidButAllowsUnobserved(t *testing.T) {
@@ -119,6 +121,107 @@ func TestCreateTurnCapabilityGateRequiresPlanModeInAdditionToSendTurn(t *testing
 	}
 }
 
+func TestCreateSessionTargetGroupRetriesPastUnsupportedPreferredTarget(t *testing.T) {
+	fixture := newTenantExecutionPolicyFixture(t)
+	source := loadCapabilityRouteTarget(t, fixture.db, fixture.executionTargetID)
+	destination := createCapabilityRouteTargetCopy(t, fixture.db, source, "capability-route-destination")
+	sourcePool := configureWarmDefaultPool(t, fixture.db, source)
+	destinationPool := configureWarmDefaultPool(t, fixture.db, destination)
+	seedTargetCapabilityWorker(t, fixture.db, source.ID, &sourcePool.ID, &sourcePool.Version, sessionCapabilityManifestOptions{
+		CodexStartSession: "unsupported",
+	})
+	seedTargetCapabilityWorker(t, fixture.db, destination.ID, &destinationPool.ID, &destinationPool.Version, sessionCapabilityManifestOptions{})
+	group := configureCapabilityRouteGroup(t, fixture, source, destination)
+
+	created, err := fixture.service.Create(context.Background(), fixture.principal, fixture.projectID, CreateSessionInput{
+		Title:                  "retry past unsupported preferred target",
+		Provider:               "codex",
+		ExecutionTargetID:      &source.ID,
+		ExecutionTargetGroupID: &group.ID,
+	}, "provider-capability-group-create", "127.0.0.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.ExecutionTargetID != destination.ID {
+		t.Fatalf("created execution target = %s, want %s", created.ExecutionTargetID, destination.ID)
+	}
+	if created.ExecutionTargetGroupID == nil || *created.ExecutionTargetGroupID != group.ID {
+		t.Fatalf("created target group = %#v, want %s", created.ExecutionTargetGroupID, group.ID)
+	}
+	if created.RoutingPolicyVersion == nil || *created.RoutingPolicyVersion != group.Version {
+		t.Fatalf("created routing policy version = %#v, want %d", created.RoutingPolicyVersion, group.Version)
+	}
+}
+
+func TestCreateSessionTargetGroupUsesProviderAffinityWhenNoPreferredTargetIsPinned(t *testing.T) {
+	fixture := newTenantExecutionPolicyFixture(t)
+	source := loadCapabilityRouteTarget(t, fixture.db, fixture.executionTargetID)
+	destination := createCapabilityRouteTargetCopy(t, fixture.db, source, "capability-route-affinity-destination")
+	setCapabilityRouteTargetRoutingPreferences(t, fixture.db, source.ID, map[string]string{"codex": "avoid"})
+	setCapabilityRouteTargetRoutingPreferences(t, fixture.db, destination.ID, map[string]string{"codex": "prefer"})
+	sourcePool := configureWarmDefaultPool(t, fixture.db, source)
+	destinationPool := configureWarmDefaultPool(t, fixture.db, destination)
+	seedTargetCapabilityWorker(t, fixture.db, source.ID, &sourcePool.ID, &sourcePool.Version, sessionCapabilityManifestOptions{})
+	seedTargetCapabilityWorker(t, fixture.db, destination.ID, &destinationPool.ID, &destinationPool.Version, sessionCapabilityManifestOptions{})
+	group := configureCapabilityRouteGroup(t, fixture, source, destination)
+
+	created, err := fixture.service.Create(context.Background(), fixture.principal, fixture.projectID, CreateSessionInput{
+		Title:                  "provider affinity",
+		Provider:               "codex",
+		ExecutionTargetGroupID: &group.ID,
+	}, "provider-affinity-group-create", "127.0.0.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.ExecutionTargetID != destination.ID {
+		t.Fatalf("created execution target = %s, want %s", created.ExecutionTargetID, destination.ID)
+	}
+}
+
+func TestCreateTurnTargetGroupRetriesPastUnsupportedPreferredTarget(t *testing.T) {
+	fixture := newTenantExecutionPolicyFixture(t)
+	source := loadCapabilityRouteTarget(t, fixture.db, fixture.executionTargetID)
+	destination := createCapabilityRouteTargetCopy(t, fixture.db, source, "capability-route-turn-destination")
+	sourcePool := configureWarmDefaultPool(t, fixture.db, source)
+	destinationPool := configureWarmDefaultPool(t, fixture.db, destination)
+	seedTargetCapabilityWorker(t, fixture.db, source.ID, &sourcePool.ID, &sourcePool.Version, sessionCapabilityManifestOptions{
+		CodexSendTurn: "unsupported",
+	})
+	seedTargetCapabilityWorker(t, fixture.db, destination.ID, &destinationPool.ID, &destinationPool.Version, sessionCapabilityManifestOptions{})
+	group := configureCapabilityRouteGroup(t, fixture, source, destination)
+	if err := fixture.db.Model(&persistence.AgentSession{}).
+		Where("tenant_id = ? AND id = ?", fixture.tenantID, fixture.sessionID).
+		Updates(map[string]any{
+			"requested_execution_target_id": source.ID,
+			"execution_target_group_id":     group.ID,
+			"routing_policy_version":        group.Version,
+			"execution_target_id":           source.ID,
+		}).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	turn, err := fixture.service.CreateTurn(context.Background(), fixture.principal, fixture.sessionID, CreateTurnInput{
+		InputText: "retry to supported target",
+	}, "provider-capability-group-turn", "127.0.0.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var execution persistence.AgentExecution
+	if err := fixture.db.Where("tenant_id = ? AND turn_id = ?", fixture.tenantID, turn.ID).Take(&execution).Error; err != nil {
+		t.Fatal(err)
+	}
+	if execution.ExecutionTargetID != destination.ID {
+		t.Fatalf("execution target = %s, want %s", execution.ExecutionTargetID, destination.ID)
+	}
+	var session persistence.AgentSession
+	if err := fixture.db.Where("tenant_id = ? AND id = ?", fixture.tenantID, fixture.sessionID).Take(&session).Error; err != nil {
+		t.Fatal(err)
+	}
+	if session.ExecutionTargetID != destination.ID {
+		t.Fatalf("session execution target = %s, want %s", session.ExecutionTargetID, destination.ID)
+	}
+}
+
 func TestCapabilityGateRunsInsideIdempotentOperationAndDoesNotBreakReplay(t *testing.T) {
 	fixture := newTenantExecutionPolicyFixture(t)
 	ctx := context.Background()
@@ -192,6 +295,10 @@ type sessionCapabilityManifestOptions struct {
 	CodexIncompatibilityCode string
 	CodexPlanMode            string
 	CodexModelSwitch         string
+	CodexStartSession        string
+	CodexSendTurn            string
+	CodexReview              string
+	CodexCompact             string
 }
 
 func seedSessionCapabilityWorker(
@@ -200,10 +307,22 @@ func seedSessionCapabilityWorker(
 	options sessionCapabilityManifestOptions,
 ) uuid.UUID {
 	t.Helper()
+	return seedTargetCapabilityWorker(t, fixture.db, fixture.executionTargetID, nil, nil, options)
+}
+
+func seedTargetCapabilityWorker(
+	t *testing.T,
+	db *gorm.DB,
+	targetID uuid.UUID,
+	poolID *uuid.UUID,
+	poolVersion *int64,
+	options sessionCapabilityManifestOptions,
+) uuid.UUID {
+	t.Helper()
 	manifestID := uuid.New()
 	now := time.Now().UTC()
 	manifestDigest := sha256.Sum256([]byte("session-capability:" + manifestID.String()))
-	if err := fixture.db.Create(&persistence.WorkerManifest{
+	if err := db.Create(&persistence.WorkerManifest{
 		ID: manifestID, ManifestHash: hex.EncodeToString(manifestDigest[:]),
 		WorkerBuildVersion: "session-capability-test", WorkerProtocolMinimum: 2, WorkerProtocolMaximum: 2,
 		RuntimeEventMinimum: 2, RuntimeEventMaximum: 2, OperatingSystem: "linux", Architecture: "amd64",
@@ -233,6 +352,18 @@ func seedSessionCapabilityWorker(
 			if options.CodexModelSwitch != "" {
 				capabilities["model-switch"] = options.CodexModelSwitch
 			}
+			if options.CodexStartSession != "" {
+				capabilities["start-session"] = options.CodexStartSession
+			}
+			if options.CodexSendTurn != "" {
+				capabilities["send-turn"] = options.CodexSendTurn
+			}
+			if options.CodexReview != "" {
+				capabilities["review"] = options.CodexReview
+			}
+			if options.CodexCompact != "" {
+				capabilities["compact"] = options.CodexCompact
+			}
 		}
 		var codePointer, messagePointer *string
 		if status != "compatible" {
@@ -245,7 +376,7 @@ func seedSessionCapabilityWorker(
 		available := status == "compatible"
 		version := entry.RuntimePolicy.CompatibleRange.MinimumInclusive
 		descriptorDigest := sha256.Sum256([]byte(manifestID.String() + ":" + entry.Name))
-		if err := fixture.db.Create(&persistence.WorkerProviderManifest{
+		if err := db.Create(&persistence.WorkerProviderManifest{
 			WorkerManifestID: manifestID, Provider: entry.Name, SupportTier: entry.SupportTier,
 			CompatibilityStatus: status, ProviderHostMajor: 2, ProviderHostMinor: 1,
 			HostBuildVersion: "host-test", AdapterVersion: entry.AdapterVersion,
@@ -261,17 +392,183 @@ func seedSessionCapabilityWorker(
 			t.Fatal(err)
 		}
 	}
-	if err := fixture.db.Create(&persistence.WorkerInstance{
-		ID: uuid.New(), Incarnation: 1, InstanceUID: uuid.NewString(), ExecutionTargetID: fixture.executionTargetID,
-		TargetKind: "local", ClusterID: uuid.NewString(), Namespace: "local", PodName: uuid.NewString(),
+	target := loadCapabilityRouteTarget(t, db, targetID)
+	worker := persistence.WorkerInstance{
+		ID: uuid.New(), Incarnation: 1, InstanceUID: uuid.NewString(), ExecutionTargetID: targetID,
+		TargetKind: target.Kind, WorkerMode: "general-pool", ClusterID: uuid.NewString(), Namespace: "local", PodName: uuid.NewString(),
 		Version: "session-capability-worker", ProtocolVersion: 2, Capabilities: map[string]any{},
 		CurrentManifestID: &manifestID, CompatibilityStatus: "compatible", CompatibilityCheckedAt: &now,
 		LeaseSupported: true, FencingSupported: true, AuthTokenHash: []byte(uuid.NewString()),
 		Status: "online", RegisteredAt: now, LastHeartbeatAt: now,
-	}).Error; err != nil {
+	}
+	if poolID != nil {
+		worker.WorkerPoolID = poolID
+		worker.WorkerMode = "warm-pool"
+	}
+	if poolVersion != nil {
+		worker.WorkerPoolVersion = poolVersion
+	}
+	if worker.WorkerMode == "warm-pool" {
+		var pool persistence.WorkerPool
+		if err := db.Where("id = ?", *poolID).Take(&pool).Error; err != nil {
+			t.Fatal(err)
+		}
+		worker.CapacityClass = &pool.CapacityClass
+	}
+	if err := db.Create(&worker).Error; err != nil {
 		t.Fatal(err)
 	}
 	return manifestID
+}
+
+func loadCapabilityRouteTarget(t *testing.T, db *gorm.DB, targetID uuid.UUID) persistence.ExecutionTarget {
+	t.Helper()
+	var target persistence.ExecutionTarget
+	if err := db.Where("id = ?", targetID).Take(&target).Error; err != nil {
+		t.Fatal(err)
+	}
+	return target
+}
+
+func createCapabilityRouteTargetCopy(
+	t *testing.T,
+	db *gorm.DB,
+	source persistence.ExecutionTarget,
+	name string,
+) persistence.ExecutionTarget {
+	t.Helper()
+	copy := source
+	copy.ID = uuid.New()
+	copy.Name = name + "-" + uuid.NewString()
+	copy.Status = "active"
+	if err := db.Create(&copy).Error; err != nil {
+		t.Fatal(err)
+	}
+	return copy
+}
+
+func setCapabilityRouteTargetRoutingPreferences(
+	t *testing.T,
+	db *gorm.DB,
+	targetID uuid.UUID,
+	preferences map[string]string,
+) {
+	t.Helper()
+	target := loadCapabilityRouteTarget(t, db, targetID)
+	capabilities := make(map[string]any, len(target.Capabilities))
+	for key, value := range target.Capabilities {
+		capabilities[key] = value
+	}
+	rawPolicy, _ := capabilities["providerPolicy"].(map[string]any)
+	providerPolicy := make(map[string]any, len(rawPolicy)+1)
+	for key, value := range rawPolicy {
+		providerPolicy[key] = value
+	}
+	if len(preferences) == 0 {
+		delete(providerPolicy, "routingPreferences")
+	} else {
+		routingPreferences := make(map[string]any, len(preferences))
+		for provider, preference := range preferences {
+			routingPreferences[provider] = preference
+		}
+		providerPolicy["routingPreferences"] = routingPreferences
+	}
+	capabilities["providerPolicy"] = providerPolicy
+	if err := db.Model(&persistence.ExecutionTarget{}).
+		Where("id = ?", targetID).
+		Select("capabilities").
+		Updates(&persistence.ExecutionTarget{Capabilities: capabilities}).Error; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func ensureTargetDefaultPlacement(
+	t *testing.T,
+	db *gorm.DB,
+	target persistence.ExecutionTarget,
+) placement.Selection {
+	t.Helper()
+	selected, err := placement.NewService(db).SelectExecution(context.Background(), db, target, placement.WarmPoolModeDisabled)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return selected
+}
+
+func configureWarmDefaultPool(
+	t *testing.T,
+	db *gorm.DB,
+	target persistence.ExecutionTarget,
+) persistence.WorkerPool {
+	t.Helper()
+	ensureTargetDefaultPlacement(t, db, target)
+	now := time.Now().UTC()
+	pool := persistence.WorkerPool{
+		ID: uuid.New(), TenantID: target.TenantID, ExecutionTargetID: target.ID,
+		Name: "warm-default-" + uuid.NewString(), Mode: placement.PoolModeWarm, CapacityClass: placement.CapacityClassInteractive,
+		DesiredIdleUnits: 0, MaxActiveUnits: 1, SchedulingTemplate: map[string]any{},
+		Status: placement.PoolStatusActive, Version: 1, CreatedAt: now, UpdatedAt: now,
+	}
+	if err := db.Create(&pool).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Model(&persistence.ExecutionPlacementPolicy{}).
+		Where("execution_target_id = ?", target.ID).
+		Updates(map[string]any{
+			"default_pool_id": pool.ID,
+			"version":         gorm.Expr("version + 1"),
+			"updated_at":      now,
+		}).Error; err != nil {
+		t.Fatal(err)
+	}
+	return pool
+}
+
+func configureCapabilityRouteGroup(
+	t *testing.T,
+	fixture tenantExecutionPolicyFixture,
+	source persistence.ExecutionTarget,
+	destination persistence.ExecutionTarget,
+) persistence.ExecutionTargetGroup {
+	t.Helper()
+	ctx := context.Background()
+	router := routing.NewService(fixture.db)
+	group, err := router.CreateGroup(ctx, routing.CreateGroupInput{
+		TenantID: fixture.tenantID, OrganizationID: &fixture.organizationID,
+		Name: "capability-route-group-" + uuid.NewString(), Strategy: routing.StrategyPriority,
+		AllowCrossRegion: true, MaxFailoverAttempts: targetFailoverIntPointer(3), HealthMaxStalenessSeconds: 90,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := router.AddMember(ctx, routing.AddMemberInput{
+		TenantID: fixture.tenantID, TargetGroupID: group.ID, ExecutionTargetID: source.ID,
+		Region: "cn-shanghai", ClusterID: "cluster-a", Priority: 10, Weight: 100,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := router.AddMember(ctx, routing.AddMemberInput{
+		TenantID: fixture.tenantID, TargetGroupID: group.ID, ExecutionTargetID: destination.ID,
+		Region: "cn-shanghai", ClusterID: "cluster-b", Priority: 20, Weight: 100,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	capacity := 10
+	for _, targetID := range []uuid.UUID{source.ID, destination.ID} {
+		if _, err := router.ObserveHealth(ctx, routing.HealthObservation{
+			ExecutionTargetID:      targetID,
+			Status:                 routing.HealthHealthy,
+			CapacityStatus:         routing.CapacityAvailable,
+			AvailableCapacityUnits: &capacity,
+			Source:                 "provider-capability-route-test",
+			ObservedAt:             now,
+			TTL:                    time.Minute,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return group
 }
 
 func disableExperimentalProviders(t *testing.T, db *gorm.DB, targetID uuid.UUID) {

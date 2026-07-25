@@ -25,6 +25,10 @@ func TestParseProviderPolicyNormalizesExperimentalProviders(t *testing.T) {
 	policy, err := ParseProviderPolicy(map[string]any{
 		"providerPolicy": map[string]any{
 			"experimentalProviders": []any{" OpenCode ", "CLAUDEAGENT", "codex"},
+			"routingPreferences": map[string]any{
+				"codex":       "prefer",
+				"claudeAgent": "avoid",
+			},
 		},
 	})
 	if err != nil {
@@ -41,6 +45,11 @@ func TestParseProviderPolicyNormalizesExperimentalProviders(t *testing.T) {
 	}
 	if !policy.ExperimentalProviderEnabled(" CLAUDEAGENT ") || policy.ExperimentalProviderEnabled("droid") {
 		t.Fatalf("unexpected Provider enablement: %#v", policy)
+	}
+	if policy.RoutingPreference("codex") != ProviderRoutingPreferencePrefer ||
+		policy.RoutingPreference("claudeAgent") != ProviderRoutingPreferenceAvoid ||
+		policy.RoutingPreference("opencode") != ProviderRoutingPreferenceNeutral {
+		t.Fatalf("unexpected routing preferences: %#v", policy.RoutingPreferences)
 	}
 	enabled, err := ExperimentalProviderEnabled(map[string]any{}, "codex")
 	if err != nil || enabled {
@@ -77,6 +86,9 @@ func TestParseProviderPolicyRejectsInvalidShape(t *testing.T) {
 		{name: "provider-not-string", capabilities: map[string]any{"providerPolicy": map[string]any{"experimentalProviders": []any{1}}}},
 		{name: "unknown-provider", capabilities: map[string]any{"providerPolicy": map[string]any{"experimentalProviders": []any{"droid"}}}},
 		{name: "duplicate-after-normalization", capabilities: map[string]any{"providerPolicy": map[string]any{"experimentalProviders": []any{"codex", " CODEX "}}}},
+		{name: "routing-preferences-not-object", capabilities: map[string]any{"providerPolicy": map[string]any{"routingPreferences": "codex"}}},
+		{name: "routing-preference-key-not-canonical", capabilities: map[string]any{"providerPolicy": map[string]any{"routingPreferences": map[string]any{"CODEX": "prefer"}}}},
+		{name: "routing-preference-value-invalid", capabilities: map[string]any{"providerPolicy": map[string]any{"routingPreferences": map[string]any{"codex": "required"}}}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -84,5 +96,44 @@ func TestParseProviderPolicyRejectsInvalidShape(t *testing.T) {
 				t.Fatalf("invalid policy was accepted: %#v", test.capabilities)
 			}
 		})
+	}
+}
+
+func TestProviderPolicyEqualIncludesRoutingPreferences(t *testing.T) {
+	left, err := ParseProviderPolicy(map[string]any{
+		"providerPolicy": map[string]any{
+			"experimentalProviders": []any{"codex"},
+			"routingPreferences":    map[string]any{"codex": "prefer"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	right, err := ParseProviderPolicy(map[string]any{
+		"providerPolicy": map[string]any{
+			"experimentalProviders": []any{"codex"},
+			"routingPreferences":    map[string]any{"codex": "prefer"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	different, err := ParseProviderPolicy(map[string]any{
+		"providerPolicy": map[string]any{
+			"experimentalProviders": []any{"codex"},
+			"routingPreferences":    map[string]any{"codex": "avoid"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !left.Equal(right) {
+		t.Fatalf("equivalent policies were not equal: left=%#v right=%#v", left, right)
+	}
+	if left.Equal(different) {
+		t.Fatalf("different routing preferences compared equal: left=%#v different=%#v", left, different)
+	}
+	if !left.WorkerCompatibilityEqual(different) {
+		t.Fatalf("soft routing preference changed Worker compatibility: left=%#v different=%#v", left, different)
 	}
 }

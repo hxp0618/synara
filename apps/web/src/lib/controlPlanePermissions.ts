@@ -5,6 +5,7 @@ export type ControlPlaneCapabilities = {
   canManageOrganizations: boolean;
   canReadProjects: boolean;
   canCreateProject: boolean;
+  canUpdateProject: boolean;
   canCreateSession: boolean;
   canCreateTurn: boolean;
   canSteerExecution: boolean;
@@ -18,6 +19,8 @@ export type ControlPlaneCapabilities = {
   canManageQuota: boolean;
   canReadRetention: boolean;
   canManageRetention: boolean;
+  canReadLifecycle: boolean;
+  canManageLifecycle: boolean;
   canReadAudit: boolean;
   canManageCredentials: boolean;
   canReadIdentity: boolean;
@@ -31,6 +34,7 @@ const NO_CAPABILITIES: ControlPlaneCapabilities = {
   canManageOrganizations: false,
   canReadProjects: false,
   canCreateProject: false,
+  canUpdateProject: false,
   canCreateSession: false,
   canCreateTurn: false,
   canSteerExecution: false,
@@ -44,6 +48,8 @@ const NO_CAPABILITIES: ControlPlaneCapabilities = {
   canManageQuota: false,
   canReadRetention: false,
   canManageRetention: false,
+  canReadLifecycle: false,
+  canManageLifecycle: false,
   canReadAudit: false,
   canManageCredentials: false,
   canReadIdentity: false,
@@ -75,6 +81,7 @@ export function resolveControlPlaneCapabilities(input: {
   const tenantProjectOperator = tenantAdmin;
   const canReadProjects = tenantProjectReader || organizationReader;
   const canCreateProject = mutationScopeActive && (tenantProjectOperator || organizationManager);
+  const canUpdateProject = mutationScopeActive && (tenantProjectOperator || organizationManager);
   const canCreateSession = mutationScopeActive && (tenantProjectOperator || organizationMember);
   const canCreateTurn = canCreateSession;
 
@@ -83,6 +90,7 @@ export function resolveControlPlaneCapabilities(input: {
     canManageOrganizations: tenant.status === "active" && tenantAdmin,
     canReadProjects,
     canCreateProject,
+    canUpdateProject,
     canCreateSession,
     canCreateTurn,
     canSteerExecution: canCreateTurn,
@@ -96,6 +104,8 @@ export function resolveControlPlaneCapabilities(input: {
     canManageQuota: tenant.status === "active" && (tenantAdmin || tenantBilling),
     canReadRetention: tenantAdmin || tenantSecurity || tenantAuditor,
     canManageRetention: tenant.status === "active" && (tenantAdmin || tenantSecurity),
+    canReadLifecycle: tenantAdmin || tenantSecurity || tenantAuditor,
+    canManageLifecycle: tenant.status === "active" && tenantAdmin,
     canReadAudit: tenantAdmin || tenantSecurity || tenantAuditor,
     canManageCredentials: tenant.status === "active" && (tenantOwner || tenantSecurity),
     canReadIdentity: tenantAdmin || tenantSecurity,

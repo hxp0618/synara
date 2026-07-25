@@ -32,7 +32,7 @@ import (
 
 var allowedKinds = map[string]struct{}{
 	"attachment": {}, "generated_file": {}, "terminal_log": {}, "diff": {},
-	"workspace_snapshot": {}, "checkpoint": {},
+	"workspace_snapshot": {}, "checkpoint": {}, "memory": {},
 }
 
 var (
@@ -834,6 +834,63 @@ func (s *Service) DownloadCheckpointForWorker(
 	return s.downloadGrant(ctx, model)
 }
 
+func (s *Service) DownloadMemoryForWorker(
+	ctx context.Context,
+	worker persistence.WorkerInstance,
+	executionID, revisionID uuid.UUID,
+	input executions.LeaseInput,
+) (DownloadGrant, error) {
+	var model persistence.Artifact
+	err := persistence.InTransaction(ctx, s.db, func(tx *gorm.DB) error {
+		execution, reference, err := s.executions.AuthorizeMemoryArtifactRead(
+			ctx, tx, worker, executionID, revisionID, input,
+		)
+		if err != nil {
+			return err
+		}
+		if err := tx.WithContext(ctx).
+			Where(
+				"tenant_id = ? AND id = ? AND kind = ? AND status = ? AND deleted_at IS NULL AND sha256 = ? AND size_bytes = ?",
+				execution.TenantID, reference.ArtifactID, "memory", "ready", reference.SHA256, reference.SizeBytes,
+			).
+			Take(&model).Error; err != nil {
+			return problem.Wrap(409, "memory_artifact_unavailable", "The frozen Agent Memory Artifact is not ready or no longer available.", err)
+		}
+		if err := validateFrozenMemoryArtifactMetadata(model, reference); err != nil {
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		return DownloadGrant{}, err
+	}
+	return s.downloadGrant(ctx, model)
+}
+
+func validateFrozenMemoryArtifactMetadata(
+	model persistence.Artifact,
+	reference executions.RecoveryMemoryReference,
+) error {
+	if model.ID != reference.ArtifactID || model.ContentType == nil || model.SizeBytes == nil || model.SHA256 == nil ||
+		*model.SizeBytes != reference.SizeBytes || *model.SHA256 != reference.SHA256 {
+		return problem.New(
+			409,
+			"memory_artifact_identity_mismatch",
+			"The frozen Agent Memory Artifact metadata does not match its Recovery Bundle reference.",
+		)
+	}
+	mediaType, _, err := mime.ParseMediaType(*model.ContentType)
+	mediaType = strings.ToLower(strings.TrimSpace(mediaType))
+	if err != nil || mediaType != reference.MediaType {
+		return problem.New(
+			409,
+			"memory_artifact_identity_mismatch",
+			"The frozen Agent Memory Artifact media type does not match its Recovery Bundle reference.",
+		)
+	}
+	return nil
+}
+
 func (s *Service) downloadGrant(ctx context.Context, model persistence.Artifact) (DownloadGrant, error) {
 	if model.Status != "ready" || model.DeletedAt != nil {
 		return DownloadGrant{}, problem.New(409, "artifact_not_ready", "Artifact is not available for download.")
@@ -933,6 +990,13 @@ func (s *Service) deleteModel(
 	if referenced {
 		return false, problem.New(409, "artifact_checkpoint_referenced", "Artifact is referenced by an active Workspace Checkpoint.")
 	}
+	memoryReferenced, err := s.artifactReferencedByMemory(ctx, s.db, model.TenantID, model.ID)
+	if err != nil {
+		return false, err
+	}
+	if memoryReferenced {
+		return false, problem.New(409, "artifact_memory_referenced", "Artifact is pinned by an immutable Agent Memory Revision.")
+	}
 	result := s.db.WithContext(ctx).Model(&persistence.Artifact{}).
 		Where("id = ? AND tenant_id = ? AND status IN ?", model.ID, model.TenantID, []string{"pending", "ready", "failed", "deleting"}).
 		Where(`NOT EXISTS (
@@ -940,6 +1004,11 @@ func (s *Service) deleteModel(
 			WHERE checkpoint.tenant_id = artifacts.tenant_id
 			  AND checkpoint.artifact_id = artifacts.id
 			  AND checkpoint.status IN ('pending', 'uploading', 'ready')
+		)`).
+		Where(`NOT EXISTS (
+			SELECT 1 FROM agent_memory_revisions memory_revision
+			WHERE memory_revision.tenant_id = artifacts.tenant_id
+			  AND memory_revision.artifact_id = artifacts.id
 		)`).
 		Update("status", "deleting")
 	if result.Error != nil || result.RowsAffected != 1 {
@@ -949,6 +1018,13 @@ func (s *Service) deleteModel(
 		}
 		if referenced {
 			return false, problem.New(409, "artifact_checkpoint_referenced", "Artifact is referenced by an active Workspace Checkpoint.")
+		}
+		memoryReferenced, memoryReferenceErr := s.artifactReferencedByMemory(ctx, s.db, model.TenantID, model.ID)
+		if memoryReferenceErr != nil {
+			return false, memoryReferenceErr
+		}
+		if memoryReferenced {
+			return false, problem.New(409, "artifact_memory_referenced", "Artifact is pinned by an immutable Agent Memory Revision.")
 		}
 		return false, problem.Wrap(409, "artifact_delete_conflict", "Artifact deletion conflicted with another request.", result.Error)
 	}
@@ -996,6 +1072,20 @@ func (s *Service) artifactReferencedByCheckpoint(
 		Where("tenant_id = ? AND artifact_id = ? AND status IN ?", tenantID, artifactID, []string{"pending", "uploading", "ready"}).
 		Count(&count).Error; err != nil {
 		return false, problem.Wrap(500, "artifact_checkpoint_reference_lookup_failed", "Failed to inspect Workspace Checkpoint references.", err)
+	}
+	return count > 0, nil
+}
+
+func (s *Service) artifactReferencedByMemory(
+	ctx context.Context,
+	db *gorm.DB,
+	tenantID, artifactID uuid.UUID,
+) (bool, error) {
+	var count int64
+	if err := db.WithContext(ctx).Model(&persistence.AgentMemoryRevision{}).
+		Where("tenant_id = ? AND artifact_id = ?", tenantID, artifactID).
+		Count(&count).Error; err != nil {
+		return false, problem.Wrap(500, "artifact_memory_reference_lookup_failed", "Failed to inspect Agent Memory references.", err)
 	}
 	return count > 0, nil
 }

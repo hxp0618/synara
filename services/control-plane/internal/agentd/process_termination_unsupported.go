@@ -9,7 +9,7 @@ import (
 
 type processTree struct{}
 
-func newProcessTree(*exec.Cmd) (*processTree, error) {
+func newProcessTree(*exec.Cmd, ...processTreeOptions) (*processTree, error) {
 	return nil, errors.New("process-tree isolation is unsupported on this operating system")
 }
 

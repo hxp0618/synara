@@ -3,11 +3,13 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -16,6 +18,7 @@ import (
 
 	"github.com/synara-ai/synara/services/control-plane/internal/agentd"
 	"github.com/synara-ai/synara/services/control-plane/internal/artifacts"
+	"github.com/synara-ai/synara/services/control-plane/internal/billing"
 	"github.com/synara-ai/synara/services/control-plane/internal/bootstrap"
 	"github.com/synara-ai/synara/services/control-plane/internal/config"
 	"github.com/synara-ai/synara/services/control-plane/internal/credentials"
@@ -26,11 +29,15 @@ import (
 	"github.com/synara-ai/synara/services/control-plane/internal/httpapi"
 	"github.com/synara-ai/synara/services/control-plane/internal/identity"
 	credentialkms "github.com/synara-ai/synara/services/control-plane/internal/kms"
+	"github.com/synara-ai/synara/services/control-plane/internal/leadership"
+	"github.com/synara-ai/synara/services/control-plane/internal/lifecyclepolicy"
+	"github.com/synara-ai/synara/services/control-plane/internal/memories"
 	"github.com/synara-ai/synara/services/control-plane/internal/observability"
 	"github.com/synara-ai/synara/services/control-plane/internal/outbox"
 	"github.com/synara-ai/synara/services/control-plane/internal/platform"
 	"github.com/synara-ai/synara/services/control-plane/internal/projects"
 	"github.com/synara-ai/synara/services/control-plane/internal/quotas"
+	"github.com/synara-ai/synara/services/control-plane/internal/reconcilerleadership"
 	"github.com/synara-ai/synara/services/control-plane/internal/retention"
 	"github.com/synara-ai/synara/services/control-plane/internal/scim"
 	"github.com/synara-ai/synara/services/control-plane/internal/secret"
@@ -175,23 +182,91 @@ func main() {
 		WorkerLeaseTTL: cfg.WorkerLeaseTTL, Interval: cfg.DockerReconcileInterval,
 		Observer: metrics, ResolveImagePull: resolveImagePull,
 	}, logger)
+	reconcilerLeadershipConfig, err := loadReconcilerLeadershipConfig(cfg)
+	if err != nil {
+		logger.Error("failed to configure reconciler leadership", "error", err)
+		os.Exit(1)
+	}
+	reconcilerLeadership, err := leadership.New(db, leadership.Config{
+		HolderID: reconcilerLeadershipConfig.HolderID,
+		LeaseTTL: reconcilerLeadershipConfig.LeaseTTL,
+	})
+	if err != nil {
+		logger.Error("failed to initialize reconciler leadership", "error", err)
+		os.Exit(1)
+	}
+	lifecyclePolicyService, err := lifecyclepolicy.NewService(db, cfg.ResourceLifecycle)
+	if err != nil {
+		logger.Error("failed to configure Resource Lifecycle Policy", "error", err)
+		os.Exit(1)
+	}
 	sessionService := sessions.NewService(
 		db, projectService, executionTargetService,
 		sessions.WithProviderCapabilityHeartbeatTimeout(cfg.WorkerHeartbeatTimeout),
+		sessions.WithLifecyclePolicyResolver(lifecyclePolicyService),
 	)
+	memoryService := memories.NewService(db)
 	executionService := executions.NewService(
 		db, sessionService, cfg.WorkerLeaseTTL, cfg.WorkerHeartbeatTimeout,
 		cfg.WorkerReceiptTTL, cursorCipher, executionTargetService,
 		executions.WithProjectService(projectService),
+		executions.WithMemoryReferenceResolver(memoryService),
+		executions.WithProviderCredentialAccessTTL(cfg.ProviderCredentialAccessTTL),
 		executions.WithProviderCursorMaximumAge(cfg.ProviderCursorMaximumAge),
 	)
+	billingAdapter, billingImports, billingCloser, err := billing.NewAdapterFromRuntime(ctx, cfg.Billing)
+	if err != nil {
+		logger.Error("failed to configure billing adapter", "error", err)
+		os.Exit(1)
+	}
+	if billingCloser != nil {
+		defer func() {
+			if closeErr := billingCloser.Close(); closeErr != nil {
+				logger.Warn("billing source shutdown failed", "error", closeErr)
+			}
+		}()
+	}
+	tariffOperatorTenantID := cfg.Billing.TariffOperatorTenantID
+	if tariffOperatorTenantID == uuid.Nil && bootstrapped.Personal {
+		tariffOperatorTenantID = bootstrapped.TenantID
+	}
+	billingService := billing.NewService(
+		db,
+		billingAdapter,
+		billing.WithConfiguredImports(billingImports),
+		billing.WithTariffOperatorTenant(tariffOperatorTenantID),
+		billing.WithBuiltInEstimateSweeper(),
+	)
+	resourceLifecycleController := lifecyclepolicy.NewController(
+		executionService, cfg.ResourceLifecycleSweepInterval, logger, metrics,
+	)
 	tenancyService := tenancy.NewService(db, executionService)
+	managedKubernetesRoutingPublisher := executiontargets.NewManagedKubernetesRoutingPublisher(
+		executionTargetService,
+		executiontargets.ManagedKubernetesRoutingPublisherConfig{
+			PublisherIdentity: "managed-kubernetes-routing-publisher:" + reconcilerLeadershipConfig.HolderID,
+			ObservationTTL: minDuration(
+				time.Hour,
+				maxDuration(30*time.Second, 3*cfg.KubernetesReconcileInterval),
+			),
+		},
+	)
 	kubernetesReconciler := executiontargets.NewKubernetesReconciler(executionTargetService, executiontargets.KubernetesReconcilerConfig{
-		RegistrationToken: cfg.WorkerRegistrationToken, PublicControlPlaneURL: cfg.PublicControlPlaneURL,
-		WorkerLeaseTTL: cfg.WorkerLeaseTTL, Interval: cfg.KubernetesReconcileInterval,
+		PublicControlPlaneURL: cfg.PublicControlPlaneURL,
+		WorkerLeaseTTL:        cfg.WorkerLeaseTTL, Interval: cfg.KubernetesReconcileInterval,
 		RecoverExpired:                     executionService.RecoverExpired,
 		ReconcileEphemeralWorkspaceCleanup: executionService.ReconcileEphemeralWorkspaceCleanup,
-		Observer:                           metrics, ResolveImagePull: resolveImagePull,
+		FinalizeResourceSuspend: func(ctx context.Context, observation executiontargets.KubernetesPodTerminalObservation) (bool, error) {
+			return executionService.FinalizeKubernetesResourceSuspend(ctx, executions.KubernetesPodTerminalProof{
+				ExecutionTargetID: observation.ExecutionTargetID,
+				ExecutionID:       observation.ExecutionID, Generation: observation.Generation,
+				Namespace: observation.Namespace, PodName: observation.PodName,
+				PodUID: observation.PodUID, Phase: observation.Phase, ObservedAt: observation.ObservedAt,
+			})
+		},
+		ObserveWorkerPod:     executionService.ObserveKubernetesWorkerPod,
+		PublishRoutingHealth: managedKubernetesRoutingPublisher.PublishReconcile,
+		Observer:             metrics, ResolveImagePull: resolveImagePull,
 	}, logger)
 	workerReleaseAutoRollback := workerreleases.NewAutoRollbackController(
 		workerreleases.NewService(db),
@@ -217,13 +292,100 @@ func main() {
 		cfg, db, identityService, tenancyService, projectService, sessionService,
 		executionService, executionTargetService, sshProvisioner, artifactService, quotaService,
 		credentialService, retentionService, metrics, outboxService, enterpriseIdentityService,
-		serviceAccountService, scimService, schemaChecker, logger,
+		serviceAccountService, scimService, schemaChecker, logger, httpapi.WithBilling(billingService),
 	)
 	if err != nil {
 		logger.Error("failed to configure HTTP API", "error", err)
 		os.Exit(1)
 	}
 	server := newControlPlaneHTTPServer(cfg.ListenAddress, api.Handler(), runtimeContext, stopRuntime)
+	dockerLeaderRunner, err := reconcilerleadership.NewRunner(reconcilerLeadership, reconcilerleadership.RunnerConfig{
+		LeaseName:         "synara:docker-worker-pool-reconciler",
+		CycleInterval:     cfg.DockerReconcileInterval,
+		AcquireRetryDelay: reconcilerLeadershipConfig.AcquireRetryDelay,
+		RenewInterval:     reconcilerLeadershipConfig.RenewInterval,
+		AssertInterval:    reconcilerLeadershipConfig.AssertInterval,
+		Logger:            logger,
+	})
+	if err != nil {
+		logger.Error("failed to configure docker reconciler leadership runner", "error", err)
+		os.Exit(1)
+	}
+	kubernetesLeaderRunner, err := reconcilerleadership.NewRunner(reconcilerLeadership, reconcilerleadership.RunnerConfig{
+		LeaseName:         "synara:kubernetes-execution-reconciler",
+		CycleInterval:     cfg.KubernetesReconcileInterval,
+		AcquireRetryDelay: reconcilerLeadershipConfig.AcquireRetryDelay,
+		RenewInterval:     reconcilerLeadershipConfig.RenewInterval,
+		AssertInterval:    reconcilerLeadershipConfig.AssertInterval,
+		Logger:            logger,
+	})
+	if err != nil {
+		logger.Error("failed to configure kubernetes reconciler leadership runner", "error", err)
+		os.Exit(1)
+	}
+	targetFailoverLeaderRunner, err := reconcilerleadership.NewRunner(reconcilerLeadership, reconcilerleadership.RunnerConfig{
+		LeaseName:         "synara:global-target-failover-sweep",
+		CycleInterval:     reconcilerLeadershipConfig.TargetFailoverSweepInterval,
+		AcquireRetryDelay: reconcilerLeadershipConfig.AcquireRetryDelay,
+		RenewInterval:     reconcilerLeadershipConfig.RenewInterval,
+		AssertInterval:    reconcilerLeadershipConfig.AssertInterval,
+		Logger:            logger,
+	})
+	if err != nil {
+		logger.Error("failed to configure target failover leadership runner", "error", err)
+		os.Exit(1)
+	}
+	resourceLifecycleLeaderRunner, err := reconcilerleadership.NewRunner(reconcilerLeadership, reconcilerleadership.RunnerConfig{
+		LeaseName:         "synara:session-resource-lifecycle",
+		CycleInterval:     cfg.ResourceLifecycleSweepInterval,
+		AcquireRetryDelay: reconcilerLeadershipConfig.AcquireRetryDelay,
+		RenewInterval:     reconcilerLeadershipConfig.RenewInterval,
+		AssertInterval:    reconcilerLeadershipConfig.AssertInterval,
+		Logger:            logger,
+	})
+	if err != nil {
+		logger.Error("failed to configure resource lifecycle leadership runner", "error", err)
+		os.Exit(1)
+	}
+	workerReleaseLeaderRunner, err := reconcilerleadership.NewRunner(reconcilerLeadership, reconcilerleadership.RunnerConfig{
+		LeaseName:         "synara:worker-release-auto-rollback",
+		CycleInterval:     cfg.WorkerAutoRollbackInterval,
+		AcquireRetryDelay: reconcilerLeadershipConfig.AcquireRetryDelay,
+		RenewInterval:     reconcilerLeadershipConfig.RenewInterval,
+		AssertInterval:    reconcilerLeadershipConfig.AssertInterval,
+		Logger:            logger,
+	})
+	if err != nil {
+		logger.Error("failed to configure Worker release rollback leadership runner", "error", err)
+		os.Exit(1)
+	}
+	retentionLeaderRunner, err := reconcilerleadership.NewRunner(reconcilerLeadership, reconcilerleadership.RunnerConfig{
+		LeaseName:         "synara:tenant-retention-sweeper",
+		CycleInterval:     cfg.RetentionSweepInterval,
+		AcquireRetryDelay: reconcilerLeadershipConfig.AcquireRetryDelay,
+		RenewInterval:     reconcilerLeadershipConfig.RenewInterval,
+		AssertInterval:    reconcilerLeadershipConfig.AssertInterval,
+		Logger:            logger,
+	})
+	if err != nil {
+		logger.Error("failed to configure retention leadership runner", "error", err)
+		os.Exit(1)
+	}
+	var billingImportLeaderRunner *reconcilerleadership.Runner
+	if cycleInterval := billingImportScheduleInterval(cfg.Billing); cycleInterval > 0 {
+		billingImportLeaderRunner, err = reconcilerleadership.NewRunner(reconcilerLeadership, reconcilerleadership.RunnerConfig{
+			LeaseName:         "synara:billing-import-scheduler",
+			CycleInterval:     cycleInterval,
+			AcquireRetryDelay: reconcilerLeadershipConfig.AcquireRetryDelay,
+			RenewInterval:     reconcilerLeadershipConfig.RenewInterval,
+			AssertInterval:    reconcilerLeadershipConfig.AssertInterval,
+			Logger:            logger,
+		})
+		if err != nil {
+			logger.Error("failed to configure billing import leadership runner", "error", err)
+			os.Exit(1)
+		}
+	}
 	var localAgentd *agentd.LocalSupervisor
 	if len(cfg.LocalAgentdRunnerCommand) > 0 {
 		localTarget, _, resolveErr := executionTargetService.ResolveWorkerTarget(
@@ -261,10 +423,74 @@ func main() {
 			run()
 		}()
 	}
-	startBackground(func() { dockerReconciler.Run(runtimeContext) })
-	startBackground(func() { kubernetesReconciler.Run(runtimeContext) })
-	startBackground(func() { workerReleaseAutoRollback.Run(runtimeContext) })
-	startBackground(func() { retentionService.Run(runtimeContext) })
+	startBackground(func() {
+		dockerLeaderRunner.Run(runtimeContext, func(run reconcilerleadership.RunContext) error {
+			return observeLeadershipBackground(metrics, "docker", func() error {
+				return dockerReconciler.ReconcileOnce(run.Context)
+			})
+		})
+	})
+	startBackground(func() {
+		kubernetesLeaderRunner.Run(runtimeContext, func(run reconcilerleadership.RunContext) error {
+			return observeLeadershipBackground(metrics, "kubernetes", func() error {
+				return kubernetesReconciler.ReconcileOnce(run.Context)
+			})
+		})
+	})
+	startBackground(func() {
+		targetFailoverLeaderRunner.Run(runtimeContext, func(run reconcilerleadership.RunContext) error {
+			return observeLeadershipBackground(metrics, "target-failover", func() error {
+				return reconcileTargetFailovers(run, sessionService)
+			})
+		})
+	})
+	startBackground(func() {
+		resourceLifecycleLeaderRunner.Run(runtimeContext, func(run reconcilerleadership.RunContext) error {
+			return observeLeadershipBackground(metrics, "resource-lifecycle", func() error {
+				return resourceLifecycleController.RunOnce(run.Context, 200)
+			})
+		})
+	})
+	startBackground(func() {
+		workerReleaseLeaderRunner.Run(runtimeContext, func(run reconcilerleadership.RunContext) error {
+			return observeLeadershipBackground(metrics, "worker-release-auto-rollback", func() error {
+				return workerReleaseAutoRollback.EvaluateOnce(run.Context)
+			})
+		})
+	})
+	startBackground(func() {
+		retentionLeaderRunner.Run(runtimeContext, func(run reconcilerleadership.RunContext) error {
+			return observeLeadershipBackground(metrics, "retention", func() error {
+				return retentionService.RunOnce(run.Context, 200)
+			})
+		})
+	})
+	if billingImportLeaderRunner != nil {
+		startBackground(func() {
+			billingImportLeaderRunner.Run(runtimeContext, func(run reconcilerleadership.RunContext) error {
+				return observeLeadershipBackground(metrics, "billing-import-scheduler", func() error {
+					summary, err := billingService.RunImportSchedulerOnce(run.Context)
+					log := logger.Debug
+					if err != nil {
+						log = logger.Warn
+					}
+					log(
+						"billing import scheduler cycle completed",
+						"checked", summary.Checked,
+						"imported", summary.Imported,
+						"reconciled", summary.Reconciled,
+						"estimateWorkers", summary.EstimateWorkers,
+						"estimateRows", summary.EstimateSweeps,
+						"estimateWorkerFailures", summary.EstimateWorkerFailures,
+						"skipped", summary.Skipped,
+						"failed", summary.Failed,
+						"error", err,
+					)
+					return err
+				})
+			})
+		})
+	}
 	startBackground(func() { outboxDispatcher.Run(runtimeContext) })
 	if localAgentd != nil {
 		logger.Info(
@@ -340,4 +566,147 @@ func runHealthcheck() error {
 		return errors.New("control plane is not ready")
 	}
 	return nil
+}
+
+type reconcilerLeadershipConfig struct {
+	HolderID                    string
+	LeaseTTL                    time.Duration
+	RenewInterval               time.Duration
+	AssertInterval              time.Duration
+	AcquireRetryDelay           time.Duration
+	TargetFailoverSweepInterval time.Duration
+}
+
+func loadReconcilerLeadershipConfig(cfg config.Config) (reconcilerLeadershipConfig, error) {
+	holderID := strings.TrimSpace(os.Getenv("SYNARA_RECONCILER_LEASE_HOLDER_ID"))
+	if holderID == "" {
+		holderID = defaultReconcilerLeaseHolderID()
+	}
+
+	failoverInterval, err := envDuration("SYNARA_TARGET_FAILOVER_SWEEP_INTERVAL", 10*time.Second)
+	if err != nil {
+		return reconcilerLeadershipConfig{}, err
+	}
+	leaseTTL, err := envDuration("SYNARA_RECONCILER_LEASE_TTL", 30*time.Second)
+	if err != nil {
+		return reconcilerLeadershipConfig{}, err
+	}
+	renewInterval, err := envDuration("SYNARA_RECONCILER_LEASE_RENEW_INTERVAL", maxDuration(2*time.Second, leaseTTL/3))
+	if err != nil {
+		return reconcilerLeadershipConfig{}, err
+	}
+	assertInterval, err := envDuration("SYNARA_RECONCILER_LEASE_ASSERT_INTERVAL", minDuration(5*time.Second, maxDuration(time.Second, leaseTTL/4)))
+	if err != nil {
+		return reconcilerLeadershipConfig{}, err
+	}
+	acquireRetryDelay, err := envDuration("SYNARA_RECONCILER_LEASE_ACQUIRE_RETRY_DELAY", 2*time.Second)
+	if err != nil {
+		return reconcilerLeadershipConfig{}, err
+	}
+	if leaseTTL <= 0 {
+		return reconcilerLeadershipConfig{}, errors.New("SYNARA_RECONCILER_LEASE_TTL must be positive")
+	}
+	if renewInterval <= 0 || renewInterval >= leaseTTL {
+		return reconcilerLeadershipConfig{}, errors.New("SYNARA_RECONCILER_LEASE_RENEW_INTERVAL must be positive and less than SYNARA_RECONCILER_LEASE_TTL")
+	}
+	if assertInterval <= 0 || assertInterval >= leaseTTL {
+		return reconcilerLeadershipConfig{}, errors.New("SYNARA_RECONCILER_LEASE_ASSERT_INTERVAL must be positive and less than SYNARA_RECONCILER_LEASE_TTL")
+	}
+	if acquireRetryDelay <= 0 {
+		return reconcilerLeadershipConfig{}, errors.New("SYNARA_RECONCILER_LEASE_ACQUIRE_RETRY_DELAY must be positive")
+	}
+	if failoverInterval <= 0 {
+		return reconcilerLeadershipConfig{}, errors.New("SYNARA_TARGET_FAILOVER_SWEEP_INTERVAL must be positive")
+	}
+	return reconcilerLeadershipConfig{
+		HolderID:                    holderID,
+		LeaseTTL:                    leaseTTL,
+		RenewInterval:               renewInterval,
+		AssertInterval:              assertInterval,
+		AcquireRetryDelay:           acquireRetryDelay,
+		TargetFailoverSweepInterval: failoverInterval,
+	}, nil
+}
+
+func defaultReconcilerLeaseHolderID() string {
+	host := strings.TrimSpace(os.Getenv("HOSTNAME"))
+	if host == "" {
+		if resolved, err := os.Hostname(); err == nil {
+			host = strings.TrimSpace(resolved)
+		}
+	}
+	if host == "" {
+		host = "unknown-host"
+	}
+	if len(host) > 80 {
+		host = host[:80]
+	}
+	return fmt.Sprintf("%s:%d:%s", host, os.Getpid(), uuid.NewString())
+}
+
+func envDuration(name string, fallback time.Duration) (time.Duration, error) {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback, nil
+	}
+	duration, err := time.ParseDuration(value)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be a valid duration: %w", name, err)
+	}
+	return duration, nil
+}
+
+func maxDuration(left, right time.Duration) time.Duration {
+	if left > right {
+		return left
+	}
+	return right
+}
+
+func minDuration(left, right time.Duration) time.Duration {
+	if left < right {
+		return left
+	}
+	return right
+}
+
+func billingImportScheduleInterval(config billing.RuntimeConfig) time.Duration {
+	return config.MinimumScheduleInterval()
+}
+
+func observeLeadershipBackground(observer interface {
+	ObserveBackground(kind string, started time.Time, err error)
+}, kind string, work func() error) error {
+	started := time.Now()
+	err := work()
+	observedErr := err
+	if errors.Is(err, reconcilerleadership.ErrLeadershipLost) || errors.Is(err, context.Canceled) {
+		observedErr = nil
+	}
+	if observer != nil {
+		observer.ObserveBackground(kind, started, observedErr)
+	}
+	return err
+}
+
+func reconcileTargetFailovers(run reconcilerleadership.RunContext, sessionService *sessions.Service) error {
+	for {
+		if err := run.AssertActive(run.Context); err != nil {
+			return err
+		}
+		summary, err := sessionService.ReconcileTargetFailovers(run.Context, sessions.TargetFailoverFence{
+			LeaseName: run.Lease.Name, HolderID: run.Lease.HolderID, FencingToken: run.Lease.FencingToken,
+		}, 1)
+		if err != nil {
+			return err
+		}
+		if summary.Candidates == 0 || summary.Committed == 0 {
+			return nil
+		}
+		select {
+		case <-run.Context.Done():
+			return run.Context.Err()
+		default:
+		}
+	}
 }

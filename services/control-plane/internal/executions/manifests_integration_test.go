@@ -9,6 +9,7 @@ import (
 
 	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
 	"github.com/synara-ai/synara/services/control-plane/internal/problem"
+	"github.com/synara-ai/synara/services/control-plane/internal/providercatalog"
 )
 
 func TestWorkerManifestPersistsAndBindsClaimedExecution(t *testing.T) {
@@ -32,6 +33,18 @@ func TestWorkerManifestPersistsAndBindsClaimedExecution(t *testing.T) {
 	t.Cleanup(func() { cleanupWorkers(t, db, worker.ID) })
 	if worker.CurrentManifestID == nil || worker.CompatibilityStatus != "compatible" {
 		t.Fatalf("Worker manifest was not attached: %#v", worker)
+	}
+	var workerManifest persistence.WorkerManifest
+	if err := db.Where("id = ?", *worker.CurrentManifestID).Take(&workerManifest).Error; err != nil {
+		t.Fatal(err)
+	}
+	if !workerManifestSupportsStrictResourceSuspendContainment(workerManifest) {
+		t.Fatalf("Worker manifest did not freeze strict process-containment proof: %#v", workerManifest)
+	}
+	if err := db.Model(&persistence.WorkerManifest{}).
+		Where("id = ?", workerManifest.ID).
+		Update("process_containment_mode", "none").Error; err == nil {
+		t.Fatal("database allowed immutable process-containment evidence to be downgraded")
 	}
 	claimInput := ClaimExecutionInput{
 		ExecutionTargetID: fixture.TargetID, TargetKind: fixture.TargetKind, ExecutionID: &fixture.ExecutionID,
@@ -99,8 +112,13 @@ func TestWorkerManifestPersistsAndBindsClaimedExecution(t *testing.T) {
 		Take(&binding).Error; err != nil {
 		t.Fatal(err)
 	}
+	codexCatalog, found := providercatalog.Lookup("codex")
+	if !found {
+		t.Fatal("Codex is missing from the Provider catalog")
+	}
 	if binding.RuntimeKind == nil || *binding.RuntimeKind != "cli" || binding.RuntimeVersion == nil ||
-		*binding.RuntimeVersion != "0.144.1" || binding.RuntimeCompatible == nil || !*binding.RuntimeCompatible ||
+		*binding.RuntimeVersion != codexCatalog.RuntimePolicy.CompatibleRange.MinimumInclusive ||
+		binding.RuntimeCompatible == nil || !*binding.RuntimeCompatible ||
 		binding.ReleaseEnabled == nil || !*binding.ReleaseEnabled {
 		t.Fatalf("Provider runtime binding omitted runtime/release evidence: %#v", binding)
 	}

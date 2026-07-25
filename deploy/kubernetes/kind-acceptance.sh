@@ -6,7 +6,9 @@ repo_root="$(cd "$script_dir/../.." && pwd)"
 kind_bin="${KIND_BIN:-kind}"
 cluster_name="${SYNARA_KIND_CLUSTER:-synara-stage2-acceptance}"
 node_image="${SYNARA_KIND_NODE_IMAGE:-kindest/node:v1.33.1}"
+cluster_config="${SYNARA_KIND_CLUSTER_CONFIG:-}"
 control_plane_image="${SYNARA_K8S_ACCEPTANCE_IMAGE:-synara-control-plane:stage2-acceptance}"
+acceptance_script="${SYNARA_K8S_ACCEPTANCE_SCRIPT:-$script_dir/acceptance.sh}"
 created_cluster=0
 dependency_images=(
   postgres:17-alpine
@@ -27,6 +29,10 @@ if ! command -v "$kind_bin" >/dev/null 2>&1; then
   printf 'kind is required; set KIND_BIN to an explicit binary path if it is not on PATH\n' >&2
   exit 1
 fi
+if [[ ! -f "$acceptance_script" ]]; then
+  printf 'Acceptance script %s does not exist\n' "$acceptance_script" >&2
+  exit 1
+fi
 
 cleanup() {
   if [[ "$created_cluster" == "1" && "${SYNARA_KIND_KEEP_CLUSTER:-0}" != "1" ]]; then
@@ -41,7 +47,11 @@ if "$kind_bin" get clusters | grep -Fxq "$cluster_name"; then
     exit 1
   fi
 else
-  "$kind_bin" create cluster --name "$cluster_name" --image "$node_image" --wait 180s
+  create_args=(create cluster --name "$cluster_name" --image "$node_image" --wait 180s)
+  if [[ -n "$cluster_config" ]]; then
+    create_args+=(--config "$cluster_config")
+  fi
+  "$kind_bin" "${create_args[@]}"
   created_cluster=1
 fi
 
@@ -56,6 +66,7 @@ done
 
 SYNARA_K8S_CONTEXT="kind-$cluster_name" \
 SYNARA_K8S_ACCEPTANCE_IMAGE="$control_plane_image" \
-  "$script_dir/acceptance.sh"
+  bash "$acceptance_script" "$@"
 
-printf 'Kind Stage 2 acceptance passed: cluster=%s image=%s\n' "$cluster_name" "$control_plane_image"
+printf 'Kind Kubernetes acceptance passed: cluster=%s image=%s script=%s\n' \
+  "$cluster_name" "$control_plane_image" "$(basename "$acceptance_script")"

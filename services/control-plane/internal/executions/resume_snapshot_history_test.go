@@ -59,6 +59,51 @@ func TestResumeSnapshotLoadsOnlyNewestFiveHundredFromFiveHundredOneEventTail(t *
 	}
 }
 
+func TestRecoverySnapshotIncludesCurrentTurnCompletedToolMarkers(t *testing.T) {
+	db := newResumeSnapshotHistoryTestDB(t)
+	tenantID := uuid.New()
+	sessionID := uuid.New()
+	executionID := uuid.New()
+	turnID := uuid.New()
+	createResumeSnapshotHistorySession(t, db, tenantID, sessionID, 2)
+	events := []persistence.SessionEvent{
+		resumeSnapshotHistoryEvent(
+			tenantID, sessionID, 1, "turn.created",
+			map[string]any{"inputText": "perform the side effect"}, &executionID,
+		),
+		resumeSnapshotHistoryEvent(
+			tenantID, sessionID, 2, "item.completed",
+			map[string]any{
+				"itemType": "command_execution", "status": "completed",
+				"title": "Create record", "detail": "External record 42 was created",
+			}, &executionID,
+		),
+	}
+	if err := db.Create(&events).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	service := &Service{now: func() time.Time { return time.Now().UTC() }}
+	execution := persistence.AgentExecution{
+		ID: executionID, TenantID: tenantID, SessionID: sessionID, TurnID: turnID,
+		Generation: 2,
+	}
+	snapshot, err := service.loadResumeSnapshot(context.Background(), db, execution, resumeSnapshotContext{
+		Provider: "codex", RuntimeMode: "full-access", InteractionMode: "default",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.CurrentTurnSequence != 1 || snapshot.AuthoritativeHistorySequence != 2 ||
+		snapshot.SourceSequenceRange.Through != 2 {
+		t.Fatalf("recovery snapshot stopped before current-Turn progress: %#v", snapshot.SourceSequenceRange)
+	}
+	if len(snapshot.ToolResults) != 1 || snapshot.ToolResults[0].Sequence != 2 ||
+		snapshot.ToolResults[0].Summary != "External record 42 was created" {
+		t.Fatalf("recovery snapshot omitted completed current-Turn side effect marker: %#v", snapshot.ToolResults)
+	}
+}
+
 func TestResumeSnapshotOrdersNewestRollbackChainSegmentsAndDropsRolledBackSpans(t *testing.T) {
 	db := newResumeSnapshotHistoryTestDB(t)
 	tenantID := uuid.New()

@@ -12,13 +12,20 @@ import (
 	"os/exec"
 	"sort"
 	"strings"
+	"sync/atomic"
+
+	"github.com/google/uuid"
 )
 
 type Runner struct {
-	command               []string
-	maxMessageBytes       int
-	protocol              RunnerProtocol
-	experimentalProviders map[string]struct{}
+	command                  []string
+	maxMessageBytes          int
+	protocol                 RunnerProtocol
+	experimentalProviders    map[string]struct{}
+	cgroupV2Root             string
+	cgroupV2ProviderIdentity *ProtectedCgroupIdentity
+	instanceUID              uuid.UUID
+	processTreeGeneration    atomic.Int64
 }
 
 func NewRunner(cfg Config) *Runner {
@@ -26,9 +33,21 @@ func NewRunner(cfg Config) *Runner {
 	for _, provider := range cfg.ExperimentalProviders {
 		experimentalProviders[provider] = struct{}{}
 	}
+	var instanceUID uuid.UUID
+	if parsed, err := uuid.Parse(cfg.InstanceUID); err == nil {
+		instanceUID = parsed
+	}
+	var providerIdentity *ProtectedCgroupIdentity
+	if cfg.CgroupV2ProviderIdentity != nil {
+		identityCopy := *cfg.CgroupV2ProviderIdentity
+		providerIdentity = &identityCopy
+	}
 	return &Runner{
 		command: append([]string(nil), cfg.RunnerCommand...), maxMessageBytes: cfg.RunnerMessageBytes,
 		protocol: cfg.RunnerProtocol, experimentalProviders: experimentalProviders,
+		cgroupV2Root:             cfg.CgroupV2Root,
+		cgroupV2ProviderIdentity: providerIdentity,
+		instanceUID:              instanceUID,
 	}
 }
 
@@ -49,6 +68,20 @@ func (r *Runner) experimentalProviderList() []string {
 	}
 	sort.Strings(providers)
 	return providers
+}
+
+func (r *Runner) processTreeOptions() processTreeOptions {
+	options := processTreeOptions{CgroupV2Root: r.cgroupV2Root}
+	if r.cgroupV2ProviderIdentity == nil {
+		return options
+	}
+	identityCopy := *r.cgroupV2ProviderIdentity
+	options.ProtectedProviderIdentity = &identityCopy
+	options.ContainmentFence = ProtectedCgroupFence{
+		Generation:        r.processTreeGeneration.Add(1),
+		WorkerIncarnation: r.instanceUID,
+	}
+	return options
 }
 
 func (r *Runner) Run(
@@ -85,17 +118,27 @@ func (r *Runner) runLegacy(
 	input RunnerInput,
 	credential *RunnerCredential,
 	handle func(context.Context, RunnerMessage) error,
-) (RunnerResult, error) {
+) (returned RunnerResult, err error) {
 	encoded, err := json.Marshal(input)
 	if err != nil {
 		return RunnerResult{}, fmt.Errorf("encode runner input: %w", err)
 	}
 	command := exec.Command(r.command[0], r.command[1:]...)
-	processTree, err := newProcessTree(command)
+	processTree, err := newProcessTree(command, r.processTreeOptions())
 	if err != nil {
 		return RunnerResult{}, fmt.Errorf("prepare runner process tree: %w", err)
 	}
-	defer processTree.release()
+	processTreeReleased := false
+	releaseProcessTree := func() error {
+		if processTreeReleased {
+			return nil
+		}
+		processTreeReleased = true
+		return processTree.release()
+	}
+	defer func() {
+		err = errors.Join(err, releaseProcessTree())
+	}()
 	command.Dir = input.WorkspaceDirectory
 	command.Env = runnerEnvironment(os.Environ())
 	command.Stdin = bytes.NewReader(append(encoded, '\n'))
@@ -127,32 +170,41 @@ func (r *Runner) runLegacy(
 	}
 	defer outputPipes.close()
 	if err := ctx.Err(); err != nil {
-		return RunnerResult{}, err
+		return RunnerResult{}, errors.Join(err, releaseProcessTree())
 	}
 	if err := command.Start(); err != nil {
-		return RunnerResult{}, fmt.Errorf("start runner: %w", err)
+		return RunnerResult{}, errors.Join(fmt.Errorf("start runner: %w", err), releaseProcessTree())
 	}
 	if err := processTree.started(); err != nil {
-		_ = processTree.terminate()
-		_ = command.Wait()
-		return RunnerResult{}, fmt.Errorf("isolate runner process tree: %w", err)
+		terminateErr := processTree.terminate()
+		waitErr := command.Wait()
+		return RunnerResult{}, errors.Join(
+			fmt.Errorf("isolate runner process tree: %w", err),
+			terminateErr,
+			waitErr,
+			releaseProcessTree(),
+		)
 	}
 	outputPipes.started()
 	if len(command.ExtraFiles) > 0 {
 		_ = command.ExtraFiles[0].Close()
 	}
-	waitResult := make(chan error, 1)
+	type waitOutcome struct {
+		waitErr      error
+		terminateErr error
+	}
+	waitResult := make(chan waitOutcome, 1)
 	go func() {
-		err := command.Wait()
-		_ = processTree.terminate()
-		waitResult <- err
+		waitErr := command.Wait()
+		waitResult <- waitOutcome{waitErr: waitErr, terminateErr: processTree.terminate()}
 	}()
 	stopCancellation := context.AfterFunc(ctx, func() { _ = processTree.terminate() })
 	defer stopCancellation()
-	waitAfterTermination := func() {
+	waitAfterTermination := func() waitOutcome {
 		_ = processTree.terminate()
-		<-waitResult
+		outcome := <-waitResult
 		outputPipes.waitStderr()
+		return outcome
 	}
 
 	var result *RunnerResult
@@ -167,36 +219,52 @@ func (r *Runner) runLegacy(
 		decoder := json.NewDecoder(bytes.NewReader(line))
 		decoder.DisallowUnknownFields()
 		if err := decoder.Decode(&message); err != nil {
-			waitAfterTermination()
-			return RunnerResult{}, fmt.Errorf("decode runner message: %w", err)
+			outcome := waitAfterTermination()
+			return RunnerResult{}, errors.Join(
+				fmt.Errorf("decode runner message: %w", err),
+				outcome.terminateErr,
+				releaseProcessTree(),
+			)
 		}
 		switch message.Type {
 		case "event":
 			if strings.TrimSpace(message.EventType) == "" {
-				waitAfterTermination()
-				return RunnerResult{}, errors.New("runner event message requires eventType")
+				outcome := waitAfterTermination()
+				return RunnerResult{}, errors.Join(
+					errors.New("runner event message requires eventType"),
+					outcome.terminateErr,
+					releaseProcessTree(),
+				)
 			}
 			if message.Payload == nil {
 				message.Payload = map[string]any{}
 			}
 			if err := handle(ctx, message); err != nil {
-				waitAfterTermination()
-				return RunnerResult{}, err
+				outcome := waitAfterTermination()
+				return RunnerResult{}, errors.Join(err, outcome.terminateErr, releaseProcessTree())
 			}
 		case "artifact":
 			if message.Artifact == nil || strings.TrimSpace(message.Artifact.Path) == "" ||
 				strings.TrimSpace(message.Artifact.Kind) == "" || strings.TrimSpace(message.Artifact.ContentType) == "" {
-				waitAfterTermination()
-				return RunnerResult{}, errors.New("runner artifact message requires path, kind, and contentType")
+				outcome := waitAfterTermination()
+				return RunnerResult{}, errors.Join(
+					errors.New("runner artifact message requires path, kind, and contentType"),
+					outcome.terminateErr,
+					releaseProcessTree(),
+				)
 			}
 			if err := handle(ctx, message); err != nil {
-				waitAfterTermination()
-				return RunnerResult{}, err
+				outcome := waitAfterTermination()
+				return RunnerResult{}, errors.Join(err, outcome.terminateErr, releaseProcessTree())
 			}
 		case "result":
 			if result != nil {
-				waitAfterTermination()
-				return RunnerResult{}, errors.New("runner emitted more than one result message")
+				outcome := waitAfterTermination()
+				return RunnerResult{}, errors.Join(
+					errors.New("runner emitted more than one result message"),
+					outcome.terminateErr,
+					releaseProcessTree(),
+				)
 			}
 			output := message.Output
 			if output == nil {
@@ -204,35 +272,47 @@ func (r *Runner) runLegacy(
 			}
 			result = &RunnerResult{Output: output, ProviderResumeCursor: message.ProviderResumeCursor}
 		default:
-			waitAfterTermination()
-			return RunnerResult{}, fmt.Errorf("unsupported runner message type %q", message.Type)
+			outcome := waitAfterTermination()
+			return RunnerResult{}, errors.Join(
+				fmt.Errorf("unsupported runner message type %q", message.Type),
+				outcome.terminateErr,
+				releaseProcessTree(),
+			)
 		}
 	}
 	if scanErr := scanner.Err(); scanErr != nil {
-		waitAfterTermination()
-		return RunnerResult{}, fmt.Errorf("read runner output: %w", scanErr)
+		outcome := waitAfterTermination()
+		return RunnerResult{}, errors.Join(
+			fmt.Errorf("read runner output: %w", scanErr),
+			outcome.terminateErr,
+			releaseProcessTree(),
+		)
 	}
-	waitErr := <-waitResult
+	outcome := <-waitResult
 	outputPipes.waitStderr()
 	if ctxErr := ctx.Err(); ctxErr != nil {
-		return RunnerResult{}, ctxErr
+		return RunnerResult{}, errors.Join(ctxErr, outcome.waitErr, outcome.terminateErr, releaseProcessTree())
 	}
-	if waitErr != nil {
+	if outcome.waitErr != nil {
 		message := strings.TrimSpace(stderr.String())
 		if message == "" {
-			message = waitErr.Error()
+			message = outcome.waitErr.Error()
 		}
-		return RunnerResult{}, fmt.Errorf("runner failed: %s", message)
+		return RunnerResult{}, errors.Join(
+			fmt.Errorf("runner failed: %s", message),
+			outcome.terminateErr,
+			releaseProcessTree(),
+		)
 	}
 	if credentialWrite != nil {
 		if err := <-credentialWrite; err != nil {
-			return RunnerResult{}, fmt.Errorf("write runner credential: %w", err)
+			return RunnerResult{}, errors.Join(fmt.Errorf("write runner credential: %w", err), releaseProcessTree())
 		}
 	}
 	if result == nil {
-		return RunnerResult{}, errors.New("runner exited without a result message")
+		return RunnerResult{}, errors.Join(errors.New("runner exited without a result message"), releaseProcessTree())
 	}
-	return *result, nil
+	return *result, errors.Join(outcome.terminateErr, releaseProcessTree())
 }
 
 func runnerEnvironment(source []string) []string {

@@ -195,6 +195,22 @@ describe("controlPlaneClient", () => {
             executionTargetKinds: ["docker", "kubernetes", "local", "ssh"],
             artifactPayloadMigration: true,
             metadataExportImport: true,
+            resourceLifecyclePolicy: {
+              defaults: {
+                waitingKeepAliveSeconds: 900,
+                suspendAfterIdleSeconds: 1800,
+                absoluteSessionLifetimeSeconds: null,
+                workspaceRetentionDays: 30,
+                warmPoolMode: "balanced",
+              },
+              bounds: {
+                waitingKeepAliveSeconds: { min: 60, max: 86_400 },
+                suspendAfterIdleSeconds: { min: 60, max: 604_800 },
+                absoluteSessionLifetimeSeconds: { min: 3_600, max: 31_536_000 },
+                workspaceRetentionDays: { min: 1, max: 3_650 },
+                warmPoolModes: ["disabled", "balanced", "low-latency"],
+              },
+            },
           }),
           { status: 200, headers: { "Content-Type": "application/json" } },
         ),
@@ -204,6 +220,7 @@ describe("controlPlaneClient", () => {
     const profile = await controlPlaneClient.getPlatformProfile();
 
     expect(profile.profile).toBe("single-node");
+    expect(profile.resourceLifecyclePolicy.defaults.warmPoolMode).toBe("balanced");
     expect(fetchMock).toHaveBeenCalledWith(
       "/v1/platform/profile",
       expect.objectContaining({ credentials: "include" }),
@@ -286,8 +303,24 @@ describe("controlPlaneClient", () => {
             visibility: "private",
             provider: "codex",
             model: "gpt-5.6-sol",
+            providerCredentialId: null,
             executionTargetId: "target-1",
+            requestedExecutionTargetId: "target-1",
+            executionTargetGroupId: "target-group-1",
+            routingPolicyVersion: 3,
+            preferredExecutionRegion: "ap-southeast-1",
             lastEventSequence: 1,
+            resourceState: "active",
+            meaningfulActivityAt: "2026-07-12T00:00:00Z",
+            resourceIdleSince: null,
+            absoluteExpiresAt: null,
+            resourceLifecyclePolicy: {
+              waitingKeepAliveSeconds: 900,
+              suspendAfterIdleSeconds: 1800,
+              absoluteSessionLifetimeSeconds: null,
+              workspaceRetentionDays: 30,
+              warmPoolMode: "balanced",
+            },
             createdAt: "2026-07-12T00:00:00Z",
             updatedAt: "2026-07-12T00:00:00Z",
             archivedAt: null,
@@ -304,7 +337,12 @@ describe("controlPlaneClient", () => {
         visibility: "private",
         provider: "codex",
         model: "gpt-5.6-sol",
-        executionTargetId: "target-1",
+        executionTargetGroupId: "target-group-1",
+        preferredExecutionRegion: "ap-southeast-1",
+        resourceLifecyclePolicy: {
+          waitingKeepAliveSeconds: 600,
+          warmPoolMode: "low-latency",
+        },
       },
       { idempotencyKey: "web-session-request-1" },
     );
@@ -319,12 +357,197 @@ describe("controlPlaneClient", () => {
           visibility: "private",
           provider: "codex",
           model: "gpt-5.6-sol",
-          executionTargetId: "target-1",
+          executionTargetGroupId: "target-group-1",
+          preferredExecutionRegion: "ap-southeast-1",
+          resourceLifecyclePolicy: {
+            waitingKeepAliveSeconds: 600,
+            warmPoolMode: "low-latency",
+          },
         }),
       }),
     );
     const request = fetchMock.mock.calls[0]![1];
     expect(new Headers(request.headers).get("Idempotency-Key")).toBe("web-session-request-1");
+  });
+
+  it("loads and updates tenant resource lifecycle policy with explicit inherit-via-null fields", async () => {
+    const responses = [
+      new Response(
+        JSON.stringify({
+          scope: "tenant",
+          tenantId: "tenant/one",
+          overrides: {
+            waitingKeepAliveSeconds: null,
+            suspendAfterIdleSeconds: null,
+            absoluteSessionLifetimeSeconds: null,
+            workspaceRetentionDays: null,
+            warmPoolMode: null,
+          },
+          effective: {
+            waitingKeepAliveSeconds: 900,
+            suspendAfterIdleSeconds: 1800,
+            absoluteSessionLifetimeSeconds: null,
+            workspaceRetentionDays: 30,
+            warmPoolMode: "balanced",
+          },
+          version: 0,
+          updatedBy: null,
+          createdAt: null,
+          updatedAt: null,
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+      new Response(
+        JSON.stringify({
+          scope: "tenant",
+          tenantId: "tenant/one",
+          overrides: {
+            waitingKeepAliveSeconds: 600,
+            suspendAfterIdleSeconds: null,
+            absoluteSessionLifetimeSeconds: null,
+            workspaceRetentionDays: 14,
+            warmPoolMode: "low-latency",
+          },
+          effective: {
+            waitingKeepAliveSeconds: 600,
+            suspendAfterIdleSeconds: 1800,
+            absoluteSessionLifetimeSeconds: null,
+            workspaceRetentionDays: 14,
+            warmPoolMode: "low-latency",
+          },
+          version: 1,
+          updatedBy: "user-1",
+          createdAt: "2026-07-24T00:00:00Z",
+          updatedAt: "2026-07-24T00:01:00Z",
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    ];
+    const fetchMock = vi.fn<RequiredInitFetch>(async () => responses.shift()!);
+    vi.stubGlobal("fetch", fetchMock);
+
+    await controlPlaneClient.getTenantResourceLifecyclePolicy("tenant/one");
+    await controlPlaneClient.updateTenantResourceLifecyclePolicy("tenant/one", {
+      expectedVersion: 0,
+      waitingKeepAliveSeconds: 600,
+      suspendAfterIdleSeconds: null,
+      absoluteSessionLifetimeSeconds: null,
+      workspaceRetentionDays: 14,
+      warmPoolMode: "low-latency",
+    });
+
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
+      "/v1/tenants/tenant%2Fone/resource-lifecycle-policy",
+      expect.objectContaining({ credentials: "include" }),
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      "/v1/tenants/tenant%2Fone/resource-lifecycle-policy",
+      expect.objectContaining({
+        method: "PUT",
+        credentials: "include",
+        body: JSON.stringify({
+          expectedVersion: 0,
+          waitingKeepAliveSeconds: 600,
+          suspendAfterIdleSeconds: null,
+          absoluteSessionLifetimeSeconds: null,
+          workspaceRetentionDays: 14,
+          warmPoolMode: "low-latency",
+        }),
+      }),
+    );
+  });
+
+  it("loads and updates project resource lifecycle policy through the project route", async () => {
+    const responses = [
+      new Response(
+        JSON.stringify({
+          scope: "project",
+          tenantId: "tenant-1",
+          projectId: "project/one",
+          overrides: {
+            waitingKeepAliveSeconds: 900,
+            suspendAfterIdleSeconds: null,
+            absoluteSessionLifetimeSeconds: null,
+            workspaceRetentionDays: null,
+            warmPoolMode: null,
+          },
+          effective: {
+            waitingKeepAliveSeconds: 900,
+            suspendAfterIdleSeconds: 1800,
+            absoluteSessionLifetimeSeconds: null,
+            workspaceRetentionDays: 30,
+            warmPoolMode: "balanced",
+          },
+          version: 3,
+          updatedBy: "user-1",
+          createdAt: "2026-07-24T00:00:00Z",
+          updatedAt: "2026-07-24T00:01:00Z",
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+      new Response(
+        JSON.stringify({
+          scope: "project",
+          tenantId: "tenant-1",
+          projectId: "project/one",
+          overrides: {
+            waitingKeepAliveSeconds: null,
+            suspendAfterIdleSeconds: 7200,
+            absoluteSessionLifetimeSeconds: 86_400,
+            workspaceRetentionDays: null,
+            warmPoolMode: "disabled",
+          },
+          effective: {
+            waitingKeepAliveSeconds: 900,
+            suspendAfterIdleSeconds: 7200,
+            absoluteSessionLifetimeSeconds: 86_400,
+            workspaceRetentionDays: 30,
+            warmPoolMode: "disabled",
+          },
+          version: 4,
+          updatedBy: "user-1",
+          createdAt: "2026-07-24T00:00:00Z",
+          updatedAt: "2026-07-24T00:02:00Z",
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    ];
+    const fetchMock = vi.fn<RequiredInitFetch>(async () => responses.shift()!);
+    vi.stubGlobal("fetch", fetchMock);
+
+    await controlPlaneClient.getProjectResourceLifecyclePolicy("project/one");
+    await controlPlaneClient.updateProjectResourceLifecyclePolicy("project/one", {
+      expectedVersion: 3,
+      waitingKeepAliveSeconds: null,
+      suspendAfterIdleSeconds: 7200,
+      absoluteSessionLifetimeSeconds: 86_400,
+      workspaceRetentionDays: null,
+      warmPoolMode: "disabled",
+    });
+
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
+      "/v1/projects/project%2Fone/resource-lifecycle-policy",
+      expect.objectContaining({ credentials: "include" }),
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      "/v1/projects/project%2Fone/resource-lifecycle-policy",
+      expect.objectContaining({
+        method: "PUT",
+        credentials: "include",
+        body: JSON.stringify({
+          expectedVersion: 3,
+          waitingKeepAliveSeconds: null,
+          suspendAfterIdleSeconds: 7200,
+          absoluteSessionLifetimeSeconds: 86_400,
+          workspaceRetentionDays: null,
+          warmPoolMode: "disabled",
+        }),
+      }),
+    );
   });
 
   it("loads project Provider capabilities with the resolved or explicit execution target", async () => {
@@ -744,6 +967,36 @@ describe("controlPlaneClient", () => {
     expect(new Headers(request.headers).get("Idempotency-Key")).toBe("web-interrupt-1");
   });
 
+  it("requests an idempotent explicit resume for an idle-suspended active Turn", async () => {
+    const fetchMock = vi.fn<RequiredInitFetch>(
+      async () =>
+        new Response(
+          JSON.stringify({
+            id: "execution-1",
+            sessionId: "session/one",
+            turnId: "turn-1",
+            status: "recovering",
+            generation: 1,
+          }),
+          { status: 202, headers: { "Content-Type": "application/json" } },
+        ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const resumed = await controlPlaneClient.resumeActiveTurn("session/one", {
+      idempotencyKey: "web-active-resume-1",
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/v1/sessions/session%2Fone/turns/active/resume",
+      expect.objectContaining({ method: "POST", credentials: "include" }),
+    );
+    expect(new Headers(fetchMock.mock.calls[0]![1].headers).get("Idempotency-Key")).toBe(
+      "web-active-resume-1",
+    );
+    expect(resumed).toMatchObject({ id: "execution-1", status: "recovering", generation: 1 });
+  });
+
   it("loads the Session pending Interaction snapshot and resolves through encoded durable routes", async () => {
     const responses = [
       new Response(JSON.stringify({ items: [], snapshotSequence: 17 }), {
@@ -916,6 +1169,11 @@ describe("controlPlaneClient", () => {
                 },
                 workerProtocol: { minimum: 2, maximum: 2 },
                 runtimeEvent: { minimum: 2, maximum: 2 },
+                processContainment: {
+                  mode: "none",
+                  trustState: "none",
+                  reasonCode: "no-attestation",
+                },
                 providers: [
                   {
                     provider: "codex",
@@ -953,6 +1211,11 @@ describe("controlPlaneClient", () => {
     expect(page.items[0]).toMatchObject({
       executionTargetId: "target-1",
       manifestId: "manifest-1",
+      processContainment: {
+        mode: "none",
+        trustState: "none",
+        reasonCode: "no-attestation",
+      },
       providers: [
         expect.objectContaining({
           provider: "codex",
@@ -1163,6 +1426,100 @@ describe("controlPlaneClient", () => {
     expect(JSON.parse(String(transitionRequest.body))).toEqual({
       expectedPolicyVersion: 0,
       reason: "Establish baseline",
+    });
+  });
+
+  it("manages target-local Worker Pools and placement policy with CAS versions", async () => {
+    const state = {
+      pools: [],
+      policy: {
+        tenantId: "tenant/one",
+        executionTargetId: "target/one",
+        version: 1,
+        defaultPoolId: "pool/default",
+        balancedPoolId: null,
+        lowLatencyPoolId: null,
+        updatedBy: null,
+        updatedAt: "2026-07-25T00:00:00Z",
+      },
+    };
+    const pool = {
+      id: "pool/warm",
+      tenantId: "tenant/one",
+      executionTargetId: "target/one",
+      name: "interactive-warm",
+      mode: "warm",
+      capacityClass: "interactive",
+      clusterId: "cluster-a",
+      region: "cn-east-1",
+      namespace: "synara-workers",
+      desiredIdleUnits: 2,
+      maxActiveUnits: 8,
+      schedulingTemplate: {},
+      status: "active",
+      version: 1,
+      createdAt: "2026-07-25T00:00:00Z",
+      updatedAt: "2026-07-25T00:00:00Z",
+    };
+    const fetchMock = vi
+      .fn<RequiredInitFetch>()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(state), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(pool), {
+          status: 201,
+          headers: { "Content-Type": "application/json" },
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ ...state, policy: { ...state.policy, version: 2 } }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await controlPlaneClient.getExecutionPlacement("tenant/one", "target/one");
+    await controlPlaneClient.createWorkerPool("tenant/one", "target/one", {
+      name: "interactive-warm",
+      mode: "warm",
+      capacityClass: "interactive",
+      clusterId: "cluster-a",
+      region: "cn-east-1",
+      namespace: "synara-workers",
+      desiredIdleUnits: 2,
+      maxActiveUnits: 8,
+      schedulingTemplate: {},
+      status: "active",
+    });
+    await controlPlaneClient.updateExecutionPlacementPolicy("tenant/one", "target/one", {
+      expectedVersion: 1,
+      defaultPoolId: "pool/default",
+      balancedPoolId: "pool/warm",
+      lowLatencyPoolId: "pool/warm",
+    });
+
+    expect(fetchMock.mock.calls[0]![0]).toBe(
+      "/v1/tenants/tenant%2Fone/execution-targets/target%2Fone/worker-pools",
+    );
+    expect(fetchMock.mock.calls[1]![1]).toMatchObject({ method: "POST" });
+    expect(JSON.parse(String(fetchMock.mock.calls[1]![1].body))).toMatchObject({
+      mode: "warm",
+      desiredIdleUnits: 2,
+      maxActiveUnits: 8,
+    });
+    expect(fetchMock.mock.calls[2]![0]).toBe(
+      "/v1/tenants/tenant%2Fone/execution-targets/target%2Fone/placement-policy",
+    );
+    expect(JSON.parse(String(fetchMock.mock.calls[2]![1].body))).toEqual({
+      expectedVersion: 1,
+      defaultPoolId: "pool/default",
+      balancedPoolId: "pool/warm",
+      lowLatencyPoolId: "pool/warm",
     });
   });
 

@@ -6,6 +6,7 @@ func TestControlCommandCapabilityMapping(t *testing.T) {
 	expected := map[string]string{
 		"SteerTurn":       "steer-turn",
 		"InterruptTurn":   "interrupt-turn",
+		"SuspendTurn":     "suspend-active-turn",
 		"CompactSession":  "compact",
 		"RollbackSession": "rollback",
 		"ForkSession":     "fork",

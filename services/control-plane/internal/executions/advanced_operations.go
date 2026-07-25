@@ -14,8 +14,10 @@ import (
 	"github.com/synara-ai/synara/services/control-plane/internal/identity"
 	"github.com/synara-ai/synara/services/control-plane/internal/outbox"
 	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
+	"github.com/synara-ai/synara/services/control-plane/internal/placement"
 	"github.com/synara-ai/synara/services/control-plane/internal/problem"
 	"github.com/synara-ai/synara/services/control-plane/internal/providercapabilities"
+	"github.com/synara-ai/synara/services/control-plane/internal/routing"
 	"github.com/synara-ai/synara/services/control-plane/internal/sessions"
 	"github.com/synara-ai/synara/services/control-plane/internal/workerreleases"
 )
@@ -181,6 +183,10 @@ func (s *Service) requestPrimaryOperation(
 			apiError.Details = map[string]any{"expectedLastEventSequence": request.ExpectedLastEventSequence, "actualLastEventSequence": session.LastEventSequence}
 			return QueuedSessionOperation{}, apiError
 		}
+		now := s.now()
+		if err := sessions.RequireSessionWithinAbsoluteLifetime(session, now); err != nil {
+			return QueuedSessionOperation{}, err
+		}
 		if request.Type == "compact" &&
 			(session.ProviderResumeCursorState != "usable" || len(session.ProviderResumeCursorEncrypted) == 0) {
 			return QueuedSessionOperation{}, problem.New(
@@ -205,7 +211,7 @@ func (s *Service) requestPrimaryOperation(
 		var active int64
 		if err := tx.WithContext(ctx).Model(&persistence.AgentExecution{}).
 			Where("tenant_id = ? AND session_id = ? AND status IN ?", tenantID, sessionID,
-				[]string{"queued", "leased", "running", "waiting-for-approval", "recovering"}).
+				[]string{"queued", "leased", "running", "waiting-for-approval", "recovering", "suspended"}).
 			Count(&active).Error; err != nil {
 			return QueuedSessionOperation{}, problem.Wrap(500, "session_execution_check_failed", "Failed to inspect the active Session execution.", err)
 		}
@@ -216,27 +222,67 @@ func (s *Service) requestPrimaryOperation(
 			return QueuedSessionOperation{}, err
 		}
 		var target persistence.ExecutionTarget
-		if err := tx.WithContext(ctx).
-			Where("id = ? AND status = ?", session.ExecutionTargetID, "active").
-			Where("(tenant_id IS NULL OR tenant_id = ?) AND (organization_id IS NULL OR organization_id = ?)", tenantID, session.OrganizationID).
-			Take(&target).Error; err != nil {
-			return QueuedSessionOperation{}, problem.Wrap(409, "execution_target_unavailable", "The Session Execution Target is unavailable.", err)
+		if session.ExecutionTargetGroupID == nil {
+			if err := tx.WithContext(ctx).
+				Where("id = ? AND status = ?", session.ExecutionTargetID, "active").
+				Where("(tenant_id IS NULL OR tenant_id = ?) AND (organization_id IS NULL OR organization_id = ?)", tenantID, session.OrganizationID).
+				Take(&target).Error; err != nil {
+				return QueuedSessionOperation{}, problem.Wrap(409, "execution_target_unavailable", "The Session Execution Target is unavailable.", err)
+			}
 		}
-		projection, err := s.projectIdleSessionProviderCapabilities(ctx, tx, target, sessions.Session{
-			ID: session.ID, TenantID: session.TenantID, Provider: session.Provider,
-		})
+		var routeRequest *routing.SelectRequest
+		if session.ExecutionTargetGroupID != nil {
+			request, err := sessions.BuildSessionExecutionTargetGroupSelectRequest(ctx, tx, session)
+			if err != nil {
+				return QueuedSessionOperation{}, err
+			}
+			routeRequest = &request
+		}
+		launchTargetPlan, err := sessions.SelectExecutionLaunchTarget(
+			ctx,
+			tx,
+			func() *persistence.ExecutionTarget {
+				if routeRequest != nil {
+					return nil
+				}
+				return &target
+			}(),
+			routeRequest,
+			session.WarmPoolMode,
+			func(
+				ctx context.Context,
+				tx *gorm.DB,
+				target persistence.ExecutionTarget,
+				placementSelection placement.Selection,
+				selection *routing.Selection,
+			) error {
+				projection, err := s.projectIdleSessionProviderCapabilities(
+					ctx,
+					tx,
+					target,
+					sessions.Session{ID: session.ID, TenantID: session.TenantID, Provider: session.Provider},
+					placementSelection,
+				)
+				if err != nil {
+					return err
+				}
+				decision := providercapabilities.Check(projection, session.Provider, request.CapabilityID)
+				return sessions.EnforceProviderCapabilityDecision(target, decision, true)
+			},
+		)
 		if err != nil {
 			return QueuedSessionOperation{}, err
 		}
-		decision := providercapabilities.Check(projection, session.Provider, request.CapabilityID)
-		if err := sessions.EnforceProviderCapabilityDecision(target, decision, true); err != nil {
-			return QueuedSessionOperation{}, err
+		target = launchTargetPlan.Target
+		if launchTargetPlan.RoutingSelection != nil {
+			if err := sessions.AdvanceSessionExecutionTargetAuthority(ctx, tx, &session, *launchTargetPlan.RoutingSelection, now); err != nil {
+				return QueuedSessionOperation{}, err
+			}
 		}
 		resources, err := s.sessions.EnsureRuntimeResources(ctx, tx, &session)
 		if err != nil {
 			return QueuedSessionOperation{}, err
 		}
-		now := s.now()
 		turn := persistence.AgentTurn{
 			ID: uuid.New(), TenantID: tenantID, SessionID: sessionID, CreatedBy: principal.UserID,
 			Status: "queued", InputText: "", TurnKind: request.TurnKind,
@@ -248,7 +294,12 @@ func (s *Service) requestPrimaryOperation(
 			Attempt: 1, Status: "queued", ExecutionTargetID: target.ID, TargetKind: target.Kind,
 			Provider: &provider, ProviderRuntimeBindingID: &resources.BindingID,
 			RemoteWorkspaceID: &resources.WorkspaceID, WorkspaceMaterializationID: &resources.MaterializationID,
-			RestoreCheckpointID: resources.RestoreCheckpointID, RequestedBy: principal.UserID, QueuedAt: now,
+			RestoreCheckpointID: resources.RestoreCheckpointID, WarmPoolModeSnapshot: session.WarmPoolMode,
+			RequestedBy: principal.UserID, QueuedAt: now,
+		}
+		placement.ApplySelection(&execution, launchTargetPlan.PlacementSelection)
+		if launchTargetPlan.RoutingSelection != nil {
+			routing.ApplyExecutionSelection(&execution, *launchTargetPlan.RoutingSelection)
 		}
 		releaseSelection, err := workerreleases.SelectExecution(ctx, tx, target.ID, execution.ID)
 		if err != nil {
@@ -287,6 +338,16 @@ func (s *Service) requestPrimaryOperation(
 				"executionTargetId": target.ID, "targetKind": target.Kind,
 				"workerReleaseRevisionId":    execution.WorkerReleaseRevisionID,
 				"workerReleaseChannel":       execution.WorkerReleaseChannel,
+				"workerPoolId":               execution.WorkerPoolID,
+				"workerPoolVersion":          execution.WorkerPoolVersion,
+				"capacityClass":              execution.CapacityClass,
+				"placementPolicyVersion":     execution.PlacementPolicyVersion,
+				"targetGroupId":              execution.TargetGroupID,
+				"targetGroupVersion":         execution.TargetGroupVersion,
+				"targetGroupMemberVersion":   execution.TargetGroupMemberVersion,
+				"selectedRegion":             execution.SelectedRegion,
+				"selectedClusterId":          execution.SelectedClusterID,
+				"routingReason":              execution.RoutingReason,
 				"workspaceMaterializationId": resources.MaterializationID,
 				"runtimeMode":                turn.RuntimeMode, "interactionMode": turn.InteractionMode,
 				"operation": request.Payload,
@@ -301,9 +362,19 @@ func (s *Service) requestPrimaryOperation(
 				"executionId": execution.ID, "tenantId": tenantID, "sessionId": sessionID,
 				"turnId": turn.ID, "turnKind": request.TurnKind, "controlCommandId": command.ID,
 				"executionTargetId": target.ID, "targetKind": target.Kind, "attempt": execution.Attempt,
-				"workerReleaseRevisionId": execution.WorkerReleaseRevisionID,
-				"workerReleaseChannel":    execution.WorkerReleaseChannel,
-				"provider":                provider, "providerRuntimeBindingId": resources.BindingID,
+				"workerReleaseRevisionId":  execution.WorkerReleaseRevisionID,
+				"workerReleaseChannel":     execution.WorkerReleaseChannel,
+				"workerPoolId":             execution.WorkerPoolID,
+				"workerPoolVersion":        execution.WorkerPoolVersion,
+				"capacityClass":            execution.CapacityClass,
+				"placementPolicyVersion":   execution.PlacementPolicyVersion,
+				"targetGroupId":            execution.TargetGroupID,
+				"targetGroupVersion":       execution.TargetGroupVersion,
+				"targetGroupMemberVersion": execution.TargetGroupMemberVersion,
+				"selectedRegion":           execution.SelectedRegion,
+				"selectedClusterId":        execution.SelectedClusterID,
+				"routingReason":            execution.RoutingReason,
+				"provider":                 provider, "providerRuntimeBindingId": resources.BindingID,
 				"remoteWorkspaceId":                     resources.WorkspaceID,
 				"workspaceMaterializationId":            resources.MaterializationID,
 				"workspaceMaterializationIncarnationId": resources.IncarnationID,

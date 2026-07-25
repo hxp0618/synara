@@ -1,6 +1,6 @@
-# Provider Host Protocol v2.1
+# Provider Host Protocol v2.2
 
-Provider Host Protocol v2.1 is the versioned JSONL boundary between `synara-agentd` and a Provider Host. It is
+Provider Host Protocol v2.2 is the versioned JSONL boundary between `synara-agentd` and a Provider Host. It is
 independent from Worker Protocol and Runtime Event versions.
 
 The schema source of truth is `packages/contracts/src/providerHost.ts`.
@@ -8,7 +8,7 @@ The schema source of truth is `packages/contracts/src/providerHost.ts`.
 ## Version
 
 ```json
-{ "major": 2, "minor": 1 }
+{ "major": 2, "minor": 2 }
 ```
 
 - Major mismatch is incompatible and makes the Host/Provider combination non-schedulable.
@@ -102,9 +102,22 @@ preview, and preserves the same Terminal lifecycle completion.
 
 Agentd owns the Host process and its managed process scope. Windows starts the Host suspended, assigns it to a
 kill-on-close Job Object, then resumes it. Unix starts an isolated process group and terminates descendants that
-remain in that group on normal exit, protocol failure, cancellation or Drain. Deliberately detached Unix
-descendants are not yet a supported containment boundary; closing that escape requires the remaining Stage 3
-process-sandbox gate and must not be represented as complete process-tree isolation.
+remain in that group on normal exit, protocol failure, cancellation or Drain. Linux can additionally bind the Host
+before its first instruction to a delegated cgroup-v2 child and verify `cgroup.kill -> populated=0` during cleanup.
+That primitive is not a strict Suspend attestation while Provider and supervisor share an identity that can write
+the parent cgroup hierarchy: a Provider could actively migrate out. The Stage 4 production gate therefore requires
+an escape-resistant supervisor/security boundary, and agentd must not advertise strict containment until that gate
+is proven. Control Plane eligibility does not trust the transient Worker capability map: the current Execution and
+Worker must reference the same immutable Worker Manifest, and that Manifest must contain a valid OS-specific
+containment mode plus supervisor version, escape-probe SHA-256, and distinct supervisor/Provider identities. A
+same-identity or unprobed Worker remains fail closed even if operator-provided capability JSON claims otherwise.
+
+Kubernetes `waiting-for-approval` suspension has a separate external completion mode and does not relabel this
+same-identity cgroup primitive as strict containment. After Provider cancellation and a durable checkpoint-ready
+handoff, the generation-bound agentd Pod exits; Control Plane accepts completion only after the kubelet reports the
+exact Pod UID as `Succeeded` with the sole agentd container at exit code 0. Active-turn idle suspension uses this
+same external proof only after a durable `SuspendTurn` receipt exists; neither mode can be satisfied by a delete
+acknowledgement, Pod absence, or a failed/unknown Pod phase.
 
 ## Bidirectional command execution
 
@@ -141,6 +154,13 @@ acknowledgement for the Steer command while the original Turn remains active. Th
 the persisted Steer intent as a marked user message and clears the composer only after Control Plane accepts it.
 Queue delivery during an active remote Turn remains explicitly unsupported rather than being converted into
 Steer or a new Turn.
+
+`SuspendTurn` is the protocol 2.2 active-idle checkpoint command. It targets the one active `SendTurn`, invokes the
+Provider-native interrupt, and does not acknowledge until that Send reaches an interrupted terminal. Success requires
+`quiesced=true`, the exact active command ID, `checkpointProtocol=provider-host-suspend-terminal-v1`, and a non-empty
+native resume cursor. Natural completion, a non-interrupted terminal, or a missing cursor fails closed. Control Plane
+hashes this result with the Generation, activity/history sequence and runtime binding; a replacement Generation may
+consume it once and may not fall back to authoritative history.
 
 Every durable Control Command is mapped to a Provider Capability before Claim. A Worker without an immutable
 Provider Manifest is skipped for ordinary queue Claims and receives `worker_manifest_required` for an explicit
@@ -182,17 +202,17 @@ semantic slot, so replay does not append duplicate audit evidence. The warning p
 ## Describe
 
 `Describe` returns the Host build, complete Capability Descriptor, command/message limits, Runtime Event version
-range, credential delivery modes and Resume strategies. Protocol 2.1 keeps the normalized Runtime descriptor and
+range, credential delivery modes and Resume strategies. Protocol 2.2 keeps the normalized Runtime descriptor and
 Release Policy inside `capabilityDescriptor`: Runtime identifies the CLI, SDK package or local build, its observed
 version source and compatible range; Release Policy states whether explicit enablement is required and whether the
-Host actually enabled the Provider. Managed v2.1 Hosts currently advertise Runtime Event
+Host actually enabled the Provider. Managed v2.2 Hosts currently advertise Runtime Event
 `{ minimum: 2, maximum: 2 }`; every Event payload carries that negotiated version and a canonical event type from
 [Runtime Event v2](./runtime-event-v2.md). Static capability claims must be verified by the shared Provider
 Acceptance Suite.
 
 ## agentd negotiation and v1 boundary
 
-Managed Local, SSH, Docker and Kubernetes Workers use v2.1. Agentd appends `--protocol-v2`, performs
+Managed Local, SSH, Docker and Kubernetes Workers use v2.2. Agentd appends `--protocol-v2`, performs
 side-effect-free `Describe` probes before Worker registration, and publishes the returned Codex and Claude
 plus explicit Local-only Provider descriptors under the registered `providerHost` capability. It performs
 another Describe in the actual Host process before Start/Resume and rejects incompatible Major versions,

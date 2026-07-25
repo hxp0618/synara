@@ -10,6 +10,12 @@ active --archive--> archived
 ```
 
 - Only `active` Sessions accept new Turns.
+- `active` Sessions whose frozen `absoluteExpiresAt` has elapsed remain readable, but any new execution-bearing
+  operation (`turn.create`, Review, Compact), Claim/Claim replay, Lease Renew/Start, interaction resolution or
+  recovery advancement is rejected or terminally cancelled with `session_absolute_expired`. Runtime Events and
+  late Worker Complete/Fail cannot win after the deadline: the current Generation is cancelled instead. Resource
+  directive polling atomically fences the Lease and returns `terminate`, while Kubernetes reconciliation omits
+  these Executions so an expired Session cannot create or retain a Pod.
 - A suspended Session remains readable and keeps its Event history, but cannot create an Execution.
 - A suspended Session must be resumed before it can be archived.
 - Archived Sessions are immutable from the interactive API and remain replayable until Retention deletes
@@ -41,6 +47,9 @@ later Turn.
 queued -> leased -> running -> completed
    |         |         |  \
    |         |         |   -> waiting-for-approval -> running
+   |         |         |                         \
+   |         |         |                          -> suspended -> recovering -> leased
+   |         |         |                          -> failed
    |         |         |   -> interrupted
    |         |         -> failed
    |         -> recovering -> leased
@@ -48,9 +57,23 @@ queued -> leased -> running -> completed
 ```
 
 The stable persisted terminal name is `completed`; it is the v1 equivalent of the product-level
-"succeeded" state. Worker loss or an expired Lease moves the Execution to `recovering`. A user-requested,
-Provider-acknowledged Turn interrupt is distinct: it releases the Lease and moves the current Turn and
-Execution to the terminal `interrupted` state while leaving the Session active for a later Turn.
+"succeeded" state. Worker loss or an expired Lease moves the Execution to `recovering`. Resource suspend is
+distinct from recovery: after a ready suspend Checkpoint, Control Plane deletes the current Lease, marks the
+Execution `suspended`, and does not create a replacement Worker until an explicit user resolution returns the
+Execution to `recovering`. Before checkpointing, agentd cancels Provider/control delivery and waits for its Provider
+runner to stop. It then records a generation-fenced, one-time `providerQuiescedAt` ordering marker. In
+`worker-attested-v1`, a signed strict-containment boundary authorizes completion. In
+`kubernetes-pod-terminal-v1`, the marker never authorizes suspension by itself: agentd writes an immutable
+checkpoint-ready handoff and exits the generation-bound Pod; only the Reconciler observing the same Pod UID and
+Generation as `Succeeded`, with the sole agentd container terminated at exit code 0, may atomically write the
+terminal proof, delete the Lease, and enter `suspended`. `DELETE` acceptance, API `NotFound`, `Failed`, and `Unknown`
+are not completion proofs. Kubernetes registration for this mode is Pod-bound through target-scoped ServiceAccount
+TokenReview plus a live Pod ownership lookup, and the attempt freezes Worker incarnation, namespace, Pod name and UID.
+Quiesce/checkpoint recording and Suspend completion are idempotent; ambiguous or missing proof leaves the old
+Generation fenced for Lease recovery rather than classifying it as suspended.
+A user-requested, Provider-acknowledged Turn interrupt is also distinct: it releases
+the Lease and moves the current Turn and Execution to the terminal `interrupted` state while leaving the Session
+active for a later Turn.
 
 | Transition                                           | Actor                                         | Coordination                                                 | Durable side effects                                                                                      |
 | ---------------------------------------------------- | --------------------------------------------- | ------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------- |
@@ -58,6 +81,11 @@ Execution to the terminal `interrupted` state while leaving the Session active f
 | `leased -> running`                                  | Worker                                        | Current Worker/Lease/Generation                              | Turn running, `execution.started` Event                                                                   |
 | `running -> waiting-for-approval`                    | Worker Runtime Event                          | Current Lease/Generation                                     | Pending interaction and requested Event                                                                   |
 | `waiting-for-approval -> running`                    | Authorized user                               | Current unexpired Lease/Generation                           | Resolution and resolved Event                                                                             |
+| `waiting-for-approval -> suspended`                  | Worker-attested completion or Kubernetes Reconciler terminal proof | Current Lease/Worker incarnation/Generation, active suspend-attempt row lock, immutable quiesce/checkpoint proof; Kubernetes also requires exact Pod UID `Succeeded`/agentd exit 0 | Ready or unchanged Checkpoint, suspend attempt completion, Lease deletion, `execution.suspended`, resource-state suspend |
+| `running -> suspended`                               | Worker-attested completion or Kubernetes Reconciler terminal proof | Provider Host 2.2 native `SuspendTurn`, immutable active/history/activity/cursor receipt, current Lease/incarnation/Generation; Kubernetes also requires exact Pod UID `Succeeded`/agentd exit 0 | One-time active checkpoint receipt, ready/unchanged Workspace, Lease deletion, `execution.suspended`; no authoritative-history fallback |
+| `suspended -> recovering`                            | Authorized user resolving the final request   | Fenced Execution/Generation and resolved Interaction row     | Resolution recorded as `resume-recorded`, Turn re-queued, Workspace recovery marker, Recovery Outbox/Event; next Claim binds it to one immutable Bundle |
+| `suspended -> recovering`                            | Explicit active-turn Resume or semantic activity crossing a committed suspend boundary | Completed unconsumed active receipt and exact native cursor | Recovery Outbox/Event; next Claim binds the receipt to exactly one `suspend-resume` Bundle/Generation |
+| `suspended -> failed`                                | Suspended interaction expiry sweeper          | Fenced Execution/Generation and pending Interaction row      | Turn failure, `execution.failed`, Outbox                                                                  |
 | `leased/running -> completed`                        | Worker                                        | Lease then Execution row lock                                | Lease deletion, Turn completion, Event                                                                    |
 | `leased/running -> failed`                           | Worker                                        | Lease then Execution row lock                                | Lease deletion, Turn failure, Event                                                                       |
 | `leased/running/waiting-for-approval -> interrupted` | Worker acknowledgement of durable user intent | Current Lease/Worker/Generation and Control Command row lock | Provider Cursor persistence, interaction expiry, Lease deletion, Turn interruption, Event, Outbox         |
@@ -66,6 +94,38 @@ Execution to the terminal `interrupted` state while leaving the Session active f
 
 Terminal transitions use the same Lease-before-Execution lock order. Cancel/Complete races therefore
 produce exactly one legal terminal winner instead of relying on process-local synchronization.
+
+## Semantic Provider Credential access
+
+An immutable `execution_provider_credential_grants` row remains the root authority for one Execution
+Generation. It freezes the Credential ID and version but never contains plaintext. Migration `000055` adds a
+second, short-lived access authorization to the current Worker Lease and a
+`meaningful_activity_sequence` watermark to the Session:
+
+- only the explicit, Lease-fenced Grant resolve may attach access serial `1`; ordinary Lease renewal cannot
+  initialize access before the Provider secret has been requested;
+- later Worker Lease renewals may rotate the short access window, but they only read the server-authoritative
+  `meaningful_activity_sequence / meaningful_activity_at`. Browser/SSE/WebSocket presence, read traffic,
+  Worker heartbeat and the renewal request itself never advance that watermark;
+- `waiting` and `checkpointing` use the frozen `waitingKeepAliveSeconds` refresh window;
+  `provisioning`, `active` and `restoring` use `suspendAfterIdleSeconds`; `idle`, `suspended` and terminating
+  states cannot refresh;
+- the access window is analogous to an access token while the semantic activity window is analogous to refresh
+  authority. A previously issued access window may remain usable for its short TTL after refresh authority
+  closes, but neither it nor a later semantic event can cross the Session absolute expiry, Credential expiry,
+  frozen Credential version, or revocation boundary;
+- every durable access change advances a monotonic serial. The database binds the row to the exact
+  Tenant/Execution/Generation/Grant, freezes its issuance time and hard cap, and rejects sequence, activity-time,
+  renewal-time or expiry rollback;
+- agentd validates every renewal projection against the initial Grant, serial, semantic sequence and hard cap.
+  Missing metadata, Credential revocation/rotation/scope loss, access expiry, or a closed renewal stream cancels
+  the Provider and fails the Generation without exposing Credential material.
+
+The current Provider Host contract still supplies a static `apiKey` or `authToken` to one Provider process. This
+access Broker authorizes how long that frozen secret may remain in use; it does not silently replace it with a new
+Credential version mid-Generation and is not a generic upstream OAuth refresh-token adapter. KMS remains the
+envelope-decryption boundary, using its own workload identity/SDK credential lifecycle; KMS keys and long-lived
+plaintext are not extended by Session activity.
 
 ## Provider Resume decision
 
@@ -147,15 +207,31 @@ Pull validates the live Lease and returns only commands targeted to the authenti
 `delivered` is recorded after the command is written to the Provider Host; `acknowledged` is recorded after a
 correlated terminal Host message. Both transitions are idempotent. Lease recovery expires unresolved requests
 and supersedes unacknowledged resolution delivery for the obsolete Generation before a replacement Worker can
-claim the Execution.
+claim the Execution. The quiesced-suspend fallback is stricter: a user resolution recorded after Provider quiesce
+but before suspend commit is atomically converted to `resume-recorded` before the Lease is released, so recovery
+does not discard an answer that the fenced Provider never received. A resolution already marked `delivered` has
+crossed the Provider write boundary: losing that Generation before a correlated ACK produces terminal
+`outcome-unknown` rather than an unsafe replay.
 
-Pending Interactions have a bounded 24-hour wait. Lease Renew performs a targeted expiry check for its
-Execution, while Claim/recovery and the background retention pass use the existing pending-expiry partial index
-to sweep unattended rows. Expiry acquires locks in the same `Lease -> Execution -> Interaction` order as Resolve,
-deletes the obsolete Lease, marks all pending requests for that Generation `expired/superseded`, returns the Turn
-to `queued`, moves the Execution to `recovering`, and appends exactly one `execution.recovering` Event/Outbox
-message with reason `interaction_expired`. The previous Worker is fenced before a replacement can claim the next
-Generation.
+If the Execution is already `suspended`, the same browser resolve path still records the durable decision, but
+`delivery_status` becomes `resume-recorded` and no Worker/Generation is attached. The fenced Provider process
+never receives that resolution directly. When the final pending request resolves, the Execution moves to
+`recovering`, the Turn returns to `queued`, and the next Recovery Bundle freezes the recorded resolution for
+Generation `N+1`. In the same Claim transaction, that row becomes `resume-bound` with the exact Bundle ID and
+Generation. It cannot be rebound or included in another Bundle; if the bound Generation is later lost before
+Provider application can be proven, it becomes terminal `outcome-unknown` and the Execution fails closed.
+
+Pending Interactions have a bounded 24-hour wait. For a live leased `waiting-for-approval` Generation, Lease Renew
+performs a targeted expiry check for its Execution, while Claim/recovery and the background retention pass use the
+existing pending-expiry partial index to sweep unattended rows. Expiry acquires locks in the same
+`Lease -> Execution -> Interaction` order as Resolve, deletes the obsolete Lease, marks all pending requests for
+that Generation `expired/superseded`, returns the Turn to `queued`, moves the Execution to `recovering`, and
+appends exactly one `execution.recovering` Event/Outbox message with reason `interaction_expired`. The previous
+Worker is fenced before a replacement can claim the next Generation.
+
+Suspended Interactions keep the same deadline but no longer have a live Lease. Their expiry path locks the fenced
+Execution and pending Interaction rows; once the final suspended request expires, the Turn and Execution fail
+instead of spawning a replacement Provider automatically.
 
 Concurrent Resolve semantics are database-defined across Control Plane replicas:
 

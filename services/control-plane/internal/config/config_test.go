@@ -5,6 +5,10 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/google/uuid"
+
+	"github.com/synara-ai/synara/services/control-plane/internal/billing"
 )
 
 func TestLoadRejectsInvalidEnumAndScalarValues(t *testing.T) {
@@ -230,6 +234,30 @@ func TestLoadValidatesCredentialKMSConfiguration(t *testing.T) {
 	}
 }
 
+func TestLoadValidatesProviderCredentialAccessTTL(t *testing.T) {
+	clearConfigEnvironment(t)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ProviderCredentialAccessTTL != 5*time.Minute {
+		t.Fatalf("default Provider Credential access TTL = %s, want 5m", cfg.ProviderCredentialAccessTTL)
+	}
+
+	clearConfigEnvironment(t)
+	t.Setenv("SYNARA_WORKER_LEASE_TTL", "30s")
+	t.Setenv("SYNARA_PROVIDER_CREDENTIAL_ACCESS_TTL", "60s")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "SYNARA_PROVIDER_CREDENTIAL_ACCESS_TTL") {
+		t.Fatalf("expected access TTL/Worker Lease safety error, got %v", err)
+	}
+
+	clearConfigEnvironment(t)
+	t.Setenv("SYNARA_PROVIDER_CREDENTIAL_ACCESS_TTL", "2h")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "SYNARA_PROVIDER_CREDENTIAL_ACCESS_TTL") {
+		t.Fatalf("expected bounded access TTL error, got %v", err)
+	}
+}
+
 func TestLoadValidatesSSHProvisioningConfiguration(t *testing.T) {
 	clearConfigEnvironment(t)
 	t.Setenv("SYNARA_LOGIN_COOKIE_SECURE", "true")
@@ -238,6 +266,7 @@ func TestLoadValidatesSSHProvisioningConfiguration(t *testing.T) {
 	t.Setenv("SYNARA_SSH_PROVISION_TIMEOUT", "45s")
 	t.Setenv("SYNARA_DOCKER_RECONCILE_INTERVAL", "7s")
 	t.Setenv("SYNARA_KUBERNETES_RECONCILE_INTERVAL", "3s")
+	t.Setenv("SYNARA_RESOURCE_LIFECYCLE_SWEEP_INTERVAL", "4s")
 	cfg, err := Load()
 	if err != nil {
 		t.Fatal(err)
@@ -249,6 +278,9 @@ func TestLoadValidatesSSHProvisioningConfiguration(t *testing.T) {
 	}
 	if cfg.KubernetesReconcileInterval.String() != "3s" {
 		t.Fatalf("unexpected Kubernetes reconcile interval: %s", cfg.KubernetesReconcileInterval)
+	}
+	if cfg.ResourceLifecycleSweepInterval.String() != "4s" {
+		t.Fatalf("unexpected Resource Lifecycle sweep interval: %s", cfg.ResourceLifecycleSweepInterval)
 	}
 
 	clearConfigEnvironment(t)
@@ -277,6 +309,12 @@ func TestLoadValidatesWorkerAutoRollbackConfiguration(t *testing.T) {
 	}
 	if cfg.WorkerAutoRollbackEnabled || cfg.WorkerAutoRollbackInterval != 3*time.Second {
 		t.Fatalf("unexpected configured Worker auto-rollback config: %#v", cfg)
+	}
+
+	clearConfigEnvironment(t)
+	t.Setenv("SYNARA_RESOURCE_LIFECYCLE_SWEEP_INTERVAL", "0s")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "SYNARA_RESOURCE_LIFECYCLE_SWEEP_INTERVAL") {
+		t.Fatalf("expected invalid Resource Lifecycle sweep interval error, got %v", err)
 	}
 
 	clearConfigEnvironment(t)
@@ -345,6 +383,223 @@ func TestLoadValidatesSSEConfiguration(t *testing.T) {
 	}
 }
 
+func TestLoadValidatesResourceLifecycleDefaultsAndOperatorBounds(t *testing.T) {
+	clearConfigEnvironment(t)
+	t.Setenv("SYNARA_RESOURCE_WAITING_KEEP_ALIVE", "20m")
+	t.Setenv("SYNARA_RESOURCE_WAITING_KEEP_ALIVE_MIN_SECONDS", "300")
+	t.Setenv("SYNARA_RESOURCE_WAITING_KEEP_ALIVE_MAX_SECONDS", "7200")
+	t.Setenv("SYNARA_RESOURCE_SUSPEND_AFTER_IDLE", "45m")
+	t.Setenv("SYNARA_RESOURCE_ABSOLUTE_SESSION_LIFETIME", "24h")
+	t.Setenv("SYNARA_RESOURCE_WORKSPACE_RETENTION_DAYS", "14")
+	t.Setenv("SYNARA_RESOURCE_WARM_POOL_MODE", "low-latency")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := cfg.ResourceLifecycle
+	if policy.Defaults.WaitingKeepAliveSeconds != 1200 || policy.Defaults.SuspendAfterIdleSeconds != 2700 ||
+		policy.Defaults.AbsoluteSessionLifetimeSeconds == nil || *policy.Defaults.AbsoluteSessionLifetimeSeconds != 86400 ||
+		policy.Defaults.WorkspaceRetentionDays != 14 || policy.Defaults.WarmPoolMode != "low-latency" ||
+		policy.Bounds.WaitingKeepAliveSeconds.Minimum != 300 || policy.Bounds.WaitingKeepAliveSeconds.Maximum != 7200 {
+		t.Fatalf("unexpected Resource Lifecycle config: %#v", policy)
+	}
+
+	clearConfigEnvironment(t)
+	t.Setenv("SYNARA_RESOURCE_WAITING_KEEP_ALIVE", "30s")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "waitingKeepAliveSeconds") {
+		t.Fatalf("expected out-of-bounds Resource Lifecycle default, got %v", err)
+	}
+}
+
+func TestLoadParsesBillingRuntimeConfiguration(t *testing.T) {
+	clearConfigEnvironment(t)
+	tenantID := uuid.New()
+	targetID := uuid.New()
+	t.Setenv("SYNARA_BILLING_BLOB_SOURCE", "s3")
+	t.Setenv("SYNARA_BILLING_S3_BUCKET", "billing-bucket")
+	t.Setenv("SYNARA_BILLING_S3_REGION", "us-east-1")
+	t.Setenv("SYNARA_BILLING_S3_ENDPOINT", "https://billing.example.com/")
+	t.Setenv("SYNARA_BILLING_S3_ALLOW_CUSTOM_ENDPOINT", "true")
+	t.Setenv("SYNARA_BILLING_BLOB_PREFIX", " exports/aws ")
+	t.Setenv("SYNARA_BILLING_MAX_OBJECT_BYTES", "4096")
+	t.Setenv("SYNARA_BILLING_TARIFF_OPERATOR_TENANT_ID", tenantID.String())
+	t.Setenv("SYNARA_BILLING_S3_USE_PATH_STYLE", "true")
+	t.Setenv("SYNARA_BILLING_IMPORT_MAPPINGS_JSON", `[{
+		"tenantId":"`+tenantID.String()+`",
+		"provider":" AWS ",
+		"externalImportId":" july-2026 ",
+		"format":"aws-cur-csv",
+		"objectKey":" reports/cur.csv ",
+		"objectVersion":"version-1",
+		"executionTargetIds":["`+targetID.String()+`"],
+		"scheduleInterval":"30m",
+		"reconcile":true,
+		"estimateAfterImport":true
+	}]`)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Billing.MaxObjectBytes != 4096 || cfg.Billing.Source.Kind != billing.SourceKindS3 ||
+		cfg.Billing.TariffOperatorTenantID != tenantID ||
+		cfg.Billing.Source.S3Bucket != "billing-bucket" || cfg.Billing.Source.S3Region != "us-east-1" ||
+		cfg.Billing.Source.S3Endpoint != "https://billing.example.com" ||
+		cfg.Billing.Source.Prefix != "exports/aws" || !cfg.Billing.Source.S3UsePathStyle || !cfg.Billing.Source.S3AllowCustomEndpoint {
+		t.Fatalf("unexpected billing source config: %#v", cfg.Billing.Source)
+	}
+	if len(cfg.Billing.Imports) != 1 {
+		t.Fatalf("billing imports = %#v", cfg.Billing.Imports)
+	}
+	mapping := cfg.Billing.Imports[0]
+	if mapping.TenantID != tenantID || mapping.Provider != "aws" || mapping.ExternalImportID != "july-2026" ||
+		mapping.Format != billing.ExportObjectFormatAWSCURCSV || mapping.ObjectKey != "reports/cur.csv" ||
+		mapping.ObjectVersion != "version-1" || mapping.ScheduleInterval != 30*time.Minute ||
+		len(mapping.ExecutionTargetIDs) != 1 || mapping.ExecutionTargetIDs[0] != targetID ||
+		!mapping.Reconcile || !mapping.EstimateAfterImport {
+		t.Fatalf("unexpected billing import mapping: %#v", mapping)
+	}
+}
+
+func TestParseBillingImportMappingsRejectsUnknownShapesAndFields(t *testing.T) {
+	tenantID := uuid.New()
+	tests := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{
+			name: "unknown envelope field",
+			raw:  `{"importz":[]}`,
+			want: "unknown field \"importz\"",
+		},
+		{
+			name: "unknown item field",
+			raw: `[{
+				"tenantId":"` + tenantID.String() + `",
+				"provider":"aws",
+				"externalImportId":"july-2026",
+				"format":"aws-cur-csv",
+				"objectKey":"cur.csv",
+				"objectVersion":"v1",
+				"unexpected":true
+			}]`,
+			want: "unknown field \"unexpected\"",
+		},
+		{
+			name: "trailing content",
+			raw:  `[] true`,
+			want: "unexpected trailing JSON content",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := parseBillingImportMappings(test.raw)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("expected %q error, got %v", test.want, err)
+			}
+		})
+	}
+}
+
+func TestLoadRejectsInvalidBillingConfiguration(t *testing.T) {
+	tenantID := uuid.New()
+
+	clearConfigEnvironment(t)
+	t.Setenv("SYNARA_BILLING_TARIFF_OPERATOR_TENANT_ID", "not-a-uuid")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "SYNARA_BILLING_TARIFF_OPERATOR_TENANT_ID must be a UUID") {
+		t.Fatalf("expected invalid tariff operator tenant error, got %v", err)
+	}
+
+	clearConfigEnvironment(t)
+	t.Setenv("SYNARA_BILLING_IMPORT_MAPPINGS_JSON", `[{
+		"tenantId":"`+tenantID.String()+`",
+		"provider":"aws",
+		"externalImportId":"july-2026",
+		"format":"aws-cur-csv",
+		"objectKey":"cur.csv"
+	}]`)
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "require a configured billing blob source") {
+		t.Fatalf("expected missing billing source error, got %v", err)
+	}
+
+	clearConfigEnvironment(t)
+	t.Setenv("SYNARA_BILLING_BLOB_SOURCE", "s3")
+	t.Setenv("SYNARA_BILLING_S3_BUCKET", "billing-bucket")
+	t.Setenv("SYNARA_BILLING_S3_REGION", "us-east-1")
+	t.Setenv("SYNARA_BILLING_S3_ENDPOINT", "https://billing.example.com")
+	t.Setenv("SYNARA_BILLING_S3_ALLOW_CUSTOM_ENDPOINT", "true")
+	t.Setenv("SYNARA_BILLING_IMPORT_MAPPINGS_JSON", `[{
+		"tenantId":"`+tenantID.String()+`",
+		"provider":"aws",
+		"externalImportId":"july-2026",
+		"format":"aws-cur-csv",
+		"objectKey":"cur.csv"
+	}]`)
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "requires objectVersion") {
+		t.Fatalf("expected missing object version error, got %v", err)
+	}
+
+	clearConfigEnvironment(t)
+	t.Setenv("SYNARA_BILLING_BLOB_SOURCE", "s3")
+	t.Setenv("SYNARA_BILLING_S3_BUCKET", "billing-bucket")
+	t.Setenv("SYNARA_BILLING_S3_REGION", "us-east-1")
+	t.Setenv("SYNARA_BILLING_S3_ENDPOINT", "https://billing.example.com")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "custom endpoint requires explicit enablement") {
+		t.Fatalf("expected explicit custom endpoint allow error, got %v", err)
+	}
+
+	clearConfigEnvironment(t)
+	t.Setenv("SYNARA_BILLING_BLOB_SOURCE", "azure")
+	t.Setenv("SYNARA_BILLING_AZURE_CONTAINER_URL", "http://127.0.0.1:10000/devstoreaccount1/invoices")
+	t.Setenv("SYNARA_BILLING_IMPORT_MAPPINGS_JSON", `[{
+		"tenantId":"`+tenantID.String()+`",
+		"provider":"azure",
+		"externalImportId":"july-2026",
+		"format":"azure-cost-normalized-json",
+		"objectKey":"invoice.json",
+		"objectVersion":"etag-1"
+	}]`)
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "must use HTTPS unless HTTP is explicitly allowed") {
+		t.Fatalf("expected azure HTTPS requirement error, got %v", err)
+	}
+
+	clearConfigEnvironment(t)
+	t.Setenv("SYNARA_BILLING_BLOB_SOURCE", "local")
+	t.Setenv("SYNARA_BILLING_LOCAL_BASE_DIR", t.TempDir())
+	t.Setenv("SYNARA_BILLING_IMPORT_MAPPINGS_JSON", `[{
+		"tenantId":"`+tenantID.String()+`",
+		"provider":"aws",
+		"externalImportId":"duplicate",
+		"format":"aws-cur-csv",
+		"objectKey":"first.csv"
+	},{
+		"tenantId":"`+tenantID.String()+`",
+		"provider":"aws",
+		"externalImportId":"duplicate",
+		"format":"aws-cur-csv",
+		"objectKey":"second.csv"
+	}]`)
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "is duplicated") {
+		t.Fatalf("expected duplicate billing mapping error, got %v", err)
+	}
+
+	clearConfigEnvironment(t)
+	t.Setenv("SYNARA_BILLING_BLOB_SOURCE", "local")
+	t.Setenv("SYNARA_BILLING_LOCAL_BASE_DIR", t.TempDir())
+	t.Setenv("SYNARA_BILLING_IMPORT_MAPPINGS_JSON", `[{
+		"tenantId":"`+tenantID.String()+`",
+		"provider":"aws",
+		"externalImportId":"negative",
+		"format":"aws-cur-csv",
+		"objectKey":"negative.csv",
+		"scheduleInterval":"-1h"
+	}]`)
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "negative schedule interval") {
+		t.Fatalf("expected negative schedule interval error, got %v", err)
+	}
+}
+
 func clearConfigEnvironment(t *testing.T) {
 	t.Helper()
 	for _, name := range []string{
@@ -359,6 +614,7 @@ func clearConfigEnvironment(t *testing.T) {
 		"SYNARA_DATABASE_CONNECTION_MAX_LIFETIME", "SYNARA_DATABASE_CONNECTION_MAX_IDLE_TIME",
 		"SYNARA_DATABASE_MIGRATION_LOCK_TIMEOUT",
 		"SYNARA_WORKER_HEARTBEAT_TIMEOUT", "SYNARA_WORKER_RECEIPT_TTL",
+		"SYNARA_PROVIDER_CREDENTIAL_ACCESS_TTL",
 		"SYNARA_PROVIDER_CURSOR_MAX_AGE",
 		"SYNARA_LOCAL_AGENTD_RUNNER_COMMAND_JSON", "SYNARA_LOCAL_AGENTD_WORKSPACE_ROOT",
 		"SYNARA_LOCAL_AGENTD_GIT_CACHE_ROOT", "SYNARA_LOCAL_AGENTD_RESTART_BACKOFF",
@@ -368,6 +624,7 @@ func clearConfigEnvironment(t *testing.T) {
 		"SYNARA_SSH_PROVISION_TIMEOUT",
 		"SYNARA_DOCKER_RECONCILE_INTERVAL",
 		"SYNARA_KUBERNETES_RECONCILE_INTERVAL",
+		"SYNARA_RESOURCE_LIFECYCLE_SWEEP_INTERVAL",
 		"SYNARA_WORKER_AUTO_ROLLBACK_ENABLED", "SYNARA_WORKER_AUTO_ROLLBACK_INTERVAL",
 		"SYNARA_RETENTION_SWEEP_INTERVAL",
 		"SYNARA_OUTBOX_POLL_INTERVAL", "SYNARA_OUTBOX_CLAIM_TTL",
@@ -376,6 +633,20 @@ func clearConfigEnvironment(t *testing.T) {
 		"SYNARA_SSE_POLL_INTERVAL", "SYNARA_SSE_HEARTBEAT_INTERVAL",
 		"SYNARA_SSE_WRITE_TIMEOUT", "SYNARA_SSE_LEASE_TTL",
 		"SYNARA_SSE_MAX_CONNECTIONS_PER_USER", "SYNARA_SSE_MAX_CONNECTIONS_PER_TENANT",
+		"SYNARA_RESOURCE_WAITING_KEEP_ALIVE", "SYNARA_RESOURCE_SUSPEND_AFTER_IDLE",
+		"SYNARA_RESOURCE_ABSOLUTE_SESSION_LIFETIME", "SYNARA_RESOURCE_WORKSPACE_RETENTION_DAYS",
+		"SYNARA_RESOURCE_WARM_POOL_MODE",
+		"SYNARA_RESOURCE_WAITING_KEEP_ALIVE_MIN_SECONDS", "SYNARA_RESOURCE_WAITING_KEEP_ALIVE_MAX_SECONDS",
+		"SYNARA_RESOURCE_SUSPEND_AFTER_IDLE_MIN_SECONDS", "SYNARA_RESOURCE_SUSPEND_AFTER_IDLE_MAX_SECONDS",
+		"SYNARA_RESOURCE_ABSOLUTE_SESSION_LIFETIME_MIN_SECONDS", "SYNARA_RESOURCE_ABSOLUTE_SESSION_LIFETIME_MAX_SECONDS",
+		"SYNARA_RESOURCE_WORKSPACE_RETENTION_MIN_DAYS", "SYNARA_RESOURCE_WORKSPACE_RETENTION_MAX_DAYS",
+		"SYNARA_BILLING_BLOB_SOURCE", "SYNARA_BILLING_LOCAL_BASE_DIR",
+		"SYNARA_BILLING_S3_BUCKET", "SYNARA_BILLING_S3_REGION", "SYNARA_BILLING_S3_ENDPOINT",
+		"SYNARA_BILLING_S3_USE_PATH_STYLE", "SYNARA_BILLING_S3_ALLOW_CUSTOM_ENDPOINT",
+		"SYNARA_BILLING_S3_ALLOW_HTTP", "SYNARA_BILLING_GCS_BUCKET",
+		"SYNARA_BILLING_AZURE_CONTAINER_URL", "SYNARA_BILLING_AZURE_ALLOW_HTTP",
+		"SYNARA_BILLING_BLOB_PREFIX", "SYNARA_BILLING_MAX_OBJECT_BYTES",
+		"SYNARA_BILLING_IMPORT_MAPPINGS_JSON", "SYNARA_BILLING_TARIFF_OPERATOR_TENANT_ID",
 	} {
 		t.Setenv(name, "")
 	}

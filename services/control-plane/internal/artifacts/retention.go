@@ -39,6 +39,12 @@ func (s *Service) DeleteByRetention(
 			  AND checkpoint.artifact_id = artifacts.id
 			  AND checkpoint.status IN ?
 		)`, checkpointArtifactReferenceStatuses).
+		Where(`NOT EXISTS (
+			SELECT 1
+			FROM agent_memory_revisions memory_revision
+			WHERE memory_revision.tenant_id = artifacts.tenant_id
+			  AND memory_revision.artifact_id = artifacts.id
+		)`).
 		Order("COALESCE(ready_at, created_at), id").Limit(limit).Find(&candidates).Error
 	if err != nil {
 		return 0, problem.Wrap(500, "retention_artifacts_load_failed", "Retention could not load eligible Artifacts.", err)

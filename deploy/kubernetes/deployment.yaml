@@ -7,6 +7,11 @@ metadata:
     app.kubernetes.io/part-of: synara
 spec:
   replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 1
   selector:
     matchLabels:
       app.kubernetes.io/name: synara-control-plane
@@ -25,6 +30,22 @@ spec:
         fsGroup: 10001
         seccompProfile:
           type: RuntimeDefault
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: synara-control-plane
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: synara-control-plane
       containers:
         - name: control-plane
           image: synara-control-plane:local
@@ -92,6 +113,8 @@ spec:
                   key: provider-cursor-key
             - name: SYNARA_PROVIDER_CURSOR_MAX_AGE
               value: 720h
+            - name: SYNARA_PROVIDER_CREDENTIAL_ACCESS_TTL
+              value: 5m
             - name: SYNARA_CREDENTIAL_KMS_PROVIDER
               value: aws-kms
             - name: SYNARA_CREDENTIAL_KMS_KEY_ID

@@ -1,0 +1,31 @@
+{
+  "schemaVersion": "synara.kubernetes.resilience.acceptance.v1",
+  "status": "dry-run",
+  "context": "orbstack",
+  "namespace": "synara-system",
+  "baselineScript": "/Users/huang/devel/project/huang/business/synara/deploy/kubernetes/acceptance.sh",
+  "bootstrapBaseline": true,
+  "plannedCases": [
+    "rbac",
+    "leader-takeover",
+    "control-plane-failover"
+  ],
+  "allowedSkippedCases": [],
+  "soak": {
+    "enabled": false,
+    "durationSeconds": 0,
+    "intervalSeconds": 30,
+    "plannedCases": [
+      "control-plane-failover"
+    ]
+  },
+  "disruptionProbeWindowSeconds": 30,
+  "partitionSeconds": 20,
+  "caseTimeoutSeconds": 240,
+  "probeIntervalSeconds": 2,
+  "safety": {
+    "kindOnlyByDefault": true,
+    "allowNonDisposableOverride": "SYNARA_K8S_ACCEPTANCE_ALLOW_NONDISPOSABLE"
+  },
+  "evidenceFile": "/Users/huang/devel/project/huang/business/synara/docs/reports/stage-4-orbstack-resilience-acceptance-20260725-targeted-dryrun.json"
+}

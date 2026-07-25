@@ -34,3 +34,7 @@ as authorization decisions outside that mapping.
 
 Tenant permissions may grant access across all organizations (for example Tenant Owner/Admin).
 Otherwise an active Organization Membership is required and its role supplies the permission.
+
+`billing.manage` covers listing the shared provider tariff catalog plus tenant-owned invoice import and
+reconciliation operations. Appending to the shared catalog also requires the active/path Tenant to match the
+server-configured platform tariff-operator Tenant; tenant permission alone never grants a global rate mutation.

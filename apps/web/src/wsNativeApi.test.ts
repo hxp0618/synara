@@ -934,6 +934,16 @@ describe("wsNativeApi", () => {
   });
 
   it("uses the bounded HTTP upload instead of WebSocket RPC for browser voice", async () => {
+    Object.defineProperty(getWindowForTest(), "location", {
+      configurable: true,
+      writable: true,
+      value: {
+        hash: "",
+        href: "http://localhost/",
+        origin: "http://localhost",
+        search: "",
+      },
+    });
     Object.defineProperty(getWindowForTest(), "desktopBridge", {
       configurable: true,
       writable: true,

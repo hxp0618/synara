@@ -221,7 +221,7 @@ func (s *Service) DeleteTenant(
 			var activeExecutions int64
 			if err := tx.WithContext(ctx).Model(&persistence.AgentExecution{}).
 				Where("tenant_id = ? AND status IN ?", tenantID,
-					[]string{"queued", "recovering", "leased", "running", "waiting-for-approval"}).
+					[]string{"queued", "recovering", "leased", "running", "waiting-for-approval", "suspended"}).
 				Count(&activeExecutions).Error; err != nil {
 				return problem.Wrap(500, "tenant_execution_cleanup_check_failed", "Failed to inspect active Tenant Executions.", err)
 			}

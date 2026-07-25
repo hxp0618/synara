@@ -2,6 +2,7 @@ package agentd
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/google/uuid"
@@ -9,18 +10,36 @@ import (
 	"github.com/synara-ai/synara/services/control-plane/internal/executions"
 )
 
+const runnerSuspendCheckpointProtocol = "provider-host-suspend-terminal-v1"
+
 type RunnerInput struct {
 	Execution              executions.Execution `json:"execution"`
 	Workload               executions.Workload  `json:"workload"`
+	MemoryDocuments        []MemoryDocument     `json:"memoryDocuments,omitempty"`
 	ProviderResumeCursor   *string              `json:"providerResumeCursor,omitempty"`
 	WorkspaceDirectory     string               `json:"workspaceDirectory"`
 	ProviderStateDirectory string               `json:"providerStateDirectory,omitempty"`
 	RuntimeOutputDirectory string               `json:"runtimeOutputDirectory,omitempty"`
 }
 
-type RunnerCredential struct {
-	Payload map[string]any `json:"payload"`
+type MemoryDocument struct {
+	Scope       string    `json:"scope"`
+	ScopeID     uuid.UUID `json:"scopeId"`
+	MemoryKey   string    `json:"memoryKey"`
+	RevisionID  uuid.UUID `json:"revisionId"`
+	ArtifactID  uuid.UUID `json:"artifactId"`
+	SHA256      string    `json:"sha256"`
+	ContentType string    `json:"contentType"`
+	Content     string    `json:"content"`
 }
+
+type RunnerCredential struct {
+	GrantID uuid.UUID                 `json:"grantId,omitempty"`
+	Access  *ProviderCredentialAccess `json:"access,omitempty"`
+	Payload map[string]any            `json:"payload"`
+}
+
+type ProviderCredentialAccess = executions.ProviderCredentialAccess
 
 type GitHTTPSCredential struct {
 	Host     string `json:"host"`
@@ -91,4 +110,19 @@ type RunnerControlCommand struct {
 	CommandType string
 	CommandID   string
 	Payload     map[string]any
+}
+
+type runnerSuspended struct {
+	TargetCommandID    string
+	CheckpointProtocol string
+}
+
+func (e *runnerSuspended) Error() string { return "Provider turn was suspended." }
+
+func runnerSuspendedTerminal(err error) (*runnerSuspended, bool) {
+	var suspended *runnerSuspended
+	if !errors.As(err, &suspended) {
+		return nil, false
+	}
+	return suspended, true
 }

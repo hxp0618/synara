@@ -6,12 +6,14 @@ import (
 	"errors"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 
 	"github.com/synara-ai/synara/services/control-plane/internal/outbox"
 	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
+	"github.com/synara-ai/synara/services/control-plane/internal/placement"
 	"github.com/synara-ai/synara/services/control-plane/internal/platform"
 	"github.com/synara-ai/synara/services/control-plane/internal/problem"
 	"github.com/synara-ai/synara/services/control-plane/internal/secret"
@@ -51,11 +53,9 @@ func (s *Service) Claim(
 			if err := workerreleases.LockTargetForRelease(ctx, tx, normalizedTarget.ExecutionTargetID); err != nil {
 				return err
 			}
-			var receipt persistence.WorkerRequestReceipt
-			lookupErr := persistence.WithLocking(tx.WithContext(ctx), "UPDATE", "").
-				Where("worker_id = ? AND request_id = ?", worker.ID, requestID).Take(&receipt).Error
-			if err := lockCurrentWorkerIncarnation(ctx, tx, worker); err != nil {
-				return err
+			receipt, lookupErr, lockErr := lockWorkerAndLoadRequestReceipt(ctx, tx, worker, requestID)
+			if lockErr != nil {
+				return lockErr
 			}
 			if lookupErr == nil && receipt.WorkerIncarnation == worker.Incarnation && receipt.ExpiresAt.After(s.now()) {
 				if receipt.Operation != "execution.claim" || receipt.RequestHash != hash {
@@ -77,11 +77,60 @@ func (s *Service) Claim(
 				if leaseErr != nil {
 					return problem.New(409, "claim_replay_no_longer_active", "The execution returned by this claim request is no longer leased to the worker.")
 				}
+				if err := requireExecutionTenantActive(ctx, tx, execution.TenantID); err != nil {
+					return err
+				}
+				now := s.now()
+				if err := s.requireExecutionSessionWithinAbsoluteLifetime(ctx, tx, execution, now); err != nil {
+					return err
+				}
+				bundle, frozenWorkload, bundleErr := s.loadRecoveryBundle(ctx, tx, execution)
+				if bundleErr != nil {
+					var apiError *problem.Error
+					if !errors.As(bundleErr, &apiError) || apiError.Code != "recovery_bundle_missing" {
+						return bundleErr
+					}
+					// A claim receipt may predate migration 000043. Freeze that exact
+					// receipt workload instead of recomputing a newer history projection.
+					if stored.Workload != nil {
+						frozenWorkload = *stored.Workload
+					} else {
+						loadedWorkload, workloadErr := s.loadWorkload(ctx, tx, execution)
+						if workloadErr != nil {
+							return workloadErr
+						}
+						frozenWorkload = loadedWorkload
+					}
+					if frozenWorkload.ProviderCredentialID != nil && frozenWorkload.ProviderCredentialGrantID == nil {
+						return problem.New(409, "provider_credential_grant_required", "The Execution generation is missing its immutable Provider Credential Grant and cannot be replayed.")
+					}
+					createdBundle, createErr := s.createRecoveryBundle(ctx, tx, execution, frozenWorkload, now)
+					if createErr != nil {
+						return createErr
+					}
+					bundle = createdBundle
+					frozenWorkload.RecoveryBundle = &bundle
+				}
+				if frozenWorkload.ProviderCredentialID != nil && frozenWorkload.ProviderCredentialGrantID == nil {
+					return problem.New(409, "provider_credential_grant_required", "The Execution generation is missing its immutable Provider Credential Grant and cannot be replayed.")
+				}
+				if err := bindResumeRecordedInteractionsToRecoveryBundle(
+					ctx, tx, execution, frozenWorkload.ResumeSnapshot, bundle, now,
+				); err != nil {
+					return err
+				}
+				if err := bindPendingInteractionsToGeneration(ctx, tx, execution, worker.ID); err != nil {
+					return err
+				}
+				workload := &frozenWorkload
+				resumeCursor, cursorErr := s.loadReplayedProviderCursor(ctx, tx, execution, *workload)
+				if cursorErr != nil {
+					return cursorErr
+				}
 				plainToken, tokenHash, tokenErr := secret.NewToken()
 				if tokenErr != nil {
 					return problem.Wrap(500, "lease_token_generation_failed", "Failed to rotate the replayed lease token.", tokenErr)
 				}
-				now := s.now()
 				lease.LeaseTokenHash = tokenHash
 				lease.HeartbeatAt = now
 				lease.ExpiresAt = now.Add(s.leaseTTL)
@@ -95,18 +144,6 @@ func (s *Service) Claim(
 				}
 				convertedExecution := toExecution(execution)
 				convertedLease := toLease(lease, plainToken)
-				workload := stored.Workload
-				if workload == nil {
-					loadedWorkload, workloadErr := s.loadWorkload(ctx, tx, execution)
-					if workloadErr != nil {
-						return workloadErr
-					}
-					workload = &loadedWorkload
-				}
-				resumeCursor, cursorErr := s.loadReplayedProviderCursor(ctx, tx, execution, *workload)
-				if cursorErr != nil {
-					return cursorErr
-				}
 				result = ClaimResult{
 					Execution: &convertedExecution, Lease: &convertedLease, Workload: workload,
 					ProviderResumeCursor: resumeCursor,
@@ -126,16 +163,64 @@ func (s *Service) Claim(
 			if err != nil {
 				return err
 			}
+			workerMode, err := normalizeWorkerMode(claimWorker.WorkerMode)
+			if err != nil {
+				return problem.Wrap(500, "invalid_worker_mode", "The persisted Worker mode is invalid.", err)
+			}
+			if workerMode == WorkerModeExecutionPinned && normalizedTarget.ExecutionID == nil {
+				return problem.New(409, "worker_mode_execution_id_required", "execution-pinned Workers must claim an explicit executionId.")
+			}
+			if workerMode == WorkerModeExecutionPinned && claimWorker.AssignedExecutionID == nil {
+				return problem.New(409, "worker_mode_execution_assignment_required", "execution-pinned Workers must register an authoritative assignedExecutionId before claiming executions.")
+			}
+			if workerMode == WorkerModeExecutionPinned &&
+				(normalizedTarget.ExecutionID == nil || *normalizedTarget.ExecutionID != *claimWorker.AssignedExecutionID) {
+				return problem.New(409, "worker_mode_execution_assignment_mismatch", "execution-pinned Workers can claim only their registered assignedExecutionId.")
+			}
+			if workerMode == WorkerModeWarmPool && normalizedTarget.ExecutionID != nil {
+				return problem.New(409, "worker_mode_execution_id_forbidden", "warm-pool Workers cannot request an assigned executionId.")
+			}
 			controlCommandSupport, err := loadWorkerControlCommandSupport(ctx, tx, claimWorker)
 			if err != nil {
 				return err
 			}
+			claimNow := s.now()
 			var execution persistence.AgentExecution
 			claimQuery := persistence.WithLocking(tx.WithContext(ctx), "UPDATE", "SKIP LOCKED").
 				Joins("JOIN tenants AS claim_tenant ON claim_tenant.id = agent_executions.tenant_id AND claim_tenant.status = ? AND claim_tenant.deleted_at IS NULL", "active").
+				Joins("JOIN agent_sessions AS claim_session ON claim_session.tenant_id = agent_executions.tenant_id AND claim_session.id = agent_executions.session_id").
+				Where("claim_session.absolute_expires_at IS NULL OR claim_session.absolute_expires_at > ?", claimNow).
 				Where("agent_executions.status IN ? AND agent_executions.execution_target_id = ? AND agent_executions.target_kind = ?", []string{"queued", "recovering"}, normalizedTarget.ExecutionTargetID, normalizedTarget.TargetKind)
 			if normalizedTarget.ExecutionID != nil {
 				claimQuery = claimQuery.Where("agent_executions.id = ?", *normalizedTarget.ExecutionID)
+			}
+			switch workerMode {
+			case WorkerModeWarmPool:
+				if claimWorker.WorkerPoolID == nil || claimWorker.WorkerPoolVersion == nil || claimWorker.CapacityClass == nil {
+					return problem.New(409, "worker_pool_identity_required", "warm-pool Workers must register an authoritative Worker pool identity before claiming executions.")
+				}
+				claimQuery = claimQuery.Where(`agent_executions.worker_pool_id = ?
+				  AND agent_executions.worker_pool_version = ?
+				  AND agent_executions.capacity_class = ?
+					  AND EXISTS (
+						SELECT 1 FROM worker_pools placement_pool
+						WHERE placement_pool.id = agent_executions.worker_pool_id
+						  AND placement_pool.execution_target_id = agent_executions.execution_target_id
+						  AND placement_pool.mode = ?
+						  AND placement_pool.status = ?
+						  AND placement_pool.version = agent_executions.worker_pool_version
+						  AND placement_pool.capacity_class = agent_executions.capacity_class
+					)`, *claimWorker.WorkerPoolID, *claimWorker.WorkerPoolVersion, *claimWorker.CapacityClass,
+					placement.PoolModeWarm, placement.PoolStatusActive)
+			case WorkerModeGeneralPool:
+				claimQuery = claimQuery.Where(`agent_executions.worker_pool_id IS NULL OR EXISTS (
+					SELECT 1
+					FROM execution_placement_policies placement_policy
+					JOIN worker_pools default_pool ON default_pool.id = placement_policy.default_pool_id
+					WHERE placement_policy.execution_target_id = agent_executions.execution_target_id
+					  AND placement_policy.default_pool_id = agent_executions.worker_pool_id
+					  AND default_pool.mode <> ?
+				)`, placement.PoolModeWarm)
 			}
 			if claimWorker.CurrentManifestID != nil {
 				claimQuery = claimQuery.Where(`agent_executions.provider IS NULL OR EXISTS (
@@ -149,7 +234,14 @@ func (s *Service) Claim(
 			}
 			claimQuery = workerreleases.FilterClaimQuery(claimQuery, claimWorker)
 			claimQuery = controlCommandSupport.filterClaimQuery(claimQuery)
-			claimErr := claimQuery.Order("agent_executions.queued_at, agent_executions.id").Take(&execution).Error
+			claimOrder := "agent_executions.queued_at, agent_executions.id"
+			if workerMode == WorkerModeWarmPool {
+				claimOrder = `CASE claim_session.warm_pool_mode
+					WHEN 'low-latency' THEN 0
+					WHEN 'balanced' THEN 1
+					ELSE 2 END, ` + claimOrder
+			}
+			claimErr := claimQuery.Order(claimOrder).Take(&execution).Error
 			if errors.Is(claimErr, gorm.ErrRecordNotFound) {
 				if normalizedTarget.ExecutionID != nil {
 					var assigned persistence.AgentExecution
@@ -159,6 +251,12 @@ func (s *Service) Claim(
 							normalizedTarget.ExecutionTargetID, normalizedTarget.TargetKind).
 						Take(&assigned).Error
 					if assignedErr == nil {
+						if err := s.requireExecutionSessionWithinAbsoluteLifetime(ctx, tx, assigned, claimNow); err != nil {
+							return err
+						}
+						if poolErr := validateWorkerExecutionPoolAffinity(ctx, tx, claimWorker, workerMode, assigned); poolErr != nil {
+							return poolErr
+						}
 						if !workerreleases.WorkerMatchesExecution(claimWorker, assigned) {
 							return problem.New(409, "worker_release_assignment_mismatch", "The Execution is assigned to another active Worker release pool.")
 						}
@@ -185,9 +283,29 @@ func (s *Service) Claim(
 			} else if claimErr != nil {
 				return problem.Wrap(500, "execution_claim_lookup_failed", "Failed to find a claimable execution.", claimErr)
 			} else {
+				if err := s.requireExecutionSessionWithinAbsoluteLifetime(ctx, tx, execution, s.now()); err != nil {
+					return err
+				}
 				previousStatus := execution.Status
 				previousGeneration := execution.Generation
 				now := s.now()
+				resumeCursorAvailable, resumeCursorErr := s.activeTurnResumeCursorAvailable(ctx, tx, execution)
+				if resumeCursorErr != nil {
+					return resumeCursorErr
+				}
+				if !resumeCursorAvailable {
+					const message = "The exact active-turn checkpoint cursor expired or became unavailable before a Recovery worker could claim it. Automatic authoritative-history replay is unsafe."
+					failedEvent, failErr := s.failExecutionOutcomeUnknownLocked(
+						ctx, tx, &execution, "system", nil,
+						"active_suspend_resume_unavailable", message,
+					)
+					if failErr != nil {
+						return failErr
+					}
+					appended = failedEvent
+					result = ClaimResult{}
+					return nil
+				}
 				claimSnapshot, snapshotErr := loadProviderCursorClaimSnapshot(ctx, tx, execution, claimWorker, now)
 				if snapshotErr != nil {
 					return snapshotErr
@@ -218,6 +336,7 @@ func (s *Service) Claim(
 						"provider_resume_strategy_snapshot":    execution.ProviderResumeStrategySnapshot,
 						"provider_cursor_binding_version":      execution.ProviderCursorBindingVersion,
 						"provider_cursor_binding_digest":       execution.ProviderCursorBindingDigest,
+						"next_recovery_reason":                 nil,
 						"finished_at":                          nil, "failure_code": nil, "failure_message": nil,
 					})
 				if err := expectOne(claimUpdate, 409, "execution_claim_conflict", "The execution was claimed concurrently."); err != nil {
@@ -225,11 +344,31 @@ func (s *Service) Claim(
 				}
 				lease := persistence.WorkerLease{
 					ExecutionID: execution.ID, TenantID: execution.TenantID, WorkerID: worker.ID,
+					WorkerIncarnation: worker.Incarnation, WorkerInstanceUID: worker.InstanceUID,
 					Generation: execution.Generation, LeaseTokenHash: tokenHash,
 					AcquiredAt: now, HeartbeatAt: now, ExpiresAt: now.Add(s.leaseTTL),
 				}
 				if err := tx.WithContext(ctx).Create(&lease).Error; err != nil {
 					return problem.Wrap(409, "execution_lease_conflict", "The execution already has an active lease.", err)
+				}
+				if err := transitionWorkerIncarnationFactLocked(
+					ctx, tx, claimWorker, now, workerFactStateActive, true, "",
+				); err != nil {
+					return err
+				}
+				claimGeneration := execution.Generation
+				if err := recordWorkerClaimFactLocked(ctx, tx, workerClaimFactInput{
+					Worker:              claimWorker,
+					TenantID:            execution.TenantID,
+					ExecutionTargetID:   execution.ExecutionTargetID,
+					TargetKind:          execution.TargetKind,
+					ClaimKind:           workerClaimKindExecution,
+					RequestID:           requestID,
+					ClaimedAt:           now,
+					ExecutionID:         &execution.ID,
+					ExecutionGeneration: &claimGeneration,
+				}); err != nil {
+					return err
 				}
 				if err := bindExecutionRuntimeResources(ctx, tx, claimWorker, execution, now); err != nil {
 					return err
@@ -237,7 +376,13 @@ func (s *Service) Claim(
 				if err := bindExecutionControlCommands(ctx, tx, execution, worker.ID, now); err != nil {
 					return err
 				}
+				if _, err := bindExecutionProviderCredentialGrant(ctx, tx, execution, now); err != nil {
+					return err
+				}
 				if _, err := bindExecutionCredentialGrants(ctx, tx, execution, now); err != nil {
+					return err
+				}
+				if err := bindPendingInteractionsToGeneration(ctx, tx, execution, worker.ID); err != nil {
 					return err
 				}
 				workload, workloadErr := s.loadWorkload(ctx, tx, execution)
@@ -247,6 +392,19 @@ func (s *Service) Claim(
 				if workload.ResumeSnapshot == nil {
 					return problem.New(500, "execution_workload_resume_snapshot_missing", "The execution workload omitted its authoritative Resume Snapshot.")
 				}
+				recoveryBundle, bundleErr := s.createRecoveryBundle(
+					ctx, tx, execution, workload, now,
+				)
+				if bundleErr != nil {
+					return bundleErr
+				}
+				if err := bindResumeRecordedInteractionsToRecoveryBundle(
+					ctx, tx, execution, workload.ResumeSnapshot, recoveryBundle, now,
+				); err != nil {
+					return err
+				}
+				workload.RecoveryBundle = &recoveryBundle
+				execution.NextRecoveryReason = nil
 				resumeSelection, cursorErr := s.loadProviderCursor(
 					ctx,
 					tx,
@@ -257,6 +415,16 @@ func (s *Service) Claim(
 				if cursorErr != nil {
 					return cursorErr
 				}
+				if err := bindActiveTurnCheckpointToRecoveryBundle(
+					ctx, tx, execution, workload.ResumeSnapshot, recoveryBundle, resumeSelection, now,
+				); err != nil {
+					return err
+				}
+				if err := s.recordExecutionGenerationClaimLocked(
+					ctx, tx, execution, worker, recoveryBundle, lease.AcquiredAt,
+				); err != nil {
+					return err
+				}
 				appended, err = s.sessions.AppendInternalEvent(ctx, tx, execution.TenantID, execution.SessionID, sessions.InternalEventInput{
 					EventType: "execution.leased", ActorType: "worker", ActorID: &worker.ID,
 					ExecutionID: &execution.ID, WorkerID: &worker.ID, Generation: &execution.Generation,
@@ -266,6 +434,8 @@ func (s *Service) Claim(
 						"workerManifestId":        execution.WorkerManifestID,
 						"workerReleaseRevisionId": execution.WorkerReleaseRevisionID,
 						"workerReleaseChannel":    execution.WorkerReleaseChannel,
+						"recoveryBundleId":        recoveryBundle.ID,
+						"recoveryBundleSha256":    recoveryBundle.PayloadSHA256,
 						"providerResume":          resumeSelection.eventPayload(execution.ProviderResumeStrategySnapshot),
 					},
 				})
@@ -319,6 +489,43 @@ func (s *Service) Claim(
 	return OperationResult[ClaimResult]{}, problem.New(409, "request_receipt_conflict", "The claim request is still being committed; retry with the same X-Request-ID.")
 }
 
+func validateWorkerExecutionPoolAffinity(
+	ctx context.Context,
+	tx *gorm.DB,
+	worker persistence.WorkerInstance,
+	workerMode string,
+	execution persistence.AgentExecution,
+) error {
+	switch workerMode {
+	case WorkerModeWarmPool:
+		if worker.WorkerPoolID == nil || worker.WorkerPoolVersion == nil || worker.CapacityClass == nil {
+			return problem.New(409, "worker_pool_identity_required", "warm-pool Workers must register an authoritative Worker pool identity before claiming executions.")
+		}
+		if execution.WorkerPoolID == nil || execution.WorkerPoolVersion == nil || execution.CapacityClass == nil ||
+			*execution.WorkerPoolID != *worker.WorkerPoolID ||
+			*execution.WorkerPoolVersion != *worker.WorkerPoolVersion ||
+			*execution.CapacityClass != *worker.CapacityClass {
+			return problem.New(409, "worker_pool_assignment_mismatch", "The Execution is assigned to another Worker pool snapshot.")
+		}
+	case WorkerModeGeneralPool:
+		if execution.WorkerPoolID == nil {
+			return nil
+		}
+		var count int64
+		if err := tx.WithContext(ctx).Table("execution_placement_policies AS placement_policy").
+			Joins("JOIN worker_pools AS default_pool ON default_pool.id = placement_policy.default_pool_id").
+			Where("placement_policy.execution_target_id = ? AND placement_policy.default_pool_id = ? AND default_pool.mode <> ?",
+				execution.ExecutionTargetID, *execution.WorkerPoolID, placement.PoolModeWarm).
+			Count(&count).Error; err != nil {
+			return problem.Wrap(500, "worker_pool_lookup_failed", "The Execution Worker pool affinity could not be verified.", err)
+		}
+		if count != 1 {
+			return problem.New(409, "worker_pool_assignment_mismatch", "general-pool Workers can only claim legacy or default non-warm Worker pools.")
+		}
+	}
+	return nil
+}
+
 func (s *Service) Renew(
 	ctx context.Context,
 	worker persistence.WorkerInstance,
@@ -339,6 +546,9 @@ func (s *Service) Renew(
 			return Lease{}, err
 		}
 		now := s.now()
+		if err := s.requireExecutionSessionWithinAbsoluteLifetime(ctx, tx, execution, now); err != nil {
+			return Lease{}, err
+		}
 		expired, event, err := s.expireValidatedLeasePendingInteraction(ctx, tx, lease, execution, now)
 		if err != nil {
 			return Lease{}, err
@@ -352,11 +562,19 @@ func (s *Service) Renew(
 		if err := s.storeProviderCursor(ctx, tx, execution, input.ProviderResumeCursor, false); err != nil {
 			return Lease{}, err
 		}
+		access, accessUpdates, err := s.renewProviderCredentialAccessLocked(ctx, tx, execution, lease, now)
+		if err != nil {
+			return Lease{}, err
+		}
 		lease.HeartbeatAt = now
 		lease.ExpiresAt = now.Add(s.leaseTTL)
+		updates := map[string]any{"heartbeat_at": lease.HeartbeatAt, "expires_at": lease.ExpiresAt}
+		for key, value := range accessUpdates {
+			updates[key] = value
+		}
 		renewal := tx.WithContext(ctx).Model(&persistence.WorkerLease{}).
 			Where("execution_id = ? AND worker_id = ? AND generation = ?", executionID, worker.ID, input.Generation).
-			Updates(map[string]any{"heartbeat_at": lease.HeartbeatAt, "expires_at": lease.ExpiresAt})
+			Updates(updates)
 		if err := expectOne(renewal, 409, "lease_renew_failed", "Failed to renew the execution lease."); err != nil {
 			return Lease{}, err
 		}
@@ -364,7 +582,9 @@ func (s *Service) Renew(
 			Where("id = ?", worker.ID).Update("last_heartbeat_at", now).Error; err != nil {
 			return Lease{}, problem.Wrap(500, "worker_heartbeat_failed", "Failed to update the worker heartbeat.", err)
 		}
-		return toLease(lease, ""), nil
+		renewed := toLease(lease, "")
+		renewed.ProviderCredentialAccess = access
+		return renewed, nil
 	})
 	var apiError *problem.Error
 	if appended.EventID != uuid.Nil && errors.As(err, &apiError) && apiError.Code == "interaction_expired" {
@@ -392,10 +612,13 @@ func (s *Service) Start(
 		if err := requireExecutionTenantActive(ctx, tx, execution.TenantID); err != nil {
 			return Execution{}, err
 		}
+		now := s.now()
+		if err := s.requireExecutionSessionWithinAbsoluteLifetime(ctx, tx, execution, now); err != nil {
+			return Execution{}, err
+		}
 		if execution.Status == "running" {
 			return toExecution(execution), nil
 		}
-		now := s.now()
 		execution.Status = "running"
 		execution.StartedAt = &now
 		startUpdate := tx.WithContext(ctx).Model(&persistence.AgentExecution{}).
@@ -408,6 +631,9 @@ func (s *Service) Start(
 			Where("tenant_id = ? AND session_id = ? AND id = ?", execution.TenantID, execution.SessionID, execution.TurnID).
 			Updates(map[string]any{"status": "running", "started_at": now})
 		if err := expectOne(turnUpdate, 500, "turn_start_failed", "Failed to mark the turn as running."); err != nil {
+			return Execution{}, err
+		}
+		if err := s.markExecutionGenerationStartedLocked(ctx, tx, execution, now); err != nil {
 			return Execution{}, err
 		}
 		appended, err = s.sessions.AppendInternalEvent(ctx, tx, execution.TenantID, execution.SessionID, sessions.InternalEventInput{
@@ -441,6 +667,17 @@ func (s *Service) Complete(
 		lease, execution, err := s.lockLease(ctx, tx, worker, executionID, input.LeaseInput, true)
 		if err != nil {
 			return Execution{}, err
+		}
+		now := s.now()
+		expired, event, err := s.cancelExecutionIfSessionAbsoluteExpiredLocked(
+			ctx, tx, &execution, &lease, now,
+		)
+		if err != nil {
+			return Execution{}, err
+		}
+		if expired {
+			appended = event
+			return toExecution(execution), nil
 		}
 		if execution.Status == "waiting-for-approval" {
 			return Execution{}, problem.New(409, "execution_interaction_pending", "The execution is waiting for approval or user input.")
@@ -477,9 +714,11 @@ func (s *Service) Complete(
 		if err := s.storeProviderCursor(ctx, tx, execution, input.ProviderResumeCursor, true); err != nil {
 			return Execution{}, err
 		}
-		now := s.now()
 		if err := tx.WithContext(ctx).Delete(&lease).Error; err != nil {
 			return Execution{}, problem.Wrap(500, "lease_release_failed", "Failed to release the completed execution lease.", err)
+		}
+		if err := transitionWorkerAfterLeaseReleasedLocked(ctx, tx, lease, now); err != nil {
+			return Execution{}, err
 		}
 		execution.Status = "completed"
 		execution.FinishedAt = &now
@@ -508,6 +747,11 @@ func (s *Service) Complete(
 			Payload: payload,
 		})
 		if err != nil {
+			return Execution{}, err
+		}
+		if err := s.markExecutionGenerationTerminalOutcomeLocked(
+			ctx, tx, execution, now, generationTerminalOutcomeCompleted,
+		); err != nil {
 			return Execution{}, err
 		}
 		return toExecution(execution), nil
@@ -542,10 +786,26 @@ func (s *Service) Fail(
 		if err != nil {
 			return Execution{}, err
 		}
+		now := s.now()
+		expired, event, err := s.cancelExecutionIfSessionAbsoluteExpiredLocked(
+			ctx, tx, &execution, &lease, now,
+		)
+		if err != nil {
+			return Execution{}, err
+		}
+		if expired {
+			appended = event
+			return toExecution(execution), nil
+		}
 		if err := s.storeProviderCursor(ctx, tx, execution, input.ProviderResumeCursor, true); err != nil {
 			return Execution{}, err
 		}
-		now := s.now()
+		if err := supersedeResourceSuspendAttempts(
+			ctx, tx, execution, now, "execution_failed",
+			"The Execution failed while a resource suspension attempt was in progress.",
+		); err != nil {
+			return Execution{}, err
+		}
 		if err := s.supersedeInteractionGenerationWithReason(
 			ctx,
 			tx,
@@ -557,6 +817,9 @@ func (s *Service) Fail(
 		}
 		if err := tx.WithContext(ctx).Delete(&lease).Error; err != nil {
 			return Execution{}, problem.Wrap(500, "lease_release_failed", "Failed to release the failed execution lease.", err)
+		}
+		if err := transitionWorkerAfterLeaseReleasedLocked(ctx, tx, lease, now); err != nil {
+			return Execution{}, err
 		}
 		execution.Status = "failed"
 		execution.FinishedAt = &now
@@ -589,6 +852,11 @@ func (s *Service) Fail(
 			},
 		})
 		if err != nil {
+			return Execution{}, err
+		}
+		if err := s.markExecutionGenerationTerminalOutcomeLocked(
+			ctx, tx, execution, now, generationTerminalOutcomeFailed,
+		); err != nil {
 			return Execution{}, err
 		}
 		return toExecution(execution), nil
@@ -632,22 +900,111 @@ func (s *Service) Release(
 			}
 			return toExecution(execution), nil
 		}
-		if err := tx.WithContext(ctx).Delete(&lease).Error; err != nil {
-			return Execution{}, problem.Wrap(500, "lease_release_failed", "Failed to release the execution lease.", err)
-		}
-		outcomeUnknown, err := requeueExecutionControlCommands(ctx, tx, execution, lease, "The Worker released the Execution after delivering a primary operation without an acknowledgement.")
+		now := s.now()
+		expired, event, err := s.cancelExecutionIfSessionAbsoluteExpiredLocked(
+			ctx, tx, &execution, &lease, now,
+		)
 		if err != nil {
 			return Execution{}, err
 		}
-		if outcomeUnknown {
-			appended, err = s.failPrimaryOperationOutcomeUnknownLocked(
+		if expired {
+			appended = event
+			return toExecution(execution), nil
+		}
+		effectivePreserve, interactionOutcomeUnknown, err := s.prepareInteractionGenerationForRelease(
+			ctx,
+			tx,
+			execution,
+			lease,
+			input.PreserveInteractionResolutions,
+			now,
+		)
+		if err != nil {
+			return Execution{}, err
+		}
+		activeSuspendOutcomeUnknown, err := activeTurnSuspendOutcomeUnknownForLostGeneration(ctx, tx, execution)
+		if err != nil {
+			return Execution{}, err
+		}
+		if activeSuspendOutcomeUnknown {
+			const message = "The active Provider generation stopped after SuspendTurn delivery, but resource suspension did not reach its authoritative terminal proof. Automatic replay is unsafe."
+			if err := s.supersedeInteractionGenerationWithReason(ctx, tx, execution, lease, message); err != nil {
+				return Execution{}, err
+			}
+		}
+		if err := supersedeResourceSuspendAttempts(
+			ctx, tx, execution, now, "execution_released",
+			"The Worker released the Execution while a resource suspension attempt was in progress.",
+		); err != nil {
+			return Execution{}, err
+		}
+		if err := tx.WithContext(ctx).Delete(&lease).Error; err != nil {
+			return Execution{}, problem.Wrap(500, "lease_release_failed", "Failed to release the execution lease.", err)
+		}
+		if err := transitionWorkerAfterLeaseReleasedLocked(ctx, tx, lease, now); err != nil {
+			return Execution{}, err
+		}
+		if activeSuspendOutcomeUnknown {
+			const message = "The active Provider generation stopped after SuspendTurn delivery, but resource suspension did not reach its authoritative terminal proof. Automatic replay is unsafe."
+			appended, err = s.failExecutionOutcomeUnknownLocked(
 				ctx, tx, &execution, "worker", &worker.ID,
-				"The Provider operation may have completed before the Worker response was lost.",
+				"active_suspend_checkpoint_outcome_unknown", message,
 			)
 			if err != nil {
 				return Execution{}, err
 			}
 			return toExecution(execution), nil
+		}
+		controlOutcomeUnknown, err := requeueExecutionControlCommands(ctx, tx, execution, lease, "The Worker released the Execution after delivering a primary operation without an acknowledgement.")
+		if err != nil {
+			return Execution{}, err
+		}
+		if interactionOutcomeUnknown || controlOutcomeUnknown {
+			message := "The Provider operation may have completed before the Worker response was lost."
+			if interactionOutcomeUnknown {
+				message = "An interaction resolution may have reached the Provider before the Worker generation was lost; automatic replay is unsafe."
+			}
+			appended, err = s.failPrimaryOperationOutcomeUnknownLocked(
+				ctx, tx, &execution, "worker", &worker.ID,
+				message,
+			)
+			if err != nil {
+				return Execution{}, err
+			}
+			return toExecution(execution), nil
+		}
+		if effectivePreserve {
+			var pendingInteractions int64
+			if err := tx.WithContext(ctx).Model(&persistence.ExecutionInteraction{}).
+				Where("tenant_id = ? AND execution_id = ? AND status = ?", execution.TenantID, execution.ID, "pending").
+				Count(&pendingInteractions).Error; err != nil {
+				return Execution{}, problem.Wrap(
+					500,
+					"interaction_suspend_pending_count_failed",
+					"Pending interactions could not be checked while releasing the quiesced Worker generation.",
+					err,
+				)
+			}
+			if pendingInteractions > 0 {
+				if err := s.requireLeaseExpirySuspendWorkspaceRecoverable(ctx, tx, execution); err != nil {
+					message := "The Provider was quiesced with pending interactions, but a recoverable Workspace checkpoint could not be proven. Recovering the callback in a new generation is unsafe."
+					if terminalErr := s.terminalizeInteractionsAfterOutcomeUnknown(ctx, tx, execution, message); terminalErr != nil {
+						return Execution{}, terminalErr
+					}
+					appended, err = s.failExecutionOutcomeUnknownLocked(
+						ctx, tx, &execution, "worker", &worker.ID,
+						"resource_suspend_checkpoint_outcome_unknown", message,
+					)
+					if err != nil {
+						return Execution{}, err
+					}
+					return toExecution(execution), nil
+				}
+				// Explicit Worker release means the suspend commit was rejected,
+				// not that its acknowledgement was lost. Keep the callback state,
+				// but recover it in a new Generation. Only Lease-expiry
+				// reconciliation may infer a completed suspend after a lost ACK.
+			}
 		}
 		execution.Status = "recovering"
 		execution.WorkerID = nil
@@ -669,9 +1026,18 @@ func (s *Service) Release(
 		appended, err = s.sessions.AppendInternalEvent(ctx, tx, execution.TenantID, execution.SessionID, sessions.InternalEventInput{
 			EventType: "execution.recovering", ActorType: "worker", ActorID: &worker.ID,
 			ExecutionID: &execution.ID, WorkerID: &worker.ID, Generation: &execution.Generation,
-			Payload: map[string]any{"turnId": execution.TurnID, "reason": input.Reason},
+			Payload: map[string]any{
+				"turnId": execution.TurnID, "reason": input.Reason,
+				"preservedInteractionResolutions": effectivePreserve,
+				"preservationRequestedByWorker":   input.PreserveInteractionResolutions,
+			},
 		})
 		if err != nil {
+			return Execution{}, err
+		}
+		if err := s.markExecutionGenerationTerminalOutcomeLocked(
+			ctx, tx, execution, now, generationTerminalOutcomeRecovering,
+		); err != nil {
 			return Execution{}, err
 		}
 		return toExecution(execution), nil
@@ -709,6 +1075,9 @@ func (s *Service) RecoverExpired(ctx context.Context, limit int) error {
 				if err := tx.WithContext(ctx).Delete(&lease).Error; err != nil {
 					return problem.Wrap(500, "orphan_lease_cleanup_failed", "Failed to remove an orphan execution lease.", err)
 				}
+				if err := transitionWorkerAfterLeaseReleasedLocked(ctx, tx, lease, now); err != nil {
+					return err
+				}
 				continue
 			}
 			if err != nil {
@@ -730,6 +1099,9 @@ func (s *Service) RecoverExpired(ctx context.Context, limit int) error {
 			}
 			if err := tx.WithContext(ctx).Delete(&lease).Error; err != nil {
 				return problem.Wrap(500, "expired_lease_release_failed", "Failed to release an expired execution lease.", err)
+			}
+			if err := transitionWorkerAfterLeaseReleasedLocked(ctx, tx, lease, now); err != nil {
+				return err
 			}
 			if execution.WorkerID == nil || *execution.WorkerID != lease.WorkerID || execution.Generation != lease.Generation ||
 				(execution.Status != "leased" && execution.Status != "running" && execution.Status != "waiting-for-approval") {
@@ -769,18 +1141,104 @@ func (s *Service) recoverExecutionGenerationLocked(
 	lease persistence.WorkerLease,
 	reasonCode, reasonMessage, recoveryRisk string,
 ) (persistence.SessionEvent, error) {
-	if err := s.supersedeInteractionGenerationWithReason(ctx, tx, execution, lease, reasonMessage); err != nil {
-		return persistence.SessionEvent{}, err
-	}
-	outcomeUnknown, err := requeueExecutionControlCommands(ctx, tx, execution, lease, reasonMessage)
+	now := s.now()
+	expired, event, err := s.cancelExecutionIfSessionAbsoluteExpiredLocked(
+		ctx, tx, &execution, &lease, now,
+	)
 	if err != nil {
 		return persistence.SessionEvent{}, err
 	}
-	if outcomeUnknown {
-		outcomeMessage := "The Provider operation outcome is unknown because its Worker generation was lost after delivery. " + reasonMessage
-		return s.failPrimaryOperationOutcomeUnknownLocked(
-			ctx, tx, &execution, "system", nil, outcomeMessage,
+	if expired {
+		return event, nil
+	}
+	activeSuspendOutcomeUnknown, err := activeTurnSuspendOutcomeUnknownForLostGeneration(ctx, tx, execution)
+	if err != nil {
+		return persistence.SessionEvent{}, err
+	}
+	preserveInteractions := false
+	if reasonCode != "interaction_expired" {
+		var err error
+		preserveInteractions, err = s.shouldPreserveInteractionGeneration(
+			ctx, tx, execution, lease, false, now,
 		)
+		if err != nil {
+			return persistence.SessionEvent{}, err
+		}
+	}
+	if err := supersedeResourceSuspendAttempts(
+		ctx, tx, execution, s.now(), reasonCode,
+		"The Worker generation entered recovery while a resource suspension attempt was in progress.",
+	); err != nil {
+		return persistence.SessionEvent{}, err
+	}
+	if activeSuspendOutcomeUnknown {
+		message := "The active Provider generation was lost after SuspendTurn delivery, but no authoritative suspend terminal proof completed. Automatic replay is unsafe. " + reasonMessage
+		if err := s.terminalizeInteractionsAfterOutcomeUnknown(ctx, tx, execution, message); err != nil {
+			return persistence.SessionEvent{}, err
+		}
+		return s.failExecutionOutcomeUnknownLocked(
+			ctx, tx, &execution, "system", nil,
+			"active_suspend_checkpoint_outcome_unknown", message,
+		)
+	}
+	interactionOutcomeUnknown, err := s.reconcileInteractionGenerationForRecovery(
+		ctx, tx, execution, lease, preserveInteractions, s.now(), reasonMessage,
+	)
+	if err != nil {
+		return persistence.SessionEvent{}, err
+	}
+	controlOutcomeUnknown, err := requeueExecutionControlCommands(ctx, tx, execution, lease, reasonMessage)
+	if err != nil {
+		return persistence.SessionEvent{}, err
+	}
+	boundActiveSuspendOutcomeUnknown, err := markBoundActiveTurnCheckpointOutcomeUnknown(
+		ctx, tx, execution, lease, now,
+	)
+	if err != nil {
+		return persistence.SessionEvent{}, err
+	}
+	if interactionOutcomeUnknown || controlOutcomeUnknown || boundActiveSuspendOutcomeUnknown {
+		outcomeMessage := "The Provider operation outcome is unknown because its Worker generation was lost after delivery. " + reasonMessage
+		if interactionOutcomeUnknown {
+			outcomeMessage = "An interaction resolution may have reached the Provider, or a recovery-bound resolution may have been applied, before its Worker generation was lost. Automatic replay is unsafe. " + reasonMessage
+		} else if boundActiveSuspendOutcomeUnknown {
+			outcomeMessage = "The active-turn checkpoint was already consumed by this Recovery Bundle before its Worker generation was lost. Reusing the same cursor boundary could repeat completed side effects. " + reasonMessage
+		}
+		if boundActiveSuspendOutcomeUnknown {
+			return s.failExecutionOutcomeUnknownLocked(
+				ctx, tx, &execution, "system", nil,
+				"active_suspend_resume_outcome_unknown", outcomeMessage,
+			)
+		}
+		return s.failPrimaryOperationOutcomeUnknownLocked(ctx, tx, &execution, "system", nil, outcomeMessage)
+	}
+	if preserveInteractions {
+		var pendingInteractions int64
+		if err := tx.WithContext(ctx).Model(&persistence.ExecutionInteraction{}).
+			Where("tenant_id = ? AND execution_id = ? AND status = ?", execution.TenantID, execution.ID, "pending").
+			Count(&pendingInteractions).Error; err != nil {
+			return persistence.SessionEvent{}, problem.Wrap(
+				500,
+				"interaction_suspend_pending_count_failed",
+				"Pending interactions could not be checked while reconciling the lost suspend acknowledgement.",
+				err,
+			)
+		}
+		if pendingInteractions > 0 {
+			if err := s.requireLeaseExpirySuspendWorkspaceRecoverable(ctx, tx, execution); err != nil {
+				message := "The Worker lease expired during resource suspension, but a recoverable Workspace checkpoint could not be proven. Automatic callback reconstruction is unsafe."
+				if terminalErr := s.terminalizeInteractionsAfterOutcomeUnknown(ctx, tx, execution, message); terminalErr != nil {
+					return persistence.SessionEvent{}, terminalErr
+				}
+				return s.failExecutionOutcomeUnknownLocked(
+					ctx, tx, &execution, "system", nil,
+					"resource_suspend_checkpoint_outcome_unknown", message,
+				)
+			}
+			return s.suspendAfterLostResourceSuspendAcknowledgementLocked(
+				ctx, tx, &execution, lease, reasonCode, "lease-expiry",
+			)
+		}
 	}
 	var restoreCheckpointID *uuid.UUID
 	if execution.RemoteWorkspaceID != nil {
@@ -822,6 +1280,11 @@ func (s *Service) recoverExecutionGenerationLocked(
 		return persistence.SessionEvent{}, err
 	}
 	if err := s.enqueueRecovery(ctx, tx, execution, reasonCode, recoveryRisk); err != nil {
+		return persistence.SessionEvent{}, err
+	}
+	if err := s.markExecutionGenerationTerminalOutcomeLocked(
+		ctx, tx, execution, now, generationTerminalOutcomeRecovering,
+	); err != nil {
 		return persistence.SessionEvent{}, err
 	}
 	payload := map[string]any{"turnId": execution.TurnID, "reason": reasonCode}
@@ -872,19 +1335,36 @@ func (s *Service) failPrimaryOperationOutcomeUnknownLocked(
 	actorID *uuid.UUID,
 	message string,
 ) (persistence.SessionEvent, error) {
+	return s.failExecutionOutcomeUnknownLocked(
+		ctx, tx, execution, actorType, actorID,
+		"provider_operation_outcome_unknown", message,
+	)
+}
+
+func (s *Service) failExecutionOutcomeUnknownLocked(
+	ctx context.Context,
+	tx *gorm.DB,
+	execution *persistence.AgentExecution,
+	actorType string,
+	actorID *uuid.UUID,
+	failureCode string,
+	message string,
+) (persistence.SessionEvent, error) {
 	now := s.now()
-	failureCode := "provider_operation_outcome_unknown"
+	wasRecovering := execution.Status == "recovering"
 	execution.Status = "failed"
 	execution.FinishedAt = &now
 	execution.FailureCode = &failureCode
 	execution.FailureMessage = &message
+	execution.NextRecoveryReason = nil
 	updated := tx.WithContext(ctx).Model(&persistence.AgentExecution{}).
 		Where("tenant_id = ? AND id = ? AND generation = ? AND status IN ?",
 			execution.TenantID, execution.ID, execution.Generation,
-			[]string{"leased", "running", "waiting-for-approval"}).
+			[]string{"leased", "running", "waiting-for-approval", "recovering", "suspended"}).
 		Updates(map[string]any{
 			"status": "failed", "finished_at": now,
 			"failure_code": failureCode, "failure_message": message,
+			"next_recovery_reason": nil,
 		})
 	if err := expectOne(updated, 409, "primary_operation_outcome_conflict", "The uncertain Provider operation could not be terminalized safely."); err != nil {
 		return persistence.SessionEvent{}, err
@@ -909,6 +1389,18 @@ func (s *Service) failPrimaryOperationOutcomeUnknownLocked(
 	if err != nil {
 		return persistence.SessionEvent{}, err
 	}
+	if err := s.markExecutionGenerationTerminalOutcomeLocked(
+		ctx, tx, *execution, now, generationTerminalOutcomeFailed,
+	); err != nil {
+		return persistence.SessionEvent{}, err
+	}
+	if wasRecovering {
+		if err := s.markExecutionGenerationTerminalOutcomeAtGenerationLocked(
+			ctx, tx, *execution, execution.Generation+1, now, generationTerminalOutcomeFailed,
+		); err != nil {
+			return persistence.SessionEvent{}, err
+		}
+	}
 	if err := outbox.Enqueue(ctx, tx, outbox.EnqueueInput{
 		TenantID: &execution.TenantID, Topic: "execution.failed", MessageKey: execution.ID.String(),
 		Payload: map[string]any{
@@ -918,6 +1410,109 @@ func (s *Service) failPrimaryOperationOutcomeUnknownLocked(
 		},
 	}); err != nil {
 		return persistence.SessionEvent{}, problem.Wrap(500, "primary_operation_outcome_outbox_failed", "The uncertain operation failure event could not be queued.", err)
+	}
+	return event, nil
+}
+
+func (s *Service) requireLeaseExpirySuspendWorkspaceRecoverable(
+	ctx context.Context,
+	tx *gorm.DB,
+	execution persistence.AgentExecution,
+) error {
+	if execution.RemoteWorkspaceID == nil {
+		return nil
+	}
+	var workspace persistence.RemoteWorkspace
+	if err := persistence.WithLocking(tx.WithContext(ctx), "UPDATE", "").
+		Where(
+			"tenant_id = ? AND id = ? AND session_id = ?",
+			execution.TenantID, *execution.RemoteWorkspaceID, execution.SessionID,
+		).
+		Take(&workspace).Error; err != nil {
+		return problem.Wrap(
+			409,
+			"resource_suspend_workspace_unavailable",
+			"The managed Workspace could not be verified after the suspend acknowledgement was lost.",
+			err,
+		)
+	}
+	if workspace.State != "ready" && workspace.State != "dirty" {
+		return problem.New(
+			409,
+			"resource_suspend_checkpoint_unconfirmed",
+			"The managed Workspace did not reach a stable ready or dirty state before the suspend acknowledgement was lost.",
+		)
+	}
+	return s.requireSuspendWorkspaceRecoverable(ctx, tx, execution)
+}
+
+func (s *Service) suspendAfterLostResourceSuspendAcknowledgementLocked(
+	ctx context.Context,
+	tx *gorm.DB,
+	execution *persistence.AgentExecution,
+	lease persistence.WorkerLease,
+	reasonCode string,
+	reconciliationSource string,
+) (persistence.SessionEvent, error) {
+	now := s.now()
+	recoveryReason := "suspend-resume"
+	updated := tx.WithContext(ctx).Model(&persistence.AgentExecution{}).
+		Where(
+			"tenant_id = ? AND id = ? AND worker_id = ? AND generation = ? AND status = ?",
+			execution.TenantID, execution.ID, lease.WorkerID, lease.Generation, "waiting-for-approval",
+		).
+		Updates(map[string]any{
+			"status": "suspended", "worker_id": nil, "next_recovery_reason": recoveryReason,
+		})
+	if err := expectOne(
+		updated,
+		409,
+		"resource_suspend_lease_expiry_conflict",
+		"The Execution changed while reconciling its lost resource suspension acknowledgement.",
+	); err != nil {
+		return persistence.SessionEvent{}, err
+	}
+	execution.Status = "suspended"
+	execution.WorkerID = nil
+	execution.NextRecoveryReason = &recoveryReason
+	payload := map[string]any{
+		"turnId": execution.TurnID, "reason": reasonCode,
+		"reconciledAfterLostAcknowledgement": true,
+		"reconciliationSource":               reconciliationSource,
+	}
+	if reconciliationSource == "lease-expiry" {
+		payload["reconciledAfterLeaseExpiry"] = true
+	}
+	event, err := s.sessions.AppendInternalEvent(
+		ctx,
+		tx,
+		execution.TenantID,
+		execution.SessionID,
+		sessions.InternalEventInput{
+			EventType: "execution.suspended", ActorType: "system",
+			ExecutionID: &execution.ID, WorkerID: &lease.WorkerID, Generation: &execution.Generation,
+			Payload: payload,
+		},
+	)
+	if err != nil {
+		return persistence.SessionEvent{}, err
+	}
+	if err := outbox.Enqueue(ctx, tx, outbox.EnqueueInput{
+		TenantID: &execution.TenantID, Topic: "execution.suspended", MessageKey: execution.ID.String(),
+		Payload: map[string]any{
+			"tenantId": execution.TenantID, "sessionId": execution.SessionID,
+			"turnId": execution.TurnID, "executionId": execution.ID,
+			"generation": execution.Generation, "suspendedAt": now,
+			"reconciledAfterLostAcknowledgement": true,
+			"reconciliationSource":               reconciliationSource,
+		},
+	}); err != nil {
+		return persistence.SessionEvent{}, problem.Wrap(
+			500,
+			"resource_suspend_lease_expiry_outbox_failed",
+			"The reconciled resource suspension event could not be queued.",
+			err,
+		)
 	}
 	return event, nil
 }
@@ -969,6 +1564,50 @@ func (s *Service) executionGenerationCheckpointRisk(
 	return "", nil
 }
 
+func (s *Service) requireExecutionSessionWithinAbsoluteLifetime(
+	ctx context.Context,
+	tx *gorm.DB,
+	execution persistence.AgentExecution,
+	now time.Time,
+) error {
+	var session persistence.AgentSession
+	err := tx.WithContext(ctx).
+		Select("id", "absolute_expires_at").
+		Where("tenant_id = ? AND id = ?", execution.TenantID, execution.SessionID).
+		Take(&session).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return problem.New(409, "session_not_found", "The Execution Session no longer exists.")
+	}
+	if err != nil {
+		return problem.Wrap(500, "session_lifetime_load_failed", "The Execution Session lifetime could not be loaded.", err)
+	}
+	return sessions.RequireSessionWithinAbsoluteLifetime(session, now)
+}
+
+func (s *Service) cancelExecutionIfSessionAbsoluteExpiredLocked(
+	ctx context.Context,
+	tx *gorm.DB,
+	execution *persistence.AgentExecution,
+	lease *persistence.WorkerLease,
+	now time.Time,
+) (bool, persistence.SessionEvent, error) {
+	lifetimeErr := s.requireExecutionSessionWithinAbsoluteLifetime(ctx, tx, *execution, now)
+	if lifetimeErr == nil {
+		return false, persistence.SessionEvent{}, nil
+	}
+	var apiError *problem.Error
+	if !errors.As(lifetimeErr, &apiError) || apiError.Code != "session_absolute_expired" {
+		return false, persistence.SessionEvent{}, lifetimeErr
+	}
+	event, err := s.cancelExecutionLocked(
+		ctx, tx, execution, lease, "system", nil, now, sessionAbsoluteExpiryAction,
+	)
+	if err != nil {
+		return false, persistence.SessionEvent{}, err
+	}
+	return true, event, nil
+}
+
 func (s *Service) lockLease(
 	ctx context.Context,
 	tx *gorm.DB,
@@ -994,6 +1633,9 @@ func (s *Service) lockLease(
 	}
 	if lease.WorkerID != worker.ID || lease.Generation != input.Generation {
 		return persistence.WorkerLease{}, persistence.AgentExecution{}, problem.New(409, "generation_fenced", "The worker generation is no longer current.")
+	}
+	if lease.WorkerIncarnation != worker.Incarnation || lease.WorkerInstanceUID != worker.InstanceUID {
+		return persistence.WorkerLease{}, persistence.AgentExecution{}, problem.New(409, "worker_incarnation_fenced", "The execution lease belongs to a previous Worker incarnation.")
 	}
 	if requireToken && subtle.ConstantTimeCompare(lease.LeaseTokenHash, secret.HashToken(strings.TrimSpace(input.LeaseToken))) != 1 {
 		return persistence.WorkerLease{}, persistence.AgentExecution{}, problem.New(401, "invalid_lease_token", "The execution lease token is invalid.")
@@ -1052,13 +1694,41 @@ func (s *Service) requireClaimableWorker(ctx context.Context, tx *gorm.DB, worke
 		return persistence.WorkerInstance{}, problem.New(409, "remote_worker_protocol_required", "Remote workers must support execution leases and generation fencing.")
 	}
 	if worker.LastHeartbeatAt.Before(s.now().Add(-s.heartbeatTimeout)) {
+		now := s.now()
 		if err := tx.WithContext(ctx).Model(&persistence.WorkerInstance{}).Where("id = ?", worker.ID).Update("status", "offline").Error; err != nil {
 			return persistence.WorkerInstance{}, problem.Wrap(500, "worker_offline_update_failed", "Failed to mark the stale worker offline.", err)
+		}
+		worker.Status = "offline"
+		if err := transitionWorkerIncarnationFactLocked(
+			ctx, tx, worker, now, workerFactStateOffline, false, "",
+		); err != nil {
+			return persistence.WorkerInstance{}, err
 		}
 		if err := enqueueWorkerOffline(ctx, tx, worker); err != nil {
 			return persistence.WorkerInstance{}, problem.Wrap(500, "worker_offline_outbox_failed", "Failed to queue the offline Worker event.", err)
 		}
 		return persistence.WorkerInstance{}, problem.New(409, "worker_heartbeat_stale", "Worker heartbeat is stale; send a heartbeat before claiming work.")
+	}
+	var executionLeases int64
+	if err := tx.WithContext(ctx).Model(&persistence.WorkerLease{}).
+		Where("worker_id = ? AND worker_incarnation = ?", worker.ID, worker.Incarnation).
+		Count(&executionLeases).Error; err != nil {
+		return persistence.WorkerInstance{}, problem.Wrap(500, "worker_busy_probe_failed", "The Worker lease state could not be inspected.", err)
+	}
+	if executionLeases > 0 {
+		return persistence.WorkerInstance{}, problem.New(409, "worker_busy", "The Worker already owns an active Execution lease.")
+	}
+	if tx.Dialector.Name() != "sqlite" || tx.Migrator().HasTable(&persistence.WorkspaceCleanupCommand{}) {
+		var cleanupLeases int64
+		if err := tx.WithContext(ctx).Model(&persistence.WorkspaceCleanupCommand{}).
+			Where("delivery_worker_id = ? AND delivery_worker_incarnation = ? AND status IN ?",
+				worker.ID, worker.Incarnation, activeWorkspaceCleanupStatuses).
+			Count(&cleanupLeases).Error; err != nil {
+			return persistence.WorkerInstance{}, problem.Wrap(500, "worker_busy_probe_failed", "The Worker cleanup lease state could not be inspected.", err)
+		}
+		if cleanupLeases > 0 {
+			return persistence.WorkerInstance{}, problem.New(409, "worker_busy", "The Worker already owns an active Workspace cleanup lease.")
+		}
 	}
 	return worker, nil
 }
@@ -1090,6 +1760,22 @@ func (s *Service) enqueueRecovery(
 	}
 	if err != nil {
 		return problem.Wrap(500, "execution_recovery_outbox_failed", "Failed to queue the recovering execution.", err)
+	}
+	prospective := execution
+	prospective.Generation = execution.Generation + 1
+	recoveryReason, _, err := resolveRecoveryBundleLineage(ctx, tx, prospective)
+	if err != nil {
+		return err
+	}
+	if err := s.recordExecutionGenerationDispatchRequested(
+		ctx,
+		tx,
+		execution,
+		execution.Generation+1,
+		s.now(),
+		recoveryReason,
+	); err != nil {
+		return err
 	}
 	return nil
 }

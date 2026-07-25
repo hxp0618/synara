@@ -46,7 +46,7 @@ afterEach(() => {
 });
 
 describe("Stage 3 Provider Host acceptance fixture", () => {
-  it("describes the current Protocol 2.1 ordered 8 Provider by 28 Capability catalog", () => {
+  it("describes the current Protocol 2.2 ordered 8 Provider by 28 Capability catalog", () => {
     const enabled = new Set(["codex", "claudeAgent"] as const);
 
     for (const provider of PROVIDER_HOST_PROVIDER_KINDS) {
@@ -55,7 +55,7 @@ describe("Stage 3 Provider Host acceptance fixture", () => {
         (entry) => entry.provider === provider,
       );
 
-      expect(descriptor.protocolVersion).toEqual({ major: 2, minor: 1 });
+      expect(descriptor.protocolVersion).toEqual({ major: 2, minor: 2 });
       expect(descriptor.capabilityDescriptor.provider).toBe(provider);
       expect(descriptor.capabilityDescriptor.supportTier).toBe(catalog?.supportTier);
       expect(descriptor.capabilityDescriptor.capabilities).toEqual(catalog?.capabilities);

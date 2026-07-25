@@ -7,19 +7,28 @@ import (
 )
 
 type WorkerManifest struct {
-	ID                    uuid.UUID      `gorm:"column:id;type:uuid;primaryKey"`
-	ManifestHash          string         `gorm:"column:manifest_hash;uniqueIndex"`
-	WorkerBuildVersion    string         `gorm:"column:worker_build_version"`
-	WorkerBuildGitSHA     *string        `gorm:"column:worker_build_git_sha"`
-	WorkerProtocolMinimum int            `gorm:"column:worker_protocol_minimum"`
-	WorkerProtocolMaximum int            `gorm:"column:worker_protocol_maximum"`
-	RuntimeEventMinimum   int            `gorm:"column:runtime_event_minimum"`
-	RuntimeEventMaximum   int            `gorm:"column:runtime_event_maximum"`
-	OperatingSystem       string         `gorm:"column:operating_system"`
-	Architecture          string         `gorm:"column:architecture"`
-	ImageDigest           *string        `gorm:"column:image_digest"`
-	FeatureFlags          map[string]any `gorm:"column:feature_flags;serializer:json"`
-	CreatedAt             time.Time      `gorm:"column:created_at"`
+	ID                                     uuid.UUID      `gorm:"column:id;type:uuid;primaryKey"`
+	ManifestHash                           string         `gorm:"column:manifest_hash;uniqueIndex"`
+	WorkerBuildVersion                     string         `gorm:"column:worker_build_version"`
+	WorkerBuildGitSHA                      *string        `gorm:"column:worker_build_git_sha"`
+	WorkerProtocolMinimum                  int            `gorm:"column:worker_protocol_minimum"`
+	WorkerProtocolMaximum                  int            `gorm:"column:worker_protocol_maximum"`
+	RuntimeEventMinimum                    int            `gorm:"column:runtime_event_minimum"`
+	RuntimeEventMaximum                    int            `gorm:"column:runtime_event_maximum"`
+	OperatingSystem                        string         `gorm:"column:operating_system"`
+	Architecture                           string         `gorm:"column:architecture"`
+	ImageDigest                            *string        `gorm:"column:image_digest"`
+	ProcessContainmentMode                 string         `gorm:"column:process_containment_mode;default:none"`
+	ProcessContainmentSupervisorVersion    *string        `gorm:"column:process_containment_supervisor_version"`
+	ProcessContainmentProbeVersion         *int           `gorm:"column:process_containment_probe_version"`
+	ProcessContainmentProbeSHA256          *string        `gorm:"column:process_containment_probe_sha256"`
+	ProcessContainmentSupervisorIdentity   *string        `gorm:"column:process_containment_supervisor_identity"`
+	ProcessContainmentProviderIdentity     *string        `gorm:"column:process_containment_provider_identity"`
+	ProcessContainmentTrustMode            string         `gorm:"column:process_containment_trust_mode;default:none"`
+	ProcessContainmentAttestationKeyID     *string        `gorm:"column:process_containment_attestation_key_id"`
+	ProcessContainmentAttestationKeySHA256 *string        `gorm:"column:process_containment_attestation_key_sha256"`
+	FeatureFlags                           map[string]any `gorm:"column:feature_flags;serializer:json"`
+	CreatedAt                              time.Time      `gorm:"column:created_at"`
 }
 
 func (WorkerManifest) TableName() string { return "worker_manifests" }

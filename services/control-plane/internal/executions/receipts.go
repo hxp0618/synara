@@ -94,12 +94,9 @@ func runIdempotent[T any](
 		storedStatus := statusCode
 		var committedError error
 		err = persistence.InTransaction(ctx, service.db, func(tx *gorm.DB) error {
-			var receipt persistence.WorkerRequestReceipt
-			lookupErr := persistence.WithLocking(tx.WithContext(ctx), "UPDATE", "").
-				Where("worker_id = ? AND request_id = ?", worker.ID, requestID).Take(&receipt).Error
-
-			if err := lockCurrentWorkerIncarnation(ctx, tx, worker); err != nil {
-				return err
+			receipt, lookupErr, lockErr := lockWorkerAndLoadRequestReceipt(ctx, tx, worker, requestID)
+			if lockErr != nil {
+				return lockErr
 			}
 			if lookupErr == nil {
 				if receipt.WorkerIncarnation == worker.Incarnation && receipt.ExpiresAt.After(service.now()) {
@@ -161,4 +158,22 @@ func runIdempotent[T any](
 		return OperationResult[T]{Value: value, Replayed: replayed, StatusCode: storedStatus}, nil
 	}
 	return OperationResult[T]{}, problem.New(409, "request_receipt_conflict", "The worker request is still being committed; retry with the same X-Request-ID.")
+}
+
+func lockWorkerAndLoadRequestReceipt(
+	ctx context.Context,
+	tx *gorm.DB,
+	worker persistence.WorkerInstance,
+	requestID string,
+) (receipt persistence.WorkerRequestReceipt, lookupErr error, lockErr error) {
+	// The Worker row is the serialization point for all requests from one
+	// incarnation. Lock it before receipt lookup so a waiter cannot carry a
+	// stale "not found" result past the preceding transaction's commit.
+	if err := lockCurrentWorkerIncarnation(ctx, tx, worker); err != nil {
+		return receipt, nil, err
+	}
+	lookupErr = persistence.WithLocking(tx.WithContext(ctx), "UPDATE", "").
+		Where("worker_id = ? AND request_id = ?", worker.ID, requestID).
+		Take(&receipt).Error
+	return receipt, lookupErr, nil
 }

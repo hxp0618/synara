@@ -15,15 +15,19 @@ import (
 	"github.com/synara-ai/synara/services/control-plane/internal/executiontargets"
 	apiidempotency "github.com/synara-ai/synara/services/control-plane/internal/idempotency"
 	"github.com/synara-ai/synara/services/control-plane/internal/identity"
+	"github.com/synara-ai/synara/services/control-plane/internal/lifecyclepolicy"
 	"github.com/synara-ai/synara/services/control-plane/internal/outbox"
 	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
+	"github.com/synara-ai/synara/services/control-plane/internal/placement"
 	"github.com/synara-ai/synara/services/control-plane/internal/problem"
 	"github.com/synara-ai/synara/services/control-plane/internal/projects"
+	"github.com/synara-ai/synara/services/control-plane/internal/routing"
 	"github.com/synara-ai/synara/services/control-plane/internal/validation"
 	"github.com/synara-ai/synara/services/control-plane/internal/workerreleases"
 )
 
-var activeSessionExecutionStatuses = []string{"queued", "leased", "running", "waiting-for-approval", "recovering"}
+var activeSessionExecutionStatuses = []string{"queued", "leased", "running", "waiting-for-approval", "recovering", "suspended"}
+var resourceQuotaExecutionStatuses = []string{"queued", "leased", "running", "waiting-for-approval", "recovering"}
 
 const defaultProviderCapabilityHeartbeatTimeout = 90 * time.Second
 
@@ -37,6 +41,22 @@ func WithProviderCapabilityHeartbeatTimeout(timeout time.Duration) ServiceOption
 	}
 }
 
+type LifecyclePolicyResolver interface {
+	ResolveForSession(
+		context.Context,
+		*gorm.DB,
+		uuid.UUID,
+		uuid.UUID,
+		*lifecyclepolicy.Overrides,
+	) (lifecyclepolicy.Effective, error)
+}
+
+func WithLifecyclePolicyResolver(resolver LifecyclePolicyResolver) ServiceOption {
+	return func(service *Service) {
+		service.lifecyclePolicies = resolver
+	}
+}
+
 type Service struct {
 	db                                 *gorm.DB
 	authorizer                         *authorization.Authorizer
@@ -45,6 +65,7 @@ type Service struct {
 	repository                         persistence.Repository[persistence.AgentSession]
 	events                             *eventBroker
 	providerCapabilityHeartbeatTimeout time.Duration
+	lifecyclePolicies                  LifecyclePolicyResolver
 	now                                func() time.Time
 }
 
@@ -78,6 +99,15 @@ func (s *Service) RequireExecutionQuotaAvailable(
 	tx *gorm.DB,
 	tenantID uuid.UUID,
 ) error {
+	// Serialize count-based admission on the Tenant row. Locking only the quota
+	// row is insufficient because an absent (unlimited) row can be created
+	// concurrently, while every admission and quota update already shares this
+	// durable Tenant authority.
+	var tenant persistence.Tenant
+	if err := persistence.WithLocking(tx.WithContext(ctx), "UPDATE", "").
+		Select("id").Where("id = ? AND deleted_at IS NULL", tenantID).Take(&tenant).Error; err != nil {
+		return problem.Wrap(500, "execution_quota_check_failed", "Failed to lock the tenant execution quota authority.", err)
+	}
 	var quota persistence.TenantQuota
 	quotaErr := tx.WithContext(ctx).Where("tenant_id = ?", tenantID).Take(&quota).Error
 	if errors.Is(quotaErr, gorm.ErrRecordNotFound) || quota.MaxConcurrentExecutions == nil {
@@ -88,7 +118,7 @@ func (s *Service) RequireExecutionQuotaAvailable(
 	}
 	var activeExecutions int64
 	if err := tx.WithContext(ctx).Model(&persistence.AgentExecution{}).
-		Where("tenant_id = ? AND status IN ?", tenantID, activeSessionExecutionStatuses).
+		Where("tenant_id = ? AND status IN ?", tenantID, resourceQuotaExecutionStatuses).
 		Count(&activeExecutions).Error; err != nil {
 		return problem.Wrap(500, "execution_quota_check_failed", "Failed to check tenant execution quota.", err)
 	}
@@ -110,9 +140,21 @@ func toSession(model persistence.AgentSession) Session {
 		ProjectID: model.ProjectID, CreatedBy: model.CreatedBy, Title: model.Title,
 		Status: model.Status, Visibility: model.Visibility, Provider: provider,
 		Model: model.Model, ProviderCredentialID: model.ProviderCredentialID, ExecutionTargetID: model.ExecutionTargetID,
-		ForkSourceSessionID: model.ForkSourceSessionID, ForkSourceTurnID: model.ForkSourceTurnID,
+		RequestedExecutionTargetID: model.RequestedExecutionTargetID,
+		ExecutionTargetGroupID:     model.ExecutionTargetGroupID, RoutingPolicyVersion: model.RoutingPolicyVersion,
+		PreferredExecutionRegion: model.PreferredExecutionRegion,
+		ForkSourceSessionID:      model.ForkSourceSessionID, ForkSourceTurnID: model.ForkSourceTurnID,
 		ForkSourceSequence: model.ForkSourceEventSequence, ForkStrategy: model.ForkStrategy,
-		LastEventSequence: model.LastEventSequence, CreatedAt: model.CreatedAt,
+		LastEventSequence: model.LastEventSequence, ResourceState: model.ResourceState,
+		MeaningfulActivityAt: model.MeaningfulActivityAt,
+		ResourceIdleSince:    model.ResourceIdleSince, AbsoluteExpiresAt: model.AbsoluteExpiresAt,
+		ResourceLifecyclePolicy: lifecyclepolicy.Effective{
+			WaitingKeepAliveSeconds:        model.WaitingKeepAliveSeconds,
+			SuspendAfterIdleSeconds:        model.SuspendAfterIdleSeconds,
+			AbsoluteSessionLifetimeSeconds: cloneOptionalInt(model.AbsoluteSessionLifetimeSeconds),
+			WorkspaceRetentionDays:         model.WorkspaceRetentionDays, WarmPoolMode: model.WarmPoolMode,
+		},
+		CreatedAt: model.CreatedAt,
 		UpdatedAt: model.UpdatedAt, ArchivedAt: model.ArchivedAt,
 	}
 }
@@ -211,6 +253,20 @@ func normalizeModel(value *string) (*string, error) {
 	return &normalized, nil
 }
 
+func normalizePreferredExecutionRegion(value *string) (*string, error) {
+	if value == nil {
+		return nil, nil
+	}
+	normalized := strings.TrimSpace(*value)
+	if normalized == "" {
+		return nil, nil
+	}
+	if len(normalized) > 120 || strings.ContainsAny(normalized, "\r\n\t\x00") {
+		return nil, problem.New(400, "invalid_preferred_execution_region", "preferredExecutionRegion is invalid.")
+	}
+	return &normalized, nil
+}
+
 func (s *Service) Create(
 	ctx context.Context,
 	principal identity.Principal,
@@ -265,7 +321,15 @@ func (s *Service) CreateWithIdempotency(
 		}
 	}
 
-	target, err := s.targets.ResolveForSession(ctx, tenantID, project.OrganizationID, input.ExecutionTargetID)
+	var fixedTarget *executiontargets.Binding
+	if input.ExecutionTargetGroupID == nil {
+		target, err := s.targets.ResolveForSession(ctx, tenantID, project.OrganizationID, input.ExecutionTargetID)
+		if err != nil {
+			return Session{}, false, err
+		}
+		fixedTarget = &target
+	}
+	preferredRegion, err := normalizePreferredExecutionRegion(input.PreferredExecutionRegion)
 	if err != nil {
 		return Session{}, false, err
 	}
@@ -276,25 +340,86 @@ func (s *Service) CreateWithIdempotency(
 		Operation: "session.create", SuccessStatus: 201,
 		Request: map[string]any{
 			"projectId": projectID, "title": title, "visibility": visibility, "provider": provider,
-			"model": modelName, "providerCredentialId": requestedCredentialID, "executionTargetId": target.ID,
+			"model": modelName, "providerCredentialId": requestedCredentialID,
+			"executionTargetId": input.ExecutionTargetID, "executionTargetGroupId": input.ExecutionTargetGroupID,
+			"preferredExecutionRegion": preferredRegion,
+			"resourceLifecyclePolicy":  input.ResourceLifecyclePolicy,
 		},
 	}, func(tx *gorm.DB) (Session, error) {
-		var targetModel persistence.ExecutionTarget
-		targetErr := tx.WithContext(ctx).
-			Where("id = ? AND status = ?", target.ID, "active").
-			Where("(tenant_id IS NULL OR tenant_id = ?) AND (organization_id IS NULL OR organization_id = ?)", tenantID, project.OrganizationID).
-			Take(&targetModel).Error
-		if errors.Is(targetErr, gorm.ErrRecordNotFound) {
-			return Session{}, problem.New(409, "execution_target_unavailable", "The selected Execution Target is no longer available.")
-		}
-		if targetErr != nil {
-			return Session{}, problem.Wrap(500, "execution_target_lookup_failed", "Failed to reload the selected Execution Target.", targetErr)
-		}
-		if err := s.requireTargetProviderCapabilities(
-			ctx, tx, targetModel, provider, "start-session", "send-turn",
-		); err != nil {
+		now := s.now()
+		lifecyclePolicy, err := s.resolveLifecyclePolicy(
+			ctx, tx, tenantID, project.ID, input.ResourceLifecyclePolicy,
+		)
+		if err != nil {
 			return Session{}, err
 		}
+
+		var (
+			targetModel      persistence.ExecutionTarget
+			globalSelection  *routing.Selection
+			launchTargetPlan ExecutionLaunchTarget
+		)
+		if input.ExecutionTargetGroupID == nil {
+			targetErr := tx.WithContext(ctx).
+				Where("id = ? AND status = ?", fixedTarget.ID, "active").
+				Where("(tenant_id IS NULL OR tenant_id = ?) AND (organization_id IS NULL OR organization_id = ?)", tenantID, project.OrganizationID).
+				Take(&targetModel).Error
+			if errors.Is(targetErr, gorm.ErrRecordNotFound) {
+				return Session{}, problem.New(409, "execution_target_unavailable", "The selected Execution Target is no longer available.")
+			}
+			if targetErr != nil {
+				return Session{}, problem.Wrap(500, "execution_target_lookup_failed", "Failed to reload the selected Execution Target.", targetErr)
+			}
+		}
+		var routeRequest *routing.SelectRequest
+		if input.ExecutionTargetGroupID != nil {
+			preferredRegions := make([]string, 0, 1)
+			if preferredRegion != nil {
+				preferredRegions = append(preferredRegions, *preferredRegion)
+			}
+			request := routing.SelectRequest{
+				TenantID: tenantID, OrganizationID: project.OrganizationID,
+				TargetGroupID: *input.ExecutionTargetGroupID, Provider: provider,
+				PreferredTargetID: input.ExecutionTargetID,
+				PreferredRegions:  preferredRegions,
+			}
+			routeRequest = &request
+		}
+		launchTargetPlan, err = SelectExecutionLaunchTarget(
+			ctx,
+			tx,
+			func() *persistence.ExecutionTarget {
+				if routeRequest != nil {
+					return nil
+				}
+				return &targetModel
+			}(),
+			routeRequest,
+			lifecyclePolicy.WarmPoolMode,
+			func(
+				ctx context.Context,
+				tx *gorm.DB,
+				target persistence.ExecutionTarget,
+				placementSelection placement.Selection,
+				selection *routing.Selection,
+			) error {
+				return s.requireTargetPoolProviderCapabilities(
+					ctx,
+					tx,
+					target,
+					placementSelection,
+					provider,
+					false,
+					"start-session",
+					"send-turn",
+				)
+			},
+		)
+		if err != nil {
+			return Session{}, err
+		}
+		targetModel = launchTargetPlan.Target
+		globalSelection = launchTargetPlan.RoutingSelection
 		credentialID, err := s.resolveProviderCredentialSelection(
 			ctx,
 			tx,
@@ -308,11 +433,33 @@ func (s *Service) CreateWithIdempotency(
 		if err != nil {
 			return Session{}, err
 		}
+		var absoluteExpiresAt *time.Time
+		if lifecyclePolicy.AbsoluteSessionLifetimeSeconds != nil {
+			expiresAt := now.Add(time.Duration(*lifecyclePolicy.AbsoluteSessionLifetimeSeconds) * time.Second)
+			absoluteExpiresAt = &expiresAt
+		}
 		model := persistence.AgentSession{
 			ID: uuid.New(), TenantID: tenantID, OrganizationID: project.OrganizationID,
 			ProjectID: project.ID, CreatedBy: principal.UserID, Title: title, Status: "active",
 			Visibility: visibility, Provider: provider, Model: modelName,
 			ProviderCredentialID: credentialID, ExecutionTargetID: targetModel.ID,
+			RequestedExecutionTargetID: targetModel.ID, PreferredExecutionRegion: preferredRegion,
+			ResourceState: "idle", MeaningfulActivityAt: now, ResourceIdleSince: &now,
+			AbsoluteExpiresAt:              absoluteExpiresAt,
+			WaitingKeepAliveSeconds:        lifecyclePolicy.WaitingKeepAliveSeconds,
+			SuspendAfterIdleSeconds:        lifecyclePolicy.SuspendAfterIdleSeconds,
+			AbsoluteSessionLifetimeSeconds: cloneOptionalInt(lifecyclePolicy.AbsoluteSessionLifetimeSeconds),
+			WorkspaceRetentionDays:         lifecyclePolicy.WorkspaceRetentionDays,
+			WarmPoolMode:                   lifecyclePolicy.WarmPoolMode,
+			CreatedAt:                      now,
+			UpdatedAt:                      now,
+		}
+		if globalSelection != nil {
+			requestedTargetID := input.ExecutionTargetID
+			if requestedTargetID != nil && *requestedTargetID != globalSelection.Target.ID {
+				requestedTargetID = nil
+			}
+			routing.ApplySessionSelection(&model, *globalSelection, requestedTargetID, preferredRegion)
 		}
 		if err := tx.Create(&model).Error; err != nil {
 			return Session{}, problem.Wrap(409, "session_create_rejected", "Session creation was rejected by a tenant isolation constraint.", err)
@@ -320,12 +467,22 @@ func (s *Service) CreateWithIdempotency(
 		if _, err := s.ensureRuntimeResources(ctx, tx, &model); err != nil {
 			return Session{}, err
 		}
+		var selectedRegion any
+		var selectedClusterID any
+		if globalSelection != nil {
+			selectedRegion = globalSelection.Member.Region
+			selectedClusterID = globalSelection.Member.ClusterID
+		}
 		createdEvent, err = appendEvent(ctx, tx, &model, eventInput{
 			EventType: "session.created", ActorType: "user", ActorID: &principal.UserID,
 			Payload: map[string]any{
 				"title": title, "provider": provider, "visibility": visibility,
 				"executionTargetId": targetModel.ID, "targetKind": targetModel.Kind,
-				"providerCredentialId": credentialID,
+				"executionTargetGroupId": model.ExecutionTargetGroupID,
+				"routingPolicyVersion":   model.RoutingPolicyVersion,
+				"selectedRegion":         selectedRegion, "selectedClusterId": selectedClusterID,
+				"providerCredentialId":    credentialID,
+				"resourceLifecyclePolicy": lifecyclePolicy,
 			},
 		})
 		if err != nil {
@@ -348,6 +505,48 @@ func (s *Service) CreateWithIdempotency(
 		s.events.publish(toEvent(createdEvent))
 	}
 	return result.Value, result.Replayed, nil
+}
+
+func (s *Service) resolveLifecyclePolicy(
+	ctx context.Context,
+	tx *gorm.DB,
+	tenantID, projectID uuid.UUID,
+	override *lifecyclepolicy.Overrides,
+) (lifecyclepolicy.Effective, error) {
+	if s.lifecyclePolicies != nil {
+		return s.lifecyclePolicies.ResolveForSession(ctx, tx, tenantID, projectID, override)
+	}
+	defaults := lifecyclepolicy.Effective{
+		WaitingKeepAliveSeconds: 900, SuspendAfterIdleSeconds: 1800,
+		WorkspaceRetentionDays: 30, WarmPoolMode: "disabled",
+	}
+	if override == nil {
+		return defaults, nil
+	}
+	if override.WaitingKeepAliveSeconds != nil {
+		defaults.WaitingKeepAliveSeconds = *override.WaitingKeepAliveSeconds
+	}
+	if override.SuspendAfterIdleSeconds != nil {
+		defaults.SuspendAfterIdleSeconds = *override.SuspendAfterIdleSeconds
+	}
+	if override.AbsoluteSessionLifetimeSeconds != nil {
+		defaults.AbsoluteSessionLifetimeSeconds = cloneOptionalInt(override.AbsoluteSessionLifetimeSeconds)
+	}
+	if override.WorkspaceRetentionDays != nil {
+		defaults.WorkspaceRetentionDays = *override.WorkspaceRetentionDays
+	}
+	if override.WarmPoolMode != nil {
+		defaults.WarmPoolMode = *override.WarmPoolMode
+	}
+	return defaults, nil
+}
+
+func cloneOptionalInt(value *int) *int {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	return &cloned
 }
 
 func (s *Service) resolveProviderCredentialSelection(
@@ -484,7 +683,7 @@ func (s *Service) CreateTurnWithIdempotency(
 			"sourceProposedPlan": sourceProposedPlan,
 		},
 	}, func(tx *gorm.DB) (Turn, error) {
-		queuedAt := time.Now().UTC()
+		queuedAt := s.now()
 		turn := persistence.AgentTurn{
 			ID: uuid.New(), TenantID: tenantID, SessionID: sessionID,
 			CreatedBy: principal.UserID, Status: "queued", InputText: inputText,
@@ -503,6 +702,9 @@ func (s *Service) CreateTurnWithIdempotency(
 		if err != nil {
 			return Turn{}, err
 		}
+		if err := RequireSessionWithinAbsoluteLifetime(locked, queuedAt); err != nil {
+			return Turn{}, err
+		}
 		var activeSessionExecutions int64
 		if err := tx.WithContext(ctx).Model(&persistence.AgentExecution{}).
 			Where("tenant_id = ? AND session_id = ? AND status IN ?", tenantID, sessionID, activeSessionExecutionStatuses).
@@ -516,18 +718,61 @@ func (s *Service) CreateTurnWithIdempotency(
 			return Turn{}, err
 		}
 		var target persistence.ExecutionTarget
-		if err := tx.WithContext(ctx).
-			Where("id = ? AND status = ?", locked.ExecutionTargetID, "active").Take(&target).Error; err != nil {
-			return Turn{}, problem.Wrap(409, "execution_target_unavailable", "The session execution target is unavailable.", err)
+		if locked.ExecutionTargetGroupID == nil {
+			if err := tx.WithContext(ctx).
+				Where("id = ? AND status = ?", locked.ExecutionTargetID, "active").Take(&target).Error; err != nil {
+				return Turn{}, problem.Wrap(409, "execution_target_unavailable", "The session execution target is unavailable.", err)
+			}
 		}
 		requiredCapabilities := []string{"send-turn"}
 		if interactionMode == "plan" {
 			requiredCapabilities = append(requiredCapabilities, "plan-mode")
 		}
-		if err := s.requireTargetProviderCapabilities(
-			ctx, tx, target, locked.Provider, requiredCapabilities...,
-		); err != nil {
+		var routeRequest *routing.SelectRequest
+		if locked.ExecutionTargetGroupID != nil {
+			request, err := BuildSessionExecutionTargetGroupSelectRequest(ctx, tx, locked)
+			if err != nil {
+				return Turn{}, err
+			}
+			routeRequest = &request
+		}
+		launchTargetPlan, err := SelectExecutionLaunchTarget(
+			ctx,
+			tx,
+			func() *persistence.ExecutionTarget {
+				if routeRequest != nil {
+					return nil
+				}
+				return &target
+			}(),
+			routeRequest,
+			locked.WarmPoolMode,
+			func(
+				ctx context.Context,
+				tx *gorm.DB,
+				target persistence.ExecutionTarget,
+				placementSelection placement.Selection,
+				selection *routing.Selection,
+			) error {
+				return s.requireTargetPoolProviderCapabilities(
+					ctx,
+					tx,
+					target,
+					placementSelection,
+					locked.Provider,
+					false,
+					requiredCapabilities...,
+				)
+			},
+		)
+		if err != nil {
 			return Turn{}, err
+		}
+		target = launchTargetPlan.Target
+		if launchTargetPlan.RoutingSelection != nil {
+			if err := AdvanceSessionExecutionTargetAuthority(ctx, tx, &locked, *launchTargetPlan.RoutingSelection, queuedAt); err != nil {
+				return Turn{}, err
+			}
 		}
 		resources, err := s.ensureRuntimeResources(ctx, tx, &locked)
 		if err != nil {
@@ -540,7 +785,12 @@ func (s *Service) CreateTurnWithIdempotency(
 			Provider: &provider, ProviderRuntimeBindingID: &resources.BindingID, RemoteWorkspaceID: &resources.WorkspaceID,
 			WorkspaceMaterializationID: &resources.MaterializationID,
 			RestoreCheckpointID:        resources.RestoreCheckpointID,
+			WarmPoolModeSnapshot:       locked.WarmPoolMode,
 			Generation:                 0, RequestedBy: principal.UserID, QueuedAt: queuedAt,
+		}
+		placement.ApplySelection(&execution, launchTargetPlan.PlacementSelection)
+		if launchTargetPlan.RoutingSelection != nil {
+			routing.ApplyExecutionSelection(&execution, *launchTargetPlan.RoutingSelection)
 		}
 		releaseSelection, err := workerreleases.SelectExecution(ctx, tx, target.ID, execution.ID)
 		if err != nil {
@@ -562,9 +812,19 @@ func (s *Service) CreateTurnWithIdempotency(
 				"executionId": execution.ID, "tenantId": tenantID, "sessionId": sessionID,
 				"turnId": turn.ID, "executionTargetId": execution.ExecutionTargetID,
 				"targetKind": execution.TargetKind, "attempt": execution.Attempt,
-				"workerReleaseRevisionId": execution.WorkerReleaseRevisionID,
-				"workerReleaseChannel":    execution.WorkerReleaseChannel,
-				"provider":                provider, "providerRuntimeBindingId": resources.BindingID,
+				"workerReleaseRevisionId":  execution.WorkerReleaseRevisionID,
+				"workerReleaseChannel":     execution.WorkerReleaseChannel,
+				"workerPoolId":             execution.WorkerPoolID,
+				"workerPoolVersion":        execution.WorkerPoolVersion,
+				"capacityClass":            execution.CapacityClass,
+				"placementPolicyVersion":   execution.PlacementPolicyVersion,
+				"targetGroupId":            execution.TargetGroupID,
+				"targetGroupVersion":       execution.TargetGroupVersion,
+				"targetGroupMemberVersion": execution.TargetGroupMemberVersion,
+				"selectedRegion":           execution.SelectedRegion,
+				"selectedClusterId":        execution.SelectedClusterID,
+				"routingReason":            execution.RoutingReason,
+				"provider":                 provider, "providerRuntimeBindingId": resources.BindingID,
 				"remoteWorkspaceId":                     resources.WorkspaceID,
 				"workspaceMaterializationId":            resources.MaterializationID,
 				"workspaceMaterializationIncarnationId": resources.IncarnationID,
@@ -581,6 +841,16 @@ func (s *Service) CreateTurnWithIdempotency(
 			"targetKind":                 execution.TargetKind,
 			"workerReleaseRevisionId":    execution.WorkerReleaseRevisionID,
 			"workerReleaseChannel":       execution.WorkerReleaseChannel,
+			"workerPoolId":               execution.WorkerPoolID,
+			"workerPoolVersion":          execution.WorkerPoolVersion,
+			"capacityClass":              execution.CapacityClass,
+			"placementPolicyVersion":     execution.PlacementPolicyVersion,
+			"targetGroupId":              execution.TargetGroupID,
+			"targetGroupVersion":         execution.TargetGroupVersion,
+			"targetGroupMemberVersion":   execution.TargetGroupMemberVersion,
+			"selectedRegion":             execution.SelectedRegion,
+			"selectedClusterId":          execution.SelectedClusterID,
+			"routingReason":              execution.RoutingReason,
 			"workspaceMaterializationId": resources.MaterializationID,
 			"runtimeMode":                runtimeMode, "interactionMode": interactionMode,
 		}
@@ -877,11 +1147,14 @@ type InternalEventInput struct {
 	EventType    string
 	ActorType    string
 	ActorID      *uuid.UUID
-	ExecutionID  *uuid.UUID
-	WorkerID     *uuid.UUID
-	Generation   *int64
-	Payload      map[string]any
-	OccurredAt   *time.Time
+	// MeaningfulActivity is set only by trusted semantic runtime ingestion.
+	// Worker lifecycle/checkpoint bookkeeping must leave it false.
+	MeaningfulActivity bool
+	ExecutionID        *uuid.UUID
+	WorkerID           *uuid.UUID
+	Generation         *int64
+	Payload            map[string]any
+	OccurredAt         *time.Time
 }
 
 func (s *Service) AppendInternalEvent(
@@ -913,8 +1186,9 @@ func (s *Service) AppendInternalEvent(
 	}
 	return appendEvent(ctx, tx, &session, eventInput{
 		EventID: eventID, EventVersion: eventVersion, EventType: input.EventType,
-		ActorType: input.ActorType, ActorID: input.ActorID, ExecutionID: input.ExecutionID,
-		WorkerID: input.WorkerID, Generation: input.Generation, Payload: input.Payload,
+		ActorType: input.ActorType, ActorID: input.ActorID, MeaningfulActivity: input.MeaningfulActivity,
+		ExecutionID: input.ExecutionID,
+		WorkerID:    input.WorkerID, Generation: input.Generation, Payload: input.Payload,
 		OccurredAt: occurredAt,
 	})
 }
@@ -924,16 +1198,17 @@ func (s *Service) PublishInternalEvent(event persistence.SessionEvent) {
 }
 
 type eventInput struct {
-	EventID      uuid.UUID
-	EventVersion int
-	EventType    string
-	ActorType    string
-	ActorID      *uuid.UUID
-	ExecutionID  *uuid.UUID
-	WorkerID     *uuid.UUID
-	Generation   *int64
-	Payload      map[string]any
-	OccurredAt   time.Time
+	EventID            uuid.UUID
+	EventVersion       int
+	EventType          string
+	ActorType          string
+	ActorID            *uuid.UUID
+	MeaningfulActivity bool
+	ExecutionID        *uuid.UUID
+	WorkerID           *uuid.UUID
+	Generation         *int64
+	Payload            map[string]any
+	OccurredAt         time.Time
 }
 
 func appendEvent(
@@ -969,9 +1244,41 @@ func appendEvent(
 	if err := tx.WithContext(ctx).Create(&event).Error; err != nil {
 		return persistence.SessionEvent{}, problem.Wrap(409, "session_event_append_rejected", "Session event append was rejected.", err)
 	}
+	updates := map[string]any{"last_event_sequence": nextSequence}
+	observedAt := time.Now().UTC()
+	// User actions are semantic by definition. Worker events renew activity only
+	// when the trusted runtime-ingestion path marks them explicitly; lifecycle,
+	// checkpoint, Workspace, and recovery bookkeeping must never slide activity.
+	if input.ActorType == "user" || input.MeaningfulActivity {
+		if session.MeaningfulActivityAt.After(observedAt) {
+			observedAt = session.MeaningfulActivityAt
+		}
+		updates["meaningful_activity_at"] = observedAt
+		updates["meaningful_activity_sequence"] = nextSequence
+		session.MeaningfulActivityAt = observedAt
+		session.MeaningfulActivitySequence = nextSequence
+	}
+	if input.ExecutionID != nil {
+		updates["resource_idle_since"] = nil
+		session.ResourceIdleSince = nil
+	}
+	if input.ExecutionID != nil {
+		if resourceState, changed := eventResourceState(input.EventType, input.Payload); changed {
+			updates["resource_state"] = resourceState
+			session.ResourceState = resourceState
+		}
+	}
+	if input.ExecutionID != nil && terminalExecutionEvent(input.EventType) {
+		updates["resource_idle_since"] = observedAt
+		session.ResourceIdleSince = &observedAt
+	}
+	if input.ExecutionID != nil && input.EventType == "execution.suspended" {
+		updates["resource_idle_since"] = observedAt
+		session.ResourceIdleSince = &observedAt
+	}
 	result := tx.WithContext(ctx).Model(&persistence.AgentSession{}).
 		Where("tenant_id = ? AND id = ? AND last_event_sequence = ?", session.TenantID, session.ID, session.LastEventSequence).
-		Update("last_event_sequence", nextSequence)
+		Updates(updates)
 	if result.Error != nil {
 		return persistence.SessionEvent{}, problem.Wrap(500, "session_event_sequence_update_failed", "Failed to update the session event sequence.", result.Error)
 	}
@@ -980,4 +1287,39 @@ func appendEvent(
 	}
 	session.LastEventSequence = nextSequence
 	return event, nil
+}
+
+func terminalExecutionEvent(eventType string) bool {
+	switch eventType {
+	case "execution.completed", "execution.failed", "execution.cancelled", "execution.interrupted":
+		return true
+	default:
+		return false
+	}
+}
+
+func eventResourceState(eventType string, payload map[string]any) (string, bool) {
+	switch eventType {
+	case "turn.created":
+		return "provisioning", true
+	case "execution.leased", "execution.started", "approval.resolved", "request.resolved", "user-input.resolved":
+		return "active", true
+	case "approval.requested", "request.opened", "user-input.requested":
+		return "waiting", true
+	case "execution.suspend-checkpointing":
+		return "checkpointing", true
+	case "execution.suspend-aborted":
+		if reason, _ := payload["reason"].(string); reason == "active-idle-timeout" {
+			return "active", true
+		}
+		return "waiting", true
+	case "execution.suspended":
+		return "suspended", true
+	case "execution.recovering":
+		return "restoring", true
+	case "execution.completed", "execution.failed", "execution.cancelled", "execution.interrupted":
+		return "idle", true
+	default:
+		return "", false
+	}
 }

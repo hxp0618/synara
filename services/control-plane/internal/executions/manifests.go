@@ -2,6 +2,7 @@ package executions
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -13,6 +14,7 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 
+	"github.com/synara-ai/synara/services/control-plane/internal/containmentattestation"
 	"github.com/synara-ai/synara/services/control-plane/internal/executiontargets"
 	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
 	"github.com/synara-ai/synara/services/control-plane/internal/platform"
@@ -23,7 +25,7 @@ import (
 const (
 	providerHostProtocolMajor          = 2
 	providerHostProtocolMinimumMinor   = 1
-	workerManifestStorageSchemaVersion = 2
+	workerManifestStorageSchemaVersion = 3
 )
 
 var stage3ProviderNames = providercatalog.ProviderNames()
@@ -31,15 +33,35 @@ var stage3ProviderNames = providercatalog.ProviderNames()
 var stage3ProviderCapabilityIDs = providercatalog.CapabilityIDs()
 
 type workerRuntimeCapability struct {
-	WorkerBuildVersion    string  `json:"workerBuildVersion"`
-	WorkerBuildGitSHA     *string `json:"workerBuildGitSha,omitempty"`
-	WorkerProtocolMinimum int     `json:"workerProtocolMinimum"`
-	WorkerProtocolMaximum int     `json:"workerProtocolMaximum"`
-	RuntimeEventMinimum   int     `json:"runtimeEventMinimum"`
-	RuntimeEventMaximum   int     `json:"runtimeEventMaximum"`
-	OperatingSystem       string  `json:"operatingSystem"`
-	Architecture          string  `json:"architecture"`
-	ImageDigest           *string `json:"imageDigest,omitempty"`
+	WorkerBuildVersion    string                              `json:"workerBuildVersion"`
+	WorkerBuildGitSHA     *string                             `json:"workerBuildGitSha,omitempty"`
+	WorkerProtocolMinimum int                                 `json:"workerProtocolMinimum"`
+	WorkerProtocolMaximum int                                 `json:"workerProtocolMaximum"`
+	RuntimeEventMinimum   int                                 `json:"runtimeEventMinimum"`
+	RuntimeEventMaximum   int                                 `json:"runtimeEventMaximum"`
+	OperatingSystem       string                              `json:"operatingSystem"`
+	Architecture          string                              `json:"architecture"`
+	ImageDigest           *string                             `json:"imageDigest,omitempty"`
+	ProcessContainment    *workerProcessContainmentCapability `json:"processContainment,omitempty"`
+}
+
+type workerProcessContainmentCapability struct {
+	Mode               string                           `json:"mode"`
+	SupervisorVersion  string                           `json:"supervisorVersion"`
+	ProbeVersion       int                              `json:"probeVersion"`
+	ProbeSHA256        string                           `json:"probeSha256"`
+	SupervisorIdentity string                           `json:"supervisorIdentity"`
+	ProviderIdentity   string                           `json:"providerIdentity"`
+	Attestation        *containmentattestation.Envelope `json:"attestation,omitempty"`
+}
+
+type workerManifestRegistrationContext struct {
+	ExecutionTargetID uuid.UUID
+	TargetKind        platform.ExecutionTargetKind
+	InstanceUID       string
+	ClusterID         string
+	Namespace         string
+	PodName           string
 }
 
 type providerHostCapabilitySummary struct {
@@ -119,8 +141,13 @@ func normalizeWorkerManifest(
 	targetCapabilities map[string]any,
 	targetKind platform.ExecutionTargetKind,
 	now time.Time,
+	registrationContexts ...workerManifestRegistrationContext,
 ) (*normalizedWorkerManifest, error) {
 	providerPolicy, err := executiontargets.ParseProviderPolicy(targetCapabilities)
+	if err != nil {
+		return nil, err
+	}
+	containmentPolicy, err := executiontargets.ParseProcessContainmentPolicy(targetCapabilities)
 	if err != nil {
 		return nil, err
 	}
@@ -158,6 +185,21 @@ func normalizeWorkerManifest(
 	runtime.Architecture = strings.TrimSpace(runtime.Architecture)
 	runtime.WorkerBuildGitSHA = trimOptionalString(runtime.WorkerBuildGitSHA)
 	runtime.ImageDigest = trimOptionalString(runtime.ImageDigest)
+	if err := normalizeWorkerProcessContainment(&runtime); err != nil {
+		return nil, err
+	}
+	var registrationContext workerManifestRegistrationContext
+	if len(registrationContexts) > 1 {
+		return nil, problem.New(500, "worker_manifest_context_invalid", "Worker Manifest normalization received conflicting registration contexts.")
+	}
+	if len(registrationContexts) == 1 {
+		registrationContext = registrationContexts[0]
+	}
+	if err := verifyWorkerProcessContainmentAttestation(
+		runtime, containmentPolicy, targetKind, registrationContext,
+	); err != nil {
+		return nil, err
+	}
 	if runtime.WorkerBuildVersion != registrationVersion || len(runtime.WorkerBuildVersion) > 160 ||
 		(runtime.WorkerBuildGitSHA != nil && !validWorkerManifestBuildGitSHA(*runtime.WorkerBuildGitSHA)) ||
 		(runtime.ImageDigest != nil && !validWorkerManifestImageDigest(*runtime.ImageDigest)) {
@@ -205,7 +247,19 @@ func normalizeWorkerManifest(
 		WorkerProtocolMinimum: runtime.WorkerProtocolMinimum, WorkerProtocolMaximum: runtime.WorkerProtocolMaximum,
 		RuntimeEventMinimum: runtime.RuntimeEventMinimum, RuntimeEventMaximum: runtime.RuntimeEventMaximum,
 		OperatingSystem: runtime.OperatingSystem, Architecture: runtime.Architecture,
-		ImageDigest: runtime.ImageDigest, FeatureFlags: featureFlags, CreatedAt: now,
+		ImageDigest: runtime.ImageDigest, ProcessContainmentMode: "none", ProcessContainmentTrustMode: "none",
+		FeatureFlags: featureFlags, CreatedAt: now,
+	}
+	if runtime.ProcessContainment != nil {
+		manifest.ProcessContainmentMode = runtime.ProcessContainment.Mode
+		manifest.ProcessContainmentSupervisorVersion = stringReference(runtime.ProcessContainment.SupervisorVersion)
+		manifest.ProcessContainmentProbeVersion = intReference(runtime.ProcessContainment.ProbeVersion)
+		manifest.ProcessContainmentProbeSHA256 = stringReference(runtime.ProcessContainment.ProbeSHA256)
+		manifest.ProcessContainmentSupervisorIdentity = stringReference(runtime.ProcessContainment.SupervisorIdentity)
+		manifest.ProcessContainmentProviderIdentity = stringReference(runtime.ProcessContainment.ProviderIdentity)
+		manifest.ProcessContainmentTrustMode = executiontargets.ProcessContainmentTrustSignedV1
+		manifest.ProcessContainmentAttestationKeyID = stringReference(containmentPolicy.KeyID)
+		manifest.ProcessContainmentAttestationKeySHA256 = stringReference(containmentPolicy.PublicKeySHA256)
 	}
 	for index := range providerModels {
 		providerModels[index].WorkerManifestID = manifestID
@@ -231,6 +285,96 @@ func normalizeWorkerManifest(
 		reason = &value
 	}
 	return &normalizedWorkerManifest{Manifest: manifest, Providers: providerModels, Status: status, Reason: reason}, nil
+}
+
+func normalizeWorkerProcessContainment(runtime *workerRuntimeCapability) error {
+	if runtime.ProcessContainment == nil {
+		return nil
+	}
+	containment := runtime.ProcessContainment
+	containment.Mode = strings.TrimSpace(containment.Mode)
+	containment.SupervisorVersion = strings.TrimSpace(containment.SupervisorVersion)
+	containment.ProbeSHA256 = strings.TrimSpace(containment.ProbeSHA256)
+	containment.SupervisorIdentity = strings.TrimSpace(containment.SupervisorIdentity)
+	containment.ProviderIdentity = strings.TrimSpace(containment.ProviderIdentity)
+	if containment.Mode == "none" {
+		if containment.SupervisorVersion != "" || containment.ProbeVersion != 0 || containment.ProbeSHA256 != "" ||
+			containment.SupervisorIdentity != "" || containment.ProviderIdentity != "" || containment.Attestation != nil {
+			return problem.New(400, "invalid_worker_manifest", "workerRuntime process containment evidence is invalid.")
+		}
+		runtime.ProcessContainment = nil
+		return nil
+	}
+	if !containsString([]string{"cgroup-v2", "job-object"}, containment.Mode) ||
+		containment.SupervisorVersion == "" || len(containment.SupervisorVersion) > 160 ||
+		containment.ProbeVersion <= 0 || !validWorkerManifestSHA256(containment.ProbeSHA256) ||
+		containment.SupervisorIdentity == "" || len(containment.SupervisorIdentity) > 160 ||
+		containment.ProviderIdentity == "" || len(containment.ProviderIdentity) > 160 ||
+		containment.SupervisorIdentity == containment.ProviderIdentity {
+		return problem.New(400, "invalid_worker_manifest", "workerRuntime process containment evidence is invalid.")
+	}
+	if (containment.Mode == "cgroup-v2" && runtime.OperatingSystem != "linux") ||
+		(containment.Mode == "job-object" && runtime.OperatingSystem != "windows") {
+		return problem.New(400, "invalid_worker_manifest", "workerRuntime process containment mode does not match its operating system.")
+	}
+	return nil
+}
+
+func verifyWorkerProcessContainmentAttestation(
+	runtime workerRuntimeCapability,
+	policy executiontargets.ProcessContainmentPolicy,
+	targetKind platform.ExecutionTargetKind,
+	registration workerManifestRegistrationContext,
+) error {
+	if runtime.ProcessContainment == nil {
+		return nil
+	}
+	if policy.TrustMode != executiontargets.ProcessContainmentTrustSignedV1 {
+		err := problem.New(409, "worker_containment_untrusted", "The Execution Target does not trust Worker-reported strict process containment.")
+		err.Details = map[string]any{"targetKind": targetKind, "reportedMode": runtime.ProcessContainment.Mode}
+		return err
+	}
+	containment := runtime.ProcessContainment
+	if containment.Attestation == nil {
+		return problem.New(409, "worker_attestation_required", "Strict process containment requires an Execution Target trusted attestation.")
+	}
+	if runtime.ImageDigest == nil || registration.ExecutionTargetID == uuid.Nil ||
+		registration.TargetKind != targetKind || strings.TrimSpace(registration.InstanceUID) == "" ||
+		strings.TrimSpace(registration.ClusterID) == "" || strings.TrimSpace(registration.Namespace) == "" ||
+		strings.TrimSpace(registration.PodName) == "" || len(policy.PublicKey) != ed25519.PublicKeySize ||
+		containment.Attestation.KeyID != policy.KeyID {
+		return problem.New(409, "worker_containment_invalid", "The Worker process-containment attestation is not bound to the current Target and physical Worker identity.")
+	}
+	statement := containmentattestation.Statement{
+		ExecutionTargetID:  registration.ExecutionTargetID.String(),
+		TargetKind:         string(targetKind),
+		InstanceUID:        registration.InstanceUID,
+		ClusterID:          registration.ClusterID,
+		Namespace:          registration.Namespace,
+		PodName:            registration.PodName,
+		WorkerBuildVersion: runtime.WorkerBuildVersion,
+		WorkerBuildGitSHA:  optionalStringValue(runtime.WorkerBuildGitSHA),
+		ImageDigest:        *runtime.ImageDigest,
+		OperatingSystem:    runtime.OperatingSystem,
+		Architecture:       runtime.Architecture,
+		Mode:               containment.Mode,
+		SupervisorVersion:  containment.SupervisorVersion,
+		ProbeVersion:       containment.ProbeVersion,
+		ProbeSHA256:        containment.ProbeSHA256,
+		SupervisorIdentity: containment.SupervisorIdentity,
+		ProviderIdentity:   containment.ProviderIdentity,
+	}
+	if err := containmentattestation.Verify(policy.PublicKey, *containment.Attestation, statement); err != nil {
+		return problem.New(409, "worker_containment_invalid", "The Worker process-containment attestation signature is invalid.")
+	}
+	return nil
+}
+
+func optionalStringValue(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
 }
 
 func normalizeProviderManifest(
@@ -384,7 +528,14 @@ func persistWorkerManifest(
 	targetKind platform.ExecutionTargetKind,
 	now time.Time,
 ) error {
-	normalized, err := normalizeWorkerManifest(version, capabilities, targetCapabilities, targetKind, now)
+	normalized, err := normalizeWorkerManifest(
+		version, capabilities, targetCapabilities, targetKind, now,
+		workerManifestRegistrationContext{
+			ExecutionTargetID: worker.ExecutionTargetID, TargetKind: targetKind,
+			InstanceUID: worker.InstanceUID, ClusterID: worker.ClusterID,
+			Namespace: worker.Namespace, PodName: worker.PodName,
+		},
+	)
 	if err != nil {
 		return err
 	}
@@ -595,6 +746,8 @@ func isSupportedProviderCapability(value any) bool {
 }
 
 func stringReference(value string) *string { return &value }
+
+func intReference(value int) *int { return &value }
 
 func validateStage3ProviderSet(providers map[string]providerHostDescriptorCapability) error {
 	if len(providers) != len(stage3ProviderNames) {

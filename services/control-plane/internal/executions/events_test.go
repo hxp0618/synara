@@ -106,6 +106,30 @@ func TestValidateRuntimeEventContractSeparatesLegacyAndCanonicalTypes(t *testing
 	}
 }
 
+func TestMeaningfulRuntimeActivityExcludesPeriodicBookkeeping(t *testing.T) {
+	for _, eventType := range []string{
+		"runtime.output.delta", "runtime.provider.activity", "approval.requested",
+		"content.delta", "item.updated", "turn.completed", "request.opened",
+		"user-input.resolved", "tool.progress", "runtime.error",
+	} {
+		if !meaningfulRuntimeActivity(eventType) {
+			t.Fatalf("semantic Runtime Event %q did not renew meaningful activity", eventType)
+		}
+	}
+
+	for _, eventType := range []string{
+		"runtime.usage", "provider.extension.future", "session.started", "session.state.changed",
+		"thread.started", "thread.state.changed", "thread.metadata.updated", "thread.token-usage.updated",
+		"thread.realtime.started", "thread.realtime.closed", "auth.status", "account.updated",
+		"account.rate-limits.updated", "mcp.status.updated", "mcp.oauth.completed",
+		"config.warning", "deprecation.notice",
+	} {
+		if meaningfulRuntimeActivity(eventType) {
+			t.Fatalf("periodic or lifecycle Runtime Event %q renewed meaningful activity", eventType)
+		}
+	}
+}
+
 func TestValidateRuntimeEventContractChecksCanonicalPayloadShape(t *testing.T) {
 	tests := []struct {
 		name      string

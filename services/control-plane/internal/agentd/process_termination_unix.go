@@ -1,4 +1,4 @@
-//go:build darwin || dragonfly || freebsd || linux || netbsd || openbsd
+//go:build darwin || dragonfly || freebsd || netbsd || openbsd
 
 package agentd
 
@@ -21,7 +21,7 @@ type processTree struct {
 	terminated bool
 }
 
-func newProcessTree(command *exec.Cmd) (*processTree, error) {
+func newProcessTree(command *exec.Cmd, _ ...processTreeOptions) (*processTree, error) {
 	if command.SysProcAttr == nil {
 		command.SysProcAttr = &syscall.SysProcAttr{}
 	}

@@ -10,12 +10,13 @@ import (
 	"github.com/synara-ai/synara/services/control-plane/internal/executiontargets"
 	"github.com/synara-ai/synara/services/control-plane/internal/identity"
 	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
+	"github.com/synara-ai/synara/services/control-plane/internal/placement"
 	"github.com/synara-ai/synara/services/control-plane/internal/problem"
 	"github.com/synara-ai/synara/services/control-plane/internal/providercapabilities"
 	"github.com/synara-ai/synara/services/control-plane/internal/sessions"
 )
 
-var projectedActiveExecutionStatuses = []string{"queued", "leased", "running", "waiting-for-approval", "recovering"}
+var projectedActiveExecutionStatuses = []string{"queued", "leased", "running", "waiting-for-approval", "recovering", "suspended"}
 
 func (s *Service) ProjectProviderCapabilitiesForProject(
 	ctx context.Context,
@@ -108,7 +109,13 @@ func (s *Service) ProjectProviderCapabilitiesForSession(
 	if targetErr != nil {
 		return providercapabilities.Projection{}, problem.Wrap(500, "execution_target_lookup_failed", "Failed to load the Session Execution Target.", targetErr)
 	}
-	projection, err := s.projectIdleSessionProviderCapabilities(ctx, s.db, target, session)
+	placementSelection, err := placement.NewService(s.db).PreviewExecution(
+		ctx, s.db, target, session.ResourceLifecyclePolicy.WarmPoolMode,
+	)
+	if err != nil {
+		return providercapabilities.Projection{}, err
+	}
+	projection, err := s.projectIdleSessionProviderCapabilities(ctx, s.db, target, session, placementSelection)
 	if err != nil {
 		return providercapabilities.Projection{}, err
 	}
@@ -125,9 +132,17 @@ func (s *Service) projectIdleSessionProviderCapabilities(
 	db *gorm.DB,
 	target persistence.ExecutionTarget,
 	session sessions.Session,
+	placementSelection placement.Selection,
 ) (providercapabilities.Projection, error) {
-	projection, err := providercapabilities.LoadTargetProjection(
-		ctx, db, target, s.now(), s.heartbeatTimeout,
+	projection, err := providercapabilities.LoadTargetPlacementProjection(
+		ctx,
+		db,
+		target,
+		placementSelection.Pool.ID,
+		placementSelection.Pool.Version,
+		placementSelection.Pool.Mode,
+		s.now(),
+		s.heartbeatTimeout,
 	)
 	if err != nil {
 		return providercapabilities.Projection{}, capabilityProjectionError(err)
@@ -143,7 +158,7 @@ func (s *Service) projectIdleSessionProviderCapabilities(
 		return projection, nil
 	}
 
-	bound, found, err := s.loadBoundSessionProviderCapabilities(ctx, db, target, session)
+	bound, found, err := s.loadBoundSessionProviderCapabilities(ctx, db, target, session, placementSelection)
 	if err != nil {
 		return providercapabilities.Projection{}, err
 	}
@@ -179,6 +194,7 @@ func (s *Service) loadBoundSessionProviderCapabilities(
 	db *gorm.DB,
 	target persistence.ExecutionTarget,
 	session sessions.Session,
+	placementSelection placement.Selection,
 ) (providercapabilities.Projection, bool, error) {
 	binding, found, err := s.sessions.LoadActiveRuntimeBinding(
 		ctx, db, session.TenantID, session.ID, session.Provider,
@@ -204,6 +220,11 @@ func (s *Service) loadBoundSessionProviderCapabilities(
 	if err != nil {
 		return providercapabilities.Projection{}, false,
 			problem.Wrap(500, "runtime_binding_execution_load_failed", "The Session Provider runtime execution could not be loaded.", err)
+	}
+	if execution.WorkerPoolID == nil || execution.WorkerPoolVersion == nil ||
+		*execution.WorkerPoolID != placementSelection.Pool.ID ||
+		*execution.WorkerPoolVersion != placementSelection.Pool.Version {
+		return providercapabilities.Projection{}, false, nil
 	}
 	projection, err := providercapabilities.LoadExecutionProjection(
 		ctx, db, target, execution, session.Provider,

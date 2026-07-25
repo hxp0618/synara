@@ -733,12 +733,19 @@ describe("ProviderRuntimeIngestion", () => {
       turnId: asTurnId("turn-stop-aborted"),
     });
 
-    await waitForThread(
+    const runningThread = await waitForThread(
       harness.engine,
       (thread) =>
         thread.session?.status === "running" &&
-        thread.session?.activeTurnId === "turn-stop-aborted",
+        thread.session?.activeTurnId === "turn-stop-aborted" &&
+        thread.latestTurn?.turnId === "turn-stop-aborted" &&
+        thread.latestTurn.state === "running",
     );
+    expect(runningThread.latestTurn).toMatchObject({
+      turnId: "turn-stop-aborted",
+      state: "running",
+      completedAt: null,
+    });
 
     harness.emit({
       type: "content.delta",
@@ -765,16 +772,34 @@ describe("ProviderRuntimeIngestion", () => {
         reason: "provider stopped",
       },
     });
-    await waitForThread(
+    const interruptedThread = await waitForThread(
       harness.engine,
       (thread) =>
         thread.session?.status === "interrupted" &&
         thread.session?.activeTurnId === null &&
-        thread.messages.some(
-          (message: ProviderRuntimeTestMessage) =>
-            message.id === "assistant:item-stop-aborted" && message.streaming === false,
-        ),
+        thread.latestTurn?.turnId === "turn-stop-aborted" &&
+        thread.latestTurn.state === "interrupted" &&
+        thread.latestTurn.completedAt !== null,
     );
+    expect(interruptedThread.session).toMatchObject({
+      status: "interrupted",
+      activeTurnId: null,
+      lastError: null,
+    });
+    expect(interruptedThread.latestTurn).toMatchObject({
+      turnId: "turn-stop-aborted",
+      state: "interrupted",
+    });
+    const assistantMessage = interruptedThread.messages.find(
+      (message: ProviderRuntimeTestMessage) => message.id === "assistant:item-stop-aborted",
+    );
+    expect(assistantMessage).toMatchObject({
+      id: "assistant:item-stop-aborted",
+      role: "assistant",
+      turnId: "turn-stop-aborted",
+      text: "partial",
+      streaming: false,
+    });
   });
 
   it("appends generated-image markdown to the turn's assistant message when the turn settles", async () => {

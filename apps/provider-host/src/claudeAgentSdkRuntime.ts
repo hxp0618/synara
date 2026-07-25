@@ -51,6 +51,7 @@ type ClaudeRunOptions = {
   redact: TerminalRedactor;
   emit: (message: RunnerMessage) => void;
   authoritativePrompt: string;
+  nativeResumePrompt: string;
   interactive: boolean;
   operation?: ProviderPrimaryOperation;
   queryFactory?: ClaudeQueryFactory;
@@ -226,10 +227,13 @@ class ClaudeAgentSdkRuntime {
     reviewTarget?: ProviderReviewTarget,
   ): Promise<Extract<RunnerMessage, { type: "result" }>> {
     const cursor = trimmedString(this.options.input.providerResumeCursor);
-    const historyAvailable = hasAuthoritativeResumeData(this.options.input.workload);
+    const historyAvailable = hasAuthoritativeResumeData(
+      this.options.input.workload,
+      this.options.input.memoryDocuments,
+    );
     const prompt = reviewTarget
       ? claudeReviewPrompt(reviewTarget)
-      : this.options.input.workload.inputText;
+      : this.options.nativeResumePrompt;
     const authoritativePrompt = reviewTarget
       ? reconstructedPrompt({
           ...this.options.input,

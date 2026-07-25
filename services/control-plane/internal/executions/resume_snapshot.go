@@ -64,8 +64,10 @@ type resumeSnapshotContext struct {
 }
 
 type resumeArtifactEvent struct {
-	Sequence   int64
-	ArtifactID uuid.UUID
+	Sequence    int64
+	ArtifactID  uuid.UUID
+	SessionID   uuid.UUID
+	ExecutionID *uuid.UUID
 }
 
 type resumeSnapshotProjection struct {
@@ -99,8 +101,9 @@ func (s *Service) loadResumeSnapshot(
 			InteractionMode: input.InteractionMode,
 			Plan:            input.InteractionMode == "plan",
 		},
-		PendingInteractions: make([]ResumePendingInteraction, 0),
-		Workspace:           resumeWorkspaceReference(input),
+		PendingInteractions:        make([]ResumePendingInteraction, 0),
+		ResumeRecordedInteractions: make([]ResumeRecordedInteraction, 0),
+		Workspace:                  resumeWorkspaceReference(input),
 		Budget: ResumeSnapshotBudget{
 			ByteLimit:  resumeSnapshotByteLimit,
 			TokenLimit: resumeSnapshotTokenLimit,
@@ -117,14 +120,21 @@ func (s *Service) loadResumeSnapshot(
 		ArtifactEvents: make([]resumeArtifactEvent, 0),
 	}
 	if found {
+		snapshot.CurrentTurnSequence = currentSequence
+		throughSequence, throughErr := loadResumeSnapshotThroughSequence(
+			ctx, tx, execution, currentSequence,
+		)
+		if throughErr != nil {
+			return ResumeSnapshot{}, throughErr
+		}
 		allEvents, truncated, historyErr := loadEffectiveResumeSnapshotEvents(
-			ctx, tx, execution, currentSequence-1,
+			ctx, tx, execution, throughSequence,
 		)
 		if historyErr != nil {
 			return ResumeSnapshot{}, historyErr
 		}
-		snapshot.SourceSequenceRange = resumeSourceSequenceRange(allEvents, currentSequence-1)
-		snapshot.AuthoritativeHistorySequence = currentSequence - 1
+		snapshot.SourceSequenceRange = resumeSourceSequenceRange(allEvents, throughSequence)
+		snapshot.AuthoritativeHistorySequence = throughSequence
 
 		projection = projectResumeSnapshotEvents(allEvents)
 		projectResumeStateMarkers(allEvents, &projection)
@@ -157,6 +167,16 @@ func (s *Service) loadResumeSnapshot(
 	}
 	snapshot.PendingInteractions = pending
 	projection.TruncationReasons = appendUniqueStrings(projection.TruncationReasons, pendingReasons...)
+	resumeRecorded, err := s.loadResumeRecordedInteractions(ctx, tx, execution)
+	if err != nil {
+		return ResumeSnapshot{}, err
+	}
+	snapshot.ResumeRecordedInteractions = resumeRecorded
+	activeTurnCheckpoint, err := loadUnboundActiveTurnCheckpoint(ctx, tx, execution)
+	if err != nil {
+		return ResumeSnapshot{}, err
+	}
+	snapshot.ActiveTurnCheckpoint = activeTurnCheckpoint
 	if len(projection.TruncationReasons) > 0 {
 		snapshot.Truncation = &ResumeSnapshotTruncation{
 			Reasons:               append([]string(nil), projection.TruncationReasons...),
@@ -170,6 +190,44 @@ func (s *Service) loadResumeSnapshot(
 		return ResumeSnapshot{}, err
 	}
 	return snapshot, nil
+}
+
+func loadResumeSnapshotThroughSequence(
+	ctx context.Context,
+	tx *gorm.DB,
+	execution persistence.AgentExecution,
+	currentTurnSequence int64,
+) (int64, error) {
+	priorTurnThrough := currentTurnSequence - 1
+	if execution.Generation <= 1 {
+		return priorTurnThrough, nil
+	}
+	var session persistence.AgentSession
+	if err := tx.WithContext(ctx).
+		Select("last_event_sequence").
+		Where("tenant_id = ? AND id = ?", execution.TenantID, execution.SessionID).
+		Take(&session).Error; err != nil {
+		return 0, problem.Wrap(
+			500,
+			"execution_history_boundary_load_failed",
+			"Failed to load the current recovery history boundary.",
+			err,
+		)
+	}
+	if session.LastEventSequence < currentTurnSequence {
+		return 0, problem.New(
+			409,
+			"execution_history_boundary_invalid",
+			"The Session history no longer contains the current Turn boundary.",
+		)
+	}
+	if session.LastEventSequence > currentTurnSequence {
+		// A replacement Generation must freeze progress already emitted by the
+		// interrupted current Turn. Advancing the authoritative sequence also
+		// prevents a stale native cursor from bypassing those side-effect markers.
+		return session.LastEventSequence, nil
+	}
+	return priorTurnThrough, nil
 }
 
 func loadEffectiveResumeSnapshotEvents(
@@ -479,8 +537,10 @@ func projectResumeSnapshotEvents(events []persistence.SessionEvent) resumeSnapsh
 			}
 			seenArtifacts[artifactID] = struct{}{}
 			projection.ArtifactEvents = append(projection.ArtifactEvents, resumeArtifactEvent{
-				Sequence:   event.Sequence,
-				ArtifactID: artifactID,
+				Sequence:    event.Sequence,
+				ArtifactID:  artifactID,
+				SessionID:   event.SessionID,
+				ExecutionID: cloneUUIDPointer(event.ExecutionID),
 			})
 		}
 	}
@@ -716,20 +776,54 @@ func loadResumeArtifactReferences(
 	}
 	models := make([]persistence.Artifact, 0, len(ids))
 	if err := tx.WithContext(ctx).
-		Where("tenant_id = ? AND id IN ? AND status = ? AND deleted_at IS NULL",
+		Where("tenant_id = ? AND id IN ? AND status = ? AND deleted_at IS NULL AND ready_at IS NOT NULL",
 			execution.TenantID, ids, "ready").
 		Find(&models).Error; err != nil {
 		return nil, problem.Wrap(500, "execution_history_artifacts_load_failed", "Failed to load authoritative Artifact references.", err)
+	}
+	if len(models) != len(ids) {
+		return nil, problem.New(
+			409,
+			"execution_history_artifact_unavailable",
+			"An authoritative Resume Snapshot Artifact reference is no longer ready or available.",
+		)
 	}
 	byID := make(map[uuid.UUID]persistence.Artifact, len(models))
 	for _, model := range models {
 		byID[model.ID] = model
 	}
-	result := make([]ResumeArtifactReference, 0, len(models))
+	result := make([]ResumeArtifactReference, 0, len(events))
 	for _, event := range events {
 		model, ok := byID[event.ArtifactID]
 		if !ok {
-			continue
+			return nil, problem.New(
+				409,
+				"execution_history_artifact_unavailable",
+				"An authoritative Resume Snapshot Artifact reference is no longer ready or available.",
+			)
+		}
+		if event.SessionID != uuid.Nil && model.SessionID != event.SessionID {
+			return nil, problem.New(
+				409,
+				"execution_history_artifact_scope_mismatch",
+				"An authoritative Resume Snapshot Artifact reference no longer belongs to its logical Session origin.",
+			)
+		}
+		if event.ExecutionID != nil {
+			if model.ExecutionID == nil || *model.ExecutionID != *event.ExecutionID {
+				return nil, problem.New(
+					409,
+					"execution_history_artifact_scope_mismatch",
+					"An authoritative Resume Snapshot Artifact reference no longer matches its immutable Execution origin.",
+				)
+			}
+		}
+		if model.SHA256 == nil || strings.TrimSpace(*model.SHA256) == "" {
+			return nil, problem.New(
+				409,
+				"execution_history_artifact_unavailable",
+				"An authoritative Resume Snapshot Artifact reference does not have a ready content hash.",
+			)
 		}
 		result = append(result, ResumeArtifactReference{
 			Sequence:    event.Sequence,
@@ -839,6 +933,40 @@ func resumePendingInteraction(model persistence.ExecutionInteraction) (ResumePen
 	return item, truncated
 }
 
+func (s *Service) loadResumeRecordedInteractions(
+	ctx context.Context,
+	tx *gorm.DB,
+	execution persistence.AgentExecution,
+) ([]ResumeRecordedInteraction, error) {
+	models := make([]persistence.ExecutionInteraction, 0, resumeSnapshotPendingInteractionLimit+1)
+	if err := tx.WithContext(ctx).
+		Where("tenant_id = ? AND execution_id = ? AND status = ? AND delivery_status = ? AND resume_bundle_id IS NULL AND resume_generation IS NULL AND resume_bound_at IS NULL",
+			execution.TenantID, execution.ID, "resolved", "resume-recorded").
+		Order("resolved_at, id").Limit(resumeSnapshotPendingInteractionLimit + 1).
+		Find(&models).Error; err != nil {
+		return nil, problem.Wrap(500, "execution_resume_recorded_interactions_load_failed", "Suspend-resume interaction resolutions could not be loaded.", err)
+	}
+	if len(models) > resumeSnapshotPendingInteractionLimit {
+		return nil, problem.New(409, "resume_recorded_interaction_limit_exceeded", "Too many suspend-resume interaction resolutions are pending reconstruction.")
+	}
+	result := make([]ResumeRecordedInteraction, 0, len(models))
+	for _, model := range models {
+		if model.ResolvedAt == nil || model.ResolutionKind == nil || model.Resolution == nil ||
+			model.ResumeBundleID != nil || model.ResumeGeneration != nil || model.ResumeBoundAt != nil {
+			return nil, problem.New(500, "resume_recorded_interaction_corrupt", "A suspend-resume interaction resolution is incomplete.")
+		}
+		pending, _ := resumePendingInteraction(model)
+		result = append(result, ResumeRecordedInteraction{
+			ID: model.ID, ExecutionID: model.ExecutionID, TurnID: model.TurnID,
+			Provider: pending.Provider, RequestID: pending.RequestID, EventVersion: pending.EventVersion,
+			Kind: pending.Kind, RequestType: pending.RequestType, Detail: pending.Detail,
+			Questions: pending.Questions, ResolutionKind: *model.ResolutionKind,
+			Resolution: model.Resolution, RequestedAt: model.RequestedAt, ResolvedAt: *model.ResolvedAt,
+		})
+	}
+	return result, nil
+}
+
 func resumeWorkspaceReference(input resumeSnapshotContext) *ResumeWorkspaceReference {
 	if input.RemoteWorkspaceID == nil {
 		return nil
@@ -903,12 +1031,23 @@ func fitResumeSnapshotBudget(snapshot *ResumeSnapshot) error {
 			addResumeTruncationReason(snapshot, "pending_interaction_budget")
 			continue
 		}
+		if stripResumeArtifactMetadata(snapshot) {
+			addResumeTruncationReason(snapshot, "artifact_optional_metadata_budget")
+			continue
+		}
+		if len(snapshot.ArtifactReferences) != 0 {
+			return problem.New(
+				500,
+				"resume_snapshot_artifact_authority_budget_exhausted",
+				"The authoritative Resume Snapshot Artifact references exceed the fixed budget and cannot be evicted.",
+			)
+		}
 		return problem.New(500, "resume_snapshot_budget_exhausted", "The authoritative Resume Snapshot metadata exceeds its fixed budget.")
 	}
 }
 
 func dropOldestResumeContext(snapshot *ResumeSnapshot) bool {
-	if len(snapshot.Messages) == 1 && len(snapshot.ToolResults) == 0 && len(snapshot.ArtifactReferences) == 0 {
+	if len(snapshot.Messages) == 1 && len(snapshot.ToolResults) == 0 {
 		message := &snapshot.Messages[0]
 		if len(message.Text) > 1024 {
 			overBytes := snapshot.Budget.UsedBytes - snapshot.Budget.ByteLimit
@@ -938,9 +1077,6 @@ func dropOldestResumeContext(snapshot *ResumeSnapshot) bool {
 	if len(snapshot.ToolResults) > 0 {
 		candidates = append(candidates, candidate{kind: 1, sequence: snapshot.ToolResults[0].Sequence})
 	}
-	if len(snapshot.ArtifactReferences) > 0 {
-		candidates = append(candidates, candidate{kind: 2, sequence: snapshot.ArtifactReferences[0].Sequence})
-	}
 	if len(candidates) == 0 {
 		return false
 	}
@@ -958,8 +1094,6 @@ func dropOldestResumeContext(snapshot *ResumeSnapshot) bool {
 		snapshot.Messages = snapshot.Messages[1:]
 	case 1:
 		snapshot.ToolResults = snapshot.ToolResults[1:]
-	case 2:
-		snapshot.ArtifactReferences = snapshot.ArtifactReferences[1:]
 	}
 	setResumeDroppedBefore(snapshot, droppedThrough)
 	return true
@@ -975,6 +1109,35 @@ func stripResumeInteractionMetadata(snapshot *ResumeSnapshot) bool {
 		interaction.RequestType = ""
 		interaction.Questions = nil
 		return true
+	}
+	for index := range snapshot.ResumeRecordedInteractions {
+		interaction := &snapshot.ResumeRecordedInteractions[index]
+		if interaction.Detail == "" && interaction.RequestType == "" && len(interaction.Questions) == 0 {
+			continue
+		}
+		interaction.Detail = ""
+		interaction.RequestType = ""
+		interaction.Questions = nil
+		return true
+	}
+	return false
+}
+
+func stripResumeArtifactMetadata(snapshot *ResumeSnapshot) bool {
+	for index := range snapshot.ArtifactReferences {
+		reference := &snapshot.ArtifactReferences[index]
+		changed := false
+		if reference.ContentType != nil {
+			reference.ContentType = nil
+			changed = true
+		}
+		if reference.SizeBytes != nil {
+			reference.SizeBytes = nil
+			changed = true
+		}
+		if changed {
+			return true
+		}
 	}
 	return false
 }

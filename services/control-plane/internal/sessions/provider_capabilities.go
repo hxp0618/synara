@@ -7,6 +7,7 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
+	"github.com/synara-ai/synara/services/control-plane/internal/placement"
 	"github.com/synara-ai/synara/services/control-plane/internal/problem"
 	"github.com/synara-ai/synara/services/control-plane/internal/providercapabilities"
 )
@@ -21,6 +22,35 @@ func (s *Service) requireTargetProviderCapabilities(
 	return s.requireTargetProviderCapabilitiesWithObservation(
 		ctx, tx, target, provider, false, capabilityIDs...,
 	)
+}
+
+func (s *Service) requireTargetPoolProviderCapabilities(
+	ctx context.Context,
+	tx *gorm.DB,
+	target persistence.ExecutionTarget,
+	placementSelection placement.Selection,
+	provider string,
+	requireObserved bool,
+	capabilityIDs ...string,
+) error {
+	projection, err := providercapabilities.LoadTargetPlacementProjection(
+		ctx,
+		tx,
+		target,
+		placementSelection.Pool.ID,
+		placementSelection.Pool.Version,
+		placementSelection.Pool.Mode,
+		s.now(),
+		s.providerCapabilityHeartbeatTimeout,
+	)
+	if err != nil {
+		if errors.Is(err, providercapabilities.ErrInvalidManifest) {
+			return problem.Wrap(500, "worker_manifest_projection_invalid", "A stored Worker manifest is invalid.", err)
+		}
+		return problem.Wrap(500, "provider_capabilities_load_failed", "Provider capabilities could not be loaded.", err)
+	}
+	decision := providercapabilities.Check(projection, provider, capabilityIDs...)
+	return EnforceProviderCapabilityDecision(target, decision, requireObserved)
 }
 
 func (s *Service) requireObservedTargetProviderCapabilities(

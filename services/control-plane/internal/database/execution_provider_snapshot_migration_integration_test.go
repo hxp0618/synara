@@ -193,14 +193,25 @@ func TestSessionActiveExecutionMigrationRejectsAmbiguousLegacyQueue(t *testing.T
 	}
 	now := time.Now().UTC()
 	turnID := uuid.New()
+	preSessionExecutionLineageTurnColumns := []string{
+		"id", "tenant_id", "session_id", "created_by", "status", "input_text",
+		"runtime_mode", "interaction_mode", "started_at", "completed_at", "created_at",
+	}
+	preSessionExecutionLineageExecutionColumns := []string{
+		"id", "tenant_id", "session_id", "turn_id", "attempt", "status",
+		"execution_target_id", "target_kind", "provider", "provider_runtime_binding_id",
+		"generation", "requested_by", "queued_at", "started_at", "finished_at",
+		"failure_code", "failure_message",
+	}
 	if err := db.Transaction(func(tx *gorm.DB) error {
-		if err := tx.Omit("TurnKind").Create(&persistence.AgentTurn{
+		if err := tx.Select(preSessionExecutionLineageTurnColumns).Create(&persistence.AgentTurn{
 			ID: turnID, TenantID: seed.tenantID, SessionID: seed.sessionID,
-			CreatedBy: first.RequestedBy, Status: "queued", InputText: "ambiguous queued Turn", CreatedAt: now,
+			CreatedBy: first.RequestedBy, Status: "queued", InputText: "ambiguous queued Turn",
+			RuntimeMode: "full-access", InteractionMode: "default", CreatedAt: now,
 		}).Error; err != nil {
 			return err
 		}
-		return tx.Omit("WorkerReleaseRevisionID", "WorkerReleaseChannel").Create(&persistence.AgentExecution{
+		return tx.Select(preSessionExecutionLineageExecutionColumns).Create(&persistence.AgentExecution{
 			ID: uuid.New(), TenantID: seed.tenantID, SessionID: seed.sessionID, TurnID: turnID,
 			Attempt: 1, Status: "queued", ExecutionTargetID: first.ExecutionTargetID, TargetKind: first.TargetKind,
 			Provider: first.Provider, ProviderRuntimeBindingID: first.ProviderRuntimeBindingID,

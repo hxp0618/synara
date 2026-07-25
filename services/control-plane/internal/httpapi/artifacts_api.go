@@ -165,6 +165,30 @@ func (s *Server) downloadWorkerCheckpointArtifact(w http.ResponseWriter, r *http
 	writeJSON(w, http.StatusOK, grant)
 }
 
+func (s *Server) downloadWorkerMemoryArtifact(w http.ResponseWriter, r *http.Request) {
+	executionID, ok := s.pathUUID(w, r, "executionID")
+	if !ok {
+		return
+	}
+	revisionID, ok := s.pathUUID(w, r, "revisionID")
+	if !ok {
+		return
+	}
+	var input executions.LeaseInput
+	if err := decodeJSON(r, &input); err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	grant, err := s.artifacts.DownloadMemoryForWorker(
+		r.Context(), mustWorker(r), executionID, revisionID, input,
+	)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, grant)
+}
+
 func (s *Server) uploadArtifactContent(w http.ResponseWriter, r *http.Request) {
 	artifactID, ok := s.pathUUID(w, r, "artifactID")
 	if !ok {

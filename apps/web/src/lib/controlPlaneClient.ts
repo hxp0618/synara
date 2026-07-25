@@ -47,6 +47,70 @@ export type ControlPlaneTenantAccess = {
   role: "owner" | "admin" | "security_admin" | "billing_admin" | "auditor" | "member";
 };
 
+export type ControlPlaneResourceLifecycleWarmPoolMode =
+  | "disabled"
+  | "balanced"
+  | "low-latency";
+
+export type ControlPlaneResourceLifecycleIntBounds = {
+  min: number;
+  max: number;
+};
+
+export type ControlPlaneResourceLifecycleBounds = {
+  waitingKeepAliveSeconds: ControlPlaneResourceLifecycleIntBounds;
+  suspendAfterIdleSeconds: ControlPlaneResourceLifecycleIntBounds;
+  absoluteSessionLifetimeSeconds: ControlPlaneResourceLifecycleIntBounds;
+  workspaceRetentionDays: ControlPlaneResourceLifecycleIntBounds;
+  warmPoolModes: ReadonlyArray<ControlPlaneResourceLifecycleWarmPoolMode>;
+};
+
+export type ControlPlaneResourceLifecycleOverrides = {
+  waitingKeepAliveSeconds: number | null;
+  suspendAfterIdleSeconds: number | null;
+  absoluteSessionLifetimeSeconds: number | null;
+  workspaceRetentionDays: number | null;
+  warmPoolMode: ControlPlaneResourceLifecycleWarmPoolMode | null;
+};
+
+export type ControlPlaneResourceLifecycleOverrideInput = {
+  waitingKeepAliveSeconds?: number | null;
+  suspendAfterIdleSeconds?: number | null;
+  absoluteSessionLifetimeSeconds?: number | null;
+  workspaceRetentionDays?: number | null;
+  warmPoolMode?: ControlPlaneResourceLifecycleWarmPoolMode | null;
+};
+
+export type ControlPlaneResourceLifecycleEffective = {
+  waitingKeepAliveSeconds: number;
+  suspendAfterIdleSeconds: number;
+  absoluteSessionLifetimeSeconds: number | null;
+  workspaceRetentionDays: number;
+  warmPoolMode: ControlPlaneResourceLifecycleWarmPoolMode;
+};
+
+export type ControlPlaneResourceLifecycleConfig = {
+  defaults: ControlPlaneResourceLifecycleEffective;
+  bounds: ControlPlaneResourceLifecycleBounds;
+};
+
+export type ControlPlaneResourceLifecyclePolicy = {
+  scope: "tenant" | "project";
+  tenantId: string;
+  projectId?: string | null;
+  overrides: ControlPlaneResourceLifecycleOverrides;
+  effective: ControlPlaneResourceLifecycleEffective;
+  version: number;
+  updatedBy: string | null;
+  createdAt: string | null;
+  updatedAt: string | null;
+};
+
+export type ControlPlaneResourceLifecyclePolicyUpdateInput =
+  ControlPlaneResourceLifecycleOverrides & {
+    expectedVersion: number;
+  };
+
 export type ControlPlanePlatformProfile = {
   profile: "personal" | "single-node" | "enterprise";
   metadataStore: "sqlite" | "postgresql";
@@ -59,6 +123,7 @@ export type ControlPlanePlatformProfile = {
   executionTargetKinds: ReadonlyArray<ControlPlaneExecutionTargetKind>;
   artifactPayloadMigration: boolean;
   metadataExportImport: boolean;
+  resourceLifecyclePolicy: ControlPlaneResourceLifecycleConfig;
 };
 
 export type ControlPlaneSessionState = {
@@ -285,7 +350,24 @@ export type ControlPlaneAgentSession = {
   model: string | null;
   providerCredentialId: string | null;
   executionTargetId: string;
+  requestedExecutionTargetId?: string;
+  executionTargetGroupId?: string;
+  routingPolicyVersion?: number;
+  preferredExecutionRegion?: string;
   lastEventSequence: number;
+  resourceState:
+    | "idle"
+    | "provisioning"
+    | "active"
+    | "waiting"
+    | "checkpointing"
+    | "suspended"
+    | "restoring"
+    | "terminating";
+  meaningfulActivityAt: string;
+  resourceIdleSince: string | null;
+  absoluteExpiresAt: string | null;
+  resourceLifecyclePolicy: ControlPlaneResourceLifecycleEffective;
   createdAt: string;
   updatedAt: string;
   archivedAt: string | null;
@@ -305,12 +387,65 @@ export type ControlPlaneExecutionTarget = {
   updatedAt: string;
 };
 
+export type ControlPlaneWorkerPoolMode = "resident" | "per-execution" | "warm";
+export type ControlPlaneWorkerPoolStatus = "active" | "draining" | "disabled";
+export type ControlPlaneWorkerPoolCapacityClass = "standard" | "interactive";
+
+export type ControlPlaneWorkerPool = {
+  id: string;
+  tenantId: string | null;
+  executionTargetId: string;
+  name: string;
+  mode: ControlPlaneWorkerPoolMode;
+  capacityClass: ControlPlaneWorkerPoolCapacityClass;
+  clusterId: string;
+  region: string;
+  namespace: string;
+  desiredIdleUnits: number;
+  maxActiveUnits: number;
+  schedulingTemplate: Record<string, unknown>;
+  status: ControlPlaneWorkerPoolStatus;
+  version: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type ControlPlaneExecutionPlacementPolicy = {
+  tenantId: string | null;
+  executionTargetId: string;
+  version: number;
+  defaultPoolId: string;
+  balancedPoolId: string | null;
+  lowLatencyPoolId: string | null;
+  updatedBy: string | null;
+  updatedAt: string;
+};
+
+export type ControlPlaneExecutionPlacementState = {
+  pools: ReadonlyArray<ControlPlaneWorkerPool>;
+  policy: ControlPlaneExecutionPlacementPolicy;
+};
+
+export type ControlPlaneWorkerPoolInput = {
+  name: string;
+  mode: ControlPlaneWorkerPoolMode;
+  capacityClass: ControlPlaneWorkerPoolCapacityClass;
+  clusterId: string;
+  region: string;
+  namespace: string;
+  desiredIdleUnits: number;
+  maxActiveUnits: number;
+  schedulingTemplate: Record<string, unknown>;
+  status: ControlPlaneWorkerPoolStatus;
+};
+
 export type ControlPlaneWorker = {
   id: string;
   incarnation: number;
   instanceUid: string;
   executionTargetId: string;
   targetKind: ControlPlaneExecutionTargetKind | string;
+  workerMode: "execution-pinned" | "warm-pool" | "general-pool";
   clusterId: string;
   namespace: string;
   podName: string;
@@ -388,6 +523,11 @@ export type ControlPlaneWorkerManifest = {
   runtimeEvent: {
     minimum: number;
     maximum: number;
+  };
+  processContainment: {
+    mode: "none" | "cgroup-v2" | "job-object";
+    trustState: "none" | "untrusted" | "verified";
+    reasonCode?: "no-attestation" | "legacy-unverified" | "target-policy-mismatch";
   };
   providers: ReadonlyArray<ControlPlaneWorkerProviderManifest>;
 };
@@ -504,6 +644,14 @@ export type ControlPlaneAgentTurn = {
   startedAt: string | null;
   completedAt: string | null;
   createdAt: string;
+};
+
+export type ControlPlaneExecutionResume = {
+  id: string;
+  sessionId: string;
+  turnId: string;
+  status: "recovering";
+  generation: number;
 };
 
 export type ControlPlaneReviewTarget =
@@ -855,6 +1003,18 @@ export const controlPlaneClient = {
       `/v1/tenants/${encodeURIComponent(tenantId)}/retention-policy`,
       { method: "PUT", body: input },
     ),
+  getTenantResourceLifecyclePolicy: (tenantId: string) =>
+    controlPlaneRequest<ControlPlaneResourceLifecyclePolicy>(
+      `/v1/tenants/${encodeURIComponent(tenantId)}/resource-lifecycle-policy`,
+    ),
+  updateTenantResourceLifecyclePolicy: (
+    tenantId: string,
+    input: ControlPlaneResourceLifecyclePolicyUpdateInput,
+  ) =>
+    controlPlaneRequest<ControlPlaneResourceLifecyclePolicy>(
+      `/v1/tenants/${encodeURIComponent(tenantId)}/resource-lifecycle-policy`,
+      { method: "PUT", body: input },
+    ),
   listIdentityConnections: (tenantId: string) =>
     controlPlaneRequest<{ items: ReadonlyArray<ControlPlaneIdentityConnection> }>(
       `/v1/tenants/${encodeURIComponent(tenantId)}/identity-connections`,
@@ -1088,6 +1248,18 @@ export const controlPlaneClient = {
     controlPlaneRequest<{ items: ReadonlyArray<ControlPlaneAgentSession> }>(
       `/v1/projects/${encodeURIComponent(projectId)}/sessions`,
     ),
+  getProjectResourceLifecyclePolicy: (projectId: string) =>
+    controlPlaneRequest<ControlPlaneResourceLifecyclePolicy>(
+      `/v1/projects/${encodeURIComponent(projectId)}/resource-lifecycle-policy`,
+    ),
+  updateProjectResourceLifecyclePolicy: (
+    projectId: string,
+    input: ControlPlaneResourceLifecyclePolicyUpdateInput,
+  ) =>
+    controlPlaneRequest<ControlPlaneResourceLifecyclePolicy>(
+      `/v1/projects/${encodeURIComponent(projectId)}/resource-lifecycle-policy`,
+      { method: "PUT", body: input },
+    ),
   getProjectProviderCapabilities: (projectId: string, executionTargetId?: string) => {
     const query = executionTargetId
       ? `?${new URLSearchParams({ executionTargetId }).toString()}`
@@ -1105,6 +1277,9 @@ export const controlPlaneClient = {
       model?: string;
       providerCredentialId?: string;
       executionTargetId?: string;
+      executionTargetGroupId?: string;
+      preferredExecutionRegion?: string;
+      resourceLifecyclePolicy?: ControlPlaneResourceLifecycleOverrideInput;
     },
     options?: ControlPlaneIdempotencyOptions,
   ) =>
@@ -1167,6 +1342,43 @@ export const controlPlaneClient = {
   listWorkerReleases: (tenantId: string, targetId: string) =>
     controlPlaneRequest<ControlPlaneWorkerReleaseOverview>(
       `/v1/tenants/${encodeURIComponent(tenantId)}/execution-targets/${encodeURIComponent(targetId)}/worker-releases`,
+    ),
+  getExecutionPlacement: (tenantId: string, targetId: string) =>
+    controlPlaneRequest<ControlPlaneExecutionPlacementState>(
+      `/v1/tenants/${encodeURIComponent(tenantId)}/execution-targets/${encodeURIComponent(targetId)}/worker-pools`,
+    ),
+  createWorkerPool: (
+    tenantId: string,
+    targetId: string,
+    input: ControlPlaneWorkerPoolInput,
+  ) =>
+    controlPlaneRequest<ControlPlaneWorkerPool>(
+      `/v1/tenants/${encodeURIComponent(tenantId)}/execution-targets/${encodeURIComponent(targetId)}/worker-pools`,
+      { method: "POST", body: input },
+    ),
+  updateWorkerPool: (
+    tenantId: string,
+    targetId: string,
+    poolId: string,
+    input: ControlPlaneWorkerPoolInput & { expectedVersion: number },
+  ) =>
+    controlPlaneRequest<ControlPlaneWorkerPool>(
+      `/v1/tenants/${encodeURIComponent(tenantId)}/execution-targets/${encodeURIComponent(targetId)}/worker-pools/${encodeURIComponent(poolId)}`,
+      { method: "PATCH", body: input },
+    ),
+  updateExecutionPlacementPolicy: (
+    tenantId: string,
+    targetId: string,
+    input: {
+      expectedVersion: number;
+      defaultPoolId: string;
+      balancedPoolId: string | null;
+      lowLatencyPoolId: string | null;
+    },
+  ) =>
+    controlPlaneRequest<ControlPlaneExecutionPlacementState>(
+      `/v1/tenants/${encodeURIComponent(tenantId)}/execution-targets/${encodeURIComponent(targetId)}/placement-policy`,
+      { method: "PUT", body: input },
     ),
   createWorkerRelease: (
     tenantId: string,
@@ -1322,6 +1534,14 @@ export const controlPlaneClient = {
   interruptActiveTurn: (sessionId: string, options?: ControlPlaneIdempotencyOptions) =>
     controlPlaneRequest<ControlPlaneControlCommand>(
       `/v1/sessions/${encodeURIComponent(sessionId)}/turns/active/interrupt`,
+      {
+        method: "POST",
+        ...idempotencyRequestHeaders(options),
+      },
+    ),
+  resumeActiveTurn: (sessionId: string, options?: ControlPlaneIdempotencyOptions) =>
+    controlPlaneRequest<ControlPlaneExecutionResume>(
+      `/v1/sessions/${encodeURIComponent(sessionId)}/turns/active/resume`,
       {
         method: "POST",
         ...idempotencyRequestHeaders(options),

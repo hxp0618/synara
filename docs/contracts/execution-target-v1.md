@@ -183,10 +183,17 @@ The encrypted SSH configuration requires `host`, `user`, `privateKey`, pinned Op
 `port`, `privateKeyPassphrase`, `workspaceRoot`, `gitCacheRoot`, `installRoot`, `serviceUser`, and `useSudo`.
 Plain HTTP control-plane URLs are rejected unless `allowInsecureControlPlane` is explicitly true.
 
+Protected cgroup mode is enabled by the paired `cgroupV2ProviderUid` / `cgroupV2ProviderGid` and
+`cgroupV2AttestationKeyId` / `cgroupV2AttestationPrivateKeyPath` fields together with explicit `agentdVersion`,
+`agentdBuildGitSha`, and `agentdImageDigest`. It requires `serviceUser=root`. `cgroupV2Root` may be omitted and is
+derived from the target-scoped systemd service; if supplied, it must equal that exact managed ControlGroup path.
+
 Provisioning uploads `synara-agentd`, a root-readable EnvironmentFile, and a target-specific systemd
 unit through the verified SSH connection. It never places SSH keys or Worker registration tokens in
-remote command arguments, browser responses, logs, or Audit metadata. Install/upgrade temporarily mark
-the target offline and activate it only after systemd restart succeeds. Revoke stops and disables the
+remote command arguments, browser responses, logs, or Audit metadata. Each install/upgrade writes a stable
+physical Worker instance UUID into that EnvironmentFile. Install/upgrade temporarily mark the target offline and
+activate it only after systemd restart succeeds; protected mode additionally proves the active unit and delegated
+ControlGroup. Revoke stops and disables the
 unit, removes binary/configuration files, preserves the workspace, and marks the target disabled.
 The default roots are `/var/lib/synara/targets/<target>/workspaces` and
 `/var/lib/synara/targets/<target>/git-cache`. Provisioning creates and assigns both roots to the service user;

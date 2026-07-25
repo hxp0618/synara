@@ -5,6 +5,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -40,6 +41,14 @@ func TestKubernetesReconcilerAgainstRealAPIServer(t *testing.T) {
 		Updates(map[string]any{"configuration_encrypted": encrypted, "status": "offline"}).Error; err != nil {
 		t.Fatal(err)
 	}
+	publisher := NewManagedKubernetesRoutingPublisher(
+		fixture.reconciler.targets,
+		ManagedKubernetesRoutingPublisherConfig{
+			PublisherIdentity: "managed-kubernetes-routing-publisher:real-api-integration",
+			ObservationTTL:    90 * time.Second,
+		},
+	)
+	fixture.reconciler.config.PublishRoutingHealth = publisher.PublishReconcile
 
 	client, err := kubernetesHTTPFactory{}.Open(kubernetesTargetConfiguration{
 		APIServer: apiServer, BearerToken: bearerToken, CACertificate: caCertificate,
@@ -62,13 +71,39 @@ func TestKubernetesReconcilerAgainstRealAPIServer(t *testing.T) {
 	if len(pods) != 1 || pods[0].Labels[kubernetesExecutionLabel] != fixture.executionIDs[0].String() {
 		t.Fatalf("real Kubernetes API returned unexpected managed Pods: %#v", pods)
 	}
-	for _, resource := range []string{"serviceaccounts", "secrets", "resourcequotas"} {
-		path := kubernetesNamespacedPath(namespace, resource, kubernetesSecretName(fixture.targetID))
-		if resource == "resourcequotas" {
-			path = kubernetesNamespacedPath(namespace, resource, kubernetesSecretName(fixture.targetID))
-		}
-		if err := httpClient.do(context.Background(), "GET", path, nil, &map[string]any{}, 200); err != nil {
-			t.Fatalf("real Kubernetes API did not persist %s: %v", resource, err)
+	var health persistence.ExecutionTargetHealth
+	if err := fixture.db.Where("execution_target_id = ?", fixture.targetID).Take(&health).Error; err != nil {
+		t.Fatalf("real Kubernetes reconcile did not publish routing health: %v", err)
+	}
+	if health.Status != "healthy" || health.CapacityStatus != "saturated" ||
+		health.AvailableCapacityUnits == nil || *health.AvailableCapacityUnits != 1 ||
+		health.AllocatedCapacityUnits != 1 ||
+		health.Source != "managed-kubernetes-routing-publisher:real-api-integration" {
+		t.Fatalf("unexpected real Kubernetes routing health: %#v", health)
+	}
+	if health.ExpiresAt.Sub(health.ObservedAt) != 90*time.Second {
+		t.Fatalf("real Kubernetes routing health TTL = %s, want 1m30s", health.ExpiresAt.Sub(health.ObservedAt))
+	}
+	var readinessCount int64
+	if err := fixture.db.Model(&persistence.ExecutionTargetDRReadiness{}).
+		Where("execution_target_id = ?", fixture.targetID).Count(&readinessCount).Error; err != nil {
+		t.Fatal(err)
+	}
+	if readinessCount != 0 {
+		t.Fatalf("managed Kubernetes reconcile forged %d DR readiness authorities", readinessCount)
+	}
+	foundationResources := []struct {
+		kind string
+		path string
+	}{
+		{kind: "serviceaccounts", path: kubernetesNamespacedPath(namespace, "serviceaccounts", kubernetesSecretName(fixture.targetID))},
+		{kind: "registry secrets", path: kubernetesNamespacedPath(namespace, "secrets", kubernetesRegistrySecretName(fixture.targetID))},
+		{kind: "resourcequotas", path: kubernetesNamespacedPath(namespace, "resourcequotas", kubernetesSecretName(fixture.targetID))},
+		{kind: "networkpolicies", path: kubernetesNetworkPolicyPath(namespace, kubernetesSecretName(fixture.targetID))},
+	}
+	for _, resource := range foundationResources {
+		if err := httpClient.do(context.Background(), "GET", resource.path, nil, &map[string]any{}, 200); err != nil {
+			t.Fatalf("real Kubernetes API did not persist %s: %v", resource.kind, err)
 		}
 	}
 }

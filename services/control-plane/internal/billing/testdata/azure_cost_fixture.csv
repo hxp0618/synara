@@ -1,0 +1,3 @@
+ExternalLineId,BillingPeriodStartAt,BillingPeriodEndAt,CurrencyCode,CostInBillingCurrency,ChargeKind,ResourceId,Region,ClusterId,Namespace,PodName,InstanceUID
+az-csv-1,2026-07-01T00:00:00Z,2026-08-01T00:00:00Z,USD,0.7500004,cpu,/subscriptions/SUB-123/resourceGroups/rg/providers/Microsoft.ContainerService/managedClusters/cluster-c/pods/worker-c,eastus,cluster-c,prod,worker-c,cccccccc-cccc-4ccc-8ccc-cccccccccccc
+az-csv-2,2026-07-01T00:00:00Z,2026-08-01T00:00:00Z,USD,0.5000004,memory,/subscriptions/SUB-123/resourceGroups/rg/providers/Microsoft.ContainerService/managedClusters/cluster-c/pods/worker-c,eastus,cluster-c,prod,worker-c,cccccccc-cccc-4ccc-8ccc-cccccccccccc

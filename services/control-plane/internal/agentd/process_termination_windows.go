@@ -28,7 +28,7 @@ type processTree struct {
 
 var ntResumeProcess = windows.NewLazySystemDLL("ntdll.dll").NewProc("NtResumeProcess")
 
-func newProcessTree(command *exec.Cmd) (*processTree, error) {
+func newProcessTree(command *exec.Cmd, _ ...processTreeOptions) (*processTree, error) {
 	if command.SysProcAttr == nil {
 		command.SysProcAttr = &syscall.SysProcAttr{}
 	}

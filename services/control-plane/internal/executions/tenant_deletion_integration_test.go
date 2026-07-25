@@ -45,6 +45,7 @@ func TestTenantDeletionInterruptsLiveLeaseAndCancelsInsteadOfRecovering(t *testi
 		}
 		return tx.Create(&persistence.WorkerLease{
 			ExecutionID: fixture.ExecutionID, TenantID: fixture.TenantID, WorkerID: worker.ID,
+			WorkerIncarnation: worker.Incarnation, WorkerInstanceUID: worker.InstanceUID,
 			Generation: activeGeneration, LeaseTokenHash: tokenHash, AcquiredAt: now, HeartbeatAt: now,
 			ExpiresAt: now.Add(30 * time.Second),
 		}).Error
@@ -114,5 +115,44 @@ func TestTenantDeletionInterruptsLiveLeaseAndCancelsInsteadOfRecovering(t *testi
 	}
 	if recoveringEvents != 0 || cancelledEvents != 1 {
 		t.Fatalf("Tenant expiry events: recovering=%d cancelled=%d", recoveringEvents, cancelledEvents)
+	}
+}
+
+func TestClaimReceiptReplayDoesNotRotateLeaseWhenTenantIsDeleting(t *testing.T) {
+	ctx := context.Background()
+	db, service, fixture := setupSQLiteRecoveryService(t)
+	worker := registerManifestTestWorker(t, service, fixture.TargetID, fixture.TargetKind, "tenant-delete-claim-replay")
+	cleanupWorkers(t, db, worker.ID)
+
+	requestID := "tenant-delete-claim-replay"
+	claim, err := service.Claim(ctx, worker, ClaimExecutionInput{
+		ExecutionTargetID: fixture.TargetID, TargetKind: fixture.TargetKind, ExecutionID: &fixture.ExecutionID,
+	}, requestID)
+	if err != nil || claim.Value.Lease == nil {
+		t.Fatalf("initial Claim before tenant deletion: %#v, %v", claim, err)
+	}
+	var before persistence.WorkerLease
+	if err := db.Where("tenant_id = ? AND execution_id = ?", fixture.TenantID, fixture.ExecutionID).
+		Take(&before).Error; err != nil {
+		t.Fatal(err)
+	}
+	now := service.now()
+	if err := db.Model(&persistence.Tenant{}).Where("id = ?", fixture.TenantID).
+		Updates(map[string]any{"status": "deleting", "deleted_at": now}).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = service.Claim(ctx, worker, ClaimExecutionInput{
+		ExecutionTargetID: fixture.TargetID, TargetKind: fixture.TargetKind, ExecutionID: &fixture.ExecutionID,
+	}, requestID)
+	assertProblemCode(t, err, "tenant_deleting")
+
+	var after persistence.WorkerLease
+	if err := db.Where("tenant_id = ? AND execution_id = ?", fixture.TenantID, fixture.ExecutionID).
+		Take(&after).Error; err != nil {
+		t.Fatal(err)
+	}
+	if !after.ExpiresAt.Equal(before.ExpiresAt) || string(after.LeaseTokenHash) != string(before.LeaseTokenHash) {
+		t.Fatalf("tenant-deleting Claim replay rotated its lease: before=%#v after=%#v", before, after)
 	}
 }

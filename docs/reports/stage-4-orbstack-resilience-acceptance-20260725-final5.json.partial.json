@@ -1,0 +1,417 @@
+{
+  "schemaVersion": "synara.kubernetes.resilience.acceptance.progress.v1",
+  "runState": "completed",
+  "status": "passed",
+  "startedAt": "2026-07-25T13:53:32Z",
+  "updatedAt": "2026-07-25T13:56:31Z",
+  "finishedAt": "2026-07-25T13:56:31Z",
+  "context": "orbstack",
+  "namespace": "synara-system",
+  "evidenceFile": "/Users/huang/devel/project/huang/business/synara/docs/reports/stage-4-orbstack-resilience-acceptance-20260725-final5.json",
+  "journalFile": "/Users/huang/devel/project/huang/business/synara/docs/reports/stage-4-orbstack-resilience-acceptance-20260725-final5.json.journal.jsonl",
+  "partialFile": "/Users/huang/devel/project/huang/business/synara/docs/reports/stage-4-orbstack-resilience-acceptance-20260725-final5.json.partial.json",
+  "baseline": {
+    "executed": true,
+    "status": "passed",
+    "durationSeconds": 69
+  },
+  "plannedCases": [
+    "rbac",
+    "leader-takeover",
+    "control-plane-failover"
+  ],
+  "allowedSkippedCases": [],
+  "caseCounts": {
+    "passed": 3,
+    "failed": 0,
+    "skipped": 0
+  },
+  "scenarios": [
+    {
+      "name": "rbac",
+      "status": "passed",
+      "startedAt": "2026-07-25T13:54:41Z",
+      "finishedAt": "2026-07-25T13:55:02Z",
+      "details": {
+        "clusterRoleName": "synara-control-plane-reconciler",
+        "rules": [
+          {
+            "apiGroups": [
+              "authentication.k8s.io"
+            ],
+            "resources": [
+              "tokenreviews"
+            ],
+            "verbs": [
+              "create"
+            ]
+          },
+          {
+            "apiGroups": [
+              ""
+            ],
+            "resources": [
+              "namespaces"
+            ],
+            "verbs": [
+              "get",
+              "create",
+              "patch"
+            ]
+          },
+          {
+            "apiGroups": [
+              ""
+            ],
+            "resources": [
+              "pods"
+            ],
+            "verbs": [
+              "get",
+              "list",
+              "create",
+              "patch",
+              "delete"
+            ]
+          },
+          {
+            "apiGroups": [
+              ""
+            ],
+            "resources": [
+              "secrets",
+              "serviceaccounts",
+              "resourcequotas"
+            ],
+            "verbs": [
+              "get",
+              "create",
+              "patch"
+            ]
+          },
+          {
+            "apiGroups": [
+              "networking.k8s.io"
+            ],
+            "resources": [
+              "networkpolicies"
+            ],
+            "verbs": [
+              "get",
+              "create",
+              "patch"
+            ]
+          }
+        ],
+        "checks": [
+          {
+            "verb": "create",
+            "resource": "tokenreviews",
+            "apiGroup": "authentication.k8s.io",
+            "namespace": "",
+            "expectedAllowed": true,
+            "allowed": true
+          },
+          {
+            "verb": "get",
+            "resource": "namespaces",
+            "apiGroup": "",
+            "namespace": "",
+            "expectedAllowed": true,
+            "allowed": true
+          },
+          {
+            "verb": "create",
+            "resource": "namespaces",
+            "apiGroup": "",
+            "namespace": "",
+            "expectedAllowed": true,
+            "allowed": true
+          },
+          {
+            "verb": "patch",
+            "resource": "namespaces",
+            "apiGroup": "",
+            "namespace": "",
+            "expectedAllowed": true,
+            "allowed": true
+          },
+          {
+            "verb": "get",
+            "resource": "pods",
+            "apiGroup": "",
+            "namespace": "synara-system",
+            "expectedAllowed": true,
+            "allowed": true
+          },
+          {
+            "verb": "list",
+            "resource": "pods",
+            "apiGroup": "",
+            "namespace": "synara-system",
+            "expectedAllowed": true,
+            "allowed": true
+          },
+          {
+            "verb": "create",
+            "resource": "pods",
+            "apiGroup": "",
+            "namespace": "synara-system",
+            "expectedAllowed": true,
+            "allowed": true
+          },
+          {
+            "verb": "patch",
+            "resource": "pods",
+            "apiGroup": "",
+            "namespace": "synara-system",
+            "expectedAllowed": true,
+            "allowed": true
+          },
+          {
+            "verb": "delete",
+            "resource": "pods",
+            "apiGroup": "",
+            "namespace": "synara-system",
+            "expectedAllowed": true,
+            "allowed": true
+          },
+          {
+            "verb": "get",
+            "resource": "serviceaccounts",
+            "apiGroup": "",
+            "namespace": "synara-system",
+            "expectedAllowed": true,
+            "allowed": true
+          },
+          {
+            "verb": "create",
+            "resource": "serviceaccounts",
+            "apiGroup": "",
+            "namespace": "synara-system",
+            "expectedAllowed": true,
+            "allowed": true
+          },
+          {
+            "verb": "patch",
+            "resource": "serviceaccounts",
+            "apiGroup": "",
+            "namespace": "synara-system",
+            "expectedAllowed": true,
+            "allowed": true
+          },
+          {
+            "verb": "get",
+            "resource": "secrets",
+            "apiGroup": "",
+            "namespace": "synara-system",
+            "expectedAllowed": true,
+            "allowed": true
+          },
+          {
+            "verb": "create",
+            "resource": "secrets",
+            "apiGroup": "",
+            "namespace": "synara-system",
+            "expectedAllowed": true,
+            "allowed": true
+          },
+          {
+            "verb": "patch",
+            "resource": "secrets",
+            "apiGroup": "",
+            "namespace": "synara-system",
+            "expectedAllowed": true,
+            "allowed": true
+          },
+          {
+            "verb": "get",
+            "resource": "resourcequotas",
+            "apiGroup": "",
+            "namespace": "synara-system",
+            "expectedAllowed": true,
+            "allowed": true
+          },
+          {
+            "verb": "create",
+            "resource": "resourcequotas",
+            "apiGroup": "",
+            "namespace": "synara-system",
+            "expectedAllowed": true,
+            "allowed": true
+          },
+          {
+            "verb": "patch",
+            "resource": "resourcequotas",
+            "apiGroup": "",
+            "namespace": "synara-system",
+            "expectedAllowed": true,
+            "allowed": true
+          },
+          {
+            "verb": "get",
+            "resource": "networkpolicies",
+            "apiGroup": "networking.k8s.io",
+            "namespace": "synara-system",
+            "expectedAllowed": true,
+            "allowed": true
+          },
+          {
+            "verb": "create",
+            "resource": "networkpolicies",
+            "apiGroup": "networking.k8s.io",
+            "namespace": "synara-system",
+            "expectedAllowed": true,
+            "allowed": true
+          },
+          {
+            "verb": "patch",
+            "resource": "networkpolicies",
+            "apiGroup": "networking.k8s.io",
+            "namespace": "synara-system",
+            "expectedAllowed": true,
+            "allowed": true
+          },
+          {
+            "verb": "delete",
+            "resource": "namespaces",
+            "apiGroup": "",
+            "namespace": "",
+            "expectedAllowed": false,
+            "allowed": false
+          },
+          {
+            "verb": "delete",
+            "resource": "secrets",
+            "apiGroup": "",
+            "namespace": "synara-system",
+            "expectedAllowed": false,
+            "allowed": false
+          },
+          {
+            "verb": "delete",
+            "resource": "serviceaccounts",
+            "apiGroup": "",
+            "namespace": "synara-system",
+            "expectedAllowed": false,
+            "allowed": false
+          },
+          {
+            "verb": "delete",
+            "resource": "resourcequotas",
+            "apiGroup": "",
+            "namespace": "synara-system",
+            "expectedAllowed": false,
+            "allowed": false
+          },
+          {
+            "verb": "delete",
+            "resource": "networkpolicies",
+            "apiGroup": "networking.k8s.io",
+            "namespace": "synara-system",
+            "expectedAllowed": false,
+            "allowed": false
+          },
+          {
+            "verb": "update",
+            "resource": "pods",
+            "apiGroup": "",
+            "namespace": "synara-system",
+            "expectedAllowed": false,
+            "allowed": false
+          },
+          {
+            "verb": "watch",
+            "resource": "pods",
+            "apiGroup": "",
+            "namespace": "synara-system",
+            "expectedAllowed": false,
+            "allowed": false
+          }
+        ]
+      }
+    },
+    {
+      "name": "leader-takeover",
+      "status": "passed",
+      "startedAt": "2026-07-25T13:55:02Z",
+      "finishedAt": "2026-07-25T13:55:59Z",
+      "details": {
+        "leaseName": "synara:kubernetes-execution-reconciler",
+        "before": {
+          "holderId": "synara-control-plane-64cccc5d5b-779c8:1:bbc78619-efdb-419c-812e-e64476469f45",
+          "pod": "synara-control-plane-64cccc5d5b-779c8",
+          "fencingToken": 3
+        },
+        "after": {
+          "holderId": "synara-control-plane-64cccc5d5b-9lkfv:1:60d3b9bc-77c7-4ff6-b61c-a37884d04b90",
+          "pod": "synara-control-plane-64cccc5d5b-9lkfv",
+          "fencingToken": 4
+        },
+        "readyProbeFailures": 0
+      }
+    },
+    {
+      "name": "control-plane-failover",
+      "status": "passed",
+      "startedAt": "2026-07-25T13:55:59Z",
+      "finishedAt": "2026-07-25T13:56:31Z",
+      "details": {
+        "deletedPod": "synara-control-plane-64cccc5d5b-px9zs",
+        "readyProbeFailures": 0,
+        "replacement": {
+          "beforePods": [
+            {
+              "name": "synara-control-plane-64cccc5d5b-9lkfv",
+              "node": "orbstack"
+            },
+            {
+              "name": "synara-control-plane-64cccc5d5b-px9zs",
+              "node": "orbstack"
+            }
+          ],
+          "afterPods": [
+            {
+              "name": "synara-control-plane-64cccc5d5b-9lkfv",
+              "node": "orbstack"
+            },
+            {
+              "name": "synara-control-plane-64cccc5d5b-n5rkp",
+              "node": "orbstack"
+            }
+          ],
+          "replacementPods": [
+            {
+              "name": "synara-control-plane-64cccc5d5b-n5rkp",
+              "node": "orbstack"
+            }
+          ]
+        },
+        "preHook": null,
+        "postHook": null
+      }
+    }
+  ],
+  "soak": {
+    "executed": false,
+    "status": "skipped",
+    "reason": "disabled",
+    "enabled": false,
+    "configuredDurationSeconds": 0,
+    "intervalSeconds": 30,
+    "plannedCases": [
+      "control-plane-failover"
+    ],
+    "cyclesCompleted": 0,
+    "cycles": []
+  },
+  "currentPhase": null,
+  "lastProgress": {
+    "status": "passed",
+    "startedAt": "2026-07-25T13:53:32Z",
+    "finishedAt": "2026-07-25T13:56:31Z",
+    "durationSeconds": 179,
+    "evidenceFile": "/Users/huang/devel/project/huang/business/synara/docs/reports/stage-4-orbstack-resilience-acceptance-20260725-final5.json",
+    "unexpectedExitStatus": null
+  }
+}

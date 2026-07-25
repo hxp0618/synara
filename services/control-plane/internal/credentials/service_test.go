@@ -701,7 +701,7 @@ func seedCredentialExecution(
 	provider := "codex"
 	credentialVersion := 1
 	worker := persistence.WorkerInstance{
-		ID: workerID, ExecutionTargetID: fixture.targetID, TargetKind: "local",
+		ID: workerID, Incarnation: 1, InstanceUID: uuid.NewString(), ExecutionTargetID: fixture.targetID, TargetKind: "local",
 		ClusterID: "credential-test", Namespace: "credential-test", PodName: "credential-test", Version: "test", ProtocolVersion: 1,
 		Capabilities: map[string]any{}, LeaseSupported: true, FencingSupported: true,
 		AuthTokenHash: secret.HashToken("credential-worker-token"), Status: "online",
@@ -720,7 +720,11 @@ func seedCredentialExecution(
 			ProviderResumeStrategySnapshot: "authoritative-history",
 			Generation:                     1, RequestedBy: fixture.owner.UserID, QueuedAt: now, StartedAt: &now,
 		},
-		&persistence.WorkerLease{ExecutionID: executionID, TenantID: fixture.tenantID, WorkerID: workerID, Generation: 1, LeaseTokenHash: secret.HashToken(leaseToken), AcquiredAt: now, HeartbeatAt: now, ExpiresAt: now.Add(time.Hour)},
+		&persistence.WorkerLease{
+			ExecutionID: executionID, TenantID: fixture.tenantID, WorkerID: workerID,
+			WorkerIncarnation: worker.Incarnation, WorkerInstanceUID: worker.InstanceUID, Generation: 1,
+			LeaseTokenHash: secret.HashToken(leaseToken), AcquiredAt: now, HeartbeatAt: now, ExpiresAt: now.Add(time.Hour),
+		},
 	}
 	for _, model := range models {
 		if err := fixture.db.Create(model).Error; err != nil {
@@ -744,7 +748,7 @@ func seedGitCredentialExecution(
 	leaseToken := "git-credential-worker-lease-token"
 	repositoryURL := "https://git.example.com/team/repository.git"
 	worker := persistence.WorkerInstance{
-		ID: workerID, ExecutionTargetID: fixture.targetID, TargetKind: "local",
+		ID: workerID, Incarnation: 1, InstanceUID: uuid.NewString(), ExecutionTargetID: fixture.targetID, TargetKind: "local",
 		ClusterID: "git-credential-test", Namespace: "git-credential-test", PodName: "git-credential-test",
 		Version: "test", ProtocolVersion: 1, Capabilities: map[string]any{},
 		LeaseSupported: true, FencingSupported: true,
@@ -773,7 +777,8 @@ func seedGitCredentialExecution(
 			WorkerID: &workerID, Generation: 1, RequestedBy: fixture.owner.UserID, QueuedAt: now, StartedAt: &now,
 		},
 		&persistence.WorkerLease{
-			ExecutionID: executionID, TenantID: fixture.tenantID, WorkerID: workerID, Generation: 1,
+			ExecutionID: executionID, TenantID: fixture.tenantID, WorkerID: workerID,
+			WorkerIncarnation: worker.Incarnation, WorkerInstanceUID: worker.InstanceUID, Generation: 1,
 			LeaseTokenHash: secret.HashToken(leaseToken), AcquiredAt: now, HeartbeatAt: now, ExpiresAt: now.Add(time.Hour),
 		},
 	}
