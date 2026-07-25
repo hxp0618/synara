@@ -16,6 +16,11 @@ import type {
 } from "./types";
 
 export type ProjectionAuthority = "local" | "control-plane";
+/**
+ * Per-thread detail hydration status. Absence means "idle": no detail snapshot
+ * has been applied yet, so shell-only threads must not be treated as empty.
+ */
+export type ThreadDetailSyncState = "synced" | "failed";
 
 export interface AppState {
   /** Highest authoritative snapshot integrated by this store instance. */
@@ -37,6 +42,7 @@ export interface AppState {
   proposedPlanByThreadId?: Record<ThreadId, Record<string, Thread["proposedPlans"][number]>>;
   turnDiffIdsByThreadId?: Record<ThreadId, TurnId[]>;
   turnDiffSummaryByThreadId?: Record<ThreadId, Record<TurnId, Thread["turnDiffSummaries"][number]>>;
+  threadDetailSyncById?: Record<ThreadId, ThreadDetailSyncState>;
   deletedProjectIdsById?: Record<Project["id"], true>;
   deletedThreadIdsById?: Record<ThreadId, true>;
 }
@@ -85,6 +91,7 @@ export const initialState: AppState = {
   proposedPlanByThreadId: {},
   turnDiffIdsByThreadId: {},
   turnDiffSummaryByThreadId: {},
+  threadDetailSyncById: {},
   deletedProjectIdsById: {},
   deletedThreadIdsById: {},
 };
