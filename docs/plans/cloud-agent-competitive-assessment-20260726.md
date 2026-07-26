@@ -6,7 +6,8 @@
 北极星"。本文的优势/劣势判断全部对照 2026 年 7 月市场现状给出，不重复姊妹篇已有的内部诊断细节。
 
 **证据口径。** 外部事实来自 2026-07-26 的三路并行调研（产品线约 28 个一手来源、基础设施线含
-kubernetes-sigs/agent-sandbox 仓库级核对）加一次独立模型评审；关键来源见文末。延迟/规模数字多为厂商宣称
+kubernetes-sigs/agent-sandbox 仓库级核对）加一次独立模型评审；2026-07-27 对 agent-sandbox releases、
+Cursor/Claude Code/Codex changelog 四个快变来源复核，无影响本文结论的变化。关键来源见文末。延迟/规模数字多为厂商宣称
 （vendor claim），未经独立复测的一律照此标注；社区口碑类结论标注为非受控样本。内部事实以当日
 `codex/saas-tenancy-user` 工作树为准。本文为持续修订文档：第一至五节是市场评估（格局、事实、
 优劣势、方向确认），第六节是对齐手册（可执行清单与设计建议），服务"把本项目 cloud agent 能力做到
@@ -367,3 +368,6 @@ runloop.ai、beam.cloud、blaxel.ai、AWS Bedrock AgentCore devguide、Azure Bui
   入口/U6 的具体化闭环，第六节构成完整对齐手册。
 - 2026-07-27 r8：编辑收敛——第六节标题改为"对齐手册"并补小节导览；前言写明"一至五评估 + 六手册"
   两段式结构；修复劣势 6 中被硬换行拆断的代码段与缩进。无内容性变更。
+- 2026-07-27 r9–r10：漂移核查——agent-sandbox releases（仍 v0.5.3）、Cursor changelog（Router 后
+  无新条目）、Claude Code/Codex changelog（动向均在本地 CLI/桌面面）四源复核，无云端架构事实
+  变化；前言追加事实核对基线。
