@@ -2321,6 +2321,7 @@ type fakeKubernetesClient struct {
 	pods           map[string]kubernetesPod
 	deletedPods    []string
 	podApplyErr    error
+	podApplyErrFor map[string]error
 	listPodUIDsErr error
 	deletePodErr   error
 }
@@ -2330,8 +2331,16 @@ func newFakeKubernetesClient() *fakeKubernetesClient {
 }
 
 func (c *fakeKubernetesClient) Apply(_ context.Context, _ string, object map[string]any) error {
-	if object["kind"] == "Pod" && c.podApplyErr != nil {
-		return c.podApplyErr
+	if object["kind"] == "Pod" {
+		if c.podApplyErr != nil {
+			return c.podApplyErr
+		}
+		if len(c.podApplyErrFor) > 0 {
+			name, _ := object["metadata"].(map[string]any)["name"].(string)
+			if err, found := c.podApplyErrFor[name]; found {
+				return err
+			}
+		}
 	}
 	c.applied = append(c.applied, object)
 	if object["kind"] == "Pod" {
@@ -2665,16 +2674,26 @@ func TestKubernetesReconcilerReportsPodApplyFailureBeforeUIDAssignment(t *testin
 	if err == nil || !strings.Contains(err.Error(), "A Kubernetes Worker Pod could not be applied") {
 		t.Fatalf("reconcile apply failure = %v", err)
 	}
-	if len(observations) != 1 {
+	// Every queued Execution is attempted: one Pod that cannot be applied does
+	// not stop the sweep, so each failure is classified and observed rather
+	// than only the first one encountered.
+	if len(observations) != len(fixture.executionIDs) {
 		t.Fatalf("apply observations = %#v", observations)
 	}
-	observation := observations[0]
-	if observation.TenantID != fixture.tenantID || observation.ExecutionTargetID != fixture.targetID ||
-		observation.ExecutionID != fixture.executionIDs[0] || observation.Generation != 1 ||
-		observation.PodUID != "" || observation.Phase != "ApplyFailed" ||
-		observation.FailureClass != KubernetesPodFailureApplyFailed ||
-		observation.FailureReasonCode != "api-status-429" {
-		t.Fatalf("apply failure observation = %#v", observation)
+	observed := make(map[uuid.UUID]KubernetesExecutionPodObservation, len(observations))
+	for _, observation := range observations {
+		if observation.TenantID != fixture.tenantID || observation.ExecutionTargetID != fixture.targetID ||
+			observation.Generation != 1 || observation.PodUID != "" || observation.Phase != "ApplyFailed" ||
+			observation.FailureClass != KubernetesPodFailureApplyFailed ||
+			observation.FailureReasonCode != "api-status-429" {
+			t.Fatalf("apply failure observation = %#v", observation)
+		}
+		observed[observation.ExecutionID] = observation
+	}
+	for _, executionID := range fixture.executionIDs {
+		if _, found := observed[executionID]; !found {
+			t.Fatalf("execution %s produced no apply failure observation", executionID)
+		}
 	}
 }
 
@@ -2717,5 +2736,47 @@ func TestKubernetesReconcilerReportsFailedPodBeforeSafeDeletion(t *testing.T) {
 	}
 	if len(client.deletedPods) != 1 || client.deletedPods[0] != pod.Name {
 		t.Fatalf("failed Pod deletion = %#v", client.deletedPods)
+	}
+}
+
+// A single Execution that cannot be placed must not starve the other queued
+// Executions on the same target for the cycle. Before per-Execution isolation
+// the first apply failure aborted the whole target sweep, so a malformed or
+// rejected Pod spec silently blocked every Execution behind it.
+func TestKubernetesReconcilerIsolatesPodApplyFailurePerExecution(t *testing.T) {
+	fixture := newKubernetesReconcileFixture(t, "")
+	client := newFakeKubernetesClient()
+	fixture.reconciler.factory = &fakeKubernetesFactory{client: client}
+
+	blocked := fixture.executionIDs[0]
+	survivor := fixture.executionIDs[1]
+	blockedPod := kubernetesPodName(kubernetesExecution{ID: blocked, Status: "queued"})
+	survivorPod := kubernetesPodName(kubernetesExecution{ID: survivor, Status: "queued"})
+	client.podApplyErrFor = map[string]error{
+		blockedPod: &kubernetesAPIStatusError{StatusCode: http.StatusTooManyRequests, Detail: "rate limited"},
+	}
+
+	err := fixture.reconciler.ReconcileOnce(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "A Kubernetes Worker Pod could not be applied") {
+		t.Fatalf("reconcile did not report the per-Execution apply failure: %v", err)
+	}
+	// The failure is attributed to the Execution it belongs to.
+	if !strings.Contains(err.Error(), blocked.String()) {
+		t.Fatalf("apply failure was not attributed to execution %s: %v", blocked, err)
+	}
+
+	appliedPods := make(map[string]struct{})
+	for _, object := range client.applied {
+		if object["kind"] != "Pod" {
+			continue
+		}
+		name, _ := object["metadata"].(map[string]any)["name"].(string)
+		appliedPods[name] = struct{}{}
+	}
+	if _, found := appliedPods[survivorPod]; !found {
+		t.Fatalf("a failed Execution starved execution %s: applied=%v", survivor, appliedPods)
+	}
+	if _, found := appliedPods[blockedPod]; found {
+		t.Fatalf("the rejected Pod %s was recorded as applied", blockedPod)
 	}
 }

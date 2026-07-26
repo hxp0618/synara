@@ -1430,6 +1430,56 @@ func (d *Daemon) shutdownRequestTimeout() time.Duration {
 	return timeout
 }
 
+// pullRunnerControlUpdates fetches both runner delivery kinds for one poll
+// cycle. It prefers the combined endpoint and, once a Control Plane is
+// observed not to expose it, permanently uses the two legacy pulls for the
+// rest of this loop so a rollout that puts a newer Worker in front of an
+// older Control Plane keeps working.
+//
+// The legacy path deliberately skips the Interaction pull when a Control
+// command is already available, matching the delivery precedence the runner
+// applies and keeping the request count unchanged on that path.
+func (d *Daemon) pullRunnerControlUpdates(
+	ctx context.Context,
+	executionID uuid.UUID,
+	lease executions.Lease,
+	legacyPulls *bool,
+) ([]executions.ControlCommandDelivery, []executions.InteractionResolutionDelivery, error) {
+	if !*legacyPulls {
+		requestContext, cancel := context.WithTimeout(ctx, d.config.RequestTimeout)
+		updates, err := d.client.PullControlUpdates(requestContext, executionID, lease)
+		cancel()
+		if err == nil {
+			return updates.ControlCommands, updates.InteractionResolutions, nil
+		}
+		if !errControlUpdatesUnsupported(err) {
+			return nil, nil, fmt.Errorf("control update pull: %w", err)
+		}
+		*legacyPulls = true
+		d.logger.Info(
+			"control plane does not expose the combined control update pull; using separate pulls",
+			"executionId", executionID, "generation", lease.Generation,
+		)
+	}
+
+	requestContext, cancel := context.WithTimeout(ctx, d.config.RequestTimeout)
+	commands, err := d.client.PullControlCommands(requestContext, executionID, lease)
+	cancel()
+	if err != nil {
+		return nil, nil, fmt.Errorf("control command pull: %w", err)
+	}
+	if len(commands) > 0 {
+		return commands, nil, nil
+	}
+	requestContext, cancel = context.WithTimeout(ctx, d.config.RequestTimeout)
+	resolutions, err := d.client.PullInteractionResolutions(requestContext, executionID, lease)
+	cancel()
+	if err != nil {
+		return nil, nil, fmt.Errorf("interaction resolution pull: %w", err)
+	}
+	return nil, resolutions, nil
+}
+
 func (d *Daemon) runnerControlLoop(
 	ctx context.Context,
 	executionID uuid.UUID,
@@ -1442,15 +1492,14 @@ func (d *Daemon) runnerControlLoop(
 	if interval <= 0 || interval > 500*time.Millisecond {
 		interval = 500 * time.Millisecond
 	}
+	legacyPulls := false
 	for {
-		requestContext, cancel := context.WithTimeout(ctx, d.config.RequestTimeout)
-		commands, err := d.client.PullControlCommands(requestContext, executionID, lease)
-		cancel()
+		commands, resolutions, err := d.pullRunnerControlUpdates(ctx, executionID, lease, &legacyPulls)
 		if err != nil {
 			if ctx.Err() != nil {
 				return
 			}
-			d.logger.Warn("control command pull failed", "executionId", executionID, "generation", lease.Generation, "error", guard.SanitizeError(err))
+			d.logger.Warn("runner control pull failed", "executionId", executionID, "generation", lease.Generation, "error", guard.SanitizeError(err))
 			if !waitContext(ctx, interval) {
 				return
 			}
@@ -1480,21 +1529,8 @@ func (d *Daemon) runnerControlLoop(
 				},
 			}
 		} else {
-			requestContext, cancel = context.WithTimeout(ctx, d.config.RequestTimeout)
-			items, interactionErr := d.client.PullInteractionResolutions(requestContext, executionID, lease)
-			cancel()
-			if interactionErr != nil {
-				if ctx.Err() != nil {
-					return
-				}
-				d.logger.Warn("interaction resolution pull failed", "executionId", executionID, "generation", lease.Generation, "error", guard.SanitizeError(interactionErr))
-				if !waitContext(ctx, interval) {
-					return
-				}
-				continue
-			}
-			if len(items) > 0 {
-				delivery := items[0]
+			if len(resolutions) > 0 {
+				delivery := resolutions[0]
 				control = RunnerControl{
 					Command: RunnerControlCommand{
 						Provider: delivery.Provider, CommandType: delivery.CommandType, CommandID: delivery.CommandID,

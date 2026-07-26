@@ -811,6 +811,13 @@ func (r *KubernetesReconciler) reconcileTarget(ctx context.Context, target persi
 	// capacity so reconciliation does not create a replacement that the API
 	// server must reject with an exceeded-quota error.
 	scheduled := len(existing) + deleted
+	// One Execution that cannot get a Pod must not starve every other queued
+	// Execution on this target for the cycle: a malformed pool scheduling
+	// template, a rejected Pod spec or a failed observation write is scoped to
+	// its own Execution. Failures are collected and reported after the sweep,
+	// so the pass is still reported as failed and warm capacity stays
+	// unpublished, but the remaining Executions are still placed.
+	var executionFailures []error
 	for _, execution := range executions {
 		if execution.Status != "queued" && execution.Status != "recovering" {
 			continue
@@ -828,11 +835,13 @@ func (r *KubernetesReconciler) reconcileTarget(ctx context.Context, target persi
 		}
 		podHash, err := kubernetesExecutionPodHash(podBaseHash, configuration.Image, execution)
 		if err != nil {
-			return err
+			executionFailures = append(executionFailures, fmt.Errorf("execution %s: %w", execution.ID, err))
+			continue
 		}
 		pod, err := r.executionPod(target, configuration, podHash, execution, credential)
 		if err != nil {
-			return err
+			executionFailures = append(executionFailures, fmt.Errorf("execution %s: %w", execution.ID, err))
+			continue
 		}
 		// The Session can cross its immutable deadline after the initial query.
 		// Recheck at the external write boundary so a stale reconciliation
@@ -856,15 +865,20 @@ func (r *KubernetesReconciler) reconcileTarget(ctx context.Context, target persi
 		}
 		if err := r.observeExecutionPod(ctx, observation); err != nil {
 			if applyErr != nil {
-				return errors.Join(
+				err = errors.Join(
 					problem.Wrap(502, "kubernetes_pod_apply_failed", "A Kubernetes Worker Pod could not be applied.", applyErr),
 					err,
 				)
 			}
-			return err
+			executionFailures = append(executionFailures, fmt.Errorf("execution %s: %w", execution.ID, err))
+			continue
 		}
 		if applyErr != nil {
-			return problem.Wrap(502, "kubernetes_pod_apply_failed", "A Kubernetes Worker Pod could not be applied.", applyErr)
+			executionFailures = append(executionFailures, fmt.Errorf(
+				"execution %s: %w", execution.ID,
+				problem.Wrap(502, "kubernetes_pod_apply_failed", "A Kubernetes Worker Pod could not be applied.", applyErr),
+			))
+			continue
 		}
 		created++
 		scheduled++
@@ -879,17 +893,28 @@ func (r *KubernetesReconciler) reconcileTarget(ctx context.Context, target persi
 		}
 		pod, err := r.warmPoolPod(target, configuration, plan, credential)
 		if err != nil {
-			return err
+			executionFailures = append(executionFailures, fmt.Errorf("warm pod %s: %w", name, err))
+			continue
 		}
 		path := kubernetesNamespacedPath(configuration.Namespace, "pods", name)
 		if err := client.Apply(ctx, path, pod); err != nil {
-			return problem.Wrap(502, "kubernetes_pod_apply_failed", "A Kubernetes Worker Pod could not be applied.", err)
+			executionFailures = append(executionFailures, fmt.Errorf(
+				"warm pod %s: %w", name,
+				problem.Wrap(502, "kubernetes_pod_apply_failed", "A Kubernetes Worker Pod could not be applied.", err),
+			))
+			continue
 		}
 		created++
 		scheduled++
 	}
 	if err := r.setKubernetesStatus(ctx, target, "active", foundationChanged, created+deleted > 0, created, deleted); err != nil {
-		return err
+		return errors.Join(append(executionFailures, err)...)
+	}
+	if len(executionFailures) > 0 {
+		// The target itself is reachable and its status is current, so the
+		// health observation published by the deferred hook stays accurate;
+		// only the per-Execution placements failed.
+		return errors.Join(executionFailures...)
 	}
 	availableCapacity := configuration.MaxActivePods
 	healthObservation.Status = routing.HealthHealthy

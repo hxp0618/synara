@@ -2,8 +2,8 @@
 // Purpose: Verifies Droid ACP spawn, auth, mode, model, and discovery behavior.
 // Layer: Provider ACP support tests
 
-import { existsSync } from "node:fs";
-import { homedir } from "node:os";
+import { chmodSync, existsSync, mkdtempSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { Effect } from "effect";
@@ -28,10 +28,38 @@ function initializeWithAuthMethods(ids: ReadonlyArray<string>): Acp.InitializeRe
 }
 
 describe("resolveDroidCliBinaryPath", () => {
-  it("prefers ~/.local/bin/droid when it exists", () => {
+  // The resolver reads process.env.PATH, so each case pins it rather than
+  // inheriting the developer's. Without that the expectation silently depends
+  // on whether droid happens to be installed on the machine running the test.
+  function withPath<T>(value: string, run: () => T): T {
+    const previous = process.env.PATH;
+    process.env.PATH = value;
+    try {
+      return run();
+    } finally {
+      if (previous === undefined) delete process.env.PATH;
+      else process.env.PATH = previous;
+    }
+  }
+
+  it("returns an explicitly configured binary path unchanged", () => {
+    expect(resolveDroidCliBinaryPath("/opt/custom/droid")).toBe("/opt/custom/droid");
+  });
+
+  it("prefers a droid found on PATH", () => {
+    const dir = mkdtempSync(join(tmpdir(), "droid-path-"));
+    const binary = join(dir, "droid");
+    writeFileSync(binary, "#!/bin/sh\nexit 0\n");
+    chmodSync(binary, 0o755);
+    expect(withPath(dir, () => resolveDroidCliBinaryPath(""))).toBe(binary);
+  });
+
+  it("falls back to ~/.local/bin/droid, then the bare name, when PATH has none", () => {
+    const emptyDir = mkdtempSync(join(tmpdir(), "droid-empty-"));
     const localBin = join(homedir(), ".local", "bin", "droid");
-    const resolved = resolveDroidCliBinaryPath("");
-    expect(resolved).toBe(existsSync(localBin) ? localBin : "droid");
+    expect(withPath(emptyDir, () => resolveDroidCliBinaryPath(""))).toBe(
+      existsSync(localBin) ? localBin : "droid",
+    );
   });
 });
 
