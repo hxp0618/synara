@@ -345,6 +345,16 @@ func waitForProcessTreeReady(t *testing.T, path string) {
 	for time.Now().Before(deadline) {
 		content, err := os.ReadFile(path)
 		if err == nil {
+			// The helper publishes with os.WriteFile, which creates and truncates
+			// before it writes, so a reader can legitimately observe zero bytes
+			// between those two steps. Only a non-empty value that is not "ready"
+			// is a real helper error — it writes its failure reason to this same
+			// path. Treating the empty window as a failure made this test flake
+			// under parallel suite load.
+			if len(content) == 0 {
+				time.Sleep(10 * time.Millisecond)
+				continue
+			}
 			if string(content) != "ready" {
 				t.Fatalf("process-tree helper failed before readiness: %s", content)
 			}
