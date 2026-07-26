@@ -1,11 +1,11 @@
 [
   {
     "line_item_id": "gcp-1",
-    "invoice": {"month": "202607"},
+    "invoice": { "month": "202607" },
     "currency": "USD",
     "cost": "0.3333334",
-    "sku": {"description": "SSD storage capacity"},
-    "location": {"region": "us-central1"},
+    "sku": { "description": "SSD storage capacity" },
+    "location": { "region": "us-central1" },
     "resource": {
       "global_name": "//container.googleapis.com/projects/project-b/locations/us-central1/clusters/cluster-b/namespaces/default/pods/worker-b"
     },
@@ -18,11 +18,11 @@
   },
   {
     "line_item_id": "gcp-2",
-    "invoice": {"month": "202607"},
+    "invoice": { "month": "202607" },
     "currency": "USD",
     "cost": "0.3333334",
-    "sku": {"description": "SSD storage capacity"},
-    "location": {"region": "us-central1"},
+    "sku": { "description": "SSD storage capacity" },
+    "location": { "region": "us-central1" },
     "resource": {
       "global_name": "//container.googleapis.com/projects/project-b/locations/us-central1/clusters/cluster-b/namespaces/default/pods/worker-b"
     },
@@ -35,12 +35,12 @@
   },
   {
     "line_item_id": "gcp-3",
-    "invoice": {"month": "202607"},
+    "invoice": { "month": "202607" },
     "currency": "USD",
     "cost": "2.0000004",
-    "sku": {"description": "HTTP requests"},
-    "project": {"id": "project-b"},
-    "location": {"region": "us-central1"},
+    "sku": { "description": "HTTP requests" },
+    "project": { "id": "project-b" },
+    "location": { "region": "us-central1" },
     "resource": {
       "global_name": "//run.googleapis.com/projects/project-b/locations/us-central1/services/gateway"
     }

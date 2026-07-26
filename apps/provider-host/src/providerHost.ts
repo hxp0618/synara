@@ -500,7 +500,9 @@ export function hasResumeSupplementalMetadata(
   if (snapshot.workspace !== undefined && snapshot.workspace !== null) return true;
   if (snapshot.truncation !== undefined && snapshot.truncation !== null) return true;
   if (snapshot.mode?.review === true) return true;
-  return recoveryPromptMessages(inputForSupplementalDetection(workload)).currentTurnProgress.length > 0;
+  return (
+    recoveryPromptMessages(inputForSupplementalDetection(workload)).currentTurnProgress.length > 0
+  );
 }
 
 export function reconstructedPrompt(input: RunnerInput): string {
@@ -755,10 +757,13 @@ function validateMemoryDocuments(documents: RunnerInput["memoryDocuments"]): voi
     if (!/^[0-9a-f]{64}$/u.test(document.sha256)) {
       throw new Error("memoryDocuments sha256 is invalid");
     }
-    if (!(["text/plain", "text/markdown", "application/json"] as const).includes(document.contentType)) {
+    if (
+      !(["text/plain", "text/markdown", "application/json"] as const).includes(document.contentType)
+    ) {
       throw new Error("memoryDocuments contentType is unsupported");
     }
-    if (typeof document.content !== "string") throw new Error("memoryDocuments content is required");
+    if (typeof document.content !== "string")
+      throw new Error("memoryDocuments content is required");
     const bytes = Buffer.byteLength(document.content, "utf8");
     if (bytes > 256 * 1024) throw new Error("memoryDocuments item exceeds the size limit");
     totalBytes += bytes;

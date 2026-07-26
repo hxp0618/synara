@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"mime"
@@ -86,6 +87,7 @@ type Server struct {
 	workerReleases     *workerreleases.Service
 	placement          *placement.Service
 	routing            *routing.Service
+	platformRouting    *routing.PlatformAuthorityService
 	schedulingPolicies *schedulingpolicy.Service
 	retention          *retention.Service
 	metrics            *observability.Registry
@@ -157,6 +159,10 @@ func New(
 	if err != nil {
 		return nil, err
 	}
+	platformRouting, err := routing.NewPlatformAuthorityService(db, cfg.PlatformRoutingPublishers)
+	if err != nil {
+		return nil, fmt.Errorf("configure Platform routing authority publishers: %w", err)
+	}
 	server := &Server{
 		config: cfg, db: db, identity: identityService, tenancy: tenancyService,
 		projects: projectService, sessions: sessionService, executions: executionService,
@@ -165,6 +171,7 @@ func New(
 		quotas:      quotaService,
 		credentials: credentialService, credentialBindings: credentialbindings.NewService(db, credentialService),
 		workerReleases: workerreleases.NewService(db), placement: placement.NewService(db), routing: routing.NewService(db),
+		platformRouting:    platformRouting,
 		schedulingPolicies: schedulingpolicy.NewService(db),
 		retention:          retentionService, metrics: metrics, outbox: outboxService,
 		enterpriseIdentity: enterpriseIdentityService, serviceAccounts: serviceAccountService,
@@ -182,6 +189,7 @@ func New(
 	mux.HandleFunc("GET /ready", server.ready)
 	mux.HandleFunc("GET /metrics", server.prometheusMetrics)
 	mux.HandleFunc("GET /v1/platform/profile", server.getPlatformProfile)
+	mux.HandleFunc("PUT /v1/platform/routing-authority/execution-targets/{executionTargetID}/observations", server.publishPlatformRoutingAuthority)
 	mux.HandleFunc("POST /v1/auth/dev-login", server.devLogin)
 	mux.HandleFunc("GET /v1/auth/sso/connections", server.listPublicIdentityConnections)
 	mux.HandleFunc("GET /v1/auth/sso/{connectionID}/start", server.startSSO)
@@ -281,6 +289,7 @@ func New(
 	mux.Handle("GET /v1/tenants/{tenantID}/billing/shared-targets/{executionTargetID}/ledger-coverage", server.requireAuth(http.HandlerFunc(server.getBillingSharedTargetLedgerCoverage)))
 	mux.Handle("POST /v1/tenants/{tenantID}/billing/shared-targets/{executionTargetID}/ledger-coverage", server.requireAuth(http.HandlerFunc(server.sealBillingSharedTargetLedgerCoverage)))
 	mux.Handle("POST /v1/tenants/{tenantID}/billing/shared-targets/{executionTargetID}/allocations:sweep", server.requireAuth(http.HandlerFunc(server.sweepBillingSharedTargetAllocations)))
+	mux.Handle("POST /v1/tenants/{tenantID}/billing/shared-targets/{executionTargetID}/actual-invoices/{invoiceImportID}/allocations", server.requireAuth(http.HandlerFunc(server.allocateBillingSharedTargetActualInvoice)))
 	mux.Handle("POST /v1/tenants/{tenantID}/billing/imports/{provider}/{externalImportID}", server.requireAuth(http.HandlerFunc(server.triggerBillingImport)))
 	mux.Handle("POST /v1/tenants/{tenantID}/billing/imports/{importID}/reconcile", server.requireAuth(http.HandlerFunc(server.reconcileBillingImport)))
 	mux.Handle("GET /v1/tenants/{tenantID}/retention-policy", server.requireAuth(http.HandlerFunc(server.getRetentionPolicy)))

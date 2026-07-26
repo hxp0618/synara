@@ -274,6 +274,82 @@ func TestConfiguredSharedAllocationRejectsUnsafeScheduleBounds(t *testing.T) {
 		{name: "missing settlement", mutate: func(item *ConfiguredSharedAllocation) { item.SettlementDelay = 0 }, want: "settlement delay must be between"},
 		{name: "excessive settlement", mutate: func(item *ConfiguredSharedAllocation) { item.SettlementDelay = 91 * 24 * time.Hour }, want: "settlement delay must be between"},
 		{name: "tight retry loop", mutate: func(item *ConfiguredSharedAllocation) { item.ScheduleInterval = time.Second }, want: "schedule interval must be at least 1m"},
+		{name: "fractional settlement", mutate: func(item *ConfiguredSharedAllocation) { item.SettlementDelay = time.Hour + time.Millisecond }, want: "settlement delay must use whole seconds"},
+		{name: "fractional retry", mutate: func(item *ConfiguredSharedAllocation) { item.ScheduleInterval = time.Hour + time.Millisecond }, want: "schedule interval must use whole seconds"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			item := valid
+			test.mutate(&item)
+			_, err := item.Normalize()
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("expected %q error, got %v", test.want, err)
+			}
+		})
+	}
+}
+
+func TestRuntimeConfigNormalizesMonthlyUTCSharedAllocationSchedules(t *testing.T) {
+	targetID := uuid.New()
+	first := time.Date(2026, time.January, 1, 0, 0, 0, 0, time.FixedZone("UTC+8", 8*60*60))
+	last := time.Date(2026, time.April, 1, 0, 0, 0, 0, time.UTC)
+	config := RuntimeConfig{SharedAllocations: []ConfiguredSharedAllocation{{
+		ExecutionTargetID: targetID, Provider: " AWS ", CurrencyCode: " usd ",
+		Calendar: " MONTHLY-UTC ", FirstPeriodStartAt: first, LastPeriodEndAt: &last,
+		SettlementDelay: 24 * time.Hour, ScheduleInterval: 6 * time.Hour,
+	}}}
+	// A local month boundary is not a UTC month boundary.
+	if _, err := config.Normalize(); err == nil || !strings.Contains(err.Error(), "UTC month boundary") {
+		t.Fatalf("local monthly boundary error = %v", err)
+	}
+	config.SharedAllocations[0].FirstPeriodStartAt = time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
+	normalized, err := config.Normalize()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(normalized.SharedAllocations) != 1 ||
+		normalized.SharedAllocations[0].Calendar != SharedAllocationCalendarMonthlyUTC ||
+		normalized.SharedAllocations[0].Provider != "aws" ||
+		normalized.SharedAllocations[0].CurrencyCode != "USD" ||
+		!normalized.SharedAllocations[0].FirstPeriodStartAt.Equal(config.SharedAllocations[0].FirstPeriodStartAt) {
+		t.Fatalf("normalized monthly shared allocation = %#v", normalized.SharedAllocations)
+	}
+
+	staticConflict := config
+	staticConflict.SharedAllocations = append([]ConfiguredSharedAllocation(nil), config.SharedAllocations...)
+	staticConflict.SharedAllocations = append(staticConflict.SharedAllocations, ConfiguredSharedAllocation{
+		ExecutionTargetID: targetID, Provider: "aws", CurrencyCode: "USD",
+		BillingPeriodStartAt: time.Date(2026, time.May, 1, 0, 0, 0, 0, time.UTC),
+		BillingPeriodEndAt:   time.Date(2026, time.June, 1, 0, 0, 0, 0, time.UTC),
+		SettlementDelay:      time.Hour, ScheduleInterval: time.Hour,
+	})
+	if _, err := staticConflict.Normalize(); err == nil || !strings.Contains(err.Error(), "cannot be combined") {
+		t.Fatalf("monthly/static conflict error = %v", err)
+	}
+}
+
+func TestConfiguredMonthlyUTCSharedAllocationRejectsAmbiguousBounds(t *testing.T) {
+	first := time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
+	valid := ConfiguredSharedAllocation{
+		ExecutionTargetID: uuid.New(), Provider: "aws", CurrencyCode: "USD",
+		Calendar: SharedAllocationCalendarMonthlyUTC, FirstPeriodStartAt: first,
+		SettlementDelay: time.Hour, ScheduleInterval: time.Hour,
+	}
+	for _, test := range []struct {
+		name   string
+		mutate func(*ConfiguredSharedAllocation)
+		want   string
+	}{
+		{name: "unsupported calendar", mutate: func(item *ConfiguredSharedAllocation) { item.Calendar = "monthly" }, want: "unsupported"},
+		{name: "missing first", mutate: func(item *ConfiguredSharedAllocation) { item.FirstPeriodStartAt = time.Time{} }, want: "firstPeriodStartAt"},
+		{name: "non-boundary first", mutate: func(item *ConfiguredSharedAllocation) { item.FirstPeriodStartAt = first.Add(time.Hour) }, want: "UTC month boundary"},
+		{name: "mixed static", mutate: func(item *ConfiguredSharedAllocation) {
+			item.BillingPeriodStartAt = first
+			item.BillingPeriodEndAt = first.AddDate(0, 1, 0)
+		}, want: "cannot include a static"},
+		{name: "invalid last", mutate: func(item *ConfiguredSharedAllocation) {
+			last := first.Add(24 * time.Hour)
+			item.LastPeriodEndAt = &last
+		}, want: "later UTC month boundary"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			item := valid

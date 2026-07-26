@@ -9,6 +9,7 @@ import (
 
 	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
 	"github.com/synara-ai/synara/services/control-plane/internal/problem"
+	"github.com/synara-ai/synara/services/control-plane/internal/routing"
 	"github.com/synara-ai/synara/services/control-plane/internal/schedulingdecision"
 	"github.com/synara-ai/synara/services/control-plane/internal/workerreleases"
 )
@@ -53,6 +54,18 @@ func CreateScheduledExecution(
 		execution.WorkerReleaseRevisionID = &releaseSelection.RevisionID
 		execution.WorkerReleaseChannel = &releaseSelection.Channel
 	}
+	capacityAdmission, err := routing.AdmitExecutionCapacity(
+		ctx,
+		tx,
+		execution.TenantID,
+		execution.ID,
+		execution.ExecutionTargetID,
+		launchTarget.RoutingSelection != nil,
+		decidedAt,
+	)
+	if err != nil {
+		return ScheduledExecution{}, err
+	}
 
 	algorithm := schedulingdecision.AlgorithmFixedTargetV1
 	candidate := schedulingdecision.CandidateFromExecution(execution)
@@ -94,6 +107,9 @@ func CreateScheduledExecution(
 			"Execution and its immutable scheduling evidence could not be created atomically.",
 			err,
 		)
+	}
+	if err := routing.CreateCapacityAdmission(ctx, tx, capacityAdmission); err != nil {
+		return ScheduledExecution{}, err
 	}
 	return ScheduledExecution{Execution: execution, Decision: decision}, nil
 }

@@ -80,10 +80,53 @@ Provider Credential envelope encryption and Worker retrieval are defined in
 `docs/contracts/provider-credential-v1.md`.
 Global Target routing, DR readiness, and tenant-scoped Region/Cluster evacuation authority are defined in
 `docs/contracts/global-target-routing-dr-v1.md`.
+Platform-shared and external Target integrations publish health and cross-domain readiness through the Ed25519-signed
+`PUT /v1/platform/routing-authority/execution-targets/{executionTargetID}/observations` route. Configure public keys and
+exact Target/owner/DR-domain scopes with `SYNARA_PLATFORM_ROUTING_PUBLISHERS_JSON`; never place publisher private keys in
+the Control Plane environment. Migration `000083` makes publication receipts immutable and commits a signed bundle
+atomically. An empty JSON array disables this integration route safely.
+
+Generate and mount an Ed25519 PKCS#8 key in the external publisher, derive the public configuration value, and sign one
+unsigned publication without exposing the private key to the Control Plane:
+
+```bash
+openssl genpkey -algorithm ED25519 -out publisher-key.pem
+chmod 600 publisher-key.pem
+go run ./cmd/routing-authority-sign --private-key-file publisher-key.pem --public-key-only
+go run ./cmd/routing-authority-sign --private-key-file publisher-key.pem \
+  < unsigned-routing-publication.json > signed-routing-publication.json
+```
+
+The signer rejects unknown JSON, pre-existing signatures, key-file symlinks, and group/other-writable key files by
+default. Kubernetes projected Secret keys are symlinks, so a publisher may add `--allow-key-symlink` only for its
+read-only kubelet-managed Secret mount; the resolved target still must be a protected regular file. The Control Plane
+ConfigMap receives only the public key and exact scopes.
 Enterprise identity, retention, Provider Host, observability, and Worker image boundaries
 are documented under `docs/contracts` and `docs/worker-image.md`.
 Session/Execution transitions, API idempotency, Cancel races, and persisted Approval/User Input are
 defined in `docs/contracts/session-execution-state-machine.md`.
+
+Managed Kubernetes Pod provisioning records durable, Generation-scoped apply/Pending/Running timestamps and bounded
+failure classes before agentd registration exists. `SYNARA_KUBERNETES_POD_PENDING_FAILURE_THRESHOLD` defaults to `2m`,
+must be at least the reconcile interval, and is evaluated from the current Pod creation timestamp so a replacement UID
+does not inherit stale Pending age. Raw Kubernetes status messages and identities are not metric labels.
+
+## Metric rollup runtime
+
+Terminal `worker_incarnation_facts` are immutable and are compacted into exact UTC-day metric buckets by the dedicated
+`synara:metric-rollup` leader. `SYNARA_METRIC_ROLLUP_INTERVAL` defaults to `1m` and
+`SYNARA_METRIC_ROLLUP_BATCH_SIZE` defaults to `500` (allowed range `1..10000`). Bucket increments and per-fact
+completion markers commit atomically; pending facts remain part of metric output, so a stopped or delayed scheduler
+does not change totals. Monitor `synara_metric_rollup_pending_facts{kind="worker-incarnation"}` for backlog and
+`synara_metric_rollup_buckets{kind="worker-incarnation"}` for retained daily-bucket inventory.
+
+Migration `000081` extends the same fenced cycle with sealed terminal Generation and immutable Pod-failure membership.
+Outcomes use categorical daily counts; cold-start, queue, and Pod provisioning durations use mergeable integer
+histograms with at most two-percent relative bucket width. P50/P95/P99 are selected from merged sample ranks, never
+summed. Only complete UTC days are read from rollups; both partial window days, nonterminal facts, and pending cursors
+remain raw inputs in the same consistent snapshot. Monitor
+`synara_execution_generation_metric_rollup_pending_facts{kind}` and
+`synara_execution_generation_metric_rollup_buckets{kind}` for this path.
 
 ## Billing runtime
 
@@ -108,10 +151,17 @@ Cloud cost accounting is defined in `docs/contracts/cloud-cost-accounting-v1.md`
 - Shared-target allocation requires an operator-sealed Claim/Release coverage cutover and an explicit closed-period
   sweep. Exact sweep replay is idempotent, partial Worker failures return `retry-required`, and unavailable history
   remains fail-closed; the control plane does not invent cloud cost history that the Worker facts do not provide.
-- `SYNARA_BILLING_SHARED_ALLOCATION_MAPPINGS_JSON` enables leader-scoped unattended retries for explicit static
-  periods. Each strict mapping freezes Target/provider/currency/RFC3339 period bounds plus `settlementDelay` and
-  `scheduleInterval`; it does not infer calendar periods. The separate scheduler lease is transaction-fenced, and a
-  restart or leader handoff replays durable allocation identities safely.
+- Account-level actual invoice lines can be connected to one shared Target through
+  `POST /v1/tenants/{tenantID}/billing/shared-targets/{executionTargetID}/actual-invoices/{invoiceImportID}/allocations`.
+  This operator-only path requires a source-scope attestation digest, exact provider/currency/period/resource/kind
+  matches, and an already sealed shared estimate graph. Migration `000082` atomically seals a signed-micros-conserving
+  immutable Run/Line/Slice graph; unmatched account lines remain explicit rather than being assigned by guesswork.
+- `SYNARA_BILLING_SHARED_ALLOCATION_MAPPINGS_JSON` enables leader-scoped unattended retries. A mapping is either one
+  explicit static RFC3339 period or `calendar: "monthly-utc"` with an exact `firstPeriodStartAt` UTC month boundary and
+  optional `lastPeriodEndAt`. No local time zone or provider calendar is inferred, and calendar/static mappings cannot
+  be mixed for the same Target/provider/currency. Migration `000080` persists each generated period's due time, claim,
+  attempt count, and outcome; restart and leader handoff therefore retain the retry interval instead of depending on
+  process memory. The separate scheduler lease and every state/allocation mutation are transaction-fenced.
 
 ## Production authentication
 

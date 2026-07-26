@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
 )
 
 type labeledAmount struct {
@@ -43,6 +45,24 @@ type warmCapacityAuthorityMetricKey struct {
 	WarmSupported bool
 }
 
+type sharedAllocationSchedulePeriodMetric struct {
+	ScheduleKind string `gorm:"column:schedule_kind"`
+	LastOutcome  string `gorm:"column:last_outcome"`
+	DueState     string `gorm:"column:due_state"`
+	Count        int64  `gorm:"column:count"`
+}
+
+type sharedActualAllocationMetric struct {
+	Provider                string `gorm:"column:provider"`
+	CurrencyCode            string `gorm:"column:currency_code"`
+	State                   string `gorm:"column:state"`
+	RunCount                int64  `gorm:"column:run_count"`
+	SourceLineCount         int64  `gorm:"column:source_line_count"`
+	UnallocatedLineCount    int64  `gorm:"column:unallocated_line_count"`
+	SourceAmountMicros      int64  `gorm:"column:source_amount_micros"`
+	UnallocatedAmountMicros int64  `gorm:"column:unallocated_amount_micros"`
+}
+
 func (r *Registry) writeDistributedRoutingLeadershipBillingMetrics(
 	ctx context.Context,
 	output *bytes.Buffer,
@@ -70,7 +90,16 @@ func (r *Registry) writeDistributedRoutingLeadershipBillingMetrics(
 		"Authoritative cross-Target successor attempts by immutable status and reason.",
 		"status", "reason", failovers,
 	)
+	if err := r.writePlatformRoutingPublicationMetrics(ctx, output); err != nil {
+		return err
+	}
 	if err := r.writeWorkerPoolWarmCapacityMetrics(ctx, output, now); err != nil {
+		return err
+	}
+	if err := r.writeBillingSharedAllocationScheduleMetrics(ctx, output, now); err != nil {
+		return err
+	}
+	if err := r.writeBillingSharedActualAllocationMetrics(ctx, output); err != nil {
 		return err
 	}
 
@@ -148,6 +177,212 @@ func (r *Registry) writeDistributedRoutingLeadershipBillingMetrics(
 		)
 	}
 	return nil
+}
+
+func (r *Registry) writePlatformRoutingPublicationMetrics(ctx context.Context, output *bytes.Buffer) error {
+	if !r.db.Migrator().HasTable("platform_routing_publications") {
+		return nil
+	}
+	var publicationCount int64
+	if err := r.db.WithContext(ctx).Model(&persistence.PlatformRoutingPublication{}).
+		Count(&publicationCount).Error; err != nil {
+		return fmt.Errorf("collect Platform routing publication metrics: %w", err)
+	}
+	writeHelp(
+		output,
+		"synara_platform_routing_publications_total",
+		"Immutable authenticated Platform routing-authority publication receipts.",
+		"counter",
+	)
+	fmt.Fprintf(output, "synara_platform_routing_publications_total %d\n", publicationCount)
+	writeHelp(
+		output,
+		"synara_platform_routing_publication_latest_timestamp_seconds",
+		"Receive timestamp of the latest authenticated Platform routing-authority publication.",
+		"gauge",
+	)
+	latestTimestamp := float64(0)
+	if publicationCount > 0 {
+		var latest persistence.PlatformRoutingPublication
+		if err := r.db.WithContext(ctx).Select("received_at").
+			Order("received_at DESC, publisher_identity, nonce").Take(&latest).Error; err != nil {
+			return fmt.Errorf("collect latest Platform routing publication timestamp: %w", err)
+		}
+		latestTimestamp = float64(latest.ReceivedAt.UnixNano()) / float64(time.Second)
+	}
+	fmt.Fprintf(output, "synara_platform_routing_publication_latest_timestamp_seconds %s\n", strconv.FormatFloat(latestTimestamp, 'f', 6, 64))
+	return nil
+}
+
+func (r *Registry) writeBillingSharedActualAllocationMetrics(
+	ctx context.Context,
+	output *bytes.Buffer,
+) error {
+	if !r.db.Migrator().HasTable("billing_shared_actual_allocation_runs") {
+		return nil
+	}
+	var rows []sharedActualAllocationMetric
+	if err := r.db.WithContext(ctx).Table("billing_shared_actual_allocation_runs").
+		Select(`provider, currency_code, state,
+			COUNT(*) AS run_count,
+			SUM(source_line_count) AS source_line_count,
+			SUM(unallocated_line_count) AS unallocated_line_count,
+			SUM(source_amount_micros) AS source_amount_micros,
+			SUM(unallocated_amount_micros) AS unallocated_amount_micros`).
+		Group("provider, currency_code, state").
+		Order("provider, currency_code, state").
+		Scan(&rows).Error; err != nil {
+		return fmt.Errorf("collect billing shared actual allocation metrics: %w", err)
+	}
+	writeHelp(
+		output,
+		"synara_billing_shared_actual_allocation_runs",
+		"Immutable account-invoice allocation runs by bounded provider, currency, and sealing state.",
+		"gauge",
+	)
+	writeHelp(
+		output,
+		"synara_billing_shared_actual_allocation_lines",
+		"Exact account-invoice line inventory by selected or still-unallocated scope.",
+		"gauge",
+	)
+	writeHelp(
+		output,
+		"synara_billing_shared_actual_allocation_amount_micros",
+		"Signed account-invoice micros by selected or still-unallocated scope; selected amounts conserve into actual slices.",
+		"gauge",
+	)
+	for _, row := range rows {
+		baseLabels := map[string]string{
+			"provider": boundedBillingProvider(row.Provider),
+			"currency": row.CurrencyCode,
+			"state":    boundedSharedActualAllocationState(row.State),
+		}
+		fmt.Fprintf(
+			output,
+			"synara_billing_shared_actual_allocation_runs%s %d\n",
+			labels(baseLabels),
+			row.RunCount,
+		)
+		for _, sample := range []struct {
+			kind   string
+			lines  int64
+			amount int64
+		}{
+			{kind: "selected", lines: row.SourceLineCount, amount: row.SourceAmountMicros},
+			{kind: "unallocated", lines: row.UnallocatedLineCount, amount: row.UnallocatedAmountMicros},
+		} {
+			metricLabels := map[string]string{
+				"provider": baseLabels["provider"],
+				"currency": baseLabels["currency"],
+				"state":    baseLabels["state"],
+				"kind":     sample.kind,
+			}
+			fmt.Fprintf(
+				output,
+				"synara_billing_shared_actual_allocation_lines%s %d\n",
+				labels(metricLabels),
+				sample.lines,
+			)
+			fmt.Fprintf(
+				output,
+				"synara_billing_shared_actual_allocation_amount_micros%s %d\n",
+				labels(metricLabels),
+				sample.amount,
+			)
+		}
+	}
+	return nil
+}
+
+func boundedSharedActualAllocationState(value string) string {
+	switch strings.TrimSpace(value) {
+	case "building", "sealed":
+		return strings.TrimSpace(value)
+	default:
+		return "other"
+	}
+}
+
+func boundedBillingProvider(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" || len(value) > 64 {
+		return "other"
+	}
+	for _, character := range value {
+		if (character < 'a' || character > 'z') &&
+			(character < '0' || character > '9') && character != '_' && character != '-' {
+			return "other"
+		}
+	}
+	return value
+}
+
+func (r *Registry) writeBillingSharedAllocationScheduleMetrics(
+	ctx context.Context,
+	output *bytes.Buffer,
+	now time.Time,
+) error {
+	if !r.db.Migrator().HasTable("billing_shared_allocation_schedule_periods") {
+		return nil
+	}
+	var rows []sharedAllocationSchedulePeriodMetric
+	if err := r.db.WithContext(ctx).Table("billing_shared_allocation_schedule_periods").
+		Select(`schedule_kind, last_outcome,
+			CASE WHEN next_attempt_at <= CURRENT_TIMESTAMP THEN 'due' ELSE 'waiting' END AS due_state,
+			COUNT(*) AS count`).
+		Group(`schedule_kind, last_outcome,
+			CASE WHEN next_attempt_at <= CURRENT_TIMESTAMP THEN 'due' ELSE 'waiting' END`).
+		Order("schedule_kind, last_outcome, due_state").
+		Scan(&rows).Error; err != nil {
+		return fmt.Errorf("collect billing shared allocation schedule period metrics: %w", err)
+	}
+	writeHelp(
+		output,
+		"synara_billing_shared_allocation_schedule_periods",
+		"Durable shared allocation schedule period inventory by bounded schedule kind, last outcome, and due state.",
+		"gauge",
+	)
+	for _, row := range rows {
+		fmt.Fprintf(
+			output,
+			"synara_billing_shared_allocation_schedule_periods%s %d\n",
+			labels(map[string]string{
+				"schedule_kind": boundedSharedAllocationScheduleKind(row.ScheduleKind),
+				"outcome":       boundedSharedAllocationScheduleOutcome(row.LastOutcome),
+				"due_state":     boundedSharedAllocationScheduleDueState(row.DueState),
+			}),
+			row.Count,
+		)
+	}
+	return nil
+}
+
+func boundedSharedAllocationScheduleKind(value string) string {
+	switch strings.TrimSpace(value) {
+	case "static", "monthly-utc":
+		return strings.TrimSpace(value)
+	default:
+		return "other"
+	}
+}
+
+func boundedSharedAllocationScheduleOutcome(value string) string {
+	switch strings.TrimSpace(value) {
+	case "never", "running", "completed", "failed":
+		return strings.TrimSpace(value)
+	default:
+		return "other"
+	}
+}
+
+func boundedSharedAllocationScheduleDueState(value string) string {
+	switch strings.TrimSpace(value) {
+	case "due", "waiting":
+		return strings.TrimSpace(value)
+	default:
+		return "other"
+	}
 }
 
 func (r *Registry) writeWorkerPoolWarmCapacityMetrics(
@@ -295,6 +530,8 @@ func boundedReconcilerLeaseName(value string) string {
 		return "worker-release-auto-rollback"
 	case "synara:tenant-retention-sweeper":
 		return "retention"
+	case "synara:metric-rollup":
+		return "metric-rollup"
 	case "synara:billing-import-scheduler":
 		return "billing-import"
 	case "synara:billing-shared-allocation-scheduler":

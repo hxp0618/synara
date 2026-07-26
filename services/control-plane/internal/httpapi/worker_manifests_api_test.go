@@ -151,6 +151,7 @@ func TestListWorkerManifestsRouteEnforcesAuthenticationActiveTenantAndWorkerRead
 
 type workerManifestHTTPFixture struct {
 	db               *gorm.DB
+	server           *Server
 	handler          http.Handler
 	cookieName       string
 	tenantID         uuid.UUID
@@ -273,7 +274,7 @@ func newWorkerManifestHTTPFixture(t *testing.T) workerManifestHTTPFixture {
 		t.Fatal(err)
 	}
 	return workerManifestHTTPFixture{
-		db: store.DB(), handler: server.Handler(), cookieName: cfg.CookieName, tenantID: domain.TenantID,
+		db: store.DB(), server: server, handler: server.Handler(), cookieName: cfg.CookieName, tenantID: domain.TenantID,
 		targetID: domain.ExecutionTargetID, workerID: workerID, manifestID: manifestID,
 		ownerToken: ownerToken, readOnlyToken: readOnlyToken, memberToken: memberToken, crossTenantToken: crossTenantToken,
 		sensitiveValues: sensitive,

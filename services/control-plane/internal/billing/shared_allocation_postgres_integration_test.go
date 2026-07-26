@@ -191,6 +191,207 @@ func TestPostgresConcurrentSharedUsageAllocationSerializesAndReplays(t *testing.
 		t.Fatalf("PostgreSQL shared allocation sweep audit count = %d, want 1", sweepAuditCount)
 	}
 
+	var podResourceKey string
+	for _, slice := range first.result.Slices {
+		if slice.ChargeKind == ChargeKindPod {
+			podResourceKey = slice.ResourceCorrelationKey
+			break
+		}
+	}
+	if podResourceKey == "" {
+		t.Fatal("PostgreSQL shared allocation produced no Pod resource key")
+	}
+	actualImport := persistence.BillingActualInvoiceImport{
+		ID: uuid.New(), TenantID: domainA.TenantID, Provider: provider,
+		ExternalImportID:     "shared-actual-pg-" + uuid.NewString(),
+		BillingPeriodStartAt: base, BillingPeriodEndAt: terminatedAt,
+		CurrencyCode: "USD", SourceChecksum: strings.Repeat("c", 64),
+		ImportedAt: base.Add(2*time.Hour + time.Minute), CreatedAt: base.Add(2*time.Hour + time.Minute),
+	}
+	if err := db.WithContext(ctx).Create(&actualImport).Error; err != nil {
+		t.Fatal(err)
+	}
+	actualLines := []persistence.BillingActualInvoiceLine{
+		{
+			ID: uuid.New(), TenantID: domainA.TenantID, InvoiceImportID: actualImport.ID,
+			ExternalLineID: "shared-pod", Provider: provider, CurrencyCode: "USD",
+			ChargeKind: ChargeKindPod, ResourceCorrelationKey: podResourceKey,
+			BillingPeriodStartAt: base, BillingPeriodEndAt: terminatedAt,
+			AmountMicros: 12_345_679, ReconciliationState: reconciliationStatePending,
+			CreatedAt: actualImport.CreatedAt,
+		},
+		{
+			ID: uuid.New(), TenantID: domainA.TenantID, InvoiceImportID: actualImport.ID,
+			ExternalLineID: "unallocated", Provider: provider, CurrencyCode: "USD",
+			ChargeKind: ChargeKindCPU, ResourceCorrelationKey: "provider-unallocated:" + uuid.NewString(),
+			BillingPeriodStartAt: base, BillingPeriodEndAt: terminatedAt,
+			AmountMicros: -45_679, ReconciliationState: reconciliationStatePending,
+			CreatedAt: actualImport.CreatedAt,
+		},
+	}
+	if err := db.WithContext(ctx).Create(&actualLines).Error; err != nil {
+		t.Fatal(err)
+	}
+	actualInput := AllocateSharedActualInvoiceInput{
+		ExecutionTargetID: target.ID, InvoiceImportID: actualImport.ID,
+		SourceScopeAttestationSHA256: strings.Repeat("d", 64),
+	}
+	type actualOutcome struct {
+		result SharedActualInvoiceAllocationResult
+		err    error
+	}
+	actualOutcomes := make(chan actualOutcome, 2)
+	actualStart := make(chan struct{})
+	for range 2 {
+		go func() {
+			<-actualStart
+			result, allocationErr := service.AllocateSharedActualInvoiceAuthorized(
+				ctx,
+				identity.Principal{UserID: domainA.UserID, ActiveTenantID: &domainA.TenantID},
+				domainA.TenantID,
+				actualInput,
+				"shared-actual-pg-"+uuid.NewString(),
+				"127.0.0.1",
+			)
+			actualOutcomes <- actualOutcome{result: result, err: allocationErr}
+		}()
+	}
+	close(actualStart)
+	firstActual := <-actualOutcomes
+	secondActual := <-actualOutcomes
+	if firstActual.err != nil || secondActual.err != nil {
+		t.Fatalf("concurrent PostgreSQL shared actual allocation: first=%v second=%v", firstActual.err, secondActual.err)
+	}
+	if firstActual.result.Run.ID == uuid.Nil || firstActual.result.Run.ID != secondActual.result.Run.ID ||
+		firstActual.result.Created == secondActual.result.Created {
+		t.Fatalf("concurrent PostgreSQL shared actual identities: first=%#v second=%#v", firstActual.result, secondActual.result)
+	}
+	actualResult := firstActual.result
+	if !actualResult.Created {
+		actualResult = secondActual.result
+	}
+	if actualResult.Run.State != SharedActualAllocationStateSealed ||
+		actualResult.Run.SourceLineCount != 1 || actualResult.Run.UnallocatedLineCount != 1 ||
+		actualResult.Run.SourceAmountMicros != 12_345_679 || actualResult.Run.AllocatedAmountMicros != 12_345_679 ||
+		actualResult.Run.ImportAmountMicros != 12_300_000 || actualResult.Run.UnallocatedAmountMicros != -45_679 {
+		t.Fatalf("unexpected PostgreSQL shared actual run: %#v", actualResult.Run)
+	}
+	var actualSliceAmount int64
+	if err := db.WithContext(ctx).Raw(`
+		SELECT COALESCE(sum(actual_slice.amount_micros), 0)
+		FROM billing_shared_actual_charge_slices AS actual_slice
+		JOIN billing_shared_actual_allocation_lines AS allocation_line
+		  ON allocation_line.id = actual_slice.allocation_line_id
+		WHERE allocation_line.run_id = ?
+	`, actualResult.Run.ID).Scan(&actualSliceAmount).Error; err != nil {
+		t.Fatal(err)
+	}
+	if actualSliceAmount != actualResult.Run.SourceAmountMicros {
+		t.Fatalf("PostgreSQL shared actual slice total = %d, want %d", actualSliceAmount, actualResult.Run.SourceAmountMicros)
+	}
+	var actualAuditCount int64
+	if err := db.WithContext(ctx).Model(&persistence.AuditLog{}).
+		Where("tenant_id = ? AND action = ? AND resource_id = ?", domainA.TenantID,
+			"billing.shared_actual_invoice_allocated", actualResult.Run.ID).
+		Count(&actualAuditCount).Error; err != nil {
+		t.Fatal(err)
+	}
+	if actualAuditCount != 1 {
+		t.Fatalf("PostgreSQL shared actual audit count = %d, want 1", actualAuditCount)
+	}
+	if err := db.WithContext(ctx).Model(&persistence.BillingSharedActualAllocationRun{}).
+		Where("id = ?", actualResult.Run.ID).
+		UpdateColumn("source_amount_micros", actualResult.Run.SourceAmountMicros+1).Error; err == nil {
+		t.Fatal("PostgreSQL accepted mutation of a sealed shared actual allocation run")
+	}
+	var retainedActualSlice persistence.BillingSharedActualChargeSlice
+	if err := db.WithContext(ctx).Table("billing_shared_actual_charge_slices AS actual_slice").
+		Select("actual_slice.*").
+		Joins("JOIN billing_shared_actual_allocation_lines AS allocation_line ON allocation_line.id = actual_slice.allocation_line_id").
+		Where("allocation_line.run_id = ?", actualResult.Run.ID).
+		First(&retainedActualSlice).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.WithContext(ctx).Delete(&retainedActualSlice).Error; err == nil {
+		t.Fatal("PostgreSQL accepted deletion of a shared actual allocation slice")
+	}
+	lateActualLine := actualLines[0]
+	lateActualLine.ID = uuid.New()
+	lateActualLine.ExternalLineID = "late-line"
+	lateActualLine.ResourceCorrelationKey = "provider-late:" + uuid.NewString()
+	if err := db.WithContext(ctx).Create(&lateActualLine).Error; err == nil {
+		t.Fatal("PostgreSQL accepted a late line after shared actual allocation sealed the import")
+	}
+	var lateEstimateSlice persistence.BillingSharedEstimatedChargeSlice
+	for _, slice := range first.result.Slices {
+		if slice.ChargeKind == ChargeKindPod && slice.ResourceCorrelationKey == podResourceKey {
+			lateEstimateSlice = slice
+			break
+		}
+	}
+	if lateEstimateSlice.ID == uuid.Nil {
+		t.Fatal("PostgreSQL shared actual fence fixture has no matching estimate slice")
+	}
+	lateEstimateSlice.ID = uuid.New()
+	lateEstimateSlice.UsageStartAt = lateEstimateSlice.UsageStartAt.Add(time.Microsecond)
+	if err := db.WithContext(ctx).Create(&lateEstimateSlice).Error; err == nil {
+		t.Fatal("PostgreSQL accepted a late shared estimate slice after actual allocation sealed its scope")
+	}
+
+	incompleteTx := db.WithContext(ctx).Begin()
+	if incompleteTx.Error != nil {
+		t.Fatal(incompleteTx.Error)
+	}
+	incompleteImport := actualImport
+	incompleteImport.ID = uuid.New()
+	incompleteImport.ExternalImportID = "shared-actual-incomplete-" + uuid.NewString()
+	incompleteImport.SourceChecksum = strings.Repeat("e", 64)
+	if err := incompleteTx.Create(&incompleteImport).Error; err != nil {
+		_ = incompleteTx.Rollback().Error
+		t.Fatal(err)
+	}
+	incompleteLine := actualLines[0]
+	incompleteLine.ID = uuid.New()
+	incompleteLine.InvoiceImportID = incompleteImport.ID
+	incompleteLine.ExternalLineID = "incomplete"
+	incompleteLine.AmountMicros = 999
+	if err := incompleteTx.Create(&incompleteLine).Error; err != nil {
+		_ = incompleteTx.Rollback().Error
+		t.Fatal(err)
+	}
+	var retainedActualRun persistence.BillingSharedActualAllocationRun
+	if err := db.WithContext(ctx).Where("id = ?", actualResult.Run.ID).Take(&retainedActualRun).Error; err != nil {
+		_ = incompleteTx.Rollback().Error
+		t.Fatal(err)
+	}
+	incompleteRun := retainedActualRun
+	incompleteRun.ID = uuid.New()
+	incompleteRun.InvoiceImportID = incompleteImport.ID
+	incompleteRun.SourceChecksum = incompleteImport.SourceChecksum
+	incompleteRun.SourceLineSetSHA256 = strings.Repeat("f", 64)
+	incompleteRun.ImportLineCount = 1
+	incompleteRun.ImportAmountMicros = 999
+	incompleteRun.SourceLineCount = 1
+	incompleteRun.SourceAmountMicros = 999
+	incompleteRun.UnallocatedLineCount = 0
+	incompleteRun.UnallocatedAmountMicros = 0
+	incompleteRun.AllocationLineCount = 1
+	incompleteRun.AllocationSliceCount = 1
+	incompleteRun.AllocatedAmountMicros = 999
+	incompleteRun.State = SharedActualAllocationStateBuilding
+	incompleteRun.SealedAt = nil
+	if err := incompleteTx.Create(&incompleteRun).Error; err != nil {
+		_ = incompleteTx.Rollback().Error
+		t.Fatal(err)
+	}
+	if err := incompleteTx.Model(&persistence.BillingSharedActualAllocationRun{}).
+		Where("id = ?", incompleteRun.ID).
+		Updates(map[string]any{"state": SharedActualAllocationStateSealed, "sealed_at": incompleteRun.CreatedAt.Add(time.Second)}).Error; err == nil {
+		_ = incompleteTx.Rollback().Error
+		t.Fatal("PostgreSQL sealed an incomplete shared actual allocation graph")
+	}
+	_ = incompleteTx.Rollback().Error
+
 	overlap := input
 	overlap.BillingPeriodStartAt = base.Add(30 * time.Minute)
 	overlap.BillingPeriodEndAt = base.Add(90 * time.Minute)

@@ -75,6 +75,20 @@ func TestKubernetesReconcilerPublishesRoutingHealthAtReconcileCompletion(t *test
 	if health.Source != "managed-kubernetes-routing-test" || health.Version != 1 {
 		t.Fatalf("routing health source/version = %#v", health)
 	}
+	if health.ReservationAuthorityMode == nil ||
+		*health.ReservationAuthorityMode != routing.ReservationAuthorityExactActiveV1 ||
+		health.ReservationAcknowledgedUnits != 1 || health.ReservationAcknowledgementsSHA256 == nil {
+		t.Fatalf("routing reservation authority = %#v", health)
+	}
+	var reservationAcknowledgement persistence.ExecutionTargetReservationAcknowledgement
+	if err := fixture.db.Where("execution_target_id = ?", fixture.targetID).
+		Take(&reservationAcknowledgement).Error; err != nil {
+		t.Fatal(err)
+	}
+	if reservationAcknowledgement.ExecutionID != fixture.executionIDs[0] ||
+		reservationAcknowledgement.ExecutionGeneration != 0 || reservationAcknowledgement.HealthVersion != 1 {
+		t.Fatalf("routing reservation acknowledgement = %#v", reservationAcknowledgement)
+	}
 	if !health.ObservedAt.Equal(finishedAt) || !health.ExpiresAt.Equal(finishedAt.Add(10*time.Second)) {
 		t.Fatalf("routing health timing = %#v", health)
 	}
@@ -187,6 +201,11 @@ func TestKubernetesReconcilerPublishesUnreachableAfterAPIFailure(t *testing.T) {
 		health.Source != "managed-kubernetes-routing-test" || !health.ObservedAt.Equal(now) ||
 		!health.ExpiresAt.Equal(now.Add(time.Minute)) {
 		t.Fatalf("unreachable routing health = %#v", health)
+	}
+	if health.ReservationAuthorityMode == nil ||
+		*health.ReservationAuthorityMode != routing.ReservationAuthorityExactActiveV1 ||
+		health.ReservationAcknowledgedUnits != 0 || health.ReservationAcknowledgementsSHA256 == nil {
+		t.Fatalf("unreachable routing reservation authority = %#v", health)
 	}
 }
 

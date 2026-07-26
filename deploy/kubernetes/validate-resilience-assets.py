@@ -750,9 +750,74 @@ def main() -> None:
     if acceptance_text.count("rollout status deployment/synara-control-plane") != 1:
         fail("acceptance.sh must reserve Control Plane rollout status for the initial rollout only")
     if "wait_for_namespace_absent 180" not in acceptance_text:
-        fail("acceptance.sh must wait for asynchronous cleanup before recreating its fixed namespace")
+        fail("acceptance.sh must wait for asynchronous cleanup before recreating its selected namespace")
     if "already exists and is not terminating; refusing to reuse it" not in acceptance_text:
-        fail("acceptance.sh must refuse to overwrite a live fixed namespace")
+        fail("acceptance.sh must refuse to overwrite a live selected namespace")
+    for fragment in (
+        'namespace="${SYNARA_K8S_NAMESPACE:-synara-system}"',
+        'SYNARA_K8S_ACCEPTANCE_RBAC_NAME',
+        'SYNARA_K8S_ACCEPTANCE_OWNER',
+        'created_namespace=0',
+        'cleanup_rbac=0',
+        'create namespace "$namespace"',
+        'create -k "$overlay_dir"',
+        'synara.ai~1acceptance-owner',
+        'RBAC identity %s already exists; refusing to overwrite it',
+        'delete clusterrolebinding "$rbac_name"',
+        'value: $namespace',
+        'value: $rbac_name',
+    ):
+        if fragment not in acceptance_text:
+            fail(f"acceptance.sh omitted isolated namespace/RBAC behavior: {fragment}")
+    if "namespace: synara-system" in acceptance_text:
+        fail("acceptance.sh runtime resources must not retain a hard-coded namespace")
+
+    with tempfile.TemporaryDirectory(prefix="synara-acceptance-ownership-") as temp_dir_raw:
+        temp_dir = pathlib.Path(temp_dir_raw)
+        fake_kubectl = temp_dir / "kubectl"
+        fake_kubectl.write_text(
+            """#!/bin/sh
+set -eu
+printf '%s\\n' "$*" >>"$SYNARA_FAKE_KUBECTL_LOG"
+case "$*" in
+  *"cluster-info"*) exit 0 ;;
+  *"get namespace synara-existing"*)
+    [ "$SYNARA_FAKE_EXISTING" = "namespace" ] && exit 0
+    exit 1
+    ;;
+  *"get clusterrole synara-control-plane-reconciler-synara-existing"*)
+    [ "$SYNARA_FAKE_EXISTING" = "rbac" ] && exit 0
+    exit 1
+    ;;
+  *"get clusterrolebinding synara-control-plane-reconciler-synara-existing"*) exit 1 ;;
+esac
+exit 0
+""",
+            encoding="utf-8",
+        )
+        fake_kubectl.chmod(0o755)
+        for existing_kind, expected_error in (
+            ("namespace", "already exists and is not terminating; refusing to reuse it"),
+            ("rbac", "already exists; refusing to overwrite it"),
+        ):
+            log_path = temp_dir / f"{existing_kind}.log"
+            env = os.environ.copy()
+            env["PATH"] = f"{temp_dir}:{env['PATH']}"
+            env["SYNARA_K8S_CONTEXT"] = "kind-validation"
+            env["SYNARA_K8S_NAMESPACE"] = "synara-existing"
+            env["SYNARA_FAKE_EXISTING"] = existing_kind
+            env["SYNARA_FAKE_KUBECTL_LOG"] = str(log_path)
+            collision = subprocess.run(
+                ["bash", str(SCRIPT_DIR / "acceptance.sh")],
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+            if collision.returncode == 0 or expected_error not in collision.stderr:
+                fail(f"acceptance.sh did not fail closed for an existing {existing_kind} identity")
+            kubectl_log = log_path.read_text(encoding="utf-8")
+            if "delete namespace" in kubectl_log or "delete clusterrole" in kubectl_log:
+                fail(f"acceptance.sh cleanup deleted an unowned {existing_kind} identity")
     if "required_reconciler_leases" not in acceptance_text:
         fail("acceptance.sh must prove the core reconciler leases become active")
     if acceptance_text.count("postgres_scalar") < 4:
@@ -763,6 +828,16 @@ def main() -> None:
         fail("acceptance.sh must not use unsupported psql variable interpolation inside -c")
 
     resilience_text = (SCRIPT_DIR / "resilience-acceptance.sh").read_text(encoding="utf-8")
+    for fragment in (
+        'get clusterrole "$rbac_name"',
+        'delete clusterrolebinding "$rbac_name"',
+        'acceptance_resource_owner',
+        'SYNARA_K8S_NAMESPACE="$namespace"',
+        'SYNARA_K8S_ACCEPTANCE_RBAC_NAME="$rbac_name"',
+        'SYNARA_K8S_ACCEPTANCE_OWNER="$acceptance_owner"',
+    ):
+        if fragment not in resilience_text:
+            fail(f"resilience-acceptance.sh omitted isolated baseline behavior: {fragment}")
     for fragment in (
         "leader-takeover",
         "synara:kubernetes-execution-reconciler",
@@ -1262,6 +1337,28 @@ kill "$replacement"; wait "$replacement" 2>/dev/null || true
         "stopTimeoutEnvVar": "SYNARA_K8S_NODE_PARTITION_STOP_HOOK_TIMEOUT_SECONDS",
     }:
         fail("resilience dry-run managed hook override metadata drifted unexpectedly")
+
+    with tempfile.NamedTemporaryFile(prefix="synara-k8s-resilience-isolated-", delete=False) as handle:
+        isolated_evidence_path = pathlib.Path(handle.name)
+    try:
+        env = os.environ.copy()
+        env["SYNARA_K8S_CONTEXT"] = "kind-validation"
+        env["SYNARA_K8S_NAMESPACE"] = "synara-stage4-isolated-validation"
+        env["SYNARA_K8S_RESILIENCE_EVIDENCE_FILE"] = str(isolated_evidence_path)
+        subprocess.run(
+            ["bash", str(SCRIPT_DIR / "resilience-acceptance.sh"), "--dry-run"],
+            check=True,
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        isolated_payload = json.loads(isolated_evidence_path.read_text(encoding="utf-8"))
+    finally:
+        isolated_evidence_path.unlink(missing_ok=True)
+    if isolated_payload.get("namespace") != "synara-stage4-isolated-validation":
+        fail("resilience isolated dry-run lost the selected namespace")
+    if isolated_payload.get("rbacName") != "synara-control-plane-reconciler-synara-stage4-isolated-validation":
+        fail("resilience isolated dry-run did not derive an isolated ClusterRole name")
 
     for invalid_timeout in ("0", "-1", "not-a-number"):
         with tempfile.NamedTemporaryFile(prefix="synara-k8s-resilience-invalid-timeout-", delete=False) as handle:

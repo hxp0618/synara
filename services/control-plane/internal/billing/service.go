@@ -129,9 +129,7 @@ type Service struct {
 	sharedAllocationMu              sync.Mutex
 	schedulerMu                     sync.Mutex
 	schedulerState                  map[schedulerStateKey]scheduledImportState
-	sharedSchedulerMu               sync.Mutex
 	sharedSchedulerRunMu            sync.Mutex
-	sharedSchedulerState            map[sharedSchedulerStateKey]scheduledSharedAllocationState
 	now                             func() time.Time
 }
 
@@ -157,6 +155,10 @@ func WithConfiguredSharedAllocations(allocations []ConfiguredSharedAllocation) S
 		}
 		service.configuredSharedAllocations = make(map[string]ConfiguredSharedAllocation, len(allocations))
 		for _, configuredAllocation := range allocations {
+			if configuredAllocation.LastPeriodEndAt != nil {
+				last := *configuredAllocation.LastPeriodEndAt
+				configuredAllocation.LastPeriodEndAt = &last
+			}
 			service.configuredSharedAllocations[configuredSharedAllocationKey(configuredAllocation)] = configuredAllocation
 		}
 	}
@@ -211,12 +213,11 @@ func WithTariffOperatorTenant(tenantID uuid.UUID) ServiceOption {
 
 func NewService(db *gorm.DB, adapter Adapter, options ...ServiceOption) *Service {
 	service := &Service{
-		db:                   db,
-		adapter:              adapter,
-		authorizer:           authorization.NewAuthorizer(db),
-		auditRecorder:        audit.Record,
-		schedulerState:       make(map[schedulerStateKey]scheduledImportState),
-		sharedSchedulerState: make(map[sharedSchedulerStateKey]scheduledSharedAllocationState),
+		db:             db,
+		adapter:        adapter,
+		authorizer:     authorization.NewAuthorizer(db),
+		auditRecorder:  audit.Record,
+		schedulerState: make(map[schedulerStateKey]scheduledImportState),
 		now: func() time.Time {
 			return time.Now().UTC()
 		},

@@ -35,6 +35,12 @@ as authorization decisions outside that mapping.
 Tenant permissions may grant access across all organizations (for example Tenant Owner/Admin).
 Otherwise an active Organization Membership is required and its role supplies the permission.
 
-`billing.manage` covers listing the shared provider tariff catalog plus tenant-owned invoice import and
-reconciliation operations. Appending to the shared catalog also requires the active/path Tenant to match the
-server-configured platform tariff-operator Tenant; tenant permission alone never grants a global rate mutation.
+`billing.manage` covers listing the shared provider tariff catalog plus tenant-owned invoice import and reconciliation
+operations. Appending to the shared catalog, sealing/sweeping shared-Target estimate authority, and allocating an
+operator-owned account invoice to a shared Target also require the active/path Tenant to match the server-configured
+platform tariff-operator Tenant; tenant permission alone never grants a global rate or shared actual-cost mutation.
+
+The Platform routing publisher is intentionally outside this role matrix. Its
+`/v1/platform/routing-authority/.../observations` route accepts neither a user Login Session nor a Service Account role;
+it requires an Ed25519 signature from a configured public key and exact Target ownership/DR-domain scope. Tenant
+`workers.manage` cannot overwrite a Target authority assigned to that publisher.

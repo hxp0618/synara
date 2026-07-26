@@ -47,10 +47,7 @@ export type ControlPlaneTenantAccess = {
   role: "owner" | "admin" | "security_admin" | "billing_admin" | "auditor" | "member";
 };
 
-export type ControlPlaneResourceLifecycleWarmPoolMode =
-  | "disabled"
-  | "balanced"
-  | "low-latency";
+export type ControlPlaneResourceLifecycleWarmPoolMode = "disabled" | "balanced" | "low-latency";
 
 export type ControlPlaneResourceLifecycleIntBounds = {
   min: number;
@@ -1347,11 +1344,7 @@ export const controlPlaneClient = {
     controlPlaneRequest<ControlPlaneExecutionPlacementState>(
       `/v1/tenants/${encodeURIComponent(tenantId)}/execution-targets/${encodeURIComponent(targetId)}/worker-pools`,
     ),
-  createWorkerPool: (
-    tenantId: string,
-    targetId: string,
-    input: ControlPlaneWorkerPoolInput,
-  ) =>
+  createWorkerPool: (tenantId: string, targetId: string, input: ControlPlaneWorkerPoolInput) =>
     controlPlaneRequest<ControlPlaneWorkerPool>(
       `/v1/tenants/${encodeURIComponent(tenantId)}/execution-targets/${encodeURIComponent(targetId)}/worker-pools`,
       { method: "POST", body: input },

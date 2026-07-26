@@ -5,19 +5,13 @@
   "namespace": "synara-system",
   "baselineScript": "/Users/huang/devel/project/huang/business/synara/deploy/kubernetes/acceptance.sh",
   "bootstrapBaseline": true,
-  "plannedCases": [
-    "rbac",
-    "leader-takeover",
-    "control-plane-failover"
-  ],
+  "plannedCases": ["rbac", "leader-takeover", "control-plane-failover"],
   "allowedSkippedCases": [],
   "soak": {
     "enabled": false,
     "durationSeconds": 0,
     "intervalSeconds": 30,
-    "plannedCases": [
-      "control-plane-failover"
-    ]
+    "plannedCases": ["control-plane-failover"]
   },
   "disruptionProbeWindowSeconds": 30,
   "partitionSeconds": 20,

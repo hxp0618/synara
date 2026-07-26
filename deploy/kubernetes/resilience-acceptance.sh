@@ -4,6 +4,15 @@ set -euo pipefail
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 context="${SYNARA_K8S_CONTEXT:-$(kubectl config current-context 2>/dev/null || true)}"
 namespace="${SYNARA_K8S_NAMESPACE:-synara-system}"
+rbac_name="${SYNARA_K8S_ACCEPTANCE_RBAC_NAME:-}"
+if [[ -z "$rbac_name" ]]; then
+  if [[ "$namespace" == "synara-system" ]]; then
+    rbac_name="synara-control-plane-reconciler"
+  else
+    rbac_name="synara-control-plane-reconciler-$namespace"
+  fi
+fi
+acceptance_owner="${SYNARA_K8S_ACCEPTANCE_OWNER:-resilience-$(date +%s)-$$}"
 baseline_script="${SYNARA_K8S_RESILIENCE_BASELINE_SCRIPT:-$script_dir/acceptance.sh}"
 bootstrap_baseline="${SYNARA_K8S_RESILIENCE_BOOTSTRAP_BASELINE:-1}"
 cases_csv="${SYNARA_K8S_RESILIENCE_CASES:-rbac,topology,leader-takeover,control-plane-failover,node-drain,node-partition}"
@@ -49,6 +58,15 @@ if [[ "$managed_hook_controller" != "$script_dir/managed-hook-controller.py" && 
   exit 1
 fi
 touch "$permissions_file" "$scenarios_file" "$soak_cycles_file"
+
+acceptance_resource_owner() {
+  local resource="$1"
+  if [[ -z "$context" ]]; then
+    return 0
+  fi
+  kubectl --context "$context" get "$resource" \
+    -o go-template='{{index .metadata.labels "synara.ai/acceptance-owner"}}' 2>/dev/null || true
+}
 
 started_at="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 started_epoch="$(date +%s)"
@@ -187,9 +205,15 @@ cleanup() {
     CORDONED_NODE=""
   fi
   if [[ "$dry_run" != "1" && "$created_baseline" == "1" && "$keep_resources" != "1" && -n "$context" ]]; then
-    kubectl --context "$context" delete namespace "$namespace" --ignore-not-found --wait=false >/dev/null 2>&1 || true
-    kubectl --context "$context" delete clusterrolebinding synara-control-plane-reconciler --ignore-not-found >/dev/null 2>&1 || true
-    kubectl --context "$context" delete clusterrole synara-control-plane-reconciler --ignore-not-found >/dev/null 2>&1 || true
+    if [[ "$(acceptance_resource_owner "namespace/$namespace")" == "$acceptance_owner" ]]; then
+      kubectl --context "$context" delete namespace "$namespace" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+    fi
+    if [[ "$(acceptance_resource_owner "clusterrolebinding/$rbac_name")" == "$acceptance_owner" ]]; then
+      kubectl --context "$context" delete clusterrolebinding "$rbac_name" --ignore-not-found >/dev/null 2>&1 || true
+    fi
+    if [[ "$(acceptance_resource_owner "clusterrole/$rbac_name")" == "$acceptance_owner" ]]; then
+      kubectl --context "$context" delete clusterrole "$rbac_name" --ignore-not-found >/dev/null 2>&1 || true
+    fi
   fi
   rm -rf "$work_dir"
   return "$exit_status"
@@ -307,6 +331,7 @@ append_journal_entry() {
     --arg startedAt "$started_at" \
     --arg context "$context" \
     --arg namespace "$namespace" \
+    --arg rbacName "$rbac_name" \
     --arg evidenceFile "$evidence_file" \
     --arg journalFile "$journal_file" \
     --arg partialFile "$partial_file" \
@@ -319,6 +344,7 @@ append_journal_entry() {
         startedAt: $startedAt,
         context: $context,
         namespace: $namespace,
+        rbacName: $rbacName,
         evidenceFile: $evidenceFile,
         journalFile: $journalFile,
         partialFile: $partialFile
@@ -343,6 +369,7 @@ write_partial_snapshot() {
     --arg finishedAt "$finished_at" \
     --arg context "$context" \
     --arg namespace "$namespace" \
+    --arg rbacName "$rbac_name" \
     --arg cases "$cases_csv" \
     --arg allowSkippedCases "$allow_skipped_cases_csv" \
     --arg soakCases "$soak_cases_csv" \
@@ -368,6 +395,7 @@ write_partial_snapshot() {
       finishedAt: (if $finishedAt == "" then null else $finishedAt end),
       context: $context,
       namespace: $namespace,
+      rbacName: $rbacName,
       evidenceFile: $evidenceFile,
       journalFile: $journalFile,
       partialFile: $partialFile,
@@ -2199,7 +2227,7 @@ append_case_result() {
 case_rbac() {
   local role_json
   : >"$permissions_file"
-  if ! role_json="$("${kube[@]}" get clusterrole synara-control-plane-reconciler -o json)"; then
+  if ! role_json="$("${kube[@]}" get clusterrole "$rbac_name" -o json)"; then
     CASE_DETAILS_JSON='{"error":"failed to read cluster role for RBAC validation"}'
     return 1
   fi
@@ -3330,6 +3358,7 @@ emit_final_report() {
     --arg finishedAt "$finished_at" \
     --arg context "$context" \
     --arg namespace "$namespace" \
+    --arg rbacName "$rbac_name" \
     --arg cases "$cases_csv" \
     --arg allowSkippedCases "$allow_skipped_cases_csv" \
     --arg evidenceFile "$evidence_file" \
@@ -3350,6 +3379,7 @@ emit_final_report() {
       durationSeconds: $durationSeconds,
       context: $context,
       namespace: $namespace,
+      rbacName: $rbacName,
       evidenceFile: $evidenceFile,
       safety: {
         kindOnlyByDefault: true,
@@ -3433,6 +3463,18 @@ require_positive_int "$min_worker_nodes" "SYNARA_K8S_RESILIENCE_MIN_WORKER_NODES
 require_non_negative_int "$max_failover_ready_failures" "SYNARA_K8S_RESILIENCE_MAX_FAILOVER_READY_FAILURES"
 require_non_negative_int "$max_drain_ready_failures" "SYNARA_K8S_RESILIENCE_MAX_DRAIN_READY_FAILURES"
 require_non_negative_int "$max_partition_ready_failures" "SYNARA_K8S_RESILIENCE_MAX_PARTITION_READY_FAILURES"
+if [[ ! "$namespace" =~ ^synara-[a-z0-9]([-a-z0-9]*[a-z0-9])?$ ]] || (( ${#namespace} > 63 )); then
+  printf 'SYNARA_K8S_NAMESPACE must be a synara-* DNS label no longer than 63 characters\n' >&2
+  exit 1
+fi
+if [[ ! "$rbac_name" =~ ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$ ]] || (( ${#rbac_name} > 253 )); then
+  printf 'SYNARA_K8S_ACCEPTANCE_RBAC_NAME must be a DNS subdomain no longer than 253 characters\n' >&2
+  exit 1
+fi
+if [[ ! "$acceptance_owner" =~ ^[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$ ]] || (( ${#acceptance_owner} > 63 )); then
+  printf 'SYNARA_K8S_ACCEPTANCE_OWNER must be a Kubernetes label value no longer than 63 characters\n' >&2
+  exit 1
+fi
 if (( soak_seconds > 0 )) && [[ "$evidence_file_is_explicit" != "1" ]]; then
   printf 'SYNARA_K8S_RESILIENCE_EVIDENCE_FILE must be set explicitly when soak is enabled\n' >&2
   exit 1
@@ -3444,6 +3486,7 @@ if [[ "$dry_run" == "1" ]]; then
     --arg baselineScript "$baseline_script" \
     --arg context "$context" \
     --arg namespace "$namespace" \
+    --arg rbacName "$rbac_name" \
     --arg cases "$cases_csv" \
     --arg allowSkippedCases "$allow_skipped_cases_csv" \
     --arg soakCases "$soak_cases_csv" \
@@ -3460,6 +3503,7 @@ if [[ "$dry_run" == "1" ]]; then
       status: "dry-run",
       context: $context,
       namespace: $namespace,
+      rbacName: $rbacName,
       baselineScript: $baselineScript,
       bootstrapBaseline: ($bootstrapBaseline == 1),
       plannedCases: ($cases | split(",") | map(gsub("[[:space:]]"; "") | select(length > 0))),
@@ -3530,6 +3574,9 @@ if [[ "$bootstrap_baseline" == "1" ]]; then
   update_running_snapshot
   if SYNARA_K8S_KEEP_RESOURCES=1 \
     SYNARA_K8S_CONTEXT="$context" \
+    SYNARA_K8S_NAMESPACE="$namespace" \
+    SYNARA_K8S_ACCEPTANCE_RBAC_NAME="$rbac_name" \
+    SYNARA_K8S_ACCEPTANCE_OWNER="$acceptance_owner" \
     SYNARA_K8S_ACCEPTANCE_ALLOW_NONDISPOSABLE="$allow_non_disposable" \
       bash "$baseline_script"; then
     baseline_rc=0

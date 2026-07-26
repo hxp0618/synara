@@ -184,8 +184,23 @@ func TestRunSharedAllocationSchedulerOnceWaitsForSettlementAndReplaysOnInterval(
 		t.Fatalf("unexpected first shared scheduler summary: %#v", first)
 	}
 	assertSharedScheduledAuditCount(t, fixture.db, 1)
+	var durableState persistence.BillingSharedAllocationSchedulePeriod
+	if err := fixture.db.Take(&durableState).Error; err != nil {
+		t.Fatal(err)
+	}
+	if durableState.AttemptCount != 1 || durableState.LastOutcome != "completed" ||
+		durableState.LastStartedAt == nil || durableState.LastFinishedAt == nil || durableState.LastSuccessAt == nil {
+		t.Fatalf("durable shared scheduler state after first attempt = %#v", durableState)
+	}
 
-	immediate, err := service.RunSharedAllocationSchedulerOnce(context.Background())
+	restarted := NewService(
+		fixture.db,
+		nil,
+		WithConfiguredSharedAllocations([]ConfiguredSharedAllocation{job}),
+		WithPlatformBillingOperatorTenant(fixture.tenantA),
+	)
+	restarted.now = func() time.Time { return now }
+	immediate, err := restarted.RunSharedAllocationSchedulerOnce(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -195,7 +210,8 @@ func TestRunSharedAllocationSchedulerOnceWaitsForSettlementAndReplaysOnInterval(
 	assertSharedScheduledAuditCount(t, fixture.db, 1)
 
 	now = now.Add(time.Hour)
-	replayed, err := service.RunSharedAllocationSchedulerOnce(context.Background())
+	restarted.now = func() time.Time { return now }
+	replayed, err := restarted.RunSharedAllocationSchedulerOnce(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -209,6 +225,99 @@ func TestRunSharedAllocationSchedulerOnceWaitsForSettlementAndReplaysOnInterval(
 	}
 	if runCount != 1 {
 		t.Fatalf("scheduled replay created %d shared allocation Runs, want 1", runCount)
+	}
+	if err := fixture.db.Take(&durableState).Error; err != nil {
+		t.Fatal(err)
+	}
+	if durableState.AttemptCount != 2 || durableState.LastOutcome != "completed" {
+		t.Fatalf("durable shared scheduler replay state = %#v", durableState)
+	}
+}
+
+func TestRunSharedAllocationSchedulerGeneratesMonthlyUTCPeriodsAndPersistsRestartThrottle(t *testing.T) {
+	fixture := newSharedAllocationFixture(t, 2)
+	fixture.seedClaim(t, fixture.tenantA, fixture.base.Add(10*time.Minute), fixture.base.Add(40*time.Minute), 1)
+	fixture.seedClaim(t, fixture.tenantB, fixture.base.Add(70*time.Minute), fixture.base.Add(100*time.Minute), 2)
+	if err := fixture.db.AutoMigrate(&persistence.AuditLog{}); err != nil {
+		t.Fatal(err)
+	}
+	job := ConfiguredSharedAllocation{
+		ExecutionTargetID: fixture.target.ID,
+		Provider:          "aws", CurrencyCode: "USD",
+		Calendar:           SharedAllocationCalendarMonthlyUTC,
+		FirstPeriodStartAt: time.Date(2026, time.July, 1, 0, 0, 0, 0, time.UTC),
+		SettlementDelay:    time.Hour, ScheduleInterval: 6 * time.Hour,
+	}
+	newService := func(now *time.Time) *Service {
+		service := NewService(
+			fixture.db,
+			nil,
+			WithConfiguredSharedAllocations([]ConfiguredSharedAllocation{job}),
+			WithPlatformBillingOperatorTenant(fixture.tenantA),
+		)
+		service.now = func() time.Time { return *now }
+		return service
+	}
+
+	now := time.Date(2026, time.August, 1, 0, 30, 0, 0, time.UTC)
+	service := newService(&now)
+	notSettled, err := service.RunSharedAllocationSchedulerOnce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if notSettled.Checked != 1 || notSettled.GeneratedCalendarPeriods != 1 ||
+		notSettled.NotSettled != 1 || notSettled.Attempted != 0 {
+		t.Fatalf("monthly pre-settlement summary = %#v", notSettled)
+	}
+
+	now = time.Date(2026, time.August, 1, 2, 0, 0, 0, time.UTC)
+	first, err := service.RunSharedAllocationSchedulerOnce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Checked != 1 || first.GeneratedCalendarPeriods != 1 || first.Attempted != 1 ||
+		first.Completed != 1 || first.Workers != 1 || first.AllocationRuns != 1 || first.AllocationSlices == 0 {
+		t.Fatalf("monthly first-period summary = %#v", first)
+	}
+	assertSharedScheduledAuditCount(t, fixture.db, 1)
+	var scheduledAudit persistence.AuditLog
+	if err := fixture.db.Where("action = ?", "billing.shared_cost_allocation_sweep_scheduled").
+		Take(&scheduledAudit).Error; err != nil {
+		t.Fatal(err)
+	}
+	digest, _ := scheduledAudit.Metadata["scheduleConfigSha256"].(string)
+	if scheduledAudit.Metadata["scheduleKind"] != SharedAllocationCalendarMonthlyUTC || len(digest) != 64 ||
+		scheduledAudit.Metadata["firstPeriodStartAt"] == nil {
+		t.Fatalf("monthly scheduled audit metadata = %#v", scheduledAudit.Metadata)
+	}
+
+	now = now.Add(time.Hour)
+	restarted := newService(&now)
+	skipped, err := restarted.RunSharedAllocationSchedulerOnce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if skipped.Checked != 1 || skipped.Skipped != 1 || skipped.Attempted != 0 {
+		t.Fatalf("monthly durable restart throttle summary = %#v", skipped)
+	}
+
+	now = time.Date(2026, time.September, 1, 2, 0, 0, 0, time.UTC)
+	advanced, err := restarted.RunSharedAllocationSchedulerOnce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if advanced.Checked != 2 || advanced.GeneratedCalendarPeriods != 2 || advanced.Attempted != 2 ||
+		advanced.Completed != 2 || advanced.Workers != 1 || advanced.AllocationRuns != 1 {
+		t.Fatalf("monthly schedule advancement summary = %#v", advanced)
+	}
+	assertSharedScheduledAuditCount(t, fixture.db, 3)
+	var periodStates []persistence.BillingSharedAllocationSchedulePeriod
+	if err := fixture.db.Order("billing_period_start_at").Find(&periodStates).Error; err != nil {
+		t.Fatal(err)
+	}
+	if len(periodStates) != 2 || periodStates[0].AttemptCount != 2 ||
+		periodStates[1].AttemptCount != 1 || periodStates[0].ScheduleKind != SharedAllocationCalendarMonthlyUTC {
+		t.Fatalf("monthly durable period states = %#v", periodStates)
 	}
 }
 
@@ -258,7 +367,7 @@ func TestRunSharedAllocationSchedulerOnceReportsPartialFailureAndRequiresOperato
 		nil,
 		WithConfiguredSharedAllocations([]ConfiguredSharedAllocation{job}),
 	)
-	withoutOperator.now = service.now
+	withoutOperator.now = func() time.Time { return fixture.base.Add(4 * time.Hour) }
 	missingOperator, err := withoutOperator.RunSharedAllocationSchedulerOnce(context.Background())
 	assertProblemCode(t, err, "billing_shared_scheduler_operator_unavailable")
 	if missingOperator.Attempted != 1 || missingOperator.Failed != 1 {

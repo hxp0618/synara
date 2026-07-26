@@ -19,6 +19,7 @@ import (
 	"github.com/synara-ai/synara/services/control-plane/internal/billing"
 	"github.com/synara-ai/synara/services/control-plane/internal/lifecyclepolicy"
 	"github.com/synara-ai/synara/services/control-plane/internal/platform"
+	"github.com/synara-ai/synara/services/control-plane/internal/routing"
 	"github.com/synara-ai/synara/services/control-plane/internal/validation"
 )
 
@@ -76,10 +77,13 @@ type Config struct {
 	DockerReconcileInterval              time.Duration
 	KubernetesReconcileInterval          time.Duration
 	KubernetesPodPendingFailureThreshold time.Duration
+	PlatformRoutingPublishers            []routing.PlatformAuthorityPublisherConfig
 	ResourceLifecycleSweepInterval       time.Duration
 	WorkerAutoRollbackEnabled            bool
 	WorkerAutoRollbackInterval           time.Duration
 	RetentionSweepInterval               time.Duration
+	MetricRollupInterval                 time.Duration
+	MetricRollupBatchSize                int
 	OutboxPollInterval                   time.Duration
 	OutboxClaimTTL                       time.Duration
 	OutboxBatchSize                      int
@@ -259,6 +263,12 @@ func Load() (Config, error) {
 	if cfg.KubernetesPodPendingFailureThreshold, err = envDurationStrict("SYNARA_KUBERNETES_POD_PENDING_FAILURE_THRESHOLD", 2*time.Minute); err != nil {
 		return Config{}, err
 	}
+	if rawPublishers, ok := nonEmptyEnv("SYNARA_PLATFORM_ROUTING_PUBLISHERS_JSON"); ok {
+		cfg.PlatformRoutingPublishers, err = parsePlatformRoutingPublishers(rawPublishers)
+		if err != nil {
+			return Config{}, fmt.Errorf("SYNARA_PLATFORM_ROUTING_PUBLISHERS_JSON: %w", err)
+		}
+	}
 	if cfg.ResourceLifecycleSweepInterval, err = envDurationStrict("SYNARA_RESOURCE_LIFECYCLE_SWEEP_INTERVAL", 10*time.Second); err != nil {
 		return Config{}, err
 	}
@@ -269,6 +279,12 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	if cfg.RetentionSweepInterval, err = envDurationStrict("SYNARA_RETENTION_SWEEP_INTERVAL", time.Hour); err != nil {
+		return Config{}, err
+	}
+	if cfg.MetricRollupInterval, err = envDurationStrict("SYNARA_METRIC_ROLLUP_INTERVAL", time.Minute); err != nil {
+		return Config{}, err
+	}
+	if cfg.MetricRollupBatchSize, err = envInt("SYNARA_METRIC_ROLLUP_BATCH_SIZE", 500); err != nil {
 		return Config{}, err
 	}
 	if cfg.OutboxPollInterval, err = envDurationStrict("SYNARA_OUTBOX_POLL_INTERVAL", 500*time.Millisecond); err != nil {
@@ -492,6 +508,12 @@ func Load() (Config, error) {
 	}
 	if cfg.RetentionSweepInterval <= 0 {
 		return Config{}, errors.New("SYNARA_RETENTION_SWEEP_INTERVAL must be positive")
+	}
+	if cfg.MetricRollupInterval <= 0 {
+		return Config{}, errors.New("SYNARA_METRIC_ROLLUP_INTERVAL must be positive")
+	}
+	if cfg.MetricRollupBatchSize <= 0 || cfg.MetricRollupBatchSize > 10000 {
+		return Config{}, errors.New("SYNARA_METRIC_ROLLUP_BATCH_SIZE must be between 1 and 10000")
 	}
 	if cfg.OutboxPollInterval <= 0 {
 		return Config{}, errors.New("SYNARA_OUTBOX_POLL_INTERVAL must be positive")
@@ -771,6 +793,9 @@ type billingSharedAllocationMapping struct {
 	CurrencyCode         string `json:"currencyCode"`
 	BillingPeriodStartAt string `json:"billingPeriodStartAt"`
 	BillingPeriodEndAt   string `json:"billingPeriodEndAt"`
+	Calendar             string `json:"calendar"`
+	FirstPeriodStartAt   string `json:"firstPeriodStartAt"`
+	LastPeriodEndAt      string `json:"lastPeriodEndAt"`
 	SettlementDelay      string `json:"settlementDelay"`
 	ScheduleInterval     string `json:"scheduleInterval"`
 }
@@ -783,12 +808,12 @@ func parseBillingImportMappings(raw string) ([]billing.ConfiguredImport, error) 
 	var items []billingImportMapping
 	switch raw[0] {
 	case '[':
-		if err := decodeStrictBillingJSON(raw, &items); err != nil {
+		if err := decodeStrictConfigJSON(raw, &items); err != nil {
 			return nil, err
 		}
 	case '{':
 		envelope := billingImportMappingEnvelope{}
-		if err := decodeStrictBillingJSON(raw, &envelope); err != nil {
+		if err := decodeStrictConfigJSON(raw, &envelope); err != nil {
 			return nil, err
 		}
 		if envelope.Imports == nil {
@@ -843,12 +868,12 @@ func parseBillingSharedAllocationMappings(raw string) ([]billing.ConfiguredShare
 	var items []billingSharedAllocationMapping
 	switch raw[0] {
 	case '[':
-		if err := decodeStrictBillingJSON(raw, &items); err != nil {
+		if err := decodeStrictConfigJSON(raw, &items); err != nil {
 			return nil, err
 		}
 	case '{':
 		envelope := billingSharedAllocationMappingEnvelope{}
-		if err := decodeStrictBillingJSON(raw, &envelope); err != nil {
+		if err := decodeStrictConfigJSON(raw, &envelope); err != nil {
 			return nil, err
 		}
 		if envelope.Allocations == nil {
@@ -864,13 +889,25 @@ func parseBillingSharedAllocationMappings(raw string) ([]billing.ConfiguredShare
 		if err != nil || targetID == uuid.Nil {
 			return nil, fmt.Errorf("allocations[%d].executionTargetId must be a UUID", index)
 		}
-		periodStart, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(item.BillingPeriodStartAt))
+		periodStart, err := parseOptionalBillingTimestamp(item.BillingPeriodStartAt)
 		if err != nil {
 			return nil, fmt.Errorf("allocations[%d].billingPeriodStartAt must use RFC3339", index)
 		}
-		periodEnd, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(item.BillingPeriodEndAt))
+		periodEnd, err := parseOptionalBillingTimestamp(item.BillingPeriodEndAt)
 		if err != nil {
 			return nil, fmt.Errorf("allocations[%d].billingPeriodEndAt must use RFC3339", index)
+		}
+		firstPeriodStart, err := parseOptionalBillingTimestamp(item.FirstPeriodStartAt)
+		if err != nil {
+			return nil, fmt.Errorf("allocations[%d].firstPeriodStartAt must use RFC3339", index)
+		}
+		var lastPeriodEnd *time.Time
+		if strings.TrimSpace(item.LastPeriodEndAt) != "" {
+			parsed, parseErr := time.Parse(time.RFC3339Nano, strings.TrimSpace(item.LastPeriodEndAt))
+			if parseErr != nil {
+				return nil, fmt.Errorf("allocations[%d].lastPeriodEndAt must use RFC3339", index)
+			}
+			lastPeriodEnd = &parsed
 		}
 		settlementDelay, err := time.ParseDuration(strings.TrimSpace(item.SettlementDelay))
 		if err != nil {
@@ -883,13 +920,22 @@ func parseBillingSharedAllocationMappings(raw string) ([]billing.ConfiguredShare
 		allocations = append(allocations, billing.ConfiguredSharedAllocation{
 			ExecutionTargetID: targetID, Provider: item.Provider, CurrencyCode: item.CurrencyCode,
 			BillingPeriodStartAt: periodStart, BillingPeriodEndAt: periodEnd,
+			Calendar: item.Calendar, FirstPeriodStartAt: firstPeriodStart, LastPeriodEndAt: lastPeriodEnd,
 			SettlementDelay: settlementDelay, ScheduleInterval: scheduleInterval,
 		})
 	}
 	return allocations, nil
 }
 
-func decodeStrictBillingJSON(raw string, destination any) error {
+func parseOptionalBillingTimestamp(raw string) (time.Time, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return time.Time{}, nil
+	}
+	return time.Parse(time.RFC3339Nano, raw)
+}
+
+func decodeStrictConfigJSON(raw string, destination any) error {
 	decoder := json.NewDecoder(strings.NewReader(raw))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(destination); err != nil {

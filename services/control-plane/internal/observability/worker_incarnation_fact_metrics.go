@@ -3,25 +3,40 @@ package observability
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"fmt"
 	"sort"
-	"strings"
 	"time"
+
+	"gorm.io/gorm"
+
+	"github.com/synara-ai/synara/services/control-plane/internal/metricfacts"
+	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
 )
 
-type durableWorkerIncarnationMetricSample struct {
-	TargetKind                     string     `gorm:"column:target_kind"`
-	PoolMode                       *string    `gorm:"column:pool_mode"`
-	CapacityClass                  *string    `gorm:"column:capacity_class"`
-	CurrentState                   string     `gorm:"column:current_state"`
-	RegisteredAt                   time.Time  `gorm:"column:registered_at"`
-	StateChangedAt                 time.Time  `gorm:"column:state_changed_at"`
-	TerminatedAt                   *time.Time `gorm:"column:terminated_at"`
-	AccumulatedActiveSeconds       int64      `gorm:"column:accumulated_active_seconds"`
-	AccumulatedIdleSeconds         int64      `gorm:"column:accumulated_idle_seconds"`
-	RequestedCPUMillicores         *int64     `gorm:"column:requested_cpu_millicores"`
-	RequestedMemoryBytes           *int64     `gorm:"column:requested_memory_bytes"`
-	RequestedEphemeralStorageBytes *int64     `gorm:"column:requested_ephemeral_storage_bytes"`
+const workerIncarnationMetricSelect = `target_kind, pool_mode, capacity_class, current_state,
+	registered_at, state_changed_at, terminated_at,
+	accumulated_active_seconds, accumulated_idle_seconds,
+	requested_cpu_millicores, requested_memory_bytes,
+	requested_ephemeral_storage_bytes`
+
+const workerIncarnationMetricSelectFromFact = `fact.target_kind, fact.pool_mode, fact.capacity_class, fact.current_state,
+	fact.registered_at, fact.state_changed_at, fact.terminated_at,
+	fact.accumulated_active_seconds, fact.accumulated_idle_seconds,
+	fact.requested_cpu_millicores, fact.requested_memory_bytes,
+	fact.requested_ephemeral_storage_bytes`
+
+type workerIncarnationRollupTotals struct {
+	TargetKind                           string  `gorm:"column:target_kind"`
+	PoolMode                             string  `gorm:"column:pool_mode"`
+	CapacityClass                        string  `gorm:"column:capacity_class"`
+	FactCount                            int64   `gorm:"column:fact_count"`
+	RunSeconds                           float64 `gorm:"column:run_seconds"`
+	ActiveSeconds                        float64 `gorm:"column:active_seconds"`
+	IdleSeconds                          float64 `gorm:"column:idle_seconds"`
+	RequestedCPUSeconds                  float64 `gorm:"column:requested_cpu_seconds"`
+	RequestedMemoryByteSeconds           float64 `gorm:"column:requested_memory_byte_seconds"`
+	RequestedEphemeralStorageByteSeconds float64 `gorm:"column:requested_ephemeral_storage_byte_seconds"`
 }
 
 func (r *Registry) writeWorkerIncarnationFactMetrics(
@@ -32,17 +47,24 @@ func (r *Registry) writeWorkerIncarnationFactMetrics(
 	if !r.db.Migrator().HasTable("worker_incarnation_facts") {
 		return nil
 	}
-	samples := make([]durableWorkerIncarnationMetricSample, 0)
-	if err := r.db.WithContext(ctx).Table("worker_incarnation_facts").
-		Select(`target_kind, pool_mode, capacity_class, current_state,
-			registered_at, state_changed_at, terminated_at,
-			accumulated_active_seconds, accumulated_idle_seconds,
-			requested_cpu_millicores, requested_memory_bytes,
-			requested_ephemeral_storage_bytes`).
-		Find(&samples).Error; err != nil {
-		return fmt.Errorf("collect durable Worker incarnation metrics: %w", err)
+	var options []*sql.TxOptions
+	if r.db.Dialector.Name() == "postgres" {
+		options = append(options, &sql.TxOptions{
+			Isolation: sql.LevelRepeatableRead,
+			ReadOnly:  true,
+		})
 	}
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		return writeWorkerIncarnationFactMetricsSnapshot(ctx, tx, output, now)
+	}, options...)
+}
 
+func writeWorkerIncarnationFactMetricsSnapshot(
+	ctx context.Context,
+	db *gorm.DB,
+	output *bytes.Buffer,
+	now time.Time,
+) error {
 	counts := make(map[string]int64)
 	runSeconds := make(map[string]float64)
 	activeSeconds := make(map[string]float64)
@@ -51,49 +73,107 @@ func (r *Registry) writeWorkerIncarnationFactMetrics(
 	memoryByteSeconds := make(map[string]float64)
 	ephemeralStorageByteSeconds := make(map[string]float64)
 
-	for _, sample := range samples {
+	addContribution := func(
+		dimensions metricfacts.WorkerIncarnationDimensions,
+		factCount int64,
+		contribution metricfacts.WorkerIncarnationContribution,
+	) {
 		labelSet := labels(map[string]string{
-			"target_kind":    boundedTargetKind(sample.TargetKind),
-			"mode":           boundedWorkerPoolMetricMode(sample.PoolMode),
-			"capacity_class": boundedWorkerCapacityClass(sample.CapacityClass),
-			"state":          boundedWorkerLifecycleState(sample.CurrentState),
+			"target_kind":    boundedTargetKind(dimensions.TargetKind),
+			"mode":           dimensions.PoolMode,
+			"capacity_class": dimensions.CapacityClass,
+			"state":          dimensions.State,
 		})
-		counts[labelSet]++
-
-		runEnd := now
-		if sample.TerminatedAt != nil && sample.TerminatedAt.Before(runEnd) {
-			runEnd = *sample.TerminatedAt
-		}
-		runtimeSeconds := 0.0
-		if !runEnd.Before(sample.RegisteredAt) {
-			runtimeSeconds = runEnd.Sub(sample.RegisteredAt).Seconds()
-		}
-		runSeconds[labelSet] += runtimeSeconds
-
-		activeTotal := float64(sample.AccumulatedActiveSeconds)
-		if sample.CurrentState == "active" && !now.Before(sample.StateChangedAt) {
-			activeTotal += now.Sub(sample.StateChangedAt).Seconds()
-		}
-		activeSeconds[labelSet] += activeTotal
-
-		idleTotal := float64(sample.AccumulatedIdleSeconds)
-		if sample.CurrentState == "idle" && !now.Before(sample.StateChangedAt) {
-			idleTotal += now.Sub(sample.StateChangedAt).Seconds()
-		}
-		idleSeconds[labelSet] += idleTotal
-
-		if sample.RequestedCPUMillicores != nil {
-			cpuSeconds[labelSet] += runtimeSeconds * (float64(*sample.RequestedCPUMillicores) / 1000.0)
-		}
-		if sample.RequestedMemoryBytes != nil {
-			memoryByteSeconds[labelSet] += runtimeSeconds * float64(*sample.RequestedMemoryBytes)
-		}
-		if sample.RequestedEphemeralStorageBytes != nil {
-			ephemeralStorageByteSeconds[labelSet] += runtimeSeconds * float64(*sample.RequestedEphemeralStorageBytes)
+		counts[labelSet] += factCount
+		runSeconds[labelSet] += contribution.RunSeconds
+		activeSeconds[labelSet] += contribution.ActiveSeconds
+		idleSeconds[labelSet] += contribution.IdleSeconds
+		cpuSeconds[labelSet] += contribution.RequestedCPUSeconds
+		memoryByteSeconds[labelSet] += contribution.RequestedMemoryByteSeconds
+		ephemeralStorageByteSeconds[labelSet] += contribution.RequestedStorageByteSeconds
+	}
+	addRawSamples := func(samples []metricfacts.WorkerIncarnationSample) {
+		for _, sample := range samples {
+			addContribution(
+				metricfacts.WorkerIncarnationMetricDimensions(sample),
+				1,
+				metricfacts.WorkerIncarnationMetricContribution(sample, now),
+			)
 		}
 	}
 
-	writeHelp(output, "synara_worker_incarnation_facts", "Retained immutable physical Worker or Pod incarnation facts by target kind, pool mode, capacity class, and current state.", "gauge")
+	rollupsAvailable := db.Migrator().HasTable(&persistence.WorkerIncarnationMetricRollup{}) &&
+		db.Migrator().HasTable(&persistence.WorkerIncarnationMetricRollupEntry{})
+	pendingFacts := int64(0)
+	rollupBuckets := int64(0)
+	if rollupsAvailable {
+		if err := db.WithContext(ctx).Model(&persistence.WorkerIncarnationMetricRollup{}).
+			Count(&rollupBuckets).Error; err != nil {
+			return fmt.Errorf("count Worker incarnation metric rollup buckets: %w", err)
+		}
+		var rollups []workerIncarnationRollupTotals
+		if err := db.WithContext(ctx).Table("worker_incarnation_metric_rollups").
+			Select(`target_kind, pool_mode, capacity_class,
+				SUM(fact_count) AS fact_count,
+				SUM(run_seconds) AS run_seconds,
+				SUM(active_seconds) AS active_seconds,
+				SUM(idle_seconds) AS idle_seconds,
+				SUM(requested_cpu_seconds) AS requested_cpu_seconds,
+				SUM(requested_memory_byte_seconds) AS requested_memory_byte_seconds,
+				SUM(requested_ephemeral_storage_byte_seconds) AS requested_ephemeral_storage_byte_seconds`).
+			Group("target_kind, pool_mode, capacity_class").
+			Order("target_kind, pool_mode, capacity_class").
+			Find(&rollups).Error; err != nil {
+			return fmt.Errorf("collect Worker incarnation metric rollups: %w", err)
+		}
+		for _, rollup := range rollups {
+			addContribution(
+				metricfacts.WorkerIncarnationDimensions{
+					TargetKind: rollup.TargetKind, PoolMode: rollup.PoolMode,
+					CapacityClass: rollup.CapacityClass, State: "terminated",
+				},
+				rollup.FactCount,
+				metricfacts.WorkerIncarnationContribution{
+					RunSeconds: rollup.RunSeconds, ActiveSeconds: rollup.ActiveSeconds,
+					IdleSeconds: rollup.IdleSeconds, RequestedCPUSeconds: rollup.RequestedCPUSeconds,
+					RequestedMemoryByteSeconds:  rollup.RequestedMemoryByteSeconds,
+					RequestedStorageByteSeconds: rollup.RequestedEphemeralStorageByteSeconds,
+				},
+			)
+		}
+
+		var liveSamples []metricfacts.WorkerIncarnationSample
+		if err := db.WithContext(ctx).Table("worker_incarnation_facts").
+			Select(workerIncarnationMetricSelect).
+			Where("current_state <> ?", "terminated").
+			Find(&liveSamples).Error; err != nil {
+			return fmt.Errorf("collect nonterminal Worker incarnation metrics: %w", err)
+		}
+		addRawSamples(liveSamples)
+
+		var pendingSamples []metricfacts.WorkerIncarnationSample
+		if err := db.WithContext(ctx).Table("worker_incarnation_metric_rollup_entries AS entry").
+			Select(workerIncarnationMetricSelectFromFact).
+			Joins(`JOIN worker_incarnation_facts AS fact
+				ON fact.worker_id = entry.worker_id
+				AND fact.worker_incarnation = entry.worker_incarnation`).
+			Where("entry.rolled_up_at IS NULL").
+			Find(&pendingSamples).Error; err != nil {
+			return fmt.Errorf("collect pending Worker incarnation rollup metrics: %w", err)
+		}
+		pendingFacts = int64(len(pendingSamples))
+		addRawSamples(pendingSamples)
+	} else {
+		var samples []metricfacts.WorkerIncarnationSample
+		if err := db.WithContext(ctx).Table("worker_incarnation_facts").
+			Select(workerIncarnationMetricSelect).
+			Find(&samples).Error; err != nil {
+			return fmt.Errorf("collect durable Worker incarnation metrics: %w", err)
+		}
+		addRawSamples(samples)
+	}
+
+	writeHelp(output, "synara_worker_incarnation_facts", "Retained physical Worker or Pod incarnation facts from exact terminal rollups plus authoritative pending and nonterminal facts.", "gauge")
 	for _, labelSet := range sortedMetricLabelSets(counts) {
 		fmt.Fprintf(output, "synara_worker_incarnation_facts%s %d\n", labelSet, counts[labelSet])
 	}
@@ -119,48 +199,20 @@ func (r *Registry) writeWorkerIncarnationFactMetrics(
 	}
 	writeHelp(output, "synara_worker_incarnation_requested_ephemeral_storage_byte_seconds", "Requested ephemeral-storage byte-seconds proxy derived from durable runtime seconds; this is not billable currency cost.", "gauge")
 	for _, labelSet := range sortedFloatMetricLabelSets(ephemeralStorageByteSeconds) {
-		fmt.Fprintf(output, "synara_worker_incarnation_requested_ephemeral_storage_byte_seconds%s %s\n", labelSet, formatFloat(ephemeralStorageByteSeconds[labelSet]))
+		fmt.Fprintf(
+			output,
+			"synara_worker_incarnation_requested_ephemeral_storage_byte_seconds%s %s\n",
+			labelSet,
+			formatFloat(ephemeralStorageByteSeconds[labelSet]),
+		)
+	}
+	if rollupsAvailable {
+		writeHelp(output, "synara_metric_rollup_pending_facts", "Durable facts still awaiting exact metric rollup membership completion.", "gauge")
+		fmt.Fprintf(output, "synara_metric_rollup_pending_facts%s %d\n", labels(map[string]string{"kind": "worker-incarnation"}), pendingFacts)
+		writeHelp(output, "synara_metric_rollup_buckets", "Durable metric rollup bucket inventory.", "gauge")
+		fmt.Fprintf(output, "synara_metric_rollup_buckets%s %d\n", labels(map[string]string{"kind": "worker-incarnation"}), rollupBuckets)
 	}
 	return nil
-}
-
-func boundedWorkerPoolMetricMode(value *string) string {
-	mode := ""
-	if value != nil {
-		mode = strings.TrimSpace(*value)
-	}
-	switch mode {
-	case "resident", "per-execution", "warm":
-		return mode
-	case "":
-		return "unassigned"
-	default:
-		return "other"
-	}
-}
-
-func boundedWorkerCapacityClass(value *string) string {
-	capacity := ""
-	if value != nil {
-		capacity = strings.TrimSpace(*value)
-	}
-	switch capacity {
-	case "standard", "interactive":
-		return capacity
-	case "":
-		return "unassigned"
-	default:
-		return "other"
-	}
-}
-
-func boundedWorkerLifecycleState(value string) string {
-	switch strings.TrimSpace(value) {
-	case "idle", "active", "draining", "offline", "terminated":
-		return strings.TrimSpace(value)
-	default:
-		return "other"
-	}
 }
 
 func sortedFloatMetricLabelSets(values map[string]float64) []string {

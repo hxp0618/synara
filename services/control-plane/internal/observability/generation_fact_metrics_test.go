@@ -3,6 +3,7 @@ package observability
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -11,6 +12,8 @@ import (
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 
+	"github.com/synara-ai/synara/services/control-plane/internal/metricfacts"
+	"github.com/synara-ai/synara/services/control-plane/internal/metricrollup"
 	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
 )
 
@@ -76,6 +79,119 @@ func TestExecutionGenerationFactMetricsIncludeEndToEndColdStartAndWarmOutcome(t 
 	} {
 		if !strings.Contains(metrics, expected) {
 			t.Fatalf("metrics omitted %q:\n%s", expected, metrics)
+		}
+	}
+}
+
+func TestExecutionGenerationFactMetricsMergeFullDayRollupsAndRawBoundaryFactsExactlyOnce(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AutoMigrate(
+		&persistence.ExecutionGenerationFact{},
+		&persistence.ExecutionGenerationPodFailureFact{},
+		&persistence.ExecutionGenerationMetricRollup{},
+		&persistence.ExecutionGenerationMetricRollupEntry{},
+		&persistence.ExecutionGenerationPodFailureMetricRollupEntry{},
+	); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, time.July, 26, 12, 0, 0, 0, time.UTC)
+	windowStart := now.Add(-executionGenerationMetricWindow)
+	completed := "completed"
+	type generationFixture struct {
+		fact     persistence.ExecutionGenerationFact
+		failure  persistence.ExecutionGenerationPodFailureFact
+		terminal bool
+	}
+	makeFixture := func(dispatchedAt time.Time, duration time.Duration, terminal bool) generationFixture {
+		readyAt := dispatchedAt.Add(duration)
+		terminalAt := readyAt.Add(time.Second)
+		fact := persistence.ExecutionGenerationFact{
+			TenantID: uuid.New(), ExecutionID: uuid.New(), Generation: 1,
+			SessionID: uuid.New(), TurnID: uuid.New(), ExecutionTargetID: uuid.New(),
+			TargetKind: "kubernetes", Provider: "codex", RecoveryReason: "initial-claim",
+			WarmPoolMode: "disabled", WarmPoolResult: "not-requested",
+			DispatchRequestedAt: &dispatchedAt, ProviderReadyAt: &readyAt,
+			ProviderResumeStrategy: "authoritative-history", CreatedAt: dispatchedAt, UpdatedAt: readyAt,
+		}
+		if terminal {
+			fact.TerminalAt = &terminalAt
+			fact.TerminalOutcome = &completed
+			fact.UpdatedAt = terminalAt
+		}
+		podUID := uuid.NewString()
+		return generationFixture{
+			fact: fact, terminal: terminal,
+			failure: persistence.ExecutionGenerationPodFailureFact{
+				TenantID: fact.TenantID, ExecutionID: fact.ExecutionID, Generation: fact.Generation,
+				FailureClass: "image-pull", ExecutionTargetID: fact.ExecutionTargetID,
+				Namespace: "default", PodName: "worker", PodUID: &podUID, ReasonCode: "image-pull-backoff",
+				FirstObservedAt: dispatchedAt, LastObservedAt: dispatchedAt,
+				CreatedAt: dispatchedAt, UpdatedAt: dispatchedAt,
+			},
+		}
+	}
+	fixtures := []generationFixture{
+		makeFixture(time.Date(2026, time.July, 25, 10, 0, 0, 0, time.UTC), 10*time.Second, true),
+		makeFixture(windowStart.Add(time.Hour), 20*time.Second, true),
+		makeFixture(time.Date(2026, time.July, 24, 10, 0, 0, 0, time.UTC), 30*time.Second, false),
+	}
+	for _, fixture := range fixtures {
+		if err := db.Create(&fixture.fact).Error; err != nil {
+			t.Fatal(err)
+		}
+		if fixture.terminal {
+			if err := db.Create(&persistence.ExecutionGenerationMetricRollupEntry{
+				TenantID: fixture.fact.TenantID, ExecutionID: fixture.fact.ExecutionID,
+				Generation: fixture.fact.Generation, DispatchRequestedAt: *fixture.fact.DispatchRequestedAt,
+				TerminalAt: *fixture.fact.TerminalAt, BucketDay: utcDayBoundary(*fixture.fact.DispatchRequestedAt),
+				CreatedAt: *fixture.fact.TerminalAt, UpdatedAt: *fixture.fact.TerminalAt,
+			}).Error; err != nil {
+				t.Fatal(err)
+			}
+			if err := db.Create(&fixture.failure).Error; err != nil {
+				t.Fatal(err)
+			}
+			if err := db.Create(&persistence.ExecutionGenerationPodFailureMetricRollupEntry{
+				TenantID: fixture.failure.TenantID, ExecutionID: fixture.failure.ExecutionID,
+				Generation: fixture.failure.Generation, FailureClass: fixture.failure.FailureClass,
+				FirstObservedAt: fixture.failure.FirstObservedAt,
+				BucketDay:       utcDayBoundary(fixture.failure.FirstObservedAt),
+				CreatedAt:       fixture.failure.FirstObservedAt, UpdatedAt: fixture.failure.FirstObservedAt,
+			}).Error; err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	rollupService := metricrollup.NewService(db)
+	summary, err := rollupService.RunOnce(context.Background(), 100)
+	if err != nil || summary.ProcessedGenerationFacts != 2 || summary.ProcessedPodFailureFacts != 2 {
+		t.Fatalf("roll up Generation metric fixtures = %#v, %v", summary, err)
+	}
+	var output bytes.Buffer
+	if err := New(db).writeExecutionGenerationFactMetrics(context.Background(), &output, now); err != nil {
+		t.Fatal(err)
+	}
+	metrics := output.String()
+	upperMicros, ok := metricfacts.DurationHistogramUpperBoundMicros(
+		metricfacts.DurationHistogramBucket((20 * time.Second).Microseconds()),
+	)
+	if !ok {
+		t.Fatal("20-second histogram bucket is unavailable")
+	}
+	for _, expected := range []string{
+		`synara_execution_generation_outcomes_30d{outcome="completed",recovery_reason="initial-claim",target_kind="kubernetes"} 2`,
+		`synara_execution_generation_outcomes_30d{outcome="pending",recovery_reason="initial-claim",target_kind="kubernetes"} 1`,
+		`synara_execution_cold_start_samples_30d{recovery_reason="initial-claim",target_kind="kubernetes",warm_pool_mode="disabled",warm_pool_result="not-requested"} 3`,
+		fmt.Sprintf(`synara_execution_cold_start_duration_seconds_30d{recovery_reason="initial-claim",target_kind="kubernetes",warm_pool_mode="disabled",warm_pool_result="not-requested",quantile="0.5"} %s`, formatFloat(float64(upperMicros)/1_000_000)),
+		`synara_execution_pod_failure_generations_30d{failure_class="image-pull",target_kind="kubernetes"} 2`,
+		`synara_execution_generation_metric_rollup_pending_facts{kind="generation"} 0`,
+		`synara_execution_generation_metric_rollup_pending_facts{kind="pod-failure"} 0`,
+	} {
+		if !strings.Contains(metrics, expected) {
+			t.Fatalf("merged Generation metrics omitted %q:\n%s", expected, metrics)
 		}
 	}
 }

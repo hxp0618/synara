@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/synara-ai/synara/services/control-plane/internal/bootstrap"
+	"github.com/synara-ai/synara/services/control-plane/internal/metricrollup"
 	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
 	"github.com/synara-ai/synara/services/control-plane/internal/platform"
 	"github.com/synara-ai/synara/services/control-plane/migrations"
@@ -101,6 +102,7 @@ func TestSQLiteWorkerIncarnationFactSafetyRejectsIdentityAndTerminalRegression(t
 		RequestedCPUMillicores: &requestedCPU, RequestedMemoryBytes: &requestedMemory,
 		CreatedAt: now, UpdatedAt: now,
 	}
+	invalidWorkerIDs := make([]uuid.UUID, 0, 2)
 	for index, invalidUID := range []string{
 		strings.ToUpper(uuid.NewString()),
 		"gggggggg-gggg-gggg-gggg-gggggggggggg",
@@ -112,6 +114,7 @@ func TestSQLiteWorkerIncarnationFactSafetyRejectsIdentityAndTerminalRegression(t
 		if err := store.DB().Create(&invalidWorker).Error; err != nil {
 			t.Fatalf("create Worker with locally representable invalid instance UID: %v", err)
 		}
+		invalidWorkerIDs = append(invalidWorkerIDs, invalidWorker.ID)
 		invalidFact := fact
 		invalidFact.WorkerID = invalidWorker.ID
 		invalidFact.InstanceUID = invalidUID
@@ -121,6 +124,9 @@ func TestSQLiteWorkerIncarnationFactSafetyRejectsIdentityAndTerminalRegression(t
 			store.DB().Create(&invalidFact).Error,
 			"invalid Worker incarnation fact",
 		)
+	}
+	if err := store.DB().Delete(&persistence.WorkerInstance{}, "id IN ?", invalidWorkerIDs).Error; err != nil {
+		t.Fatalf("remove negative-only Worker fixtures before migration replay: %v", err)
 	}
 	wrongFact := fact
 	wrongFact.WorkerPoolID = &otherPool.ID
@@ -160,6 +166,60 @@ func TestSQLiteWorkerIncarnationFactSafetyRejectsIdentityAndTerminalRegression(t
 		}).Error; err != nil {
 		t.Fatalf("terminate valid worker incarnation fact: %v", err)
 	}
+	var entry persistence.WorkerIncarnationMetricRollupEntry
+	if err := store.DB().Where(
+		"worker_id = ? AND worker_incarnation = ?", worker.ID, worker.Incarnation,
+	).Take(&entry).Error; err != nil {
+		t.Fatalf("terminal Worker fact did not enqueue a metric rollup entry: %v", err)
+	}
+	if entry.RolledUpAt != nil || !entry.TerminalAt.Equal(terminatedAt) ||
+		entry.BucketDay.UTC().Format("2006-01-02") != terminatedAt.UTC().Format("2006-01-02") {
+		t.Fatalf("SQLite Worker metric rollup entry = %#v", entry)
+	}
+	summary, err := metricrollup.NewService(store.DB()).RunOnce(ctx, 10)
+	if err != nil || summary.ProcessedFacts != 1 || summary.UpdatedBuckets != 1 {
+		t.Fatalf("SQLite Worker metric rollup = %#v, %v", summary, err)
+	}
+	var rollup persistence.WorkerIncarnationMetricRollup
+	if err := store.DB().Take(&rollup).Error; err != nil {
+		t.Fatal(err)
+	}
+	if rollup.FactCount != 1 || rollup.TargetKind != "kubernetes" ||
+		rollup.PoolMode != "warm" || rollup.CapacityClass != "interactive" ||
+		rollup.RunSeconds != 2 || rollup.ActiveSeconds != 9 ||
+		rollup.RequestedCPUSeconds != 1 || rollup.RequestedMemoryByteSeconds != 8192 {
+		t.Fatalf("SQLite Worker metric rollup row = %#v", rollup)
+	}
+	if summary, err = metricrollup.NewService(store.DB()).RunOnce(ctx, 10); err != nil || summary.ProcessedFacts != 0 {
+		t.Fatalf("SQLite Worker metric rollup replay = %#v, %v", summary, err)
+	}
+	if err := store.Migrate(ctx, migrations.Files); err != nil {
+		t.Fatalf("repeat SQLite migration after rollup: %v", err)
+	}
+	var entryCount, pendingCount int64
+	if err := store.DB().Model(&persistence.WorkerIncarnationMetricRollupEntry{}).Count(&entryCount).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DB().Model(&persistence.WorkerIncarnationMetricRollupEntry{}).
+		Where("rolled_up_at IS NULL").Count(&pendingCount).Error; err != nil {
+		t.Fatal(err)
+	}
+	if entryCount != 1 || pendingCount != 0 {
+		t.Fatalf("repeat SQLite migration re-enqueued rolled facts: entries=%d pending=%d", entryCount, pendingCount)
+	}
+	assertSQLiteStage4Rejected(
+		t,
+		store.DB().Model(&persistence.WorkerIncarnationMetricRollup{}).
+			Where("bucket_day = ? AND target_kind = ? AND pool_mode = ? AND capacity_class = ?",
+				rollup.BucketDay, rollup.TargetKind, rollup.PoolMode, rollup.CapacityClass).
+			Update("fact_count", 0).Error,
+		"rollup totals cannot regress",
+	)
+	assertSQLiteStage4Rejected(
+		t,
+		store.DB().Delete(&entry).Error,
+		"rollup entries cannot be deleted",
+	)
 
 	assertSQLiteStage4Rejected(
 		t,

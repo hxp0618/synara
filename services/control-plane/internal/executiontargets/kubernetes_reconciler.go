@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -372,7 +373,11 @@ func (r *KubernetesReconciler) reconcileTarget(ctx context.Context, target persi
 		TenantOwned:       target.TenantID != nil,
 		Status:            routing.HealthUnknown,
 		CapacityStatus:    routing.CapacityUnknown,
+		ReservationAuthority: &routing.ReservationAuthorityObservation{
+			Mode: routing.ReservationAuthorityExactActiveV1,
+		},
 	}
+	acknowledgedReservations := make(map[routing.ReservationIdentity]struct{})
 	var warmCapacityObservations []ManagedKubernetesWarmCapacityObservation
 	defer func() {
 		if ctx.Err() != nil || target.TenantID == nil {
@@ -891,10 +896,16 @@ func (r *KubernetesReconciler) reconcileTarget(ctx context.Context, target persi
 		}
 		name := kubernetesPodName(execution)
 		if _, found := existing[name]; found {
+			acknowledgedReservations[routing.ReservationIdentity{
+				ExecutionID: execution.ID, Generation: execution.Generation,
+			}] = struct{}{}
 			continue
 		}
 		if key, ok := kubernetesWarmCapacityKeyForExecution(execution); ok && readyWarmCapacity[key] > 0 {
 			readyWarmCapacity[key]--
+			acknowledgedReservations[routing.ReservationIdentity{
+				ExecutionID: execution.ID, Generation: execution.Generation,
+			}] = struct{}{}
 			continue
 		}
 		if scheduled >= configuration.MaxActivePods {
@@ -940,6 +951,9 @@ func (r *KubernetesReconciler) reconcileTarget(ctx context.Context, target persi
 		if applyErr != nil {
 			return problem.Wrap(502, "kubernetes_pod_apply_failed", "A Kubernetes Worker Pod could not be applied.", applyErr)
 		}
+		acknowledgedReservations[routing.ReservationIdentity{
+			ExecutionID: execution.ID, Generation: execution.Generation,
+		}] = struct{}{}
 		created++
 		scheduled++
 	}
@@ -970,6 +984,23 @@ func (r *KubernetesReconciler) reconcileTarget(ctx context.Context, target persi
 	healthObservation.CapacityStatus = routing.CapacityAvailable
 	healthObservation.AvailableCapacityUnits = &availableCapacity
 	healthObservation.AllocatedCapacityUnits = scheduled
+	healthObservation.ReservationAuthority.Acknowledgements = make(
+		[]routing.ReservationIdentity, 0, len(acknowledgedReservations),
+	)
+	for identity := range acknowledgedReservations {
+		healthObservation.ReservationAuthority.Acknowledgements = append(
+			healthObservation.ReservationAuthority.Acknowledgements,
+			identity,
+		)
+	}
+	sort.Slice(healthObservation.ReservationAuthority.Acknowledgements, func(left, right int) bool {
+		leftIdentity := healthObservation.ReservationAuthority.Acknowledgements[left]
+		rightIdentity := healthObservation.ReservationAuthority.Acknowledgements[right]
+		if leftIdentity.ExecutionID != rightIdentity.ExecutionID {
+			return leftIdentity.ExecutionID.String() < rightIdentity.ExecutionID.String()
+		}
+		return leftIdentity.Generation < rightIdentity.Generation
+	})
 	healthObservation.Reason = nil
 	if scheduled >= configuration.MaxActivePods {
 		healthObservation.CapacityStatus = routing.CapacitySaturated

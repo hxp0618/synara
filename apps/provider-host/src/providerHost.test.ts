@@ -437,7 +437,9 @@ describe("durable conversation reconstruction", () => {
 
     expect(prompt).toContain("<synara_transcript>");
     expect(prompt).toContain("<assistant>\nprior answer\n</assistant>");
-    expect(prompt).not.toContain("<assistant>\nPartial deployment progress already emitted\n</assistant>");
+    expect(prompt).not.toContain(
+      "<assistant>\nPartial deployment progress already emitted\n</assistant>",
+    );
     expect(prompt).toContain("<synara_current_turn_progress_json>");
     expect(prompt).toContain("Partial deployment progress already emitted");
     expect(prompt).toContain("<current_user>\ndeploy the fix\n</current_user>");

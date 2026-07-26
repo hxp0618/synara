@@ -67,6 +67,40 @@ type observeLocationOutageInput struct {
 	TTLSeconds        int        `json:"ttlSeconds"`
 }
 
+func (s *Server) publishPlatformRoutingAuthority(w http.ResponseWriter, r *http.Request) {
+	targetID, ok := s.pathUUID(w, r, "executionTargetID")
+	if !ok {
+		return
+	}
+	var publication routing.PlatformAuthorityPublication
+	if err := decodeJSON(r, &publication); err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	if s.platformRouting == nil {
+		s.writeError(
+			w,
+			r,
+			problem.New(
+				503,
+				"platform_routing_authority_not_configured",
+				"Platform routing authority publishers are not configured.",
+			),
+		)
+		return
+	}
+	result, err := s.platformRouting.Publish(r.Context(), targetID, publication)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	if result.TenantID != nil {
+		requestLogScopeFor(r).tenantID = *result.TenantID
+	}
+	setIdempotencyReplayHeader(w, result.Replayed)
+	writeJSON(w, http.StatusOK, result)
+}
+
 func (s *Server) listExecutionTargetGroups(w http.ResponseWriter, r *http.Request) {
 	tenantID, ok := s.pathUUID(w, r, "tenantID")
 	if !ok || !s.requireRoutingPermission(w, r, tenantID, authorization.WorkerRead) {
@@ -171,6 +205,31 @@ func (s *Server) observeExecutionTargetHealth(w http.ResponseWriter, r *http.Req
 	}
 	if strings.TrimSpace(input.Status) == "" && input.DRReadiness == nil {
 		s.writeError(w, r, problem.New(400, "invalid_target_authority_observation", "Provide health status and/or drReadiness."))
+		return
+	}
+	if strings.TrimSpace(input.Status) != "" && s.platformRouting.HasConfiguredHealthAuthority(targetID) {
+		s.writeError(
+			w,
+			r,
+			problem.New(
+				403,
+				"execution_target_health_platform_authority",
+				"Execution Target health is owned by a configured Platform routing publisher.",
+			),
+		)
+		return
+	}
+	if input.DRReadiness != nil &&
+		s.platformRouting.HasConfiguredDRAuthority(targetID, input.DRReadiness.SourceDRDomain) {
+		s.writeError(
+			w,
+			r,
+			problem.New(
+				403,
+				"execution_target_dr_platform_authority",
+				"Execution Target DR readiness for this source domain is owned by a configured Platform routing publisher.",
+			),
+		)
 		return
 	}
 	principal := mustPrincipal(r)

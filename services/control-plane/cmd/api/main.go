@@ -32,6 +32,7 @@ import (
 	"github.com/synara-ai/synara/services/control-plane/internal/leadership"
 	"github.com/synara-ai/synara/services/control-plane/internal/lifecyclepolicy"
 	"github.com/synara-ai/synara/services/control-plane/internal/memories"
+	"github.com/synara-ai/synara/services/control-plane/internal/metricrollup"
 	"github.com/synara-ai/synara/services/control-plane/internal/observability"
 	"github.com/synara-ai/synara/services/control-plane/internal/outbox"
 	"github.com/synara-ai/synara/services/control-plane/internal/platform"
@@ -306,6 +307,7 @@ func main() {
 	retentionService := retention.NewService(
 		db, sessionService, artifactService, executionService, cfg.RetentionSweepInterval, logger, metrics,
 	)
+	metricRollupService := metricrollup.NewService(db)
 	api, err := httpapi.New(
 		cfg, db, identityService, tenancyService, projectService, sessionService,
 		executionService, executionTargetService, sshProvisioner, artifactService, quotaService,
@@ -387,6 +389,18 @@ func main() {
 	})
 	if err != nil {
 		logger.Error("failed to configure retention leadership runner", "error", err)
+		os.Exit(1)
+	}
+	metricRollupLeaderRunner, err := reconcilerleadership.NewRunner(reconcilerLeadership, reconcilerleadership.RunnerConfig{
+		LeaseName:         "synara:metric-rollup",
+		CycleInterval:     cfg.MetricRollupInterval,
+		AcquireRetryDelay: reconcilerLeadershipConfig.AcquireRetryDelay,
+		RenewInterval:     reconcilerLeadershipConfig.RenewInterval,
+		AssertInterval:    reconcilerLeadershipConfig.AssertInterval,
+		Logger:            logger,
+	})
+	if err != nil {
+		logger.Error("failed to configure metric rollup leadership runner", "error", err)
 		os.Exit(1)
 	}
 	var billingImportLeaderRunner *reconcilerleadership.Runner
@@ -498,6 +512,23 @@ func main() {
 			})
 		})
 	})
+	startBackground(func() {
+		metricRollupLeaderRunner.Run(runtimeContext, func(run reconcilerleadership.RunContext) error {
+			return observeLeadershipBackground(metrics, "metric-rollup", func() error {
+				summary, err := metricRollupService.RunOnce(run.Context, cfg.MetricRollupBatchSize)
+				logger.Debug(
+					"metric rollup cycle completed",
+					"processedFacts", summary.ProcessedFacts,
+					"processedWorkerFacts", summary.ProcessedWorkerFacts,
+					"processedGenerationFacts", summary.ProcessedGenerationFacts,
+					"processedPodFailureFacts", summary.ProcessedPodFailureFacts,
+					"updatedBuckets", summary.UpdatedBuckets,
+					"error", err,
+				)
+				return err
+			})
+		})
+	})
 	if billingImportLeaderRunner != nil {
 		startBackground(func() {
 			billingImportLeaderRunner.Run(runtimeContext, func(run reconcilerleadership.RunContext) error {
@@ -536,6 +567,7 @@ func main() {
 					log(
 						"shared billing allocation scheduler cycle completed",
 						"checked", summary.Checked,
+						"generatedCalendarPeriods", summary.GeneratedCalendarPeriods,
 						"attempted", summary.Attempted,
 						"completed", summary.Completed,
 						"workers", summary.Workers,

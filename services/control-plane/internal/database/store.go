@@ -1092,6 +1092,150 @@ func migrateSQLiteSafety(ctx context.Context, db *gorm.DB) error {
 		 BEGIN
 		   SELECT RAISE(ABORT, 'Worker incarnation facts cannot be deleted');
 		 END`,
+		`CREATE INDEX IF NOT EXISTS idx_worker_incarnation_metric_rollups_day
+		 ON worker_incarnation_metric_rollups (bucket_day, target_kind)`,
+		`CREATE INDEX IF NOT EXISTS idx_worker_incarnation_metric_rollup_entries_pending
+		 ON worker_incarnation_metric_rollup_entries (terminal_at, worker_id, worker_incarnation)
+		 WHERE rolled_up_at IS NULL`,
+		`INSERT OR IGNORE INTO worker_incarnation_metric_rollup_entries (
+		   worker_id, worker_incarnation, terminal_at, bucket_day,
+		   rolled_up_at, created_at, updated_at
+		 )
+		 SELECT
+		   worker_id, worker_incarnation, terminated_at, date(terminated_at),
+		   NULL, terminated_at, terminated_at
+		 FROM worker_incarnation_facts
+		 WHERE current_state = 'terminated'
+		   AND terminated_at IS NOT NULL`,
+		`DROP TRIGGER IF EXISTS trg_worker_incarnation_metric_rollups_insert`,
+		`CREATE TRIGGER trg_worker_incarnation_metric_rollups_insert
+		 BEFORE INSERT ON worker_incarnation_metric_rollups
+		 BEGIN
+		   SELECT RAISE(ABORT, 'invalid Worker incarnation metric rollup')
+		   WHERE NEW.bucket_day IS NULL
+		      OR NEW.target_kind NOT IN ('local', 'ssh', 'docker', 'kubernetes')
+		      OR NEW.pool_mode NOT IN ('resident', 'per-execution', 'warm', 'unassigned')
+		      OR NEW.capacity_class NOT IN ('standard', 'interactive', 'unassigned')
+		      OR NEW.fact_count <= 0
+		      OR NEW.run_seconds < 0
+		      OR NEW.active_seconds < 0
+		      OR NEW.idle_seconds < 0
+		      OR NEW.requested_cpu_seconds < 0
+		      OR NEW.requested_memory_byte_seconds < 0
+		      OR NEW.requested_ephemeral_storage_byte_seconds < 0
+		      OR NEW.run_seconds >= 1e308
+		      OR NEW.active_seconds >= 1e308
+		      OR NEW.idle_seconds >= 1e308
+		      OR NEW.requested_cpu_seconds >= 1e308
+		      OR NEW.requested_memory_byte_seconds >= 1e308
+		      OR NEW.requested_ephemeral_storage_byte_seconds >= 1e308
+		      OR NEW.created_at > NEW.updated_at;
+		 END`,
+		`DROP TRIGGER IF EXISTS trg_worker_incarnation_metric_rollups_update`,
+		`CREATE TRIGGER trg_worker_incarnation_metric_rollups_update
+		 BEFORE UPDATE ON worker_incarnation_metric_rollups
+		 BEGIN
+		   SELECT RAISE(ABORT, 'Worker incarnation metric rollup identity is immutable')
+		   WHERE NEW.bucket_day IS NOT OLD.bucket_day
+		      OR NEW.target_kind IS NOT OLD.target_kind
+		      OR NEW.pool_mode IS NOT OLD.pool_mode
+		      OR NEW.capacity_class IS NOT OLD.capacity_class
+		      OR NEW.created_at IS NOT OLD.created_at;
+
+		   SELECT RAISE(ABORT, 'Worker incarnation metric rollup totals cannot regress')
+		   WHERE NEW.fact_count < OLD.fact_count
+		      OR NEW.run_seconds < OLD.run_seconds
+		      OR NEW.active_seconds < OLD.active_seconds
+		      OR NEW.idle_seconds < OLD.idle_seconds
+		      OR NEW.requested_cpu_seconds < OLD.requested_cpu_seconds
+		      OR NEW.requested_memory_byte_seconds < OLD.requested_memory_byte_seconds
+		      OR NEW.requested_ephemeral_storage_byte_seconds < OLD.requested_ephemeral_storage_byte_seconds
+		      OR NEW.run_seconds >= 1e308
+		      OR NEW.active_seconds >= 1e308
+		      OR NEW.idle_seconds >= 1e308
+		      OR NEW.requested_cpu_seconds >= 1e308
+		      OR NEW.requested_memory_byte_seconds >= 1e308
+		      OR NEW.requested_ephemeral_storage_byte_seconds >= 1e308
+		      OR NEW.updated_at < OLD.updated_at;
+		 END`,
+		`DROP TRIGGER IF EXISTS trg_worker_incarnation_metric_rollups_delete`,
+		`CREATE TRIGGER trg_worker_incarnation_metric_rollups_delete
+		 BEFORE DELETE ON worker_incarnation_metric_rollups
+		 BEGIN
+		   SELECT RAISE(ABORT, 'Worker incarnation metric rollups cannot be deleted');
+		 END`,
+		`DROP TRIGGER IF EXISTS trg_worker_incarnation_metric_rollup_entries_insert`,
+		`CREATE TRIGGER trg_worker_incarnation_metric_rollup_entries_insert
+		 BEFORE INSERT ON worker_incarnation_metric_rollup_entries
+		 BEGIN
+		   SELECT RAISE(ABORT, 'invalid Worker incarnation metric rollup entry')
+		   WHERE NEW.worker_incarnation <= 0
+		      OR NEW.terminal_at IS NULL
+		      OR NEW.bucket_day IS NULL
+		      OR date(NEW.bucket_day) <> date(NEW.terminal_at)
+		      OR NEW.created_at > NEW.updated_at
+		      OR (NEW.rolled_up_at IS NOT NULL AND NEW.rolled_up_at < NEW.created_at)
+		      OR NOT EXISTS (
+		        SELECT 1 FROM worker_incarnation_facts AS fact
+		        WHERE fact.worker_id = NEW.worker_id
+		          AND fact.worker_incarnation = NEW.worker_incarnation
+		          AND fact.current_state = 'terminated'
+		          AND fact.terminated_at IS NEW.terminal_at
+		      );
+		 END`,
+		`DROP TRIGGER IF EXISTS trg_worker_incarnation_metric_rollup_entries_update`,
+		`CREATE TRIGGER trg_worker_incarnation_metric_rollup_entries_update
+		 BEFORE UPDATE ON worker_incarnation_metric_rollup_entries
+		 BEGIN
+		   SELECT RAISE(ABORT, 'Worker incarnation metric rollup entry identity is immutable')
+		   WHERE NEW.worker_id IS NOT OLD.worker_id
+		      OR NEW.worker_incarnation IS NOT OLD.worker_incarnation
+		      OR NEW.terminal_at IS NOT OLD.terminal_at
+		      OR NEW.bucket_day IS NOT OLD.bucket_day
+		      OR NEW.created_at IS NOT OLD.created_at;
+
+		   SELECT RAISE(ABORT, 'Worker incarnation metric rollup entry completion is immutable')
+		   WHERE OLD.rolled_up_at IS NOT NULL
+		     AND NEW.rolled_up_at IS NOT OLD.rolled_up_at;
+
+		   SELECT RAISE(ABORT, 'Worker incarnation metric rollup entry timeline cannot regress')
+		   WHERE NEW.updated_at < OLD.updated_at
+		      OR (NEW.rolled_up_at IS NOT NULL AND NEW.rolled_up_at < NEW.created_at);
+		 END`,
+		`DROP TRIGGER IF EXISTS trg_worker_incarnation_metric_rollup_entries_delete`,
+		`CREATE TRIGGER trg_worker_incarnation_metric_rollup_entries_delete
+		 BEFORE DELETE ON worker_incarnation_metric_rollup_entries
+		 BEGIN
+		   SELECT RAISE(ABORT, 'Worker incarnation metric rollup entries cannot be deleted');
+		 END`,
+		`DROP TRIGGER IF EXISTS trg_worker_incarnation_metric_rollup_enqueue_insert`,
+		`CREATE TRIGGER trg_worker_incarnation_metric_rollup_enqueue_insert
+		 AFTER INSERT ON worker_incarnation_facts
+		 WHEN NEW.current_state = 'terminated' AND NEW.terminated_at IS NOT NULL
+		 BEGIN
+		   INSERT OR IGNORE INTO worker_incarnation_metric_rollup_entries (
+		     worker_id, worker_incarnation, terminal_at, bucket_day,
+		     rolled_up_at, created_at, updated_at
+		   ) VALUES (
+		     NEW.worker_id, NEW.worker_incarnation, NEW.terminated_at, date(NEW.terminated_at),
+		     NULL, NEW.terminated_at, NEW.terminated_at
+		   );
+		 END`,
+		`DROP TRIGGER IF EXISTS trg_worker_incarnation_metric_rollup_enqueue_update`,
+		`CREATE TRIGGER trg_worker_incarnation_metric_rollup_enqueue_update
+		 AFTER UPDATE OF current_state, terminated_at ON worker_incarnation_facts
+		 WHEN NEW.current_state = 'terminated'
+		   AND NEW.terminated_at IS NOT NULL
+		   AND OLD.current_state <> 'terminated'
+		 BEGIN
+		   INSERT OR IGNORE INTO worker_incarnation_metric_rollup_entries (
+		     worker_id, worker_incarnation, terminal_at, bucket_day,
+		     rolled_up_at, created_at, updated_at
+		   ) VALUES (
+		     NEW.worker_id, NEW.worker_incarnation, NEW.terminated_at, date(NEW.terminated_at),
+		     NULL, NEW.terminated_at, NEW.terminated_at
+		   );
+		 END`,
 		`DROP TRIGGER IF EXISTS trg_worker_instances_registration_trust_insert`,
 		`CREATE TRIGGER trg_worker_instances_registration_trust_insert
 		 BEFORE INSERT ON worker_instances
@@ -3075,7 +3219,22 @@ func migrateSQLiteSafety(ctx context.Context, db *gorm.DB) error {
 	if err := migrateSharedCostAllocationSQLiteSafety(ctx, db); err != nil {
 		return err
 	}
+	if err := migrateBillingSharedAllocationScheduleSQLiteSafety(ctx, db); err != nil {
+		return err
+	}
+	if err := migrateSharedActualAllocationSQLiteSafety(ctx, db); err != nil {
+		return err
+	}
+	if err := migrateExecutionGenerationMetricRollupSQLiteSafety(ctx, db); err != nil {
+		return err
+	}
 	if err := migrateRoutingSQLiteSafety(ctx, db); err != nil {
+		return err
+	}
+	if err := migratePlatformRoutingAuthoritySQLiteSafety(ctx, db); err != nil {
+		return err
+	}
+	if err := migrateCapacityReservationSQLiteSafety(ctx, db); err != nil {
 		return err
 	}
 	if err := migrateExecutionSchedulingPolicySQLiteSafety(ctx, db); err != nil {

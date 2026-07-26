@@ -233,7 +233,7 @@ func (r *Registry) ObserveBackground(kind string, started time.Time, err error) 
 	switch kind {
 	case "docker", "kubernetes", "target-failover", "resource-lifecycle",
 		"worker-release-auto-rollback", "retention", "billing-import-scheduler",
-		"billing-shared-allocation-scheduler", "outbox":
+		"billing-shared-allocation-scheduler", "metric-rollup", "outbox":
 	default:
 		kind = "other"
 	}

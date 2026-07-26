@@ -72,3 +72,28 @@ type BillingSharedEstimatedChargeSlice struct {
 func (BillingSharedEstimatedChargeSlice) TableName() string {
 	return "billing_shared_estimated_charge_slices"
 }
+
+type BillingSharedAllocationSchedulePeriod struct {
+	ScheduleConfigSHA256    string     `gorm:"column:schedule_config_sha256;primaryKey"`
+	BillingPeriodStartAt    time.Time  `gorm:"column:billing_period_start_at;primaryKey"`
+	BillingPeriodEndAt      time.Time  `gorm:"column:billing_period_end_at;primaryKey"`
+	ExecutionTargetID       uuid.UUID  `gorm:"column:execution_target_id;type:uuid;not null;index:idx_billing_shared_allocation_schedule_due,priority:2"`
+	Provider                string     `gorm:"column:provider;not null"`
+	CurrencyCode            string     `gorm:"column:currency_code;not null"`
+	ScheduleKind            string     `gorm:"column:schedule_kind;not null"`
+	SettlementDelaySeconds  int64      `gorm:"column:settlement_delay_seconds;not null"`
+	ScheduleIntervalSeconds int64      `gorm:"column:schedule_interval_seconds;not null"`
+	NextAttemptAt           time.Time  `gorm:"column:next_attempt_at;not null;index:idx_billing_shared_allocation_schedule_due,priority:1"`
+	AttemptCount            int64      `gorm:"column:attempt_count;not null"`
+	LastStartedAt           *time.Time `gorm:"column:last_started_at"`
+	LastFinishedAt          *time.Time `gorm:"column:last_finished_at"`
+	LastSuccessAt           *time.Time `gorm:"column:last_success_at"`
+	LastOutcome             string     `gorm:"column:last_outcome;not null"`
+	LastErrorCode           *string    `gorm:"column:last_error_code"`
+	CreatedAt               time.Time  `gorm:"column:created_at;not null"`
+	UpdatedAt               time.Time  `gorm:"column:updated_at;not null"`
+}
+
+func (BillingSharedAllocationSchedulePeriod) TableName() string {
+	return "billing_shared_allocation_schedule_periods"
+}

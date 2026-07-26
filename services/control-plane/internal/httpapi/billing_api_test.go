@@ -250,6 +250,38 @@ func TestBillingSharedTargetManagementFailsClosedWithoutConfiguredOperatorTenant
 	)
 }
 
+func TestBillingSharedActualInvoiceAllocationRouteIsOperatorScopedAndValidatesAttestation(t *testing.T) {
+	fixture := newBillingHTTPFixture(t)
+	path := "/v1/tenants/" + fixture.tenantID.String() + "/billing/shared-targets/" +
+		uuid.NewString() + "/actual-invoices/" + uuid.NewString() + "/allocations"
+	assertProblemResponse(
+		t,
+		fixture.request(t, http.MethodPost, path, fixture.ownerToken, map[string]any{
+			"sourceScopeAttestationSHA256": "not-a-digest",
+		}),
+		http.StatusBadRequest,
+		"billing_shared_actual_source_scope_attestation_invalid",
+	)
+	assertProblemResponse(
+		t,
+		fixture.request(t, http.MethodPost, path, fixture.securityAdminToken, map[string]any{
+			"sourceScopeAttestationSHA256": strings.Repeat("a", 64),
+		}),
+		http.StatusForbidden,
+		"tenant_forbidden",
+	)
+	otherTenantPath := "/v1/tenants/" + fixture.otherTenantID.String() + "/billing/shared-targets/" +
+		uuid.NewString() + "/actual-invoices/" + uuid.NewString() + "/allocations"
+	assertProblemResponse(
+		t,
+		fixture.request(t, http.MethodPost, otherTenantPath, fixture.crossTenantToken, map[string]any{
+			"sourceScopeAttestationSHA256": strings.Repeat("a", 64),
+		}),
+		http.StatusForbidden,
+		"billing_shared_operator_forbidden",
+	)
+}
+
 func TestBillingTariffCreateDrivesEstimateImportAndReconcileFlow(t *testing.T) {
 	fixture := newBillingHTTPFixture(t)
 	basePath := "/v1/tenants/" + fixture.tenantID.String() + "/billing/tariffs"

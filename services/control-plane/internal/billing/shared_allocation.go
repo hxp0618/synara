@@ -115,6 +115,21 @@ func (s *Service) AllocateSharedUsageCharges(
 				lockErr,
 			)
 		}
+		if lockErr := acquireSharedEstimatePeriodSnapshotLock(
+			ctx,
+			tx,
+			provider,
+			currency,
+			periodStart,
+			periodEnd,
+		); lockErr != nil {
+			return problem.Wrap(
+				500,
+				"billing_shared_allocation_snapshot_lock_failed",
+				"The shared billing period snapshot could not be locked.",
+				lockErr,
+			)
+		}
 
 		fact, loadErr := loadWorkerFactForBilling(ctx, tx, input.WorkerID, input.WorkerIncarnation)
 		if loadErr != nil {

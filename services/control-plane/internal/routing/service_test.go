@@ -840,7 +840,8 @@ func newRoutingFixture(t *testing.T) *routingFixture {
 	if err := db.AutoMigrate(
 		&persistence.Tenant{}, &persistence.Organization{}, &persistence.AuditLog{}, &persistence.ExecutionTarget{},
 		&persistence.ExecutionTargetGroup{}, &persistence.ExecutionTargetGroupMember{},
-		&persistence.ExecutionTargetHealth{}, &persistence.ExecutionTargetDRReadiness{},
+		&persistence.ExecutionTargetHealth{}, &persistence.ExecutionTargetReservationAcknowledgement{},
+		&persistence.ExecutionTargetDRReadiness{},
 		&persistence.ExecutionLocationOutage{},
 		&persistence.AgentExecution{},
 		&persistence.ExecutionSchedulingPolicyHead{}, &persistence.ExecutionSchedulingPolicyRevision{},

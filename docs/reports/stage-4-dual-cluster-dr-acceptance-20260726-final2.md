@@ -28,10 +28,10 @@ current-context 保持不变。
 
 ## 环境和镜像身份
 
-| 角色 | Kubernetes context | Server version | Node 数 |
-| --- | --- | --- | ---: |
-| 主集群 | `orbstack` | `v1.34.8+orb1` | 1 |
-| 副集群 | `kind-synara-dr-20260725175633-43317-6984` | `v1.33.1` | 1 |
+| 角色   | Kubernetes context                         | Server version | Node 数 |
+| ------ | ------------------------------------------ | -------------- | ------: |
+| 主集群 | `orbstack`                                 | `v1.34.8+orb1` |       1 |
+| 副集群 | `kind-synara-dr-20260725175633-43317-6984` | `v1.33.1`      |       1 |
 
 测试使用根 `Dockerfile` 的 `worker-acceptance` target 构建 run-owned 本地镜像，并在两套运行时核对精确镜像身份：
 
@@ -43,17 +43,17 @@ current-context 保持不变。
 
 机器可读证据只保留以下九个 allowlisted boolean；本次全部为 `true`：
 
-| 断言 | 证明内容 |
-| --- | --- |
-| `missingReadinessFailedClosed` | 未发布 destination readiness 时，failover 不产生持久化副作用 |
-| `exactReadinessAccepted` | 精确 source DR domain、watermark 和 backing-store readiness 可授权切换 |
-| `sourcePlacementImmutable` | 源 Execution 的 Target/Region/Cluster 快照保持历史事实，不被改写 |
-| `singleSuccessor` | 首轮只提交一个 successor，重复 sweep 幂等且不再创建 successor |
-| `successorLineagePersisted` | successor 与源 Execution、源 Recovery Bundle 和 leader fence 的 lineage 已持久化 |
-| `obsoletePrimaryPodAbsent` | 原 OrbStack Pod 的精确 UID 已消失，不以同名 Pod 混淆 |
-| `sourceRuntimeReady` | 源 Pod 为 Running/Ready，agentd 启动且零重启，并完成精确身份的 register/claim/heartbeat |
-| `successorRuntimeReady` | successor Pod 为 Running/Ready，agentd 启动且零重启，并完成精确身份的 register/claim/heartbeat |
-| `recoveryBundleIntegrityVerified` | failover 前验证 Recovery Bundle 的持久化 SHA-256 和 envelope 一致性 |
+| 断言                              | 证明内容                                                                                       |
+| --------------------------------- | ---------------------------------------------------------------------------------------------- |
+| `missingReadinessFailedClosed`    | 未发布 destination readiness 时，failover 不产生持久化副作用                                   |
+| `exactReadinessAccepted`          | 精确 source DR domain、watermark 和 backing-store readiness 可授权切换                         |
+| `sourcePlacementImmutable`        | 源 Execution 的 Target/Region/Cluster 快照保持历史事实，不被改写                               |
+| `singleSuccessor`                 | 首轮只提交一个 successor，重复 sweep 幂等且不再创建 successor                                  |
+| `successorLineagePersisted`       | successor 与源 Execution、源 Recovery Bundle 和 leader fence 的 lineage 已持久化               |
+| `obsoletePrimaryPodAbsent`        | 原 OrbStack Pod 的精确 UID 已消失，不以同名 Pod 混淆                                           |
+| `sourceRuntimeReady`              | 源 Pod 为 Running/Ready，agentd 启动且零重启，并完成精确身份的 register/claim/heartbeat        |
+| `successorRuntimeReady`           | successor Pod 为 Running/Ready，agentd 启动且零重启，并完成精确身份的 register/claim/heartbeat |
+| `recoveryBundleIntegrityVerified` | failover 前验证 Recovery Bundle 的持久化 SHA-256 和 envelope 一致性                            |
 
 临时详细证据为 2,108 bytes，SHA-256 为
 `bb976ab820f6bfd65a8a814dd0486776640c0f49bbfb7738ab6b631d0005cbad`；最终 JSON 不保存 Token、CA、

@@ -33,23 +33,23 @@ deployment, or production release gate.
 
 ## Frozen acceptance inputs
 
-| Asset | SHA-256 |
-| --- | --- |
-| `deploy/kubernetes/resilience-acceptance.sh` | `c2171e0f0fcef6ae1c6d826e29d4df326db6a4478a7882b012b0fab086fded63` |
-| `deploy/kubernetes/validate-resilience-assets.py` | `75e666fe4f8e7ff607acd4d25c1978c3c165316fa068b35a85419c1bc4c6e5f4` |
-| `services/control-plane/Dockerfile` | `cd8747438e2b1ef24bbcaf23f58a4cd589e5e89776f319052fd8ee3afe561a4c` |
-| `services/control-plane/go.mod` | `65c8f3ad8b88e3730fa2ad79b288178e057bec34f90afa1435cb7dbb0e3dde47` |
-| `services/control-plane/migrations/000071_ssh_target_operation_fencing.sql` | `db979123f806bcab43ce3fd2997330932052ff83b3fd7e93c9505bc45cfabb39` |
-| `services/control-plane/migrations/000072_ssh_bootstrap_authority.sql` | `975171705f3f8af8f6fe214589f9bd6a9166dbd0403ef9276672640c97fb64ce` |
+| Asset                                                                          | SHA-256                                                            |
+| ------------------------------------------------------------------------------ | ------------------------------------------------------------------ |
+| `deploy/kubernetes/resilience-acceptance.sh`                                   | `c2171e0f0fcef6ae1c6d826e29d4df326db6a4478a7882b012b0fab086fded63` |
+| `deploy/kubernetes/validate-resilience-assets.py`                              | `75e666fe4f8e7ff607acd4d25c1978c3c165316fa068b35a85419c1bc4c6e5f4` |
+| `services/control-plane/Dockerfile`                                            | `cd8747438e2b1ef24bbcaf23f58a4cd589e5e89776f319052fd8ee3afe561a4c` |
+| `services/control-plane/go.mod`                                                | `65c8f3ad8b88e3730fa2ad79b288178e057bec34f90afa1435cb7dbb0e3dde47` |
+| `services/control-plane/migrations/000071_ssh_target_operation_fencing.sql`    | `db979123f806bcab43ce3fd2997330932052ff83b3fd7e93c9505bc45cfabb39` |
+| `services/control-plane/migrations/000072_ssh_bootstrap_authority.sql`         | `975171705f3f8af8f6fe214589f9bd6a9166dbd0403ef9276672640c97fb64ce` |
 | `services/control-plane/migrations/000073_ssh_worker_bootstrap_generation.sql` | `7aa8fe173a3faba337093eae88166d2efe4d4e1306c2d73045f4fc0882dbb2da` |
-| `services/control-plane/internal/executiontargets/ssh_provisioner.go` | `691d03aed54f6f97ae0edc6a40886cd4bda9e97f9e2b80db3199573bedd6c3b4` |
-| `services/control-plane/internal/executions/service.go` | `ced4fd11f0a025d7b89fb4956ce076ae620aee3fb6ee2f593ff49bcd523627f4` |
-| `services/control-plane/internal/executions/worker_revocation.go` | `1d99cb3349cb100e74dc5bf3b85402e7e25fcb982d852d71784b8c172a8a63c6` |
-| `scripts/stage3-provider-acceptance/acceptance_runner.py` | `16d24a0545ffda6b21594a517982da3ba8481a6b31069071ea14f52de334c187` |
-| SSH final4 JSON evidence | `ce39688cf2706505577055d254bca92e581e680d7ee15e82e5ad720efff9ec01` |
-| Final11 JSON evidence | `61f409fe76e075c038b8a060e9685a1d0f019c4beeb01dc454d16d27202a976b` |
-| JSONL progress journal | `190f1000499c6a4320e596c2169c7566f9848d9668009a05d38831ba5579d05d` |
-| Atomic progress snapshot | `c58c63e568430cc648b7fff58c9e6409b1d7359784c9cf26547044b738289499` |
+| `services/control-plane/internal/executiontargets/ssh_provisioner.go`          | `691d03aed54f6f97ae0edc6a40886cd4bda9e97f9e2b80db3199573bedd6c3b4` |
+| `services/control-plane/internal/executions/service.go`                        | `ced4fd11f0a025d7b89fb4956ce076ae620aee3fb6ee2f593ff49bcd523627f4` |
+| `services/control-plane/internal/executions/worker_revocation.go`              | `1d99cb3349cb100e74dc5bf3b85402e7e25fcb982d852d71784b8c172a8a63c6` |
+| `scripts/stage3-provider-acceptance/acceptance_runner.py`                      | `16d24a0545ffda6b21594a517982da3ba8481a6b31069071ea14f52de334c187` |
+| SSH final4 JSON evidence                                                       | `ce39688cf2706505577055d254bca92e581e680d7ee15e82e5ad720efff9ec01` |
+| Final11 JSON evidence                                                          | `61f409fe76e075c038b8a060e9685a1d0f019c4beeb01dc454d16d27202a976b` |
+| JSONL progress journal                                                         | `190f1000499c6a4320e596c2169c7566f9848d9668009a05d38831ba5579d05d` |
+| Atomic progress snapshot                                                       | `c58c63e568430cc648b7fff58c9e6409b1d7359784c9cf26547044b738289499` |
 
 The hashes identify the dirty files used for this local run; they do not make the uncommitted source tree
 reconstructible. The exact final11 image remains in OrbStack for follow-up inspection.

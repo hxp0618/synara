@@ -20,6 +20,8 @@ const (
 	SourceKindS3       = "s3"
 	SourceKindGCS      = "gcs"
 	SourceKindAzure    = "azure"
+
+	SharedAllocationCalendarMonthlyUTC = "monthly-utc"
 )
 
 type RuntimeConfig struct {
@@ -63,16 +65,19 @@ type ConfiguredImport struct {
 	EstimateAfterImport bool
 }
 
-// ConfiguredSharedAllocation freezes one explicit closed accounting period.
-// The runtime deliberately does not infer calendar windows: operators advance
-// mappings only after their own ingestion/settlement authority says a period
-// is ready to be retried unattended.
+// ConfiguredSharedAllocation is either one exact static period or one explicit
+// monthly-UTC period generator. Calendar generation is anchored by a required
+// first boundary and never infers locale, time zone, or a provider billing
+// account from wall-clock state.
 type ConfiguredSharedAllocation struct {
 	ExecutionTargetID    uuid.UUID
 	Provider             string
 	CurrencyCode         string
 	BillingPeriodStartAt time.Time
 	BillingPeriodEndAt   time.Time
+	Calendar             string
+	FirstPeriodStartAt   time.Time
+	LastPeriodEndAt      *time.Time
 	SettlementDelay      time.Duration
 	ScheduleInterval     time.Duration
 }
@@ -158,6 +163,17 @@ func (config RuntimeConfig) Normalize() (RuntimeConfig, error) {
 		}
 		sharedKeys[key] = struct{}{}
 		for _, existing := range normalized.SharedAllocations {
+			if existing.ExecutionTargetID == normalizedAllocation.ExecutionTargetID &&
+				existing.Provider == normalizedAllocation.Provider &&
+				existing.CurrencyCode == normalizedAllocation.CurrencyCode &&
+				(existing.Calendar != "" || normalizedAllocation.Calendar != "") {
+				return RuntimeConfig{}, fmt.Errorf(
+					"billing shared allocation calendar mapping for Target %s %s/%s cannot be combined with another mapping",
+					normalizedAllocation.ExecutionTargetID,
+					normalizedAllocation.Provider,
+					normalizedAllocation.CurrencyCode,
+				)
+			}
 			if existing.ExecutionTargetID == normalizedAllocation.ExecutionTargetID &&
 				existing.Provider == normalizedAllocation.Provider &&
 				existing.CurrencyCode == normalizedAllocation.CurrencyCode &&
@@ -409,21 +425,74 @@ func (configuredAllocation ConfiguredSharedAllocation) Normalize() (ConfiguredSh
 		return ConfiguredSharedAllocation{}, err
 	}
 	normalized.CurrencyCode = currency
-	periodStart, periodEnd, err := normalizeClosedPeriod(
-		normalized.BillingPeriodStartAt,
-		normalized.BillingPeriodEndAt,
-	)
-	if err != nil {
-		return ConfiguredSharedAllocation{}, err
+	normalized.Calendar = strings.ToLower(strings.TrimSpace(normalized.Calendar))
+	switch normalized.Calendar {
+	case "":
+		if !normalized.FirstPeriodStartAt.IsZero() || normalized.LastPeriodEndAt != nil {
+			return ConfiguredSharedAllocation{}, errors.New(
+				"static billing shared allocation mapping cannot include calendar boundaries",
+			)
+		}
+		periodStart, periodEnd, periodErr := normalizeClosedPeriod(
+			normalized.BillingPeriodStartAt,
+			normalized.BillingPeriodEndAt,
+		)
+		if periodErr != nil {
+			return ConfiguredSharedAllocation{}, periodErr
+		}
+		periodStart = periodStart.UTC().Truncate(time.Microsecond)
+		periodEnd = periodEnd.UTC().Truncate(time.Microsecond)
+		if !periodEnd.After(periodStart) {
+			return ConfiguredSharedAllocation{}, errors.New(
+				"billing shared allocation mapping period must remain positive at database microsecond precision",
+			)
+		}
+		if periodEnd.Sub(periodStart) > 366*24*time.Hour {
+			return ConfiguredSharedAllocation{}, errors.New("billing shared allocation mapping period must not exceed 366 days")
+		}
+		normalized.BillingPeriodStartAt = periodStart
+		normalized.BillingPeriodEndAt = periodEnd
+	case SharedAllocationCalendarMonthlyUTC:
+		if !normalized.BillingPeriodStartAt.IsZero() || !normalized.BillingPeriodEndAt.IsZero() {
+			return ConfiguredSharedAllocation{}, errors.New(
+				"monthly-utc billing shared allocation mapping cannot include a static billing period",
+			)
+		}
+		first := normalized.FirstPeriodStartAt.UTC()
+		if normalized.FirstPeriodStartAt.IsZero() || !isUTCMonthBoundary(first) {
+			return ConfiguredSharedAllocation{}, errors.New(
+				"monthly-utc billing shared allocation mapping firstPeriodStartAt must be a UTC month boundary",
+			)
+		}
+		normalized.FirstPeriodStartAt = first
+		if normalized.LastPeriodEndAt != nil {
+			last := normalized.LastPeriodEndAt.UTC()
+			if !isUTCMonthBoundary(last) || !last.After(first) {
+				return ConfiguredSharedAllocation{}, errors.New(
+					"monthly-utc billing shared allocation mapping lastPeriodEndAt must be a later UTC month boundary",
+				)
+			}
+			if monthlyPeriodCount(first, last) > 1200 {
+				return ConfiguredSharedAllocation{}, errors.New(
+					"monthly-utc billing shared allocation mapping cannot span more than 1200 periods",
+				)
+			}
+			normalized.LastPeriodEndAt = &last
+		}
+	default:
+		return ConfiguredSharedAllocation{}, fmt.Errorf(
+			"unsupported billing shared allocation calendar %q",
+			normalized.Calendar,
+		)
 	}
-	if periodEnd.Sub(periodStart) > 366*24*time.Hour {
-		return ConfiguredSharedAllocation{}, errors.New("billing shared allocation mapping period must not exceed 366 days")
-	}
-	normalized.BillingPeriodStartAt = periodStart
-	normalized.BillingPeriodEndAt = periodEnd
 	if normalized.SettlementDelay < time.Minute || normalized.SettlementDelay > 90*24*time.Hour {
 		return ConfiguredSharedAllocation{}, errors.New(
 			"billing shared allocation mapping settlement delay must be between 1m and 2160h",
+		)
+	}
+	if normalized.SettlementDelay%time.Second != 0 {
+		return ConfiguredSharedAllocation{}, errors.New(
+			"billing shared allocation mapping settlement delay must use whole seconds",
 		)
 	}
 	if normalized.ScheduleInterval < time.Minute {
@@ -431,10 +500,25 @@ func (configuredAllocation ConfiguredSharedAllocation) Normalize() (ConfiguredSh
 			"billing shared allocation mapping schedule interval must be at least 1m",
 		)
 	}
+	if normalized.ScheduleInterval%time.Second != 0 {
+		return ConfiguredSharedAllocation{}, errors.New(
+			"billing shared allocation mapping schedule interval must use whole seconds",
+		)
+	}
 	return normalized, nil
 }
 
 func configuredSharedAllocationKey(configuredAllocation ConfiguredSharedAllocation) string {
+	if configuredAllocation.Calendar != "" {
+		return strings.Join([]string{
+			configuredAllocation.ExecutionTargetID.String(),
+			configuredAllocation.Provider,
+			configuredAllocation.CurrencyCode,
+			configuredAllocation.Calendar,
+			configuredAllocation.FirstPeriodStartAt.UTC().Format(time.RFC3339Nano),
+			nullableConfiguredTime(configuredAllocation.LastPeriodEndAt),
+		}, "\x00")
+	}
 	return strings.Join([]string{
 		configuredAllocation.ExecutionTargetID.String(),
 		configuredAllocation.Provider,
@@ -452,6 +536,15 @@ func compareConfiguredSharedAllocations(left, right ConfiguredSharedAllocation) 
 		return strings.Compare(left.Provider, right.Provider)
 	case left.CurrencyCode != right.CurrencyCode:
 		return strings.Compare(left.CurrencyCode, right.CurrencyCode)
+	case left.Calendar != right.Calendar:
+		return strings.Compare(left.Calendar, right.Calendar)
+	case left.Calendar != "" && !left.FirstPeriodStartAt.Equal(right.FirstPeriodStartAt):
+		if left.FirstPeriodStartAt.Before(right.FirstPeriodStartAt) {
+			return -1
+		}
+		return 1
+	case left.Calendar != "":
+		return strings.Compare(nullableConfiguredTime(left.LastPeriodEndAt), nullableConfiguredTime(right.LastPeriodEndAt))
 	case !left.BillingPeriodStartAt.Equal(right.BillingPeriodStartAt):
 		if left.BillingPeriodStartAt.Before(right.BillingPeriodStartAt) {
 			return -1
@@ -466,6 +559,25 @@ func compareConfiguredSharedAllocations(left, right ConfiguredSharedAllocation) 
 		}
 		return 0
 	}
+}
+
+func isUTCMonthBoundary(value time.Time) bool {
+	value = value.UTC()
+	return value.Day() == 1 && value.Hour() == 0 && value.Minute() == 0 &&
+		value.Second() == 0 && value.Nanosecond() == 0
+}
+
+func monthlyPeriodCount(start, end time.Time) int {
+	start = start.UTC()
+	end = end.UTC()
+	return (end.Year()-start.Year())*12 + int(end.Month()-start.Month())
+}
+
+func nullableConfiguredTime(value *time.Time) string {
+	if value == nil {
+		return ""
+	}
+	return value.UTC().Format(time.RFC3339Nano)
 }
 
 func exportObjectFormatProvider(format ExportObjectFormat) (string, bool) {

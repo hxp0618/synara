@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/synara-ai/synara/services/control-plane/internal/bootstrap"
+	"github.com/synara-ai/synara/services/control-plane/internal/metricrollup"
 	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
 	"github.com/synara-ai/synara/services/control-plane/internal/platform"
 	"github.com/synara-ai/synara/services/control-plane/migrations"
@@ -140,6 +141,58 @@ func TestSQLiteExecutionGenerationFactsBackfillAndDeleteFence(t *testing.T) {
 	}
 	if err := store.DB().Create(&failure).Error; err != nil {
 		t.Fatalf("create SQLite Pod failure fact: %v", err)
+	}
+	var failureRollupEntry persistence.ExecutionGenerationPodFailureMetricRollupEntry
+	if err := store.DB().Where(
+		"tenant_id = ? AND execution_id = ? AND generation = ? AND failure_class = ?",
+		failure.TenantID, failure.ExecutionID, failure.Generation, failure.FailureClass,
+	).Take(&failureRollupEntry).Error; err != nil {
+		t.Fatalf("SQLite Pod failure metric rollup enqueue: %v", err)
+	}
+	readyAt := podRunningAt.Add(time.Second)
+	terminalAt := readyAt.Add(time.Second)
+	if err := store.DB().Model(&persistence.ExecutionGenerationFact{}).
+		Where("tenant_id = ? AND execution_id = ? AND generation = ?", domain.TenantID, executionID, 2).
+		Updates(map[string]any{
+			"provider_ready_at": readyAt, "terminal_at": terminalAt,
+			"terminal_outcome": "completed", "updated_at": terminalAt,
+		}).Error; err != nil {
+		t.Fatalf("seal SQLite Generation metric source: %v", err)
+	}
+	var generationRollupEntry persistence.ExecutionGenerationMetricRollupEntry
+	if err := store.DB().Where(
+		"tenant_id = ? AND execution_id = ? AND generation = ?", domain.TenantID, executionID, 2,
+	).Take(&generationRollupEntry).Error; err != nil {
+		t.Fatalf("SQLite Generation metric rollup enqueue: %v", err)
+	}
+	rollupSummary, err := metricrollup.NewService(store.DB()).RunOnce(ctx, 100)
+	if err != nil || rollupSummary.ProcessedGenerationFacts != 1 || rollupSummary.ProcessedPodFailureFacts != 1 {
+		t.Fatalf("SQLite Generation metric rollup = %#v, %v", rollupSummary, err)
+	}
+	if err := store.DB().Model(&persistence.ExecutionGenerationFact{}).
+		Where("tenant_id = ? AND execution_id = ? AND generation = ?", domain.TenantID, executionID, 2).
+		Update("provider_ready_at", readyAt.Add(time.Second)).Error; err == nil || !strings.Contains(err.Error(), "metric source is sealed") {
+		t.Fatalf("SQLite Generation metric source seal = %v", err)
+	}
+	if err := store.DB().Delete(
+		&persistence.ExecutionGenerationMetricRollupEntry{},
+		"tenant_id = ? AND execution_id = ? AND generation = ?", domain.TenantID, executionID, 2,
+	).Error; err == nil || !strings.Contains(err.Error(), "rollup entries cannot be deleted") {
+		t.Fatalf("SQLite Generation metric rollup membership delete fence = %v", err)
+	}
+	var generationRollup persistence.ExecutionGenerationMetricRollup
+	if err := store.DB().Where("metric_kind = ?", "outcome").Take(&generationRollup).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DB().Model(&persistence.ExecutionGenerationMetricRollup{}).
+		Where(
+			"bucket_day = ? AND metric_kind = ? AND target_kind = ? AND recovery_reason = ? AND outcome = ? AND warm_pool_mode = ? AND warm_pool_result = ? AND failure_class = ? AND histogram_bucket = ?",
+			generationRollup.BucketDay, generationRollup.MetricKind, generationRollup.TargetKind,
+			generationRollup.RecoveryReason, generationRollup.Outcome, generationRollup.WarmPoolMode,
+			generationRollup.WarmPoolResult, generationRollup.FailureClass, generationRollup.HistogramBucket,
+		).
+		Update("sample_count", 0).Error; err == nil || !strings.Contains(err.Error(), "totals cannot regress") {
+		t.Fatalf("SQLite Generation metric rollup monotonic fence = %v", err)
 	}
 	if err := store.DB().Model(&failure).Update("reason_code", "err-image-pull").Error; err == nil || !strings.Contains(err.Error(), "Pod failure fact identity is immutable") {
 		t.Fatalf("SQLite Pod failure identity fence = %v", err)

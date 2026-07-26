@@ -141,6 +141,91 @@ func TestLockSelectionForCommitPostgresRejectsQueuePressureCommittedWhileWaiting
 	}
 }
 
+func TestCapacityAdmissionPostgresSerializesConcurrentReservations(t *testing.T) {
+	db := openRoutingCommitPostgresDB(t)
+	service, request, selection := seedRoutingCommitPostgresFixture(t, db)
+	firstExecution := seedRoutingPressureExecutionParents(t, db, request, selection)
+	now := time.Now().UTC()
+	if _, err := service.ObserveHealth(context.Background(), HealthObservation{
+		ExecutionTargetID: selection.Target.ID, Status: HealthHealthy, CapacityStatus: CapacityAvailable,
+		AvailableCapacityUnits: intPointer(1), AllocatedCapacityUnits: 0,
+		ReservationAuthority: &ReservationAuthorityObservation{
+			Mode:             ReservationAuthorityExactActiveV1,
+			Acknowledgements: []ReservationIdentity{},
+		},
+		Source: "postgres-capacity-reservation", ObservedAt: now, TTL: time.Minute,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	firstTx := db.Begin()
+	if firstTx.Error != nil {
+		t.Fatal(firstTx.Error)
+	}
+	firstAdmission, err := AdmitExecutionCapacity(
+		context.Background(), firstTx, request.TenantID, firstExecution.ID,
+		selection.Target.ID, false, now,
+	)
+	if err != nil {
+		_ = firstTx.Rollback().Error
+		t.Fatal(err)
+	}
+
+	secondDone := make(chan error, 1)
+	secondStarted := make(chan struct{})
+	go func() {
+		secondTx := db.Begin()
+		if secondTx.Error != nil {
+			secondDone <- secondTx.Error
+			return
+		}
+		close(secondStarted)
+		_, admitErr := AdmitExecutionCapacity(
+			context.Background(), secondTx, request.TenantID, uuid.New(),
+			selection.Target.ID, false, time.Now().UTC(),
+		)
+		_ = secondTx.Rollback().Error
+		secondDone <- admitErr
+	}()
+	<-secondStarted
+
+	select {
+	case secondErr := <-secondDone:
+		_ = firstTx.Rollback().Error
+		t.Fatalf("concurrent capacity admission crossed the Target lock: %v", secondErr)
+	case <-time.After(150 * time.Millisecond):
+	}
+	if err := firstTx.Create(&firstExecution).Error; err != nil {
+		_ = firstTx.Rollback().Error
+		t.Fatal(err)
+	}
+	if err := CreateCapacityAdmission(context.Background(), firstTx, firstAdmission); err != nil {
+		_ = firstTx.Rollback().Error
+		t.Fatal(err)
+	}
+	if err := firstTx.Commit().Error; err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case secondErr := <-secondDone:
+		if codeOf(secondErr) != "execution_target_capacity_reserved" {
+			t.Fatalf("second capacity admission err = %v", secondErr)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("second capacity admission did not resume after the first transaction committed")
+	}
+	var evidence persistence.ExecutionCapacityAdmission
+	if err := db.Where("tenant_id = ? AND execution_id = ?", request.TenantID, firstExecution.ID).
+		Take(&evidence).Error; err != nil {
+		t.Fatal(err)
+	}
+	if evidence.AdmissionMode != CapacityAdmissionExactActiveV1 ||
+		evidence.SnapshotSHA256 != CapacityAdmissionSHA256(evidence) {
+		t.Fatalf("capacity admission evidence = %#v", evidence)
+	}
+}
+
 func openRoutingCommitPostgresDB(t *testing.T) *gorm.DB {
 	t.Helper()
 	databaseURL := os.Getenv("SYNARA_TEST_DATABASE_URL")

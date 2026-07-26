@@ -133,9 +133,7 @@ export function parseLifecycleIntegerInput(
 
 export function applyLifecycleOverrides(
   effective: ControlPlaneResourceLifecycleEffective,
-  overrides:
-    | ControlPlaneResourceLifecycleOverrideInput
-    | ControlPlaneResourceLifecycleOverrides,
+  overrides: ControlPlaneResourceLifecycleOverrideInput | ControlPlaneResourceLifecycleOverrides,
 ): ControlPlaneResourceLifecycleEffective {
   const next: ControlPlaneResourceLifecycleEffective = {
     ...effective,
@@ -196,8 +194,12 @@ function renderLifecycleValues(
       />
       <LifecycleValue label="retain" value={`${effective.workspaceRetentionDays}d`} />
       <LifecycleValue label="warm" value={formatLifecycleWarmPoolMode(effective.warmPoolMode)} />
-      {createdAt ? <LifecycleValue label="created" value={formatLifecycleTimestamp(createdAt)} /> : null}
-      {updatedAt ? <LifecycleValue label="updated" value={formatLifecycleTimestamp(updatedAt)} /> : null}
+      {createdAt ? (
+        <LifecycleValue label="created" value={formatLifecycleTimestamp(createdAt)} />
+      ) : null}
+      {updatedAt ? (
+        <LifecycleValue label="updated" value={formatLifecycleTimestamp(updatedAt)} />
+      ) : null}
     </span>
   );
 }
@@ -227,9 +229,9 @@ export function TenantLifecyclePolicySettingsSection(props: {
   const [suspendAfterIdleSeconds, setSuspendAfterIdleSeconds] = useState("");
   const [absoluteSessionLifetimeSeconds, setAbsoluteSessionLifetimeSeconds] = useState("");
   const [workspaceRetentionDays, setWorkspaceRetentionDays] = useState("");
-  const [warmPoolMode, setWarmPoolMode] = useState<
-    ControlPlaneResourceLifecycleWarmPoolMode | ""
-  >("");
+  const [warmPoolMode, setWarmPoolMode] = useState<ControlPlaneResourceLifecycleWarmPoolMode | "">(
+    "",
+  );
   const [inputError, setInputError] = useState<unknown>(null);
 
   const queryKey =
@@ -352,9 +354,7 @@ export function TenantLifecyclePolicySettingsSection(props: {
         title="Platform defaults"
         description={summarizeLifecycleEffective(props.config.defaults)}
         actions={
-          <span className="text-[11px] text-muted-foreground">
-            Used when no override exists
-          </span>
+          <span className="text-[11px] text-muted-foreground">Used when no override exists</span>
         }
       />
       <SettingsListRow
@@ -432,7 +432,9 @@ export function TenantLifecyclePolicySettingsSection(props: {
                 className={CONTROL_PLANE_NATIVE_SELECT_CLASS_NAME}
                 value={warmPoolMode}
                 onChange={(event) =>
-                  setWarmPoolMode(event.target.value as ControlPlaneResourceLifecycleWarmPoolMode | "")
+                  setWarmPoolMode(
+                    event.target.value as ControlPlaneResourceLifecycleWarmPoolMode | "",
+                  )
                 }
               >
                 <option value="">Inherit</option>

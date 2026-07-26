@@ -372,7 +372,10 @@ func newSharedAllocationFixture(t *testing.T, claimCount int64) sharedAllocation
 		t.Fatal(err)
 	}
 	if err := db.AutoMigrate(
+		&persistence.User{},
 		&persistence.Tenant{},
+		&persistence.TenantMembership{},
+		&persistence.AuditLog{},
 		&persistence.ExecutionTarget{},
 		&persistence.WorkerIncarnationFact{},
 		&persistence.WorkerClaimFact{},
@@ -381,6 +384,12 @@ func newSharedAllocationFixture(t *testing.T, claimCount int64) sharedAllocation
 		&persistence.BillingSharedTargetLedgerCoverage{},
 		&persistence.BillingSharedCostAllocationRun{},
 		&persistence.BillingSharedEstimatedChargeSlice{},
+		&persistence.BillingSharedAllocationSchedulePeriod{},
+		&persistence.BillingActualInvoiceImport{},
+		&persistence.BillingActualInvoiceLine{},
+		&persistence.BillingSharedActualAllocationRun{},
+		&persistence.BillingSharedActualAllocationLine{},
+		&persistence.BillingSharedActualChargeSlice{},
 	); err != nil {
 		t.Fatal(err)
 	}

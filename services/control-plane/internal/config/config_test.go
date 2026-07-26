@@ -335,6 +335,34 @@ func TestLoadValidatesWorkerAutoRollbackConfiguration(t *testing.T) {
 	}
 }
 
+func TestLoadValidatesMetricRollupConfiguration(t *testing.T) {
+	clearConfigEnvironment(t)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.MetricRollupInterval != time.Minute || cfg.MetricRollupBatchSize != 500 {
+		t.Fatalf("unexpected default metric rollup config: %#v", cfg)
+	}
+
+	clearConfigEnvironment(t)
+	t.Setenv("SYNARA_METRIC_ROLLUP_INTERVAL", "15s")
+	t.Setenv("SYNARA_METRIC_ROLLUP_BATCH_SIZE", "750")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.MetricRollupInterval != 15*time.Second || cfg.MetricRollupBatchSize != 750 {
+		t.Fatalf("unexpected metric rollup config: %#v", cfg)
+	}
+
+	clearConfigEnvironment(t)
+	t.Setenv("SYNARA_METRIC_ROLLUP_BATCH_SIZE", "10001")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "SYNARA_METRIC_ROLLUP_BATCH_SIZE") {
+		t.Fatalf("expected metric rollup batch bound error, got %v", err)
+	}
+}
+
 func TestLoadValidatesOutboxConfiguration(t *testing.T) {
 	clearConfigEnvironment(t)
 	t.Setenv("SYNARA_OUTBOX_POLL_INTERVAL", "2s")
@@ -502,8 +530,8 @@ func TestParseBillingSharedAllocationMappingsRejectsUnknownAndInvalidFields(t *t
 			name: "unknown field",
 			raw: `[{"executionTargetId":"` + targetID.String() + `","provider":"aws","currencyCode":"USD",` +
 				`"billingPeriodStartAt":"2026-07-01T00:00:00Z","billingPeriodEndAt":"2026-08-01T00:00:00Z",` +
-				`"settlementDelay":"24h","scheduleInterval":"6h","calendar":"monthly"}]`,
-			want: "unknown field \"calendar\"",
+				`"settlementDelay":"24h","scheduleInterval":"6h","calendarz":"monthly-utc"}]`,
+			want: "unknown field \"calendarz\"",
 		},
 		{
 			name: "invalid start",
@@ -527,6 +555,56 @@ func TestParseBillingSharedAllocationMappingsRejectsUnknownAndInvalidFields(t *t
 				t.Fatalf("expected %q error, got %v", test.want, err)
 			}
 		})
+	}
+}
+
+func TestLoadParsesMonthlyUTCSharedAllocationSchedule(t *testing.T) {
+	clearConfigEnvironment(t)
+	targetID := uuid.New()
+	t.Setenv("SYNARA_BILLING_SHARED_ALLOCATION_MAPPINGS_JSON", `{"allocations":[{
+		"executionTargetId":"`+targetID.String()+`",
+		"provider":"aws",
+		"currencyCode":"USD",
+		"calendar":"monthly-utc",
+		"firstPeriodStartAt":"2026-01-01T00:00:00Z",
+		"lastPeriodEndAt":"2027-01-01T00:00:00Z",
+		"settlementDelay":"24h",
+		"scheduleInterval":"6h"
+	}]}`)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Billing.SharedAllocations) != 1 {
+		t.Fatalf("monthly shared allocations = %#v", cfg.Billing.SharedAllocations)
+	}
+	shared := cfg.Billing.SharedAllocations[0]
+	if shared.ExecutionTargetID != targetID || shared.Calendar != billing.SharedAllocationCalendarMonthlyUTC ||
+		!shared.FirstPeriodStartAt.Equal(time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)) ||
+		shared.LastPeriodEndAt == nil ||
+		!shared.LastPeriodEndAt.Equal(time.Date(2027, time.January, 1, 0, 0, 0, 0, time.UTC)) ||
+		shared.SettlementDelay != 24*time.Hour || shared.ScheduleInterval != 6*time.Hour {
+		t.Fatalf("monthly shared allocation config = %#v", shared)
+	}
+}
+
+func TestLoadRejectsMixedStaticAndCalendarSharedAllocationFields(t *testing.T) {
+	clearConfigEnvironment(t)
+	targetID := uuid.New()
+	t.Setenv("SYNARA_BILLING_SHARED_ALLOCATION_MAPPINGS_JSON", `[{
+		"executionTargetId":"`+targetID.String()+`",
+		"provider":"aws",
+		"currencyCode":"USD",
+		"calendar":"monthly-utc",
+		"firstPeriodStartAt":"2026-01-01T00:00:00Z",
+		"billingPeriodStartAt":"2026-01-01T00:00:00Z",
+		"billingPeriodEndAt":"2026-02-01T00:00:00Z",
+		"settlementDelay":"24h",
+		"scheduleInterval":"6h"
+	}]`)
+	_, err := Load()
+	if err == nil || !strings.Contains(err.Error(), "cannot include a static billing period") {
+		t.Fatalf("mixed static/calendar shared allocation error = %v", err)
 	}
 }
 
@@ -708,9 +786,11 @@ func clearConfigEnvironment(t *testing.T) {
 		"SYNARA_DOCKER_RECONCILE_INTERVAL",
 		"SYNARA_KUBERNETES_RECONCILE_INTERVAL",
 		"SYNARA_KUBERNETES_POD_PENDING_FAILURE_THRESHOLD",
+		"SYNARA_PLATFORM_ROUTING_PUBLISHERS_JSON",
 		"SYNARA_RESOURCE_LIFECYCLE_SWEEP_INTERVAL",
 		"SYNARA_WORKER_AUTO_ROLLBACK_ENABLED", "SYNARA_WORKER_AUTO_ROLLBACK_INTERVAL",
 		"SYNARA_RETENTION_SWEEP_INTERVAL",
+		"SYNARA_METRIC_ROLLUP_INTERVAL", "SYNARA_METRIC_ROLLUP_BATCH_SIZE",
 		"SYNARA_OUTBOX_POLL_INTERVAL", "SYNARA_OUTBOX_CLAIM_TTL",
 		"SYNARA_OUTBOX_BATCH_SIZE", "SYNARA_OUTBOX_MAX_ATTEMPTS",
 		"SYNARA_OUTBOX_BASE_BACKOFF", "SYNARA_OUTBOX_MAX_BACKOFF",

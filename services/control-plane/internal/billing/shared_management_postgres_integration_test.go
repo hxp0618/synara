@@ -13,6 +13,7 @@ import (
 
 	"github.com/synara-ai/synara/services/control-plane/internal/identity"
 	"github.com/synara-ai/synara/services/control-plane/internal/leadership"
+	"github.com/synara-ai/synara/services/control-plane/internal/observability"
 	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
 	"github.com/synara-ai/synara/services/control-plane/internal/reconcilerleadership"
 )
@@ -214,6 +215,10 @@ func TestPostgresSharedAllocationSchedulerLeadershipHandoffReplaysExplicitPeriod
 	case <-time.After(200 * time.Millisecond):
 	}
 
+	// The due cursor is durable rather than process-local. Advance exactly one
+	// configured interval before takeover so the new leader performs a replay;
+	// an immediate takeover is covered separately as a durable skip.
+	now = now.Add(time.Hour)
 	stopFirst()
 	select {
 	case <-firstDone:
@@ -247,6 +252,121 @@ func TestPostgresSharedAllocationSchedulerLeadershipHandoffReplaysExplicitPeriod
 	}
 	if lease.FencingToken != 2 {
 		t.Fatalf("shared scheduler handoff fencing token = %d, want 2", lease.FencingToken)
+	}
+}
+
+func TestPostgresMonthlySharedAllocationScheduleDurableClaimAllowsOneReplica(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	db := openBillingPostgresIntegrationDB(t)
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sqlDB.SetMaxOpenConns(12)
+
+	wallNow := time.Now().UTC()
+	periodEnd := time.Date(wallNow.Year(), wallNow.Month(), 1, 0, 0, 0, 0, time.UTC)
+	periodStart := periodEnd.AddDate(0, -1, 0)
+	now := periodEnd.Add(2*time.Hour + 123456789*time.Nanosecond)
+	operatorUserID, operatorTenantID := seedPostgresSharedBillingOperator(t, ctx, db, now)
+	target := persistence.ExecutionTarget{
+		ID: uuid.New(), Kind: "kubernetes", Name: "shared-calendar-pg-" + uuid.NewString()[:8], Status: "active",
+		ConfigurationEncrypted: []byte("{}"), Capabilities: map[string]any{},
+		CreatedAt: periodStart.Add(-time.Hour), UpdatedAt: periodStart.Add(-time.Hour),
+	}
+	if err := db.WithContext(ctx).Create(&target).Error; err != nil {
+		t.Fatal(err)
+	}
+	sealer := NewService(db, nil, WithPlatformBillingOperatorTenant(operatorTenantID))
+	sealer.now = func() time.Time { return now }
+	if _, created, err := sealer.SealSharedTargetLedgerCoverageAuthorized(
+		ctx,
+		identity.Principal{UserID: operatorUserID, ActiveTenantID: &operatorTenantID},
+		operatorTenantID,
+		target.ID,
+		SealSharedTargetLedgerCoverageInput{
+			CompleteFromAt: periodStart.Add(-time.Minute), MinimumWriterVersion: "stage4-pg-calendar-v1",
+			DeploymentAttestationSHA256: strings.Repeat("c", 64),
+		},
+		"shared-calendar-pg-seal",
+		"127.0.0.1",
+	); err != nil || !created {
+		t.Fatalf("seal monthly shared scheduler coverage: created=%v err=%v", created, err)
+	}
+
+	lastPeriodEnd := periodEnd
+	job := ConfiguredSharedAllocation{
+		ExecutionTargetID: target.ID, Provider: "aws", CurrencyCode: "USD",
+		Calendar:           SharedAllocationCalendarMonthlyUTC,
+		FirstPeriodStartAt: periodStart, LastPeriodEndAt: &lastPeriodEnd,
+		SettlementDelay: time.Hour, ScheduleInterval: time.Hour,
+	}
+	newBillingService := func() *Service {
+		service := NewService(
+			db,
+			nil,
+			WithConfiguredSharedAllocations([]ConfiguredSharedAllocation{job}),
+			WithPlatformBillingOperatorTenant(operatorTenantID),
+		)
+		service.now = func() time.Time { return now }
+		return service
+	}
+
+	start := make(chan struct{})
+	outcomes := make(chan postgresSharedSchedulerOutcome, 2)
+	for range 2 {
+		go func() {
+			<-start
+			summary, runErr := newBillingService().RunSharedAllocationSchedulerOnce(ctx)
+			outcomes <- postgresSharedSchedulerOutcome{summary: summary, err: runErr}
+		}()
+	}
+	close(start)
+	first := <-outcomes
+	second := <-outcomes
+	if first.err != nil || second.err != nil {
+		t.Fatalf("concurrent monthly scheduler errors: first=%v second=%v", first.err, second.err)
+	}
+	attempted := 0
+	skipped := 0
+	for _, outcome := range []postgresSharedSchedulerOutcome{first, second} {
+		if outcome.summary.Checked != 1 || outcome.summary.GeneratedCalendarPeriods != 1 {
+			t.Fatalf("monthly scheduler generated summary = %#v", outcome.summary)
+		}
+		attempted += outcome.summary.Attempted
+		skipped += outcome.summary.Skipped
+	}
+	if attempted != 1 || skipped != 1 {
+		t.Fatalf("concurrent monthly scheduler split attempted=%d skipped=%d first=%#v second=%#v", attempted, skipped, first, second)
+	}
+
+	var state persistence.BillingSharedAllocationSchedulePeriod
+	if err := db.WithContext(ctx).
+		Where("execution_target_id = ? AND billing_period_start_at = ? AND billing_period_end_at = ?", target.ID, periodStart, periodEnd).
+		Take(&state).Error; err != nil {
+		t.Fatal(err)
+	}
+	if state.ScheduleKind != SharedAllocationCalendarMonthlyUTC || state.AttemptCount != 1 ||
+		state.LastOutcome != "completed" || state.LastSuccessAt == nil {
+		t.Fatalf("PostgreSQL monthly schedule state = %#v", state)
+	}
+	var scheduledAudits int64
+	if err := db.WithContext(ctx).Model(&persistence.AuditLog{}).
+		Where("tenant_id = ? AND action = ? AND resource_id = ?", operatorTenantID,
+			"billing.shared_cost_allocation_sweep_scheduled", target.ID).
+		Count(&scheduledAudits).Error; err != nil {
+		t.Fatal(err)
+	}
+	if scheduledAudits != 1 {
+		t.Fatalf("concurrent monthly scheduler audit count = %d, want 1", scheduledAudits)
+	}
+	payload, err := observability.New(db).Gather(ctx)
+	if err != nil {
+		t.Fatalf("gather PostgreSQL monthly schedule metrics: %v", err)
+	}
+	if expected := `synara_billing_shared_allocation_schedule_periods{due_state="due",outcome="completed",schedule_kind="monthly-utc"}`; !strings.Contains(string(payload), expected) {
+		t.Fatalf("PostgreSQL monthly schedule metrics omitted %q:\n%s", expected, payload)
 	}
 }
 

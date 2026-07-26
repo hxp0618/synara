@@ -22,6 +22,7 @@ type ManagedKubernetesRoutingHealthObservation struct {
 	// AvailableCapacityUnits is the total target Pod-slot ceiling.
 	AvailableCapacityUnits *int
 	AllocatedCapacityUnits int
+	ReservationAuthority   *routing.ReservationAuthorityObservation
 	Reason                 *string
 	ObservedAt             time.Time
 }
@@ -90,6 +91,7 @@ func (p *ManagedKubernetesRoutingPublisher) PublishReconcile(
 		CapacityStatus:         observation.CapacityStatus,
 		AvailableCapacityUnits: observation.AvailableCapacityUnits,
 		AllocatedCapacityUnits: observation.AllocatedCapacityUnits,
+		ReservationAuthority:   observation.ReservationAuthority,
 		Source:                 p.publisherIdentity,
 		Reason:                 observation.Reason,
 		ObservedAt:             observedAt,

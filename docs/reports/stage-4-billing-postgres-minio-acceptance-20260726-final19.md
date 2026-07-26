@@ -54,17 +54,17 @@ The bounded detail was 735 bytes with SHA-256
 
 ## Exact dirty provenance
 
-| Asset | SHA-256 |
-| --- | --- |
-| Acceptance wrapper | `fe2ae900d89304ab3d28b4513684fb21517058e2525c277f817b8fb4e4304e79` |
-| Billing runtime PostgreSQL test | `29097245652556079087aa73967dfe844de137c62a2d37534136390cdfb2ba69` |
+| Asset                             | SHA-256                                                            |
+| --------------------------------- | ------------------------------------------------------------------ |
+| Acceptance wrapper                | `fe2ae900d89304ab3d28b4513684fb21517058e2525c277f817b8fb4e4304e79` |
+| Billing runtime PostgreSQL test   | `29097245652556079087aa73967dfe844de137c62a2d37534136390cdfb2ba69` |
 | Concurrent import PostgreSQL test | `fc547c4026403f608be59cdb26e0141dbff1bc5d2ed2442941be39fc257e5d06` |
-| Native CUR2 manifest test | `7c81ab5264b2bf35914a26425b2f062b2950f8b7a43cd7e4b93e586967616102` |
-| Billing service | `9e75b8d1d5f28c69ff1faa9b6e5808fc814bf022f9771f0a83f28bca9dc6e5af` |
-| Blob parsers | `90b1343c19bfa583569742b76a020a0ac51a1fa33e10dba01e4f6ba5f7cc9b3d` |
-| Blob source | `ab830965db6fc2224ac01d0b052407ab81a2a0dbc291da7d4e851e29378045ff` |
-| Cloud sources | `fef9ac7350b79151c28bcc364ecbcb3f42e54d66a9471b91a8a5949a1fa344fc` |
-| Executed Linux `billing.test` | `e7c2891d55f2f02bafb927bb188b954ce096543da3db2e2d2bbb9c8828967f35` |
+| Native CUR2 manifest test         | `7c81ab5264b2bf35914a26425b2f062b2950f8b7a43cd7e4b93e586967616102` |
+| Billing service                   | `9e75b8d1d5f28c69ff1faa9b6e5808fc814bf022f9771f0a83f28bca9dc6e5af` |
+| Blob parsers                      | `90b1343c19bfa583569742b76a020a0ac51a1fa33e10dba01e4f6ba5f7cc9b3d` |
+| Blob source                       | `ab830965db6fc2224ac01d0b052407ab81a2a0dbc291da7d4e851e29378045ff` |
+| Cloud sources                     | `fef9ac7350b79151c28bcc364ecbcb3f42e54d66a9471b91a8a5949a1fa344fc` |
+| Executed Linux `billing.test`     | `e7c2891d55f2f02bafb927bb188b954ce096543da3db2e2d2bbb9c8828967f35` |
 
 The wrapper verified the same test-binary and source hashes before and after execution. The disposable binary was
 removed with the environment, so the JSON records its bounded run provenance rather than claiming a retained

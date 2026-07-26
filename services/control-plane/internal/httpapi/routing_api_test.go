@@ -1,7 +1,10 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -14,6 +17,109 @@ import (
 	"github.com/synara-ai/synara/services/control-plane/internal/persistence"
 	"github.com/synara-ai/synara/services/control-plane/internal/routing"
 )
+
+func TestPlatformRoutingAuthorityRouteUsesSignedPublisherWithoutTenantSession(t *testing.T) {
+	fixture := newWorkerManifestHTTPFixture(t)
+	now := time.Now().UTC().Add(-time.Second).Truncate(time.Microsecond)
+	targetID := uuid.New()
+	if err := fixture.db.Create(&persistence.ExecutionTarget{
+		ID: targetID, Kind: "kubernetes", Name: "platform-signed-routing", Status: "active",
+		ConfigurationEncrypted: []byte{}, Capabilities: map[string]any{}, CreatedAt: now, UpdatedAt: now,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const publisherIdentity = "platform-routing-http-publisher"
+	const keyID = "platform-routing-http-key-v1"
+	tenantID := fixture.tenantID
+	service, err := routing.NewPlatformAuthorityService(fixture.db, []routing.PlatformAuthorityPublisherConfig{{
+		PublisherIdentity: publisherIdentity,
+		Keys:              []routing.PlatformAuthorityPublisherKey{{KeyID: keyID, PublicKey: publicKey}},
+		Targets: []routing.PlatformAuthorityTargetScope{{
+			ExecutionTargetID: targetID,
+			Ownership:         routing.PlatformAuthorityOwnershipShared,
+			PublishHealth:     true,
+			DRRoutes: []routing.PlatformAuthorityDRRouteScope{{
+				SourceDRDomain: "region-a/cluster-a", DRDomain: "region-b/cluster-b",
+			}},
+		}, {
+			ExecutionTargetID: fixture.targetID,
+			Ownership:         routing.PlatformAuthorityOwnershipTenantOwned,
+			TenantID:          &tenantID,
+			PublishHealth:     true,
+		}},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.server.platformRouting = service
+	publication, err := routing.SignPlatformAuthorityPublication(privateKey, routing.PlatformAuthorityPublication{
+		SchemaVersion: routing.PlatformAuthoritySchemaVersionV1, PublisherIdentity: publisherIdentity,
+		KeyID: keyID, Nonce: uuid.NewString(), IssuedAt: now.Format(time.RFC3339Nano),
+		ExpiresAt: now.Add(time.Minute).Format(time.RFC3339Nano), ExecutionTargetID: targetID.String(),
+		ObservedAt: now.Format(time.RFC3339Nano),
+		Health: &routing.PlatformAuthorityHealth{
+			Status: routing.HealthHealthy, CapacityStatus: routing.CapacityAvailable,
+			AvailableCapacityUnits: routingIntPointer(8), AllocatedCapacityUnits: 2, TTLSeconds: 120,
+		},
+		DRReadiness: []routing.PlatformAuthorityDRReadiness{{
+			SourceDRDomain: "region-a/cluster-a", DRDomain: "region-b/cluster-b",
+			ReplicatedThroughAt: now.Add(-time.Second).Format(time.RFC3339Nano),
+			ArtifactsReady:      true, CheckpointsReady: true, MemoryReady: true, TTLSeconds: 120,
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := "/v1/platform/routing-authority/execution-targets/" + targetID.String() + "/observations"
+	publish := func(value routing.PlatformAuthorityPublication) *httptest.ResponseRecorder {
+		encoded, encodeErr := json.Marshal(value)
+		if encodeErr != nil {
+			t.Fatal(encodeErr)
+		}
+		request := httptest.NewRequest(http.MethodPut, path, bytes.NewReader(encoded))
+		request.Header.Set("Content-Type", "application/json")
+		recorder := httptest.NewRecorder()
+		fixture.handler.ServeHTTP(recorder, request)
+		return recorder
+	}
+
+	accepted := publish(publication)
+	if accepted.Code != http.StatusOK {
+		t.Fatalf("signed publication status = %d body=%s", accepted.Code, accepted.Body.String())
+	}
+	var result routing.PlatformAuthorityPublicationResult
+	if err := json.Unmarshal(accepted.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Replayed || result.ExecutionTargetID != targetID || result.Health == nil ||
+		len(result.DRReadiness) != 1 {
+		t.Fatalf("signed publication result = %#v", result)
+	}
+	replayed := publish(publication)
+	if replayed.Code != http.StatusOK || replayed.Header().Get("Idempotency-Replayed") != "true" {
+		t.Fatalf("replay status=%d headers=%v body=%s", replayed.Code, replayed.Header(), replayed.Body.String())
+	}
+
+	tampered := publication
+	tampered.Nonce = uuid.NewString()
+	assertProblemResponse(t, publish(tampered), http.StatusUnauthorized, "platform_routing_publisher_authentication_failed")
+
+	tenantWrite := fixture.routingRequest(
+		t,
+		http.MethodPut,
+		fixture.ownerTargetHealthPath(fixture.targetID),
+		fixture.ownerToken,
+		routingHTTPJSON(t, map[string]any{
+			"status": routing.HealthHealthy, "capacityStatus": routing.CapacityAvailable,
+			"allocatedCapacityUnits": 0, "ttlSeconds": 60,
+		}),
+	)
+	assertProblemResponse(t, tenantWrite, http.StatusForbidden, "execution_target_health_platform_authority")
+}
 
 func TestExecutionTargetRoutingRoutesEnforceReadManageAndRejectSharedHealthWrites(t *testing.T) {
 	fixture := newWorkerManifestHTTPFixture(t)

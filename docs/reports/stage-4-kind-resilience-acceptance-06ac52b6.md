@@ -18,12 +18,12 @@ a clean-commit release gate, a pushed artifact, or deployment evidence.
 
 ## Frozen acceptance inputs
 
-| Asset | SHA-256 |
-| --- | --- |
-| `deploy/kubernetes/acceptance.sh` | `001a3fc6c981f9898cd862eba45632922f15567968c2138238b85de0b5232191` |
-| `deploy/kubernetes/resilience-acceptance.sh` | `9ebdca44c857b7d91964de493496cb68468771d00c493b95bd7d688d5dc60220` |
+| Asset                                             | SHA-256                                                            |
+| ------------------------------------------------- | ------------------------------------------------------------------ |
+| `deploy/kubernetes/acceptance.sh`                 | `001a3fc6c981f9898cd862eba45632922f15567968c2138238b85de0b5232191` |
+| `deploy/kubernetes/resilience-acceptance.sh`      | `9ebdca44c857b7d91964de493496cb68468771d00c493b95bd7d688d5dc60220` |
 | `deploy/kubernetes/kind-resilience-acceptance.sh` | `0d2d1b748b00c6909efacc2d5af890567420ab6522c192a46ac0df9278f440b0` |
-| `deploy/kubernetes/kind-multinode.yaml` | `4127f63cd7a80bbaa85988fed9670b960d0f9ec8acbc551219fd81a3e982ceda` |
+| `deploy/kubernetes/kind-multinode.yaml`           | `4127f63cd7a80bbaa85988fed9670b960d0f9ec8acbc551219fd81a3e982ceda` |
 
 The hashes were captured before the proof and verified unchanged after it completed.
 
@@ -31,13 +31,13 @@ The hashes were captured before the proof and verified unchanged after it comple
 
 The Stage 2 two-replica baseline passed in `90` seconds before the additive resilience lane ran.
 
-| Scenario | Status | Readiness evidence |
-| --- | --- | --- |
-| `rbac` | pass | Required least-privilege grants present; destructive Namespace deletion absent |
-| `topology` | pass | 4 nodes, 3 workers, 2 Control Plane Pods on distinct hosts, PDB `minAvailable=1` |
-| `control-plane-failover` | pass | Replacement Pod became ready; `0` probe failures |
-| `node-drain` | pass | Replacement moved off the cordoned node; `0` probe failures |
-| `node-partition` | pass | 20-second Kind network partition recovered; `1` transient probe failure, threshold `2` |
+| Scenario                 | Status | Readiness evidence                                                                     |
+| ------------------------ | ------ | -------------------------------------------------------------------------------------- |
+| `rbac`                   | pass   | Required least-privilege grants present; destructive Namespace deletion absent         |
+| `topology`               | pass   | 4 nodes, 3 workers, 2 Control Plane Pods on distinct hosts, PDB `minAvailable=1`       |
+| `control-plane-failover` | pass   | Replacement Pod became ready; `0` probe failures                                       |
+| `node-drain`             | pass   | Replacement moved off the cordoned node; `0` probe failures                            |
+| `node-partition`         | pass   | 20-second Kind network partition recovered; `1` transient probe failure, threshold `2` |
 
 Case totals were `passed=5`, `failed=0`, `skipped=0`; no skip allowlist was configured. PostgreSQL and MinIO
 were pinned to the labeled dependency Worker, leaving one safe Control Plane target for drain and partition tests.

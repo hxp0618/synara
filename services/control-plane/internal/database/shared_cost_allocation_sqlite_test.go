@@ -191,6 +191,163 @@ func TestSQLiteSharedCostAllocationRejectsClaimWithoutUniqueRelease(t *testing.T
 	assertSharedAllocationSQLiteRejected(t, fixture.db.Create(&slice).Error, "invalid billing shared estimated charge slice")
 }
 
+func TestSQLiteSharedActualAllocationRequiresCompleteConservedGraphBeforeSeal(t *testing.T) {
+	fixture := seedSQLiteSharedCostAllocationFixture(t, time.Minute, 3*time.Minute, 5*time.Minute, true)
+	estimateSlice := validSharedTenantChargeSlice(fixture, "cpu", fixture.claimAt, fixture.releaseAt)
+	if err := fixture.db.Create(&estimateSlice).Error; err != nil {
+		t.Fatalf("create shared estimate basis: %v", err)
+	}
+	for _, name := range []string{
+		"trg_billing_shared_actual_allocation_runs_insert",
+		"trg_billing_shared_actual_allocation_lines_insert",
+		"trg_billing_shared_actual_charge_slices_insert",
+		"trg_billing_shared_actual_allocation_runs_seal",
+		"trg_billing_shared_actual_allocation_runs_delete",
+		"trg_billing_shared_actual_allocation_lines_update",
+		"trg_billing_shared_actual_allocation_lines_delete",
+		"trg_billing_shared_actual_charge_slices_update",
+		"trg_billing_shared_actual_charge_slices_delete",
+		"trg_billing_actual_invoice_lines_shared_allocation_fence",
+		"trg_billing_shared_estimated_charge_slices_actual_allocation_fence",
+		"uq_billing_shared_actual_allocation_lines_actual",
+		"uq_billing_shared_actual_charge_slices_estimate",
+	} {
+		var count int64
+		if err := fixture.db.Raw(`SELECT count(*) FROM sqlite_master WHERE name = ?`, name).Scan(&count).Error; err != nil {
+			t.Fatal(err)
+		}
+		if count != 1 {
+			t.Fatalf("SQLite shared actual safety object %s count = %d, want 1", name, count)
+		}
+	}
+
+	var operatorTenant persistence.Tenant
+	if err := fixture.db.Where("id = ?", fixture.tenantID).Take(&operatorTenant).Error; err != nil {
+		t.Fatal(err)
+	}
+	createdAt := fixture.run.BillingPeriodEndAt.Add(time.Minute)
+	invoiceImport := persistence.BillingActualInvoiceImport{
+		ID: uuid.New(), TenantID: fixture.tenantID, Provider: fixture.run.Provider,
+		ExternalImportID:     "sqlite-shared-actual-" + uuid.NewString(),
+		BillingPeriodStartAt: fixture.run.BillingPeriodStartAt,
+		BillingPeriodEndAt:   fixture.run.BillingPeriodEndAt,
+		CurrencyCode:         fixture.run.CurrencyCode, SourceChecksum: strings.Repeat("c", 64),
+		ImportedAt: createdAt, CreatedAt: createdAt,
+	}
+	if err := fixture.db.Create(&invoiceImport).Error; err != nil {
+		t.Fatal(err)
+	}
+	actualLine := persistence.BillingActualInvoiceLine{
+		ID: uuid.New(), TenantID: fixture.tenantID, InvoiceImportID: invoiceImport.ID,
+		ExternalLineID: "shared-cpu", Provider: fixture.run.Provider, CurrencyCode: fixture.run.CurrencyCode,
+		ChargeKind: estimateSlice.ChargeKind, ResourceCorrelationKey: estimateSlice.ResourceCorrelationKey,
+		BillingPeriodStartAt: fixture.run.BillingPeriodStartAt,
+		BillingPeriodEndAt:   fixture.run.BillingPeriodEndAt,
+		AmountMicros:         7, ReconciliationState: "pending", CreatedAt: createdAt,
+	}
+	if err := fixture.db.Create(&actualLine).Error; err != nil {
+		t.Fatal(err)
+	}
+	run := persistence.BillingSharedActualAllocationRun{
+		ID: uuid.New(), OperatorTenantID: fixture.tenantID, InvoiceImportID: invoiceImport.ID,
+		ExecutionTargetID: fixture.target.ID, LedgerCoverageID: fixture.coverage.ID,
+		Provider: fixture.run.Provider, CurrencyCode: fixture.run.CurrencyCode,
+		BillingPeriodStartAt:         fixture.run.BillingPeriodStartAt,
+		BillingPeriodEndAt:           fixture.run.BillingPeriodEndAt,
+		AlgorithmVersion:             "proportional-shared-estimate-v1",
+		SourceChecksum:               invoiceImport.SourceChecksum,
+		SourceScopeAttestationSHA256: strings.Repeat("d", 64),
+		SourceLineSetSHA256:          strings.Repeat("e", 64),
+		ImportLineCount:              1, ImportAmountMicros: 7,
+		SourceLineCount: 1, SourceAmountMicros: 7,
+		UnallocatedLineCount: 0, UnallocatedAmountMicros: 0,
+		AllocationLineCount: 1, AllocationSliceCount: 1, AllocatedAmountMicros: 7,
+		State: "building", CreatedBy: operatorTenant.CreatedBy, CreatedAt: createdAt,
+	}
+	if err := fixture.db.Create(&run).Error; err != nil {
+		t.Fatalf("create building shared actual run: %v", err)
+	}
+	allocationLine := persistence.BillingSharedActualAllocationLine{
+		ID: uuid.New(), RunID: run.ID, ActualInvoiceLineID: actualLine.ID,
+		SourceAmountMicros: 7, EstimatedAmountMicros: estimateSlice.AmountMicros,
+		AllocatedAmountMicros: 7, EstimatedSliceCount: 1,
+		EstimatedSliceSetSHA256: strings.Repeat("f", 64), CreatedAt: createdAt,
+	}
+	if err := fixture.db.Create(&allocationLine).Error; err != nil {
+		t.Fatalf("create shared actual allocation line: %v", err)
+	}
+	actualSlice := persistence.BillingSharedActualChargeSlice{
+		ID: uuid.New(), AllocationLineID: allocationLine.ID, EstimatedSliceID: estimateSlice.ID,
+		TenantID: estimateSlice.TenantID, AllocationKind: estimateSlice.AllocationKind,
+		EstimateWeightMicros: estimateSlice.AmountMicros, AmountMicros: 7, CreatedAt: createdAt,
+	}
+	if err := fixture.db.Create(&actualSlice).Error; err != nil {
+		t.Fatalf("create shared actual charge slice: %v", err)
+	}
+	sealedAt := createdAt.Add(time.Second)
+	if err := fixture.db.Model(&persistence.BillingSharedActualAllocationRun{}).
+		Where("id = ?", run.ID).
+		Updates(map[string]any{"state": "sealed", "sealed_at": sealedAt}).Error; err != nil {
+		t.Fatalf("seal conserved shared actual graph: %v", err)
+	}
+	assertSharedAllocationSQLiteRejected(
+		t,
+		fixture.db.Model(&persistence.BillingSharedActualAllocationRun{}).
+			Where("id = ?", run.ID).UpdateColumn("source_amount_micros", 8).Error,
+		"transition is invalid",
+	)
+	assertSharedAllocationSQLiteRejected(
+		t,
+		fixture.db.Delete(&persistence.BillingSharedActualChargeSlice{}, "id = ?", actualSlice.ID).Error,
+		"immutable",
+	)
+	lateActualLine := actualLine
+	lateActualLine.ID = uuid.New()
+	lateActualLine.ExternalLineID = "late-line"
+	lateActualLine.ResourceCorrelationKey = "late-resource/" + uuid.NewString()
+	assertSharedAllocationSQLiteRejected(
+		t,
+		fixture.db.Create(&lateActualLine).Error,
+		"invoice import is sealed by shared allocation",
+	)
+	lateEstimateSlice := estimateSlice
+	lateEstimateSlice.ID = uuid.New()
+	lateEstimateSlice.UsageStartAt = lateEstimateSlice.UsageStartAt.Add(time.Second)
+	assertSharedAllocationSQLiteRejected(
+		t,
+		fixture.db.Create(&lateEstimateSlice).Error,
+		"estimate scope is sealed by actual allocation",
+	)
+
+	incompleteImport := invoiceImport
+	incompleteImport.ID = uuid.New()
+	incompleteImport.ExternalImportID = "sqlite-shared-actual-incomplete-" + uuid.NewString()
+	if err := fixture.db.Create(&incompleteImport).Error; err != nil {
+		t.Fatal(err)
+	}
+	incompleteLine := actualLine
+	incompleteLine.ID = uuid.New()
+	incompleteLine.InvoiceImportID = incompleteImport.ID
+	if err := fixture.db.Create(&incompleteLine).Error; err != nil {
+		t.Fatal(err)
+	}
+	incompleteRun := run
+	incompleteRun.ID = uuid.New()
+	incompleteRun.InvoiceImportID = incompleteImport.ID
+	incompleteRun.State = "building"
+	incompleteRun.SealedAt = nil
+	if err := fixture.db.Create(&incompleteRun).Error; err != nil {
+		t.Fatal(err)
+	}
+	assertSharedAllocationSQLiteRejected(
+		t,
+		fixture.db.Model(&persistence.BillingSharedActualAllocationRun{}).
+			Where("id = ?", incompleteRun.ID).
+			Updates(map[string]any{"state": "sealed", "sealed_at": sealedAt}).Error,
+		"conservation is invalid",
+	)
+}
+
 func TestSQLiteSharedRequestSliceAllowsExactFinalRunBoundaryAndGlobalTariff(t *testing.T) {
 	fixture := seedSQLiteSharedCostAllocationFixture(t, 5*time.Minute, 5*time.Minute, 5*time.Minute, true)
 	slice := validSharedTenantChargeSlice(

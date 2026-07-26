@@ -15,6 +15,10 @@ Entry points:
 The resilience lane is production-oriented in structure, but safe by default:
 
 - it refuses non-Kind contexts unless `SYNARA_K8S_ACCEPTANCE_ALLOW_NONDISPOSABLE=1`;
+- baseline bootstrap accepts only a fresh `synara-*` `SYNARA_K8S_NAMESPACE`; a non-default namespace derives an
+  isolated ClusterRole/Binding name unless `SYNARA_K8S_ACCEPTANCE_RBAC_NAME` is supplied, and all four RBAC references
+  (role, binding, roleRef, ServiceAccount subject) change together; the namespace and both RBAC identities carry an
+  exact run-owner label, existing identities are never overwritten, and cleanup deletes only an exact owner match;
 - it reuses the existing Stage 2 bootstrap unless explicitly disabled;
 - every disruption is bounded by explicit timeouts;
 - node drain is simulated narrowly by cordoning a selected node and replacing
@@ -148,6 +152,29 @@ overall report fail. An explicitly narrower environment may list intentional
 skips in `SYNARA_K8S_RESILIENCE_ALLOW_SKIPPED_CASES`; the report records that
 allowlist and still records the case as `skipped`.
 
+## Execution Pod failure evidence
+
+Repository and environment acceptance for managed Execution Pods must distinguish the following bounded classes:
+
+- API apply failure before a Pod UID exists;
+- Pending timeout for the current Pod UID, measured from Kubernetes `metadata.creationTimestamp` rather than browser
+  presence or an older replacement Pod;
+- `PodScheduled=False/Unschedulable`;
+- `ErrImagePull`, `ImagePullBackOff`, invalid image, and registry-unavailable states;
+- bounded container-start waiting reasons;
+- Pod `reason=Evicted`;
+- current or last container termination `reason=OOMKilled`; and
+- a generic failed phase without copying the raw status message into a metric label.
+
+The durable authority is Migration `000078`: one Generation provisioning timeline plus one immutable first proof per
+Generation/failure class whose last-observed timestamp may only advance. Reconcile polling must not manufacture event
+counts, and a later healthy Pod must not overwrite earlier failure classes. A registered Worker with a terminal Failed
+Pod must be terminalized before exact-UID deletion so recovery does not wait only for Lease expiry.
+
+A local API status-subresource patch is acceptable E3 parser/persistence evidence for `Evicted`; it is not evidence of
+real node-pressure eviction. Closing the production gate requires an actual kubelet/node-controller eviction and OOM
+under the target cluster's runtime, in addition to API apply, scheduling, image-pull, and Pending scenarios.
+
 ## Evidence schema
 
 The runner keeps the existing final report shape and adds two sidecars beside the
@@ -168,7 +195,7 @@ report, with:
 - `schemaVersion`: always `synara.kubernetes.resilience.acceptance.v1`
 - `status`: `passed`, `failed`, or `dry-run`
 - `startedAt`, `finishedAt`, `durationSeconds`
-- `context`, `namespace`
+- `context`, `namespace`, `rbacName`
 - `evidenceFile`
 - `safety`: static guardrail metadata
 - `baseline`: whether Stage 2 bootstrap ran and its status/duration
@@ -209,6 +236,11 @@ The direct child is a same-PID launcher: it publishes its own creation identity
 to a private ready file and cannot exec the controller until the parent validates
 that PID/identity and releases it. Identity failure expires without a numeric-PID
 signal and therefore cannot execute the hook.
+
+Local namespace/RBAC isolation, schema-81 two-replica bootstrap, exact Leader takeover, Control Plane failover, and a
+120-second six-cycle bounded soak are recorded in
+[`stage-4-orbstack-isolated-resilience-20260726-final2.md`](../reports/stage-4-orbstack-isolated-resilience-20260726-final2.md).
+This is E3 single-node evidence and does not replace managed multi-AZ or production-duration E4 acceptance.
 
 Optional failover hooks remain supported, but recorded hook evidence is
 redacted-by-default: command text, stdout, and stderr are replaced with

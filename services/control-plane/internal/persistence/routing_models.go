@@ -56,17 +56,40 @@ type ExecutionTargetHealth struct {
 	Status            string    `gorm:"column:status;not null"`
 	CapacityStatus    string    `gorm:"column:capacity_status;not null;default:unknown"`
 	// AvailableCapacityUnits stores the total schedulable capacity ceiling.
-	AvailableCapacityUnits *int      `gorm:"column:available_capacity_units"`
-	AllocatedCapacityUnits int       `gorm:"column:allocated_capacity_units;not null;default:0"`
-	Source                 string    `gorm:"column:source;not null"`
-	Reason                 *string   `gorm:"column:reason"`
-	ObservedAt             time.Time `gorm:"column:observed_at;not null"`
-	ExpiresAt              time.Time `gorm:"column:expires_at;not null"`
-	Version                int64     `gorm:"column:version;not null;default:1"`
-	UpdatedAt              time.Time `gorm:"column:updated_at;not null"`
+	AvailableCapacityUnits *int `gorm:"column:available_capacity_units"`
+	AllocatedCapacityUnits int  `gorm:"column:allocated_capacity_units;not null;default:0"`
+	// ReservationAuthorityMode is non-nil only when the publisher atomically
+	// identifies the queued/recovering Execution generations already reflected
+	// by AllocatedCapacityUnits. The acknowledgement rows are replaced together
+	// with this Health version.
+	ReservationAuthorityMode          *string   `gorm:"column:reservation_authority_mode"`
+	ReservationAcknowledgedUnits      int       `gorm:"column:reservation_acknowledged_units;not null;default:0"`
+	ReservationAcknowledgementsSHA256 *string   `gorm:"column:reservation_acknowledgements_sha256"`
+	Source                            string    `gorm:"column:source;not null"`
+	Reason                            *string   `gorm:"column:reason"`
+	ObservedAt                        time.Time `gorm:"column:observed_at;not null"`
+	ExpiresAt                         time.Time `gorm:"column:expires_at;not null"`
+	Version                           int64     `gorm:"column:version;not null;default:1"`
+	UpdatedAt                         time.Time `gorm:"column:updated_at;not null"`
 }
 
 func (ExecutionTargetHealth) TableName() string { return "execution_target_health" }
+
+// ExecutionTargetReservationAcknowledgement is the exact, current Health
+// publisher proof that one queued/recovering Execution generation is already
+// represented in the Target's allocated occupancy. Rows are version-scoped;
+// hard admission ignores acknowledgements from any other Health version.
+type ExecutionTargetReservationAcknowledgement struct {
+	ExecutionTargetID   uuid.UUID `gorm:"column:execution_target_id;type:uuid;primaryKey"`
+	ExecutionID         uuid.UUID `gorm:"column:execution_id;type:uuid;primaryKey"`
+	ExecutionGeneration int64     `gorm:"column:execution_generation;primaryKey"`
+	HealthVersion       int64     `gorm:"column:health_version;not null"`
+	AcknowledgedAt      time.Time `gorm:"column:acknowledged_at;not null"`
+}
+
+func (ExecutionTargetReservationAcknowledgement) TableName() string {
+	return "execution_target_reservation_acknowledgements"
+}
 
 type ExecutionTargetDRReadiness struct {
 	ExecutionTargetID   uuid.UUID `gorm:"column:execution_target_id;type:uuid;primaryKey"`

@@ -50,6 +50,7 @@ Current management/runtime surface:
 - `GET /v1/tenants/{tenantID}/billing/shared-targets/{executionTargetID}/ledger-coverage`
 - `POST /v1/tenants/{tenantID}/billing/shared-targets/{executionTargetID}/ledger-coverage`
 - `POST /v1/tenants/{tenantID}/billing/shared-targets/{executionTargetID}/allocations:sweep`
+- `POST /v1/tenants/{tenantID}/billing/shared-targets/{executionTargetID}/actual-invoices/{invoiceImportID}/allocations`
 - `POST /v1/tenants/{tenantID}/billing/imports/{provider}/{externalImportID}`
 - `POST /v1/tenants/{tenantID}/billing/imports/{importID}/reconcile`
 
@@ -153,18 +154,34 @@ after a crash or failure replays successful deterministic graphs and retries the
 neither required nor treated as scheduling authority. Every manual request first records
 `billing.shared_cost_allocation_sweep_requested`.
 
-Unattended retries use `SYNARA_BILLING_SHARED_ALLOCATION_MAPPINGS_JSON`. Every mapping freezes an exact shared Target,
-provider, currency, half-open period, settlement delay, and retry interval; the scheduler never derives calendar
-months from wall-clock time. Periods are at most 366 days, settlement delay is `1m..2160h`, retry interval is at least
-`1m`, duplicate identities are rejected, and periods for the same Target/provider/currency cannot overlap. A mapping
-does not run before `billingPeriodEndAt + settlementDelay`.
+Unattended retries use `SYNARA_BILLING_SHARED_ALLOCATION_MAPPINGS_JSON`. Every mapping freezes one shared Target,
+provider, currency, settlement delay, and retry interval, then chooses exactly one period mode:
+
+- static mode supplies exact RFC3339 `billingPeriodStartAt` / `billingPeriodEndAt` half-open bounds;
+- `calendar: "monthly-utc"` supplies an exact `firstPeriodStartAt` UTC month boundary and an optional
+  `lastPeriodEndAt` UTC month boundary. Each generated period is exactly one UTC calendar month.
+
+The scheduler does not infer a local time zone, account billing day, cloud-provider calendar, or missing anchor from
+wall-clock state. A local month boundary such as midnight UTC+8 is rejected unless the represented instant is also a
+UTC month boundary. A configured calendar spans at most 1200 periods; static periods remain at most 366 days.
+Settlement delay is `1m..2160h`, retry interval is at least `1m`, duplicate identities are rejected, static periods for
+the same Target/provider/currency cannot overlap, and a calendar mapping cannot be combined with any other mapping in
+that same scope. No period runs before `billingPeriodEndAt + settlementDelay`.
+
+Migration `000080` materializes durable `billing_shared_allocation_schedule_periods` state for every static or generated
+period. The schedule-config SHA-256 and exact period form the identity; Target/provider/currency, mode, delay, and
+interval are immutable. A due attempt locks the row, monotonically increments `attempt_count`, sets `last_outcome` to
+`running`, and advances `next_attempt_at` before audit/allocation work begins. Completion records `completed` or
+`failed` without deleting history. State rows, identities, and parent Targets cannot be deleted, attempt/timeline fields
+cannot regress, and PostgreSQL/SQLite enforce the same transition shape.
 
 Only the holder of the separate `synara:billing-shared-allocation-scheduler` database lease runs configured mappings.
 The lease carries a monotonic fencing token and every scheduler mutation receives the transaction write fence. A
-standby therefore cannot write while the leader is active; takeover revalidates the explicit period immediately and
-then resumes the configured interval. The in-memory timestamp is only a per-process throttle: durable Run/Slice
-identity is the restart cursor, so losing scheduler memory causes a safe replay rather than a skipped period. Repeated
-settled-period scans intentionally catch late Worker facts; operators remove a static mapping only after their external
+standby therefore cannot write while the leader is active. The durable period row is the retry throttle across process
+restart and leader handoff. A paused old leader cannot claim or finish a period after its transaction write fence is
+lost. If a process crashes after claim, the next leader retries after the configured `next_attempt_at`; if allocation
+committed but outcome persistence did not, deterministic Run/Slice identity makes that retry safe. Repeated
+settled-period scans intentionally catch late Worker facts. Operators cap or remove a mapping only after their external
 settlement/ingestion authority says no later facts can arrive.
 
 Every due scheduled attempt records `billing.shared_cost_allocation_sweep_scheduled` as a `system` actor under the
@@ -172,12 +189,68 @@ configured platform billing operator Tenant before scanning. A partial Worker re
 `billing_shared_allocation_sweep_partial_failure`, preserves successful graphs, and is retried after the configured
 interval. Local operator/API, PostgreSQL concurrency, and two-holder leadership-handoff evidence is recorded in
 [`stage-4-shared-cost-scheduler-orbstack-pg-20260726-final3.md`](../reports/stage-4-shared-cost-scheduler-orbstack-pg-20260726-final3.md).
+Migration `000080` monthly generation, durable restart throttle, two-replica period claim, database fences, and
+PostgreSQL metric projection are recorded in
+[`stage-4-billing-calendar-scheduler-orbstack-pg-20260726-final1.md`](../reports/stage-4-billing-calendar-scheduler-orbstack-pg-20260726-final1.md).
 
-This graph is an estimated shared-cost allocation from the versioned tariff catalog. It does not claim to allocate an
-account-level actual invoice among Tenants: the current actual invoice model is tenant-owned and the provider rows may
-be period-aggregated. A future actual-allocation graph must separately prove source scope and amount conservation
-before shared slices participate in reconciliation. Local OrbStack PostgreSQL evidence is recorded in
+This graph is an estimated shared-cost allocation from the versioned tariff catalog. Local OrbStack PostgreSQL evidence
+is recorded in
 [`stage-4-shared-cost-allocation-orbstack-pg-20260726-final4.md`](../reports/stage-4-shared-cost-allocation-orbstack-pg-20260726-final4.md).
+
+## Shared Target actual-invoice allocation
+
+Migration `000082` connects operator-owned account invoice truth to the existing shared-Target estimate graph without
+rewriting either source. It creates three retained tables:
+
+- `billing_shared_actual_allocation_runs` freezes one operator Tenant, immutable invoice import, platform-shared Target,
+  ledger coverage, exact provider/currency/period, source checksum, source-scope attestation, selected-line digest,
+  source/unallocated totals, algorithm, and creator;
+- `billing_shared_actual_allocation_lines` assigns one exact actual invoice line at most once and freezes its source
+  amount, complete estimated-slice set digest, estimated weight, and conserved allocated amount;
+- `billing_shared_actual_charge_slices` references one immutable shared estimated slice at most once and preserves its
+  exact Tenant or `platform-idle` ownership while carrying the signed actual micros.
+
+The API is operator-only: the active/path Tenant must be the configured platform billing operator and the caller must
+have `billing.manage`. The request supplies a lowercase `sourceScopeAttestationSHA256`. That digest is an explicit
+operator assertion that the provider account/export scope, object lineage, and settlement boundary have been checked;
+the Control Plane never invents it from an account name or treats a local digest as managed-cloud proof.
+
+Selection is fail closed. An invoice line participates only when `provider`, `currency_code`, charge kind, resource
+correlation key, and both exact billing-period boundaries match a retained shared estimated slice for the selected
+Target. A line matching more than one shared Target rejects the whole attempt. Lines with no match for this Target stay
+explicit in `unallocatedLineCount` and signed `unallocatedAmountMicros`; a Target-scoped run with nonzero unallocated
+totals is not a claim that the complete account invoice has been attributed.
+
+`proportional-shared-estimate-v1` distributes each signed actual line over the complete matching estimate-slice set.
+It uses arbitrary-precision cumulative integer division over nonnegative estimate micros, then reapplies the actual
+line's sign. The difference between adjacent cumulative amounts becomes each slice, so the final slice receives the
+exact remainder and every line conserves micros without floating-point arithmetic. A nonzero actual line with a zero
+estimate basis fails closed; zero, positive, and negative actual lines remain supported.
+
+Creation is one transaction. The run starts as `building`; after all deterministic Line/Slice rows exist, the database
+validates import totals, complete selected-line coverage, per-line slice count/weight/amount sums, run totals, exact
+Target scope, and cross-Target uniqueness before allowing the sole `building -> sealed` transition. PostgreSQL and
+SQLite reject any other Run mutation, all Line/Slice updates or deletes, a late line appended to a sealed invoice
+import, and a late shared estimate slice matching an already allocated actual line. Actual lines and estimate slices
+therefore cannot be double used by a corrected or competing invoice.
+
+PostgreSQL serializes all Target allocations for one import and freezes shared estimate publication for the exact
+provider/currency/period with transaction advisory locks. The existing shared estimate allocator takes the same period
+snapshot lock. Concurrent identical first calls return one sealed deterministic graph and one mutation audit; an
+attestation or authoritative evidence change is a conflict. SQLite keeps its single-replica Service serialization and
+the same seal/fence triggers. One run is bounded to 100,000 selected actual lines and 1,000,000 estimate slices, inserted
+in bounded batches.
+
+The low-cardinality metrics are
+`synara_billing_shared_actual_allocation_runs{provider,currency,state}`,
+`synara_billing_shared_actual_allocation_lines{provider,currency,state,kind}` and
+`synara_billing_shared_actual_allocation_amount_micros{provider,currency,state,kind}`, where `kind` is `selected` or
+`unallocated`. No Tenant, Target, import, resource, digest, or period identity becomes a label.
+
+Local SQLite and OrbStack PostgreSQL 17.10 evidence is recorded in
+[`stage-4-shared-actual-allocation-orbstack-pg-20260726-final1.md`](../reports/stage-4-shared-actual-allocation-orbstack-pg-20260726-final1.md).
+It proves database/runtime correctness, not AWS/GCP/Azure workload identity, provider account ownership, export
+settlement, or managed-cloud delivery; those remain provider-specific E4 gates.
 
 ## Actual invoice imports
 

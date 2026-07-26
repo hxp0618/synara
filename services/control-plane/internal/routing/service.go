@@ -42,6 +42,8 @@ const (
 	CapacitySaturated = "saturated"
 	CapacityUnknown   = "unknown"
 
+	ReservationAuthorityExactActiveV1 = "exact-active-v1"
+
 	LocationStatusDraining    = "draining"
 	LocationStatusUnreachable = "unreachable"
 )
@@ -78,10 +80,24 @@ type HealthObservation struct {
 	// minus AllocatedCapacityUnits.
 	AvailableCapacityUnits *int
 	AllocatedCapacityUnits int
+	ReservationAuthority   *ReservationAuthorityObservation
 	Source                 string
 	Reason                 *string
 	ObservedAt             time.Time
 	TTL                    time.Duration
+}
+
+// ReservationIdentity names one active capacity reservation. Generation is
+// part of the identity so a recovered Execution cannot reuse an acknowledgement
+// issued for an earlier Worker generation.
+type ReservationIdentity struct {
+	ExecutionID uuid.UUID `json:"executionId"`
+	Generation  int64     `json:"generation"`
+}
+
+type ReservationAuthorityObservation struct {
+	Mode             string                `json:"mode"`
+	Acknowledgements []ReservationIdentity `json:"acknowledgements"`
 }
 
 type DRReadinessObservation struct {
@@ -167,8 +183,12 @@ type Selection struct {
 // Pod counted by AllocatedCapacityUnits, so adding these values is deliberately
 // only a conservative routing rank.
 type QueuePressureSnapshot struct {
-	QueuedExecutionUnits int64
-	EffectiveLoadRank    int64
+	QueuedExecutionUnits           int64
+	EffectiveLoadRank              int64
+	ReservationAuthorityMode       string
+	ReservationAcknowledgedUnits   int
+	UnacknowledgedReservationUnits int64
+	StrictCapacityUsedUnits        *int64
 }
 
 type MemberState struct {
@@ -207,13 +227,20 @@ type TargetHealthView struct {
 	Status         string `json:"status"`
 	CapacityStatus string `json:"capacityStatus"`
 	// AvailableCapacityUnits is the total schedulable capacity ceiling.
-	AvailableCapacityUnits *int      `json:"availableCapacityUnits,omitempty"`
-	AllocatedCapacityUnits int       `json:"allocatedCapacityUnits"`
-	Source                 string    `json:"source"`
-	Reason                 *string   `json:"reason,omitempty"`
-	ObservedAt             time.Time `json:"observedAt"`
-	ExpiresAt              time.Time `json:"expiresAt"`
-	Version                int64     `json:"version"`
+	AvailableCapacityUnits *int                            `json:"availableCapacityUnits,omitempty"`
+	AllocatedCapacityUnits int                             `json:"allocatedCapacityUnits"`
+	ReservationAuthority   *TargetReservationAuthorityView `json:"reservationAuthority,omitempty"`
+	Source                 string                          `json:"source"`
+	Reason                 *string                         `json:"reason,omitempty"`
+	ObservedAt             time.Time                       `json:"observedAt"`
+	ExpiresAt              time.Time                       `json:"expiresAt"`
+	Version                int64                           `json:"version"`
+}
+
+type TargetReservationAuthorityView struct {
+	Mode                   string `json:"mode"`
+	AcknowledgedUnits      int    `json:"acknowledgedUnits"`
+	AcknowledgementsSHA256 string `json:"acknowledgementsSha256"`
 }
 
 type TargetDRReadinessView struct {
@@ -491,193 +518,346 @@ func (s *Service) AddMember(ctx context.Context, input AddMemberInput) (persiste
 }
 
 func (s *Service) ObserveHealth(ctx context.Context, input HealthObservation) (persistence.ExecutionTargetHealth, error) {
+	normalized, err := normalizeHealthObservation(input, s.now())
+	if err != nil {
+		return persistence.ExecutionTargetHealth{}, err
+	}
+	var result persistence.ExecutionTargetHealth
+	err = persistence.InTransaction(ctx, s.db, func(tx *gorm.DB) error {
+		var observeErr error
+		result, observeErr = observeHealthInTransaction(ctx, tx, normalized)
+		return observeErr
+	})
+	return result, err
+}
+
+type normalizedHealthObservation struct {
+	ExecutionTargetID      uuid.UUID
+	Status                 string
+	CapacityStatus         string
+	AvailableCapacityUnits *int
+	AllocatedCapacityUnits int
+	ReservationAuthority   *ReservationAuthorityObservation
+	Source                 string
+	Reason                 *string
+	ObservedAt             time.Time
+	ExpiresAt              time.Time
+	UpdatedAt              time.Time
+}
+
+func normalizeHealthObservation(input HealthObservation, now time.Time) (normalizedHealthObservation, error) {
 	status := strings.ToLower(strings.TrimSpace(input.Status))
 	if !slices.Contains([]string{HealthHealthy, HealthDegraded, HealthUnreachable, HealthUnknown}, status) {
-		return persistence.ExecutionTargetHealth{}, problem.New(400, "invalid_target_health_status", "Target health status is invalid.")
+		return normalizedHealthObservation{}, problem.New(400, "invalid_target_health_status", "Target health status is invalid.")
 	}
 	capacity := strings.ToLower(strings.TrimSpace(input.CapacityStatus))
 	if capacity == "" {
 		capacity = CapacityUnknown
 	}
 	if !slices.Contains([]string{CapacityAvailable, CapacitySaturated, CapacityUnknown}, capacity) {
-		return persistence.ExecutionTargetHealth{}, problem.New(400, "invalid_target_capacity_status", "Target capacity status is invalid.")
+		return normalizedHealthObservation{}, problem.New(400, "invalid_target_capacity_status", "Target capacity status is invalid.")
 	}
 	if input.ExecutionTargetID == uuid.Nil || input.AllocatedCapacityUnits < 0 ||
 		(input.AvailableCapacityUnits != nil && *input.AvailableCapacityUnits < 0) {
-		return persistence.ExecutionTargetHealth{}, problem.New(400, "invalid_target_health_capacity", "Target health capacity values are invalid.")
+		return normalizedHealthObservation{}, problem.New(400, "invalid_target_health_capacity", "Target health capacity values are invalid.")
 	}
 	source := strings.TrimSpace(input.Source)
 	if source == "" || len(source) > 160 {
-		return persistence.ExecutionTargetHealth{}, problem.New(400, "invalid_target_health_source", "Target health source must be between 1 and 160 characters.")
+		return normalizedHealthObservation{}, problem.New(400, "invalid_target_health_source", "Target health source must be between 1 and 160 characters.")
 	}
 	observedAt := input.ObservedAt.UTC()
-	now := s.now()
 	if observedAt.IsZero() {
 		observedAt = now
 	}
 	if observedAt.After(now) {
-		return persistence.ExecutionTargetHealth{}, problem.New(400, "invalid_target_health_observed_at", "observedAt must not be later than server time.")
+		return normalizedHealthObservation{}, problem.New(400, "invalid_target_health_observed_at", "observedAt must not be later than server time.")
 	}
 	if input.TTL < 10*time.Second || input.TTL > time.Hour {
-		return persistence.ExecutionTargetHealth{}, problem.New(400, "invalid_target_health_ttl", "Target health TTL must be between 10 seconds and 1 hour.")
+		return normalizedHealthObservation{}, problem.New(400, "invalid_target_health_ttl", "Target health TTL must be between 10 seconds and 1 hour.")
 	}
 	if input.Reason != nil && len(*input.Reason) > 2000 {
-		return persistence.ExecutionTargetHealth{}, problem.New(400, "invalid_target_health_reason", "Target health reason is too long.")
+		return normalizedHealthObservation{}, problem.New(400, "invalid_target_health_reason", "Target health reason is too long.")
 	}
+	var reservationAuthority *ReservationAuthorityObservation
+	if input.ReservationAuthority != nil {
+		copy := *input.ReservationAuthority
+		copy.Acknowledgements = append([]ReservationIdentity(nil), input.ReservationAuthority.Acknowledgements...)
+		reservationAuthority = &copy
+	}
+	return normalizedHealthObservation{
+		ExecutionTargetID: input.ExecutionTargetID, Status: status, CapacityStatus: capacity,
+		AvailableCapacityUnits: input.AvailableCapacityUnits, AllocatedCapacityUnits: input.AllocatedCapacityUnits,
+		ReservationAuthority: reservationAuthority,
+		Source:               source, Reason: input.Reason, ObservedAt: observedAt, ExpiresAt: observedAt.Add(input.TTL),
+		UpdatedAt: now,
+	}, nil
+}
+
+func observeHealthInTransaction(
+	ctx context.Context,
+	tx *gorm.DB,
+	input normalizedHealthObservation,
+) (persistence.ExecutionTargetHealth, error) {
 	var result persistence.ExecutionTargetHealth
-	err := persistence.InTransaction(ctx, s.db, func(tx *gorm.DB) error {
-		var target persistence.ExecutionTarget
-		if err := tx.WithContext(ctx).Select("id").Where("id = ?", input.ExecutionTargetID).Take(&target).Error; err != nil {
-			return problem.Wrap(404, "execution_target_not_found", "Execution Target not found.", err)
+	var target persistence.ExecutionTarget
+	if err := persistence.WithLocking(tx.WithContext(ctx), "UPDATE", "").
+		Select("id").Where("id = ?", input.ExecutionTargetID).Take(&target).Error; err != nil {
+		return result, problem.Wrap(404, "execution_target_not_found", "Execution Target not found.", err)
+	}
+	var current persistence.ExecutionTargetHealth
+	err := persistence.WithLocking(tx.WithContext(ctx), "UPDATE", "").
+		Where("execution_target_id = ?", input.ExecutionTargetID).Take(&current).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		authority, authorityErr := prepareReservationAuthority(
+			ctx, tx, input.ExecutionTargetID, 1, input.ReservationAuthority,
+		)
+		if authorityErr != nil {
+			return result, authorityErr
 		}
-		var current persistence.ExecutionTargetHealth
-		err := persistence.WithLocking(tx.WithContext(ctx), "UPDATE", "").
-			Where("execution_target_id = ?", input.ExecutionTargetID).Take(&current).Error
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			result = persistence.ExecutionTargetHealth{
-				ExecutionTargetID: input.ExecutionTargetID, Status: status, CapacityStatus: capacity,
-				AvailableCapacityUnits: input.AvailableCapacityUnits, AllocatedCapacityUnits: input.AllocatedCapacityUnits,
-				Source: source, Reason: input.Reason, ObservedAt: observedAt, ExpiresAt: observedAt.Add(input.TTL),
-				Version: 1, UpdatedAt: now,
-			}
-			if err := tx.WithContext(ctx).Create(&result).Error; err != nil {
-				return problem.Wrap(409, "target_health_create_rejected", "Target health observation could not be created.", err)
-			}
-			return nil
+		if authority != nil && len(authority.Acknowledgements) > input.AllocatedCapacityUnits {
+			return result, invalidReservationAcknowledgementOccupancy()
 		}
-		if err != nil {
-			return problem.Wrap(500, "target_health_load_failed", "Target health observation could not be loaded.", err)
+		if replaceErr := replaceReservationAcknowledgements(
+			ctx, tx, input.ExecutionTargetID, 1, input.ObservedAt, authority,
+		); replaceErr != nil {
+			return result, replaceErr
 		}
-		if !observedAt.After(current.ObservedAt) {
-			return problem.New(409, "target_health_observation_stale", "Target health observation is not newer than the current authority.")
+		result = persistence.ExecutionTargetHealth{
+			ExecutionTargetID: input.ExecutionTargetID, Status: input.Status, CapacityStatus: input.CapacityStatus,
+			AvailableCapacityUnits: input.AvailableCapacityUnits, AllocatedCapacityUnits: input.AllocatedCapacityUnits,
+			Source: input.Source, Reason: input.Reason, ObservedAt: input.ObservedAt, ExpiresAt: input.ExpiresAt,
+			Version: 1, UpdatedAt: input.UpdatedAt,
 		}
-		result = current
-		result.Status = status
-		result.CapacityStatus = capacity
-		result.AvailableCapacityUnits = input.AvailableCapacityUnits
-		result.AllocatedCapacityUnits = input.AllocatedCapacityUnits
-		result.Source = source
-		result.Reason = input.Reason
-		result.ObservedAt = observedAt
-		result.ExpiresAt = observedAt.Add(input.TTL)
-		result.Version++
-		result.UpdatedAt = now
-		if err := tx.WithContext(ctx).Model(&persistence.ExecutionTargetHealth{}).
-			Where("execution_target_id = ? AND version = ?", current.ExecutionTargetID, current.Version).
-			Select("status", "capacity_status", "available_capacity_units", "allocated_capacity_units", "source", "reason", "observed_at", "expires_at", "version", "updated_at").
-			Updates(&result).Error; err != nil {
-			return problem.Wrap(409, "target_health_update_rejected", "Target health observation could not be advanced.", err)
+		applyReservationAuthorityToHealth(&result, authority)
+		if err := tx.WithContext(ctx).Create(&result).Error; err != nil {
+			return persistence.ExecutionTargetHealth{}, problem.Wrap(409, "target_health_create_rejected", "Target health observation could not be created.", err)
 		}
-		return nil
+		return result, nil
+	}
+	if err != nil {
+		return result, problem.Wrap(500, "target_health_load_failed", "Target health observation could not be loaded.", err)
+	}
+	if !input.ObservedAt.After(current.ObservedAt) {
+		return result, problem.New(409, "target_health_observation_stale", "Target health observation is not newer than the current authority.")
+	}
+	if current.ReservationAuthorityMode != nil && input.ReservationAuthority == nil {
+		return result, problem.New(
+			409,
+			"target_reservation_authority_required",
+			"Reservation acknowledgements are required after exact Target capacity authority has been enabled.",
+		)
+	}
+	nextVersion := current.Version + 1
+	authority, err := prepareReservationAuthority(
+		ctx, tx, input.ExecutionTargetID, nextVersion, input.ReservationAuthority,
+	)
+	if err != nil {
+		return result, err
+	}
+	if authority != nil && len(authority.Acknowledgements) > input.AllocatedCapacityUnits {
+		return result, invalidReservationAcknowledgementOccupancy()
+	}
+	if err := replaceReservationAcknowledgements(
+		ctx, tx, input.ExecutionTargetID, nextVersion, input.ObservedAt, authority,
+	); err != nil {
+		return result, err
+	}
+	result = current
+	result.Status = input.Status
+	result.CapacityStatus = input.CapacityStatus
+	result.AvailableCapacityUnits = input.AvailableCapacityUnits
+	result.AllocatedCapacityUnits = input.AllocatedCapacityUnits
+	result.Source = input.Source
+	result.Reason = input.Reason
+	result.ObservedAt = input.ObservedAt
+	result.ExpiresAt = input.ExpiresAt
+	result.Version = nextVersion
+	result.UpdatedAt = input.UpdatedAt
+	applyReservationAuthorityToHealth(&result, authority)
+	updated := tx.WithContext(ctx).Model(&persistence.ExecutionTargetHealth{}).
+		Where("execution_target_id = ? AND version = ?", current.ExecutionTargetID, current.Version).
+		Select("status", "capacity_status", "available_capacity_units", "allocated_capacity_units",
+			"reservation_authority_mode", "reservation_acknowledged_units", "reservation_acknowledgements_sha256",
+			"source", "reason", "observed_at", "expires_at", "version", "updated_at").
+		Updates(&result)
+	if updated.Error != nil || updated.RowsAffected != 1 {
+		return persistence.ExecutionTargetHealth{}, problem.Wrap(409, "target_health_update_rejected", "Target health observation could not be advanced.", updated.Error)
+	}
+	return result, nil
+}
+
+func invalidReservationAcknowledgementOccupancy() error {
+	return problem.New(
+		409,
+		"target_reservation_acknowledgements_exceed_occupancy",
+		"Reservation acknowledgements cannot exceed the allocated Target occupancy in the same Health observation.",
+	)
+}
+
+func applyReservationAuthorityToHealth(
+	health *persistence.ExecutionTargetHealth,
+	authority *normalizedReservationAuthority,
+) {
+	health.ReservationAuthorityMode = nil
+	health.ReservationAcknowledgedUnits = 0
+	health.ReservationAcknowledgementsSHA256 = nil
+	if authority == nil {
+		return
+	}
+	mode := authority.Mode
+	digest := authority.AcknowledgementsSHA256
+	health.ReservationAuthorityMode = &mode
+	health.ReservationAcknowledgedUnits = len(authority.Acknowledgements)
+	health.ReservationAcknowledgementsSHA256 = &digest
+}
+
+func (s *Service) ObserveDRReadiness(ctx context.Context, input DRReadinessObservation) (persistence.ExecutionTargetDRReadiness, error) {
+	normalized, err := normalizeDRReadinessObservation(input, s.now())
+	if err != nil {
+		return persistence.ExecutionTargetDRReadiness{}, err
+	}
+	var result persistence.ExecutionTargetDRReadiness
+	err = persistence.InTransaction(ctx, s.db, func(tx *gorm.DB) error {
+		var observeErr error
+		result, observeErr = observeDRReadinessInTransaction(ctx, tx, normalized)
+		return observeErr
 	})
 	return result, err
 }
 
-func (s *Service) ObserveDRReadiness(ctx context.Context, input DRReadinessObservation) (persistence.ExecutionTargetDRReadiness, error) {
+type normalizedDRReadinessObservation struct {
+	ExecutionTargetID   uuid.UUID
+	SourceDRDomain      string
+	DRDomain            string
+	ReplicatedThroughAt time.Time
+	ArtifactsReady      bool
+	CheckpointsReady    bool
+	MemoryReady         bool
+	PublisherIdentity   string
+	Reason              *string
+	ObservedAt          time.Time
+	ExpiresAt           time.Time
+	UpdatedAt           time.Time
+}
+
+func normalizeDRReadinessObservation(
+	input DRReadinessObservation,
+	now time.Time,
+) (normalizedDRReadinessObservation, error) {
 	if input.ExecutionTargetID == uuid.Nil {
-		return persistence.ExecutionTargetDRReadiness{}, problem.New(400, "invalid_target_dr_readiness_scope", "Execution Target is required.")
+		return normalizedDRReadinessObservation{}, problem.New(400, "invalid_target_dr_readiness_scope", "Execution Target is required.")
 	}
 	sourceDRDomain, err := normalizeLocation(
 		input.SourceDRDomain, 200, "invalid_target_dr_source_domain", "sourceDrDomain",
 	)
 	if err != nil {
-		return persistence.ExecutionTargetDRReadiness{}, err
+		return normalizedDRReadinessObservation{}, err
 	}
 	drDomain, err := normalizeLocation(input.DRDomain, 200, "invalid_target_dr_domain", "drDomain")
 	if err != nil {
-		return persistence.ExecutionTargetDRReadiness{}, err
+		return normalizedDRReadinessObservation{}, err
 	}
 	publisherIdentity, err := normalizeLocation(
 		input.PublisherIdentity, 200, "invalid_target_dr_publisher_identity", "publisherIdentity",
 	)
 	if err != nil {
-		return persistence.ExecutionTargetDRReadiness{}, err
+		return normalizedDRReadinessObservation{}, err
 	}
 	replicatedThroughAt := input.ReplicatedThroughAt.UTC()
 	if replicatedThroughAt.IsZero() {
-		return persistence.ExecutionTargetDRReadiness{}, problem.New(400, "invalid_target_dr_replicated_through_at", "replicatedThroughAt is required.")
+		return normalizedDRReadinessObservation{}, problem.New(400, "invalid_target_dr_replicated_through_at", "replicatedThroughAt is required.")
 	}
 	if input.Reason != nil && len(*input.Reason) > 2000 {
-		return persistence.ExecutionTargetDRReadiness{}, problem.New(400, "invalid_target_dr_readiness_reason", "Target DR readiness reason is too long.")
+		return normalizedDRReadinessObservation{}, problem.New(400, "invalid_target_dr_readiness_reason", "Target DR readiness reason is too long.")
 	}
 	observedAt := input.ObservedAt.UTC()
-	now := s.now()
 	if observedAt.IsZero() {
 		observedAt = now
 	}
 	if observedAt.After(now) {
-		return persistence.ExecutionTargetDRReadiness{}, problem.New(400, "invalid_target_dr_readiness_observed_at", "observedAt must not be later than server time.")
+		return normalizedDRReadinessObservation{}, problem.New(400, "invalid_target_dr_readiness_observed_at", "observedAt must not be later than server time.")
 	}
 	if replicatedThroughAt.After(observedAt) {
-		return persistence.ExecutionTargetDRReadiness{}, problem.New(400, "invalid_target_dr_replicated_through_at", "replicatedThroughAt must not be later than observedAt.")
+		return normalizedDRReadinessObservation{}, problem.New(400, "invalid_target_dr_replicated_through_at", "replicatedThroughAt must not be later than observedAt.")
 	}
 	if input.TTL < 10*time.Second || input.TTL > time.Hour {
-		return persistence.ExecutionTargetDRReadiness{}, problem.New(400, "invalid_target_dr_readiness_ttl", "Target DR readiness TTL must be between 10 seconds and 1 hour.")
+		return normalizedDRReadinessObservation{}, problem.New(400, "invalid_target_dr_readiness_ttl", "Target DR readiness TTL must be between 10 seconds and 1 hour.")
 	}
+	return normalizedDRReadinessObservation{
+		ExecutionTargetID: input.ExecutionTargetID, SourceDRDomain: sourceDRDomain, DRDomain: drDomain,
+		ReplicatedThroughAt: replicatedThroughAt, ArtifactsReady: input.ArtifactsReady,
+		CheckpointsReady: input.CheckpointsReady, MemoryReady: input.MemoryReady,
+		PublisherIdentity: publisherIdentity, Reason: input.Reason,
+		ObservedAt: observedAt, ExpiresAt: observedAt.Add(input.TTL), UpdatedAt: now,
+	}, nil
+}
+
+func observeDRReadinessInTransaction(
+	ctx context.Context,
+	tx *gorm.DB,
+	input normalizedDRReadinessObservation,
+) (persistence.ExecutionTargetDRReadiness, error) {
 	var result persistence.ExecutionTargetDRReadiness
-	err = persistence.InTransaction(ctx, s.db, func(tx *gorm.DB) error {
-		var target persistence.ExecutionTarget
-		if err := tx.WithContext(ctx).Select("id").Where("id = ?", input.ExecutionTargetID).Take(&target).Error; err != nil {
-			return problem.Wrap(404, "execution_target_not_found", "Execution Target not found.", err)
+	var target persistence.ExecutionTarget
+	if err := tx.WithContext(ctx).Select("id").Where("id = ?", input.ExecutionTargetID).Take(&target).Error; err != nil {
+		return result, problem.Wrap(404, "execution_target_not_found", "Execution Target not found.", err)
+	}
+	var current persistence.ExecutionTargetDRReadiness
+	err := persistence.WithLocking(tx.WithContext(ctx), "UPDATE", "").
+		Where("execution_target_id = ? AND source_dr_domain = ?", input.ExecutionTargetID, input.SourceDRDomain).
+		Take(&current).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		result = persistence.ExecutionTargetDRReadiness{
+			ExecutionTargetID:   input.ExecutionTargetID,
+			SourceDRDomain:      input.SourceDRDomain,
+			DRDomain:            input.DRDomain,
+			ReplicatedThroughAt: input.ReplicatedThroughAt,
+			ArtifactsReady:      input.ArtifactsReady,
+			CheckpointsReady:    input.CheckpointsReady,
+			MemoryReady:         input.MemoryReady,
+			PublisherIdentity:   input.PublisherIdentity,
+			Reason:              input.Reason,
+			ObservedAt:          input.ObservedAt,
+			ExpiresAt:           input.ExpiresAt,
+			Version:             1,
+			UpdatedAt:           input.UpdatedAt,
 		}
-		var current persistence.ExecutionTargetDRReadiness
-		err := persistence.WithLocking(tx.WithContext(ctx), "UPDATE", "").
-			Where("execution_target_id = ? AND source_dr_domain = ?", input.ExecutionTargetID, sourceDRDomain).
-			Take(&current).Error
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			result = persistence.ExecutionTargetDRReadiness{
-				ExecutionTargetID:   input.ExecutionTargetID,
-				SourceDRDomain:      sourceDRDomain,
-				DRDomain:            drDomain,
-				ReplicatedThroughAt: replicatedThroughAt,
-				ArtifactsReady:      input.ArtifactsReady,
-				CheckpointsReady:    input.CheckpointsReady,
-				MemoryReady:         input.MemoryReady,
-				PublisherIdentity:   publisherIdentity,
-				Reason:              input.Reason,
-				ObservedAt:          observedAt,
-				ExpiresAt:           observedAt.Add(input.TTL),
-				Version:             1,
-				UpdatedAt:           now,
-			}
-			if err := tx.WithContext(ctx).Create(&result).Error; err != nil {
-				return problem.Wrap(409, "target_dr_readiness_create_rejected", "Target DR readiness observation could not be created.", err)
-			}
-			return nil
+		if err := tx.WithContext(ctx).Create(&result).Error; err != nil {
+			return persistence.ExecutionTargetDRReadiness{}, problem.Wrap(409, "target_dr_readiness_create_rejected", "Target DR readiness observation could not be created.", err)
 		}
-		if err != nil {
-			return problem.Wrap(500, "target_dr_readiness_load_failed", "Target DR readiness observation could not be loaded.", err)
-		}
-		if !observedAt.After(current.ObservedAt) {
-			return problem.New(409, "target_dr_readiness_observation_stale", "Target DR readiness observation is not newer than the current authority.")
-		}
-		result = current
-		result.DRDomain = drDomain
-		result.ReplicatedThroughAt = replicatedThroughAt
-		result.ArtifactsReady = input.ArtifactsReady
-		result.CheckpointsReady = input.CheckpointsReady
-		result.MemoryReady = input.MemoryReady
-		result.PublisherIdentity = publisherIdentity
-		result.Reason = input.Reason
-		result.ObservedAt = observedAt
-		result.ExpiresAt = observedAt.Add(input.TTL)
-		result.Version++
-		result.UpdatedAt = now
-		if err := tx.WithContext(ctx).Model(&persistence.ExecutionTargetDRReadiness{}).
-			Where(
-				"execution_target_id = ? AND source_dr_domain = ? AND version = ?",
-				current.ExecutionTargetID, current.SourceDRDomain, current.Version,
-			).
-			Select(
-				"dr_domain", "replicated_through_at", "artifacts_ready", "checkpoints_ready",
-				"memory_ready", "publisher_identity", "reason", "observed_at", "expires_at", "version", "updated_at",
-			).
-			Updates(&result).Error; err != nil {
-			return problem.Wrap(409, "target_dr_readiness_update_rejected", "Target DR readiness observation could not be advanced.", err)
-		}
-		return nil
-	})
-	return result, err
+		return result, nil
+	}
+	if err != nil {
+		return result, problem.Wrap(500, "target_dr_readiness_load_failed", "Target DR readiness observation could not be loaded.", err)
+	}
+	if !input.ObservedAt.After(current.ObservedAt) {
+		return result, problem.New(409, "target_dr_readiness_observation_stale", "Target DR readiness observation is not newer than the current authority.")
+	}
+	result = current
+	result.DRDomain = input.DRDomain
+	result.ReplicatedThroughAt = input.ReplicatedThroughAt
+	result.ArtifactsReady = input.ArtifactsReady
+	result.CheckpointsReady = input.CheckpointsReady
+	result.MemoryReady = input.MemoryReady
+	result.PublisherIdentity = input.PublisherIdentity
+	result.Reason = input.Reason
+	result.ObservedAt = input.ObservedAt
+	result.ExpiresAt = input.ExpiresAt
+	result.Version++
+	result.UpdatedAt = input.UpdatedAt
+	if err := tx.WithContext(ctx).Model(&persistence.ExecutionTargetDRReadiness{}).
+		Where(
+			"execution_target_id = ? AND source_dr_domain = ? AND version = ?",
+			current.ExecutionTargetID, current.SourceDRDomain, current.Version,
+		).
+		Select(
+			"dr_domain", "replicated_through_at", "artifacts_ready", "checkpoints_ready",
+			"memory_ready", "publisher_identity", "reason", "observed_at", "expires_at", "version", "updated_at",
+		).
+		Updates(&result).Error; err != nil {
+		return persistence.ExecutionTargetDRReadiness{}, problem.Wrap(409, "target_dr_readiness_update_rejected", "Target DR readiness observation could not be advanced.", err)
+	}
+	return result, nil
 }
 
 func (s *Service) ObserveLocationOutage(
@@ -832,7 +1012,7 @@ func (s *Service) Select(ctx context.Context, tx *gorm.DB, request SelectRequest
 	if err := db.WithContext(ctx).Where("execution_target_id IN ?", targetIDs).Find(&healthRows).Error; err != nil {
 		return Selection{}, problem.Wrap(500, "target_group_health_load_failed", "Execution Target health could not be loaded.", err)
 	}
-	queuedExecutionUnitsByTarget, err := loadQueuedExecutionUnits(ctx, db, targetIDs)
+	reservationUnitsByTarget, err := loadReservationUnitCounts(ctx, db, targetIDs)
 	if err != nil {
 		return Selection{}, problem.Wrap(
 			500,
@@ -906,7 +1086,8 @@ func (s *Service) Select(ctx context.Context, tx *gorm.DB, request SelectRequest
 			continue
 		}
 		health, ok := healthByID[member.ExecutionTargetID]
-		if !ok || !healthEligible(health, group, now) {
+		reservationUnits := reservationUnitsByTarget[member.ExecutionTargetID]
+		if !ok || !healthEligible(health, group, now, reservationUnits) {
 			continue
 		}
 		regionRank := indexOrMax(preferredRegions, member.Region)
@@ -919,11 +1100,7 @@ func (s *Service) Select(ctx context.Context, tx *gorm.DB, request SelectRequest
 				continue
 			}
 		}
-		queuePressure := queuePressureSnapshot(
-			health,
-			queuedExecutionUnitsByTarget[member.ExecutionTargetID],
-			member.Weight,
-		)
+		queuePressure := reservationAwareQueuePressure(health, reservationUnits, member.Weight)
 		candidate := routeCandidate{
 			member: member, target: target, health: health,
 			preferred:  request.PreferredTargetID != nil && member.ExecutionTargetID == *request.PreferredTargetID,
@@ -1119,7 +1296,17 @@ func (s *Service) LockSelectionForCommit(
 			return Selection{}, staleSelectionProblem("destination-location-outage-changed", selection)
 		}
 	}
-	if !sameTargetHealthAuthority(health, selection.Health) || !healthEligible(health, group, now) {
+	reservationUnitsByTarget, err := loadReservationUnitCounts(ctx, tx, []uuid.UUID{target.ID})
+	if err != nil {
+		return Selection{}, problem.Wrap(
+			500,
+			"target_routing_commit_reservation_pressure_load_failed",
+			"Destination reservation pressure could not be revalidated for routing commit.",
+			err,
+		)
+	}
+	actualReservationUnits := reservationUnitsByTarget[target.ID]
+	if !sameTargetHealthAuthority(health, selection.Health) || !healthEligible(health, group, now, actualReservationUnits) {
 		return Selection{}, staleSelectionProblem("health-changed-or-ineligible", selection)
 	}
 
@@ -1143,21 +1330,20 @@ func (s *Service) LockSelectionForCommit(
 	} else if selection.DRReadiness != nil {
 		return Selection{}, staleSelectionProblem("dr-readiness-selection-unexpected", selection)
 	}
-	queuedExecutionUnitsByTarget, err := loadQueuedExecutionUnits(ctx, tx, []uuid.UUID{target.ID})
-	if err != nil {
-		return Selection{}, problem.Wrap(
-			500,
-			"target_routing_commit_queue_pressure_load_failed",
-			"Destination queue pressure could not be revalidated for routing commit.",
-			err,
-		)
-	}
-	actualQueuedExecutionUnits := queuedExecutionUnitsByTarget[target.ID]
+	actualQueuedExecutionUnits := actualReservationUnits.Active
 	if actualQueuedExecutionUnits != selection.QueuePressure.QueuedExecutionUnits {
 		return Selection{}, staleQueuePressureProblem(
 			selection,
 			selection.QueuePressure.QueuedExecutionUnits,
 			actualQueuedExecutionUnits,
+		)
+	}
+	if selection.QueuePressure.ReservationAuthorityMode != "" &&
+		actualReservationUnits.Unacknowledged != selection.QueuePressure.UnacknowledgedReservationUnits {
+		return Selection{}, staleReservationPressureProblem(
+			selection,
+			selection.QueuePressure.UnacknowledgedReservationUnits,
+			actualReservationUnits.Unacknowledged,
 		)
 	}
 
@@ -1167,7 +1353,7 @@ func (s *Service) LockSelectionForCommit(
 	locked.Member = member
 	locked.Health = health
 	locked.DRReadiness = readiness
-	locked.QueuePressure = queuePressureSnapshot(health, actualQueuedExecutionUnits, member.Weight)
+	locked.QueuePressure = reservationAwareQueuePressure(health, actualReservationUnits, member.Weight)
 	return locked, nil
 }
 
@@ -1201,6 +1387,17 @@ func staleQueuePressureProblem(
 	apiError := staleSelectionProblem("queue-pressure-changed", selection)
 	apiError.Details["expectedQueuedExecutionUnits"] = expectedQueuedExecutionUnits
 	apiError.Details["actualQueuedExecutionUnits"] = actualQueuedExecutionUnits
+	return apiError
+}
+
+func staleReservationPressureProblem(
+	selection Selection,
+	expectedUnacknowledgedUnits int64,
+	actualUnacknowledgedUnits int64,
+) *problem.Error {
+	apiError := staleSelectionProblem("reservation-pressure-changed", selection)
+	apiError.Details["expectedUnacknowledgedReservationUnits"] = expectedUnacknowledgedUnits
+	apiError.Details["actualUnacknowledgedReservationUnits"] = actualUnacknowledgedUnits
 	return apiError
 }
 
@@ -1250,6 +1447,9 @@ func sameTargetHealthAuthority(current, selected persistence.ExecutionTargetHeal
 		current.Status == selected.Status && current.CapacityStatus == selected.CapacityStatus &&
 		sameOptionalInt(current.AvailableCapacityUnits, selected.AvailableCapacityUnits) &&
 		current.AllocatedCapacityUnits == selected.AllocatedCapacityUnits && current.Source == selected.Source &&
+		sameOptionalString(current.ReservationAuthorityMode, selected.ReservationAuthorityMode) &&
+		current.ReservationAcknowledgedUnits == selected.ReservationAcknowledgedUnits &&
+		sameOptionalString(current.ReservationAcknowledgementsSHA256, selected.ReservationAcknowledgementsSHA256) &&
 		sameOptionalString(current.Reason, selected.Reason) && current.ObservedAt.Equal(selected.ObservedAt) &&
 		current.ExpiresAt.Equal(selected.ExpiresAt)
 }
@@ -1443,7 +1643,12 @@ func candidateLess(left, right routeCandidate, strategy string) bool {
 	return left.target.ID.String() < right.target.ID.String()
 }
 
-func healthEligible(health persistence.ExecutionTargetHealth, group persistence.ExecutionTargetGroup, now time.Time) bool {
+func healthEligible(
+	health persistence.ExecutionTargetHealth,
+	group persistence.ExecutionTargetGroup,
+	now time.Time,
+	reservationUnits reservationUnitCounts,
+) bool {
 	if health.Status != HealthHealthy && health.Status != HealthDegraded {
 		return false
 	}
@@ -1453,7 +1658,14 @@ func healthEligible(health persistence.ExecutionTargetHealth, group persistence.
 	if health.CapacityStatus == CapacitySaturated {
 		return false
 	}
-	return health.AvailableCapacityUnits == nil || health.AllocatedCapacityUnits < *health.AvailableCapacityUnits
+	if health.AvailableCapacityUnits == nil {
+		return true
+	}
+	used := int64(health.AllocatedCapacityUnits)
+	if health.ReservationAuthorityMode != nil && *health.ReservationAuthorityMode == ReservationAuthorityExactActiveV1 {
+		used = strictCapacityUsedUnits(health.AllocatedCapacityUnits, reservationUnits.Unacknowledged)
+	}
+	return used < int64(*health.AvailableCapacityUnits)
 }
 
 func drReadinessRequirement(
@@ -1551,22 +1763,15 @@ func drReadinessBlockedReason(
 	return "", nil
 }
 
-func queuePressureSnapshot(
-	health persistence.ExecutionTargetHealth,
-	queuedExecutionUnits int64,
-	weight int,
-) QueuePressureSnapshot {
-	return QueuePressureSnapshot{
-		QueuedExecutionUnits: queuedExecutionUnits,
-		EffectiveLoadRank:    effectiveLoadRank(health, queuedExecutionUnits, weight),
-	}
+func effectiveLoadRank(health persistence.ExecutionTargetHealth, queuedExecutionUnits int64, weight int) int64 {
+	return effectiveLoadRankForPressure(health, queuedExecutionUnits, weight)
 }
 
-func effectiveLoadRank(health persistence.ExecutionTargetHealth, queuedExecutionUnits int64, weight int) int64 {
+func effectiveLoadRankForPressure(health persistence.ExecutionTargetHealth, pressureUnits int64, weight int) int64 {
 	if weight <= 0 {
 		weight = 1
 	}
-	pressure := queuedExecutionUnits
+	pressure := pressureUnits
 	if health.AvailableCapacityUnits != nil && *health.AvailableCapacityUnits > 0 {
 		pressure += int64(health.AllocatedCapacityUnits)
 	}
@@ -1772,13 +1977,21 @@ func DRDomainForLocation(region, clusterID string) string {
 }
 
 func toTargetHealthView(health persistence.ExecutionTargetHealth) TargetHealthView {
-	return TargetHealthView{
+	view := TargetHealthView{
 		Status: health.Status, CapacityStatus: health.CapacityStatus,
 		AvailableCapacityUnits: health.AvailableCapacityUnits,
 		AllocatedCapacityUnits: health.AllocatedCapacityUnits,
 		Source:                 health.Source, Reason: health.Reason, ObservedAt: health.ObservedAt,
 		ExpiresAt: health.ExpiresAt, Version: health.Version,
 	}
+	if health.ReservationAuthorityMode != nil && health.ReservationAcknowledgementsSHA256 != nil {
+		view.ReservationAuthority = &TargetReservationAuthorityView{
+			Mode:                   *health.ReservationAuthorityMode,
+			AcknowledgedUnits:      health.ReservationAcknowledgedUnits,
+			AcknowledgementsSHA256: *health.ReservationAcknowledgementsSHA256,
+		}
+	}
+	return view
 }
 
 func toTargetDRReadinessView(readiness persistence.ExecutionTargetDRReadiness) TargetDRReadinessView {

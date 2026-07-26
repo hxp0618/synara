@@ -261,6 +261,7 @@ func TestGatherUsesBoundedRoutePatternsAndAuthoritativeState(t *testing.T) {
 	registry.ObserveHTTP("GET", "GET /v1/sessions/{sessionID}", 200, 25*time.Millisecond, "")
 	registry.ObserveHTTP("GET", "/v1/sessions/"+executionID.String(), 404, 10*time.Millisecond, "")
 	registry.ObserveBackground("docker", now, nil)
+	registry.ObserveBackground("metric-rollup", now, nil)
 	registry.ObserveArtifact("complete", 128, nil)
 	registry.ObserveSSECatchup(20*time.Millisecond, 3, nil)
 	registry.ObserveSSELimit("user")
@@ -301,6 +302,7 @@ func TestGatherUsesBoundedRoutePatternsAndAuthoritativeState(t *testing.T) {
 		`synara_provider_credential_access_leases{state="active"} 0`,
 		`synara_provider_credential_access_leases{state="credential-unavailable"} 0`,
 		`synara_worker_leases{state="active"} 1`, `synara_metrics_collection_success 1`,
+		`synara_background_runs_total{kind="metric-rollup"} 1`,
 		`synara_outbox_pending 1`, `synara_outbox_retrying 1`,
 		`synara_outbox_dead_letter 1`, `synara_outbox_oldest_pending_seconds`,
 		`synara_sse_connections{state="active"} 0`, `synara_artifact_ready_bytes 0`,
@@ -316,16 +318,17 @@ func TestGatherUsesBoundedRoutePatternsAndAuthoritativeState(t *testing.T) {
 	}
 }
 
-func TestBoundedReconcilerLeaseNameIncludesBillingSchedulers(t *testing.T) {
+func TestBoundedReconcilerLeaseNameIncludesDedicatedSchedulers(t *testing.T) {
 	for _, test := range []struct {
 		lease string
 		want  string
 	}{
 		{lease: "synara:billing-import-scheduler", want: "billing-import"},
 		{lease: "synara:billing-shared-allocation-scheduler", want: "billing-shared-allocation"},
+		{lease: "synara:metric-rollup", want: "metric-rollup"},
 	} {
 		if got := boundedReconcilerLeaseName(test.lease); got != test.want {
-			t.Fatalf("billing scheduler lease label = %q, want %q", got, test.want)
+			t.Fatalf("dedicated scheduler lease label = %q, want %q", got, test.want)
 		}
 	}
 }

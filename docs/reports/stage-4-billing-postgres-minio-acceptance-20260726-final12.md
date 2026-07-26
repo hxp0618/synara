@@ -48,13 +48,13 @@ The bounded detail was 735 bytes, SHA-256
 
 ## Exact dirty provenance
 
-| Asset | SHA-256 |
-| --- | --- |
-| Acceptance wrapper | `b7ddaf3220e044a35e740d46f32a953d9752d302da55613937781abe88e5ff85` |
-| Billing runtime PostgreSQL test | `29097245652556079087aa73967dfe844de137c62a2d37534136390cdfb2ba69` |
+| Asset                             | SHA-256                                                            |
+| --------------------------------- | ------------------------------------------------------------------ |
+| Acceptance wrapper                | `b7ddaf3220e044a35e740d46f32a953d9752d302da55613937781abe88e5ff85` |
+| Billing runtime PostgreSQL test   | `29097245652556079087aa73967dfe844de137c62a2d37534136390cdfb2ba69` |
 | Concurrent import PostgreSQL test | `fc547c4026403f608be59cdb26e0141dbff1bc5d2ed2442941be39fc257e5d06` |
-| Billing service | `02e5a53a81aaf21215051c43ff27f6a0f798a62c0e96c6bb96b58b0612b6f646` |
-| Executed Linux `billing.test` | `b7c88c2121185e6052d5bf67d3e1cb9d1a16471c429b89f265606f8132be5d8f` |
+| Billing service                   | `02e5a53a81aaf21215051c43ff27f6a0f798a62c0e96c6bb96b58b0612b6f646` |
+| Executed Linux `billing.test`     | `b7c88c2121185e6052d5bf67d3e1cb9d1a16471c429b89f265606f8132be5d8f` |
 
 The host compiler was `go version go1.26.5 darwin/arm64`; the test ran in the pinned Go 1.26 bookworm image resolved to
 `sha256:1b67dd879851e02ab4035680c180ed8d607ef4aaaf19e17ea1328a00f2450d86`. The binary hash was unchanged after

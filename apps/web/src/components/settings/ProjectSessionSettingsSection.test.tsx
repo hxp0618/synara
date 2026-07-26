@@ -212,21 +212,25 @@ function getFirstElementChild(node: ReactNode): ElementLike {
 }
 
 function getFormFieldControl(tree: ReactNode, label: string): ElementLike {
-  return getFirstElementChild(getElement(tree, (element) => element.props.label === label).props.children);
+  return getFirstElementChild(
+    getElement(tree, (element) => element.props.label === label).props.children,
+  );
 }
 
 function getClickableElement(tree: ReactNode, text: string): ElementLike {
   return getElement(
     tree,
     (element) =>
-      typeof element.props.onClick === "function" && elementText(element.props.children).includes(text),
+      typeof element.props.onClick === "function" &&
+      elementText(element.props.children).includes(text),
   );
 }
 
 function getSubmitForm(tree: ReactNode, buttonText: string): ElementLike {
   return getElement(
     tree,
-    (element) => element.type === "form" && elementText(element.props.children).includes(buttonText),
+    (element) =>
+      element.type === "form" && elementText(element.props.children).includes(buttonText),
   );
 }
 
@@ -435,9 +439,8 @@ async function createSubmitPathHarness() {
     };
   });
 
-  const { ProjectSessionSettingsSection: SubmitHarnessComponent } = await import(
-    "./ProjectSessionSettingsSection"
-  );
+  const { ProjectSessionSettingsSection: SubmitHarnessComponent } =
+    await import("./ProjectSessionSettingsSection");
 
   return {
     createSession,
@@ -503,7 +506,9 @@ async function createLiveSessionStreamHarness() {
     "organization-1",
     "projects",
   ]);
-  const projectPolicyQueryKeyJson = JSON.stringify(projectResourceLifecyclePolicyQueryKey("project-1"));
+  const projectPolicyQueryKeyJson = JSON.stringify(
+    projectResourceLifecyclePolicyQueryKey("project-1"),
+  );
 
   const queryClient = {
     invalidateQueries: vi.fn(() => Promise.resolve()),
@@ -525,8 +530,7 @@ async function createLiveSessionStreamHarness() {
         if (JSON.stringify(queryKey) !== sessionsQueryKeyJson) {
           return undefined;
         }
-        const next =
-          typeof updater === "function" ? updater({ items: sessionItems }) : updater;
+        const next = typeof updater === "function" ? updater({ items: sessionItems }) : updater;
         if (next?.items) {
           sessionItems = [...next.items];
         }
@@ -643,9 +647,8 @@ async function createLiveSessionStreamHarness() {
     };
   });
 
-  const { ProjectSessionSettingsSection: StreamHarnessComponent } = await import(
-    "./ProjectSessionSettingsSection"
-  );
+  const { ProjectSessionSettingsSection: StreamHarnessComponent } =
+    await import("./ProjectSessionSettingsSection");
 
   return {
     queryClient,
@@ -807,27 +810,30 @@ describe("ProjectSessionSettingsSection", () => {
     "execution.suspend-aborted",
     "execution.recovering",
     "execution.completed",
-  ])("refreshes the watched session query when %s arrives on the live stream", async (eventType) => {
-    const harness = await createLiveSessionStreamHarness();
+  ])(
+    "refreshes the watched session query when %s arrives on the live stream",
+    async (eventType) => {
+      const harness = await createLiveSessionStreamHarness();
 
-    harness.render();
-    harness.watchSession();
-    harness.render();
-    harness.flushEffects();
+      harness.render();
+      harness.watchSession();
+      harness.render();
+      harness.flushEffects();
 
-    expect(harness.subscribeSessionEvents).toHaveBeenCalledWith(
-      "session-1",
-      9,
-      expect.any(Object),
-    );
+      expect(harness.subscribeSessionEvents).toHaveBeenCalledWith(
+        "session-1",
+        9,
+        expect.any(Object),
+      );
 
-    harness.emitEvent(eventType, 10);
+      harness.emitEvent(eventType, 10);
 
-    expect(harness.queryClient.invalidateQueries).toHaveBeenCalledWith({
-      queryKey: ["control-plane", "projects", "project-1", "sessions"],
-    });
-    expect(harness.getSessionItems()[0]?.lastEventSequence).toBe(10);
-  });
+      expect(harness.queryClient.invalidateQueries).toHaveBeenCalledWith({
+        queryKey: ["control-plane", "projects", "project-1", "sessions"],
+      });
+      expect(harness.getSessionItems()[0]?.lastEventSequence).toBe(10);
+    },
+  );
 
   it.each(["content.delta", "runtime.output.delta"])(
     "does not refresh the watched session query for %s",

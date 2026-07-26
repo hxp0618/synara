@@ -98,10 +98,7 @@
         },
         "workerProxy": {
           "advertisedHost": "127.0.0.1",
-          "allowedPathPrefixes": [
-            "/v1/workers/",
-            "/v1/artifact-content/"
-          ],
+          "allowedPathPrefixes": ["/v1/workers/", "/v1/artifact-content/"],
           "faultInjection": "runner-owned transport close before HTTP forwarding",
           "listenAddress": "0.0.0.0",
           "port": 64991,
@@ -275,9 +272,7 @@
           "status": "ready"
         },
         "credentialEvidence": {
-          "credentialPayloadKeys": [
-            "apiKey"
-          ],
+          "credentialPayloadKeys": ["apiKey"],
           "credentialVerified": true
         },
         "eventTypes": [
@@ -550,10 +545,7 @@
         },
         "workerProxy": {
           "advertisedHost": "127.0.0.1",
-          "allowedPathPrefixes": [
-            "/v1/workers/",
-            "/v1/artifact-content/"
-          ],
+          "allowedPathPrefixes": ["/v1/workers/", "/v1/artifact-content/"],
           "faultInjection": "runner-owned transport close before HTTP forwarding",
           "listenAddress": "0.0.0.0",
           "port": 64991,
@@ -640,22 +632,10 @@
     {
       "durationMs": 4,
       "evidence": {
-        "fileTypes": [
-          ".json",
-          ".log",
-          ".md",
-          ".txt",
-          ".yaml",
-          ".yml"
-        ],
+        "fileTypes": [".json", ".log", ".md", ".txt", ".yaml", ".yml"],
         "findings": [],
         "knownSecretCount": 11,
-        "patternNames": [
-          "private-key-pem",
-          "aws-access-key",
-          "github-token",
-          "openai-style-key"
-        ],
+        "patternNames": ["private-key-pem", "aws-access-key", "github-token", "openai-style-key"],
         "scannedBytes": 186712,
         "scannedFiles": 13,
         "scope": "acceptance JSON, Markdown, text metadata, and redacted logs; binary SQLite/Artifacts excluded"

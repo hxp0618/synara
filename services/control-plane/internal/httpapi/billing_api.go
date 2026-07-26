@@ -139,6 +139,44 @@ func (s *Server) sweepBillingSharedTargetAllocations(w http.ResponseWriter, r *h
 	writeJSON(w, http.StatusOK, result)
 }
 
+func (s *Server) allocateBillingSharedTargetActualInvoice(w http.ResponseWriter, r *http.Request) {
+	service := s.requireBillingService(w, r)
+	if service == nil {
+		return
+	}
+	tenantID, ok := s.pathUUID(w, r, "tenantID")
+	if !ok {
+		return
+	}
+	targetID, ok := s.pathUUID(w, r, "executionTargetID")
+	if !ok {
+		return
+	}
+	invoiceImportID, ok := s.pathUUID(w, r, "invoiceImportID")
+	if !ok {
+		return
+	}
+	var input billing.AllocateSharedActualInvoiceInput
+	if err := decodeJSON(r, &input); err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	input.ExecutionTargetID = targetID
+	input.InvoiceImportID = invoiceImportID
+	result, err := service.AllocateSharedActualInvoiceAuthorized(
+		r.Context(), mustPrincipal(r), tenantID, input, requestID(r), clientIP(r),
+	)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	status := http.StatusOK
+	if result.Created {
+		status = http.StatusCreated
+	}
+	writeJSON(w, status, result)
+}
+
 func (s *Server) triggerBillingImport(w http.ResponseWriter, r *http.Request) {
 	service := s.requireBillingService(w, r)
 	if service == nil {
