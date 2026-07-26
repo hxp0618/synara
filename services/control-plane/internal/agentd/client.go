@@ -206,9 +206,13 @@ func workspaceCleanupRequestID(claim executions.WorkspaceCleanupClaim, action st
 }
 
 func (c *Client) Start(ctx context.Context, executionID uuid.UUID, lease executions.Lease) error {
-	return c.executionRequest(ctx, executionID, "start", executions.LeaseInput{
-		TenantID: lease.TenantID, Generation: lease.Generation, LeaseToken: lease.LeaseToken,
-	}, nil)
+	return c.doJSON(
+		ctx, http.MethodPost, executionPath(executionID, "start"), c.workerToken,
+		executionLifecycleRequestID(executionID, lease, "start", ""),
+		executions.LeaseInput{
+			TenantID: lease.TenantID, Generation: lease.Generation, LeaseToken: lease.LeaseToken,
+		}, nil,
+	)
 }
 
 func (c *Client) MarkWorkspaceReady(
@@ -310,6 +314,9 @@ func (c *Client) ResolveProviderCredentialGrant(
 
 func (c *Client) Renew(ctx context.Context, executionID uuid.UUID, lease executions.Lease) (executions.Lease, error) {
 	var output executions.Lease
+	// Deliberately a fresh request ID per call: Renew is receipt-idempotent and
+	// runs repeatedly inside one Generation, so a stable key would replay the
+	// first response and the lease would silently stop being extended.
 	err := c.executionRequest(ctx, executionID, "renew", executions.RenewLeaseInput{LeaseInput: executions.LeaseInput{
 		TenantID: lease.TenantID, Generation: lease.Generation, LeaseToken: lease.LeaseToken,
 	}}, &output)
@@ -532,17 +539,27 @@ func controlCommandDeliveryRequestID(
 }
 
 func (c *Client) Complete(ctx context.Context, executionID uuid.UUID, lease executions.Lease, result RunnerResult) error {
-	return c.executionRequest(ctx, executionID, "complete", executions.CompleteExecutionInput{
-		LeaseInput:           executions.LeaseInput{TenantID: lease.TenantID, Generation: lease.Generation, LeaseToken: lease.LeaseToken},
-		ProviderResumeCursor: result.ProviderResumeCursor, Output: result.Output,
-	}, nil)
+	return c.doJSON(
+		ctx, http.MethodPost, executionPath(executionID, "complete"), c.workerToken,
+		executionLifecycleRequestID(executionID, lease, "complete", ""),
+		executions.CompleteExecutionInput{
+			LeaseInput:           executions.LeaseInput{TenantID: lease.TenantID, Generation: lease.Generation, LeaseToken: lease.LeaseToken},
+			ProviderResumeCursor: result.ProviderResumeCursor, Output: result.Output,
+		}, nil,
+	)
 }
 
 func (c *Client) Fail(ctx context.Context, executionID uuid.UUID, lease executions.Lease, code, message string) error {
-	return c.executionRequest(ctx, executionID, "fail", executions.FailExecutionInput{
-		LeaseInput:  executions.LeaseInput{TenantID: lease.TenantID, Generation: lease.Generation, LeaseToken: lease.LeaseToken},
-		FailureCode: code, FailureMessage: message,
-	}, nil)
+	// The failure code is part of the key so a different failure reports a new
+	// request instead of colliding with a stored receipt as request_id_reused.
+	return c.doJSON(
+		ctx, http.MethodPost, executionPath(executionID, "fail"), c.workerToken,
+		executionLifecycleRequestID(executionID, lease, "fail", code),
+		executions.FailExecutionInput{
+			LeaseInput:  executions.LeaseInput{TenantID: lease.TenantID, Generation: lease.Generation, LeaseToken: lease.LeaseToken},
+			FailureCode: code, FailureMessage: message,
+		}, nil,
+	)
 }
 
 func (c *Client) Release(ctx context.Context, executionID uuid.UUID, lease executions.Lease, reason string) error {
