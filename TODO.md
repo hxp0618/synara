@@ -369,3 +369,7 @@ Observability 已存在，本阶段负责补齐企业可运营、可支持、可
       `.oxfmtrc.json` 已将 `docs/reports` 加入 ignore；新增证据目录时必须同步维护该 ignore 列表。
 - [ ] 后台恢复/对账类 sweep 必须有唯一的不节流权威（leader-elected reconciler）；散布在请求热路径上的
       opportunistic sweep 只能作为延迟优化，必须节流且不得成为任何正确性前提。
+- [ ] 根 `package.json` 的 `overrides` 优先级高于任何 workspace 包的依赖范围：合并分支时必须把 overrides
+      与各包的直接依赖一起核对。过期的 override 会静默压过 `^x.y.z`，症状是装出低版本、改 lockfile 条目后
+      被重新生成回旧版、`bun update` 也"无效"，极易被误判为镜像元数据陈旧或缓存问题。判定方法是先查
+      `overrides`，而不是先查 registry。同理适用于 `resolutions` 与 workspace `catalog`。
