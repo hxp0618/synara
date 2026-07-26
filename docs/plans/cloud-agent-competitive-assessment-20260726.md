@@ -210,6 +210,35 @@ fencing、幂等 receipt、Recovery Bundle、调度决策证据图、Grant 凭�
 排序原则：A 不新增领域概念且决定产品成立；B 只做露出，收益/成本比最高；C 才引入新原语。任何
 阶段不回退第三节已领先项（S1–S3）的语义。
 
+### 可度量定义：SLO 草案 v0
+
+先分两类以免混淆：**不变式**是契约已保证、必须 100% 的性质（违反即 bug，验收即回归）；**SLO**
+是分位目标，按[方向评估](cloud-agent-direction-assessment-20260726.md)建议 1 升级为 Stage 4 完成
+条件与 release checklist 门禁。市场参照：成熟产品一律不发布延迟 SLO（以异步任务框架 + 环境缓存
+掩盖体感）；公开的供给延迟承诺仅 GKE"90% 分配 ≤200ms"一例。发布明确 SLO 本身即 U9 透明差异化的
+一部分。
+
+不变式（现行契约已保证）：
+
+- 事件零丢失：SSE 重连后按权威 Event Sequence 补齐 backlog，无空洞（S1）。
+- 无第二终态：旧 Generation/Pod/Lease 不能产生第二终态或重复副作用（S3）。
+- 失败必有 bounded class：非用户取消的终态失败 100% 携带低基数失败分类（S4 的数据前提，
+  Migration `000078` 已保证）。
+
+SLO 草案（目标值待评审，度量来源全部已存在）：
+
+| SLI                                  | 目标（草案）                            | 度量来源                                           | 对标  |
+| ------------------------------------ | --------------------------------------- | -------------------------------------------------- | ----- |
+| 交互供给延迟 dispatch→provider ready | warm 命中 P95 ≤2.5s、P99 ≤5s            | trailing-30d Generation facts（`000059`/`000081`） | U1    |
+| interactive lane warm 命中率         | ≥99%（首阶段 ≥95%）                     | warm hit/fallback durable facts                    | U1    |
+| 交互排队时长                         | P95 ≤1s                                 | `synara_execution_queue_*`（`000084`）             | U1    |
+| suspended→可继续输入                 | checkpoint 层 P95 ≤15s；快照层 ≤1s      | claim-time resume decision facts                   | S1/S2 |
+| Worker/Pod 丢失后恢复成功率          | ≥99.5%，outcome-unknown ≤0.1%           | recovery outcome trailing-30d                      | S3    |
+| 控制面就绪可用性                     | enterprise 双副本 99.9%（Stage 5 定稿） | `/ready` 与 readiness 探针序列                     | S1    |
+
+注：延迟目标沿用 fast-provision 提案 §0，补充排队与命中率拆解；outcome-unknown 预算把 fail-closed
+的代价显式化——它是安全边界的成本，不得为清零而放宽不可重放约束。
+
 ## 七、主要外部来源
 
 产品层（一手）：Cursor docs（cloud-agent/security、security-network、setup、automations、api）与
@@ -238,3 +267,5 @@ runloop.ai、beam.cloud、blaxel.ai、AWS Bedrock AgentCore devguide、Azure Bui
   来源节改为第七节；前言标注本文为持续修订文档。
 - 2026-07-26 r3：第六节新增"对齐路线建议"——A（产品成立）/B（易用性齐平）/C（差异化）三阶段，
   与 fast-provision 提案 §6 落地顺序合并，并为各步标注市场参照与反面教材。
+- 2026-07-27 r4：第六节新增"可度量定义：SLO 草案 v0"——区分契约不变式与分位 SLO，六项 SLI 全部
+  映射到既有 trailing-30d 度量，目标值沿用 fast-provision §0 并补排队/warm 命中率拆解。
