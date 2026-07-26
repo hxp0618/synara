@@ -514,6 +514,10 @@ Observability 已存在，本阶段负责补齐企业可运营、可支持、可
       已修一处：`cleanupFixture` 漏了 Migration `000078`/`000081` 新增的两个
       `execution_generation_facts` 子表，补齐后 `internal/executions` 在全新库上从 54 个失败降到 27 个、
       无新增失败。修复该类问题的方法是逐层跑单测看 FK/触发器报错，并用
-      `pg_constraint`/`pg_trigger` 反查真实引用关系，不要照名字猜。
+      `pg_constraint`/`pg_trigger` 反查真实引用关系，不要照名字猜；也不要照兄弟表的写法猜列名——
+      `worker_incarnation_metric_rollup_entries` 按 `worker_id` 组织、没有 `tenant_id` 列，照搬
+      `execution_generation_metric_rollup_entries` 的 `WHERE tenant_id = ?` 会让该包失败数从 27 涨到 80。
+      每次改动都要用失败测试名集合（而非计数）对比前后：清理提前中断会掩盖后续失败，清理走得更远又会
+      暴露新失败，两种效应会让计数互相抵消而失去意义。
       CI 不运行这些门禁测试，所以长期无人察觉；修复前不应把 checklist 的
       "真实 PostgreSQL Integration Test 通过"勾成通过。

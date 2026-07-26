@@ -2948,6 +2948,26 @@ func cleanupFixture(db *gorm.DB, tenantID uuid.UUID) error {
 		).Error; err != nil {
 			return err
 		}
+		// Migration 000079 added this append-only child of
+		// worker_incarnation_facts. Unlike the Generation rollup entries it is
+		// keyed by worker_id with no tenant_id column, so the fixture rows are
+		// reached through the parent fact rather than by tenant directly.
+		if err := tx.Exec(
+			"ALTER TABLE worker_incarnation_metric_rollup_entries DISABLE TRIGGER trg_worker_incarnation_metric_rollup_entries",
+		).Error; err != nil {
+			return err
+		}
+		if err := tx.Exec(
+			"DELETE FROM worker_incarnation_metric_rollup_entries WHERE worker_id IN (SELECT worker_id FROM worker_incarnation_facts WHERE tenant_id = ?)",
+			tenantID,
+		).Error; err != nil {
+			return err
+		}
+		if err := tx.Exec(
+			"ALTER TABLE worker_incarnation_metric_rollup_entries ENABLE TRIGGER trg_worker_incarnation_metric_rollup_entries",
+		).Error; err != nil {
+			return err
+		}
 		if err := tx.Exec("DELETE FROM worker_incarnation_facts WHERE tenant_id = ?", tenantID).Error; err != nil {
 			return err
 		}
