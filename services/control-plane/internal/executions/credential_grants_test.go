@@ -305,8 +305,8 @@ func snapshotProviderCredentialGrantForGeneration(
 	if err := db.Model(&persistence.AgentExecution{}).
 		Where("tenant_id = ? AND id = ?", fixture.TenantID, fixture.ExecutionID).
 		Updates(map[string]any{
-			"generation": generation,
-			"provider_credential_id_snapshot": fixture.ProviderCredentialID,
+			"generation":                           generation,
+			"provider_credential_id_snapshot":      fixture.ProviderCredentialID,
 			"provider_credential_version_snapshot": 1,
 		}).Error; err != nil {
 		t.Fatal(err)

@@ -189,3 +189,51 @@ jobs:
 
       - name: Exercise release-only workflow steps
         run: node scripts/release-smoke.ts
+
+  control-plane:
+    name: Go Control Plane
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: services/control-plane
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: services/control-plane/go.mod
+          cache-dependency-path: services/control-plane/go.sum
+
+      - name: Verify formatting
+        run: |
+          unformatted="$(gofmt -l . | grep -v '^$' || true)"
+          if [ -n "$unformatted" ]; then
+            echo "gofmt reported unformatted files:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Build
+        run: go build ./...
+
+      # The control plane ships to Linux hosts and Kubernetes Pods on both
+      # architectures, and several agentd paths are build-tagged Linux-only, so
+      # they are never compiled by a macOS or amd64-only check.
+      - name: Cross-compile deployment targets
+        run: |
+          GOOS=linux GOARCH=amd64 go build ./...
+          GOOS=linux GOARCH=arm64 go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test ./... -count=1
+
+      # Executions and the reconcilers coordinate through goroutines, atomics
+      # and shared caches; -race is the only check that covers them.
+      - name: Race test
+        run: go test ./internal/agentd/ ./internal/executions/ ./internal/executiontargets/ ./internal/sessions/ -race -count=1

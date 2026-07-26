@@ -156,9 +156,9 @@ func TestSQLiteCredentialBindingsEnforceOwnerPurposeAndGenerationFencing(t *test
 	if err := store.DB().Create(&persistence.AgentExecution{
 		ID: executionID, TenantID: domain.TenantID, SessionID: sessionID, TurnID: turnID,
 		Attempt: 1, Status: "queued", ExecutionTargetID: domain.ExecutionTargetID,
-		ProviderCredentialIDSnapshot: &credential.ID,
+		ProviderCredentialIDSnapshot:      &credential.ID,
 		ProviderCredentialVersionSnapshot: pointerInt(credential.Version),
-		TargetKind: "local", Generation: 1, RequestedBy: domain.UserID, QueuedAt: now,
+		TargetKind:                        "local", Generation: 1, RequestedBy: domain.UserID, QueuedAt: now,
 	}).Error; err != nil {
 		t.Fatal(err)
 	}
