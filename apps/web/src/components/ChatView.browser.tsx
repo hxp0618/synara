@@ -52,10 +52,7 @@ import {
   type ControlPlaneAgentSession,
   controlPlaneClient,
 } from "../lib/controlPlaneClient";
-import {
-  createTestAgentSession,
-  createTestPlatformProfile,
-} from "../lib/controlPlaneTestFixtures";
+import { createTestAgentSession, createTestPlatformProfile } from "../lib/controlPlaneTestFixtures";
 import { resetSharedControlPlaneTurnDispatcherForTests } from "../lib/controlPlaneTurnDispatch";
 import { resetStudioProjectPrewarmStateForTests } from "../lib/studioProjects";
 import { getRouter } from "../router";

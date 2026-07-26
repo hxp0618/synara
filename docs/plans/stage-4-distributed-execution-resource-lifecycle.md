@@ -345,7 +345,7 @@ Operator hard bounds
       durable fact；冷启动 P50/P95/P99 与 recovery outcome 使用 trailing 30-day gauge，不再依赖重复 Event join。
 - [x] PostgreSQL 已覆盖并发 suspend completion 单赢家和 `suspend-resume` 新 Generation lineage。
 - [x] Migration `000057`-`000060` + Worker Pool/Placement v1：显式 `execution-pinned | warm-pool |
-    general-pool` 模式、target-local Pool/Capacity Class/Placement Policy、队列时不可变选择、exact Pool/version/
+  general-pool` 模式、target-local Pool/Capacity Class/Placement Policy、队列时不可变选择、exact Pool/version/
       release Claim fence，以及 Kubernetes release-aware one-shot Warm Pod。已注册、online/active、无 Lease 且
       exact release/pool 匹配的 Worker 才算 ready warm capacity；Claim 与 scale-down 通过 Worker row lock + Lease
       recheck 串行化，Claim 后会在 `maxActiveUnits` 内回补新的 idle slot。Pool/Placement 仍只负责选中 Target 内的
