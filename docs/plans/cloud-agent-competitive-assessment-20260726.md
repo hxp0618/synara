@@ -268,6 +268,35 @@ devcontainer 摄取三家都没有。
 结论：环境模型是 B 阶段体感收益最大的单件——它同时落地 U2（缓存）、U4 前置（自动化需要稳定环境
 引用）、S5（失效语义）与 S6 入口（网络等级），而实现上只是既有 policy/Bundle 模式的一次复用。
 
+### 失败呈现与恢复 UX 建议（S4 的具体化）
+
+市场正反例。反面：Codex"the job was killed during the step (likely due to resource limits)"——不说
+哪种资源、无提额路径，是公开抱怨最集中的稳定性 UX 缺陷；Jules 失败尝试照扣每日额度同为公开痛点。
+正面：Claude 把"内存不足会失败"写成文档化边界并给出 escape hatch（转本地 Remote Control）；Cursor
+用运行 artifacts（截图/录像/日志）让失败可检视；Devin 给子会话结构化输出 schema 与每会话成本上限。
+蒸馏成四条原则：失败必须归因（阶段 × 类别 × 责任方）；失败必须给下一步；恢复必须说明保留了什么；
+失败不应白白计费。
+
+本方案的底层数据已全部存在，缺的只是投影：
+
+- **失败卡片**：阶段（排队/供给/物化/Provider 启动/运行中）× bounded class（Migration `000078` 的
+  Unschedulable/ImagePullBackOff/OOMKilled/Evicted 等分类）× 归因（租户环境/平台/Provider）×
+  建议动作。对照 Codex 反例：OOMKilled 应呈现为"内存超出 capacity class X，建议改用 Y 或调整
+  构建"，而非"job was killed"。
+- **"为什么在等"**：排队时把 `synara_execution_queue_*` 与调度决策的 bounded rejection code
+  （capacity-saturated/health-expired/dr-readiness-\* 等）投影为一句人话；这是调度证据图（第三节
+  优势 3）的第一个用户可见收益。
+- **恢复透明卡**：新 Generation 恢复后显式列出"已保留（权威历史/Workspace checkpoint/待审批
+  interaction）/ 已重建（新 Pod）/ 不确定（outcome-unknown 及其含义）"。outcome-unknown 是市场
+  无对等物的诚实原语——对手在同类场景只能静默重试或静默丢失。
+- **失败不计费政策**：供给阶段失败（Pod 创建/镜像拉取/注册失败）不计入租户用量——release ledger
+  与 requested-resource-seconds 的精确性使这条可以做成硬承诺，直接差异化 Jules 的额度痛点。
+- **边界显式化**：会话创建即显示 capacity class 规格与生命周期边界（Web 已有 lifecycle bounds
+  预览，补资源规格即可），对齐 Claude 的透明做法、避开 Codex/Cursor 的不公布抱怨。
+
+结论：S4 不需要任何新数据或新契约，是纯投影工作；其中"恢复透明卡 + 失败不计费"两项直接把第三节
+的正确性优势转译成用户可感知的稳定性，是"内部深度 → 外部体感"转化率最高的两件。
+
 ## 七、主要外部来源
 
 产品层（一手）：Cursor docs（cloud-agent/security、security-network、setup、automations、api）与
@@ -301,3 +330,6 @@ runloop.ai、beam.cloud、blaxel.ai、AWS Bedrock AgentCore devguide、Azure Bui
 - 2026-07-27 r5：第六节新增"环境模型建议"——蒸馏三家环境配置 UX 收敛形态与公开痛点，给出 Project
   级版本化 Environment 实体形状（复用 Worker Release/policy 冻结/Recovery Bundle 既有模式），并
   接到 U2/U4/S5/S6 与 fast-provision cache-first。
+- 2026-07-27 r6：第六节新增"失败呈现与恢复 UX 建议"——四条市场蒸馏原则（归因/下一步/恢复透明/
+  失败不计费），五个纯投影件（失败卡片、为什么在等、恢复透明卡、失败不计费政策、边界显式化），
+  全部复用既有 durable facts 与调度证据图。
