@@ -212,7 +212,9 @@ export function buildSessionLifecycleOverrideInput(
   };
 }
 
-export function hasSessionLifecycleOverrides(input: ControlPlaneResourceLifecycleOverrideInput): boolean {
+export function hasSessionLifecycleOverrides(
+  input: ControlPlaneResourceLifecycleOverrideInput,
+): boolean {
   return (
     input.waitingKeepAliveSeconds !== null ||
     input.suspendAfterIdleSeconds !== null ||
@@ -236,9 +238,7 @@ export function buildCreateSessionPayload(input: {
     visibility: input.visibility,
     provider: input.provider,
     ...(input.model ? { model: input.model } : {}),
-    ...(input.providerCredentialId
-      ? { providerCredentialId: input.providerCredentialId }
-      : {}),
+    ...(input.providerCredentialId ? { providerCredentialId: input.providerCredentialId } : {}),
     ...(input.executionTargetId ? { executionTargetId: input.executionTargetId } : {}),
     ...(input.resourceLifecyclePolicy
       ? { resourceLifecyclePolicy: input.resourceLifecyclePolicy }
@@ -388,7 +388,8 @@ export function ProjectSessionSettingsSection(props: {
       sessionLifecycleDraftValidationError = error;
     }
   }
-  const selectedProjectLifecycleEffective = selectedProjectLifecyclePolicyQuery.data?.effective ?? null;
+  const selectedProjectLifecycleEffective =
+    selectedProjectLifecyclePolicyQuery.data?.effective ?? null;
   const sessionLifecyclePreview =
     selectedProjectLifecycleEffective && sessionLifecycleDraftInput
       ? applyLifecycleOverrides(selectedProjectLifecycleEffective, sessionLifecycleDraftInput)
@@ -487,7 +488,9 @@ export function ProjectSessionSettingsSection(props: {
     },
   });
   const createSession = useMutation({
-    mutationFn: async (input: { resourceLifecyclePolicy?: ControlPlaneResourceLifecycleOverrideInput }) => {
+    mutationFn: async (input: {
+      resourceLifecyclePolicy?: ControlPlaneResourceLifecycleOverrideInput;
+    }) => {
       const freshProjection = await controlPlaneClient.getProjectProviderCapabilities(
         selectedProjectId!,
         selectedExecutionTargetId ?? undefined,
@@ -930,9 +933,7 @@ export function ProjectSessionSettingsSection(props: {
                           <p className="text-xs font-medium text-foreground">
                             Session lifecycle overrides
                           </p>
-                          <p className="text-xs text-muted-foreground">
-                            {sessionLifecycleSummary}
-                          </p>
+                          <p className="text-xs text-muted-foreground">{sessionLifecycleSummary}</p>
                         </div>
                         <Button
                           size="sm"
@@ -940,16 +941,23 @@ export function ProjectSessionSettingsSection(props: {
                           variant="outline"
                           onClick={() => setSessionLifecycleOverridesOpen((open) => !open)}
                         >
-                          <DisclosureChevron open={sessionLifecycleOverridesOpen} className="size-3.5" />
-                          {sessionLifecycleOverridesOpen ? "Hide overrides" : "Customize for this Session"}
+                          <DisclosureChevron
+                            open={sessionLifecycleOverridesOpen}
+                            className="size-3.5"
+                          />
+                          {sessionLifecycleOverridesOpen
+                            ? "Hide overrides"
+                            : "Customize for this Session"}
                         </Button>
                       </div>
-                      <DisclosureRegion open={sessionLifecycleOverridesOpen} contentClassName="pt-3">
+                      <DisclosureRegion
+                        open={sessionLifecycleOverridesOpen}
+                        contentClassName="pt-3"
+                      >
                         <div className={formGridClassName}>
                           <p className="text-xs text-muted-foreground sm:col-span-2">
-                            Leave every field blank to inherit from the selected Project policy.
-                            The control plane computes the effective Session policy at creation
-                            time.
+                            Leave every field blank to inherit from the selected Project policy. The
+                            control plane computes the effective Session policy at creation time.
                           </p>
                           <p className="text-xs text-muted-foreground sm:col-span-2">
                             Runtime enforces waiting keep-alive and absolute lifetime. Suspend after
@@ -994,8 +1002,14 @@ export function ProjectSessionSettingsSection(props: {
                           <FormField label="Absolute session lifetime (seconds)">
                             <Input
                               inputMode="numeric"
-                              max={props.resourceLifecycleConfig.bounds.absoluteSessionLifetimeSeconds.max}
-                              min={props.resourceLifecycleConfig.bounds.absoluteSessionLifetimeSeconds.min}
+                              max={
+                                props.resourceLifecycleConfig.bounds.absoluteSessionLifetimeSeconds
+                                  .max
+                              }
+                              min={
+                                props.resourceLifecycleConfig.bounds.absoluteSessionLifetimeSeconds
+                                  .min
+                              }
                               placeholder="Inherit"
                               type="number"
                               value={sessionLifecycleDraft.absoluteSessionLifetimeSeconds}
@@ -1032,8 +1046,9 @@ export function ProjectSessionSettingsSection(props: {
                               onChange={(event) => {
                                 setSessionLifecycleDraft((draft) => ({
                                   ...draft,
-                                  warmPoolMode:
-                                    event.target.value as ControlPlaneResourceLifecycleWarmPoolMode | "",
+                                  warmPoolMode: event.target.value as
+                                    | ControlPlaneResourceLifecycleWarmPoolMode
+                                    | "",
                                 }));
                                 setSessionLifecycleInputError(null);
                               }}

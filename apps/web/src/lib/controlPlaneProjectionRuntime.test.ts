@@ -7,6 +7,7 @@ import {
   type ControlPlaneSessionEventPage,
 } from "./controlPlaneClient";
 import { ControlPlaneProjectionRuntime } from "./controlPlaneProjectionRuntime";
+import { createTestAgentSession } from "./controlPlaneTestFixtures";
 
 class FakeEventSource {
   static instances: FakeEventSource[] = [];
@@ -37,24 +38,7 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-const session: ControlPlaneAgentSession = {
-  id: "session-1",
-  tenantId: "tenant-1",
-  organizationId: "organization-1",
-  projectId: "project-1",
-  createdBy: "user-1",
-  title: "Remote session",
-  status: "active",
-  visibility: "private",
-  provider: "codex",
-  model: "gpt-5.6-sol",
-  providerCredentialId: null,
-  executionTargetId: "target-1",
-  lastEventSequence: 2,
-  createdAt: "2026-07-12T00:00:00Z",
-  updatedAt: "2026-07-12T00:00:00Z",
-  archivedAt: null,
-};
+const session: ControlPlaneAgentSession = createTestAgentSession({ lastEventSequence: 2 });
 
 function event(sequence: number, eventType = "runtime.output.delta"): ControlPlaneSessionEvent {
   return {

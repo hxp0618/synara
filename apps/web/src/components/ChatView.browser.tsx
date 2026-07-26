@@ -47,7 +47,15 @@ import {
 import { isMacPlatform } from "../lib/utils";
 import { readNativeApi } from "../nativeApi";
 import { resetHomeChatProjectPrewarmStateForTests } from "../lib/chatProjects";
-import { ControlPlaneError, controlPlaneClient } from "../lib/controlPlaneClient";
+import {
+  ControlPlaneError,
+  type ControlPlaneAgentSession,
+  controlPlaneClient,
+} from "../lib/controlPlaneClient";
+import {
+  createTestAgentSession,
+  createTestPlatformProfile,
+} from "../lib/controlPlaneTestFixtures";
 import { resetSharedControlPlaneTurnDispatcherForTests } from "../lib/controlPlaneTurnDispatch";
 import { resetStudioProjectPrewarmStateForTests } from "../lib/studioProjects";
 import { getRouter } from "../router";
@@ -1229,25 +1237,17 @@ function createAuthoritativeSession(
     lastEventSequence: number;
     updatedAt: string;
   }> = {},
-) {
-  return {
+): ControlPlaneAgentSession {
+  return createTestAgentSession({
     id: sessionId,
-    tenantId: "tenant-1",
-    organizationId: "organization-1",
     projectId: overrides.projectId ?? PROJECT_ID,
-    createdBy: "user-1",
     title: overrides.title ?? "Authoritative session",
-    status: "active" as const,
-    visibility: "private" as const,
-    provider: "codex" as const,
     model: overrides.model ?? "gpt-5",
-    providerCredentialId: null,
-    executionTargetId: "target-1",
     lastEventSequence: overrides.lastEventSequence ?? 0,
+    meaningfulActivityAt: NOW_ISO,
     createdAt: NOW_ISO,
     updatedAt: overrides.updatedAt ?? NOW_ISO,
-    archivedAt: null,
-  };
+  });
 }
 
 function supportedCapabilityProjection(
@@ -1296,19 +1296,7 @@ function installAuthoritativeControlPlaneFixture(options?: {
   }> = [];
   let createTurnFailuresRemaining = options?.createTurnFailures ?? 0;
   let modelSwitchConflictsRemaining = options?.modelSwitchConflictOnce ? 1 : 0;
-  const profile = {
-    profile: "enterprise" as const,
-    metadataStore: "postgresql" as const,
-    artifactStore: "minio" as const,
-    queueDriver: "postgres-outbox" as const,
-    controlPlaneReplicas: 1,
-    highAvailability: false,
-    leaseEnabled: true,
-    fencingEnabled: true,
-    executionTargetKinds: ["docker"] as const,
-    artifactPayloadMigration: false,
-    metadataExportImport: false,
-  };
+  const profile = createTestPlatformProfile();
   const sessionState = {
     authenticated: true as const,
     user: {
