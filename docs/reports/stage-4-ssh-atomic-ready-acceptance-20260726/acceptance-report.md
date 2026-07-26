@@ -22,24 +22,24 @@ This report uses the deterministic Provider Host fixture through the real Contro
 
 ## Cases
 
-| Case | Status | Duration | Reason |
-| --- | --- | ---: | --- |
-| `environment.target-prepare` | pass | 44187 ms |  |
-| `environment.control-plane-start` | pass | 1686 ms |  |
-| `identity.dev-login` | pass | 6 ms |  |
-| `runtime.worker-discovery` | pass | 16654 ms |  |
-| `resources.credential-project-session` | pass | 7 ms |  |
-| `fixture.text-tool-usage-artifact` | pass | 1824 ms |  |
-| `fixture.approval-resolution` | pass | 1579 ms |  |
-| `fixture.terminal-large-log` | pass | 1826 ms |  |
-| `fixture.user-input-resolution` | pass | 1848 ms |  |
-| `fixture.provider-error` | pass | 1317 ms |  |
-| `recovery.worker-replacement` | pass | 37083 ms |  |
-| `recovery.post-replacement-workspace-turn` | pass | 515 ms |  |
-| `recovery.control-plane-restart` | pass | 132 ms |  |
-| `fixture.second-turn-continuity` | pass | 1048 ms |  |
-| `environment.cleanup` | pass | 0 ms |  |
-| `security.output-secret-scan` | pass | 4 ms |  |
+| Case                                       | Status | Duration | Reason |
+| ------------------------------------------ | ------ | -------: | ------ |
+| `environment.target-prepare`               | pass   | 44187 ms |        |
+| `environment.control-plane-start`          | pass   |  1686 ms |        |
+| `identity.dev-login`                       | pass   |     6 ms |        |
+| `runtime.worker-discovery`                 | pass   | 16654 ms |        |
+| `resources.credential-project-session`     | pass   |     7 ms |        |
+| `fixture.text-tool-usage-artifact`         | pass   |  1824 ms |        |
+| `fixture.approval-resolution`              | pass   |  1579 ms |        |
+| `fixture.terminal-large-log`               | pass   |  1826 ms |        |
+| `fixture.user-input-resolution`            | pass   |  1848 ms |        |
+| `fixture.provider-error`                   | pass   |  1317 ms |        |
+| `recovery.worker-replacement`              | pass   | 37083 ms |        |
+| `recovery.post-replacement-workspace-turn` | pass   |   515 ms |        |
+| `recovery.control-plane-restart`           | pass   |   132 ms |        |
+| `fixture.second-turn-continuity`           | pass   |  1048 ms |        |
+| `environment.cleanup`                      | pass   |     0 ms |        |
+| `security.output-secret-scan`              | pass   |     4 ms |        |
 
 ## Evidence
 
@@ -134,10 +134,7 @@ This report uses the deterministic Provider Host fixture through the real Contro
   },
   "workerProxy": {
     "advertisedHost": "127.0.0.1",
-    "allowedPathPrefixes": [
-      "/v1/workers/",
-      "/v1/artifact-content/"
-    ],
+    "allowedPathPrefixes": ["/v1/workers/", "/v1/artifact-content/"],
     "faultInjection": "runner-owned transport close before HTTP forwarding",
     "listenAddress": "0.0.0.0",
     "port": 64991,
@@ -299,9 +296,7 @@ This report uses the deterministic Provider Host fixture through the real Contro
     "status": "ready"
   },
   "credentialEvidence": {
-    "credentialPayloadKeys": [
-      "apiKey"
-    ],
+    "credentialPayloadKeys": ["apiKey"],
     "credentialVerified": true
   },
   "eventTypes": [
@@ -553,10 +548,7 @@ This report uses the deterministic Provider Host fixture through the real Contro
   },
   "workerProxy": {
     "advertisedHost": "127.0.0.1",
-    "allowedPathPrefixes": [
-      "/v1/workers/",
-      "/v1/artifact-content/"
-    ],
+    "allowedPathPrefixes": ["/v1/workers/", "/v1/artifact-content/"],
     "faultInjection": "runner-owned transport close before HTTP forwarding",
     "listenAddress": "0.0.0.0",
     "port": 64991,
@@ -634,22 +626,10 @@ This report uses the deterministic Provider Host fixture through the real Contro
 
 ```json
 {
-  "fileTypes": [
-    ".json",
-    ".log",
-    ".md",
-    ".txt",
-    ".yaml",
-    ".yml"
-  ],
+  "fileTypes": [".json", ".log", ".md", ".txt", ".yaml", ".yml"],
   "findings": [],
   "knownSecretCount": 11,
-  "patternNames": [
-    "private-key-pem",
-    "aws-access-key",
-    "github-token",
-    "openai-style-key"
-  ],
+  "patternNames": ["private-key-pem", "aws-access-key", "github-token", "openai-style-key"],
   "scannedBytes": 186712,
   "scannedFiles": 13,
   "scope": "acceptance JSON, Markdown, text metadata, and redacted logs; binary SQLite/Artifacts excluded"

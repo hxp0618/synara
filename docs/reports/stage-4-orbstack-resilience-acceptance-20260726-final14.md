@@ -32,20 +32,20 @@ deployment, or production release gate.
 
 ## Frozen acceptance inputs
 
-| Asset | SHA-256 |
-| --- | --- |
-| `deploy/kubernetes/resilience-acceptance.sh` | `832d2c4476218d72b831b46317377a03dc359e24390a7da647c9e1edef7abd34` |
-| `deploy/kubernetes/managed-hook-controller.py` | `c9086ba399ee84163d78444ecd6a6bf08712861b4bc1c0a79e08d6e60e7adfb3` |
-| `deploy/kubernetes/test_managed_hook_controller.py` | `9fe1819dfb625bc0b77e3e45e0762a3338910a4e8b22a871a79c84cc282550c3` |
-| `deploy/kubernetes/validate-resilience-assets.py` | `4df6bd26c4beb60562d23dade59ca39c16f57ba6dbd3dc72b7d7fb42b2ed1a24` |
-| `deploy/kubernetes/validate-resilience-assets.sh` | `59003c25b7001c26ae391034e9d883c0e5bb9c266add651d0f8129ad054cfbdd` |
-| `services/control-plane/Dockerfile` | `cd8747438e2b1ef24bbcaf23f58a4cd589e5e89776f319052fd8ee3afe561a4c` |
-| `services/control-plane/migrations/000071_ssh_target_operation_fencing.sql` | `db979123f806bcab43ce3fd2997330932052ff83b3fd7e93c9505bc45cfabb39` |
-| `services/control-plane/migrations/000072_ssh_bootstrap_authority.sql` | `975171705f3f8af8f6fe214589f9bd6a9166dbd0403ef9276672640c97fb64ce` |
+| Asset                                                                          | SHA-256                                                            |
+| ------------------------------------------------------------------------------ | ------------------------------------------------------------------ |
+| `deploy/kubernetes/resilience-acceptance.sh`                                   | `832d2c4476218d72b831b46317377a03dc359e24390a7da647c9e1edef7abd34` |
+| `deploy/kubernetes/managed-hook-controller.py`                                 | `c9086ba399ee84163d78444ecd6a6bf08712861b4bc1c0a79e08d6e60e7adfb3` |
+| `deploy/kubernetes/test_managed_hook_controller.py`                            | `9fe1819dfb625bc0b77e3e45e0762a3338910a4e8b22a871a79c84cc282550c3` |
+| `deploy/kubernetes/validate-resilience-assets.py`                              | `4df6bd26c4beb60562d23dade59ca39c16f57ba6dbd3dc72b7d7fb42b2ed1a24` |
+| `deploy/kubernetes/validate-resilience-assets.sh`                              | `59003c25b7001c26ae391034e9d883c0e5bb9c266add651d0f8129ad054cfbdd` |
+| `services/control-plane/Dockerfile`                                            | `cd8747438e2b1ef24bbcaf23f58a4cd589e5e89776f319052fd8ee3afe561a4c` |
+| `services/control-plane/migrations/000071_ssh_target_operation_fencing.sql`    | `db979123f806bcab43ce3fd2997330932052ff83b3fd7e93c9505bc45cfabb39` |
+| `services/control-plane/migrations/000072_ssh_bootstrap_authority.sql`         | `975171705f3f8af8f6fe214589f9bd6a9166dbd0403ef9276672640c97fb64ce` |
 | `services/control-plane/migrations/000073_ssh_worker_bootstrap_generation.sql` | `7aa8fe173a3faba337093eae88166d2efe4d4e1306c2d73045f4fc0882dbb2da` |
-| Final14 JSON evidence | `a9583456dc73d20b75c2c1d403df7f4be34e1875086a4aa48154f2d362235ca4` |
-| JSONL progress journal | `74a2dacb13b53cab9cf7be0ac527b42f6d931d4c524f896b72c872eab4ac4a6b` |
-| Atomic progress snapshot | `45f40a888acc0e011015c183d6e25eb9bcdaf01f311367b3d075df2daea59aa9` |
+| Final14 JSON evidence                                                          | `a9583456dc73d20b75c2c1d403df7f4be34e1875086a4aa48154f2d362235ca4` |
+| JSONL progress journal                                                         | `74a2dacb13b53cab9cf7be0ac527b42f6d931d4c524f896b72c872eab4ac4a6b` |
+| Atomic progress snapshot                                                       | `45f40a888acc0e011015c183d6e25eb9bcdaf01f311367b3d075df2daea59aa9` |
 
 The hashes bind this report to the exact dirty files used for the local run; they do not make the worktree
 reconstructible.

@@ -36,17 +36,17 @@ deployment, or production release gate.
 
 ## Frozen acceptance inputs
 
-| Asset | SHA-256 |
-| --- | --- |
-| `deploy/kubernetes/acceptance.sh` | `476b38842dc09d416b4abbebb30e12916c06270f936bf22402b07faa96c6d3ac` |
-| `deploy/kubernetes/resilience-acceptance.sh` | `c2171e0f0fcef6ae1c6d826e29d4df326db6a4478a7882b012b0fab086fded63` |
-| `deploy/kubernetes/validate-resilience-assets.py` | `4cb1b1d48f913ce63cc094b65880d277d5c2045dedd51bc9a59a7afd282f1d3d` |
-| `services/control-plane/Dockerfile` | `cd8747438e2b1ef24bbcaf23f58a4cd589e5e89776f319052fd8ee3afe561a4c` |
-| `services/control-plane/migrations/000069_worker_pool_warm_capacity.sql` | `3c3563ff70e589afa3d99424aba70898528c5dd757f97b5b71aabf8676ba9812` |
+| Asset                                                                         | SHA-256                                                            |
+| ----------------------------------------------------------------------------- | ------------------------------------------------------------------ |
+| `deploy/kubernetes/acceptance.sh`                                             | `476b38842dc09d416b4abbebb30e12916c06270f936bf22402b07faa96c6d3ac` |
+| `deploy/kubernetes/resilience-acceptance.sh`                                  | `c2171e0f0fcef6ae1c6d826e29d4df326db6a4478a7882b012b0fab086fded63` |
+| `deploy/kubernetes/validate-resilience-assets.py`                             | `4cb1b1d48f913ce63cc094b65880d277d5c2045dedd51bc9a59a7afd282f1d3d` |
+| `services/control-plane/Dockerfile`                                           | `cd8747438e2b1ef24bbcaf23f58a4cd589e5e89776f319052fd8ee3afe561a4c` |
+| `services/control-plane/migrations/000069_worker_pool_warm_capacity.sql`      | `3c3563ff70e589afa3d99424aba70898528c5dd757f97b5b71aabf8676ba9812` |
 | `services/control-plane/migrations/000070_kubernetes_pod_deletion_fences.sql` | `e9a936a14a481180fabaacb6fe2814caddd39dd510f8f65fc44c49dc2482dfcd` |
-| Final JSON evidence | `71fc63e1f17c35b8bb8ad27962f4479f4636952c9381be94b4c61977c1849132` |
-| JSONL progress journal | `fb18672f52f94ace2fccfe109bff583a61cd1b1891c4a9118b24e07653c6638a` |
-| Atomic progress snapshot | `7666990e3d1b61b52e3c68c16624100f8be654b8a9586c008e7ccbcf72b8d577` |
+| Final JSON evidence                                                           | `71fc63e1f17c35b8bb8ad27962f4479f4636952c9381be94b4c61977c1849132` |
+| JSONL progress journal                                                        | `fb18672f52f94ace2fccfe109bff583a61cd1b1891c4a9118b24e07653c6638a` |
+| Atomic progress snapshot                                                      | `7666990e3d1b61b52e3c68c16624100f8be654b8a9586c008e7ccbcf72b8d577` |
 
 The hashes were captured after the proof. The exact final9 image and retained Kubernetes resources remain available
 for follow-up inspection.

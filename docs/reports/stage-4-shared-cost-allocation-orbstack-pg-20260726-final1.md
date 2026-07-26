@@ -70,17 +70,17 @@ platform_idle_seconds = 3600
 
 Charge-slice aggregate:
 
-| Allocation | Charge | Slices | Billable seconds | Amount micros |
-| --- | --- | ---: | ---: | ---: |
-| platform-idle | cpu | 4 | 3600 | 5,400,000 |
-| platform-idle | ephemeral-storage | 4 | 3600 | 3,000,000 |
-| platform-idle | memory | 4 | 3600 | 3,000,000 |
-| platform-idle | pod | 4 | 3600 | 5,400,000 |
-| tenant-claim | cpu | 2 | 3600 | 5,400,000 |
-| tenant-claim | ephemeral-storage | 2 | 3600 | 3,000,000 |
-| tenant-claim | memory | 2 | 3600 | 3,000,000 |
-| tenant-claim | pod | 2 | 3600 | 5,400,000 |
-| tenant-claim | request | 3 | 0 | 1,500,000 |
+| Allocation    | Charge            | Slices | Billable seconds | Amount micros |
+| ------------- | ----------------- | -----: | ---------------: | ------------: |
+| platform-idle | cpu               |      4 |             3600 |     5,400,000 |
+| platform-idle | ephemeral-storage |      4 |             3600 |     3,000,000 |
+| platform-idle | memory            |      4 |             3600 |     3,000,000 |
+| platform-idle | pod               |      4 |             3600 |     5,400,000 |
+| tenant-claim  | cpu               |      2 |             3600 |     5,400,000 |
+| tenant-claim  | ephemeral-storage |      2 |             3600 |     3,000,000 |
+| tenant-claim  | memory            |      2 |             3600 |     3,000,000 |
+| tenant-claim  | pod               |      2 |             3600 |     5,400,000 |
+| tenant-claim  | request           |      3 |                0 |     1,500,000 |
 
 For every time-based charge kind, tenant plus platform-idle amounts equal the full two-tariff Worker amount. Request
 charges are attributed only to their exact Claim/Tenant, including the terminal-boundary claim; platform idle never
@@ -88,13 +88,13 @@ receives a request charge or a synthetic Tenant.
 
 ## Source binding
 
-| Source | SHA-256 |
-| --- | --- |
-| `migrations/000077_shared_target_cost_allocation.sql` | `df93010cff7243eb62ee1424aed95c9e830bfd129b5377d429b168ef5db056e7` |
-| `internal/persistence/shared_cost_allocation_models.go` | `effb05c4646171998ed3d1572a546331eb7cd1ef4a2565902ea647ebce61e6fc` |
-| `internal/database/shared_cost_allocation_sqlite.go` | `83b199026865b2e66fe60157169018ccf43beba0ab2e608b17440791b348828a` |
-| `internal/billing/shared_allocation.go` | `c207014a4717e51b2910379dca709c39f083b90cadc8a1478a0027d4528961ff` |
-| `internal/billing/shared_allocation_test.go` | `1112191ead6b4a0688a58f310798e5ceff582bbb399e074bd4774b53bd7a57a0` |
+| Source                                                            | SHA-256                                                            |
+| ----------------------------------------------------------------- | ------------------------------------------------------------------ |
+| `migrations/000077_shared_target_cost_allocation.sql`             | `df93010cff7243eb62ee1424aed95c9e830bfd129b5377d429b168ef5db056e7` |
+| `internal/persistence/shared_cost_allocation_models.go`           | `effb05c4646171998ed3d1572a546331eb7cd1ef4a2565902ea647ebce61e6fc` |
+| `internal/database/shared_cost_allocation_sqlite.go`              | `83b199026865b2e66fe60157169018ccf43beba0ab2e608b17440791b348828a` |
+| `internal/billing/shared_allocation.go`                           | `c207014a4717e51b2910379dca709c39f083b90cadc8a1478a0027d4528961ff` |
+| `internal/billing/shared_allocation_test.go`                      | `1112191ead6b4a0688a58f310798e5ceff582bbb399e074bd4774b53bd7a57a0` |
 | `internal/billing/shared_allocation_postgres_integration_test.go` | `22ca4d41acfd9102e534fc38fc80f19e0a5c28d2e55acdf8bb11fa33f343d9f7` |
 
 ## Boundaries and remaining gates

@@ -26,12 +26,12 @@ deployment, or production release gate.
 
 ## Frozen acceptance inputs
 
-| Asset | SHA-256 |
-| --- | --- |
-| `deploy/kubernetes/acceptance.sh` | `476b38842dc09d416b4abbebb30e12916c06270f936bf22402b07faa96c6d3ac` |
-| `deploy/kubernetes/resilience-acceptance.sh` | `613cb224360b3697c775257d3fb4c70d2955d80eac25d85e7a247965b527e047` |
+| Asset                                             | SHA-256                                                            |
+| ------------------------------------------------- | ------------------------------------------------------------------ |
+| `deploy/kubernetes/acceptance.sh`                 | `476b38842dc09d416b4abbebb30e12916c06270f936bf22402b07faa96c6d3ac` |
+| `deploy/kubernetes/resilience-acceptance.sh`      | `613cb224360b3697c775257d3fb4c70d2955d80eac25d85e7a247965b527e047` |
 | `deploy/kubernetes/validate-resilience-assets.py` | `01fb834d52380b2577309cec14ce089556944ec3209c6274d2130cc962b16a50` |
-| `services/control-plane/Dockerfile` | `cd8747438e2b1ef24bbcaf23f58a4cd589e5e89776f319052fd8ee3afe561a4c` |
+| `services/control-plane/Dockerfile`               | `cd8747438e2b1ef24bbcaf23f58a4cd589e5e89776f319052fd8ee3afe561a4c` |
 
 The hashes were captured after the proof and before exact image cleanup; the acceptance assets were unchanged during
 the run.

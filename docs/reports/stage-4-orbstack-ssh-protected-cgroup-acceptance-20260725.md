@@ -17,15 +17,15 @@ deployment, or a Stage 4 release-completion claim.
 
 ## Bound identities
 
-| Identity | Value |
-| --- | --- |
-| Tenant | `34fef581-69f9-5b83-bcc4-54e19ba7ece4` |
-| Organization | `11daa2d0-6f97-5dae-a2ad-36f16ff014ff` |
-| Execution Target | `789d5070-97e6-4832-908e-2f962eecc61d` |
-| Worker | `7f93c1a5-95dd-434c-bfa8-d44b87f6abc3` |
-| Worker instance UID | `a9fbda21-9b2c-4268-9380-fcd80a6f3563` |
-| Worker Manifest | `27537d5e-9f15-4127-9050-5a6768258fc7` |
-| Service | `synara-agentd-789d5070-97e6-4832-908e-2f962eecc61d.service` |
+| Identity            | Value                                                        |
+| ------------------- | ------------------------------------------------------------ |
+| Tenant              | `34fef581-69f9-5b83-bcc4-54e19ba7ece4`                       |
+| Organization        | `11daa2d0-6f97-5dae-a2ad-36f16ff014ff`                       |
+| Execution Target    | `789d5070-97e6-4832-908e-2f962eecc61d`                       |
+| Worker              | `7f93c1a5-95dd-434c-bfa8-d44b87f6abc3`                       |
+| Worker instance UID | `a9fbda21-9b2c-4268-9380-fcd80a6f3563`                       |
+| Worker Manifest     | `27537d5e-9f15-4127-9050-5a6768258fc7`                       |
+| Service             | `synara-agentd-789d5070-97e6-4832-908e-2f962eecc61d.service` |
 
 The Execution Target was created through an isolated local Control Plane API and installed through the real SSH
 provisioner. The Worker subsequently registered as `online` and `compatible`; the Control Plane's current Worker

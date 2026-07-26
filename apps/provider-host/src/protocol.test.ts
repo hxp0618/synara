@@ -526,11 +526,7 @@ describe("Provider Host Protocol v2", () => {
 
     const send = handle(command("SendTurn", { inputText: "long task" }, "send-suspend-cursor"));
     const suspend = handle(
-      command(
-        "SuspendTurn",
-        { targetCommandId: "send-suspend-cursor" },
-        "suspend-missing-cursor",
-      ),
+      command("SuspendTurn", { targetCommandId: "send-suspend-cursor" }, "suspend-missing-cursor"),
     );
 
     rejectRun?.(new ProviderInterruptedError());
@@ -753,11 +749,7 @@ describe("Provider Host Protocol v2", () => {
         }) satisfies ProviderRunController,
     });
     await handle(
-      command(
-        "ResumeSession",
-        { runnerInput: remoteRunnerInput(true) },
-        "session-primary-suspend",
-      ),
+      command("ResumeSession", { runnerInput: remoteRunnerInput(true) }, "session-primary-suspend"),
     );
 
     const compact = handle(command("CompactSession", {}, "compact-suspend"));

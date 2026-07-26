@@ -36,8 +36,7 @@ export function buildPlacementPolicyInput(
     expectedVersion: state.policy.version,
     defaultPoolId: field === "defaultPoolId" ? value : state.policy.defaultPoolId,
     balancedPoolId: field === "balancedPoolId" ? value || null : state.policy.balancedPoolId,
-    lowLatencyPoolId:
-      field === "lowLatencyPoolId" ? value || null : state.policy.lowLatencyPoolId,
+    lowLatencyPoolId: field === "lowLatencyPoolId" ? value || null : state.policy.lowLatencyPoolId,
   };
 }
 
@@ -102,20 +101,12 @@ export function WorkerPoolPlacementControls(props: {
       defaultPoolId: string;
       balancedPoolId: string | null;
       lowLatencyPoolId: string | null;
-    }) =>
-      controlPlaneClient.updateExecutionPlacementPolicy(
-        props.tenantId,
-        props.target.id,
-        input,
-      ),
+    }) => controlPlaneClient.updateExecutionPlacementPolicy(props.tenantId, props.target.id, input),
     onSuccess: (next) => queryClient.setQueryData(queryKey, next),
   });
 
   const state = placement.data;
-  const updateMapping = (
-    field: WorkerPoolPlacementPolicyField,
-    value: string,
-  ) => {
+  const updateMapping = (field: WorkerPoolPlacementPolicyField, value: string) => {
     if (!state || updatePolicy.isPending) return;
     updatePolicy.mutate(buildPlacementPolicyInput(state, field, value));
   };
@@ -138,17 +129,13 @@ export function WorkerPoolPlacementControls(props: {
           <WorkerPoolInventory
             canManage={props.canManage}
             onUpdated={(next) => {
-              queryClient.setQueryData<ControlPlaneExecutionPlacementState>(
-                queryKey,
-                (current) =>
-                  current
-                    ? {
-                        ...current,
-                        pools: current.pools.map((pool) =>
-                          pool.id === next.id ? next : pool,
-                        ),
-                      }
-                    : current,
+              queryClient.setQueryData<ControlPlaneExecutionPlacementState>(queryKey, (current) =>
+                current
+                  ? {
+                      ...current,
+                      pools: current.pools.map((pool) => (pool.id === next.id ? next : pool)),
+                    }
+                  : current,
               );
             }}
             state={state}
@@ -208,9 +195,7 @@ function WorkerPoolInventoryRow(props: {
   canManage: boolean;
   onUpdated: (pool: ControlPlaneWorkerPool) => void;
 }) {
-  const [desiredIdleUnits, setDesiredIdleUnits] = useState(
-    String(props.pool.desiredIdleUnits),
-  );
+  const [desiredIdleUnits, setDesiredIdleUnits] = useState(String(props.pool.desiredIdleUnits));
   const [maxActiveUnits, setMaxActiveUnits] = useState(String(props.pool.maxActiveUnits));
   const [status, setStatus] = useState<ControlPlaneWorkerPoolStatus>(props.pool.status);
   const updatePool = useMutation({
@@ -286,9 +271,7 @@ function WorkerPoolInventoryRow(props: {
             <select
               className={CONTROL_PLANE_NATIVE_SELECT_CLASS_NAME}
               value={status}
-              onChange={(event) =>
-                setStatus(event.target.value as ControlPlaneWorkerPoolStatus)
-              }
+              onChange={(event) => setStatus(event.target.value as ControlPlaneWorkerPoolStatus)}
             >
               <option value="active">Active</option>
               <option value="draining">Draining</option>
@@ -305,9 +288,7 @@ function WorkerPoolInventoryRow(props: {
             </Button>
           </span>
           {updatePool.error ? (
-            <p className="text-destructive sm:col-span-4">
-              {errorMessage(updatePool.error)}
-            </p>
+            <p className="text-destructive sm:col-span-4">{errorMessage(updatePool.error)}</p>
           ) : null}
         </form>
       ) : null}
@@ -318,10 +299,7 @@ function WorkerPoolInventoryRow(props: {
 function PlacementPolicyEditor(props: {
   state: ControlPlaneExecutionPlacementState;
   disabled: boolean;
-  onChange: (
-    field: "defaultPoolId" | "balancedPoolId" | "lowLatencyPoolId",
-    value: string,
-  ) => void;
+  onChange: (field: "defaultPoolId" | "balancedPoolId" | "lowLatencyPoolId", value: string) => void;
 }) {
   const activePools = props.state.pools.filter((pool) => pool.status === "active");
   return (

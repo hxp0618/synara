@@ -13,14 +13,14 @@ combined into a managed-cloud pass.
 
 Every report declares exactly one evidence level:
 
-| Level | Name | Meaning | Eligible for managed-cloud pass |
-| --- | --- | --- | --- |
-| `E0` | design/static | Contract, schema, or source inspection only. | No |
-| `E1` | repository-verified | Focused tests exercise parsers, normalization, imports, and fail-closed behavior. | No |
-| `E2` | emulated | Local files, fixtures, MinIO, fake SDKs, fake metadata services, or another provider-compatible emulator are used. | No |
-| `E3` | local-runtime | Real PostgreSQL, local Kubernetes/Kind/OrbStack, real kubelet, versioned local object storage, or local workload-token plumbing is used. | No |
-| `E4` | managed-cloud-provider | One complete AWS, GCP, or Azure gate runs against that provider's managed identity and real billing-export delivery. | Yes, for that provider only |
-| `E5` | release-accepted | All provider gates claimed by the release are current, complete, and bound to the exact released artifacts. | Yes, only for the declared provider set |
+| Level | Name                   | Meaning                                                                                                                                  | Eligible for managed-cloud pass         |
+| ----- | ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------- |
+| `E0`  | design/static          | Contract, schema, or source inspection only.                                                                                             | No                                      |
+| `E1`  | repository-verified    | Focused tests exercise parsers, normalization, imports, and fail-closed behavior.                                                        | No                                      |
+| `E2`  | emulated               | Local files, fixtures, MinIO, fake SDKs, fake metadata services, or another provider-compatible emulator are used.                       | No                                      |
+| `E3`  | local-runtime          | Real PostgreSQL, local Kubernetes/Kind/OrbStack, real kubelet, versioned local object storage, or local workload-token plumbing is used. | No                                      |
+| `E4`  | managed-cloud-provider | One complete AWS, GCP, or Azure gate runs against that provider's managed identity and real billing-export delivery.                     | Yes, for that provider only             |
+| `E5`  | release-accepted       | All provider gates claimed by the release are current, complete, and bound to the exact released artifacts.                              | Yes, only for the declared provider set |
 
 Evidence never upgrades itself. In particular:
 

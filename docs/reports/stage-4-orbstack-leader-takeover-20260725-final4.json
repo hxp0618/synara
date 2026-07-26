@@ -16,9 +16,7 @@
     "status": "skipped",
     "durationSeconds": 0
   },
-  "plannedCases": [
-    "leader-takeover"
-  ],
+  "plannedCases": ["leader-takeover"],
   "allowedSkippedCases": [],
   "caseCounts": {
     "passed": 0,

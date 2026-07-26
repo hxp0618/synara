@@ -193,9 +193,7 @@ class CodexAppServerRuntime {
       if (this.options.operation?.commandType === "StartReview") {
         return await this.runReview(this.options.operation.payload.target);
       }
-      const prompt = resumed
-        ? this.options.nativeResumePrompt
-        : this.options.authoritativePrompt;
+      const prompt = resumed ? this.options.nativeResumePrompt : this.options.authoritativePrompt;
       const turnParams = {
         threadId: this.threadId,
         input: [{ type: "text", text: prompt, text_elements: [] }],
