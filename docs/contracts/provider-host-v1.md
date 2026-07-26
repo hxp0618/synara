@@ -1,4 +1,10 @@
-# Provider Host contract v1
+# Provider Host contract v1 (legacy)
+
+> Legacy baseline only. Managed Workers use
+> [Provider Host Protocol v2.2](./provider-host-v2.md) (`codex app-server`, Claude Agent SDK,
+> bidirectional JSONL). This one-shot runner remains available only behind the explicit
+> `SYNARA_AGENTD_PROVIDER_HOST_PROTOCOL=v1` compatibility switch and is never an automatic
+> fallback after a v2 command.
 
 `apps/provider-host` is the Worker-side boundary between `synara-agentd` and concrete
 coding-agent CLIs. It reads one JSON request per line and emits normalized Runtime

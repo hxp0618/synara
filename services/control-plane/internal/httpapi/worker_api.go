@@ -615,6 +615,24 @@ func (s *Server) pullControlCommands(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }
 
+func (s *Server) pullControlUpdates(w http.ResponseWriter, r *http.Request) {
+	executionID, ok := s.pathUUID(w, r, "executionID")
+	if !ok {
+		return
+	}
+	var input executions.PullControlUpdatesInput
+	if err := decodeJSON(r, &input); err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	updates, err := s.executions.PullControlUpdates(r.Context(), mustWorker(r), executionID, input)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, updates)
+}
+
 func (s *Server) markControlCommandDelivered(w http.ResponseWriter, r *http.Request) {
 	s.handleControlCommandDelivery(w, r, false)
 }

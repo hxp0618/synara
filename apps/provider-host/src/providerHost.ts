@@ -742,23 +742,31 @@ function validateMemoryDocuments(documents: RunnerInput["memoryDocuments"]): voi
   const keys = new Set<string>();
   for (const document of documents) {
     if (!isRecord(document)) throw new Error("memoryDocuments item is invalid");
-    if (!(["user", "project", "session"] as const).includes(document.scope)) {
+    const { scope, memoryKey, sha256, contentType } = document;
+    if (scope !== "user" && scope !== "project" && scope !== "session") {
       throw new Error("memoryDocuments scope is invalid");
     }
     for (const field of ["scopeId", "memoryKey", "revisionId", "artifactId", "sha256"] as const) {
-      if (typeof document[field] !== "string" || document[field].trim() === "") {
+      const value = document[field];
+      if (typeof value !== "string" || value.trim() === "") {
         throw new Error(`memoryDocuments ${field} is required`);
       }
     }
-    if (!/^[a-z][a-z0-9._-]{0,159}$/u.test(document.memoryKey) || keys.has(document.memoryKey)) {
+    if (
+      typeof memoryKey !== "string" ||
+      !/^[a-z][a-z0-9._-]{0,159}$/u.test(memoryKey) ||
+      keys.has(memoryKey)
+    ) {
       throw new Error("memoryDocuments memoryKey is invalid or duplicated");
     }
-    keys.add(document.memoryKey);
-    if (!/^[0-9a-f]{64}$/u.test(document.sha256)) {
+    keys.add(memoryKey);
+    if (typeof sha256 !== "string" || !/^[0-9a-f]{64}$/u.test(sha256)) {
       throw new Error("memoryDocuments sha256 is invalid");
     }
     if (
-      !(["text/plain", "text/markdown", "application/json"] as const).includes(document.contentType)
+      contentType !== "text/plain" &&
+      contentType !== "text/markdown" &&
+      contentType !== "application/json"
     ) {
       throw new Error("memoryDocuments contentType is unsupported");
     }

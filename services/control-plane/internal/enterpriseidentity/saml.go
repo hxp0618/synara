@@ -240,18 +240,18 @@ func (s *Service) samlServiceProvider(ctx context.Context, connection persistenc
 	}, nil
 }
 
-func (s *Service) fetchSAMLMetadata(ctx context.Context, metadataURL string) (*saml.EntityDescriptor, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, metadataURL, nil)
-	if err != nil {
-		return nil, problem.New(400, "invalid_saml_metadata_url", "SAML metadataUrl is invalid.")
-	}
+// redirectGuardedClient copies the configured client and constrains redirects
+// to the same scheme policy applied to the initial URL. Identity connection
+// endpoints are operator-supplied, so an unconstrained redirect chain would
+// let a hostile IdP pivot the server onto an internal address.
+func (s *Service) redirectGuardedClient(code, label string) *http.Client {
 	client := *s.httpClient
 	configuredRedirectCheck := client.CheckRedirect
 	client.CheckRedirect = func(request *http.Request, via []*http.Request) error {
 		if len(via) >= 5 {
-			return fmt.Errorf("SAML metadata exceeded the redirect limit")
+			return fmt.Errorf("%s exceeded the redirect limit", label)
 		}
-		if err := validateHTTPSOrLoopbackURL(request.URL.String(), "invalid_saml_metadata_redirect", "SAML metadata redirect"); err != nil {
+		if err := validateHTTPSOrLoopbackURL(request.URL.String(), code, label+" redirect"); err != nil {
 			return err
 		}
 		if configuredRedirectCheck != nil {
@@ -259,6 +259,15 @@ func (s *Service) fetchSAMLMetadata(ctx context.Context, metadataURL string) (*s
 		}
 		return nil
 	}
+	return &client
+}
+
+func (s *Service) fetchSAMLMetadata(ctx context.Context, metadataURL string) (*saml.EntityDescriptor, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, metadataURL, nil)
+	if err != nil {
+		return nil, problem.New(400, "invalid_saml_metadata_url", "SAML metadataUrl is invalid.")
+	}
+	client := s.redirectGuardedClient("invalid_saml_metadata_redirect", "SAML metadata")
 	response, err := client.Do(req)
 	if err != nil {
 		return nil, problem.Wrap(502, "saml_metadata_fetch_failed", "SAML IdP metadata could not be fetched.", err)

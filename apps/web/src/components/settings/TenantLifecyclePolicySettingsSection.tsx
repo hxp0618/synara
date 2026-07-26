@@ -85,25 +85,25 @@ export function summarizeLifecycleEffective(
 }
 
 export function summarizeLifecycleOverrides(
-  overrides: ControlPlaneResourceLifecycleOverrides,
+  overrides: ControlPlaneResourceLifecycleOverrideInput,
   inheritedFromLabel: string,
 ): string {
   const entries: string[] = [];
-  if (overrides.waitingKeepAliveSeconds !== null) {
+  if (overrides.waitingKeepAliveSeconds != null) {
     entries.push(`wait ${formatLifecycleDurationSeconds(overrides.waitingKeepAliveSeconds)}`);
   }
-  if (overrides.suspendAfterIdleSeconds !== null) {
+  if (overrides.suspendAfterIdleSeconds != null) {
     entries.push(`suspend ${formatLifecycleDurationSeconds(overrides.suspendAfterIdleSeconds)}`);
   }
-  if (overrides.absoluteSessionLifetimeSeconds !== null) {
+  if (overrides.absoluteSessionLifetimeSeconds != null) {
     entries.push(
       `absolute ${formatLifecycleDurationSeconds(overrides.absoluteSessionLifetimeSeconds)}`,
     );
   }
-  if (overrides.workspaceRetentionDays !== null) {
+  if (overrides.workspaceRetentionDays != null) {
     entries.push(`retain ${overrides.workspaceRetentionDays}d`);
   }
-  if (overrides.warmPoolMode !== null) {
+  if (overrides.warmPoolMode != null) {
     entries.push(`warm ${formatLifecycleWarmPoolMode(overrides.warmPoolMode)}`);
   }
   if (entries.length === 0) return `Inheriting every value from ${inheritedFromLabel}.`;

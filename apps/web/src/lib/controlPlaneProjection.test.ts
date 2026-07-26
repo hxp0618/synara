@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { deriveWorkLogEntries } from "../session-logic";
 import type { ControlPlaneAgentSession, ControlPlaneSessionEvent } from "./controlPlaneClient";
+import { createTestAgentSession } from "./controlPlaneTestFixtures";
 import {
   applyControlPlaneSessionEvent,
   createControlPlaneSessionProjection,
@@ -9,24 +10,7 @@ import {
   withControlPlaneStreamStatus,
 } from "./controlPlaneProjection";
 
-const session: ControlPlaneAgentSession = {
-  id: "session-1",
-  tenantId: "tenant-1",
-  organizationId: "organization-1",
-  projectId: "project-1",
-  createdBy: "user-1",
-  title: "Remote session",
-  status: "active",
-  visibility: "private",
-  provider: "codex",
-  model: "gpt-5.6-sol",
-  providerCredentialId: null,
-  executionTargetId: "target-1",
-  lastEventSequence: 0,
-  createdAt: "2026-07-12T00:00:00Z",
-  updatedAt: "2026-07-12T00:00:00Z",
-  archivedAt: null,
-};
+const session: ControlPlaneAgentSession = createTestAgentSession();
 
 function event(
   sequence: number,

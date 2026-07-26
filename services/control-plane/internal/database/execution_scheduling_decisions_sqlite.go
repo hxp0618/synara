@@ -63,7 +63,7 @@ func migrateExecutionSchedulingDecisionsSQLiteSafety(ctx context.Context, db *go
 		 BEFORE INSERT ON execution_scheduling_decisions
 		 BEGIN
 		   SELECT RAISE(ABORT, 'invalid Execution Scheduling Decision shape')
-		   WHERE NEW.algorithm_version NOT IN ('queue-pressure-v1', 'fixed-target-v1', 'legacy-selected-only')
+		   WHERE NEW.algorithm_version NOT IN ('queue-pressure-v1', 'reservation-aware-v1', 'fixed-target-v1', 'legacy-selected-only')
 		      OR NEW.evidence_completeness NOT IN ('complete', 'selected-only', 'legacy-selected-only')
 		      OR NEW.decision_kind NOT IN ('target-group', 'fixed-target')
 		      OR length(NEW.provider) NOT BETWEEN 1 AND 80
@@ -73,7 +73,7 @@ func migrateExecutionSchedulingDecisionsSQLiteSafety(ctx context.Context, db *go
 		      OR NEW.selected_ordinal NOT BETWEEN 0 AND 4095
 		      OR (NEW.evidence_completeness <> 'complete' AND NEW.candidate_count <> 1)
 		      OR ((NEW.algorithm_version = 'legacy-selected-only') <> (NEW.evidence_completeness = 'legacy-selected-only'))
-		      OR (NEW.decision_kind = 'target-group' AND NEW.algorithm_version NOT IN ('queue-pressure-v1', 'legacy-selected-only'))
+		      OR (NEW.decision_kind = 'target-group' AND NEW.algorithm_version NOT IN ('queue-pressure-v1', 'reservation-aware-v1', 'legacy-selected-only'))
 		      OR (NEW.decision_kind = 'fixed-target' AND NEW.algorithm_version NOT IN ('fixed-target-v1', 'legacy-selected-only'))
 		      OR length(NEW.candidate_set_sha256) <> 64 OR NEW.candidate_set_sha256 GLOB '*[^0-9a-f]*'
 		      OR length(NEW.selected_region) > 120 OR trim(NEW.selected_region) <> NEW.selected_region

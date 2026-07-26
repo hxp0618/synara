@@ -38,15 +38,19 @@ transaction boundary.
 
 ## Controllers
 
-Durable leadership currently covers:
+Durable leadership currently covers these lease names:
 
-- Docker Worker Pool reconciliation;
-- Kubernetes Execution reconciliation;
-- global Target failover;
-- Session resource lifecycle enforcement;
-- Worker Release automatic rollback;
-- Tenant retention sweeping;
-- scheduled cloud invoice import, estimate sweep, and reconciliation.
+- `synara:docker-worker-pool-reconciler` — Docker Worker Pool reconciliation;
+- `synara:kubernetes-execution-reconciler` — Kubernetes Execution reconciliation;
+- `synara:global-target-failover-sweep` — global Target failover;
+- `synara:session-resource-lifecycle` — Session resource lifecycle enforcement;
+- `synara:worker-release-auto-rollback` — Worker Release automatic rollback;
+- `synara:tenant-retention-sweeper` — Tenant retention sweeping;
+- `synara:billing-import-scheduler` — scheduled cloud invoice import, estimate sweep, and reconciliation;
+- `synara:billing-shared-allocation-scheduler` — scheduled shared-Target cost-allocation sweeps
+  (Migration `000080` durable periods);
+- `synara:metric-rollup` — terminal Worker-incarnation and Generation metric daily rollups
+  (Migrations `000079`/`000081`).
 
 The Outbox dispatcher remains multi-active because its database claim/lease protocol is independently safe across
 replicas.

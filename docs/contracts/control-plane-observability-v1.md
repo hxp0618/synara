@@ -70,6 +70,10 @@ The endpoint includes:
 - trailing-30-day `synara_execution_pod_queue_duration_seconds_30d` dispatch-to-first-apply and
   `synara_execution_pod_provisioning_duration_seconds_30d` first-apply-to-first-Running P50/P95/P99 gauges, plus
   `synara_execution_pod_failure_generations_30d{failure_class,target_kind}`;
+- authoritative durable queued/recovering Execution inventory as
+  `synara_execution_queue_depth{target_kind,capacity_class}` and
+  `synara_execution_queue_oldest_age_seconds{target_kind,capacity_class}`; Tenant, Target, and Execution
+  identifiers are never labels;
 - retained physical Worker/Pod incarnation count, runtime, active/idle seconds, and requested CPU core-seconds,
   memory byte-seconds, and ephemeral-storage byte-seconds. Terminal history comes from exact daily rollups while
   pending-rollup terminal facts and nonterminal facts remain authoritative raw input. Requested-resource seconds are

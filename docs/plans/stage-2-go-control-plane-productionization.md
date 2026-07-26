@@ -12,13 +12,15 @@
 
 ## 1. 状态
 
+- **阶段状态**：已完成 / 已验收（见 `TODO.md` 与 `stage-2-drift-audit.md`）。本文档为历史执行计划，
+  文中“当前”均指该阶段收口时点；现行 schema 版本以运行构建 `/ready` 的 expectedVersion 为权威。
 - **优先级**：P0
 - **预计工作量**：XL
 - **风险**：HIGH
 - **计划基线分支**：`codex/saas-tenancy-user`
 - **计划基线提交**：`05c3c5da`
 - **工作区状态**：以执行时的 Git 状态为准，不再假设计划基线中的未提交文件仍存在
-- **当前 Schema**：forward-only migration 已连续到 `000031_session_execution_cursor_lineage.sql`
+- **收口时 Schema**：forward-only migration 连续到 `000031_session_execution_cursor_lineage.sql`
 - **验收证据边界**：最新固定 Stage 2 证据记录为 `b507b0c3`、Migration `000031`，Result 为 `PASS`，见
   `docs/reports/stage-2-production-acceptance-b507b0c3.md`
 - **依赖**：SaaS Tenant/Organization/User 领域模型；managed path 使用 Worker Protocol v2 与 Runtime

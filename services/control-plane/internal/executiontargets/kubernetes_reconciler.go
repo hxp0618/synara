@@ -1,18 +1,13 @@
 package executiontargets
 
 import (
-	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net"
-	"net/http"
 	"net/url"
 	"regexp"
 	"sort"
@@ -30,7 +25,6 @@ import (
 	"github.com/synara-ai/synara/services/control-plane/internal/podlifecycle"
 	"github.com/synara-ai/synara/services/control-plane/internal/problem"
 	"github.com/synara-ai/synara/services/control-plane/internal/routing"
-	"github.com/synara-ai/synara/services/control-plane/internal/workertiming"
 )
 
 const (
@@ -295,76 +289,9 @@ type kubernetesExecutionPoolSnapshot struct {
 	SchedulingTemplate map[string]any
 }
 
-type kubernetesWarmPool struct {
-	ID                 uuid.UUID      `gorm:"column:id"`
-	Version            int64          `gorm:"column:version"`
-	CapacityClass      string         `gorm:"column:capacity_class"`
-	ClusterID          string         `gorm:"column:cluster_id"`
-	Namespace          string         `gorm:"column:namespace"`
-	DesiredIdleUnits   int            `gorm:"column:desired_idle_units"`
-	MaxActiveUnits     int            `gorm:"column:max_active_units"`
-	SchedulingTemplate map[string]any `gorm:"column:scheduling_template"`
-	Status             string         `gorm:"column:status"`
-}
-
-type kubernetesWarmWorkerState struct {
-	WorkerID                uuid.UUID  `gorm:"column:id"`
-	WorkerIncarnation       int64      `gorm:"column:incarnation"`
-	PodName                 string     `gorm:"column:pod_name"`
-	InstanceUID             string     `gorm:"column:instance_uid"`
-	WorkerPoolID            *uuid.UUID `gorm:"column:worker_pool_id"`
-	WorkerPoolVersion       *int64     `gorm:"column:worker_pool_version"`
-	CapacityClass           *string    `gorm:"column:capacity_class"`
-	WorkerReleaseRevisionID *uuid.UUID `gorm:"column:worker_release_revision_id"`
-	WorkerReleaseChannel    *string    `gorm:"column:worker_release_channel"`
-	WorkerReleaseStatus     string     `gorm:"column:worker_release_status"`
-	RegistrationTrustMode   string     `gorm:"column:registration_trust_mode"`
-	ProtocolVersion         int        `gorm:"column:protocol_version"`
-	CurrentManifestID       *uuid.UUID `gorm:"column:current_manifest_id"`
-	CompatibilityStatus     string     `gorm:"column:compatibility_status"`
-	LeaseSupported          bool       `gorm:"column:lease_supported"`
-	FencingSupported        bool       `gorm:"column:fencing_supported"`
-	Status                  string     `gorm:"column:status"`
-	AdministrativeStatus    string     `gorm:"column:administrative_status"`
-	LastHeartbeatAt         time.Time  `gorm:"column:last_heartbeat_at"`
-	HasLease                bool       `gorm:"column:has_lease"`
-}
-
-type kubernetesWarmWorkerIdentity struct {
-	PodName     string
-	InstanceUID string
-}
-
 type kubernetesWorkerPodState struct {
 	PodName     string `gorm:"column:pod_name"`
 	InstanceUID string `gorm:"column:instance_uid"`
-}
-
-type kubernetesWarmReleaseSelection struct {
-	RevisionID  *uuid.UUID
-	Channel     *string
-	ImageDigest *string
-}
-
-type kubernetesWarmPodPlan struct {
-	Pool       kubernetesWarmPool
-	Slot       int
-	Release    kubernetesWarmReleaseSelection
-	ConfigHash string
-}
-
-type kubernetesObservedWarmPod struct {
-	Pod           kubernetesPod
-	PoolID        uuid.UUID
-	PoolVersion   int64
-	CapacityClass string
-	Slot          int
-	State         *kubernetesWarmWorkerState
-}
-
-type kubernetesWarmDemandEvictionCandidate struct {
-	Observed kubernetesObservedWarmPod
-	Key      kubernetesWarmCapacityKey
 }
 
 func (r *KubernetesReconciler) reconcileTarget(ctx context.Context, target persistence.ExecutionTarget) (err error) {
@@ -563,7 +490,7 @@ func (r *KubernetesReconciler) reconcileTarget(ctx context.Context, target persi
 			}
 			poolID, poolVersion, capacityClass, slot, parseErr := kubernetesWarmPodIdentity(pod)
 			if parseErr != nil {
-				deletedPod, retainedWorker, err := r.deleteObservedWarmPod(
+				deletedPod, retainedWorker, err := r.deleteObservedPodSafely(
 					ctx, client, target.ID, configuration.Namespace, pod, "warm-pool-invalid-identity",
 				)
 				if err != nil {
@@ -689,13 +616,12 @@ func (r *KubernetesReconciler) reconcileTarget(ctx context.Context, target persi
 		}
 		existing[pod.Name] = pod
 	}
-	validationWarmPlans, validationWarmPlansByName, err := kubernetesWarmPodPlans(
+	_, validationWarmPlansByName, err := kubernetesWarmPodPlans(
 		warmPools, warmPoolsSupported, warmClaimedCounts, warmRelease, podBaseHash, configuration.Image,
 	)
 	if err != nil {
 		return err
 	}
-	_ = validationWarmPlans
 	readyWarmCapacity := make(map[kubernetesWarmCapacityKey]int)
 	warmDemandEvictionCandidates := make([]kubernetesWarmDemandEvictionCandidate, 0)
 	for _, observed := range unleasedWarmPods {
@@ -714,7 +640,7 @@ func (r *KubernetesReconciler) reconcileTarget(ctx context.Context, target persi
 			} else if terminalPod {
 				reason = "warm-pool-terminal"
 			}
-			deletedPod, retainedWorker, err := r.deleteObservedWarmPod(
+			deletedPod, retainedWorker, err := r.deleteObservedPodSafely(
 				ctx, client, target.ID, configuration.Namespace, observed.Pod, reason,
 			)
 			if err != nil {
@@ -758,7 +684,7 @@ func (r *KubernetesReconciler) reconcileTarget(ctx context.Context, target persi
 				readinessObservedAt,
 				r.config.WorkerHeartbeatTimeout,
 			) {
-				deletedPod, retainedWorker, err := r.deleteObservedWarmPod(
+				deletedPod, retainedWorker, err := r.deleteObservedPodSafely(
 					ctx, client, target.ID, configuration.Namespace, observed.Pod, "warm-pool-not-ready",
 				)
 				if err != nil {
@@ -825,7 +751,7 @@ func (r *KubernetesReconciler) reconcileTarget(ctx context.Context, target persi
 		evictCandidate := func(index int) error {
 			attempted[index] = struct{}{}
 			candidate := warmDemandEvictionCandidates[index]
-			deletedPod, retainedWorker, err := r.deleteObservedWarmPod(
+			deletedPod, retainedWorker, err := r.deleteObservedPodSafely(
 				ctx,
 				client,
 				target.ID,
@@ -890,6 +816,13 @@ func (r *KubernetesReconciler) reconcileTarget(ctx context.Context, target persi
 	// capacity so reconciliation does not create a replacement that the API
 	// server must reject with an exceeded-quota error.
 	scheduled := len(existing) + deleted
+	// One Execution that cannot get a Pod must not starve every other queued
+	// Execution on this target for the cycle: a malformed pool scheduling
+	// template, a rejected Pod spec or a failed observation write is scoped to
+	// its own Execution. Failures are collected and reported after the sweep,
+	// so the pass is still reported as failed and warm capacity stays
+	// unpublished, but the remaining Executions are still placed.
+	var executionFailures []error
 	for _, execution := range executions {
 		if execution.Status != "queued" && execution.Status != "recovering" {
 			continue
@@ -913,11 +846,13 @@ func (r *KubernetesReconciler) reconcileTarget(ctx context.Context, target persi
 		}
 		podHash, err := kubernetesExecutionPodHash(podBaseHash, configuration.Image, execution)
 		if err != nil {
-			return err
+			executionFailures = append(executionFailures, fmt.Errorf("execution %s: %w", execution.ID, err))
+			continue
 		}
 		pod, err := r.executionPod(target, configuration, podHash, execution, credential)
 		if err != nil {
-			return err
+			executionFailures = append(executionFailures, fmt.Errorf("execution %s: %w", execution.ID, err))
+			continue
 		}
 		// The Session can cross its immutable deadline after the initial query.
 		// Recheck at the external write boundary so a stale reconciliation
@@ -941,15 +876,20 @@ func (r *KubernetesReconciler) reconcileTarget(ctx context.Context, target persi
 		}
 		if err := r.observeExecutionPod(ctx, observation); err != nil {
 			if applyErr != nil {
-				return errors.Join(
+				err = errors.Join(
 					problem.Wrap(502, "kubernetes_pod_apply_failed", "A Kubernetes Worker Pod could not be applied.", applyErr),
 					err,
 				)
 			}
-			return err
+			executionFailures = append(executionFailures, fmt.Errorf("execution %s: %w", execution.ID, err))
+			continue
 		}
 		if applyErr != nil {
-			return problem.Wrap(502, "kubernetes_pod_apply_failed", "A Kubernetes Worker Pod could not be applied.", applyErr)
+			executionFailures = append(executionFailures, fmt.Errorf(
+				"execution %s: %w", execution.ID,
+				problem.Wrap(502, "kubernetes_pod_apply_failed", "A Kubernetes Worker Pod could not be applied.", applyErr),
+			))
+			continue
 		}
 		acknowledgedReservations[routing.ReservationIdentity{
 			ExecutionID: execution.ID, Generation: execution.Generation,
@@ -967,17 +907,28 @@ func (r *KubernetesReconciler) reconcileTarget(ctx context.Context, target persi
 		}
 		pod, err := r.warmPoolPod(target, configuration, plan, credential)
 		if err != nil {
-			return err
+			executionFailures = append(executionFailures, fmt.Errorf("warm pod %s: %w", name, err))
+			continue
 		}
 		path := kubernetesNamespacedPath(configuration.Namespace, "pods", name)
 		if err := client.Apply(ctx, path, pod); err != nil {
-			return problem.Wrap(502, "kubernetes_pod_apply_failed", "A Kubernetes Worker Pod could not be applied.", err)
+			executionFailures = append(executionFailures, fmt.Errorf(
+				"warm pod %s: %w", name,
+				problem.Wrap(502, "kubernetes_pod_apply_failed", "A Kubernetes Worker Pod could not be applied.", err),
+			))
+			continue
 		}
 		created++
 		scheduled++
 	}
 	if err := r.setKubernetesStatus(ctx, target, "active", foundationChanged, created+deleted > 0, created, deleted); err != nil {
-		return err
+		return errors.Join(append(executionFailures, err)...)
+	}
+	if len(executionFailures) > 0 {
+		// The target itself is reachable and its status is current, so the
+		// health observation published by the deferred hook stays accurate;
+		// only the per-Execution placements failed.
+		return errors.Join(executionFailures...)
 	}
 	availableCapacity := configuration.MaxActivePods
 	healthObservation.Status = routing.HealthHealthy
@@ -1018,58 +969,6 @@ func (r *KubernetesReconciler) reconcileTarget(ctx context.Context, target persi
 		warmRelease,
 	)
 	return nil
-}
-
-func managedKubernetesWarmCapacityObservations(
-	tenantID uuid.UUID,
-	executionTargetID uuid.UUID,
-	warmPools []kubernetesWarmPool,
-	warmPoolsSupported bool,
-	warmClaimedCounts map[uuid.UUID]int,
-	readyWarmCapacity map[kubernetesWarmCapacityKey]int,
-	warmRelease kubernetesWarmReleaseSelection,
-) []ManagedKubernetesWarmCapacityObservation {
-	observations := make([]ManagedKubernetesWarmCapacityObservation, 0, len(warmPools))
-	for _, pool := range warmPools {
-		if pool.Status != placement.PoolStatusActive {
-			continue
-		}
-		claimed := warmClaimedCounts[pool.ID]
-		if claimed < 0 {
-			claimed = 0
-		}
-		observation := ManagedKubernetesWarmCapacityObservation{
-			TenantID:          tenantID,
-			ExecutionTargetID: executionTargetID,
-			WorkerPoolID:      pool.ID,
-			WorkerPoolVersion: pool.Version,
-			WarmSupported:     warmPoolsSupported,
-			ClaimedUnits:      claimed,
-		}
-		if !warmPoolsSupported {
-			observation.Reason = managedKubernetesRoutingReasonPointer(
-				"Managed Kubernetes warm capacity is unavailable while a canary Worker release is active.",
-			)
-			observations = append(observations, observation)
-			continue
-		}
-		observation.WorkerReleaseRevisionID = warmRelease.RevisionID
-		observation.WorkerReleaseChannel = warmRelease.Channel
-		observation.DesiredTotalUnits = pool.DesiredIdleUnits + claimed
-		if observation.DesiredTotalUnits > pool.MaxActiveUnits {
-			observation.DesiredTotalUnits = pool.MaxActiveUnits
-		}
-		key := kubernetesWarmCapacityKey{
-			PoolID:          pool.ID,
-			PoolVersion:     pool.Version,
-			CapacityClass:   pool.CapacityClass,
-			ReleaseRevision: optionalUUIDString(warmRelease.RevisionID),
-			ReleaseChannel:  stringValue(warmRelease.Channel),
-		}
-		observation.ReadyIdleUnits = readyWarmCapacity[key]
-		observations = append(observations, observation)
-	}
-	return observations
 }
 
 func kubernetesPodCompletedSuccessfully(pod kubernetesPod) bool {
@@ -1441,223 +1340,6 @@ func (r *KubernetesReconciler) loadKubernetesWarmReleaseSelection(
 	}, true, nil
 }
 
-func kubernetesWarmWorkerStateForPod(
-	states map[kubernetesWarmWorkerIdentity]kubernetesWarmWorkerState,
-	pod kubernetesPod,
-) (kubernetesWarmWorkerState, bool) {
-	state, found := states[kubernetesWarmWorkerIdentityKey(pod.Name, pod.UID)]
-	return state, found
-}
-
-func kubernetesWarmWorkerIdentityKey(podName, instanceUID string) kubernetesWarmWorkerIdentity {
-	return kubernetesWarmWorkerIdentity{
-		PodName:     strings.TrimSpace(podName),
-		InstanceUID: strings.TrimSpace(instanceUID),
-	}
-}
-
-func kubernetesWarmPodIdentity(pod kubernetesPod) (uuid.UUID, int64, string, int, error) {
-	poolID, err := uuid.Parse(strings.TrimSpace(pod.Labels[kubernetesWorkerPoolIDLabel]))
-	if err != nil {
-		return uuid.UUID{}, 0, "", 0, err
-	}
-	poolVersion, err := strconv.ParseInt(strings.TrimSpace(pod.Labels[kubernetesWorkerPoolVersionLabel]), 10, 64)
-	if err != nil || poolVersion <= 0 {
-		return uuid.UUID{}, 0, "", 0, errors.New("invalid worker pool version")
-	}
-	capacityClass := strings.TrimSpace(pod.Labels[kubernetesCapacityClassLabel])
-	if capacityClass != placement.CapacityClassStandard && capacityClass != placement.CapacityClassInteractive {
-		return uuid.UUID{}, 0, "", 0, errors.New("invalid capacity class")
-	}
-	slot, err := strconv.Atoi(strings.TrimSpace(pod.Labels[kubernetesWarmSlotLabel]))
-	if err != nil || slot < 0 {
-		return uuid.UUID{}, 0, "", 0, errors.New("invalid warm slot")
-	}
-	return poolID, poolVersion, capacityClass, slot, nil
-}
-
-func kubernetesWarmWorkerStateMatchesPlan(state kubernetesWarmWorkerState, plan kubernetesWarmPodPlan) bool {
-	return state.WorkerPoolID != nil &&
-		state.WorkerPoolVersion != nil &&
-		state.CapacityClass != nil &&
-		*state.WorkerPoolID == plan.Pool.ID &&
-		*state.WorkerPoolVersion == plan.Pool.Version &&
-		*state.CapacityClass == plan.Pool.CapacityClass &&
-		sameOptionalUUID(state.WorkerReleaseRevisionID, plan.Release.RevisionID) &&
-		sameOptionalString(state.WorkerReleaseChannel, plan.Release.Channel)
-}
-
-type kubernetesWarmCapacityKey struct {
-	PoolID          uuid.UUID
-	PoolVersion     int64
-	CapacityClass   string
-	ReleaseRevision string
-	ReleaseChannel  string
-}
-
-func kubernetesWarmWorkerStateReadyIdle(
-	state kubernetesWarmWorkerState,
-	pod kubernetesPod,
-	plan kubernetesWarmPodPlan,
-	now time.Time,
-	heartbeatTimeout time.Duration,
-) bool {
-	return kubernetesWarmWorkerIdentityKey(state.PodName, state.InstanceUID) ==
-		kubernetesWarmWorkerIdentityKey(pod.Name, pod.UID) &&
-		pod.Phase == "Running" &&
-		!state.HasLease &&
-		strings.TrimSpace(state.Status) == "online" &&
-		strings.TrimSpace(state.AdministrativeStatus) == "active" &&
-		state.ProtocolVersion == kubernetesWorkerProtocolVersion &&
-		state.CurrentManifestID != nil &&
-		strings.TrimSpace(state.CompatibilityStatus) == "compatible" &&
-		state.LeaseSupported &&
-		state.FencingSupported &&
-		strings.TrimSpace(state.RegistrationTrustMode) == kubernetesPodBoundRegistrationTrust &&
-		kubernetesWarmWorkerHeartbeatFresh(state.LastHeartbeatAt, now, heartbeatTimeout) &&
-		kubernetesWarmWorkerStateMatchesPlan(state, plan) &&
-		kubernetesWarmWorkerReleaseReady(state, plan)
-}
-
-func kubernetesWarmWorkerStateShouldRecycle(
-	state kubernetesWarmWorkerState,
-	pod kubernetesPod,
-	now time.Time,
-	heartbeatTimeout time.Duration,
-) bool {
-	if pod.Phase == "Succeeded" || pod.Phase == "Failed" {
-		return true
-	}
-	status := strings.TrimSpace(state.Status)
-	administrativeStatus := strings.TrimSpace(state.AdministrativeStatus)
-	return status == "offline" ||
-		status == "draining" ||
-		status == "terminated" ||
-		administrativeStatus == "draining" ||
-		!kubernetesWarmWorkerHeartbeatFresh(state.LastHeartbeatAt, now, heartbeatTimeout)
-}
-
-func kubernetesWarmWorkerHeartbeatFresh(lastHeartbeatAt, now time.Time, heartbeatTimeout time.Duration) bool {
-	if heartbeatTimeout <= 0 || lastHeartbeatAt.IsZero() {
-		return false
-	}
-	return !lastHeartbeatAt.Before(now.Add(-heartbeatTimeout))
-}
-
-func kubernetesWarmWorkerReleaseReady(state kubernetesWarmWorkerState, plan kubernetesWarmPodPlan) bool {
-	planHasRevision := plan.Release.RevisionID != nil
-	planHasChannel := plan.Release.Channel != nil
-	if planHasRevision != planHasChannel ||
-		!sameOptionalUUID(state.WorkerReleaseRevisionID, plan.Release.RevisionID) ||
-		!sameOptionalString(state.WorkerReleaseChannel, plan.Release.Channel) {
-		return false
-	}
-	status := strings.TrimSpace(state.WorkerReleaseStatus)
-	if !planHasRevision {
-		return status == "" || status == "unmanaged"
-	}
-	return status == "active"
-}
-
-func kubernetesWarmCapacityKeyForState(state kubernetesWarmWorkerState) (kubernetesWarmCapacityKey, bool) {
-	if state.WorkerPoolID == nil || state.WorkerPoolVersion == nil || state.CapacityClass == nil {
-		return kubernetesWarmCapacityKey{}, false
-	}
-	if (state.WorkerReleaseRevisionID == nil) != (state.WorkerReleaseChannel == nil) {
-		return kubernetesWarmCapacityKey{}, false
-	}
-	return kubernetesWarmCapacityKey{
-		PoolID: *state.WorkerPoolID, PoolVersion: *state.WorkerPoolVersion, CapacityClass: *state.CapacityClass,
-		ReleaseRevision: optionalUUIDString(state.WorkerReleaseRevisionID),
-		ReleaseChannel:  stringValue(state.WorkerReleaseChannel),
-	}, true
-}
-
-func kubernetesWarmCapacityKeyForExecution(execution kubernetesExecution) (kubernetesWarmCapacityKey, bool) {
-	if execution.WorkerPool == nil || execution.WorkerPool.Mode != placement.PoolModeWarm {
-		return kubernetesWarmCapacityKey{}, false
-	}
-	if (execution.WorkerReleaseRevisionID == nil) != (execution.WorkerReleaseChannel == nil) {
-		return kubernetesWarmCapacityKey{}, false
-	}
-	return kubernetesWarmCapacityKey{
-		PoolID: execution.WorkerPool.ID, PoolVersion: execution.WorkerPool.Version, CapacityClass: execution.WorkerPool.CapacityClass,
-		ReleaseRevision: optionalUUIDString(execution.WorkerReleaseRevisionID),
-		ReleaseChannel:  stringValue(execution.WorkerReleaseChannel),
-	}, true
-}
-
-func kubernetesWarmCapacityKeyForPlan(plan kubernetesWarmPodPlan) (kubernetesWarmCapacityKey, bool) {
-	if (plan.Release.RevisionID == nil) != (plan.Release.Channel == nil) {
-		return kubernetesWarmCapacityKey{}, false
-	}
-	return kubernetesWarmCapacityKey{
-		PoolID: plan.Pool.ID, PoolVersion: plan.Pool.Version, CapacityClass: plan.Pool.CapacityClass,
-		ReleaseRevision: optionalUUIDString(plan.Release.RevisionID),
-		ReleaseChannel:  stringValue(plan.Release.Channel),
-	}, true
-}
-
-func optionalUUIDString(value *uuid.UUID) string {
-	if value == nil {
-		return ""
-	}
-	return value.String()
-}
-
-func sameOptionalUUID(left, right *uuid.UUID) bool {
-	if left == nil || right == nil {
-		return left == nil && right == nil
-	}
-	return *left == *right
-}
-
-func sameOptionalString(left, right *string) bool {
-	if left == nil || right == nil {
-		return left == nil && right == nil
-	}
-	return *left == *right
-}
-
-func kubernetesWarmPodPlans(
-	warmPools []kubernetesWarmPool,
-	warmPoolsSupported bool,
-	warmClaimedCounts map[uuid.UUID]int,
-	warmRelease kubernetesWarmReleaseSelection,
-	podBaseHash string,
-	baseImage string,
-) ([]kubernetesWarmPodPlan, map[string]kubernetesWarmPodPlan, error) {
-	plans := make([]kubernetesWarmPodPlan, 0)
-	plansByName := make(map[string]kubernetesWarmPodPlan)
-	if !warmPoolsSupported {
-		return plans, plansByName, nil
-	}
-	for _, pool := range warmPools {
-		if pool.Status != placement.PoolStatusActive {
-			continue
-		}
-		claimed := warmClaimedCounts[pool.ID]
-		if claimed < 0 {
-			claimed = 0
-		}
-		desiredTotal := pool.DesiredIdleUnits + claimed
-		if desiredTotal > pool.MaxActiveUnits {
-			desiredTotal = pool.MaxActiveUnits
-		}
-		for slot := 0; slot < desiredTotal; slot++ {
-			plan := kubernetesWarmPodPlan{Pool: pool, Slot: slot, Release: warmRelease}
-			configHash, err := kubernetesWarmPoolPodHash(podBaseHash, baseImage, plan)
-			if err != nil {
-				return nil, nil, err
-			}
-			plan.ConfigHash = configHash
-			plans = append(plans, plan)
-			plansByName[kubernetesWarmPodName(plan)] = plan
-		}
-	}
-	return plans, plansByName, nil
-}
-
 func (r *KubernetesReconciler) observeWorkerPod(ctx context.Context, observation KubernetesWorkerPodObservation) error {
 	if r.config.ObserveWorkerPod == nil {
 		return nil
@@ -1749,17 +1431,6 @@ func (r *KubernetesReconciler) deleteObservedPod(
 		return problem.Wrap(502, "kubernetes_pod_delete_failed", "An obsolete Kubernetes Worker Pod could not be deleted.", err)
 	}
 	return nil
-}
-
-func (r *KubernetesReconciler) deleteObservedWarmPod(
-	ctx context.Context,
-	client kubernetesClient,
-	targetID uuid.UUID,
-	namespace string,
-	pod kubernetesPod,
-	reason string,
-) (deleted bool, retainedWorker *persistence.WorkerInstance, err error) {
-	return r.deleteObservedPodSafely(ctx, client, targetID, namespace, pod, reason)
 }
 
 func (r *KubernetesReconciler) deleteObservedPodSafely(
@@ -1890,15 +1561,6 @@ func kubernetesExecutionWithinAbsoluteLifetime(execution kubernetesExecution, no
 	return execution.AbsoluteExpiresAt == nil || execution.AbsoluteExpiresAt.After(now)
 }
 
-func kubernetesPodName(execution kubernetesExecution) string {
-	generation := execution.Generation
-	if execution.Status == "queued" || execution.Status == "recovering" {
-		generation++
-	}
-	compactID := strings.ReplaceAll(execution.ID.String(), "-", "")
-	return "synara-exec-" + compactID[:28] + "-g" + strconv.FormatInt(generation, 16)
-}
-
 func (r *KubernetesReconciler) loadConfiguration(target persistence.ExecutionTarget) (kubernetesTargetConfiguration, error) {
 	if target.TenantID == nil {
 		return kubernetesTargetConfiguration{}, problem.New(409, "kubernetes_target_tenant_required", "Managed Kubernetes targets must belong to a Tenant.")
@@ -2020,762 +1682,6 @@ func (r *KubernetesReconciler) normalizeKubernetes(
 	return configuration, nil
 }
 
-func (r *KubernetesReconciler) foundationHash(
-	target persistence.ExecutionTarget,
-	configuration kubernetesTargetConfiguration,
-) (string, error) {
-	capabilities, err := json.Marshal(target.Capabilities)
-	if err != nil {
-		return "", err
-	}
-	payload, err := json.Marshal(struct {
-		Configuration kubernetesTargetConfiguration
-		Capabilities  json.RawMessage
-		LeaseRenew    time.Duration
-	}{configuration, capabilities, workertiming.LeaseRenewInterval(r.config.WorkerLeaseTTL)})
-	if err != nil {
-		return "", err
-	}
-	digest := sha256.Sum256(payload)
-	return hex.EncodeToString(digest[:]), nil
-}
-
-func (r *KubernetesReconciler) applyFoundation(
-	ctx context.Context,
-	client kubernetesClient,
-	target persistence.ExecutionTarget,
-	configuration kubernetesTargetConfiguration,
-	credential *ImagePullCredential,
-) error {
-	labels := kubernetesTargetLabels(target)
-	if configuration.ManageNamespace != nil && *configuration.ManageNamespace {
-		namespace := map[string]any{
-			"apiVersion": "v1", "kind": "Namespace",
-			"metadata": map[string]any{
-				"name":   configuration.Namespace,
-				"labels": kubernetesManagedNamespaceLabels(labels),
-			},
-		}
-		if err := client.Apply(ctx, "/api/v1/namespaces/"+url.PathEscape(configuration.Namespace), namespace); err != nil {
-			return problem.Wrap(502, "kubernetes_namespace_apply_failed", "Kubernetes Worker Namespace could not be applied.", err)
-		}
-	}
-	serviceAccount := map[string]any{
-		"apiVersion": "v1", "kind": "ServiceAccount",
-		"metadata":                     map[string]any{"name": configuration.ServiceAccountName, "namespace": configuration.Namespace, "labels": labels},
-		"automountServiceAccountToken": false,
-	}
-	if err := client.Apply(ctx, kubernetesNamespacedPath(configuration.Namespace, "serviceaccounts", configuration.ServiceAccountName), serviceAccount); err != nil {
-		return problem.Wrap(502, "kubernetes_service_account_apply_failed", "Kubernetes Worker ServiceAccount could not be applied.", err)
-	}
-	registrySecret, err := kubernetesRegistrySecret(target, configuration.Namespace, labels, credential)
-	if err != nil {
-		return err
-	}
-	registrySecretName := kubernetesRegistrySecretName(target.ID)
-	if err := client.Apply(ctx, kubernetesNamespacedPath(configuration.Namespace, "secrets", registrySecretName), registrySecret); err != nil {
-		return problem.Wrap(502, "kubernetes_registry_secret_apply_failed", "Kubernetes Worker Registry Secret could not be applied.", err)
-	}
-	hard := map[string]any{"pods": strconv.Itoa(configuration.MaxActivePods)}
-	for key, value := range map[string]string{
-		"requests.cpu": configuration.QuotaCPURequests, "limits.cpu": configuration.QuotaCPULimits,
-		"requests.memory": configuration.QuotaMemoryRequests, "limits.memory": configuration.QuotaMemoryLimits,
-		"requests.ephemeral-storage": configuration.QuotaEphemeralStorage,
-	} {
-		if value != "" {
-			hard[key] = value
-		}
-	}
-	quotaName := "synara-agentd-" + strings.ReplaceAll(target.ID.String(), "-", "")[:12]
-	quota := map[string]any{
-		"apiVersion": "v1", "kind": "ResourceQuota",
-		"metadata": map[string]any{"name": quotaName, "namespace": configuration.Namespace, "labels": labels},
-		"spec":     map[string]any{"hard": hard},
-	}
-	if err := client.Apply(ctx, kubernetesNamespacedPath(configuration.Namespace, "resourcequotas", quotaName), quota); err != nil {
-		return problem.Wrap(502, "kubernetes_quota_apply_failed", "Kubernetes Worker ResourceQuota could not be applied.", err)
-	}
-	ipBlocks := make([]any, 0, len(configuration.EgressCIDRs))
-	for _, cidr := range configuration.EgressCIDRs {
-		ipBlocks = append(ipBlocks, map[string]any{"ipBlock": map[string]any{"cidr": strings.TrimSpace(cidr)}})
-	}
-	networkPolicy := map[string]any{
-		"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy",
-		"metadata": map[string]any{"name": quotaName, "namespace": configuration.Namespace, "labels": labels},
-		"spec": map[string]any{
-			"podSelector": map[string]any{"matchLabels": map[string]any{kubernetesTargetLabel: target.ID.String()}},
-			"policyTypes": []any{"Ingress", "Egress"}, "ingress": []any{},
-			"egress": []any{
-				map[string]any{"ports": []any{map[string]any{"protocol": "UDP", "port": 53}, map[string]any{"protocol": "TCP", "port": 53}}},
-				map[string]any{"to": ipBlocks},
-			},
-		},
-	}
-	if err := client.Apply(ctx, kubernetesNetworkPolicyPath(configuration.Namespace, quotaName), networkPolicy); err != nil {
-		return problem.Wrap(502, "kubernetes_network_policy_apply_failed", "Kubernetes Worker NetworkPolicy could not be applied.", err)
-	}
-	return nil
-}
-
-func (r *KubernetesReconciler) executionPod(
-	target persistence.ExecutionTarget,
-	configuration kubernetesTargetConfiguration,
-	configHash string,
-	execution kubernetesExecution,
-	credential *ImagePullCredential,
-) (map[string]any, error) {
-	runner, err := json.Marshal(configuration.RunnerCommand)
-	if err != nil {
-		return nil, err
-	}
-	capabilities, err := json.Marshal(target.Capabilities)
-	if err != nil {
-		return nil, err
-	}
-	placementSnapshot, err := kubernetesExecutionPodPlacement(configuration, execution)
-	if err != nil {
-		return nil, err
-	}
-	generation := execution.Generation + 1
-	labels := kubernetesTargetLabels(target)
-	labels["synara.io/project-id"] = execution.ProjectID.String()
-	labels["synara.io/session-id"] = execution.SessionID.String()
-	labels[kubernetesExecutionLabel] = execution.ID.String()
-	labels[kubernetesGenerationLabel] = strconv.FormatInt(generation, 10)
-	labels[kubernetesWorkerModeLabel] = kubernetesWorkerModeExecutionPinned
-	image, err := kubernetesExecutionImage(configuration.Image, execution)
-	if err != nil {
-		return nil, err
-	}
-	if err := validateKubernetesImagePullCredential(image, credential); err != nil {
-		return nil, err
-	}
-	if execution.WorkerReleaseRevisionID != nil {
-		labels[kubernetesReleaseLabel] = execution.WorkerReleaseRevisionID.String()
-		labels[kubernetesChannelLabel] = stringValue(execution.WorkerReleaseChannel)
-	}
-	requests := map[string]any{}
-	limits := map[string]any{}
-	for key, value := range map[string]string{"cpu": configuration.CPURequest, "memory": configuration.MemoryRequest, "ephemeral-storage": configuration.EphemeralStorageRequest} {
-		if value != "" {
-			requests[key] = value
-		}
-	}
-	for key, value := range map[string]string{"cpu": configuration.CPULimit, "memory": configuration.MemoryLimit, "ephemeral-storage": configuration.EphemeralStorageLimit} {
-		if value != "" {
-			limits[key] = value
-		}
-	}
-	gitCacheRoot := "/data/git-cache"
-	if configuration.GitCachePersistentVolumeClaim != "" {
-		gitCacheRoot = "/git-cache"
-	}
-	environment := []any{
-		map[string]any{"name": "SYNARA_CONTROL_PLANE_URL", "value": configuration.ControlPlaneURL},
-		map[string]any{"name": "SYNARA_WORKER_REGISTRATION_TOKEN_FILE", "value": kubernetesWorkloadIdentityTokenPath},
-		map[string]any{"name": "SYNARA_EXECUTION_TARGET_ID", "value": target.ID.String()},
-		map[string]any{"name": "SYNARA_EXECUTION_TARGET_KIND", "value": "kubernetes"},
-		map[string]any{"name": "SYNARA_AGENTD_ASSIGNED_EXECUTION_ID", "value": execution.ID.String()},
-		map[string]any{"name": "SYNARA_AGENTD_CLUSTER_ID", "value": placementSnapshot.ClusterID},
-		map[string]any{"name": "SYNARA_AGENTD_NAMESPACE", "value": placementSnapshot.Namespace},
-		map[string]any{"name": "SYNARA_AGENTD_INSTANCE_ID", "valueFrom": map[string]any{"fieldRef": map[string]any{"fieldPath": "metadata.name"}}},
-		map[string]any{"name": "SYNARA_AGENTD_INSTANCE_UID", "valueFrom": map[string]any{"fieldRef": map[string]any{"fieldPath": "metadata.uid"}}},
-		map[string]any{"name": "SYNARA_AGENTD_CAPABILITIES_JSON", "value": string(capabilities)},
-		map[string]any{"name": "SYNARA_AGENTD_RUNNER_COMMAND_JSON", "value": string(runner)},
-		map[string]any{"name": "SYNARA_AGENTD_PROVIDER_HOST_PROTOCOL", "value": "v2"},
-		map[string]any{"name": "SYNARA_AGENTD_LEASE_RENEW_INTERVAL", "value": workertiming.LeaseRenewInterval(r.config.WorkerLeaseTTL).String()},
-		map[string]any{"name": "SYNARA_AGENTD_DRAIN_TIMEOUT", "value": "20s"},
-		map[string]any{"name": "SYNARA_AGENTD_WORKSPACE_ROOT", "value": "/data/workspaces"},
-		map[string]any{"name": "SYNARA_AGENTD_GIT_CACHE_ROOT", "value": gitCacheRoot},
-	}
-	if digest := immutableImageDigest(image); digest != "" {
-		environment = append(environment, map[string]any{"name": "SYNARA_AGENTD_IMAGE_DIGEST", "value": digest})
-	}
-	volumes := []any{
-		map[string]any{"name": "workspace", "emptyDir": map[string]any{}},
-		map[string]any{"name": "tmp", "emptyDir": map[string]any{}},
-		map[string]any{"name": "home", "emptyDir": map[string]any{}},
-		map[string]any{
-			"name": kubernetesWorkloadIdentityVolume,
-			"projected": map[string]any{
-				"defaultMode": 0o440,
-				"sources": []any{map[string]any{
-					"serviceAccountToken": map[string]any{
-						"audience":          KubernetesWorkerRegistrationAudience(target.ID),
-						"expirationSeconds": 600, "path": "token",
-					},
-				}},
-			},
-		},
-	}
-	if configuration.WorkspaceSizeLimit != "" {
-		volumes[0] = map[string]any{"name": "workspace", "emptyDir": map[string]any{"sizeLimit": configuration.WorkspaceSizeLimit}}
-	}
-	volumeMounts := []any{
-		map[string]any{"name": "workspace", "mountPath": "/data"},
-		map[string]any{"name": "tmp", "mountPath": "/tmp"},
-		map[string]any{"name": "home", "mountPath": "/home/synara"},
-		map[string]any{
-			"name":      kubernetesWorkloadIdentityVolume,
-			"mountPath": "/var/run/secrets/synara.io/workload-identity", "readOnly": true,
-		},
-	}
-	if configuration.GitCachePersistentVolumeClaim != "" {
-		volumes = append(volumes, map[string]any{
-			"name": "git-cache", "persistentVolumeClaim": map[string]any{"claimName": configuration.GitCachePersistentVolumeClaim},
-		})
-		volumeMounts = append(volumeMounts, map[string]any{"name": "git-cache", "mountPath": "/git-cache"})
-	}
-	container := map[string]any{
-		"name": "agentd", "image": image, "imagePullPolicy": configuration.ImagePullPolicy,
-		"command": []any{"/usr/local/bin/synara-agentd"}, "env": environment,
-		"workingDir": "/data", "volumeMounts": volumeMounts,
-		"securityContext": map[string]any{
-			"allowPrivilegeEscalation": false, "readOnlyRootFilesystem": true,
-			"runAsNonRoot": true, "runAsUser": 10001, "runAsGroup": 10001,
-			"capabilities":   map[string]any{"drop": []any{"ALL"}},
-			"seccompProfile": map[string]any{"type": "RuntimeDefault"},
-		},
-		"resources": map[string]any{"requests": requests, "limits": limits},
-	}
-	podSpec := map[string]any{
-		"serviceAccountName": configuration.ServiceAccountName, "automountServiceAccountToken": false,
-		"enableServiceLinks": false, "hostNetwork": false, "hostPID": false, "hostIPC": false,
-		"restartPolicy": "Never", "terminationGracePeriodSeconds": 30,
-		"securityContext": map[string]any{"runAsNonRoot": true, "fsGroup": 10001, "seccompProfile": map[string]any{"type": "RuntimeDefault"}},
-		"containers":      []any{container}, "volumes": volumes,
-	}
-	if len(configuration.NodeSelector) > 0 {
-		podSpec["nodeSelector"] = cloneStringMap(configuration.NodeSelector)
-	}
-	if len(configuration.Tolerations) > 0 {
-		podSpec["tolerations"] = cloneObjectList(configuration.Tolerations)
-	}
-	if configuration.RequireNodeSpread {
-		podSpec["topologySpreadConstraints"] = kubernetesNodeSpreadConstraints(target.ID)
-	}
-	if err := applyKubernetesWorkerPoolSchedulingTemplate(podSpec, placementSnapshot.SchedulingTemplate); err != nil {
-		return nil, err
-	}
-	if len(configuration.ImagePullSecrets) > 0 || credential != nil {
-		secrets := make([]any, 0, len(configuration.ImagePullSecrets)+1)
-		seen := make(map[string]struct{}, len(configuration.ImagePullSecrets)+1)
-		for _, name := range configuration.ImagePullSecrets {
-			if _, duplicate := seen[name]; duplicate {
-				continue
-			}
-			secrets = append(secrets, map[string]any{"name": name})
-			seen[name] = struct{}{}
-		}
-		if credential != nil {
-			name := kubernetesRegistrySecretName(target.ID)
-			if _, duplicate := seen[name]; !duplicate {
-				secrets = append(secrets, map[string]any{"name": name})
-			}
-		}
-		podSpec["imagePullSecrets"] = secrets
-	}
-	return map[string]any{
-		"apiVersion": "v1", "kind": "Pod",
-		"metadata": map[string]any{
-			"name": kubernetesPodName(execution), "namespace": configuration.Namespace, "labels": labels,
-			"annotations": map[string]any{kubernetesConfigAnnotation: configHash},
-		},
-		"spec": podSpec,
-	}, nil
-}
-
-type kubernetesExecutionPodPlacementSnapshot struct {
-	ClusterID          string
-	Namespace          string
-	SchedulingTemplate map[string]any
-}
-
-func kubernetesExecutionPodPlacement(
-	configuration kubernetesTargetConfiguration,
-	execution kubernetesExecution,
-) (kubernetesExecutionPodPlacementSnapshot, error) {
-	placementSnapshot := kubernetesExecutionPodPlacementSnapshot{
-		ClusterID:          kubernetesLocalClusterID,
-		Namespace:          configuration.Namespace,
-		SchedulingTemplate: map[string]any{},
-	}
-	if execution.WorkerPool == nil {
-		return placementSnapshot, nil
-	}
-	clusterID := strings.TrimSpace(execution.WorkerPool.ClusterID)
-	if clusterID != "" && clusterID != kubernetesLocalClusterID {
-		return kubernetesExecutionPodPlacementSnapshot{}, problem.New(
-			409,
-			"worker_pool_cluster_mismatch",
-			"Worker pool cluster does not match the Kubernetes execution target cluster.",
-		)
-	}
-	if namespace := strings.TrimSpace(execution.WorkerPool.Namespace); namespace != "" && namespace != configuration.Namespace {
-		return kubernetesExecutionPodPlacementSnapshot{}, problem.New(
-			409,
-			"worker_pool_namespace_mismatch",
-			"Worker pool namespace does not match the Kubernetes execution target namespace.",
-		)
-	}
-	placementSnapshot.SchedulingTemplate = execution.WorkerPool.SchedulingTemplate
-	return placementSnapshot, nil
-}
-
-func (r *KubernetesReconciler) warmPoolPod(
-	target persistence.ExecutionTarget,
-	configuration kubernetesTargetConfiguration,
-	plan kubernetesWarmPodPlan,
-	credential *ImagePullCredential,
-) (map[string]any, error) {
-	runner, err := json.Marshal(configuration.RunnerCommand)
-	if err != nil {
-		return nil, err
-	}
-	capabilities, err := json.Marshal(target.Capabilities)
-	if err != nil {
-		return nil, err
-	}
-	clusterID := strings.TrimSpace(plan.Pool.ClusterID)
-	if clusterID == "" {
-		clusterID = kubernetesLocalClusterID
-	}
-	if clusterID != kubernetesLocalClusterID {
-		return nil, problem.New(409, "worker_pool_cluster_mismatch", "Warm Worker pool cluster does not match the Kubernetes execution target cluster.")
-	}
-	if namespace := strings.TrimSpace(plan.Pool.Namespace); namespace != "" && namespace != configuration.Namespace {
-		return nil, problem.New(409, "worker_pool_namespace_mismatch", "Warm Worker pool namespace does not match the Kubernetes execution target namespace.")
-	}
-	image, err := kubernetesWarmPoolImage(configuration.Image, plan.Release)
-	if err != nil {
-		return nil, err
-	}
-	if err := validateKubernetesImagePullCredential(image, credential); err != nil {
-		return nil, err
-	}
-	labels := kubernetesTargetLabels(target)
-	labels[kubernetesWorkerModeLabel] = kubernetesWorkerModeWarmPool
-	labels[kubernetesWorkerPoolIDLabel] = plan.Pool.ID.String()
-	labels[kubernetesWorkerPoolVersionLabel] = strconv.FormatInt(plan.Pool.Version, 10)
-	labels[kubernetesCapacityClassLabel] = plan.Pool.CapacityClass
-	labels[kubernetesWarmSlotLabel] = strconv.Itoa(plan.Slot)
-	if plan.Release.RevisionID != nil {
-		labels[kubernetesReleaseLabel] = plan.Release.RevisionID.String()
-		labels[kubernetesChannelLabel] = stringValue(plan.Release.Channel)
-	}
-	requests := map[string]any{}
-	limits := map[string]any{}
-	for key, value := range map[string]string{"cpu": configuration.CPURequest, "memory": configuration.MemoryRequest, "ephemeral-storage": configuration.EphemeralStorageRequest} {
-		if value != "" {
-			requests[key] = value
-		}
-	}
-	for key, value := range map[string]string{"cpu": configuration.CPULimit, "memory": configuration.MemoryLimit, "ephemeral-storage": configuration.EphemeralStorageLimit} {
-		if value != "" {
-			limits[key] = value
-		}
-	}
-	gitCacheRoot := "/data/git-cache"
-	if configuration.GitCachePersistentVolumeClaim != "" {
-		gitCacheRoot = "/git-cache"
-	}
-	environment := []any{
-		map[string]any{"name": "SYNARA_CONTROL_PLANE_URL", "value": configuration.ControlPlaneURL},
-		map[string]any{"name": "SYNARA_WORKER_REGISTRATION_TOKEN_FILE", "value": kubernetesWorkloadIdentityTokenPath},
-		map[string]any{"name": "SYNARA_EXECUTION_TARGET_ID", "value": target.ID.String()},
-		map[string]any{"name": "SYNARA_EXECUTION_TARGET_KIND", "value": "kubernetes"},
-		map[string]any{"name": "SYNARA_AGENTD_WORKER_MODE", "value": kubernetesWorkerModeWarmPool},
-		map[string]any{"name": "SYNARA_AGENTD_CLUSTER_ID", "value": clusterID},
-		map[string]any{"name": "SYNARA_AGENTD_NAMESPACE", "value": configuration.Namespace},
-		map[string]any{"name": "SYNARA_AGENTD_INSTANCE_ID", "valueFrom": map[string]any{"fieldRef": map[string]any{"fieldPath": "metadata.name"}}},
-		map[string]any{"name": "SYNARA_AGENTD_INSTANCE_UID", "valueFrom": map[string]any{"fieldRef": map[string]any{"fieldPath": "metadata.uid"}}},
-		map[string]any{"name": "SYNARA_AGENTD_CAPABILITIES_JSON", "value": string(capabilities)},
-		map[string]any{"name": "SYNARA_AGENTD_RUNNER_COMMAND_JSON", "value": string(runner)},
-		map[string]any{"name": "SYNARA_AGENTD_PROVIDER_HOST_PROTOCOL", "value": "v2"},
-		map[string]any{"name": "SYNARA_AGENTD_LEASE_RENEW_INTERVAL", "value": workertiming.LeaseRenewInterval(r.config.WorkerLeaseTTL).String()},
-		map[string]any{"name": "SYNARA_AGENTD_DRAIN_TIMEOUT", "value": "20s"},
-		map[string]any{"name": "SYNARA_AGENTD_WORKSPACE_ROOT", "value": "/data/workspaces"},
-		map[string]any{"name": "SYNARA_AGENTD_GIT_CACHE_ROOT", "value": gitCacheRoot},
-	}
-	if digest := immutableImageDigest(image); digest != "" {
-		environment = append(environment, map[string]any{"name": "SYNARA_AGENTD_IMAGE_DIGEST", "value": digest})
-	}
-	volumes := []any{
-		map[string]any{"name": "workspace", "emptyDir": map[string]any{}},
-		map[string]any{"name": "tmp", "emptyDir": map[string]any{}},
-		map[string]any{"name": "home", "emptyDir": map[string]any{}},
-		map[string]any{
-			"name": kubernetesWorkloadIdentityVolume,
-			"projected": map[string]any{
-				"defaultMode": 0o440,
-				"sources": []any{map[string]any{
-					"serviceAccountToken": map[string]any{
-						"audience":          KubernetesWorkerRegistrationAudience(target.ID),
-						"expirationSeconds": 600, "path": "token",
-					},
-				}},
-			},
-		},
-	}
-	if configuration.WorkspaceSizeLimit != "" {
-		volumes[0] = map[string]any{"name": "workspace", "emptyDir": map[string]any{"sizeLimit": configuration.WorkspaceSizeLimit}}
-	}
-	volumeMounts := []any{
-		map[string]any{"name": "workspace", "mountPath": "/data"},
-		map[string]any{"name": "tmp", "mountPath": "/tmp"},
-		map[string]any{"name": "home", "mountPath": "/home/synara"},
-		map[string]any{
-			"name":      kubernetesWorkloadIdentityVolume,
-			"mountPath": "/var/run/secrets/synara.io/workload-identity", "readOnly": true,
-		},
-	}
-	if configuration.GitCachePersistentVolumeClaim != "" {
-		volumes = append(volumes, map[string]any{
-			"name": "git-cache", "persistentVolumeClaim": map[string]any{"claimName": configuration.GitCachePersistentVolumeClaim},
-		})
-		volumeMounts = append(volumeMounts, map[string]any{"name": "git-cache", "mountPath": "/git-cache"})
-	}
-	container := map[string]any{
-		"name": "agentd", "image": image, "imagePullPolicy": configuration.ImagePullPolicy,
-		"command": []any{"/usr/local/bin/synara-agentd"}, "env": environment,
-		"workingDir": "/data", "volumeMounts": volumeMounts,
-		"securityContext": map[string]any{
-			"allowPrivilegeEscalation": false, "readOnlyRootFilesystem": true,
-			"runAsNonRoot": true, "runAsUser": 10001, "runAsGroup": 10001,
-			"capabilities":   map[string]any{"drop": []any{"ALL"}},
-			"seccompProfile": map[string]any{"type": "RuntimeDefault"},
-		},
-		"resources": map[string]any{"requests": requests, "limits": limits},
-	}
-	podSpec := map[string]any{
-		"serviceAccountName": configuration.ServiceAccountName, "automountServiceAccountToken": false,
-		"enableServiceLinks": false, "hostNetwork": false, "hostPID": false, "hostIPC": false,
-		"restartPolicy": "Never", "terminationGracePeriodSeconds": 30,
-		"securityContext": map[string]any{"runAsNonRoot": true, "fsGroup": 10001, "seccompProfile": map[string]any{"type": "RuntimeDefault"}},
-		"containers":      []any{container}, "volumes": volumes,
-	}
-	if len(configuration.NodeSelector) > 0 {
-		podSpec["nodeSelector"] = cloneStringMap(configuration.NodeSelector)
-	}
-	if len(configuration.Tolerations) > 0 {
-		podSpec["tolerations"] = cloneObjectList(configuration.Tolerations)
-	}
-	if configuration.RequireNodeSpread {
-		podSpec["topologySpreadConstraints"] = kubernetesNodeSpreadConstraints(target.ID)
-	}
-	if err := applyKubernetesWorkerPoolSchedulingTemplate(podSpec, plan.Pool.SchedulingTemplate); err != nil {
-		return nil, err
-	}
-	if len(configuration.ImagePullSecrets) > 0 || credential != nil {
-		secrets := make([]any, 0, len(configuration.ImagePullSecrets)+1)
-		seen := make(map[string]struct{}, len(configuration.ImagePullSecrets)+1)
-		for _, name := range configuration.ImagePullSecrets {
-			if _, duplicate := seen[name]; duplicate {
-				continue
-			}
-			secrets = append(secrets, map[string]any{"name": name})
-			seen[name] = struct{}{}
-		}
-		if credential != nil {
-			name := kubernetesRegistrySecretName(target.ID)
-			if _, duplicate := seen[name]; !duplicate {
-				secrets = append(secrets, map[string]any{"name": name})
-			}
-		}
-		podSpec["imagePullSecrets"] = secrets
-	}
-	return map[string]any{
-		"apiVersion": "v1", "kind": "Pod",
-		"metadata": map[string]any{
-			"name": kubernetesWarmPodName(plan), "namespace": configuration.Namespace, "labels": labels,
-			"annotations": map[string]any{kubernetesConfigAnnotation: plan.ConfigHash},
-		},
-		"spec": podSpec,
-	}, nil
-}
-
-func kubernetesWarmPodName(plan kubernetesWarmPodPlan) string {
-	compactPoolID := strings.ReplaceAll(plan.Pool.ID.String(), "-", "")
-	releaseKey := "unmanaged"
-	if plan.Release.RevisionID != nil && plan.Release.Channel != nil {
-		compactReleaseID := strings.ReplaceAll(plan.Release.RevisionID.String(), "-", "")
-		channelKey := "p"
-		if *plan.Release.Channel == "canary" {
-			channelKey = "c"
-		}
-		releaseKey = channelKey + compactReleaseID[:8]
-	}
-	return fmt.Sprintf("synara-warm-%s-v%s-%s-s%d", compactPoolID[:10], strconv.FormatInt(plan.Pool.Version, 16), releaseKey, plan.Slot)
-}
-
-func kubernetesWarmPoolImage(baseImage string, release kubernetesWarmReleaseSelection) (string, error) {
-	if release.RevisionID == nil && release.Channel == nil && release.ImageDigest == nil {
-		return baseImage, nil
-	}
-	if release.RevisionID == nil || release.Channel == nil || release.ImageDigest == nil ||
-		(*release.Channel != "promoted" && *release.Channel != "canary") {
-		return "", problem.New(409, "worker_release_execution_invalid", "Warm Worker release selection is invalid.")
-	}
-	return pinImageReference(baseImage, *release.ImageDigest)
-}
-
-func kubernetesWarmPoolPodHash(baseHash, baseImage string, plan kubernetesWarmPodPlan) (string, error) {
-	image, err := kubernetesWarmPoolImage(baseImage, plan.Release)
-	if err != nil {
-		return "", err
-	}
-	payload, err := json.Marshal(struct {
-		BaseHash      string
-		Image         string
-		PoolID        uuid.UUID
-		PoolVersion   int64
-		CapacityClass string
-		Slot          int
-		RevisionID    *uuid.UUID
-		Channel       *string
-	}{baseHash, image, plan.Pool.ID, plan.Pool.Version, plan.Pool.CapacityClass, plan.Slot, plan.Release.RevisionID, plan.Release.Channel})
-	if err != nil {
-		return "", err
-	}
-	digest := sha256.Sum256(payload)
-	return hex.EncodeToString(digest[:]), nil
-}
-
-func applyKubernetesWorkerPoolSchedulingTemplate(podSpec map[string]any, template map[string]any) error {
-	if len(template) == 0 {
-		return nil
-	}
-	for key, value := range template {
-		switch key {
-		case "priorityClassName":
-			text, ok := value.(string)
-			if !ok || strings.TrimSpace(text) == "" || strings.ContainsAny(text, "\r\n\t") {
-				return problem.New(409, "worker_pool_scheduling_template_invalid", "Worker pool priorityClassName must be a non-empty string.")
-			}
-			podSpec["priorityClassName"] = strings.TrimSpace(text)
-		case "nodeSelector":
-			nodeSelector, err := normalizeSchedulingTemplateStringMap(value, "nodeSelector")
-			if err != nil {
-				return err
-			}
-			merged := map[string]string{}
-			if existing, ok := podSpec["nodeSelector"].(map[string]string); ok {
-				merged = cloneStringMap(existing)
-			}
-			for nodeKey, nodeValue := range nodeSelector {
-				merged[nodeKey] = nodeValue
-			}
-			podSpec["nodeSelector"] = merged
-		case "tolerations":
-			tolerations, err := normalizeSchedulingTemplateTolerations(value)
-			if err != nil {
-				return err
-			}
-			existing := make([]any, 0)
-			if current, ok := podSpec["tolerations"].([]any); ok {
-				existing = append(existing, current...)
-			}
-			podSpec["tolerations"] = append(existing, tolerations...)
-		default:
-			return problem.New(409, "worker_pool_scheduling_template_unsupported", "Worker pool schedulingTemplate contains an unsupported field.")
-		}
-	}
-	return nil
-}
-
-func normalizeSchedulingTemplateStringMap(value any, field string) (map[string]string, error) {
-	raw, ok := value.(map[string]any)
-	if !ok {
-		return nil, problem.New(409, "worker_pool_scheduling_template_invalid", "Worker pool "+field+" must be an object.")
-	}
-	normalized := make(map[string]string, len(raw))
-	for key, item := range raw {
-		text, ok := item.(string)
-		if !ok || strings.TrimSpace(key) == "" || strings.TrimSpace(text) == "" || strings.ContainsAny(key+text, "\r\n\t") {
-			return nil, problem.New(409, "worker_pool_scheduling_template_invalid", "Worker pool "+field+" values must be non-empty strings.")
-		}
-		normalized[strings.TrimSpace(key)] = strings.TrimSpace(text)
-	}
-	return normalized, nil
-}
-
-func normalizeSchedulingTemplateTolerations(value any) ([]any, error) {
-	items, ok := value.([]any)
-	if !ok {
-		return nil, problem.New(409, "worker_pool_scheduling_template_invalid", "Worker pool tolerations must be an array.")
-	}
-	normalized := make([]any, 0, len(items))
-	for _, item := range items {
-		object, ok := item.(map[string]any)
-		if !ok {
-			return nil, problem.New(409, "worker_pool_scheduling_template_invalid", "Worker pool tolerations must contain objects.")
-		}
-		clone := make(map[string]any, len(object))
-		for key, value := range object {
-			clone[key] = value
-		}
-		normalized = append(normalized, clone)
-	}
-	return normalized, nil
-}
-
-func cloneStringMap(input map[string]string) map[string]string {
-	cloned := make(map[string]string, len(input))
-	for key, value := range input {
-		cloned[key] = value
-	}
-	return cloned
-}
-
-func cloneObjectList(input []map[string]any) []any {
-	cloned := make([]any, 0, len(input))
-	for _, item := range input {
-		copy := make(map[string]any, len(item))
-		for key, value := range item {
-			copy[key] = value
-		}
-		cloned = append(cloned, copy)
-	}
-	return cloned
-}
-
-func kubernetesNodeSpreadConstraints(targetID uuid.UUID) []any {
-	return []any{
-		map[string]any{
-			"maxSkew":           1,
-			"topologyKey":       "kubernetes.io/hostname",
-			"whenUnsatisfiable": "DoNotSchedule",
-			"labelSelector": map[string]any{
-				"matchLabels": map[string]any{
-					kubernetesTargetLabel: targetID.String(),
-				},
-			},
-		},
-	}
-}
-
-func kubernetesTargetLabels(target persistence.ExecutionTarget) map[string]string {
-	labels := map[string]string{
-		kubernetesManagedLabel: "true", kubernetesTargetLabel: target.ID.String(),
-	}
-	if target.TenantID != nil {
-		labels["synara.io/tenant-id"] = target.TenantID.String()
-	}
-	if target.OrganizationID != nil {
-		labels["synara.io/organization-id"] = target.OrganizationID.String()
-	}
-	return labels
-}
-
-func kubernetesManagedNamespaceLabels(labels map[string]string) map[string]string {
-	namespaced := make(map[string]string, len(labels)+3)
-	for key, value := range labels {
-		namespaced[key] = value
-	}
-	namespaced["pod-security.kubernetes.io/enforce"] = "restricted"
-	namespaced["pod-security.kubernetes.io/audit"] = "restricted"
-	namespaced["pod-security.kubernetes.io/warn"] = "restricted"
-	return namespaced
-}
-
-func kubernetesSecretName(targetID uuid.UUID) string {
-	return "synara-agentd-" + strings.ReplaceAll(targetID.String(), "-", "")[:12]
-}
-
-func kubernetesRegistrySecretName(targetID uuid.UUID) string {
-	return kubernetesSecretName(targetID) + "-registry"
-}
-
-func kubernetesRegistrySecret(
-	target persistence.ExecutionTarget,
-	namespace string,
-	labels map[string]string,
-	credential *ImagePullCredential,
-) (map[string]any, error) {
-	auths := map[string]any{}
-	if credential != nil {
-		if credential.RegistryToken != "" {
-			return nil, problem.New(
-				409,
-				"worker_image_pull_bearer_unsupported",
-				"Kubernetes Worker image pull Secrets require an OCI Registry basic Credential.",
-			)
-		}
-		authority, err := normalizeRegistryAuthority(credential.Host)
-		if err != nil {
-			return nil, problem.New(500, "worker_image_pull_credential_invalid", "Worker image pull Credential projection is invalid.")
-		}
-		auths[registryAuthServerAddress(authority)] = map[string]any{
-			"username": credential.Username,
-			"password": credential.Password,
-			"auth":     base64.StdEncoding.EncodeToString([]byte(credential.Username + ":" + credential.Password)),
-		}
-	}
-	config, err := json.Marshal(map[string]any{"auths": auths})
-	if err != nil {
-		return nil, err
-	}
-	return map[string]any{
-		"apiVersion": "v1", "kind": "Secret", "type": "kubernetes.io/dockerconfigjson",
-		"metadata": map[string]any{
-			"name": kubernetesRegistrySecretName(target.ID), "namespace": namespace, "labels": labels,
-		},
-		"data": map[string]any{".dockerconfigjson": base64.StdEncoding.EncodeToString(config)},
-	}, nil
-}
-
-func kubernetesFoundationApplyHash(baseHash string, credential *ImagePullCredential) (string, error) {
-	var identity any
-	if credential != nil {
-		identity = struct {
-			BindingID         uuid.UUID
-			CredentialID      uuid.UUID
-			CredentialVersion int
-			Host              string
-		}{credential.BindingID, credential.CredentialID, credential.CredentialVersion, credential.Host}
-	}
-	payload, err := json.Marshal(struct {
-		BaseHash   string
-		Credential any
-	}{baseHash, identity})
-	if err != nil {
-		return "", err
-	}
-	digest := sha256.Sum256(payload)
-	return hex.EncodeToString(digest[:]), nil
-}
-
-func kubernetesExecutionPodHash(baseHash, baseImage string, execution kubernetesExecution) (string, error) {
-	image, err := kubernetesExecutionImage(baseImage, execution)
-	if err != nil {
-		return "", err
-	}
-	payload, err := json.Marshal(struct {
-		BaseHash   string
-		Image      string
-		RevisionID *uuid.UUID
-		Channel    *string
-		WorkerPool *kubernetesExecutionPoolSnapshot
-	}{baseHash, image, execution.WorkerReleaseRevisionID, execution.WorkerReleaseChannel, execution.WorkerPool})
-	if err != nil {
-		return "", err
-	}
-	digest := sha256.Sum256(payload)
-	return hex.EncodeToString(digest[:]), nil
-}
-
-func kubernetesExecutionImage(baseImage string, execution kubernetesExecution) (string, error) {
-	if execution.WorkerReleaseRevisionID == nil && execution.WorkerReleaseChannel == nil && execution.WorkerReleaseImageDigest == nil {
-		return baseImage, nil
-	}
-	if execution.WorkerReleaseRevisionID == nil || execution.WorkerReleaseChannel == nil ||
-		execution.WorkerReleaseImageDigest == nil ||
-		(*execution.WorkerReleaseChannel != "promoted" && *execution.WorkerReleaseChannel != "canary") {
-		return "", problem.New(409, "worker_release_execution_invalid", "Execution Worker release selection is invalid.")
-	}
-	return pinImageReference(baseImage, *execution.WorkerReleaseImageDigest)
-}
-
 func (r *KubernetesReconciler) resolveImagePullCredential(
 	ctx context.Context,
 	target persistence.ExecutionTarget,
@@ -2792,20 +1698,6 @@ func (r *KubernetesReconciler) resolveImagePullCredential(
 		return ImagePullCredentialResolution{Authoritative: true}, err
 	}
 	return r.config.ResolveImagePull(ctx, *target.TenantID, target.ID, registryComparisonAuthority(authority))
-}
-
-func validateKubernetesImagePullCredential(image string, credential *ImagePullCredential) error {
-	if err := validateImagePullCredential(image, credential); err != nil {
-		return err
-	}
-	if credential != nil && credential.RegistryToken != "" {
-		return problem.New(
-			409,
-			"worker_image_pull_bearer_unsupported",
-			"Kubernetes Worker image pull Secrets require an OCI Registry basic Credential.",
-		)
-	}
-	return nil
 }
 
 func (r *KubernetesReconciler) rejectImagePullCredential(
@@ -2886,219 +1778,4 @@ func (r *KubernetesReconciler) setKubernetesStatus(
 			Metadata: map[string]any{"status": status, "foundationApplied": foundationChanged, "podsCreated": created, "podsDeleted": deleted},
 		})
 	})
-}
-
-type kubernetesHTTPFactory struct{}
-
-func (kubernetesHTTPFactory) Open(configuration kubernetesTargetConfiguration) (kubernetesClient, error) {
-	return newKubernetesHTTPClient(configuration)
-}
-
-type kubernetesHTTPClient struct {
-	baseURL string
-	token   string
-	client  *http.Client
-}
-
-func (c *kubernetesHTTPClient) Apply(ctx context.Context, path string, object map[string]any) error {
-	query := url.Values{"fieldManager": {"synara-control-plane"}, "force": {"true"}}
-	return c.do(ctx, http.MethodPatch, path+"?"+query.Encode(), object, nil, http.StatusOK, http.StatusCreated)
-}
-
-func (c *kubernetesHTTPClient) ListPods(ctx context.Context, namespace string, targetID uuid.UUID) ([]kubernetesPod, error) {
-	return c.listPods(ctx, namespace, kubernetesTargetLabel+"="+targetID.String())
-}
-
-func (c *kubernetesHTTPClient) ListPodUIDs(ctx context.Context, namespace string) ([]string, error) {
-	pods, err := c.listPods(ctx, namespace, "")
-	if err != nil {
-		return nil, err
-	}
-	uids := make([]string, 0, len(pods))
-	for _, pod := range pods {
-		uids = append(uids, pod.UID)
-	}
-	return uids, nil
-}
-
-func (c *kubernetesHTTPClient) listPods(ctx context.Context, namespace, labelSelector string) ([]kubernetesPod, error) {
-	items := make([]kubernetesPod, 0)
-	continueToken := ""
-	seenContinueTokens := map[string]struct{}{}
-	for {
-		var response struct {
-			Metadata struct {
-				Continue string `json:"continue"`
-			} `json:"metadata"`
-			Items []struct {
-				Metadata struct {
-					Name              string            `json:"name"`
-					UID               string            `json:"uid"`
-					CreationTimestamp time.Time         `json:"creationTimestamp"`
-					Labels            map[string]string `json:"labels"`
-					Annotations       map[string]string `json:"annotations"`
-				} `json:"metadata"`
-				Status struct {
-					Phase      string `json:"phase"`
-					Reason     string `json:"reason"`
-					Conditions []struct {
-						Type   string `json:"type"`
-						Status string `json:"status"`
-						Reason string `json:"reason"`
-					} `json:"conditions"`
-					ContainerStatuses []struct {
-						Name  string `json:"name"`
-						State struct {
-							Waiting *struct {
-								Reason string `json:"reason"`
-							} `json:"waiting"`
-							Terminated *struct {
-								ExitCode int    `json:"exitCode"`
-								Reason   string `json:"reason"`
-							} `json:"terminated"`
-						} `json:"state"`
-						LastState struct {
-							Terminated *struct {
-								Reason string `json:"reason"`
-							} `json:"terminated"`
-						} `json:"lastState"`
-					} `json:"containerStatuses"`
-				} `json:"status"`
-			} `json:"items"`
-		}
-		query := url.Values{}
-		query.Set("limit", "100")
-		if labelSelector != "" {
-			query.Set("labelSelector", labelSelector)
-		}
-		if continueToken != "" {
-			query.Set("continue", continueToken)
-		}
-		path := "/api/v1/namespaces/" + url.PathEscape(namespace) + "/pods"
-		if encoded := query.Encode(); encoded != "" {
-			path += "?" + encoded
-		}
-		if err := c.do(ctx, http.MethodGet, path, nil, &response, http.StatusOK); err != nil {
-			return nil, err
-		}
-		for _, item := range response.Items {
-			conditions := make([]kubernetesPodCondition, 0, len(item.Status.Conditions))
-			for _, condition := range item.Status.Conditions {
-				conditions = append(conditions, kubernetesPodCondition{
-					Type: condition.Type, Status: condition.Status, Reason: condition.Reason,
-				})
-			}
-			containers := make([]kubernetesContainerStatus, 0, len(item.Status.ContainerStatuses))
-			for _, status := range item.Status.ContainerStatuses {
-				container := kubernetesContainerStatus{Name: status.Name}
-				if status.State.Waiting != nil {
-					container.WaitingReason = status.State.Waiting.Reason
-				}
-				if status.State.Terminated != nil {
-					container.Terminated = true
-					container.ExitCode = status.State.Terminated.ExitCode
-					container.TerminatedReason = status.State.Terminated.Reason
-				}
-				if status.LastState.Terminated != nil {
-					container.LastTerminatedReason = status.LastState.Terminated.Reason
-				}
-				containers = append(containers, container)
-			}
-			items = append(items, kubernetesPod{
-				Name: item.Metadata.Name, UID: item.Metadata.UID, Phase: item.Status.Phase,
-				Reason: item.Status.Reason, CreatedAt: item.Metadata.CreationTimestamp.UTC(),
-				Labels: item.Metadata.Labels, Annotations: item.Metadata.Annotations,
-				Conditions: conditions, Containers: containers,
-			})
-		}
-		continueToken = strings.TrimSpace(response.Metadata.Continue)
-		if continueToken == "" {
-			break
-		}
-		if _, seen := seenContinueTokens[continueToken]; seen {
-			return nil, errors.New("Kubernetes Pod list repeated its continuation token")
-		}
-		seenContinueTokens[continueToken] = struct{}{}
-	}
-	return items, nil
-}
-
-func (c *kubernetesHTTPClient) DeletePod(ctx context.Context, namespace, name, uid string) error {
-	uid = strings.TrimSpace(uid)
-	if uid == "" {
-		return errors.New("Kubernetes Pod UID is required for safe deletion")
-	}
-	path := kubernetesNamespacedPath(namespace, "pods", name) + "?gracePeriodSeconds=30&propagationPolicy=Background"
-	err := c.do(ctx, http.MethodDelete, path, map[string]any{
-		"apiVersion": "v1", "kind": "DeleteOptions",
-		"preconditions": map[string]any{"uid": uid},
-	}, nil, http.StatusOK, http.StatusAccepted, http.StatusNotFound)
-	var statusErr *kubernetesAPIStatusError
-	if errors.As(err, &statusErr) && statusErr.StatusCode == http.StatusConflict {
-		return fmt.Errorf("%w: %s", errKubernetesPodUIDPreconditionFailed, statusErr.Detail)
-	}
-	return err
-}
-
-func (c *kubernetesHTTPClient) do(
-	ctx context.Context,
-	method, path string,
-	input, output any,
-	accepted ...int,
-) error {
-	var body io.Reader
-	if input != nil {
-		encoded, err := json.Marshal(input)
-		if err != nil {
-			return err
-		}
-		body = bytes.NewReader(encoded)
-	}
-	request, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, body)
-	if err != nil {
-		return err
-	}
-	request.Header.Set("Authorization", "Bearer "+c.token)
-	if input != nil {
-		contentType := "application/json"
-		if method == http.MethodPatch {
-			contentType = "application/apply-patch+yaml"
-		}
-		request.Header.Set("Content-Type", contentType)
-	}
-	response, err := c.client.Do(request)
-	if err != nil {
-		return err
-	}
-	defer response.Body.Close()
-	acceptedStatus := false
-	for _, status := range accepted {
-		if response.StatusCode == status {
-			acceptedStatus = true
-			break
-		}
-	}
-	if !acceptedStatus {
-		var status struct {
-			Reason  string `json:"reason"`
-			Message string `json:"message"`
-		}
-		_ = json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&status)
-		detail := strings.TrimSpace(status.Reason)
-		if message := strings.TrimSpace(status.Message); message != "" {
-			if detail != "" {
-				detail += ": "
-			}
-			detail += message
-		}
-		if detail == "" {
-			detail = http.StatusText(response.StatusCode)
-		}
-		return &kubernetesAPIStatusError{StatusCode: response.StatusCode, Detail: detail}
-	}
-	if output == nil {
-		_, _ = io.Copy(io.Discard, response.Body)
-		return nil
-	}
-	return json.NewDecoder(io.LimitReader(response.Body, 4<<20)).Decode(output)
 }

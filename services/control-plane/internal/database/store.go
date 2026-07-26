@@ -405,6 +405,12 @@ func migrateSQLiteSafety(ctx context.Context, db *gorm.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_agent_executions_placement_claim
 		 ON agent_executions (execution_target_id, worker_pool_id, status, queued_at, id)
 		 WHERE status IN ('queued', 'recovering')`,
+		`CREATE INDEX IF NOT EXISTS idx_agent_executions_fair_share_active
+		 ON agent_executions (execution_target_id, target_kind, tenant_id)
+		 WHERE status IN ('leased', 'running', 'waiting-for-approval')`,
+		`CREATE INDEX IF NOT EXISTS idx_agent_executions_target_nonterminal
+		 ON agent_executions (execution_target_id, target_kind, status, queued_at, id)
+		 WHERE status IN ('queued', 'recovering', 'leased', 'running', 'waiting-for-approval')`,
 		`INSERT INTO worker_pools (
 		   id, tenant_id, execution_target_id, name, mode, capacity_class,
 		   cluster_id, region, namespace, desired_idle_units, max_active_units,

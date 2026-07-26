@@ -1,5 +1,10 @@
 # SaaS 路线第三阶段：Provider Runtime 与远程 Worker 产品化计划
 
+> **阶段状态**：COMPLETE（2026-07-24 按收窄验收边界关闭，runtime 源码固定为 `8415efa1`；见
+> `TODO.md` Stage 3 与 `docs/release-checklists/stage-3-provider-runtime-remote-worker.md` 的
+> closure banner）。本文档为历史执行计划，文中各 checkpoint、`partial` 状态与 migration boundary
+> 均为时点快照，不代表现行状态。
+>
 > **阶段命名说明**：这里的“第三阶段”对应产品路线中的“Provider Runtime 与远程 Worker
 > 产品化”。它不等同于 `docs/plans/saas-tenancy-organization-user-plan.md` 中技术 Phase 3 的
 > “Execution、Worker、Lease”。

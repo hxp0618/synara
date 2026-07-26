@@ -74,12 +74,12 @@ strategy-specific load, priority, and weight tie-breaks. Missing affinity is neu
 ineligible, and affinity cannot outrank an explicit Target/Region choice or healthier capacity. A saturated Target is
 never treated as available merely because it has a higher policy priority or Provider preference.
 
-`queue-pressure-v1` treats each durable `agent_executions` row in `queued | recovering` as one not-yet-serviced unit. For
-a positive numeric capacity ceiling, balanced load rank uses `(allocatedCapacityUnits + queuedExecutionUnits) / (ceiling
-
-- memberWeight)`; when the publisher supplies no numeric ceiling, it uses `queuedExecutionUnits / memberWeight`.
-`balanced`evaluates this effective load before priority, while`priority | latency` retain priority before effective
-  load. Terminal, leased, running, waiting-for-approval, and suspended Executions are not included in this queue count.
+`queue-pressure-v1` treats each durable `agent_executions` row in `queued | recovering` as one not-yet-serviced unit.
+For a positive numeric capacity ceiling, balanced load rank uses
+`(allocatedCapacityUnits + queuedExecutionUnits) / (ceiling * memberWeight)`; when the publisher supplies no numeric
+ceiling, it uses `queuedExecutionUnits / memberWeight`. `balanced` evaluates this effective load before priority, while
+`priority | latency` retain priority before effective load. Terminal, leased, running, waiting-for-approval, and
+suspended Executions are not included in this queue count.
 
 This is deliberately a conservative **soft ranking signal**, not hard capacity reservation. A Kubernetes Pod may already
 be included in the publisher's allocated occupancy while its Execution is still `queued`, so summing both can double

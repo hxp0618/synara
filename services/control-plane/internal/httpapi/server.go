@@ -225,6 +225,7 @@ func New(
 	mux.Handle("POST /v1/workers/executions/{executionID}/interaction-resolutions/pull", server.requireWorker(http.HandlerFunc(server.pullInteractionResolutions)))
 	mux.Handle("POST /v1/workers/executions/{executionID}/interaction-resolutions/{interactionID}/delivered", server.requireWorker(http.HandlerFunc(server.markInteractionResolutionDelivered)))
 	mux.Handle("POST /v1/workers/executions/{executionID}/interaction-resolutions/{interactionID}/acknowledged", server.requireWorker(http.HandlerFunc(server.acknowledgeInteractionResolution)))
+	mux.Handle("POST /v1/workers/executions/{executionID}/control-updates/pull", server.requireWorker(http.HandlerFunc(server.pullControlUpdates)))
 	mux.Handle("POST /v1/workers/executions/{executionID}/control-commands/pull", server.requireWorker(http.HandlerFunc(server.pullControlCommands)))
 	mux.Handle("POST /v1/workers/executions/{executionID}/control-commands/{controlCommandID}/delivered", server.requireWorker(http.HandlerFunc(server.markControlCommandDelivered)))
 	mux.Handle("POST /v1/workers/executions/{executionID}/control-commands/{controlCommandID}/acknowledged", server.requireWorker(http.HandlerFunc(server.acknowledgeControlCommand)))

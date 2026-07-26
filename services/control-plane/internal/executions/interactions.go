@@ -409,40 +409,62 @@ func (s *Service) PullInteractionResolutions(
 	executionID uuid.UUID,
 	input PullInteractionResolutionsInput,
 ) ([]InteractionResolutionDelivery, error) {
-	limit := input.Limit
-	if limit == 0 {
-		limit = defaultInteractionResolutionPullLimit
+	limit, err := normalizeInteractionResolutionPullLimit(input.Limit)
+	if err != nil {
+		return nil, err
 	}
-	if limit < 1 || limit > maximumInteractionResolutionPullLimit {
-		return nil, problem.New(400, "invalid_interaction_resolution_limit", "limit must be between 1 and 100.")
-	}
-
 	items := make([]InteractionResolutionDelivery, 0)
-	err := persistence.InTransaction(ctx, s.db, func(tx *gorm.DB) error {
+	err = persistence.InTransaction(ctx, s.db, func(tx *gorm.DB) error {
 		_, execution, err := s.lockLease(ctx, tx, worker, executionID, input.LeaseInput, true)
 		if err != nil {
 			return err
 		}
-		models := make([]persistence.ExecutionInteraction, 0)
-		if err := tx.WithContext(ctx).
-			Where(
-				"tenant_id = ? AND execution_id = ? AND status = ? AND delivery_worker_id = ? AND delivery_generation = ? AND delivery_status IN ? AND delivery_available_at <= ?",
-				execution.TenantID, execution.ID, "resolved", worker.ID, input.Generation,
-				[]string{"pending", "delivered", "failed"}, s.now(),
-			).
-			Order("delivery_available_at, id").Limit(limit).Find(&models).Error; err != nil {
-			return problem.Wrap(500, "interaction_resolutions_load_failed", "Interaction resolutions could not be loaded.", err)
-		}
-		for _, model := range models {
-			item, err := toInteractionResolutionDelivery(model)
-			if err != nil {
-				return err
-			}
-			items = append(items, item)
-		}
-		return nil
+		items, err = s.loadInteractionResolutionDeliveries(ctx, tx, worker, execution, input.Generation, limit)
+		return err
 	})
 	return items, err
+}
+
+func normalizeInteractionResolutionPullLimit(limit int) (int, error) {
+	if limit == 0 {
+		return defaultInteractionResolutionPullLimit, nil
+	}
+	if limit < 1 || limit > maximumInteractionResolutionPullLimit {
+		return 0, problem.New(400, "invalid_interaction_resolution_limit", "limit must be between 1 and 100.")
+	}
+	return limit, nil
+}
+
+// loadInteractionResolutionDeliveries reads the deliverable Interaction
+// resolutions for an already lease-verified Execution. The caller owns the
+// transaction and the lease lock.
+func (s *Service) loadInteractionResolutionDeliveries(
+	ctx context.Context,
+	tx *gorm.DB,
+	worker persistence.WorkerInstance,
+	execution persistence.AgentExecution,
+	generation int64,
+	limit int,
+) ([]InteractionResolutionDelivery, error) {
+	models := make([]persistence.ExecutionInteraction, 0)
+	if err := tx.WithContext(ctx).
+		Where(
+			"tenant_id = ? AND execution_id = ? AND status = ? AND delivery_worker_id = ? AND delivery_generation = ? AND delivery_status IN ? AND delivery_available_at <= ?",
+			execution.TenantID, execution.ID, "resolved", worker.ID, generation,
+			[]string{"pending", "delivered", "failed"}, s.now(),
+		).
+		Order("delivery_available_at, id").Limit(limit).Find(&models).Error; err != nil {
+		return nil, problem.Wrap(500, "interaction_resolutions_load_failed", "Interaction resolutions could not be loaded.", err)
+	}
+	items := make([]InteractionResolutionDelivery, 0, len(models))
+	for _, model := range models {
+		item, err := toInteractionResolutionDelivery(model)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, nil
 }
 
 func (s *Service) MarkInteractionResolutionDelivered(

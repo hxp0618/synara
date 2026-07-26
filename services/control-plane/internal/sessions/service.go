@@ -831,75 +831,31 @@ func (s *Service) CreateTurnWithIdempotency(
 			return Turn{}, err
 		}
 		execution = scheduled.Execution
-		decision := scheduled.Decision
 		if err := outbox.Enqueue(ctx, tx, outbox.EnqueueInput{
 			TenantID: &tenantID, Topic: "execution.queued", MessageKey: execution.ID.String(),
-			Payload: map[string]any{
+			Payload: scheduled.MergeSchedulingEvidencePayload(map[string]any{
 				"executionId": execution.ID, "tenantId": tenantID, "sessionId": sessionID,
 				"turnId": turn.ID, "executionTargetId": execution.ExecutionTargetID,
 				"targetKind": execution.TargetKind, "attempt": execution.Attempt,
-				"workerReleaseRevisionId":             execution.WorkerReleaseRevisionID,
-				"workerReleaseChannel":                execution.WorkerReleaseChannel,
-				"workerPoolId":                        execution.WorkerPoolID,
-				"workerPoolVersion":                   execution.WorkerPoolVersion,
-				"capacityClass":                       execution.CapacityClass,
-				"placementPolicyVersion":              execution.PlacementPolicyVersion,
-				"placementRegion":                     execution.PlacementRegion,
-				"placementClusterId":                  execution.PlacementClusterID,
-				"tenantSchedulingPolicyVersion":       execution.TenantSchedulingPolicyVersion,
-				"tenantSchedulingPolicyDigest":        execution.TenantSchedulingPolicyDigest,
-				"organizationSchedulingPolicyVersion": execution.OrganizationSchedulingPolicyVersion,
-				"organizationSchedulingPolicyDigest":  execution.OrganizationSchedulingPolicyDigest,
-				"targetGroupId":                       execution.TargetGroupID,
-				"targetGroupVersion":                  execution.TargetGroupVersion,
-				"targetGroupMemberVersion":            execution.TargetGroupMemberVersion,
-				"selectedRegion":                      execution.SelectedRegion,
-				"selectedClusterId":                   execution.SelectedClusterID,
-				"routingReason":                       execution.RoutingReason,
-				"schedulingDecisionId":                decision.ID,
-				"schedulingAlgorithmVersion":          decision.AlgorithmVersion,
-				"schedulingEvidenceCompleteness":      decision.EvidenceCompleteness,
-				"schedulingCandidateSetSha256":        decision.CandidateSetSHA256,
-				"provider":                            provider, "providerRuntimeBindingId": resources.BindingID,
+				"provider":                              provider,
+				"providerRuntimeBindingId":              resources.BindingID,
 				"remoteWorkspaceId":                     resources.WorkspaceID,
 				"workspaceMaterializationId":            resources.MaterializationID,
 				"workspaceMaterializationIncarnationId": resources.IncarnationID,
 				"workspaceLayoutVersion":                resources.LayoutVersion,
 				"restoreCheckpointId":                   resources.RestoreCheckpointID,
-			},
+			}),
 			Headers: map[string]any{"eventVersion": 1}, AvailableAt: queuedAt, CreatedAt: queuedAt,
 		}); err != nil {
 			return Turn{}, problem.Wrap(409, "execution_outbox_create_rejected", "Execution dispatch could not be queued atomically.", err)
 		}
-		turnCreatedPayload := map[string]any{
+		turnCreatedPayload := scheduled.MergeSchedulingEvidencePayload(map[string]any{
 			"turnId": turn.ID, "executionId": execution.ID, "inputText": inputText,
 			"status": "queued", "executionTargetId": execution.ExecutionTargetID,
-			"targetKind":                          execution.TargetKind,
-			"workerReleaseRevisionId":             execution.WorkerReleaseRevisionID,
-			"workerReleaseChannel":                execution.WorkerReleaseChannel,
-			"workerPoolId":                        execution.WorkerPoolID,
-			"workerPoolVersion":                   execution.WorkerPoolVersion,
-			"capacityClass":                       execution.CapacityClass,
-			"placementPolicyVersion":              execution.PlacementPolicyVersion,
-			"placementRegion":                     execution.PlacementRegion,
-			"placementClusterId":                  execution.PlacementClusterID,
-			"tenantSchedulingPolicyVersion":       execution.TenantSchedulingPolicyVersion,
-			"tenantSchedulingPolicyDigest":        execution.TenantSchedulingPolicyDigest,
-			"organizationSchedulingPolicyVersion": execution.OrganizationSchedulingPolicyVersion,
-			"organizationSchedulingPolicyDigest":  execution.OrganizationSchedulingPolicyDigest,
-			"targetGroupId":                       execution.TargetGroupID,
-			"targetGroupVersion":                  execution.TargetGroupVersion,
-			"targetGroupMemberVersion":            execution.TargetGroupMemberVersion,
-			"selectedRegion":                      execution.SelectedRegion,
-			"selectedClusterId":                   execution.SelectedClusterID,
-			"routingReason":                       execution.RoutingReason,
-			"schedulingDecisionId":                decision.ID,
-			"schedulingAlgorithmVersion":          decision.AlgorithmVersion,
-			"schedulingEvidenceCompleteness":      decision.EvidenceCompleteness,
-			"schedulingCandidateSetSha256":        decision.CandidateSetSHA256,
-			"workspaceMaterializationId":          resources.MaterializationID,
-			"runtimeMode":                         runtimeMode, "interactionMode": interactionMode,
-		}
+			"targetKind":                 execution.TargetKind,
+			"workspaceMaterializationId": resources.MaterializationID,
+			"runtimeMode":                runtimeMode, "interactionMode": interactionMode,
+		})
 		if sourceProposedPlan != nil {
 			turnCreatedPayload["sourceProposedPlan"] = sourceProposedPlan
 		}

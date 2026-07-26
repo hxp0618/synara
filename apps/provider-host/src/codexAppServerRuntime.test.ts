@@ -1028,6 +1028,7 @@ function fakeCodexSource(
     | "long-approval"
     | "user-input"
     | "resume"
+    | "resume-with-recovery-metadata"
     | "resume-rebuild"
     | "resume-auth-failure"
     | "interrupt"

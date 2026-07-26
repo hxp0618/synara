@@ -14,6 +14,20 @@ ALTER TABLE execution_target_health
         AND reservation_acknowledgements_sha256 ~ '^[0-9a-f]{64}$')
     );
 
+ALTER TABLE execution_scheduling_decisions
+  DROP CONSTRAINT execution_scheduling_decisions_algorithm_version_check,
+  ADD CONSTRAINT execution_scheduling_decisions_algorithm_version_check
+    CHECK (algorithm_version IN ('queue-pressure-v1', 'reservation-aware-v1', 'fixed-target-v1', 'legacy-selected-only')),
+  DROP CONSTRAINT execution_scheduling_decisions_check2,
+  ADD CONSTRAINT execution_scheduling_decisions_check2
+    CHECK (
+      (decision_kind = 'target-group'
+        AND algorithm_version IN ('queue-pressure-v1', 'reservation-aware-v1', 'legacy-selected-only'))
+      OR
+      (decision_kind = 'fixed-target'
+        AND algorithm_version IN ('fixed-target-v1', 'legacy-selected-only'))
+    );
+
 CREATE TABLE execution_target_reservation_acknowledgements (
   execution_target_id UUID NOT NULL REFERENCES execution_targets(id) ON DELETE CASCADE,
   execution_id UUID NOT NULL REFERENCES agent_executions(id) ON DELETE CASCADE,

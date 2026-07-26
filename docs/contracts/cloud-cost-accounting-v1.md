@@ -2,11 +2,17 @@
 
 This contract defines the first Control Plane billing-accounting boundary for retained worker usage.
 
-It is deliberately split into three durable domains:
+It is deliberately split into separate durable domains:
 
 - `worker_claim_facts` is the append-only authoritative request-claim ledger for one worker incarnation.
 - `worker_claim_release_facts` is the one-to-one append-only closure ledger for claims that have left active delivery.
 - `billing_estimated_usage_charges` is internal cost attribution derived from immutable `worker_incarnation_facts`, `worker_claim_facts`, and versioned provider tariffs.
+- `billing_shared_target_ledger_coverages`, `billing_shared_cost_allocation_runs`, and
+  `billing_shared_estimated_charge_slices` are the operator-sealed shared-Target estimated-cost allocation graph
+  (see "Shared Target estimated-cost allocation" below).
+- `billing_shared_actual_allocation_runs`, `billing_shared_actual_allocation_lines`, and
+  `billing_shared_actual_charge_slices` are the operator-attested shared-Target actual-invoice allocation graph
+  (see "Shared Target actual-invoice allocation" below).
 - `billing_actual_invoice_imports` and `billing_actual_invoice_lines` are imported external billing truth keyed by tenant-scoped provider external IDs.
 
 Estimates and actuals must never share a table or a mutable "final cost" column.

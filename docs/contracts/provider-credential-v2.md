@@ -190,6 +190,32 @@ The Execution generation freezes `provider_credential_id_snapshot` and
 Session rebinding cannot change an in-flight generation. Rotation fences the old version. Revocation,
 expiry, User suspension, or Platform policy disablement prevents new plaintext resolution immediately.
 
+### Generation-scoped opaque Grants
+
+Migration `000049` makes the frozen snapshot an explicit, opaque authority. Claim creates one immutable
+`execution_provider_credential_grants` row per `(tenant, execution, generation)` that freezes the resolved
+Credential ID and version. The Recovery Bundle and Claim workload carry only the opaque Grant ID — never the
+Credential ID, version, ciphertext, or plaintext.
+
+- agentd resolves plaintext only through
+  `POST /v1/workers/executions/{executionID}/provider-credential-grants/{grantID}/resolve` with the current
+  Worker bearer token and the exact Tenant, Generation, and Lease Token.
+- A Generation that has a Grant cannot fall back to the older Credential-ID resolution path; a legacy Bundle
+  or Claim receipt that lacks a Grant fails closed on replay instead of re-deriving one.
+- A deleting Tenant or a Session past its `absoluteExpiresAt` hard lifetime refuses all Grant resolution.
+
+### Short-lived access authorization
+
+Migration `000055` adds a Worker-Lease-scoped access window for the frozen Grant: a monotonic access serial
+with issued/renewed/expiry timestamps and a refresh deadline persisted on the Lease. Only an explicit Grant
+resolve can first issue the window. Subsequent Lease renewals extend it solely from committed semantic Session
+activity; browser presence, SSE reconnects, read APIs, and Worker heartbeats do not extend it. The window can
+never slide past Credential expiry/revocation/rotation, the Grant's frozen version, or the Session's absolute
+lifetime. agentd fails closed on rotation, revocation, scope loss, sequence regression, missing metadata, or a
+closed refresh stream. Authoritative inventory is exposed as
+`synara_provider_credential_access_leases{state}` (see
+[Control-plane observability v1](control-plane-observability-v1.md)).
+
 ## Stable errors
 
 | Code                                        | Meaning                                                                      |

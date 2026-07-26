@@ -22,6 +22,7 @@ import (
 
 const (
 	AlgorithmQueuePressureV1    = "queue-pressure-v1"
+	AlgorithmReservationAwareV1 = "reservation-aware-v1"
 	AlgorithmFixedTargetV1      = "fixed-target-v1"
 	AlgorithmLegacySelectedOnly = "legacy-selected-only"
 
@@ -341,8 +342,9 @@ func validateAlgorithm(algorithm, decisionKind string, legacy bool) error {
 		}
 		return nil
 	}
-	if decisionKind == DecisionKindTargetGroup && algorithm != AlgorithmQueuePressureV1 {
-		return invalid("target-group decisions require queue-pressure-v1")
+	if decisionKind == DecisionKindTargetGroup &&
+		algorithm != AlgorithmQueuePressureV1 && algorithm != AlgorithmReservationAwareV1 {
+		return invalid("target-group decisions require queue-pressure-v1 or reservation-aware-v1")
 	}
 	if decisionKind == DecisionKindFixedTarget && algorithm != AlgorithmFixedTargetV1 {
 		return invalid("fixed-target decisions require fixed-target-v1")
@@ -409,11 +411,11 @@ func validateCandidate(candidate CandidateSnapshot, algorithm string, legacy boo
 		!validNonnegative(candidate.PriorityRank) || !validNonnegative(candidate.RegionRank) || !validNonnegative(candidate.CapacityRank) {
 		return errors.New("priority, weight, or rank is invalid")
 	}
-	if algorithm == AlgorithmQueuePressureV1 && !legacy {
+	if (algorithm == AlgorithmQueuePressureV1 || algorithm == AlgorithmReservationAwareV1) && !legacy {
 		if candidate.TargetGroupID == nil || candidate.TargetGroupVersion == nil || *candidate.TargetGroupVersion <= 0 ||
 			candidate.TargetGroupMemberID == nil || candidate.TargetGroupMemberVersion == nil || *candidate.TargetGroupMemberVersion <= 0 ||
 			candidate.Priority == nil || candidate.Weight == nil || candidate.QueuedExecutionUnits == nil || !healthPresence[0] {
-			return errors.New("queue-pressure-v1 candidate lacks routing authority")
+			return errors.New("routed scheduling candidate lacks routing authority")
 		}
 	}
 	if candidate.WorkerPoolID == nil {

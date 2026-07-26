@@ -4,8 +4,9 @@ Remote Workspace v1 separates the logical Session Workspace from any disposable 
 PostgreSQL owns identity and lifecycle metadata; Git and ready Artifact payloads own recoverable content; a Worker
 checkout is only a cache.
 
-The DDL source of truth is the forward migration chain through
-`000027_workspace_cleanup_dispatch.sql`; published migrations are never rewritten in place.
+The DDL source of truth is the forward migration chain under `services/control-plane/migrations/` (the core
+Workspace/Checkpoint tables arrived in `000020`–`000027` and later migrations extend them); published migrations
+are never rewritten in place.
 
 ## Identity and states
 
@@ -119,8 +120,13 @@ and the socket is removed immediately after Clone/Fetch. Fetch rejects a checkou
 contains Credential helpers, AskPass, hooks, SSH commands, proxy/extra headers, URL rewrites, includes, filters,
 or remote upload/receive command overrides.
 
-SSH repositories remain blocked until the separate short-lived SSH Agent and pinned Host Key delivery contract
-is implemented. Agentd never falls back to host credentials or interactive login.
+Private SSH uses a Project-bound `git/ssh_key` Credential through the short-lived SSH Agent contract in
+[Worker Protocol v2](worker-protocol-v2.md): the `ssh://user@host[:port]/path` repository must match the Grant
+selector, DNS answers must be public and the selected IP is pinned, the stored Host Key is fixed, and exactly one
+private key is loaded into a temporary agent socket that is removed immediately after Clone/Fetch. The private key
+and passphrase never enter the Workspace, argv, ordinary environment, Git config, or Provider input. Ambient
+`SSH_AUTH_SOCK`, SSH config, ProxyCommand, and host credential stores are not inherited; agentd never falls back
+to host credentials or interactive login.
 
 ## Checkpoints
 

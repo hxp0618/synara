@@ -428,6 +428,43 @@ func (c *Client) PullControlCommands(
 	return output.Items, err
 }
 
+// PullControlUpdates fetches Control commands and Interaction resolutions in
+// one lease-verified request. A Control Plane predating the combined endpoint
+// answers 404; callers detect that with errControlUpdatesUnsupported and fall
+// back to the two separate pulls for the rest of the process.
+func (c *Client) PullControlUpdates(
+	ctx context.Context,
+	executionID uuid.UUID,
+	lease executions.Lease,
+) (executions.ControlUpdates, error) {
+	var output executions.ControlUpdates
+	err := c.doJSON(
+		ctx, http.MethodPost, executionPath(executionID, "control-updates/pull"),
+		c.workerToken, uuid.NewString(), executions.PullControlUpdatesInput{
+			LeaseInput: executions.LeaseInput{
+				TenantID: lease.TenantID, Generation: lease.Generation, LeaseToken: lease.LeaseToken,
+			},
+			ControlCommandLimit:        1,
+			InteractionResolutionLimit: 1,
+		}, &output,
+	)
+	return output, err
+}
+
+// errControlUpdatesUnsupported reports whether the Control Plane does not
+// expose the combined pull. Only a routing miss counts: an authorization or
+// fencing rejection is a real answer and must not silently downgrade the
+// runner onto a different code path.
+func errControlUpdatesUnsupported(err error) bool {
+	var problem *controlPlaneProblem
+	if !errors.As(err, &problem) || problem.Status != http.StatusNotFound {
+		return false
+	}
+	// A handled 404 (`execution_not_found`) always carries a problem envelope;
+	// only an unrouted path yields a bare status.
+	return problem.Code == "" && strings.TrimSpace(problem.Message) == ""
+}
+
 func (c *Client) MarkControlCommandDelivered(
 	ctx context.Context,
 	executionID uuid.UUID,

@@ -871,6 +871,19 @@ type PullControlCommandsInput struct {
 	Limit int `json:"limit,omitempty"`
 }
 
+// PullControlUpdatesInput carries independent limits so the combined pull
+// keeps the per-kind bounds the two separate pulls enforced.
+type PullControlUpdatesInput struct {
+	LeaseInput
+	ControlCommandLimit        int `json:"controlCommandLimit,omitempty"`
+	InteractionResolutionLimit int `json:"interactionResolutionLimit,omitempty"`
+}
+
+type ControlUpdates struct {
+	ControlCommands        []ControlCommandDelivery        `json:"controlCommands"`
+	InteractionResolutions []InteractionResolutionDelivery `json:"interactionResolutions"`
+}
+
 type SteerActiveTurnInput struct {
 	InputText string `json:"inputText"`
 }

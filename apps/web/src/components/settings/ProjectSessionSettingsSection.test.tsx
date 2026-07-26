@@ -160,7 +160,7 @@ type ElementLike = {
   props: Record<string, unknown> & { children?: ReactNode };
 };
 
-function isElementLike(node: ReactNode): node is ElementLike {
+function isElementLike(node: ReactNode): node is ReactNode & ElementLike {
   return typeof node === "object" && node !== null && "props" in node;
 }
 

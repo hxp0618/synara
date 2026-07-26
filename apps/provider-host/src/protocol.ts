@@ -606,9 +606,9 @@ async function executeCommand(
       const terminal = await terminalPromise;
       if (!isInterruptedTerminalMessage(terminal)) {
         const detail =
-          terminal.messageType === "Result"
-            ? "the active SendTurn completed naturally"
-            : `the active SendTurn ended with ${terminal.error.code}`;
+          terminal.messageType === "Error"
+            ? `the active SendTurn ended with ${terminal.error.code}`
+            : "the active SendTurn completed naturally";
         throw suspendTurnFailure(
           `SuspendTurn requires an interrupted terminal confirmation, but ${detail}.`,
         );
@@ -1013,9 +1013,10 @@ function errorMessage(
   };
 }
 
-function isInterruptedTerminalMessage(
-  message: ProviderHostMessageEnvelope,
-): message is Extract<ProviderHostMessageEnvelope, { messageType: "Error" }> {
+// Intentionally not a type predicate: a non-interrupted Error message fails
+// this check too, so narrowing the negative branch away from "Error" would be
+// unsound (the caller still needs to read `error.code` from it).
+function isInterruptedTerminalMessage(message: ProviderHostMessageEnvelope): boolean {
   return message.messageType === "Error" && message.error.code === "interrupted";
 }
 

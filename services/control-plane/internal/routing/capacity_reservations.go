@@ -115,7 +115,7 @@ func prepareReservationAuthority(
 			return nil, problem.Wrap(
 				500,
 				"target_reservation_acknowledgements_load_failed",
-				"Reservation acknowledgement Execution state could not be locked.",
+				"Reservation acknowledgement Execution state could not be loaded.",
 				err,
 			)
 		}

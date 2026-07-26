@@ -425,6 +425,12 @@ billing.manage
 
 v1 使用固定角色和代码内 Permission Map。自定义角色和复杂 ABAC 延后。
 
+> 上面是 Phase 0-3 的初始 Permission 集。后续阶段已新增 `credentials.use`、`artifact.*`、
+> `quota.*`、`retention.*`、`lifecycle.*`、`scheduling_policy.*`、`identity.*`、
+> `service_accounts.*`、`outbox.*` 等；完整现行清单以
+> `services/control-plane/internal/authorization/permissions.go` 为权威，文档投影见
+> [`role-permission-matrix.md`](../contracts/role-permission-matrix.md)。本计划不再维护全量副本。
+
 ## 6. PostgreSQL Schema 规划
 
 ### 6.1 Identity 与登录

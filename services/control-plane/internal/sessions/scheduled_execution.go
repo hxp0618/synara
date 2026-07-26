@@ -19,8 +19,53 @@ import (
 // is deliberately selected-only: rejected candidates are not available from
 // the current routing and capability-gate APIs and must not be invented.
 type ScheduledExecution struct {
-	Execution persistence.AgentExecution
-	Decision  persistence.ExecutionSchedulingDecision
+	Execution         persistence.AgentExecution
+	Decision          persistence.ExecutionSchedulingDecision
+	CapacityAdmission persistence.ExecutionCapacityAdmission
+}
+
+// SchedulingEvidencePayload returns the frozen scheduling evidence keys shared
+// by every `execution.queued` outbox message and `turn.created` session event.
+// Callers merge operation-specific keys on top; keeping the shared set in one
+// place prevents the payload copies from silently diverging.
+func (s ScheduledExecution) SchedulingEvidencePayload() map[string]any {
+	execution := s.Execution
+	decision := s.Decision
+	return map[string]any{
+		"workerReleaseRevisionId":             execution.WorkerReleaseRevisionID,
+		"workerReleaseChannel":                execution.WorkerReleaseChannel,
+		"workerPoolId":                        execution.WorkerPoolID,
+		"workerPoolVersion":                   execution.WorkerPoolVersion,
+		"capacityClass":                       execution.CapacityClass,
+		"placementPolicyVersion":              execution.PlacementPolicyVersion,
+		"placementRegion":                     execution.PlacementRegion,
+		"placementClusterId":                  execution.PlacementClusterID,
+		"tenantSchedulingPolicyVersion":       execution.TenantSchedulingPolicyVersion,
+		"tenantSchedulingPolicyDigest":        execution.TenantSchedulingPolicyDigest,
+		"organizationSchedulingPolicyVersion": execution.OrganizationSchedulingPolicyVersion,
+		"organizationSchedulingPolicyDigest":  execution.OrganizationSchedulingPolicyDigest,
+		"targetGroupId":                       execution.TargetGroupID,
+		"targetGroupVersion":                  execution.TargetGroupVersion,
+		"targetGroupMemberVersion":            execution.TargetGroupMemberVersion,
+		"selectedRegion":                      execution.SelectedRegion,
+		"selectedClusterId":                   execution.SelectedClusterID,
+		"routingReason":                       execution.RoutingReason,
+		"schedulingDecisionId":                decision.ID,
+		"schedulingAlgorithmVersion":          decision.AlgorithmVersion,
+		"schedulingEvidenceCompleteness":      decision.EvidenceCompleteness,
+		"schedulingCandidateSetSha256":        decision.CandidateSetSHA256,
+		"capacityAdmissionMode":               s.CapacityAdmission.AdmissionMode,
+		"capacityAdmissionSnapshotSha256":     s.CapacityAdmission.SnapshotSHA256,
+	}
+}
+
+// MergeSchedulingEvidencePayload copies the shared scheduling evidence keys
+// into payload and returns it.
+func (s ScheduledExecution) MergeSchedulingEvidencePayload(payload map[string]any) map[string]any {
+	for key, value := range s.SchedulingEvidencePayload() {
+		payload[key] = value
+	}
+	return payload
 }
 
 func CreateScheduledExecution(
@@ -71,6 +116,9 @@ func CreateScheduledExecution(
 	candidate := schedulingdecision.CandidateFromExecution(execution)
 	if selection := launchTarget.RoutingSelection; selection != nil {
 		algorithm = schedulingdecision.AlgorithmQueuePressureV1
+		if selection.QueuePressure.ReservationAuthorityMode == routing.ReservationAuthorityExactActiveV1 {
+			algorithm = schedulingdecision.AlgorithmReservationAwareV1
+		}
 		candidate.Region = selection.Member.Region
 		candidate.ClusterID = selection.Member.ClusterID
 		candidate.TargetGroupMemberID = &selection.Member.ID
@@ -111,5 +159,7 @@ func CreateScheduledExecution(
 	if err := routing.CreateCapacityAdmission(ctx, tx, capacityAdmission); err != nil {
 		return ScheduledExecution{}, err
 	}
-	return ScheduledExecution{Execution: execution, Decision: decision}, nil
+	return ScheduledExecution{
+		Execution: execution, Decision: decision, CapacityAdmission: capacityAdmission.Evidence,
+	}, nil
 }
