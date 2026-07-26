@@ -371,7 +371,7 @@ func validateCreateWorkspaceCheckpointInput(input CreateWorkspaceCheckpointInput
 	if input.TotalBytes != nil && *input.TotalBytes < 0 {
 		return problem.New(400, "invalid_checkpoint_metadata", "totalBytes must not be negative.")
 	}
-	if input.Manifest == nil || len(input.Manifest) == 0 {
+	if len(input.Manifest) == 0 {
 		return problem.New(400, "invalid_checkpoint_manifest", "manifest must describe the Checkpoint content.")
 	}
 	encoded, err := json.Marshal(input.Manifest)

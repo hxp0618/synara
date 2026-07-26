@@ -547,9 +547,9 @@ func (s *LocalReadOnlyBlobSource) Open(
 		return nil, BlobObjectMetadata{}, err
 	}
 	parentRoot := s.root
-	cleanup := func() {}
 	if len(segments) > 1 {
 		parentRelative := filepath.Join(segments[:len(segments)-1]...)
+		var cleanup func()
 		parentRoot, cleanup, err = openVerifiedLocalBlobDirectory(s.root, parentRelative)
 		if err != nil {
 			return nil, BlobObjectMetadata{}, err

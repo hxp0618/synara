@@ -233,7 +233,9 @@ jobs:
       - name: Test
         run: go test ./... -count=1
 
-      # Executions and the reconcilers coordinate through goroutines, atomics
-      # and shared caches; -race is the only check that covers them.
+      # -race is the only check covering the goroutine, atomic and shared-cache
+      # coordination in agentd and the reconcilers. Measured at 3m11s for the
+      # whole module versus 2m55s for just those packages, so it runs everywhere
+      # rather than leaving the other 50 packages unguarded to save 16 seconds.
       - name: Race test
-        run: go test ./internal/agentd/ ./internal/executions/ ./internal/executiontargets/ ./internal/sessions/ -race -count=1
+        run: go test ./... -race -count=1
