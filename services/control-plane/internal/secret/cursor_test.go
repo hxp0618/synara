@@ -106,3 +106,62 @@ func TestCursorCipherV2AllowsAuthoritativeFallbackWithoutConfiguredCipher(t *tes
 		t.Fatal("nil cipher unexpectedly sealed a Cursor")
 	}
 }
+
+// Encrypt/Decrypt is the unversioned pair still used to protect Execution
+// Target configuration in the SSH, Docker and Kubernetes reconcilers. The
+// package only exercised the versioned SealV2 envelope, so this covers the
+// round trip plus the two rejections a caller depends on: a wrong key and a
+// tampered ciphertext must both fail rather than return partial plaintext.
+func TestCursorCipherEncryptDecryptRoundTripAndRejections(t *testing.T) {
+	cipher, err := NewCursorCipher(bytes.Repeat([]byte{0x41}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const plain = "ssh://worker.example.internal:22?fingerprint=abc"
+
+	encrypted, err := cipher.Encrypt(plain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(encrypted, []byte(plain)) {
+		t.Fatal("ciphertext contains the plaintext configuration")
+	}
+	decrypted, err := cipher.Decrypt(encrypted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decrypted != plain {
+		t.Fatalf("round trip returned %q", decrypted)
+	}
+
+	// A distinct nonce per call, so two encryptions of one value do not match.
+	repeat, err := cipher.Encrypt(plain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(encrypted, repeat) {
+		t.Fatal("Encrypt reused a nonce")
+	}
+
+	other, err := NewCursorCipher(bytes.Repeat([]byte{0x42}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := other.Decrypt(encrypted); err == nil {
+		t.Fatal("a wrong key decrypted the configuration")
+	}
+
+	tampered := append([]byte(nil), encrypted...)
+	tampered[len(tampered)-1] ^= 0xFF
+	if _, err := cipher.Decrypt(tampered); err == nil {
+		t.Fatal("a tampered ciphertext was accepted")
+	}
+
+	if _, err := cipher.Decrypt(encrypted[:4]); err == nil {
+		t.Fatal("a truncated ciphertext was accepted")
+	}
+	var absent *CursorCipher
+	if _, err := absent.Decrypt(encrypted); err == nil {
+		t.Fatal("an unconfigured cipher reported success")
+	}
+}
